@@ -4,13 +4,15 @@
 // serves all of it.
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { loadCaseSchema } from '../registry/schema.js'
 import { makeTempWorkspace, REPO_ROOT, testConfig, type TempWorkspace } from '../runs/test-helpers.js'
+import { persistRunSummary } from '../tools/mesh.js'
 import { registerApiRoutes } from '../http/routes.js'
 import { Router } from '../http/router.js'
 import { createHttpServer, type HttpServerHandle } from '../http/server.js'
-import { fakeAgent, fakeDatasets, fakeRunManager } from '../http/test-fakes.js'
+import { fakeAgent, fakeDatasets, fakeRun, fakeRunManager } from '../http/test-fakes.js'
 import { writePolyMesh, type PolyMesh } from './polymesh.js'
 import { buildMeshSummary, meshSummaryForCase, parseAutomesherSummary, parseMeshLog, parseStepSummary, MeshSummaryError, readMeshSummaryRecord, summaryFromPolyMesh, writeMeshSummaryRecord } from './meshSummary.js'
 
@@ -295,5 +297,171 @@ describe('GET /api/mesh/summary', () => {
 
   it('the shared error type stays a 404 in the route worker', async () => {
     await expect(meshSummaryForCase(ws.root, 'cases/empty')).rejects.toThrow(MeshSummaryError)
+  })
+})
+
+describe('the automesher stage block', () => {
+  const HERE = path.dirname(fileURLToPath(import.meta.url))
+  const fixture = (name: string): any => JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', `${name}.automesher.json`), 'utf8'))
+  const stageOf = (F: any, word: string) => F.stages.find((s: any) => s.stage === word)
+  function expectSameKeys(got: Record<string, unknown> | null | undefined, want: Record<string, unknown>, skip: string[] = []) {
+    expect(got).toBeTruthy()
+    for (const k of Object.keys(want)) if (!skip.includes(k)) expect(got![k], k).toEqual(want[k])
+  }
+  /** parse -> build -> write -> read back; the assertions see the read-back record. */
+  async function roundTrip(F: any): Promise<any> {
+    const tmp = await fs.promises.mkdtemp(path.join(process.env.TEMP ?? '/tmp', 'meshsummary-'))
+    try {
+      const record = buildMeshSummary('ofgpu-automesher', 'cases/x', parseAutomesherSummary(F), { runId: 'r_1' })
+      await writeMeshSummaryRecord(tmp, record)
+      const back = await readMeshSummaryRecord(tmp)
+      expect(back).toEqual(record)
+      return back
+    } finally {
+      await fs.promises.rm(tmp, { recursive: true, force: true })
+    }
+  }
+
+  it('keeps every key of the delivered-layers fixture verbatim through the record round trip', async () => {
+    const F = fixture('cubep_nofeat')
+    const back = await roundTrip(F)
+    const a = back.automesher
+    expectSameKeys(a.octree, stageOf(F, 'octree'))
+    expectSameKeys(a.castellate, stageOf(F, 'castellate'))
+    expectSameKeys(a.snap, stageOf(F, 'snap'))
+    expectSameKeys(a.split, stageOf(F, 'split'))
+    expectSameKeys(a.surface, F.surface)
+    expectSameKeys(a.layers, stageOf(F, 'layers'), ['patches'])
+    const rows = stageOf(F, 'layers').patches
+    expect(a.layers.patches).toHaveLength(rows.length)
+    for (let i = 0; i < rows.length; i++) expectSameKeys(a.layers.patches[i], rows[i])
+    expect(a.layers.patches[0]).toEqual({ region: null, ...rows[0] })
+    expect(a.layers.patches[0].n_layers).toBe(3)
+    expect(a.layers.patches[0].full_area_frac).toBe(1)
+    expect(a.layers.patches[0].mean_frac).toBe(1)
+    expect(a.layers.patches[0].t1_requested).toBe(0.02)
+    expect(a.layers.patches[0].t1_mean).toBe(0.02)
+    expect(a.layers.patches[0].t1_min).toBe(0.02)
+    expect(a.layers.patches[0].dropped).toBeNull()
+    expect(a.surface.n_triangles).toBe(12)
+    expect(a.surface.bbox).toEqual([1, 1, 1, 2.5, 2.5, 2.5])
+    expect(a.snap.n_pinned).toBe(0)
+    expect(back.counts.cells).toBe(F.mesh.n_cells)
+  })
+
+  it('keeps every key of the pinned-and-dropped fixture verbatim through the record round trip', async () => {
+    const F = fixture('wing_a_L4')
+    const back = await roundTrip(F)
+    const a = back.automesher
+    expectSameKeys(a.octree, stageOf(F, 'octree'))
+    expectSameKeys(a.castellate, stageOf(F, 'castellate'))
+    expectSameKeys(a.snap, stageOf(F, 'snap'))
+    expectSameKeys(a.split, stageOf(F, 'split'))
+    expectSameKeys(a.surface, F.surface)
+    expectSameKeys(a.layers, stageOf(F, 'layers'), ['patches'])
+    const rows = stageOf(F, 'layers').patches
+    expect(a.layers.patches).toHaveLength(rows.length)
+    for (let i = 0; i < rows.length; i++) expectSameKeys(a.layers.patches[i], rows[i])
+    expect(a.layers.patches[0]).toEqual({ region: null, ...rows[0] })
+    expect(a.snap.n_pinned).toBe(2702)
+    expect(a.snap.n_boundary_points).toBe(6690)
+    expect(a.snap.converged).toBe(false)
+    expect(a.snap.p99_residual).toBe(0.014714009820472744)
+    expect(a.snap.max_residual).toBe(0.01672681859180182)
+    expect(a.layers.patches[0].n_layers).toBe(0)
+    expect(a.layers.patches[0].t1_requested).toBe(0.002)
+    expect(a.layers.patches[0].t1_mean).toBe(0)
+    expect(a.layers.patches[0].t1_min).toBe(0)
+    expect(a.layers.patches[0].dropped).toBe('patch "wing": the gate still failed after 4 retreat(s)')
+    expect(a.surface.n_triangles).toBe(5996)
+    expect(a.surface.bbox).toEqual([0, -1.5, -0.04235619522, 1, 1.5, 0.0791798384])
+    expect(a.stages).toEqual(['octree', 'castellate', 'snap', 'split', 'layers'])
+    expect(back.counts.cells).toBe(F.mesh.n_cells)
+  })
+
+  it('passes unknown additive keys through verbatim and nulls a known key of the wrong JSON type', async () => {
+    const F = fixture('wing_a_L4')
+    Object.assign(stageOf(F, 'snap'), { p99_over_h: 0.5, max_over_h: 0.75, area_ratio: [{ face: 12, ratio: 3.5 }] })
+    Object.assign(stageOf(F, 'octree'), { gate_passed: true, max_non_orth_deg: 61.5 })
+    Object.assign(stageOf(F, 'layers').patches[0], { area: 1.25, area_frac_tau_ge: { tau: 0.05, frac: 0.9 } })
+    F.surface.extra_note = 'added by a later binary'
+    const a = (await roundTrip(F)).automesher
+    expect(a.snap.p99_over_h).toBe(0.5)
+    expect(a.snap.max_over_h).toBe(0.75)
+    expect(a.snap.area_ratio).toEqual([{ face: 12, ratio: 3.5 }])
+    expect(a.octree.gate_passed).toBe(true)
+    expect(a.octree.max_non_orth_deg).toBe(61.5)
+    expect(a.layers.patches[0].area).toBe(1.25)
+    expect(a.layers.patches[0].area_frac_tau_ge).toEqual({ tau: 0.05, frac: 0.9 })
+    expect(a.surface.extra_note).toBe('added by a later binary')
+    const bad = JSON.parse(JSON.stringify(F))
+    stageOf(bad, 'snap').n_pinned = '2702'
+    const b = (await roundTrip(bad)).automesher
+    expect(b.snap.n_pinned).toBeNull()
+    expect(b.snap.n_boundary_points).toBe(6690)
+  })
+
+  it('flattens the split-run layer rows under their region name and tells skipped from stopped', () => {
+    const split = {
+      stage: 'layers', seconds: 0.5, n_layer_cells: 10, n_layer_points: 12, n_side_internal: 20,
+      n_side_boundary: 0, n_split_sides: 0, retreats: 1,
+      regions: [
+        { name: 'fluid', n_layer_cells: 10, n_layer_points: 12, n_side_internal: 20, n_side_boundary: 0, n_split_sides: 0, retreats: 1,
+          patches: [{ name: 'chip', n_layers: 2, n_faces: 5, full_area_frac: 0.8, mean_frac: 0.9, t1_requested: 0.001, t1_mean: 0.0009, t1_min: 0.0005, dropped: null }] },
+        { name: 'solid', skipped: true, n_layer_cells: 0, patches: [] },
+      ],
+    }
+    const a = parseAutomesherSummary({ tool: 'ofgpu-automesher', stages: [split] }).automesher!
+    expect(a.layers!.patches).toHaveLength(1)
+    expect(a.layers!.patches[0].region).toBe('fluid')
+    expect(a.layers!.regions).toEqual([
+      { name: 'fluid', n_layer_cells: 10, n_layer_points: 12, n_side_internal: 20, n_side_boundary: 0, n_split_sides: 0, retreats: 1 },
+      { name: 'solid', skipped: true, n_layer_cells: 0 },
+    ])
+    expect(a.layers!.skipped).toBe(false)
+    const skipped = parseAutomesherSummary({
+      tool: 'ofgpu-automesher',
+      stages: [{ stage: 'layers', seconds: 0, skipped: true, n_layer_cells: 0, n_layer_points: 0, n_side_internal: 0, n_side_boundary: 0, n_split_sides: 0, retreats: 0, patches: [] }],
+    }).automesher!
+    expect(skipped.layers!.skipped).toBe(true)
+    expect(skipped.layers!.patches).toEqual([])
+    const stopped = parseAutomesherSummary({ tool: 'ofgpu-automesher', stages: fixture('wing_a_L4').stages.slice(0, 3) }).automesher!
+    expect(stopped.layers).toBeNull()
+    expect(stopped.snap).not.toBeNull()
+    expect(stopped.stages).toEqual(['octree', 'castellate', 'snap'])
+  })
+
+  it('a generate-mesh record has no automesher block, and a summary with no stages yields all nulls', () => {
+    const record = buildMeshSummary('ofgpu-generate-mesh', 'cases/channel', { cells: 24000, faces: 72400 }, { runId: 'r_9' })
+    expect(record.automesher).toBeNull()
+    const bare = parseAutomesherSummary({ tool: 'ofgpu-automesher' }).automesher!
+    expect(bare.surface).toBeNull()
+    expect(bare.octree).toBeNull()
+    expect(bare.castellate).toBeNull()
+    expect(bare.snap).toBeNull()
+    expect(bare.split).toBeNull()
+    expect(bare.layers).toBeNull()
+    expect(bare.stages).toEqual([])
+  })
+
+  it('reaches the record the run writes beside the mesh', async () => {
+    const root = await fs.promises.mkdtemp(path.join(process.env.TEMP ?? '/tmp', 'meshsummary-'))
+    try {
+      const F = fixture('wing_a_L4')
+      await fs.promises.mkdir(path.join(root, 'wing_a_L4_case'), { recursive: true })
+      await fs.promises.writeFile(path.join(root, 'wing_a_L4_case', 'wing_a_L4_summary.json'), JSON.stringify(F), 'utf8')
+      await writePolyMesh(path.join(root, 'wing_a_L4_case', 'constant', 'polyMesh'), cube())
+      const runs = fakeRunManager()
+      runs.runs.set('r_7', fakeRun('r_7', { binary: 'ofgpu-automesher', status: 'done' }))
+      runs.lines.set('r_7', ['ofgpu-automesher: wrote wing_a_L4_case/constant/polyMesh (78244 cells)', 'ofgpu-automesher: wrote wing_a_L4_case/wing_a_L4_summary.json']
+        .map((text, i) => ({ seq: i + 1, stream: 'stdout' as const, text, ts: 0 })))
+      expect(await persistRunSummary({ runs, workspaceRoot: root }, 'r_7', 'ofgpu-automesher', null)).toBe('wing_a_L4_case')
+      const back = await readMeshSummaryRecord(path.join(root, 'wing_a_L4_case'))
+      expect(back!.automesher!.snap!.n_pinned).toBe(2702)
+      expect(back!.automesher!.layers!.patches[0].t1_requested).toBe(0.002)
+      expect(back!.automesher!.surface!.n_triangles).toBe(5996)
+    } finally {
+      await fs.promises.rm(root, { recursive: true, force: true })
+    }
   })
 })

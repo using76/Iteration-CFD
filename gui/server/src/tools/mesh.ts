@@ -164,6 +164,7 @@ export async function persistRunSummary(ctx: Pick<ToolContext, 'runs' | 'workspa
           })
           if (merged.quality) facts.quality = { ...facts.quality, ...merged.quality, subjects: merged.quality.subjects.length ? merged.quality.subjects : facts.quality.subjects }
           if (merged.patches?.length) facts.patches = merged.patches
+          if (merged.automesher) facts.automesher = merged.automesher
           stoppedAfter = merged.stoppedAfter ?? null
           totalSeconds = merged.totalSeconds ?? null
         } catch {
