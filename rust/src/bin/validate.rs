@@ -3243,6 +3243,11 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
     check_ale_space_conservation(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT 105.10 - the SIMPLE loop on a moving mesh, and Gate 105-B.
+    println!("\n=== Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10) ===");
+    c.enter_gate("SPEC-LIT 105.10 Gate 105-B the flow on a moving mesh");
+    check_ale_flow(c, &gpu)?;
+    c.leave_gate();
     println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
     c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
     published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
@@ -19815,6 +19820,80 @@ fn check_ale_space_conservation(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                 "SPEC-LIT 105.5 Gate 105-A ({name}): bitwise history, boundary phi_mesh zero"
             ),
             r.history_bitwise && r.steps == 100 && r.boundary_flux_max == 0.0,
+        );
+    }
+    Ok(())
+}
+
+/// Gate 105-B (SPEC-LIT 105.10): the piston's uniform state through the whole
+/// SIMPLE loop in both convective forms, no relative flux through the moving
+/// wall, the absolute flux that closes every cell, the stroking outlet's time
+/// order on three step counts, the finest level against the exact value, and
+/// the extrapolation toward it - euler and backward, seven rows each.
+fn check_ale_flow(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::ale_flow::{
+        expected_order, fine_tolerance, gate_105b, CONTINUITY_TOL, ORDER_BAND, UNIFORM_TOL,
+        WALL_FLUX_TOL,
+    };
+    use ofgpu::timescheme::DdtScheme;
+
+    for (name, scheme) in
+        [("euler", DdtScheme::Euler), ("backward", DdtScheme::Backward)]
+    {
+        let r = gate_105b(gpu, scheme)?;
+        c.note(&format!(
+            "{name} piston conservative: worst U {:.3e}, worst p {:.3e}, wall flux {:.3e}, \
+             continuity {:.3e}, min V/V0 {:.10e}, stroke {:.6}",
+            r.conservative.worst_u, r.conservative.worst_p, r.conservative.worst_wall_flux,
+            r.conservative.worst_continuity, r.conservative.min_volume_ratio,
+            r.conservative.stroke
+        ));
+        c.note(&format!(
+            "{name} piston bounded: worst U {:.3e}, worst p {:.3e}, wall flux {:.3e}, \
+             continuity {:.3e}, min V/V0 {:.10e}, stroke {:.6}",
+            r.bounded.worst_u, r.bounded.worst_p, r.bounded.worst_wall_flux,
+            r.bounded.worst_continuity, r.bounded.min_volume_ratio, r.bounded.stroke
+        ));
+        c.note(&format!(
+            "{name} stroke: exact {:.10e}, p {:.6e}, err_fine {:.3e}, err_ext {:.3e}; levels: \
+             320 steps {:.10e}, 160 steps {:.10e}, 80 steps {:.10e} (spreads {:.3e}, {:.3e}, {:.3e})",
+            r.stroke.exact, r.stroke.p, r.stroke.err_fine, r.stroke.err_ext,
+            r.stroke.runs[0].value, r.stroke.runs[1].value, r.stroke.runs[2].value,
+            r.stroke.runs[0].spread, r.stroke.runs[1].spread, r.stroke.runs[2].spread
+        ));
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the piston keeps the uniform state, conservative form"),
+            r.conservative.worst_u.max(r.conservative.worst_p),
+            UNIFORM_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the piston keeps the uniform state, bounded form"),
+            r.bounded.worst_u.max(r.bounded.worst_p),
+            UNIFORM_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): no relative flux through the moving wall"),
+            r.conservative.worst_wall_flux.max(r.bounded.worst_wall_flux),
+            WALL_FLUX_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the absolute flux closes every cell"),
+            r.conservative.worst_continuity.max(r.bounded.worst_continuity),
+            CONTINUITY_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): observed time order on three steps"),
+            (r.stroke.p - expected_order(scheme)).abs(),
+            ORDER_BAND,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the finest step against the exact solution"),
+            r.stroke.err_fine,
+            fine_tolerance(scheme),
+        );
+        c.require(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the extrapolation moves toward the exact solution"),
+            r.stroke.err_ext < r.stroke.err_fine,
         );
     }
     Ok(())

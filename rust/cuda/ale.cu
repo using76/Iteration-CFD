@@ -196,3 +196,61 @@ extern "C" __global__ void tsDdtGeneralRhoV
     diag[c]   += sign*(aN*V[c]*rho[c]);
     source[c] -= sign*(a0*V0[c]*rho0[c]*psi0[c] + a00*V00[c]*rho00[c]*psi00[c]);
 }
+
+/*---------------------------------------------------------------------------*\
+  aleRelativeFlux - one thread per face, global face order (internal first).
+
+  phi_rel = phi - phi_mesh: the flux every convective term reads on a moving
+  mesh (SPEC-LIT 105.7). A mesh that has not moved has phi_mesh = 0 exactly,
+  and then phi_rel is phi bit for bit.
+\*---------------------------------------------------------------------------*/
+extern "C" __global__ void aleRelativeFlux
+(
+    ofscalar* __restrict__ phiRel,
+    ofscalar* __restrict__ phiRelB,
+    const ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ phiB,
+    const ofscalar* __restrict__ phiMesh,
+    const ofscalar* __restrict__ phiMeshB,
+    oflabel nInternalFaces,
+    oflabel nBoundaryFaces
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= nInternalFaces + nBoundaryFaces) return;
+    if (f < nInternalFaces)
+    {
+        phiRel[f] = phi[f] - phiMesh[f];
+    }
+    else
+    {
+        const oflabel i = f - nInternalFaces;
+        phiRelB[i] = phiB[i] - phiMeshB[i];
+    }
+}
+
+/*---------------------------------------------------------------------------*\
+  aleMovingWallVelocity - one thread per LISTED boundary face.
+
+  The moving wall's velocity (SPEC-LIT 105.8): the vector normal to the face
+  whose flux through it is the mesh flux, refValue = bSf (phiMeshB / |bSf|^2).
+  Written on the device so a captured step keeps it: a host write of the
+  same value is refused inside a capture (SPEC-LIT 81.3). A face of zero area
+  gets zero.
+\*---------------------------------------------------------------------------*/
+extern "C" __global__ void aleMovingWallVelocity
+(
+    ofvec3* __restrict__ refValue,
+    const ofscalar* __restrict__ phiMeshB,
+    const ofvec3* __restrict__ bSf,
+    const oflabel* __restrict__ faces,
+    oflabel nFaces
+)
+{
+    const oflabel k = OFGPU_TID;
+    if (k >= nFaces) return;
+    const oflabel i = faces[k];
+    const ofvec3 s = bSf[i];
+    const ofscalar s2 = dot3(s, s);
+    refValue[i] = s2 > (ofscalar)0 ? aleScale(s, phiMeshB[i]/s2) : aleZero();
+}

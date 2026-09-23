@@ -88,6 +88,7 @@ use crate::io::dict::FoamDict;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::GpuMesh;
+use crate::mesh::ale::AleMesh;
 use crate::rheology::{self, RheologyCoeffs, RheologyKernels};
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Tensor, Vec3};
@@ -1268,6 +1269,22 @@ impl<'m> Momentum<'m> {
         phi: &GpuSurfaceScalarField,
         nut: &GpuScalarField,
     ) -> Result<[SolverPerformance; 3]> {
+        self.solve_on(gpu, u, phi, nut, None)
+    }
+
+    /// [`Self::solve`] on a moving mesh - SPEC-LIT 105.7. `phi` is the flux
+    /// the convective terms read (the relative flux when the mesh moves) and
+    /// `ale` the moving mesh whose volume history the time derivative reads in
+    /// the conservative form (SPEC-LIT 105.7 says which form reads which).
+    /// `None` is [`Self::solve`], launch for launch.
+    pub fn solve_on(
+        &mut self,
+        gpu: &Gpu,
+        u: &mut GpuVectorField,
+        phi: &GpuSurfaceScalarField,
+        nut: &GpuScalarField,
+        ale: Option<&AleMesh>,
+    ) -> Result<[SolverPerformance; 3]> {
         let m = self.m;
         let n = m.n_cells;
         if n == 0 {
@@ -1289,7 +1306,7 @@ impl<'m> Momentum<'m> {
         // which is right on an orthogonal mesh and not enough on a skewed one.
         // This loop used to exist for the pressure equation alone.
         for _pass in 0..=self.ctrl.n_non_orth_correctors {
-            perf = self.solve_once(gpu, u, phi)?;
+            perf = self.solve_once(gpu, u, phi, ale)?;
         }
 
         Ok(perf)
@@ -1314,6 +1331,19 @@ impl<'m> Momentum<'m> {
         phi: &GpuSurfaceScalarField,
         nut: &GpuScalarField,
     ) -> Result<()> {
+        self.assemble_only_on(gpu, u, phi, nut, None)
+    }
+
+    /// [`Self::assemble_only`] on a moving mesh - see [`Self::solve_on`] for
+    /// the two extra arguments.
+    pub fn assemble_only_on(
+        &mut self,
+        gpu: &Gpu,
+        u: &GpuVectorField,
+        phi: &GpuSurfaceScalarField,
+        nut: &GpuScalarField,
+        ale: Option<&AleMesh>,
+    ) -> Result<()> {
         let n = self.m.n_cells;
         if n == 0 {
             return Ok(());
@@ -1322,7 +1352,7 @@ impl<'m> Momentum<'m> {
         self.update_viscosity(gpu, u, nut)?;
         self.update_div_weights(gpu, u, phi)?;
         for c in 0..3 {
-            self.assemble_component(gpu, u, phi, c as Label)?;
+            self.assemble_component(gpu, u, phi, c as Label, ale)?;
         }
         Ok(())
     }
@@ -1333,12 +1363,13 @@ impl<'m> Momentum<'m> {
         gpu: &Gpu,
         u: &mut GpuVectorField,
         phi: &GpuSurfaceScalarField,
+        ale: Option<&AleMesh>,
     ) -> Result<[SolverPerformance; 3]> {
         let m = self.m;
         let n = m.n_cells;
 
         for c in 0..3 {
-            self.assemble_component(gpu, u, phi, c as Label)?;
+            self.assemble_component(gpu, u, phi, c as Label, ale)?;
         }
 
         let mut perf = [SolverPerformance::default(); 3];
@@ -1450,6 +1481,7 @@ impl<'m> Momentum<'m> {
         u: &GpuVectorField,
         phi: &GpuSurfaceScalarField,
         cmpt: Label,
+        ale: Option<&AleMesh>,
     ) -> Result<()> {
         let m = self.m;
         let n = m.n_cells;
@@ -1466,9 +1498,17 @@ impl<'m> Momentum<'m> {
 
         {
             // SPEC-LIT 13: the scheme `ddtSchemes` named, applied to the two
-            // old levels of THIS component.
-            let Self { ddt, a, uc, .. } = self;
-            ddt.add(gpu, a, m, &uc.f0, &uc.f00, 1.0)?;
+            // old levels of THIS component. On a moving mesh (SPEC-LIT 105.7)
+            // the conservative form reads each level's own volume; the bounded
+            // form keeps the static term, its consistent partner.
+            let Self { ddt, a, uc, ctrl, .. } = self;
+            match ale {
+                Some(ale) if !ctrl.bounded_convection => {
+                    let c = ddt.state.coeffs(ddt.scheme)?;
+                    ale.fvm_ddt(gpu, a, m, &uc.f0, &uc.f00, c, 1.0)?;
+                }
+                _ => ddt.add(gpu, a, m, &uc.f0, &uc.f00, 1.0)?,
+            }
         }
         {
             let Self { fvk, a, uc, .. } = self;

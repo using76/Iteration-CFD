@@ -38,9 +38,11 @@
 //! nothing syncs - which is what makes the step capturable; its gate is
 //! `the_ale_step_replays_bitwise`.
 //!
-//! NOT here: the relative flux `phi - phi_mesh` routed through the momentum
-//! predictor, the pressure equation, turbulence and energy; the point
-//! smoother; the case block. Those are the next units'.
+//! NOT here: the routing of the relative flux through the solver, the moving
+//! wall and the smoother are SPEC-LIT 105.7-105.9 (`src/simple.rs`,
+//! `src/mesh/motion.rs`); this module owns the two kernels they launch,
+//! `relative_flux` and `moving_wall_velocity`. The case block is not here
+//! either.
 
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
@@ -55,12 +57,14 @@ use crate::mesh::{geometry, GpuMesh, HostMesh};
 use crate::timescheme::{DdtCoeffs, DdtScheme};
 use crate::{DevBuf, Label, Scalar, Vec3};
 
-/// The four kernels of `cuda/ale.cu`.
+/// The six kernels of `cuda/ale.cu`.
 pub struct AleKernels {
     pub swept_volume: CudaFunction,
     pub mesh_flux: CudaFunction,
     pub ddt_v: CudaFunction,
     pub ddt_rho_v: CudaFunction,
+    pub relative_flux: CudaFunction,
+    pub moving_wall: CudaFunction,
 }
 
 impl AleKernels {
@@ -68,7 +72,7 @@ impl AleKernels {
         Self::from_cubin(gpu, crate::kernels::ALE)
     }
 
-    /// Load the same four kernels from a named module. There is exactly one
+    /// Load the same six kernels from a named module. There is exactly one
     /// other module: `kernels::ALE_FMAD`, the same source compiled with
     /// nvcc's default multiply-add contraction, which
     /// `tests::the_contraction_the_ale_unit_turns_off_is_real` runs so that
@@ -81,6 +85,8 @@ impl AleKernels {
             mesh_flux: ks.func("aleMeshFlux")?,
             ddt_v: ks.func("tsDdtGeneralV")?,
             ddt_rho_v: ks.func("tsDdtGeneralRhoV")?,
+            relative_flux: ks.func("aleRelativeFlux")?,
+            moving_wall: ks.func("aleMovingWallVelocity")?,
         })
     }
 }
@@ -520,6 +526,88 @@ impl AleMesh {
     pub fn total_volume(&self, gpu: &Gpu, gm: &GpuMesh) -> Result<Scalar> {
         let v = gpu.download(&gm.v)?;
         Ok(v.iter().copied().take(self.n_cells).sum())
+    }
+
+    /// `out = phi - phi_mesh` on every face - SPEC-LIT 105.7: the flux every
+    /// convective term reads on a moving mesh. A mesh that has not moved has
+    /// `phi_mesh == 0` exactly, and then `out` is `phi` bit for bit.
+    pub fn relative_flux(
+        &self,
+        gpu: &Gpu,
+        phi: &GpuSurfaceScalarField,
+        out: &mut GpuSurfaceScalarField,
+    ) -> Result<()> {
+        if phi.n_internal_faces != self.n_internal_faces
+            || phi.n_boundary_faces != self.n_boundary_faces
+            || out.n_internal_faces != self.n_internal_faces
+            || out.n_boundary_faces != self.n_boundary_faces
+        {
+            return Err(Error::Config(format!(
+                "AleMesh::relative_flux: phi is {}+{} faces and the output {}+{}, but this \
+                 AleMesh moves {} internal and {} boundary faces",
+                phi.n_internal_faces, phi.n_boundary_faces, out.n_internal_faces,
+                out.n_boundary_faces, self.n_internal_faces, self.n_boundary_faces
+            )));
+        }
+        let n_faces = self.n_internal_faces + self.n_boundary_faces;
+        if n_faces == 0 {
+            return Ok(());
+        }
+        let (nl_if, nl_bf) = (self.n_internal_faces as Label, self.n_boundary_faces as Label);
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.k.relative_flux)
+                .arg(&mut out.f)
+                .arg(&mut out.bf)
+                .arg(&phi.f)
+                .arg(&phi.bf)
+                .arg(&self.phi_mesh.f)
+                .arg(&self.phi_mesh.bf)
+                .arg(&nl_if)
+                .arg(&nl_bf)
+                .launch(cfg_for(n_faces))?;
+        }
+        Ok(())
+    }
+
+    /// The moving wall's velocity - SPEC-LIT 105.8: on each of the first
+    /// `n_faces` boundary faces `faces` lists, `ref_value[i] = b_sf[i] *
+    /// (phi_mesh_b[i] / (b_sf[i] . b_sf[i]))`, the velocity normal to the
+    /// face whose flux is the mesh flux. A device write, so a captured step
+    /// keeps it (SPEC-LIT 81.3).
+    pub fn moving_wall_velocity(
+        &self,
+        gpu: &Gpu,
+        gm: &GpuMesh,
+        ref_value: &mut DevBuf<Vec3>,
+        faces: &DevBuf<Label>,
+        n_faces: usize,
+    ) -> Result<()> {
+        self.check_shape(gm, "AleMesh::moving_wall_velocity")?;
+        if n_faces == 0 {
+            return Ok(());
+        }
+        if ref_value.len() < self.n_boundary_faces || faces.len() < n_faces {
+            return Err(Error::Config(format!(
+                "AleMesh::moving_wall_velocity: ref_value holds {} values and the face list {}, \
+                 but this AleMesh moves {} boundary faces",
+                ref_value.len(),
+                faces.len(),
+                self.n_boundary_faces
+            )));
+        }
+        let nl = n_faces as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.k.moving_wall)
+                .arg(&mut *ref_value)
+                .arg(&self.phi_mesh.bf)
+                .arg(&gm.b_sf)
+                .arg(faces)
+                .arg(&nl)
+                .launch(cfg_for(n_faces))?;
+        }
+        Ok(())
     }
 }
 

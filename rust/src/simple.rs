@@ -106,11 +106,13 @@ use crate::fv::{self, FvKernels};
 use crate::io::case::SolverControls;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
+use crate::mesh::ale::AleMesh;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::momentum::{BuoyancyCoeffs, Momentum, MomentumControls};
 use crate::pressure::PressureBackend;
 use crate::solver::{self, SolverKernels, SolverPerformance};
 use crate::turbulence::FlowState;
+use crate::timescheme::DdtScheme;
 use crate::{Label, Scalar};
 
 // ==========================================================================
@@ -350,6 +352,20 @@ impl SimpleKernels {
 //  Simple
 // ==========================================================================
 
+const FLOW_DEVICES_REFUSED: &str = "Simple: fan and porous-jump patches (SPEC-LIT 52 and SPEC-LIT 53) are not implemented on a moving mesh (SPEC-LIT 105.7)";
+
+/// SPEC-LIT 105.7: the moving mesh a driver attached, and the relative flux
+/// every convective consumer reads while it is attached.
+struct SimpleMotion {
+    ale: AleMesh,
+    /// `phi - phi_mesh`, named "phiRel".
+    phi_rel: GpuSurfaceScalarField,
+    /// The boundary faces whose velocity condition is the moving wall's
+    /// (SPEC-LIT 105.8), padded to one element when empty.
+    wall_faces: DevBuf<Label>,
+    n_wall_faces: usize,
+}
+
 /// The coupled `U`-`p`-`phi` system.
 ///
 /// Owns the three fields, because they are only meaningful together: a `phi`
@@ -404,6 +420,12 @@ pub struct Simple<'m> {
     /// this file changes.
     flow_devices: Option<crate::fan::FlowDevices>,
 
+    /// SPEC-LIT 105.7's moving mesh, when a driver attached one. `None` for
+    /// every driver that existed before 105.7, and on that path the only
+    /// thing this field does is fail two `if let`s and pick `&self.phi` in
+    /// one `match` in [`Self::correct_outer_impl`].
+    motion: Option<SimpleMotion>,
+
     fvk: FvKernels,
     lduk: LduKernels,
     fldk: FieldKernels,
@@ -451,6 +473,7 @@ impl<'m> Simple<'m> {
             reference_cell: 0,
             outer_correctors: 0,
             flow_devices: None,
+            motion: None,
 
             fvk: FvKernels::new(gpu)?,
             lduk: LduKernels::new(gpu)?,
@@ -520,6 +543,101 @@ impl<'m> Simple<'m> {
         self.flow_devices.as_mut()
     }
 
+    /// Attach the moving mesh of SPEC-LIT 105.7. `wall_faces` lists the
+    /// boundary faces whose velocity condition is the moving wall's (SPEC-LIT
+    /// 105.8); an empty list means the run has none.
+    pub fn attach_motion(&mut self, gpu: &Gpu, ale: AleMesh, wall_faces: &[Label]) -> Result<()> {
+        let m = self.m;
+        if self.motion.is_some() {
+            return Err(Error::Config(
+                "Simple::attach_motion: a motion is already attached; one Simple moves one mesh".to_string(),
+            ));
+        }
+        let scheme = self.momentum.ddt.scheme;
+        if self.ctrl.momentum.steady || !matches!(scheme, DdtScheme::Euler | DdtScheme::Backward) {
+            return Err(Error::Config(format!(
+                "Simple::attach_motion: a moving mesh needs `Euler` or `backward`, and this run's \
+                 momentum ddt is {scheme:?}{} - a steady or local-time-step run has no time for \
+                 the mesh to move in (SPEC-LIT 105.7)",
+                if self.ctrl.momentum.steady { " on a steady run" } else { "" }
+            )));
+        }
+        if self.flow_devices.is_some() {
+            return Err(Error::Config(FLOW_DEVICES_REFUSED.to_string()));
+        }
+        if ale.n_cells != m.n_cells
+            || ale.n_internal_faces != m.n_internal_faces
+            || ale.n_boundary_faces != m.n_boundary_faces
+        {
+            return Err(Error::Config(format!(
+                "Simple::attach_motion: the AleMesh was built for {} cells, {} internal and {} \
+                 boundary faces, and this Simple's mesh has {}, {} and {}",
+                ale.n_cells, ale.n_internal_faces, ale.n_boundary_faces,
+                m.n_cells, m.n_internal_faces, m.n_boundary_faces
+            )));
+        }
+        for &f in wall_faces {
+            if f < 0 || f as usize >= m.n_boundary_faces {
+                return Err(Error::Config(format!(
+                    "Simple::attach_motion: wall face {f} is not a boundary face of this mesh, \
+                     which has {} of them",
+                    m.n_boundary_faces
+                )));
+            }
+        }
+        let mut phi_rel = GpuSurfaceScalarField::zeros(gpu, m, "phiRel")?;
+        ale.relative_flux(gpu, &self.phi, &mut phi_rel)?;
+        let n_wall_faces = wall_faces.len();
+        let wall_faces = if wall_faces.is_empty() { gpu.zeros(1)? } else { gpu.upload(wall_faces)? };
+        self.motion = Some(SimpleMotion { ale, phi_rel, wall_faces, n_wall_faces });
+        Ok(())
+    }
+
+    /// The attached moving mesh, if any (SPEC-LIT 105.7).
+    pub fn motion(&self) -> Option<&AleMesh> {
+        self.motion.as_ref().map(|mm| &mm.ale)
+    }
+
+    /// The attached moving mesh, mutably - what a driver moves the points
+    /// with between steps (SPEC-LIT 105.7).
+    pub fn motion_mut(&mut self) -> Option<&mut AleMesh> {
+        self.motion.as_mut().map(|mm| &mut mm.ale)
+    }
+
+    /// The flux the convective terms read: `phi - phi_mesh` while a motion is
+    /// attached, `phi` itself otherwise (SPEC-LIT 105.7).
+    pub fn convective_flux(&self) -> &GpuSurfaceScalarField {
+        match &self.motion {
+            Some(mm) => &mm.phi_rel,
+            None => &self.phi,
+        }
+    }
+
+    /// One moving-mesh step, in the order SPEC-LIT 105.7 prescribes: called
+    /// after `set_points` and after `begin_time_step` (or, on a run's first
+    /// step, without it - SPEC-LIT 105.10), before `solve_step`. It advances
+    /// the mesh with the momentum ddt's own coefficients, writes the moving
+    /// walls' value on the device (SPEC-LIT 105.8), re-evaluates `U`'s
+    /// boundary, and refreshes `phi_rel`. Nothing it does is a host write, so
+    /// a step that calls it captures.
+    pub fn move_mesh(&mut self, gpu: &Gpu) -> Result<()> {
+        let m = self.m;
+        if self.flow_devices.is_some() {
+            return Err(Error::Config(FLOW_DEVICES_REFUSED.to_string()));
+        }
+        let c = self.momentum.ddt.state.coeffs(self.momentum.ddt.scheme)?;
+        let Self { motion, u, phi, fldk, .. } = self;
+        let Some(mm) = motion.as_mut() else {
+            return Err(Error::Config(
+                "Simple::move_mesh: no motion is attached; call attach_motion first".to_string(),
+            ));
+        };
+        mm.ale.advance(gpu, m, c)?;
+        mm.ale.moving_wall_velocity(gpu, m, &mut u.ref_value, &mm.wall_faces, mm.n_wall_faces)?;
+        field_ops::correct_boundary_conditions_vector(gpu, fldk, u, m)?;
+        mm.ale.relative_flux(gpu, phi, &mut mm.phi_rel)
+    }
+
     /// Give the outer loop a stopping criterion.
     ///
     /// Tested on the INITIAL residual of each outer corrector, per SPEC-LIT
@@ -539,8 +657,12 @@ impl<'m> Simple<'m> {
 
     /// What a turbulence model or a scalar transport equation needs from the
     /// flow: the velocity, the conservative flux, and the molecular viscosity.
+    ///
+    /// While a motion is attached the flux is the RELATIVE flux (SPEC-LIT
+    /// 105.7) - what every convective term needs; [`Self::phi`] stays the
+    /// absolute one.
     pub fn flow_state(&self) -> FlowState<'_> {
-        FlowState::new(&self.u, &self.phi, self.ctrl.momentum.nu)
+        FlowState::new(&self.u, self.convective_flux(), self.ctrl.momentum.nu)
     }
 
     /// The assembled pressure system - what [`crate::pressure::SystemProbe`]
@@ -750,11 +872,21 @@ impl<'m> Simple<'m> {
         // reports the iteration it happened in.
         self.outer_correctors += 1;
 
+        // SPEC-LIT 105.7: the relative flux, from the flux the last corrector
+        // left and the mesh flux `move_mesh` wrote. `None` fails here.
+        if let Some(mm) = self.motion.as_mut() {
+            mm.ale.relative_flux(gpu, &self.phi, &mut mm.phi_rel)?;
+        }
+
         // inletOutlet switches on the sign of the face flux, so the fractions
         // have to follow the flux the last iteration produced before anything
         // reads them.
-        field_ops::update_inlet_outlet_vector(gpu, &self.fldk, &mut self.u, &self.phi)?;
-        field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, &mut self.p, &self.phi)?;
+        let conv = match &self.motion {
+            Some(mm) => &mm.phi_rel,
+            None => &self.phi,
+        };
+        field_ops::update_inlet_outlet_vector(gpu, &self.fldk, &mut self.u, conv)?;
+        field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, &mut self.p, conv)?;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
 
@@ -788,14 +920,18 @@ impl<'m> Simple<'m> {
         self.momentum.update_force(gpu, &self.p, &self.u)?;
 
         // ---- momentum predictor -------------------------------------------
+        let (conv, ale) = match &self.motion {
+            Some(mm) => (&mm.phi_rel, Some(&mm.ale)),
+            None => (&self.phi, None),
+        };
         let u_perf = if self.ctrl.momentum_predictor {
-            self.momentum.solve(gpu, &mut self.u, &self.phi, nut)?
+            self.momentum.solve_on(gpu, &mut self.u, conv, nut, ale)?
         } else {
             // No predictor still needs the matrix that `H` and `rAU` come out
             // of, and that matrix needs the eddy viscosity and the convection
             // weights - so the assembly happens either way; only the linear
             // solve is skipped.
-            self.momentum.assemble_only(gpu, &self.u, &self.phi, nut)?;
+            self.momentum.assemble_only_on(gpu, &self.u, conv, nut, ale)?;
             [SolverPerformance::default(); 3]
         };
 
@@ -847,6 +983,12 @@ impl<'m> Simple<'m> {
             self.momentum.update_force(gpu, &self.p, &self.u)?;
             self.momentum
                 .correct_flux_and_velocity(gpu, &mut self.u, &mut self.phi)?;
+        }
+
+        // SPEC-LIT 105.7: and again from the corrected flux, so `flow_state()`
+        // after this corrector hands out phi - phi_mesh of the flux it made.
+        if let Some(mm) = self.motion.as_mut() {
+            mm.ale.relative_flux(gpu, &self.phi, &mut mm.phi_rel)?;
         }
 
         // ---- relax the pressure FIELD, for the next predictor ---------------

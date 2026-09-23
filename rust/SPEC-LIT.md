@@ -29277,10 +29277,10 @@ derivative. Gate 105-A (§105.5) holds the space conservation law to 1e-12 on a
 box in prescribed sinusoidal motion, over 100 steps, in euler and backward,
 with a uniform flow uniform to round-off.
 
-What this section does NOT own: the relative flux `phi - phi_mesh` routed
-through the momentum predictor, the pressure equation, turbulence and energy;
-the moving-wall boundary condition; the point smoother; the case block that
-prescribes a motion. Those belong to the next units.
+§105.1-§105.6 do not own the relative flux in the solver, the moving wall,
+the point smoother or the case block. §105.7-§105.10 own the first three,
+with Gate 105-B; the case block is the next unit's, and §105.11 lists what
+is still not claimed.
 
 No GPL-licensed source was consulted. The sources are this crate's own
 `cuda/meshgeom.cu` and `src/mesh/geometry.rs` (the fan of §2.1), SPEC-LIT §2,
@@ -29493,6 +29493,255 @@ break that on every non-axis-aligned face. The capture row is `Gate`,
 `the_ale_step_replays_bitwise`; `src/mesh/gpugeom.rs` stays `Outside`. No
 existing kernel changed and no solver numerics moved to make any gate here
 pass.
+
+### 105.7 The relative flux, and which consumer reads which
+
+`Simple` holds the moving mesh as an `Option`: the `AleMesh`, a resident
+`phi - phi_mesh` named "phiRel", and the moving-wall face list. `None` is
+every caller that existed before this section, and on that path the only
+thing the field does is fail two `if let` tests and pick `&self.phi` in one
+`match` in the outer corrector - no launch changes, no argument changes, no
+order changes.
+
+The consumers of the flux in `src/simple.rs`, measured with `grep -n` on the
+tree this section was written from (the insertions this section describes
+shift the lines; the consumers do not move):
+
+| line | consumer | reads, when a motion is attached |
+|---|---|---|
+| 543 | `flow_state()` - every turbulence model, species and scalar through `FlowState.phi` | `phi_rel` |
+| 756-757 | `update_inlet_outlet_vector`/`_scalar` | `phi_rel` (the switch is on the flux through the moving face) |
+| 792 | `momentum.solve` - `div_scheme_weights`, `fvm_div_gauss`, `fvm_div_bounded_correction`, `fvm_div_correction`, `update_local_step` | `phi_rel`, plus the moving mesh for the time derivative |
+| 798 | `momentum.assemble_only` | the same |
+| 826 | `FlowDevices::update` (fan, porous jump) | refused with a motion |
+| 849 | `correct_flux_and_velocity(&mut self.phi)` | absolute - it writes `phi` |
+| 1072 | `continuity_error` | absolute |
+| `assemble_pressure` | `momentum.phi_hbya()` | absolute |
+
+The pressure equation and the continuity error stay on the ABSOLUTE flux,
+and that is exact, not an approximation:
+
+```text
+the volume balance of a cell on a moving mesh, which Gate 105-A holds to
+round-off (§105.4):
+
+    aN V^{n+1} + a0 V^n + a00 V^{n-1} - sum_f phi_mesh,f = 0
+
+it says where the volumes went. With it closed, the incompressible
+continuity statement the pressure equation enforces is about the absolute
+flux alone:
+
+    sum_f phi_f = 0
+
+the relative flux closes no cell: its cell sum is minus the cell's mesh
+flux, which is not zero on a moving mesh.
+```
+
+Which time derivative goes with which convective form. With a motion
+attached and `bounded_convection == false` (the conservative form
+`div(phi_rel U)`), the momentum time derivative is §105.4's
+`AleMesh::fvm_ddt`, each level carrying its own volume. With
+`bounded_convection == true` (`div(phi_rel U) - U div(phi_rel)`, the
+non-conservative form) it stays the static `Ddt::add`. Both annihilate a
+uniform `U`: the first because the discrete space conservation law holds,
+the second identically.
+
+```text
+conservative: aN V^{n+1} U^{n+1} + a0 V^n U^n + a00 V^{n-1} U^{n-1} + Σ_f phi_rel,f U_f
+bounded:      V^{n+1} (aN U^{n+1} + a0 U^n + a00 U^{n-1}) + Σ_f phi_rel,f U_f - U_P Σ_f phi_rel,f
+```
+
+Mixing them - the ALE derivative plus the bounded correction - counts the
+volume change twice, and is wrong. The `match` in `assemble_component` makes
+it impossible: the bounded form keeps the static term, its consistent
+partner.
+
+`attach_motion` refuses a steady run and the schemes `localEuler` and
+`CrankNicolson` - a moving mesh needs `Euler` or `backward`, and the LTS
+path has no time for the mesh to move in - and it refuses the fan and
+porous-jump patches of §52 and §53. `flow_state()` hands out `phi_rel` while
+a motion is attached, which routes every model through `FlowState` without
+editing a model file. The drivers' own call sites that read the flux for a
+convective term - energy's `phi_conv` through `src/cht/flow.rs`, the
+drivers' `update_inlet_outlet` calls - are the next unit's, and no driver
+can attach a motion before it. A `Simple` with no motion launches exactly
+what it launched before this section; the supervisor's byte-for-byte
+checksum of written fields is recorded by the commit, not here.
+
+### 105.8 The moving wall
+
+The moving wall's velocity is written by a kernel, never by a host write.
+`Gpu::write` is refused inside a CUDA graph capture (§81.3), so a per-step
+host write of the wall's `refValue` would break any captured region; the
+value is computed on the device by `aleMovingWallVelocity` from the mesh
+flux and the face areas. On each listed boundary face,
+
+    refValue = b_sf (phi_mesh_b / (b_sf . b_sf))
+
+the vector normal to the face whose flux through it is the mesh flux, and
+the face's velocity condition is `fixedValue` (`fr = 1`). After that,
+`momPhiHbyABoundary` writes the face flux as `U_b . Sf`, which is then
+exactly `phi_mesh,b`, so nothing crosses the wall. The piston gate of
+§105.10 measures the largest boundary imbalance over the piston's faces at
+0.0 - exact, on every step - of the mesh flux.
+
+The value is the NORMAL mesh velocity only: a wall whose law moves it
+tangentially is refused by `MeshMotion::wall_faces` ("a tangential wall
+velocity is not implemented"). The crate's own `movingWallVelocity`
+condition strips the face-normal component of the cell value instead of
+computing the mesh velocity, and is NOT the condition used here; on a
+prescribed mesh motion the mesh flux is the truth the velocity condition
+has to reproduce.
+
+### 105.9 The point smoother
+
+The interior points are moved by host-side inverse-distance weighting, the
+two-term weight of Luke, Collins & Blades (2012), DOI
+10.1016/j.jcp.2011.09.021, with the parameters chosen here and stated as
+ours. For a free point at rest position `x`,
+
+```text
+d(x) = sum_i w_i d_i / sum_i w_i
+w_i  = (L / r_i)^3 + (alpha L / r_i)^5,    r_i = |x - x_i|
+L     the diagonal of the control points' rest bounding box
+alpha = 5 max_i |d_i| / L
+```
+
+over the control points `x_i` (rest positions) with prescribed displacements
+`d_i`. The paper's rotational part, its per-node area weights and its
+boundary-node reduction are NOT implemented. Displacements are measured from
+the REST position, never incrementally, so nothing drifts. The cost is
+`O(N_free N_control)` per call, on the host; `AleMesh::set_points` then
+writes the points, and that host write is why a prescribed-motion step is
+not capturable as a whole - `move_mesh` and the outer corrector are
+(§105.10).
+
+Which points the laws move and which the smoother moves is a per-patch rule
+table, and every patch of the mesh must be named exactly once:
+
+| rule | meaning |
+|---|---|
+| `Fixed` | the points stay where they are; control points with zero displacement |
+| `Slide` | the points are moved by the smoother, like interior points - a plane the mesh slides along |
+| `Move(law)` | every point of the patch is displaced by the law |
+
+The classification walks the boundary faces patch by patch and gives each
+point of each face a state. A `Move` point stays `Move` unless it meets a
+different law or a `Fixed` point - refused, naming the point id; a `Fixed`
+point stays `Fixed` unless it meets a `Move` - refused; `Slide` never
+overrides anything. Control points are every `Move` and `Fixed` point, in
+ascending point id; the free points are all the others. A rule other than
+`Fixed` on a `Cyclic` patch is refused. A slide plane is kept exactly: a
+point stays in its plane exactly when no control displacement has a
+component along the plane's normal, and then every `w_i d_i`, and so the
+weighted sum, has zero normal component exactly. At the gate amplitudes the
+smallest cell keeps 0.8021156375 of its rest volume on the piston and
+1.0000285445 on the stroke
+(§105.10).
+
+### 105.10 Gate 105-B - the piston and the stroking outlet
+
+The plan document writes the piston as `u = x (dx_w/dt) / x_w`. That is the
+velocity of a gas compressed uniformly in a CLOSED cylinder, and this
+solver is incompressible: there its `div u` is `(dx_w/dt) / x_w`, not zero,
+so it cannot carry that state. The incompressible piston is the OPEN one:
+the wall at `x_w(t)` pushes the fluid out through an open end, `U = dx_w/dt`
+everywhere, and the mesh velocity between the two ends is what the smoother
+makes it - so the relative flux is NOT zero in the interior, and the gate
+exercises it.
+
+(a) The piston, at constant speed `dx_w/dt = -c`: the exact state is
+`U = (-c, 0, 0)`, `p = 0`, and it must hold to round-off through the whole
+SIMPLE loop - moving wall, smoother, `phi_rel`, the ALE time derivative,
+both convective forms, euler and backward. The box is 8x3x3 cells of
+0.125 x 0.25 x 0.25, `c = 0.5`, `dt = 0.005`, 40 steps; `xmin` is `Fixed`,
+`xmax` is the moving wall `Move(linear, -c)`, the four sides `Slide`; the
+patch kinds are `Generic` on `xmin`, `Wall` on `xmax` and symmetry on the
+four sides. `U` is seeded `(-c, 0, 0)` with zero-gradient on the inlet and
+symmetry on the sides, `p` is seeded zero with `p = 0` on the inlet, and
+`phi` is the exact uniform flux.
+
+(b) The time order is measured on a STROKING OUTLET, not on an accelerating
+piston. At a face whose flux the velocity condition prescribes,
+`momForceFluxBoundary` writes zero force flux, so the reconstructed
+pressure force in the adjacent cell carries half of a wall-normal pressure
+gradient. An accelerating piston has one (`dp/dn = -d2x_w/dt2`), so its
+wall cell's velocity is wrong by `O(dt d2x_w/dt2)` each step and the
+pressure near the wall by `O(h d2x_w/dt2)`, an error that does not fall
+with `dt` and hides the time order - measured on a 1-D model of this
+corrector before this gate was written. That is the outer corrector of §5,
+and changing it is a numerics decision for the user, not made here. The
+stroking outlet has no prescribed-flux face with a pressure gradient across
+it: a 1-D channel `x` in `[0, L(t)]`, `p = P0` at `x = 0`, `p = 0` at the
+moving end `L(t) = L0 + a sin(2 pi t / T_p)`, symmetry on the sides, so
+`U(t)` is uniform and `dU/dt = P0 / L(t)` exactly,
+`U(T) = U0 + P0 integral over [0, T] of ds / L(s)`. On the 1-D model at the
+step counts below the orders are euler `p = 1.004` and backward
+`p = 2.034`. The mesh is 16x1x1 cells of 0.0625 x 0.1 x 0.1, `L0 = 1.0`,
+`a = 0.2`, `T_p = 1.0`, `T = 0.25`, `U0 = 0.5`, `P0 = 1.0`, steps 320, 160,
+80, finest first; `xmin` is `Fixed` with `p = P0`, `xmax` is the moving
+outlet with `p = 0`, the four sides `Slide` with zero-gradient `U`.
+
+The step loop. The first step does NOT call `begin_time_step`, so
+`TimeState::step` is 0 during it and `DdtScheme::Backward.coeffs` returns
+the Euler row of §13.3 for the momentum derivative AND for
+`AleMesh::advance` - both read `momentum.ddt.state`. Every later step calls
+`begin_time_step` first. Starting BDF2 with two equal old levels instead is
+a first-order error when `dU/dt(0)` is not zero, and the stroke's
+`dU/dt(0) = P0 / L0`. Each step then moves the points by the law at
+`(k+1) dt`, advances the mesh with the momentum ddt's own coefficients,
+writes the moving walls' value, re-evaluates `U`'s boundary, refreshes
+`phi_rel`, and only then runs the outer correctors. Tolerances: uniform
+state `1e-10`, relative flux through the wall `1e-12`, cell continuity
+`1e-10`, order band `|p - p_scheme| <= 0.1`, finest-level error against the
+exact value `5e-4` (euler) and `5e-6` (backward), and the extrapolated
+value must sit nearer the exact one than the finest.
+
+Measured on the card, the run this section ships:
+
+```text
+| piston   | form         | steps | cells | worst U  | worst p | wall flux | continuity | min V/V0 |
+| euler    | conservative | 40    | 72    | 2.531e-14 | 1.637e-11 | 0.000e0   | 3.415e-16  | 8.0211563746e-1 |
+| euler    | bounded      | 40    | 72    | 2.554e-14 | 1.632e-11 | 0.000e0   | 4.692e-16  | 8.0211563746e-1 |
+| backward | conservative | 40    | 72    | 4.719e-14 | 6.354e-11 | 0.000e0   | 5.281e-16  | 8.0211563746e-1 |
+| backward | bounded      | 40    | 72    | 4.752e-14 | 6.337e-11 | 0.000e0   | 4.108e-16  | 8.0211563746e-1 |
+
+| stroke   | 320 steps | 160 steps | 80 steps | exact | p | finest error | extrapolated error |
+| euler    | 7.2251240486e-1 | 7.2257769565e-1 | 7.2270865053e-1 | 7.2244723847e-1 | 1.004118 | 9.020e-5 | 3.415e-7 |
+| backward | 7.2244739974e-1 | 7.2244789023e-1 | 7.2244989887e-1 | 7.2244723847e-1 | 2.033915 | 2.232e-7 | 1.385e-8 |
+```
+
+(the stroke columns are the volume-weighted mean of `U_x` at `T`, to ten
+significant digits; both errors relative to the exact value.) One moving
+step - `move_mesh` plus one outer corrector - captures and replays
+bitwise: 659 nodes (598 kernel, 55 memset, 6 memcpy); 3 replays bitwise
+over 9 buffer(s) / 324 value(s). `ofgpu-validate` carries the same fourteen rows under the gate
+scope `SPEC-LIT 105.10 Gate 105-B the flow on a moving mesh`, entered and
+left around one function, so the reported-gate census stays 19 literals /
+17 distinct.
+
+### 105.11 What is not claimed, and the house items
+
+Not claimed here: tangential moving walls; rotations in the smoother; a
+device smoother; the case block and any driver that runs a moving mesh (the
+next unit's); the energy and turbulence equations' time derivatives on a
+moving mesh in the conservative form - their bounded form keeps the static
+term, which §105.7's argument covers for a constant density only; the wall
+distance a turbulence model reads is computed once and is stale after a
+move; pressure backends that assume a fixed Cartesian mesh; faces of five
+or more vertices (§105.3).
+
+House items. Four new files - `src/mesh/motion.rs`,
+`src/mesh/motion/tests.rs`, `src/ale_flow.rs`, `src/ale_flow/tests.rs` - and
+the source-file count is 217. Two kernels are appended to `cuda/ale.cu`,
+which stays in `FMAD_OFF_UNITS`: the wall value is held bitwise against its
+host formula by the test named
+`the_relative_flux_and_the_wall_value_are_what_they_say_bitwise`. No new
+capture row: the two new kernels are launched from `src/mesh/ale.rs`, whose
+`Gate` row stands, and `src/mesh/motion.rs` and `src/ale_flow.rs` launch
+nothing and drive no iteration - the moving step that captures is the
+proof. No existing kernel changed and no solver numerics moved to make any
+gate here pass.
 
 ---
 
