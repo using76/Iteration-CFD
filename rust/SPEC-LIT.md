@@ -808,7 +808,7 @@ No test in this project may compare against another CFD code.
 | Lid-driven cavity | **Ghia, Ghia & Shin, *JCP* 48 (1982) 387–411** | tabulated centreline profiles |
 | Channel flow | **Moser, Kim & Mansour, *Phys. Fluids* 11 (1999) 943** | DNS profiles at Re_tau 180/395/590 |
 | Backward-facing step | **Driver & Seegmiller, *AIAA J.* 23 (1985) 163** | reattachment length |
-| Buoyant plume | **McCaffrey, NBS TN 910 (1979)** centreline correlations | plume temperature and velocity decay |
+| Buoyant plume | **McCaffrey, NBSIR 79-1910 (1979)** centreline correlations | plume temperature and velocity decay |
 
 ---
 
@@ -2104,7 +2104,7 @@ Extends §10. Same rule: **no test compares against another CFD code.**
 | species | sum of mass fractions | exactly 1 |
 | Turbulent channel | **Moser, Kim & Mansour, *Phys. Fluids* 11 (1999) 943** | DNS profiles, Re_tau 180/395/590 |
 | Backward-facing step | **Driver & Seegmiller, *AIAA J.* 23 (1985) 163** | reattachment length |
-| Buoyant plume | **McCaffrey, NBS TN 910 (1979)** | centreline decay |
+| Buoyant plume | **McCaffrey, NBSIR 79-1910 (1979)** | centreline decay |
 | Dam break | **Martin & Moyce, *Phil. Trans. R. Soc. A* 244 (1952) 312** | surge front position vs time |
 
 ---
@@ -5613,7 +5613,9 @@ IS run is the realizability sweep and the homogeneous-strain experiments above,
 which are the model's own defining property and are sharper than a
 reattachment length: a wrong `Ustar`, a wrong `A_s`, a wrong `A_0` or a
 confused `S`/`Stil` each change them by a measurable amount, while a
-reattachment length can be right for the wrong reason.
+reattachment length can be right for the wrong reason. §110.3 now runs the geometry this
+paragraph says blockgen cannot build, by carving the step out of one block (castellation,
+§23.4), and holds the reattachment length against the same datum.
 
 ---
 
@@ -29259,5 +29261,355 @@ three N/A house items of a device unit are N/A here too - no `.cu` (so no
 `KERNEL_UNITS` row), no capture-registry `Stance` row (no device module),
 no `build.rs` change - and no solver numerics moved to make any gate pass:
 the gate is bitwise precisely because nothing moved.
+
+---
+
+## 110. The published fluid gates — channel DNS, backward-facing step, buoyant plume
+
+Section 10's validation table has promised three rows against published fluid data that no
+section of this file defined: the Moser–Kim–Mansour (1999) channel-DNS mean profiles, the
+Driver & Seegmiller (1985) reattachment length, and McCaffrey's (1979) buoyant-plume
+centreline correlations. This section defines them. Each is one gate of `ofgpu-validate` —
+**Gate 110-A**, **Gate 110-B**, **Gate 110-C** — built on the shape Gate 94-D gave the
+lid-driven cavity: the comparison runs against an answer-key file under `reference/`, the
+band is stated before any run is made against it, and every number a verdict is quoted
+with is a printed output of a named driver run. What none of the three gets that the
+cavity has is a key in the tree; §110.1 says why that is the design and not an omission.
+
+`No GPL-licensed source was consulted.`
+
+### 110.1 What the three gates are, and why each one replays a driver run
+
+**The three rows, and the fifth kind of correct.** §10's table names the channel, the step
+and the plume beside the cavity; all four are the fifth entry of §10's own list of what
+"correct" is allowed to mean here — published experimental or benchmark data, never the
+output of another CFD program. The cavity has run live on three meshes per Reynolds
+number since Gate 94-D. These three are recorded-run gates, for the reason below, and
+this subsection is the contract they share: key first, then the key's own consistency
+rows, then the band, then the verdict.
+
+**The key store.** Every number a gate of this section compares against lives in an
+answer-key file under `reference/`, named by a row of `reference/PROVENANCE.md` that
+carries its source, DOI or URL, licence and SHA-256. The loader
+(`validate_key::load_text`) reads a key back through that manifest and refuses by name a
+key whose file is absent or whose digest is not the manifest's; the gate then prints the
+digest line — `answer key <id>: reference/<file> sha256 <hex>` — beside its verdict, so
+the number the verdict stands on is the number the manifest vouches for. A key that is
+not in the tree is not a skip and never a quiet pass: the gate reports not closed, by
+name (§10's fifth kind, held honest through the registry of §69). **None of the three
+keys of this section is distributed with this tree** — the DNS files because their host
+states no redistribution terms, the other two by the same decision of 2026-09-20: they are transcriptions a user
+types from the fenced blocks of §110.3 and §110.4 — so on a clean clone every gate of
+this section reports not closed, with five `answer key <id> missing` lines between them.
+That is the designed behaviour, not a failure; §110.5's *Placing a key* says what a user
+who wants a gate closed writes where.
+
+**Why each gate replays a driver run.** A live multi-minute GPU run belongs in a driver
+invocation a human chooses to make, not in `cargo test` — the rule `ofgpu-validate`
+states beside its Launder-Sharma channel section, and these three obey it twice over, because each needs a
+converged steady state at three mesh levels before it has a number to compare. Each gate
+therefore splits in two: the RECIPE (§110.5), which a human runs in `ofgpu-lowmach`, and
+the VERDICT, which `ofgpu-validate` computes from the recorded outputs of that run
+against the key. A record whose slot is empty is reported as no driver run recorded yet;
+the verdict half never invents a number, and a run that diverged is recorded as exactly
+that — a finding, never a reason to change the case's numerics.
+
+**The verdict discipline.** Transcribed from §32.4 and §94.3, and binding on all three
+gates: every band statement names what it was evaluated at — the mesh level and the
+input the number was taken at; a weaker verdict is never reported as, summarised as, or
+promoted to a stronger one; a result that lands within the uncertainty of a band edge is
+reported UNDECIDED, not as inside it. Three meshes per gate, through §94's
+`grid_study`, with the datum's stated uncertainty `u_D` (`0` where the reference states
+none, and said so where it is `0`) and `u_input` measured rather than assumed (94.10).
+The kind of datum decides what an outside-band result IS: against a published
+measurement it is a miss; against a correlation it leaves the gate open, reported and
+never asserted as a pass it is not.
+
+### 110.2 Gate 110-A — the plane channel against Moser, Kim & Mansour (1999)
+
+**The datum.** Moser, Kim & Mansour, *Phys. Fluids* 11 (1999) 943, DOI
+`10.1063/1.869966` — DNS mean-velocity profiles of the plane channel at `Re_tau =
+178.12 / 392.24 / 587.19`, the headers' own values of the three `.means` files the
+hosting page `http://turbulence.oden.utexas.edu/MKM_1999.html` serves at `http://turbulence.oden.utexas.edu/data/MKM/chan<N>/profiles/chan<N>.means` (columns `y  y+  Umean
+dUmean/dy  Wmean  dWmean/dy  Pmean`; `Umean` normalised by `U_tau`, `y` by `h`; header
+`ny = 129 / 257 / 257`). The page states no licence or terms of use, so the files are
+read as data and are NOT distributed with this tree. Key ids `mkm99-chan180`,
+`mkm99-chan395`, `mkm99-chan590`, expected at `reference/mkm99/chan{180,395,590}.means`.
+
+**The case, and the force balance that fixes `u_tau`.** The periodic channel drives
+itself: in the steady state the body force balances the wall shear exactly, so the
+friction velocity is fixed by the case's own inputs and needs no wall measurement to
+define —
+
+```text
+u_tau = sqrt(g_x h),   Re_tau = u_tau h / nu,   so   g_x = (Re_tau nu / h)^2 / h
+h = 0.02 m (half the 0.04 m channel height, mesh.bounds), nu = 1.5e-5 m2/s (physics.fluid.nu)
+Re_tau = 178.12 -> g_x = 0.89231 m/s2 ;  392.24 -> 4.32709 ;  587.19 -> 9.69728
+```
+
+— the same balance `cases/channelPeriodicFluxLowRe.jsonc` closes to −0.000 % as run
+(§32.5.2). The three case files are that case's body with the body force of the balance
+above, 64 cells wall-normal, the thermostat deleted and the walls adiabatic: the DNS
+profiles are an isothermal-flow statistic, so `T` rides at `zeroGradient` and nothing
+heats the channel.
+
+**The functionals.**
+
+```text
+y+ = y u_tau / nu,   u+ = u_x / u_tau,   U_b+ = (1/h) integral_0^h u+ dy
+DNS side:  U_b+ by trapezoid over the key's own (y, Umean) rows, y in [0, 1] (already
+           scaled by h)
+our side:  the cell-volume-weighted mean of u+ over the wall-to-centre column the
+           sampler prints
+```
+
+**The bands, stated before any run.**
+
+```text
+B1  |U_b+_sim - U_b+_DNS| / U_b+_DNS <= 0.05    on the finest mesh, u_num from the
+    three-mesh study; undecided within u_val/D of the 5 % edge (S32.4)
+B2  max over DNS rows with 30 <= y+ <= Re_tau of |u+_sim(y+) - u+_DNS(y+)| <= 1.0 wall
+    unit, u+_sim linearly interpolated in y+ from the recorded finest-mesh column
+B3  our own sublayer: |u+ - y+|/y+ <= 0.02 on every recorded cell with y+ <= 4 - a
+    self-check against §15.2's resolved-sublayer law, not a verdict
+u_D = 0 - the DNS files state no uncertainty, and this section says so (§94.3)
+u_input = the relative disagreement between the wall shear the driver MEASURES and
+    g_x h, quoted beside the verdict, never folded into the band
+datum kind: published data - an outside-band result is a miss against a measurement
+```
+
+**The mesh study.** The level is the mean wall-normal spacing, `h_level = 2h / N_y`,
+`N_y = 32, 64, 128` (uniform ratio 2 with the case's two-sided wall grading kept);
+`value = U_b+`; finest first, as §94.1 requires.
+
+**Expected, stated in advance (UNVERIFIED).** §33.3's Launder-Sharma channel run
+reproduced `u+ = y+` below y+ 5 (worst deviation 0.8 % at y+ 4.4) and the log law
+within ~1 % at y+ 30–35 (`docs/07-lowmach-solver.md` §1.1) — on a far coarser mesh,
+without fully settling. B1 is expected inside at all three `Re_tau`; B2 is expected
+near its limit at `Re_tau = 178.12`, where the profile is shortest and the log region
+the interpolation must cross is least forgiving.
+
+### 110.3 Gate 110-B — the backward-facing step against Driver & Seegmiller (1985)
+
+**The datum.** Driver, D. M. and Seegmiller, H. L., "Features of a Reattaching Turbulent
+Shear Layer in Divergent Channel Flow," *AIAA Journal* 23 (2) (1985) 163–171, DOI
+`10.2514/3.8890`. The number the gate holds against is quoted from the NASA Turbulence
+Modeling Resource's 2D backward-facing-step validation page (a US Government work, read
+2026-09-18): **`x_r/H = 6.26 ± 0.10`**, `Re_H` approximately 36 000 on the step height,
+`M = 0.128`, inflow boundary layer approximately 1.5`H`, `Re_theta = 5 000`; and on the
+same resource's SST results page, "Reattachment is predicted by the SSTm model near
+`x/H = 6.50`".
+
+**The geometry, UNVERIFIED against the paper.** The upstream channel height is taken as
+**8H** and the downstream one as **9H** (expansion ratio 1.125), the step height as
+**H = 1.27 cm** and the reference velocity as **U_ref = 44.2 m/s** — assumed, not
+confirmed; the TMR page confirms only the quantities quoted above, and this section
+says so rather than lending them the page's authority. It costs the gate nothing in
+kind: the run is incompressible at `U_ref = 10`, `H = 1`, `nu = 2.7778e-4` —
+`Re_H = U_ref H / nu = 36 000` — so the datum's `x_r/H` is compared against the same
+non-dimensional number the experiment reports, and the physical centimetres never
+enter.
+
+**The castellated step, and why it has no cut cells.** §40.7 records why this gate was
+NOT run here: `blockgen` builds one rectangular block, and its `CaseKind::Step` is
+documented in its own source as the outlet box, not a step. §110.3 runs the geometry by
+carving: `cases/backstep.stl` is one closed box lying over the upstream half of the
+domain — floor at `y = 1H`, step face at `x = 0` — and `ofgpu-generate-mesh -- step ...
+-stl step=backstep.stl` removes every cell whose CENTRE the box contains and skins the
+exposed faces as wall patches: §23.4's castellation, the same path the race-car sample
+takes. No cut cells are used and none are needed. The box edges are cell-aligned by
+construction at every level of the sequence (the step lands on whole cell columns), so
+the stair-step IS the geometry and there is no small-cell merge to argue with; the
+reattachment search runs on the lower wall's own cells, from the corner eddy's
+circulation to the far field.
+
+**The measurement, and the inputs stated beside it.**
+
+```text
+datum   x_r/H = 6.26 +- 0.10     ->  D = 6.26,  u_D = 0.10
+x_r     = the largest x on the patch lowerWall at which the owner-cell u_x changes
+          sign from negative (upstream) to positive (downstream), linearly
+          interpolated between the two face centres; the corner eddy's earlier
+          sign change near x < 1H is not it, and the LARGEST is what the gate takes
+verdict band = the datum's own +-0.10: |x_r/H - 6.26| <= 0.10 inside; within u_num
+          of that edge undecided (S32.4); else a miss against the measurement
+u_input = the inflow boundary layer: delta_99/H at x = -4H, measured from the run's
+          own column and printed beside the datum's "approximately 1.5H". A mismatch
+          is an INPUT DIFFERENCE - reported, never folded into the band (S32.4)
+Re_H = U_ref H / nu = 36 000 ; M = 0.128 in the experiment, incompressible here
+study level = the streamwise spacing dx: 0.2H, 0.1H, 0.05H, with dy = dx/2,
+          value = x_r/H
+```
+
+**Prediction, stated in advance.** The TMR's SSTm reattaches near `x/H = 6.50`; this
+crate's `kOmegaSST` is expected near there too, which is OUTSIDE the datum's ±0.10 on
+the high side — the gate is stated expecting its first recorded verdict to be a miss,
+and the record says so either way.
+
+**The key, verbatim.** A user who wants this gate closed writes these bytes to
+`reference/driver_seegmiller_1985/reattachment.txt`:
+
+```text
+# Driver, D. M. and Seegmiller, H. L., "Features of a Reattaching Turbulent Shear Layer in Divergent
+# Channel Flow", AIAA Journal 23 (2) (1985) 163-171. DOI 10.2514/3.8890.
+# Datum quoted from the NASA Turbulence Modeling Resource, 2D Backward Facing Step validation page
+# (https://tmbwg.github.io/turbmodels/backstep_val.html, read 2026-09-18), a US Government work:
+# "x/Hreattach = 6.26 +- 0.10"; Re_H approximately 36,000; M = 0.128; inflow boundary layer ~1.5H.
+# key value uncertainty
+x_r_over_H 6.26 0.10
+```
+
+### 110.4 Gate 110-C — the buoyant plume against McCaffrey (1979)
+
+**The datum.** B. J. McCaffrey, *Purely Buoyant Diffusion Flames: Some Experimental
+Results*, **NBSIR 79-1910**, National Bureau of Standards, 1979 — US Government work,
+public domain. (§10's and §22's plume rows carried a wrong report identifier — a
+technical-note number, not this report — until this section landed; both now read
+NBSIR 79-1910.) Table 1's weighted
+averages, in the three regimes of `z/Q^(2/5)`, are the correlation the gate holds
+against. **The constants below are a transcription of the 2026-09-18 reading of the
+report (archive.org item `purelybuoyantdif7919mcca`) and have NOT been re-confirmed
+against the report's Table 1 by the section that now gates on them.** What stands
+between that transcription and a silently wrong gate is the key's own four continuity
+checks: the report's regime boundaries ARE the intersections of its fits, so a
+mistyped constant fails them at the 1–3 % level.
+
+**The case, and the declared heat release rate.** The inlet is a HOT-GAS INLET, NOT A
+FLAME — the case header says so and so does the recipe. All of `Q` enters as enthalpy,
+nothing radiates, and `Q` itself is declared, not measured:
+
+```text
+Q = rho_in U_in A_in cp (T_in - T_inf),   rho_in = p0 / (R_s T_in)
+p0 = 101325 Pa, R_s = 287.05 J/(kg K), cp = 1006 J/(kg K), T_in = 1173.15 K,
+T_inf = 293.15 K, A_in = 0.30 m x 0.30 m = 0.09 m2 (the report's burner:
+"a 0.30 m square porous refractory burner")
+-> rho_in = 0.30089 kg/m3 ; Q per (m/s) of U_in = 23 973 W ; Q = 57.5 kW <=> U_in = 2.3985 m/s
+```
+
+57.5 kW is the largest of the five fires the report ran — 14.4, 21.7, 33.0, 44.9,
+57.5 kW. `cases/plumeMcCaffrey.jsonc` is `cases/plume.jsonc`'s body re-bounded to a
+3.3 m x 3.3 m x 4 m box, the burner a 0.3 m square window of whole cells in the floor,
+and the top boundary the open one. The bounds sit at ±1.65 m, not ±1.5 m, for a reason
+the header repeats: with ±1.5 m and 30 cells the coarse mesh's cell centres would fall
+exactly on the burner edge ±0.15 m, making the inlet area — and therefore `Q` — depend
+on rounding; at ±1.65 m the burner is 3 x 3, 6 x 6 and 12 x 12 whole cells at the three
+levels, 0.09 m2 each, and no centre lies within 0.0125 m of the edge.
+
+**The correlation.**
+
+```text
+flame region        (z/Q^(2/5) <= 0.0796 m kW^(-2/5)):   V / z^(1/2) = 6.84 m^(1/2) s^-1 ;   dT = 797 C
+intermittent region (0.0796 < z/Q^(2/5) <= 0.195):        V / Q^(1/5) = 1.93 m s^-1 kW^(-1/5) ;
+                                                          dT z / Q^(2/5) = 62.9 C m kW^(-2/5)
+plume region        (z/Q^(2/5) > 0.195):                  V z^(1/3) / Q^(1/3) = 1.12 m^(4/3) s^-1 kW^(-1/3) ;
+                                                          dT z^(5/3) / Q^(2/3) = 21.6 C m^(5/3) kW^(-2/3)
+and throughout:     V / sqrt(2 g z dT / T0) ~ 0.9   (0.935 in the table)
+so in the plume region:   dT_c(z) = 21.6 Q^(2/3) z^(-5/3),   w_c(z) = 1.12 Q^(1/3) z^(-1/3),
+                          Q in kW, z in m;   at Q = 57.5 kW, Q^(2/5) = 5.0567 and the
+                          plume region begins at z = 0.986 m
+```
+
+**What is predicted, and what is expected to miss.**
+
+```text
+stations  z = 1.25, 1.50, 1.75, 2.00, 2.25, 2.50 m
+          (z/Q^(2/5) = 0.247 ... 0.494, all in the plume region)
+P1  dT_c,sim(z) / dT_c,McC(z; Q) - 1  within +-0.15 at every station
+P2  w_c,sim(z)  / w_c,McC(z; Q)  - 1  within +-0.15 at every station
+P3  the least-squares slope of ln dT_c,sim against ln z over the six stations
+    within -5/3 +- 0.25
+P4  (a number, not a verdict) the implied convective fraction
+    chi_c = mean over stations of (dT_c,McC(z; Q) / dT_c,sim(z))^(3/2)
+u_D = 0 (Table 1 states no uncertainty on the averages; said so); the datum is a
+    CORRELATION - an outside-band P1/P2 leaves the gate open, reported and never
+    asserted as a pass it is not
+study functional: dT_c at z = 2.00 m; level = the cell size, 0.10 / 0.05 / 0.025 m
+```
+
+**The expectation, stated before the run, with its source.** McCaffrey's flames are
+real fires, and radiative loss is 20–40 % of `Q` — the paragraph that planned this
+gate (`docs/09-thermal-structural-plan.md`, its plume gate, which that document numbers
+Gate 101-C in its own pre-renumbering scheme) says a non-radiating solver is expected to sit high,
+and the arithmetic is: `dT` high by `(1/(1-chi_r))^(2/3)` = +16 % to +41 % over the
+radiative range, `w` high by `(1/(1-chi_r))^(1/3)` = +8 % to +19 %. P1 and P2 are
+therefore expected OUTSIDE their bands, and that miss is the measurement the gate
+exists to take — it is what would make the case for participating media if that is
+ever built. P3, the decay EXPONENT, is the part a non-radiating solver can close:
+radiation is a sink, not a reshaper of `z`. P4 is printed beside the sentence above —
+the convective fraction the run implies — and asserted as nothing.
+
+**Where the sampled column actually is.** On the two finer meshes no cell centre sits
+on `x = y = 0`; the column the sampler takes is the NEAREST one, `dx/2` off the axis
+in both coordinates, and every number P1–P4 is quoted with that offset standing.
+
+**The key, verbatim.** A user who wants this gate closed writes these bytes to
+`reference/mccaffrey_1979/centreline_table1.txt`:
+
+```text
+# McCaffrey, B. J., "Purely Buoyant Diffusion Flames: Some Experimental Results", NBSIR 79-1910,
+# National Bureau of Standards, 1979. US Government work, public domain. Table 1, weighted averages.
+# z = vertical height above burner [m]; Q = nominal heat release rate [kW]; V centreline velocity [m/s];
+# dT centreline temperature rise above ambient [C]. Regime boundaries in z/Q^(2/5) [m kW^(-2/5)].
+# key value
+boundary_flame_intermittent 0.0796
+boundary_intermittent_plume 0.195
+flame_V_over_sqrt_z 6.84
+flame_dT 797
+intermittent_V_over_Q15 1.93
+intermittent_dT_z_over_Q25 62.9
+plume_V_z13_over_Q13 1.12
+plume_dT_z53_over_Q23 21.6
+buoyancy_constant 0.935
+```
+
+### 110.5 The recipe, and the record
+
+**The channel.** `cases/channelDns{180,395,590}.jsonc` at `ofgpu-lowmach`, 40 000
+iterations, `-check 5000`. The mesh sequence `N_y = 32 / 64 / 128` runs on scratch
+copies of each file with ONLY `cells` edited — the shipped file is the 64 level — and
+`ofgpu-sample column cases/channelDns<N>.jsonc 40000 y 0.045 0.02 -mean` takes the column (a steady run writes its final state to the directory named by its iteration count, §44.9).
+The sampler's x is 0.045 m, not the 0.04 m mid-plane: 0.04 is a tie between two
+cell-centre columns, and although the sampler's nearest rule breaks ties toward the
+lower index deterministically, the recipe never asks it to.
+
+**The step.** From `cases/`: `backstep.cmd backstep_c 700 90`, `backstep_m 1400 180`,
+`backstep_f 2800 360` — dx = 0.2H / 0.1H / 0.05H, dy = dx/2, the study's three levels.
+The recipe generates the castellated mesh from `backstep.stl`, swaps `kEpsilon` for
+`kOmegaSST` and the `Re_H = 36 000` viscosity (the recipe, not the code, is where that
+is decided), runs `ofgpu-lowmach` 6 000 iterations, and prints the two measurements the
+record needs: the reattachment search (`ofgpu-sample wall <case> 6000 lowerWall x`) and
+the inflow column (`ofgpu-sample column <case> 6000 y -4 0.5 -at 0.5,1,1.5,2,2.5,3,4,5`),
+whose delta_99 is the input difference §110.3 reports beside the band.
+
+**The plume.** `cases/plumeMcCaffrey.jsonc` at `ofgpu-lowmach`, 4 000 iterations,
+`-check 500`. The sequence `cells [33,33,40] / [66,66,80] / [132,132,160]` — 0.10 /
+0.05 / 0.025 m — runs on scratch copies with only `cells` edited (the shipped file is
+the 66 level), and `ofgpu-sample column cases/plumeMcCaffrey.jsonc 4000 z 0 0 -at
+1.25,1.5,1.75,2.0,2.25,2.5` takes the six stations.
+
+**Placing a key.** None of the three keys is distributed — the user decided on
+2026-09-20 that the DNS files are not tracked (their host states no terms), and the
+other two are transcriptions this document prints instead. To close a gate locally, a
+user writes the key file under `reference/` at the path the gate names — the MKM files
+from the URLs of §110.2, the other two exactly as the fenced blocks of §110.3 and
+§110.4 print them — adds its row to `reference/PROVENANCE.md` in that table's shape
+with the `sha256sum` digest, and adds an `// answer-key: <id>` marker at the
+`key::load_text` call in `validate.rs`. The manifest test holds rows and markers
+against each other in both directions and asserts their number (nine today), so a key
+exists to the code exactly when the manifest and a call site both name it — which is
+what keeps a key nobody can vouch for from reaching a verdict. The gate then loads the
+key, prints its digest line beside the verdict, and runs the key's own consistency
+rows; the recorded runs are still this subsection's to make.
+
+**Results.** Every cell below is filled by the run that produced it; until then none
+has been made, and no verdict in this table is a claim.
+
+| gate | datum | finest-mesh value | study | verdict |
+|---|---|---|---|---|
+| Gate 110-A Re_tau 178.12 | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-A Re_tau 392.24 | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-A Re_tau 587.19 | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-B reattachment | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-C plume centreline | not yet run | not yet run | not yet run | not yet run |
 
 ---

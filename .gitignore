@@ -37,6 +37,10 @@ cases/*
 # write. Uniform fields: the boundary conditions are the whole content, so this
 # is 2 kB, not the 40 MB a solved p and T are.
 !cases/racecar.fields/
+# SPEC-LIT 110.3 Gate 110-B: the closed box the step is carved out of, and the
+# recipe that runs the castellated mesh end to end. 86 lines of ASCII.
+!cases/backstep.stl
+!cases/backstep.cmd
 # Retired case definitions - kept as dated records of measurements that were
 # taken before a later SPEC-LIT rule made the cases themselves unrunnable.
 # They are records, not cases; cases/retired/README.md says what replaced each.

@@ -355,19 +355,16 @@ pub fn load(id: &str) -> Result<KeyFile> {
     load_from(&Manifest::load()?, &reference_dir(), id)
 }
 
-/// The key `id` through `manifest`, its file under `dir`. Refuses by name
-/// (`Error::Parse`, `msg` naming `id`): no row names `id`; the row is a
-/// literal ("answer key `<id>` is a literal in <file>, not a file"); the
-/// digest of the bytes is not the row's ("sha256 <got> does not match the
-/// manifest's <want> for answer key `<id>` (line endings? the file is tracked
-/// with LF)"); a data row whose cell count differs from the header's (line
-/// number); a cell that does not parse as `f64` (line number, cell text).
-/// An unreadable file is `Error::Io { path, source }` with `path` the joined
-/// path, separators as `/`. CSV grammar: a line whose trimmed form is empty
-/// or starts with `#` is skipped; the first remaining line is the header,
-/// split on `,` and trimmed; every later line is data, split on `,`, each
-/// cell `str::parse::<f64>` after trimming.
-pub fn load_from(manifest: &Manifest, dir: &Path, id: &str) -> Result<KeyFile> {
+/// The verified half of a key read, shared by [`load_from`] and
+/// [`load_text_from`]: the manifest's row, the joined path, the SHA-256 of
+/// the bytes as read, and the bytes as UTF-8 text - with exactly the
+/// refusals [`load_from`]'s doc comment names. One reader, one digest: the
+/// two callers cannot disagree about what a key is.
+fn read_verified<'a>(
+    manifest: &'a Manifest,
+    dir: &Path,
+    id: &str,
+) -> Result<(&'a Row, PathBuf, String, String)> {
     let named = display_path(&manifest.path);
     let row = manifest.row(id).ok_or_else(|| Error::Parse {
         path: named.clone(),
@@ -402,6 +399,43 @@ pub fn load_from(manifest: &Manifest, dir: &Path, id: &str) -> Result<KeyFile> {
         path: display_path(&path),
         msg: format!("answer key \"{id}\": the file is not UTF-8 text"),
     })?;
+    Ok((row, path, digest, text.to_string()))
+}
+
+/// `load_text_from(&Manifest::load()?, &reference_dir(), id)`.
+pub fn load_text(id: &str) -> Result<(String, String)> {
+    load_text_from(&Manifest::load()?, &reference_dir(), id)
+}
+
+/// The key `id`'s digest line and VERIFIED text, for keys that are not the
+/// CSV [`load_from`] parses - an MKM `.means` whitespace table with `%`
+/// header lines, and the two transcriptions SPEC-LIT §110.3 and §110.4
+/// print. The refusals are exactly [`load_from`]'s (no row names `id`; a
+/// literal row; an unreadable file; a digest that is not the manifest's;
+/// text that is not UTF-8) - one reader, one digest, so a key cannot verify
+/// differently for the two callers. The returned line is
+/// [`KeyFile::digest_line`]'s exact shape; making sense of the text is the
+/// gate's own parser's job.
+pub fn load_text_from(manifest: &Manifest, dir: &Path, id: &str) -> Result<(String, String)> {
+    let (row, _path, digest, text) = read_verified(manifest, dir, id)?;
+    let line = format!("answer key {}: reference/{} sha256 {}", id, row.file, digest);
+    Ok((line, text))
+}
+
+/// The key `id` through `manifest`, its file under `dir`. Refuses by name
+/// (`Error::Parse`, `msg` naming `id`): no row names `id`; the row is a
+/// literal ("answer key `<id>` is a literal in <file>, not a file"); the
+/// digest of the bytes is not the row's ("sha256 <got> does not match the
+/// manifest's <want> for answer key `<id>` (line endings? the file is tracked
+/// with LF)"); a data row whose cell count differs from the header's (line
+/// number); a cell that does not parse as `f64` (line number, cell text).
+/// An unreadable file is `Error::Io { path, source }` with `path` the joined
+/// path, separators as `/`. CSV grammar: a line whose trimmed form is empty
+/// or starts with `#` is skipped; the first remaining line is the header,
+/// split on `,` and trimmed; every later line is data, split on `,`, each
+/// cell `str::parse::<f64>` after trimming.
+pub fn load_from(manifest: &Manifest, dir: &Path, id: &str) -> Result<KeyFile> {
+    let (row, path, digest, text) = read_verified(manifest, dir, id)?;
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<f64>> = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -630,6 +664,32 @@ mod tests {
     fn a_missing_key_is_refused_naming_the_id() {
         let text = text_of(load("no-such-key"));
         assert!(text.contains("no-such-key"), "{text}");
+    }
+
+    #[test]
+    fn load_text_returns_the_verified_text_of_a_whitespace_key() {
+        let dir = std::env::temp_dir().join("ofgpuValidate_key_text");
+        let body = "% Re_tau = 1\n 0 0\n";
+        let m = one_row_manifest(
+            &dir,
+            &format!(
+                "| k | file | k.means | s | u | l | {} |",
+                sha256_hex(body.as_bytes())
+            ),
+        );
+        std::fs::write(dir.join("k.means"), body).expect("write k.means");
+        let (line, text) = load_text_from(&m, &dir, "k").expect("the whitespace key loads");
+        assert_eq!(text, body);
+        assert!(
+            line.starts_with("answer key k: reference/k.means sha256 "),
+            "{line}"
+        );
+        let other = "% Re_tau = 2\n 0 0\n";
+        std::fs::write(dir.join("k.means"), other).expect("rewrite k.means");
+        let got = text_of(load_text_from(&m, &dir, "k"));
+        assert!(got.contains(&sha256_hex(other.as_bytes())), "{got}");
+        assert!(got.contains(&sha256_hex(body.as_bytes())), "{got}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

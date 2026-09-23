@@ -1,0 +1,128 @@
+// SPEC-LIT 110.2 Gate 110-A - the plane channel against Moser, Kim & Mansour
+// (1999), Re_tau = 392.24. This file is channelPeriodicFluxLowRe.jsonc's body
+// with ONLY the rows marked edited: the body force is the force balance that
+// fixes u_tau without a wall measurement,
+//
+//   g_x = (Re_tau nu / h)^2 / h,   h = 0.02 m,  nu = 1.5e-5 m2/s,
+//   Re_tau = 392.24  ->  g_x = 4.32709 m/s2,  u_tau = sqrt(g_x h) = 0.29418 m/s,
+//
+// the thermostat is deleted and the walls ride adiabatic (the DNS profile is
+// an isothermal-flow statistic), and the two walls are named wallLower /
+// wallUpper. In the steady state the force balance closes the wall shear, so
+// the gate's u_input is how far the driver's OWN measured shear misses
+// g_x h - reported beside the verdict, never folded into the band (110.2).
+//
+// The mesh study's level is the mean wall-normal spacing h_level = 2h/N_y,
+// N_y = 32 / 64 / 128, finest first (94.1). THIS FILE IS THE 64 LEVEL: the 32
+// and 128 levels run on scratch copies of this file with ONLY "cells" edited.
+//
+// Measurement (110.2's functional): the cell-volume-weighted mean of u+ over
+// the wall-to-centre column,
+//   ofgpu-sample column cases/channelDns395.jsonc 40000 y 0.045 0.02 -mean
+// (x = 0.045 m, not the 0.04 m mid-plane: 0.04 is a tie between two
+// cell-centre columns, and the recipe never asks the sampler to break one).
+//
+// The key `mkm99-chan395` is expected at reference/mkm99/chan395.means and is
+// NOT distributed with this tree - the hosting page states no terms, and
+// 110.1's manifest test holds the key, its PROVENANCE.md row and the
+// answer-key marker together or not at all. The gate itself is validate.rs's
+// check_channel_dns; the recipe is 110.5.
+//
+// UNVERIFIED: no run of this file has filled a cell of 110.5's table, and no
+// number anywhere below is a claim.
+// ============================================================================
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "channelDns395",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.08, 0.04, 0.04] },
+    "cells":  [8, 64, 1],
+
+    "boundaries": {
+      "xmin": "streamwiseMin", "xmax": "streamwiseMax",
+      "ymin": "wallLower", "ymax": "wallUpper",
+      "zmin": "back", "zmax": "front",
+    },
+
+    "cyclic": [ { "a": "streamwiseMin", "b": "streamwiseMax", "transform": "translate" } ],
+
+    "grading": { "y": { "expansion": 200.0, "twoSided": true } },
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "LaunderSharmaKE",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+    "wallTreatment": "lowRe",
+  },
+
+  "sources": [
+    // The force balance above: g_x alone, no thermostat - the walls are
+    // adiabatic and this is an isothermal-flow statistic (110.2).
+    { "type": "momentumSource", "field": "U", "bodyForce": [4.32709, 0, 0] },
+  ],
+
+  "patches": [
+    {
+      // SPEC-LIT S34.1: the 2-D constraint, not a boundary condition - no
+      // per-field BC may be named alongside it (checked and refused). This
+      // is what replaces the old duct's `wallSide.*` real walls: there is
+      // no side-wall boundary layer left to interact with the hot-wall one
+      // at a corner, which is the point of this rebuild.
+      "match": "(back|front)",
+      "kind": "empty",
+    },
+    {
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+  ],
+
+  "initial": {
+    "U": [3.0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.03,
+    "epsilon": 0.3,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.5, "p": 0.3, "T": 0.5, "k": 0.5, "epsilon": 0.5 },
+    "solvers": [
+      { "match": "p",       "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-9, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "k",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  "run": {
+    "endTime": 1.0,
+    "deltaT": 1.0,
+    "adjustTimeStep": false,
+  },
+}

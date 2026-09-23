@@ -139,3 +139,7 @@ path = "src/bin/automesher.rs"
 [[bin]]
 name = "ofgpu-regions"
 path = "src/bin/regions.rs"
+
+[[bin]]
+name = "ofgpu-sample"
+path = "src/bin/sample.rs"

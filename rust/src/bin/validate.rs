@@ -92,7 +92,8 @@ use ofgpu::models::{RealizableKeCoeffs, RngKeCoeffs};
 use ofgpu::turbulence::TurbulenceControls;
 use ofgpu::vof::{Vof, VofControls, VofProperties};
 use cudarc::driver::PushKernelArg;
-use ofgpu::{cfg_for, DevBuf, Gpu, GpuMesh, KernelSet, Label, Result, Scalar, Tensor, Vec3};
+use ofgpu::vv;
+use ofgpu::{cfg_for, DevBuf, Error, Gpu, GpuMesh, KernelSet, Label, Result, Scalar, Tensor, Vec3};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -3240,6 +3241,20 @@ fn run(c: &mut Checks) -> Result<()> {
     println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
     c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
     published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
+    c.leave_gate();
+    // SPEC-LIT 110 - the published fluid gates: on this tree every one of
+    // the three takes the missing-key path (SPEC-LIT §110.1), and says so by name.
+    println!("\n=== Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2) ===");
+    c.enter_gate("SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)");
+    check_channel_dns(c)?;
+    c.leave_gate();
+    println!("\n=== Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3) ===");
+    c.enter_gate("SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)");
+    check_backstep_reattachment(c)?;
+    c.leave_gate();
+    println!("\n=== Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4) ===");
+    c.enter_gate("SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)");
+    check_mccaffrey_plume(c)?;
     c.leave_gate();
     c.replaying(check_kays_crawford_experiment_replay);
 
@@ -11935,6 +11950,964 @@ const BOUNDED_AFTER_S261: [BoundedRun; 2] = [
 ];
 
 // ==========================================================================
+//  SPEC-LIT 110 - the published fluid gates: record types, keys, verdicts
+//
+//  Three gates compare this crate against numbers somebody else produced:
+//  110-A the Moser-Kim-Mansour channel DNS, 110-B the Driver & Seegmiller
+//  reattachment, 110-C the McCaffrey plume centreline. None of their keys
+//  is distributed with this tree (SPEC-LIT 110.1, the user's decision of
+//  2026-09-20), so on THIS tree every gate takes the missing-key path; the
+//  verdict logic for a recorded run is written here anyway and exercised
+//  by `mod published_fluid_gates` on synthetic records, so that a run
+//  changes DATA, not code.
+// ==========================================================================
+
+/// One Re_tau leg of Gate 110-A as RECORDED from `ofgpu-lowmach` +
+/// `ofgpu-sample` (SPEC-LIT 110.5). Arrays are coarse to fine; the study
+/// reverses them before `vv::grid_study`.
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct ChannelDnsRecord {
+    re_tau: Scalar,                     // the key file's header value the case was built for
+    body_force: Scalar,                 // g_x of the case, m/s2
+    n_y: [usize; 3],                    // coarse, medium, fine
+    u_b_plus: [Scalar; 3],              // U_b / u_tau per mesh, u_tau = sqrt(g_x h)
+    tau_w_measured_kin: Scalar,         // the driver's MEASURED wall shear on the finest mesh, m2/s2 (tau_w / rho)
+    iterations: usize,
+    residual_u: Scalar,                 // the finest run's final |U| residual
+    profile_fine: &'static [(Scalar, Scalar)], // (y from the wall [m], u_x [m/s]) wall-to-centre, finest mesh
+}
+
+/// One backward-facing-step run as RECORDED (SPEC-LIT 110.5's recipe).
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct StepRecord {
+    n_cells: [usize; 3], dx_over_h: [Scalar; 3], x_r_over_h: [Scalar; 3],
+    delta99_over_h_at_minus_4h: [Scalar; 3], u_ref: [Scalar; 3], iterations: usize, residual_u: Scalar,
+}
+
+/// One plume run as RECORDED (SPEC-LIT 110.5's recipe).
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct PlumeRecord {
+    q_kw: Scalar, n_cells: [usize; 3], cell_size: [Scalar; 3],
+    stations_m: [Scalar; 6], dt_c: [[Scalar; 6]; 3], w_c: [[Scalar; 6]; 3], iterations: usize, residual_u: Scalar,
+}
+
+const CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [None, None, None]; // 178.12, 392.24, 587.19
+const STEP_RECORD: Option<&StepRecord> = None;
+const PLUME_RECORD: Option<&PlumeRecord> = None;
+
+/// The five answer keys the three gates read, id and expected file under
+/// `reference/` (SPEC-LIT 110.1). None is distributed: no manifest row, no
+/// `// answer-key:` marker - a key exists to the code exactly when the user
+/// places BOTH the file and its manifest row.
+const MKM_KEYS: [(&str, &str); 3] = [
+    ("mkm99-chan180", "mkm99/chan180.means"),
+    ("mkm99-chan395", "mkm99/chan395.means"),
+    ("mkm99-chan590", "mkm99/chan590.means"),
+];
+const DS_KEY: (&str, &str) =
+    ("driver-seegmiller1985", "driver_seegmiller_1985/reattachment.txt");
+const MC_KEY: (&str, &str) =
+    ("mccaffrey1979-table1", "mccaffrey_1979/centreline_table1.txt");
+
+/// One MKM `.means` file, parsed: the header's `Re_tau` and `ny`, and one
+/// `(y, y+, u+)` row per data line - columns 1, 2 and 3 of the host's nine
+/// (`y y+ Umean ...`, SPEC-LIT 110.2).
+struct MkmProfile {
+    re_tau: Scalar,
+    ny: usize,
+    rows: Vec<(Scalar, Scalar, Scalar)>,
+}
+
+/// The McCaffrey Table 1 transcription (SPEC-LIT 110.4's fenced block): the
+/// two regime boundaries in `z/Q^(2/5)` and the seven constants.
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct McCaffreyKey {
+    b_flame_int: Scalar,     // 0.0796 m kW^(-2/5)
+    b_int_plume: Scalar,     // 0.195 m kW^(-2/5)
+    flame_v: Scalar,         // 6.84  - V / sqrt(z)
+    flame_dt: Scalar,        // 797 C
+    int_v: Scalar,           // 1.93  - V / Q^(1/5)
+    int_dt: Scalar,          // 62.9  - dT z / Q^(2/5)
+    plume_v: Scalar,         // 1.12  - V z^(1/3) / Q^(1/3)
+    plume_dt: Scalar,        // 21.6  - dT z^(5/3) / Q^(2/3)
+    buoyancy: Scalar,        // 0.935 - V / sqrt(2 g z dT / T0)
+}
+
+/// Where a comparison error sits in its band, given the band's half-width
+/// and the uncertainty quoted beside the comparison (SPEC-LIT 32.4): inside;
+/// undecided because the uncertainty reaches the edge; or outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Band {
+    Inside,
+    Undecided,
+    Outside,
+}
+
+fn band_of(e_abs: Scalar, band: Scalar, u_val: Scalar) -> Band {
+    if e_abs <= band {
+        Band::Inside
+    } else if e_abs <= band + u_val {
+        Band::Undecided
+    } else {
+        Band::Outside
+    }
+}
+
+/// The one line a missing key is named by (SPEC-LIT 110.1's wording, S1):
+/// the id, the file that would hold it, and the reader's own refusal.
+fn answer_key_missing_line(id: &str, file: &str, why: &ofgpu::Error) -> String {
+    format!(
+        "answer key {id} missing: reference/{file} is not in this tree and \
+         reference/PROVENANCE.md has no row for it (not distributed, SPEC-LIT 110.1) - {why}"
+    )
+}
+
+/// Parse one MKM `.means` file (SPEC-LIT 110.2): `%`-comment header lines
+/// carry `Re_tau = <r>` and `ny = <n>` in either order; every other
+/// non-empty line is whitespace-separated data whose first three fields are
+/// `y y+ Umean`. It cannot go through `key::load_from`, which parses CSV -
+/// this file is whitespace-separated (S2).
+fn parse_mkm_means(text: &str) -> Result<MkmProfile> {
+    let number_after = |label: &str, line: &str| -> Option<Scalar> {
+        let mut words = line.split_whitespace();
+        while let Some(w) = words.next() {
+            if w == label {
+                let mut rest = words.clone();
+                if rest.next() == Some("=") {
+                    if let Some(v) = rest.next() {
+                        // the host's headers comma-separate on one line
+                        return v.trim_end_matches([',', ';']).parse().ok();
+                    }
+                }
+                return None;
+            }
+        }
+        None
+    };
+    let (mut re_tau, mut ny) = (None, None);
+    let mut rows: Vec<(Scalar, Scalar, Scalar)> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('%') {
+            let body = t.trim_start_matches('%');
+            if re_tau.is_none() {
+                re_tau = number_after("Re_tau", body);
+            }
+            if ny.is_none() {
+                ny = number_after("ny", body).map(|v| v as usize);
+            }
+            continue;
+        }
+        if t.is_empty() {
+            continue;
+        }
+        let mut f = t.split_whitespace();
+        let (y, yp, up) = match (f.next(), f.next(), f.next()) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => {
+                return Err(Error::Config(format!(
+                    "mkm99 .means: data row '{t}' has fewer than three fields"
+                )))
+            }
+        };
+        let (y, yp, up) = (y.parse(), yp.parse(), up.parse());
+        let (y, yp, up) = match (y, yp, up) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            _ => {
+                return Err(Error::Config(format!(
+                    "mkm99 .means: data row '{t}' is not three numbers"
+                )))
+            }
+        };
+        rows.push((y, yp, up));
+    }
+    let re_tau = re_tau.ok_or_else(|| {
+        Error::Config("mkm99 .means: no '% Re_tau = <r>' header line".to_string())
+    })?;
+    let ny = ny.ok_or_else(|| {
+        Error::Config("mkm99 .means: no '% ny = <n>' header line".to_string())
+    })?;
+    if rows.is_empty() {
+        return Err(Error::Config("mkm99 .means: no data rows".to_string()));
+    }
+    Ok(MkmProfile { re_tau, ny, rows })
+}
+
+/// Parse the Driver & Seegmiller transcription (SPEC-LIT 110.3's fenced
+/// block): one data row `x_r_over_H <D> <u_D>` past `#` comment lines.
+fn parse_ds_key(text: &str) -> Result<(Scalar, Scalar)> {
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        if f[0] == "x_r_over_H" {
+            if f.len() < 3 {
+                return Err(Error::Config(
+                    "driver-seegmiller1985 key: `x_r_over_H` row needs a value and an \
+                     uncertainty"
+                        .to_string(),
+                ));
+            }
+            let d = f[1].parse().map_err(|_| {
+                Error::Config(format!("driver-seegmiller1985 key: '{}' is not a number", f[1]))
+            })?;
+            let u = f[2].parse().map_err(|_| {
+                Error::Config(format!("driver-seegmiller1985 key: '{}' is not a number", f[2]))
+            })?;
+            return Ok((d, u));
+        }
+    }
+    Err(Error::Config(
+        "driver-seegmiller1985 key: no `x_r_over_H <value> <uncertainty>` row".to_string(),
+    ))
+}
+
+/// Parse the McCaffrey Table 1 transcription (SPEC-LIT 110.4's fenced
+/// block): `key value` rows past `#` comments; all nine are required.
+fn parse_mc_key(text: &str) -> Result<McCaffreyKey> {
+    const NAMES: [&str; 9] = [
+        "boundary_flame_intermittent",
+        "boundary_intermittent_plume",
+        "flame_V_over_sqrt_z",
+        "flame_dT",
+        "intermittent_V_over_Q15",
+        "intermittent_dT_z_over_Q25",
+        "plume_V_z13_over_Q13",
+        "plume_dT_z53_over_Q23",
+        "buoyancy_constant",
+    ];
+    let mut vals = [None; 9];
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let mut f = t.split_whitespace();
+        let (Some(name), Some(value)) = (f.next(), f.next()) else {
+            return Err(Error::Config(format!(
+                "mccaffrey1979-table1 key: row '{t}' is not `key value`"
+            )));
+        };
+        let Some(slot) = NAMES.iter().position(|n| *n == name) else {
+            return Err(Error::Config(format!(
+                "mccaffrey1979-table1 key: unknown key name '{name}'"
+            )));
+        };
+        let v: Scalar = value.parse().map_err(|_| {
+            Error::Config(format!("mccaffrey1979-table1 key: '{value}' is not a number"))
+        })?;
+        vals[slot] = Some(v);
+    }
+    let missing: Vec<&str> = NAMES
+        .iter()
+        .zip(vals.iter())
+        .filter(|(_, v)| v.is_none())
+        .map(|(n, _)| *n)
+        .collect();
+    if !missing.is_empty() {
+        return Err(Error::Config(format!(
+            "mccaffrey1979-table1 key: missing rows {}",
+            missing.join(", ")
+        )));
+    }
+    let [b_flame_int, b_int_plume, flame_v, flame_dt, int_v, int_dt, plume_v, plume_dt, buoyancy] =
+        vals.map(|v| v.expect("checked above"));
+    Ok(McCaffreyKey {
+        b_flame_int,
+        b_int_plume,
+        flame_v,
+        flame_dt,
+        int_v,
+        int_dt,
+        plume_v,
+        plume_dt,
+        buoyancy,
+    })
+}
+
+/// Gate 110-A's functionals, PURE so `mod published_fluid_gates` can drive
+/// them on a synthetic profile (contract C-VERDICT, written in Run 1 so a
+/// recorded run changes data, not code). From the recorded wall-to-centre
+/// column `(y, u_x)` at the case's own `u_tau = sqrt(g_x h)`:
+///
+/// 1. `U_b+_sim` - the cell-height-weighted mean of `u+ = u_x/u_tau`, the
+///    cell heights taken between consecutive `y` midpoints;
+/// 2. `U_b+_DNS` - the trapezoid integral of the key's own `(y, y+, u+)`
+///    rows over their span (`y` is already scaled by `h`, so the integral
+///    over [0, 1] IS the bulk);
+/// 3. B2's sup-norm - max over key rows with `30 <= y+ <= Re_tau` of
+///    `|u+_sim(y+) - u+_DNS(y+)|`, `u+_sim` linearly interpolated in `y+`
+///    from the column;
+/// 4. B3's worst sublayer deviation - max over recorded cells with
+///    `y+ <= 4` of `|u+/y+ - 1|` (a self-check, not a verdict).
+fn channel_functionals(
+    profile_fine: &[(Scalar, Scalar)],
+    u_tau: Scalar,
+    nu: Scalar,
+    dns: &MkmProfile,
+) -> Result<(Scalar, Scalar, Scalar, Scalar)> {
+    if profile_fine.len() < 2 {
+        return Err(Error::Config(
+            "channel DNS record: the recorded column needs two or more cells".to_string(),
+        ));
+    }
+    let yp: Vec<Scalar> = profile_fine.iter().map(|(y, _)| y * u_tau / nu).collect();
+    let up: Vec<Scalar> = profile_fine.iter().map(|(_, ux)| ux / u_tau).collect();
+    // Cell heights between consecutive midpoints: cell 0 is y[0]..m0, cell i
+    // is m_{i-1}..m_i, and the last cell runs from m_n to y_n.
+    let mut w = vec![0.0; yp.len()];
+    let mid = |a: Scalar, b: Scalar| (a + b) / 2.0;
+    w[0] = mid(yp[0], yp[1]) - yp[0];
+    for i in 1..yp.len() - 1 {
+        w[i] = mid(yp[i], yp[i + 1]) - mid(yp[i - 1], yp[i]);
+    }
+    let n = yp.len() - 1;
+    w[n] = yp[n] - mid(yp[n - 1], yp[n]);
+    let num: Scalar = w.iter().zip(up.iter()).map(|(wi, ui)| wi * ui).sum();
+    let den: Scalar = w.iter().sum();
+    if !(den > 0.0) {
+        return Err(Error::Config(
+            "channel DNS record: the recorded column has zero height".to_string(),
+        ));
+    }
+    let ub_sim = num / den;
+    // The DNS side: trapezoid over the key's own rows, y already in half-heights.
+    let (y0, yl) = (dns.rows[0].0, dns.rows[dns.rows.len() - 1].0);
+    let span = yl - y0;
+    if !(span > 0.0) {
+        return Err(Error::Config(
+            "mkm99 .means: rows do not span a positive y range".to_string(),
+        ));
+    }
+    let mut acc = 0.0;
+    for t in dns.rows.windows(2) {
+        acc += (t[1].0 - t[0].0) * (t[0].2 + t[1].2) / 2.0;
+    }
+    let ub_dns = acc / span;
+    // B2's sup-norm over the key's log-region rows, `u+_sim` interpolated in
+    // `y+` (the recorded column is sorted wall to centre, so `yp` ascends).
+    let mut b2 = 0.0f64;
+    for &(_y, yp_row, up_row) in &dns.rows {
+        if yp_row < 30.0 || yp_row > dns.re_tau {
+            continue;
+        }
+        let j = yp.partition_point(|&p| p < yp_row);
+        let sim = if j < yp.len() && yp[j] == yp_row {
+            up[j]
+        } else if j == 0 || j >= yp.len() {
+            continue;
+        } else {
+            let t = (yp_row - yp[j - 1]) / (yp[j] - yp[j - 1]);
+            up[j - 1] + t * (up[j] - up[j - 1])
+        };
+        b2 = b2.max((sim - up_row).abs());
+    }
+    // B3's worst sublayer deviation, on the recorded cells themselves.
+    let b3 = yp
+        .iter()
+        .zip(up.iter())
+        .filter(|(&p, _)| p > 0.0 && p <= 4.0)
+        .map(|(&p, &u)| (u / p - 1.0).abs())
+        .fold(0.0f64, f64::max);
+    Ok((ub_sim, ub_dns, b2, b3))
+}
+
+/// Gate 110-C's P3: the least-squares slope of `ln dT_c` against `ln z` - a
+/// pure power law `dT = a z^b` returns its exponent `b` to machine precision.
+fn plume_exponent(z: &[Scalar; 6], dt_c: &[Scalar; 6]) -> Scalar {
+    let xs: Vec<f64> = z.iter().map(|v| f64::from(*v)).map(|v| v.ln()).collect();
+    let ys: Vec<f64> = dt_c.iter().map(|v| f64::from(*v)).map(|v| v.ln()).collect();
+    let n = xs.len() as f64;
+    let (sx, sy) = (xs.iter().sum::<f64>(), ys.iter().sum::<f64>());
+    let sxx: f64 = xs.iter().map(|x| x * x).sum();
+    let sxy: f64 = xs.iter().zip(ys.iter()).map(|(x, y)| x * y).sum();
+    (n * sxy - sx * sy) / (n * sxx - sx * sx)
+}
+
+/// The one way Gate 110-A registers a verdict - and the only place in this
+/// file carrying its `gate` literal, so the registry's name is spelled once
+/// (SPEC-LIT 69.3) and every path through the gate reports BY NAME.
+fn report_110a(
+    c: &mut Checks,
+    verdict: Verdict,
+    how: How,
+    headline: String,
+    detail: Vec<String>,
+    uncertainty: Option<Uncertainty>,
+) {
+    c.report(GateReport {
+        verdict,
+        how,
+        gate: "SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)",
+        against:
+            "Moser, Kim & Mansour (1999) DNS mean-velocity profiles, reference/mkm99/chan{180,395,590}.means, u_D = 0 (none stated)",
+        headline,
+        detail,
+        uncertainty,
+    });
+}
+
+/// Gate 110-B's single report site - its `gate` literal is spelled here and
+/// nowhere else (SPEC-LIT 69.3).
+fn report_110b(
+    c: &mut Checks,
+    verdict: Verdict,
+    how: How,
+    headline: String,
+    uncertainty: Option<Uncertainty>,
+) {
+    c.report(GateReport {
+        verdict,
+        how,
+        gate: "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+        against:
+            "Driver & Seegmiller (1985) x_r/H = 6.26 +- 0.10, reference/driver_seegmiller_1985/reattachment.txt",
+        headline,
+        detail: vec![],
+        uncertainty,
+    });
+}
+
+/// Gate 110-C's single report site - its `gate` literal is spelled here and
+/// nowhere else (SPEC-LIT 69.3).
+fn report_110c(
+    c: &mut Checks,
+    verdict: Verdict,
+    how: How,
+    headline: String,
+    uncertainty: Option<Uncertainty>,
+) {
+    c.report(GateReport {
+        verdict,
+        how,
+        gate: "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
+        against:
+            "McCaffrey (1979) NBSIR 79-1910 Table 1 plume-region correlations at the declared Q, reference/mccaffrey_1979/centreline_table1.txt",
+        headline,
+        detail: vec![],
+        uncertainty,
+    });
+}
+
+/// The uncertainty every not-yet-run gate carries while its record is
+/// `None`: the three-mesh study is a property of the RUN, not of this tree
+/// (SPEC-LIT 110.5).
+fn not_yet_run_uncertainty() -> Option<Uncertainty> {
+    Some(Uncertainty::SingleMesh(
+        "no driver run recorded yet; the three-mesh study is taken when the runs are (SPEC-LIT 110.5)",
+    ))
+}
+
+/// The channel cases' own constants (SPEC-LIT 110.2): `h = 0.02 m` and the
+/// air viscosity the three cases share. `u_tau = sqrt(g_x h)` needs both.
+const H_CHANNEL: Scalar = 0.02;
+const NU_CHANNEL: Scalar = 1.5e-5;
+
+/// Gate 110-A: load the three MKM keys and the record slots, then hand the
+/// verdict to [`check_channel_dns_on`] - Gate 94-D's split, so the smoke
+/// tests can drive the verdict logic on synthetic records (S7).
+fn check_channel_dns(c: &mut Checks) -> Result<()> {
+    let mut keys: [Option<MkmProfile>; 3] = [None, None, None];
+    for (i, (id, file)) in MKM_KEYS.iter().enumerate() {
+        match key::load_text(id) {
+            Ok((line, text)) => {
+                c.note(&line);
+                match parse_mkm_means(&text) {
+                    Ok(p) => keys[i] = Some(p),
+                    Err(why) => c.note(&why.to_string()),
+                }
+            }
+            Err(why) => c.note(&answer_key_missing_line(id, file, &why)),
+        }
+    }
+    check_channel_dns_on(c, keys, CHANNEL_DNS_RECORDS)
+}
+
+/// The worker behind [`check_channel_dns`]: parsed keys and record slots are
+/// parameters so `mod published_fluid_gates` can exercise every path here
+/// without any file on disk (S7). Key consistency rows run only for a key
+/// that loaded; the verdict runs only when a key AND its record both exist.
+fn check_channel_dns_on(
+    c: &mut Checks,
+    keys: [Option<MkmProfile>; 3],
+    records: [Option<&ChannelDnsRecord>; 3],
+) -> Result<()> {
+    // The key's own consistency rows (C-KEYCHK), per loaded file.
+    for (i, k) in keys.iter().enumerate() {
+        let Some(p) = k else { continue };
+        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
+        c.check(
+            &format!("MKM99 {leg}: header ny equals the row count"),
+            (p.rows.len() as Scalar - p.ny as Scalar).abs(),
+            0.0,
+        );
+        let last = p.rows[p.rows.len() - 1];
+        c.check(
+            &format!("MKM99 {leg}: last y+ equals the header Re_tau to 0.1%"),
+            (last.1 / p.re_tau - 1.0).abs(),
+            1e-3,
+        );
+        let monotone = p.rows.windows(2).all(|t| t[1].2 >= t[0].2);
+        c.require(
+            &format!("MKM99 {leg}: Umean is non-decreasing from the wall to the centre"),
+            monotone,
+        );
+        let sub = p
+            .rows
+            .iter()
+            .filter(|r| r.1 > 0.0 && r.1 <= 4.0)
+            .map(|r| (r.2 / r.1 - 1.0).abs())
+            .fold(0.0f64, f64::max);
+        c.check(
+            &format!("MKM99 {leg}: sublayer rows y+ <= 4 obey u+ = y+ to 3% (SPEC-LIT 15.2)"),
+            sub,
+            0.03,
+        );
+    }
+    let any_missing = keys.iter().any(Option::is_none);
+    let any_record = records.iter().any(Option::is_some);
+    if any_missing || !any_record {
+        // Not closed, BY NAME - and by exactly one report, because a gate
+        // that has not run has one thing to say, not three.
+        if any_missing {
+            let ids: Vec<&str> = MKM_KEYS
+                .iter()
+                .zip(keys.iter())
+                .filter(|(_, k)| k.is_none())
+                .map(|((id, _), _)| *id)
+                .collect();
+            report_110a(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
+                     110.1); no comparison was run",
+                    ids.join(", ")
+                ),
+                vec![],
+                not_yet_run_uncertainty(),
+            );
+        } else {
+            report_110a(
+                c,
+                Verdict::Open,
+                How::Live,
+                "no driver run recorded yet - run SPEC-LIT 110.5's recipe and record it"
+                    .to_string(),
+                vec![],
+                not_yet_run_uncertainty(),
+            );
+        }
+        return Ok(());
+    }
+    // C-VERDICT, per leg: the key and the record both exist.
+    for i in 0..3 {
+        let (Some(key), Some(rec)) = (&keys[i], records[i]) else {
+            continue;
+        };
+        let u_tau = (rec.body_force * H_CHANNEL).sqrt();
+        let (_ub_sim, ub_dns, b2, b3) =
+            channel_functionals(rec.profile_fine, u_tau, NU_CHANNEL, key)?;
+        let levels: Vec<ofgpu::vv::Level> = (0..3)
+            .rev()
+            .map(|j| ofgpu::vv::Level {
+                h: 2.0 * H_CHANNEL / rec.n_y[j] as Scalar,
+                value: rec.u_b_plus[j],
+            })
+            .collect();
+        let study = vv::grid_study(&levels)?;
+        let u_input = (rec.tau_w_measured_kin / (rec.body_force * H_CHANNEL) - 1.0).abs() * ub_dns;
+        let val = vv::validation(rec.u_b_plus[2], ub_dns, study.u_fine, u_input, 0.0);
+        c.note(&study.one_line());
+        c.note(&val.one_line("U_b+ on the finest mesh"));
+        c.note(&format!(
+            "u_input (S32.4): the driver's measured wall shear misses g_x h by \
+             {} relative - quoted, never folded into the band",
+            sci(f64::from(u_input), 3)
+        ));
+        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
+        match band_of(val.e.abs() / ub_dns, 0.05, val.u_val / ub_dns) {
+            Band::Inside => c.check(
+                &format!(
+                    "Gate 110-A {leg}: U_b+ within 5% of the DNS at the case's own u_tau \
+                     (absolute prediction, SPEC-LIT S110.2)"
+                ),
+                val.e.abs() / ub_dns,
+                0.05,
+            ),
+            Band::Undecided => report_110a(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "undecided: |E|/D = {} is within u_val/D = {} of the 5% edge (S32.4)",
+                    sci(f64::from(val.e.abs() / ub_dns), 3),
+                    sci(f64::from(val.u_val / ub_dns), 3)
+                ),
+                vec![],
+                Some(Uncertainty::Study(study)),
+            ),
+            Band::Outside => report_110a(
+                c,
+                Verdict::Misses,
+                How::Live,
+                format!(
+                    "U_b+ = {} against the DNS {} - {:+.1}% of D, outside the 5% band; the \
+                     study's order p = {}",
+                    sci(f64::from(rec.u_b_plus[2]), 5),
+                    sci(f64::from(ub_dns), 5),
+                    100.0 * val.e / ub_dns,
+                    study
+                        .p
+                        .map(|p| format!("{:.3}", f64::from(p)))
+                        .unwrap_or_else(|| "n/a".to_string())
+                ),
+                vec![],
+                Some(Uncertainty::Study(study)),
+            ),
+        }
+        c.check(
+            &format!(
+                "Gate 110-A {leg}: B2 sup-norm of |u+_sim - u+_DNS| over 30 <= y+ <= Re_tau \
+                 within 1.0 wall unit (SPEC-LIT S110.2)"
+            ),
+            b2,
+            1.0,
+        );
+        c.check(
+            &format!(
+                "Gate 110-A {leg}: B3 self-check, recorded cells with y+ <= 4 obey u+ = y+ \
+                 to 2% (not a verdict, SPEC-LIT S110.2)"
+            ),
+            b3,
+            0.02,
+        );
+    }
+    Ok(())
+}
+
+/// Gate 110-B: load the Driver & Seegmiller key and the record slot, then
+/// hand the verdict to [`check_backstep_reattachment_on`] (S7's split).
+fn check_backstep_reattachment(c: &mut Checks) -> Result<()> {
+    let key = match key::load_text(DS_KEY.0) {
+        Ok((line, text)) => {
+            c.note(&line);
+            match parse_ds_key(&text) {
+                Ok(k) => Some(k),
+                Err(why) => {
+                    c.note(&why.to_string());
+                    None
+                }
+            }
+        }
+        Err(why) => {
+            c.note(&answer_key_missing_line(DS_KEY.0, DS_KEY.1, &why));
+            None
+        }
+    };
+    check_backstep_reattachment_on(c, key, STEP_RECORD)
+}
+
+/// The worker behind [`check_backstep_reattachment`]: the parsed key
+/// `(D, u_D)` and the record slot are parameters (S7). With the key present
+/// and a record recorded, the datum's own +-0.10 IS the band - `u_num` from
+/// the three-mesh study decides undecided at its edge (SPEC-LIT 110.3) - and
+/// the inflow boundary layer and reference velocity are INPUT DIFFERENCES,
+/// printed beside the verdict, never folded in (S32.4).
+fn check_backstep_reattachment_on(
+    c: &mut Checks,
+    key: Option<(Scalar, Scalar)>,
+    rec: Option<&StepRecord>,
+) -> Result<()> {
+    if let Some((d, u_d)) = key {
+        c.check(
+            "D&S 1985 key: x_r/H = 6.26 with u_D = 0.10, as the TMR page states it",
+            (d - 6.26).abs() + (u_d - 0.10).abs(),
+            0.0,
+        );
+    }
+    let (Some((d, u_d)), Some(r)) = (key, rec) else {
+        if key.is_none() {
+            report_110b(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
+                     110.1); no comparison was run",
+                    DS_KEY.0
+                ),
+                not_yet_run_uncertainty(),
+            );
+        } else {
+            report_110b(
+                c,
+                Verdict::Open,
+                How::Live,
+                "no driver run recorded yet - run SPEC-LIT 110.5's recipe and record it"
+                    .to_string(),
+                not_yet_run_uncertainty(),
+            );
+        }
+        return Ok(());
+    };
+    let levels: Vec<ofgpu::vv::Level> = (0..3)
+        .rev()
+        .map(|j| ofgpu::vv::Level { h: r.dx_over_h[j], value: r.x_r_over_h[j] })
+        .collect();
+    let study = vv::grid_study(&levels)?;
+    let val = vv::validation(r.x_r_over_h[2], d, study.u_fine, 0.0, u_d);
+    c.note(&format!(
+        "input difference (S110.3): delta_99/H at x = -4H = {:.4}/{:.4}/{:.4} across the \
+         study, the datum says approximately 1.5H",
+        r.delta99_over_h_at_minus_4h[0],
+        r.delta99_over_h_at_minus_4h[1],
+        r.delta99_over_h_at_minus_4h[2]
+    ));
+    c.note(&format!(
+        "input difference (S110.3): u_ref = {:.2}/{:.2}/{:.2} across the study, the \
+         experiment's 44.2 m/s is UNVERIFIED",
+        r.u_ref[0], r.u_ref[1], r.u_ref[2]
+    ));
+    c.note(&study.one_line());
+    c.note(&val.one_line("x_r/H on the finest mesh"));
+    match band_of(val.e.abs(), 0.10, study.u_fine) {
+        Band::Inside => c.check(
+            "Gate 110-B: x_r/H within the datum's own +-0.10 (absolute prediction, \
+             SPEC-LIT S110.3)",
+            val.e.abs(),
+            0.10,
+        ),
+        Band::Undecided => report_110b(
+            c,
+            Verdict::Open,
+            How::Live,
+            format!(
+                "undecided: |E| = {} is within u_num = {} of the 0.10 edge (S32.4)",
+                sci(f64::from(val.e.abs()), 3),
+                sci(f64::from(study.u_fine), 3)
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+        Band::Outside => report_110b(
+            c,
+            Verdict::Misses,
+            How::Live,
+            format!(
+                "x_r/H = {:.3} against 6.26 - {:+.1}% of D, outside the datum's own \
+                 +-0.10; the study's order p = {}",
+                r.x_r_over_h[2],
+                100.0 * val.e / d,
+                study
+                    .p
+                    .map(|p| format!("{:.3}", f64::from(p)))
+                    .unwrap_or_else(|| "n/a".to_string())
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+    }
+    Ok(())
+}
+
+/// Gate 110-C: load the McCaffrey key and the record slot, then hand the
+/// verdict to [`check_mccaffrey_plume_on`] (S7's split).
+fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
+    let key = match key::load_text(MC_KEY.0) {
+        Ok((line, text)) => {
+            c.note(&line);
+            match parse_mc_key(&text) {
+                Ok(k) => Some(k),
+                Err(why) => {
+                    c.note(&why.to_string());
+                    None
+                }
+            }
+        }
+        Err(why) => {
+            c.note(&answer_key_missing_line(MC_KEY.0, MC_KEY.1, &why));
+            None
+        }
+    };
+    check_mccaffrey_plume_on(c, key.as_ref(), PLUME_RECORD)
+}
+
+/// The worker behind [`check_mccaffrey_plume`]: the parsed key and record
+/// slot are parameters (S7). The transcription's four continuity rows run
+/// for a key that loaded (C-KEYCHK - the report's regime boundaries ARE the
+/// intersections of its fits, so a mistyped constant fails them); with a
+/// record, P1/P2 hold against the correlation with a +-15% band whose
+/// outside is an open verdict, P3 is the exponent a non-radiating solver
+/// CAN close, and P4 is a number asserted as nothing (SPEC-LIT 110.4).
+fn check_mccaffrey_plume_on(
+    c: &mut Checks,
+    key: Option<&McCaffreyKey>,
+    rec: Option<&PlumeRecord>,
+) -> Result<()> {
+    if let Some(k) = key {
+        c.check(
+            "McCaffrey Table 1: velocity is continuous at z/Q^(2/5) = 0.0796 to 1%",
+            (k.flame_v * k.b_flame_int.sqrt() / k.int_v - 1.0).abs(),
+            0.01,
+        );
+        c.check(
+            "McCaffrey Table 1: velocity is continuous at z/Q^(2/5) = 0.195 to 1%",
+            (k.plume_v * k.b_int_plume.powf(-1.0 / 3.0) / k.int_v - 1.0).abs(),
+            0.01,
+        );
+        c.check(
+            "McCaffrey Table 1: temperature is continuous at 0.0796 to 2%",
+            (k.int_dt / k.b_flame_int / k.flame_dt - 1.0).abs(),
+            0.02,
+        );
+        c.check(
+            "McCaffrey Table 1: temperature is continuous at 0.195 to 3%",
+            (k.plume_dt * k.b_int_plume.powf(-5.0 / 3.0) / (k.int_dt / k.b_int_plume) - 1.0)
+                .abs(),
+            0.03,
+        );
+    }
+    let (Some(k), Some(r)) = (key, rec) else {
+        if key.is_none() {
+            report_110c(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
+                     110.1); no comparison was run",
+                    MC_KEY.0
+                ),
+                not_yet_run_uncertainty(),
+            );
+        } else {
+            report_110c(
+                c,
+                Verdict::Open,
+                How::Live,
+                "no driver run recorded yet - run SPEC-LIT 110.5's recipe and record it"
+                    .to_string(),
+                not_yet_run_uncertainty(),
+            );
+        }
+        return Ok(());
+    };
+    // The plume-region correlations at the declared Q (SPEC-LIT 110.4):
+    // dT_c = plume_dt Q^(2/3) z^(-5/3), w_c = plume_v Q^(1/3) z^(-1/3).
+    let dt_mcc = |z: Scalar| k.plume_dt * r.q_kw.powf(2.0 / 3.0) * z.powf(-5.0 / 3.0);
+    let w_mcc = |z: Scalar| k.plume_v * r.q_kw.powf(1.0 / 3.0) * z.powf(-1.0 / 3.0);
+    // The worst station of each, kept SIGNED: the band reads its magnitude,
+    // the headline its sign (high is the side S110.4 predicts; low is not).
+    let (mut s_t, mut s_w) = (0.0f64, 0.0f64);
+    for i in 0..6 {
+        let e_t = r.dt_c[2][i] / dt_mcc(r.stations_m[i]) - 1.0;
+        let e_w = r.w_c[2][i] / w_mcc(r.stations_m[i]) - 1.0;
+        if e_t.abs() > s_t.abs() {
+            s_t = e_t;
+        }
+        if e_w.abs() > s_w.abs() {
+            s_w = e_w;
+        }
+    }
+    let (r_t, r_w) = (s_t.abs(), s_w.abs());
+    let p3 = plume_exponent(&r.stations_m, &r.dt_c[2]);
+    // P4, printed and asserted as nothing: the convective fraction the run
+    // implies, BEFORE the numbers (S110.4).
+    let chi: Scalar = (0..6)
+        .map(|i| (dt_mcc(r.stations_m[i]) / r.dt_c[2][i]).powf(1.5))
+        .sum::<Scalar>()
+        / 6.0;
+    c.note(
+        "McCaffrey's flames are real fires; a non-radiating solver injects all of Q as \
+         enthalpy and is EXPECTED TO SIT HIGH on P1 and P2 (S110.4)",
+    );
+    c.note(&format!(
+        "P4 (a number, not a verdict): the implied convective fraction chi_c = {:.3} - \
+         what a participating medium would have to carry if one were ever built",
+        chi
+    ));
+    let levels: Vec<ofgpu::vv::Level> = (0..3)
+        .rev()
+        .map(|j| ofgpu::vv::Level {
+            h: r.cell_size[j],
+            value: r.dt_c[j][3], // dT_c at z = 2.00 m, the study functional
+        })
+        .collect();
+    let study = vv::grid_study(&levels)?;
+    let val = vv::validation(r.dt_c[2][3], dt_mcc(2.0), study.u_fine, 0.0, 0.0);
+    c.note(&study.one_line());
+    c.note(&val.one_line("dT_c at z = 2.00 m"));
+    c.check(
+        "Gate 110-C: centreline dT decays as z^(-5/3) within +-0.25 in the exponent \
+         (SPEC-LIT S110.4)",
+        (p3 + 5.0 / 3.0).abs(),
+        0.25,
+    );
+    // P1 and P2 each: inside, undecided, or outside a correlation - and an
+    // outside band is Verdict::Open, never the measurement word, because the
+    // datum is a correlation and the section expects this very miss.
+    let band1 = band_of(r_t, 0.15, val.u_val / dt_mcc(2.0));
+    let band2 = band_of(r_w, 0.15, val.u_val / dt_mcc(2.0));
+    let worst = if band1 == Band::Outside || band2 == Band::Outside {
+        Band::Outside
+    } else if band1 == Band::Undecided || band2 == Band::Undecided {
+        Band::Undecided
+    } else {
+        Band::Inside
+    };
+    match worst {
+        Band::Inside => {
+            c.check(
+                "Gate 110-C: P1, centreline dT within 15% of the correlation at every \
+                 station (SPEC-LIT S110.4)",
+                r_t,
+                0.15,
+            );
+            c.check(
+                "Gate 110-C: P2, centreline w within 15% of the correlation at every \
+                 station (SPEC-LIT S110.4)",
+                r_w,
+                0.15,
+            );
+        }
+        Band::Undecided => report_110c(
+            c,
+            Verdict::Open,
+            How::Live,
+            format!(
+                "undecided: P1/P2 worst {:.3} is within u_val/D = {:.3} of the 15% edge \
+                 (S32.4)",
+                r_t.max(r_w),
+                val.u_val / dt_mcc(2.0)
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+        Band::Outside => report_110c(
+            c,
+            Verdict::Open,
+            How::Live,
+            format!(
+                "P1 worst {:+.1}%, P2 worst {:+.1}% - outside the +-15% band, {} (S110.4)",
+                100.0 * s_t,
+                100.0 * s_w,
+                if s_t > 0.0 && s_w > 0.0 {
+                    "on the high side a non-radiating solver was predicted to sit on: the \
+                     correlation does not close without radiative loss, which is the \
+                     measurement this gate exists to take"
+                } else {
+                    "NOT the high side the section predicted for a non-radiating solver - \
+                     a deficit radiation cannot explain"
+                },
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  Published benchmarks
 //
 //  The published-benchmark section `run` calls: the lid-driven cavity of
@@ -18994,7 +19967,8 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 16 occurrences, 14 distinct - two gates report twice.
+    /// same string. 19 occurrences, 17 distinct - two gates report twice,
+    /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
     #[test]
@@ -19019,9 +19993,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 16, "16 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 19, "19 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 14, "14 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 17, "17 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
@@ -19350,5 +20324,256 @@ mod region_layout {
         assert_eq!(c.failures, 0, "gate 97-B must hold on this machine");
         assert!(c.total >= 3, "three rows required, took {}", c.total);
         assert_eq!(c.skipped, 0, "nothing may be skipped");
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT 110's own tests: the key parsers, the pure verdict helpers, and
+//  the not-yet-run paths the three sections take ON THIS TREE (S7, S1).
+// ==========================================================================
+
+#[cfg(test)]
+mod published_fluid_gates {
+    use super::*;
+
+    /// C-DS's bytes, as the test fixture (never a file: the key is NOT
+    /// distributed, S1).
+    const DS_KEY_TEXT: &str = "\
+# Driver, D. M. and Seegmiller, H. L., \"Features of a Reattaching Turbulent Shear Layer in Divergent
+# Channel Flow\", AIAA Journal 23 (2) (1985) 163-171. DOI 10.2514/3.8890.
+# Datum quoted from the NASA Turbulence Modeling Resource, 2D Backward Facing Step validation page
+# (https://tmbwg.github.io/turbmodels/backstep_val.html, read 2026-09-18), a US Government work:
+# \"x/Hreattach = 6.26 +- 0.10\"; Re_H approximately 36,000; M = 0.128; inflow boundary layer ~1.5H.
+# key value uncertainty
+x_r_over_H 6.26 0.10
+";
+
+    /// C-MC's bytes, as the test fixture (never a file, S1).
+    const MC_KEY_TEXT: &str = "\
+# McCaffrey, B. J., \"Purely Buoyant Diffusion Flames: Some Experimental Results\", NBSIR 79-1910,
+# National Bureau of Standards, 1979. US Government work, public domain. Table 1, weighted averages.
+# z = vertical height above burner [m]; Q = nominal heat release rate [kW]; V centreline velocity [m/s];
+# dT centreline temperature rise above ambient [C]. Regime boundaries in z/Q^(2/5) [m kW^(-2/5)].
+# key value
+boundary_flame_intermittent 0.0796
+boundary_intermittent_plume 0.195
+flame_V_over_sqrt_z 6.84
+flame_dT 797
+intermittent_V_over_Q15 1.93
+intermittent_dT_z_over_Q25 62.9
+plume_V_z13_over_Q13 1.12
+plume_dT_z53_over_Q23 21.6
+buoyancy_constant 0.935
+";
+
+    /// (a) The `.means` parser on a synthetic file: header numbers out of
+    /// `%` lines, three data rows out of whitespace-separated lines.
+    #[test]
+    fn parse_mkm_means_reads_header_and_rows() {
+        let text = "\
+% Moser, Kim & Mansour (1999), Re_tau = 178.12, ny = 3 (chan180.means)
+% y y+ Umean
+% (the host's own header rows; this fixture is three rows, not 129)
+ 0.000000 0.000000 0.000000
+ 0.500000 89.060000 11.440000
+ 1.000000 178.120000 16.900000
+";
+        let p = parse_mkm_means(text).expect("the synthetic .means parses");
+        assert_eq!(p.re_tau, 178.12, "Re_tau from the header");
+        assert_eq!(p.ny, 3, "ny from the header");
+        assert_eq!(p.rows.len(), 3, "three rows");
+        assert_eq!(p.rows[1], (0.5, 89.06, 11.44), "middle row verbatim");
+    }
+
+    /// (b) The Driver & Seegmiller parser on C-DS's own bytes.
+    #[test]
+    fn parse_ds_key_reads_the_datum_row() {
+        let (d, u) = parse_ds_key(DS_KEY_TEXT).expect("C-DS parses");
+        assert_eq!((d, u), (6.26, 0.10));
+    }
+
+    /// (c) The McCaffrey parser on C-MC's own bytes: six constants, two
+    /// boundaries, and the buoyancy constant - all nine, by name.
+    #[test]
+    fn parse_mc_key_reads_all_nine_constants() {
+        let k = parse_mc_key(MC_KEY_TEXT).expect("C-MC parses");
+        assert_eq!(k.b_flame_int, 0.0796);
+        assert_eq!(k.b_int_plume, 0.195);
+        assert_eq!(k.flame_v, 6.84);
+        assert_eq!(k.flame_dt, 797.0);
+        assert_eq!(k.int_v, 1.93);
+        assert_eq!(k.int_dt, 62.9);
+        assert_eq!(k.plume_v, 1.12);
+        assert_eq!(k.plume_dt, 21.6);
+        assert_eq!(k.buoyancy, 0.935);
+    }
+
+    /// (d) The band helper at its three edges: inside; undecided because
+    /// the uncertainty reaches the edge; outside (S32.4's discipline).
+    #[test]
+    fn band_of_places_the_error_in_its_band() {
+        assert_eq!(band_of(0.04, 0.05, 0.01), Band::Inside);
+        assert_eq!(band_of(0.055, 0.05, 0.01), Band::Undecided);
+        assert_eq!(band_of(0.07, 0.05, 0.01), Band::Outside);
+    }
+
+    /// The synthetic DNS profile: `u+ = y+` to y+ 11, the log law above it.
+    fn synthetic_up(yp: Scalar) -> Scalar {
+        if yp <= 11.0 { yp } else { yp.ln() / 0.41 + 5.2 }
+    }
+
+    /// (e) `channel_functionals` on that profile sampled onto 32 cell
+    /// centres of the whole wall-to-centre span `[0, Re_tau]` in wall units,
+    /// so the log region B2 is evaluated over IS in the sample: the
+    /// midpoint cell-height mean and the trapezoid over the same points
+    /// agree to 1e-3; the key rows ARE the cell centres, so the sup-norm is
+    /// node for node and lands below 1e-6 - over the rows with
+    /// `30 <= y+ <= Re_tau`, of which there are some; and the same key
+    /// shifted up by half a wall unit is seen by B2 as exactly that.
+    #[test]
+    fn channel_functionals_reproduce_the_synthetic_profile() {
+        let n = 32usize;
+        let span = 178.12;
+        let h = span / n as Scalar;
+        let profile: Vec<(Scalar, Scalar)> = (0..n)
+            .map(|j| {
+                let yp = (j as Scalar + 0.5) * h;
+                // u_tau = 1 m/s: y+ = y/nu, so y = yp*nu, and u_x = u+.
+                (yp * NU_CHANNEL, synthetic_up(yp))
+            })
+            .collect();
+        let u_tau = 1.0;
+        let rows: Vec<(Scalar, Scalar, Scalar)> = profile
+            .iter()
+            .map(|(y, ux)| (*y, y * u_tau / NU_CHANNEL, ux / u_tau))
+            .collect();
+        let in_b2 = rows.iter().filter(|r| r.1 >= 30.0 && r.1 <= 178.12).count();
+        assert!(in_b2 >= 20, "B2's y+ window holds {in_b2} of the 32 rows");
+        let shifted: Vec<(Scalar, Scalar, Scalar)> =
+            rows.iter().map(|&(y, yp, up)| (y, yp, up + 0.5)).collect();
+        let dns = MkmProfile { re_tau: 178.12, ny: rows.len(), rows };
+        let (ub_sim, ub_dns, sup, _) =
+            channel_functionals(&profile, u_tau, NU_CHANNEL, &dns).expect("functionals run");
+        assert!(
+            (ub_sim - ub_dns).abs() < 1e-3,
+            "midpoint {ub_sim} against trapezoid {ub_dns}"
+        );
+        assert!(sup < 1e-6, "node-for-node sup-norm {sup}");
+        let off = MkmProfile { re_tau: 178.12, ny: shifted.len(), rows: shifted };
+        let (_, _, sup_off, _) =
+            channel_functionals(&profile, u_tau, NU_CHANNEL, &off).expect("functionals run");
+        assert!((sup_off - 0.5).abs() < 1e-9, "a half-wall-unit shift reads as {sup_off}");
+    }
+
+    /// (f) `plume_exponent` on an exact power law: the least-squares slope
+    /// of ln dT against ln z IS the exponent, to machine precision.
+    #[test]
+    fn plume_exponent_recovers_a_power_law() {
+        let z: [Scalar; 6] = [1.25, 1.50, 1.75, 2.00, 2.25, 2.50];
+        let dt: [Scalar; 6] = z.map(|zi| 100.0 * zi.powf(-5.0 / 3.0));
+        let p = plume_exponent(&z, &dt);
+        assert!((p + 5.0 / 3.0).abs() < 1e-9, "slope {p} against -5/3");
+    }
+
+    /// (g) THIS TREE's own truth: no key is distributed, no record exists,
+    /// so the three top-level checks each print the missing-key line(s) and
+    /// register exactly one open, live verdict, BY NAME, in C-GATES order.
+    #[test]
+    fn the_three_sections_report_not_closed_by_name_on_this_tree() {
+        let mut c = Checks::new();
+        check_channel_dns(&mut c).expect("110-A runs");
+        check_backstep_reattachment(&mut c).expect("110-B runs");
+        check_mccaffrey_plume(&mut c).expect("110-C runs");
+        assert_eq!(c.failures, 0, "nothing has run, so nothing has failed");
+        assert_eq!(c.gates.len(), 3, "one report per gate");
+        let gates: Vec<&str> = c.gates.iter().map(|g| g.gate).collect();
+        assert_eq!(
+            gates,
+            [
+                "SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)",
+                "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+                "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
+            ],
+            "the three gate names, in order"
+        );
+        for g in &c.gates {
+            assert_eq!(g.verdict, Verdict::Open, "{}", g.headline);
+            assert_eq!(g.how, How::Live, "{}", g.headline);
+        }
+    }
+
+    /// A recorded step run whose finest-mesh reattachment lands inside the
+    /// datum's own +-0.10: one absolute-prediction check row, and no
+    /// verdict - a pass is not a report (SPEC-LIT 69).
+    #[test]
+    fn a_step_record_inside_the_band_passes_and_reports_nothing() {
+        static INSIDE: StepRecord = StepRecord {
+            n_cells: [700, 90, 1],
+            dx_over_h: [0.2, 0.1, 0.05],
+            x_r_over_h: [6.40, 6.30, 6.27],
+            delta99_over_h_at_minus_4h: [1.42, 1.48, 1.50],
+            u_ref: [10.0, 10.0, 10.0],
+            iterations: 6000,
+            residual_u: 1.0e-6,
+        };
+        let mut c = Checks::new();
+        check_backstep_reattachment_on(&mut c, Some((6.26, 0.10)), Some(&INSIDE))
+            .expect("the verdict runs");
+        assert_eq!(c.failures, 0);
+        assert!(c.total >= 1, "the inside-band row ran");
+        assert!(c.gates.is_empty(), "no verdict");
+    }
+
+    /// ...and one far outside it: the verdict is the measurement word, with
+    /// the three-mesh study as the declared uncertainty.
+    #[test]
+    fn a_step_record_far_outside_the_band_reports_the_measurement_word() {
+        static OUTSIDE: StepRecord = StepRecord {
+            n_cells: [700, 90, 1],
+            dx_over_h: [0.2, 0.1, 0.05],
+            x_r_over_h: [7.2, 7.0, 6.9],
+            delta99_over_h_at_minus_4h: [1.42, 1.48, 1.50],
+            u_ref: [10.0, 10.0, 10.0],
+            iterations: 6000,
+            residual_u: 1.0e-6,
+        };
+        let mut c = Checks::new();
+        check_backstep_reattachment_on(&mut c, Some((6.26, 0.10)), Some(&OUTSIDE))
+            .expect("the verdict runs");
+        assert_eq!(c.gates.len(), 1, "exactly one report");
+        assert_eq!(c.gates[0].verdict, Verdict::Misses);
+        assert!(matches!(c.gates[0].uncertainty, Some(Uncertainty::Study(_))));
+    }
+
+    /// A recorded plume run that sits LOW, 30 % under the correlation at
+    /// every station on the finest mesh: the exponent closes (P3 is a check
+    /// row), P1/P2 fall outside the +-15 % band, the verdict is the
+    /// correlation word - and the headline quotes the SIGNED worst deviation,
+    /// -30.0 %, not a clamp at zero that would read as "on the correlation".
+    #[test]
+    fn a_plume_record_sitting_low_quotes_its_signed_worst_deviation() {
+        let key = parse_mc_key(MC_KEY_TEXT).expect("C-MC parses");
+        let q: Scalar = 57.5;
+        let z: [Scalar; 6] = [1.25, 1.50, 1.75, 2.00, 2.25, 2.50];
+        let dt = |f: Scalar| z.map(|zi| f * 21.6 * q.powf(2.0 / 3.0) * zi.powf(-5.0 / 3.0));
+        let w = |f: Scalar| z.map(|zi| f * 1.12 * q.powf(1.0 / 3.0) * zi.powf(-1.0 / 3.0));
+        let rec = PlumeRecord {
+            q_kw: q,
+            n_cells: [43_560, 348_480, 2_787_840],
+            cell_size: [0.10, 0.05, 0.025],
+            stations_m: z,
+            dt_c: [dt(0.60), dt(0.67), dt(0.70)],
+            w_c: [w(0.60), w(0.67), w(0.70)],
+            iterations: 4000,
+            residual_u: 1.0e-5,
+        };
+        let mut c = Checks::new();
+        check_mccaffrey_plume_on(&mut c, Some(&key), Some(&rec)).expect("the verdict runs");
+        assert_eq!(c.failures, 0, "the key rows and P3 hold");
+        assert_eq!(c.gates.len(), 1, "exactly one report");
+        assert_eq!(c.gates[0].verdict, Verdict::Open, "a correlation leaves the gate open");
+        let h = &c.gates[0].headline;
+        assert!(h.contains("P1 worst -30.0%"), "{h}");
+        assert!(h.contains("P2 worst -30.0%"), "{h}");
     }
 }
