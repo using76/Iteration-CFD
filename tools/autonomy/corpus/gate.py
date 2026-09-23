@@ -2,17 +2,22 @@
 # meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
-"""gate - docs/15 §F G-CORPUS for the generated corpus families.
+"""gate - docs/15 §F G-CORPUS for the generated corpus families A, B, D, E, F.
 
 Every written STL is re-read from disk by two independent oracles:
 tools/geom/stl_repair.py (before.open_edges 0, non_manifold 0, nothing
-welded, nothing reoriented, one closed component, positive re-read volume)
-and ofgpu-automesher -dryRun (exit 0 and the bit-exact weld's point count).
-Checks, each by its name: closed, dryrun, no_negzero, sha, regen, row,
-volume, min_edge.  Regeneration runs in a child process under a different
-PYTHONHASHSEED; rows re-validate as ManifestRow with split added; volumes
-compare against the generator's closed form (1 %).  Negative controls in
---selftest prove the gate is not vacuous.
+welded, nothing reoriented, n_bodies closed components, positive re-read
+volume) and ofgpu-automesher -dryRun (exit 0 and the bit-exact weld's point
+count).  Checks, each by its name: closed, dryrun, no_negzero, sha, regen,
+row, volume, min_edge - and for families D, E and F the features check,
+which re-computes tools/autonomy/features.py's fingerprint on the written
+file and refuses any disagreement with the generator's expected_features
+(commensurability and lattice spacing, the planar fraction, the outer gap
+and the plate thickness, each within its own tolerance).  Regeneration
+runs in a child process under a different PYTHONHASHSEED; rows re-validate
+as ManifestRow with split added; volumes compare against the generator's
+closed form (1 %).  Negative controls in --selftest prove the gate is not
+vacuous.
 
     python tools/autonomy/corpus/gate.py --family A --family B --n 120 --seed 1
     python tools/autonomy/corpus/gate.py --selftest
@@ -43,12 +48,19 @@ import stl_io  # noqa: E402
 import schema  # noqa: E402
 import stl_repair  # noqa: E402
 
-FAMILIES = {"A": "gen_wing", "B": "gen_lathe"}
+FAMILIES = {"A": "gen_wing", "B": "gen_lathe", "D": "gen_bluff",
+           "E": "gen_gap", "F": "gen_thin"}
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
 BINARY = os.path.join(REPO, "rust", "target", "release",
                       "ofgpu-automesher" + (".exe" if os.name == "nt" else ""))
 CHECKS = ("closed", "dryrun", "no_negzero", "sha", "regen", "row", "volume",
           "min_edge")
+
+
+def checks_for(gen) -> tuple:
+    """A and B print today's checks; D, E and F add the features agreement."""
+    return (CHECKS + ("features",) if hasattr(gen, "expected_features")
+            else CHECKS)
 
 
 def _load(family: str):
@@ -103,9 +115,10 @@ def _surface_line(stdout: str) -> str:
 
 def check_row(row: dict, stl_path: str, binary: str, scratch: dict) -> dict:
     """The C6 checks, each by name: "" when it passes, else the why."""
-    res = {c: "" for c in CHECKS}
-    res["_vol_dev"] = None
     gen = _load(row["family"])
+    chks = checks_for(gen)
+    res = {c: "" for c in chks}
+    res["_vol_dev"] = None
     P, T = gen.build(row["params"])
     nP, nT = len(P), len(T)
     rep = repair_report(stl_path)
@@ -130,8 +143,9 @@ def check_row(row: dict, stl_path: str, binary: str, scratch: dict) -> dict:
         if o["flipped_components"] != 0:
             bad.append("orientation.flipped_components = %d"
                        % o["flipped_components"])
-        if rep["n_components"] != 1:
-            bad.append("n_components = %d" % rep["n_components"])
+        nb = gen.n_bodies(row["params"]) if hasattr(gen, "n_bodies") else 1
+        if rep["n_components"] != nb:
+            bad.append("n_components = %d != %d" % (rep["n_components"], nb))
         if aft["closed"] is not True:
             bad.append("after.closed is not True")
         if not (isinstance(aft["volume"], float) and aft["volume"] > 0.0):
@@ -198,14 +212,70 @@ def check_row(row: dict, stl_path: str, binary: str, scratch: dict) -> dict:
             res["min_edge"] = "min edge %.6g < 10 x weld tol %.6g" % (me, tol)
     else:
         res["min_edge"] = rep["_error"]
+    if "features" in chks:
+        res["features"], res["_feat"] = features_check(gen, row, stl_path)
     res["_nT"] = nT
     return res
+
+
+def features_check(gen, row: dict, stl_path: str) -> tuple:
+    """features.py's fingerprint must agree with expected_features."""
+    import features
+
+    info = {"planar_frac": None, "commensurate": None,
+            "gap_dev": None, "thick_dev": None, "thick_rep_dev": None}
+    try:
+        fp, _diag = features.fingerprint(stl_path, row["geometry_id"])
+    except ValueError as e:
+        return "features refused: %s" % e, info
+    exp = gen.expected_features(row["params"])
+    why = []
+    if (fp["commensurate"] != exp["commensurate"]
+            or row["commensurate"] != exp["commensurate"]):
+        why.append("commensurate %s != expected %s"
+                   % (fp["commensurate"], exp["commensurate"]))
+    el = exp.get("lattice_base_size_m")
+    fl_ = fp["lattice_base_size_m"]
+    if el is None:
+        if fl_ is not None:
+            why.append("lattice_base_size_m %r != %r" % (fl_, el))
+    elif fl_ is None or abs(fl_ / el - 1.0) > 1e-8:
+        why.append("lattice_base_size_m %r != %r" % (fl_, el))
+    po = exp.get("planar_one")
+    if po is True and fp["planar_frac"] != 1.0:
+        why.append("planar_frac %r != 1.0" % (fp["planar_frac"],))
+    if po is False and fp["planar_frac"] >= 1.0:
+        why.append("planar_frac %r is >= 1.0" % (fp["planar_frac"],))
+    info["planar_frac"] = fp["planar_frac"]
+    info["commensurate"] = bool(fp["commensurate"])
+
+    def dev(key, limit, tag):
+        want = exp.get(key)
+        if want is None:
+            return
+        got = fp.get(key)
+        if got is None:
+            why.append("%s %r vs %r (none measured)" % (key, got, want))
+            info[tag] = None
+            return
+        d = abs(got / want - 1.0)
+        info[tag] = d
+        if d > limit:
+            why.append("%s %r vs %r (%.3f %%)" % (key, got, want, 100.0 * d))
+
+    dev("outer_gap_m", 0.02, "gap_dev")
+    dev("inner_thickness_m", 0.02, "thick_dev")
+    rep = exp.get("inner_thickness_reported_m")
+    if rep is not None and fp.get("inner_thickness_m") is not None:
+        info["thick_rep_dev"] = abs(fp["inner_thickness_m"] / rep - 1.0)
+    return "; ".join(why), info
 
 
 def run_gate(family: str, n: int, seed: int, binary: str,
              keep: str | None = None) -> dict:
     """Generate, then check every row; the printed lines carry the numbers."""
     gen = _load(family)
+    chks = checks_for(gen)
     tmp_root = keep
     if keep:
         if os.path.isdir(keep):
@@ -256,16 +326,17 @@ def run_gate(family: str, n: int, seed: int, binary: str,
                             {"case": case, "rw": dir3})
             res["regen"] = regen_why[row["geometry_id"]]
             results.append((row, res))
-            for c in CHECKS:
+            for c in chks:
                 if res[c]:
                     fails.append("%s %s: %s" % (row["geometry_id"], c, res[c]))
-        counts = {c: sum(1 for _r, res in results if res[c] == "") for c in CHECKS}
+        counts = {c: sum(1 for _r, res in results if res[c] == "")
+                  for c in chks}
         devs = [res["_vol_dev"] for _r, res in results
                 if res["_vol_dev"] is not None]
         worst = "%.3f %%" % (100.0 * max(devs)) if devs else "n/a"
         nts = [res["_nT"] for _r, res in results]
         print("G-CORPUS %s seed %d n %d: %s" % (family, seed, n,
-              ", ".join("%s %d/%d" % (c, counts[c], n) for c in CHECKS)))
+              ", ".join("%s %d/%d" % (c, counts[c], n) for c in chks)))
         print("G-CORPUS %s volume: max |V_file/V_closed - 1| = %s over %d "
               "measured of %d (limit 1 %%); %s"
               % (family, worst, len(devs), n, gen.VOLUME_FORM))
@@ -283,7 +354,7 @@ def run_gate(family: str, n: int, seed: int, binary: str,
         for r, _res in results:
             strata[r["stratum"]] += 1
         shapes = ""
-        if family == "B":
+        if any("shape" in r["params"] for r, _res in results):
             sc = {}
             for r, _res in results:
                 sc[r["params"]["shape"]] = sc.get(r["params"]["shape"], 0) + 1
@@ -291,7 +362,44 @@ def run_gate(family: str, n: int, seed: int, binary: str,
         print("G-CORPUS %s strata: easy %d, medium %d, hard %d; triangles "
               "%d..%d%s" % (family, strata["easy"], strata["medium"],
                             strata["hard"], min(nts), max(nts), shapes))
-        ok = all(counts[c] == n for c in CHECKS)
+        if hasattr(gen, "expected_features"):
+            ck = sum(1 for r, _ in results
+                     if gen.expected_features(r["params"])["commensurate"])
+            a = sum(1 for r, res in results
+                    if gen.expected_features(r["params"])["commensurate"]
+                    and res["_feat"]["commensurate"]
+                    and res["_feat"]["planar_frac"] == 1.0)
+            m = len(results) - ck
+            b = sum(1 for r, res in results
+                    if not gen.expected_features(r["params"])["commensurate"]
+                    and res["_feat"]["commensurate"] is False)
+            print("G-CORPUS %s features: commensurate rows %d (planar_frac "
+                  "1.0 and commensurate True on %d/%d); other rows %d "
+                  "(commensurate False on %d/%d)"
+                  % (family, ck, a, ck, m, b, m))
+            if family == "E":
+                gd = [res["_feat"]["gap_dev"] for r, res in results
+                      if res["_feat"]["gap_dev"] is not None]
+                gh = [r["params"]["gap_over_h"] for r, _ in results]
+                worst = "%.3f %%" % (100.0 * max(gd)) if gd else "n/a"
+                print("G-CORPUS E gap: gap/h %s..%s, max |gap_features/gap "
+                      "- 1| = %s over %d (limit 2 %%)"
+                      % ("%.3f" % min(gh), "%.3f" % max(gh), worst, len(gd)))
+            if family == "F":
+                pd = [res["_feat"]["thick_dev"] for r, res in results
+                      if r["params"]["shape"] in ("plate_c", "plate_n")
+                      and res["_feat"]["thick_dev"] is not None]
+                fd = [res["_feat"]["thick_rep_dev"] for r, res in results
+                      if r["params"]["shape"] == "fin"
+                      and res["_feat"]["thick_rep_dev"] is not None]
+                print("G-CORPUS F thickness: plates max |t_features/t - 1| = "
+                      "%s over %d (limit 2 %%); fins max %s over %d "
+                      "(reported, not gated)"
+                      % ("%.3f %%" % (100.0 * max(pd)) if pd else "n/a",
+                         len(pd),
+                         "%.3f %%" % (100.0 * max(fd)) if fd else "n/a",
+                         len(fd)))
+        ok = all(counts[c] == n for c in chks)
         if ok:
             print("G-CORPUS PASS")
         else:
@@ -313,6 +421,21 @@ def _selftest():
         assert out["pass"], out["fails"][:5]
         return "every check 24/24 (counts line above)"
 
+    def group_d():
+        out = run_gate("D", 16, 7, BINARY)
+        assert out["pass"], out["fails"][:5]
+        return "every check 16/16 incl. features (counts line above)"
+
+    def group_e():
+        out = run_gate("E", 16, 7, BINARY)
+        assert out["pass"], out["fails"][:5]
+        return "every check 16/16 incl. features (counts line above)"
+
+    def group_f():
+        out = run_gate("F", 16, 7, BINARY)
+        assert out["pass"], out["fails"][:5]
+        return "every check 16/16 incl. features (counts line above)"
+
     def _ctrl_bytes(row, data, name):
         d = tempfile.mkdtemp(prefix="gctrl_")
         try:
@@ -329,6 +452,9 @@ def _selftest():
     def group_controls():
         wing = importlib.import_module("gen_wing")
         lathe = importlib.import_module("gen_lathe")
+        bluff = importlib.import_module("gen_bluff")
+        gap_gen = importlib.import_module("gen_gap")
+        thin = importlib.import_module("gen_thin")
         verdicts = []
 
         # (1) an open lathe: the ogive's nose-pole fan removed
@@ -384,15 +510,65 @@ def _selftest():
         res = _ctrl_bytes(row, stl_io.stl_bytes(P2, T, wing.SOLID), "scaled")
         assert res["volume"], res["volume"]
         verdicts.append("volume x1.02: volume (%s)" % res["volume"])
+
+        # (5) a commensurate box_c made incommensurate (every z x 1.0003)
+        row, _ = bluff.make_row(7, 0)
+        assert row["params"]["shape"] == "box_c", row["params"]["shape"]
+        P, T = bluff.build(row["params"])
+        P2 = P.copy()
+        P2[:, 2] *= 1.0003
+        res = _ctrl_bytes(row, stl_io.stl_bytes(P2, T, bluff.SOLID),
+                          "box_incommensurate")
+        assert res["features"], res["features"]
+        assert "commensurate False != expected True" in res["features"], \
+            res["features"]
+        verdicts.append("box_c z x1.0003: features (%s)" % res["features"])
+
+        # (6) an E pair's gap closed by 5 per cent (body b moved in -y)
+        row, _ = gap_gen.make_row(7, 0)
+        assert row["params"]["shape"] == "boxes", row["params"]["shape"]
+        P, T = gap_gen.build(row["params"])
+        P2 = P.copy()
+        P2[P2[:, 1] > 0.0, 1] -= 0.05 * gap_gen.gap(row["params"])
+        res = _ctrl_bytes(row, stl_io.stl_bytes(P2, T, gap_gen.SOLID),
+                          "gap_closed")
+        assert res["features"], res["features"]
+        assert "outer_gap_m" in res["features"], res["features"]
+        verdicts.append("E gap -5%%: features (%s)" % res["features"])
+
+        # (7) an E pair with body b removed: one closed component, not two
+        row, _ = gap_gen.make_row(7, 0)
+        P, T = gap_gen.build_bodies(row["params"])[0]
+        res = _ctrl_bytes(row, stl_io.stl_bytes(P, T, gap_gen.SOLID),
+                          "body_removed")
+        assert "n_components = 1 != 2" in res["closed"], res["closed"]
+        assert res["volume"], res["volume"]
+        verdicts.append("E body removed: closed (n_components = 1 != 2), "
+                        "volume (%s)" % res["volume"])
+
+        # (8) a plate thickened by 5 per cent (its z-max face lifted)
+        row, _ = thin.make_row(7, 0)
+        assert row["params"]["shape"] == "plate_c", row["params"]["shape"]
+        P, T = thin.build(row["params"])
+        P2 = P.copy()
+        P2[P2[:, 2] == P2[:, 2].max(), 2] = 1.05 * P2[:, 2].max()
+        res = _ctrl_bytes(row, stl_io.stl_bytes(P2, T, thin.SOLID),
+                          "plate_thickened")
+        assert res["features"], res["features"]
+        assert "inner_thickness_m" in res["features"], res["features"]
+        verdicts.append("plate z x1.05: features (%s)" % res["features"])
         for v in verdicts:
             print("  [gate] %s" % v)
-        return "4 of 4 failed by name"
+        return "8 of 8 failed by name"
 
     if not os.path.isfile(BINARY):
         print("SELFTEST FAIL: binary not found: %s" % BINARY)
         return 1
     groups = [("G-CORPUS A seed 7 n 24", group_a),
               ("G-CORPUS B seed 7 n 24", group_b),
+              ("G-CORPUS D seed 7 n 16", group_d),
+              ("G-CORPUS E seed 7 n 16", group_e),
+              ("G-CORPUS F seed 7 n 16", group_f),
               ("negative controls", group_controls)]
     n_ok = 0
     for name, fn in groups:

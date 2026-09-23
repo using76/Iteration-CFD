@@ -262,6 +262,53 @@ geometry is a pure function of (family, seed, index). Rows are `autonomy-manifes
 ManifestRows without `split` (AM-7's split.py adds it); STLs and manifests are never
 committed (docs/15 §E) — only the generators are.
 
+## corpus/ — families D, E and F
+
+- `corpus/meshkit.py` — the builders and row machinery the three families
+  share, numpy and stdlib only: twelve uniform draws per (salt, seed, index)
+  as the only randomness; axis-aligned grid boxes; lofts and prisms of
+  counter-clockwise rings with fan caps (an odd axis permutation is a
+  reflection, so its triangles are emitted with swapped corners); UV spheres
+  with exact poles; 64-gon circles with exact quarter points; a union that
+  refuses overlapping bodies. Every quad is split along the diagonal through
+  its lexicographically smallest world corner, so opposite parallel faces
+  with the same grid are mirror-triangulated — that is what makes the
+  fingerprint's thickness and gap samples face each other (a loft with
+  unmatched face diagonals measured +100 % to +1500 % thickness; with the
+  rule, 0-2.4 % on fins, exact on plates). The docs/15 §C lattice rule is restated on analytic
+  plane coordinates; `gate.py` checks the two agree.
+- `corpus/gen_bluff.py` — family D (120): an 8-slot cycle giving 30
+  commensurate boxes (box_c), 30 boxes nudged until the lattice rule says
+  incommensurate (box_n), 15 rounded boxes, 15 cross-flow cylinders and 30
+  Ahmed-type bodies (side-view front radius, rear slant 0-40 deg, no
+  stilts), from Ahmed, S. R., Ramm, G. & Faltin, G. (1984), "Some Salient
+  Features Of The Time-Averaged Ground Vehicle Wake", SAE Technical Paper
+  840300, DOI 10.4271/840300 — only the model's published proportions, as
+  the centre of the draw ranges. Closed forms: n_x·n_y·n_z·s³, L·W·H,
+  H·(L·W − (4−π)r²), π(d/2)²H, W·(L·H − (4−π)r_f²/2 − s²·sinφ·cosφ/2).
+- `corpus/gen_gap.py` — family E (60): 20 box, sphere and cylinder pairs
+  each, at gap_over_h·h_ref with gap_over_h in 0.5-5 and h_ref = l_ref/32
+  (the §B / AM-5 L4-template wall cell). Body a on -y, body b on +y, the
+  same x and z grids, so the closest-approach vertices sit at y = ∓gap/2
+  with equal (x, z) and features.py's outer_gap is exact. One STL holds
+  both bodies: two closed components, V − E + F = 4.
+- `corpus/gen_thin.py` — family F (60): a 6-slot cycle giving 10
+  commensurate plates (plate_c), 10 incommensurate plates (plate_n),
+  20 swept tapered fins with constant-length wedge edges, 10 commensurate
+  and 10 incommensurate L-section angles. Closed forms: n_x·n_y·n_t·s³,
+  L·W·t, t·span·((c_root + c_tip)/2 − e), W·t·(A + B − t). The commensurate
+  tier (box_c 30, plate_c 10, lcorner_c 10) is G-BLC-0's tier-0 stratum
+  (docs/15 §F): every axis-aligned plane lies on an octree lattice of
+  spacing at least bbox_extent/2⁶ (docs/15 §C), the rule features.py
+  applies to the mesh.
+- `corpus/gate.py` gains families D, E and F, a per-body component count
+  and the `features` check: the fingerprint is recomputed on the written
+  file and must agree with expected_features — commensurability and lattice
+  spacing (1e-8), planar fraction 1.0 or below it, outer gap and plate
+  thickness within 2 %; fin thickness is reported, never gated. Eight
+  negative controls (AM-3's four, plus a de-commensurated box, closed gap,
+  removed body, thickened plate) prove it is not vacuous.
+
 ## sensitivity.py — G-PILOT
 
 - `sensitivity.py` — docs/15 §B's measured failure turned into a decision: a
@@ -348,6 +395,8 @@ AM-9's rules (R-CURV, R-GAP, R-FEAT, R-PLANE) and AM-13's k-NN.
     python tools/autonomy/corpus/gen_wing.py --seed 1 --n 120 --out DIR   # family A STLs + manifest_A.jsonl
     python tools/autonomy/corpus/gen_lathe.py --seed 1 --n 120 --out DIR  # family B
     python tools/autonomy/corpus/gate.py --family A --family B --n 120 --seed 1   # G-CORPUS
+    python tools/autonomy/corpus/gen_bluff.py --seed 1 --n 120 --out DIR  # family D STLs + manifest_D.jsonl
+    python tools/autonomy/corpus/gate.py --family D --n 120 --seed 1      # G-CORPUS D (E and F: --n 60)
 
     python tools/autonomy/features.py FILE.stl --id NAME [--diag]      # one fingerprint (JSON)
     python tools/autonomy/features.py --corpus A --seed 1 --n 120        # fingerprint a whole family
