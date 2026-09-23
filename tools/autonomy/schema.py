@@ -7,7 +7,7 @@ schema.py - the autonomy package's validator: a stdlib JSON-Schema draft
 2020-12 subset written from the keyword list in docs/15 (no third-party
 import on the validation path), the canonical-sha256 gate lock (docs/15 §F,
 §I-3), the knob whitelist and legal-range table (docs/15 §C L0 (d), §I-5),
-the twelve semantic checks on an attempt row (docs/15 §D), and the a priori
+the seventeen semantic checks on an attempt row (docs/15 §D), and the a priori
 y+ helpers (docs/15 §D.3, §I-4).
 
     python tools/autonomy/schema.py --selftest              # the package gate
@@ -46,6 +46,7 @@ FIXTURE_KINDS = {"flow": "FlowSpec", "manifest": "ManifestRow",
                  "fingerprint": "Fingerprint", "decision": "DecisionRecord",
                  "attempt": "AttemptRow"}
 YPLUS_NAME = re.compile(r"(?i)(yplus|y_plus|blc|u_tau|(^|_)cf(_|$))")
+F1_CLASSES = ("config", "surface_closed", "layer_t1_G5", "timeout", "crash", "io")
 FLAT_PLATE_CITE = ("SPEC-LIT §32.5.6 (solver tree, feat/core-2 d272391, rust/SPEC-LIT.md:3898-3899); "
                    "Schlichting & Gersten, Boundary-Layer Theory, 8th ed., Springer (2000)")
 
@@ -443,7 +444,7 @@ def _finish_check_edit(pointer, value, row):
     return None
 
 
-# --- the twelve semantic checks on an attempt row (docs/15 §D) --------------
+# --- the seventeen semantic checks on an attempt row (docs/15 §D) -----------
 
 def _parse_iso(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -492,6 +493,24 @@ def check_attempt(row: dict, gates: dict, knobs: dict) -> list[str]:
     if row["fingerprint"]["geometry_id"] != row["geometry_id"]:
         out.append("attempt: fingerprint.geometry_id: the embedded fingerprint names a "
                    "different geometry")
+    if fl["F3a"] != (oc["pinned_frac"] is not None
+                     and oc["pinned_frac"] > gates["pinned_frac_max"]):
+        out.append("attempt: outcome.flags.F3a: F3a is pinned_frac > pinned_frac_max "
+                   "(docs/15 §D.1)")
+    if fl["F3b"] != (oc["p99_over_hf"] is not None
+                     and oc["p99_over_hf"] > gates["p99_residual_over_hf_max"]):
+        out.append("attempt: outcome.flags.F3b: F3b is p99_over_hf > "
+                   "p99_residual_over_hf_max (docs/15 §D.1)")
+    if fl["F3c"] != (oc["max_over_hf"] is not None
+                     and oc["max_over_hf"] > gates["max_residual_over_hf_max"]):
+        out.append("attempt: outcome.flags.F3c: F3c is max_over_hf > "
+                   "max_residual_over_hf_max (docs/15 §D.1)")
+    if fl["F5"] != (oc["n_cells"] is not None and oc["n_cells"] > gates["cell_budget"]):
+        out.append("attempt: outcome.flags.F5: F5 is n_cells > cell_budget (docs/15 §D.1)")
+    if fl["F1"] != (oc["exit_code"] != 0 or oc["failure_class"] in F1_CLASSES
+                    or (oc["failure_class"] or "").startswith("gate_")):
+        out.append("attempt: outcome.flags.F1: F1 is exit != 0, timeout, crash, io or a "
+                   "refusal class (docs/15 §D.1)")
     return out
 
 
@@ -790,7 +809,8 @@ def selftest() -> int:
         paths = ["attempt", "config_delta[0].pointer", "rule_id", "rule_id", "prediction",
                  "prediction.t_predicted", "t_end", "outcome.failure",
                  "outcome.strict_failure", "outcome.verdict", "outcome.patches[0].delivered",
-                 "fingerprint.geometry_id"]
+                 "fingerprint.geometry_id", "outcome.flags.F3a", "outcome.flags.F3b",
+                 "outcome.flags.F3c", "outcome.flags.F5", "outcome.flags.F1"]
         bads = []
         b = dict(row0); b["attempt"] = gates["attempts_k"] + 1; bads.append(b)
         b = dict(row0); b["config_delta"] = [dict(row0["config_delta"][0],
@@ -810,10 +830,20 @@ def selftest() -> int:
                 dict(row0["outcome"]["patches"][0], delivered=True)]); bads.append(b)
         b = dict(row0); b["fingerprint"] = dict(row0["fingerprint"],
                 geometry_id="other-geom"); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], flags=dict(
+                row0["outcome"]["flags"], F3a=False)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], flags=dict(
+                row0["outcome"]["flags"], F3b=False)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], flags=dict(
+                row0["outcome"]["flags"], F3c=False)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], flags=dict(
+                row0["outcome"]["flags"], F5=True)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], flags=dict(
+                row0["outcome"]["flags"], F1=True)); bads.append(b)
         for b, path in zip(bads, paths):
             msgs = check_attempt(b, gates, knobs)
             assert any(m.startswith("attempt: %s: " % path) for m in msgs),                 "S-check for %s did not fire: %s" % (path, msgs)
-        lines.append("[ok] semantic refusals: 12 by name")
+        lines.append("[ok] semantic refusals: 17 by name")
 
         k_names = 0
         for kind in SCHEMAS:

@@ -6,9 +6,10 @@
 selftest.py - the tools/autonomy package gate.
 
 Runs schema.py --selftest (the schemas, fixtures, knob table and lock), then
-checks that README.md still carries docs/15 §D verbatim between its markers and
-that deps_licences.py --python sees numpy, scipy and scikit-learn installed as
-BSD-3-Clause.
+score.py --selftest (the G-SCORER probe fixtures, the refusal grammar, the
+content hash and the live automesher), then checks that README.md still
+carries docs/15 §D verbatim between its markers and that deps_licences.py
+--python sees numpy, scipy and scikit-learn installed as BSD-3-Clause.
 
     python tools/autonomy/selftest.py
 """
@@ -27,7 +28,7 @@ README = os.path.join(HERE, "README.md")
 
 
 def main():
-    """Run schema.py --selftest as a child; echo its output; fail below 8 [ok] lines."""
+    """Run schema.py and score.py --selftest as children; echo; fail on either."""
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     p = subprocess.run([sys.executable, os.path.join(HERE, "schema.py"), "--selftest"],
                        capture_output=True, text=True, encoding="utf-8",
@@ -36,10 +37,17 @@ def main():
     assert p.returncode == 0 and n_ok >= 8, \
         "schema.py --selftest failed (exit %d, %d [ok]): %s" % (p.returncode, n_ok, (p.stdout + p.stderr)[-2000:])
     assert "SELFTEST PASS" in p.stdout
-    for l in p.stdout.splitlines():
+    q = subprocess.run([sys.executable, os.path.join(HERE, "score.py"), "--selftest"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=env, timeout=300)
+    s_ok = sum(1 for l in q.stdout.splitlines() if l.startswith("[ok]"))
+    assert q.returncode == 0 and s_ok >= 9 and "SELFTEST PASS" in q.stdout, \
+        "score.py --selftest failed (exit %d, %d [ok]): %s" % (q.returncode, s_ok,
+                                                               (q.stdout + q.stderr)[-2000:])
+    for l in p.stdout.splitlines() + q.stdout.splitlines():
         if l != "SELFTEST PASS":
             print(l)
-    return n_ok
+    return n_ok + s_ok
 
 
 def _section_d(plan_lines):

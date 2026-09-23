@@ -90,6 +90,39 @@ rules the corpus flow window at L4–L6 is Re_L ≈ 1e4–1e5 (L4 at 1 m covers 
 3.6e4–8.1e4).
 <!-- END VERBATIM -->
 
+## score.py
+
+`score.py` (AM-2) turns one automesher run into §D's Outcome. It reads only what `ofgpu-automesher`
+itself prints and writes: the `=== stage i/n <name> ===` banners and `--- <name>: x.x s` elapsed lines
+of `driver.rs`, the `error:` refusal of `bin/automesher.rs`'s main in SPEC-LIT §92.3's fixed grammar, and
+`<name>_summary.json` (§92.14.3). On `exit != 0` the summary is IGNORED even if given — a refusal writes
+nothing (§92.14.4), so any summary there is stale — and the refusal line is classed, first rule that fires:
+`surface/closed:` → `surface_closed`; `quality gate G<k> (` → `gate_G<k>@<last stage>`; the (92.51)
+thin-first-layer text → `layer_t1_G5`; `io error on ` → `io`; anything else → `config`. `exit 0` with no
+summary is `io`; a timeout or a missing process is `timeout`/`crash`. An unknown layer drop text raises
+`ScoreParseError` — the scorer never guesses past what the reports say.
+
+The F-flags are stored in the RATIO form `check_attempt` re-derives (S13–S16): `pinned_frac > 0.05`,
+`p99/h_f > 0.1`, `max/h_f > 0.5` with `h_f = base_size / 2**max_level`, `F4` a requested wall patch with a
+zero `wall_patches` row or `n_regions != 1`, `F5` cells over the 2 M budget. **BLC_8** and **BLC_full** use
+every STL wall patch as denominator; a patch counts only when delivered (dropped is null, n_layers ≥ 8) and
+its a priori y⁺ (`schema.yplus_a_priori`, named `_a_priori` until AR-2) is ≤ 1. **BLC_beta** is the area
+share with achieved/requested ≥ beta; until AM-R1 reports per-face tau it is BOUNDED per patch from
+`t1_min`, the area-weighted `mean_frac` and `full_area_frac` (two Markov-type inequalities, `exact: false`).
+A requested patch that was dropped is not a failure — it scores 0 — but it makes `strict_failure` true, so
+the two can never be traded out of sight. `missing_signals` names what today's reports lack instead of
+guessing: the `-check` that was not run, AM-R2's `area_ratio` and octree gate fields, AM-R1's per-face tau.
+
+`content_sha256` hashes `constant/polyMesh`'s points, faces, owner, neighbour and boundary, name- and
+length-prefixed — equal across two runs of one config, different after one byte. `run_check` is §92.14.5's
+`-check`: it returns the exit code, the refusal line and the gate name, and `check_exit != 0` is flag F2.
+`score.py --hash-gate CONFIG` runs one config three ways (A, B, then C with one whitelisted knob moved by
+`--pointer`/`--to`) and demands A == B and C != A by content sha256 — the content-hash half of G-DET. The 31
+frozen probes under `fixtures/probes/` are the docs/15 surveys' own automesher outputs, re-scored on every
+`--selftest`: the exit codes, patch areas, hand labels and expected numbers in `labels.json` are the
+SUPERVISOR'S, computed from the summaries independently of the scorer, and the scorer is wrong whenever
+they disagree.
+
 ## The locked constants
 
 | field | value |

@@ -1,0 +1,2331 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted. AM-2 G-SCORER fixtures: the docs/15 survey probes (mesh tree c93e4c1 binary, 2026-09-23), frozen from the scratchpad. Hand labels and expected numbers are the supervisor's, computed from the summary JSON and the STL independently of score.py.",
+ "flow": {
+  "u_ref_m_s": 0.003,
+  "l_ref_m": 1.0,
+  "nu_m2_s": 1.5e-05,
+  "note": "AM-2 fixture flow, chosen by the supervisor so the y+ indicator is exercised on both sides: Re_L 200, laminar C_F, y+(0.02 m) = 0.867 <= 1, y+(0.05 m) = 2.17 > 1. Not a physical claim about any probe."
+ },
+ "betas": [
+  0.5,
+  0.8,
+  0.95
+ ],
+ "probes": [
+  {
+   "id": "L1",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at min_thickness * T = 1.820e-3",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.3968275,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.21668384866156212,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "L2",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "the gate still failed after 4 retreat(s) on the layer cells themselves ... (SPEC-LIT 92.13)",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.5060359,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.43336769732312425,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "L3",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at min_thickness * T = 1.100e-3",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.3590402,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.21668384866156212,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "NO15",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 1,
+   "wall_seconds": null,
+   "hand_label": "as NO25 with a 15 deg ceiling",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": "castellate",
+    "failure_class": "gate_G4@castellate",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 1.6,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "NO25",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 1,
+   "wall_seconds": null,
+   "hand_label": "octree printed gate: FAILED without refusing; castellate refused G4 on 6432 faces at 25.239 > 25",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": "castellate",
+    "failure_class": "gate_G4@castellate",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 1.6,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "NO26",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "no layers; 288 of 1250 boundary points pinned (23 %): F3a",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 12880,
+    "pinned_frac": 0.2304,
+    "p99_over_hf": 0.08738138894468009,
+    "max_over_hf": 0.0873858884572835,
+    "h_f_m": 0.125,
+    "seconds": 4.1765677,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": false,
+      "row": false
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "NO28",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "no layers; 528 scaled back, 0 pinned, converged: pass",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.04611351619030872,
+    "max_over_hf": 0.046402456158353825,
+    "h_f_m": 0.125,
+    "seconds": 3.5567374000000003,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": false,
+      "row": false
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": false,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "box_L4",
+   "stl": "box.stl",
+   "patch_areas_m2": {
+    "body": 2.5
+   },
+   "n_triangles": 3072,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "out of iterations, 1672/2562 pinned (65 %): F3a F3b F3c; retreat give-up",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 42480,
+    "pinned_frac": 0.652615144418423,
+    "p99_over_hf": 0.3690682809688841,
+    "max_over_hf": 0.6719398219782704,
+    "h_f_m": 0.03125,
+    "seconds": 17.9888239,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "body",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "box_sphere",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "the shipped example: exit 0, sphere layers dropped at min_thickness * T = 4.600e-3",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.4432307,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "coarse",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "no layers requested (n = 0), max_level 0, 26 boundary points converged: pass; the unresolved sphere is what F3d (AM-R2 area ratio) would catch",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 992,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0011669713580153898,
+    "max_over_hf": 0.0011669713580153898,
+    "h_f_m": 1.0,
+    "seconds": 0.0536327,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": false,
+      "row": false
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": false,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cube_cf",
+   "stl": "cube.stl",
+   "patch_areas_m2": {
+    "cube": 5.999999999999998
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at 1.995e-2",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 196,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0043849052512140675,
+    "max_over_hf": 0.0043849052512140675,
+    "h_f_m": 0.5,
+    "seconds": 0.0094693,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cube_n5",
+   "stl": "cube.stl",
+   "patch_areas_m2": {
+    "cube": 5.999999999999998
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at 4.522e-2",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 196,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0043849052512140675,
+    "max_over_hf": 0.0043849052512140675,
+    "h_f_m": 0.5,
+    "seconds": 0.0100686,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cube_ok",
+   "stl": "cube.stl",
+   "patch_areas_m2": {
+    "cube": 5.999999999999998
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "unit cube off the planes: dropped at 4.600e-3",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 196,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0043849052512140675,
+    "max_over_hf": 0.0043849052512140675,
+    "h_f_m": 0.5,
+    "seconds": 0.0095635,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cubep_cf",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "retreat give-up (92.13)",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 226,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0020786091044560427,
+    "max_over_hf": 0.0023710315566513778,
+    "h_f_m": 0.5,
+    "seconds": 0.0312625,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cubep_defaults",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at 7.980e-3",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 226,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0020786091044560427,
+    "max_over_hf": 0.0023710315566513778,
+    "h_f_m": 0.5,
+    "seconds": 0.0120004,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cubep_nofeat",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "feature_tolerance 0: 3 layers on 54 faces, full 100 %, t1 2.000e-2 of 2.000e-2: pass, BLC_full 1.0",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 388,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0,
+    "max_over_hf": 0.0,
+    "h_f_m": 0.5,
+    "seconds": 0.0081463,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 1.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 3,
+      "dropped": false,
+      "full_area_frac": 1.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 1.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": false,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cubep_nofeat_cf",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "3 layers on 54 faces, full 0.0 %, mean frac 0.251, t1 1.253e-2 of 5.000e-2 - NO face received the full stack",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:no_full_stack",
+    "n_cells": 388,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0,
+    "max_over_hf": 0.0,
+    "h_f_m": 0.5,
+    "seconds": 0.0086584,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 3,
+      "dropped": false,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.2506265664160401
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": false,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cubep_nosnap",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "snap.iterations 0: full 100 %: pass, BLC_full 1.0",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 388,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0,
+    "max_over_hf": 0.0,
+    "h_f_m": 0.5,
+    "seconds": 0.0081711,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 1.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 3,
+      "dropped": false,
+      "full_area_frac": 1.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 1.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": false,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cubep_ok",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "on-plane cube, default snap moves the wall: retreat give-up (92.13)",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 226,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0020786091044560427,
+    "max_over_hf": 0.0023710315566513778,
+    "h_f_m": 0.5,
+    "seconds": 0.029771,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "ok",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "layers: patch sphere: the thickness fell below min_thickness * T = 4.600e-3",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.2960405,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "rev2_L4",
+   "stl": "rev2.stl",
+   "patch_areas_m2": {
+    "body": 0.4878854393039955
+   },
+   "n_triangles": 10112,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "converged, 0 pinned, p99/h_f 0.017: not a failure; layers given up on the snapped wall (92.13): strict failure",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 22856,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.01691587697090773,
+    "max_over_hf": 0.016924028934665967,
+    "h_f_m": 0.03125,
+    "seconds": 6.1781553,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "body",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "rev_L4",
+   "stl": "rev.stl",
+   "patch_areas_m2": {
+    "body": 0.4878854393039955
+   },
+   "n_triangles": 10112,
+   "exit_code": 1,
+   "wall_seconds": 0.062,
+   "hand_label": "error: surface/closed: 16 open edge(s), exit 1 in 62 ms, before any banner",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": null,
+    "failure_class": "surface_closed",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 0.062,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "thick_stack",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at min_thickness * T = 4.522e-2",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.3891915,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "thin_t1",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 1,
+   "wall_seconds": null,
+   "hand_label": "error: 3 * 0.0001 / 0.03757 = 0.007984 < min_thickness_ratio = 0.05 (92.51), exit 1 in stage 5",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": "layers",
+    "failure_class": "layer_t1_G5",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 2.9,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "tight_nonorth",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "max_non_orth 35: final 30.118 deg passes; layers dropped at 4.600e-3",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.3664143,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "wb_L4",
+   "stl": "wb.stl",
+   "patch_areas_m2": {
+    "body": 10.529419365009215
+   },
+   "n_triangles": 16628,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "1774/12808 pinned (14 %): F3a F3b F3c",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 115313,
+    "pinned_frac": 0.13850718301061837,
+    "p99_over_hf": 0.6920475069195369,
+    "max_over_hf": 1.8558444653442463,
+    "h_f_m": 0.03125,
+    "seconds": 91.9793041,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "body",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "wing_a_L3",
+   "stl": "wing_a.stl",
+   "patch_areas_m2": {
+    "wing": 6.288127839555913
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "416/1484 pinned (28 %): F3a F3b",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 11234,
+    "pinned_frac": 0.2803234501347709,
+    "p99_over_hf": 0.4010443092786121,
+    "max_over_hf": 0.40104826218788076,
+    "h_f_m": 0.0625,
+    "seconds": 6.6734335,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": false,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "wing_a_L4",
+   "stl": "wing_a.stl",
+   "patch_areas_m2": {
+    "wing": 6.288127839555913
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "2702/6690 pinned (40 %): F3a F3b F3c",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 78244,
+    "pinned_frac": 0.4038863976083707,
+    "p99_over_hf": 0.4708483142551278,
+    "max_over_hf": 0.5352581949376582,
+    "h_f_m": 0.03125,
+    "seconds": 41.2828161,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "wing_a_L5",
+   "stl": "wing_a.stl",
+   "patch_areas_m2": {
+    "wing": 6.288127839555913
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "9802/27558 pinned (36 %): F3a F3b F3c",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 585900,
+    "pinned_frac": 0.3556861891283838,
+    "p99_over_hf": 0.47786671951107845,
+    "max_over_hf": 0.5969281976378795,
+    "h_f_m": 0.015625,
+    "seconds": 283.9921829,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "wing_b_L4",
+   "stl": "wing_b.stl",
+   "patch_areas_m2": {
+    "wing": 4.336066039093696
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "2623/4872 pinned (54 %): F3a F3b F3c",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 61490,
+    "pinned_frac": 0.5383825944170771,
+    "p99_over_hf": 0.5732519873188513,
+    "max_over_hf": 2.2870399001821817,
+    "h_f_m": 0.03125,
+    "seconds": 33.044202,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "wing_c_L4",
+   "stl": "wing_c.stl",
+   "patch_areas_m2": {
+    "wing": 4.723455267692194
+   },
+   "n_triangles": 6046,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "2278/5384 pinned (42 %): F3a F3b F3c",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 64370,
+    "pinned_frac": 0.42310549777117384,
+    "p99_over_hf": 0.5579538771791831,
+    "max_over_hf": 2.2734792552217797,
+    "h_f_m": 0.03125,
+    "seconds": 34.2063207,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d is null",
+     "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)",
+     "BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); BLC_beta is bounded from t1_min, mean_frac and full_area_frac"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail"
+   }
+  }
+ ],
+ "variants": [
+  {
+   "id": "cubep_nofeat",
+   "flow": {
+    "u_ref_m_s": 10.0,
+    "l_ref_m": 1.0,
+    "nu_m2_s": 1.5e-05,
+    "note": "air at 10 m/s over 1 m: y+ of a 0.02 m first layer is far above 1"
+   },
+   "betas": [
+    0.5,
+    0.8,
+    0.95
+   ],
+   "expect": {
+    "yplus_a_priori": 655.0925391932913,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "failure_class": null,
+    "verdict": "pass"
+   }
+  },
+  {
+   "id": "cubep_nofeat_cf",
+   "flow": {
+    "u_ref_m_s": 0.001,
+    "l_ref_m": 1.0,
+    "nu_m2_s": 1.5e-05,
+    "note": "Re_L 66.7: y+ of a 0.05 m first layer is 0.95 <= 1"
+   },
+   "betas": [
+    0.25,
+    0.5
+   ],
+   "expect": {
+    "yplus_a_priori": 0.9505732741667087,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.25,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     },
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "failure_class": "layer_dropped:no_full_stack",
+    "verdict": "pass"
+   }
+  }
+ ]
+}

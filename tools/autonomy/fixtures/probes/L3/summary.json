@@ -1,0 +1,272 @@
+{
+  "case_dir": "<survey>\\am\\case_L3",
+  "config": {
+    "castellation": {
+      "keep_region": "seed",
+      "min_faces": 4,
+      "seed_point": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    },
+    "domain": {
+      "base_size": 1.0,
+      "extent": [
+        0.0,
+        10.0,
+        0.0,
+        10.0,
+        0.0,
+        10.0
+      ],
+      "grading": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "input": {
+      "surfaces": [
+        {
+          "name": null,
+          "path": "<survey>\\am\\..\\box_sphere.stl"
+        }
+      ]
+    },
+    "layers": {
+      "cell_frac": 0.2,
+      "first_thickness": 0.005,
+      "growth": 1.2,
+      "medial_frac": 0.5,
+      "min_thickness": 0.1,
+      "n": 2,
+      "normal_passes": 3,
+      "patches": [
+        "sphere"
+      ],
+      "retreat_limit": 4,
+      "smoothing": 0.5,
+      "smoothing_passes": 4
+    },
+    "output": {
+      "case_dir": "<survey>\\am\\case_L3",
+      "name": "L3",
+      "patch_names": {
+        "xMax": "outlet",
+        "xMin": "inlet",
+        "yMax": "side_y1",
+        "yMin": "side_y0",
+        "zMax": "top",
+        "zMin": "ground"
+      }
+    },
+    "quality": {
+      "max_closure": 1e-10,
+      "max_cond": 10000.0,
+      "max_non_orth_deg": 70.0,
+      "min_thickness_ratio": 0.05,
+      "report_non_orth_deg": 60.0
+    },
+    "refinement": {
+      "feature_angle_deg": 30.0,
+      "levels": [
+        {
+          "bands": [
+            {
+              "distance": 0.5,
+              "level": 3
+            },
+            {
+              "distance": 2.0,
+              "level": 2
+            }
+          ],
+          "feature_level": 0,
+          "patch": "sphere"
+        }
+      ],
+      "max_level": 3
+    },
+    "snap": {
+      "feature_tolerance": 0.5,
+      "iterations": 30,
+      "max_area_ratio": 4.0,
+      "smoothing": 0.5,
+      "smoothing_passes": 3,
+      "tolerance": 0.001,
+      "undo_limit": 4
+    }
+  },
+  "config_path": "<survey>\\am\\L3.json",
+  "identity": {
+    "host": "MAIN_M",
+    "mesh_id": "m_430a2a117e3c75e8",
+    "run_id": null,
+    "schema": 1,
+    "tool": "ofgpu-automesher",
+    "written_at": "2026-09-23T12:27:31Z"
+  },
+  "layout": null,
+  "mesh": {
+    "n_boundary_faces": 1848,
+    "n_cells": 12880,
+    "n_internal_faces": 40128,
+    "n_points": 17767,
+    "patches": [
+      {
+        "kind": "patch",
+        "name": "inlet",
+        "size": 100
+      },
+      {
+        "kind": "patch",
+        "name": "outlet",
+        "size": 100
+      },
+      {
+        "kind": "patch",
+        "name": "side_y0",
+        "size": 100
+      },
+      {
+        "kind": "patch",
+        "name": "side_y1",
+        "size": 100
+      },
+      {
+        "kind": "patch",
+        "name": "ground",
+        "size": 100
+      },
+      {
+        "kind": "patch",
+        "name": "top",
+        "size": 100
+      },
+      {
+        "kind": "wall",
+        "name": "sphere",
+        "size": 1248
+      }
+    ]
+  },
+  "name": "L3",
+  "quality": {
+    "ldu_ordered": true,
+    "max_closure": 3.695799215425099e-15,
+    "max_closure_cell": 1803,
+    "max_cond": 6.297821571492879,
+    "max_cond_cell": 7223,
+    "max_non_orth_deg": 30.117647888728328,
+    "mean_non_orth_deg": 5.135245216056377,
+    "min_thickness_cell": 5871,
+    "min_thickness_ratio": 0.4508951565934893,
+    "min_volume": 0.00047171086265988734,
+    "min_volume_cell": 7675,
+    "n_cells": 12880,
+    "n_duplicate_faces": 0,
+    "n_non_orth_over_report": 0,
+    "n_regions": 1,
+    "passed": true,
+    "region_sizes": [
+      12880
+    ]
+  },
+  "stages": [
+    {
+      "balance_splits": 72,
+      "base_n": [
+        10,
+        10,
+        10
+      ],
+      "max_level": 3,
+      "n_leaves": 14832,
+      "refine_splits": 1904,
+      "seconds": 1.7106436999999999,
+      "stage": "octree"
+    },
+    {
+      "n_cells": 12880,
+      "n_dropped_components": 0,
+      "removed": {
+        "off_region": 0,
+        "pinch": 0,
+        "solid": 1952,
+        "starved": 0,
+        "unrepaired_pinch": 0
+      },
+      "seconds": 0.0815031,
+      "stage": "castellate",
+      "wall_faces": 1248,
+      "wall_patches": {
+        "sphere": 1248
+      }
+    },
+    {
+      "converged": true,
+      "iterations": 7,
+      "max_residual": 0.0010611840622805795,
+      "max_step": 0.0006657355484237288,
+      "n_abandoned": 0,
+      "n_boundary_points": 1250,
+      "n_feature_corners": 0,
+      "n_feature_edges": 0,
+      "n_pinned": 0,
+      "n_scaled_back": 0,
+      "n_snapped_to_corner": 0,
+      "n_snapped_to_edge": 0,
+      "p99_residual": 0.000992831268036464,
+      "seconds": 0.9132852,
+      "stage": "snap"
+    },
+    {
+      "n_regions": 1,
+      "seconds": 0.0,
+      "skipped": true,
+      "stage": "split"
+    },
+    {
+      "n_layer_cells": 0,
+      "n_layer_points": 0,
+      "n_side_boundary": 0,
+      "n_side_internal": 0,
+      "n_split_sides": 0,
+      "patches": [
+        {
+          "dropped": "patch \"sphere\": the thickness fell below min_thickness * T = 1.100e-3",
+          "full_area_frac": 0.0,
+          "mean_frac": 0.0,
+          "n_faces": 1248,
+          "n_layers": 0,
+          "name": "sphere",
+          "t1_mean": 0.0,
+          "t1_min": 0.0,
+          "t1_requested": 0.005
+        }
+      ],
+      "retreats": 3,
+      "seconds": 0.6499958,
+      "stage": "layers"
+    }
+  ],
+  "stopped_after": null,
+  "surface": {
+    "bbox": [
+      4.0,
+      4.0,
+      4.0,
+      6.0,
+      6.0,
+      6.0
+    ],
+    "n_points": 4514,
+    "n_triangles": 9024,
+    "patches": [
+      "sphere"
+    ]
+  },
+  "tool": "ofgpu-automesher",
+  "total_seconds": 3.3590402
+}

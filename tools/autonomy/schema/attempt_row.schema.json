@@ -72,12 +72,31 @@
         "max_over_hf": {"type": ["number", "null"], "minimum": 0},
         "blc8_a_priori": {"type": "number", "minimum": 0, "maximum": 1},
         "blc_full_a_priori": {"type": "number", "minimum": 0, "maximum": 1},
-        "patches": {"type": "array", "items": {"$ref": "#/$defs/PatchOutcome"}}
+        "patches": {"type": "array", "items": {"$ref": "#/$defs/PatchOutcome"}},
+        "h_f_m": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "n_pinned": {"type": ["integer", "null"], "minimum": 0},
+        "n_boundary_points": {"type": ["integer", "null"], "minimum": 0},
+        "refusal_line": {"type": ["string", "null"]},
+        "blc_beta_a_priori": {"type": "array", "items": {"$ref": "#/$defs/BetaBound"}},
+        "missing_signals": {"type": "array", "items": {"type": "string", "minLength": 1}}
       },
       "required": ["verdict", "failure_class", "flags", "failure", "strict_failure",
                    "exit_code", "last_stage", "n_cells", "seconds", "pinned_frac",
                    "p99_over_hf", "max_over_hf", "blc8_a_priori", "blc_full_a_priori",
-                   "patches"]
+                   "patches", "h_f_m", "n_pinned", "n_boundary_points", "refusal_line",
+                   "blc_beta_a_priori", "missing_signals"]
+    },
+    "BetaBound": {
+      "title": "BetaBound",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "beta": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "lo": {"type": "number", "minimum": 0, "maximum": 1},
+        "hi": {"type": "number", "minimum": 0, "maximum": 1},
+        "exact": {"type": "boolean"}
+      },
+      "required": ["beta", "lo", "hi", "exact"]
     },
     "Flags": {
       "title": "Flags",
@@ -109,11 +128,15 @@
         "t1_requested_m": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "yplus_a_priori": {"type": ["number", "null"], "minimum": 0},
         "delivered": {"type": "boolean"},
-        "capability_limited": {"type": "boolean"}
+        "capability_limited": {"type": "boolean"},
+        "layer_class": {"type": ["string", "null"],
+                        "enum": ["min_thickness", "retreat_snapped", "no_full_stack", null]},
+        "mean_frac": {"type": ["number", "null"], "minimum": 0},
+        "t1_min_m": {"type": ["number", "null"], "minimum": 0}
       },
       "required": ["name", "area_m2", "requested", "n_layers", "dropped",
                    "full_area_frac", "t1_requested_m", "yplus_a_priori", "delivered",
-                   "capability_limited"]
+                   "capability_limited", "layer_class", "mean_frac", "t1_min_m"]
     }
   }
 }

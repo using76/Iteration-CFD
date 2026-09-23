@@ -1,0 +1,65 @@
+{
+ "input": {
+  "surfaces": [
+   {
+    "path": "wing_a.stl"
+   }
+  ]
+ },
+ "domain": {
+  "extent": [
+   -3.0,
+   7.0,
+   -3.0,
+   3.0,
+   -2.5,
+   2.5
+  ],
+  "base_size": 0.5
+ },
+ "refinement": {
+  "levels": [
+   {
+    "patch": "wing",
+    "bands": [
+     {
+      "distance": 0.1,
+      "level": 4
+     },
+     {
+      "distance": 0.5,
+      "level": 3
+     },
+     {
+      "distance": 1.5,
+      "level": 2
+     }
+    ],
+    "feature_level": 4
+   }
+  ],
+  "max_level": 4
+ },
+ "castellation": {
+  "keep_region": "seed",
+  "seed_point": [
+   -2.9,
+   -2.9,
+   -2.4
+  ]
+ },
+ "layers": {
+  "patches": [
+   "wing"
+  ],
+  "n": 3,
+  "first_thickness": 0.002,
+  "growth": 1.3,
+  "min_thickness": 0.002,
+  "medial_frac": 0.5
+ },
+ "output": {
+  "case_dir": "wing_a_L4_case",
+  "name": "wing_a_L4"
+ }
+}

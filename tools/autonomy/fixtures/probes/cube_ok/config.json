@@ -1,0 +1,45 @@
+{
+ "input": {
+  "surfaces": [
+   {
+    "path": "<survey>\\am\\cube.stl"
+   }
+  ]
+ },
+ "domain": {
+  "extent": [
+   0,
+   4,
+   0,
+   4,
+   0,
+   4
+  ],
+  "base_size": 1.0
+ },
+ "refinement": {
+  "levels": [
+   {
+    "patch": "cube",
+    "bands": [
+     {
+      "distance": 0.0,
+      "level": 1
+     }
+    ]
+   }
+  ],
+  "max_level": 1
+ },
+ "layers": {
+  "patches": [
+   "cube"
+  ],
+  "n": 2,
+  "first_thickness": 0.02
+ },
+ "output": {
+  "case_dir": "<survey>\\am\\case_cube_ok",
+  "name": "cube_ok"
+ }
+}

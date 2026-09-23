@@ -1,0 +1,6 @@
+ofgpu-automesher (SPEC-LIT §92, hex-dominant path)
+[stl] rev.stl: 10112 triangle(s), 1 patch(es)
+
+error: surface/closed: "16 open edge(s), 0 non-manifold edge(s)" is not supported by ofgpu
+               note: inside/outside classification (SPEC-LIT §23.2) requires a closed surface: every undirected edge shared by exactly two oppositely oriented triangles
+               (run with -permissive to substitute parity voting over the open surface (SPEC-LIT §23.3) and continue)

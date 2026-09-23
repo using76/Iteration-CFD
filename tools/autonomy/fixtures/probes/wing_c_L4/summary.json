@@ -1,0 +1,268 @@
+{
+  "case_dir": "wing_c_L4_case",
+  "config": {
+    "castellation": {
+      "keep_region": "seed",
+      "min_faces": 4,
+      "seed_point": [
+        -2.9,
+        -2.9,
+        -2.4
+      ]
+    },
+    "domain": {
+      "base_size": 0.5,
+      "extent": [
+        -3.0,
+        7.0,
+        -3.0,
+        3.0,
+        -2.5,
+        2.5
+      ],
+      "grading": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "input": {
+      "surfaces": [
+        {
+          "name": null,
+          "path": "wing_c.stl"
+        }
+      ]
+    },
+    "layers": {
+      "cell_frac": 0.5,
+      "first_thickness": 0.002,
+      "growth": 1.3,
+      "medial_frac": 0.5,
+      "min_thickness": 0.002,
+      "n": 3,
+      "normal_passes": 3,
+      "patches": [
+        "wing"
+      ],
+      "retreat_limit": 4,
+      "smoothing": 0.5,
+      "smoothing_passes": 4
+    },
+    "output": {
+      "case_dir": "wing_c_L4_case",
+      "name": "wing_c_L4"
+    },
+    "quality": {
+      "max_closure": 1e-10,
+      "max_cond": 10000.0,
+      "max_non_orth_deg": 70.0,
+      "min_thickness_ratio": 0.05,
+      "report_non_orth_deg": 60.0
+    },
+    "refinement": {
+      "feature_angle_deg": 30.0,
+      "levels": [
+        {
+          "bands": [
+            {
+              "distance": 0.1,
+              "level": 4
+            },
+            {
+              "distance": 0.5,
+              "level": 3
+            },
+            {
+              "distance": 1.5,
+              "level": 2
+            }
+          ],
+          "feature_level": 4,
+          "patch": "wing"
+        }
+      ],
+      "max_level": 4
+    },
+    "snap": {
+      "feature_tolerance": 0.5,
+      "iterations": 30,
+      "max_area_ratio": 4.0,
+      "smoothing": 0.5,
+      "smoothing_passes": 3,
+      "tolerance": 0.001,
+      "undo_limit": 4
+    }
+  },
+  "config_path": "wing_c_L4.json",
+  "identity": {
+    "host": "MAIN_M",
+    "mesh_id": "m_763b399752dc284a",
+    "run_id": null,
+    "schema": 1,
+    "tool": "ofgpu-automesher",
+    "written_at": "2026-09-23T12:27:15Z"
+  },
+  "layout": null,
+  "mesh": {
+    "n_boundary_faces": 6826,
+    "n_cells": 64370,
+    "n_internal_faces": 198427,
+    "n_points": 80282,
+    "patches": [
+      {
+        "kind": "patch",
+        "name": "xMin",
+        "size": 120
+      },
+      {
+        "kind": "patch",
+        "name": "xMax",
+        "size": 120
+      },
+      {
+        "kind": "patch",
+        "name": "yMin",
+        "size": 362
+      },
+      {
+        "kind": "patch",
+        "name": "yMax",
+        "size": 362
+      },
+      {
+        "kind": "patch",
+        "name": "zMin",
+        "size": 240
+      },
+      {
+        "kind": "patch",
+        "name": "zMax",
+        "size": 240
+      },
+      {
+        "kind": "wall",
+        "name": "wing",
+        "size": 5382
+      }
+    ]
+  },
+  "name": "wing_c_L4",
+  "quality": {
+    "ldu_ordered": true,
+    "max_closure": 4.012717994995766e-15,
+    "max_closure_cell": 38141,
+    "max_cond": 139.05526111690526,
+    "max_cond_cell": 35663,
+    "max_non_orth_deg": 69.99801983365838,
+    "mean_non_orth_deg": 5.088513965725079,
+    "min_thickness_cell": 35332,
+    "min_thickness_ratio": 0.07720574351336806,
+    "min_volume": 8.134034550454023e-07,
+    "min_volume_cell": 35675,
+    "n_cells": 64370,
+    "n_duplicate_faces": 0,
+    "n_non_orth_over_report": 1065,
+    "n_regions": 1,
+    "passed": true,
+    "region_sizes": [
+      64370
+    ]
+  },
+  "stages": [
+    {
+      "balance_splits": 230,
+      "base_n": [
+        20,
+        12,
+        10
+      ],
+      "max_level": 4,
+      "n_leaves": 70566,
+      "refine_splits": 9508,
+      "seconds": 6.4674086,
+      "stage": "octree"
+    },
+    {
+      "n_cells": 64370,
+      "n_dropped_components": 0,
+      "removed": {
+        "off_region": 0,
+        "pinch": 0,
+        "solid": 6196,
+        "starved": 0,
+        "unrepaired_pinch": 0
+      },
+      "seconds": 0.448309,
+      "stage": "castellate",
+      "wall_faces": 5382,
+      "wall_patches": {
+        "wing": 5382
+      }
+    },
+    {
+      "converged": false,
+      "iterations": 30,
+      "max_residual": 0.07104622672568062,
+      "max_step": 0.0,
+      "n_abandoned": 20,
+      "n_boundary_points": 5384,
+      "n_feature_corners": 6,
+      "n_feature_edges": 301,
+      "n_pinned": 2278,
+      "n_scaled_back": 7241,
+      "n_snapped_to_corner": 6,
+      "n_snapped_to_edge": 1608,
+      "p99_residual": 0.017436058661849472,
+      "seconds": 25.9577776,
+      "stage": "snap"
+    },
+    {
+      "n_regions": 1,
+      "seconds": 0.0,
+      "skipped": true,
+      "stage": "split"
+    },
+    {
+      "n_layer_cells": 0,
+      "n_layer_points": 0,
+      "n_side_boundary": 0,
+      "n_side_internal": 0,
+      "n_split_sides": 0,
+      "patches": [
+        {
+          "dropped": "patch \"wing\": the gate still failed after 4 retreat(s)",
+          "full_area_frac": 0.0,
+          "mean_frac": 0.0,
+          "n_faces": 5382,
+          "n_layers": 0,
+          "name": "wing",
+          "t1_mean": 0.0,
+          "t1_min": 0.0,
+          "t1_requested": 0.002
+        }
+      ],
+      "retreats": 4,
+      "seconds": 1.3168348,
+      "stage": "layers"
+    }
+  ],
+  "stopped_after": null,
+  "surface": {
+    "bbox": [
+      -0.0004433330224,
+      -1.5,
+      -0.04191583512,
+      1.170586216,
+      1.5,
+      0.1136979599
+    ],
+    "n_points": 3025,
+    "n_triangles": 6046,
+    "patches": [
+      "wing"
+    ]
+  },
+  "tool": "ofgpu-automesher",
+  "total_seconds": 34.2063207
+}
