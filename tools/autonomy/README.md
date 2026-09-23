@@ -226,6 +226,42 @@ jsonschema     4.24.0    yes       MIT                                      MIT 
 referencing    0.36.2    yes       MIT                                      MIT              ok
 ```
 
+## corpus/ — families A and B
+
+- `corpus/stl_io.py` — the pure-numpy ASCII STL writer every corpus family shares
+  (`%.9e` numbers, `\n` ends, shared vertices printed from one point array so they
+  are bit-identical, `+0.0` canonical so no `-0.` is written) and the in-memory
+  oracles: per-edge open/non-manifold/same-direction counts, Euler characteristic,
+  signed volume, shortest edge, and `check_closed`, which raises instead of repairing.
+- `corpus/gen_wing.py` — family A, NACA 4-digit wings. The section is NACA Report 460
+  verbatim (open trailing edge, −0.1015; the −0.1036 closed-TE variant is NOT used
+  because Report 460 does not contain it): Jacobs, E. N., Ward, K. E. & Pinkerton,
+  R. M. (1933), *The characteristics of 78 related airfoil sections from tests in the
+  variable-density wind tunnel*, NACA Report No. 460 (NACA-TR-460), NTRS 19930091108,
+  https://ntrs.nasa.gov/citations/19930091108 (no DOI; US government work). Full-span
+  planform: quarter-chord sweep, linear taper, linear twist, blunt-TE base strip,
+  planar tip caps. Camber is capped at m ≤ 4 % so the section area stays within 1 %
+  of 0.685·t·c² (measured 1.03 % at 6 %, 0.43 % at 4 %); the closed form is
+  0.685·t·span·(c_root² + c_root·c_tip + c_tip²)/3.
+- `corpus/gen_lathe.py` — family B, bodies of revolution about x: prolate
+  ellipsoids (4/3·π·a·b²), tangent-ogive + cylinder and tangent-ogive + cylinder +
+  conical boat-tail bodies with flat bases (nose volume
+  π(ρ²L_n − L_n³/3 − (ρ−R)ρ² asin(L_n/ρ)), cylinder πR²L_c, frustum
+  πL_b(R² + R·r_b + r_b²)/3). Every pole is ONE vertex; a flat base's outer ring is
+  the last side ring.
+- `corpus/gate.py` — §F G-CORPUS: closed, dryrun, no_negzero, sha, regen, row,
+  volume, min_edge — closure judged on the re-read file by `stl_repair` and by
+  `ofgpu-automesher -dryRun`, byte-identical regeneration in a child process, and
+  four negative controls proving the gate is not vacuous.
+
+Both generators expose the same API (AM-6/AM-7 depend on it): `sample_params`,
+`validate_params`, `build`, `closed_form_volume`, `stratum`, `l_ref`, `flow`,
+`geometry_id`, `make_row`, `write_row`, `generate`. No global RNG: parameters come
+from `numpy.random.default_rng([SALT, seed, index])` in a fixed draw order, so a
+geometry is a pure function of (family, seed, index). Rows are `autonomy-manifest/1`
+ManifestRows without `split` (AM-7's split.py adds it); STLs and manifests are never
+committed (docs/15 §E) — only the generators are.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -233,5 +269,9 @@ referencing    0.36.2    yes       MIT                                      MIT 
     python tools/autonomy/schema.py --print-lock          # the lock lines, no comments
     python tools/autonomy/schema.py --validate KIND FILE  # valid / one error per line
     python tools/deps_licences.py --python                # the Python-side licences above
+
+    python tools/autonomy/corpus/gen_wing.py --seed 1 --n 120 --out DIR   # family A STLs + manifest_A.jsonl
+    python tools/autonomy/corpus/gen_lathe.py --seed 1 --n 120 --out DIR  # family B
+    python tools/autonomy/corpus/gate.py --family A --family B --n 120 --seed 1   # G-CORPUS
 
 The mesh tree's own gate (`python tools/mesh/selftest.py`) runs `tools/autonomy/selftest.py` last.

@@ -7,7 +7,9 @@ selftest.py - the tools/autonomy package gate.
 
 Runs schema.py --selftest (the schemas, fixtures, knob table and lock), then
 score.py --selftest (the G-SCORER probe fixtures, the refusal grammar, the
-content hash and the live automesher), then checks that README.md still
+content hash and the live automesher), then the four corpus selftests of
+docs/15 §E/§F (corpus/stl_io.py, corpus/gen_wing.py, corpus/gen_lathe.py and
+corpus/gate.py -- G-CORPUS on families A and B), then checks that README.md still
 carries docs/15 §D verbatim between its markers and that deps_licences.py
 --python sees numpy, scipy and scikit-learn installed as BSD-3-Clause.
 
@@ -44,10 +46,24 @@ def main():
     assert q.returncode == 0 and s_ok >= 9 and "SELFTEST PASS" in q.stdout, \
         "score.py --selftest failed (exit %d, %d [ok]): %s" % (q.returncode, s_ok,
                                                                (q.stdout + q.stderr)[-2000:])
-    for l in p.stdout.splitlines() + q.stdout.splitlines():
+    corpus = (("corpus/stl_io.py", 4), ("corpus/gen_wing.py", 7),
+              ("corpus/gen_lathe.py", 7), ("corpus/gate.py", 3))
+    total = n_ok + s_ok
+    outs = [p.stdout, q.stdout]
+    for rel, min_ok in corpus:
+        c = subprocess.run([sys.executable, os.path.join(HERE, rel), "--selftest"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=300)
+        k = sum(1 for l in c.stdout.splitlines() if l.startswith("[ok]"))
+        assert c.returncode == 0 and k >= min_ok and "SELFTEST PASS" in c.stdout, \
+            "%s --selftest failed (exit %d, %d [ok]): %s" % (rel, c.returncode, k,
+                                                             (c.stdout + c.stderr)[-2000:])
+        total += k
+        outs.append(c.stdout)
+    for l in "".join(outs).splitlines():
         if l != "SELFTEST PASS":
             print(l)
-    return n_ok + s_ok
+    return total
 
 
 def _section_d(plan_lines):
