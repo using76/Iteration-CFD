@@ -3248,6 +3248,11 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("SPEC-LIT 105.10 Gate 105-B the flow on a moving mesh");
     check_ale_flow(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT 105.14 - Turek-Hron CFD1/CFD2 through three meshes, CFD3 on a wobbling mesh, Gate 105-C.
+    println!("\n=== Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over three meshes, CFD3 on a wobbling mesh (SPEC-LIT 105.14) ===");
+    c.enter_gate("SPEC-LIT 105.14 Gate 105-C Turek-Hron");
+    check_turek_hron(c, &gpu)?;
+    c.leave_gate();
     println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
     c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
     published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
@@ -19899,6 +19904,293 @@ fn check_ale_flow(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     Ok(())
 }
 
+// answer-key: turek-hron2006
+/// Turek & Hron (2006), CFD1 and CFD2 at level 6+0: (drag, lift), N per
+/// metre of depth.
+const TH_CFD1: (Scalar, Scalar) = (14.2929, 1.11905);
+const TH_CFD2: (Scalar, Scalar) = (136.700, 10.5343);
+/// CFD3 at level 4+0, dt 0.005: [mean, amplitude, frequency in Hz], drag
+/// then lift - a band beside the gate.
+const TH_CFD3_DRAG: [Scalar; 3] = [439.45, 5.6183, 4.3956];
+const TH_CFD3_LIFT: [Scalar; 3] = [-11.893, 437.81, 4.3956];
+
+/// Gate 105-C (SPEC-LIT 105.14): the Turek-Hron benchmark on the card.
+/// CFD1 and CFD2 run steady on each of the three generated meshes and
+/// their drag and lift go through a three-level grid study, the gate on
+/// the EXTRAPOLATED value against the published one (2 per cent). CFD3
+/// spins up statically to t = 8 s and forks into two 1,500-step
+/// continuations from that one state - static and wobbling - whose drag
+/// and lift are reduced over their last four lift periods and compared,
+/// 0.5 per cent per statistic, on the one mesh. A missing mesh is not a
+/// solver failure: the gate opens by name and skips its comparison rows.
+/// A miss fails its row AND registers a MISSES verdict with its study -
+/// the Gate 94-D pattern - so it reaches the summary and is never tuned
+/// away.
+fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::turek_hron::{self, Case};
+
+    const NOT_GENERATED: &str = "the Turek-Hron meshes are not generated";
+    let absent: Vec<usize> = (1..=3)
+        .filter(|&l| !turek_hron::mesh_dir(l).join("points").is_file())
+        .collect();
+    if !absent.is_empty() {
+        let mut detail: Vec<String> = Vec::new();
+        for l in &absent {
+            detail.push(format!(
+                "level {l}: {} is absent - generate it from the repository root with \
+                 `python tools/mesh/examples/turek_hron.py --level {l}`",
+                turek_hron::mesh_dir(*l).display()
+            ));
+        }
+        for line in &detail {
+            c.note(line);
+        }
+        for case in [Case::Cfd1, Case::Cfd2] {
+            for quantity in ["drag", "lift"] {
+                c.skip(
+                    &format!("SPEC-LIT 105.14 Gate 105-C ({}): {quantity}, extrapolated over three meshes, against Turek & Hron", case.name()),
+                    NOT_GENERATED,
+                );
+            }
+        }
+        for statistic in ["drag mean", "drag amplitude", "lift mean", "lift amplitude"] {
+            c.skip(
+                &format!("SPEC-LIT 105.14 Gate 105-C (CFD3): {statistic}, wobbling mesh against the static mesh"),
+                NOT_GENERATED,
+            );
+        }
+        c.report(GateReport {
+            verdict: Verdict::Open,
+            how: How::Live,
+            gate: "SPEC-LIT 105.14 Gate 105-C Turek-Hron",
+            against: "Turek & Hron (2006), CFD1/CFD2 level 6+0 and CFD3 level 4+0",
+            headline: "the Turek-Hron meshes are not generated, so no comparison was run".to_string(),
+            detail,
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "no mesh was run: the Turek-Hron meshes were not generated",
+            )),
+        });
+        return Ok(());
+    }
+    // Steady CFD1 and CFD2 on all three levels, notes first, then the rows.
+    let studies = turek_hron::steady_studies(gpu)?;
+    let published =
+        |case: Case| if case == Case::Cfd1 { TH_CFD1 } else { TH_CFD2 };
+    let mut notes: Vec<Vec<String>> = Vec::with_capacity(studies.len());
+    for study in &studies {
+        let (pd, pl) = published(study.case);
+        let mut n = Vec::new();
+        for run in &study.runs {
+            n.push(format!(
+                "{} L{}: {} cells, h {:.4e}, {} SIMPLE iterations, stopping rule met {}, \
+                 residual {:.3e}, drag {:.6}, lift {:.6}, {:.1} s",
+                run.case.name(), run.level, run.n_cells, run.h, run.iterations,
+                run.converged, run.residual, run.forces.drag, run.forces.lift, run.seconds
+            ));
+        }
+        for (quantity, one, err_ext) in [
+            ("drag", &study.drag, turek_hron::extrapolated_error(&study.drag, pd)),
+            ("lift", &study.lift, turek_hron::extrapolated_error(&study.lift, pl)),
+        ] {
+            let (v1, v2, v3, err_fine) = if quantity == "drag" {
+                (
+                    study.runs[2].forces.drag, study.runs[1].forces.drag, study.runs[0].forces.drag,
+                    (study.runs[0].forces.drag - pd).abs() / pd.abs(),
+                )
+            } else {
+                (
+                    study.runs[2].forces.lift, study.runs[1].forces.lift, study.runs[0].forces.lift,
+                    (study.runs[0].forces.lift - pl).abs() / pl.abs(),
+                )
+            };
+            let (line, gci) = match one {
+                Ok(s) => (
+                    s.one_line(),
+                    s.triplet
+                        .gci_fine
+                        .map(|g| format!("{:.3e}", f64::from(g)))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                ),
+                Err(e) => (format!("study refused by name: {e}"), "n/a".to_string()),
+            };
+            n.push(format!(
+                "{quantity}: L1 {v1:.6}, L2 {v2:.6}, L3 {v3:.6}; {line}; gci_fine {gci}; \
+                 err_fine {err_fine:.3e}, err_ext {err_ext:.3e}, published {:.6}",
+                if quantity == "drag" { pd } else { pl }
+            ));
+        }
+        notes.push(n);
+    }
+    for (study, note) in studies.iter().zip(&notes) {
+        let (pd, pl) = published(study.case);
+        // Every case prints its three levels, its two studies and both
+        // errors, whether or not it holds (SPEC-LIT 105.14).
+        for line in note {
+            c.note(line);
+        }
+        for run in &study.runs {
+            c.require(
+                &format!("SPEC-LIT 105.14 Gate 105-C ({} L{}): the steady run met its stopping rule within its budget", run.case.name(), run.level),
+                run.converged,
+            );
+        }
+        c.require(
+            &format!("SPEC-LIT 105.14 Gate 105-C ({}): the three-level drag and lift studies could be formed (SPEC-LIT 94.1)", study.case.name()),
+            study.drag.is_ok() && study.lift.is_ok(),
+        );
+        let err_drag = turek_hron::extrapolated_error(&study.drag, pd);
+        let err_lift = turek_hron::extrapolated_error(&study.lift, pl);
+        c.check(
+            &format!("SPEC-LIT 105.14 Gate 105-C ({}): drag, extrapolated over three meshes, against Turek & Hron", study.case.name()),
+            err_drag,
+            turek_hron::STEADY_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.14 Gate 105-C ({}): lift, extrapolated over three meshes, against Turek & Hron", study.case.name()),
+            err_lift,
+            turek_hron::STEADY_TOL,
+        );
+        if !(err_drag <= turek_hron::STEADY_TOL && err_lift <= turek_hron::STEADY_TOL) {
+            // The study of the quantity that missed - the lift's when the
+            // lift is the one outside 2 %, the drag's otherwise.
+            let missed = if err_lift <= turek_hron::STEADY_TOL { &study.drag } else { &study.lift };
+            let uncertainty = match missed {
+                Ok(s) => Some(Uncertainty::Study(s.clone())),
+                Err(_) => Some(Uncertainty::SingleMesh(
+                    "three meshes were run but the study was refused by name; the reason is printed above",
+                )),
+            };
+            let phi = |one: &std::result::Result<ofgpu::vv::GridStudy, String>| match one {
+                Ok(s) => f64::from(s.phi_ext),
+                Err(_) => f64::NAN,
+            };
+            c.report(GateReport {
+                verdict: Verdict::Misses,
+                how: How::Live,
+                gate: "SPEC-LIT 105.14 Gate 105-C Turek-Hron",
+                against: "Turek & Hron (2006) CFD1/CFD2, level 6+0, drag and lift on cylinder and flap",
+                headline: format!(
+                    "{}: drag extrapolated {:.4} (err {:.3}%), lift extrapolated {:.4} (err {:.3}%) against 2 %",
+                    study.case.name(),
+                    phi(&study.drag),
+                    f64::from(err_drag) * 100.0,
+                    phi(&study.lift),
+                    f64::from(err_lift) * 100.0,
+                ),
+                detail: note.clone(),
+                uncertainty,
+            });
+        }
+    }
+    // CFD3: one mesh, a static and a wobbling continuation of one state.
+    let r = turek_hron::cfd3(gpu)?;
+    let mut n3 = Vec::new();
+    n3.push(format!(
+        "spin-up to t = {:.1} s: {:.1} s",
+        (ofgpu::turek_hron::CFD3_SPIN_STEPS as f64) * f64::from(ofgpu::turek_hron::CFD3_DT),
+        r.traces.spin_seconds
+    ));
+    let say = |one: &std::result::Result<ofgpu::turek_hron::Periodic, String>| match one {
+        Ok(p) => format!(
+            "{:.4} ± {:.4} [{:.4} Hz]",
+            f64::from(p.mean), f64::from(p.amplitude), f64::from(p.frequency)
+        ),
+        Err(e) => format!("reduction refused by name: {e}"),
+    };
+    for tr in [&r.traces.static_run, &r.traces.moving] {
+        n3.push(format!(
+            "{}: {} steps, {:.1} s, worst continuity {:.3e}, min V/V0 {:.6}, \
+             boundary disp {:.3e}, upstream disp {:.3e}, max disp {:.3e}",
+            if tr.moving { "moving" } else { "static" },
+            tr.drag.len(), tr.seconds, tr.worst_continuity, tr.min_volume_ratio,
+            tr.max_boundary_displacement, tr.max_upstream_displacement, tr.max_displacement
+        ));
+    }
+    n3.push(format!("static drag: {}, static lift: {}", say(&r.static_drag), say(&r.static_lift)));
+    n3.push(format!("moving drag: {}, moving lift: {}", say(&r.moving_drag), say(&r.moving_lift)));
+    n3.push(format!(
+        "relative, wobbling against static: drag mean {:.3e}, drag amplitude {:.3e}, \
+         lift mean {:.3e}, lift amplitude {:.3e}",
+        f64::from(r.rel[0]), f64::from(r.rel[1]), f64::from(r.rel[2]), f64::from(r.rel[3])
+    ));
+    n3.push(format!(
+        "static CFD3 on L{}: drag {}, lift {}; Turek & Hron level 4+0 publish {:.2} ± {:.4} [{:.4}], \
+         {:.3} ± {:.2} [{:.4}] - a band beside the gate, not the gate",
+        r.level, say(&r.static_drag), say(&r.static_lift),
+        TH_CFD3_DRAG[0], TH_CFD3_DRAG[1], TH_CFD3_DRAG[2],
+        TH_CFD3_LIFT[0], TH_CFD3_LIFT[1], TH_CFD3_LIFT[2]
+    ));
+    for line in &n3 {
+        c.note(line);
+    }
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): the wobble moves no point of a non-empty patch",
+        r.traces.moving.max_boundary_displacement,
+        0.0,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): the wobble leaves every point upstream of x = 0.7 at rest",
+        r.traces.moving.max_upstream_displacement,
+        0.0,
+    );
+    c.require(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): the wobble moved the wake by at least half its amplitude",
+        r.traces.moving.max_displacement >= 0.5 * r.law.amplitude,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): no cell of the moving mesh lost a fifth of its volume",
+        (1.0 - r.traces.moving.min_volume_ratio).max(0.0),
+        0.2,
+    );
+    c.require(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): both runs reached the lift periods they are reduced over",
+        r.static_drag.is_ok() && r.static_lift.is_ok() && r.moving_drag.is_ok() && r.moving_lift.is_ok(),
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): drag mean, wobbling mesh against the static mesh",
+        r.rel[0],
+        turek_hron::CFD3_TOL,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): drag amplitude, wobbling mesh against the static mesh",
+        r.rel[1],
+        turek_hron::CFD3_TOL,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): lift mean, wobbling mesh against the static mesh",
+        r.rel[2],
+        turek_hron::CFD3_TOL,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): lift amplitude, wobbling mesh against the static mesh",
+        r.rel[3],
+        turek_hron::CFD3_TOL,
+    );
+    if !(r.rel[0] <= turek_hron::CFD3_TOL
+        && r.rel[1] <= turek_hron::CFD3_TOL
+        && r.rel[2] <= turek_hron::CFD3_TOL
+        && r.rel[3] <= turek_hron::CFD3_TOL)
+    {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 105.14 Gate 105-C Turek-Hron",
+            against: "the static CFD3 run on the same mesh (SPEC-LIT 105.14)",
+            headline: format!(
+                "CFD3: wobbling against static, drag mean {:.3}%, drag amplitude {:.3}%, \
+                 lift mean {:.3}%, lift amplitude {:.3}% against 0.5 %",
+                f64::from(r.rel[0]) * 100.0, f64::from(r.rel[1]) * 100.0,
+                f64::from(r.rel[2]) * 100.0, f64::from(r.rel[3]) * 100.0,
+            ),
+            detail: n3.clone(),
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one mesh, L1: the wobbling run is compared with the static run on the same mesh, not extrapolated",
+            )),
+        });
+    }
+    Ok(())
+}
+
 // ==========================================================================
 //  SPEC-LIT §97 - the imported region
 // ==========================================================================
@@ -20132,9 +20424,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 19, "19 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 22, "22 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 17, "17 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 18, "18 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
