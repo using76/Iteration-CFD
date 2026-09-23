@@ -26786,6 +26786,14 @@ each over the patch's own surface area, and null when that area is zero. The oct
 `gate_passed` and `max_non_orth_deg`, the verdict and the worst face of §92.3's measurement of the leaf
 mesh; a full run records them and does not refuse on them.
 
+The layers row of each layer patch — on the single-mesh path and in each region's `patches` — carries
+`area`, (92.50)'s `sum A_f` in m² (on a dropped patch, the input mesh's own area of the patch), and
+`area_frac_tau_ge`, three rows `{ "beta", "area_frac" }` at beta = 0.5, 0.8 and 0.95, each
+`sum { A_f : tau_f >= beta - 1e-9 } / sum A_f`: the share of the patch's area whose face got at least
+that fraction of `T`. The sum runs over the same faces in the same order as `full`, so the same share at
+beta = 1 is `full_area_frac` bit for bit; a dropped patch reports 0 at every beta. Like the snap and
+octree additions, they are read off the stage's report and change nothing in the mesh.
+
 `identity` is the mesh's own name and the run's. `mesh_id` is
 `"m_" + fnv1a64(<case_dir as configured, '\' -> '/', no trailing '/'> + newline + <name>)` in 16 hex digits — deterministic,
 because the mesh at a directory is one mesh however many times it is re-made — and `run_id` is

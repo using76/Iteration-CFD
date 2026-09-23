@@ -900,6 +900,10 @@ pub struct Extrusion {
     pub n: usize,
 }
 
+/// The thresholds `beta` the summary reports `area_frac_tau_ge` at: the
+/// share of a patch's area whose face got at least `beta` of `T` (92.50).
+pub const TAU_GE_BETAS: [Scalar; 3] = [0.5, 0.8, 0.95];
+
 /// (92.50), per patch.
 #[derive(Debug, Clone)]
 pub struct PatchLayers {
@@ -910,6 +914,12 @@ pub struct PatchLayers {
     pub area: Scalar,
     /// The fraction of the patch's AREA that got the full stack.
     pub full_area_frac: Scalar,
+    /// `frac_tau_ge(beta)` at each of `TAU_GE_BETAS`; `0.0` on a dropped
+    /// patch.
+    pub area_frac_tau_ge: [Scalar; 3],
+    /// `(A_f, tau_f)` of (92.50) for every layer face of the patch, in the
+    /// order `full` sums them; empty on a dropped patch.
+    pub face_area_tau: Vec<(Scalar, Scalar)>,
     /// The area-weighted mean of the fraction of `T` actually achieved.
     pub mean_frac: Scalar,
     /// The first layer ASKED for, metres - `st.t[0]`, `0.0` when no stack
@@ -923,6 +933,25 @@ pub struct PatchLayers {
     pub t1_min: Scalar,
     /// `Some(reason)` when the patch lost its layers.
     pub dropped: Option<String>,
+}
+
+impl PatchLayers {
+    /// The share of `area` whose face got at least `beta` of `T` - (92.50)'s
+    /// `full` with `1` replaced by `beta`, over the same faces in the same
+    /// order, so `frac_tau_ge(1.0)` is `full_area_frac` bit for bit.
+    pub fn frac_tau_ge(&self, beta: Scalar) -> Scalar {
+        let mut s = 0.0;
+        for &(a, tau) in &self.face_area_tau {
+            if tau >= beta - 1e-9 {
+                s += a;
+            }
+        }
+        if self.area > 0.0 {
+            s / self.area
+        } else {
+            0.0
+        }
+    }
 }
 
 /// What the extrusion did, for the run log and the tests.
@@ -1050,6 +1079,8 @@ pub fn add_layers(
                     n_faces: patch.size,
                     area: patch_area(mesh, n_internal, patch),
                     full_area_frac: 0.0,
+                    area_frac_tau_ge: [0.0; 3],
+                    face_area_tau: Vec::new(),
                     mean_frac: 0.0,
                     t1_requested,
                     t1_mean: 0.0,
@@ -1223,6 +1254,8 @@ fn attempt(
                 n_faces: patch.size,
                 area: patch_area(mesh, n_internal, patch),
                 full_area_frac: 0.0,
+                area_frac_tau_ge: [0.0; 3],
+                face_area_tau: Vec::new(),
                 mean_frac: 0.0,
                 t1_requested: if n == 0 { 0.0 } else { st.t[0] },
                 t1_mean: 0.0,
@@ -1634,6 +1667,8 @@ fn attempt(
                     n_faces: patch.size,
                     area: patch_area(mesh, n_internal, patch),
                     full_area_frac: 0.0,
+                    area_frac_tau_ge: [0.0; 3],
+                    face_area_tau: Vec::new(),
                     mean_frac: 0.0,
                     t1_requested: st.t[0],
                     t1_mean: 0.0,
@@ -1647,6 +1682,7 @@ fn attempt(
                 let mut wsum = 0.0;
                 let mut tau_min_all = Scalar::INFINITY;
                 let mut nf = 0usize;
+                let mut face_area_tau: Vec<(Scalar, Scalar)> = Vec::new();
                 for (j, &f) in field.faces.iter().enumerate() {
                     if field.face_patch[j] != p {
                         continue;
@@ -1663,6 +1699,7 @@ fn attempt(
                         .map(|q| field.disp[*q as usize].mag())
                         .fold(Scalar::INFINITY, Scalar::min);
                     let tau = tau_min / st.total;
+                    face_area_tau.push((a, tau));
                     area += a;
                     if tau >= 1.0 - 1e-9 {
                         full += a;
@@ -1671,12 +1708,14 @@ fn attempt(
                     tau_min_all = tau_min_all.min(tau);
                 }
                 let mean_frac = if area > 0.0 { wsum / area } else { 0.0 };
-                patches_rep.push(PatchLayers {
+                let mut row = PatchLayers {
                     name: patch.name.clone(),
                     n_layers: n,
                     n_faces: nf,
                     area,
                     full_area_frac: if area > 0.0 { full / area } else { 0.0 },
+                    area_frac_tau_ge: [0.0; 3],
+                    face_area_tau,
                     mean_frac,
                     t1_requested: st.t[0],
                     t1_mean: st.t[0] * mean_frac,
@@ -1684,7 +1723,9 @@ fn attempt(
                     // limiter's own number, in metres.
                     t1_min: st.t[0] * if area > 0.0 { tau_min_all } else { 0.0 },
                     dropped: None,
-                });
+                };
+                row.area_frac_tau_ge = TAU_GE_BETAS.map(|b| row.frac_tau_ge(b));
+                patches_rep.push(row);
             }
         }
     }
@@ -3182,5 +3223,133 @@ mod tests {
             "t1_mean {} vs 0.02 * tau, tau = 0.05/0.0798",
             row.t1_mean
         );
+    }
+
+    /// The row `area` of (92.50) is the patch's own area: on the on-plane
+    /// cube the rows' areas sum to the STL's area for the patch to 1e-12
+    /// relative, and the recorded `(A_f, tau_f)` pairs re-sum to the row's
+    /// `area` bit for bit, in the order `full` sums them.
+    #[test]
+    fn the_row_areas_sum_to_the_cube_area() {
+        let (surf, mesh) = castellated_cube_case();
+        let out = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("layers");
+        let k = surf
+            .patch_names
+            .iter()
+            .position(|n| n == "cube")
+            .expect("the surface names the cube");
+        let a_stl = surf.patch_area[k];
+        let sum: Scalar = out.report.patches.iter().map(|p| p.area).sum();
+        eprintln!("row areas sum {sum:.9} vs STL area {a_stl:.9}");
+        assert!(((sum - a_stl) / a_stl).abs() <= 1e-12, "{sum} vs {a_stl}");
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the named patch has a row");
+        assert!(row.dropped.is_none(), "{:?}", row.dropped);
+        assert_eq!(row.face_area_tau.len(), row.n_faces);
+        let mut from_pairs = 0.0;
+        for &(a, _) in &row.face_area_tau {
+            from_pairs += a;
+        }
+        assert_eq!(from_pairs.to_bits(), row.area.to_bits());
+    }
+
+    /// The tau shares at every beta of `TAU_GE_BETAS` are the rows'
+    /// `frac_tau_ge` recomputed, order down to `full_area_frac` at beta = 1
+    /// bit for bit, sit under the Markov bound `beta * share <= mean_frac`,
+    /// and vanish with no `(A_f, tau_f)` pairs on a dropped row.
+    #[test]
+    fn tau_ge_one_is_the_full_area_fraction() {
+        let (surf, mesh) = castellated_cube_case();
+        let a = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("layers");
+        let lim = LayerSpec { cell_frac: 0.10, ..cube_layers(0.02) };
+        let b = add_layers(&mesh, &surf, &lim, &thresholds()).expect("layers");
+        let (surf_g, mesh_g) = castellated_gap_case();
+        let c = add_layers(&mesh_g, &surf_g, &gap_layers(0.0), &thresholds())
+            .expect("layers");
+        let (surf_s, mesh_s) = snapped_sphere_case();
+        let d = add_layers(&mesh_s, &surf_s, &sphere_layers(0.05), &thresholds())
+            .expect("the patch loses its layers by name; the run continues");
+        let cases: [(&str, &LayerReport, bool); 4] = [
+            ("a", &a.report, true),
+            ("b", &b.report, true),
+            ("c", &c.report, true),
+            ("d", &d.report, false),
+        ];
+        for (case, report, want_kept) in cases {
+            let mut kept = 0usize;
+            let mut dropped = 0usize;
+            for row in &report.patches {
+                eprintln!(
+                    "{case} \"{}\": full {:.6}, ge {:.6} {:.6} {:.6}, mean {:.6}",
+                    row.name,
+                    row.full_area_frac,
+                    row.area_frac_tau_ge[0],
+                    row.area_frac_tau_ge[1],
+                    row.area_frac_tau_ge[2],
+                    row.mean_frac
+                );
+                check_tau_ge_row(row);
+                if row.dropped.is_some() {
+                    dropped += 1;
+                } else {
+                    kept += 1;
+                }
+            }
+            if want_kept {
+                assert!(kept > 0, "{case}: no non-dropped row");
+            } else {
+                assert!(dropped > 0, "{case}: no dropped row");
+            }
+        }
+        let cube = b
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the named patch has a row");
+        assert!(
+            cube.area_frac_tau_ge[0] > cube.area_frac_tau_ge[1],
+            "the limiter's tau sits between 0.5 and 0.8: {:.6} vs {:.6}",
+            cube.area_frac_tau_ge[0],
+            cube.area_frac_tau_ge[1]
+        );
+    }
+
+    /// The per-row half of `tau_ge_one_is_the_full_area_fraction`, shared by
+    /// all four of its cases.
+    fn check_tau_ge_row(row: &PatchLayers) {
+        assert_eq!(
+            row.frac_tau_ge(1.0).to_bits(),
+            row.full_area_frac.to_bits()
+        );
+        for i in 0..3 {
+            assert_eq!(
+                row.area_frac_tau_ge[i].to_bits(),
+                row.frac_tau_ge(TAU_GE_BETAS[i]).to_bits()
+            );
+        }
+        assert!(row.area_frac_tau_ge[0] >= row.area_frac_tau_ge[1]);
+        assert!(row.area_frac_tau_ge[1] >= row.area_frac_tau_ge[2]);
+        assert!(row.area_frac_tau_ge[2] >= row.full_area_frac);
+        assert!(row.area_frac_tau_ge[0] <= 1.0 + 1e-12);
+        for i in 0..3 {
+            assert!(
+                TAU_GE_BETAS[i] * row.area_frac_tau_ge[i] <= row.mean_frac + 1e-12,
+                "beta {} share {} vs mean {}",
+                TAU_GE_BETAS[i],
+                row.area_frac_tau_ge[i],
+                row.mean_frac
+            );
+        }
+        if row.dropped.is_some() {
+            assert_eq!(row.area_frac_tau_ge, [0.0; 3]);
+            assert!(row.face_area_tau.is_empty());
+        }
     }
 }

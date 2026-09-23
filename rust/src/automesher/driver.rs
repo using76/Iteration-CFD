@@ -355,6 +355,29 @@ fn split_stage(
     Ok(())
 }
 
+/// One layer row of the summary, (92.50) per patch: the same keys on the
+/// single-mesh path and in each region's rows (SPEC-LIT §92.14).
+fn layer_patch_json(p: &super::layers::PatchLayers) -> serde_json::Value {
+    let tau_ge: Vec<serde_json::Value> = super::layers::TAU_GE_BETAS
+        .iter()
+        .zip(p.area_frac_tau_ge.iter())
+        .map(|(b, f)| json!({ "beta": b, "area_frac": f }))
+        .collect();
+    json!({
+        "name": p.name,
+        "n_layers": p.n_layers,
+        "n_faces": p.n_faces,
+        "area": p.area,
+        "full_area_frac": p.full_area_frac,
+        "area_frac_tau_ge": tau_ge,
+        "mean_frac": p.mean_frac,
+        "t1_requested": p.t1_requested,
+        "t1_mean": p.t1_mean,
+        "t1_min": p.t1_min,
+        "dropped": p.dropped,
+    })
+}
+
 /// The layers stage on a split run: `layers.patches` names the SPLIT patch
 /// names (`fluid_to_<body>`, `<body>_to_fluid`), so each region filters the
 /// spec down to the patches it carries, a region with none is recorded and
@@ -425,19 +448,7 @@ fn layers_regions_stage(
             .report
             .patches
             .iter()
-            .map(|p| {
-                json!({
-                    "name": p.name,
-                    "n_layers": p.n_layers,
-                    "n_faces": p.n_faces,
-                    "full_area_frac": p.full_area_frac,
-                    "mean_frac": p.mean_frac,
-                    "t1_requested": p.t1_requested,
-                    "t1_mean": p.t1_mean,
-                    "t1_min": p.t1_min,
-                    "dropped": p.dropped,
-                })
-            })
+            .map(layer_patch_json)
             .collect();
         rows.push(json!({
             "name": r.name,
@@ -698,17 +709,7 @@ pub fn run(
         )?;
         let seconds = started.elapsed().as_secs_f64();
         let patches: Vec<serde_json::Value> =
-            lay.report.patches.iter().map(|p| json!({
-                "name": p.name,
-                "n_layers": p.n_layers,
-                "n_faces": p.n_faces,
-                "full_area_frac": p.full_area_frac,
-                "mean_frac": p.mean_frac,
-                "t1_requested": p.t1_requested,
-                "t1_mean": p.t1_mean,
-                "t1_min": p.t1_min,
-                "dropped": p.dropped,
-            })).collect();
+            lay.report.patches.iter().map(layer_patch_json).collect();
         let counts = json!({
             "n_layer_cells": lay.report.n_layer_cells,
             "n_layer_points": lay.report.n_layer_points,
@@ -1660,5 +1661,85 @@ mod tests {
         let r = row["ratio"].as_f64().unwrap();
         eprintln!("cube area ratio {r}");
         assert!(0.9 < r && r < 1.1, "ratio {r} not in (0.9, 1.1)");
+    }
+
+    /// The region rows carry the same `area` bookkeeping as the
+    /// single-mesh path: on the on-plane cube every region's layer rows sum
+    /// to the STL's area for the patch to 1e-12 relative, and every patch
+    /// row publishes its three beta shares at `TAU_GE_BETAS`.
+    #[test]
+    fn the_region_layer_rows_sum_to_the_cube_area() {
+        let cfg = planar_config();
+        let surf = planar_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let rows = out.stages[4].counts["regions"].as_array().cloned().unwrap();
+        let a_stl = surf.patch_area[0];
+        for r in &rows {
+            assert!(r.get("skipped").is_none(), "{r}");
+            let mut sum = 0.0;
+            for p in r["patches"].as_array().unwrap() {
+                sum += p["area"].as_f64().expect("area is a number");
+                let shares = p["area_frac_tau_ge"].as_array().expect("tau shares");
+                assert_eq!(shares.len(), 3, "{p}");
+                for (i, s) in shares.iter().enumerate() {
+                    assert_eq!(
+                        s["beta"].as_f64().unwrap(),
+                        crate::automesher::layers::TAU_GE_BETAS[i] as f64,
+                        "{p}"
+                    );
+                    let f = s["area_frac"].as_f64().expect("area_frac is a number");
+                    let full = p["full_area_frac"].as_f64().unwrap();
+                    assert!(full <= f && f <= 1.0 + 1e-12, "{p}");
+                }
+            }
+            eprintln!(
+                "region \"{}\" layer rows sum to {sum:.9} (STL area {a_stl:.9})",
+                r["name"].as_str().unwrap()
+            );
+            assert!(((sum - a_stl) / a_stl).abs() <= 1e-12, "{sum} vs {a_stl}");
+        }
+    }
+
+    /// The single-mesh summary's layer row carries `area` and the three
+    /// beta shares beside every key it had before; the cube here straddles
+    /// the cell planes, so its row area is printed beside the STL's, not
+    /// compared with it.
+    #[test]
+    fn the_summary_layer_row_carries_its_area_and_tau_shares() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let r = &s["stages"][4]["patches"][0];
+        assert_eq!(r["name"].as_str().unwrap(), "cube");
+        let area = r["area"].as_f64().expect("area is a number");
+        assert!(area.is_finite() && area > 0.0, "{area}");
+        let a_stl = surf.patch_area[0];
+        eprintln!("cube row area {area:.9} vs STL area {a_stl:.9}");
+        let shares = r["area_frac_tau_ge"].as_array().expect("tau shares");
+        assert_eq!(shares.len(), 3, "{r}");
+        let betas = crate::automesher::layers::TAU_GE_BETAS;
+        for (beta, s) in betas.iter().zip(shares.iter()) {
+            assert_eq!(s["beta"].as_f64().unwrap(), *beta as f64, "{r}");
+        }
+        for key in [
+            "name",
+            "n_layers",
+            "n_faces",
+            "full_area_frac",
+            "mean_frac",
+            "t1_requested",
+            "t1_mean",
+            "t1_min",
+            "dropped",
+        ] {
+            assert!(r.get(key).is_some(), "missing {key} in {r}");
+        }
     }
 }
