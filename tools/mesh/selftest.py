@@ -27,6 +27,8 @@ Then three T1 checks: variant_from_checkpoint.py against a case whose
 out_dir is not <case dir>/mesh (copy + refusal), run.log through
 STEP_MESH_LOG (banner first, refusal last, no stale log), and the box-floor
 refusal (fluid.largest / fluid.tag) with its non-refusal twin.
+Last, tools/autonomy/selftest.py (the autonomous-setup schemas and gate lock) must
+pass.
 
     python tools/mesh/selftest.py [--keep]
 
@@ -426,6 +428,18 @@ def check_floor_refusal(work, step_path):
     print('  [ok] fluid_floor %s' % s['fluid_floor'])
 
 
+def check_autonomy():
+    """tools/autonomy/selftest.py - the autonomous-setup package's own gate - passes."""
+    script = os.path.join(REPO, 'tools', 'autonomy', 'selftest.py')
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    p = subprocess.run([sys.executable, script], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', env=env, timeout=300)
+    oks = [l for l in p.stdout.splitlines() if l.startswith('[ok]')]
+    assert p.returncode == 0 and 'SELFTEST PASS' in p.stdout, \
+        'tools/autonomy/selftest.py failed (exit %d): %s' % (p.returncode, (p.stdout + p.stderr)[-2000:])
+    print('  [ok] tools/autonomy/selftest.py: %d checks' % len(oks))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Mesh a tiny STEP through step_mesh.py, in seconds.')
     ap.add_argument('--keep', action='store_true', help='keep the scratch directory')
@@ -510,6 +524,7 @@ def main(argv=None):
         check_variant_tool(work, cfg_path, out_dir)
         check_tee(work, step)
         check_floor_refusal(work, step)
+        check_autonomy()
         print('  [--] %s is left for the M4 converter (a --keep run preserves it)' % msh_r)
 
         print('SELFTEST PASS')

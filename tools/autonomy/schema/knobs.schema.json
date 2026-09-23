@@ -1,0 +1,57 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.iterations.invalid/autonomy/knobs.schema.json",
+  "title": "Knobs",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$comment": {"type": "string"},
+    "schema": {"const": "autonomy-knobs/1"},
+    "whitelist": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Knob"}},
+    "forbidden": {"type": "array", "items": {"$ref": "#/$defs/Forbidden"}},
+    "forbidden_flags": {"type": "array", "items": {"$ref": "#/$defs/ForbiddenFlag"}}
+  },
+  "required": ["$comment", "schema", "whitelist", "forbidden", "forbidden_flags"],
+  "$defs": {
+    "Knob": {
+      "title": "Knob",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pointer": {"type": "string", "pattern": "^(/([a-z_]+|\\*))+$"},
+        "type": {"enum": ["int", "float", "str", "str_list", "extent"]},
+        "stage": {"enum": ["octree", "castellate", "snap", "layers"]},
+        "min": {"type": ["number", "null"]},
+        "max": {"type": ["number", "null"]},
+        "min_excl": {"type": "boolean"},
+        "field": {"type": "string", "minLength": 1},
+        "validator": {"type": ["string", "null"]},
+        "declared": {"type": ["string", "null"]}
+      },
+      "required": ["pointer", "type", "stage", "min", "max", "min_excl", "field",
+                   "validator", "declared"]
+    },
+    "Forbidden": {
+      "title": "Forbidden",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pointer": {"type": "string"},
+        "match": {"enum": ["exact", "prefix"]},
+        "cite": {"type": "string", "minLength": 1}
+      },
+      "required": ["pointer", "match", "cite"]
+    },
+    "ForbiddenFlag": {
+      "title": "ForbiddenFlag",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "flag": {"type": "string"},
+        "cite": {"type": "string", "minLength": 1}
+      },
+      "required": ["flag", "cite"]
+    }
+  }
+}

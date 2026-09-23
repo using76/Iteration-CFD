@@ -1,0 +1,35 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "schema": "autonomy-knobs/1",
+  "whitelist": [
+    {"pointer": "/domain/base_size", "type": "float", "stage": "octree", "min": 0, "max": null, "min_excl": true, "field": "rust/src/automesher/mod.rs:96", "validator": "rust/src/automesher/mod.rs:546", "declared": null},
+    {"pointer": "/domain/extent", "type": "extent", "stage": "octree", "min": null, "max": null, "min_excl": false, "field": "rust/src/automesher/mod.rs:94", "validator": "rust/src/automesher/mod.rs:527", "declared": null},
+    {"pointer": "/refinement/max_level", "type": "int", "stage": "octree", "min": 0, "max": 6, "min_excl": false, "field": "rust/src/automesher/mod.rs:129", "validator": "rust/src/automesher/mod.rs:559", "declared": null},
+    {"pointer": "/refinement/levels/*/patch", "type": "str", "stage": "octree", "min": null, "max": null, "min_excl": false, "field": "rust/src/automesher/mod.rs:137", "validator": null, "declared": "a patch of the STL; preflight checks the name"},
+    {"pointer": "/refinement/levels/*/bands/*/distance", "type": "float", "stage": "octree", "min": 0, "max": null, "min_excl": true, "field": "rust/src/automesher/mod.rs:152", "validator": null, "declared": "a distance band is positive"},
+    {"pointer": "/refinement/levels/*/bands/*/level", "type": "int", "stage": "octree", "min": 0, "max": 6, "min_excl": false, "field": "rust/src/automesher/mod.rs:153", "validator": null, "declared": "no level past the octree cap of mod.rs:559"},
+    {"pointer": "/refinement/levels/*/feature_level", "type": "int", "stage": "octree", "min": 0, "max": 6, "min_excl": false, "field": "rust/src/automesher/mod.rs:145", "validator": null, "declared": "no level past the octree cap of mod.rs:559"},
+    {"pointer": "/snap/iterations", "type": "int", "stage": "snap", "min": 0, "max": 200, "min_excl": false, "field": "rust/src/automesher/mod.rs:243", "validator": null, "declared": "default 30; 60 measured as enough for the 1e-6 dead band"},
+    {"pointer": "/snap/tolerance", "type": "float", "stage": "snap", "min": 1e-9, "max": 0.01, "min_excl": false, "field": "rust/src/automesher/mod.rs:249", "validator": null, "declared": "fraction of base_size; default 1e-3"},
+    {"pointer": "/snap/smoothing_passes", "type": "int", "stage": "snap", "min": 0, "max": 10, "min_excl": false, "field": "rust/src/automesher/mod.rs:252", "validator": null, "declared": "default 3; the L4 box uses 0..3"},
+    {"pointer": "/snap/smoothing", "type": "float", "stage": "snap", "min": 0, "max": 1, "min_excl": false, "field": "rust/src/automesher/mod.rs:255", "validator": "rust/src/automesher/mod.rs:571", "declared": null},
+    {"pointer": "/snap/undo_limit", "type": "int", "stage": "snap", "min": 0, "max": 10, "min_excl": false, "field": "rust/src/automesher/mod.rs:259", "validator": null, "declared": "default 4"},
+    {"pointer": "/snap/feature_tolerance", "type": "float", "stage": "snap", "min": 0, "max": 1, "min_excl": false, "field": "rust/src/automesher/mod.rs:270", "validator": "rust/src/automesher/mod.rs:577", "declared": "validator has no upper bound; the L4 box uses 0, 0.25, 0.5"},
+    {"pointer": "/layers/patches", "type": "str_list", "stage": "layers", "min": null, "max": null, "min_excl": false, "field": "rust/src/automesher/mod.rs:322", "validator": null, "declared": "patches of the STL; preflight checks the names"},
+    {"pointer": "/layers/n", "type": "int", "stage": "layers", "min": 0, "max": 16, "min_excl": false, "field": "rust/src/automesher/mod.rs:325", "validator": null, "declared": "docs/15 §D.2 counts n >= 8"},
+    {"pointer": "/layers/first_thickness", "type": "float", "stage": "layers", "min": 0, "max": null, "min_excl": true, "field": "rust/src/automesher/mod.rs:328", "validator": null, "declared": "set by R-YP from §D.3"},
+    {"pointer": "/layers/growth", "type": "float", "stage": "layers", "min": 1.0, "max": 2.0, "min_excl": false, "field": "rust/src/automesher/mod.rs:331", "validator": "rust/src/automesher/mod.rs:603", "declared": "validator only asks > 0; §D.3's window is empty above ~1.36, refused there, not here"},
+    {"pointer": "/layers/normal_passes", "type": "int", "stage": "layers", "min": 0, "max": 10, "min_excl": false, "field": "rust/src/automesher/mod.rs:343", "validator": null, "declared": "default 3"},
+    {"pointer": "/layers/smoothing", "type": "float", "stage": "layers", "min": 0, "max": 1, "min_excl": false, "field": "rust/src/automesher/mod.rs:349", "validator": null, "declared": "a relaxation weight"},
+    {"pointer": "/layers/smoothing_passes", "type": "int", "stage": "layers", "min": 0, "max": 10, "min_excl": false, "field": "rust/src/automesher/mod.rs:352", "validator": null, "declared": "default 4"},
+    {"pointer": "/layers/retreat_limit", "type": "int", "stage": "layers", "min": 0, "max": 8, "min_excl": false, "field": "rust/src/automesher/mod.rs:356", "validator": null, "declared": "default 4"}
+  ],
+  "forbidden": [
+    {"pointer": "/quality", "match": "prefix", "cite": "docs/15 §C, §H: the loop never loosens the gate that judges it (SPEC-LIT §92.3)"},
+    {"pointer": "/layers/cell_frac", "match": "exact", "cite": "docs/15 §I-5 (D-D): a limiter, out of the action space"},
+    {"pointer": "/layers/medial_frac", "match": "exact", "cite": "docs/15 §I-5 (D-D): a limiter, out of the action space"}
+  ],
+  "forbidden_flags": [
+    {"flag": "-permissive", "cite": "docs/15 §C L0 (c): no -permissive, ever"}
+  ]
+}

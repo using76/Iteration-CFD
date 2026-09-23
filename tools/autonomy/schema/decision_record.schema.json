@@ -1,0 +1,61 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.iterations.invalid/autonomy/decision_record.schema.json",
+  "title": "DecisionRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "autonomy-decision/1"},
+    "layer": {"enum": ["preflight", "rule", "remedy", "prior", "optimiser", "llm"]},
+    "rule_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$"},
+    "verdict": {"enum": ["apply", "refuse", "abstain", "pass"]},
+    "trigger": {"$ref": "#/$defs/Trigger"},
+    "inputs": {"type": "array", "items": {"$ref": "#/$defs/Input"}},
+    "formula": {"type": "string"},
+    "edits": {"type": "array", "items": {"$ref": "#/$defs/Edit"}},
+    "cite": {"type": "string", "minLength": 1},
+    "message": {"type": "string", "minLength": 1},
+    "uncertainty": {"type": "number", "minimum": 0},
+    "t": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"}
+  },
+  "required": ["schema", "layer", "rule_id", "verdict", "trigger", "inputs", "formula",
+               "edits", "cite", "message", "uncertainty", "t"],
+  "$defs": {
+    "Trigger": {
+      "title": "Trigger",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "observable": {"type": "string", "minLength": 1},
+        "value": {},
+        "threshold": {},
+        "op": {"enum": ["<", "<=", ">", ">=", "==", "!=", "in", "not_in"]},
+        "source": {"type": "string", "minLength": 1}
+      },
+      "required": ["observable", "value", "threshold", "op", "source"]
+    },
+    "Input": {
+      "title": "Input",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "value": {},
+        "unit": {"type": "string"}
+      },
+      "required": ["name", "value", "unit"]
+    },
+    "Edit": {
+      "title": "Edit",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pointer": {"type": "string", "pattern": "^(/[^/]+)+$"},
+        "from": {},
+        "to": {}
+      },
+      "required": ["pointer", "from", "to"]
+    }
+  }
+}

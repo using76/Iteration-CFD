@@ -1,0 +1,18 @@
+# meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted.
+# sha256 over canonical JSON (sort_keys, separators (",", ":"), ensure_ascii, allow_nan=False) of the parsed file / field
+# locked 2026-09-23 before any tuning (docs/15 §F, §I-3); relocking is the user's decision - never rewrite this file to make a number pass
+93cc1648563ec0ac96b81d837e8625c9b98140114c094e63ee20b793a1aef1aa  gates.json
+30cb814e182b9c080370d2070c6a42e299b1f5d31edc18bb4fbffd69bc82e6a1  gates.json#$comment
+203550de69fd32247aa59c67343c1ec7437181af7576b6b4a0750aca2b15d62b  gates.json#adopted
+f42b383a2bf402ee84ccf15180546c6a5906c8e54c939fd633be87fac485f225  gates.json#area_ratio_max
+b8cbc38948375ba9789be4c7b4da56d790594cd5f488169fee62dd03cf39c9c3  gates.json#area_ratio_min
+4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a  gates.json#attempts_k
+dd80d7a873341d491936c851964a9793195f37e646f6809dd546e2946f46d283  gates.json#cell_budget
+2c624232cdd221771294dfbb310aca000a0df6ac8b66b696d90ef06fdefb64a3  gates.json#delivered_min_layers
+d2cbad71ff333de67d07ec676e352ab7f38248eb69c942950157220607c55e84  gates.json#max_residual_over_hf_max
+14be4b45f18e0d8c67b4f719b5144eee88497e413709d11d85b096d8e2346310  gates.json#p99_residual_over_hf_max
+0602d7c813c1f6e7351a5832730f29daf739674976caba8d9dd955be838d46ea  gates.json#pinned_frac_max
+7a326423e6179fb459e0f7f2e2f85a2af1e2fd5958b49c40eba5c4cbb062504f  gates.json#schema
+efe0280709369ad2b99ece000176eebc2f7eac4424e1a50bb1035827d3bb8f0f  gates.json#source
+d0ff5974b6aa52cf562bea5921840c032a860a91a3512f7fe8f768f6bbe005f6  gates.json#yplus_max_a_priori
+60a021602ffb9e2c4ac59b0851745113162a86988bf562a6cd4db30cccc0b0ba  schema/knobs.json
