@@ -671,8 +671,11 @@ pub fn device_banner(gpu: &Gpu, tag: &str) -> Result<String> {
     ))
 }
 
-/// Resident device memory, as the benchmark reports it. `mem_get_info`
-/// returns `(free, total)`; what a user cares about is the difference.
+/// Resident device memory on the whole card, `total - free` from
+/// `mem_get_info`: every process on the card, not this one. Under the
+/// Windows display driver it counts another process only some of the time,
+/// which is what `docs/11`'s 4.72 M-cell "cliff" was. For this process's own
+/// bytes use `Gpu::pool_usage` (SPEC-LIT 111.1, 111.2).
 pub fn resident_mib(gpu: &Gpu) -> Result<(usize, usize)> {
     let (free, total) = gpu.mem_info()?;
     Ok(((total - free) >> 20, total >> 20))

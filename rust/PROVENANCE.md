@@ -341,7 +341,7 @@ and they are a larger share of the value than their line counts suggest.
 
 | File | What it is |
 |---|---|
-| `src/device.rs` | The cudarc wrapper: context, dedicated non-blocking stream, `DevBuf`, `KernelSet`, CUDA graph capture |
+| `src/device.rs` | The cudarc wrapper: context, dedicated non-blocking stream, `DevBuf`, `KernelSet`, CUDA graph capture, and the per-process pool reading and allocation trace of SPEC-LIT §111.2 (`cuDeviceGetMemPool`, `cuMemPoolGetAttribute`; documented driver API) |
 | `src/error.rs` | The error type |
 | `src/types.rs` | `Vec3` / `Tensor`, `#[repr(C)]` mirrors of the device structs, with a layout test |
 | `build.rs` | The MSVC/nvcc build glue: `vcvars64.bat` capture, CUBIN emission, `/Zc:preprocessor` |

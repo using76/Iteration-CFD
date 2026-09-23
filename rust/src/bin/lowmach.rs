@@ -1516,17 +1516,24 @@ momentum predictor {}{}",
 /// iteration, and a `cuMemGetInfo` per step would put a driver round trip
 /// and a stream synchronise inside the wall time a run is also being judged
 /// on.
+///
+/// The pool figure counts this process alone; the whole-card difference
+/// above can also move when another process on the card allocates or frees
+/// (SPEC-LIT 111.1).
 struct MemWatch {
     baseline_free: usize,
     total: usize,
     peak: usize,
+    pool_baseline: u64,
+    pool_peak: u64,
 }
 
 impl MemWatch {
     fn new(gpu: &Gpu) -> Result<Self> {
         gpu.sync()?;
         let (free, total) = gpu.mem_info()?;
-        Ok(Self { baseline_free: free, total, peak: 0 })
+        let pool_baseline = gpu.pool_usage()?.used;
+        Ok(Self { baseline_free: free, total, peak: 0, pool_baseline, pool_peak: 0 })
     }
 
     /// One sample. `saturating_sub` because the baseline is a device-wide
@@ -1537,6 +1544,9 @@ impl MemWatch {
         gpu.sync()?;
         let (free, _) = gpu.mem_info()?;
         self.peak = self.peak.max(self.baseline_free.saturating_sub(free));
+        self.pool_peak = self
+            .pool_peak
+            .max(gpu.pool_usage()?.used.saturating_sub(self.pool_baseline));
         Ok(())
     }
 
@@ -1549,12 +1559,15 @@ impl MemWatch {
         let used_now = self.total.saturating_sub(self.baseline_free);
         format!(
             "device memory: {} MiB peak allocated by this run | {} MiB was already \
-             resident of {} MiB before it started | {} B/cell over {} cells",
+             resident of {} MiB before it started | {} B/cell over {} cells \
+             | {} MiB peak in this process's own pool, {} B/cell (SPEC-LIT 111.2)",
             self.peak >> 20,
             used_now >> 20,
             self.total >> 20,
             g(self.peak as f64 / n_cells.max(1) as f64),
-            n_cells
+            n_cells,
+            self.pool_peak >> 20,
+            g(self.pool_peak as f64 / n_cells.max(1) as f64)
         )
     }
 }

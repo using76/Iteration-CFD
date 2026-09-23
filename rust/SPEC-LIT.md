@@ -20651,7 +20651,7 @@ alternative, per §13.4.
 
 `Gpu` carries an `AtomicBool` set between `begin_capture` and `end_capture`,
 and every host round-trip on that type checks it first: `sync`, `download`,
-`upload`, `write`, `zeros`, `mem_info`, `load`. Each returns an error naming
+`upload`, `write`, `zeros`, `mem_info`, `pool_usage` (§111.2), `load`. Each returns an error naming
 **the call**, the reason a graph cannot hold it, and the alternative — keep the
 value on the device, as `solver.rs` keeps its residuals. A nested `capture` is
 refused too, because it would fold into the outer graph and return `None`,
@@ -30405,5 +30405,171 @@ has been made, and no verdict in this table is a claim.
 | Gate 110-A Re_tau 587.19 | not yet run | not yet run | not yet run | not yet run |
 | Gate 110-B reattachment | not yet run | not yet run | not yet run | not yet run |
 | Gate 110-C plume centreline | not yet run | not yet run | not yet run | not yet run |
+
+---
+
+## 111. Device memory — what a cell costs, what the card holds, and the cliff that was a reading
+
+`docs/11` §B.1 recorded, from four runs on 2026-09-14, that between 4,720,000 and
+4,800,000 cells the k-ε benchmark's device footprint stepped from 498 to 1870 bytes per
+cell, and it read the step as the stream-ordered memory pool asking the driver for
+~6 GB that no source line requests. This section is the diagnosis that plan asked for.
+The step is not an allocation. It is the whole-card free-memory reading changing what
+it counts while a second process holds memory on the same card, and every per-cell
+figure this crate prints now comes from a reading that cannot do that. No allocation,
+kernel, scheme or solver control changed; a case writes byte-identical fields before
+and after.
+
+`No GPL-licensed source was consulted.` The sources are this tree's own code, the CUDA
+driver API's documented stream-ordered allocator entry points (`cuDeviceGetMemPool`,
+`cuMemPoolGetAttribute`), and the measurements below.
+
+### 111.1 The diagnosis — what was measured, and what it rules out
+
+Every run below is `ofgpu-bench <nx> <ny> <nz> -model kEpsilon` on the machine of record
+(one RTX 5070 Ti, 16,303 MiB, driver 596.49, f64), taken 2026-09-23 and 2026-09-24 at
+HEAD `af8f7fd`. "Card" is `mem_get_info`'s whole-device figure, `total - free`, which is
+what `ofgpu-bench` printed until this section; "pool" is this process's own pool, §111.2.
+B/cell is the k-ε model's step over the mesh-only reading, divided by the cell count.
+
+**Idle card** (only the desktop resident, 1.3–2.6 GB):
+
+| cells | card, mesh only (MiB) | card, after k-ε (MiB) | card B/cell | ms/iter |
+|---|---|---|---|---|
+| 4,720,000 | 4,113 | 6,357 | 499 | 36.2 |
+| 4,800,000 | 4,145 | 6,453 | 504 | 36.8 |
+| 6,000,000 | 4,881 | 7,733 | 498 | 46.3 |
+| 8,000,000 | 6,065 | 9,845 | 495 | 66.8 |
+| 10,000,000 | 7,249 | 13,109 | 614 | 76.0 |
+| 12,000,000 | 8,433 | 15,162 | 588 | 90.9 |
+| 13,000,000 | 9,009 | 15,668 | 537 | 98.8 |
+
+There is no step at 4.72–4.80 M on an idle card, and throughput holds at 120–132 Mcell
+iterations per second up to 13 M cells. The 10 M row was taken three times: the card
+reading after k-ε came out 13,109, 13,330 and 11,989 MiB, while the pool reading of the
+third run was 5,958 MiB after the mesh and 10,703 MiB after the model — 497.5 B/cell,
+the same as every other size. The whole-card figure moved by 1.3 GB between runs of an
+identical allocation sequence because the other processes on the card moved.
+
+**A second process on the card.** A second `ofgpu-bench 400 250 68` (6.8 M cells, 7,297
+MiB in its own pool, 99 % SM) held the card while the probe ran, which is the condition
+of 2026-09-14 (a second CUDA process held ~7.1 GB then):
+
+| cells | card, mesh only | card, after k-ε | card B/cell | pool, mesh only | pool, after k-ε | pool B/cell | ms/iter |
+|---|---|---|---|---|---|---|---|
+| 4,720,000 | 4,113 | 12,161 | **1,788** | 2,825 | 5,081 | 501 | 92.5 |
+| 4,800,000 | 4,145 | 12,346 | **1,792** | 2,874 | 5,169 | 501 | 94.4 |
+| 6,000,000 | 9,223 | 14,876 | 988 | 3,585 | 6,446 | 500 | 387.8 |
+
+The 2026-09-14 figure (1,870–1,924 B/cell) reproduces in the card column, and in the
+same runs the pool column is 500–501 B/cell. The mesh-only card reading of the 4.72 M
+row (4,113 MiB) is the idle one although `nvidia-smi` reported 8,847 MiB in use before
+the probe started: under the Windows display driver the whole-device reading does not
+count the other process until something forces it to, and then it counts all of it. The
+step is that switch. Where it falls and how much of the neighbour it adds are
+properties of the neighbour: an earlier pair of runs, with the neighbour holding 8.2 GB,
+read 984 and 998 B/cell at the same two sizes, the mesh-only reading already counting it.
+
+**What it rules out.** The pool's release threshold (`CU_MEMPOOL_ATTR_RELEASE_THRESHOLD`)
+is 0, the driver default, and in every run above the pool's reserved bytes exceeded its
+used bytes by at most 31 MiB: the pool does not hoard. A trace of every allocation
+(§111.2's `OFGPU_MEM_TRACE`) at 8 M and 10 M cells requested 8,574.7 and 10,703.1 MiB
+in 129 allocations each, and at 10 M the pool's used bytes (10,703 MiB) matched the
+requested sum to the MiB; no allocation in the k-ε constructor is larger than the per-cell arithmetic says.
+
+**What is real.** Throughput under contention. With the neighbour resident, 4.72 M cells
+ran 2.6× slower (92.5 against 36.2 ms/iter), which is two processes sharing the SMs.
+6 M cells ran 8.4× slower (387.8 against 46.3), because the two pools plus the desktop
+then exceed the card's 16 GB and the display driver pages device memory to the host
+rather than refusing the allocation. That is the "8 M cells thrashes" of `docs/11`, and
+it is a limit of the card's occupancy, not of this code. It cannot be predicted from
+inside the process, because the one reading that could — the card's free memory — is the
+reading that does not see the neighbour.
+
+### 111.2 The reading that counts only this process
+
+`Gpu::pool_usage()` (`src/device.rs`) returns `PoolUsage { used, reserved, used_high,
+release_threshold }` from the device's current memory pool — the pool every
+`Gpu::zeros` and `Gpu::upload` draws from, since `cudarc` allocates with
+`cuMemAllocAsync`. `used` is the bytes handed to live buffers of this process and no
+other; it is what every per-cell figure is now computed from. It excludes the CUDA
+context, the loaded kernel modules and any library that allocates outside the pool, so
+it is a lower bound on the process's residency and an exact count of what the solver
+asked for. It is a host query and is refused during a capture, like `mem_info` (§81.3).
+
+`ofgpu-bench` prints both readings on each memory line, the pool one first and named as
+this process's; `ofgpu-lowmach`'s device-memory line keeps its whole-card difference and
+adds the pool's peak. `resident_mib` (`src/bin/common/mod.rs`) is documented as the
+whole-card figure it is.
+
+Setting `OFGPU_MEM_TRACE` in the environment makes `Gpu::zeros` and `Gpu::upload`
+synchronise the stream after each allocation and print one line to stderr naming the
+calling source line, the bytes requested, the pool's used bytes and the card's free
+bytes. The synchronise is what makes the trace attributable: without it the card
+reading lags the queued work and charges an allocation to a later line. Unset, which is
+the default, the only cost is one read of an initialised flag per allocation.
+
+### 111.3 The memory model, and the test that holds it
+
+On a hex block, the `ofgpu-bench` k-ε case costs, in bytes of this process's pool:
+
+* mesh and frozen flow: **622.2 B/cell**,
+* the k-ε model (constructor and `init`): **494.3 B/cell**,
+* together: **1116.5 B/cell**, plus a fixed **64 MiB** (measured 55 MiB, rounded up).
+
+The two slopes are the pool readings of the 4.72 M and 10 M rows above, differenced;
+the 4.80 M and 10 M rows (one 400 × 250 cross-section) give 621.9 and 494.0, and the
+4.72 M and 6.8 M rows 622.6 and 494.5. The constructor arithmetic of the k-ε footprint — nine per-cell field arrays,
+the gradient, the matrix, the solver workspace and four face arrays at 2.97 internal
+faces per cell — comes to about 491 B/cell, within 1 % of the measured model slope.
+
+Checked after the change, on an idle card: `ofgpu-bench`'s model line predicted 5,090,
+5,175, 10,712 and 13,906 MiB at 4.72, 4.80, 10 and 13 M cells, and the pool read 5,081,
+5,169, 10,703 and 13,895 MiB after k-ε — within 0.2 % at every size, 13 M included. A
+400-cell `ofgpu-lowmach` case (`cases/channelPeriodicFluxLowRe.jsonc`, 50 iterations)
+wrote byte-identical fields before and after.
+
+`the_kepsilon_case_costs_linear_bytes_per_cell` (`src/bin/bench.rs`) builds the same
+case at 400 × 250 × 2, × 4 and × 6 (200,000 to 600,000 cells), reads the pool after the
+mesh and after the model at each size, and asserts that the two successive slopes of
+each agree within 1 % — bytes per cell are linear — and that each is within 2 % of the
+constant above. It refuses by name when the card reports less than 2 GiB free, rather
+than measure a card that is paging.
+
+### 111.4 Cells that fit in N GiB
+
+Cells of the k-ε benchmark case that fit in N GiB of pool memory, from §111.3's model
+(`fits_in` in `src/bin/bench.rs`, the fixed 64 MiB taken off first):
+
+| pool memory | cells |
+|---|---|
+| 2 GiB | 1.86 M cells |
+| 4 GiB | 3.79 M cells |
+| 6 GiB | 5.71 M cells |
+| 8 GiB | 7.63 M cells |
+| 10 GiB | 9.56 M cells |
+| 12 GiB | 11.48 M cells |
+| 14 GiB | 13.40 M cells |
+| 16 GiB | 15.33 M cells |
+
+`the_fit_table_in_spec_lit_is_the_one_the_model_computes` rebuilds every row of this
+table from the constants in the code and fails if any row, or any of the four constants
+of §111.3, is missing from this file: the table cannot drift from the model.
+
+The pool is not the whole card. On the machine of record with only the desktop resident,
+about 1.26 GiB sits outside it — the desktop, the CUDA context and the modules; the 10 M
+row read 7,249 MiB on the card against 5,958 in the pool — so the 16,302 MiB card leaves
+about 14.66 GiB for the pool, 14.04 M cells by the model. 13,000,000 cells ran there at
+98.8 ms/iter with the card at 15,668 of 16,302 MiB. `docs/11` put the real ceiling at
+6.0–6.5 M; that was the ceiling beside a 7 GB neighbour, and the idle ceiling — 13 M
+measured, 14.04 M modelled — is 2.0–2.3 times it.
+
+### 111.5 What this does not cover
+
+The model is the `ofgpu-bench` k-ε case on a hex block. Another model, a polyhedral mesh
+with a different face count per cell, or a driver that adds its own fields costs a
+different number per cell; §111.2's reading measures any of them, and the table speaks
+for this one. The table is in pool memory: what the card leaves for the pool depends on
+everything else resident on it, which only the card's owner controls.
 
 ---
