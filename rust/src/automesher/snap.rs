@@ -57,6 +57,29 @@ use super::SnapSpec;
 //  The report
 // ==========================================================================
 
+/// One surface patch's wall area, as (92.32) measures it: the mesh's wall
+/// faces carrying the patch name plus the region-interface faces (92.32)
+/// assigns to it, before the first move and on the points the stage returns.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PatchArea {
+    pub name: String,
+    /// The patch's own area on the surface, `surf.patch_area[k]`.
+    pub stl_area: Scalar,
+    pub castellated_area: Scalar,
+    pub snapped_area: Scalar,
+}
+
+impl PatchArea {
+    /// `snapped_area / stl_area`; `None` when the surface area is not positive.
+    pub fn ratio(&self) -> Option<Scalar> {
+        (self.stl_area > 0.0).then(|| self.snapped_area / self.stl_area)
+    }
+    /// `castellated_area / stl_area` - the ratio (92.32) refuses on.
+    pub fn castellated_ratio(&self) -> Option<Scalar> {
+        (self.stl_area > 0.0).then(|| self.castellated_area / self.stl_area)
+    }
+}
+
 /// What stage 4 did, per SPEC-LIT §92.11.
 #[derive(Debug, Clone, Default)]
 pub struct SnapReport {
@@ -77,6 +100,11 @@ pub struct SnapReport {
     pub n_scaled_back: usize,
     /// Points that ended PINNED - alpha driven to zero, or fixed by (92.30).
     pub n_pinned: usize,
+    /// The pinned points that lie in `B` of (92.27). `n_pinned` also counts
+    /// the non-wall points (92.31) pins with a failing cell when it abandons
+    /// an iterate, and the domain points (92.30) pins, so it can exceed
+    /// `n_boundary_points`; this count cannot.
+    pub n_pinned_boundary: usize,
     /// Iterates abandoned whole by (92.31).
     pub n_abandoned: usize,
     /// Feature edges (92.34) the surface carried, and corners (92.35).
@@ -86,6 +114,8 @@ pub struct SnapReport {
     /// branch. Counted from the last iterate that ran, not cumulatively.
     pub n_snapped_to_edge: usize,
     pub n_snapped_to_corner: usize,
+    /// One row per surface patch, in `surf.patch_names` order.
+    pub patch_areas: Vec<PatchArea>,
 }
 
 impl SnapReport {
@@ -264,6 +294,9 @@ pub fn snap_regions(
     // names the surface patch an interface face's area lands on.
     let idx = TriIndex::new(surf, base_size)?;
     let mut iface_area = vec![0.0; surf.patch_names.len()];
+    // The same faces, kept with the patch (92.32) assigned them, so the
+    // report can re-measure them on the returned points.
+    let mut iface_patch: Vec<(usize, usize)> = Vec::new();
     for f in 0..n_internal {
         if !wall_face[f] {
             continue;
@@ -281,7 +314,9 @@ pub fn snap_regions(
         let (t, _) = idx.nearest_triangle(centre);
         iface_area[surf.tri_patch[t] as usize] +=
             face_area_vector(&mesh.points, ps).mag();
+        iface_patch.push((f, surf.tri_patch[t] as usize));
     }
+    let mut patch_areas: Vec<PatchArea> = Vec::new();
     for (k, name) in surf.patch_names.iter().enumerate() {
         let mut a_mesh = iface_area[k];
         if let Some(patch) = mesh.patches.iter().find(|p| p.name == *name) {
@@ -313,6 +348,12 @@ pub fn snap_regions(
                 sig3(spec.max_area_ratio),
             )));
         }
+        patch_areas.push(PatchArea {
+            name: name.clone(),
+            stl_area: a_surf,
+            castellated_area: a_mesh,
+            snapped_area: 0.0,
+        });
     }
     // The arrival check. G3 and G7 are topological: no motion of the points
     // can mend either, so a mesh that fails one on arrival is refused at
@@ -664,9 +705,14 @@ pub fn snap_regions(
     }
     report.n_scaled_back = scaled_back.iter().filter(|&&s| s).count();
     report.n_pinned = pinned.iter().filter(|&&p| p).count();
+    report.n_pinned_boundary = (0..n_points).filter(|&i| pinned[i] && is_b[i]).count();
     // The gate: a mesh that still fails leaves as §92.3's own refusal text.
     let mut out = mesh.clone();
     out.points = pts;
+    // Each patch's area once more, on the points the stage returns: the
+    // (92.32) walk unchanged, measured twice.
+    patch_areas_on(&out.points, &out, n_internal, &iface_patch, &mut patch_areas);
+    report.patch_areas = patch_areas;
     let quality = quality::check(&out, t)?;
     Ok(Snapped {
         mesh: out,
@@ -678,6 +724,35 @@ pub fn snap_regions(
 // ==========================================================================
 //  Helpers
 // ==========================================================================
+
+/// Each surface patch's area on `points`: the (92.32) walk - the region
+/// interface faces assigned to the patch, in the order they were recorded,
+/// then the boundary faces of the mesh patch carrying its name - with
+/// `face_area_vector` measured on `points` rather than the mesh's own.
+fn patch_areas_on(
+    points: &[Vec3],
+    mesh: &PolyMeshRaw,
+    n_internal: usize,
+    iface_patch: &[(usize, usize)],
+    rows: &mut [PatchArea],
+) {
+    for (k, row) in rows.iter_mut().enumerate() {
+        let mut a = iface_patch
+            .iter()
+            .filter(|&(_, kk)| *kk == k)
+            .map(|&(f, _)| face_area_vector(points, &mesh.faces[f]).mag())
+            .sum::<Scalar>();
+        if let Some(patch) = mesh.patches.iter().find(|p| p.name == row.name) {
+            for j in 0..patch.size {
+                let f = n_internal + patch.start + j;
+                if f < mesh.faces.len() {
+                    a += face_area_vector(points, &mesh.faces[f]).mag();
+                }
+            }
+        }
+        row.snapped_area = a;
+    }
+}
 
 /// (92.39): the corner claim, from the CURRENT positions - for every corner
 /// `k`, the boundary point `i` of `B`, not pinned, minimising
@@ -1685,5 +1760,203 @@ mod tests {
         assert!(text.contains("sphere"), "{err}");
         assert!(text.contains("max_area_ratio"), "{err}");
         assert!(text.contains("92.32"), "{err}");
+    }
+
+    /// The on-plane cube's report carries its one patch with castellated
+    /// and snapped areas each the geometry's own 24 m^2 - the snap moved
+    /// nothing, so both walks measure the same unit quads - both ratios 1,
+    /// and no pinned point of any kind, wall or otherwise.
+    #[test]
+    fn the_cube_on_the_cell_planes_reports_its_whole_area() {
+        let (tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 0);
+        let surf = Surface::from_soup(
+            box_soup([1.0; 3], [3.0; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped =
+            snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap");
+        assert_eq!(snapped.report.patch_areas.len(), 1);
+        let row = &snapped.report.patch_areas[0];
+        assert_eq!(row.name, "cube");
+        let near = |a: Scalar, b: Scalar| (a - b).abs() <= 1e-12 * b.abs();
+        assert!(near(row.stl_area, 24.0), "stl area {}", row.stl_area);
+        assert!(
+            near(row.castellated_area, 24.0),
+            "castellated area {}",
+            row.castellated_area
+        );
+        assert!(
+            near(row.snapped_area, 24.0),
+            "snapped area {}",
+            row.snapped_area
+        );
+        let r = row.ratio().expect("ratio");
+        let cr = row.castellated_ratio().expect("castellated ratio");
+        assert!((r - 1.0).abs() <= 1e-12, "ratio {r}");
+        assert!((cr - 1.0).abs() <= 1e-12, "castellated ratio {cr}");
+        assert_eq!(snapped.report.n_pinned_boundary, 0);
+    }
+
+    /// An abandoned iterate pins more than the boundary: the pinned points
+    /// that lie in B of (92.27) stay inside the boundary count and under
+    /// the pinned total, and with the mesh returned unmoved each patch's
+    /// re-measured area is bit for bit the castellated one.
+    #[test]
+    fn an_abandoned_iterate_pins_more_than_the_boundary() {
+        let (tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 0);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let mut t = thresholds();
+        t.max_non_orth_deg = 1e-3;
+        t.report_non_orth_deg = 1e-3;
+        let snapped = snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &t)
+            .expect("the arrival mesh is orthogonal, so the gate is satisfiable");
+        eprintln!(
+            "n_pinned {} n_pinned_boundary {} n_boundary_points {}",
+            snapped.report.n_pinned,
+            snapped.report.n_pinned_boundary,
+            snapped.report.n_boundary_points
+        );
+        assert!(snapped.report.n_pinned_boundary > 0);
+        assert!(
+            snapped.report.n_pinned_boundary <= snapped.report.n_boundary_points,
+            "a boundary-only count cannot exceed the boundary points"
+        );
+        assert!(
+            snapped.report.n_pinned_boundary < snapped.report.n_pinned,
+            "the pinned total also counts points outside B"
+        );
+        for row in &snapped.report.patch_areas {
+            assert_eq!(
+                row.snapped_area.to_bits(),
+                row.castellated_area.to_bits(),
+                "the mesh came back unmoved, so the two walks agree exactly"
+            );
+        }
+    }
+
+    /// The snapped sphere's mesh area lands within ten per cent of its
+    /// surface's own, and the snap moved the castellated mesh toward that:
+    /// a staircase over-reports a curved surface's area (by up to sqrt(3)),
+    /// so the castellated ratio sits above the snapped one.
+    #[test]
+    fn the_snapped_sphere_area_is_near_its_surface_area() {
+        let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "sphere".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped =
+            snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap");
+        assert_eq!(snapped.report.patch_areas.len(), 1);
+        let row = &snapped.report.patch_areas[0];
+        assert_eq!(row.name, "sphere");
+        let r = row.ratio().expect("ratio");
+        let cr = row.castellated_ratio().expect("castellated ratio");
+        eprintln!("sphere snapped ratio {r} castellated ratio {cr}");
+        assert!(0.9 < r && r < 1.1, "ratio {r} not in (0.9, 1.1)");
+        assert!(cr > r, "castellated ratio {cr} not under snapped ratio {r}");
+    }
+
+    /// With the sphere declared a body, the interface faces (92.32) assigns
+    /// to the patch count toward its areas, and the snapped mesh still
+    /// covers the geometry: one row, a positive castellated area that
+    /// includes those interfaces, and a snapped ratio within ten per cent.
+    #[test]
+    fn the_interface_area_counts_toward_the_snapped_ratio() {
+        let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "sphere".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast_spec = CastellationSpec {
+            bodies: vec![BodySpec {
+                name: "sphere".to_string(),
+                patches: vec!["sphere".to_string()],
+            }],
+            ..Default::default()
+        };
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &cast_spec,
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped = snap_regions(
+            &cast.mesh,
+            &surf,
+            Some(&cast.region_of_cell),
+            1.0,
+            30.0,
+            &SnapSpec::default(),
+            &thresholds(),
+        )
+        .expect("snap_regions");
+        assert_eq!(snapped.report.patch_areas.len(), 1);
+        let row = &snapped.report.patch_areas[0];
+        assert_eq!(row.name, "sphere");
+        let r = row.ratio().expect("ratio");
+        let cr = row.castellated_ratio().expect("castellated ratio");
+        eprintln!("body snapped ratio {r} castellated ratio {cr}");
+        assert!(row.castellated_area > 0.0, "interface area must count");
+        assert!(0.9 < r && r < 1.1, "ratio {r} not in (0.9, 1.1)");
     }
 }

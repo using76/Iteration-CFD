@@ -811,7 +811,14 @@ def _live(lines: list) -> None:
                         summary=summary_a, config=cfg,
                         patch_areas_m2=row["patch_areas_m2"], flow=labels["flow"],
                         case_dir=os.path.join(tmp, "case_a"))
-        k, bad = _compare_expect(row["expect"], res["outcome"], "live-a")
+        # The frozen probe predates AM-R2: its missing_signals still names M_OCT. A live
+        # binary that writes stages[octree].gate_passed legitimately drops that note.
+        expect = copy.deepcopy(row["expect"])
+        octree = {s["stage"]: s for s in summary_a["stages"]}.get("octree", {})
+        if "gate_passed" in octree:
+            assert M_OCT in expect.get("missing_signals", []), "frozen probe lost M_OCT"
+            expect["missing_signals"].remove(M_OCT)
+        k, bad = _compare_expect(expect, res["outcome"], "live-a")
         assert not bad, "live score differs from the frozen one:\n  %s" % "\n  ".join(bad)
         assert k > 0 and res["content_sha256"] == runs["a"][2]
         chk = run_check(binary, live, os.path.join(tmp, "case_a"))

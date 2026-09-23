@@ -532,6 +532,8 @@ pub fn run(
         "refine_splits": refine_splits,
         "balance_splits": balance_splits,
         "n_leaves": leaf_quality.n_cells,
+        "gate_passed": leaf_quality.passed(),
+        "max_non_orth_deg": leaf_quality.max_non_orth_deg as f64,
     });
     let log = report_lines(progress, &leaf_quality.summary());
     let seconds = started.elapsed().as_secs_f64();
@@ -594,6 +596,23 @@ pub fn run(
         &thr,
     )?;
     let seconds = started.elapsed().as_secs_f64();
+    // h_f of docs/15 §D.1's F3: the finest cell, base_size / 2^max_level.
+    let h_f = cfg.domain.base_size / 2f64.powi(cfg.refinement.max_level as i32);
+    let area_ratio: Vec<serde_json::Value> = snapped
+        .report
+        .patch_areas
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "stl_area_m2": p.stl_area,
+                "castellated_area_m2": p.castellated_area,
+                "snapped_area_m2": p.snapped_area,
+                "castellated_ratio": p.castellated_ratio(),
+                "ratio": p.ratio(),
+            })
+        })
+        .collect();
     let counts = json!({
         "n_boundary_points": snapped.report.n_boundary_points,
         "iterations": snapped.report.iterations,
@@ -608,6 +627,11 @@ pub fn run(
         "n_feature_corners": snapped.report.n_feature_corners,
         "n_snapped_to_edge": snapped.report.n_snapped_to_edge,
         "n_snapped_to_corner": snapped.report.n_snapped_to_corner,
+        "h_f_m": h_f,
+        "p99_over_h": snapped.report.p99_residual as f64 / h_f,
+        "max_over_h": snapped.report.max_residual as f64 / h_f,
+        "n_pinned_boundary": snapped.report.n_pinned_boundary,
+        "area_ratio": area_ratio,
     });
     let log = report_lines(progress, &snapped.report.summary());
     elapsed(progress, Stage::Snap, seconds);
@@ -1583,5 +1607,58 @@ mod tests {
         let back: AutomeshConfig = serde_json::from_value(s["config"].clone()).unwrap();
         assert_eq!(back, cfg);
         assert!(serde_json::to_string(&s["config"]).unwrap().contains("\"bodies\""));
+    }
+
+    /// The summary reports the numbers a fidelity flag reads - the snap
+    /// stage's finest cell, both residuals over it, the boundary-only
+    /// pinned count and one area row per patch, and the octree stage's
+    /// gate verdict - while every stage's own behaviour stays untouched.
+    #[test]
+    fn the_summary_reports_the_snap_ratios_and_the_octree_verdict() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let st = &s["stages"];
+        // Octree: the leaf mesh measured, reported and not refused on.
+        assert!(st[0]["gate_passed"].is_boolean(), "{}", st[0]);
+        assert!(st[0]["gate_passed"].as_bool().unwrap());
+        let mno = st[0]["max_non_orth_deg"].as_f64().unwrap();
+        eprintln!("octree max_non_orth_deg {mno}");
+        assert!(mno.is_finite() && mno >= 0.0, "max_non_orth_deg {mno}");
+        // Snap: this config's finest cell is base 1 over 2^1.
+        assert_eq!(st[2]["h_f_m"].as_f64().unwrap(), 0.5);
+        let p99 = st[2]["p99_over_h"].as_f64().unwrap().to_bits();
+        assert_eq!(p99, (st[2]["p99_residual"].as_f64().unwrap() / 0.5).to_bits());
+        let max = st[2]["max_over_h"].as_f64().unwrap().to_bits();
+        assert_eq!(max, (st[2]["max_residual"].as_f64().unwrap() / 0.5).to_bits());
+        let npb = st[2]["n_pinned_boundary"].as_u64().unwrap();
+        assert!(
+            npb <= st[2]["n_boundary_points"].as_u64().unwrap(),
+            "boundary-only pinned {npb} over the boundary points"
+        );
+        let rows = st[2]["area_ratio"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["name"].as_str().unwrap(), "cube");
+        for key in [
+            "name",
+            "stl_area_m2",
+            "castellated_area_m2",
+            "snapped_area_m2",
+            "castellated_ratio",
+            "ratio",
+        ] {
+            assert!(row.get(key).is_some(), "missing {key} in {row}");
+        }
+        let r = row["ratio"].as_f64().unwrap();
+        eprintln!("cube area ratio {r}");
+        assert!(0.9 < r && r < 1.1, "ratio {r} not in (0.9, 1.1)");
     }
 }

@@ -26774,6 +26774,18 @@ records is the config the run actually used, defaults filled in, which is the
 thing a second run has to match. The patch list is the FINAL one, after
 (92.56).
 
+Two stage rows carry numbers read off a stage's output that change nothing in it. The snap row adds
+`h_f_m`, the finest cell size `base_size / 2^max_level`; `p99_over_h` and `max_over_h`, §92.11's p99 and
+largest residual over B divided by it; `n_pinned_boundary`, the pinned points that lie in B of (92.27) —
+`n_pinned` also counts the non-wall points of every cell an abandoned iterate of (92.31) pins, and the
+domain points (92.30) pins, so it can exceed `n_boundary_points` and this count cannot; and `area_ratio`,
+one row per surface patch, `{ "name", "stl_area_m2", "castellated_area_m2", "snapped_area_m2",
+"castellated_ratio", "ratio" }`: the area (92.32) measures — the patch's wall faces plus the region
+interfaces it assigns to the patch — before the first move and again on the points the stage returns,
+each over the patch's own surface area, and null when that area is zero. The octree row adds
+`gate_passed` and `max_non_orth_deg`, the verdict and the worst face of §92.3's measurement of the leaf
+mesh; a full run records them and does not refuse on them.
+
 `identity` is the mesh's own name and the run's. `mesh_id` is
 `"m_" + fnv1a64(<case_dir as configured, '\' -> '/', no trailing '/'> + newline + <name>)` in 16 hex digits — deterministic,
 because the mesh at a directory is one mesh however many times it is re-made — and `run_id` is
