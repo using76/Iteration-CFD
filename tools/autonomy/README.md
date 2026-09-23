@@ -262,6 +262,37 @@ geometry is a pure function of (family, seed, index). Rows are `autonomy-manifes
 ManifestRows without `split` (AM-7's split.py adds it); STLs and manifests are never
 committed (docs/15 §E) — only the generators are.
 
+## sensitivity.py — G-PILOT
+
+- `sensitivity.py` — docs/15 §B's measured failure turned into a decision: a
+  one-at-a-time sweep of the L4 knobs on 12 tuning geometries (five family-A
+  wings and five family-B lathes at seed 1, plus two boxes — BOX-c on the
+  octree lattice, BOX-n off it), judged by docs/15 §F's kill rule, verbatim:
+  "If no knob brings the pinned fraction to 5 % or less on at least a third of
+  the feature-bearing geometries, **stop** before AM-13/AM-14 and return to
+  the user (§I-2)."
+- The template P0 is §B's L4 recipe generalised by `L = l_ref_m`: bands at
+  0.1/0.5/1.5·L and levels 4/3/2, `feature_level` 4, the domain a whole number
+  of `b = 0.5·L` cells around a 3·L/2.5·L/6·L margin. Each geometry gets 24
+  jobs: `baseline`, the six L4 knobs of §C line 122 (wall level offset, band
+  distance, `feature_level` offset, `snap.feature_tolerance`,
+  `snap.smoothing_passes`, `layers.growth`) and — REPORTED ONLY, never gated
+  on — the remaining whitelisted snap knobs (`iterations`, `tolerance`,
+  `smoothing`, `undo_limit`, `feature_level = 0`). Every edit passes
+  `schema.check_edit`; no config carries `quality`, `cell_frac`,
+  `medial_frac`, `min_thickness` or `-permissive`.
+- The cube check is an 8-layer stack on a commensurate cube at the R-WIN t1
+  (`t1_floor(schema.a_priori_wall(flow)["t1_a_priori_m"])`, growth = R-WIN's
+  g_max), with the feature attraction and snap smoothing OFF — R-PLANE,
+  SPEC-LIT §92.15.5. Refused there, G-BLC-0 goes back to the user.
+- Whether a geometry is feature-bearing comes from the STL's own dihedral
+  angles (a 30° threshold over per-edge normals), never from a summary. Rows
+  are `autonomy-pilot/1`, one JSON object per line in `pilot_rows.jsonl`,
+  resumable by config sha256. The PASS/KILL verdict is computed from the rows
+  alone — never typed; the full pilot's rows and report are committed by the
+  supervisor under `tools/autonomy/pilot/`. psutil 7.0.0 (BSD-3-Clause) reads
+  each child's peak working set for the per-level cost table.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -273,5 +304,8 @@ committed (docs/15 §E) — only the generators are.
     python tools/autonomy/corpus/gen_wing.py --seed 1 --n 120 --out DIR   # family A STLs + manifest_A.jsonl
     python tools/autonomy/corpus/gen_lathe.py --seed 1 --n 120 --out DIR  # family B
     python tools/autonomy/corpus/gate.py --family A --family B --n 120 --seed 1   # G-CORPUS
+
+    python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
+    python tools/autonomy/sensitivity.py --report DIR                            # re-render the report
 
 The mesh tree's own gate (`python tools/mesh/selftest.py`) runs `tools/autonomy/selftest.py` last.

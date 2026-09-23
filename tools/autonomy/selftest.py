@@ -9,7 +9,10 @@ Runs schema.py --selftest (the schemas, fixtures, knob table and lock), then
 score.py --selftest (the G-SCORER probe fixtures, the refusal grammar, the
 content hash and the live automesher), then the four corpus selftests of
 docs/15 §E/§F (corpus/stl_io.py, corpus/gen_wing.py, corpus/gen_lathe.py and
-corpus/gate.py -- G-CORPUS on families A and B), then checks that README.md still
+corpus/gate.py -- G-CORPUS on families A and B), then sensitivity.py --selftest
+(the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
+edits, R-WIN, the verdict function, a live small-cube run, resume and the
+report), then checks that README.md still
 carries docs/15 §D verbatim between its markers and that deps_licences.py
 --python sees numpy, scipy and scikit-learn installed as BSD-3-Clause.
 
@@ -60,6 +63,15 @@ def main():
                                                              (c.stdout + c.stderr)[-2000:])
         total += k
         outs.append(c.stdout)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sensitivity.py"), "--selftest"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=env, timeout=300)
+    s_ok = sum(1 for l in r.stdout.splitlines() if l.startswith("[ok]"))
+    msg = ("sensitivity.py --selftest failed (exit %d, %d [ok]): %s"
+           % (r.returncode, s_ok, (r.stdout + r.stderr)[-2000:]))
+    assert r.returncode == 0 and s_ok >= 9 and "SELFTEST PASS" in r.stdout, msg
+    total += s_ok
+    outs.append(r.stdout)
     for l in "".join(outs).splitlines():
         if l != "SELFTEST PASS":
             print(l)

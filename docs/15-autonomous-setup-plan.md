@@ -381,3 +381,47 @@ reading every changed file, owned files only, the house style for commits. Never
 Ports 8787 and 5180 are the user's. The mesh tree's cargo runs write the shared `rust/target`, so AM-R1 and
 AM-R2 are serialised with any other mesh-tree Rust work. Every DOI above is resolved once before it enters a
 SPEC.
+
+## K. Ledger
+
+Measured results that a later unit or the user decides on. Each entry names its rows and report files;
+the numbers come from those files, not from memory.
+
+### G-PILOT (AM-5), 2026-09-24: PASS as written, with two cautions
+
+Run by `tools/autonomy/sensitivity.py --pilot` on binary sha256 `f59f66ce…d929` at tree `aeb2530`: 291 runs,
+all exit 0, 4.26 h of summed job time in 43 min of wall time at 6 streams. The rows, the report and the verdict are in
+`tools/autonomy/pilot/` (`pilot_rows.jsonl`, `pilot_report.json`, `G-PILOT.md`). The template is §B's L4
+recipe scaled by each geometry's L_ref, so the baseline reproduces §B (BOX-c pins 1,672 of 2,562 points,
+the box_L4 probe exactly). Ten of the 12 geometries have feature edges by the STL's own 30° dihedral test;
+the two ellipsoids have none and already snap clean.
+
+- **Snap clause: PASS.** `snap.feature_tolerance = 0` brings the pinned fraction to 0 on 10 of the 10
+  feature-bearing geometries (4 needed), with p99/h_f ≤ 0.016 and max/h_f ≤ 0.5 on all of them. The
+  baseline passes on 0 of 10.
+- **Caution 1: that knob works by turning the feature attraction off.** Every ft = 0 run reports
+  `n_feature_edges 0` and `n_snapped_to_edge 0`, so the edges are not captured, and G-FID (feature-edge
+  snapped share no worse than B0-template) is the guard that will bind. With the attraction on, the best
+  L4 knob is `feature_level` +1/+2, which brings pinned ≤ 5 % on 5 of 10 (still ≥ 4). Those runs are not
+  F3-clean: p99/h_f is 1.1-2.5 at max_level 6. The only F3-clean runs with the attraction on are
+  wall level −1 (L3) on B-1-002 and B-1-004. `snap.smoothing_passes`, `layers.growth`, `snap.iterations`,
+  `snap.tolerance`, `snap.smoothing` and `feature_level = 0` bring 0 geometries to 5 %. `undo_limit = 10`
+  brings 1.
+- **Caution 2: the pinned fraction is not a fraction of boundary points.** In snap.rs (read, not changed),
+  an abandoned iterate pins every point of each failing cell (snap.rs:620-625), interior points included.
+  `n_boundary_points` counts only the wall points of (92.27) (snap.rs:440). So `n_pinned / n_boundary_points`
+  goes past 1 on 5 rows (up to 3,108 / 2,562 on BOX-c with `undo_limit = 0`). §D.1's F3a over-counts. A
+  PASS under it is also a PASS under a boundary-only count, so this verdict stands. A KILL under it would
+  not. Counting the pinned boundary points needs an output-only summary field (AM-R2's kind), and whether
+  to add one is the user's call.
+- **Cube clause: DELIVERED.** On the commensurate cube at R-WIN (t1 = 7.296e-4 m, level 5, h/t1 = 42.8,
+  g_max = 1.270, T = 0.015585 ≤ 0.5·h = 0.015625), with R-PLANE's attraction and snap smoothing off:
+  8 layers, `full_area_frac` 1.0, BLC_8 = BLC_full = 1.0. g = 1.2 and `normal_passes 0` give 8 layers
+  too. That is also AM-9's one-run check of the §D.3 limiter inequality.
+- **Layers elsewhere**: all 36 growth runs on the P0 snap lost their layers. Thirty were dropped
+  `retreat_snapped` (§92.13's snapped-wall gap), and the six ellipsoid runs `min_thickness`. Their snap
+  stage is identical to the no-layer run in 36 of 36.
+- **Cost per level** (median / max over the 12): L3 3.5 / 16 s, 7.6k / 27k cells, 25 / 72 MiB; L4 19 / 96 s,
+  41k / 165k cells, 99 / 377 MiB; L5 125 / 677 s, 285k / 1.25 M cells, 627 / 2,592 MiB (the wings are
+  the maximum). At 27.6 GiB the L5 wing peak caps the pool at 9 streams. Feature L6 over an L4 wall
+  costs +15 % cells.
