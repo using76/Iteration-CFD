@@ -4,6 +4,7 @@
 import { z } from 'zod'
 import { Boolish, CameraPresetSchema, ColormapNameSchema, FieldComponentSchema, RangeTupleSchema, RepresentationModeSchema, TimeIndexSchema, Vec3Schema, ViewerCommandSchema, ViewerLayerSummarySchema, ViewerResultSchema, ViewerStateSchema } from './viewerCommands'
 import type { DatasetProgress } from './viewerDataset'
+import { RUN_END_WORDS } from './residuals'
 
 // ---------------------------------------------------------------------------
 // Runs
@@ -11,6 +12,7 @@ import type { DatasetProgress } from './viewerDataset'
 
 export const RunStatusSchema = z.enum(['queued', 'running', 'done', 'failed', 'killed', 'diverged'])
 export type RunStatus = z.infer<typeof RunStatusSchema>
+export const RunEndWordSchema = z.enum(RUN_END_WORDS)
 
 /** Grouped machine scalars; `hostname` is the Machine primary key and the struct's main field. */
 export const MachineRefSchema = z.object({
@@ -68,6 +70,10 @@ export const RunInfoSchema = z.object({
   meshId: z.string().nullable().optional(),
   /** The Machine this run ran on: N1's struct, `hostname` its main field. Null only when unreadable. */
   machine: MachineRefSchema.nullable().optional(),
+  /** The driver's own `run ended:` word; absent when it printed none (every run before it, every other driver). */
+  endWord: RunEndWordSchema.optional(),
+  /** The `<detail>` of that line; absent with endWord. */
+  endDetail: z.string().optional(),
 })
 export type RunInfo = z.infer<typeof RunInfoSchema>
 

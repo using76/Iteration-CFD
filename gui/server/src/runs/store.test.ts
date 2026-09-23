@@ -87,4 +87,12 @@ describe('loadPastRuns', () => {
     const after = await fsp.readFile(runJson, 'utf8')
     expect(after).toBe(before)
   })
+
+  it('a past record without the end keys loads with them absent, not null', async () => {
+    const runsDir = await seedRuns()
+    const records = await loadPastRuns(runsDir, silentLogger)
+    const old = records.find((r) => r.id === 'r_1')!
+    expect('endWord' in old).toBe(false)
+    expect('endDetail' in old).toBe(false)
+  })
 })

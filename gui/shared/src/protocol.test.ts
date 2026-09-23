@@ -144,6 +144,16 @@ describe('run info provenance', () => {
   it('refuses a machine that is a bare string, because N1 declares a struct', () => {
     expect(RunInfoSchema.safeParse({ ...legacyRunInfo, machine: 'H' }).success).toBe(false)
   })
+  it('a legacy record has no end word, and an end word round-trips or is refused by name', () => {
+    const legacy = RunInfoSchema.parse(legacyRunInfo)
+    expect(legacy.endWord).toBeUndefined()
+    expect(legacy.endDetail).toBeUndefined()
+    const round = JSON.parse(JSON.stringify({ ...legacyRunInfo, endWord: 'refused', endDetail: 'x' }))
+    expect(round).toEqual({ ...legacyRunInfo, endWord: 'refused', endDetail: 'x' })
+    expect(RunInfoSchema.parse(round).endWord).toBe('refused')
+    expect(RunInfoSchema.safeParse({ ...legacyRunInfo, endWord: 'timeout' }).success).toBe(false)
+    expect(RunInfoSchema.safeParse({ ...legacyRunInfo, endWord: null }).success).toBe(false)
+  })
 })
 
 describe('chat REST schemas', () => {
