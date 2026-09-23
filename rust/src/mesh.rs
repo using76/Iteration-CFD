@@ -311,7 +311,12 @@ impl HostMesh {
     }
 }
 
-/// The device-resident mirror. Uploaded once; immutable thereafter.
+/// The device-resident mirror. Uploaded once; its topology and addressing
+/// are immutable thereafter; its sixteen geometry arrays are rewritten in
+/// place by `mesh::ale::AleMesh::recompute_in_place` when the mesh moves,
+/// through a shared borrow (SPEC-LIT 105.2). `total_volume` below is the
+/// volume at upload and is stale after the first move
+/// (`AleMesh::total_volume` re-folds it).
 ///
 /// Every field is a separate `DevBuf` rather than a packed struct of raw
 /// pointers: `cudarc` tracks stream dependencies per buffer when they are
@@ -636,6 +641,7 @@ impl GpuMesh {
     }
 }
 
+pub mod ale;
 pub mod geometry;
 pub mod gpuemit;
 pub mod gpugeom;

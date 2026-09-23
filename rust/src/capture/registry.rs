@@ -184,6 +184,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_transition_correction_replays_bitwise"),
     ),
     (
+        "src/mesh/ale.rs",
+        Stance::Gate("the_ale_step_replays_bitwise"),
+    ),
+    (
         "src/mesh/gpuemit.rs",
         Stance::Outside(
             "the polyMesh emitter runs when a mesh is BUILT - at setup, or at \
@@ -205,7 +209,9 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              device pointers of the mesh it was captured on, so a mesh that \
              has just been rebuilt is by definition on the far side of a \
              recapture, which is the same argument src/adapt.rs is refused \
-             under. SPEC-LIT 82.8",
+             under. SPEC-LIT 82.8. The same four kernels also run INSIDE a \
+             time step since SPEC-LIT 105.2, launched by src/mesh/ale.rs against \
+             resident inputs, and that module carries its own Gate row",
         ),
     ),
     (

@@ -3238,6 +3238,11 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("S97 Gate 97-B region layout");
     check_region_layout(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT 105 - the moving mesh, and Gate 105-A.
+    println!("\n=== Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) ===");
+    c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
+    check_ale_space_conservation(c, &gpu)?;
+    c.leave_gate();
     println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
     c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
     published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
@@ -19756,6 +19761,61 @@ fn check_solid_bimetal(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             detail,
             uncertainty: Some(Uncertainty::Study(study)),
         });
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §105 - the moving mesh
+// ==========================================================================
+
+/// Gate 105-A (SPEC-LIT 105.5): the space conservation law, the scheme's own
+/// flux form of it, the uniform-flow residual of the ALE ddt plus Gauss
+/// upwind of `phi - phi_mesh`, the total-volume drift, and the bitwise
+/// volume history with the boundary flux that must be exactly zero - on the
+/// 6x5x4 box in prescribed sinusoidal motion, euler and backward, 100 steps.
+fn check_ale_space_conservation(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::mesh::ale::gate_105a;
+    use ofgpu::timescheme::DdtScheme;
+
+    for (name, scheme) in
+        [("euler", DdtScheme::Euler), ("backward", DdtScheme::Backward)]
+    {
+        let r = gate_105a(gpu, scheme)?;
+        c.note(&format!(
+            "{name}: {} steps, {} cells, worst SCL {:.3e}, scheme SCL {:.3e}, \
+             uniform {:.3e}, volume drift {:.3e}, boundary phi_mesh {}, \
+             min V/V0 {:.6}, history bitwise {}, worst at step {} cell {}",
+            r.steps, r.n_cells, r.worst_scl, r.worst_scheme, r.worst_uniform,
+            r.volume_drift, r.boundary_flux_max, r.min_volume_ratio,
+            r.history_bitwise, r.worst_step, r.worst_cell
+        ));
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): the space conservation law, 100 steps"),
+            r.worst_scl,
+            1e-12,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): the scheme's own flux form"),
+            r.worst_scheme,
+            1e-12,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): a uniform flow stays uniform"),
+            r.worst_uniform,
+            1e-12,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): total volume drift"),
+            r.volume_drift,
+            1e-12,
+        );
+        c.require(
+            &format!(
+                "SPEC-LIT 105.5 Gate 105-A ({name}): bitwise history, boundary phi_mesh zero"
+            ),
+            r.history_bitwise && r.steps == 100 && r.boundary_flux_max == 0.0,
+        );
     }
     Ok(())
 }

@@ -571,4 +571,4 @@ fn refuse_a_cell_with_no_faces(m: &HostMesh) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -29,7 +29,7 @@ use std::process::Command;
 
 /// Every translation unit in `cuda/` that holds device code.
 /// Each becomes one module loaded at run time.
-const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "rheology.cu", "ke_variants.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu", "meshgeom.cu", "meshemit.cu", "marangoni.cu", "lmtrans.cu", "gmtrans.cu", "solid.cu", "solidstress.cu"];
+const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "ldu.cu", "field.cu", "wallfunctions.cu", "turbulence.cu", "pressure.cu", "momentum.cu", "simple.cu", "timescheme.cu", "precon.cu", "vof.cu", "sst.cu", "les.cu", "sources.cu", "species.cu", "energy.cu", "rheology.cu", "ke_variants.cu", "cht.cu", "s2s.cu", "fan.cu", "sa.cu", "des.cu", "parcels.cu", "parcelsort.cu", "parcelcouple.cu", "halo.cu", "exactsum.cu", "meshgeom.cu", "meshemit.cu", "marangoni.cu", "lmtrans.cu", "gmtrans.cu", "solid.cu", "solidstress.cu", "ale.cu"];
 
 /// Translation units compiled with `-fmad=false`.
 ///
@@ -46,6 +46,11 @@ const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "l
 /// differs in the last bit changes every operator downstream of it, so there
 /// is nothing to be tolerant with.
 ///
+/// `ale.cu` is the second exception, for the same kind of reason: its swept
+/// volume is held BITWISE against its host twin `mesh::ale::host_swept_volumes`
+/// (SPEC-LIT §105.3), and the contraction would break that on every
+/// non-axis-aligned face.
+///
 /// This costs the listed units their FMA throughput. It buys the only claim
 /// SPEC-LIT §82 makes.
 ///
@@ -54,7 +59,7 @@ const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "l
 /// contraction would break the gate" can be measured on the real compiler
 /// rather than simulated on the host, which is how §67.11's first draft came
 /// to assert an FMA had not happened when it had.
-const FMAD_OFF_UNITS: &[&str] = &["meshgeom.cu"];
+const FMAD_OFF_UNITS: &[&str] = &["meshgeom.cu", "ale.cu"];
 
 fn cuda_root() -> PathBuf {
     // CUDA_PATH is set by the Windows installer; CUDA_HOME and /usr/local/cuda
@@ -352,8 +357,9 @@ fn main() {
         // contraction OFF is making a claim about what the contraction would
         // do, and the only way to hold a claim like that is to build the other
         // one and run it. Emitted as `<STEM>_FMAD`, used by exactly one test
-        // (mesh::gpugeom::tests::the_contraction_this_unit_turns_off_is_real)
-        // and by no solver.
+        // per unit (mesh::gpugeom::tests::the_contraction_this_unit_turns_off_is_real
+        // for meshgeom.cu, mesh::ale::tests::the_contraction_the_ale_unit_turns_off_is_real
+        // for ale.cu) and by no solver.
         if FMAD_OFF_UNITS.contains(unit) {
             let twin = out_dir.join(format!("{stem}_fmad.cubin"));
             let mut cmd = Command::new(&nvcc);

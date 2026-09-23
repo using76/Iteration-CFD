@@ -20980,15 +20980,16 @@ never the consideration.
 The registry as the tests print it:
 
 ```
-  CUDA-graph capture registry (52 modules)
-     36  gated
+  CUDA-graph capture registry (53 modules)
+     37  gated
       4  outside the iteration
      12  refused, by name
 ```
 
 It read `50 / 36 / 10 / 1 / 3` when §81 was written, and `3 UNGATED` right up
 until the debt went to zero: the population is derived from disk, so it moves
-as the tree does. The ceiling only falls, and the fall to `0 ungated` is the
+as the tree does - it read `52 / 36` until §105.2 added
+`src/mesh/ale.rs` as a gated row. The ceiling only falls, and the fall to `0 ungated` is the
 one this ratchet exists to record.
 
 The three ungated were closed one by one, each by name. `src/simple.rs` — the
@@ -29261,6 +29262,237 @@ three N/A house items of a device unit are N/A here too - no `.cu` (so no
 `KERNEL_UNITS` row), no capture-registry `Stance` row (no device module),
 no `build.rs` change - and no solver numerics moved to make any gate pass:
 the gate is bitwise precisely because nothing moved.
+
+---
+
+## 105. ALE motion and the space conservation law — the mesh that moves, and the volume it sweeps
+
+The mesh moves and the volume it computes moves with it. This section owns:
+the resident points and face CSR beside a `GpuMesh` (`src/mesh/ale.rs`,
+`src/mesh/ale/tests.rs`, `cuda/ale.cu`), the in-place recompute of the sixteen
+§82 geometry arrays from resident points, the swept volume of a face held
+bitwise against its host twin, the mesh flux `phi_mesh` weighted by the time
+scheme's own coefficients, the volume history `v0`/`v00`, and the ALE time
+derivative. Gate 105-A (§105.5) holds the space conservation law to 1e-12 on a
+box in prescribed sinusoidal motion, over 100 steps, in euler and backward,
+with a uniform flow uniform to round-off.
+
+What this section does NOT own: the relative flux `phi - phi_mesh` routed
+through the momentum predictor, the pressure equation, turbulence and energy;
+the moving-wall boundary condition; the point smoother; the case block that
+prescribes a motion. Those belong to the next units.
+
+No GPL-licensed source was consulted. The sources are this crate's own
+`cuda/meshgeom.cu` and `src/mesh/geometry.rs` (the fan of §2.1), SPEC-LIT §2,
+§3.3, §13.3, §81, §82, and two papers cited by DOI only: Demirdžić & Perić
+(1988), DOI 10.1002/fld.1650080906 (the space conservation law), and Thomas &
+Lombard (1979), DOI 10.2514/3.61273 (the geometric conservation law).
+
+### 105.1 What moves, and what does not
+
+The points move; the topology never does. `owner`, `neighbour`, the face to
+point CSR, the patch table and the cell to face maps are fixed at upload, and
+a mesh in this tree never gains or loses a face or a point. What motion
+invalidates is the sixteen geometry arrays §82 defines, and they are
+RECOMPUTED from the moved points at every step - not integrated forward, and
+not carried by any flux register.
+
+`GpuMesh::total_volume` is the volume at upload. After the first move it is
+stale, and it stays stale by design: re-folding it is
+`AleMesh::total_volume`'s job, which downloads `gm.v` and folds the first
+`n_cells` entries in ascending cell id - the same fold `GpuMesh::upload` used,
+so the two numbers agree exactly whenever the mesh has not moved.
+
+A mesh moves in this tree only through the API of this section:
+`AleMesh::set_points`, a host write that §81.3's guard refuses inside a
+capture, or a device kernel of the caller's own writing the resident `points`
+buffer. There is no second path that writes `GpuMesh` state, and §105.2
+records what the type therefore no longer promises.
+
+### 105.2 The resident recompute, written through a shared borrow
+
+`Simple<'m>`, `Momentum<'m>`, `Energy` and `RasCore` each hold a `&'m GpuMesh`
+for their whole life. An `&mut GpuMesh` in the recompute's signature would
+therefore force the next unit to rebuild every solver object on every time
+step, so the recompute writes through a SHARED borrow:
+`AleMesh::recompute_in_place(&mut self, gpu, gm: &GpuMesh)` takes `gm` by
+reference and writes its sixteen arrays in place, each output argument passed
+`.arg(&gm.X) // written in place: SPEC-LIT 105.2`.
+
+That is sound in THIS crate for three reasons, all facts of `src/device.rs`
+and not hopes: `Gpu::new` disables cudarc's event tracking BEFORE the first
+allocation, so no `.arg(&buf)` carries a `SyncOnDrop`; there is exactly one
+stream, so every launch runs in issue order and there is no cross-stream
+hazard for tracking to guard; and no host reference points into device memory.
+With tracking off, `.arg(&buf)` and `.arg(&mut buf)` push the identical device
+pointer - the mutability is a host-side aliasing statement, and the device
+cannot see it. The mutable state the recompute owns - points, CSR, scratch,
+history - lives in `AleMesh`, which the caller holds `&mut`. The plan's name
+`GpuGeometry::recompute_in_place` lands on `AleMesh` because a `GpuGeometry`
+is a transient that `GpuMesh::from_device_geometry` consumes, and after
+construction there is no `GpuGeometry` left to call a method on.
+
+What the shared borrow costs: the type no longer says immutable. A caller
+that derived a host value from the geometry - `total_volume`, a downloaded
+`v`, a plot - holds the value of the mesh that was uploaded, not of the mesh
+that lives there now (§105.1).
+
+The recompute is §82's four kernels in the same order with the same argument
+order, reading the resident points and CSR instead of an upload, so after a
+move the device geometry is BITWISE the host sweep on the moved points:
+`the_recomputed_geometry_is_the_host_sweep_on_the_moved_points`, on `5`
+fixtures.
+
+The capture stance: `src/mesh/ale.rs` launches kernels and owns an iteration
+entry point, so §81.7's registry classifies it, and its row is `Gate` -
+`the_ale_step_replays_bitwise` - which printed `12 nodes (6 kernel, 0 memset,
+6 memcpy); 3 replays bitwise over 16 buffer(s) / 1833 value(s)`.
+
+`set_points` is a host write and §81.3's guard refuses it inside a capture by
+name; a device-side motion - a `memcpy_dtod` from a spare buffer - is
+capturable, and is what the gate itself iterates with. §82.8's `Outside`
+stance is about building a mesh and still holds for `src/mesh/gpugeom.rs`; the
+sentence added to its registry row records that the same four kernels also run
+INSIDE a step from `src/mesh/ale.rs`, which carries its own row.
+
+### 105.3 The swept volume of a face
+
+One thread per face. The face's vertices move linearly over the step from
+`x^n` to `x^{n+1}`, and the fan of §2.1 moves with them. Each level has its
+own vertex average `x_avg`; for the fan triangle of edge `(a, c)` the normal
+`N(t) = (a - x_avg) x (c - x_avg)` is quadratic in the step fraction `t`,
+while every vertex moves at a constant velocity over the step, so the
+integrand of the triangle's swept volume is a quadratic in `t` - which
+Simpson's rule integrates exactly on the three points `t = 0, 1/2, 1`:
+
+```text
+dV_tri = (d_xavg + d_a + d_c) . (N^n + 4 N^{n+1/2} + N^{n+1}) / 36
+dV_f   = sum over the fan's triangles, in CSR order
+```
+
+with `d_p = p^{n+1} - p^n` the displacement of point `p` over the step.
+`dV_f` is positive when the face moves along its `Sf` - the owner grows - and
+a face whose vertices do not move sweeps exactly `0.0`, because every
+difference in the expression vanishes.
+
+The identity the space conservation law stands on: summed over a cell with
+owner sign `s`, `sum_f s dV_f = V_fan^{n+1} - V_fan^n` in exact arithmetic,
+because every ruled surface swept between two fan triangles is shared by
+exactly two of them with opposite orientation. It holds with boundary faces
+sweeping too: a uniform dilation of a whole box, walls included, closes it to
+`7.289e-16` (`the_volume_drift_is_the_worst_step_and_not_the_last`).
+
+§2.2's pyramid volume differs from the fan volume by
+`(1/3) sum_f s Sf.(Cf - x_avg)`. For a triangle `Cf = x_avg` exactly, so the
+two agree. For a quadrilateral the offset vanishes identically, planar or
+warped: with `q_i = x_i - x_avg` (so `sum q_i = 0`), diagonals
+`d1 = q2 - q0` and `d2 = q3 - q1`, the area vector is
+`Sf = (1/2) d1 x d2`, and every fan triangle's centroid offset
+`(q_i + q_{i+1})/3` is `+-(d1 +- d2)/6`, which lies in the plane spanned by
+the two diagonals - the plane `Sf` is normal to. So on every mesh whose faces
+have at most four vertices the space conservation law holds to round-off
+against the geometry §82 recomputes, however warped the faces.
+
+A face of five or more vertices breaks it by the warp:
+`a_quadrilateral_keeps_its_centroid_offset_normal_to_sf_and_a_pentagon_does_not`
+measured `1.038e-16` at worst over three warped quads and `1.771e-2` for the
+pentagon. The route that would close
+it there - advancing `v` by the swept volumes instead of recomputing it, as
+docs/09's §105 row puts it - changes what `v` means for every operator in the
+tree, and is not taken.
+
+The kernel is compiled with `-fmad=false` and is BITWISE its host twin:
+`the_swept_volume_kernel_is_its_host_twin_bitwise`. The contracted build of
+the same source differs on `125` of `868` faces
+(`the_contraction_the_ale_unit_turns_off_is_real`) - that is the flag buying
+the bits, measured and not believed.
+
+### 105.4 The mesh flux, the volume history and the ALE time derivative
+
+§13.3's three-level form is `aN psi^{n+1} + a0 psi^n + a00 psi^{n-1}` with
+`aN + a0 + a00 = 0`. Applying the same form to the volume itself and moving
+the old levels to the right gives the mesh flux, per face:
+
+```text
+aN V^{n+1} + a0 V^n + a00 V^{n-1} = aN dV^{n+1} - a00 dV^n
+phi_mesh,f = aN dV_f^{n+1} - a00 dV_f^n
+```
+
+- euler: `phi_mesh,f` is `dV_f/dt`, the swept-volume flux itself;
+- backward at constant `dt`: `(1.5 dV_f^{n+1} - 0.5 dV_f^n)/dt`.
+
+This is the ONE weighting for which the scheme's own discrete space
+conservation law holds: summing the flux form of a cell returns §105.3's
+volume identity with the scheme's coefficients already on it.
+
+The volume history: `v0` is `V^n`, the volume at `psi0`'s level, and `v00` is
+`V^{n-1}`, the volume at `psi00`'s level. `advance` rotates them BEFORE the
+move (`v00 <- v0 <- v`), the same rotation order §13.3 requires of `psi`.
+
+The two ddt kernels put the geometry on the levels. `tsDdtGeneralV` puts
+`aN V^{n+1}` on the diagonal and `a0 V^n psi^n + a00 V^{n-1} psi^{n-1}` in the
+source, reading `V^{n+1}` from the mesh's own `v` AFTER the move and `V^n`,
+`V^{n-1}` from the history; `tsDdtGeneralRhoV` likewise with each level's
+density, so the discrete form conserves `rho psi`. The existing
+`tsDdtGeneral` is untouched, and on a mesh that does not move the new kernel
+agrees with it to `3.210e-16` relative at worst (both diagonals bitwise)
+(`the_ale_ddt_reduces_to_the_static_ddt_on_a_mesh_that_does_not_move`); the
+difference that remains is association only, in the order the products fold.
+
+`advance` runs, in this order, all on the one stream and nothing else:
+`v00 <- v0 <- v` and `swept0 <- swept` as device-to-device copies; the swept
+volume of every face from `points_old` and `points`; the in-place geometry
+recompute of §105.2; `phi_mesh` on internal and boundary faces at once; and
+`points_old <- points` as its last act. Nothing downloads, nothing allocates,
+nothing syncs - which is what makes the step capturable.
+
+### 105.5 Gate 105-A - space conservation and the uniform state
+
+The fixture: a uniform box 6x5x4, cell `0.2 x 0.25 x 0.3`, no refinement - a
+box lists no hanging node, and moving one would tear the mesh, so the gate
+moves a uniform box only. Every interior point moves by `interior_sinusoid`
+with amplitude `0.03` and period `0.5`; every boundary point is returned
+EXACTLY, which is what makes every boundary face's swept volume exactly zero.
+`dt = 0.01`, 100 steps, euler and backward. Over the run no cell falls below
+`0.8846` of its rest volume.
+
+The uniform state: `U = (0.7, -0.4, 0.25)`, `psi = 1` Dirichlet on every
+boundary face. The residual is the ALE ddt plus Gauss upwind of
+`phi - phi_mesh` assembled at `psi = 1` and evaluated on the constant field -
+`A 1 - b` - which is zero exactly when the space conservation law holds and
+each cell closes its own balance. This proves the uniform state by DIRECT
+assembly; the same statement through the SIMPLE loop is the next unit's.
+
+```text
+| scheme   | steps | cells | worst SCL | scheme SCL | uniform | volume drift | boundary phi_mesh | min V/V0 |
+| euler    | 100   | 120   | 1.535e-15 | 1.531e-15  | 1.770e-15 | 2.591e-15    | 0.0               | 0.884630 |
+| backward | 100   | 120   | 1.535e-15 | 1.798e-15  | 1.997e-15 | 2.591e-15    | 0.0               | 0.884630 |
+```
+
+Tolerances: `worst SCL`, `scheme SCL`, `uniform` and `volume drift` at most
+1e-12 each, `volume drift` the worst step's and not the last's;
+`boundary phi_mesh` exactly `0.0`; `v0`/`v00` bitwise `V^n`/`V^{n-1}`
+after every step. The same ten rows run in `ofgpu-validate` under the gate
+scope `SPEC-LIT 105.5 Gate 105-A space conservation`, entered and left around
+one function, so the reported-gate census stays 19 literals / 17 distinct.
+
+### 105.6 What is not claimed, and the house items
+
+Not claimed here: faces of five or more vertices close only to the warp
+(§105.3); the relative flux `phi - phi_mesh` in the momentum predictor, the
+pressure equation, turbulence and energy; the smoother for interior points;
+the moving-wall boundary condition; the case block that prescribes a motion;
+any time-order measurement. Those are the next units'.
+
+House items. Three new files - `cuda/ale.cu`, `src/mesh/ale.rs`,
+`src/mesh/ale/tests.rs` - and the source-file count is 213. `ale.cu` is the
+last entry of build.rs's `KERNEL_UNITS` and the second unit of
+`FMAD_OFF_UNITS`: its swept volume is held BITWISE against
+`mesh::ale::host_swept_volumes`, and nvcc's multiply-add contraction would
+break that on every non-axis-aligned face. The capture row is `Gate`,
+`the_ale_step_replays_bitwise`; `src/mesh/gpugeom.rs` stays `Outside`. No
+existing kernel changed and no solver numerics moved to make any gate here
+pass.
 
 ---
 
