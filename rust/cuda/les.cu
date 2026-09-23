@@ -71,7 +71,13 @@ OFGPU_DEV ofscalar oflog_(ofscalar a)   { return log(a); }
 OFGPU_DEV ofscalar ofpow_(ofscalar a, ofscalar b) { return pow(a, b); }
 #endif
 
+//  SPEC-LIT 112.1: one floor per precision, the same distance above each
+//  precision's smallest normal.
+#ifdef OFGPU_SINGLE
+#define OFGPU_LES_TINY ((ofscalar)1e-30f)
+#else
 #define OFGPU_LES_TINY ((ofscalar)1e-300)
+#endif
 
 
 // ==========================================================================

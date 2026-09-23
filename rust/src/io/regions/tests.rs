@@ -208,6 +208,7 @@ fn a_manifest_that_breaks_a_rule_is_refused_by_name() {
 /// and the pairing numbers R2 measures on it are zero to within the fan's
 /// one-ulp centroid (exact areas and normals - the fixture is dyadic).
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_layout_round_trips_through_disk_and_load_checks_r1_to_r6() {
     let d = scratch("roundtrip");
     let regions = write_two_zone_layout(&d);
@@ -249,6 +250,7 @@ fn the_layout_round_trips_through_disk_and_load_checks_r1_to_r6() {
 /// The split's two regions ARE the sub-blocks - topology, coordinates
 /// and built geometry bitwise, and one conformal pair between them.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_two_zone_block_splits_into_two_standalone_regions_with_one_conformal_pair() {
     let (regions, ifaces, _) = split_fixture();
     let (lo, up) = (&regions[0].1, &regions[1].1);
@@ -339,9 +341,9 @@ fn a_two_zone_block_splits_into_two_standalone_regions_with_one_conformal_pair()
         // that is zero on BOTH sides (+0.0, the fixture's x and y) does not
         // fail on the sign of zero: a.x + b.x is +0.0 iff a.x == -b.x
         // exactly, for every finite pair including the zeros.
-        assert_eq!((a.x + b.x).to_bits(), 0.0f64.to_bits(), "Sf x {k}");
-        assert_eq!((a.y + b.y).to_bits(), 0.0f64.to_bits(), "Sf y {k}");
-        assert_eq!((a.z + b.z).to_bits(), 0.0f64.to_bits(), "Sf z {k}");
+        assert_eq!((a.x + b.x).to_bits(), (0.0 as Scalar).to_bits(), "Sf x {k}");
+        assert_eq!((a.y + b.y).to_bits(), (0.0 as Scalar).to_bits(), "Sf y {k}");
+        assert_eq!((a.z + b.z).to_bits(), (0.0 as Scalar).to_bits(), "Sf z {k}");
         assert!(
             (lm.b_cf[ifl.start + k] - um.b_cf[ifu.start + k]).mag() <= 1e-14,
             "interface centroid {k}"
@@ -475,6 +477,7 @@ fn gate_97b_case(
 /// explicitly lower to the same thing - and every conflict is noted or
 /// refused by name (SPEC-LIT §97).
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_case_that_names_the_manifest_and_one_that_lists_the_split_regions_explicitly_lower_to_the_same_thing() {
     let d = scratch("r8");
     write_two_zone_layout(&d);
@@ -569,6 +572,7 @@ fn a_case_that_names_the_manifest_and_one_that_lists_the_split_regions_explicitl
 /// cell numbering is the same in both documents, so it compares
 /// entry-by-entry as it stands.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_97b_a_split_two_zone_block_run_through_the_manifest_is_bitwise_the_block_run() {
     let Some(gpu) = gpu() else { return };
     let d = scratch("gate97b");
@@ -609,7 +613,7 @@ fn gate_97b_a_split_two_zone_block_run_through_the_manifest_is_bitwise_the_block
     }
     let sa = run_case(&gpu, &la).expect("run the block case");
     let sb = run_case(&gpu, &lb).expect("run the manifest case");
-    let max_rel = sa.t.iter().zip(&sb.t).map(|(a, b)| (a - b).abs() / a.abs().max(1.0)).fold(0.0f64, f64::max);
+    let max_rel = sa.t.iter().zip(&sb.t).map(|(a, b)| (a - b).abs() / a.abs().max(1.0)).fold(0.0 as Scalar, Scalar::max);
     assert_eq!(sa.t.len(), sb.t.len(), "t length");
     for (i, (a, b)) in sa.t.iter().zip(&sb.t).enumerate() {
         assert_eq!(a.to_bits(), b.to_bits(), "t differs at cell {i}: {a} vs {b} (max relative difference {max_rel:e})");

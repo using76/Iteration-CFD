@@ -194,6 +194,14 @@ extern "C" __global__ void fanStoreScalar3
 //  what CUDA Graph capture needs (S52.7).
 #define OFGPU_FAN_MAX_POINTS 64
 
+//  SPEC-LIT 112.1: one floor per precision, the same distance above each
+//  precision's smallest normal.
+#ifdef OFGPU_SINGLE
+#define OFGPU_FAN_TINY ((ofscalar)1e-30f)
+#else
+#define OFGPU_FAN_TINY ((ofscalar)1e-300)
+#endif
+
 
 //- (S52.13)'s corrections, and the value/slope of the curve at one flow.
 //
@@ -288,7 +296,7 @@ OFGPU_DEV void fanCurveAt
             const ofscalar qref = ofmax_(fanAbs_(qN - q0), (ofscalar)1e-30);
             const ofscalar kA = fanAbs_(mE)/qref;
             const ofscalar kB = fanAbs_(tdp[0])/(qref*qref);
-            const ofscalar k  = ofmax_(ofmax_(kA, kB), (ofscalar)1e-300);
+            const ofscalar k  = ofmax_(ofmax_(kA, kB), OFGPU_FAN_TINY);
             v = tdp[e] + mE*d - k*d*fanAbs_(d);
             s = mE - 2*k*fanAbs_(d);
         }

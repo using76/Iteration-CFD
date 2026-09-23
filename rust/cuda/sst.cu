@@ -77,7 +77,13 @@ OFGPU_DEV ofscalar oftanh_(ofscalar a) { return tanh(a); }
 //  and y is a length, so these only ever bite on a degenerate input; they are
 //  here so that such an input produces a large-but-finite blending argument
 //  rather than a NaN that propagates into nu_t and is then invisible.
+//  SPEC-LIT 112.1: one floor per precision, the same distance above each
+//  precision's smallest normal.
+#ifdef OFGPU_SINGLE
+#define OFGPU_SST_TINY ((ofscalar)1e-30f)
+#else
 #define OFGPU_SST_TINY ((ofscalar)1e-300)
+#endif
 
 
 // ==========================================================================

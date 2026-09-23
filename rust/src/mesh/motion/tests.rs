@@ -109,6 +109,7 @@ fn a_displacement_along_x_moves_no_point_in_y_or_z() {
 /// M3 - every patch moved by the SAME law is a rigid translation, and the
 /// smoother must reproduce it on the interior points.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_rigid_translation_is_reproduced() {
     let rb = refined::build([4, 4, 4], Vec3::new(0.25, 0.25, 0.25), &[0u32; 64]).expect("box");
     let law = Displacement::Linear {
@@ -331,6 +332,7 @@ fn the_motion_rules_refuse_what_they_cannot_mean() {
 
 /// M7 - the two laws say what they do.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_two_laws_are_what_they_say() {
     let lin = Displacement::Linear {
         velocity: Vec3::new(0.3, -0.2, 0.1),

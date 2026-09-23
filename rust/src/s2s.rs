@@ -103,6 +103,7 @@ use crate::io::dict::FoamDict;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::radiation::SIGMA_SB;
 use crate::{Label, Scalar, Vec3};
+use crate::SCALAR_FLOOR;
 
 #[cfg(test)]
 mod tests;
@@ -1516,7 +1517,7 @@ impl ViewFactors {
                  form, which is far less accurate in the near field (SPEC-LIT 49.2b) \
                  - measured 8.8e-3 against 0.16 on the same enclosure. Try \
                  the OTHER one, or a finer `agglomerate`.",
-                f64::from(rs[worst_row] / area_host[worst_row].max(1e-300))
+                f64::from(rs[worst_row] / area_host[worst_row].max(SCALAR_FLOOR))
             )));
         }
 
@@ -1944,7 +1945,7 @@ pub fn solve_radiosity(
     let hh = gpu.download(&h)?;
     let qh = gpu.download(&q)?;
     let ph = gpu.download(&p)?;
-    let scale = jh[..n].iter().fold(0.0 as Scalar, |m, &v| m.max(v.abs())).max(1e-300);
+    let scale = jh[..n].iter().fold(0.0 as Scalar, |m, &v| m.max(v.abs())).max(SCALAR_FLOOR);
     let mut res: Scalar = 0.0;
     for i in 0..n {
         res = res.max((jh[i] - eps[i] * eb[i] - (1.0 - eps[i]) * hh[i]).abs());
@@ -2347,7 +2348,7 @@ impl<'m> S2s<'m> {
         let eb = gpu.download(&self.eb)?;
         let e = gpu.download(&self.eps_c)?;
         let n = self.n_surf;
-        let scale = j[..n].iter().fold(0.0 as Scalar, |m, &v| m.max(v.abs())).max(1e-300);
+        let scale = j[..n].iter().fold(0.0 as Scalar, |m, &v| m.max(v.abs())).max(SCALAR_FLOOR);
         let mut res: Scalar = 0.0;
         for i in 0..n {
             res = res.max((j[i] - e[i] * eb[i] - (1.0 - e[i]) * h[i]).abs());

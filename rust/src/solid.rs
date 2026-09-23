@@ -336,7 +336,7 @@ fn symmetric_eigenvalues(c: [[Scalar; 3]; 3]) -> [Scalar; 3] {
         + b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]);
     let phi = (det / 2.0).clamp(-1.0, 1.0).acos() / 3.0;
     let e0 = q + 2.0 * p * phi.cos();
-    let e2 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::FRAC_PI_3).cos();
+    let e2 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::FRAC_PI_3 as Scalar).cos();
     // The trace is exact, so the middle one costs no third cosine.
     [e0, c[0][0] + c[1][1] + c[2][2] - e0 - e2, e2]
 }

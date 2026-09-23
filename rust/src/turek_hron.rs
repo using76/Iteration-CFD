@@ -227,8 +227,8 @@ pub fn load_rig_from(dir: &Path, level: usize) -> Result<Rig> {
     }
     hm.compute_geometry(&raw.points, &raw.faces)?;
 
-    let z_min = raw.points.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
-    let z_max = raw.points.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+    let z_min = raw.points.iter().map(|p| p.z).fold(Scalar::INFINITY, Scalar::min);
+    let z_max = raw.points.iter().map(|p| p.z).fold(Scalar::NEG_INFINITY, Scalar::max);
     let dz = z_max - z_min;
     if !dz.is_finite() || dz <= 0.0 {
         return Err(Error::Mesh(format!(

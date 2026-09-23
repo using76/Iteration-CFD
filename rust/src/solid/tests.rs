@@ -17,6 +17,13 @@ use crate::io::case::{LinearSolverKind, Preconditioner, SolverControls};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::{Label, Scalar, Tensor, Vec3};
 
+/// One `Scalar`'s bit pattern, the width the `to_bits` pair produces, so the
+/// bitwise diff compiles in either precision (SPEC-LIT 112.1).
+#[cfg(not(feature = "single"))]
+type Bits = u64;
+#[cfg(feature = "single")]
+type Bits = u32;
+
 fn gpu() -> Option<Gpu> {
     Gpu::new(0).ok()
 }
@@ -143,6 +150,7 @@ fn an_unsupported_patch_or_a_free_component_is_refused_by_name() {
 /// residual times the conditioning, which is the same reason the
 /// prototype's own free-expansion gate compares `u` at 1e-10.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn one_picard_application_matches_the_prototype() {
     let Some(gpu) = gpu() else { return };
     let mat = Material::steel(0.3);
@@ -337,6 +345,7 @@ fn linear_state(hm: &HostMesh) -> (Vec<Vec3>, Vec<Vec3>) {
 /// state; here the exact `u = alpha dT x` - cells and boundary faces - goes
 /// in, the map is applied once, and the defect is the solve's alone.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_free_expansion_state_is_a_fixed_point_with_no_stress() {
     let Some(gpu) = gpu() else { return };
     let mat = Material::steel(0.3);
@@ -390,6 +399,7 @@ fn the_free_expansion_state_is_a_fixed_point_with_no_stress() {
 /// defect beside the non-orthogonality and assert only that it is finite and
 /// falls with the amplitude - the numbers are later units' input.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_linear_displacement_is_reproduced_on_a_graded_block() {
     let Some(gpu) = gpu() else { return };
     fn defect(gpu: &Gpu, hm: &HostMesh) -> (Scalar, Scalar) {
@@ -594,6 +604,7 @@ fn a_bending_dominated_slender_body_is_refused_naming_block_coupling() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_displacement_that_should_have_moved_the_mesh_is_refused() {
     let hm = prototype::block(10).expect("block");
     let n = hm.c.len();
@@ -624,6 +635,7 @@ fn a_displacement_that_should_have_moved_the_mesh_is_refused() {
 /// match the host mirrors of the same algebra. One pass, so the host can
 /// replay the sub-pass sequence step by step.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_bond_kernels_match_the_host_mirrors() {
     use super::materials::{
         bond_face_values, bond_grad_correction, rhs_mirror, traction_ref_grad_mirror, CellMaterial,
@@ -822,10 +834,10 @@ fn a_one_material_map_leaves_s5_bitwise() {
     d1.apply(&gpu, &mut out1).expect("apply 1");
     d2.apply(&gpu, &mut out2).expect("apply 2");
 
-    let bits3 = |v: &[Vec3]| -> Vec<u64> {
+    let bits3 = |v: &[Vec3]| -> Vec<Bits> {
         v.iter().flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).collect()
     };
-    let bits9 = |v: &[Tensor]| -> Vec<u64> {
+    let bits9 = |v: &[Tensor]| -> Vec<Bits> {
         v.iter()
             .flat_map(|s| {
                 [s.xx.to_bits(), s.xy.to_bits(), s.xz.to_bits(), s.yx.to_bits(),
@@ -880,6 +892,7 @@ fn bimetal_case(
 /// finest mesh its measured curvature is the closed form (S95.19) to two
 /// percent, with the outer loop converged.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_95_e_the_bimetal_curvature_is_timoshenko_s() {
     let Some(gpu) = gpu() else { return };
     let (hm, gm, map, _bonds) = bimetal_case(&gpu, 192, 32, BondTreatment::Series).expect("case");
@@ -926,6 +939,7 @@ fn gate_95_e_the_bimetal_curvature_is_timoshenko_s() {
 /// - leaves an interface stress the traction-continuous series bond does
 /// not (S95.20), on the middle mesh of the gate's sequence.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_linear_bond_leaves_an_interface_stress_the_series_bond_removes() {
     let Some(gpu) = gpu() else { return };
     let mut ratio = [0.0 as Scalar; 2];

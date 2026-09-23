@@ -79,6 +79,7 @@ use crate::io::contract::unsupported_note;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solver::{self, SolverKernels};
 use crate::{Label, Scalar};
+use crate::SCALAR_FLOOR;
 
 #[cfg(test)]
 mod tests;
@@ -384,7 +385,7 @@ impl FanCurve {
             let me = m[e];
             let d = qc - p[e].0;
             let qref = (qn - q0).abs().max(1e-30);
-            let k = (me.abs() / qref).max(p[0].1.abs() / (qref * qref)).max(1e-300);
+            let k = (me.abs() / qref).max(p[0].1.abs() / (qref * qref)).max(SCALAR_FLOOR);
             return (p[e].1 + me * d - k * d * d.abs(), me - 2.0 * k * d.abs());
         }
 

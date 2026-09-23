@@ -827,7 +827,7 @@ fn with_supply_temperature_moves_a_tile_plenum_and_its_vapour() {
         .with_supply_temperature(297.15)
         .expect("the supply patch is a tile");
     assert!(
-        rel(c.tiles[0].plenum_temperature, 297.15) < 1e-12,
+        rel(c.tiles[0].plenum_temperature as Scalar, 297.15) < 1e-12,
         "the tile's plenumTemperature is what moves"
     );
     let lc = c.lower().expect("the moved case lowers");
@@ -878,5 +878,5 @@ fn with_supply_temperature_sets_an_inflow_fans_supply_temperature() {
     let t = moved.fans[0]
         .supply_temperature
         .expect("the fan carries a supply temperature");
-    assert!(rel(t, 297.15) < 1e-12, "{t} vs 297.15");
+    assert!(rel(t as Scalar, 297.15) < 1e-12, "{t} vs 297.15");
 }

@@ -30573,3 +30573,259 @@ for this one. The table is in pool memory: what the card leaves for the pool dep
 everything else resident on it, which only the card's owner controls.
 
 ---
+
+## 112. Single precision — the f32 build, its floors, and what it holds
+
+The crate has carried a `single` feature since the first port (`Cargo.toml`): it makes
+`Scalar` an `f32` on the host (`src/lib.rs`) and `ofscalar` a `float` on the device
+(`cuda/ofgpu_device.cuh`), and `build.rs` passes `-DOFGPU_SINGLE` to every kernel unit
+so the two agree, which `types::tests::layout_matches_device` pins. Nothing had ever
+built it. §67.11 recorded in passing that it did not compile, and `docs/11` §B.6 found
+the defect nothing could catch while it did not: a floor written `1e-300` is `0` in
+`float`. This section makes the build compile, gives every such floor a value that
+means the same thing in both precisions, and publishes what changes at f32. The f64
+build is bitwise what it was: every edit made for f32 is either inside an
+`OFGPU_SINGLE` / `feature = "single"` arm or a cast that is the identity in f64.
+
+`No GPL-licensed source was consulted.` The sources are this tree's own code, the IEEE
+754 binary32 and binary64 formats (their smallest normal numbers, 2^-126 and 2^-1022,
+and their largest finite ones), and the measurements below.
+
+### 112.1 The floors — one value per precision, the same distance from the bottom
+
+A floor such as `max(x, 1e-300)` exists to keep a logarithm, a square root or a
+division finite on a degenerate input without touching any physical value. `1e-300`
+does that in f64 because it is about 10^8 above the smallest normal double
+(2.2e-308) and hundreds of decades below any physical quantity. In f32 the same
+literal is below even the smallest subnormal float (1.4e-45) and rounds to `0`, with
+no diagnostic from nvcc or rustc: the floor vanishes and `log(0)`, `1/0` and `0/0`
+come back. The opposite literal, `1e300`, is out of range in f32; rustc refuses it
+as a compile error (`overflowing_literals`), and in CUDA C++ converting it to `float` is
+undefined.
+
+The rule, which `cuda/solver.cu`'s `OFGPU_TINY` (`1e-30f` / `1e-290`),
+`cuda/meshgeom.cu`'s `OFGEOM_MIN_POSITIVE` and `cuda/gmtrans.cu`'s `OFGM_MIN_POSITIVE`
+already followed: **each precision gets its own floor, the same distance above its
+own smallest normal.** f32's smallest normal is 1.18e-38, so the f32 floor is `1e-30`
+and the matching large value is `1e30`. The f64 arm keeps the literal it had, byte
+for byte.
+
+| where | what it floors | f64 (unchanged) | f32 |
+|---|---|---|---|
+| `SCALAR_FLOOR` in `src/lib.rs` | every host floor that was a `Scalar`-typed `1e-300` | `1e-300` | `1e-30` |
+| `SCALAR_HUGE` in `src/lib.rs` | every host `Scalar`-typed `1e300` | `1e300` | `1e30` |
+| `OFGPU_LES_TINY`, `cuda/les.cu` | the Deardorff aspect ratios before `log` | `1e-300` | `1e-30f` |
+| `OFGPU_SST_TINY`, `cuda/sst.cu` | `omega` and `y` in the blending functions | `1e-300` | `1e-30f` |
+| `OFGPU_WF_TINY`, `cuda/wallfunctions.cu` | `wfPow`'s argument before `log` | `1e-300` | `1e-30f` |
+| `OFGPU_FAN_TINY`, `cuda/fan.cu` | the extrapolation curvature `k` | `1e-300` | `1e-30f` |
+| `OFGPU_ADAPT_TINY`, `cuda/adapt.cu` | the band in which the transfer limiter leaves a cell alone | `1e-300` | `1e-30f` |
+| `OFGPU_S2S_HUGE`, `cuda/s2s.cu` | the start of the two half-space maxima | `1e300` | `1e30f` |
+| `OFGPU_DBL_MIN`, `cuda/solid.cu` | `Vec3::normalised`'s threshold | `2.2250738585072014e-308` | `1.17549435e-38f` |
+
+The host twins follow: `adapt::transfer::LIMITER_FLOOR` is `SCALAR_FLOOR`, and the host
+floors in `src/fan.rs`, `src/wallfunctions.rs`, `src/s2s.rs`, `ofgpu-lowmach` and the
+gate code of `ofgpu-validate` read `SCALAR_FLOOR` where they read a `Scalar` `1e-300`.
+A `1e-300` that is an `f64` (a value already widened with `f64::from`) is not dead in
+either build and stays. Two tests hold this: `types::tests` checks that both constants
+are finite, non-zero and invertible in the build being tested and that the f64 values
+are the historical ones, and a scan of `cuda/` refuses a `1e-300`, `1e300` or
+`2.2250738585072014e-308` anywhere but the double arm of an `#ifdef OFGPU_SINGLE`
+block.
+
+### 112.2 The build, the second invocation, and the rule that keeps f64 bitwise
+
+At `8c935c3`, `cargo test --release --features single --no-run` stopped at 64 type
+errors in the library and 279 in its tests, before a single binary or lint was
+reached. Almost all were one shape: a value declared `f64` (a configuration field, a
+literal array, a helper's parameter) meeting a `Scalar`. The fixes are of three kinds
+only:
+
+1. **A type written `f64` becomes `Scalar`, or a cast `as Scalar` / `f64::from` is
+   added**, where the value meets `Scalar` arithmetic. In f64 both are the identity:
+   the same operations on the same values in the same order.
+2. **A literal outside f32's range becomes a paired constant**: `SCALAR_FLOOR`,
+   `SCALAR_HUGE`, or a local `#[cfg(feature = "single")]` / `#[cfg(not(...))]` pair
+   whose f64 arm is the old literal verbatim.
+3. **A test whose subject is f64 itself** (an f64 bit pattern, a digit count only a
+   double carries) is compiled only without the feature, `#[cfg(not(feature =
+   "single"))]`, as `blockgen.rs` and `ofgpu-datacentre` already did. Each is named in
+   §112.3.
+
+No tolerance, scheme, iteration count or physical constant changed in the f64 build;
+where a check is given its own f32 value, §112.3 names it with both values.
+The claim that f64 did not move is checked four ways, not asserted: the SASS of every
+f64 kernel unit (`cuobjdump -sass`, which carries no line table) hashes the same
+before and after; three `ofgpu-buoyant` runs, one `ofgpu-cht` run, three
+`ofgpu-lowmach` runs and one `ofgpu-k-epsilon` run write byte-identical fields; the f64
+test suites list and pass the same tests; and `ofgpu-validate` prints all 937 of its
+rows, name, error and tolerance, byte for byte as it did at `af8f7fd` (936 of 937, the
+same one miss).
+
+The house command (`README.md`) is now two invocations:
+
+```
+cargo test --release
+cargo test --release --features single --target-dir target/single
+```
+
+The second builds into its own directory because the feature changes every kernel
+unit and the library: sharing `target/release` would leave whichever precision was
+built last in `target/release/*.exe`, and a driver run from there would silently be
+the other precision.
+
+### 112.3 The test suites at f32 — what passes, what does not, and why
+
+Measured on 2026-09-24 on the machine of record (one RTX 5070 Ti, 16,303 MiB, driver
+596.49, idle but for the desktop: 1.3-1.5 GB resident), with the tree of §112.1-112.2 and
+before any test below was marked. `cargo test --release --features single --target-dir
+target/single`:
+
+| suite | listed | passed | failed | did not finish | ignored before |
+|---|---|---|---|---|---|
+| library (`--lib`) | 2018 | 1576 | 428 | 4 | 10 |
+| the 18 binaries' tests (`--bins`) | 272 | 258 | 14 | 0 | 0 |
+
+The same tree in f64 lists 2019 library tests (the extra one is `blockgen`'s f64-only
+digit test) and passes 2009 with the same 10 ignored, and passes all 272 binary tests.
+One of the 14 binary failures is not an f32 failure: `ofgpu-datacentre`'s
+`the_shipped_dc_schema_is_the_generated_one` read an empty file because its sibling test
+was rewriting it at that moment, the race between the two schema tests that fails the
+same way in f64 and passes when re-run; re-run under the feature it passes, and the
+schema it generates is byte-identical to the shipped one. It is not marked.
+
+Every other test in the failed and did-not-finish columns now carries
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **432** library
+tests and **13** binary tests. So the second invocation of the house command reports
+1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
+test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
+race above fires), and `-- --ignored` under the feature runs exactly the tests that do
+not hold at f32 (plus the ten that were ignored before, in both builds). The attribute
+does nothing without the feature: the f64 lists and results are the ones above.
+`types::tests::the_f32_failure_count_is_the_one_spec_lit_states` counts the attributes
+and holds them to the two bold numbers in this paragraph (it is itself one more library
+test, so the f64 build now lists 2020 and passes 2010).
+
+**Why they fail**, read from their own messages (the four that did not finish were
+stopped after 95 minutes; in f64 each takes seconds):
+
+* **Most are a tolerance written for double round-off** — `1e-12` or `1e-14` between a
+  device result and its host twin or a closed form — meeting single round-off, which is
+  about `1e-7`. Nothing is wrong with the arithmetic they check; the check was never
+  written to hold in f32, and no f32 tolerance was written here (§112.2).
+* **A production refusal whose threshold lies below f32 round-off.** The largest is the
+  conduction solver's `ANISOTROPY_RESIDUAL_LIMIT = 1e-10` (`src/cht.rs`, §46.4): on an
+  axis-aligned mesh the residual it reads is `1.19e-7` in f32 — exactly one unit in the
+  last place at 1 — so every conduction case is refused, and 56 library tests fail on it.
+  Its own documentation asks for a threshold "loose enough that a mesh generator's
+  last-bit noise on `Sf` and `C` cannot trip it"; in f32, `1e-10` is not. The conjugate
+  interface's conformity and area checks (`1e-7`, `1e-9`), the radiating-surface closure
+  check, the pressure backend's probe solve and the wet-bulb iteration refuse at least 33
+  more the same way.
+* **A pin of an f64 value**: a JSON double's bit pattern, a fixture's `RCI_HI` of
+  `99.999_999_9`, which f32 rounds to exactly 100, and `ofgpu-bench`'s memory model, whose
+  constants are f64 bytes per cell (the f32 mesh-and-flow slope is 377.0 B/cell against
+  §111.3's 622.2).
+* **Four that do not finish**: `ale_flow::tests::gate_105b_the_stroking_outlet_has_the_scheme_time_order`,
+  `models::k_omega_sst::tests::forcing_f1_to_zero_reproduces_the_transformed_k_epsilon`,
+  `solid::tests::gate_95_e_the_bimetal_curvature_is_timoshenko_s` and
+  `solid::tests::the_linear_bond_leaves_an_interface_stress_the_series_bond_removes`.
+
+By module, the 432 library tests are: io 56, models 52, cht 44, parcels 42, solid 27,
+s2s 25, automesher 23, fv 16, fan 13, wallfunctions 11, pressure 11, mesh 10, rheology 9,
+blockgen 9, and 84 across 22 more modules. The 13 binary tests are: `ofgpu-lowmach` 4,
+`ofgpu-datacentre` 2, `ofgpu-sample` 2, `ofgpu-validate` 2, and one each in `ofgpu-bench`,
+`ofgpu-buoyant` and `ofgpu-regions`.
+
+### 112.4 `ofgpu-validate` at f32, section by section
+
+`target/single/release/ofgpu-validate.exe -json …`, 2026-09-24 05:56, 3.5 s, exit 2:
+
+```
+validation aborted: conduction: the anisotropy residual |E - Dhat n (n.d)|/(Dhat |d|) is
+0.00000011920926 at internal face 376, limit 0.0000000001
+```
+
+The run stops at the first conduction case, which is the first case of section 8, for
+the reason §112.3 gives. The f64 column is `af8f7fd`'s run (936 of 937, the one miss
+being Gate 105-C's CFD2 lift, §105.14); §111 and this section change nothing
+`ofgpu-validate` computes in f64 (§112.2: every row is byte-identical).
+
+The verdict is read from the rows, with no tolerance changed: **holds** — every row
+passes at its f64 tolerance; **loosens** — some rows miss their f64 tolerance, but every
+miss is an error below `1e-5` (84 single-precision units in the last place at 1), so the
+arithmetic is right to single precision and the tolerance is double's (the worst error is
+printed: it is what an f32 tolerance would have to admit); **fails** — the section cannot
+be taken in f32.
+
+| # | section | f64 | f32 | at f32 |
+|---|---|---|---|---|
+| 1 | 3-D graded block | 71/71 | 18/71 | **loosens**: 53 rows miss an f64 tolerance, worst err 9.1e-06 |
+| 2 | 3-D sheared block (non-orthogonal) | 36/36 | 11/36 | **loosens**: 25 rows miss an f64 tolerance, worst err 5.5e-06 |
+| 3 | 3-D block with 2:1 refinement interfaces | 35/35 | 18/35 | **loosens**: 17 rows miss an f64 tolerance, worst err 1.8e-06 |
+| 4 | the adapt: refine, coarsen, and what a rebuild costs | 34/34 | 30/34 | **loosens**: 4 rows miss an f64 tolerance, worst err 2.6e-07 |
+| 5 | 2-D block with empty front and back | 37/37 | 13/37 | **loosens**: 24 rows miss an f64 tolerance, worst err 9.4e-06 |
+| 6 | linear solvers | 6/6 | 1/6 | **loosens**: 5 rows miss an f64 tolerance, worst err 4.8e-07 |
+| 7 | method of manufactured solutions, -lap(psi) = f | 6/6 | 6/6 | **holds** |
+| 8 | observed order and reported uncertainty (SPEC-LIT 94) | 10/10 | aborted | **fails**: the run stops at this section's first case, above |
+| 9 | buoyancy | 12/12 | not reached | not reached |
+| 10 | buoyancy production, sources, species, phi I/O | 14/14 | not reached | not reached |
+| 11 | volume of fluid (SPEC-LIT 20, the 22 rows) | 16/16 | not reached | not reached |
+| 12 | msh hex closure, cut-cell closure (SPEC-LIT 23, 24) | 10/10 | not reached | not reached |
+| 13 | the low-Mach reference pressure (SPEC-LIT 25) | 3/3 | not reached | not reached |
+| 14 | wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29) | 5/5 | not reached | not reached |
+| 15 | Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30) | 9/9 | not reached | not reached |
+| 16 | periodic domains: cyclic-pair invariants (SPEC-LIT 31.1) | 4/4 | not reached | not reached |
+| 17 | the thermal wall-function gate, redesigned (SPEC-LIT 32) | 27/27 | not reached | not reached |
+| 18 | Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3) | 10/10 | not reached | not reached |
+| 19 | resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) | 3/3 | not reached | not reached |
+| 20 | the bulk-temperature thermostat (SPEC-LIT 35) | 15/15 | not reached | not reached |
+| 21 | thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2) | 5/5 | not reached | not reached |
+| 22 | bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5) | 10/10 | not reached | not reached |
+| 23 | Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2) | 10/10 | not reached | not reached |
+| 24 | realizable and RNG k-epsilon (SPEC-LIT 40, 41) | 39/39 | not reached | not reached |
+| 25 | the output block, and fp16 voxels (SPEC-LIT 44, 45) | 22/22 | not reached | not reached |
+| 26 | conjugate heat transfer (SPEC-LIT 46, 47, 48) | 16/16 | not reached | not reached |
+| 27 | the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows) | 6/6 | not reached | not reached |
+| 28 | an equation that lives on a region - Gate 93-A (SPEC-LIT 93) | 8/8 | not reached | not reached |
+| 29 | the conjugate fluid/solid interface (SPEC-LIT 59, 60) | 48/48 | not reached | not reached |
+| 30 | surface-to-surface radiation (SPEC-LIT 49, 50, 51) | 47/47 | not reached | not reached |
+| 31 | fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55) | 83/83 | not reached | not reached |
+| 32 | Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58) | 43/43 | not reached | not reached |
+| 33 | gamma-Re_theta transition (SPEC-LIT 88, 89) | 20/20 | not reached | not reached |
+| 34 | the 2015 gamma transition model (SPEC-LIT 90) | 24/24 | not reached | not reached |
+| 35 | Lagrangian parcels (SPEC-LIT 66) | 11/11 | not reached | not reached |
+| 36 | the parcel sort and gather-shaped deposition (SPEC-LIT 67) | 12/12 | not reached | not reached |
+| 37 | two-way coupling of the dispersed phase (SPEC-LIT 68) | 13/13 | not reached | not reached |
+| 38 | droplet heating and evaporation (SPEC-LIT 76) | 12/12 | not reached | not reached |
+| 39 | the vapour into the gas (SPEC-LIT 77) | 14/14 | not reached | not reached |
+| 40 | droplet-wall impact (SPEC-LIT 78) | 45/45 | not reached | not reached |
+| 41 | Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10) | 6/6 | not reached | not reached |
+| 42 | Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) | 3/3 | not reached | not reached |
+| 43 | the imported region (SPEC-LIT 97) | 5/5 | not reached | not reached |
+| 44 | the region layout (SPEC-LIT 97) | 3/3 | not reached | not reached |
+| 45 | Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) | 10/10 | not reached | not reached |
+| 46 | Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10) | 14/14 | not reached | not reached |
+| 47 | Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over three meshes, CFD3 on a wobbling mesh (SPEC-LIT 105.14) | 20/21 | not reached | not reached |
+| 48 | lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) | 8/8 | not reached | not reached |
+| 49 | Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2) | 0 rows (open) | not reached | not reached |
+| 50 | Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3) | 0 rows (open) | not reached | not reached |
+| 51 | Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4) | 16/16 | not reached | not reached |
+
+Seven of the 51 sections are reached: 225 rows, 97 pass at their f64 tolerance, 128 miss
+it by at most `9.4e-6`, and none misses it by more. Section 8 onward, 44 sections and 712 of
+the f64 run's 937 rows, is not reached, so for them this section can say only that f32 does
+not get there. Gates 94-A to 94-D, 95-D, 95-E, 105-A to 105-C and 110-C are among them.
+
+### 112.5 What this does not cover, and the decision it leaves
+
+* **It does not make f32 a supported configuration.** It makes it build, keeps its floors
+  alive, and states what holds. The f64 build remains the one every gate is taken in.
+* **No speed or memory figure** is taken for f32 (§111's model is an f64 measurement), and
+  mixed precision is not attempted.
+* **The decision.** `ANISOTROPY_RESIDUAL_LIMIT` and the conjugate interface's tolerances
+  are guards whose right value depends on the precision, like the floors of §112.1: in
+  f64 each sits far above round-off, in f32 below it. Giving each an f32 value (a limit
+  near `1e-5` would sit about 84 units in the last place above the f32 noise and far below
+  any misalignment §46's tests construct) would let `ofgpu-validate` run past section 8 in
+  f32 and let most of the 89 refused tests run. It changes what the f32 build accepts,
+  so it is left to whoever owns those guards; the f64 values stay as they are either way.

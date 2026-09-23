@@ -13,6 +13,14 @@
 
 use super::*;
 use crate::blockgen::{self, BlockSpec, GradedAxis};
+
+/// One `Scalar`'s bit pattern, the width the `to_bits`/`from_bits` pair
+/// agrees on, so the rig's bitwise snapshots mean the same thing in either
+/// precision (SPEC-LIT 112.1).
+#[cfg(not(feature = "single"))]
+type Bits = u64;
+#[cfg(feature = "single")]
+type Bits = u32;
 use crate::field::GpuSurfaceScalarField;
 use crate::mesh::HostMesh;
 
@@ -107,6 +115,7 @@ fn blasius(eta_max: Scalar, n: usize) -> Vec<(Scalar, Scalar, Scalar, Scalar)> {
 /// criterion is not the published one**, and no amount of agreement on the
 /// correlations would tell you.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_two_point_one_nine_three_is_a_property_of_the_blasius_profile() {
     let sol = blasius(10.0, 200_000);
 
@@ -176,6 +185,7 @@ fn the_two_point_one_nine_three_is_a_property_of_the_blasius_profile() {
 /// rather than merely bounded, because it is the size of the only difference
 /// between following the paper and following the documentation.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_two_forms_of_re_thetac_agree() {
     let mut worst = 0.0 as Scalar;
     let mut worst_at = 0.0 as Scalar;
@@ -246,6 +256,7 @@ fn re_thetac_is_below_re_thetat_and_positive_over_the_fitted_range() {
 /// one IS asserted, because it is the breakpoint whose two pieces were
 /// written to meet.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_published_f_length_is_discontinuous_and_this_measures_it() {
     let eps = 1e-9 as Scalar;
     let mut jumps = Vec::new();
@@ -472,6 +483,7 @@ fn the_intermittency_has_the_two_fixed_points_the_constants_imply() {
 /// check that the split actually chosen never puts a negative number on the
 /// diagonal.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_gamma_source_split_never_makes_the_diagonal_negative() {
     let c = LmCoeffs::default();
     for gamma in [0.0 as Scalar, 1e-12, 0.02, 0.5, 1.0] {
@@ -873,7 +885,7 @@ fn gate_88_r_a_frozen_intermittency_reproduces_plain_sst_bitwise() {
         (y, ())
     };
 
-    let run = |transition: bool| -> Vec<Vec<u64>> {
+    let run = |transition: bool| -> Vec<Vec<Bits>> {
         let mut m = crate::models::KOmegaSst::new(
             &gpu,
             &hm,
@@ -901,7 +913,7 @@ fn gate_88_r_a_frozen_intermittency_reproduces_plain_sst_bitwise() {
         for _ in 0..3 {
             m.correct(&gpu, &flow).expect("correct");
         }
-        let bits = |f: &crate::field::GpuScalarField| -> Vec<u64> {
+        let bits = |f: &crate::field::GpuScalarField| -> Vec<Bits> {
             gpu.download(&f.f).expect("read").iter().map(|v: &Scalar| v.to_bits()).collect()
         };
         vec![bits(m.k()), bits(m.omega()), bits(m.nut())]
@@ -937,6 +949,7 @@ fn gate_88_r_a_frozen_intermittency_reproduces_plain_sst_bitwise() {
 /// not to this: a digit dropped in one of them is only visible by measuring
 /// them against each other.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_host_and_device_correlations_agree() {
     let Some(gpu) = gpu() else { return };
     let hm = block(8);
@@ -1050,7 +1063,7 @@ fn a_transitional_correct_is_bitwise_repeatable() {
     let mut wy: DevBuf<Scalar> = gpu.zeros(n).expect("y");
     gpu.write(&mut wy, &vec![0.02 as Scalar; n]).expect("write");
 
-    let run = || -> Vec<Vec<u64>> {
+    let run = || -> Vec<Vec<Bits>> {
         let mut m = crate::models::KOmegaSst::new(
             &gpu,
             &hm,
@@ -1076,7 +1089,7 @@ fn a_transitional_correct_is_bitwise_repeatable() {
         for _ in 0..3 {
             m.correct(&gpu, &flow).expect("correct");
         }
-        let bits = |f: &crate::field::GpuScalarField| -> Vec<u64> {
+        let bits = |f: &crate::field::GpuScalarField| -> Vec<Bits> {
             gpu.download(&f.f).expect("read").iter().map(|v: &Scalar| v.to_bits()).collect()
         };
         let lm = m.transition().expect("attached");
@@ -1118,7 +1131,7 @@ fn the_intermittency_reaches_the_k_equation() {
     let mut wy: DevBuf<Scalar> = gpu.zeros(n).expect("y");
     gpu.write(&mut wy, &vec![0.05 as Scalar; n]).expect("write");
 
-    let run = |frozen: Scalar| -> Vec<u64> {
+    let run = |frozen: Scalar| -> Vec<Bits> {
         let mut m = crate::models::KOmegaSst::new(
             &gpu,
             &hm,

@@ -20,6 +20,14 @@
 
 use super::*;
 
+/// One `Scalar`'s bit pattern, the width the `to_bits`/`from_bits` pair
+/// agrees on, so the rig's bitwise snapshots mean the same thing in either
+/// precision (SPEC-LIT 112.1).
+#[cfg(not(feature = "single"))]
+type Bits = u64;
+#[cfg(feature = "single")]
+type Bits = u32;
+
 /// Two doubles agree to the 1e-15 the reference digits are quoted to.
 ///
 /// `exp` is the one operation these closed forms use whose bits IEEE does
@@ -89,6 +97,7 @@ fn the_reference_f_pg_rows_reproduce_bit_for_bit() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn c_pg3_is_live_below_the_knot_and_inert_from_it_up() {
     let c0 = GammaCoeffs::default();
     let c1 = c_pg3(1.0);
@@ -107,6 +116,7 @@ fn c_pg3_is_live_below_the_knot_and_inert_from_it_up() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_reference_re_thetac_rows_reproduce() {
     let c = GammaCoeffs::default();
     // The reference's 11 rows. `exp` is not bit-pinned across languages, so
@@ -154,6 +164,7 @@ fn f_pg_at_zero_is_exactly_one_and_re_thetac_two_constant_there() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_positive_branch_reaches_its_cap_at_half_over_c_pg1() {
     let c = GammaCoeffs::default();
     // 90.11: F_PG reaches C_PG1lim where 1 + C_PG1 lambda = C_PG1lim, i.e.
@@ -168,6 +179,7 @@ fn the_positive_branch_reaches_its_cap_at_half_over_c_pg1() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_negative_branch_reaches_its_cap_three() {
     let c = GammaCoeffs::default();
     // 90.11: the negative branch's cap is C_PG2lim = 3, reached where
@@ -211,6 +223,7 @@ fn lambda_thl_is_clipped_at_both_ends() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn re_thetac_is_monotone_decreasing_in_tu_l_and_bounded() {
     let c = GammaCoeffs::default();
     // 90.11: decreasing over [0, 100] wherever F_PG > 0, and bounded in
@@ -302,6 +315,7 @@ fn the_reference_f_turb_f_onset3_and_f_on_lim_rows_reproduce() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_reference_tu_l_and_lambda_rows_reproduce_bit_for_bit() {
     // Tu_L's four rows: sqrt and the four operations are IEEE-pinned, so
     // bit equality - including both rows that sit ON the min(..., 100) cap,
@@ -329,6 +343,7 @@ fn the_reference_tu_l_and_lambda_rows_reproduce_bit_for_bit() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_split_never_sinks_negative_and_reconstructs_the_source() {
     // 90.11, split row - 90.5's sweep: sp >= 0 at every state, over gamma
     // in [0, 1] including both ends (the absorbing state), and a, b in
@@ -463,6 +478,7 @@ fn p_k_lim_switches_itself_off_and_is_never_negative() {
 }
 
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn f3_is_the_blending_floor_written_against_ry() {
     // (90.17): 88.6's F_3 to the character. 1 at the wall, e^-1 at
     // R_y = 120, monotone, and far below machine relevance by R_y = 240 -
@@ -605,6 +621,7 @@ fn block(n: usize) -> crate::mesh::HostMesh {
 /// one of them is visible only by measuring them against each other.
 /// (90.11): worst relative difference below 1e-13, per closed form.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_host_and_device_closed_forms_agree() {
     let Some(gpu) = gpu() else { return };
     let hm = block(8);
@@ -767,6 +784,7 @@ fn the_host_and_device_closed_forms_agree() {
 /// (`fma(t1, ftb, a)`) where rustc rounds twice. (§90.11: the halves
 /// reconstruct the source, and `Sp` never sinks negative.)
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_gamma_source_split_matches_the_host_split() {
     let Some(gpu) = gpu() else { return };
     let hm = block(6);
@@ -861,6 +879,7 @@ fn the_gamma_source_split_matches_the_host_split() {
 /// `gamma = 1` toward the laminar fixed point `1/c_e2` is left to the
 /// wiring unit.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_cell_at_zero_intermittency_stays_at_zero_and_one_decays_toward_the_fixed_point() {
     let Some(gpu) = gpu() else { return };
     let hm = block(6);
@@ -1129,7 +1148,7 @@ fn update_fields_reads_no_velocity() {
         .map(|i| Vec3 { x: 0.8, y: 0.1 + 0.001 * i as Scalar, z: -0.2 })
         .collect();
 
-    let run = || -> Vec<Vec<u64>> {
+    let run = || -> Vec<Vec<Bits>> {
         let yv: Vec<Scalar> = (0..n).map(|i| 1e-4 * (i as Scalar + 1.0)).collect();
         let mut yb: DevBuf<Scalar> = gpu.zeros(n).expect("y");
         gpu.write(&mut yb, &yv).expect("write y");
@@ -1157,7 +1176,7 @@ fn update_fields_reads_no_velocity() {
 
         let turb = TurbKernels::new(&gpu).expect("turb kernels");
         gm.update_fields(&gpu, &turb, &kb, &wb, &sb, &grub, nu, n).expect("update");
-        let bits = |b: &DevBuf<Scalar>| -> Vec<u64> {
+        let bits = |b: &DevBuf<Scalar>| -> Vec<Bits> {
             gpu.download(b).expect("read").iter().map(|v: &Scalar| v.to_bits()).collect()
         };
         vec![
@@ -1195,14 +1214,14 @@ fn update_fields_reads_no_velocity() {
 /// coefficient it was handed).
 #[derive(Default)]
 struct RigBits {
-    k: Vec<u64>,
-    omega: Vec<u64>,
-    nut: Vec<u64>,
-    gamma: Vec<u64>,
-    gamma_steps: Vec<Vec<u64>>,
-    f1: Vec<u64>,
-    g: Vec<u64>,
-    sp: Vec<u64>,
+    k: Vec<Bits>,
+    omega: Vec<Bits>,
+    nut: Vec<Bits>,
+    gamma: Vec<Bits>,
+    gamma_steps: Vec<Vec<Bits>>,
+    f1: Vec<Bits>,
+    g: Vec<Bits>,
+    sp: Vec<Bits>,
 }
 
 /// The rig every test below shares: one [`crate::models::KOmegaSst`], plain
@@ -1271,7 +1290,7 @@ fn gamma_rig(
     for _ in 0..steps {
         m.correct(gpu, &flow)?;
         if let Some(gm) = m.gamma_transition() {
-            let bits: Vec<u64> = gpu
+            let bits: Vec<Bits> = gpu
                 .download(&gm.gamma().f)?
                 .iter()
                 .map(|v: &Scalar| v.to_bits())
@@ -1461,7 +1480,7 @@ fn gate_90_r_at_gamma_one_the_model_is_sst_with_kato_launder_production() {
     };
     let plain =
         |u: &[Vec3]| gamma_rig(&gpu, &hm, None, u, 0.05, 50.0, 3, (1.0, 1.0)).expect("plain");
-    let measure = |a: &[u64], b: &[u64]| -> (Scalar, usize) {
+    let measure = |a: &[Bits], b: &[Bits]| -> (Scalar, usize) {
         let av: Vec<Scalar> = a.iter().map(|x| Scalar::from_bits(*x)).collect();
         let bv: Vec<Scalar> = b.iter().map(|x| Scalar::from_bits(*x)).collect();
         let mut worst = 0.0 as Scalar;

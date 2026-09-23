@@ -458,6 +458,7 @@ mod tests {
     /// Everything SPEC-LIT section 74.3 tabulates for a 2:1 hexahedral
     /// interface, measured on a mesh that has one.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_2to1_hex_interface_carries_the_numbers_section_74_tabulates() {
         let r = refined_half([4, 4, 4], CUBE, 1).unwrap();
         let m = &r.mesh;
@@ -519,6 +520,7 @@ mod tests {
     /// This is the claim that a 2:1 interface needs no flux register - four
     /// sub-areas summing to the parent area is the entire argument.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_refined_box_closes_and_is_ldu_ordered() {
         for r in [
             refined_half([4, 4, 4], CUBE, 1).unwrap(),

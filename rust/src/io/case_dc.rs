@@ -503,10 +503,10 @@ impl DcCase {
             }
             .unwrap_or(JsonGradingAxis { expansion: 1.0, two_sided: false });
             GradedAxis {
-                lo: b.min[i],
-                hi: b.max[i],
+                lo: b.min[i] as Scalar,
+                hi: b.max[i] as Scalar,
                 n: self.room.cells[i] as usize,
-                expansion: ga.expansion,
+                expansion: ga.expansion as Scalar,
                 two_sided: ga.two_sided,
             }
         };

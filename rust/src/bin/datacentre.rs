@@ -2153,6 +2153,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_ceiling_is_the_highest_swept_temperature_holding_exactly_one_hundred() {
         let pts = vec![
             sp(285.15, 100.0),
@@ -2222,6 +2223,10 @@ mod tests {
         let text = doc_text(&lowered(), &s, Some("r_1"));
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         let json_k = v["report"]["pue"]["freeCoolingCeiling"].as_f64().unwrap();
+        // In f32 the bitwise pin below does not exist (SPEC-LIT 112.2); the
+        // unwrap above still checks the field is a number.
+        #[cfg(feature = "single")]
+        let _ = json_k;
         #[cfg(not(feature = "single"))]
         assert_eq!(
             json_k.to_bits(),
@@ -2263,6 +2268,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn continuity_is_one_computation_printed_and_serialised() {
         let s = solution();
         let v = value(&s, None);

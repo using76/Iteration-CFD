@@ -205,6 +205,7 @@ fn the_recomputed_geometry_is_the_host_sweep_on_the_moved_points() {
 /// T4 - Gate 105-A itself: space conservation to round-off over 100 steps,
 /// euler and backward, and the uniform state uniform to round-off.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_105a_space_conservation_holds_to_round_off() {
     let Some(gpu) = gpu() else { return };
     for (name, scheme) in [("euler", DdtScheme::Euler), ("backward", DdtScheme::Backward)] {
@@ -269,6 +270,7 @@ fn fan(verts: &[Label], points: &[Vec3]) -> (Vec3, Vec3) {
 /// T5 - the identity of SPEC-LIT 105.3: a warped QUAD has
 /// `Sf.(Cf - x_avg) = 0` to round-off, a warped PENTAGON does not.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_quadrilateral_keeps_its_centroid_offset_normal_to_sf_and_a_pentagon_does_not() {
     // A fixed 32-bit LCG, as the gpugeom fixture jitter uses, coordinates in
     // [-0.5, 0.5) - the same warping every run and every machine.
@@ -325,6 +327,7 @@ fn a_quadrilateral_keeps_its_centroid_offset_normal_to_sf_and_a_pentagon_does_no
 /// T6 - on a mesh that does not move, the ALE ddt equals `timescheme`'s ddt
 /// to 1e-14 relative: the same equation, one association apart.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_ale_ddt_reduces_to_the_static_ddt_on_a_mesh_that_does_not_move() {
     let Some(gpu) = gpu() else { return };
     let rb = gate_box();
@@ -563,6 +566,7 @@ fn the_ale_step_replays_bitwise() {
 /// the swept-volume identity is measured with BOUNDARY faces sweeping, so its
 /// SCL is held to the gate's 1e-12 too.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_volume_drift_is_the_worst_step_and_not_the_last() {
     let Some(gpu) = gpu() else { return };
     let rb = refined::build([4, 3, 3], Vec3::new(0.25, 0.3, 0.2), &[0u32; 36]).expect("box");

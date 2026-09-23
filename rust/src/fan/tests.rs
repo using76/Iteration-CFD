@@ -113,6 +113,7 @@ fn the_fan_kernels_contain_no_atomic() {
 /// pressure are the SAME number there, which is what "operating point"
 /// means. A transcription error in (S52.15) breaks that equality.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52a_the_quadratic_operating_point_is_where_the_two_curves_cross() {
     let (dp_max, q_max, k_sys) = (3048.0 as Scalar, 2.4094 as Scalar, 400.0 as Scalar);
     let q = quadratic_operating_point(dp_max, q_max, k_sys);
@@ -175,6 +176,7 @@ fn gate_52b_the_fds_fan_test_operating_point_is_reproduced() {
 /// computed here from `p M/(R T)` rather than quoted, so a wrong molar mass
 /// fails rather than agrees.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52b_the_fds_qfan_loss_duct_is_reproduced() {
     let rho = 101325.0 * 28.85034e-3 / (8.3145 * 293.15) as Scalar;
     assert!(rel(rho, 1.199338) < 1e-5, "FDS's air density comes out {rho}");
@@ -205,6 +207,7 @@ fn gate_52b_the_fds_qfan_loss_duct_is_reproduced() {
 
 /// (S52.8): the exact operator is symmetric, and it is a *bounded* downdate.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_exact_rank1_operator_is_symmetric() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
     for s in [0.0 as Scalar, 0.7, 12.0, 1e6] {
@@ -245,6 +248,7 @@ fn gate_52d_the_exact_rank1_operator_is_symmetric() {
 /// wrong** - at `S = 0` a `fixedValue` face contributes `D_f` to its own row,
 /// not the patch total. This test is what the note's prose would fail.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_row_sum_is_d_f_over_one_plus_s_sigma_d() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
     let sd: Scalar = d.iter().sum();
@@ -288,6 +292,7 @@ fn gate_52d_the_row_sum_is_d_f_over_one_plus_s_sigma_d() {
 /// (S52.10): the lumped `fr` reproduces (S52.9)'s row sum for **any** `D`,
 /// and the design note's per-face form does not.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_lumped_fr_preserves_the_row_sum_and_the_notes_does_not() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
     let sd: Scalar = d.iter().sum();
@@ -361,6 +366,7 @@ fn gate_52d_the_lumped_fr_preserves_the_row_sum_and_the_notes_does_not() {
 /// expression trees, so what is measured is the round-off - and that is what
 /// this test reports, not "identically zero".
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_lumped_and_exact_operators_impose_the_same_flow_rate() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
     let p_p = [1.0 as Scalar, -2.0, 0.5, 3.0, 0.25];
@@ -457,6 +463,7 @@ fn a_vertical_curve_delivers_the_prescribed_flow() {
 /// The Fritsch-Carlson limiter: a monotone table stays monotone, where a
 /// plain Catmull-Rom spline through the same points does not.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_hermite_curve_is_monotone_where_a_plain_spline_is_not() {
     // Four points with a near-flat stretch followed by a steep drop - the
     // classic overshoot configuration.
@@ -504,6 +511,7 @@ fn the_hermite_curve_is_monotone_where_a_plain_spline_is_not() {
 
 /// (S52.13): the affinity laws, checked against their own statement.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_density_and_speed_corrections_are_the_affinity_laws() {
     let base = FanCurve::quadratic(500.0, 2.0);
     let q = 1.0 as Scalar;
@@ -902,6 +910,7 @@ impl Rig {
 /// A 1-D chain with Dirichlet ends carries `Q = dp/SUM_i (1/D_i)`; a jump on
 /// face `j` replaces `1/D_j` by `1/D_j + R`. ONE assembly, ONE solve.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_53a_a_porous_jump_puts_resistances_in_series() {
     let Some(gpu) = gpu() else { return };
     let n = 12;
@@ -1192,6 +1201,7 @@ fn fan_rig(gpu: &Gpu, n: usize, fan: FanPatch, rau: Scalar) -> (Rig, FlowDevices
 /// The device triple is exactly [`lumped_triple`], for every curve kind and
 /// both directions.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_device_triple_mirrors_the_host() {
     let Some(gpu) = gpu() else { return };
     let curves = [
@@ -1346,6 +1356,7 @@ fn gate_52c_a_flat_curve_reproduces_the_fixed_value_field_bitwise() {
 /// This is §52.12 Gate 52-A's real content on a real system: no model of the
 /// duct is needed, because the identity is closed.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_fan_lands_where_its_curve_crosses_the_systems_own_characteristic() {
     let Some(gpu) = gpu() else { return };
     let (p_a, rho, rau) = (0.0 as Scalar, 1.2 as Scalar, 0.02 as Scalar);
@@ -1950,6 +1961,7 @@ fn a_zero_resistance_boundary_jump_is_a_fixed_value_bitwise() {
 /// SPEC-LIT §52.1: the quadratic must be **odd** in `Q`, or a reversed fan
 /// pushes harder the more it is pushed back.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_quadratic_curve_is_odd_in_q_so_s_never_goes_negative() {
     let c = FanCurve::quadratic(20.0, 3.0);
 
@@ -2103,11 +2115,11 @@ fn a_fan_or_jump_patch_is_seeded_as_a_dirichlet_because_it_pins_the_level() {
     // The property that forces the seed: `fr` is in (0, 1] for every finite
     // curve slope and every finite resistance, so the patch is never a pure
     // Neumann face and the Poisson operator is never singular because of it.
-    for s in [0.0 as Scalar, 1e-9, 1.0, 1e6, 1e300] {
+    for s in [0.0 as Scalar, 1e-9, 1.0, 1e6, crate::SCALAR_HUGE] {
         let fr = 1.0 / (1.0 + s * 3.7);
         assert!(fr > 0.0 && fr <= 1.0, "fr = {fr} at S = {s}");
     }
-    for r in [0.0 as Scalar, 1e-9, 1.0, 1e6, 1e300] {
+    for r in [0.0 as Scalar, 1e-9, 1.0, 1e6, crate::SCALAR_HUGE] {
         let fr = 1.0 / (1.0 + r * 0.04);
         assert!(fr > 0.0 && fr <= 1.0, "fr = {fr} at R = {r}");
     }
@@ -2207,6 +2219,7 @@ fn the_boundary_jump_does_not_scale_the_coefficient_it_measured_d_from() {
 /// §53.8 Gate 53-A, the BOUNDARY form: the same series law with the plenum on
 /// the far side. This is the gate that caught the double application.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_53a_the_boundary_jump_puts_resistances_in_series() {
     let Some(gpu) = gpu() else { return };
     let n = 12;

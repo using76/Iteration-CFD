@@ -135,6 +135,23 @@ pub type Scalar = f32;
 #[cfg(not(feature = "single"))]
 pub type Scalar = f64;
 
+/// A positive floor far below any physical quantity and far above the bottom
+/// of [`Scalar`]'s range: `1e-300` in f64, `1e-30` in f32, each about 10^8
+/// above its type's smallest normal (SPEC-LIT 112.1). A `Scalar`-typed
+/// `1e-300` literal is `0.0` in the single build, silently.
+#[cfg(feature = "single")]
+pub const SCALAR_FLOOR: Scalar = 1e-30;
+#[cfg(not(feature = "single"))]
+pub const SCALAR_FLOOR: Scalar = 1e-300;
+
+/// The large finite value that mirrors [`SCALAR_FLOOR`]: `1e300` in f64,
+/// `1e30` in f32 (SPEC-LIT 112.1). A `Scalar`-typed `1e300` literal does not
+/// compile in the single build.
+#[cfg(feature = "single")]
+pub const SCALAR_HUGE: Scalar = 1e30;
+#[cfg(not(feature = "single"))]
+pub const SCALAR_HUGE: Scalar = 1e300;
+
 /// A mesh index. `i32` matches what the ASCII case format carries and
 /// is what the kernels index with.
 pub type Label = i32;
