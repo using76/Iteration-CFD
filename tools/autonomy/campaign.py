@@ -355,6 +355,7 @@ class Campaign:
         self.hooks = dict(hooks or {})
         self.lock = threading.Lock()
         self.fp_lock = threading.Lock()
+        self.progress_lock = threading.Lock()
         self.total_mib = psutil.virtual_memory().total / 2 ** 20
         self.ram = Ram(RAM_FRACTION * self.total_mib - 512.0)
         self.live = {}
@@ -512,11 +513,21 @@ class Campaign:
                "n_total": self.n_total, "n_rows": self.n_rows, "n_live": nlive,
                "peak_rss_mib": self.peak_rss_mib, "t": schema._now_iso()}
         path = os.path.join(self.dir, FILES["progress"])
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(rec, f, indent=1, sort_keys=True, ensure_ascii=False)
-            f.write("\n")
-        os.replace(tmp, path)
+        with self.progress_lock:
+            # One writer at a time (they shared one .tmp). A Windows reader
+            # can hold progress.json open and fail os.replace with
+            # PermissionError. progress.json is advisory: a dropped heartbeat
+            # copy must never end a geometry as HARNESS-ERROR, so 20 tries.
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(rec, f, indent=1, sort_keys=True, ensure_ascii=False)
+                f.write("\n")
+            for _ in range(20):
+                try:
+                    os.replace(tmp, path)
+                    return
+                except PermissionError:
+                    time.sleep(0.05)
 
     def _loop(self):
         last = time.perf_counter()
@@ -2395,7 +2406,41 @@ def _g10_runner(H):
     assert time.perf_counter() - t0s < 0.5, "acquire(500) waited"
     ram.release(500)
     _g10_rerun_reservation(H)
+    _g10_progress_race(c)
     return {"peak": "%.1f" % peak}
+
+
+def _g10_progress_race(c):
+    """Concurrent _write_progress against a reader holding the file open."""
+    c._write_progress()
+    errs = []
+
+    def writer():
+        for _ in range(50):
+            try:
+                c._write_progress()
+            except OSError as e:
+                errs.append("%s: %s" % (type(e).__name__, e))
+
+    def reader():
+        path = os.path.join(c.dir, FILES["progress"])
+        for _ in range(20):
+            f = open(path, encoding="utf-8")
+            f.read()
+            time.sleep(0.01)
+            f.close()
+
+    ws = [threading.Thread(target=writer) for _ in range(4)]
+    rd = threading.Thread(target=reader)
+    rd.start()
+    for t in ws:
+        t.start()
+    for t in ws:
+        t.join(60)
+    rd.join(60)
+    assert not errs, "%d progress-write errors, first: %s" % (len(errs), errs[0])
+    with open(os.path.join(c.dir, FILES["progress"]), encoding="utf-8") as f:
+        assert json.load(f)["campaign_id"] == c.campaign_id
 
 
 def _g10_rerun_reservation(H):

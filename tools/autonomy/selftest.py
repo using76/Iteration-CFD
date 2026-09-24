@@ -23,7 +23,7 @@ the whitelist, the records, determinism and the CLI), then remedies.py --selftes
 runner: the modes, the two baselines, the sealed split, observe, a fake rules
 campaign, replay, the veto and the ablations, the hooks, the PID runner and
 RAM admission, the audit sample and the comparator, resume, and a live
-campaign through the CLI), then sensitivity.py --selftest
+campaign through the CLI), then baseline.py --selftest (the baselines: the refusals and the seal of the test split, the wall-area split, the R-PLANE predicate, the tuning report on fake campaigns, the sealed bundle, determinism, the R-CURV ablation, the check and live baseline campaigns through the CLI), then sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
 report), then checks that README.md still
@@ -70,7 +70,7 @@ def main():
               ("corpus/gate.py", 7), ("corpus/split.py", 7),
               ("features.py", 11), ("preflight.py", 12), ("rules.py", 14),
               ("remedies.py", 13), ("explain.py", 13),
-              ("campaign.py", 13))
+              ("campaign.py", 13), ("baseline.py", 9))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:

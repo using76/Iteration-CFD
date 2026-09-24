@@ -664,6 +664,46 @@ mean failure fraction. AM-13/AM-14: `prior.attempt1(ctx) -> {verdict, config, ed
 history) -> {verdict, config, edits, record, prediction}` as `_run_system` calls them, each new rule id with an explain.py
 template. AM-16: G-DET again on 20 test geometries in mode evaluate, plus `replay`/`compare` there.
 
+## baseline.py — the baselines (B0-template, B0-LHS)
+
+AM-12 runs campaign.py's two baseline systems (see the campaign.py section above for how they are
+built) over both splits with ONE binary and turns the tuning rows into the report the user decides
+AM-L on. The supervisor's order: tuning b0-template, tuning b0-lhs, then — through the seal — test
+b0-template, test b0-lhs, then `--report`, then `--rcurv`, then `--check`.
+
+    python tools/autonomy/baseline.py --run --split tuning|test --system b0-template|b0-lhs --out DIR [--streams 6] [--ids A,B] [--limit N]
+    python tools/autonomy/baseline.py --report --template DIR --lhs DIR [--allow-partial]      # --seal --system S --out DIR after --resume
+    python tools/autonomy/baseline.py --rcurv --out DIR [--ids A,B] [--limit N]
+    python tools/autonomy/baseline.py --check
+
+The tuning report groups every (family, stratum) present, then every family, then `tier1` (families
+A, B, E, F — the snapped-wall families of G-BLC-1), `non-plane` (geometries the R-PLANE predicate
+rejects) and `all`: failure and strict failure with Clopper-Pearson intervals, BLC_8, BLC_full,
+BLC_beta, cells, seconds, the F flags, failure classes, and the wall-area split of docs/15 §D.2 —
+every patch's STL area lands in exactly one of `delivered`, `capability_limited`, `plane_fixable`,
+`no_full_stack`, `other`, `no_mesh` (first match wins). CAPABILITY-LIMITED is a remedies terminal; a
+baseline runs no remedies, so the report reads it from the layer rows with remedies' own predicate: a
+requested patch dropped `min_thickness` or `retreat_snapped` (the two classes remedies names) on a
+geometry R-PLANE does not qualify for. It is counted whatever the F flags say; a second column counts
+it only on geometries with no F flag (`fclean`), where remedies would end CAPABILITY-LIMITED at once.
+
+The seal: each test campaign is written into one deterministic gzip bundle
+(`baseline/sealed/test_<system>.json.gz`) whose sha256 goes into a write-once `baseline/sealed.lock`;
+the plaintext campaign directory is removed once the bundle is verified, and only
+`load_sealed(system, "evaluate")` opens a bundle. `--check` hashes the sealed files' bytes only and
+never decompresses them. `--rcurv` runs attempt 1 with and without the curvature rule on the tuning
+rows where R-CURV applies (the rule is measured, not changed; DECISIONS 2026-09-24) and reports its
+F3 cost — reported, not gated. Departures from docs/15 §F: 6 streams, not 12 (the house cap); the
+seal is per-system bundles plus a lock, not one file; a thin body lost in castellation exits 1 at
+layers and scores config (F1), not F4. The numbers are in `baseline/B0.json`, `baseline/B0.md` and
+`baseline/R-CURV.json`, written by the supervisor's run; the test split's numbers are sealed in
+`baseline/sealed/`.
+
+For later units — AM-13/AM-14: the tuning rows of both baselines are in
+`baseline/tuning_<system>.json.gz` (`baseline.read_bundle`); B0-LHS's 1,680 rows are random-knob
+training rows. AM-16: `baseline.load_sealed(system, "evaluate")` gives the test baselines for
+G-FAIL/G-FID/G-COST, and McNemar pairs by geometry id.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -697,6 +737,10 @@ template. AM-16: G-DET again on 20 test geometries in mode evaluate, plus `repla
     python tools/autonomy/campaign.py --run --manifest tuning --mode rules --out DIR [--ids A,B] [--streams 6]   # a campaign
     python tools/autonomy/campaign.py --summary --out DIR | --replay --out DIR | --compare DIR_A DIR_B         # read one back
     python tools/autonomy/campaign.py --gate --out DIR [--parts smoke,1,2]                                      # G-DET (AM-11's gate)
+    python tools/autonomy/baseline.py --run --split tuning|test --system b0-template|b0-lhs --out DIR   # one baseline (test: sealed)
+    python tools/autonomy/baseline.py --report --template DIR --lhs DIR     # baseline/B0.json and B0.md (tuning only)
+    python tools/autonomy/baseline.py --rcurv --out DIR                     # baseline/R-CURV.json and .md
+    python tools/autonomy/baseline.py --check                               # the report, the bundles and the seal
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report

@@ -576,3 +576,48 @@ Run by `tools/autonomy/campaign.py --gate --parts smoke,2,1 --streams 6` on bina
 - **Found on the way, for the owner of remedies.py:** `remedies._strip_t` discards its recursive copies, so a nested
   record `t` survives and selftest group 11 (determinism) fails whenever its two runs straddle a second boundary (seen
   in 3 of 4 house runs, rarely alone). Not fixed here.
+
+### The baselines B0-template and B0-LHS (AM-12), 2026-09-25: measured on the tuning split, the test split sealed
+
+Run by `tools/autonomy/baseline.py --run` (both splits), `--rcurv`, `--report` and `--check`, on binary sha256
+`054bba67…a90b` for all four campaigns and the R-CURV run, at tree `4f56fd1` plus this unit; the tuning report is
+`tools/autonomy/baseline/B0.json` (and `B0.md`), the tuning rows `baseline/tuning_b0-template.json.gz` and
+`baseline/tuning_b0-lhs.json.gz`, the R-CURV measurement `baseline/R-CURV.json` (and `.md`).
+
+- **The sealed test baselines** (180 geometries each, one gzip bundle per system, write-once `baseline/sealed.lock`,
+  opened only by `baseline.load_sealed(system, "evaluate")`; the plaintext campaign directories were removed once each
+  bundle verified): `sealed/test_b0-template.json.gz` sha256
+  `7685d908ada56902576840d03baef07476408bb7e969a4739fb8d9a3fac79a59`, `sealed/test_b0-lhs.json.gz` sha256
+  `03ee0ac451a0474bd3339028f1364e18745336ba890b2e46a06b324285d79a59`. Replay and audit ok, 0 unnamed harness
+  errors, 0 orphans, at most 6 mesher processes; nothing else about them was read.
+- **Tuning, 420 geometries** (a priori; MFR / strict failure / BLC_8 / cells median / mesher s median): B0-template
+  0.914 [0.883, 0.939] / 1.000 / 0.000 / 9,616 / 4.4 s, 372 rows in 491 s; B0-LHS best of 4 0.571 [0.523, 0.619] /
+  0.945 / 0.057 / 17,515 / 35.8 s (mean of 4: MFR 0.824, BLC_8 0.014), 1,488 rows in 4,009 s. Per family B0-template
+  MFR: A 1.000, B 0.750, D 1.000, E 0.690, F 1.000, G 0.976; B0-LHS best: A 1.000, B 0.155, D 0.286, E 0.429, F 0.690,
+  G 0.857. BLC_8 is 0 on every family for B0-template; B0-LHS delivers some on D 0.214, F 0.071, E 0.048, G 0.012, and
+  none on A or B. 47 G geometries end SURFACE-OPEN; B0-template's 87 F1 are those 47, 1 harness end, and 39 `config`
+  exits (the thin body lost in castellation: 16 A wings, 17 F bodies, 6 G).
+- **CAPABILITY-LIMITED wall area (the AM-L decision, docs/15 §I-1)** — the mean share of each geometry's STL wall area
+  whose requested layers were dropped `min_thickness` or `retreat_snapped` on a body R-PLANE cannot put on cell planes
+  (remedies' own predicate), whatever the F flags: B0-template A 81.0 %, B 100 %, E 100 %, F 28.6 %, **tier 1 (A, B,
+  E, F) 81.7 %**, every non-plane geometry 88.4 %, all 70.5 %; B0-LHS best A 85.7 %, B 98.8 %, E 95.2 %, F 47.6 %,
+  **tier 1 85.3 %**, non-plane 88.7 %, all 70.7 %. Counted only on geometries with no F flag (where remedies would end
+  CAPABILITY-LIMITED at once): B0-template tier 1 13.5 % (B 25.0 %, E 31.0 %), B0-LHS tier 1 39.3 % (B 84.5 %, E
+  52.4 %). The rest of the tier-1 wall is lost before layers (B0-template 13.1 %, the wings that vanish at level 4) or
+  fixable by R-PLANE (5.2 %, F's commensurate plates).
+- **R-CURV's F3 cost** (DECISIONS 2026-09-24; attempt 1 of rules.setup with and without the rule, 133 tuning rows
+  where it fires and changes the config: A 33, B 70, D 27, E 1, F 2): F3 106 with vs 113 without; the rule never adds
+  an F3 (0 with-only) and removes 7 on B (45 vs 52 of 70 lathes); A and D fail F3 either way. It costs 15 times the
+  cells (median 695k vs 46k) and 12 times the mesher time (283 s vs 23.5 s), and without it preflight refuses 9 of
+  the configs (A 4, B 5). The layers are dropped on 99.2 % of this wall area either way (strict failure 133/133).
+  Reported, not gated: keep / retune / drop is the user's.
+- **Where the tree departs from the plan:** (1) 6 streams, not 12. (2) The seal is one bundle per system plus a lock.
+  (3) CAPABILITY-LIMITED on a baseline is read from the layer rows with remedies' predicate, since a baseline runs no
+  remedies. (4) G-1-053 (tuning, family G) ends HARNESS-ERROR in both baselines: `features.py: surface/degenerate:
+  triangle 1826 has zero area` after stl_repair closed it; it counts as a failure, and it is the one check B0.json
+  fails (`harness_errors_zero`), so `baseline.py --check` prints CHECK FAIL on that item alone. campaign.py should
+  name it as a surface end like SURFACE-OPEN (owner of campaign.py; the seal and the report rule are the user's).
+- **Fixed in this unit, each proved first:** `remedies._strip_t` never entered the `(row, result)` tuples, so selftest
+  group 11 failed whenever its two runs straddled a second (6 of 6 runs pass after); `campaign.Campaign._write_progress`
+  shared one tmp file unlocked, so two geometries ending together raised WinError 32 and the second end record was a
+  HARNESS-ERROR (647 of 800 concurrent writes failed before, 0 after; a regression check joins campaign group 10).

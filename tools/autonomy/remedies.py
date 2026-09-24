@@ -1527,15 +1527,11 @@ def _fix_probe_rows(plabels, rl, fps, gates, knobs):
 
 
 def _strip_t(obj):
-    obj = copy.deepcopy(obj)
     if isinstance(obj, dict):
-        obj.pop("t", None)
-        for v in obj.values():
-            _strip_t(v)
-    elif isinstance(obj, list):
-        for v in obj:
-            _strip_t(v)
-    return obj
+        return {k: _strip_t(v) for k, v in obj.items() if k != "t"}
+    if isinstance(obj, (list, tuple)):
+        return [_strip_t(v) for v in obj]
+    return copy.deepcopy(obj)
 
 
 def selftest() -> int:
