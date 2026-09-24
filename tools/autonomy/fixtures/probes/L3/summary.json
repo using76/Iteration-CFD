@@ -101,11 +101,11 @@
   "config_path": "<survey>\\am\\L3.json",
   "identity": {
     "host": "MAIN_M",
-    "mesh_id": "m_430a2a117e3c75e8",
+    "mesh_id": "m_99554e11a8842b54",
     "run_id": null,
     "schema": 1,
     "tool": "ofgpu-automesher",
-    "written_at": "2026-09-23T12:27:31Z"
+    "written_at": "2026-09-24T07:24:16Z"
   },
   "layout": null,
   "mesh": {
@@ -181,10 +181,12 @@
         10,
         10
       ],
+      "gate_passed": true,
       "max_level": 3,
+      "max_non_orth_deg": 25.239401820679703,
       "n_leaves": 14832,
       "refine_splits": 1904,
-      "seconds": 1.7106436999999999,
+      "seconds": 1.7242338,
       "stage": "octree"
     },
     {
@@ -197,7 +199,7 @@
         "starved": 0,
         "unrepaired_pinch": 0
       },
-      "seconds": 0.0815031,
+      "seconds": 0.1067587,
       "stage": "castellate",
       "wall_faces": 1248,
       "wall_patches": {
@@ -205,8 +207,20 @@
       }
     },
     {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 19.5,
+          "castellated_ratio": 1.5531463850212268,
+          "name": "sphere",
+          "ratio": 0.9968877999583977,
+          "snapped_area_m2": 12.51608495288297,
+          "stl_area_m2": 12.555159119617366
+        }
+      ],
       "converged": true,
+      "h_f_m": 0.125,
       "iterations": 7,
+      "max_over_h": 0.008489472498244636,
       "max_residual": 0.0010611840622805795,
       "max_step": 0.0006657355484237288,
       "n_abandoned": 0,
@@ -214,11 +228,13 @@
       "n_feature_corners": 0,
       "n_feature_edges": 0,
       "n_pinned": 0,
+      "n_pinned_boundary": 0,
       "n_scaled_back": 0,
       "n_snapped_to_corner": 0,
       "n_snapped_to_edge": 0,
+      "p99_over_h": 0.007942650144291711,
       "p99_residual": 0.000992831268036464,
-      "seconds": 0.9132852,
+      "seconds": 0.9791861,
       "stage": "snap"
     },
     {
@@ -235,6 +251,21 @@
       "n_split_sides": 0,
       "patches": [
         {
+          "area": 12.51608495288297,
+          "area_frac_tau_ge": [
+            {
+              "area_frac": 0.0,
+              "beta": 0.5
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.8
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.95
+            }
+          ],
           "dropped": "patch \"sphere\": the thickness fell below min_thickness * T = 1.100e-3",
           "full_area_frac": 0.0,
           "mean_frac": 0.0,
@@ -247,7 +278,7 @@
         }
       ],
       "retreats": 3,
-      "seconds": 0.6499958,
+      "seconds": 0.6687833,
       "stage": "layers"
     }
   ],
@@ -268,5 +299,5 @@
     ]
   },
   "tool": "ofgpu-automesher",
-  "total_seconds": 3.3590402
+  "total_seconds": 3.4825483
 }

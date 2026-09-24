@@ -11,7 +11,7 @@ automesher: 23540 cells, 73576 internal faces, 1120 boundary faces, 27791 points
   non-orthogonality: max 25.239 deg, mean 3.216 deg, 0 face(s) past the report mark
   thickness: min tau 3.000000 (cell 739); conditioning: max cond 1.000 (cell 0)
   duplicate faces: 0; ldu ordered: yes; gate: passed
---- octree: 3.8 s
+--- octree: 3.9 s
 === stage 2/5  castellate ===
 automesher: 22856 cells, 71200 internal faces, 1768 boundary faces, 27791 points
   volume: min 0.000031 (cell 8395); regions: 1 (22856 cells)
@@ -42,4 +42,4 @@ automesher: 22856 cells, 71200 internal faces, 1768 boundary faces, 27791 points
   duplicate faces: 0; ldu ordered: yes; gate: passed
 ofgpu-automesher: wrote rev2_L4_case\constant\polyMesh (22856 cells)
 ofgpu-automesher: wrote rev2_L4_case\rev2_L4_summary.json
-ofgpu-automesher: total 6.2 s
+ofgpu-automesher: total 6.3 s

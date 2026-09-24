@@ -85,11 +85,11 @@
   "config_path": "<survey>\\am\\cubep_nosnap.json",
   "identity": {
     "host": "MAIN_M",
-    "mesh_id": "m_0e865db5e6156a74",
+    "mesh_id": "m_69491f12a1d01860",
     "run_id": null,
     "schema": 1,
     "tool": "ofgpu-automesher",
-    "written_at": "2026-09-23T12:31:19Z"
+    "written_at": "2026-09-24T07:24:16Z"
   },
   "layout": null,
   "mesh": {
@@ -165,10 +165,12 @@
         4,
         4
       ],
+      "gate_passed": true,
       "max_level": 1,
+      "max_non_orth_deg": 25.239401820678985,
       "n_leaves": 253,
       "refine_splits": 27,
-      "seconds": 0.0013629,
+      "seconds": 0.0011693,
       "stage": "octree"
     },
     {
@@ -181,7 +183,7 @@
         "starved": 0,
         "unrepaired_pinch": 0
       },
-      "seconds": 0.0017249,
+      "seconds": 0.0016731,
       "stage": "castellate",
       "wall_faces": 54,
       "wall_patches": {
@@ -189,8 +191,20 @@
       }
     },
     {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 13.5,
+          "castellated_ratio": 1.0,
+          "name": "cube",
+          "ratio": 1.0,
+          "snapped_area_m2": 13.5,
+          "stl_area_m2": 13.5
+        }
+      ],
       "converged": false,
+      "h_f_m": 0.5,
       "iterations": 0,
+      "max_over_h": 0.0,
       "max_residual": 0.0,
       "max_step": 0.0,
       "n_abandoned": 0,
@@ -198,11 +212,13 @@
       "n_feature_corners": 8,
       "n_feature_edges": 12,
       "n_pinned": 0,
+      "n_pinned_boundary": 0,
       "n_scaled_back": 0,
       "n_snapped_to_corner": 0,
       "n_snapped_to_edge": 0,
+      "p99_over_h": 0.0,
       "p99_residual": 0.0,
-      "seconds": 0.0015228,
+      "seconds": 0.0015576,
       "stage": "snap"
     },
     {
@@ -219,6 +235,21 @@
       "n_split_sides": 0,
       "patches": [
         {
+          "area": 13.5,
+          "area_frac_tau_ge": [
+            {
+              "area_frac": 1.0,
+              "beta": 0.5
+            },
+            {
+              "area_frac": 1.0,
+              "beta": 0.8
+            },
+            {
+              "area_frac": 1.0,
+              "beta": 0.95
+            }
+          ],
           "dropped": null,
           "full_area_frac": 1.0,
           "mean_frac": 1.0,
@@ -231,7 +262,7 @@
         }
       ],
       "retreats": 0,
-      "seconds": 0.003299,
+      "seconds": 0.0037591,
       "stage": "layers"
     }
   ],
@@ -252,5 +283,5 @@
     ]
   },
   "tool": "ofgpu-automesher",
-  "total_seconds": 0.0081711
+  "total_seconds": 0.0084636
 }

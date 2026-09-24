@@ -85,11 +85,11 @@
   "config_path": "<survey>\\am\\cube_n5.json",
   "identity": {
     "host": "MAIN_M",
-    "mesh_id": "m_bc279c3c03642882",
+    "mesh_id": "m_d1f9bc073555a37e",
     "run_id": null,
     "schema": 1,
     "tool": "ofgpu-automesher",
-    "written_at": "2026-09-23T12:30:41Z"
+    "written_at": "2026-09-24T07:24:16Z"
   },
   "layout": null,
   "mesh": {
@@ -165,10 +165,12 @@
         4,
         4
       ],
+      "gate_passed": true,
       "max_level": 1,
+      "max_non_orth_deg": 25.239401820678985,
       "n_leaves": 204,
       "refine_splits": 20,
-      "seconds": 0.0010751,
+      "seconds": 0.0009606,
       "stage": "octree"
     },
     {
@@ -181,7 +183,7 @@
         "starved": 0,
         "unrepaired_pinch": 0
       },
-      "seconds": 0.0014291,
+      "seconds": 0.0013843,
       "stage": "castellate",
       "wall_faces": 24,
       "wall_patches": {
@@ -189,8 +191,20 @@
       }
     },
     {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 6.0,
+          "castellated_ratio": 1.0000000000000002,
+          "name": "cube",
+          "ratio": 1.000001082797374,
+          "snapped_area_m2": 6.000006496784243,
+          "stl_area_m2": 5.999999999999999
+        }
+      ],
       "converged": true,
+      "h_f_m": 0.5,
       "iterations": 10,
+      "max_over_h": 0.0043849052512140675,
       "max_residual": 0.0021924526256070337,
       "max_step": 0.0009801377386301543,
       "n_abandoned": 0,
@@ -198,11 +212,13 @@
       "n_feature_corners": 8,
       "n_feature_edges": 12,
       "n_pinned": 0,
+      "n_pinned_boundary": 0,
       "n_scaled_back": 0,
       "n_snapped_to_corner": 8,
       "n_snapped_to_edge": 18,
+      "p99_over_h": 0.0043849052512140675,
       "p99_residual": 0.0021924526256070337,
-      "seconds": 0.00507,
+      "seconds": 0.0052603,
       "stage": "snap"
     },
     {
@@ -219,6 +235,21 @@
       "n_split_sides": 0,
       "patches": [
         {
+          "area": 6.000006496784243,
+          "area_frac_tau_ge": [
+            {
+              "area_frac": 0.0,
+              "beta": 0.5
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.8
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.95
+            }
+          ],
           "dropped": "patch \"cube\": the thickness fell below min_thickness * T = 4.522e-2",
           "full_area_frac": 0.0,
           "mean_frac": 0.0,
@@ -231,7 +262,7 @@
         }
       ],
       "retreats": 1,
-      "seconds": 0.0022653,
+      "seconds": 0.0023521,
       "stage": "layers"
     }
   ],
@@ -252,5 +283,5 @@
     ]
   },
   "tool": "ofgpu-automesher",
-  "total_seconds": 0.0100686
+  "total_seconds": 0.0102335
 }

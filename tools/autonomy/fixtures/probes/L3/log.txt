@@ -25,7 +25,7 @@ snap: 1250 boundary points, 7 iteration(s), converged
 snap: max step 6.657e-4, residual max 1.061e-3, p99 9.928e-4
 snap: 0 point(s) scaled back, 0 pinned, 0 iterate(s) abandoned
 snap: 0 feature edge(s), 0 corner(s); last iterate 0 point(s) to an edge, 0 to a corner
---- snap: 0.9 s
+--- snap: 1.0 s
 === stage 4/5  split ===
 split: skipped - castellation.bodies is empty
 --- split: 0.0 s
@@ -33,7 +33,7 @@ split: skipped - castellation.bodies is empty
 layers: 0 cell(s) behind 1248 face(s), 0 new point(s), 3 retreat(s)
 layers: 0 internal side face(s), 0 boundary side face(s), 0 from a split edge
 layers: patch "sphere": the thickness fell below min_thickness * T = 1.100e-3
---- layers: 0.6 s
+--- layers: 0.7 s
 automesher: 12880 cells, 40128 internal faces, 1848 boundary faces, 17767 points
   volume: min 0.000472 (cell 7675); regions: 1 (12880 cells)
   closure: max 3.696e-15 (cell 1803)
@@ -42,4 +42,4 @@ automesher: 12880 cells, 40128 internal faces, 1848 boundary faces, 17767 points
   duplicate faces: 0; ldu ordered: yes; gate: passed
 ofgpu-automesher: wrote <survey>\am\case_L3\constant\polyMesh (12880 cells)
 ofgpu-automesher: wrote <survey>\am\case_L3\L3_summary.json
-ofgpu-automesher: total 3.4 s
+ofgpu-automesher: total 3.5 s

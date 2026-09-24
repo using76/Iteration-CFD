@@ -101,11 +101,11 @@
   "config_path": "<survey>\\am\\NO28.json",
   "identity": {
     "host": "MAIN_M",
-    "mesh_id": "m_f5a9319ada7c3718",
+    "mesh_id": "m_28bc3d171a7a7e14",
     "run_id": null,
     "schema": 1,
     "tool": "ofgpu-automesher",
-    "written_at": "2026-09-23T12:28:01Z"
+    "written_at": "2026-09-24T07:24:18Z"
   },
   "layout": null,
   "mesh": {
@@ -181,10 +181,12 @@
         10,
         10
       ],
+      "gate_passed": true,
       "max_level": 3,
+      "max_non_orth_deg": 25.239401820679703,
       "n_leaves": 14832,
       "refine_splits": 1904,
-      "seconds": 2.0326761,
+      "seconds": 1.6702667,
       "stage": "octree"
     },
     {
@@ -197,7 +199,7 @@
         "starved": 0,
         "unrepaired_pinch": 0
       },
-      "seconds": 0.1669609,
+      "seconds": 0.0907126,
       "stage": "castellate",
       "wall_faces": 1248,
       "wall_patches": {
@@ -205,8 +207,20 @@
       }
     },
     {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 19.5,
+          "castellated_ratio": 1.5531463850212268,
+          "name": "sphere",
+          "ratio": 0.9980318237205427,
+          "snapped_area_m2": 12.530448353253323,
+          "stl_area_m2": 12.555159119617366
+        }
+      ],
       "converged": true,
+      "h_f_m": 0.125,
       "iterations": 7,
+      "max_over_h": 0.046402456158353825,
       "max_residual": 0.005800307019794228,
       "max_step": 0.0008680767960489772,
       "n_abandoned": 0,
@@ -214,11 +228,13 @@
       "n_feature_corners": 0,
       "n_feature_edges": 0,
       "n_pinned": 0,
+      "n_pinned_boundary": 0,
       "n_scaled_back": 528,
       "n_snapped_to_corner": 0,
       "n_snapped_to_edge": 0,
+      "p99_over_h": 0.04611351619030872,
       "p99_residual": 0.00576418952378859,
-      "seconds": 1.3545924999999999,
+      "seconds": 1.2423602,
       "stage": "snap"
     },
     {
@@ -257,5 +273,5 @@
     ]
   },
   "tool": "ofgpu-automesher",
-  "total_seconds": 3.5567374000000003
+  "total_seconds": 3.0055485
 }

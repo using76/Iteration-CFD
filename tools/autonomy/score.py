@@ -10,7 +10,8 @@ banners and elapsed lines of src/automesher/driver.rs, the `error:` refusal
 of src/bin/automesher.rs's main in SPEC-LIT §92.3's fixed grammar, and
 <name>_summary.json (§92.14.3). Applies docs/15 §D: the closed failure
 enum, F1-F5, strict failure, BLC_8 / BLC_full with schema.yplus_a_priori,
-BLC_beta bounded per patch, and the polyMesh content sha256.
+BLC_beta exact from the layer rows' area_frac_tau_ge (bounded per patch
+when a report lacks it), and the polyMesh content sha256.
 
     python tools/autonomy/score.py --selftest
     python tools/autonomy/score.py --fixtures
@@ -52,6 +53,10 @@ M_F3D = "F3d: stages[snap] carries no per-patch area_ratio (AM-R2 adds it); F3d 
 M_OCT = "octree: stages[octree] carries no gate_passed or max_non_orth_deg (AM-R2 adds them)"
 M_BETA = ("BLC_beta: layer rows carry no per-face tau or row area (AM-R1 adds them); "
           "BLC_beta is bounded from t1_min, mean_frac and full_area_frac")
+M_F3D_NULL = 'F3d: patch "%s" has no STL area, so its area_ratio is null and it is not judged'
+M_BETA_AT = ("BLC_beta: beta %g is not one of the thresholds the layer rows report (%s); "
+             "it is bounded from t1_min, mean_frac and full_area_frac")
+TAU_SHARE_TOL = 1e-12
 
 
 class ScoreParseError(ValueError):
@@ -167,6 +172,14 @@ def beta_share_bounds(tau_min: float, m: float, f: float, b: float) -> tuple[flo
     return (min(lo, 1.0), hi)
 
 
+def tau_share(row: dict | None, beta: float) -> float | None:
+    """The row's area_frac_tau_ge share at beta (AM-R1), or None when not reported."""
+    for e in (row or {}).get("area_frac_tau_ge") or []:
+        if abs(e["beta"] - beta) <= TAU_SHARE_TOL:
+            return e["area_frac"]
+    return None
+
+
 def content_sha256(case_dir: str) -> str | None:
     """sha256 over the five polyMesh files, name- and length-prefixed; None without."""
     pm = os.path.join(case_dir, "constant", "polyMesh")
@@ -265,18 +278,35 @@ def score_run(*, exit_code, stdout, stderr, summary, config, patch_areas_m2, flo
     requested = set(cfg["layers"]["patches"]) if cfg["layers"]["n"] > 0 else set()
     hf = h_f(cfg)
     snap = st["snap"]
+    if "n_pinned_boundary" not in snap:
+        raise ScoreParseError("score_run: stages[snap] carries no n_pinned_boundary - a binary "
+                              "before a5ff553; F3a is boundary-only since 2026-09-24 and is never "
+                              "scored the old way")
     nb = snap["n_boundary_points"]
-    npin = snap["n_pinned"]
+    npin = snap["n_pinned_boundary"]
     pinned_frac = npin / nb if nb > 0 else None
     p99_over_hf = snap["p99_residual"] / hf if hf is not None else None
     max_over_hf = snap["max_residual"] / hf if hf is not None else None
+    ar = snap.get("area_ratio")
+    f3d_notes = []
+    if ar is None:
+        f3d = None
+    else:
+        names = [r["name"] for r in ar]
+        if sorted(names) != sorted(sp):
+            raise ScoreParseError("score_run: stages[snap].area_ratio names %s but the summary's "
+                                  "surface carries %s" % (sorted(names), sorted(sp)))
+        judged = [r["ratio"] for r in ar if r["ratio"] is not None]
+        f3d_notes = [M_F3D_NULL % r["name"] for r in ar if r["ratio"] is None]
+        f3d = (any(x < gates["area_ratio_min"] or x > gates["area_ratio_max"] for x in judged)
+               if judged else None)
     flags = {
         "F1": False,
         "F2": check_exit is not None and check_exit != 0,
         "F3a": pinned_frac is not None and pinned_frac > gates["pinned_frac_max"],
         "F3b": p99_over_hf > gates["p99_residual_over_hf_max"],
         "F3c": max_over_hf > gates["max_residual_over_hf_max"],
-        "F3d": None,
+        "F3d": f3d,
         "F4": any(st["castellate"]["wall_patches"].get(p, 0) == 0 for p in sp)
               or summary["quality"]["n_regions"] != 1,
         "F5": summary["mesh"]["n_cells"] > gates["cell_budget"],
@@ -317,7 +347,9 @@ def score_run(*, exit_code, stdout, stderr, summary, config, patch_areas_m2, flo
         blcf += a * (full or 0.0) * y_ok
         for b in betas:
             if (r is not None and dropped is None and n_layers > 0 and y_ok and t1r):
-                lo, hi = beta_share_bounds(t1min / t1r, mean, full, b)
+                f = tau_share(r, b)
+                lo, hi = (f, f) if f is not None else \
+                    beta_share_bounds(t1min / t1r, mean, full, b)
             else:
                 lo, hi = 0.0, 0.0
             acc[b][0] += a * lo
@@ -330,16 +362,26 @@ def score_run(*, exit_code, stdout, stderr, summary, config, patch_areas_m2, flo
                         "mean_frac": mean, "t1_min_m": t1min})
         if first_dropped is None and p in requested and layer_class is not None:
             first_dropped = layer_class
+    used = [rows[p] for p in sp if p in rows]
+    exact = {b: all(tau_share(r, b) is not None for r in used) for b in betas}
     failure_class = "layer_dropped:" + first_dropped if first_dropped else None
     strict = any(v is True for v in flags.values()) or \
         any(q["requested"] and q["dropped"] is not None for q in patches)
     missing = []
     if check_exit is None:
         missing.append(M_F2)
-    missing.append(M_F3D)
+    if ar is None:
+        missing.append(M_F3D)
+    else:
+        missing.extend(f3d_notes)
     if "gate_passed" not in st.get("octree", {}):
         missing.append(M_OCT)
-    missing.append(M_BETA)
+    if any("area_frac_tau_ge" not in r for r in used):
+        missing.append(M_BETA)
+    else:
+        for b in betas:
+            if not exact[b]:
+                missing.append(M_BETA_AT % (b, ", ".join("%g" % x for x in DEFAULT_BETAS)))
     outcome = {
         "verdict": "fail" if any(v is True for v in flags.values()) else "pass",
         "failure_class": failure_class, "flags": flags,
@@ -353,7 +395,7 @@ def score_run(*, exit_code, stdout, stderr, summary, config, patch_areas_m2, flo
         "h_f_m": hf, "n_pinned": npin, "n_boundary_points": nb,
         "refusal_line": None,
         "blc_beta_a_priori": [{"beta": b, "lo": min(1.0, acc[b][0] / total),
-                               "hi": min(1.0, acc[b][1] / total), "exact": False}
+                               "hi": min(1.0, acc[b][1] / total), "exact": exact[b]}
                               for b in betas],
         "missing_signals": missing, "patches": patches,
     }
@@ -567,9 +609,12 @@ def _nine_layer_probes(results: dict, lines: list) -> None:
     assert classes == {"layer_dropped:min_thickness": 1,
                        "layer_dropped:retreat_snapped": 8}, classes
     assert f3a == 7, f3a
+    f3d = sum(1 for pid in NINE_LAYER_PROBES if results[pid]["flags"]["F3d"] is True)
+    assert f3d == 6, f3d
     lines.append("[ok] the nine layer probes: 9 of 9 exit 0 with zero layers and are "
                  "strict failures by name (1 layer_dropped:min_thickness, 8 "
-                 "layer_dropped:retreat_snapped); 7 of 9 also fail F3a")
+                 "layer_dropped:retreat_snapped); 7 of 9 also fail F3a (boundary-only) "
+                 "and 6 of 9 F3d")
 
 
 def _section_f(results: dict, lines: list) -> None:
@@ -589,7 +634,7 @@ def _section_f(results: dict, lines: list) -> None:
     assert results["NO25"]["failure_class"] == "gate_G4@castellate"
     wa = results["wing_a_L4"]
     assert wa["flags"]["F3a"] is True
-    assert round(wa["pinned_frac"], 4) == 0.4039, wa["pinned_frac"]
+    assert round(wa["pinned_frac"], 4) == 0.2058, wa["pinned_frac"]
     lines.append("[ok] section F labels: 5 of 5 (box_sphere, cubep_nofeat, "
                  "cubep_nofeat_cf, NO25, wing_a_L4)")
 
@@ -703,7 +748,8 @@ def _drop_reasons(lines: list) -> None:
 
 
 def _parse_errors(labels: dict, lines: list) -> None:
-    """(R12): a stopped run, an area mismatch, an unknown drop, a missing row."""
+    """(R12): a stopped run, an area mismatch, an unknown drop, a missing row,
+    an old binary's summary, a mismatched area_ratio row set."""
     cfg = _probe_json("cubep_nofeat", "config.json")
     summary = _probe_json("cubep_nofeat", "summary.json")
     row = next(r for r in labels["probes"] if r["id"] == "cubep_nofeat")
@@ -736,7 +782,135 @@ def _parse_errors(labels: dict, lines: list) -> None:
     s["stages"][4]["patches"] = []
     e = must_fail(s, why="requested patch with no row")
     assert "cube" in str(e), str(e)
-    lines.append("[ok] parse errors: 4 by name")
+
+    def snap_stage(s):
+        return next(x for x in s["stages"] if x["stage"] == "snap")
+
+    s = copy.deepcopy(summary)
+    del snap_stage(s)["n_pinned_boundary"]
+    e = must_fail(s, why="a summary without n_pinned_boundary")
+    assert "n_pinned_boundary" in str(e), str(e)
+    s = copy.deepcopy(summary)
+    snap_stage(s)["area_ratio"][0]["name"] = "other"
+    e = must_fail(s, why="area_ratio row set mismatch")
+    assert "other" in str(e) and "cube" in str(e), str(e)
+    lines.append("[ok] parse errors: 6 by name")
+
+
+def _f3_decisions(labels: dict, lines: list) -> None:
+    """(C6e): decision 1 (F3a boundary-only) and decision 2 (F3d wired) by case."""
+    cfg = _probe_json("cubep_nofeat", "config.json")
+    summary = _probe_json("cubep_nofeat", "summary.json")
+    row = next(r for r in labels["probes"] if r["id"] == "cubep_nofeat")
+    log = _norm(open(os.path.join(PROBES_DIR, "cubep_nofeat", "log.txt"),
+                     encoding="utf-8").read())
+
+    def run(s):
+        oc = score_run(exit_code=0, stdout=log, stderr="", summary=s, config=cfg,
+                       patch_areas_m2=row["patch_areas_m2"],
+                       flow=labels["flow"])["outcome"]
+        errs = outcome_errors(oc)
+        assert errs == [], errs
+        return oc
+
+    def snap_of(s):
+        return next(x for x in s["stages"] if x["stage"] == "snap")
+
+    nb = snap_of(summary)["n_boundary_points"]
+    assert nb == 56, nb
+
+    s = copy.deepcopy(summary)
+    snap_of(s)["n_pinned"] = 999
+    oc = run(s)
+    assert oc["pinned_frac"] == 0.0 and oc["n_pinned"] == 0, (oc["pinned_frac"], oc["n_pinned"])
+    assert oc["flags"]["F3a"] is False
+    s = copy.deepcopy(summary)
+    snap_of(s)["n_pinned_boundary"] = 3
+    oc = run(s)
+    assert oc["pinned_frac"] == 3 / nb and oc["n_pinned"] == 3
+    assert oc["flags"]["F3a"] is True and oc["verdict"] == "fail"
+    s = copy.deepcopy(summary)
+    snap_of(s)["n_pinned_boundary"] = 2
+    oc = run(s)
+    assert oc["flags"]["F3a"] is False and oc["verdict"] == "pass"
+
+    def ratio(v):
+        s = copy.deepcopy(summary)
+        snap_of(s)["area_ratio"][0]["ratio"] = v
+        return s
+
+    oc = run(ratio(0.97))
+    assert oc["flags"]["F3d"] is True and oc["failure"] is True
+    assert oc["verdict"] == "fail" and oc["failure_class"] is None
+    oc = run(ratio(1.03))
+    assert oc["flags"]["F3d"] is True and oc["verdict"] == "fail"
+    oc = run(ratio(0.98))
+    assert oc["flags"]["F3d"] is False
+    oc = run(ratio(1.02))
+    assert oc["flags"]["F3d"] is False
+    oc = run(ratio(None))
+    assert oc["flags"]["F3d"] is None
+    assert oc["missing_signals"] == [M_F2, M_F3D_NULL % "cube"], oc["missing_signals"]
+    s = copy.deepcopy(summary)
+    del snap_of(s)["area_ratio"]
+    oc = run(s)
+    assert oc["flags"]["F3d"] is None
+    assert oc["missing_signals"] == [M_F2, M_F3D], oc["missing_signals"]
+    lines.append("[ok] F3a boundary-only and F3d: n_pinned 999 ignored, 3/%d fails and "
+                 "2/%d passes; ratio 0.97 and 1.03 fail, 0.98 and 1.02 pass, null not "
+                 "judged, absent -> null by name" % (nb, nb))
+
+
+def _beta_exact(labels: dict, lines: list) -> None:
+    """(C6f): BLC_beta exact from area_frac_tau_ge; bounded and named otherwise."""
+    pairs = probes = 0
+    for row in labels["probes"]:
+        if not os.path.isfile(os.path.join(PROBES_DIR, row["id"], "summary.json")):
+            continue
+        summary = _probe_json(row["id"], "summary.json")
+        hit = False
+        for r in layer_rows(summary).values():
+            if not (r["dropped"] is None and r["n_layers"] > 0 and r["t1_requested"] > 0):
+                continue
+            hit = True
+            for b in DEFAULT_BETAS:
+                f = tau_share(r, b)
+                assert f is not None, (row["id"], r["name"], b)
+                lo, hi = beta_share_bounds(r["t1_min"] / r["t1_requested"],
+                                           r["mean_frac"], r["full_area_frac"], b)
+                assert lo - 1e-12 <= f <= hi + 1e-12, (row["id"], r["name"], b, f, lo, hi)
+                pairs += 1
+        probes += 1 if hit else 0
+    assert (pairs, probes) == (9, 3), (pairs, probes)
+
+    cfg = _probe_json("cubep_nofeat", "config.json")
+    row = next(r for r in labels["probes"] if r["id"] == "cubep_nofeat")
+    log = _norm(open(os.path.join(PROBES_DIR, "cubep_nofeat", "log.txt"),
+                     encoding="utf-8").read())
+
+    def score(s):
+        return score_run(exit_code=0, stdout=log, stderr="", summary=s, config=cfg,
+                         patch_areas_m2=row["patch_areas_m2"],
+                         flow=labels["flow"])["outcome"]
+
+    plain = score(_probe_json("cubep_nofeat", "summary.json"))
+    s = copy.deepcopy(_probe_json("cubep_nofeat", "summary.json"))
+    lay = next(x for x in s["stages"] if x["stage"] == "layers")
+    del lay["patches"][0]["area_frac_tau_ge"]
+    oc = score(s)
+    assert all(e["exact"] is False for e in oc["blc_beta_a_priori"]), oc["blc_beta_a_priori"]
+    assert M_BETA in oc["missing_signals"], oc["missing_signals"]
+    for e, g in zip(plain["blc_beta_a_priori"], oc["blc_beta_a_priori"]):
+        assert _leaf_eq(e["lo"], g["lo"]) and _leaf_eq(e["hi"], g["hi"]), (e, g)
+    oc = score_probe("cubep_nofeat_cf", labels, flow=labels["variants"][1]["flow"],
+                     betas=(0.25, 0.5))["outcome"]
+    assert [e["exact"] for e in oc["blc_beta_a_priori"]] == [False, True], \
+        oc["blc_beta_a_priori"]
+    assert M_BETA_AT % (0.25, "0.5, 0.8, 0.95") in oc["missing_signals"], oc["missing_signals"]
+    assert M_BETA not in oc["missing_signals"], oc["missing_signals"]
+    lines.append("[ok] BLC_beta exact: 9 of 9 (row, beta) shares inside the Markov bounds "
+                 "on 3 layered probes; a row without area_frac_tau_ge -> bounded, named; "
+                 "beta 0.25 -> bounded, named, 0.5 exact")
 
 
 def _content_hash(lines: list) -> None:
@@ -811,13 +985,7 @@ def _live(lines: list) -> None:
                         summary=summary_a, config=cfg,
                         patch_areas_m2=row["patch_areas_m2"], flow=labels["flow"],
                         case_dir=os.path.join(tmp, "case_a"))
-        # The frozen probe predates AM-R2: its missing_signals still names M_OCT. A live
-        # binary that writes stages[octree].gate_passed legitimately drops that note.
         expect = copy.deepcopy(row["expect"])
-        octree = {s["stage"]: s for s in summary_a["stages"]}.get("octree", {})
-        if "gate_passed" in octree:
-            assert M_OCT in expect.get("missing_signals", []), "frozen probe lost M_OCT"
-            expect["missing_signals"].remove(M_OCT)
         k, bad = _compare_expect(expect, res["outcome"], "live-a")
         assert not bad, "live score differs from the frozen one:\n  %s" % "\n  ".join(bad)
         assert k > 0 and res["content_sha256"] == runs["a"][2]
@@ -846,7 +1014,7 @@ def _live(lines: list) -> None:
 
 
 def selftest() -> int:
-    """The ten checks behind `score.py --selftest`; 1 and SELFTEST FAIL on any."""
+    """The twelve checks behind `score.py --selftest`; 1 and SELFTEST FAIL on any."""
     lines = []
     try:
         labels = _probe_json("labels.json")
@@ -861,6 +1029,8 @@ def selftest() -> int:
             ("refusal classes", lambda: _refusal_classes(labels, lines)),
             ("drop reasons", lambda: _drop_reasons(lines)),
             ("parse errors", lambda: _parse_errors(labels, lines)),
+            ("F3a boundary-only and F3d", lambda: _f3_decisions(labels, lines)),
+            ("BLC_beta exact", lambda: _beta_exact(labels, lines)),
             ("content hash", lambda: _content_hash(lines)),
             ("live automesher", lambda: _live(lines)),
         ]

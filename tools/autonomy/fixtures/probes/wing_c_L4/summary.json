@@ -101,7 +101,7 @@
     "run_id": null,
     "schema": 1,
     "tool": "ofgpu-automesher",
-    "written_at": "2026-09-23T12:27:15Z"
+    "written_at": "2026-09-24T07:19:17Z"
   },
   "layout": null,
   "mesh": {
@@ -177,10 +177,12 @@
         12,
         10
       ],
+      "gate_passed": true,
       "max_level": 4,
+      "max_non_orth_deg": 25.23940182067945,
       "n_leaves": 70566,
       "refine_splits": 9508,
-      "seconds": 6.4674086,
+      "seconds": 6.5965963,
       "stage": "octree"
     },
     {
@@ -193,7 +195,7 @@
         "starved": 0,
         "unrepaired_pinch": 0
       },
-      "seconds": 0.448309,
+      "seconds": 0.5161436,
       "stage": "castellate",
       "wall_faces": 5382,
       "wall_patches": {
@@ -201,8 +203,20 @@
       }
     },
     {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 5.255859375,
+          "castellated_ratio": 1.1127149675682033,
+          "name": "wing",
+          "ratio": 1.2710636911665134,
+          "snapped_area_m2": 6.003812487612776,
+          "stl_area_m2": 4.723455267692213
+        }
+      ],
       "converged": false,
+      "h_f_m": 0.03125,
       "iterations": 30,
+      "max_over_h": 2.2734792552217797,
       "max_residual": 0.07104622672568062,
       "max_step": 0.0,
       "n_abandoned": 20,
@@ -210,11 +224,13 @@
       "n_feature_corners": 6,
       "n_feature_edges": 301,
       "n_pinned": 2278,
+      "n_pinned_boundary": 1183,
       "n_scaled_back": 7241,
       "n_snapped_to_corner": 6,
       "n_snapped_to_edge": 1608,
+      "p99_over_h": 0.5579538771791831,
       "p99_residual": 0.017436058661849472,
-      "seconds": 25.9577776,
+      "seconds": 25.9335616,
       "stage": "snap"
     },
     {
@@ -231,6 +247,21 @@
       "n_split_sides": 0,
       "patches": [
         {
+          "area": 6.003812487612776,
+          "area_frac_tau_ge": [
+            {
+              "area_frac": 0.0,
+              "beta": 0.5
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.8
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.95
+            }
+          ],
           "dropped": "patch \"wing\": the gate still failed after 4 retreat(s)",
           "full_area_frac": 0.0,
           "mean_frac": 0.0,
@@ -243,7 +274,7 @@
         }
       ],
       "retreats": 4,
-      "seconds": 1.3168348,
+      "seconds": 1.4365367,
       "stage": "layers"
     }
   ],
@@ -264,5 +295,5 @@
     ]
   },
   "tool": "ofgpu-automesher",
-  "total_seconds": 34.2063207
+  "total_seconds": 34.4976077
 }

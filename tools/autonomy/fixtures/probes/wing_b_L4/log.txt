@@ -19,13 +19,13 @@ automesher: 61490 cells, 189947 internal faces, 6296 boundary faces, 75328 point
   non-orthogonality: max 25.239 deg, mean 3.056 deg, 0 face(s) past the report mark
   thickness: min tau 3.000000 (cell 803); conditioning: max cond 1.000 (cell 0)
   duplicate faces: 0; ldu ordered: yes; gate: passed
---- castellate: 0.5 s
+--- castellate: 0.4 s
 === stage 3/5  snap ===
 snap: 4872 boundary points, 30 iteration(s), out of iterations
 snap: max step 0.000e0, residual max 7.147e-2, p99 1.791e-2
 snap: 7047 point(s) scaled back, 2623 pinned, 16 iterate(s) abandoned
 snap: 278 feature edge(s), 5 corner(s); last iterate 1255 point(s) to an edge, 5 to a corner
---- snap: 24.5 s
+--- snap: 25.5 s
 === stage 4/5  split ===
 split: skipped - castellation.bodies is empty
 --- split: 0.0 s
@@ -42,4 +42,4 @@ automesher: 61490 cells, 189947 internal faces, 6296 boundary faces, 75328 point
   duplicate faces: 0; ldu ordered: yes; gate: passed
 ofgpu-automesher: wrote wing_b_L4_case\constant\polyMesh (61490 cells)
 ofgpu-automesher: wrote wing_b_L4_case\wing_b_L4_summary.json
-ofgpu-automesher: total 33.2 s
+ofgpu-automesher: total 34.0 s

@@ -107,18 +107,36 @@ The F-flags are stored in the RATIO form `check_attempt` re-derives (S13–S16):
 zero `wall_patches` row or `n_regions != 1`, `F5` cells over the 2 M budget. **BLC_8** and **BLC_full** use
 every STL wall patch as denominator; a patch counts only when delivered (dropped is null, n_layers ≥ 8) and
 its a priori y⁺ (`schema.yplus_a_priori`, named `_a_priori` until AR-2) is ≤ 1. **BLC_beta** is the area
-share with achieved/requested ≥ beta; until AM-R1 reports per-face tau it is BOUNDED per patch from
-`t1_min`, the area-weighted `mean_frac` and `full_area_frac` (two Markov-type inequalities, `exact: false`).
-A requested patch that was dropped is not a failure — it scores 0 — but it makes `strict_failure` true, so
-the two can never be traded out of sight. `missing_signals` names what today's reports lack instead of
-guessing: the `-check` that was not run, AM-R2's `area_ratio` and octree gate fields, AM-R1's per-face tau.
+share with achieved/requested ≥ beta. A requested patch that was dropped is not a failure — it scores 0 —
+but it makes `strict_failure` true, so the two can never be traded out of sight.
+
+**The user's decisions of 2026-09-24** (AM-2b; no gate constant changed, `gates.lock` not relocked):
+
+- **F3a is boundary-only.** `pinned_frac = stages[snap].n_pinned_boundary / n_boundary_points`, and the
+  outcome's `n_pinned` is that numerator. `stages[snap].n_pinned` also counts the non-wall and domain points
+  the snap stage pins (it can exceed `n_boundary_points`), so it is no longer read. A summary without
+  `n_pinned_boundary` (a binary before a5ff553) raises `ScoreParseError` by name — never scored the old way.
+- **F3d is wired**: true when any `stages[snap].area_ratio[].ratio` (snapped mesh wall area / STL patch
+  area) lies outside the locked `[area_ratio_min, area_ratio_max]` = [0.98, 1.02], bounds inclusive. A
+  `null` ratio means the STL patch has no area — the binary refuses a patch with mesh wall area and no STL
+  area — so there is nothing to preserve: that patch is not judged and `missing_signals` names it. F3d is
+  null only when no patch is judged or the summary has no `area_ratio`. The baseline (AM-12) and the full
+  system (AM-16) both call this scorer, so both sides carry F3d under one definition (docs/15 §D.1).
+- **BLC_beta is exact** from each layer row's `area_frac_tau_ge` (the share of the row's area whose face got
+  at least beta of the stack, at 0.5, 0.8 and 0.95): `exact: true`, lo = hi. A row without the field, or a
+  beta the rows do not report, falls back to the per-patch Markov bounds from `t1_min`, the area-weighted
+  `mean_frac` and `full_area_frac` (`exact: false`), and `missing_signals` says which.
+
+`missing_signals` names what a report lacks instead of guessing: the `-check` that was not run, and — only
+on a summary that lacks them — the `area_ratio` rows, the octree gate fields and the per-face tau shares.
 
 `content_sha256` hashes `constant/polyMesh`'s points, faces, owner, neighbour and boundary, name- and
 length-prefixed — equal across two runs of one config, different after one byte. `run_check` is §92.14.5's
 `-check`: it returns the exit code, the refusal line and the gate name, and `check_exit != 0` is flag F2.
 `score.py --hash-gate CONFIG` runs one config three ways (A, B, then C with one whitelisted knob moved by
 `--pointer`/`--to`) and demands A == B and C != A by content sha256 — the content-hash half of G-DET. The 31
-frozen probes under `fixtures/probes/` are the docs/15 surveys' own automesher outputs, re-scored on every
+frozen probes under `fixtures/probes/` are the docs/15 surveys' own automesher outputs (the 27 that wrote a summary
+re-run on 2026-09-24 so they carry the fields above), re-scored on every
 `--selftest`: the exit codes, patch areas, hand labels and expected numbers in `labels.json` are the
 SUPERVISOR'S, computed from the summaries independently of the scorer, and the scorer is wrong whenever
 they disagree.

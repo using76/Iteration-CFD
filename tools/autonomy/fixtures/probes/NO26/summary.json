@@ -101,11 +101,11 @@
   "config_path": "<survey>\\am\\NO26.json",
   "identity": {
     "host": "MAIN_M",
-    "mesh_id": "m_50cb4580d6e81d88",
+    "mesh_id": "m_cbff6b35d80341e4",
     "run_id": null,
     "schema": 1,
     "tool": "ofgpu-automesher",
-    "written_at": "2026-09-23T12:28:05Z"
+    "written_at": "2026-09-24T07:24:19Z"
   },
   "layout": null,
   "mesh": {
@@ -181,10 +181,12 @@
         10,
         10
       ],
+      "gate_passed": true,
       "max_level": 3,
+      "max_non_orth_deg": 25.239401820679703,
       "n_leaves": 14832,
       "refine_splits": 1904,
-      "seconds": 1.8675723,
+      "seconds": 1.6432674999999999,
       "stage": "octree"
     },
     {
@@ -197,7 +199,7 @@
         "starved": 0,
         "unrepaired_pinch": 0
       },
-      "seconds": 0.0938579,
+      "seconds": 0.0859937,
       "stage": "castellate",
       "wall_faces": 1248,
       "wall_patches": {
@@ -205,8 +207,20 @@
       }
     },
     {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 19.5,
+          "castellated_ratio": 1.5531463850212268,
+          "name": "sphere",
+          "ratio": 1.000545359843498,
+          "snapped_area_m2": 12.562006199229932,
+          "stl_area_m2": 12.555159119617366
+        }
+      ],
       "converged": true,
+      "h_f_m": 0.125,
       "iterations": 10,
+      "max_over_h": 0.0873858884572835,
       "max_residual": 0.010923236057160437,
       "max_step": 0.0008817236868512679,
       "n_abandoned": 2,
@@ -214,11 +228,13 @@
       "n_feature_corners": 0,
       "n_feature_edges": 0,
       "n_pinned": 288,
+      "n_pinned_boundary": 216,
       "n_scaled_back": 528,
       "n_snapped_to_corner": 0,
       "n_snapped_to_edge": 0,
+      "p99_over_h": 0.08738138894468009,
       "p99_residual": 0.010922673618085011,
-      "seconds": 2.2127399,
+      "seconds": 1.9180405,
       "stage": "snap"
     },
     {
@@ -257,5 +273,5 @@
     ]
   },
   "tool": "ofgpu-automesher",
-  "total_seconds": 4.1765677
+  "total_seconds": 3.6495436
 }

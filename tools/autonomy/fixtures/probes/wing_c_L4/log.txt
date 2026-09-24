@@ -11,7 +11,7 @@ automesher: 70566 cells, 219706 internal faces, 1444 boundary faces, 80282 point
   non-orthogonality: max 25.239 deg, mean 2.674 deg, 0 face(s) past the report mark
   thickness: min tau 3.000000 (cell 835); conditioning: max cond 1.000 (cell 0)
   duplicate faces: 0; ldu ordered: yes; gate: passed
---- octree: 6.5 s
+--- octree: 6.6 s
 === stage 2/5  castellate ===
 automesher: 64370 cells, 198427 internal faces, 6826 boundary faces, 80282 points
   volume: min 0.000031 (cell 19864); regions: 1 (64370 cells)
@@ -19,13 +19,13 @@ automesher: 64370 cells, 198427 internal faces, 6826 boundary faces, 80282 point
   non-orthogonality: max 25.239 deg, mean 2.961 deg, 0 face(s) past the report mark
   thickness: min tau 3.000000 (cell 835); conditioning: max cond 1.000 (cell 0)
   duplicate faces: 0; ldu ordered: yes; gate: passed
---- castellate: 0.4 s
+--- castellate: 0.5 s
 === stage 3/5  snap ===
 snap: 5384 boundary points, 30 iteration(s), out of iterations
 snap: max step 0.000e0, residual max 7.105e-2, p99 1.744e-2
 snap: 7241 point(s) scaled back, 2278 pinned, 20 iterate(s) abandoned
 snap: 301 feature edge(s), 6 corner(s); last iterate 1608 point(s) to an edge, 6 to a corner
---- snap: 26.0 s
+--- snap: 25.9 s
 === stage 4/5  split ===
 split: skipped - castellation.bodies is empty
 --- split: 0.0 s
@@ -33,7 +33,7 @@ split: skipped - castellation.bodies is empty
 layers: 0 cell(s) behind 5382 face(s), 0 new point(s), 4 retreat(s)
 layers: 0 internal side face(s), 0 boundary side face(s), 0 from a split edge
 layers: patch "wing": the gate still failed after 4 retreat(s)
---- layers: 1.3 s
+--- layers: 1.4 s
 automesher: 64370 cells, 198427 internal faces, 6826 boundary faces, 80282 points
   volume: min 0.000001 (cell 35675); regions: 1 (64370 cells)
   closure: max 4.013e-15 (cell 38141)
@@ -42,4 +42,4 @@ automesher: 64370 cells, 198427 internal faces, 6826 boundary faces, 80282 point
   duplicate faces: 0; ldu ordered: yes; gate: passed
 ofgpu-automesher: wrote wing_c_L4_case\constant\polyMesh (64370 cells)
 ofgpu-automesher: wrote wing_c_L4_case\wing_c_L4_summary.json
-ofgpu-automesher: total 34.3 s
+ofgpu-automesher: total 34.6 s

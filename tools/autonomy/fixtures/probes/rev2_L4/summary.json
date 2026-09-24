@@ -101,7 +101,7 @@
     "run_id": null,
     "schema": 1,
     "tool": "ofgpu-automesher",
-    "written_at": "2026-09-23T12:33:35Z"
+    "written_at": "2026-09-24T07:18:01Z"
   },
   "layout": null,
   "mesh": {
@@ -177,10 +177,12 @@
         12,
         10
       ],
+      "gate_passed": true,
       "max_level": 4,
+      "max_non_orth_deg": 25.239401820679177,
       "n_leaves": 23540,
       "refine_splits": 2884,
-      "seconds": 3.7811797,
+      "seconds": 3.8752356,
       "stage": "octree"
     },
     {
@@ -193,7 +195,7 @@
         "starved": 0,
         "unrepaired_pinch": 0
       },
-      "seconds": 0.136329,
+      "seconds": 0.1270782,
       "stage": "castellate",
       "wall_faces": 648,
       "wall_patches": {
@@ -201,8 +203,20 @@
       }
     },
     {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 0.6328125,
+          "castellated_ratio": 1.2970514162151716,
+          "name": "body",
+          "ratio": 0.9804890600634694,
+          "snapped_area_m2": 0.4783663358018209,
+          "stl_area_m2": 0.4878854393039889
+        }
+      ],
       "converged": true,
+      "h_f_m": 0.03125,
       "iterations": 6,
+      "max_over_h": 0.016924028934665967,
       "max_residual": 0.0005288759042083115,
       "max_step": 0.00039667278290999767,
       "n_abandoned": 0,
@@ -210,11 +224,13 @@
       "n_feature_corners": 0,
       "n_feature_edges": 0,
       "n_pinned": 0,
+      "n_pinned_boundary": 0,
       "n_scaled_back": 0,
       "n_snapped_to_corner": 0,
       "n_snapped_to_edge": 0,
+      "p99_over_h": 0.01691587697090773,
       "p99_residual": 0.0005286211553408665,
-      "seconds": 0.7349022,
+      "seconds": 0.7361337,
       "stage": "snap"
     },
     {
@@ -231,6 +247,21 @@
       "n_split_sides": 0,
       "patches": [
         {
+          "area": 0.4783663358018209,
+          "area_frac_tau_ge": [
+            {
+              "area_frac": 0.0,
+              "beta": 0.5
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.8
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.95
+            }
+          ],
           "dropped": "patch \"body\": the gate still failed after 4 retreat(s) on the layer cells themselves - the extruded mesh could not be brought inside the gate: layers are supported on a wall that castellates onto the cell planes, and a snapped wall carries its own non-orthogonality into the level-n face (SPEC-LIT 92.13)",
           "full_area_frac": 0.0,
           "mean_frac": 0.0,
@@ -243,7 +274,7 @@
         }
       ],
       "retreats": 4,
-      "seconds": 1.5203782000000001,
+      "seconds": 1.4999965,
       "stage": "layers"
     }
   ],
@@ -264,5 +295,5 @@
     ]
   },
   "tool": "ofgpu-automesher",
-  "total_seconds": 6.1781553
+  "total_seconds": 6.2431976
 }

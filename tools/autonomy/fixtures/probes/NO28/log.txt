@@ -11,7 +11,7 @@ automesher: 14832 cells, 46716 internal faces, 600 boundary faces, 17767 points
   non-orthogonality: max 25.239 deg, mean 3.631 deg, 6720 face(s) past the report mark
   thickness: min tau 3.000000 (cell 541); conditioning: max cond 1.000 (cell 0)
   duplicate faces: 0; ldu ordered: yes; gate: passed
---- octree: 2.0 s
+--- octree: 1.7 s
 === stage 2/5  castellate ===
 automesher: 12880 cells, 40128 internal faces, 1848 boundary faces, 17767 points
   volume: min 0.001953 (cell 1823); regions: 1 (12880 cells)
@@ -19,13 +19,13 @@ automesher: 12880 cells, 40128 internal faces, 1848 boundary faces, 17767 points
   non-orthogonality: max 25.239 deg, mean 4.046 deg, 6432 face(s) past the report mark
   thickness: min tau 3.000000 (cell 541); conditioning: max cond 1.000 (cell 0)
   duplicate faces: 0; ldu ordered: yes; gate: passed
---- castellate: 0.2 s
+--- castellate: 0.1 s
 === stage 3/5  snap ===
 snap: 1250 boundary points, 7 iteration(s), converged
 snap: max step 8.681e-4, residual max 5.800e-3, p99 5.764e-3
 snap: 528 point(s) scaled back, 0 pinned, 0 iterate(s) abandoned
 snap: 0 feature edge(s), 0 corner(s); last iterate 0 point(s) to an edge, 0 to a corner
---- snap: 1.4 s
+--- snap: 1.2 s
 === stage 4/5  split ===
 split: skipped - castellation.bodies is empty
 --- split: 0.0 s
@@ -40,4 +40,4 @@ automesher: 12880 cells, 40128 internal faces, 1848 boundary faces, 17767 points
   duplicate faces: 0; ldu ordered: yes; gate: passed
 ofgpu-automesher: wrote <survey>\am\case_NO28\constant\polyMesh (12880 cells)
 ofgpu-automesher: wrote <survey>\am\case_NO28\NO28_summary.json
-ofgpu-automesher: total 3.6 s
+ofgpu-automesher: total 3.0 s
