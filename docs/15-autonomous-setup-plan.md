@@ -595,8 +595,8 @@ Run by `tools/autonomy/baseline.py --run` (both splits), `--rcurv`, `--report` a
   0.945 / 0.057 / 17,515 / 35.8 s (mean of 4: MFR 0.824, BLC_8 0.014), 1,488 rows in 4,009 s. Per family B0-template
   MFR: A 1.000, B 0.750, D 1.000, E 0.690, F 1.000, G 0.976; B0-LHS best: A 1.000, B 0.155, D 0.286, E 0.429, F 0.690,
   G 0.857. BLC_8 is 0 on every family for B0-template; B0-LHS delivers some on D 0.214, F 0.071, E 0.048, G 0.012, and
-  none on A or B. 47 G geometries end SURFACE-OPEN; B0-template's 87 F1 are those 47, 1 harness end, and 39 `config`
-  exits (the thin body lost in castellation: 16 A wings, 17 F bodies, 6 G).
+  none on A or B. 47 G geometries end SURFACE-OPEN; B0-template's 87 F1 are those 47, 1 SURFACE-REFUSED end, and
+  39 `config` exits (the thin body lost in castellation: 16 A wings, 17 F bodies, 6 G).
 - **CAPABILITY-LIMITED wall area (the AM-L decision, docs/15 §I-1)** — the mean share of each geometry's STL wall area
   whose requested layers were dropped `min_thickness` or `retreat_snapped` on a body R-PLANE cannot put on cell planes
   (remedies' own predicate), whatever the F flags: B0-template A 81.0 %, B 100 %, E 100 %, F 28.6 %, **tier 1 (A, B,
@@ -617,6 +617,9 @@ Run by `tools/autonomy/baseline.py --run` (both splits), `--rcurv`, `--report` a
   triangle 1826 has zero area` after stl_repair closed it; it counts as a failure, and it is the one check B0.json
   fails (`harness_errors_zero`), so `baseline.py --check` prints CHECK FAIL on that item alone. campaign.py should
   name it as a surface end like SURFACE-OPEN (owner of campaign.py; the seal and the report rule are the user's).
+  AM-FIX names it SURFACE-REFUSED (campaign.py), and the report re-reads the committed end records through
+  `campaign.terminal_of`; `harness_errors_zero` stays strict, and B0.json re-derived from the campaign's own rows
+  passes every check (`--check` CHECK PASS), no number moved.
 - **Fixed in this unit, each proved first:** `remedies._strip_t` never entered the `(row, result)` tuples, so selftest
   group 11 failed whenever its two runs straddled a second (6 of 6 runs pass after); `campaign.Campaign._write_progress`
   shared one tmp file unlocked, so two geometries ending together raised WinError 32 and the second end record was a

@@ -318,12 +318,13 @@ def _group_stats(family, stratum, ms, rows_by, q, areas, system):
     fclasses = {}
     terminals = {}
     for g in ms:
-        terminals[g["terminal"]] = terminals.get(g["terminal"], 0) + 1
+        t = campaign.terminal_of(g)
+        terminals[t] = terminals.get(t, 0) + 1
         gid = g["geometry_id"]
         row = rows_by.get(gid, {}).get(g.get("final_attempt"))
         if row is None:
             flags["F1"] += 1
-            fclasses[g["terminal"]] = fclasses.get(g["terminal"], 0) + 1
+            fclasses[t] = fclasses.get(t, 0) + 1
             for k in BETA_KEYS:
                 beta_lo[k].append(0.0)
             wall_s.append(g["seconds"])
@@ -445,6 +446,12 @@ def _build_groups(geoms, rows_by, q, areas, system):
 def _system_report(cdir, header, gates, knobs, expect_n):
     end = _load_json(os.path.join(cdir, campaign.FILES["end"]), "report")
     geoms = campaign.load_geometries(cdir)
+    terms = [campaign.terminal_of(g) for g in geoms]
+    recorded = sum(1 for g in geoms if g["terminal"] == "HARNESS-ERROR")
+    if recorded != end["harness_errors"]:
+        raise BaselineError(
+            "report: %s: campaign_end.json counts %d harness errors, the end "
+            "records %d" % (cdir, end["harness_errors"], recorded))
     rows_by = {}
     for r in campaign.load_rows(cdir):
         rows_by.setdefault(r["geometry_id"], {})[r["attempt"]] = r
@@ -466,7 +473,12 @@ def _system_report(cdir, header, gates, knobs, expect_n):
            "n_expected": expect_n, "n_rows": sum(len(v) for v in rows_by.values()),
            "wall_seconds": end["wall_seconds"], "peak_rss_mib": end["peak_rss_mib"],
            "peak_frac": end["peak_frac"], "max_live_mesher": end["max_live_mesher"],
-           "orphans": len(end["orphans"]), "harness_errors": end["harness_errors"],
+           "orphans": len(end["orphans"]),
+           "harness_errors": terms.count("HARNESS-ERROR"),
+           "harness_errors_recorded": end["harness_errors"],
+           "surface_refused": sorted(g["geometry_id"] for g, t in
+                                     zip(geoms, terms)
+                                     if t == "SURFACE-REFUSED"),
            "binary_sha256": header["binary_sha256"], "git_sha": header["git_sha"],
            "manifest_sha256": header["manifest"]["sha256"],
            "replay_ok": bool(replay["ok"]),
@@ -1375,9 +1387,69 @@ def _g4(tmp):
                   report_dir=repd, expect_n=None, allow_partial=False,
                   write=False)
     assert rep3["verdict"] == "FAIL", rep3["verdict"]
+    t2 = os.path.join(tmp, "t2")
+    shutil.copytree(os.path.join(tmp, "t"), t2)
+    gpath = os.path.join(t2, campaign.FILES["geometries"])
+    with open(gpath, encoding="utf-8") as f:
+        recs = [json.loads(ln) for ln in f if ln.strip()]
+    hit = [g for g in recs if g["terminal"] == "SURFACE-OPEN"]
+    assert len(hit) == 1, [g["terminal"] for g in recs]
+
+    def rewrite(recs, reason):
+        hit[0]["terminal"] = "HARNESS-ERROR"
+        hit[0]["reason"] = reason
+        with open(gpath, "w", encoding="utf-8", newline=chr(10)) as f:
+            for g in recs:
+                f.write(json.dumps(g, sort_keys=True,
+                                   ensure_ascii=False) + chr(10))
+    rewrite(recs, "features.py: surface/degenerate: triangle 1 has zero area")
+    epath = os.path.join(t2, campaign.FILES["end"])
+
+    def write_end(harness_errors):
+        with open(epath, encoding="utf-8") as f:
+            e2 = json.load(f)
+        e2["harness_errors"] = harness_errors
+        e2["terminals"]["HARNESS-ERROR"] = (
+            e2["terminals"].get("HARNESS-ERROR", 0) + 1)
+        e2["terminals"]["SURFACE-OPEN"] -= 1
+        with open(epath, "w", encoding="utf-8", newline=chr(10)) as f:
+            json.dump(e2, f, indent=1, sort_keys=True,
+                      ensure_ascii=False)
+            f.write(chr(10))
+    write_end(1)
+    repd2 = os.path.join(tmp, "rep2")
+    rep2 = report(t2, os.path.join(tmp, "l"), report_dir=repd2,
+                  expect_n=None, allow_partial=True, write=False)
+    blk2 = rep2["systems"]["b0-template"]["campaign"]
+    assert rep2["checks"]["harness_errors_zero"] is True, rep2["checks"]
+    assert (blk2["harness_errors"] == 0 and
+            blk2["harness_errors_recorded"] == 1), blk2
+    assert blk2["surface_refused"] == [hit[0]["geometry_id"]], blk2
+    fc2 = {(g["family"], g["stratum"]): g for g in
+           rep2["systems"]["b0-template"]["groups"]}[("all", "all")]
+    fc2 = fc2["failure_classes"]
+    assert fc2.get("SURFACE-REFUSED") == 1 and "SURFACE-OPEN" not in fc2, fc2
+    rewrite(recs, "RuntimeError: boom")
+    rep4 = report(t2, os.path.join(tmp, "l"), report_dir=repd2,
+                  expect_n=None, allow_partial=True, write=False)
+    assert rep4["checks"]["harness_errors_zero"] is False, rep4["checks"]
+    with open(epath, encoding="utf-8") as f:
+        e3 = json.load(f)
+    e3["harness_errors"] = 0
+    with open(epath, "w", encoding="utf-8", newline=chr(10)) as f:
+        json.dump(e3, f, indent=1, sort_keys=True, ensure_ascii=False)
+        f.write(chr(10))
+    try:
+        report(t2, os.path.join(tmp, "l"), report_dir=repd2,
+               expect_n=None, allow_partial=True, write=False)
+    except BaselineError as e:
+        assert "harness errors" in str(e), str(e)
+    else:
+        raise BaselineError("the harness-error count mismatch was not refused")
     return ("report on fake campaigns: template MFR 0.400 strict 0.800 "
             "capability-limited 0.200, LHS MFR 0.000 mean-of-4 fail 0.250, "
-            "verdict PARTIAL")
+            "verdict PARTIAL, a features.py surface refusal re-read as "
+            "SURFACE-REFUSED keeps harness_errors_zero strict")
 
 
 def _g5(tmp):

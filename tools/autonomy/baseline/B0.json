@@ -6,7 +6,7 @@
   "audit_reruns_equal": true,
   "complete_b0-lhs": true,
   "complete_b0-template": true,
-  "harness_errors_zero": false,
+  "harness_errors_zero": true,
   "mesher_cap_ok": true,
   "one_binary": true,
   "orphans_zero": true,
@@ -201,7 +201,8 @@
     "binary_sha256": "054bba67c8650082431ac01325e497208a9bc663c4760a36f7472ff62814a90b",
     "campaign_id": "b0-lhs-tuning",
     "git_sha": "4f56fd1312ccf7ddfc8c47b54c44ac8959e29d8f",
-    "harness_errors": 1,
+    "harness_errors": 0,
+    "harness_errors_recorded": 1,
     "manifest_sha256": "a579f10c00ea4fa6ca6f1d65e73a9e21c008f5e0c3158dd19cf97a20dbfb2da4",
     "max_live_mesher": 6,
     "n_expected": 420,
@@ -212,6 +213,9 @@
     "peak_rss_mib": 1352.765625,
     "replay_decisions": 1488,
     "replay_ok": true,
+    "surface_refused": [
+     "G-1-053"
+    ],
     "wall_seconds": 4008.8544477000833
    },
    "groups": [
@@ -1443,8 +1447,8 @@
      "cells_median": 18372.0,
      "fail": 20,
      "failure_classes": {
-      "HARNESS-ERROR": 1,
       "SURFACE-OPEN": 13,
+      "SURFACE-REFUSED": 1,
       "layer_dropped:min_thickness": 4,
       "layer_dropped:retreat_snapped": 4
      },
@@ -1490,8 +1494,8 @@
      "strict_rate": 1.0,
      "terminals": {
       "BASELINE": 8,
-      "HARNESS-ERROR": 1,
-      "SURFACE-OPEN": 13
+      "SURFACE-OPEN": 13,
+      "SURFACE-REFUSED": 1
      },
      "wall_seconds_median": 0.9169684500084259
     },
@@ -1878,8 +1882,8 @@
      "cells_median": 11363.0,
      "fail": 72,
      "failure_classes": {
-      "HARNESS-ERROR": 1,
       "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1,
       "config": 2,
       "layer_dropped:min_thickness": 18,
       "layer_dropped:no_full_stack": 1,
@@ -1927,8 +1931,8 @@
      "strict_rate": 0.9880952380952381,
      "terminals": {
       "BASELINE": 36,
-      "HARNESS-ERROR": 1,
-      "SURFACE-OPEN": 47
+      "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1
      },
      "wall_seconds_median": 1.08188114996301
     },
@@ -2102,8 +2106,8 @@
      "cells_median": 17515.0,
      "fail": 240,
      "failure_classes": {
-      "HARNESS-ERROR": 1,
       "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1,
       "config": 20,
       "layer_dropped:min_thickness": 184,
       "layer_dropped:no_full_stack": 12,
@@ -2153,8 +2157,8 @@
      "strict_rate": 0.9452380952380952,
      "terminals": {
       "BASELINE": 372,
-      "HARNESS-ERROR": 1,
-      "SURFACE-OPEN": 47
+      "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1
      },
      "wall_seconds_median": 43.15919504995691
     }
@@ -2175,7 +2179,8 @@
     "binary_sha256": "054bba67c8650082431ac01325e497208a9bc663c4760a36f7472ff62814a90b",
     "campaign_id": "b0-template-tuning",
     "git_sha": "4f56fd1312ccf7ddfc8c47b54c44ac8959e29d8f",
-    "harness_errors": 1,
+    "harness_errors": 0,
+    "harness_errors_recorded": 1,
     "manifest_sha256": "a579f10c00ea4fa6ca6f1d65e73a9e21c008f5e0c3158dd19cf97a20dbfb2da4",
     "max_live_mesher": 6,
     "n_expected": 420,
@@ -2186,6 +2191,9 @@
     "peak_rss_mib": 326.9609375,
     "replay_decisions": 372,
     "replay_ok": true,
+    "surface_refused": [
+     "G-1-053"
+    ],
     "wall_seconds": 491.0311066999566
    },
    "groups": [
@@ -3172,8 +3180,8 @@
      "cells_median": 7542.0,
      "fail": 22,
      "failure_classes": {
-      "HARNESS-ERROR": 1,
       "SURFACE-OPEN": 13,
+      "SURFACE-REFUSED": 1,
       "layer_dropped:retreat_snapped": 8
      },
      "family": "G",
@@ -3205,8 +3213,8 @@
      "strict_rate": 1.0,
      "terminals": {
       "BASELINE": 8,
-      "HARNESS-ERROR": 1,
-      "SURFACE-OPEN": 13
+      "SURFACE-OPEN": 13,
+      "SURFACE-REFUSED": 1
      },
      "wall_seconds_median": 0.9103355499682948
     },
@@ -3516,8 +3524,8 @@
      "cells_median": 9942.0,
      "fail": 82,
      "failure_classes": {
-      "HARNESS-ERROR": 1,
       "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1,
       "config": 6,
       "layer_dropped:min_thickness": 3,
       "layer_dropped:retreat_snapped": 27
@@ -3551,8 +3559,8 @@
      "strict_rate": 1.0,
      "terminals": {
       "BASELINE": 36,
-      "HARNESS-ERROR": 1,
-      "SURFACE-OPEN": 47
+      "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1
      },
      "wall_seconds_median": 1.0536166499950923
     },
@@ -3694,8 +3702,8 @@
      "cells_median": 9616,
      "fail": 384,
      "failure_classes": {
-      "HARNESS-ERROR": 1,
       "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1,
       "config": 39,
       "layer_dropped:min_thickness": 46,
       "layer_dropped:retreat_snapped": 287
@@ -3729,13 +3737,13 @@
      "strict_rate": 1.0,
      "terminals": {
       "BASELINE": 372,
-      "HARNESS-ERROR": 1,
-      "SURFACE-OPEN": 47
+      "SURFACE-OPEN": 47,
+      "SURFACE-REFUSED": 1
      },
      "wall_seconds_median": 6.259145899966825
     }
    ]
   }
  },
- "verdict": "FAIL"
+ "verdict": "PASS"
 }

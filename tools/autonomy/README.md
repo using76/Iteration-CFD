@@ -620,7 +620,9 @@ remedies; +prior; +optimiser; full: both hooks). Only `preflight`/`remedies` are
 and is the only mode reading the held-out split.
 
 Observe is common to every mode, baselines included: the generator rebuilds the STL, `stl_repair --json` gated on
-`after.closed` (SURFACE-OPEN is a named end with no mesher run — G-1-026 stays non-manifold), features.py fingerprints the
+`after.closed` (SURFACE-OPEN is a named end with no mesher run — G-1-026 stays non-manifold). A named features.py refusal
+(`surface/degenerate`, `surface/open`, ...) ends the geometry SURFACE-REFUSED with the refusal text as its reason, a
+failure with no mesher run; any other fingerprint error stays HARNESS-ERROR. features.py fingerprints the
 surface. Attempt 1 is `rules.setup`'s config under `preflight.preflight` with the live `-stopAfter octree` probe as cost
 signal; a PF-THIN refusal is re-checked with `snap_probe`'s measured post-snap wall edge (docs/15 §K part 3); a refusal is
 a named REFUSED end with no row. The loop is `remedies.propose` per failed attempt, the veto consulted on every candidate,
@@ -697,7 +699,8 @@ F3 cost — reported, not gated. Departures from docs/15 §F: 6 streams, not 12 
 seal is per-system bundles plus a lock, not one file; a thin body lost in castellation exits 1 at
 layers and scores config (F1), not F4. The numbers are in `baseline/B0.json`, `baseline/B0.md` and
 `baseline/R-CURV.json`, written by the supervisor's run; the test split's numbers are sealed in
-`baseline/sealed/`.
+`baseline/sealed/`. The report counts harness errors from the end records through `campaign.terminal_of`, so a
+record written before SURFACE-REFUSED existed is read under it, and `harness_errors_zero` still requires zero.
 
 For later units — AM-13/AM-14: the tuning rows of both baselines are in
 `baseline/tuning_<system>.json.gz` (`baseline.read_bundle`); B0-LHS's 1,680 rows are random-knob

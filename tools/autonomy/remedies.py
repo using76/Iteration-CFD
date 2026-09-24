@@ -1716,6 +1716,15 @@ def selftest() -> int:
             "its rule id" % len(records)
 
     def g11():
+        got = _strip_t({"t": 1, "a": {"t": 2}})
+        assert got == {"a": {}}, got
+        got = _strip_t({"a": ({"t": 3, "b": 1},)})
+        assert got == {"a": [{"b": 1}]}, got
+        got = _strip_t([{"t": 1, "x": [{"t": 2, "y": 3}]}])
+        assert got == [{"x": [{"y": 3}]}], got
+        src = {"t": 1, "a": {"t": 2}}
+        _strip_t(src)
+        assert src == {"t": 1, "a": {"t": 2}}, src
         p1, s1 = g34()[0:2]
         p2, s2 = g34()[0:2]
         assert json.dumps(_strip_t(p1), sort_keys=True) == json.dumps(_strip_t(p2), sort_keys=True)
@@ -1726,7 +1735,7 @@ def selftest() -> int:
         rng = random.Random(11)
         lb = _loops(rng, pool, 50, gates, knobs, [])
         assert json.dumps(_strip_t(la), sort_keys=True) == json.dumps(_strip_t(lb), sort_keys=True)
-        return "[ok] determinism: groups 3-4 twice and 50 loops twice equal apart from t"
+        return "[ok] determinism: groups 3-4 twice and 50 loops twice equal apart from t; _strip_t drops nested t in dicts, lists and tuples"
 
     def g12():
         veto = lambda c: ["PF-TEST"]

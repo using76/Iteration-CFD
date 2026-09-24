@@ -119,7 +119,12 @@ LHS_FEATURE = (0, 1, 2)
 LHS_FT = (0.0, 0.25, 0.5)
 LHS_SP = (0, 1, 2, 3)
 GEOMETRY_TERMINALS = remedies.TERMINALS + ("BASELINE", "REFUSED", "SURFACE-OPEN",
-                                           "HARNESS-ERROR")
+                                           "SURFACE-REFUSED", "HARNESS-ERROR")
+# features.py's named surface/<name> refusals.
+SURFACE_REFUSALS = ("too_small", "degenerate", "non_manifold", "open",
+                    "orientation", "volume")
+_SURFACE_REFUSAL_RE = re.compile(r"^features\.py: surface/(%s): "
+                                 % "|".join(SURFACE_REFUSALS))
 SMOKE_IDS = ("D-1-010", "F-1-009", "G-1-016", "G-1-026")
 LIVE_IDS = ("D-1-010", "F-1-005", "G-1-026")
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -637,6 +642,13 @@ def observe(c, mrow):
     with c.fp_lock:
         try:
             fp = rules._fp_of(out, gid)
+        except ValueError as e:
+            # A named features.py refusal is a property of the surface, a failure
+            # like SURFACE-OPEN, never a harness fault (docs/15 §C).
+            reason = "features.py: %s" % e
+            return {"terminal": "SURFACE-REFUSED" if surface_refusal(reason)
+                    else "HARNESS-ERROR", "reason": reason,
+                    "surface": surface}
         except Exception as e:
             return {"terminal": "HARNESS-ERROR", "reason": "features.py: %s" % e,
                     "surface": surface}
@@ -649,6 +661,25 @@ def observe(c, mrow):
     for p in fp["patches"]:
         areas[p["name"]] = areas.get(p["name"], 0.0) + p["area_m2"]
     return {"terminal": None, "fingerprint": fp, "areas": areas, "surface": surface}
+
+
+def surface_refusal(reason):
+    """The refusal name in a features.py surface/<name> error text, else None."""
+    if isinstance(reason, str):
+        m = _SURFACE_REFUSAL_RE.match(reason)
+        if m:
+            return m.group(1)
+    return None
+
+
+def terminal_of(g):
+    """One geometry end record's terminal under the current set: a record written
+    before SURFACE-REFUSED existed reads as SURFACE-REFUSED when its reason is a
+    named features.py surface refusal."""
+    if g["terminal"] == "HARNESS-ERROR" and surface_refusal(
+            g.get("reason")) is not None:
+        return "SURFACE-REFUSED"
+    return g["terminal"]
 
 
 def write_config(c, gid, a, cfg):
@@ -1426,7 +1457,7 @@ def _replay_one(gid, header, layers, k, rows_by, end, mrow, cdir, gates, knobs,
             bad(gid, r["attempt"], "config file %s is missing" % rel)
         if sha(read_cfg(gid, r["attempt"])) != r["config_sha"]:
             bad(gid, r["attempt"], "config file %s differs from the row" % rel)
-    if end["terminal"] in ("SURFACE-OPEN", "HARNESS-ERROR"):
+    if end["terminal"] in ("SURFACE-OPEN", "SURFACE-REFUSED", "HARNESS-ERROR"):
         if ordered:
             bad(gid, 0, "a %s geometry carries %d rows"
                 % (end["terminal"], len(ordered)))
@@ -1948,7 +1979,25 @@ def _g1_constants(H):
                      "full", "evaluate") and len(SYSTEMS) == 6
     assert LAYERS["full"] == ("preflight", "rules", "remedies", "prior", "optimiser")
     assert MAX_STREAMS == 6 and STREAMS_DOCS == 12 and AUDIT_MOD == 10
-    assert len(GEOMETRY_TERMINALS) == 8
+    assert len(GEOMETRY_TERMINALS) == 9, GEOMETRY_TERMINALS
+    assert "SURFACE-REFUSED" in GEOMETRY_TERMINALS, GEOMETRY_TERMINALS
+    for n in SURFACE_REFUSALS:
+        assert surface_refusal("features.py: surface/%s: x" % n) == n, n
+    assert surface_refusal(
+        "features.py: the fingerprint is invalid: x") is None, "invalid fp"
+    assert surface_refusal("surface/degenerate: x") is None, "no prefix"
+    assert surface_refusal("features.py: surface/bogus: x") is None, "bogus"
+    assert surface_refusal(None) is None, "None"
+    assert (terminal_of({"terminal": "HARNESS-ERROR",
+                         "reason": "features.py: surface/degenerate: "
+                                   "triangle 1826 has zero area"}) ==
+            "SURFACE-REFUSED"), "a record written before the name existed"
+    assert (terminal_of({"terminal": "HARNESS-ERROR",
+                         "reason": "RuntimeError: boom"}) ==
+            "HARNESS-ERROR"), "RuntimeError"
+    assert (terminal_of({"terminal": "SURFACE-OPEN",
+                         "reason": "features.py: surface/open: x"}) ==
+            "SURFACE-OPEN"), "SURFACE-OPEN"
     base = {"manifest": "tuning", "mode": "rules", "out": "x/out"}
     cases = [("mode", dict(base, mode="nope"), "mode"),
              ("--system", dict(base, mode="evaluate"), "--system"),
@@ -2128,6 +2177,24 @@ def _g5_observe(H):
     for gid in ("D-1-010", "F-1-009", "G-1-016", "F-1-005"):
         errs = schema.errors(H["obs"][gid]["fingerprint"], "Fingerprint")
         assert errs == [], (gid, errs)
+    deg = (b"solid deg\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\n"
+           b"vertex 1 0 0\nvertex 0 0 0\nendloop\nendfacet\n"
+           b"facet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\n"
+           b"vertex 1 1 0\nendloop\nendfacet\n"
+           b"facet normal 0 0 1\nouter loop\nvertex 1 1 0\nvertex 1 0 0\n"
+           b"vertex 0 0 0\nendloop\nendfacet\n"
+           b"facet normal 0 1 0\nouter loop\nvertex 0 0 0\nvertex 1 1 0\n"
+           b"vertex 0 1 0\nendloop\nendfacet\nendsolid deg\n")
+    dpath = os.path.join(H["tmp"], "g5-deg.stl")
+    with open(dpath, "wb") as f:
+        f.write(deg)
+    try:
+        rules._fp_of(dpath, "g5-deg")
+    except ValueError as e:
+        reason = "features.py: %s" % e
+        assert surface_refusal(reason) == "degenerate", reason
+    else:
+        raise CampaignError("group 5: the degenerate STL was not refused")
 
 
 _G6_IDS = ("D-1-010", "F-1-009", "G-1-016", "G-1-026", "F-1-005")
@@ -2653,7 +2720,7 @@ def selftest():
                              quiet=True)
         H["obs"] = {gid: observe(H["camp"], H["rows"][gid]) for gid in OBS_IDS}
         _group("constants: 7 modes, 6 systems, layers per system, MAX_STREAMS 6 "
-               "(docs/15 says 12), audit 1 in 10, 8 geometry terminals, 10 refusals "
+               "(docs/15 says 12), audit 1 in 10, 9 geometry terminals, 10 refusals "
                "by name", _g1_constants, H)
         _group("b0-template: 3 geometries, one band per patch at level 4, t1 = the "
                "a priori first layer, extent on the base lattice around bbox + "
