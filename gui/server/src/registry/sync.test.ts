@@ -102,7 +102,7 @@ describe('registry <-> rust sources', () => {
   })
 
   it('geometry_pipelines_shape: geom-tool and regions-from-msh are .py pipelines beside the binaries', () => {
-    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh', 'autonomy-campaign'])
+    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh', 'autonomy-campaign', 'autonomy-preflight'])
     for (const [name, positionals] of [['geom-tool', ['command', 'file']], ['regions-from-msh', ['msh', 'outDir']]] as const) {
       const pipeline = PIPELINES.find((p) => p.name === name)!
       expect(pipeline.pipeline).toBe(true)
@@ -176,6 +176,40 @@ describe('registry <-> rust sources', () => {
     expect(checkArgValue(flag('--ablate'), 'preflight,remedies')).toBeNull()
     expect(checkArgValue(flag('--ablate'), 'quality')).toMatch(/unknown quality/)
     expect(checkArgValue(flag('--run'), true)).toBeNull()
+    expect(toolPolicy('run_start')).toBe('ask')
+  })
+
+  it('autonomy_preflight_pipeline: preflight.py beside the binaries, its config flags from the script\'s own parser', () => {
+    const p = PIPELINES.find((x) => x.name === 'autonomy-preflight')!
+    expect(p).toBeTruthy()
+    expect(p.pipeline).toBe(true)
+    expect(BINARY_NAMES).not.toContain('autonomy-preflight')
+    expect(getBinary('autonomy-preflight')).toBe(p)
+    expect(p.source).toBe('tools/autonomy/preflight.py')
+    expect([p.kind, p.gpu, p.longRunning, p.positionals.map((x) => x.name)]).toEqual(['mesh', false, false, ['config']])
+    const texts = [fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'preflight_cli.209852c.txt'), 'utf8')]
+    const real = path.join(REPO_ROOT, 'tools', 'autonomy', 'preflight.py')
+    if (fs.existsSync(real)) texts.push(read(real))
+    for (const text of texts) {
+      const body = (name: string) => {
+        const at = text.indexOf(`def ${name}(`)
+        expect(at, name).toBeGreaterThanOrEqual(0)
+        const end = text.indexOf('\ndef ', at + 1)
+        return text.slice(at, end < 0 ? undefined : end)
+      }
+      const cfg = body('_main_config')
+      const valued = new Set([...cfg.matchAll(/a == "(--[a-z-]+)" or a\.startswith\("--[a-z-]+="\)/g)].map((m) => m[1]))
+      const bare = new Set([...cfg.matchAll(/elif a == "(--[a-z-]+)":/g)].map((m) => m[1]))
+      for (const f of p.flags) {
+        expect(valued.has(f.name) || bare.has(f.name), `${f.name} is parsed by preflight.py`).toBe(true)
+        expect(f.type === 'flag', f.name).toBe(bare.has(f.name))
+      }
+      expect([...valued, ...bare].filter((n) => !p.flags.some((f) => f.name === n)).sort()).toEqual(['--records'])
+      expect([...body('main').matchAll(/"(--[a-z-]+)" in args/g)].map((m) => m[1])).toEqual(['--selftest', '--gate'])
+      expect(cfg).toContain('print("PREFLIGHT PASS")')
+      expect(cfg).toContain('return 3')
+    }
+    expect(p.flags.find((f) => f.name === '--arg')!.repeatable).toBe(true)
     expect(toolPolicy('run_start')).toBe('ask')
   })
 })

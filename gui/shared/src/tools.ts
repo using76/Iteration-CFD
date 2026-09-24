@@ -25,6 +25,7 @@ export const TOOL_NAMES = [
   'mesh_regions',
   'regions_check',
   'autonomy_attempts',
+  'autonomy_propose_edit',
   'residuals_get',
   'viewer_command',
   'plot_residuals',
@@ -78,6 +79,7 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   mesh_regions: { name: 'mesh_regions', kind: 'long', policy: 'ask', label: { ko: '영역 격자 생성', en: 'Mesh regions' } },
   regions_check: { name: 'regions_check', kind: 'read', policy: 'auto', label: { ko: '영역 레이아웃 검사', en: 'Check regions' } },
   autonomy_attempts: { name: 'autonomy_attempts', kind: 'read', policy: 'auto', label: { ko: '자율 격자 시도 조회', en: 'Read autonomy attempts' } },
+  autonomy_propose_edit: { name: 'autonomy_propose_edit', kind: 'mutate', policy: 'ask', label: { ko: '자율 격자 편집 제안', en: 'Propose an autonomy edit' } },
   residuals_get: { name: 'residuals_get', kind: 'read', policy: 'auto', label: { ko: '잔차 조회', en: 'Get residuals' } },
   viewer_command: { name: 'viewer_command', kind: 'ui', policy: 'auto', label: { ko: '3D 뷰어', en: '3D viewer' } },
   plot_residuals: { name: 'plot_residuals', kind: 'ui', policy: 'auto', label: { ko: '잔차 플롯', en: 'Plot residuals' } },
@@ -204,6 +206,12 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       if (v === 'status') return ko ? `캠페인 ${cid}: ${r.finished ? '완료' : '진행 중'}` : `Campaign ${cid}: ${r.finished ? 'finished' : 'running'}`
       const what = v === 'geometries' ? (ko ? '형상 기록' : 'geometry records') : ko ? '시도' : 'attempts'
       return ko ? `캠페인 ${cid} ${what} ${fmtInt(Number(r.returned ?? 0))}/${fmtInt(Number(r.total ?? 0))}건 조회` : `Read ${fmtInt(Number(r.returned ?? 0))} of ${fmtInt(Number(r.total ?? 0))} ${what} of campaign ${cid}`
+    }
+    case 'autonomy_propose_edit': {
+      const e = (r.edit ?? {}) as Record<string, unknown>
+      const p = String(e.pointer ?? i.pointer ?? '')
+      const to = JSON.stringify(e.to ?? i.value ?? null)
+      return ko ? `자율 격자 편집 제안 ${p} = ${to} (사전 점검 통과, ${String(r.proposed ?? '')})` : `Proposed ${p} = ${to} (preflight pass, ${String(r.proposed ?? '')})`
     }
     case 'residuals_get':
       return ko ? '잔차 시계열 조회' : 'Fetched residual series'

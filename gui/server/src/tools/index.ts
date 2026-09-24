@@ -9,6 +9,7 @@ import { TOOL_NAMES } from '@cfd/shared'
 import { z } from 'zod'
 import { toWorkspaceRel } from '../workspace/paths.js'
 import { autonomyAttempts } from './autonomy.js'
+import { autonomyProposeEdit } from './autonomyEdit.js'
 import { caseCreate, caseEdit, caseRead, caseValidate } from './case.js'
 import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { customToolCreate, customToolRun } from './custom.js'
@@ -56,6 +57,7 @@ export const TOOLS: ToolDef[] = [
   meshRegions,
   regionsCheck,
   autonomyAttempts,
+  autonomyProposeEdit,
   residualsGet,
   viewerCommand,
   plotResiduals,
@@ -251,7 +253,10 @@ export function toolTimeoutMs(tool: ToolDef, ctx: Pick<ToolContext, 'config'>): 
 export async function runTool(name: string, input: unknown, ctx: ToolContext): Promise<ToolResult> {
   const tool = byName.get(name)
   if (!tool) return fail('UNKNOWN_TOOL', `no tool named ${name}`)
-  const parsed = tool.schema.safeParse(forgiveToolInput(name, input))
+  const forgiven = forgiveToolInput(name, input)
+  const refused = tool.refuse?.(forgiven) ?? null
+  if (refused) return refused
+  const parsed = tool.schema.safeParse(forgiven)
   if (!parsed.success) return fail('INVALID_INPUT', `invalid input for ${name}: ${issues(parsed.error)}`)
   if (ctx.signal.aborted) return fail('CANCELLED', 'cancelled by user')
   try {

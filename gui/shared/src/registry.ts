@@ -625,6 +625,33 @@ export const PIPELINES: BinarySpec[] = [
     usageKind: 'none',
     pipeline: true,
   },
+  {
+    name: 'autonomy-preflight',
+    source: 'tools/autonomy/preflight.py',
+    purpose: 'Check one automesher config against the L0 preflight of the autonomous mesh setup (tools/autonomy/preflight.py, docs/15 section C): the STL closed and consistently wound, the quality block byte-equal to the reference, no forbidden flag, every knob on the whitelist and in range, the non-orthogonality floor, the y+ window and first-layer thickness, the domain margin and, with --octree-probe, the cell budget. Prints one pass/refuse/abstain line per check naming its rule id (the autonomy-preflight/1 JSON with --json), then PREFLIGHT PASS or PREFLIGHT REFUSED: <rule ids>. Exits 0 on a pass, 3 on a refusal, 2 on a caller error. Relative STL paths resolve against the working directory. It writes no file.',
+    summary: 'Autonomy preflight: the L0 checks on one automesher config, each named by rule id (exit 0 pass, 3 refused).',
+    kind: 'mesh',
+    positionals: [{ name: 'config', type: 'path', description: 'The automesher config JSON to check (workspace path)' }],
+    flags: [
+      { name: '--edits', type: 'path', description: 'A JSON file holding the edit list [{pointer, from, to}] that produced the config; every pointer is checked against the knob whitelist' },
+      { name: '--arg', type: 'string', repeatable: true, description: 'One mesher command-line argument the config would run with, checked for forbidden flags such as -permissive' },
+      { name: '--flow', type: 'path', description: 'A FlowSpec JSON (u_ref_m_s, l_ref_m, nu_m2_s) for the y+ window check' },
+      { name: '--fingerprint', type: 'path', description: 'The geometry fingerprint JSON (tools/autonomy/features.py) for the y+ and thickness checks' },
+      { name: '--h-wall-min', type: 'float', description: 'The measured shortest wall edge in metres, in place of the castellated prediction' },
+      { name: '--octree-probe', type: 'flag', description: 'Run the mesher to the octree stage in a temporary directory and check n_leaves against the cell budget' },
+      { name: '--snap-probe', type: 'flag', description: 'Run the mesher to the snap stage in a temporary directory and use its shortest wall edge' },
+      { name: '--binary', type: 'path', description: 'The ofgpu-automesher executable the probes run (default the release build)' },
+      { name: '--json', type: 'flag', description: 'Print the autonomy-preflight/1 result as JSON before the verdict line' },
+    ],
+    accepts: [],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: [], restart: false, csv: false },
+    longRunning: false,
+    gpu: false,
+    usageKind: 'none',
+    pipeline: true,
+  },
 ]
 
 export function getBinary(name: string): BinarySpec | undefined {

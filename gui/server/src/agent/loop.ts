@@ -138,6 +138,8 @@ export async function approvalPreview(name: string, input: unknown, workspaceRoo
     }
     case 'shell_exec':
       return Array.isArray(i.argv) ? (i.argv as string[]).join(' ') : null
+    case 'autonomy_propose_edit':
+      return `${String(i.config)}\n${String(i.pointer)} = ${typeof i.value === 'string' ? i.value : JSON.stringify(i.value)}\n${String(i.reason ?? '')}`
     default:
       return ontology ? await ontology(name, input, toolUseId) : null
   }
@@ -368,7 +370,7 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       call.status = 'running'
       call.startedAt = Date.now()
       emitCall(call)
-      const ctx: ToolContext = { config: deps.config, hub: deps.hub, runs: deps.runs, datasets: deps.datasets, sessionId, signal, workspaceRoot: deps.config.workspaceRoot, settings: rec.settings, toolUseId: tu.id }
+      const ctx: ToolContext = { config: deps.config, hub: deps.hub, runs: deps.runs, datasets: deps.datasets, sessionId, signal, workspaceRoot: deps.config.workspaceRoot, settings: rec.settings, toolUseId: tu.id, llm: { provider: deps.llm.kind, model: model ?? deps.llm.model } }
       settle(tu, call, input, await runTool(tu.name, input, ctx))
     }
 
@@ -380,7 +382,14 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
         continue
       }
       // "null" spelled as a string is the model leaving a field out (forgive.ts)
-      const parsed = tool.schema.safeParse(forgiveToolInput(tu.name, tu.input))
+      const forgiven = forgiveToolInput(tu.name, tu.input)
+      // A tool's own veto (autonomy_propose_edit's whitelist) answers before any approval card.
+      const refused = tool.refuse?.(forgiven) ?? null
+      if (refused) {
+        settle(tu, call, tu.input, refused)
+        continue
+      }
+      const parsed = tool.schema.safeParse(forgiven)
       if (!parsed.success) {
         settle(tu, call, tu.input, fail('INVALID_INPUT', `invalid input for ${tu.name}: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`))
         continue
