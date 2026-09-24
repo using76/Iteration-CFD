@@ -491,7 +491,6 @@ fn every_not_built_feature_is_refused_by_name() {
         (NotBuilt::Inertia, "Newmark", "rho_infinity"),
         (NotBuilt::Orthotropic, "orthotropic", "alignment"),
         (NotBuilt::TwoWayCoupling { delta: 1.06e-2 }, "two-way", "delta"),
-        (NotBuilt::BlockCoupled, "block-coupled", "3x3"),
     ];
     for (what, a, b) in cases {
         let msg = refuse(*what, "mechanics").to_string();

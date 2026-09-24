@@ -2016,6 +2016,7 @@ fn a_mechanics_block_reads_and_lowers() {
     assert_eq!(m.patch_bcs.len(), 6);
     assert_eq!(m.solver.tolerance, 1e-8);
     assert_eq!(m.solver.max_outer, 500);
+    assert!(!m.solver.coupled);
 
     // A mistyped key is a parse error naming the key, not a silent drop.
     let typo = default_stress().replace(r#""maxOuter": 500"#, r#""maxOutre": 500"#);
@@ -2516,6 +2517,7 @@ fn cht_schema_documents_the_mechanics_block() {
         "bond",
         "materials",
         "maxOuter",
+        "coupled",
     ] {
         assert!(text.contains(word), "the schema must document '{word}'");
     }
@@ -2580,7 +2582,7 @@ fn the_stress_banner_names_every_zone() {
     let case = read(&bond_block("series")).expect("parse");
     let low = case.lower().expect("lower");
     let banner = case::banner_lines(&low).join("\n");
-    for what in ["copper", "steel", "predicted", "delta", "0.45"] {
+    for what in ["copper", "steel", "predicted", "delta", "0.45", "slenderness"] {
         assert!(banner.contains(what), "banner is missing '{what}':\n{banner}");
     }
 }
@@ -3487,4 +3489,70 @@ fn two_cases_differing_only_in_the_preconditioner_produce_different_output() {
             sol.interface.imbalance()
         );
     }
+}
+
+// ==========================================================================
+//  SPEC-LIT 96.3 row 22 and 109.8 - the block-coupled knob at the lowering
+//  and in the banner
+// ==========================================================================
+
+/// Row 22: the block operator of 109 carries one material per region, so
+/// `coupled: true` with a `materials` list is refused at the lowering, by
+/// path, before any run.
+#[test]
+fn coupled_with_two_materials_is_refused_naming_the_bond() {
+    let base = bond_block("series");
+    let text = base.replace(r#""maxOuter": 500 }"#, r#""maxOuter": 500, "coupled": true }"#);
+    assert_ne!(text, base, "the substitution must change the text");
+    let e = read(&text).expect("parse").lower().expect_err("must refuse");
+    let msg = e.to_string();
+    assert!(msg.contains("solver/coupled"), "{msg}");
+    assert!(msg.contains("materials"), "{msg}");
+    assert!(msg.contains("109"), "{msg}");
+}
+
+/// 109.8: the banner names the method that will run - the `coupled: true`
+/// document of pair 11 says `block-coupled`.
+#[test]
+fn the_banner_names_the_block_coupled_solve() {
+    let text = default_stress()
+        .replace(r#""maxOuter": 500 }"#, r#""maxOuter": 500, "coupled": true }"#);
+    let case = read(&text).expect("parse");
+    let low = case.lower().expect("lower");
+    let banner = case::banner_lines(&low).join("\n");
+    assert!(banner.contains("block-coupled"), "{banner}");
+}
+
+/// Pair 11 (96.4 row 11): `solver.coupled` false -> true. The two loops are
+/// two discretisations of one continuum problem, so the answers must MOVE
+/// (13.4.1) but agree to first order in h ((109.7): the operators differ at
+/// `O(h)`).
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn pair_coupled_changes_the_solve_and_keeps_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let a = default_stress();
+    let b = a.replace(r#""maxOuter": 500 }"#, r#""maxOuter": 500, "coupled": true }"#);
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (_, _, sb) = run_stress_doc(&gpu, &b);
+    let (na, nb) = (sa[0].report.iterations, sb[0].report.iterations);
+    let d = du(&sa[0].u, &sb[0].u);
+    let ua = umax(&sa[0].u);
+    println!("pair coupled: iterations(a) = {na}, iterations(b) = {nb}");
+    println!("pair coupled: max|du| = {d:.3e}, max|u_a| = {ua:.3e}");
+    assert!(
+        sa[0].report.converged && sb[0].report.converged,
+        "both outer loops must converge"
+    );
+    assert!(
+        d > 0.0,
+        "the case said solver.coupled and the solver ignored it (SPEC-LIT 13.4.1)"
+    );
+    assert!(
+        d <= 0.1 * ua,
+        "two discretisations of one problem differ by more than O(h): \
+         max|du| = {d:.3e}, 0.1 max|u_a| = {:.3e}",
+        0.1 * ua
+    );
 }

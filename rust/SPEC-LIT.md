@@ -28319,10 +28319,10 @@ relaxation; the ratios between them are not measured, and five is the
 conservative end of that interval for the same reason 0.45 is.
 
 The route for both is **Cardiff, Tuković, Jasak & Ivanković (2016)**: a
-block-coupled matrix that solves the three components at once and never
-defers the coupling. The MATRIX is built - §109 is the second storage format
-beside §1's, with its assembly and its host twin - and the solve around it is
-not; until it is, both refusals stand.
+block-coupled matrix that solves the three components at once. It is built -
+§109 is the second storage format beside §1's, its solve and the loop around
+it - and Gate 95-A measured it (§109.7): it holds at 2.5:1 and misses at 5:1
+and 10:1, so neither refusal is lifted (§109.8).
 
 **A displacement that has reached the fluid mesh** — `max|u| / min_c
 V_c^{1/3}` above 0.1. An ALE step obeying the space conservation law needs a
@@ -28361,7 +28361,10 @@ count, the observed contraction and the predicted one at `nu = 0.2 / 0.3 /
 0.45`, held to the sweep's own numbers, with bare Picard's divergence at 0.45
 reproduced by name.
 
-**Gate 95-A, the end-loaded cantilever, IS NOT WRITTEN.** It was to measure
+**Gate 95-A, the end-loaded cantilever, is written in §109.6 and measured in
+§109.7, for the block-coupled solve; it holds at 2.5:1 and misses at 5:1 and
+10:1.** The rest of this paragraph is the record of why it could not be
+written for the segregated loop. It was to measure
 observed order on displacement and on cell-centre stress against Timoshenko &
 Goodier ch. 3 on three meshes at `r = 2`, through §94. §F.1b is why it is
 not: at the slenderness that makes a cantilever a bending problem the loop
@@ -28379,9 +28382,9 @@ with, and it is the one the measurement supports.
 
 ### 95.7 What this section does not do
 
-No block-coupled SOLVE - §109 assembles the matrix and nothing solves with
-it - and therefore no near-incompressible solid and no slender one. Both are
-refused above with the paper that would take them.
+No near-incompressible solid and no slender one past five: §109's block-coupled
+solve exists and does not lift either refusal (§109.8), and both are refused
+above with what was measured.
 
 No large deflection. The Turek-Hron flap of the fluid-structure programme is
 17.5:1 slender and deflects centimetres on a 35 cm span; it is beyond this
@@ -28696,7 +28699,7 @@ on `run`, and §44.1's `output` block on the case:
         { "match": "loaded", "u": { "type": "traction", "value": [1.0e6, 0.0, 0.0] } },
         { "match": "mid",    "u": { "type": "symmetry" } },
         { "match": "top",    "u": { "type": "free" } } ],
-      "solver": { "tolerance": 1e-6, "maxOuter": 500 }   // both optional, these are the defaults
+      "solver": { "tolerance": 1e-6, "maxOuter": 500, "coupled": false }   // all optional, these are the defaults
     } } ],
 "run":    { "steady": true, "mode": "stress" },      // "thermal" (default) | "stress"
 "output": { "exact": { "format": "vtu" } }           // §44.1's block, unchanged
@@ -28713,6 +28716,7 @@ on `run`, and §44.1's `output` block on the case:
 | `symmetry` | the normal component fixed 0, the tangential traction 0 - the axis is the patch's slot in `-x +x -y +y -z +z`, divided by two |
 | `free` | traction `(0, 0, 0)` |
 | `solver` | `tolerance` (default `1e-6`) is the outer loop's stop, `maxOuter` (default `500`) its iteration cap |
+| `solver.coupled` | `false` (the default): §95's segregated outer loop; `true`: §109's block-coupled solve inside the same loop and its controls (§109.8). Only with a single `material` (96.3 row 22) |
 | `run.mode` | `"thermal"` (the default, §47.14's conduction) or `"stress"` |
 | `output` | §44.1's block; on this run only `exact.format: "vtu"`, written once, is accepted |
 
@@ -28804,7 +28808,7 @@ every region of a thermal-mode run that names `output` — writes `T` only.
 ### 96.3 The refusal list
 
 Every message names the setting's JSON path (`regions/<name>/mechanics/...`,
-`run/mode`, `output/...`) and what to do instead. Rows 1-19 are refused in
+`run/mode`, `output/...`) and what to do instead. Rows 1-19 and 22 are refused in
 the lowering and proved by host tests in `io::case_cht::tests`; rows 20-21
 are runtime refusals, proved with the driver.
 
@@ -28829,6 +28833,7 @@ are runtime refusals, proved with the driver.
 | 17 | the `output` block accepts exactly `exact.format: "vtu"`, once: `output.visualisation` (a multi-region mesh is not one Cartesian lattice), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
 | 18 | `output` on a case with a fluid region - the flow path's VTU is a follow-up, not in this unit |
 | 19 | `mode` that is neither `thermal` nor `stress`, refused listing both |
+| 22 | `mechanics.solver.coupled: true` with `materials` - §109's block operator carries one material per region; the bond face as a 3x3 block is not built |
 
 An `output` field the run did not compute is UNREACHABLE in this format: the
 only field list the block can name is `visualisation.fields`, and row 17
@@ -28838,7 +28843,7 @@ refuses that block whole.
 
 §13.4.1, as §91.4 states it: two case documents identical in every byte but
 one, REQUIRED to produce different output, failing by name if they do not.
-All ten run on the 160-cell bar of the shared fixtures, in seconds, and all
+All eleven run on the 160-cell bar of the shared fixtures, in seconds, and all
 ten start by asserting the two documents actually differ. The measured
 numbers are from the run that wrote this section (RTX 5070 Ti, f64).
 
@@ -28854,6 +28859,7 @@ numbers are from the run that wrote this section (RTX 5070 Ti, f64).
 | 8 | `solver.tolerance` 1e-8 → 1e-2 | the outer iteration counts differ, both converged | 17 → 5 |
 | 9 | `solver.maxOuter` 500 → 2 | `a` converges; `b`'s `run_stress` is refused naming the region and the knob (96.3 row 21) | refusal at 2 iterations |
 | 10 | `bond` series → `linear` | `max|du| > 1e-6 max|u_a|` — the same pair Gate 95-E runs as its second leg | du 1.375e-6, |u_a| 6.099e-5 |
+| 11 | `solver.coupled` false → true | both converged, `max|du| > 0`, and `max|du| <= 0.1 max|u_a|` - two discretisations of one problem (109.7) | 17 → 18, du 6.568e-8, |u_a| 5.484e-5 |
 
 Row 2 is the interesting shape: a pair test whose knob CANNOT move `u` and
 what it does about it. The failure message of every row says "the case said
@@ -30836,7 +30842,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **446** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **447** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -30847,7 +30853,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -31345,9 +31351,9 @@ No f32 tolerance is written for this section, for §112.2's reason.
 
 ### 109.4 What this section does not do
 
-No solve. Nothing iterates on this matrix; `mechanics` cannot ask for it;
-§95.5's two refusals stand word for word until the solve exists and Gate 95-A
-is earned, which is the next section's work.
+No solve here. §109.5 solves this matrix, §109.6 iterates the loop around it and states
+Gate 95-A, §109.7 measures the gate, and §109.8 says what a case can ask for and what the
+refusals now say.
 
 No implicit tangential derivative. Cardiff et al. (2016) put the tangential
 rows of the face gradient into the matrix through a stencil on the face's
@@ -31483,5 +31489,73 @@ converges on every mesh, the observed order of the cell-centre displacement
 error is at least 1.9, that of the cell-centre stress error at least 0.9, and
 the finest mesh's tip deflection is within 5 % of the closed form; §94's
 study of the tip deflection is its uncertainty. The measured table is §109.7's.
+
+### 109.7 Gate 95-A, measured
+
+`ofgpu-validate`, RTX 5070 Ti, f64, the controls of §109.6: the block solve
+to (109.11) `1e-12` per application, Anderson of depth five, eight decades of
+`r = F(u) - u` or 1000 outer iterations. `e_tip`, `e_u`, `e_xx`, `e_xy` are
+the relative tip-deflection error and the three error measures of §109.6
+(`e_u` a maximum over cells against the largest exact displacement; the two
+stress errors volume-weighted rms against `P l c / I`).
+
+| ratio | `n_y` | cells | outer | `q_obs` | BiCGStab | `e_tip` | `e_u` | `e_xx` | `e_xy` |
+|---|---|---|---|---|---|---|---|---|---|
+| 2.5:1 | 4 | 40 | 93 | 0.641 | 1663 | 2.71e-2 | 2.75e-2 | 1.44e-2 | 1.34e-2 |
+| 2.5:1 | 8 | 160 | 33 | 0.545 | 1203 | 4.02e-3 | 4.05e-3 | 3.91e-3 | 4.88e-3 |
+| 2.5:1 | 16 | 640 | 31 | 0.479 | 2363 | 6.73e-4 | 6.97e-4 | 1.35e-3 | 1.74e-3 |
+| 5:1 | 4 | 80 | diverged at 673 | - | - | - | - | - | - |
+| 5:1 | 8 | 320 | 200 | 0.682 | 10198 | 1.98e-5 | 5.78e-4 | 3.76e-3 | 3.44e-3 |
+| 5:1 | 16 | 1280 | 52 | 0.553 | 6124 | 2.59e-4 | 2.63e-4 | 1.34e-3 | 1.23e-3 |
+| 10:1 | 4 | 160 | 1000, not converged | 0.992 | 68571 | - | - | - | - |
+| 10:1 | 8 | 640 | 730 | 0.826 | 84432 | 1.40e-3 | 1.40e-3 | 3.66e-3 | 2.43e-3 |
+| 10:1 | 16 | 2560 | 200 | 0.626 | 43339 | 5.66e-4 | 5.66e-4 | 1.32e-3 | 8.64e-4 |
+
+**2.5:1 holds**: converged on all three meshes, `p_u = 2.54`, `p_sigma =
+1.49`, the finest tip 0.07 % off the closed form; §94's study of the tip is
+monotone with `p = 2.79` and `U_fine = 2.6e-7` (0.78 % of the tip).
+**5:1 misses**: the coarsest mesh diverges - Anderson's residual grows a
+million-fold at outer iteration 673 - and the displacement error falls at
+`p_u = 1.14` between the two finer meshes; `p_sigma = 1.49` and the finest
+tip is 0.026 % off. **10:1 misses**: the coarsest mesh stalls at `q_obs =
+0.992` to the cap, and `p_u = 1.31`; `p_sigma = 1.47`, the finest tip 0.057 %
+off. The two studies of 5:1 and 10:1 read nothing, because their coarse level
+is not a converged solve.
+
+What the block solve changes, read beside the segregated loop on the same
+`n_y = 8` beams with the same controls (the ignored measurement
+`the_block_coupled_cantilever_sweep`): 2.5:1 in 33 outer iterations against
+53; 5:1 in 200 against no convergence in 1000 (`q_obs` 1.04); 10:1 in 730
+against no convergence in 1000 (`q_obs` 1.0008). The block-coupled loop
+converges the slender beams the segregated one stalls on, on the meshes that
+resolve them, and it does NOT yet earn Gate 95-A there: the coarse mesh does
+not converge and the displacement order is short of 1.9. Which of the two
+explicit parts of (109.3) - the tangential rows or §2.4's correction - sets
+that order is not measured here; §109.4's third format is the named next step.
+
+### 109.8 The case knob, and what the refusals now say
+
+`mechanics.solver.coupled` (default `false`) picks the map §95.3's loop
+iterates: `false` is §95's three scalar solves, bitwise what it always was;
+`true` is (109.12). The loop controls are the same either way - Anderson of
+depth five, `tolerance` as decades of `r = F(u) - u`, `maxOuter` and its
+refusal (§96.3 row 21) - and the block solve's own linear controls are the
+case's one `numerics` block, whose `solver` and `preconditioner` name the
+scalar systems' method and are not read by it: it is always BiCGStab with
+block-DILU, and `GAMG` is refused by name. `coupled: true` with `materials`
+is refused at lowering (§96.3 row 22).
+
+The rule for the refusals is the user's, recorded 2026-09-23: the
+slenderness refusal is lifted only at the aspect ratios where Gate 95-A
+holds. It holds at 2.5:1, which the segregated edge of five already accepts,
+so nothing is lifted: `SLENDERNESS_MAX` stays five and
+`refuse_bending_dominated_slender_body` refuses what it refused, with a
+message that says what the block solve measured. The refusal is still not
+called by the case path, as it never was - the shipped bimetal strip and die
+stack score above five and converge - and the banner prints each mechanical
+region's slenderness with its verdict and the method that will run. `nu`
+above 0.45 stays refused in both modes: Gate 95-A measures bending, not
+incompressibility. The `not built` refusal of a block-coupled solve is gone
+with the feature built.
 
 ---

@@ -647,6 +647,12 @@ pub struct ChtSolidSolver {
     /// The outer loop's iteration cap. Default `500`.
     #[serde(default = "default_solid_max_outer")]
     pub max_outer: u32,
+    /// `false` (the default) runs §95.3's segregated outer loop; `true` runs
+    /// the block-coupled solve of §109 - the three displacement components in
+    /// one matrix, PBiCGStab with block-DILU, inside the same outer loop and
+    /// its controls (§109.8). Only with a single `material` (§96.3 row 22).
+    #[serde(default)]
+    pub coupled: bool,
     /// ALWAYS refused (§96.3 row 7): the outer loop is Aitken delta-squared
     /// on the increment and its first omega is 1 - a static relaxation
     /// factor is not offered.
@@ -663,6 +669,7 @@ impl Default for ChtSolidSolver {
         Self {
             tolerance: default_solid_tolerance(),
             max_outer: default_solid_max_outer(),
+            coupled: false,
             relaxation: None,
             ddt_scheme: None,
         }
@@ -759,6 +766,8 @@ pub struct SolidOuterControls {
     pub tolerance: Scalar,
     /// The outer loop's iteration cap.
     pub max_outer: usize,
+    /// `true`: the block-coupled solve (§109.8).
+    pub coupled: bool,
 }
 
 /// A region's `mechanics` block, everything resolved - what
@@ -2114,9 +2123,19 @@ fn lower_mechanics(
              and its first omega is 1 (SPEC-LIT §95). Delete `relaxation`"
         )));
     }
+    // Row 22: the block operator of §109 carries one material per region.
+    if mech.solver.coupled && mech.materials.is_some() {
+        return Err(Error::Config(format!(
+            "{path}/solver/coupled: `coupled: true` with `materials` is not offered - \
+             the block-coupled operator of SPEC-LIT §109 carries one material per \
+             region, and the bond face of §95.8 written as a 3x3 face block is not \
+             built. Use one `material`, or `coupled: false` (SPEC-LIT 96.3 row 22)"
+        )));
+    }
     let solver = SolidOuterControls {
         tolerance: mech.solver.tolerance as Scalar,
         max_outer: mech.solver.max_outer as usize,
+        coupled: mech.solver.coupled,
     };
 
     Ok(Some(LoweredMechanics {

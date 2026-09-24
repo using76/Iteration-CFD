@@ -37,8 +37,8 @@
 //!     off the sweep, not off the algebra
 //!   P. Cardiff, Ž. Tuković, H. Jasak, A. Ivanković, *Comput. Struct.* 175
 //!     (2016) 100-122, DOI 10.1016/j.compstruc.2016.07.004 - block-coupled
-//!     elasticity, the route a near-incompressible case must take; named and
-//!     NOT implemented
+//!     elasticity, the route a near-incompressible case must take; implemented in
+//!     src/solid/coupled.rs (§109)
 //!   S. P. Timoshenko, J. N. Goodier, *Theory of Elasticity*, 3rd ed.,
 //!     McGraw-Hill (1970) ch. 3 - the end-loaded cantilever, the closed form
 //!     the validation binary's cantilever gate measures against

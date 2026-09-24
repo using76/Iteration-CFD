@@ -609,6 +609,7 @@
           "description": "The outer loop's own settings. Both knobs optional, both defaulted.",
           "$ref": "#/$defs/ChtSolidSolver",
           "default": {
+            "coupled": false,
             "maxOuter": 500,
             "tolerance": 1e-6
           }
@@ -950,6 +951,11 @@
       "description": "The outer displacement loop's own settings - SPEC-LIT §96.1. Two knobs,\nboth optional and defaulted; the two entries that are NOT offered\n(`relaxation`, `ddtScheme`) are present as fields so their refusals can\nsay why, exactly as `JsonExact::precision` does.",
       "type": "object",
       "properties": {
+        "coupled": {
+          "description": "`false` (the default) runs §95.3's segregated outer loop; `true` runs\nthe block-coupled solve of §109 - the three displacement components in\none matrix, PBiCGStab with block-DILU, inside the same outer loop and\nits controls (§109.8). Only with a single `material` (§96.3 row 22).",
+          "type": "boolean",
+          "default": false
+        },
         "ddtScheme": {
           "description": "ALWAYS refused (§96.3 row 6) through §95's inertia refusal:\nNewmark, HHT and generalised-alpha are not built.",
           "type": [

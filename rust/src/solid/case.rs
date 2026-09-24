@@ -23,6 +23,7 @@ use crate::io::pointfield::PointInterpolator;
 use crate::io::vtu::write_vtu_points;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solid::bc::CompBc;
+use crate::solid::coupled;
 use crate::solid::displacement::Displacement;
 use crate::solid::materials::MaterialMap;
 use crate::solid::outer::{self, OuterControls, OuterReport, Relaxation};
@@ -198,7 +199,13 @@ pub fn run_stress(gpu: &Gpu, low: &LoweredChtCase, sol: &ChtSolution) -> Result<
             max_outer: m.solver.max_outer,
             boundary_passes: 3,
         };
-        let report = outer::solve(gpu, &mut d, &ctrl)?;
+        // SPEC-LIT §109.8: the same loop controls either way; `coupled` picks
+        // the map the loop iterates.
+        let report = if m.solver.coupled {
+            coupled::solve(gpu, &mut d, &ctrl)?
+        } else {
+            outer::solve(gpu, &mut d, &ctrl)?
+        };
         if !report.converged {
             return Err(Error::Config(format!(
                 "regions/{}/mechanics/solver/maxOuter: the outer loop stopped \
@@ -290,6 +297,30 @@ pub fn banner_lines(low: &LoweredChtCase) -> Vec<String> {
                  equation omits (Boley & Weiner ch. 1-2)"
             ));
         }
+        // SPEC-LIT 109.8: the banner names the slenderness, its verdict and
+        // the map the outer loop will iterate - once per mechanical region.
+        let s = crate::solid::slenderness(&low.meshes[r]);
+        let edge = crate::solid::SLENDERNESS_MAX;
+        if m.solver.coupled {
+            out.push(format!(
+                "    slenderness {s:.2} (SPEC-LIT 95.5): block-coupled solve \
+                 (SPEC-LIT 109), PBiCGStab with block-DILU inside the outer \
+                 loop; Gate 95-A holds at 2.5:1 and misses at 5:1 and 10:1 \
+                 (SPEC-LIT 109.7)"
+            ));
+        } else if s <= edge * (1.0 + 1.0e-9) {
+            out.push(format!(
+                "    slenderness {s:.2} <= {edge} (SPEC-LIT 95.5): segregated outer loop"
+            ));
+        } else {
+            out.push(format!(
+                "    slenderness {s:.2} > {edge} (SPEC-LIT 95.5): the segregated \
+                 loop is measured to stall on a bending-dominated body above the \
+                 edge (docs/09-thermal-structural-plan.md F.1b); if this run stops \
+                 at maxOuter, mechanics.solver.coupled: true is the block-coupled \
+                 solve (SPEC-LIT 109.7 has what it measured)"
+            ));
+        }
     }
     out
 }
@@ -299,12 +330,22 @@ pub fn banner_lines(low: &LoweredChtCase) -> Vec<String> {
 pub fn summary_lines(low: &LoweredChtCase, stress: &[RegionStress]) -> Vec<String> {
     let mut out = Vec::new();
     for s in stress {
+        let method = low.mechanics[s.region]
+            .as_ref()
+            .map_or("segregated", |m| {
+                if m.solver.coupled {
+                    "block-coupled"
+                } else {
+                    "segregated"
+                }
+            });
         out.push(format!(
-            "  region {} '{}': outer iterations {}, converged {}, \
+            "  region {} '{}' ({}): outer iterations {}, converged {}, \
              observed contraction {:.4} vs predicted {:.4}, max|u| = {:.4e} m, \
              motion_ratio (max|u|/h_min) = {:.3e}",
             s.region,
             s.name,
+            method,
             s.report.iterations,
             s.report.converged,
             s.report.observed_contraction,
@@ -322,7 +363,6 @@ pub fn summary_lines(low: &LoweredChtCase, stress: &[RegionStress]) -> Vec<Strin
         ));
         out.push(s.describe.clone());
     }
-    let _ = low;
     out
 }
 
