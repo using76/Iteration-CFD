@@ -3,8 +3,9 @@
 // text of the others, and the model names.
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { BINARIES, BINARY_NAMES, getBinary, MODELS, PIPELINES } from '@cfd/shared'
+import { BINARIES, BINARY_NAMES, checkArgValue, getBinary, MODELS, PIPELINES, toolPolicy } from '@cfd/shared'
 import { REPO_ROOT } from '../runs/test-helpers.js'
 
 const RUST = path.join(REPO_ROOT, 'rust')
@@ -101,7 +102,7 @@ describe('registry <-> rust sources', () => {
   })
 
   it('geometry_pipelines_shape: geom-tool and regions-from-msh are .py pipelines beside the binaries', () => {
-    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh'])
+    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh', 'autonomy-campaign'])
     for (const [name, positionals] of [['geom-tool', ['command', 'file']], ['regions-from-msh', ['msh', 'outDir']]] as const) {
       const pipeline = PIPELINES.find((p) => p.name === name)!
       expect(pipeline.pipeline).toBe(true)
@@ -137,5 +138,44 @@ describe('registry <-> rust sources', () => {
     expect(common).toMatch(/RasModel::KEpsilon \| RasModel::RealizableKE \| RasModel::RNGkEpsilon => "ofgpu-k-epsilon"/)
     const ke = BINARIES.find((b) => b.name === 'ofgpu-k-epsilon')!
     expect(ke.builds).toEqual(expect.arrayContaining(['kEpsilon', 'realizableKE', 'RNGkEpsilon']))
+  })
+
+  it('autonomy_campaign_pipeline: campaign.py beside the binaries, its run flags from the script\'s own argparse', () => {
+    const p = PIPELINES.find((x) => x.name === 'autonomy-campaign')!
+    expect(p).toBeTruthy()
+    expect(p.pipeline).toBe(true)
+    expect(BINARY_NAMES).not.toContain('autonomy-campaign')
+    expect(getBinary('autonomy-campaign')).toBe(p)
+    expect(p.source).toBe('tools/autonomy/campaign.py')
+    expect([p.kind, p.gpu, p.longRunning, p.positionals]).toEqual(['mesh', false, true, []])
+    const flag = (n: string) => p.flags.find((f) => f.name === n)!
+    for (const n of ['--run', '--manifest', '--mode', '--out', '--tag', '--run-id', '--streams']) expect(p.flags.map((f) => f.name)).toContain(n)
+    const texts = [fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'campaign_cli.4f56fd1.txt'), 'utf8')]
+    const real = path.join(REPO_ROOT, 'tools', 'autonomy', 'campaign.py')
+    if (fs.existsSync(real)) texts.push(read(real))
+    for (const text of texts) {
+      const decl = new Map([...text.matchAll(/ap\.add_argument\("(--[a-z-]+)"([^\n]*)/g)].map((m) => [m[1], m[2]] as const))
+      for (const f of p.flags) {
+        expect(decl.has(f.name), `${f.name} is declared by campaign.py`).toBe(true)
+        const rest = decl.get(f.name) ?? ''
+        const want = rest.includes('action="store_true"') ? 'flag' : rest.includes('type=int') ? 'int' : rest.includes('type=float') ? 'float' : null
+        if (want) expect(f.type, f.name).toBe(want)
+        else expect(['string', 'path', 'enum', 'list'], f.name).toContain(f.type)
+      }
+      expect([...decl.keys()].filter((n) => !p.flags.some((f) => f.name === n)).sort()).toEqual(['--compare', '--gate', '--json', '--parts', '--replay', '--selftest', '--status', '--summary'])
+      const tuple = (name: string) => [...text.match(new RegExp(`^${name} = \\(([^)]*)\\)`, 'm'))![1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
+      expect(flag('--mode').values).toEqual(tuple('MODES'))
+      expect(text).toMatch(/^SYSTEMS = MODES\[:-1\]/m)
+      expect(flag('--system').values).toEqual(tuple('MODES').slice(0, -1))
+      expect(flag('--ablate').values).toEqual(tuple('ABLATABLE'))
+      expect(flag('--streams').description).toContain(`1..${Number(text.match(/^MAX_STREAMS = (\d+)/m)![1])}`)
+    }
+    expect(checkArgValue(flag('--streams'), '4')).toBeNull()
+    expect(checkArgValue(flag('--mode'), 'rules')).toBeNull()
+    expect(checkArgValue(flag('--mode'), 'bogus')).toMatch(/--mode must be one of/)
+    expect(checkArgValue(flag('--ablate'), 'preflight,remedies')).toBeNull()
+    expect(checkArgValue(flag('--ablate'), 'quality')).toMatch(/unknown quality/)
+    expect(checkArgValue(flag('--run'), true)).toBeNull()
+    expect(toolPolicy('run_start')).toBe('ask')
   })
 })

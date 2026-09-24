@@ -8,6 +8,7 @@ import type { BetaImageBlockParam, BetaTextBlockParam, BetaTool, BetaToolResultB
 import { TOOL_NAMES } from '@cfd/shared'
 import { z } from 'zod'
 import { toWorkspaceRel } from '../workspace/paths.js'
+import { autonomyAttempts } from './autonomy.js'
 import { caseCreate, caseEdit, caseRead, caseValidate } from './case.js'
 import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { customToolCreate, customToolRun } from './custom.js'
@@ -54,6 +55,7 @@ export const TOOLS: ToolDef[] = [
   geometryEdit,
   meshRegions,
   regionsCheck,
+  autonomyAttempts,
   residualsGet,
   viewerCommand,
   plotResiduals,
