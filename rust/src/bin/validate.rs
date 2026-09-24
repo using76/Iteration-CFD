@@ -3266,6 +3266,15 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("S97 Gate 97-B region layout");
     check_region_layout(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT 98.6 - the face that exchanges heat with something not meshed.
+    println!("\n=== Gate 98-A: the straight fin, three meshes, against (S98.7) (SPEC-LIT 98.6) ===");
+    c.enter_gate("SPEC-LIT 98.6 Gate 98-A straight fin");
+    check_straight_fin(c, &gpu)?;
+    c.leave_gate();
+    println!("\n=== Gate 98-B: the slab radiating to a surround, its Newton passes (SPEC-LIT 98.6) ===");
+    c.enter_gate("SPEC-LIT 98.6 Gate 98-B radiating slab");
+    check_radiating_slab(c, &gpu)?;
+    c.leave_gate();
     // SPEC-LIT 105 - the moving mesh, and Gate 105-A.
     println!("\n=== Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) ===");
     c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
@@ -20224,6 +20233,240 @@ fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 }
 
 // ==========================================================================
+//  SPEC-LIT §98 - the face that exchanges heat with something not meshed
+// ==========================================================================
+
+/// Gate 98-A's fin as a case document (SPEC-LIT 98.6): silicon, 50 mm long,
+/// 1 mm thick, 10 mm deep, `nx` cells along it and two across it; the base
+/// held at 400 K, the two broad faces losing heat at h = 25 to 300 K, the
+/// tip and the two depth faces adiabatic - so P = 2w and A = t w.
+fn gate_98a_fin(nx: usize) -> String {
+    format!(
+        r#"{{
+  "name": "gate98aFin",
+  "regions": [
+    {{
+      "name": "fin",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.05, 0.001, 0.01] }},
+        "cells": [{nx}, 2, 1],
+        "boundaries": {{
+          "xmin": "base", "xmax": "tip",
+          "ymin": "lower", "ymax": "upper", "zmin": "front", "zmax": "back"
+        }}
+      }},
+      "material": {{ "rho": 2330.0, "c": 700.0, "kappa": 148.0 }},
+      "patches": [
+        {{ "match": "base",  "T": {{ "type": "fixedValue", "value": 400.0 }} }},
+        {{ "match": "tip",   "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "lower", "T": {{ "type": "externalConvection", "h": 25.0, "TInf": 300.0 }} }},
+        {{ "match": "upper", "T": {{ "type": "externalConvection", "h": 25.0, "TInf": 300.0 }} }},
+        {{ "match": "front", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "back",  "T": {{ "type": "zeroGradient" }} }}
+      ]
+    }}
+  ],
+  "initial": {{ "T": 350.0 }},
+  "run": {{ "steady": true }},
+  "numerics": {{
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 4000
+  }}
+}}"#
+    )
+}
+
+/// Gate 98-A (SPEC-LIT 98.6): the fin's base heat flow, read with
+/// `ChtSolution::patch_heat_flow` the way `ChtFlowSolution::patch_heat_flow`
+/// reads one, against (S98.7) on three meshes - 0.5 % on the finest, with
+/// §94's study and GCI beside it. The band holds the discretisation error
+/// AND the 1-D model's O(Bi) offset, and the verdict says so.
+fn check_straight_fin(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::ambient::fin_heat_flow;
+    use ofgpu::cht::run_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let (h, k, t, w, l, theta_b): (Scalar, Scalar, Scalar, Scalar, Scalar, Scalar) =
+        (25.0, 148.0, 1.0e-3, 1.0e-2, 0.05, 100.0);
+    let q_exact = fin_heat_flow(h, 2.0 * w, k, t * w, l, theta_b);
+    let m_l = (h * 2.0 * w / (k * t * w)).sqrt() * l;
+    let bi = h * (0.5 * t) / k;
+    c.note(&format!(
+        "  (S98.7): m L = {m_l:.4}, q_b = {q_exact:.6} W, Bi = h (t/2)/k = {bi:.3e}"
+    ));
+
+    let mut levels = Vec::new();
+    let mut rels: Vec<Scalar> = Vec::new();
+    let mut detail = Vec::new();
+    for nx in [20usize, 40, 80] {
+        let low = parse_cht_case(&gate_98a_fin(nx), "SPEC-LIT 98.6 Gate 98-A")?.lower()?;
+        let sol = run_case(gpu, &low)?;
+        let q = sol.patch_heat_flow(0, "base")?;
+        let rel = (q / q_exact - 1.0).abs();
+        levels.push(vv::Level { h: l / nx as Scalar, value: q });
+        rels.push(rel);
+        let line = format!(
+            "nx={nx:>3} cells={:>4} q_b={q:.8} W rel={rel:.3e}",
+            sol.mesh.host.n_cells
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+
+    // The study reads the FINEST level first.
+    levels.reverse();
+    let study = vv::grid_study(&levels)?;
+    c.note(&format!("  base heat flow: {}", study.one_line()));
+    let val = vv::validation(levels[0].value, q_exact, study.u_fine, 0.0, 0.0);
+    c.note(&format!("  {}", val.one_line("base heat flow, finest mesh")));
+    c.note(&format!(
+        "  the band holds the discretisation error AND the 1-D model's offset, of relative \
+         order Bi = {bi:.1e} (SPEC-LIT 98.6)"
+    ));
+    c.check(
+        "SPEC-LIT 98.6 Gate 98-A: fin base heat flow on the finest mesh (nx = 80), rel to (S98.7)",
+        rels[2],
+        5.0e-3,
+    );
+    if !(rels[2] <= 5.0e-3) {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 98.6 Gate 98-A straight fin",
+            against: "the straight fin with an adiabatic tip, (S98.7), SPEC-LIT 98.6",
+            headline: format!(
+                "base heat flow {:.3} % off (S98.7) on the finest mesh, against 0.5 %",
+                f64::from(rels[2]) * 100.0
+            ),
+            detail,
+            uncertainty: Some(Uncertainty::Study(study)),
+        });
+    }
+    Ok(())
+}
+
+/// Gate 98-B's slab as a case document (SPEC-LIT 98.6): 20 mm of `k = 1` in
+/// twenty cells, `hot` held at 500 K, `face` radiating at 0.8 to 300 K, the
+/// four side faces adiabatic, started at 500 K.
+fn gate_98b_slab() -> String {
+    r#"{
+  "name": "gate98bSlab",
+  "regions": [
+    {
+      "name": "slab",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.02, 0.01, 0.01] },
+        "cells": [20, 1, 1],
+        "boundaries": {
+          "xmin": "hot", "xmax": "face",
+          "ymin": "s1", "ymax": "s2", "zmin": "s3", "zmax": "s4"
+        }
+      },
+      "material": { "rho": 2000.0, "c": 800.0, "kappa": 1.0 },
+      "patches": [
+        { "match": "hot",  "T": { "type": "fixedValue", "value": 500.0 } },
+        { "match": "face", "T": { "type": "externalRadiation", "emissivity": 0.8, "TEnv": 300.0 } },
+        { "match": "s1", "T": { "type": "zeroGradient" } },
+        { "match": "s2", "T": { "type": "zeroGradient" } },
+        { "match": "s3", "T": { "type": "zeroGradient" } },
+        { "match": "s4", "T": { "type": "zeroGradient" } }
+      ]
+    }
+  ],
+  "initial": { "T": 500.0 },
+  "run": { "steady": true },
+  "numerics": {
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 1000
+  }
+}"#
+    .to_string()
+}
+
+/// Gate 98-B (SPEC-LIT 98.6): the radiating face's temperature against the
+/// root of (S98.8) to 1e-10, the linearisation residual (S98.5) to 1e-10,
+/// and the Newton passes quadratic - every ratio delta_(k+1)/delta_k^2
+/// whose delta_(k+1) is above the solver's floor 1e-12 T_r at most 2C, and
+/// at least two of them. One mesh, for the reason SPEC-LIT 94.3 accepts.
+fn check_radiating_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::ambient::radiating_slab_root;
+    use ofgpu::cht::run_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let root = radiating_slab_root(1.0 / 0.02, 500.0, 0.8, 300.0);
+    c.note(&format!(
+        "  (S98.8): host Newton from 500 K, T_r = {:.10} K, C = {:.4e} /K, corrections {:?} K",
+        root.root, root.newton_constant, root.corrections
+    ));
+    let low = parse_cht_case(&gate_98b_slab(), "SPEC-LIT 98.6 Gate 98-B")?.lower()?;
+    let sol = run_case(gpu, &low)?;
+    let bf = sol.mesh.patch_range(0, "face")?.start;
+    let tb = sol.bt[bf];
+    let rel = ((tb - root.root) / root.root).abs();
+    let d = &sol.external_passes;
+    let mut ratios: Vec<Scalar> = Vec::new();
+    for k in 0..d.len().saturating_sub(1) {
+        if d[k + 1] > 1.0e-12 * root.root {
+            ratios.push(d[k + 1] / (d[k] * d[k]));
+        }
+    }
+    let worst = ratios.iter().copied().fold(0.0 as Scalar, Scalar::max);
+    let bound = 2.0 * root.newton_constant;
+    c.note(&format!(
+        "  T_b = {tb:.10} K after {} Newton passes; corrections {d:?} K",
+        d.len()
+    ));
+    c.note(&format!(
+        "  ratios delta_(k+1)/delta_k^2 above the floor: {ratios:?} against 2C = {bound:.4e}"
+    ));
+    c.note(
+        "  one mesh: the steady solid is exactly linear, so each pass is Newton's step on \
+         (S98.8) and T_b is its root to round-off - no discretisation error to extrapolate \
+         (SPEC-LIT 94.3)",
+    );
+    c.check("SPEC-LIT 98.6 Gate 98-B: T_b against the root of (S98.8), rel", rel, 1.0e-10);
+    c.check(
+        "SPEC-LIT 98.6 Gate 98-B: the linearisation residual (S98.5)",
+        sol.external_residual,
+        1.0e-10,
+    );
+    c.check(
+        "SPEC-LIT 98.6 Gate 98-B: worst Newton ratio over 2C (quadratic)",
+        worst / bound,
+        1.0,
+    );
+    c.require(
+        "SPEC-LIT 98.6 Gate 98-B: at least two Newton ratios above the solver's floor",
+        ratios.len() >= 2,
+    );
+
+    let ok = rel <= 1.0e-10
+        && sol.external_residual <= 1.0e-10
+        && worst <= bound
+        && ratios.len() >= 2;
+    if !ok {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 98.6 Gate 98-B radiating slab",
+            against: "the steady balance of a slab radiating to a large surround, (S98.8), SPEC-LIT 98.6",
+            headline: format!(
+                "T_b rel {rel:.2e}, residual {:.2e}, worst Newton ratio {worst:.3e} against 2C = \
+                 {bound:.3e}, {} ratios",
+                sol.external_residual,
+                ratios.len()
+            ),
+            detail: vec![format!("  corrections {d:?} K")],
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one mesh: the steady solid is exactly linear, so T_b is the root of (S98.8) to \
+                 round-off and there is no discretisation error to extrapolate",
+            )),
+        });
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  SPEC-LIT §97 - the imported region
 // ==========================================================================
 
@@ -20430,7 +20673,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 27 occurrences, 23 distinct - two gates report twice,
+    /// same string. 29 occurrences, 25 distinct - two gates report twice,
     /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
@@ -20456,9 +20699,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 27, "27 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 29, "29 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 23, "23 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 25, "25 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(

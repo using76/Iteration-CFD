@@ -29943,6 +29943,19 @@ The corrections the host Newton takes from 500 K are 33.95, 1.096,
 `1.04e-3` and `9.3e-10` K against `C = 8.62e-4` /K - three ratios,
 `9.5e-4`, `8.65e-4` and `8.62e-4`, each already at the asymptotic constant.
 
+**Measured** (RTX 5070 Ti, f64, the `ofgpu-validate` run that landed this
+section). Gate 98-A: `q_b = 1.97269876`, `1.97316727` and `1.97328444` W at
+`n_x = 20, 40, 80`, which is `3.50e-4`, `1.13e-4` and `5.36e-5` off (S98.7);
+the study reads monotone, `p = 1.999`, `phi_ext = 1.973324` W, `U_fine = 4.9e-5`
+W. The extrapolated value sits `3.4e-5` (relative) BELOW (S98.7), outside
+`U_fine`, so §94.3's metric says what is left is not the mesh - and its size is
+of the order of `Bi = 8.4e-5` and its sign is the one a transverse resistance
+gives: the 1-D model's offset the band was said to contain, measured rather
+than argued. Gate 98-B: four Newton passes, corrections 33.95, 1.096,
+`1.04e-3` and `9.33e-10` K, ratios `9.51e-4`, `8.65e-4` and `8.63e-4` against
+`2C = 1.72e-3`; `T_b = 464.9497776245` K, `3.7e-16` from the host's root, and
+the residual (S98.5) `3.9e-16`.
+
 ---
 
 ## 105. ALE motion and the space conservation law — the mesh that moves, and the volume it sweeps
