@@ -396,10 +396,10 @@ fn the_transition_correction_replays_bitwise() {
             gpu.write(&mut m.omega_mut().f, &vec![50.0 as Scalar; hm.n_cells])?;
             // The two new equations get the SAME fixed-iteration solver the
             // other two have. Not a detail: a checking solve calls
-            // `read_flag`, which synchronises on an event, and §81.3's guard
-            // catches exactly that - the capture fails with
-            // CUDA_ERROR_CAPTURED_EVENT rather than silently recording a
-            // stale flag. It is how this gate found that `LmControls`
+            // `read_flag`, which synchronises on an event, and a graph cannot
+            // record that. The solve now refuses it by name before it
+            // launches (§113.2); before that, the capture failed with
+            // CUDA_ERROR_CAPTURED_EVENT. It is how this gate found that `LmControls`
             // defaults to a checking solver, which is right for a run and
             // wrong for a capture.
             let lmc = crate::models::transition::LmControls {
@@ -445,9 +445,9 @@ fn the_transition_correction_replays_bitwise() {
 /// The LM gate's reasoning with a fourth equation in the rotation:
 /// `GammaControls` mirrors the k settings, which are adaptive, so a
 /// checking solve is what a default `gamma` solve would be - and a checking
-/// solve calls `read_flag`, which synchronises on an event, and §81.3's
-/// guard refuses that inside a capture by name (CUDA_ERROR_CAPTURED_EVENT,
-/// not a silent stale flag). The gate therefore hands `gamma` the SAME
+/// solve calls `read_flag`, which synchronises on an event, and the solve
+/// refuses that inside a capture by name (§113.2) rather than recording a
+/// stale flag. The gate therefore hands `gamma` the SAME
 /// fixed-iteration solver the other three equations get, which is right for
 /// a capture and what the run's `system/fvSolution` would say.
 #[test]

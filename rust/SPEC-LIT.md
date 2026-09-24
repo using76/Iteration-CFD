@@ -30829,3 +30829,212 @@ not get there. Gates 94-A to 94-D, 95-D, 95-E, 105-A to 105-C and 110-C are amon
   any misalignment §46's tests construct) would let `ofgpu-validate` run past section 8 in
   f32 and let most of the 89 refused tests run. It changes what the f32 build accepts,
   so it is left to whoever owns those guards; the f64 values stay as they are either way.
+
+---
+
+## 113. The Krylov loop without one-thread launches, and the flag read a case can space out
+
+`docs/11` §B.4 counted four one-thread kernels among the launches of every PBiCGStab
+sweep, and a convergence flag read back to the host after every sweep because
+`check_interval` defaulted to 1 and no case could set it. This section records three
+changes to `src/solver.rs` and `cuda/solver.cu`. Every scalar update the two Krylov loops
+launched as a one-thread kernel is now done by thread 0 of the stage-two reduction that
+produces its operand, with the same loads and the same IEEE operations in the same
+order, so the fused loop is the unfused one bit for bit, and a test holds it to a
+verbatim copy of the loop as it stood. A solve that would make a host round-trip inside
+a CUDA-graph capture is refused by name before it launches anything. And
+`checkInterval` is a case keyword, with the default §113.4 measures. No scheme,
+tolerance, stopping rule, operand order or preconditioner changed.
+
+`No GPL-licensed source was consulted.` The sources are Saad (2003) §6.7 and §7.4.2 and
+van der Vorst (1992) for the two algorithms (§8.1, §8.2), and this tree's own code.
+
+### 113.1 The fold — each scalar update rides on the reduction that feeds it
+
+A reduction here is two launches: stage one writes one partial per block, stage two
+(`solSumStage2`, `solSum2Stage2`) adds the partials in one block and thread 0 stores the
+sum. The loop then launched a one-thread kernel to read that sum back from device memory
+and combine it with other device scalars. The fused stage-two kernels keep stage two's
+body unchanged and let thread 0, which already holds the sum in a register, do the
+one-thread kernel's arithmetic before it exits:
+
+| loop | one-thread launches removed | fused stage two | what thread 0 computes after the sum `s` |
+|---|---|---|---|
+| PBiCGStab | `solBetaBicg`, and the end-of-sweep `solCopyScalar` of `rho` into `rho_old` | `solSumStage2Beta` | `rho = s + 0`; `beta = safeDiv(rho, rho_old)·safeDiv(alpha, omega)`; `rho_old = rho` |
+| PBiCGStab | `solDivideScalar` for `alpha` | `solSumStage2Divide` | `den = s + 0`; `alpha = safeDiv(rho, den)` |
+| PBiCGStab | `solDivideScalar` for `omega` | `solSum2Stage2Divide` | `num = s_a`, `den = s_b`; `omega = safeDiv(num, den)` |
+| PCG | `solDivideScalar` for `alpha` | `solSumStage2Divide` | `den = s + 0`; `alpha = safeDiv(rho, den)` |
+| PCG | `solDivideScalar` for `beta`, and `solCopyScalar` of the new `rho` | `solSumStage2Ratio` | `num = s + 0`; `beta = safeDiv(num, rho)`; `rho = num` |
+| both, at every check | `solConvergenceTest` | `solSumStage2Converged` | `res = s + 0`; the §8.4 test against the tolerance and `relTol`; `flag = 1` once it is met |
+
+Why it is the same answer to the bit. (1) Thread 0's register holds exactly the value
+stage two stored: nothing on this card carries extra precision between a register and
+memory. (2) The `+ 0` is still the runtime `offset` argument `solSumStage2` takes. It is
+not a literal, because `s + 0.0` turns a `-0` sum into `+0` and a folded constant need
+not. (3) `safeDiv` is the same guarded quotient with the same `OFGPU_TINY`, and each
+product and comparison has the same operands in the same order. None of them is an
+add after a multiply, so no fused multiply-add can form where there was none. (4)
+`rho_old = rho` moved from the end of a sweep to the moment `beta` is formed. Nothing
+reads `rho_old` between those two points, so the next sweep sees the same value.
+
+The one-thread kernels themselves stay. The setup of a solve and the test before the
+first sweep still use them, and so does `src/distsolve.rs`, whose per-part protocol is
+unchanged. They are also what the fused loop is tested against.
+
+What a sweep saves: in a fixed-iteration solve, four launches a sweep for PBiCGStab and
+three for PCG; in a checking sweep, one more (the convergence test). The capture census
+of §81.4 counts it. A 12-sweep fixed-iteration PBiCGStab solve on the dense 29-cell rig
+of `src/solver.rs`'s tests captured **232** kernel nodes before this section and **184**
+after.
+
+The proof is three tests in `src/solver.rs`. `the_fused_pbicgstab_is_the_unfused_one_bit_for_bit`
+and `the_fused_pcg_is_the_unfused_one_bit_for_bit` keep a verbatim copy of each loop as
+it stood before this section and require every value of the solution, the iteration
+count, the converged flag and both reported residuals to be bitwise equal. They cover a
+dense 29-cell system and a 12 x 10 x 8 hex block, the diagonal preconditioner and the
+multi-colour DIC and DILU of §21. They cover fixed solves of 1, 7 and 40 sweeps and
+checking solves at `check_interval` 1 and 3, each started once from zero and once more
+from the first answer. `the_fused_loops_launch_fewer_kernels_a_sweep` captures both
+loops at 6 and 12 sweeps and requires the census difference to be exactly four and
+three kernel nodes a sweep.
+
+### 113.2 A host round-trip inside a capture is refused by the solve, by name
+
+A checking solve reads its flag back to the host every `check_interval` sweeps. With
+`report_residuals` on, it also copies the residual triple back once at the end. A CUDA
+graph can record neither. Until this section, such a solve was kept out of every
+capture only by its caller setting `fixed_iters` on and `report_residuals` off. One
+that did not set them reached the flag read, whose event record fails inside a capture
+with `CUDA_ERROR_CAPTURED_EVENT`: a driver error that names neither the solve nor the
+setting.
+
+`solve_pbicgstab` and `solve_pcg` now ask `Gpu::is_capturing` (§81.3) before they launch
+anything. Inside a capture they refuse `fixed_iters` off and `report_residuals` on. Each
+refusal names the function, the setting, why a graph cannot hold it, and what to set
+instead. Outside a capture nothing changes. The proof is
+`a_round_trip_solve_is_refused_by_name_inside_a_capture`, which also captures a
+fixed-iteration solve on the same `Gpu` right after the refusals, to show that a
+refusal leaves nothing armed.
+
+### 113.3 `checkInterval` — the case keyword, and the default
+
+`solvers/<var>/checkInterval N;` in `system/fvSolution` sets how many sweeps pass between
+two reads of the convergence flag for that equation. `N` must be a whole number of at
+least 1. Anything else is refused by name rather than defaulted, because a silently
+defaulted interval is a solve that drains the pipeline when the case said it should
+not, or overshoots when the case said it should not. A JSONC case's solver rule has no
+such key and takes the default.
+
+What the interval means is unchanged. The flag is sticky, so a wider interval never
+misses a convergence. It overshoots by up to `N - 1` sweeps, and those sweeps update
+the solution (`a_wider_check_interval_only_overshoots`). So a different interval is a
+different stopping sweep and a different answer, within the tolerance but not to the
+bit. The fold of §113.1 is bitwise at every interval. Changing the interval is not.
+
+`checkInterval` defaults to **1** (`DEFAULT_CHECK_INTERVAL` in `src/io/case.rs`), and
+§113.4 is the measurement that default rests on. The code paths that set their own
+interval keep it: the CHT lowering (10), Turek–Hron (5), the pressure selector's
+reference solve (20), and the gates of `ofgpu-validate` that set 10.
+`check_interval_is_read_and_a_bad_one_is_refused_by_name` and
+`the_default_check_interval_is_the_one_spec_lit_states` in `src/io/case.rs` hold the
+keyword and this paragraph to the code.
+
+### 113.4 What it buys, measured
+
+Every figure below was taken on the machine of record (one RTX 5070 Ti, 16,303 MiB,
+driver 596.49, f64) on 2026-09-24, before this section (HEAD `f0a3762`) and after it,
+with `nvidia-smi --query-compute-apps` logged next to every run. The cases are
+`ofgpu-generate-mesh plume <dir> <nx> <ny> <nz>` at 60 x 25 x 16 (24,000 cells),
+98 x 42 x 20 (82,320), 120 x 50 x 40 (240,000) and 200 x 120 x 100 (2,400,000). Each
+is run by two drivers. `ofgpu-plume <dir> -iters 60` holds the flow frozen: a
+potential-flow prologue, then k-ε and T. `ofgpu-buoyant <dir> -iters 60 -backend
+pbicgstab` is steady SIMPLE on U, p, k, ε and T. The timed figure is each driver's own
+per-iteration line, the median of three runs, and the fields each run writes are
+compared byte for byte with the run before this section.
+
+**The answer did not move.** Every field every run wrote is byte-identical to the run
+before this section:
+
+| mesh | cells | `ofgpu-plume` fields | `ofgpu-buoyant` fields | potential-flow sweeps |
+|---|---|---|---|---|
+| 60 x 25 x 16 | 24,000 | identical, 5 files | identical, 7 files | 144 |
+| 98 x 42 x 20 | 82,320 | identical | identical | 212 |
+| 98 x 42 x 20, `p` and `Phi` on PCG + DIC | 82,320 | identical | identical | 294 |
+| 120 x 50 x 40 | 240,000 | identical | identical | 328 |
+| 200 x 120 x 100 | 2,400,000 | identical | identical | 832 |
+
+The same runs with `checkInterval 1;` written into every solver dictionary are
+byte-identical to the default runs. `ofgpu-validate` reports 936/937 checks, and all
+937 rows are byte-identical to the rows at `f0a3762`. That includes the CHT, Turek–Hron
+and selector solves that check at an interval of their own, and the one failing row,
+Gate 105-C CFD2 lift, which was failing before.
+
+**The fold, on the wall clock.** The card was shared for most of the day. Another
+user's `fds_gpu.exe` held about 8 GB at 78–98 % SM from about 10:00 to 10:40, and after
+that short-lived Python processes kept opening GPU contexts. So every timing below was
+taken alternating a build of `f0a3762` with this one, case by case, and each row says
+how loaded the card was. In the quietest window (12:03–12:05, 29 of the 48 run starts
+reading 0–3 % SM and none above 57 %, a reading that includes the tail of the run
+before), the medians of three runs, in ms per iteration or per unit of work, were:
+
+| mesh | cells | `ofgpu-plume` before → after | `ofgpu-buoyant` before → after |
+|---|---|---|---|
+| 60 x 25 x 16 | 24,000 | 2.413 → 2.169 (−10.1 %) | 19.91 → 17.56 (−11.8 %) |
+| 98 x 42 x 20 | 82,320 | 2.682 → 2.610 (−2.7 %) | 25.69 → 23.27 (−9.4 %) |
+| 98 x 42 x 20, PCG | 82,320 | 2.846 → 2.490 (−12.5 %) | 29.57 → 26.55 (−10.2 %) |
+
+At 240,000 cells in the same window this build's run starts read 12–25 % SM, and it
+came out slower: `ofgpu-plume` 4.805 → 6.072, `ofgpu-buoyant` 70.10 → 71.18. So the
+larger meshes were timed again on a loaded card (up to 94 % SM at a run start), and the
+figure is the fastest of alternating runs: the least disturbed run, not an idle one.
+`ofgpu-plume` gave 4.981 → 4.652 ms (−6.6 %, eight pairs) at 240,000 cells and
+39.74 → 37.27 ms (−6.2 %, three pairs) at 2,400,000. The idle figures before this
+section, taken the same morning, were 4.63 and 37.4. `ofgpu-buoyant` at 2,400,000 cells
+was not re-timed on a quiet card.
+
+The fixed-iteration benches do the same work either side, so they isolate the fold.
+Five alternating pairs, card lightly loaded (medians, fastest in brackets):
+`ofgpu-graph-bench <60 x 25 x 16> -iters 300 -sweeps 3` per-launch 1.362 → 1.232
+(1.304 → 1.212) ms/iter, CUDA graph 0.540 → 0.454 (0.454 → 0.432), adaptive 1.054 →
+1.047. Every run reported `0 of 24000 cells differ`. `ofgpu-bench 400 200 1 -iters 50
+-fixedIters 3`: k-ε 1.590 → 1.577, k-ω 1.700 → 1.545.
+
+**The interval, and why the default stays 1.** The same case was run with
+`checkInterval N;` in every solver dictionary, round-robin (every `N` once per round,
+five rounds at 24,000 cells and three at 240,000), on a card loaded to between 0 and
+94 % SM. Medians, ms:
+
+| run | N = 1 | N = 2 | N = 4 | N = 8 |
+|---|---|---|---|---|
+| `ofgpu-plume`, 24,000 cells | 3.177 | 3.304 | 3.684 | 5.133 |
+| `ofgpu-plume`, 240,000 cells | 7.169 | 6.754 | 8.167 | 9.621 |
+| `ofgpu-buoyant`, 24,000 cells, fastest round | 23.11 | 23.77 | 23.84 | 28.53 |
+
+With `checkInterval` on the pressure equation only, `ofgpu-buoyant` gave 39.76 / 37.89
+/ 40.81 ms for `N` = 1 / 4 / 16 at 24,000 cells, and 58.91 / 59.62 / 61.96 at 240,000.
+
+In these cases U, k, ε and T converge in one to five sweeps. A wider interval runs every
+one of those solves past its converged sweep, up to `N - 1` extra sweeps, and those
+sweeps cost more than the drains they save: 23–62 % at `N = 8`. `N = 2` is inside the
+noise. The pressure equation alone at `N = 4` came out about 5 % faster at 24,000 cells and
+not at all at 240,000. So the default is not moved. The keyword exists for a case whose
+long solves a wider interval does pay for, and changing it changes that case's answer
+within its tolerance, as §113.3 says.
+
+### 113.5 What this does not do
+
+- **It does not remove the drain.** A checking solve still waits on a pinned copy of
+  the flag every `check_interval` sweeps. Removing the wait needs a read the host polls
+  instead of waiting on: a ring of events, or a loop the device ends itself with a
+  conditional graph node. Neither is attempted.
+- **It does not make the interval free.** The sweeps after convergence still update the
+  solution, so the interval is part of the answer. A loop whose updates stop on the
+  device at the converged sweep would make any interval give the interval-1 answer. It
+  would also change the answer of every path that sets its own interval today (§113.3),
+  so it is a numerics decision and was not taken.
+- `src/distsolve.rs` still launches the one-thread kernels. Its reductions finish in
+  its own `reduce_into`, and folding it there is a separate change, with its own
+  bitwise gate, left undone.
+- No JSONC key: a JSONC case's linear solvers take the default interval.
+- The timings are from a shared card, and each row says how loaded it was. None of them
+  is an idle-card figure; the quietest-window table is the closest. None replaces §81.12.
