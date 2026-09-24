@@ -612,6 +612,58 @@ D-1-002), and write rows that `explain.py --audit` passes. AM-13 / AM-14 / AG-5 
 (prefixes PR, OPT, LLM) needs a TEMPLATES row, or `explain.py --selftest` fails by design. AM-16 —
 run `audit` on every campaign row and put `summarise` per family and stratum in the results page.
 
+## campaign.py — the campaign runner
+
+AM-11's runner turns manifest rows into append-only `autonomy-attempt/1` rows. Seven modes — `b0-template`, `b0-lhs`,
+`rules`, `rules+prior`, `rules+opt`, `full`, `evaluate` — with layers in arbitration order (rules: preflight, rules,
+remedies; +prior; +optimiser; full: both hooks). Only `preflight`/`remedies` are ablatable; `evaluate` takes `--system`
+and is the only mode reading the held-out split.
+
+Observe is common to every mode, baselines included: the generator rebuilds the STL, `stl_repair --json` gated on
+`after.closed` (SURFACE-OPEN is a named end with no mesher run — G-1-026 stays non-manifold), features.py fingerprints the
+surface. Attempt 1 is `rules.setup`'s config under `preflight.preflight` with the live `-stopAfter octree` probe as cost
+signal; a PF-THIN refusal is re-checked with `snap_probe`'s measured post-snap wall edge (docs/15 §K part 3); a refusal is
+a named REFUSED end with no row. The loop is `remedies.propose` per failed attempt, the veto consulted on every candidate,
+each verdict recorded in the end record's `vetoes`; after K = 4 attempts, or when every remedy is skipped, the geometry
+ends PASS / CAPABILITY-LIMITED / EXHAUSTED / NO-REMEDY, and `rules+opt`/`full` then call the optimiser hook before K.
+
+The baselines (AM-12): B0-template is one naive config — `base_size` 0.5 L, margins 3/6/2.5 L, one band per patch at level
+4 and distance 0.1 L, layers n 8 at the a priori t1, mesher defaults otherwise. B0-LHS draws four Latin-hypercube configs
+around it (wall level {-1,0,+1}, band ×[0.5,2), feature level {0,+1,+2}, tolerance {0,0.25,0.5}, smoothing {0..3}, growth
+[1.1,1.3]), reported best-of-4 with the mean failure fraction beside it.
+
+Directory of one campaign (`--out DIR`): `campaign.json`, `attempts.jsonl`, `records.jsonl`, `geometries.jsonl`,
+`jobs.jsonl`, `samples.jsonl`, `progress.json`, `campaign_end.json`, `records.json` (the explain shape), `summary.json`;
+`stl/` (`raw/`, `<gid>.stl`, `<gid>_repair.json`), `configs/<gid>_a<k>.json` (kept, replay reads them),
+`cases/<gid>_a<k>/` (summary kept, polyMesh and mesh deleted after scoring), `jobs/<gid>/<tag>.stdout|.stderr`,
+`probes/<gid>/`.
+
+The runner pools at most 6 mesher jobs (docs/15 §C says 12; the house caps it at 6 while the solver workflow owns the
+machine), each with a hard timeout (`--timeout`, default 1 h) killed through the child's own Popen handle, RAM admission
+from the probe's `n_leaves` (64 MiB + 2.5 KiB/leaf against 60 % of RAM minus 512 MiB), a 5 s sample, a 60 s heartbeat, an
+orphan check by PID+create time. A 10 % audit sample (`--audit-mod`, keyed on the config sha) re-gates with `-check` and
+reruns for an equal content hash; the polyMesh is deleted after scoring. The split is sealed: `split.refuse_test` runs
+before every row write, and `--manifest test` outside `--mode evaluate` is refused before any directory exists; a geometry
+with no row is failure=True (docs/15 §D.1 F1). `--replay` reproduces every decision from rows, config files and vetoes;
+`--compare` shows two runs equal apart from the time fields.
+
+Departures from docs/15 §C/§F: 6 streams, not 12; G-DET on the 20 tuning geometries of `fixtures/campaign/gdet_ids.json`
+(the test split is sealed until AM-16); the act tag is `a<k>` (the mesher refuses a tag with `/`), so the case directory
+is `cases/<gid>_a<k>`; B0-LHS is the L4 box around B0-template, not around the L1 config. G-DET part 1 (the 20 geometries
+run twice) is run by the supervisor; its numbers are in `campaign/G-DET.json`: PASS, 29 rows per run identical apart from
+time fields, 28/28 content hashes equal, 94 replayed decisions, 6 audited reruns equal, 0 orphans, at most 6 mesher
+processes, peak rss 3,183 MiB (11.3 % of RAM), level-5 peak 708 MiB (L5 cap 12), 646 s for both runs. Smoke (four
+geometries twice, live) PASSed with 4 rows, 14 replayed decisions, 8 audited reruns all equal, peak rss 147.9 MiB, 37.6 s;
+part 2 (the seal) PASSed its three refusals (first test id A-1-008).
+
+For later units — AG-3: the pipeline reads `<out>/attempts.jsonl`, `geometries.jsonl`, `records.json`, `summary.json`,
+`progress.json`, `campaign_end.json` and runs `campaign.py --run --manifest M --mode MODE --out DIR [--tag NAME] [--run-id
+ID] [--streams N]`. AM-12: `--mode b0-template`/`b0-lhs` on `--manifest tuning`, `--mode evaluate --system
+b0-template|b0-lhs --manifest test`, same binary; MFR counts a no-row geometry as a failure; b0-lhs is best-of-4 with the
+mean failure fraction. AM-13/AM-14: `prior.attempt1(ctx) -> {verdict, config, edits, record}` and `optimise.propose(ctx,
+history) -> {verdict, config, edits, record, prediction}` as `_run_system` calls them, each new rule id with an explain.py
+template. AM-16: G-DET again on 20 test geometries in mode evaluate, plus `replay`/`compare` there.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -642,6 +694,9 @@ run `audit` on every campaign row and put `summarise` per family and stratum in 
     python tools/autonomy/explain.py --summary --rows ROWS.jsonl --meta META.json [--json]           # the campaign summary
     python tools/autonomy/explain.py --audit --rows ROWS.jsonl [--records R.json]                    # G-EXPL on any rows
     python tools/autonomy/explain.py --gate                                                          # G-EXPL (AM-15's gate)
+    python tools/autonomy/campaign.py --run --manifest tuning --mode rules --out DIR [--ids A,B] [--streams 6]   # a campaign
+    python tools/autonomy/campaign.py --summary --out DIR | --replay --out DIR | --compare DIR_A DIR_B         # read one back
+    python tools/autonomy/campaign.py --gate --out DIR [--parts smoke,1,2]                                      # G-DET (AM-11's gate)
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report

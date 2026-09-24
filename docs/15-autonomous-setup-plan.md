@@ -547,3 +547,32 @@ Run by `tools/autonomy/explain.py --gate` at tree `57a2b4d`; the report is `tool
 - **Found on the way, for the owner of preflight.py:** a config whose quality block sets `min_thickness_ratio` to 0 is
   refused PF-QUALITY without a flow, but with a flow `preflight()` raises ZeroDivisionError in `yplus_window` instead of
   refusing. The quality block is locked, so only an edit that preflight exists to refuse reaches it. Not fixed here.
+
+### G-DET, the campaign runner (AM-11), 2026-09-24: PASS on 20 tuning geometries
+
+Run by `tools/autonomy/campaign.py --gate --parts smoke,2,1 --streams 6` on binary sha256 `054bba67…a90b` at tree
+`b007ef2` plus this unit; the report is `tools/autonomy/campaign/G-DET.json` (and `.md`).
+
+- **Part 1:** the 20 geometries of `tools/autonomy/fixtures/campaign/gdet_ids.json` (every family, every end kind) run
+  twice in mode `rules`. 29 rows per run, identical apart from the time fields; 28/28 polyMesh content hashes equal (the
+  29th row exits 1 at layers); both replays reproduce 47 decisions with 0 mismatches; 3 audited attempts per run re-gate
+  and re-run to an equal hash. Ends: PASS 4, CAPABILITY-LIMITED 9, EXHAUSTED 3, NO-REMEDY 1, REFUSED 1 (A-1-009,
+  R-BUDGET), SURFACE-OPEN 2 (G-1-026, G-1-029). Resources: at most 6 mesher processes, 0 orphans, peak RSS 3,183 MiB
+  (11.3 % of 27.6 GiB), level-5 jobs peak at 708 MiB, so the docs' L5 cap is min(12, (RAM - 4 GB) / 708 MiB) = 12;
+  646 s for both runs. D-1-002's attempt 1 has content sha `febb117a…`, the same as the AM-15 fixture meshed elsewhere
+  by absolute paths. **Smoke:** four geometries twice, audit on every attempt, PASS. **Part 2 (the seal):** the test
+  manifest outside mode evaluate, a test id in a manifest file and a test row handed to the row writer are each refused
+  before anything is written.
+- **Where the tree departs from the plan:** (1) at most 6 streams while the solver workflow owns the machine, not 12;
+  the L5 cap is still measured. (2) G-DET runs on 20 tuning geometries, because the test split is sealed; AM-16 re-runs
+  it on 20 test geometries in mode evaluate. (3) The act tag is `a<k>` and the case `cases/<gid>_a<k>`, because the
+  mesher refuses a tag containing `/`. (4) B0-LHS is the L4 box around B0-template, not around the L1 config, which a
+  baseline must not use. (5) Observe (regenerate, `stl_repair`, fingerprint) is common to every mode, so a surface
+  `stl_repair` cannot close ends SURFACE-OPEN with no row in every mode and counts as a failure (§D.1 F1). (6) F2 is
+  measured on the 10 % audit sample only.
+- **Found on the way, for AM-12 and the owner of score.py:** F-1-005, a thin plate at wall level 3, loses its body in
+  castellation; the mesher exits 1 at the layers stage (`layers: patch "body" is not a patch of the mesh`), score.py
+  classes it `config`, and the remedies end it NO-REMEDY. It is F4-shaped, and a topology refinement remedy would apply.
+- **Found on the way, for the owner of remedies.py:** `remedies._strip_t` discards its recursive copies, so a nested
+  record `t` survives and selftest group 11 (determinism) fails whenever its two runs straddle a second boundary (seen
+  in 3 of 4 house runs, rarely alone). Not fixed here.
