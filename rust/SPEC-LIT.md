@@ -29645,6 +29645,306 @@ the gate is bitwise precisely because nothing moved.
 
 ---
 
+## 98. A face that exchanges heat with something not meshed — convection to an ambient, grey radiation to a surround, and `h_total`
+
+Until this section a wall of a `*.cht.jsonc` case could hold a temperature,
+be adiabatic, or take a prescribed flux (§32.2). None of the three says what
+the wall of a real enclosure does: lose heat to air nobody meshed, at a film
+coefficient, and radiate to surroundings at an emissivity. This section adds
+the three `T` conditions that say it - on a solid face or on a fluid face -
+written as §4's one triple, and the two closed-form gates that hold them.
+
+The line this section draws is the one between a face whose unmeshed other
+side is a **number the case states** (an ambient temperature, a surround's
+temperature) and a face whose other side is **another face of the same
+enclosure**. The first is here, whole. The second is §50's radiosity system
+reaching a conjugate case, and it is a later subsection of this number: a
+face that radiates to its neighbours in an enclosure is not a face that
+radiates to a surround, and nothing below pretends it is.
+
+`No GPL-licensed source was consulted.`
+
+### 98.1 What the case can say
+
+Three new words for a patch's `T` in §47.14's `patches` list, and nothing
+else moves:
+
+```jsonc
+"patches": [
+  { "match": "sides", "T": { "type": "externalConvection", "h": 25.0, "TInf": 300.0 } },
+  { "match": "face",  "T": { "type": "externalRadiation", "emissivity": 0.8, "TEnv": 300.0 } },
+  { "match": "lid",   "T": { "type": "externalConvectionRadiation",
+                             "h": 10.0, "TInf": 300.0, "emissivity": 0.9, "TEnv": 290.0 } },
+  { "match": "plate", "T": { "type": "externalConvection", "TInf": 300.0,
+                             "h": { "correlation": "churchillChu",
+                                    "Ra": 1.0e8, "Pr": 0.71, "kappa": 0.026, "L": 0.2 } } }
+]
+```
+
+| Key | Meaning |
+|---|---|
+| `externalConvection` | `-k dT/dn = h (T_b - TInf)`: the face loses heat at a film coefficient `h` [W/(m^2 K)] to an ambient at `TInf` [K] |
+| `externalRadiation` | `-k dT/dn = eps sigma (T_b^4 - TEnv^4)`: grey radiation at an emissivity `eps` in `(0, 1]` to a surround at `TEnv` [K], large enough that its temperature does not move and none of the face's own emission comes back |
+| `externalConvectionRadiation` | both on one face, summed - the `h_total` a datasheet quotes (S98.4) |
+| `h` | a number, or `{ "correlation": "churchillChu", "Ra", "Pr", "kappa", "L" }`: §98.4's vertical-plate correlation, evaluated ONCE at lowering from the Rayleigh number the case states |
+| where | any wall patch of a solid region OR of a fluid region; refused on an `inlet`, on an `outlet` and on an interface patch (§98.5) |
+
+**The sign.** The loss is written positive OUT of the domain, the way each
+of the two laws is written in every textbook; §32.2's `q` is positive INTO
+the solid. The two conventions are stated side by side here so that a reader
+comparing a `fixedFluxTemperature` with an `externalConvection` does not
+have to derive it.
+
+§47.14's one rule is unchanged: every patch is named exactly once. A case
+that writes none of the three words lowers, runs and prints bit for bit what
+it did before this section.
+
+### 98.2 The triple - convection exactly, radiation by its tangent
+
+**The convective face.** Let `C_b` be the face's cell-to-face conductance
+of (S47.4): `Dhat_b/|Sf|` on a solid face, `k_eff Delta_b` on a fluid one.
+The unmeshed side is a lumped resistance `1/h` whose far end sits at `TInf`,
+so §47.2's triple with `R_c = 0` and the ambient in the place of the cell
+across the interface is, exactly,
+
+```
+fr = h/(h + C_b),     refValue = TInf,     refGrad = 0                      (S98.1)
+```
+
+*Proof.* §4 gives `T_b = fr TInf + (1 - fr) T_P`, so
+`C_b (T_P - T_b) = C_b fr (T_P - TInf) = h (1 - fr)(T_P - TInf) = h (T_b - TInf)`.
+The flux the solid conducts to the face and the flux the face convects away
+are the same number **at every iterate**, not at convergence, and
+`0 < fr < 1` whenever `h` and `C_b` are positive. A face whose conductance is
+not positive is set exactly adiabatic, (S47.8)'s convention. ∎
+
+**The radiating face.** `q_r(T_b) = eps sigma (T_b^4 - TEnv^4)` is not linear
+in `T_b`, so the face carries its tangent about a linearisation point `T*`:
+
+```
+q_r(T_b) ~ a + b T_b,    b = 4 eps sigma T*^3,    a = eps sigma (T*^4 - TEnv^4) - b T*    (S98.2)
+```
+
+With a convective part beside it (`h = 0` on `externalRadiation`, `eps = 0`
+on `externalConvection`) the face's whole loss is one Robin condition:
+
+```
+q_out(T_b) ~ H (T_b - T_ref),    H = h + b,    T_ref = (h TInf - a)/H
+fr = H/(H + C_b),     refValue = T_ref,     refGrad = 0                      (S98.3)
+```
+
+which is (S98.1) with `H` for `h` and `T_ref` for `TInf` - the same triple,
+the same identity, now on the linearised flux. On `externalConvection`
+(S98.3) is (S98.1) in every bit: `H = h` and `T_ref = TInf` are taken, not
+computed. Nothing is carried in `refGrad`, which §47.2 consequence 3 shows
+the assembly would weight by `(1 - fr)`.
+
+**Why the tangent and not the datasheet's form.** The form a datasheet
+quotes,
+
+```
+h_r(T_b)     = eps sigma (T_b^2 + TEnv^2)(T_b + TEnv),     h_r (T_b - TEnv) = q_r(T_b)
+h_total(T_b) = h + h_r(T_b),      and when TEnv = TInf:  q_out = h_total (T_b - TInf)    (S98.4)
+```
+
+is exact as an identity. As a linearisation it is not a tangent: freezing
+`h_r` at `T*` is a secant (Picard) iteration, whose error shrinks by a
+constant factor each pass. The tangent (S98.2) is Newton's, whose error is
+squared each pass - which is what Gate 98-B holds. So the solve uses
+(S98.2) and (S98.4) is what the face REPORTS: `ExternalLoss::h_r` and
+`ExternalLoss::h_total` in `src/cht/ambient.rs`.
+
+**The linearisation residual.** When the run stops, each face's triple still
+carries the tangent about the last `T*`, so the flux the matrix delivered
+and the quartic differ by a term second order in `T_b - T*`. The run reports
+it, relative to the largest loss:
+
+```
+r = max_f | q_out(T_b) - H (T_b - T_ref) |  /  max_f | q_out(T_b) |           (S98.5)
+```
+
+### 98.3 Where the triple is written, and the loop a radiating face needs
+
+**A convective face is static.** On a solid face `C_b` is static (§46: a
+fixed mesh and a fixed `K`), so (S98.1) is written once, in the host loop
+that already writes §32.2's `fixedFluxTemperature`, in both
+`cht::run_case` and `cht::flow::run_flow_case`. On a fluid face
+`C_b = k_eff Delta_b`, and the conjugate flow path is laminar - `nu_t` is
+zero on both meshes and never written - so `k_eff = kappa` in every bit and
+`C_b = kappa Delta_b` is static too. A test holds the conductance the energy
+equation used to that product, on the face (§98.5).
+
+**A radiating face moves with `T_b`.** On the conduction path `run_case` had
+no outer loop at all (`steps = 1` when steady). A case with a radiating face
+now takes Newton passes inside each step: `correct`, read the face values
+back, move every radiating face's `T*` to its `T_b`, rewrite `(fr, refValue)`
+there, and repeat until
+
+```
+max_f |T_b - T*|  <=  1e-10 max_f T_b          (1e-4 in the f32 build)
+```
+
+in at most 50 passes, and a run that does not meet it is REFUSED naming its
+last corrections. The first pass is linearised about the case's initial
+temperature. The host round trip sits between two `correct` calls, so it is
+outside the region `the_solid_side_iteration_replays_bitwise` captures -
+which is `correct` alone - by construction, and `src/cht.rs` keeps its
+capture-registry row as it was. A case with no radiating face takes exactly
+the one `correct` per step it always took. The criterion is a constant here;
+a criterion the case states is a later section's.
+
+The linear solver's own tolerance must resolve the criterion: a correction
+that stops shrinking above it has reached the solver's floor, and the
+refusal says to tighten `numerics.tolerance`.
+
+**On the conjugate path the SIMPLE loop is already an outer loop.** Every
+outer iteration re-linearises each radiating face about the `T_b` the
+previous energy solve left, before the next energy solve: one round trip per
+iteration, and only on a case that has such a face. (S98.5) of the triple the
+last solve used is reported as `ChtFlowSolution::external_residual`.
+
+**What a run reports.** `ChtSolution::external_passes` - the last step's
+corrections, K, one per pass, empty when no face radiates;
+`ChtSolution::external_residual` - (S98.5), zero when no face radiates;
+`ChtSolution::b_conductance` and `ChtSolution::patch_heat_flow`, the
+conduction twin of `ChtFlowSolution::patch_heat_flow`, which is what a base
+heat flow is read with.
+
+**What does not move.** `src/energy.rs` is not modified. The three
+conditions are `BcKind::Mixed` faces, which every kernel evaluates through
+§4's one expression; no kernel was added or changed, and no `.cu`,
+`KERNEL_UNITS` or capture-registry row is touched. `src/cht/ambient.rs` is
+host arithmetic plus the one round trip above.
+
+### 98.4 Churchill & Chu, and why no gate runs through it
+
+```
+Nu_L = { 0.825 + 0.387 Ra_L^{1/6} / [1 + (0.492/Pr)^{9/16}]^{8/27} }^2,     1e-1 <= Ra_L <= 1e12
+h    = Nu_L kappa / L                                                        (S98.6)
+```
+
+Churchill & Chu's vertical-plate correlation for every Rayleigh number,
+taken from its restatement in Incropera & DeWitt, *Fundamentals of Heat and
+Mass Transfer* (Wiley), ch. 9 - **not from the paper**: S. W. Churchill and
+H. H. S. Chu, *Int. J. Heat Mass Transfer* 18 (1975) 1323-1329, DOI
+10.1016/0017-9310(75)90243-4, is paywalled and was not read. The five
+coefficients and the range are the `churchill-chu1975` literal row of
+`reference/PROVENANCE.md`: **trusted to a transcription, and gated against
+nothing.** That is the reason no gate runs through the correlation - Gate
+98-A states `h` as a number.
+
+The correlation is evaluated once, at lowering, from the Rayleigh number the
+case writes. A Rayleigh number that follows the face's own `T_b - TInf`,
+which would make `h` a function of the solution, is not built. What holds the
+entry instead: a §13.4.1 pair test (two Rayleigh numbers, two fields), and
+the refusal of a Rayleigh number outside `[1e-1, 1e12]` by name, because a
+correlation is not extrapolated.
+
+### 98.5 The refusal list, the pair tests, and what must hold
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | `h` not finite and positive | the JSON path; `h = 0` is `zeroGradient` under another name |
+| 2 | `TInf` not finite and positive | the JSON path; the ambient temperature is absolute, K |
+| 3 | `emissivity` outside `(0, 1]` | the JSON path; `0` radiates nothing and is `zeroGradient` under another name |
+| 4 | `TEnv` not finite and positive | the JSON path; it enters as `T^4` and must be absolute |
+| 5 | a `correlation` other than `churchillChu` | the JSON path, and the one that exists |
+| 6 | `Ra` outside `[1e-1, 1e12]` | the JSON path and the range (S98.6) states |
+| 7 | `Pr`, `kappa` or `L` not finite and positive | the JSON path |
+| 8 | any of the three on an `inlet` or an `outlet` | the JSON path; they are wall conditions |
+| 9 | any of the three on an interface patch | the patch, named twice - §47.14's one-condition rule; an interface's other side is meshed |
+| 10 | a run whose radiating faces do not meet §98.3's criterion in 50 passes | the case, the criterion, and the last corrections |
+
+**The pair tests (§13.4.1).** Two case documents identical in every byte but
+one, required to produce different fields, each failing by name: on a
+one-region conduction slab, `h`, `TInf`, `emissivity`, `TEnv` and the
+correlation's `Ra`; on the conjugate cavity of §60.1, `h` on the fluid's
+cold wall, `h` on the solid's outer face, and `emissivity` on the fluid's
+cold wall.
+
+| Check | Expected |
+|---|---|
+| the triple, host | (S98.1)'s identity to `1e-13`; the tangent (S98.2) touching the quartic at `T*` with its slope, and its error quadrupling when the offset doubles; (S98.4)'s `h_r` reproducing the quartic |
+| Churchill & Chu, host | rising with `Ra`; at `Pr -> infinity` the Prandtl factor going to one; rows 6 and 7 refused by name |
+| the three spellings lower | onto one `ExternalLoss` each, `h = 0` on the radiation-only word and `emissivity = 0` on the convection-only one, the correlation's `h` equal to (S98.6) |
+| rows 1-9 | each refused, the message naming the JSON path |
+| a convective slab | the heat through the slab `(T_hot - TInf)/(d/k + 1/h)` to `1e-10`, and the face's conducted flux equal to `h |Sf| (T_b - TInf)` to `1e-12` |
+| a radiating slab | `T_b` the root of the quartic to `1e-10`, the Newton passes between three and six, the residual (S98.5) below `1e-10` |
+| a case with no external face | one solve per step, `external_passes` empty, `external_residual` zero |
+| a fluid wall | the conductance the energy equation used equal to `kappa Delta_b` to `1e-14`, and (S98.1)'s identity on the fluid face to `1e-10` |
+| the pair tests | every pair above different, failing by name |
+| the schema | `docs/schema/cht-1.json` regenerated, the three words in its `oneOf` |
+
+Seven of the new library tests carry the f32 attribute, and §112.3's count
+moves by seven: the four host tests of the triple, the tangent, the secant
+and the slab root in `src/cht/ambient.rs`, and the convective slab, the
+radiating slab and the fluid wall in `src/io/case_cht/tests.rs`.
+
+### 98.6 Gates 98-A and 98-B
+
+**Gate 98-A - the straight fin, three meshes.** A fin of conductivity `k`,
+cross-section `A` and wetted perimeter `P`, its base held `theta_b` above the
+ambient and its tip adiabatic, obeys `k A theta'' = h P theta` with
+`theta(0) = theta_b` and `theta'(L) = 0`, so
+`theta = theta_b cosh(m (L - x))/cosh(m L)` and the base heat flow is
+
+```
+q_b = k A theta_b m tanh(m L) = sqrt(h P k A) theta_b tanh(m L),     m^2 = h P/(k A)    (S98.7)
+```
+
+The case: silicon, `k = 148` W/(m K), length `L = 50` mm, thickness
+`t = 1` mm, depth `w = 10` mm; the base `fixedValue` 400 K, the upper and
+lower faces `externalConvection` at `h = 25` W/(m^2 K), `TInf = 300` K; the
+tip and the two depth faces `zeroGradient`, so `P = 2w` and `A = t w`,
+`m = sqrt(2h/(k t)) = 18.38` /m, `m L = 0.919`, and (S98.7) gives
+`q_b = 1.97339` W. The run's base heat flow is
+`ChtSolution::patch_heat_flow` on the base patch - `sum C_b |Sf| (T_b - T_P)`,
+taken the way `ChtFlowSolution::patch_heat_flow` takes it. Three meshes,
+`n_x = 20, 40, 80` with two cells across the thickness throughout, through
+`vv::grid_study` with `h = L/n_x`; the gate is `0.5 %` on the finest mesh,
+and §94's study and GCI are printed beside it.
+
+**What the band contains.** The study sees the discretisation error; it
+cannot separate from it the error of the model (S98.7) is. The solid is
+two-dimensional and the fin equation neglects its transverse gradient,
+which is of relative order `Bi = h (t/2)/k = 8.4e-5` - sixty times inside
+the band at this Biot number. The verdict says both are in it.
+
+**Gate 98-B - the radiating slab, one mesh.** A slab of conductivity `k`
+and thickness `d` with one face held at `T_i` and the other radiating to a
+surround at `TEnv` settles where the conducted flux meets the radiated one:
+
+```
+f(T_b) = eps sigma (T_b^4 - TEnv^4) - (k/d)(T_i - T_b) = 0,
+C = f''(T_r) / (2 f'(T_r)) = 12 eps sigma T_r^2 / (2 (4 eps sigma T_r^3 + k/d))          (S98.8)
+```
+
+The case: `k = 1` W/(m K), `d = 20` mm in twenty cells, `T_i = 500` K, the
+other face `externalRadiation` with `eps = 0.8`, `TEnv = 300` K, the four
+side faces `zeroGradient`, the initial temperature 500 K. **One mesh is the
+whole sequence there is**, and not for convenience: the steady solid profile
+is exactly linear (`a_steady_isotropic_solid_is_exactly_linear`), so the
+discrete conducted flux is `(k/d)(T_i - T_b)` on any uniform mesh, each
+pass of §98.3 is exactly Newton's step on `f`, and `T_b` is the root to
+round-off, with no discretisation error to extrapolate (§94.3). The host
+solves `f = 0` by Newton to `1e-14` relative (`T_r = 464.9498` K), and the
+gate holds:
+
+- `|T_b - T_r| / T_r <= 1e-10`, and the residual (S98.5) `<= 1e-10`;
+- **quadratic convergence**: for every pass whose correction `delta_{k+1}`
+  is above the solver's floor `1e-12 T_r`, the ratio
+  `delta_{k+1} / delta_k^2 <= 2C`, and at least two such ratios. The bound
+  is the theorem, not a tuning: the first linearisation is at 500 K, above
+  the root, and Newton on a convex, increasing `f` from above descends
+  monotonically with every ratio at most `f''(T_k)/(2 f'(T_r))`, which is
+  below `(T_0/T_r)^2 C < 2C` because `T_0/T_r = 1.075 < sqrt 2`.
+
+The corrections the host Newton takes from 500 K are 33.95, 1.096,
+`1.04e-3` and `9.3e-10` K against `C = 8.62e-4` /K - three ratios,
+`9.5e-4`, `8.65e-4` and `8.62e-4`, each already at the asymptotic constant.
+
+---
+
 ## 105. ALE motion and the space conservation law — the mesh that moves, and the volume it sweeps
 
 The mesh moves and the volume it computes moves with it. This section owns:
@@ -31073,7 +31373,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **451** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **455** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -31084,7 +31384,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 four.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

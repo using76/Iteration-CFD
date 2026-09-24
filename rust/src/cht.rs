@@ -2357,6 +2357,7 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     })
 }
 
+pub mod ambient;
 pub mod flow;
 
 #[cfg(test)]

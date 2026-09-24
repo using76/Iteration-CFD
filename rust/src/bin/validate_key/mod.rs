@@ -775,11 +775,12 @@ mod tests {
 
     #[test]
     fn every_answer_key_is_named_in_the_manifest_and_every_row_has_its_marker() {
-        const SCAN: [(&str, &str); 4] = [
+        const SCAN: [(&str, &str); 5] = [
             ("rust/src/bin/validate.rs", include_str!("../validate.rs")),
             ("rust/src/bin/validate_key/mod.rs", include_str!("mod.rs")),
             ("rust/src/simple.rs", include_str!("../../simple.rs")),
             ("rust/src/fan/tests.rs", include_str!("../../fan/tests.rs")),
+            ("rust/src/cht/ambient.rs", include_str!("../../cht/ambient.rs")),
         ];
         let needle: &str = concat!("// answer-key", ": ");
         let mut markers: Vec<(String, &str)> = Vec::new();
@@ -795,7 +796,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 13, "thirteen markers, found {markers:?}");
+        assert_eq!(markers.len(), 14, "fourteen markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
