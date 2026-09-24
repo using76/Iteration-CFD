@@ -305,7 +305,7 @@ fn the_displacement_iteration_replays_bitwise() {
 
 /// The graded orthogonal block of the patch test: 12 cubed, x graded by
 /// 1.6, y by 0.7, z uniform, all six slots real patches.
-fn graded_block() -> HostMesh {
+pub(super) fn graded_block() -> HostMesh {
     let axis = |e: Scalar| GradedAxis { lo: 0.0, hi: 1.0, n: 12, expansion: e, two_sided: false };
     let spec = BlockSpec {
         x: axis(1.6),
@@ -319,7 +319,7 @@ fn graded_block() -> HostMesh {
 
 /// `u = A x + b` at the cell centres and the boundary-face centres, with
 /// the patch test's non-symmetric `A` and its offset `b`.
-fn linear_state(hm: &HostMesh) -> (Vec<Vec3>, Vec<Vec3>) {
+pub(super) fn linear_state(hm: &HostMesh) -> (Vec<Vec3>, Vec<Vec3>) {
     let a = [
         [1.0e-3, 2.0e-4, -3.0e-4],
         [4.0e-4, -5.0e-4, 6.0e-4],

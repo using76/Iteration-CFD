@@ -30834,7 +30834,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **432** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **436** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -30843,7 +30843,9 @@ not hold at f32 (plus the ten that were ignored before, in both builds). The att
 does nothing without the feature: the f64 lists and results are the ones above.
 `types::tests::the_f32_failure_count_is_the_one_spec_lit_states` counts the attributes
 and holds them to the two bold numbers in this paragraph (it is itself one more library
-test, so the f64 build now lists 2020 and passes 2010).
+test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
+paragraph was measured; a later section that adds such a test moves the bold number and says so
+where the test is described - §109.3 added four.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -31178,3 +31180,180 @@ within its tolerance, as §113.3 says.
 - No JSONC key: a JSONC case's linear solvers take the default interval.
 - The timings are from a shared card, and each row says how loaded it was. None of them
   is an idle-card figure; the quietest-window table is the closest. None replaces §81.12.
+
+---
+
+## 109. The block-coupled solid matrix — a second storage format beside §1, its assembly, and what it does not yet solve
+
+§95 solves three scalar systems because §1's storage holds one coefficient
+per face, and §95.5 measured what that costs: a Poisson ratio above 0.45 and
+a bending-dominated slender body are refused by name, with Cardiff, Tuković,
+Jasak & Ivanković (2016, DOI `10.1016/j.compstruc.2016.07.004`) named as the
+route. This section builds the first half of that route — the matrix — and
+says exactly what "block-coupled" means here, which is less than the paper
+and more than §95. The second half, the solve around it and Gate 95-A, is
+written after this section and not with it.
+
+Written from: §1 (the storage this sits beside), §2.4, §3.5, §4, §95.1,
+§95.2 (the boundary statement, kept per component), §95.8 (what is refused);
+Cardiff, Tuković, Jasak & Ivanković, *Comput. Struct.* 175 (2016) 100-122,
+DOI `10.1016/j.compstruc.2016.07.004` — the IDEA of one cell-centred
+finite-volume matrix for the three displacement components, cited for that
+and for nothing else: every coefficient below is derived from (95.3) and
+(95.5), the paper's formulae are not quoted, and its own implicit tangential
+stencil is not built (§109.4). **OpenFOAM and solids4foam are GPL and were
+not opened**; no solid-mechanics solver of any licence was consulted.
+
+### 109.1 The storage — one `3x3` per cell and per face-direction, one vector per cell
+
+*DESIGN*: beside §1's `diag/upper/lower/source` of scalars, a SECOND format
+with the same shape and `3x3` entries: `diag [n_cells]`, `upper [n_if]`,
+`lower [n_if]` are blocks indexed `(row component, column component)`, and
+`source [n_cells]` is a vector per cell. `upper[f]` is the owner's row and
+`lower[f]` the neighbour's, exactly as in §1. There is no boundary-coefficient
+pair: a boundary face folds into `diag` and `source` at assembly, because the
+operator refuses every coupled patch (cyclic, processor, interface) through
+§95's own `check_patches`, and nothing decomposes it — §71's split of a matrix
+across a cut is a later section's, if it is ever wanted here. The product is
+the ordinary block product:
+
+```text
+  (A u)_c = diag[c] u_c + sum_{f: owner[f] = c} upper[f] u_{neighbour[f]}
+                        + sum_{f: neighbour[f] = c} lower[f] u_{owner[f]}                  (109.2)
+```
+
+with `(T v)_i = sum_j T_ij v_j` for a block `T`. The device keeps the blocks in
+the row-major nine-scalar layout the gradient already uses; §1's `G_ij =
+du_j/dx_i` convention is for gradients and is not what a block's indices mean.
+
+### 109.2 The assembly — the normal-derivative row implicit in all three terms
+
+Write the face gradient as its normal row plus its tangential rows,
+`G_f = n (x) (G_f.n) + G'_f`, with `G.a` the vector `(G.a)_j = sum_i a_i G_ij`
+(§1: `grad(u).Sf` at `a = Sf`). Then `sigma_f.Sf` less its thermal term,
+`mu G_f.Sf + mu G_f^T.Sf + lambda tr(G_f) Sf`, splits: the normal row gives
+`|Sf| [mu I + (mu + lambda) n n^T] (G_f.n)` (because `(n (x) g).Sf = |Sf| g`,
+`(n (x) g)^T.Sf = |Sf| n (n.g)` and `tr(n (x) g) = n.g`) and the tangential
+rows give `mu G'_f^T.Sf + lambda tr(G'_f) Sf`, with `G'_f.Sf = 0`. §95 makes
+`(2 mu + lambda) G_f.Sf` implicit and defers the rest; here the normal row is
+the two-point estimate `Delta_f (u_N - u_P)` in ALL THREE terms, so the face
+coefficient is a `3x3` and the component coupling `(mu + lambda) n n^T` sits
+in the matrix. With `o = owner[f]`, `n = Sf/|Sf|`, `Delta_f` §2.4's
+non-orthogonal delta coefficient:
+
+```text
+  B_f = |Sf| Delta_f [ mu_o I + (mu_o + lambda_o) n n^T ]                                  (109.1)
+  upper[f] = -B_f     lower[f] = -B_f     diag[P] += B_f     diag[N] += B_f
+```
+
+(the sign of §3.2's laplacian as `src/reference.rs` assembles it, so that
+equilibrium reads `A u = source`). What the two-point stencil cannot see —
+the tangential rows, and §2.4's correction of the normal row — stays
+explicit, from §3.5's interpolated gradient `Gbar_f = w G_P + (1 - w) G_N`,
+`G'_f = Gbar_f - n (x) (Gbar_f.n)`, `k_f` the over-relaxed correction vector,
+evaluated with the ROW cell's `mu_c, lambda_c` and added to the owner's row,
+subtracted from the neighbour's:
+
+```text
+  q_f = |Sf| [ mu_c I + (mu_c + lambda_c) n n^T ] (Gbar_f.k_f)
+        + mu_c G'_f^T.Sf + lambda_c tr(G'_f) Sf                                            (109.3)
+```
+
+A boundary face keeps §95.2's statement per component. With `P_b` the
+diagonal `0/1` matrix of the FIXED components, `Q_b = I - P_b`,
+`M_b = mu_c I + (mu_c + lambda_c) n n^T`, `k_b = n - (Cf_b - C_c) Delta_b`,
+`G'_b = G_c - n (x) (G_c.n)`, `v_b` the prescribed value, `t_b` the prescribed
+traction and `ub_b` the evaluated boundary displacement (§4's triple with
+`fr` in {0,1}, so a free component carries `u_c + refGrad/Delta_b` with
+`refGrad` the traction condition (95.5) solved at the face):
+
+```text
+  diag[c]   += |Sf_b| Delta_b  P_b M_b P_b
+  source[c] += P_b [ |Sf_b| M_b ( P_b (Delta_b v_b + G_c.k_b) + Q_b Delta_b (ub_b - u_c) )
+                     + mu_c G'_b^T.Sf_b + lambda_c tr(G'_b) Sf_b ]
+             + Q_b t_b |Sf_b|                                                                (109.4)
+```
+
+A fixed row carries the whole `(sigma_b.Sf_b)_i`, its fixed columns implicit
+and corrected as a `fr = 1` face of §2.4 is, its free columns explicit; a free
+row carries `t_i |Sf_b|` and nothing else (Demirdžić & Muzaferija 1994). The
+thermal load is §95's masked face gather, unchanged:
+
+```text
+  source[c] -= beta_c [ sum_f (+-)(T_f - T_ref,c) Sf + sum_b P_b (T_b - T_ref,c) Sf_b ]      (109.5)
+```
+
+One material per region: a bonded region (§95.8) is refused by name, and
+the route — the series coefficient written as a face block — changes one line
+of (109.1) when it is taken.
+
+### 109.3 What is measured, and what "matches §95" means
+
+The residual and the scale every gate of this section is read against:
+
+```text
+  r = A u - source
+  scale = max_c ||diag[c]||_F  *  max_c |u_c|
+  gate:  max_c |r_c| <= 1e-12 scale                                                          (109.6)
+```
+
+**Gate 109-A, the patch test and the cube.** On §95.6's graded orthogonal
+block with `u = A x + b` prescribed face by face, and on the `10^3` cube in
+the free-expansion state of Gate 95-B, `max|r| <= 1e-12 scale` — on the host
+against the exact Green-Gauss gradient, and on the device with the segregated
+operator's own residual printed beside it, the two equal to the same
+tolerance. That is the plan's "matches the segregated operator's residual to
+round-off", and it is a statement about LINEAR fields on ORTHOGONAL meshes
+only. On any other state the two operators differ, per internal face, by
+
+```text
+  (mu + lambda) |Sf| (I - n n^T) [ Gbar_f.n - Delta_f (u_N - u_P) - Gbar_f.k_f ]                (109.7)
+```
+
+— the tangential part of the mismatch between the Green-Gauss normal
+derivative and the two-point one, `O(h)`, zero exactly where (109.6) holds.
+The two operators therefore have DIFFERENT discrete fixed points that agree to
+discretisation order, which is the observation §95.1 already makes about
+`kappa` and is stated here so that nobody measures §95's converged field
+against this section's and calls the difference a defect.
+
+**Gate 109-B, the device twin.** `diag`, `upper`, `lower`, `source` and `A u`
+from the kernels against the scatter-shaped host assembly to `1e-12` relative,
+on the uniform cube, the trigonometrically jittered cube and the graded block,
+with a non-linear state and a temperature gradient — the crate's habit of one
+orthogonal, one non-orthogonal and one graded mesh.
+
+**Gate 109-C, capture.** One assembly (the four memsets of the zeroing and
+two kernels) plus one product captures and replays bitwise under §81's
+protocol; the row in §81's registry is a `Gate`.
+
+**Symmetry, a finding.** `B_f^T = B_f`, `upper[f] = lower[f]` and
+`P_b M_b P_b` symmetric make the block matrix symmetric by construction, and
+the host test asserts the dense `3n x 3n` expansion equal to its transpose TO
+THE BIT on a jittered mesh. The solve that follows this section may therefore
+be block-PCG with a block incomplete-Cholesky preconditioner; §8.2's refusal
+of PCG on an asymmetric matrix is not touched.
+
+**At single precision.** The host legs of Gate 109-A, the host product
+against the dense expansion and the direct dense solve bound DOUBLE round-off
+(`1e-12`, `1e-14`, `1e-10`) and carry §112.3's f32 attribute: four library
+tests. The symmetry check and the refusals hold at f32 and do not carry it.
+No f32 tolerance is written for this section, for §112.2's reason.
+
+### 109.4 What this section does not do
+
+No solve. Nothing iterates on this matrix; `mechanics` cannot ask for it;
+§95.5's two refusals stand word for word until the solve exists and Gate 95-A
+is earned, which is the next section's work.
+
+No implicit tangential derivative. Cardiff et al. (2016) put the tangential
+rows of the face gradient into the matrix through a stencil on the face's
+vertices, which is wider than one entry per face; (109.3) keeps them explicit.
+Whether the compact coupling of (109.1) alone converges the 10:1 cantilever of
+§95.5 is not known and is what the solve has to measure; if it does not, the
+wider stencil is a THIRD format and gets its own paragraph.
+
+No bonded region, no coupled patch, no decomposition: refused by name at
+construction, with the route stated in §109.2.
+
+---
