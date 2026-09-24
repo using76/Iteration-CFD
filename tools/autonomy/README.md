@@ -259,8 +259,9 @@ Both generators expose the same API (AM-6/AM-7 depend on it): `sample_params`,
 `geometry_id`, `make_row`, `write_row`, `generate`. No global RNG: parameters come
 from `numpy.random.default_rng([SALT, seed, index])` in a fixed draw order, so a
 geometry is a pure function of (family, seed, index). Rows are `autonomy-manifest/1`
-ManifestRows without `split` (AM-7's split.py adds it); STLs and manifests are never
-committed (docs/15 §E) — only the generators are.
+ManifestRows without `split` (AM-7's split.py adds it); STLs are never committed
+(docs/15 §E) — the generators are, and the only committed manifests are split.py's
+`corpus/manifests/` (the sealed split, below).
 
 ## corpus/ — families D, E and F
 
@@ -308,6 +309,51 @@ committed (docs/15 §E) — only the generators are.
   thickness within 2 %; fin thickness is reported, never gated. Eight
   negative controls (AM-3's four, plus a de-commensurated box, closed gap,
   removed body, thickened plate) prove it is not vacuous.
+
+## corpus/ — family G and the split
+
+- `corpus/inject.py` — family G (120): six defect classes, 20 each at every
+  seed, injected into FRESH parents of families A, B, D, E and F at index
+  1000 + i — outside the A-F corpus index range, so no G row shares its
+  geometry with any corpus row across the split: a hole of 3-64 edges cut
+  as a triangle disk with no interior vertex (one open k-edge loop), a
+  flipped disk patch of 1-32 triangles (its m+2 boundary edges
+  same-direction), 1-8 duplicated facets (3d non-manifold edges), 1-8
+  corners written with a signed zero, 1-8 corners moved by 0.1-0.4 of the
+  weld tolerance, 1-8 T-junctions (an edge split on one side only, three
+  open edges each). Every row states the counts it injects ("expect");
+  `build_bytes` verifies them twice before writing — against a bit-exact
+  in-memory re-read of the written bytes (numpy only) and against the
+  recomputed expectation — and refuses, by name, to hand back anything
+  else. The strata are a priori classes — what stl_repair's repertoire can
+  close on paper (easy: the tolerance weld; medium: a local fill; hard:
+  nothing in it).
+- `corpus/gate.py` gains family G and its eight checks: parent_clean,
+  expected_repair (stl_repair's before counts, weld and holes equal the
+  injected counts; a near-duplicate's max_move in (0, 0.5·tol]), negzero,
+  refused (`-dryRun` exit 1 with its `surface/closed` line carrying the
+  SAME two counts), sha, regen, row, differs. "Detected" means both
+  oracles returned the injected counts. What stl_repair then closes —
+  holes filled or skipped, a single flip reoriented, signed zeros and
+  near-duplicates welded shut, duplicated facets and flipped patches left
+  alone — is reported, never gated.
+- `corpus/split.py` — the split, written once by `--write`: one pool per
+  family at corpus seed 1. This is where the tree departs from §E's "seed
+  S_tune / seed S_test": G-CORPUS ran on each generator at seed 1 with
+  §E's n, and G-PILOT's ten tuning geometries are seed-1 ids, so the split
+  divides one pool per family by a stratified draw; a second claim needs a
+  fresh corpus seed and a NEW lock. Quotas are Hamilton's largest
+  remainder per (family, stratum); the ten spent G-PILOT ids
+  (A-1-000..003, A-1-012, B-1-000..004) stay in tuning; the draw is
+  `default_rng([17, 1, family ordinal, stratum ordinal])` over the sorted
+  non-spent candidate ids. `manifests/` holds tuning.jsonl (420 rows),
+  test.jsonl (180) and a write-once split.lock carrying the test
+  manifest's sha256 and ids; `--check` re-derives every count,
+  regenerates byte-identically in a child under PYTHONHASHSEED=12345, and
+  refuses a lock touched by two commits. `--guard`/`refuse_test`/
+  `filter_rows` refuse a test row outside mode evaluate BEFORE anything is
+  read — **nobody reads a test row's outcome before the evaluation unit
+  (docs/15 §F)**.
 
 ## sensitivity.py — G-PILOT
 
@@ -397,6 +443,9 @@ AM-9's rules (R-CURV, R-GAP, R-FEAT, R-PLANE) and AM-13's k-NN.
     python tools/autonomy/corpus/gate.py --family A --family B --n 120 --seed 1   # G-CORPUS
     python tools/autonomy/corpus/gen_bluff.py --seed 1 --n 120 --out DIR  # family D STLs + manifest_D.jsonl
     python tools/autonomy/corpus/gate.py --family D --n 120 --seed 1      # G-CORPUS D (E and F: --n 60)
+    python tools/autonomy/corpus/gate.py --family G --n 120 --seed 1      # G-CORPUS G (the injected defects)
+    python tools/autonomy/corpus/split.py --check                         # the sealed 420/180 split
+    python tools/autonomy/corpus/split.py --guard ROWS.jsonl --mode MODE  # refuses test rows outside evaluate
 
     python tools/autonomy/features.py FILE.stl --id NAME [--diag]      # one fingerprint (JSON)
     python tools/autonomy/features.py --corpus A --seed 1 --n 120        # fingerprint a whole family

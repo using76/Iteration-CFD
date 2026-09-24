@@ -425,3 +425,27 @@ the two ellipsoids have none and already snap clean.
   41k / 165k cells, 99 / 377 MiB; L5 125 / 677 s, 285k / 1.25 M cells, 627 / 2,592 MiB (the wings are
   the maximum). At 27.6 GiB the L5 wing peak caps the pool at 9 streams. Feature L6 over an L4 wall
   costs +15 % cells.
+
+### The split and family G (AM-7), 2026-09-24: sealed
+
+Written once by `tools/autonomy/corpus/split.py --write` into `tools/autonomy/corpus/manifests/`; checked by
+`split.py --check`, which the autonomy selftest runs.
+
+- **Test manifest** `test.jsonl`: 180 rows (A 36, B 36, D 36, E 18, F 18, G 36), sha256
+  `69a6c9399b5ace39696ebbc2b6123214f0b5134f7cfb8b8709e392a871fb010a`. **Tuning** `tuning.jsonl`: 420 rows,
+  sha256 `a579f10c00ea4fa6ca6f1d65e73a9e21c008f5e0c3158dd19cf97a20dbfb2da4`. **Lock** `split.lock` sha256
+  `9e427c3aa573636afdcb2d4ccedbbbb41b5a233b802b6cc6ed70880dd1af6170`, carrying both hashes and the 180 test ids.
+- **Where the tree departs from §E:** one pool per family at corpus seed 1 (the seed G-CORPUS gated at §E's n,
+  and the seed of G-PILOT's ten geometries), divided per (family, stratum) by Hamilton quotas with
+  `default_rng([17, 1, family, stratum])`, not two generation seeds S_tune / S_test. The ten G-PILOT ids
+  (A-1-000..003, A-1-012, B-1-000..004) are forced into tuning. A second claim needs a fresh corpus seed for
+  its test pool and a new lock.
+- **Sealed:** `split.load("test", mode)` and the `filter_rows`/`--guard` path refuse any mode but `evaluate`
+  before the file is opened. `--check` fails if two commits touch `split.lock`. Nobody reads a test row's
+  outcome before AM-16.
+- **Family G** (`corpus/inject.py`): 20 each of hole (3-64 edges), flipped patch (1-32 triangles), duplicated
+  facets (1-8), signed-zero corners (1-8), near-duplicate corners (1-8, 0.1-0.4 of the weld tolerance) and
+  T-junctions (1-8), on fresh A-F parents at index 1000 + i. G-CORPUS G at seed 1: stl_repair's counts equal
+  the injected counts on 120/120, and `-dryRun` refused `surface/closed` with the same counts on 120/120.
+  Reported, not gated: stl_repair then closes duplicate 0/20, flip 0/20, hole 6/20, near_duplicate 20/20,
+  signed_zero 20/20, t_junction 9/20, and skips 9/9 holes over 32 edges.

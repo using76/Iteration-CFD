@@ -7,10 +7,11 @@ selftest.py - the tools/autonomy package gate.
 
 Runs schema.py --selftest (the schemas, fixtures, knob table and lock), then
 score.py --selftest (the G-SCORER probe fixtures, the refusal grammar, the
-content hash and the live automesher), then the eight corpus selftests of
+content hash and the live automesher), then the ten corpus selftests of
 docs/15 §E/§F (corpus/stl_io.py, corpus/gen_wing.py, corpus/gen_lathe.py,
-corpus/meshkit.py, corpus/gen_bluff.py, corpus/gen_gap.py, corpus/gen_thin.py
-and corpus/gate.py -- G-CORPUS on families A, B, D, E and F), then
+corpus/meshkit.py, corpus/gen_bluff.py, corpus/gen_gap.py, corpus/gen_thin.py,
+corpus/inject.py (family G), corpus/gate.py (G-CORPUS on families A, B, D,
+E, F and G) and corpus/split.py (the sealed 420/180 split)), then
 features.py --selftest
 (the AM-4 geometry fingerprint: refusals, sphere curvature, cube sharp edges,
 two-sphere gap, NACA0012 thickness, planar fraction, commensurability,
@@ -57,7 +58,8 @@ def main():
     corpus = (("corpus/stl_io.py", 4), ("corpus/gen_wing.py", 7),
               ("corpus/gen_lathe.py", 7), ("corpus/meshkit.py", 7),
               ("corpus/gen_bluff.py", 7), ("corpus/gen_gap.py", 7),
-              ("corpus/gen_thin.py", 7), ("corpus/gate.py", 6),
+              ("corpus/gen_thin.py", 7), ("corpus/inject.py", 7),
+              ("corpus/gate.py", 7), ("corpus/split.py", 7),
               ("features.py", 11))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
