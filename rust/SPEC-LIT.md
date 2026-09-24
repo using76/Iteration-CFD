@@ -20915,6 +20915,166 @@ off by default.
 
 ### 81.12 What the graph actually buys — measured, and not what was expected
 
+This section measures what a CUDA graph saves over launching the same
+fixed-iteration k-epsilon work one kernel at a time, with `ofgpu-graph-bench`,
+whose two fixed modes do identical work and must agree bit for bit. It was
+re-taken on 2026-09-24 on the machine named below, after §113 folded the
+one-thread launches out of every Krylov sweep. The reason is that the table
+printed here until then named no driver, no case and no card state, and a
+2026-09-14 run on the same card read 11.84× at 24 000 cells where it printed
+3.06×. **This section now names its machine and what else was on the card.**
+The old tables are kept at the end of the section, as they were printed.
+
+**The machine this section describes.** Measured on 2026-09-24 between 12:55
+and 13:25 (KST), at commit `48908b1` — after §113's fold — in the default
+`f64` release build:
+
+| | |
+|---|---|
+| GPU | NVIDIA GeForce RTX 5070 Ti, 16 303 MiB, sm_120, PCIe gen 5 x16, VBIOS 98.03.58.00.f7 |
+| driver | 596.49, WDDM; the card also drives the desktop's display (`display_active` Enabled) |
+| toolkit | nvcc 13.3 (V13.3.73) |
+| host | AMD Ryzen 9 7950X, 16 cores / 32 threads, Windows 11 Pro 10.0.22631 |
+| compiler | rustc 1.95.0 |
+
+**What else was on the card.** Before and after every run
+`nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu` and
+`nvidia-smi --query-compute-apps=pid,process_name,used_memory` were logged, and
+a watcher logged the compute-apps list every 2–3 s for the whole sweep. The
+desktop's own processes (Explorer, the browsers, the terminal) hold contexts on
+this card all the time, and so does one process `nvidia-smi` will not name
+(PID 3092, `[Insufficient Permissions]`), which was in every sample, the first
+one included. Apart from those the card was idle until 12:57:28. From then on
+the machine owner's mutation-test suite was running: a `python.exe` driver that
+starts one `pytest` process after another, each with a CUDA context of its own.
+The watcher saw 107 distinct `python.exe` contexts, and at least one of them in
+511 of its 739 samples. Nothing was stopped: those processes were not ours to
+stop.
+
+A run counts as **quiet** when no context other than the desktop's and PID
+3092's appears in either `nvidia-smi` reading around it or in any watcher
+sample during it. From the sixth round on (13:03) every run first waited, for
+up to 80–90 s, for three consecutive one-second readings with no such context.
+37 of the 86 runs were quiet; at their start the card read 1 553–3 257 MiB
+used and 0–6 % utilisation. The tables below are the medians of the quiet
+runs. A context that lived for less than the watcher's interval can fall
+between two samples, so "quiet" means that none was seen, not that none
+existed.
+
+The meshes, the harness and the order:
+
+```
+ofgpu-generate-mesh plume   <dir> 15 10 10     #     1 500 cells
+ofgpu-generate-mesh plume   <dir> 60 25 16     #    24 000
+ofgpu-generate-mesh channel <dir> 200 120 1    #    24 000
+ofgpu-generate-mesh plume   <dir> 120 50 40    #   240 000
+ofgpu-generate-mesh plume   <dir> 200 100 40   #   800 000
+ofgpu-generate-mesh plume   <dir> 200 120 100  # 2 400 000
+ofgpu-graph-bench <dir> -iters 300 -sweeps N   # N = 3 on every mesh; 1, 10 and 30 as below
+```
+
+Every row ran once per round, round-robin, so a drift in the card's load falls
+on every row alike; eight rounds, and three more of the two rows that were
+short of quiet runs.
+
+Three solver sweeps, 300 outer iterations, medians of the quiet runs in
+ms/iter; the ratio is the per-launch median over the graph median:
+
+| case, mesh | cells | adaptive | per-launch | graph | ratio | quiet runs |
+|---|---|---|---|---|---|---|
+| plume 15 x 10 x 10 | 1 500 | 0.992 | 1.187 | 0.363 | **3.27×** | 4 of 8 |
+| plume 60 x 25 x 16 | 24 000 | 1.007 | 1.219 | 0.438 | **2.78×** | 3 of 8 |
+| channel 200 x 120 x 1 | 24 000 | 1.492 | 1.252 | 0.413 | **3.03×** | 4 of 8 |
+| plume 120 x 50 x 40 | 240 000 | 2.638 | 2.624 | 2.142 | **1.23×** | 3 of 8 |
+| plume 200 x 100 x 40 | 800 000 | 7.086 | 7.712 | 7.383 | **1.04×** | 3 of 8 |
+| plume 200 x 120 x 100 | 2 400 000 | 20.861 | 23.272 | 23.172 | **1.00×** | 4 of 11 |
+
+Every one of the 86 runs, quiet or not, printed `k vs per-launch: 0 of N cells
+differ, max |diff| 0`.
+
+The same harness with the mesh held at 24 000 cells (plume 60 x 25 x 16) and
+the number of solver sweeps varied:
+
+| sweeps | per-launch ms/iter | graph ms/iter | ratio | quiet runs |
+|---|---|---|---|---|
+| 1 | 0.866 | 0.335 | 2.59× | 4 of 8 |
+| 3 | 1.219 | 0.438 | 2.78× | 3 of 8 |
+| 10 | 2.588 | 0.806 | 3.21× | 4 of 8 |
+| 30 | 5.916 | 1.846 | 3.20× | 3 of 8 |
+
+and at 240 000 cells (plume 120 x 50 x 40), 3 sweeps gives 1.23× while 30
+sweeps gives 11.366 / 9.071 ms, 1.25× (5 of 11 runs quiet).
+
+On a quiet card the old table's shape holds: the ratio falls with mesh size,
+from 3.27× at 1 500 cells to 1.00× at 2 400 000 cells, the row the old table
+never had. The 24 000-cell channel row comes within half a per cent of the
+old 24 000-cell row on both paths, per-launch 1.252 against 1.258 and graph
+0.413 against 0.412; the old section does not say which case its row used, so
+this is a match of numbers, not a proof that it was the same case. The plume
+rows sit lower than the old ratios at the small meshes, 3.27× against 3.70×
+at 1 500 cells and 2.78× against 3.06× at 24 000. §113's fold took launches
+out of every sweep — four a sweep for PBiCGStab, §113 counting 232 kernel
+nodes before it and 184 after for a 12-sweep solve — which lowers the ratio
+where launches dominate; the section does not claim the fold is the whole
+difference, because the old run's cases and card state are not known.
+
+The 11.84× of 2026-09-14 — per-launch 12.099 ms, graph 1.022 ms, the
+24 000-cell channel — was taken while a second process, `fds_gpu.exe`, held
+6.8–7.3 GB and 47–95 % of the card's SM time. **What `docs/11` read as a
+table that no longer reproduces was a contended card, not a different
+machine.** The sweep table keeps its rise, 2.59× at 1 sweep to 3.21× at 10,
+and stops there: 3.20× at 30, where the old table read 3.41×.
+
+The runs that were not quiet, set beside the quiet ones (medians, ms/iter;
+the slowdown is the contended median over the quiet median):
+
+| case, sweeps | contended runs | per-launch | graph | ratio | per-launch slowdown | graph slowdown |
+|---|---|---|---|---|---|---|
+| plume 1 500, 3 | 4 | 2.054 | 0.432 | 4.75× | 1.73× | 1.19× |
+| plume 24 000, 3 | 5 | 2.329 | 0.542 | 4.30× | 1.91× | 1.24× |
+| channel 24 000, 3 | 4 | 1.702 | 0.440 | 3.87× | 1.36× | 1.07× |
+| plume 24 000, 30 | 5 | 10.695 | 2.406 | 4.45× | 1.81× | 1.30× |
+| plume 240 000, 3 | 5 | 3.587 | 2.798 | 1.28× | 1.37× | 1.31× |
+| plume 800 000, 3 | 5 | 9.587 | 8.121 | 1.18× | 1.24× | 1.10× |
+| plume 2 400 000, 3 | 7 | 23.967 | 23.442 | 1.02× | 1.03× | 1.01× |
+
+With the owner's test suite starting CUDA contexts beside it, the per-launch
+path slowed by up to 1.91× and the graph path by up to 1.31×, and at
+2 400 000 cells neither moved by more than 1.03×. On the small meshes the
+ratio rose under contention, to 3.87–4.75×, **because the graph pays the
+contended submission once per iteration and the per-launch path pays it per
+kernel.** The heavier neighbour of 2026-09-14 cost the per-launch path 9.6×
+and the graph path 2.5×. A ratio from this section is therefore a property of
+the card together with what shares it, and none of these figures is
+publishable without its contention column.
+
+**A CUDA graph buys back CPU submission time. That cost is per *launch* and is
+independent of the work each launch does.** So the ratio is governed by
+launches per unit of GPU work, not by cells: it rises with the number of
+kernels in an iteration and falls as each kernel gets more to do. Above roughly
+half a million cells this solver is memory-bandwidth bound and the graph is
+worth a few per cent — which `README.en.md`'s neighbouring paragraph already
+said about launch overhead in general, two sections earlier, without anyone
+joining the two statements.
+
+The practical consequence for this project cuts the helpful way. §38–§79 added
+*more kernels per iteration*, not more work per kernel: the gates above measure
+384 nodes for one momentum predictor and 369 for one species correction, and a
+coupled iteration is the sum of a dozen such modules. At a fixed mesh, today's
+iteration has far more launches to amortise than the 2024 iteration that was
+measured at 3.16×, so the graph is worth **more** now than it was — and the
+place it is worth least is the large mesh, not the small one.
+
+Capture and instantiation cost 0.24–3.25 ms at 1 and 3 sweeps and
+0.82–15.57 ms at 10 and 30, once per run, on every mesh measured. It is
+never the consideration.
+
+**The measurement this section printed until 2026-09-24.** It was committed on
+2026-09-02 (`e475d26`) and names the card (an RTX 5070 Ti) and the harness
+settings, and nothing else: not the driver, the toolkit, the day it was taken,
+the cases behind its cell counts, or what else was running on the card. It is
+kept here as it was printed, its opening sentence included:
+
 The published **3.16×** was measured at 24 000 cells, and it reproduces: this
 machine gives **2.96×** on the same case today. What did not survive is the
 belief that the advantage *grows with mesh size*. It does the opposite, and
@@ -20939,26 +21099,6 @@ cells and vary the number of launches per iteration (solver sweeps):
 | 30 | 6.408 | 1.880 | 3.41× |
 
 and at 240 000 cells, 3 sweeps gives 1.25× while 30 sweeps gives 1.38×.
-
-**A CUDA graph buys back CPU submission time. That cost is per *launch* and is
-independent of the work each launch does.** So the ratio is governed by
-launches per unit of GPU work, not by cells: it rises with the number of
-kernels in an iteration and falls as each kernel gets more to do. Above roughly
-half a million cells this solver is memory-bandwidth bound and the graph is
-worth a few per cent — which `README.en.md`'s neighbouring paragraph already
-said about launch overhead in general, two sections earlier, without anyone
-joining the two statements.
-
-The practical consequence for this project cuts the helpful way. §38–§79 added
-*more kernels per iteration*, not more work per kernel: the gates above measure
-384 nodes for one momentum predictor and 369 for one species correction, and a
-coupled iteration is the sum of a dozen such modules. At a fixed mesh, today's
-iteration has far more launches to amortise than the 2024 iteration that was
-measured at 3.16×, so the graph is worth **more** now than it was — and the
-place it is worth least is the large mesh, not the small one.
-
-Capture and instantiation cost 0.3–0.8 ms, once, on every mesh measured. It is
-never the consideration.
 
 ### 81.13 What must hold
 
