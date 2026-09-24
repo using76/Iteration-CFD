@@ -449,3 +449,24 @@ Written once by `tools/autonomy/corpus/split.py --write` into `tools/autonomy/co
   the injected counts on 120/120, and `-dryRun` refused `surface/closed` with the same counts on 120/120.
   Reported, not gated: stl_repair then closes duplicate 0/20, flip 0/20, hole 6/20, near_duplicate 20/20,
   signed_zero 20/20, t_junction 9/20, and skips 9/9 holes over 32 edges.
+
+### G-PREFLIGHT (AM-8), 2026-09-24: PASS
+
+Run by `tools/autonomy/preflight.py --gate` on binary sha256 `054bba67…a90b` at tree `ead44b0`; the report is
+`tools/autonomy/preflight/G-PREFLIGHT.json` (and `.md`).
+
+- **Part 1 (gated):** 10,000 random configs (5,000 on box_sphere, 5,000 on wing_b, 60 defect kinds, each
+  applied 122 times or more). The mirror of the mesher's parser, validator and surface read agrees with
+  `-dryRun` 10,000/10,000 in both directions and on the refused field; `-dryRun` refused 3,740, and preflight
+  refused every one of them. Preflight-only refusals on configs `-dryRun` passed: PF-THIN 2,090, WL-RANGE 841,
+  WL-UNLISTED 319, PF-PATCH 128, WL-FORBIDDEN 119, PF-QUALITY 68, PF-DOMAIN 66.
+- **Where the tree departs from the AM-8 brief:** the mesher parses its config through a `serde_json::Value`
+  (a BTreeMap), so a parse error is the first in key-sorted order, not document order.
+- **Part 2 (gated):** C-THIN with the measured post-snap wall edge reproduces thin_t1 bit for bit:
+  `3 * 0.0001 / 0.03757424300735249 = 0.007984192787098767 < 0.05`. The castellated prediction
+  (`3 * 0.0001 / 0.125 = 0.0024`) refuses too.
+- **Part 3 (reported, not gated, on snapped walls):** 48 full runs. On castellated walls (12 rows) the
+  predicted h equals the mesher's h_min exactly on all 6 refused rows, with 0 false passes and 0 false
+  refusals. On snapped walls (36 rows) there were 0 false passes and 11 false refusals (rate 0.306 of reached
+  rows): the castellated h is 2.49-3.33 times the real post-snap shortest wall edge, so the prediction is
+  conservative there. AM-9/AM-11 should pass `snap_probe`'s measured h when a snap run exists.

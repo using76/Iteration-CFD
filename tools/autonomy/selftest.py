@@ -15,7 +15,7 @@ E, F and G) and corpus/split.py (the sealed 420/180 split)), then
 features.py --selftest
 (the AM-4 geometry fingerprint: refusals, sphere curvature, cube sharp edges,
 two-sphere gap, NACA0012 thickness, planar fraction, commensurability,
-patches, invariance, schema and speed), then sensitivity.py --selftest
+patches, invariance, schema and speed), then preflight.py --selftest (the L0 checks: the mesher schema mirror, 54 hand cases and 300 random configs against -dryRun, one fixture per refusal, the survey configs, C-THIN and stage 0), then sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
 report), then checks that README.md still
@@ -60,7 +60,7 @@ def main():
               ("corpus/gen_bluff.py", 7), ("corpus/gen_gap.py", 7),
               ("corpus/gen_thin.py", 7), ("corpus/inject.py", 7),
               ("corpus/gate.py", 7), ("corpus/split.py", 7),
-              ("features.py", 11))
+              ("features.py", 11), ("preflight.py", 12))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:

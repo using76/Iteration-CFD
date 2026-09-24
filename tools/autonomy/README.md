@@ -430,6 +430,61 @@ the AM-1 Fingerprint schema, which wins, has `area_m2` per patch and
 volume/bbox for the whole surface. The fingerprint feeds AM-8's preflight,
 AM-9's rules (R-CURV, R-GAP, R-FEAT, R-PLANE) and AM-13's k-NN.
 
+## preflight.py — L0 and G-PREFLIGHT
+
+AM-8's gate: a candidate setup must clear nine checks, in a fixed order, before
+any mesher work; each `refuse` record carries a rule id, the value against its
+limit and a cite. Checks and the refusal ids under them: (a) PF-SURFACE;
+(b) PF-QUALITY; (c) PF-FLAGS → WL-FLAG; (d) PF-KNOBS → WL-POINTER, WL-FORBIDDEN,
+WL-UNLISTED, WL-TYPE, WL-RANGE, PF-PATCH, PF-CONFIG; (e) PF-NONORTH;
+(f) PF-YPLUS and PF-THIN; (g) PF-DOMAIN; (h) PF-BUDGET.
+
+(c) and (d) WRAP `schema.check_flags` and `schema.check_edit` — the locked knob
+table lives in `schema/knobs.json` and is never restated here. PF-CONFIG is the
+mirror's catch-all: a faithful re-implementation of what `-dryRun` refuses (the
+argument parser, the serde parse — the document goes through a
+`serde_json::Value`, so object keys are visited in BTreeMap order with
+missing-required at object end — and `validate`'s own order). `-dryRun` does not
+run stage 0 and does not know patch names, so PF-DOMAIN and PF-PATCH are
+preflight-only.
+
+Where the tree and the AM-8 brief disagree (the tree wins): the mirror visits
+object keys in the mesher's real (BTreeMap) order, not the brief's "document
+order" — the 54 hand cases cannot tell the two apart, 300 random configs can.
+PF-THIN predicts h as the castellated `base_size / 2**L` because the §D.3 G5
+edge needs the post-snap wall edge, which preflight cannot see; the
+to-the-digit reproduction uses a measured h from `snap_probe`, and the
+castellated prediction's error is reported by part 3, not gated. A band
+`distance` of 0 is a WL-RANGE refusal (`min_excl`) in the locked table although
+the mesher accepts it — preflight reports the table, it does not change it. The
+KINDS table has 60 rows where the brief's prose says 58 — the table wins (marked
+in the source). box_sphere.stl is closed and consistently wound but INWARD
+(`orientation.flipped_components` 1) and is accepted, because castellation
+classifies by parity; (a) refuses an open or non-manifold surface and one with
+`reoriented_triangles > 0` (inconsistent winding), never an inward one.
+
+Records: `preflight()` returns them in CHECKS order, each check holding either
+its refusals or exactly one `pass`/`abstain` record — PF-CONFIG sits in PF-KNOBS's
+group, and a check's pass record never stands beside a refusal of its own.
+
+G-PREFLIGHT (`--gate`, docs/15 §F): part 1 runs the mirror and `-dryRun` over
+10,000 random configs (5,000 on box_sphere, 5,000 on wing_b) with 60 defect kinds
+(each applied ≥ 20 times); part 2
+reproduces the thin_t1 refusal bit for bit (`3 * 0.0001 / 0.03757424300735249 =
+0.007984192787098767 < 0.05`); part 3 compares the castellated h prediction
+against 48 live runs' real G5 refusals. Ran 2026-09-24 (numbers in
+`preflight/G-PREFLIGHT.json`): PASS — part 1, 10,000 configs, 0 disagreements in
+either direction, 0 field mismatches, 3,740 refused / 6,260 passed by `-dryRun`,
+every kind applied ≥ 122 times; part 2 bit-equal and `%.6f` exact; part 3,
+castellated 12 rows with 6 refused, h_pred/h_mesher = 1.0 exactly on all 6, 0 false
+passes and 0 false refusals; snapped 36 rows, 2 refused, 0 false passes and 11 false
+refusals (a rate of 0.306, reported, not gated).
+
+For later units: AM-9 — a band `distance` of 0 is a WL-RANGE refusal in the
+locked table; do not change preflight to allow it. AM-11 — call `preflight()`
+on every candidate; `surface_facts` caches per (path, size, mtime); pass
+`snap_probe`'s h as `h_wall_min_m` when a snap run exists.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -449,6 +504,8 @@ AM-9's rules (R-CURV, R-GAP, R-FEAT, R-PLANE) and AM-13's k-NN.
 
     python tools/autonomy/features.py FILE.stl --id NAME [--diag]      # one fingerprint (JSON)
     python tools/autonomy/features.py --corpus A --seed 1 --n 120        # fingerprint a whole family
+    python tools/autonomy/preflight.py CONFIG [--flow F] [--octree-probe] [--records OUT.jsonl]   # L0 verdict
+    python tools/autonomy/preflight.py --gate --stl box_sphere=P --stl wing_b=P --out DIR          # G-PREFLIGHT
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report
