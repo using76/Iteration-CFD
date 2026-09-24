@@ -360,6 +360,36 @@ pub enum ChtScalarBc {
         #[serde(rename = "inletValue")]
         inlet_value: f64,
     },
+    /// SPEC-LIT §98.1: the face loses heat at a film coefficient `h`,
+    /// W/(m^2 K), to an ambient at `TInf`, K, that nobody meshed -
+    /// `-k dT/dn = h (T_b - TInf)`. A wall condition, on a solid or a fluid
+    /// region.
+    #[serde(rename = "externalConvection")]
+    ExternalConvection {
+        h: ChtFilmCoefficient,
+        #[serde(rename = "TInf")]
+        t_inf: f64,
+    },
+    /// SPEC-LIT §98.1: grey radiation at `emissivity`, in (0, 1], to a
+    /// surround at `TEnv`, K, large enough that its temperature does not
+    /// move - `-k dT/dn = eps sigma (T_b^4 - TEnv^4)`.
+    #[serde(rename = "externalRadiation")]
+    ExternalRadiation {
+        emissivity: f64,
+        #[serde(rename = "TEnv")]
+        t_env: f64,
+    },
+    /// SPEC-LIT §98.1: both on one face, summed - the `h_total` a datasheet
+    /// quotes (S98.4).
+    #[serde(rename = "externalConvectionRadiation")]
+    ExternalConvectionRadiation {
+        h: ChtFilmCoefficient,
+        #[serde(rename = "TInf")]
+        t_inf: f64,
+        emissivity: f64,
+        #[serde(rename = "TEnv")]
+        t_env: f64,
+    },
     /// The 2-D front/back plane: the patch contributes to no surface integral
     /// at all.
     ///
@@ -372,6 +402,46 @@ pub enum ChtScalarBc {
     /// naming the axis.
     #[serde(rename = "empty")]
     Empty,
+}
+
+impl ChtScalarBc {
+    /// One of §98's three words - a wall condition, legal on no opening.
+    fn is_external(&self) -> bool {
+        matches!(
+            self,
+            Self::ExternalConvection { .. }
+                | Self::ExternalRadiation { .. }
+                | Self::ExternalConvectionRadiation { .. }
+        )
+    }
+}
+
+/// SPEC-LIT §98.1's `h`: a number, W/(m^2 K), or §98.4's correlation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChtFilmCoefficient {
+    Value(f64),
+    Correlation(ChtCorrelation),
+}
+
+/// SPEC-LIT §98.4: Churchill & Chu's vertical-plate correlation (S98.6),
+/// evaluated ONCE at lowering from the Rayleigh number stated here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtCorrelation {
+    /// `"churchillChu"`, the one that exists.
+    pub correlation: String,
+    /// The Rayleigh number on `L`, in `[1e-1, 1e12]`.
+    #[serde(rename = "Ra")]
+    pub ra: f64,
+    /// The ambient fluid's Prandtl number.
+    #[serde(rename = "Pr")]
+    pub pr: f64,
+    /// The ambient fluid's conductivity, W/(m K).
+    pub kappa: f64,
+    /// The plate's height, m.
+    #[serde(rename = "L")]
+    pub l: f64,
 }
 
 /// One conformal interface between two regions - SPEC-LIT §47.4/§47.5.
@@ -714,6 +784,10 @@ pub enum LoweredBc {
     /// rewritten from the sign of the face flux every outer iteration by
     /// `field_ops::update_inlet_outlet`.
     InletOutlet(Scalar),
+    /// SPEC-LIT §98.2: the external loss, whose triple (S98.3) is written
+    /// from the face's own `C_b` - once on a face that only convects,
+    /// re-linearised every Newton pass (§98.3) on one that radiates.
+    External(crate::cht::ambient::ExternalLoss),
 }
 
 impl LoweredBc {
@@ -723,6 +797,7 @@ impl LoweredBc {
             Self::ZeroGradient => BcKind::ZeroGradient,
             Self::FixedFlux(_) => BcKind::FixedFluxTemperature,
             Self::InletOutlet(_) => BcKind::InletOutlet,
+            Self::External(_) => BcKind::Mixed,
         }
     }
 }
@@ -1419,6 +1494,15 @@ impl ChtCase {
                              it cannot also be an opening (SPEC-LIT 79.2)"
                         )))
                     }
+                    (bc, i, o) if bc.is_external() && (i || o) => {
+                        return Err(Error::Config(format!(
+                            "{path}/T: an external heat-loss condition is a WALL condition - \
+                             the heat a wall loses to an ambient nobody meshed (SPEC-LIT \
+                             98.1) - and this patch is an `{}`. An `inlet` carries \
+                             `fixedValue`; an `outlet` carries `inletOutlet` or `zeroGradient`",
+                            rule.kind
+                        )))
+                    }
                     (ChtScalarBc::InletOutlet { .. }, _, true) => {}
                     (ChtScalarBc::InletOutlet { .. }, _, false) => {
                         return Err(Error::Config(format!(
@@ -1456,7 +1540,7 @@ impl ChtCase {
                     outlets.push((region.name.clone(), rule.match_.clone()));
                 }
 
-                patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t)));
+                patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t, &path)?));
             }
         }
 
@@ -2202,8 +2286,9 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
     Ok((mat, t_ref))
 }
 
-fn lower_bc(bc: &ChtScalarBc) -> LoweredBc {
-    match bc {
+fn lower_bc(bc: &ChtScalarBc, path: &str) -> Result<LoweredBc> {
+    use crate::cht::ambient::ExternalLoss;
+    Ok(match bc {
         ChtScalarBc::FixedValue { value } => LoweredBc::FixedValue(*value as Scalar),
         ChtScalarBc::ZeroGradient => LoweredBc::ZeroGradient,
         ChtScalarBc::FixedFluxTemperature { q } => LoweredBc::FixedFlux(*q as Scalar),
@@ -2214,7 +2299,84 @@ fn lower_bc(bc: &ChtScalarBc) -> LoweredBc {
         // written on it is never read. `run_flow_case` skips those faces by
         // the mesh's own `PatchKind`, which is where the fact lives.
         ChtScalarBc::Empty => LoweredBc::ZeroGradient,
+        // SPEC-LIT §98.1: `h = 0` on the word that only radiates and
+        // `emissivity = 0` on the one that only convects.
+        ChtScalarBc::ExternalConvection { h, t_inf } => LoweredBc::External(ExternalLoss {
+            h: lower_film(h, path)?,
+            t_inf: lower_absolute(*t_inf, &format!("{path}/T/TInf"), "the ambient temperature")?,
+            emissivity: 0.0,
+            t_env: 0.0,
+        }),
+        ChtScalarBc::ExternalRadiation { emissivity, t_env } => LoweredBc::External(ExternalLoss {
+            h: 0.0,
+            t_inf: 0.0,
+            emissivity: lower_emissivity(*emissivity, path)?,
+            t_env: lower_absolute(*t_env, &format!("{path}/T/TEnv"), "the surround's temperature")?,
+        }),
+        ChtScalarBc::ExternalConvectionRadiation { h, t_inf, emissivity, t_env } => {
+            LoweredBc::External(ExternalLoss {
+                h: lower_film(h, path)?,
+                t_inf: lower_absolute(*t_inf, &format!("{path}/T/TInf"), "the ambient temperature")?,
+                emissivity: lower_emissivity(*emissivity, path)?,
+                t_env: lower_absolute(*t_env, &format!("{path}/T/TEnv"), "the surround's temperature")?,
+            })
+        }
+    })
+}
+
+/// SPEC-LIT §98.5 rows 1 and 5-7: `h` as a number, or through (S98.6).
+fn lower_film(h: &ChtFilmCoefficient, path: &str) -> Result<Scalar> {
+    let at = format!("{path}/T/h");
+    match h {
+        ChtFilmCoefficient::Value(v) => {
+            if !(*v > 0.0) || !v.is_finite() {
+                return Err(Error::Config(format!(
+                    "{at} = {v}: a film coefficient has to be finite and positive, W/(m^2 K); \
+                     h = 0 is `zeroGradient` under another name (SPEC-LIT 98.5)"
+                )));
+            }
+            Ok(*v as Scalar)
+        }
+        ChtFilmCoefficient::Correlation(c) => {
+            if c.correlation != "churchillChu" {
+                return Err(Error::Config(format!(
+                    "{at}/correlation = \"{}\" is not implemented. Available: churchillChu \
+                     (SPEC-LIT 98.4)",
+                    c.correlation
+                )));
+            }
+            crate::cht::ambient::churchill_chu_h(
+                &at,
+                c.ra as Scalar,
+                c.pr as Scalar,
+                c.kappa as Scalar,
+                c.l as Scalar,
+            )
+        }
     }
+}
+
+/// SPEC-LIT §98.5 rows 2 and 4: an absolute temperature, K.
+fn lower_absolute(t: f64, at: &str, what: &str) -> Result<Scalar> {
+    if !(t > 0.0) || !t.is_finite() {
+        return Err(Error::Config(format!(
+            "{at} = {t}: {what} is absolute, K, and has to be finite and positive \
+             (SPEC-LIT 98.5)"
+        )));
+    }
+    Ok(t as Scalar)
+}
+
+/// SPEC-LIT §98.5 row 3.
+fn lower_emissivity(e: f64, path: &str) -> Result<Scalar> {
+    if !(e > 0.0 && e <= 1.0) {
+        return Err(Error::Config(format!(
+            "{path}/T/emissivity = {e}: a grey emissivity lies in [0, 1], and 0 radiates \
+             nothing - `zeroGradient` under another name - so this condition takes (0, 1] \
+             (SPEC-LIT 98.5)"
+        )));
+    }
+    Ok(e as Scalar)
 }
 
 /// A `divSchemes` entry, through the same reader every other case uses -

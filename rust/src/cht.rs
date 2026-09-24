@@ -2128,6 +2128,17 @@ pub struct ChtSolution {
     pub region_row_scale: Vec<Scalar>,
     /// `ConjugatePerformance::all_converged` of the last step.
     pub converged: bool,
+    /// `[n_bf]` the cell-to-face conductance `C = Dhat_b/|Sf|`, W/(m^2 K),
+    /// every triple was written from - what [`Self::patch_heat_flow`] is
+    /// built from (SPEC-LIT §98.3).
+    pub b_conductance: Vec<Scalar>,
+    /// SPEC-LIT §98.3: the last step's Newton corrections of the radiating
+    /// faces, `max_f |T_b - T*|` in K, one per pass; empty when no face
+    /// radiates.
+    pub external_passes: Vec<Scalar>,
+    /// (S98.5) of the triples the last solve used; zero when no face
+    /// radiates.
+    pub external_residual: Scalar,
 }
 
 impl ChtSolution {
@@ -2142,6 +2153,21 @@ impl ChtSolution {
                 (name.clone(), a, b)
             })
             .collect()
+    }
+
+    /// The conductive heat flowing **INTO** the domain through one patch, W:
+    /// `SUM_bf C_b |Sf|_b (T_b - T_P)` - the conduction twin of
+    /// [`crate::cht::flow::ChtFlowSolution::patch_heat_flow`], and what
+    /// Gate 98-A reads a fin's base heat flow with (§98.6). Not meaningful
+    /// on an interface patch; use [`Self::interface_flows`] there.
+    pub fn patch_heat_flow(&self, region: usize, patch: &str) -> Result<Scalar> {
+        let h = &self.mesh.host;
+        let mut q: Scalar = 0.0;
+        for bf in self.mesh.patch_range(region, patch)? {
+            let c = h.b_face_cells[bf] as usize;
+            q += self.b_conductance[bf] * h.b_mag_sf[bf] * (self.bt[bf] - self.t[c]);
+        }
+        Ok(q)
     }
 
     /// The volume-averaged temperature of one region, K.
@@ -2231,6 +2257,8 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     let mut cht = ConjugateHeat::new(gpu, &gm, &tm, &cond, ctrl)?;
     mark_coupled_faces(gpu, cht.field_mut(), &tm)?;
 
+    let mut external: Vec<ambient::ExternalFace> = Vec::new();
+
     // ---- the boundary conditions ----------------------------------------
     {
         let mut kind = gpu.download(&cht.field().bc_kind)?;
@@ -2267,6 +2295,25 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
                         fr[bf] = 0.0;
                         rv[bf] = *q;
                         rg[bf] = if c_b > 0.0 { q * delta / c_b } else { 0.0 };
+                    }
+                    // SPEC-LIT §98.2-§98.3: (S98.1) on a face that only
+                    // convects, written once because `C_b` is static; (S98.3)
+                    // about the initial temperature on one that radiates,
+                    // which the Newton passes below move.
+                    LoweredBc::External(loss) => {
+                        let face = ambient::ExternalFace {
+                            bf,
+                            c_b: cond.b_conductance[bf],
+                            loss: *loss,
+                            t_star: case.initial_t,
+                        };
+                        let (a, b, c) = face.triple();
+                        fr[bf] = a;
+                        rv[bf] = b;
+                        rg[bf] = c;
+                        if loss.radiates() {
+                            external.push(face);
+                        }
                     }
                     // SPEC-LIT §79.5. Unreachable through the reader - the
                     // condition is legal only on an `outlet`, an outlet is
@@ -2331,8 +2378,31 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     };
 
     let mut last = ConjugatePerformance::default();
+    // SPEC-LIT §98.3: a radiating face's Newton passes sit BETWEEN two
+    // `correct` calls, outside any captured region. A case with no such
+    // face takes the one `correct` per step it always took.
+    let mut external_passes: Vec<Scalar> = Vec::new();
+    let mut external_residual: Scalar = 0.0;
     for _ in 0..steps {
-        last = cht.correct(gpu)?;
+        if external.is_empty() {
+            last = cht.correct(gpu)?;
+        } else {
+            external_passes.clear();
+            let mut met = false;
+            for _ in 0..ambient::NEWTON_MAX_PASSES {
+                last = cht.correct(gpu)?;
+                let r = ambient::relinearise(gpu, cht.field_mut(), &mut external)?;
+                external_passes.push(r.change);
+                external_residual = r.residual;
+                if r.change <= ambient::NEWTON_RTOL * r.scale {
+                    met = true;
+                    break;
+                }
+            }
+            if !met {
+                return Err(ambient::newton_refused(&case.name, &external_passes));
+            }
+        }
         if !case.steady {
             cht.advance_time_step(gpu)?;
         }
@@ -2354,6 +2424,9 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
         region_residuals: last.regions.clone(),
         region_row_scale: cht.row_scale().map(<[Scalar]>::to_vec).unwrap_or_default(),
         converged: last.all_converged(),
+        b_conductance: cond.b_conductance.clone(),
+        external_passes,
+        external_residual,
     })
 }
 

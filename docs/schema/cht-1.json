@@ -181,6 +181,44 @@
         "TRef"
       ]
     },
+    "ChtCorrelation": {
+      "description": "SPEC-LIT §98.4: Churchill & Chu's vertical-plate correlation (S98.6),\nevaluated ONCE at lowering from the Rayleigh number stated here.",
+      "type": "object",
+      "properties": {
+        "L": {
+          "description": "The plate's height, m.",
+          "type": "number",
+          "format": "double"
+        },
+        "Pr": {
+          "description": "The ambient fluid's Prandtl number.",
+          "type": "number",
+          "format": "double"
+        },
+        "Ra": {
+          "description": "The Rayleigh number on `L`, in `[1e-1, 1e12]`.",
+          "type": "number",
+          "format": "double"
+        },
+        "correlation": {
+          "description": "`\"churchillChu\"`, the one that exists.",
+          "type": "string"
+        },
+        "kappa": {
+          "description": "The ambient fluid's conductivity, W/(m K).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "correlation",
+        "Ra",
+        "Pr",
+        "kappa",
+        "L"
+      ]
+    },
     "ChtElastic": {
       "description": "The elastic constants of one material or one zone - SPEC-LIT §96.1.\n\nValidated at lowering by [`crate::solid::Material::validate`], which is\nwhere `E <= 0`, the `nu` range and the measured 0.45 edge are refused\n(§96.3 rows 1-2); this struct carries no logic of its own.",
       "type": "object",
@@ -246,6 +284,18 @@
         "name",
         "bounds",
         "material"
+      ]
+    },
+    "ChtFilmCoefficient": {
+      "description": "SPEC-LIT §98.1's `h`: a number, W/(m^2 K), or §98.4's correlation.",
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "$ref": "#/$defs/ChtCorrelation"
+        }
       ]
     },
     "ChtFlow": {
@@ -929,6 +979,86 @@
           "required": [
             "type",
             "inletValue"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §98.1: the face loses heat at a film coefficient `h`,\nW/(m^2 K), to an ambient at `TInf`, K, that nobody meshed -\n`-k dT/dn = h (T_b - TInf)`. A wall condition, on a solid or a fluid\nregion.",
+          "type": "object",
+          "properties": {
+            "TInf": {
+              "type": "number",
+              "format": "double"
+            },
+            "h": {
+              "$ref": "#/$defs/ChtFilmCoefficient"
+            },
+            "type": {
+              "type": "string",
+              "const": "externalConvection"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "h",
+            "TInf"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §98.1: grey radiation at `emissivity`, in (0, 1], to a\nsurround at `TEnv`, K, large enough that its temperature does not\nmove - `-k dT/dn = eps sigma (T_b^4 - TEnv^4)`.",
+          "type": "object",
+          "properties": {
+            "TEnv": {
+              "type": "number",
+              "format": "double"
+            },
+            "emissivity": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "externalRadiation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "emissivity",
+            "TEnv"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §98.1: both on one face, summed - the `h_total` a datasheet\nquotes (S98.4).",
+          "type": "object",
+          "properties": {
+            "TEnv": {
+              "type": "number",
+              "format": "double"
+            },
+            "TInf": {
+              "type": "number",
+              "format": "double"
+            },
+            "emissivity": {
+              "type": "number",
+              "format": "double"
+            },
+            "h": {
+              "$ref": "#/$defs/ChtFilmCoefficient"
+            },
+            "type": {
+              "type": "string",
+              "const": "externalConvectionRadiation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "h",
+            "TInf",
+            "emissivity",
+            "TEnv"
           ]
         },
         {

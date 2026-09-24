@@ -3556,3 +3556,343 @@ fn pair_coupled_changes_the_solve_and_keeps_the_answer() {
         0.1 * ua
     );
 }
+
+// ==========================================================================
+//  SPEC-LIT §98 - the face that exchanges heat with something not meshed
+// ==========================================================================
+
+/// §98's one-region slab: 20 mm of `k = 1` in twenty cells, `hot` held at
+/// 500 K and `face` carrying `face_t` - the one thing a §98 test varies.
+fn external_slab(face_t: &str) -> String {
+    format!(
+        r#"{{
+  "name": "externalSlab",
+  "regions": [
+    {{
+      "name": "slab",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.02, 0.01, 0.01] }},
+        "cells": [20, 1, 1],
+        "boundaries": {{
+          "xmin": "hot", "xmax": "face",
+          "ymin": "s1", "ymax": "s2", "zmin": "s3", "zmax": "s4"
+        }}
+      }},
+      "material": {{ "rho": 2000.0, "c": 800.0, "kappa": 1.0 }},
+      "patches": [
+        {{ "match": "hot",  "T": {{ "type": "fixedValue", "value": 500.0 }} }},
+        {{ "match": "face", "T": {face_t} }},
+        {{ "match": "s1", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s2", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s3", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s4", "T": {{ "type": "zeroGradient" }} }}
+      ]
+    }}
+  ],
+  "initial": {{ "T": 500.0 }},
+  "run": {{ "steady": true }},
+  "numerics": {{
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 1000
+  }}
+}}"#
+    )
+}
+
+const SLAB_CONV: &str = r#"{ "type": "externalConvection", "h": 25.0, "TInf": 300.0 }"#;
+const SLAB_RAD: &str = r#"{ "type": "externalRadiation", "emissivity": 0.8, "TEnv": 300.0 }"#;
+const SLAB_CHU: &str = r#"{ "type": "externalConvection", "TInf": 300.0, "h": { "correlation": "churchillChu", "Ra": 1.0e6, "Pr": 0.71, "kappa": 0.026, "L": 0.2 } }"#;
+const KP_COLD: &str = r#"{ "match": "cold",      "T": { "type": "fixedValue", "value": 299.95 } }"#;
+const KP_HOT: &str = r#"{ "match": "hot",        "T": { "type": "fixedValue", "value": 300.05 } }"#;
+
+#[test]
+fn the_three_external_words_lower_onto_one_loss_each() {
+    let face_bc = |t: &str| {
+        let low = read(&external_slab(t)).expect("parse").lower().expect("lower");
+        let bc = low
+            .patch_bcs
+            .iter()
+            .find(|(_, p, _)| p == "face")
+            .map(|(_, _, b)| *b)
+            .expect("a face patch");
+        match bc {
+            LoweredBc::External(loss) => loss,
+            other => panic!("the face lowered to {other:?}, not LoweredBc::External"),
+        }
+    };
+    let conv = face_bc(SLAB_CONV);
+    println!("externalConvection -> h = {}, TInf = {}, eps = {}", conv.h, conv.t_inf, conv.emissivity);
+    assert_eq!((conv.h, conv.t_inf, conv.emissivity), (25.0, 300.0, 0.0));
+    let rad = face_bc(SLAB_RAD);
+    assert_eq!((rad.h, rad.emissivity, rad.t_env), (0.0, 0.8, 300.0));
+    let both = face_bc(r#"{ "type": "externalConvectionRadiation", "h": 10.0, "TInf": 300.0, "emissivity": 0.9, "TEnv": 290.0 }"#);
+    assert_eq!(
+        (both.h, both.t_inf, both.emissivity, both.t_env),
+        (10.0, 300.0, 0.9, 290.0)
+    );
+    assert_eq!(LoweredBc::External(both).kind(), BcKind::Mixed);
+    let chu = face_bc(SLAB_CHU);
+    let want = crate::cht::ambient::churchill_chu_h("x", 1.0e6, 0.71, 0.026, 0.2).unwrap();
+    println!("churchillChu -> h = {want} W/(m^2 K)");
+    assert_eq!(chu.h, want);
+    let schema = emit_cht_schema();
+    for word in [
+        "externalConvection",
+        "externalRadiation",
+        "externalConvectionRadiation",
+        "TInf",
+        "TEnv",
+        "churchillChu",
+    ] {
+        assert!(schema.contains(word), "the schema does not spell {word}");
+    }
+}
+
+#[test]
+fn every_external_refusal_fires_and_names_the_setting() {
+    let refused = |doc: String, needles: &[&str]| {
+        let e = read(&doc).expect("parse").lower().expect_err("must refuse");
+        let msg = e.to_string();
+        for n in needles {
+            assert!(msg.contains(n), "the refusal did not name \"{n}\":\n{msg}");
+        }
+    };
+    let p = "regions/slab/patches/face/T";
+    refused(external_slab(SLAB_CONV).replace(r#""h": 25.0"#, r#""h": 0.0"#), &[&format!("{p}/h"), "zeroGradient"]);
+    refused(external_slab(SLAB_CONV).replace(r#""h": 25.0"#, r#""h": -5.0"#), &[&format!("{p}/h")]);
+    refused(external_slab(SLAB_CONV).replace(r#""TInf": 300.0"#, r#""TInf": 0.0"#), &[&format!("{p}/TInf"), "absolute"]);
+    refused(external_slab(SLAB_RAD).replace(r#""emissivity": 0.8"#, r#""emissivity": 0.0"#), &[&format!("{p}/emissivity"), "(0, 1]"]);
+    refused(external_slab(SLAB_RAD).replace(r#""emissivity": 0.8"#, r#""emissivity": 1.5"#), &[&format!("{p}/emissivity")]);
+    refused(external_slab(SLAB_RAD).replace(r#""TEnv": 300.0"#, r#""TEnv": -1.0"#), &[&format!("{p}/TEnv"), "absolute"]);
+    refused(
+        external_slab(r#"{ "type": "externalConvectionRadiation", "h": 10.0, "TInf": 300.0, "emissivity": 0.9, "TEnv": 290.0 }"#)
+            .replace(r#""emissivity": 0.9"#, r#""emissivity": 2.0"#),
+        &[&format!("{p}/emissivity")],
+    );
+    refused(external_slab(SLAB_CHU).replace(r#""churchillChu""#, r#""mcAdams""#), &[&format!("{p}/h/correlation"), "churchillChu"]);
+    refused(external_slab(SLAB_CHU).replace(r#""Ra": 1.0e6"#, r#""Ra": 1.0e13"#), &[&format!("{p}/h/Ra"), "[1e-1, 1e12]"]);
+    refused(external_slab(SLAB_CHU).replace(r#""L": 0.2"#, r#""L": 0.0"#), &[&format!("{p}/h/L")]);
+    refused(duct_case("inlet", DUCT_U, SLAB_CONV, "outlet", DUCT_TOUT, ""), &["regions/water/patches/west/T", "WALL condition"]);
+    refused(duct_case("inlet", DUCT_U, DUCT_TIN, "outlet", SLAB_CONV, ""), &["regions/water/patches/east/T", "WALL condition"]);
+    let inserted = format!(
+        r#"{{ "match": "toMetal", "T": {SLAB_CONV} }},
+        {{ "match": "sideA",  "T": {{ "type": "zeroGradient" }} }},"#
+    );
+    let text = default_slab().replace(
+        r#"{ "match": "sideA",  "T": { "type": "zeroGradient" } },"#,
+        &inserted,
+    );
+    assert!(text.contains("\"type\": \"external"), "the substitution inserted nothing");
+    refused(text, &["toMetal", "ONE condition"]);
+}
+
+#[test]
+fn pair_every_external_entry_changes_the_answer() {
+    let Some(gpu) = gpu() else { return };
+    let pairs = [
+        (SLAB_CONV, r#""h": 25.0"#, r#""h": 50.0"#),
+        (SLAB_CONV, r#""TInf": 300.0"#, r#""TInf": 320.0"#),
+        (SLAB_RAD, r#""emissivity": 0.8"#, r#""emissivity": 0.3"#),
+        (SLAB_RAD, r#""TEnv": 300.0"#, r#""TEnv": 250.0"#),
+        (SLAB_CHU, r#""Ra": 1.0e6"#, r#""Ra": 1.0e8"#),
+    ];
+    for (face, from, to) in pairs {
+        let a = external_slab(face);
+        let b = external_slab(&face.replace(from, to));
+        assert_ne!(a, b, "the pair test's own substitution '{from}' -> '{to}' changed nothing");
+        let sa = solve(&gpu, &a);
+        let sb = solve(&gpu, &b);
+        let gap = sa
+            .t
+            .iter()
+            .zip(&sb.t)
+            .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+        println!("{from} -> {to}: max |dT| = {gap:.3e} K");
+        assert!(
+            gap > 1e-9,
+            "changing {from} -> {to} moved T by {gap} K: the case said it and the solver \
+             ignored it (SPEC-LIT 13.4.1)"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn a_convective_face_conducts_exactly_what_it_convects() {
+    let Some(gpu) = gpu() else { return };
+    let sol = solve(&gpu, &external_slab(SLAB_CONV));
+    let h = &sol.mesh.host;
+    let range = sol.mesh.patch_range(0, "face").unwrap();
+    let area: Scalar = range.clone().map(|bf| h.b_mag_sf[bf]).sum();
+    let q_exact = (500.0 - 300.0) / (0.02 / 1.0 + 1.0 / 25.0);
+    let hot = sol.patch_heat_flow(0, "hot").unwrap();
+    println!("q_hot/area = {:.6} W/m^2, q_exact = {q_exact:.6} W/m^2, area = {area:.3e} m^2", hot / area);
+    assert!(
+        (hot / area / q_exact - 1.0).abs() < 1e-10,
+        "the hot wall's flux {} W/m^2 is not the closed form {q_exact} W/m^2 (SPEC-LIT 98.6)",
+        hot / area
+    );
+    let conducted = sol.patch_heat_flow(0, "face").unwrap();
+    let convected: Scalar = range.map(|bf| 25.0 * h.b_mag_sf[bf] * (sol.bt[bf] - 300.0)).sum();
+    println!("conducted = {conducted:.9} W, convected = {convected:.9} W");
+    assert!(
+        (conducted + convected).abs() <= 1e-12 * convected.abs(),
+        "what the face conducts ({conducted} W) and what it convects ({convected} W) do not \
+         balance - the Robin triple and the reported flux disagree"
+    );
+    assert!(sol.external_passes.is_empty(), "a purely convective face took a Newton pass");
+    assert_eq!(sol.steps, 1);
+}
+
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn a_radiating_face_meets_the_quartic_in_quadratic_newton_passes() {
+    let Some(gpu) = gpu() else { return };
+    let sol = solve(&gpu, &external_slab(SLAB_RAD));
+    let root = crate::cht::ambient::radiating_slab_root(1.0 / 0.02, 500.0, 0.8, 300.0);
+    let bf = sol.mesh.patch_range(0, "face").unwrap().start;
+    let tb = sol.bt[bf];
+    println!(
+        "T_b = {tb:.9} K, closed form T_r = {:.9} K, {} Newton passes, corrections: {:?}",
+        root.root,
+        sol.external_passes.len(),
+        sol.external_passes
+    );
+    assert!(
+        ((tb - root.root) / root.root).abs() <= 1e-10,
+        "the solved face temperature {tb} K is not the quartic's root {} K (SPEC-LIT 98.6)",
+        root.root
+    );
+    let n = sol.external_passes.len();
+    assert!(
+        (3..=6).contains(&n),
+        "{n} Newton passes: the quadratic convergence of (S98.3) about a good start takes \
+         a handful, not {n}"
+    );
+    assert!(
+        *sol.external_passes.last().unwrap() <= 1e-10 * tb,
+        "the last correction {} K exceeds the 1e-10 relative bar",
+        sol.external_passes.last().unwrap()
+    );
+    assert!(
+        sol.external_residual <= 1e-10,
+        "the linearisation residual {} exceeds 1e-10 (S98.5)",
+        sol.external_residual
+    );
+    let area = sol.mesh.host.b_mag_sf[bf];
+    let q_r = 0.8 * crate::radiation::SIGMA_SB * (tb.powi(4) - (300.0 as Scalar).powi(4));
+    println!("q_r = {q_r:.6} W/m^2, q_hot/area = {:.6} W/m^2", sol.patch_heat_flow(0, "hot").unwrap() / area);
+    assert!(
+        (sol.patch_heat_flow(0, "hot").unwrap() / area / q_r - 1.0).abs() < 1e-9,
+        "the hot wall's flux is not the quartic loss at T_b = {tb} K"
+    );
+}
+
+#[test]
+fn a_case_without_an_external_face_takes_one_solve_and_no_newton_pass() {
+    let Some(gpu) = gpu() else { return };
+    let sol = solve(&gpu, &default_slab());
+    println!("steps = {}, external_passes = {}", sol.steps, sol.external_passes.len());
+    assert_eq!(sol.steps, 1);
+    assert!(sol.external_passes.is_empty(), "no face radiates, yet a Newton pass was taken");
+    assert_eq!(sol.external_residual, 0.0);
+    assert_eq!(
+        sol.b_conductance.len(),
+        sol.mesh.host.n_boundary_faces,
+        "b_conductance is not one entry per boundary face"
+    );
+}
+
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn an_external_face_on_a_fluid_wall_meets_its_robin_identity() {
+    let Some(gpu) = gpu() else { return };
+    let text = kp_pair_base()
+        .replace(KP_COLD, r#"{ "match": "cold", "T": { "type": "externalConvection", "h": 5.0, "TInf": 299.95 } }"#)
+        .replace(r#""iterations": 600"#, r#""iterations": 20"#);
+    assert!(text.contains("\"type\": \"external"), "the cold wall did not take the external word");
+    assert!(text.contains(r#""iterations": 20"#), "the iteration cap was not lowered");
+    let sol = run_flow(&gpu, &text);
+    let h = &sol.mesh.host;
+    let (mut conducted, mut convected) = (0.0 as Scalar, 0.0 as Scalar);
+    let mut worst = 0.0 as Scalar;
+    for bf in sol.mesh.patch_range(0, "cold").unwrap() {
+        let want = 1.0 * h.b_delta_coeffs[bf];
+        let ratio = sol.b_conductance[bf] / want;
+        worst = worst.max((ratio - 1.0).abs());
+        assert!(
+            (ratio - 1.0).abs() < 1e-14,
+            "the conductance the energy equation used is not the one the triple was written \
+             from: {} against {} (ratio {})",
+            sol.b_conductance[bf],
+            want,
+            ratio
+        );
+        let c = h.b_face_cells[bf] as usize;
+        conducted += sol.b_conductance[bf] * h.b_mag_sf[bf] * (sol.bt[bf] - sol.t[c]);
+        convected += 5.0 * h.b_mag_sf[bf] * (sol.bt[bf] - 299.95);
+    }
+    println!(
+        "worst conductance ratio deviation = {worst:.3e}; conducted = {conducted:.6e} W, convected = {convected:.6e} W"
+    );
+    assert!(
+        (conducted + convected).abs() <= 1e-10 * convected.abs(),
+        "what the fluid face conducts ({conducted} W) and what it convects ({convected} W) do \
+         not balance - the triple and the assembled conductance disagree"
+    );
+    assert_eq!(sol.external_residual, 0.0);
+}
+
+#[test]
+fn pair_the_external_entries_change_a_conjugate_answer() {
+    let Some(gpu) = gpu() else { return };
+    let rows = [
+        (
+            KP_COLD,
+            r#"{ "match": "cold", "T": { "type": "externalConvection", "h": 5.0, "TInf": 299.95 } }"#,
+            (r#""h": 5.0"#, r#""h": 10.0"#),
+            "h on the fluid's cold wall",
+        ),
+        (
+            KP_HOT,
+            r#"{ "match": "hot", "T": { "type": "externalConvection", "h": 50.0, "TInf": 300.05 } }"#,
+            (r#""h": 50.0"#, r#""h": 100.0"#),
+            "h on the solid's outer face",
+        ),
+        (
+            KP_COLD,
+            r#"{ "match": "cold", "T": { "type": "externalRadiation", "emissivity": 0.5, "TEnv": 299.95 } }"#,
+            (r#""emissivity": 0.5"#, r#""emissivity": 0.9"#),
+            "emissivity on the fluid's cold wall",
+        ),
+    ];
+    for (kp, face, (from, to), what) in rows {
+        let base = kp_pair_base().replace(kp, face);
+        assert!(
+            base.contains("\"type\": \"external"),
+            "the substitution for {what} inserted nothing"
+        );
+        let b = base.replace(from, to);
+        assert_ne!(base, b, "the pair test's own substitution '{from}' -> '{to}' changed nothing");
+        let sa = run_flow(&gpu, &base);
+        let sb = run_flow(&gpu, &b);
+        let gap = sa
+            .t
+            .iter()
+            .zip(&sb.t)
+            .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()));
+        println!("{what}: {from} -> {to}, max |dT| = {gap:.3e} K");
+        assert!(
+            gap > 1e-12,
+            "changing {what} moved the temperature field by {gap} K. Two cases differing in \
+             one entry produced the SAME answer, which means the case said it and the solver \
+             ignored it (SPEC-LIT 13.4.1)"
+        );
+        assert!(
+            sa.external_residual < 1e-6 && sb.external_residual < 1e-6,
+            "the linearisation residual of a finished run is not small: {} and {} (S98.5)",
+            sa.external_residual,
+            sb.external_residual
+        );
+    }
+}

@@ -385,6 +385,9 @@ pub struct ChtFlowSolution {
     /// re-derive a bulk temperature rise from a heat flow without restating
     /// the properties.
     pub fluid_rho_cp: Scalar,
+    /// (S98.5) of the triples the last energy solve used on the radiating
+    /// faces; zero when no face radiates (SPEC-LIT §98.3).
+    pub external_residual: Scalar,
 }
 
 impl ChtFlowSolution {
@@ -663,6 +666,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     // once here, exactly as `crate::cht::run_case` writes it. Handing a solid
     // face to `set_fixed_flux_walls` would divide by the FLUID's conductivity,
     // which on an air/silicon pair is wrong by 5e3.
+    let mut external: Vec<crate::cht::ambient::ExternalFace> = Vec::new();
     let mut ffq_fluid = vec![false; tm.host.n_boundary_faces];
     {
         let f = energy.field();
@@ -712,6 +716,31 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
                             let c_b = cond.b_conductance[bf];
                             let delta = tm.host.b_delta_coeffs[bf];
                             rg[bf] = if c_b > 0.0 { q * delta / c_b } else { 0.0 };
+                        }
+                    }
+                    // SPEC-LIT §98.2-§98.3. `C_b` on a solid face is the static
+                    // `Dhat_b/|Sf|`; on a fluid face it is `k_eff Delta_b`, and
+                    // this path is laminar - `nut` is zero on both meshes and
+                    // never written - so `k_eff = kappa` in every bit and the
+                    // product below is the conductance `Energy` assembles with.
+                    LoweredBc::External(loss) => {
+                        let c_b = if is_fluid {
+                            fluid.kappa * tm.host.b_delta_coeffs[bf]
+                        } else {
+                            cond.b_conductance[bf]
+                        };
+                        let face = crate::cht::ambient::ExternalFace {
+                            bf,
+                            c_b,
+                            loss: *loss,
+                            t_star: case.initial_t,
+                        };
+                        let (a, b, c) = face.triple();
+                        fr[bf] = a;
+                        rv[bf] = b;
+                        rg[bf] = c;
+                        if loss.radiates() {
+                            external.push(face);
                         }
                     }
                 }
@@ -997,6 +1026,13 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             gas.update_density(gpu, energy.field())?;
         }
 
+        // 4b. SPEC-LIT §98.3: every radiating face re-linearised about the
+        // T_b the previous energy solve left - one host round trip per
+        // iteration, and only on a case that has such a face.
+        if !external.is_empty() {
+            crate::cht::ambient::relinearise(gpu, energy.field_mut(), &mut external)?;
+        }
+
         // 5. the one energy equation, over both regions
         let tperf = energy.correct(gpu, &phi_thermal, &nut_thermal, &tke, nu, &gas)?;
 
@@ -1031,6 +1067,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         .unwrap_or_default();
 
     let bt = gpu.download(&energy.field().bf)?;
+    let external_residual = crate::cht::ambient::linearisation_residual(&bt, &external);
     let rho_cp = fluid.rho * fluid.cp;
     let opening_report = if openings.is_some() {
         // SPEC-LIT §79.7's global balance, taken on the host from the boundary
@@ -1085,6 +1122,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         continuity,
         openings: opening_report,
         fluid_rho_cp: rho_cp,
+        external_residual,
         mesh: tm,
     })
 }
