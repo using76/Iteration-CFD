@@ -635,6 +635,281 @@ pub fn solve_block_pbicgstab(
 }
 
 // ==========================================================================
+//  The block map F(u) and the outer loop around it (SPEC-LIT §109.6)
+// ==========================================================================
+
+use crate::solid::block::BlockOperator;
+use crate::solid::displacement::Displacement;
+use crate::solid::motion_ratio_of;
+use crate::solid::outer::{
+    aitken_omega, anderson_gamma, observed_contraction, OuterControls, OuterReport, Relaxation,
+};
+use crate::Vec3;
+
+/// Everything one block application needs, built once per region: the
+/// operator (§109.1-§109.2), the flat workspace (§109.5), and both kernel
+/// sets.
+pub struct CoupledSolid {
+    pub op: BlockOperator,
+    pub cw: CoupledWorkspace,
+    pub k: SolverKernels,
+    pub ck: CoupledKernels,
+}
+
+impl CoupledSolid {
+    /// A bonded region is refused by name, through [`BlockOperator::new`]
+    /// (§95.8).
+    pub fn new(gpu: &Gpu, d: &Displacement<'_>) -> Result<Self> {
+        Ok(Self {
+            op: BlockOperator::new(gpu, d)?,
+            cw: CoupledWorkspace::for_mesh(gpu, d.mesh())?,
+            k: SolverKernels::new(gpu)?,
+            ck: CoupledKernels::new(gpu)?,
+        })
+    }
+}
+
+/// The flat copy INTO a `DevBuf<Scalar>` workspace vector from a
+/// `DevBuf<Vec3>` cell field - `k.copy` (`solCopy`) pushing the typed
+/// buffer's device pointer as the source, the launch shape of
+/// [`copy_source_to_b`]. A typed buffer is only ever a launch argument,
+/// never handed to a typed helper such as [`vec_copy`].
+fn copy_vec3_to_flat(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    dst: &mut DevBuf<Scalar>,
+    src: &DevBuf<Vec3>,
+) -> Result<()> {
+    // `n` is the FLAT count: the buffer holds one Vec3 per cell, the
+    // kernel copies one Scalar per thread (109.8).
+    let n = src.len() * 3;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.copy)
+            .arg(dst)
+            .arg(src)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// The flat copy OUT of a `DevBuf<Scalar>` workspace vector into a
+/// `DevBuf<Vec3>` cell field, the mirror of [`copy_vec3_to_flat`].
+fn copy_flat_to_vec3(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    dst: &mut DevBuf<Vec3>,
+    src: &DevBuf<Scalar>,
+) -> Result<()> {
+    // The mirror of [`copy_vec3_to_flat`]: the flat count, not the cell
+    // count.
+    let n = dst.len() * 3;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.copy)
+            .arg(dst)
+            .arg(src)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// ONE application of the block map `F(u)` into `out` (§109.6's (109.12)):
+/// the boundary values and gradients of the CURRENT `u` (`d.passes`
+/// sub-passes), the block operator assembled at that state, the flat copy
+/// of `d.u.f` into `cw.x` (the warm start), ONE [`solve_block_pbicgstab`]
+/// with `d.ctrl` and [`BlockPrecon::Dilu`], the flat copy of `cw.x` into
+/// `out`. `u` is not written; its fixed point is the discrete solution of
+/// §109's operator.
+pub fn apply_block(
+    gpu: &Gpu,
+    d: &mut Displacement<'_>,
+    cs: &mut CoupledSolid,
+    out: &mut DevBuf<Vec3>,
+) -> Result<SolverPerformance> {
+    if out.len() != d.mesh().n_cells {
+        return Err(Error::Config(format!(
+            "apply_block: out holds {} elements for {} cells - the output of \
+             the block map is one Vec3 per cell",
+            out.len(),
+            d.mesh().n_cells
+        )));
+    }
+    d.correct_boundary(gpu)?;
+    cs.op.assemble(gpu, d)?;
+    copy_vec3_to_flat(gpu, &cs.k, &mut cs.cw.x, &d.u.f)?;
+    let perf = solve_block_pbicgstab(
+        gpu,
+        &cs.k,
+        &cs.ck,
+        &mut cs.cw,
+        cs.op.matrix(),
+        d.mesh(),
+        &d.ctrl,
+        BlockPrecon::Dilu,
+    )?;
+    copy_flat_to_vec3(gpu, &cs.k, out, &cs.cw.x)?;
+    Ok(perf)
+}
+
+/// §95.3's outer loop around §109.6's block map:
+/// [`crate::solid::outer::solve`] transcribed line for line,
+/// [`apply_block`] in place of the three scalar solves - the same
+/// relaxations, the same stopping quantity `r = F(u) - u`, the same
+/// divergence refusal, the same report, and the same closing boundary
+/// correction so the gradient a stress read-out takes belongs to the
+/// accepted `u`. `predicted_contraction` is the SEGREGATED split's
+/// prediction, `(mu + lambda)/(2 mu + lambda)`, kept so the two loops
+/// print the same columns; the observed contraction of THIS loop is what
+/// a slender body separates them on.
+pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Result<OuterReport> {
+    d.passes = ctrl.boundary_passes;
+    let n_c = d.mesh().n_cells;
+
+    // Cell volumes, once: motion_ratio needs them; the mesh does not move.
+    let vols: Vec<Scalar> = gpu.download(&d.mesh().v)?;
+    let mut cs = CoupledSolid::new(gpu, d)?;
+    let mut report = OuterReport {
+        predicted_contraction: d.material.predicted_contraction(),
+        ..Default::default()
+    };
+    let mut u: Vec<Vec3> = gpu.download(&d.u.f)?;
+    let mut next = gpu.zeros(n_c)?;
+    let mut r: Vec<Vec3> = vec![Vec3::ZERO; n_c];
+    let mut r_prev: Vec<Vec3> = vec![Vec3::ZERO; n_c];
+    let mut g_prev: Vec<Vec3> = vec![Vec3::ZERO; n_c];
+    let mut d_f: Vec<Vec<Vec3>> = Vec::new();
+    let mut d_g: Vec<Vec<Vec3>> = Vec::new();
+    let depth = match ctrl.relaxation {
+        Relaxation::Anderson(m) => m,
+        _ => 0,
+    };
+    let mut omega = 1.0 as Scalar;
+    let mut first = 0.0 as Scalar;
+    let mut prev_norm = 0.0 as Scalar;
+
+    for k in 1..=ctrl.max_outer {
+        let perf = apply_block(gpu, d, &mut cs, &mut next)?;
+        report.linear_iterations += perf.n_iterations;
+        let f: Vec<Vec3> = gpu.download(&next)?;
+        for c in 0..n_c {
+            r[c] = f[c] - u[c];
+        }
+        let norm = l2(&r);
+        report.norms.push(norm);
+        report.iterations = k;
+        if !norm.is_finite() || (k > 1 && norm > first * 1.0e6) {
+            return Err(Error::Diverged {
+                iteration: k,
+                what: format!(
+                    "the block-coupled displacement fixed point grew from {first:.3e} to \
+                     {norm:.3e} at nu = {:.2} (a million-fold): the outer loop around \
+                     SPEC-LIT §109.6's block map does not contract here; \
+                     relaxation = {:?}, boundary_passes = {}",
+                    d.material.nu, ctrl.relaxation, ctrl.boundary_passes
+                ),
+            });
+        }
+
+        if k == 1 {
+            first = norm;
+            omega = 1.0;
+        } else {
+            report.ratios.push(if prev_norm > 0.0 { norm / prev_norm } else { 0.0 });
+            if ctrl.relaxation == Relaxation::Aitken {
+                omega = aitken_omega(omega, &r_prev, &r);
+            }
+            if norm <= first * (10.0 as Scalar).powf(-ctrl.decades) {
+                report.converged = true;
+                for c in 0..n_c {
+                    u[c] += r[c] * omega;
+                }
+                gpu.write(&mut d.u.f, &u)?;
+                break;
+            }
+            if depth > 0 {
+                // The two difference columns of this iteration, then the
+                // window trimmed to `depth` - the prototype's order.
+                let mut df = vec![Vec3::ZERO; n_c];
+                let mut dg = vec![Vec3::ZERO; n_c];
+                for c in 0..n_c {
+                    df[c] = r[c] - r_prev[c];
+                    dg[c] = f[c] - g_prev[c];
+                }
+                d_f.push(df);
+                d_g.push(dg);
+                while d_f.len() > depth {
+                    d_f.remove(0);
+                    d_g.remove(0);
+                }
+            }
+        }
+        if ctrl.relaxation == Relaxation::Aitken {
+            report.omegas.push(omega);
+        }
+        if d_f.is_empty() {
+            for c in 0..n_c {
+                u[c] += r[c] * omega;
+            }
+        } else {
+            let gamma = anderson_gamma(&d_f, &r);
+            for c in 0..n_c {
+                let mut v = f[c];
+                for (j, col) in d_g.iter().enumerate() {
+                    v -= col[c] * gamma[j];
+                }
+                u[c] = v;
+            }
+            // Not a relaxation factor: the one-norm of the least-squares
+            // combination, which is what says whether the columns have gone
+            // linearly dependent.
+            report.omegas.push(gamma.iter().map(|x| x.abs()).sum());
+        }
+        gpu.write(&mut d.u.f, &u)?;
+        r_prev.copy_from_slice(&r);
+        g_prev.copy_from_slice(&f);
+        prev_norm = norm;
+    }
+
+    // The boundary values and the gradient the caller will read stress from
+    // have to belong to the displacement that was just accepted.
+    d.correct_boundary(gpu)?;
+    report.observed_contraction = observed_contraction(&report.ratios, 10);
+    report.motion_ratio = motion_ratio_of(&u, &vols);
+    println!(
+        "solid coupled: nu={:.3} relaxation={:?} outer={} converged={} observed={:.4} \
+         predicted={:.4} omega_last={:.3} linear_iters={} motion_ratio={:.3e}",
+        d.material.nu,
+        ctrl.relaxation,
+        report.iterations,
+        report.converged,
+        report.observed_contraction,
+        report.predicted_contraction,
+        report.omegas.last().copied().unwrap_or(omega),
+        report.linear_iterations,
+        report.motion_ratio
+    );
+    Ok(report)
+}
+
+/// The Euclidean norm of a vector field, sequential over cells - the
+/// prototype's own reduction order; [`crate::solid::outer`] keeps it
+/// private, so it is copied, four lines.
+fn l2(v: &[Vec3]) -> Scalar {
+    v.iter().map(|a| a.mag_sqr()).sum::<Scalar>().sqrt()
+}
+
+// ==========================================================================
 //  Tests. The host references walk the FACE LIST, not the kernels' cf_*
 //  lists - the same choice Gate 109-B's scatter-shaped host twin makes.
 // ==========================================================================
@@ -1354,5 +1629,278 @@ mod tests {
         )
         .expect("SPEC-LIT 81.7: the block-coupled solve must capture and replay bitwise");
         println!("  block-coupled solve: {report}");
+    }
+
+    use crate::solid::fixtures;
+    use crate::solid::outer::{ANDERSON_DEPTH, OuterControls, Relaxation};
+    use crate::solid::tests::{graded_block, linear_state};
+
+    /// `Vec3` field -> the flat `3 n` layout `rel_max` reads.
+    fn flat3(v: &[Vec3]) -> Vec<Scalar> {
+        v.iter().flat_map(|a| [a.x, a.y, a.z]).collect()
+    }
+
+    /// The block map's linear solve in the fixed-point tests below.
+    fn block_tight() -> SolverControls {
+        SolverControls {
+            solver: LinearSolverKind::PBiCGStab,
+            precon: Preconditioner::Dilu,
+            tolerance: 1e-12,
+            rel_tol: 0.0,
+            max_iter: 5000,
+            min_iter: 0,
+            check_interval: 1,
+            fixed_iters: false,
+            report_residuals: true,
+        }
+    }
+
+    /// A free-expansion displacement (`T = T_REF + DT` everywhere) with the
+    /// given state uploaded, ready for `apply_block` or either loop.
+    fn free_expansion_state<'m>(
+        gpu: &Gpu,
+        hm: &'m HostMesh,
+        gm: &'m GpuMesh,
+        u: &[Vec3],
+        ub: &[Vec3],
+        ctrl: SolverControls,
+    ) -> Result<Displacement<'m>> {
+        let n = hm.n_cells;
+        let nbf = hm.n_boundary_faces;
+        let mut d =
+            Displacement::new(gpu, gm, hm, Material::steel(0.3), &bc::free_expansion(), ctrl)?;
+        d.set_temperature(gpu, &vec![T_REF + DT; n], &vec![T_REF + DT; nbf], T_REF)?;
+        d.set_displacement(gpu, u, ub)?;
+        Ok(d)
+    }
+
+    /// The free-expansion state of Gate 95-B, uploaded exactly, is a fixed
+    /// point of the BLOCK map: one `apply_block` at `u = alpha dT x`
+    /// returns it, the defect the block solve's own tolerance.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_free_expansion_state_is_a_fixed_point_of_the_block_map() {
+        let Some(gpu) = gpu() else { return };
+        let mat = Material::steel(0.3);
+        let hm = prototype::block(10).expect("block");
+        let gm = upload(&gpu, &hm);
+        let n = hm.n_cells;
+        let a = mat.alpha * DT;
+        let u_exact: Vec<Vec3> = hm.c.iter().map(|x| *x * a).collect();
+        let ub_exact: Vec<Vec3> = hm.b_cf.iter().map(|x| *x * a).collect();
+        let mut d = free_expansion_state(&gpu, &hm, &gm, &u_exact, &ub_exact, block_tight())
+            .expect("displacement");
+        let mut cs = CoupledSolid::new(&gpu, &d).expect("coupled");
+        let mut out = gpu.zeros(n).expect("zeros");
+        let perf = apply_block(&gpu, &mut d, &mut cs, &mut out).expect("apply_block");
+        let f = gpu.download(&out).expect("F(u)");
+        let rel = rel_max(&flat3(&f), &flat3(&u_exact));
+        println!(
+            "  109.6: block-map free expansion rel = {rel:e}  BiCGStab = {} iterations",
+            perf.n_iterations
+        );
+        assert!(rel <= 1e-9, "the block map does not fix the free-expansion state: {rel:e}");
+    }
+
+    /// Gate 95-C's linear field on the graded block is a fixed point of the
+    /// block map: prescribed by value on every face, one `apply_block`
+    /// returns it.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_linear_displacement_is_a_fixed_point_of_the_block_map() {
+        let Some(gpu) = gpu() else { return };
+        let hm = graded_block();
+        let gm = upload(&gpu, &hm);
+        let n = hm.n_cells;
+        let nbf = hm.n_boundary_faces;
+        let (u, ub) = linear_state(&hm);
+        let mut d = Displacement::new(
+            &gpu,
+            &gm,
+            &hm,
+            Material::steel(0.3),
+            &[[bc::CompBc::Fixed(0.0); 3]; 6],
+            block_tight(),
+        )
+        .expect("displacement");
+        d.set_temperature(&gpu, &vec![T_REF; n], &vec![T_REF; nbf], T_REF)
+            .expect("temperature");
+        d.bcs.set_fixed_values(&gpu, &ub).expect("per-face fixed values");
+        d.set_displacement(&gpu, &u, &ub).expect("state");
+        let mut cs = CoupledSolid::new(&gpu, &d).expect("coupled");
+        let mut out = gpu.zeros(n).expect("zeros");
+        let perf = apply_block(&gpu, &mut d, &mut cs, &mut out).expect("apply_block");
+        let f = gpu.download(&out).expect("F(u)");
+        let rel = rel_max(&flat3(&f), &flat3(&u));
+        println!(
+            "  109.6: block-map linear state rel = {rel:e}  BiCGStab = {} iterations",
+            perf.n_iterations
+        );
+        assert!(rel <= 1e-9, "the block map does not fix the linear state: {rel:e}");
+    }
+
+    /// From rest, the coupled loop finds the free-expansion state; the
+    /// segregated loop on a fresh displacement of the same problem runs
+    /// beside it, its count and contraction printed, not held.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_coupled_loop_finds_the_free_expansion_state_from_rest() {
+        let Some(gpu) = gpu() else { return };
+        let mat = Material::steel(0.3);
+        let hm = prototype::block(8).expect("block");
+        let gm = upload(&gpu, &hm);
+        let n = hm.n_cells;
+        let nbf = hm.n_boundary_faces;
+        let a = mat.alpha * DT;
+        let zeros: Vec<Vec3> = vec![Vec3::ZERO; n];
+        let zeros_b: Vec<Vec3> = vec![Vec3::ZERO; nbf];
+        let ctrl = OuterControls {
+            relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+            decades: 10.0,
+            max_outer: 200,
+            boundary_passes: 3,
+        };
+        let mut d = free_expansion_state(&gpu, &hm, &gm, &zeros, &zeros_b, block_tight())
+            .expect("displacement");
+        let rep = solve(&gpu, &mut d, &ctrl).expect("coupled solve");
+        let u = gpu.download(&d.u.f).expect("u");
+        let u_exact: Vec<Vec3> = hm.c.iter().map(|x| *x * a).collect();
+        let scale = u_exact.iter().map(|v| v.mag()).fold(0.0 as Scalar, |m, v| m.max(v));
+        let err = u
+            .iter()
+            .zip(&u_exact)
+            .map(|(g, w)| (*g - *w).mag())
+            .fold(0.0 as Scalar, |m, v| m.max(v))
+            / scale;
+        let mut d_seg = free_expansion_state(&gpu, &hm, &gm, &zeros, &zeros_b, block_tight())
+            .expect("segregated displacement");
+        let seg = crate::solid::outer::solve(&gpu, &mut d_seg, &ctrl).expect("segregated solve");
+        println!(
+            "  109.6: from rest, block-coupled outer = {} (observed {:.4}), \
+             segregated outer = {} (observed {:.4}); err = {err:e}",
+            rep.iterations, rep.observed_contraction, seg.iterations, seg.observed_contraction
+        );
+        assert!(rep.converged, "the coupled loop did not converge");
+        assert!(
+            err <= 1e-8,
+            "the coupled loop's state is not the free-expansion one: {err:e}"
+        );
+    }
+
+    /// A wrong-length output is refused by name, before anything launches.
+    #[test]
+    fn the_block_map_refuses_a_wrong_output_by_name() {
+        let Some(gpu) = gpu() else { return };
+        let hm = prototype::block(8).expect("block");
+        let gm = upload(&gpu, &hm);
+        let n = hm.n_cells;
+        let nbf = hm.n_boundary_faces;
+        let zeros: Vec<Vec3> = vec![Vec3::ZERO; n];
+        let zeros_b: Vec<Vec3> = vec![Vec3::ZERO; nbf];
+        let mut d = free_expansion_state(&gpu, &hm, &gm, &zeros, &zeros_b, block_tight())
+            .expect("displacement");
+        let mut cs = CoupledSolid::new(&gpu, &d).expect("coupled");
+        let mut out = gpu.zeros(n + 1).expect("zeros");
+        let err = apply_block(&gpu, &mut d, &mut cs, &mut out)
+            .expect_err("the wrong-length output must be refused");
+        match err {
+            Error::Config(msg) => {
+                assert!(msg.contains("out"), "the refusal does not name out: {msg}");
+                println!("  109.6: refusal: {msg}");
+            }
+            other => panic!("not a Config refusal: {other:?}"),
+        }
+    }
+
+    /// The end-loaded cantilever, isothermal, its per-face load and clamp
+    /// uploaded, ready for either loop - a FRESH displacement per call.
+    fn cantilever_state<'m>(
+        gpu: &Gpu,
+        hm: &'m HostMesh,
+        gm: &'m GpuMesh,
+        tr: &[Vec3],
+        fv: &[Vec3],
+        ctrl: SolverControls,
+    ) -> Result<Displacement<'m>> {
+        let n = hm.n_cells;
+        let nbf = hm.n_boundary_faces;
+        let mut d = Displacement::new(
+            gpu,
+            gm,
+            hm,
+            fixtures::cantilever_material(),
+            &fixtures::cantilever_bcs(),
+            ctrl,
+        )?;
+        d.set_temperature(gpu, &vec![T_REF; n], &vec![T_REF; nbf], T_REF)?;
+        d.bcs.set_traction_values(gpu, tr)?;
+        d.bcs.set_fixed_values(gpu, fv)?;
+        Ok(d)
+    }
+
+    /// The measurement itself: three slendernesses, the block-coupled loop
+    /// beside the segregated one, one row per method.
+    #[test]
+    #[ignore = "the measurement itself; the supervisor runs it with --ignored --nocapture"]
+    fn the_block_coupled_cantilever_sweep() {
+        let Some(gpu) = gpu() else { return };
+        let ctrl = OuterControls {
+            relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+            decades: 8.0,
+            max_outer: 1000,
+            boundary_passes: 3,
+        };
+        for (l, label) in [(0.5 as Scalar, "2.5:1"), (1.0 as Scalar, "5:1"), (2.0 as Scalar, "10:1")] {
+            let n_y = 8usize;
+            let n_x = (l * n_y as Scalar / 0.2).round() as usize;
+            let hm = fixtures::cantilever_mesh(n_x, n_y, l, fixtures::CANTILEVER_C).expect("mesh");
+            let exact = fixtures::CantileverExact::new(
+                fixtures::CANTILEVER_E,
+                fixtures::CANTILEVER_NU,
+                l,
+                fixtures::CANTILEVER_C,
+                fixtures::CANTILEVER_P,
+            );
+            let (tr, fv) = fixtures::cantilever_face_values(&hm, &exact);
+            let gm = upload(&gpu, &hm);
+            let tip = exact.tip();
+
+            let mut d = cantilever_state(&gpu, &hm, &gm, &tr, &fv, block_tight())
+                .expect("block-coupled displacement");
+            match solve(&gpu, &mut d, &ctrl) {
+                Ok(rep) => {
+                    let ub = gpu.download(&d.u.bf).expect("ub");
+                    let v_h = fixtures::cantilever_tip_deflection(&hm, &ub);
+                    println!(
+                        "  95-A {label} block-coupled: outer={} converged={} observed={:.4} \
+                         linear={} tip_rel={:.3e}",
+                        rep.iterations,
+                        rep.converged,
+                        rep.observed_contraction,
+                        rep.linear_iterations,
+                        ((v_h - tip) / tip.abs()).abs()
+                    );
+                }
+                Err(e) => println!("  95-A {label} block-coupled: {e}"),
+            }
+            let mut d = cantilever_state(&gpu, &hm, &gm, &tr, &fv, block_tight())
+                .expect("segregated displacement");
+            match crate::solid::outer::solve(&gpu, &mut d, &ctrl) {
+                Ok(rep) => {
+                    let ub = gpu.download(&d.u.bf).expect("ub");
+                    let v_h = fixtures::cantilever_tip_deflection(&hm, &ub);
+                    println!(
+                        "  95-A {label} segregated:    outer={} converged={} observed={:.4} \
+                         linear={} tip_rel={:.3e}",
+                        rep.iterations,
+                        rep.converged,
+                        rep.observed_contraction,
+                        rep.linear_iterations,
+                        ((v_h - tip) / tip.abs()).abs()
+                    );
+                }
+                Err(e) => println!("  95-A {label} segregated:    {e}"),
+            }
+        }
     }
 }

@@ -30836,7 +30836,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **442** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **446** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -30847,7 +30847,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -31436,5 +31436,52 @@ What this subsection does not do: the outer loop that re-assembles
 (109.3)'s explicit rows around this solve, the case knob, and Gate 95-A are
 the next subsections' work; §109.4's "no solve" is superseded by this
 subsection and is amended when they land.
+
+### 109.6 The outer loop around the block map, and Gate 95-A
+
+*DESIGN*: (109.3)'s tangential rows and §2.4's correction are explicit, so
+one block solve is not the answer: it is one application of a map,
+
+```text
+  F(u) = A(u)^-1 b(u):  correct the boundary of u, assemble (109.1)-(109.5) at u,
+                        solve (109.8)-(109.11) from x = u                                    (109.12)
+```
+
+and the displacement is its fixed point. The loop around it is §95.3's,
+transcribed with `F` in place of the three scalar solves: the same
+relaxations (bare Picard, Aitken, Anderson of depth five by default), the
+same stopping quantity `r = F(u) - u` and its decades, the same million-fold
+divergence refusal, the same report, and the same closing boundary
+correction so that the gradient a stress read-out takes belongs to the
+accepted `u`. What differs is the split: §95's implicit half is
+`(2 mu + lambda)` times a laplacian per component, this one's is (109.1), and
+the observed contraction of the two is what a slender body separates:
+
+```text
+  q_obs = geometric mean of the last ten |r_k| / |r_(k-1)|                                   (109.13)
+```
+
+printed beside §95.3's predicted `(mu + lambda)/(2 mu + lambda)`, which is
+the segregated split's number and is kept so that the two loops print the
+same columns.
+
+**What is measured.** The free-expansion state of Gate 95-B is a fixed point
+of the block map to 0.0 (the warm start is the exact state, the block solve
+runs zero iterations), and Gate 95-C's linear field on the graded block
+to 0.0. From rest, on the `8^3` block with three symmetry planes, the
+loop finds the free-expansion state in 20 outer iterations (observed
+contraction 0.33) against the segregated loop's 22 outer iterations
+(observed contraction 0.44), to 1.1e-10 of the exact field.
+
+**Gate 95-A** is the end-loaded cantilever of Timoshenko & Goodier ch. 3 in
+plane strain - span `l` along `x`, depth `2c = 0.2`, one cell through the
+thickness with symmetry planes on both faces, the closed form's parabolic
+shear on the free end and its own displacement on the built-in end, `E = 200`
+GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on three meshes
+of cubic cells with `n_y = 4, 8, 16` through the depth. Per ratio: the loop
+converges on every mesh, the observed order of the cell-centre displacement
+error is at least 1.9, that of the cell-centre stress error at least 0.9, and
+the finest mesh's tip deflection is within 5 % of the closed form; §94's
+study of the tip deflection is its uncertainty. The measured table is §109.7's.
 
 ---
