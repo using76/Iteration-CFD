@@ -89,6 +89,7 @@ pub mod fixtures;
 pub mod materials;
 pub mod outer;
 pub mod prototype;
+pub mod restated;
 pub mod stress;
 
 pub use materials::{BondTreatment, MaterialMap};

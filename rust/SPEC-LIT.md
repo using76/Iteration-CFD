@@ -28395,10 +28395,11 @@ No mesh motion, no inertia, no time. The displacement equation here has no
 `ddt` term at all; a transient solid is a different section and is named, not
 squatted on.
 
-No boundary-point stress extrapolation. §94's order study on cell-centre
-stress is what the stress section measures; extrapolating to a boundary POINT
-is a second scheme with a second order, and it gets its own paragraph and its
-own gate when it is written, not a silent reuse of this one.
+No boundary-point stress extrapolation in the gates above. §94's order study
+on cell-centre stress is what they measure; extrapolating to a boundary POINT
+is a second scheme with a second order, and it is written, and gated in its
+own right, in §95.11, where Gate 95-G reads NAFEMS LE1, LE10 and LE11 from a
+restatement.
 
 ### 95.8 Two materials bonded in one region — the series (2 mu + lambda) face coefficient and the traction-continuous bond face
 
@@ -28666,6 +28667,236 @@ run printed, and whose uncertainty is the grid study - §94.3's rule
 that a verdict states its own discretisation error. The gate is
 `check_thick_cylinder` in `ofgpu-validate`, under the scope
 `Gate 95-D thick cylinder`.
+
+
+### 95.11 Gate 95-G — NAFEMS LE1, LE10 and LE11 from a restatement, and the boundary point a cell-centred stress is read at
+
+**A DISCLOSURE, because the gate is only as good as its reference.** The
+primary is *The Standard NAFEMS Benchmarks*, NAFEMS ref. P18 (TNSB Rev. 3,
+October 1990), a purchasable publication with no DOI; on 2026-09-23 it was
+decided not to buy it. **It was therefore never read, and this gate does not
+compare against it.** What it compares against instead is a RESTATEMENT: the
+material, boundary conditions, loads and targets are those of ESRD, Inc.,
+*Benchmarks Guide: The Standard NAFEMS Benchmarks, Linear Elastic Tests*
+(2018), `www.esrd.com/wp-content/uploads/dlm_uploads/Benchmarks-Guide-Standard-NAFEMS-Benchmarks-Linear-Elastic-Tests.pdf`,
+© 2018 ESRD, Inc., read and not redistributed, whose text states them. That
+guide carries every dimension only inside raster figures, so the geometry
+below is taken from other openly published pages that state it in TEXT, each
+named where it is used. It is labelled a restatement everywhere it is used,
+including in `ofgpu-validate`'s own output. Those pages document runs of
+proprietary codes and were read as text; no code's source and no input deck
+was opened, and the GPL FeenoX/Fino examples of these three tests were not
+opened.
+
+The targets, as the restatement prints them:
+
+```text
+  LE1    sigma_yy at D = (2, 0)          =   92.7 MPa   (the tangential edge stress)
+  LE10   sigma_yy at D = (2, 0, 0.6)     =   -5.38 MPa
+  LE11   sigma_zz at A = (1, 0, 0)       = -105 MPa                          (S95.23)
+```
+
+ESRD states LE11 with its axis along `y` ("the direct stress sigma_y at
+point A"; "Uy = 0 on the plane Y = 0 and the face BCDE"); the Abaqus
+Benchmarks Guide's LE11 page
+(`abaqus-docs.mit.edu/2017/English/SIMACAEBMKRefMap/simabmk-c-le11.htm`)
+states the same test with the axis along `z` ("sigma_zz = -105 MPa at point
+A"; "uz = 0 on the plane z = 0 and the face HIH'I'"), and this section uses
+the `z` frame throughout. The bar is docs/09's: within `3 %` of the target
+on the finest of three meshes, with §94's study of the point value beside it.
+
+**LE1, the elliptic membrane, in plane stress.** A quarter of the region
+between the ellipses `(x/2)^2 + y^2 = 1` (AD) and
+`(x/3.25)^2 + (y/2.75)^2 = 1` (BC), 0.1 m thick; `E = 210 GPa`,
+`nu = 0.3`; symmetry on AB (`x = 0`) and DC (`y = 0`); a uniform outward
+pressure of 10 MPa - a tension - on BC. The ellipses, the thickness and D are
+the text of the README of `github.com/masteryol/FEA-NAFEMS-Benchmarks-ANSYS`
+("Inner ellipse", "Outer ellipse", "Thickness T = 0.1 m", "Point D (X = 2.0
+m, Y = 0 m)"; an ANSYS study, no licence stated), and they are the ellipses
+SimScale's LE10 page states for the plate LE10 is (below).
+
+This solver has no plane-stress formulation. The membrane is meshed as a slab
+one cell thick with `u_z = 0` on both faces - plane strain - and given the
+plane-strain material whose in-plane law is plane stress's exactly
+(Timoshenko & Goodier ch. 2):
+
+```text
+  E* = E (1 + 2 nu) / (1 + nu)^2 ,     nu* = nu / (1 + nu)                   (S95.24)
+```
+
+so `E*/(1 - nu*^2) = E` and `nu*/(1 - nu*) = nu`: the two problems have the
+same in-plane stress field, and `sigma_yy` is read from it. The mesh maps
+the unit block `(t, phi)`, `t in [0, 1]` across the wall and
+`phi in [0, pi/2]` around it, by
+
+```text
+  x = (2 + 1.25 t) cos phi ,     y = (1 + 1.75 t) sin phi                   (S95.25)
+```
+
+- every constant-`t` line an ellipse of the family between AD (`t = 0`)
+and BC (`t = 1`) - with the points of `phi = 0` put on `y = 0` exactly and
+those of `phi = pi/2` on `x = 0` exactly. Three meshes,
+`(n_t, n_phi) = (16, 32), (32, 64), (64, 128)`.
+
+**LE10, the thick plate.** LE1's quarter elliptic annulus, 0.6 m thick,
+`z in [0, 0.6]`; `E = 210 GPa`, `nu = 0.3`; symmetry on DCD'C' (`y = 0`)
+and ABA'B' (`x = 0`); `u_x = u_y = 0` on the outer curved face BCB'C';
+`u_z = 0` along the mid-plane line of BCB'C'; a uniform normal pressure of
+1 MPa on the upper face ABCD (`z = 0.6`). The point table, the two ellipses
+and the thickness are the text of SimScale's validation case "Thick Plate
+Under Pressure" (`www.simscale.com/docs/validation-cases/thick-plate-under-pressure/`:
+A = (0, 1, 0.6), B = (0, 2.75, 0.6), C = (3.25, 0, 0.6), D = (2, 0, 0.6));
+LEAP Australia's "NAFEMS Discovery Benchmark Series - Part 2: Pressure
+Plates" (`www.leapaust.com.au/blog/fea/nafems-discovery-series-part-2-pressure-plates/`)
+says the plate "has the same dimensions as the plate depicted in LE1, but
+with the thickness increased to 0.6 meters", which makes it the second
+source for LE1's ellipses.
+
+A line constraint has no cell-centred counterpart: a boundary condition here
+lives on faces. The line `u_z = 0` is therefore the BAND of outer faces in
+the two cell layers either side of the mid-plane, `2 (0.6)/n_z` high, a patch
+`outer_mid` of its own; as the mesh refines the band closes on the line, and
+its effect is part of the discretisation error the study measures. ESRD's
+note is the other choice, recorded and not taken: "Since constraints along a
+line are incompatible with 3D-elasticity, the StressCheck results were
+obtained by fixing the z-displacement of the face BCB'C'" - a choice worth
+2.4-2.6 % of the answer (ESRD's -5.24 and -5.25 MPa). Three meshes,
+`(n_t, n_phi, n_z) = (6, 12, 4), (12, 24, 8), (24, 48, 16)`, the map
+(S95.25) in plan.
+
+**LE11, the solid cylinder/taper/sphere under a temperature field.**
+Axisymmetric about `z` and modelled as the quarter `x >= 0`, `y >= 0`. In the
+`(r, z)` half-plane the section is bounded by `z = 0` from A = (1, 0) to
+B = (1.4, 0); the outer sphere `r^2 + z^2 = 1.4^2` from B to
+C = (1.4 cos 30°, 0.7); the taper line from C to G = (1, 1.39); the outer
+cylinder `r = 1` from G to I = (1, 1.79); `z = 1.79` from I to
+H = (1/sqrt 2, 1.79); the bore `r = 1/sqrt 2` from H down to
+E = (1/sqrt 2, 1/sqrt 2); and the inner sphere `r^2 + z^2 = 1` from E back
+to A. Those points are the text of the CEA's "Test elas11 Description
+sheet" for Cast3M (`www-cast3m.cea.fr/html/CasTestsCastem/node9.html`: "PA
+(1, 0)", "PB (1.4, 0)", the cone and sphere points at 30° and 45°, "PH
+(0.7071, 1.79)", "PI (1, 1.79)", "PG (1, 1.39)", "T(r,z) = r + z", the
+vertical displacement null on the upper and lower faces, and the axial
+stress at A, -105 MPa). Precise Simulation's FEATool tutorial "Temperature
+Loading of a Tapered Cylinder"
+(`www.featool.com/doc/Structural_Mechanics_07_temperature_loading1`) builds
+the same section from the same numbers with the axis reversed - the
+rectangle `0.7071..1.4 x -1.79..0`, circles of radius 1 and 1.4, the polygon
+through (1.2124, -0.7), (1, -1.39), (1, -1.79) - and is the second source.
+The bore is written `1/sqrt 2`, the 45° point of the unit sphere, which both
+round to 0.7071.
+
+Material `E = 210 GPa`, `nu = 0.3`, `alpha = 2.3e-4 /°C`; `u_z = 0` on
+`z = 0` (AB) and on `z = 1.79` (HI); symmetry on `x = 0` and `y = 0`; and
+the temperature
+
+```text
+  T = sqrt(x^2 + y^2) + z   [°C],     T_ref = 0                             (S95.26)
+```
+
+evaluated at every cell centre and every boundary-face centre - prescribed,
+not solved: this gate tests a non-uniform thermal load on a curved solid,
+and §95.10's Gate 95-D already tests the conduction link of the chain. The
+mesh maps the unit block `(t, theta, s)`: `s` is the normalised arc length
+along the inner boundary A-E-H and, separately, along the outer one
+B-C-G-I; `(r, z) = (1 - t) inner(s) + t outer(s)`, `x = r cos theta`,
+`y = r sin theta`; the points of `theta = 0`, `theta = pi/2`, `s = 0` and
+`s = 1` are put on `y = 0`, `x = 0`, `z = 0` and `z = 1.79` exactly. Three
+meshes, `(n_t, n_theta, n_s) = (4, 8, 16), (8, 16, 32), (16, 32, 64)`.
+
+**The boundary point, and how a cell-centred stress is read at it.** §95.7
+kept this out of §95 until it could be specified and gated in its own right;
+it is specified here. Every target of (S95.23) is a point on the boundary, at
+a corner of two or three boundary faces, while the stress lives at cell
+centres. The point value is the constant term of a least-squares linear fit
+over a fixed stencil:
+
+```text
+  sigma(P) = a ,   (a, b) = argmin  SUM_{c in S} ( a + b . (x_c - P)/s - sigma_c )^2 ,
+                   s = max_{c in S} |x_c - P|                               (S95.27)
+```
+
+where `S` is the `2 x 2` block of cells (LE1, one layer thick: the fit spans
+`x` and `y` only) or the `2 x 2 x 2` block (LE10, LE11 and the Lamé ring:
+`x`, `y` and `z`) at the point's corner of the mapped block's index space -
+the first two cells from each boundary the point lies on. The normal
+equations are solved by Gaussian elimination with partial pivoting, and a
+stencil that does not span the fit is refused by name, not solved. The fit
+is exact for a linear field and `O(h^2)` for a smooth one; the cell nearest
+the point is printed beside it, so the fit's own contribution is visible.
+The code is `src/solid/restated.rs` (`extrapolate_linear`, the three bodies,
+`lame_ring`); four of its host tests carry §112.3's f32 attribute.
+
+**Its own gate: the Lamé ring.** §95.10's quarter annulus, `r_in = 0.5 m`,
+`r_out = 1.0 m`, two layers in `z`, plane strain, is loaded by an internal
+pressure `p = 1 MPa` and nothing else. The hoop stress at the bore is closed
+form (Timoshenko & Goodier ch. 4):
+
+```text
+  sigma_tt(r_in) = p (r_out^2 + r_in^2) / (r_out^2 - r_in^2) = 5 p / 3        (S95.28)
+```
+
+and it is read with (S95.27) at `P = (r_in, 0, L/2)`, where on the symmetry
+plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10.
+Held: the point value within `1 %` of (S95.28) on the finest mesh, and the
+observed order of its error between the two finest meshes at `p >= 0.9` -
+the bar docs/09's risk 2 wrote for exactly this read-out.
+
+**What is run, and what it registers.** Four scopes in `ofgpu-validate`,
+after Gate 95-A, each its own function and its own gate name:
+`check_boundary_point_fit` (`Gate 95-G boundary-point fit (Lame ring)`),
+`check_nafems_le1` (`Gate 95-G LE1 elliptic membrane (restated)`),
+`check_nafems_le10` (`Gate 95-G LE10 thick plate (restated)`) and
+`check_nafems_le11` (`Gate 95-G LE11 cylinder/taper/sphere (restated)`).
+Every body runs §95.3's segregated outer loop as a case runs it - Anderson
+acceleration at depth five, eight decades, `max_outer = 2000`, three boundary
+passes, BiCGStab with DILU underneath to `1e-12`; LE10, the one of the three
+that is a plate in bending, runs a second time through §109.6's block-coupled
+loop with the same controls, and each run is held to the same bar. Required
+per mesh: the loop converges, and a loop that stops or diverges is reported
+by name as a failed row, never retuned. Required on the finest mesh: the
+point value (S95.27) within the bar. Printed per mesh: the cells, the outer
+and linear iteration counts, the observed contraction, the point value, the
+nearest cell's value and both relative errors; per body, its slenderness
+(95.9). A pass registers NOTHING; a miss is ONE `GateReport` per scope
+(`Verdict::Misses`, `How::Live`) whose `against` names the restatement and
+not the primary, whose headline carries the finest point value and its
+error, and whose uncertainty is §94's study of the point value over the
+three meshes - or, when three values cannot form one, §94.3's single-mesh
+declaration saying so. The three targets are answer keys `nafems-le1`,
+`nafems-le10` and `nafems-le11` of `reference/PROVENANCE.md`, `literal` rows
+that name the restatement as their source.
+
+**Gate 95-G, measured** on 2026-09-25 on the machine of record (one RTX 5070 Ti, f64; another
+workflow was compiling on the CPU), with the meshes and controls above and nothing tuned:
+
+```text
+                                      mesh 1        mesh 2        mesh 3     finest    bar
+  ring   sigma_tt(bore), the fit     1.701161e6    1.688910e6    1.679071e6    0.74 %    1 %    holds
+         order of its error, nr 24 -> 48:  p = 0.842                                   0.9    misses
+  LE1    sigma_yy(D)                 9.074983e7    9.261311e7    9.289492e7    0.21 %    3 %    holds
+  LE10   sigma_yy(D), segregated    -3.988007e6   -4.784563e6   -5.166283e6    3.97 %    3 %    misses
+  LE10   sigma_yy(D), block-coupled -3.838860e6   -4.804854e6   -5.200692e6    3.33 %    3 %    misses
+  LE11   sigma_zz(A)                -1.105979e8   -1.083291e8   -1.067931e8    1.71 %    3 %    holds
+```
+
+Every loop converged on every mesh: 23-85 outer iterations segregated, 46-56 block-coupled on
+LE10. §94's studies of the point values: the ring `p = 0.316`, `phi_ext = 1.672089e6`; LE1
+`p = 2.725`, `phi_ext = 9.311153e7`; LE10 segregated `p = 1.061`, `phi_ext = -5.517532e6`,
+block-coupled `p = 1.287`, `phi_ext = -5.475508e6`; LE11 `p = 0.563`, `phi_ext = -1.035731e8`.
+The nearest cell's own value is 1.0-13.7 % off on the finest meshes where the fit is 0.2-4.0 %:
+the fit is what brings three of the four within their bars.
+
+What the misses say, and what they do not. The ring's point error falls at `p = 0.84`, not 0.9 -
+the order §95.10's Gate 95-D measures for the cell-centre hoop stress itself (0.848): the fit
+carries the cell-centre stress's own order to the boundary and loses none of it, where docs/09's
+risk 2 feared it would. LE10 misses its bar by 0.97 (segregated) and 0.33 (block-coupled) points
+with both loops converged, so it is discretisation error and not the loop; both studies
+extrapolate past the restated -5.38 MPa (-5.52 and -5.48), and the band that stands for the line
+constraint is part of what the refinement changes. A finer LE10 level, a wider stencil or a
+graded mesh at D is a decision for another unit, not a retry of this one. LE1 and LE11 hold
+against the RESTATEMENT; that is a statement about ESRD's restated numbers, not about the NAFEMS
+primary, which was not read.
 
 
 ## 96. What a thermo-elastic case says, the refusal list, and the pair tests
@@ -30842,7 +31073,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **447** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **451** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -30853,7 +31084,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

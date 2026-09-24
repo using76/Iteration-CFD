@@ -3244,6 +3244,20 @@ fn run(c: &mut Checks) -> Result<()> {
     check_cantilever(c, &gpu)?;
     c.leave_gate();
 
+    println!("\n=== Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (three meshes each, SPEC-LIT 95.11) ===");
+    c.enter_gate("Gate 95-G boundary-point fit (Lame ring)");
+    check_boundary_point_fit(c, &gpu)?;
+    c.leave_gate();
+    c.enter_gate("Gate 95-G LE1 elliptic membrane (restated)");
+    check_nafems_le1(c, &gpu)?;
+    c.leave_gate();
+    c.enter_gate("Gate 95-G LE10 thick plate (restated)");
+    check_nafems_le10(c, &gpu)?;
+    c.leave_gate();
+    c.enter_gate("Gate 95-G LE11 cylinder/taper/sphere (restated)");
+    check_nafems_le11(c, &gpu)?;
+    c.leave_gate();
+
     // SPEC-LIT S97 - the imported region, and Gate 97-A.
     c.enter_gate("S97 Gate 97-A imported region");
     check_imported_region(c, &gpu)?;
@@ -20416,7 +20430,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 23 occurrences, 19 distinct - two gates report twice,
+    /// same string. 27 occurrences, 23 distinct - two gates report twice,
     /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
@@ -20442,9 +20456,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 23, "23 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 27, "27 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 19, "19 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 23, "23 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
@@ -21185,6 +21199,442 @@ fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                 uncertainty: Some(Uncertainty::Study(study)),
             });
         }
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT 95.11 - Gate 95-G: NAFEMS LE1, LE10 and LE11 from a
+//  restatement, and the boundary-point fit gated on the Lame ring
+// ==========================================================================
+
+// answer-key: nafems-le1
+const NAFEMS_LE1_SYY_D: Scalar = 92.7e6;
+// answer-key: nafems-le10
+const NAFEMS_LE10_SYY_D: Scalar = -5.38e6;
+// answer-key: nafems-le11
+const NAFEMS_LE11_SZZ_A: Scalar = -105.0e6;
+
+/// Printed at the head of every NAFEMS scope: the reference is a
+/// restatement, and the output says so (SPEC-LIT 95.11).
+const RESTATED_95G: &str = "95-G reference: ESRD (2018)'s RESTATEMENT of NAFEMS P18 - the primary was not \
+                            read; geometry from openly published text (SPEC-LIT 95.11)";
+
+/// SPEC-LIT 94.3's declaration when three point values cannot form a study.
+const NO_STUDY_95G: &str =
+    "three meshes were run and their point values could not form a study; the reason is printed above";
+
+/// Which outer loop a Gate 95-G mesh runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Loop95g {
+    Segregated,
+    BlockCoupled,
+}
+
+impl Loop95g {
+    fn name(self) -> &'static str {
+        match self {
+            Loop95g::Segregated => "segregated",
+            Loop95g::BlockCoupled => "block-coupled",
+        }
+    }
+}
+
+/// One mesh of a Gate 95-G body: the loop's report and the point value.
+struct Point95g {
+    cells: usize,
+    converged: bool,
+    outer: usize,
+    linear: usize,
+    observed: Scalar,
+    fit: Scalar,
+    nearest: Scalar,
+    why: String,
+}
+
+fn rel95g(v: Scalar, target: Scalar) -> Scalar {
+    (v - target).abs() / target.abs()
+}
+
+impl Point95g {
+    fn failed(cells: usize, why: String) -> Self {
+        Point95g {
+            cells,
+            converged: false,
+            outer: 0,
+            linear: 0,
+            observed: Scalar::NAN,
+            fit: Scalar::NAN,
+            nearest: Scalar::NAN,
+            why,
+        }
+    }
+
+    fn line(&self, label: &str, target: Scalar) -> String {
+        format!(
+            "{label} cells={:>6} outer={:>4} converged={} observed={:.4} linear={} \
+             point={:.6e} rel={:.3e} nearest={:.6e} rel={:.3e}{}",
+            self.cells, self.outer, self.converged, self.observed, self.linear,
+            self.fit, rel95g(self.fit, target), self.nearest, rel95g(self.nearest, target),
+            if self.why.is_empty() { String::new() } else { format!(" ({})", self.why) }
+        )
+    }
+}
+
+/// SPEC-LIT 94's study of a Gate 95-G point value over its three meshes
+/// (`levels` coarse first), or 94.3's declaration when they cannot form one.
+fn study_95g(c: &mut Checks, what: &str, mut levels: Vec<vv::Level>) -> Uncertainty {
+    // The study reads the FINEST level first.
+    levels.reverse();
+    match vv::grid_study(&levels) {
+        Ok(study) => {
+            c.note(&format!("  {what}: {}", study.one_line()));
+            Uncertainty::Study(study)
+        }
+        Err(e) => {
+            c.note(&format!("  {what}: no study - {e}"));
+            Uncertainty::SingleMesh(NO_STUDY_95G)
+        }
+    }
+}
+
+/// Solve one Gate 95-G mesh with the controls SPEC-LIT 95.11 names, read
+/// the stress and fit it at the body's point (S95.27). A failure comes
+/// back as a record naming it, never as an error that would end the run.
+#[allow(clippy::too_many_arguments)]
+fn point_95g(
+    gpu: &Gpu,
+    b: &ofgpu::solid::restated::RestatedBody,
+    mat: ofgpu::solid::Material,
+    per_patch: &[[ofgpu::solid::bc::CompBc; 3]],
+    traction: Option<&[Vec3]>,
+    temps: Option<(&[Scalar], &[Scalar])>,
+    pick: fn(&Tensor) -> Scalar,
+    mode: Loop95g,
+) -> Point95g {
+    match point_95g_inner(gpu, b, mat, per_patch, traction, temps, pick, mode) {
+        Ok(p) => p,
+        Err(e) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn point_95g_inner(
+    gpu: &Gpu,
+    b: &ofgpu::solid::restated::RestatedBody,
+    mat: ofgpu::solid::Material,
+    per_patch: &[[ofgpu::solid::bc::CompBc; 3]],
+    traction: Option<&[Vec3]>,
+    temps: Option<(&[Scalar], &[Scalar])>,
+    pick: fn(&Tensor) -> Scalar,
+    mode: Loop95g,
+) -> Result<Point95g> {
+    use ofgpu::solid::displacement::Displacement;
+    use ofgpu::solid::outer::{self, OuterControls, Relaxation, ANDERSON_DEPTH};
+    use ofgpu::solid::stress::StressFields;
+    use ofgpu::solid::{coupled, restated};
+    let n = b.mesh.n_cells;
+    let nbf = b.mesh.n_boundary_faces;
+    let gm = GpuMesh::upload(gpu, &b.mesh)?;
+    let ctrl = SolverControls {
+        solver: LinearSolverKind::PBiCGStab,
+        precon: Preconditioner::Dilu,
+        tolerance: 1e-12,
+        rel_tol: 0.0,
+        max_iter: 20000,
+        min_iter: 0,
+        check_interval: 1,
+        fixed_iters: false,
+        report_residuals: true,
+    };
+    let mut d = Displacement::new(gpu, &gm, &b.mesh, mat, per_patch, ctrl)?;
+    match temps {
+        Some((t, bt)) => d.set_temperature(gpu, t, bt, 0.0)?,
+        None => d.set_temperature(gpu, &vec![0.0 as Scalar; n], &vec![0.0 as Scalar; nbf], 0.0)?,
+    }
+    if let Some(tr) = traction {
+        d.bcs.set_traction_values(gpu, tr)?;
+    }
+    let oc = OuterControls {
+        relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+        decades: 8.0,
+        max_outer: 2000,
+        boundary_passes: 3,
+    };
+    let solved = match mode {
+        Loop95g::Segregated => outer::solve(gpu, &mut d, &oc),
+        Loop95g::BlockCoupled => coupled::solve(gpu, &mut d, &oc),
+    };
+    let (converged, outer_its, linear, observed, why) = match solved {
+        Ok(rep) => (rep.converged, rep.iterations, rep.linear_iterations, rep.observed_contraction, String::new()),
+        Err(e) => (false, 0, 0, Scalar::NAN, e.to_string()),
+    };
+    // Both loops end in the boundary correction, so the gradient they left
+    // belongs to the accepted u; the readout derives nothing anew.
+    let mut sf = StressFields::new(gpu, n)?;
+    sf.compute(gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref)?;
+    let h = sf.download(gpu)?;
+    let vals: Vec<Scalar> = h.sigma.iter().map(pick).collect();
+    let fit = restated::extrapolate_linear(&b.mesh, &vals, &b.stencil, b.target, b.fit_dims)?;
+    let dist = |c: usize| (b.mesh.c[c] - b.target).mag();
+    let mut near = b.stencil[0];
+    for &c in &b.stencil {
+        if dist(c) < dist(near) {
+            near = c;
+        }
+    }
+    Ok(Point95g { cells: n, converged, outer: outer_its, linear, observed, fit, nearest: vals[near], why })
+}
+
+/// Gate 95-G's own read-out gate (SPEC-LIT 95.11): the Lame ring's bore
+/// hoop stress (S95.28), read at a boundary point by the fit (S95.27).
+fn check_boundary_point_fit(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::{fixtures, restated, Material};
+    let target = restated::lame_hoop_at_bore(restated::LAME_P, restated::LAME_R_IN, restated::LAME_R_OUT);
+    let mat = Material { e: 200.0e9, nu: 0.3, alpha: 0.0 };
+    let mut levels: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    let mut errs = [Scalar::NAN; 3];
+    let mut conv = [false; 3];
+    for (idx, nr) in [12usize, 24, 48].into_iter().enumerate() {
+        let p = match restated::lame_ring(nr) {
+            Ok(b) => match restated::patch_pressure(&b.mesh, "inner", restated::LAME_P) {
+                Ok(tr) => point_95g(
+                    gpu, &b, mat, &fixtures::quarter_annulus_plane_strain_bcs(), Some(&tr[..]), None,
+                    |s| s.yy, Loop95g::Segregated,
+                ),
+                Err(e) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+            },
+            Err(e) => Point95g::failed(0, e.to_string()),
+        };
+        conv[idx] = p.converged;
+        errs[idx] = rel95g(p.fit, target);
+        c.require(&format!("Gate 95-G ring: outer loop converged, nr = {nr}"), p.converged);
+        let h = (restated::LAME_R_OUT - restated::LAME_R_IN) / nr as Scalar;
+        levels.push(vv::Level { h, value: p.fit });
+        let line = p.line(&format!("ring nr={nr:>2}"), target);
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    let order = (errs[1] / errs[2]).ln() / (2.0 as Scalar).ln();
+    c.check("Gate 95-G ring: sigma_tt at the bore point, finest mesh (nr = 48), rel", errs[2], 0.01);
+    c.check("Gate 95-G ring: order of the bore-point error, 0.9 - p", 0.9 - order, 0.0);
+    c.note(&format!("  closed form (S95.28) {target:.6e} Pa; observed order of the point error p = {order:.3}"));
+    let unc = study_95g(c, "bore-point sigma_tt", levels);
+    let ok = conv.iter().all(|&v| v) && errs[2] <= 0.01 && 0.9 - order <= 0.0;
+    if !ok {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G boundary-point fit (Lame ring)",
+            against: "Timoshenko & Goodier ch. 4, the thick-walled cylinder's bore hoop stress (S95.28), \
+                      read by the fit (S95.27), three meshes r = 2",
+            headline: format!(
+                "converged {}/3, finest point error {:.2e}, order p = {order:.2}",
+                conv.iter().filter(|&&v| v).count(),
+                errs[2]
+            ),
+            detail,
+            uncertainty: Some(unc),
+        });
+    }
+    Ok(())
+}
+
+/// Gate 95-G, NAFEMS LE1 as restated (SPEC-LIT 95.11): the membrane in its
+/// plane-strain equivalent (S95.24), sigma_yy at D.
+fn check_nafems_le1(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::restated;
+    c.note(RESTATED_95G);
+    let target = NAFEMS_LE1_SYY_D;
+    let mut levels: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    let mut errs = [Scalar::NAN; 3];
+    let mut fits = [Scalar::NAN; 3];
+    let mut conv = [false; 3];
+    for (idx, (n_t, n_phi)) in [(16usize, 32usize), (32, 64), (64, 128)].into_iter().enumerate() {
+        let p = match restated::le1_membrane(n_t, n_phi) {
+            Ok(b) => {
+                if idx == 0 {
+                    c.note(&format!("  LE1 slenderness (95.9): {:.3}", ofgpu::solid::slenderness(&b.mesh)));
+                }
+                match restated::patch_pressure(&b.mesh, "outer", -restated::LE1_P) {
+                    Ok(tr) => point_95g(
+                        gpu, &b, restated::le1_plane_strain_material(), &restated::le1_bcs(), Some(&tr[..]),
+                        None, |s| s.yy, Loop95g::Segregated,
+                    ),
+                    Err(e) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+                }
+            }
+            Err(e) => Point95g::failed(0, e.to_string()),
+        };
+        conv[idx] = p.converged;
+        fits[idx] = p.fit;
+        errs[idx] = rel95g(p.fit, target);
+        c.require(&format!("Gate 95-G LE1: outer loop converged, n_t = {n_t}"), p.converged);
+        levels.push(vv::Level { h: 1.0 / n_t as Scalar, value: p.fit });
+        let line = p.line(&format!("LE1 n_t={n_t:>2}"), target);
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    c.check(
+        "Gate 95-G LE1: sigma_yy(D) on the finest mesh (n_t = 64), rel to the restated 92.7 MPa",
+        errs[2],
+        0.03,
+    );
+    let unc = study_95g(c, "LE1 sigma_yy(D)", levels);
+    if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G LE1 elliptic membrane (restated)",
+            against: "NAFEMS LE1 sigma_yy(D) = 92.7 MPa as RESTATED by ESRD (2018) - the NAFEMS P18 \
+                      primary was not read; geometry from openly published text (SPEC-LIT 95.11)",
+            headline: format!(
+                "converged {}/3, finest sigma_yy(D) {:.4e} Pa, {:+.2} % of the restated target",
+                conv.iter().filter(|&&v| v).count(),
+                fits[2],
+                100.0 * (fits[2] - target) / target.abs()
+            ),
+            detail,
+            uncertainty: Some(unc),
+        });
+    }
+    Ok(())
+}
+
+/// Gate 95-G, NAFEMS LE10 as restated (SPEC-LIT 95.11): the thick plate,
+/// its line constraint a mid-plane band, sigma_yy at D - run by the
+/// segregated loop and by the block-coupled one, each held to the bar.
+fn check_nafems_le10(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::restated;
+    c.note(RESTATED_95G);
+    let target = NAFEMS_LE10_SYY_D;
+    let mut detail: Vec<String> = Vec::new();
+    let mut short: Vec<String> = Vec::new();
+    let mut first_unc: Option<Uncertainty> = None;
+    for mode in [Loop95g::Segregated, Loop95g::BlockCoupled] {
+        let name = mode.name();
+        let mut levels: Vec<vv::Level> = Vec::new();
+        let mut errs = [Scalar::NAN; 3];
+        let mut fits = [Scalar::NAN; 3];
+        let mut conv = [false; 3];
+        let meshes = [(6usize, 12usize, 4usize), (12, 24, 8), (24, 48, 16)];
+        for (idx, (n_t, n_phi, n_z)) in meshes.into_iter().enumerate() {
+            let p = match restated::le10_plate(n_t, n_phi, n_z) {
+                Ok(b) => {
+                    if idx == 0 && mode == Loop95g::Segregated {
+                        c.note(&format!("  LE10 slenderness (95.9): {:.3}", ofgpu::solid::slenderness(&b.mesh)));
+                    }
+                    match (restated::le10_bcs(&b.mesh), restated::patch_pressure(&b.mesh, "zmax", restated::LE10_P)) {
+                        (Ok(bcs), Ok(tr)) => point_95g(
+                            gpu, &b, restated::nafems_material(), &bcs, Some(&tr[..]), None, |s| s.yy, mode,
+                        ),
+                        (Err(e), _) | (_, Err(e)) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+                    }
+                }
+                Err(e) => Point95g::failed(0, e.to_string()),
+            };
+            conv[idx] = p.converged;
+            fits[idx] = p.fit;
+            errs[idx] = rel95g(p.fit, target);
+            c.require(&format!("Gate 95-G LE10 {name}: outer loop converged, n_z = {n_z}"), p.converged);
+            levels.push(vv::Level { h: 1.0 / n_t as Scalar, value: p.fit });
+            let line = p.line(&format!("LE10 {name} n_z={n_z:>2}"), target);
+            c.note(&format!("  {line}"));
+            detail.push(line);
+        }
+        c.check(
+            &format!("Gate 95-G LE10 {name}: sigma_yy(D) on the finest mesh (n_z = 16), rel to the restated -5.38 MPa"),
+            errs[2],
+            0.03,
+        );
+        let unc = study_95g(c, &format!("LE10 {name} sigma_yy(D)"), levels);
+        if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
+            short.push(format!(
+                "{name}: converged {}/3, finest sigma_yy(D) {:.4e} Pa, {:+.2} %",
+                conv.iter().filter(|&&v| v).count(),
+                fits[2],
+                100.0 * (fits[2] - target) / target.abs()
+            ));
+            if first_unc.is_none() {
+                first_unc = Some(unc);
+            }
+        }
+    }
+    if !short.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G LE10 thick plate (restated)",
+            against: "NAFEMS LE10 sigma_yy(D) = -5.38 MPa as RESTATED by ESRD (2018) - the NAFEMS P18 \
+                      primary was not read; geometry from openly published text; the line u_z = 0 is a \
+                      mid-plane band (SPEC-LIT 95.11)",
+            headline: short.join("; "),
+            detail,
+            uncertainty: first_unc,
+        });
+    }
+    Ok(())
+}
+
+/// Gate 95-G, NAFEMS LE11 as restated (SPEC-LIT 95.11): the solid
+/// cylinder/taper/sphere under T = r + z (S95.26), sigma_zz at A.
+fn check_nafems_le11(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::restated;
+    c.note(RESTATED_95G);
+    let target = NAFEMS_LE11_SZZ_A;
+    let mut levels: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    let mut errs = [Scalar::NAN; 3];
+    let mut fits = [Scalar::NAN; 3];
+    let mut conv = [false; 3];
+    let meshes = [(4usize, 8usize, 16usize), (8, 16, 32), (16, 32, 64)];
+    for (idx, (n_t, n_theta, n_s)) in meshes.into_iter().enumerate() {
+        let p = match restated::le11_body(n_t, n_theta, n_s) {
+            Ok(b) => {
+                if idx == 0 {
+                    c.note(&format!("  LE11 slenderness (95.9): {:.3}", ofgpu::solid::slenderness(&b.mesh)));
+                }
+                let (t, bt) = restated::le11_temperatures(&b.mesh);
+                point_95g(
+                    gpu, &b, restated::le11_material(), &restated::le11_bcs(), None, Some((&t[..], &bt[..])),
+                    |s| s.zz, Loop95g::Segregated,
+                )
+            }
+            Err(e) => Point95g::failed(0, e.to_string()),
+        };
+        conv[idx] = p.converged;
+        fits[idx] = p.fit;
+        errs[idx] = rel95g(p.fit, target);
+        c.require(&format!("Gate 95-G LE11: outer loop converged, n_s = {n_s}"), p.converged);
+        levels.push(vv::Level { h: 1.0 / n_t as Scalar, value: p.fit });
+        let line = p.line(&format!("LE11 n_s={n_s:>2}"), target);
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    c.check(
+        "Gate 95-G LE11: sigma_zz(A) on the finest mesh (n_s = 64), rel to the restated -105 MPa",
+        errs[2],
+        0.03,
+    );
+    let unc = study_95g(c, "LE11 sigma_zz(A)", levels);
+    if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G LE11 cylinder/taper/sphere (restated)",
+            against: "NAFEMS LE11 sigma_zz(A) = -105 MPa as RESTATED by ESRD (2018) - the NAFEMS P18 \
+                      primary was not read; geometry from openly published text (SPEC-LIT 95.11)",
+            headline: format!(
+                "converged {}/3, finest sigma_zz(A) {:.4e} Pa, {:+.2} % of the restated target",
+                conv.iter().filter(|&&v| v).count(),
+                fits[2],
+                100.0 * (fits[2] - target) / target.abs()
+            ),
+            detail,
+            uncertainty: Some(unc),
+        });
     }
     Ok(())
 }
