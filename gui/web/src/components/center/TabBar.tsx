@@ -15,6 +15,8 @@ function tabIcon(tab: Tab): IconName {
       return 'diff'
     case 'geometry':
       return 'cube'
+    case 'campaign':
+      return 'chart'
     case 'file':
       return /\.jsonc?$/i.test(tab.path) ? 'braces' : /\.rs$/i.test(tab.path) ? 'gear' : 'file'
   }
@@ -53,7 +55,9 @@ export function TabBar() {
           ? t('tab.residuals')
           : tab.kind === 'geometry'
             ? `${t('tab.geometry')}: ${basename(tab.path)}`
-            : `${t('tab.diff')}: ${basename(tab.path)}`
+            : tab.kind === 'campaign'
+              ? `${t('autonomy.tab')}: ${basename(tab.path) || '.'}`
+              : `${t('tab.diff')}: ${basename(tab.path)}`
 
   return (
     <div className="tabbar" data-testid="tabbar">

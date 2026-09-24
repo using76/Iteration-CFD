@@ -1,0 +1,635 @@
+{
+ "attempts": [
+  {
+   "attempt": 1,
+   "decided": "the config as given: no rule chose it",
+   "decided_by": "default",
+   "edits": [],
+   "edits_text": "none",
+   "end": [],
+   "layers_text": "wing 0 layers, full 0, not delivered (retreat_snapped)",
+   "moved": null,
+   "moved_text": null,
+   "observed": {
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "failure_class": "layer_dropped:retreat_snapped",
+    "flags_true": [
+     "F3a",
+     "F3b"
+    ],
+    "max_over_hf": 0.40104826218788076,
+    "n_cells": 11234,
+    "p99_over_hf": 0.4010443092786121,
+    "pinned_frac": 0.1334231805929919,
+    "seconds": 5.719686900032684,
+    "verdict": "fail"
+   },
+   "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b, cells 11234, pinned 0.133423, p99/h_f 0.401044, max/h_f 0.401048, BLC_8 0, BLC_full 0, 5.71969 s",
+   "prediction": null,
+   "prediction_text": "none",
+   "records": [],
+   "refused": [],
+   "rule_id": null,
+   "stage_focus": null,
+   "why": null,
+   "why_text": "no trigger"
+  },
+  {
+   "attempt": 2,
+   "decided": "switch the feature attraction off",
+   "decided_by": "remedy",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/snap/feature_tolerance",
+     "to": 0.0
+    }
+   ],
+   "edits_text": "/snap/feature_tolerance absent -> 0",
+   "end": [],
+   "layers_text": "wing 0 layers, full 0, not delivered (retreat_snapped)",
+   "moved": {
+    "after": 0.0,
+    "before": 0.1334231805929919,
+    "from_attempt": 1,
+    "observable": "outcome.pinned_frac",
+    "to_attempt": 2,
+    "unchanged": false
+   },
+   "moved_text": "outcome.pinned_frac 0.133423 -> 0 (attempt 1 -> 2)",
+   "observed": {
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "failure_class": "layer_dropped:retreat_snapped",
+    "flags_true": [
+     "F3d"
+    ],
+    "max_over_hf": 0.008478194132689866,
+    "n_cells": 11234,
+    "p99_over_hf": 0.00792795778857608,
+    "pinned_frac": 0.0,
+    "seconds": 2.5139847999671474,
+    "verdict": "fail"
+   },
+   "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3d, cells 11234, pinned 0, p99/h_f 0.00792796, max/h_f 0.00847819, BLC_8 0, BLC_full 0, 2.51398 s",
+   "prediction": null,
+   "prediction_text": "none",
+   "records": [
+    {
+     "because": "the pilot sweep found that it unpins the snap on every feature-bearing body, at the cost of the edges not being captured",
+     "cite": "docs/15 §K G-PILOT (feature_tolerance 0 unpinned 10 of 10 feature-bearing geometries; caution 1: the edges are then not captured, G-FID guards it)",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "inputs": [
+      {
+       "name": "attempt",
+       "unit": "1",
+       "value": 1
+      },
+      {
+       "name": "k",
+       "unit": "1",
+       "value": 4
+      },
+      {
+       "name": "key",
+       "unit": "1",
+       "value": "F3"
+      },
+      {
+       "name": "stage_focus",
+       "unit": "1",
+       "value": "snap"
+      },
+      {
+       "name": "fires_before",
+       "unit": "1",
+       "value": 0
+      },
+      {
+       "name": "wall_level",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "floor_level",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "on_plane",
+       "unit": "1",
+       "value": false
+      },
+      {
+       "name": "config_sha256_before",
+       "unit": "",
+       "value": "c7df0ea0db35b380dd6aede6c21ce579dffa54dc115c038f1b51a68a85cce0bc"
+      },
+      {
+       "name": "config_sha256_after",
+       "unit": "",
+       "value": "7bb11a709142a2120ae9fa8f9fb44eace427c40cea3f0ca6c4e926e312dfcf07"
+      },
+      {
+       "name": "skipped",
+       "unit": "1",
+       "value": [
+        {
+         "rule_id": "RM-SNAP-WALL",
+         "why": "below the y+ floor (wall 3 -> 2 < floor 3)"
+        }
+       ]
+      }
+     ],
+     "layer": "remedy",
+     "line": "RM-SNAP-FT [remedy apply]: switch the feature attraction off; because the pilot sweep found that it unpins the snap on every feature-bearing body, at the cost of the edges not being captured. RM-SNAP-FT: F3 at stage snap (outcome.pinned_frac = 0.133423 > 0.05; score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)) -> switch the feature attraction off (snap.feature_tolerance = 0) (fire 1 of 2, attempt 2 of 4): /snap/feature_tolerance absent -> 0 (cite: docs/15 §K G-PILOT (feature_tolerance 0 unpinned 10 of 10 feature-bearing geometries; caution 1: the edges are then not captured, G-FID guards it))",
+     "message": "RM-SNAP-FT: F3 at stage snap (outcome.pinned_frac = 0.133423 > 0.05; score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)) -> switch the feature attraction off (snap.feature_tolerance = 0) (fire 1 of 2, attempt 2 of 4): /snap/feature_tolerance absent -> 0",
+     "rule_id": "RM-SNAP-FT",
+     "t": "2026-09-24T10:14:01Z",
+     "title": "switch the feature attraction off",
+     "trigger": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.1334231805929919
+     },
+     "trigger_text": "outcome.pinned_frac = 0.133423 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))",
+     "verdict": "apply"
+    }
+   ],
+   "refused": [],
+   "rule_id": "RM-SNAP-FT",
+   "stage_focus": "snap",
+   "why": {
+    "observable": "outcome.pinned_frac",
+    "op": ">",
+    "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+    "threshold": 0.05,
+    "value": 0.1334231805929919
+   },
+   "why_text": "outcome.pinned_frac = 0.133423 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+  },
+  {
+   "attempt": 3,
+   "decided": "refine the whole refinement ladder one level",
+   "decided_by": "remedy",
+   "edits": [
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 4
+    },
+    {
+     "from": 2,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 3
+    },
+    {
+     "from": 1,
+     "pointer": "/refinement/levels/0/bands/2/level",
+     "to": 2
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/feature_level",
+     "to": 4
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/max_level",
+     "to": 4
+    }
+   ],
+   "edits_text": "/refinement/levels/0/bands/0/level 3 -> 4; /refinement/levels/0/bands/1/level 2 -> 3; /refinement/levels/0/bands/2/level 1 -> 2; /refinement/levels/0/feature_level 3 -> 4; /refinement/max_level 3 -> 4",
+   "end": [],
+   "layers_text": "wing 0 layers, full 0, not delivered (retreat_snapped)",
+   "moved": {
+    "after": true,
+    "before": true,
+    "from_attempt": 2,
+    "observable": "outcome.flags.F3d",
+    "to_attempt": 3,
+    "unchanged": true
+   },
+   "moved_text": "outcome.flags.F3d true -> true (attempt 2 -> 3); unchanged",
+   "observed": {
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "failure_class": "layer_dropped:retreat_snapped",
+    "flags_true": [
+     "F3d"
+    ],
+    "max_over_hf": 0.01883807442114287,
+    "n_cells": 78244,
+    "p99_over_hf": 0.014829743399416223,
+    "pinned_frac": 0.0,
+    "seconds": 15.554798900033347,
+    "verdict": "fail"
+   },
+   "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3d, cells 78244, pinned 0, p99/h_f 0.0148297, max/h_f 0.0188381, BLC_8 0, BLC_full 0, 15.5548 s",
+   "prediction": null,
+   "prediction_text": "none",
+   "records": [
+    {
+     "because": "the snapped surface misses area, so the lattice is too coarse for the body",
+     "cite": "docs/15 §D.1 F3d (area ratio outside [0.98, 1.02]); rules.predict_cells",
+     "edits": [
+      {
+       "from": 3,
+       "pointer": "/refinement/levels/0/bands/0/level",
+       "to": 4
+      },
+      {
+       "from": 2,
+       "pointer": "/refinement/levels/0/bands/1/level",
+       "to": 3
+      },
+      {
+       "from": 1,
+       "pointer": "/refinement/levels/0/bands/2/level",
+       "to": 2
+      },
+      {
+       "from": 3,
+       "pointer": "/refinement/levels/0/feature_level",
+       "to": 4
+      },
+      {
+       "from": 3,
+       "pointer": "/refinement/max_level",
+       "to": 4
+      }
+     ],
+     "inputs": [
+      {
+       "name": "attempt",
+       "unit": "1",
+       "value": 2
+      },
+      {
+       "name": "k",
+       "unit": "1",
+       "value": 4
+      },
+      {
+       "name": "key",
+       "unit": "1",
+       "value": "F3d"
+      },
+      {
+       "name": "stage_focus",
+       "unit": "1",
+       "value": "snap"
+      },
+      {
+       "name": "fires_before",
+       "unit": "1",
+       "value": 0
+      },
+      {
+       "name": "wall_level",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "floor_level",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "on_plane",
+       "unit": "1",
+       "value": false
+      },
+      {
+       "name": "config_sha256_before",
+       "unit": "",
+       "value": "7bb11a709142a2120ae9fa8f9fb44eace427c40cea3f0ca6c4e926e312dfcf07"
+      },
+      {
+       "name": "config_sha256_after",
+       "unit": "",
+       "value": "87b7f3d0249b9cf90e8366f42af4d6e96e3cca36ebcd1aa5ba44852ccc6bb581"
+      },
+      {
+       "name": "skipped",
+       "unit": "1",
+       "value": []
+      }
+     ],
+     "layer": "remedy",
+     "line": "RM-SNAP-REFINE [remedy apply]: refine the whole refinement ladder one level; because the snapped surface misses area, so the lattice is too coarse for the body. RM-SNAP-REFINE: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) -> refine the whole refinement ladder one level (the snapped surface misses area: the lattice is too coarse for the body) (fire 1 of 2, attempt 3 of 4): /refinement/levels/0/bands/0/level 3 -> 4; /refinement/levels/0/bands/1/level 2 -> 3; /refinement/levels/0/bands/2/level 1 -> 2; /refinement/levels/0/feature_level 3 -> 4; /refinement/max_level 3 -> 4 (cite: docs/15 §D.1 F3d (area ratio outside [0.98, 1.02]); rules.predict_cells)",
+     "message": "RM-SNAP-REFINE: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) -> refine the whole refinement ladder one level (the snapped surface misses area: the lattice is too coarse for the body) (fire 1 of 2, attempt 3 of 4): /refinement/levels/0/bands/0/level 3 -> 4; /refinement/levels/0/bands/1/level 2 -> 3; /refinement/levels/0/bands/2/level 1 -> 2; /refinement/levels/0/feature_level 3 -> 4; /refinement/max_level 3 -> 4",
+     "rule_id": "RM-SNAP-REFINE",
+     "t": "2026-09-24T10:14:04Z",
+     "title": "refine the whole refinement ladder one level",
+     "trigger": {
+      "observable": "outcome.flags.F3d",
+      "op": "not_in",
+      "source": "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)",
+      "threshold": [
+       0.98,
+       1.02
+      ],
+      "value": true
+     },
+     "trigger_text": "outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))",
+     "verdict": "apply"
+    }
+   ],
+   "refused": [],
+   "rule_id": "RM-SNAP-REFINE",
+   "stage_focus": "snap",
+   "why": {
+    "observable": "outcome.flags.F3d",
+    "op": "not_in",
+    "source": "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)",
+    "threshold": [
+     0.98,
+     1.02
+    ],
+    "value": true
+   },
+   "why_text": "outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))"
+  },
+  {
+   "attempt": 4,
+   "decided": "refine the whole refinement ladder one level",
+   "decided_by": "remedy",
+   "edits": [
+    {
+     "from": 4,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 5
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 4
+    },
+    {
+     "from": 2,
+     "pointer": "/refinement/levels/0/bands/2/level",
+     "to": 3
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/levels/0/feature_level",
+     "to": 5
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/max_level",
+     "to": 5
+    }
+   ],
+   "edits_text": "/refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 4 -> 5; /refinement/max_level 4 -> 5",
+   "end": [
+    {
+     "because": "each remedy fires at most twice, no config is revisited, and the attempt count is capped",
+     "cite": "docs/15 §C L2 (each remedy at most twice per geometry, no config sha revisited); gates.json attempts_k",
+     "edits": [],
+     "inputs": [
+      {
+       "name": "attempt",
+       "unit": "1",
+       "value": 4
+      },
+      {
+       "name": "k",
+       "unit": "1",
+       "value": 4
+      },
+      {
+       "name": "key",
+       "unit": "1",
+       "value": "F3d"
+      },
+      {
+       "name": "stage_focus",
+       "unit": "1",
+       "value": "snap"
+      },
+      {
+       "name": "fires_before",
+       "unit": "1",
+       "value": 0
+      },
+      {
+       "name": "wall_level",
+       "unit": "1",
+       "value": 5
+      },
+      {
+       "name": "floor_level",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "on_plane",
+       "unit": "1",
+       "value": false
+      },
+      {
+       "name": "config_sha256_before",
+       "unit": "",
+       "value": "2ae8b53f191a1bd3f47582dfeba9ad41a8fc4d3c9edf7e6709e4ff77bbb5236c"
+      },
+      {
+       "name": "config_sha256_after",
+       "unit": "",
+       "value": null
+      },
+      {
+       "name": "skipped",
+       "unit": "1",
+       "value": []
+      }
+     ],
+     "layer": "remedy",
+     "line": "RM-EXHAUSTED [remedy refuse]: end the geometry: the attempts or the remedies are spent; because each remedy fires at most twice, no config is revisited, and the attempt count is capped. RM-EXHAUSTED: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) remains: K = 4 attempts spent (cite: docs/15 §C L2 (each remedy at most twice per geometry, no config sha revisited); gates.json attempts_k)",
+     "message": "RM-EXHAUSTED: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) remains: K = 4 attempts spent",
+     "rule_id": "RM-EXHAUSTED",
+     "t": "2026-09-24T10:16:26Z",
+     "title": "end the geometry: the attempts or the remedies are spent",
+     "trigger": {
+      "observable": "outcome.flags.F3d",
+      "op": "not_in",
+      "source": "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)",
+      "threshold": [
+       0.98,
+       1.02
+      ],
+      "value": true
+     },
+     "trigger_text": "outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))",
+     "verdict": "refuse"
+    }
+   ],
+   "layers_text": "wing 0 layers, full 0, not delivered (retreat_snapped)",
+   "moved": {
+    "after": true,
+    "before": true,
+    "from_attempt": 3,
+    "observable": "outcome.flags.F3d",
+    "to_attempt": 4,
+    "unchanged": true
+   },
+   "moved_text": "outcome.flags.F3d true -> true (attempt 3 -> 4); unchanged",
+   "observed": {
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "failure_class": "layer_dropped:retreat_snapped",
+    "flags_true": [
+     "F3d"
+    ],
+    "max_over_hf": 0.03614337130741842,
+    "n_cells": 585900,
+    "p99_over_hf": 0.0350285713689621,
+    "pinned_frac": 0.0,
+    "seconds": 126.41912510001566,
+    "verdict": "fail"
+   },
+   "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3d, cells 585900, pinned 0, p99/h_f 0.0350286, max/h_f 0.0361434, BLC_8 0, BLC_full 0, 126.419 s",
+   "prediction": null,
+   "prediction_text": "none",
+   "records": [
+    {
+     "because": "the snapped surface misses area, so the lattice is too coarse for the body",
+     "cite": "docs/15 §D.1 F3d (area ratio outside [0.98, 1.02]); rules.predict_cells",
+     "edits": [
+      {
+       "from": 4,
+       "pointer": "/refinement/levels/0/bands/0/level",
+       "to": 5
+      },
+      {
+       "from": 3,
+       "pointer": "/refinement/levels/0/bands/1/level",
+       "to": 4
+      },
+      {
+       "from": 2,
+       "pointer": "/refinement/levels/0/bands/2/level",
+       "to": 3
+      },
+      {
+       "from": 4,
+       "pointer": "/refinement/levels/0/feature_level",
+       "to": 5
+      },
+      {
+       "from": 4,
+       "pointer": "/refinement/max_level",
+       "to": 5
+      }
+     ],
+     "inputs": [
+      {
+       "name": "attempt",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "k",
+       "unit": "1",
+       "value": 4
+      },
+      {
+       "name": "key",
+       "unit": "1",
+       "value": "F3d"
+      },
+      {
+       "name": "stage_focus",
+       "unit": "1",
+       "value": "snap"
+      },
+      {
+       "name": "fires_before",
+       "unit": "1",
+       "value": 1
+      },
+      {
+       "name": "wall_level",
+       "unit": "1",
+       "value": 4
+      },
+      {
+       "name": "floor_level",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "on_plane",
+       "unit": "1",
+       "value": false
+      },
+      {
+       "name": "config_sha256_before",
+       "unit": "",
+       "value": "87b7f3d0249b9cf90e8366f42af4d6e96e3cca36ebcd1aa5ba44852ccc6bb581"
+      },
+      {
+       "name": "config_sha256_after",
+       "unit": "",
+       "value": "2ae8b53f191a1bd3f47582dfeba9ad41a8fc4d3c9edf7e6709e4ff77bbb5236c"
+      },
+      {
+       "name": "skipped",
+       "unit": "1",
+       "value": []
+      }
+     ],
+     "layer": "remedy",
+     "line": "RM-SNAP-REFINE [remedy apply]: refine the whole refinement ladder one level; because the snapped surface misses area, so the lattice is too coarse for the body. RM-SNAP-REFINE: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) -> refine the whole refinement ladder one level (the snapped surface misses area: the lattice is too coarse for the body) (fire 2 of 2, attempt 4 of 4): /refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 4 -> 5; /refinement/max_level 4 -> 5 (cite: docs/15 §D.1 F3d (area ratio outside [0.98, 1.02]); rules.predict_cells)",
+     "message": "RM-SNAP-REFINE: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) -> refine the whole refinement ladder one level (the snapped surface misses area: the lattice is too coarse for the body) (fire 2 of 2, attempt 4 of 4): /refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 4 -> 5; /refinement/max_level 4 -> 5",
+     "rule_id": "RM-SNAP-REFINE",
+     "t": "2026-09-24T10:14:19Z",
+     "title": "refine the whole refinement ladder one level",
+     "trigger": {
+      "observable": "outcome.flags.F3d",
+      "op": "not_in",
+      "source": "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)",
+      "threshold": [
+       0.98,
+       1.02
+      ],
+      "value": true
+     },
+     "trigger_text": "outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))",
+     "verdict": "apply"
+    }
+   ],
+   "refused": [],
+   "rule_id": "RM-SNAP-REFINE",
+   "stage_focus": "snap",
+   "why": {
+    "observable": "outcome.flags.F3d",
+    "op": "not_in",
+    "source": "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)",
+    "threshold": [
+     0.98,
+     1.02
+    ],
+    "value": true
+   },
+   "why_text": "outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))"
+  }
+ ],
+ "campaign_id": "am15-fixture",
+ "geometry_id": "wing_a_L3",
+ "n_attempts": 4,
+ "schema": "autonomy-explain/1",
+ "split": "reported",
+ "terminal": "EXHAUSTED",
+ "text": "# wing_a_L3: 4 attempt(s), split reported, campaign am15-fixture, terminal EXHAUSTED\n\n## attempt 1: default, stage focus none\ndecided: the config as given: no rule chose it\nwhy: no trigger\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b, cells 11234, pinned 0.133423, p99/h_f 0.401044, max/h_f 0.401048, BLC_8 0, BLC_full 0, 5.71969 s\nlayers: wing 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.133423 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\nrecord RM-SNAP-FT [remedy apply]: switch the feature attraction off; because the pilot sweep found that it unpins the snap on every feature-bearing body, at the cost of the edges not being captured. RM-SNAP-FT: F3 at stage snap (outcome.pinned_frac = 0.133423 > 0.05; score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)) -> switch the feature attraction off (snap.feature_tolerance = 0) (fire 1 of 2, attempt 2 of 4): /snap/feature_tolerance absent -> 0 (cite: docs/15 §K G-PILOT (feature_tolerance 0 unpinned 10 of 10 feature-bearing geometries; caution 1: the edges are then not captured, G-FID guards it))\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3d, cells 11234, pinned 0, p99/h_f 0.00792796, max/h_f 0.00847819, BLC_8 0, BLC_full 0, 2.51398 s\nlayers: wing 0 layers, full 0, not delivered (retreat_snapped)\nmoved: outcome.pinned_frac 0.133423 -> 0 (attempt 1 -> 2)\n\n## attempt 3: remedy RM-SNAP-REFINE, stage focus snap\ndecided: refine the whole refinement ladder one level\nwhy: outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))\nedits: /refinement/levels/0/bands/0/level 3 -> 4; /refinement/levels/0/bands/1/level 2 -> 3; /refinement/levels/0/bands/2/level 1 -> 2; /refinement/levels/0/feature_level 3 -> 4; /refinement/max_level 3 -> 4\nrecord RM-SNAP-REFINE [remedy apply]: refine the whole refinement ladder one level; because the snapped surface misses area, so the lattice is too coarse for the body. RM-SNAP-REFINE: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) -> refine the whole refinement ladder one level (the snapped surface misses area: the lattice is too coarse for the body) (fire 1 of 2, attempt 3 of 4): /refinement/levels/0/bands/0/level 3 -> 4; /refinement/levels/0/bands/1/level 2 -> 3; /refinement/levels/0/bands/2/level 1 -> 2; /refinement/levels/0/feature_level 3 -> 4; /refinement/max_level 3 -> 4 (cite: docs/15 §D.1 F3d (area ratio outside [0.98, 1.02]); rules.predict_cells)\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3d, cells 78244, pinned 0, p99/h_f 0.0148297, max/h_f 0.0188381, BLC_8 0, BLC_full 0, 15.5548 s\nlayers: wing 0 layers, full 0, not delivered (retreat_snapped)\nmoved: outcome.flags.F3d true -> true (attempt 2 -> 3); unchanged\n\n## attempt 4: remedy RM-SNAP-REFINE, stage focus snap\ndecided: refine the whole refinement ladder one level\nwhy: outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))\nedits: /refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 4 -> 5; /refinement/max_level 4 -> 5\nrecord RM-SNAP-REFINE [remedy apply]: refine the whole refinement ladder one level; because the snapped surface misses area, so the lattice is too coarse for the body. RM-SNAP-REFINE: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) -> refine the whole refinement ladder one level (the snapped surface misses area: the lattice is too coarse for the body) (fire 2 of 2, attempt 4 of 4): /refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 4 -> 5; /refinement/max_level 4 -> 5 (cite: docs/15 §D.1 F3d (area ratio outside [0.98, 1.02]); rules.predict_cells)\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3d, cells 585900, pinned 0, p99/h_f 0.0350286, max/h_f 0.0361434, BLC_8 0, BLC_full 0, 126.419 s\nlayers: wing 0 layers, full 0, not delivered (retreat_snapped)\nmoved: outcome.flags.F3d true -> true (attempt 3 -> 4); unchanged\nend RM-EXHAUSTED [remedy refuse]: end the geometry: the attempts or the remedies are spent; because each remedy fires at most twice, no config is revisited, and the attempt count is capped. RM-EXHAUSTED: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) remains: K = 4 attempts spent (cite: docs/15 §C L2 (each remedy at most twice per geometry, no config sha revisited); gates.json attempts_k)\n"
+}

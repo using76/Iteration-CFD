@@ -13,6 +13,7 @@ export type Tab =
   | { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null }
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
   | { id: string; kind: 'geometry'; path: string }
+  | { id: string; kind: 'campaign'; path: string }
 
 export type PanelLayout = Record<string, number>
 
@@ -58,6 +59,7 @@ export interface UiActions {
   openFile(path: string): void
   openViewerTab(): void
   openGeometryTab(path: string): void
+  openCampaignTab(path: string): void
   openResidualsTab(runId: string | null): void
   setCompareRun(runId: string | null): void
   setViewSplit(on: boolean): void
@@ -188,6 +190,12 @@ export const useUiStore = create<UiStore>()(
         set((s) => ({ tabs: upsertTab(s.tabs, tab), activeTabId: tab.id }))
       },
       openFile(path) {
+        // A campaign directory opens as one campaign tab, not as the raw
+        // campaign.json text: the directory ('' at the workspace root) is the tab.
+        if (path.split('/').pop() === 'campaign.json') {
+          get().openCampaignTab(path.slice(0, path.length - 'campaign.json'.length).replace(/\/+$/, ''))
+          return
+        }
         // Surface files are geometry, not text: a binary STL in the text editor
         // is mojibake and a STEP is 60 KB of B-rep noise — show the 3D view.
         if (/\.(step|stp|stl|obj)$/i.test(path)) get().openGeometryTab(path)
@@ -198,6 +206,10 @@ export const useUiStore = create<UiStore>()(
       },
       openGeometryTab(path) {
         get().openTab({ id: `geometry:${path}`, kind: 'geometry', path })
+      },
+      openCampaignTab(path) {
+        const p = path.replace(/\/+$/, '')
+        get().openTab({ id: `campaign:${p}`, kind: 'campaign', path: p })
       },
       openResidualsTab(runId) {
         set((s) => {

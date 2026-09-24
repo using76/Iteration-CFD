@@ -9,6 +9,7 @@ import { ViewerTab } from './ViewerTab'
 const CodeEditor = lazy(() => import('../../editor/CodeEditor').then((m) => ({ default: m.CodeEditor })))
 const DiffEditorTab = lazy(() => import('../../editor/DiffEditorTab').then((m) => ({ default: m.DiffEditorTab })))
 const GeometryTab = lazy(() => import('./GeometryTab').then((m) => ({ default: m.GeometryTab })))
+const CampaignTab = lazy(() => import('./CampaignTab').then((m) => ({ default: m.CampaignTab })))
 
 export function TabHost() {
   const tabs = useUiStore((s) => s.tabs)
@@ -29,6 +30,8 @@ export function TabHost() {
                 <ResidualsChart runId={tab.runId} compareRunId={tab.compareRunId ?? null} active={active} />
               ) : tab.kind === 'geometry' ? (
                 <GeometryTab path={tab.path} active={active} />
+              ) : tab.kind === 'campaign' ? (
+                <CampaignTab path={tab.path} active={active} />
               ) : (
                 <DiffEditorTab id={tab.id} />
               )}
