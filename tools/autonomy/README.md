@@ -576,6 +576,42 @@ preflight refusal ids, the result's record into the row (`decided_by` remedy, `r
 AM-12 — measure how often RM-SNAP-WALL undoes R-CURV's raise and how often RM-SNAP-FT fires (caution 1).
 AM-15 — one template per rule id: the 12 rows and the 4 terminal ids.
 
+## explain.py — explanations and the campaign summary
+
+AM-15's explain row: one fixed template per `rule_id` — what it decides (the title) and why it exists
+(the because), with no number in either — turns every DecisionRecord into a **card**: the layer, the
+rule id, the verdict, the trigger (`observable = value op threshold (source)`), the edits
+(`pointer from -> to`), the message and the cite. The templates live in `TEMPLATES` at the top of
+`tools/autonomy/explain.py`.
+
+`explain_geometry` renders a geometry's rows as deterministic text with one line kind each: `decided`
+(the template title, or "the config as given"), `why` (the trigger), `edits`, `refused` (a card per
+constraint refusal), `record` (a card per pre-run record), `predicted` (p_fail ± std, BLC_8, log10
+cells, at t_predicted, against what was observed), `observed` (verdict, failure class, true F flags,
+cells, pinned, p99/max over h_f, BLC_8/BLC_full, seconds), `layers` (per patch: layers, full area
+frac, delivered / not requested / not delivered (class), capability-limited), `moved` (the measurement
+the edit targeted, before -> after, attempt n-1 -> n, "; unchanged" when it did not move), `end` (the
+terminal card). The text has no clock and no digit from a template: every number is grounded in its
+rows (`ungrounded`, the §C L5 lint).
+
+`--summary` takes the FINAL row (highest attempt) of each geometry and reports, per family and
+stratum and per family overall: MFR and strict-failure rate with Clopper-Pearson 95 % intervals,
+BLC_8/BLC_full means, median cells, mean attempts, capability-limited count.
+
+G-EXPL (`--gate`, report in `tools/autonomy/explain/G-EXPL.json`): part 1 all fixture rows valid and
+the audit ok; part 2 the static rule-id scan (a template for every id the package emits) and 59
+records render with 0 ungrounded; part 3 predictions precede their runs and 23 records sit on the
+right side of their runs; part 4 three golden geometries and the summary byte-equal their golden
+files with every expect label. The fixtures (tools/autonomy/fixtures/explain/) were written by the
+supervisor from six live runs at `57a2b4d`, not by explain.py.
+
+For later units: AM-11 — tag each DecisionRecord with its attempt as `records.json` does (a remedy's
+record on the attempt its edit produced, the terminal record on the last attempt), keep the `rule_id`
+of a rules attempt 1 as the last applying rule with edits (the fixture's convention, R-WIN on
+D-1-002), and write rows that `explain.py --audit` passes. AM-13 / AM-14 / AG-5 — every new rule id
+(prefixes PR, OPT, LLM) needs a TEMPLATES row, or `explain.py --selftest` fails by design. AM-16 —
+run `audit` on every campaign row and put `summarise` per family and stratum in the results page.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -602,6 +638,10 @@ AM-15 — one template per rule id: the 12 rows and the 4 terminal ids.
     python tools/autonomy/rules.py --gate --out DIR [--parts 1,2,3]                       # G-RULES (AM-9's gate)
     python tools/autonomy/remedies.py --probe PROBE_ID [--json]                  # the tabled remedy for one probe
     python tools/autonomy/remedies.py --gate --out DIR [--parts 1,2,3,4]         # G-REMEDIES (AM-10's gate)
+    python tools/autonomy/explain.py --rows ROWS.jsonl [--records R.json] [--geometry ID] [--json]   # per-geometry text
+    python tools/autonomy/explain.py --summary --rows ROWS.jsonl --meta META.json [--json]           # the campaign summary
+    python tools/autonomy/explain.py --audit --rows ROWS.jsonl [--records R.json]                    # G-EXPL on any rows
+    python tools/autonomy/explain.py --gate                                                          # G-EXPL (AM-15's gate)
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report

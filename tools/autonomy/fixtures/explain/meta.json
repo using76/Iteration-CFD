@@ -1,0 +1,19 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "meta": {
+  "D-1-002": {
+   "family": "D",
+   "stratum": "easy"
+  },
+  "box_sphere": {
+   "family": "X",
+   "stratum": "probe"
+  },
+  "wing_a_L3": {
+   "family": "X",
+   "stratum": "probe"
+  }
+ },
+ "note": "family and stratum of the three golden geometries: D-1-002 from the tuning manifest; the two survey probes are reported, family X, stratum probe",
+ "schema": "autonomy-explain-meta/1"
+}

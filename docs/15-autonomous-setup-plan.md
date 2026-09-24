@@ -524,3 +524,26 @@ Run by `tools/autonomy/remedies.py --gate` on binary sha256 `054bba67…a90b` at
   **Part 4, live:** from the frozen attempt 1, cube_n5, cube_ok, cubep_defaults and cubep_ok end PASS at attempt 2
   through RM-PLANE with 8 layers, BLC_8 = BLC_full = 1.0; cube_cf and cubep_cf, which set `/layers/cell_frac` 0.1
   themselves, end EXHAUSTED at attempt 2 (no lattice divisor is left above n*t1/cell_frac).
+
+### G-EXPL, the explanations (AM-15), 2026-09-24: PASS on the fixtures
+
+Run by `tools/autonomy/explain.py --gate` at tree `57a2b4d`; the report is `tools/autonomy/explain/G-EXPL.json` (and
+`.md`). No campaign rows exist before AM-11, so the gate runs on six rows the supervisor produced live (binary
+`054bba67…`) and froze in `tools/autonomy/fixtures/explain/`; `explain.py --audit` is the same check for any later rows.
+
+- **Templates:** 41, one per rule id the package emits (PF 11, WL 6, R 8, RM 16), each with the layer of its prefix and no
+  digit in its text. A scan of the package's own string constants finds exactly those ids (plus remedies.py's test veto
+  id), so a later unit that adds a rule id without a template fails `explain.py --selftest`.
+- **Rows and timestamps:** 6/6 rows valid under `autonomy-attempt/1` and `schema.check_attempt`. No fixture row carries a
+  prediction (no optimiser yet); on copies of all six, a prediction 1 s before `t_start` passes and one at or after it is
+  refused. 23/23 tagged DecisionRecords sit on the right side of their runs (decisions before `t_start`, terminals after
+  `t_end`), and the three remedy triggers equal the previous attempt's measurement.
+- **Golden texts:** box_sphere (CAPABILITY-LIMITED after 1), wing_a_L3 (EXHAUSTED after 4) and D-1-002 (PASS after 1, 8
+  layers) equal their golden files and carry all 59 supervisor labels; every number in them is found in their rows. The
+  summary gives MFR and strict failure with Clopper-Pearson 95 % intervals per family and stratum.
+- **Found on the way, for AM-12:** on wing_a_L3, RM-SNAP-FT moved the pinned fraction from 0.133 to 0 but the attempt then
+  failed F3d (area ratio), and two RM-SNAP-REFINE rungs (78,244 and 585,900 cells, 126 s) left F3d failing. The coarser
+  ladder was skipped there because the probe config is already at the y+ floor.
+- **Found on the way, for the owner of preflight.py:** a config whose quality block sets `min_thickness_ratio` to 0 is
+  refused PF-QUALITY without a flow, but with a flow `preflight()` raises ZeroDivisionError in `yplus_window` instead of
+  refusing. The quality block is locked, so only an edit that preflight exists to refuse reaches it. Not fixed here.

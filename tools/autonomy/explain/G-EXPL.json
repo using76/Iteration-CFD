@@ -1,0 +1,88 @@
+{
+ "git_head": "57a2b4dedb35badaea143d32e24e66840857706b",
+ "ok": true,
+ "parts": [
+  {
+   "audit_ok": true,
+   "n_rows": 6,
+   "n_valid": 6,
+   "name": "rows",
+   "ok": true,
+   "part": 1,
+   "rule_ids": [
+    "R-WIN",
+    "RM-SNAP-FT",
+    "RM-SNAP-REFINE"
+   ]
+  },
+  {
+   "dead": [],
+   "files": 18,
+   "ids": 42,
+   "missing": [],
+   "n_records": 59,
+   "n_ungrounded": 0,
+   "name": "templates",
+   "ok": true,
+   "part": 2
+  },
+  {
+   "before_ok": 6,
+   "late_refused": 12,
+   "n_predictions": 0,
+   "name": "timestamps",
+   "ok": true,
+   "part": 3,
+   "records_bad": 0,
+   "records_checked": 23
+  },
+  {
+   "geometries": {
+    "D-1-002": {
+     "labels": 21,
+     "n_attempts": 1,
+     "n_labels": 21,
+     "ok": true,
+     "rule_ids": [
+      "R-WIN"
+     ],
+     "terminal": "PASS",
+     "ungrounded": 0
+    },
+    "box_sphere": {
+     "labels": 15,
+     "n_attempts": 1,
+     "n_labels": 15,
+     "ok": true,
+     "rule_ids": [],
+     "terminal": "CAPABILITY-LIMITED",
+     "ungrounded": 0
+    },
+    "wing_a_L3": {
+     "labels": 23,
+     "n_attempts": 4,
+     "n_labels": 23,
+     "ok": true,
+     "rule_ids": [
+      "RM-SNAP-FT",
+      "RM-SNAP-REFINE"
+     ],
+     "terminal": "EXHAUSTED",
+     "ungrounded": 0
+    }
+   },
+   "labels": 65,
+   "name": "golden",
+   "ok": true,
+   "part": 4,
+   "summary": {
+    "labels": 6,
+    "n_labels": 6,
+    "ok": true,
+    "ungrounded": 0
+   },
+   "summary_ok": true
+  }
+ ],
+ "schema": "autonomy-explain-gate/1"
+}
