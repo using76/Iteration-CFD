@@ -28320,8 +28320,9 @@ conservative end of that interval for the same reason 0.45 is.
 
 The route for both is **Cardiff, Tuković, Jasak & Ivanković (2016)**: a
 block-coupled matrix that solves the three components at once and never
-defers the coupling. It is not built, and §1's one-entry-per-face LDU storage
-is why.
+defers the coupling. The MATRIX is built - §109 is the second storage format
+beside §1's, with its assembly and its host twin - and the solve around it is
+not; until it is, both refusals stand.
 
 **A displacement that has reached the fluid mesh** — `max|u| / min_c
 V_c^{1/3}` above 0.1. An ALE step obeying the space conservation law needs a
@@ -28378,8 +28379,9 @@ with, and it is the one the measurement supports.
 
 ### 95.7 What this section does not do
 
-No block-coupled matrix, and therefore no near-incompressible solid and no
-slender one. Both are refused above with the paper that would take them.
+No block-coupled SOLVE - §109 assembles the matrix and nothing solves with
+it - and therefore no near-incompressible solid and no slender one. Both are
+refused above with the paper that would take them.
 
 No large deflection. The Turek-Hron flap of the fluid-structure programme is
 17.5:1 slender and deflects centimetres on a 35 cm span; it is beyond this
@@ -30834,7 +30836,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **436** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **438** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -30845,7 +30847,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added four.
+where the test is described - §109.3 added six.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -31336,8 +31338,9 @@ of PCG on an asymmetric matrix is not touched.
 
 **At single precision.** The host legs of Gate 109-A, the host product
 against the dense expansion and the direct dense solve bound DOUBLE round-off
-(`1e-12`, `1e-14`, `1e-10`) and carry §112.3's f32 attribute: four library
-tests. The symmetry check and the refusals hold at f32 and do not carry it.
+(`1e-12`, `1e-14`, `1e-10`) and carry §112.3's f32 attribute, and so do Gate
+109-B and the device leg of Gate 109-A: six library tests. The symmetry
+check, the capture gate and the refusals hold at f32 and do not carry it.
 No f32 tolerance is written for this section, for §112.2's reason.
 
 ### 109.4 What this section does not do

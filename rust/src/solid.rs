@@ -277,8 +277,8 @@ pub fn refuse(what: NotBuilt, setting: &str) -> Error {
             "{head}: a block-coupled solve is not built - Cardiff, Tuković, Jasak \
              & Ivanković, *Comput. Struct.* 175 (2016) 100-122, DOI \
              10.1016/j.compstruc.2016.07.004 is the route a near-incompressible \
-             case has to take, and a 3x3 coefficient per face breaks the \
-             one-entry-per-face LDU storage of SPEC-LIT §1"
+             case has to take; the 3x3-per-face block matrix of SPEC-LIT §109 \
+             is assembled and the Krylov solve around it is not"
         )),
     }
 }

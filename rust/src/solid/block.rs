@@ -457,6 +457,325 @@ pub fn unflatten3(v: &[Scalar]) -> Vec<Vec3> {
     v.chunks_exact(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect()
 }
 
+
+// ==========================================================================
+//  The device half - §109.1's storage on the card, and the operator that
+//  fills it from a `Displacement`'s state (§109.2). The kernels live in
+//  `cuda/solidblock.cu` and gather one row per thread; `assemble_host` above
+//  is their scatter-shaped twin, and Gate 109-B is the 1e-12 diff between
+//  them. Nothing here solves or iterates (§109.4).
+// ==========================================================================
+
+use super::displacement::Displacement;
+use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
+use crate::mesh::GpuMesh;
+use cudarc::driver::{CudaFunction, PushKernelArg};
+
+/// SPEC-LIT §109.1 on the device: `HostBlockLdu`'s twin, `gpu.zeros` per
+/// array, [`GpuBlockLdu::zero`] a memset per array - the four memset nodes a
+/// capture records, over which the two assembly kernels write every element
+/// they own.
+pub struct GpuBlockLdu {
+    pub n_cells: usize,
+    pub n_internal_faces: usize,
+    pub diag: DevBuf<Tensor>,
+    pub upper: DevBuf<Tensor>,
+    pub lower: DevBuf<Tensor>,
+    pub source: DevBuf<Vec3>,
+}
+
+impl GpuBlockLdu {
+    pub fn new(gpu: &Gpu, m: &GpuMesh) -> Result<Self> {
+        Ok(Self {
+            n_cells: m.n_cells,
+            n_internal_faces: m.n_internal_faces,
+            diag: gpu.zeros(m.n_cells)?,
+            upper: gpu.zeros(m.n_internal_faces)?,
+            lower: gpu.zeros(m.n_internal_faces)?,
+            source: gpu.zeros(m.n_cells)?,
+        })
+    }
+
+    pub fn zero(&mut self, gpu: &Gpu) -> Result<()> {
+        gpu.fill_zero(&mut self.diag)?;
+        gpu.fill_zero(&mut self.upper)?;
+        gpu.fill_zero(&mut self.lower)?;
+        gpu.fill_zero(&mut self.source)?;
+        Ok(())
+    }
+}
+
+impl HostBlockLdu {
+    /// Upload as-is; the shape fields travel with the arrays.
+    pub fn upload(&self, gpu: &Gpu) -> Result<GpuBlockLdu> {
+        Ok(GpuBlockLdu {
+            n_cells: self.n_cells,
+            n_internal_faces: self.n_internal_faces,
+            diag: gpu.upload(&self.diag)?,
+            upper: gpu.upload(&self.upper)?,
+            lower: gpu.upload(&self.lower)?,
+            source: gpu.upload(&self.source)?,
+        })
+    }
+
+    pub fn download(gpu: &Gpu, a: &GpuBlockLdu) -> Result<Self> {
+        Ok(Self {
+            n_cells: a.n_cells,
+            n_internal_faces: a.n_internal_faces,
+            diag: gpu.download(&a.diag)?,
+            upper: gpu.download(&a.upper)?,
+            lower: gpu.download(&a.lower)?,
+            source: gpu.download(&a.source)?,
+        })
+    }
+}
+
+/// `cuda/solidblock.cu`'s four entry points, resolved once.
+struct BlockKernels {
+    face: CudaFunction,
+    row: CudaFunction,
+    amul: CudaFunction,
+    residual: CudaFunction,
+}
+
+impl BlockKernels {
+    fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::SOLIDBLOCK)?;
+        Ok(Self {
+            face: k.func("solidBlockFace")?,
+            row: k.func("solidBlockRow")?,
+            amul: k.func("solidBlockAmul")?,
+            residual: k.func("solidBlockResidual")?,
+        })
+    }
+}
+
+/// The row topology `amul` and `residual` walk, copied device-to-device from
+/// the mesh once, at construction (five label arrays; `try_clone` is a real
+/// allocation and copy, not a reference count), so that the Krylov solve
+/// §109.4 defers needs nothing but `y`, `u` and this operator.
+struct BlockTopo {
+    owner: DevBuf<Label>,
+    neighbour: DevBuf<Label>,
+    cf_offset: DevBuf<Label>,
+    cf_face: DevBuf<Label>,
+    cf_own: DevBuf<Label>,
+}
+
+/// The block operator on the device, built over a [`Displacement`] and
+/// reading ITS state - `u.f`, `u.bf`, `grad`, `t`, `bt`, `bcs`, `cells` - so
+/// `d.correct_boundary(gpu)` followed by [`BlockOperator::assemble`] is one
+/// evaluation of (109.1)-(109.5) at `d`'s displacement. Allocates at
+/// construction only.
+pub struct BlockOperator {
+    a: GpuBlockLdu,
+    k: BlockKernels,
+    topo: BlockTopo,
+    n_cells: usize,
+    n_internal_faces: usize,
+}
+
+impl BlockOperator {
+    /// One material per region and no bond faces: a bonded region is refused
+    /// by name (§95.8), the series coefficient written as a `3x3` face block
+    /// being the stated route when it is taken.
+    pub fn new(gpu: &Gpu, d: &Displacement<'_>) -> Result<Self> {
+        let (nm, nb) = (d.map.n_materials(), d.n_bond());
+        if nm > 1 || nb > 0 {
+            return Err(Error::Config(format!(
+                "solid block: a region with {nm} materials and {nb} bond faces \
+                 is not carried by the block operator of SPEC-LIT §109 - the \
+                 series coefficient of §95.8 written as a 3x3 face block is \
+                 the route, not built"
+            )));
+        }
+        let m = d.mesh();
+        Ok(Self {
+            a: GpuBlockLdu::new(gpu, m)?,
+            k: BlockKernels::new(gpu)?,
+            topo: BlockTopo {
+                owner: m.owner.try_clone()?,
+                neighbour: m.neighbour.try_clone()?,
+                cf_offset: m.cf_offset.try_clone()?,
+                cf_face: m.cf_face.try_clone()?,
+                cf_own: m.cf_own.try_clone()?,
+            },
+            n_cells: m.n_cells,
+            n_internal_faces: m.n_internal_faces,
+        })
+    }
+
+    /// `a.zero`, `solidBlockFace` over `n_if`, `solidBlockRow` over
+    /// `n_cells`. Nothing else launches, nothing allocates, nothing
+    /// downloads, so one assembly is capturable end to end (Gate 109-C).
+    /// A displacement whose mesh is not the one the operator was built for
+    /// is refused by name - the coefficients would land on another
+    /// topology.
+    pub fn assemble(&mut self, gpu: &Gpu, d: &Displacement<'_>) -> Result<()> {
+        let m = d.mesh();
+        let n = m.n_cells;
+        let n_if = m.n_internal_faces;
+        if n != self.n_cells || n_if != self.n_internal_faces {
+            return Err(Error::Config(format!(
+                "solid block: assemble: the operator was built for {} cells \
+                 and {} internal faces, the displacement's mesh has {n} and \
+                 {n_if}",
+                self.n_cells, self.n_internal_faces
+            )));
+        }
+        self.a.zero(gpu)?;
+        if n_if > 0 {
+            let nl = n_if as Label;
+            let f = self.k.face.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(&mut self.a.upper)
+                    .arg(&mut self.a.lower)
+                    .arg(&m.sf)
+                    .arg(&m.mag_sf)
+                    .arg(&m.delta_coeffs)
+                    .arg(&m.owner)
+                    .arg(&d.cells.mu)
+                    .arg(&d.cells.lambda)
+                    .arg(&nl)
+                    .launch(cfg_for(n_if))?;
+            }
+        }
+        if n > 0 {
+            let nl = n as Label;
+            let f = self.k.row.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(&mut self.a.diag)
+                    .arg(&mut self.a.source)
+                    .arg(&d.u.f)
+                    .arg(&d.u.bf)
+                    .arg(&d.grad)
+                    .arg(&d.t)
+                    .arg(&d.bt)
+                    .arg(&d.bcs.mask)
+                    .arg(&d.bcs.ref_value)
+                    .arg(&d.bcs.traction)
+                    .arg(&m.sf)
+                    .arg(&m.mag_sf)
+                    .arg(&m.weights)
+                    .arg(&m.delta_coeffs)
+                    .arg(&m.non_orth_corr)
+                    .arg(&m.owner)
+                    .arg(&m.neighbour)
+                    .arg(&self.a.upper)
+                    .arg(&m.b_sf)
+                    .arg(&m.b_mag_sf)
+                    .arg(&m.b_cf)
+                    .arg(&m.c)
+                    .arg(&m.b_delta_coeffs)
+                    .arg(&m.b_kind)
+                    .arg(&m.cf_offset)
+                    .arg(&m.cf_face)
+                    .arg(&m.cf_own)
+                    .arg(&m.bcf_offset)
+                    .arg(&m.bcf_face)
+                    .arg(&d.cells.mu)
+                    .arg(&d.cells.lambda)
+                    .arg(&d.cells.beta_alpha)
+                    .arg(&d.cells.t_ref)
+                    .arg(&nl)
+                    .launch(cfg_for(n))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// (109.2): `y = A u`, one row per thread; a wrong length is refused by
+    /// name.
+    pub fn amul(&self, gpu: &Gpu, y: &mut DevBuf<Vec3>, u: &DevBuf<Vec3>) -> Result<()> {
+        if y.len() != self.n_cells {
+            return Err(Error::Config(format!(
+                "solid block: amul: y has {} elements for {} cells",
+                y.len(),
+                self.n_cells
+            )));
+        }
+        if u.len() != self.n_cells {
+            return Err(Error::Config(format!(
+                "solid block: amul: u has {} elements for {} cells",
+                u.len(),
+                self.n_cells
+            )));
+        }
+        if self.n_cells == 0 {
+            return Ok(());
+        }
+        let nl = self.n_cells as Label;
+        let f = self.k.amul.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(y)
+                .arg(u)
+                .arg(&self.a.diag)
+                .arg(&self.a.upper)
+                .arg(&self.a.lower)
+                .arg(&self.topo.owner)
+                .arg(&self.topo.neighbour)
+                .arg(&self.topo.cf_offset)
+                .arg(&self.topo.cf_face)
+                .arg(&self.topo.cf_own)
+                .arg(&nl)
+                .launch(cfg_for(self.n_cells))?;
+        }
+        Ok(())
+    }
+
+    /// (109.6): `r = A u - source`; the same refusals.
+    pub fn residual(&self, gpu: &Gpu, r: &mut DevBuf<Vec3>, u: &DevBuf<Vec3>) -> Result<()> {
+        if r.len() != self.n_cells {
+            return Err(Error::Config(format!(
+                "solid block: residual: r has {} elements for {} cells",
+                r.len(),
+                self.n_cells
+            )));
+        }
+        if u.len() != self.n_cells {
+            return Err(Error::Config(format!(
+                "solid block: residual: u has {} elements for {} cells",
+                u.len(),
+                self.n_cells
+            )));
+        }
+        if self.n_cells == 0 {
+            return Ok(());
+        }
+        let nl = self.n_cells as Label;
+        let f = self.k.residual.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(r)
+                .arg(u)
+                .arg(&self.a.diag)
+                .arg(&self.a.upper)
+                .arg(&self.a.lower)
+                .arg(&self.a.source)
+                .arg(&self.topo.owner)
+                .arg(&self.topo.neighbour)
+                .arg(&self.topo.cf_offset)
+                .arg(&self.topo.cf_face)
+                .arg(&self.topo.cf_own)
+                .arg(&nl)
+                .launch(cfg_for(self.n_cells))?;
+        }
+        Ok(())
+    }
+
+    /// The assembled matrix, for a test's download or a solve's coefficient.
+    pub fn matrix(&self) -> &GpuBlockLdu {
+        &self.a
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

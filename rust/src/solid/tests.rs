@@ -9,6 +9,7 @@
 //! [`super::prototype`] stage by stage; the capture gate; and the refusals.
 
 use super::bc::*;
+use super::block::*;
 use super::displacement::*;
 use super::*;
 use crate::blockgen::{BlockSpec, GradedAxis};
@@ -974,4 +975,319 @@ fn the_linear_bond_leaves_an_interface_stress_the_series_bond_removes() {
         ratio[1],
         ratio[0]
     );
+}
+
+// ==========================================================================
+//  The block-coupled matrix of SPEC-LIT §109 on the device (Gates 109-A/B/C)
+// ==========================================================================
+
+/// The deterministic non-linear state the block gates read: the linear state
+/// multiplied by a fixed trigonometric field of the cell / boundary-face
+/// centre, and a temperature gradient on top. No random numbers anywhere in
+/// this crate's tests.
+fn block_nonlinear_state(
+    hm: &HostMesh,
+) -> (Vec<Vec3>, Vec<Vec3>, Vec<Scalar>, Vec<Scalar>) {
+    let (mut u, mut ub) = linear_state(hm);
+    let bump = |x: Vec3| 1.0 + 0.3 * (7.0 * x.x).sin() * (5.0 * x.y).cos();
+    for (uc, xc) in u.iter_mut().zip(&hm.c) {
+        *uc = *uc * bump(*xc);
+    }
+    for (ub_b, xb) in ub.iter_mut().zip(&hm.b_cf) {
+        *ub_b = *ub_b * bump(*xb);
+    }
+    let t: Vec<Scalar> = hm.c.iter().map(|x| T_REF + DT * x.x).collect();
+    let bt: Vec<Scalar> = hm.b_cf.iter().map(|x| T_REF + DT * x.x).collect();
+    (u, ub, t, bt)
+}
+
+/// Gate 109-B: diag, upper, lower, source and A u from the kernels against
+/// the scatter-shaped host assembly, to 1e-12 relative, on the uniform cube,
+/// the jittered cube and the graded block, on a non-linear state with a
+/// temperature gradient.
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn the_block_assembly_matches_the_host_twin_on_three_meshes() {
+    let Some(gpu) = gpu() else { return };
+    let meshes = [
+        ("block(6)", prototype::block(6).expect("block")),
+        (
+            "jittered_block(6, 0.25)",
+            prototype::jittered_block(6, 0.25).expect("jittered"),
+        ),
+        ("graded_block()", graded_block()),
+    ];
+    for (name, hm) in meshes {
+        let n = hm.n_cells;
+        let gm = upload(&gpu, &hm);
+        let mut d = Displacement::new(
+            &gpu,
+            &gm,
+            &hm,
+            Material::steel(0.3),
+            &fixed_minus_x(),
+            tight(),
+        )
+        .expect("displacement");
+        let (u, ub, t, bt) = block_nonlinear_state(&hm);
+        d.set_temperature(&gpu, &t, &bt, T_REF).expect("temperature");
+        d.set_displacement(&gpu, &u, &ub).expect("state");
+        d.correct_boundary(&gpu).expect("correct_boundary");
+        let mut blk = BlockOperator::new(&gpu, &d).expect("block operator");
+        blk.assemble(&gpu, &d).expect("assemble");
+        let mut y = gpu.zeros::<Vec3>(n).expect("zeros");
+        blk.amul(&gpu, &mut y, &d.u.f).expect("amul");
+
+        let du = gpu.download(&d.u.f).expect("u");
+        let dub = gpu.download(&d.u.bf).expect("ub");
+        let dgrad = gpu.download(&d.grad).expect("grad");
+        let dt = gpu.download(&d.t).expect("t");
+        let dbt = gpu.download(&d.bt).expect("bt");
+        let dmask = gpu.download(&d.bcs.mask).expect("mask");
+        let dref = gpu.download(&d.bcs.ref_value).expect("ref_value");
+        let dtr = gpu.download(&d.bcs.traction).expect("traction");
+        let dmu = gpu.download(&d.cells.mu).expect("mu");
+        let dlam = gpu.download(&d.cells.lambda).expect("lambda");
+        let dbeta = gpu.download(&d.cells.beta_alpha).expect("beta_alpha");
+        let dtref = gpu.download(&d.cells.t_ref).expect("t_ref");
+
+        let s = BlockState {
+            u: &du,
+            ub: &dub,
+            grad: &dgrad,
+            t: &dt,
+            bt: &dbt,
+            mask: &dmask,
+            ref_value: &dref,
+            traction: &dtr,
+            mu: &dmu,
+            lambda: &dlam,
+            beta_alpha: &dbeta,
+            t_ref: &dtref,
+        };
+        let mut ha = HostBlockLdu::zeros(&hm);
+        assemble_host(&mut ha, &hm, &s).expect("host assemble");
+        let mut hu = Vec::new();
+        amul_host(&mut hu, &du, &ha, &hm);
+
+        let r_diag = rel_max(&flat9(&gpu.download(&blk.matrix().diag).expect("diag")), &flat9(&ha.diag));
+        let r_up = rel_max(&flat9(&gpu.download(&blk.matrix().upper).expect("upper")), &flat9(&ha.upper));
+        let r_lo = rel_max(&flat9(&gpu.download(&blk.matrix().lower).expect("lower")), &flat9(&ha.lower));
+        let r_src = rel_max(&flat3(&gpu.download(&blk.matrix().source).expect("source")), &flat3(&ha.source));
+        let r_au = rel_max(&flat3(&gpu.download(&y).expect("y")), &flat3(&hu));
+        println!("  109-B {name}: diag {r_diag:e}  upper {r_up:e}  lower {r_lo:e}  source {r_src:e}  amul {r_au:e}");
+        assert!(r_diag <= 1e-12, "{name}: diag differs by {r_diag:e}");
+        assert!(r_up <= 1e-12, "{name}: upper differs by {r_up:e}");
+        assert!(r_lo <= 1e-12, "{name}: lower differs by {r_lo:e}");
+        assert!(r_src <= 1e-12, "{name}: source differs by {r_src:e}");
+        assert!(r_au <= 1e-12, "{name}: A u differs by {r_au:e}");
+    }
+}
+
+/// Gate 109-A on the device: the block residual, the segregated operator's
+/// own residual and their difference, all read against (109.6)'s scale, on
+/// the patch test and on the free-expansion cube - the two states on which
+/// the two operators agree to round-off and nowhere else is claimed.
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn the_block_residual_vanishes_where_the_segregated_one_does() {
+    let Some(gpu) = gpu() else { return };
+    use crate::ldu::HostLduMatrix;
+    use crate::reference::{amul, CpuLdu};
+
+    fn max_abs3(v: &[Vec3]) -> Scalar {
+        v.iter()
+            .fold(0.0 as Scalar, |a, p| a.max(p.x.abs()).max(p.y.abs()).max(p.z.abs()))
+    }
+
+    fn case(
+        gpu: &Gpu,
+        name: &str,
+        hm: &HostMesh,
+        per_patch: &[[CompBc; 3]],
+        fixed: Option<&[Vec3]>,
+        u: &[Vec3],
+        ub: &[Vec3],
+        t: &[Scalar],
+        bt: &[Scalar],
+    ) -> (Scalar, Scalar, Scalar) {
+        let n = hm.n_cells;
+        let gm = upload(gpu, hm);
+        let mut d =
+            Displacement::new(gpu, &gm, hm, Material::steel(0.3), per_patch, tight())
+                .expect("displacement");
+        d.set_temperature(gpu, t, bt, T_REF).expect("temperature");
+        if let Some(fv) = fixed {
+            d.bcs.set_fixed_values(gpu, fv).expect("per-face fixed values");
+        }
+        d.set_displacement(gpu, u, ub).expect("state");
+        d.correct_boundary(gpu).expect("correct_boundary");
+        d.assemble_rhs(gpu).expect("assemble_rhs");
+        let mut blk = BlockOperator::new(gpu, &d).expect("block operator");
+        blk.assemble(gpu, &d).expect("assemble");
+
+        // The block residual, from the downloaded matrix and u.
+        let du = gpu.download(&d.u.f).expect("u");
+        let ba = HostBlockLdu::download(gpu, blk.matrix()).expect("download");
+        let mut r_blk = Vec::new();
+        residual_host(&mut r_blk, &du, &ba, hm);
+        let scale = residual_scale(&ba, &du);
+
+        // The segregated residual, component by component, from the
+        // downloaded scalar matrix and the same downloaded u.
+        let mut r_seg = vec![Vec3::ZERO; n];
+        for cmpt in 0..3 {
+            d.assemble_component(gpu, cmpt).expect("assemble_component");
+            let host = HostLduMatrix::download(gpu, d.matrix()).expect("segregated matrix");
+            let mut cl = CpuLdu::new(hm);
+            cl.diag = host.diag;
+            cl.upper = host.upper;
+            cl.lower = host.lower;
+            cl.source = host.source;
+            cl.internal_coeffs = host.internal_coeffs;
+            cl.boundary_coeffs = host.boundary_coeffs;
+            let mut psi: Vec<Scalar> = Vec::with_capacity(n);
+            psi.extend(du.iter().map(|v| match cmpt {
+                0 => v.x,
+                1 => v.y,
+                _ => v.z,
+            }));
+            let mut out = Vec::new();
+            amul(&mut out, &psi, &cl, hm);
+            for c in 0..n {
+                let r = out[c] - cl.source[c];
+                match cmpt {
+                    0 => r_seg[c].x = r,
+                    1 => r_seg[c].y = r,
+                    _ => r_seg[c].z = r,
+                }
+            }
+        }
+
+        let diff: Vec<Vec3> = r_blk
+            .iter()
+            .zip(&r_seg)
+            .map(|(a, b)| *a - *b)
+            .collect();
+        let (b_r, s_r, d_r) =
+            (max_abs3(&r_blk), max_abs3(&r_seg), max_abs3(&diff));
+        println!("  109-A {name}: block {b_r:e}  segregated {s_r:e}  difference {d_r:e}  (scale {scale:e})");
+        (b_r / scale, s_r / scale, d_r / scale)
+    }
+
+    // The patch test: the graded orthogonal block, the linear state, every
+    // component Fixed at the state's own boundary values, T = T_ref.
+    let hm = graded_block();
+    let (u, ub) = linear_state(&hm);
+    let n = hm.n_cells;
+    let nbf = hm.n_boundary_faces;
+    let (b, s, df) = case(
+        &gpu,
+        "graded block, patch test",
+        &hm,
+        &[[CompBc::Fixed(0.0); 3]; 6],
+        Some(&ub),
+        &u,
+        &ub,
+        &vec![T_REF; n],
+        &vec![T_REF; nbf],
+    );
+    assert!(b <= 1e-12, "the block residual is {b:e} of the scale");
+    assert!(s <= 1e-12, "the segregated residual is {s:e} of the scale");
+    assert!(df <= 1e-12, "the two residuals differ by {df:e} of the scale");
+
+    // The free-expansion cube of Gate 95-B.
+    let hm = prototype::block(10).expect("block");
+    let (n, nbf) = (hm.n_cells, hm.n_boundary_faces);
+    let a = Material::steel(0.3).alpha * DT;
+    let u: Vec<Vec3> = hm.c.iter().map(|x| *x * a).collect();
+    let ub: Vec<Vec3> = hm.b_cf.iter().map(|x| *x * a).collect();
+    let (b, s, df) = case(
+        &gpu,
+        "block(10), free expansion",
+        &hm,
+        &free_expansion(),
+        None,
+        &u,
+        &ub,
+        &vec![T_REF + DT; n],
+        &vec![T_REF + DT; nbf],
+    );
+    assert!(b <= 1e-12, "the block residual is {b:e} of the scale");
+    assert!(s <= 1e-12, "the segregated residual is {s:e} of the scale");
+    assert!(df <= 1e-12, "the two residuals differ by {df:e} of the scale");
+}
+
+/// Gate 109-C: one boundary correction, one assembly and one product capture
+/// and replay bitwise under SPEC-LIT 81's protocol. The registry row for
+/// `src/solid/block.rs` names this test.
+#[test]
+fn the_block_assembly_replays_bitwise() {
+    let Some(gpu) = gpu() else { return };
+    let mat = Material::steel(0.3);
+    let hm = prototype::block(6).expect("block");
+    let gm = upload(&gpu, &hm);
+    let n = hm.n_cells;
+    let (u, ub, t, bt) = block_nonlinear_state(&hm);
+
+    let report = crate::capture::capture_replays_bitwise(
+        &gpu,
+        "solid block assembly, one evaluation",
+        || {
+            let mut d =
+                Displacement::new(&gpu, &gm, &hm, mat, &fixed_minus_x(), tight())?;
+            d.set_temperature(&gpu, &t, &bt, T_REF)?;
+            d.set_displacement(&gpu, &u, &ub)?;
+            let blk = BlockOperator::new(&gpu, &d)?;
+            let y = gpu.zeros::<Vec3>(n)?;
+            Ok((d, blk, y))
+        },
+        |(d, blk, y)| {
+            d.correct_boundary(&gpu)?;
+            blk.assemble(&gpu, d)?;
+            blk.amul(&gpu, y, &d.u.f)
+        },
+        |(_, blk, y)| {
+            Ok(vec![
+                ("diag", flat9(&gpu.download(&blk.matrix().diag)?)),
+                ("upper", flat9(&gpu.download(&blk.matrix().upper)?)),
+                ("lower", flat9(&gpu.download(&blk.matrix().lower)?)),
+                ("source", flat3(&gpu.download(&blk.matrix().source)?)),
+                ("y", flat3(&gpu.download(y)?)),
+            ])
+        },
+    )
+    .expect("SPEC-LIT 81.7: the block assembly must capture and replay bitwise");
+    println!("  block: {report}");
+}
+
+/// A bonded region is refused at construction, by name (SPEC-LIT 95.8):
+/// the series coefficient written as a 3x3 face block is the stated route,
+/// and until it is taken the block operator refuses the map.
+#[test]
+fn the_block_operator_refuses_a_bonded_region_by_name() {
+    let Some(gpu) = gpu() else { return };
+    let a = Material::steel(0.3);
+    let b = Material { e: 100e9, nu: 0.3, alpha: 2.0e-5 };
+    let hm = prototype::block(4).expect("block");
+    let gm = upload(&gpu, &hm);
+    let n = hm.n_cells;
+    let low: Vec<Label> = (0..n as Label).filter(|&c| hm.c[c as usize].x < 0.5).collect();
+    let high: Vec<Label> = (0..n as Label).filter(|&c| hm.c[c as usize].x >= 0.5).collect();
+    let map = MaterialMap::from_cell_lists(
+        &[("steel", a, None, low), ("brass", b, None, high)],
+        n,
+        BondTreatment::Series,
+    )
+    .expect("map");
+    let d = Displacement::with_materials(&gpu, &gm, &hm, &map, &fixed_minus_x(), tight())
+        .expect("displacement");
+    let msg = match BlockOperator::new(&gpu, &d) {
+        Ok(_) => panic!("a bonded region must be refused at construction"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("solid block"), "{msg}");
+    assert!(msg.contains("bond"), "{msg}");
+    assert!(msg.contains("109"), "{msg}");
+    assert!(msg.contains("not built"), "{msg}");
 }

@@ -269,6 +269,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ("src/scalar_transport.rs", Stance::Via("src/species.rs")),
     ("src/simple.rs", Stance::Gate("the_simple_outer_corrector_replays_bitwise")),
     (
+        "src/solid/block.rs",
+        Stance::Gate("the_block_assembly_replays_bitwise"),
+    ),
+    (
         "src/solid/displacement.rs",
         Stance::Gate("the_displacement_iteration_replays_bitwise"),
     ),
