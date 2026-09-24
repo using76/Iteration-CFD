@@ -81,6 +81,7 @@ pub const MOTION_RATIO_MAX: Scalar = 0.1;
 pub mod bc;
 pub mod block;
 pub mod case;
+pub mod coupled;
 pub mod displacement;
 pub mod fixtures;
 pub mod materials;

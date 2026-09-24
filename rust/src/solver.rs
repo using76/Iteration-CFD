@@ -338,7 +338,7 @@ pub struct SolverWorkspace {
 
     /// Landing pad for [`Self::flag`]. Page-locked so the copy is a plain DMA
     /// with no staging buffer behind it.
-    flag_host: PinnedHostSlice<Label>,
+    pub(crate) flag_host: PinnedHostSlice<Label>,
 
     /// The wait that makes that copy safe to read.
     ///
@@ -351,7 +351,7 @@ pub struct SolverWorkspace {
     /// before the read. Created with the default flags, i.e. spin rather than
     /// block, because this wait is on the critical path of the iteration and
     /// `check_interval` already exists to make it rare.
-    flag_event: CudaEvent,
+    pub(crate) flag_event: CudaEvent,
 }
 
 impl SolverWorkspace {
@@ -821,7 +821,7 @@ fn refuse_empty(n: usize, who: &str) -> Result<()> {
 /// `rho = (r0,r)`, then `beta = (rho/rho_old)·(alpha/omega)` and
 /// `rho_old = rho`, in one stage-two launch: `device_dot`, `solBetaBicg`
 /// and the end-of-sweep `copy_scalar` of the unfused loop.
-fn bicg_rho_and_beta(
+pub(crate) fn bicg_rho_and_beta(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -858,7 +858,7 @@ fn bicg_rho_and_beta(
 /// `out = (a,b)`, then `q = num/out` guarded, in one stage-two launch:
 /// `device_dot` followed by `divide_scalar(q, num, out)`.
 #[allow(clippy::too_many_arguments)]
-fn dot_then_divide(
+pub(crate) fn dot_then_divide(
     gpu: &Gpu,
     k: &SolverKernels,
     out: &mut DevBuf<Scalar>,
@@ -939,7 +939,7 @@ fn dot_then_ratio(
 /// `ab = (a,b)` and `aa = (a,a)`, then `q = ab/aa` guarded, in one
 /// stage-two launch: `device_dot2` followed by `divide_scalar(q, ab, aa)`.
 #[allow(clippy::too_many_arguments)]
-fn dot2_then_divide(
+pub(crate) fn dot2_then_divide(
     gpu: &Gpu,
     k: &SolverKernels,
     ab: &mut DevBuf<Scalar>,
@@ -981,7 +981,7 @@ fn dot2_then_divide(
 /// in one stage-two launch: `device_sum_mag` followed by
 /// `convergence_test(flag, res, res0, norm_factor, ctrl, iter)`.
 #[allow(clippy::too_many_arguments)]
-fn sum_mag_then_test(
+pub(crate) fn sum_mag_then_test(
     gpu: &Gpu,
     k: &SolverKernels,
     res: &mut DevBuf<Scalar>,
@@ -1029,7 +1029,7 @@ fn sum_mag_then_test(
 
 /// SPEC-LIT 113.2: inside a CUDA-graph capture, a solve that would make a
 /// host round-trip is refused by name before it launches anything.
-fn refuse_round_trip_in_capture(gpu: &Gpu, ctrl: &SolverControls, who: &str) -> Result<()> {
+pub(crate) fn refuse_round_trip_in_capture(gpu: &Gpu, ctrl: &SolverControls, who: &str) -> Result<()> {
     if !gpu.is_capturing() {
         return Ok(());
     }
@@ -1670,7 +1670,7 @@ pub(crate) fn convergence_test(
 /// the landing pad last time - which is a *plausible* value, so the bug shows
 /// up as a solve that stops one check too early or too late rather than as a
 /// crash. See the note on [`SolverWorkspace::flag_event`].
-fn read_flag(
+pub(crate) fn read_flag(
     gpu: &Gpu,
     flag: &DevBuf<Label>,
     host: &mut PinnedHostSlice<Label>,
@@ -1682,7 +1682,7 @@ fn read_flag(
     Ok(host.as_slice()?.first().copied().unwrap_or(0) != 0)
 }
 
-fn check_workspace(w: &SolverWorkspace, n: usize) -> Result<()> {
+pub(crate) fn check_workspace(w: &SolverWorkspace, n: usize) -> Result<()> {
     if w.n < n {
         return Err(Error::Config(format!(
             "solver: workspace is sized for {} cells, the system has {n}",
@@ -1693,7 +1693,7 @@ fn check_workspace(w: &SolverWorkspace, n: usize) -> Result<()> {
 }
 
 /// Turn the three device scalars into the reported pair, in one copy.
-fn collect_report(
+pub(crate) fn collect_report(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -1884,7 +1884,7 @@ pub fn solve_pbicgstab(
     Ok(perf)
 }
 
-fn bicg_p_update(
+pub(crate) fn bicg_p_update(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -1905,7 +1905,7 @@ fn bicg_p_update(
     Ok(())
 }
 
-fn bicg_s_update(
+pub(crate) fn bicg_s_update(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -1925,7 +1925,7 @@ fn bicg_s_update(
     Ok(())
 }
 
-fn bicg_x_update(
+pub(crate) fn bicg_x_update(
     gpu: &Gpu,
     k: &SolverKernels,
     psi: &mut DevBuf<Scalar>,
@@ -1947,7 +1947,7 @@ fn bicg_x_update(
     Ok(())
 }
 
-fn bicg_r_update(
+pub(crate) fn bicg_r_update(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,

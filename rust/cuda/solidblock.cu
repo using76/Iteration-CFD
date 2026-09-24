@@ -478,3 +478,252 @@ extern "C" __global__ void solidBlockRow
     diag[c] = dc;
     source[c] = src;
 }
+
+// --------------------------------------------------------------------------
+//  The block-coupled solve (SPEC-LIT 109.5). SPEC-LIT 8.1's BiCGStab runs over
+//  the flat 3 n_cells system of SPEC-LIT 109's block matrix with SPEC-LIT 21's
+//  multi-colour no-fill factorisation written with 3x3 blocks, every product
+//  kept in its order because blocks do not commute, and a block-Jacobi
+//  comparison. The preconditioner appears only as M^-1 applied to a vector:
+//  a breakdown degrades one row to block-Jacobi and never enters the residual.
+//
+//  Written from: Saad, Iterative Methods for Sparse Linear Systems, 2nd ed.
+//  (2003), ch. 10 and ch. 12 (the multi-colour ordering); van der Vorst, SIAM
+//  J. Sci. Stat. Comput. 13 (1992) 631-644; P. Cardiff, Z. Tukovic, H. Jasak,
+//  A. Ivankovic, Comput. Struct. 175 (2016) 100-122, DOI
+//  10.1016/j.compstruc.2016.07.004 - the IDEA of solving the three displacement
+//  components in one matrix, cited for that and nothing else. SPEC-LIT 8, 21,
+//  109. No GPL-licensed source was consulted.
+// --------------------------------------------------------------------------
+
+//- The determinant of a 3x3 block, expanded along its first row.
+OFGPU_DEV ofscalar solidBlockDet3(const oftensor& t)
+{
+    return t.xx*(t.yy*t.zz - t.yz*t.zy)
+         - t.xy*(t.yx*t.zz - t.yz*t.zx)
+         + t.xz*(t.yx*t.zy - t.yy*t.zx);
+}
+
+//- adj(t)/det for a non-zero det: entry (i,j) is the cofactor of (j,i).
+OFGPU_DEV oftensor solidBlockAdjugateOver(const oftensor& t, ofscalar det)
+{
+    const ofscalar d = (ofscalar)1/det;
+    oftensor inv;
+    inv.xx =  (t.yy*t.zz - t.yz*t.zy)*d;
+    inv.xy = -(t.xy*t.zz - t.xz*t.zy)*d;
+    inv.xz =  (t.xy*t.yz - t.xz*t.yy)*d;
+    inv.yx = -(t.yx*t.zz - t.yz*t.zx)*d;
+    inv.yy =  (t.xx*t.zz - t.xz*t.zx)*d;
+    inv.yz = -(t.xx*t.yz - t.xz*t.yx)*d;
+    inv.zx =  (t.yx*t.zy - t.yy*t.zx)*d;
+    inv.zy = -(t.xx*t.zy - t.xy*t.zx)*d;
+    inv.zz =  (t.xx*t.yy - t.xy*t.yx)*d;
+    return inv;
+}
+
+//- The inverse of a 3x3 block: the adjugate over the determinant. A block
+//  whose determinant is zero falls back to the inverse of `fallback` - the
+//  cell's own diagonal block in the factorisation - if that is non-singular
+//  too, and to the identity otherwise: pcSafeReciprocal's three-way rule
+//  (cuda/precon.cu) written for a block. The fallback degrades that row to
+//  block-Jacobi; M never enters the residual.
+OFGPU_DEV oftensor solidBlockInverse3(const oftensor& t, const oftensor& fallback)
+{
+    const ofscalar det = solidBlockDet3(t);
+    if (det != (ofscalar)0)
+    {
+        return solidBlockAdjugateOver(t, det);
+    }
+    const ofscalar fdet = solidBlockDet3(fallback);
+    if (fdet != (ofscalar)0)
+    {
+        return solidBlockAdjugateOver(fallback, fdet);
+    }
+    return identityT();
+}
+
+// ==========================================================================
+//  Block-DILU (SPEC-LIT 21's no-fill factorisation, 3x3 blocks, Saad ch. 10
+//  and ch. 12; cuda/precon.cu's three per-colour kernels with every scalar
+//  replaced by its block and the ORDER of every product kept):
+//
+//      Dt_v = A_vv - sum_{colour(u) < colour(v)} A_vu Dt_u^-1 A_uv
+//      rD_v = Dt_v^-1
+//      forward,  colours ascending:  y_v = rD_v ( y_v - sum_{col(u)<col(v)} A_vu y_u )
+//      backward, colours descending: y_v = y_v - rD_v sum_{col(u)>col(v)} A_vu y_u
+//
+//  v owns f  ->  A_vu = upper[f], A_uv = lower[f];
+//  v is f's neighbour  ->  A_vu = lower[f], A_uv = upper[f].
+//
+//  `cells[start .. start+count)` are the cells of this colour; no two
+//  neighbours share a colour, so every cell of one launch reads only rD or y
+//  of STRICTLY EARLIER colours - the schedule-independence SPEC-LIT 21 is
+//  after. The host twin is the face-list factorisation in
+//  src/solid/coupled.rs's tests, diffed to 1e-12.
+// ==========================================================================
+
+//- One colour's factorisation. Same walk as pcFactorColour.
+extern "C" __global__ void solidBlockFactorColour
+(
+    oftensor* __restrict__ rD,
+    const oftensor* __restrict__ diag,
+    const oftensor* __restrict__ upper,
+    const oftensor* __restrict__ lower,
+    const oflabel* __restrict__ colour,
+    const oflabel* __restrict__ cells,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    oflabel start,
+    oflabel count
+)
+{
+    const oflabel t = OFGPU_TID;
+    if (t >= count) return;
+
+    const oflabel c = cells[start + t];
+    const oflabel myColour = colour[c];
+
+    oftensor dt = diag[c];
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+        const int isOwner = (cfOwn[j] != 0);
+        const oflabel nbr = isOwner ? neighbour[f] : owner[f];
+
+        if (colour[nbr] < myColour)
+        {
+            const oftensor Avu = isOwner ? upper[f] : lower[f];
+            const oftensor Auv = isOwner ? lower[f] : upper[f];
+            dt = subT(dt, matmulT(Avu, matmulT(rD[nbr], Auv)));
+        }
+    }
+
+    rD[c] = solidBlockInverse3(dt, diag[c]);
+}
+
+//- Forward sweep, colours in ASCENDING order: the forward substitution of
+//  (Dt + L) w = x, y holding x on entry and w on exit. Same walk as
+//  pcForwardColour.
+extern "C" __global__ void solidBlockForwardColour
+(
+    ofvec3* __restrict__ y,
+    const oftensor* __restrict__ rD,
+    const oftensor* __restrict__ upper,
+    const oftensor* __restrict__ lower,
+    const oflabel* __restrict__ colour,
+    const oflabel* __restrict__ cells,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    oflabel start,
+    oflabel count
+)
+{
+    const oflabel t = OFGPU_TID;
+    if (t >= count) return;
+
+    const oflabel c = cells[start + t];
+    const oflabel myColour = colour[c];
+
+    ofvec3 acc = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+        const int isOwner = (cfOwn[j] != 0);
+        const oflabel nbr = isOwner ? neighbour[f] : owner[f];
+
+        if (colour[nbr] < myColour)
+        {
+            const oftensor Avu = isOwner ? upper[f] : lower[f];
+            acc = addV(acc, matvecT(Avu, y[nbr]));
+        }
+    }
+
+    y[c] = matvecT(rD[c], subV(y[c], acc));
+}
+
+//- Backward sweep, colours in DESCENDING order: the back substitution of
+//  (Dt + U) y = Dt w. Same walk as pcBackwardColour.
+extern "C" __global__ void solidBlockBackwardColour
+(
+    ofvec3* __restrict__ y,
+    const oftensor* __restrict__ rD,
+    const oftensor* __restrict__ upper,
+    const oftensor* __restrict__ lower,
+    const oflabel* __restrict__ colour,
+    const oflabel* __restrict__ cells,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ cfOffset,
+    const oflabel* __restrict__ cfFace,
+    const oflabel* __restrict__ cfOwn,
+    oflabel start,
+    oflabel count
+)
+{
+    const oflabel t = OFGPU_TID;
+    if (t >= count) return;
+
+    const oflabel c = cells[start + t];
+    const oflabel myColour = colour[c];
+
+    ofvec3 acc = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+
+    for (oflabel j = cfOffset[c]; j < cfOffset[c + 1]; ++j)
+    {
+        const oflabel f = cfFace[j];
+        const int isOwner = (cfOwn[j] != 0);
+        const oflabel nbr = isOwner ? neighbour[f] : owner[f];
+
+        if (colour[nbr] > myColour)
+        {
+            const oftensor Avu = isOwner ? upper[f] : lower[f];
+            acc = addV(acc, matvecT(Avu, y[nbr]));
+        }
+    }
+
+    y[c] = subV(y[c], matvecT(rD[c], acc));
+}
+
+// ==========================================================================
+//  Block-Jacobi (SPEC-LIT 8.3's "Jacobi: M = diag(A)" with 3x3 blocks) - the
+//  comparison preconditioner:
+//
+//      rD_v = diag[v]^-1,      y_v = rD_v x_v
+// ==========================================================================
+
+//- The inverse of every cell's diagonal block; the identity where the block
+//  is singular (solidBlockInverse3's three-way rule).
+extern "C" __global__ void solidBlockInvertDiag
+(
+    oftensor* __restrict__ rD,
+    const oftensor* __restrict__ diag,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    rD[c] = solidBlockInverse3(diag[c], identityT());
+}
+
+//- y_v = rD_v x_v, one thread per cell. Reading x[c] and writing y[c] on the
+//  same thread is race-free even when the caller passes the same buffer.
+extern "C" __global__ void solidBlockJacobi
+(
+    ofvec3* __restrict__ y,
+    const ofvec3* __restrict__ x,
+    const oftensor* __restrict__ rD,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    y[c] = matvecT(rD[c], x[c]);
+}

@@ -273,6 +273,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_block_assembly_replays_bitwise"),
     ),
     (
+        "src/solid/coupled.rs",
+        Stance::Gate("the_block_coupled_solve_replays_bitwise"),
+    ),
+    (
         "src/solid/displacement.rs",
         Stance::Gate("the_displacement_iteration_replays_bitwise"),
     ),

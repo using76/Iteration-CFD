@@ -30836,7 +30836,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **438** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **442** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -30847,7 +30847,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six.
+where the test is described - §109.3 added six, §109.5 four.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -31358,5 +31358,83 @@ wider stencil is a THIRD format and gets its own paragraph.
 
 No bonded region, no coupled patch, no decomposition: refused by name at
 construction, with the route stated in §109.2.
+
+### 109.5 The block-coupled solve — BiCGStab on the flat system, block-DILU and block-Jacobi
+
+*DESIGN*: the system of §109.1 is solved as ONE Krylov system of `3 n_cells`
+unknowns, cell-major, so that its vectors are byte for byte the per-cell
+vectors of §109.1:
+
+```text
+  x[3 c + i] = u_i(c),   i in {0, 1, 2},   c in 0..n_cells                                  (109.8)
+```
+
+The method is §8.1's BiCGStab — the scalar systems' own loop, the same
+device-resident scalar updates in the same order, over this length — with
+(109.2) as the product. The matrix is symmetric (§109.3), so §8.2's conjugate
+gradient would be lawful too; BiCGStab is used because it is the loop the tree
+already trusts, and a symmetric solver is a later choice, not a correction.
+The preconditioner is §21's multi-colour no-fill factorisation with a `3x3`
+block where §21 has a number, every product kept in its order because blocks
+do not commute:
+
+```text
+  Dt_v = A_vv - sum_{colour(u) < colour(v)} A_vu Dt_u^-1 A_uv,      rD_v = Dt_v^-1
+  forward,  colours ascending:  y_v = rD_v ( y_v - sum_{colour(u) < colour(v)} A_vu y_u )
+  backward, colours descending: y_v = y_v - rD_v sum_{colour(u) > colour(v)} A_vu y_u        (109.9)
+```
+
+with `A_vu = upper[f]` when `v` owns `f` and `lower[f]` when it does not (§1).
+A block whose determinant is zero is inverted from the cell's own `diag`
+instead, and from the identity if that is singular too — §21's safe
+reciprocal written for a block: it degrades one row to block-Jacobi and never
+enters the residual. Block-Jacobi is the comparison:
+
+```text
+  rD_v = diag[v]^-1,      y_v = rD_v x_v                                                     (109.10)
+```
+
+The residual is §8.4 applied literally to the flat vector:
+
+```text
+  m = (1/(3n)) sum_k x_k,      x_ref = (m, m, m) in every cell
+  norm = sum_k |(A x)_k - (A x_ref)_k| + sum_k |b_k - (A x_ref)_k| + eps
+  res  = sum_k |b_k - (A x)_k| / norm                                                        (109.11)
+```
+
+— `x_ref` a constant vector field, still in the null space of a
+traction-only operator, which is the property §8.4 asks of it.
+
+**What is measured.** Block-DILU on the device equals a host factorisation
+that walks the face list rather than the kernels' per-cell lists to
+7.4e-16 on the uniform, the jittered and the graded block, and block-Jacobi
+equals the host `3x3` inverse likewise. Because a host twin can copy a
+kernel's slip, the block inverse is also checked by multiplication: `rD`
+times a full non-symmetric `diag` block is the identity, and a factorisation
+whose `Dt` is exactly singular lands on `diag^-1` (the first transcription had
+one cofactor wrong and divided the fallback by its determinant instead of
+inverting it, in both halves, and passed its host comparison). Shuffling the
+cells inside each colour leaves `rD` and `M^-1 y` unchanged to the bit —
+§21's schedule independence; reversing the colour order is a different and
+equally lawful factorisation, which on `block(6)` at `1e-5` needs the same
+ten iterations as the ascending order. On `block(6)` (648 unknowns, free
+expansion) BiCGStab with block-DILU reaches (109.11) `<= 1e-12` in 18
+iterations, block-Jacobi in 36, and the answer matches the direct solve of
+the dense `3n x 3n` expansion to 8.6e-14. A fixed-iteration solve of six
+sweeps reports the true residual of a host recomputation to `1e-10`
+relative, its normalisation formed once from the starting state as §8.4
+forms it. A fixed-iteration solve captures and replays bitwise
+under §81's protocol (110 nodes: 106 kernel, 4 memset, 0 memcpy); its row in
+§81's registry is a `Gate`.
+
+**At single precision.** The two host-reference tests, the dense comparison
+and the fixed-iteration report bound double round-off and carry §112.3's f32
+attribute: four library tests. The inverse, schedule, capture and refusal
+tests hold at f32 and do not carry it.
+
+What this subsection does not do: the outer loop that re-assembles
+(109.3)'s explicit rows around this solve, the case knob, and Gate 95-A are
+the next subsections' work; §109.4's "no solve" is superseded by this
+subsection and is amended when they land.
 
 ---
