@@ -470,3 +470,30 @@ Run by `tools/autonomy/preflight.py --gate` on binary sha256 `054bba67…a90b` a
   refusals. On snapped walls (36 rows) there were 0 false passes and 11 false refusals (rate 0.306 of reached
   rows): the castellated h is 2.49-3.33 times the real post-snap shortest wall edge, so the prediction is
   conservative there. AM-9/AM-11 should pass `snap_probe`'s measured h when a snap run exists.
+
+### G-RULES, the L1 setup rules (AM-9), 2026-09-24: PASS, with one departure from section D.3
+
+Run by `tools/autonomy/rules.py --gate` on binary sha256 `054bba67…a90b` at tree `7e8e14f`; the report is
+`tools/autonomy/rules/G-RULES.json` (and `.md`).
+
+- **Worked example:** Re_L 2e4, L 1 m, nu 1.5e-5 gives t1 = 7.296985e-4 m, floored to 7.296e-4 (a priori y+
+  0.99986), and wall level 4 at base 0.5 (h/t1 42.83, growth 1.270, T 0.0155851 <= 0.015625). g = 1.4 at n = 8 is
+  refused as an empty window (68.79 t1 > 60 t1).
+- **Where the tree departs from section D.3: the box-corner bound.** On a commensurate cube with the faces on cell
+  planes, the extruded-mesh G5 (`tau = 3 V / A_max^1.5`, quality.rs:735) binds below the early check's 60 t1,
+  because at a convex corner the extrusion follows the averaged normal. Measured on `fixtures/stl/cubep.stl`,
+  n 8, g 1.2: h/t1 42.8 and 42.9 deliver 8 layers with full_area_frac 1.0; 43.0 to 58.7 exit 0 with the stack
+  dropped (min_thickness after 4 retreats). The gate's runs D (h/t1 59.94) and F (44.0) pass the early check and
+  still lose their layers. So R-PLANE, the only path where layers are delivered today, targets 0.70 of the G5 edge
+  (h <= 42 t1). R-WIN keeps 60 on snapped walls, where section 92.13 drops the layers anyway. No threshold moved.
+- **The limiter, both sides, live on cubep at the rules' own config** (h/t1 41.96): growth 1.265 delivers 8
+  layers, full 1.0; growth 1.266 (T = 1.0033 cell_frac h) keeps 8 layers with full 0.0, mean_frac 0.9967; the
+  early check refuses at h/t1 60.06 (0.04995 < 0.05).
+- **60 tuning rows** (12 per family A, B, D, E, F): 59 configs emitted, every one passing preflight with its flow,
+  fingerprint and a live octree probe (max 1.44 M leaves), and `-dryRun`. One refusal, A-1-009, by R-BUDGET: the
+  y+ window puts it at level 6 and no rung predicts under 0.7 x 2 M. The predicted/probe leaf ratio was 0.79 to
+  4.09 (median 1.30). R-CURV put all 12 B bodies at level 6. G-PILOT found wall level -1 F3-clean on B-1-002 and
+  B-1-004, and AM-10/AM-12 should measure that tension.
+- **R-PLANE:** it applies on 34 of the 35 commensurate tuning rows (all 21 box_c). F-1-009 abstains, because its
+  lattice gives h/t1 15.2 < 16. Every face lies on a cell plane (worst 5.7e-14 cells), and three live runs
+  (D-1-002, F-1-006, F-1-003) snapped by at most 9.4e-13 h and delivered 8 layers with full_area_frac 1.0.

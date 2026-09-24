@@ -485,6 +485,30 @@ locked table; do not change preflight to allow it. AM-11 — call `preflight()`
 on every candidate; `surface_facts` caches per (path, size, mtime); pass
 `snap_probe`'s h as `h_wall_min_m` when a snap run exists.
 
+## rules.py — L1 setup rules
+
+AM-9's attempt 1: eight pure rules run in a fixed order, each editing the config and returning one DecisionRecord
+(formula, inputs with units, edits, cite). Verdicts: `apply` edited, `pass` — holds already or trigger absent,
+`abstain` — cannot act, `refuse` — no config under the rule; it sets `stop`, the config comes back None and every
+later rule abstains. Every edit goes through the locked knob table (no `/quality`, no `cell_frac`, `medial_frac`,
+`min_thickness`); only R-PLANE writes `/snap/*` (`feature_tolerance` 0, `smoothing_passes` 0), and R-FEAT leaves
+`feature_tolerance` at its default 0.5 — 0 switches the feature attraction off (G-PILOT caution 1; G-FID guards it).
+
+- R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
+- R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
+- R-PLANE reads commensurability, writes `/domain/*`, `/snap/*`: h = s/m, the extent starts on the body's own faces, so every face lies on a cell plane.
+- R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter.
+- R-CURV reads r_p5 and raises the wall level to h ≤ r_p5/8.
+- R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
+- R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1.
+- R-BUDGET predicts cells (never probes: one costs up to 150 s) and coarsens far-field bands, then the wall band, then the feature bump, then the wall level, until 0.7·cell_budget fits.
+
+Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 on every snapped wall (§92.13 drops their layers anyway; a tighter window there costs a whole octree level for no capture). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
+
+G-RULES 2026-09-24 (`rules/G-RULES.json`, binary 054bba67…a90b, HEAD 7e8e14f): PASS. Part 1, the worked example plus five live cube runs at h/t1 41.96: A 8 layers, full_area_frac 1.0; B (first growth over the limiter) 8 layers, full 0.0 — the limiter binds and the stack survives; C exit 1 on the G5 early check (0.04995 < 0.05); D and F exit 0 with 0 layers, dropped under min_thickness·T. Part 2, 60 tuning rows: 59 applied, 1 refused (A-1-009, R-BUDGET, re-derived), preflight pass 59/59 with a live octree probe, -dryRun 0 59/59; wall levels A {4:1, 5:10}, B {6:12}, D {4:2, 5:5, 6:5}, E {4:3, 5:8, 6:1}, F {3:2, 4:4, 5:6}; predicted/probe leaves 0.79–4.09 (median 1.30 over the 59 probes, conservative). Part 3: R-PLANE applied 34/35 commensurate rows (box_c 21/21, plate_c 8/8, lcorner_c 5/6); F-1-009 abstains (h/t1 15.2 < 16); 34/34 plane checks ok (worst 5.7e-14); three live runs' snap max_over_h ≤ 9.4e-13, and all three delivered 8 layers with full_area_frac 1.0 (reported, not gated).
+
+For later units: AM-10 — a layer drop `retreat_snapped` on a non-R-PLANE body is §92.13's snapped-wall gap (CAPABILITY-LIMITED); R-CURV raises the curved bodies' wall level (all 12 B rows landed at 6) while G-PILOT found wall level −1 F3-clean on B-1-002 and B-1-004, a tension for AM-10/AM-12 to measure. AM-11 — `setup()` then `preflight()` with the flow, the fingerprint and one octree probe; an R-BUDGET or R-WIN refusal is a named outcome for the row, not a failure to hide.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -506,6 +530,9 @@ on every candidate; `surface_facts` caches per (path, size, mtime); pass
     python tools/autonomy/features.py --corpus A --seed 1 --n 120        # fingerprint a whole family
     python tools/autonomy/preflight.py CONFIG [--flow F] [--octree-probe] [--records OUT.jsonl]   # L0 verdict
     python tools/autonomy/preflight.py --gate --stl box_sphere=P --stl wing_b=P --out DIR          # G-PREFLIGHT
+
+    python tools/autonomy/rules.py --id GEOMETRY_ID --out-dir DIR [--records OUT.jsonl]   # attempt 1 for a tuning row
+    python tools/autonomy/rules.py --gate --out DIR [--parts 1,2,3]                       # G-RULES (AM-9's gate)
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report
