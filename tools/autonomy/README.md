@@ -527,6 +527,55 @@ G-RULES 2026-09-24 (`rules/G-RULES.json`, binary 054bba67…a90b, HEAD 7e8e14f):
 
 For later units: AM-10 — a layer drop `retreat_snapped` on a non-R-PLANE body is §92.13's snapped-wall gap (CAPABILITY-LIMITED); R-CURV raises the curved bodies' wall level (all 12 B rows landed at 6) while G-PILOT found wall level −1 F3-clean on B-1-002 and B-1-004, a tension for AM-10/AM-12 to measure. AM-11 — `setup()` then `preflight()` with the flow, the fingerprint and one octree probe; an R-BUDGET or R-WIN refusal is a named outcome for the row, not a failure to hide.
 
+## remedies.py — L2 remedies
+
+AM-10's L2: after a failed attempt, `diagnose` names the key and the earliest failing stage from score.py's
+closed failure enum; `propose` walks a twelve-row table in priority order. Keys and their stage: F1's
+`surface_closed`/`config`/`io`/`crash`, `gate@octree|castellate|split|layers` and F2 end NO-REMEDY (stage
+None; the gate keys keep their stage); `timeout` and F5 → octree; F4 → castellate; F3a/F3b/F3c, F3d and
+`gate@snap` → snap; `layer_t1_G5`, `layer:min_thickness`, `layer:retreat_snapped`, `layer:no_full_stack` →
+layers; no flag and no requested patch dropped → PASS.
+
+- RM-BUDGET-FAR (F5, timeout; octree) — halves every far-field band, never under 3 cells of its level.
+- RM-BUDGET-FEAT (F5, timeout; octree) — drops the feature bump to the wall level.
+- RM-BUDGET-WALL (F5, timeout; octree) — the whole ladder one level coarser, never below the y⁺ floor.
+- RM-TOPO-REFINE (F4; castellate) — the ladder one level finer, predicted cells ≤ 0.7·cell_budget.
+- RM-SNAP-WALL (F3, gate@snap; snap) — the ladder one level coarser, never on the R-PLANE path (G-PILOT's only F3-clean knob with the attraction on).
+- RM-SNAP-FT (F3, gate@snap; snap) — `snap.feature_tolerance = 0`; caution 1 applies and G-FID guards it.
+- RM-SNAP-REFINE (F3d; snap) — the ladder one level finer (the lattice missed the body's area).
+- RM-T1-RAISE (layer_t1_G5; layers) — t1 raised to its y⁺ = 1 bound; RM-T1-REFINE (same key) — the ladder finer, growth refit.
+- RM-PLANE (a layer drop; layers) — rules.setup's R-PLANE config, the ten pointers only.
+- RM-PLANE-FINER (a layer drop on a plane body) — the next lattice divisor s/(m+1), extent re-aligned (the box-corner bound).
+- RM-LAYER-FIT (layer:no_full_stack; layers) — the largest growth (or t1′ = the limiter share ÷ n) that fits.
+
+A layer drop routes: on the R-PLANE path → RM-PLANE-FINER (nothing left → EXHAUSTED); qualifies for R-PLANE →
+RM-PLANE (nothing left → CAPABILITY-LIMITED); otherwise CAPABILITY-LIMITED at once (SPEC-LIT §92.13: no more
+trials are spent on those layers' patches). Terminals: PASS, CAPABILITY-LIMITED, EXHAUSTED, NO-REMEDY.
+Guards: each remedy fires at most MAX_FIRES = 2 per geometry, no config sha is ever revisited, K = 4 attempts;
+every write goes through one `_set` (whitelisted leaf pointers + the levels container), every edit through
+`check_edit`, later-stage knobs frozen, the quality block and the limiters never written, no band distance 0.
+
+Where the plan and the tree disagree (the tree wins): docs/15 §G names only `retreat_snapped`, but layers.rs
+drops layers two ways (a thickness floor and the snapped-wall retreat) — both are keyed. docs/15 §C names no
+snap remedies; the table uses G-PILOT's two measured snap knobs in cost order. docs/15 counts "26 probes";
+the probe fixtures hold 31, all labelled. The y⁺ floor is computed from the attempt's own t1 and base
+(the smallest level with h ≤ 60 t1); it equals rules.setup's `win_level` on all 20 rules configs checked
+(ten fingerprints × two flows), and a caller's `win_level` raises it, never lowers it.
+
+G-REMEDIES 2026-09-24 (`remedies/G-REMEDIES.json`): PASS. Part 1: 31/31 probes and 32/32 sequences as
+labelled, box_sphere CAPABILITY-LIMITED after 1 attempt. Part 2: the static scan, 35 `_set` calls in 12
+`_rm_*` functions, 0 violations. Part 3: 600 single steps, 300 loops and an exhaustive sweep of 2,853
+cases (every probe and rules ctx × every synthetic kind × three firing histories), 0 violations. Part 4, live (binary
+054bba67…, attempt 2 of each): cube_n5, cube_ok, cubep_defaults, cubep_ok PASS with 8 layers, BLC_8 =
+BLC_full = 1.0; cube_cf, cubep_cf EXHAUSTED (RM-PLANE-FINER skipped "below the window's lower edge").
+
+For later units: AM-11 — `ctx = {geometry_id, fingerprint, flow, config, outcome, win_level}` with `win_level`
+from rules.setup's summary, the history from the rows (`rule_id` when `decided_by` is remedy), `veto` = the
+preflight refusal ids, the result's record into the row (`decided_by` remedy, `rule_id`, `trigger`,
+`config_delta` = edits, `stage_focus`), stop on a terminal, and set `outcome.patches[].capability_limited`.
+AM-12 — measure how often RM-SNAP-WALL undoes R-CURV's raise and how often RM-SNAP-FT fires (caution 1).
+AM-15 — one template per rule id: the 12 rows and the 4 terminal ids.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -551,6 +600,8 @@ For later units: AM-10 — a layer drop `retreat_snapped` on a non-R-PLANE body 
 
     python tools/autonomy/rules.py --id GEOMETRY_ID --out-dir DIR [--records OUT.jsonl]   # attempt 1 for a tuning row
     python tools/autonomy/rules.py --gate --out DIR [--parts 1,2,3]                       # G-RULES (AM-9's gate)
+    python tools/autonomy/remedies.py --probe PROBE_ID [--json]                  # the tabled remedy for one probe
+    python tools/autonomy/remedies.py --gate --out DIR [--parts 1,2,3,4]         # G-REMEDIES (AM-10's gate)
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report

@@ -497,3 +497,30 @@ Run by `tools/autonomy/rules.py --gate` on binary sha256 `054bba67…a90b` at tr
 - **R-PLANE:** it applies on 34 of the 35 commensurate tuning rows (all 21 box_c). F-1-009 abstains, because its
   lattice gives h/t1 15.2 < 16. Every face lies on a cell plane (worst 5.7e-14 cells), and three live runs
   (D-1-002, F-1-006, F-1-003) snapped by at most 9.4e-13 h and delivered 8 layers with full_area_frac 1.0.
+
+### G-REMEDIES, the L2 remedies (AM-10), 2026-09-24: PASS, with two departures from the plan's text
+
+Run by `tools/autonomy/remedies.py --gate` on binary sha256 `054bba67…a90b` at tree `3afd66e`; the report is
+`tools/autonomy/remedies/G-REMEDIES.json` (and `.md`). The labels are the supervisor's
+(`tools/autonomy/fixtures/remedies/labels.json`), written from the probe logs and the table, not from the code.
+
+- **The table:** twelve remedies keyed on the first failing stage (octree: far-field bands, the feature bump, the
+  wall ladder; castellate: a finer ladder; snap: the ladder one level coarser, never below the y+ floor, then
+  `feature_tolerance = 0`, or a finer ladder for F3d alone; layers: t1 raised to its y+ bound or a finer ladder for
+  the G5 early check, R-PLANE or its next lattice divisor for a drop on a commensurate body, the stack fitted under
+  the limiter). Each fires at most twice per geometry, no config sha is revisited, K = 4. Every geometry ends PASS,
+  CAPABILITY-LIMITED, EXHAUSTED or NO-REMEDY.
+- **Where the tree departs from the plan:** (1) CAPABILITY-LIMITED takes both drop classes on a snapped wall, not
+  only `retreat_snapped`: layers.rs:640-700 gives a patch up after its retreats either by count or by the thickness
+  floor it retreated to, the same gate failing on snapped cells. That is why box_sphere (a `min_thickness` drop)
+  ends CAPABILITY-LIMITED after 1 try, not 4. (2) The snap rows are G-PILOT's two measured knobs; `feature_level`
+  +1 is not one, because it was never F3-clean. The attraction-off row is caution 1's knob and fires only after the
+  coarser ladder cannot; AM-12 counts how often, and G-FID guards it.
+- **Part 1:** 31/31 probes and 32/32 sequence cases as labelled (probes: CAPABILITY-LIMITED 8, RM-SNAP-WALL 7,
+  RM-PLANE 6, NO-REMEDY 3, PASS 3, one each of RM-LAYER-FIT, RM-SNAP-FT, RM-SNAP-REFINE, RM-T1-RAISE).
+  **Part 2:** a static scan of the module's own AST: 35 guarded writes in 12 remedy functions, 0 violations (no
+  write outside `_set`, no forbidden pointer or flag literal, no knob of a later stage than the row's).
+  **Part 3:** 600 seeded single steps, 300 seeded loops and an exhaustive sweep of 2,853 cases, 0 violations.
+  **Part 4, live:** from the frozen attempt 1, cube_n5, cube_ok, cubep_defaults and cubep_ok end PASS at attempt 2
+  through RM-PLANE with 8 layers, BLC_8 = BLC_full = 1.0; cube_cf and cubep_cf, which set `/layers/cell_frac` 0.1
+  themselves, end EXHAUSTED at attempt 2 (no lattice divisor is left above n*t1/cell_frac).

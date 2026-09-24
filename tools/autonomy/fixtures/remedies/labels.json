@@ -1,0 +1,1112 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "schema": "autonomy-remedy-labels/1",
+ "note": "The AM-10 supervisor's labels, 2026-09-24, tree 3afd66e: for each of the 31 G-SCORER probes (fixtures/probes, flow = labels.json's flow) the key, the stage and the tabled remedy or terminal; then 32 sequence cases (a config, an outcome, a firing history). 'edits' is the complete pointer -> to map (floats within 1e-12); 'skipped_why' maps a skipped row to a substring of its reason. Written from the logs and the AM-10 table, never from remedies.py.",
+ "flows": {
+  "worked": {
+   "u_ref_m_s": 0.3,
+   "l_ref_m": 1.0,
+   "nu_m2_s": 1.5e-05
+  },
+  "re5e4": {
+   "u_ref_m_s": 0.75,
+   "l_ref_m": 1.0,
+   "nu_m2_s": 1.5e-05
+  }
+ },
+ "probes": [
+  {
+   "id": "L1",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "sphere"
+   ],
+   "note": "box_sphere, snapped sphere, not commensurate"
+  },
+  {
+   "id": "L2",
+   "key": "layer:retreat_snapped",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "sphere"
+   ],
+   "note": "section 92.13 retreat give-up on the snapped sphere"
+  },
+  {
+   "id": "L3",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "sphere"
+   ],
+   "note": "min_thickness drop on the snapped sphere"
+  },
+  {
+   "id": "NO15",
+   "key": "gate@castellate",
+   "stage": "castellate",
+   "verdict": "terminal",
+   "terminal": "NO-REMEDY",
+   "rule_id": "RM-NO-REMEDY",
+   "edits": {},
+   "capability_limited": [],
+   "note": "G4 refusal at castellate under a 15 deg quality ceiling: no remedy touches the quality block"
+  },
+  {
+   "id": "NO25",
+   "key": "gate@castellate",
+   "stage": "castellate",
+   "verdict": "terminal",
+   "terminal": "NO-REMEDY",
+   "rule_id": "RM-NO-REMEDY",
+   "edits": {},
+   "capability_limited": [],
+   "note": "G4 refusal at castellate (25.239 > 25)"
+  },
+  {
+   "id": "NO26",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-WALL",
+   "edits": {
+    "/refinement/levels/0/bands/0/level": 2,
+    "/refinement/levels/0/bands/1/level": 1,
+    "/refinement/max_level": 2
+   },
+   "capability_limited": [],
+   "note": "F3a 0.173; no layer requested (n 0), so floor 1; wall 3 -> 2, no feature level"
+  },
+  {
+   "id": "NO28",
+   "key": "pass",
+   "stage": null,
+   "verdict": "terminal",
+   "terminal": "PASS",
+   "rule_id": "RM-PASS",
+   "edits": {},
+   "capability_limited": [],
+   "note": "no layers requested, 0 pinned: pass"
+  },
+  {
+   "id": "box_L4",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-WALL",
+   "edits": {
+    "/refinement/levels/0/bands/0/level": 3,
+    "/refinement/levels/0/bands/1/level": 2,
+    "/refinement/levels/0/bands/2/level": 1,
+    "/refinement/levels/0/feature_level": 3,
+    "/refinement/max_level": 3
+   },
+   "capability_limited": [],
+   "note": "F3 (pinned 0.326) first; floor = 3 (t1 0.002 m: base 0.5/2**3 = 0.0625 <= 60 t1 = 0.12); wall 4 -> 3"
+  },
+  {
+   "id": "box_sphere",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "sphere"
+   ],
+   "note": "the shipped example: ends CAPABILITY-LIMITED after 1 try"
+  },
+  {
+   "id": "coarse",
+   "key": "F3d",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-REFINE",
+   "edits": {
+    "/refinement/levels/0/patch": "sphere",
+    "/refinement/levels/0/bands/0/distance": 1.5,
+    "/refinement/levels/0/bands/0/level": 1,
+    "/refinement/max_level": 1
+   },
+   "capability_limited": [],
+   "note": "F3d only (area ratio 0.88 at max_level 0); no band exists, so the wall band is built: bands_for(1.0, 1.0, 1, 1, 1) = [{1.5, 1}] (3 cells of level 1)"
+  },
+  {
+   "id": "cube_cf",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-PLANE",
+   "edits": {
+    "/domain/extent": [
+     -2.1999999999999993,
+     8.799999999999999,
+     -1.699999999999999,
+     5.299999999999999,
+     -1.699999999999999,
+     5.299999999999999
+    ],
+    "/domain/base_size": 0.4999999999999999,
+    "/refinement/max_level": 0,
+    "/refinement/levels/0/patch": null,
+    "/refinement/levels/0/bands/0/distance": null,
+    "/refinement/levels/0/bands/0/level": null,
+    "/snap/feature_tolerance": 0.0,
+    "/snap/smoothing_passes": 0,
+    "/layers/n": 8,
+    "/layers/first_thickness": 0.02307,
+    "/layers/growth": 1.085
+   },
+   "capability_limited": [],
+   "note": "not on the R-PLANE path (feature_tolerance absent = 0.5) and rules.setup's R-PLANE applies for this body and the probe flow (t1 0.02307 m, wall level 0); its /layers/cell_frac 0.1 is carried unchanged"
+  },
+  {
+   "id": "cube_n5",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-PLANE",
+   "edits": {
+    "/domain/extent": [
+     -2.1999999999999993,
+     8.799999999999999,
+     -1.699999999999999,
+     5.299999999999999,
+     -1.699999999999999,
+     5.299999999999999
+    ],
+    "/domain/base_size": 0.4999999999999999,
+    "/refinement/max_level": 0,
+    "/refinement/levels/0/patch": null,
+    "/refinement/levels/0/bands/0/distance": null,
+    "/refinement/levels/0/bands/0/level": null,
+    "/snap/feature_tolerance": 0.0,
+    "/snap/smoothing_passes": 0,
+    "/layers/n": 8,
+    "/layers/first_thickness": 0.02307,
+    "/layers/growth": 1.085
+   },
+   "capability_limited": [],
+   "note": "not on the R-PLANE path (feature_tolerance absent = 0.5) and rules.setup's R-PLANE applies for this body and the probe flow (t1 0.02307 m, wall level 0)"
+  },
+  {
+   "id": "cube_ok",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-PLANE",
+   "edits": {
+    "/domain/extent": [
+     -2.1999999999999993,
+     8.799999999999999,
+     -1.699999999999999,
+     5.299999999999999,
+     -1.699999999999999,
+     5.299999999999999
+    ],
+    "/domain/base_size": 0.4999999999999999,
+    "/refinement/max_level": 0,
+    "/refinement/levels/0/patch": null,
+    "/refinement/levels/0/bands/0/distance": null,
+    "/refinement/levels/0/bands/0/level": null,
+    "/snap/feature_tolerance": 0.0,
+    "/snap/smoothing_passes": 0,
+    "/layers/n": 8,
+    "/layers/first_thickness": 0.02307,
+    "/layers/growth": 1.085
+   },
+   "capability_limited": [],
+   "note": "not on the R-PLANE path (feature_tolerance absent = 0.5) and rules.setup's R-PLANE applies for this body and the probe flow (t1 0.02307 m, wall level 0)"
+  },
+  {
+   "id": "cubep_cf",
+   "key": "layer:retreat_snapped",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-PLANE",
+   "edits": {
+    "/domain/extent": [
+     -2.0,
+     8.5,
+     -2.0,
+     5.5,
+     -2.0,
+     5.5
+    ],
+    "/domain/base_size": 0.75,
+    "/refinement/max_level": 0,
+    "/refinement/levels/0/patch": null,
+    "/refinement/levels/0/bands/0/distance": null,
+    "/refinement/levels/0/bands/0/level": null,
+    "/snap/feature_tolerance": 0.0,
+    "/snap/smoothing_passes": 0,
+    "/layers/n": 8,
+    "/layers/first_thickness": 0.02307,
+    "/layers/growth": 1.195
+   },
+   "capability_limited": [],
+   "note": "not on the R-PLANE path (feature_tolerance absent = 0.5) and rules.setup's R-PLANE applies for this body and the probe flow (t1 0.02307 m, wall level 0); its /layers/cell_frac 0.1 is carried unchanged"
+  },
+  {
+   "id": "cubep_defaults",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-PLANE",
+   "edits": {
+    "/domain/extent": [
+     -2.0,
+     8.5,
+     -2.0,
+     5.5,
+     -2.0,
+     5.5
+    ],
+    "/domain/base_size": 0.75,
+    "/refinement/max_level": 0,
+    "/refinement/levels/0/patch": null,
+    "/refinement/levels/0/bands/0/distance": null,
+    "/refinement/levels/0/bands/0/level": null,
+    "/snap/feature_tolerance": 0.0,
+    "/snap/smoothing_passes": 0,
+    "/layers/n": 8,
+    "/layers/first_thickness": 0.02307,
+    "/layers/growth": 1.195
+   },
+   "capability_limited": [],
+   "note": "not on the R-PLANE path (feature_tolerance absent = 0.5) and rules.setup's R-PLANE applies for this body and the probe flow (t1 0.02307 m, wall level 0)"
+  },
+  {
+   "id": "cubep_nofeat",
+   "key": "pass",
+   "stage": null,
+   "verdict": "terminal",
+   "terminal": "PASS",
+   "rule_id": "RM-PASS",
+   "edits": {},
+   "capability_limited": [],
+   "note": "3 layers, full 1.0, dropped none: nothing to remedy (n < 8 is not a layer class)"
+  },
+  {
+   "id": "cubep_nofeat_cf",
+   "key": "layer:no_full_stack",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-LAYER-FIT",
+   "edits": {
+    "/layers/first_thickness": 0.01666,
+    "/layers/growth": 1.0
+   },
+   "capability_limited": [],
+   "note": "cell_frac 0.1 (read, never written), h_wall 0.5: T(1.3) = 0.1995 > 0.05; no growth fits (3 t1 = 0.15); t1' = t1_floor(0.05*(1-1e-6)/3) = 0.01666, 3*0.01666/0.5 = 0.09996 >= 0.05"
+  },
+  {
+   "id": "cubep_nosnap",
+   "key": "pass",
+   "stage": null,
+   "verdict": "terminal",
+   "terminal": "PASS",
+   "rule_id": "RM-PASS",
+   "edits": {},
+   "capability_limited": [],
+   "note": "snap.iterations 0: full 1.0"
+  },
+  {
+   "id": "cubep_ok",
+   "key": "layer:retreat_snapped",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-PLANE",
+   "edits": {
+    "/domain/extent": [
+     -2.0,
+     8.5,
+     -2.0,
+     5.5,
+     -2.0,
+     5.5
+    ],
+    "/domain/base_size": 0.75,
+    "/refinement/max_level": 0,
+    "/refinement/levels/0/patch": null,
+    "/refinement/levels/0/bands/0/distance": null,
+    "/refinement/levels/0/bands/0/level": null,
+    "/snap/feature_tolerance": 0.0,
+    "/snap/smoothing_passes": 0,
+    "/layers/n": 8,
+    "/layers/first_thickness": 0.02307,
+    "/layers/growth": 1.195
+   },
+   "capability_limited": [],
+   "note": "not on the R-PLANE path (feature_tolerance absent = 0.5) and rules.setup's R-PLANE applies for this body and the probe flow (t1 0.02307 m, wall level 0)"
+  },
+  {
+   "id": "ok",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "sphere"
+   ],
+   "note": "box_sphere variant"
+  },
+  {
+   "id": "rev2_L4",
+   "key": "layer:retreat_snapped",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "body"
+   ],
+   "note": "lathe, not commensurate: section 92.13"
+  },
+  {
+   "id": "rev_L4",
+   "key": "surface_closed",
+   "stage": null,
+   "verdict": "terminal",
+   "terminal": "NO-REMEDY",
+   "rule_id": "RM-NO-REMEDY",
+   "edits": {},
+   "capability_limited": [],
+   "note": "16 open edges: tools/geom/stl_repair.py first"
+  },
+  {
+   "id": "thick_stack",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "sphere"
+   ],
+   "note": "box_sphere variant"
+  },
+  {
+   "id": "thin_t1",
+   "key": "layer_t1_G5",
+   "stage": "layers",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-T1-RAISE",
+   "edits": {
+    "/layers/first_thickness": 0.02307
+   },
+   "capability_limited": [],
+   "note": "t1 1e-4 < the y+ = 1 bound t1_floor(0.023075) = 0.02307; the stack 0.02307*(1+1.3) = 0.05306 fits 0.5*0.125 = 0.0625, so growth is kept"
+  },
+  {
+   "id": "tight_nonorth",
+   "key": "layer:min_thickness",
+   "stage": "layers",
+   "verdict": "terminal",
+   "terminal": "CAPABILITY-LIMITED",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "edits": {},
+   "capability_limited": [
+    "sphere"
+   ],
+   "note": "box_sphere variant"
+  },
+  {
+   "id": "wb_L4",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-WALL",
+   "edits": {
+    "/refinement/levels/0/bands/0/level": 3,
+    "/refinement/levels/0/bands/1/level": 2,
+    "/refinement/levels/0/bands/2/level": 1,
+    "/refinement/levels/0/feature_level": 3,
+    "/refinement/max_level": 3
+   },
+   "capability_limited": [],
+   "note": "F3 (pinned 0.084) first; floor = 3 (t1 0.002 m: base 0.5/2**3 = 0.0625 <= 60 t1 = 0.12); wall 4 -> 3"
+  },
+  {
+   "id": "wing_a_L3",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-FT",
+   "edits": {
+    "/snap/feature_tolerance": 0.0
+   },
+   "capability_limited": [],
+   "note": "F3a 0.133; wall 3 is the floor (3 -> 2 < 3), so the attraction goes off",
+   "skipped_why": {
+    "RM-SNAP-WALL": "below the y+ floor"
+   }
+  },
+  {
+   "id": "wing_a_L4",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-WALL",
+   "edits": {
+    "/refinement/levels/0/bands/0/level": 3,
+    "/refinement/levels/0/bands/1/level": 2,
+    "/refinement/levels/0/bands/2/level": 1,
+    "/refinement/levels/0/feature_level": 3,
+    "/refinement/max_level": 3
+   },
+   "capability_limited": [],
+   "note": "F3 (pinned 0.206) first; floor = 3 (t1 0.002 m: base 0.5/2**3 = 0.0625 <= 60 t1 = 0.12); wall 4 -> 3"
+  },
+  {
+   "id": "wing_a_L5",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-WALL",
+   "edits": {
+    "/refinement/levels/0/bands/0/level": 4,
+    "/refinement/levels/0/bands/1/level": 3,
+    "/refinement/levels/0/bands/2/level": 2,
+    "/refinement/levels/0/feature_level": 4,
+    "/refinement/max_level": 4
+   },
+   "capability_limited": [],
+   "note": "F3a 0.181; floor 3; wall 5 -> 4"
+  },
+  {
+   "id": "wing_b_L4",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-WALL",
+   "edits": {
+    "/refinement/levels/0/bands/0/level": 3,
+    "/refinement/levels/0/bands/1/level": 2,
+    "/refinement/levels/0/bands/2/level": 1,
+    "/refinement/levels/0/feature_level": 3,
+    "/refinement/max_level": 3
+   },
+   "capability_limited": [],
+   "note": "F3 (pinned 0.291) first; floor = 3 (t1 0.002 m: base 0.5/2**3 = 0.0625 <= 60 t1 = 0.12); wall 4 -> 3"
+  },
+  {
+   "id": "wing_c_L4",
+   "key": "F3",
+   "stage": "snap",
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-WALL",
+   "edits": {
+    "/refinement/levels/0/bands/0/level": 3,
+    "/refinement/levels/0/bands/1/level": 2,
+    "/refinement/levels/0/bands/2/level": 1,
+    "/refinement/levels/0/feature_level": 3,
+    "/refinement/max_level": 3
+   },
+   "capability_limited": [],
+   "note": "F3 (pinned 0.220) first; floor = 3 (t1 0.002 m: base 0.5/2**3 = 0.0625 <= 60 t1 = 0.12); wall 4 -> 3"
+  }
+ ],
+ "sequences": [
+  {
+   "id": "S01",
+   "config": "probe:wing_a_L3",
+   "outcome": "probe:wing_a_L3",
+   "fired": {
+    "RM-SNAP-WALL": 1
+   },
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-FT",
+    "terminal": null,
+    "edits": {
+     "/snap/feature_tolerance": 0.0
+    },
+    "attempt": 2,
+    "skipped_why": {
+     "RM-SNAP-WALL": "below the y+ floor"
+    }
+   }
+  },
+  {
+   "id": "S02",
+   "config": "probe:wing_a_L3",
+   "outcome": "probe:wing_a_L3",
+   "config_edits": {
+    "/snap/feature_tolerance": 0.0
+   },
+   "fired": {
+    "RM-SNAP-WALL": 1,
+    "RM-SNAP-FT": 1
+   },
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 3,
+    "skipped_why": {
+     "RM-SNAP-WALL": "below the y+ floor",
+     "RM-SNAP-FT": "the attraction is already off"
+    }
+   }
+  },
+  {
+   "id": "S03",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F3a",
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-WALL",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/0/level": 4,
+     "/refinement/levels/0/bands/1/level": 3,
+     "/refinement/levels/0/bands/2/level": 2,
+     "/refinement/levels/0/feature_level": 5,
+     "/refinement/max_level": 5
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S04",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F3a",
+   "config_edits": {
+    "/refinement/levels/0/bands/0/level": 4,
+    "/refinement/levels/0/bands/1/level": 3,
+    "/refinement/levels/0/bands/2/level": 2,
+    "/refinement/levels/0/feature_level": 5,
+    "/refinement/max_level": 5
+   },
+   "fired": {
+    "RM-SNAP-WALL": 1
+   },
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-FT",
+    "terminal": null,
+    "edits": {
+     "/snap/feature_tolerance": 0.0
+    },
+    "attempt": 2,
+    "skipped_why": {
+     "RM-SNAP-WALL": "below the y+ floor"
+    }
+   }
+  },
+  {
+   "id": "S05",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F5",
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-BUDGET-FAR",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/1/distance": 0.25,
+     "/refinement/levels/0/bands/2/distance": 0.75
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S06",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F5",
+   "fired": {
+    "RM-BUDGET-FAR": 2
+   },
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-BUDGET-FEAT",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/feature_level": 5,
+     "/refinement/max_level": 5
+    },
+    "attempt": 3,
+    "skipped_why": {
+     "RM-BUDGET-FAR": "fired twice"
+    }
+   }
+  },
+  {
+   "id": "S07",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F5",
+   "config_edits": {
+    "/refinement/levels/0/feature_level": 5,
+    "/refinement/max_level": 5
+   },
+   "fired": {
+    "RM-BUDGET-FAR": 2,
+    "RM-BUDGET-FEAT": 1
+   },
+   "k": 6,
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-BUDGET-WALL",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/0/level": 4,
+     "/refinement/levels/0/bands/1/level": 3,
+     "/refinement/levels/0/bands/2/level": 2,
+     "/refinement/levels/0/feature_level": 4,
+     "/refinement/max_level": 4
+    },
+    "attempt": 4,
+    "skipped_why": {
+     "RM-BUDGET-FAR": "fired twice",
+     "RM-BUDGET-FEAT": "no feature level above the wall level"
+    }
+   }
+  },
+  {
+   "id": "S08",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F5",
+   "config_edits": {
+    "/refinement/levels/0/feature_level": 5,
+    "/refinement/max_level": 5
+   },
+   "fired": {
+    "RM-BUDGET-FAR": 2,
+    "RM-BUDGET-FEAT": 1
+   },
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 4,
+    "message_has": "K = 4 attempts spent"
+   }
+  },
+  {
+   "id": "S09",
+   "config": "probe:wing_a_L4",
+   "outcome": "synthetic:F4",
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-TOPO-REFINE",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/0/level": 5,
+     "/refinement/levels/0/bands/1/level": 4,
+     "/refinement/levels/0/bands/2/level": 3,
+     "/refinement/levels/0/feature_level": 5,
+     "/refinement/max_level": 5
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S10",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F4",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 1,
+    "skipped_why": {
+     "RM-TOPO-REFINE": "predicted"
+    }
+   }
+  },
+  {
+   "id": "S11",
+   "config": "probe:thin_t1",
+   "outcome": "probe:thin_t1",
+   "config_edits": {
+    "/layers/first_thickness": 0.02307
+   },
+   "fired": {
+    "RM-T1-RAISE": 1
+   },
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-T1-REFINE",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/0/level": 4,
+     "/refinement/levels/0/bands/1/level": 3,
+     "/refinement/max_level": 4,
+     "/layers/growth": 1.0
+    },
+    "attempt": 2,
+    "skipped_why": {
+     "RM-T1-RAISE": "already at the y+ = 1 bound"
+    }
+   }
+  },
+  {
+   "id": "S12",
+   "config": "rules:cubep.stl:worked",
+   "outcome": "synthetic:min_thickness",
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-PLANE-FINER",
+    "terminal": null,
+    "edits": {
+     "/domain/extent": [
+      -2.36,
+      8.68,
+      -1.88,
+      5.319999999999999,
+      -1.88,
+      5.319999999999999
+     ],
+     "/domain/base_size": 0.48,
+     "/layers/growth": 1.259
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S13",
+   "config": "rules:cubep.stl:worked",
+   "outcome": "synthetic:retreat_snapped",
+   "fired": {
+    "RM-PLANE-FINER": 2
+   },
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 3,
+    "skipped_why": {
+     "RM-PLANE-FINER": "fired twice"
+    }
+   }
+  },
+  {
+   "id": "S14",
+   "config": "rules:cubep.stl:worked",
+   "outcome": "synthetic:no_full_stack",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 1,
+    "skipped_why": {
+     "RM-LAYER-FIT": "the stack already fits"
+    }
+   }
+  },
+  {
+   "id": "S15",
+   "config": "probe:cubep_nofeat_cf",
+   "outcome": "probe:cubep_nofeat_cf",
+   "config_edits": {
+    "/layers/first_thickness": 0.01666,
+    "/layers/growth": 1.0
+   },
+   "fired": {
+    "RM-LAYER-FIT": 1
+   },
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 2,
+    "skipped_why": {
+     "RM-LAYER-FIT": "the stack already fits"
+    }
+   }
+  },
+  {
+   "id": "S16",
+   "config": "rules:wing_b.stl:worked",
+   "outcome": "synthetic:timeout",
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-BUDGET-FAR",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/1/distance": 0.25,
+     "/refinement/levels/0/bands/2/distance": 0.75
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S17",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:gate_G4@snap",
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-WALL",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/0/level": 4,
+     "/refinement/levels/0/bands/1/level": 3,
+     "/refinement/levels/0/bands/2/level": 2,
+     "/refinement/levels/0/feature_level": 5,
+     "/refinement/max_level": 5
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S18",
+   "config": "probe:box_sphere",
+   "outcome": "probe:box_sphere",
+   "fired": {
+    "RM-SNAP-WALL": 3
+   },
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-CAPABILITY-LIMITED",
+    "terminal": "CAPABILITY-LIMITED",
+    "edits": {},
+    "attempt": 4,
+    "capability_limited": [
+     "sphere"
+    ]
+   }
+  },
+  {
+   "id": "S19",
+   "config": "rules:box_sphere.stl:worked",
+   "outcome": "synthetic:crash",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-NO-REMEDY",
+    "terminal": "NO-REMEDY",
+    "edits": {},
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S20",
+   "config": "rules:box_sphere.stl:worked",
+   "outcome": "synthetic:io",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-NO-REMEDY",
+    "terminal": "NO-REMEDY",
+    "edits": {},
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S21",
+   "config": "rules:box_sphere.stl:worked",
+   "outcome": "synthetic:config",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-NO-REMEDY",
+    "terminal": "NO-REMEDY",
+    "edits": {},
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S22",
+   "config": "rules:box_sphere.stl:worked",
+   "outcome": "synthetic:F2",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-NO-REMEDY",
+    "terminal": "NO-REMEDY",
+    "edits": {},
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S23",
+   "config": "rules:box_sphere.stl:worked",
+   "outcome": "synthetic:surface_closed",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-NO-REMEDY",
+    "terminal": "NO-REMEDY",
+    "edits": {},
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S24",
+   "config": "rules:box_sphere.stl:worked",
+   "outcome": "synthetic:gate_G4@castellate",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-NO-REMEDY",
+    "terminal": "NO-REMEDY",
+    "edits": {},
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S25",
+   "config": "probe:wing_a_L3",
+   "outcome": "probe:wing_a_L3",
+   "seed_seen": [
+    "RM-SNAP-FT"
+   ],
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 2,
+    "skipped_why": {
+     "RM-SNAP-WALL": "below the y+ floor",
+     "RM-SNAP-FT": "revisits config sha"
+    }
+   }
+  },
+  {
+   "id": "S26",
+   "config": "rules:cubep.stl:worked",
+   "outcome": "synthetic:pass",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-PASS",
+    "terminal": "PASS",
+    "edits": {},
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S27",
+   "config": "rules:rev.stl:worked",
+   "outcome": "synthetic:F3a",
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-WALL",
+    "terminal": null,
+    "edits": {
+     "/refinement/levels/0/bands/0/level": 5,
+     "/refinement/levels/0/bands/1/level": 4,
+     "/refinement/levels/0/bands/2/level": 3,
+     "/refinement/max_level": 5
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S28",
+   "config": "rules:rev.stl:worked",
+   "outcome": "synthetic:F3a",
+   "win_level": 6,
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 1,
+    "skipped_why": {
+     "RM-SNAP-WALL": "below the y+ floor",
+     "RM-SNAP-FT": "no sharp edge"
+    }
+   }
+  },
+  {
+   "id": "S29",
+   "config": "rules:cubep.stl:worked",
+   "outcome": "synthetic:F3a",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 1,
+    "skipped_why": {
+     "RM-SNAP-WALL": "on the R-PLANE path",
+     "RM-SNAP-FT": "the attraction is already off"
+    }
+   }
+  },
+  {
+   "id": "S30",
+   "config": "rules:cube.stl:worked",
+   "outcome": "synthetic:min_thickness",
+   "config_edits": {
+    "/snap/feature_tolerance": 0.5
+   },
+   "expect": {
+    "verdict": "apply",
+    "rule_id": "RM-PLANE",
+    "terminal": null,
+    "edits": {
+     "/snap/feature_tolerance": 0.0
+    },
+    "attempt": 1
+   }
+  },
+  {
+   "id": "S31",
+   "config": "rules:box_sphere.stl:worked",
+   "outcome": "synthetic:retreat_snapped",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-CAPABILITY-LIMITED",
+    "terminal": "CAPABILITY-LIMITED",
+    "edits": {},
+    "attempt": 1,
+    "capability_limited": [
+     "sphere"
+    ]
+   }
+  },
+  {
+   "id": "S32",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:layer_t1_G5",
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 1,
+    "skipped_why": {
+     "RM-T1-RAISE": "already at the y+ = 1 bound",
+     "RM-T1-REFINE": "predicted"
+    }
+   }
+  }
+ ]
+}
