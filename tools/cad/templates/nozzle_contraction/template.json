@@ -285,6 +285,42 @@
       "unit": "1",
       "u_kind": "exact",
       "u_meas": 0.0
+    },
+    {
+      "quantity": "watertight",
+      "primitive": "watertight",
+      "where": [
+        "fluid"
+      ],
+      "kind": "geometric",
+      "method": "geometry",
+      "unit": "1",
+      "u_kind": "exact",
+      "u_meas": 0.0
+    },
+    {
+      "quantity": "axis",
+      "primitive": "axis_x",
+      "where": [
+        "fluid"
+      ],
+      "kind": "geometric",
+      "method": "geometry",
+      "unit": "1",
+      "u_kind": "exact",
+      "u_meas": 0.0
+    },
+    {
+      "quantity": "units",
+      "primitive": "units_m",
+      "where": [
+        "fluid"
+      ],
+      "kind": "geometric",
+      "method": "geometry",
+      "unit": "1",
+      "u_kind": "exact",
+      "u_meas": 0.0
     }
   ],
   "profile_rules": [

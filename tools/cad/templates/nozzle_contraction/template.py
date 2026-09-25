@@ -47,6 +47,7 @@ from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Check
 from OCP.ShapeAnalysis import ShapeAnalysis_Wire
+from OCP.TopExp import TopExp
 
 # ---------------------------------------------------------------- params
 TEMPLATE_ID = "nozzle_contraction/1"
@@ -97,8 +98,8 @@ TAGS = [{"name": "inlet", "kind": "face", "description": "velocity inlet disc at
         {"name": "wall_exit", "kind": "face", "description": "no-slip exit tube wall, x = L to L + Lx"},
         {"name": "wetted", "kind": "edge", "description": "meridian wetted curve: the law, then the exit tube"},
         {"name": "outer", "kind": "edge", "description": "meridian outer wall: the true normal offset of the wetted curve by t_wall"}]
-# watertight / axis / units belong to CAD-06's export checks and the performance rows to
-# CAD-14's post.py; neither primitive exists yet, so they are not catalogued here.
+# watertight / axis / units are measured by export.py (the stl_repair report, the fluid's faces and
+# geom.json); the performance rows belong to CAD-14's post.py and are not catalogued yet.
 CATALOGUE = [
     {"quantity": "inlet_diameter", "primitive": "diameter_at_plane", "where": ["contraction_start"],
      "kind": "geometric", "method": "geometry", "unit": "m", "u_kind": "abs", "u_meas": 1e-9},
@@ -122,6 +123,12 @@ CATALOGUE = [
     {"quantity": "n_solids", "primitive": "n_solids", "where": ["fluid"], "kind": "geometric",
      "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
     {"quantity": "valid", "primitive": "valid", "where": ["fluid"], "kind": "geometric",
+     "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
+    {"quantity": "watertight", "primitive": "watertight", "where": ["fluid"], "kind": "geometric",
+     "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
+    {"quantity": "axis", "primitive": "axis_x", "where": ["fluid"], "kind": "geometric",
+     "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
+    {"quantity": "units", "primitive": "units_m", "where": ["fluid"], "kind": "geometric",
      "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
 ]
 PROFILE_RULES = ["PRF-BOX", "PRF-RMIN", "PRF-MONO", "PRF-DERIV", "PRF-SELFX", "PRF-FACE2D"]
@@ -228,33 +235,69 @@ def law_curves(p, d):
     return out
 
 
+def vertex(x, y):
+    """A new TopoDS_Vertex at (x, y, 0)."""
+    return BRepBuilderAPI_MakeVertex(gp_Pnt(float(x), float(y), 0.0)).Vertex()
+
+
+def first_vertex(edge):
+    return TopExp.FirstVertex_s(edge.wrapped)
+
+
+def last_vertex(edge):
+    return TopExp.LastVertex_s(edge.wrapped)
+
+
+def line_between(va, vb):
+    """A straight edge whose two ends ARE the given vertices (shared, never copied)."""
+    mk = BRepBuilderAPI_MakeEdge(va, vb)
+    if not mk.IsDone():
+        raise RuntimeError("line between shared vertices failed: error %r" % (mk.Error(),))
+    return cq.Edge(mk.Edge())
+
+
+def curve_between(curve, va, vb, u0, u1):
+    """The curve on [u0, u1] as an edge whose two ends ARE the given vertices."""
+    mk = BRepBuilderAPI_MakeEdge(curve, va, vb, u0, u1)
+    if not mk.IsDone():
+        raise RuntimeError("curve between shared vertices failed: error %r" % (mk.Error(),))
+    return cq.Edge(mk.Edge())
+
+
 def wetted_edges(d, curves):
-    """The meridian wetted curve: the law curves, then the straight exit tube to the outlet plane."""
-    edges = [cq.Edge(BRepBuilderAPI_MakeEdge(c).Edge()) for c in curves]
-    edges.append(cq.Edge.makeLine(cq.Vector(d["L"], d["R_e"], 0.0),
-                                  cq.Vector(d["x_outlet"], d["R_e"], 0.0)))
+    """The meridian wetted curve: the law curves, then the straight exit tube to the outlet plane.
+
+    Adjacent edges SHARE one vertex object at every junction. Two separate vertices a few ulp
+    apart make the wire builder keep one of them by an order that changes between processes,
+    and then the BREP bytes change too (docs/16 §H.3 GC-4).
+    """
+    vs = [vertex(0.0, d["R_i"])]
+    for c in curves[:-1]:
+        q = c.Value(1.0)
+        vs.append(vertex(q.X(), q.Y()))
+    vs.append(vertex(d["L"], d["R_e"]))
+    edges = [curve_between(c, vs[i], vs[i + 1], 0.0, 1.0) for i, c in enumerate(curves)]
+    edges.append(line_between(vs[-1], vertex(d["x_outlet"], d["R_e"])))
     return edges
 
 
 def fluid_edges(d, wall):
     """The closed fluid meridian wire: inlet, slip pipe, the wall, exit tube, outlet, axis."""
-    edges = [cq.Edge.makeLine(cq.Vector(d["x_inlet"], 0.0, 0.0), cq.Vector(d["x_inlet"], d["R_i"], 0.0)),
-             cq.Edge.makeLine(cq.Vector(d["x_inlet"], d["R_i"], 0.0), cq.Vector(0.0, d["R_i"], 0.0))]
+    a, b = vertex(d["x_inlet"], 0.0), vertex(d["x_inlet"], d["R_i"])
+    e, f = vertex(d["x_outlet"], d["R_e"]), vertex(d["x_outlet"], 0.0)
+    edges = [line_between(a, b), line_between(b, first_vertex(wall[0]))]
     edges.extend(wall)
-    edges.append(cq.Edge.makeLine(cq.Vector(d["L"], d["R_e"], 0.0),
-                                  cq.Vector(d["x_outlet"], d["R_e"], 0.0)))
-    edges.append(cq.Edge.makeLine(cq.Vector(d["x_outlet"], d["R_e"], 0.0),
-                                  cq.Vector(d["x_outlet"], 0.0, 0.0)))
-    edges.append(cq.Edge.makeLine(cq.Vector(d["x_outlet"], 0.0, 0.0),
-                                  cq.Vector(d["x_inlet"], 0.0, 0.0)))
+    edges.append(line_between(last_vertex(wall[-1]), e))
+    edges.append(line_between(e, f))
+    edges.append(line_between(f, a))
     return edges
 
 
 def body_edges(wetted, outer):
     """The closed body meridian wire: two radial ends, the outer wall, and the wetted curve back."""
-    edges = [cq.Edge.makeLine(wetted[0].startPoint(), outer[0].startPoint())]
+    edges = [line_between(first_vertex(wetted[0]), first_vertex(outer[0]))]
     edges.extend(outer)
-    edges.append(cq.Edge.makeLine(outer[-1].endPoint(), wetted[-1].endPoint()))
+    edges.append(line_between(last_vertex(outer[-1]), last_vertex(wetted[-1])))
     edges.extend(list(reversed(wetted)))
     return edges
 
@@ -335,12 +378,15 @@ def outer_edges(d, curves, wetted):
     segs.extend(span(cur, (len(pieces) - 1, pieces[-1][2])))
     edges = []
     max_error = 0.0
+    k0, s00 = segs[0][0], segs[0][1]
+    p0 = pieces[k0][0].Value(s00)
+    ends = [vertex(p0.X(), p0.Y())]            # one shared vertex per junction of the outer wall
     for k, s0, s1 in segs:
         curve = pieces[k][0]
+        pb = curve.Value(s1)
+        ends.append(vertex(pb.X(), pb.Y()))
         if k == len(pieces) - 1:
-            pa, pb = curve.Value(s0), curve.Value(s1)
-            edges.append(cq.Edge.makeLine(cq.Vector(pa.X(), pa.Y(), pa.Z()),
-                                          cq.Vector(pb.X(), pb.Y(), pb.Z())))
+            edges.append(line_between(ends[-2], ends[-1]))
         else:
             ap = GeomConvert_ApproxCurve(Geom_TrimmedCurve(curve, s0, s1), APPROX_TOL, GeomAbs_C2, 200, 9)
             err = ap.MaxError() if ap.IsDone() and ap.HasResult() else -1.0
@@ -348,7 +394,8 @@ def outer_edges(d, curves, wetted):
                 raise RuntimeError("offset piece %d: B-spline refit failed (done %r, error %r m)"
                                    % (k, ap.IsDone(), err))
             max_error = max(max_error, err)
-            edges.append(cq.Edge(BRepBuilderAPI_MakeEdge(ap.Curve()).Edge()))
+            bs = ap.Curve()
+            edges.append(curve_between(bs, ends[-2], ends[-1], bs.FirstParameter(), bs.LastParameter()))
     fidelity = 0.0
     for edge in edges:
         for i in range(N_FIDELITY):

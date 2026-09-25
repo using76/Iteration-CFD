@@ -18,7 +18,7 @@ import cadquery as cq
 from scipy.optimize import minimize, minimize_scalar
 
 from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
-from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Circle
+from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Circle, GeomAbs_Plane, GeomAbs_SurfaceOfRevolution
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section, BRepAlgoAPI_Check
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
@@ -45,8 +45,10 @@ U_MEAS = {                # (kind, value): "abs" in the record's unit, "rel" tim
     "diameter_at_plane": ("abs", 1e-9), "area_ratio": ("rel", 1e-9), "extent_along_axis": ("abs", 1e-9),
     "plane_distance": ("abs", 1e-9), "meridian_min_wall": ("abs", 1e-8), "slope_max": ("rel", 1e-6),
     "curvature_radius_min": ("rel", 1e-6), "n_solids": ("abs", 0.0), "valid": ("abs", 0.0),
+    "watertight": ("abs", 0.0), "axis_x": ("abs", 0.0), "units_m": ("abs", 0.0),
 }
 REFUSED = {"wall_distance_3d": "MEAS-3D-WALL"}
+UNITS_TOL = 1e-9          # m: gmsh vs BREP x-span in geom.json (docs/16 §H.3 GC-5)
 
 
 def record(primitive, value, unit, u_meas, method, feature=None, where=(), status="ok", reason_id=None, detail=""):
@@ -398,11 +400,89 @@ def valid(shape, feature=None):
                       ("%s: %s" % (type(e).__name__, e))[:300], feature)
 
 
+def units_m(geom, feature=None):
+    """1 iff geom.json says m, scale 1, a METRE STEP, and gmsh read that STEP at the BREP's own x-span."""
+    method = "geom.json: units m, scale 1, STEP length unit METRE, gmsh (OCCTargetUnit M) x-span = BREP x-span within 1e-9 m"
+    try:
+        if not isinstance(geom, dict):
+            return _refused("units_m", "1", method, "MEAS-BADGEOM", "not a geom.json dict", feature)
+        sc, sb, sg = geom["scale"], geom["x_span_m"], geom["gmsh_import"]["x_span_m"]
+        nums = all(not isinstance(v, bool) and isinstance(v, (int, float)) for v in (sc, sb, sg))
+        ok = (nums and geom["units"] == "m" and sc == 1 and geom["step_length_unit"] == "METRE"
+              and abs(sg - sb) <= UNITS_TOL)
+        return _ok("units_m", 1 if ok else 0, "1", method, feature=feature,
+                   detail="units %r scale %r step %r; x-span brep %r gmsh %r" % (geom["units"], sc,
+                                                                               geom["step_length_unit"], sb, sg))
+    except (KeyError, TypeError) as e:
+        return _refused("units_m", "1", method, "MEAS-BADGEOM", "geom field missing: %s" % (e,), feature)
+    except Exception as e:
+        return _error("units_m", "1", method, "MEAS-ERROR", ("%s: %s" % (type(e).__name__, e))[:300], feature)
+
+
+def axis_x(shape, feature=None):
+    """1 iff every face is a plane normal to x or a surface revolved about the x axis itself."""
+    method = "every face a plane with normal +-x, or a cylinder, cone or surface of revolution about the x axis"
+    try:
+        faces = shape.Faces()
+        if not faces:
+            return _refused("axis_x", "1", method, "MEAS-EMPTY", "the shape has no face", feature)
+        for i, f in enumerate(faces):
+            a = BRepAdaptor_Surface(f.wrapped)
+            t = a.GetType()
+            if t == GeomAbs_Plane:
+                ax, on_axis = a.Plane().Axis(), False
+            elif t == GeomAbs_Cylinder:
+                ax, on_axis = a.Cylinder().Axis(), True
+            elif t == GeomAbs_Cone:
+                ax, on_axis = a.Cone().Axis(), True
+            elif t == GeomAbs_SurfaceOfRevolution:
+                ax, on_axis = a.AxeOfRevolution(), True
+            else:
+                return _ok("axis_x", 0, "1", method, feature=feature,
+                           detail="face %d is %s, not a plane or a surface of revolution" % (i, t))
+            dd, loc = ax.Direction(), ax.Location()
+            if abs(abs(dd.X()) - 1.0) > AXIS_TOL:
+                return _ok("axis_x", 0, "1", method, feature=feature,
+                           detail="face %d axis direction (%r, %r, %r) is not +-x" % (i, dd.X(), dd.Y(), dd.Z()))
+            if on_axis and (abs(loc.Y()) > AXIS_TOL or abs(loc.Z()) > AXIS_TOL):
+                return _ok("axis_x", 0, "1", method, feature=feature,
+                           detail="face %d axis passes (%r, %r) off the x axis" % (i, loc.Y(), loc.Z()))
+        return _ok("axis_x", 1, "1", method, feature=feature, detail="%d faces on the x axis" % (len(faces),))
+    except Exception as e:
+        return _error("axis_x", "1", method, "MEAS-ERROR", ("%s: %s" % (type(e).__name__, e))[:300], feature)
+
+
+def watertight(report, feature=None):
+    """1 iff an stl_repair --weld 0 report says closed before and after with nothing repaired, one component."""
+    method = "stl_repair --weld 0 report: closed before and after, 0 open, 0 non-manifold, 0 reoriented, 0 flipped, 0 filled, 0 dropped, 1 component"
+    try:
+        if not isinstance(report, dict) or report.get("tool") != "stl_repair":
+            return _refused("watertight", "1", method, "MEAS-BADREPORT", "not an stl_repair report", feature)
+        tol = report["weld"]["tol_rel"]
+        if tol != 0:
+            return _refused("watertight", "1", method, "MEAS-BADREPORT",
+                            "the report was made with --weld %r, not --weld 0" % (tol,), feature)
+        o, a = report["orientation"], report["after"]
+        counts = (a["open_edges"], a["non_manifold_edges"], o["reoriented_triangles"], o["flipped_components"],
+                  report["holes"]["filled"], report["degenerate_dropped"])
+        ok = (bool(report["before"]["closed"]) and bool(a["closed"]) and counts == (0, 0, 0, 0, 0, 0)
+              and report["n_components"] == 1)
+        return _ok("watertight", 1 if ok else 0, "1", method, feature=feature,
+                   detail="before closed %s; after closed %s; open %d non-manifold %d reoriented %d flipped %d "
+                          "filled %d dropped %d; components %d" % ((report["before"]["closed"], a["closed"])
+                                                                   + counts + (report["n_components"],)))
+    except (KeyError, TypeError) as e:
+        return _refused("watertight", "1", method, "MEAS-BADREPORT", "report field missing: %s" % (e,), feature)
+    except Exception as e:
+        return _error("watertight", "1", method, "MEAS-ERROR", ("%s: %s" % (type(e).__name__, e))[:300], feature)
+
+
 PRIMITIVES = {"cylinder_radius": cylinder_radius, "cone_semi_angle": cone_semi_angle, "volume": volume,
               "diameter_at_plane": diameter_at_plane, "area_ratio": area_ratio,
               "extent_along_axis": extent_along_axis, "plane_distance": plane_distance,
               "meridian_min_wall": meridian_min_wall, "slope_max": slope_max,
-              "curvature_radius_min": curvature_radius_min, "n_solids": n_solids, "valid": valid}
+              "curvature_radius_min": curvature_radius_min, "n_solids": n_solids, "valid": valid,
+              "watertight": watertight, "axis_x": axis_x, "units_m": units_m}
 
 assert set(PRIMITIVES) == set(U_MEAS), "the primitive registry and U_MEAS must name the same set"
 
@@ -535,7 +615,7 @@ def _fx_arc():
 
 
 def selftest():
-    """GC-1: every primitive against an analytic answer; 21 [ok] lines, then SELFTEST PASS."""
+    """GC-1: every primitive against an analytic answer; 24 [ok] lines, then SELFTEST PASS."""
     seen = []
 
     def keep(rec):
@@ -741,6 +821,66 @@ def selftest():
         "M20 guard ids %r" % (ids,))
     assert guards[0]["status"] == "error", "M20 None face status %r" % (guards[0]["status"],)
     print("[ok] guards: MEAS-ERROR MEAS-UNKNOWN MEAS-NOTCYL MEAS-NOTCONE MEAS-NOTMERIDIAN")
+
+    # (M24)
+    def geo(**over):
+        d = {"units": "m", "scale": 1, "step_length_unit": "METRE", "x_span_m": 0.1,
+             "gmsh_import": {"x_span_m": 0.1}}
+        d.update(over)
+        return d
+
+    r = keep(units_m(geo()))
+    assert r["value"] == 1, "M24 good %r" % (r,)
+    r = keep(units_m(geo(units="mm")))
+    assert r["value"] == 0, "M24 mm %r" % (r,)
+    r = keep(units_m(geo(scale=1000)))
+    assert r["value"] == 0, "M24 scale 1000 %r" % (r,)
+    r = keep(units_m(geo(scale=True)))
+    assert r["value"] == 0, "M24 scale True %r" % (r,)
+    r = keep(units_m(geo(step_length_unit="MILLI.METRE")))
+    assert r["value"] == 0, "M24 MILLI %r" % (r,)
+    r = keep(units_m(geo(gmsh_import={"x_span_m": 100.0})))
+    assert r["value"] == 0, "M24 span x1000 %r" % (r,)
+    r = keep(units_m(geo(gmsh_import={"x_span_m": 0.1 + 2e-9})))
+    assert r["value"] == 0, "M24 span +2e-9 %r" % (r,)
+    r = keep(units_m({"units": "m", "scale": 1, "step_length_unit": "METRE", "x_span_m": 0.1}))
+    assert r["status"] == "refused" and r["reason_id"] == "MEAS-BADGEOM", "M24 missing %r" % (r,)
+    print("[ok] units_m: good 1; mm, scale 1000, scale True, MILLI STEP, span x1000, span +2e-9 all 0; "
+          "missing key refused")
+
+    # (M23)
+    r = keep(axis_x(cylinder))
+    assert r["value"] == 1, "M23 cylinder %r" % (r,)
+    r = keep(axis_x(fluid))
+    assert r["value"] == 1, "M23 poly5 fluid %r" % (r,)
+    r = keep(axis_x(cylinder.rotate(V(0, 0, 0), V(0, 1, 0), 90)))
+    assert r["value"] == 0, "M23 rotated %r" % (r,)
+    r = keep(axis_x(_fx_torus()))
+    assert r["value"] == 0, "M23 torus %r" % (r,)
+    r = keep(axis_x(cq.Solid.makeBox(0.01, 0.02, 0.03)))
+    assert r["value"] == 0, "M23 box %r" % (r,)
+    print("[ok] axis_x: cylinder 1, poly5 fluid 1, rotated 0, torus 0, box 0")
+
+    # (M22)
+    def rep(**over):
+        d = {"tool": "stl_repair", "weld": {"tol_rel": 0.0}, "before": {"closed": True},
+             "after": {"closed": True, "open_edges": 0, "non_manifold_edges": 0},
+             "orientation": {"reoriented_triangles": 0, "flipped_components": 0}, "holes": {"filled": 0},
+             "degenerate_dropped": 0, "n_components": 1}
+        d.update(over)
+        return d
+
+    r = keep(watertight(rep()))
+    assert r["value"] == 1, "M22 clean %r" % (r,)
+    r = keep(watertight(rep(orientation={"reoriented_triangles": 3, "flipped_components": 0})))
+    assert r["value"] == 0, "M22 reoriented %r" % (r,)
+    r = keep(watertight(rep(after={"closed": False, "open_edges": 2, "non_manifold_edges": 0})))
+    assert r["value"] == 0, "M22 open %r" % (r,)
+    r = keep(watertight(rep(weld={"tol_rel": 1e-6})))
+    assert r["status"] == "refused" and r["reason_id"] == "MEAS-BADREPORT", "M22 weld %r" % (r,)
+    r = keep(watertight({}))
+    assert r["status"] == "refused" and r["reason_id"] == "MEAS-BADREPORT", "M22 empty %r" % (r,)
+    print("[ok] watertight: clean 1, reoriented 0, open 0, weld 1e-6 refused, non-report refused")
 
     # (M21)
     bad = [r for r in seen if schema.errors(r, "cad-measure/1") != []]
