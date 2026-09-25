@@ -29958,6 +29958,161 @@ than argued. Gate 98-B: four Newton passes, corrections 33.95, 1.096,
 `2C = 1.72e-3`; `T_b = 464.9497776245` K, `3.7e-16` from the host's root, and
 the residual (S98.5) `3.9e-16`.
 
+### 98.7 The enclosure a conjugate case radiates in - what the case says
+
+§98.1-§98.6 give a face a surround whose temperature the case states. A face
+of a real enclosure radiates to the other faces of the same enclosure
+instead, and §49-§51 already solve that exchange: the view factors, the
+radiosity system (S50.3), the one rewritten triple (S50.12) and §51.1's
+dictionary. What no case could do was reach them - §50.12's second item.
+Three entries of a `*.cht.jsonc` case do, and nothing else moves:
+
+```jsonc
+"radiation": "enclosure",
+"regions": [ { "name": "air", "kind": "fluid", ...
+  "patches": [
+    { "match": "airTop", "T": { "type": "s2sWall" } },
+    { "match": "lid",    "T": { "type": "s2sWall", "emissivity": 0.3, "q": 250.0 } } ] } ],
+"interfaces": [ { "regionA": "air", "patchA": "airToWall",
+                  "regionB": "wall", "patchB": "wallToAir", "emissivity": 0.9 } ]
+```
+
+| Key | Meaning |
+|---|---|
+| `radiation` | the directory, relative to the case file's directory, whose `constant/radiationProperties` `RadiationConfig::from_case` reads exactly as §51.1 states it: `radiationModel viewFactor`, the required `emissivity`, and every optional entry of that table. A path and not a block, because §51.1 keeps one place for those entries, so nothing can be said twice and read once. The path takes §97.2's rules: relative, existing, inside the case directory |
+| `s2sWall` | a wall of the FLUID region that radiates in the enclosure, grey and diffuse - §50.8's condition, in the JSONC spelling. `emissivity`, in `(0, 1]`, defaults to the dictionary's; `q` is §50.3's `q_ext`, W/m^2, delivered to the face from outside, default `0`: an adiabatic, re-radiating wall |
+| `emissivity` on an interface | the conjugate interface radiates in the enclosure from its fluid side at this emissivity, through §98.8's cell source - never through the interface's triple, which §47.2 owns |
+
+Every radiating face is a face of the fluid region, so the enclosure is the
+fluid volume and the medium is transparent: §50.3's statement that the
+exchange puts no term in any volume holds unchanged. A fluid face that no
+`s2sWall` and no radiating interface names is not in the enclosure; the view
+through it is closed by `ambientTemperature` (§49.6) - a black surface at
+that temperature - and without one a radiating surface that does not close
+is refused by §49.6, as it always was.
+
+The refusals continue §98.5's numbering:
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 11 | `radiation` on a case with no fluid region | `radiation`; the enclosure is a conjugate case's fluid volume |
+| 12 | `radiation` naming a directory that does not exist, is absolute or lies outside the case directory, or a document lowered with no directory | `radiation` and the path - §97.2's rules |
+| 13 | a `radiationProperties` §51.1 refuses | §51.1's own message: no file, no `radiationModel`, no `emissivity`, an entry out of range |
+| 14 | `radiation`, and nothing radiates | `radiation`; an enclosure nothing radiates in is a setting the solver would ignore (§13.4.1) |
+| 15 | an `s2sWall`, or an interface `emissivity`, and no `radiation` | the JSON path, and the key that is missing |
+| 16 | `s2sWall` on a solid region | the JSON path; a solid's surface radiates across an interface, with its `emissivity` |
+| 17 | `s2sWall` on an `inlet` or an `outlet` | the JSON path; it is a wall condition |
+| 18 | an `emissivity` outside `(0, 1]` | the JSON path |
+| 19 | an interface `emissivity` where neither side is the fluid region | the interface; there is no enclosure between two solids |
+
+A case with none of the three entries lowers, runs and prints bit for bit
+what it did before this subsection. The conduction path (`cht::run_case`)
+has no enclosure and never sees one: row 11 stops it at lowering.
+`docs/schema/cht-1.json` is regenerated with the three keys.
+
+| Check | Expected |
+|---|---|
+| a case with all three | lowers: each `s2sWall` to `LoweredBc::S2sWall` with its own or the dictionary's emissivity and its `q`; each radiating interface to `(index, emissivity)`; the dictionary as §51.1 reads it |
+| a case with none of them | no enclosure, on the lowered case and on the driver's |
+| rows 11-16 and 18 | each refused, the message naming what the table says; rows 17 and 19 are built and not separately tested - each needs a fixture (an opening, a second solid) no other check uses |
+
+### 98.8 Where the exchange runs - `S2s::update` in the SIMPLE loop, and the radiating conjugate face
+
+**The construction.** On a case whose `radiation` lowered,
+`cht::flow::run_flow_case` attaches every region's raw polyMesh to the
+thermal mesh (`ThermalMesh::attach_points` - §49.3: `HostMesh` keeps no face
+polygons) and builds one `S2s` over the THERMAL mesh's boundary: every
+`s2sWall` face at its emissivity and `q`, and the fluid-side face of every
+radiating interface at its emissivity and `q = 0`. The view factors, the
+agglomeration, the sweep count and §50.6's memory refusal are `S2s::new`'s,
+unchanged.
+
+**The cadence: once per SIMPLE iteration.** Step 4c of the loop, after step
+4b's re-linearised external faces are written back and before step 5's
+energy solve: copy `Energy::k_eff_wall()` into a scratch array, call
+`S2s::update` on the energy's `T` - gather, solve, relax, net flux,
+broadcast, stamp (§50) - and read back the face temperatures it gathered and
+the irradiation it broadcast. It lies outside the span between step 4a's
+download and its write-back, and outside step 4b's, so no host copy of a
+boundary array is stale across it. `T0` is the `T_b` the previous energy
+solve left and `k_eff` the previous `update_k_eff`'s: §50.7's lag. On the
+first iteration `k_eff` is still zero, the stamp leaves the seeded triple -
+`fr = 0`, `refGrad = q/kappa`, the `eps -> 0` limit of (S50.12) - in place,
+and the gather, the solve and the broadcast run.
+
+**The radiating conjugate face: the cell source.** The stamp writes
+`(fr, refValue, refGrad)` on every radiating face, the fluid side of a
+radiating interface included. `Energy::correct` rewrites both sides of every
+interface from §47.2's `h_G` at its head (`update_conjugate_interface`,
+before the assembly), so an interface is assembled with its coupled triple
+and nothing else - §47.6's one condition per face. What the face radiates
+enters where §47.2 consequence 3 says an interface source must, the cell
+source of the SOLID cell behind it:
+
+```
+S_c += - eps (sigma T0^4 - H_b) |Sf| / V_c,     c the solid cell of the pair        (S98.9)
+```
+
+with `T0` and `H_b` the numbers the stamp read, so the power the surface
+radiates is the power the solid loses, once. The solid cell and not the
+fluid one, because the medium is transparent: a sink in a fluid cell would be
+the volumetric radiative term §50.3 says this model does not have. (S98.9) is
+explicit, lagged one iteration as the irradiation is, and the SIMPLE loop is
+the outer loop that converges both.
+
+**Clear and re-register.** `EnergySources` accumulates. The conjugate path
+registered its one uniform source before the loop and never cleared; a case
+with a radiating interface now clears every iteration, re-registers the
+uniform source from the same array and registers (S98.9), so the source is
+this iteration's and not the sum of every iteration's. A case without a
+radiating interface keeps the one registration before the loop, in every
+bit.
+
+**What a run reports.** `ChtFlowSolution::enclosure`: `S2s::report` of the
+last update - `SUM A_i q_r,i`, `SUM A_i |q_r,i|`, the (S50.3) residual and
+the sweeps - the view-factor report, the updates taken, the relaxation,
+every radiating face with its emissivity, its `q` and the `T0` and `H_b` of
+the last update, and `interface_source`, the device's own sum of the cell
+source over the mesh less the uniform sources.
+`ChtFlowSolution::interface_radiated` is (S98.9)'s total from the host.
+`ChtFlowSolution::radiative_split` gives one patch's `(Q_ext, Q_in, Q_rad,
+L)`: the external flux delivered to it, `patch_heat_flow`'s conducted heat
+into the domain, `SUM |Sf| eps (sigma T_b^4 - H_b)` at the final `T_b`, and
+the right side of
+
+```
+Q_in + Q_rad - Q_ext = SUM |Sf| eps sigma (T_b - T0)^2 (T_b^2 + 2 T_b T0 + 3 T0^2) = L    (S98.10)
+```
+
+which (S50.12) makes exact on an `s2sWall` patch at every iterate, not at
+convergence: `L` is second order in the last correction, and is the
+enclosure's linearisation residual. It is exact while `k_eff` does not move
+between the stamp and the end of the solve - the laminar constant-`kappa`
+fluid of §98.3; a `kappa` curve (§100.10) adds the one-iteration lag of
+`k_eff` to it.
+
+**Symmetry - a finding against the plan.** `docs/09` expected
+`matrix_is_symmetric` to fire once an interface radiates, and to select an
+asymmetric solver. It cannot. (S98.9) reaches the right-hand side and
+touches neither `upper`, `lower` nor `boundary_coeffs`, so §48.3's
+coupled-pair equality holds as before; and the energy matrix on this path
+was never symmetric, because it carries the convected flux (§26). The solver
+the case names is the solver that runs.
+
+**What does not move.** `src/s2s.rs`, `src/radiation.rs`, `src/energy.rs`
+and every `.cu` are not modified. `src/cht/flow.rs` gains no
+`launch_builder` and no `pub fn correct|step|update|solve|advance`, so it
+stays outside the capture population and `UNGATED_CEILING` does not move. A
+case with no `radiation` takes every statement it took before.
+
+| Check | Expected |
+|---|---|
+| the conjugate box, a live run at `radiationRelaxation 1` | `|SUM A q_r| <= 1e-10 SUM A |q_r|` |
+| every `s2sWall` patch of it | (S98.10) to `1e-9` of `max(|Q_in|, |Q_rad|)` |
+| its radiating interface | `interface_source = -interface_radiated` to `1e-12`; §47.12 Gate 4's imbalance at most `1e-12` |
+| the interface alone, into the black closure | every face's `eps (sigma T0^4 - H_b)` equal to `parallel_plate_flux(T0, T_amb, eps, 1)` to `1e-10` |
+| the pair tests (§13.4.1) | the dictionary's `emissivity`, an interface's `emissivity`, `radiationRelaxation`: each pair different, failing by name |
+
 ---
 
 ## 100. Properties that are functions of temperature — one evaluator, the curve a case may write, `E(T)` and `alpha(T)` on the solid, and the published tables it is held against

@@ -186,6 +186,7 @@ pub(crate) fn de_vahl_davis(
         n_non_orthogonal_correctors: 0,
         tolerances: PairingTolerances::default(),
         conduction_curves: Vec::new(),
+        radiation: None,
         p0: 101_325.0,
     };
 
@@ -325,6 +326,7 @@ pub(crate) fn kaminski_prakash(
         n_non_orthogonal_correctors: 0,
         tolerances: PairingTolerances::default(),
         conduction_curves: Vec::new(),
+        radiation: None,
         p0: 101_325.0,
     };
 
@@ -1135,6 +1137,7 @@ fn open_cavity_case<'a>(
         n_non_orthogonal_correctors: 0,
         tolerances: PairingTolerances::default(),
         conduction_curves: Vec::new(),
+        radiation: None,
         p0: 101_325.0,
     }
 }

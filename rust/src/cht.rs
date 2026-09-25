@@ -75,8 +75,9 @@
 //! why). No patch-averaged heat-transfer coefficient (§47.8 - it needs a
 //! reduction and is less accurate than the local form). No non-conformal
 //! (AMI) interface (§47.4 - it wants a scatter). No radiative interface
-//! exchange (§47.10). Each of those is refused by name where a case can ask
-//! for it, rather than silently approximated.
+//! exchange on this conduction path (§47.10; a conjugate case radiates
+//! through `cht::flow`, §98.8). Each of those is refused by name where a
+//! case can ask for it, rather than silently approximated.
 
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
@@ -2554,6 +2555,19 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
                              pure-conduction case. It switches on the sign of \
                              the face flux and a stack of solids has no flux \
                              at all (SPEC-LIT 79.5)",
+                            tm.regions
+                                .get(*region)
+                                .map_or("?", |r| r.name.as_str())
+                        )))
+                    }
+                    // SPEC-LIT §98.7 row 11 refuses this at lowering: the
+                    // enclosure is a conjugate case's fluid volume, and a stack
+                    // of solids has none.
+                    LoweredBc::S2sWall { .. } => {
+                        return Err(Error::Config(format!(
+                            "regions/{}/patches/{patch}/T: `s2sWall` on a pure-conduction \
+                             case - the enclosure it radiates in is a conjugate case's fluid \
+                             volume (SPEC-LIT 98.7)",
                             tm.regions
                                 .get(*region)
                                 .map_or("?", |r| r.name.as_str())

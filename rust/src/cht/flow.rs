@@ -498,6 +498,20 @@ pub struct FlowRegion {
     pub source: Scalar,
 }
 
+/// SPEC-LIT §98.7: the enclosure a conjugate case radiates in, as the driver
+/// is told it.
+#[derive(Debug, Clone)]
+pub struct FlowRadiation<'a> {
+    /// §51.1's dictionary, as `RadiationConfig::from_case` read it.
+    pub config: crate::s2s::S2sConfig,
+    /// `(index into FlowCase::interfaces, emissivity)`, one per radiating
+    /// interface.
+    pub interfaces: Vec<(usize, Scalar)>,
+    /// One raw polyMesh per region, in region order - the face polygons
+    /// `S2s::new` needs and `HostMesh` does not keep (SPEC-LIT §49.3).
+    pub raw: &'a [crate::io::polymesh::PolyMeshRaw],
+}
+
 /// A whole conjugate fluid/solid case, with every name already resolved.
 #[derive(Debug)]
 pub struct FlowCase<'a> {
@@ -527,6 +541,8 @@ pub struct FlowCase<'a> {
     /// every other region's a solid's `kappa` and `c`. Empty is every
     /// region's numbers.
     pub conduction_curves: Vec<Option<crate::io::case_cht::ConductionCurves>>,
+    /// SPEC-LIT §98.7: the enclosure. `None` is every case that names none.
+    pub radiation: Option<FlowRadiation<'a>>,
     /// Ambient pressure the gas state is pinned at, Pa.
     pub p0: Scalar,
 }
@@ -541,6 +557,15 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     use crate::io::case_cht::LoweredBc;
 
     case.flow.validate()?;
+    // SPEC-LIT §98.7: the enclosure is lowered; the driver that runs it is
+    // §98.8's and is not in this build yet.
+    if case.radiation.is_some() {
+        return Err(Error::Config(
+            "run_flow_case: this case names an enclosure (`radiation`, SPEC-LIT 98.7), and the \
+             driver that runs one (SPEC-LIT 98.8) is not in this build"
+                .to_string(),
+        ));
+    }
     if let Some(b) = &case.buoyancy {
         b.validate()?;
     }
@@ -768,6 +793,20 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
                         } else if refresh {
                             convective.push(face);
                         }
+                    }
+                    // SPEC-LIT §98.8: seeded as the `eps -> 0` limit of
+                    // (S50.12) - `fr = 0`, `refGrad = q/kappa` - which the
+                    // first `S2s::update` with a non-zero `k_eff` rewrites.
+                    LoweredBc::S2sWall { q, .. } => {
+                        if !is_fluid {
+                            return Err(Error::Config(format!(
+                                "patch '{patch}': `s2sWall` on a solid face - the enclosure \
+                                 is the fluid volume (SPEC-LIT 98.7)"
+                            )));
+                        }
+                        fr[bf] = 0.0;
+                        rv[bf] = 0.0;
+                        rg[bf] = *q / fluid.kappa;
                     }
                 }
             }

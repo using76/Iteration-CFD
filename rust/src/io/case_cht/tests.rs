@@ -4857,3 +4857,245 @@ mod conjugate_curves {
         }
     }
 }
+
+/// SPEC-LIT §98.7-§98.8: the enclosure a conjugate case radiates in.
+mod enclosure {
+    use super::*;
+
+    /// The fluid side walls' three `T` spellings, and the interface's.
+    const S2S: &str = r#"{ "type": "s2sWall" }"#;
+    const ADIABATIC: &str = r#"{ "type": "zeroGradient" }"#;
+    const TOP_OWN: &str = r#"{ "type": "s2sWall", "emissivity": 0.3, "q": 0.25 }"#;
+    const IFACE: &str = r#", "emissivity": 0.9"#;
+    const RAD: &str = r#""radiation": "enclosure","#;
+
+    /// §51.1's dictionary for the box: the walls' emissivity `e`, the cold wall
+    /// as the black closure at 299.95 K, sixty sweeps (the box is within 0.1 K
+    /// of isothermal, so its net fluxes are ~5e-4 of the radiosity), and the
+    /// relaxation `w`.
+    fn box_dict(e: f64, w: f64) -> String {
+        format!(
+            "radiationModel viewFactor;\nemissivity {e};\nambientTemperature 299.95;\n\
+             radiositySweeps 60;\nradiationRelaxation {w};\n"
+        )
+    }
+
+    /// `<temp>/ofgpu_s98_<tag>/enclosure/constant/radiationProperties` holding
+    /// `body`; returns the case directory `<temp>/ofgpu_s98_<tag>`.
+    fn enclosure_dir(tag: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ofgpu_s98_{tag}"));
+        let c = dir.join("enclosure").join("constant");
+        std::fs::create_dir_all(&c).expect("mkdir");
+        std::fs::write(c.join("radiationProperties"), body).expect("write radiationProperties");
+        dir
+    }
+
+    fn lower_box(text: &str, dir: &std::path::Path) -> Result<LoweredChtCase> {
+        read(text)?.lower_in(Some(dir))
+    }
+
+    /// The conjugate box of SPEC-LIT §98.8: a solid wall 0.2 thick (x in [0, 0.2])
+    /// against a fluid box (x in [0.2, 1]), 1 x 1 across in `n` x `n` cells, one
+    /// solid cell through the wall per five across. The wall's outer face is held
+    /// at 300.05 K, the fluid's far face at 299.95 K, the solid's sides are
+    /// adiabatic. `side` is the `T` of three fluid side walls, `air_top` the
+    /// fourth's; `iface` is appended to the interface entry; `top` is inserted at
+    /// the document's top level.
+    fn box_case(
+        n: usize,
+        side: &str,
+        air_top: &str,
+        iface: &str,
+        top: &str,
+        iterations: usize,
+    ) -> String {
+        let ns = (n / 5).max(1);
+        let nf = n - ns;
+        format!(
+            r#"{{
+  "name": "enclosureBox", {top}
+  "regions": [
+    {{ "name": "air", "kind": "fluid",
+      "mesh": {{ "bounds": {{ "min": [0.2, 0.0, 0.0], "max": [1.0, 1.0, 1.0] }}, "cells": [{nf}, {n}, {n}],
+        "boundaries": {{ "xmin": "airToWall", "xmax": "cold", "ymin": "airBottom", "ymax": "airTop",
+                         "zmin": "airFront", "zmax": "airBack" }} }},
+      "fluid": {{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }},
+      "patches": [
+        {{ "match": "cold", "T": {{ "type": "fixedValue", "value": 299.95 }} }},
+        {{ "match": "airBottom", "T": {side} }},
+        {{ "match": "airTop", "T": {air_top} }},
+        {{ "match": "airFront", "T": {side} }},
+        {{ "match": "airBack", "T": {side} }}
+      ] }},
+    {{ "name": "wall", "kind": "solid",
+      "mesh": {{ "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.2, 1.0, 1.0] }}, "cells": [{ns}, {n}, {n}],
+        "boundaries": {{ "xmin": "hot", "xmax": "wallToAir", "ymin": "wallBottom", "ymax": "wallTop",
+                         "zmin": "wallFront", "zmax": "wallBack" }} }},
+      "material": {{ "rho": 1.0, "c": 1.0, "kappa": 1.0 }},
+      "patches": [
+        {{ "match": "hot", "T": {{ "type": "fixedValue", "value": 300.05 }} }},
+        {{ "match": "wallBottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallTop", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallFront", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallBack", "T": {{ "type": "zeroGradient" }} }}
+      ] }}
+  ],
+  "interfaces": [ {{ "regionA": "air", "patchA": "airToWall", "regionB": "wall", "patchB": "wallToAir"{iface} }} ],
+  "buoyancy": {{ "g": [0.0, -2.13e7, 0.0], "TRef": 300.0 }},
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": {iterations} }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-16, "maxIter": 400,
+    "flow": {{ "relaxU": 0.7, "relaxP": 0.3, "relaxT": 0.7,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear", "residual": 1e-7,
+      "uTolerance": 1e-14, "pTolerance": 1e-14, "uMaxIter": 150, "pMaxIter": 500 }}
+  }}
+}}"#
+        )
+    }
+
+    #[test]
+    fn an_enclosure_lowers_its_dictionary_its_walls_and_its_radiating_interface() {
+        let dir = enclosure_dir("lowers", &box_dict(0.8, 1.0));
+        let low = match lower_box(&box_case(5, S2S, TOP_OWN, IFACE, RAD, 10), &dir) {
+            Ok(l) => l,
+            Err(e) => panic!("lower: {e}"),
+        };
+        let r = low.radiation.as_ref().unwrap();
+        assert_eq!(r.dir, "enclosure");
+        assert_eq!(r.config.emissivity, 0.8 as Scalar);
+        assert_eq!(r.config.ambient_temperature, Some(299.95 as Scalar));
+        assert_eq!(r.config.sweeps, 60);
+        assert_eq!(r.interfaces, vec![(0usize, 0.9 as Scalar)]);
+        let (_, _, bc_top) = low.patch_bcs.iter().find(|(_, p, _)| p == "airTop").unwrap();
+        match bc_top {
+            LoweredBc::S2sWall { emissivity, q } => {
+                assert_eq!(*emissivity, 0.3 as Scalar);
+                assert_eq!(*q, 0.25 as Scalar);
+            }
+            other => panic!("airTop lowered to {other:?}, not S2sWall"),
+        }
+        let (_, _, bc_bottom) =
+            low.patch_bcs.iter().find(|(_, p, _)| p == "airBottom").unwrap();
+        match bc_bottom {
+            LoweredBc::S2sWall { emissivity, q } => {
+                assert_eq!(*emissivity, 0.8 as Scalar);
+                assert_eq!(*q, 0.0 as Scalar);
+            }
+            other => panic!("airBottom lowered to {other:?}, not S2sWall"),
+        }
+        let case = low.flow_case().unwrap();
+        let rad = case.radiation.as_ref().unwrap();
+        assert_eq!(rad.raw.len(), 2);
+        assert_eq!(rad.interfaces, vec![(0usize, 0.9 as Scalar)]);
+        let plain = read(&kp_pair_base()).unwrap().lower().unwrap();
+        assert!(plain.radiation.is_none());
+        assert!(plain.flow_case().unwrap().radiation.is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn every_enclosure_refusal_names_what_it_refuses() {
+        let good = enclosure_dir("refusals", &box_dict(0.8, 1.0));
+        let refused = |text: &str, dir: &std::path::Path| -> String {
+            match lower_box(text, dir) {
+                Ok(_) => panic!("expected a refusal, lowered instead:\n{text}"),
+                Err(e) => e.to_string(),
+            }
+        };
+
+        // SPEC-LIT §98.7 row 11: `radiation` with no fluid region.
+        let slab = default_slab();
+        let t11 = slab.replacen(
+            r#""name": "twoLayerSlab","#,
+            r#""name": "twoLayerSlab", "radiation": "enclosure","#,
+            1,
+        );
+        assert!(t11 != slab, "the row-11 replacement changed nothing");
+        let m = refused(&t11, &good);
+        println!("row 11: {m}");
+        for what in ["radiation", "no region has", "SPEC-LIT 98.7"] {
+            assert!(m.contains(what), "row 11 must name '{what}': {m}");
+        }
+
+        // SPEC-LIT §98.7 row 12: the directory does not exist; and a document
+        // lowered with no directory.
+        let m = refused(&box_case(5, S2S, S2S, IFACE, r#""radiation": "nowhere","#, 10), &good);
+        println!("row 12: {m}");
+        for what in ["radiation", "nowhere", "does not exist"] {
+            assert!(m.contains(what), "row 12 must name '{what}': {m}");
+        }
+        let m = read(&box_case(5, S2S, S2S, IFACE, RAD, 10))
+            .expect("parse")
+            .lower()
+            .expect_err("row 12b must refuse");
+        let m = m.to_string();
+        println!("row 12b: {m}");
+        for what in ["radiation", "lowered without one"] {
+            assert!(m.contains(what), "row 12b must name '{what}': {m}");
+        }
+
+        // SPEC-LIT §98.7 row 13: a radiationProperties §51.1 refuses.
+        let bad13 = enclosure_dir("refusals13", "emissivity 0.8;\n");
+        let m = refused(&box_case(5, S2S, S2S, IFACE, RAD, 10), &bad13);
+        println!("row 13: {m}");
+        assert!(m.contains("radiationModel"), "row 13 must name it: {m}");
+
+        // SPEC-LIT §98.7 row 14: an enclosure nothing radiates in.
+        let m = refused(&box_case(5, ADIABATIC, ADIABATIC, "", RAD, 10), &good);
+        println!("row 14: {m}");
+        assert!(m.contains("names nothing that radiates"), "row 14: {m}");
+
+        // SPEC-LIT §98.7 row 15: a radiating face or interface, and no
+        // `radiation`.
+        let m = refused(&box_case(5, S2S, S2S, "", "", 10), &good);
+        println!("row 15: {m}");
+        for what in ["regions/air/patches/airBottom/T", "names none"] {
+            assert!(m.contains(what), "row 15 must name '{what}': {m}");
+        }
+        let m = refused(&box_case(5, ADIABATIC, ADIABATIC, IFACE, "", 10), &good);
+        println!("row 15b: {m}");
+        for what in ["interfaces[0]/emissivity", "names none"] {
+            assert!(m.contains(what), "row 15b must name '{what}': {m}");
+        }
+
+        // SPEC-LIT §98.7 row 16: `s2sWall` on a solid region.
+        let s = box_case(5, S2S, S2S, IFACE, RAD, 10);
+        let pat = r#"{ "match": "wallTop", "T": { "type": "zeroGradient" } }"#;
+        assert_eq!(s.matches(pat).count(), 1, "the wallTop pattern matches once");
+        let m = refused(
+            &s.replacen(pat, r#"{ "match": "wallTop", "T": { "type": "s2sWall" } }"#, 1),
+            &good
+        );
+        println!("row 16: {m}");
+        for what in ["regions/wall/patches/wallTop/T", "solid region"] {
+            assert!(m.contains(what), "row 16 must name '{what}': {m}");
+        }
+
+        // SPEC-LIT §98.7 row 18: an emissivity outside (0, 1], on a wall and
+        // on an interface.
+        let m = refused(
+            &box_case(5, S2S, r#"{ "type": "s2sWall", "emissivity": 1.5 }"#, IFACE, RAD, 10),
+            &good
+        );
+        println!("row 18: {m}");
+        for what in ["airTop/T/emissivity", "(0, 1]"] {
+            assert!(m.contains(what), "row 18 must name '{what}': {m}");
+        }
+        let m = refused(&box_case(5, S2S, S2S, r#", "emissivity": 0.0"#, RAD, 10), &good);
+        println!("row 18b: {m}");
+        for what in ["interfaces[0]/emissivity", "(0, 1]"] {
+            assert!(m.contains(what), "row 18b must name '{what}': {m}");
+        }
+
+        std::fs::remove_dir_all(std::env::temp_dir().join("ofgpu_s98_refusals13")).ok();
+        std::fs::remove_dir_all(good).ok();
+    }
+
+    #[test]
+    fn the_cht_schema_spells_the_enclosure_keys() {
+        let schema = emit_cht_schema();
+        assert!(schema.contains("s2sWall"), "the schema must spell `s2sWall`");
+        assert!(schema.contains("\"radiation\""), "the schema must spell `radiation`");
+    }
+}

@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::blockgen::{self, BlockSpec, GradedAxis};
 use crate::cht::flow::{
-    Buoyancy, FlowCase, FlowControls, FlowRegion, FluidMaterial, Openings,
+    Buoyancy, FlowCase, FlowControls, FlowRadiation, FlowRegion, FluidMaterial, Openings,
 };
 use crate::cht::{
     Conductivity, InterfaceRequest, PairingTolerances, RegionKind, SolidMaterial,
@@ -105,6 +105,12 @@ pub struct ChtCase {
     /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<ChtMeshManifest>,
+    /// SPEC-LIT §98.7: the directory, RELATIVE TO THE CASE FILE'S DIRECTORY,
+    /// whose `constant/radiationProperties` §51.1 reads - the enclosure a
+    /// conjugate case radiates in. A path and not a block: SPEC-LIT 51.1 keeps
+    /// one place for those entries. `None` is every case written before §98.7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radiation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<ChtInterface>,
     /// SPEC-LIT §9's face body force. **Required by a fluid region and
@@ -505,6 +511,18 @@ pub enum ChtScalarBc {
         #[serde(rename = "TEnv")]
         t_env: f64,
     },
+    /// SPEC-LIT §98.7: a wall of the FLUID region that radiates in the
+    /// enclosure the case's `radiation` names - §50.8's grey diffuse wall.
+    /// `emissivity`, in (0, 1], defaults to `radiationProperties`' own; `q` is
+    /// §50.3's external flux, W/m^2, delivered to the face from outside
+    /// (default zero: an adiabatic, re-radiating wall).
+    #[serde(rename = "s2sWall")]
+    S2sWall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emissivity: Option<f64>,
+        #[serde(default)]
+        q: f64,
+    },
     /// The 2-D front/back plane: the patch contributes to no surface integral
     /// at all.
     ///
@@ -580,6 +598,12 @@ pub struct ChtInterface {
     pub thickness_layers: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kappa_layers: Option<Vec<f64>>,
+    /// SPEC-LIT §98.7: the interface radiates in the enclosure `radiation`
+    /// names, from its fluid side, at this grey emissivity in (0, 1] - through
+    /// §98.8's cell source, never through the interface's triple. Absent: it
+    /// does not radiate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emissivity: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -924,6 +948,10 @@ pub enum LoweredBc {
     /// from the face's own `C_b` - once on a face that only convects,
     /// re-linearised every Newton pass (§98.3) on one that radiates.
     External(crate::cht::ambient::ExternalLoss),
+    /// SPEC-LIT §98.7: a wall of the enclosure, at its resolved emissivity and
+    /// external flux `q`, W/m^2. Its triple is (S50.12), rewritten by
+    /// `S2s::update` every SIMPLE iteration (§98.8).
+    S2sWall { emissivity: Scalar, q: Scalar },
 }
 
 impl LoweredBc {
@@ -934,8 +962,20 @@ impl LoweredBc {
             Self::FixedFlux(_) => BcKind::FixedFluxTemperature,
             Self::InletOutlet(_) => BcKind::InletOutlet,
             Self::External(_) => BcKind::Mixed,
+            Self::S2sWall { .. } => BcKind::S2sWall,
         }
     }
+}
+
+/// SPEC-LIT §98.7: the enclosure a conjugate case radiates in, resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredRadiation {
+    /// `radiation`, as the case wrote it.
+    pub dir: String,
+    /// §51.1's dictionary, read from `<dir>/constant/radiationProperties`.
+    pub config: crate::s2s::S2sConfig,
+    /// `(index into interfaces, emissivity)`, one per radiating interface.
+    pub interfaces: Vec<(usize, Scalar)>,
 }
 
 /// SPEC-LIT §100.6: the conduction curves one solid region wrote - `None`
@@ -1097,6 +1137,8 @@ pub struct LoweredChtCase {
     /// `(region, patch name, condition)`, one per patch that is not an
     /// interface.
     pub patch_bcs: Vec<(usize, String, LoweredBc)>,
+    /// SPEC-LIT §98.7: `Some` exactly when the case names an enclosure.
+    pub radiation: Option<LoweredRadiation>,
     pub initial_t: Scalar,
     pub steady: bool,
     pub end_time: Scalar,
@@ -1153,6 +1195,11 @@ impl LoweredChtCase {
             n_non_orthogonal_correctors: self.n_non_orthogonal_correctors,
             tolerances: self.tolerances,
             conduction_curves: self.conduction_curves.clone(),
+            radiation: self.radiation.as_ref().map(|r| FlowRadiation {
+                config: r.config,
+                interfaces: r.interfaces.clone(),
+                raw: &self.raw,
+            }),
             p0: AMBIENT_PRESSURE,
         })
     }
@@ -1575,6 +1622,38 @@ impl ChtCase {
         }
         let has_fluid = kinds.iter().any(|k| *k == RegionKind::Fluid);
 
+        // SPEC-LIT §98.7 rows 11-13: the enclosure, read BEFORE the patch
+        // rules - an `s2sWall` that states no emissivity takes its dictionary's.
+        let enclosure: Option<(String, crate::s2s::S2sConfig)> = match &self.radiation {
+            None => None,
+            Some(p) => {
+                if !has_fluid {
+                    return Err(Error::Config(format!(
+                        "radiation = '{p}': an enclosure is the fluid volume of a conjugate \
+                         case, and no region has `\"kind\": \"fluid\"` (SPEC-LIT 98.7)"
+                    )));
+                }
+                if let Some(d) = case_dir {
+                    let base = if d.as_os_str().is_empty() { Path::new(".") } else { d };
+                    let joined = base.join(p);
+                    if !joined.exists() {
+                        return Err(Error::Config(format!(
+                            "radiation: '{}' does not exist (case directory '{}'). It is the \
+                             directory whose constant/radiationProperties the enclosure is \
+                             read from (SPEC-LIT 98.7)",
+                            joined.display(),
+                            base.display()
+                        )));
+                    }
+                }
+                let dir = resolve_case_path("radiation", case_dir, p)?;
+                let crate::radiation::RadiationConfig::S2s(cfg) =
+                    crate::radiation::RadiationConfig::from_case(&dir)?;
+                Some((p.clone(), cfg))
+            }
+        };
+        let s2s_eps: Option<Scalar> = enclosure.as_ref().map(|(_, c)| c.emissivity);
+
         // R8: with a manifest, every region it lists must be IN the case -
         // the manifest carries no `material` and no `patches` rule, and a
         // region needs both, which is exactly why the case cannot silently
@@ -1598,6 +1677,7 @@ impl ChtCase {
 
         // ---- interfaces --------------------------------------------------
         let mut interfaces = Vec::new();
+        let mut radiating_interfaces: Vec<(usize, Scalar)> = Vec::new();
         for (i, f) in self.interfaces.iter().enumerate() {
             let ra = *index.get(f.region_a.as_str()).ok_or_else(|| {
                 Error::Config(format!(
@@ -1666,6 +1746,32 @@ impl ChtCase {
             }
 
             interfaces.push(InterfaceRequest::new(ra, &f.patch_a, rb, &f.patch_b, r_c));
+
+            // SPEC-LIT §98.7 rows 15, 18 and 19: a radiating interface.
+            if let Some(e) = f.emissivity {
+                let at = format!("interfaces[{i}]/emissivity");
+                if enclosure.is_none() {
+                    return Err(Error::Config(format!(
+                        "{at}: a radiating interface radiates in the enclosure the case's \
+                         `radiation` names, and this case names none (SPEC-LIT 98.7)"
+                    )));
+                }
+                if kinds[ra] != RegionKind::Fluid && kinds[rb] != RegionKind::Fluid {
+                    return Err(Error::Config(format!(
+                        "{at}: neither '{}' nor '{}' is the fluid region, and the enclosure is \
+                         the fluid volume - there is no enclosure between two solids \
+                         (SPEC-LIT 98.7)",
+                        f.region_a, f.region_b
+                    )));
+                }
+                if !(e > 0.0 && e <= 1.0) {
+                    return Err(Error::Config(format!(
+                        "{at} = {e}: a grey emissivity lies in (0, 1]; leave the entry out on an \
+                         interface that does not radiate (SPEC-LIT 98.7)"
+                    )));
+                }
+                radiating_interfaces.push((interfaces.len() - 1, e as Scalar));
+            }
         }
 
         // ---- patch rules -------------------------------------------------
@@ -1745,6 +1851,14 @@ impl ChtCase {
                              it cannot also be an opening (SPEC-LIT 79.2)"
                         )))
                     }
+                    (ChtScalarBc::S2sWall { .. }, i, o) if i || o => {
+                        return Err(Error::Config(format!(
+                            "{path}/T: `s2sWall` is a WALL of the enclosure (SPEC-LIT 98.7) and \
+                             this patch is an `{}`. An `inlet` carries `fixedValue`; an `outlet` \
+                             carries `inletOutlet` or `zeroGradient`",
+                            rule.kind
+                        )))
+                    }
                     (bc, i, o) if bc.is_external() && (i || o) => {
                         return Err(Error::Config(format!(
                             "{path}/T: an external heat-loss condition is a WALL condition - \
@@ -1784,6 +1898,15 @@ impl ChtCase {
                     _ => {}
                 }
 
+                // SPEC-LIT §98.7 row 16: the enclosure is the fluid volume.
+                if matches!(rule.t, ChtScalarBc::S2sWall { .. }) && kinds[r] != RegionKind::Fluid {
+                    return Err(Error::Config(format!(
+                        "{path}/T: `s2sWall` on a solid region. The enclosure is the fluid volume \
+                         and its walls are the fluid region's; a solid's surface radiates into it \
+                         across an interface, with the interface's `emissivity` (SPEC-LIT 98.7)"
+                    )));
+                }
+
                 if is_inlet {
                     inlets.push((region.name.clone(), rule.match_.clone(), opening_u));
                 }
@@ -1791,7 +1914,7 @@ impl ChtCase {
                     outlets.push((region.name.clone(), rule.match_.clone()));
                 }
 
-                patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t, &path)?));
+                patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t, &path, s2s_eps)?));
             }
         }
 
@@ -2210,6 +2333,26 @@ impl ChtCase {
             None => None,
         };
 
+        // SPEC-LIT §98.7 row 14: an enclosure nothing radiates in.
+        let radiation = match enclosure {
+            None => None,
+            Some((dir, config)) => {
+                let walls = patch_bcs
+                    .iter()
+                    .filter(|(_, _, bc)| matches!(bc, LoweredBc::S2sWall { .. }))
+                    .count();
+                if walls == 0 && radiating_interfaces.is_empty() {
+                    return Err(Error::Config(format!(
+                        "radiation = '{dir}': the enclosure names nothing that radiates - no \
+                         `s2sWall` patch and no interface `emissivity`. An enclosure nothing \
+                         radiates in is a setting the solver would ignore (SPEC-LIT 13.4.1; \
+                         SPEC-LIT 98.7)"
+                    )));
+                }
+                Some(LoweredRadiation { dir, config, interfaces: radiating_interfaces })
+            }
+        };
+
         let radiates = patch_bcs
             .iter()
             .any(|(_, _, bc)| matches!(bc, LoweredBc::External(l) if l.radiates()));
@@ -2235,6 +2378,7 @@ impl ChtCase {
             notes,
             interfaces,
             patch_bcs,
+            radiation,
             initial_t: self.initial.t as Scalar,
             steady: self.run.steady,
             end_time,
@@ -2652,7 +2796,7 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar, Elasti
     Ok((mat, t_ref, curves))
 }
 
-fn lower_bc(bc: &ChtScalarBc, path: &str) -> Result<LoweredBc> {
+fn lower_bc(bc: &ChtScalarBc, path: &str, s2s_eps: Option<Scalar>) -> Result<LoweredBc> {
     use crate::cht::ambient::ExternalLoss;
     Ok(match bc {
         ChtScalarBc::FixedValue { value } => LoweredBc::FixedValue(*value as Scalar),
@@ -2660,6 +2804,29 @@ fn lower_bc(bc: &ChtScalarBc, path: &str) -> Result<LoweredBc> {
         ChtScalarBc::FixedFluxTemperature { q } => LoweredBc::FixedFlux(*q as Scalar),
         ChtScalarBc::InletOutlet { inlet_value } => {
             LoweredBc::InletOutlet(*inlet_value as Scalar)
+        }
+        // SPEC-LIT §98.7: a wall of the enclosure `radiation` names, at its
+        // own emissivity or the dictionary's.
+        ChtScalarBc::S2sWall { emissivity, q } => {
+            let Some(default) = s2s_eps else {
+                return Err(Error::Config(format!(
+                    "{path}/T: `s2sWall` radiates in the enclosure the case's `radiation` \
+                     names, and this case names none. Add `\"radiation\": \"<dir>\"`, the \
+                     directory whose constant/radiationProperties says `radiationModel \
+                     viewFactor` (SPEC-LIT 98.7)"
+                )));
+            };
+            let eps = match emissivity {
+                Some(e) => lower_emissivity(*e, path)?,
+                None => default,
+            };
+            if !q.is_finite() {
+                return Err(Error::Config(format!(
+                    "{path}/T/q = {q}: the external flux delivered to the face, W/m^2, has to \
+                     be finite (SPEC-LIT 98.7)"
+                )));
+            }
+            LoweredBc::S2sWall { emissivity: eps, q: *q as Scalar }
         }
         // An `empty` patch contributes to no surface integral, so the triple
         // written on it is never read. `run_flow_case` skips those faces by

@@ -65,6 +65,13 @@
         }
       ]
     },
+    "radiation": {
+      "description": "SPEC-LIT §98.7: the directory, RELATIVE TO THE CASE FILE'S DIRECTORY,\nwhose `constant/radiationProperties` §51.1 reads - the enclosure a\nconjugate case radiates in. A path and not a block: SPEC-LIT 51.1 keeps\none place for those entries. `None` is every case written before §98.7.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "regions": {
       "description": "At least one. Region order fixes the concatenated cell numbering\n(SPEC-LIT §47.4), so it is the case's own decision and not this\nreader's.",
       "type": "array",
@@ -469,6 +476,14 @@
       "properties": {
         "Rc": {
           "description": "The contact resistance, m^2 K/W. Absent is perfect contact.\n\nMutually exclusive with `thicknessLayers`/`kappaLayers`: a case that\nwrites both has said the same number twice and this reader has no\nbusiness deciding which one it meant.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "emissivity": {
+          "description": "SPEC-LIT §98.7: the interface radiates in the enclosure `radiation`\nnames, from its fluid side, at this grey emissivity in (0, 1] - through\n§98.8's cell source, never through the interface's triple. Absent: it\ndoes not radiate.",
           "type": [
             "number",
             "null"
@@ -1210,6 +1225,32 @@
             "TInf",
             "emissivity",
             "TEnv"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §98.7: a wall of the FLUID region that radiates in the\nenclosure the case's `radiation` names - §50.8's grey diffuse wall.\n`emissivity`, in (0, 1], defaults to `radiationProperties`' own; `q` is\n§50.3's external flux, W/m^2, delivered to the face from outside\n(default zero: an adiabatic, re-radiating wall).",
+          "type": "object",
+          "properties": {
+            "emissivity": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "q": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "s2sWall"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
           ]
         },
         {

@@ -48,7 +48,7 @@ use common::output_root;
 use ofgpu::cht::flow::{run_flow_case, ChtFlowSolution};
 use ofgpu::cht::{run_case, ChtSolution};
 use ofgpu::error::{IoContext, Result};
-use ofgpu::io::case_cht::{read_cht_case, LoweredChtCase};
+use ofgpu::io::case_cht::{read_cht_case, LoweredBc, LoweredChtCase};
 use ofgpu::solid::case::{banner_lines, run_stress, summary_lines, thermal_converged, write_region_vtu};
 use ofgpu::{Gpu, Scalar};
 
@@ -185,6 +185,34 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
             f64::from(b.g.y),
             f64::from(b.g.z),
             f64::from(b.t_ref)
+        );
+    }
+
+    // SPEC-LIT §98.7: the enclosure, BEFORE the run.
+    if let Some(r) = &low.radiation {
+        let walls: Vec<String> = low
+            .patch_bcs
+            .iter()
+            .filter_map(|(reg, p, bc)| match bc {
+                LoweredBc::S2sWall { emissivity, q } => Some(format!(
+                    "{}:{p} eps {} q {} W/m^2",
+                    low.region_names[*reg],
+                    f64::from(*emissivity),
+                    f64::from(*q)
+                )),
+                _ => None,
+            })
+            .collect();
+        println!(
+            "  radiation: {}/constant/radiationProperties - viewFactor, emissivity {}, \
+             radiationRelaxation {}, radiositySweeps {} (0 is the (S50.8) count); s2sWall: {}; \
+             radiating interfaces: {} (SPEC-LIT 98.7)",
+            r.dir,
+            f64::from(r.config.emissivity),
+            f64::from(r.config.relaxation),
+            r.config.sweeps,
+            if walls.is_empty() { "none".to_string() } else { walls.join(", ") },
+            r.interfaces.len()
         );
     }
 
