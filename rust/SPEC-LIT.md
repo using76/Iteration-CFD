@@ -30065,13 +30065,15 @@ uniform source from the same array and registers (S98.9), so the source is
 this iteration's and not the sum of every iteration's. A case without a
 radiating interface keeps the one registration before the loop, in every
 bit.
+§100.12 moved the clearing and the registrations, unchanged and in the same
+order, into step 4d, where a source curve in `T` registers between them.
 
 **What a run reports.** `ChtFlowSolution::enclosure`: `S2s::report` of the
 last update - `SUM A_i q_r,i`, `SUM A_i |q_r,i|`, the (S50.3) residual and
 the sweeps - the view-factor report, the updates taken, the relaxation,
 every radiating face with its emissivity, its `q` and the `T0` and `H_b` of
 the last update, and `interface_source`, the device's own sum of the cell
-source over the mesh less the uniform sources.
+source over the mesh less the fixed sources and §100.12's explicit part.
 `ChtFlowSolution::interface_radiated` is (S98.9)'s total from the host.
 `ChtFlowSolution::radiative_split` gives one patch's `(Q_ext, Q_in, Q_rad,
 L)`: the external flux delivered to it, `patch_heat_flow`'s conducted heat
@@ -30225,7 +30227,9 @@ SIMPLE loop (§100.10). A fluid's `kappa` is evaluated on the device inside
 every energy correction (§100.10). A fluid's `cp` and `mu` are still built
 once, from a constant, and a curve there is read, validated and **refused
 by name** (§100.2), so no run silently uses a constant in its place.
-Volumetric sources that vary are later.
+A volumetric source may be a number, a curve in `T` or a table in `t`,
+over a region or a box (§100.11), and a curve is split Patankar's way
+(§100.12).
 
 The gates of this section are 100-A to 100-D. `docs/09` wrote them under the
 number before this one, which §69's registry reserves for invented gate
@@ -30476,7 +30480,7 @@ relative (N2) or better.
 | 9 | a zone whose converged temperatures leave its curve's range | the JSON path, the zone's range and the curve's |
 | 10 | a `kappa` or `c` curve that does not contain the case's initial temperature, or whose value at a sample temperature is not positive | the JSON path and the temperature |
 | 11 | a cell whose temperature leaves a `kappa` or `c` curve during the outer loop, or where the curve is not positive | the JSON path, the temperature and the range |
-| 12 | `numerics.outer` on a case with a fluid region, or on one with no curve and no radiating face | `numerics/outer`, and why nothing reads it |
+| 12 | `numerics.outer` on a case with a fluid region, or on one with no curve, no source curve in `T` and no radiating face | `numerics/outer`, and why nothing reads it |
 | 13 | `numerics.outer.tolerance` outside `(0, 1)`, or `maxOuter` of zero | the setting |
 | 14 | a step whose outer loop did not meet (S100.7) in `maxOuter` passes | the criterion, the pass count, the last changes and their contraction (§100.7) |
 | 15 | a fluid whose temperature leaves its `kappa` curve, or a `kappa` curve with Kays-Crawford's `Pr_t` | the JSON path, the temperatures reached and the range; the `Pr_t` model |
@@ -30579,9 +30583,9 @@ read-back, no rebuild, the same bits.
 optional. Absent, `epsilon` is §98.3's `1e-10` (`1e-4` in the f32 build) and
 `N = 50`, so a radiating case that states nothing runs exactly as it did.
 It is refused on a case with a fluid region, whose outer loop is
-`numerics.flow`'s, and on a case with no curve and no radiating face, where
-nothing would read it (§13.4.1); `tolerance` must lie in `(0, 1)` and
-`maxOuter` must be positive.
+`numerics.flow`'s, and on a case with no curve, no source curve in `T`
+(§100.12) and no radiating face, where nothing would read it (§13.4.1);
+`tolerance` must lie in `(0, 1)` and `maxOuter` must be positive.
 
 **The stall refusal.** A step that has not met (S100.7) after `N` passes is
 refused, naming `epsilon`, `N`, the last four relative changes, the
@@ -30754,6 +30758,118 @@ that loop carries. `numerics.outer` is refused on a conjugate case (§100.7).
 | `Energy` with a flat curve | the constant's `k_eff` and `T` to `1e-14` |
 | `Energy::correct` with a curve | captured, three replays bitwise |
 | a curve under Kays-Crawford | refused (row 15) |
+
+### 100.11 Volumetric sources that vary - a number, a curve in `T`, a table in `t`, over a region or a box
+
+Until this subsection a region's `source` is one number, `q'''` in W/m^3 on
+every cell of the region (§46.1, §60.3). It may now be written three ways in
+the same entry, and a region may add boxes:
+
+```jsonc
+"source": 5.0e6,
+"source": { "table": [[250.0, 6.0e6], [500.0, 3.5e6]] },
+"source": { "time": [[0.0, 0.0], [1.0, 5.0e6], [10.0, 5.0e6]] },
+"sourceBoxes": [ { "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.005, 0.02, 0.02] },
+                   "source": 2.0e6 } ]
+```
+
+| Key | Meaning |
+|---|---|
+| a number | exactly what it meant before: the lowered case, and every bit a run prints, are unchanged |
+| a curve in `T` (`table`, `polynomial`, `sutherland`) | `q'''(T)` through §100.1's evaluator, its range and its refusal; split per cell by (S100.12) |
+| `{ "time": [[t, q], ...] }` | `q'''(t)`, (S100.11); the conduction path's transient only |
+| `sourceBoxes` | each box's `source`, in any of the three forms, ADDED on the cells of its region whose centroids its closed `bounds` hold - §18's test |
+
+The table in `t` is (S100.2)'s form with time in place of temperature:
+
+```
+q'''(t) = q_i + (t - t_i)/(t_(i+1) - t_i) (q_(i+1) - q_i),   t_i <= t < t_(i+1)     (S100.11)
+```
+
+on knots `0 <= t_0 < t_1 < ... < t_n`, at least two; the last knot returns
+its own value, and a time outside `[t_0, t_n]` is refused, never
+extrapolated. A step of the conduction path's transient reads it at the
+step's end, `t_(n+1) = (n + 1) Delta t`, where the implicit step takes every
+other term. A steady case has no time, and the conjugate path (§59, a case
+with a fluid region) is steady only, so a table in `t` there is refused by
+name.
+
+**A box adds.** A cell's `q'''` is its region's `source` plus the source of
+every box that holds its centroid; two boxes that overlap both add. A box is
+its region's and never reaches another region's cells. A box that holds no
+centroid of its region is refused, naming it: a source that heats nothing is
+a setting the solver would ignore (§13.4.1).
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | a curve in `T` whose slope at one of its samples (every knot of a table; both ends and fifteen interior points of any other curve, §100.3) is positive | the JSON path, the temperature and `S_P` (§100.12) |
+| 2 | a curve in `T` whose range does not contain the case's initial temperature | the JSON path, the temperature and the range |
+| 3 | a table in `t` with fewer than two knots, times that do not increase strictly, a first time below zero, or a number that is not finite | the JSON path, and which |
+| 4 | a table in `t` on a steady case - every case with a fluid region is one | the JSON path, and that the run has no time |
+| 5 | a box that holds no cell centroid of its region | the box's `bounds` path and the region |
+| 6 | during a run: a cell whose temperature leaves a source curve's range, or where its slope is positive | the JSON path, the temperature and the range, or `S_P` |
+| 7 | during a run: a step whose end time leaves the table in `t` | the JSON path, the time and the table's range |
+
+### 100.12 Patankar's split, where each source enters, and the one point it registers
+
+A curve in `T` is linearised per cell about the temperature the previous
+pass or iteration left, `T*_c`:
+
+```
+q'''(T_c) ~ S_C + S_P T_c,   S_P = dq'''/dT at T*_c <= 0,   S_C = q'''(T*_c) - S_P T*_c     (S100.12)
+```
+
+Patankar's §4.2: `S_P` enters the diagonal and strengthens it, `S_C` enters
+the right side, and the split is exact when the curve is linear - a two-knot
+table converges in the pass after the first. `dq'''/dT` is
+`Property::slope`: a table's segment slope (the segment of (S100.2)'s rule,
+the last segment at the last knot), a series' and Sutherland's law's
+derivative. A positive `S_P` would weaken the diagonal (§3.4); it is refused
+by name (rows 1 and 6 of §100.11), not lagged.
+
+**The conduction path.** `ConjugateHeat` carries the implicit array beside
+`q'''` and assembles `fvm_sp(.., S_P, -1)` after `fvm_su`, only once a case
+has set one, so a case without a curve launches exactly what it launched.
+The numbers and the number boxes are one array written once before the
+loop; a table in `t` is written at the head of every step; a curve in `T`
+makes the step nonlinear, so it takes §100.7's outer passes, re-split at the
+head of every pass from that pass's `T`, and (S100.7) stops it -
+`numerics.outer` is read on such a case.
+
+**The conjugate path.** Each region's number and every number box are one
+fixed array, registered once before the loop - §98.8's array, whose total
+`interface_source` is measured beside. A curve in `T` is re-split every
+SIMPLE iteration from the previous iteration's `T`, at **step 4d**, the one
+point every per-iteration source goes through: clear `EnergySources`,
+register the fixed array again, register `S_C` and `S_P`, then (S98.9)'s
+sink (§98.8). A case with neither a curve in `T` nor a radiating interface
+keeps the one registration before the loop, in every bit; a case with a
+radiating interface and no curve registers what §98.8 registered, in the
+same order. `interface_source` is the device's sum of the explicit sources
+less the fixed total and less the last `S_C` total, so it stays (S98.9)'s
+alone.
+
+**What a run reports.** `ChtSolution::source_power` and
+`ChtFlowSolution::source_power`: `SUM_c (S_C + S_P T_c) V_c` over the arrays
+the last solve assembled, at the `T` it returned - the whole volumetric power
+the domain received, W; zero when the case has none. At a converged steady
+state it is the heat the boundaries carry out.
+
+| Check | Expected |
+|---|---|
+| the slope of a table | its segment's, to the bit; the last knot the last segment's |
+| the slope of a series and of Sutherland's law | their derivative, to `1e-7` of a central difference |
+| a table in `t` | every knot to the bit, a midpoint the mean; a time outside it refused |
+| a flat curve in `T`; a flat table in `t` | the number's field to `1e-9` K; the transient number's field to the bit |
+| a curve linear in `T` | two passes, the second's change below `1e-12`; the boundaries carry out `source_power` to `1e-9` |
+| a curve against its value at the initial `T`; a ramp in `t` against its flat twin; a box against none | each field moved (§13.4.1) |
+| a number box | `source_power` its value times its cells' volume, to `1e-12` |
+| a flat curve on the conjugate path | the number's field to `1e-9` K, and the same `source_power` |
+| a curve beside a radiating interface | `interface_source` the power the interface radiates, to `1e-12` |
+| rows 1-5 and 7 of §100.11 | each refused, the message naming the setting |
+
+Seven of the new library tests carry §112.3's f32 attribute: the series
+slope, and the six that run a case.
 
 ---
 
@@ -32185,7 +32301,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **475** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **482** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -32196,7 +32312,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

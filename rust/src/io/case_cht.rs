@@ -80,6 +80,8 @@ use crate::io::output_plan::{OutputFormat, OutputPlan};
 use crate::io::polymesh::{build_host_mesh, read_poly_mesh, PolyMeshRaw};
 use crate::mesh::{HostMesh, PatchKind};
 use crate::properties::{Piece, Property};
+use crate::cht::volumetric::{LoweredSource, SourceLaw, TimeTable};
+use crate::sources::CellSelector;
 use crate::solid::{BondTreatment, Material, NotBuilt};
 use crate::{Label, Scalar, Vec3};
 
@@ -172,10 +174,15 @@ pub struct ChtRegion {
     /// `run` - in both directions (row 14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mechanics: Option<ChtMechanics>,
-    /// Uniform volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1). The
-    /// die's own dissipation, in the case this format exists for.
+    /// Volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1): the die's
+    /// own dissipation, in the case this format exists for. A number, a
+    /// curve in `T`, or a table in `t` (SPEC-LIT §100.11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<f64>,
+    pub source: Option<ChtSource>,
+    /// SPEC-LIT §100.11: boxes whose sources ADD on the cells of this region
+    /// whose centroids they hold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_boxes: Vec<ChtSourceBox>,
     /// One rule per patch. Every patch must appear here or in an
     /// `interfaces` entry; see the module doc.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -330,6 +337,38 @@ impl ChtScalarOrCurve {
             Self::Curve(c) => c.lower(path),
         }
     }
+}
+
+/// A volumetric source written three ways - SPEC-LIT §100.11. Untagged with
+/// the number FIRST, so every document written before §100.11 deserialises
+/// exactly as it did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChtSource {
+    /// W/m^3.
+    Number(f64),
+    /// `q'''(T)`: any of §100.1's three curve forms.
+    Curve(ChtCurve),
+    /// `q'''(t)`: `{ "time": [[t, q], ...] }`.
+    Time(ChtTimeTable),
+}
+
+/// (S100.11) as a case writes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtTimeTable {
+    /// `[[t, q'''], ...]`, `t` in s and strictly increasing from `t >= 0`,
+    /// `q'''` in W/m^3.
+    pub time: Vec<[f64; 2]>,
+}
+
+/// One entry of a region's `sourceBoxes` - SPEC-LIT §100.11.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtSourceBox {
+    /// The closed box the covered cells' centroids fall in - §18's test.
+    pub bounds: JsonBounds,
+    pub source: ChtSource,
 }
 
 /// §100.1's three curve forms, one key each: `{ "table": .. }`,
@@ -1128,6 +1167,10 @@ pub struct LoweredChtCase {
     pub openings: Option<Openings>,
     /// `[n_regions]` uniform volumetric source, W/m^3.
     pub sources: Vec<Scalar>,
+    /// SPEC-LIT §100.11: every source that is not a region's number - a
+    /// curve in `T`, a table in `t`, a box - in case order. Empty on every
+    /// case written before §100.11.
+    pub volumetric: Vec<LoweredSource>,
     /// R8's notes, one per region the manifest ALSO lists but the case gives
     /// its own `mesh` to: the explicit form wins and the conflict is printed
     /// by `ofgpu-cht` (`  note: ...`), never silently swallowed (SPEC-LIT
@@ -1195,6 +1238,7 @@ impl LoweredChtCase {
             n_non_orthogonal_correctors: self.n_non_orthogonal_correctors,
             tolerances: self.tolerances,
             conduction_curves: self.conduction_curves.clone(),
+            volumetric: self.volumetric.clone(),
             radiation: self.radiation.as_ref().map(|r| FlowRadiation {
                 config: r.config,
                 interfaces: r.interfaces.clone(),
@@ -1255,6 +1299,7 @@ impl ChtCase {
         let t0 = self.initial.t as Scalar;
         let mut fluids: Vec<Option<FluidMaterial>> = Vec::new();
         let mut sources = Vec::new();
+        let mut volumetric: Vec<LoweredSource> = Vec::new();
         // Which patches of which region have been spoken for, and by what.
         let mut claimed: Vec<BTreeMap<String, &'static str>> = Vec::new();
         // §97.2: each region's own patch names, as the BUILT mesh spells
@@ -1598,6 +1643,10 @@ impl ChtCase {
             // balance, a solid region's source reaches. Nothing is refused
             // here any more, and nothing is dropped either.
 
+            // SPEC-LIT §100.11: the region's `source` and its boxes, on the
+            // region's own mesh. `region_names.len()` is this region's index.
+            let (source_number, source_terms) =
+                lower_sources(r, region_names.len(), &mesh, t0, self.run.steady)?;
             region_names.push(r.name.clone());
             kinds.push(kind);
             meshes.push(mesh);
@@ -1605,7 +1654,8 @@ impl ChtCase {
             materials.push(mat);
             conduction_curves.push(curves);
             fluids.push(fluid);
-            sources.push(r.source.unwrap_or(0.0) as Scalar);
+            sources.push(source_number);
+            volumetric.extend(source_terms);
             claimed.push(seen);
             all_patch_names.push(patch_names);
             mechanics.push(mech);
@@ -2357,7 +2407,10 @@ impl ChtCase {
             .iter()
             .any(|(_, _, bc)| matches!(bc, LoweredBc::External(l) if l.radiates()));
         let curved = conduction_curves.iter().any(Option::is_some);
-        let outer = lower_outer(self.numerics.outer.as_ref(), has_fluid, curved || radiates)?;
+        // SPEC-LIT §100.12: a source curve in T makes a conduction step nonlinear.
+        let source_curve = volumetric.iter().any(|s| matches!(s.law, SourceLaw::Temperature(_)));
+        let outer =
+            lower_outer(self.numerics.outer.as_ref(), has_fluid, curved || radiates || source_curve)?;
 
         Ok(LoweredChtCase {
             name: self.name.clone(),
@@ -2375,6 +2428,7 @@ impl ChtCase {
             flow,
             openings,
             sources,
+            volumetric,
             notes,
             interfaces,
             patch_bcs,
@@ -2653,8 +2707,9 @@ fn lower_outer(o: Option<&ChtOuter>, has_fluid: bool, nonlinear: bool) -> Result
     if !nonlinear {
         return Err(Error::Config(
             "numerics/outer: nothing in this case is nonlinear - no curve in a solid's \
-             kappa or c and no radiating face - so the conduction problem is solved in \
-             one pass and nothing would read the block (SPEC-LIT 100.7). Remove it"
+             kappa or c, no source curve in T and no radiating face - so the conduction \
+             problem is solved in one pass and nothing would read the block \
+             (SPEC-LIT 100.7). Remove it"
                 .to_string(),
         ));
     }
@@ -2681,6 +2736,89 @@ fn lower_outer(o: Option<&ChtOuter>, has_fluid: bool, nonlinear: bool) -> Result
         Some(n) => n as usize,
     };
     Ok(OuterControls { tolerance, max_outer, stated: true })
+}
+
+/// SPEC-LIT §100.11: a region's `source` and `sourceBoxes`, lowered on its
+/// own mesh - the region's number, which `sources` carries exactly as
+/// before, and one [`LoweredSource`] per curve, table or box.
+fn lower_sources(
+    r: &ChtRegion,
+    region: usize,
+    mesh: &HostMesh,
+    t0: Scalar,
+    steady: bool,
+) -> Result<(Scalar, Vec<LoweredSource>)> {
+    let base = format!("regions/{}", r.name);
+    let mut out = Vec::new();
+    let number = match &r.source {
+        None => 0.0,
+        Some(ChtSource::Number(q)) => *q as Scalar,
+        Some(s) => {
+            let path = format!("{base}/source");
+            let law = lower_law(s, &path, t0, steady)?;
+            out.push(LoweredSource { path, region, cells: None, law });
+            0.0
+        }
+    };
+    for (i, b) in r.source_boxes.iter().enumerate() {
+        let v = |a: [f64; 3]| Vec3::new(a[0] as Scalar, a[1] as Scalar, a[2] as Scalar);
+        let sel = CellSelector::Box { min: v(b.bounds.min), max: v(b.bounds.max) };
+        let cells = sel.select(mesh);
+        if cells.is_empty() {
+            return Err(Error::Config(format!(
+                "{base}/sourceBoxes/{i}/bounds: the {} holds the centroid of no cell of region \
+                 '{}' - a source that heats nothing is a setting the solver would ignore \
+                 (SPEC-LIT 13.4.1; SPEC-LIT 100.11)",
+                sel.describe(),
+                r.name
+            )));
+        }
+        let path = format!("{base}/sourceBoxes/{i}/source");
+        let law = lower_law(&b.source, &path, t0, steady)?;
+        out.push(LoweredSource { path, region, cells: Some(cells), law });
+    }
+    Ok((number, out))
+}
+
+/// SPEC-LIT §100.11 rows 1-4: one source's law, validated under `path`.
+fn lower_law(s: &ChtSource, path: &str, t0: Scalar, steady: bool) -> Result<SourceLaw> {
+    match s {
+        ChtSource::Number(q) => Ok(SourceLaw::Number(*q as Scalar)),
+        ChtSource::Curve(c) => {
+            let p = c.lower(path)?;
+            if let Some((lo, hi)) = p.range() {
+                if !(t0 >= lo && t0 <= hi) {
+                    return Err(Error::Config(format!(
+                        "{path}: the curve's range [{lo}, {hi}] K does not contain the case's \
+                         initial temperature {t0} K (SPEC-LIT 100.11)"
+                    )));
+                }
+            }
+            for ts in p.samples() {
+                let s_p = p.slope(path, ts)?;
+                if s_p > 0.0 {
+                    return Err(Error::Config(format!(
+                        "{path}: at T = {ts} K the curve rises, S_P = dq/dT = {s_p:e} W/(m^3 K) \
+                         > 0; Patankar's split needs S_P <= 0, and a rising source is refused, \
+                         not lagged (SPEC-LIT 100.12)"
+                    )));
+                }
+            }
+            Ok(SourceLaw::Temperature(p))
+        }
+        ChtSource::Time(tt) => {
+            if steady {
+                return Err(Error::Config(format!(
+                    "{path}: a table in t on a steady case - there is no time to read it at. The \
+                     conduction path's transient reads it at the end of every step; the \
+                     conjugate path, a case with a fluid region, is steady only (SPEC-LIT 100.11)"
+                )));
+            }
+            let knots: Vec<(Scalar, Scalar)> =
+                tt.time.iter().map(|k| (k[0] as Scalar, k[1] as Scalar)).collect();
+            Ok(SourceLaw::Time(TimeTable::new(path, &knots)?))
+        }
+    }
 }
 
 /// SPEC-LIT §100.2: an entry whose consumer is still built from a constant.

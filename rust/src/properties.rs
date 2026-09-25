@@ -291,6 +291,38 @@ impl Property {
             }
         })
     }
+
+    /// `dp/dT` at `t` - (S100.12)'s `S_P` when the property is a source.
+    /// The segment and the piece are [`Self::value`]'s; at a table's last
+    /// knot it is the last segment's. A constant's is zero. A `t` outside
+    /// the range is refused exactly as [`Self::value`] refuses it.
+    pub fn slope(&self, setting: &str, t: Scalar) -> Result<Scalar> {
+        self.value(setting, t)?;
+        Ok(match self {
+            Property::Constant(_) => 0.0,
+            Property::Table { t: ts, v } => {
+                let n = ts.len();
+                let k = ts.partition_point(|&x| x <= t).min(n - 1);
+                let i = k.max(1) - 1;
+                (v[i + 1] - v[i]) / (ts[i + 1] - ts[i])
+            }
+            Property::Polynomial { exponents, pieces, scale, factor } => {
+                let p = pieces.iter().find(|p| t <= p.hi).unwrap_or(&pieces[pieces.len() - 1]);
+                let x = t / *scale;
+                let mut sum = 0.0 as Scalar;
+                for (e, c) in exponents.iter().zip(&p.coefficients) {
+                    if *e != 0.0 {
+                        sum += *c * *e * power(x, *e - 1.0);
+                    }
+                }
+                *factor * sum / *scale
+            }
+            Property::Sutherland { value, t_ref, s, .. } => {
+                let p = *value * (t / *t_ref).powf(1.5) * (*t_ref + *s) / (t + *s);
+                p * (1.5 / t - 1.0 / (t + *s))
+            }
+        })
+    }
 }
 
 /// (S100.2) at `t`, which [`Property::value`] has already put inside
@@ -659,6 +691,52 @@ mod tests {
             assert!(p.value("c", *x).is_ok(), "x = {x}");
         }
         assert!(p.describe().contains("[250, 450] K"), "{}", p.describe());
+    }
+
+    /// SPEC-LIT §100.12: a table's slope is its segment's, the last knot's
+    /// the last segment's; a constant's is zero.
+    #[test]
+    fn the_slope_of_a_table_is_its_segment_s_and_the_last_knot_takes_the_last_segment() {
+        let knots: [(Scalar, Scalar); 3] = [(300.0, 148.0), (400.0, 98.9), (600.0, 61.9)];
+        let p = Property::table("k", &knots).unwrap();
+        let s0: Scalar = (98.9 - 148.0) / (400.0 - 300.0);
+        let s1: Scalar = (61.9 - 98.9) / (600.0 - 400.0);
+        assert_eq!(p.slope("k", 300.0).unwrap(), s0);
+        assert_eq!(p.slope("k", 350.0).unwrap(), s0);
+        assert_eq!(p.slope("k", 400.0).unwrap(), s1);
+        assert_eq!(p.slope("k", 600.0).unwrap(), s1);
+        assert_eq!(Property::Constant(3.0).slope("k", 1.0e4).unwrap(), 0.0);
+    }
+
+    /// SPEC-LIT §100.12: a series' and Sutherland's slope is their
+    /// derivative, against a central difference.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_slope_of_a_series_and_of_sutherland_is_their_derivative() {
+        let piece = Piece { lo: 200.0, hi: 1000.0, coefficients: vec![3.0e3, 1.0, -2.0e-3, 4.0e-7] };
+        let poly = Property::polynomial("cp", &[-1.0, 0.0, 1.0, 2.5], &[piece], 100.0, 1.5).unwrap();
+        let suth = Property::sutherland("mu", 1.8e-5, 300.0, 110.4, 200.0, 1000.0).unwrap();
+        for p in [&poly, &suth] {
+            for t in [250.0 as Scalar, 400.0, 777.0] {
+                let h: Scalar = 1.0e-3;
+                let fd = (p.value("x", t + h).unwrap() - p.value("x", t - h).unwrap()) / (2.0 * h);
+                let s = p.slope("x", t).unwrap();
+                println!("{} at {t} K: slope {s:e}, central difference {fd:e}", p.describe());
+                assert!((s - fd).abs() <= 1e-7 * s.abs(), "{} at {t} K: {s:e} against {fd:e}", p.describe());
+            }
+        }
+    }
+
+    /// SPEC-LIT §100.12: outside the range the slope is refused as the value is.
+    #[test]
+    fn a_slope_outside_the_range_is_refused_as_the_value_is() {
+        let setting = "regions/die/source";
+        let p = Property::table(setting, &[(300.0, 2.0), (600.0, 1.0)]).unwrap();
+        for t in [299.0 as Scalar, 601.0] {
+            let e = p.slope(setting, t).unwrap_err().to_string();
+            assert_eq!(e, p.value(setting, t).unwrap_err().to_string());
+            assert!(e.contains(setting), "{e}");
+        }
     }
 
     /// The process's device, if the box has one: every GPU test returns

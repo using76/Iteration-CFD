@@ -176,6 +176,11 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
         if low.sources[i] != 0.0 {
             println!("    source {:.4e} W/m^3", f64::from(low.sources[i]));
         }
+        // SPEC-LIT §100.11: a curve, a table in t, a box.
+        for s in low.volumetric.iter().filter(|s| s.region == i) {
+            let cells = s.cells.as_ref().map_or(String::new(), |c| format!(", {} cells", c.len()));
+            println!("    source {} ({}{cells})", s.law.describe(), s.path);
+        }
     }
     if let Some(b) = &low.buoyancy {
         println!(

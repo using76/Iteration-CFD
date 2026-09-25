@@ -1836,6 +1836,10 @@ pub struct ConjugateHeat<'m> {
     b_gamma_base: DevBuf<Scalar>,
     b_cond: DevBuf<Scalar>,
     q: DevBuf<Scalar>,
+    /// SPEC-LIT §100.12's `S_P`, W/(m^3 K), `<= 0` per cell; assembled only
+    /// once [`Self::set_implicit_source`] has been called.
+    sp: DevBuf<Scalar>,
+    implicit: bool,
     grad_t: DevBuf<Vec3>,
 
     interfaces: ConjugateInterfaces,
@@ -1875,6 +1879,8 @@ impl<'m> ConjugateHeat<'m> {
             b_gamma_base: b_gamma,
             b_cond: gpu.upload(&cond.b_conductance)?,
             q: gpu.zeros(m.n_cells)?,
+            sp: gpu.zeros(m.n_cells)?,
+            implicit: false,
             grad_t: gpu.zeros(m.n_cells)?,
             interfaces: ConjugateInterfaces::new(gpu, tm)?,
             fvk: FvKernels::new(gpu)?,
@@ -1948,6 +1954,15 @@ impl<'m> ConjugateHeat<'m> {
         &mut self.q
     }
 
+    /// SPEC-LIT §100.12: write the implicit part `S_P`, `<= 0` per cell, and
+    /// assemble it from now on. Between two `correct` calls, never inside a
+    /// captured region.
+    pub fn set_implicit_source(&mut self, gpu: &Gpu, sp: &[Scalar]) -> Result<()> {
+        gpu.write(&mut self.sp, sp)?;
+        self.implicit = true;
+        Ok(())
+    }
+
     pub fn controls_mut(&mut self) -> &mut ConjugateControls {
         &mut self.ctrl
     }
@@ -1989,7 +2004,7 @@ impl<'m> ConjugateHeat<'m> {
         self.interfaces.flux(gpu, &self.t, self.m, cond)
     }
 
-    /// Assemble `(rho c) dT/dt - div(K grad T) - q''' = 0`.
+    /// Assemble `(rho c) dT/dt - div(K grad T) - q''' = 0`, `q''' = S_C + S_P T` (SPEC-LIT §100.12).
     pub fn assemble(&mut self, gpu: &Gpu) -> Result<()> {
         let m = self.m;
         self.a.zero(gpu)?;
@@ -2037,7 +2052,13 @@ impl<'m> ConjugateHeat<'m> {
             )?;
         }
 
-        fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &self.q, 1.0)
+        fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &self.q, 1.0)?;
+        // SPEC-LIT §100.12: `diag[P] += -V_P S_P`, which strengthens it; a case
+        // that never set one launches exactly what it launched before.
+        if self.implicit {
+            fv::fvm_sp(gpu, &self.fvk, &mut self.a, m, &self.sp, -1.0)?;
+        }
+        Ok(())
     }
 
     /// One outer pass: interface triples, assembly, solve, boundary values.
@@ -2217,6 +2238,10 @@ pub struct ChtSolution {
     /// SPEC-LIT §100.7: the last step's relative changes (S100.7), one per
     /// outer pass; empty when the case has no conduction curve.
     pub outer_changes: Vec<Scalar>,
+    /// SPEC-LIT §100.12: `SUM_c (S_C + S_P T_c) V_c` over the arrays the last
+    /// solve assembled, at the returned `T` - every volumetric watt the domain
+    /// received; zero when the case has no source.
+    pub source_power: Scalar,
 }
 
 impl ChtSolution {
@@ -2584,15 +2609,19 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     }
 
     // ---- the volumetric source ------------------------------------------
-    if case.sources.iter().any(|q| *q != 0.0) {
-        let mut q = vec![0.0 as Scalar; tm.host.n_cells];
-        for (block, s) in tm.regions.iter().zip(&case.sources) {
-            for c in block.cells() {
-                q[c] = *s;
-            }
-        }
-        gpu.write(cht.source_mut(), &q)?;
+    // SPEC-LIT §100.11: each region's number and every number box, written
+    // once - the array this block always wrote when the case has no box; a
+    // table in t is written at the head of every step and a curve in T at the
+    // head of every outer pass, below.
+    let sources = volumetric::CellSources::build(&tm, &case.sources, &case.volumetric)?;
+    if sources.fixed().iter().any(|q| *q != 0.0) {
+        gpu.write(cht.source_mut(), sources.fixed())?;
     }
+    let src_t = sources.in_temperature();
+    let src_time = sources.in_time();
+    // The arrays the last solve assembled - what `source_power` is formed from.
+    let mut last_su: Vec<Scalar> = sources.fixed().to_vec();
+    let mut last_sp: Vec<Scalar> = vec![0.0 as Scalar; tm.host.n_cells];
 
     // ---- the initial field ----------------------------------------------
     let t0 = vec![case.initial_t; tm.host.n_cells];
@@ -2626,22 +2655,43 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     let mut external_residual: Scalar = 0.0;
     let mut outer_changes: Vec<Scalar> = Vec::new();
     let outer = case.outer;
-    for _ in 0..steps {
-        if external.is_empty() && !curved {
+    // SPEC-LIT §100.12: a source curve in T makes the step nonlinear too.
+    let nonlinear = curved || src_t;
+    for step in 0..steps {
+        // SPEC-LIT §100.11: a table in t at the step's end, where the implicit
+        // step takes every other term; `None` on a steady case.
+        let time = (!case.steady).then(|| (step + 1) as Scalar * dt);
+        if src_time && !src_t {
+            let (su, sp) = sources.evaluate(None, time)?;
+            gpu.write(cht.source_mut(), &su)?;
+            last_su = su;
+            last_sp = sp;
+        }
+        if external.is_empty() && !nonlinear {
             last = cht.correct(gpu)?;
         } else {
             external_passes.clear();
             outer_changes.clear();
             let mut met = false;
             for _ in 0..outer.max_outer {
-                let t_prev = if curved {
+                let t_prev = if nonlinear {
                     let t = gpu.download(&cht.field().f)?;
-                    let (k, rho_c) =
-                        conduction_at(&tm, &case.materials, &case.conduction_curves, &t)?;
-                    cond.rebuild(&tm, &k, &rho_c)?;
-                    cht.set_conduction(gpu, &cond)?;
-                    refresh_faces(gpu, cht.field_mut(), &cond, &tm, &fixed_flux, &mut convective)?;
-                    refresh_faces(gpu, cht.field_mut(), &cond, &tm, &[], &mut external)?;
+                    if curved {
+                        let (k, rho_c) =
+                            conduction_at(&tm, &case.materials, &case.conduction_curves, &t)?;
+                        cond.rebuild(&tm, &k, &rho_c)?;
+                        cht.set_conduction(gpu, &cond)?;
+                        refresh_faces(gpu, cht.field_mut(), &cond, &tm, &fixed_flux, &mut convective)?;
+                        refresh_faces(gpu, cht.field_mut(), &cond, &tm, &[], &mut external)?;
+                    }
+                    // SPEC-LIT §100.12: the curve in T split about this pass's T.
+                    if src_t {
+                        let (su, sp) = sources.evaluate(Some(&t), time)?;
+                        gpu.write(cht.source_mut(), &su)?;
+                        cht.set_implicit_source(gpu, &sp)?;
+                        last_su = su;
+                        last_sp = sp;
+                    }
                     Some(t)
                 } else {
                     None
@@ -2666,7 +2716,7 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
                 }
             }
             if !met {
-                return Err(if curved || outer.stated {
+                return Err(if nonlinear || outer.stated {
                     outer_refused(&case.name, &outer, &outer_changes, &external_passes)
                 } else {
                     ambient::newton_refused(&case.name, &external_passes)
@@ -2683,6 +2733,9 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     let t = gpu.download(&cht.field().f)?;
     let bt = gpu.download(&cht.field().bf)?;
 
+    // SPEC-LIT §100.12: the power the last solve's sources delivered, at its T.
+    let source_power = volumetric::delivered_power(&last_su, &last_sp, &t, &tm.host.v);
+
     Ok(ChtSolution {
         mesh: tm,
         t,
@@ -2698,11 +2751,13 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
         external_passes,
         external_residual,
         outer_changes,
+        source_power,
     })
 }
 
 pub mod ambient;
 pub mod flow;
+pub mod volumetric;
 
 #[cfg(test)]
 mod tests;

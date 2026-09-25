@@ -5245,4 +5245,274 @@ mod enclosure {
         assert!(gap > 1e-6, "the two relaxations disagree by only {gap:.3e} K \
             - a case input must move the answer (SPEC-LIT 13.4.1)");
     }
+
+    /// SPEC-LIT §100.12: a source curve on the wall beside a radiating
+    /// interface - step 4d registers both, and `interface_source` is still
+    /// (S98.9)'s alone.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_source_curve_beside_a_radiating_interface_leaves_its_cell_source_the_radiated_power() {
+        let Some(gpu) = gpu() else { return };
+        const WALL: &str = r#""material": { "rho": 1.0, "c": 1.0, "kappa": 1.0 },"#;
+        let base = box_case(5, S2S, S2S, IFACE, RAD, 20);
+        assert_eq!(base.matches(WALL).count(), 1, "the wall's material line must match once");
+        let ins =
+            format!("{WALL}\n      \"source\": {{ \"table\": [[299.0, 2.0], [301.0, 0.0]] }},");
+        let text = base.replace(WALL, &ins);
+        let dir = enclosure_dir("source", &box_dict(0.8, 1.0));
+        let low = lower_box(&text, &dir).unwrap_or_else(|e| panic!("lower: {e}"));
+        let case = low.flow_case().expect("a conjugate case");
+        let sol = crate::cht::flow::run_flow_case(&gpu, &case).unwrap_or_else(|e| panic!("run: {e}"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let e = sol.enclosure.as_ref().expect("an enclosure report");
+        let rad = sol.interface_radiated();
+        println!(
+            "radiated {rad:+.6e} W, cell source {:+.6e} W, source_power {:+.6e} W",
+            e.interface_source,
+            sol.source_power
+        );
+        assert!(
+            (e.interface_source + rad).abs() <= 1e-12 * rad.abs(),
+            "the cell source {} W is not the radiated {rad} W once the curve registers too",
+            e.interface_source
+        );
+        assert!(sol.source_power > 0.0, "the wall's source delivered {} W", sol.source_power);
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT §100.11-§100.12: volumetric sources that vary
+// ==========================================================================
+
+mod sources {
+    use super::*;
+    use crate::cht::volumetric::SourceLaw;
+
+    /// `slab_case` with `source` in the insulation region's slot.
+    fn slab_with(source: &str) -> String {
+        slab_case("1.4", "148.0", "", source, "")
+    }
+
+    /// `slab_with`, transient: ten steps of 0.05 s.
+    fn transient_with(source: &str) -> String {
+        let t = slab_with(source).replace(
+            r#""run": { "steady": true }"#,
+            r#""run": { "endTime": 0.5, "deltaT": 0.05 }"#,
+        );
+        assert_ne!(t, slab_with(source), "the run block was not replaced");
+        t
+    }
+
+    /// `kp_pair_base` with `source` on the wall region.
+    fn kp_with(source: &str) -> String {
+        const WALL: &str = r#""material": { "rho": 1.0, "c": 1.0, "kappa": 1.0 },"#;
+        let base = kp_pair_base();
+        assert_eq!(base.matches(WALL).count(), 1, "the wall's material line must match once");
+        base.replace(WALL, &format!("{WALL}\n      \"source\": {source},"))
+    }
+
+    fn refused(text: &str) -> String {
+        match read(text).and_then(|c| c.lower()) {
+            Ok(_) => panic!("the case lowered; it must be refused"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    fn gap(a: &[Scalar], b: &[Scalar]) -> Scalar {
+        a.iter().zip(b).fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// Linear in T, falling: 5.1e6 W/m^3 at the initial 340 K.
+    const CURVE: &str = r#""source": { "table": [[250.0, 6.0e6], [500.0, 3.5e6]] },"#;
+    /// The first six of the insulation's twelve cells.
+    const BOX: &str = concat!(
+        r#""sourceBoxes": [ { "bounds": { "min": [0.0, 0.0, 0.0],"#,
+        r#" "max": [0.005, 0.02, 0.02] }, "source": 5.0e6 } ],"#
+    );
+
+    /// SPEC-LIT §100.11: each form lowers onto its region.
+    #[test]
+    fn a_source_written_as_a_curve_a_time_table_or_a_box_lowers_onto_its_region() {
+        let low = read(&slab_with(CURVE)).unwrap().lower().unwrap();
+        assert_eq!(low.sources[0], 0.0, "a curve is not a region's number");
+        assert_eq!(low.volumetric.len(), 1);
+        let s = &low.volumetric[0];
+        assert_eq!(s.path, "regions/insulation/source");
+        assert_eq!(s.region, 0);
+        assert!(s.cells.is_none());
+        assert!(matches!(s.law, SourceLaw::Temperature(_)), "{:?}", s.law);
+        let text = transient_with(r#""source": { "time": [[0.0, 0.0], [1.0, 5.0e6]] },"#);
+        let low = read(&text).unwrap().lower().unwrap();
+        assert!(matches!(low.volumetric[0].law, SourceLaw::Time(_)), "{:?}", low.volumetric[0].law);
+        let low = read(&slab_with(&format!(r#""source": 1.0e6, {}"#, BOX))).unwrap().lower().unwrap();
+        assert_eq!(low.sources[0], 1.0e6, "the region's number stays in sources");
+        let b = &low.volumetric[0];
+        assert_eq!(b.path, "regions/insulation/sourceBoxes/0/source");
+        assert_eq!(b.cells.as_ref().map(Vec::len), Some(6), "six of twelve centroids lie below 5 mm");
+        assert_eq!(b.law, SourceLaw::Number(5.0e6));
+        let low = read(&slab_with(r#""source": 5.0e6,"#)).unwrap().lower().unwrap();
+        assert_eq!(low.sources[0], 5.0e6, "a number lowers exactly as it did");
+        assert!(low.volumetric.is_empty());
+    }
+
+    /// SPEC-LIT §100.11 rows 1-5, and §100.5 row 12 as amended.
+    #[test]
+    fn every_source_refusal_names_its_setting() {
+        let check = |text: &str, row: &str, words: &[&str]| {
+            let e = refused(text);
+            println!("{row}: {e}");
+            for w in words {
+                assert!(e.contains(w), "{row} must name {w:?}: {e}");
+            }
+        };
+        let p = "regions/insulation/source";
+        check(
+            &slab_with(r#""source": { "table": [[250.0, 1.0e6], [500.0, 2.0e6]] },"#),
+            "row 1",
+            &[p, "S_P", "SPEC-LIT 100.12"],
+        );
+        check(
+            &slab_with(r#""source": { "table": [[350.0, 6.0e6], [500.0, 3.5e6]] },"#),
+            "row 2",
+            &[p, "340", "SPEC-LIT 100.11"],
+        );
+        check(
+            &transient_with(r#""source": { "time": [[0.0, 1.0], [0.0, 2.0]] },"#),
+            "row 3",
+            &[p, "increase strictly"],
+        );
+        check(&transient_with(r#""source": { "time": [[0.0, 1.0]] },"#), "row 3b", &[p, "two knots"]);
+        check(
+            &slab_with(r#""source": { "time": [[0.0, 0.0], [1.0, 5.0e6]] },"#),
+            "row 4",
+            &[p, "steady", "SPEC-LIT 100.11"],
+        );
+        let far = concat!(
+            r#""sourceBoxes": [ { "bounds": { "min": [0.02, 0.0, 0.0],"#,
+            r#" "max": [0.03, 0.02, 0.02] }, "source": 1.0 } ],"#
+        );
+        check(
+            &slab_with(far),
+            "row 5",
+            &["regions/insulation/sourceBoxes/0/bounds", "insulation", "SPEC-LIT 100.11"],
+        );
+        check(
+            &kp_with(r#"{ "time": [[0.0, 0.0], [1.0, 1.0]] }"#),
+            "row 4, conjugate",
+            &["regions/wall/source", "steady", "conjugate"],
+        );
+        // A source curve in T is nonlinear, so numerics.outer is read.
+        let ps = r#""tolerance": 1e-30, "maxIter": 4000"#;
+        let text = slab_with(CURVE).replace(ps, &format!(r#"{ps}, "outer": {{ "maxOuter": 20 }}"#));
+        assert_ne!(text, slab_with(CURVE));
+        let low = read(&text).unwrap().lower().expect("numerics.outer is read on a source curve in T");
+        assert_eq!(low.outer.max_outer, 20);
+    }
+
+    /// SPEC-LIT §100.12: a flat curve is its number; a flat table in t is the
+    /// transient number to the bit.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_flat_curve_and_a_flat_time_table_give_the_number_s_field() {
+        let Some(gpu) = gpu() else { return };
+        let number = solve(&gpu, &slab_with(r#""source": 5.0e6,"#));
+        let flat = solve(&gpu, &slab_with(r#""source": { "table": [[250.0, 5.0e6], [500.0, 5.0e6]] },"#));
+        let g = gap(&number.t, &flat.t);
+        println!("flat curve against the number: {g:.3e} K in {} passes", flat.outer_changes.len());
+        assert!(g <= 1e-9, "a flat curve moved the field by {g} K");
+        let number = solve(&gpu, &transient_with(r#""source": 5.0e6,"#));
+        let flat = solve(&gpu, &transient_with(r#""source": { "time": [[0.0, 5.0e6], [1.0, 5.0e6]] },"#));
+        assert_eq!(number.t, flat.t, "a flat table in t must be the transient number to the bit");
+        assert_eq!(number.source_power, flat.source_power);
+    }
+
+    /// SPEC-LIT §100.12: a curve linear in T is exact after one split, and
+    /// its power leaves through the two held faces.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_source_linear_in_t_is_exact_after_one_split_and_its_power_leaves_through_the_walls() {
+        let Some(gpu) = gpu() else { return };
+        let sol = solve(&gpu, &slab_with(CURVE));
+        println!("outer changes {:?}; source_power {:.10e} W", sol.outer_changes, sol.source_power);
+        assert_eq!(sol.outer_changes.len(), 2, "a linear curve converges in the pass after the first");
+        assert!(sol.outer_changes[1] <= 1e-12, "the second pass moved T by {:e}", sol.outer_changes[1]);
+        let q_hot = sol.patch_heat_flow(0, "hot").unwrap();
+        let q_cold = sol.patch_heat_flow(1, "cold").unwrap();
+        let bal = (q_hot + q_cold + sol.source_power).abs() / sol.source_power.abs();
+        println!("into hot {q_hot:+.10e} W, into cold {q_cold:+.10e} W, balance {bal:.3e}");
+        assert!(sol.source_power > 0.0, "source_power {}", sol.source_power);
+        assert!(bal <= 1e-9, "the walls carry out {} W of {} W", -(q_hot + q_cold), sol.source_power);
+    }
+
+    /// SPEC-LIT §13.4.1, three pairs: a curve against its value at 340 K, a
+    /// ramp in t against its flat twin, a box against none.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn pair_a_curve_in_t_a_ramp_in_time_and_a_box_each_move_the_field() {
+        let Some(gpu) = gpu() else { return };
+        let a = solve(&gpu, &slab_with(CURVE));
+        let b = solve(&gpu, &slab_with(r#""source": 5.1e6,"#));
+        let g = gap(&a.t, &b.t);
+        println!("curve against q(340 K) as a number: {g:.6e} K");
+        assert!(g > 1e-6, "the curve moved the field by only {g} K (SPEC-LIT 13.4.1)");
+        let a = solve(&gpu, &transient_with(r#""source": { "time": [[0.0, 0.0], [1.0, 1.0e7]] },"#));
+        let b = solve(&gpu, &transient_with(r#""source": { "time": [[0.0, 5.0e6], [1.0, 5.0e6]] },"#));
+        let g = gap(&a.t, &b.t);
+        println!("ramp against flat: {g:.6e} K");
+        assert!(g > 1e-6, "the ramp moved the field by only {g} K (SPEC-LIT 13.4.1)");
+        let a = solve(&gpu, &slab_with(BOX));
+        let b = solve(&gpu, &slab_with(""));
+        let g = gap(&a.t, &b.t);
+        let v: Scalar = (0..6).map(|c| a.mesh.host.v[c]).sum();
+        let rel = (a.source_power / (5.0e6 * v) - 1.0).abs();
+        println!("box against none: {g:.6e} K; source_power {:.10e} W, rel {rel:.3e}", a.source_power);
+        assert!(g > 1.0, "the box moved the field by only {g} K (SPEC-LIT 13.4.1)");
+        assert!(rel <= 1e-12, "the box delivered {} W, not 5e6 W/m^3 times {v} m^3", a.source_power);
+    }
+
+    /// SPEC-LIT §100.11 row 7: a step past the table's end is refused.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_time_outside_the_table_is_refused_mid_run() {
+        let Some(gpu) = gpu() else { return };
+        let text = transient_with(r#""source": { "time": [[0.0, 5.0e6], [0.3, 5.0e6]] },"#);
+        let low = read(&text).unwrap().lower().unwrap();
+        let e = match run_case(&gpu, &low) {
+            Ok(_) => panic!("a step at t = 0.35 s past a table ending at 0.3 s must be refused"),
+            Err(e) => e.to_string(),
+        };
+        println!("{e}");
+        for w in ["regions/insulation/source", "[0, 0.3] s", "SPEC-LIT 100.11"] {
+            assert!(e.contains(w), "{w:?} not in: {e}");
+        }
+    }
+
+    /// SPEC-LIT §100.12 on the conjugate path: a flat curve on the wall is
+    /// its number, with the same source_power; a sloped one moves the field.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_flat_source_curve_on_the_conjugate_path_gives_the_number_s_field() {
+        let Some(gpu) = gpu() else { return };
+        let a = run_flow(&gpu, &kp_with("1.0"));
+        let b = run_flow(&gpu, &kp_with(r#"{ "table": [[299.0, 1.0], [301.0, 1.0]] }"#));
+        let g = gap(&a.t, &b.t);
+        let rel = (b.source_power / a.source_power - 1.0).abs();
+        println!(
+            "flat curve against 1 W/m^3: {g:.3e} K; source_power {:.10e} / {:.10e} W",
+            a.source_power,
+            b.source_power
+        );
+        assert!(g <= 1e-9, "a flat curve moved the conjugate field by {g} K");
+        assert!(
+            a.source_power > 0.0 && rel <= 1e-12,
+            "source_power {} against {}",
+            b.source_power,
+            a.source_power
+        );
+        let c = run_flow(&gpu, &kp_with(r#"{ "table": [[299.0, 2.0], [301.0, 0.0]] }"#));
+        let g = gap(&a.t, &c.t);
+        println!("sloped curve against 1 W/m^3: {g:.3e} K");
+        assert!(g > 1e-12, "a sloped curve moved the field by only {g} K (SPEC-LIT 13.4.1)");
+    }
 }

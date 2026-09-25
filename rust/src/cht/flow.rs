@@ -434,6 +434,10 @@ pub struct ChtFlowSolution {
     /// SPEC-LIT §98.8: what the enclosure measured. `None` on a case that
     /// names none.
     pub enclosure: Option<EnclosureReport>,
+    /// SPEC-LIT §100.12: the power the last energy solve's volumetric sources
+    /// delivered, W - the fixed array's total plus `SUM_c (S_C + S_P T_c) V_c`
+    /// of a curve in `T` at the returned `T`; zero when the case has none.
+    pub source_power: Scalar,
 }
 
 impl ChtFlowSolution {
@@ -628,6 +632,9 @@ pub struct FlowCase<'a> {
     /// every other region's a solid's `kappa` and `c`. Empty is every
     /// region's numbers.
     pub conduction_curves: Vec<Option<crate::io::case_cht::ConductionCurves>>,
+    /// SPEC-LIT §100.11: `LoweredChtCase::volumetric`. Empty is every region's
+    /// number alone.
+    pub volumetric: Vec<crate::cht::volumetric::LoweredSource>,
     /// SPEC-LIT §98.7: the enclosure. `None` is every case that names none.
     pub radiation: Option<FlowRadiation<'a>>,
     /// Ambient pressure the gas state is pinned at, Pa.
@@ -734,15 +741,14 @@ impl<'m> Enclosure<'m> {
 
     /// Step 4c (SPEC-LIT §98.8): one `S2s::update` on the energy's `T`, the
     /// face temperatures and the irradiation it used read back, and - on a
-    /// case with a radiating interface - the sources cleared, the uniform one
-    /// registered again and (S98.9) registered beside it.
+    /// case with a radiating interface - (S98.9) written to its device array,
+    /// which step 4d registers (SPEC-LIT §100.12).
     fn exchange(
         &mut self,
         gpu: &Gpu,
         fldk: &FieldKernels,
         energy: &mut Energy<'_>,
         tm: &ThermalMesh,
-        uniform_q: Option<&DevBuf<Scalar>>,
     ) -> Result<()> {
         let h = &tm.host;
         field_ops::copy_field(gpu, fldk, &mut self.k_wall, energy.k_eff_wall(), h.n_boundary_faces)?;
@@ -763,13 +769,13 @@ impl<'m> Enclosure<'m> {
             let q_r = self.sel.emissivity[bf] * (SIGMA_SB * t * t * t * t - self.h[s]);
             self.sink[c] -= q_r * h.b_mag_sf[bf] / h.v[c];
         }
-        gpu.write(&mut self.sink_dev, &self.sink)?;
-        let sources = energy.sources_mut();
-        sources.clear(gpu)?;
-        if let Some(q) = uniform_q {
-            sources.register_explicit(gpu, q)?;
-        }
-        sources.register_explicit(gpu, &self.sink_dev)
+        gpu.write(&mut self.sink_dev, &self.sink)
+    }
+
+    /// (S98.9)'s device array, `Some` exactly on a case with a radiating
+    /// interface - what step 4d registers (SPEC-LIT §100.12).
+    fn sink(&self) -> Option<&DevBuf<Scalar>> {
+        (!self.interface_faces.is_empty()).then_some(&self.sink_dev)
     }
 
     /// §98.8's report of the last update. `interface_source` is measured by
@@ -1076,21 +1082,39 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     // SPEC-LIT §98.8: the device array is kept, because a case with a
     // radiating interface clears the sources every iteration and registers
     // it again; its host total is what `interface_source` is measured beside.
+    // SPEC-LIT §100.11: it holds each region's number and every number box;
+    // a curve in T is split and registered at step 4d.
+    let region_numbers: Vec<Scalar> = case.regions.iter().map(|r| r.source).collect();
+    let sources =
+        crate::cht::volumetric::CellSources::build(&tm, &region_numbers, &case.volumetric)?;
+    if sources.in_time() {
+        return Err(Error::Config(format!(
+            "{}: a table in t on the conjugate path, which is steady only (SPEC-LIT 100.11)",
+            case.name
+        )));
+    }
     let (uniform_q, uniform_total): (Option<DevBuf<Scalar>>, Scalar) =
-        if case.regions.iter().any(|r| r.source != 0.0) {
-            let mut q = vec![0.0 as Scalar; tm.host.n_cells];
-            for (block, r) in tm.regions.iter().zip(&case.regions) {
-                for c in block.cells() {
-                    q[c] = r.source;
-                }
-            }
+        if sources.fixed().iter().any(|q| *q != 0.0) {
+            let q = sources.fixed();
             let total: Scalar = q.iter().zip(&tm.host.v).map(|(a, v)| a * v).sum();
-            let dq = gpu.upload(&q)?;
+            let dq = gpu.upload(q)?;
             energy.sources_mut().register_explicit(gpu, &dq)?;
             (Some(dq), total)
         } else {
             (None, 0.0)
         };
+    let src_t = sources.in_temperature();
+    let n_cells = tm.host.n_cells;
+    // SPEC-LIT §100.12: the split's device arrays, and its host copies and
+    // explicit total from the last registration.
+    let mut curve_dev: Option<(DevBuf<Scalar>, DevBuf<Scalar>)> = if src_t {
+        Some((gpu.zeros(n_cells.max(1))?, gpu.zeros(n_cells.max(1))?))
+    } else {
+        None
+    };
+    let mut curve_su: Vec<Scalar> = vec![0.0 as Scalar; n_cells];
+    let mut curve_sp: Vec<Scalar> = vec![0.0 as Scalar; n_cells];
+    let mut curve_total: Scalar = 0.0;
 
     // ---- SPEC-LIT §98.8: the enclosure -----------------------------------
     let mut enclosure: Option<Enclosure<'_>> = match &case.radiation {
@@ -1434,7 +1458,36 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         // write-back, before the energy solve, and only on a case that names
         // one.
         if let Some(e) = enclosure.as_mut() {
-            e.exchange(gpu, &fldk, &mut energy, &tm, uniform_q.as_ref())?;
+            e.exchange(gpu, &fldk, &mut energy, &tm)?;
+        }
+
+        // 4d. SPEC-LIT §100.12: the one point every per-iteration source goes
+        // through - cleared, the fixed array registered again, a curve in T
+        // split about the previous iteration's T, then (S98.9)'s sink (§98.8).
+        // A case with neither keeps the one registration before the loop.
+        let sink = enclosure.as_ref().and_then(|e| e.sink());
+        if src_t || sink.is_some() {
+            if let Some((su_dev, sp_dev)) = curve_dev.as_mut() {
+                let t = gpu.download(&energy.field().f)?;
+                let (su, sp) = sources.varying(Some(&t), None)?;
+                curve_total = su.iter().zip(&tm.host.v).map(|(a, v)| a * v).sum();
+                gpu.write(su_dev, &su)?;
+                gpu.write(sp_dev, &sp)?;
+                curve_su = su;
+                curve_sp = sp;
+            }
+            let src = energy.sources_mut();
+            src.clear(gpu)?;
+            if let Some(q) = uniform_q.as_ref() {
+                src.register_explicit(gpu, q)?;
+            }
+            if let Some((su_dev, sp_dev)) = curve_dev.as_ref() {
+                src.register_explicit(gpu, su_dev)?;
+                src.register_implicit_sink(gpu, sp_dev)?;
+            }
+            if let Some(s) = sink {
+                src.register_explicit(gpu, s)?;
+            }
         }
 
         // 5. the one energy equation, over both regions
@@ -1482,7 +1535,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             let interface_source = if e.interface_faces.is_empty() {
                 0.0
             } else {
-                energy.sources_mut().total_q(gpu, &thermal_mesh)? - uniform_total
+                energy.sources_mut().total_q(gpu, &thermal_mesh)? - uniform_total - curve_total
             };
             Some(e.report(interface_source))
         }
@@ -1530,8 +1583,13 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         None
     };
 
+    // SPEC-LIT §100.12: the power the last energy solve's sources delivered.
+    let t_final = gpu.download(&energy.field().f)?;
+    let source_power = uniform_total
+        + crate::cht::volumetric::delivered_power(&curve_su, &curve_sp, &t_final, &tm.host.v);
+
     Ok(ChtFlowSolution {
-        t: gpu.download(&energy.field().f)?,
+        t: t_final,
         bt,
         u: gpu.download(&simple.u().f)?,
         b_conductance,
@@ -1545,6 +1603,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         fluid_rho_cp: rho_cp,
         external_residual,
         enclosure: enclosure_report,
+        source_power,
         mesh: tm,
     })
 }

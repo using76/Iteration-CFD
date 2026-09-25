@@ -4315,6 +4315,22 @@ mod tests {
         s.clear(&g)?;
         let q = g.download(s.q())?;
         assert!(q.iter().all(|&v| v == 0.0));
+
+        // SPEC-LIT §100.12: the implicit half accumulates and clears the same
+        // way, and a registration after a clear is the source ONCE - the rule
+        // step 4d of `run_flow_case` rests on.
+        let c = g.upload(&vec![-2.0 as Scalar; hm.n_cells])?;
+        let d = g.upload(&vec![-3.0 as Scalar; hm.n_cells])?;
+        s.register_explicit(&g, &a)?;
+        s.register_implicit_sink(&g, &c)?;
+        s.register_implicit_sink(&g, &d)?;
+        let sp = g.download(s.sp())?;
+        assert!(sp.iter().all(|&v| v == -5.0), "{sp:?}");
+        s.clear(&g)?;
+        assert!(g.download(s.sp())?.iter().all(|&v| v == 0.0));
+        s.register_explicit(&g, &a)?;
+        let q = g.download(s.q())?;
+        assert!(q.iter().all(|&v| v == 10.0), "cleared and registered again: {q:?}");
         Ok(())
     }
 
