@@ -29958,6 +29958,288 @@ the residual (S98.5) `3.9e-16`.
 
 ---
 
+## 100. Properties that are functions of temperature — one evaluator, the curve a case may write, `E(T)` and `alpha(T)` on the solid, and the published tables it is held against
+
+Until this section every property a `*.cht.jsonc` case writes is one
+number: `kappa`, `c`, `cp`, `mu`, `E`, `alpha`. This section adds the
+evaluator a temperature-dependent property needs (§100.1), lets a case write
+a curve in `T` in every one of those entries (§100.2), consumes the two that
+the thermo-elastic solid reads after the thermal solve has converged,
+`E(T)` and `alpha(T)` (§100.3), and holds the evaluator against three
+published tables (§100.4, Gate 100-B).
+
+What it does not do is rebuild the conduction operator, the transient
+weight, the fluid's `k_eff` and `rho cp`, or the momentum equation's
+viscosity from a curve. Each of those is built once, from a constant, before
+the first iteration, and a curve there makes the problem nonlinear - it
+needs an outer loop that rebuilds the coefficients from the current iterate
+and says when it has converged. That loop, and the gate that proves it
+converged (Gate 100-A), are a later subsection of this number; until then a
+case that writes a curve in one of those entries has the curve read,
+validated and **refused by name** (§100.2), so no run silently uses a
+constant in its place. Volumetric sources that vary are also later.
+
+The gates of this section are 100-A to 100-D. `docs/09` wrote them under the
+number before this one, which §69's registry reserves for invented gate
+addresses; those names are not used anywhere in the tree.
+
+`No GPL-licensed source was consulted.`
+
+### 100.1 The evaluator - four forms, one range, no extrapolation
+
+`src/properties.rs` holds `Property`, and every curve a case writes lowers
+onto one of its four forms:
+
+```
+p(T) = p0                                                                    (S100.1)
+p(T) = v_i + (T - T_i)/(T_(i+1) - T_i) (v_(i+1) - v_i),   T_i <= T < T_(i+1)  (S100.2)
+p(T) = F sum_j c_(k,j) (T/T_s)^(e_j),   piece k: lo_k <= T <= hi_k            (S100.3)
+p(T) = p_ref (T/T_ref)^(3/2) (T_ref + S)/(T + S)                             (S100.4)
+```
+
+**The constant (S100.1)** is the number a case wrote. It has no range and no
+evaluation: it is the same bits at every temperature, which is what makes
+the constant path of every consumer the path it was before this section.
+
+**The table (S100.2)** is piecewise linear on knots `T_0 < T_1 < ... < T_n`,
+at least two, `T_0 > 0`. The segment used at `T` is the one whose LEFT end
+is the last knot at or below `T`, and the last knot returns its own value,
+so a table returns every knot's value to the bit.
+
+**The series (S100.3)** is a generalised power series in `T/T_s` with real
+exponents `e_j`, one coefficient per exponent on each of one or more pieces,
+times a factor `F`. It is one form for two published families: the
+seven-term `cp/R` of McBride, Zehe & Gordon (NASA/TP-2002-211556, eq. (1)) is
+`e = -2, -1, 0, 1, 2, 3, 4`, `T_s = 1`, two pieces 200-1000 and 1000-6000 K,
+and `F = R/W` turns it into J/(kg K); Kadoya, Matsunaga & Nagashima's dilute
+air, eqs. (3a) and (5a), is `e = 1, 1/2, 0, -1, -2, -3, -4`,
+`T_s = T* = 132.5 K` and `F = H` or `Lambda`. The pieces are contiguous -
+`hi_k` IS `lo_(k+1)` - and a `T` on a shared end belongs to the LOWER piece.
+NASA's own fit constraint (2) makes the two pieces agree at the common
+point, so the choice does not move a printed digit (§100.4 measures it);
+it is stated because a device twin must make the same one. A term whose
+exponent is an integer of magnitude at most 16 is evaluated by repeated
+multiplication (`powi`) and any other by `powf`, for the same reason.
+
+**Sutherland's law (S100.4)** is carried in its textbook form, with the
+three constants and the range the case states; no constant of it is
+supplied by the code.
+
+**The range.** A table's is `[T_0, T_n]`, a series' `[lo_1, hi_last]`,
+Sutherland's the one the case writes. Every lower end must be a positive,
+absolute temperature. An evaluation outside the range is an error naming
+the setting, the temperature and the range: **a curve is not extrapolated**,
+the rule §98.4 applies to Churchill & Chu's Rayleigh range.
+
+**What the evaluator does not check** is the sign of the value. Each
+consumer states what its quantity must be - `E > 0` through §95's
+`Material::validate`, `alpha >= 0` - and checks the values it evaluates.
+
+**Host only, in this state of the tree.** A device twin of the evaluator,
+held to the host to `1e-12` on random temperatures, lands with its first
+device consumer, the conduction rebuild: a kernel that no captured region
+calls would enter §81.7's registry with a stance nothing proves.
+
+### 100.2 What a case writes - the number, or a curve, in the same entry
+
+```jsonc
+"material": { "rho": 2330.0, "c": 700.0,
+              "kappa": { "table": [[300.0, 148.0], [350.0, 119.0], [400.0, 98.9],
+                                   [500.0, 76.2], [600.0, 61.9]] } },
+"mechanics": {
+  "material": { "E": 200e9, "nu": 0.3, "TRef": 293.15,
+                "alpha": { "polynomial": {
+                  "exponents": [0.0, 1.0],
+                  "pieces": [ { "range": [250.0, 450.0], "coefficients": [1.0e-5, 1.0e-8] } ] } } },
+  ...
+}
+```
+
+(The silicon table is §100.4's leg 1; the `alpha` curve is illustrative.)
+
+| Key | Meaning |
+|---|---|
+| a number | exactly what it meant before this section: the lowered case, and every bit a run prints, are unchanged |
+| `{ "table": [[T, v], ...] }` | (S100.2); `T` in K, `v` in the entry's own unit |
+| `{ "polynomial": { "exponents", "pieces": [{ "range": [lo, hi], "coefficients" }], "scale", "factor" } }` | (S100.3); `scale` is `T_s` and `factor` is `F`, both defaulting to 1 |
+| `{ "sutherland": { "value", "TRef", "S", "range": [lo, hi] } }` | (S100.4); `value` is the property at `TRef` |
+
+The entry is read number-first, so every document written before this
+section deserialises exactly as it did. `kappa` keeps its second spelling,
+three numbers for `diag(kx, ky, kz)` (§46.4); a curve is isotropic, and an
+anisotropic curve is not a form.
+
+**Where a curve is accepted, and what reads it today:**
+
+| entry | a number | a curve |
+|---|---|---|
+| a solid's `material.kappa` | as before | read, validated, **refused**: §46.2's face conductances are built once, at setup |
+| a solid's `material.c` | as before | read, validated, **refused**: the transient weight `rho c` is built once |
+| a fluid's `fluid.kappa`, `fluid.cp` | as before | read, validated, **refused**: §26's `k_eff` and `rho cp` are built from constants |
+| a fluid's `fluid.mu` | as before | read, validated, **refused**: the momentum equation's laminar viscosity is a constant |
+| `mechanics.material.E` and `alpha`, and each zone's | as before | **consumed**: §100.3 |
+
+A refused curve is refused only after it has been validated as a curve, so
+a malformed one is refused for its own reason first; the message then names
+the entry, the curve, and the consumer that does not yet rebuild from it -
+`regions/die/material/kappa: a curve in T (a table of 5 knots on [300, 600]
+K) is read and valid, but the conduction operator's face conductances are
+built once, from a constant (SPEC-LIT 100.2); write a number`.
+
+### 100.3 `E(T)` and `alpha(T)` on the thermo-elastic solid - evaluated per zone, at the zone's mean temperature
+
+§96.2 solves the displacement AFTER the thermal solve has converged, on a `T`
+that no longer moves, so a temperature-dependent elastic constant needs no
+loop: it is evaluated once, from the converged field, before §95.8's
+material map is built.
+
+What it cannot be, in this state of the tree, is evaluated per CELL. Two
+facts of `cuda/solid.cu` say why. The deferred traction a non-bond internal
+face contributes is computed with the ASSEMBLING cell's own `mu` and
+`lambda`, and the thermal load with that cell's own `(3 lambda + 2 mu)
+alpha`. Both are exact when the constants are uniform across the face, which
+is what a zone is. With constants that differ cell to cell, the owner and
+the neighbour would compute two different tractions for one face, and the
+discretisation would stop conserving momentum. A per-cell `E(T)` needs
+face-interpolated constants in those two kernels, which is a change to
+§95's numerics and is not made here.
+
+So each zone `z` is evaluated once:
+
+```
+T_z = sum_(c in z) V_c T_c / sum_(c in z) V_c,     E_z = E(T_z),     alpha_z = alpha(T_z)    (S100.5)
+```
+
+and the zone is then §95's constant-property zone with `(E_z, nu, alpha_z)`:
+every kernel reads the bits it would read had the case written those two
+numbers. The thermal strain stays `alpha_z (T - TRef)`, so **a curve for
+`alpha` is the SECANT coefficient** - the total expansion from `TRef`
+divided by `T - TRef`. A curve of the instantaneous coefficient `d eps/dT`
+is a different quantity; this section does not convert one into the other.
+
+**What the approximation costs is printed, not argued.** After the run each
+zone with a curve reports `T_z`, the range `[T_min, T_max]` of its cells'
+temperatures, and each curve's value at the three, so the spread the mean
+hides is on the screen. Every cell's temperature must lie in the curve's
+range: a zone whose converged range leaves it is refused, naming the curve's
+range and the zone's, even though only `T_z` is evaluated - the case stated
+a curve valid over a range its own solution leaves.
+
+**At lowering** a curve is validated at sample temperatures - every knot of
+a table; both ends and fifteen evenly spaced interior points of any other
+curve - with the zone's other constants: `E > 0` and the `nu` rules through
+§95's `Material::validate`, `alpha >= 0`. `TRef` is required beside an
+`alpha` curve (§96.3 row 3's rule: a curve is never the zero that exempts
+it). The zone's lowered constants carry the curve's values at the LOWER end
+of its range as a placeholder, and the §13.4.2 banner prints the curve and
+says that it is evaluated after the thermal solve.
+
+**The bitwise rule.** A zone that writes numbers builds §95.8's map from its
+lowered constants exactly as before this section.
+
+### 100.4 Gate 100-B - the evaluator against three published tables
+
+`docs/09` names two primaries for this gate that the programme had marked
+paywalled - Glassbrenner & Slack (1964) for silicon and Kadoya, Matsunaga &
+Nagashima (1985) for air - and a third that is public domain. The decision
+of 2026-09-23 was to buy neither and to implement the same function from an
+open, citable source. What was found on 2026-09-25:
+
+* **Kadoya et al. is not paywalled.** *J. Phys. Chem. Ref. Data* 14 (1985)
+  947-970, DOI 10.1063/1.555744, is reprinted in NIST's open JPCRD archive
+  (`srd.nist.gov/JPCRD/jpcrd283.pdf`). That host answered 503 on the day; the
+  copy read is the Internet Archive's of the same URL. The leg uses the
+  primary itself.
+* **Glassbrenner & Slack** (*Phys. Rev.* 134 (1964) A1058, DOI
+  10.1103/PhysRev.134.A1058) is behind the APS paywall and was not read. The
+  open equivalent is **Ho, Powell & Liley**, "Thermal conductivity of the
+  elements: a comprehensive review", *J. Phys. Chem. Ref. Data* 1 (1972)
+  279-421, DOI 10.1063/1.3253100, in the same archive (`jpcrd7.pdf`, the
+  Internet Archive's copy), whose recommended values for high-purity silicon
+  are stated accurate to within 5 % from 300 to 1000 K (p. 394).
+* **McBride, Zehe & Gordon**, NASA/TP-2002-211556 (2002), a US-Government
+  work, is on NASA's technical reports server
+  (`ntrs.nasa.gov/citations/20020085330`, 295 pages).
+
+Every number the gate compares with is a key file under `reference/` with its
+digest (§10). Each leg builds its curve by writing the case format's own JSON
+from the key and lowering it, so the parse, the validation and the evaluator
+are all on the path.
+
+**Leg 1 - silicon (Ho, Powell & Liley, p. 394).** A table of the source's
+five values at 300, 350, 400, 500 and 600 K returns each to the bit, and at
+the source's four other printed temperatures in the range - 323.2, 373.2,
+473.2 and 573.2 K - lies within the 5 % it states. What this proves: that a
+piecewise-linear table of the recommended values represents silicon between
+its knots inside the source's own uncertainty, so the silicon curve a case
+writes can be the recommended table itself. What it does not: Glassbrenner &
+Slack's measurements are not compared, and `dieStack`'s die conductivity is
+an effective anisotropic number that no leg reads.
+
+**Leg 2 - air (Kadoya et al., eqs. (3) and (5), Tables 3, 7, 8, 11, 12).**
+The dilute parts `eta_0(T)` and `lambda_0(T)` as (S100.3) curves from Tables
+7 and 11 (`T* = 132.5 K`, `H = 6.16090e-6 Pa s`, `Lambda = 25.9778e-3
+W/(m K)`), plus the paper's own density series `Delta eta(rho_r)` and
+`Delta lambda(rho_r)`, `rho_r = rho/314.3 kg/m^3`, at 0.1 MPa with `rho`
+from the ideal gas at `M = 28.9644 kg/kmol` (Table 3); held against Tables 8
+and 12 at 0.10 MPa, 250 to 1000 K in 50 K steps (sixteen temperatures), to
+half a unit in the printed last digit - `0.005e-6 Pa s` and `0.005e-3 W/(m
+K)` - plus `1e-3` of the density term, which bounds the ideal-gas density's
+error (`|Z - 1| < 1e-3` over this range at 0.1 MPa). This is the paper's
+function, implemented from the paper and held to the paper's printed
+tables; `docs/09`'s 1 % is looser by more than an order of magnitude.
+
+**Leg 3 - the seven-term `cp/R` (NASA/TP-2002-211556, eq. (1), Appendices A,
+B and D).** `cp/R` for N2, O2, Ar and air as two-piece (S100.3) curves on
+200-1000-6000 K. `Cp(298.15) = R cp/R` with `R = 8.314510 J/(mol K)`
+(Appendix A) against Table B1 to half the printed last digit, `0.0005
+J/(K mol)` - the report's fits are constrained to be exact at 298.15 K (its
+constraint (1)); and the two pieces equal at 1000 K to `1e-8` relative - its
+constraint (2), to the ten digits the coefficients are printed with.
+
+A key that is absent, or whose digest is not the manifest's, makes its leg
+report open by name; it is never passed (§10).
+
+### 100.5 The refusal list, the pair tests, and what must hold
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | a table with fewer than two knots, with temperatures that do not increase strictly, or with a number that is not finite | the JSON path, and which |
+| 2 | a polynomial with no exponent or no piece, a piece whose coefficient count is not the exponent count, pieces that are not contiguous, `scale <= 0`, or `factor = 0` | the JSON path, and which |
+| 3 | Sutherland's law with `value <= 0`, `TRef <= 0` or `S < 0` | the JSON path |
+| 4 | any range that is not ascending or does not start at a positive temperature | the JSON path and the range |
+| 5 | an evaluation outside the range | the JSON path, the temperature and the range |
+| 6 | a curve for a solid's `kappa` or `c`, or a fluid's `kappa`, `cp` or `mu` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
+| 7 | an `E` or `alpha` curve whose value at a sample temperature fails §95's `validate`, or an `alpha` below zero there | the JSON path and the temperature |
+| 8 | an `alpha` curve without `TRef` | the JSON path |
+| 9 | a zone whose converged temperatures leave its curve's range | the JSON path, the zone's range and the curve's |
+
+**The pair tests (§13.4.1).** On §96's steel bar - clamped, heated linearly
+from 300 to 400 K - an `alpha` curve against the constant `alpha(300 K)`,
+and an `E` curve against the constant `E(300 K)`, each required to move the
+displacement; and the twin: a curve and the constant it evaluates to at
+`T_z` (S100.5), written back as a number, required to give the same
+displacement to `1e-12` relative - which proves where the curve was
+evaluated. On Gate 95-E's bimetal strip as the shipped case, brass's `alpha`
+as a table whose value at the strip's temperature is `2.4e-5` - not `2.0e-5`
+- required to move the tip, and to meet Timoshenko's closed form (S95.19)
+with that `alpha` inside the case's own 10 % band.
+
+| Check | Expected |
+|---|---|
+| the table, host | every knot returned to the bit; the midpoint the mean of its two knots |
+| the series, host | the value its terms give, piece by piece; a shared end taken from the lower piece |
+| Sutherland, host | `value` at `TRef`; `value (T/TRef)^(1/2)` when `S = 0` |
+| the constant, host | its number at every temperature, no range |
+| rows 1-5 | each refused, the message naming the setting |
+| rows 6-9 | each refused, the message naming the JSON path |
+| a number in every entry | the lowered case equal to what it was before this section |
+| the pair tests | every pair above different, the twin equal, failing by name |
+| the schema | `docs/schema/cht-1.json` regenerated, the three curve forms in it |
+| Gate 100-B | the three legs of §100.4, each on its key's digest |
+
+---
+
 ## 105. ALE motion and the space conservation law — the mesh that moves, and the volume it sweeps
 
 The mesh moves and the volume it computes moves with it. This section owns:
