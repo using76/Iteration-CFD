@@ -707,6 +707,51 @@ For later units — AM-13/AM-14: the tuning rows of both baselines are in
 training rows. AM-16: `baseline.load_sealed(system, "evaluate")` gives the test baselines for
 G-FAIL/G-FID/G-COST, and McNemar pairs by geometry id.
 
+## prior.py — the L3 prior (k-NN warm start, G-PRIOR)
+
+In modes `rules+prior` and `full`, campaign.py calls `prior.attempt1` before attempt 1:
+a distance-weighted k-NN (k = 3) over standardised fingerprints of the PASSING tuning
+geometries. Each fingerprint becomes 17 shape features (extents, area, volume, sharp
+edges, curvature radii, inner thickness, outer gap, planar fraction, commensurability,
+triangles) with a stated fill and a missing-indicator per nullable field:
+
+| null field | feature | indicator | fill | clip | why |
+|---|---|---|---|---|---|
+| curvature p5/p50/p95 | log10_r*_over_lmax | curv_missing | 2.0 | [-3, 2] | no curved triangle (a box); a plane's radius takes the flattest clipped value |
+| inner_thickness_m | log10_inner_over_lmax | inner_missing | 0.0 | [-3, 0] | no thin section; the body's own largest extent |
+| outer_gap_m | log10_gap_over_lmax | gap_missing | 1.0 | [-3, 1] | a single body; the gap is ten body extents |
+
+Excluded from the fingerprint: `lattice_base_size_m` (carried by `commensurate`),
+`patches`, `feature_angle_deg`, `stl_sha256`, `geometry_id`. Features are standardised
+with the tuning pool's mean and std (features with std <= 1e-12 drop); distance is the
+RMS over the kept features; the neighbours vote with weight 1/(d + 1e-6), ties to the
+nearest. The abstention distance d_abstain is locked at the 95th percentile of the
+pool's nearest-neighbour distances. Decisions: PR-KNN (apply the winning path's
+refinement and snap remedies through remedies.py's own functions, guards and `_commit` —
+a wall level never drops below this geometry's y+ floor, the R-PLANE path is left alone,
+the layers block is never touched), PR-KEEP (the neighbours needed nothing), PR-FAR
+(too far, or the bank is smaller than k), PR-NOEDIT (the path changes nothing here),
+PR-DISABLED (the prior ships disabled).
+
+G-PRIOR (docs/15 §F): on a finished `rules` campaign of the tuning split (nothing
+ablated; the seal refuses any other campaign first), leave-one-geometry-out — each
+geometry's own bank entry is removed — the real prior's attempt-1 pass rate must be at
+least rules-only's AND a shuffled-fingerprint control (three seeded permutations of the
+bank's fingerprints per fold, mean of their pass counts) must do worse; otherwise the
+prior ships DISABLED. A config the rules campaign already ran (equal config sha256) is
+reused, not meshed again; the rest is run in rounds with the audit sample off.
+Departures from docs/15 §C L3/§F (the tree wins): the transferred "knobs" are a remedy
+PATH; the standardisation and d_abstain use every fingerprinted tuning geometry; the
+shuffled control's mean decides; first-attempt pass is `failure` False (the MFR
+definition). campaign.py's replay reads a prior-applied attempt 1's preflight verdict
+under the prior's config sha (the only attempt-1 candidate vetoed then). The numbers are
+in `prior/G-PRIOR.json`, `prior/G-PRIOR.md` and `prior/prior_model.json`, written by the
+supervisor's run. For later units — AM-14: `prior/tuning_rules.json.gz`
+(`baseline.read_bundle`) holds every rules attempt on the tuning split with its outcome;
+AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
+`prior/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
+(the ablation "-prior" is then equal to it by construction).
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -744,6 +789,9 @@ G-FAIL/G-FID/G-COST, and McNemar pairs by geometry id.
     python tools/autonomy/baseline.py --report --template DIR --lhs DIR     # baseline/B0.json and B0.md (tuning only)
     python tools/autonomy/baseline.py --rcurv --out DIR                     # baseline/R-CURV.json and .md
     python tools/autonomy/baseline.py --check                               # the report, the bundles and the seal
+    python tools/autonomy/prior.py --plan --rules DIR                      # G-PRIOR's decisions and rounds, nothing run
+    python tools/autonomy/prior.py --gate --rules DIR --work DIR           # prior/G-PRIOR.json, .md and prior_model.json
+    python tools/autonomy/prior.py --check                                 # the report, the bundles and the model rebuild
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report

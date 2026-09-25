@@ -1486,9 +1486,15 @@ def _replay_one(gid, header, layers, k, rows_by, end, mrow, cdir, gates, knobs,
             bad(gid, 1, "rules.setup refuses %s but the end record says %s / %s"
                 % (setup["refused"], end["terminal"], end["refused"]))
         return
-    v1 = lookup.get((1, sha(setup["config"]))) if "preflight" in layers else None
+    # A prior-applied attempt 1 whose config passed preflight is the only
+    # attempt-1 candidate _run_system vetoes; its verdict is the one recorded.
+    first = ordered[0] if ordered else None
+    a1_sha = first["config_sha"] if first is not None and \
+        first["decided_by"] == "prior" else sha(setup["config"])
+    v1 = lookup.get((1, a1_sha)) if "preflight" in layers else None
     if "preflight" in layers and v1 is None:
-        bad(gid, 1, "no recorded attempt-1 verdict for the setup config")
+        bad(gid, 1, "no recorded attempt-1 verdict for the %s config"
+            % ("prior's" if a1_sha != sha(setup["config"]) else "setup"))
     if end["terminal"] == "REFUSED":
         if ordered:
             bad(gid, 1, "REFUSED end with %d rows" % len(ordered))
@@ -2363,7 +2369,7 @@ def _hook_record(layer, rid, verdict, edits, message):
 def _g9_hooks(H):
     pid = "-".join(("PR", "FAKE"))
     oid = "-".join(("OPT", "FAKE"))
-    for mode, want in (("rules+prior", "prior.py"), ("rules+opt", "optimise.py")):
+    for mode, want in (("rules+opt", "optimise.py"),):
         out = os.path.join(H["tmp"], "g9-missing-" + mode.replace("+", "-"))
         try:
             run_campaign({"manifest": "tuning", "mode": mode, "out": out,
@@ -2434,6 +2440,8 @@ def _g9_hooks_run(H, pid, oid, prior, optimise):
     assert all(explain.validate_row(r) == [] for r in rows)
     a = explain.audit(rows, load_records(d))
     assert a["ok"], json.dumps(a["record_order"]["bad"])[:1000]
+    rp = replay(d)
+    assert rp["ok"], json.dumps(rp["mismatches"])[:1000]
 
 
 def _g10_runner(H):
@@ -2742,9 +2750,10 @@ def selftest():
         _group("veto and ablation: PF-BUDGET refuses attempt 1 (REFUSED, 0 rows); "
                "-preflight runs with the refusal recorded; -remedies ends after 1 "
                "attempt (EXHAUSTED, K = 1)", _g8_veto_ablation, H)
-        _group("hooks: rules+prior and rules+opt refused without prior.py / "
-               "optimise.py; a fake prior decides attempt 1; a fake optimiser runs "
-               "after EXHAUSTED with its prediction before t_start", _g9_hooks, H)
+        _group("hooks: rules+opt refused without optimise.py (prior.py is present); "
+               "a fake prior decides attempt 1; a fake optimiser runs "
+               "after EXHAUSTED with its prediction before t_start; replay "
+               "reproduces both", _g9_hooks, H)
         _group("runner: a 30 s child killed by its PID after 1.5 s, a 50 MiB child "
                "peaks at {peak} MiB, RAM admission ordered, 0 orphans",
                _g10_runner, H)

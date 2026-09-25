@@ -231,6 +231,24 @@ TEMPLATES = {
                      "title": "end the geometry: the failure is outside the remedy table",
                      "because": "a surface defect, a config the mesher rejects, a harness fault or a "
                                 "quality gate is not something a bounded edit may change"},
+    "PR-KNN": {"layer": "prior",
+               "title": "warm-start attempt one from the nearest passing tuning geometries",
+               "because": "similar geometries needed the same refinement and snap remedies to pass, "
+                          "so attempt one starts from their path"},
+    "PR-KEEP": {"layer": "prior",
+                "title": "keep the rules' attempt: the nearest passing geometries needed no remedy",
+                "because": "the neighbours passed with the setup rules' own config"},
+    "PR-FAR": {"layer": "prior",
+               "title": "abstain: no passing tuning geometry is near enough",
+               "because": "a neighbour beyond the locked distance says nothing about this geometry"},
+    "PR-NOEDIT": {"layer": "prior",
+                  "title": "abstain: the neighbours' remedies change nothing here",
+                  "because": "the transferred remedies are refused by their own guards on this "
+                             "config, or the body is on the plane path"},
+    "PR-DISABLED": {"layer": "prior",
+                    "title": "abstain: the prior ships disabled",
+                    "because": "the prior did not earn its place on the tuning split, so the setup "
+                               "rules decide attempt one"},
 }
 
 
@@ -847,7 +865,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 41, len(TEMPLATES)
+    assert len(TEMPLATES) == 46, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -856,8 +874,9 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 6, "R": 8, "RM": 16}, counts
-    print("[ok] templates: 41 rule ids (PF 11, WL 6, R 8, RM 16), each with its "
+    assert counts == {"PF": 11, "WL": 6, "R": 8, "RM": 16, "PR": 5}, counts
+    print("[ok] templates: 46 rule ids (PF 11, WL 6, R 8, RM 16, PR 5), each "
+          "with its "
           "prefix's layer, no digit in any template")
 
 
@@ -877,7 +896,7 @@ def _g2_static_scan():
     finally:
         os.remove(planted)
         os.rmdir(tmp)
-    print("[ok] static scan: 41 ids in %d source files, all templated, none dead, "
+    print("[ok] static scan: 46 ids in %d source files, all templated, none dead, "
           "PF-TEST only in remedies.py; module tables templated; a planted "
           "RM-NEW-THING is reported missing" % sc["files"])
 
@@ -892,7 +911,8 @@ def _g3_records():
         assert c["line"].startswith(rec["rule_id"] + " "), rec["rule_id"]
         ids.add(rec["rule_id"])
         assert ungrounded(c["line"], [rec]) == [], rec["rule_id"]
-    assert ids == set(TEMPLATES), ids ^ set(TEMPLATES)
+    fx_ids = {r for r in TEMPLATES if not r.startswith("PR-")}
+    assert ids == fx_ids, ids ^ fx_ids
     for v in [0.0, 1.0, 0.1334231805929919, 3, True, None, "a", [1.5, None], {"k": 1}]:
         assert fmt(v) == remedies._fmt(v), (v, fmt(v), remedies._fmt(v))
     print("[ok] records: 59 fixture records of 41 ids render, every line starts with "
