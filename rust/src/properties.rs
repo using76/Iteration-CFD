@@ -9,7 +9,7 @@
 //! a generalised power series in `T/T_s` over contiguous pieces (S100.3),
 //! and Sutherland's law (S100.4); every form but the constant has a range,
 //! and an evaluation outside it is refused, never extrapolated (§100.1).
-//! Host arithmetic only: nothing here launches a kernel.
+//! The host evaluator, and its device twin (§100.9) in `cuda/properties.cu`.
 //!
 //! Written from:
 //!   B. J. McBride, M. J. Zehe, S. Gordon, *NASA Glenn Coefficients for
@@ -28,7 +28,9 @@
 //! No GPL-licensed source was consulted.
 
 use crate::error::{Error, Result};
-use crate::Scalar;
+use crate::{Label, Scalar};
+use cudarc::driver::{CudaFunction, PushKernelArg};
+use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 
 /// One piece of a (S100.3) series: its closed range, K, and one
 /// coefficient per exponent.
@@ -315,6 +317,175 @@ fn power(x: Scalar, e: Scalar) -> Scalar {
     }
 }
 
+// ==========================================================================
+//  §100.9  The device twin
+// ==========================================================================
+
+/// §100.9: the three kernels of `cuda/properties.cu`.
+pub struct PropertyKernels {
+    table: CudaFunction,
+    polynomial: CudaFunction,
+    sutherland: CudaFunction,
+}
+
+impl PropertyKernels {
+    pub fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::PROPERTIES)?;
+        Ok(Self {
+            table: k.func("propertyTable")?,
+            polynomial: k.func("propertyPolynomial")?,
+            sutherland: k.func("propertySutherland")?,
+        })
+    }
+}
+
+/// A curve's coefficients on the device, in the kernel's layout.
+enum DeviceForm {
+    Table { t: DevBuf<Scalar>, v: DevBuf<Scalar>, n: Label },
+    Polynomial {
+        exponents: DevBuf<Scalar>,
+        lo: DevBuf<Scalar>,
+        hi: DevBuf<Scalar>,
+        /// `[n_pieces][n_terms]`, row-major.
+        coefficients: DevBuf<Scalar>,
+        n_terms: Label,
+        n_pieces: Label,
+        scale: Scalar,
+        factor: Scalar,
+    },
+    Sutherland { value: Scalar, t_ref: Scalar, s: Scalar },
+}
+
+/// §100.9: a curve uploaded once, evaluated elementwise on the device. An
+/// evaluation outside the range writes NaN and raises the flag, which the
+/// consumer reads between two solves and refuses on (§100.9).
+pub struct DeviceProperty {
+    form: DeviceForm,
+    range: (Scalar, Scalar),
+    /// `[1]`: 0 until an evaluation leaves the range, 1 after.
+    flag: DevBuf<Scalar>,
+}
+
+impl DeviceProperty {
+    /// Upload `p`. A constant has no device form - its consumer takes the
+    /// constant path - and is refused naming `setting`.
+    pub fn upload(gpu: &Gpu, setting: &str, p: &Property) -> Result<Self> {
+        let Some(range) = p.range() else {
+            return Err(Error::Config(format!(
+                "{setting}: a constant has no device form - its consumer takes the \
+                 constant path it took before §100 (SPEC-LIT 100.9)"
+            )));
+        };
+        let form = match p {
+            Property::Constant(_) => unreachable!("a constant has no range"),
+            Property::Table { t, v } => DeviceForm::Table {
+                t: gpu.upload(t)?,
+                v: gpu.upload(v)?,
+                n: t.len() as Label,
+            },
+            Property::Polynomial { exponents, pieces, scale, factor } => {
+                let lo: Vec<Scalar> = pieces.iter().map(|q| q.lo).collect();
+                let hi: Vec<Scalar> = pieces.iter().map(|q| q.hi).collect();
+                let c: Vec<Scalar> =
+                    pieces.iter().flat_map(|q| q.coefficients.iter().copied()).collect();
+                DeviceForm::Polynomial {
+                    exponents: gpu.upload(exponents)?,
+                    lo: gpu.upload(&lo)?,
+                    hi: gpu.upload(&hi)?,
+                    coefficients: gpu.upload(&c)?,
+                    n_terms: exponents.len() as Label,
+                    n_pieces: pieces.len() as Label,
+                    scale: *scale,
+                    factor: *factor,
+                }
+            }
+            Property::Sutherland { value, t_ref, s, .. } => {
+                DeviceForm::Sutherland { value: *value, t_ref: *t_ref, s: *s }
+            }
+        };
+        Ok(Self { form, range, flag: gpu.upload(&[0.0 as Scalar])? })
+    }
+
+    /// The closed range `[lo, hi]`, K.
+    pub fn range(&self) -> (Scalar, Scalar) {
+        self.range
+    }
+
+    /// `dst[i] = p(t[i])` for `i < n` (§100.9).
+    pub fn evaluate(
+        &mut self,
+        gpu: &Gpu,
+        k: &PropertyKernels,
+        dst: &mut DevBuf<Scalar>,
+        t: &DevBuf<Scalar>,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as Label;
+        let (lo, hi) = self.range;
+        let Self { form, flag, .. } = self;
+        match form {
+            DeviceForm::Table { t: ts, v, n: nk } => unsafe {
+                gpu.stream()
+                    .launch_builder(&k.table)
+                    .arg(&mut *dst)
+                    .arg(t)
+                    .arg(&nl)
+                    .arg(&*ts)
+                    .arg(&*v)
+                    .arg(&*nk)
+                    .arg(&mut *flag)
+                    .launch(cfg_for(n))?;
+            },
+            DeviceForm::Polynomial { exponents, lo: plo, hi: phi, coefficients, n_terms, n_pieces, scale, factor } => unsafe {
+                gpu.stream()
+                    .launch_builder(&k.polynomial)
+                    .arg(&mut *dst)
+                    .arg(t)
+                    .arg(&nl)
+                    .arg(&*exponents)
+                    .arg(&*n_terms)
+                    .arg(&*plo)
+                    .arg(&*phi)
+                    .arg(&*coefficients)
+                    .arg(&*n_pieces)
+                    .arg(&*scale)
+                    .arg(&*factor)
+                    .arg(&mut *flag)
+                    .launch(cfg_for(n))?;
+            },
+            DeviceForm::Sutherland { value, t_ref, s } => unsafe {
+                gpu.stream()
+                    .launch_builder(&k.sutherland)
+                    .arg(&mut *dst)
+                    .arg(t)
+                    .arg(&nl)
+                    .arg(&*value)
+                    .arg(&*t_ref)
+                    .arg(&*s)
+                    .arg(&lo)
+                    .arg(&hi)
+                    .arg(&mut *flag)
+                    .launch(cfg_for(n))?;
+            },
+        }
+        Ok(())
+    }
+
+    /// Has any evaluation since the last [`Self::clear_flag`] left the range?
+    /// A read-back: between two solves, never inside a captured region.
+    pub fn left_range(&self, gpu: &Gpu) -> Result<bool> {
+        Ok(gpu.download(&self.flag)?[0] != 0.0)
+    }
+
+    /// Lower the flag.
+    pub fn clear_flag(&mut self, gpu: &Gpu) -> Result<()> {
+        gpu.write(&mut self.flag, &[0.0 as Scalar])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +659,166 @@ mod tests {
             assert!(p.value("c", *x).is_ok(), "x = {x}");
         }
         assert!(p.describe().contains("[250, 450] K"), "{}", p.describe());
+    }
+
+    /// The process's device, if the box has one: every GPU test returns
+    /// early rather than failing.
+    fn gpu() -> Option<Gpu> {
+        Gpu::new(0).ok()
+    }
+
+    /// The four curves of §100.9's twin gate, each with the name a failure
+    /// prints.
+    fn twin_curves() -> Vec<(&'static str, Property)> {
+        let table = Property::table(
+            "table",
+            &[(300.0, 148.0), (350.0, 119.0), (400.0, 98.9), (500.0, 76.2), (600.0, 61.9)],
+        )
+        .unwrap();
+        let nasa = Property::polynomial(
+            "nasa",
+            &[-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0],
+            &[
+                Piece { lo: 200.0, hi: 1000.0, coefficients: vec![2.2e4, -3.8e2, 6.1, -1.1e-2, 1.9e-5, -1.3e-8, 3.6e-12] },
+                Piece { lo: 1000.0, hi: 6000.0, coefficients: vec![5.9e5, -2.2e3, 6.6, -6.1e-4, 1.5e-7, -1.9e-11, 1.0e-15] },
+            ],
+            1.0,
+            296.8,
+        )
+        .unwrap();
+        let kadoya = Property::polynomial(
+            "kadoya",
+            &[1.0, 0.5, 0.0, -1.0, -2.0, -3.0, -4.0],
+            &[Piece { lo: 250.0, hi: 1000.0, coefficients: vec![0.128, -0.005, 2.0, -0.4, 0.07, -0.006, 0.0002] }],
+            132.5,
+            25.9,
+        )
+        .unwrap();
+        let suth = Property::sutherland("sutherland", 1.716e-5, 273.15, 110.4, 200.0, 1000.0).unwrap();
+        vec![("table", table), ("nasa", nasa), ("kadoya", kadoya), ("sutherland", suth)]
+    }
+
+    /// The device twin (SPEC-LIT 100.9) against the host: four curves, at
+    /// both range ends, every knot and piece end, and 4096 random
+    /// temperatures, all to `1e-12` relative.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_device_evaluator_agrees_with_the_host_on_random_temperatures() {
+        let Some(g) = gpu() else { return };
+        let k = PropertyKernels::new(&g).expect("kernels");
+        for (name, p) in twin_curves() {
+            let (lo, hi) = p.range().expect("a curve has a range");
+            let mut ts: Vec<Scalar> = vec![lo, hi];
+            match &p {
+                Property::Table { t, .. } => ts.extend_from_slice(t),
+                Property::Polynomial { pieces, .. } => {
+                    for q in pieces {
+                        ts.push(q.lo);
+                        ts.push(q.hi);
+                    }
+                }
+                _ => {}
+            }
+            let mut x: u64 = 0x9E3779B97F4A7C15;
+            for _ in 0..4096 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let u = (x >> 11) as Scalar / (1u64 << 53) as Scalar;
+                ts.push(lo + (hi - lo) * u);
+            }
+            let n = ts.len();
+            let dt = g.upload(&ts).expect("upload");
+            let mut dv = g.zeros::<Scalar>(n).expect("alloc");
+            let mut d = DeviceProperty::upload(&g, name, &p).expect("upload");
+            d.evaluate(&g, &k, &mut dv, &dt, n).expect("evaluate");
+            g.sync().expect("sync");
+            let got = g.download(&dv).expect("download");
+            let mut worst = 0.0 as Scalar;
+            for (i, t) in ts.iter().enumerate() {
+                let want = p.value(name, *t).unwrap();
+                let rel = (got[i] - want).abs() / want.abs().max(Scalar::MIN_POSITIVE);
+                worst = worst.max(rel);
+                assert!(
+                    rel <= 1e-12,
+                    "{name}: at T = {t} K the device gave {} and the host {want} \
+                     (relative {rel})",
+                    got[i]
+                );
+            }
+            println!("  {name}: worst relative difference {worst:e}");
+            assert!(!d.left_range(&g).unwrap(), "{name}: nothing left the range");
+        }
+    }
+
+    /// Outside the range the device writes NaN and raises the flag (SPEC-LIT
+    /// 100.9); `clear_flag` lowers it again, and a constant is refused by
+    /// name.
+    #[test]
+    fn an_evaluation_outside_the_range_writes_nan_and_raises_the_flag() {
+        let Some(g) = gpu() else { return };
+        let k = PropertyKernels::new(&g).expect("kernels");
+        for (name, p) in twin_curves() {
+            let (lo, hi) = p.range().expect("a curve has a range");
+            let ts: Vec<Scalar> = vec![lo - 1.0, 0.5 * (lo + hi), hi + 1.0];
+            let dt = g.upload(&ts).expect("upload");
+            let mut dv = g.zeros::<Scalar>(3).expect("alloc");
+            let mut d = DeviceProperty::upload(&g, name, &p).expect("upload");
+            d.evaluate(&g, &k, &mut dv, &dt, 3).expect("evaluate");
+            g.sync().expect("sync");
+            let got = g.download(&dv).expect("download");
+            assert!(got[0].is_nan(), "{name}: below the range the device writes NaN");
+            assert!(got[2].is_nan(), "{name}: above the range the device writes NaN");
+            assert!(got[1].is_finite(), "{name}: inside the range the value is finite");
+            assert!(d.left_range(&g).unwrap(), "{name}: the flag is up");
+            d.clear_flag(&g).expect("clear");
+            assert!(!d.left_range(&g).unwrap(), "{name}: the flag is down again");
+        }
+        let Err(e) = DeviceProperty::upload(&g, "regions/x/fluid/kappa", &Property::Constant(0.026))
+        else {
+            panic!("a constant has no device form, SPEC-LIT 100.9 refuses it by name");
+        };
+        let m = format!("{e}");
+        for what in ["regions/x/fluid/kappa", "constant", "SPEC-LIT 100.9"] {
+            assert!(m.contains(what), "'{what}' is not in the refusal: {m}");
+        }
+    }
+
+    /// SPEC-LIT 81.7's row for `src/properties.rs`: the evaluation captures
+    /// and replays bitwise, its result feeding the next iteration's
+    /// temperatures.
+    #[test]
+    fn the_property_evaluation_replays_bitwise() {
+        let Some(g) = gpu() else { return };
+        let p = twin_curves().into_iter().find(|(n, _)| *n == "table").unwrap().1;
+        let n = 256;
+        let k = PropertyKernels::new(&g).expect("kernels");
+        let fk = crate::field_ops::FieldKernels::new(&g).expect("field kernels");
+        let t0: Vec<Scalar> = (0..n).map(|i| 300.0 + 200.0 * i as Scalar / n as Scalar).collect();
+        let report = crate::capture::capture_replays_bitwise(
+            &g,
+            "the device evaluator (SPEC-LIT 100.9)",
+            || {
+                let d = DeviceProperty::upload(&g, "table", &p)?;
+                Ok((d, g.upload(&t0)?, g.zeros::<Scalar>(n)?))
+            },
+            |(d, t, v)| {
+                d.evaluate(&g, &k, v, t, n)?;
+                // The result, scaled to at most 0.015 K, feeds the next
+                // iteration's temperatures, so a replay that skipped the
+                // evaluation cannot pass.
+                crate::field_ops::scale_field(&g, &fk, v, 1.0e-4, n)?;
+                crate::field_ops::add_field(&g, &fk, t, v, n)
+            },
+            |(d, t, v)| {
+                Ok(vec![
+                    ("t", g.download(t)?),
+                    ("v", g.download(v)?),
+                    ("flag", g.download(&d.flag)?),
+                ])
+            },
+        )
+        .expect("SPEC-LIT 81.7: the device evaluator must capture and replay bitwise");
+        println!("  property evaluation: {report}");
     }
 }

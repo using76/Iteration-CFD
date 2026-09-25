@@ -30035,12 +30035,10 @@ the rule §98.4 applies to Churchill & Chu's Rayleigh range.
 consumer states what its quantity must be - `E > 0` through §95's
 `Material::validate`, `alpha >= 0` - and checks the values it evaluates.
 
-**Host only, in this state of the tree.** The conduction rebuild of §100.6
-is host arithmetic too: its loop is host-driven, because its criterion is a
-read-back. A device twin of the evaluator, held to the host to `1e-12` on
-random temperatures, lands with the first consumer that runs inside a
-captured region - a kernel that no captured region calls would enter §81.7's
-registry with a stance nothing proves.
+**Host and device.** The conduction rebuild of §100.6 is host arithmetic:
+its loop is host-driven, because its criterion is a read-back. The
+evaluator's device twin is §100.9's, held to this one to `1e-12` on random
+temperatures and gated for graph capture on its own.
 
 ### 100.2 What a case writes - the number, or a curve, in the same entry
 
@@ -30421,6 +30419,41 @@ temperature is 392.612070, 392.597463 and 392.593810 K against
 `E = 1.22e-3` K, so `|E|/U_fine = 0.80` - the `1/Fs` of a study in its
 asymptotic range. The largest cell-centre error falls by 3.90 and 3.95 per
 halving.
+
+### 100.9 The evaluator on the device
+
+`cuda/properties.cu` evaluates (S100.2), (S100.3) and (S100.4) elementwise,
+one kernel per form, from coefficients `DeviceProperty::upload` puts on the
+device once; a constant has no device form, because its consumer takes the
+constant path it took before this section, and uploading one is refused by
+name. The kernels make §100.1's two stated choices exactly as the host
+does: a table's segment is the one whose left end is the last knot at or
+below `T`, and a series term whose exponent is an integer of magnitude at
+most 16 is evaluated by repeated squaring, any other by `pow`; a `T` on a
+shared end belongs to the lower piece.
+
+**Outside the range.** A kernel cannot refuse. An evaluation outside the
+range writes NaN and raises a one-element flag, and the consumer reads the
+flag between two solves - never inside a captured region - and refuses by
+name, naming the range. NaN rather than the nearest end, because a curve is
+not extrapolated (§100.1), and a value that is silently the end of the
+range is an extrapolation by another name.
+
+**Two gates.** The twin against the host on four curves - a five-knot
+table, a two-piece seven-term series in the NASA form, a one-piece series
+with fractional exponents in Kadoya's form, and Sutherland's law - at 4096
+random temperatures plus every knot, every piece end and both range ends:
+at most `1e-12` relative. And graph capture: `the_property_evaluation_replays_bitwise`
+captures an evaluation whose result feeds the next one's temperatures, and
+requires three replays to reproduce three per-launch iterations bit for bit;
+it is `src/properties.rs`'s row in §81.7's registry.
+
+| Check | Expected |
+|---|---|
+| device against host, four curves, random `T` | `<= 1e-12` relative |
+| an evaluation outside the range | NaN, and the flag raised; cleared by `clear_flag` |
+| a constant uploaded | refused, naming the setting |
+| capture | three replays bitwise |
 
 ---
 
@@ -31852,7 +31885,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **468** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **469** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -31863,7 +31896,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 ten.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 eleven.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

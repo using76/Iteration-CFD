@@ -257,6 +257,7 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         ),
     ),
     ("src/pressure/mod.rs", Stance::Gate("the_pressure_backend_dispatch_replays_bitwise")),
+    ("src/properties.rs", Stance::Gate("the_property_evaluation_replays_bitwise")),
     (
         "src/psychro.rs",
         Stance::Gate("the_psychrometric_update_replays_bitwise"),
