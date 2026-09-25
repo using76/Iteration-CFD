@@ -3275,6 +3275,13 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("SPEC-LIT 98.6 Gate 98-B radiating slab");
     check_radiating_slab(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT 100.4 - the evaluator against three published tables.
+    println!("\n=== Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4) ===");
+    c.enter_gate("SPEC-LIT 100.4 Gate 100-B published property tables");
+    check_gate_100b_silicon(c)?;
+    check_gate_100b_air(c)?;
+    check_gate_100b_nasa(c)?;
+    c.leave_gate();
     // SPEC-LIT 105 - the moving mesh, and Gate 105-A.
     println!("\n=== Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) ===");
     c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
@@ -20467,6 +20474,293 @@ fn check_radiating_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 }
 
 // ==========================================================================
+//  SPEC-LIT §100 - properties that are functions of temperature
+// ==========================================================================
+
+/// Gate 100-B's one verdict line (SPEC-LIT 100.4): every leg reports under
+/// the one gate name.
+fn report_gate_100b(
+    c: &mut Checks,
+    verdict: Verdict,
+    against: &'static str,
+    headline: String,
+    detail: Vec<String>,
+) {
+    c.report(GateReport {
+        verdict,
+        how: How::Live,
+        gate: "SPEC-LIT 100.4 Gate 100-B published property tables",
+        against,
+        headline,
+        detail,
+        uncertainty: Some(Uncertainty::SingleMesh(
+            "no mesh is run: the evaluator is compared with a printed table",
+        )),
+    });
+}
+
+/// The key `id`, its digest line noted - or `None` after the leg has
+/// reported its verdict as not comparable, by name (SPEC-LIT 10).
+fn gate_100b_key(c: &mut Checks, id: &str, against: &'static str) -> Option<key::KeyFile> {
+    match key::load(id) {
+        Ok(k) => {
+            c.note(&k.digest_line());
+            Some(k)
+        }
+        Err(why) => {
+            let why = why.to_string();
+            c.note(&why);
+            report_gate_100b(
+                c,
+                Verdict::Open,
+                against,
+                format!("answer key {id} is absent from reference/ or is not its digest, so the leg was not compared"),
+                vec![why],
+            );
+            None
+        }
+    }
+}
+
+/// A curve written in the case format's own JSON and lowered through it
+/// (SPEC-LIT 100.4): the parse, the validation and the evaluator are all on
+/// the gate's path.
+fn gate_100b_curve(json: &str, what: &str) -> Result<ofgpu::properties::Property> {
+    let curve: ofgpu::io::case_cht::ChtCurve = ofgpu::io::case_json::parse_jsonc_str(json, what)?;
+    curve.lower(what)
+}
+
+/// Gate 100-B leg 1 (SPEC-LIT 100.4): silicon. A table of Ho, Powell and
+/// Liley's five round-temperature values returns each to the bit, and at
+/// their four other printed temperatures in 300-600 K lies within the 5 %
+/// the source states.
+fn check_gate_100b_silicon(c: &mut Checks) -> Result<()> {
+    const AGAINST: &str =
+        "Ho, Powell and Liley (1972), J. Phys. Chem. Ref. Data 1, 279, p. 394: silicon, recommended values";
+    const WHAT: &str = "SPEC-LIT 100.4 Gate 100-B silicon";
+    // answer-key: ho-powell-liley1972-silicon
+    let Some(kf) = gate_100b_key(c, "ho-powell-liley1972-silicon", AGAINST) else {
+        return Ok(());
+    };
+    let (t, k, knot) = (kf.column("t")?, kf.column("k")?, kf.column("knot")?);
+    // W/(cm K) as printed; W/(m K) as a case writes it.
+    let wmk: Vec<f64> = k.iter().map(|x| 100.0 * x).collect();
+    let pairs: Vec<String> = (0..t.len())
+        .filter(|&i| knot[i] == 1.0)
+        .map(|i| format!("[{}, {}]", t[i], wmk[i]))
+        .collect();
+    let json = format!(r#"{{ "table": [{}] }}"#, pairs.join(", "));
+    c.note(&format!("  the curve, as a case writes it: {json}"));
+    let p = gate_100b_curve(&json, WHAT)?;
+    let mut worst: f64 = 0.0;
+    let mut knots_exact = true;
+    let mut detail = Vec::new();
+    for i in 0..t.len() {
+        let got = f64::from(p.value(WHAT, t[i] as Scalar)?);
+        let rel = (got / wmk[i] - 1.0).abs();
+        let at_knot = knot[i] == 1.0;
+        let line = format!(
+            "T = {:>5} K  k = {got:.4} W/(m K)  source {:.4}  rel {rel:.3e}  {}",
+            t[i],
+            wmk[i],
+            if at_knot { "knot" } else { "between knots" }
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+        if at_knot {
+            knots_exact &= got == wmk[i];
+        } else {
+            worst = worst.max(rel);
+        }
+    }
+    c.require("SPEC-LIT 100.4 Gate 100-B silicon: every knot returned to the bit", knots_exact);
+    c.check("SPEC-LIT 100.4 Gate 100-B silicon: worst rel between knots (5 %)", worst as Scalar, 0.05);
+    if !(knots_exact && worst <= 0.05) {
+        report_gate_100b(
+            c,
+            Verdict::Misses,
+            AGAINST,
+            format!("silicon: knots to the bit {knots_exact}, worst {:.2} % between them against 5 %", worst * 100.0),
+            detail,
+        );
+    }
+    Ok(())
+}
+
+/// One of Kadoya et al.'s constants tables (7 or 11), read by its
+/// `kind, index, value` rows: `T*`, `rho*`, the factor (`H` or `Lambda` in
+/// the printed unit), the temperature series `(exponent, coefficient)` and
+/// the density series `(power, coefficient)`.
+struct KadoyaEq {
+    t_star: f64,
+    rho_star: f64,
+    factor: f64,
+    temperature: Vec<(f64, f64)>,
+    density: Vec<(f64, f64)>,
+}
+
+fn kadoya_constants(kf: &key::KeyFile) -> Result<KadoyaEq> {
+    let (kind, index, value) = (kf.column("kind")?, kf.column("index")?, kf.column("value")?);
+    let pick = |i: f64| (0..kind.len()).find(|&r| kind[r] == 0.0 && index[r] == i).map(|r| value[r]);
+    let (Some(t_star), Some(rho_star), Some(factor)) = (pick(1.0), pick(2.0), pick(3.0)) else {
+        return Err(Error::Config(format!(
+            "answer key {}: T*, rho* or the factor is missing",
+            kf.id
+        )));
+    };
+    let series = |k: f64| -> Vec<(f64, f64)> {
+        (0..kind.len()).filter(|&r| kind[r] == k).map(|r| (index[r], value[r])).collect()
+    };
+    Ok(KadoyaEq { t_star, rho_star, factor, temperature: series(1.0), density: series(2.0) })
+}
+
+/// Gate 100-B leg 2 (SPEC-LIT 100.4): air. `eta_0` and `lambda_0` as
+/// (S100.3) curves from Tables 7 and 11, plus the paper's own density series
+/// at 0.1 MPa with the ideal-gas density at Table 3's `M`, against Tables 8
+/// and 12 at 0.10 MPa to half a printed digit plus 1e-3 of the density term.
+fn check_gate_100b_air(c: &mut Checks) -> Result<()> {
+    const AGAINST: &str =
+        "Kadoya, Matsunaga and Nagashima (1985), J. Phys. Chem. Ref. Data 14, 947, Tables 8 and 12 at 0.10 MPa";
+    // answer-key: kadoya1985-table-7
+    let Some(t7) = gate_100b_key(c, "kadoya1985-table-7", AGAINST) else { return Ok(()) };
+    // answer-key: kadoya1985-table-11
+    let Some(t11) = gate_100b_key(c, "kadoya1985-table-11", AGAINST) else { return Ok(()) };
+    // answer-key: kadoya1985-tables-8-12
+    let Some(tab) = gate_100b_key(c, "kadoya1985-tables-8-12", AGAINST) else { return Ok(()) };
+    let (visc, cond) = (kadoya_constants(&t7)?, kadoya_constants(&t11)?);
+    let (t, eta, lambda) = (tab.column("t")?, tab.column("eta")?, tab.column("lambda")?);
+    // 0.1 MPa; Table 3's M = 28.9644 kg/kmol; R = 8.314462618 J/(mol K).
+    let (p0, m_air, r_gas): (f64, f64, f64) = (0.1e6, 28.9644e-3, 8.314462618);
+    let mut detail = Vec::new();
+    let mut worst: f64 = 0.0;
+    for (name, eq, unit, printed) in
+        [("viscosity", &visc, 1.0e-6, &eta), ("thermal conductivity", &cond, 1.0e-3, &lambda)]
+    {
+        let exps: Vec<String> = eq.temperature.iter().map(|(e, _)| format!("{e}")).collect();
+        let coefs: Vec<String> = eq.temperature.iter().map(|(_, a)| format!("{a}")).collect();
+        let json = format!(
+            r#"{{ "polynomial": {{ "exponents": [{}], "pieces": [{{ "range": [85.0, 2000.0], "coefficients": [{}] }}], "scale": {}, "factor": {} }} }}"#,
+            exps.join(", "),
+            coefs.join(", "),
+            eq.t_star,
+            eq.factor * unit
+        );
+        c.note(&format!("  {name}, as a case writes it: {json}"));
+        let what = format!("SPEC-LIT 100.4 Gate 100-B air {name}");
+        let p = gate_100b_curve(&json, &what)?;
+        for i in 0..t.len() {
+            let rho_r = p0 * m_air / (r_gas * t[i]) / eq.rho_star;
+            // The density series, in the printed unit.
+            let excess: f64 =
+                eq.density.iter().map(|(n, b)| b * rho_r.powi(*n as i32)).sum::<f64>() * eq.factor;
+            let calc = f64::from(p.value(&what, t[i] as Scalar)?) / unit + excess;
+            let bound = 0.005 + 1.0e-3 * excess.abs();
+            let ratio = (calc - printed[i]).abs() / bound;
+            worst = worst.max(ratio);
+            let line = format!(
+                "{name}: T = {:>6} K  eq. {calc:.4}  printed {:.2}  |d|/bound {ratio:.3}",
+                t[i], printed[i]
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+        }
+    }
+    c.check(
+        "SPEC-LIT 100.4 Gate 100-B air: worst |eq. - printed| over half a printed digit",
+        worst as Scalar,
+        1.0,
+    );
+    if !(worst <= 1.0) {
+        report_gate_100b(
+            c,
+            Verdict::Misses,
+            AGAINST,
+            format!("air: the worst |eq. - printed| is {worst:.3} of half a printed digit"),
+            detail,
+        );
+    }
+    Ok(())
+}
+
+/// Gate 100-B leg 3 (SPEC-LIT 100.4): cp/R of N2, O2, Ar and Air as
+/// two-piece (S100.3) curves from Appendix D; `R cp/R` at 298.15 K against
+/// Table B1 to half its printed digit, and the two pieces equal at 1000 K to
+/// 1e-8 - the report's fit constraints (1) and (2).
+fn check_gate_100b_nasa(c: &mut Checks) -> Result<()> {
+    const AGAINST: &str =
+        "McBride, Zehe and Gordon, NASA/TP-2002-211556 (2002), eq. (1), Appendix D and Table B1";
+    // answer-key: nasa-glenn2002-coefficients
+    let Some(co) = gate_100b_key(c, "nasa-glenn2002-coefficients", AGAINST) else { return Ok(()) };
+    // answer-key: nasa-glenn2002-table-B1
+    let Some(b1) = gate_100b_key(c, "nasa-glenn2002-table-B1", AGAINST) else { return Ok(()) };
+    // The report's Appendix A.
+    let r_gas: f64 = 8.314510;
+    let names = ["N2", "O2", "Ar", "Air"];
+    let (sp, lo, hi) = (co.column("species")?, co.column("t_lo")?, co.column("t_hi")?);
+    let a: Vec<Vec<f64>> = (1..=7).map(|j| co.column(&format!("a{j}"))).collect::<Result<_>>()?;
+    let (bs, bcp) = (b1.column("species")?, b1.column("cp_298")?);
+    let piece = |r: usize| {
+        let cs: Vec<String> = (0..7).map(|j| format!("{}", a[j][r])).collect();
+        format!(r#"{{ "range": [{}, {}], "coefficients": [{}] }}"#, lo[r], hi[r], cs.join(", "))
+    };
+    let curve = |pieces: String| {
+        format!(r#"{{ "polynomial": {{ "exponents": [-2, -1, 0, 1, 2, 3, 4], "pieces": [{pieces}] }} }}"#)
+    };
+    let (mut worst_298, mut worst_1000): (f64, f64) = (0.0, 0.0);
+    let mut detail = Vec::new();
+    for (s, name) in names.iter().enumerate() {
+        let code = (s + 1) as f64;
+        let rows: Vec<usize> = (0..sp.len()).filter(|&r| sp[r] == code).collect();
+        let (2, Some(rb)) = (rows.len(), (0..bs.len()).find(|&r| bs[r] == code)) else {
+            return Err(Error::Config(format!(
+                "answer key {}: species {name} needs two intervals and a Table B1 row",
+                co.id
+            )));
+        };
+        let what = format!("SPEC-LIT 100.4 Gate 100-B cp/R {name}");
+        let both = gate_100b_curve(&curve(format!("{}, {}", piece(rows[0]), piece(rows[1]))), &what)?;
+        let upper = gate_100b_curve(&curve(piece(rows[1])), &what)?;
+        let cp298 = r_gas * f64::from(both.value(&what, 298.15 as Scalar)?);
+        let d298 = (cp298 - bcp[rb]).abs();
+        let at_lo = f64::from(both.value(&what, 1000.0 as Scalar)?);
+        let at_hi = f64::from(upper.value(&what, 1000.0 as Scalar)?);
+        let d1000 = (at_lo / at_hi - 1.0).abs();
+        worst_298 = worst_298.max(d298);
+        worst_1000 = worst_1000.max(d1000);
+        let line = format!(
+            "{name}: Cp(298.15) = {cp298:.6} J/(K mol), Table B1 {:.3}, |d| {d298:.2e}; \
+             cp/R at 1000 K {at_lo:.10} below, {at_hi:.10} above, rel {d1000:.2e}",
+            bcp[rb]
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    c.check(
+        "SPEC-LIT 100.4 Gate 100-B cp/R: worst |Cp(298.15) - Table B1|, J/(K mol)",
+        worst_298 as Scalar,
+        5.0e-4,
+    );
+    c.check(
+        "SPEC-LIT 100.4 Gate 100-B cp/R: worst rel jump between the pieces at 1000 K",
+        worst_1000 as Scalar,
+        1.0e-8,
+    );
+    if !(worst_298 <= 5.0e-4 && worst_1000 <= 1.0e-8) {
+        report_gate_100b(
+            c,
+            Verdict::Misses,
+            AGAINST,
+            format!(
+                "cp/R: worst |Cp(298.15) - Table B1| {worst_298:.2e} J/(K mol) against 5e-4, \
+                 worst jump at 1000 K {worst_1000:.2e} against 1e-8"
+            ),
+            detail,
+        );
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  SPEC-LIT §97 - the imported region
 // ==========================================================================
 
@@ -20673,7 +20967,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 29 occurrences, 25 distinct - two gates report twice,
+    /// same string. 30 occurrences, 26 distinct - two gates report twice,
     /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
@@ -20699,9 +20993,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 29, "29 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 30, "30 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 25, "25 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 26, "26 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(

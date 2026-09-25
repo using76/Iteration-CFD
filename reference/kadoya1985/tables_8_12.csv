@@ -1,0 +1,22 @@
+# K. Kadoya, N. Matsunaga and A. Nagashima, J. Phys. Chem. Ref. Data 14 (1985) 947-970,
+# Table 8 (pp. 954-955, viscosity of air calculated with eq. (3), 1e-6 Pa s) and Table 12
+# (pp. 962-963, thermal conductivity of air calculated with eq. (5), 1e-3 W/(m K)), the
+# P = 0.10 MPa row at the printed temperatures from 250 to 1000 K; the other pressures and
+# temperatures are not transcribed.
+t,eta,lambda
+250.0,16.06,22.41
+300.0,18.57,26.23
+350.0,20.90,29.84
+400.0,23.10,33.28
+450.0,25.17,36.56
+500.0,27.13,39.71
+550.0,29.02,42.77
+600.0,30.82,45.73
+650.0,32.57,48.63
+700.0,34.25,51.46
+750.0,35.88,54.25
+800.0,37.47,56.99
+850.0,39.01,59.69
+900.0,40.52,62.37
+950.0,41.99,65.01
+1000.0,43.43,67.63

@@ -1,0 +1,9 @@
+# B. J. McBride, M. J. Zehe and S. Gordon, NASA/TP-2002-211556 (2002), Appendix B, Table B1,
+# "Thermodynamic properties for gases at 0 and 298.15 K": the molecular weight and Cp(298.15),
+# J/(K mol), of the four species of coefficients.csv (pp. 24, 25, 10 and 32); the other columns
+# are not transcribed. species: 1 = N2, 2 = O2, 3 = Ar, 4 = Air.
+species,mol_weight,cp_298
+1,28.01340,29.124
+2,31.99880,29.378
+3,39.94800,20.786
+4,28.96512,29.102

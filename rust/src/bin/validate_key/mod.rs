@@ -796,7 +796,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 14, "fourteen markers, found {markers:?}");
+        assert_eq!(markers.len(), 20, "twenty markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -807,7 +807,19 @@ mod tests {
             .filter(|r| r.kind == Kind::File)
             .map(|r| r.id.as_str())
             .collect();
-        assert_eq!(file_ids, ["ghia1982-table-I", "ghia1982-table-II"]);
+        assert_eq!(
+            file_ids,
+            [
+                "ghia1982-table-I",
+                "ghia1982-table-II",
+                "ho-powell-liley1972-silicon",
+                "kadoya1985-table-7",
+                "kadoya1985-table-11",
+                "kadoya1985-tables-8-12",
+                "nasa-glenn2002-coefficients",
+                "nasa-glenn2002-table-B1",
+            ]
+        );
         for row in &m.rows {
             assert!(!row.source.is_empty(), "{}: an empty source cell", row.id);
             assert!(!row.doi_url.is_empty(), "{}: an empty DOI/URL cell", row.id);

@@ -30200,6 +30200,18 @@ constraint (2), to the ten digits the coefficients are printed with.
 A key that is absent, or whose digest is not the manifest's, makes its leg
 report open by name; it is never passed (§10).
 
+**Measured** on 2026-09-25 in f64 (the gate runs no mesh). Leg 1: the five
+knots returned to the bit; between them the table lies 1.16 %, 1.55 %, 1.09 %
+and 0.97 % above the source at 323.2, 373.2, 473.2 and 573.2 K - always above,
+as a straight chord of a falling, convex curve must - against the 5 % the source
+states. Leg 2: all thirty-two printed values are reproduced within half a
+printed digit, the worst at 0.975 of that bound (viscosity at 650 K, eq. (3)
+`32.5651` against the printed `32.57`), so every printed value is the rounded
+value of the equation as implemented here. Leg 3: `Cp(298.15)` within
+`3.53e-4 J/(K mol)` of Table B1 (O2; N2 `3.50e-4`, Ar `2.75e-4`, air
+`2.7e-5`) against `5e-4`, and the two pieces equal at 1000 K to `2.2e-9`
+relative (N2) or better.
+
 ### 100.5 The refusal list, the pair tests, and what must hold
 
 | # | what the case wrote | refused, naming |
