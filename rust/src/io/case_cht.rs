@@ -79,6 +79,7 @@ use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis, JsonOutput}
 use crate::io::output_plan::{OutputFormat, OutputPlan};
 use crate::io::polymesh::{build_host_mesh, read_poly_mesh, PolyMeshRaw};
 use crate::mesh::{HostMesh, PatchKind};
+use crate::properties::{Piece, Property};
 use crate::solid::{BondTreatment, Material, NotBuilt};
 use crate::{Label, Scalar, Vec3};
 
@@ -254,8 +255,8 @@ impl ChtBoundaries {
 pub struct ChtMaterial {
     /// `rho_s`, kg/m^3.
     pub rho: f64,
-    /// `c_s`, J/(kg K).
-    pub c: f64,
+    /// `c_s`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).
+    pub c: ChtScalarOrCurve,
     /// `k_s`: one number for an isotropic material, three for `diag(kx,ky,kz)`
     /// in the MESH axes. Nine is a §13.4 error naming the two that are
     /// implemented - SPEC-LIT §46.4.
@@ -267,18 +268,19 @@ pub struct ChtMaterial {
 /// Four numbers, and `Pr = mu cp/kappa` is DERIVED from them and printed
 /// rather than stated: a case that stated both could contradict itself, and
 /// the reader would have to pick a winner.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChtFluid {
     /// `rho_f` at `buoyancy.TRef`, kg/m^3.
     pub rho: f64,
-    /// `c_p`, J/(kg K).
-    pub cp: f64,
+    /// `c_p`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).
+    pub cp: ChtScalarOrCurve,
     /// `k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not
     /// a thing, and three or nine components are a §13.4 error.
-    pub kappa: f64,
-    /// Dynamic viscosity, Pa s.
-    pub mu: f64,
+    /// A number or a curve in T (SPEC-LIT §100.2).
+    pub kappa: ChtScalarOrCurve,
+    /// Dynamic viscosity, Pa s. A number or a curve in T (SPEC-LIT §100.2).
+    pub mu: ChtScalarOrCurve,
 }
 
 /// `kappa` written either way. A user with an isotropic material should not
@@ -289,6 +291,8 @@ pub struct ChtFluid {
 pub enum ChtKappa {
     Isotropic(f64),
     Components(Vec<f64>),
+    /// A curve in T (SPEC-LIT §100.2) - isotropic.
+    Curve(ChtCurve),
 }
 
 impl ChtKappa {
@@ -296,6 +300,117 @@ impl ChtKappa {
         match self {
             Self::Isotropic(k) => vec![*k as Scalar],
             Self::Components(v) => v.iter().map(|x| *x as Scalar).collect(),
+            Self::Curve(_) => Vec::new(),
+        }
+    }
+}
+
+/// A property entry written as a number or as a curve in `T` - SPEC-LIT
+/// §100.2. Untagged with the number FIRST, so every document written before
+/// §100 deserialises exactly as it did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChtScalarOrCurve {
+    Number(f64),
+    Curve(ChtCurve),
+}
+
+impl ChtScalarOrCurve {
+    /// §100.2: the number as `Property::Constant`, or the curve lowered and
+    /// validated under `path`.
+    pub fn lower(&self, path: &str) -> Result<Property> {
+        match self {
+            Self::Number(x) => Ok(Property::Constant(*x as Scalar)),
+            Self::Curve(c) => c.lower(path),
+        }
+    }
+}
+
+/// §100.1's three curve forms, one key each: `{ "table": .. }`,
+/// `{ "polynomial": .. }`, `{ "sutherland": .. }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ChtCurve {
+    /// (S100.2): `[[T, value], ...]`, `T` in K and strictly increasing.
+    Table(Vec<[f64; 2]>),
+    /// (S100.3).
+    Polynomial(ChtPolynomial),
+    /// (S100.4).
+    Sutherland(ChtSutherland),
+}
+
+/// (S100.3) as a case writes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtPolynomial {
+    /// The exponents `e_j`, one per coefficient of every piece.
+    pub exponents: Vec<f64>,
+    /// The pieces, contiguous and ascending in `T`.
+    pub pieces: Vec<ChtPolynomialPiece>,
+    /// `T_s`, K. Default 1.
+    #[serde(default = "one_f64")]
+    pub scale: f64,
+    /// `F`. Default 1.
+    #[serde(default = "one_f64")]
+    pub factor: f64,
+}
+
+fn one_f64() -> f64 {
+    1.0
+}
+
+/// One piece of (S100.3): its closed range in K and one coefficient per
+/// exponent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtPolynomialPiece {
+    pub range: [f64; 2],
+    pub coefficients: Vec<f64>,
+}
+
+/// (S100.4) as a case writes it: `value` is the property at `TRef`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtSutherland {
+    pub value: f64,
+    #[serde(rename = "TRef")]
+    pub t_ref: f64,
+    #[serde(rename = "S")]
+    pub s: f64,
+    pub range: [f64; 2],
+}
+
+impl ChtCurve {
+    /// §100.1: the curve as a validated [`Property`], every refusal naming
+    /// `path`.
+    pub fn lower(&self, path: &str) -> Result<Property> {
+        match self {
+            Self::Table(k) => {
+                let knots: Vec<(Scalar, Scalar)> =
+                    k.iter().map(|p| (p[0] as Scalar, p[1] as Scalar)).collect();
+                Property::table(path, &knots)
+            }
+            Self::Polynomial(p) => {
+                let e: Vec<Scalar> = p.exponents.iter().map(|x| *x as Scalar).collect();
+                let pieces: Vec<Piece> = p
+                    .pieces
+                    .iter()
+                    .map(|q| Piece {
+                        lo: q.range[0] as Scalar,
+                        hi: q.range[1] as Scalar,
+                        coefficients: q.coefficients.iter().map(|c| *c as Scalar).collect(),
+                    })
+                    .collect();
+                Property::polynomial(path, &e, &pieces, p.scale as Scalar, p.factor as Scalar)
+            }
+            Self::Sutherland(s) => Property::sutherland(
+                path,
+                s.value as Scalar,
+                s.t_ref as Scalar,
+                s.s as Scalar,
+                s.range[0] as Scalar,
+                s.range[1] as Scalar,
+            ),
         }
     }
 }
@@ -627,13 +742,14 @@ pub struct ChtMechanics {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChtElastic {
-    /// Young's modulus `E`, Pa.
+    /// Young's modulus `E`, Pa. A number or a curve in T (SPEC-LIT §100.2).
     #[serde(rename = "E")]
-    pub e: f64,
+    pub e: ChtScalarOrCurve,
     /// Poisson's ratio, in (-1, 0.5) and at most the measured edge 0.45.
     pub nu: f64,
     /// Linear thermal expansion coefficient `alpha`, 1/K.
-    pub alpha: f64,
+    /// A number or a curve in T (SPEC-LIT §100.2).
+    pub alpha: ChtScalarOrCurve,
     /// The stress-free temperature, K: the thermal strain is
     /// `alpha (T - TRef)`, so `alpha > 0` without it is refused (§96.3
     /// row 3), and it without `alpha` is a reference nothing reads (row 4).
@@ -802,6 +918,15 @@ impl LoweredBc {
     }
 }
 
+/// SPEC-LIT §100.3: the curves one elastic zone wrote - `None` where it
+/// wrote a number - and the zone's JSON path an evaluation's refusal names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElasticCurves {
+    pub e: Option<Property>,
+    pub alpha: Option<Property>,
+    pub path: String,
+}
+
 /// SPEC-LIT §96.2: one elastic zone of a region's `mechanics` block,
 /// validated and in [`crate::solid::Material`]'s own units.
 #[derive(Debug, Clone, PartialEq)]
@@ -813,6 +938,10 @@ pub struct LoweredElasticZone {
     /// The zone's `TRef`, K - present because §96.3 row 3 required it
     /// whenever `alpha > 0`.
     pub t_ref: Scalar,
+    /// §100.3: `E(T)`/`alpha(T)` if the case wrote curves; `material`
+    /// then holds their values at the lower end of each range, a placeholder
+    /// `crate::solid::case::run_stress` replaces.
+    pub curves: ElasticCurves,
 }
 
 /// A mechanical patch condition, resolved onto §95's per-component
@@ -1225,10 +1354,24 @@ impl ChtCase {
 
             let (mat, fluid) = match (kind, &r.material, &r.fluid) {
                 (RegionKind::Solid, Some(m), None) => {
+                    let base = format!("regions/{}/material", r.name);
+                    if let ChtKappa::Curve(cv) = &m.kappa {
+                        let at = format!("{base}/kappa");
+                        return Err(refused_curve(
+                            &cv.lower(&at)?,
+                            &at,
+                            "the conduction operator's face conductances are built once, from \
+                             a constant",
+                        ));
+                    }
                     let mat = SolidMaterial {
                         name: r.name.clone(),
                         rho: m.rho as Scalar,
-                        c: m.c as Scalar,
+                        c: number_only(
+                            &m.c,
+                            &format!("{base}/c"),
+                            "the transient weight rho c is built once, from a constant",
+                        )?,
                         k: Conductivity::parse(
                             &m.kappa.values(),
                             &format!("regions/{}/material/kappa", r.name),
@@ -1238,12 +1381,25 @@ impl ChtCase {
                     (mat, None)
                 }
                 (RegionKind::Fluid, None, Some(f)) => {
+                    let base = format!("regions/{}/fluid", r.name);
                     let fl = FluidMaterial {
                         name: r.name.clone(),
                         rho: f.rho as Scalar,
-                        cp: f.cp as Scalar,
-                        kappa: f.kappa as Scalar,
-                        mu: f.mu as Scalar,
+                        cp: number_only(
+                            &f.cp,
+                            &format!("{base}/cp"),
+                            "the energy equation's rho cp is built from a constant",
+                        )?,
+                        kappa: number_only(
+                            &f.kappa,
+                            &format!("{base}/kappa"),
+                            "the energy equation's k_eff is built from a constant",
+                        )?,
+                        mu: number_only(
+                            &f.mu,
+                            &format!("{base}/mu"),
+                            "the momentum equation's laminar viscosity is built from a constant",
+                        )?,
                     };
                     fl.validate()?;
                     // The conduction entry a fluid region still needs; every
@@ -2034,20 +2190,22 @@ fn lower_mechanics(
     // `material` is one zone named after the region.
     let mut zones = Vec::new();
     if let Some(m) = &mech.material {
-        let (material, t_ref) = lower_elastic(m, &format!("{path}/material"))?;
+        let (material, t_ref, curves) = lower_elastic(m, &format!("{path}/material"))?;
         zones.push(LoweredElasticZone {
             name: r.name.clone(),
             material,
             t_ref,
+            curves,
         });
     } else if let Some(list) = &mech.materials {
         for z in list {
-            let (material, t_ref) =
+            let (material, t_ref, curves) =
                 lower_elastic(&z.material, &format!("{path}/materials/{}", z.name))?;
             zones.push(LoweredElasticZone {
                 name: z.name.clone(),
                 material,
                 t_ref,
+                curves,
             });
         }
     }
@@ -2232,12 +2390,32 @@ fn lower_mechanics(
     }))
 }
 
+/// SPEC-LIT §100.2: an entry whose consumer is still built from a constant.
+/// The number exactly as before, or the curve lowered - so a malformed one
+/// is refused for its own reason first - and then refused naming `consumer`.
+fn number_only(v: &ChtScalarOrCurve, path: &str, consumer: &str) -> Result<Scalar> {
+    match v {
+        ChtScalarOrCurve::Number(x) => Ok(*x as Scalar),
+        ChtScalarOrCurve::Curve(c) => Err(refused_curve(&c.lower(path)?, path, consumer)),
+    }
+}
+
+/// §100.2's refusal of a valid curve that its consumer cannot read yet.
+fn refused_curve(p: &Property, path: &str, consumer: &str) -> Error {
+    Error::Config(format!(
+        "{path}: a curve in T ({}) is read and valid, but {consumer} (SPEC-LIT 100.2); \
+         write a number",
+        p.describe()
+    ))
+}
+
 /// One elastic material, validated under its JSON path - SPEC-LIT §96.3
 /// rows 1-5. [`crate::solid::Material::validate`] refuses `E <= 0`, the `nu`
 /// range and the measured 0.45 edge with its own messages; this wraps it
 /// with the path and adds what the case format knows that the struct does
 /// not: `alpha < 0`, the `TRef` pairing, and `rho`.
-fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
+/// SPEC-LIT §100.3: a curve for E or alpha is lowered and validated at its samples.
+fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar, ElasticCurves)> {
     if let Some(rho) = m.rho {
         return Err(Error::Config(format!(
             "{path}/rho = {rho}: nothing in SPEC-LIT 95's static solve reads a \
@@ -2246,10 +2424,18 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
              the region's density)"
         )));
     }
+    // SPEC-LIT §100.3: a number is the constant it always was; a curve is
+    // lowered, and the zone's constants are its values at the LOWER end of
+    // its range - a placeholder `crate::solid::case::run_stress` replaces.
+    let e_path = format!("{path}/E");
+    let alpha_path = format!("{path}/alpha");
+    let e = m.e.lower(&e_path)?;
+    let alpha = m.alpha.lower(&alpha_path)?;
+    let at_lo = |p: &Property, s: &str| p.value(s, p.range().map_or(0.0, |r| r.0));
     let mat = Material {
-        e: m.e as Scalar,
+        e: at_lo(&e, &e_path)?,
         nu: m.nu as Scalar,
-        alpha: m.alpha as Scalar,
+        alpha: at_lo(&alpha, &alpha_path)?,
     };
     mat.validate()
         .map_err(|e| Error::Config(format!("{path}: {e}")))?;
@@ -2260,9 +2446,28 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
             mat.alpha
         )));
     }
+    // §100.3 (§100.5 row 7): every sample of a curve, with the zone's
+    // other constants.
+    for t in e.samples() {
+        let at = Material { e: e.value(&e_path, t)?, ..mat };
+        at.validate().map_err(|err| {
+            Error::Config(format!("{e_path}: at T = {t} K the curve fails: {err} (SPEC-LIT 100.3)"))
+        })?;
+    }
+    for t in alpha.samples() {
+        let a = alpha.value(&alpha_path, t)?;
+        if !(a >= 0.0) || !a.is_finite() {
+            return Err(Error::Config(format!(
+                "{alpha_path}: at T = {t} K the curve gives alpha = {a:e}, which is negative \
+                 or not finite - a negative expansion coefficient is a sign error, not a \
+                 material (SPEC-LIT 100.3)"
+            )));
+        }
+    }
+    let alpha_curve = !alpha.is_constant();
     let t_ref = match m.t_ref {
         Some(t) => {
-            if mat.alpha == 0.0 {
+            if mat.alpha == 0.0 && !alpha_curve {
                 return Err(Error::Config(format!(
                     "{path}/TRef = {t} is given with alpha = 0 - a reference \
                      nothing reads, which is the setting the solver ignores \
@@ -2272,6 +2477,13 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
             t as Scalar
         }
         None => {
+            if alpha_curve {
+                return Err(Error::Config(format!(
+                    "{path}/TRef: alpha is a curve in T but TRef is not given - the thermal \
+                     strain is alpha(T) (T - TRef), alpha the secant coefficient from TRef \
+                     (SPEC-LIT 100.3). Give TRef, the stress-free temperature"
+                )));
+            }
             if mat.alpha > 0.0 {
                 return Err(Error::Config(format!(
                     "{path}/TRef: alpha = {} is given but TRef is not - the \
@@ -2283,7 +2495,12 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
             0.0
         }
     };
-    Ok((mat, t_ref))
+    let curves = ElasticCurves {
+        e: (!e.is_constant()).then_some(e),
+        alpha: alpha_curve.then_some(alpha),
+        path: path.to_string(),
+    };
+    Ok((mat, t_ref, curves))
 }
 
 fn lower_bc(bc: &ChtScalarBc, path: &str) -> Result<LoweredBc> {

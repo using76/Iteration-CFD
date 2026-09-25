@@ -3896,3 +3896,335 @@ fn pair_the_external_entries_change_a_conjugate_answer() {
         );
     }
 }
+
+/// SPEC-LIT §100.5: the curve a case writes, lowered, refused, and evaluated.
+mod curves {
+    use super::*;
+
+    /// §100.5's pair fixtures: an `alpha` and an `E` curve over the bar's 300-400 K.
+    const ALPHA_TABLE: &str = r#"{ "table": [[250.0, 1.0e-5], [450.0, 1.4e-5]] }"#;
+    const E_TABLE: &str = r#"{ "table": [[250.0, 2.2e11], [450.0, 1.8e11]] }"#;
+
+    #[test]
+    fn a_curve_whose_consumer_is_built_from_a_constant_is_refused_by_name() {
+        let slab = slab_case("1.4", "148.0", "", "", "");
+        let kp = kp_pair_base();
+        let bad = |text: &str, base: &str, path: &str, phrase: &str, extra: &str| {
+            assert_ne!(text, base, "the replaced document must differ from its base");
+            let Err(err) = read(text).expect("parse").lower() else {
+                panic!("{path}: a curve whose consumer wants a number must be refused");
+            };
+            let msg = err.to_string();
+            println!("refusal: {msg}");
+            for what in [path, phrase, "is read and valid", "SPEC-LIT 100.2", extra] {
+                if what.is_empty() {
+                    continue;
+                }
+                assert!(msg.contains(what), "must name '{what}': {msg}");
+            }
+        };
+        let t_a = slab_case("1.4", r#"{ "table": [[250.0, 150.0], [500.0, 80.0]] }"#, "", "", "");
+        bad(
+            &t_a,
+            &slab,
+            "regions/metal/material/kappa",
+            "face conductances",
+            "a table of 2 knots on [250, 500] K",
+        );
+        let pat_b = r#""c": 1200.0"#;
+        assert_eq!(slab.matches(pat_b).count(), 1, "'{pat_b}' must match exactly once");
+        let t_b = slab.replace(pat_b, r#""c": { "table": [[250.0, 1100.0], [500.0, 1300.0]] }"#);
+        bad(&t_b, &slab, "regions/metal/material/c", "transient weight", "");
+        let pat_c = r#""kappa": 1.0, "mu": 0.71"#;
+        assert_eq!(kp.matches(pat_c).count(), 1, "'{pat_c}' must match exactly once");
+        let t_c = kp.replace(
+            pat_c,
+            r#""kappa": { "table": [[200.0, 1.0], [400.0, 2.0]] }, "mu": 0.71"#,
+        );
+        bad(&t_c, &kp, "fluid/kappa", "k_eff", "");
+        let pat_d = r#""cp": 1.0"#;
+        assert_eq!(kp.matches(pat_d).count(), 1, "'{pat_d}' must match exactly once");
+        let t_d = kp.replace(pat_d, r#""cp": { "table": [[200.0, 1.0], [400.0, 2.0]] }"#);
+        bad(&t_d, &kp, "fluid/cp", "rho cp", "");
+        let pat_e = r#""mu": 0.71"#;
+        assert_eq!(kp.matches(pat_e).count(), 1, "'{pat_e}' must match exactly once");
+        let t_e = kp.replace(
+            pat_e,
+            r#""mu": { "sutherland": { "value": 0.71, "TRef": 300.0, "S": 110.0, "range": [200.0, 400.0] } }"#,
+        );
+        bad(&t_e, &kp, "fluid/mu", "laminar viscosity", "");
+    }
+
+    #[test]
+    fn a_malformed_curve_is_refused_for_its_own_reason_first() {
+        let text = slab_case("1.4", r#"{ "table": [[250.0, 150.0]] }"#, "", "", "");
+        let Err(err) = read(&text).expect("parse").lower() else {
+            panic!("a one-knot table must be refused for being malformed");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        assert!(msg.contains("regions/metal/material/kappa"), "must name the path: {msg}");
+        assert!(msg.contains("at least two knots"), "must name the malformation: {msg}");
+        assert!(
+            !msg.contains("is read and valid"),
+            "the malformed curve is not read and valid, so the consumer refusal is wrong: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_elastic_curve_lowers_onto_its_zone_and_a_number_stays_a_number() {
+        let base = steel("1.2e-5", "200e9", "0.3", "300.0");
+        let text = default_stress().replace(&base, &steel(ALPHA_TABLE, "200e9", "0.3", "300.0"));
+        assert_ne!(text, default_stress(), "the replaced document must differ");
+        let low = read(&text).expect("parse").lower().expect("lower");
+        let z = &low.mechanics[0].as_ref().unwrap().zones[0];
+        assert!(z.curves.alpha.is_some(), "the alpha curve must lower: {:?}", z.curves.alpha);
+        assert!(z.curves.e.is_none(), "E stays a number");
+        assert_eq!(z.curves.path, "regions/bar/mechanics/material");
+        assert_eq!(
+            z.material.alpha, 1.0e-5,
+            "the zone constant must be the curve at its LOWER knot, got {:e}",
+            z.material.alpha
+        );
+        assert_eq!(z.material.e, 200.0e9, "got {:e}", z.material.e);
+        let plain = read(&default_stress()).expect("parse").lower().expect("lower");
+        let zp = &plain.mechanics[0].as_ref().unwrap().zones[0];
+        assert!(
+            zp.curves.e.is_none() && zp.curves.alpha.is_none(),
+            "a zone of numbers lowers no curves"
+        );
+        assert_eq!(zp.material.alpha, 1.2e-5, "got {:e}", zp.material.alpha);
+    }
+
+    #[test]
+    fn an_elastic_curve_is_refused_by_name() {
+        let base = steel("1.2e-5", "200e9", "0.3", "300.0");
+        let e_bad = default_stress().replace(
+            &base,
+            &steel("1.2e-5", r#"{ "table": [[250.0, 2.0e11], [450.0, -1.0e9]] }"#, "0.3", "300.0"),
+        );
+        let Err(err) = read(&e_bad).expect("parse").lower() else {
+            panic!("an E curve with a negative sample must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["mechanics/material/E", "T = 450 K", "not positive"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+        let a_bad = default_stress().replace(
+            &base,
+            &steel(r#"{ "table": [[250.0, 1.0e-5], [450.0, -1.0e-6]] }"#, "200e9", "0.3", "300.0"),
+        );
+        let Err(err) = read(&a_bad).expect("parse").lower() else {
+            panic!("an alpha curve with a negative sample must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["mechanics/material/alpha", "T = 450 K", "negative"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+        let no_tref = default_stress().replace(
+            &base,
+            &format!(r#""material": {{ "E": 200e9, "nu": 0.3, "alpha": {ALPHA_TABLE} }}"#),
+        );
+        let Err(err) = read(&no_tref).expect("parse").lower() else {
+            panic!("an alpha curve without TRef must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["mechanics/material/TRef", "curve in T"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+    }
+
+    #[test]
+    fn cht_schema_documents_the_property_curves() {
+        let text = emit_cht_schema();
+        for word in [
+            "table",
+            "polynomial",
+            "sutherland",
+            "exponents",
+            "pieces",
+            "coefficients",
+            "scale",
+            "factor",
+        ] {
+            assert!(text.contains(word), "the schema must document '{word}'");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn pair_an_alpha_curve_moves_the_bar_and_its_twin_at_the_zone_mean_does_not() {
+        let Some(gpu) = gpu() else { return };
+        let base = steel("1.2e-5", "200e9", "0.3", "300.0");
+        let a = default_stress().replace(&base, &steel(ALPHA_TABLE, "200e9", "0.3", "300.0"));
+        let (low_a, _, sa) = run_stress_doc(&gpu, &a);
+        for line in case::summary_lines(&low_a, &sa) {
+            println!("{line}");
+        }
+        let ev = &sa[0].evaluated;
+        assert!(ev.len() == 1, "one zone wrote a curve, evaluated has {}", ev.len());
+        assert_eq!(ev[0].zone, "bar");
+        assert!(
+            (ev[0].t_mean - 350.0).abs() < 1e-6,
+            "the mean converged T must be 350 K, got {}",
+            ev[0].t_mean
+        );
+        assert!(
+            ev[0].t_min > 300.0 && ev[0].t_max < 400.0,
+            "cells over [{}, {}] K, inside the 300-400 K ends",
+            ev[0].t_min,
+            ev[0].t_max
+        );
+        let b = default_stress().replace(&base, &steel("1.1e-5", "200e9", "0.3", "300.0"));
+        let (_, _, sb) = run_stress_doc(&gpu, &b);
+        let (d, u) = (du(&sa[0].u, &sb[0].u), umax(&sa[0].u));
+        println!("pair alpha curve vs constant 1.1e-5: du = {d:.6e}, umax(a) = {u:.6e}");
+        assert!(d > 0.03 * u, "du = {d} against umax(a) = {u}: the curve and the \
+            solver ignored it, SPEC-LIT 13.4.1");
+        let c = default_stress().replace(
+            &base,
+            &steel(&format!("{:e}", ev[0].alpha), "200e9", "0.3", "300.0"),
+        );
+        let (_, _, sc) = run_stress_doc(&gpu, &c);
+        let dt = du(&sa[0].u, &sc[0].u);
+        println!("curve vs its twin at the zone mean: du = {dt:.6e}, umax(a) = {u:.6e}");
+        assert!(dt <= 1e-12 * u, "du = {dt} against umax(a) = {u}: the curve was \
+            not evaluated at (S100.5)");
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn pair_an_e_curve_moves_the_stress_and_its_twin_at_the_zone_mean_does_not() {
+        let Some(gpu) = gpu() else { return };
+        let base = steel("1.2e-5", "200e9", "0.3", "300.0");
+        let a = default_stress().replace(&base, &steel("1.2e-5", E_TABLE, "0.3", "300.0"));
+        let (low_a, _, sa) = run_stress_doc(&gpu, &a);
+        for line in case::summary_lines(&low_a, &sa) {
+            println!("{line}");
+        }
+        let ev = &sa[0].evaluated;
+        assert!(ev.len() == 1, "one zone wrote a curve, evaluated has {}", ev.len());
+        assert_eq!(ev[0].zone, "bar");
+        assert!(
+            (ev[0].t_mean - 350.0).abs() < 1e-6,
+            "the mean converged T must be 350 K, got {}",
+            ev[0].t_mean
+        );
+        let b = default_stress().replace(&base, &steel("1.2e-5", "2.1e11", "0.3", "300.0"));
+        let (_, _, sb) = run_stress_doc(&gpu, &b);
+        let c = default_stress().replace(
+            &base,
+            &steel("1.2e-5", &format!("{:e}", ev[0].e), "0.3", "300.0"),
+        );
+        let (_, _, sc) = run_stress_doc(&gpu, &c);
+        let (va, vb, vc) = (vm_max(&sa), vm_max(&sb), vm_max(&sc));
+        println!(
+            "pair E curve: vm_max(a) = {va:.6e}, vm_max(b, 2.1e11) = {vb:.6e}, \
+             vm_max(c, twin) = {vc:.6e}"
+        );
+        assert!(
+            (va - vb).abs() > 0.02 * va,
+            "|{va} - {vb}| against vm_max(a) = {va}: the curve and the solver \
+             ignored it, SPEC-LIT 13.4.1"
+        );
+        assert!(
+            (va - vc).abs() <= 1e-12 * va,
+            "|{va} - {vc}| against vm_max(a) = {va}: the curve was not evaluated \
+             at (S100.5)"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_zone_whose_temperatures_leave_its_curve_is_refused_by_name() {
+        let Some(gpu) = gpu() else { return };
+        let base = steel("1.2e-5", "200e9", "0.3", "300.0");
+        let text = default_stress().replace(
+            &base,
+            &steel(
+                r#"{ "table": [[320.0, 1.0e-5], [450.0, 1.4e-5]] }"#,
+                "200e9",
+                "0.3",
+                "300.0",
+            ),
+        );
+        assert_ne!(text, default_stress(), "the replaced document must differ");
+        let low = read(&text).expect("parse").lower().expect("lower");
+        let sol = run_case(&gpu, &low).expect("run");
+        case::thermal_converged(&low, &sol).expect("thermal");
+        let Err(err) = case::run_stress(&gpu, &low, &sol) else {
+            panic!("a zone whose cells leave the curve's range must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["mechanics/material/alpha", "leaves the curve's range", "[320, 450] K"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+    }
+
+    /// The bimetal strip's tip, exactly as `the_bimetal_strip_case_reproduces_
+    /// timoshenko` reads it: the mean `u.y` over the last x column's cells,
+    /// against that column's mean centroid `x`.
+    fn tip(low: &LoweredChtCase, s: &RegionStress) -> (Scalar, Scalar) {
+        let m = &low.meshes[0];
+        let last: Vec<usize> =
+            (0..m.n_cells).filter(|&c| m.c[c].x > 0.06 - 0.06 / 96.0).collect();
+        assert!(!last.is_empty(), "the last x column must have cells");
+        let x_c = last.iter().map(|&c| m.c[c].x).sum::<Scalar>() / last.len() as Scalar;
+        let d = last.iter().map(|&c| s.u[c].y).sum::<Scalar>() / last.len() as Scalar;
+        (x_c, d)
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_bimetal_strip_with_a_brass_alpha_curve_moves_the_tip_and_meets_timoshenko() {
+        let Some(gpu) = gpu() else { return };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cases/bimetalStrip.cht.jsonc");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let from = r#""alpha": 2.0e-5, "TRef": 293.15"#;
+        let to = r#""alpha": { "table": [[293.15, 2.3e-5], [313.15, 2.5e-5]] }, "TRef": 293.15"#;
+        assert_eq!(text.matches(from).count(), 1, "'{from}' must appear exactly once");
+        let curve_text = text.replace(from, to);
+        assert_ne!(text, curve_text, "the replaced document must differ");
+        let (low_a, _, sa) = run_stress_doc(&gpu, &text);
+        let (low_b, _, sb) = run_stress_doc(&gpu, &curve_text);
+        for line in case::summary_lines(&low_b, &sb) {
+            println!("{line}");
+        }
+        let (x_c, d_a) = tip(&low_a, &sa[0]);
+        let (x_c_b, d_b) = tip(&low_b, &sb[0]);
+        assert!((x_c - x_c_b).abs() < 1e-15, "both runs share one mesh");
+        let ev = &sb[0].evaluated;
+        assert!(ev.len() == 1 && ev[0].zone == "brass", "brass alone wrote a curve: {:?}",
+            ev.iter().map(|z| z.zone.as_str()).collect::<Vec<_>>());
+        assert!(
+            (ev[0].alpha - 2.4e-5).abs() < 1e-8,
+            "alpha at the zone's mean T must be 2.4e-5, got {:e}",
+            ev[0].alpha
+        );
+        // Timoshenko 1925 (SPEC-LIT (S95.19)) rebuilt with the curve's
+        // evaluated alpha2, never transcribed.
+        let a2 = ev[0].alpha;
+        let (a1, a2h) = (0.005 as Scalar, 0.005 as Scalar);
+        let h = a1 + a2h;
+        let (mm, n) = (a1 / a2h, 200.0e9 / 100.0e9);
+        let (alpha1, alpha2, d_t) = (1.2e-5 as Scalar, a2, 10.0 as Scalar);
+        let kappa = 6.0 * (alpha2 - alpha1) * d_t * (1.0 + mm) * (1.0 + mm)
+            / (h * (3.0 * (1.0 + mm) * (1.0 + mm) + (1.0 + mm * n) * (mm * mm + 1.0 / (mm * n))));
+        let d_exp = -kappa * x_c * x_c / 2.0;
+        let err = ((d_b - d_exp) / d_exp).abs();
+        println!(
+            "bimetal curve: d_a = {d_a:.4e} m, d_b = {d_b:.4e} m, d_exp = {d_exp:.4e} m, \
+             error {:.3} %",
+            100.0 * err
+        );
+        assert!(err <= 0.10, "tip deflection {d_b} against closed form {d_exp}: {err} ratio");
+        assert!(d_b / d_a > 1.3, "d_b/d_a = {}: the larger evaluated alpha must move \
+            the tip further", d_b / d_a);
+    }
+}

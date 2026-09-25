@@ -219,14 +219,66 @@
         "L"
       ]
     },
+    "ChtCurve": {
+      "description": "§100.1's three curve forms, one key each: `{ \"table\": .. }`,\n`{ \"polynomial\": .. }`, `{ \"sutherland\": .. }`.",
+      "oneOf": [
+        {
+          "description": "(S100.2): `[[T, value], ...]`, `T` in K and strictly increasing.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "table"
+          ]
+        },
+        {
+          "description": "(S100.3).",
+          "type": "object",
+          "properties": {
+            "polynomial": {
+              "$ref": "#/$defs/ChtPolynomial"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "polynomial"
+          ]
+        },
+        {
+          "description": "(S100.4).",
+          "type": "object",
+          "properties": {
+            "sutherland": {
+              "$ref": "#/$defs/ChtSutherland"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "sutherland"
+          ]
+        }
+      ]
+    },
     "ChtElastic": {
       "description": "The elastic constants of one material or one zone - SPEC-LIT §96.1.\n\nValidated at lowering by [`crate::solid::Material::validate`], which is\nwhere `E <= 0`, the `nu` range and the measured 0.45 edge are refused\n(§96.3 rows 1-2); this struct carries no logic of its own.",
       "type": "object",
       "properties": {
         "E": {
-          "description": "Young's modulus `E`, Pa.",
-          "type": "number",
-          "format": "double"
+          "description": "Young's modulus `E`, Pa. A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "TRef": {
           "description": "The stress-free temperature, K: the thermal strain is\n`alpha (T - TRef)`, so `alpha > 0` without it is refused (§96.3\nrow 3), and it without `alpha` is a reference nothing reads (row 4).",
@@ -237,9 +289,8 @@
           "format": "double"
         },
         "alpha": {
-          "description": "Linear thermal expansion coefficient `alpha`, 1/K.",
-          "type": "number",
-          "format": "double"
+          "description": "Linear thermal expansion coefficient `alpha`, 1/K.\nA number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "nu": {
           "description": "Poisson's ratio, in (-1, 0.5) and at most the measured edge 0.45.",
@@ -373,19 +424,16 @@
       "type": "object",
       "properties": {
         "cp": {
-          "description": "`c_p`, J/(kg K).",
-          "type": "number",
-          "format": "double"
+          "description": "`c_p`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "kappa": {
-          "description": "`k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not\na thing, and three or nine components are a §13.4 error.",
-          "type": "number",
-          "format": "double"
+          "description": "`k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not\na thing, and three or nine components are a §13.4 error.\nA number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "mu": {
-          "description": "Dynamic viscosity, Pa s.",
-          "type": "number",
-          "format": "double"
+          "description": "Dynamic viscosity, Pa s. A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "rho": {
           "description": "`rho_f` at `buoyancy.TRef`, kg/m^3.",
@@ -482,6 +530,10 @@
             "type": "number",
             "format": "double"
           }
+        },
+        {
+          "description": "A curve in T (SPEC-LIT §100.2) - isotropic.",
+          "$ref": "#/$defs/ChtCurve"
         }
       ]
     },
@@ -490,9 +542,8 @@
       "type": "object",
       "properties": {
         "c": {
-          "description": "`c_s`, J/(kg K).",
-          "type": "number",
-          "format": "double"
+          "description": "`c_s`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "kappa": {
           "description": "`k_s`: one number for an isotropic material, three for `diag(kx,ky,kz)`\nin the MESH axes. Nine is a §13.4 error naming the two that are\nimplemented - SPEC-LIT §46.4.",
@@ -777,6 +828,71 @@
       "additionalProperties": false,
       "required": [
         "polyMesh"
+      ]
+    },
+    "ChtPolynomial": {
+      "description": "(S100.3) as a case writes it.",
+      "type": "object",
+      "properties": {
+        "exponents": {
+          "description": "The exponents `e_j`, one per coefficient of every piece.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "factor": {
+          "description": "`F`. Default 1.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "pieces": {
+          "description": "The pieces, contiguous and ascending in `T`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChtPolynomialPiece"
+          }
+        },
+        "scale": {
+          "description": "`T_s`, K. Default 1.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "exponents",
+        "pieces"
+      ]
+    },
+    "ChtPolynomialPiece": {
+      "description": "One piece of (S100.3): its closed range in K and one coefficient per\nexponent.",
+      "type": "object",
+      "properties": {
+        "coefficients": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "range",
+        "coefficients"
       ]
     },
     "ChtRegion": {
@@ -1077,6 +1193,18 @@
         }
       ]
     },
+    "ChtScalarOrCurve": {
+      "description": "A property entry written as a number or as a curve in `T` - SPEC-LIT\n§100.2. Untagged with the number FIRST, so every document written before\n§100 deserialises exactly as it did.",
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "$ref": "#/$defs/ChtCurve"
+        }
+      ]
+    },
     "ChtSolidSolver": {
       "description": "The outer displacement loop's own settings - SPEC-LIT §96.1. Two knobs,\nboth optional and defaulted; the two entries that are NOT offered\n(`relaxation`, `ddtScheme`) are present as fields so their refusals can\nsay why, exactly as `JsonExact::precision` does.",
       "type": "object",
@@ -1116,6 +1244,40 @@
         }
       },
       "additionalProperties": false
+    },
+    "ChtSutherland": {
+      "description": "(S100.4) as a case writes it: `value` is the property at `TRef`.",
+      "type": "object",
+      "properties": {
+        "S": {
+          "type": "number",
+          "format": "double"
+        },
+        "TRef": {
+          "type": "number",
+          "format": "double"
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "value": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "TRef",
+        "S",
+        "range"
+      ]
     },
     "JsonBounds": {
       "type": "object",

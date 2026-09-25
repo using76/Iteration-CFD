@@ -17,11 +17,13 @@ use std::path::{Path, PathBuf};
 
 use crate::cht::ChtSolution;
 use crate::error::{Error, IoContext, Result};
-use crate::io::case_cht::{LoweredChtCase, LoweredMechanicalBc};
+use crate::io::case_cht::{LoweredChtCase, LoweredElasticZone, LoweredMechanicalBc};
 use crate::io::output_types::OutputField;
 use crate::io::pointfield::PointInterpolator;
 use crate::io::vtu::write_vtu_points;
 use crate::mesh::{GpuMesh, HostMesh};
+use crate::properties::Property;
+use crate::solid::Material;
 use crate::solid::bc::CompBc;
 use crate::solid::coupled;
 use crate::solid::displacement::Displacement;
@@ -126,6 +128,23 @@ pub(crate) fn per_patch_of(
 //  The run - SPEC-LIT 96.2
 // ==========================================================================
 
+/// SPEC-LIT §100.3: what one zone's curves were evaluated at, and gave.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZoneEvaluation {
+    pub zone: String,
+    /// (S100.5): the volume-weighted mean of the zone's converged `T`, K.
+    pub t_mean: Scalar,
+    /// The zone's coldest and hottest cell, K.
+    pub t_min: Scalar,
+    pub t_max: Scalar,
+    /// The constants the zone was solved with.
+    pub e: Scalar,
+    pub alpha: Scalar,
+    /// `(at t_min, at t_max)`: the spread the mean hides.
+    pub e_spread: (Scalar, Scalar),
+    pub alpha_spread: (Scalar, Scalar),
+}
+
 /// What one mechanical region's run produced - what `summary_lines` prints
 /// and `write_region_vtu` writes.
 #[derive(Debug)]
@@ -138,6 +157,8 @@ pub struct RegionStress {
     pub report: OuterReport,
     /// [`MaterialMap::describe`] - one line per zone, then the bond faces.
     pub describe: String,
+    /// §100.3: one entry per zone that wrote a curve, in zone order.
+    pub evaluated: Vec<ZoneEvaluation>,
     /// `[n_cells]` cell displacement.
     pub u: Vec<Vec3>,
     /// `[n_points]` displacement on the mesh's own points.
@@ -154,6 +175,87 @@ pub struct RegionStress {
     pub max_u: Scalar,
     /// `(value, cell, centroid)`, the peak von Mises.
     pub peak_von_mises: (Scalar, usize, Vec3),
+}
+
+/// SPEC-LIT §100.3: zone `z`'s material at (S100.5) from the region's
+/// converged cell temperatures `t_c` on `host`; `None` when the zone wrote
+/// numbers only, whose lowered constants are then used exactly as they are.
+/// A zone whose cells' temperatures leave a curve's range is refused (§100.5
+/// row 9), and so is an evaluated constant that fails `Material::validate`.
+pub fn evaluate_zone(
+    host: &HostMesh,
+    t_c: &[Scalar],
+    cells: &[Label],
+    z: &LoweredElasticZone,
+) -> Result<Option<(Material, ZoneEvaluation)>> {
+    if z.curves.e.is_none() && z.curves.alpha.is_none() {
+        return Ok(None);
+    }
+    let (mut vs, mut vt) = (0.0 as Scalar, 0.0 as Scalar);
+    let (mut lo, mut hi) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
+    for &c in cells {
+        let c = c as usize;
+        vs += host.v[c];
+        vt += host.v[c] * t_c[c];
+        lo = lo.min(t_c[c]);
+        hi = hi.max(t_c[c]);
+    }
+    if !(vs > 0.0) {
+        return Err(Error::Config(format!(
+            "{}: zone '{}' has no cells to evaluate its curves on (SPEC-LIT 100.3)",
+            z.curves.path, z.name
+        )));
+    }
+    let t_mean = vt / vs;
+    let covered = |p: &Property, setting: &str| -> Result<()> {
+        if let Some((a, b)) = p.range() {
+            if !(lo >= a && hi <= b) {
+                return Err(Error::Config(format!(
+                    "{setting}: zone '{}' reached T in [{lo}, {hi}] K after the thermal \
+                     solve, which leaves the curve's range [{a}, {b}] K - a curve is not \
+                     extrapolated, and the case stated one its own solution leaves \
+                     (SPEC-LIT 100.3)",
+                    z.name
+                )));
+            }
+        }
+        Ok(())
+    };
+    let mut mat = z.material;
+    let mut ev = ZoneEvaluation {
+        zone: z.name.clone(),
+        t_mean,
+        t_min: lo,
+        t_max: hi,
+        e: mat.e,
+        alpha: mat.alpha,
+        e_spread: (mat.e, mat.e),
+        alpha_spread: (mat.alpha, mat.alpha),
+    };
+    if let Some(p) = &z.curves.e {
+        let s = format!("{}/E", z.curves.path);
+        covered(p, &s)?;
+        mat.e = p.value(&s, t_mean)?;
+        ev.e = mat.e;
+        ev.e_spread = (p.value(&s, lo)?, p.value(&s, hi)?);
+    }
+    if let Some(p) = &z.curves.alpha {
+        let s = format!("{}/alpha", z.curves.path);
+        covered(p, &s)?;
+        mat.alpha = p.value(&s, t_mean)?;
+        ev.alpha = mat.alpha;
+        ev.alpha_spread = (p.value(&s, lo)?, p.value(&s, hi)?);
+    }
+    mat.validate().map_err(|e| {
+        Error::Config(format!("{}: at T_z = {t_mean} K: {e} (SPEC-LIT 100.3)", z.curves.path))
+    })?;
+    if !(mat.alpha >= 0.0) {
+        return Err(Error::Config(format!(
+            "{}/alpha: at T_z = {t_mean} K the curve gives alpha = {:e} (SPEC-LIT 100.3)",
+            z.curves.path, mat.alpha
+        )));
+    }
+    Ok(Some((mat, ev)))
 }
 
 /// Solve SPEC-LIT 95's displacement on every solid region carrying a
@@ -173,18 +275,25 @@ pub fn run_stress(gpu: &Gpu, low: &LoweredChtCase, sol: &ChtSolution) -> Result<
         let bt: Vec<Scalar> = sol.bt[bo..bo + nb].to_vec();
 
         let gm = GpuMesh::upload(gpu, host)?;
-        let entries: Vec<(&str, crate::solid::Material, Option<Scalar>, Vec<Label>)> = m
-            .zones
-            .iter()
-            .enumerate()
-            .map(|(zi, z)| {
-                let cells: Vec<Label> = (0..m.zone_of_cell.len())
-                    .filter(|&c| m.zone_of_cell[c] == zi)
-                    .map(|c| c as Label)
-                    .collect();
-                (z.name.as_str(), z.material, Some(z.t_ref), cells)
-            })
-            .collect();
+        // SPEC-LIT §100.3: a zone with a curve is evaluated once, at
+        // (S100.5); a zone of numbers takes its lowered constants unchanged.
+        let mut evaluated = Vec::new();
+        let mut entries: Vec<(&str, crate::solid::Material, Option<Scalar>, Vec<Label>)> =
+            Vec::new();
+        for (zi, z) in m.zones.iter().enumerate() {
+            let cells: Vec<Label> = (0..m.zone_of_cell.len())
+                .filter(|&c| m.zone_of_cell[c] == zi)
+                .map(|c| c as Label)
+                .collect();
+            let mat = match evaluate_zone(host, &t_c, &cells, z)? {
+                Some((mat, ev)) => {
+                    evaluated.push(ev);
+                    mat
+                }
+                None => z.material,
+            };
+            entries.push((z.name.as_str(), mat, Some(z.t_ref), cells));
+        }
         let map = MaterialMap::from_cell_lists(&entries, host.n_cells, m.bond)?;
         let per_patch = per_patch_of(host, &m.patch_bcs)?;
         // One `numerics` block serves the conduction matrix and the three
@@ -233,6 +342,7 @@ pub fn run_stress(gpu: &Gpu, low: &LoweredChtCase, sol: &ChtSolution) -> Result<
             name: low.region_names[r].clone(),
             report,
             describe,
+            evaluated,
             u,
             u_points,
             sigma: hs.sigma,
@@ -296,6 +406,18 @@ pub fn banner_lines(low: &LoweredChtCase) -> Vec<String> {
                  -(3lambda+2mu) alpha T0 d(tr eps)/dt term the one-way energy \
                  equation omits (Boley & Weiner ch. 1-2)"
             ));
+            if z.curves.e.is_some() || z.curves.alpha.is_some() {
+                let say = |p: &Option<crate::properties::Property>| {
+                    p.as_ref().map_or("the number above".to_string(), |c| c.describe())
+                };
+                out.push(format!(
+                    "    E: {}; alpha: {} - evaluated at the zone's mean converged T after \
+                     the thermal solve, (S100.5); the constants above are the curves at their \
+                     lowest temperature (SPEC-LIT 100.3)",
+                    say(&z.curves.e),
+                    say(&z.curves.alpha)
+                ));
+            }
         }
         // SPEC-LIT 109.8: the banner names the slenderness, its verdict and
         // the map the outer loop will iterate - once per mechanical region.
@@ -362,6 +484,22 @@ pub fn summary_lines(low: &LoweredChtCase, stress: &[RegionStress]) -> Vec<Strin
             s.peak_von_mises.2.z,
         ));
         out.push(s.describe.clone());
+        for ev in &s.evaluated {
+            out.push(format!(
+                "    zone '{}': evaluated at T_z = {:.4} K (S100.5), cells over [{:.4}, {:.4}] K: \
+                 E = {:e} Pa ({:e} .. {:e}), alpha = {:e} /K ({:e} .. {:e}) (SPEC-LIT 100.3)",
+                ev.zone,
+                ev.t_mean,
+                ev.t_min,
+                ev.t_max,
+                ev.e,
+                ev.e_spread.0,
+                ev.e_spread.1,
+                ev.alpha,
+                ev.alpha_spread.0,
+                ev.alpha_spread.1
+            ));
+        }
     }
     out
 }
