@@ -523,6 +523,10 @@ pub struct FlowCase<'a> {
     pub t_solver: SolverControls,
     pub n_non_orthogonal_correctors: usize,
     pub tolerances: PairingTolerances,
+    /// `[n_regions]` SPEC-LIT §100.10: region 0's is the fluid's `kappa`,
+    /// every other region's a solid's `kappa` and `c`. Empty is every
+    /// region's numbers.
+    pub conduction_curves: Vec<Option<crate::io::case_cht::ConductionCurves>>,
     /// Ambient pressure the gas state is pinned at, Pa.
     pub p0: Scalar,
 }
@@ -596,7 +600,18 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             ))),
         })
         .collect::<Result<Vec<_>>>()?;
-    let cond = Conduction::uniform_per_region(&tm, &entries)?;
+    let mut cond = Conduction::uniform_per_region(&tm, &entries)?;
+    // SPEC-LIT §100.10: region 0's curve is the fluid's `kappa`, evaluated on
+    // the device inside the energy equation; every other region's is a
+    // solid's, rebuilt on the host between two iterations.
+    let curves_of = |r: usize| case.conduction_curves.get(r).and_then(Option::as_ref);
+    let fluid_kappa: Option<(crate::properties::Property, String)> = curves_of(0)
+        .and_then(|c| c.kappa.as_ref().map(|p| (p.clone(), format!("{}/kappa", c.path))));
+    let solid_curves: Vec<Option<crate::io::case_cht::ConductionCurves>> = (0..case.regions.len())
+        .map(|r| if r == 0 { None } else { curves_of(r).cloned() })
+        .collect();
+    let solid_curved = solid_curves.iter().any(Option::is_some);
+    let refresh = solid_curved || fluid_kappa.is_some();
 
     let thermal_mesh = GpuMesh::upload(gpu, &tm.host)?;
     let fluid_hm = &case.meshes[0];
@@ -655,6 +670,9 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     };
     let mut energy = Energy::new(gpu, &thermal_mesh, ectrl, props)?;
     energy.attach_conjugate(gpu, &tm, &cond)?;
+    if let Some((p, path)) = &fluid_kappa {
+        energy.set_conductivity_curve(gpu, path, p, n_fluid, n_fluid_bf)?;
+    }
 
     // ---- T's boundary conditions -----------------------------------------
     //
@@ -668,6 +686,9 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     // which on an air/silicon pair is wrong by 5e3.
     let mut external: Vec<crate::cht::ambient::ExternalFace> = Vec::new();
     let mut ffq_fluid = vec![false; tm.host.n_boundary_faces];
+    // SPEC-LIT §100.10: the faces written from a conductance a curve moves.
+    let mut solid_ffq: Vec<(usize, Scalar)> = Vec::new();
+    let mut convective: Vec<crate::cht::ambient::ExternalFace> = Vec::new();
     {
         let f = energy.field();
         let mut kind = gpu.download(&f.bc_kind)?;
@@ -716,6 +737,9 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
                             let c_b = cond.b_conductance[bf];
                             let delta = tm.host.b_delta_coeffs[bf];
                             rg[bf] = if c_b > 0.0 { q * delta / c_b } else { 0.0 };
+                            if solid_curved {
+                                solid_ffq.push((bf, *q));
+                            }
                         }
                     }
                     // SPEC-LIT §98.2-§98.3. `C_b` on a solid face is the static
@@ -741,6 +765,8 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
                         rg[bf] = c;
                         if loss.radiates() {
                             external.push(face);
+                        } else if refresh {
+                            convective.push(face);
                         }
                     }
                 }
@@ -1026,6 +1052,75 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             gas.update_density(gpu, energy.field())?;
         }
 
+        // 4a. SPEC-LIT §100.10: the solid half rebuilt from the current T, and
+        // every face written from a conductance a curve moves rewritten - one
+        // host round trip per iteration, and only on a case with a curve.
+        if refresh {
+            let t = gpu.download(&energy.field().f)?;
+            let bt = gpu.download(&energy.field().bf)?;
+            // The temperatures the next `update_k_eff` evaluates the fluid's
+            // curve at are these very ones, so a fluid that has left the
+            // curve is refused here, naming what it reached, before a NaN
+            // can reach the solve; the device flag read after the correction
+            // is the backstop.
+            if let Some((p, path)) = &fluid_kappa {
+                if let Some((lo, hi)) = p.range() {
+                    let (mut a, mut b) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
+                    for x in t[..n_fluid].iter().chain(&bt[..n_fluid_bf]) {
+                        a = a.min(*x);
+                        b = b.max(*x);
+                    }
+                    if !(a >= lo && b <= hi) {
+                        return Err(Error::Config(format!(
+                            "{path}: the fluid reached T in [{a}, {b}] K, which leaves the \
+                             curve's range [{lo}, {hi}] K - a curve is not extrapolated \
+                             (SPEC-LIT 100.10)"
+                        )));
+                    }
+                }
+            }
+            if solid_curved {
+                let (k, rho_c) = crate::cht::conduction_at(&tm, &entries, &solid_curves, &t)?;
+                cond.rebuild(&tm, &k, &rho_c)?;
+                energy.refresh_conjugate_solid(gpu, &tm, &cond)?;
+            }
+            let delta = &tm.host.b_delta_coeffs;
+            let c_b_of = |bf: usize| -> Result<Scalar> {
+                if (tm.host.b_face_cells[bf] as usize) < n_fluid {
+                    match &fluid_kappa {
+                        Some((p, path)) => Ok(p.value(path, bt[bf])? * delta[bf]),
+                        None => Ok(fluid.kappa * delta[bf]),
+                    }
+                } else {
+                    Ok(cond.b_conductance[bf])
+                }
+            };
+            if !(solid_ffq.is_empty() && convective.is_empty() && external.is_empty()) {
+                let f = energy.field_mut();
+                let mut fr = gpu.download(&f.fr)?;
+                let mut rv = gpu.download(&f.ref_value)?;
+                let mut rg = gpu.download(&f.ref_grad)?;
+                for &(bf, q) in &solid_ffq {
+                    let c_b = cond.b_conductance[bf];
+                    rg[bf] = if c_b > 0.0 { q * delta[bf] / c_b } else { 0.0 };
+                }
+                for face in convective.iter_mut() {
+                    face.c_b = c_b_of(face.bf)?;
+                    let (a, b, c) = face.triple();
+                    fr[face.bf] = a;
+                    rv[face.bf] = b;
+                    rg[face.bf] = c;
+                }
+                // A radiating face's triple is rewritten by 4b from this c_b.
+                for face in external.iter_mut() {
+                    face.c_b = c_b_of(face.bf)?;
+                }
+                gpu.write(&mut f.fr, &fr)?;
+                gpu.write(&mut f.ref_value, &rv)?;
+                gpu.write(&mut f.ref_grad, &rg)?;
+            }
+        }
+
         // 4b. SPEC-LIT §98.3: every radiating face re-linearised about the
         // T_b the previous energy solve left - one host round trip per
         // iteration, and only on a case that has such a face.
@@ -1035,6 +1130,11 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
 
         // 5. the one energy equation, over both regions
         let tperf = energy.correct(gpu, &phi_thermal, &nut_thermal, &tke, nu, &gas)?;
+
+        // SPEC-LIT §100.10: a fluid that left its conductivity curve.
+        if fluid_kappa.is_some() {
+            energy.check_conductivity_range(gpu)?;
+        }
 
         let u_res = sperf
             .u

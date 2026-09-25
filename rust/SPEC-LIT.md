@@ -29771,7 +29771,8 @@ that already writes §32.2's `fixedFluxTemperature`, in both
 `cht::run_case` and `cht::flow::run_flow_case`. On a fluid face
 `C_b = k_eff Delta_b`, and the conjugate flow path is laminar - `nu_t` is
 zero on both meshes and never written - so `k_eff = kappa` in every bit and
-`C_b = kappa Delta_b` is static too. A test holds the conductance the energy
+`C_b = kappa Delta_b` is static too - unless `kappa` is a curve, when §100.10 rewrites
+it every iteration. A test holds the conductance the energy
 equation used to that product, on the face (§98.5).
 
 **A radiating face moves with `T_b`.** On the conduction path `run_case` had
@@ -29969,15 +29970,15 @@ the thermo-elastic solid reads after the thermal solve has converged,
 `E(T)` and `alpha(T)` (§100.3), and holds the evaluator against three
 published tables (§100.4, Gate 100-B).
 
-What it does not do everywhere is rebuild a coefficient from a curve. On the
-conduction path a solid's `kappa` and `c` are rebuilt from the current
-temperature every outer pass (§100.6), inside a loop that states its
-criterion and refuses to stall (§100.7); Gate 100-A is the proof that loop
-converged. On the conjugate path the solid's conductances, the fluid's
-`k_eff` and `rho cp`, and the momentum equation's viscosity are still built
-once, from a constant, and a curve there is read, validated and **refused by
-name** (§100.2), so no run silently uses a constant in its place. Volumetric
-sources that vary are later.
+A curve in a solid's `kappa` or `c` is rebuilt from the current temperature
+on both paths: every outer pass of the conduction path's loop, which states
+its criterion and refuses to stall (§100.6-§100.7, and Gate 100-A, the
+proof that loop converged), and every iteration of the conjugate path's
+SIMPLE loop (§100.10). A fluid's `kappa` is evaluated on the device inside
+every energy correction (§100.10). A fluid's `cp` and `mu` are still built
+once, from a constant, and a curve there is read, validated and **refused
+by name** (§100.2), so no run silently uses a constant in its place.
+Volumetric sources that vary are later.
 
 The gates of this section are 100-A to 100-D. `docs/09` wrote them under the
 number before this one, which §69's registry reserves for invented gate
@@ -30073,9 +30074,10 @@ anisotropic curve is not a form.
 
 | entry | a number | a curve |
 |---|---|---|
-| a solid's `material.kappa` | as before | **consumed** on the conduction path: rebuilt every outer pass (§100.6); read, validated, **refused** on a case with a fluid region |
-| a solid's `material.c` | as before | **consumed** on the conduction path: the transient weight is rebuilt every outer pass (§100.6); read, validated, **refused** on a case with a fluid region |
-| a fluid's `fluid.kappa`, `fluid.cp` | as before | read, validated, **refused**: §26's `k_eff` and `rho cp` are built from constants |
+| a solid's `material.kappa` | as before | **consumed**: rebuilt every outer pass of the conduction path (§100.6) and every iteration of the conjugate path (§100.10) |
+| a solid's `material.c` | as before | **consumed**: the transient weight is rebuilt every outer pass (§100.6); on the steady conjugate path it weights nothing |
+| a fluid's `fluid.kappa` | as before | **consumed**: evaluated on the device inside every energy correction (§100.10) |
+| a fluid's `fluid.cp` | as before | read, validated, **refused**: §26 carries `cp T` in the convected flux and the budget, and a `cp(T)` wants the enthalpy form, which is not built |
 | a fluid's `fluid.mu` | as before | read, validated, **refused**: the momentum equation's laminar viscosity is a constant |
 | `mechanics.material.E` and `alpha`, and each zone's | as before | **consumed**: §100.3 |
 
@@ -30221,7 +30223,7 @@ relative (N2) or better.
 | 3 | Sutherland's law with `value <= 0`, `TRef <= 0` or `S < 0` | the JSON path |
 | 4 | any range that is not ascending or does not start at a positive temperature | the JSON path and the range |
 | 5 | an evaluation outside the range | the JSON path, the temperature and the range |
-| 6 | a curve for a solid's `kappa` or `c` on a case with a fluid region, or for a fluid's `kappa`, `cp` or `mu` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
+| 6 | a curve for a fluid's `cp` or `mu` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
 | 7 | an `E` or `alpha` curve whose value at a sample temperature fails §95's `validate`, or an `alpha` below zero there | the JSON path and the temperature |
 | 8 | an `alpha` curve without `TRef` | the JSON path |
 | 9 | a zone whose converged temperatures leave its curve's range | the JSON path, the zone's range and the curve's |
@@ -30230,6 +30232,7 @@ relative (N2) or better.
 | 12 | `numerics.outer` on a case with a fluid region, or on one with no curve and no radiating face | `numerics/outer`, and why nothing reads it |
 | 13 | `numerics.outer.tolerance` outside `(0, 1)`, or `maxOuter` of zero | the setting |
 | 14 | a step whose outer loop did not meet (S100.7) in `maxOuter` passes | the criterion, the pass count, the last changes and their contraction (§100.7) |
+| 15 | a fluid whose temperature leaves its `kappa` curve, or a `kappa` curve with Kays-Crawford's `Pr_t` | the JSON path, the temperatures reached and the range; the `Pr_t` model |
 
 **The pair tests (§13.4.1).** On §96's steel bar - clamped, heated linearly
 from 300 to 400 K - an `alpha` curve against the constant `alpha(300 K)`,
@@ -30306,9 +30309,8 @@ extrapolated, not even by a solve that overshoots.
 It is first-order consistent and is not conservative across a jump in `c`;
 an enthalpy form is not built.
 
-**On the conjugate path** (`cht::flow::run_flow_case`) a curve on a solid's
-`kappa` or `c` is still refused by name: there the solid's conductances are
-attached to §26's energy equation once.
+**On the conjugate path** (`cht::flow::run_flow_case`) the same rebuild runs
+between two SIMPLE iterations, and §100.10 says where its result goes.
 
 ### 100.7 The outer loop - the criterion a case may state, and the refusal when it stalls
 
@@ -30454,6 +30456,57 @@ it is `src/properties.rs`'s row in §81.7's registry.
 | an evaluation outside the range | NaN, and the flag raised; cleared by `clear_flag` |
 | a constant uploaded | refused, naming the setting |
 | capture | three replays bitwise |
+
+### 100.10 The conjugate path - the fluid's `k_eff` and the solid's conductances from a curve
+
+On `cht::flow::run_flow_case` a fluid's `kappa` and a solid's `kappa` and
+`c` may be curves. The fluid's `cp` and `mu` may not (§100.2).
+
+**The fluid's `k_eff`.** `Energy::set_conductivity_curve` uploads the curve
+(§100.9). Every `update_k_eff` evaluates it at the current `T` of the
+fluid's cells and boundary faces - the fluid prefix of §47.4's numbering -
+interpolates it linearly onto the faces, the convention every face property
+of §25.3 follows, and adds it where the constant was added:
+`k_eff = (0 + rho_f nu_t cp/Pr_t) + k_f`. A case of numbers passes the
+constant exactly as before. The evaluation runs inside `Energy::correct`,
+and a second capture test holds that path bitwise on replay. Before every
+correction the driver checks, on the host, the very temperatures the curve
+is about to be evaluated at - the ones it has already read back to rewrite
+the faces - and refuses a fluid that left the curve's range, naming it and
+the temperatures reached, before a NaN can reach the solve; the device flag,
+read after the correction, is the backstop. Kays-Crawford's
+`Pr_t` is refused with a curve: its branch is not built with one.
+
+**The solid's conductances.** Between two iterations, exactly as on the
+conduction path: download `T`, (S100.6) per cell, `Conduction::rebuild`;
+then `Energy::refresh_conjugate_solid` writes the solid half of (S59.3)'s
+blend - the face conductances, their boundary twin, `C_b` and `rho c` - with
+the same selection `attach_conjugate` made. The fluid half and the masks do
+not move.
+
+**What a moving conductance moves.** A solid `fixedFluxTemperature` face's
+`refGrad`, from the rebuilt `C_b`. Every external face's `C_b` (§98.3): a
+solid face's from the rebuilt operator; a fluid face's as `kappa(T_b)
+Delta_b`, evaluated on the host at the very `T_b` the next `update_k_eff`
+evaluates on the device, so the triple and the conductance the equation
+assembles agree to the twin's round-off. A fluid `fixedFluxTemperature`
+face reads `k_eff_wall` inside the correction already.
+
+**The loop.** The SIMPLE loop is the outer loop and its criterion is
+`numerics.flow`'s; the coefficients are rebuilt at the head of every
+iteration from the previous iteration's `T`, the lag every coefficient of
+that loop carries. `numerics.outer` is refused on a conjugate case (§100.7).
+
+| Check | Expected |
+|---|---|
+| a flat fluid `kappa` curve | the field of its number to `1e-9` K |
+| a fluid `kappa` curve against its value at the initial `T` | the field moved |
+| a fluid wall losing heat to an ambient, `kappa` a curve | conducted and convected balance to `1e-10` |
+| a flat solid `kappa` curve; a sloped one | the number's field to `1e-9` K; the field moved |
+| a fluid that leaves its curve | refused, naming the range (row 15) |
+| `Energy` with a flat curve | the constant's `k_eff` and `T` to `1e-14` |
+| `Energy::correct` with a curve | captured, three replays bitwise |
+| a curve under Kays-Crawford | refused (row 15) |
 
 ---
 
@@ -31885,7 +31938,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **469** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **473** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -31896,7 +31949,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 eleven.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

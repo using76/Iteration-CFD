@@ -3922,13 +3922,6 @@ mod curves {
                 assert!(msg.contains(what), "must name '{what}': {msg}");
             }
         };
-        let pat_c = r#""kappa": 1.0, "mu": 0.71"#;
-        assert_eq!(kp.matches(pat_c).count(), 1, "'{pat_c}' must match exactly once");
-        let t_c = kp.replace(
-            pat_c,
-            r#""kappa": { "table": [[200.0, 1.0], [400.0, 2.0]] }, "mu": 0.71"#,
-        );
-        bad(&t_c, &kp, "fluid/kappa", "k_eff", "");
         let pat_d = r#""cp": 1.0"#;
         assert_eq!(kp.matches(pat_d).count(), 1, "'{pat_d}' must match exactly once");
         let t_d = kp.replace(pat_d, r#""cp": { "table": [[200.0, 1.0], [400.0, 2.0]] }"#);
@@ -4310,29 +4303,6 @@ mod conduction {
         let msg = err.to_string();
         println!("refusal: {msg}");
         for what in ["regions/metal/material/kappa", "not positive"] {
-            assert!(msg.contains(what), "must name '{what}': {msg}");
-        }
-    }
-
-    #[test]
-    fn a_conduction_curve_on_a_conjugate_case_is_refused_by_name() {
-        let pat = r#""c": 1.0, "kappa": 1.0 }"#;
-        let base = kp_pair_base();
-        assert_eq!(base.matches(pat).count(), 1, "'{pat}' must match exactly once");
-        let text = base.replace(pat, r#""c": 1.0, "kappa": { "table": [[200.0, 1.0], [400.0, 2.0]] } }"#);
-        assert_ne!(text, base, "the replaced document must differ from its base");
-        let Err(err) = read(&text).expect("parse").lower() else {
-            panic!("a solid curve on a conjugate case must be refused");
-        };
-        let msg = err.to_string();
-        println!("refusal: {msg}");
-        for what in [
-            "regions/wall/material/kappa",
-            "is read and valid",
-            "conjugate path",
-            "a table of 2 knots on [200, 400] K",
-            "SPEC-LIT 100.2",
-        ] {
             assert!(msg.contains(what), "must name '{what}': {msg}");
         }
     }
@@ -4731,5 +4701,159 @@ mod conduction {
             "the flat c curve is not its number: {} K apart",
             max_diff(&f.t, &b.t)
         );
+    }
+}
+
+/// SPEC-LIT §100.10: the curves on the conjugate path.
+mod conjugate_curves {
+    use super::*;
+
+    /// The kp fixture's two kappa entries, as `kp_pair_base` writes them.
+    const KP_FLUID_K: &str = r#""kappa": 1.0, "mu": 0.71"#;
+    const KP_WALL_K: &str = r#""c": 1.0, "kappa": 1.0 }"#;
+    /// A fluid kappa curve over the cavity's 299.95-300.05 K: 1.0 at 300 K,
+    /// sloped 0.8 /K, so 0.96-1.04 across the cavity.
+    const K_SLOPED: &str = r#"{ "table": [[299.0, 0.2], [301.0, 1.8]] }"#;
+    const K_FLAT: &str = r#"{ "table": [[299.0, 1.0], [301.0, 1.0]] }"#;
+
+    fn with_fluid_k(text: &str, k: &str) -> String {
+        assert_eq!(text.matches(KP_FLUID_K).count(), 1, "'{KP_FLUID_K}' must match exactly once");
+        text.replace(KP_FLUID_K, &format!(r#""kappa": {k}, "mu": 0.71"#))
+    }
+
+    fn with_wall_k(text: &str, k: &str) -> String {
+        assert_eq!(text.matches(KP_WALL_K).count(), 1, "'{KP_WALL_K}' must match exactly once");
+        text.replace(KP_WALL_K, &format!(r#""c": 1.0, "kappa": {k} }}"#))
+    }
+
+    fn short(text: &str) -> String {
+        let t = text.replace(r#""iterations": 600"#, r#""iterations": 100"#);
+        assert_ne!(t, text, "the iteration cap was not lowered");
+        t
+    }
+
+    fn gap(a: &[Scalar], b: &[Scalar]) -> Scalar {
+        a.iter().zip(b).fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// SPEC-LIT §100.10 check: the curves lower onto the case's regions.
+    #[test]
+    fn a_fluid_and_a_solid_conductivity_curve_lower_on_a_conjugate_case() {
+        let base = kp_pair_base();
+        let text = with_wall_k(&with_fluid_k(&base, K_SLOPED), r#"{ "table": [[200.0, 1.0], [400.0, 2.0]] }"#);
+        let low = read(&text).expect("parse").lower().expect("a conjugate case with curves lowers");
+        println!("lowered: {} regions, {} curve entries", low.region_names.len(), low.conduction_curves.len());
+        let f0 = low.conduction_curves[0].as_ref().expect("the fluid's curve entry");
+        assert!(f0.kappa.is_some(), "the fluid's kappa curve must be Some");
+        assert!(f0.c.is_none(), "the fluid's curve entry has no c");
+        assert_eq!(f0.path, "regions/air/fluid");
+        let k0 = low.fluids[0].as_ref().unwrap().kappa;
+        assert!(
+            (k0 - 1.0).abs() <= 1e-15,
+            "the curve at 300 K is {k0}, not the 1.0 the material must hold"
+        );
+        let w1 = low.conduction_curves[1].as_ref().expect("the wall's curve entry");
+        assert!(w1.kappa.is_some(), "the wall's kappa curve must be Some");
+        assert_eq!(w1.path, "regions/wall/material");
+        let case = low.flow_case().expect("a fluid case lowers to a FlowCase");
+        assert_eq!(case.conduction_curves.len(), 2);
+    }
+
+    /// SPEC-LIT §100.10 check: a flat curve is the number it stands for.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_flat_fluid_conductivity_curve_lands_on_the_number_it_stands_for() {
+        let Some(gpu) = gpu() else { return };
+        let base = kp_pair_base();
+        let a = run_flow(&gpu, &short(&with_fluid_k(&base, K_FLAT)));
+        let b = run_flow(&gpu, &short(&base));
+        let gap = gap(&a.t, &b.t);
+        println!("  flat fluid curve vs the number: max |dT| = {gap:.3e} K");
+        assert!(gap <= 1e-9, "a flat curve must be its number: {gap:.3e} K apart");
+    }
+
+    /// SPEC-LIT §100.10 check: a sloped fluid curve moves the answer.
+    #[test]
+    fn pair_a_fluid_conductivity_curve_moves_the_conjugate_answer() {
+        let Some(gpu) = gpu() else { return };
+        let base = kp_pair_base();
+        let a = run_flow(&gpu, &short(&with_fluid_k(&base, K_SLOPED)));
+        let b = run_flow(&gpu, &short(&base));
+        let gap = gap(&a.t, &b.t);
+        println!("  sloped fluid curve vs the number: max |dT| = {gap:.3e} K");
+        assert!(gap > 1e-6, "the curve must move the answer (SPEC-LIT 13.4.1): {gap:.3e} K");
+    }
+
+    /// SPEC-LIT §100.10 check: the Robin identity survives a moving `C_b`.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn an_external_face_on_a_fluid_wall_meets_its_robin_identity_through_a_conductivity_curve() {
+        let Some(gpu) = gpu() else { return };
+        let text = with_fluid_k(
+            &kp_pair_base()
+                .replace(
+                    KP_COLD,
+                    r#"{ "match": "cold", "T": { "type": "externalConvection", "h": 5.0, "TInf": 299.95 } }"#,
+                )
+                .replace(r#""iterations": 600"#, r#""iterations": 20"#),
+            K_SLOPED,
+        );
+        assert!(text.contains("\"type\": \"external"), "the cold wall did not take the external word");
+        assert!(text.contains(r#""iterations": 20"#), "the iteration cap was not lowered");
+        let sol = run_flow(&gpu, &text);
+        let h = &sol.mesh.host;
+        let (mut conducted, mut convected) = (0.0 as Scalar, 0.0 as Scalar);
+        for bf in sol.mesh.patch_range(0, "cold").unwrap() {
+            let c = h.b_face_cells[bf] as usize;
+            conducted += sol.b_conductance[bf] * h.b_mag_sf[bf] * (sol.bt[bf] - sol.t[c]);
+            convected += 5.0 * h.b_mag_sf[bf] * (sol.bt[bf] - 299.95);
+        }
+        println!("  through the curve: conducted = {conducted:.6e} W, convected = {convected:.6e} W");
+        assert!(
+            (conducted + convected).abs() <= 1e-10 * convected.abs(),
+            "what the fluid face conducts ({conducted} W) and what it convects ({convected} W) do \
+             not balance through the curve"
+        );
+        let mut moved = 0.0 as Scalar;
+        for bf in sol.mesh.patch_range(0, "cold").unwrap() {
+            moved = moved.max((sol.b_conductance[bf] / h.b_delta_coeffs[bf] - 1.0).abs());
+        }
+        println!("  worst conductance move on the cold wall = {moved:.3e}");
+        assert!(moved > 1e-6, "the conductance did not move with the curve: {moved:.3e}");
+    }
+
+    /// SPEC-LIT §100.10 check: a solid curve takes effect; its flat twin does
+    /// not.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_solid_conductivity_curve_on_a_conjugate_case_takes_effect_and_its_flat_twin_does_not() {
+        let Some(gpu) = gpu() else { return };
+        let base = kp_pair_base();
+        let f = run_flow(&gpu, &short(&with_wall_k(&base, K_FLAT)));
+        let s = run_flow(&gpu, &short(&with_wall_k(&base, r#"{ "table": [[299.0, 0.5], [301.0, 1.5]] }"#)));
+        let b = run_flow(&gpu, &short(&base));
+        let flat = gap(&f.t, &b.t);
+        let sloped = gap(&s.t, &b.t);
+        println!("  flat solid curve vs the number: {flat:.3e} K; sloped vs the number: {sloped:.3e} K");
+        assert!(flat <= 1e-9, "the flat solid curve is not its number: {flat:.3e} K apart");
+        assert!(sloped > 1e-6, "the sloped solid curve must move the answer: {sloped:.3e} K");
+    }
+
+    /// SPEC-LIT §100.10 check: a fluid that leaves its curve is refused by
+    /// name.
+    #[test]
+    fn a_fluid_that_leaves_its_conductivity_curve_is_refused_by_name() {
+        let Some(gpu) = gpu() else { return };
+        let text = short(&with_fluid_k(&kp_pair_base(), r#"{ "table": [[299.99, 1.0], [301.0, 2.0]] }"#));
+        let low = read(&text).expect("parse").lower().expect("a curve containing 300 K lowers");
+        let case = low.flow_case().expect("a fluid case lowers to a FlowCase");
+        let Err(err) = crate::cht::flow::run_flow_case(&gpu, &case) else {
+            panic!("a fluid that leaves its curve must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["regions/air/fluid/kappa", "leaves the curve's range", "[299.99, 301] K"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
     }
 }

@@ -141,6 +141,13 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
                 f64::from(f.alpha()),
                 f64::from(f.pr()),
             );
+            if let Some(p) = low.conduction_curves[i].as_ref().and_then(|c| c.kappa.as_ref()) {
+                println!(
+                    "    kappa: {} - evaluated on the device at the current T inside every \
+                     energy correction (SPEC-LIT 100.10); the k above is the curve at the initial T",
+                    p.describe()
+                );
+            }
             continue;
         }
         let m = &low.materials[i];

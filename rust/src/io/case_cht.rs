@@ -1152,6 +1152,7 @@ impl LoweredChtCase {
             t_solver: self.solver,
             n_non_orthogonal_correctors: self.n_non_orthogonal_correctors,
             tolerances: self.tolerances,
+            conduction_curves: self.conduction_curves.clone(),
             p0: AMBIENT_PRESSURE,
         })
     }
@@ -1460,6 +1461,25 @@ impl ChtCase {
                 }
                 (RegionKind::Fluid, None, Some(f)) => {
                     let base = format!("regions/{}/fluid", r.name);
+                    // SPEC-LIT §100.10: the fluid's kappa may be a curve; the
+                    // material then holds its value at the initial T.
+                    let kappa_path = format!("{base}/kappa");
+                    let kappa_prop = f.kappa.lower(&kappa_path)?;
+                    let kappa = kappa_prop.value(&kappa_path, t0)?;
+                    for t in kappa_prop.samples() {
+                        let v = kappa_prop.value(&kappa_path, t)?;
+                        if !(v > 0.0) || !v.is_finite() {
+                            return Err(Error::Config(format!(
+                                "{kappa_path}: at T = {t} K the curve gives kappa = {v:e}, which \
+                                 is not positive (SPEC-LIT 100.10)"
+                            )));
+                        }
+                    }
+                    let fluid_curves = (!kappa_prop.is_constant()).then(|| ConductionCurves {
+                        kappa: Some(kappa_prop.clone()),
+                        c: None,
+                        path: base.clone(),
+                    });
                     let fl = FluidMaterial {
                         name: r.name.clone(),
                         rho: f.rho as Scalar,
@@ -1468,11 +1488,7 @@ impl ChtCase {
                             &format!("{base}/cp"),
                             "the energy equation's rho cp is built from a constant",
                         )?,
-                        kappa: number_only(
-                            &f.kappa,
-                            &format!("{base}/kappa"),
-                            "the energy equation's k_eff is built from a constant",
-                        )?,
+                        kappa,
                         mu: number_only(
                             &f.mu,
                             &format!("{base}/mu"),
@@ -1489,7 +1505,7 @@ impl ChtCase {
                         c: fl.cp,
                         k: Conductivity::Isotropic(fl.kappa),
                     };
-                    (mat, Some(fl), None)
+                    (mat, Some(fl), fluid_curves)
                 }
                 (RegionKind::Solid, None, _) => {
                     return Err(Error::Config(format!(
@@ -1558,24 +1574,6 @@ impl ChtCase {
             ));
         }
         let has_fluid = kinds.iter().any(|k| *k == RegionKind::Fluid);
-
-        // SPEC-LIT §100.2/§100.6: the conjugate path attaches the solid's
-        // conductances to the energy equation once.
-        if has_fluid {
-            for cv in conduction_curves.iter().flatten() {
-                let (p, at) = match (&cv.kappa, &cv.c) {
-                    (Some(p), _) => (p, format!("{}/kappa", cv.path)),
-                    (None, Some(p)) => (p, format!("{}/c", cv.path)),
-                    (None, None) => continue,
-                };
-                return Err(refused_curve(
-                    p,
-                    &at,
-                    "the conjugate path attaches the solid's face conductances and rho c to \
-                     the energy equation once, from a constant",
-                ));
-            }
-        }
 
         // R8: with a manifest, every region it lists must be IN the case -
         // the manifest carries no `material` and no `patches` rule, and a
