@@ -145,7 +145,7 @@ export function extractFacts(messages: BetaMessageParam[]): Facts {
 // The script
 // ---------------------------------------------------------------------------
 
-type Scenario = 'refuse' | 'long' | 'error' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'run' | 'default'
+type Scenario = 'refuse' | 'long' | 'error' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'propose' | 'campaign' | 'run' | 'default'
 
 export function detectScenario(text: string): Scenario {
   const t = text.toLowerCase()
@@ -153,6 +153,9 @@ export function detectScenario(text: string): Scenario {
   if (t.includes('long-test')) return 'long'
   if (t.includes('error-test')) return 'error'
   if (t.includes('split-test')) return 'split'
+  // the autonomy scenarios name their tool, so they answer before any word a later arm claims
+  if (t.includes('autonomy_propose_edit')) return 'propose'
+  if (t.includes('autonomy_attempts')) return 'campaign'
   // first of the natural arms: every ontology prompt also carries a word a later
   // arm claims (case, run, mesh, show) and the ladder returns on the first match
   if (/\bontology\b|온톨로지/.test(t)) return 'ontology'
@@ -480,6 +483,34 @@ function scenarioDefault(f: Facts): MockPlan {
   ])
 }
 
+/** The mock's explanation of one geometry: every number printed exactly as the autonomy_attempts result holds it. */
+export function campaignExplanation(d: Record<string, unknown>, geometryId: string): string {
+  const isRow = (r: unknown): r is Record<string, unknown> => typeof r === 'object' && r !== null && !Array.isArray(r)
+  const lit = (v: unknown): string => (typeof v === 'number' ? String(v) : Array.isArray(v) ? `[${v.map(lit).join(', ')}]` : v === null || v === undefined ? 'none' : isRow(v) ? JSON.stringify(v) : String(v))
+  const rows = Array.isArray(d.rows) ? d.rows.filter(isRow) : []
+  const lines = [`Geometry ${geometryId} in ${lit(d.out)}: ${lit(d.total)} attempt rows.`]
+  for (const r of rows) {
+    const t = isRow(r.trigger) ? r.trigger : null
+    const o = isRow(r.outcome) ? r.outcome : {}
+    const who = `decided by ${lit(r.decided_by)}${r.rule_id ? ` (${lit(r.rule_id)})` : ''}`
+    const trig = t ? `trigger ${lit(t.observable)} ${lit(t.op)} ${lit(t.threshold)} at ${lit(t.value)}` : 'no trigger'
+    const cls = o.failure_class ? ` (${lit(o.failure_class)})` : ''
+    lines.push(`- Attempt ${lit(r.attempt)}: ${who}; ${trig}; verdict ${lit(o.verdict)}${cls}; ${lit(o.n_cells)} cells.`)
+  }
+  return lines.join('\n')
+}
+
+/** The autonomy_propose_edit call a request spells as "config <path>, pointer <p>, value <v>, reason: <text>"; "pass -permissive" adds the flag. */
+export function proposeInputOf(text: string): Record<string, unknown> {
+  const config = /\bconfig (\S+?),?\s/.exec(text)?.[1] ?? ''
+  const pointer = /\bpointer (\S+?),?\s/.exec(text)?.[1] ?? ''
+  const value = /\bvalue (\S+?)[,.]?(?:\s|$)/.exec(text)?.[1] ?? ''
+  const reason = /\breason: ([^\n]+)/.exec(text)?.[1]?.trim() ?? 'no reason given'
+  const input: Record<string, unknown> = { config, pointer, value, reason }
+  if (/\bpass -permissive\b/.test(text)) input.args = ['-permissive']
+  return input
+}
+
 function runNoticeReply(f: Facts): MockPlan {
   const ko = f.korean
   const m = f.runNotice?.match(/run (\S+) \(([^)]*)\) ended with status (\w+) after (\d+)/) ?? f.runNotice?.match(/실행 (\S+) \(([^)]*)\)이\(가\) (\d+)회 반복 후 (\S+) 상태/)
@@ -492,6 +523,26 @@ function runNoticeReply(f: Facts): MockPlan {
 
 export interface MockState {
   errorThrown: boolean
+}
+
+const EXPLAIN_RE = /autonomy_attempts with out (\S+) and geometryId (\S+?)[,.]?(?:\s|$)/
+
+function scenarioCampaign(f: Facts): MockPlan {
+  const m = EXPLAIN_RE.exec(f.userText)
+  if (!m) return done([text('Name the campaign as "autonomy_attempts with out <dir> and geometryId <id>".')])
+  const [, out, geometryId] = m
+  const res = [...f.results].reverse().find((r) => r.name === 'autonomy_attempts')
+  if (!res) return useTools([tool('autonomy_attempts', { out, view: 'attempts', geometryId, detail: 'brief' })])
+  if (!res.ok) return done([text(`autonomy_attempts failed: ${String((res.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+  return done([text(campaignExplanation(res.data, geometryId))])
+}
+
+function scenarioPropose(f: Facts): MockPlan {
+  const res = [...f.results].reverse().find((r) => r.name === 'autonomy_propose_edit')
+  if (!res) return useTools([tool('autonomy_propose_edit', proposeInputOf(f.userText))])
+  if (!res.ok) return done([text(`Refused: ${String((res.data.error as { message?: string } | undefined)?.message ?? 'no message')}`)])
+  const e = (res.data.edit ?? {}) as Record<string, unknown>
+  return done([text(`Proposed ${String(e.pointer ?? '')} = ${JSON.stringify(e.to ?? null)} (preflight pass): ${String(res.data.proposed ?? '')}`)])
 }
 
 export function planResponse(messages: BetaMessageParam[], state: MockState): MockPlan {
@@ -525,6 +576,10 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
       return scenarioGui(f)
     case 'viewer':
       return scenarioViewer(f)
+    case 'propose':
+      return scenarioPropose(f)
+    case 'campaign':
+      return scenarioCampaign(f)
     case 'run':
       return scenarioRun(f)
     default:

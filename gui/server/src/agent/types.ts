@@ -2,6 +2,7 @@
 // loop, tool execution and approvals. Implemented in agent/service.ts.
 import type { ChatRequest, ChatResponse, ClientMsg, SessionState, SessionSummary } from '@cfd/shared'
 import type { ClientConn } from '../ws/types.js'
+import type { SessionGrounding } from './grounding.js'
 
 /** A refusal a route can map: errorToResponse() turns any thrown object with a numeric
  *  `status` into that HTTP status, so this needs nothing from http/. */
@@ -17,6 +18,8 @@ export interface AgentService {
   handleClientMessage(client: ClientConn, msg: ClientMsg): Promise<boolean>
   listSessions(): SessionSummary[]
   getSessionState(sessionId: string): SessionState | null
+  /** The grounding lint over one stored session (agent/grounding.ts), or null for an unknown id. */
+  groundingOf?(sessionId: string): SessionGrounding | null
   createSession(): SessionState
   /** Start or continue a session over REST: append the user turn, run it, and answer with
    *  the UI messages that turn appended. Rejects with ChatError(404|409|400|503). */

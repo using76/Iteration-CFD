@@ -250,6 +250,12 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     if (!s) throw new HttpError(404, `no such session: ${params.id}`)
     return s
   })
+  // The grounding lint of one session: every number its assistant stated, checked against the tool results it saw.
+  router.get('/api/sessions/:id/grounding', ({ params }) => {
+    const g = agent.groundingOf?.(params.id) ?? null
+    if (!g) throw new HttpError(404, `no such session: ${params.id}`)
+    return g
+  })
   router.delete('/api/sessions/:id', ({ params }) => ({ deleted: agent.deleteSession(params.id) }))
   // A whole turn over one request: the WebSocket is the GUI's transport, this is a program's.
   // The response is held until the turn ends or timeoutMs expires; see ChatResponse.status.

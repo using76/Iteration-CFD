@@ -6,6 +6,7 @@
 //   CFD_DEMO=1 npx tsx server/src/main.ts &
 //   npx tsx server/scripts/ai-drive.ts --autopilot --ui --case cases/plume.jsonc
 // The script never sees an API key: those are read by the server alone.
+// With --campaign it runs the autonomy neutrality scenario instead (ai-drive-campaign.ts).
 import WebSocket from 'ws'
 import {
   CHAT_TIMEOUT_MAX_MS,
@@ -22,6 +23,7 @@ import {
   type UiState,
   type Usage,
 } from '@cfd/shared'
+import { CAMPAIGN_USAGE, driveCampaign, parseCampaignOptions } from './ai-drive-campaign.js'
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -40,7 +42,7 @@ interface Options {
   http: boolean
 }
 
-const USAGE_LINE = 'usage: npx tsx server/scripts/ai-drive.ts [--url ws://127.0.0.1:$CFD_PORT/ws] [--case cases/plume.jsonc] [--prompt "<text>"] [--autopilot] [--timeout 900] [--ui] [--http]'
+const USAGE_LINE = `usage: npx tsx server/scripts/ai-drive.ts [--url ws://127.0.0.1:$CFD_PORT/ws] [--case cases/plume.jsonc] [--prompt "<text>"] [--autopilot] [--timeout 900] [--ui] [--http]\n   or: ${CAMPAIGN_USAGE.replace(/^usage: /, '')}`
 
 /** The server this drives is the one CFD_PORT names, so the two agree without a flag. */
 function defaultUrl(): string {
@@ -647,7 +649,9 @@ async function driveHttp(opts: Options): Promise<number> {
 }
 
 async function main(): Promise<number> {
-  const opts = parseOptions(process.argv.slice(2))
+  const argv = process.argv.slice(2)
+  if (argv.includes('--campaign')) return driveCampaign(parseCampaignOptions(argv, defaultUrl()))
+  const opts = parseOptions(argv)
   return opts.http ? driveHttp(opts) : drive(opts)
 }
 

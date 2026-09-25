@@ -27,6 +27,7 @@ import { loadPolicyOverrides, type PolicyOverrides } from './policy.js'
 import { runNoticeText, runNoticeUserText } from './prompt.js'
 import { buildQuickMessage } from './quick.js'
 import { createZaiClient } from './zai.js'
+import { lintSession } from './grounding.js'
 import { appendUserTurn, createSessionStore, newId, stateOf, summaryOf, type SessionRecord, type SessionStore } from './session.js'
 import { ChatError, type AgentService } from './types.js'
 
@@ -454,6 +455,10 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     getSessionState: (id) => {
       const rec = store.get(id)
       return rec ? state(rec) : null
+    },
+    groundingOf: (id) => {
+      const rec = store.get(id)
+      return rec ? lintSession(rec.messages) : null
     },
     createSession,
     chat,
