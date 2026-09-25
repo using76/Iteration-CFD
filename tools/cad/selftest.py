@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CHECKS = (("common.py", 6), ("schema.py", 6))   # (script relative to HERE, minimum [ok]); later units append
+CHECKS = (("common.py", 6), ("schema.py", 6), ("schema_fixtures.py", 13))   # (script, min [ok]); later units append
 
 _TALLY = []                                     # each child's n_ok, for the final count
 

@@ -1,0 +1,162 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-params/1",
+  "valid": [
+    {
+      "name": "g4_start_poly7",
+      "instance": {
+        "schema": "cad-params/1",
+        "template_id": "nozzle_contraction/1",
+        "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "values": [
+          {
+            "name": "D_i",
+            "real": 0.06,
+            "choice": null,
+            "provenance": "user_text"
+          },
+          {
+            "name": "CR",
+            "real": 9.0,
+            "choice": null,
+            "provenance": "user_text"
+          },
+          {
+            "name": "L_over_Di",
+            "real": 0.5,
+            "choice": null,
+            "provenance": "llm_choice"
+          },
+          {
+            "name": "law",
+            "real": null,
+            "choice": "poly7",
+            "provenance": "llm_choice"
+          },
+          {
+            "name": "Lx_over_De",
+            "real": 0.5,
+            "choice": null,
+            "provenance": "default"
+          },
+          {
+            "name": "Lu_over_Di",
+            "real": 0.5,
+            "choice": null,
+            "provenance": "default"
+          },
+          {
+            "name": "t_wall",
+            "real": 0.003,
+            "choice": null,
+            "provenance": "user_text"
+          }
+        ]
+      }
+    },
+    {
+      "name": "optimiser_candidate_cubic",
+      "instance": {
+        "schema": "cad-params/1",
+        "template_id": "nozzle_contraction/1",
+        "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "values": [
+          {
+            "name": "D_i",
+            "real": 0.06,
+            "choice": null,
+            "provenance": "user_text"
+          },
+          {
+            "name": "CR",
+            "real": 9.0,
+            "choice": null,
+            "provenance": "user_text"
+          },
+          {
+            "name": "L_over_Di",
+            "real": 0.8125,
+            "choice": null,
+            "provenance": "optimiser"
+          },
+          {
+            "name": "law",
+            "real": null,
+            "choice": "cubic_matched",
+            "provenance": "optimiser"
+          },
+          {
+            "name": "x_m",
+            "real": 0.4375,
+            "choice": null,
+            "provenance": "optimiser"
+          },
+          {
+            "name": "Lx_over_De",
+            "real": 0.5,
+            "choice": null,
+            "provenance": "default"
+          },
+          {
+            "name": "Lu_over_Di",
+            "real": 0.5,
+            "choice": null,
+            "provenance": "default"
+          },
+          {
+            "name": "t_wall",
+            "real": 0.003,
+            "choice": null,
+            "provenance": "user_text"
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "provenance_guess",
+      "path": "values[0].provenance",
+      "op": "set",
+      "value": "guess",
+      "errors": [
+        "cad-params/1: values[0].provenance: not one of [\"user_text\", \"sketch_label\", \"default\", \"llm_choice\", \"optimiser\"]"
+      ]
+    },
+    {
+      "name": "real_missing",
+      "path": "values[0].real",
+      "op": "delete",
+      "errors": [
+        "cad-params/1: values[0].real: required field missing"
+      ]
+    },
+    {
+      "name": "template_sha_upper",
+      "path": "template_sha",
+      "op": "set",
+      "value": "ABC",
+      "errors": [
+        "cad-params/1: template_sha: does not match ^[0-9a-f]{64}$"
+      ]
+    },
+    {
+      "name": "values_empty",
+      "path": "values",
+      "op": "set",
+      "value": [],
+      "errors": [
+        "cad-params/1: values: fewer than 1 items"
+      ]
+    },
+    {
+      "name": "real_as_string",
+      "path": "values[2].real",
+      "op": "set",
+      "value": "0.5",
+      "errors": [
+        "cad-params/1: values[2].real: expected number, null, got string"
+      ]
+    }
+  ]
+}

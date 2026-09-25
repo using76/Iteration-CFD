@@ -1,0 +1,60 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad-decision/1",
+  "title": "one loop, gate or optimiser decision",
+  "description": "One decision of the loop, the promotion gate or the optimiser of docs/16 §E.6-§E.7, named by its rule id; CAD-17 abstains instead of guessing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+      "schema",
+      "study_id",
+      "n",
+      "after_iteration",
+      "decision",
+      "rule_id",
+      "stable_eval_key",
+      "candidate_eval_key",
+      "params_sha",
+      "law",
+      "sobol_index",
+      "ei",
+      "reason",
+      "gates_lock"
+    ],
+  "properties": {
+      "schema": {"const": "cad-decision/1"},
+      "study_id": {"$ref": "#/$defs/StudyId"},
+      "n": {"type": "integer", "minimum": 0},
+      "after_iteration": {"type": ["integer", "null"], "minimum": 0},
+      "decision": {
+          "enum": [
+              "promote",
+              "reject",
+              "abstain",
+              "propose",
+              "stop",
+              "confirm_pass",
+              "confirm_fail",
+              "llm_consult",
+              "llm_off"
+            ]
+        },
+      "rule_id": {"$ref": "#/$defs/RuleId"},
+      "stable_eval_key": {"$ref": "#/$defs/ShaOrNull"},
+      "candidate_eval_key": {"$ref": "#/$defs/ShaOrNull"},
+      "params_sha": {"$ref": "#/$defs/ShaOrNull"},
+      "law": {"$ref": "#/$defs/NameOrNull"},
+      "sobol_index": {"type": ["integer", "null"], "minimum": 0},
+      "ei": {"type": ["number", "null"]},
+      "reason": {"type": "string", "minLength": 1},
+      "gates_lock": {"$ref": "#/$defs/Sha"}
+    },
+  "$defs": {
+      "StudyId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+      "RuleId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*(-[A-Z0-9]+)*$"},
+      "ShaOrNull": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+      "Sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
+    }
+}

@@ -1,0 +1,90 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-decision/1",
+  "valid": [
+    {
+      "name": "abstain_nofeas",
+      "instance": {
+        "schema": "cad-decision/1",
+        "study_id": "g4_nozzle",
+        "n": 3,
+        "after_iteration": 7,
+        "decision": "abstain",
+        "rule_id": "CADOPT-NOFEAS",
+        "stable_eval_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "candidate_eval_key": null,
+        "params_sha": null,
+        "law": null,
+        "sobol_index": null,
+        "ei": null,
+        "reason": "no pool point is predicted feasible",
+        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    {
+      "name": "propose_first",
+      "instance": {
+        "schema": "cad-decision/1",
+        "study_id": "g4_nozzle",
+        "n": 0,
+        "after_iteration": null,
+        "decision": "propose",
+        "rule_id": "CADOPT-EI",
+        "stable_eval_key": null,
+        "candidate_eval_key": "6666666666666666666666666666666666666666666666666666666666666666",
+        "params_sha": "7777777777777777777777777777777777777777777777777777777777777777",
+        "law": "poly5",
+        "sobol_index": 17,
+        "ei": 0.0021,
+        "reason": "constrained EI maximum over the pool",
+        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "decision_accept",
+      "path": "decision",
+      "op": "set",
+      "value": "accept",
+      "errors": [
+        "cad-decision/1: decision: not one of [\"promote\", \"reject\", \"abstain\", \"propose\", \"stop\", \"confirm_pass\", \"confirm_fail\", \"llm_consult\", \"llm_off\"]"
+      ]
+    },
+    {
+      "name": "rule_lowercase",
+      "path": "rule_id",
+      "op": "set",
+      "value": "cadopt nofeas",
+      "errors": [
+        "cad-decision/1: rule_id: does not match ^[A-Z][A-Z0-9]*(-[A-Z0-9]+)*$"
+      ]
+    },
+    {
+      "name": "sobol_negative",
+      "path": "sobol_index",
+      "op": "set",
+      "value": -1,
+      "errors": [
+        "cad-decision/1: sobol_index: below minimum 0"
+      ]
+    },
+    {
+      "name": "gates_lock_missing",
+      "path": "gates_lock",
+      "op": "delete",
+      "errors": [
+        "cad-decision/1: gates_lock: required field missing"
+      ]
+    },
+    {
+      "name": "reason_empty",
+      "path": "reason",
+      "op": "set",
+      "value": "",
+      "errors": [
+        "cad-decision/1: reason: shorter than 1"
+      ]
+    }
+  ]
+}

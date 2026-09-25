@@ -1,0 +1,115 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad-template/1",
+  "title": "frozen template declaration",
+  "description": "The frozen template's declaration of docs/16 §G, §H.1 and §E.2: its parameters, planes, tags, measurement catalogue and profile rules, frozen before any loop uses it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+      "schema",
+      "template_id",
+      "title",
+      "axis",
+      "units",
+      "params",
+      "planes",
+      "tags",
+      "catalogue",
+      "profile_rules"
+    ],
+  "properties": {
+      "schema": {"const": "cad-template/1"},
+      "template_id": {"$ref": "#/$defs/TemplateId"},
+      "title": {"type": "string", "minLength": 1},
+      "axis": {"const": "+x"},
+      "units": {"const": "m"},
+      "params": {
+          "type": "array",
+          "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                  "name",
+                  "kind",
+                  "unit",
+                  "min",
+                  "max",
+                  "default_real",
+                  "choices",
+                  "default_choice",
+                  "role",
+                  "only_when"
+                ],
+              "properties": {
+                  "name": {"$ref": "#/$defs/Name"},
+                  "kind": {"enum": ["real", "choice"]},
+                  "unit": {"$ref": "#/$defs/Unit"},
+                  "min": {"type": ["number", "null"]},
+                  "max": {"type": ["number", "null"]},
+                  "default_real": {"type": ["number", "null"]},
+                  "choices": {"type": "array", "items": {"$ref": "#/$defs/Name"}},
+                  "default_choice": {"$ref": "#/$defs/NameOrNull"},
+                  "role": {"enum": ["design", "intent"]},
+                  "only_when": {"$ref": "#/$defs/OnlyWhen"}
+                }
+            },
+          "minItems": 1
+        },
+      "planes": {
+          "type": "array",
+          "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "description"],
+              "properties": {
+                  "name": {"$ref": "#/$defs/Name"},
+                  "description": {"type": "string", "minLength": 1}
+                }
+            },
+          "minItems": 1
+        },
+      "tags": {
+          "type": "array",
+          "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "kind", "description"],
+              "properties": {
+                  "name": {"$ref": "#/$defs/Name"},
+                  "kind": {"enum": ["face", "edge"]},
+                  "description": {"type": "string", "minLength": 1}
+                }
+            },
+          "minItems": 1
+        },
+      "catalogue": {
+          "type": "array",
+          "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["quantity", "primitive", "where", "kind", "method", "unit", "u_kind", "u_meas"],
+              "properties": {
+                  "quantity": {"$ref": "#/$defs/Name"},
+                  "primitive": {"$ref": "#/$defs/Name"},
+                  "where": {"type": "array", "items": {"$ref": "#/$defs/Name"}},
+                  "kind": {"enum": ["geometric", "readiness", "performance"]},
+                  "method": {"enum": ["geometry", "mesh", "cfd", "human"]},
+                  "unit": {"$ref": "#/$defs/Unit"},
+                  "u_kind": {"enum": ["abs", "rel", "exact", "cfd"]},
+                  "u_meas": {"type": ["number", "null"], "minimum": 0}
+                }
+            },
+          "minItems": 1
+        },
+      "profile_rules": {"type": "array", "items": {"$ref": "#/$defs/PrfId"}}
+    },
+  "$defs": {
+      "TemplateId": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}/[1-9][0-9]*$"},
+      "Name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "Unit": {"enum": ["m", "m2", "m3", "rad", "m/s", "m3/s", "kg/s", "Pa", "K", "1"]},
+      "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "OnlyWhen": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]*=[A-Za-z0-9_]+$"},
+      "PrfId": {"type": "string", "pattern": "^PRF-[A-Z0-9]+$"}
+    }
+}

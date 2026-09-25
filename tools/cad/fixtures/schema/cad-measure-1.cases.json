@@ -1,0 +1,108 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-measure/1",
+  "valid": [
+    {
+      "name": "exit_diameter_ok",
+      "instance": {
+        "schema": "cad-measure/1",
+        "primitive": "diameter_at_plane",
+        "feature": "exit_plane",
+        "where": [
+          "exit_plane"
+        ],
+        "value": 0.02,
+        "unit": "m",
+        "u_meas": 1e-09,
+        "method": "BRepAlgoAPI_Section",
+        "status": "ok",
+        "reason_id": null,
+        "detail": ""
+      }
+    },
+    {
+      "name": "wall_3d_refused",
+      "instance": {
+        "schema": "cad-measure/1",
+        "primitive": "wall_distance_3d",
+        "feature": null,
+        "where": [
+          "wetted",
+          "outer"
+        ],
+        "value": null,
+        "unit": "m",
+        "u_meas": null,
+        "method": "BRepExtrema_DistShapeShape",
+        "status": "refused",
+        "reason_id": "MEAS-3D-WALL",
+        "detail": "3-D surface-to-surface wall distance on freeform surfaces is a refused method"
+      }
+    },
+    {
+      "name": "solid_count_exact",
+      "instance": {
+        "schema": "cad-measure/1",
+        "primitive": "solid_count",
+        "feature": null,
+        "where": [
+          "part"
+        ],
+        "value": 1,
+        "unit": "1",
+        "u_meas": 0,
+        "method": "TopExp_Explorer",
+        "status": "ok",
+        "reason_id": null,
+        "detail": ""
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "status_failed",
+      "path": "status",
+      "op": "set",
+      "value": "failed",
+      "errors": [
+        "cad-measure/1: status: not one of [\"ok\", \"refused\", \"error\"]"
+      ]
+    },
+    {
+      "name": "value_as_string",
+      "path": "value",
+      "op": "set",
+      "value": "0.02",
+      "errors": [
+        "cad-measure/1: value: expected number, null, got string"
+      ]
+    },
+    {
+      "name": "reason_lowercase",
+      "path": "reason_id",
+      "op": "set",
+      "value": "meas 3d",
+      "errors": [
+        "cad-measure/1: reason_id: does not match ^[A-Z][A-Z0-9]*(-[A-Z0-9]+)*$"
+      ]
+    },
+    {
+      "name": "units_typo_field",
+      "path": "units",
+      "op": "set",
+      "value": "m",
+      "errors": [
+        "cad-measure/1: units: unknown field"
+      ]
+    },
+    {
+      "name": "u_meas_negative",
+      "path": "u_meas",
+      "op": "set",
+      "value": -1,
+      "errors": [
+        "cad-measure/1: u_meas: below minimum 0"
+      ]
+    }
+  ]
+}
