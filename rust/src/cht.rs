@@ -1255,11 +1255,11 @@ fn one_sided_conductance(k: Tensor, sf: Vec3, d: Vec3) -> (Scalar, Scalar, Scala
 /// The static conduction coefficients of a thermal mesh -
 /// SPEC-LIT §46.2/§46.3.
 ///
-/// Computed **once, on the host**, and uploaded, because for a fixed mesh and
-/// a fixed `K` they are as static as the mesh geometry itself and the crate
-/// already uploads that once. A temperature-dependent `k_s` (charring, a
-/// leakage-power model) would want a device kernel; it is not implemented and
-/// this is where it would go.
+/// Computed on the host and uploaded: for a fixed mesh and a fixed `K`
+/// they are as static as the mesh geometry. A `kappa` or `c` that is a
+/// curve in `T` is rebuilt between two outer passes by
+/// [`Conduction::rebuild`], from the same face arithmetic - SPEC-LIT
+/// §100.6.
 #[derive(Debug, Clone)]
 pub struct Conduction {
     /// `[n_internal_faces]` the `gammaMagSf` argument of
@@ -1287,36 +1287,23 @@ pub struct Conduction {
 /// (residual ~ 1.7e-2) cannot pass.
 pub const ANISOTROPY_RESIDUAL_LIMIT: Scalar = 1.0e-10;
 
-impl Conduction {
-    /// Build the coefficients for a thermal mesh whose cells carry `k` and
-    /// `rho c` per region.
-    ///
-    /// The face conductance is the **series** of the two one-sided
-    /// conductances,
-    ///
-    /// ```text
-    /// 1/Dhat_f = 1/Dhat_P + 1/Dhat_N
-    /// ```
-    ///
-    /// which is SPEC-LIT (S46.2) - Patankar's harmonic interface
-    /// conductivity - and (S46.5)'s tensor form at once. For an isotropic `K`
-    /// it reduces algebraically to `|Sf|/(d_P/k_P + d_N/k_N)`, which is
-    /// exactly `k_f |Sf| Delta_f` with `k_f` the harmonically interpolated
-    /// conductivity; for a uniform `K` it reduces to `k |Sf| Delta_f`. One
-    /// expression covers the multi-material case and the anisotropic case and
-    /// needs no branch.
-    pub fn build(m: &ThermalMesh, k: &[Tensor], rho_c: Vec<Scalar>) -> Result<Self> {
-        let h = &m.host;
-        if k.len() != h.n_cells || rho_c.len() != h.n_cells {
-            return Err(Error::Config(format!(
-                "Conduction::build: the mesh has {} cells but k has {} entries and \
-                 rho_c has {}",
-                h.n_cells,
-                k.len(),
-                rho_c.len()
-            )));
-        }
+/// The face half of [`Conduction::build`] and [`Conduction::rebuild`]:
+/// both face loops, the two §46.4 metrics, and the faces they peak on.
+struct Faces {
+    gamma_mag_sf: Vec<Scalar>,
+    b_gamma_mag_sf: Vec<Scalar>,
+    b_conductance: Vec<Scalar>,
+    worst_alignment: Scalar,
+    worst_residual: Scalar,
+    align_face: (usize, bool),
+    resid_face: (usize, bool),
+}
 
+impl Conduction {
+    /// The face half of [`Conduction::build`] and [`Conduction::rebuild`]:
+    /// both face loops, the two §46.4 metrics, and the faces they peak on.
+    fn faces(m: &ThermalMesh, k: &[Tensor]) -> Faces {
+        let h = &m.host;
         let mut gamma_mag_sf = vec![0.0 as Scalar; h.n_internal_faces];
         let mut b_gamma_mag_sf = vec![0.0 as Scalar; h.n_boundary_faces];
         let mut b_conductance = vec![0.0 as Scalar; h.n_boundary_faces];
@@ -1372,7 +1359,21 @@ impl Conduction {
             let mag = h.b_mag_sf[bf];
             b_conductance[bf] = if mag > 0.0 { dhat / mag } else { 0.0 };
         }
+        Faces {
+            gamma_mag_sf,
+            b_gamma_mag_sf,
+            b_conductance,
+            worst_alignment,
+            worst_residual,
+            align_face,
+            resid_face,
+        }
+    }
 
+    /// §46.4's two refusals, on the metrics [`Self::faces`] measured.
+    fn refuse_faces(f: &Faces) -> Result<()> {
+        let (worst_alignment, worst_residual, align_face, resid_face) =
+            (f.worst_alignment, f.worst_residual, f.align_face, f.resid_face);
         // SPEC-LIT 46.4's refusal. Both numbers are measured over every face
         // and both are quoted, because a case that fails one usually fails it
         // for a reason the other number explains.
@@ -1415,15 +1416,76 @@ impl Conduction {
                 name(align_face)
             )));
         }
+        Ok(())
+    }
 
+    /// Build the coefficients for a thermal mesh whose cells carry `k` and
+    /// `rho c` per region.
+    ///
+    /// The face conductance is the **series** of the two one-sided
+    /// conductances,
+    ///
+    /// ```text
+    /// 1/Dhat_f = 1/Dhat_P + 1/Dhat_N
+    /// ```
+    ///
+    /// which is SPEC-LIT (S46.2) - Patankar's harmonic interface
+    /// conductivity - and (S46.5)'s tensor form at once. For an isotropic `K`
+    /// it reduces algebraically to `|Sf|/(d_P/k_P + d_N/k_N)`, which is
+    /// exactly `k_f |Sf| Delta_f` with `k_f` the harmonically interpolated
+    /// conductivity; for a uniform `K` it reduces to `k |Sf| Delta_f`. One
+    /// expression covers the multi-material case and the anisotropic case and
+    /// needs no branch.
+    pub fn build(m: &ThermalMesh, k: &[Tensor], rho_c: Vec<Scalar>) -> Result<Self> {
+        let h = &m.host;
+        if k.len() != h.n_cells || rho_c.len() != h.n_cells {
+            return Err(Error::Config(format!(
+                "Conduction::build: the mesh has {} cells but k has {} entries and \
+                 rho_c has {}",
+                h.n_cells,
+                k.len(),
+                rho_c.len()
+            )));
+        }
+
+        let f = Self::faces(m, k);
+        Self::refuse_faces(&f)?;
         Ok(Self {
-            gamma_mag_sf,
-            b_gamma_mag_sf,
-            b_conductance,
+            gamma_mag_sf: f.gamma_mag_sf,
+            b_gamma_mag_sf: f.b_gamma_mag_sf,
+            b_conductance: f.b_conductance,
             rho_c,
-            worst_alignment,
-            worst_residual,
+            worst_alignment: f.worst_alignment,
+            worst_residual: f.worst_residual,
         })
+    }
+
+    /// SPEC-LIT §100.6: the per-iteration half. The face arithmetic of
+    /// [`Self::build`] on new per-cell tensors and `rho c`, written over
+    /// this one in place and refused exactly where `build` refuses; a
+    /// rebuild from the tensors a build was made from is that build to
+    /// the bit.
+    pub fn rebuild(&mut self, m: &ThermalMesh, k: &[Tensor], rho_c: &[Scalar]) -> Result<()> {
+        let h = &m.host;
+        if k.len() != h.n_cells || rho_c.len() != h.n_cells {
+            return Err(Error::Config(format!(
+                "Conduction::rebuild: the mesh has {} cells but k has {} entries and \
+                 rho_c has {}",
+                h.n_cells,
+                k.len(),
+                rho_c.len()
+            )));
+        }
+        let f = Self::faces(m, k);
+        Self::refuse_faces(&f)?;
+        self.gamma_mag_sf = f.gamma_mag_sf;
+        self.b_gamma_mag_sf = f.b_gamma_mag_sf;
+        self.b_conductance = f.b_conductance;
+        self.rho_c.clear();
+        self.rho_c.extend_from_slice(rho_c);
+        self.worst_alignment = f.worst_alignment;
+        self.worst_residual = f.worst_residual;
+        Ok(())
     }
 
     /// The common case: one material per region.
@@ -1868,6 +1930,18 @@ impl<'m> ConjugateHeat<'m> {
         &self.b_cond
     }
 
+    /// SPEC-LIT §100.6: write a rebuilt [`Conduction`] into the operator -
+    /// the face conductances, the boundary base [`Self::update_interfaces`]
+    /// copies from, `C_b` and `rho c`. Between two `correct` calls, never
+    /// inside a captured region.
+    pub fn set_conduction(&mut self, gpu: &Gpu, cond: &Conduction) -> Result<()> {
+        gpu.write(&mut self.gamma_mag_sf, &cond.gamma_mag_sf)?;
+        gpu.write(&mut self.b_gamma_base, &cond.b_gamma_mag_sf)?;
+        gpu.write(&mut self.b_gamma_mag_sf, &cond.b_gamma_mag_sf)?;
+        gpu.write(&mut self.b_cond, &cond.b_conductance)?;
+        gpu.write(&mut self.rho_c, &cond.rho_c)
+    }
+
     /// The volumetric heat source `q'''`, W/m^3.
     pub fn source_mut(&mut self) -> &mut DevBuf<Scalar> {
         &mut self.q
@@ -2139,6 +2213,9 @@ pub struct ChtSolution {
     /// (S98.5) of the triples the last solve used; zero when no face
     /// radiates.
     pub external_residual: Scalar,
+    /// SPEC-LIT §100.7: the last step's relative changes (S100.7), one per
+    /// outer pass; empty when the case has no conduction curve.
+    pub outer_changes: Vec<Scalar>,
 }
 
 impl ChtSolution {
@@ -2198,6 +2275,145 @@ impl ChtSolution {
     }
 }
 
+/// SPEC-LIT (S100.6): the per-cell tensors and `rho c` of `tm` at the cell
+/// temperatures `t`. A region of numbers takes exactly what
+/// [`Conduction::uniform_per_region`] gives it; a region with a curve takes
+/// the curve's value at each cell, refused outside its range or where it is
+/// not positive.
+pub fn conduction_at(
+    tm: &ThermalMesh,
+    materials: &[SolidMaterial],
+    curves: &[Option<crate::io::case_cht::ConductionCurves>],
+    t: &[Scalar],
+) -> Result<(Vec<Tensor>, Vec<Scalar>)> {
+    let n = tm.host.n_cells;
+    if materials.len() != tm.regions.len() || curves.len() != tm.regions.len() || t.len() != n {
+        return Err(Error::Config(format!(
+            "conduction_at: {} regions, {} materials, {} curve entries, {} cells, {} \
+             temperatures",
+            tm.regions.len(),
+            materials.len(),
+            curves.len(),
+            n,
+            t.len()
+        )));
+    }
+    let mut k = vec![Tensor::ZERO; n];
+    let mut rho_c = vec![0.0 as Scalar; n];
+    for ((block, mat), cv) in tm.regions.iter().zip(materials).zip(curves) {
+        let (kt, rc) = (mat.k.tensor(), mat.rho_c());
+        let paths = cv.as_ref().map(|cv| (format!("{}/kappa", cv.path), format!("{}/c", cv.path)));
+        for c in block.cells() {
+            k[c] = kt;
+            rho_c[c] = rc;
+            let (Some(cv), Some((kp, cp))) = (cv, &paths) else { continue };
+            if let Some(p) = &cv.kappa {
+                let v = p.value(kp, t[c])?;
+                if !(v > 0.0) || !v.is_finite() {
+                    return Err(Error::Config(format!(
+                        "{kp}: at T = {} K the curve gives kappa = {v:e}, which is not \
+                         positive (SPEC-LIT 100.6)",
+                        t[c]
+                    )));
+                }
+                k[c] = Conductivity::Isotropic(v).tensor();
+            }
+            if let Some(p) = &cv.c {
+                let v = p.value(cp, t[c])?;
+                if !(v > 0.0) || !v.is_finite() {
+                    return Err(Error::Config(format!(
+                        "{cp}: at T = {} K the curve gives c = {v:e}, which is not \
+                         positive (SPEC-LIT 100.6)",
+                        t[c]
+                    )));
+                }
+                rho_c[c] = mat.rho * v;
+            }
+        }
+    }
+    Ok((k, rho_c))
+}
+
+/// (S100.7)'s left side over its right side's `max|T|`: the largest move
+/// of any cell over the largest temperature; zero on an empty field.
+pub fn relative_change(t0: &[Scalar], t: &[Scalar]) -> Scalar {
+    let (mut d, mut s) = (0.0 as Scalar, 0.0 as Scalar);
+    for (a, b) in t0.iter().zip(t) {
+        d = d.max((b - a).abs());
+        s = s.max(b.abs());
+    }
+    if s > 0.0 {
+        d / s
+    } else {
+        0.0
+    }
+}
+
+/// SPEC-LIT §100.7's refusal: a step whose outer loop did not meet
+/// (S100.7) in `outer.max_outer` passes.
+pub fn outer_refused(
+    case: &str,
+    outer: &crate::io::case_cht::OuterControls,
+    changes: &[Scalar],
+    newton: &[Scalar],
+) -> Error {
+    let tail = |v: &[Scalar]| {
+        let from = v.len().saturating_sub(4);
+        v[from..].iter().map(|d| format!("{d:.3e}")).collect::<Vec<_>>().join(", ")
+    };
+    let h = if changes.is_empty() { newton } else { changes };
+    let ratio = if h.len() >= 2 { h[h.len() - 1] / h[h.len() - 2] } else { Scalar::NAN };
+    let faces = if newton.is_empty() {
+        String::new()
+    } else {
+        format!("; the radiating faces' last corrections were [{}] K", tail(newton))
+    };
+    Error::Config(format!(
+        "{case}: the outer loop did not meet max|T - T_prev| <= {:e} max|T| (S100.7) in \
+         {} passes (SPEC-LIT 100.7); the last relative changes were [{}]{faces}, and the \
+         last two contract by {ratio:.3} - near 1 is a stall, above 1 a divergence. \
+         Raise numerics.outer.maxOuter or loosen numerics.outer.tolerance; a curve too \
+         steep for this loop needs relaxation, which is not built",
+        outer.tolerance,
+        outer.max_outer,
+        tail(changes)
+    ))
+}
+
+/// SPEC-LIT §100.6: the faces whose triple is written from `C_b`, rewritten
+/// from a rebuilt one - a fixed-flux face's `refGrad`, and every external
+/// face's `(fr, refValue, refGrad)` about its current `t_star`.
+fn refresh_faces(
+    gpu: &Gpu,
+    t: &mut GpuScalarField,
+    cond: &Conduction,
+    tm: &ThermalMesh,
+    fixed_flux: &[(usize, Scalar)],
+    external: &mut [ambient::ExternalFace],
+) -> Result<()> {
+    if fixed_flux.is_empty() && external.is_empty() {
+        return Ok(());
+    }
+    let mut fr = gpu.download(&t.fr)?;
+    let mut rv = gpu.download(&t.ref_value)?;
+    let mut rg = gpu.download(&t.ref_grad)?;
+    for &(bf, q) in fixed_flux {
+        let c_b = cond.b_conductance[bf];
+        let delta = tm.host.b_delta_coeffs[bf];
+        rg[bf] = if c_b > 0.0 { q * delta / c_b } else { 0.0 };
+    }
+    for f in external.iter_mut() {
+        f.c_b = cond.b_conductance[f.bf];
+        let (a, b, c) = f.triple();
+        fr[f.bf] = a;
+        rv[f.bf] = b;
+        rg[f.bf] = c;
+    }
+    gpu.write(&mut t.fr, &fr)?;
+    gpu.write(&mut t.ref_value, &rv)?;
+    gpu.write(&mut t.ref_grad, &rg)
+}
+
 /// Solve a lowered multi-region conduction case - SPEC-LIT §46's solid energy
 /// equation over §47.4's concatenated mesh.
 ///
@@ -2239,7 +2455,7 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     // point VTU writes from.
     let raws: Vec<&PolyMeshRaw> = case.raw.iter().collect();
     tm.attach_points(&raws)?;
-    let cond = Conduction::uniform_per_region(&tm, &case.materials)?;
+    let mut cond = Conduction::uniform_per_region(&tm, &case.materials)?;
     let gm = GpuMesh::upload(gpu, &tm.host)?;
 
     let dt = case.delta_t;
@@ -2258,6 +2474,11 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     mark_coupled_faces(gpu, cht.field_mut(), &tm)?;
 
     let mut external: Vec<ambient::ExternalFace> = Vec::new();
+    // SPEC-LIT §100.6: with a conduction curve the faces written from `C_b`
+    // are rewritten every pass; without one these stay empty.
+    let curved = case.conduction_curves.iter().any(Option::is_some);
+    let mut fixed_flux: Vec<(usize, Scalar)> = Vec::new();
+    let mut convective: Vec<ambient::ExternalFace> = Vec::new();
 
     // ---- the boundary conditions ----------------------------------------
     {
@@ -2295,6 +2516,9 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
                         fr[bf] = 0.0;
                         rv[bf] = *q;
                         rg[bf] = if c_b > 0.0 { q * delta / c_b } else { 0.0 };
+                        if curved {
+                            fixed_flux.push((bf, *q));
+                        }
                     }
                     // SPEC-LIT §98.2-§98.3: (S98.1) on a face that only
                     // convects, written once because `C_b` is static; (S98.3)
@@ -2313,6 +2537,8 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
                         rg[bf] = c;
                         if loss.radiates() {
                             external.push(face);
+                        } else if curved {
+                            convective.push(face);
                         }
                     }
                     // SPEC-LIT §79.5. Unreachable through the reader - the
@@ -2378,29 +2604,59 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
     };
 
     let mut last = ConjugatePerformance::default();
-    // SPEC-LIT §98.3: a radiating face's Newton passes sit BETWEEN two
-    // `correct` calls, outside any captured region. A case with no such
-    // face takes the one `correct` per step it always took.
+    // SPEC-LIT §100.7 (§98.3's loop, generalised in place): a step with a
+    // conduction curve or a radiating face takes outer passes BETWEEN two
+    // `correct` calls, outside any captured region. A case with neither
+    // takes the one `correct` per step it always took.
     let mut external_passes: Vec<Scalar> = Vec::new();
     let mut external_residual: Scalar = 0.0;
+    let mut outer_changes: Vec<Scalar> = Vec::new();
+    let outer = case.outer;
     for _ in 0..steps {
-        if external.is_empty() {
+        if external.is_empty() && !curved {
             last = cht.correct(gpu)?;
         } else {
             external_passes.clear();
+            outer_changes.clear();
             let mut met = false;
-            for _ in 0..ambient::NEWTON_MAX_PASSES {
+            for _ in 0..outer.max_outer {
+                let t_prev = if curved {
+                    let t = gpu.download(&cht.field().f)?;
+                    let (k, rho_c) =
+                        conduction_at(&tm, &case.materials, &case.conduction_curves, &t)?;
+                    cond.rebuild(&tm, &k, &rho_c)?;
+                    cht.set_conduction(gpu, &cond)?;
+                    refresh_faces(gpu, cht.field_mut(), &cond, &tm, &fixed_flux, &mut convective)?;
+                    refresh_faces(gpu, cht.field_mut(), &cond, &tm, &[], &mut external)?;
+                    Some(t)
+                } else {
+                    None
+                };
                 last = cht.correct(gpu)?;
-                let r = ambient::relinearise(gpu, cht.field_mut(), &mut external)?;
-                external_passes.push(r.change);
-                external_residual = r.residual;
-                if r.change <= ambient::NEWTON_RTOL * r.scale {
+                let mut ok = true;
+                if !external.is_empty() {
+                    let r = ambient::relinearise(gpu, cht.field_mut(), &mut external)?;
+                    external_passes.push(r.change);
+                    external_residual = r.residual;
+                    ok &= r.change <= outer.tolerance * r.scale;
+                }
+                if let Some(t0) = t_prev {
+                    let t = gpu.download(&cht.field().f)?;
+                    let d = relative_change(&t0, &t);
+                    outer_changes.push(d);
+                    ok &= d <= outer.tolerance;
+                }
+                if ok {
                     met = true;
                     break;
                 }
             }
             if !met {
-                return Err(ambient::newton_refused(&case.name, &external_passes));
+                return Err(if curved || outer.stated {
+                    outer_refused(&case.name, &outer, &outer_changes, &external_passes)
+                } else {
+                    ambient::newton_refused(&case.name, &external_passes)
+                });
             }
         }
         if !case.steady {
@@ -2427,6 +2683,7 @@ pub fn run_case(gpu: &Gpu, case: &crate::io::case_cht::LoweredChtCase) -> Result
         b_conductance: cond.b_conductance.clone(),
         external_passes,
         external_residual,
+        outer_changes,
     })
 }
 

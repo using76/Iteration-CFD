@@ -641,6 +641,25 @@ pub struct ChtNumerics {
     /// refused without one**, for the same §13.4.1 reason as `buoyancy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<ChtFlow>,
+    /// SPEC-LIT §100.7: the conduction path's outer loop. Refused on a case
+    /// with a fluid region, and on one with nothing nonlinear in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer: Option<ChtOuter>,
+}
+
+/// SPEC-LIT §100.7's `numerics.outer` block: the conduction path's outer
+/// loop. Both entries optional; absent, the loop runs §98.3's criterion
+/// and cap, so a case that states nothing runs as it did.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChtOuter {
+    /// (S100.7)'s `epsilon`: a step stops when `max|T - T_prev| <= epsilon
+    /// max|T|`. In `(0, 1)`. Absent: `1e-10` (`1e-4` in the f32 build).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<f64>,
+    /// The most passes one step may take before it is refused. Absent: 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_outer: Option<u32>,
 }
 
 /// SPEC-LIT §60.1's `numerics.flow` block - the SIMPLE loop's own settings.
@@ -698,6 +717,7 @@ impl Default for ChtNumerics {
             max_iter: 2000,
             n_non_orthogonal_correctors: 0,
             flow: None,
+            outer: None,
         }
     }
 }
@@ -918,6 +938,38 @@ impl LoweredBc {
     }
 }
 
+/// SPEC-LIT §100.6: the conduction curves one solid region wrote - `None`
+/// where it wrote a number - and the region's JSON path
+/// (`regions/<name>/material`), which every refusal names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConductionCurves {
+    pub kappa: Option<Property>,
+    pub c: Option<Property>,
+    pub path: String,
+}
+
+/// SPEC-LIT §100.7: the outer loop's criterion and cap, resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OuterControls {
+    /// (S100.7)'s `epsilon`.
+    pub tolerance: Scalar,
+    /// Passes per step before the refusal.
+    pub max_outer: usize,
+    /// `true` when the case wrote `numerics.outer`.
+    pub stated: bool,
+}
+
+impl Default for OuterControls {
+    /// §98.3's two numbers.
+    fn default() -> Self {
+        Self {
+            tolerance: crate::cht::ambient::NEWTON_RTOL,
+            max_outer: crate::cht::ambient::NEWTON_MAX_PASSES,
+            stated: false,
+        }
+    }
+}
+
 /// SPEC-LIT §100.3: the curves one elastic zone wrote - `None` where it
 /// wrote a number - and the zone's JSON path an evaluation's refusal names.
 #[derive(Debug, Clone, PartialEq)]
@@ -1021,6 +1073,10 @@ pub struct LoweredChtCase {
     /// - SPEC-LIT (S59.3) masks every coefficient it produces on a fluid face
     /// away, because a fluid face carries the LIVE `k_eff`.
     pub materials: Vec<SolidMaterial>,
+    /// `[n_regions]` SPEC-LIT §100.6: `Some` exactly on a solid region that
+    /// wrote a curve for `kappa` or `c`; `materials` then holds the curves'
+    /// values at `initial_t`, the placeholder the first pass solves with.
+    pub conduction_curves: Vec<Option<ConductionCurves>>,
     /// `[n_regions]`, `Some` exactly on the fluid region - SPEC-LIT §60.2.
     pub fluids: Vec<Option<FluidMaterial>>,
     /// SPEC-LIT §9's body force. `Some` exactly when there is a fluid region.
@@ -1047,6 +1103,8 @@ pub struct LoweredChtCase {
     pub delta_t: Scalar,
     pub solver: SolverControls,
     pub n_non_orthogonal_correctors: usize,
+    /// SPEC-LIT §100.7: the conduction path's outer loop.
+    pub outer: OuterControls,
     pub tolerances: PairingTolerances,
 }
 
@@ -1145,6 +1203,8 @@ impl ChtCase {
         let mut meshes = Vec::new();
         let mut raws = Vec::new();
         let mut materials = Vec::new();
+        let mut conduction_curves: Vec<Option<ConductionCurves>> = Vec::new();
+        let t0 = self.initial.t as Scalar;
         let mut fluids: Vec<Option<FluidMaterial>> = Vec::new();
         let mut sources = Vec::new();
         // Which patches of which region have been spoken for, and by what.
@@ -1352,33 +1412,51 @@ impl ChtCase {
             // are measured on.
             let mech = lower_mechanics(i, r, &mesh, &empties, &patch_names)?;
 
-            let (mat, fluid) = match (kind, &r.material, &r.fluid) {
+            let (mat, fluid, curves) = match (kind, &r.material, &r.fluid) {
                 (RegionKind::Solid, Some(m), None) => {
+                    // SPEC-LIT §100.6: a number is the constant it always was;
+                    // a curve is lowered, every sample must be positive, and
+                    // the material holds its value at the initial T.
                     let base = format!("regions/{}/material", r.name);
-                    if let ChtKappa::Curve(cv) = &m.kappa {
-                        let at = format!("{base}/kappa");
-                        return Err(refused_curve(
-                            &cv.lower(&at)?,
-                            &at,
-                            "the conduction operator's face conductances are built once, from \
-                             a constant",
-                        ));
-                    }
-                    let mat = SolidMaterial {
-                        name: r.name.clone(),
-                        rho: m.rho as Scalar,
-                        c: number_only(
-                            &m.c,
-                            &format!("{base}/c"),
-                            "the transient weight rho c is built once, from a constant",
-                        )?,
-                        k: Conductivity::parse(
-                            &m.kappa.values(),
-                            &format!("regions/{}/material/kappa", r.name),
-                        )?,
+                    let kappa_path = format!("{base}/kappa");
+                    let (k, kappa_curve) = match &m.kappa {
+                        ChtKappa::Curve(cv) => {
+                            let p = cv.lower(&kappa_path)?;
+                            let v = p.value(&kappa_path, t0)?;
+                            (Conductivity::Isotropic(v), Some(p))
+                        }
+                        _ => (
+                            Conductivity::parse(
+                                &m.kappa.values(),
+                                &format!("regions/{}/material/kappa", r.name),
+                            )?,
+                            None,
+                        ),
                     };
+                    let c_path = format!("{base}/c");
+                    let c_prop = m.c.lower(&c_path)?;
+                    let c = c_prop.value(&c_path, t0)?;
+                    let c_curve = (!c_prop.is_constant()).then_some(c_prop);
+                    for (p, s, what) in
+                        [(&kappa_curve, &kappa_path, "kappa"), (&c_curve, &c_path, "c")]
+                    {
+                        let Some(p) = p else { continue };
+                        for t in p.samples() {
+                            let v = p.value(s, t)?;
+                            if !(v > 0.0) || !v.is_finite() {
+                                return Err(Error::Config(format!(
+                                    "{s}: at T = {t} K the curve gives {what} = {v:e}, which \
+                                     is not positive (SPEC-LIT 100.6)"
+                                )));
+                            }
+                        }
+                    }
+                    let mat = SolidMaterial { name: r.name.clone(), rho: m.rho as Scalar, c, k };
                     mat.validate()?;
-                    (mat, None)
+                    let curves = (kappa_curve.is_some() || c_curve.is_some()).then(|| {
+                        ConductionCurves { kappa: kappa_curve, c: c_curve, path: base.clone() }
+                    });
+                    (mat, None, curves)
                 }
                 (RegionKind::Fluid, None, Some(f)) => {
                     let base = format!("regions/{}/fluid", r.name);
@@ -1411,7 +1489,7 @@ impl ChtCase {
                         c: fl.cp,
                         k: Conductivity::Isotropic(fl.kappa),
                     };
-                    (mat, Some(fl))
+                    (mat, Some(fl), None)
                 }
                 (RegionKind::Solid, None, _) => {
                     return Err(Error::Config(format!(
@@ -1462,6 +1540,7 @@ impl ChtCase {
             meshes.push(mesh);
             raws.push(rmesh);
             materials.push(mat);
+            conduction_curves.push(curves);
             fluids.push(fluid);
             sources.push(r.source.unwrap_or(0.0) as Scalar);
             claimed.push(seen);
@@ -1479,6 +1558,24 @@ impl ChtCase {
             ));
         }
         let has_fluid = kinds.iter().any(|k| *k == RegionKind::Fluid);
+
+        // SPEC-LIT §100.2/§100.6: the conjugate path attaches the solid's
+        // conductances to the energy equation once.
+        if has_fluid {
+            for cv in conduction_curves.iter().flatten() {
+                let (p, at) = match (&cv.kappa, &cv.c) {
+                    (Some(p), _) => (p, format!("{}/kappa", cv.path)),
+                    (None, Some(p)) => (p, format!("{}/c", cv.path)),
+                    (None, None) => continue,
+                };
+                return Err(refused_curve(
+                    p,
+                    &at,
+                    "the conjugate path attaches the solid's face conductances and rho c to \
+                     the energy equation once, from a constant",
+                ));
+            }
+        }
 
         // R8: with a manifest, every region it lists must be IN the case -
         // the manifest carries no `material` and no `patches` rule, and a
@@ -2115,6 +2212,12 @@ impl ChtCase {
             None => None,
         };
 
+        let radiates = patch_bcs
+            .iter()
+            .any(|(_, _, bc)| matches!(bc, LoweredBc::External(l) if l.radiates()));
+        let curved = conduction_curves.iter().any(Option::is_some);
+        let outer = lower_outer(self.numerics.outer.as_ref(), has_fluid, curved || radiates)?;
+
         Ok(LoweredChtCase {
             name: self.name.clone(),
             region_names,
@@ -2125,6 +2228,7 @@ impl ChtCase {
             stress,
             output,
             materials,
+            conduction_curves,
             fluids,
             buoyancy,
             flow,
@@ -2139,6 +2243,7 @@ impl ChtCase {
             delta_t,
             solver,
             n_non_orthogonal_correctors: self.numerics.n_non_orthogonal_correctors as usize,
+            outer,
             tolerances: PairingTolerances::default(),
         })
     }
@@ -2388,6 +2493,52 @@ fn lower_mechanics(
         patch_bcs,
         solver,
     }))
+}
+
+/// SPEC-LIT §100.7: `numerics.outer`, resolved. Absent, §98.3's criterion
+/// and cap; refused where nothing would read it.
+fn lower_outer(o: Option<&ChtOuter>, has_fluid: bool, nonlinear: bool) -> Result<OuterControls> {
+    let Some(o) = o else {
+        return Ok(OuterControls::default());
+    };
+    if has_fluid {
+        return Err(Error::Config(
+            "numerics/outer: a case with a fluid region runs the SIMPLE loop, whose \
+             outer iterations and stop are numerics.flow's (SPEC-LIT 100.7)"
+                .to_string(),
+        ));
+    }
+    if !nonlinear {
+        return Err(Error::Config(
+            "numerics/outer: nothing in this case is nonlinear - no curve in a solid's \
+             kappa or c and no radiating face - so the conduction problem is solved in \
+             one pass and nothing would read the block (SPEC-LIT 100.7). Remove it"
+                .to_string(),
+        ));
+    }
+    let d = OuterControls::default();
+    let tolerance = match o.tolerance {
+        None => d.tolerance,
+        Some(t) if t > 0.0 && t < 1.0 => t as Scalar,
+        Some(t) => {
+            return Err(Error::Config(format!(
+                "numerics/outer/tolerance = {t}: (S100.7)'s epsilon is relative and \
+                 must lie in (0, 1) (SPEC-LIT 100.7)"
+            )))
+        }
+    };
+    let max_outer = match o.max_outer {
+        None => d.max_outer,
+        Some(0) => {
+            return Err(Error::Config(
+                "numerics/outer/maxOuter = 0: a step needs at least one pass \
+                 (SPEC-LIT 100.7)"
+                    .to_string(),
+            ))
+        }
+        Some(n) => n as usize,
+    };
+    Ok(OuterControls { tolerance, max_outer, stated: true })
 }
 
 /// SPEC-LIT §100.2: an entry whose consumer is still built from a constant.

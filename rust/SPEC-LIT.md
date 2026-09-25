@@ -29790,8 +29790,9 @@ temperature. The host round trip sits between two `correct` calls, so it is
 outside the region `the_solid_side_iteration_replays_bitwise` captures -
 which is `correct` alone - by construction, and `src/cht.rs` keeps its
 capture-registry row as it was. A case with no radiating face takes exactly
-the one `correct` per step it always took. The criterion is a constant here;
-a criterion the case states is a later section's.
+the one `correct` per step it always took. The criterion is §100.7's,
+which a case may state in `numerics.outer`; stated or not, a case with no
+curve takes it with exactly these two numbers.
 
 The linear solver's own tolerance must resolve the criterion: a correction
 that stops shrinking above it has reached the solver's floor, and the
@@ -29968,16 +29969,15 @@ the thermo-elastic solid reads after the thermal solve has converged,
 `E(T)` and `alpha(T)` (§100.3), and holds the evaluator against three
 published tables (§100.4, Gate 100-B).
 
-What it does not do is rebuild the conduction operator, the transient
-weight, the fluid's `k_eff` and `rho cp`, or the momentum equation's
-viscosity from a curve. Each of those is built once, from a constant, before
-the first iteration, and a curve there makes the problem nonlinear - it
-needs an outer loop that rebuilds the coefficients from the current iterate
-and says when it has converged. That loop, and the gate that proves it
-converged (Gate 100-A), are a later subsection of this number; until then a
-case that writes a curve in one of those entries has the curve read,
-validated and **refused by name** (§100.2), so no run silently uses a
-constant in its place. Volumetric sources that vary are also later.
+What it does not do everywhere is rebuild a coefficient from a curve. On the
+conduction path a solid's `kappa` and `c` are rebuilt from the current
+temperature every outer pass (§100.6), inside a loop that states its
+criterion and refuses to stall (§100.7); Gate 100-A is the proof that loop
+converged. On the conjugate path the solid's conductances, the fluid's
+`k_eff` and `rho cp`, and the momentum equation's viscosity are still built
+once, from a constant, and a curve there is read, validated and **refused by
+name** (§100.2), so no run silently uses a constant in its place. Volumetric
+sources that vary are later.
 
 The gates of this section are 100-A to 100-D. `docs/09` wrote them under the
 number before this one, which §69's registry reserves for invented gate
@@ -30035,10 +30035,12 @@ the rule §98.4 applies to Churchill & Chu's Rayleigh range.
 consumer states what its quantity must be - `E > 0` through §95's
 `Material::validate`, `alpha >= 0` - and checks the values it evaluates.
 
-**Host only, in this state of the tree.** A device twin of the evaluator,
-held to the host to `1e-12` on random temperatures, lands with its first
-device consumer, the conduction rebuild: a kernel that no captured region
-calls would enter §81.7's registry with a stance nothing proves.
+**Host only, in this state of the tree.** The conduction rebuild of §100.6
+is host arithmetic too: its loop is host-driven, because its criterion is a
+read-back. A device twin of the evaluator, held to the host to `1e-12` on
+random temperatures, lands with the first consumer that runs inside a
+captured region - a kernel that no captured region calls would enter §81.7's
+registry with a stance nothing proves.
 
 ### 100.2 What a case writes - the number, or a curve, in the same entry
 
@@ -30073,8 +30075,8 @@ anisotropic curve is not a form.
 
 | entry | a number | a curve |
 |---|---|---|
-| a solid's `material.kappa` | as before | read, validated, **refused**: §46.2's face conductances are built once, at setup |
-| a solid's `material.c` | as before | read, validated, **refused**: the transient weight `rho c` is built once |
+| a solid's `material.kappa` | as before | **consumed** on the conduction path: rebuilt every outer pass (§100.6); read, validated, **refused** on a case with a fluid region |
+| a solid's `material.c` | as before | **consumed** on the conduction path: the transient weight is rebuilt every outer pass (§100.6); read, validated, **refused** on a case with a fluid region |
 | a fluid's `fluid.kappa`, `fluid.cp` | as before | read, validated, **refused**: §26's `k_eff` and `rho cp` are built from constants |
 | a fluid's `fluid.mu` | as before | read, validated, **refused**: the momentum equation's laminar viscosity is a constant |
 | `mechanics.material.E` and `alpha`, and each zone's | as before | **consumed**: §100.3 |
@@ -30221,10 +30223,15 @@ relative (N2) or better.
 | 3 | Sutherland's law with `value <= 0`, `TRef <= 0` or `S < 0` | the JSON path |
 | 4 | any range that is not ascending or does not start at a positive temperature | the JSON path and the range |
 | 5 | an evaluation outside the range | the JSON path, the temperature and the range |
-| 6 | a curve for a solid's `kappa` or `c`, or a fluid's `kappa`, `cp` or `mu` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
+| 6 | a curve for a solid's `kappa` or `c` on a case with a fluid region, or for a fluid's `kappa`, `cp` or `mu` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
 | 7 | an `E` or `alpha` curve whose value at a sample temperature fails §95's `validate`, or an `alpha` below zero there | the JSON path and the temperature |
 | 8 | an `alpha` curve without `TRef` | the JSON path |
 | 9 | a zone whose converged temperatures leave its curve's range | the JSON path, the zone's range and the curve's |
+| 10 | a `kappa` or `c` curve that does not contain the case's initial temperature, or whose value at a sample temperature is not positive | the JSON path and the temperature |
+| 11 | a cell whose temperature leaves a `kappa` or `c` curve during the outer loop, or where the curve is not positive | the JSON path, the temperature and the range |
+| 12 | `numerics.outer` on a case with a fluid region, or on one with no curve and no radiating face | `numerics/outer`, and why nothing reads it |
+| 13 | `numerics.outer.tolerance` outside `(0, 1)`, or `maxOuter` of zero | the setting |
+| 14 | a step whose outer loop did not meet (S100.7) in `maxOuter` passes | the criterion, the pass count, the last changes and their contraction (§100.7) |
 
 **The pair tests (§13.4.1).** On §96's steel bar - clamped, heated linearly
 from 300 to 400 K - an `alpha` curve against the constant `alpha(300 K)`,
@@ -30249,6 +30256,110 @@ with that `alpha` inside the case's own 10 % band.
 | the pair tests | every pair above different, the twin equal, failing by name |
 | the schema | `docs/schema/cht-1.json` regenerated, the three curve forms in it |
 | Gate 100-B | the three legs of §100.4, each on its key's digest |
+
+### 100.6 The conduction operator, rebuilt from the current temperature
+
+On the conduction path (`cht::run_case`) a solid's `kappa` and `c` may be
+curves. `Conduction::build` is two halves: the face arithmetic of
+§46.2-§46.4 - the two one-sided conductances in series, (S46.2)'s harmonic
+interface conductivity, and §46.4's two refusals - and the per-cell tensors
+and `rho c` it is handed. `Conduction::rebuild` runs the same face
+arithmetic on new per-cell values and overwrites the face conductances,
+`C_b` and `rho c` in place. The arithmetic was moved, not rewritten, so every
+caller of `build` gets the bits it got before, and a rebuild from the
+tensors a build was made from is that build to the bit (§100.7's checks).
+
+```
+k_c = kappa(T_c) I,        (rho c)_c = rho c(T_c)                        (S100.6)
+```
+
+at the cell temperatures the previous pass left; a region of numbers takes
+exactly the tensors and `rho c` that `uniform_per_region` gives it. The
+alignment and the anisotropy residual of §46.4 are homogeneous of degree
+zero in an isotropic `K`, so a rebuild leaves them where the setup put them,
+to round-off; they are recomputed and the refusals re-run anyway.
+
+**What a rebuilt `C_b` moves**, and is rewritten with it every pass: a
+`fixedFluxTemperature` face's `refGrad = q Delta_b / C_b` (§32.2), and every
+external face's triple (S98.3), convective and radiating alike. Without that
+refresh a `k(T)` solid would deliver `q C_b(T_0)/C_b(T)` through a fixed-flux
+face. `ConjugateHeat::set_conduction` writes the four device arrays - the
+face conductances, the boundary base `update_interfaces` copies from, `C_b`
+and `rho c` - between two `correct` calls, so the capture of `correct` alone
+(`the_solid_side_iteration_replays_bitwise`) and `src/cht.rs`'s row in
+§81.7's registry are untouched.
+
+**Host arithmetic, not a kernel.** The loop is host-driven, because its
+criterion is a read-back that §81.3 refuses inside a capture; a pass costs
+one download of `T`, one pass over the cells and the faces, and four
+uploads. Sharing `build`'s arithmetic is what makes a flat curve its
+constant to the bit.
+
+**The placeholder.** The lowered `SolidMaterial` of a region with a curve
+holds the curve's value at the case's initial temperature, so the setup
+build is the operator the first pass solves with. An initial temperature
+outside the curve's range is refused there, naming the range, and every
+sample (§100.3) of a `kappa` or `c` curve must be positive. During the loop a
+cell whose temperature leaves the range is refused: a curve is not
+extrapolated, not even by a solve that overshoots.
+
+**The transient weight** is `c` at the current iterate,
+`rho c(T^(n+1)) (T^(n+1) - T^n) / dt` - the apparent-heat-capacity form.
+It is first-order consistent and is not conservative across a jump in `c`;
+an enthalpy form is not built.
+
+**On the conjugate path** (`cht::flow::run_flow_case`) a curve on a solid's
+`kappa` or `c` is still refused by name: there the solid's conductances are
+attached to §26's energy equation once.
+
+### 100.7 The outer loop - the criterion a case may state, and the refusal when it stalls
+
+§98.3's loop, generalised in place. A step of `run_case` whose case has a
+conduction curve or a radiating face takes outer passes: rebuild from `T`
+(§100.6, when a curve is present), `correct`, re-linearise every radiating
+face (§98.3, when one is present), measure - until
+
+```
+max_c |T_c^p - T_c^(p-1)|  <=  epsilon  max_c |T_c^p|                   (S100.7)
+```
+
+over every cell when a curve is present, and §98.3's face criterion with the
+same `epsilon` when a face radiates; both, when both are. A case of numbers
+with no radiating face takes the one `correct` per step it always took: no
+read-back, no rebuild, the same bits.
+
+`numerics.outer` is `{ "tolerance": epsilon, "maxOuter": N }`, both
+optional. Absent, `epsilon` is §98.3's `1e-10` (`1e-4` in the f32 build) and
+`N = 50`, so a radiating case that states nothing runs exactly as it did.
+It is refused on a case with a fluid region, whose outer loop is
+`numerics.flow`'s, and on a case with no curve and no radiating face, where
+nothing would read it (§13.4.1); `tolerance` must lie in `(0, 1)` and
+`maxOuter` must be positive.
+
+**The stall refusal.** A step that has not met (S100.7) after `N` passes is
+refused, naming `epsilon`, `N`, the last four relative changes, the
+radiating faces' last corrections if any, and the ratio of the last two
+changes - near 1 is a stall, above 1 a divergence. No result is returned
+from an unconverged loop. This is a Picard iteration, whose contraction per
+pass is roughly `|dk/dT| Delta T / k`; a curve steep enough to hold it near 1
+needs relaxation, which is not built.
+
+**What a run reports.** `ChtSolution::outer_changes` - the last step's left
+side of (S100.7) over `max|T|`, one per pass, empty when no curve is present;
+`external_passes` as §98.3 says.
+
+| Check | Expected |
+|---|---|
+| a rebuild from a build's own tensors | that build, to the bit; alignment within `1e-14`, residual under §46.4's limit |
+| a region of numbers | the constants `uniform_per_region` gives it, to the bit |
+| a case of numbers, no radiating face | no outer pass |
+| a flat curve | two passes, and the field of its number to `1e-12` |
+| a linear `kappa(T)` on the slab against its mean | the profile bent by more than 1 K, the heat flow Kirchhoff's to `1e-3` |
+| a fixed-flux face with a `kappa` curve | the hot wall conducts `q` to `1e-9` |
+| a convective face with a `kappa` curve | conducted and convected balance to `1e-10` |
+| a radiating face with a `kappa` curve | one loop, the quartic's flux to `1e-9` |
+| a `c` curve on a transient | the field moved; its flat twin the number's to `1e-9` |
+| rows 10-14 of §100.5 | each refused, the message naming the setting |
 
 ---
 
@@ -31680,7 +31791,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **462** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **468** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -31691,7 +31802,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 four.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 ten.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

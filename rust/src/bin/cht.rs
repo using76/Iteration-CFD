@@ -155,6 +155,17 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
             f64::from(m.diffusivity()),
             f64::from(m.effusivity()),
         );
+        if let Some(cv) = &low.conduction_curves[i] {
+            let say = |p: &Option<ofgpu::properties::Property>| {
+                p.as_ref().map_or("the number above".to_string(), |c| c.describe())
+            };
+            println!(
+                "    kappa: {}; c: {} - rebuilt from the current T every outer pass (SPEC-LIT \
+                 100.6); the numbers above are the curves at the initial T",
+                say(&cv.kappa),
+                say(&cv.c)
+            );
+        }
         if low.sources[i] != 0.0 {
             println!("    source {:.4e} W/m^3", f64::from(low.sources[i]));
         }
@@ -376,6 +387,15 @@ fn report(low: &LoweredChtCase, sol: &ChtSolution) {
     }
 
     println!("\n  steps {} | last residual {:.3e}", sol.steps, f64::from(sol.residual));
+    if !sol.outer_changes.is_empty() {
+        println!(
+            "  outer loop: {} passes in the last step, last relative change {:.3e} against \
+             {:e} (SPEC-LIT 100.7)",
+            sol.outer_changes.len(),
+            f64::from(*sol.outer_changes.last().unwrap()),
+            f64::from(low.outer.tolerance)
+        );
+    }
 
     // The per-region story behind that global number (the §13.4.2 rule of
     // saying what was used, applied to the linear solve): one line per

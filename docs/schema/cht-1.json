@@ -760,6 +760,17 @@
           "default": 0,
           "minimum": 0
         },
+        "outer": {
+          "description": "SPEC-LIT §100.7: the conduction path's outer loop. Refused on a case\nwith a fluid region, and on one with nothing nonlinear in it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtOuter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "preconditioner": {
           "description": "`DIC`, `DILU`, `diagonal` or `none`.",
           "type": "string"
@@ -780,6 +791,30 @@
         "tolerance",
         "maxIter"
       ]
+    },
+    "ChtOuter": {
+      "description": "SPEC-LIT §100.7's `numerics.outer` block: the conduction path's outer\nloop. Both entries optional; absent, the loop runs §98.3's criterion\nand cap, so a case that states nothing runs as it did.",
+      "type": "object",
+      "properties": {
+        "maxOuter": {
+          "description": "The most passes one step may take before it is refused. Absent: 50.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tolerance": {
+          "description": "(S100.7)'s `epsilon`: a step stops when `max|T - T_prev| <= epsilon\nmax|T|`. In `(0, 1)`. Absent: `1e-10` (`1e-4` in the f32 build).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "ChtPatchRule": {
       "description": "One patch's temperature condition, and - on a fluid region - what the patch\nIS.",

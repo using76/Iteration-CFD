@@ -3907,7 +3907,6 @@ mod curves {
 
     #[test]
     fn a_curve_whose_consumer_is_built_from_a_constant_is_refused_by_name() {
-        let slab = slab_case("1.4", "148.0", "", "", "");
         let kp = kp_pair_base();
         let bad = |text: &str, base: &str, path: &str, phrase: &str, extra: &str| {
             assert_ne!(text, base, "the replaced document must differ from its base");
@@ -3923,18 +3922,6 @@ mod curves {
                 assert!(msg.contains(what), "must name '{what}': {msg}");
             }
         };
-        let t_a = slab_case("1.4", r#"{ "table": [[250.0, 150.0], [500.0, 80.0]] }"#, "", "", "");
-        bad(
-            &t_a,
-            &slab,
-            "regions/metal/material/kappa",
-            "face conductances",
-            "a table of 2 knots on [250, 500] K",
-        );
-        let pat_b = r#""c": 1200.0"#;
-        assert_eq!(slab.matches(pat_b).count(), 1, "'{pat_b}' must match exactly once");
-        let t_b = slab.replace(pat_b, r#""c": { "table": [[250.0, 1100.0], [500.0, 1300.0]] }"#);
-        bad(&t_b, &slab, "regions/metal/material/c", "transient weight", "");
         let pat_c = r#""kappa": 1.0, "mu": 0.71"#;
         assert_eq!(kp.matches(pat_c).count(), 1, "'{pat_c}' must match exactly once");
         let t_c = kp.replace(
@@ -4226,5 +4213,523 @@ mod curves {
         assert!(err <= 0.10, "tip deflection {d_b} against closed form {d_exp}: {err} ratio");
         assert!(d_b / d_a > 1.3, "d_b/d_a = {}: the larger evaluated alpha must move \
             the tip further", d_b / d_a);
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT §100.6-§100.7 - the conduction operator rebuilt from a curve,
+//  and the outer loop around it
+// ==========================================================================
+
+/// SPEC-LIT §100.6-§100.7: the conduction operator rebuilt from a curve, and the loop around it.
+mod conduction {
+    use super::*;
+
+    /// §100.6's slab curve: `kappa(T) = 1.2 - 0.002 (T - 250)` W/(m K), so
+    /// `kappa(300) = 1.1`, `kappa(500) = 0.7` and their mean is `0.9`.
+    const K_LINEAR: &str = r#""kappa": { "table": [[250.0, 1.2], [550.0, 0.6]] } }"#;
+    const K_FLAT: &str = r#""kappa": { "table": [[250.0, 1.0], [550.0, 1.0]] } }"#;
+    const K_NUMBER: &str = r#""kappa": 1.0 }"#;
+    const FACE_300: &str = r#"{ "type": "fixedValue", "value": 300.0 }"#;
+
+    /// `external_slab(face)` with its `kappa` written as `kappa`.
+    fn slab_with(face: &str, kappa: &str) -> String {
+        let base = external_slab(face);
+        assert_eq!(base.matches(K_NUMBER).count(), 1, "'{K_NUMBER}' must match exactly once");
+        base.replace(K_NUMBER, kappa)
+    }
+
+    /// The max-norm distance between two fields.
+    fn max_diff(a: &[Scalar], b: &[Scalar]) -> Scalar {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, Scalar::max)
+    }
+
+    #[test]
+    fn a_conductivity_or_heat_capacity_curve_lowers_onto_its_region() {
+        let text = slab_case("1.4", r#"{ "table": [[250.0, 150.0], [500.0, 80.0]] }"#, "", "", "");
+        let low = read(&text).expect("parse").lower().expect("lower");
+        let cv = low.conduction_curves[1].as_ref().expect("metal wrote a curve");
+        assert!(cv.kappa.is_some(), "kappa must be a curve: {cv:?}");
+        assert!(cv.c.is_none(), "c must stay a number: {cv:?}");
+        assert_eq!(cv.path, "regions/metal/material");
+        assert!(low.conduction_curves[0].is_none(), "insulation wrote no curve");
+        let p = cv.kappa.as_ref().unwrap();
+        let want = p.value("k", 340.0).unwrap();
+        assert_eq!(
+            low.materials[1].k.range(),
+            (want, want),
+            "the placeholder must be kappa(340) = {want}, got {:?}",
+            low.materials[1].k.range()
+        );
+        let pat = r#""c": 1200.0"#;
+        let base = default_slab();
+        let c_text = base.replace(pat, r#""c": { "table": [[250.0, 1100.0], [500.0, 1300.0]] }"#);
+        assert_ne!(c_text, base, "'{pat}' must match exactly once");
+        let clow = read(&c_text).expect("parse").lower().expect("lower");
+        let ccv = clow.conduction_curves[1].as_ref().expect("metal wrote a c curve");
+        assert!(ccv.c.is_some(), "c must be a curve: {ccv:?}");
+        assert!(ccv.kappa.is_none(), "kappa must stay a number: {ccv:?}");
+        let cwant = ccv.c.as_ref().unwrap().value("c", 340.0).unwrap();
+        assert_eq!(
+            clow.materials[1].c, cwant,
+            "the placeholder c must be c(340) = {cwant}, got {}",
+            clow.materials[1].c
+        );
+        let dlow = read(&base).expect("parse").lower().expect("lower");
+        assert!(
+            dlow.conduction_curves.iter().all(Option::is_none),
+            "a case of numbers lowers to no curve: {:?}",
+            dlow.conduction_curves
+        );
+        assert_eq!(dlow.outer, crate::io::case_cht::OuterControls::default());
+    }
+
+    #[test]
+    fn a_conduction_curve_that_misses_the_initial_temperature_or_is_not_positive_is_refused_by_name()
+    {
+        let text = slab_case("1.4", r#"{ "table": [[350.0, 150.0], [500.0, 80.0]] }"#, "", "", "");
+        let Err(err) = read(&text).expect("parse").lower() else {
+            panic!("a kappa curve that misses the initial T must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["regions/metal/material/kappa", "340", "outside the curve's range"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+        let text = slab_case(
+            "1.4",
+            r#"{ "polynomial": { "exponents": [0.0, 1.0], "pieces": [ { "range": [250.0, 500.0],
+                 "coefficients": [200.0, -0.5] } ] } }"#,
+            "",
+            "",
+            "",
+        );
+        let Err(err) = read(&text).expect("parse").lower() else {
+            panic!("a kappa curve that goes negative must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["regions/metal/material/kappa", "not positive"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+    }
+
+    #[test]
+    fn a_conduction_curve_on_a_conjugate_case_is_refused_by_name() {
+        let pat = r#""c": 1.0, "kappa": 1.0 }"#;
+        let base = kp_pair_base();
+        assert_eq!(base.matches(pat).count(), 1, "'{pat}' must match exactly once");
+        let text = base.replace(pat, r#""c": 1.0, "kappa": { "table": [[200.0, 1.0], [400.0, 2.0]] } }"#);
+        assert_ne!(text, base, "the replaced document must differ from its base");
+        let Err(err) = read(&text).expect("parse").lower() else {
+            panic!("a solid curve on a conjugate case must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in [
+            "regions/wall/material/kappa",
+            "is read and valid",
+            "conjugate path",
+            "a table of 2 knots on [200, 400] K",
+            "SPEC-LIT 100.2",
+        ] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+    }
+
+    #[test]
+    fn numerics_outer_lowers_to_its_defaults_and_is_refused_where_nothing_reads_it() {
+        let outer = |text: &str, pat: &str, block: &str| {
+            assert_eq!(text.matches(pat).count(), 1, "'{pat}' must match exactly once");
+            text.replace(pat, &format!("{pat}, \"outer\": {block}"))
+        };
+        let rad = external_slab(SLAB_RAD);
+        let pr = r#""tolerance": 1e-30, "maxIter": 1000"#;
+        let ps = r#""tolerance": 1e-30, "maxIter": 4000"#;
+        let text = outer(&rad, pr, r#"{ "tolerance": 1e-9, "maxOuter": 20 }"#);
+        let low = read(&text).expect("parse").lower().expect("lower");
+        assert_eq!(low.outer.tolerance, 1e-9, "tolerance must lower: {}", low.outer.tolerance);
+        assert_eq!(low.outer.max_outer, 20, "maxOuter must lower: {}", low.outer.max_outer);
+        assert!(low.outer.stated, "a written numerics.outer must be stated");
+        let text = outer(&rad, pr, "{}");
+        let low = read(&text).expect("parse").lower().expect("lower");
+        assert_eq!(
+            low.outer.tolerance,
+            crate::cht::ambient::NEWTON_RTOL,
+            "an empty block takes the criterion of 98.3: {}",
+            low.outer.tolerance
+        );
+        assert_eq!(low.outer.max_outer, 50, "an empty block takes the cap of 98.3");
+        assert!(low.outer.stated);
+        let text = outer(&default_slab(), ps, "{}");
+        let Err(err) = read(&text).expect("parse").lower() else {
+            panic!("numerics.outer on a linear case must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["numerics/outer", "nothing in this case is nonlinear"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+        let text = outer(&rad, pr, r#"{ "maxOuter": 0 }"#);
+        let Err(err) = read(&text).expect("parse").lower() else {
+            panic!("maxOuter of zero must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        assert!(msg.contains("maxOuter"), "must name the setting: {msg}");
+        for tol in ["0.0", "1.0"] {
+            let text = outer(&rad, pr, &format!(r#"{{ "tolerance": {tol} }}"#));
+            let Err(err) = read(&text).expect("parse").lower() else {
+                panic!("tolerance = {tol} must be refused");
+            };
+            let msg = err.to_string();
+            println!("refusal: {msg}");
+            assert!(
+                msg.contains("numerics/outer/tolerance"),
+                "must name the setting: {msg}"
+            );
+        }
+        let text = outer(&kp_pair_base(), r#""tolerance": 1e-16, "maxIter": 400"#, "{}");
+        let Err(err) = read(&text).expect("parse").lower() else {
+            panic!("numerics.outer on a conjugate case must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["numerics/outer", "numerics.flow"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+    }
+
+    /// The thermal mesh `run_case` builds, for the host tests below.
+    fn tm_of(low: &LoweredChtCase) -> crate::cht::ThermalMesh {
+        let regions: Vec<crate::cht::RegionInput<'_>> = low
+            .region_names
+            .iter()
+            .zip(&low.meshes)
+            .map(|(name, m)| crate::cht::RegionInput {
+                name: name.clone(),
+                kind: crate::cht::RegionKind::Solid,
+                mesh: m,
+            })
+            .collect();
+        crate::cht::ThermalMesh::build(&regions, &low.interfaces, low.tolerances)
+            .expect("thermal mesh")
+    }
+
+    #[test]
+    fn a_rebuild_is_bitwise_the_build_of_the_same_conductivity_and_keeps_its_geometry() {
+        let low = read(&default_slab()).expect("parse").lower().expect("lower");
+        let tm = tm_of(&low);
+        let base = crate::cht::Conduction::uniform_per_region(&tm, &low.materials)
+            .expect("the setup build");
+        let n = tm.host.n_cells;
+        let k_b: Vec<crate::Tensor> =
+            (0..n).map(|c| Conductivity::Isotropic(1.0 + 0.37 * c as Scalar).tensor()).collect();
+        let rc_b: Vec<Scalar> = (0..n).map(|c| 1.0e6 + c as Scalar).collect();
+        let fresh = crate::cht::Conduction::build(&tm, &k_b, rc_b.clone()).expect("build");
+        let mut r = base.clone();
+        r.rebuild(&tm, &k_b, &rc_b).expect("rebuild");
+        for (what, x, y) in [
+            ("gamma_mag_sf", &r.gamma_mag_sf, &fresh.gamma_mag_sf),
+            ("b_gamma_mag_sf", &r.b_gamma_mag_sf, &fresh.b_gamma_mag_sf),
+            ("b_conductance", &r.b_conductance, &fresh.b_conductance),
+            ("rho_c", &r.rho_c, &fresh.rho_c),
+        ] {
+            assert_eq!(x.len(), y.len(), "{what}: length differs");
+            let bad = x.iter().zip(y).position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(bad.is_none(), "{what}: first differing index {bad:?}");
+        }
+        assert!(
+            (r.worst_alignment - base.worst_alignment).abs() <= 1e-14,
+            "the alignment moved under a rebuild: {} vs {}",
+            r.worst_alignment,
+            base.worst_alignment
+        );
+        assert!(
+            r.worst_residual <= crate::cht::ANISOTROPY_RESIDUAL_LIMIT,
+            "the rebuilt residual {} is over the limit",
+            r.worst_residual
+        );
+        assert!(
+            r.gamma_mag_sf != base.gamma_mag_sf,
+            "a rebuild with a different k must move gamma_mag_sf"
+        );
+    }
+
+    #[test]
+    fn conduction_at_gives_a_region_of_numbers_its_constants_to_the_bit() {
+        let low = read(&default_slab()).expect("parse").lower().expect("lower");
+        let tm = tm_of(&low);
+        let n = tm.host.n_cells;
+        let t: Vec<Scalar> = (0..n).map(|c| 300.0 + c as Scalar).collect();
+        let (k, rc) = crate::cht::conduction_at(&tm, &low.materials, &low.conduction_curves, &t)
+            .expect("conduction_at");
+        let built = crate::cht::Conduction::build(&tm, &k, rc).expect("build");
+        let uni = crate::cht::Conduction::uniform_per_region(&tm, &low.materials)
+            .expect("uniform_per_region");
+        for (what, x, y) in [
+            ("gamma_mag_sf", &built.gamma_mag_sf, &uni.gamma_mag_sf),
+            ("b_gamma_mag_sf", &built.b_gamma_mag_sf, &uni.b_gamma_mag_sf),
+            ("b_conductance", &built.b_conductance, &uni.b_conductance),
+            ("rho_c", &built.rho_c, &uni.rho_c),
+        ] {
+            assert_eq!(x.len(), y.len(), "{what}: length differs");
+            let bad = x.iter().zip(y).position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(bad.is_none(), "{what}: first differing index {bad:?}");
+        }
+    }
+
+    #[test]
+    fn relative_change_is_the_largest_move_over_the_largest_temperature() {
+        assert_eq!(
+            crate::cht::relative_change(&[300.0, 400.0], &[301.0, 398.0]),
+            2.0 / 398.0
+        );
+        assert_eq!(crate::cht::relative_change(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn a_case_of_numbers_takes_no_outer_pass() {
+        let Some(gpu) = gpu() else { return };
+        let sol = solve(&gpu, &default_slab());
+        assert!(
+            sol.outer_changes.is_empty(),
+            "a case of numbers took outer passes: {:?}",
+            sol.outer_changes
+        );
+        assert_eq!(sol.steps, 1);
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_flat_curve_takes_two_passes_and_lands_on_the_number_it_stands_for() {
+        let Some(gpu) = gpu() else { return };
+        let a = solve(&gpu, &slab_with(FACE_300, K_FLAT));
+        let b = solve(&gpu, &slab_with(FACE_300, K_NUMBER));
+        println!("flat-curve passes: {:?}", a.outer_changes);
+        println!("number passes: {:?}", b.outer_changes);
+        assert_eq!(
+            a.outer_changes.len(),
+            2,
+            "a flat curve takes exactly two passes: {:?}",
+            a.outer_changes
+        );
+        assert!(
+            b.outer_changes.is_empty(),
+            "a case of numbers takes no outer pass: {:?}",
+            b.outer_changes
+        );
+        assert!(
+            max_diff(&a.t, &b.t) <= 1e-12 * 500.0,
+            "the flat curve's field is not the number's: {} K apart",
+            max_diff(&a.t, &b.t)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn pair_a_conductivity_curve_bends_the_profile_and_keeps_kirchhoffs_heat_flow() {
+        let Some(gpu) = gpu() else { return };
+        let a = solve(&gpu, &slab_with(FACE_300, K_LINEAR));
+        let b = solve(&gpu, &slab_with(FACE_300, r#""kappa": 0.9 }"#));
+        let h = &a.mesh.host;
+        let range = a.mesh.patch_range(0, "hot").unwrap();
+        let area: Scalar = range.clone().map(|bf| h.b_mag_sf[bf]).sum();
+        let q = 0.9 * 200.0 / 0.02;
+        println!("curve passes: {:?}", a.outer_changes);
+        let ratios: Vec<Scalar> = a
+            .outer_changes
+            .iter()
+            .zip(a.outer_changes.iter().skip(1))
+            .map(|(x, y)| y / x)
+            .collect();
+        println!("successive contraction ratios: {ratios:?}");
+        assert!(
+            (3..=50).contains(&a.outer_changes.len()),
+            "{} outer passes, expected between 3 and 50",
+            a.outer_changes.len()
+        );
+        assert!(
+            *a.outer_changes.last().unwrap() <= crate::cht::ambient::NEWTON_RTOL,
+            "the loop stopped above the criterion: {:?}",
+            a.outer_changes.last()
+        );
+        assert!(
+            max_diff(&a.t, &b.t) > 1.0,
+            "the curve did not bend the profile (SPEC-LIT 13.4.1): {} K apart",
+            max_diff(&a.t, &b.t)
+        );
+        let b_hot = b.patch_heat_flow(0, "hot").unwrap();
+        let a_hot = a.patch_heat_flow(0, "hot").unwrap();
+        println!("b_hot/area = {}, a_hot/area = {}, Kirchhoff q = {q}", b_hot / area, a_hot / area);
+        assert!(
+            (b_hot / area / q - 1.0).abs() < 1e-10,
+            "the constant case missed Kirchhoff's heat flow: {} against {q}",
+            b_hot / area
+        );
+        assert!(
+            (a_hot / area / q - 1.0).abs() < 1e-3,
+            "the curve case missed Kirchhoff's heat flow: {} against {q}",
+            a_hot / area
+        );
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_fixed_flux_face_delivers_its_q_through_a_conductivity_curve() {
+        let Some(gpu) = gpu() else { return };
+        let sol = solve(
+            &gpu,
+            &slab_with(r#"{ "type": "fixedFluxTemperature", "q": -5000.0 }"#, K_LINEAR),
+        );
+        let hot = sol.patch_heat_flow(0, "hot").unwrap();
+        let range = sol.mesh.patch_range(0, "hot").unwrap();
+        let area: Scalar = range.clone().map(|bf| sol.mesh.host.b_mag_sf[bf]).sum();
+        let face = sol.mesh.patch_range(0, "face").unwrap();
+        println!("T_b on the flux face: {:?}", &sol.bt[face]);
+        println!("q_hot/area = {} against q = 5000", hot / area);
+        assert!(
+            (hot / area / 5000.0 - 1.0).abs() < 1e-9,
+            "the hot wall does not conduct q: {hot} W over {area} m^2"
+        );
+        assert!(
+            !sol.outer_changes.is_empty(),
+            "a kappa curve must take outer passes: {:?}",
+            sol.outer_changes
+        );
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_convective_face_meets_its_robin_identity_through_a_conductivity_curve() {
+        let Some(gpu) = gpu() else { return };
+        let sol = solve(&gpu, &slab_with(SLAB_CONV, K_LINEAR));
+        let h = &sol.mesh.host;
+        let range = sol.mesh.patch_range(0, "face").unwrap();
+        let conducted = sol.patch_heat_flow(0, "face").unwrap();
+        let convected: Scalar =
+            range.clone().map(|bf| 25.0 * h.b_mag_sf[bf] * (sol.bt[bf] - 300.0)).sum();
+        println!("conducted = {conducted:.12} W, convected = {convected:.12} W");
+        assert!(
+            (conducted + convected).abs() <= 1e-10 * convected.abs(),
+            "the Robin identity failed: conducted {conducted} W against convected {convected} W"
+        );
+        let hot = sol.patch_heat_flow(0, "hot").unwrap();
+        assert!(
+            (hot - convected).abs() <= 1e-9 * convected.abs(),
+            "the hot wall carries {hot} W against the convected {convected} W"
+        );
+        assert!(
+            sol.external_passes.is_empty(),
+            "a purely convective face took a Newton pass: {:?}",
+            sol.external_passes
+        );
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_radiating_face_and_a_conductivity_curve_share_one_loop() {
+        let Some(gpu) = gpu() else { return };
+        let sol = solve(&gpu, &slab_with(SLAB_RAD, K_LINEAR));
+        println!(
+            "external passes: {:?}, outer changes: {:?}",
+            sol.external_passes, sol.outer_changes
+        );
+        assert_eq!(
+            sol.external_passes.len(),
+            sol.outer_changes.len(),
+            "the two criteria must take the same passes: {:?} against {:?}",
+            sol.external_passes,
+            sol.outer_changes
+        );
+        assert!(
+            sol.external_passes.len() >= 2,
+            "one loop must carry both criteria: {} passes",
+            sol.external_passes.len()
+        );
+        let face = sol.mesh.patch_range(0, "face").unwrap();
+        let tb = sol.bt[face.start];
+        let area: Scalar = face.clone().map(|bf| sol.mesh.host.b_mag_sf[bf]).sum();
+        let q_r = 0.8 * crate::radiation::SIGMA_SB * (tb.powi(4) - (300.0 as Scalar).powi(4));
+        let hot = sol.patch_heat_flow(0, "hot").unwrap();
+        println!("T_b = {tb:.9} K, q_r = {q_r:.6}, q_hot/area = {:.6}", hot / area);
+        assert!(
+            (hot / area / q_r - 1.0).abs() < 1e-9,
+            "the hot wall is not the quartic's flux at T_b = {tb} K"
+        );
+    }
+
+    #[test]
+    fn a_stalled_outer_loop_is_refused_naming_its_changes() {
+        let Some(gpu) = gpu() else { return };
+        let pat = r#""tolerance": 1e-30, "maxIter": 1000"#;
+        let plain = slab_with(FACE_300, K_LINEAR);
+        let text = plain
+            .replace(pat, r#""tolerance": 1e-30, "maxIter": 1000, "outer": { "maxOuter": 2 }"#);
+        assert_ne!(text, plain, "'{pat}' must match exactly once");
+        let case = read(&text).expect("parse").lower().expect("lower");
+        let Err(err) = run_case(&gpu, &case) else {
+            panic!("a loop capped at 2 passes must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["did not meet", "in 2 passes", "SPEC-LIT 100.7", "numerics.outer"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+    }
+
+    #[test]
+    fn a_solution_that_leaves_its_conductivity_curve_is_refused_by_name() {
+        let Some(gpu) = gpu() else { return };
+        let text = slab_with(FACE_300, r#""kappa": { "table": [[400.0, 1.0], [550.0, 0.8]] } }"#);
+        let case = read(&text).expect("parse").lower().expect("lower");
+        let Err(err) = run_case(&gpu, &case) else {
+            panic!("a solution that leaves its curve must be refused");
+        };
+        let msg = err.to_string();
+        println!("refusal: {msg}");
+        for what in ["regions/slab/material/kappa", "outside the curve's range", "[400, 550] K"] {
+            assert!(msg.contains(what), "must name '{what}': {msg}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn pair_a_heat_capacity_curve_moves_a_transient_and_its_flat_twin_does_not() {
+        let Some(gpu) = gpu() else { return };
+        let tr = |c: &str| {
+            let base = external_slab(FACE_300);
+            let text = base.replace(
+                r#""run": { "steady": true }"#,
+                r#""run": { "steady": false, "endTime": 200.0, "deltaT": 20.0 }"#,
+            );
+            assert_ne!(text, base, "'\"run\": {{ \"steady\": true }}' must match exactly once");
+            assert_eq!(
+                text.matches(r#""c": 800.0"#).count(),
+                1,
+                "'\"c\": 800.0' must match exactly once"
+            );
+            text.replace(r#""c": 800.0"#, c)
+        };
+        let a = solve(&gpu, &tr(r#""c": { "table": [[250.0, 400.0], [550.0, 1000.0]] }"#));
+        let b = solve(&gpu, &tr(r#""c": 800.0"#));
+        let f = solve(&gpu, &tr(r#""c": { "table": [[250.0, 800.0], [550.0, 800.0]] }"#));
+        println!("a passes: {:?}, b passes: {:?}", a.outer_changes, b.outer_changes);
+        assert_eq!(a.steps, 10, "200 s at 20 s must take 10 steps");
+        assert!(
+            !a.outer_changes.is_empty(),
+            "a c curve must take outer passes: {:?}",
+            a.outer_changes
+        );
+        assert!(
+            max_diff(&a.t, &b.t) > 0.1,
+            "the c curve did not move the transient: {} K apart",
+            max_diff(&a.t, &b.t)
+        );
+        assert!(
+            max_diff(&f.t, &b.t) <= 1e-9 * 500.0,
+            "the flat c curve is not its number: {} K apart",
+            max_diff(&f.t, &b.t)
+        );
     }
 }
