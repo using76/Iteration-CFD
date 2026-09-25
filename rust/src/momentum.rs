@@ -824,6 +824,32 @@ impl<'m> Momentum<'m> {
         self.ctrl.u_relax
     }
 
+    /// SPEC-LIT §100.14: write the laminar viscosity, per cell and per
+    /// boundary face - (S100.14)'s `mu(T)/rho_f` from a case's curve. Between
+    /// two outer iterations, never inside a captured region. Refused under a
+    /// non-Newtonian model, whose `update_rheology` owns the same two arrays.
+    pub fn set_laminar_viscosity(&mut self, gpu: &Gpu, nu: &[Scalar], b_nu: &[Scalar]) -> Result<()> {
+        if self.rheok.is_some() {
+            return Err(Error::Config(format!(
+                "Momentum::set_laminar_viscosity: the viscosityModel is {}, whose rheology \
+                 writes the laminar viscosity; a curve in T and a non-Newtonian model cannot \
+                 both write it (SPEC-LIT 100.14)",
+                self.ctrl.rheology.model.name()
+            )));
+        }
+        let (n, nbf) = (self.m.n_cells, self.m.n_boundary_faces);
+        if nu.len() != n || b_nu.len() != nbf {
+            return Err(Error::Config(format!(
+                "Momentum::set_laminar_viscosity: {} cell and {} face values for a mesh of {n} \
+                 cells and {nbf} boundary faces (SPEC-LIT 100.14)",
+                nu.len(),
+                b_nu.len()
+            )));
+        }
+        gpu.write(&mut self.nu_lam, nu)?;
+        gpu.write(&mut self.b_nu_lam, b_nu)
+    }
+
     /// Volumetric sources on the momentum equation - SPEC-LIT §18.
     ///
     /// A body force per unit mass, or Darcy-Forchheimer porous drag. The drag
@@ -2233,5 +2259,46 @@ mod tests {
             ..MomentumControls::default()
         };
         newtonian.validate().expect("a uniform viscosity has no transpose term to lose");
+    }
+
+    /// SPEC-LIT §100.14: the laminar viscosity written from the host reaches
+    /// `nu_eff` to the bit; a wrong length and a rheology model are refused.
+    #[test]
+    fn the_laminar_viscosity_is_written_and_a_rheology_model_refuses_it() {
+        use crate::rheology::{RheologyCoeffs, RheologyModel};
+        let Some(gpu) = Gpu::new(0).ok() else { return };
+        let (mut hm, points, faces) =
+            crate::mesh::topology::tests::box_mesh([3, 3, 3], crate::Vec3::new(0.1, 0.1, 0.1));
+        hm.compute_geometry(&points, &faces).expect("box geometry");
+        hm.build_cell_face_maps();
+        let m = crate::GpuMesh::upload(&gpu, &hm).expect("upload");
+        let mut mom = Momentum::new(&gpu, &m, MomentumControls::default(), BuoyancyCoeffs::default())
+            .expect("a Newtonian equation");
+        let nu: Vec<Scalar> = (0..hm.n_cells).map(|i| 1.0e-3 * (1.0 + i as Scalar)).collect();
+        let b_nu: Vec<Scalar> = vec![0.25; hm.n_boundary_faces];
+        mom.set_laminar_viscosity(&gpu, &nu, &b_nu).expect("a Newtonian equation takes it");
+        let u = GpuVectorField::zeros(&gpu, &m, "U").expect("U");
+        let nut = GpuScalarField::zeros(&gpu, &m, "nut").expect("nut");
+        mom.update_viscosity(&gpu, &u, &nut).expect("update_viscosity");
+        assert_eq!(gpu.download(&mom.nu_eff.f).unwrap(), nu, "nu_eff = nu_lam + 0");
+        assert_eq!(gpu.download(&mom.nu_eff.bf).unwrap(), b_nu);
+
+        let e = mom.set_laminar_viscosity(&gpu, &nu[1..], &b_nu).unwrap_err().to_string();
+        println!("{e}");
+        assert!(e.contains("set_laminar_viscosity") && e.contains("SPEC-LIT 100.14"), "{e}");
+        let rheology = RheologyCoeffs {
+            model: RheologyModel::HerschelBulkley,
+            rho: 1000.0,
+            tau0: 2.0,
+            k: 0.35,
+            n: 0.6,
+            m_reg: 1000.0,
+            ..RheologyCoeffs::default()
+        };
+        let ctrl = MomentumControls { rheology, ..MomentumControls::default() };
+        let mut hb = Momentum::new(&gpu, &m, ctrl, BuoyancyCoeffs::default()).expect("Herschel-Bulkley");
+        let e = hb.set_laminar_viscosity(&gpu, &nu, &b_nu).unwrap_err().to_string();
+        println!("{e}");
+        assert!(e.contains("HerschelBulkley") && e.contains("SPEC-LIT 100.14"), "{e}");
     }
 }

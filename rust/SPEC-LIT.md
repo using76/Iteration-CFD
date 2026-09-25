@@ -2421,6 +2421,9 @@ nevertheless applied unconditionally. Sources arrive through the §18 registry:
 a model with a volumetric heat term REGISTERS it; the energy module must not
 know any of their internals, and that hook is what keeps every such model out
 of this file.
+Viscous dissipation, Phi of (S100.13), is one such term: the conjugate path
+registers it when a case asks for it, and §26.1's budget carries it in its
+sources entry.
 
 Wall heat transfer: fixed-T and fixed-flux walls via the §4 Robin triple
 (`g_ref = q_w / k_eff`); the convective wall function for temperature
@@ -30224,9 +30227,12 @@ on both paths: every outer pass of the conduction path's loop, which states
 its criterion and refuses to stall (§100.6-§100.7, and Gate 100-A, the
 proof that loop converged), and every iteration of the conjugate path's
 SIMPLE loop (§100.10). A fluid's `kappa` is evaluated on the device inside
-every energy correction (§100.10). A fluid's `cp` and `mu` are still built
-once, from a constant, and a curve there is read, validated and **refused
-by name** (§100.2), so no run silently uses a constant in its place.
+every energy correction (§100.10). A fluid's `mu` may be a curve, and the
+momentum equation's laminar viscosity is rebuilt from it every SIMPLE
+iteration (§100.14); its `cp` is still built once, from a constant, and a
+curve there is read, validated and **refused by name** (§100.2), so no run
+silently uses a constant in its place. Viscous dissipation is a source a
+case may ask for (§100.13).
 A volumetric source may be a number, a curve in `T` or a table in `t`,
 over a region or a box (§100.11), and a curve is split Patankar's way
 (§100.12).
@@ -30329,7 +30335,7 @@ anisotropic curve is not a form.
 | a solid's `material.c` | as before | **consumed**: the transient weight is rebuilt every outer pass (§100.6); on the steady conjugate path it weights nothing |
 | a fluid's `fluid.kappa` | as before | **consumed**: evaluated on the device inside every energy correction (§100.10) |
 | a fluid's `fluid.cp` | as before | read, validated, **refused**: §26 carries `cp T` in the convected flux and the budget, and a `cp(T)` wants the enthalpy form, which is not built |
-| a fluid's `fluid.mu` | as before | read, validated, **refused**: the momentum equation's laminar viscosity is a constant |
+| a fluid's `fluid.mu` | as before | **consumed**: `nu_lam = mu(T)/rho_f` rewritten every SIMPLE iteration (§100.14) |
 | `mechanics.material.E` and `alpha`, and each zone's | as before | **consumed**: §100.3 |
 
 A refused curve is refused only after it has been validated as a curve, so
@@ -30474,7 +30480,7 @@ relative (N2) or better.
 | 3 | Sutherland's law with `value <= 0`, `TRef <= 0` or `S < 0` | the JSON path |
 | 4 | any range that is not ascending or does not start at a positive temperature | the JSON path and the range |
 | 5 | an evaluation outside the range | the JSON path, the temperature and the range |
-| 6 | a curve for a fluid's `cp` or `mu` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
+| 6 | a curve for a fluid's `cp` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
 | 7 | an `E` or `alpha` curve whose value at a sample temperature fails §95's `validate`, or an `alpha` below zero there | the JSON path and the temperature |
 | 8 | an `alpha` curve without `TRef` | the JSON path |
 | 9 | a zone whose converged temperatures leave its curve's range | the JSON path, the zone's range and the curve's |
@@ -30711,7 +30717,7 @@ it is `src/properties.rs`'s row in §81.7's registry.
 ### 100.10 The conjugate path - the fluid's `k_eff` and the solid's conductances from a curve
 
 On `cht::flow::run_flow_case` a fluid's `kappa` and a solid's `kappa` and
-`c` may be curves. The fluid's `cp` and `mu` may not (§100.2).
+`c` may be curves. The fluid's `cp` may not (§100.2); its `mu` may, since §100.14.
 
 **The fluid's `k_eff`.** `Energy::set_conductivity_curve` uploads the curve
 (§100.9). Every `update_k_eff` evaluates it at the current `T` of the
@@ -30870,6 +30876,90 @@ state it is the heat the boundaries carry out.
 
 Seven of the new library tests carry §112.3's f32 attribute: the series
 slope, and the six that run a case.
+
+### 100.13 Viscous dissipation - a metered, non-negative source
+
+```
+Phi = 2 mu (S - (1/3)(div u) I) : (S - (1/3)(div u) I)
+    = 2 mu S:S - (2/3) mu (div u)^2  >=  0,        S = (grad u + (grad u)^T)/2        (S100.13)
+```
+
+A case asks for it on its fluid, `"fluid": { ..., "viscousDissipation": true }`.
+The conjugate path then forms (S100.13) per fluid cell every SIMPLE
+iteration at step 4d (§100.12), from that iteration's velocity after the
+pressure correction - its Gauss gradient, the one §3 takes everywhere - and
+`mu` at the temperature the previous iteration left (the number, or
+§100.14's curve), and registers it as an explicit source in §18's registry.
+Written as the square of the deviatoric strain, Phi is non-negative cell by
+cell by construction: there is no clip and nothing to meter away.
+`ChtFlowSolution::dissipation_power` is `SUM_c Phi_c V_c` of the last
+registration, and §26.1's budget carries it in its sources entry, where it
+carries every registered term. Absent or `false`, no gradient is taken and
+nothing is registered: the bits of every case before this subsection.
+
+**Resolved and modelled.** This path is laminar: `nu_t` is zero on both of
+its meshes (§59.4), so `mu` in (S100.13) is the molecular viscosity and Phi
+is the whole dissipation of the resolved field. On a RAS path the mean-flow
+part would be (S100.13) with `mu`, and the turbulent part is the `rho
+epsilon` of the model's own `k` budget; writing `mu + mu_t` into (S100.13) as
+well would count that part twice. No RAS path registers Phi, and none is
+claimed.
+
+**Where it enters.** Step 4d's order becomes: clear, the fixed array, a
+curve's `S_C` and `S_P`, Phi, then (S98.9)'s sink. `interface_source`
+subtracts Phi's total as it subtracts the others, so it stays (S98.9)'s.
+
+**A fixture where Phi runs away.** §98.8's box is normalised to `Ra = 1e4`
+with `rho = cp = kappa = 1`, so its Gebhart number `g beta L / cp` is about
+`7e4`: viscous heating drives the buoyancy that drives it. Measured on the
+box with Phi on, `SUM Phi V` is `2.5e2` W after two iterations, `1.4e6` W
+after three and `1.3e11` W after twenty, while the same run computing Phi
+without registering it, or registering zeros, stays where it was: the
+growth is the heating feeding back through the flow. No gate runs Phi on
+that box; the check beside a radiating interface below runs two
+iterations, because the identity it holds is exact at every iterate.
+
+### 100.14 `mu(T)` - the momentum equation's laminar viscosity from a curve
+
+```
+nu_lam,c = mu(T_c) / rho_f,        nu_lam,b = mu(T_b) / rho_f                       (S100.14)
+```
+
+A fluid's `mu` may be a curve (§100.1). The momentum equation is kinematic
+(§5) and is written with the fluid's constant `rho_f`, so the laminar
+viscosity it reads is (S100.14), on every fluid cell and every fluid boundary
+face, from the temperature the previous iteration left. At the head of every
+SIMPLE iteration - step 1b, before the momentum predictor -
+`Momentum::set_laminar_viscosity` writes the two arrays `update_viscosity`
+adds `nu_t` to. They are the arrays §38's rheology writes on a non-Newtonian
+case, which is why a curve and a non-Newtonian model are refused together.
+`div(nu_eff (grad U)^T)` is on (§38.5) and is no longer zero. The material's
+`mu` is the curve at the initial temperature: what the first iteration uses
+and what the banner prints. A fluid that leaves the curve is refused, naming
+the temperature and the range (§100.1). Gate 100-D measures what it moves.
+`rho` stays the constant it was: `rho(T)` is §79.6's buoyancy on a closed
+cavity, and `cp` is still refused (§100.2).
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | a fluid `mu` curve whose range does not contain the initial temperature, or that is not positive at one of its samples | the JSON path and the temperature |
+| 2 | during a run: a fluid temperature outside the `mu` curve's range | the JSON path, the temperature and the range |
+| 3 | a `mu` curve under a non-Newtonian viscosity model | the model - not reachable from a `*.cht.jsonc` case, whose fluid is Newtonian; `Momentum::set_laminar_viscosity` refuses it |
+
+| Check | Expected |
+|---|---|
+| Phi of a simple shear `du/dy = gamma` | `mu gamma^2`, to the bit |
+| Phi of a pure dilatation, and of a pure rotation | zero, to the bit |
+| Phi of random gradients | non-negative in every cell |
+| `Momentum::set_laminar_viscosity` | reaches `nu_eff` to the bit; a wrong length and a rheology model refused |
+| a flat `mu` curve on the duct | the number's field to `1e-9` K |
+| a sloped `mu` curve; Phi on | each field moved (§13.4.1) |
+| Phi on the duct, its heater off, whose flow does not depend on `T` | `U` unchanged to `1e-6` of its largest component; every watt of Phi leaves through the openings, by the outlet's enthalpy and by conduction, to `1e-4` |
+| Phi beside a radiating interface, two iterations | `interface_source` the radiated power to `1e-12` |
+| rows 1 of §100.14 | refused, the message naming the JSON path |
+
+Three of the new library tests carry §112.3's f32 attribute: the three that
+run a case.
 
 ---
 
@@ -32301,7 +32391,7 @@ same way in f64 and passes when re-run; re-run under the feature it passes, and 
 schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **482** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
 tests and **13** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -32312,7 +32402,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three.
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

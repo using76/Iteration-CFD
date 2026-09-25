@@ -276,6 +276,10 @@ pub struct ChtMaterial {
     pub kappa: ChtKappa,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// A fluid region's constant properties - SPEC-LIT §60.2.
 ///
 /// Four numbers, and `Pr = mu cp/kappa` is DERIVED from them and printed
@@ -294,6 +298,10 @@ pub struct ChtFluid {
     pub kappa: ChtScalarOrCurve,
     /// Dynamic viscosity, Pa s. A number or a curve in T (SPEC-LIT §100.2).
     pub mu: ChtScalarOrCurve,
+    /// SPEC-LIT §100.13: register viscous dissipation as a heat source of
+    /// the fluid. Absent or `false`: no term, the bits as before.
+    #[serde(default, rename = "viscousDissipation", skip_serializing_if = "is_false")]
+    pub viscous_dissipation: bool,
 }
 
 /// `kappa` written either way. A user with an isotropic material should not
@@ -1171,6 +1179,11 @@ pub struct LoweredChtCase {
     /// curve in `T`, a table in `t`, a box - in case order. Empty on every
     /// case written before §100.11.
     pub volumetric: Vec<LoweredSource>,
+    /// SPEC-LIT §100.14: the fluid's `mu` curve and its JSON path; `None` is
+    /// the number `FluidMaterial::mu` carries.
+    pub viscosity: Option<(Property, String)>,
+    /// SPEC-LIT §100.13: register viscous dissipation on the fluid.
+    pub viscous_dissipation: bool,
     /// R8's notes, one per region the manifest ALSO lists but the case gives
     /// its own `mesh` to: the explicit form wins and the conflict is printed
     /// by `ofgpu-cht` (`  note: ...`), never silently swallowed (SPEC-LIT
@@ -1239,6 +1252,8 @@ impl LoweredChtCase {
             tolerances: self.tolerances,
             conduction_curves: self.conduction_curves.clone(),
             volumetric: self.volumetric.clone(),
+            viscosity: self.viscosity.clone(),
+            viscous_dissipation: self.viscous_dissipation,
             radiation: self.radiation.as_ref().map(|r| FlowRadiation {
                 config: r.config,
                 interfaces: r.interfaces.clone(),
@@ -1300,6 +1315,8 @@ impl ChtCase {
         let mut fluids: Vec<Option<FluidMaterial>> = Vec::new();
         let mut sources = Vec::new();
         let mut volumetric: Vec<LoweredSource> = Vec::new();
+        let mut viscosity: Option<(Property, String)> = None;
+        let mut viscous_dissipation = false;
         // Which patches of which region have been spoken for, and by what.
         let mut claimed: Vec<BTreeMap<String, &'static str>> = Vec::new();
         // §97.2: each region's own patch names, as the BUILT mesh spells
@@ -1572,6 +1589,24 @@ impl ChtCase {
                         c: None,
                         path: base.clone(),
                     });
+                    // SPEC-LIT §100.14: the fluid's mu may be a curve; the
+                    // material then holds its value at the initial T.
+                    let mu_path = format!("{base}/mu");
+                    let mu_prop = f.mu.lower(&mu_path)?;
+                    let mu = mu_prop.value(&mu_path, t0)?;
+                    for t in mu_prop.samples() {
+                        let v = mu_prop.value(&mu_path, t)?;
+                        if !(v > 0.0) || !v.is_finite() {
+                            return Err(Error::Config(format!(
+                                "{mu_path}: at T = {t} K the curve gives mu = {v:e}, which is \
+                                 not positive (SPEC-LIT 100.14)"
+                            )));
+                        }
+                    }
+                    if !mu_prop.is_constant() {
+                        viscosity = Some((mu_prop.clone(), mu_path.clone()));
+                    }
+                    viscous_dissipation = f.viscous_dissipation;
                     let fl = FluidMaterial {
                         name: r.name.clone(),
                         rho: f.rho as Scalar,
@@ -1581,11 +1616,7 @@ impl ChtCase {
                             "the energy equation's rho cp is built from a constant",
                         )?,
                         kappa,
-                        mu: number_only(
-                            &f.mu,
-                            &format!("{base}/mu"),
-                            "the momentum equation's laminar viscosity is built from a constant",
-                        )?,
+                        mu,
                     };
                     fl.validate()?;
                     // The conduction entry a fluid region still needs; every
@@ -2429,6 +2460,8 @@ impl ChtCase {
             openings,
             sources,
             volumetric,
+            viscosity,
+            viscous_dissipation,
             notes,
             interfaces,
             patch_bcs,

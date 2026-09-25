@@ -148,6 +148,25 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
                     p.describe()
                 );
             }
+            // SPEC-LIT §100.14 and §100.13.
+            if let Some((p, _)) = &low.viscosity {
+                println!(
+                    "    mu: {} - nu_lam = mu(T)/rho rewritten from the current T every SIMPLE \
+                     iteration (SPEC-LIT 100.14); the mu above is the curve at the initial T",
+                    p.describe()
+                );
+            }
+            if low.viscous_dissipation {
+                println!("    viscous dissipation: a heat source every SIMPLE iteration (SPEC-LIT 100.13)");
+            }
+            // SPEC-LIT §100.11: a fluid region's sources, which this branch skipped.
+            if low.sources[i] != 0.0 {
+                println!("    source {:.4e} W/m^3", f64::from(low.sources[i]));
+            }
+            for s in low.volumetric.iter().filter(|s| s.region == i) {
+                let cells = s.cells.as_ref().map_or(String::new(), |c| format!(", {} cells", c.len()));
+                println!("    source {} ({}{cells})", s.law.describe(), s.path);
+            }
             continue;
         }
         let m = &low.materials[i];
@@ -377,6 +396,15 @@ fn report_flow(low: &LoweredChtCase, sol: &ChtFlowSolution) {
             worst_jump = worst_jump.max((sol.bt[p.bf_a as usize] - sol.bt[p.bf_b as usize]).abs());
         }
         println!("  largest interface temperature JUMP: {:.6e} K", f64::from(worst_jump));
+    }
+
+    // SPEC-LIT §100.12-§100.13: what the sources and the dissipation delivered.
+    if sol.source_power != 0.0 || low.viscous_dissipation {
+        println!(
+            "\n  volumetric sources {:+.6e} W; viscous dissipation {:+.6e} W (SPEC-LIT 100.13)",
+            f64::from(sol.source_power),
+            f64::from(sol.dissipation_power)
+        );
     }
 
     // SPEC-LIT §98.8: the enclosure, and the split it makes checkable.

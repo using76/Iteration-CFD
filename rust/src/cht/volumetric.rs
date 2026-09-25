@@ -18,14 +18,15 @@
 //!   S. V. Patankar, *Numerical Heat Transfer and Fluid Flow*, Hemisphere
 //!     (1980), §4.2 - the linearisation `S = S_C + S_P T_P` and the rule
 //!     `S_P <= 0`
-//!   ofgpu `SPEC-LIT.md` §3.4, §18, §100.11, §100.12
+//!   ofgpu `SPEC-LIT.md` §3.4, §18, §100.11, §100.12, §100.13 - the last
+//!     the viscous dissipation function a Newtonian fluid's strain gives
 //!
 //! No GPL-licensed source was consulted.
 
 use super::ThermalMesh;
 use crate::error::{Error, Result};
 use crate::properties::Property;
-use crate::Scalar;
+use crate::{Scalar, Tensor};
 
 /// (S100.11): `q'''(t)`, W/m^3, piecewise linear in time on knots
 /// `t_0 < t_1 < ... < t_n`, `t_0 >= 0`, with (S100.2)'s segment rule. A
@@ -272,6 +273,22 @@ pub fn delivered_power(su: &[Scalar], sp: &[Scalar], t: &[Scalar], v: &[Scalar])
     su.iter().zip(sp).zip(t).zip(v).map(|(((a, b), t), v)| (a + b * t) * v).sum()
 }
 
+/// (S100.13): `Phi = 2 mu |S - (1/3)(div u) I|^2` per cell, W/m^3, from the
+/// velocity gradient and `mu` of each cell. `2 mu S:S - (2/3) mu (div u)^2`
+/// written as a sum of squares, so it is non-negative by construction.
+pub fn viscous_dissipation(grad: &[Tensor], mu: &[Scalar]) -> Vec<Scalar> {
+    grad.iter()
+        .zip(mu)
+        .map(|(g, m)| {
+            let (sxy, sxz, syz) = (0.5 * (g.xy + g.yx), 0.5 * (g.xz + g.zx), 0.5 * (g.yz + g.zy));
+            let third = (g.xx + g.yy + g.zz) / 3.0;
+            let (dx, dy, dz) = (g.xx - third, g.yy - third, g.zz - third);
+            let s = dx * dx + dy * dy + dz * dz + 2.0 * (sxy * sxy + sxz * sxz + syz * syz);
+            2.0 * *m * s
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +323,37 @@ mod tests {
             let e = TimeTable::new("x", &knots).unwrap_err().to_string();
             assert!(e.contains(w), "{w:?} not in: {e}");
         }
+    }
+
+    fn tensor(v: [Scalar; 9]) -> Tensor {
+        Tensor { xx: v[0], xy: v[1], xz: v[2], yx: v[3], yy: v[4], yz: v[5], zx: v[6], zy: v[7], zz: v[8] }
+    }
+
+    /// SPEC-LIT §100.13: a simple shear dissipates `mu gamma^2`; a pure
+    /// dilatation and a pure rotation dissipate nothing, to the bit.
+    #[test]
+    fn dissipation_is_mu_gamma_squared_in_shear_and_zero_in_dilatation_and_rotation() {
+        let shear = tensor([0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let dilate = tensor([2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0]);
+        let rotate = tensor([0.0, 5.0, 0.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let phi = viscous_dissipation(&[shear, dilate, rotate], &[2.0, 2.0, 2.0]);
+        assert_eq!(phi, vec![18.0, 0.0, 0.0], "mu gamma^2 = 2 * 3^2, then zero twice");
+    }
+
+    /// SPEC-LIT §100.13: non-negative on any gradient.
+    #[test]
+    fn dissipation_is_non_negative_on_random_gradients() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as Scalar / (1u64 << 53) as Scalar * 2.0 - 1.0
+        };
+        let grads: Vec<Tensor> = (0..4096)
+            .map(|_| tensor([next(), next(), next(), next(), next(), next(), next(), next(), next()]))
+            .collect();
+        let phi = viscous_dissipation(&grads, &vec![1.0e-3; 4096]);
+        assert!(phi.iter().all(|p| *p >= 0.0), "a negative Phi: {:?}", phi.iter().find(|p| **p < 0.0));
     }
 }

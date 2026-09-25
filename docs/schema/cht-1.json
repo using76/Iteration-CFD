@@ -446,6 +446,10 @@
           "description": "`rho_f` at `buoyancy.TRef`, kg/m^3.",
           "type": "number",
           "format": "double"
+        },
+        "viscousDissipation": {
+          "description": "SPEC-LIT §100.13: register viscous dissipation as a heat source of\nthe fluid. Absent or `false`: no term, the bits as before.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,

@@ -187,6 +187,8 @@ pub(crate) fn de_vahl_davis(
         tolerances: PairingTolerances::default(),
         conduction_curves: Vec::new(),
         volumetric: Vec::new(),
+        viscosity: None,
+        viscous_dissipation: false,
         radiation: None,
         p0: 101_325.0,
     };
@@ -328,6 +330,8 @@ pub(crate) fn kaminski_prakash(
         tolerances: PairingTolerances::default(),
         conduction_curves: Vec::new(),
         volumetric: Vec::new(),
+        viscosity: None,
+        viscous_dissipation: false,
         radiation: None,
         p0: 101_325.0,
     };
@@ -1140,6 +1144,8 @@ fn open_cavity_case<'a>(
         tolerances: PairingTolerances::default(),
         conduction_curves: Vec::new(),
         volumetric: Vec::new(),
+        viscosity: None,
+        viscous_dissipation: false,
         radiation: None,
         p0: 101_325.0,
     }

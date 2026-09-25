@@ -3932,7 +3932,10 @@ mod curves {
             pat_e,
             r#""mu": { "sutherland": { "value": 0.71, "TRef": 300.0, "S": 110.0, "range": [200.0, 400.0] } }"#,
         );
-        bad(&t_e, &kp, "fluid/mu", "laminar viscosity", "");
+        // SPEC-LIT §100.14: a fluid's mu curve is consumed now, so it lowers.
+        let low = read(&t_e).expect("parse").lower().expect("a mu curve lowers since SPEC-LIT 100.14");
+        let (_, path) = low.viscosity.as_ref().expect("the curve must reach the lowered case");
+        assert_eq!(path, "regions/air/fluid/mu");
     }
 
     #[test]
@@ -5279,6 +5282,36 @@ mod enclosure {
         );
         assert!(sol.source_power > 0.0, "the wall's source delivered {} W", sol.source_power);
     }
+
+    /// SPEC-LIT §100.13: viscous dissipation beside a radiating interface -
+    /// step 4d registers both, and `interface_source` stays (S98.9)'s.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn viscous_dissipation_beside_a_radiating_interface_leaves_its_cell_source_the_radiated_power() {
+        let Some(gpu) = gpu() else { return };
+        const MU: &str = r#""mu": 0.71 }"#;
+        let base = box_case(5, S2S, S2S, IFACE, RAD, 2);
+        assert_eq!(base.matches(MU).count(), 1, "the fluid's mu must match once");
+        let text = base.replace(MU, r#""mu": 0.71, "viscousDissipation": true }"#);
+        let dir = enclosure_dir("dissipation", &box_dict(0.8, 1.0));
+        let low = lower_box(&text, &dir).unwrap_or_else(|e| panic!("lower: {e}"));
+        let case = low.flow_case().expect("a conjugate case");
+        let sol = crate::cht::flow::run_flow_case(&gpu, &case).unwrap_or_else(|e| panic!("run: {e}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let e = sol.enclosure.as_ref().expect("an enclosure report");
+        let rad = sol.interface_radiated();
+        println!(
+            "radiated {rad:+.6e} W, cell source {:+.6e} W, Phi {:+.6e} W",
+            e.interface_source,
+            sol.dissipation_power
+        );
+        assert!(
+            (e.interface_source + rad).abs() <= 1e-12 * rad.abs(),
+            "cell source {} against {rad}",
+            e.interface_source
+        );
+        assert!(sol.dissipation_power > 0.0, "Phi delivered {} W", sol.dissipation_power);
+    }
 }
 
 // ==========================================================================
@@ -5514,5 +5547,115 @@ mod sources {
         let g = gap(&a.t, &c.t);
         println!("sloped curve against 1 W/m^3: {g:.3e} K");
         assert!(g > 1e-12, "a sloped curve moved the field by only {g} K (SPEC-LIT 13.4.1)");
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT §100.13-§100.14: viscous dissipation, and mu(T)
+// ==========================================================================
+
+mod dissipation {
+    use super::*;
+
+    const MU: &str = r#""mu": 1.0e-3"#;
+
+    /// `duct_base()` with the fluid's `mu` entry replaced by `mu`.
+    fn duct_with(mu: &str) -> String {
+        let base = duct_base();
+        assert_eq!(base.matches(MU).count(), 1, "the duct's mu must match once");
+        base.replace(MU, mu)
+    }
+
+    fn gap(a: &[Scalar], b: &[Scalar]) -> Scalar {
+        a.iter().zip(b).fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// SPEC-LIT §100.14 and §100.13: a mu curve and the flag lower, and a
+    /// curve that misses the initial T or goes non-positive is refused.
+    #[test]
+    fn a_mu_curve_and_viscous_dissipation_lower_and_a_bad_curve_is_refused() {
+        let text = duct_with(
+            r#""mu": { "table": [[280.0, 1.4e-3], [340.0, 0.6e-3]] }, "viscousDissipation": true"#,
+        );
+        let low = read(&text).expect("parse").lower().expect("lower");
+        let (p, path) = low.viscosity.as_ref().expect("the curve must reach the lowered case");
+        assert_eq!(path, "regions/water/fluid/mu");
+        let mu0 = low.fluids[0].as_ref().unwrap().mu;
+        assert_eq!(mu0, p.value(path, 300.0).unwrap(), "the material holds the curve at the initial T");
+        assert!(low.viscous_dissipation);
+        let case = low.flow_case().expect("a conjugate case");
+        assert!(case.viscosity.is_some() && case.viscous_dissipation);
+        let low = read(&duct_base()).expect("parse").lower().expect("lower");
+        assert!(low.viscosity.is_none() && !low.viscous_dissipation, "a number and no flag lower as before");
+        for (mu, words) in [
+            (r#""mu": { "table": [[310.0, 1.0e-3], [340.0, 0.6e-3]] }"#, ["regions/water/fluid/mu", "300"]),
+            (r#""mu": { "table": [[280.0, 1.0e-3], [340.0, -1.0e-3]] }"#, ["regions/water/fluid/mu", "not positive"]),
+        ] {
+            let Err(e) = read(&duct_with(mu)).expect("parse").lower() else {
+                panic!("{mu} must be refused")
+            };
+            let e = e.to_string();
+            println!("refusal: {e}");
+            for w in words {
+                assert!(e.contains(w), "{w:?} not in: {e}");
+            }
+        }
+    }
+
+    /// SPEC-LIT §100.14: a flat mu curve is its number; a sloped one moves
+    /// the answer (SPEC-LIT 13.4.1).
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_flat_mu_curve_gives_the_number_s_field_and_a_sloped_one_moves_it() {
+        let Some(gpu) = gpu() else { return };
+        let a = run_flow(&gpu, &duct_base());
+        let b = run_flow(&gpu, &duct_with(r#""mu": { "table": [[280.0, 1.0e-3], [340.0, 1.0e-3]] }"#));
+        let g = gap(&a.t, &b.t);
+        println!("flat mu curve against the number: {g:.3e} K");
+        assert!(g <= 1e-9, "a flat mu curve moved the field by {g} K");
+        let c = run_flow(&gpu, &duct_with(r#""mu": { "table": [[280.0, 1.4e-3], [340.0, 0.6e-3]] }"#));
+        let g = gap(&a.t, &c.t);
+        println!("sloped mu curve against the number: {g:.3e} K");
+        assert!(g > 1e-12, "a sloped mu curve moved the field by only {g} K (SPEC-LIT 13.4.1)");
+    }
+
+    /// The duct with its heater off and a viscous fluid (`mu = 1` Pa s), so
+    /// the only heat anywhere is Phi; `extra` follows the `mu` entry.
+    fn viscous_duct(extra: &str) -> String {
+        let t = duct_with(&format!(r#""mu": 1.0{extra}"#));
+        let q = r#""q": 1.0e4"#;
+        assert_eq!(t.matches(q).count(), 1, "the heater must match once");
+        t.replace(q, r#""q": 0.0"#)
+    }
+
+    /// SPEC-LIT §100.13: on the duct, whose flow does not depend on T, Phi
+    /// leaves U where it was, is positive, and every watt of it leaves through
+    /// the openings - by the outlet's enthalpy and by conduction.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn viscous_dissipation_is_metered_and_leaves_through_the_openings() {
+        let Some(gpu) = gpu() else { return };
+        let a = run_flow(&gpu, &viscous_duct(""));
+        let b = run_flow(&gpu, &viscous_duct(r#", "viscousDissipation": true"#));
+        let umax = a.u.iter().fold(0.0 as Scalar, |m, v| {
+            m.max(v.x.abs()).max(v.y.abs()).max(v.z.abs())
+        });
+        let du = a.u.iter().zip(&b.u).fold(0.0 as Scalar, |m, (p, q)| {
+            m.max((p.x - q.x).abs()).max((p.y - q.y).abs()).max((p.z - q.z).abs())
+        });
+        assert!(du <= 1e-6 * umax, "Phi is a heat source only, yet U moved by {du} of {umax}");
+        assert_eq!(a.dissipation_power, 0.0);
+        assert!(b.dissipation_power > 0.0, "Phi delivered {} W", b.dissipation_power);
+        let g = gap(&a.t, &b.t);
+        let o = b.openings.as_ref().expect("openings");
+        let cond = b.patch_heat_flow(0, "west").unwrap() + b.patch_heat_flow(0, "east").unwrap();
+        let out = o.enthalpy_rise - cond;
+        let rel = (out / b.dissipation_power - 1.0).abs();
+        println!(
+            "Phi {:.10e} W; the openings carry out {out:.10e} W (rel {rel:.3e}); T moved {g:.3e} K; U moved {du:.3e}",
+            b.dissipation_power
+        );
+        assert!(g > 1e-12, "Phi moved the field by only {g} K (SPEC-LIT 13.4.1)");
+        assert!(rel <= 1e-4, "the openings carry out {out} W of the {} W Phi delivered", b.dissipation_power);
     }
 }

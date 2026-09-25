@@ -64,7 +64,7 @@ use crate::energy::{DomainKind, Energy, EnergyControls, GasProperties, GasState}
 use crate::error::{Error, Result};
 use crate::field::{BcKind, GpuScalarField, GpuSurfaceScalarField};
 use crate::field_ops::{self, FieldKernels};
-use crate::fv::{DivScheme, GradScheme, SnGradScheme};
+use crate::fv::{DivScheme, FvKernels, GradScheme, SnGradScheme};
 use crate::io::case::SolverControls;
 use crate::io::schemes::DivEntry;
 use crate::mesh::{GpuMesh, HostMesh};
@@ -74,7 +74,7 @@ use crate::radiation::SIGMA_SB;
 use crate::s2s::{RadiantFaces, S2s};
 use crate::simple::{Simple, SimpleControls};
 use crate::timescheme::DdtScheme;
-use crate::{Label, Scalar, Vec3};
+use crate::{Label, Scalar, Tensor, Vec3};
 
 // ==========================================================================
 //  §60.2  What a fluid region is made of
@@ -438,6 +438,9 @@ pub struct ChtFlowSolution {
     /// delivered, W - the fixed array's total plus `SUM_c (S_C + S_P T_c) V_c`
     /// of a curve in `T` at the returned `T`; zero when the case has none.
     pub source_power: Scalar,
+    /// SPEC-LIT §100.13: `SUM_c Phi_c V_c` of the last registration, W; zero
+    /// when the case does not ask for viscous dissipation.
+    pub dissipation_power: Scalar,
 }
 
 impl ChtFlowSolution {
@@ -635,6 +638,11 @@ pub struct FlowCase<'a> {
     /// SPEC-LIT §100.11: `LoweredChtCase::volumetric`. Empty is every region's
     /// number alone.
     pub volumetric: Vec<crate::cht::volumetric::LoweredSource>,
+    /// SPEC-LIT §100.14: the fluid's `mu` curve and its JSON path; `None` is
+    /// `FluidMaterial::mu`, a number.
+    pub viscosity: Option<(crate::properties::Property, String)>,
+    /// SPEC-LIT §100.13: register viscous dissipation on the fluid.
+    pub viscous_dissipation: bool,
     /// SPEC-LIT §98.7: the enclosure. `None` is every case that names none.
     pub radiation: Option<FlowRadiation<'a>>,
     /// Ambient pressure the gas state is pinned at, Pa.
@@ -1115,6 +1123,14 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     let mut curve_su: Vec<Scalar> = vec![0.0 as Scalar; n_cells];
     let mut curve_sp: Vec<Scalar> = vec![0.0 as Scalar; n_cells];
     let mut curve_total: Scalar = 0.0;
+    // SPEC-LIT §100.13: viscous dissipation's gradient kernels and scratch,
+    // its device array on the thermal mesh, and the last registration's total.
+    let mut phi_dev: Option<(FvKernels, DevBuf<Tensor>, DevBuf<Scalar>)> = if case.viscous_dissipation {
+        Some((FvKernels::new(gpu)?, gpu.zeros(n_fluid)?, gpu.zeros(n_cells.max(1))?))
+    } else {
+        None
+    };
+    let mut phi_total: Scalar = 0.0;
 
     // ---- SPEC-LIT §98.8: the enclosure -----------------------------------
     let mut enclosure: Option<Enclosure<'_>> = match &case.radiation {
@@ -1343,6 +1359,18 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         field_ops::copy_field(gpu, &fldk, &mut t_fluid.f, &energy.field().f, n_fluid)?;
         field_ops::copy_field(gpu, &fldk, &mut t_fluid.bf, &energy.field().bf, n_fluid_bf)?;
 
+        // 1b. SPEC-LIT §100.14: nu_lam = mu(T)/rho_f on the fluid's cells and
+        // boundary faces, from the T the previous iteration left - one host
+        // round trip per iteration, and only on a case with a mu curve.
+        if let Some((p, path)) = &case.viscosity {
+            let t = gpu.download(&energy.field().f)?;
+            let bt = gpu.download(&energy.field().bf)?;
+            let at = |x: &Scalar| -> Result<Scalar> { Ok(p.value(path, *x)? / fluid.rho) };
+            let nu = t[..n_fluid].iter().map(at).collect::<Result<Vec<Scalar>>>()?;
+            let b_nu = bt[..n_fluid_bf].iter().map(at).collect::<Result<Vec<Scalar>>>()?;
+            simple.momentum_mut().set_laminar_viscosity(gpu, &nu, &b_nu)?;
+        }
+
         // 2. momentum + pressure, on the FLUID mesh
         let sperf = simple.correct_outer(gpu, &mut backend, &nut_fluid, &t_fluid, false)?;
 
@@ -1466,7 +1494,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         // split about the previous iteration's T, then (S98.9)'s sink (§98.8).
         // A case with neither keeps the one registration before the loop.
         let sink = enclosure.as_ref().and_then(|e| e.sink());
-        if src_t || sink.is_some() {
+        if src_t || sink.is_some() || phi_dev.is_some() {
             if let Some((su_dev, sp_dev)) = curve_dev.as_mut() {
                 let t = gpu.download(&energy.field().f)?;
                 let (su, sp) = sources.varying(Some(&t), None)?;
@@ -1476,6 +1504,24 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
                 curve_su = su;
                 curve_sp = sp;
             }
+            // SPEC-LIT §100.13: Phi from this iteration's U, per fluid cell,
+            // with mu at the T the previous iteration left.
+            if let Some((fvk_phi, grad_u, phi_buf)) = phi_dev.as_mut() {
+                crate::fv::fvc_grad_vector(gpu, fvk_phi, grad_u, simple.u(), &fluid_mesh)?;
+                let g = gpu.download(grad_u)?;
+                let mu: Vec<Scalar> = match &case.viscosity {
+                    None => vec![fluid.mu; n_fluid],
+                    Some((p, path)) => {
+                        let t = gpu.download(&energy.field().f)?;
+                        t[..n_fluid].iter().map(|x| p.value(path, *x)).collect::<Result<Vec<Scalar>>>()?
+                    }
+                };
+                let phi_f = crate::cht::volumetric::viscous_dissipation(&g, &mu);
+                let mut phi = vec![0.0 as Scalar; n_cells];
+                phi[..n_fluid].copy_from_slice(&phi_f);
+                phi_total = phi.iter().zip(&tm.host.v).map(|(a, v)| a * v).sum();
+                gpu.write(phi_buf, &phi)?;
+            }
             let src = energy.sources_mut();
             src.clear(gpu)?;
             if let Some(q) = uniform_q.as_ref() {
@@ -1484,6 +1530,9 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             if let Some((su_dev, sp_dev)) = curve_dev.as_ref() {
                 src.register_explicit(gpu, su_dev)?;
                 src.register_implicit_sink(gpu, sp_dev)?;
+            }
+            if let Some((_, _, phi_buf)) = phi_dev.as_ref() {
+                src.register_explicit(gpu, phi_buf)?;
             }
             if let Some(s) = sink {
                 src.register_explicit(gpu, s)?;
@@ -1536,6 +1585,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
                 0.0
             } else {
                 energy.sources_mut().total_q(gpu, &thermal_mesh)? - uniform_total - curve_total
+                    - phi_total
             };
             Some(e.report(interface_source))
         }
@@ -1604,6 +1654,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         external_residual,
         enclosure: enclosure_report,
         source_power,
+        dissipation_power: phi_total,
         mesh: tm,
     })
 }
