@@ -1,0 +1,257 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "schema": "cad-probe-cases/1",
+  "cases": [
+    {
+      "name": "valid_minimal",
+      "valid": true,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ]
+      },
+      "errors": []
+    },
+    {
+      "name": "valid_bounds_null_note",
+      "valid": true,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": 10,
+        "ratio": 1,
+        "tags": [
+          "a",
+          "b"
+        ],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ],
+        "note": null
+      },
+      "errors": []
+    },
+    {
+      "name": "valid_integral_float_count",
+      "valid": true,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "pipe",
+        "count": 3.0,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ],
+        "note": "a short note"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid_two_rows_max_name",
+      "valid": true,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "dxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "kind": "diffuser",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 2
+          },
+          {
+            "id": "r2",
+            "value": -0.25
+          }
+        ]
+      },
+      "errors": []
+    },
+    {
+      "name": "invalid_type",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": "3",
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ]
+      },
+      "errors": [
+        "cad-probe/1: count: expected integer, got string"
+      ]
+    },
+    {
+      "name": "invalid_enum",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "venturi",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ]
+      },
+      "errors": [
+        "cad-probe/1: kind: not one of [\"nozzle\", \"pipe\", \"diffuser\"]"
+      ]
+    },
+    {
+      "name": "invalid_required",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": []
+      },
+      "errors": [
+        "cad-probe/1: items: required field missing"
+      ]
+    },
+    {
+      "name": "invalid_additional",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ],
+        "colour": "red"
+      },
+      "errors": [
+        "cad-probe/1: colour: unknown field"
+      ]
+    },
+    {
+      "name": "invalid_maximum",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": 11,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ]
+      },
+      "errors": [
+        "cad-probe/1: count: above maximum 10"
+      ]
+    },
+    {
+      "name": "invalid_pattern",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "Nozzle",
+        "kind": "nozzle",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ]
+      },
+      "errors": [
+        "cad-probe/1: name: does not match ^[a-z][a-z0-9_]{0,31}$"
+      ]
+    },
+    {
+      "name": "invalid_items",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/1",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": [
+          "a",
+          5
+        ],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ]
+      },
+      "errors": [
+        "cad-probe/1: tags[1]: expected string, got integer"
+      ]
+    },
+    {
+      "name": "invalid_const",
+      "valid": false,
+      "instance": {
+        "schema": "cad-probe/2",
+        "name": "nozzle_a",
+        "kind": "nozzle",
+        "count": 1,
+        "ratio": 0.5,
+        "tags": [],
+        "items": [
+          {
+            "id": "r1",
+            "value": 1.0
+          }
+        ]
+      },
+      "errors": [
+        "cad-probe/1: schema: must equal \"cad-probe/1\""
+      ]
+    }
+  ]
+}
