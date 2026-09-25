@@ -249,6 +249,22 @@ TEMPLATES = {
                     "title": "abstain: the prior ships disabled",
                     "because": "the prior did not earn its place on the tuning split, so the setup "
                                "rules decide attempt one"},
+    "OPT-PICK": {"layer": "optimiser",
+                 "title": "propose the surrogate's pick from the Sobol pool",
+                 "because": "the remedies are spent, and the surrogate predicts this config passes "
+                            "with the most boundary-layer capture for its cells"},
+    "OPT-NOFEAS": {"layer": "optimiser",
+                   "title": "abstain: no pool config is predicted to pass within the budget",
+                   "because": "a proposal the surrogate expects to fail would spend an attempt "
+                              "for nothing"},
+    "OPT-PLANE": {"layer": "optimiser",
+                  "title": "abstain: the body is on the plane path",
+                  "because": "the plane rule owns the refinement and snap knobs of a commensurate "
+                             "body"},
+    "OPT-DISABLED": {"layer": "optimiser",
+                     "title": "abstain: the optimiser ships disabled",
+                     "because": "the optimiser did not earn its place on the tuning split, so the "
+                                "remedies' terminal stands"},
 }
 
 
@@ -865,7 +881,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 46, len(TEMPLATES)
+    assert len(TEMPLATES) == 50, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -874,9 +890,10 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 6, "R": 8, "RM": 16, "PR": 5}, counts
-    print("[ok] templates: 46 rule ids (PF 11, WL 6, R 8, RM 16, PR 5), each "
-          "with its "
+    assert counts == {"PF": 11, "WL": 6, "R": 8, "RM": 16, "PR": 5,
+                      "OPT": 4}, counts
+    print("[ok] templates: 50 rule ids (PF 11, WL 6, R 8, RM 16, PR 5, OPT 4), "
+          "each with its "
           "prefix's layer, no digit in any template")
 
 
@@ -896,7 +913,7 @@ def _g2_static_scan():
     finally:
         os.remove(planted)
         os.rmdir(tmp)
-    print("[ok] static scan: 46 ids in %d source files, all templated, none dead, "
+    print("[ok] static scan: 50 ids in %d source files, all templated, none dead, "
           "PF-TEST only in remedies.py; module tables templated; a planted "
           "RM-NEW-THING is reported missing" % sc["files"])
 
@@ -911,7 +928,7 @@ def _g3_records():
         assert c["line"].startswith(rec["rule_id"] + " "), rec["rule_id"]
         ids.add(rec["rule_id"])
         assert ungrounded(c["line"], [rec]) == [], rec["rule_id"]
-    fx_ids = {r for r in TEMPLATES if not r.startswith("PR-")}
+    fx_ids = {r for r in TEMPLATES if not r.startswith(("PR-", "OPT-"))}
     assert ids == fx_ids, ids ^ fx_ids
     for v in [0.0, 1.0, 0.1334231805929919, 3, True, None, "a", [1.5, None], {"k": 1}]:
         assert fmt(v) == remedies._fmt(v), (v, fmt(v), remedies._fmt(v))

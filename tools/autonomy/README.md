@@ -752,6 +752,49 @@ AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
 `prior/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
 (the ablation "-prior" is then equal to it by construction).
 
+## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
+
+In modes `rules+opt` and `full`, campaign.py calls `optimise.propose` only where the remedies end
+EXHAUSTED with attempts left under the locked K = 4 — its deployed place. The training rows are
+every tuning attempt of the five committed bundles (`prior/tuning_rules.json.gz`,
+`prior/eval_r1.json.gz`, `prior/eval_r2.json.gz`, `baseline/tuning_b0-template.json.gz`,
+`baseline/tuning_b0-lhs.json.gz`) plus each round's new rows: every attempt's config is rebuilt
+from its row's `config_delta`, checked against the row's config sha256, and deduplicated by
+(geometry, config sha). The 31 features are prior.py's 17 fingerprint features, then 14 knob
+features: `wall_level`, `log10_base_over_lmax`, `log10_hwall_over_lmax`, `log10_wallband_over_lmax`,
+`log10_band_over_lmax`, `feature_offset`, `feature_tolerance`, `smoothing_passes`, `growth`,
+`log10_hwall_over_t1`, `layers_n`, `log10_predicted_cells`, `on_plane`, `max_level`.
+
+The ensemble is five bootstrap members (max_iter 200, learning_rate 0.05, 15 leaves, min 20
+samples, l2 1.0, no early stopping); the bootstrap draws GEOMETRIES, not rows, and a member whose
+training rows hold one fail class is a constant. Five folds by crc32(geometry_id) give the
+out-of-geometry CV. The box is relative to the L1 config the hook rebuilds with rules.setup: wall
+level offset {-1, 0, +1} shifts every band level (clipped [0, 6]); band distances scale by
+0.5 * 4 ** u in [0.5, 2] (rounded to 6 decimals); feature offset {0, 1, 2} sets
+`feature_level = min(6, wall + f)` (f = 0 zeroes an existing one); `snap.feature_tolerance`
+{0, 0.25, 0.5}; `snap.smoothing_passes` {0..3}; `layers.growth` in [1.1, the L1 growth]. 256
+scrambled Sobol points (seeded by the geometry id) fill the box; L0 is the config-level preflight
+without the octree probe (a PF-THIN refusal drops the point) and the campaign's own veto re-checks
+the pick with the probe. The pick is lexicographic: p_fail <= 0.2 within the cell budget, then max
+BLC_8, then min cells, ties to the lower Sobol index. Rule ids: OPT-PICK, OPT-NOFEAS, OPT-PLANE
+(the R-PLANE path owns the knobs), OPT-DISABLED.
+
+A refinement round is ONE `rules+opt` campaign over the geometries where the hook can act,
+cross-fitted so every proposal comes from a fold ensemble that never saw the geometry, replaying
+what the rules campaign (and earlier rounds) already meshed by (geometry, config sha) and probe
+values from the recorded vetoes; verify_round checks the rows before the first optimiser row
+reproduce the rules campaign exactly and campaign.replay passes. G-OPT (docs/15 §F): the CV half
+needs fail AUC >= 0.75 and BLC_8 RMSE <= 0.15; the tuning ablation bar is the test-split bar at
+home — MFR lower by >= 3 pp or mean BLC_8 higher by >= 0.05 on the last round, with no family
+worse; the optimiser ships disabled unless both hold. Departures: docs/15 §G's "5 rounds x 3
+trials" becomes the deployed one-campaign round; the box, L0, reuse and the training rows are as
+above; the importances are seeded permutation AUC drops. The numbers are in `optimise/G-OPT.json`,
+`optimise/G-OPT.md` and `optimise/opt_model.json`, written by the supervisor's run.
+
+For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
+`optimise/opt_model.json` and `optimise/train.json.gz` and refits in seconds; when it is disabled
+it records OPT-DISABLED at every EXHAUSTED; G-FID binds on any feature_tolerance 0 pick.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -792,6 +835,9 @@ AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
     python tools/autonomy/prior.py --plan --rules DIR                      # G-PRIOR's decisions and rounds, nothing run
     python tools/autonomy/prior.py --gate --rules DIR --work DIR           # prior/G-PRIOR.json, .md and prior_model.json
     python tools/autonomy/prior.py --check                                 # the report, the bundles and the model rebuild
+    python tools/autonomy/optimise.py --plan                               # the training rows, the surrogate CV, the refinement set
+    python tools/autonomy/optimise.py --refine --work DIR                  # optimise/G-OPT.json, .md, opt_model.json, train.json.gz
+    python tools/autonomy/optimise.py --check                              # the report, the bundles, the train rebuild and the refit
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report

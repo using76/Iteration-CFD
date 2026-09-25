@@ -666,3 +666,41 @@ the committed bundle and passes.
   group 9 now replays its fake prior and prior.py's group 9 its own); `prior._finish` raised KeyError on a geometry
   with no rows; `tools/mesh/selftest.py` gave the autonomy gate 300 s, which it now exceeds under load (343 s
   measured), so the child timeout is 900 s.
+
+### G-OPT, the L4 optimiser (AM-14), 2026-09-25: the CV half PASSES and the optimiser ships enabled
+
+Run by `tools/autonomy/optimise.py --refine --streams 6` (five rules+opt rounds over the 101 tuning geometries where
+the hook can act, 3,767 s of round wall time, 64.6 min in all) and `--check` (CHECK PASS) on binary sha256
+`054bba67…a90b` at tree `e63c61f` plus this unit; the report is `tools/autonomy/optimise/G-OPT.json` (and `.md`), the
+shipped model `optimise/opt_model.json` (model sha256 `d16dfc24…323f`), its training rows `optimise/train.json.gz`
+(sha256 `47b15020…5d76`, 2,852 rows, 2,134 failures, 372 geometries) and the rounds `optimise/refine_r1..r5.json.gz`.
+
+- **Surrogate CV (tuning, out-of-geometry, 5 folds by crc32):** fail AUC 0.986475 (>= 0.75), BLC_8 RMSE 0.116997
+  (<= 0.15), log10-cells RMSE 0.053. The RMSE is flattered by zeros: the zero predictor scores 0.224702, and on the
+  144 rows with BLC_8 > 0 the RMSE is 0.406584. Before any round (the 2,805 committed rows): AUC 0.985904, RMSE
+  0.121079.
+- **Tuning, rules -> rules+opt (round 5, cross-fitted):** MFR 0.460 (193/420) -> 0.424 (178/420), -3.57 pp, 15
+  rescued, 0 lost; mean BLC_8 0.140 -> 0.169; strict failure 0.862 -> 0.833. Per round MFR 0.426, 0.429, 0.429, 0.426,
+  0.424. Per family, failures (mean BLC_8): A 78 -> 76 (0 -> 0), B 5 -> 5, D 13 -> 6 (0.405 -> 0.488), E 18 -> 13
+  (0.048 -> 0.143), F 17 -> 16 (0.333 -> 0.357), G 62 -> 62; no family worse, so the G-OPT ablation bar holds on
+  tuning and the optimiser ships enabled. What it moved: the D boxes and E pairs (a finer wall with feature attraction
+  off), one F plate and, by round 5, two A wings (A-1-048, A-1-102); the rest of the A wings, every G defect and the
+  CAPABILITY-LIMITED walls are out of its reach.
+- **Decisions:** 26-30 OPT-PICK and 72-75 OPT-NOFEAS per round (all 60 A wings abstain in round 1). 12-14 picks per
+  round are then refused by the campaign's own PF-BUDGET veto (round 5: octree probes of 2.0-9.2 M leaves): the
+  cells surrogate learns only from meshes that ran, so it cannot see the budget. 47 new meshes in all (20, 7, 8, 5,
+  7); the other 1,241 rows replay the rules campaign exactly (checked per round, and campaign.replay passes).
+- **Caution (G-FID binds at AM-16):** every one of the 143 OPT-PICK records sets `snap.feature_tolerance = 0` and 132
+  refine the wall one level; the top permutation importance is feature_tolerance (fail-AUC drop 0.189), then the
+  sharp-edge length (0.087). Most of the gain is the same global effect the prior found (docs/15 §K G-PRIOR caution 1).
+- **Where the tree departs from the plan** (all in the report's `departures`): a round is one rules+opt campaign in
+  the optimiser's deployed place, so each geometry gets what K = 4 leaves (1-2 proposals), not 3 trials x 420; every
+  round is cross-fitted, the shipped model is fitted on all tuning rows; the box is relative to the L1 config rebuilt
+  by `rules.setup` in the hook (campaign.py passes the campaign directory as `cwd`); L0 on the pool is the config-level
+  preflight without probes; the rounds replay what the rules campaign already meshed; the training rows are the five
+  committed bundles plus each round's new rows, rebuilt by sha; "beats the rules" is G-OPT's ablation bar applied on
+  tuning; the importances are seeded permutation AUC drops.
+- **Fixed in this unit, each proved first:** the knob-feature names at positions 3 and 4 were swapped against their
+  values (labels only; a group-3 check now pins the wall band's value to its name); the replay seam ran a recorded
+  None probe or snap value again instead of returning it (a group-6 check); the report's per-round `reused_dir` was
+  always True and is gone (the console line says ran or reused).

@@ -1092,7 +1092,7 @@ def _run_system(c, gctx, mrow):
                 and len(history) < k:
             c.append_record(gid, a, prop["record"])
             rm_written = True
-            op = c.hooks["optimiser"](ctx, history)
+            op = c.hooks["optimiser"](dict(ctx, cwd=c.dir), history)
             _check_hook(op, "optimiser", cfg, c.knobs)
             if op["verdict"] == "apply" and (veto is None or veto(op["config"]) == []):
                 nxt = ("optimiser", op)
@@ -2369,16 +2369,6 @@ def _hook_record(layer, rid, verdict, edits, message):
 def _g9_hooks(H):
     pid = "-".join(("PR", "FAKE"))
     oid = "-".join(("OPT", "FAKE"))
-    for mode, want in (("rules+opt", "optimise.py"),):
-        out = os.path.join(H["tmp"], "g9-missing-" + mode.replace("+", "-"))
-        try:
-            run_campaign({"manifest": "tuning", "mode": mode, "out": out,
-                          "ids": ["D-1-010"], "streams": 2, "quiet": True})
-        except CampaignError as e:
-            assert want in str(e), str(e)
-        else:
-            raise CampaignError("group 9: %s was not refused" % mode)
-        assert not os.path.exists(out)
     explain.TEMPLATES[pid] = {"layer": "prior", "title": "the selftest prior",
                               "because": "the selftest exercises the hook seam"}
     explain.TEMPLATES[oid] = {"layer": "optimiser",
@@ -2750,7 +2740,7 @@ def selftest():
         _group("veto and ablation: PF-BUDGET refuses attempt 1 (REFUSED, 0 rows); "
                "-preflight runs with the refusal recorded; -remedies ends after 1 "
                "attempt (EXHAUSTED, K = 1)", _g8_veto_ablation, H)
-        _group("hooks: rules+opt refused without optimise.py (prior.py is present); "
+        _group("hooks: prior.py and optimise.py are present; "
                "a fake prior decides attempt 1; a fake optimiser runs "
                "after EXHAUSTED with its prediction before t_start; replay "
                "reproduces both", _g9_hooks, H)
