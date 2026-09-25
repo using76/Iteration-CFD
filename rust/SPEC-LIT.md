@@ -6976,7 +6976,9 @@ rewrite the same `(fr, refValue, refGrad)` — the same reason §47.6 gives for
 `thermalWallFunction`. So `compressible::turbulentTemperatureRadCoupledMixed`
 is still a §13.4 error; its message now names **both** conditions that exist
 and says a face carries one or the other (§50.8). A genuinely radiating
-conjugate interface — the cell-source route above — remains unbuilt.
+conjugate interface is built by §98.8, through the cell-source route above:
+the interface keeps its coupled triple and the power it radiates is a cell
+source of the solid behind it.
 
 ### 47.11 What must hold
 
@@ -8415,8 +8417,9 @@ localises to the coupling rather than to the geometry — and it exercises the
 whole chain: the buoyant solver, the energy equation, (S50.12), the radiosity
 solve and the Picard lag between them.
 
-Two things stand between here and it, and both are structural rather than
-incidental:
+Two things stood between here and it. The second is gone: §98.7 is the case
+format for a radiating enclosure, §98.8 its driver and Gate 98-C (§98.9) the
+gate that runs them. The one that stands is structural rather than incidental:
 
 1. **The tabulated `Nu_conv`/`Nu_rad` values could not be obtained.** Both
    papers are behind Elsevier's paywall and no open-access reproduction of the
@@ -8424,12 +8427,6 @@ incidental:
    gate against "compare with experiment" instead of against their own
    tabulated numbers with their stated band would be the wrong shape of gate
    for this project.
-2. **The fluid side has no case format for a radiating enclosure.** The model
-   is fully wired and gated as a *library* — `S2s::update` writes the triple,
-   and §51's pair tests drive it from a case document — but no driver binary
-   reads an enclosure definition out of a case directory and runs
-   `ofgpu-buoyant` with it. That is the same boundary §47.14 records for the
-   conjugate model's fluid side, and it is the next step for both.
 
 `ofgpu-validate` prints this omission on every run rather than leaving it
 silent, in the same way §68.12 prints its miss.
@@ -8441,10 +8438,11 @@ silent, in the same way §68.12 prints its miss.
   in §49/§50 that rests on nothing but this project's own measurement.
 * **The Picard lag between the radiosity system and the energy equation has no
   convergence proof** (§50.7). `radiationRelaxation` exists because of that,
-  and it has never been exercised against a case that actually needs it — only
-  against the requirement that it changes the answer.
-* **Specular reflection, non-grey bands and a radiating conjugate interface
-  are all refused by name** (§50.9, §47.10) rather than approximated. The
+  and Gate 98-C (§98.9) now runs it on a live enclosure at three
+  values and prints what each cost.
+* **Specular reflection and non-grey bands are refused by name** (§50.9)
+  rather than approximated; a radiating conjugate interface is no longer on
+  this list - §98.8 builds it. The
   first of those is not a tolerance question: polished aluminium and gold
   plating are exactly the surfaces this model's target application is full of,
   and (S50.1) does not describe them at all.
@@ -8479,14 +8477,14 @@ Boundary side: `T`'s patch entry says `greyDiffusiveRadiationViewFactor` (or
 `s2sWall`), optionally with its own `emissivity` and a `q` (the external flux
 `q_ext`, W/m^2, default `0`).
 
-**What this dictionary does NOT do yet, said here rather than discovered.**
-It configures the model; it does not run one. No driver binary reads an
-enclosure out of a case directory and steps a flow with it — the library API
-(`RadiantFaces`, `S2s::new`, `S2s::update`) is what the gates drive, and
-§50.12 records that boundary. The JSONC case format has no radiation block at
-all — an enclosure is read from `constant/radiationProperties` and from
-nowhere else — so there is no second place for the same entries to be said
-and ignored.
+**What this dictionary does, and where.** It configures the model, and
+since §98.7 a case runs one: `ofgpu-cht` reads an enclosure out of the
+directory a `*.cht.jsonc` case names with `radiation`, and §98.8 steps it
+inside the conjugate SIMPLE loop. The JSONC case format still has no
+radiation block - an enclosure is read from `constant/radiationProperties`
+and from nowhere else - so there is no second place for the same entries to
+be said and ignored. `ofgpu-buoyant` runs none and refuses one by name
+(§98.10).
 
 ### 51.2 The pair tests
 
@@ -29658,7 +29656,7 @@ The line this section draws is the one between a face whose unmeshed other
 side is a **number the case states** (an ambient temperature, a surround's
 temperature) and a face whose other side is **another face of the same
 enclosure**. The first is here, whole. The second is §50's radiosity system
-reaching a conjugate case, and it is a later subsection of this number: a
+reaching a conjugate case, and §98.7-§98.10 are it: a
 face that radiates to its neighbours in an enclosure is not a face that
 radiates to a surround, and nothing below pretends it is.
 
@@ -30112,6 +30110,100 @@ case with no `radiation` takes every statement it took before.
 | its radiating interface | `interface_source = -interface_radiated` to `1e-12`; §47.12 Gate 4's imbalance at most `1e-12` |
 | the interface alone, into the black closure | every face's `eps (sigma T0^4 - H_b)` equal to `parallel_plate_flux(T0, T_amb, eps, 1)` to `1e-10` |
 | the pair tests (§13.4.1) | the dictionary's `emissivity`, an interface's `emissivity`, `radiationRelaxation`: each pair different, failing by name |
+
+### 98.9 Gate 98-C - an enclosure with a running flow
+
+§50.12 named the gate that had never existed: an enclosure whose walls
+exchange radiation while a flow runs past them, held end to end. Gate 98-C
+is that gate, on identities and closed forms only - §98.10 says which
+published gate it is not.
+
+**The fixture: the conjugate box of §98.8.** It is the geometry of
+`cases/kaminskiPrakash.cht.jsonc` (§60.5) at `Ra = 1e4`, made
+three-dimensional so that its four side walls are faces of an enclosure
+rather than the empty faces of a one-cell-deep slab. A solid wall `x in [0, 0.2]`
+against a fluid box `x in [0.2, 1]`, `1 x 1` across in `10 x 10` cells, 2
+cells through the wall and 8 through the fluid; `rho = cp = kappa = 1`,
+`mu = 0.71`, buoyancy at `Ra = 1e4` on the unit length - the normalisation of
+§60.1's cavity. The wall's outer face is held at `300.05` K and the fluid's
+far face, `cold`, at `299.95` K; the solid's four sides are adiabatic. The
+enclosure: the fluid's four side walls are `s2sWall` at the dictionary's
+`emissivity 0.8` with `q = 0` - adiabatic and re-radiating - the interface
+radiates at `0.9`, and `cold`, which holds a temperature and is no
+`s2sWall`, is closed by `ambientTemperature 299.95`: a BLACK cold wall, which
+is exactly what §49.6's closure surface is when the one face it stands for
+sits at that temperature. Radiation is not small here: `4 eps sigma T^3` is
+`4.9` W/(m^2 K) at 300 K, against the fluid's `kappa/L = 1`.
+
+**Sixty sweeps, and why.** The box is within 0.1 K of isothermal, so its net
+fluxes are about `5e-4` of the radiosity, and (S50.8)'s `1e-12` of `J` would
+be `2e-9` of them. A `1e-10` balance needs the round-off floor, so the
+dictionary states `radiositySweeps 60`: at `eps_min = 0.8` the Neumann
+series is then `0.2^60` short of its limit. The count is the case's own
+statement through §51.1's entry; nothing in the solve changed.
+
+**(a) The enclosure's power balance, end to end.** On the live run at
+`radiationRelaxation 1`, `S2s::report` of the loop's last update:
+`|SUM A_i q_r,i| <= 1e-10 SUM A_i |q_r,i|`, the closure surface in the sum.
+
+**(b) The split, three ways.** (1) On each of the four walls, (S98.10) to
+`1e-9` of `max(|Q_in|, |Q_rad|)`: what a re-radiating wall receives it
+hands to the fluid, face by face, at every iterate. (2) On the interface,
+(S98.9)'s cell source as the device sums it against the power the faces
+radiate, to `1e-12`: delivered once, and only once. (3) Against the
+two-surface closed forms. Those hold on a live mesh only where the second
+surface's radiosity is uniform, and a black surface at a stated temperature
+is the one such surface a mesh can carry - §49.6's closure surface. So a
+second run radiates from the interface alone, into the closure at `299.95`
+K, the four side walls adiabatic and not in the enclosure. The interface's
+faces are coplanar and see none of each other, so `H_b = sigma T_amb^4` on
+every face and each face's net flux is `parallel_plate_flux(T0, T_amb, eps,
+1)` = `eps sigma (T0^4 - T_amb^4)`, to `1e-10`, and so is
+`concentric_flux(T0, T_amb, eps, 1, 1/4.2)` - the interface against the
+fluid box's five other faces - because at `e2 = 1` its area ratio
+multiplies `1/e2 - 1 = 0`; the gate evaluates both. The grey second surface
+and the unequal areas that ratio would test stay Gates 50-A's and 50-B's, on
+the hand-written `F` they need.
+
+**(c) `radiationRelaxation`, measured.** The enclosure run at `w = 1`, `0.5`
+and `0.3`, each to the case's residual `1e-7` in at most 4000 SIMPLE
+iterations: each must converge, and the iterations each took and the hot
+face's heat flow are printed with the spread of the three. The converged
+answer does not depend on `w` - (S50.13) relaxes the iteration, not its fixed
+point - so the spread is three stopping points, not a model difference. The
+relaxation starts from a zero irradiation (`S2s`'s `H_old`), so the first
+updates of a `w < 1` run see `w H`: what that start costs is part of what
+this leg measures. This is §50.12's "never exercised", run.
+
+Printed beside the verdicts and not gated: the domain's energy balance - the
+heat in through `hot`, out through `cold` by conduction, and into the black
+cold wall by radiation.
+
+### 98.10 What §98 does not do
+
+* **`ofgpu-buoyant` runs no enclosure, and refuses one by name.** Its heat
+  equation is `ScalarTransport`, which has no `Energy::k_eff_wall` for
+  (S50.12) to read, and its loop is the one `-graph` captures (§81.3), which a
+  per-iteration read-back would break. A case directory holding
+  `constant/radiationProperties`, or a `T` with a
+  `greyDiffusiveRadiationViewFactor` or `s2sWall` patch, is refused naming
+  `ofgpu-cht` and §98.7 - where before this section it was seeded adiabatic
+  and run.
+* **§50.12's first item stands.** The coupled cavity of Balaji & Venkateshan
+  and of Akiyama & Chong - its `Nu_conv`/`Nu_rad` tables are behind
+  Elsevier's paywall - is not run. §98 ships with no gate against a published
+  coupled convection-plus-radiation number; Gate 98-C is identities and
+  closed forms.
+* **No enclosure on the conduction path.** Two solids facing each other
+  across a vacuum gap are an enclosure with no fluid in it; §98.7's row 11
+  refuses one.
+* **A solid face radiates only across an interface** - §98.7's row 16.
+* **(S98.9) is explicit.** Patankar's split of the `T^4` sink into
+  `S_C + S_P T_P` would be written in the cell's temperature while the surface
+  emits at the face's; it is not built, and the SIMPLE loop's lag carries the
+  term.
+* **The cadence is every iteration.** §51.1 has no entry for another, and one
+  would be a second place for the exchange's timing to be said.
 
 ---
 

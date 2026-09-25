@@ -116,7 +116,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use ofgpu::field::{GpuSurfaceScalarField, GpuVectorField};
+use ofgpu::field::{BcKind, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field,
@@ -2238,6 +2238,7 @@ fn run(o: &Options) -> Result<()> {
     // the same reader every other one does (SPEC-LIT §13.4.1).
     heat.set_convection(t_div);
     setup_scalar_field(&gpu, heat.field_mut(), &raw_t, &hm)?;
+    refuse_enclosure(&o.case_dir, &gpu.download(&heat.field().bc_kind)?)?;
 
     for (fname, field) in turb.output_fields_mut() {
         if fname != "nut" {
@@ -2516,6 +2517,31 @@ fn run(o: &Options) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// SPEC-LIT §98.10: this driver runs no enclosure. Its heat equation is
+/// `ScalarTransport`, which has no wall conductivity for (S50.12) to read, and
+/// its loop is the one `-graph` captures. A case directory holding
+/// `constant/radiationProperties`, or a `T` with a radiating patch, is refused
+/// naming the driver that runs one, rather than seeded adiabatic and run.
+fn refuse_enclosure(case_dir: &Path, t_kinds: &[Label]) -> Result<()> {
+    let p = case_dir.join("constant").join("radiationProperties");
+    let wall = t_kinds.iter().any(|&k| k == BcKind::S2sWall as Label);
+    if !(wall || p.exists()) {
+        return Ok(());
+    }
+    let what = if wall {
+        "T has a greyDiffusiveRadiationViewFactor / s2sWall patch".to_string()
+    } else {
+        format!("{} exists", p.display())
+    };
+    Err(Error::Config(format!(
+        "{}: ofgpu-buoyant runs no radiating enclosure - {what}. The driver that runs one is \
+         ofgpu-cht: a conjugate *.cht.jsonc case names the enclosure with `radiation` and its \
+         walls with `s2sWall` (SPEC-LIT 98.7). This driver's heat equation has no wall \
+         conductivity to hand the exchange (SPEC-LIT 98.10)",
+        case_dir.display()
+    )))
 }
 
 fn main() -> ExitCode {
@@ -3109,5 +3135,29 @@ mod buoyant_tests {
         let num = CaseNumerics::read(&case, &cc, None).expect("numerics");
         let t_ctrl = read_t_controls(&num, &cc.turb).expect("T controls");
         assert_eq!(t_ctrl.sn_grad, ofgpu::fv::SnGradScheme::Uncorrected);
+    }
+
+    /// SPEC-LIT §98.10: an enclosure is refused by name on this driver, from
+    /// either direction - the dictionary on disk or a radiating `T` patch.
+    #[test]
+    fn an_enclosure_is_refused_by_name() {
+        let dir = scratch_dir("enclosureRefused");
+        std::fs::create_dir_all(dir.join("constant")).expect("mkdir");
+        refuse_enclosure(&dir, &[BcKind::ZeroGradient as Label]).expect("nothing radiates, nothing is refused");
+        let e = refuse_enclosure(&dir, &[BcKind::S2sWall as Label])
+            .expect_err("an s2sWall patch must be refused")
+            .to_string();
+        println!("{e}");
+        for w in ["ofgpu-cht", "s2sWall", "SPEC-LIT 98.10"] {
+            assert!(e.contains(w), "{w:?} not in: {e}");
+        }
+        std::fs::write(dir.join("constant").join("radiationProperties"), "radiationModel viewFactor;\n")
+            .expect("write");
+        let e = refuse_enclosure(&dir, &[]).expect_err("the dictionary must be refused").to_string();
+        println!("{e}");
+        for w in ["ofgpu-cht", "radiationProperties", "SPEC-LIT 98.7"] {
+            assert!(e.contains(w), "{w:?} not in: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3275,6 +3275,11 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("SPEC-LIT 98.6 Gate 98-B radiating slab");
     check_radiating_slab(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT 98.9 - the enclosure with a running flow.
+    println!("\n=== Gate 98-C: an enclosure on a live conjugate flow, its balance, split and relaxation (SPEC-LIT 98.9) ===");
+    c.enter_gate("SPEC-LIT 98.9 Gate 98-C enclosure with a running flow");
+    check_enclosure_flow(c, &gpu)?;
+    c.leave_gate();
     // SPEC-LIT 100.4 - the evaluator against three published tables.
     println!("\n=== Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4) ===");
     c.enter_gate("SPEC-LIT 100.4 Gate 100-B published property tables");
@@ -15761,8 +15766,9 @@ fn check_strained_realizability_live(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 //  What is NOT here, and is said out loud rather than left out quietly:
 //  §50.11's coupled cavity gate (Balaji & Venkateshan 1993/1994; Akiyama &
 //  Chong 1997) needs the paper's own tabulated Nu_conv/Nu_rad, which are
-//  behind Elsevier's paywall, AND a fluid-side case format for a radiating
-//  enclosure that does not exist yet. §50.12 records both. The summary line
+//  behind Elsevier's paywall. The fluid-side case format it also needed exists
+//  since §98.7, and Gate 98-C (§98.9) runs an enclosure on it. §50.12 records
+//  what is left. The summary line
 //  says so on every run.
 // ==========================================================================
 
@@ -16264,8 +16270,9 @@ fn check_surface_to_surface_radiation(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         "NOT RUN, and not replayed either: S50.11's coupled cavity gate (Balaji & \
          Venkateshan 1993/1994, Akiyama & Chong 1997). It needs the papers' own \
          tabulated Nu_conv/Nu_rad - behind Elsevier's paywall, no open-access \
-         reproduction reachable - AND a fluid-side case format for a radiating \
-         enclosure, which does not exist. SPEC-LIT S50.12 records both.",
+         reproduction reachable. The fluid-side case format it also needed exists \
+         now (SPEC-LIT 98.7) and Gate 98-C runs an enclosure on it; SPEC-LIT 50.12 \
+         records what is left.",
     );
 
     Ok(())
@@ -20479,6 +20486,279 @@ fn check_radiating_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 }
 
 // ==========================================================================
+//  SPEC-LIT §98.9 - Gate 98-C, an enclosure with a running flow
+// ==========================================================================
+
+/// Gate 98-C's conjugate box as a case document (SPEC-LIT 98.9): a solid
+/// wall 0.2 thick against a fluid box, 1 x 1 across in 10 x 10 cells, 2 cells
+/// through the wall and 8 through the fluid; the wall's outer face at
+/// 300.05 K, the fluid's far face at 299.95 K, Ra = 1e4. `side` is the `T` of
+/// the fluid's four side walls; the interface radiates at 0.9; the enclosure
+/// is read from `enclosure/`.
+fn gate_98c_box(side: &str) -> String {
+    format!(
+        r#"{{
+  "name": "gate98cBox", "radiation": "enclosure",
+  "regions": [
+    {{ "name": "air", "kind": "fluid",
+      "mesh": {{ "bounds": {{ "min": [0.2, 0.0, 0.0], "max": [1.0, 1.0, 1.0] }}, "cells": [8, 10, 10],
+        "boundaries": {{ "xmin": "airToWall", "xmax": "cold", "ymin": "airBottom", "ymax": "airTop",
+                         "zmin": "airFront", "zmax": "airBack" }} }},
+      "fluid": {{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }},
+      "patches": [
+        {{ "match": "cold", "T": {{ "type": "fixedValue", "value": 299.95 }} }},
+        {{ "match": "airBottom", "T": {side} }},
+        {{ "match": "airTop", "T": {side} }},
+        {{ "match": "airFront", "T": {side} }},
+        {{ "match": "airBack", "T": {side} }}
+      ] }},
+    {{ "name": "wall", "kind": "solid",
+      "mesh": {{ "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.2, 1.0, 1.0] }}, "cells": [2, 10, 10],
+        "boundaries": {{ "xmin": "hot", "xmax": "wallToAir", "ymin": "wallBottom", "ymax": "wallTop",
+                         "zmin": "wallFront", "zmax": "wallBack" }} }},
+      "material": {{ "rho": 1.0, "c": 1.0, "kappa": 1.0 }},
+      "patches": [
+        {{ "match": "hot", "T": {{ "type": "fixedValue", "value": 300.05 }} }},
+        {{ "match": "wallBottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallTop", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallFront", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallBack", "T": {{ "type": "zeroGradient" }} }}
+      ] }}
+  ],
+  "interfaces": [ {{ "regionA": "air", "patchA": "airToWall", "regionB": "wall", "patchB": "wallToAir",
+                     "emissivity": 0.9 }} ],
+  "buoyancy": {{ "g": [0.0, -2.13e7, 0.0], "TRef": 300.0 }},
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": 4000 }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-16, "maxIter": 400,
+    "flow": {{ "relaxU": 0.7, "relaxP": 0.3, "relaxT": 0.7,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear", "residual": 1e-7,
+      "uTolerance": 1e-14, "pTolerance": 1e-14, "uMaxIter": 150, "pMaxIter": 500 }}
+  }}
+}}"#
+    )
+}
+
+/// One Gate 98-C run at the relaxation `w` (SPEC-LIT 98.9): its dictionary
+/// written to `<scratch>/enclosure/constant/radiationProperties`, the box
+/// lowered against that directory and run, the directory removed.
+fn gate_98c_run(gpu: &Gpu, tag: &str, w: f64, side: &str) -> Result<ofgpu::cht::flow::ChtFlowSolution> {
+    use ofgpu::cht::flow::run_flow_case;
+    use ofgpu::error::IoContext;
+    use ofgpu::io::case_cht::parse_cht_case;
+    let dir = scratch_dir(&format!("gate98c_{tag}"));
+    let c = dir.join("enclosure").join("constant");
+    std::fs::create_dir_all(&c).path(&c)?;
+    let f = c.join("radiationProperties");
+    let body = format!(
+        "radiationModel viewFactor;\nemissivity 0.8;\nambientTemperature 299.95;\n\
+         radiositySweeps 60;\nradiationRelaxation {w};\n"
+    );
+    std::fs::write(&f, body).path(&f)?;
+    let out = (|| -> Result<ofgpu::cht::flow::ChtFlowSolution> {
+        let low = parse_cht_case(&gate_98c_box(side), "SPEC-LIT 98.9 Gate 98-C")?.lower_in(Some(&dir))?;
+        let case = low.flow_case().ok_or_else(|| {
+            Error::Config("Gate 98-C: the box did not lower to a conjugate case".to_string())
+        })?;
+        run_flow_case(gpu, &case)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+/// Gate 98-C (SPEC-LIT 98.9): (a) the enclosure's power balance on a live run
+/// to 1e-10; (b) the split - (S98.10) on the four re-radiating walls to 1e-9,
+/// the interface's (S98.9) cell source against the power it radiates to
+/// 1e-12, and the interface alone into the black closure against
+/// `parallel_plate_flux` and `concentric_flux` face by face to 1e-10;
+/// (c) `radiationRelaxation` 1, 0.5 and 0.3, each required to converge, the
+/// iterations each took printed.
+/// A run that fails is recorded as a row, never propagated: one failing leg
+/// must not stop the rest of `ofgpu-validate`.
+#[allow(clippy::too_many_lines)]
+fn check_enclosure_flow(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::flow::ChtFlowSolution;
+    use ofgpu::radiation::SIGMA_SB;
+    use ofgpu::s2s::{concentric_flux, parallel_plate_flux};
+    const S2S: &str = r#"{ "type": "s2sWall" }"#;
+    const ADIABATIC: &str = r#"{ "type": "zeroGradient" }"#;
+    const WALLS: [&str; 4] = ["airBottom", "airTop", "airFront", "airBack"];
+    let t_amb: Scalar = 299.95;
+    let mut detail: Vec<String> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+
+    // (c) - and its w = 1 run is (a)'s and (b)'s.
+    let mut runs: Vec<(f64, Option<ChtFlowSolution>)> = Vec::new();
+    for (tag, w) in [("w10", 1.0_f64), ("w05", 0.5), ("w03", 0.3)] {
+        let line = match gate_98c_run(gpu, tag, w, S2S) {
+            Ok(sol) => {
+                let q_hot = sol.patch_heat_flow(1, "hot")?;
+                let l = format!(
+                    "radiationRelaxation {w}: {} SIMPLE iterations, converged {}, residuals U {:.2e} \
+                     p {:.2e} T {:.2e}, Q_hot {q_hot:.10e} W",
+                    sol.iterations, sol.converged, sol.residuals.0, sol.residuals.1, sol.residuals.2
+                );
+                runs.push((w, Some(sol)));
+                l
+            }
+            Err(e) => {
+                runs.push((w, None));
+                format!("radiationRelaxation {w}: the run failed - {e}")
+            }
+        };
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    if let Some(base) = runs[0].1.as_ref() {
+        let e = base.enclosure.as_ref().ok_or_else(|| {
+            Error::Config("Gate 98-C: the w = 1 run carries no enclosure report".to_string())
+        })?;
+        // (a)
+        let balance = e.net_power.abs() / e.gross_power;
+        c.note(&format!(
+            "  (a) SUM A q_r = {:+.3e} W against SUM A |q_r| = {:.6e} W over {} faces and the \
+             closure; the (S50.3) residual {:.2e} after {} sweeps; view factors: {}",
+            e.net_power, e.gross_power, e.faces.len(), e.radiosity_residual, e.sweeps, e.view_factors
+        ));
+        c.check(
+            "SPEC-LIT 98.9 Gate 98-C (a): the enclosure's power balance on the live run, |SUM A q_r| / SUM A |q_r|",
+            balance,
+            1.0e-10,
+        );
+        if !(balance <= 1.0e-10) {
+            misses.push(format!("(a) power balance {balance:.2e} against 1e-10"));
+        }
+        // (b) 1: (S98.10) on the four walls
+        let mut worst: Scalar = 0.0;
+        let mut radiated_walls: Scalar = 0.0;
+        for p in WALLS {
+            let (q_ext, q_in, q_rad, lin) = base.radiative_split(0, p)?;
+            let rel = (q_in + q_rad - q_ext - lin).abs() / q_in.abs().max(q_rad.abs());
+            worst = if rel.is_nan() || worst.is_nan() { Scalar::NAN } else { worst.max(rel) };
+            radiated_walls += q_rad;
+            c.note(&format!(
+                "  (b) {p}: conducted in {q_in:+.6e} W, radiated out {q_rad:+.6e} W, L {lin:.3e} W, \
+                 (S98.10) rel {rel:.2e}"
+            ));
+        }
+        c.check("SPEC-LIT 98.9 Gate 98-C (b): (S98.10) on the four re-radiating walls, worst rel", worst, 1.0e-9);
+        if !(worst <= 1.0e-9) {
+            misses.push(format!("(b) (S98.10) worst {worst:.2e} against 1e-9"));
+        }
+        // (b) 2: the interface's cell source, delivered once
+        let rad = base.interface_radiated();
+        let src_rel = (e.interface_source + rad).abs() / rad.abs();
+        c.note(&format!(
+            "  (b) the interface radiates {rad:+.6e} W; its (S98.9) cell source sums to {:+.6e} W: \
+             rel {src_rel:.2e}",
+            e.interface_source
+        ));
+        c.check(
+            "SPEC-LIT 98.9 Gate 98-C (b): the interface's (S98.9) cell source against the power it radiates, rel",
+            src_rel,
+            1.0e-12,
+        );
+        if !(src_rel <= 1.0e-12) {
+            misses.push(format!("(b) cell source rel {src_rel:.2e} against 1e-12"));
+        }
+        // printed, not gated: the domain's energy balance
+        let q_hot = base.patch_heat_flow(1, "hot")?;
+        let q_cold = base.patch_heat_flow(0, "cold")?;
+        let q_black = rad + radiated_walls;
+        c.note(&format!(
+            "  energy: in through hot {q_hot:+.6e} W, through cold {q_cold:+.6e} W, radiated into the \
+             black cold wall {q_black:+.6e} W; in - out = {:+.3e} W (the run's convergence)",
+            q_hot + q_cold - q_black
+        ));
+    } else {
+        c.require("SPEC-LIT 98.9 Gate 98-C (a), (b): the radiationRelaxation 1 run completes", false);
+        misses.push("the radiationRelaxation 1 run failed, so (a) and (b) were not measured".to_string());
+    }
+    // (b) 3: the interface alone into the black closure
+    match gate_98c_run(gpu, "surround", 1.0, ADIABATIC) {
+        Ok(sur) => {
+            let faces = sur.enclosure.as_ref().map(|e| e.faces.clone()).unwrap_or_default();
+            let (mut worst, mut scale) = (0.0 as Scalar, 0.0 as Scalar);
+            let (mut lo, mut hi) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
+            for f in &faces {
+                let q = f.emissivity * (SIGMA_SB * f.t0 * f.t0 * f.t0 * f.t0 - f.irradiation);
+                let want = parallel_plate_flux(f.t0, t_amb, f.emissivity, 1.0);
+                let want_c = concentric_flux(f.t0, t_amb, f.emissivity, 1.0, 1.0 / 4.2);
+                worst = worst.max((q - want).abs()).max((q - want_c).abs());
+                scale = scale.max(want.abs());
+                lo = lo.min(f.t0);
+                hi = hi.max(f.t0);
+            }
+            let rel = worst / scale;
+            let line = format!(
+                "the interface alone into the black closure at {t_amb} K: {} faces, T0 in [{lo:.6}, \
+                 {hi:.6}] K, worst |q_r - parallel_plate_flux or concentric_flux| / max |q_r| \
+                 = {rel:.2e}; {} iterations, converged {}",
+                faces.len(), sur.iterations, sur.converged
+            );
+            c.note(&format!("  (b) {line}"));
+            detail.push(line);
+            c.check(
+                "SPEC-LIT 98.9 Gate 98-C (b): the interface into a black closure against parallel_plate_flux and concentric_flux, face by face, rel",
+                rel,
+                1.0e-10,
+            );
+            if !(rel <= 1.0e-10) || faces.is_empty() {
+                misses.push(format!("(b) closed form rel {rel:.2e} against 1e-10 over {} faces", faces.len()));
+            }
+        }
+        Err(err) => {
+            let line = format!("the surround run failed - {err}");
+            c.note(&format!("  (b) {line}"));
+            detail.push(line.clone());
+            c.require("SPEC-LIT 98.9 Gate 98-C (b): the surround run completes", false);
+            misses.push(line);
+        }
+    }
+    // (c)
+    let q1 = runs[0].1.as_ref().map(|s| s.patch_heat_flow(1, "hot")).transpose()?;
+    let mut spread: Scalar = 0.0;
+    for (_, s) in &runs {
+        if let (Some(s), Some(q1)) = (s.as_ref(), q1) {
+            if s.converged {
+                spread = spread.max((s.patch_heat_flow(1, "hot")? - q1).abs() / q1.abs());
+            }
+        }
+    }
+    let all = runs.iter().all(|(_, s)| s.as_ref().is_some_and(|s| s.converged));
+    c.note(&format!(
+        "  (c) the hot face's heat flow over the converged runs: spread {spread:.2e} of its value - \
+         three stopping points of one fixed point (SPEC-LIT 98.9)"
+    ));
+    c.require(
+        "SPEC-LIT 98.9 Gate 98-C (c): radiationRelaxation 1, 0.5 and 0.3 each converge within 4000 iterations",
+        all,
+    );
+    if !all {
+        misses.push("(c) not every radiationRelaxation converged within 4000 iterations".to_string());
+    }
+
+    if !misses.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 98.9 Gate 98-C enclosure with a running flow",
+            against: "the enclosure's own power balance, (S98.9), (S98.10), parallel_plate_flux and \
+                      concentric_flux, SPEC-LIT 98.9",
+            headline: misses.join("; "),
+            detail,
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one mesh: legs (a) and (b) are identities or closed forms in the run's own face \
+                 temperatures, exact at every iterate, and leg (c) counts iterations - there is no \
+                 discretisation error to extrapolate (SPEC-LIT 94.3)",
+            )),
+        });
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  SPEC-LIT §100 - properties that are functions of temperature
 // ==========================================================================
 
@@ -21212,7 +21492,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 31 occurrences, 27 distinct - two gates report twice,
+    /// same string. 32 occurrences, 28 distinct - two gates report twice,
     /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
@@ -21238,9 +21518,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 31, "31 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 32, "32 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 27, "27 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 28, "28 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
