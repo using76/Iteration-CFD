@@ -184,24 +184,56 @@ function pathRefusal(config: string): ToolResult | null {
   return null
 }
 
+/** WL-FORBIDDEN: a pointer whose squashed text holds a FORBIDDEN_WORDS entry, in any spelling (dotted, fullwidth, %-encoded, mixed case), or null. */
+export function forbiddenPointerRefusal(raw: string): ToolResult | null {
+  const f = FORBIDDEN_WORDS.findIndex((w) => squash(raw).includes(w))
+  return f >= 0 ? refusal('WL-FORBIDDEN', `WL-FORBIDDEN: ${canonPointer(raw)} is out of the action space (${FORBIDDEN_POINTERS[f].cite})`, FORBIDDEN_POINTERS[f].cite) : null
+}
+
 function pointerRefusal(raw: string): ToolResult | null {
-  const sq = squash(raw)
-  const canon = canonPointer(raw)
-  const f = FORBIDDEN_WORDS.findIndex((w) => sq.includes(w))
-  if (f >= 0) return refusal('WL-FORBIDDEN', `WL-FORBIDDEN: ${canon} is out of the action space (${FORBIDDEN_POINTERS[f].cite})`, FORBIDDEN_POINTERS[f].cite)
-  if (SOLVER_WORDS.some((w) => sq.includes(w)))
-    return refusal('LLM-SOLVER', `LLM-SOLVER: ${canon} is a solver setting (numerics, schemes, relaxation, solver controls); the mesh loop never touches a solver case`, 'docs/15 §C')
+  const forbidden = forbiddenPointerRefusal(raw)
+  if (forbidden) return forbidden
+  if (SOLVER_WORDS.some((w) => squash(raw).includes(w)))
+    return refusal('LLM-SOLVER', `LLM-SOLVER: ${canonPointer(raw)} is a solver setting (numerics, schemes, relaxation, solver controls); the mesh loop never touches a solver case`, 'docs/15 §C')
   return null
+}
+
+/** WL-FLAG at `at`, a dotted path of the call. */
+export function flagRefusalAt(at: string): ToolResult {
+  return refusal('WL-FLAG', `WL-FLAG: ${at} carries -permissive, which is forbidden (${FORBIDDEN_FLAGS[0].cite})`, FORBIDDEN_FLAGS[0].cite)
+}
+
+/** WL-FLAG: the first key or string anywhere in `v` that asks for -permissive, or null. */
+export function flagRefusal(v: unknown): ToolResult | null {
+  const at = permissiveAt(v, '')
+  return at ? flagRefusalAt(at) : null
+}
+
+/** WL-FORBIDDEN: the first object key inside `v` naming a forbidden knob, reported as `<what> carries <key>`, or null. */
+export function forbiddenKeyRefusal(v: unknown, what: string): ToolResult | null {
+  const fk = forbiddenKeyIn(v)
+  return fk ? refusal('WL-FORBIDDEN', `WL-FORBIDDEN: ${what} carries ${fk.key}, which is out of the action space (${FORBIDDEN_POINTERS[fk.k].cite})`, FORBIDDEN_POINTERS[fk.k].cite) : null
 }
 
 /** The fields of the tool's schema; any other key of a call is an extra the schema drops. */
 const SCHEMA_KEYS = ['config', 'pointer', 'value', 'reason', 'geometryId'] as const
 
+/** WL-FORBIDDEN on a key the schema does not name (zod drops it unseen): the key itself, or a key inside its value. */
+export function extraKeyRefusal(raw: Json, schemaKeys: readonly string[]): ToolResult | null {
+  for (const [key, val] of Object.entries(raw)) {
+    if (schemaKeys.includes(key)) continue
+    const k = FORBIDDEN_WORDS.findIndex((w) => squash(key).includes(w))
+    const fk = k >= 0 ? { key, k } : forbiddenKeyIn(val)
+    if (fk) return refusal('WL-FORBIDDEN', `WL-FORBIDDEN: the extra key ${key} carries ${fk.key}, which is out of the action space (${FORBIDDEN_POINTERS[fk.k].cite})`, FORBIDDEN_POINTERS[fk.k].cite)
+  }
+  return null
+}
+
 /** The tool-layer veto on the raw call: a named refusal, or null. Pure and synchronous; runs before zod and before any approval card. */
 export function refuseEdit(raw: unknown): ToolResult | null {
   if (!isObj(raw)) return null
-  const flagAt = permissiveAt(raw, '')
-  if (flagAt) return refusal('WL-FLAG', `WL-FLAG: ${flagAt} carries -permissive, which is forbidden (${FORBIDDEN_FLAGS[0].cite})`, FORBIDDEN_FLAGS[0].cite)
+  const flag = flagRefusal(raw)
+  if (flag) return flag
   if (typeof raw.config === 'string') {
     const r = pathRefusal(raw.config)
     if (r) return r
@@ -212,18 +244,14 @@ export function refuseEdit(raw: unknown): ToolResult | null {
     if (r) return r
   }
   // A key the schema does not name is dropped by zod unseen, so one that carries a forbidden block is refused here.
-  for (const [key, val] of Object.entries(raw)) {
-    if ((SCHEMA_KEYS as readonly string[]).includes(key)) continue
-    const k = FORBIDDEN_WORDS.findIndex((w) => squash(key).includes(w))
-    const fk = k >= 0 ? { key, k } : forbiddenKeyIn(val)
-    if (fk) return refusal('WL-FORBIDDEN', `WL-FORBIDDEN: the extra key ${key} carries ${fk.key}, which is out of the action space (${FORBIDDEN_POINTERS[fk.k].cite})`, FORBIDDEN_POINTERS[fk.k].cite)
-  }
+  const extra = extraKeyRefusal(raw, SCHEMA_KEYS)
+  if (extra) return extra
   if (typeof raw.pointer !== 'string') return null
   const hasValue = 'value' in raw
   const value = coerceValue(raw.value)
   if (hasValue) {
-    const fk = forbiddenKeyIn(value)
-    if (fk) return refusal('WL-FORBIDDEN', `WL-FORBIDDEN: value carries ${fk.key}, which is out of the action space (${FORBIDDEN_POINTERS[fk.k].cite})`, FORBIDDEN_POINTERS[fk.k].cite)
+    const fv = forbiddenKeyRefusal(value, 'value')
+    if (fv) return fv
   }
   const pointer = raw.pointer
   const canon = canonPointer(pointer)

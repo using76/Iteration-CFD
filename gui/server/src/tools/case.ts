@@ -11,6 +11,7 @@ import { getChtSchema, schemaFileFor, type CaseSchemaFile } from '../registry/sc
 import { errorMessage, fail, okResult, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { unifiedDiff } from './diff.js'
 import { resolveTool } from './paths.js'
+import { refuseCaseEdit } from './writeGuards.js'
 
 export const CASE_TEXT_CAP = 32 * 1024
 const FORMATTING = { insertSpaces: true, tabSize: 2, eol: '\n' }
@@ -560,6 +561,7 @@ export const caseEdit: ToolDef<typeof EditSchema> = {
   description:
     'Edit a JSONC case in place with JSON-pointer edits (set or remove); comments and formatting are preserved and the result is validated. Use dryRun:true to preview the unified diff first. Never rewrite a whole case file.',
   schema: EditSchema,
+  refuse: refuseCaseEdit,
   async run(input, ctx) {
     const preview = await previewCaseEdit(ctx.workspaceRoot, input)
     if (isToolResult(preview)) return preview
