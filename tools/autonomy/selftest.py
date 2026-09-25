@@ -29,7 +29,7 @@ vote, the bank, the remedy path, the G-PRIOR gate on an oracle campaign and its 
 branch, the hook seam, a live rules+prior campaign, the check and the CLI), then optimise.py --selftest
 (the L4 optimiser: the config rebuild, the knob features, the cross-fitted ensemble, the Sobol pool and the pick,
 the hook seam, the refinement rounds on two oracle campaigns and the disabled branch, a live rules+opt campaign, the
-check and the CLI), then
+check and the CLI), then evaluate.py --selftest (the held-out evaluation: the seal and the G-DET ids, McNemar and the gate functions on hand data, the fidelity and quality rows, the reuse and RAM-guard seam, the write-once plan lock, a fake evaluation end to end, the check and the CLI), then
 sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
@@ -78,7 +78,7 @@ def main():
               ("features.py", 11), ("preflight.py", 12), ("rules.py", 14),
               ("remedies.py", 13), ("explain.py", 13),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 11),
-              ("optimise.py", 11))
+              ("optimise.py", 11), ("evaluate.py", 8))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:

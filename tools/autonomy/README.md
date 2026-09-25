@@ -795,6 +795,45 @@ For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`,
 `optimise/opt_model.json` and `optimise/train.json.gz` and refits in seconds; when it is disabled
 it records OPT-DISABLED at every EXHAUSTED; G-FID binds on any feature_tolerance 0 pick.
 
+## evaluate.py — the held-out evaluation (G-FAIL, G-BLC-0 and the guards)
+
+AM-16 runs `evaluate.py --run --work DIR`: it verifies the two sealed baselines **by hash only**
+(`baseline/sealed.lock` and the constants committed in evaluate.py; the files are never decompressed here),
+writes a write-once `evaluate/opened.lock` recording the plan (campaigns, streams, binary, gate/knob/model
+hashes, the 20 G-DET ids fixed from the lock's test ids), and only then opens the test split once in mode
+`evaluate`. Nothing else ever reads `corpus/manifests/test.jsonl`; once the lock records a plan, another plan
+is refused — the split is spent.
+
+The nine campaigns, in order: `full`, `b0-template` (a fresh re-measure: the sealed rows carry no feature-edge
+counts, so G-FID needs it; its rows must equal the seal apart from time fields and git_sha), `gdet-1`, `gdet-2`
+(the 20 G-DET geometries, meshed fresh, run twice), then `no-remedies`, `no-optimiser`, `rules`, `no-prior`,
+`no-preflight` — these reuse what earlier campaigns meshed by (geometry, config sha), because the mesher is
+deterministic. An octree probe predicting more than 8192 MiB of peak memory is not run and is scored as an F1
+no-mesh failure (class crash); the count is reported and is 0 wherever L0 runs.
+
+The gates (§F), decided once from the committed bundles: **G-FAIL** — MFR(full) <= 0.25 x MFR(B0-template), the
+95 % upper bound <= 10 %, an exact two-sided McNemar p < 0.01 against B0-template, and no family worse.
+**G-BLC-0** — mean BLC_8 >= 0.90 and BLC_full >= 0.80 over the tier-0 stratum (the D/F geometries whose manifest
+`commensurate` is true); other geometries' BLC and their CAPABILITY-LIMITED patches are reported, never gated.
+**G-QUAL** — every written config byte-equal to the reference quality block, every edit inside the whitelist, no
+config sha mismatch, no forbidden flag spelled anywhere (read from knobs, never a literal). **G-FID** — per
+family, the medians of p99/h_f and the pinned fraction are no worse than B0-template and the snapped feature-edge
+share (`n_snapped_to_edge / n_feature_edges`) no worse; a mesh snapped with `feature_tolerance 0` extracts no
+edges and reports 0 of them, so on a body with sharp edges its share is 0.0, and a body without sharp edges is
+left out. **G-COST** — median cells <= 1.5 x B0-template where both pass, none over the budget, wall time <= 3 h
+(the house runs 6 streams, not the plan's 12: pass at the 6-stream time <= 3 h, fail when even perfect 12-stream
+scaling or the longest single geometry exceeds 3 h, undecided in between), peak RAM <= 60 %, zero orphans.
+**G-DET** — the two G-DET runs identical apart from time fields and both replays reproduce every decision (the
+full campaign against gdet-1 on the same geometries is reported). **G-EXPL** — every campaign's audit passes. **G-OPT** —
+full beats rules-only by >= 3 pp MFR or >= 0.05 BLC_8 with no family regressing (the optimiser's marginal and
+rules+opt vs rules are reported beside it). **G-ABL** is reported: the ablation table and the per-round tuning
+curve. A gate that cannot be decided is reported UNDECIDED, never as a pass.
+
+A rehearsal (a manifest FILE, stand-in baselines, `--gdet-n`) runs the whole path on tuning rows, but must write
+its report outside `evaluate/`. The departures from docs/15 §F are listed in the report. The numbers are in
+`evaluate/EVAL.json` and the results page `evaluate/EVAL.md`, written by the supervisor's run; the test split is
+then spent.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -838,6 +877,10 @@ it records OPT-DISABLED at every EXHAUSTED; G-FID binds on any feature_tolerance
     python tools/autonomy/optimise.py --plan                               # the training rows, the surrogate CV, the refinement set
     python tools/autonomy/optimise.py --refine --work DIR                  # optimise/G-OPT.json, .md, opt_model.json, train.json.gz
     python tools/autonomy/optimise.py --check                              # the report, the bundles, the train rebuild and the refit
+
+    python tools/autonomy/evaluate.py --plan                               # the seal, the campaigns, the G-DET ids; nothing opened
+    python tools/autonomy/evaluate.py --run --work DIR                     # THE evaluation: opens the test split once
+    python tools/autonomy/evaluate.py --report | --check                   # evaluate/EVAL.json and EVAL.md from the bundles
 
     python tools/autonomy/sensitivity.py --pilot --out DIR --work DIR --jobs 6   # G-PILOT (~1-2 h CPU)
     python tools/autonomy/sensitivity.py --report DIR                            # re-render the report
