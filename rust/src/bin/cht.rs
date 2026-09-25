@@ -373,6 +373,48 @@ fn report_flow(low: &LoweredChtCase, sol: &ChtFlowSolution) {
         }
         println!("  largest interface temperature JUMP: {:.6e} K", f64::from(worst_jump));
     }
+
+    // SPEC-LIT §98.8: the enclosure, and the split it makes checkable.
+    if let Some(e) = &sol.enclosure {
+        println!(
+            "\n  enclosure (SPEC-LIT 98.8): {} radiating faces, {} updates, radiationRelaxation {}, \
+             {} sweeps",
+            e.faces.len(),
+            e.updates,
+            f64::from(e.relaxation),
+            e.sweeps
+        );
+        println!("    view factors: {}", e.view_factors);
+        println!(
+            "    SUM A q_r = {:+.6e} W against SUM A |q_r| = {:.6e} W; radiosity residual {:.3e}",
+            f64::from(e.net_power),
+            f64::from(e.gross_power),
+            f64::from(e.radiosity_residual)
+        );
+        for (region, patch, bc) in &low.patch_bcs {
+            if !matches!(bc, LoweredBc::S2sWall { .. }) {
+                continue;
+            }
+            if let Ok((q_ext, q_in, q_rad, lin)) = sol.radiative_split(*region, patch) {
+                println!(
+                    "    {}:{patch}: external {:+.6e}, conducted in {:+.6e}, radiated out {:+.6e}, \
+                     (S98.10) L {:.3e} W",
+                    low.region_names[*region],
+                    f64::from(q_ext),
+                    f64::from(q_in),
+                    f64::from(q_rad),
+                    f64::from(lin)
+                );
+            }
+        }
+        if e.faces.iter().any(|f| f.interface) {
+            println!(
+                "    radiating interfaces: radiated {:+.6e} W, (S98.9) cell source {:+.6e} W",
+                f64::from(sol.interface_radiated()),
+                f64::from(e.interface_source)
+            );
+        }
+    }
 }
 
 fn write_flow_csv(path: &Path, sol: &ChtFlowSolution) -> Result<()> {

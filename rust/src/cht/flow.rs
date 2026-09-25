@@ -70,6 +70,8 @@ use crate::io::schemes::DivEntry;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::momentum::{BuoyancyCoeffs, MomentumControls};
 use crate::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
+use crate::radiation::SIGMA_SB;
+use crate::s2s::{RadiantFaces, S2s};
 use crate::simple::{Simple, SimpleControls};
 use crate::timescheme::DdtScheme;
 use crate::{Label, Scalar, Vec3};
@@ -355,6 +357,47 @@ impl FlowControls {
 //  What one conjugate fluid/solid run produced
 // ==========================================================================
 
+/// SPEC-LIT §98.8: one radiating boundary face, as the last update saw it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadiatingFace {
+    /// Thermal-mesh boundary face.
+    pub bf: usize,
+    pub emissivity: Scalar,
+    /// §50.3's external flux, W/m^2 - zero on an interface face.
+    pub q_ext: Scalar,
+    /// `true` on the fluid side of a radiating interface, whose radiated
+    /// power is the (S98.9) cell source.
+    pub interface: bool,
+    /// The face temperature the last update gathered, K.
+    pub t0: Scalar,
+    /// The irradiation the last update broadcast, relaxed, W/m^2.
+    pub irradiation: Scalar,
+}
+
+/// SPEC-LIT §98.8: what the enclosure measured on the last iteration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnclosureReport {
+    /// `SUM A_i q_r,i`, W, of the last update - the closure surface in it.
+    pub net_power: Scalar,
+    /// `SUM A_i |q_r,i|`, W.
+    pub gross_power: Scalar,
+    /// The (S50.3) residual after the sweeps.
+    pub radiosity_residual: Scalar,
+    pub sweeps: usize,
+    /// The view-factor report at setup, as `ViewFactorReport::describe`
+    /// prints it.
+    pub view_factors: String,
+    /// Updates taken - one per SIMPLE iteration.
+    pub updates: usize,
+    /// `radiationRelaxation`, as read.
+    pub relaxation: Scalar,
+    /// Every radiating face, in the model's slot order.
+    pub faces: Vec<RadiatingFace>,
+    /// The (S98.9) cell source over the mesh as the device sums it, W, less
+    /// the uniform sources. Zero when no interface radiates.
+    pub interface_source: Scalar,
+}
+
 /// The result of [`run_flow_case`].
 pub struct ChtFlowSolution {
     pub mesh: ThermalMesh,
@@ -388,6 +431,9 @@ pub struct ChtFlowSolution {
     /// (S98.5) of the triples the last energy solve used on the radiating
     /// faces; zero when no face radiates (SPEC-LIT §98.3).
     pub external_residual: Scalar,
+    /// SPEC-LIT §98.8: what the enclosure measured. `None` on a case that
+    /// names none.
+    pub enclosure: Option<EnclosureReport>,
 }
 
 impl ChtFlowSolution {
@@ -415,6 +461,47 @@ impl ChtFlowSolution {
             q += self.b_conductance[bf] * h.b_mag_sf[bf] * (self.bt[bf] - self.t[c]);
         }
         Ok(q)
+    }
+
+    /// SPEC-LIT §98.8's split on one patch, W: `(Q_ext, Q_in, Q_rad, L)` -
+    /// the external flux delivered to its radiating faces, the conducted heat
+    /// into the domain ([`Self::patch_heat_flow`]), the net radiative power
+    /// leaving at the final `T_b` against the last irradiation, and the right
+    /// side of (S98.10), which is `Q_in + Q_rad - Q_ext`. Meaningful on an
+    /// `s2sWall` patch; every term but `Q_in` is zero where nothing radiates.
+    pub fn radiative_split(&self, region: usize, patch: &str) -> Result<(Scalar, Scalar, Scalar, Scalar)> {
+        let q_in = self.patch_heat_flow(region, patch)?;
+        let range = self.mesh.patch_range(region, patch)?;
+        let h = &self.mesh.host;
+        let (mut q_ext, mut q_rad, mut lin) = (0.0 as Scalar, 0.0 as Scalar, 0.0 as Scalar);
+        if let Some(e) = &self.enclosure {
+            for f in e.faces.iter().filter(|f| range.contains(&f.bf)) {
+                let a = h.b_mag_sf[f.bf];
+                let (t, t0) = (self.bt[f.bf], f.t0);
+                q_ext += a * f.q_ext;
+                q_rad += a * f.emissivity * (SIGMA_SB * t * t * t * t - f.irradiation);
+                let d = t - t0;
+                lin += a * f.emissivity * SIGMA_SB * d * d * (t * t + 2.0 * t * t0 + 3.0 * t0 * t0);
+            }
+        }
+        Ok((q_ext, q_in, q_rad, lin))
+    }
+
+    /// (S98.9)'s total, W: `SUM |Sf| eps (sigma T0^4 - H_b)` over the
+    /// radiating interface faces at the `T0` and `H_b` the last update used -
+    /// the power the cell source removes, `EnclosureReport::interface_source`'s
+    /// negative. Zero with no enclosure.
+    pub fn interface_radiated(&self) -> Scalar {
+        let Some(e) = &self.enclosure else { return 0.0 };
+        let h = &self.mesh.host;
+        e.faces
+            .iter()
+            .filter(|f| f.interface)
+            .map(|f| {
+                let t = f.t0;
+                h.b_mag_sf[f.bf] * f.emissivity * (SIGMA_SB * t * t * t * t - f.irradiation)
+            })
+            .sum()
     }
 
     /// Every face of one patch, as `(face centre, area, evaluated T)`.
@@ -551,21 +638,176 @@ pub struct FlowCase<'a> {
 //  The run
 // ==========================================================================
 
+/// SPEC-LIT §98.8: the enclosure's state across the SIMPLE loop.
+struct Enclosure<'m> {
+    s2s: S2s<'m>,
+    /// `Energy::k_eff_wall()`, copied before every update: `S2s::update`
+    /// takes `T` mutably and the conductivity immutably, from one `Energy`.
+    k_wall: DevBuf<Scalar>,
+    /// The selection the model was built from, per thermal boundary face.
+    sel: RadiantFaces,
+    /// `true` on the fluid side of a radiating interface, per boundary face.
+    on_interface: Vec<bool>,
+    /// `(fluid bf, solid cell, slot)` for every radiating interface face.
+    interface_faces: Vec<(usize, usize, usize)>,
+    /// (S98.9) per thermal cell, and its device copy.
+    sink: Vec<Scalar>,
+    sink_dev: DevBuf<Scalar>,
+    /// The last update's gathered `T0` and broadcast `H_b`, per slot.
+    t0: Vec<Scalar>,
+    h: Vec<Scalar>,
+    updates: usize,
+    view_factors: String,
+}
+
+impl<'m> Enclosure<'m> {
+    /// §98.8's construction: the selection, then `S2s::new` over the thermal
+    /// mesh's boundary, whose face polygons `attach_points` put on `tm`.
+    fn new(
+        gpu: &Gpu,
+        thermal_mesh: &'m GpuMesh,
+        tm: &ThermalMesh,
+        case: &FlowCase<'_>,
+        r: &FlowRadiation<'_>,
+    ) -> Result<Self> {
+        use crate::io::case_cht::LoweredBc;
+        let h = &tm.host;
+        let nbf = h.n_boundary_faces;
+        let mut sel = RadiantFaces {
+            radiating: vec![false; nbf],
+            emissivity: vec![0.0; nbf],
+            q_ext: vec![0.0; nbf],
+        };
+        for (region, patch, bc) in &case.patch_bcs {
+            if let LoweredBc::S2sWall { emissivity, q } = bc {
+                for bf in tm.patch_range(*region, patch)? {
+                    sel.radiating[bf] = true;
+                    sel.emissivity[bf] = *emissivity;
+                    sel.q_ext[bf] = *q;
+                }
+            }
+        }
+        let mut on_interface = vec![false; nbf];
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for &(i, eps) in &r.interfaces {
+            let (_, range) = tm.interface_ranges.get(i).ok_or_else(|| {
+                Error::Config(format!(
+                    "radiation: interface {i} does not exist - the case has {} (SPEC-LIT 98.8)",
+                    tm.interface_ranges.len()
+                ))
+            })?;
+            let fluid_is_a = tm.regions[case.interfaces[i].region_a].kind == RegionKind::Fluid;
+            for p in &tm.pairs[range.clone()] {
+                let (bf_f, bf_s) = if fluid_is_a {
+                    (p.bf_a as usize, p.bf_b as usize)
+                } else {
+                    (p.bf_b as usize, p.bf_a as usize)
+                };
+                sel.radiating[bf_f] = true;
+                sel.emissivity[bf_f] = eps;
+                on_interface[bf_f] = true;
+                pairs.push((bf_f, h.b_face_cells[bf_s] as usize));
+            }
+        }
+        let s2s = S2s::new(gpu, thermal_mesh, h, &tm.points, &tm.faces, &sel, r.config)?;
+        let n = s2s.n_fine();
+        let mut slot_of = vec![usize::MAX; nbf];
+        for s in 0..n {
+            slot_of[s2s.b_face_of(s) as usize] = s;
+        }
+        let interface_faces = pairs.into_iter().map(|(bf, c)| (bf, c, slot_of[bf])).collect();
+        let view_factors = s2s.view_factors().report().describe();
+        Ok(Self {
+            s2s,
+            k_wall: gpu.zeros(nbf.max(1))?,
+            sel,
+            on_interface,
+            interface_faces,
+            sink: vec![0.0; h.n_cells],
+            sink_dev: gpu.zeros(h.n_cells.max(1))?,
+            t0: vec![0.0; n],
+            h: vec![0.0; n],
+            updates: 0,
+            view_factors,
+        })
+    }
+
+    /// Step 4c (SPEC-LIT §98.8): one `S2s::update` on the energy's `T`, the
+    /// face temperatures and the irradiation it used read back, and - on a
+    /// case with a radiating interface - the sources cleared, the uniform one
+    /// registered again and (S98.9) registered beside it.
+    fn exchange(
+        &mut self,
+        gpu: &Gpu,
+        fldk: &FieldKernels,
+        energy: &mut Energy<'_>,
+        tm: &ThermalMesh,
+        uniform_q: Option<&DevBuf<Scalar>>,
+    ) -> Result<()> {
+        let h = &tm.host;
+        field_ops::copy_field(gpu, fldk, &mut self.k_wall, energy.k_eff_wall(), h.n_boundary_faces)?;
+        self.s2s.update(gpu, energy.field_mut(), &self.k_wall)?;
+        self.updates += 1;
+        let bt = gpu.download(&energy.field().bf)?;
+        let hb = self.s2s.irradiation_fine(gpu)?;
+        for s in 0..self.t0.len() {
+            self.t0[s] = bt[self.s2s.b_face_of(s) as usize];
+            self.h[s] = hb[s];
+        }
+        if self.interface_faces.is_empty() {
+            return Ok(());
+        }
+        self.sink.iter_mut().for_each(|x| *x = 0.0);
+        for &(bf, c, s) in &self.interface_faces {
+            let t = self.t0[s];
+            let q_r = self.sel.emissivity[bf] * (SIGMA_SB * t * t * t * t - self.h[s]);
+            self.sink[c] -= q_r * h.b_mag_sf[bf] / h.v[c];
+        }
+        gpu.write(&mut self.sink_dev, &self.sink)?;
+        let sources = energy.sources_mut();
+        sources.clear(gpu)?;
+        if let Some(q) = uniform_q {
+            sources.register_explicit(gpu, q)?;
+        }
+        sources.register_explicit(gpu, &self.sink_dev)
+    }
+
+    /// §98.8's report of the last update. `interface_source` is measured by
+    /// the caller, which owns the sources.
+    fn report(&self, interface_source: Scalar) -> EnclosureReport {
+        let r = self.s2s.report();
+        EnclosureReport {
+            net_power: r.net_power,
+            gross_power: r.gross_power,
+            radiosity_residual: r.radiosity_residual,
+            sweeps: r.sweeps,
+            view_factors: self.view_factors.clone(),
+            updates: self.updates,
+            relaxation: self.s2s.config().relaxation,
+            faces: (0..self.t0.len())
+                .map(|s| {
+                    let bf = self.s2s.b_face_of(s) as usize;
+                    RadiatingFace {
+                        bf,
+                        emissivity: self.sel.emissivity[bf],
+                        q_ext: self.sel.q_ext[bf],
+                        interface: self.on_interface[bf],
+                        t0: self.t0[s],
+                        irradiation: self.h[s],
+                    }
+                })
+                .collect(),
+            interface_source,
+        }
+    }
+}
+
 /// Solve a conjugate fluid/solid case - SPEC-LIT §59.4's loop, five steps.
 #[allow(clippy::too_many_lines)]
 pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> {
     use crate::io::case_cht::LoweredBc;
 
     case.flow.validate()?;
-    // SPEC-LIT §98.7: the enclosure is lowered; the driver that runs it is
-    // §98.8's and is not in this build yet.
-    if case.radiation.is_some() {
-        return Err(Error::Config(
-            "run_flow_case: this case names an enclosure (`radiation`, SPEC-LIT 98.7), and the \
-             driver that runs one (SPEC-LIT 98.8) is not in this build"
-                .to_string(),
-        ));
-    }
     if let Some(b) = &case.buoyancy {
         b.validate()?;
     }
@@ -590,7 +832,13 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             mesh: m,
         })
         .collect();
-    let tm = ThermalMesh::build(&regions, &case.interfaces, case.tolerances)?;
+    let mut tm = ThermalMesh::build(&regions, &case.interfaces, case.tolerances)?;
+    // SPEC-LIT §98.8: the enclosure needs the face polygons `HostMesh` does
+    // not keep (§49.3); a case with no enclosure never attaches them.
+    if let Some(r) = &case.radiation {
+        let raws: Vec<&crate::io::polymesh::PolyMeshRaw> = r.raw.iter().collect();
+        tm.attach_points(&raws)?;
+    }
 
     let fluid = case.regions[0]
         .fluid
@@ -824,16 +1072,31 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     mark_coupled_faces(gpu, energy.field_mut(), &tm)?;
 
     // ---- the volumetric sources ------------------------------------------
-    if case.regions.iter().any(|r| r.source != 0.0) {
-        let mut q = vec![0.0 as Scalar; tm.host.n_cells];
-        for (block, r) in tm.regions.iter().zip(&case.regions) {
-            for c in block.cells() {
-                q[c] = r.source;
+    //
+    // SPEC-LIT §98.8: the device array is kept, because a case with a
+    // radiating interface clears the sources every iteration and registers
+    // it again; its host total is what `interface_source` is measured beside.
+    let (uniform_q, uniform_total): (Option<DevBuf<Scalar>>, Scalar) =
+        if case.regions.iter().any(|r| r.source != 0.0) {
+            let mut q = vec![0.0 as Scalar; tm.host.n_cells];
+            for (block, r) in tm.regions.iter().zip(&case.regions) {
+                for c in block.cells() {
+                    q[c] = r.source;
+                }
             }
-        }
-        let dq = gpu.upload(&q)?;
-        energy.sources_mut().register_explicit(gpu, &dq)?;
-    }
+            let total: Scalar = q.iter().zip(&tm.host.v).map(|(a, v)| a * v).sum();
+            let dq = gpu.upload(&q)?;
+            energy.sources_mut().register_explicit(gpu, &dq)?;
+            (Some(dq), total)
+        } else {
+            (None, 0.0)
+        };
+
+    // ---- SPEC-LIT §98.8: the enclosure -----------------------------------
+    let mut enclosure: Option<Enclosure<'_>> = match &case.radiation {
+        None => None,
+        Some(r) => Some(Enclosure::new(gpu, &thermal_mesh, &tm, case, r)?),
+    };
 
     // ---- the initial field -----------------------------------------------
     {
@@ -1167,6 +1430,13 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
             crate::cht::ambient::relinearise(gpu, energy.field_mut(), &mut external)?;
         }
 
+        // 4c. SPEC-LIT §98.8: the enclosure, once per iteration - after 4b's
+        // write-back, before the energy solve, and only on a case that names
+        // one.
+        if let Some(e) = enclosure.as_mut() {
+            e.exchange(gpu, &fldk, &mut energy, &tm, uniform_q.as_ref())?;
+        }
+
         // 5. the one energy equation, over both regions
         let tperf = energy.correct(gpu, &phi_thermal, &nut_thermal, &tke, nu, &gas)?;
 
@@ -1205,6 +1475,18 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         .transpose()?
         .unwrap_or_default();
 
+    // SPEC-LIT §98.8: what the enclosure measured on the last iteration.
+    let enclosure_report = match &enclosure {
+        None => None,
+        Some(e) => {
+            let interface_source = if e.interface_faces.is_empty() {
+                0.0
+            } else {
+                energy.sources_mut().total_q(gpu, &thermal_mesh)? - uniform_total
+            };
+            Some(e.report(interface_source))
+        }
+    };
     let bt = gpu.download(&energy.field().bf)?;
     let external_residual = crate::cht::ambient::linearisation_residual(&bt, &external);
     let rho_cp = fluid.rho * fluid.cp;
@@ -1262,6 +1544,7 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
         openings: opening_report,
         fluid_rho_cp: rho_cp,
         external_residual,
+        enclosure: enclosure_report,
         mesh: tm,
     })
 }

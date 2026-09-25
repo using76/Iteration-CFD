@@ -5098,4 +5098,151 @@ mod enclosure {
         assert!(schema.contains("s2sWall"), "the schema must spell `s2sWall`");
         assert!(schema.contains("\"radiation\""), "the schema must spell `radiation`");
     }
+
+    use crate::cht::flow::ChtFlowSolution;
+    use crate::radiation::SIGMA_SB;
+
+    /// A live run of the box against its own dictionary; the directory is removed.
+    fn box_run(
+        gpu: &Gpu,
+        tag: &str,
+        dict: &str,
+        side: &str,
+        air_top: &str,
+        iface: &str,
+        iterations: usize,
+    ) -> ChtFlowSolution {
+        let dir = enclosure_dir(tag, dict);
+        let low = lower_box(&box_case(5, side, air_top, iface, RAD, iterations), &dir)
+            .unwrap_or_else(|e| panic!("lower: {e}"));
+        let case = low.flow_case().expect("a conjugate case");
+        let sol = crate::cht::flow::run_flow_case(gpu, &case).unwrap_or_else(|e| panic!("run: {e}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        sol
+    }
+
+    fn t_gap(a: &ChtFlowSolution, b: &ChtFlowSolution) -> Scalar {
+        a.t.iter().zip(&b.t).fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn an_enclosure_on_a_live_run_balances_its_power_splits_every_wall_and_sources_the_interface_once() {
+        let Some(gpu) = gpu() else { return };
+        let sol = box_run(&gpu, "live", &box_dict(0.8, 1.0), S2S, TOP_OWN, IFACE, 40);
+        let e = sol.enclosure.as_ref().unwrap();
+        println!("updates {} against iterations {}", e.updates, sol.iterations);
+        println!("radiating faces {} (25 interface + 4 walls of 20)", e.faces.len());
+        assert_eq!(e.updates, sol.iterations);
+        assert_eq!(e.faces.len(), 25 + 4 * 20);
+        println!(
+            "net_power {:+.6e} against gross_power {:+.6e}",
+            e.net_power, e.gross_power
+        );
+        assert!(e.gross_power > 0.0, "gross_power {}", e.gross_power);
+        assert!(
+            e.net_power.abs() <= 1e-10 * e.gross_power,
+            "net_power {} against gross_power {}",
+            e.net_power,
+            e.gross_power
+        );
+        for p in ["airBottom", "airTop", "airFront", "airBack"] {
+            let (q_ext, q_in, q_rad, lin) = sol.radiative_split(0, p).unwrap();
+            println!(
+                "{p}: q_ext {q_ext:+.6e}, q_in {q_in:+.6e}, q_rad {q_rad:+.6e}, (S98.10) L {lin:+.6e}"
+            );
+            assert!(q_rad != 0.0, "{p}: q_rad is zero");
+            let resid = (q_in + q_rad - q_ext - lin).abs();
+            let scale = q_in.abs().max(q_rad.abs());
+            println!("{p}: (S98.10) residual {resid:.3e} against scale {scale:.3e}");
+            assert!(
+                resid <= 1e-9 * scale,
+                "{p}: residual {resid:.3e} against scale {scale:.3e}"
+            );
+        }
+        let (q_ext, _, _, _) = sol.radiative_split(0, "airTop").unwrap();
+        println!("airTop external flux total {q_ext:+.12e} W");
+        assert!(
+            (q_ext - 0.2).abs() <= 1e-12,
+            "airTop external {q_ext} against 0.25 W/m^2 on 0.8 m^2"
+        );
+        let rad = sol.interface_radiated();
+        println!(
+            "interface radiated {rad:+.6e} W against (S98.9) cell source {:+.6e} W",
+            e.interface_source
+        );
+        assert!(rad != 0.0, "interface radiated power is zero");
+        assert!(
+            (e.interface_source + rad).abs() <= 1e-12 * rad.abs(),
+            "cell source {} against radiated {}",
+            e.interface_source,
+            rad
+        );
+        let imb = sol.interface.imbalance();
+        println!("interface conservation imbalance {imb:.3e}");
+        assert!(imb <= 1e-12, "interface imbalance {imb}");
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn an_interface_radiating_into_a_black_closure_meets_the_two_surface_closed_form_face_by_face() {
+        let Some(gpu) = gpu() else { return };
+        let sol = box_run(&gpu, "surround", &box_dict(0.8, 1.0), ADIABATIC, ADIABATIC, IFACE, 20);
+        let e = sol.enclosure.as_ref().unwrap();
+        println!("radiating faces {}", e.faces.len());
+        assert_eq!(e.faces.len(), 25);
+        assert!(e.faces.iter().all(|f| f.interface), "a face is not on the interface");
+        let (mut worst, mut scale) = (0.0 as Scalar, 0.0 as Scalar);
+        let (mut t_lo, mut t_hi) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
+        for f in &e.faces {
+            let q = f.emissivity * (SIGMA_SB * f.t0.powi(4) - f.irradiation);
+            let want = crate::s2s::parallel_plate_flux(f.t0, 299.95, f.emissivity, 1.0);
+            worst = worst.max((q - want).abs());
+            scale = scale.max(want.abs());
+            t_lo = t_lo.min(f.t0);
+            t_hi = t_hi.max(f.t0);
+        }
+        println!("face T0 in [{t_lo:.6}, {t_hi:.6}] K; worst {worst:.3e} against scale {scale:.3e}");
+        assert!(scale > 0.0, "closed-form scale is zero");
+        assert!(
+            worst <= 1e-10 * scale,
+            "worst {worst:.3e} against scale {scale:.3e}"
+        );
+    }
+
+    #[test]
+    fn pair_the_dictionary_emissivity_moves_the_enclosure_answer() {
+        let Some(gpu) = gpu() else { return };
+        let a = box_run(&gpu, "eps03", &box_dict(0.3, 1.0), S2S, S2S, IFACE, 20);
+        let b = box_run(&gpu, "eps08", &box_dict(0.8, 1.0), S2S, S2S, IFACE, 20);
+        let gap = t_gap(&a, &b);
+        println!("emissivity 0.3 against 0.8: worst T gap {gap:.6e} K");
+        assert!(gap > 1e-6, "the two emissivities disagree by only {gap:.3e} K \
+            - a case input must move the answer (SPEC-LIT 13.4.1)");
+    }
+
+    #[test]
+    fn pair_an_interface_emissivity_moves_the_enclosure_answer() {
+        let Some(gpu) = gpu() else { return };
+        let a = box_run(&gpu, "if09", &box_dict(0.8, 1.0), S2S, S2S, IFACE, 20);
+        let b = box_run(&gpu, "if05", &box_dict(0.8, 1.0), S2S, S2S, r#", "emissivity": 0.5"#, 20);
+        let gap = t_gap(&a, &b);
+        println!("interface emissivity 0.9 against 0.5: worst T gap {gap:.6e} K");
+        assert!(gap > 1e-6, "the two interface emissivities disagree by only {gap:.3e} K \
+            - a case input must move the answer (SPEC-LIT 13.4.1)");
+    }
+
+    #[test]
+    fn pair_radiation_relaxation_moves_the_enclosure_answer() {
+        let Some(gpu) = gpu() else { return };
+        // Two iterations, because the relaxation starts from a zero
+        // irradiation and what that start costs a converged run is Gate
+        // 98-C's measurement, not this pair test's.
+        let a = box_run(&gpu, "w10", &box_dict(0.8, 1.0), S2S, S2S, IFACE, 2);
+        let b = box_run(&gpu, "w03", &box_dict(0.8, 0.3), S2S, S2S, IFACE, 2);
+        let gap = t_gap(&a, &b);
+        println!("radiationRelaxation 1.0 against 0.3, two iterations: worst T gap {gap:.6e} K");
+        assert!(gap > 1e-6, "the two relaxations disagree by only {gap:.3e} K \
+            - a case input must move the answer (SPEC-LIT 13.4.1)");
+    }
 }
