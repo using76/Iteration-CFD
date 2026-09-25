@@ -1078,6 +1078,7 @@ def check(report_dir=REPORT_DIR):
         add("rules bundle", hashlib.sha256(data).hexdigest() == want, bpath)
     ok_all, why_all = True, "%s (no rounds)" % os.path.join(report_dir, "eval_r*.json.gz")
     if rep is not None:
+        checked = []
         for r in rep.get("rounds") or []:
             fname = r["bundle"]["file"]
             fpath = os.path.join(report_dir, fname)
@@ -1089,6 +1090,9 @@ def check(report_dir=REPORT_DIR):
             if h != r["bundle"]["sha256"]:
                 ok_all, why_all = False, "%s holds %s" % (fpath, h[:12])
                 break
+            checked.append(fname)
+        if ok_all and checked:
+            why_all = "%s: %s" % (report_dir, ", ".join(checked))
         if not (rep.get("rounds") or []):
             why_all = "%s (no rounds)" % os.path.join(report_dir, "eval_r*.json.gz")
     add("round bundles", ok_all and rep is not None,
@@ -1101,9 +1105,6 @@ def _check_models(rep, pm, bpath, mp, items, report_dir, rp_path):
     def add(name, ok, why):
         items.append({"name": name, "ok": bool(ok), "why": why})
 
-    ok_all, why_all = True, "%s (no rounds)" % os.path.join(report_dir, "eval_r*.json.gz")
-    if rep is not None and not (rep.get("rounds") or []):
-        why_all = "%s (no rounds)" % os.path.join(report_dir, "eval_r*.json.gz")
     msha = model_sha(pm) if isinstance(pm, dict) and pm.get("schema") == MODEL_SCHEMA else None
     if pm is None or rep is None or not os.path.isfile(bpath) or msha is None:
         add("model rebuild", False, bpath if os.path.isfile(bpath) or pm is None

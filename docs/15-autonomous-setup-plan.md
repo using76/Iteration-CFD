@@ -624,3 +624,45 @@ Run by `tools/autonomy/baseline.py --run` (both splits), `--rcurv`, `--report` a
   group 11 failed whenever its two runs straddled a second (6 of 6 runs pass after); `campaign.Campaign._write_progress`
   shared one tmp file unlocked, so two geometries ending together raised WinError 32 and the second end record was a
   HARNESS-ERROR (647 of 800 concurrent writes failed before, 0 after; a regression check joins campaign group 10).
+
+### G-PRIOR, the L3 prior (AM-13), 2026-09-25: PASS, the prior ships enabled
+
+Run by `tools/autonomy/campaign.py --run --manifest tuning --mode rules` (4 streams, 37,291 s) and then
+`tools/autonomy/prior.py --gate` (two evaluation rounds at 6 streams, 2,920 s and 896 s) on binary sha256
+`054bba67…a90b` at tree `344aade`; the report is `tools/autonomy/prior/G-PRIOR.json` (and `.md`), the shipped model
+`prior/prior_model.json` (model sha256 `ce086424…31a1`), the rules campaign `prior/tuning_rules.json.gz` (sha256
+`583556b0…0075`) and the rounds `prior/eval_r1.json.gz`, `eval_r2.json.gz`; `prior.py --check` rebuilds the model from
+the committed bundle and passes.
+
+- **The rules campaign** (420 tuning geometries, 805 rows, 0 harness errors, 0 orphans, peak 7.6 GiB): PASS 58,
+  CAPABILITY-LIMITED 169, EXHAUSTED 118, NO-REMEDY 3, REFUSED 24, SURFACE-OPEN 47, SURFACE-REFUSED 1. 348 geometries
+  have an attempt 1; 227 of them pass (no F flag) at some attempt and form the bank. The pool of 372 fingerprints
+  keeps all 17 features; the locked abstention distance is 0.225634 (the 95th percentile of the pool's
+  nearest-neighbour RMS distance).
+- **Attempt-1 passes (of 420; strict passes in brackets):** rules-only 80 (35); real prior 214 (54), gain 134, loss 0;
+  shuffled fingerprints 169, 171, 169 (51, 52, 52), mean 169.667. Both conditions hold: 214 >= 80 and 169.667 < 214.
+  Per family, rules / real / shuffled mean: A 0 / 5 / 3.0, B 29 / 81 / 64.7, D 20 / 66 / 49.3, E 13 / 19 / 16.0,
+  F 13 / 22 / 20.3, G 5 / 21 / 16.3. Real decisions: PR-KNN 189 (139 reuse a config the rules campaign already ran,
+  50 were meshed; 0 refused by preflight), PR-KEEP 81, PR-FAR 76, PR-NOEDIT 2.
+- **Caution 1: most of the gain is global.** The shuffled control keeps 90 of the 134 gains: the bank's commonest
+  paths end in RM-SNAP-FT, which helps almost any feature-bearing geometry. The fingerprint adds 44 geometries over
+  the control. **Caution 2: every one of the 134 gains carries RM-SNAP-FT** (feature attraction off; 72 of them also
+  one or two coarser wall levels), which is G-PILOT caution 1 at attempt 1: the edges are not captured. G-FID
+  (feature-edge snapped share no worse than B0-template) is the guard that binds in AM-16.
+- **Null policy** (a missing-indicator plus a stated fill, on log10 of the value over the body's largest extent):
+  curvature p5/p50/p95 null on 97 of 372 (planar bodies) -> fill 2.0, clip [-3, 2], `curv_missing`; inner thickness
+  null on 126 -> fill 0.0, clip [-3, 0], `inner_missing`; outer gap null on 324 -> fill 1.0, clip [-3, 1],
+  `gap_missing`; `lattice_base_size_m` (null on 334) is excluded, the `commensurate` feature carries it.
+- **Where the tree departs from the plan:** (1) leave-one-group-out with one group per geometry, each geometry at
+  most one bank entry (its earliest attempt with no F flag), so it is §F's leave-one-geometry-out. (2) The prior
+  transfers the refinement and snap knobs as a remedy path: the octree/castellate/snap remedies a neighbour needed
+  are re-applied through remedies.py's own functions and `_commit`, so no wall drops below the y+ floor, the R-PLANE
+  path is left alone and the layers block is never touched. (3) The standardisation and the abstention distance use
+  every fingerprinted tuning geometry, outcomes unused. (4) The control is three permutations of the bank's
+  fingerprints inside each fold, compared by their mean. (5) A config the rules campaign already meshed for that
+  geometry is reused, not meshed again (G-DET determinism); the rounds run with the audit sample off.
+- **Fixed in this unit, each proved first:** `campaign.replay` looked up the setup config's attempt-1 veto on a
+  prior-applied row, which _run_system never vetoes, so every prior-decided geometry was a replay mismatch (campaign
+  group 9 now replays its fake prior and prior.py's group 9 its own); `prior._finish` raised KeyError on a geometry
+  with no rows; `tools/mesh/selftest.py` gave the autonomy gate 300 s, which it now exceeds under load (343 s
+  measured), so the child timeout is 900 s.
