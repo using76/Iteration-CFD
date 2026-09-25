@@ -3282,6 +3282,11 @@ fn run(c: &mut Checks) -> Result<()> {
     check_gate_100b_air(c)?;
     check_gate_100b_nasa(c)?;
     c.leave_gate();
+    // SPEC-LIT 100.8 - the Kirchhoff slab, and Gate 100-A.
+    println!("\n=== Gate 100-A: the Kirchhoff slab, kappa linear in T, three meshes (SPEC-LIT 100.8) ===");
+    c.enter_gate("SPEC-LIT 100.8 Gate 100-A Kirchhoff slab");
+    check_kirchhoff_slab(c, &gpu)?;
+    c.leave_gate();
     // SPEC-LIT 105 - the moving mesh, and Gate 105-A.
     println!("\n=== Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) ===");
     c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
@@ -20761,6 +20766,246 @@ fn check_gate_100b_nasa(c: &mut Checks) -> Result<()> {
 }
 
 // ==========================================================================
+//  SPEC-LIT §100.8 - Gate 100-A, the Kirchhoff slab
+// ==========================================================================
+
+/// Gate 100-A's `kappa(T)` (SPEC-LIT 100.8): the two knots of its table,
+/// `(T, kappa)`, K and W/(m K).
+const K100A: [(f64, f64); 2] = [(250.0, 1.2), (550.0, 0.6)];
+/// Gate 100-A's slab thickness, m, and its two wall temperatures, K.
+const L100A: f64 = 0.02;
+const T1_100A: f64 = 500.0;
+const T2_100A: f64 = 300.0;
+
+/// The table's slope `s`, W/(m K^2).
+fn s100a() -> f64 {
+    let ((ta, ka), (tb, kb)) = (K100A[0], K100A[1]);
+    (kb - ka) / (tb - ta)
+}
+
+/// `kappa(T)` of the gate's table - linear, so (S100.8)-(S100.10) are exact.
+fn k100a(t: f64) -> f64 {
+    K100A[0].1 + (t - K100A[0].0) * s100a()
+}
+
+/// (S100.8): Kirchhoff's potential `psi(T) = int_T2^T kappa`, W/m.
+fn psi100a(t: f64) -> f64 {
+    let w = t - T2_100A;
+    k100a(T2_100A) * w + 0.5 * s100a() * w * w
+}
+
+/// (S100.8) inverted, in the form with no cancellation.
+fn t_of_psi100a(psi: f64) -> f64 {
+    let (k2, s) = (k100a(T2_100A), s100a());
+    T2_100A + 2.0 * psi / (k2 + (k2 * k2 + 2.0 * s * psi).sqrt())
+}
+
+/// (S100.9): the exact temperature at `x`, m from the hot wall.
+fn t_exact100a(x: f64) -> f64 {
+    t_of_psi100a(psi100a(T1_100A) * (1.0 - x / L100A))
+}
+
+/// (S100.10): the exact volume-mean temperature, K.
+fn t_mean100a() -> f64 {
+    let (k2, s, t2) = (k100a(T2_100A), s100a(), T2_100A);
+    let f = |t: f64| k2 * t * t / 2.0 + s * (t * t * t / 3.0 - t2 * t * t / 2.0);
+    (f(T1_100A) - f(T2_100A)) / psi100a(T1_100A)
+}
+
+/// Gate 100-A's slab as a case document (SPEC-LIT 100.8): `nx` cells across
+/// 20 mm, `hot` held at 500 K and `face` at 300 K, the four side faces
+/// adiabatic, `kappa` the table of `K100A`, started at 500 K; the outer loop
+/// states `tolerance 1e-13` so leg 1 is taken at the discrete fixed point.
+fn gate_100a_slab(nx: usize) -> String {
+    let ((ta, ka), (tb, kb)) = (K100A[0], K100A[1]);
+    format!(
+        r#"{{
+  "name": "gate100aSlab",
+  "regions": [
+    {{
+      "name": "slab",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [{L100A}, 0.01, 0.01] }},
+        "cells": [{nx}, 1, 1],
+        "boundaries": {{
+          "xmin": "hot", "xmax": "face",
+          "ymin": "s1", "ymax": "s2", "zmin": "s3", "zmax": "s4"
+        }}
+      }},
+      "material": {{ "rho": 2000.0, "c": 800.0,
+                    "kappa": {{ "table": [[{ta:?}, {ka:?}], [{tb:?}, {kb:?}]] }} }},
+      "patches": [
+        {{ "match": "hot",  "T": {{ "type": "fixedValue", "value": {T1_100A:?} }} }},
+        {{ "match": "face", "T": {{ "type": "fixedValue", "value": {T2_100A:?} }} }},
+        {{ "match": "s1", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s2", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s3", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s4", "T": {{ "type": "zeroGradient" }} }}
+      ]
+    }}
+  ],
+  "initial": {{ "T": {T1_100A:?} }},
+  "run": {{ "steady": true }},
+  "numerics": {{
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 4000,
+    "outer": {{ "tolerance": 1e-13, "maxOuter": 60 }}
+  }}
+}}"#
+    )
+}
+
+/// Gate 100-A (SPEC-LIT 100.8): the Kirchhoff slab on three meshes. Leg 1,
+/// transformed: `psi` of every face temperature against (S100.9), and the
+/// heat flow against `psi_1 / L`, to 1e-12. Leg 2, untransformed: the mean
+/// temperature against (S100.10) inside §94's band on the finest mesh, at
+/// an observed order within 0.2 of 2.
+fn check_kirchhoff_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::run_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let psi1 = psi100a(T1_100A);
+    let t_mean = t_mean100a();
+    c.note(&format!(
+        "  (S100.8)-(S100.10): psi_1 = {psi1:.12} W/m, q = psi_1/L = {:.9} W/m^2, \
+         T_mean = {t_mean:.12} K",
+        psi1 / L100A
+    ));
+    let mut levels = Vec::new();
+    let (mut worst_psi, mut worst_q) = (0.0f64, 0.0f64);
+    let mut nodal: Vec<f64> = Vec::new();
+    let mut detail = Vec::new();
+
+    for nx in [20usize, 40, 80] {
+        let low = parse_cht_case(&gate_100a_slab(nx), "SPEC-LIT 100.8 Gate 100-A")?.lower()?;
+        let sol = run_case(gpu, &low)?;
+        let h = &sol.mesh.host;
+        // Leg 1: every face temperature, transformed (SPEC-LIT 100.8).
+        let mut w_psi = 0.0f64;
+        for f in 0..h.n_internal_faces {
+            let (o, n) = (h.owner[f] as usize, h.neighbour[f] as usize);
+            let (tp, tn) = (f64::from(sol.t[o]), f64::from(sol.t[n]));
+            let (kp, kn) = (k100a(tp), k100a(tn));
+            let tf = (kp * tp + kn * tn) / (kp + kn);
+            let x = f64::from(h.cf[f].x);
+            w_psi = w_psi.max((psi100a(tf) - psi1 * (1.0 - x / L100A)).abs() / psi1);
+        }
+        for patch in ["hot", "face"] {
+            for bf in sol.mesh.patch_range(0, patch)? {
+                let x = f64::from(h.b_cf[bf].x);
+                let tb = f64::from(sol.bt[bf]);
+                w_psi = w_psi.max((psi100a(tb) - psi1 * (1.0 - x / L100A)).abs() / psi1);
+            }
+        }
+
+        let area: f64 = sol.mesh.patch_range(0, "hot")?.map(|bf| f64::from(h.b_mag_sf[bf])).sum();
+        let q = f64::from(sol.patch_heat_flow(0, "hot")?) / area;
+        let rel_q = (q * L100A / psi1 - 1.0).abs();
+        // Leg 2: the mean temperature, untransformed.
+        let mean = f64::from(sol.region_mean(0));
+        let e_nodal = (0..h.n_cells)
+            .map(|k| (f64::from(sol.t[k]) - t_exact100a(f64::from(h.c[k].x))).abs())
+            .fold(0.0f64, f64::max);
+        levels.push(vv::Level { h: (L100A / nx as f64) as Scalar, value: mean as Scalar });
+        let line = format!(
+            "nx={nx:>3} passes={:>2} last change={:.3e} psi(T_f) rel={w_psi:.3e} \
+             |qL/psi_1 - 1|={rel_q:.3e} T_mean={mean:.12} K max|T_c - T(x_c)|={e_nodal:.3e} K",
+            sol.outer_changes.len(),
+            sol.outer_changes.last().map_or(0.0, |d| f64::from(*d))
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+        worst_psi = worst_psi.max(w_psi);
+        worst_q = worst_q.max(rel_q);
+        nodal.push(e_nodal);
+    }
+
+    // The study reads the FINEST level first.
+    levels.reverse();
+    let study = vv::grid_study(&levels)?;
+    c.note(&format!("  mean temperature: {}", study.one_line()));
+    let val = vv::validation(levels[0].value, t_mean as Scalar, study.u_fine, 0.0, 0.0);
+    c.note(&format!("  {}", val.one_line("mean temperature, finest mesh")));
+    c.note(&format!(
+        "  max nodal error ratios per halving: {:.3} {:.3} (second order is 4)",
+        nodal[0] / nodal[1],
+        nodal[1] / nodal[2]
+    ));
+    let e_over_u = if study.u_fine > 0.0 {
+        f64::from(val.e).abs() / f64::from(study.u_fine)
+    } else {
+        f64::INFINITY
+    };
+    let p = study.p.map_or(f64::NAN, f64::from);
+
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: psi(T_f) against (S100.9), worst rel over every face of three meshes",
+        worst_psi as Scalar,
+        1.0e-12,
+    );
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: the heat flow q L against psi_1, worst rel over three meshes",
+        worst_q as Scalar,
+        1.0e-12,
+    );
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: |E| / U_fine of the mean temperature, finest mesh (SPEC-LIT 94)",
+        e_over_u as Scalar,
+        1.0,
+    );
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: |p - 2| of the mean temperature",
+        (p - 2.0).abs() as Scalar,
+        0.2,
+    );
+    let ok = worst_psi <= 1.0e-12 && worst_q <= 1.0e-12 && e_over_u <= 1.0 && (p - 2.0).abs() <= 0.2;
+    if !ok {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 100.8 Gate 100-A Kirchhoff slab",
+            against: "Kirchhoff's transform of a slab with kappa linear in T, (S100.8)-(S100.10), SPEC-LIT 100.8",
+            headline: format!(
+                "psi(T_f) rel {worst_psi:.2e}, |qL/psi_1 - 1| {worst_q:.2e} (1e-12 each); mean T \
+                 |E|/U_fine {e_over_u:.3}, p = {p:.3}"
+            ),
+            detail,
+            uncertainty: Some(Uncertainty::Study(study)),
+        });
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 100.8: Gate 100-A's closed forms, held against themselves and
+/// against a quadrature - no GPU.
+#[cfg(test)]
+mod kirchhoff_100a {
+    use super::*;
+
+    #[test]
+    fn the_kirchhoff_closed_forms_invert_meet_their_walls_and_integrate_to_the_mean() {
+        assert!((k100a(300.0) - 1.1).abs() <= 1e-15, "kappa(300 K) = {}", k100a(300.0));
+        assert!((k100a(500.0) - 0.7).abs() <= 1e-15, "kappa(500 K) = {}", k100a(500.0));
+        assert!((psi100a(T1_100A) - 180.0).abs() <= 1e-12, "psi_1 = {}", psi100a(T1_100A));
+        for i in 0..=16 {
+            let t = T2_100A + (T1_100A - T2_100A) * i as f64 / 16.0;
+            let back = t_of_psi100a(psi100a(t));
+            assert!((back - t).abs() <= 1e-12 * t, "T = {t}: the inverse returns {back}");
+        }
+        assert!((t_exact100a(0.0) - T1_100A).abs() <= 1e-12, "T(0) = {}", t_exact100a(0.0));
+        assert!((t_exact100a(L100A) - T2_100A).abs() <= 1e-12, "T(L) = {}", t_exact100a(L100A));
+        let n = 20_000usize;
+        let mid: f64 = (0..n)
+            .map(|i| t_exact100a(L100A * (i as f64 + 0.5) / n as f64))
+            .sum::<f64>()
+            / n as f64;
+        println!("T_mean = {:.12}, midpoint quadrature {mid:.12}", t_mean100a());
+        assert!((t_mean100a() - 10600.0 / 27.0).abs() <= 1e-10, "T_mean = {}", t_mean100a());
+        assert!((mid - t_mean100a()).abs() <= 1e-6, "quadrature {mid} against {}", t_mean100a());
+    }
+}
+
+// ==========================================================================
 //  SPEC-LIT §97 - the imported region
 // ==========================================================================
 
@@ -20967,7 +21212,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 30 occurrences, 26 distinct - two gates report twice,
+    /// same string. 31 occurrences, 27 distinct - two gates report twice,
     /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
@@ -20993,9 +21238,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 30, "30 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 31, "31 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 26, "26 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 27, "27 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(

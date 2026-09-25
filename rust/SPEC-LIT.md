@@ -30361,6 +30361,67 @@ side of (S100.7) over `max|T|`, one per pass, empty when no curve is present;
 | a `c` curve on a transient | the field moved; its flat twin the number's to `1e-9` |
 | rows 10-14 of §100.5 | each refused, the message naming the setting |
 
+### 100.8 Gate 100-A - the Kirchhoff slab
+
+A slab `L = 20` mm thick, its walls held at `T1 = 500` K and `T2 = 300` K,
+its four side faces adiabatic, and `kappa(T)` the two-knot table
+`[[250, 1.2], [550, 0.6]]` W/(m K): linear, with slope `s = -0.002`
+W/(m K^2), `kappa(300 K) = 1.1` and `kappa(500 K) = 0.7`. Kirchhoff's
+transform makes the problem linear:
+
+```
+psi(T) = int_T2^T kappa(u) du = kappa(T2) (T - T2) + (s/2) (T - T2)^2        (S100.8)
+psi(T(x)) = psi_1 (1 - x/L),     psi_1 = psi(T1),     q = psi_1 / L          (S100.9)
+T_mean = (1/psi_1) int_T2^T1 T kappa(T) dT                                   (S100.10)
+```
+
+and (S100.8) is inverted as `T = T2 + 2 psi / (kappa(T2) + sqrt(kappa(T2)^2
++ 2 s psi))`, the form with no cancellation. Here `psi_1 = 180` W/m,
+`q = 9000` W/m^2 and `T_mean = 10600/27` K.
+
+**Why the transformed leg is exact.** At the loop's fixed point the two
+halves of a cell carry the same flux through the same `kappa(T_P)` over the
+same distance, so `T_P` is the mean of its two face temperatures and
+`F d = kappa(T_P) (T_w - T_e)`. For a `kappa` linear in `T` its value at the
+midpoint is its mean over `[T_e, T_w]`, so `F d = psi(T_w) - psi(T_e)`
+exactly: the face temperatures of the discrete solution are the exact
+solution's, `psi` of them is linear in `x` to round-off, and `F L = psi_1`.
+An interior face temperature is recovered from its two cells as the series
+interface value `(kappa_P T_P + kappa_N T_N)/(kappa_P + kappa_N)`; a boundary
+one is `ChtSolution::bt`. The cell centres are the midpoints of a curved
+profile, and that is the `O(h^2)` error the untransformed leg measures.
+
+**Leg 1, transformed.** On each of three meshes (20, 40 and 80 cells across
+the slab), the worst `|psi(T_f) - psi_1 (1 - x_f/L)| / psi_1` over every
+face, and `|q L / psi_1 - 1|` with `q` the hot wall's heat flow per unit
+area: both at most `1e-12`. It holds only at the discrete fixed point, which
+is why the gate's case states `numerics.outer.tolerance = 1e-13` - so the
+gate also runs §100.7's stated path.
+
+**Leg 2, untransformed.** The slab's volume-mean temperature on the same
+three meshes, through §94's study: the closed form (S100.10) must lie inside
+the finest mesh's band, `|E| <= U_fine`, and the observed order must be
+within 0.2 of 2. A loop that stopped early leaves an error that does not fall
+with the mesh, so this leg is what proves the loop converged to the answer,
+and not merely to a fixed point of its own.
+
+| Check | Expected |
+|---|---|
+| `psi(T_f)` against (S100.9), every face, three meshes | `<= 1e-12` relative to `psi_1` |
+| `q L / psi_1 - 1`, three meshes | `<= 1e-12` |
+| the mean temperature against (S100.10), finest mesh | `|E| <= U_fine` (§94) |
+| the observed order of the mean temperature | within 0.2 of 2 |
+
+**Measured** (RTX 5070 Ti, 2026-09-25, from the section run on its own before the
+unit landed). Each mesh took 12 outer passes, the last relative change
+5.2e-14, 5.0e-14 and 6.7e-14. Leg 1: the worst `psi(T_f)` is 2.9e-14 of
+`psi_1` and the worst `|q L/psi_1 - 1|` is 2.7e-13. Leg 2: the mean
+temperature is 392.612070, 392.597463 and 392.593810 K against
+392.592593 K; the study reads monotone, `p = 2.000`, `U_fine = 1.52e-3` K,
+`E = 1.22e-3` K, so `|E|/U_fine = 0.80` - the `1/Fs` of a study in its
+asymptotic range. The largest cell-centre error falls by 3.90 and 3.95 per
+halving.
+
 ---
 
 ## 105. ALE motion and the space conservation law — the mesh that moves, and the volume it sweeps
