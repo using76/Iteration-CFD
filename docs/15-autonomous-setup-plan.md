@@ -704,3 +704,60 @@ shipped model `optimise/opt_model.json` (model sha256 `d16dfc24…323f`), its tr
   values (labels only; a group-3 check now pins the wall band's value to its name); the replay seam ran a recorded
   None probe or snap value again instead of returning it (a group-6 check); the report's per-round `reused_dir` was
   always True and is gone (the console line says ran or reused).
+
+### The held-out evaluation (AM-16), 2026-09-26: headline 1 (G-FAIL) MISSED, headline 2 (G-BLC-0) PASS
+
+Run once by `tools/autonomy/evaluate.py --run` (6 streams, 02:16-06:34) on binary sha256 `054bba67…a90b` at tree
+`5a8d1cf`, after both sealed baselines verified by hash (`7685d908…`, `03ee0ac4…`) and a write-once plan lock
+(`evaluate/opened.lock`, plan sha256 `1ceecf60…70eb`) was written; the test split (180 geometries, manifest
+`69a6c939…`) was then opened once. The results page is `tools/autonomy/evaluate/EVAL.md` (numbers in `EVAL.json`,
+the directory facts in `runs.json`, nine campaign bundles `eval_*.json.gz`); `evaluate.py --check` passes. Every
+rule was fixed in the unit's brief before the split was opened; nothing was re-run. **The test split is spent**: a
+second claim (AM-L's G-BLC-1) needs a fresh test seed and a new lock.
+
+- **G-FAIL (headline 1): FAIL.** MFR full 73/180 = 0.406 [0.333, 0.481] against B0-template 164/180 = 0.911: the
+  ratio 0.445 misses <= 0.25 and the 95 % upper bound 0.481 misses <= 10 %; the McNemar test holds (b 92, c 1,
+  p 1.9e-26) and no family is worse. Per family, full / B0-template failures: A 29/36, B 1/29, D 5/36, E 4/11,
+  F 7/18, G 27/34 (18 of G's are SURFACE-OPEN in every system). Strict failure: full 0.828, B0-template 1.000.
+  B0-LHS best of 4: MFR 0.578.
+- **G-BLC-0 (headline 2): PASS.** The 15 commensurate D/F geometries: mean BLC_8 0.933 and BLC_full 0.933 (a
+  priori) against B0-template 0 / 0. Elsewhere BLC_8 is reported only: A 0.000, B 0.028, D 0.444, E 0.056, F 0.083,
+  G 0.083, with CAPABILITY-LIMITED patches on 76 geometries (B 35 of 36).
+- **G-QUAL: PASS** (1,791 configs byte-equal to the reference quality block, 0 of 3,312 edits outside the whitelist,
+  0 config sha mismatches, no forbidden-flag literal, the remedies scan ok). **G-DET: PASS** (the 20 pre-registered
+  geometries twice: 21/21 rows equal, content 20/20, both replays reproduce every decision; the full campaign agrees
+  with both on those ids). The B0-template re-measure equals the sealed rows (162 rows, content 143/143).
+- **G-FID: FAIL.** Among passing meshes the median p99/h_f is worse than B0-template in B (0.035 vs 0.016), E
+  (0.032 vs 0.016) and G (0.032 vs 0.016), all under the 0.1 F3b limit; the pinned fraction is 0 on both sides. The
+  feature-edge share could not be compared in any family: B0-template passes no body with sharp edges. On the full
+  system's side 88 of its 107 passing meshes are sharp-edged bodies snapped with feature_tolerance 0, share 0 in every
+  family — the G-PILOT / G-PRIOR / G-OPT caution, now measured on the test split.
+- **G-COST: FAIL on cells alone.** On the 15 geometries both pass, median cells 469,898 against 10,808 (43.5x, bar
+  1.5x); none over budget; campaign wall 7,615 s at 6 streams (the 12-stream bar holds already at 6); peak RSS 59.2 %
+  of RAM (bar 60 %); 0 orphans.
+- **G-EXPL: FAIL** in 5 of 9 campaigns (every one with the optimiser): the records that `explain.audit` calls "a
+  decision record after its run started" (63) are all OPT-NOFEAS or veto-refused OPT-PICK records that end a geometry on
+  its last attempt. campaign.py writes them on that attempt and the audit's terminal list does not name them; the
+  rows themselves are all valid and templated. AM-14's committed rounds carry the same (63 in `refine_r1`), unseen
+  until now.
+- **G-OPT (held-out): FAIL as written.** Full against rules + remedies only: MFR 0.450 -> 0.406 (-4.4 pp, bar 3 pp)
+  but family B regresses (BLC_8 0.056 -> 0.028, one lathe). The regression comes from the prior's B paths, not the
+  optimiser: the optimiser's own marginal (full against -optimiser) is MFR 0.439 -> 0.406 with no family worse, and
+  rules+opt against rules is 0.450 -> 0.417 with none worse. §F says the optimiser then ships disabled; that flip is
+  the user's, not taken here.
+- **G-ABL (reported)**, MFR / BLC_8: full 0.406 / 0.178; -preflight 0.394 / 0.189; -remedies 0.511 / 0.144;
+  -prior 0.417 / 0.172; -optimiser 0.439 / 0.161; rules + remedies only 0.450 / 0.156; B0-template 0.911 / 0.000;
+  B0-LHS best 0.578 / 0.033. Without L0 the system fails 2 geometries fewer (D 5 -> 2; REFUSED 14 -> 10), and 7 of
+  its attempts were not run by the evaluation's RAM guard. On the test split the prior decided PR-KNN 78, PR-KEEP
+  33, PR-FAR 37, and the optimiser OPT-PICK 14, OPT-NOFEAS 26. Tuning context (not the result): rules-only 80, the
+  prior 214 and the shuffled control 169.667 attempt-1 passes of 420, so 89.667 of the 134-geometry gain is reached
+  with shuffled fingerprints and 44.333 is the fingerprint's own.
+- **Found on the way, for the owners of campaign.py and preflight.py:** E-1-038's optimiser pick had its octree
+  probe time out at 900 s; with no `n_leaves` PF-BUDGET abstained and the veto passed it, so it meshed 13.76 M cells
+  in 2,130 s with a job peak working set of 18,226 MiB (the campaign's sampled peak, 16,745 MiB, is its 59.2 % of RAM) before RM-BUDGET-WALL brought it back to 1.73 M. A
+  failed cost probe lets a config through L0.
+- **Where the tree departs from the plan** (all in the report's `departures`): 6 streams, with the 12-stream wall
+  rule; the ablations reuse earlier campaigns' meshes by (geometry, config sha); B0-template re-meshed once for the
+  feature-edge counts the seal lacks; the feature-share rule for feature_tolerance 0; the -preflight RAM guard (8,192
+  MiB); G-OPT decided as written with the optimiser's marginal beside it; -remedies runs K = 1; the plan lock; the
+  G-DET draw; the tier-0 stratum by the manifest's commensurate flag; surface ends count as failures everywhere.
