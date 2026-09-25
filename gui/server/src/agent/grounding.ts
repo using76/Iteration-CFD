@@ -1,6 +1,7 @@
 // The grounding lint: every number an assistant message states must appear in a tool result it saw
 // before that message (docs/15 section F, G-LLM). Pure: it reads a session's messages and writes nothing.
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
+import type { Usage } from '@cfd/shared'
 
 export const GROUNDING_SCHEMA = 'autonomy-grounding/1'
 /** A turn that calls one of these explains a campaign; its numbers are what the lint is for. */
@@ -120,6 +121,8 @@ export interface SessionGrounding {
   checked: number
   ungrounded: number
   messages: MessageGrounding[]
+  /** The repair rounds the session log recorded (agent/groundingRepair.ts); a bare lintSession has none. */
+  repairs?: GroundingRepair[]
 }
 
 function resultText(content: unknown): string {
@@ -159,4 +162,103 @@ export function lintSession(messages: readonly BetaMessageParam[]): SessionGroun
   for (const e of entries) e.final = last.get(e.turn) === e.index
   const camp = entries.filter((e) => e.campaign)
   return { schema: GROUNDING_SCHEMA, explanations: camp.filter((e) => e.final).length, checked: camp.reduce((s, e) => s + e.checked, 0), ungrounded: camp.reduce((s, e) => s + e.ungrounded.length, 0), messages: entries }
+}
+/** One number a tool result holds, and where: the tool, its call id and the JSON path ('/' for the whole result). */
+export interface SourceEntry {
+  value: number
+  tool: string
+  toolUseId: string
+  path: string
+}
+
+/** sourceNumbers with provenance: the same numbers in the same order, each with its JSON path. */
+export function sourceEntries(content: string, tool: string, toolUseId: string): SourceEntry[] {
+  const out: SourceEntry[] = []
+  const add = (value: number, at: string): void => {
+    out.push({ value, tool, toolUseId, path: at || '/' })
+  }
+  const walk = (v: unknown, at: string, depth: number): void => {
+    if (depth > 64) return
+    if (typeof v === 'number') {
+      if (Number.isFinite(v)) add(v, at)
+      return
+    }
+    if (typeof v === 'string') {
+      for (const s of extractNumbers(v)) add(s.value, at)
+      return
+    }
+    if (Array.isArray(v)) {
+      v.forEach((x, i) => walk(x, `${at}/${i}`, depth + 1))
+      return
+    }
+    if (typeof v === 'object' && v !== null) for (const [k, x] of Object.entries(v)) walk(x, `${at}/${k}`, depth + 1)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    parsed = content
+  }
+  walk(parsed, '', 0)
+  return out
+}
+
+/** Every tool-result number of a session, in order: what lintSession grounds the next assistant message on. */
+export function sessionSources(messages: readonly BetaMessageParam[]): SourceEntry[] {
+  const names = new Map<string, string>()
+  const out: SourceEntry[] = []
+  for (const m of messages) {
+    if (typeof m.content === 'string') continue
+    for (const b of m.content) {
+      if (b.type === 'tool_use') names.set(b.id, b.name)
+      if (m.role === 'user' && b.type === 'tool_result') {
+        for (const e of sourceEntries(resultText(b.content), names.get(b.tool_use_id) ?? 'unknown', b.tool_use_id)) out.push(e)
+      }
+    }
+  }
+  return out
+}
+
+/** The tool-result numbers closest to a stated one (relative distance; a percent also against 100x), at most n distinct values. */
+export function nearestSources(s: Pick<StatedNumber, 'value' | 'percent'>, sources: readonly SourceEntry[], n = 3): SourceEntry[] {
+  const rel = (y: number): number => Math.abs(y - s.value) / Math.max(Math.abs(s.value), Math.abs(y), 1e-300)
+  const dist = (y: number): number => (s.percent ? Math.min(rel(y), rel(100 * y)) : rel(y))
+  const seen = new Set<number>()
+  const out: SourceEntry[] = []
+  for (const e of [...sources].sort((a, b) => dist(a.value) - dist(b.value))) {
+    if (seen.has(e.value)) continue
+    seen.add(e.value)
+    out.push(e)
+    if (out.length >= n) break
+  }
+  return out
+}
+
+export const REPAIR_SCHEMA = 'autonomy-grounding-repair/1'
+/** A text and its lint. */
+export interface LintedText {
+  text: string
+  checked: number
+  ungrounded: Array<{ raw: string; value: number; at: number }>
+}
+/** One repair round as the session log keeps it: the draft, the reply shown, and what changed between them. */
+export interface GroundingRepair {
+  schema: typeof REPAIR_SCHEMA
+  turnId: string
+  /** Position of the reply in the session's messages. */
+  index: number
+  at: string
+  /** The model that wrote the correction; null when the call failed. */
+  model: string | null
+  before: LintedText
+  after: LintedText
+  /** Flagged numbers of the draft (raw) that the reply shown no longer states. */
+  fixed: string[]
+  /** Flagged numbers of the reply shown (raw): marked on screen. */
+  remaining: string[]
+  /** The corrected text replaced the draft (false when the call failed or gave the draft back unchanged). */
+  replaced: boolean
+  /** The repair call's own tokens. */
+  usage: Usage
+  error: string | null
 }

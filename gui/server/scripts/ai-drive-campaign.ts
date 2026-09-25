@@ -59,7 +59,7 @@ export function parseCampaignOptions(argv: string[], url: string): CampaignOptio
   return o
 }
 
-interface ExplanationRow { out: string; geometryId: string; sessionId: string; end: string; explanations: number; checked: number; ungrounded: Array<{ raw: string; value: number; at: number }>; text: string }
+interface ExplanationRow { out: string; geometryId: string; sessionId: string; end: string; explanations: number; checked: number; ungrounded: Array<{ raw: string; value: number; at: number }>; before: number; repairs: number; fixed: string[]; remaining: string[]; repairErrors: number; repairUsage: { inputTokens: number; outputTokens: number }; turnUsage: { inputTokens: number; outputTokens: number } | null; text: string }
 interface EditRow { sessionId: string | null; config: string | null; value: number | null; outcome: string; toolUseIds: string[] }
 interface RedTeamRow { id: string; sessionId: string; outcome: RedTeamOutcome; ruleIds: string[] }
 
@@ -75,6 +75,7 @@ export async function driveCampaign(o: CampaignOptions): Promise<number> {
   const ws = new WebSocket(o.url)
   const waiters = new Set<(m: ServerMsg) => boolean>()
   const decisions = new Map<string, 'approved' | 'denied' | 'expired'>()
+  const turnUsage = new Map<string, { inputTokens: number; outputTokens: number }>()
   const known = new Set<string>()
   /** Per phase: may the approval card of a call to this tool be approved? */
   let approveNow = (_name: string): boolean => false
@@ -118,6 +119,7 @@ export async function driveCampaign(o: CampaignOptions): Promise<number> {
       send(yes ? { t: 'tool.approve', sessionId: m.sessionId, toolUseIds: ids, remember: 'none' } : { t: 'tool.deny', sessionId: m.sessionId, toolUseIds: ids, reason: 'the campaign scenario denies this call' })
     }
     if (m.t === 'tool.approval_resolved') for (const id of m.toolUseIds) decisions.set(id, m.decision)
+    if (m.t === 'turn.done') turnUsage.set(m.sessionId, { inputTokens: m.usage.inputTokens, outputTokens: m.usage.outputTokens })
     for (const w of [...waiters]) if (w(m)) break
   })
 
@@ -201,8 +203,13 @@ export async function driveCampaign(o: CampaignOptions): Promise<number> {
       const end = await turn(sid, explainPrompt(rel(out), id))
       const g = await getJson<SessionGrounding>(`/api/sessions/${sid}/grounding`)
       const bad = g.messages.filter((x) => x.campaign).flatMap((x) => x.ungrounded)
-      explanations.push({ out, geometryId: id, sessionId: sid, end, explanations: g.explanations, checked: g.checked, ungrounded: bad, text: await lastText(sid) })
-      say(`[explain] ${out} ${id}: ${end}, ${g.explanations} explanation(s), ${g.checked} numbers, ${bad.length} ungrounded${bad.length ? ` (${bad.map((b) => b.raw).join(', ')})` : ''}`)
+      const reps = g.repairs ?? []
+      const before = bad.length + reps.reduce((s, r) => s + r.before.ungrounded.length - r.after.ungrounded.length, 0)
+      const repairUsage = { inputTokens: reps.reduce((s, r) => s + r.usage.inputTokens, 0), outputTokens: reps.reduce((s, r) => s + r.usage.outputTokens, 0) }
+      const fixed = reps.flatMap((r) => r.fixed)
+      const repairErrors = reps.filter((r) => r.error !== null).length
+      explanations.push({ out, geometryId: id, sessionId: sid, end, explanations: g.explanations, checked: g.checked, ungrounded: bad, before, repairs: reps.length, fixed, remaining: reps.flatMap((r) => r.remaining), repairErrors, repairUsage, turnUsage: turnUsage.get(sid) ?? null, text: await lastText(sid) })
+      say(`[explain] ${out} ${id}: ${end}, ${g.explanations} explanation(s), ${g.checked} numbers, ungrounded ${before} before repair, ${bad.length} after${bad.length ? ` (${bad.map((b) => b.raw).join(', ')})` : ''}${reps.length ? ` | repair fixed ${fixed.join(', ') || 'none'}, tokens in ${repairUsage.inputTokens} out ${repairUsage.outputTokens}${repairErrors ? `, ${repairErrors} failed` : ''}` : ''}`)
     }
   }
 
@@ -247,6 +254,13 @@ export async function driveCampaign(o: CampaignOptions): Promise<number> {
   const nExpl = explanations.filter((e) => e.explanations >= 1).length
   const nChecked = explanations.reduce((s, e) => s + e.checked, 0)
   const nBad = explanations.reduce((s, e) => s + e.ungrounded.length, 0)
+  const nBefore = explanations.reduce((s, e) => s + e.before, 0)
+  const nRepairs = explanations.reduce((s, e) => s + e.repairs, 0)
+  const nRepairErrors = explanations.reduce((s, e) => s + e.repairErrors, 0)
+  const repairTokens = { inputTokens: explanations.reduce((s, e) => s + e.repairUsage.inputTokens, 0), outputTokens: explanations.reduce((s, e) => s + e.repairUsage.outputTokens, 0) }
+  const turnTokens = { inputTokens: explanations.reduce((s, e) => s + (e.turnUsage?.inputTokens ?? 0), 0), outputTokens: explanations.reduce((s, e) => s + (e.turnUsage?.outputTokens ?? 0), 0) }
+  const perReply = (x: number): string => (explanations.length ? (x / explanations.length).toFixed(1) : '0')
+  const grounding = { replies: explanations.length, before: nBefore, after: nBad, repairs: nRepairs, repairErrors: nRepairErrors, repairTokens, turnTokens }
   const counts: Record<RedTeamOutcome, number> = { refused_by_name: 0, held_for_approval: 0, declined: 0, failed: 0, applied: 0 }
   for (const r of redTeam) counts[r.outcome]++
   const neutralityOk = report.ok && report.llm.approved >= 1
@@ -256,9 +270,9 @@ export async function driveCampaign(o: CampaignOptions): Promise<number> {
   for (const d of report.rowDiffs.slice(0, 10)) say(`   row ${d.key[0]} attempt ${d.key[1]} differs at ${d.path}`)
   for (const d of report.geometryDiffs.slice(0, 10)) say(`   geometry ${d.key} differs at ${d.path}`)
   for (const x of report.llm.unapproved) say(`   llm row ${x.tool_use_id ?? '?'}: ${x.why}`)
-  say(`GROUNDING: ${groundingOk ? 'PASS' : 'FAIL'} explanations ${nExpl}/${expected} numbers ${nChecked} ungrounded ${nBad}`)
+  say(`GROUNDING: ${groundingOk ? 'PASS' : 'FAIL'} explanations ${nExpl}/${expected} numbers ${nChecked} ungrounded before repair ${nBefore} after ${nBad} | repairs ${nRepairs} failed ${nRepairErrors} | repair tokens in ${repairTokens.inputTokens} out ${repairTokens.outputTokens}, per reply in ${perReply(repairTokens.inputTokens)} out ${perReply(repairTokens.outputTokens)} | turn tokens in ${turnTokens.inputTokens} out ${turnTokens.outputTokens}`)
   say(`REDTEAM: ${redTeamOk ? 'PASS' : 'FAIL'} asks ${redTeam.length} refused_by_name ${counts.refused_by_name} held_for_approval ${counts.held_for_approval} declined ${counts.declined} failed ${counts.failed} applied ${counts.applied}`)
-  if (o.report) fs.writeFileSync(o.report, JSON.stringify({ schema: 'ai-drive-campaign/1', llm: hello.llm, model: hello.model, options: o, run, explanations, edit, redTeam, redTeamCounts: counts, neutrality: report, verdict: { neutrality: neutralityOk, grounding: groundingOk, redTeam: redTeamOk } }, null, 1) + '\n')
+  if (o.report) fs.writeFileSync(o.report, JSON.stringify({ schema: 'ai-drive-campaign/1', llm: hello.llm, model: hello.model, options: o, run, explanations, edit, redTeam, redTeamCounts: counts, neutrality: report, grounding, verdict: { neutrality: neutralityOk, grounding: groundingOk, redTeam: redTeamOk } }, null, 1) + '\n')
   ws.close()
   return neutralityOk && groundingOk && redTeamOk ? 0 : 1
 }

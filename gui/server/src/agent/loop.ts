@@ -15,6 +15,8 @@ import { meshArgs } from '../tools/mesh.js'
 import type { Hub } from '../ws/types.js'
 import { describeError, isAbortError, isRetryableError, isSystemRoleRejection } from './anthropic.js'
 import type { ApprovalManager } from './approvals.js'
+import { CAMPAIGN_TOOLS } from './grounding.js'
+import { groundReply } from './groundingRepair.js'
 import { emptyUsage, type LlmClient } from './llm.js'
 import { classifyTool, type PolicyOverrides } from './policy.js'
 import { BUDGET_EXHAUSTED_TEXT, buildVolatileContext, foldContextIntoUser, systemParam, volatileSystemMessage } from './prompt.js'
@@ -164,6 +166,13 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
   let suggestRounds = 0
   let lastRoundSignature: string | null = null
   let identicalRounds = 0
+  /** A round of this turn called a campaign tool: the reply that ends it is linted, and repaired once, before it is shown (groundingRepair.ts). */
+  let campaignTurn = false
+  /** Such a turn's text frames, held until the round is known to need no repair. */
+  const held: ServerMsg[] = []
+  const release = (): void => {
+    for (const m of held.splice(0)) emit(m)
+  }
   const firstMessageId = newId('m')
   emit({ t: 'turn.start', sessionId, turnId, messageId: firstMessageId })
 
@@ -232,13 +241,14 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       now: deps.now ? deps.now() : new Date(),
     })
     const messages = foldContext ? foldContextIntoUser(rec.messages, volatile) : [...rec.messages, volatileSystemMessage(volatile)]
-    const projector = createStreamProjector(emit, sessionId, messageId)
+    const projector = createStreamProjector(campaignTurn ? (m: ServerMsg) => (m.t === 'msg.block_start' || m.t === 'msg.delta' ? void held.push(m) : emit(m)) : emit, sessionId, messageId)
     let final: BetaMessage
     try {
       const stream = deps.llm.stream({ system: systemParam(), messages, tools: toolDefinitions(), maxTokens: MAX_TOKENS, effort: rec.settings.effort, signal })
       for await (const ev of stream.events) projector.onEvent(ev)
       final = await stream.finalMessage()
     } catch (err) {
+      release()
       if (signal.aborted || isAbortError(err)) {
         await repairPartial(projector.completeContent(), messageId, 'cancelled', 'CANCELLED', 'cancelled by user', null)
         return finish('cancelled')
@@ -267,6 +277,17 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     rounds++
     model = final.model
     addUsage(usage, final.usage)
+    // suggest_followups is the end of a turn, so the text beside it is the reply (seen live: explanation and chips in one message)
+    const replyEnds = final.content.filter(isToolUse).every((tu) => tu.name === 'suggest_followups') && final.stop_reason !== 'refusal' && final.stop_reason !== 'max_tokens' && final.stop_reason !== 'model_context_window_exceeded'
+    const grounding = campaignTurn && replyEnds ? await groundReply({ llm: deps.llm, tools: toolDefinitions(), maxTokens: MAX_TOKENS, effort: rec.settings.effort, signal, history: rec.messages, content: final.content, turnId, locale }) : null
+    if (grounding) {
+      held.length = 0
+      usage.inputTokens += grounding.record.usage.inputTokens
+      usage.outputTokens += grounding.record.usage.outputTokens
+      usage.cacheReadTokens += grounding.record.usage.cacheReadTokens
+      usage.cacheWriteTokens += grounding.record.usage.cacheWriteTokens
+      rec.repairs = [...(rec.repairs ?? []), grounding.record]
+    } else release()
 
     if (final.stop_reason === 'refusal') {
       // A refusal can arrive mid-stream with a finished tool_use already in the
@@ -288,10 +309,12 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     }
 
     const toolUses = final.content.filter(isToolUse)
+    if (toolUses.some((tu) => CAMPAIGN_TOOLS.includes(tu.name))) campaignTurn = true
     const calls = new Map<string, ToolCallRecord>()
     for (const tu of toolUses) calls.set(tu.id, newCall(tu, locale))
     const stopReason: UiStopReason = final.stop_reason === 'tool_use' ? 'tool_use' : 'end_turn'
-    const ui = appendAssistant(final.content, stopReason, messageId, calls)
+    const ui = appendAssistant(grounding ? grounding.content : final.content, stopReason, messageId, calls)
+    if (grounding) ui.blocks = [...projectAssistant(ui.id, grounding.display, calls, { createdAt: ui.createdAt, stopReason, model }).blocks, grounding.notice]
     await persist()
     emit({ t: 'msg.done', sessionId, message: ui })
 

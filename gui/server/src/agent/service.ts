@@ -458,7 +458,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     },
     groundingOf: (id) => {
       const rec = store.get(id)
-      return rec ? lintSession(rec.messages) : null
+      return rec ? { ...lintSession(rec.messages), repairs: rec.repairs ?? [] } : null
     },
     createSession,
     chat,
