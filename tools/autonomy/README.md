@@ -787,7 +787,7 @@ refinement and snap remedies through remedies.py's own functions, guards and `_c
 a wall level never drops below this geometry's y+ floor, the R-PLANE path is left alone,
 the layers block is never touched), PR-KEEP (the neighbours needed nothing), PR-FAR
 (too far, or the bank is smaller than k), PR-NOEDIT (the path changes nothing here),
-PR-DISABLED (the prior ships disabled).
+PR-PARTIAL (the path applies only in part here), PR-DISABLED (the prior ships disabled).
 
 G-PRIOR (docs/15 §F): on a finished `rules` campaign of the tuning split (nothing
 ablated; the seal refuses any other campaign first), leave-one-geometry-out — each
@@ -807,6 +807,31 @@ supervisor's run. For later units — AM-14: `prior/tuning_rules.json.gz`
 AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
 `prior/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
 (the ablation "-prior" is then equal to it by construction).
+
+**The re-measure under the 2026-09-26 rule (PRIOR-FIX).** AM-16's held-out G-OPT miss
+came through family B, where the prior's paths regressed the lathes against rules-only
+(a post-hoc finding on the spent test split; it is not re-read here). Diagnosed on the
+tuning split only: every non-empty path of the 2026-09-25 bank carried RM-SNAP-FT, so
+each of G-PRIOR's 134 gains (52 of them on B) was a feature_tolerance 0 mesh; since the
+rule, RM-SNAP-FT is skipped by name and the old model re-applied the rest of such a
+path (its RM-SNAP-WALL steps), a config no neighbour passed with. The distance, the null
+policy and the abstention distance were not the cause: the 18 B bodies with a null inner
+thickness met only null neighbours (54 of 54 slots) and the others only non-null ones
+(198 of 198), every B query lay within d_abstain (median neighbour distance about 0.06
+against 0.226), and 5 of the 252 B neighbour slots crossed the sharp/smooth divide (31
+reached family G, the injected copies). Three changes: the bank is read under the rule
+(a feature_tolerance 0 pass on a sharp body off the R-PLANE path is an F3e failure, read
+as rescore.py reads it); only bank entries of the query's edge class vote; a path that
+applies only in part abstains (PR-PARTIAL). Family B, attempt-1 passes of 84,
+leave-one-geometry-out on the 420 tuning geometries: 2026-09-25 under the old rule,
+rules 29, real 81, shuffled mean 64.667; the shipped model under the rule before this
+fix, rules 29, real 29 (36 partial paths, none passing), shuffled 28, 28, 29 (each loss
+a smooth lathe the rules pass, handed a partial path); after, rules 29, real 29,
+shuffled 29, 29, 29. All families after: rules 80, real 80, shuffled 80, 80, 80, no
+round, so the control is not worse, G-PRIOR FAILs and the prior ships DISABLED
+(PR-DISABLED on every geometry in `rules+prior` and `full`). Under the rule no tuning
+body with sharp edges off the R-PLANE path passes with any measured config, so the prior
+has nothing to transfer yet; it is re-gated when AM-L gives snap an attraction-on pass.
 
 ## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
 
@@ -888,7 +913,8 @@ curve. A gate that cannot be decided is reported UNDECIDED, never as a pass.
 A rehearsal (a manifest FILE, stand-in baselines, `--gdet-n`) runs the whole path on tuning rows, but must write
 its report outside `evaluate/`. The departures from docs/15 §F are listed in the report. The numbers are in
 `evaluate/EVAL.json` and the results page `evaluate/EVAL.md`, written by the supervisor's run; the test split is
-then spent.
+then spent. The report reads its tuning context from `evaluate/tuning_context.json`, written the first time a
+report is written, so re-measuring G-PRIOR later (as on 2026-09-26) leaves the committed evaluation checkable.
 
 ## rescore.py — the tuning campaigns under the 2026-09-26 rule (FEAT-CONSTRAINT)
 

@@ -14,8 +14,11 @@ the winning path's refinement and snap remedies are re-applied to this
 geometry's L1 config through remedies.py's own functions, guards and _commit -
 a wall level never drops below this geometry's y+ floor, the R-PLANE path is
 left alone, and the layers block is never touched.  The prior abstains by name
-(PR-FAR, PR-KEEP, PR-NOEDIT) when the neighbours are too far, needed nothing,
-or the path changes nothing here.  G-PRIOR (docs/15 §F) measures, on the tuning
+(PR-FAR, PR-KEEP, PR-NOEDIT, PR-PARTIAL) when the neighbours are too far,
+needed nothing, or the path changes nothing here.  Since 2026-09-26 the bank is
+read under README section D's feature-edge rule, only neighbours of the query's
+edge class (with a sharp edge or without) vote, and a path that applies only in
+part abstains (PR-PARTIAL).  G-PRIOR (docs/15 §F) measures, on the tuning
 split and leave-one-geometry-out, whether the real prior's attempt-1 pass rate
 beats rules-only's and a shuffled-fingerprint control; if either condition
 fails the model ships DISABLED and records PR-DISABLED on every geometry.
@@ -53,6 +56,7 @@ import explain
 import preflight
 import remedies
 import rules
+import score
 import schema
 import split
 
@@ -76,8 +80,11 @@ AUDIT_OFF = 2 ** 40                        # audit_mod for the evaluation rounds
 STD_MIN = 1e-12                            # a feature whose pool std is not above this is dropped
 TRANSFER_STAGES = ("octree", "castellate", "snap")
 TRANSFER = tuple(r["id"] for r in remedies.REMEDIES if r["stage"] in TRANSFER_STAGES)
-PR_IDS = ("PR-KNN", "PR-KEEP", "PR-FAR", "PR-NOEDIT", "PR-DISABLED")
+PR_IDS = ("PR-KNN", "PR-KEEP", "PR-FAR", "PR-NOEDIT", "PR-PARTIAL",
+          "PR-DISABLED")
 VARIANTS = ("real", "shuffle-0", "shuffle-1", "shuffle-2")
+EDGE_CLASSES = ("sharp", "smooth")         # the 2026-09-26 feature-edge rule
+FOCUS_FAMILY = "B"  # the family the held-out G-OPT miss named; the report states it
 FEATURES = ("log10_lmax", "mid_over_lmax", "min_over_lmax", "log10_area_over_lmax2",
             "volume_over_bbox", "log10_1p_sharp_over_lmax", "log10_r5_over_lmax",
             "log10_r50_over_lmax", "log10_r95_over_lmax", "curv_missing",
@@ -124,7 +131,7 @@ EXCLUDED = {
 DEPARTURES = (
     "\"leave-one-group-out\" and \"leave-one-geometry-out\" are the same fold here: each "
     "geometry is one group and contributes at most one bank entry (its earliest attempt "
-    "with no F flag)",
+    "with no F flag, read under README section D's rule of 2026-09-26)",
     "docs/15 §C L3 says the prior \"transfers only refinement and snap knobs\"; the tree "
     "transfers them as a remedy PATH - the refinement and snap remedies (stages octree, "
     "castellate, snap) the neighbour needed before it passed are re-applied to this "
@@ -141,6 +148,16 @@ DEPARTURES = (
     "definition); strict passes are reported, not gated. A geometry with no attempt-1 row "
     "(SURFACE-OPEN, SURFACE-REFUSED, REFUSED) is a first-attempt failure in every "
     "variant, as MFR counts it",
+    "the bank is read under README section D's rule of 2026-09-26: an attempt of a "
+    "committed rules campaign that passed with feature_tolerance 0 on a body with "
+    "sharp edges off the R-PLANE path is an F3e failure, read the way rescore.py "
+    "reads it (score.feature_capture on the rebuilt config), so it is not a bank entry",
+    "only bank entries of the query's edge class vote (sharp: a sharp edge length above "
+    "zero; smooth: none), because the rule splits the action space there (RM-SNAP-FT, "
+    "the optimiser's box, WL-SHARP-FT0); too few of them is PR-FAR",
+    "a winning path is re-applied only whole: when one of its remedies is refused by "
+    "its own guard here, the rest is a config no neighbour passed with, and the prior "
+    "abstains PR-PARTIAL",
 )
 
 
@@ -267,36 +284,79 @@ def bundle_sha(bundle):
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def edge_class(fp):
+    """'sharp' when the fingerprint has a sharp edge (sharp_edge_length_m > 0), else
+    'smooth': the 2026-09-26 rule splits the action space there (RM-SNAP-FT, the
+    optimiser's box, WL-SHARP-FT0)."""
+    return "sharp" if (fp.get("sharp_edge_length_m") or 0) > 0 else "smooth"
+
+
+def rule_failure(outcome, config, fp):
+    """True when the outcome fails under README section D (2026-09-26): its own failure flag,
+    or a pass meshed with feature_tolerance 0 on a body with sharp edges off the R-PLANE path
+    (F3e) - a row scored before the rule is read the way rescore.py reads it."""
+    if outcome is None or outcome["failure"] is not False:
+        return True
+    ft = (config.get("snap") or {}).get(
+        "feature_tolerance", preflight.MESHER_DEFAULTS["/snap/feature_tolerance"])
+    _fc, f3e, _note = score.feature_capture(
+        fp["sharp_edge_length_m"], preflight.plane_path(config, fp), ft, None)
+    return f3e is True
+
+
+def rule_passes(bundle):
+    """(geometry_id, attempt) -> whether the attempt passes under the 2026-09-26 rule."""
+    import optimise   # optimise imports this module at its top: no top-level import
+    gates, knobs = schema.load_gates(), schema.load_knobs()
+    mrows = {r["geometry_id"]: r for r in campaign.load_manifest(
+        "tuning", "rules", ids=bundle["campaign"]["geometry_ids"])}
+    raw = {(r["geometry_id"], r["attempt"]): r for r in bundle["attempts"]}
+    out = {}
+    try:
+        for tr in optimise.rows_from(bundle, "prior bank", mrows, gates, knobs):
+            key = (tr["geometry_id"], tr["attempt"])
+            out[key] = not rule_failure(raw[key]["outcome"], tr["config"],
+                                        tr["fingerprint"])
+    except optimise.OptError as e:
+        raise PriorError("reconstruct: %s" % e)
+    return out
+
+
 def bank_from(bundle):
-    """One entry per passing geometry: its earliest passing attempt and the
-    transferred remedies it needed on the way (layer-stage remedies dropped)."""
+    """One entry per passing geometry: its earliest passing attempt under the
+    2026-09-26 rule, and the transferred remedies it needed on the way
+    (layer-stage remedies dropped)."""
     ends = {g["geometry_id"]: g for g in bundle["geometries"]}
     by = {}
     for r in bundle["attempts"]:
         by.setdefault(r["geometry_id"], {})[r["attempt"]] = r
-    out = []
-    for gid in sorted(by):
+    for gid in sorted(by):                  # completeness before anything else is read
         att = by[gid]
         want = list(range(1, max(att) + 1))
         if sorted(att) != want:
             raise PriorError("incomplete: %s carries attempts %s, not 1..%d"
                              % (gid, sorted(att), max(att)))
+        if ends.get(gid) is None:
+            raise PriorError("incomplete: no end record for %s" % gid)
+    ok = rule_passes(bundle)
+    out = []
+    for gid in sorted(by):
+        att = by[gid]
         p = None
-        for a in want:
-            if att[a]["outcome"]["failure"] is False:
+        for a in sorted(att):
+            if ok[(gid, a)]:
                 p = a
                 break
         if p is None:
             continue
-        end = ends.get(gid)
-        if end is None:
-            raise PriorError("incomplete: no end record for %s" % gid)
+        end = ends[gid]
         out.append({"geometry_id": gid, "family": end["family"], "attempt": p,
                     "path": [att[a]["rule_id"] for a in range(2, p + 1)
                              if att[a]["decided_by"] == "remedy"
                              and att[a]["rule_id"] in TRANSFER],
                     "fingerprint_sha256":
-                        schema.canonical_sha256(end["fingerprint"])})
+                        schema.canonical_sha256(end["fingerprint"]),
+                    "edge_class": edge_class(end["fingerprint"])})
     return out
 
 
@@ -388,15 +448,17 @@ def _record(rid, verdict, trigger, inputs, formula, edits, cite, message,
     return rec
 
 
-FORMULA = ("k-NN (k = 3) on the RMS distance of standardised fingerprint "
-           "features; weight 1/(d + 1e-6); the remedy path with the largest summed "
-           "weight wins, ties to the nearest; its refinement and snap remedies are "
-           "re-applied through remedies.py")
+FORMULA = ("k-NN (k = 3) on the RMS distance of standardised fingerprint features, "
+           "among the passing tuning geometries of the query's edge class (with a "
+           "sharp edge, or without one); weight 1/(d + 1e-6); the remedy path with "
+           "the largest summed weight wins, ties to the nearest; its refinement and "
+           "snap remedies are re-applied through remedies.py, and only whole: a path "
+           "that applies in part abstains")
 CITE = ("docs/15 §C L3 prior, §F G-PRIOR; tools/autonomy/remedies.py "
         "(the transferred refinement and snap remedies)")
 
 
-def _inputs(v, skipped, model, bank_n):
+def _inputs(v, skipped, model, bank_n, edge_cls, class_n):
     return [{"name": "neighbours", "value": list(v["neighbours"]), "unit": ""},
             {"name": "distances", "value": [float(d) for d in v["distances"]],
              "unit": "1"},
@@ -410,6 +472,8 @@ def _inputs(v, skipped, model, bank_n):
             {"name": "d_abstain", "value": float(model["d_abstain"]), "unit": "1"},
             {"name": "k", "value": int(model["k"]), "unit": "1"},
             {"name": "bank_n", "value": int(bank_n), "unit": "1"},
+            {"name": "edge_class", "value": edge_cls, "unit": ""},
+            {"name": "class_n", "value": int(class_n), "unit": "1"},
             {"name": "model_sha256", "value": model_sha(model), "unit": ""}]
 
 
@@ -430,7 +494,13 @@ def _nb_text(v):
 
 def decide(zq, bank, model, ctx, gates, knobs):
     """One prior decision on one geometry: the vote, the config, the record."""
-    v = vote(zq, bank, model["d_abstain"], model["k"])
+    for e in bank:
+        if "edge_class" not in e:
+            raise PriorError("the model's bank carries no edge class (built before "
+                             "2026-09-26): run prior.py --gate")
+    cls = edge_class(ctx["fingerprint"])
+    same = [e for e in bank if e["edge_class"] == cls]
+    v = vote(zq, same, model["d_abstain"], model["k"])
     skipped = []
     after = None
     if v["kind"] in ("few", "far"):
@@ -439,34 +509,47 @@ def decide(zq, bank, model, ctx, gates, knobs):
         rid = "PR-KEEP"
     else:
         after, skipped = apply_path(ctx["config"], v["winner"], ctx, gates, knobs)
-        rid = "PR-KNN" if after is not None else "PR-NOEDIT"
+        if after is None:
+            rid = "PR-NOEDIT"
+        elif skipped:
+            rid, after = "PR-PARTIAL", None
+        else:
+            rid = "PR-KNN"
     verdict = "apply" if after is not None else "abstain"
     edits = rules.diff_edits(ctx["config"], after) if after is not None else []
     if rid == "PR-KNN":
-        msg = ("PR-KNN: the %d nearest passing tuning geometries (%s) lie within "
-               "d_abstain %s; their path %s won the vote and is re-applied here: %s"
-               % (model["k"], _nb_text(v), explain.fmt(model["d_abstain"]),
+        msg = ("PR-KNN: the %d nearest passing tuning geometries of edge class %s "
+               "(%s) lie within d_abstain %s; their path %s won the vote and is "
+               "re-applied here: %s"
+               % (model["k"], cls, _nb_text(v), explain.fmt(model["d_abstain"]),
                   " + ".join(v["winner"]), explain.edits_text(edits)))
     elif rid == "PR-KEEP":
-        msg = ("PR-KEEP: the %d nearest passing tuning geometries (%s) passed with "
-               "the setup rules' own config; attempt 1 stays the rules' config"
-               % (model["k"], _nb_text(v)))
+        msg = ("PR-KEEP: the %d nearest passing tuning geometries of edge class %s "
+               "(%s) passed with the setup rules' own config; attempt 1 stays the "
+               "rules' config" % (model["k"], cls, _nb_text(v)))
+    elif rid == "PR-PARTIAL":
+        msg = ("PR-PARTIAL: the neighbours' path %s applies only in part here (%s); "
+               "a part of a path is a config no neighbour passed with, so attempt 1 "
+               "stays the rules' config"
+               % (" + ".join(v["winner"]),
+                  "; ".join("%s: %s" % (s["rule_id"], s["why"]) for s in skipped)))
     elif v["kind"] == "few":
-        msg = ("PR-FAR: the bank holds %d passing tuning geometries, fewer than "
-               "k = %d; the prior abstains" % (len(bank), model["k"]))
+        msg = ("PR-FAR: the bank holds %d passing tuning geometries of edge class "
+               "%s, fewer than k = %d; the prior abstains"
+               % (len(same), cls, model["k"]))
     elif v["kind"] == "far":
-        msg = ("PR-FAR: the nearest passing tuning geometry %s is at %s > d_abstain "
-               "%s; the prior abstains" % (v["neighbours"][0],
-                                           explain.fmt(v["nearest"]),
-                                           explain.fmt(model["d_abstain"])))
+        msg = ("PR-FAR: the nearest passing tuning geometry of edge class %s, %s, "
+               "is at %s > d_abstain %s; the prior abstains"
+               % (cls, v["neighbours"][0], explain.fmt(v["nearest"]),
+                  explain.fmt(model["d_abstain"])))
     else:
         msg = ("PR-NOEDIT: the neighbours' path %s changes nothing here (%s); "
                "attempt 1 stays the rules' config"
                % (" + ".join(v["winner"]),
                   "; ".join("%s: %s" % (s["rule_id"] or "R-PLANE", s["why"])
                             for s in skipped)))
-    rec = _record(rid, verdict, _trigger(v, model), _inputs(v, skipped, model,
-                                                            len(bank)),
+    rec = _record(rid, verdict, _trigger(v, model),
+                  _inputs(v, skipped, model, len(bank), cls, len(same)),
                   FORMULA, edits, CITE, msg, v["nearest"] or 0.0)
     return {"schema": DECISION_SCHEMA, "geometry_id": ctx["geometry_id"],
             "verdict": verdict, "rule_id": rid, "config": after, "edits": edits,
@@ -898,6 +981,24 @@ def _systems_and_report(head, bundle, model, systems, geom_out, fams, n, rounds,
     row["shuffled_mean"] = sum(row[v] for v in VARIANTS
                                if v.startswith("shuffle-")) / 3.0
     rep_fams["all"] = row
+    per_fam_dec, elig = {}, {g["geometry_id"]: g["eligible"] for g in geom_out}
+    for g in geom_out:
+        if not g["eligible"]:
+            continue
+        fd = per_fam_dec.setdefault(g["family"], {v: {} for v in VARIANTS})
+        for name in VARIANTS:
+            rid = g[name]["rule_id"]
+            fd[name][rid] = fd[name].get(rid, 0) + 1
+    per_fam_dec = {fam: per_fam_dec[fam] for fam in sorted(per_fam_dec)}
+    focus = None
+    if FOCUS_FAMILY in per_fam_dec:
+        ends = {g["geometry_id"]: g for g in bundle["geometries"]}
+        ec = {"sharp": 0, "smooth": 0}
+        for gid in fams[FOCUS_FAMILY]:
+            if elig[gid]:
+                ec[edge_class(ends[gid]["fingerprint"])] += 1
+        focus = dict(rep_fams[FOCUS_FAMILY],
+                     decisions=per_fam_dec[FOCUS_FAMILY], edge_classes=ec)
     pool = [g for g in bundle["geometries"] if g.get("fingerprint") is not None]
     null_counts = {}
     for f in CURV + ("inner_thickness_m", "outer_gap_m", "lattice_base_size_m"):
@@ -921,7 +1022,9 @@ def _systems_and_report(head, bundle, model, systems, geom_out, fams, n, rounds,
                            if x != "pass_gids"} for k in systems},
            "shuffled_mean_pass": shuffled_mean_pass,
            "shuffled_mean_rate": shuffled_mean_pass / n,
-           "per_family": rep_fams, "rounds": [], "rules_campaign": {},
+           "per_family": rep_fams,
+           "per_family_decisions": per_fam_dec, "focus": focus,
+           "rounds": [], "rules_campaign": {},
            "geometries": geom_out, "departures": list(DEPARTURES)}
     return _report_and_bundles(head, bundle, shipped, rep, round_infos,
                                report_dir, write)
@@ -994,14 +1097,16 @@ def report_md(rep):
     a.append("")
     a.append("## Decisions")
     a.append("")
-    a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | reused | ran | refused |")
-    a.append("|---|---|---|---|---|---|---|---|")
+    a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | PR-PARTIAL | "
+             "reused | ran | refused |")
+    a.append("|---|---|---|---|---|---|---|---|---|")
     for name in VARIANTS:
         s = rep["systems"][name]
         dec, st = s["decisions"], s["statuses"]
-        a.append("| %s | %d | %d | %d | %d | %d | %d | %d |"
+        a.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d |"
                  % (name, dec.get("PR-KNN", 0), dec.get("PR-KEEP", 0),
                     dec.get("PR-FAR", 0), dec.get("PR-NOEDIT", 0),
+                    dec.get("PR-PARTIAL", 0),
                     st.get("reused", 0), st.get("ran", 0), st.get("refused", 0)))
     a.append("")
     a.append("## Per family")
@@ -1013,6 +1118,28 @@ def report_md(rep):
                  % (row["family"], row["n"], row["rules"], row["real"],
                     row["shuffle-0"], row["shuffle-1"], row["shuffle-2"],
                     _f3(row["shuffled_mean"])))
+    a.append("")
+    a.append("## Family %s" % FOCUS_FAMILY)
+    a.append("")
+    focus = rep["focus"]
+    if focus is None:
+        a.append("- family %s is not in this campaign." % FOCUS_FAMILY)
+    else:
+        a.append("- n %d (%d with sharp edges, %d without, of the eligible); "
+                 "attempt-1 passes rules %d, real %d, shuffled %d, %d, %d (mean %s)"
+                 % (focus["n"], focus["edge_classes"]["sharp"],
+                    focus["edge_classes"]["smooth"], focus["rules"],
+                    focus["real"], focus["shuffle-0"], focus["shuffle-1"],
+                    focus["shuffle-2"], _f3(focus["shuffled_mean"])))
+        a.append("")
+        a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | PR-PARTIAL |")
+        a.append("|---|---|---|---|---|---|")
+        for name in VARIANTS:
+            dec = focus["decisions"][name]
+            a.append("| %s | %d | %d | %d | %d | %d |"
+                     % (name, dec.get("PR-KNN", 0), dec.get("PR-KEEP", 0),
+                        dec.get("PR-FAR", 0), dec.get("PR-NOEDIT", 0),
+                        dec.get("PR-PARTIAL", 0)))
     a.append("")
     a.append("## Null policy")
     a.append("")
@@ -1139,7 +1266,8 @@ class _ArgParser(argparse.ArgumentParser):
 
 
 def _counts_line(variant, decisions, measured):
-    dec = {"PR-KNN": 0, "PR-KEEP": 0, "PR-FAR": 0, "PR-NOEDIT": 0}
+    dec = {"PR-KNN": 0, "PR-KEEP": 0, "PR-FAR": 0, "PR-NOEDIT": 0,
+           "PR-PARTIAL": 0}
     m = w = 0
     for d in decisions:
         if not d["eligible"]:
@@ -1153,9 +1281,9 @@ def _counts_line(variant, decisions, measured):
             else:
                 w += 1
     return ("[prior] %s: PR-KNN %d, PR-KEEP %d, PR-FAR %d, PR-NOEDIT %d, "
-            "measured %d, new %d"
+            "PR-PARTIAL %d, measured %d, new %d"
             % (variant, dec["PR-KNN"], dec["PR-KEEP"], dec["PR-FAR"],
-               dec["PR-NOEDIT"], m, w))
+               dec["PR-NOEDIT"], dec["PR-PARTIAL"], m, w))
 
 
 def _plan_lines(model, decisions, measured, rounds):
@@ -1197,12 +1325,19 @@ def _cli_run(a):
     rep = gate(a.rules, a.work, streams=a.streams, report_dir=a.report_dir,
                binary=a.binary, quiet=False)
     s = rep["systems"]
-    print("G-PRIOR %s: attempt-1 passes rules %d/%d, real %d/%d, shuffled %d, %d, "
-          "%d (mean %.3f); the prior ships %s"
-          % (rep["verdict"], s["rules"]["pass"], rep["n_tuning"],
-             s["real"]["pass"], rep["n_tuning"], s["shuffle-0"]["pass"],
-             s["shuffle-1"]["pass"], s["shuffle-2"]["pass"],
-             rep["shuffled_mean_pass"], "enabled" if rep["enabled"] else "DISABLED"))
+    line = ("G-PRIOR %s: attempt-1 passes rules %d/%d, real %d/%d, shuffled %d, "
+            "%d, %d (mean %.3f); the prior ships %s"
+            % (rep["verdict"], s["rules"]["pass"], rep["n_tuning"],
+               s["real"]["pass"], rep["n_tuning"], s["shuffle-0"]["pass"],
+               s["shuffle-1"]["pass"], s["shuffle-2"]["pass"],
+               rep["shuffled_mean_pass"],
+               "enabled" if rep["enabled"] else "DISABLED"))
+    if rep["focus"] is not None:
+        line += ("; family %s: rules %d, real %d, shuffled %d, %d, %d"
+                 % (FOCUS_FAMILY, rep["focus"]["rules"], rep["focus"]["real"],
+                    rep["focus"]["shuffle-0"], rep["focus"]["shuffle-1"],
+                    rep["focus"]["shuffle-2"]))
+    print(line)
     return 0
 
 
@@ -1360,7 +1495,7 @@ def _g1_constants(H):
     else:
         raise AssertionError("a missing model was not refused")
     print("[ok] constants: 17 features, k 3, 3 shuffles, 7 transferable remedies, "
-          "5 PR ids templated; an evaluate campaign is refused before any other "
+          "6 PR ids templated; an evaluate campaign is refused before any other "
           "file, a b0-template campaign and a missing model are refused by name")
 
 
@@ -1477,6 +1612,9 @@ def _g5_bank(H):
     got = {e["geometry_id"]: (e["attempt"], e["path"])
            for e in bank_from(H["B1"])}
     assert got == _WANT_BANK, got
+    bank = bank_from(H["B1"])
+    assert all(e["edge_class"] == ("smooth" if e["geometry_id"] == "E-1-010"
+                                   else "sharp") for e in bank)
     m = H["model"]
     assert m["bank_n"] == 6 and all(len(e["z"]) == 17 for e in m["bank"])
     assert m["null_policy"] == list(NULL_POLICY)
@@ -1553,16 +1691,16 @@ def _g7_gate(H):
                probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
                quiet=True)
     s = rep["systems"]
-    assert s["rules"]["pass"] == 2 and s["real"]["pass"] == 6, \
+    assert s["rules"]["pass"] == 2 and s["real"]["pass"] == 5, \
         (s["rules"]["pass"], s["real"]["pass"])
-    assert s["shuffle-0"]["pass"] == 4 and s["shuffle-1"]["pass"] == 5 \
+    assert s["shuffle-0"]["pass"] == 2 and s["shuffle-1"]["pass"] == 3 \
         and s["shuffle-2"]["pass"] == 4
-    assert abs(rep["shuffled_mean_pass"] - 13.0 / 3.0) <= 1e-9
-    assert s["real"]["decisions"] == {"PR-KNN": 4, "PR-KEEP": 2, "PR-NOEDIT": 1,
-                                      "PR-FAR": 1}, s["real"]["decisions"]
-    assert s["real"]["statuses"] == {"reused": 4, "PR-KEEP": 2, "PR-NOEDIT": 1,
-                                     "PR-FAR": 1}, s["real"]["statuses"]
-    assert s["real"]["gain"] == 4 and s["real"]["loss"] == 0
+    assert abs(rep["shuffled_mean_pass"] - 3.0) <= 1e-9
+    assert s["real"]["decisions"] == {"PR-KNN": 3, "PR-KEEP": 2,
+                                      "PR-FAR": 3}, s["real"]["decisions"]
+    assert s["real"]["statuses"] == {"reused": 3, "PR-KEEP": 2,
+                                     "PR-FAR": 3}, s["real"]["statuses"]
+    assert s["real"]["gain"] == 3 and s["real"]["loss"] == 0
     assert rep["rounds"] == [], rep["rounds"]
     assert rep["conditions"] == {"real_ge_rules": True, "shuffled_worse": True}
     assert rep["verdict"] == "PASS" and rep["enabled"] is True
@@ -1573,6 +1711,10 @@ def _g7_gate(H):
     assert pm["enabled"] is True and pm["bank_n"] == 6 and pm["pool_n"] == 8
     grow = {g["geometry_id"]: g for g in rep["geometries"]}
     assert grow["F-1-009"]["real"]["rule_id"] == "PR-FAR"
+    assert rep["focus"] is None, rep["focus"]     # IDS8 holds no family-B geometry
+    with open(os.path.join(rdir, REPORT_MD), encoding="utf-8") as f:
+        md7 = f.read()
+    assert "## Family B" in md7 and "is not in this campaign" in md7, md7
     H["shipped"] = pm
     rep2 = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_wall_oracle,
                 probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
@@ -1592,12 +1734,12 @@ def _g7_gate(H):
                 quiet=True)
     ms = mrep["systems"]
     assert ms["real"]["pass"] == 2, ms["real"]["pass"]
-    assert ms["real"]["statuses"].get("ran") == 1, ms["real"]["statuses"]
+    assert ms["real"]["statuses"].get("ran") == 2, ms["real"]["statuses"]
     assert len(mrep["rounds"]) == 1 and mrep["rounds"][0]["geometry_ids"] == \
-        ["E-1-010", "F-1-011"], mrep["rounds"]
+        ["D-1-077", "F-1-011"], mrep["rounds"]
     assert ms["shuffle-0"]["pass"] == 3 and ms["shuffle-1"]["pass"] == 2 \
-        and ms["shuffle-2"]["pass"] == 3
-    assert abs(mrep["shuffled_mean_pass"] - 8.0 / 3.0) <= 1e-9
+        and ms["shuffle-2"]["pass"] == 2
+    assert abs(mrep["shuffled_mean_pass"] - 7.0 / 3.0) <= 1e-9
     assert mrep["conditions"] == {"real_ge_rules": True, "shuffled_worse": False}
     assert mrep["verdict"] == "FAIL" and mrep["enabled"] is False
     assert os.path.isfile(os.path.join(mrdir, ROUND_BUNDLE % 1)), "round bundle"
@@ -1612,9 +1754,9 @@ def _g7_gate(H):
     m1.pop("date")
     m2.pop("date")
     assert m1 == m2, "the mixed re-run's report differs beyond the date"
-    print("[ok] gate on the oracle campaign: rules 2, real 6, shuffled 4 5 4 (mean "
-          "4.333), no round (every prior config already meshed), PASS and enabled; "
-          "on the mixed oracle one round of two geometries (E-1-010, F-1-011) runs, "
+    print("[ok] gate on the oracle campaign: rules 2, real 5, shuffled 2 3 4 (mean "
+          "3.000), no round (every prior config already meshed), PASS and enabled; "
+          "on the mixed oracle one round of two geometries (D-1-077, F-1-011) runs, "
           "the shuffled control is not worse so it FAILs disabled, and a re-run "
           "reuses the round and gives an equal report")
 
@@ -1666,15 +1808,16 @@ def _g9_hook(H):
     by1 = {r["geometry_id"]: r for r in rows if r["attempt"] == 1}
     prior_gids = sorted(g for g, r in by1.items() if r["decided_by"] == "prior")
     # F-1-009 left the bank (2026-09-26): its only path held the refused lever,
-    # so the model no longer fires there
-    assert prior_gids == ["A-1-000", "D-1-077", "E-1-010", "F-1-011"], \
+    # so the model no longer fires there; E-1-010 is now PR-FAR - its edge class
+    # holds one entry, fewer than k
+    assert prior_gids == ["A-1-000", "D-1-077", "F-1-011"], \
         prior_gids
     assert all(by1[g]["rule_id"] == "PR-KNN" for g in prior_gids)
-    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 6, \
+    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 5, \
         sum(1 for r in by1.values() if r["outcome"]["failure"] is False)
     assert end["harness_errors"] == 0
     rp = campaign.replay(out)
-    assert rp["ok"] and rp["hook_decisions"] == 4, rp
+    assert rp["ok"] and rp["hook_decisions"] == 3, rp
     recs = campaign.load_records(out)
     assert explain.audit(rows, recs)["ok"], "audit failed"
     for gid in sorted(recs):
@@ -1729,8 +1872,8 @@ def _g9_hook(H):
     finally:
         pm_mod._MODEL.clear()
         pm_mod._MODEL.update(old)
-    print("[ok] hook seam: make_hook in a fake rules+prior campaign (4 prior rows, "
-          "6 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
+    print("[ok] hook seam: make_hook in a fake rules+prior campaign (3 prior rows, "
+          "5 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
           "disabled model, a missing model ends each geometry HARNESS-ERROR; every "
           "PR card grounded, audit and replay ok")
 
@@ -1827,8 +1970,99 @@ def _g11_check_cli(H):
           "a gate without --rules, and checks")
 
 
+def _g12_rule(H):
+    # (a) the rule reads one attempt: its flag, or an F3e pass on a sharp body
+    cfg9, fp9 = H["cfg"]["F-1-009"], H["ctx"]["F-1-009"]["fingerprint"]
+    assert rule_failure({"failure": False}, cfg9, fp9) is False
+    cfg_ft = copy.deepcopy(cfg9)
+    cfg_ft.setdefault("snap", {})["feature_tolerance"] = 0.0
+    assert rule_failure({"failure": False}, cfg_ft, fp9) is True
+    cfg4, fp4 = H["cfg"]["E-1-004"], H["ctx"]["E-1-004"]["fingerprint"]
+    cfg4_ft = copy.deepcopy(cfg4)
+    cfg4_ft.setdefault("snap", {})["feature_tolerance"] = 0.0
+    assert rule_failure({"failure": False}, cfg4_ft, fp4) is False
+    assert rule_failure({"failure": False}, H["cfg"]["D-1-010"],
+                        H["ctx"]["D-1-010"]["fingerprint"]) is False
+    assert rule_failure({"failure": True}, cfg9, fp9) is True
+    # (b) the bank under the rule on the oracle bundle
+    import optimise
+    rows1 = {(r["geometry_id"], r["attempt"]): r for r in H["B1"]["attempts"]}
+    assert rule_passes(H["B1"]) == \
+        {k: v["outcome"]["failure"] is False for k, v in rows1.items()}
+    b3 = copy.deepcopy(H["B1"])
+    a1row = [r for r in H["B1"]["attempts"]
+             if r["geometry_id"] == "A-1-000" and r["attempt"] == 1][0]
+    a2row = [r for r in b3["attempts"]
+             if r["geometry_id"] == "A-1-000" and r["attempt"] == 2][0]
+    a2row["config_delta"] = list(a2row["config_delta"]) + \
+        [{"pointer": "/snap/feature_tolerance", "from": None, "to": 0.0}]
+    cfg1 = optimise.apply_edits(H["cfg"]["A-1-000"], a1row["config_delta"])
+    a2row["config_sha"] = schema.canonical_sha256(
+        optimise.apply_edits(cfg1, a2row["config_delta"]))
+    assert [e["geometry_id"] for e in bank_from(b3)] == \
+        ["D-1-010", "D-1-077", "E-1-010", "F-1-011", "G-1-016"]
+    # (c) the committed rules campaign under the rule
+    bc = baseline.read_bundle(os.path.join(REPORT_DIR, RULES_BUNDLE))
+    okc = rule_passes(bc)
+    assert sum(1 for v in okc.values() if v) == 81, \
+        sum(1 for v in okc.values() if v)
+    assert len({gid for (gid, _a), v in okc.items() if v}) == 80
+    assert len(bank_from(bc)) == 80
+    # (d) the edge class: only same-class entries vote
+    assert edge_class(fp9) == "sharp" and edge_class(fp4) == "smooth"
+    zq4 = standardise(features(fp4), H["model"]["scaler"])
+    d4 = decide(zq4, H["model"]["bank"], H["model"], H["ctx"]["E-1-004"],
+                H["gates"], H["knobs"])
+    assert d4["rule_id"] == "PR-FAR" and d4["vote"]["kind"] == "few", d4
+    assert "of edge class smooth" in d4["record"]["message"]
+    zqA = standardise(features(H["ctx"]["A-1-000"]["fingerprint"]),
+                      H["model"]["scaler"])
+    fold = [e for e in H["model"]["bank"] if e["geometry_id"] != "A-1-000"]
+    dA = decide(zqA, fold, H["model"], H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert dA["rule_id"] == "PR-KNN" and \
+        dA["vote"]["neighbours"] == ["D-1-077", "F-1-011", "D-1-010"], dA["vote"]
+    fold2 = copy.deepcopy(fold)
+    [e for e in fold2 if e["geometry_id"] == "D-1-077"][0]["edge_class"] = "smooth"
+    dB = decide(zqA, fold2, H["model"], H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert "D-1-077" not in dB["vote"]["neighbours"], dB["vote"]
+    # (e) a path that applies only in part abstains PR-PARTIAL
+    m9 = dict(H["model"], d_abstain=1e9)
+    fold3 = copy.deepcopy(fold)
+    for e in fold3:
+        e["path"] = ["RM-SNAP-WALL", "RM-SNAP-FT"]
+    dC = decide(zqA, fold3, m9, H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert dC["rule_id"] == "PR-PARTIAL" and dC["verdict"] == "abstain", dC
+    assert dC["config"] is None and dC["edits"] == []
+    assert dC["skipped"] == [{"rule_id": "RM-SNAP-FT",
+                              "why": remedies.FT_FORBIDDEN_WHY}], dC["skipped"]
+    assert schema.errors(dC["record"], "DecisionRecord") == []
+    assert explain.ungrounded(explain.card(dC["record"])["line"],
+                              [dC["record"]]) == []
+    foldF = copy.deepcopy([e for e in H["model"]["bank"]
+                           if e["geometry_id"] != "F-1-009"])
+    for e in foldF:
+        e["path"] = ["RM-SNAP-WALL", "RM-SNAP-FT"]
+    zqF = standardise(features(fp9), H["model"]["scaler"])
+    dD = decide(zqF, foldF, m9, H["ctx"]["F-1-009"], H["gates"], H["knobs"])
+    assert dD["rule_id"] == "PR-NOEDIT", dD
+    # (f) an old bank is refused
+    fold5 = copy.deepcopy(fold)
+    for e in fold5:
+        del e["edge_class"]
+    try:
+        decide(zqA, fold5, H["model"], H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    except PriorError as e:
+        assert "edge class" in str(e), str(e)
+    else:
+        raise AssertionError("a bank without edge classes was not refused")
+    print("[ok] the 2026-09-26 rule: a feature_tolerance 0 pass on a sharp body "
+          "leaves the bank, the committed rules campaign keeps 81 passing rows on "
+          "80 geometries; only same-class neighbours vote; a partial path abstains "
+          "PR-PARTIAL; an old bank is refused")
+
+
 def selftest():
-    """(C14): eleven [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
+    """(C14): twelve [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
     t0 = time.perf_counter()
     tmp = tempfile.mkdtemp()
     H = {"tmp": tmp}
@@ -1836,7 +2070,8 @@ def selftest():
               (_g3_scaler, "scaler"), (_g4_vote, "vote"), (_g5_bank, "bank"),
               (_g6_apply, "apply"), (_g7_gate, "gate"), (_g8_disabled, "disabled"),
               (_g9_hook, "hook seam"), (_g10_live, "live"),
-              (_g11_check_cli, "check and CLI"))
+              (_g11_check_cli, "check and CLI"),
+              (_g12_rule, "the rule, the edge class, the whole path"))
     try:
         try:
             H["gates"] = schema.load_gates()

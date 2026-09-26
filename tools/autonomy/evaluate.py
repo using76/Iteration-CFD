@@ -70,6 +70,8 @@ REPORT_NAME = "EVAL.json"
 REPORT_MD = "EVAL.md"
 RUNS_NAME = "runs.json"
 LOCK_NAME = "opened.lock"
+CONTEXT_NAME = "tuning_context.json"
+CONTEXT_SCHEMA = "autonomy-eval-context/1"
 COUNTS_NAME = "eval_counts.json"            # inside each campaign directory
 BUNDLE_NAME = "eval_%s.json.gz"             # one per campaign name, in the report dir
 BASELINE_COPY = "baseline_%s.json.gz"       # rehearsal only: the stand-in baselines
@@ -900,6 +902,17 @@ def g_abl(systems, tuning):
     return {"verdict": REPORTED, "table": table, "tuning_curve": tuning["curve"]}
 
 
+def load_context(report_dir):
+    """The tuning context frozen when this report was first written, or None."""
+    p = os.path.join(report_dir, CONTEXT_NAME)
+    if not os.path.isfile(p):
+        return None
+    obj = _read_json(p)
+    if obj.get("schema") != CONTEXT_SCHEMA or "context" not in obj:
+        raise EvalError("%s is not a %s file" % (p, CONTEXT_SCHEMA))
+    return obj["context"]
+
+
 def tuning_context():
     p = _read_json(os.path.join(HERE, "prior", "G-PRIOR.json"))
     o = _read_json(os.path.join(HERE, "optimise", "G-OPT.json"))
@@ -1051,7 +1064,16 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
     tier0 = runs["meta"]["tier0_ids"]
     replays = dict((c["name"], c["replay"]) for c in runs["campaigns"])
     gates_const = schema.load_gates()
-    tuning = tuning_context()
+    tuning = load_context(report_dir)
+    if tuning is None:
+        tuning = tuning_context()
+        if write:
+            _dump_json(os.path.join(report_dir, CONTEXT_NAME),
+                       {"$comment": HEADER, "schema": CONTEXT_SCHEMA,
+                        "note": "the tuning context (prior/G-PRIOR.json and "
+                                "optimise/G-OPT.json) as it stood when this "
+                                "evaluation's report was first written",
+                        "context": tuning})
     gate_reps = {
         "G-FAIL": g_fail(systems["full"], systems["b0-template"],
                          [(ends_b0t[i]["failure"] is True,
@@ -2091,6 +2113,8 @@ def _selftest():
                 + [BUNDLE_NAME % c[0] for c in CAMPAIGNS] \
                 + [BASELINE_COPY % s for s in baseline.SYSTEMS]:
             assert os.path.isfile(os.path.join(rep_dir, fname)), fname
+        assert os.path.isfile(os.path.join(rep_dir, CONTEXT_NAME))
+        assert load_context(rep_dir) == rep["tuning"]
         runs7 = _read_json(os.path.join(rep_dir, RUNS_NAME))
         by_name = dict((c["name"], c) for c in runs7["campaigns"])
         assert by_name["full"]["counts"]["meshed"] > 0
