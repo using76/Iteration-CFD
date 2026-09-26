@@ -608,7 +608,7 @@ the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0,
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
 - R-PLANE reads commensurability, writes `/domain/*`, `/snap/*`: h = s/m, the extent starts on the body's own faces, so every face lies on a cell plane.
-- R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter.
+- R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter, taken at the finest level on the patch: h/2 on a sharp body off R-PLANE below max_level, where R-FEAT will put the edges (WIN-2TO1).
 - R-CURV reads r_p5 and raises the wall level to h ≤ r_p5/8.
 - R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
 - R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1, then asks for the attraction radius tau = h_f/2 (SPEC-LIT §92.12's erratum: the default 0.5 is half a BASE cell, 2^(L−1) wall cells at wall level L, and pins a refined sharp body).
@@ -647,6 +647,43 @@ F 0.907, G 0.745), min 0 and max 0.978. (92.62) under-reads an edge that the STL
 (section D), so these shares are lower bounds. Identity: plane 37/37, smooth 44/44, sharp 276/276 (only
 `/snap/feature_tolerance` differs), refused 15/15. The wings (family A) stay F3-dirty at h_f/2, as the AM-L plan
 feared: their trailing edges are the thin, near-180° case.
+
+**WIN-2TO1 (2026-09-27, AM-L's E5).** The (92.45) limiter caps a point's stack at cell_frac·h_i, h_i its shortest
+layer-face edge. R-FEAT puts a sharp body's edges one level finer than its wall, so a stack sized against
+cell_frac·h at the wall level is cut to about half at every feature-level point; the wall-level faces beside those
+points then carry 3·t1·τ/h ≈ 0.033 < 0.05 and fail G5, and each outer retreat thins them further. L0b's trace shows
+it on F-1-001 at tau = h_f/2 (binary 7ff16117): the outer ladder fails on G5 alone (440, 2632, 8648 cells, G4 0 on
+every rung), then `thin_after_caps`. R-WIN now takes the stack limit at the finest level on the patch: on a sharp
+body off R-PLANE whose wall level is below max_level the growth is the largest k/1000 with t1·S(g) ≤ cell_frac·h/2
+(1.0 when none fits; the limiter then trims the stack at the feature-level points and G5 beside them is
+3/(4·S(g)) ≥ 0.094 at n = 8). The level choice and the G5 edge t1 ≥ h/60 at the wall level are unchanged. R-CURV,
+R-GAP and R-BUDGET refit the same way when they move the wall level, and R-BUDGET refits at h when it drops the
+feature bump. F-1-001's growth goes from 1.289 to 1.1. Only `/layers/growth` changes, only downwards, only on sharp
+bodies off R-PLANE (162 of the 276 sharp tuning configs); every R-PLANE, smooth-body and refused config keeps its
+sha. `setup(..., win_2to1=False)` is the rule set the committed campaigns were recorded under and
+`win_2to1_of(records)` tells which one a campaign used (an R-WIN, R-CURV, R-GAP or R-BUDGET apply record carrying the
+input `fine_ratio`); `optimise.rows_from`, optimise.py's selftest and prior.py's G-PRIOR rows pass it beside
+`ft_radius`. remedies.py's growth refits (`_refit_growth`) still fit at the wall level; that is its owner's (L6).
+
+The gate: `rules.py --win-gate --campaign DIR --ref DIR` over two attempt-1 campaigns
+(`campaign.py --run --manifest tuning --mode rules --ablate remedies`) on FT-RADIUS's 60 bodies (the same
+`--ft-sample` ids), DIR under WIN-2TO1 and the reference under FT-RADIUS alone. The delivered share of the
+requested wall area, BLC_8, BLC_full and the drops with G5 in the ladders' trace are reported, not gated. PASS
+needs no preflight refusal added on any sharp tuning config (PF-SURFACE set aside: the population has no STLs on
+disk), -dryRun exit 0 on every campaign config, every snap number and F3 flag equal, an unchanged config meshing
+to the same content sha, the identity (a changed config differs in a lower `/layers/growth` alone) and zero
+harness errors in both campaigns; it writes `rules/G-WIN-2TO1.json` and `.md`.
+
+G-WIN-2TO1 2026-09-27 (`rules/G-WIN-2TO1.json`, binary 7ff16117…5a83, on 5fea51f): PASS, against FT-RADIUS's own
+gate campaign on the same 60 bodies. 31 of the 60 attempt-1 configs get a lower growth. 11 rows deliver their layers
+where 6 did (PASS 10 against 5): F-1-001, F-1-022, F-1-028, F-1-040 and G-1-054 go from `thin_after_caps` to a
+delivered stack, and no row loses one. The delivered share of the requested wall area is 0.1833 over 60 meshed rows
+against 0.1017 over 59 (BLC_full 0.1446 against 0.0754; family F 0.40 against 0). E-1-032, refused by PF-YPLUS under
+the steeper growth, now passes preflight and meshes, and drops its layers (`inner_gate`); over the 276 sharp tuning
+configs preflight clears 8 PF-YPLUS refusals and adds none, and -dryRun exits 0 on all 60 campaign configs. Snap
+numbers and F3 flags are equal on the 59 rows both campaigns meshed. The 26 changed rows that still drop name
+`inner_gate` (18), `thin_proposed` (7) and `thin_after_caps` (1, F-1-025): what is left is L2/L3's and L5's, not the
+2:1 window.
 
 ## remedies.py — L2 remedies
 

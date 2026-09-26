@@ -10,7 +10,8 @@ Eight pure rules run in a fixed order and each returns ONE DecisionRecord:
 R-YP (the a priori first layer), R-DOM (the domain in L_ref multiples),
 R-PLANE (commensurate planar bodies put on cell planes, attraction off,
 SPEC-LIT §92.15.5), R-WIN (the coarsest wall level inside the §D.3 y+ window
-and the largest growth under the stack limiter), R-CURV (h <= r_p5/8),
+and the largest growth under the stack limiter at the finest level on the
+patch: h/2 where R-FEAT will put the sharp edges, WIN-2TO1), R-CURV (h <= r_p5/8),
 R-GAP (h <= gap/3), R-FEAT (feature_level +1 on sharp edges, the attraction
 on at tau = h_f / 2: snap.feature_tolerance = 0.5 * 2**-max_level, SPEC-LIT
 §92.12's erratum) and R-BUDGET (a predicted cell ladder that coarsens far-field
@@ -25,6 +26,7 @@ the §D.3 G5 edge; every other wall keeps the full edge (docs/15 §H, §I-1).
     python tools/autonomy/rules.py --gate --out DIR [--parts 1,2,3]
     python tools/autonomy/rules.py --ft-sample [--out IDS.txt]
     python tools/autonomy/rules.py --ft-gate --campaign DIR
+    python tools/autonomy/rules.py --win-gate --campaign DIR --ref DIR
 """
 
 from __future__ import annotations
@@ -146,6 +148,16 @@ def _apply_levels(state: dict, wall_level: int, far: float, wall: float, feature
     state["rung"] = (far, wall)
     state["feature"] = feature
     state["feature_level"] = fl
+
+
+def _fine_ratio(state: dict, level: int) -> int:
+    """WIN-2TO1: h at wall level `level` over h at the finest level on the layer
+    patch.  2 on a sharp body off R-PLANE below max_level, where R-FEAT puts the
+    edges one level finer (feature_level = wall level + 1); 1 on every other body,
+    and 1 under the recorded rules (setup(..., win_2to1=False))."""
+    if not state["win_2to1"] or state["plane"] or not state["fp"]["sharp_edge_length_m"]:
+        return 1
+    return 2 if level < state["cap"] else 1
 
 
 def _set_growth(state: dict, h: float):
@@ -475,11 +487,18 @@ def r_win(state: dict) -> dict:
                     "layers.rs:449 (t_i = min(T, medial, cell_frac*h_i)), "
                     "layers.rs:1292-1316 (92.51)", msg)
     level = plane["level"] if plane else w["level"]
+    ratio = _fine_ratio(state, level)
+    if ratio > 1 and state.get("requested_growth") is None:
+        w["fit"] = fit_growth(t1, n, w["h"] / ratio, state["knobs"])
+        w["growth"] = w["fit"] if w["fit"] is not None else 1.0
+        w["T"] = stack_total(t1, w["growth"], n)
     state["win_level"] = level
     _apply_levels(state, level, 1.0, 1.0, False)
     state["config"]["layers"]["growth"] = w["growth"]
     state["growth"] = w["growth"]
     edits = _edit_records(state)
+    if ratio > 1:
+        return _win_fine(state, w, level, ratio, edits)
     extra = ", times 0.70 for the box corners" if plane else ""
     return _rec("R-WIN", "apply",
                 {"observable": "h_wall / t1", "value": w["h"] / t1,
@@ -511,6 +530,68 @@ def r_win(state: dict) -> dict:
                 "growth %.3f is the largest step with T = %.6g m <= cell_frac*h = %.6g m"
                 % (n, w["lo"], w["hi"], w["lo"] / t1, w["hi"] / t1, G5_RATIO, extra,
                    level, w["h"], w["h"] / t1, w["growth"], w["T"], CELL_FRAC * w["h"]))
+
+
+def _win_fine(state: dict, w: dict, level: int, ratio: int, edits: list) -> dict:
+    """R-WIN's apply on a sharp body off R-PLANE below max_level (WIN-2TO1): R-FEAT
+    puts the sharp edges at level + 1, so the growth fits cell_frac * h / 2 there.  A
+    stack fitted to the wall level is cut to half at every feature-level point, and
+    the wall-level faces beside those points fail G5 (F-1-001: 440 cells, then more
+    at every retreat, AM-L's E5 confirmed by L0b's trace)."""
+    t1, n, h, T = state["t1"], state["n"], w["h"], w["T"]
+    hf = h / ratio
+    tau = min(1.0, CELL_FRAC * hf / T)
+    g5 = G5_FACTOR * t1 * tau / h
+    if state.get("requested_growth") is not None:
+        how = ("growth %.3f as requested, T = %.6g m against cell_frac*h_f = %.6g m"
+               % (w["growth"], T, CELL_FRAC * hf))
+    elif w["fit"] is not None:
+        how = ("growth %.3f is the largest step with T = %.6g m <= cell_frac*h_f = %.6g m"
+               % (w["growth"], T, CELL_FRAC * hf))
+    else:
+        how = ("no growth fits cell_frac*h_f = %.6g m (n*t1 = %.6g m), so growth 1.000"
+               % (CELL_FRAC * hf, T))
+    return _rec("R-WIN", "apply",
+                {"observable": "h_wall / t1", "value": h / t1,
+                 "threshold": [w["lo"] / t1, w["hi"] / t1], "op": "in",
+                 "source": "docs/15 §D.3"},
+                [{"name": "t1", "value": t1, "unit": "m"},
+                 {"name": "n", "value": n, "unit": "1"},
+                 {"name": "cell_frac", "value": CELL_FRAC, "unit": "1"},
+                 {"name": "min_thickness_ratio", "value": G5_RATIO, "unit": "1"},
+                 {"name": "kappa", "value": 1.0, "unit": "1"},
+                 {"name": "lo", "value": w["lo"], "unit": "m"},
+                 {"name": "hi", "value": w["hi"], "unit": "m"},
+                 {"name": "wall_level", "value": level, "unit": "1"},
+                 {"name": "h", "value": h, "unit": "m"},
+                 {"name": "h_over_t1", "value": h / t1, "unit": "1"},
+                 {"name": "fine_ratio", "value": ratio, "unit": "1"},
+                 {"name": "h_fine", "value": hf, "unit": "m"},
+                 {"name": "growth", "value": w["growth"], "unit": "1"},
+                 {"name": "T", "value": T, "unit": "m"},
+                 {"name": "cell_frac_h_fine", "value": CELL_FRAC * hf, "unit": "m"},
+                 {"name": "tau_fine", "value": tau, "unit": "1"},
+                 {"name": "g5_beside_fine", "value": g5, "unit": "1"}],
+                "lo = t1*S(g)/cell_frac with S(g) = sum g^k, k < n (g -> 1: S = n); "
+                "hi = 3*t1/min_thickness_ratio; the coarsest level with lo <= "
+                "base/2**L <= hi; R-FEAT puts the sharp edges at L + 1, so growth = "
+                "the largest k/1000 with t1*S(g) <= cell_frac*h/2 (1.0 when none fits); "
+                "tau_f = min(1, cell_frac*(h/2)/T), G5 beside it = 3*t1*tau_f/h",
+                edits, "docs/15 §D.3 (R-WIN); layers.rs:127-133 (the stack), "
+                "layers.rs:449 (t_i = min(T, medial, cell_frac*h_i)), "
+                "layers.rs:1292-1316 (92.51); docs/15 §G.1 AM-L (WIN-2TO1)",
+                "R-WIN: at n = %d the window is h in [%.4g, %.4g] m (h/t1 in [%.2f, "
+                "%.2f]: the stack limiter T <= cell_frac*h below, the G5 edge 3*t1/h "
+                ">= %g above); wall level %d gives h = %.6g m (h/t1 = %.2f). R-FEAT "
+                "will put the sharp edges at level %d (h_f = %.6g m), where the "
+                "limiter's cell is h_f: %s. The feature-level points keep tau = %.4g "
+                "of the stack and G5 on the wall-level faces beside them is "
+                "3*t1*tau/h = %.4g (%s %g); a stack fitted to the wall level instead "
+                "is cut at every feature-level point, and G5 fails on the faces beside "
+                "them (WIN-2TO1)"
+                % (n, w["lo"], w["hi"], w["lo"] / t1, w["hi"] / t1, G5_RATIO, level,
+                   h, h / t1, level + 1, hf, how, tau, g5,
+                   ">=" if g5 >= G5_RATIO else "<", G5_RATIO))
 
 
 # --- R-CURV, R-GAP, R-FEAT (C7) -----------------------------------------------
@@ -565,8 +646,9 @@ def _curv_gap_apply(state: dict, rid, r, h_max, L, capped, base, h, cells, word,
     """The apply arm of R-CURV / R-GAP: raise the wall level, refit the growth."""
     t1 = state["t1"]
     before_level = state["wall_level"]
+    ratio = _fine_ratio(state, L)
     _apply_levels(state, L, *state["rung"], state["feature"])
-    fit = _set_growth(state, base / 2 ** L)
+    fit = _set_growth(state, base / 2 ** L / ratio)
     edits = _edit_records(state)
     tail = (" (capped at max_level %d: %s/h = %.2f < %d)"
             % (state["cap"], word, r / (base / 2 ** L), cells)) if capped else ""
@@ -574,9 +656,16 @@ def _curv_gap_apply(state: dict, rid, r, h_max, L, capped, base, h, cells, word,
         g_txt = "%.3f" % state["growth"]
         tail2 = ("; no growth fits cell_frac*h at this level (n*t1 = %.4g m > %.4g m): "
                  "the cell_frac limiter will trim the stack"
-                 % (state["n"] * t1, CELL_FRAC * base / 2 ** L))
+                 % (state["n"] * t1, CELL_FRAC * base / 2 ** L / ratio))
     else:
         g_txt, tail2 = "%.3f" % fit, ""
+    fine_in = []
+    if ratio > 1:
+        fine_in = [{"name": "fine_ratio", "value": ratio, "unit": "1"},
+                   {"name": "h_fine", "value": base / 2 ** L / ratio, "unit": "m"}]
+        tail2 += ("; the stack is sized against cell_frac*h_f = %.4g m at level %d, "
+                  "where R-FEAT will put the sharp edges (WIN-2TO1)"
+                  % (CELL_FRAC * base / 2 ** L / ratio, L + 1))
     return _rec(rid, "apply",
                 {"observable": observable, "value": h_max, "threshold": h,
                  "op": "<", "source": "features.py; docs/15 §C " + rid},
@@ -587,7 +676,7 @@ def _curv_gap_apply(state: dict, rid, r, h_max, L, capped, base, h, cells, word,
                  {"name": "wall_level_before", "value": before_level, "unit": "1"},
                  {"name": "wall_level_after", "value": L, "unit": "1"},
                  {"name": "capped", "value": int(capped), "unit": "1"},
-                 {"name": "growth", "value": state["growth"], "unit": "1"}],
+                 {"name": "growth", "value": state["growth"], "unit": "1"}] + fine_in,
                 formula, edits, cite,
                 "%s: the %s is %.4g m, so h <= %s/%d = %.4g m; wall level %d -> %d "
                 "(h %.4g -> %.4g m)%s; growth %s%s"
@@ -745,7 +834,12 @@ def r_budget(state: dict) -> dict:
             cand = copy.deepcopy(state)
             _apply_levels(cand, lw, far, wall, feat)
             if lw != entry_wall:
-                _set_growth(cand, base / 2 ** lw)
+                ratio = _fine_ratio(cand, lw) if feat else 1
+                _set_growth(cand, base / 2 ** lw / ratio)
+                cand["fine_refit"] = ratio
+            elif feat != state["feature"] and _fine_ratio(cand, lw) > 1 \
+                    and state.get("requested_growth") is None:
+                _set_growth(cand, base / 2 ** lw)   # the bump dropped: h is the finest
             p = predict_cells(cand["config"], state["fp"], state["n"])
             tried.append({"wall_level": lw, "far": far, "wall": wall,
                           "feature": feat, "predicted": round(p["total"])})
@@ -777,6 +871,9 @@ def r_budget(state: dict) -> dict:
     state["predicted"] = p
     pred_in = base_in + [{"name": "predicted", "value": round(p["total"]),
                           "unit": "cells"}]
+    if cand.get("fine_refit", 1) > 1:
+        pred_in = pred_in + [{"name": "fine_ratio", "value": cand["fine_refit"],
+                              "unit": "1"}]
     if len(tried) == 1:
         return _rec("R-BUDGET", "pass", trig, pred_in, _BUDGET_FORMULA,
                     _edit_records(state), _BUDGET_CITE,
@@ -820,7 +917,7 @@ RULE_FN = {"R-YP": r_yp, "R-DOM": r_dom, "R-PLANE": r_plane, "R-WIN": r_win,
 
 def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str, *,
           flow=None, gates=None, knobs=None, requested_growth=None,
-          ft_radius=True) -> dict:
+          ft_radius=True, win_2to1=True) -> dict:
     """The eight L1 rules on one geometry; the autonomy-rules/1 result out."""
     gates = gates or schema.load_gates()
     knobs = knobs or schema.load_knobs()
@@ -841,7 +938,8 @@ def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str,
              "t1": None, "n": None, "base": None, "plane": None, "win_level": None,
              "wall_level": None, "rung": (1.0, 1.0), "feature": False,
              "feature_level": None, "growth": None, "stop": None, "predicted": None,
-             "ft_radius": bool(ft_radius), "ft_set": False}
+             "ft_radius": bool(ft_radius), "ft_set": False,
+             "win_2to1": bool(win_2to1)}
     records = []
     for rid in RULES:
         if state["stop"] is not None:
@@ -887,6 +985,23 @@ def ft_radius_of(records) -> bool:
                 or rec.get("verdict") != "apply":
             continue
         if any(e.get("pointer") == "/snap/feature_tolerance" for e in rec.get("edits") or []):
+            return True
+    return False
+
+
+def win_2to1_of(records) -> bool:
+    """Which R-WIN a recorded campaign ran under: True when one of its R-WIN, R-CURV,
+    R-GAP or R-BUDGET apply records carries the input fine_ratio (WIN-2TO1, the growth
+    fitted at the feature level), False for a campaign recorded before it.  A reader
+    that rebuilds recorded attempt-1 configs passes setup(..., ft_radius=ft_radius_of(r),
+    win_2to1=win_2to1_of(r)); a campaign with no such record holds no body whose
+    config WIN-2TO1 changes, so either value rebuilds it."""
+    for item in records:
+        rec = item.get("record", item) if isinstance(item, dict) else None
+        if not isinstance(rec, dict) or rec.get("verdict") != "apply" \
+                or rec.get("rule_id") not in ("R-WIN", "R-CURV", "R-GAP", "R-BUDGET"):
+            continue
+        if any(i.get("name") == "fine_ratio" for i in rec.get("inputs") or []):
             return True
     return False
 
@@ -1440,7 +1555,7 @@ def gate(parts, out_dir: str, streams: int = 6, binary: str | None = None) -> in
 # --- the selftest (C12) --------------------------------------------------------
 
 def selftest() -> int:
-    """16 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
+    """19 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
     import random
     import shutil
     import tempfile
@@ -1653,8 +1768,10 @@ def selftest() -> int:
             growth_edits = [e for e in rec_a["edits"]
                             if e["pointer"] == "/layers/growth"]
             new_h = ins_of(rec_a)["h_after"] if "h_after" in ins_of(rec_a) else None
+            ratio = ins_of(rec_a).get("fine_ratio", 1)
+            assert ratio == (2 if ins_of(rec_a)["wall_level_after"] < 6 else 1), rec_a["inputs"]
             if new_h is not None:
-                fit = fit_growth(res["summary"]["t1_m"], 8, new_h, knobs)
+                fit = fit_growth(res["summary"]["t1_m"], 8, new_h / ratio, knobs)
                 want = fit if fit is not None else 1.0
                 for e in growth_edits:
                     assert abs(e["to"] - want) < 1e-12, (e, want)
@@ -1908,6 +2025,128 @@ def selftest() -> int:
                 "short family; ft_summary passes at 20 of 60 F3-clean and fails at 19, on a "
                 "broken identity, a harness error, a radius off h_f/2 or a missing row")
 
+    def g17():
+        res_n = setup_of("F-1-001")
+        res_o = setup_of("F-1-001", win_2to1=False)
+        eds = diff_edits(res_o["config"], res_n["config"])
+        assert eds == [{"pointer": "/layers/growth", "from": 1.289, "to": 1.1}], eds
+        w = ins_of(res_n["records"][3])
+        assert (w["fine_ratio"], w["wall_level"], res_n["summary"]["feature_level"]) \
+            == (2, 5, 6), (w, res_n["summary"])
+        t1 = res_n["summary"]["t1_m"]
+        g5_old = G5_FACTOR * t1 * min(1.0, CELL_FRAC * w["h_fine"]
+                                      / stack_total(t1, 1.289, 8)) / w["h"]
+        assert g5_old < G5_RATIO <= w["g5_beside_fine"] and w["tau_fine"] == 1.0, \
+            (g5_old, w)
+        assert w["T"] <= CELL_FRAC * w["h_fine"], w
+        assert win_2to1_of(res_n["records"]) is True
+        assert win_2to1_of([{"record": r} for r in res_n["records"]]) is True
+        assert win_2to1_of(res_o["records"]) is False and win_2to1_of([]) is False
+        # a smooth body, the R-PLANE cube and a dropped feature bump keep their sha
+        assert setup_of("B-1-000", win_2to1=False)["config_sha256"] \
+            == setup_of("B-1-000")["config_sha256"]
+        assert cube_setup(win_2to1=False)["config_sha256"] == cube_setup()["config_sha256"]
+        res_b = setup_of("A-1-002")
+        assert res_b["summary"]["feature_level"] is None, res_b["summary"]
+        assert setup_of("A-1-002", win_2to1=False)["config_sha256"] == res_b["config_sha256"]
+        # R-BUDGET back at R-WIN's level refits at h/2 and records it
+        fp8 = dict(fp_of("A-1-000"))
+        fp8["area_m2"] = fp8["area_m2"] * 8
+        rb = setup_of("A-1-000", fp8)["records"][7]
+        assert rb["verdict"] == "apply" and ins_of(rb).get("fine_ratio") == 2, rb["inputs"]
+        assert win_2to1_of([rb]) is True
+        # a requested growth is kept, and the record says what G5 will see
+        rq = setup_of("F-1-001", requested_growth=1.2)
+        assert rq["config"]["layers"]["growth"] == 1.2, rq["config"]["layers"]
+        assert "as requested" in rq["records"][3]["message"] \
+            and "(< 0.05)" in rq["records"][3]["message"], rq["records"][3]["message"]
+        return ("F-1-001 (wall level 5, edges at 6): growth 1.289 -> 1.1, G5 beside the "
+                "feature level %.4f -> %.4f; B-1-000, cubep and A-1-002 (bump dropped) "
+                "keep their sha; R-BUDGET records its refit; a requested growth is kept; "
+                "win_2to1_of tells the two apart" % (g5_old, w["g5_beside_fine"]))
+
+    def g18():
+        def pp(gid, cls, growth, refused=None):
+            cfg = None if growth is None else {"layers": {"n": 8, "growth": growth}}
+            return {"geometry_id": gid, "class": cls,
+                    "result": {"config": cfg, "refused": refused or []}}
+        old = [pp("a", "sharp", 1.3), pp("b", "plane", 1.3), pp("c", "smooth", 1.3),
+               pp("d", "refused", None, ["R-WIN"]), pp("e", "no_fingerprint", None)]
+        new = [pp("a", "sharp", 1.1)] + old[1:]
+        idn = win_identity(old, new)
+        assert idn["ok"] and idn["counts"]["sharp"]["changed"] == 1, idn
+        assert win_identity(old, [pp("a", "sharp", 1.4)] + old[1:])["bad"] == ["a"]
+        assert win_identity(old, new[:1] + [pp("b", "plane", 1.1)] + old[2:])["bad"] == ["b"]
+        assert win_identity(old, new[:3] + [pp("d", "refused", None, ["R-BUDGET"])]
+                            + old[4:])["bad"] == ["d"]
+        cdir = os.path.join(tmp, "win_campaign")
+        os.makedirs(os.path.join(cdir, "cases", "X-1-001_a1"))
+        lay = {"stage": "layers", "retreats": 3,
+               "ladder": [{"gates": [{"gate": "G5", "n_failed": 440}]}, {"gates": []}],
+               "patches": [{"drop_cause": "thin_after_caps"}, {"drop_cause": None}]}
+        with open(os.path.join(cdir, "cases", "X-1-001_a1", "X-1-001_a1_summary.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump({"stages": [{"stage": "snap"}, lay]}, fh)
+        got = win_layers(cdir, "X-1-001")
+        assert got == {"drop_causes": ["thin_after_caps"], "g4": False, "g5": True,
+                       "retreats": 3}, got
+        assert win_layers(cdir, "X-1-002") is None
+        row = {"outcome": {"patches": [{"requested": True, "area_m2": 3.0, "delivered": True},
+                                       {"requested": True, "area_m2": 1.0, "delivered": False},
+                                       {"requested": False, "area_m2": 9.0}],
+                           "flags": {"F3a": False}}, "content_sha256": "x"}
+        sd = _win_side(({"terminal": "EXHAUSTED"}, row, {"layers": {"growth": 1.1}}), got)
+        assert (sd["delivered_share"], sd["growth"], sd["g5_in_trace"]) == (0.75, 1.1, True), sd
+        none = _win_side(({"terminal": "REFUSED"}, None, None), None)
+        assert none["meshed"] is False and none["delivered_share"] is None, none
+        return ("win_identity passes a sharp growth cut and fails a rise, a changed plane "
+                "config and a changed refusal; win_layers reads drop_cause and G5 from the "
+                "trace; _win_side's delivered share counts requested area only (0.75)")
+
+    def g19():
+        def side(share):
+            return {"terminal": "EXHAUSTED", "meshed": True, "delivered_share": share,
+                    "blc8": share, "blc_full": share, "g5_in_trace": share == 0.0,
+                    "drop_causes": [] if share else ["thin_after_caps"]}
+
+        def rows():
+            return [{"geometry_id": "%s-9-%03d" % (FT_FAMILIES[i // 10], i),
+                     "family": FT_FAMILIES[i // 10], "new": side(1.0), "ref": side(0.0),
+                     "growth_changed": i % 2 == 0, "snap_equal": True,
+                     "content_equal": i % 2 == 1} for i in range(60)]
+        ok = ({"ok": True}, {"ok": True, "added": []}, {"ok": True, "bad": []},
+              ({"harness_errors": 0}, {"harness_errors": 0}))
+        s = win_summary(rows(), *ok)
+        assert s["verdict"] == "PASS" and s["changed"] == 30, s
+        assert (s["new"]["delivered_rows"], s["ref"]["delivered_rows"]) == (60, 0), s
+        assert (s["new"]["g5_drops"], s["ref"]["g5_drops"]) == (0, 60), s
+        bad = []
+        for k, fix in (("refused", lambda r: r[3]["new"].update(terminal="REFUSED")),
+                       ("snap", lambda r: r[1].update(snap_equal=False)),
+                       ("same config", lambda r: r[1].update(content_equal=False)),
+                       ("not ended", lambda r: r[2]["ref"].update(terminal=None)),
+                       ("59 rows", lambda r: r.pop())):
+            r = rows()
+            fix(r)
+            if win_summary(r, *ok)["verdict"] != "FAIL":
+                bad.append(k)
+        for i, k in enumerate(("identity", "preflight", "dryrun")):
+            args = list(ok)
+            args[i] = dict(args[i], ok=False)
+            if win_summary(rows(), *args)["verdict"] != "FAIL":
+                bad.append(k)
+        if win_summary(rows(), *ok[:3], ({"harness_errors": 0}, {"harness_errors": 1})
+                       )["verdict"] != "FAIL":
+            bad.append("harness")
+        assert not bad, bad
+        r = rows()
+        r[0]["content_equal"] = False     # a changed config may change the mesh
+        assert win_summary(r, *ok)["verdict"] == "PASS"
+        return ("win_summary passes 60 clean rows and fails on an added refusal, a snap "
+                "difference, an unchanged config's mesh differing, a missing end, 59 rows, "
+                "a broken identity, a preflight refusal added, a -dryRun failure or a "
+                "harness error")
+
     failed = 0
     try:
         for name, fn in (("R-YP", g1), ("R-WIN", g2), ("window table", g3),
@@ -1915,7 +2154,8 @@ def selftest() -> int:
                          ("R-CURV / R-GAP", g7), ("R-FEAT", g8), ("R-BUDGET", g9),
                          ("setup", g10), ("whitelist", g11), ("records", g12),
                          ("determinism", g13), ("cli", g14), ("FT-RADIUS rule", g15),
-                         ("FT-RADIUS gate", g16)):
+                         ("FT-RADIUS gate", g16), ("WIN-2TO1 rule", g17),
+                         ("WIN-2TO1 gate", g18), ("WIN-2TO1 verdict", g19)):
             failed += group(name, fn)
             if failed:
                 for l in lines:
@@ -1942,10 +2182,12 @@ FT_HEADER = ("meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (I
              "Source-available, not Open Source. No GPL-licensed source was consulted.")
 
 
-def ft_population(bundle, rows, gates=None, knobs=None) -> list:
-    """Every tuning row, classed by today's setup on the fingerprint the committed rules
+def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False) -> list:
+    """Every tuning row, classed by setup on the fingerprint the committed rules
     campaign recorded: no_fingerprint, refused, plane (R-PLANE), smooth (no sharp edge)
-    or sharp (the rows FT-RADIUS changes); the stl and case paths are campaign.py's."""
+    or sharp (the rows FT-RADIUS changes); the stl and case paths are campaign.py's.
+    The rules are FT-RADIUS's (win_2to1=False), so G-FT-RADIUS still reproduces;
+    the WIN-2TO1 gate builds a second population with win_2to1=True."""
     ends = {g["geometry_id"]: g for g in bundle["geometries"]}
     out = []
     for row in rows:
@@ -1955,7 +2197,7 @@ def ft_population(bundle, rows, gates=None, knobs=None) -> list:
              "row": row, "fingerprint": fp, "result": None, "class": "no_fingerprint"}
         if fp is not None:
             res = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
-                        gates=gates, knobs=knobs)
+                        gates=gates, knobs=knobs, win_2to1=win_2to1)
             p["result"] = res
             if res["verdict"] != "apply":
                 p["class"] = "refused"
@@ -2019,7 +2261,7 @@ def ft_identity(pop, bundle, gates=None, knobs=None) -> dict:
                 sorted(end["refused"]) == sorted(new["refused"])
         else:
             old = setup(p["row"], p["fingerprint"], "stl/%s.stl" % gid, "cases/%s" % gid,
-                        gid, gates=gates, knobs=knobs, ft_radius=False)
+                        gid, gates=gates, knobs=knobs, ft_radius=False, win_2to1=False)
             ok = r1 is None or r1["config_sha"] == old["config_sha256"]
             if cls in ("plane", "smooth"):
                 ok = ok and new["config_sha256"] == old["config_sha256"]
@@ -2230,6 +2472,300 @@ def ft_gate(cdir, bundle_path=FT_BUNDLE, report_dir=REPORT_DIR) -> int:
     return 0 if summ["verdict"] == "PASS" else 1
 
 
+# --- the WIN-2TO1 gate: FT-RADIUS's 60 bodies, the growth at the feature level ------
+
+WIN_GATE_SCHEMA = "autonomy-win-2to1-gate/1"
+WIN_SNAP_KEYS = ("n_boundary_points", "n_pinned", "pinned_frac", "p99_over_hf",
+                 "max_over_hf", "feature_capture")
+
+
+def win_identity(pop_old, pop_new) -> dict:
+    """WIN-2TO1 against FT-RADIUS alone on every tuning row with a fingerprint: the
+    same class, plane and smooth configs unchanged, a sharp config different in
+    /layers/growth alone and only downwards, a refusal naming the same rules."""
+    counts = {c: {"n": 0, "ok": 0, "changed": 0}
+              for c in ("plane", "smooth", "sharp", "refused")}
+    bad = []
+    for po, pn in zip(pop_old, pop_new):
+        cls, gid = po["class"], po["geometry_id"]
+        if cls == "no_fingerprint":
+            continue
+        ok = pn["geometry_id"] == gid and pn["class"] == cls
+        eds = []
+        if ok and cls == "refused":
+            ok = po["result"]["refused"] == pn["result"]["refused"]
+        elif ok:
+            eds = diff_edits(po["result"]["config"], pn["result"]["config"])
+            ok = not eds if cls != "sharp" else all(
+                e["pointer"] == "/layers/growth" and e["to"] < e["from"] for e in eds)
+        c = counts[cls]
+        c["n"] += 1
+        c["ok"] += 1 if ok else 0
+        c["changed"] += 1 if eds else 0
+        if not ok:
+            bad.append(gid)
+    return {"counts": counts, "bad": bad, "ok": not bad and len(pop_old) == len(pop_new)}
+
+
+def win_preflight(pop_old, pop_new, gates=None, knobs=None) -> dict:
+    """preflight() on every sharp config under both rule sets, with its fingerprint and
+    flow.  The STLs are not on disk here, so PF-SURFACE is set aside on both sides;
+    `added` lists the rows WIN-2TO1 makes refuse (the gate needs none), `cleared` the
+    rows it lets pass."""
+    added, cleared, n = [], [], 0
+    for po, pn in zip(pop_old, pop_new):
+        if po["class"] != "sharp":
+            continue
+        n += 1
+        got = []
+        for p in (po, pn):
+            pf = preflight.preflight(p["result"]["config"], fingerprint=p["fingerprint"],
+                                     flow=p["row"]["flow"], gates=gates, knobs=knobs)
+            got.append(set(pf["refused"]) - {"PF-SURFACE"})
+        if got[1] - got[0]:
+            added.append({"geometry_id": po["geometry_id"], "rules": sorted(got[1] - got[0])})
+        if got[0] - got[1]:
+            cleared.append({"geometry_id": po["geometry_id"],
+                            "rules": sorted(got[0] - got[1])})
+    return {"n": n, "added": added, "cleared": cleared, "ok": not added}
+
+
+def win_dryrun(cdir, ids, binary) -> dict:
+    """-dryRun on every attempt-1 config the campaign wrote, run from the campaign
+    directory (its stl/ paths are relative there); ok when every one exits 0."""
+    import campaign
+    bad, n = [], 0
+    for gid in ids:
+        rel = campaign.config_rel(gid, 1)
+        if not os.path.isfile(os.path.join(cdir, rel)):
+            continue
+        n += 1
+        p = subprocess.run([binary, rel, "-dryRun"], cwd=cdir, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+        if p.returncode != 0:
+            bad.append({"geometry_id": gid, "exit_code": p.returncode,
+                        "error": _last_error_line(p.stderr)})
+    return {"n": n, "bad": bad, "ok": not bad}
+
+
+def win_layers(cdir, gid):
+    """Attempt 1's layer story from its summary: each patch's drop_cause (L0b) and
+    whether G4 or G5 failed anywhere in the ladders' trace; None without a summary."""
+    path = os.path.join(cdir, "cases", "%s_a1" % gid, "%s_a1_summary.json" % gid)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        st = json.load(fh).get("stages") or []
+    lay = st.get("layers") if isinstance(st, dict) else next(
+        (s for s in st if s.get("stage") == "layers"), None)
+    if not lay:
+        return None
+    failed = {g["gate"] for e in lay.get("ladder") or [] for g in e.get("gates") or []}
+    return {"drop_causes": sorted({p["drop_cause"] for p in lay.get("patches") or []
+                                   if p.get("drop_cause")}),
+            "g4": "G4" in failed, "g5": "G5" in failed, "retreats": lay.get("retreats")}
+
+
+def _win_side(got, lay) -> dict:
+    """One campaign's view of one geometry: terminal, growth, the delivered share of
+    the requested wall area, BLC_8 / BLC_full, the failure class and the layer story."""
+    end, row, cfg = got
+    oc = (row or {}).get("outcome") or {}
+    req = [p for p in oc.get("patches") or [] if p.get("requested")]
+    area = sum(p["area_m2"] for p in req)
+    dl = sum(p["area_m2"] for p in req if p.get("delivered"))
+    return {"terminal": end["terminal"] if end else None,
+            "growth": ((cfg or {}).get("layers") or {}).get("growth"),
+            "meshed": bool(oc), "delivered_share": dl / area if area > 0 else None,
+            "blc8": oc.get("blc8_a_priori"), "blc_full": oc.get("blc_full_a_priori"),
+            "failure_class": oc.get("failure_class"),
+            "drop_causes": lay["drop_causes"] if lay else None,
+            "g5_in_trace": lay["g5"] if lay else None,
+            "snap": {k: oc.get(k) for k in WIN_SNAP_KEYS} if oc else None,
+            "f3": {k: (oc.get("flags") or {}).get(k) for k in FT_F3} if oc else None,
+            "content_sha256": (row or {}).get("content_sha256")}
+
+
+def win_row(p, new, ref) -> dict:
+    """One sampled geometry under WIN-2TO1 (`new`) beside FT-RADIUS alone (`ref`);
+    snap_equal: stages 1-5 read no /layers key, so every snap number and F3 flag must
+    match; content_equal: an unchanged config must give the same mesh."""
+    a, b = new, ref
+    both = a["meshed"] and b["meshed"]
+    return {"geometry_id": p["geometry_id"], "family": p["family"],
+            "stratum": p["stratum"], "new": a, "ref": b,
+            "growth_changed": a["growth"] != b["growth"],
+            "snap_equal": (a["snap"] == b["snap"] and a["f3"] == b["f3"]) if both else None,
+            "content_equal": (a["content_sha256"] == b["content_sha256"]) if both else None}
+
+
+def _win_mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def _win_side_summary(rows, key) -> dict:
+    s = [r[key] for r in rows]
+    return {"meshed": sum(1 for x in s if x["meshed"]),
+            "refused": sum(1 for x in s if x["terminal"] == "REFUSED"),
+            "delivered_rows": sum(1 for x in s if (x["delivered_share"] or 0) > 0),
+            "delivered_share_mean": _win_mean([x["delivered_share"] for x in s]),
+            "blc8_mean": _win_mean([x["blc8"] for x in s]),
+            "blc_full_mean": _win_mean([x["blc_full"] for x in s]),
+            "g5_drops": sum(1 for x in s if x["g5_in_trace"] and x["drop_causes"]),
+            "terminals": {t: sum(1 for x in s if x["terminal"] == t)
+                          for t in sorted({x["terminal"] for x in s if x["terminal"]})}}
+
+
+def win_summary(rows, identity, pf, dry, ends) -> dict:
+    """The gate's numbers from the rows alone.  PASS needs the 60 rows in both
+    campaigns, the identity held, no preflight refusal added (population and sample),
+    -dryRun 0 on every config, every snap number equal, every unchanged config's mesh
+    equal and zero harness errors in both; the delivered share is reported, not gated."""
+    n_ok = len(rows) == FT_PER_FAMILY * len(FT_FAMILIES)
+    ended = all(r["new"]["terminal"] and r["ref"]["terminal"] for r in rows)
+    refused_added = [r["geometry_id"] for r in rows if r["new"]["terminal"] == "REFUSED"
+                     and r["ref"]["terminal"] != "REFUSED"]
+    snap_bad = [r["geometry_id"] for r in rows if r["snap_equal"] is False]
+    same_bad = [r["geometry_id"] for r in rows
+                if not r["growth_changed"] and r["content_equal"] is False]
+    harness = [(e or {}).get("harness_errors") for e in ends]
+    fams = {}
+    for fam in FT_FAMILIES:
+        fr = [r for r in rows if r["family"] == fam]
+        fams[fam] = {"n": len(fr), "changed": sum(1 for r in fr if r["growth_changed"]),
+                     "new": _win_side_summary(fr, "new"), "ref": _win_side_summary(fr, "ref")}
+    ok = (n_ok and ended and identity["ok"] and pf["ok"] and dry["ok"] and not refused_added
+          and not snap_bad and not same_bad and harness == [0, 0])
+    return {"n": len(rows), "changed": sum(1 for r in rows if r["growth_changed"]),
+            "new": _win_side_summary(rows, "new"), "ref": _win_side_summary(rows, "ref"),
+            "refused_added": refused_added, "snap_bad": snap_bad, "same_config_bad": same_bad,
+            "snap_compared": sum(1 for r in rows if r["snap_equal"] is not None),
+            "harness_errors": harness, "families": fams,
+            "verdict": "PASS" if ok else "FAIL"}
+
+
+def _win_md_head(report: dict) -> list:
+    """G-WIN-2TO1.md's header and verdict lines, every number read from the report."""
+    s, ic = report["summary"], report["identity"]["counts"]
+    a, b, pf, dry = s["new"], s["ref"], report["preflight"], report["dryrun"]
+    return [
+        "<!-- %s -->" % FT_HEADER, "",
+        "# G-WIN-2TO1 - R-WIN fits the growth at the feature level on FT-RADIUS's 60 bodies",
+        "", "Date %s - binary sha256 `%s` - git HEAD `%s` - campaign `%s` against FT-RADIUS "
+        "alone `%s` (mode rules, remedies ablated: attempt 1 only)."
+        % (report["date"], (report["binary_sha256"] or "?")[:16], report["git_head"][:12],
+           report["campaign"]["campaign_id"], report["ref_campaign"]["campaign_id"]), "",
+        "## Verdict - %s" % s["verdict"], "",
+        "- Delivered share of the requested wall area (reported, not gated): mean **%s** "
+        "over %d meshed rows against %s over %d; rows with a delivered patch %d against "
+        "%d; BLC_8 mean %s against %s; BLC_full mean %s against %s."
+        % (_ft4(a["delivered_share_mean"]), a["meshed"],
+           _ft4(b["delivered_share_mean"]), b["meshed"],
+           a["delivered_rows"], b["delivered_rows"],
+                                          _ft4(a["blc8_mean"]), _ft4(b["blc8_mean"]),
+                                          _ft4(a["blc_full_mean"]), _ft4(b["blc_full_mean"])),
+        "- Growth changed on %d of %d; layer drops with G5 in the trace %d against %d; "
+        "refused %d against %d (added: %s)." % (s["changed"], s["n"], a["g5_drops"],
+                                               b["g5_drops"], a["refused"], b["refused"],
+                                               ", ".join(s["refused_added"]) or "none"),
+        "- Snap numbers and F3 flags equal on %d of %d rows meshed by both (bad: %s); "
+        "unchanged configs whose mesh differs: %s; harness errors %s."
+        % (s["snap_compared"] - len(s["snap_bad"]), s["snap_compared"],
+           ", ".join(s["snap_bad"]) or "none", ", ".join(s["same_config_bad"]) or "none",
+           s["harness_errors"]),
+        "- Preflight on the %d sharp tuning configs: %d refusal(s) added, %d cleared (%s); "
+        "-dryRun exit 0 on %d of %d campaign configs."
+        % (pf["n"], len(pf["added"]), len(pf["cleared"]),
+           ", ".join("%s %s" % (c["geometry_id"], "+".join(c["rules"]))
+                     for c in pf["cleared"]) or "none",
+           dry["n"] - len(dry["bad"]), dry["n"]),
+        "- Identity against FT-RADIUS alone: " + "; ".join(
+            "%s %d/%d (changed %d)" % (c, ic[c]["ok"], ic[c]["n"], ic[c]["changed"])
+            for c in ("plane", "smooth", "sharp", "refused"))
+        + "; bad: %s." % (", ".join(report["identity"]["bad"]) or "none"), ""]
+
+
+def _win_write(report: dict, report_dir: str) -> None:
+    """The ONLY in-tree writes of --win-gate: report_dir/G-WIN-2TO1.json and .md."""
+    os.makedirs(report_dir, exist_ok=True)
+    with open(os.path.join(report_dir, "G-WIN-2TO1.json"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write(json.dumps(report, indent=1, sort_keys=True, ensure_ascii=False) + "\n")
+    L = _win_md_head(report)
+    L += ["## By family (WIN-2TO1 / FT-RADIUS alone)", "",
+          "| family | rows | growth changed | delivered rows | delivered share | BLC_full "
+          "| G5 drops |", "|---|---|---|---|---|---|---|"]
+    for fam, f in sorted(report["summary"]["families"].items()):
+        a, b = f["new"], f["ref"]
+        L.append("| %s | %d | %d | %d / %d | %s / %s | %s / %s | %d / %d |"
+                 % (fam, f["n"], f["changed"], a["delivered_rows"], b["delivered_rows"],
+                    _ft4(a["delivered_share_mean"]), _ft4(b["delivered_share_mean"]),
+                    _ft4(a["blc_full_mean"]), _ft4(b["blc_full_mean"]),
+                    a["g5_drops"], b["g5_drops"]))
+    L += ["", "## The 60 rows (WIN-2TO1 / FT-RADIUS alone)", "",
+          "| geometry | growth | terminal | delivered share | failure class | drop cause |",
+          "|---|---|---|---|---|---|"]
+    for r in report["rows"]:
+        a, b = r["new"], r["ref"]
+        L.append("| %s | %s / %s | %s / %s | %s / %s | %s / %s | %s / %s |"
+                 % (r["geometry_id"], a["growth"], b["growth"], a["terminal"], b["terminal"],
+                    _ft4(a["delivered_share"]), _ft4(b["delivered_share"]),
+                    a["failure_class"] or "-", b["failure_class"] or "-",
+                    " ".join(a["drop_causes"] or []) or "-",
+                    " ".join(b["drop_causes"] or []) or "-"))
+    with open(os.path.join(report_dir, "G-WIN-2TO1.md"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write("\n".join(L) + "\n")
+
+
+def win_gate(cdir, ref_dir, bundle_path=FT_BUNDLE, report_dir=REPORT_DIR,
+             binary=BINARY_DEFAULT) -> int:
+    """The WIN-2TO1 gate over two finished attempt-1 campaigns on FT-RADIUS's sample:
+    `cdir` under WIN-2TO1, `ref_dir` under FT-RADIUS alone; writes G-WIN-2TO1.*"""
+    import lreplay
+    import split
+    bundle = lreplay.load_bundle(bundle_path)
+    gates, knobs = schema.load_gates(), schema.load_knobs()
+    rows_t = split.load("tuning", "rules")
+    pop_old = ft_population(bundle, rows_t, gates=gates, knobs=knobs, win_2to1=False)
+    pop_new = ft_population(bundle, rows_t, gates=gates, knobs=knobs, win_2to1=True)
+    picked = ft_sample(pop_old)
+    ids = [p["geometry_id"] for p in picked]
+    identity = win_identity(pop_old, pop_new)
+    pf = win_preflight(pop_old, pop_new, gates=gates, knobs=knobs)
+    head, got, end = ft_read(cdir, ids)
+    rhead, rgot, rend = ft_read(ref_dir, ids)
+    rows = [win_row(p, _win_side(got[p["geometry_id"]], win_layers(cdir, p["geometry_id"])),
+                    _win_side(rgot[p["geometry_id"]], win_layers(ref_dir, p["geometry_id"])))
+            for p in picked]
+    dry = win_dryrun(cdir, ids, binary)
+    summ = win_summary(rows, identity, pf, dry, (end, rend))
+    git = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True,
+                         text=True)
+    keys = ("campaign_id", "git_sha", "streams", "t_start")
+    report = {"$comment": FT_HEADER, "schema": WIN_GATE_SCHEMA,
+              "date": schema._now_iso()[:10], "git_head": git.stdout.strip(),
+              "binary_sha256": head.get("binary_sha256"),
+              "ref_binary_sha256": rhead.get("binary_sha256"),
+              "campaign": {k: head.get(k) for k in keys},
+              "ref_campaign": {k: rhead.get(k) for k in keys},
+              "bundle": os.path.relpath(bundle_path, REPO).replace(os.sep, "/"),
+              "sample_ids": ids, "identity": identity, "preflight": pf, "dryrun": dry,
+              "summary": summ, "rows": rows}
+    _win_write(report, report_dir)
+    a, b = summ["new"], summ["ref"]
+    print("G-WIN-2TO1 %s: delivered share %s against %s (rows %d against %d), G5 drops %d "
+          "against %d; growth changed on %d of %d; snap equal %d/%d; preflight added %d, "
+          "cleared %d; dryRun bad %d of %d"
+          % (summ["verdict"], _ft4(a["delivered_share_mean"]),
+             _ft4(b["delivered_share_mean"]), a["delivered_rows"], b["delivered_rows"],
+             a["g5_drops"], b["g5_drops"], summ["changed"], summ["n"],
+             summ["snap_compared"] - len(summ["snap_bad"]), summ["snap_compared"],
+             len(pf["added"]), len(pf["cleared"]), len(dry["bad"]), dry["n"]))
+    return 0 if summ["verdict"] == "PASS" else 1
+
+
 # --- the CLI (C9) ---------------------------------------------------------------
 
 class _ArgParser(argparse.ArgumentParser):
@@ -2366,6 +2902,21 @@ def _cli_ft_gate(argv: list[str]) -> int:
         return 2
 
 
+def _cli_win_gate(argv: list[str]) -> int:
+    ap = _ArgParser(prog="rules.py --win-gate")
+    ap.add_argument("--campaign", required=True)
+    ap.add_argument("--ref", required=True)
+    ap.add_argument("--report-dir", default=REPORT_DIR)
+    ap.add_argument("--binary", default=BINARY_DEFAULT)
+    args = ap.parse_args(argv)
+    try:
+        return win_gate(args.campaign, args.ref, report_dir=args.report_dir,
+                        binary=args.binary)
+    except (RulesError, OSError, ValueError, schema.SchemaError) as e:
+        sys.stderr.write("rules: %s\n" % e)
+        return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
@@ -2379,6 +2930,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cli_ft_sample(argv[1:])
     if argv[0] == "--ft-gate":
         return _cli_ft_gate(argv[1:])
+    if argv[0] == "--win-gate":
+        return _cli_win_gate(argv[1:])
     ap = _ArgParser(prog="rules.py", description="the L1 setup rules (AM-9)")
     ap.add_argument("stl", nargs="?")
     ap.add_argument("--id")

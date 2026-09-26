@@ -201,8 +201,10 @@ def rows_from(bundle, source, mrows, gates, knobs):
         by_geom.setdefault(r["geometry_id"], {})[r["attempt"]] = r
     out = []
     # the rules the campaign was recorded under (a bundle written before FT-RADIUS
-    # rebuilds its attempt-1 configs with the default attraction radius)
+    # rebuilds its attempt-1 configs with the default attraction radius, one written
+    # before WIN-2TO1 with the growth fitted at the wall level)
     ftr = rules.ft_radius_of(bundle.get("records") or [])
+    w21 = rules.win_2to1_of(bundle.get("records") or [])
     for gid in sorted(by_geom):
         att = by_geom[gid]
         if sorted(att) != list(range(1, max(att) + 1)):
@@ -215,7 +217,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
         else:
             s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
                             campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
-                            ft_radius=ftr)
+                            ft_radius=ftr, win_2to1=w21)
             if s["refused"]:
                 raise OptError("rules.setup refuses %s (%s): %s"
                                % (gid, source, ", ".join(s["refused"])))
@@ -1709,10 +1711,12 @@ def _g2_rows(H):
 def _g3_pool(H):
     gid = "D-1-073"
     fp = H["cends"][gid]["fingerprint"]
-    # D-1-073's L1 as the committed rules campaign built it (before FT-RADIUS)
+    # D-1-073's L1 as the committed rules campaign built it (before FT-RADIUS and
+    # WIN-2TO1)
     s = rules.setup(H["mrows"][gid], fp, campaign.stl_rel(gid),
                     campaign.case_rel(gid), gid, gates=H["gates"],
-                    knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]))
+                    knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]),
+                    win_2to1=rules.win_2to1_of(H["rb"]["records"]))
     assert not s["refused"], s["refused"]
     l1 = s["config"]
     assert schema.canonical_sha256(l1).startswith("e31caabef618")
@@ -1822,13 +1826,15 @@ def _g5_decide(H):
         (256, 256, 0, 0, 29, 227, 14), c
     pk = res["pick"]
     assert pk["sobol_index"] == 7, pk["sobol_index"]
-    assert pk["config_sha256"].startswith("a5e6d2875713"), \
+    # the box is centred on today's L1, whose growth WIN-2TO1 fits at the feature
+    # level (1.151, not the recorded 1.34), so the pick's config and scores moved
+    assert pk["config_sha256"].startswith("8fb496e8d71e"), \
         pk["config_sha256"][:12]
-    assert abs(pk["p_fail"] - 0.146157) <= 1e-6, pk["p_fail"]
-    assert abs(pk["p_fail_std"] - 0.043875) <= 1e-6, pk["p_fail_std"]
-    assert abs(pk["blc8_a_priori"] - 0.013567) <= 1e-6, pk["blc8_a_priori"]
+    assert abs(pk["p_fail"] - 0.140108) <= 1e-6, pk["p_fail"]
+    assert abs(pk["p_fail_std"] - 0.033052) <= 1e-6, pk["p_fail_std"]
+    assert abs(pk["blc8_a_priori"] - 0.018721) <= 1e-6, pk["blc8_a_priori"]
     assert abs(pk["log_cells"] - 3.961202) <= 1e-6, pk["log_cells"]
-    assert [r["sobol_index"] for r in res["runners_up"]] == [191, 216, 130], \
+    assert [r["sobol_index"] for r in res["runners_up"]] == [130, 93, 191], \
         [r["sobol_index"] for r in res["runners_up"]]
     assert pk["knobs"]["feature_tolerance"] in FEATURE_TOLS_SHARP
     assert pk["knobs"]["smoothing_passes"] == 2
@@ -1920,11 +1926,11 @@ def _g8_refine(H):
     rows = {(r["geometry_id"], r["attempt"]): r for r in r1["attempts"]}
     assert rows[("D-1-073", 2)]["decided_by"] == "optimiser"
     assert rows[("D-1-073", 2)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("D-1-073", 2)]["prediction"]["p_fail"] - 0.163066) <= 1e-6, \
+    assert abs(rows[("D-1-073", 2)]["prediction"]["p_fail"] - 0.094653) <= 1e-6, \
         rows[("D-1-073", 2)]["prediction"]["p_fail"]
     assert rows[("F-1-025", 2)]["decided_by"] == "optimiser"
     assert rows[("F-1-025", 2)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("F-1-025", 2)]["prediction"]["p_fail"] - 0.181093) <= 1e-6, \
+    assert abs(rows[("F-1-025", 2)]["prediction"]["p_fail"] - 0.193727) <= 1e-6, \
         rows[("F-1-025", 2)]["prediction"]["p_fail"]
     sidx = {}
     for ln in r1["records"]:
@@ -1932,7 +1938,7 @@ def _g8_refine(H):
             if i["name"] == "sobol_index":
                 sidx[(ln["geometry_id"], ln["attempt"])] = i["value"]
     assert sidx[("D-1-073", 2)] == 0, sidx
-    assert sidx[("F-1-025", 2)] == 4, sidx
+    assert sidx[("F-1-025", 2)] == 12, sidx
     ends = {g["geometry_id"]: g for g in r1["geometries"]}
     assert ends["D-1-073"]["terminal"] == "PASS"
     assert ends["F-1-025"]["terminal"] == "PASS"
@@ -1993,7 +1999,7 @@ def _g8_refine(H):
         om._MODEL.clear()
         om._MODEL.update(saved)
     print("[ok] refine on the oracle: D-1-073 and F-1-025 rescued in round 1 "
-          "(indices 0 and 4), MFR 0.375 -> 0.25, PASS and enabled; a re-run reuses "
+          "(indices 0 and 12), MFR 0.375 -> 0.25, PASS and enabled; a re-run reuses "
           "both rounds and gives an equal report; check PASS")
 
 
@@ -2046,7 +2052,8 @@ def _g10_live(H):
     # and verified under the rules it was recorded with; restored in the finally below
     setup0 = rules.setup
     rules.setup = functools.partial(
-        setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]))
+        setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]),
+        win_2to1=rules.win_2to1_of(H["rb"]["records"]))
     try:
         end = campaign.run_campaign(
             {"manifest": "tuning", "ids": ["D-1-073"], "out": live,
