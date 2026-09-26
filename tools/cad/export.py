@@ -2,7 +2,13 @@
 # meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
-"""export.py - the S3 export of the CAD loop (docs/16 §D S3, §I, gates GC-5 and GC-4 of §H.3): fluid / body / meridian STEP declared in metres, a named-patch STL, tags.json, probes.json and geom.json (units m, scale 1, axis +x).
+"""export.py - the S3 export of the CAD loop (docs/16 §D S3, §I, gates GC-5 and GC-4 of §H.3): fluid / body / meridian STEP declared in metres, a named-patch STL, tags.json, probes.json and geom.json (units m, scale 1, axis +x), every file read back by an independent reader (EXP-READBACK).
+
+The export readback reimplements three Amagine3D ideas (https://github.com/amagine-ai/Amagine3D, e608dc6,
+skills/text-a3d/): export_audit.py audit_exports / _audit_step / _geometry_errors (every file re-read and compared
+with the kernel record, here with metre-relative tolerances, because their absolute-mm ones pass a 0.7x and a 1.3x
+scaled STL of ours), brep_tessellation.py tessellate_brep (mesh a cleaned copy) and mesh_topology.py
+physical_body_count (count bodies after a weld, here with trimesh instead of manifold3d). No code was copied.
 
 Usage:
   python export.py --selftest
@@ -13,6 +19,7 @@ Usage:
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +34,13 @@ from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRep import BRep_Tool
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopAbs import TopAbs_REVERSED
+from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy
+from OCP.BRepTools import BRepTools
+from OCP.Bnd import Bnd_Box
+from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Check
+import trimesh
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -41,8 +55,8 @@ import schema
 # writer construction, so the file declares SI_UNIT($,.METRE.) over its metre values; CadQuery's
 # default declares SI_UNIT(.MILLI.,.METRE.) over the same numbers - a silent 1000x. gmsh always
 # runs in a fresh child process (the gmsh-span sub-command) because it shares OCCT state with the
-# writer and reader in this process. The STL is ONE BRepMesh_IncrementalMesh on a freshly
-# reloaded fluid, reversed faces flipped on write, ASCII so each face tag is its own solid;
+# writer and reader in this process. The STL is ONE BRepMesh_IncrementalMesh on a cleaned
+# copy of the fluid, reversed faces flipped on write, ASCII so each face tag is its own solid;
 # tools/geom/stl_repair.py --weld 0 is the watertightness oracle.
 SCHEMA_MEASURE = "cad-measure/1"
 STL_LIN_REL = 1e-3            # BRepMesh linear deflection = STL_LIN_REL * D_e, in m
@@ -55,6 +69,12 @@ STEP_SYSTEM = "meteor-cfd tools/cad"
 SPAN_TOL = 1e-9               # m, GC-5 gmsh x-span
 ROUNDTRIP_TOL = 1e-9          # rel, GC-5 STEP volume / area
 STL_VOL_TOL = 2e-3            # rel, GC-5 STL volume vs BREP
+READBACK_BOUNDS_M = 1e-9      # m, each of the 6 STEP readback bounds vs the BREP's (docs/16a §B.2)
+READBACK_VOL_REL = 1e-9       # rel, STEP readback volume (solids) or area (the meridian face) vs the BREP
+READBACK_AREA_REL = STL_LIN_REL   # rel, per-patch STL area vs the geom.json tag area, tied to the deflection
+READBACK_CX_M = 1e-9          # m, a planar patch's STL area-weighted centroid x vs its named plane's x
+READBACK_STEP = (("fluid.step", "fluid.brep", "solid"), ("body.step", "body.brep", "solid"),
+                 ("meridian.step", "meridian.brep", "face"))
 BUILD_TIMEOUT_S = 180
 STL_REPAIR = os.path.join(common.REPO, "tools", "geom", "stl_repair.py")
 TEMPLATE = os.path.join(HERE, "templates", "nozzle_contraction", "template.py")
@@ -67,7 +87,7 @@ EXPORT_FILES = ("fluid.step", "body.step", "meridian.step", "fluid_named.stl", "
                 "tags.json", "probes.json", "geom.json")
 GEOM_KEYS = ("version", "template_id", "template_sha", "declaration_sha", "params", "params_sha", "units",
              "scale", "axis", "step_length_unit", "x_span_m", "x_span_expected_m", "gmsh_import", "stl",
-             "watertight", "step_roundtrip", "tags", "files", "env")
+             "watertight", "step_roundtrip", "readback", "tags", "files", "env")
 TAGS_KEYS = ("version", "template_id", "face_tags", "meridian_edges", "wall_edges", "planes", "stl_patches")
 PROBES_KEYS = ("version", "template_id", "params_sha", "rows")
 USAGE = ("usage: python export.py --selftest" + chr(10)
@@ -153,7 +173,15 @@ def write_named_stl(shape, face_tags, order, path, lin, ang, flip_reversed=True)
     A REVERSED face is written with its second and third corners swapped, so the written
     corner order carries the outward normal (a cq.Solid.makeBox has 3 REVERSED faces of 6;
     without the flip stl_repair sees non-manifold edges and an open shell).
+
+    The mesh is made on a BRepBuilderAPI_Copy (geometry copied, no mesh) cleaned by
+    BRepTools.Clean_s, so a triangulation already on the caller's shape - finer or coarser -
+    can never stand in for the requested deflection (docs/16a §B.2, after
+    Amagine3D's tessellate_brep).
     """
+    copy = BRepBuilderAPI_Copy(shape.wrapped, True, False).Shape()
+    BRepTools.Clean_s(copy)
+    shape = cq.Shape.cast(copy)
     m = BRepMesh_IncrementalMesh(shape.wrapped, lin, False, ang, False)
     m.Perform()
     faces = shape.Faces()
@@ -265,6 +293,119 @@ def tag_table(fluid, meridian, wall_m, value):
     return groups
 
 
+def _bounds(shape):
+    """The 6 bounds (xmin, ymin, zmin, xmax, ymax, zmax) from the geometry, never a triangulation or tolerance."""
+    b = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape.wrapped, b, False, False)
+    return list(b.Get())
+
+
+def _step_readback(step_path, brep_path, kind):
+    """One STEP re-read at METRE against its BREP: (row, failing fields); nothing raises out of it."""
+    name = os.path.basename(step_path)
+    what = "volume" if kind == "solid" else "area"
+    row = {"read": False, "valid": None, "bopcheck": None, "n_solids": None, "n_faces": None,
+           "bounds_dmax_m": None, "measure": what, "measure_rel": None, "error": None}
+    try:
+        back = read_step(step_path)
+        ref = cq.Shape.importBrep(brep_path)
+        row["read"] = True
+        row["valid"] = bool(BRepCheck_Analyzer(back.wrapped).IsValid())
+        row["bopcheck"] = bool(BRepAlgoAPI_Check(back.wrapped).IsValid())
+        row["n_solids"] = len(back.Solids())
+        row["n_faces"] = len(back.Faces())
+        row["bounds_dmax_m"] = max(abs(a - b) for a, b in zip(_bounds(back), _bounds(ref)))
+        vb, vr = measure.gprop(back, what)[0], measure.gprop(ref, what)[0]
+        row["measure_rel"] = (vb - vr) / vr
+        topo_ok = (row["n_faces"] == len(ref.Faces())
+                   and row["n_solids"] == (1 if kind == "solid" else 0))
+    except Exception as exc:
+        row["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+        return row, [name + ":read"]
+    bad = []
+    if not row["valid"]:
+        bad.append(name + ":valid")
+    if not row["bopcheck"]:
+        bad.append(name + ":bopcheck")
+    if not topo_ok:
+        bad.append(name + ":topology")
+    if not row["bounds_dmax_m"] <= READBACK_BOUNDS_M:
+        bad.append(name + ":bounds")
+    if not abs(row["measure_rel"]) <= READBACK_VOL_REL:
+        bad.append(name + ":" + what)
+    return row, bad
+
+
+def _stl_readback(stl_path, order, face_rows, planes):
+    """The named STL re-read by trimesh (an independent reader): (row, failing fields); nothing raises out of it.
+
+    Per-patch meshes come from force="scene" (one geometry per ASCII solid); the body count from force="mesh"
+    after merge_vertices(), because trimesh does not weld across solid blocks (docs/16a §D.12).
+    """
+    row = {"file": os.path.basename(stl_path), "reader": "trimesh " + trimesh.__version__, "patches": None,
+           "per_patch": {}, "welded_vertices": None, "bodies": None, "watertight_bodies": None, "error": None}
+    try:
+        scene = trimesh.load(stl_path, force="scene")
+        mesh = trimesh.load(stl_path, force="mesh")
+    except Exception as exc:
+        row["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+        return row, ["stl:read"]
+    names = list(scene.geometry.keys())
+    row["patches"] = names
+    bad = []
+    if sorted(names) != sorted(order):
+        bad.append("stl:patches")
+    px = dict((q["name"], q["x"]) for q in planes)
+    for tag in order:
+        if tag not in scene.geometry:
+            continue
+        m = scene.geometry[tag]
+        ar = m.area_faces
+        a = float(ar.sum())
+        ta = face_rows[tag]["area_m2"]
+        cx = float((m.triangles[:, :, 0].mean(axis=1) * ar).sum() / a) if a > 0 else None
+        r = {"area_m2": a, "tag_area_m2": ta, "area_rel": (a - ta) / ta, "centroid_x_m": cx,
+             "plane_x_m": px.get(tag), "centroid_dx_m": None}
+        if tag in px and cx is not None:
+            r["centroid_dx_m"] = cx - px[tag]
+        row["per_patch"][tag] = r
+        if not abs(r["area_rel"]) <= READBACK_AREA_REL:
+            bad.append("stl:area:" + tag)
+        if tag in px and not (r["centroid_dx_m"] is not None and abs(r["centroid_dx_m"]) <= READBACK_CX_M):
+            bad.append("stl:centroid:" + tag)
+    mesh.merge_vertices()
+    bodies = mesh.split(only_watertight=False)
+    row["welded_vertices"] = int(len(mesh.vertices))
+    row["bodies"] = int(len(bodies))
+    row["watertight_bodies"] = int(sum(1 for b in bodies if b.is_watertight))
+    if not (row["bodies"] == 1 and row["watertight_bodies"] == 1):
+        bad.append("stl:bodies")
+    return row, bad
+
+
+def readback(out_dir, face_rows):
+    """EXP-READBACK (docs/16a §B.2, §E): every STEP re-read at METRE and the named STL re-read by trimesh.
+
+    `face_rows` is geom.json's tags["fluid_faces"] (tag -> row with area_m2); tags.json gives stl_patches and planes.
+    The record lists EVERY failing field in check order; `field` is the first. Nothing raises out of it.
+    """
+    tags = common.read_json(os.path.join(out_dir, "tags.json"))
+    fields = []
+    steps = {}
+    for step_name, brep_name, kind in READBACK_STEP:
+        row, bad = _step_readback(os.path.join(out_dir, step_name), os.path.join(out_dir, brep_name), kind)
+        steps[step_name] = row
+        fields.extend(bad)
+    stl, bad = _stl_readback(os.path.join(out_dir, "fluid_named.stl"), tags["stl_patches"], face_rows,
+                             tags["planes"])
+    fields.extend(bad)
+    return {"status": "refused" if fields else "ok", "reason_id": "EXP-READBACK" if fields else None,
+            "field": fields[0] if fields else None, "fields": fields,
+            "tolerances": {"bounds_m": READBACK_BOUNDS_M, "volume_rel": READBACK_VOL_REL,
+                           "area_rel": READBACK_AREA_REL, "centroid_m": READBACK_CX_M},
+            "step": steps, "stl": stl}
+
+
 def roundtrip(shape, path, kind):
     """GC-5 STEP round trip for one shape: counts equal and the volume / area relative drift."""
     back = read_step(path)
@@ -295,8 +436,32 @@ def determinism(template_path, cases, n, root):
     return out
 
 
+def _stl_mutate(path, kind, s=None):
+    """Rewrite an ASCII STL in place for the readback proofs: "swap" inlet/outlet names, "drop" outlet, "scale" s."""
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().split(chr(10))
+    out = []
+    skip = False
+    names = {"solid inlet": "solid outlet", "solid outlet": "solid inlet",
+             "endsolid inlet": "endsolid outlet", "endsolid outlet": "endsolid inlet"}
+    for ln in lines:
+        if kind == "swap":
+            ln = names.get(ln, ln)
+        elif kind == "drop":
+            if ln == "solid outlet":
+                skip = True
+            if skip:
+                if ln == "endsolid outlet":
+                    skip = False
+                continue
+        elif kind == "scale" and ln.startswith("vertex "):
+            ln = "vertex %s %s %s" % tuple(repr(float(t) * s) for t in ln.split()[1:])
+        out.append(ln)
+    common.atomic_write(path, chr(10).join(out))
+
+
 def selftest():
-    """GC-5 and GC-4 end to end, plus the can-fail proofs; eleven [ok] lines, then SELFTEST PASS."""
+    """GC-5 and GC-4 end to end, plus the can-fail proofs; fifteen [ok] lines, then SELFTEST PASS."""
     import time
     t0 = time.monotonic()
     me = os.path.abspath(__file__)
@@ -541,13 +706,115 @@ def selftest():
               "tag areas move nominal %.2e corner %.2e (<= 1e-8); corner Bezier length default rel %+.2e, "
               "adaptive %+.2e" % (moves["A_nom"], moves["A_cor"], len_def, len_ada))
 
+        # (X12)
+        bmax = mmax = dxmax = 0.0
+        arels = []
+        for name, g in (("A_nom", an), ("A_cor", ac)):
+            rb = g["readback"]
+            assert rb["status"] == "ok" and rb["reason_id"] is None and rb["field"] is None and rb["fields"] == [], (
+                "X12 %s readback %r" % (name, rb["fields"],))
+            for sn, sr in rb["step"].items():
+                assert sr["read"] and sr["valid"] and sr["bopcheck"], "X12 %s %s %r" % (name, sn, sr["error"],)
+            bmax = max(bmax, max(sr["bounds_dmax_m"] for sr in rb["step"].values()))
+            mmax = max(mmax, max(abs(sr["measure_rel"]) for sr in rb["step"].values()))
+            assert len(rb["stl"]["per_patch"]) == 5, "X12 %s patches %d" % (name, len(rb["stl"]["per_patch"]),)
+            for tg, pr in rb["stl"]["per_patch"].items():
+                assert abs(pr["area_rel"]) <= READBACK_AREA_REL, "X12 %s %s area %r" % (name, tg, pr["area_rel"],)
+                arels.append(pr["area_rel"])
+            for tg in ("inlet", "outlet"):
+                dx = rb["stl"]["per_patch"][tg]["centroid_dx_m"]
+                assert dx is not None and abs(dx) <= READBACK_CX_M, "X12 %s %s dx %r" % (name, tg, dx,)
+                dxmax = max(dxmax, abs(dx))
+            assert rb["stl"]["bodies"] == 1 and rb["stl"]["watertight_bodies"] == 1, (
+                "X12 %s bodies %r" % (name, (rb["stl"]["bodies"], rb["stl"]["watertight_bodies"]),))
+            assert readback(A[name], g["tags"]["fluid_faces"]) == rb, "X12 %s re-run differs" % (name,)
+        print("[ok] readback: nominal and corner pass: STEP bounds max %.1e m, volume/area max |rel| %.1e, "
+              "BRepCheck and BOPCheck true; STL patch area rel %+.2e..%+.2e, planar centroid max |dx| %.1e m, "
+              "1 welded watertight body" % (bmax, mmax, min(arels), max(arels), dxmax))
+
+        # (X13)
+        mids = ("control", "milli", "swap", "drop", "s0.7", "s1.3", "s1.001", "other")
+        first_also = {"milli": ("fluid.step:bounds", ["fluid.step:volume"]),
+                      "swap": ("stl:area:inlet", ["stl:centroid:inlet", "stl:area:outlet", "stl:centroid:outlet"]),
+                      "drop": ("stl:patches", ["stl:bodies"]),
+                      "s0.7": ("stl:area:inlet", ["stl:centroid:outlet"]),
+                      "s1.3": ("stl:area:inlet", ["stl:centroid:outlet"]),
+                      "s1.001": ("stl:area:inlet", ["stl:centroid:inlet"]),
+                      "other": ("fluid.step:topology", ["fluid.step:bounds", "fluid.step:volume"])}
+        for mid in mids:
+            d = rp("MX_" + mid.replace(".", "_"))
+            shutil.copytree(A["A_nom"], d)
+            if mid == "milli":
+                write_step(cq.Shape.importBrep(os.path.join(d, "fluid.brep")), os.path.join(d, "fluid.step"),
+                           unit="MM")
+            elif mid in ("swap", "drop"):
+                _stl_mutate(os.path.join(d, "fluid_named.stl"), mid)
+            elif mid.startswith("s"):
+                _stl_mutate(os.path.join(d, "fluid_named.stl"), "scale", float(mid[1:]))
+            elif mid == "other":
+                shutil.copyfile(os.path.join(A["A_cor"], "fluid.step"), os.path.join(d, "fluid.step"))
+            r = readback(d, an["tags"]["fluid_faces"])
+            if mid == "control":
+                assert r["status"] == "ok" and r["fields"] == [], "X13 control %r" % (r["fields"],)
+                continue
+            first, also = first_also[mid]
+            assert r["status"] == "refused" and r["reason_id"] == "EXP-READBACK", (
+                "X13 %s status %r" % (mid, r["status"],))
+            assert r["field"] == first, "X13 %s field %r != %r" % (mid, r["field"], first)
+            for fld in also:
+                assert fld in r["fields"], "X13 %s missing %r in %r" % (mid, fld, r["fields"])
+        print("[ok] readback refuses 7 of 7 mutants EXP-READBACK by field: "
+              + "; ".join("%s %s" % (m, first_also[m][0]) for m in mids[1:]) + "; the unmutated copy passes")
+
+        # (X14)
+        mod = sys.modules[__name__]
+        orig_wns = mod.write_named_stl
+
+        def scaled(shape, face_tags, order, path, lin, ang, flip_reversed=True):
+            out = orig_wns(shape, face_tags, order, path, lin, ang, flip_reversed)
+            _stl_mutate(path, "scale", 1.001)
+            return out
+
+        mod.write_named_stl = scaled
+        try:
+            res = run_pipeline(TEMPLATE, dict(NOMINAL), rp("RB"))
+        finally:
+            mod.write_named_stl = orig_wns
+        assert res["status"] == "refused" and res["rule"] == "EXP-READBACK", "X14 status %r" % (res["status"],)
+        assert res["message"].startswith("EXP-READBACK: stl:area:inlet"), "X14 msg %r" % (res["message"],)
+        gd = common.read_json(os.path.join(rp("RB"), "geom.json"))
+        assert gd["readback"]["status"] == "refused" and gd["readback"]["field"] == "stl:area:inlet", (
+            "X14 geom %r" % (gd["readback"]["field"],))
+        assert gd["readback"] == res["geom"]["readback"], "X14 geom readback differs from the result"
+        print("[ok] run_pipeline refuses EXP-READBACK (field stl:area:inlet) on an STL scaled 1.001 in the "
+              "export, and geom.json records the refused readback")
+
+        # (X15)
+        lin_n = an["stl"]["lin_deflection_m"]
+        with open(os.path.join(A["A_nom"], "fluid_named.stl"), "rb") as f:
+            ref_bytes = f.read()
+        for label, fl, fa in (("coarse", 10.0, 4.0), ("fine", 0.3, 0.5)):
+            sh = cq.Shape.importBrep(os.path.join(A["A_nom"], "fluid.brep"))
+            BRepMesh_IncrementalMesh(sh.wrapped, fl * lin_n, False, fa * STL_ANG_RAD, False).Perform()
+            pth = rp("pre_%s.stl" % label)
+            write_named_stl(sh, tags_nom["face_tags"], tags_nom["stl_patches"], pth, lin_n, STL_ANG_RAD)
+            with open(pth, "rb") as f:
+                got = f.read()
+            assert got == ref_bytes, "X15 %s: %d bytes vs %d" % (label, len(got), len(ref_bytes))
+        print("[ok] a shape meshed first coarsely (10x) or finely (0.3x) gives an STL byte-identical to the "
+              "export (%d bytes)" % len(ref_bytes))
+
     print("selftest wall %.1f s" % (time.monotonic() - t0,))
     print("SELFTEST PASS")
     return 0
 
 
 def export_build(out_dir, value, template_path):
-    """The S3 export of one ok template result: 3 STEP, named STL, stl_repair report, tags, probes, geom."""
+    """The S3 export of one ok template result: 3 STEP, named STL, stl_repair report, tags, probes, geom.
+
+    geom.json records the readback; a refused one is refused by run_pipeline, never raised here
+    (mutate.py's M10 exports through this function).
+    """
     p = lambda *a: os.path.join(out_dir, *a)
     fluid = cq.Shape.importBrep(p("fluid.brep"))
     body = cq.Shape.importBrep(p("body.brep"))
@@ -581,14 +848,23 @@ def export_build(out_dir, value, template_path):
 
 
 def run_pipeline(template_path, params, out_dir, timeout_s=BUILD_TIMEOUT_S):
-    """runner build then export; ok / refused / error with the rule, the export files only when ok."""
+    """runner build then export; ok / refused / error with the rule, the export files only when ok.
+
+    A refused export readback is refused EXP-READBACK here, not in export_build (docs/16a line 80 says
+    export_build; the tree wins because mutate.py's M10 calls export_build and counts an exception as an
+    error).
+    """
     r = runner.run_job(template_path, params, out_dir, entry="build", timeout_s=timeout_s)
     if r["status"] != "ok":
         return {"status": "error", "rule": r["rule"], "message": r["message"], "geom": None}
     if r["value"]["status"] == "refused":
         return {"status": "refused", "rule": r["value"]["rule"], "message": r["value"]["detail"], "geom": None}
-    return {"status": "ok", "rule": None, "message": "",
-            "geom": export_build(out_dir, r["value"], template_path)}
+    geom = export_build(out_dir, r["value"], template_path)
+    rb = geom["readback"]
+    if rb["status"] != "ok":
+        return {"status": "refused", "rule": "EXP-READBACK",
+                "message": "EXP-READBACK: " + ", ".join(rb["fields"]), "geom": geom}
+    return {"status": "ok", "rule": None, "message": "", "geom": geom}
 
 
 def _wt_dict(report):
@@ -618,6 +894,8 @@ def _geom_dict(out_dir, value, template_path, lin, span, ext, geom_units, stl, r
     for name in list(BREP_FILES) + [f for f in EXPORT_FILES if f != "geom.json"]:
         files[name] = common.sha256_file(p(name))
     decl = os.path.join(os.path.dirname(template_path), "template.json")
+    tags = tag_table(cq.Shape.importBrep(p("fluid.brep")), cq.Shape.importBrep(p("meridian.brep")),
+                     cq.Shape.importBrep(p("wall_meridian.brep")), value)
     return {"version": 1, "template_id": value["template_id"],
             "template_sha": common.sha256_file(template_path), "declaration_sha": common.sha256_file(decl),
             "params": value["params"], "params_sha": common.sha256_of(value["params"]),
@@ -631,8 +909,8 @@ def _geom_dict(out_dir, value, template_path, lin, span, ext, geom_units, stl, r
                                "body": roundtrip(cq.Shape.importBrep(p("body.brep")), p("body.step"), "solid"),
                                "meridian": roundtrip(cq.Shape.importBrep(p("meridian.brep")),
                                                      p("meridian.step"), "face")},
-            "tags": tag_table(cq.Shape.importBrep(p("fluid.brep")), cq.Shape.importBrep(p("meridian.brep")),
-                              cq.Shape.importBrep(p("wall_meridian.brep")), value),
+            "readback": readback(out_dir, tags["fluid_faces"]),
+            "tags": tags,
             "files": files, "env": common.env_fingerprint()}
 
 
