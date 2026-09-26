@@ -11,6 +11,14 @@ Usage:
   python reqs.py check PROPOSAL_JSON BRIEF_JSON TEMPLATE_DIR OUT_JSON
   python reqs.py lock REPORT_JSON APPROVED_BY OUT_DIR
   python reqs.py compile REQUIREMENTS_JSON TEMPLATE_DIR OUT_JSON
+  python reqs.py vocab TEMPLATE_DIR OUT_JSON
+
+AMG-6 (docs/16a §B.1, §E, §F) reimplements, from reading only (no code copied), four ideas of Amagine3D
+(https://github.com/amagine-ai/Amagine3D, commit e608dc6, Apache-2.0): per-value provenance with a derived
+confidence (skills/text-a3d/intent_contract.py `validate`, scene_contract.py `INTENT_ONLY_FIELDS`), a write-once
+intent file (authoring.py `_write_json(immutable=True)`, intent_revision.py `load_history`), and an LLM vocabulary
+generated from the validator's live constants and fingerprinted (capability_manifest.py `_intent_input_constraints`,
+`build_manifest`).
 """
 import copy
 import json
@@ -32,22 +40,36 @@ import schema
 # the template's DECLARATION (template.json), and it compiles an approved, locked set into cad-checks/1. Every
 # refusal names one rule id of docs/16 §E.3; a row gets at most one refusal, the first in the order of (C5).
 VERSION = 1
-REFUSAL_IDS = ("REQ-QTY", "REQ-UNIT", "REQ-QUOTE", "REQ-GROUND", "REQ-OP", "REQ-TOL", "REQ-DUP", "REQ-CONFLICT",
-               "REQ-OUTSIDE", "REQ-PIXEL", "REQ-OBJ", "REQ-DEFAULT-HARD")
+CAD07_REFUSAL_IDS = ("REQ-QTY", "REQ-UNIT", "REQ-QUOTE", "REQ-GROUND", "REQ-OP", "REQ-TOL", "REQ-DUP",
+                     "REQ-CONFLICT", "REQ-OUTSIDE", "REQ-PIXEL", "REQ-OBJ", "REQ-DEFAULT-HARD")
+REFUSAL_IDS = CAD07_REFUSAL_IDS + ("REQ-STD", "REQ-VOCAB")    # docs/16a §E; REQ-IMMUTABLE is write_locked's
 REPORT_KEYS = ("version", "status", "refusals", "questions", "requirements", "derived")
-PROPOSAL_KEYS = ("study_id", "template_id", "operating_point", "rows", "created_by")
+PROPOSAL_KEYS = ("study_id", "template_id", "vocab_sha", "operating_point", "rows", "created_by")
 OPPOINT_KEYS = ("fluid", "T_K", "p0_Pa", "flow")
+OPPOINT_OPTIONAL = ("fluid_source", "T_K_source", "p0_Pa_source")   # absent -> "assumed" (docs/16a §F)
+OPPOINT_SOURCES = ("brief", "sketch_label", "default", "assumed")
 FLOW_KEYS = ("field", "value", "unit", "source", "quote")
 FLOW_FIELDS = {"U_exit_m_s": "m/s", "Q_m3_s": "m3/s", "mdot_kg_s": "kg/s"}
 FLOW_SOURCES = ("brief", "sketch_label", "assumed")
 ROW_IN_KEYS = ("quantity", "feature", "op", "value", "upper", "tol_abs", "tol_rel", "unit", "condition",
                "hardness", "source", "quote")
-ROW_IN_OPTIONAL = ("ears", "ticked")     # ears: the LLM's draft, discarded; ticked: the card's tick on a default row
+ROW_IN_OPTIONAL = ("ears", "ticked", "standard_ref")   # ears: the LLM's draft, discarded; ticked: the card's tick
 ROW_KEYS = ("id", "ears", "quantity", "feature", "op", "value", "upper", "tol_abs", "tol_rel", "unit", "kind",
-            "method", "condition", "hardness", "source", "quote", "locks_params")
+            "method", "condition", "hardness", "source", "quote", "locks_params", "ticked", "confidence",
+            "standard_ref")
 OPS = ("<=", ">=", "==", "in", "is_true")
 HARDNESS = ("hard", "soft", "objective")
-SOURCES = ("brief", "sketch_label", "default", "assumed")
+SOURCES = ("brief", "sketch_label", "default", "assumed", "standard")
+TICK_SOURCES = ("default", "assumed")     # a hard row from these needs the card's tick (REQ-DEFAULT-HARD)
+CONFIDENCE = {"brief": "high", "sketch_label": "medium", "default": "low", "assumed": "low", "standard": "high",
+              "system": "high"}           # docs/16a §F: derived from the source, never taken from the LLM
+CHANGE_KINDS = ("new", "target_change", "evidence_correction")
+REPRS = ("brep", "stl", "mesh", "cfd")
+REPR_BY_METHOD = {"geometry": "brep", "mesh": "mesh", "cfd": "cfd"}
+REPR_BY_PRIMITIVE = {"watertight": "stl"}  # judged on the named STL's stl_repair report, not on the BREP
+VOCAB_VERSION = 1
+EVAL_KEY_PARTS = ("template_sha", "declaration_sha", "params", "requirements_lock", "gates_lock", "env",
+                  "mesh_recipe_version", "case_writer_version", "bin_sha")    # docs/16 §D, docs/16a §F
 BOOLEAN_PRIMITIVES = ("valid", "watertight", "axis_x", "units_m")
 LEVEL_RE = re.compile("^L[0-9]$")
 STUDY_RE = re.compile("^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -96,11 +118,13 @@ EARS_RE = re.compile("^(The design|While [^,]+, the design) (shall|should) [a-z]
 FIXTURES = os.path.join(HERE, "fixtures", "reqs")
 CASES = os.path.join(FIXTURES, "cases.json")
 GOLDEN = os.path.join(FIXTURES, "golden")
+LINEAGE = os.path.join(FIXTURES, "lineage.json")
 NOZZLE_DIR = os.path.join(HERE, "templates", "nozzle_contraction")
 USAGE = ("usage: python reqs.py --selftest" + chr(10)
          + "       python reqs.py check PROPOSAL_JSON BRIEF_JSON TEMPLATE_DIR OUT_JSON" + chr(10)
          + "       python reqs.py lock REPORT_JSON APPROVED_BY OUT_DIR" + chr(10)
-         + "       python reqs.py compile REQUIREMENTS_JSON TEMPLATE_DIR OUT_JSON")
+         + "       python reqs.py compile REQUIREMENTS_JSON TEMPLATE_DIR OUT_JSON" + chr(10)
+         + "       python reqs.py vocab TEMPLATE_DIR OUT_JSON")
 
 
 def nfc(text) -> str:
@@ -287,6 +311,22 @@ def _quote_pass(source, quote, brief, labels):
     return None
 
 
+def _std_pass(row, refs):
+    """REQ-STD (docs/16a §E): a standard row names a ref of the template's frozen standards table; no other row
+    names one. None when it passes, else (id, check, detail)."""
+    ref = row.get("standard_ref")
+    if row["source"] == "standard":
+        if ref is None:
+            return ("REQ-STD", "missing_ref", "the row is sourced standard but carries no standard_ref")
+        if ref not in refs:
+            return ("REQ-STD", "not_in_table", "the standard_ref %r is not in the template's standards table [%s]"
+                    % (ref, ", ".join(refs)))
+        return None
+    if ref is not None:
+        return ("REQ-STD", "ref_on_non_standard", "a %s row carries the standard_ref %r" % (row["source"], ref))
+    return None
+
+
 def _ground_pass(unit, quote, values):
     """Step 6 of docs/16 §E.3: every cited magnitude must appear in its quote after conversion.
     values: (name, si_value) pairs. None when it passes, else (id, check, detail)."""
@@ -338,6 +378,8 @@ def _type_pass(row):
         return "ears"
     if "ticked" in row and not isinstance(row["ticked"], bool):
         return "ticked"
+    if "standard_ref" in row and row["standard_ref"] is not None and not isinstance(row["standard_ref"], str):
+        return "standard_ref"
     return None
 
 
@@ -376,7 +418,7 @@ def _shape_pass(row, cat):
     return None
 
 
-def _row_pass(row, cat, brief, labels):
+def _row_pass(row, cat, brief, labels, refs):
     """Steps 1-8 of docs/16 §E.3 for one input row; the first failing step wins. None or a refusal record."""
     allowed = set(ROW_IN_KEYS) | set(ROW_IN_OPTIONAL)
     if not isinstance(row, dict):
@@ -411,6 +453,9 @@ def _row_pass(row, cat, brief, labels):
     q = _quote_pass(row["source"], row["quote"], brief, labels)
     if q is not None:
         return _refuse(0, q[0], q[1], q[2])
+    s = _std_pass(row, refs)
+    if s is not None:
+        return _refuse(0, s[0], s[1], s[2])
     if row["source"] in ("brief", "sketch_label"):
         si_row = _si_row(row)
         g = _ground_pass(row["unit"], row["quote"],
@@ -430,10 +475,10 @@ def _row_pass(row, cat, brief, labels):
         return _refuse(0, "REQ-TOL", "band_below_u",
                        "the band [%g, %g] plus twice the tolerance %g is narrower than twice the primitive"
                        " uncertainty u = %g of %s" % (lo, hi, tol, u, cat["quantity"]))
-    if row["hardness"] == "hard" and row["source"] == "default" and row.get("ticked") is not True:
+    if row["hardness"] == "hard" and row["source"] in TICK_SOURCES and row.get("ticked") is not True:
         return _refuse(0, "REQ-DEFAULT-HARD", "not_ticked",
-                       "the default row on %s is hard but carries no tick of approval on the card"
-                       % (cat["quantity"],))
+                       "the %s row on %s is hard but carries no tick of approval on the card"
+                       % (row["source"], cat["quantity"]))
     return None
 
 
@@ -635,7 +680,7 @@ def _sys_out_row(t) -> dict:
     return {"id": rid, "ears": ears, "quantity": quantity, "feature": None, "op": op, "value": value,
             "upper": None, "tol_abs": None, "tol_rel": None, "unit": "1", "kind": kind, "method": method,
             "condition": {"Re": None, "level": None}, "hardness": "hard", "source": "system", "quote": None,
-            "locks_params": []}
+            "locks_params": [], "ticked": False, "confidence": CONFIDENCE["system"], "standard_ref": None}
 
 
 def _user_out_row(index, row, cat) -> dict:
@@ -653,12 +698,13 @@ def _user_out_row(index, row, cat) -> dict:
            "condition": {"Re": None if row["condition"]["Re"] is None else float(row["condition"]["Re"]),
                          "level": row["condition"]["level"]},
            "hardness": row["hardness"], "source": row["source"], "quote": row["quote"],
-           "locks_params": locks}
+           "locks_params": locks, "ticked": row.get("ticked") is True, "confidence": CONFIDENCE[row["source"]],
+           "standard_ref": row.get("standard_ref")}
     out["ears"] = render_ears(out)
     return out
 
 
-def _build_document(proposal, brief, template_sha, user_recs, catalogue) -> dict:
+def _build_document(proposal, brief, template_sha, declaration_sha, user_recs, catalogue) -> dict:
     """The cad-requirements/1 document: approved_by PENDING, lock_sha None (docs/16 §E.1, §E.8)."""
     rows = []
     for r in user_recs:
@@ -677,17 +723,25 @@ def _build_document(proposal, brief, template_sha, user_recs, catalogue) -> dict
             break
     return {"schema": "cad-requirements/1", "study_id": proposal["study_id"],
             "template_id": proposal["template_id"], "template_sha": template_sha,
+            "declaration_sha": declaration_sha, "vocab_sha": proposal["vocab_sha"],
             "brief_sha": common.sha256_of(brief),
             "attachments": [a["sha256"] for a in brief["attachments"]],
             "operating_point": {"fluid": opp["fluid"], "T_K": float(opp["T_K"]), "p0_Pa": float(opp["p0_Pa"]),
                                 "U_exit_m_s": flow_fields["U_exit_m_s"], "Q_m3_s": flow_fields["Q_m3_s"],
-                                "mdot_kg_s": flow_fields["mdot_kg_s"]},
+                                "mdot_kg_s": flow_fields["mdot_kg_s"],
+                                "flow_source": None if flow is None else flow["source"],
+                                "flow_quote": None if flow is None else flow["quote"],
+                                "fluid_source": opp.get("fluid_source", "assumed"),
+                                "T_K_source": opp.get("T_K_source", "assumed"),
+                                "p0_Pa_source": opp.get("p0_Pa_source", "assumed")},
             "rows": rows, "objective": objective,
             "created_by": copy.deepcopy(proposal["created_by"]),
-            "approved_by": PENDING, "lock_sha": None}
+            "approved_by": PENDING, "lock_sha": None,
+            "supersedes_study": None, "supersedes_lock": None, "change_kind": "new", "change_reason": None,
+            "evidence_sha": None}
 
 
-def check(proposal, brief, declaration, template_sha) -> dict:
+def check(proposal, brief, declaration, template_sha, declaration_sha) -> dict:
     """The S1 gate (docs/16 §D, §E.3): pure; refuses the LLM's rows by rule id, asks for missing drivers,
     or returns the report with its cad-requirements/1 document. Never mutates an argument."""
     proposal = copy.deepcopy(proposal)
@@ -696,10 +750,19 @@ def check(proposal, brief, declaration, template_sha) -> dict:
     _check_envelope(proposal, declaration)
     if not isinstance(template_sha, str) or not SHA_RE.match(template_sha):
         raise ValueError("template_sha: %r is not a 64 lowercase hex sha256" % (template_sha,))
+    if not isinstance(declaration_sha, str) or not SHA_RE.match(declaration_sha):
+        raise ValueError("declaration_sha: %r is not a 64 lowercase hex sha256" % (declaration_sha,))
+    if not isinstance(declaration.get("standards"), list):
+        raise ValueError("declaration: the frozen standards table is missing (docs/16a §F)")
+    refs = [s["ref"] for s in declaration["standards"]]
     catalogue = {c["quantity"]: c for c in declaration["catalogue"]}
     params = {p["name"]: p for p in declaration["params"]}
     labels = [lab for a in brief["attachments"] for lab in a["labels"]]
     refusals = []
+    if proposal["vocab_sha"] != vocab_sha(declaration):
+        refusals.append(_refuse("proposal", "REQ-VOCAB", "stale",
+                                "the proposal's vocab_sha %r is not the vocabulary reqs.py vocab gives now"
+                                % (proposal["vocab_sha"],)))
     rows = proposal["rows"]
     opp = proposal["operating_point"]
     flow = opp.get("flow") if isinstance(opp, dict) else None
@@ -718,7 +781,7 @@ def check(proposal, brief, declaration, template_sha) -> dict:
     for i, row in enumerate(rows):
         q = row.get("quantity") if isinstance(row, dict) else None
         cat = catalogue.get(q) if isinstance(q, str) else None
-        ref = _row_pass(row, cat, brief, labels)
+        ref = _row_pass(row, cat, brief, labels, refs)
         if ref is not None:
             ref["row"] = i
             refusals.append(ref)
@@ -749,7 +812,7 @@ def check(proposal, brief, declaration, template_sha) -> dict:
     document = None
     derived = None
     if status != "refused":
-        document = _build_document(proposal, brief, template_sha, live, catalogue)
+        document = _build_document(proposal, brief, template_sha, declaration_sha, live, catalogue)
         errs = schema.errors(document, "cad-requirements/1")
         if errs:
             raise ValueError("reqs: the built document violates cad-requirements/1: %s" % (errs[0],))
@@ -765,8 +828,12 @@ def _check_operating_point(opp):
         return _refuse("operating_point", "REQ-OP", "shape", "the operating point is malformed: %s" % (why,))
     if not isinstance(opp, dict):
         return bad("not an object")
-    if set(opp.keys()) != set(OPPOINT_KEYS):
-        return bad("keys must be exactly %s" % (", ".join(OPPOINT_KEYS),))
+    keys = set(opp.keys())
+    if not set(OPPOINT_KEYS) <= keys <= set(OPPOINT_KEYS) | set(OPPOINT_OPTIONAL):
+        return bad("keys must be %s, optionally with %s" % (", ".join(OPPOINT_KEYS), ", ".join(OPPOINT_OPTIONAL)))
+    for k in OPPOINT_OPTIONAL:
+        if k in opp and opp[k] not in OPPOINT_SOURCES:
+            return bad("%s %r is not one of %s" % (k, opp[k], ", ".join(OPPOINT_SOURCES)))
     if opp["fluid"] not in RHO_TABLE:
         return bad("fluid %r is neither air nor water" % (opp["fluid"],))
     if not _is_pos(opp["T_K"]):
@@ -877,10 +944,23 @@ def lock(report, approved_by) -> dict:
     return doc
 
 
-def compile_checks(doc, declaration) -> dict:
+def _repr_of(primitive, method) -> str:
+    """The representation a check is judged on (docs/16a §F cad-checks/1): stl for the watertight report, else by
+    the row's method."""
+    if primitive in REPR_BY_PRIMITIVE:
+        return REPR_BY_PRIMITIVE[primitive]
+    if method not in REPR_BY_METHOD:
+        raise ValueError("reqs: method %r has no representation in %s" % (method, ", ".join(REPRS)))
+    return REPR_BY_METHOD[method]
+
+
+def compile_checks(doc, declaration, declaration_sha) -> dict:
     """The pure compile of docs/16 §E.4: a locked document into cad-checks/1, one check per row in row order."""
     if not lock_ok(doc):
         raise ValueError("GATE-LOCK: the requirements lock does not match its document")
+    if doc.get("declaration_sha") != declaration_sha:
+        raise ValueError("GATE-LOCK: the document binds the declaration %r, not this template's %r"
+                         % (doc.get("declaration_sha"), declaration_sha))
     if doc["template_id"] != declaration["template_id"]:
         raise ValueError("GATE-LOCK: the document is for template %r but the declaration is %r"
                          % (doc["template_id"], declaration["template_id"]))
@@ -906,9 +986,9 @@ def compile_checks(doc, declaration) -> dict:
         checks.append({"req_id": rid, "primitive": primitive,
                        "args": {"feature": feature, "where": where, "Re": re_, "level": level},
                        "op": row["op"], "lo": lo, "hi": hi, "tol": _tol(row, ref), "u": u,
-                       "hardness": row["hardness"]})
+                       "hardness": row["hardness"], "repr": _repr_of(primitive, row["method"])})
     out = {"schema": "cad-checks/1", "study_id": doc["study_id"], "requirements_lock": doc["lock_sha"],
-           "checks": checks}
+           "declaration_sha": doc["declaration_sha"], "checks": checks}
     errs = schema.errors(out, "cad-checks/1")
     if errs:
         raise ValueError("reqs: the compiled checks violate cad-checks/1: %s" % (errs[0],))
@@ -921,13 +1001,24 @@ def write_canonical(path, obj) -> None:
 
 
 def write_locked(out_dir, doc) -> tuple:
-    """requirements.json plus requirements.lock; refuses an unlocked document (docs/16 §E.8)."""
+    """requirements.json plus requirements.lock, written once (docs/16 §E.8, docs/16a §E REQ-IMMUTABLE): an
+    existing file with identical bytes is accepted and left untouched; any other existing path is refused."""
     if not lock_ok(doc):
         raise ValueError("GATE-LOCK: the requirements lock does not match its document")
     p_doc = os.path.join(out_dir, "requirements.json")
     p_lock = os.path.join(out_dir, "requirements.lock")
-    write_canonical(p_doc, doc)
-    common.atomic_write(p_lock, doc["lock_sha"] + chr(10))
+    pairs = ((p_doc, (common.canonical_json(doc) + chr(10)).encode("utf-8")),
+             (p_lock, (doc["lock_sha"] + chr(10)).encode("utf-8")))
+    for path, blob in pairs:
+        if not os.path.lexists(path):
+            continue
+        snap = common.stable_file_snapshot(path)
+        if snap["stable"] is not True or snap["sha256"] != common.sha256_bytes(blob):
+            raise ValueError("REQ-IMMUTABLE: %s already exists with other bytes; a changed requirement set is"
+                             " a new study" % (os.path.basename(path),))
+    for path, blob in pairs:
+        if not os.path.lexists(path):
+            common.atomic_write(path, blob)
     return (p_doc, p_lock)
 
 
@@ -942,9 +1033,48 @@ def read_locked(out_dir) -> dict:
 
 
 def load_template(template_dir) -> tuple:
-    """(declaration, template_sha): the template's DECLARATION and the sha of its module (docs/16 §D)."""
-    return (common.read_json(os.path.join(template_dir, "template.json")),
-            common.sha256_file(os.path.join(template_dir, "template.py")))
+    """(declaration, template_sha, declaration_sha): the template's DECLARATION, the sha of its module and the sha
+    of template.json's bytes (docs/16 §D; docs/16a §D.13: the catalogue, u_meas and LOCKS live in template.json)."""
+    p_decl = os.path.join(template_dir, "template.json")
+    return (common.read_json(p_decl), common.sha256_file(os.path.join(template_dir, "template.py")),
+            common.sha256_file(p_decl))
+
+
+def vocab(declaration) -> dict:
+    """The cad_requirements_propose vocabulary (docs/16a §B.1): generated from template.json and this module's
+    constants only, so any change to either moves vocab_sha."""
+    quantities = []
+    features = []
+    for c in declaration["catalogue"]:
+        ops = ["is_true"] if c["primitive"] in BOOLEAN_PRIMITIVES else ["<=", ">=", "==", "in"]
+        quantities.append({"quantity": c["quantity"], "unit": c["unit"], "kind": c["kind"], "method": c["method"],
+                           "where": list(c["where"]), "ops": ops,
+                           "units": [u for u in UNIT_TABLE if UNIT_TABLE[u][0] == c["unit"]]})
+        for w in c["where"]:
+            if w not in features:
+                features.append(w)
+    return {"version": VOCAB_VERSION, "template_id": declaration["template_id"], "quantities": quantities,
+            "features": features, "planes": [p["name"] for p in declaration["planes"]],
+            "tags": [t["name"] for t in declaration["tags"]],
+            "standards": [s["ref"] for s in declaration["standards"]],
+            "units": list(UNIT_TABLE), "ops": list(OPS), "hardness": list(HARDNESS), "sources": list(SOURCES),
+            "flow_fields": list(FLOW_FIELDS), "flow_sources": list(FLOW_SOURCES),
+            "oppoint_sources": list(OPPOINT_SOURCES), "fluids": sorted(RHO_TABLE),
+            "proposal_keys": list(PROPOSAL_KEYS), "oppoint_keys": list(OPPOINT_KEYS) + list(OPPOINT_OPTIONAL),
+            "flow_keys": list(FLOW_KEYS), "row_keys": list(ROW_IN_KEYS), "row_optional": list(ROW_IN_OPTIONAL)}
+
+
+def vocab_sha(declaration) -> str:
+    """sha256 of the canonical vocabulary: the proposal's vocab_sha must equal it (REQ-VOCAB)."""
+    return common.sha256_of(vocab(declaration))
+
+
+def eval_key(parts) -> str:
+    """The evaluation key of docs/16 §D with declaration_sha beside template_sha (docs/16a §F): sha256 of the
+    canonical dict of exactly EVAL_KEY_PARTS."""
+    if not isinstance(parts, dict) or set(parts.keys()) != set(EVAL_KEY_PARTS):
+        raise ValueError("EVAL-KEY: the parts must be exactly %s" % (", ".join(EVAL_KEY_PARTS),))
+    return common.sha256_of({k: parts[k] for k in EVAL_KEY_PARTS})
 
 
 def _walk(node, piece):
@@ -959,7 +1089,9 @@ def _walk(node, piece):
 def _fixture_proposal(cases, s) -> dict:
     """A fixture set's proposal: its own, or its base's with every patch step applied (docs/16 §I CAD-07)."""
     if s.get("proposal") is not None:
-        return copy.deepcopy(s["proposal"])
+        node = copy.deepcopy(s["proposal"])
+        node.setdefault("vocab_sha", cases["vocab_sha"])      # the vocabulary the fixture was recorded with
+        return node
     base = None
     for other in cases["sets"]:
         if other["name"] == s["base"]:
@@ -968,6 +1100,7 @@ def _fixture_proposal(cases, s) -> dict:
     if base is None:
         raise ValueError("fixture patch: base %r not found" % (s["base"],))
     node = copy.deepcopy(base["proposal"])
+    node.setdefault("vocab_sha", cases["vocab_sha"])
     for step in s["patch"]:
         pieces = step["path"].split(".")
         parent = node
@@ -993,10 +1126,11 @@ def selftest():
     cases = common.read_json(CASES)
     decl = common.read_json(os.path.join(NOZZLE_DIR, "template.json"))
     sets = {s["name"]: s for s in cases["sets"]}
+    DSHA = cases["declaration_sha"]
 
     def run(name):
         s = sets[name]
-        return check(_fixture_proposal(cases, s), cases["briefs"][s["brief"]], decl, cases["template_sha"])
+        return check(_fixture_proposal(cases, s), cases["briefs"][s["brief"]], decl, cases["template_sha"], DSHA)
 
     def judged_right(s, rep):
         got = (rep["status"], [{"row": r["row"], "id": r["id"]} for r in rep["refusals"]])
@@ -1055,7 +1189,7 @@ def selftest():
     p["rows"][0]["quote"] = qpre
     b1 = copy.deepcopy(cases["briefs"]["B1"])
     b1["text"] = pre + ". " + b1["text"]
-    rep = check(p, b1, decl, cases["template_sha"])
+    rep = check(p, b1, decl, cases["template_sha"], DSHA)
     assert rep["status"] == "ok", rep["status"]
     print("[ok] quote numbers: 9 measured parses, NFC quote-in-brief, v1 accepted with the precomposed quote")
 
@@ -1111,7 +1245,7 @@ def selftest():
         assert len(rep["refusals"]) == 1, name
         assert rep["requirements"] is None and rep["derived"] is None, name
         expected_ids.add(rep["refusals"][0]["id"])
-    assert expected_ids == set(REFUSAL_IDS), expected_ids ^ set(REFUSAL_IDS)
+    assert expected_ids == set(CAD07_REFUSAL_IDS), expected_ids ^ set(CAD07_REFUSAL_IDS)
     print("[ok] 12 of 12 refusal sets each refused by exactly one id: %s" % (", ".join(
         [r["id"] for s2 in refused_names for r in run(s2)["refusals"]]),))
 
@@ -1146,9 +1280,12 @@ def selftest():
         {"req_id": "SYS-MACH", "primitive": "mach_max", "args": _a(None, ["fluid"]),
          "op": "<=", "lo": None, "hi": 0.3, "tol": 0.0, "u": None, "hardness": "hard"},
     ]
+    for c, rp in zip(_V1_CHECKS, ["brep"] * 8 + ["stl", "brep", "brep", "cfd"]):
+        c["repr"] = rp                        # docs/16a §F: SYS-WATERTIGHT is judged on the STL, SYS-MACH by CFD
     locked1 = lock(r1, "reviewer")
-    k1 = compile_checks(locked1, decl)
+    k1 = compile_checks(locked1, decl, DSHA)
     assert k1["checks"] == _V1_CHECKS, "v1 compile differs from the hand-derived checks"
+    assert k1["declaration_sha"] == locked1["declaration_sha"] == DSHA
     assert k1["requirements_lock"] == locked1["lock_sha"]
     assert schema.errors(k1, "cad-checks/1") == []
     print("[ok] v1 compile: 12 checks byte-equal to the hand-derived literal, cad-checks/1 valid")
@@ -1157,7 +1294,7 @@ def selftest():
     for name in valid_names:
         rep = run(name)
         locked = lock(rep, cases["approved_by"])
-        checks = compile_checks(locked, decl)
+        checks = compile_checks(locked, decl, DSHA)
         blob = {"$comment": common.HEADER_COMMENT, "requirements": locked, "checks": checks}
         want = common.canonical_bytes(blob) + b"\n"
         with open(os.path.join(GOLDEN, name + ".json"), "rb") as f:
@@ -1173,7 +1310,7 @@ def selftest():
     tampered["rows"][2]["value"] = 0.09
     assert not lock_ok(tampered)
     try:
-        compile_checks(tampered, decl)
+        compile_checks(tampered, decl, DSHA)
         raise AssertionError("compile_checks accepted a tampered lock")
     except ValueError as e:
         assert str(e).startswith("GATE-LOCK"), e
@@ -1198,7 +1335,7 @@ def selftest():
     def without_row(name, idx):
         p = _fixture_proposal(cases, sets[name])
         del p["rows"][idx]
-        return check(p, cases["briefs"][sets[name]["brief"]], decl, cases["template_sha"])
+        return check(p, cases["briefs"][sets[name]["brief"]], decl, cases["template_sha"], DSHA)
 
     rep = without_row("v1_nominal", 1)
     assert rep["status"] == "questions" and [q["id"] for q in rep["questions"]] == ["Q-CR"], rep["questions"]
@@ -1215,7 +1352,7 @@ def selftest():
     assert [q["id"] for q in rep["questions"]] == ["Q-D_i", "Q-CR"], rep["questions"]
     p = _fixture_proposal(cases, sets["v1_nominal"])
     p["operating_point"]["flow"] = None
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [q["id"] for q in rep["questions"]] == ["Q-FLOW"], rep["questions"]
     op = rep["requirements"]["operating_point"]
     assert op["U_exit_m_s"] is None and op["Q_m3_s"] is None and op["mdot_kg_s"] is None
@@ -1225,7 +1362,7 @@ def selftest():
     def one_ref(mutate):
         p = _fixture_proposal(cases, sets["v1_nominal"])
         mutate(p)
-        rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+        rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
         assert len(rep["refusals"]) == 1, rep["refusals"]
         r = rep["refusals"][0]
         return (r["row"], r["id"], r["check"])
@@ -1261,15 +1398,16 @@ def selftest():
     def assumed(quantity, op, value, unit, hardness, upper=None, tol_rel=None):
         return {"quantity": quantity, "feature": None, "op": op, "value": value, "upper": upper,
                 "tol_abs": None, "tol_rel": tol_rel, "unit": unit, "condition": {"Re": None, "level": None},
-                "hardness": hardness, "source": "assumed", "quote": None}
+                "hardness": hardness, "source": "assumed", "quote": None,
+                "ticked": True}                    # REQ-DEFAULT-HARD covers assumed rows; the card ticked these
 
     p = _fixture_proposal(cases, sets["v1_nominal"])
     appended_row(p, assumed("watertight", "is_true", None, "-", "hard"))
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [(r["row"], r["id"]) for r in rep["refusals"]] == [(6, "REQ-DUP")], rep["refusals"]
     p = _fixture_proposal(cases, sets["v1_nominal"])
     appended_row(p, assumed("n_solids", ">=", 2, "-", "hard"))
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [(r["row"], r["id"]) for r in rep["refusals"]] == [(6, "REQ-CONFLICT")], rep["refusals"]
     # the feature names WHERE the row is measured, and the primitive measures a quantity at its catalogue where
     # whatever the feature says: rows 0 (feature contraction_start) and these (feature null) are one measurement,
@@ -1279,23 +1417,23 @@ def selftest():
     r61 = assumed("inlet_diameter", "==", 61, "mm", "hard")
     r61["tol_abs"] = 0.001
     appended_row(p, r61)
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [(r["row"], r["id"]) for r in rep["refusals"]] == [(6, "REQ-DUP")], rep["refusals"]
     p = _fixture_proposal(cases, sets["v1_nominal"])
     appended_row(p, assumed("inlet_diameter", ">=", 61, "mm", "hard"))
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [(r["row"], r["id"]) for r in rep["refusals"]] == [(6, "REQ-CONFLICT")], rep["refusals"]
     p = _fixture_proposal(cases, sets["v1_nominal"])
     appended_row(p, assumed("contraction_length", ">=", 100, "mm", "soft"))
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [(r["row"], r["id"]) for r in rep["refusals"]] == [(6, "REQ-OUTSIDE")], rep["refusals"]
     p = _fixture_proposal(cases, sets["v1_nominal"])
     p["rows"][3] = assumed("min_wall_normal", ">=", 12, "mm", "soft")
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [(r["row"], r["id"]) for r in rep["refusals"]] == [(3, "REQ-OUTSIDE")], rep["refusals"]
     p = _fixture_proposal(cases, sets["v1_nominal"])
     p["rows"][1] = assumed("contraction_ratio", "==", 0.5, "-", "hard", tol_rel=1e-06)
-    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"])
+    rep = check(p, cases["briefs"]["B1"], decl, cases["template_sha"], DSHA)
     assert [(r["row"], r["id"]) for r in rep["refusals"]] == [(1, "REQ-OUTSIDE")], rep["refusals"]
     print("[ok] set passes: DUP vs SYS-WATERTIGHT, CONFLICT vs SYS-SOLID, DUP and CONFLICT across features, OUTSIDE from the analytic box")
 
@@ -1304,9 +1442,9 @@ def selftest():
     b0 = copy.deepcopy(cases["briefs"]["B1"])
     d0 = copy.deepcopy(decl)
     sha0 = cases["template_sha"]
-    ra = check(p0, b0, d0, sha0)
+    ra = check(p0, b0, d0, sha0, DSHA)
     assert p0 == _fixture_proposal(cases, sets["v1_nominal"]) and b0 == cases["briefs"]["B1"] and d0 == decl
-    rb = check(p0, b0, d0, sha0)
+    rb = check(p0, b0, d0, sha0, DSHA)
     assert common.canonical_json(ra) == common.canonical_json(rb)
     with tempfile.TemporaryDirectory() as td:
         pj = os.path.join(td, "proposal.json")
@@ -1363,11 +1501,178 @@ def selftest():
     assert sorted(s["expect"]["status"] for s in cases["sets"]).count("refused") == 12
     assert sorted(os.listdir(GOLDEN)) == sorted(n + ".json" for n in valid_names)
     print("[ok] inventory: 20 unique sets, 8 ok + 12 refused, %d golden files" % (len(os.listdir(GOLDEN)),))
+
+    # (A0) the fixtures record the declaration and the vocabulary they were judged with; both are today's.
+    B1 = cases["briefs"]["B1"]
+    TSHA = cases["template_sha"]
+    assert DSHA == common.sha256_file(os.path.join(NOZZLE_DIR, "template.json")), "re-record declaration_sha"
+    assert cases["vocab_sha"] == vocab_sha(decl), "re-record vocab_sha"
+    assert decl["standards"] == []
+    lin = common.read_json(LINEAGE)
+    lin_names = sorted([s["name"] for s in lin["sets"]] + [p["name"] for p in lin["procedures"]])
+    assert len(lin_names) == 10 and [n[:3] for n in lin_names] == ["a%02d" % i for i in range(1, 11)], lin_names
+    print("[ok] recorded shas: declaration %s.. and vocab %s.. are today's; standards table empty; 10 lineage"
+          " fixtures" % (DSHA[:12], cases["vocab_sha"][:12]))
+
+    # (A1) the flow's source and quote survive check, lock, write_locked and read_locked byte for byte.
+    with tempfile.TemporaryDirectory() as td:
+        for name in ("v1_nominal", "v2_water_mdot", "v8_assumed_flow_degree_sign"):
+            flow = _fixture_proposal(cases, sets[name])["operating_point"]["flow"]
+            d = os.path.join(td, name)
+            write_locked(d, lock(run(name), "reviewer"))
+            op = read_locked(d)["operating_point"]
+            assert (op["flow_source"], op["flow_quote"]) == (flow["source"], flow["quote"]), name
+            assert common.canonical_json(op["flow_quote"]) == common.canonical_json(flow["quote"]), name
+            assert (op["fluid_source"], op["T_K_source"], op["p0_Pa_source"]) == ("assumed",) * 3, name
+    print("[ok] a01 flow provenance: the brief, brief and assumed flows of v1, v2 and v8 keep source and quote"
+          " byte for byte through lock, write_locked and read_locked")
+
+    # (A2) a template.json edit moves declaration_sha, the lock and the eval key; compile refuses the old lock.
+    with tempfile.TemporaryDirectory() as td:
+        tdir = os.path.join(td, "nozzle_contraction")
+        os.makedirs(tdir)
+        for fn in ("template.json", "template.py"):
+            with open(os.path.join(NOZZLE_DIR, fn), "rb") as f:
+                blob = f.read()
+            with open(os.path.join(tdir, fn), "wb") as f:
+                f.write(blob)
+        d2 = copy.deepcopy(decl)
+        d2["title"] = d2["title"] + " (edited)"
+        with open(os.path.join(tdir, "template.json"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(d2, indent=2, ensure_ascii=False) + chr(10))
+        decl2, sha2, dsha2 = load_template(tdir)
+        decl1, sha1, dsha1 = load_template(NOZZLE_DIR)
+    assert sha2 == sha1 and dsha1 == DSHA and dsha2 != dsha1 and decl2 == d2
+    assert vocab_sha(decl2) == vocab_sha(decl1)             # the title is not vocabulary
+    pv = _fixture_proposal(cases, sets["v1_nominal"])
+    l1 = lock(check(pv, B1, decl1, TSHA, dsha1), "reviewer")
+    l2 = lock(check(pv, B1, decl2, TSHA, dsha2), "reviewer")
+    assert (l1["declaration_sha"], l2["declaration_sha"]) == (dsha1, dsha2) and l1["lock_sha"] != l2["lock_sha"]
+    assert compile_checks(l2, decl2, dsha2)["declaration_sha"] == dsha2
+    try:
+        compile_checks(l1, decl2, dsha2)
+        raise AssertionError("compile_checks accepted a lock bound to the old declaration")
+    except ValueError as e:
+        assert str(e).startswith("GATE-LOCK"), e
+    parts = {"template_sha": sha1, "declaration_sha": dsha1, "params": {"D_i": 0.06, "CR": 9.0},
+             "requirements_lock": l1["lock_sha"], "gates_lock": "0" * 64, "env": {"python": "fixture"},
+             "mesh_recipe_version": 1, "case_writer_version": 1, "bin_sha": "1" * 64}
+    k_1 = eval_key(parts)
+    k_2 = eval_key(dict(parts, declaration_sha=dsha2))
+    assert k_1 != k_2 and k_1 == eval_key(copy.deepcopy(parts))
+    assert eval_key(dict(parts, declaration_sha=dsha2, requirements_lock=l2["lock_sha"])) not in (k_1, k_2)
+    for bad in (dict(parts, extra=1), {k: parts[k] for k in EVAL_KEY_PARTS[1:]}):
+        try:
+            eval_key(bad)
+            raise AssertionError("eval_key accepted the parts %r" % (sorted(bad),))
+        except ValueError as e:
+            assert str(e).startswith("EVAL-KEY"), e
+    print("[ok] a02 declaration edit: declaration_sha %s.. -> %s.., lock and eval key move, the vocabulary does"
+          " not, compile refuses the old lock GATE-LOCK" % (dsha1[:8], dsha2[:8]))
+
+    # (A3..A6, A9) the proposal fixtures: each refused by exactly its (row, id, check), naming its field.
+    new_ids = set()
+    for s in lin["sets"]:
+        rep = check(_fixture_proposal(cases, s), cases["briefs"][s["brief"]], decl, TSHA, DSHA)
+        got = [(r["row"], r["id"], r["check"]) for r in rep["refusals"]]
+        want = [(r["row"], r["id"], r["check"]) for r in s["expect"]["refusals"]]
+        assert rep["status"] == s["expect"]["status"] and got == want, (s["name"], got)
+        assert s["expect"]["detail_has"] in rep["refusals"][0]["detail"], (s["name"], rep["refusals"][0])
+        new_ids.add(got[0][1])
+        print("[ok] %s: refused %s %s at row %s (%r in the detail)"
+              % (s["name"], got[0][1], got[0][2], got[0][0], s["expect"]["detail_has"]))
+    assert new_ids == {"REQ-DEFAULT-HARD", "REQ-OP", "REQ-STD", "REQ-VOCAB"}, new_ids
+
+    # (A7, A8) requirements.json and .lock are write-once: other bytes REQ-IMMUTABLE, identical bytes accepted.
+    with tempfile.TemporaryDirectory() as td:
+        la = lock(r1, "reviewer")
+        pd, pl = write_locked(td, la)
+        before = [(os.stat(q).st_mtime_ns, common.sha256_file(q)) for q in (pd, pl)]
+        for bad_dir, doc_b, name_b in ((td, lock(r1, "another-reviewer"), "requirements.json"),
+                                       (os.path.join(td, "lone_lock"), la, "requirements.lock"),
+                                       (os.path.join(td, "dir_in_place"), la, "requirements.json")):
+            if name_b == "requirements.lock":
+                common.atomic_write(os.path.join(bad_dir, name_b), "0" * 64 + chr(10))
+            elif bad_dir != td:
+                os.makedirs(os.path.join(bad_dir, name_b))
+            try:
+                write_locked(bad_dir, doc_b)
+                raise AssertionError("write_locked rewrote %s in %s" % (name_b, bad_dir))
+            except ValueError as e:
+                assert str(e).startswith("REQ-IMMUTABLE: " + name_b), e
+        assert not os.path.exists(os.path.join(td, "lone_lock", "requirements.json"))
+        assert [(os.stat(q).st_mtime_ns, common.sha256_file(q)) for q in (pd, pl)] == before
+        print("[ok] a07 immutable: another approver's bytes, a lone rewritten lock and a directory in place are"
+              " refused REQ-IMMUTABLE; nothing written")
+        assert write_locked(td, copy.deepcopy(la)) == (pd, pl)
+        assert [(os.stat(q).st_mtime_ns, common.sha256_file(q)) for q in (pd, pl)] == before
+        assert read_locked(td) == la
+        print("[ok] a08 immutable: identical bytes accepted, both files untouched (mtime and sha)")
+
+    # (A10) reqs.py vocab is byte-identical in two fresh processes and moves with one catalogue quantity.
+    with tempfile.TemporaryDirectory() as td:
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        blobs = []
+        for i in (1, 2):
+            out_i = os.path.join(td, "vocab%d.json" % (i,))
+            pr = subprocess.run([sys.executable, os.path.abspath(__file__), "vocab", NOZZLE_DIR, out_i],
+                                capture_output=True, encoding="utf-8", errors="replace", env=env, timeout=120)
+            assert pr.returncode == 0 and pr.stdout.strip() == vocab_sha(decl), (pr.returncode, pr.stderr[-300:])
+            with open(out_i, "rb") as f:
+                blobs.append(f.read())
+    assert blobs[0] == blobs[1], "two fresh vocab runs differ"
+    vj = json.loads(blobs[0].decode("utf-8"))
+    assert vj["vocab_sha"] == vocab_sha(decl) == cases["vocab_sha"] and vj["vocab"] == vocab(decl)
+    assert [q["quantity"] for q in vj["vocab"]["quantities"]] == [c["quantity"] for c in decl["catalogue"]]
+    d3 = copy.deepcopy(decl)
+    d3["catalogue"].append({"quantity": "throat_area", "primitive": "section_at_plane", "where": ["exit_plane"],
+                            "kind": "geometric", "method": "geometry", "unit": "m2", "u_kind": "rel",
+                            "u_meas": 1e-09})
+    assert vocab_sha(d3) != vocab_sha(decl) and vocab(d3)["quantities"][-1]["quantity"] == "throat_area"
+    rep = check(_fixture_proposal(cases, sets["v1_nominal"]), B1, d3, TSHA, DSHA)
+    assert [(r["row"], r["id"]) for r in rep["refusals"]] == [("proposal", "REQ-VOCAB")], rep["refusals"]
+    print("[ok] a10 vocab: %d bytes byte-identical in two fresh processes, sha %s..; one more catalogue quantity"
+          " moves it and the old proposal is refused REQ-VOCAB" % (len(blobs[0]), vj["vocab_sha"][:12]))
+
+    # (A11) confidence is derived from the source; a table standard is admitted; a ref on a brief row is not.
+    assert CONFIDENCE == {"brief": "high", "sketch_label": "medium", "default": "low", "assumed": "low",
+                          "standard": "high", "system": "high"}
+    seen = set()
+    for name in valid_names:
+        for r in run(name)["requirements"]["rows"]:
+            assert r["confidence"] == CONFIDENCE[r["source"]] and r["standard_ref"] is None, (name, r["id"])
+            assert r["ticked"] is (r["source"] == "default"), (name, r["id"])
+            seen.add((r["source"], r["confidence"]))
+    assert seen == {("brief", "high"), ("sketch_label", "medium"), ("default", "low"), ("assumed", "low"),
+                    ("system", "high")}, seen
+    d4 = copy.deepcopy(decl)
+    d4["standards"] = [{"ref": "FIXTURE-STD-1", "title": "a fixture standard", "url": "https://example.org/std1"}]
+    p = _fixture_proposal(cases, sets["v1_nominal"])
+    p["vocab_sha"] = vocab_sha(d4)
+    p["rows"].append({"quantity": "min_curvature_radius", "feature": None, "op": ">=", "value": 5, "upper": None,
+                      "tol_abs": None, "tol_rel": None, "unit": "mm", "condition": {"Re": None, "level": None},
+                      "hardness": "soft", "source": "standard", "quote": None, "standard_ref": "FIXTURE-STD-1"})
+    rep = check(p, B1, d4, TSHA, DSHA)
+    row6 = rep["requirements"]["rows"][6]
+    assert rep["status"] == "ok" and (row6["source"], row6["confidence"], row6["standard_ref"]) == \
+        ("standard", "high", "FIXTURE-STD-1")
+    p["rows"][0]["standard_ref"] = "FIXTURE-STD-1"
+    rep = check(p, B1, d4, TSHA, DSHA)
+    assert [(r["row"], r["id"], r["check"]) for r in rep["refusals"]] == [(0, "REQ-STD", "ref_on_non_standard")]
+    p = _fixture_proposal(cases, sets["v1_nominal"])
+    p["operating_point"]["fluid_source"] = "brief"
+    rep = check(p, B1, decl, TSHA, DSHA)
+    assert rep["status"] == "ok" and rep["requirements"]["operating_point"]["fluid_source"] == "brief"
+    p["operating_point"]["T_K_source"] = "guess"
+    rep = check(p, B1, decl, TSHA, DSHA)
+    assert [(r["row"], r["id"], r["check"]) for r in rep["refusals"]] == [("operating_point", "REQ-OP", "shape")]
+    print("[ok] confidence derived per source on all 8 valid sets; a standard row from a 1-entry table admitted"
+          " high; a standard_ref on a brief row refused REQ-STD; fluid_source brief kept, T_K_source guess refused")
     print("SELFTEST PASS")
 
 
 def main(argv) -> int:
-    """The CLI of docs/16 §I CAD-07: --selftest, check, lock, compile."""
+    """The CLI of docs/16 §I CAD-07 and docs/16a AMG-6: --selftest, check, lock, compile, vocab."""
     if argv and argv[0] == "--selftest":
         try:
             selftest()
@@ -1377,8 +1682,8 @@ def main(argv) -> int:
         return 0
     try:
         if len(argv) == 5 and argv[0] == "check":
-            decl, sha = load_template(argv[3])
-            report = check(common.read_json(argv[1]), common.read_json(argv[2]), decl, sha)
+            decl, sha, dsha = load_template(argv[3])
+            report = check(common.read_json(argv[1]), common.read_json(argv[2]), decl, sha, dsha)
             write_canonical(argv[4], report)
             print(common.canonical_json({
                 "status": report["status"],
@@ -1391,7 +1696,13 @@ def main(argv) -> int:
             print(doc["lock_sha"])
             return 0
         if len(argv) == 4 and argv[0] == "compile":
-            write_canonical(argv[3], compile_checks(common.read_json(argv[1]), load_template(argv[2])[0]))
+            decl, _sha, dsha = load_template(argv[2])
+            write_canonical(argv[3], compile_checks(common.read_json(argv[1]), decl, dsha))
+            return 0
+        if len(argv) == 3 and argv[0] == "vocab":
+            v = vocab(load_template(argv[1])[0])
+            write_canonical(argv[2], {"vocab": v, "vocab_sha": common.sha256_of(v)})
+            print(common.sha256_of(v))
             return 0
     except ValueError as e:
         print("reqs: %s" % (e,), file=sys.stderr)

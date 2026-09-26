@@ -251,7 +251,8 @@
           "PRF-SELFX",
           "PRF-FACE2D",
           "PRF-DERIV"
-        ]
+        ],
+        "standards": []
       }
     }
   ],
@@ -316,6 +317,23 @@
       "value": "BOX",
       "errors": [
         "cad-template/1: profile_rules[0]: does not match ^PRF-[A-Z0-9]+$"
+      ]
+    },
+    {
+      "name": "standards_missing",
+      "path": "standards",
+      "op": "delete",
+      "errors": [
+        "cad-template/1: standards: required field missing"
+      ]
+    },
+    {
+      "name": "standards_not_list",
+      "path": "standards",
+      "op": "set",
+      "value": "none",
+      "errors": [
+        "cad-template/1: standards: expected array, got string"
       ]
     }
   ]

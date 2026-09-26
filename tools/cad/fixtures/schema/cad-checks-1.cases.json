@@ -25,7 +25,8 @@
             "hi": 0.06,
             "tol": 1e-06,
             "u": 1e-09,
-            "hardness": "hard"
+            "hardness": "hard",
+            "repr": "brep"
           },
           {
             "req_id": "REQ-003",
@@ -44,7 +45,8 @@
             "hi": null,
             "tol": 0,
             "u": 1e-08,
-            "hardness": "hard"
+            "hardness": "hard",
+            "repr": "brep"
           },
           {
             "req_id": "REQ-004",
@@ -62,7 +64,8 @@
             "hi": null,
             "tol": 0,
             "u": 0,
-            "hardness": "hard"
+            "hardness": "hard",
+            "repr": "brep"
           },
           {
             "req_id": "REQ-005",
@@ -80,9 +83,11 @@
             "hi": null,
             "tol": 0,
             "u": null,
-            "hardness": "hard"
+            "hardness": "hard",
+            "repr": "brep"
           }
-        ]
+        ],
+        "declaration_sha": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
       }
     }
   ],
@@ -129,6 +134,23 @@
       "value": "exit plane",
       "errors": [
         "cad-checks/1: checks[0].args.where[0]: does not match ^[A-Za-z][A-Za-z0-9_]{0,63}$"
+      ]
+    },
+    {
+      "name": "repr_step",
+      "path": "checks[0].repr",
+      "op": "set",
+      "value": "step",
+      "errors": [
+        "cad-checks/1: checks[0].repr: not one of [\"brep\", \"stl\", \"mesh\", \"cfd\"]"
+      ]
+    },
+    {
+      "name": "declaration_sha_missing",
+      "path": "declaration_sha",
+      "op": "delete",
+      "errors": [
+        "cad-checks/1: declaration_sha: required field missing"
       ]
     }
   ]

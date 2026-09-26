@@ -3,20 +3,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "cad-checks/1",
   "title": "compiled assertions",
-  "description": "The requirement set compiled to typed primitive assertions by reqs.py compile (docs/16 §E.4), locked by the requirements lock sha.",
+  "description": "The requirement set compiled to typed primitive assertions by reqs.py compile (docs/16 §E.4), locked by the requirements lock sha and bound to the template declaration's sha; each check names the representation it is judged on (docs/16a §F).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "study_id", "requirements_lock", "checks"],
+  "required": ["schema", "study_id", "requirements_lock", "declaration_sha", "checks"],
   "properties": {
       "schema": {"const": "cad-checks/1"},
       "study_id": {"$ref": "#/$defs/StudyId"},
       "requirements_lock": {"$ref": "#/$defs/Sha"},
+      "declaration_sha": {"$ref": "#/$defs/Sha"},
       "checks": {
           "type": "array",
           "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["req_id", "primitive", "args", "op", "lo", "hi", "tol", "u", "hardness"],
+              "required": ["req_id", "primitive", "args", "op", "lo", "hi", "tol", "u", "hardness", "repr"],
               "properties": {
                   "req_id": {"$ref": "#/$defs/ReqId"},
                   "primitive": {"$ref": "#/$defs/Name"},
@@ -36,7 +37,8 @@
                   "hi": {"type": ["number", "null"]},
                   "tol": {"type": "number", "minimum": 0},
                   "u": {"type": ["number", "null"], "minimum": 0},
-                  "hardness": {"$ref": "#/$defs/Hardness"}
+                  "hardness": {"$ref": "#/$defs/Hardness"},
+                  "repr": {"enum": ["brep", "stl", "mesh", "cfd"]}
                 }
             },
           "minItems": 1

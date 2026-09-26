@@ -132,10 +132,11 @@ CATALOGUE = [
      "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
 ]
 PROFILE_RULES = ["PRF-BOX", "PRF-RMIN", "PRF-MONO", "PRF-DERIV", "PRF-SELFX", "PRF-FACE2D"]
+STANDARDS = []   # docs/16a §F: the frozen table a row sourced standard must cite (REQ-STD); none for the nozzle
 DECLARATION = {"schema": "cad-template/1", "template_id": TEMPLATE_ID,
                "title": "axisymmetric subsonic contraction on +x", "axis": "+x", "units": "m",
                "params": PARAMS, "planes": PLANES, "tags": TAGS, "catalogue": CATALOGUE,
-               "profile_rules": PROFILE_RULES}
+               "profile_rules": PROFILE_RULES, "standards": STANDARDS}
 
 
 def domain_rules(p):

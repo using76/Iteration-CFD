@@ -3,7 +3,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "cad-requirements/1",
   "title": "the approved, locked requirement set",
-  "description": "The approved, locked requirement set of docs/16 §E.1; exactly one of the three flow fields is non-null, and lock_sha is the sha256 of the document's canonical JSON with lock_sha set to null; both are enforced by reqs.py, not the schema.",
+  "description": "The approved, locked requirement set of docs/16 §E.1; exactly one of the three flow fields is non-null, and lock_sha is the sha256 of the document's canonical JSON with lock_sha set to null; both are enforced by reqs.py, not the schema. docs/16a §F adds the declaration and vocabulary shas, the operating point's provenance, per row the card's tick, the confidence reqs.py derives from the source and a standards-table ref, and the lineage fields of a superseding study.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,6 +11,8 @@
       "study_id",
       "template_id",
       "template_sha",
+      "declaration_sha",
+      "vocab_sha",
       "brief_sha",
       "attachments",
       "operating_point",
@@ -18,26 +20,39 @@
       "objective",
       "created_by",
       "approved_by",
-      "lock_sha"
+      "lock_sha",
+      "supersedes_study",
+      "supersedes_lock",
+      "change_kind",
+      "change_reason",
+      "evidence_sha"
     ],
   "properties": {
       "schema": {"const": "cad-requirements/1"},
       "study_id": {"$ref": "#/$defs/StudyId"},
       "template_id": {"$ref": "#/$defs/TemplateId"},
       "template_sha": {"$ref": "#/$defs/Sha"},
+      "declaration_sha": {"$ref": "#/$defs/Sha"},
+      "vocab_sha": {"$ref": "#/$defs/Sha"},
       "brief_sha": {"$ref": "#/$defs/Sha"},
       "attachments": {"type": "array", "items": {"$ref": "#/$defs/Sha"}, "maxItems": 4},
       "operating_point": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["fluid", "T_K", "p0_Pa", "U_exit_m_s", "Q_m3_s", "mdot_kg_s"],
+          "required": ["fluid", "T_K", "p0_Pa", "U_exit_m_s", "Q_m3_s", "mdot_kg_s", "flow_source", "flow_quote",
+                       "fluid_source", "T_K_source", "p0_Pa_source"],
           "properties": {
               "fluid": {"enum": ["air", "water"]},
               "T_K": {"type": "number", "exclusiveMinimum": 0},
               "p0_Pa": {"type": "number", "exclusiveMinimum": 0},
               "U_exit_m_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
               "Q_m3_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
-              "mdot_kg_s": {"type": ["number", "null"], "exclusiveMinimum": 0}
+              "mdot_kg_s": {"type": ["number", "null"], "exclusiveMinimum": 0},
+              "flow_source": {"enum": ["brief", "sketch_label", "assumed", null]},
+              "flow_quote": {"type": ["string", "null"]},
+              "fluid_source": {"enum": ["brief", "sketch_label", "default", "assumed"]},
+              "T_K_source": {"enum": ["brief", "sketch_label", "default", "assumed"]},
+              "p0_Pa_source": {"enum": ["brief", "sketch_label", "default", "assumed"]}
             }
         },
       "rows": {
@@ -62,7 +77,10 @@
                   "hardness",
                   "source",
                   "quote",
-                  "locks_params"
+                  "locks_params",
+                  "ticked",
+                  "confidence",
+                  "standard_ref"
                 ],
               "properties": {
                   "id": {"$ref": "#/$defs/ReqId"},
@@ -87,9 +105,12 @@
                         }
                     },
                   "hardness": {"$ref": "#/$defs/Hardness"},
-                  "source": {"enum": ["brief", "sketch_label", "default", "assumed", "system"]},
+                  "source": {"enum": ["brief", "sketch_label", "default", "assumed", "standard", "system"]},
                   "quote": {"type": ["string", "null"]},
-                  "locks_params": {"type": "array", "items": {"$ref": "#/$defs/Name"}}
+                  "locks_params": {"type": "array", "items": {"$ref": "#/$defs/Name"}},
+                  "ticked": {"type": "boolean"},
+                  "confidence": {"enum": ["high", "medium", "low"]},
+                  "standard_ref": {"type": ["string", "null"]}
                 }
             },
           "minItems": 1
@@ -110,7 +131,12 @@
             }
         },
       "approved_by": {"type": "string", "minLength": 1},
-      "lock_sha": {"$ref": "#/$defs/ShaOrNull"}
+      "lock_sha": {"$ref": "#/$defs/ShaOrNull"},
+      "supersedes_study": {"type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+      "supersedes_lock": {"$ref": "#/$defs/ShaOrNull"},
+      "change_kind": {"enum": ["new", "target_change", "evidence_correction"]},
+      "change_reason": {"type": ["string", "null"]},
+      "evidence_sha": {"$ref": "#/$defs/ShaOrNull"}
     },
   "$defs": {
       "StudyId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},

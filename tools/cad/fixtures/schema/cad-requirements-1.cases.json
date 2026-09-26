@@ -17,7 +17,12 @@
           "p0_Pa": 101325.0,
           "U_exit_m_s": null,
           "Q_m3_s": 0.00707,
-          "mdot_kg_s": null
+          "mdot_kg_s": null,
+          "flow_source": "brief",
+          "flow_quote": null,
+          "fluid_source": "assumed",
+          "T_K_source": "assumed",
+          "p0_Pa_source": "assumed"
         },
         "rows": [
           {
@@ -42,7 +47,10 @@
             "quote": "60 mm inlet",
             "locks_params": [
               "D_i"
-            ]
+            ],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
           },
           {
             "id": "REQ-002",
@@ -66,7 +74,10 @@
             "quote": "20 mm exit",
             "locks_params": [
               "CR"
-            ]
+            ],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
           },
           {
             "id": "REQ-003",
@@ -88,7 +99,10 @@
             "hardness": "hard",
             "source": "brief",
             "quote": "normal wall >= 3 mm",
-            "locks_params": []
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
           },
           {
             "id": "REQ-004",
@@ -110,7 +124,10 @@
             "hardness": "hard",
             "source": "brief",
             "quote": "no separation",
-            "locks_params": []
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
           },
           {
             "id": "REQ-005",
@@ -132,7 +149,10 @@
             "hardness": "hard",
             "source": "brief",
             "quote": "Cd >= 0.96",
-            "locks_params": []
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
           },
           {
             "id": "SYS-MACH",
@@ -154,7 +174,10 @@
             "hardness": "hard",
             "source": "system",
             "quote": null,
-            "locks_params": []
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
           }
         ],
         "objective": {
@@ -166,7 +189,14 @@
           "model": "claude-opus-5-5"
         },
         "approved_by": "user",
-        "lock_sha": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        "lock_sha": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "declaration_sha": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "vocab_sha": "9999999999999999999999999999999999999999999999999999999999999999",
+        "supersedes_study": null,
+        "supersedes_lock": null,
+        "change_kind": "new",
+        "change_reason": null,
+        "evidence_sha": null
       }
     },
     {
@@ -186,7 +216,12 @@
           "p0_Pa": 101325.0,
           "U_exit_m_s": null,
           "Q_m3_s": null,
-          "mdot_kg_s": 7.07
+          "mdot_kg_s": 7.07,
+          "flow_source": "brief",
+          "flow_quote": null,
+          "fluid_source": "assumed",
+          "T_K_source": "assumed",
+          "p0_Pa_source": "assumed"
         },
         "rows": [
           {
@@ -209,7 +244,10 @@
             "hardness": "soft",
             "source": "sketch_label",
             "quote": "CR 4-9",
-            "locks_params": []
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "medium",
+            "standard_ref": null
           }
         ],
         "objective": null,
@@ -218,7 +256,14 @@
           "model": "glm-5.3-flash"
         },
         "approved_by": "user",
-        "lock_sha": null
+        "lock_sha": null,
+        "declaration_sha": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "vocab_sha": "9999999999999999999999999999999999999999999999999999999999999999",
+        "supersedes_study": null,
+        "supersedes_lock": null,
+        "change_kind": "new",
+        "change_reason": null,
+        "evidence_sha": null
       }
     }
   ],
@@ -307,6 +352,41 @@
       "value": 0,
       "errors": [
         "cad-requirements/1: operating_point.T_K: at or below exclusive minimum 0"
+      ]
+    },
+    {
+      "name": "confidence_word",
+      "path": "rows[0].confidence",
+      "op": "set",
+      "value": "certain",
+      "errors": [
+        "cad-requirements/1: rows[0].confidence: not one of [\"high\", \"medium\", \"low\"]"
+      ]
+    },
+    {
+      "name": "change_kind_edit",
+      "path": "change_kind",
+      "op": "set",
+      "value": "edit",
+      "errors": [
+        "cad-requirements/1: change_kind: not one of [\"new\", \"target_change\", \"evidence_correction\"]"
+      ]
+    },
+    {
+      "name": "flow_source_default",
+      "path": "operating_point.flow_source",
+      "op": "set",
+      "value": "default",
+      "errors": [
+        "cad-requirements/1: operating_point.flow_source: not one of [\"brief\", \"sketch_label\", \"assumed\", null]"
+      ]
+    },
+    {
+      "name": "declaration_sha_missing",
+      "path": "declaration_sha",
+      "op": "delete",
+      "errors": [
+        "cad-requirements/1: declaration_sha: required field missing"
       ]
     }
   ]

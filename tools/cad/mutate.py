@@ -59,13 +59,14 @@ USAGE = ("usage: python mutate.py --selftest" + chr(10)
 def load_checks():
     """The GC-2 set through the production reqs path: accept, lock, compile (docs/16 §E.3, §E.4)."""
     fx = common.read_json(FIXTURE)
-    decl, sha = reqs.load_template(reqs.NOZZLE_DIR)
-    rep = reqs.check(fx["proposal"], fx["brief"], decl, sha)
+    decl, sha, dsha = reqs.load_template(reqs.NOZZLE_DIR)
+    proposal = dict(fx["proposal"], vocab_sha=reqs.vocab_sha(decl))    # stamped at call time, as GUI-1 will
+    rep = reqs.check(proposal, fx["brief"], decl, sha, dsha)
     if rep["status"] != "ok":
         raise RuntimeError("the GC-2 requirement set is %s with refusals %r"
                            % (rep["status"], rep.get("refusals")))
     doc = reqs.lock(rep, fx["approved_by"])
-    checks_doc = reqs.compile_checks(doc, decl)
+    checks_doc = reqs.compile_checks(doc, decl, dsha)
     return doc, checks_doc, decl
 
 
