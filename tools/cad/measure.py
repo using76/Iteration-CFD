@@ -2,7 +2,7 @@
 # meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
-"""measure.py - the typed measurement primitives of the CAD loop (docs/16 §E.2, gate GC-1 of §H.3): each returns one cad-measure/1 record, and wall thickness is measured on the 2-D meridian, never between 3-D surfaces.
+"""measure.py - the typed measurement primitives of the CAD loop (docs/16 §E.2, gate GC-1 of §H.3): each returns one cad-measure/1 record; wall thickness is measured on the 2-D meridian, or in 3-D only between complete tagged face sets.
 
 Integral properties are adaptive (docs/16a §B.2): the idea of passing an eps to BRepGProp and keeping the returned
 error estimate is from Amagine3D (https://github.com/amagine-ai/Amagine3D, e608dc6,
@@ -11,6 +11,14 @@ Sections on an explicit plane (islands, holes as inner wires, the cutting face r
 idea from the same Amagine3D file's measure_section, reimplemented in raw OCP; the solid is scaled to a 1e5 bounding-box
 diagonal first because the kernel's plane-surface intersection tolerance is absolute (2.09e-6 rel off in metres on the trap
 station, 1.7e-13 at 1e5); no code was copied.
+A 3-D wall distance is measured only between COMPLETE tagged face sets (docs/16a D-9, §D.15): wall_min_tagged takes
+BRepExtrema between the two selections after proving each selection's adaptive area equals its geom.json tag row
+(MEAS-COVER), refuses sets that touch (MEAS-TOUCH) and cross-checks the distance against a BRep normal-ray field
+sampled outside a boundary band (MEAS-XCHECK); an untagged or free-form pair stays refused MEAS-3D-WALL. The ray
+field's report (minimum, area-weighted p05, violating-area ratio, a full sample account and the argmin location) is
+the report of Amagine3D's skills/text-a3d/qa_check.py thickness_observation, reimplemented around a true BRep normal
+ray (BRepClass_FaceClassifier inside the face, IntCurvesFace_ShapeIntersector along the inward normal); their
+max-sphere method is not taken and no code was copied.
 
 Usage:
   python measure.py --selftest
@@ -30,20 +38,22 @@ from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Circle, GeomAbs_
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section, BRepAlgoAPI_Check, BRepAlgoAPI_Common
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_Transform
-from OCP.gp import gp_Pln, gp_Pnt, gp_Dir, gp_Vec, gp_Ax1, gp_Ax3, gp_Trsf
+from OCP.gp import gp_Pln, gp_Pnt, gp_Dir, gp_Vec, gp_Ax1, gp_Ax3, gp_Trsf, gp_Lin, gp_Pnt2d
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
 from OCP.GProp import GProp_GProps
 from OCP.BRepGProp import BRepGProp
 from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib
-from OCP.BRepLProp import BRepLProp_CLProps
+from OCP.BRepLProp import BRepLProp_CLProps, BRepLProp_SLProps
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol   # selftest only
 from OCP.GCPnts import GCPnts_AbscissaPoint
 from OCP.BRep import BRep_Tool
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_WIRE, TopAbs_SOLID
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_WIRE, TopAbs_SOLID, TopAbs_IN, TopAbs_REVERSED
 from OCP.TopoDS import TopoDS
 from OCP.BRepTools import BRepTools
+from OCP.BRepClass import BRepClass_FaceClassifier
+from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -60,6 +70,7 @@ U_MEAS = {                # (kind, value): "abs" in the record's unit, "rel" tim
     "plane_distance": ("abs", 1e-9), "meridian_min_wall": ("abs", 1e-8), "slope_max": ("rel", 1e-6),
     "curvature_radius_min": ("rel", 1e-6), "n_solids": ("abs", 0.0), "valid": ("abs", 0.0),
     "watertight": ("abs", 0.0), "axis_x": ("abs", 0.0), "units_m": ("abs", 0.0), "section_at_plane": ("rel", 1e-9),
+    "wall_min_tagged": ("abs", 1e-8),
 }
 REFUSED = {"wall_distance_3d": "MEAS-3D-WALL"}
 UNITS_TOL = 1e-9          # m: gmsh vs BREP x-span in geom.json (docs/16 §H.3 GC-5)
@@ -68,6 +79,15 @@ GPROP_EPS_CHECK = 1e-9    # the coarser length pass; |L(GPROP_EPS) - L(GPROP_EPS
 GPROP_REL_MAX = 1e-8      # rel: the export helpers' bound, the volume primitive's u_meas (docs/16 §E.2)
 SECTION_DIAG = 1e5        # model units: each solid is scaled to this bounding-box diagonal before the cut (the kernel's section tolerance is absolute)
 SECTION_PERP_TOL = 1e-12  # |n . u| of the unit normal and unit u axis above this is refused MEAS-BADPLANE
+COVER_REL = 1e-8          # rel: a tag selection's adaptive area must equal its geom.json row's area_m2 (MEAS-COVER)
+TOUCH_TOL = 1e-9          # m: tagged sets nearer than this touch, and distance 0 is not a wall (MEAS-TOUCH, 16a §D.10)
+RAY_N = 81                # ray samples per face and parameter direction, at cell midpoints (16a G.1 AMG-10: 81 x 81)
+RAY_BAND = 0.02           # the boundary band: no ray within this fraction of either end of u or v (16a §D.14)
+RAY_XCHECK_REL = 5e-4     # rel: the ray-field minimum must lie in [extrema - RAY_XCHECK_ABS, extrema (1 + this)]
+RAY_XCHECK_ABS = 1e-12    # m: the lower slack of the cross-check (a normal ray is never shorter than the extrema)
+RAY_TOL = 1e-9            # the classifier, normal and intersector tolerance
+RAY_W_MIN_REL = 1e-6      # a hit nearer than this times the solid's bounding-box diagonal is the ray's own start
+RAY_P = 0.05              # the area-weighted percentile of the ray-field report
 
 
 def record(primitive, value, unit, u_meas, method, feature=None, where=(), status="ok", reason_id=None, detail=""):
@@ -726,13 +746,222 @@ def section_at_plane(shape, plane, feature=None):
     return rec
 
 
+def tag_faces(shape, rows, name):
+    """The tag selection {name, faces, area_m2} of one row of a geom.json face-tag group (geom["tags"]["fluid_faces"]):
+    faces are shape.Faces()[i] for the row's index list and area_m2 is the row's recorded area."""
+    row = rows[name]
+    fs = shape.Faces()
+    return {"name": name, "faces": [fs[i] for i in row["index"]], "area_m2": row["area_m2"]}
+
+
+def _tag_ok(tag):
+    """True iff tag is exactly {name, faces, area_m2}: a template name, a list of cq.Face, a finite area > 0."""
+    if not isinstance(tag, dict) or set(tag) != {"name", "faces", "area_m2"}:
+        return False
+    name, faces, a = tag["name"], tag["faces"], tag["area_m2"]
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        return False
+    if isinstance(a, bool) or not isinstance(a, (int, float)) or not math.isfinite(float(a)) or not a > 0:
+        return False
+    return isinstance(faces, (list, tuple)) and all(isinstance(f, cq.Face) for f in faces)
+
+
+def _face_indices(own, faces):
+    """Each face's index in own (the shape's faces, IsSame); None if one is missing or selected twice."""
+    idx = []
+    for f in faces:
+        hit = [k for k, g in enumerate(own) if g.wrapped.IsSame(f.wrapped)]
+        if not hit or hit[0] in idx:
+            return None
+        idx.append(hit[0])
+    return idx
+
+
+def _cover(own, tag):
+    """(indices, rel, detail): the selection is distinct faces of the shape whose adaptive area equals area_m2."""
+    idx = _face_indices(own, tag["faces"])
+    if idx is None:
+        return None, None, "tag %s: a selected face is not a face of the shape, or is selected twice" % (tag["name"],)
+    a = sum(gprop(own[k], "area")[0] for k in idx)
+    rel = (a - tag["area_m2"]) / tag["area_m2"]
+    if not abs(rel) <= COVER_REL:
+        return None, rel, ("tag %s: the %d selected faces hold %.12g m2 against the tag's %.12g m2 (rel %+.3e, over "
+                           "%.0e): the selection is not the complete tag" % (tag["name"], len(idx), a, tag["area_m2"],
+                                                                            rel, COVER_REL))
+    return idx, rel, ""
+
+
+def _ray_cast(X, own, src, dst, name, n, band, w_min, acc, out):
+    """Cast one normal ray per band-free, inside, midpoint sample of every src face into the material; a sample is
+    valid when the first hit beyond w_min lies on a dst face. Appends (w, weight, name, k, u, v, P, H) to out."""
+    for k in src:
+        f = own[k]
+        a = BRepAdaptor_Surface(f.wrapped)
+        u0, u1, v0, v1 = a.FirstUParameter(), a.LastUParameter(), a.FirstVParameter(), a.LastVParameter()
+        du, dv = (u1 - u0) / n, (v1 - v0) / n
+        s = 1.0 if f.wrapped.Orientation() == TopAbs_REVERSED else -1.0
+        for i in range(n):
+            fu = (i + 0.5) / n
+            for j in range(n):
+                fv = (j + 0.5) / n
+                acc["candidate"] += 1
+                if fu < band or fu > 1.0 - band or fv < band or fv > 1.0 - band:
+                    acc["banded"] += 1
+                    continue
+                u, v = u0 + fu * (u1 - u0), v0 + fv * (v1 - v0)
+                if BRepClass_FaceClassifier(f.wrapped, gp_Pnt2d(u, v), RAY_TOL).State() != TopAbs_IN:
+                    acc["outside"] += 1
+                    continue
+                acc["selected"] += 1
+                pr = BRepLProp_SLProps(a, u, v, 1, RAY_TOL)
+                wgt = pr.D1U().Crossed(pr.D1V()).Magnitude() * du * dv
+                acc["selected_area_m2"] += wgt
+                if not pr.IsNormalDefined():
+                    acc["no_normal"] += 1
+                    continue
+                N, P = pr.Normal(), pr.Value()
+                X.Perform(gp_Lin(P, gp_Dir(s * N.X(), s * N.Y(), s * N.Z())), 0.0, 1e100)
+                hits = [(X.WParameter(h), h) for h in range(1, X.NbPnt() + 1) if X.WParameter(h) > w_min]
+                if not hits:
+                    acc["no_hit"] += 1
+                    continue
+                w, h = min(hits)
+                if not any(X.Face(h).IsSame(own[d].wrapped) for d in dst):
+                    acc["other_face"] += 1
+                    continue
+                acc["valid"] += 1
+                H = X.Pnt(h)
+                out.append((w, wgt, name, k, u, v, [P.X(), P.Y(), P.Z()], [H.X(), H.Y(), H.Z()]))
+
+
+def wall_ray_field(shape, tag_a, tag_b, n=RAY_N, band=RAY_BAND, target_m=None):
+    """The BRep normal-ray wall field between two tag selections of ONE solid, as one plain dict (a diagnostic, never
+    a gate): rays from each set's faces along the inward normal, a sample valid when its first hit is on the other
+    set. Reports min_m (both directions), min_ab_m, min_ba_m, the area-weighted p05_m, violating_area_ratio (valid
+    area thinner than target_m, None without a target), the sample account and the argmin location."""
+    rep = {"status": "error", "reason_id": None, "detail": "", "tags": [None, None], "n": n, "band": band,
+           "target_m": target_m, "min_m": None, "min_ab_m": None, "min_ba_m": None, "p05_m": None,
+           "violating_area_ratio": None, "account": None, "argmin": None}
+    try:
+        for t in (tag_a, tag_b):
+            if (not isinstance(t, dict) or not isinstance(t.get("name"), str) or not _NAME_RE.fullmatch(t["name"])
+                    or not isinstance(t.get("faces"), (list, tuple)) or not t["faces"]
+                    or not all(isinstance(f, cq.Face) for f in t["faces"])):
+                rep.update(status="refused", reason_id="MEAS-EMPTY",
+                           detail="a tag is not {name, faces} with at least one cq.Face")
+                return rep
+        rep["tags"] = [tag_a["name"], tag_b["name"]]
+        solids = shape.Solids()
+        if len(solids) != 1:
+            rep.update(status="refused", reason_id="MEAS-NOSOLID" if not solids else "MEAS-MULTISOLID",
+                       detail="the shape holds %d solids; a ray field is cast in one" % (len(solids),))
+            return rep
+        own = shape.Faces()
+        ia, ib = _face_indices(own, tag_a["faces"]), _face_indices(own, tag_b["faces"])
+        if ia is None or ib is None:
+            rep.update(status="refused", reason_id="MEAS-COVER",
+                       detail="a selected face is not a face of the solid, or is selected twice")
+            return rep
+        bb = Bnd_Box()
+        BRepBndLib.AddOptimal_s(solids[0].wrapped, bb, False, False)
+        w_min = RAY_W_MIN_REL * math.sqrt(bb.SquareExtent())
+        X = IntCurvesFace_ShapeIntersector()
+        X.Load(solids[0].wrapped, RAY_TOL)
+        acc = {"candidate": 0, "banded": 0, "outside": 0, "selected": 0, "valid": 0, "no_normal": 0, "no_hit": 0,
+               "other_face": 0, "selected_area_m2": 0.0}
+        ab, ba = [], []
+        _ray_cast(X, own, ia, ib, tag_a["name"], n, band, w_min, acc, ab)
+        _ray_cast(X, own, ib, ia, tag_b["name"], n, band, w_min, acc, ba)
+        total = sum(gprop(own[k], "area")[0] for k in ia + ib)
+        sel_area = acc.pop("selected_area_m2")
+        acc["invalid"] = acc["no_normal"] + acc["no_hit"] + acc["other_face"]
+        acc["sampled_area_ratio"] = sel_area / total
+        rep["account"] = acc
+        rep["status"] = "ok"
+        rep["min_ab_m"] = min(q[0] for q in ab) if ab else None
+        rep["min_ba_m"] = min(q[0] for q in ba) if ba else None
+        allq = ab + ba
+        if not allq:
+            rep["detail"] = "no valid sample: no normal ray from either set reaches the other"
+            return rep
+        vals = np.array([q[0] for q in allq])
+        wts = np.array([q[1] for q in allq])
+        order = np.argsort(vals, kind="stable")
+        cum = np.cumsum(wts[order])
+        p = int(np.searchsorted(cum, cum[-1] * RAY_P, side="left"))
+        best = allq[int(order[0])]
+        rep["min_m"] = float(best[0])
+        rep["p05_m"] = float(vals[order][min(p, len(vals) - 1)])
+        if target_m is not None:
+            rep["violating_area_ratio"] = float(wts[vals < target_m].sum() / wts.sum())
+        rep["argmin"] = {"from": best[2], "face_index": best[3], "uv": [best[4], best[5]], "point_m": best[6],
+                         "hit_m": best[7]}
+        return rep
+    except Exception as e:
+        rep.update(status="error", reason_id="MEAS-ERROR", detail=("%s: %s" % (type(e).__name__, e))[:300])
+        return rep
+
+
+def wall_min_tagged(shape, tag_a, tag_b, feature=None, n_ray=RAY_N):
+    """3-D minimum wall between two COMPLETE tag selections of one solid (docs/16a D-9): MEAS-COVER, BRepExtrema,
+    MEAS-TOUCH, then the ray-field cross-check MEAS-XCHECK. An untagged set is refused MEAS-3D-WALL."""
+    method = "BRepExtrema_DistShapeShape between complete tagged face sets, BRep normal-ray cross-check"
+    try:
+        if not _tag_ok(tag_a) or not _tag_ok(tag_b):
+            return _refused("wall_min_tagged", "m", method, "MEAS-3D-WALL",
+                            "an untagged set: a 3-D wall distance is measured only between complete tagged face "
+                            "sets {name, faces, area_m2} (docs/16a D-9); a revolved wall is meridian_min_wall",
+                            feature)
+        where = (tag_a["name"], tag_b["name"])
+        if not tag_a["faces"] or not tag_b["faces"]:
+            return _refused("wall_min_tagged", "m", method, "MEAS-EMPTY", "a tag selects no face", feature, where)
+        own = shape.Faces()
+        idx, rels = [], []
+        for t in (tag_a, tag_b):
+            i, rel, why = _cover(own, t)
+            if i is None:
+                return _refused("wall_min_tagged", "m", method, "MEAS-COVER", why, feature, where)
+            idx.append(i)
+            rels.append(rel)
+        d = BRepExtrema_DistShapeShape(cq.Compound.makeCompound([own[k] for k in idx[0]]).wrapped,
+                                       cq.Compound.makeCompound([own[k] for k in idx[1]]).wrapped)
+        d.Perform()
+        if not d.IsDone():
+            return _error("wall_min_tagged", "m", method, "MEAS-ERROR", "BRepExtrema_DistShapeShape not done",
+                          feature, where)
+        ext = d.Value()
+        if not ext > TOUCH_TOL:
+            return _refused("wall_min_tagged", "m", method, "MEAS-TOUCH",
+                            "the tagged sets %s and %s touch: BRepExtrema %.3g m is not above %.0e m, and distance 0 "
+                            "is not a wall" % (where[0], where[1], ext, TOUCH_TOL), feature, where)
+        rf = wall_ray_field(shape, tag_a, tag_b, n=n_ray)
+        if rf["status"] != "ok":
+            return _refused("wall_min_tagged", "m", method, rf["reason_id"], rf["detail"], feature, where)
+        acc = rf["account"]
+        if rf["min_m"] is None:
+            return _refused("wall_min_tagged", "m", method, "MEAS-XCHECK",
+                            "BRepExtrema %.12g m, but no normal ray from either set reaches the other outside the band "
+                            "(%d selected samples, %d on another face)" % (ext, acc["selected"], acc["other_face"]),
+                            feature, where)
+        lo, hi = ext - RAY_XCHECK_ABS, ext * (1.0 + RAY_XCHECK_REL)
+        if not lo <= rf["min_m"] <= hi:
+            return _refused("wall_min_tagged", "m", method, "MEAS-XCHECK",
+                            "BRepExtrema %.12g m vs ray-field minimum %.12g m outside [%.12g, %.12g] m (n %d, band %g)"
+                            % (ext, rf["min_m"], lo, hi, n_ray, RAY_BAND), feature, where)
+        return _ok("wall_min_tagged", ext, "m", method, feature=feature, where=where,
+                   detail="ray min %.12g m over %d valid samples (n %d, band %g); cover rel %+.2e %+.2e"
+                   % (rf["min_m"], acc["valid"], n_ray, RAY_BAND, rels[0], rels[1]))
+    except Exception as e:
+        return _error("wall_min_tagged", "m", method, "MEAS-ERROR", ("%s: %s" % (type(e).__name__, e))[:300], feature)
+
+
 PRIMITIVES = {"cylinder_radius": cylinder_radius, "cone_semi_angle": cone_semi_angle, "volume": volume,
               "diameter_at_plane": diameter_at_plane, "area_ratio": area_ratio,
               "extent_along_axis": extent_along_axis, "plane_distance": plane_distance,
               "meridian_min_wall": meridian_min_wall, "slope_max": slope_max,
               "curvature_radius_min": curvature_radius_min, "n_solids": n_solids, "valid": valid,
               "watertight": watertight, "axis_x": axis_x, "units_m": units_m,
-              "section_at_plane": section_at_plane}
+              "section_at_plane": section_at_plane, "wall_min_tagged": wall_min_tagged}
 
 assert set(PRIMITIVES) == set(U_MEAS), "the primitive registry and U_MEAS must name the same set"
 
@@ -864,8 +1093,40 @@ def _fx_arc():
     return cq.Edge.makeCircle(0.05, V(0, 0, 0), V(0, 0, 1), 10, 80)
 
 
+def _fx_tag(shape, name, idx):
+    """A geom.json-style face-tag row made the way export.tag_table makes it (index list, summed adaptive area)."""
+    fs = shape.Faces()
+    return {name: {"index": list(idx), "area_m2": sum(gprop(fs[k], "area")[0] for k in idx)}}
+
+
+def _fx_tilted_tube():
+    """A tube of radii 10 and 12.5 mm, 60 mm long, tilted 30 deg about y and 20 deg about z: wall 2.5 mm."""
+    tube = cq.Workplane("XY").circle(0.0125).circle(0.010).extrude(0.06).val()
+    tube = tube.rotate(V(0, 0, 0), V(0, 1, 0), 30).rotate(V(0, 0, 0), V(0, 0, 1), 20)
+    rad = [(k, BRepAdaptor_Surface(f.wrapped).Cylinder().Radius()) for k, f in enumerate(tube.Faces())
+           if f.geomType() == "CYLINDER"]
+    rows = dict(_fx_tag(tube, "inner", [k for k, r in rad if abs(r - 0.010) < 1e-12]),
+                **_fx_tag(tube, "outer", [k for k, r in rad if abs(r - 0.0125) < 1e-12]))
+    return tube, rows
+
+
+def _fx_ramp(z_top=None):
+    """Two slanted faces z = x tan 50 deg and 3 mm above it (x 0..20 mm, y 0..40 mm): wall 3 cos 50 deg mm.
+    With z_top = (z0, z1) the top face runs from z0 at x = 0 to z1 at x = 20 mm above a flat bottom instead."""
+    if z_top is None:
+        t = math.tan(math.radians(50))
+        pts = [(0, 0), (0.02, 0.02 * t), (0.02, 0.02 * t + 0.003), (0, 0.003)]
+    else:
+        pts = [(0, 0), (0.02, 0), (0.02, z_top[1]), (0, z_top[0])]
+    body = cq.Workplane("XZ").polyline(pts).close().extrude(-0.04).val()
+    fs = body.Faces()
+    sl = [k for k, f in enumerate(fs) if abs(f.normalAt().z) > 1e-9]
+    sl.sort(key=lambda k: fs[k].Center().z)
+    return body, dict(_fx_tag(body, "lower", sl[:1]), **_fx_tag(body, "upper", sl[1:]))
+
+
 def selftest():
-    """GC-1: every primitive against an analytic answer; 34 [ok] lines, then SELFTEST PASS."""
+    """GC-1: every primitive against an analytic answer; 43 [ok] lines, then SELFTEST PASS."""
     seen = []
 
     def keep(rec):
@@ -1359,6 +1620,137 @@ def selftest():
     assert rint["status"] == "error" and rint["reason_id"] == "MEAS-ERROR", "M34 %r" % (rint,)
     print("[ok] section refusals: 9 bad planes MEAS-BADPLANE, a face MEAS-NOSOLID, two solids MEAS-MULTISOLID, "
           "a non-shape MEAS-ERROR")
+    # (M35)
+    ttube, trows = _fx_tilted_tube()
+    tin, tout = tag_faces(ttube, trows, "inner"), tag_faces(ttube, trows, "outer")
+    rt = keep(wall_min_tagged(ttube, tin, tout))
+    rt2 = keep(run("wall_min_tagged", ttube, tin, tout))
+    assert rt["status"] == "ok" and rt["where"] == ["inner", "outer"] and rt == rt2, "M35 %r" % (rt,)
+    err_t = abs(rt["value"] - 0.0025)
+    assert err_t <= 1e-12, "M35 tilted tube err %.3e > 1e-12 m" % (err_t,)
+    ft = wall_ray_field(ttube, tin, tout)
+    err_ab, err_ba = abs(ft["min_ab_m"] - 0.0025), abs(ft["min_ba_m"] - 0.0025)
+    assert max(err_ab, err_ba) <= 1e-12, "M35 ray field from both sides %.3e %.3e > 1e-12 m" % (err_ab, err_ba)
+    print("[ok] wall_min_tagged tilted tube: extrema err %.1e m vs t = 2.5 mm, ray field from both sides err "
+          "%.1e / %.1e m (direct and run)" % (err_t, err_ab, err_ba))
+
+    # (M36)
+    ramp, rrows = _fx_ramp()
+    rr = keep(wall_min_tagged(ramp, tag_faces(ramp, rrows, "lower"), tag_faces(ramp, rrows, "upper")))
+    truth_r = 0.003 * math.cos(math.radians(50))
+    assert abs(truth_r - 1.928362829e-3) <= 1e-12, "M36 3 cos 50 deg %.15g" % (truth_r,)
+    assert rr["status"] == "ok", "M36 %r" % (rr,)
+    err_r = abs(rr["value"] - truth_r)
+    assert err_r <= 1e-12, "M36 ramp err %.3e > 1e-12 m" % (err_r,)
+    print("[ok] wall_min_tagged ramp: %.9f mm, err %.1e m vs 3 cos 50 deg = 1.928362829 mm"
+          % (rr["value"] * 1e3, err_r))
+
+    # (M37)
+    tb = trap.build()
+    tfs = tb.Faces()
+    lim = {"REVOLUTION": trap.RI + trap.W / 2, "CYLINDER": trap.RE + trap.W / 2}
+    wet_k = [k for k, f in enumerate(tfs) if f.geomType() in lim and f.BoundingBox().ymax < lim[f.geomType()]]
+    out_k = [k for k, f in enumerate(tfs) if f.geomType() in lim and k not in wet_k]
+    assert len(wet_k) == 2 and len(out_k) == 2, "M37 trap faces %r %r" % (wet_k, out_k)
+    grows = dict(_fx_tag(tb, "wetted", wet_k), **_fx_tag(tb, "outer", out_k))
+    twet, tout2 = tag_faces(tb, grows, "wetted"), tag_faces(tb, grows, "outer")
+    rtr = keep(wall_min_tagged(tb, twet, tout2))
+    assert rtr["status"] == "ok" and rtr["where"] == ["wetted", "outer"], "M37 %r" % (rtr,)
+    err_tr = abs(rtr["value"] - 1.8758968327e-3)
+    assert err_tr <= 1e-8, "M37 trap err %.3e > 1e-8 m vs the dense 2-D truth" % (err_tr,)
+    print("[ok] wall_min_tagged trap complete tagged sets: %.12f mm, err %.1e m vs the dense 2-D truth 1.8758968327 mm"
+          % (rtr["value"] * 1e3, err_tr))
+
+    # (M38)
+    cyl_w = [tfs[k] for k in wet_k if tfs[k].geomType() == "CYLINDER"]
+    cyl_o = [tfs[k] for k in out_k if tfs[k].geomType() == "CYLINDER"]
+    d_line = BRepExtrema_DistShapeShape(cq.Compound.makeCompound(cyl_w).wrapped,
+                                        cq.Compound.makeCompound(cyl_o).wrapped)
+    d_line.Perform()
+    assert abs(d_line.Value() - 0.003) <= 1e-12, "M38 exit-line extrema %.15g" % (d_line.Value(),)
+    bad = [dict(twet, faces=cyl_w), dict(twet, faces=twet["faces"] + cyl_w), dict(twet, faces=[tin["faces"][0]])]
+    for tg in bad:
+        rc = keep(wall_min_tagged(tb, tg, dict(tout2, faces=cyl_o)))
+        assert rc["status"] == "refused" and rc["reason_id"] == "MEAS-COVER" and rc["value"] is None, "M38 %r" % (rc,)
+    print("[ok] trap exit-line faces only refused MEAS-COVER (their extrema reads the false %.12f mm); a face twice "
+          "and a foreign face refused MEAS-COVER" % (d_line.Value() * 1e3,))
+
+    # (M39)
+    b1, b2 = cq.Solid.makeBox(0.01, 0.01, 0.01), cq.Solid.makeBox(0.01, 0.01, 0.01, pnt=V(0.01, 0, 0))
+    bb2 = cq.Compound.makeCompound([b1, b2])
+    ball = dict(_fx_tag(bb2, "left", range(6)), **_fx_tag(bb2, "right", range(6, 12)))
+    rb = keep(wall_min_tagged(bb2, tag_faces(bb2, ball, "left"), tag_faces(bb2, ball, "right")))
+    top = [k for k, f in enumerate(b1.Faces()) if abs(f.Center().z - 0.01) < 1e-12]
+    side = [k for k, f in enumerate(b1.Faces()) if abs(f.Center().x) < 1e-12]
+    b1rows = dict(_fx_tag(b1, "top", top), **_fx_tag(b1, "side", side))
+    re_ = keep(wall_min_tagged(b1, tag_faces(b1, b1rows, "top"), tag_faces(b1, b1rows, "side")))
+    for rx in (rb, re_):
+        assert rx["status"] == "refused" and rx["reason_id"] == "MEAS-TOUCH" and rx["value"] is None, "M39 %r" % (rx,)
+    print("[ok] two touching boxes refused MEAS-TOUCH; two faces sharing an edge refused MEAS-TOUCH")
+
+    # (M40)
+    fr = wall_ray_field(tb, twet, tout2)
+    a40 = fr["account"]
+    ext = rtr["value"]
+    assert fr["status"] == "ok" and ext <= fr["min_m"] <= ext * (1 + 5e-4), "M40 ray min %r vs %r" % (fr["min_m"], ext)
+    assert (a40["candidate"] == 4 * 81 * 81 == a40["banded"] + a40["outside"] + a40["selected"]
+            and a40["selected"] == a40["valid"] + a40["invalid"]
+            and a40["invalid"] == a40["no_normal"] + a40["no_hit"] + a40["other_face"]), "M40 account %r" % (a40,)
+    assert fr["argmin"]["face_index"] in wet_k + out_k and fr["p05_m"] >= fr["min_m"], "M40 %r" % (fr["argmin"],)
+    print("[ok] ray field trap 81 x 81: min %.6f mm in [extrema, extrema (1 + 5e-4)] (rel %+.2e), p05 %.6f mm, "
+          "%d valid of %d candidates, sampled area ratio %.4f" % (fr["min_m"] * 1e3, fr["min_m"] / ext - 1,
+                                                                  fr["p05_m"] * 1e3, a40["valid"], a40["candidate"],
+                                                                  a40["sampled_area_ratio"]))
+
+    # (M41)
+    f3, f2 = wall_ray_field(ttube, tin, tout, target_m=0.003), wall_ray_field(ttube, tin, tout, target_m=0.002)
+    a41 = f3["account"]
+    ratio = (77 / 81) ** 2
+    assert (a41["candidate"] == 2 * 81 * 81 and a41["selected"] == a41["valid"] == 2 * 77 * 77
+            and a41["banded"] == 2 * (81 * 81 - 77 * 77) and a41["outside"] == 0), "M41 account %r" % (a41,)
+    assert abs(a41["sampled_area_ratio"] / ratio - 1) <= 1e-12, "M41 sampled area ratio %r" % (a41,)
+    assert abs(f3["p05_m"] - 0.0025) <= 1e-12, "M41 p05 %r" % (f3["p05_m"],)
+    assert f3["violating_area_ratio"] == 1.0 and f2["violating_area_ratio"] == 0.0, "M41 violating %r %r" % (
+        f3["violating_area_ratio"], f2["violating_area_ratio"])
+    assert ft["violating_area_ratio"] is None and set(f3["argmin"]) == {"from", "face_index", "uv", "point_m",
+                                                                        "hit_m"}, "M41 %r" % (f3["argmin"],)
+    print("[ok] ray field report on the tube: p05 2.5 mm, violating area 1 at 3 mm and 0 at 2 mm, sampled area "
+          "ratio (77/81)^2, account %d = %d banded + %d valid" % (a41["candidate"], a41["banded"], a41["valid"]))
+
+    # (M42)
+    taper, prow = _fx_ramp(z_top=(0.003, 0.001))
+    tl, tu = tag_faces(taper, prow, "lower"), tag_faces(taper, prow, "upper")
+    rx1 = keep(wall_min_tagged(taper, tl, tu))
+    fx1 = wall_ray_field(taper, tl, tu)
+    pb = cq.Solid.makeBox(0.04, 0.03, 0.02).cut(cq.Solid.makeBox(0.0345, 0.025, 0.02, pnt=V(0.0015, 0.002, 0.0025)))
+    pk = [k for k, f in enumerate(pb.Faces()) if f.geomType() == "PLANE" and abs(abs(f.normalAt().x) - 1) < 1e-12]
+    px0 = [k for k in pk if abs(pb.Faces()[k].Center().x) < 1e-12]
+    px1 = [k for k in pk if abs(pb.Faces()[k].Center().x - 0.036) < 1e-12]
+    prows = dict(_fx_tag(pb, "outside", px0), **_fx_tag(pb, "pocket", px1))
+    rx2 = keep(wall_min_tagged(pb, tag_faces(pb, prows, "outside"), tag_faces(pb, prows, "pocket")))
+    fx2 = wall_ray_field(pb, tag_faces(pb, prows, "outside"), tag_faces(pb, prows, "pocket"))
+    for rx in (rx1, rx2):
+        assert rx["status"] == "refused" and rx["reason_id"] == "MEAS-XCHECK" and rx["value"] is None, "M42 %r" % (rx,)
+    assert fx1["min_m"] > 0.001 * (1 + 5e-4) and "BRepExtrema 0.001 m" in rx1["detail"], "M42 taper %r" % (fx1,)
+    assert (fx2["min_m"] is None and fx2["account"]["valid"] == 0
+            and fx2["account"]["other_face"] == fx2["account"]["selected"] > 0), "M42 pocket %r" % (fx2,)
+    print("[ok] MEAS-XCHECK: a taper whose 1 mm minimum sits in the band (ray min %.6f mm), and a pocket pair no ray "
+          "joins (%d rays hit another face)" % (fx1["min_m"] * 1e3, fx2["account"]["other_face"]))
+
+    # (M43)
+    two = cq.Compound.makeCompound([ttube, ttube.translate(V(0.1, 0, 0))])
+    un = [keep(wall_min_tagged(ttube, tin["faces"], tout["faces"])), keep(wall_min_tagged(ttube, {"name": "inner",
+          "faces": tin["faces"]}, tout)), keep(wall_min_tagged(ttube, dict(tin, area_m2=True), tout)),
+          keep(run("wall_distance_3d", tin["faces"], tout["faces"]))]
+    assert all(r["status"] == "refused" and r["reason_id"] == "MEAS-3D-WALL" and r["value"] is None for r in un), (
+        "M43 untagged %r" % (un,))
+    rem = keep(wall_min_tagged(ttube, dict(tin, faces=[]), tout))
+    rms = keep(wall_min_tagged(two, tin, tout))
+    assert rem["status"] == "refused" and rem["reason_id"] == "MEAS-EMPTY", "M43 empty %r" % (rem,)
+    assert rms["status"] == "refused" and rms["reason_id"] == "MEAS-MULTISOLID", "M43 two solids %r" % (rms,)
+    print("[ok] untagged sets refused MEAS-3D-WALL four ways (face lists, no area, a bool area, wall_distance_3d); "
+          "an empty tag MEAS-EMPTY; two solids MEAS-MULTISOLID")
+
     # (M21)
     bad = [r for r in seen if schema.errors(r, "cad-measure/1") != []]
     statuses = set(r["status"] for r in seen)

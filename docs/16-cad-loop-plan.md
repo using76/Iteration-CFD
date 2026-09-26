@@ -147,6 +147,8 @@ Seven facts from this table decide the shape of the plan.
 2. **A measurement of the wrong definition passes silently.** Our own radial-wall check passed a 0.53 mm lip, and
    3-D BRepExtrema passed a 1.876 mm wall as 3.000 mm. Every primitive gates only after an analytic-truth self-test,
    and 3-D surface-to-surface wall distance on freeform surfaces is a refused method.
+   3-D BRepExtrema between COMPLETE tagged face sets is exact (1.875896831886508 mm on the trap); the 3.000
+   came from selecting only the line edge. D-9 admits it behind a coverage guard (`measure.wall_min_tagged`, AMG-10).
 3. **Measure where the template says the feature is.** Named planes and tags are exact; sampling is off by 0.8-1.7 %.
 4. **Units must be explicit.** Every export carries a `geom.json` sidecar (units m, scale 1, axis +x), and a gate
    imports it at scale 1 and checks the span.
