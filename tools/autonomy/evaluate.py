@@ -2128,35 +2128,21 @@ def _selftest():
         assert all(c["replay"]["ok"] for c in runs7["campaigns"])
         assert rep["gates"]["G-QUAL"]["verdict"] == PASS
         assert rep["gates"]["G-DET"]["verdict"] == PASS
-        # EXPL-FIX (queued after FEAT-CONSTRAINT) makes this PASS again: the
-        # remedies end EXHAUSTED and the optimiser then abstains, so campaign.py
-        # tags the OPT-NOFEAS record (F-1-009, attempt 1, mode full) with the
-        # attempt whose run had already started; the only bad audit entries are
-        # that optimiser record, "a decision record after its run started"
-        assert rep["gates"]["G-EXPL"]["verdict"] == FAIL
-        # wherever the defect surfaces, the ONLY failing audit entries are the
-        # optimiser's decision records (OPT-NOFEAS / OPT-PICK, at F-1-009
-        # attempt 1) tagged "a decision record after its run started"; a bundle
-        # keeps only their count, with every other audit group clean
-        bad_names = [c["name"] for c in runs7["campaigns"]
-                     if not rep["gates"]["G-EXPL"]["per_campaign"][c["name"]]["ok"]]
-        assert "full" in bad_names, bad_names
-        for c in runs7["campaigns"]:
-            if c["name"] not in bad_names:
-                continue
-            su = baseline.read_bundle(
-                os.path.join(rep_dir, c["bundle"]["file"]))["summary"]["audit"]
-            assert su["ok"] is False and su["record_order_bad"] >= 1, su
-            assert su["n_valid"] == su["n_rows"] and su["time_reversed"] == 0 \
-                and su["trigger_mismatch"] == 0 and su["prediction_late"] == 0 \
-                and su["untemplated"] == [], su
-            cd = os.path.join(work7, c["name"])
-            au = explain.audit(campaign.load_rows(cd), campaign.load_records(cd))
-            bad = au["record_order"]["bad"]
-            assert bad and all(
-                b["rule_id"] in ("OPT-NOFEAS", "OPT-PICK")
-                and b["why"] == "a decision record after its run started"
-                for b in bad), bad
+        # EXPL-FIX: the optimiser records written after the remedies' terminal
+        # on a geometry's last attempt end the geometry (explain.ends_geometry),
+        # so every campaign's audit is clean and G-EXPL passes
+        assert rep["gates"]["G-EXPL"]["verdict"] == PASS, rep["gates"]["G-EXPL"]
+        assert all(rep["gates"]["G-EXPL"]["per_campaign"][c["name"]]["ok"]
+                   for c in runs7["campaigns"]), rep["gates"]["G-EXPL"]
+        cd = os.path.join(work7, "full")
+        rows_f = campaign.load_rows(cd)
+        recs_f = campaign.load_records(cd)
+        au = explain.audit(rows_f, recs_f)
+        assert au["ok"] and au["record_order"]["bad"] == [], au["record_order"]
+        last = max(r["attempt"] for r in rows_f if r["geometry_id"] == "F-1-009")
+        tags = recs_f["F-1-009"]
+        assert any(e and t["record"]["rule_id"] == "OPT-NOFEAS" for t, e in
+                   zip(tags, explain.ends_geometry(tags, last))), tags
         assert rep["systems"]["b0-template"]["failures"] == 4
         assert rep["gates"]["G-FID"]["verdict"] == UNDECIDED
         assert rep["systems"]["full"]["n"] == 4

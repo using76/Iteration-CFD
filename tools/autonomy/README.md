@@ -650,6 +650,16 @@ the edit targeted, before -> after, attempt n-1 -> n, "; unchanged" when it did 
 terminal card). The text has no clock and no digit from a template: every number is grounded in its
 rows (`ungrounded`, the §C L5 lint).
 
+An optimiser record written after the remedies' terminal on the last attempt (an OPT-NOFEAS,
+OPT-PLANE or OPT-DISABLED abstain, or an OPT-PICK that preflight's veto refused) ends the
+geometry: `ends_geometry` names it, `END_TEMPLATES` gives it one end-of-geometry text,
+`explain_geometry` renders it as an `end` line after the terminal card with that text appended,
+and `audit` checks it against its run's END (`END_WHY` when it is earlier) instead of the
+pre-run rule; before EXPL-FIX (2026-09-26) it was reported as "a decision record after its run started"
+(AM-16's G-EXPL miss, 63 records; AM-14's rounds 63 / 56 / 79 / 65 / 63), and the rounds now
+audit clean. campaign.py and every committed bundle are unchanged, and AM-16's committed
+EVAL.json keeps its recorded G-EXPL FAIL (it is the held-out result as run).
+
 `--summary` takes the FINAL row (highest attempt) of each geometry and reports, per family and
 stratum and per family overall: MFR and strict-failure rate with Clopper-Pearson 95 % intervals,
 BLC_8/BLC_full means, median cells, mean attempts, capability-limited count.
@@ -666,7 +676,9 @@ record on the attempt its edit produced, the terminal record on the last attempt
 of a rules attempt 1 as the last applying rule with edits (the fixture's convention, R-WIN on
 D-1-002), and write rows that `explain.py --audit` passes. AM-13 / AM-14 / AG-5 — every new rule id
 (prefixes PR, OPT, LLM) needs a TEMPLATES row, or `explain.py --selftest` fails by design. AM-16 —
-run `audit` on every campaign row and put `summarise` per family and stratum in the results page.
+run `audit` on every campaign row and put `summarise` per family and stratum in the results
+page. A new layer that writes a record after the terminal needs an `END_TEMPLATES` row and an
+`ends_geometry` case.
 
 ## campaign.py — the campaign runner
 
@@ -981,6 +993,7 @@ rise is honest: the fix is sought in snap itself (AM-L), not in switching the at
     python tools/autonomy/explain.py --rows ROWS.jsonl [--records R.json] [--geometry ID] [--json]   # per-geometry text
     python tools/autonomy/explain.py --summary --rows ROWS.jsonl --meta META.json [--json]           # the campaign summary
     python tools/autonomy/explain.py --audit --rows ROWS.jsonl [--records R.json]                    # G-EXPL on any rows
+    python tools/autonomy/explain.py --audit --bundle BUNDLE.json.gz                                 # G-EXPL on a campaign bundle
     python tools/autonomy/explain.py --gate                                                          # G-EXPL (AM-15's gate)
     python tools/autonomy/campaign.py --run --manifest tuning --mode rules --out DIR [--ids A,B] [--streams 6]   # a campaign
     python tools/autonomy/campaign.py --summary --out DIR | --replay --out DIR | --compare DIR_A DIR_B         # read one back

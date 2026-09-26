@@ -19,7 +19,7 @@ patches, invariance, schema and speed), then preflight.py --selftest (the L0 che
 (the L1 setup rules: the worked example, the §D.3 window and fit_growth, R-DOM,
 R-PLANE on cubep and corpus boxes, R-CURV, R-GAP and R-FEAT, the R-BUDGET
 predictor and ladder, setup on five corpus rows against preflight and -dryRun,
-the whitelist, the records, determinism and the CLI), then remedies.py --selftest (the L2 remedies: the table, diagnose, the 31 probe fixtures and 33 sequences, box_sphere CAPABILITY-LIMITED after 1 try, the static scan, 600 single steps and 300 loops, the synthetic outcomes, the records, determinism, the veto and the CLI), then explain.py --selftest (the explanations: 52 templates and the static rule-id scan, the fixture records, rows and timestamps, the moved measurements, three golden geometries, the campaign summary and Clopper-Pearson, the audit, determinism and the CLI), then campaign.py --selftest (the campaign
+the whitelist, the records, determinism and the CLI), then remedies.py --selftest (the L2 remedies: the table, diagnose, the 31 probe fixtures and 33 sequences, box_sphere CAPABILITY-LIMITED after 1 try, the static scan, 600 single steps and 300 loops, the synthetic outcomes, the records, determinism, the veto and the CLI), then explain.py --selftest (the explanations: 52 templates and the static rule-id scan, the fixture records, rows and timestamps, the moved measurements, three golden geometries, the campaign summary and Clopper-Pearson, the audit, determinism, the CLI and the optimiser records that end a geometry), then campaign.py --selftest (the campaign
 runner: the modes, the two baselines, the sealed split, observe, a fake rules
 campaign, replay, the veto and the ablations, the hooks, the PID runner and
 RAM admission, the audit sample and the comparator, resume, and a live
@@ -80,7 +80,7 @@ def main():
               ("corpus/gen_thin.py", 7), ("corpus/inject.py", 7),
               ("corpus/gate.py", 7), ("corpus/split.py", 7),
               ("features.py", 11), ("preflight.py", 12), ("rules.py", 14),
-              ("remedies.py", 13), ("explain.py", 13),
+              ("remedies.py", 13), ("explain.py", 14),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 12),
               ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6))
     total = n_ok + s_ok
