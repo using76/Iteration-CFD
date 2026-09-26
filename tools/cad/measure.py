@@ -7,6 +7,10 @@
 Integral properties are adaptive (docs/16a §B.2): the idea of passing an eps to BRepGProp and keeping the returned
 error estimate is from Amagine3D (https://github.com/amagine-ai/Amagine3D, e608dc6,
 skills/text-a3d/brep_measurements.py, _surface_properties), reimplemented here; no code was copied.
+Sections on an explicit plane (islands, holes as inner wires, the cutting face recentred on the solid's projection) are an
+idea from the same Amagine3D file's measure_section, reimplemented in raw OCP; the solid is scaled to a 1e5 bounding-box
+diagonal first because the kernel's plane-surface intersection tolerance is absolute (2.09e-6 rel off in metres on the trap
+station, 1.7e-13 at 1e5); no code was copied.
 
 Usage:
   python measure.py --selftest
@@ -23,10 +27,10 @@ from scipy.optimize import minimize, minimize_scalar
 
 from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
 from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Circle, GeomAbs_Plane, GeomAbs_SurfaceOfRevolution
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Section, BRepAlgoAPI_Check
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Section, BRepAlgoAPI_Check, BRepAlgoAPI_Common
 from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
-from OCP.gp import gp_Pln, gp_Pnt, gp_Dir, gp_Vec, gp_Ax1
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_Transform
+from OCP.gp import gp_Pln, gp_Pnt, gp_Dir, gp_Vec, gp_Ax1, gp_Ax3, gp_Trsf
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
 from OCP.GProp import GProp_GProps
 from OCP.BRepGProp import BRepGProp
@@ -37,8 +41,9 @@ from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol   # selftest only
 from OCP.GCPnts import GCPnts_AbscissaPoint
 from OCP.BRep import BRep_Tool
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_EDGE
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_WIRE, TopAbs_SOLID
 from OCP.TopoDS import TopoDS
+from OCP.BRepTools import BRepTools
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -54,13 +59,15 @@ U_MEAS = {                # (kind, value): "abs" in the record's unit, "rel" tim
     "diameter_at_plane": ("abs", 1e-9), "area_ratio": ("rel", 1e-9), "extent_along_axis": ("abs", 1e-9),
     "plane_distance": ("abs", 1e-9), "meridian_min_wall": ("abs", 1e-8), "slope_max": ("rel", 1e-6),
     "curvature_radius_min": ("rel", 1e-6), "n_solids": ("abs", 0.0), "valid": ("abs", 0.0),
-    "watertight": ("abs", 0.0), "axis_x": ("abs", 0.0), "units_m": ("abs", 0.0),
+    "watertight": ("abs", 0.0), "axis_x": ("abs", 0.0), "units_m": ("abs", 0.0), "section_at_plane": ("rel", 1e-9),
 }
 REFUSED = {"wall_distance_3d": "MEAS-3D-WALL"}
 UNITS_TOL = 1e-9          # m: gmsh vs BREP x-span in geom.json (docs/16 §H.3 GC-5)
 GPROP_EPS = 1e-12         # rel eps of every adaptive integral (BRepGProp Eps overloads, GCPnts length)
 GPROP_EPS_CHECK = 1e-9    # the coarser length pass; |L(GPROP_EPS) - L(GPROP_EPS_CHECK)| / L is the length's estimate
 GPROP_REL_MAX = 1e-8      # rel: the export helpers' bound, the volume primitive's u_meas (docs/16 §E.2)
+SECTION_DIAG = 1e5        # model units: each solid is scaled to this bounding-box diagonal before the cut (the kernel's section tolerance is absolute)
+SECTION_PERP_TOL = 1e-12  # |n . u| of the unit normal and unit u axis above this is refused MEAS-BADPLANE
 
 
 def record(primitive, value, unit, u_meas, method, feature=None, where=(), status="ok", reason_id=None, detail=""):
@@ -525,12 +532,207 @@ def watertight(report, feature=None):
         return _error("watertight", "1", method, "MEAS-ERROR", ("%s: %s" % (type(e).__name__, e))[:300], feature)
 
 
+def _vec3(a):
+    """A finite non-bool 3-vector as a numpy array, or None."""
+    if not isinstance(a, (list, tuple)) or len(a) != 3:
+        return None
+    if any(isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(float(c)) for c in a):
+        return None
+    return np.array([float(c) for c in a])
+
+
+def _section_plane(p):
+    """(origin, n, u, v) of a {name, origin, normal, u} plane dict, n and u unit and perpendicular, or None."""
+    if not isinstance(p, dict):
+        return None
+    if not isinstance(p.get("name"), str) or not _NAME_RE.fullmatch(p.get("name")):
+        return None
+    origin, nv, uv = _vec3(p.get("origin")), _vec3(p.get("normal")), _vec3(p.get("u"))
+    if origin is None or nv is None or uv is None:
+        return None
+    if not np.linalg.norm(nv) > 0 or not np.linalg.norm(uv) > 0:
+        return None
+    n, u = nv / np.linalg.norm(nv), uv / np.linalg.norm(uv)
+    if abs(float(np.dot(n, u))) > SECTION_PERP_TOL:
+        return None
+    return origin, n, u, np.cross(n, u)
+
+
+def _uv_extent(shape, d, o_s, k):
+    """(lo, hi) in metres along the unit direction d relative to o_s, by BRepExtrema distances to far planes."""
+    b = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape, b, False, False)
+    x0, y0, z0, x1, y1, z1 = b.Get()
+    cs = np.array([(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2])
+    m = 10.0 * math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2) + 1.0
+    gap = {}
+    for sgn in (-1, +1):
+        pf = cs + sgn * m * d
+        far = BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(*pf), gp_Dir(*d)), -3 * m, 3 * m, -3 * m, 3 * m).Face()
+        dd = BRepExtrema_DistShapeShape(shape, far)
+        dd.Perform()
+        if not dd.IsDone():
+            raise RuntimeError("BRepExtrema not done")
+        gap[sgn] = dd.Value()
+    base = float(np.dot(cs - o_s, d))
+    return ((base - (m - gap[-1])) / k, (base + (m - gap[1])) / k)
+
+
+def _section_islands(solid, origin, n, u, diag_units):
+    """The islands of one solid cut by a planar face recentred on its projection, as a list of dicts.
+
+    solid is a TopoDS_Shape of one solid; diag_units is SECTION_DIAG in production and None for the unscaled
+    selftest cut (k = 1). The transform copies, so the caller's solid is never modified.
+    """
+    b = Bnd_Box()
+    BRepBndLib.AddOptimal_s(solid, b, False, False)
+    x0, y0, z0, x1, y1, z1 = b.Get()
+    c = np.array([(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2])
+    diag = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2)
+    k = 1.0 if diag_units is None else diag_units / diag
+    t = gp_Trsf()
+    t.SetScale(gp_Pnt(*c), k)
+    s = BRepBuilderAPI_Transform(solid, t, True).Shape()
+    o_s = c + k * (origin - c)
+    p0 = c - np.dot(c - o_s, n) * n
+    h = 2.0 * k * diag
+    face = BRepBuilderAPI_MakeFace(gp_Pln(gp_Ax3(gp_Pnt(*p0), gp_Dir(*n), gp_Dir(*u))), -h, h, -h, h).Face()
+    op = BRepAlgoAPI_Common(s, face)
+    op.Build()
+    if not op.IsDone():
+        raise RuntimeError("BRepAlgoAPI_Common failed")
+    v = np.cross(n, u)
+    islands = []
+    ex = TopExp_Explorer(op.Shape(), TopAbs_FACE)
+    while ex.More():
+        f = TopoDS.Face_s(ex.Current())
+        ex.Next()
+        a_s, est = gprop(f, "area")
+        if not a_s > 0:
+            continue
+        ow = BRepTools.OuterWire_s(f)
+        holes = []
+        ew = TopExp_Explorer(f, TopAbs_WIRE)
+        while ew.More():
+            w = TopoDS.Wire_s(ew.Current())
+            ew.Next()
+            if not w.IsSame(ow):
+                holes.append(w)
+        lo, elo = gprop(ow, "length")
+        lh, elh = [], []
+        for w in holes:
+            li, ei = gprop(w, "length")
+            lh.append(li)
+            elh.append(ei)
+        umin, umax = _uv_extent(ow, u, o_s, k)
+        vmin, vmax = _uv_extent(ow, v, o_s, k)
+        islands.append({"area_m2": a_s / k ** 2, "area_est_rel": est, "outer_perimeter_m": lo / k,
+                        "hole_perimeters_m": [li / k for li in lh], "perimeter_est_rel": max([elo] + elh),
+                        "envelope_uv_m": [umin, umax, vmin, vmax]})
+    return islands
+
+
+def section_props(shape, plane):
+    """The section of one solid at an explicit {name, origin, normal, u} plane as ONE plain dict (AMG-5 reads it).
+
+    status is ok, refused or error; a plane that misses is refused MEAS-NOSECTION, never an area of 0.
+    """
+    sp = {"name": None, "origin": None, "normal": None, "u": None, "v": None, "diag_units": SECTION_DIAG,
+          "status": "error", "reason_id": None, "detail": "", "area_m2": None, "area_est_rel": None,
+          "n_islands": 0, "n_holes": 0, "outer_perimeter_m": None, "hole_perimeter_m": None,
+          "perimeter_est_rel": None, "dh_m": None, "envelope_uv_m": None, "islands": []}
+    try:
+        p = _section_plane(plane)
+        if p is None:
+            sp["status"] = "refused"
+            sp["reason_id"] = "MEAS-BADPLANE"
+            sp["detail"] = ("the plane is not a {name, origin, normal, u} dict with finite 3-vectors, "
+                            "nonzero normal and u, and u normal to the normal")
+            return sp
+        origin, n, u, v = p
+        sp["name"] = plane["name"]
+        sp["origin"] = [float(q) for q in origin]
+        sp["normal"] = [float(q) for q in n]
+        sp["u"] = [float(q) for q in u]
+        sp["v"] = [float(q) for q in v]
+        solids = shape.Solids()
+        if len(solids) == 0:
+            sp["status"] = "refused"
+            sp["reason_id"] = "MEAS-NOSOLID"
+            sp["detail"] = "the shape holds no solid"
+            return sp
+        if len(solids) > 1:
+            sp["status"] = "refused"
+            sp["reason_id"] = "MEAS-MULTISOLID"
+            sp["detail"] = ("the shape holds %d solids; a section measures one "
+                            "(summed islands of overlapping solids double count)" % (len(solids),))
+            return sp
+        islands = _section_islands(solids[0].wrapped, origin, n, u, SECTION_DIAG)
+        if not islands:
+            sp["status"] = "refused"
+            sp["reason_id"] = "MEAS-NOSECTION"
+            sp["detail"] = "the plane %s misses the solid" % (plane["name"],)
+            return sp
+        sp["islands"] = [dict({"island_index": i}, **isl) for i, isl in enumerate(islands)]
+        area = sum(isl["area_m2"] for isl in islands)
+        sp["status"] = "ok"
+        sp["area_m2"] = area
+        sp["area_est_rel"] = sum(isl["area_est_rel"] * isl["area_m2"] for isl in islands) / area
+        sp["n_islands"] = len(islands)
+        sp["n_holes"] = sum(len(isl["hole_perimeters_m"]) for isl in islands)
+        sp["outer_perimeter_m"] = sum(isl["outer_perimeter_m"] for isl in islands)
+        sp["hole_perimeter_m"] = sum(sum(isl["hole_perimeters_m"]) for isl in islands)
+        sp["perimeter_est_rel"] = max(isl["perimeter_est_rel"] for isl in islands)
+        sp["dh_m"] = 4 * area / (sp["outer_perimeter_m"] + sp["hole_perimeter_m"])
+        sp["envelope_uv_m"] = [min(isl["envelope_uv_m"][0] for isl in islands),
+                               max(isl["envelope_uv_m"][1] for isl in islands),
+                               min(isl["envelope_uv_m"][2] for isl in islands),
+                               max(isl["envelope_uv_m"][3] for isl in islands)]
+        return sp
+    except Exception as e:
+        sp["status"] = "error"
+        sp["reason_id"] = "MEAS-ERROR"
+        sp["detail"] = ("%s: %s" % (type(e).__name__, e))[:300]
+        return sp
+
+
+def section_at_plane(shape, plane, feature=None):
+    """One cad-measure/1 record of the section of one solid at an explicit plane (docs/16a §B.2, AMG-2).
+
+    The plane is explicit; islands are the positive-area faces of solid ∩ a planar face recentred on the solid's
+    projection, holes are inner wires, and the solid is scaled to SECTION_DIAG first because the kernel's
+    plane-surface intersection tolerance is absolute (in metres the trap station was 2.09e-6 rel off, at 1e5
+    1.7e-13). The in-plane envelope is measured from the input origin along u and v = normal × u by BRepExtrema to
+    far planes; a plane that misses is refused MEAS-NOSECTION, never 0.
+    """
+    method = "BRepAlgoAPI_Common with a recentred planar face at bounding-box diagonal 1e5, adaptive BRepGProp"
+    where = (plane["name"],) if _section_plane(plane) is not None else ()
+    sp = section_props(shape, plane)
+    if sp["status"] == "refused":
+        return _refused("section_at_plane", "m2", method, sp["reason_id"], sp["detail"], feature, where)
+    if sp["status"] == "error":
+        return _error("section_at_plane", "m2", method, sp["reason_id"], sp["detail"], feature, where)
+    D = ("islands %d holes %d; outer perimeter %.12g m; hole perimeter %.12g m; 4A/P %.12g m; "
+         "envelope u [%.12g, %.12g] v [%.12g, %.12g] m; eps %.0e; area estimate %.3e"
+         % (sp["n_islands"], sp["n_holes"], sp["outer_perimeter_m"], sp["hole_perimeter_m"], sp["dh_m"],
+            sp["envelope_uv_m"][0], sp["envelope_uv_m"][1], sp["envelope_uv_m"][2], sp["envelope_uv_m"][3],
+            GPROP_EPS, sp["area_est_rel"]))
+    rec = _ok("section_at_plane", sp["area_m2"], "m2", method, feature=feature, where=where, detail=D)
+    est = sp["area_est_rel"]
+    if rec["status"] == "ok" and not (est * abs(sp["area_m2"]) <= rec["u_meas"]):
+        return _refused("section_at_plane", "m2", method, "MEAS-GPROP",
+                        "eps %.0e; relative error estimate %.3e exceeds u_meas %.3e m2"
+                        % (GPROP_EPS, est, rec["u_meas"]), feature, where)
+    return rec
+
+
 PRIMITIVES = {"cylinder_radius": cylinder_radius, "cone_semi_angle": cone_semi_angle, "volume": volume,
               "diameter_at_plane": diameter_at_plane, "area_ratio": area_ratio,
               "extent_along_axis": extent_along_axis, "plane_distance": plane_distance,
               "meridian_min_wall": meridian_min_wall, "slope_max": slope_max,
               "curvature_radius_min": curvature_radius_min, "n_solids": n_solids, "valid": valid,
-              "watertight": watertight, "axis_x": axis_x, "units_m": units_m}
+              "watertight": watertight, "axis_x": axis_x, "units_m": units_m,
+              "section_at_plane": section_at_plane}
 
 assert set(PRIMITIVES) == set(U_MEAS), "the primitive registry and U_MEAS must name the same set"
 
@@ -663,7 +865,7 @@ def _fx_arc():
 
 
 def selftest():
-    """GC-1: every primitive against an analytic answer; 28 [ok] lines, then SELFTEST PASS."""
+    """GC-1: every primitive against an analytic answer; 34 [ok] lines, then SELFTEST PASS."""
     seen = []
 
     def keep(rec):
@@ -1016,6 +1218,147 @@ def selftest():
     print("[ok] gprop length: trap spline rel %+.3e vs per-span quad, arc rel %+.3e, unknown kind raises"
           % ((ln - q) / q, (la - ta) / ta))
 
+    # (M29)
+    from scipy.special import ellipe
+    from scipy.optimize import brentq
+    Ro, Ri = 0.02, 0.012
+    tube = cq.Workplane("YZ").circle(Ro).circle(Ri).extrude(0.1).val()
+    pm = {"name": "mid", "origin": [0.05, 0, 0], "normal": [1, 0, 0], "u": [0, 1, 0]}
+    sp = section_props(tube, pm)
+    rec = keep(section_at_plane(tube, pm))
+    assert rec["status"] == "ok", "M29 %r" % (rec,)
+    assert rec["value"] == sp["area_m2"] and rec["unit"] == "m2" and rec["where"] == ["mid"], "M29 %r" % (rec,)
+    assert sp["n_islands"] == 1 and sp["n_holes"] == 1, "M29 islands %r" % (sp,)
+    tr_a, tr_h, tr_o, tr_d = (math.pi * (Ro ** 2 - Ri ** 2), 2 * math.pi * Ri, 2 * math.pi * Ro, 2 * (Ro - Ri))
+    rel = (sp["area_m2"] - tr_a) / tr_a
+    relh = (sp["hole_perimeter_m"] - tr_h) / tr_h
+    relo = (sp["outer_perimeter_m"] - tr_o) / tr_o
+    reld = (sp["dh_m"] - tr_d) / tr_d
+    assert abs(rel) <= 1e-12 and abs(relh) <= 1e-12 and abs(relo) <= 1e-12 and abs(reld) <= 1e-12, (
+        "M29 tube rels %+.3e %+.3e %+.3e %+.3e > 1e-12" % (rel, relh, relo, reld))
+    env_err = max(abs(a - b) for a, b in zip(sp["envelope_uv_m"], [-Ro, Ro, -Ro, Ro]))
+    assert env_err <= 1e-12, "M29 envelope err %.3e > 1e-12 m" % (env_err,)
+    pf = {"name": "mid_far", "origin": [0.05, 7.0, -3.0], "normal": [1, 0, 0], "u": [0, 1, 0]}
+    spf = section_props(tube, pf)
+    recf = keep(section_at_plane(tube, pf))
+    assert recf["status"] == "ok", "M29 far %r" % (recf,)
+    relf = (spf["area_m2"] - tr_a) / tr_a
+    assert abs(relf) <= 1e-12, "M29 far area rel %+.3e > 1e-12" % (relf,)
+    envf = max(abs(a - b) for a, b in zip(spf["envelope_uv_m"], [-Ro - 7.0, Ro - 7.0, -Ro + 3.0, Ro + 3.0]))
+    assert envf <= 1e-11, "M29 far envelope err %.3e > 1e-11 m" % (envf,)
+    print("[ok] section tube: annulus rel %+.2e, hole perimeter rel %+.2e, outer rel %+.2e, 4A/P rel %+.2e, "
+          "envelope err %.1e m; far in-plane origin area rel %+.2e envelope err %.1e m"
+          % (rel, relh, relo, reld, env_err, relf, envf))
+
+    # (M30)
+    r = 0.01
+    cyl = cq.Workplane("YZ").circle(r).extrude(0.1).val()
+    c30, s30 = math.cos(math.radians(30)), math.sin(math.radians(30))
+    pe = {"name": "oblique", "origin": [0.05, 0, 0], "normal": [c30, s30, 0], "u": [-s30, c30, 0]}
+    a = r / c30
+    m = 1 - (r / a) ** 2
+    P = 4 * a * ellipe(m)
+    sp2 = section_props(cyl, pe)
+    rec2 = keep(section_at_plane(cyl, pe))
+    assert rec2["status"] == "ok", "M30 %r" % (rec2,)
+    assert sp2["n_islands"] == 1 and sp2["n_holes"] == 0, "M30 islands %r" % (sp2,)
+    tr_e = math.pi * r * r / c30
+    rel_e = (sp2["area_m2"] - tr_e) / tr_e
+    assert abs(rel_e) <= 1e-12, "M30 area rel %+.3e > 1e-12" % (rel_e,)
+    rel_p = (sp2["outer_perimeter_m"] - P) / P
+    assert abs(rel_p) <= 1e-9, "M30 perimeter rel %+.3e > 1e-9 vs 4a E(m)" % (rel_p,)
+    assert sp2["hole_perimeter_m"] == 0.0, "M30 hole perimeter %r" % (sp2["hole_perimeter_m"],)
+    env_e = max(abs(x - y) for x, y in zip(sp2["envelope_uv_m"], [-a, a, -r, r]))
+    assert env_e <= 1e-12, "M30 envelope err %.3e > 1e-12 m" % (env_e,)
+    print("[ok] section 30 deg ellipse: area rel %+.2e, perimeter rel %+.2e vs 4a E(m), envelope err %.1e m"
+          % (rel_e, rel_p, env_e))
+
+    # (M31)
+    x = 0.014269
+    cc = BRepAdaptor_Curve(trap.spline(0.0).wrapped)
+    t = brentq(lambda s: cc.Value(s).X() - x, cc.FirstParameter(), cc.LastParameter(), xtol=1e-16, rtol=1e-15)
+    rs = cc.Value(t).Y()
+    truth = math.pi * ((rs + trap.W) ** 2 - rs ** 2)
+    ps = {"name": "station", "origin": [x, 0, 0], "normal": [1, 0, 0], "u": [0, 1, 0]}
+    sp3 = section_props(body, ps)
+    rec3 = keep(section_at_plane(body, ps))
+    assert rec3["status"] == "ok", "M31 %r" % (rec3,)
+    assert sp3["n_islands"] == 1 and sp3["n_holes"] == 1, "M31 islands %r" % (sp3,)
+    rel_t = (sp3["area_m2"] - truth) / truth
+    assert abs(rel_t) <= 1e-9, "M31 area rel %+.3e > 1e-9" % (rel_t,)
+    rel_hp = (sp3["hole_perimeter_m"] - 2 * math.pi * rs) / (2 * math.pi * rs)
+    assert abs(rel_hp) <= 1e-9, "M31 hole perimeter rel %+.3e > 1e-9" % (rel_hp,)
+    raw = _section_islands(body.Solids()[0].wrapped, np.array([x, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0]), None)
+    rel_raw = sum(i["area_m2"] for i in raw) / truth - 1
+    assert abs(rel_raw) > 1e-7, "M31 the fixture no longer discriminates the scale step: rel %+.3e" % (rel_raw,)
+    po = {"name": "oblique_trap", "origin": [0.02, 0, 0], "normal": [c30, 0, s30], "u": [0, 1, 0]}
+    spo = section_props(body, po)
+    assert spo["status"] == "ok", "M31 oblique %r" % (spo,)
+    print("[ok] section trap x 14.269 mm: area rel %+.2e, hole perimeter rel %+.2e vs the spline radius; "
+          "unscaled cut rel %+.2e (misses > 1e-7); oblique 30 deg %.9f mm2"
+          % (rel_t, rel_hp, rel_raw, spo["area_m2"] * 1e6))
+
+    # (M32)
+    pmer = {"name": "meridian", "origin": [0, 0, 0], "normal": [0, 0, 1], "u": [1, 0, 0]}
+    truth_m = 2 * trap.W * (trap.L + trap.LX)
+    sp4 = section_props(body, pmer)
+    rec4 = keep(section_at_plane(body, pmer))
+    assert rec4["status"] == "ok", "M32 %r" % (rec4,)
+    assert sp4["n_islands"] == 2 and sp4["n_holes"] == 0, "M32 islands %r" % (sp4,)
+    rel_m = (sp4["area_m2"] - truth_m) / truth_m
+    assert abs(rel_m) <= 1e-12, "M32 area rel %+.3e > 1e-12" % (rel_m,)
+    print("[ok] section trap meridian: 2 islands 0 holes, area rel %+.2e vs 2 W (L + LX)" % (rel_m,))
+
+    # (M33)
+    pmiss = {"name": "upstream", "origin": [-1.0, 0, 0], "normal": [1, 0, 0], "u": [0, 1, 0]}
+    rm = keep(section_at_plane(body, pmiss))
+    assert (rm["status"] == "refused" and rm["reason_id"] == "MEAS-NOSECTION" and rm["value"] is None
+            and rm["u_meas"] is None and rm["where"] == ["upstream"]), "M33 %r" % (rm,)
+    rr = keep(run("section_at_plane", body, pmiss))
+    assert (rr["status"] == "refused" and rr["reason_id"] == "MEAS-NOSECTION" and rr["value"] is None
+            and rr["u_meas"] is None and rr["where"] == ["upstream"]), "M33 %r" % (rr,)
+    spm = section_props(body, pmiss)
+    assert (spm["status"] == "refused" and spm["reason_id"] == "MEAS-NOSECTION" and spm["area_m2"] is None
+            and spm["n_islands"] == 0), "M33 %r" % (spm,)
+    mod = sys.modules[__name__]
+    saved = mod.GPROP_EPS
+    try:
+        mod.GPROP_EPS = 1e-2
+        rg = keep(section_at_plane(body, ps))
+    finally:
+        mod.GPROP_EPS = saved
+    assert (rg["status"] == "refused" and rg["reason_id"] == "MEAS-GPROP" and "exceeds u_meas" in rg["detail"]
+            and rg["value"] is None), "M33 %r" % (rg,)
+    rok = keep(section_at_plane(body, ps))
+    assert rok["status"] == "ok", "M33 restored %r" % (rok,)
+    print("[ok] section x = -1 m refused MEAS-NOSECTION (direct and run), value None; eps 1e-2 refused MEAS-GPROP")
+
+    # (M34)
+    def bad_plane(p):
+        rb = keep(section_at_plane(tube, p))
+        assert (rb["status"] == "refused" and rb["reason_id"] == "MEAS-BADPLANE"
+                and rb["value"] is None), "M34 %r" % (rb,)
+
+    bad_plane(dict(pm, name="1bad"))
+    bad_plane(dict(pm, normal=[0, 0, 0]))
+    bad_plane(dict(pm, normal=[1, 0, 0], u=[1, 0, 0]))
+    bad_plane(dict(pm, normal=[1, 0, 0], u=[1e-9, 1, 0]))
+    bad_plane(dict(pm, origin=[True, 0, 0]))
+    bad_plane(dict(pm, origin=[float("nan"), 0, 0]))
+    bad_plane(dict(pm, origin=[0, 0]))
+    nb = dict(pm)
+    del nb["u"]
+    bad_plane(nb)
+    bad_plane("x")
+    rface = keep(section_at_plane(cq.Face.makePlane(0.1, 0.1), pm))
+    assert rface["status"] == "refused" and rface["reason_id"] == "MEAS-NOSOLID", "M34 %r" % (rface,)
+    rcomp = keep(section_at_plane(cq.Compound.makeCompound([tube, tube.translate(cq.Vector(0.2, 0, 0))]), pm))
+    assert rcomp["status"] == "refused" and rcomp["reason_id"] == "MEAS-MULTISOLID", "M34 %r" % (rcomp,)
+    rint = keep(section_at_plane(42, pm))
+    assert rint["status"] == "error" and rint["reason_id"] == "MEAS-ERROR", "M34 %r" % (rint,)
+    print("[ok] section refusals: 9 bad planes MEAS-BADPLANE, a face MEAS-NOSOLID, two solids MEAS-MULTISOLID, "
+          "a non-shape MEAS-ERROR")
     # (M21)
     bad = [r for r in seen if schema.errors(r, "cad-measure/1") != []]
     statuses = set(r["status"] for r in seen)
