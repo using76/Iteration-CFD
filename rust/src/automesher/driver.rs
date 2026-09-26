@@ -624,6 +624,24 @@ pub fn run(
             })
         })
         .collect();
+    // (92.62), read off the mesh the stage returns and moving nothing: the
+    // sharp length and the part of it the wall edges hold within a tenth of
+    // h_f, with the attraction on or off; null only when the feature
+    // extraction refuses the run's feature angle.
+    let feature_capture = match super::snap::feature_capture(
+        &snapped.mesh,
+        surf,
+        Some(&cast_region),
+        cfg.refinement.feature_angle_deg as Scalar,
+        (0.1 * h_f) as Scalar,
+    ) {
+        Ok(c) => json!({
+            "sharp_length_m": c.sharp_length,
+            "captured_length_m": c.captured_length,
+            "tol_m": c.tol,
+        }),
+        Err(_) => serde_json::Value::Null,
+    };
     let counts = json!({
         "n_boundary_points": snapped.report.n_boundary_points,
         "iterations": snapped.report.iterations,
@@ -643,6 +661,7 @@ pub fn run(
         "max_over_h": snapped.report.max_residual as f64 / h_f,
         "n_pinned_boundary": snapped.report.n_pinned_boundary,
         "area_ratio": area_ratio,
+        "feature_capture": feature_capture,
     });
     let log = report_lines(progress, &snapped.report.summary());
     elapsed(progress, Stage::Snap, seconds);
@@ -1753,5 +1772,52 @@ mod tests {
         let got = crate::automesher::layers::tests::castellated_goldens::mesh_sha256(&out.mesh);
         eprintln!("golden cube_config_end_to_end = {got}");
         assert_eq!(got, GOLDEN);
+    }
+
+    /// The snap row carries (92.62)'s capture of the mesh the stage returns:
+    /// the cube's 12 edges of 1 m, a tenth of the finest cell as the
+    /// tolerance, and a captured length above 0 and at most the sharp one.
+    #[test]
+    fn the_snap_row_reports_the_feature_capture() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let fc = &s["stages"][2]["feature_capture"];
+        eprintln!("cube_config feature_capture {fc}");
+        let sharp = fc["sharp_length_m"].as_f64().unwrap();
+        let got = fc["captured_length_m"].as_f64().unwrap();
+        assert!((sharp - 12.0).abs() <= 1e-12 * 12.0, "sharp {sharp}");
+        assert_eq!(fc["tol_m"].as_f64().unwrap(), 0.1 * 0.5);
+        assert!(0.0 < got && got <= sharp * (1.0 + 1e-12), "captured {got} of {sharp}");
+    }
+
+    /// With the cube declared a body its wall is the region interface, and
+    /// the capture reads the interface faces' edges: the same 12 m of sharp
+    /// length, and some of it held.
+    #[test]
+    fn a_body_run_captures_along_its_interface() {
+        let cfg = body_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let fc = &s["stages"][2]["feature_capture"];
+        eprintln!("body_config feature_capture {fc}");
+        let sharp = fc["sharp_length_m"].as_f64().unwrap();
+        let got = fc["captured_length_m"].as_f64().unwrap();
+        assert!((sharp - 12.0).abs() <= 1e-12 * 12.0, "sharp {sharp}");
+        assert!(0.0 < got && got <= sharp * (1.0 + 1e-12), "captured {got} of {sharp}");
     }
 }

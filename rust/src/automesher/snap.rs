@@ -951,6 +951,200 @@ fn sig3(v: Scalar) -> String {
 }
 
 // ==========================================================================
+//  Feature-edge capture - read off a mesh, moves nothing
+// ==========================================================================
+
+/// How much of the surface's sharp-edge length the mesh's wall edges lie
+/// along - SPEC-LIT §92.12, equation (92.62). It is read off a mesh and
+/// moves nothing, so no stage's output depends on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FeatureCapture {
+    /// The summed length of the feature edges (92.34), in metres.
+    pub sharp_length: Scalar,
+    /// Per feature edge, the length the union of its covered parameter
+    /// intervals spans, summed, in metres; never above `sharp_length`.
+    pub captured_length: Scalar,
+    /// The distance both ends of a covering wall edge lie within.
+    pub tol: Scalar,
+}
+
+/// A covering wall edge runs within this many degrees of the feature
+/// edge's direction.
+pub const CAPTURE_ANGLE_DEG: Scalar = 30.0;
+
+/// The cover test of (92.62): the parameter interval `[t0, t1]` of the
+/// segment `a`-`b` that the mesh edge `p`-`q` covers, or `None` when an end
+/// lies further than `tol` from the segment, the edge runs more than
+/// `CAPTURE_ANGLE_DEG` off the segment's direction, or either is of zero
+/// length.
+pub(crate) fn covered_interval(
+    p: Vec3,
+    q: Vec3,
+    a: Vec3,
+    b: Vec3,
+    tol: Scalar,
+) -> Option<(Scalar, Scalar)> {
+    let ab = b - a;
+    let l2 = ab.mag_sqr();
+    let pq = q - p;
+    let lpq = pq.mag();
+    if !(l2 > 0.0) || !(lpq > 0.0) {
+        return None;
+    }
+    let tp = ((p - a).dot(ab) / l2).clamp(0.0, 1.0);
+    let tq = ((q - a).dot(ab) / l2).clamp(0.0, 1.0);
+    if (p - (a + ab * tp)).mag() > tol || (q - (a + ab * tq)).mag() > tol {
+        return None;
+    }
+    let cos_min = CAPTURE_ANGLE_DEG.to_radians().cos();
+    if pq.dot(ab).abs() < cos_min * lpq * l2.sqrt() {
+        return None;
+    }
+    Some((tp.min(tq), tp.max(tq)))
+}
+
+/// The length of the union of the intervals `iv`, which it sorts in place.
+pub(crate) fn union_length(iv: &mut [(Scalar, Scalar)]) -> Scalar {
+    iv.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.total_cmp(&y.1)));
+    let mut total: Scalar = 0.0;
+    let mut cur: Option<(Scalar, Scalar)> = None;
+    for &(s, e) in iv.iter() {
+        cur = match cur {
+            Some((cs, ce)) if s <= ce => Some((cs, ce.max(e))),
+            Some((cs, ce)) => {
+                total += ce - cs;
+                Some((s, e))
+            }
+            None => Some((s, e)),
+        };
+    }
+    if let Some((cs, ce)) = cur {
+        total += ce - cs;
+    }
+    total
+}
+
+/// The faces the stage calls wall faces: a boundary face whose patch name
+/// is one of the surface's, and - with regions - an internal face between
+/// two cells of different regions.
+fn wall_face_mask(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    region_of_cell: Option<&[i32]>,
+) -> Vec<bool> {
+    let n_faces = mesh.faces.len();
+    let n_internal = mesh.neighbour.len().min(n_faces);
+    let names: HashSet<&str> = surf.patch_names.iter().map(|s| s.as_str()).collect();
+    let mut wall = vec![false; n_faces];
+    for patch in &mesh.patches {
+        if !names.contains(patch.name.as_str()) {
+            continue;
+        }
+        for j in 0..patch.size {
+            let f = n_internal + patch.start + j;
+            if f < n_faces {
+                wall[f] = true;
+            }
+        }
+    }
+    if let Some(r) = region_of_cell {
+        for f in 0..n_internal {
+            let (o, n) = (mesh.owner[f] as usize, mesh.neighbour[f] as usize);
+            if o < r.len() && n < r.len() && r[o] != r[n] {
+                wall[f] = true;
+            }
+        }
+    }
+    wall
+}
+
+/// (92.62): the sharp length of `surf` at `feature_angle_deg`, and the part
+/// of it the wall edges of `mesh` cover within `tol`. Reads; moves nothing.
+pub fn feature_capture(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    region_of_cell: Option<&[i32]>,
+    feature_angle_deg: Scalar,
+    tol: Scalar,
+) -> Result<FeatureCapture> {
+    if !(tol > 0.0) || !tol.is_finite() {
+        return Err(Error::Mesh(format!(
+            "feature capture: the tolerance must be positive and finite, got {tol}"
+        )));
+    }
+    let fs = features::extract(surf, feature_angle_deg)?;
+    let seg = |e: usize| (fs.points[fs.edges[e][0] as usize], fs.points[fs.edges[e][1] as usize]);
+    let mut out = FeatureCapture { tol, ..FeatureCapture::default() };
+    for e in 0..fs.edges.len() {
+        let (a, b) = seg(e);
+        out.sharp_length += (b - a).mag();
+    }
+    if fs.edges.is_empty() {
+        return Ok(out);
+    }
+    // Buckets of side g >= 2 tol, the segments sampled at most g apart: a
+    // point within tol of a segment is within g of a sample, so in one of
+    // the 27 buckets around that sample's.
+    let g = (2.0 * tol).max(out.sharp_length / 4.0e6);
+    let key = |p: Vec3| {
+        [(p.x / g).floor() as i64, (p.y / g).floor() as i64, (p.z / g).floor() as i64]
+    };
+    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+    for e in 0..fs.edges.len() {
+        let (a, b) = seg(e);
+        let n = (((b - a).mag() / g).ceil().max(1.0)) as usize;
+        for k in 0..=n {
+            let c = key(a + (b - a) * ((k as Scalar) / (n as Scalar)));
+            let list = grid.entry(c).or_default();
+            if list.last() != Some(&(e as u32)) {
+                list.push(e as u32);
+            }
+        }
+    }
+    let wall = wall_face_mask(mesh, surf, region_of_cell);
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    for (f, face) in mesh.faces.iter().enumerate() {
+        if wall[f] {
+            for k in 0..face.len() {
+                let (a, b) = (face[k] as u32, face[(k + 1) % face.len()] as u32);
+                edges.push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    let mut covered: Vec<Vec<(Scalar, Scalar)>> = vec![Vec::new(); fs.edges.len()];
+    let mut cand: Vec<u32> = Vec::new();
+    for &(i, j) in &edges {
+        let (p, q) = (mesh.points[i as usize], mesh.points[j as usize]);
+        let c = key(p);
+        cand.clear();
+        for dz in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if let Some(list) = grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
+                        cand.extend_from_slice(list);
+                    }
+                }
+            }
+        }
+        cand.sort_unstable();
+        cand.dedup();
+        for &e in &cand {
+            let (a, b) = seg(e as usize);
+            if let Some(iv) = covered_interval(p, q, a, b, tol) {
+                covered[e as usize].push(iv);
+            }
+        }
+    }
+    for e in 0..fs.edges.len() {
+        let (a, b) = seg(e);
+        out.captured_length += union_length(&mut covered[e]) * (b - a).mag();
+    }
+    Ok(out)
+}
+
+// ==========================================================================
 //  Tests
 // ==========================================================================
 
@@ -1958,5 +2152,119 @@ mod tests {
         eprintln!("body snapped ratio {r} castellated ratio {cr}");
         assert!(row.castellated_area > 0.0, "interface area must count");
         assert!(0.9 < r && r < 1.1, "ratio {r} not in (0.9, 1.1)");
+    }
+
+    /// The `a_cube_on_the_cell_planes_is_snapped_bit_for_bit` case, its
+    /// castellated mesh only: a cube spanning [1, 3]^3 at base size 1 and
+    /// level 0, so every wall face lies on a cube face and every wall edge
+    /// along a cube edge lies on that edge.
+    fn plane_cube_case() -> (Surface, PolyMeshRaw) {
+        let (tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 0);
+        let surf = Surface::from_soup(box_soup([1.0; 3], [3.0; 3]), vec!["cube".to_string()])
+            .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        (surf, cast.mesh)
+    }
+
+    /// On the cell planes the capture is the whole sharp length: 12 edges
+    /// of 2, every one held by the wall edges along it.
+    #[test]
+    fn the_capture_on_the_cell_planes_is_the_whole_sharp_length() {
+        let (surf, mesh) = plane_cube_case();
+        let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
+        eprintln!("plane cube capture {c:?}");
+        assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert!((c.captured_length - c.sharp_length).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert_eq!(c.tol, 0.1);
+    }
+
+    /// Pull the mesh point at the middle of one cube edge half a cell off
+    /// it, in a copy of the mesh: the two wall edges through it no longer
+    /// cover that edge, and the capture falls by exactly its length, 2.
+    #[test]
+    fn a_point_pulled_off_an_edge_uncovers_that_edge() {
+        let (surf, mut mesh) = plane_cube_case();
+        let mid = Vec3::new(2.0, 1.0, 1.0);
+        let i = (0..mesh.points.len())
+            .min_by(|&a, &b| {
+                (mesh.points[a] - mid).mag().total_cmp(&(mesh.points[b] - mid).mag())
+            })
+            .expect("points");
+        assert!((mesh.points[i] - mid).mag() <= 1e-12, "no mesh point at the edge's middle");
+        mesh.points[i] = Vec3::new(2.0, 0.5, 0.5);
+        let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
+        eprintln!("pulled point capture {c:?}");
+        assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert!((c.captured_length - 22.0).abs() <= 1e-12 * 24.0, "{c:?}");
+    }
+
+    /// A smooth sphere has no sharp length, so nothing to capture, and the
+    /// tolerance is reported as given.
+    #[test]
+    fn a_sphere_has_no_sharp_length() {
+        let (surf, cast) = sphere_case();
+        let snapped = snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+            .expect("snap");
+        let c = feature_capture(&snapped.mesh, &surf, None, 30.0, 0.025).expect("capture");
+        assert_eq!(c, FeatureCapture { sharp_length: 0.0, captured_length: 0.0, tol: 0.025 });
+    }
+
+    /// The off-lattice cube holds more of its edges with the attraction on
+    /// than with it off - the chamfer of `feature_tolerance` 0 is what the
+    /// capture exists to show. Both are printed for the record.
+    #[test]
+    fn the_attraction_raises_the_capture_on_an_off_lattice_cube() {
+        let (surf, cast) = cube_case();
+        let on = snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+            .expect("snap on");
+        let off_spec = SnapSpec { feature_tolerance: 0.0, ..SnapSpec::default() };
+        let off = snap(&cast, &surf, 1.0, 30.0, &off_spec, &thresholds()).expect("snap off");
+        let c_on = feature_capture(&on.mesh, &surf, None, 30.0, 0.05).expect("on");
+        let c_off = feature_capture(&off.mesh, &surf, None, 30.0, 0.05).expect("off");
+        eprintln!("off-lattice cube capture on {c_on:?} off {c_off:?}");
+        for c in [c_on, c_off] {
+            assert!((c.sharp_length - 12.0).abs() <= 1e-12 * 12.0, "{c:?}");
+            assert!(0.0 <= c.captured_length, "{c:?}");
+            assert!(c.captured_length <= c.sharp_length * (1.0 + 1e-12), "{c:?}");
+        }
+        assert!(c_on.captured_length > c_off.captured_length, "on {c_on:?} off {c_off:?}");
+    }
+
+    /// The union counts an overlap once and a gap not at all.
+    #[test]
+    fn the_union_counts_an_overlap_once() {
+        let mut a = vec![(0.5, 1.0), (0.0, 0.5), (0.2, 0.3)];
+        assert_eq!(union_length(&mut a), 1.0);
+        let mut b = vec![(0.5, 0.75), (0.0, 0.25)];
+        assert_eq!(union_length(&mut b), 0.5);
+        let mut c: Vec<(Scalar, Scalar)> = Vec::new();
+        assert_eq!(union_length(&mut c), 0.0);
+    }
+
+    /// The cover test on its own: both ends within `tol` AND the direction
+    /// within 30 degrees, or no cover; the interval is clamped to the
+    /// segment and ordered.
+    #[test]
+    fn the_cover_test_needs_both_ends_near_and_the_direction_along() {
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let v = |x: f64, y: f64| Vec3::new(x, y, 0.0);
+        let cov = |p: Vec3, q: Vec3| covered_interval(p, q, a, b, 0.1);
+        assert_eq!(cov(v(0.2, 0.05), v(0.6, -0.05)), Some((0.2, 0.6)));
+        assert_eq!(cov(v(0.6, -0.05), v(0.2, 0.05)), Some((0.2, 0.6)));
+        assert_eq!(cov(v(0.2, 0.05), v(0.6, 0.2)), None);
+        assert_eq!(cov(v(0.5, 0.0), v(0.5, 0.09)), None);
+        assert_eq!(cov(v(0.5, 0.0), v(0.55, 0.05)), None);
+        assert!(cov(v(0.5, 0.0), v(0.6, 0.05)).is_some());
+        assert_eq!(cov(v(-0.05, 0.0), v(0.3, 0.0)), Some((0.0, 0.3)));
+        assert_eq!(cov(v(0.3, 0.0), v(0.3, 0.0)), None);
     }
 }

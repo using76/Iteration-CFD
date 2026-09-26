@@ -26058,6 +26058,28 @@ value of zero turns the attraction off entirely, which is what the second
 validation row below runs and what makes "a surface with no feature edges is
 returned bit for bit" testable on a surface that HAS them.
 
+**Erratum (2026-09-26): half a BASE cell is not half a WALL cell.** The
+paragraph above defends `feature_tolerance = 0.5` as "the furthest a wall point
+of a cell the edge passes through can be from it". That holds for a wall at
+level 0 and at no other level: `tau` is measured in `base_size`, so at wall
+level `L` it is `2^(L-1)` wall cells - 8 of them at level 4, 32 at level 6 -
+and every point of a band that wide is sent onto the one feature line, where
+(92.31)'s guarded step halves the collapsing cells and pins their points.
+Measured on an off-lattice box (side 1.1 m at (1.03, 1.07, 1.01), base 0.5 m,
+the attraction on in every run): at level 4, `tau / h_f = 8` pins 3386 of 7492
+points, 4 pins 584, and 1 or less pins none and converges in 4-5 iterations;
+at level 3, 4 pins 84 and 2 or less pins none. At `tau = h_f / 2` the level-4
+box carries 412 points on its edges against the ~422 lattice points along its
+13.2 m of edge, and two layers are delivered over its whole 7.261 m² - the
+STL's 6 x 1.21 - where `feature_tolerance = 0` chamfers it to 7.206 m². On a
+refined wall it is the default radius that pins sharp bodies, not a limit of
+the attraction. (92.38) is NOT changed: `tau` stays
+`feature_tolerance * base_size`, because a knob that keeps its meaning is what
+every committed configuration was written against. A configuration that wants
+half a wall cell asks for it, `feature_tolerance = 0.5 * 2^-L` at the wall's
+level `L`; `tau = feature_tolerance * h_local` is the alternative this erratum
+records and does not adopt. (92.62) below is how a run reports the difference.
+
 **Where the attraction actually earns its place, and where (92.28) already
 had the answer.** A CONVEX feature seen from the fluid — the edge of a solid
 block — has an outward Voronoi wedge, and for a point inside that wedge the
@@ -26116,6 +26138,40 @@ anyway. A corner that stays unclaimed while the mesh is refined enough to
 resolve it does not occur on any case run here; if it ever does, it is visible
 in the report's corner count rather than silent.
 
+**How much of the sharp length the mesh holds.** Neither branch of (92.38)
+says afterwards whether the wall ended up ON the edges: the report's edge and
+corner counts count points, not length. The capture reads the mesh the stage
+returns and moves nothing. With `F` of (92.34) at the run's
+`feature_angle_deg`, `W` the wall edges - consecutive point pairs of the faces
+(92.27) calls wall faces, region interfaces included - `h_f = base_size /
+2^max_level` and `tol = 0.1 h_f`:
+
+```
+t_e(p)  = clamp( (p - x_a).(x_b - x_a) / |x_b - x_a|^2 , 0, 1 ),   e = (a, b) in F
+
+w = (p, q) in W covers e  iff  |p - proj_e(p)| <= tol,  |q - proj_e(q)| <= tol
+                          and  |(q - p).(x_b - x_a)| >= cos(30 deg) |q - p| |x_b - x_a|
+
+I_e             = union over the w covering e of [ min(t_e(p), t_e(q)), max(t_e(p), t_e(q)) ]
+sharp_length    = sum over e in F of |x_b - x_a|
+captured_length = sum over e in F of |I_e| |x_b - x_a|                          (92.62)
+```
+
+It is computed with the attraction on or off - a surface's sharp length does
+not depend on a knob - so `feature_tolerance = 0` reports how little of the
+edge its chamfer holds rather than nothing. A covering edge runs ALONG the
+feature edge, within 30 degrees, with both ends within `tol`: a face diagonal
+that merely ends on the edge covers nothing. The union is per feature edge,
+so two wall edges over one stretch count it once and `captured_length <=
+sharp_length` by construction. `tol` is a tenth of the finest cell, so a
+chamfer half a cell off the edge does not count; it exceeds (92.28)'s default
+dead band `eps = 1e-3 base_size` by the factor `100 / 2^max_level` - 1.56 at
+level 6 - and falls below it at level 7 and deeper, where a point the band
+left at `eps` may not count; that is recorded here rather than hidden.
+`sharp_length` is what `tools/autonomy/features.py` reports as
+`sharp_edge_length_m` for the same STL at the same angle, on a closed surface,
+the only kind it accepts.
+
 **What must hold**
 
 | Check | Expected |
@@ -26128,6 +26184,7 @@ in the report's corner count rather than silent.
 | two boundary points near one corner | at most one of them is moved onto it, by (92.39); the other takes the edge branch |
 | the mesh feature snapping returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message — the guard of (92.31) is unchanged |
 | a surface with no feature edges | `snap` returns exactly what it returned before this section, bit for bit |
+| the capture (92.62) of any run | at most the sharp length; the mesh, the report's other fields and the log are bit for bit what they are without it |
 
 **Validation**
 
@@ -26140,6 +26197,10 @@ in the report's corner count rather than silent.
 | the same case with `feature_tolerance = 0` | no point takes either branch of (92.38), the run is bit for bit the run before this section, and seven of the eight corners have no mesh point within 0.1 of them. The eighth is the one the geometry hands to (92.28) for free: the castellated block's own corner faces it up the body diagonal from 0.2 of a cell, and a point outside a CONVEX corner projects onto the corner — measured, and asserted as measured rather than as wished |
 | the snapped mesh of the cube case | no two points within 1e-9 of each other — what (92.39) buys, asserted directly rather than inferred from the gate |
 | `feat` against a linear scan over the segments | the same point and the same distance, at points beside a segment, beyond its end, and on it |
+| a cube on the cell planes, castellated | `sharp_length` is 12 times the side to 1e-12 relative, and `captured_length` equals it: every wall edge along a cube edge lies on that edge |
+| the same mesh with the point at one edge's middle pulled half a cell off it | `captured_length` falls by exactly that edge's length |
+| the off-lattice cube, the attraction on and off | the capture is larger with it on; both are printed |
+| a smooth sphere | `sharp_length` and `captured_length` are both 0 |
 
 ---
 
@@ -26784,7 +26845,9 @@ one row per surface patch, `{ "name", "stl_area_m2", "castellated_area_m2", "sna
 interfaces it assigns to the patch — before the first move and again on the points the stage returns,
 each over the patch's own surface area, and null when that area is zero. The octree row adds
 `gate_passed` and `max_non_orth_deg`, the verdict and the worst face of §92.3's measurement of the leaf
-mesh; a full run records them and does not refuse on them.
+mesh; a full run records them and does not refuse on them. The snap row also carries `feature_capture`,
+`{ "sharp_length_m", "captured_length_m", "tol_m" }`: (92.62) of §92.12 at `tol_m = 0.1 h_f`, measured on
+the points the stage returns, and null only when §92.12's extraction refuses the run's `feature_angle_deg`.
 
 The layers row of each layer patch — on the single-mesh path and in each region's `patches` — carries
 `area`, (92.50)'s `sum A_f` in m² (on a dropped patch, the input mesh's own area of the patch), and
