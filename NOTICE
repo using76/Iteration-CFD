@@ -190,9 +190,10 @@ Amagine3D (https://github.com/amagine-ai/Amagine3D, commit e608dc6)
   Copied files (docs/16a-amagine-borrow.md §J, decision D-10): the four
   functions `_missing_snapshot`, `_same_file_state`, `_hash_descriptor` and
   `stable_file_snapshot` of `skills/text-a3d/freshness_check.py` (lines 14-107
-  at e608dc6), to be copied VERBATIM into a marked block of
-  `tools/cad/common.py` by unit AMG-3, and, only if the AMG-11 brief copies it
-  rather than rewrites it, the PNG `chunk()` helper of
+  at e608dc6), copied VERBATIM into a marked block of
+  `tools/cad/common.py` by unit AMG-3 (one inserted line, marked), and, only
+  if the AMG-11 brief copies it rather than rewrites it, the PNG `chunk()`
+  helper of
   `packages/a3d-runtime/src/vision-probe.ts` (lines 18-34); each copied block
   carries Amagine3D's attribution and the mark "modified by Iteration-CFD"
   beside every changed line. Everything else docs/16a takes from Amagine3D is

@@ -4,10 +4,13 @@
 # No GPL-licensed source was consulted.
 """common.py - canonical JSON, sha256, atomic writes, fsynced jsonl and the env fingerprint of the CAD loop (docs/16 §D Reproducibility).
 
+It also holds, in one VERBATIM block, Amagine3D's four file-snapshot functions (Apache-2.0, docs/16a §J, D-10).
+
 Usage:
   python common.py --selftest
   python common.py --digest FILE
   python common.py --env
+  python common.py --upstream-diff FRESHNESS_CHECK_PY
 """
 
 import hashlib
@@ -16,10 +19,13 @@ import json
 import math
 import os
 import platform
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from hashlib import sha256
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))       # tools/cad
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -30,8 +36,19 @@ HEADER_COMMENT = ("meteor-cfd - Copyright (c) 2026 주식회사 이터레이션�
                   "Source-available, not Open Source. No GPL-licensed source was consulted.")
 DIGEST20 = "181ba7663373e3a7dfe47e1af96624dea42039939c30e678d55dc38847a4b143"
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+SNAPSHOT_BEGIN_MARK = ("# ---- BEGIN VERBATIM: Amagine3D e608dc6 skills/text-a3d/freshness_check.py:14-107"
+                       " (Apache-2.0) ----")
+SNAPSHOT_END_MARK = "# ---- END VERBATIM: Amagine3D freshness_check.py ----"
+MODIFIED_MARK = "# modified by Iteration-CFD"
+UPSTREAM_SNAPSHOT_SHA256 = "14b336f8c1a5090b1c026dc36ad796d399e9dae0b1732acec9d739b2f67d7306"
+UPSTREAM_SNAPSHOT_LINES = (14, 107)             # 1-based, inclusive, in freshness_check.py at e608dc6
+SNAPSHOT_HEADER = (
+    "# Portions copied from Amagine3D (https://github.com/amagine-ai/Amagine3D, e608dc6, skills/text-a3d/freshness_check.py),",
+    "# Copyright 2026 amagine-ai, licensed under the Apache License 2.0 (LICENSE-APACHE-2.0.amagine3d).",
+    "# Modified by Iteration-CFD: stable_file_snapshot also accepts a str path (one inserted line, marked).",
+)
 
-_USAGE = ("usage: python common.py --selftest | --digest FILE | --env"
+_USAGE = ("usage: python common.py --selftest | --digest FILE | --env | --upstream-diff FILE"
           + NL)
 
 
@@ -197,6 +214,305 @@ def read_jsonl(path: str) -> list:
         except ValueError as e:
             raise ValueError("%s:%d: %s" % (path, i, e))
     return rows
+
+
+# ---- BEGIN VERBATIM: Amagine3D e608dc6 skills/text-a3d/freshness_check.py:14-107 (Apache-2.0) ----
+# Portions copied from Amagine3D (https://github.com/amagine-ai/Amagine3D, e608dc6, skills/text-a3d/freshness_check.py),
+# Copyright 2026 amagine-ai, licensed under the Apache License 2.0 (LICENSE-APACHE-2.0.amagine3d).
+# Modified by Iteration-CFD: stable_file_snapshot also accepts a str path (one inserted line, marked).
+def _missing_snapshot() -> dict[str, object]:
+    return {
+        "exists": False,
+        "mtime_ns": None,
+        "sha256": None,
+        "size": None,
+        "stable": False,
+    }
+
+
+def _same_file_state(
+    left: os.stat_result,
+    right: os.stat_result,
+    *,
+    compare_change_time: bool = True,
+) -> bool:
+    same_change_time = (
+        left.st_ctime_ns == right.st_ctime_ns
+        if compare_change_time
+        else True
+    )
+    return (
+        stat.S_ISREG(right.st_mode)
+        and right.st_nlink == 1
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and same_change_time
+    )
+
+
+def _hash_descriptor(descriptor: int) -> str:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = sha256()
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stable_file_snapshot(path: Path) -> dict[str, object]:
+    """Hash one regular file through one descriptor and bind it to its path."""
+
+    path = path if isinstance(path, Path) else Path(path)  # modified by Iteration-CFD
+    descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return _missing_snapshot()
+        digest = _hash_descriptor(descriptor)
+        first_after = os.fstat(descriptor)
+        descriptor_stable = _same_file_state(before, first_after)
+        if os.name == "nt":
+            # Windows st_ctime is creation time, so it cannot reveal a
+            # same-size rewrite whose mtime was restored. A second read does.
+            verification_digest = _hash_descriptor(descriptor)
+            after = os.fstat(descriptor)
+            descriptor_stable = (
+                descriptor_stable
+                and digest == verification_digest
+                and _same_file_state(first_after, after)
+            )
+        else:
+            after = first_after
+        current = path.lstat()
+    except OSError:
+        return _missing_snapshot()
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    stable = descriptor_stable and _same_file_state(
+        before,
+        current,
+        # CPython 3.12 deprecated Windows st_ctime as a creation-time alias.
+        # Keep ctime protection between the two descriptor snapshots, but do
+        # not compare that value across Windows fstat/lstat implementations.
+        compare_change_time=os.name != "nt",
+    )
+    return {
+        "exists": True,
+        "mtime_ns": after.st_mtime_ns,
+        "sha256": digest if stable else None,
+        "size": after.st_size,
+        "stable": stable,
+    }
+
+
+# ---- END VERBATIM: Amagine3D freshness_check.py ----
+
+
+def snapshot_block(source_text: str) -> tuple:
+    """(header_lines, content_lines) of the one VERBATIM block (docs/16a §J): the leading lines after BEGIN that
+    start with '#' are the header, the rest up to END is the content. ValueError unless exactly one line equals
+    each mark and BEGIN comes first."""
+    lines = source_text.split("\n")
+    if lines.count(SNAPSHOT_BEGIN_MARK) != 1 or lines.count(SNAPSHOT_END_MARK) != 1:
+        raise ValueError("common.py: the SNAPSHOT BEGIN/END marks are not each there exactly once")
+    begin = lines.index(SNAPSHOT_BEGIN_MARK)
+    end = lines.index(SNAPSHOT_END_MARK)
+    if begin > end:
+        raise ValueError("common.py: the SNAPSHOT BEGIN mark does not come first")
+    rest = lines[begin + 1:end]
+    header = []
+    for line in rest:
+        if line.startswith("#"):
+            header.append(line)
+        else:
+            break
+    return header, rest[len(header):]
+
+
+def unmarked_sha256(content_lines: list) -> str:
+    """sha256 of the content lines that do NOT end with MODIFIED_MARK, each followed by LF, utf-8."""
+    kept = [l for l in content_lines if not l.rstrip().endswith(MODIFIED_MARK)]
+    return sha256(("\n".join(kept) + "\n").encode("utf-8")).hexdigest()
+
+
+def verbatim_diff(content_lines: list, upstream_lines: list) -> tuple:
+    """(ok, n_marked, diff_text). difflib.SequenceMatcher(None, upstream_lines, content_lines, autojunk=False):
+    ok iff every 'replace' and 'insert' opcode's content-side lines all end with MODIFIED_MARK and there is no
+    'delete' opcode. n_marked counts content lines ending with MODIFIED_MARK. diff_text is
+    difflib.unified_diff(upstream_lines, content_lines, 'amagine3d e608dc6 freshness_check.py:14-107',
+    'tools/cad/common.py VERBATIM block', lineterm='') joined with LF."""
+    import difflib
+    up = [l.rstrip("\r") for l in upstream_lines]
+    con = [l.rstrip("\r") for l in content_lines]
+    ok = True
+    for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(None, up, con, autojunk=False).get_opcodes():
+        if tag == "delete" or (tag in ("replace", "insert") and
+                               any(not l.rstrip().endswith(MODIFIED_MARK) for l in con[j1:j2])):
+            ok = False
+    n_marked = sum(1 for l in con if l.rstrip().endswith(MODIFIED_MARK))
+    diff_text = "\n".join(difflib.unified_diff(
+        up, con, "amagine3d e608dc6 freshness_check.py:14-107",
+        "tools/cad/common.py VERBATIM block", lineterm=""))
+    return ok, n_marked, diff_text
+
+
+def upstream_diff(path: str) -> int:
+    """--upstream-diff FILE: pin the file to e608dc6 by its unmarked sha256, then show the block's diff."""
+    raw = open(path, "rb").read().decode("utf-8")
+    upstream = raw.split("\n")[13:107]
+    if unmarked_sha256(upstream) != UPSTREAM_SNAPSHOT_SHA256:
+        print("upstream-diff: %s is not freshness_check.py at e608dc6" % path)
+        return 1
+    header, content = snapshot_block(open(os.path.abspath(__file__), "rb").read().decode("utf-8"))
+    ok, n_marked, diff_text = verbatim_diff(content, upstream)
+    print(diff_text)
+    if ok and header == list(SNAPSHOT_HEADER):
+        print("upstream-diff: ok, %d marked line(s), header 3 line(s)" % n_marked)
+        return 0
+    print("upstream-diff: FAIL")
+    return 1
+
+
+def snapshot_selftest() -> None:
+    """The AMG-3 proofs (docs/16a §J, AMG-3): the snapshot behaviour, with Amagine3D's two passing tests
+    ported as behaviour, not text, and the VERBATIM block's pin and diff."""
+    import types
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as td:
+        left = types.SimpleNamespace(st_mode=stat.S_IFREG, st_nlink=1, st_dev=1, st_ino=2,
+                                     st_size=3, st_mtime_ns=4, st_ctime_ns=5)
+        right = types.SimpleNamespace(st_mode=stat.S_IFREG, st_nlink=1, st_dev=1, st_ino=2,
+                                      st_size=3, st_mtime_ns=4, st_ctime_ns=6)
+        assert not _same_file_state(left, right)
+        assert _same_file_state(left, right, compare_change_time=False)
+        right.st_nlink = 2
+        assert not _same_file_state(left, right, compare_change_time=False)
+        print("[ok] snapshot: _same_file_state compares change time unless told not to, and refuses nlink 2")
+
+        plain = os.path.join(td, "artifact.bin")
+        with open(plain, "wb") as f:
+            f.write(b"stable artifact")
+        snap = stable_file_snapshot(Path(plain))
+        assert snap == stable_file_snapshot(str(plain)), "the str path changed the snapshot"
+        assert snap["exists"] is True and snap["stable"] is True
+        pst = Path(plain).stat()
+        assert snap["size"] == pst.st_size and snap["mtime_ns"] == pst.st_mtime_ns
+        assert snap["sha256"] == sha256_file(str(plain))
+        print("[ok] snapshot: a regular file binds size, mtime and digest; a str path gives the same snapshot")
+
+        def rewriter(target, replacement):
+            st0 = os.stat(target)
+            original_read = os.read
+            state = {"n": 0}
+
+            def side_effect(fd, n):
+                chunk = original_read(fd, n)
+                if chunk and state["n"] == 0:
+                    state["n"] += 1
+                    with open(target, "r+b") as g:
+                        g.write(replacement)
+                    os.utime(target, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+                return chunk
+            return st0, side_effect
+
+        mutated = os.path.join(td, "mutated.bin")
+        with open(mutated, "wb") as f:
+            f.write(b"original payload")
+        replacement = b"changed! payload"
+        assert len(replacement) == len(b"original payload"), "lengths differ"
+        st3, effect3 = rewriter(mutated, replacement)
+        with mock.patch.object(os, "read", side_effect=effect3):
+            snap3 = stable_file_snapshot(Path(mutated))
+        assert open(mutated, "rb").read() == replacement, "the rewrite did not happen"
+        assert snap3["exists"] is True and snap3["stable"] is False and snap3["sha256"] is None
+        assert Path(mutated).stat().st_mtime_ns == st3.st_mtime_ns, "the mtime was not restored"
+        print("[ok] snapshot: a same-size in-place rewrite with the mtime restored is detected (stable False, no digest)")
+
+        with open(mutated, "wb") as f:
+            f.write(b"original payload")
+        st4, effect4 = rewriter(mutated, replacement)
+        with mock.patch.object(os, "name", "nt"), mock.patch.object(os, "read", side_effect=effect4):
+            snap4 = stable_file_snapshot(Path(mutated))
+        assert open(mutated, "rb").read() == replacement, "the rewrite did not happen"
+        assert snap4["exists"] is True and snap4["stable"] is False and snap4["sha256"] is None
+        assert Path(mutated).stat().st_mtime_ns == st4.st_mtime_ns, "the mtime was not restored"
+        print("[ok] snapshot: the Windows branch re-hashes and refuses a digest that changed between the two reads")
+
+        hard_src = os.path.join(td, "hard_source.bin")
+        with open(hard_src, "wb") as f:
+            f.write(b"hard link body")
+        hard_link = os.path.join(td, "hard_link.bin")
+        os.link(hard_src, hard_link)
+        assert stable_file_snapshot(Path(hard_src)) == _missing_snapshot()
+        assert stable_file_snapshot(Path(hard_link)) == _missing_snapshot()
+        os.remove(hard_link)
+        snap5 = stable_file_snapshot(Path(hard_src))
+        assert snap5["stable"] is True and snap5["sha256"] == sha256_file(hard_src)
+        print("[ok] snapshot: a hard link is refused on both names (nlink 2); removing it restores the source")
+
+        sym_target = Path(os.path.join(td, "sym_target.bin"))
+        sym_target.write_bytes(b"symlink body")
+        sym_link = Path(os.path.join(td, "sym_link.bin"))
+        try:
+            sym_link.symlink_to(sym_target)
+        except OSError as e:
+            print("[skip] snapshot: symlink not tested, this account cannot create one (%s)"
+                  % (getattr(e, "winerror", None) or e.errno))
+        else:
+            snap6 = stable_file_snapshot(sym_link)
+            assert snap6["stable"] is False and snap6["sha256"] is None
+            print("[ok] snapshot: a symlink is refused (stable False, no digest)")
+
+        missing = _missing_snapshot()
+        assert sorted(missing.keys()) == ["exists", "mtime_ns", "sha256", "size", "stable"]
+        assert stable_file_snapshot(Path(os.path.join(td, "no_such_file.bin"))) == missing
+        assert stable_file_snapshot(Path(td)) == missing
+        print("[ok] snapshot: a missing file and a directory give the missing snapshot")
+
+        source = open(os.path.abspath(__file__), "rb").read().decode("utf-8")
+        header, content = snapshot_block(source)
+        assert header == list(SNAPSHOT_HEADER), header
+        assert len(content) == 95, len(content)
+        assert unmarked_sha256(content) == UPSTREAM_SNAPSHOT_SHA256
+        assert sum(1 for l in content if l.rstrip().endswith(MODIFIED_MARK)) == 1
+        names = [l[4:].split("(")[0] for l in content if l.startswith("def ")]
+        assert names == ["_missing_snapshot", "_same_file_state", "_hash_descriptor", "stable_file_snapshot"], names
+        every_line = source.split("\n")
+        assert every_line.count(SNAPSHOT_BEGIN_MARK) == 1 and every_line.count(SNAPSHOT_END_MARK) == 1
+        print("[ok] verbatim: the block's unmarked lines hash to upstream e608dc6 14-107, 3 header lines, 1 marked line")
+
+        upstream = [l for l in content if not l.rstrip().endswith(MODIFIED_MARK)]
+        assert len(upstream) == 94, len(upstream)
+        ok9, n9, _ = verbatim_diff(content, upstream)
+        assert ok9 and n9 == 1, (ok9, n9)
+        hits = [k for k, l in enumerate(content) if "1024 * 1024" in l]
+        assert len(hits) == 1, hits
+        k = hits[0]
+        mut_a = list(content)
+        mut_a[k] = content[k].replace("1024 * 1024", "1024 * 512")
+        assert not verbatim_diff(mut_a, upstream)[0], "an unmarked change was accepted"
+        first_stable = next(j for j, l in enumerate(content) if l == '        "stable": False,')
+        mut_b = list(content)
+        del mut_b[first_stable]
+        assert not verbatim_diff(mut_b, upstream)[0], "a deletion was accepted"
+        mut_c = list(content)
+        mut_c.insert(1, "    pass")
+        assert not verbatim_diff(mut_c, upstream)[0], "an unmarked insertion was accepted"
+        mut_d = list(content)
+        mut_d[k] = content[k].replace("1024 * 1024", "1024 * 512") + "  # modified by Iteration-CFD"
+        okd, nd, _ = verbatim_diff(mut_d, upstream)
+        assert okd and nd == 2, (okd, nd)
+        print("[ok] verbatim: the diff refuses an unmarked change, a deletion and an unmarked insertion, and accepts a marked change")
 
 
 def selftest() -> int:
@@ -367,6 +683,7 @@ def selftest() -> int:
     blob = canonical_json(fp)
     assert '"cad-env/1"' in blob, blob
     print("[ok] env_fingerprint: %s" % blob[:120])
+    snapshot_selftest()
     print("SELFTEST PASS")
     return 0
 
@@ -381,6 +698,8 @@ def main(argv=None) -> int:
     if len(argv) == 1 and argv[0] == "--env":
         print(canonical_json(env_fingerprint()))
         return 0
+    if len(argv) == 2 and argv[0] == "--upstream-diff":
+        return upstream_diff(argv[1])
     sys.stderr.write(_USAGE)
     return 2
 
