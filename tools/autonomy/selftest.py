@@ -33,7 +33,9 @@ the hook seam, the refinement rounds on two oracle campaigns and the disabled br
 check and the CLI), then evaluate.py --selftest (the held-out evaluation: the seal and the G-DET ids, McNemar and the gate functions on hand data, the fidelity and quality rows, the reuse and RAM-guard seam, the write-once plan lock, a fake evaluation end to end, the check and the CLI), then
 rescore.py --selftest (the 2026-09-26 re-score: the capture kinds, a
 four-geometry re-score under both readings, the identity and seal refusals,
-determinism and the CLI), then
+determinism and the CLI), then lreplay.py --selftest (the replay of recorded
+tuning rows: the sample, the config rebuild, the seal, the verdicts, a
+scripted run and one live R-PLANE row), then
 sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
@@ -82,7 +84,8 @@ def main():
               ("features.py", 11), ("preflight.py", 12), ("rules.py", 14),
               ("remedies.py", 13), ("explain.py", 14),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 12),
-              ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6))
+              ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6),
+              ("lreplay.py", 6))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:
