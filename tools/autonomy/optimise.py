@@ -100,6 +100,9 @@ HYPER = {"max_iter": 200, "learning_rate": 0.05, "max_leaf_nodes": 15,
 WALL_OFFSETS = (-1, 0, 1)
 FEATURE_OFFSETS = (0, 1, 2)
 FEATURE_TOLS = (0.0, 0.25, 0.5)
+# a body with sharp edges (README section D, 2026-09-26): feature_tolerance 0 is
+# refused there
+FEATURE_TOLS_SHARP = (0.25, 0.5)
 SMOOTHING = (0, 1, 2, 3)
 BAND_SCALE = (0.5, 2.0)
 GROWTH_LO = 1.1
@@ -432,7 +435,7 @@ def pick(seq, x):
     return seq[min(len(seq) - 1, int(x * len(seq)))]
 
 
-def point_config(l1, u):
+def point_config(l1, u, fp):
     """(cfg, knobs): the six-knob box of docs/15 §C L4 around the L1 config."""
     cfg = copy.deepcopy(l1)
     off = pick(WALL_OFFSETS, u[0])
@@ -452,7 +455,8 @@ def point_config(l1, u):
             e["feature_level"] = 0
     cfg["refinement"]["max_level"] = max(lv + [0])
     snap = cfg.setdefault("snap", {})
-    snap["feature_tolerance"] = pick(FEATURE_TOLS, u[3])
+    snap["feature_tolerance"] = pick(
+        FEATURE_TOLS_SHARP if fp["sharp_edge_length_m"] > 0 else FEATURE_TOLS, u[3])
     snap["smoothing_passes"] = pick(SMOOTHING, u[4])
     growth = None
     if "layers" in cfg:
@@ -548,7 +552,7 @@ def decide(ens, ctx, history, gates, knobs, meta):
               "feasible_n": 0}
     candidates = []
     for i, u in enumerate(sobol(gid)):
-        cfg, kn = point_config(l1, u)
+        cfg, kn = point_config(l1, u, fp)
         s = schema.canonical_sha256(cfg)
         if s in seen:
             continue
@@ -1568,7 +1572,7 @@ def _harness(H):
     H["o_lhs"] = os.path.join(tmp, "o_lhs")
     for out, mode in ((H["o_rules"], "rules"), (H["o_tmpl"], "b0-template"),
                       (H["o_lhs"], "b0-lhs")):
-        _oracle_run(out, IDS16, mode, prior._ft_oracle)
+        _oracle_run(out, IDS16, mode, prior._wall_oracle)
     src = os.path.join(tmp, "src")
     os.makedirs(src)
     H["osrc"] = [os.path.join(src, n)
@@ -1614,6 +1618,8 @@ def _g1_constants(H):
     tmp = H["tmp"]
     assert list(FEATURES[:17]) == list(prior.FEATURES) and len(FEATURES) == 31
     assert MEMBERS == 5 and POOL_M == 8 and 2 ** POOL_M == 256
+    assert FEATURE_TOLS == (0.0, 0.25, 0.5) \
+        and FEATURE_TOLS_SHARP == (0.25, 0.5)
     for rid in OPT_IDS:
         assert rid in explain.TEMPLATES \
             and explain.TEMPLATES[rid]["layer"] == "optimiser", rid
@@ -1668,9 +1674,11 @@ def _g2_rows(H):
     orows, dup2 = training_rows([(n, b) for n, b, _s in
                                  load_sources(H["osrc"])], H["mrows"],
                                 H["gates"], H["knobs"])
-    assert (len(orows), dup2) == (116, 0), (len(orows), dup2)
-    assert sum(1 for r in orows if r["fail"]) == 80
-    assert len({r["geometry_id"] for r in orows}) == 16
+    assert (len(orows), dup2) == (104, 0), (len(orows), dup2)
+    assert sum(1 for r in orows if r["fail"]) == 62, \
+        sum(1 for r in orows if r["fail"])
+    assert len({r["geometry_id"] for r in orows}) == 16, \
+        len({r["geometry_id"] for r in orows})
     b = baseline.read_bundle(H["osrc"][0])
     victim = None
     for r in b["attempts"]:
@@ -1688,9 +1696,9 @@ def _g2_rows(H):
         raise OptError("group 2: the tampered delta was not refused")
     H["crows"] = rows
     print("[ok] rows: 2805 committed rows rebuilt by sha (2130 failures, 107 "
-          "with BLC_8 > 0, 192 without cells, 372 geometries, 0 duplicates); the "
-          "first row reproduces to 1e-6; the oracle gives 116 rows; a tampered "
-          "delta is refused")
+          "with BLC_8 > 0, 192 without cells, 372 geometries, 0 duplicates); "
+          "the first row reproduces to 1e-6; the oracle gives %d rows; a "
+          "tampered delta is refused" % (len(orows),))
 
 
 def _g3_pool(H):
@@ -1705,13 +1713,14 @@ def _g3_pool(H):
     assert remedies.wall_level(l1) == 3
     assert remedies._get(l1, "/layers/growth") == 1.34
     assert "snap" not in l1
-    pc, kn = point_config(l1, [0.5] * 6)
+    pc, kn = point_config(l1, [0.5] * 6, fp)
     assert kn == {"wall_offset": 0, "band_scale": 1.0, "feature_offset": 1,
-                  "feature_tolerance": 0.25, "smoothing_passes": 2,
+                  "feature_tolerance": 0.5, "smoothing_passes": 2,
                   "growth": 1.22}, kn
-    assert schema.canonical_sha256(pc).startswith("efd77732b7ee")
+    assert schema.canonical_sha256(pc).startswith("7ff2856a0591"), \
+        schema.canonical_sha256(pc)[:12]
     feats = config_features(pc, fp)
-    want = [3, -0.300984, -1.204074, -0.726951, 0.176091, 1, 0.25, 2, 1.22,
+    want = [3, -0.300984, -1.204074, -0.726951, 0.176091, 1, 0.5, 2, 1.22,
             1.742763, 8, 4.729018, 0.0, 4]
     assert all(abs(a - b) <= 1e-6 for a, b in zip(feats, want)), feats
     assert abs(feats[CONFIG_FEATURES.index("log10_wallband_over_lmax")]
@@ -1721,7 +1730,7 @@ def _g3_pool(H):
                   {"pointer": "/refinement/levels/0/bands/0/distance",
                    "from": 0.1755375, "to": 0.175538},
                   {"pointer": "/snap/feature_tolerance", "from": None,
-                   "to": 0.25},
+                   "to": 0.5},
                   {"pointer": "/snap/smoothing_passes", "from": None, "to": 2}]
     assert json.dumps(edits, sort_keys=True) == \
         json.dumps(want_edits, sort_keys=True), edits
@@ -1804,16 +1813,18 @@ def _g5_decide(H):
     c = res["counts"]
     assert (c["pool_n"], c["unique_n"], c["visited_n"], c["edit_refused_n"],
             c["l0_refused_n"], c["l0_pass_n"], c["feasible_n"]) == \
-        (256, 256, 0, 0, 29, 227, 22), c
+        (256, 256, 0, 0, 29, 227, 14), c
     pk = res["pick"]
-    assert pk["sobol_index"] == 249, pk["sobol_index"]
-    assert pk["config_sha256"].startswith("45f8394c50e4")
-    assert abs(pk["p_fail"] - 0.043409) <= 1e-6, pk["p_fail"]
-    assert abs(pk["p_fail_std"] - 0.044921) <= 1e-6, pk["p_fail_std"]
-    assert abs(pk["blc8_a_priori"] - 0.76712) <= 1e-6, pk["blc8_a_priori"]
-    assert abs(pk["log_cells"] - 4.614511) <= 1e-6, pk["log_cells"]
-    assert [r["sobol_index"] for r in res["runners_up"]] == [5, 193, 161]
-    assert pk["knobs"]["feature_tolerance"] == 0.0
+    assert pk["sobol_index"] == 7, pk["sobol_index"]
+    assert pk["config_sha256"].startswith("a5e6d2875713"), \
+        pk["config_sha256"][:12]
+    assert abs(pk["p_fail"] - 0.146157) <= 1e-6, pk["p_fail"]
+    assert abs(pk["p_fail_std"] - 0.043875) <= 1e-6, pk["p_fail_std"]
+    assert abs(pk["blc8_a_priori"] - 0.013567) <= 1e-6, pk["blc8_a_priori"]
+    assert abs(pk["log_cells"] - 3.961202) <= 1e-6, pk["log_cells"]
+    assert [r["sobol_index"] for r in res["runners_up"]] == [191, 216, 130], \
+        [r["sobol_index"] for r in res["runners_up"]]
+    assert pk["knobs"]["feature_tolerance"] in FEATURE_TOLS_SHARP
     assert pk["knobs"]["smoothing_passes"] == 2
     assert schema.errors(res["record"], "DecisionRecord") == []
     assert not [e["pointer"] for e in res["edits"]
@@ -1891,33 +1902,39 @@ def _g8_refine(H):
     w8 = os.path.join(tmp, "w8")
     rep8 = os.path.join(tmp, "rep8")
     rep = refine(w8, sources=H["osrc"], rounds=2, streams=2, report_dir=rep8,
-                 attempt_fn=prior._ft_oracle,
+                 attempt_fn=prior._wall_oracle,
                  probe_fn=campaign._fake_probe(1000),
                  snap_fn=campaign._fake_snap, quiet=True)
-    assert rep["refinement_set"]["geometry_ids"] == ["E-1-004", "E-1-010"]
+    # the set grows to six with the lever refused: F-1-009's only fix is gone,
+    # so the optimiser may propose for it again
+    assert rep["refinement_set"]["geometry_ids"] == \
+        ["D-1-001", "D-1-027", "D-1-073", "E-1-004", "F-1-009", "F-1-025"], \
+        rep["refinement_set"]["geometry_ids"]
     r1 = baseline.read_bundle(os.path.join(rep8, "refine_r1.json.gz"))
     rows = {(r["geometry_id"], r["attempt"]): r for r in r1["attempts"]}
-    assert rows[("E-1-004", 2)]["decided_by"] == "optimiser"
-    assert rows[("E-1-004", 2)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("E-1-004", 2)]["prediction"]["p_fail"] - 0.180021) <= 1e-6
-    assert rows[("E-1-010", 3)]["decided_by"] == "optimiser"
-    assert rows[("E-1-010", 3)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("E-1-010", 3)]["prediction"]["p_fail"] - 0.165506) <= 1e-6
+    assert rows[("D-1-073", 2)]["decided_by"] == "optimiser"
+    assert rows[("D-1-073", 2)]["rule_id"] == "OPT-PICK"
+    assert abs(rows[("D-1-073", 2)]["prediction"]["p_fail"] - 0.152656) <= 1e-6, \
+        rows[("D-1-073", 2)]["prediction"]["p_fail"]
+    assert rows[("F-1-025", 2)]["decided_by"] == "optimiser"
+    assert rows[("F-1-025", 2)]["rule_id"] == "OPT-PICK"
+    assert abs(rows[("F-1-025", 2)]["prediction"]["p_fail"] - 0.173456) <= 1e-6, \
+        rows[("F-1-025", 2)]["prediction"]["p_fail"]
     sidx = {}
     for ln in r1["records"]:
         for i in ln["record"]["inputs"]:
             if i["name"] == "sobol_index":
                 sidx[(ln["geometry_id"], ln["attempt"])] = i["value"]
-    assert sidx[("E-1-004", 2)] == 0, sidx
-    assert sidx[("E-1-010", 3)] == 12, sidx
+    assert sidx[("D-1-073", 2)] == 0, sidx
+    assert sidx[("F-1-025", 2)] == 4, sidx
     ends = {g["geometry_id"]: g for g in r1["geometries"]}
-    assert ends["E-1-004"]["terminal"] == "PASS"
-    assert ends["E-1-010"]["terminal"] == "PASS"
-    assert rep["rounds"][0]["rescued"] == ["E-1-004", "E-1-010"]
-    assert rep["rounds"][1]["rescued"] == ["E-1-004", "E-1-010"]
-    assert rep["systems"]["rules"]["failures"] == 2
-    assert abs(rep["systems"]["rules"]["mfr"] - 0.125) <= 1e-12
-    assert rep["systems"]["round-2"]["failures"] == 0
+    assert ends["D-1-073"]["terminal"] == "PASS"
+    assert ends["F-1-025"]["terminal"] == "PASS"
+    assert rep["rounds"][0]["rescued"] == ["D-1-073", "F-1-025"]
+    assert rep["rounds"][1]["rescued"] == ["D-1-073", "F-1-025"]
+    assert rep["systems"]["rules"]["failures"] == 6
+    assert abs(rep["systems"]["rules"]["mfr"] - 0.375) <= 1e-12
+    assert rep["systems"]["round-2"]["failures"] == 4
     assert rep["cv"]["auc"] >= 0.75 and rep["cv"]["blc8_rmse"] == 0.0
     assert rep["conditions"]["beats_rules"] is True
     assert rep["verdict"] == "PASS" and rep["enabled"] is True
@@ -1925,12 +1942,13 @@ def _g8_refine(H):
               "refine_r1.json.gz", "refine_r2.json.gz"):
         assert os.path.isfile(os.path.join(rep8, n)), n
     model = _read_json_or_none(os.path.join(rep8, "opt_model.json"))
-    assert model["train"]["n_rows"] >= 118, model["train"]["n_rows"]
+    # the 104 oracle rows (group 2) plus round 1's two optimiser rows
+    assert model["train"]["n_rows"] >= 106, model["train"]["n_rows"]
     H["rep8"] = rep8
     m1 = os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns
     m2 = os.stat(os.path.join(w8, "round_2", "campaign.json")).st_mtime_ns
     rep2 = refine(w8, sources=H["osrc"], rounds=2, streams=2, report_dir=rep8,
-                  attempt_fn=prior._ft_oracle,
+                  attempt_fn=prior._wall_oracle,
                   probe_fn=campaign._fake_probe(1000),
                   snap_fn=campaign._fake_snap, quiet=True)
     assert os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns == m1
@@ -1968,15 +1986,15 @@ def _g8_refine(H):
     finally:
         om._MODEL.clear()
         om._MODEL.update(saved)
-    print("[ok] refine on the oracle: E-1-004 and E-1-010 rescued in round 1 "
-          "(indices 0 and 12), MFR 0.125 -> 0, PASS and enabled; a re-run reuses "
+    print("[ok] refine on the oracle: D-1-073 and F-1-025 rescued in round 1 "
+          "(indices 0 and 4), MFR 0.375 -> 0.25, PASS and enabled; a re-run reuses "
           "both rounds and gives an equal report; check PASS")
 
 
 def _g9_refine_a(H):
     tmp = H["tmp"]
     a_oracle = prior._oracle_attempt(
-        lambda cfg: "F3a"
+        lambda cfg, gctx: "F3a"
         if "A-1-000" in cfg["input"]["surfaces"][0]["path"] else "pass")
     srcA = os.path.join(tmp, "srcA")
     os.makedirs(srcA)
@@ -2028,20 +2046,26 @@ def _g10_live(H):
           if r["geometry_id"] == "D-1-073"}
     comm = {r["attempt"]: r for r in H["rb"]["attempts"]
             if r["geometry_id"] == "D-1-073"}
-    for a in (1, 2):
-        assert (lr[a]["config_sha"], lr[a]["decided_by"], lr[a]["rule_id"]) == \
-            (comm[a]["config_sha"], comm[a]["decided_by"],
-             comm[a]["rule_id"]), a
-    assert lr[3]["decided_by"] == "optimiser" and lr[3]["rule_id"] == "OPT-PICK"
-    assert lr[3]["config_sha"].startswith("45f8394c50e4")
+    assert (lr[1]["config_sha"], lr[1]["decided_by"], lr[1]["rule_id"]) == \
+        (comm[1]["config_sha"], comm[1]["decided_by"],
+         comm[1]["rule_id"]), 1
+    # the committed attempt 2 is RM-SNAP-FT, refused since 2026-09-26, so the
+    # live campaign cannot replay it and the optimiser's first pick takes over
+    assert lr[2]["decided_by"] == "optimiser" and lr[2]["rule_id"] == "OPT-PICK", \
+        (lr[2]["decided_by"], lr[2]["rule_id"])
     assert end["harness_errors"] == 0 and end["orphans"] == []
     assert end["max_live_mesher"] <= 2, end["max_live_mesher"]
-    verify_round(1, live, H["rb"]["attempts"], ["D-1-073"])
-    oc = lr[3]["outcome"]
-    print("[ok] live: rules+opt through the mesher at 2 streams on D-1-073: rows "
-          "1-2 replayed from the rules campaign, row 3 the optimiser's pick %s "
-          "(exit %s, %s), 0 harness errors, 0 orphans, at most 2 meshers; replay "
-          "ok" % (lr[3]["config_sha"][:12], oc["exit_code"], oc["failure_class"]))
+    # the first optimiser row is now attempt 2 (the committed attempt 2 is the
+    # refused RM-SNAP-FT), so only attempt 1 is verified against the campaign
+    verify_round(1, live,
+                 [r for r in H["rb"]["attempts"]
+                  if r["geometry_id"] == "D-1-073" and r["attempt"] == 1],
+                 ["D-1-073"])
+    oc = lr[2]["outcome"]
+    print("[ok] live: rules+opt through the mesher at 2 streams on D-1-073: row "
+          "1 replayed from the rules campaign, row 2 the optimiser's pick %s "
+          "(exit %s, %s), 0 harness errors, 0 orphans, at most 2 meshers; verify "
+          "ok" % (lr[2]["config_sha"][:12], oc["exit_code"], oc["failure_class"]))
 
 
 def _g11_check_cli(H):

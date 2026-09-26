@@ -1,5 +1,5 @@
 {
- "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted. G-SCORER fixtures: the docs/15 survey probes. The 27 that wrote a summary were re-run on 2026-09-24 with the mesh tree's binary at 77a33b5 (sha256 054bba67...) so their summaries carry n_pinned_boundary, area_ratio and area_frac_tau_ge; the 4 refused runs keep their 2026-09-23 logs (refusal re-confirmed). Hand labels and expected numbers are the supervisor's, computed from the summary JSON and the STL independently of score.py, under the user's decisions of 2026-09-24 (F3a boundary-only, F3d wired, BLC_beta exact).",
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted. G-SCORER fixtures: the docs/15 survey probes. The 27 that wrote a summary were re-run on 2026-09-24 with the mesh tree's binary at 77a33b5 (sha256 054bba67...) so their summaries carry n_pinned_boundary, area_ratio and area_frac_tau_ge; the 4 refused runs keep their 2026-09-23 logs (refusal re-confirmed). Hand labels and expected numbers are the supervisor's, computed from the summary JSON and the STL independently of score.py, under the user's decisions of 2026-09-24 (F3a boundary-only, F3d wired, BLC_beta exact). Re-frozen 2026-09-26 for the user's decision that feature-edge capture is a hard constraint on a body with sharp edges: every probe row carries its STL fingerprint's sharp_edge_length_m (30 deg) and plane_path (remedies.on_plane on its config), and every expect carries F3e and feature_capture, computed from the summary's snap stage (n_feature_edges, n_snapped_to_edge, n_snapped_to_corner) and its config's feature_tolerance; cubep_nofeat, cubep_nofeat_cf, cubep_nosnap flip to fail.",
  "flow": {
   "u_ref_m_s": 0.003,
   "l_ref_m": 1.0,
@@ -76,13 +76,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "L2",
@@ -148,13 +152,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "L3",
@@ -220,13 +228,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO15",
@@ -277,13 +289,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO25",
@@ -334,13 +350,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO26",
@@ -401,13 +421,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO28",
@@ -468,13 +492,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": false,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "box_L4",
@@ -531,7 +559,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -540,13 +569,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 8.0,
+   "plane_path": false
   },
   {
    "id": "box_sphere",
@@ -612,13 +645,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "coarse",
@@ -679,13 +716,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "cube_cf",
@@ -742,7 +783,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -751,13 +793,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
   },
   {
    "id": "cube_n5",
@@ -814,7 +860,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -823,13 +870,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
   },
   {
    "id": "cube_ok",
@@ -886,7 +937,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -895,13 +947,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
   },
   {
    "id": "cubep_cf",
@@ -958,7 +1014,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -967,13 +1024,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_defaults",
@@ -1030,7 +1091,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -1039,13 +1101,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_nofeat",
@@ -1056,7 +1122,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "feature_tolerance 0: 3 layers on 54 faces, full 100 %, t1 2.000e-2 of 2.000e-2: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "feature_tolerance 0: 3 layers on 54 faces, full 100 %, t1 2.000e-2 of 2.000e-2: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (feature_tolerance 0), so F3e is true and the run fails",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1111,13 +1177,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": true,
      "F4": false,
      "F5": false
     },
-    "failure": false,
-    "strict_failure": false,
-    "verdict": "pass"
-   }
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_nofeat_cf",
@@ -1128,7 +1198,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "3 layers on 54 faces, full 0.0 %, mean frac 0.251, t1 1.253e-2 of 5.000e-2 - NO face received the full stack; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "3 layers on 54 faces, full 0.0 %, mean frac 0.251, t1 1.253e-2 of 5.000e-2 - NO face received the full stack; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (feature_tolerance 0), so F3e is true and the run fails",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1183,13 +1253,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": true,
      "F4": false,
      "F5": false
     },
-    "failure": false,
-    "strict_failure": false,
-    "verdict": "pass"
-   }
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_nosnap",
@@ -1200,7 +1274,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "snap.iterations 0: full 100 %: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "snap.iterations 0: full 100 %: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (no point took the edge or corner branch), so F3e is true and the run fails",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1255,13 +1329,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": true,
      "F4": false,
      "F5": false
     },
-    "failure": false,
-    "strict_failure": false,
-    "verdict": "pass"
-   }
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_ok",
@@ -1318,7 +1396,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -1327,13 +1406,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "ok",
@@ -1399,13 +1482,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "rev2_L4",
@@ -1471,13 +1558,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "rev_L4",
@@ -1528,13 +1619,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "thick_stack",
@@ -1600,13 +1695,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "thin_t1",
@@ -1657,13 +1756,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "tight_nonorth",
@@ -1729,13 +1832,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "wb_L4",
@@ -1792,7 +1899,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -1801,13 +1909,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 13.12100723220657,
+   "plane_path": false
   },
   {
    "id": "wing_a_L3",
@@ -1864,7 +1976,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -1873,13 +1986,17 @@
      "F3b": true,
      "F3c": false,
      "F3d": false,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
   },
   {
    "id": "wing_a_L4",
@@ -1936,7 +2053,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -1945,13 +2063,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
   },
   {
    "id": "wing_a_L5",
@@ -2008,7 +2130,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -2017,13 +2140,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
   },
   {
    "id": "wing_b_L4",
@@ -2080,7 +2207,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -2089,13 +2217,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 4.838746175463724,
+   "plane_path": false
   },
   {
    "id": "wing_c_L4",
@@ -2152,7 +2284,8 @@
      }
     ],
     "missing_signals": [
-     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false",
+     "F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds stages[snap].feature_capture); the attraction reached an edge, so F3e is null"
     ],
     "flags": {
      "F1": false,
@@ -2161,13 +2294,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 8.185825694348434,
+   "plane_path": false
   }
  ],
  "variants": [
@@ -2209,7 +2346,7 @@
      }
     ],
     "failure_class": null,
-    "verdict": "pass"
+    "verdict": "fail"
    }
   },
   {
@@ -2243,7 +2380,7 @@
      }
     ],
     "failure_class": "layer_dropped:no_full_stack",
-    "verdict": "pass"
+    "verdict": "fail"
    }
   }
  ]

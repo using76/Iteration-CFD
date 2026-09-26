@@ -797,7 +797,9 @@ def run_attempt(c, gctx, config, a, n_leaves):
                              timed_out=job["timed_out"], wall_seconds=job["seconds"],
                              check_exit=check_exit,
                              case_dir=case if job["exit_code"] == 0 else None,
-                             gates=c.gates)
+                             gates=c.gates,
+                             sharp_edge_length_m=gctx["fp"]["sharp_edge_length_m"],
+                             plane_path=preflight.plane_path(config, gctx["fp"]))
         if audited:
             gctx["audit"].append({"attempt": a, "check_exit": check_exit,
                                   "content_sha256": sc["content_sha256"],
@@ -2204,7 +2206,7 @@ def _g5_observe(H):
 
 
 _G6_IDS = ("D-1-010", "F-1-009", "G-1-016", "G-1-026", "F-1-005")
-_G6_SCRIPT = {"D-1-010": ["pass"], "F-1-009": ["F3a"], "G-1-016": ["F3a"],
+_G6_SCRIPT = {"D-1-010": ["pass"], "F-1-009": ["F3d"], "G-1-016": ["F3a"],
               "F-1-005": ["retreat_snapped"]}
 
 
@@ -2382,7 +2384,9 @@ def _g9_hooks(H):
                     "record": _hook_record("prior", pid, "abstain", [],
                                            "the selftest prior abstains")}
         after = copy.deepcopy(cfg)
-        after.setdefault("snap", {})["smoothing_passes"] = 1
+        # a snap knob off the R-PLANE predicate: smoothing_passes 1 on this sharp
+        # plane body is refused since 2026-09-26 (WL-SHARP-FT0 vetoes the pick)
+        after.setdefault("snap", {})["iterations"] = 10
         edits = rules.diff_edits(cfg, after)
         return {"verdict": "apply", "config": after, "edits": edits,
                 "record": _hook_record("prior", pid, "apply", edits,

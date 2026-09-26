@@ -1243,7 +1243,7 @@ IDS8 = ("D-1-010", "G-1-016", "F-1-009", "D-1-077", "F-1-011", "A-1-000",
 
 def _oracle_attempt(kind_of):
     def attempt(c, gctx, config, a, n_leaves):
-        kind = kind_of(config)
+        kind = kind_of(config, gctx)
         t_start = schema._now_iso()
         oc = remedies.synthetic_outcome(kind, config, gctx["fp"], gctx["flow"],
                                         c.gates)
@@ -1257,10 +1257,48 @@ def _oracle_attempt(kind_of):
     return attempt
 
 
-_ft_oracle = _oracle_attempt(
-    lambda config: "pass"
-    if remedies._get(config, "/snap/feature_tolerance") == 0 else "F3a")
-_pass_oracle = _oracle_attempt(lambda config: "pass")
+_L1_WALL = {}
+
+
+def _l1_wall(gctx):
+    """The setup rules' wall level for this geometry (the oracles' reference), cached."""
+    gid = gctx["gid"]
+    if gid not in _L1_WALL:
+        s = rules.setup(gctx["mrow"], gctx["fp"], campaign.stl_rel(gid),
+                        campaign.case_rel(gid), gid)
+        _L1_WALL[gid] = None if s["refused"] else remedies.wall_level(s["config"])
+    return _L1_WALL[gid]
+
+
+def _wall_kind(config, gctx):
+    """The selftests' fake mesher since 2026-09-26 (feature_tolerance 0 is no longer a
+    lever on a body with sharp edges): the R-PLANE path passes; any other config passes
+    one wall level or more below the setup rules' and fails F3a otherwise (docs/15 §K
+    G-PILOT: wall level -1 was the only F3-clean knob with the attraction on)."""
+    if remedies.on_plane(config, gctx["fp"]):
+        return "pass"
+    w = _l1_wall(gctx)
+    return "pass" if w is not None and remedies.wall_level(config) < w else "F3a"
+
+
+def _mixed_kind(config, gctx):
+    """A second fake mesher for the round mechanics: families A, B and G pass one wall
+    level below the setup rules' (F3a otherwise), D, E and F one level above (F3d
+    otherwise); the R-PLANE path passes."""
+    if remedies.on_plane(config, gctx["fp"]):
+        return "pass"
+    w = _l1_wall(gctx)
+    if w is None:
+        return "F3a"
+    d = remedies.wall_level(config) - w
+    if gctx["gid"][0] in "ABG":
+        return "pass" if d < 0 else "F3a"
+    return "pass" if d > 0 else "F3d"
+
+
+_wall_oracle = _oracle_attempt(_wall_kind)
+_mixed_oracle = _oracle_attempt(_mixed_kind)
+_pass_oracle = _oracle_attempt(lambda config, gctx: "pass")
 
 
 def _run_oracle(out, attempt_fn, ids=IDS8):
@@ -1426,11 +1464,11 @@ def _g4_vote(H):
 
 
 _WANT_BANK = {
-    "A-1-000": (3, ["RM-SNAP-WALL", "RM-SNAP-FT"]),
+    "A-1-000": (2, ["RM-SNAP-WALL"]),
     "D-1-010": (1, []),
-    "D-1-077": (3, ["RM-SNAP-WALL", "RM-SNAP-FT"]),
-    "F-1-009": (2, ["RM-SNAP-FT"]),
-    "F-1-011": (3, ["RM-SNAP-WALL", "RM-SNAP-FT"]),
+    "D-1-077": (2, ["RM-SNAP-WALL"]),
+    "E-1-010": (2, ["RM-SNAP-WALL"]),
+    "F-1-011": (2, ["RM-SNAP-WALL"]),
     "G-1-016": (1, []),
 }
 
@@ -1445,8 +1483,10 @@ def _g5_bank(H):
     assert m["source"]["content_sha256"] == bundle_sha(H["B1"])
     assert m["enabled"] is False and m["gate"] is None
     b2 = copy.deepcopy(H["B1"])
+    # F-1-009 left the bank (its only passing attempt needed the refused lever),
+    # so the gap test cuts a banked geometry's middle attempt instead
     b2["attempts"] = [r for r in b2["attempts"]
-                      if not (r["geometry_id"] == "F-1-009" and r["attempt"] == 1)]
+                      if not (r["geometry_id"] == "A-1-000" and r["attempt"] == 1)]
     try:
         bank_from(b2)
     except PriorError as e:
@@ -1454,30 +1494,31 @@ def _g5_bank(H):
     else:
         raise AssertionError("a bundle with a gap in the attempts was not refused")
     print("[ok] bank: 6 passing geometries with their remedy paths, E-1-004 and "
-          "E-1-010 absent; the model carries the null policy and the source sha")
+          "F-1-009 absent; the model carries the null policy and the source sha")
 
 
 def _g6_apply(H):
     cfg, ctx = H["cfg"], H["ctx"]
     after, skipped = apply_path(cfg["F-1-009"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
                                 ctx["F-1-009"], H["gates"], H["knobs"])
-    edits = rules.diff_edits(cfg["F-1-009"], after)
-    assert edits == [{"pointer": "/snap/feature_tolerance", "from": None,
-                      "to": 0.0}], edits
-    assert skipped == [{"rule_id": "RM-SNAP-WALL",
-                        "why": "below the y+ floor (wall 3 -> 2 < floor 3)"}], skipped
+    assert after is None
+    assert [x["rule_id"] for x in skipped] == ["RM-SNAP-WALL", "RM-SNAP-FT"]
+    assert "below the y+ floor" in skipped[0]["why"], skipped[0]
+    assert skipped[1]["why"] == remedies.FT_FORBIDDEN_WHY, skipped[1]
     after2, skipped2 = apply_path(cfg["E-1-004"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
                                   ctx["E-1-004"], H["gates"], H["knobs"])
     assert after2 is None
     assert [x["rule_id"] for x in skipped2] == ["RM-SNAP-WALL", "RM-SNAP-FT"]
     assert skipped2[1] == {"rule_id": "RM-SNAP-FT",
                            "why": "no sharp edge (features.py)"}, skipped2[1]
-    after3, _sk = apply_path(cfg["A-1-000"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
-                             ctx["A-1-000"], H["gates"], H["knobs"])
-    assert schema.canonical_sha256(after3) == H["att3_sha"]["A-1-000"]
-    after4, _sk = apply_path(cfg["A-1-000"], ["RM-SNAP-FT"], ctx["A-1-000"],
-                             H["gates"], H["knobs"])
-    assert schema.canonical_sha256(after4) not in H["A1_shas"]
+    after3, skipped3 = apply_path(cfg["A-1-000"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
+                                  ctx["A-1-000"], H["gates"], H["knobs"])
+    assert schema.canonical_sha256(after3) == H["att2_sha"]["A-1-000"]
+    assert skipped3 == [{"rule_id": "RM-SNAP-FT",
+                         "why": remedies.FT_FORBIDDEN_WHY}], skipped3
+    after4, skipped4 = apply_path(cfg["A-1-000"], ["RM-SNAP-FT"], ctx["A-1-000"],
+                                  H["gates"], H["knobs"])
+    assert after4 is None and skipped4 == skipped3, (after4, skipped4)
     after5, skipped5 = apply_path(cfg["D-1-010"], ["RM-SNAP-FT"], ctx["D-1-010"],
                                   H["gates"], H["knobs"])
     assert after5 is None
@@ -1488,6 +1529,7 @@ def _g6_apply(H):
     d = decide(zq, fold, model, ctx["A-1-000"], H["gates"], H["knobs"])
     assert d["rule_id"] == "PR-KNN" and d["verdict"] == "apply", d["rule_id"]
     assert schema.errors(d["record"], "DecisionRecord") == []
+    edits = rules.diff_edits(cfg["A-1-000"], after3)
     for es in (edits, d["edits"]):
         for x in es:
             assert not x["pointer"].startswith("/layers")
@@ -1498,35 +1540,33 @@ def _g6_apply(H):
         pass
     else:
         raise AssertionError("a path outside the transfer table was not refused")
-    print("[ok] apply: F-1-009 gets feature_tolerance 0 with the wall step skipped "
-          "at the y+ floor; E-1-004 and D-1-010 change nothing; A-1-000's path "
-          "lands on its attempt-3 config; no edit in the layers block")
+    print("[ok] apply: F-1-009's wall step is skipped at the y+ floor and RM-SNAP-FT "
+          "by name, so its path changes nothing; E-1-004 and D-1-010 change nothing; "
+          "A-1-000's path lands on its attempt-2 config with RM-SNAP-FT skipped by "
+          "name; no edit in the layers block")
 
 
 def _g7_gate(H):
     work = os.path.join(H["tmp"], "work")
     rdir = os.path.join(H["tmp"], "rep")
-    rep = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_ft_oracle,
+    rep = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_wall_oracle,
                probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
                quiet=True)
     s = rep["systems"]
-    assert s["rules"]["pass"] == 2 and s["real"]["pass"] == 5, \
+    assert s["rules"]["pass"] == 2 and s["real"]["pass"] == 6, \
         (s["rules"]["pass"], s["real"]["pass"])
-    assert s["shuffle-0"]["pass"] == 4 and s["shuffle-1"]["pass"] == 3 \
-        and s["shuffle-2"]["pass"] == 3
-    assert abs(rep["shuffled_mean_pass"] - 10.0 / 3.0) <= 1e-9
-    assert s["real"]["decisions"] == {"PR-KNN": 4, "PR-KEEP": 2, "PR-FAR": 1,
-                                      "PR-NOEDIT": 1}, s["real"]["decisions"]
-    assert s["real"]["statuses"] == {"reused": 4, "PR-KEEP": 2, "PR-FAR": 1,
-                                     "PR-NOEDIT": 1}, s["real"]["statuses"]
-    assert s["real"]["gain"] == 3 and s["real"]["loss"] == 0
-    assert len(rep["rounds"]) == 1 and rep["rounds"][0]["geometry_ids"] == \
-        ["D-1-077"], rep["rounds"]
-    assert s["shuffle-1"]["statuses"].get("ran") == 1, s["shuffle-1"]["statuses"]
+    assert s["shuffle-0"]["pass"] == 4 and s["shuffle-1"]["pass"] == 5 \
+        and s["shuffle-2"]["pass"] == 4
+    assert abs(rep["shuffled_mean_pass"] - 13.0 / 3.0) <= 1e-9
+    assert s["real"]["decisions"] == {"PR-KNN": 4, "PR-KEEP": 2, "PR-NOEDIT": 1,
+                                      "PR-FAR": 1}, s["real"]["decisions"]
+    assert s["real"]["statuses"] == {"reused": 4, "PR-KEEP": 2, "PR-NOEDIT": 1,
+                                     "PR-FAR": 1}, s["real"]["statuses"]
+    assert s["real"]["gain"] == 4 and s["real"]["loss"] == 0
+    assert rep["rounds"] == [], rep["rounds"]
     assert rep["conditions"] == {"real_ge_rules": True, "shuffled_worse": True}
     assert rep["verdict"] == "PASS" and rep["enabled"] is True
-    for name in (REPORT_NAME, REPORT_MD, MODEL_NAME, RULES_BUNDLE,
-                 ROUND_BUNDLE % 1):
+    for name in (REPORT_NAME, REPORT_MD, MODEL_NAME, RULES_BUNDLE):
         assert os.path.isfile(os.path.join(rdir, name)), name
     with open(os.path.join(rdir, MODEL_NAME), encoding="utf-8") as f:
         pm = json.load(f)
@@ -1534,19 +1574,48 @@ def _g7_gate(H):
     grow = {g["geometry_id"]: g for g in rep["geometries"]}
     assert grow["F-1-009"]["real"]["rule_id"] == "PR-FAR"
     H["shipped"] = pm
-    cj = os.path.join(work, "round_1", campaign.FILES["campaign"])
-    mtime = os.stat(cj).st_mtime
-    rep2 = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_ft_oracle,
+    rep2 = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_wall_oracle,
                 probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
                 quiet=True)
-    assert os.stat(cj).st_mtime == mtime, "round 1 was not reused"
     r1 = dict(rep)
     r2 = dict(rep2)
     r1.pop("date")
     r2.pop("date")
     assert r1 == r2, "the re-run's report differs beyond the date"
-    print("[ok] gate on the oracle campaign: rules 2, real 5, shuffled 4 3 3 (mean "
-          "3.333), one round of one geometry (D-1-077), PASS and enabled; a re-run "
+    # the mixed oracle: a round runs, the control is not worse, the prior ships disabled
+    mwork = os.path.join(H["tmp"], "work_mixed")
+    mrdir = os.path.join(H["tmp"], "rep_mixed")
+    mrules = os.path.join(H["tmp"], "rules_mixed")
+    _run_oracle(mrules, _mixed_oracle)
+    mrep = gate(mrules, mwork, streams=2, report_dir=mrdir, attempt_fn=_mixed_oracle,
+                probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
+                quiet=True)
+    ms = mrep["systems"]
+    assert ms["real"]["pass"] == 2, ms["real"]["pass"]
+    assert ms["real"]["statuses"].get("ran") == 1, ms["real"]["statuses"]
+    assert len(mrep["rounds"]) == 1 and mrep["rounds"][0]["geometry_ids"] == \
+        ["E-1-010", "F-1-011"], mrep["rounds"]
+    assert ms["shuffle-0"]["pass"] == 3 and ms["shuffle-1"]["pass"] == 2 \
+        and ms["shuffle-2"]["pass"] == 3
+    assert abs(mrep["shuffled_mean_pass"] - 8.0 / 3.0) <= 1e-9
+    assert mrep["conditions"] == {"real_ge_rules": True, "shuffled_worse": False}
+    assert mrep["verdict"] == "FAIL" and mrep["enabled"] is False
+    assert os.path.isfile(os.path.join(mrdir, ROUND_BUNDLE % 1)), "round bundle"
+    cj = os.path.join(mwork, "round_1", campaign.FILES["campaign"])
+    mtime = os.stat(cj).st_mtime
+    mrep2 = gate(mrules, mwork, streams=2, report_dir=mrdir,
+                 attempt_fn=_mixed_oracle, probe_fn=campaign._fake_probe(1000),
+                 snap_fn=campaign._fake_snap, quiet=True)
+    assert os.stat(cj).st_mtime == mtime, "the mixed round was not reused"
+    m1 = dict(mrep)
+    m2 = dict(mrep2)
+    m1.pop("date")
+    m2.pop("date")
+    assert m1 == m2, "the mixed re-run's report differs beyond the date"
+    print("[ok] gate on the oracle campaign: rules 2, real 6, shuffled 4 5 4 (mean "
+          "4.333), no round (every prior config already meshed), PASS and enabled; "
+          "on the mixed oracle one round of two geometries (E-1-010, F-1-011) runs, "
+          "the shuffled control is not worse so it FAILs disabled, and a re-run "
           "reuses the round and gives an equal report")
 
 
@@ -1584,7 +1653,7 @@ def _fake_prior_campaign(out, ids, hooks=None):
     return campaign.run_campaign(
         {"manifest": "tuning", "ids": list(ids), "out": out, "mode": "rules+prior",
          "ablate": ("remedies",), "streams": 2, "quiet": True},
-        attempt_fn=_ft_oracle, probe_fn=campaign._fake_probe(1000),
+        attempt_fn=_wall_oracle, probe_fn=campaign._fake_probe(1000),
         snap_fn=campaign._fake_snap, hooks=hooks)
 
 
@@ -1596,13 +1665,16 @@ def _g9_hook(H):
     rows = campaign.load_rows(out)
     by1 = {r["geometry_id"]: r for r in rows if r["attempt"] == 1}
     prior_gids = sorted(g for g, r in by1.items() if r["decided_by"] == "prior")
-    assert prior_gids == ["A-1-000", "D-1-077", "E-1-010", "F-1-009", "F-1-011"], \
+    # F-1-009 left the bank (2026-09-26): its only path held the refused lever,
+    # so the model no longer fires there
+    assert prior_gids == ["A-1-000", "D-1-077", "E-1-010", "F-1-011"], \
         prior_gids
     assert all(by1[g]["rule_id"] == "PR-KNN" for g in prior_gids)
-    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 6
+    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 6, \
+        sum(1 for r in by1.values() if r["outcome"]["failure"] is False)
     assert end["harness_errors"] == 0
     rp = campaign.replay(out)
-    assert rp["ok"] and rp["hook_decisions"] == 5, rp
+    assert rp["ok"] and rp["hook_decisions"] == 4, rp
     recs = campaign.load_records(out)
     assert explain.audit(rows, recs)["ok"], "audit failed"
     for gid in sorted(recs):
@@ -1618,15 +1690,17 @@ def _g9_hook(H):
     pm_mod = importlib.import_module("prior")
     old = dict(pm_mod._MODEL)
     try:
-        ids2 = ["F-1-009", "D-1-010"]
+        # F-1-009 no longer takes a prior decision (2026-09-26): the model's
+        # bank lost it, so the importlib leg runs F-1-011 instead
+        ids2 = ["F-1-011", "D-1-010"]
         pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out2 = os.path.join(H["tmp"], "hook-import")
         _fake_prior_campaign(out2, ids2)
         by2 = {r["geometry_id"]: r
                for r in campaign.load_rows(out2) if r["attempt"] == 1}
-        assert by2["F-1-009"]["decided_by"] == "prior" and \
-            by2["F-1-009"]["rule_id"] == "PR-KNN", by2["F-1-009"]
+        assert by2["F-1-011"]["decided_by"] == "prior" and \
+            by2["F-1-011"]["rule_id"] == "PR-KNN", by2["F-1-011"]
         assert by2["D-1-010"]["decided_by"] == "rule"
         recs2 = campaign.load_records(out2)
         assert any(t["attempt"] == 1 and t["record"]["rule_id"] == "PR-KEEP"
@@ -1655,7 +1729,7 @@ def _g9_hook(H):
     finally:
         pm_mod._MODEL.clear()
         pm_mod._MODEL.update(old)
-    print("[ok] hook seam: make_hook in a fake rules+prior campaign (5 prior rows, "
+    print("[ok] hook seam: make_hook in a fake rules+prior campaign (4 prior rows, "
           "6 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
           "disabled model, a missing model ends each geometry HARNESS-ERROR; every "
           "PR card grounded, audit and replay ok")
@@ -1665,29 +1739,31 @@ def _g10_live(H):
     mlive = copy.deepcopy(H["shipped"])
     mlive["d_abstain"] = 1e9
     for e in mlive["bank"]:
-        e["path"] = ["RM-SNAP-FT"]
+        e["path"] = ["RM-SNAP-WALL"]
     mlive["enabled"] = True
     out = os.path.join(H["tmp"], "live")
     end = campaign.run_campaign(
-        {"manifest": "tuning", "ids": ["F-1-009", "D-1-010"], "out": out,
+        {"manifest": "tuning", "ids": ["A-1-000", "D-1-010"], "out": out,
          "mode": "rules+prior", "ablate": ("remedies",), "streams": 2,
          "audit_mod": AUDIT_OFF, "quiet": True},
         hooks={"prior": make_hook(mlive)})
     by1 = {r["geometry_id"]: r
            for r in campaign.load_rows(out) if r["attempt"] == 1}
-    f = by1["F-1-009"]
+    f = by1["A-1-000"]
     assert f["decided_by"] == "prior" and f["rule_id"] == "PR-KNN", \
         (f["decided_by"], f["rule_id"])
-    assert f["config_delta"] == [{"pointer": "/snap/feature_tolerance",
-                                  "from": None, "to": 0.0}], f["config_delta"]
+    after, _sk = apply_path(H["cfg"]["A-1-000"], ["RM-SNAP-WALL"],
+                            H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert f["config_delta"] == rules.diff_edits(H["cfg"]["A-1-000"], after), \
+        f["config_delta"]
     assert by1["D-1-010"]["decided_by"] == "rule"
     recs = campaign.load_records(out)
     assert any(t["attempt"] == 1 and t["record"]["rule_id"] == "PR-NOEDIT"
                for t in recs["D-1-010"])
     assert end["harness_errors"] == 0, end["harness_errors"]
     assert end["orphans"] == [] and end["max_live_mesher"] <= 2
-    print("[ok] live: rules+prior through the mesher at 2 streams: F-1-009 attempt "
-          "1 decided by the prior (feature_tolerance 0, exit %s, %s), D-1-010 by "
+    print("[ok] live: rules+prior through the mesher at 2 streams: A-1-000 attempt "
+          "1 decided by the prior (RM-SNAP-WALL, exit %s, %s), D-1-010 by "
           "the rules (PR-NOEDIT on the plane); 0 harness errors, 0 orphans, at "
           "most 2 meshers"
           % (f["outcome"]["exit_code"], f["outcome"]["failure_class"]))
@@ -1710,7 +1786,10 @@ def _g11_check_cli(H):
     rdir = os.path.join(H["tmp"], "rep")
     ck = check(rdir)
     assert ck["verdict"] == "PASS", ck
-    c1 = _copy_dir(rdir, os.path.join(H["tmp"], "check-flip"))
+    # the flipped byte needs a round bundle: only the mixed gate (rep_mixed)
+    # ran a round, the wall gate's rounds list is empty by design
+    c1 = _copy_dir(os.path.join(H["tmp"], "rep_mixed"),
+                   os.path.join(H["tmp"], "check-flip"))
     p1 = os.path.join(c1, ROUND_BUNDLE % 1)
     data = bytearray(open(p1, "rb").read())
     data[len(data) // 2] ^= 0x01
@@ -1731,7 +1810,9 @@ def _g11_check_cli(H):
     assert it2["model rebuild"]["ok"] is False and it2["model sha"]["ok"] is False
     assert ck2["verdict"] == "FAIL"
     p = _child(["--plan", "--rules", H["R1"]])
-    assert p.returncode == 0 and "rounds 1" in p.stdout, \
+    # every prior config is already meshed on this oracle, so the plan has no
+    # round left to run (2026-09-26)
+    assert p.returncode == 0 and "rounds 0" in p.stdout, \
         (p.returncode, p.stdout[-400:], p.stderr[-400:])
     p = _child(["--gate", "--rules", H["R1"]])
     assert p.returncode == 2 and "needs --rules and --work" in (p.stderr or ""), \
@@ -1742,8 +1823,8 @@ def _g11_check_cli(H):
     p = _child(["--check", "--report-dir", os.path.join(H["tmp"], "nothing")])
     assert p.returncode == 1, (p.returncode, p.stdout[-400:])
     print("[ok] check: PASS on the gate's files, a flipped round-bundle byte and "
-          "an edited model FAIL by name; the CLI plans one round, refuses a gate "
-          "without --rules, and checks")
+          "an edited model FAIL by name; the CLI plans the rounds it has, refuses "
+          "a gate without --rules, and checks")
 
 
 def selftest():
@@ -1761,7 +1842,7 @@ def selftest():
             H["gates"] = schema.load_gates()
             H["knobs"] = schema.load_knobs()
             H["R1"] = os.path.join(tmp, "rules")
-            _run_oracle(H["R1"], _ft_oracle)
+            _run_oracle(H["R1"], _wall_oracle)
             H["B1"] = baseline.bundle_dir(H["R1"])
             H["model"] = build(H["B1"])
             H["ends"] = {g["geometry_id"]: g for g in H["B1"]["geometries"]}
@@ -1774,7 +1855,7 @@ def selftest():
             rows_by = {}
             for r in H["B1"]["attempts"]:
                 rows_by.setdefault(r["geometry_id"], {})[r["attempt"]] = r
-            H["att3_sha"] = {"A-1-000": rows_by["A-1-000"][3]["config_sha"]}
+            H["att2_sha"] = {"A-1-000": rows_by["A-1-000"][2]["config_sha"]}
             H["A1_shas"] = {r["config_sha"] for r in rows_by["A-1-000"].values()}
         except Exception as e:
             print("SELFTEST FAIL: harness: %s: %s" % (type(e).__name__, e))

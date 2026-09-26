@@ -53,12 +53,13 @@ STAGES = score.STAGES
 TERMINALS = ("PASS", "CAPABILITY-LIMITED", "EXHAUSTED", "NO-REMEDY")
 TERMINAL_ID = {"PASS": "RM-PASS", "CAPABILITY-LIMITED": "RM-CAPABILITY-LIMITED",
                "EXHAUSTED": "RM-EXHAUSTED", "NO-REMEDY": "RM-NO-REMEDY"}
+FT_FORBIDDEN_WHY = ("feature_tolerance 0 is refused on a body with sharp edges off the R-PLANE path (WL-SHARP-FT0, the user's decision of 2026-09-26)")
 DROP_KEYS = ("layer:min_thickness", "layer:retreat_snapped")
 NO_REMEDY_KEYS = ("surface_closed", "config", "io", "crash", "gate@octree", "gate@castellate",
-                  "gate@split", "gate@layers", "F2")
+                  "gate@split", "gate@layers", "F2", "F3e")
 CONTAINERS = ("/refinement/levels",)     # the one non-leaf pointer _set may write
 LAYER_KINDS = ("min_thickness", "retreat_snapped", "no_full_stack")
-SYNTHETIC_KINDS = ("pass", "F3a", "F3b", "F3c", "F3d", "F4", "F5", "F2", "min_thickness",
+SYNTHETIC_KINDS = ("pass", "F3a", "F3b", "F3c", "F3d", "F3e", "F4", "F5", "F2", "min_thickness",
                    "retreat_snapped", "no_full_stack", "timeout", "crash", "io", "config",
                    "surface_closed", "gate_G4@castellate", "gate_G4@snap", "layer_t1_G5")
 
@@ -97,8 +98,10 @@ REMEDIES = (
              "on: B-1-002, B-1-004); docs/15 §D.3"},
     {"id": "RM-SNAP-FT", "keys": ("F3", "gate@snap"), "stage": "snap",
      "fn": "_rm_snap_ft",
-     "what": "switch the feature attraction off (snap.feature_tolerance = 0)",
-     "formula": "feature_tolerance' = 0.0 when the body has sharp edges and the attraction is on",
+     "what": "switch the feature attraction off (never since 2026-09-26 on a body "
+             "with sharp edges)",
+     "formula": "none since 2026-09-26: feature_tolerance 0 is refused on a body with "
+                "sharp edges (WL-SHARP-FT0), and a body without one has no edge to release",
      "cite": "docs/15 §K G-PILOT (feature_tolerance 0 unpinned 10 of 10 feature-bearing "
              "geometries; caution 1: the edges are then not captured, G-FID guards it)"},
     {"id": "RM-SNAP-REFINE", "keys": ("F3d",), "stage": "snap",
@@ -189,26 +192,7 @@ def floor_level(config: dict, ctx: dict | None, knobs: dict) -> int | None:
 
 def on_plane(config: dict, fingerprint: dict) -> bool:
     """True when the body already lies on the R-PLANE path (faces on cell planes)."""
-    if fingerprint.get("commensurate") is not True:
-        return False
-    s = fingerprint.get("lattice_base_size_m")
-    if not (isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0):
-        return False
-    if _get(config, "/snap/feature_tolerance") != 0:
-        return False
-    if _get(config, "/snap/smoothing_passes") != 0:
-        return False
-    h = config["domain"]["base_size"] / 2 ** wall_level(config)
-    q = s / h
-    if abs(q - round(q)) > 1e-9 or round(q) < 1:
-        return False
-    bb = fingerprint["bbox"]
-    ext = config["domain"]["extent"]
-    for a in range(3):
-        q = (bb[2 * a] - ext[2 * a]) / h
-        if abs(q - round(q)) > 1e-9:
-            return False
-    return True
+    return preflight.plane_path(config, fingerprint)
 
 
 def _patches(ctx: dict) -> list:
@@ -481,9 +465,7 @@ def _rm_snap_ft(ctx, gates, knobs):
         return None, "no sharp edge (features.py)", []
     if _get(before, "/snap/feature_tolerance") == 0:
         return None, "the attraction is already off", []
-    after = copy.deepcopy(before)
-    _set(after, "/snap/feature_tolerance", 0.0)
-    return after, None, []
+    return None, FT_FORBIDDEN_WHY, []
 
 
 def _rm_t1_raise(ctx, gates, knobs):
@@ -675,6 +657,10 @@ def diagnose(outcome: dict, gates: dict) -> dict:
         return {"key": "F3d", "stage": "snap", "trigger": trig(
             "outcome.flags.F3d", True, [gates["area_ratio_min"], gates["area_ratio_max"]],
             "not_in", "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)")}
+    if fl.get("F3e") is True:
+        return {"key": "F3e", "stage": "snap", "trigger": trig(
+            "outcome.feature_capture", outcome.get("feature_capture"), 0.0, "==",
+            "score.py stages[snap] feature attraction (README section D, 2026-09-26)")}
     if fl.get("F2") is True:
         return {"key": "F2", "stage": None, "trigger": trig(
             "outcome.flags.F2", True, True, "==", "-check (docs/15 §D.1 F2)")}
@@ -720,6 +706,10 @@ def _no_remedy_why(key):
         return "a harness fault, not a mesh the table can change"
     if key.startswith("gate@"):
         return "a quality gate at %s: no remedy touches the quality block" % key[len("gate@"):]
+    if key == "F3e":
+        return ("feature-edge capture is a hard constraint on a body with sharp edges "
+                "(the user's decision of 2026-09-26): no remedy switches the attraction "
+                "off, and the fix is sought in snap itself (AM-L)")
     return "the written mesh fails -check: no remedy touches the quality block"
 
 
@@ -945,6 +935,7 @@ def synthetic_outcome(kind: str, config: dict, fingerprint: dict, flow: dict,
     oc["max_over_hf"] = 0.001
     for f in oc["flags"]:
         oc["flags"][f] = False
+    oc["feature_capture"] = None
     oc["refusal_line"] = None
     oc["failure_class"] = None
     oc["blc8_a_priori"] = 0.0
@@ -981,6 +972,9 @@ def synthetic_outcome(kind: str, config: dict, fingerprint: dict, flow: dict,
     elif kind == "F3c":
         oc["max_over_hf"] = 0.8
         oc["flags"]["F3c"] = True
+    elif kind == "F3e":
+        oc["flags"]["F3e"] = True
+        oc["feature_capture"] = 0.0
     elif kind in ("F3d", "F4", "F2"):
         oc["flags"][kind] = True
     elif kind == "F5":
@@ -1566,10 +1560,10 @@ def selftest() -> int:
         for r in REMEDIES:
             keys.update(r["keys"])
         routed = keys | set(NO_REMEDY_KEYS) | {"gate@snap", "pass"}
-        assert len(routed) == 20, "20 keys routed, have %d: %s" % (len(routed), sorted(routed))
+        assert len(routed) == 21, "21 keys routed, have %d: %s" % (len(routed), sorted(routed))
         for k in ("surface_closed", "gate@snap", "pass", "layer:min_thickness"):
             assert k in routed, "%s unrouted" % k
-        return ("[ok] table: 12 remedies, 4 terminals, 20 keys routed "
+        return ("[ok] table: 12 remedies, 4 terminals, 21 keys routed "
                 "(RM-BUDGET-FAR ... RM-LAYER-FIT)")
 
     def g2():
@@ -1609,7 +1603,7 @@ def selftest() -> int:
         ptxt = ", ".join("%s %d" % (k, n) for k, n in
                          sorted(pc.items(), key=lambda kv: (-kv[1], kv[0])))
         return p_results, s_results, ("[ok] fixtures: 31/31 probes get the tabled remedy (%s)"
-                                      % ptxt), "[ok] sequences: 32/32 as labelled"
+                                      % ptxt), "[ok] sequences: 33/33 as labelled"
 
     def g5():
         ctx = probe_ctx("box_sphere", plabels, fps)
@@ -1629,7 +1623,7 @@ def selftest() -> int:
         sc = static_scan(knobs=knobs)
         assert sc["ok"], "static scan: %s" % sc["violations"]
         n_fn = len(sc["writes"])
-        assert n_fn == 12, "12 _rm_* functions with writes, have %d" % n_fn
+        assert n_fn == 11, "11 _rm_* functions with writes, have %d" % n_fn
         wr = "; ".join("%s[%s]" % (k[3:], ",".join(
             "levels" if p in CONTAINERS else p.rsplit("/", 1)[-1] for p in v))
             for k, v in sorted(sc["writes"].items()))
@@ -1656,7 +1650,7 @@ def selftest() -> int:
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
-        return ("[ok] static scan: %d _set calls in 12 _rm_* functions, 0 violations; "
+        return ("[ok] static scan: %d _set calls in 11 _rm_* functions, 0 violations; "
                 "writes %s" % (sc["n_set_calls"], wr))
 
     def g7():
@@ -1680,10 +1674,11 @@ def selftest() -> int:
             % (tt, aa)
 
     def g9():
-        contexts = [("rules wing_a", rules_ctx("wing_a.stl", "worked", plabels, rl, fps), 19),
-                    ("rules cubep", rules_ctx("cubep.stl", "worked", plabels, rl, fps), 19),
-                    ("probe NO26", probe_ctx("NO26", plabels, fps), 16)]
+        contexts = [("rules wing_a", rules_ctx("wing_a.stl", "worked", plabels, rl, fps), 20),
+                    ("rules cubep", rules_ctx("cubep.stl", "worked", plabels, rl, fps), 20),
+                    ("probe NO26", probe_ctx("NO26", plabels, fps), 17)]
         key_of = {"pass": "pass", "F3a": "F3", "F3b": "F3", "F3c": "F3", "F3d": "F3d",
+                  "F3e": "F3e",
                   "F4": "F4", "F5": "F5", "F2": "F2", "timeout": "timeout", "crash": "crash",
                   "io": "io", "config": "config", "surface_closed": "surface_closed",
                   "gate_G4@castellate": "gate@castellate", "gate_G4@snap": "gate@snap",
@@ -1702,7 +1697,7 @@ def selftest() -> int:
                 assert d["key"] == key_of[kind], \
                     "%s/%s: key %r != %r" % (name, kind, d["key"], key_of[kind])
                 n += 1
-        return "[ok] synthetic: 19 kinds x 3 contexts pass score.outcome_errors " \
+        return "[ok] synthetic: 20 kinds x 3 contexts pass score.outcome_errors " \
             "and diagnose to their key (%d outcomes)" % n
 
     def g10():
@@ -1748,8 +1743,14 @@ def selftest() -> int:
             res = propose(ctx, hist, gates=gates, knobs=knobs, veto=veto)
             assert res["skipped"], "%s: nothing skipped" % sid
             for s in res["skipped"]:
-                assert "preflight refused: PF-TEST" in s["why"], \
-                    "%s: %s" % (sid, s["why"])
+                # since 2026-09-26 RM-SNAP-FT is refused by name before any veto
+                # is asked (S03): the veto still refuses every candidate it sees
+                if s["rule_id"] == "RM-SNAP-FT":
+                    assert "refused on a body with sharp edges" in s["why"], \
+                        "%s: %s" % (sid, s["why"])
+                else:
+                    assert "preflight refused: PF-TEST" in s["why"], \
+                        "%s: %s" % (sid, s["why"])
             out.append("%s %s" % (sid, res["terminal"]))
         assert out == ["S03 EXHAUSTED", "S30 CAPABILITY-LIMITED"], out
         return "[ok] veto: a refusing veto skips every candidate by name (S03 EXHAUSTED, " \
@@ -1764,13 +1765,17 @@ def selftest() -> int:
                                   capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", env=env, timeout=300)
         p = run("--probe", "wing_a_L3")
-        last = (p.stdout or "").strip().splitlines()[-1]
-        assert p.returncode == 0 and last.startswith("REMEDY RM-SNAP-FT "), \
+        out = (p.stdout or "").strip().splitlines()
+        last = out[-1]
+        before = out[-2] if len(out) > 1 else ""
+        assert p.returncode == 0 and last == "TERMINAL EXHAUSTED", \
             "exit %d, last %r" % (p.returncode, last)
+        assert "refused on a body with sharp edges" in before, before
         q = run("--probe", "NOPE")
         assert q.returncode == 2 and "remedies:" in (q.stderr or ""), \
             "exit %d, err %r" % (q.returncode, (q.stderr or "")[:80])
-        return "[ok] cli: --probe wing_a_L3 exit 0 ends REMEDY RM-SNAP-FT; --probe NOPE exit 2"
+        return "[ok] cli: --probe wing_a_L3 exit 0 ends TERMINAL EXHAUSTED (RM-SNAP-FT " \
+            "refused by name); --probe NOPE exit 2"
 
     for g, name, fn in ((1, "the table", g1), (2, "diagnose", g2),
                         (3, "fixtures", lambda: g34()[2]),
@@ -1899,7 +1904,9 @@ def _part4_one(pid, row, ctx0, out_dir, binary, gates, knobs, plabels):
                              stderr=run["stderr"], summary=summary, config=c,
                              patch_areas_m2=row["patch_areas_m2"], flow=plabels["flow"],
                              timed_out=run["timed_out"],
-                             wall_seconds=run["seconds"])["outcome"]
+                             wall_seconds=run["seconds"],
+                             sharp_edge_length_m=row["sharp_edge_length_m"],
+                             plane_path=row["plane_path"])["outcome"]
         outs[a] = oc
         return oc
     lr = loop(ctx, attempt_fn, gates=gates, knobs=knobs)

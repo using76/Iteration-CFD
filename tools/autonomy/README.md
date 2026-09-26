@@ -90,6 +90,59 @@ rules the corpus flow window at L4–L6 is Re_L ≈ 1e4–1e5 (L4 at 1 m covers 
 3.6e4–8.1e4).
 <!-- END VERBATIM -->
 
+### The user's decision of 2026-09-26: feature-edge capture on a body with sharp edges
+
+**A body with sharp edges** is one whose fingerprint (`features.py`, `autonomy-fingerprint/1`) has
+`sharp_edge_length_m > 0` at its `feature_angle_deg` — 30°, the mesher's default
+`refinement.feature_angle_deg` and the same dihedral test as SPEC-LIT (92.34). On such a body
+**`snap.feature_tolerance = 0` is forbidden as an unpinning lever**: it switches the snap's feature
+attraction (92.38) off, so no boundary point is pulled onto an edge (docs/15 §K G-PILOT caution 1), and
+feature-edge capture is a hard constraint instead. So:
+
+- `preflight.py` refuses it by name, **`WL-SHARP-FT0`** (in the PF-KNOBS group), whenever the fingerprint is
+  given; `RM-SNAP-FT` never applies to such a body and is skipped by name; the prior's remedy paths reach
+  it only through that skip; the optimiser's box offers `feature_tolerance` in {0.25, 0.5} there. The B0
+  baselines are the comparison systems and keep their sealed configs.
+- **The R-PLANE path is the one exception** (`preflight.plane_path`, the predicate `remedies.on_plane` has
+  always used: a commensurate body, `feature_tolerance = 0`, `smoothing_passes = 0`, the lattice spacing a
+  whole multiple of the wall cell and the extent on the body's faces). Its edges are lattice lines, so the
+  castellated boundary reproduces them exactly and the attraction has nothing to do (SPEC-LIT §92.15.5;
+  G-RULES 34 of 34 plane checks, worst 5.7e-14 m). This exception is the supervisor's reading of the
+  words "as an unpinning lever" and is the user's to overturn; `rescore/FEAT-CONSTRAINT.md` reports the
+  tuning MFR under both readings.
+
+**Feature-edge capture is scored** as `outcome.feature_capture` and the failure flag **F3e**, from what the
+automesher reports today (`stages[snap]`: `n_feature_edges`, `n_snapped_to_edge`, `n_snapped_to_corner`,
+and the summary's own `config.snap.feature_tolerance`):
+
+| the run | feature_capture | F3e | missing_signals |
+|---|---|---|---|
+| no mesh (F1) | null | null | — |
+| the scorer was given no fingerprint sharp-edge length | null | null | named |
+| `sharp_edge_length_m = 0` | null | false | — |
+| the R-PLANE path | 1.0 | false | — |
+| `feature_tolerance = 0` | 0.0 | **true** | — |
+| attraction on, but `n_feature_edges = 0` or no point took the edge or corner branch | 0.0 | **true** | — |
+| attraction on and points reached an edge | null | null | named |
+
+"Captured" means what (92.38) means: a boundary point attracted onto a sharp edge or corner within
+`feature_tolerance × domain.base_size`. The row this decision asks for — the share of the STL's sharp-edge
+length that the snapped wall reproduces within 0.1·h_f — needs an output-only signal a later Rust unit
+adds, **`stages[snap].feature_capture` = {`sharp_length_m`, `captured_length_m`, `tol_m`}**; until it lands, a
+run whose attraction reached an edge scores `feature_capture` null and F3e null, and `missing_signals`
+says so. A pass threshold on that share is a new gate constant and the user's decision: today F3e is true
+only when the capture is exactly zero, so no constant changed and `gates.lock` is not relocked. A body that
+merely sits on cell planes without the R-PLANE config (the probes `cubep_nofeat`, `cubep_nofeat_cf` and
+`cubep_nosnap`) is not credited: its edges may coincide with lattice lines, but only the R-PLANE path
+proves it, and the Rust signal will measure it.
+
+F3e is optional in the attempt-row schema, so a row scored before 2026-09-26 still validates; the scorer
+writes it on every row since, and `schema.check_attempt` holds F3e true exactly when `feature_capture` is 0.
+A campaign run before 2026-09-26 — every committed bundle so far — no longer replays where `RM-SNAP-FT`
+fired: `campaign.replay` re-runs today's remedy table, and that is this decision taking effect, not a
+determinism fault. Any new headline claim is measured on a fresh test seed (the user's decision of
+2026-09-26).
+
 ## score.py
 
 `score.py` (AM-2) turns one automesher run into §D's Outcome. It reads only what `ofgpu-automesher`
@@ -126,6 +179,7 @@ but it makes `strict_failure` true, so the two can never be traded out of sight.
   at least beta of the stack, at 0.5, 0.8 and 0.95): `exact: true`, lo = hi. A row without the field, or a
   beta the rows do not report, falls back to the per-patch Markov bounds from `t1_min`, the area-weighted
   `mean_frac` and `full_area_frac` (`exact: false`), and `missing_signals` says which.
+- **F3e is feature-edge capture** (the user's decision of 2026-09-26, section D): `score_run` takes the fingerprint's `sharp_edge_length_m` and the config's `plane_path`, writes `outcome.feature_capture` and `flags.F3e` by section D's table, and `score.feature_capture` is that table as a function (rescore.py calls it). The probes' labels carry both inputs; `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap` fail F3e.
 
 `missing_signals` names what a report lacks instead of guessing: the `-check` that was not run, and — only
 on a summary that lacks them — the `area_ratio` rows, the octree gate fields and the per-face tau shares.
@@ -456,6 +510,7 @@ limit and a cite. Checks and the refusal ids under them: (a) PF-SURFACE;
 (b) PF-QUALITY; (c) PF-FLAGS → WL-FLAG; (d) PF-KNOBS → WL-POINTER, WL-FORBIDDEN,
 WL-UNLISTED, WL-TYPE, WL-RANGE, PF-PATCH, PF-CONFIG; (e) PF-NONORTH;
 (f) PF-YPLUS and PF-THIN; (g) PF-DOMAIN; (h) PF-BUDGET.
+WL-SHARP-FT0 (the user's decision of 2026-09-26, section D) refuses snap.feature_tolerance 0 on a body with sharp edges off the R-PLANE path, in the PF-KNOBS group; `plane_path` is the R-PLANE predicate `remedies.on_plane` now calls.
 
 (c) and (d) WRAP `schema.check_flags` and `schema.check_edit` — the locked knob
 table lives in `schema/knobs.json` and is never restated here. PF-CONFIG is the
@@ -535,6 +590,7 @@ closed failure enum; `propose` walks a twelve-row table in priority order. Keys 
 None; the gate keys keep their stage); `timeout` and F5 → octree; F4 → castellate; F3a/F3b/F3c, F3d and
 `gate@snap` → snap; `layer_t1_G5`, `layer:min_thickness`, `layer:retreat_snapped`, `layer:no_full_stack` →
 layers; no flag and no requested patch dropped → PASS.
+Since 2026-09-26 RM-SNAP-FT never applies on a body with sharp edges (skipped by name, section D), and an F3e failure is outside the table (NO-REMEDY): the fix is sought in snap itself.
 
 - RM-BUDGET-FAR (F5, timeout; octree) — halves every far-field band, never under 3 cells of its level.
 - RM-BUDGET-FEAT (F5, timeout; octree) — drops the feature bump to the wall level.
@@ -772,7 +828,7 @@ out-of-geometry CV. The box is relative to the L1 config the hook rebuilds with 
 level offset {-1, 0, +1} shifts every band level (clipped [0, 6]); band distances scale by
 0.5 * 4 ** u in [0.5, 2] (rounded to 6 decimals); feature offset {0, 1, 2} sets
 `feature_level = min(6, wall + f)` (f = 0 zeroes an existing one); `snap.feature_tolerance`
-{0, 0.25, 0.5}; `snap.smoothing_passes` {0..3}; `layers.growth` in [1.1, the L1 growth]. 256
+{0, 0.25, 0.5} ({0.25, 0.5} on a body with sharp edges, section D); `snap.smoothing_passes` {0..3}; `layers.growth` in [1.1, the L1 growth]. 256
 scrambled Sobol points (seeded by the geometry id) fill the box; L0 is the config-level preflight
 without the octree probe (a PF-THIN refusal drops the point) and the campaign's own veto re-checks
 the pick with the probe. The pick is lexicographic: p_fail <= 0.2 within the cell budget, then max
@@ -793,7 +849,7 @@ above; the importances are seeded permutation AUC drops. The numbers are in `opt
 
 For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
 `optimise/opt_model.json` and `optimise/train.json.gz` and refits in seconds; when it is disabled
-it records OPT-DISABLED at every EXHAUSTED; G-FID binds on any feature_tolerance 0 pick.
+it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the committed model was fitted before that rule and is not refitted.
 
 ## evaluate.py — the held-out evaluation (G-FAIL, G-BLC-0 and the guards)
 
@@ -834,10 +890,46 @@ its report outside `evaluate/`. The departures from docs/15 §F are listed in th
 `evaluate/EVAL.json` and the results page `evaluate/EVAL.md`, written by the supervisor's run; the test split is
 then spent.
 
+## rescore.py — the tuning campaigns under the 2026-09-26 rule (FEAT-CONSTRAINT)
+
+`rescore.py --run` re-scores the committed TUNING bundles under the feature-edge rule of section D, with
+no re-meshing: every attempt's config is rebuilt from its row (`optimise.rows_from`, sha-checked), F3e is
+decided by `score.feature_capture` from the fingerprint, `preflight.plane_path` and, where a campaign
+directory is given with `--cases`, the attempt's own `stages[snap]` report, and a geometry passes when one
+of its attempts that ran still passes. It is the MFR of the attempts actually run: a geometry whose passing
+mesh now fails ended there, so the attempts a re-run would have made instead never ran, and a re-run can
+only rescue. The seal holds (a bundle that is not a tuning campaign is refused); the test split is spent
+and is not read. The numbers are in `rescore/FEAT-CONSTRAINT.json` and `rescore/FEAT-CONSTRAINT.md`.
+
+| system (tuning, 420 geometries) | failures before | after | MFR before -> after | after, plane path forbidden too |
+|---|---|---|---|---|
+| B0-template | 384 | 384 | 0.914 -> 0.914 | 384 (0.914) |
+| B0-LHS (best of 4) | 240 | 348 | 0.571 -> 0.829 | 348 (0.829) |
+| rules | 193 | 340 | 0.460 -> 0.810 | 376 (0.895) |
+| rules+opt (AM-14 round 5) | 178 | 340 | 0.424 -> 0.810 | 376 (0.895) |
+
+Family by family (failures of 84, 84, 84, 42, 42, 84 in A, B, D, E, F, G), before -> after:
+
+| system | A | B | D | E | F | G |
+|---|---|---|---|---|---|---|
+| B0-template | 84 -> 84 | 63 -> 63 | 84 -> 84 | 29 -> 29 | 42 -> 42 | 82 -> 82 |
+| B0-LHS | 84 -> 84 | 13 -> 51 | 24 -> 63 | 18 -> 27 | 29 -> 42 | 72 -> 81 |
+| rules | 78 -> 84 | 5 -> 55 | 13 -> 64 | 18 -> 29 | 17 -> 29 | 62 -> 79 |
+| rules+opt | 76 -> 84 | 5 -> 55 | 6 -> 64 | 13 -> 29 | 16 -> 29 | 62 -> 79 |
+
+What passed before, by what its capture row now says (rules): 147 passing meshes were sharp bodies
+snapped with the attraction off (F3e true, now failures), 37 were on the R-PLANE path (capture 1.0) and 44
+were bodies without a sharp edge. On a sharp body with the attraction on, no rules attempt passed at all
+(0 of 454 attempts). B0-LHS's 28 passing sharp meshes with the attraction on reached their edges (capture
+null, still passing). Every one of the optimiser's 15 tuning rescues was a `feature_tolerance` 0 pick,
+so under the rule rules+opt equals rules; B0-template passes no sharp body, so it does not move. The
+rise is honest: the fix is sought in snap itself (AM-L), not in switching the attraction off.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
     python tools/autonomy/selftest.py                     # the package gate (adds README + licences)
+    python tools/autonomy/rescore.py --run [--cases SOURCE=DIR ...]   # the 2026-09-26 re-score of the tuning bundles
     python tools/autonomy/schema.py --print-lock          # the lock lines, no comments
     python tools/autonomy/schema.py --validate KIND FILE  # valid / one error per line
     python tools/deps_licences.py --python                # the Python-side licences above

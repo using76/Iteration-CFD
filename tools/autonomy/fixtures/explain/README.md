@@ -11,7 +11,7 @@ at `57a2b4d`, not by explain.py.
 - `records.json`: every DecisionRecord of those runs, tagged with the attempt it decided (a remedy's record is
   tagged with the attempt its edit produced; a terminal record with the attempt it ended on).
 - `records_by_id.json`: one real record per (rule_id, verdict) emitted by schema.py, preflight.py, rules.py and
-  remedies.py, 59 records of 41 ids. A scratch path is replaced by `<work>`.
+  remedies.py, 60 records of 42 ids (WL-SHARP-FT0 added 2026-09-26). A scratch path is replaced by `<work>`.
 - `meta.json`: the family and stratum of the three geometries (the probes are family X, stratum probe).
 - `expect.json`: the supervisor's labels for the golden texts and the summary, and nine Clopper-Pearson
   references computed with scipy's beta quantile.

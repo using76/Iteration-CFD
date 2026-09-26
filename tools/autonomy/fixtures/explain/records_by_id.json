@@ -1,6 +1,6 @@
 {
  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
- "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py)",
+ "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py); WL-SHARP-FT0 refuse added 2026-09-26 (FEAT-CONSTRAINT: preflight on cubep_nofeat's config with the cubep fingerprint)",
  "records": [
   {
    "cite": "gates.json cell_budget; docs/15 §D.1 F5",
@@ -3023,6 +3023,42 @@
      200
     ],
     "value": 414
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "tools/autonomy/README.md section D (the user's decision of 2026-09-26); docs/15 §K G-PILOT caution 1; SPEC-LIT (92.38)",
+   "edits": [],
+   "formula": "refuse when sharp_edge_length_m > 0 and feature_tolerance == 0 and not plane_path",
+   "inputs": [
+    {
+     "name": "sharp_edge_length_m",
+     "unit": "m",
+     "value": 18.0
+    },
+    {
+     "name": "feature_angle_deg",
+     "unit": "deg",
+     "value": 30.0
+    },
+    {
+     "name": "plane_path",
+     "unit": "1",
+     "value": false
+    }
+   ],
+   "layer": "preflight",
+   "message": "WL-SHARP-FT0: snap.feature_tolerance = 0 on a body with 18 m of sharp edge at 30 deg switches the feature attraction off, so its edges are not captured; the user's decision of 2026-09-26 forbids it off the R-PLANE path",
+   "rule_id": "WL-SHARP-FT0",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-26T05:48:32Z",
+   "trigger": {
+    "observable": "/snap/feature_tolerance",
+    "op": ">",
+    "source": "features.py sharp_edge_length_m; preflight.plane_path",
+    "threshold": 0.0,
+    "value": 0.0
    },
    "uncertainty": 0,
    "verdict": "refuse"

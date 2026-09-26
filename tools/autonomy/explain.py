@@ -60,7 +60,7 @@ LAYER_OF_PREFIX = {"PF": "preflight", "WL": "preflight", "R": "rule", "RM": "rem
 EXEMPT_IDS = {"PF-TEST": ("remedies.py",)}     # test scaffolding: allowed only in these files
 TERMINAL_IDS = tuple(remedies.TERMINAL_ID.values())
 TERMINAL_OF = {v: k for k, v in remedies.TERMINAL_ID.items()}
-FLAG_ORDER = ("F1", "F2", "F3a", "F3b", "F3c", "F3d", "F4", "F5")
+FLAG_ORDER = ("F1", "F2", "F3a", "F3b", "F3c", "F3d", "F3e", "F4", "F5")
 NUM_RE = re.compile(r"(?<![A-Za-z0-9_.])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 GOLDEN_IDS = ("box_sphere", "wing_a_L3", "D-1-002")
 
@@ -93,6 +93,12 @@ TEMPLATES = {
                 "title": "refuse a forbidden command-line flag",
                 "because": "the permissive flag would let a mesh past the quality gate, and it is "
                            "never passed"},
+    "WL-SHARP-FT0": {"layer": "preflight",
+                     "title": "refuse switching the feature attraction off on a body with sharp edges",
+                     "because": "the user decided that a body with sharp edges must have its edges "
+                                "captured, and a zero feature tolerance stops the snap pulling any point "
+                                "onto an edge; only the cell-plane path, whose edges lie on lattice "
+                                "lines, keeps it at zero"},
     "PF-SURFACE": {"layer": "preflight",
                    "title": "check that every surface is closed and consistently wound",
                    "because": "an open or inverted surface cannot be meshed, so it is refused before "
@@ -881,7 +887,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 50, len(TEMPLATES)
+    assert len(TEMPLATES) == 51, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -890,9 +896,9 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 6, "R": 8, "RM": 16, "PR": 5,
+    assert counts == {"PF": 11, "WL": 7, "R": 8, "RM": 16, "PR": 5,
                       "OPT": 4}, counts
-    print("[ok] templates: 50 rule ids (PF 11, WL 6, R 8, RM 16, PR 5, OPT 4), "
+    print("[ok] templates: 51 rule ids (PF 11, WL 7, R 8, RM 16, PR 5, OPT 4), "
           "each with its "
           "prefix's layer, no digit in any template")
 
@@ -913,7 +919,7 @@ def _g2_static_scan():
     finally:
         os.remove(planted)
         os.rmdir(tmp)
-    print("[ok] static scan: 50 ids in %d source files, all templated, none dead, "
+    print("[ok] static scan: 51 ids in %d source files, all templated, none dead, "
           "PF-TEST only in remedies.py; module tables templated; a planted "
           "RM-NEW-THING is reported missing" % sc["files"])
 
@@ -921,7 +927,7 @@ def _g2_static_scan():
 def _g3_records():
     fx = load_fixtures()
     recs = fx["records_by_id"]
-    assert len(recs) == 59, len(recs)
+    assert len(recs) == 60, len(recs)
     ids = set()
     for rec in recs:
         c = card(rec)
@@ -932,7 +938,7 @@ def _g3_records():
     assert ids == fx_ids, ids ^ fx_ids
     for v in [0.0, 1.0, 0.1334231805929919, 3, True, None, "a", [1.5, None], {"k": 1}]:
         assert fmt(v) == remedies._fmt(v), (v, fmt(v), remedies._fmt(v))
-    print("[ok] records: 59 fixture records of 41 ids render, every line starts with "
+    print("[ok] records: 60 fixture records of 42 ids render, every line starts with "
           "its rule id, 0 ungrounded; fmt == remedies._fmt on 9 values")
 
 
