@@ -1,0 +1,14 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. docs/16 §D Binaries: the CPU tools of the CAD loop, from the main checkout's rust/target/release built 2026-09-15; each path is relative to the repository root and is refused unless its sha256 matches.",
+  "version": 1,
+  "binaries": {
+    "ofgpu-automesher": {
+      "path": "../Iteration-CFD/rust/target/release/ofgpu-automesher.exe",
+      "sha256": "0b9e7ba83b094aac7b90e64c2d3cd42fde7a68fa0ae4e54332ed7b5361161d4d"
+    },
+    "ofgpu-convert-mesh": {
+      "path": "../Iteration-CFD/rust/target/release/ofgpu-convert-mesh.exe",
+      "sha256": "af4f4341b04ad783e9037532aebe9c057298142d37268f981543cedd0c575a7c"
+    }
+  }
+}
