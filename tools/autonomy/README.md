@@ -111,9 +111,12 @@ feature-edge capture is a hard constraint instead. So:
   words "as an unpinning lever" and is the user's to overturn; `rescore/FEAT-CONSTRAINT.md` reports the
   tuning MFR under both readings.
 
-**Feature-edge capture is scored** as `outcome.feature_capture` and the failure flag **F3e**, from what the
-automesher reports today (`stages[snap]`: `n_feature_edges`, `n_snapped_to_edge`, `n_snapped_to_corner`,
-and the summary's own `config.snap.feature_tolerance`):
+**Feature-edge capture is scored** as `outcome.feature_capture` and the failure flag **F3e**. Since
+2026-09-27 the automesher MEASURES it: `stages[snap].feature_capture` = {`sharp_length_m`,
+`captured_length_m`, `tol_m`} (SPEC-LIT (92.62), binary 0fa9e2b or later). A summary from an older binary
+falls back to the count proxy (`stages[snap]`: `n_feature_edges`, `n_snapped_to_edge`,
+`n_snapped_to_corner`). The summary's own `config.snap.feature_tolerance` is read either way. The rows
+are tried in order and the first that applies decides:
 
 | the run | feature_capture | F3e | missing_signals |
 |---|---|---|---|
@@ -122,19 +125,52 @@ and the summary's own `config.snap.feature_tolerance`):
 | `sharp_edge_length_m = 0` | null | false | — |
 | the R-PLANE path | 1.0 | false | — |
 | `feature_tolerance = 0` | 0.0 | **true** | — |
-| attraction on, but `n_feature_edges = 0` or no point took the edge or corner branch | 0.0 | **true** | — |
-| attraction on and points reached an edge | null | null | named |
+| no `stages[snap]` report (a re-score from the rows alone) | null | null | named |
+| the signal is present: `captured_length_m / sharp_length_m` | that share | **true** only at 0 | — |
+| the signal is present with `sharp_length_m = 0` (no feature edge at the run's `feature_angle_deg`) | 0.0 | **true** | — |
+| the signal is present but null (the extraction refused the run's angle) | null | null | named |
+| no signal: `n_feature_edges = 0` or no point took the edge or corner branch | 0.0 | **true** | — |
+| no signal: points reached an edge | null | null | named |
 
-"Captured" means what (92.38) means: a boundary point attracted onto a sharp edge or corner within
-`feature_tolerance × domain.base_size`. The row this decision asks for — the share of the STL's sharp-edge
-length that the snapped wall reproduces within 0.1·h_f — needs an output-only signal a later Rust unit
-adds, **`stages[snap].feature_capture` = {`sharp_length_m`, `captured_length_m`, `tol_m`}**; until it lands, a
-run whose attraction reached an edge scores `feature_capture` null and F3e null, and `missing_signals`
-says so. A pass threshold on that share is a new gate constant and the user's decision: today F3e is true
-only when the capture is exactly zero, so no constant changed and `gates.lock` is not relocked. A body that
-merely sits on cell planes without the R-PLANE config (the probes `cubep_nofeat`, `cubep_nofeat_cf` and
-`cubep_nosnap`) is not credited: its edges may coincide with lattice lines, but only the R-PLANE path
-proves it, and the Rust signal will measure it.
+The signal replaces the count proxy wherever a summary carries it; the mesher's `sharp_length_m` equals the
+fingerprint's `sharp_edge_length_m` to 4e-15 relative on every probe and every replayed tuning row. A
+malformed signal (a key missing, a length not finite or negative, `tol_m` not positive, more held than the
+sharp length) raises `ScoreParseError` by name. The R-PLANE and `feature_tolerance = 0` rows still decide
+before the measurement: at ft 0 the capture depends on how the edges happen to sit on the lattice (the
+user's D-L0a-FT0: boxn at L4 holds 0.414 at ft 0 against 0.99988 at tau = h_f/2), and the decision of
+2026-09-26 forbids ft 0 off the R-PLANE path whatever it holds. A pass threshold on the share is a new gate
+constant and the user's decision (D-L5): until it is set F3e is true only when the share is exactly 0, so
+no constant changed and `gates.lock` is not relocked. A body that merely sits on cell planes without the
+R-PLANE config (the probes `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap`) is still not credited.
+
+#### The measured share on the tuning rows, for D-L5 (2026-09-27)
+
+Measured by the supervisor on the 97 tuning rows lreplay re-meshed on the binary `7ff16117` (every R-PLANE
+row plus 60 stratified, `lreplay.py --run`; tuning only - the test split is spent and was not read), as
+`captured_length_m / sharp_length_m` from each row's own summary:
+
+| rows | n | scored | the (92.62) share as the mesher measures it |
+|---|---|---|---|
+| no sharp edge | 3 | null, F3e false | — |
+| the R-PLANE path | 37 | 1.0, F3e false | min 0.423, median 0.809, max 1.000; 35 of 37 below 0.95 |
+| `feature_tolerance = 0` off the R-PLANE path | 28 | 0.0, F3e true | min 0, median 0.187, max 0.808; 9 of 28 exactly 0 |
+| the attraction on | 29 | the share; F3e false on all 29 | min 0.006, median 0.237, max 0.976; 19 at or below 0.5, 27 below 0.95 |
+
+By family, the attraction-on rows: A 8 (0.115 to 0.338, median 0.146), B 9 (0.006 to 0.826, median 0.043),
+D 6 (0.758 to 0.976, median 0.885), E 2 (0.242, 0.967), F 1 (0.494), G 3 (0.073, 0.224, 0.939). The 13
+probes read 0.022 to 0.470 on the wings and the wing-body, 0.972 on the off-lattice box at L4 and 0.9994 to
+0.9997 on the cubes.
+
+**Today's (92.62) under-reads an edge the STL splits into segments**, and the R-PLANE row shows it: those
+edges are lattice lines reproduced exactly (5.7e-14 m), yet they read 0.81 at the median. A wall edge counts
+only when BOTH its ends lie within `tol_m` of ONE feature segment, so a wall edge that straddles the joint of
+two collinear segments counts for neither. On D-1-042 attempt 1 (R-PLANE; 128 segments of 1.4 to 1.6 h_f
+forming 12 straight edges, 91 % of their ends off the lattice) a brute-force recount over the snapped mesh
+gives 3.45825 of 8.178 m = 0.4229 per segment, the mesher's own number, and 8.178 of 8.178 m = 1.000 against
+the 12 collinear chains; D-1-072 and D-1-112, whose segment ends are lattice points, read 1.000 as measured.
+A threshold near 0.95 on today's measure would fail meshes whose edges are exact, so D-L5 needs either
+(92.62) measured along the feature-edge polyline (a Rust change, the snap.rs owner's) or a threshold set
+against these numbers.
 
 F3e is optional in the attempt-row schema, so a row scored before 2026-09-26 still validates; the scorer
 writes it on every row since, and `schema.check_attempt` holds F3e true exactly when `feature_capture` is 0.
@@ -179,7 +215,7 @@ but it makes `strict_failure` true, so the two can never be traded out of sight.
   at least beta of the stack, at 0.5, 0.8 and 0.95): `exact: true`, lo = hi. A row without the field, or a
   beta the rows do not report, falls back to the per-patch Markov bounds from `t1_min`, the area-weighted
   `mean_frac` and `full_area_frac` (`exact: false`), and `missing_signals` says which.
-- **F3e is feature-edge capture** (the user's decision of 2026-09-26, section D): `score_run` takes the fingerprint's `sharp_edge_length_m` and the config's `plane_path`, writes `outcome.feature_capture` and `flags.F3e` by section D's table, and `score.feature_capture` is that table as a function (rescore.py calls it). The probes' labels carry both inputs; `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap` fail F3e.
+- **F3e is feature-edge capture** (the user's decision of 2026-09-26, section D): `score_run` takes the fingerprint's `sharp_edge_length_m` and the config's `plane_path`, writes `outcome.feature_capture` and `flags.F3e` by section D's table, and `score.feature_capture` is that table as a function (rescore.py calls it). The probes' labels carry both inputs; `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap` fail F3e. Since 2026-09-27 `score.measured_capture` reads `stages[snap].feature_capture` (92.62) wherever a summary carries it; the 13 probes whose attraction reached an edge score their measured share (0.0217 to 0.9997) and pass F3e.
 
 `missing_signals` names what a report lacks instead of guessing: the `-check` that was not run, and — only
 on a summary that lacks them — the `area_ratio` rows, the octree gate fields and the per-face tau shares.
@@ -769,6 +805,8 @@ layers and scores config (F1), not F4. The numbers are in `baseline/B0.json`, `b
 `baseline/R-CURV.json`, written by the supervisor's run; the test split's numbers are sealed in
 `baseline/sealed/`. The report counts harness errors from the end records through `campaign.terminal_of`, so a
 record written before SURFACE-REFUSED existed is read under it, and `harness_errors_zero` still requires zero.
+Since 2026-09-27 `FLAG_KEYS` counts F3e and a group's `F3` count is the geometries with any of F3a-F3e;
+`B0.json` and `B0.md` were written before and are not regenerated, and `--rcurv`'s F3 cost keeps F3a-F3d.
 
 For later units — AM-13/AM-14: the tuning rows of both baselines are in
 `baseline/tuning_<system>.json.gz` (`baseline.read_bundle`); B0-LHS's 1,680 rows are random-knob

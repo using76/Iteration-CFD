@@ -58,13 +58,16 @@ M_F3D_NULL = 'F3d: patch "%s" has no STL area, so its area_ratio is null and it 
 M_BETA_AT = ("BLC_beta: beta %g is not one of the thresholds the layer rows report (%s); "
              "it is bounded from t1_min, mean_frac and full_area_frac")
 TAU_SHARE_TOL = 1e-12
-M_FCAP = ("F3e: stages[snap] carries no captured sharp-edge length (a later Rust unit adds "
-          "stages[snap].feature_capture); the attraction reached an edge, so F3e is null")
+M_FCAP = ("F3e: stages[snap] carries no feature_capture (a binary before 0fa9e2b); the "
+          "attraction reached an edge, so F3e is null")
+M_FCAP_NULL = ("F3e: stages[snap].feature_capture is null (the automesher's feature extraction "
+               "refused the run's feature angle); F3e is null")
 M_FCAP_NOFP = ("F3e: the scorer was given no fingerprint sharp_edge_length_m, so it cannot "
                "tell a body with sharp edges; F3e is null")
 M_FCAP_NOSNAP = ("F3e: no stages[snap] report was read for this attempt (a re-score from the "
                  "rows alone); F3e is null")
 FCAP_SNAP_KEYS = ("n_feature_edges", "n_snapped_to_edge", "n_snapped_to_corner")
+FCAP_SIGNAL_KEYS = ("sharp_length_m", "captured_length_m", "tol_m")
 
 
 class ScoreParseError(ValueError):
@@ -199,6 +202,31 @@ def _fcap_args(sharp_edge_length_m, plane_path):
         raise ValueError("plane_path %r is not a bool" % (plane_path,))
 
 
+def measured_capture(fc):
+    """(feature_capture, F3e, missing-signal text or None) from stages[snap].feature_capture,
+    SPEC-LIT (92.62): the share of the mesher's own sharp-edge length the snapped wall
+    edges hold. F3e is true only at share 0 until the user sets a pass threshold."""
+    if fc is None:
+        return None, None, M_FCAP_NULL
+    if not isinstance(fc, dict) or any(k not in fc for k in FCAP_SIGNAL_KEYS):
+        raise ScoreParseError("score_run: stages[snap].feature_capture is %r, not {%s}"
+                              % (fc, ", ".join(FCAP_SIGNAL_KEYS)))
+    for k in FCAP_SIGNAL_KEYS:
+        v = fc[k]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                or not math.isfinite(v) or v < 0 or (k == "tol_m" and v == 0):
+            raise ScoreParseError("score_run: stages[snap].feature_capture.%s is %r, not a "
+                                  "finite length >= 0 (tol_m > 0)" % (k, v))
+    sharp, held = fc["sharp_length_m"], fc["captured_length_m"]
+    if held > sharp * (1.0 + 1e-9):
+        raise ScoreParseError("score_run: stages[snap].feature_capture holds %r m of a %r m "
+                              "sharp length - more than all of it" % (held, sharp))
+    if sharp == 0:
+        return 0.0, True, None
+    share = min(1.0, held / sharp)
+    return share, share == 0, None
+
+
 def feature_capture(sharp_edge_length_m, plane_path, feature_tolerance, snap):
     """(feature_capture, F3e, missing-signal text or None): the user's decision of
     2026-09-26 - feature-edge capture is a hard constraint on a body with sharp edges."""
@@ -213,6 +241,8 @@ def feature_capture(sharp_edge_length_m, plane_path, feature_tolerance, snap):
         return 0.0, True, None
     if snap is None:
         return None, None, M_FCAP_NOSNAP
+    if "feature_capture" in snap:
+        return measured_capture(snap["feature_capture"])
     gone = [k for k in FCAP_SNAP_KEYS if k not in snap]
     if gone:
         raise ScoreParseError("score_run: stages[snap] carries no %s - the feature-edge row "
@@ -986,6 +1016,37 @@ def _beta_exact(labels: dict, lines: list) -> None:
                  "beta 0.25 -> bounded, named, 0.5 exact")
 
 
+MEASURED_PROBES = ("box_L4", "cube_cf", "cube_n5", "cube_ok", "cubep_cf", "cubep_defaults",
+                   "cubep_ok", "wb_L4", "wing_a_L3", "wing_a_L4", "wing_a_L5", "wing_b_L4",
+                   "wing_c_L4")
+
+
+def _signal_rows() -> list:
+    """(args, want) rows for a snap report that carries the (92.62) signal."""
+    def sig(sharp, held):
+        return {"sharp_length_m": sharp, "captured_length_m": held, "tol_m": 0.05}
+    legacy0 = {"n_feature_edges": 12, "n_snapped_to_edge": 0, "n_snapped_to_corner": 0}
+    return [
+        ((18.0, False, 0.5, {"feature_capture": sig(18.0, 9.0)}), (0.5, False, None)),
+        ((18.0, False, 0.5, {"feature_capture": sig(18.0, 0.0)}), (0.0, True, None)),
+        ((18.0, False, 0.5, {"feature_capture": sig(0.0, 0.0)}), (0.0, True, None)),
+        ((18.0, False, 0.5, {"feature_capture": None}), (None, None, M_FCAP_NULL)),
+        ((18.0, False, 0.5, dict(legacy0, feature_capture=sig(18.0, 4.5))), (0.25, False, None)),
+        ((18.0, False, 0.5, {"feature_capture": sig(18.0, 18.0 * (1 + 1e-12))}),
+         (1.0, False, None)),
+        ((18.0, True, 0.0, {"feature_capture": sig(18.0, 4.5)}), (1.0, False, None)),
+        ((18.0, False, 0.0, {"feature_capture": sig(18.0, 4.5)}), (0.0, True, None)),
+    ]
+
+
+def _bad_signals() -> list:
+    """Signals the scorer refuses by name; never guessed past."""
+    good = {"sharp_length_m": 18.0, "captured_length_m": 9.0, "tol_m": 0.05}
+    return [dict(good, captured_length_m=18.1), dict(good, sharp_length_m=-1.0),
+            dict(good, captured_length_m=float("nan")), dict(good, tol_m=0.0),
+            dict(good, sharp_length_m=True), {"sharp_length_m": 18.0, "tol_m": 0.05}]
+
+
 def _feature_capture(labels: dict, results: dict, lines: list) -> None:
     """(C3 f): the user's decision of 2026-09-26 - the capture table, the refusals
     and the F3e column over the 31 frozen probes."""
@@ -1004,10 +1065,19 @@ def _feature_capture(labels: dict, results: dict, lines: list) -> None:
         ((18.0, False, 0.5, {"n_feature_edges": 12, "n_snapped_to_edge": 48,
                              "n_snapped_to_corner": 8}), (None, None, M_FCAP)),
     ]
+    table += _signal_rows()
     for args, want in table:
         got = feature_capture(*args)
         assert got == want, (args, got, want)
-    assert len(table) == 9 and len({str(w) for _a, w in table}) == 6  # 7 branches, 6 values
+    assert len(table) == 17 and len({str(w) for _a, w in table}) == 9  # 10 branches, 9 values
+    for sig in _bad_signals():
+        try:
+            feature_capture(18.0, False, 0.5, {"feature_capture": sig})
+        except ScoreParseError:
+            pass
+        else:
+            raise AssertionError("feature_capture signal %r did not raise ScoreParseError"
+                                 % (sig,))
     for bad in ((-1.0, False, 0.5, None), (float("nan"), False, 0.5, None),
                 (True, False, 0.5, None), ("18", False, 0.5, None),
                 (18.0, "yes", 0.5, None)):
@@ -1017,7 +1087,7 @@ def _feature_capture(labels: dict, results: dict, lines: list) -> None:
             pass
         else:
             raise AssertionError("feature_capture%s did not raise ValueError" % (bad,))
-    trues, nones, falses, mfcap = [], 0, 0, 0
+    trues, nones, falses, measured = [], 0, 0, {}
     for row in labels["probes"]:
         oc = results[row["id"]]
         f3e = oc["flags"]["F3e"]
@@ -1025,15 +1095,18 @@ def _feature_capture(labels: dict, results: dict, lines: list) -> None:
             trues.append(row["id"])
         elif f3e is None:
             nones += 1
-            if oc["feature_capture"] is None and oc["flags"]["F1"] is False \
-                    and row["sharp_edge_length_m"] > 0:
-                mfcap += 1
-                assert M_FCAP in oc["missing_signals"], row["id"]
+            assert oc["flags"]["F1"] is True, row["id"]
         else:
             falses += 1
+        fc = oc["feature_capture"]
+        if fc is not None and 0 < fc < 1:
+            measured[row["id"]] = fc
+        assert M_FCAP not in oc["missing_signals"], row["id"]
         assert outcome_errors(oc) == [], (row["id"], outcome_errors(oc))
     assert sorted(trues) == ["cubep_nofeat", "cubep_nofeat_cf", "cubep_nosnap"], trues
-    assert mfcap == 13 and nones == 17 and falses == 11, (mfcap, nones, falses)
+    assert sorted(measured) == sorted(MEASURED_PROBES), sorted(measured)
+    assert all(results[p]["flags"]["F3e"] is False for p in MEASURED_PROBES)
+    assert nones == 4 and falses == 24, (nones, falses)
     row = next(r for r in labels["probes"] if r["id"] == "cube_ok")
     d = os.path.join(PROBES_DIR, "cube_ok")
     log = _norm(open(os.path.join(d, "log.txt"), encoding="utf-8").read())
@@ -1047,11 +1120,12 @@ def _feature_capture(labels: dict, results: dict, lines: list) -> None:
                    sharp_edge_length_m=None, plane_path=row["plane_path"])["outcome"]
     assert oc["flags"]["F3e"] is None and M_FCAP_NOFP in oc["missing_signals"], oc
     assert outcome_errors(oc) == [], outcome_errors(oc)
-    lines.append("[ok] F3e feature capture: 7 branches by table, 5 bad inputs refused; "
-                 "on the 31 probes 3 fail F3e (cubep_nofeat, cubep_nofeat_cf, "
-                 "cubep_nosnap), 13 sharp runs whose attraction reached an edge are null "
-                 "by name, 11 bodies without a sharp edge are false, 4 refused runs "
-                 "are null")
+    lo, hi = min(measured.values()), max(measured.values())
+    lines.append("[ok] F3e feature capture: 10 branches by table, 5 bad inputs and 6 bad "
+                 "signals refused; on the 31 probes 3 fail F3e (cubep_nofeat, "
+                 "cubep_nofeat_cf, cubep_nosnap), the 13 sharp runs with the attraction on "
+                 "score their measured capture (92.62), %.4f to %.4f, and pass F3e, 11 "
+                 "bodies without a sharp edge are false, 4 refused runs are null" % (lo, hi))
 
 
 def _content_hash(lines: list) -> None:

@@ -74,7 +74,7 @@ HEADER = ("meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iter
 RCURV_CITE = ("docs/15 §C L1 R-CURV; DECISIONS 2026-09-24 "
               "(its F3 cost is measured with the rule off)")
 RCURV_MSG = "R-CURV: off for the paired F3-cost run (the rule is measured, not changed)"
-FLAG_KEYS = ("F1", "F2", "F3a", "F3b", "F3c", "F3d", "F4", "F5")
+FLAG_KEYS = ("F1", "F2", "F3a", "F3b", "F3c", "F3d", "F3e", "F4", "F5")
 BETA_KEYS = ("0.5", "0.8", "0.95")
 DEPARTURES = (
     "docs/15 §F runs the baselines at 12 streams; the house caps campaigns at 6 "
@@ -337,7 +337,7 @@ def _group_stats(family, stratum, ms, rows_by, q, areas, system):
         for k in FLAG_KEYS:
             if oc.get("flags", {}).get(k) is True:
                 flags[k] += 1
-        if any(oc.get("flags", {}).get("F3" + s) is True for s in ("a", "b", "c", "d")):
+        if any(oc.get("flags", {}).get("F3" + s) is True for s in ("a", "b", "c", "d", "e")):
             flags["F3"] += 1
         bad_beta = False
         for b in oc.get("blc_beta_a_priori") or []:
