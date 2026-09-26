@@ -4,6 +4,10 @@
 # No GPL-licensed source was consulted.
 """measure.py - the typed measurement primitives of the CAD loop (docs/16 §E.2, gate GC-1 of §H.3): each returns one cad-measure/1 record, and wall thickness is measured on the 2-D meridian, never between 3-D surfaces.
 
+Integral properties are adaptive (docs/16a §B.2): the idea of passing an eps to BRepGProp and keeping the returned
+error estimate is from Amagine3D (https://github.com/amagine-ai/Amagine3D, e608dc6,
+skills/text-a3d/brep_measurements.py, _surface_properties), reimplemented here; no code was copied.
+
 Usage:
   python measure.py --selftest
 """
@@ -30,6 +34,11 @@ from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepLProp import BRepLProp_CLProps
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeRevol   # selftest only
+from OCP.GCPnts import GCPnts_AbscissaPoint
+from OCP.BRep import BRep_Tool
+from OCP.TopExp import TopExp_Explorer
+from OCP.TopAbs import TopAbs_EDGE
+from OCP.TopoDS import TopoDS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -49,6 +58,9 @@ U_MEAS = {                # (kind, value): "abs" in the record's unit, "rel" tim
 }
 REFUSED = {"wall_distance_3d": "MEAS-3D-WALL"}
 UNITS_TOL = 1e-9          # m: gmsh vs BREP x-span in geom.json (docs/16 §H.3 GC-5)
+GPROP_EPS = 1e-12         # rel eps of every adaptive integral (BRepGProp Eps overloads, GCPnts length)
+GPROP_EPS_CHECK = 1e-9    # the coarser length pass; |L(GPROP_EPS) - L(GPROP_EPS_CHECK)| / L is the length's estimate
+GPROP_REL_MAX = 1e-8      # rel: the export helpers' bound, the volume primitive's u_meas (docs/16 §E.2)
 
 
 def record(primitive, value, unit, u_meas, method, feature=None, where=(), status="ok", reason_id=None, detail=""):
@@ -128,15 +140,51 @@ def cone_semi_angle(face, feature=None):
                       ("%s: %s" % (type(e).__name__, e))[:300], feature)
 
 
+def gprop(shape, kind):
+    """(mass, est_rel) by adaptive integration at GPROP_EPS.
+
+    'volume' and 'area' use BRepGProp's Eps overloads, which return the relative error estimate; 'length' sums
+    GCPnts_AbscissaPoint.Length at GPROP_EPS over every non-degenerate edge occurrence (this OCP has no Eps
+    overload of LinearProperties), its estimate the relative difference to a pass at GPROP_EPS_CHECK (0.0 when the
+    length is 0). The default quadrature is off by -2.16e-4 on a 200-span spline solid (docs/16a §D.13).
+    """
+    w = shape.wrapped if hasattr(shape, "wrapped") else shape
+    if kind in ("volume", "area"):
+        p = GProp_GProps()
+        if kind == "volume":
+            est = BRepGProp.VolumeProperties_s(w, p, GPROP_EPS, False)
+        else:
+            est = BRepGProp.SurfaceProperties_s(w, p, GPROP_EPS, False)
+        return float(p.Mass()), float(est)
+    if kind == "length":
+        total, diff = 0.0, 0.0
+        ex = TopExp_Explorer(w, TopAbs_EDGE)
+        while ex.More():
+            e = TopoDS.Edge_s(ex.Current())
+            if not BRep_Tool.Degenerated_s(e):
+                c = BRepAdaptor_Curve(e)
+                fine = GCPnts_AbscissaPoint.Length_s(c, GPROP_EPS)
+                total += fine
+                diff += abs(fine - GCPnts_AbscissaPoint.Length_s(c, GPROP_EPS_CHECK))
+            ex.Next()
+        return total, (diff / total if total > 0.0 else 0.0)
+    raise ValueError("gprop kind %r is not volume, area or length" % (kind,))
+
+
 def volume(shape, feature=None):
-    method = "BRepGProp volume"
+    method = "BRepGProp adaptive volume"
     try:
         if len(shape.Solids()) == 0:
             return _refused("volume", "m3", method, "MEAS-NOSOLID",
                             "the shape holds no solid", feature)
-        p = GProp_GProps()
-        BRepGProp.VolumeProperties_s(shape.wrapped, p)
-        return _ok("volume", p.Mass(), "m3", method, feature=feature)
+        v, est = gprop(shape, "volume")
+        rec = _ok("volume", v, "m3", method, feature=feature,
+                  detail="eps %.0e; relative error estimate %.3e" % (GPROP_EPS, est))
+        if rec["status"] == "ok" and not (est * abs(v) <= rec["u_meas"]):
+            return _refused("volume", "m3", method, "MEAS-GPROP",
+                            "eps %.0e; relative error estimate %.3e exceeds u_meas %.3e m3"
+                            % (GPROP_EPS, est, rec["u_meas"]), feature)
+        return rec
     except Exception as e:
         return _error("volume", "m3", method, "MEAS-ERROR",
                       ("%s: %s" % (type(e).__name__, e))[:300], feature)
@@ -615,7 +663,7 @@ def _fx_arc():
 
 
 def selftest():
-    """GC-1: every primitive against an analytic answer; 24 [ok] lines, then SELFTEST PASS."""
+    """GC-1: every primitive against an analytic answer; 28 [ok] lines, then SELFTEST PASS."""
     seen = []
 
     def keep(rec):
@@ -881,6 +929,92 @@ def selftest():
     r = keep(watertight({}))
     assert r["status"] == "refused" and r["reason_id"] == "MEAS-BADREPORT", "M22 empty %r" % (r,)
     print("[ok] watertight: clean 1, reoriented 0, open 0, weld 1e-6 refused, non-report refused")
+
+    import warnings
+    from scipy.integrate import quad
+    sys.path.insert(0, os.path.join(HERE, "fixtures", "trap"))
+    import trap
+    body = trap.build()
+    assert body.isValid() and len(body.Solids()) == 1, "M25 trap build"
+
+    # (M25)
+    pd = GProp_GProps()
+    BRepGProp.VolumeProperties_s(body.wrapped, pd)
+    rel_d = (pd.Mass() - trap.VOLUME_M3) / trap.VOLUME_M3
+    assert abs(rel_d) > 1e-5, "M25 the default call no longer misses: fixture does not discriminate"
+    rec = keep(volume(body))
+    assert rec["status"] == "ok", "M25 volume refused or errored: %r" % (rec,)
+    rel = (rec["value"] - trap.VOLUME_M3) / trap.VOLUME_M3
+    assert abs(rel) <= 1e-8, "M25 adaptive volume rel %+.3e > 1e-8" % (rel,)
+    assert rec["detail"].startswith("eps 1e-12; relative error estimate "), "M25 detail %r" % (rec["detail"],)
+    est = float(rec["detail"].rsplit(" ", 1)[1])
+    assert est <= 1e-8, "M25 estimate %.3e > 1e-8" % (est,)
+    print("[ok] trap volume: default call rel %+.3e (misses > 1e-5), adaptive rel %+.3e, estimate %.3e"
+          % (rel_d, rel, est))
+
+    # (M26)
+    mod = sys.modules[__name__]
+    saved = mod.GPROP_EPS
+    try:
+        mod.GPROP_EPS = 1e-6
+        rec = keep(volume(body))
+    finally:
+        mod.GPROP_EPS = saved
+    assert (rec["status"] == "refused" and rec["reason_id"] == "MEAS-GPROP" and rec["value"] is None
+            and rec["u_meas"] is None and "exceeds u_meas" in rec["detail"]), "M26 %r" % (rec,)
+    rec2 = keep(volume(body))
+    assert rec2["status"] == "ok", "M26 restored call %r" % (rec2,)
+    print("[ok] MEAS-GPROP: at eps 1e-6 the trap volume estimate exceeds u_meas and is refused, value None")
+
+    # (M27)
+    face = trap.wetted_face(body)
+    ad = BRepAdaptor_Curve(trap.spline(0.0).wrapped)
+    us = np.linspace(ad.FirstParameter(), ad.LastParameter(), 20001)
+    res = max(abs(ad.Value(u).Y() - trap.r(ad.Value(u).X())) for u in us)
+    assert res <= 1e-8, "M27 spline-vs-law residual %g > 1e-8" % (res,)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        law = 2 * math.pi * quad(lambda x: trap.r(x) * math.sqrt(1 + trap.dr(x) ** 2), 0, trap.L,
+                                 epsabs=0, epsrel=1e-13, limit=200)[0]
+    a, est_a = gprop(face, "area")
+    assert abs(a - law) / law <= 1e-7, "M27 adaptive area rel %+.3e > 1e-7" % ((a - law) / law,)
+    assert est_a <= 1e-8, "M27 area estimate %g > 1e-8" % (est_a,)
+    pf = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(face.wrapped, pf)
+    assert abs(pf.Mass() - law) / law > 1e-5, "M27 default does not miss: rel %g" % (abs(pf.Mass() - law) / law,)
+    print("[ok] trap wetted spline face: spline-vs-law residual %.3e m, adaptive area rel %+.3e (estimate %.3e), "
+          "default rel %+.3e" % (res, (a - law) / law, est_a, (pf.Mass() - law) / law))
+
+    # (M28)
+    e = trap.spline(0.0)
+    ad = BRepAdaptor_Curve(e.wrapped)
+    bs = ad.BSpline()
+    kn = [bs.Knot(i) for i in range(1, bs.NbKnots() + 1)]
+
+    def sp(u):
+        p = gp_Pnt()
+        v = gp_Vec()
+        ad.D1(u, p, v)
+        return v.Magnitude()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        q = sum(quad(sp, a0, a1, epsabs=0, epsrel=1e-13)[0] for a0, a1 in zip(kn[:-1], kn[1:]))
+    ln, est_l = gprop(e, "length")
+    assert abs(ln - q) / q <= 1e-12, "M28 spline length rel %+.3e > 1e-12" % ((ln - q) / q,)
+    assert est_l <= 1e-8, "M28 length estimate %g > 1e-8" % (est_l,)
+    la = gprop(_fx_arc(), "length")[0]
+    ta = 0.05 * math.radians(70)
+    assert abs(la - ta) / ta <= 1e-12, "M28 arc length rel %+.3e > 1e-12" % ((la - ta) / ta,)
+    assert gprop(body, "area")[0] > 0, "M28 body area not positive"
+    raised = False
+    try:
+        gprop(body, "mass")
+    except ValueError:
+        raised = True
+    assert raised, "M28 unknown kind did not raise ValueError"
+    print("[ok] gprop length: trap spline rel %+.3e vs per-span quad, arc rel %+.3e, unknown kind raises"
+          % ((ln - q) / q, (la - ta) / ta))
 
     # (M21)
     bad = [r for r in seen if schema.errors(r, "cad-measure/1") != []]

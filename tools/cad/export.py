@@ -27,8 +27,6 @@ from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRep import BRep_Tool
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopAbs import TopAbs_REVERSED
-from OCP.GProp import GProp_GProps
-from OCP.BRepGProp import BRepGProp
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -214,25 +212,28 @@ def stl_report(stl_path, json_path):
     return common.read_json(json_path)
 
 
+def _gprop_checked(shape, kind):
+    """measure.gprop's value, or ValueError MEAS-GPROP when its estimate exceeds measure.GPROP_REL_MAX."""
+    value, est = measure.gprop(shape, kind)
+    if not (est <= measure.GPROP_REL_MAX):
+        raise ValueError("MEAS-GPROP: %s relative error estimate %.3e exceeds %.0e at eps %.0e"
+                         % (kind, est, measure.GPROP_REL_MAX, measure.GPROP_EPS))
+    return value
+
+
 def face_props(face):
-    """Face area in m^2 by BRepGProp."""
-    props = GProp_GProps()
-    BRepGProp.SurfaceProperties_s(face.wrapped, props)
-    return props.Mass()
+    """Face area in m^2 by adaptive integration (measure.gprop)."""
+    return _gprop_checked(face, "area")
 
 
 def edge_length(edge):
-    """Edge length in m by BRepGProp."""
-    props = GProp_GProps()
-    BRepGProp.LinearProperties_s(edge.wrapped, props)
-    return props.Mass()
+    """Edge length in m by adaptive integration (measure.gprop)."""
+    return _gprop_checked(edge, "length")
 
 
 def solid_volume(shape):
-    """Solid volume in m^3 by BRepGProp."""
-    props = GProp_GProps()
-    BRepGProp.VolumeProperties_s(shape.wrapped, props)
-    return props.Mass()
+    """Solid volume in m^3 by adaptive integration (measure.gprop)."""
+    return _gprop_checked(shape, "volume")
 
 
 def tag_table(fluid, meridian, wall_m, value):
@@ -246,7 +247,9 @@ def tag_table(fluid, meridian, wall_m, value):
         fs = [fluid.Faces()[i] for i in idx]
         faces[tag] = {"kind": "face", "shape": "fluid", "index": list(idx),
                       "type": sorted(set(f.geomType() for f in fs)),
-                      "area_m2": sum(face_props(f) for f in fs)}
+                      "area_m2": sum(face_props(f) for f in fs),
+                      "gprop_eps": measure.GPROP_EPS,
+                      "gprop_est_rel": max([measure.gprop(f, "area")[1] for f in fs] + [0.0])}
     groups = {"fluid_faces": faces}
     for key, shape_name, shape, tags in (("meridian_edges", "meridian", meridian, value["meridian_edges"]),
                                          ("wall_edges", "wall_meridian", wall_m, value["wall_edges"])):
@@ -255,7 +258,9 @@ def tag_table(fluid, meridian, wall_m, value):
             es = [shape.Edges()[i] for i in idx]
             rows[tag] = {"kind": "edge", "shape": shape_name, "index": list(idx),
                          "type": sorted(set(e.geomType() for e in es)),
-                         "length_m": sum(edge_length(e) for e in es)}
+                         "length_m": sum(edge_length(e) for e in es),
+                         "gprop_eps": measure.GPROP_EPS,
+                         "gprop_est_rel": max([measure.gprop(e, "length")[1] for e in es] + [0.0])}
         groups[key] = rows
     return groups
 
@@ -291,7 +296,7 @@ def determinism(template_path, cases, n, root):
 
 
 def selftest():
-    """GC-5 and GC-4 end to end, plus the can-fail proofs; ten [ok] lines, then SELFTEST PASS."""
+    """GC-5 and GC-4 end to end, plus the can-fail proofs; eleven [ok] lines, then SELFTEST PASS."""
     import time
     t0 = time.monotonic()
     me = os.path.abspath(__file__)
@@ -467,6 +472,74 @@ def selftest():
                   == os.path.normcase(tdir)]
         assert not loaded, "X10 template modules %r" % (loaded,)
         print("[ok] isolation: this process never imported template.py")
+
+        # (X11)
+        from scipy.integrate import quad
+        from OCP.BRepAdaptor import BRepAdaptor_Curve
+        from OCP.gp import gp_Pnt, gp_Vec
+        from OCP.GProp import GProp_GProps
+        from OCP.BRepGProp import BRepGProp
+        sys.path.insert(0, os.path.join(HERE, "fixtures", "trap"))
+        import trap
+        body_t = trap.build()
+        assert solid_volume(body_t) == measure.gprop(body_t, "volume")[0], "X11 solid helper not routed"
+        assert face_props(trap.wetted_face(body_t)) == measure.gprop(trap.wetted_face(body_t), "area")[0], (
+            "X11 face helper not routed")
+        saved_eps = measure.GPROP_EPS
+        raised = False
+        try:
+            measure.GPROP_EPS = 1e-6
+            try:
+                solid_volume(body_t)
+            except ValueError as exc:
+                raised = str(exc).startswith("MEAS-GPROP")
+        finally:
+            measure.GPROP_EPS = saved_eps
+        assert raised, "X11 MEAS-GPROP not raised at eps 1e-6"
+        moves = {}
+        len_def = len_ada = None
+        for name in ("A_nom", "A_cor"):
+            g = common.read_json(os.path.join(A[name], "geom.json"))
+            fl = cq.Shape.importBrep(os.path.join(A[name], "fluid.brep"))
+            mer = cq.Shape.importBrep(os.path.join(A[name], "meridian.brep"))
+            tg = common.read_json(os.path.join(A[name], "tags.json"))
+            move = 0.0
+            for tag, row in g["tags"]["fluid_faces"].items():
+                assert row["gprop_eps"] == 1e-12 and row["gprop_est_rel"] <= 1e-8, (
+                    "X11 %s %s row %r" % (name, tag, row))
+                default = 0.0
+                for i in row["index"]:
+                    pd = GProp_GProps()
+                    BRepGProp.SurfaceProperties_s(fl.Faces()[i].wrapped, pd)
+                    default += pd.Mass()
+                move = max(move, abs(default - row["area_m2"]) / row["area_m2"])
+            moves[name] = move
+            assert move <= 1e-8, "X11 %s tag area move %.3e > 1e-8" % (name, move)
+            for key in ("meridian_edges", "wall_edges"):
+                for tag, row in g["tags"][key].items():
+                    assert row["gprop_eps"] == 1e-12 and row["gprop_est_rel"] <= 1e-8, (
+                        "X11 %s %s %s row %r" % (name, key, tag, row))
+            if name == "A_cor":
+                for i in tg["meridian_edges"]["wall_contraction"]:
+                    e = mer.Edges()[i]
+                    ad = BRepAdaptor_Curve(e.wrapped)
+
+                    def sp(u, ad=ad):
+                        p = gp_Pnt()
+                        v = gp_Vec()
+                        ad.D1(u, p, v)
+                        return v.Magnitude()
+                    q = quad(sp, ad.FirstParameter(), ad.LastParameter(), epsabs=0, epsrel=1e-13, limit=200)[0]
+                    la = edge_length(e)
+                    assert abs(la - q) / q <= 1e-11, "X11 corner Bezier adaptive rel %+.3e > 1e-11" % ((la - q) / q,)
+                    pl = GProp_GProps()
+                    BRepGProp.LinearProperties_s(e.wrapped, pl)
+                    assert abs(pl.Mass() - q) / q > 1e-8, "X11 corner Bezier default does not miss: %r" % (i,)
+                    len_def, len_ada = (pl.Mass() - q) / q, (la - q) / q
+        assert len_def is not None and len_ada is not None, "X11 corner lengths not measured"
+        print("[ok] adaptive GProp: trap helpers equal measure.gprop, MEAS-GPROP raised at eps 1e-6; "
+              "tag areas move nominal %.2e corner %.2e (<= 1e-8); corner Bezier length default rel %+.2e, "
+              "adaptive %+.2e" % (moves["A_nom"], moves["A_cor"], len_def, len_ada))
 
     print("selftest wall %.1f s" % (time.monotonic() - t0,))
     print("SELFTEST PASS")
