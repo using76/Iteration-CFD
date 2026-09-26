@@ -8,6 +8,7 @@ import { activeTurnWarning, CHAT_TIMEOUT_DEFAULT_MS } from '@cfd/shared'
 import { attachmentObjectBlocks, dehydrateAttachmentImages, MAX_ATTACHMENT_IDS, visionMode } from '../attachments/blocks.js'
 import { looksBinary } from '../attachments/sniff.js'
 import { createAttachmentStore } from '../attachments/store.js'
+import { readVisionVerdict } from '../attachments/visionProbe.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
 import type { Logger } from '../log.js'
@@ -199,7 +200,9 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       try {
         // N5's memoised handle: the same instance the REST routes hold, so there is no second database.
         const handle = await ontologyHandle({ config, runs, hub: undefined })
-        const attached = await attachmentObjectBlocks(context.attachmentIds, { mode: visionMode(config), store: createAttachmentStore(config), mirror: handle.store })
+        const active = llmForTurn()
+        const mode = visionMode({ llm: active.kind, vision: config.vision }, active.kind === 'zai' ? readVisionVerdict(config.cacheDir, active.kind, active.model) : null)
+        const attached = await attachmentObjectBlocks(context.attachmentIds, { mode, store: createAttachmentStore(config), mirror: handle.store })
         blocks.push(...attached.blocks)
         notices.push(...attached.notices)
         warnings.push(...attached.warnings)

@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "probe:llm": "tsx scripts/llm-probe.ts",
+    "probe:vision": "tsx scripts/vision-probe.ts",
     "drive": "tsx scripts/ai-drive.ts"
   },
   "dependencies": {

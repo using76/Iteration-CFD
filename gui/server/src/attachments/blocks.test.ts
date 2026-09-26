@@ -44,10 +44,14 @@ async function seed(filename: string, declaredType: string): Promise<{ id: strin
 }
 
 describe('attachment blocks', () => {
-  it('visionMode follows the provider and CFD_VISION', () => {
+  it('visionMode follows CFD_VISION, then the provider and its probe record', () => {
     expect(visionMode({ llm: 'anthropic' })).toBe('blocks')
+    expect(visionMode({ llm: 'anthropic' }, 'failed')).toBe('blocks')
     expect(visionMode({ llm: 'mock' })).toBe('blocks')
-    expect(visionMode({ llm: 'zai' })).toBe('blocks') // the SUPPORTED literal the probe answered
+    expect(visionMode({ llm: 'zai' })).toBe('describe')
+    expect(visionMode({ llm: 'zai' }, 'failed')).toBe('describe')
+    expect(visionMode({ llm: 'zai' }, 'inconclusive')).toBe('describe')
+    expect(visionMode({ llm: 'zai' }, 'passed')).toBe('blocks')
     expect(visionMode({ llm: 'anthropic', vision: 'describe' })).toBe('describe')
     expect(visionMode({ llm: 'zai', vision: 'blocks' })).toBe('blocks')
   })
