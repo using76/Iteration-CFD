@@ -600,8 +600,10 @@ AM-9's attempt 1: eight pure rules run in a fixed order, each editing the config
 (formula, inputs with units, edits, cite). Verdicts: `apply` edited, `pass` — holds already or trigger absent,
 `abstain` — cannot act, `refuse` — no config under the rule; it sets `stop`, the config comes back None and every
 later rule abstains. Every edit goes through the locked knob table (no `/quality`, no `cell_frac`, `medial_frac`,
-`min_thickness`); only R-PLANE writes `/snap/*` (`feature_tolerance` 0, `smoothing_passes` 0), and R-FEAT leaves
-`feature_tolerance` at its default 0.5 — 0 switches the feature attraction off (G-PILOT caution 1; G-FID guards it).
+`min_thickness`); R-PLANE writes `/snap/*` (`feature_tolerance` 0, `smoothing_passes` 0), and since FT-RADIUS
+(2026-09-27) R-FEAT writes `/snap/feature_tolerance = 0.5 · 2^−max_level`, so the attraction radius
+tau = feature_tolerance · base_size is h_f/2 (R-BUDGET re-derives it when it changes max_level); 0 still switches
+the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0, section D).
 
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
@@ -609,7 +611,7 @@ later rule abstains. Every edit goes through the locked knob table (no `/quality
 - R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter.
 - R-CURV reads r_p5 and raises the wall level to h ≤ r_p5/8.
 - R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
-- R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1.
+- R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1, then asks for the attraction radius tau = h_f/2 (SPEC-LIT §92.12's erratum: the default 0.5 is half a BASE cell, 2^(L−1) wall cells at wall level L, and pins a refined sharp body).
 - R-BUDGET predicts cells (never probes: one costs up to 150 s) and coarsens far-field bands, then the wall band, then the feature bump, then the wall level, until 0.7·cell_budget fits.
 
 Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 on every snapped wall (§92.13 drops their layers anyway; a tighter window there costs a whole octree level for no capture). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
@@ -617,6 +619,34 @@ Where the plan and the tree disagree (the tree wins): on a box the delivered sta
 G-RULES 2026-09-24 (`rules/G-RULES.json`, binary 054bba67…a90b, HEAD 7e8e14f): PASS. Part 1, the worked example plus five live cube runs at h/t1 41.96: A 8 layers, full_area_frac 1.0; B (first growth over the limiter) 8 layers, full 0.0 — the limiter binds and the stack survives; C exit 1 on the G5 early check (0.04995 < 0.05); D and F exit 0 with 0 layers, dropped under min_thickness·T. Part 2, 60 tuning rows: 59 applied, 1 refused (A-1-009, R-BUDGET, re-derived), preflight pass 59/59 with a live octree probe, -dryRun 0 59/59; wall levels A {4:1, 5:10}, B {6:12}, D {4:2, 5:5, 6:5}, E {4:3, 5:8, 6:1}, F {3:2, 4:4, 5:6}; predicted/probe leaves 0.79–4.09 (median 1.30 over the 59 probes, conservative). Part 3: R-PLANE applied 34/35 commensurate rows (box_c 21/21, plate_c 8/8, lcorner_c 5/6); F-1-009 abstains (h/t1 15.2 < 16); 34/34 plane checks ok (worst 5.7e-14); three live runs' snap max_over_h ≤ 9.4e-13, and all three delivered 8 layers with full_area_frac 1.0 (reported, not gated).
 
 For later units: AM-10 — a layer drop `retreat_snapped` on a non-R-PLANE body is §92.13's snapped-wall gap (CAPABILITY-LIMITED); R-CURV raises the curved bodies' wall level (all 12 B rows landed at 6) while G-PILOT found wall level −1 F3-clean on B-1-002 and B-1-004, a tension for AM-10/AM-12 to measure. AM-11 — `setup()` then `preflight()` with the flow, the fingerprint and one octree probe; an R-BUDGET or R-WIN refusal is a named outcome for the row, not a failure to hide.
+
+**FT-RADIUS (2026-09-27, AM-L; the user's decision D-L4).** The attraction radius goes by the config route:
+(92.38) is unchanged (tau = feature_tolerance · base_size) and R-FEAT asks for half a cell of the finest level. Sharp
+bodies off R-PLANE are the only configs that change; every R-PLANE and every smooth-body config keeps its sha.
+`setup(..., ft_radius=False)` is the rule set every committed campaign was recorded under, and
+`ft_radius_of(records)` tells which one a campaign used (an R-FEAT apply record that edits
+`/snap/feature_tolerance`). `optimise.rows_from` and prior.py's G-PRIOR rows rebuild recorded attempt-1 configs
+with it, so the committed bundles still reproduce, and optimise.py's live selftest replays its committed attempt 1
+under the recorded rules. `RM-SNAP-FT` stays refused on a sharp body; a halve-tau remedy is left to L6, the owners
+of the optimiser and the prior, because a new applicable snap remedy moves where the optimiser acts.
+
+The gate, fixed before the run: 60 sharp non-plane tuning bodies, 10 per family A, B, D, E, F and G
+(`rules.py --ft-sample`: the strata round robin, each stratum in sha256(`ft-radius/1`|id) order), meshed at
+attempt 1 by `campaign.py --run --manifest tuning --mode rules --ablate remedies --ids <the 60>`; PASS needs at
+least 20 of the 60 F3-clean (a mesh with none of F3a–F3e), every attempt 1 at tau = h_f/2, zero harness errors,
+and the identity against `prior/tuning_rules.json.gz` (plane and smooth configs unchanged, a sharp config
+different in `/snap/feature_tolerance` alone). `rules.py --ft-gate --campaign DIR` reports the capture share
+(92.62) too, and writes `rules/G-FT-RADIUS.json` and `.md`.
+
+G-FT-RADIUS 2026-09-27 (`rules/G-FT-RADIUS.json`, binary 7ff16117…5a83, on 48e29bd): PASS. 36 of the 60 are
+F3-clean at attempt 1 (the gate is 20), where the committed rules campaign's attempt 1 at the default radius was
+F3a–F3d-clean on none of the same 60; by family A 0, B 7, D 9, E 5, F 7, G 8 of 10. The flags set are F3b 10,
+F3c 13, F3d 6 and F3e 3 (B-1-005, B-1-041 and B-1-077 capture 0), and E-1-032 is refused by PF-YPLUS before it
+meshes. The capture share (92.62) over the 59 meshes has median 0.7315 (A 0.287, B 0.500, D 0.858, E 0.951,
+F 0.907, G 0.745), min 0 and max 0.978. (92.62) under-reads an edge that the STL splits into collinear segments
+(section D), so these shares are lower bounds. Identity: plane 37/37, smooth 44/44, sharp 276/276 (only
+`/snap/feature_tolerance` differs), refused 15/15. The wings (family A) stay F3-dirty at h_f/2, as the AM-L plan
+feared: their trailing edges are the thin, near-180° case.
 
 ## remedies.py — L2 remedies
 

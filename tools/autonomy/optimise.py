@@ -32,6 +32,7 @@ enabled only when the CV holds AND it beats the rules on the tuning split.
 import argparse
 import collections
 import copy
+import functools
 import gzip
 import hashlib
 import importlib
@@ -199,6 +200,9 @@ def rows_from(bundle, source, mrows, gates, knobs):
     for r in bundle["attempts"]:
         by_geom.setdefault(r["geometry_id"], {})[r["attempt"]] = r
     out = []
+    # the rules the campaign was recorded under (a bundle written before FT-RADIUS
+    # rebuilds its attempt-1 configs with the default attraction radius)
+    ftr = rules.ft_radius_of(bundle.get("records") or [])
     for gid in sorted(by_geom):
         att = by_geom[gid]
         if sorted(att) != list(range(1, max(att) + 1)):
@@ -210,7 +214,8 @@ def rows_from(bundle, source, mrows, gates, knobs):
             base = campaign.b0_template(mrows[gid], fp)
         else:
             s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
-                            campaign.case_rel(gid), gid, gates=gates, knobs=knobs)
+                            campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
+                            ft_radius=ftr)
             if s["refused"]:
                 raise OptError("rules.setup refuses %s (%s): %s"
                                % (gid, source, ", ".join(s["refused"])))
@@ -1704,9 +1709,10 @@ def _g2_rows(H):
 def _g3_pool(H):
     gid = "D-1-073"
     fp = H["cends"][gid]["fingerprint"]
+    # D-1-073's L1 as the committed rules campaign built it (before FT-RADIUS)
     s = rules.setup(H["mrows"][gid], fp, campaign.stl_rel(gid),
                     campaign.case_rel(gid), gid, gates=H["gates"],
-                    knobs=H["knobs"])
+                    knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]))
     assert not s["refused"], s["refused"]
     l1 = s["config"]
     assert schema.canonical_sha256(l1).startswith("e31caabef618")
@@ -1914,11 +1920,11 @@ def _g8_refine(H):
     rows = {(r["geometry_id"], r["attempt"]): r for r in r1["attempts"]}
     assert rows[("D-1-073", 2)]["decided_by"] == "optimiser"
     assert rows[("D-1-073", 2)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("D-1-073", 2)]["prediction"]["p_fail"] - 0.152656) <= 1e-6, \
+    assert abs(rows[("D-1-073", 2)]["prediction"]["p_fail"] - 0.163066) <= 1e-6, \
         rows[("D-1-073", 2)]["prediction"]["p_fail"]
     assert rows[("F-1-025", 2)]["decided_by"] == "optimiser"
     assert rows[("F-1-025", 2)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("F-1-025", 2)]["prediction"]["p_fail"] - 0.173456) <= 1e-6, \
+    assert abs(rows[("F-1-025", 2)]["prediction"]["p_fail"] - 0.181093) <= 1e-6, \
         rows[("F-1-025", 2)]["prediction"]["p_fail"]
     sidx = {}
     for ln in r1["records"]:
@@ -2036,31 +2042,39 @@ def _g10_live(H):
     A, P, S = replay_fns(measured_from(H["rb"]), probes_from(H["rb"]),
                          snaps_from(H["rb"]))
     live = os.path.join(tmp, "live")
-    end = campaign.run_campaign(
-        {"manifest": "tuning", "ids": ["D-1-073"], "out": live,
-         "mode": "rules+opt", "streams": 2, "audit_mod": AUDIT_OFF,
-         "quiet": True}, attempt_fn=A, probe_fn=P, snap_fn=S,
-        hooks={"optimiser": make_hook(lambda gid: (H["folds"][4], 4),
-                                      model_sha256="selftest")})
-    lr = {r["attempt"]: r for r in campaign.load_rows(live)
-          if r["geometry_id"] == "D-1-073"}
-    comm = {r["attempt"]: r for r in H["rb"]["attempts"]
-            if r["geometry_id"] == "D-1-073"}
-    assert (lr[1]["config_sha"], lr[1]["decided_by"], lr[1]["rule_id"]) == \
-        (comm[1]["config_sha"], comm[1]["decided_by"],
-         comm[1]["rule_id"]), 1
-    # the committed attempt 2 is RM-SNAP-FT, refused since 2026-09-26, so the
-    # live campaign cannot replay it and the optimiser's first pick takes over
-    assert lr[2]["decided_by"] == "optimiser" and lr[2]["rule_id"] == "OPT-PICK", \
-        (lr[2]["decided_by"], lr[2]["rule_id"])
-    assert end["harness_errors"] == 0 and end["orphans"] == []
-    assert end["max_live_mesher"] <= 2, end["max_live_mesher"]
-    # the first optimiser row is now attempt 2 (the committed attempt 2 is the
-    # refused RM-SNAP-FT), so only attempt 1 is verified against the campaign
-    verify_round(1, live,
-                 [r for r in H["rb"]["attempts"]
-                  if r["geometry_id"] == "D-1-073" and r["attempt"] == 1],
-                 ["D-1-073"])
+    # the committed rules campaign ran before FT-RADIUS, so its attempt 1 is replayed
+    # and verified under the rules it was recorded with; restored in the finally below
+    setup0 = rules.setup
+    rules.setup = functools.partial(
+        setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]))
+    try:
+        end = campaign.run_campaign(
+            {"manifest": "tuning", "ids": ["D-1-073"], "out": live,
+             "mode": "rules+opt", "streams": 2, "audit_mod": AUDIT_OFF,
+             "quiet": True}, attempt_fn=A, probe_fn=P, snap_fn=S,
+            hooks={"optimiser": make_hook(lambda gid: (H["folds"][4], 4),
+                                          model_sha256="selftest")})
+        lr = {r["attempt"]: r for r in campaign.load_rows(live)
+              if r["geometry_id"] == "D-1-073"}
+        comm = {r["attempt"]: r for r in H["rb"]["attempts"]
+                if r["geometry_id"] == "D-1-073"}
+        assert (lr[1]["config_sha"], lr[1]["decided_by"], lr[1]["rule_id"]) == \
+            (comm[1]["config_sha"], comm[1]["decided_by"],
+             comm[1]["rule_id"]), 1
+        # the committed attempt 2 is RM-SNAP-FT, refused since 2026-09-26, so the
+        # live campaign cannot replay it and the optimiser's first pick takes over
+        assert lr[2]["decided_by"] == "optimiser" and lr[2]["rule_id"] == "OPT-PICK", \
+            (lr[2]["decided_by"], lr[2]["rule_id"])
+        assert end["harness_errors"] == 0 and end["orphans"] == []
+        assert end["max_live_mesher"] <= 2, end["max_live_mesher"]
+        # the first optimiser row is now attempt 2 (the committed attempt 2 is the
+        # refused RM-SNAP-FT), so only attempt 1 is verified against the campaign
+        verify_round(1, live,
+                     [r for r in H["rb"]["attempts"]
+                      if r["geometry_id"] == "D-1-073" and r["attempt"] == 1],
+                     ["D-1-073"])
+    finally:
+        rules.setup = setup0
     oc = lr[2]["outcome"]
     print("[ok] live: rules+opt through the mesher at 2 streams on D-1-073: row "
           "1 replayed from the rules campaign, row 2 the optimiser's pick %s "

@@ -644,7 +644,8 @@ def decide_all(bundle, model, gates, knobs):
             continue
         fp = end["fingerprint"]
         s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
-                        campaign.case_rel(gid), gid, gates=gates, knobs=knobs)
+                        campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
+                        ft_radius=rules.ft_radius_of(bundle.get("records") or []))
         if s["refused"]:
             raise PriorError("rules.setup refuses %s: %s"
                              % (gid, ", ".join(s["refused"])))
