@@ -30237,9 +30237,10 @@ A volumetric source may be a number, a curve in `T` or a table in `t`,
 over a region or a box (§100.11), and a curve is split Patankar's way
 (§100.12).
 
-The gates of this section are 100-A to 100-D. `docs/09` wrote them under the
-number before this one, which §69's registry reserves for invented gate
-addresses; those names are not used anywhere in the tree.
+The gates of this section are 100-A to 100-D - §100.8, §100.4 and §100.15.
+`docs/09` wrote them under the number before this one, which §69's registry
+reserves for invented gate addresses; those names are not used anywhere in
+the tree.
 
 `No GPL-licensed source was consulted.`
 
@@ -30960,6 +30961,78 @@ cavity, and `cp` is still refused (§100.2).
 
 Three of the new library tests carry §112.3's f32 attribute: the three that
 run a case.
+
+### 100.15 Gates 100-C and 100-D
+
+**Gate 100-C - Brinkman's plane Poiseuille with viscous heating.** Fully
+developed laminar flow between parallel plates `H` apart at mean speed
+`U_m`, `u = 6 U_m s (1 - s)` with `s = y/H`, heats itself by (S100.13) at
+`Phi = mu (du/dy)^2 = 36 mu U_m^2 (1 - 2 s)^2 / H^2`. The axial derivatives
+are zero, so `k theta'' = -Phi` with `theta = T - T_w`. With both walls held
+at `T_w`, and with the top wall adiabatic instead:
+
+```
+theta(s) = (3/4) Br (1 - (1 - 2 s)^4),                  mean over s  (3/5) Br          (S100.15)
+theta(s) = Br (6 s + (3/4)(1 - (1 - 2 s)^4)),            mean over s  (18/5) Br         (S100.16)
+```
+
+in K, with `Br = mu U_m^2 / (k 1 K)`. H. C. Brinkman, *Appl. Sci. Res.* A2
+(1951) 120-124, DOI 10.1007/BF00411976, posed the problem; the paper was not
+read, and both forms are derived here from the lines above: integrate twice,
+`theta(0) = 0`, and `theta(1) = 0` or `theta'(1) = 0`.
+
+**The fixture.** A fluid-only conjugate case, `H = 1` across and `L = 20`
+along, one cell deep between `empty` faces, `rho = cp = kappa = mu = 1` and
+`viscousDissipation` on; a uniform inlet at `U = 1` and 300 K, an
+`inletOutlet` outlet, `bottom` held at 300 K and `top` held (S100.15) or
+adiabatic (S100.16). So `Br = 1` and `Re = Pe = 1` on `H`: the flow and the
+temperature develop within a few `H` of the inlet, and the middle third,
+`x` in `[L/3, 2L/3]`, is fully developed. Three meshes, `ny = 8, 16, 32`
+across and `5 ny + 1` along, so a column of cells is centred on `x = L/2`.
+
+**What is held.** (1) The mean rise over the middle third, the volume mean
+of `T - 300` over its cells, against the closed form's mean, to `1 %` on the
+finest mesh, with §94's study beside it. (2) The profile of the column
+centred on `x = L/2` against the closed form at its cell centres, the
+largest deviation over the largest rise, to `1 %` on the finest mesh. (3) On
+every mesh, `SUM Phi V` against the enthalpy the outlet carries out less the
+heat conducted in through the four patches, to `1e-6` - §26.1's balance,
+closed with Phi in it. Every run must converge on its own residual. No
+published number is compared against; there is no answer key.
+
+**Gate 100-D - Gate 6 with water's `mu(T)` live.** Qu & Mudawar's
+micro-channel - §79's document and driver unchanged - with the water's `mu`
+a table in `T` in place of the number §79.12's Disclosure 2 fixes at the
+inlet temperature. **Disclosure 3:** the table is liquid water's viscosity at
+0.1 MPa from 10 to 80 C, standard tabulated values (as the CRC Handbook of
+Chemistry and Physics tabulates them from the IAPWS 2008 formulation),
+transcribed and not keyed: no viscosity is compared against anything. At
+20 C it reads `1.0016e-3` Pa s against Disclosure 2's `1.002e-3`, 0.04 %
+apart. The inlet speed is Gate 6's, `Re = 140` with the inlet `mu`, so the
+mass flow is Gate 6's and what moves is the viscosity's distribution -
+thinner at the heated wall.
+
+Gate 6's two live levels run again with the table. Each must converge and
+close §79.7's three identities with Gate 6's own bars; the coarse level runs
+with the number too, and the curve must move `R_t,out` (§13.4.1); the finer
+level's two resistances must lie inside Kawano et al.'s bars, which is Gate
+6's criterion, and the movement against §79.12's constant-`mu` rows is
+printed for both levels. Disclosure 2's `R_t,out` 0.235 -> about 0.27 is a
+different change - `mu` at the mean fluid temperature inside `Re` at a fixed
+`Re`, which cuts the mass flow by a fifth; this gate does not make it, and it
+prints both numbers so a reader can tell them apart. The movement's
+direction is measured; its absolute size is not held against a published
+viscosity, because no key for water's is carried (§100.4's rule), and Gate
+6's band is not changed.
+
+| Check | Expected |
+|---|---|
+| (S100.15) and (S100.16), on the host | their walls, `k theta'' = -Phi`, and their means |
+| Gate 100-C, both variants | the mean rise and the profile within `1 %` on `ny = 32`; the study printed |
+| Gate 100-C, every mesh | converged; the balance with Phi in it to `1e-6` |
+| Gate 100-D, each level | converged; §79.7's identities with Gate 6's bars |
+| Gate 100-D, the coarse pair | `R_t,out` moved by the curve |
+| Gate 100-D, the finer level | both resistances inside Kawano et al.'s bars |
 
 ---
 

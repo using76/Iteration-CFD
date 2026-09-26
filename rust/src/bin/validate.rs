@@ -3292,6 +3292,16 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("SPEC-LIT 100.8 Gate 100-A Kirchhoff slab");
     check_kirchhoff_slab(c, &gpu)?;
     c.leave_gate();
+    // SPEC-LIT 100.15 - Brinkman's channel, Gate 100-C.
+    println!("\n=== Gate 100-C: Brinkman's plane Poiseuille with viscous heating, two walls, three meshes each (SPEC-LIT 100.15) ===");
+    c.enter_gate("SPEC-LIT 100.15 Gate 100-C Brinkman plane Poiseuille");
+    check_brinkman_channel(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 100.15 - Gate 6 with the water's mu(T) live, Gate 100-D.
+    println!("\n=== Gate 100-D: Qu & Mudawar's micro-channel with water's mu(T) live (SPEC-LIT 100.15) ===");
+    c.enter_gate("SPEC-LIT 100.15 Gate 100-D Qu & Mudawar with mu(T)");
+    check_qm_viscosity(c, &gpu)?;
+    c.leave_gate();
     // SPEC-LIT 105 - the moving mesh, and Gate 105-A.
     println!("\n=== Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) ===");
     c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
@@ -21286,6 +21296,335 @@ mod kirchhoff_100a {
 }
 
 // ==========================================================================
+//  SPEC-LIT §100.15 - Gates 100-C and 100-D: viscous dissipation, and mu(T)
+// ==========================================================================
+
+/// (S100.15): the rise across a plane Poiseuille channel with both walls
+/// held, at `Br = 1`, K, at `s = y/H`.
+fn brinkman_held(s: f64) -> f64 {
+    0.75 * (1.0 - (1.0 - 2.0 * s).powi(4))
+}
+
+/// (S100.16): the same channel with its top wall adiabatic.
+fn brinkman_adiabatic(s: f64) -> f64 {
+    6.0 * s + 0.75 * (1.0 - (1.0 - 2.0 * s).powi(4))
+}
+
+/// Gate 100-C's channel as a case document (SPEC-LIT 100.15): `H = 1`
+/// across in `ny` cells, `L = 20` along in `5 ny + 1`, one cell deep; unit
+/// properties at `U_m = 1`, so `Br = 1`; `bottom` held at 300 K and `top`
+/// the case's `T`; viscous dissipation on.
+fn gate_100c_channel(ny: usize, top: &str) -> String {
+    let nx = 5 * ny + 1;
+    format!(
+        r#"{{
+  "name": "brinkmanChannel",
+  "regions": [
+    {{ "name": "fluid", "kind": "fluid",
+      "mesh": {{ "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [20.0, 1.0, 0.1] }}, "cells": [{nx}, {ny}, 1],
+        "boundaries": {{ "xmin": "inlet", "xmax": "outlet", "ymin": "bottom", "ymax": "top",
+                         "zmin": "front", "zmax": "back" }} }},
+      "fluid": {{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 1.0, "viscousDissipation": true }},
+      "patches": [
+        {{ "match": "inlet", "kind": "inlet", "U": [1.0, 0.0, 0.0], "T": {{ "type": "fixedValue", "value": 300.0 }} }},
+        {{ "match": "outlet", "kind": "outlet", "T": {{ "type": "inletOutlet", "inletValue": 300.0 }} }},
+        {{ "match": "bottom", "T": {{ "type": "fixedValue", "value": 300.0 }} }},
+        {{ "match": "top", "T": {top} }},
+        {{ "match": "front", "T": {{ "type": "empty" }} }},
+        {{ "match": "back", "T": {{ "type": "empty" }} }}
+      ] }}
+  ],
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": 4000 }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-16, "maxIter": 500,
+    "flow": {{ "relaxU": 0.7, "relaxP": 0.3, "relaxT": 1.0,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear", "residual": 1e-9,
+      "uTolerance": 1e-14, "pTolerance": 1e-14, "uMaxIter": 200, "pMaxIter": 800 }}
+  }}
+}}"#
+    )
+}
+
+/// What one Gate 100-C level measured (SPEC-LIT 100.15).
+struct BrinkmanRun {
+    /// The volume mean of `T - 300` over the middle third, K.
+    rise: Scalar,
+    /// The largest deviation from the closed form in the column centred on
+    /// `x = L/2`, over the closed form's largest rise.
+    profile: Scalar,
+    phi: Scalar,
+    /// `|(enthalpy out - heat conducted in) / SUM Phi V - 1|`.
+    balance: Scalar,
+    iterations: usize,
+    converged: bool,
+}
+
+fn gate_100c_run(gpu: &Gpu, ny: usize, top: &str, exact: fn(f64) -> f64) -> Result<BrinkmanRun> {
+    use ofgpu::cht::flow::run_flow_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+    let low = parse_cht_case(&gate_100c_channel(ny, top), "SPEC-LIT 100.15 Gate 100-C")?.lower()?;
+    let case = low
+        .flow_case()
+        .ok_or_else(|| Error::Config("Gate 100-C: the channel did not lower to a conjugate case".to_string()))?;
+    let sol = run_flow_case(gpu, &case)?;
+    let hm = &sol.mesh.host;
+    let (mut num, mut den) = (0.0 as Scalar, 0.0 as Scalar);
+    let (mut worst, mut top_rise) = (0.0 as Scalar, 0.0 as Scalar);
+    let dx = 20.0 / (5 * ny + 1) as Scalar;
+    for c in 0..hm.n_cells {
+        let p = hm.c[c];
+        if p.x >= 20.0 / 3.0 && p.x <= 40.0 / 3.0 {
+            num += (sol.t[c] - 300.0) * hm.v[c];
+            den += hm.v[c];
+        }
+        if (p.x - 10.0).abs() < 0.5 * dx {
+            let want = exact(f64::from(p.y)) as Scalar;
+            worst = worst.max((sol.t[c] - 300.0 - want).abs());
+            top_rise = top_rise.max(want);
+        }
+    }
+    let o = sol
+        .openings
+        .as_ref()
+        .ok_or_else(|| Error::Config("Gate 100-C: the channel has no openings".to_string()))?;
+    let mut conducted = 0.0 as Scalar;
+    for p in ["inlet", "outlet", "bottom", "top"] {
+        conducted += sol.patch_heat_flow(0, p)?;
+    }
+    Ok(BrinkmanRun {
+        rise: num / den,
+        profile: worst / top_rise,
+        phi: sol.dissipation_power,
+        balance: ((o.enthalpy_rise - conducted) / sol.dissipation_power - 1.0).abs(),
+        iterations: sol.iterations,
+        converged: sol.converged,
+    })
+}
+
+/// Gate 100-C (SPEC-LIT 100.15): Brinkman's plane Poiseuille with viscous
+/// heating, both walls held and then the top adiabatic, three meshes each -
+/// the middle third's mean rise and the centre column's profile against
+/// (S100.15) and (S100.16) to 1 % on the finest, SPEC-LIT 94's study beside
+/// them, and every watt of Phi out through the walls and the openings to
+/// 1e-6 on every mesh.
+fn check_brinkman_channel(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    const HELD: &str = r#"{ "type": "fixedValue", "value": 300.0 }"#;
+    const ADIABATIC: &str = r#"{ "type": "zeroGradient" }"#;
+    let variants: [(&str, &str, f64, fn(f64) -> f64); 2] =
+        [("both walls held", HELD, 0.6, brinkman_held), ("top adiabatic", ADIABATIC, 3.6, brinkman_adiabatic)];
+    let mut detail: Vec<String> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+    let mut studies = Vec::new();
+    for (name, top, mean, exact) in variants {
+        let mean = mean as Scalar;
+        let mut levels = Vec::new();
+        let mut last: Option<BrinkmanRun> = None;
+        for ny in [8usize, 16, 32] {
+            let r = gate_100c_run(gpu, ny, top, exact)?;
+            let rel = (r.rise / mean - 1.0).abs();
+            let line = format!(
+                "{name}, ny = {ny}: mean rise {:.8} K against {mean} K, rel {rel:.3e}; profile {:.3e}; \
+                 Phi {:.6e} W, balance {:.2e}; {} iterations, converged {}",
+                r.rise, r.profile, r.phi, r.balance, r.iterations, r.converged
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+            c.require(&format!("SPEC-LIT 100.15 Gate 100-C ({name}, ny = {ny}): the channel converges"), r.converged);
+            c.check(
+                &format!("SPEC-LIT 100.15 Gate 100-C ({name}, ny = {ny}): SUM Phi V out through the walls and openings, rel"),
+                r.balance,
+                1.0e-6,
+            );
+            if !r.converged || !(r.balance <= 1.0e-6) {
+                misses.push(format!("{name}, ny = {ny}: converged {}, balance {:.2e}", r.converged, r.balance));
+            }
+            levels.push(vv::Level { h: 1.0 / ny as Scalar, value: r.rise });
+            last = Some(r);
+        }
+        let fine = last.expect("three levels");
+        let rel = (fine.rise / mean - 1.0).abs();
+        levels.reverse();
+        let study = vv::grid_study(&levels)?;
+        c.note(&format!("  {name}, the mean rise: {}", study.one_line()));
+        c.check(
+            &format!("SPEC-LIT 100.15 Gate 100-C ({name}): the mean rise on the finest mesh, rel to the closed form"),
+            rel,
+            1.0e-2,
+        );
+        c.check(
+            &format!("SPEC-LIT 100.15 Gate 100-C ({name}): the centre column's profile on the finest mesh, rel"),
+            fine.profile,
+            1.0e-2,
+        );
+        if !(rel <= 1.0e-2) || !(fine.profile <= 1.0e-2) {
+            misses.push(format!("{name}: mean rise {:.3} %, profile {:.3} % against 1 %", rel * 100.0, fine.profile * 100.0));
+        }
+        studies.push(study);
+    }
+    if !misses.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 100.15 Gate 100-C Brinkman plane Poiseuille",
+            against: "Brinkman's fully developed plane Poiseuille with viscous heating, (S100.15) and (S100.16), SPEC-LIT 100.15",
+            headline: misses.join("; "),
+            detail,
+            uncertainty: Some(Uncertainty::Study(studies.remove(0))),
+        });
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 100.15: Gate 100-C's closed forms meet their walls, carry
+/// `k theta'' = -Phi`, and integrate to their means - no GPU, in f64.
+#[cfg(test)]
+mod brinkman_100c {
+    use super::*;
+
+    #[test]
+    fn the_brinkman_closed_forms_meet_their_walls_and_integrate_to_their_means() {
+        let phi = |s: f64| 36.0 * (1.0 - 2.0 * s).powi(2);
+        assert_eq!(brinkman_held(0.0), 0.0);
+        assert!(brinkman_held(1.0).abs() <= 1e-15, "held at the top: {}", brinkman_held(1.0));
+        assert_eq!(brinkman_adiabatic(0.0), 0.0);
+        let h = 1.0e-4;
+        let slope = (brinkman_adiabatic(1.0 + h) - brinkman_adiabatic(1.0 - h)) / (2.0 * h);
+        assert!(slope.abs() <= 1e-6, "the adiabatic wall's slope is {slope}");
+        for f in [brinkman_held as fn(f64) -> f64, brinkman_adiabatic] {
+            for s in [0.1, 0.37, 0.5, 0.81] {
+                let h = 1.0e-3;
+                let second = (f(s + h) - 2.0 * f(s) + f(s - h)) / (h * h);
+                assert!((second + phi(s)).abs() <= 1e-4 * phi(0.0), "k theta'' + Phi = {} at s = {s}", second + phi(s));
+            }
+        }
+        let n = 1000usize;
+        let simpson = |f: fn(f64) -> f64| -> f64 {
+            let h = 1.0 / n as f64;
+            (0..=n)
+                .map(|i| {
+                    let w = if i == 0 || i == n { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
+                    w * f(i as f64 * h)
+                })
+                .sum::<f64>()
+                * h
+                / 3.0
+        };
+        assert!((simpson(brinkman_held) - 0.6).abs() <= 1e-10, "held mean {}", simpson(brinkman_held));
+        assert!((simpson(brinkman_adiabatic) - 3.6).abs() <= 1e-10, "adiabatic mean {}", simpson(brinkman_adiabatic));
+    }
+}
+
+/// SPEC-LIT 100.15 Disclosure 3: liquid water's dynamic viscosity at
+/// 0.1 MPa, Pa s, from 10 to 80 C - standard tabulated values, as the CRC
+/// Handbook tabulates them from the IAPWS 2008 formulation. Transcribed and
+/// not keyed: Gate 100-D compares no viscosity against anything.
+const QM_MU_WATER: &str = r#"{ "table": [[283.15, 1.3059e-3], [293.15, 1.0016e-3], [303.15, 0.7972e-3],
+  [313.15, 0.6527e-3], [323.15, 0.5465e-3], [333.15, 0.4660e-3], [343.15, 0.4035e-3], [353.15, 0.3544e-3]] }"#;
+
+/// Gate 6's document with the water's `mu` the table of Disclosure 3.
+fn qm_document_mu_t(nx: usize, ny: [usize; 3], nz: [usize; 3]) -> Result<String> {
+    let text = qm_document(nx, ny, nz);
+    let from = format!(r#""mu": {QM_MU}"#);
+    if text.matches(&from).count() != 1 {
+        return Err(Error::Config(format!("Gate 100-D: '{from}' is not in Gate 6's document exactly once")));
+    }
+    Ok(text.replace(&from, &format!(r#""mu": {QM_MU_WATER}"#)))
+}
+
+/// Gate 100-D (SPEC-LIT 100.15): Gate 6 with the water's `mu(T)` live - its
+/// two live levels again, each converged and closing §79.7's identities with
+/// Gate 6's bars; the coarse level with the number too, the curve required to
+/// move `R_t,out`; the finer level's resistances inside Kawano et al.'s bars.
+/// The movement against SPEC-LIT 79.12's constant-mu rows is printed.
+fn check_qm_viscosity(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    let levels: [(usize, [usize; 3], [usize; 3]); 2] =
+        [(40, [2, 6, 2], [8, 14, 14]), (60, [3, 9, 3], [12, 21, 21])];
+    let mut detail: Vec<String> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+    let mut fine: Option<QmRun> = None;
+    for (k, (nx, ny, nz)) in levels.into_iter().enumerate() {
+        let r = run_qm_document(gpu, &qm_document_mu_t(nx, ny, nz)?)?;
+        let (d_in, d_out) = QM_LEVELS
+            .iter()
+            .find(|(cells, _, _)| *cells == r.cells)
+            .map_or((Scalar::NAN, Scalar::NAN), |&(_, a, b)| (100.0 * (r.r_in / a - 1.0), 100.0 * (r.r_out / b - 1.0)));
+        let line = format!(
+            "{} cells, mu(T) live: R_t,in = {:.5}, R_t,out = {:.5} C cm^2/W ({d_in:+.3} %, {d_out:+.3} % against \
+             SPEC-LIT 79.12's constant-mu row); T_w,in = {:.2} C, T_w,out = {:.2} C; {} iterations, converged {}",
+            r.cells,
+            f64::from(r.r_in),
+            f64::from(r.r_out),
+            f64::from(r.t_w_in) - 273.15,
+            f64::from(r.t_w_out) - 273.15,
+            r.iterations,
+            r.converged
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+        c.require(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): converged on its own residual", r.cells), r.converged);
+        c.check(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): §79.7 the two opening fluxes cancel", r.cells), r.mass_imbalance, 1e-10);
+        c.check(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): §79.7 the flow carries out the 0.9 W", r.cells), r.enthalpy_gap, 1e-3);
+        c.check(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): §79.7 identity (79.10)", r.cells), r.bulk_gap, 1e-2);
+        if !r.converged || !(r.mass_imbalance <= 1e-10) || !(r.enthalpy_gap <= 1e-3) || !(r.bulk_gap <= 1e-2) {
+            misses.push(format!("{} cells: converged {}, or a §79.7 identity open", r.cells, r.converged));
+        }
+        if k == 0 {
+            // SPEC-LIT 13.4.1: the same level with the number - the curve must move the answer.
+            let r0 = run_qm_document(gpu, &qm_document(nx, ny, nz))?;
+            let moved = (r.r_out - r0.r_out) / r0.r_out;
+            let line = format!(
+                "{} cells, the number against the curve: R_t,out {:.6} -> {:.6}, {:+.3e} of it",
+                r.cells,
+                f64::from(r0.r_out),
+                f64::from(r.r_out),
+                f64::from(moved)
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+            c.require("SPEC-LIT 100.15 Gate 100-D: the mu(T) curve moves R_t,out (SPEC-LIT 13.4.1)", moved.abs() > 1e-9);
+            if !(moved.abs() > 1e-9) {
+                misses.push("the curve did not move R_t,out".to_string());
+            }
+        }
+        fine = Some(r);
+    }
+    let fine = fine.expect("two levels");
+    let names = ["R_t,in (Fig. 4b)", "R_t,out (Fig. 4c)"];
+    let mine = [fine.r_in, fine.r_out];
+    for (k, (meas, lo, hi, _)) in QM_FIG4.iter().copied().enumerate() {
+        let ok = mine[k] >= lo as Scalar && mine[k] <= hi as Scalar;
+        c.require(&format!("SPEC-LIT 100.15 Gate 100-D: {} with mu(T) inside Kawano et al.'s error bar", names[k]), ok);
+        c.note(&format!("    {}: {:.4} against Kawano {meas} [{lo}, {hi}]", names[k], f64::from(mine[k])));
+        if !ok {
+            misses.push(format!("{} = {:.4} outside [{lo}, {hi}]", names[k], f64::from(mine[k])));
+        }
+    }
+    c.note(
+        "  Gate 100-D's inlet speed is Gate 6's (Re = 140 with the inlet mu), so the mass flow is Gate 6's and \
+         what moved is the viscosity's distribution. SPEC-LIT 79.12's Disclosure 2 - R_t,out 0.235 -> about \
+         0.27 - is a different change, mu at the mean fluid temperature inside Re at a fixed Re, which cuts the \
+         mass flow by a fifth; this gate does not make it. The direction of the movement is measured; its size \
+         is held against no published viscosity (Disclosure 3, SPEC-LIT 100.15).",
+    );
+    if !misses.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 100.15 Gate 100-D Qu & Mudawar with mu(T)",
+            against: "Kawano et al.'s R_t,in and R_t,out as Qu & Mudawar Fig. 4 renders them (the qu-mudawar2002 rows, unchanged), SPEC-LIT 100.15",
+            headline: misses.join("; "),
+            detail,
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "two live levels; the mesh study of this micro-channel is Gate 6's, SPEC-LIT 79.12, whose four \
+                 levels were run with the number (SPEC-LIT 94.3)",
+            )),
+        });
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  SPEC-LIT §97 - the imported region
 // ==========================================================================
 
@@ -21492,7 +21831,7 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 32 occurrences, 28 distinct - two gates report twice,
+    /// same string. 34 occurrences, 30 distinct - two gates report twice,
     /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
@@ -21518,9 +21857,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 32, "32 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 34, "34 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 28, "28 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 30, "30 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
