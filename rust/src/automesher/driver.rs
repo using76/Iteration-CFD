@@ -1742,4 +1742,16 @@ mod tests {
             assert!(r.get(key).is_some(), "missing {key} in {r}");
         }
     }
+
+    /// `cube_config()` end to end: the mesh the run emits is the one it
+    /// emitted when the layer stage's castellated goldens were written, bit
+    /// for bit, hashed as they are.
+    #[test]
+    fn the_cube_config_run_is_golden() {
+        const GOLDEN: &str = "3b257be84dc343e6b66432eca0ead5d7e150203a2c5984001e28a4b3fd95d5e3";
+        let (out, _) = run_recording(&cube_config(), &cube_surface(), None);
+        let got = crate::automesher::layers::tests::castellated_goldens::mesh_sha256(&out.mesh);
+        eprintln!("golden cube_config_end_to_end = {got}");
+        assert_eq!(got, GOLDEN);
+    }
 }

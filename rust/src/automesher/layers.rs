@@ -1956,7 +1956,7 @@ fn split_edge(mp: &Midpoints, a: u32, b: u32, depth: u32) -> Result<Vec<(u32, u3
 // ==========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::automesher::castellate::castellate;
     use crate::automesher::castellate::tests::{box_soup, sphere_soup, thresholds};
@@ -3350,6 +3350,280 @@ mod tests {
         if row.dropped.is_some() {
             assert_eq!(row.area_frac_tau_ge, [0.0; 3]);
             assert!(row.face_area_tau.is_empty());
+        }
+    }
+
+    /// Byte-for-byte goldens of stage 6's output on the castellated-wall
+    /// cases, where every wall face lies on a cell plane, and a printed (not
+    /// asserted) report of the snapped cases. A golden is SHA-256 over the
+    /// emitted mesh, written at the commit this module landed on; it changes
+    /// only when the layer stage's output on these cases does.
+    pub(crate) mod castellated_goldens {
+        use super::*;
+
+        /// SHA-256, FIPS 180-4 (NIST, 2015) section 6.2, as 64 lowercase
+        /// hex digits.
+        pub(crate) fn sha256_hex(msg: &[u8]) -> String {
+            const K: [u32; 64] = [
+                0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+                0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+                0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+                0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+                0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+                0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+                0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+                0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+                0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+                0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+                0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+                0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+                0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+                0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+                0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+                0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+            ];
+            let mut h: [u32; 8] = [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+            ];
+            let mut m = msg.to_vec();
+            let bit_len = (msg.len() as u64).wrapping_mul(8);
+            m.push(0x80);
+            while m.len() % 64 != 56 {
+                m.push(0);
+            }
+            m.extend_from_slice(&bit_len.to_be_bytes());
+            for block in m.chunks_exact(64) {
+                let mut w = [0u32; 64];
+                for t in 0..16 {
+                    let q = &block[4 * t..4 * t + 4];
+                    w[t] = u32::from_be_bytes([q[0], q[1], q[2], q[3]]);
+                }
+                for t in 16..64 {
+                    let (a, b) = (w[t - 15], w[t - 2]);
+                    let s0 = a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3);
+                    let s1 = b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10);
+                    w[t] = w[t - 16]
+                        .wrapping_add(s0)
+                        .wrapping_add(w[t - 7])
+                        .wrapping_add(s1);
+                }
+                let mut v = h;
+                for t in 0..64 {
+                    let [a, b, c, d, e, f, g, hh] = v;
+                    let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                    let ch = (e & f) ^ (!e & g);
+                    let t1 = hh
+                        .wrapping_add(s1)
+                        .wrapping_add(ch)
+                        .wrapping_add(K[t])
+                        .wrapping_add(w[t]);
+                    let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                    let maj = (a & b) ^ (a & c) ^ (b & c);
+                    let t2 = s0.wrapping_add(maj);
+                    v = [t1.wrapping_add(t2), a, b, c, d.wrapping_add(t1), e, f, g];
+                }
+                for k in 0..8 {
+                    h[k] = h[k].wrapping_add(v[k]);
+                }
+            }
+            h.iter().map(|x| format!("{x:08x}")).collect()
+        }
+
+        /// SHA-256 over every count, every point's f64 bits, every face,
+        /// owner, neighbour and patch-table entry of `m`, in order,
+        /// little-endian.
+        pub(crate) fn mesh_sha256(m: &PolyMeshRaw) -> String {
+            let mut b: Vec<u8> = b"PolyMeshRaw/v1\0".to_vec();
+            let n = [m.points.len(), m.faces.len(), m.owner.len()];
+            for k in n.into_iter().chain([m.neighbour.len(), m.patches.len()]) {
+                b.extend_from_slice(&(k as u64).to_le_bytes());
+            }
+            for p in &m.points {
+                for v in [p.x, p.y, p.z] {
+                    b.extend_from_slice(&(v as f64).to_bits().to_le_bytes());
+                }
+            }
+            for f in &m.faces {
+                b.extend_from_slice(&(f.len() as u64).to_le_bytes());
+                for q in f {
+                    b.extend_from_slice(&(*q as i64).to_le_bytes());
+                }
+            }
+            for o in m.owner.iter().chain(m.neighbour.iter()) {
+                b.extend_from_slice(&(*o as i64).to_le_bytes());
+            }
+            for p in &m.patches {
+                let kind = format!("{:?}", p.kind);
+                for s in [p.name.as_str(), p.type_name.as_str(), kind.as_str()] {
+                    b.extend_from_slice(s.as_bytes());
+                    b.push(0);
+                }
+                b.extend_from_slice(&(p.start as u64).to_le_bytes());
+                b.extend_from_slice(&(p.size as u64).to_le_bytes());
+                let nbr = p.nbr_patch.map_or(-1i64, |k| k as i64);
+                b.extend_from_slice(&nbr.to_le_bytes());
+            }
+            sha256_hex(&b)
+        }
+
+        /// What stage 6 returns on one case, hashed: the mesh when it returns
+        /// one, `refused:` and the hash of the refusal's text when it refuses.
+        fn run_case(surf: &Surface, mesh: &PolyMeshRaw, spec: &LayerSpec) -> String {
+            match add_layers(mesh, surf, spec, &thresholds()) {
+                Ok(out) => mesh_sha256(&out.mesh),
+                Err(e) => format!("refused:{}", sha256_hex(e.to_string().as_bytes())),
+            }
+        }
+
+        /// The case of `a_two_to_one_transition_emits_split_sides`, its setup
+        /// and layer spec copied unchanged: feature refinement takes the cells
+        /// along the cube's edges to level 2, so the castellated wall carries
+        /// 2:1 transitions and the extrusion emits split sides.
+        fn two_to_one_case() -> (Surface, PolyMeshRaw, LayerSpec) {
+            let (mut tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 2);
+            let surf = Surface::from_soup(box_soup([1.1; 3], [3.1; 3]), vec!["cube".to_string()])
+                .expect("surface");
+            let spec = RefinementSpec {
+                levels: vec![RefinementBand {
+                    patch: "cube".to_string(),
+                    bands: vec![DistanceBand { distance: 0.0, level: 1 }],
+                    feature_level: 2,
+                }],
+                feature_angle_deg: 30.0,
+                max_level: 2,
+            };
+            refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+            let cast = castellate(
+                &tree,
+                &bg,
+                &surf,
+                &patch_names(),
+                &CastellationSpec::default(),
+                &thresholds(),
+            )
+            .expect("castellate");
+            let lspec = LayerSpec {
+                patches: vec!["cube".to_string()],
+                n: 2,
+                first_thickness: 0.01,
+                normal_passes: 0,
+                min_thickness: 0.0,
+                ..LayerSpec::default()
+            };
+            (surf, cast.mesh, lspec)
+        }
+
+        /// The castellated-wall cases, by golden name; each is built afresh.
+        fn castellated_cases() -> Vec<(&'static str, Surface, PolyMeshRaw, LayerSpec)> {
+            let mut smoothed = cube_layers(0.02);
+            smoothed.normal_passes = LayerSpec::default().normal_passes;
+            let (c1s, c1m) = castellated_cube_case();
+            let (c2s, c2m) = castellated_cube_case();
+            let (c3s, c3m) = castellated_cube_case();
+            let (g1s, g1m) = castellated_gap_case();
+            let (g2s, g2m) = castellated_gap_case();
+            let (ts, tm, tl) = two_to_one_case();
+            vec![
+                ("box_minus_cube", c1s, c1m, smoothed),
+                ("box_minus_cube_normal_passes_0", c2s, c2m, cube_layers(0.02)),
+                ("slot", g1s, g1m, gap_layers(0.0)),
+                ("slot_with_floor", g2s, g2m, gap_layers(0.9)),
+                ("two_to_one_split_sides", ts, tm, tl),
+                ("thin_t1_refusal", c3s, c3m, cube_layers(0.5 / 200.0)),
+            ]
+        }
+
+        /// Written from the output of the commit this module landed on.
+        const GOLDENS: [(&str, &str); 6] = [
+            ("box_minus_cube", "50a122b585c3808af769fa7c10e8685561e5c014c65686cfd2e6832926fb4e76"),
+            ("box_minus_cube_normal_passes_0", "6a66264cf1b2822b7d317440a2cd5f43c83ff7e531c72d8d0cd4f6fa8224d617"),
+            ("slot", "8864f6af86014970c34146d02a572c8e38d30d8cd5f40697822494c6a894e8b9"),
+            ("slot_with_floor", "3ce1d2e9882accd2859b8f51d0e65e9eb158366ec27224d4c99ab2838f54a4a7"),
+            ("two_to_one_split_sides", "b131581b6e4411aa5d274ec376153ac7a38806dab82832b4b590ae3153cad72e"),
+            ("thin_t1_refusal", "refused:307046d9b46bd9358add4273f97ea40beda48fc10292a7c73cb7bab51069fe8e"),
+        ];
+
+        /// The FIPS 180-4 example messages give their published digests.
+        #[test]
+        fn sha256_matches_the_published_vectors() {
+            let two_block = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+            let million = vec![b'a'; 1_000_000];
+            let cases: [(&[u8], &str); 4] = [
+                (&b""[..], "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+                (&b"abc"[..], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+                (&two_block[..], "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+                (&million[..], "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"),
+            ];
+            for (msg, want) in cases {
+                assert_eq!(sha256_hex(msg), want, "message of {} bytes", msg.len());
+            }
+        }
+
+        /// Every castellated-wall case returns the mesh (or the refusal) it
+        /// returned when the goldens were written, bit for bit.
+        #[test]
+        fn the_castellated_layer_cases_are_golden() {
+            let mut bad: Vec<String> = Vec::new();
+            for (name, surf, mesh, spec) in castellated_cases() {
+                let got = run_case(&surf, &mesh, &spec);
+                eprintln!("golden {name} = {got}");
+                let want = GOLDENS.iter().find(|g| g.0 == name).map(|g| g.1);
+                if want != Some(got.as_str()) {
+                    bad.push(format!("{name}: got {got}, want {want:?}"));
+                }
+            }
+            assert!(bad.is_empty(), "the goldens differ: {bad:#?}");
+            for (name, h) in GOLDENS {
+                assert_eq!(
+                    name == "thin_t1_refusal",
+                    h.starts_with("refused:"),
+                    "{name}: only the thin first layer is a refusal"
+                );
+            }
+        }
+
+        /// One flipped bit in one emitted point changes the hash, and
+        /// flipping it back restores it: the goldens are not vacuous.
+        #[test]
+        fn a_flipped_point_bit_changes_the_golden() {
+            let (surf, mesh) = castellated_cube_case();
+            let mut out = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+                .expect("layers");
+            let name = "box_minus_cube_normal_passes_0";
+            let want = GOLDENS.iter().find(|g| g.0 == name).expect("golden").1;
+            assert_eq!(mesh_sha256(&out.mesh), want);
+            let i = out.mesh.points.len() - 1;
+            let x = out.mesh.points[i].x;
+            out.mesh.points[i].x = Scalar::from_bits(x.to_bits() ^ 1);
+            assert_ne!(mesh_sha256(&out.mesh), want);
+            out.mesh.points[i].x = x;
+            assert_eq!(mesh_sha256(&out.mesh), want);
+        }
+
+        /// The snapped cases' hashes, printed for the record and NOT
+        /// asserted: a snapped wall is what later layer work may change.
+        #[test]
+        fn the_snapped_layer_cases_are_reported() {
+            let floor = LayerSpec {
+                patches: vec!["cube".to_string()],
+                n: 3,
+                first_thickness: 0.02,
+                growth: 1.3,
+                min_thickness: 0.0,
+                ..LayerSpec::default()
+            };
+            let cases = [
+                ("snapped_cube", snapped_cube_case(), cube_layers(0.02)),
+                ("snapped_floor_box", snapped_floor_box_case(), floor),
+                ("snapped_sphere_t1_0.02", snapped_sphere_case(), sphere_layers(0.02)),
+                ("snapped_sphere_t1_0.05", snapped_sphere_case(), sphere_layers(0.05)),
+            ];
+            for (name, (surf, mesh), spec) in cases {
+                let got = run_case(&surf, &mesh, &spec);
+                eprintln!("snapped {name} = {got}");
+                assert!(got.len() == 64 || got.starts_with("refused:"), "{name}: {got}");
+            }
         }
     }
 }
