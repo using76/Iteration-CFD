@@ -375,7 +375,35 @@ fn layer_patch_json(p: &super::layers::PatchLayers) -> serde_json::Value {
         "t1_mean": p.t1_mean,
         "t1_min": p.t1_min,
         "dropped": p.dropped,
+        "drop_cause": p.drop_cause.map(|c| c.as_str()),
     })
+}
+
+/// The layers row's `ladder`: one entry per measurement either ladder of
+/// (92.47) took, in the order taken (SPEC-LIT §92.13).
+fn ladder_json(ladder: &[super::layers::LadderEntry]) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = ladder
+        .iter()
+        .map(|e| {
+            let gates: Vec<serde_json::Value> = e
+                .gates
+                .iter()
+                .map(|(g, n)| json!({ "gate": super::layers::gate_label(*g), "n_failed": n }))
+                .collect();
+            json!({
+                "ladder": e.ladder.as_str(),
+                "round": e.round,
+                "rung": e.rung,
+                "patches": e.patches,
+                "gates": gates,
+                "g4_level_n": e.g4_level_n,
+                "outcome": e.outcome.as_str(),
+                "give_up": e.give_up.map(|c| c.as_str()),
+                "dropped": e.dropped,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
 }
 
 /// The layers stage on a split run: `layers.patches` names the SPLIT patch
@@ -439,6 +467,7 @@ fn layers_regions_stage(
                 "skipped": true,
                 "n_layer_cells": 0,
                 "patches": [],
+                "ladder": [],
             }));
             continue;
         }
@@ -459,6 +488,7 @@ fn layers_regions_stage(
             "n_split_sides": lay.report.n_split_sides,
             "retreats": lay.report.retreats,
             "patches": patches,
+            "ladder": ladder_json(&lay.report.ladder),
         }));
         totals.0 += lay.report.n_layer_cells;
         totals.1 += lay.report.n_layer_points;
@@ -709,6 +739,7 @@ pub fn run(
             "n_split_sides": 0,
             "retreats": 0,
             "patches": [],
+            "ladder": [],
         });
         let log = report_lines(
             progress,
@@ -737,6 +768,7 @@ pub fn run(
             "n_split_sides": lay.report.n_split_sides,
             "retreats": lay.report.retreats,
             "patches": patches,
+            "ladder": ladder_json(&lay.report.ladder),
         });
         let log = report_lines(progress, &lay.report.summary());
         elapsed(progress, Stage::Layers, seconds);
@@ -1819,5 +1851,72 @@ mod tests {
         let got = fc["captured_length_m"].as_f64().unwrap();
         assert!((sharp - 12.0).abs() <= 1e-12 * 12.0, "sharp {sharp}");
         assert!(0.0 < got && got <= sharp * (1.0 + 1e-12), "captured {got} of {sharp}");
+    }
+
+    /// The snapped cube of `cube_config()` loses its layers: the layers row
+    /// carries the trace - the inner ladder of round 0 first, the outer pass
+    /// the run returned on last - and the cube's row names a cause, the one
+    /// the last give-up naming the cube names.
+    #[test]
+    fn the_layer_row_names_its_drop_cause_and_carries_its_ladder() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let row = &s["stages"][4];
+        let ladder = row["ladder"].as_array().expect("the layers row has a ladder");
+        for e in ladder {
+            eprintln!("cube_config ladder {e}");
+        }
+        assert_eq!(ladder[0]["ladder"], "inner");
+        assert_eq!(ladder[0]["round"], 0);
+        let last = ladder.last().unwrap();
+        assert_eq!(last["ladder"], "outer");
+        assert_eq!(last["outcome"], "pass");
+        let p = &row["patches"][0];
+        assert_eq!(p["name"], "cube");
+        let cause = p["drop_cause"].as_str().expect("the dropped cube names its cause");
+        let classes = ["inner_gate", "outer_gate", "thin_after_caps", "thin_proposed", "zero_disp"];
+        assert!(classes.contains(&cause), "{cause}");
+        let quit = ladder.iter().rev().find(|e| e["dropped"] == "cube").expect("a give-up");
+        assert_eq!(quit["give_up"], cause);
+        for key in ["ladder", "round", "rung", "patches", "gates", "g4_level_n", "outcome"] {
+            assert!(quit.get(key).is_some(), "missing {key} in {quit}");
+        }
+    }
+
+    /// On a split run each region's layers row carries its own trace, ending
+    /// on the outer pass, and a patch row names a cause only where it was
+    /// dropped.
+    #[test]
+    fn each_region_layer_row_carries_its_ladder() {
+        let cfg = planar_config();
+        let surf = planar_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let rows = out.stages[4].counts["regions"].as_array().cloned().unwrap();
+        for r in &rows {
+            let ladder = r["ladder"].as_array().expect("a region row has a ladder");
+            eprintln!("region {} ladder entries {}", r["name"], ladder.len());
+            if r.get("skipped").is_some() {
+                assert!(ladder.is_empty(), "{r}");
+                continue;
+            }
+            let last = ladder.last().expect("a region that ran has a trace");
+            assert_eq!(last["outcome"], "pass", "{r}");
+            for p in r["patches"].as_array().unwrap() {
+                if p["dropped"].is_null() {
+                    assert!(p["drop_cause"].is_null(), "{p}");
+                }
+                if !p["drop_cause"].is_null() {
+                    assert!(!p["dropped"].is_null(), "{p}");
+                }
+            }
+        }
     }
 }

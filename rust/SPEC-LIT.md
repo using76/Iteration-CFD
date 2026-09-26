@@ -26580,6 +26580,37 @@ t1_mean   = t_1 mean_frac          t1_min = t_1 min_f tau_f            (92.50)
 `mean_frac` is the fraction of the nominal thickness the patch received on
 average. A dropped patch reports `n_layers = 0` and the reason.
 
+**The trace, and what a drop is blamed on.** A drop's reason names the check
+that fired LAST, and with two ladders nested that is not always the one that
+caused it: the outer ladder's retreats reach the shrink as caps, so a wall that
+fails G4 on its level-n faces is thinned by the OUTER ladder until the INNER
+ladder's floor `min_thickness * T` fires first, and the reason then reads as a
+thickness failure. So the report also keeps the ladders' trace, `ladder`: one
+entry per measurement either ladder took, in the order taken - which ladder;
+the outer round (one extrusion attempt, counted from 0; an inner entry carries
+the round that ran it); the rung (the halvings that ladder had taken on this
+patch set); the patch set by name; each failing gate of §92.3 with its failed
+count; how many of the G4 subjects are level-n faces, internal faces whose
+owner is an input cell and whose neighbour a layer cell (always 0 on the inner
+ladder, whose mesh has no layer cell); the outcome, `pass`, `retreat` or
+`give_up`; and on a give-up its class and the patch that lost its layers. Each
+patch row carries `drop_cause`, the class of the give-up that dropped it:
+
+| `drop_cause` | the give-up |
+|---|---|
+| `inner_gate` | the inner ladder: the gate still failed on the shrunk mesh after the last retreat, or failed on cells no layer point reaches, or the inner ladder's own halvings took a point under the floor |
+| `outer_gate` | the outer ladder: the gate still failed on the extruded mesh after the last retreat, or failed on cells no layer point reaches |
+| `thin_after_caps` | the floor, at a point the outer ladder had capped: the gates its outer entries name drove the thickness down |
+| `thin_proposed` | the floor, at a point neither ladder had thinned: (92.45)'s proposal after its limiters was under it |
+| `zero_disp` | a layer point whose applied displacement is zero |
+
+The floor's class is read over every point under it: a cap on any of them names
+the caps, else a halving on any names the inner ladder, else the proposal.
+`drop_cause` is null on a kept patch and where no ladder ran for the patch
+(`layers.n = 0`, a patch with no layer face). Both are read off the ladders and
+move nothing: the mesh, the reasons and the log are bit for bit what they are
+without them.
+
 The report prints `t1_mean` and `t1_min` IN METRES beside the fractions,
 because the fraction alone hides a limiter the user did not write down. On the
 snapped sphere the run reported `full 0.0%, mean frac 0.346` and the binding
@@ -26693,6 +26724,7 @@ solver can run.
 | a side face's winding | fixed by the topology (92.53), never by the sign of a dot product against a cell centre |
 | a snapped wall | closes exactly all the same — (92.54) holds on it even where the gate does not |
 | a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
+| a patch that lost its layers | its row names `drop_cause`, the class of the last give-up in `ladder` that names it; the trace ends on the outer pass the run returned on; the mesh, the reason and the log are bit for bit what they are without it |
 | the report of a patch that kept its layers | says the achieved first layer in METRES (`t1_mean`, `t1_min`), not only as a fraction |
 
 **Validation**
@@ -26709,9 +26741,13 @@ solver can run.
 | `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
 | a box standing on the domain floor, SNAPPED, 3 layers | every cell closes to `1e-12` relative. The assertion is closure and not a quality number, so it catches a mis-wound face and nothing else; the thresholds are opened past every refusal on purpose. Before (92.53) was applied: 13 cells open, worst `2.96e-1` |
 | one internal face of an emitted mesh reversed by hand | (92.54) refuses it, naming that cell — the check is not vacuous |
-| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured, the sphere gives up in the INNER ladder — two halvings take the applied thickness under `min_thickness * T = 1.995e-2` — so it never reaches the outer one; the row below is the case that does |
+| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured with the trace, the sphere REACHES the outer ladder: two outer retreats on G4 alone, every failing face a level-n face (312, then 360), cap the thickness until the inner ladder's floor `min_thickness * T = 1.995e-2` fires — `drop_cause` `thin_after_caps`; the row below is the case that gives up in the outer ladder itself |
 | the same box, at `quality`'s own thresholds | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
 | the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
+| the castellated cube that keeps its stack | the trace is one inner and one outer pass, both in round 0, and no row names a cause |
+| the snapped floor box with no floor | `retreat_limit` outer retreats at rungs 0, 1, ..., each naming its gates, then an `outer_gate` give-up dropping the cube, then the pass on the empty set |
+| the snapped level-2 sphere | its row names a cause, the trace names the give-up, and a `thin_after_caps` drop comes after at least one outer retreat; the trace is printed |
+| the level-n count | equals the number of G4 subjects whose point list is a layer face's, on the floor box's first extruded attempt |
 
 ### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
 
@@ -26856,6 +26892,11 @@ The layers row of each layer patch — on the single-mesh path and in each regio
 that fraction of `T`. The sum runs over the same faces in the same order as `full`, so the same share at
 beta = 1 is `full_area_frac` bit for bit; a dropped patch reports 0 at every beta. Like the snap and
 octree additions, they are read off the stage's report and change nothing in the mesh.
+The layers row - on the single-mesh path and in each region's row - also carries `ladder`, §92.13's
+trace, `[ { "ladder", "round", "rung", "patches", "gates": [ { "gate", "n_failed" } ], "g4_level_n",
+"outcome", "give_up", "dropped" } ]`, empty on a skipped stage or region; and each layer patch row
+carries `drop_cause`, §92.13's class of the give-up that dropped it, or null. Both are read off the
+ladders and change nothing in the mesh.
 
 `identity` is the mesh's own name and the run's. `mesh_id` is
 `"m_" + fnv1a64(<case_dir as configured, '\' -> '/', no trailing '/'> + newline + <name>)` in 16 hex digits — deterministic,
