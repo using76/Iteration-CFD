@@ -7,6 +7,8 @@
       "instance": {
         "schema": "cad-verdict/1",
         "study_id": "g4_nozzle",
+        "requirements_lock": "2222222222222222222222222222222222222222222222222222222222222222",
+        "checks_sha": "3333333333333333333333333333333333333333333333333333333333333333",
         "eval_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "design_verdict": "infeasible",
         "verdicts": [
@@ -93,6 +95,23 @@
       "value": "",
       "errors": [
         "cad-verdict/1: eval_key: does not match ^[0-9a-f]{64}$"
+      ]
+    },
+    {
+      "name": "requirements_lock_missing",
+      "path": "requirements_lock",
+      "op": "delete",
+      "errors": [
+        "cad-verdict/1: requirements_lock: required field missing"
+      ]
+    },
+    {
+      "name": "checks_sha_short",
+      "path": "checks_sha",
+      "op": "set",
+      "value": "333333333333333333333333333333333333333333333333333333333333333",
+      "errors": [
+        "cad-verdict/1: checks_sha: does not match ^[0-9a-f]{64}$"
       ]
     }
   ]

@@ -24,7 +24,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -68,7 +69,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -112,7 +114,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -156,7 +159,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -200,7 +204,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -244,7 +249,8 @@
     "hi": 4.0,
     "tol": 0.25,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -288,7 +294,8 @@
     "hi": null,
     "tol": 0.0,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -332,7 +339,8 @@
     "hi": null,
     "tol": 0.0,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -376,7 +384,8 @@
     "hi": null,
     "tol": 0.0,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -420,7 +429,8 @@
     "hi": null,
     "tol": 0.5,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -465,7 +475,8 @@
     "hi": 8.0,
     "tol": 0.5,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -511,7 +522,8 @@
     "hi": 8.0,
     "tol": 0.5,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -557,7 +569,8 @@
     "hi": 8.0,
     "tol": 0.5,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -603,7 +616,8 @@
     "hi": 8.0,
     "tol": 0.5,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -648,7 +662,8 @@
     "hi": 1.0,
     "tol": 0.0,
     "u": 0.0,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -690,7 +705,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -734,7 +750,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -778,7 +795,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -822,7 +840,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.25,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -866,7 +885,8 @@
     "hi": 0.3,
     "tol": 0.0,
     "u": null,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "cfd"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -913,7 +933,8 @@
     "hi": 0.3,
     "tol": 0.0,
     "u": null,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "cfd"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -957,7 +978,8 @@
     "hi": 0.3,
     "tol": 0.0,
     "u": null,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "cfd"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -1004,7 +1026,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": null,
    "cfd": null,
@@ -1034,7 +1057,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": "RAISE",
    "cfd": null,
@@ -1064,7 +1088,8 @@
     "hi": 4.0,
     "tol": 0.0,
     "u": 0.5,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -1109,7 +1134,8 @@
     "hi": null,
     "tol": 0.0,
     "u": 0.0078125,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -1154,7 +1180,8 @@
     "hi": null,
     "tol": 0.0,
     "u": 0.0,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -1196,7 +1223,8 @@
     "hi": null,
     "tol": 0.0,
     "u": 0.0,
-    "hardness": "hard"
+    "hardness": "hard",
+    "repr": "stl"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -1238,7 +1266,8 @@
     "hi": null,
     "tol": 0.0,
     "u": 0.125,
-    "hardness": "objective"
+    "hardness": "objective",
+    "repr": "brep"
    },
    "record": {
     "schema": "cad-measure/1",
@@ -1282,7 +1311,8 @@
     "hi": null,
     "tol": 0.0,
     "u": null,
-    "hardness": "objective"
+    "hardness": "objective",
+    "repr": "cfd"
    },
    "record": {
     "schema": "cad-measure/1",

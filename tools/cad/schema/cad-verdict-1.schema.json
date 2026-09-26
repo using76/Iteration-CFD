@@ -3,13 +3,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "cad-verdict/1",
   "title": "one evaluation's verdicts",
-  "description": "The row verdicts of one evaluation and the derived design verdict of docs/16 §E.4; hardness is carried because the derivation needs it.",
+  "description": "The row verdicts of one evaluation and the derived design verdict of docs/16 §E.4; hardness is carried because the derivation needs it; bound to the requirements lock and the sha of the checks it was judged under (docs/16a §F).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "study_id", "eval_key", "design_verdict", "verdicts"],
+  "required": ["schema", "study_id", "requirements_lock", "checks_sha", "eval_key", "design_verdict", "verdicts"],
   "properties": {
       "schema": {"const": "cad-verdict/1"},
       "study_id": {"$ref": "#/$defs/StudyId"},
+      "requirements_lock": {"$ref": "#/$defs/Sha"},
+      "checks_sha": {"$ref": "#/$defs/Sha"},
       "eval_key": {"$ref": "#/$defs/Sha"},
       "design_verdict": {"enum": ["feasible", "infeasible", "not_evaluable"]},
       "verdicts": {

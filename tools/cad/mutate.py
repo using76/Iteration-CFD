@@ -97,16 +97,16 @@ def measurements(out_dir, geo):
     return meas, rows
 
 
-def judge_dir(out_dir, checks_doc, geo):
-    """verify.evaluate over the whole cad-checks/1 doc; write verdict.json; return the doc.
+def judge_dir(out_dir, doc, checks_doc, geo):
+    """verify.evaluate over the whole cad-checks/1 doc and its locked set; write verdict.json; return the doc.
 
     SYS-MACH is absent from the measurements on purpose: with no CFD it is NE-MISSING, never a kill."""
     meas, rows = measurements(out_dir, geo)
     key = common.sha256_of(rows)
     ev = {"path": "probes.json", "sha": common.sha256_file(os.path.join(out_dir, "probes.json"))}
-    doc = verify.evaluate(checks_doc, meas, key, evidence=ev)
-    reqs.write_canonical(os.path.join(out_dir, "verdict.json"), doc)
-    return doc
+    vdoc = verify.evaluate(checks_doc, doc, meas, key, evidence=ev)
+    reqs.write_canonical(os.path.join(out_dir, "verdict.json"), vdoc)
+    return vdoc
 
 
 def kills(doc, geo):
@@ -185,14 +185,14 @@ def run_matrix(out_root):
             except Exception as e:              # an export failure is a row status, never a kill
                 error = "%s: %s" % (type(e).__name__, str(e)[:200])
         if error is None:
-            jdoc = judge_dir(out_dir, checks_doc, geo)
+            jdoc = judge_dir(out_dir, doc, checks_doc, geo)
         return row_of(out_dir, name, klass, planted, jdoc, geo, error)
 
     nom_dir = os.path.join(out_root, "nominal")
     res = export.run_pipeline(export.TEMPLATE, dict(export.NOMINAL), nom_dir)
     if res["status"] != "ok":
         raise RuntimeError("the nominal export is %s (%s)" % (res["status"], res["rule"]))
-    nominal = row_of(nom_dir, "nominal", None, "nothing", judge_dir(nom_dir, checks_doc, geo), geo, None)
+    nominal = row_of(nom_dir, "nominal", None, "nothing", judge_dir(nom_dir, doc, checks_doc, geo), geo, None)
     control = one(CONTROL[0], CONTROL[1], CONTROL[2], CONTROL[3])
     mutants = [one(mid, name, klass, planted) for (mid, name, klass, planted) in MUTANTS]
     killed = sum(1 for m in mutants if m["killed_by"])
