@@ -1,0 +1,609 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. The twelve requirement-diff fixture pairs of docs/16a §G.1 AMG-7 (supervisor-written). Each side is a golden requirements document of fixtures/reqs/golden/ with the patch steps applied (set, append, delete, permute), user rows' locks_params, confidence and ears re-derived, the catalogue where of the named quantities replaced in a temporary template.json when 'where' is set, and the lock re-sealed; expect is the exact classification reqs.diff must return.",
+ "pairs": [
+  {
+   "name": "d01_value_moved",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [
+     {
+      "op": "set",
+      "path": "rows[2].value",
+      "value": 0.09
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 11
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-003",
+      "new_id": "REQ-003",
+      "fields": [
+       "ears",
+       "value"
+      ]
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d02_bound_widened",
+   "old": {
+    "golden": "v5_band_default_assumed",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v5_band_default_assumed",
+    "patch": [
+     {
+      "op": "set",
+      "path": "rows[2].upper",
+      "value": 0.075
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 10
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-003",
+      "new_id": "REQ-003",
+      "fields": [
+       "ears",
+       "upper"
+      ]
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d03_tolerance_tightened",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [
+     {
+      "op": "set",
+      "path": "rows[0].tol_abs",
+      "value": 5e-07
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 11
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-001",
+      "new_id": "REQ-001",
+      "fields": [
+       "ears",
+       "tol_abs"
+      ]
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d04_op_changed",
+   "old": {
+    "golden": "v6_two_sided_exit",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v6_two_sided_exit",
+    "patch": [
+     {
+      "op": "set",
+      "path": "rows[3].op",
+      "value": "=="
+     },
+     {
+      "op": "set",
+      "path": "rows[3].tol_abs",
+      "value": 0.0001
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 9
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-004",
+      "new_id": "REQ-004",
+      "fields": [
+       "ears",
+       "op",
+       "tol_abs",
+       "locks_params"
+      ]
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d05_hardness_changed",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [
+     {
+      "op": "set",
+      "path": "rows[4].hardness",
+      "value": "hard"
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 11
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-005",
+      "new_id": "REQ-005",
+      "fields": [
+       "ears",
+       "hardness"
+      ]
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d06_source_changed",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [
+     {
+      "op": "set",
+      "path": "rows[4].source",
+      "value": "sketch_label"
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 11
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-005",
+      "new_id": "REQ-005",
+      "fields": [
+       "source",
+       "confidence"
+      ]
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d07_ticked_changed",
+   "old": {
+    "golden": "v5_band_default_assumed",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v5_band_default_assumed",
+    "patch": [
+     {
+      "op": "set",
+      "path": "rows[4].ticked",
+      "value": true
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 10
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-005",
+      "new_id": "REQ-005",
+      "fields": [
+       "ticked"
+      ]
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d08_where_swapped",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": {
+     "contraction_ratio": [
+      "exit_plane",
+      "contraction_start"
+     ]
+    }
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 1,
+     "added": 0,
+     "removed": 0,
+     "none": 11
+    },
+    "changed": [
+     {
+      "class": "target_change",
+      "old_id": "REQ-002",
+      "new_id": "REQ-002",
+      "fields": [
+       "where"
+      ]
+     }
+    ],
+    "context_changed": [
+     "declaration_sha",
+     "vocab_sha"
+    ],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d09_rows_reordered",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [
+     {
+      "op": "permute",
+      "path": "rows",
+      "value": [
+       5,
+       4,
+       3,
+       2,
+       1,
+       0,
+       11,
+       10,
+       9,
+       8,
+       7,
+       6
+      ]
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "none",
+    "counts": {
+     "target_change": 0,
+     "added": 0,
+     "removed": 0,
+     "none": 12
+    },
+    "changed": [],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    },
+    "pairs": [
+     [
+      "REQ-006",
+      "REQ-006"
+     ],
+     [
+      "REQ-003",
+      "REQ-003"
+     ]
+    ]
+   }
+  },
+  {
+   "name": "d10_ids_renumbered",
+   "old": {
+    "golden": "v6_two_sided_exit",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v6_two_sided_exit",
+    "patch": [
+     {
+      "op": "permute",
+      "path": "rows",
+      "value": [
+       3,
+       2,
+       1,
+       0,
+       4,
+       5,
+       6,
+       7,
+       8,
+       9
+      ]
+     },
+     {
+      "op": "set",
+      "path": "rows[0].id",
+      "value": "REQ-001"
+     },
+     {
+      "op": "set",
+      "path": "rows[1].id",
+      "value": "REQ-002"
+     },
+     {
+      "op": "set",
+      "path": "rows[2].id",
+      "value": "REQ-003"
+     },
+     {
+      "op": "set",
+      "path": "rows[3].id",
+      "value": "REQ-004"
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "none",
+    "counts": {
+     "target_change": 0,
+     "added": 0,
+     "removed": 0,
+     "none": 10
+    },
+    "changed": [],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    },
+    "pairs": [
+     [
+      "REQ-004",
+      "REQ-001"
+     ],
+     [
+      "REQ-003",
+      "REQ-002"
+     ],
+     [
+      "REQ-002",
+      "REQ-003"
+     ],
+     [
+      "REQ-001",
+      "REQ-004"
+     ]
+    ]
+   }
+  },
+  {
+   "name": "d11_row_added",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [
+     {
+      "op": "append",
+      "path": "rows",
+      "value": {
+       "id": "REQ-007",
+       "ears": "",
+       "quantity": "min_curvature_radius",
+       "feature": null,
+       "op": ">=",
+       "value": 0.005,
+       "upper": null,
+       "tol_abs": null,
+       "tol_rel": null,
+       "unit": "m",
+       "kind": "geometric",
+       "method": "geometry",
+       "condition": {
+        "Re": null,
+        "level": null
+       },
+       "hardness": "soft",
+       "source": "assumed",
+       "quote": null,
+       "locks_params": [],
+       "ticked": false,
+       "confidence": "low",
+       "standard_ref": null
+      }
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 0,
+     "added": 1,
+     "removed": 0,
+     "none": 12
+    },
+    "changed": [
+     {
+      "class": "added",
+      "old_id": null,
+      "new_id": "REQ-007",
+      "fields": []
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  },
+  {
+   "name": "d12_row_removed",
+   "old": {
+    "golden": "v1_nominal",
+    "patch": [],
+    "where": null
+   },
+   "new": {
+    "golden": "v1_nominal",
+    "patch": [
+     {
+      "op": "delete",
+      "path": "rows[4]"
+     }
+    ],
+    "where": null
+   },
+   "expect": {
+    "change": "target_change",
+    "counts": {
+     "target_change": 0,
+     "added": 0,
+     "removed": 1,
+     "none": 11
+    },
+    "changed": [
+     {
+      "class": "removed",
+      "old_id": "REQ-005",
+      "new_id": null,
+      "fields": []
+     }
+    ],
+    "context_changed": [],
+    "operating_point": {
+     "class": "none",
+     "fields": []
+    }
+   }
+  }
+ ]
+}

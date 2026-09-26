@@ -12,6 +12,8 @@ Usage:
   python reqs.py lock REPORT_JSON APPROVED_BY OUT_DIR
   python reqs.py compile REQUIREMENTS_JSON TEMPLATE_DIR OUT_JSON
   python reqs.py vocab TEMPLATE_DIR OUT_JSON
+  python reqs.py diff OLD_DIR NEW_DIR OLD_TEMPLATE_DIR NEW_TEMPLATE_DIR OUT_JSON
+  python reqs.py supersede REPORT_JSON APPROVED_BY OLD_DIR OLD_TEMPLATE_DIR NEW_TEMPLATE_DIR CHANGE_KIND CHANGE_REASON OUT_DIR [EVIDENCE]
 
 AMG-6 (docs/16a §B.1, §E, §F) reimplements, from reading only (no code copied), four ideas of Amagine3D
 (https://github.com/amagine-ai/Amagine3D, commit e608dc6, Apache-2.0): per-value provenance with a derived
@@ -19,6 +21,13 @@ confidence (skills/text-a3d/intent_contract.py `validate`, scene_contract.py `IN
 intent file (authoring.py `_write_json(immutable=True)`, intent_revision.py `load_history`), and an LLM vocabulary
 generated from the validator's live constants and fingerprinted (capability_manifest.py `_intent_input_constraints`,
 `build_manifest`).
+
+AMG-7 (docs/16a §B.1, §D.7, §E) reimplements, from reading only (no code copied), Amagine3D's revision diff and
+lineage (skills/text-a3d/intent_revision.py `semantic_diff`, `validate_revision`) without their two traps: rows are
+matched by what they measure (quantity, the catalogue where as a set, condition, objective or not), never by REQ id
+or position, and the ordered where is compared as a field, so a swapped area_ratio reads as a target change; and a
+generated file is refused as evidence by its CONTENT sha against the superseded study's cache/ and iterations.jsonl,
+not by a schema prefix it can drop.
 """
 import copy
 import json
@@ -70,6 +79,14 @@ REPR_BY_PRIMITIVE = {"watertight": "stl"}  # judged on the named STL's stl_repai
 VOCAB_VERSION = 1
 EVAL_KEY_PARTS = ("template_sha", "declaration_sha", "params", "requirements_lock", "gates_lock", "env",
                   "mesh_recipe_version", "case_writer_version", "bin_sha")    # docs/16 §D, docs/16a §F
+DIFF_VERSION = 1
+DIFF_ROW_FIELDS = tuple(k for k in ROW_KEYS if k != "id") + ("where",)    # compared per matched row, in this order
+DIFF_CLASSES = ("target_change", "added", "removed", "none")
+DIFF_CONTEXT = ("template_id", "template_sha", "declaration_sha", "vocab_sha", "brief_sha", "attachments")
+DIFF_HEAD = ("study_id", "lock_sha", "declaration_sha", "template_sha")
+DIFF_KEYS = ("version", "old", "new", "change", "counts", "rows", "operating_point", "context_changed")
+SUPERSEDE_KINDS = ("target_change", "evidence_correction")
+SHA_TOKEN_RE = re.compile("(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
 BOOLEAN_PRIMITIVES = ("valid", "watertight", "axis_x", "units_m")
 LEVEL_RE = re.compile("^L[0-9]$")
 STUDY_RE = re.compile("^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -119,12 +136,16 @@ FIXTURES = os.path.join(HERE, "fixtures", "reqs")
 CASES = os.path.join(FIXTURES, "cases.json")
 GOLDEN = os.path.join(FIXTURES, "golden")
 LINEAGE = os.path.join(FIXTURES, "lineage.json")
+DIFF_PAIRS = os.path.join(FIXTURES, "diff", "pairs.json")
 NOZZLE_DIR = os.path.join(HERE, "templates", "nozzle_contraction")
 USAGE = ("usage: python reqs.py --selftest" + chr(10)
          + "       python reqs.py check PROPOSAL_JSON BRIEF_JSON TEMPLATE_DIR OUT_JSON" + chr(10)
          + "       python reqs.py lock REPORT_JSON APPROVED_BY OUT_DIR" + chr(10)
          + "       python reqs.py compile REQUIREMENTS_JSON TEMPLATE_DIR OUT_JSON" + chr(10)
-         + "       python reqs.py vocab TEMPLATE_DIR OUT_JSON")
+         + "       python reqs.py vocab TEMPLATE_DIR OUT_JSON" + chr(10)
+         + "       python reqs.py diff OLD_DIR NEW_DIR OLD_TEMPLATE_DIR NEW_TEMPLATE_DIR OUT_JSON" + chr(10)
+         + "       python reqs.py supersede REPORT_JSON APPROVED_BY OLD_DIR OLD_TEMPLATE_DIR NEW_TEMPLATE_DIR"
+         + " CHANGE_KIND CHANGE_REASON OUT_DIR [EVIDENCE]")
 
 
 def nfc(text) -> str:
@@ -927,6 +948,31 @@ def lock_ok(doc) -> bool:
         and doc["lock_sha"] == lock_sha_of(doc)
 
 
+def _check_lineage(doc) -> None:
+    """The lineage fields of docs/16a §F agree with change_kind, or REQ-LOCK: a new study names no predecessor; a
+    superseding one names another study, its lock sha and a reason, and an evidence_correction the evidence sha."""
+    kind = doc.get("change_kind")
+    study, lsha = doc.get("supersedes_study"), doc.get("supersedes_lock")
+    reason, ev = doc.get("change_reason"), doc.get("evidence_sha")
+    if kind == "new":
+        if (study, lsha, reason, ev) != (None, None, None, None):
+            raise ValueError("REQ-LOCK: change_kind new carries no supersedes_study, supersedes_lock,"
+                             " change_reason or evidence_sha")
+        return
+    if kind not in SUPERSEDE_KINDS:
+        raise ValueError("REQ-LOCK: change_kind %r is not one of %s" % (kind, ", ".join(CHANGE_KINDS)))
+    if not isinstance(study, str) or not STUDY_RE.match(study) or study == doc.get("study_id"):
+        raise ValueError("REQ-LOCK: a %s names another study it supersedes, got %r" % (kind, study))
+    if not isinstance(lsha, str) or not SHA_RE.match(lsha):
+        raise ValueError("REQ-LOCK: a %s names the superseded lock sha, got %r" % (kind, lsha))
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("REQ-LOCK: a %s needs a change_reason" % (kind,))
+    if kind == "evidence_correction" and not (isinstance(ev, str) and SHA_RE.match(ev)):
+        raise ValueError("REQ-LOCK: an evidence_correction needs the evidence file's sha, got %r" % (ev,))
+    if kind == "target_change" and ev is not None:
+        raise ValueError("REQ-LOCK: a target_change carries no evidence_sha, got %r" % (ev,))
+
+
 def lock(report, approved_by) -> dict:
     """Seal an accepted report into a locked cad-requirements/1 document (docs/16 §E.8, §F 1)."""
     if not isinstance(report, dict) or report.get("status") != "ok":
@@ -936,6 +982,7 @@ def lock(report, approved_by) -> dict:
         raise ValueError("REQ-LOCK: approved_by must be a non-empty name other than %r, got %r"
                          % (PENDING, approved_by))
     doc = copy.deepcopy(report["requirements"])
+    _check_lineage(doc)
     doc["approved_by"] = approved_by
     doc["lock_sha"] = lock_sha_of(doc)
     errs = schema.errors(doc, "cad-requirements/1")
@@ -1077,6 +1124,162 @@ def eval_key(parts) -> str:
     return common.sha256_of({k: parts[k] for k in EVAL_KEY_PARTS})
 
 
+def _where_of(row, declaration) -> list:
+    """Where a locked row is measured: the SYS table's where for a SYS row, else its catalogue row's (ordered)."""
+    for t in SYS_ROWS:
+        if t[0] == row["id"]:
+            return list(t[7])
+    for c in declaration["catalogue"]:
+        if c["quantity"] == row["quantity"]:
+            return list(c["where"])
+    raise ValueError("GATE-LOCK: row %s measures %r, which the declaration's catalogue does not hold"
+                     % (row["id"], row["quantity"]))
+
+
+def _diff_view(doc, declaration) -> list:
+    """Per row: its id and op, its match key and its compared fields (every row key but id, plus the ordered where).
+    The key is REQ-DUP's without the op: quantity, the where as a SET, condition Re and level, objective or not."""
+    out = []
+    for row in doc["rows"]:
+        where = _where_of(row, declaration)
+        fields = {k: row[k] for k in DIFF_ROW_FIELDS if k != "where"}
+        fields["where"] = where
+        key = (row["quantity"], tuple(sorted(where)), row["condition"]["Re"], row["condition"]["level"],
+               row["hardness"] == "objective")
+        out.append({"id": row["id"], "op": row["op"], "key": key, "fields": fields})
+    return out
+
+
+def _key_dict(key) -> dict:
+    """A match key as the diff reports it."""
+    return {"quantity": key[0], "where": list(key[1]), "Re": key[2], "level": key[3], "objective": key[4]}
+
+
+def _diff_docs(old, new, old_template, new_template) -> dict:
+    """The row diff of two requirement documents (docs/16a §B.1, §D.7). A template is load_template's tuple; each
+    document must bind its template's declaration_sha (GATE-LOCK). Rows pair first on key and op, then the one row
+    left on each side of a key pairs (an op change); the rest are added or removed. A pair is target_change when
+    any compared field differs, else none."""
+    for side, doc, tpl in (("old", old, old_template), ("new", new, new_template)):
+        if doc.get("declaration_sha") != tpl[2]:
+            raise ValueError("GATE-LOCK: the %s set binds the declaration %r, not the given template's %r"
+                             % (side, doc.get("declaration_sha"), tpl[2]))
+    olds = _diff_view(old, old_template[0])
+    news = _diff_view(new, new_template[0])
+    pair = {}                                   # new index -> old index
+    used = set()
+    for j, n in enumerate(news):                # pass 1: the same key and the same op
+        for i, o in enumerate(olds):
+            if i not in used and o["key"] == n["key"] and o["op"] == n["op"]:
+                pair[j] = i
+                used.add(i)
+                break
+    for j, n in enumerate(news):                # pass 2: the one row left on each side of a key
+        if j in pair:
+            continue
+        o_left = [i for i, o in enumerate(olds) if i not in used and o["key"] == n["key"]]
+        n_left = [k for k, m in enumerate(news) if k not in pair and m["key"] == n["key"]]
+        if len(o_left) == 1 and len(n_left) == 1:
+            pair[j] = o_left[0]
+            used.add(o_left[0])
+    rows = []
+    for j, n in enumerate(news):                # new order: pairs and added rows, then removed rows in old order
+        if j in pair:
+            o = olds[pair[j]]
+            changed = [k for k in DIFF_ROW_FIELDS if o["fields"][k] != n["fields"][k]]
+            rows.append({"class": "target_change" if changed else "none", "old_id": o["id"], "new_id": n["id"],
+                         "key": _key_dict(n["key"]), "fields": changed})
+        else:
+            rows.append({"class": "added", "old_id": None, "new_id": n["id"], "key": _key_dict(n["key"]),
+                         "fields": []})
+    for i, o in enumerate(olds):
+        if i not in used:
+            rows.append({"class": "removed", "old_id": o["id"], "new_id": None, "key": _key_dict(o["key"]),
+                         "fields": []})
+    op_old, op_new = old["operating_point"], new["operating_point"]
+    op_fields = sorted(k for k in set(op_old) | set(op_new) if op_old.get(k) != op_new.get(k))
+    counts = {c: sum(1 for r in rows if r["class"] == c) for c in DIFF_CLASSES}
+    change = "none" if counts["none"] == len(rows) and not op_fields else "target_change"
+    return {"version": DIFF_VERSION, "old": {k: old.get(k) for k in DIFF_HEAD},
+            "new": {k: new.get(k) for k in DIFF_HEAD}, "change": change, "counts": counts, "rows": rows,
+            "operating_point": {"class": "target_change" if op_fields else "none", "fields": op_fields},
+            "context_changed": [k for k in DIFF_CONTEXT if old.get(k) != new.get(k)]}
+
+
+def diff(old_doc, new_doc, old_template, new_template) -> dict:
+    """`reqs.py diff` (docs/16a §B.1): the row diff of two LOCKED requirement sets; refuses an unlocked one
+    GATE-LOCK. Pure: never mutates an argument."""
+    for side, doc in (("old", old_doc), ("new", new_doc)):
+        if not lock_ok(doc):
+            raise ValueError("GATE-LOCK: the %s requirement set's lock does not match its document" % (side,))
+    return _diff_docs(copy.deepcopy(old_doc), copy.deepcopy(new_doc), old_template, new_template)
+
+
+def generated_shas(study_dir) -> set:
+    """Every sha a study generated (docs/16a §E REQ-EVIDENCE-GENERATED): each file under cache/, the
+    iterations.jsonl file itself and every 64-hex token written in it. A missing cache/ or log adds nothing."""
+    shas = set()
+    cache = os.path.join(study_dir, "cache")
+    if os.path.isdir(cache):
+        for root, dirs, files in os.walk(cache):
+            dirs.sort()
+            for name in sorted(files):
+                path = os.path.join(root, name)
+                if os.path.isfile(path):
+                    shas.add(common.sha256_file(path))
+    log = os.path.join(study_dir, "iterations.jsonl")
+    if os.path.isfile(log):
+        shas.add(common.sha256_file(log))
+        with open(log, "r", encoding="utf-8", errors="replace") as f:
+            shas.update(SHA_TOKEN_RE.findall(f.read()))
+    return shas
+
+
+def supersede(report, approved_by, old_dir, old_template, new_template, change_kind, change_reason,
+              evidence_path=None) -> dict:
+    """Lock an accepted report as a study that supersedes the locked set in old_dir (docs/16a §B.1, §E, §F): it
+    records supersedes_study, supersedes_lock, change_kind, change_reason and evidence_sha. A target_change must
+    change a target (the diff is not none) and cites no file; an evidence_correction cites one stable file whose
+    content sha the old study never generated (REQ-EVIDENCE-GENERATED). Any other inconsistency is REQ-LOCK."""
+    old = read_locked(old_dir)
+    if change_kind not in SUPERSEDE_KINDS:
+        raise ValueError("REQ-LOCK: a superseding study is one of %s, got %r"
+                         % (", ".join(SUPERSEDE_KINDS), change_kind))
+    if not isinstance(change_reason, str) or not change_reason.strip():
+        raise ValueError("REQ-LOCK: a superseding study needs a change_reason")
+    if not isinstance(report, dict) or report.get("status") != "ok":
+        raise ValueError("REQ-LOCK: the report status is %r, not an accepted requirement set"
+                         % (report.get("status") if isinstance(report, dict) else None,))
+    doc = copy.deepcopy(report["requirements"])
+    if doc["study_id"] == old["study_id"]:
+        raise ValueError("REQ-LOCK: the superseding study needs a new study_id, not %r" % (old["study_id"],))
+    if doc["template_id"] != old["template_id"]:
+        raise ValueError("REQ-LOCK: the study %s is for template %r, the superseded one for %r"
+                         % (doc["study_id"], doc["template_id"], old["template_id"]))
+    evidence_sha = None
+    if change_kind == "evidence_correction":
+        if evidence_path is None:
+            raise ValueError("REQ-LOCK: an evidence_correction cites an evidence file")
+        name = os.path.basename(str(evidence_path))
+        snap = common.stable_file_snapshot(evidence_path)
+        if snap["stable"] is not True:
+            raise ValueError("REQ-LOCK: the evidence %s is not a stable regular file" % (name,))
+        if snap["sha256"] in generated_shas(old_dir):
+            raise ValueError("REQ-EVIDENCE-GENERATED: the evidence %s has the sha %s.. of a file the superseded"
+                             " study %s generated (cache/ or iterations.jsonl); generated output cannot correct a"
+                             " requirement" % (name, snap["sha256"][:12], old["study_id"]))
+        evidence_sha = snap["sha256"]
+    elif evidence_path is not None:
+        raise ValueError("REQ-LOCK: a target_change cites no evidence file")
+    doc.update({"supersedes_study": old["study_id"], "supersedes_lock": old["lock_sha"],
+                "change_kind": change_kind, "change_reason": change_reason, "evidence_sha": evidence_sha})
+    delta = _diff_docs(old, doc, old_template, new_template)
+    if change_kind == "target_change" and delta["change"] == "none":
+        raise ValueError("REQ-LOCK: the new set changes no target of %s; a target_change must change one"
+                         % (old["study_id"],))
+    return lock(dict(report, requirements=doc), approved_by)
+
+
 def _walk(node, piece):
     """One path piece of the fixture grammar: `name` or `name[i]`."""
     m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[([0-9]+)\])?$", piece)
@@ -1119,6 +1322,330 @@ def _fixture_proposal(cases, s) -> dict:
         else:
             raise ValueError("fixture patch: unknown op %r" % (step["op"],))
     return node
+
+
+def _patch_doc(node, steps) -> None:
+    """The diff fixtures' patch grammar on a document: set, append, delete (one list element), permute (a list)."""
+    for step in steps:
+        pieces = step["path"].split(".")
+        parent = node
+        for piece in pieces[:-1]:
+            parent = _walk(parent, piece)
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[([0-9]+)\])?$", pieces[-1])
+        if m is None:
+            raise ValueError("diff fixture patch: bad path piece %r" % (pieces[-1],))
+        name, index = m.group(1), m.group(2)
+        if step["op"] == "set" and index is None:
+            parent[name] = copy.deepcopy(step["value"])
+        elif step["op"] == "set":
+            parent[name][int(index)] = copy.deepcopy(step["value"])
+        elif step["op"] == "append" and index is None:
+            parent[name].append(copy.deepcopy(step["value"]))
+        elif step["op"] == "delete" and index is not None:
+            del parent[name][int(index)]
+        elif step["op"] == "permute" and index is None:
+            items = parent[name]
+            if sorted(step["value"]) != list(range(len(items))):
+                raise ValueError("diff fixture patch: %r is not a permutation of %d items"
+                                 % (step["value"], len(items)))
+            parent[name] = [items[i] for i in step["value"]]
+        else:
+            raise ValueError("diff fixture patch: bad step %r" % (step,))
+
+
+def _diff_side(side, tmp) -> tuple:
+    """One side of a diff fixture pair: a golden requirements document with the patch applied, the user rows'
+    locks_params, confidence and ears re-derived, the catalogue where of the named quantities replaced in a
+    temporary template.json, and the lock re-sealed. Returns (document, template tuple)."""
+    doc = common.read_json(os.path.join(GOLDEN, side["golden"] + ".json"))["requirements"]
+    tpl = load_template(NOZZLE_DIR)
+    if not side["patch"] and side["where"] is None:
+        return doc, tpl
+    _patch_doc(doc, side["patch"])
+    for row in doc["rows"]:
+        if row["id"].startswith("SYS-"):
+            continue
+        row["locks_params"] = list(LOCKS[row["quantity"]]) \
+            if row["hardness"] == "hard" and row["op"] == "==" and row["quantity"] in LOCKS else []
+        row["confidence"] = CONFIDENCE[row["source"]]
+        row["ears"] = render_ears(row)
+    if side["where"] is not None:
+        decl2 = copy.deepcopy(tpl[0])
+        for c in decl2["catalogue"]:
+            if c["quantity"] in side["where"]:
+                c["where"] = list(side["where"][c["quantity"]])
+        tdir = os.path.join(tmp, "template")
+        os.makedirs(tdir)
+        with open(os.path.join(NOZZLE_DIR, "template.py"), "rb") as f:
+            blob = f.read()
+        with open(os.path.join(tdir, "template.py"), "wb") as f:
+            f.write(blob)
+        with open(os.path.join(tdir, "template.json"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(decl2, indent=2, ensure_ascii=False) + chr(10))
+        tpl = load_template(tdir)
+        doc["declaration_sha"] = tpl[2]
+        doc["vocab_sha"] = vocab_sha(tpl[0])
+    doc["lock_sha"] = lock_sha_of(doc)
+    errs = schema.errors(doc, "cad-requirements/1")
+    if errs:
+        raise ValueError("diff fixture %s: %s" % (side["golden"], errs[0]))
+    return doc, tpl
+
+
+def _refused(fn, prefix, needle=None) -> str:
+    """Run fn; it must raise ValueError whose text starts with prefix (and holds needle). Returns the text."""
+    try:
+        fn()
+    except ValueError as e:
+        text = str(e)
+        assert text.startswith(prefix), text
+        assert needle is None or needle in text, (needle, text)
+        return text
+    raise AssertionError("expected a %s refusal" % (prefix,))
+
+
+DIFF_PAIR_NAMES = ("d01_value_moved", "d02_bound_widened", "d03_tolerance_tightened", "d04_op_changed",
+                   "d05_hardness_changed", "d06_source_changed", "d07_ticked_changed", "d08_where_swapped",
+                   "d09_rows_reordered", "d10_ids_renumbered", "d11_row_added", "d12_row_removed")
+
+
+def _selftest_diff_pairs(td) -> dict:
+    """(D1-D12) the 12 fixture pairs of fixtures/reqs/diff/pairs.json, each classified exactly. Returns the built
+    (old, new, old_template, new_template) per pair name."""
+    pairs = common.read_json(DIFF_PAIRS)["pairs"]
+    assert tuple(p["name"] for p in pairs) == DIFF_PAIR_NAMES, [p["name"] for p in pairs]
+    built = {}
+    for p in pairs:
+        old, old_t = _diff_side(p["old"], os.path.join(td, p["name"], "old"))
+        new, new_t = _diff_side(p["new"], os.path.join(td, p["name"], "new"))
+        assert lock_ok(old) and lock_ok(new), p["name"]
+        before = common.canonical_json([old, new])
+        d = diff(old, new, old_t, new_t)
+        assert common.canonical_json([old, new]) == before, "diff mutated %s" % (p["name"],)
+        assert common.canonical_json(d) == common.canonical_json(diff(old, new, old_t, new_t)), p["name"]
+        e = p["expect"]
+        changed = [{k: r[k] for k in ("class", "old_id", "new_id", "fields")} for r in d["rows"]
+                   if r["class"] != "none"]
+        assert d["change"] == e["change"], (p["name"], d["change"])
+        assert d["counts"] == e["counts"], (p["name"], d["counts"])
+        assert changed == e["changed"], (p["name"], changed)
+        assert d["context_changed"] == e["context_changed"], (p["name"], d["context_changed"])
+        assert d["operating_point"] == e["operating_point"], (p["name"], d["operating_point"])
+        assert sum(d["counts"].values()) == len(d["rows"]) and tuple(d) == DIFF_KEYS, p["name"]
+        text = "; ".join("%s %s->%s [%s]" % (r["class"], r["old_id"], r["new_id"], ", ".join(r["fields"]))
+                         for r in changed) or "all %d rows none" % (len(d["rows"]),)
+        if "pairs" in e:
+            got = [[r["old_id"], r["new_id"]] for r in d["rows"]]
+            assert [x for x in got if x in e["pairs"]] == e["pairs"], (p["name"], got)
+            text += "; paired " + ", ".join("%s->%s" % (a, b) for a, b in e["pairs"])
+        if e["context_changed"]:
+            text += "; context " + ", ".join(e["context_changed"])
+        built[p["name"]] = (old, new, old_t, new_t)
+        print("[ok] %s: %s; %s" % (p["name"], d["change"], text))
+    return built
+
+
+def _selftest_diff_refusals(built) -> None:
+    """(D13) an identical pair is none, a reversed pair mirrors, an unsealed set and a foreign declaration are
+    GATE-LOCK."""
+    v1, _new, tpl, _t = built["d01_value_moved"]
+    same = diff(v1, v1, tpl, tpl)
+    assert same["change"] == "none" and same["counts"] == {"target_change": 0, "added": 0, "removed": 0,
+                                                           "none": 12}
+    back = diff(built["d11_row_added"][1], built["d11_row_added"][0], tpl, tpl)
+    assert back["counts"]["removed"] == 1 and [r["old_id"] for r in back["rows"] if r["class"] == "removed"] \
+        == ["REQ-007"]
+    rev = diff(built["d01_value_moved"][1], v1, tpl, tpl)
+    assert [(r["old_id"], r["fields"]) for r in rev["rows"] if r["class"] != "none"] == [("REQ-003",
+                                                                                          ["ears", "value"])]
+    unsealed = copy.deepcopy(v1)
+    unsealed["rows"][2]["value"] = 0.09
+    _refused(lambda: diff(v1, unsealed, tpl, tpl), "GATE-LOCK", "new requirement set")
+    where_t = built["d08_where_swapped"][3]
+    _refused(lambda: diff(v1, v1, tpl, where_t), "GATE-LOCK", "the new set binds the declaration")
+    wrong = copy.deepcopy(v1)
+    wrong["rows"][0]["quantity"] = "throat_length"
+    wrong["lock_sha"] = lock_sha_of(wrong)
+    _refused(lambda: diff(v1, wrong, tpl, tpl), "GATE-LOCK", "'throat_length'")
+    print("[ok] diff refusals: an identical pair is none on 12 rows, d11 and d01 reversed read removed REQ-007 and"
+          " REQ-003 [ears, value], an unsealed set, a foreign declaration and an uncatalogued quantity are"
+          " GATE-LOCK")
+
+
+def _fixture_study(td, v1) -> tuple:
+    """A superseded study on disk: v1 locked, two cache files (one nested), and an iterations.jsonl whose eval row
+    names a report sha that is in no file any more. Returns (old_dir, eval key, the bytes by name)."""
+    old_dir = os.path.join(td, "v1_nominal")
+    write_locked(old_dir, v1)
+    key = common.sha256_bytes(b"fixture eval key")
+    blobs = {"geom": common.canonical_bytes({"schema": "fixture-geom/1", "volume_m3": 1.4e-05}) + b"\n",
+             "boundary": b"FoamFile boundary fixture\n",
+             "report": b"verdict fixture: a report the loop generated and later deleted\n"}
+    common.atomic_write(os.path.join(old_dir, "cache", key, "geom.json"), blobs["geom"])
+    common.atomic_write(os.path.join(old_dir, "cache", key, "mesh", "boundary"), blobs["boundary"])
+    log = os.path.join(old_dir, "iterations.jsonl")
+    common.jsonl_append(log, {"kind": "genesis", "lock_sha": v1["lock_sha"]})
+    common.jsonl_append(log, {"kind": "eval", "eval_key": key, "report_sha": common.sha256_bytes(blobs["report"])})
+    return old_dir, key, blobs
+
+
+def _report_of(doc, study_id) -> dict:
+    """An accepted report carrying a copy of doc under another study id."""
+    return {"status": "ok", "requirements": dict(copy.deepcopy(doc), study_id=study_id)}
+
+
+def _copy_bytes(src, dst) -> None:
+    """Copy one file's bytes to a new name."""
+    with open(src, "rb") as f:
+        blob = f.read()
+    with open(dst, "wb") as f:
+        f.write(blob)
+
+
+def _selftest_lineage(td, built) -> dict:
+    """(E1-E6) the lineage of a superseding study and REQ-EVIDENCE-GENERATED by content sha. Returns what the CLI
+    test reuses."""
+    v1, moved, tpl, _t = built["d01_value_moved"]
+    old_dir, key, blobs = _fixture_study(td, v1)
+    ext = os.path.join(td, "external")
+    os.makedirs(ext)
+    gen = generated_shas(old_dir)
+    assert len(gen) == 6 and v1["lock_sha"] in gen and key in gen, sorted(gen)
+    rep = _report_of(v1, "v1_nominal_r2")
+    reason = "the supplier corrected the wall thickness in writing"
+    ev = "evidence_correction"
+    for src, name in ((os.path.join(old_dir, "cache", key, "geom.json"), "vendor_datasheet.json"),
+                      (os.path.join(old_dir, "cache", key, "mesh", "boundary"), "boundary_from_supplier.txt")):
+        dst = os.path.join(ext, name)
+        _copy_bytes(src, dst)
+        _refused(lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, ev, reason, dst),
+                 "REQ-EVIDENCE-GENERATED", "v1_nominal generated")
+    print("[ok] e01 generated evidence: cache/ geom.json copied out as vendor_datasheet.json and the nested"
+          " mesh/boundary renamed are refused REQ-EVIDENCE-GENERATED by content sha; 6 generated shas")
+    report_file = os.path.join(ext, "loop_report.txt")
+    with open(report_file, "wb") as f:
+        f.write(blobs["report"])
+    _refused(lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, ev, reason, report_file),
+             "REQ-EVIDENCE-GENERATED", "iterations.jsonl")
+    log_copy = os.path.join(ext, "history.txt")
+    _copy_bytes(os.path.join(old_dir, "iterations.jsonl"), log_copy)
+    _refused(lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, ev, reason, log_copy),
+             "REQ-EVIDENCE-GENERATED")
+    print("[ok] e02 generated evidence: a deleted report whose sha iterations.jsonl records and a copy of"
+          " iterations.jsonl itself are refused REQ-EVIDENCE-GENERATED")
+    letter = os.path.join(ext, "supplier_letter.txt")
+    with open(letter, "wb") as f:
+        f.write(b"Supplier letter 2026-09-26: the wall is 2.5 mm, not 2 mm.\n")
+    old_bytes = common.sha256_file(os.path.join(old_dir, "requirements.json"))
+    doc = supersede(rep, "reviewer", old_dir, tpl, tpl, ev, reason, letter)
+    assert (doc["supersedes_study"], doc["supersedes_lock"], doc["change_kind"], doc["change_reason"],
+            doc["evidence_sha"]) == ("v1_nominal", v1["lock_sha"], ev, reason, common.sha256_file(letter))
+    assert lock_ok(doc) and doc["approved_by"] == "reviewer" and not schema.errors(doc, "cad-requirements/1")
+    new_dir = os.path.join(td, "v1_nominal_r2")
+    write_locked(new_dir, doc)
+    assert read_locked(new_dir) == doc and common.sha256_file(os.path.join(old_dir, "requirements.json")) \
+        == old_bytes
+    _refused(lambda: write_locked(old_dir, doc), "REQ-IMMUTABLE")
+    print("[ok] e03 external evidence: supplier_letter.txt passes as an evidence_correction of v1_nominal with its"
+          " sha, locked, written once and read back; writing it over the old study is REQ-IMMUTABLE")
+    tc = supersede(_report_of(moved, "v1_nominal_r3"), "reviewer", old_dir, tpl, tpl, "target_change",
+                   "the user asked for 90 mm")
+    assert (tc["change_kind"], tc["evidence_sha"], tc["supersedes_lock"]) == ("target_change", None,
+                                                                             v1["lock_sha"])
+    _refused(lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, "target_change", reason), "REQ-LOCK",
+             "changes no target")
+    _refused(lambda: supersede(_report_of(moved, "v1_nominal_r3"), "reviewer", old_dir, tpl, tpl,
+                               "target_change", reason, letter), "REQ-LOCK", "cites no evidence")
+    swapped, where_t = built["d08_where_swapped"][1], built["d08_where_swapped"][3]
+    ws = supersede(_report_of(swapped, "v1_nominal_r4"), "reviewer", old_dir, tpl, where_t, "target_change",
+                   "the ratio is taken exit over inlet")
+    assert ws["declaration_sha"] == where_t[2]
+    _refused(lambda: supersede(_report_of(swapped, "v1_nominal_r4"), "reviewer", old_dir, tpl, tpl,
+                               "target_change", reason), "GATE-LOCK")
+    print("[ok] e04 target_change: a moved value supersedes with no evidence, an unchanged set and a cited file"
+          " are REQ-LOCK, a swapped where supersedes under its own declaration and is GATE-LOCK under the old one")
+    same_id = _report_of(v1, "v1_nominal")
+    for fn, needle in (
+            (lambda: supersede(same_id, "reviewer", old_dir, tpl, tpl, ev, reason, letter), "new study_id"),
+            (lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, "new", reason, letter), "one of"),
+            (lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, "rename", reason, letter), "one of"),
+            (lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, ev, "  ", letter), "change_reason"),
+            (lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, ev, reason), "cites an evidence file"),
+            (lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, ev, reason, os.path.join(ext, "none.txt")),
+             "not a stable regular file"),
+            (lambda: supersede({"status": "refused"}, "reviewer", old_dir, tpl, tpl, ev, reason, letter),
+             "not an accepted")):
+        _refused(fn, "REQ-LOCK", needle)
+    linked = os.path.join(ext, "letter_copy.txt")
+    _copy_bytes(letter, linked)
+    os.link(linked, os.path.join(ext, "letter_link.txt"))
+    _refused(lambda: supersede(rep, "reviewer", old_dir, tpl, tpl, ev, reason, linked), "REQ-LOCK",
+             "not a stable regular file")
+    print("[ok] e05 supersede refusals: the same study_id, change_kind new and rename, a blank reason, no evidence,"
+          " a missing file, a refused report and a hard-linked evidence file are REQ-LOCK")
+    base = copy.deepcopy(rep["requirements"])
+    lin_ok = {"supersedes_study": "v1_nominal", "supersedes_lock": v1["lock_sha"], "change_kind": "target_change",
+              "change_reason": reason, "evidence_sha": None}
+    for patch, needle in (({"change_kind": "new", "supersedes_study": "v1_nominal"}, "change_kind new"),
+                          ({"supersedes_study": None}, "names another study"),
+                          ({"supersedes_study": "v1_nominal_r2"}, "names another study"),
+                          ({"supersedes_lock": "abc"}, "lock sha"),
+                          ({"change_reason": ""}, "change_reason"),
+                          ({"change_kind": "evidence_correction"}, "evidence file's sha"),
+                          ({"evidence_sha": "0" * 64}, "carries no evidence_sha")):
+        bad = dict(base, **lin_ok)
+        bad.update(patch)
+        _refused(lambda: lock({"status": "ok", "requirements": bad}, "reviewer"), "REQ-LOCK", needle)
+    assert lock({"status": "ok", "requirements": dict(base, **lin_ok)}, "reviewer")["change_kind"] == "target_change"
+    print("[ok] e06 lock lineage: 7 inconsistent lineages refused REQ-LOCK (new with a predecessor, no or own"
+          " predecessor, a bad lock sha, no reason, a correction without and a change with an evidence sha)")
+    return {"old_dir": old_dir, "rep": rep, "reason": reason, "letter": letter, "doc": doc,
+            "datasheet": os.path.join(ext, "vendor_datasheet.json")}
+
+
+def _selftest_diff_cli(td, built, lin) -> None:
+    """(D14) the diff and supersede verbs in fresh processes, byte-equal to the in-process results."""
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    me = os.path.abspath(__file__)
+    old, new, old_t, new_t = built["d10_ids_renumbered"]
+    dirs = []
+    for name, doc in (("cli_old", old), ("cli_new", new)):
+        dirs.append(os.path.join(td, name))
+        write_locked(dirs[-1], doc)
+    out = os.path.join(td, "diff.json")
+    pr = subprocess.run([sys.executable, me, "diff", dirs[0], dirs[1], NOZZLE_DIR, NOZZLE_DIR, out],
+                        capture_output=True, encoding="utf-8", errors="replace", env=env, timeout=120)
+    assert pr.returncode == 0, (pr.returncode, pr.stderr[-500:])
+    d = diff(old, new, old_t, new_t)
+    with open(out, "rb") as f:
+        assert f.read() == common.canonical_bytes(d) + b"\n"
+    assert pr.stdout.strip() == common.canonical_json({"change": "none", "counts": d["counts"]}), pr.stdout
+    rep_file = os.path.join(td, "report_r2.json")
+    write_canonical(rep_file, lin["rep"])
+    new_dir = os.path.join(td, "cli_r2")
+    base = [sys.executable, me, "supersede", rep_file, "reviewer", lin["old_dir"], NOZZLE_DIR, NOZZLE_DIR,
+            "evidence_correction", lin["reason"], new_dir]
+    pr = subprocess.run(base + [lin["letter"]], capture_output=True, encoding="utf-8", errors="replace", env=env,
+                        timeout=120)
+    assert pr.returncode == 0, (pr.returncode, pr.stderr[-500:])
+    assert pr.stdout.strip() == lin["doc"]["lock_sha"] and read_locked(new_dir) == lin["doc"]
+    bad_dir = os.path.join(td, "cli_bad")
+    pr = subprocess.run(base[:-1] + [bad_dir, lin["datasheet"]], capture_output=True, encoding="utf-8",
+                        errors="replace", env=env, timeout=120)
+    assert pr.returncode == 1 and "REQ-EVIDENCE-GENERATED" in pr.stderr and not os.path.exists(bad_dir), \
+        (pr.returncode, pr.stderr[-300:])
+    print("[ok] CLI diff and supersede in fresh processes: d10 diff bytes equal, the letter's lock sha %s.. equal,"
+          " the datasheet refused REQ-EVIDENCE-GENERATED with exit 1 and nothing written"
+          % (lin["doc"]["lock_sha"][:12],))
+
+
+def _selftest_diff() -> None:
+    """The AMG-7 gates of docs/16a §G.1: D1-D12, D13, E1-E6, D14 (20 [ok] lines)."""
+    with tempfile.TemporaryDirectory() as td:
+        built = _selftest_diff_pairs(os.path.join(td, "pairs"))
+        _selftest_diff_refusals(built)
+        lin = _selftest_lineage(os.path.join(td, "lineage"), built)
+        _selftest_diff_cli(os.path.join(td, "cli"), built, lin)
 
 
 def selftest():
@@ -1668,11 +2195,13 @@ def selftest():
     assert [(r["row"], r["id"], r["check"]) for r in rep["refusals"]] == [("operating_point", "REQ-OP", "shape")]
     print("[ok] confidence derived per source on all 8 valid sets; a standard row from a 1-entry table admitted"
           " high; a standard_ref on a brief row refused REQ-STD; fluid_source brief kept, T_K_source guess refused")
+    _selftest_diff()
     print("SELFTEST PASS")
 
 
 def main(argv) -> int:
-    """The CLI of docs/16 §I CAD-07 and docs/16a AMG-6: --selftest, check, lock, compile, vocab."""
+    """The CLI of docs/16 §I CAD-07 and docs/16a AMG-6, AMG-7: --selftest, check, lock, compile, vocab, diff,
+    supersede."""
     if argv and argv[0] == "--selftest":
         try:
             selftest()
@@ -1703,6 +2232,17 @@ def main(argv) -> int:
             v = vocab(load_template(argv[1])[0])
             write_canonical(argv[2], {"vocab": v, "vocab_sha": common.sha256_of(v)})
             print(common.sha256_of(v))
+            return 0
+        if len(argv) == 6 and argv[0] == "diff":
+            d = diff(read_locked(argv[1]), read_locked(argv[2]), load_template(argv[3]), load_template(argv[4]))
+            write_canonical(argv[5], d)
+            print(common.canonical_json({"change": d["change"], "counts": d["counts"]}))
+            return 0
+        if len(argv) in (9, 10) and argv[0] == "supersede":
+            doc = supersede(common.read_json(argv[1]), argv[2], argv[3], load_template(argv[4]),
+                            load_template(argv[5]), argv[6], argv[7], argv[9] if len(argv) == 10 else None)
+            write_locked(argv[8], doc)
+            print(doc["lock_sha"])
             return 0
     except ValueError as e:
         print("reqs: %s" % (e,), file=sys.stderr)
