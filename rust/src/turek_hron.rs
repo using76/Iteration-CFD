@@ -67,10 +67,14 @@ pub const PATCHES: [&str; 8] = [
 /// The body the forces are taken on: the paper's S1 (cylinder) and S2
 /// (flap) together.
 pub const BODY: [&str; 2] = ["cylinder", "fluid_to_flap"];
-/// `cases/turekHron/<dir>/fluid/polyMesh` for levels 1, 2, 3.
-pub const LEVEL_DIRS: [&str; 3] = ["mesh", "mesh_L2", "mesh_L3"];
-/// The steady runs' iteration budgets along the levels, L1 to L3.
-pub const STEADY_MAX_ITERS: [usize; 3] = [4000, 8000, 16000];
+/// `cases/turekHron/<dir>/fluid/polyMesh` for levels 1, 2, 3 and 4.
+pub const LEVEL_DIRS: [&str; 4] = ["mesh", "mesh_L2", "mesh_L3", "mesh_L4"];
+/// The steady runs' iteration budgets along the levels, L1 to L4.
+pub const STEADY_MAX_ITERS: [usize; 4] = [4000, 8000, 16000, 40000];
+/// How many of the finest levels the grid study takes - L4, L3 and L2.
+/// L1 is run and printed but is not in the study: its CFD2 lift lies far
+/// outside the asymptotic range (SPEC-LIT 105.13).
+pub const STUDY_LEVELS: usize = 3;
 /// How often the stopping rule's forces are folded between iterations.
 pub const STEADY_CHECK_EVERY: usize = 100;
 /// No stopping decision before this many iterations.
@@ -172,9 +176,12 @@ pub struct Rig {
 
 /// `<CARGO_MANIFEST_DIR>/../cases/turekHron/<LEVEL_DIRS[level-1]>/fluid/polyMesh`.
 ///
-/// `level` outside 1..=3 panics: it is a programming error, not an input.
+/// `level` outside 1..=4 panics: it is a programming error, not an input.
 pub fn mesh_dir(level: usize) -> PathBuf {
-    assert!((1..=3).contains(&level), "turek_hron: level {level} is not 1, 2 or 3");
+    assert!(
+        (1..=LEVEL_DIRS.len()).contains(&level),
+        "turek_hron: level {level} is not 1, 2, 3 or 4"
+    );
     // The crate's directory as compiled in, never the runtime environment:
     // `ofgpu-validate` run as a plain executable has no CARGO_MANIFEST_DIR.
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -693,24 +700,25 @@ pub fn steady(gpu: &Gpu, rig: &Rig, case: Case, max_iters: usize) -> Result<Stea
     })
 }
 
-/// CFD1 or CFD2 on all three levels, and its two grid studies.
+/// CFD1 or CFD2 on all four levels, and its two grid studies over the
+/// finest three.
 #[derive(Debug, Clone)]
 pub struct SteadyStudy {
     pub case: Case,
-    /// Finest first: L3, L2, L1.
+    /// Finest first: L4, L3, L2, L1.
     pub runs: Vec<SteadyRun>,
-    /// `vv::grid_study` over (h, drag) finest first; `Err` carries the
-    /// refusal's text.
+    /// `vv::grid_study` over (h, drag) of the `STUDY_LEVELS` finest runs,
+    /// finest first; `Err` carries the refusal's text.
     pub drag: std::result::Result<GridStudy, String>,
     pub lift: std::result::Result<GridStudy, String>,
 }
 
-/// Levels 3, 2, 1 each loaded ONCE, CFD1 and CFD2 run on each with
+/// Levels 4, 3, 2, 1 each loaded ONCE, CFD1 and CFD2 run on each with
 /// `STEADY_MAX_ITERS[level - 1]`; returns `[CFD1 study, CFD2 study]`.
 pub fn steady_studies(gpu: &Gpu) -> Result<Vec<SteadyStudy>> {
     let mut runs_cfd1 = Vec::new();
     let mut runs_cfd2 = Vec::new();
-    for level in (1..=3).rev() {
+    for level in (1..=LEVEL_DIRS.len()).rev() {
         let rig = load_rig(level)?;
         runs_cfd1.push(steady(gpu, &rig, Case::Cfd1, STEADY_MAX_ITERS[level - 1])?);
         runs_cfd2.push(steady(gpu, &rig, Case::Cfd2, STEADY_MAX_ITERS[level - 1])?);
@@ -723,8 +731,9 @@ pub fn steady_studies(gpu: &Gpu) -> Result<Vec<SteadyStudy>> {
     ])
 }
 
-/// The drag study and the lift study over `runs`, finest first - the same
-/// levels, one quantity each, whichever case the runs carry.
+/// The drag study and the lift study over the `STUDY_LEVELS` finest of
+/// `runs` (finest first) - the same levels, one quantity each, whichever
+/// case the runs carry.
 pub(crate) fn studies_of(
     _case: Case,
     runs: &[SteadyRun],
@@ -732,6 +741,7 @@ pub(crate) fn studies_of(
     let study = |value: fn(&Forces) -> Scalar| -> std::result::Result<GridStudy, String> {
         let levels: Vec<Level> = runs
             .iter()
+            .take(STUDY_LEVELS)
             .map(|r| Level { h: r.h, value: value(&r.forces) })
             .collect();
         vv::grid_study(&levels).map_err(|e| e.to_string())

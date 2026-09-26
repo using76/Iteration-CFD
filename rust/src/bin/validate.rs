@@ -3312,8 +3312,8 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("SPEC-LIT 105.10 Gate 105-B the flow on a moving mesh");
     check_ale_flow(c, &gpu)?;
     c.leave_gate();
-    // SPEC-LIT 105.14 - Turek-Hron CFD1/CFD2 through three meshes, CFD3 on a wobbling mesh, Gate 105-C.
-    println!("\n=== Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over three meshes, CFD3 on a wobbling mesh (SPEC-LIT 105.14) ===");
+    // SPEC-LIT 105.14 - Turek-Hron CFD1/CFD2 on four meshes, studied through the finest three, CFD3 on a wobbling mesh, Gate 105-C.
+    println!("\n=== Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over four meshes (the study on the finest three), CFD3 on a wobbling mesh (SPEC-LIT 105.14) ===");
     c.enter_gate("SPEC-LIT 105.14 Gate 105-C Turek-Hron");
     check_turek_hron(c, &gpu)?;
     c.leave_gate();
@@ -19985,14 +19985,15 @@ const TH_CFD3_DRAG: [Scalar; 3] = [439.45, 5.6183, 4.3956];
 const TH_CFD3_LIFT: [Scalar; 3] = [-11.893, 437.81, 4.3956];
 
 /// Gate 105-C (SPEC-LIT 105.14): the Turek-Hron benchmark on the card.
-/// CFD1 and CFD2 run steady on each of the three generated meshes and
-/// their drag and lift go through a three-level grid study, the gate on
-/// the EXTRAPOLATED value against the published one (2 per cent). CFD3
-/// spins up statically to t = 8 s and forks into two 1,500-step
-/// continuations from that one state - static and wobbling - whose drag
-/// and lift are reduced over their last four lift periods and compared,
-/// 0.5 per cent per statistic, on the one mesh. A missing mesh is not a
-/// solver failure: the gate opens by name and skips its comparison rows.
+/// CFD1 and CFD2 run steady on each of the four generated meshes and
+/// their drag and lift go through a grid study of the finest three
+/// (L2, L3, L4), the gate on the EXTRAPOLATED value against the
+/// published one (2 per cent). CFD3 spins up statically to t = 8 s and
+/// forks into two 1,500-step continuations from that one state - static
+/// and wobbling - whose drag and lift are reduced over their last four
+/// lift periods and compared, 0.5 per cent per statistic, on the one
+/// mesh. A missing mesh is not a solver failure: the gate opens by name
+/// and skips its comparison rows.
 /// A miss fails its row AND registers a MISSES verdict with its study -
 /// the Gate 94-D pattern - so it reaches the summary and is never tuned
 /// away.
@@ -20000,7 +20001,7 @@ fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::turek_hron::{self, Case};
 
     const NOT_GENERATED: &str = "the Turek-Hron meshes are not generated";
-    let absent: Vec<usize> = (1..=3)
+    let absent: Vec<usize> = (1..=turek_hron::LEVEL_DIRS.len())
         .filter(|&l| !turek_hron::mesh_dir(l).join("points").is_file())
         .collect();
     if !absent.is_empty() {
@@ -20042,7 +20043,7 @@ fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         });
         return Ok(());
     }
-    // Steady CFD1 and CFD2 on all three levels, notes first, then the rows.
+    // Steady CFD1 and CFD2 on all four levels, notes first, then the rows.
     let studies = turek_hron::steady_studies(gpu)?;
     let published =
         |case: Case| if case == Case::Cfd1 { TH_CFD1 } else { TH_CFD2 };
@@ -20062,17 +20063,24 @@ fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             ("drag", &study.drag, turek_hron::extrapolated_error(&study.drag, pd)),
             ("lift", &study.lift, turek_hron::extrapolated_error(&study.lift, pl)),
         ] {
-            let (v1, v2, v3, err_fine) = if quantity == "drag" {
-                (
-                    study.runs[2].forces.drag, study.runs[1].forces.drag, study.runs[0].forces.drag,
-                    (study.runs[0].forces.drag - pd).abs() / pd.abs(),
-                )
-            } else {
-                (
-                    study.runs[2].forces.lift, study.runs[1].forces.lift, study.runs[0].forces.lift,
-                    (study.runs[0].forces.lift - pl).abs() / pl.abs(),
-                )
+            let value = |r: &turek_hron::SteadyRun| {
+                if quantity == "drag" { r.forces.drag } else { r.forces.lift }
             };
+            let published_q = if quantity == "drag" { pd } else { pl };
+            let err_fine = (value(&study.runs[0]) - published_q).abs() / published_q.abs();
+            let all: Vec<String> = study
+                .runs
+                .iter()
+                .rev()
+                .map(|r| format!("L{} {:.6}", r.level, value(r)))
+                .collect();
+            let studied: Vec<String> = study
+                .runs
+                .iter()
+                .take(turek_hron::STUDY_LEVELS)
+                .rev()
+                .map(|r| format!("L{}", r.level))
+                .collect();
             let (line, gci) = match one {
                 Ok(s) => (
                     s.one_line(),
@@ -20084,16 +20092,17 @@ fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                 Err(e) => (format!("study refused by name: {e}"), "n/a".to_string()),
             };
             n.push(format!(
-                "{quantity}: L1 {v1:.6}, L2 {v2:.6}, L3 {v3:.6}; {line}; gci_fine {gci}; \
-                 err_fine {err_fine:.3e}, err_ext {err_ext:.3e}, published {:.6}",
-                if quantity == "drag" { pd } else { pl }
+                "{quantity}: {}; the study takes {}; {line}; gci_fine {gci}; \
+                 err_fine {err_fine:.3e}, err_ext {err_ext:.3e}, published {published_q:.6}",
+                all.join(", "),
+                studied.join(", ")
             ));
         }
         notes.push(n);
     }
     for (study, note) in studies.iter().zip(&notes) {
         let (pd, pl) = published(study.case);
-        // Every case prints its three levels, its two studies and both
+        // Every case prints its four levels, its two studies and both
         // errors, whether or not it holds (SPEC-LIT 105.14).
         for line in note {
             c.note(line);
@@ -20127,7 +20136,7 @@ fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             let uncertainty = match missed {
                 Ok(s) => Some(Uncertainty::Study(s.clone())),
                 Err(_) => Some(Uncertainty::SingleMesh(
-                    "three meshes were run but the study was refused by name; the reason is printed above",
+                    "four meshes were run but the finest-three study was refused by name; the reason is printed above",
                 )),
             };
             let phi = |one: &std::result::Result<ofgpu::vv::GridStudy, String>| match one {

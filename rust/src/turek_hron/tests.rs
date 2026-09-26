@@ -481,3 +481,35 @@ fn the_drag_study_reads_drag_and_the_lift_study_reads_lift() {
         assert!((l.phi_ext - 1.1).abs() < 1e-9, "{case:?}: lift study phi_ext {}", l.phi_ext);
     }
 }
+
+/// Four synthetic runs, finest first: the three finest follow
+/// `limit - c h^2` exactly, the coarsest is far off. The study takes the
+/// three finest only, so Richardson recovers both limits exactly.
+#[test]
+fn the_study_takes_the_three_finest_of_four_levels() {
+    let run = |h: Scalar, drag: Scalar, lift: Scalar| SteadyRun {
+        case: Case::Cfd1,
+        level: 1,
+        n_cells: 1,
+        h,
+        iterations: 1,
+        converged: true,
+        residual: 0.0,
+        forces: Forces { drag, lift, pressure: Vec3::ZERO, viscous: Vec3::ZERO },
+        seconds: 0.0,
+    };
+    let runs = [
+        run(1.0, 14.0 - 0.1, 1.1 - 0.01),
+        run(2.0, 14.0 - 0.4, 1.1 - 0.04),
+        run(4.0, 14.0 - 1.6, 1.1 - 0.16),
+        run(8.0, 3.0, -7.0),
+    ];
+    let (d, l) = studies_of(Case::Cfd2, &runs);
+    let (d, l) = (d.expect("drag study"), l.expect("lift study"));
+    assert_eq!(d.n_levels, 3, "drag study n_levels {}", d.n_levels);
+    assert_eq!(l.n_levels, 3, "lift study n_levels {}", l.n_levels);
+    assert!((d.phi_ext - 14.0).abs() < 1e-9, "drag study phi_ext {}", d.phi_ext);
+    assert!((l.phi_ext - 1.1).abs() < 1e-9, "lift study phi_ext {}", l.phi_ext);
+    assert_eq!(STUDY_LEVELS, 3);
+    assert_eq!(LEVEL_DIRS.len(), STEADY_MAX_ITERS.len());
+}
