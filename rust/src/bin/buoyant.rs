@@ -1290,11 +1290,17 @@ fn one_step(
     dt: Scalar,
     thermal: Option<(Vec3, Scalar)>,
     diss_name: &'static str,
+    open_step: bool,
 ) -> Result<Residuals> {
     // ONE rotation of the time levels per TIME STEP, before the correctors -
     // not one per corrector, which would collapse U^{n-2} onto U^{n-1} and
     // make `ddtSchemes backward` quietly first order (SPEC-LIT 13.3).
-    s.begin_time_step(gpu, dt)?;
+    // SPEC-LIT 105.16: a transient run's FIRST unit of work opens no time
+    // step, so `backward` takes its Euler row there; a steady run opens every
+    // unit as before.
+    if open_step {
+        s.begin_time_step(gpu, dt)?;
+    }
 
     let mut r = Residuals::default();
     for _ in 0..outer.max(1) {
@@ -1454,6 +1460,7 @@ fn run_loop(
 
     for step in 1..=sched.n_steps {
         done = step;
+        let open_step = !sched.transient || step > 1;
 
         // A capture executes nothing, so the step it happens on is advanced by
         // the replay immediately below.
@@ -1481,6 +1488,7 @@ fn run_loop(
                         sched.dt as Scalar,
                         thermal,
                         diss_name,
+                        open_step,
                     )?;
                     Ok(())
                 })?
@@ -1523,6 +1531,7 @@ fn run_loop(
                 sched.dt as Scalar,
                 thermal,
                 diss_name,
+                open_step,
             )?,
         };
 
@@ -2472,6 +2481,17 @@ fn run(o: &Options) -> Result<()> {
     // field was uploaded - this is the state the first outer iteration's
     // `correct` reads, restart restore included.
     common::report_gamma_range(&gpu, &turb.output_fields())?;
+
+    // SPEC-LIT 105.16: a transient run's first unit of work opens no time
+    // step, so its counter stays 0 and `backward` takes its Euler row - but
+    // the bootstrap iteration above has already moved `U` and `p` past the
+    // levels `initialise` stored. The rotation the first step's
+    // `begin_time_step` used to make is made here instead, so that step
+    // differences against the post-bootstrap state exactly as before.
+    if transient {
+        ofgpu::field_ops::advance_time_levels_vector(&gpu, &fk, s.u_mut())?;
+        ofgpu::field_ops::advance_time_levels(&gpu, &fk, s.p_mut())?;
+    }
 
     let rep = run_loop(
         &gpu,

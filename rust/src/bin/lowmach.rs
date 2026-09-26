@@ -2342,7 +2342,13 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     for step in 0..n_steps {
         if transient {
-            s.begin_time_step(&gpu, dt)?;
+            // SPEC-LIT 105.16: the FIRST step opens no time step, so the
+            // counter is 0 during it and `backward` takes its Euler row, as
+            // §105.10's gate loops start; `initialise` already made `U`'s and
+            // `p`'s old level the starting field.
+            if step > 0 {
+                s.begin_time_step(&gpu, dt)?;
+            }
             energy.advance_time_step(dt);
             gas.advance_time_levels();
             t_phys += f64::from(dt);
@@ -2480,11 +2486,16 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
     }
 
+    let ux_mean = {
+        let u = gpu.download(&s.u().f)?;
+        u.iter().map(|v| f64::from(v.x)).sum::<f64>() / u.len().max(1) as f64
+    };
     // How the run ended, for `main`'s last line (SPEC-LIT §31.4).
     let run_end = RunEnd {
         steps: n_steps,
         transient,
         t_end: t_phys,
+        ux_mean,
     };
 
     mem.sample(&gpu)?;
@@ -3267,6 +3278,11 @@ struct RunEnd {
     steps: usize,
     transient: bool,
     t_end: f64,
+    /// The arithmetic mean of the internal cells' `U_x` at the end - Gate
+    /// 105-D's readout (SPEC-LIT 105.16), since the written field carries
+    /// six digits. It feeds no output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    ux_mean: f64,
 }
 
 /// SPEC-LIT §31.4: 0 the budget was reached, 2 diverged, 3 refused by name
@@ -5190,8 +5206,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0 });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03 });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0 });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5211,8 +5227,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0 });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03 });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0 });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5596,6 +5612,20 @@ mod lowmach_tests {
         common::json_case_output_dir(&path)
     }
 
+    /// [`run_case_text`], also handing back how the run ended - Gate 105-D
+    /// reads `RunEnd::ux_mean` (SPEC-LIT 105.16).
+    fn run_case_text_end(text: &str, tag: &str, args: &[&str]) -> (PathBuf, RunEnd) {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, text).expect("write case");
+        let mut a: Vec<String> =
+            vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+        a.extend(args.iter().map(|s| (*s).to_string()));
+        let o = parse(&a).expect("the command line must parse");
+        let end = run(&o).expect("the case must run");
+        (common::json_case_output_dir(&path), end)
+    }
+
     /// The mean internal `Ux` of a written time directory, and its cells.
     fn mean_ux(root: &Path, time: Scalar, n_cells: usize) -> (f64, Vec<ofgpu::Vec3>) {
         let f = read_vector_field(&root.join(format_time_name(time)).join("U"), n_cells)
@@ -5814,6 +5844,55 @@ mod lowmach_tests {
             (moving_ux - 0.75).abs() >= 1e-2,
             "moving {moving_ux} must sit far from the static 0.75"
         );
+    }
+
+    /// Gate 105-D (SPEC-LIT 105.16): the stroking outlet of SPEC-LIT 105.12,
+    /// static and on its sine law, under Euler and backward at 20, 40 and 80
+    /// steps, read through `RunEnd::ux_mean`.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn gate_105d_backward_starts_from_the_euler_row_and_the_stroke_is_second_order() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::ale_flow::stroke_exact;
+        const STEPS: [usize; 3] = [20, 40, 80];
+        let exact_moving = stroke_exact() as f64;
+        let err = |motion: &str, ddt: &str, n: usize, exact: f64| -> f64 {
+            let text = stroke_case_text(motion, "");
+            let text = if ddt == "backward" {
+                let t = text.replace("\"ddt\": \"Euler\"", "\"ddt\": \"backward\"");
+                assert_ne!(t, text, "the stroke case must name its ddt");
+                t
+            } else {
+                text
+            };
+            let kind = if motion.is_empty() { "static" } else { "moving" };
+            let dt = format!("{}", 0.25 / n as f64);
+            let args = ["-endTime", "0.25", "-deltaT", dt.as_str(), "-check", "1000"];
+            let (_, end) = run_case_text_end(&text, &format!("g105d_{ddt}_{kind}_{n}"), &args);
+            assert_eq!(end.steps, n, "{ddt} {kind}: {n} steps asked, {} run", end.steps);
+            let e = end.ux_mean - exact;
+            println!("gate 105-D: {ddt} {kind} {n} steps: Ux {:.12e} err {e:+.6e}", end.ux_mean);
+            e
+        };
+        for ddt in ["Euler", "backward"] {
+            for n in STEPS {
+                let e = err("", ddt, n, 0.75);
+                assert!(e.abs() <= 1e-5, "{ddt} static {n} steps: error {e:e} against 0.75");
+            }
+            let e: Vec<f64> =
+                STEPS.iter().map(|&n| err(STROKE_MOTION, ddt, n, exact_moving)).collect();
+            let p_coarse = (e[0] / e[1]).abs().log2();
+            let p_fine = (e[1] / e[2]).abs().log2();
+            println!("gate 105-D: {ddt} moving: p coarse {p_coarse:.4}, p fine {p_fine:.4}");
+            if ddt == "backward" {
+                assert!((p_fine - 2.0).abs() <= 0.2, "backward p fine {p_fine} (coarse {p_coarse})");
+                assert!(e[2].abs() <= 5e-6, "backward 80-step error {:e}", e[2]);
+            } else {
+                assert!((p_fine - 1.0).abs() <= 0.1, "Euler p fine {p_fine} (coarse {p_coarse})");
+            }
+        }
     }
 
     #[test]

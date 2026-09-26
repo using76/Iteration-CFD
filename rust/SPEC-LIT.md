@@ -31601,18 +31601,18 @@ value seeded the first step's flux against the moving mesh: a pressure
 impulse of `0.125` after one step that decayed to `5.5e-3` after ten - the
 measurement that made the value a refusal.
 
-Measured on this driver and not changed here: `ofgpu-lowmach` calls
+Measured on this driver before §105.16 changed it: `ofgpu-lowmach` called
 `begin_time_step` before its FIRST step too, so the time state's step
-counter is 1 during it and `backward` takes the BDF2 row with two equal old
+counter was 1 during it and `backward` took the BDF2 row with two equal old
 levels, not the Euler row §105.10's loops start from. With `dU/dt(0)` not
 zero that start is first order. The static stroke case under `backward`
-(`U0 + P0 T / L0 = 0.75`, the same 16x1x1 duct, no `motion`) writes `Ux`
+(`U0 + P0 T / L0 = 0.75`, the same 16x1x1 duct, no `motion`) wrote `Ux`
 errors of `-6.252e-3`, `-3.126e-3` and `-1.563e-3` at 20, 40 and 80 steps -
 `-dt P0 / (2 L0)`, halving with the step - where `Euler` writes `3e-6`,
-`-1e-6` and `0` (the `fp32` write). Changing a driver's time stepping is a
-numerics decision, so it is reported, not made; a moving run's mesh advance
-takes the same coefficients as its momentum, so the space conservation law
-still closes.
+`-1e-6` and `0` (the six-digit write). The user decided on 2026-09-24 that
+the drivers start `backward` from the Euler row; §105.16 does it and lists
+what moved. A moving run's mesh advance takes the same coefficients as its
+momentum, so the space conservation law still closes.
 
 House items. No new file - the source-file count stays 217; no new capture
 row - `src/bin/` is outside the capture registry, and nothing here launches
@@ -31874,6 +31874,100 @@ because they need the generated L1 mesh; the other ten pass on any
 checkout with a card and no mesh at all. The fourth level added one test
 (the study takes the three finest of four levels) and no file; the gate
 census and the answer-key markers are unchanged.
+
+### 105.16 A driver's first step takes backward's Euler row - Gate 105-D
+
+The user's decision of 2026-09-24. `ofgpu-lowmach` and `ofgpu-buoyant`
+called `Simple::begin_time_step` before a transient run's FIRST step, so
+`TimeState::step` was 1 during it and `DdtScheme::Backward.coeffs` returned
+the BDF2 row of §13.3 over two equal old levels - a first-order start
+whenever `dU/dt(0)` is not zero (§105.12 measured it). Both drivers now open
+a time step with `begin_time_step` from the SECOND step on, the order
+§105.10's gate loops already use: during the first step the counter is 0
+and `backward` takes its Euler row, for the momentum derivative and, on a
+moving mesh, for `AleMesh::advance`, which reads the same state.
+In `ofgpu-lowmach`, `Simple::initialise` has already made `U`'s and `p`'s
+old level the starting field, so the rotation the first step no longer calls
+would have copied the same values. `ofgpu-buoyant` runs one bootstrap SIMPLE
+iteration after `initialise` - the pressure selector's - which moves `U` and
+`p` past those levels, so it makes that rotation once before its loop
+instead, with the driver's own field kernels and without the counter, and
+its first step differences against the post-bootstrap state as it always
+did. Under `Euler` the row does not depend on the counter, and a steady run
+still calls `begin_time_step` on every unit of work. Nothing else changes: `ofgpu-lowmach` still calls
+`Energy::advance_time_step` and `GasState::advance_time_levels` on every
+transient step, `ofgpu-plume` has no such call (its equations are Euler),
+and no library loop, kernel or solver control moves.
+
+Gate 105-D is `ofgpu-lowmach`'s test
+`gate_105d_backward_starts_from_the_euler_row_and_the_stroke_is_second_order`:
+§105.12's stroking-outlet case, static and on its sine law, under `Euler`
+and `backward`, at 20, 40 and 80 steps to `T = 0.25`, read through
+`RunEnd::ux_mean` - the arithmetic mean of the internal cells' `U_x` at the
+end of the run, because the written field carries six digits. Tolerances:
+every static error within `1e-5` of `0.75`; on the moving case the fine
+pair's observed order `p = log2(e_40 / e_80)` within `0.2` of 2 under
+`backward` and within `0.1` of 1 under `Euler`, and the 80-step `backward`
+error within `5e-6` of `stroke_exact()`. Measured on the card:
+
+| scheme   | case   | 20 steps | 40 steps | 80 steps | p coarse | p fine |
+|----------|--------|----------|----------|----------|----------|--------|
+| Euler    | static | +3.452e-6 | -1.175e-6 | -2.816e-7 |          |        |
+| backward | static | +3.996e-6 | -1.918e-6 | -4.396e-7 |          |        |
+| Euler    | moving | +1.076e-3 | +5.257e-4 | +2.614e-4 | 1.03     | 1.01   |
+| backward | moving | +6.452e-5 | +1.089e-5 | +2.447e-6 | 2.57     | 2.15   |
+
+Before the change, from the six-digit written fields of the HEAD binary
+(94095d9): `backward` static `-6.252e-3`, `-3.126e-3`, `-1.563e-3`, and
+`backward` moving `-6.179e-3`, `-3.104e-3`, `-1.556e-3` - order 0.99 and
+1.00, the start's `-dt dU/dt(0) / 2` swamping the scheme.
+
+The gate stops at 80 steps, not at §105.10's 320, because under `backward`
+this driver's stroke is refused by §93.6's Mach guard from 140 steps on -
+the static case at 140 steps on the HEAD binary already, the moving case at
+160 there and at 140 after this change - while `Euler` runs to 320. The
+start does not cause it and it is not diagnosed here. The static error is
+not zero under either scheme (a few `1e-6`, second order in `dt`): the
+two-corrector PIMPLE step's own splitting, not the time scheme, and it is
+what bends the moving case's coarse-pair order away from 2.
+
+Read, not measured, and not changed here: `Energy::correct` refreshes `T`'s
+first old level only and nothing in `ofgpu-lowmach` rotates the second, so
+the energy equation's `backward` row reads the initial `T` as `T^{n-2}` on
+every later step, and its own step counter still reaches 1 during the first
+step. `T` under `backward` is therefore not claimed second order; that is a
+numerics decision for the user. The stroke cases are isothermal, so the
+gate does not see it.
+
+What moved, the full list: §105.12's static `backward` numbers above, the
+moving `backward` numbers above, and the fields of any `backward` run of
+either driver from its first step on. `ofgpu-validate` does not move: none
+of its rows runs either driver, and its §105 loops are the library's, which
+already started from the Euler row.
+
+Measured on 2026-09-26, the HEAD binaries (94095d9) against this unit's on
+the same inputs, every written field file compared byte for byte.
+Identical: `ofgpu-lowmach` on the stroke case under `Euler` at 20, 40, 80,
+160 and 320 steps, static and moving (50 files), and on
+`cases/plume.jsonc` steady for 5 iterations and, switched to PIMPLE, under
+`Euler` for three steps of `0.01` s (14 files); `ofgpu-buoyant` on a copy
+of `cases/plumeB` steady for 5 iterations and, switched to PIMPLE, under
+`Euler` for three steps (14 files); `ofgpu-plume` on the same copies,
+steady, `Euler` and `backward` (15 files) - its executable is itself
+byte-identical. Moved, every `backward` run: `ofgpu-buoyant` on plumeB, max
+`|dU|` 1.727e-2 m/s against a max `|U|` of 1.924, `|dT|` 0.192 K, `|dp|`
+0.170; `ofgpu-lowmach` on the heated plume case, max `|dU|` 6.989e-2
+against 1.740, `|dT|` 0.151 K, `|dp|` 0.335; the stroke's `U` by the
+`1.56e-3` of the start, and its isothermal `T` in the sixth written digit
+(`1e-3` K). Every exit code is unchanged, the four `backward` stroke runs at
+160 and 320 steps that §93.6's guard refuses on both binaries included.
+Measuring the first Run of this unit is what found `ofgpu-buoyant`'s
+bootstrap: skipping the first step's rotation had moved all seven of its
+`Euler` files.
+
+House items. No new file; no capture row - `src/bin/` is outside the capture
+registry; no kernel changed. `ofgpu-lowmach` gains one test (47); the gate
+census of `ofgpu-validate` is unchanged, Gate 105-D being a driver test.
 
 ---
 
