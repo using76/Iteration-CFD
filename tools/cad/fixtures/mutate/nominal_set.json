@@ -1,0 +1,168 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. The GC-2 nominal requirement set of docs/16 §E.5 (supervisor-written).",
+  "brief": {
+    "schema": "cad-brief/1",
+    "text": "Mutation-gate nominal: an axisymmetric air contraction. The inlet diameter is 60 mm, the exit diameter is 20 mm and the contraction ratio is 9:1. The contraction is 60 mm long and the nozzle is 70 mm long overall. The wall thickness is at least 2.9 mm. Keep the wall slope below 35 deg. The flow rate is 7.07 L/s. Make it as short as possible.",
+    "attachments": [],
+    "provider": "anthropic"
+  },
+  "approved_by": "mutation-gate",
+  "proposal": {
+    "study_id": "gc2_nominal",
+    "template_id": "nozzle_contraction/1",
+    "operating_point": {
+      "fluid": "air",
+      "T_K": 293.15,
+      "p0_Pa": 101325.0,
+      "flow": {
+        "field": "Q_m3_s",
+        "value": 7.07,
+        "unit": "L/s",
+        "source": "brief",
+        "quote": "The flow rate is 7.07 L/s"
+      }
+    },
+    "rows": [
+      {
+        "quantity": "inlet_diameter",
+        "feature": "contraction_start",
+        "op": "==",
+        "value": 60,
+        "upper": null,
+        "tol_abs": 0.001,
+        "tol_rel": null,
+        "unit": "mm",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "hard",
+        "source": "brief",
+        "quote": "The inlet diameter is 60 mm"
+      },
+      {
+        "quantity": "exit_diameter",
+        "feature": "exit_plane",
+        "op": "==",
+        "value": 20,
+        "upper": null,
+        "tol_abs": 0.001,
+        "tol_rel": null,
+        "unit": "mm",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "hard",
+        "source": "brief",
+        "quote": "the exit diameter is 20 mm"
+      },
+      {
+        "quantity": "contraction_ratio",
+        "feature": null,
+        "op": "==",
+        "value": 9,
+        "upper": null,
+        "tol_abs": null,
+        "tol_rel": 1e-06,
+        "unit": "-",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "hard",
+        "source": "brief",
+        "quote": "the contraction ratio is 9:1"
+      },
+      {
+        "quantity": "contraction_length",
+        "feature": null,
+        "op": "==",
+        "value": 60,
+        "upper": null,
+        "tol_abs": 0.001,
+        "tol_rel": null,
+        "unit": "mm",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "hard",
+        "source": "brief",
+        "quote": "The contraction is 60 mm long"
+      },
+      {
+        "quantity": "total_length",
+        "feature": null,
+        "op": "==",
+        "value": 70,
+        "upper": null,
+        "tol_abs": 0.001,
+        "tol_rel": null,
+        "unit": "mm",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "hard",
+        "source": "brief",
+        "quote": "the nozzle is 70 mm long overall"
+      },
+      {
+        "quantity": "min_wall_normal",
+        "feature": null,
+        "op": ">=",
+        "value": 2.9,
+        "upper": null,
+        "tol_abs": null,
+        "tol_rel": null,
+        "unit": "mm",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "hard",
+        "source": "brief",
+        "quote": "The wall thickness is at least 2.9 mm"
+      },
+      {
+        "quantity": "max_wall_slope",
+        "feature": null,
+        "op": "<=",
+        "value": 35,
+        "upper": null,
+        "tol_abs": null,
+        "tol_rel": null,
+        "unit": "deg",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "soft",
+        "source": "brief",
+        "quote": "the wall slope below 35 deg"
+      },
+      {
+        "quantity": "total_length",
+        "feature": null,
+        "op": "<=",
+        "value": null,
+        "upper": null,
+        "tol_abs": null,
+        "tol_rel": null,
+        "unit": "mm",
+        "condition": {
+          "Re": null,
+          "level": null
+        },
+        "hardness": "objective",
+        "source": "brief",
+        "quote": "Make it as short as possible"
+      }
+    ],
+    "created_by": {
+      "provider": "anthropic",
+      "model": "fixture"
+    }
+  }
+}
