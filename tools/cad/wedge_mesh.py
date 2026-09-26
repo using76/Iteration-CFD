@@ -47,7 +47,7 @@ REPORT_KEYS = ("version", "recipe", "recipe_sha", "gc6_tolerances", "geom_sha256
                "bins", "h1_fine_m", "pappus", "levels", "gc6_pass")
 LEVEL_KEYS = ("level", "target_cells", "cells", "cells_rel", "elements", "nr", "nb", "h1_target_m", "h1_max_m",
               "h1_min_m", "h1_mean_m", "h1_rel", "volume_m3", "volume_pappus_m3", "volume_rel", "patches",
-              "check", "msh_sha256", "gc6")
+              "check", "msh_sha256", "polymesh_sha256", "gc6")
 GC6_KEYS = ("volume", "areas", "check", "tau", "first_cell", "cells", "types", "pass")
 USAGE = ("usage: python wedge_mesh.py --selftest" + chr(10)
          + "       python wedge_mesh.py run GEOM_DIR OUT_DIR [H1_FINE]" + chr(10)
@@ -425,7 +425,7 @@ def judge(rep):
     return out
 
 
-def level_report(build, meas, check, cad, msh_sha):
+def level_report(build, meas, check, cad, msh_sha, polymesh_sha):
     """One level's LEVEL_KEYS row: counts, first cell, volume and areas against the CAD, the check, the sha."""
     target = RECIPE["cells_l0"] * 4 ** build["level"]
     check_row = dict((k, v) for k, v in check.items() if k != "text")
@@ -441,7 +441,7 @@ def level_report(build, meas, check, cad, msh_sha):
                                    "rel": (None if cad["areas"].get(name) is None
                                            else (p["area_m2"] - cad["areas"][name]) / cad["areas"][name])})
                            for name, p in meas["patches"].items()),
-           "check": check_row, "msh_sha256": msh_sha}
+           "check": check_row, "msh_sha256": msh_sha, "polymesh_sha256": dict(polymesh_sha)}
     rep["gc6"] = judge(rep)
     return rep
 
@@ -470,6 +470,13 @@ def _run(geom_dir, out_dir, h1_fine, levels):
         msh_sha = common.sha256_file(os.path.join(ld, "wedge.msh"))
         convert(bins, os.path.join(ld, "wedge.msh"), os.path.join(ld, "case"))
         require_wedge_types(patch_types(os.path.join(ld, "case")))
+        polymesh_sha = {}
+        for pm_name in ("boundary", "faces", "neighbour", "owner", "points"):
+            pm_snap = common.stable_file_snapshot(
+                os.path.join(ld, "case", "constant", "polyMesh", pm_name))
+            if pm_snap["stable"] is not True:
+                raise Refused("WEDGE-CONVERT", "polyMesh/%s is not a stable regular file" % pm_name)
+            polymesh_sha[pm_name] = pm_snap["sha256"]
         check = run_check(bins, os.path.join(ld, "case"), os.path.join(ld, "check_config.json"))
         common.atomic_write(os.path.join(ld, "check.txt"), check["text"])
         meas = measure(os.path.join(ld, "case"))
@@ -479,7 +486,7 @@ def _run(geom_dir, out_dir, h1_fine, levels):
             if abs(cad["pappus"]["rel"]) > PAPPUS_TOL:
                 raise Refused("WEDGE-GEOM", "Pappus 2 pi A ybar against the BREP volume is %r, over %r"
                               % (cad["pappus"]["rel"], PAPPUS_TOL))
-        levels_out.append(level_report(build, meas, check, cad, msh_sha))
+        levels_out.append(level_report(build, meas, check, cad, msh_sha, polymesh_sha))
     decl = common.read_json(BIN_JSON)
     rep = {"version": 1, "recipe": RECIPE, "recipe_sha": common.sha256_of(RECIPE), "gc6_tolerances": GC6,
            "geom_sha256": common.sha256_file(os.path.join(geom_dir, "geom.json")),
@@ -606,6 +613,15 @@ def selftest():
             assert poison not in text, poison
         assert main([]) == 2 and main(["run"]) == 2, "usage must exit 2"
         print("[ok] wedge_mesh.json canonical and path-free; usage exits 2")
+
+        # T6b: every level row's polymesh_sha256 equals the five written polyMesh files
+        for lv in doc["levels"]:
+            n = lv["level"]
+            want = dict((nm, common.sha256_file(os.path.join(td, "out", "L%d" % n, "case",
+                                                              "constant", "polyMesh", nm)))
+                        for nm in ("boundary", "faces", "neighbour", "owner", "points"))
+            assert lv["polymesh_sha256"] == want, n
+        print("[ok] polymesh_sha256 of L0, L1, L2 equals the five written polyMesh files")
 
         # T7: each GC-6 predicate fails on its own planted miss, alone
         base = rep["levels"][0]

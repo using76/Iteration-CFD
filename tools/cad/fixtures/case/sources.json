@@ -1,0 +1,75 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "sources": [
+    {
+      "id": "turek_hron",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "bceb79996fd272e036658d01e466dded2b945575",
+      "file": "rust/src/turek_hron.rs",
+      "blob": "45035e00ae204b8bf056730f51d0a2f0b75f90dc",
+      "lines": [
+        447,
+        513
+      ],
+      "what": "turek_rules() and steady_controls(), verbatim",
+      "text": "/// The Turek-Hron rule table for `u_bar`: walls and body `Wall` /\n/// `ZeroGradient`, inlet `Inlet`/`ZeroGradient`, outlet\n/// `ZeroGradient`/`Fixed(0)` (the paper's do-nothing), the empties\n/// `Empty`/`Empty`.\npub fn turek_rules(u_bar: Scalar) -> Vec<(&'static str, VelocityBc, PressureBc)> {\n    vec![\n        (\"empty_back\", VelocityBc::Empty, PressureBc::Empty),\n        (\"empty_front\", VelocityBc::Empty, PressureBc::Empty),\n        (\"wall_top\", VelocityBc::Wall, PressureBc::ZeroGradient),\n        (\n            \"cylinder\",\n            VelocityBc::Wall,\n            PressureBc::ZeroGradient,\n        ),\n        (\"wall_bottom\", VelocityBc::Wall, PressureBc::ZeroGradient),\n        (\n            \"inlet\",\n            VelocityBc::Inlet { u_bar },\n            PressureBc::ZeroGradient,\n        ),\n        (\"outlet\", VelocityBc::ZeroGradient, PressureBc::Fixed(0.0)),\n        (\n            \"fluid_to_flap\",\n            VelocityBc::Wall,\n            PressureBc::ZeroGradient,\n        ),\n    ]\n}\n\n/// Steady SIMPLE: `alpha_U` 0.7, `alpha_p` 0.3 (SPEC-LIT 5.2's pairing).\npub fn steady_controls() -> SimpleControls {\n    SimpleControls {\n        momentum: MomentumControls {\n            nu: NU,\n            u_solver: SolverControls {\n                solver: LinearSolverKind::PBiCGStab,\n                tolerance: 1e-10,\n                rel_tol: 0.1,\n                max_iter: 200,\n                precon: Preconditioner::Dilu,\n                check_interval: 5,\n                ..SolverControls::default()\n            },\n            u_relax: 0.7,\n            div_scheme: DivScheme::LinearUpwind,\n            bounded_convection: true,\n            sn_grad: crate::fv::SnGradScheme::Corrected,\n            variable_viscosity_stress: false,\n            ..MomentumControls::default()\n        },\n        p_solver: SolverControls {\n            solver: LinearSolverKind::PCG,\n            tolerance: 1e-10,\n            rel_tol: 0.05,\n            max_iter: 2000,\n            precon: Preconditioner::Dic,\n            check_interval: 5,\n            ..SolverControls::default()\n        },\n        p_relax: 0.3,\n        n_non_orth_correctors: 1,\n        n_correctors: 1,\n        n_outer_correctors: 1,\n        momentum_predictor: true,\n        report_continuity: true,\n    }\n}\n",
+      "text_sha256": "efaeec2169486c58659ad57062dc0dc4d16ffb339f0ed3fff5d35cde21937aeb"
+    },
+    {
+      "id": "blockgen",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "bceb79996fd272e036658d01e466dded2b945575",
+      "file": "rust/src/blockgen.rs",
+      "blob": "9da5f98982fcee57e90403f6858047e5aee18151",
+      "lines": [
+        4160,
+        4286
+      ],
+      "what": "write_system(): controlDict, fvSchemes and fvSolution of the solver's own case generator, verbatim",
+      "text": "fn write_system(case_dir: &Path) -> Result<()> {\n    let dir = case_dir.join(\"system\");\n\n    write_dict(\n        &dir,\n        \"controlDict\",\n        \"application     foamRun;\\n\\\n         startFrom       startTime;\\n\\\n         startTime       0;\\n\\\n         stopAt          endTime;\\n\\\n         endTime         1;\\n\\\n         deltaT          1;\\n\\\n         writeControl    timeStep;\\n\\\n         writeInterval   1;\\n\\\n         purgeWrite      0;\\n\\\n         writeFormat     ascii;\\n\\\n         writePrecision  6;\\n\\\n         writeCompression off;\\n\\\n         timeFormat      general;\\n\\\n         timePrecision   6;\\n\\\n         runTimeModifiable true;\",\n    )?;\n\n    write_dict(\n        &dir,\n        \"fvSchemes\",\n        \"ddtSchemes\\n{\\n    default         steadyState;\\n}\\n\\n\\\n         gradSchemes\\n{\\n    default         Gauss linear;\\n}\\n\\n\\\n         divSchemes\\n{\\n    default         none;\\n\\\n         \\x20   div(phi,U)       Gauss linearUpwind grad(U);\\n\\\n         \\x20   div(phi,T)       bounded Gauss upwind;\\n\\\n         \\x20   div(phi,k)       bounded Gauss upwind;\\n\\\n         \\x20   div(phi,epsilon) bounded Gauss upwind;\\n\\\n         \\x20   div(phi,omega)   bounded Gauss upwind;\\n\\\n         \\x20   div(phi,nuTilda) bounded Gauss upwind;\\n}\\n\\n\\\n         laplacianSchemes\\n{\\n    default         Gauss linear corrected;\\n}\\n\\n\\\n         interpolationSchemes\\n{\\n    default         linear;\\n}\\n\\n\\\n         snGradSchemes\\n{\\n    default         corrected;\\n}\",\n    )?;\n\n    // ofgpu looks up solvers/<var>/... by exact name, so the sub-dictionaries\n    // are written out one per variable rather than behind a regex key.\n    //\n    // `p` and `U` are here for `ofgpu-buoyant`; the frozen-flow drivers never\n    // look them up. `p` is the one entry whose settings actually matter: the\n    // pressure Poisson equation is diagonally weak and takes hundreds of\n    // sweeps where every other equation here takes three, so it gets DIC\n    // rather than Jacobi and a budget to match. `relTol 0.01` is deliberate\n    // too - inside a SIMPLE loop the pressure only has to be solved as well as\n    // the coefficients it was assembled from deserve, and driving it to 1e-8\n    // on an outer iteration that is about to change `rAUf` is wasted work.\n    write_dict(\n        &dir,\n        \"fvSolution\",\n        \"solvers\\n{\\n\\\n         \\x20   p\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  DIC;\\n\\\n         \\x20       tolerance       1e-08;\\n\\\n         \\x20       relTol          0.01;\\n\\\n         \\x20       maxIter         1000;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   Phi\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  DIC;\\n\\\n         \\x20       tolerance       1e-12;\\n\\\n         \\x20       relTol          0;\\n\\\n         \\x20       maxIter         5000;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   U\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  diagonal;\\n\\\n         \\x20       tolerance       1e-08;\\n\\\n         \\x20       relTol          0.1;\\n\\\n         \\x20       maxIter         200;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   T\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  diagonal;\\n\\\n         \\x20       tolerance       1e-08;\\n\\\n         \\x20       relTol          0.01;\\n\\\n         \\x20       maxIter         200;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   k\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  diagonal;\\n\\\n         \\x20       tolerance       1e-08;\\n\\\n         \\x20       relTol          0.01;\\n\\\n         \\x20       maxIter         200;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   epsilon\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  diagonal;\\n\\\n         \\x20       tolerance       1e-08;\\n\\\n         \\x20       relTol          0.01;\\n\\\n         \\x20       maxIter         200;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   omega\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  diagonal;\\n\\\n         \\x20       tolerance       1e-08;\\n\\\n         \\x20       relTol          0.01;\\n\\\n         \\x20       maxIter         200;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   nuTilda\\n    {\\n\\\n         \\x20       solver          PBiCGStab;\\n\\\n         \\x20       preconditioner  diagonal;\\n\\\n         \\x20       tolerance       1e-08;\\n\\\n         \\x20       relTol          0.01;\\n\\\n         \\x20       maxIter         200;\\n\\\n         \\x20   }\\n}\\n\\n\\\n         SIMPLE\\n{\\n    nNonOrthogonalCorrectors 0;\\n}\\n\\n\\\n         // U 0.7 with p 0.3 is what OpenFOAM's buoyant cases use, and the two\\n\\\n         // summing to one is the usual rule of thumb behind it.\\n\\\n         relaxationFactors\\n{\\n    fields\\n    {\\n\\\n         \\x20       p               0.3;\\n\\\n         \\x20   }\\n\\n\\\n         \\x20   equations\\n    {\\n\\\n         \\x20       U               0.7;\\n\\\n         \\x20       T               0.7;\\n\\\n         \\x20       k               0.7;\\n\\\n         \\x20       epsilon         0.7;\\n\\\n         \\x20       omega           0.7;\\n\\\n         \\x20       nuTilda         0.7;\\n\\\n         \\x20   }\\n}\",\n    )\n}\n",
+      "text_sha256": "1eedb731072d99c978c7df4dc2d481f47fa8e707b793d0b62c45fcb382eb15ac"
+    }
+  ],
+  "cites": [
+    {
+      "what": "air nu 1.5e-5",
+      "file": "rust/src/blockgen.rs",
+      "lines": [
+        3603,
+        3604
+      ]
+    },
+    {
+      "what": "GasProperties::default(): R 8.314462618, W 0.0289647, gamma 1.4",
+      "file": "rust/src/energy.rs",
+      "lines": [
+        311,
+        329
+      ]
+    },
+    {
+      "what": "p is the crate's kinematic pressure",
+      "file": "rust/src/bin/lowmach.rs",
+      "lines": [
+        3205,
+        3206
+      ]
+    },
+    {
+      "what": "noSlip is fixedValue; slip and wedge are Symmetry; inletOutlet",
+      "file": "rust/src/field.rs",
+      "lines": [
+        423,
+        433
+      ]
+    },
+    {
+      "what": "a patch with no entry holds its cell value",
+      "file": "rust/src/field_setup.rs",
+      "lines": [
+        3045,
+        3046
+      ]
+    }
+  ]
+}
