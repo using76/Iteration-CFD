@@ -86,6 +86,11 @@ convention we deliberately change: their ADR 0013 puts revolved axes on Z; we pu
 streamwise direction falls back to (1,0,0) when there is no cyclic pair (solver tree `lowmach.rs:2974-2985`)
 (decision D-3).
 
+**Addendum (adopted 2026-09-26):** what the loop also borrows from Amagine3D (https://github.com/amagine-ai/Amagine3D,
+e608dc6, Apache-2.0: `NOTICE`, `LICENSE-APACHE-2.0.amagine3d`) is `docs/16a-amagine-borrow.md`, with decisions D-9,
+D-10 and D-11 answered yes. It adds units AMG-0..AMG-11, amends CAD-13..18, CAD-23, GUI-1 and GUI-3, replaces GUI-4's
+body with AMG-11 (16a §G, §H), and narrows §C fact 2 and extends §E.2 as those units land.
+
 ## B. What we take from the published work
 
 | work | what it showed | what we take | code licence |
@@ -758,3 +763,9 @@ passing: Savitzky & Golay 1964, DOI 10.1021/ac60214a047 (CAD-12's smoothing); Tu
 10.1007/3-540-34596-5_15 (Gate 105-C); Ghia, Ghia & Shin 1982, DOI 10.1016/0021-9991(82)90058-4 (Gate 94-D). Every DOI
 in this section was checked against api.crossref.org on 2026-09-25 (title and year); every URL in the turbulent block
 was fetched that day.
+
+Addendum sources (`docs/16a-amagine-borrow.md` §L, adopted 2026-09-26): Amagine3D https://github.com/amagine-ai/Amagine3D
+(e608dc61d5ac70238d96d9c4f3fba00b6cc9dc21, Apache-2.0); trimesh https://github.com/mikedh/trimesh (MIT); manifold3d
+https://github.com/elalish/manifold (Apache-2.0, named, not used); OCCT https://dev.opencascade.org (used as a
+library); Inui, Umezu & Shimane 2016 DOI 10.1080/16864360.2015.1084186 (cited, not used); Pappus's centroid theorem
+https://mathworld.wolfram.com/PappussCentroidTheorem.html.
