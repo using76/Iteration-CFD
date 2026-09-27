@@ -1,0 +1,177 @@
+// SPEC-LIT 110.4 Gate 110-C - the buoyant plume against McCaffrey (1979),
+// NBSIR 79-1910, Table 1's weighted averages. THIS CASE IS A HOT-GAS INLET,
+// NOT A FLAME: all of Q enters as enthalpy, nothing radiates, and Q is
+// DECLARED, not measured (110.4's own arithmetic, repeated here):
+//
+//   Q = rho_in U_in A_in cp (T_in - T_inf),  rho_in = p0 / (R_s T_in)
+//   p0 = 101325 Pa, R_s = 287.05 J/(kg K), cp = 1006 J/(kg K),
+//   T_in = 1173.15 K, T_inf = 293.15 K, A_in = 0.30 m x 0.30 m = 0.09 m2
+//   -> rho_in = 0.30089 kg/m3 ; Q per (m/s) = 23 973 W ;
+//   Q = 57.5 kW  <=>  U_in = 2.3985 m/s   (this file's inlet velocity)
+//
+// The bounds sit at +-1.65 m, NOT +-1.5 m: at +-1.5 m with 30 cells the coarse
+// mesh's cell centres would fall exactly on the burner edge +-0.15 m, making
+// the inlet area - and therefore Q - depend on rounding. At +-1.65 m the 0.3 m
+// square window is 3 x 3, 6 x 6 and 12 x 12 whole cells at the three levels,
+// 0.09 m2 each, and no cell centre lies within 0.0125 m of the edge.
+//
+// The mesh sequence is cells [33,33,40] / [66,66,80] / [132,132,160] - cell
+// size 0.10 / 0.05 / 0.025 m, finest first (94.1). THIS FILE IS THE 66 LEVEL:
+// the other two levels run on scratch copies with ONLY "cells" edited.
+//
+// Measurement (110.4): the centreline column's U_z and T at
+//   ofgpu-sample column cases/plumeMcCaffrey.jsonc 4000 z 0 0 -at 1.25,1.5,1.75,2.0,2.25,2.5
+// On the two finer
+// meshes no cell centre sits on x = y = 0: the column is the NEAREST one,
+// dx/2 off the axis, and that offset stands quoted on every number.
+//
+// The key `mccaffrey1979-table1` is expected at
+// reference/mccaffrey_1979/centreline_table1.txt - the report is a US
+// Government work, public domain, but this tree carries NO transcription of
+// it; the key's bytes live in 110.4's fenced block and nowhere else. The
+// gate itself is validate.rs's check_mccaffrey_plume; the recipe is 110.5.
+//
+// UNVERIFIED: no run of this file has filled a cell of 110.5's table, and no
+// number anywhere below is a claim. P1/P2 are EXPECTED outside their bands
+// (radiation is 20-40 % of Q and this solver does not model it - 110.4); that
+// miss is the measurement, not a failure.
+// ============================================================================
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "plumeMcCaffrey",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [-1.65, -1.65, 0.0], "max": [1.65, 1.65, 4.0] },
+    "cells":  [66, 66, 80],
+
+    // `wallXMin/wallXMax/wallYMin/wallYMax/floor/outlet`, the block's own
+    // `-x +x -y +y -z +z` slot order - the top boundary is the open one here,
+    // and the box is the McCaffrey case's own 3.3 x 3.3 x 4 m (110.4).
+    "boundaries": {
+      "xmin": "wallXMin", "xmax": "wallXMax",
+      "ymin": "wallYMin", "ymax": "wallYMax",
+      "zmin": "floor",    "zmax": "outlet",
+    },
+
+    // The hot inlet: a 0.30 m x 0.30 m window centred on the origin, cut from
+    // the floor - the report's "0.30 m square porous refractory burner"
+    // (110.4). At this level's 0.05 m cells it is 6 x 6 whole cells
+    // (i 30..35, j 30..35), 0.09 m2 exactly, and no cell centre lies within
+    // 0.0125 m of the edge +-0.15 - which is why the bounds are +-1.65, not
+    // +-1.5 (110.4's rounding argument, and this header's).
+    "regions": [
+      {
+        "name": "inlet",
+        "on": "zmin",
+        "shape": { "kind": "box", "min": [-0.15, -0.15, -1], "max": [0.15, 0.15, 1] },
+      },
+    ],
+  },
+
+  "physics": {
+    "gravity": [0, 0, -9.81],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    // `cases/plumeB/constant/momentumTransport` sets neither `kappa` nor `E`
+    // (and `blended` is not read by anything - see the comment where ofgpu's
+    // `TextOut::real` precision was raised, and `WallFunctionCoeffs::default`
+    // itself), so these ARE `WallFunctionCoeffs::default()`'s own numbers,
+    // written explicitly rather than left to a default this reader has no
+    // "case gave nothing" branch for.
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+  },
+
+  // ORDERED, first-match-wins. Three rules are enough because every patch
+  // NAME is already unique (`inlet`, `outlet`, and five walls) - the
+  // catch-all is a pattern-reuse convenience, not a preset: every field it
+  // sets is still the literal value `cases/plumeB`'s field files carry on
+  // `ceiling`/`floor`/`wallXMin`/`wallYMin`/`wallYMax` (all five are
+  // identical, being ordinary no-slip, adiabatic, wall-function walls).
+  "patches": [
+    {
+      "match": "inlet",
+      "kind": "inlet",
+      // 2.3985 m/s: Q = 57.5 kW, the largest of the report's five fires,
+      // declared through 110.4's enthalpy balance - see this file's header.
+      "U": { "type": "fixedValue", "value": [0, 0, 2.3985] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 1173.15 },
+      "k": { "type": "fixedValue", "value": 0.015 },
+      "epsilon": { "type": "fixedValue", "value": 0.00361829 },
+      "omega": { "type": "fixedValue", "value": 2.68022 },
+      "nut": { "type": "calculated", "value": 0 },
+    },
+    {
+      "match": "outlet",
+      "kind": "open",
+      "U": { "type": "inletOutlet", "inletValue": [0, 0, 0] },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "inletOutlet", "inletValue": 293.15 },
+      "k": { "type": "zeroGradient" },
+      "epsilon": { "type": "zeroGradient" },
+      "omega": { "type": "zeroGradient" },
+      "nut": { "type": "calculated", "value": 0 },
+    },
+    {
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "kqRWallFunction", "value": 0.015 },
+      "epsilon": { "type": "epsilonWallFunction", "value": 0.00361829 },
+      "omega": { "type": "omegaWallFunction", "value": 2.68022 },
+      "nut": { "type": "nutkWallFunction", "value": 0 },
+    },
+  ],
+
+  "initial": {
+    "U": [0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.015,
+    "epsilon": 0.00361829,
+    "omega": 2.68022,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      // Never actually consulted: every equation this case runs names its
+      // own entry below. A real, always-parseable scheme rather than
+      // OpenFOAM's `none` sentinel, because `parse_div` (correctly) refuses
+      // `none` as a scheme - see `numerics.div.default`'s doc in `case_json.rs`.
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+      "div(phi,omega)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.7, "p": 0.3, "T": 0.7, "k": 0.7, "epsilon": 0.7, "omega": 0.7 },
+    "solvers": [
+      { "match": "p",       "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-8, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+      { "match": "k",       "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+      { "match": "omega",   "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-8, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  "run": {
+    "endTime": 1.0,
+    "deltaT": 1.0,
+    "adjustTimeStep": false,
+  },
+}

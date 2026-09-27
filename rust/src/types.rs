@@ -360,4 +360,120 @@ mod tests {
         let y = Vec3::new(0.0, 1.0, 0.0);
         assert_eq!(x.cross(y), Vec3::new(0.0, 0.0, 1.0));
     }
+
+    /// SPEC-LIT 112.1: the floor and its large twin mean something in the
+    /// precision this build solves in, and in f64 they are the values every
+    /// floor in this crate had before.
+    #[test]
+    fn the_floor_and_its_large_twin_survive_the_scalar_type() {
+        use crate::{SCALAR_FLOOR, SCALAR_HUGE};
+        assert!(SCALAR_FLOOR > 0.0, "SCALAR_FLOOR is 0 in this build (SPEC-LIT 112.1)");
+        assert!(
+            SCALAR_FLOOR >= Scalar::MIN_POSITIVE * 1.0e7,
+            "SCALAR_FLOOR {SCALAR_FLOOR:e} is within 1e7 of the smallest normal"
+        );
+        assert!(SCALAR_FLOOR.ln().is_finite() && SCALAR_FLOOR.sqrt() > 0.0);
+        assert!((1.0 / SCALAR_FLOOR).is_finite(), "1 / SCALAR_FLOOR overflows");
+        let product = SCALAR_HUGE * SCALAR_FLOOR;
+        assert!(SCALAR_HUGE.is_finite() && product > 0.5 && product < 2.0);
+        #[cfg(not(feature = "single"))]
+        {
+            assert_eq!(SCALAR_FLOOR.to_bits(), 1e-300_f64.to_bits());
+            assert_eq!(SCALAR_HUGE.to_bits(), 1e300_f64.to_bits());
+        }
+        #[cfg(feature = "single")]
+        {
+            assert_eq!(SCALAR_FLOOR.to_bits(), 1e-30_f32.to_bits());
+            assert_eq!(SCALAR_HUGE.to_bits(), 1e30_f32.to_bits());
+        }
+    }
+
+    /// SPEC-LIT 112.1: a double-only literal in a kernel unit is `0` (or
+    /// undefined) in the f32 build, so it may appear only on a `#define` in
+    /// the `#else` arm of an `#ifdef OFGPU_SINGLE` pair.
+    #[test]
+    fn no_kernel_unit_carries_a_double_only_literal_outside_its_pair() {
+        const DOUBLE_ONLY: [&str; 3] = ["1e-300", "1e300", "2.2250738585072014e-308"];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cuda");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        let (mut bad, mut paired) = (Vec::new(), 0usize);
+        for p in files {
+            if !matches!(p.extension().and_then(|s| s.to_str()), Some("cu") | Some("cuh")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap();
+            // One entry per open conditional: (is it `#ifdef OFGPU_SINGLE`, in its `#else`).
+            let mut stack: Vec<(bool, bool)> = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("").trim();
+                if code.starts_with("#if") {
+                    stack.push((code == "#ifdef OFGPU_SINGLE", false));
+                } else if code.starts_with("#else") {
+                    if let Some(top) = stack.last_mut() {
+                        top.1 = true;
+                    }
+                } else if code.starts_with("#endif") {
+                    stack.pop();
+                }
+                if DOUBLE_ONLY.iter().any(|t| code.contains(t)) {
+                    if code.starts_with("#define") && stack.last() == Some(&(true, true)) {
+                        paired += 1;
+                    } else {
+                        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                        bad.push(format!("cuda/{name}:{}: {code}", i + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} double-only literal(s) outside an OFGPU_SINGLE pair - each is 0 or undefined in the f32 \
+             build (SPEC-LIT 112.1):\n  {}",
+            bad.len(),
+            bad.join("\n  ")
+        );
+        assert!(paired >= 9, "only {paired} paired double-only literals: the scan is not reading cuda/");
+    }
+
+    /// SPEC-LIT 112.3: the tests that do not hold at f32 are marked by name,
+    /// and the number of marks is the number that section publishes.
+    #[test]
+    fn the_f32_failure_count_is_the_one_spec_lit_states() {
+        // Built from two pieces so that this file's own text is not counted.
+        let needle = concat!("ignore = \"fails at f32", ": SPEC-LIT 112.3\"");
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        walk(&root.join("src"), &mut files);
+        let bin_dir = root.join("src").join("bin");
+        let (mut lib, mut bins) = (0usize, 0usize);
+        for p in &files {
+            let n = std::fs::read_to_string(p).unwrap().matches(needle).count();
+            if p.starts_with(&bin_dir) {
+                bins += n;
+            } else {
+                lib += n;
+            }
+        }
+        let spec = std::fs::read_to_string(root.join("SPEC-LIT.md")).unwrap();
+        assert!(
+            spec.contains(&format!("**{lib}** library")),
+            "{lib} library tests are marked as failing at f32, and SPEC-LIT 112.3 does not say so"
+        );
+        assert!(
+            spec.contains(&format!("**{bins}** binary tests")),
+            "{bins} binary tests are marked as failing at f32, and SPEC-LIT 112.3 does not say so"
+        );
+    }
 }

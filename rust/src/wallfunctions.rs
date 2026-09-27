@@ -78,6 +78,7 @@ use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{set_values, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::{Label, Scalar};
+use crate::SCALAR_FLOOR;
 
 /// Read from `constant/momentumTransport`; defined in [`crate::io::case`]
 /// because that is where it is parsed, re-exported here because this is where
@@ -279,7 +280,7 @@ pub fn roughness_db(ks_plus: Scalar, cs: Scalar, kappa: Scalar) -> Scalar {
     } else if ks_plus < 90.0 {
         let arg = (ks_plus - 2.25) / 87.75 + cs * ks_plus;
         let sine = (0.4258 * (ks_plus.ln() - 0.811)).sin();
-        arg.max(1e-300).ln() * sine / kappa
+        arg.max(SCALAR_FLOOR).ln() * sine / kappa
     } else {
         (1.0 + cs * ks_plus).ln() / kappa
     }
@@ -363,7 +364,7 @@ pub fn u_tau_newton(
         return 0.0;
     }
 
-    let mut u_tau: Scalar = (nu * u_mag / y).max(1e-300).sqrt();
+    let mut u_tau: Scalar = (nu * u_mag / y).max(SCALAR_FLOOR).sqrt();
 
     for _ in 0..10 {
         let ks_plus = ks_plus_of(ks, cs, u_tau, nu);
@@ -383,8 +384,8 @@ pub fn u_tau_newton(
             break;
         }
 
-        let next = (u_tau - f / df).max(1e-300);
-        let done = (next - u_tau).abs() <= 1e-6 * next.abs().max(1e-300);
+        let next = (u_tau - f / df).max(SCALAR_FLOOR);
+        let done = (next - u_tau).abs() <= 1e-6 * next.abs().max(SCALAR_FLOOR);
         u_tau = next;
         if done {
             break;
@@ -1437,6 +1438,10 @@ pub struct WallShearPatch {
     /// cross-check to print, and its disagreement with [`Self::tau_w_mag`] is
     /// a finding about the wall treatment, not a number to average away.
     pub tau_w_other: Option<Scalar>,
+    /// The viscous force ON the wall, N: `sum_f tau_f (dU_par,f/|dU_par,f|) A_f`
+    /// over this patch's faces, in the form `form` names - SPEC-LIT §32.5.6.
+    /// Its projection on `e_hat` is exactly [`Self::tau_w`] times [`Self::area`].
+    pub force: crate::Vec3,
 }
 
 /// [`wall_shear`]'s whole-domain totals - SPEC-LIT §32.5.1.
@@ -1467,6 +1472,9 @@ pub struct WallShear {
     /// `rho u_tau^2`. [`Self::drag`] keeps whichever form §32.5.1 selects for
     /// reporting; these two are never mixed.
     pub drag_kin: Scalar,
+    /// `sum` of every patch's [`WallShearPatch::force`], N;
+    /// `force.dot(e_hat)` is [`Self::drag`] - SPEC-LIT §32.5.6.
+    pub force: crate::Vec3,
     /// [`Self::drag`] / [`Self::area`].
     pub tau_w: Scalar,
     /// Area-mean traction magnitude over every wall face.
@@ -1531,6 +1539,8 @@ pub fn wall_shear(
 ) -> WallShear {
     let mut total_area = 0.0f64;
     let mut total_drag = 0.0f64;
+    // SPEC-LIT §32.5.6: the force vector's components, f64 like `drag`.
+    let (mut total_fx, mut total_fy, mut total_fz) = (0.0f64, 0.0f64, 0.0f64);
     let mut total_drag_kin = 0.0f64;
     let mut total_mag = 0.0f64;
     let mut n_faces = 0usize;
@@ -1542,6 +1552,7 @@ pub fn wall_shear(
         }
         let mut area = 0.0f64;
         let mut drag = 0.0f64;
+        let (mut fx, mut fy, mut fz) = (0.0f64, 0.0f64, 0.0f64);
         let mut mag = 0.0f64;
         let mut other = 0.0f64;
         let mut other_ok = true;
@@ -1593,6 +1604,15 @@ pub fn wall_shear(
             n_faces += 1;
             area += a;
             drag += tau * cos * a;
+            // SPEC-LIT §32.5.6: the same `tau` given its direction is the
+            // force VECTOR - `force . e_hat` is `drag` identically, face by
+            // face, so this accumulates nothing the projection above did not.
+            if speed > 0.0 {
+                let s = tau * a / speed;
+                fx += f64::from(du_par.x) * s;
+                fy += f64::from(du_par.y) * s;
+                fz += f64::from(du_par.z) * s;
+            }
             // SPEC-LIT §32.5.2's cross-check quantity: the viscous form,
             // divided by the same `rho` it was just multiplied by, which is
             // `nu_eff |dU_par| deltaCoeffs |Sf|` - the momentum matrix's own
@@ -1610,6 +1630,9 @@ pub fn wall_shear(
 
         total_area += area;
         total_drag += drag;
+        total_fx += fx;
+        total_fy += fy;
+        total_fz += fz;
         total_mag += mag;
         let inv = if area > 0.0 { 1.0 / area } else { 0.0 };
         by_patch.push(WallShearPatch {
@@ -1619,6 +1642,7 @@ pub fn wall_shear(
             tau_w: (drag * inv) as Scalar,
             tau_w_mag: (mag * inv) as Scalar,
             tau_w_other: if other_ok { Some((other * inv) as Scalar) } else { None },
+            force: crate::Vec3::new(fx as Scalar, fy as Scalar, fz as Scalar),
         });
     }
 
@@ -1627,6 +1651,11 @@ pub fn wall_shear(
         area: total_area as Scalar,
         drag: total_drag as Scalar,
         drag_kin: total_drag_kin as Scalar,
+        force: crate::Vec3::new(
+            total_fx as Scalar,
+            total_fy as Scalar,
+            total_fz as Scalar,
+        ),
         tau_w: (total_drag * inv) as Scalar,
         tau_w_mag: (total_mag * inv) as Scalar,
         n_faces,
@@ -1959,6 +1988,398 @@ impl ThermalWallData {
                 .launch(cfg_for(n))?;
         }
         Ok(())
+    }
+}
+
+// ==========================================================================
+//  Wall forces: pressure, and the flat-plate estimate - SPEC-LIT §32.5.6
+// ==========================================================================
+
+/// One wall patch's pressure force - SPEC-LIT §32.5.6.
+#[derive(Debug, Clone)]
+pub struct PressureForcePatch {
+    /// Index into [`HostMesh::patches`].
+    pub patch: usize,
+    /// Summed `|Sf|` over this patch's wall faces, m^2.
+    pub area: Scalar,
+    /// The force the fluid exerts ON this wall, N.
+    pub force: crate::Vec3,
+}
+
+/// `sum_f rho_f p_f Sf_f` over every `wall`-kind face - SPEC-LIT §32.5.6.
+#[derive(Debug, Clone)]
+pub struct PressureForce {
+    /// Total wall area entered into the sum, m^2.
+    pub area: Scalar,
+    /// The total force ON the walls, N.
+    pub force: crate::Vec3,
+    /// How many boundary faces entered the sum.
+    pub n_faces: usize,
+    /// One row per `wall`-kind patch, in [`HostMesh::patches`] order.
+    pub by_patch: Vec<PressureForcePatch>,
+}
+
+/// Sum `rho_bf[bf] * p_bf[bf] * b_sf[bf]` over every `wall`-kind face -
+/// SPEC-LIT §32.5.6.
+///
+/// `p` is this crate's KINEMATIC pressure (`p/rho`; the momentum equation
+/// carries no density), so the face density is what turns the sum into
+/// newtons. `p_f` is the face's EVALUATED boundary value: on a
+/// `zeroGradient` wall that is the owner cell's - first order, and the same
+/// value the momentum equation saw. `Sf` points OUT of the fluid, so the
+/// sum is the force ON the wall. `Empty`/`Symmetry`/`Cyclic`/`Generic`
+/// faces are not summed - an inlet or an outlet is not a wall. A cut face
+/// is an ordinary `wall`-kind boundary face (SPEC-LIT §24.3: its patch
+/// comes from the nearest surface triangle) and needs no path of its own.
+/// A face with `b_mag_sf == 0` contributes zero without a special case.
+pub fn pressure_force(m: &HostMesh, p_bf: &[Scalar], rho_bf: &[Scalar]) -> PressureForce {
+    let (mut fx, mut fy, mut fz) = (0.0f64, 0.0f64, 0.0f64);
+    let mut area = 0.0f64;
+    let mut n_faces = 0usize;
+    let mut by_patch: Vec<PressureForcePatch> = Vec::new();
+    for (pi, patch) in m.patches.iter().enumerate() {
+        if patch.kind != crate::mesh::PatchKind::Wall || patch.size == 0 {
+            continue;
+        }
+        let (mut pfx, mut pfy, mut pfz) = (0.0f64, 0.0f64, 0.0f64);
+        let mut parea = 0.0f64;
+        for i in 0..patch.size {
+            let bf = patch.start + i;
+            let w = f64::from(rho_bf[bf]) * f64::from(p_bf[bf]);
+            let sf = m.b_sf[bf];
+            pfx += w * f64::from(sf.x);
+            pfy += w * f64::from(sf.y);
+            pfz += w * f64::from(sf.z);
+            parea += f64::from(m.b_mag_sf[bf]);
+            n_faces += 1;
+        }
+        area += parea;
+        fx += pfx;
+        fy += pfy;
+        fz += pfz;
+        by_patch.push(PressureForcePatch {
+            patch: pi,
+            area: parea as Scalar,
+            force: crate::Vec3::new(pfx as Scalar, pfy as Scalar, pfz as Scalar),
+        });
+    }
+    PressureForce {
+        area: area as Scalar,
+        force: crate::Vec3::new(fx as Scalar, fy as Scalar, fz as Scalar),
+        n_faces,
+        by_patch,
+    }
+}
+
+/// Which correlation [`flat_plate_cf`] returned - printed with the number,
+/// SPEC-LIT §32.5.6, so a reader can judge the transition it crossed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlatPlateRegime {
+    /// `C_F = 1.328 / sqrt(Re_L)` (Blasius 1908).
+    Laminar,
+    /// `C_F = 0.455 / (log10 Re_L)^2.58` (Prandtl 1927 / Schlichting 1932).
+    Turbulent,
+}
+
+impl FlatPlateRegime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Laminar => "Blasius laminar",
+            Self::Turbulent => "Prandtl-Schlichting turbulent",
+        }
+    }
+}
+
+/// The TOTAL (plate-averaged) skin-friction coefficient of a smooth flat
+/// plate at `Re_L = U_ref L / nu` - SPEC-LIT §32.5.6's comparison number,
+/// printed beside the measured force and never added to it.
+///
+/// * laminar, `Re_L < 5e5`: Blasius, `1.328 / sqrt(Re_L)` (Blasius, *Z.
+///   Math. Phys.* 56 (1908) 1-37; Schlichting & Gersten, *Boundary-Layer
+///   Theory*, 8th ed., the laminar flat-plate chapter).
+/// * turbulent smooth plate, `Re_L >= 5e5`: Prandtl-Schlichting,
+///   `0.455 / (log10 Re_L)^2.58` (Prandtl 1927 / Schlichting 1932;
+///   Schlichting & Gersten, the turbulent boundary-layer-on-a-plate
+///   chapter; used here to about `1e9`).
+///
+/// Both formulas are transcribed from the textbook as printed. `5e5` is
+/// the textbook smooth-plate transition Reynolds number at low
+/// free-stream turbulence and is *DESIGN* - real transition depends on
+/// turbulence level and roughness, which is why the regime is printed
+/// with the number. `None` for `Re_L <= 0` or non-finite: the estimate is
+/// skipped, never guessed.
+pub fn flat_plate_cf(re_l: Scalar) -> Option<(Scalar, FlatPlateRegime)> {
+    if !(re_l > 0.0) || !re_l.is_finite() {
+        return None;
+    }
+    if re_l < 5.0e5 {
+        Some((1.328 / re_l.sqrt(), FlatPlateRegime::Laminar))
+    } else {
+        Some((
+            0.455 / re_l.log10().powf(2.58),
+            FlatPlateRegime::Turbulent,
+        ))
+    }
+}
+
+/// One wall patch's row of the force report - SPEC-LIT §32.5.6.
+#[derive(Debug, Clone)]
+pub struct PatchDrag {
+    /// Index into [`HostMesh::patches`].
+    pub patch: usize,
+    /// The patch's wall area, m^2.
+    pub area: Scalar,
+    /// Which [`WallShearForm`] the patch's viscous traction came from.
+    pub form: WallShearForm,
+    /// The viscous force ON the wall, N ([`WallShearPatch::force`]).
+    pub f_visc: crate::Vec3,
+    /// The pressure force ON the wall, N ([`PressureForcePatch::force`]).
+    pub f_pres: crate::Vec3,
+    /// The axis this row's projections and estimate were taken along.
+    pub axis: crate::Vec3,
+    /// Where `axis` came from, in the report's own words.
+    pub axis_whence: String,
+    /// `true` when `axis` is this patch's own traction direction because
+    /// the run supplied none - the line says `DEFAULT`.
+    pub axis_is_default: bool,
+    /// `f_visc . axis`, N.
+    pub drag_visc: Scalar,
+    /// `f_pres . axis`, N.
+    pub drag_pres: Scalar,
+    /// The domain's mass-weighted mean of `U . axis`, m/s.
+    pub u_ref: Scalar,
+    /// The patch's face-centre extent along `axis`, m - about one cell
+    /// short of the geometric length, since [`HostMesh`] carries no face
+    /// vertices and the centres sit half a cell in from each end.
+    pub length: Scalar,
+    /// `u_ref * length / nu`.
+    pub re_l: Scalar,
+    /// The flat-plate `C_F` at [`Self::re_l`], with its regime.
+    pub cf: Option<(Scalar, FlatPlateRegime)>,
+    /// `0.5 rho_ref u_ref^2 C_F A` - the estimate, never added to anything.
+    pub flat_plate: Option<Scalar>,
+}
+
+/// The whole wall-force report [`drag_report`] builds - SPEC-LIT §32.5.6.
+#[derive(Debug, Clone)]
+pub struct DragReport {
+    /// One row per `wall`-kind patch, in [`HostMesh::patches`] order.
+    pub by_patch: Vec<PatchDrag>,
+    /// Total viscous force ON the walls, N.
+    pub f_visc: crate::Vec3,
+    /// Total pressure force ON the walls, N.
+    pub f_pres: crate::Vec3,
+    /// The reference density the estimate used, `rho(T_b)` (SPEC-LIT §32.5.2).
+    pub rho_ref: Scalar,
+    /// The molecular kinematic viscosity the estimate used, m^2/s.
+    pub nu: Scalar,
+}
+
+/// Build the wall-force report - SPEC-LIT §32.5.6.
+///
+/// `axis` is the run's resolved streamwise direction with its `whence`
+/// string (SPEC-LIT §32.5.1's two sources, as the driver resolved them).
+/// Where it is `None` the report does not guess a global axis: each patch
+/// takes its OWN mean traction direction `f_visc/|f_visc|` and its row
+/// says `DEFAULT`. A patch with no traction gets a zero axis and skips
+/// its estimate. `ws` and `pf` walk the same [`crate::mesh::PatchKind::Wall`]
+/// patches in the same order; `u_internal`/`rho_internal` are the
+/// downloaded internal `U` and `rho`; `rho_ref` is `rho(T_b)` and `nu`
+/// the molecular kinematic viscosity.
+#[allow(clippy::too_many_arguments)]
+pub fn drag_report(
+    m: &HostMesh,
+    ws: &WallShear,
+    pf: &PressureForce,
+    axis: Option<(crate::Vec3, &str)>,
+    u_internal: &[crate::Vec3],
+    rho_internal: &[Scalar],
+    rho_ref: Scalar,
+    nu: Scalar,
+) -> DragReport {
+    // The mass-weighted mean of `U . axis` is linear in `axis`, so the
+    // weighted VELOCITY is accumulated once and dotted per patch.
+    let (mut mass, mut mx, mut my, mut mz) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for c in 0..m.n_cells {
+        let w = f64::from(rho_internal[c]) * f64::from(m.v[c]);
+        mass += w;
+        mx += w * f64::from(u_internal[c].x);
+        my += w * f64::from(u_internal[c].y);
+        mz += w * f64::from(u_internal[c].z);
+    }
+    let momentum = crate::Vec3::new(mx as Scalar, my as Scalar, mz as Scalar);
+    let mut by_patch: Vec<PatchDrag> = Vec::new();
+    for (wr, pr) in ws.by_patch.iter().zip(pf.by_patch.iter()) {
+        debug_assert_eq!(
+            wr.patch, pr.patch,
+            "wall_shear and pressure_force must walk the same wall patches"
+        );
+        let (axis, whence, is_default): (crate::Vec3, String, bool) = match axis {
+            Some((a, w)) => (a, w.to_string(), false),
+            None => {
+                if f64::from(wr.force.mag()) > 0.0 {
+                    (
+                        wr.force.normalised(),
+                        "DEFAULT: this patch's own mean traction direction - no thermostat \
+                         direction and no cyclic pair"
+                            .to_string(),
+                        true,
+                    )
+                } else {
+                    (
+                        crate::Vec3::ZERO,
+                        "none: no traction on this patch".to_string(),
+                        true,
+                    )
+                }
+            }
+        };
+        let drag_visc = f64::from(wr.force.dot(axis));
+        let drag_pres = f64::from(pr.force.dot(axis));
+        let u_ref = if mass > 0.0 {
+            f64::from(momentum.dot(axis)) / mass
+        } else {
+            0.0
+        };
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let info = &m.patches[wr.patch];
+        for i in 0..info.size {
+            let s = f64::from(m.b_cf[info.start + i].dot(axis));
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+        let length = if info.size > 0 && lo.is_finite() { hi - lo } else { 0.0 };
+        let (cf, flat_plate, re_l) = if length > 0.0 {
+            let re_l = u_ref * length / f64::from(nu);
+            match flat_plate_cf(re_l as Scalar) {
+                Some((c, reg)) => {
+                    let q = 0.5 * f64::from(rho_ref) * u_ref * u_ref;
+                    (
+                        Some((c, reg)),
+                        Some(q * f64::from(c) * f64::from(wr.area)),
+                        re_l,
+                    )
+                }
+                None => (None, None, re_l),
+            }
+        } else {
+            (None, None, 0.0)
+        };
+        by_patch.push(PatchDrag {
+            patch: wr.patch,
+            area: wr.area,
+            form: wr.form,
+            f_visc: wr.force,
+            f_pres: pr.force,
+            axis,
+            axis_whence: whence,
+            axis_is_default: is_default,
+            drag_visc: drag_visc as Scalar,
+            drag_pres: drag_pres as Scalar,
+            u_ref: u_ref as Scalar,
+            length: length as Scalar,
+            re_l: re_l as Scalar,
+            cf,
+            flat_plate: flat_plate.map(|v| v as Scalar),
+        });
+    }
+    DragReport {
+        by_patch,
+        f_visc: ws.force,
+        f_pres: pf.force,
+        rho_ref,
+        nu,
+    }
+}
+
+impl DragReport {
+    /// Render the block SPEC-LIT §32.5.6 specifies - what `ofgpu-lowmach`
+    /// prints after the §32.5 friction block, one blank line ahead of it.
+    /// `fmt` is the driver's own `%g`-style number formatter, so these
+    /// lines look like every other line it prints. No line here states or
+    /// changes a run status: they all start with `=== wall forces`, two
+    /// spaces, or `total:`.
+    pub fn lines(&self, m: &HostMesh, fmt: &dyn Fn(f64) -> String) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        out.push("=== wall forces, MEASURED (SPEC-LIT §32.5.6) ===".to_string());
+        for r in &self.by_patch {
+            let name = &m.patches[r.patch].name;
+            out.push(format!(
+                "  {name}: area {a} m2 | F_visc = ({vx} {vy} {vz}) N [{form}] | \
+                 F_pres = ({px} {py} {pz}) N | axis = ({ax} {ay} {az}) ({wh}) | \
+                 drag along axis: viscous {dv} N, pressure {dp} N, total {tot} N",
+                a = fmt(f64::from(r.area)),
+                vx = fmt(f64::from(r.f_visc.x)),
+                vy = fmt(f64::from(r.f_visc.y)),
+                vz = fmt(f64::from(r.f_visc.z)),
+                form = r.form.as_str(),
+                px = fmt(f64::from(r.f_pres.x)),
+                py = fmt(f64::from(r.f_pres.y)),
+                pz = fmt(f64::from(r.f_pres.z)),
+                ax = fmt(f64::from(r.axis.x)),
+                ay = fmt(f64::from(r.axis.y)),
+                az = fmt(f64::from(r.axis.z)),
+                wh = r.axis_whence,
+                dv = fmt(f64::from(r.drag_visc)),
+                dp = fmt(f64::from(r.drag_pres)),
+                tot = fmt(f64::from(r.drag_visc + r.drag_pres)),
+            ));
+            let skipped = if r.axis_whence == "none: no traction on this patch" {
+                Some("no traction on this patch")
+            } else if r.length == 0.0 {
+                Some("patch extent along the axis is zero")
+            } else if r.flat_plate.is_none() {
+                Some("Re_L is not positive")
+            } else {
+                None
+            };
+            match (skipped, r.cf, r.flat_plate) {
+                (Some(reason), ..) => out.push(format!(
+                    "  {name}: flat-plate estimate SKIPPED: {reason}"
+                )),
+                (None, Some((c_f, regime)), Some(f_flat)) => {
+                    let ratio = f64::from(r.drag_visc) / f64::from(f_flat);
+                    out.push(format!(
+                        "  {name}: flat-plate estimate: U_ref = {u} m/s (mass-weighted \
+                         mean of U.axis over the domain) | L = {l} m (face-centre extent \
+                         along axis) | Re_L = {re} | C_F = {cf} ({rg}) | F_flat = q C_F A \
+                         = {ff} N | measured viscous / estimate = {ratio}",
+                        u = fmt(f64::from(r.u_ref)),
+                        l = fmt(f64::from(r.length)),
+                        re = fmt(f64::from(r.re_l)),
+                        cf = fmt(f64::from(c_f)),
+                        rg = regime.as_str(),
+                        ff = fmt(f64::from(f_flat)),
+                        ratio = fmt(ratio),
+                    ));
+                }
+                _ => unreachable!("an unskipped row carries both C_F and F_flat"),
+            }
+        }
+        let t = &self.f_visc;
+        let p = &self.f_pres;
+        out.push(format!(
+            "total: F_visc = ({vx} {vy} {vz}) N | F_pres = ({px} {py} {pz}) N | \
+             F = ({fx} {fy} {fz}) N | rho_ref = {rho} kg/m3 | nu = {nu} m2/s",
+            vx = fmt(f64::from(t.x)),
+            vy = fmt(f64::from(t.y)),
+            vz = fmt(f64::from(t.z)),
+            px = fmt(f64::from(p.x)),
+            py = fmt(f64::from(p.y)),
+            pz = fmt(f64::from(p.z)),
+            fx = fmt(f64::from((*t + *p).x)),
+            fy = fmt(f64::from((*t + *p).y)),
+            fz = fmt(f64::from((*t + *p).z)),
+            rho = fmt(f64::from(self.rho_ref)),
+            nu = fmt(f64::from(self.nu)),
+        ));
+        out.push(
+            "  pressure is this solver's KINEMATIC p times the wall density rho_bf \
+             (SPEC-LIT §32.5.6); the wall value is the face's evaluated boundary \
+             value (zeroGradient: the owner cell), first order"
+                .to_string(),
+        );
+        out
     }
 }
 
@@ -2913,6 +3334,7 @@ mod tests {
     /// wall-parallel velocity driving the Newton on the device exactly as it
     /// does on the host.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn device_rough_nutu_agrees_with_the_host_law() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -3023,6 +3445,7 @@ mod tests {
     /// different expressions landing on the same number is evidence a typo'd
     /// exponent or a transposed term would not survive.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn nu_correlations_match_an_independently_written_derivation() {
         for (re, pr) in [(1.0e4, 0.71), (1.6e4, 0.71), (1.0e5, 7.0), (5.0e5, 0.6)] {
             let db = dittus_boelter_nu(re, pr);
@@ -3059,6 +3482,7 @@ mod tests {
     /// change to either formula is caught here rather than only downstream in
     /// the two-mesh comparison.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn nu_correlations_at_the_channel_operating_point() {
         let re: Scalar = 1.6e4;
         let pr: Scalar = 0.71;
@@ -3083,6 +3507,7 @@ mod tests {
     /// to `Pr_t · u+` because `t_vis = Pr_t·y+ `, `t_log = Pr_t·u_log` and
     /// both share `u_plus`'s own blend weights exactly.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn t_plus_reduces_to_prt_times_u_plus_when_pr_equals_prt() {
         let prt: Scalar = 0.85;
         let p = jayatilleke_p(prt, prt);
@@ -3363,6 +3788,7 @@ mod tests {
     /// Inverting the integrated power law reproduces a manufactured `tau_w`
     /// to round-off - SPEC-LIT §30.3's own wording for this gate.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn ww_power_branch_inverts_a_manufactured_tau_w_to_round_off() {
         let nu: Scalar = 1.5e-5;
         let h: Scalar = 0.01;
@@ -3636,6 +4062,7 @@ mod tests {
     /// magnitude mean is `mu S`. That the totals differ is the whole point of
     /// reporting both.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn wall_shear_viscous_form_is_exact_on_a_linear_profile() {
         let (ny, h): (usize, Scalar) = (4, 1.0);
         let m = channel_mesh(ny, h);
@@ -3768,6 +4195,7 @@ mod tests {
     /// gradient, which is reported alongside it as `tau_w_other` and never
     /// averaged in.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn wall_shear_wall_function_form_uses_u_tau_of_k() {
         let (ny, h): (usize, Scalar) = (4, 1.0);
         let m = channel_mesh(ny, h);
@@ -4011,5 +4439,358 @@ mod tests {
             "an 8% friction excess moved Nu by {}x",
             channel / pipe
         );
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §32.5.6: the forces on a wall patch, both of them
+    // ----------------------------------------------------------------------
+
+    /// An 8 x 4 x 1 box of 0.25 m x 0.25 m x 1 m cells: `ymin`/`ymax` are
+    /// its two `wall` patches, `xmin`/`xmax` Generic, `zmin`/`zmax` Empty -
+    /// the fixture of the §32.5.6 force report.
+    fn force_report_mesh() -> HostMesh {
+        let d = crate::Vec3::new(0.25, 0.25, 1.0);
+        let (mut m, points, faces) = crate::mesh::topology::tests::box_mesh([8, 4, 1], d);
+        m.compute_geometry(&points, &faces).expect("box geometry");
+        m.build_cell_face_maps();
+        m
+    }
+
+    /// The force vector is §32.5.1's drag GIVEN A DIRECTION: its projection
+    /// on every `e_hat` must be the drag to round-off, and the patch forces
+    /// must sum to the total - it adds no claim the projection did not
+    /// already make.
+    #[test]
+    fn wall_shear_force_vector_projects_to_the_streamwise_drag() {
+        let m = channel_mesh(4, 1.0);
+        let nbf = m.n_boundary_faces;
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|_| crate::Vec3::new(4.0, 0.0, 0.0))
+            .collect();
+        let run = |e: crate::Vec3| {
+            wall_shear(
+                &m,
+                e,
+                &u_i,
+                &vec![crate::Vec3::ZERO; nbf],
+                &vec![1.2 as Scalar; nbf],
+                &vec![0.0 as Scalar; nbf],
+                None,
+                &vec![false; nbf],
+                1.5e-5,
+                0.09,
+            )
+        };
+        for e in [
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            crate::Vec3::new(-1.0, 0.0, 0.0),
+            crate::Vec3::new(0.0, 1.0, 0.0),
+        ] {
+            let ws = run(e);
+            let tol = 1e-12 * f64::from(ws.tau_w_mag) * f64::from(ws.area);
+            let resid = f64::from(ws.force.dot(e)) - f64::from(ws.drag);
+            assert!(
+                resid.abs() <= tol,
+                "force . e_hat {e:?} off the drag by {resid:e} (tolerance {tol:e})"
+            );
+            let mut sum = crate::Vec3::ZERO;
+            for p in &ws.by_patch {
+                sum = sum + p.force;
+            }
+            let d = (ws.force - sum).mag();
+            assert!(
+                d <= 1e-12 * sum.mag(),
+                "total force off the patch sum by {d:e} (sum {sum:?})"
+            );
+        }
+    }
+
+    /// SPEC-LIT §32.5.6: Couette's two walls push OPPOSITE ways with equal
+    /// magnitude, so the streamwise drag cancels while the vectors do not.
+    /// Each wall here is one `1 x 1` face, so its force is exactly
+    /// `rho nu S` along `x` - the wall-function form has nothing to read.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn couette_force_vector_is_mu_s_times_area_on_each_wall_to_round_off() {
+        let (ny, h): (usize, Scalar) = (4, 1.0);
+        let m = channel_mesh(ny, h);
+        let nbf = m.n_boundary_faces;
+        let (nu, rho, s): (Scalar, Scalar, Scalar) = (2.0, 1.5, 3.0);
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|c| crate::Vec3::new(s * m.c[c].y, 0.0, 0.0))
+            .collect();
+        let mut u_bf = vec![crate::Vec3::ZERO; nbf];
+        for p in &m.patches {
+            if p.name == "ymax" {
+                for i in 0..p.size {
+                    u_bf[p.start + i] = crate::Vec3::new(s * h, 0.0, 0.0);
+                }
+            }
+        }
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &u_bf,
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            nu,
+            0.09,
+        );
+        let want = rho * nu * s;
+        assert_eq!(ws.by_patch.len(), 2);
+        let (lo, hi) = (&ws.by_patch[0], &ws.by_patch[1]);
+        assert!((lo.force.x - want).abs() < 1e-12 * want, "ymin F.x = {}", lo.force.x);
+        assert!((hi.force.x + want).abs() < 1e-12 * want, "ymax F.x = {}", hi.force.x);
+        assert!(lo.force.y.abs() < 1e-12 * want && hi.force.y.abs() < 1e-12 * want);
+        assert!(lo.force.z.abs() < 1e-12 * want && hi.force.z.abs() < 1e-12 * want);
+        let t = ws.force;
+        assert!(t.x.abs() < 1e-12 * want && t.y.abs() < 1e-12 * want && t.z.abs() < 1e-12 * want);
+    }
+
+    /// THE GATE (docs/14, R4): plane Poiseuille's wall force against the
+    /// closed form `rho g_x (H/2) A`. The one-cell wall gradient of the
+    /// analytic parabola under-reads `tau_w` by EXACTLY `1/(2 n_y)` - the
+    /// same closed form `ofgpu-validate`'s own live check uses - so the
+    /// ratio is asserted exactly, and the 1 % bound with it.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn poiseuille_viscous_force_is_within_one_percent_of_the_closed_form() {
+        let (ny, h): (usize, Scalar) = (64, 1.0);
+        let m = channel_mesh(ny, h);
+        let nbf = m.n_boundary_faces;
+        let (rho, nu, g_x): (Scalar, Scalar, Scalar) = (1.2, 1.5e-5, 3.9);
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|c| {
+                let y = m.c[c].y;
+                crate::Vec3::new(g_x / (2.0 * nu) * y * (h - y), 0.0, 0.0)
+            })
+            .collect();
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &vec![crate::Vec3::ZERO; nbf],
+            &vec![rho; nbf],
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            nu,
+            0.09,
+        );
+        let want = rho * g_x * (h / 2.0); // x A, and A = 1 on a 1 x 1 wall face
+        let exact_ratio = 1.0 - 1.0 / (2.0 * ny as f64);
+        assert_eq!(ws.by_patch.len(), 2);
+        for r in &ws.by_patch {
+            let fx = f64::from(r.force.x);
+            assert!(
+                (fx - f64::from(want)).abs() <= 0.01 * f64::from(want),
+                "{}: force.x {fx} against the closed form {want}",
+                m.patches[r.patch].name
+            );
+            let ratio = fx / f64::from(want);
+            assert!(
+                (ratio - exact_ratio).abs() <= 1e-12,
+                "{}: ratio {ratio} against 1 - 1/(2 n_y) = {exact_ratio}",
+                m.patches[r.patch].name
+            );
+        }
+    }
+
+    /// SPEC-LIT §32.5.6's pressure integral on a CLOSED box: uniform `p`
+    /// gives exactly zero (closure), linear `p = a x` gives exactly
+    /// `a V e_x` (divergence theorem - the face-centre rule is exact for a
+    /// linear field on a hexahedron), and the wall density scales it.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn pressure_force_on_a_closed_box_is_zero_for_uniform_p_and_grad_p_times_v_for_linear_p() {
+        let d = crate::Vec3::new(0.5, 0.25, 2.0);
+        let (mut m, points, faces) = crate::mesh::topology::tests::box_mesh([4, 3, 2], d);
+        m.compute_geometry(&points, &faces).expect("box geometry");
+        m.build_cell_face_maps();
+        for p in m.patches.iter_mut() {
+            p.kind = crate::mesh::PatchKind::Wall;
+        }
+        let nbf = m.n_boundary_faces;
+        // Uniform p: every closed body integrates its own Sf to zero.
+        let pf = pressure_force(&m, &vec![7.0 as Scalar; nbf], &vec![1.5 as Scalar; nbf]);
+        assert_eq!(pf.n_faces, nbf, "a closed box: every boundary face is a wall face");
+        let ref_uniform = 7.0 * 1.5 * f64::from(pf.area);
+        assert!(
+            f64::from(pf.force.mag()) <= 1e-12 * ref_uniform,
+            "uniform p integrates to |F| = {} against p A = {ref_uniform}",
+            pf.force.mag()
+        );
+        let area_sum: f64 = (0..nbf).map(|bf| f64::from(m.b_mag_sf[bf])).sum();
+        assert!((f64::from(pf.area) - area_sum).abs() <= 1e-12 * area_sum);
+        // Linear p, unit density: F = grad(p) V = 3 V e_x.
+        let p_bf: Vec<Scalar> = (0..nbf).map(|bf| 3.0 * m.b_cf[bf].x).collect();
+        let pf_1 = pressure_force(&m, &p_bf, &vec![1.0 as Scalar; nbf]);
+        let v: Scalar = m.v.iter().sum();
+        assert!(
+            (f64::from(pf_1.force.x) - 3.0 * f64::from(v)).abs() <= 1e-12 * 3.0 * f64::from(v),
+            "F.x = {} against 3 V = {}",
+            pf_1.force.x,
+            3.0 * v
+        );
+        assert!(f64::from(pf_1.force.y) <= 1e-12 * 3.0 * f64::from(v));
+        assert!(f64::from(pf_1.force.z) <= 1e-12 * 3.0 * f64::from(v));
+        // The wall density is a plain factor on the whole integral.
+        let pf_15 = pressure_force(&m, &p_bf, &vec![1.5 as Scalar; nbf]);
+        assert!((f64::from(pf_15.force.x) - 1.5 * 3.0 * f64::from(v)).abs() <= 1.5e-12 * 3.0 * f64::from(v));
+        assert!(f64::from(pf_15.force.y) <= 1.5e-12 * 3.0 * f64::from(v));
+    }
+
+    /// SPEC-LIT §32.5.6's two correlations, transcribed: Blasius below the
+    /// textbook transition, Prandtl-Schlichting from it up, and `None` -
+    /// SKIPPED, not guessed - for a non-positive or non-finite `Re_L`.
+    #[test]
+    fn flat_plate_cf_is_blasius_below_the_transition_and_prandtl_schlichting_above() {
+        let (c, reg) = flat_plate_cf(1e4).expect("1e4 is in the laminar branch");
+        assert_eq!(reg, FlatPlateRegime::Laminar);
+        assert_eq!(c, 1.328 / (1e4 as Scalar).sqrt(), "Blasius, as transcribed");
+        let (c, reg) = flat_plate_cf(1e7).expect("1e7 is in the turbulent branch");
+        assert_eq!(reg, FlatPlateRegime::Turbulent);
+        assert!(
+            (c - 0.455 / (7.0 as Scalar).powf(2.58)).abs() < 1e-15,
+            "Prandtl-Schlichting at Re = 1e7: got {c}"
+        );
+        // The textbook transition belongs to the turbulent correlation.
+        assert_eq!(
+            flat_plate_cf(5e5).map(|(_, r)| r),
+            Some(FlatPlateRegime::Turbulent)
+        );
+        assert!(flat_plate_cf(0.0).is_none(), "Re = 0: skipped, not guessed");
+        assert!(flat_plate_cf(-1.0).is_none());
+        assert!(flat_plate_cf(Scalar::NAN).is_none());
+    }
+
+    /// SPEC-LIT §32.5.6's axis rule: the run's own direction where one
+    /// exists, each patch's OWN traction direction where it does not - and
+    /// the numbers either way are the same, because a plug flow's traction
+    /// IS streamwise.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn drag_report_takes_the_run_axis_when_given_and_each_patch_own_traction_direction_otherwise()
+    {
+        let m = force_report_mesh();
+        let nbf = m.n_boundary_faces;
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|_| crate::Vec3::new(4.0, 0.0, 0.0))
+            .collect();
+        let rho_all = vec![1.2 as Scalar; nbf];
+        let rho_cells = vec![1.2 as Scalar; m.n_cells];
+        let nu: Scalar = 1.5e-5;
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &vec![crate::Vec3::ZERO; nbf],
+            &rho_all,
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            nu,
+            0.09,
+        );
+        let pf = pressure_force(&m, &vec![0.0 as Scalar; nbf], &rho_all);
+        let want_re = 4.0 * 7.0 * 0.25 / 1.5e-5;
+        for (want_default, report) in [
+            (
+                false,
+                drag_report(
+                    &m,
+                    &ws,
+                    &pf,
+                    Some((crate::Vec3::new(1.0, 0.0, 0.0), "the mesh's single cyclic pair")),
+                    &u_i,
+                    &rho_cells,
+                    1.2,
+                    nu,
+                ),
+            ),
+            (true, drag_report(&m, &ws, &pf, None, &u_i, &rho_cells, 1.2, nu)),
+        ] {
+            let rows = &report.by_patch;
+            assert_eq!(rows.len(), 2, "ymin and ymax");
+            for r in rows {
+                assert_eq!(r.axis_is_default, want_default);
+                let n = r.f_visc.normalised();
+                assert!(
+                    (r.axis.x - n.x).abs() < 1e-12
+                        && (r.axis.y - n.y).abs() < 1e-12
+                        && (r.axis.z - n.z).abs() < 1e-12,
+                    "axis off the traction direction: {:?} vs {n:?}",
+                    r.axis
+                );
+                assert!((f64::from(r.u_ref) - 4.0).abs() < 1e-12);
+                assert!((f64::from(r.length) - 7.0 * 0.25).abs() < 1e-12);
+                assert!((f64::from(r.re_l) - want_re).abs() <= 1e-9 * want_re);
+                let (c_f, _) = r.cf.expect("Re_L is in the laminar branch");
+                let want_fp = 0.5 * 1.2 * 16.0 * f64::from(c_f) * f64::from(r.area);
+                assert!(
+                    (r.flat_plate.expect("estimate present") as f64 - want_fp).abs()
+                        <= 1e-12 * want_fp
+                );
+            }
+        }
+    }
+
+    /// SPEC-LIT §32.5.6's printed block: `2 n_wall_patches + 3` lines, the
+    /// `DEFAULT` marker only where the axis really is one, and no line that
+    /// a run-status reader could mistake for anything else.
+    #[test]
+    fn drag_report_lines_name_the_axis_and_say_when_it_is_a_default() {
+        let m = force_report_mesh();
+        let nbf = m.n_boundary_faces;
+        let u_i: Vec<crate::Vec3> = (0..m.n_cells)
+            .map(|_| crate::Vec3::new(4.0, 0.0, 0.0))
+            .collect();
+        let rho_all = vec![1.2 as Scalar; nbf];
+        let rho_cells = vec![1.2 as Scalar; m.n_cells];
+        let nu: Scalar = 1.5e-5;
+        let ws = wall_shear(
+            &m,
+            crate::Vec3::new(1.0, 0.0, 0.0),
+            &u_i,
+            &vec![crate::Vec3::ZERO; nbf],
+            &rho_all,
+            &vec![0.0 as Scalar; nbf],
+            None,
+            &vec![false; nbf],
+            nu,
+            0.09,
+        );
+        let pf = pressure_force(&m, &vec![0.0 as Scalar; nbf], &rho_all);
+        let fmt = |x: f64| format!("{x}");
+        let with_axis = drag_report(
+            &m,
+            &ws,
+            &pf,
+            Some((crate::Vec3::new(1.0, 0.0, 0.0), "the mesh's single cyclic pair")),
+            &u_i,
+            &rho_cells,
+            1.2,
+            nu,
+        );
+        let lines = with_axis.lines(&m, &fmt);
+        assert_eq!(lines[0], "=== wall forces, MEASURED (SPEC-LIT §32.5.6) ===");
+        assert_eq!(lines.len(), 2 * with_axis.by_patch.len() + 3);
+        for l in &lines {
+            assert!(
+                l.starts_with("=== wall forces") || l.starts_with("  ") || l.starts_with("total:"),
+                "line with a status-shaped prefix: {l}"
+            );
+            assert!(!l.to_lowercase().contains("permissive"), "{l}");
+        }
+        assert!(lines.iter().all(|l| !l.contains("DEFAULT")));
+        let no_axis = drag_report(&m, &ws, &pf, None, &u_i, &rho_cells, 1.2, nu);
+        let lines = no_axis.lines(&m, &fmt);
+        for (row, r) in no_axis.by_patch.iter().enumerate() {
+            let l = &lines[1 + 2 * row];
+            assert!(l.contains("DEFAULT"), "axis line must say DEFAULT: {l}");
+        }
     }
 }

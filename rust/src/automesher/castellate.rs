@@ -1256,7 +1256,7 @@ pub(crate) mod tests {
             [1, 6, 5], // +x
         ];
         t.iter()
-            .map(|tr| (0u32, tr.map(|i| Vec3::new(v[i][0], v[i][1], v[i][2]))))
+            .map(|tr| (0u32, tr.map(|i| Vec3::new(v[i][0] as Scalar, v[i][1] as Scalar, v[i][2] as Scalar))))
             .collect()
     }
 
@@ -1297,7 +1297,7 @@ pub(crate) mod tests {
             [1, 2, 6], [1, 6, 5], // +x
         ];
         t.iter()
-            .map(|tr| (0u32, tr.map(|i| Vec3::new(v[i][0], v[i][1], v[i][2]))))
+            .map(|tr| (0u32, tr.map(|i| Vec3::new(v[i][0] as Scalar, v[i][1] as Scalar, v[i][2] as Scalar))))
             .collect()
     }
 
@@ -1400,7 +1400,11 @@ pub(crate) mod tests {
                 (
                     0u32,
                     t.map(|i| {
-                        Vec3::new(c[0] + r * v[i][0], c[1] + r * v[i][1], c[2] + r * v[i][2])
+                        Vec3::new(
+                            (c[0] + r * v[i][0]) as Scalar,
+                            (c[1] + r * v[i][1]) as Scalar,
+                            (c[2] + r * v[i][2]) as Scalar,
+                        )
                     }),
                 )
             })
@@ -1508,7 +1512,7 @@ pub(crate) mod tests {
         host.compute_geometry(&out.mesh.points, &out.mesh.faces)
             .expect("geometry");
         let total = host.check().total_volume;
-        let want = 512.0 - 4.0 / 3.0 * std::f64::consts::PI * 27.0;
+        let want = 512.0 - 4.0 / 3.0 * std::f64::consts::PI as Scalar * 27.0;
         let rel = (total - want).abs() / want;
         assert!(
             rel < 0.05,
@@ -1706,8 +1710,8 @@ pub(crate) mod tests {
             .copied()
             .max()
             .map_or(0, |m| m as usize + 1);
-        let mut lo = vec![[f64::INFINITY; 3]; n_cells];
-        let mut hi = vec![[f64::NEG_INFINITY; 3]; n_cells];
+        let mut lo = vec![[Scalar::INFINITY; 3]; n_cells];
+        let mut hi = vec![[Scalar::NEG_INFINITY; 3]; n_cells];
         let mut cell_faces: Vec<Vec<usize>> = vec![Vec::new(); n_cells];
         for f in 0..n_faces {
             let own = full.owner[f] as usize;
@@ -1729,7 +1733,7 @@ pub(crate) mod tests {
                 }
             }
         }
-        const SLACK: f64 = 1e-12;
+        const SLACK: Scalar = 1e-12;
         let mut found: Vec<Vec3> = Vec::new();
         for f in 0..n_faces {
             let own = full.owner[f] as usize;

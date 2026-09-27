@@ -19,13 +19,15 @@
 //!   a race.
 //!
 //! Provenance: ORIGINAL - the cudarc wrapper (context, dedicated non-blocking
-//! stream, `DevBuf`, `KernelSet`, CUDA-graph capture). No external source: this
-//! is ownership plumbing over the CUDA driver API, with no CFD analogue
-//! anywhere. `PROVENANCE.md`, *GPU plumbing and tooling - original*. No
-//! GPL-licensed source was consulted.
+//! stream, `DevBuf`, `KernelSet`, CUDA-graph capture, the per-process pool
+//! reading of SPEC-LIT 111.2). No external source: this is ownership plumbing
+//! over the CUDA driver API, with no CFD analogue anywhere. `PROVENANCE.md`,
+//! *GPU plumbing and tooling - original*. No GPL-licensed source was
+//! consulted.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{
@@ -64,6 +66,26 @@ pub struct Gpu {
     /// True between `begin_capture` and `end_capture`. See
     /// [`Gpu::refuse_during_capture`] and `SPEC-LIT` 81.3.
     capturing: AtomicBool,
+}
+
+/// This process's own device memory, read from the stream-ordered memory
+/// pool every [`Gpu::zeros`] and [`Gpu::upload`] allocates from.
+///
+/// Unlike [`Gpu::mem_info`], which reports the whole device and, under the
+/// Windows display driver, counts another process's memory only some of the
+/// time, these figures belong to this process alone. SPEC-LIT 111.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolUsage {
+    /// Bytes handed out to live buffers (`CU_MEMPOOL_ATTR_USED_MEM_CURRENT`).
+    pub used: u64,
+    /// Bytes the pool holds from the driver, used plus cached
+    /// (`CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT`).
+    pub reserved: u64,
+    /// The highest `used` so far (`CU_MEMPOOL_ATTR_USED_MEM_HIGH`).
+    pub used_high: u64,
+    /// Cached bytes the pool keeps at a synchronise
+    /// (`CU_MEMPOOL_ATTR_RELEASE_THRESHOLD`); 0 is the driver default.
+    pub release_threshold: u64,
 }
 
 impl Gpu {
@@ -126,6 +148,36 @@ impl Gpu {
         Ok((free, total))
     }
 
+    /// This process's own pool figures, SPEC-LIT 111.2. A host query, so it
+    /// is refused during a capture like [`Gpu::mem_info`] (§81.3).
+    pub fn pool_usage(&self) -> Result<PoolUsage> {
+        use cudarc::driver::sys::CUmemPool_attribute as A;
+        self.refuse_during_capture("pool_usage")?;
+        self.ctx.bind_to_thread()?;
+        // SAFETY: `cu_device()` is the device this context was created on,
+        // so `get_mem_pool` receives a device the driver returned; each
+        // attribute read below is one of the four `cuuint64_t` attributes and
+        // writes exactly the eight bytes of `v`.
+        unsafe {
+            let pool = cudarc::driver::result::device::get_mem_pool(self.ctx.cu_device())?;
+            let read = |a: A| -> Result<u64> {
+                let mut v: u64 = 0;
+                cudarc::driver::result::mem_pool::get_attribute(
+                    pool,
+                    a,
+                    (&mut v as *mut u64).cast(),
+                )?;
+                Ok(v)
+            };
+            Ok(PoolUsage {
+                used: read(A::CU_MEMPOOL_ATTR_USED_MEM_CURRENT)?,
+                reserved: read(A::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT)?,
+                used_high: read(A::CU_MEMPOOL_ATTR_USED_MEM_HIGH)?,
+                release_threshold: read(A::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD)?,
+            })
+        }
+    }
+
     // ---- the capture guard -------------------------------------------
     //
     // SPEC-LIT 81.3. A CUDA graph records a sequence of *device* work. The
@@ -170,17 +222,45 @@ impl Gpu {
 
     // ---- memory -----------------------------------------------------------
 
+    #[track_caller]
     pub fn zeros<T>(&self, n: usize) -> Result<DevBuf<T>>
     where
         T: DeviceRepr + ValidAsZeroBits,
     {
         self.refuse_during_capture("zeros")?;
-        Ok(self.stream.alloc_zeros::<T>(n)?)
+        let at = std::panic::Location::caller();
+        let buf = self.stream.alloc_zeros::<T>(n)?;
+        if mem_trace_on() {
+            self.trace_allocation(at, n * std::mem::size_of::<T>())?;
+        }
+        Ok(buf)
     }
 
+    #[track_caller]
     pub fn upload<T: DeviceRepr>(&self, src: &[T]) -> Result<DevBuf<T>> {
         self.refuse_during_capture("upload")?;
-        Ok(self.stream.clone_htod(src)?)
+        let at = std::panic::Location::caller();
+        let buf = self.stream.clone_htod(src)?;
+        if mem_trace_on() {
+            self.trace_allocation(at, std::mem::size_of_val(src))?;
+        }
+        Ok(buf)
+    }
+
+    /// One `mem-trace` line on stderr, SPEC-LIT 111.2. The stream is
+    /// synchronised first: without it the card's free figure lags the queued
+    /// work and the bytes are charged to a later allocation.
+    fn trace_allocation(&self, at: &std::panic::Location<'_>, bytes: usize) -> Result<()> {
+        self.stream.synchronize()?;
+        let (free, _) = cudarc::driver::result::mem_get_info()?;
+        let pool = self.pool_usage()?;
+        eprintln!(
+            "mem-trace {}:{} | requested {bytes} B | pool used {} B | card free {free} B",
+            at.file(),
+            at.line(),
+            pool.used
+        );
+        Ok(())
     }
 
     pub fn download<T: DeviceRepr>(&self, src: &DevBuf<T>) -> Result<Vec<T>> {
@@ -274,6 +354,12 @@ impl Gpu {
 
         Ok(graph.map(Graph::new))
     }
+}
+
+/// `OFGPU_MEM_TRACE` in the environment, read once. SPEC-LIT 111.2.
+fn mem_trace_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OFGPU_MEM_TRACE").is_some())
 }
 
 /// A captured, instantiated graph.
@@ -422,5 +508,44 @@ impl KernelSet {
                  is it declared extern \"C\"?"
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pool reading counts this process's own live buffers, and the
+    /// driver defaults SPEC-LIT 111.1 measured hold. Upper bounds are
+    /// deliberately absent: other lib tests share the pool in parallel.
+    #[test]
+    fn pool_usage_counts_this_process_own_buffers() {
+        let Ok(gpu) = Gpu::new(0) else { return; };
+        let held = gpu.zeros::<f64>(8 << 20).unwrap(); // 64 MiB, held live.
+        gpu.sync().unwrap();
+        let pool = gpu.pool_usage().unwrap();
+        assert!(
+            pool.used >= 64 << 20,
+            "the pool's used bytes are {} after one live 64 MiB allocation",
+            pool.used
+        );
+        assert!(
+            pool.reserved >= pool.used,
+            "reserved {} is below used {} - the pool cannot hand out bytes it does not hold",
+            pool.reserved,
+            pool.used
+        );
+        assert!(
+            pool.used_high >= pool.used,
+            "used_high {} is below used {} - a high-water mark cannot sit under the current level",
+            pool.used_high,
+            pool.used
+        );
+        assert!(
+            pool.release_threshold == 0,
+            "the pool's release threshold is {} bytes, not the 0 SPEC-LIT 111.1 measured: the pool now keeps freed memory at a synchronise",
+            pool.release_threshold
+        );
+        drop(held);
     }
 }

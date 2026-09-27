@@ -238,8 +238,8 @@ pub struct PueInputs {
     pub fan_power_each: Vec<Scalar>,
     /// Total IT heat, W, from §18's cell-zone releases.
     pub it_heat: Scalar,
-    /// The highest supply temperature at which `RCI_HI` stayed at 100 %, if a
-    /// sweep was run. `None` means no sweep - never a guess.
+    /// The highest supply temperature, K, at which `RCI_HI` stayed at exactly
+    /// 100 % in §55.4's sweep. `None` means no sweep - never a guess.
     pub free_cooling_ceiling: Option<Scalar>,
 }
 
@@ -248,7 +248,7 @@ impl PueInputs {
     /// what they are not**.
     pub fn describe(&self) -> String {
         let ceiling = match self.free_cooling_ceiling {
-            Some(t) => format!("{t:.2} C"),
+            Some(t) => format!("{t:.2} K ({:.2} C)", t - 273.15),
             None => "not swept".to_string(),
         };
         format!(

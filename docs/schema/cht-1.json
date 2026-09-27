@@ -30,6 +30,17 @@
         "$ref": "#/$defs/ChtInterface"
       }
     },
+    "mesh": {
+      "description": "R8: the region LAYOUT the case composes from - `mesh/regions.json`,\none polyMesh per region (SPEC-LIT §97). The path is RELATIVE TO THE\nCASE FILE'S DIRECTORY, resolved through the same rules a region's\nown `polyMesh` path follows. `None` is every case written before §97,\nunchanged.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChtMeshManifest"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "name": {
       "type": "string"
     },
@@ -52,6 +63,13 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "radiation": {
+      "description": "SPEC-LIT §98.7: the directory, RELATIVE TO THE CASE FILE'S DIRECTORY,\nwhose `constant/radiationProperties` §51.1 reads - the enclosure a\nconjugate case radiates in. A path and not a block: SPEC-LIT 51.1 keeps\none place for those entries. `None` is every case written before §98.7.",
+      "type": [
+        "string",
+        "null"
       ]
     },
     "regions": {
@@ -170,14 +188,104 @@
         "TRef"
       ]
     },
+    "ChtCorrelation": {
+      "description": "SPEC-LIT §98.4: Churchill & Chu's vertical-plate correlation (S98.6),\nevaluated ONCE at lowering from the Rayleigh number stated here.",
+      "type": "object",
+      "properties": {
+        "L": {
+          "description": "The plate's height, m.",
+          "type": "number",
+          "format": "double"
+        },
+        "Pr": {
+          "description": "The ambient fluid's Prandtl number.",
+          "type": "number",
+          "format": "double"
+        },
+        "Ra": {
+          "description": "The Rayleigh number on `L`, in `[1e-1, 1e12]`.",
+          "type": "number",
+          "format": "double"
+        },
+        "correlation": {
+          "description": "`\"churchillChu\"`, the one that exists.",
+          "type": "string"
+        },
+        "kappa": {
+          "description": "The ambient fluid's conductivity, W/(m K).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "correlation",
+        "Ra",
+        "Pr",
+        "kappa",
+        "L"
+      ]
+    },
+    "ChtCurve": {
+      "description": "§100.1's three curve forms, one key each: `{ \"table\": .. }`,\n`{ \"polynomial\": .. }`, `{ \"sutherland\": .. }`.",
+      "oneOf": [
+        {
+          "description": "(S100.2): `[[T, value], ...]`, `T` in K and strictly increasing.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "table"
+          ]
+        },
+        {
+          "description": "(S100.3).",
+          "type": "object",
+          "properties": {
+            "polynomial": {
+              "$ref": "#/$defs/ChtPolynomial"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "polynomial"
+          ]
+        },
+        {
+          "description": "(S100.4).",
+          "type": "object",
+          "properties": {
+            "sutherland": {
+              "$ref": "#/$defs/ChtSutherland"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "sutherland"
+          ]
+        }
+      ]
+    },
     "ChtElastic": {
       "description": "The elastic constants of one material or one zone - SPEC-LIT §96.1.\n\nValidated at lowering by [`crate::solid::Material::validate`], which is\nwhere `E <= 0`, the `nu` range and the measured 0.45 edge are refused\n(§96.3 rows 1-2); this struct carries no logic of its own.",
       "type": "object",
       "properties": {
         "E": {
-          "description": "Young's modulus `E`, Pa.",
-          "type": "number",
-          "format": "double"
+          "description": "Young's modulus `E`, Pa. A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "TRef": {
           "description": "The stress-free temperature, K: the thermal strain is\n`alpha (T - TRef)`, so `alpha > 0` without it is refused (§96.3\nrow 3), and it without `alpha` is a reference nothing reads (row 4).",
@@ -188,9 +296,8 @@
           "format": "double"
         },
         "alpha": {
-          "description": "Linear thermal expansion coefficient `alpha`, 1/K.",
-          "type": "number",
-          "format": "double"
+          "description": "Linear thermal expansion coefficient `alpha`, 1/K.\nA number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "nu": {
           "description": "Poisson's ratio, in (-1, 0.5) and at most the measured edge 0.45.",
@@ -235,6 +342,18 @@
         "name",
         "bounds",
         "material"
+      ]
+    },
+    "ChtFilmCoefficient": {
+      "description": "SPEC-LIT §98.1's `h`: a number, W/(m^2 K), or §98.4's correlation.",
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "$ref": "#/$defs/ChtCorrelation"
+        }
       ]
     },
     "ChtFlow": {
@@ -312,24 +431,25 @@
       "type": "object",
       "properties": {
         "cp": {
-          "description": "`c_p`, J/(kg K).",
-          "type": "number",
-          "format": "double"
+          "description": "`c_p`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "kappa": {
-          "description": "`k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not\na thing, and three or nine components are a §13.4 error.",
-          "type": "number",
-          "format": "double"
+          "description": "`k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not\na thing, and three or nine components are a §13.4 error.\nA number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "mu": {
-          "description": "Dynamic viscosity, Pa s.",
-          "type": "number",
-          "format": "double"
+          "description": "Dynamic viscosity, Pa s. A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "rho": {
           "description": "`rho_f` at `buoyancy.TRef`, kg/m^3.",
           "type": "number",
           "format": "double"
+        },
+        "viscousDissipation": {
+          "description": "SPEC-LIT §100.13: register viscous dissipation as a heat source of\nthe fluid. Absent or `false`: no term, the bits as before.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -360,6 +480,14 @@
       "properties": {
         "Rc": {
           "description": "The contact resistance, m^2 K/W. Absent is perfect contact.\n\nMutually exclusive with `thicknessLayers`/`kappaLayers`: a case that\nwrites both has said the same number twice and this reader has no\nbusiness deciding which one it meant.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "emissivity": {
+          "description": "SPEC-LIT §98.7: the interface radiates in the enclosure `radiation`\nnames, from its fluid side, at this grey emissivity in (0, 1] - through\n§98.8's cell source, never through the interface's triple. Absent: it\ndoes not radiate.",
           "type": [
             "number",
             "null"
@@ -421,6 +549,10 @@
             "type": "number",
             "format": "double"
           }
+        },
+        {
+          "description": "A curve in T (SPEC-LIT §100.2) - isotropic.",
+          "$ref": "#/$defs/ChtCurve"
         }
       ]
     },
@@ -429,9 +561,8 @@
       "type": "object",
       "properties": {
         "c": {
-          "description": "`c_s`, J/(kg K).",
-          "type": "number",
-          "format": "double"
+          "description": "`c_s`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).",
+          "$ref": "#/$defs/ChtScalarOrCurve"
         },
         "kappa": {
           "description": "`k_s`: one number for an isotropic material, three for `diag(kx,ky,kz)`\nin the MESH axes. Nine is a §13.4 error naming the two that are\nimplemented - SPEC-LIT §46.4.",
@@ -598,6 +729,7 @@
           "description": "The outer loop's own settings. Both knobs optional, both defaulted.",
           "$ref": "#/$defs/ChtSolidSolver",
           "default": {
+            "coupled": false,
             "maxOuter": 500,
             "tolerance": 1e-6
           }
@@ -606,6 +738,19 @@
       "additionalProperties": false,
       "required": [
         "patches"
+      ]
+    },
+    "ChtMeshManifest": {
+      "description": "R8's `mesh.regions` - the region LAYOUT a case composes from (SPEC-LIT\n§97): one polyMesh per region and the conformal interface patch pairs,\nwritten by `ofgpu-regions split`. One key, and the path is RELATIVE TO\nTHE CASE FILE'S DIRECTORY exactly as a region's own `polyMesh` path is.",
+      "type": "object",
+      "properties": {
+        "regions": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "regions"
       ]
     },
     "ChtNumerics": {
@@ -634,8 +779,19 @@
           "default": 0,
           "minimum": 0
         },
+        "outer": {
+          "description": "SPEC-LIT §100.7: the conduction path's outer loop. Refused on a case\nwith a fluid region, and on one with nothing nonlinear in it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtOuter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "preconditioner": {
-          "description": "`DIC`, `DILU` or `diagonal`.",
+          "description": "`DIC`, `DILU`, `diagonal` or `none`.",
           "type": "string"
         },
         "solver": {
@@ -654,6 +810,30 @@
         "tolerance",
         "maxIter"
       ]
+    },
+    "ChtOuter": {
+      "description": "SPEC-LIT §100.7's `numerics.outer` block: the conduction path's outer\nloop. Both entries optional; absent, the loop runs §98.3's criterion\nand cap, so a case that states nothing runs as it did.",
+      "type": "object",
+      "properties": {
+        "maxOuter": {
+          "description": "The most passes one step may take before it is refused. Absent: 50.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tolerance": {
+          "description": "(S100.7)'s `epsilon`: a step stops when `max|T - T_prev| <= epsilon\nmax|T|`. In `(0, 1)`. Absent: `1e-10` (`1e-4` in the f32 build).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "ChtPatchRule": {
       "description": "One patch's temperature condition, and - on a fluid region - what the patch\nIS.",
@@ -704,6 +884,71 @@
         "polyMesh"
       ]
     },
+    "ChtPolynomial": {
+      "description": "(S100.3) as a case writes it.",
+      "type": "object",
+      "properties": {
+        "exponents": {
+          "description": "The exponents `e_j`, one per coefficient of every piece.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "factor": {
+          "description": "`F`. Default 1.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "pieces": {
+          "description": "The pieces, contiguous and ascending in `T`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChtPolynomialPiece"
+          }
+        },
+        "scale": {
+          "description": "`T_s`, K. Default 1.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "exponents",
+        "pieces"
+      ]
+    },
+    "ChtPolynomialPiece": {
+      "description": "One piece of (S100.3): its closed range in K and one coefficient per\nexponent.",
+      "type": "object",
+      "properties": {
+        "coefficients": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "range",
+        "coefficients"
+      ]
+    },
     "ChtRegion": {
       "description": "One region: a block of cells, one material, its own boundary conditions.",
       "type": "object",
@@ -747,7 +992,15 @@
           ]
         },
         "mesh": {
-          "$ref": "#/$defs/ChtRegionMesh"
+          "description": "One region's mesh: an axis-aligned block this reader builds, or a\npolyMesh (or a single-volume `.msh`) read from disk - SPEC-LIT §97.1.\n`None` is legal exactly when the case names a `mesh.regions` manifest\nthat lists this region (R8): the manifest's own mesh is used.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtRegionMesh"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "name": {
           "type": "string"
@@ -760,18 +1013,27 @@
           }
         },
         "source": {
-          "description": "Uniform volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1). The\ndie's own dissipation, in the case this format exists for.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
+          "description": "Volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1): the die's\nown dissipation, in the case this format exists for. A number, a\ncurve in `T`, or a table in `t` (SPEC-LIT §100.11).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChtSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceBoxes": {
+          "description": "SPEC-LIT §100.11: boxes whose sources ADD on the cells of this region\nwhose centroids they hold.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChtSourceBox"
+          }
         }
       },
       "additionalProperties": false,
       "required": [
-        "name",
-        "mesh"
+        "name"
       ]
     },
     "ChtRegionMesh": {
@@ -900,6 +1162,112 @@
           ]
         },
         {
+          "description": "SPEC-LIT §98.1: the face loses heat at a film coefficient `h`,\nW/(m^2 K), to an ambient at `TInf`, K, that nobody meshed -\n`-k dT/dn = h (T_b - TInf)`. A wall condition, on a solid or a fluid\nregion.",
+          "type": "object",
+          "properties": {
+            "TInf": {
+              "type": "number",
+              "format": "double"
+            },
+            "h": {
+              "$ref": "#/$defs/ChtFilmCoefficient"
+            },
+            "type": {
+              "type": "string",
+              "const": "externalConvection"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "h",
+            "TInf"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §98.1: grey radiation at `emissivity`, in (0, 1], to a\nsurround at `TEnv`, K, large enough that its temperature does not\nmove - `-k dT/dn = eps sigma (T_b^4 - TEnv^4)`.",
+          "type": "object",
+          "properties": {
+            "TEnv": {
+              "type": "number",
+              "format": "double"
+            },
+            "emissivity": {
+              "type": "number",
+              "format": "double"
+            },
+            "type": {
+              "type": "string",
+              "const": "externalRadiation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "emissivity",
+            "TEnv"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §98.1: both on one face, summed - the `h_total` a datasheet\nquotes (S98.4).",
+          "type": "object",
+          "properties": {
+            "TEnv": {
+              "type": "number",
+              "format": "double"
+            },
+            "TInf": {
+              "type": "number",
+              "format": "double"
+            },
+            "emissivity": {
+              "type": "number",
+              "format": "double"
+            },
+            "h": {
+              "$ref": "#/$defs/ChtFilmCoefficient"
+            },
+            "type": {
+              "type": "string",
+              "const": "externalConvectionRadiation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "h",
+            "TInf",
+            "emissivity",
+            "TEnv"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §98.7: a wall of the FLUID region that radiates in the\nenclosure the case's `radiation` names - §50.8's grey diffuse wall.\n`emissivity`, in (0, 1], defaults to `radiationProperties`' own; `q` is\n§50.3's external flux, W/m^2, delivered to the face from outside\n(default zero: an adiabatic, re-radiating wall).",
+          "type": "object",
+          "properties": {
+            "emissivity": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "q": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "type": {
+              "type": "string",
+              "const": "s2sWall"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
           "description": "The 2-D front/back plane: the patch contributes to no surface integral\nat all.\n\nSpelled as a `T` condition rather than as a mesh flag because the\nformat's one rule is that **every patch is named exactly once** (module\ndoc), and a mesh flag that silently claimed two patches would be\nexactly the \"adiabatic unless you say otherwise\" default that rule\nexists to stop. `empty` patches come in opposite pairs and the axis\nthey lie on must have one cell; `blockgen` refuses anything else,\nnaming the axis.",
           "type": "object",
           "properties": {
@@ -915,10 +1283,27 @@
         }
       ]
     },
+    "ChtScalarOrCurve": {
+      "description": "A property entry written as a number or as a curve in `T` - SPEC-LIT\n§100.2. Untagged with the number FIRST, so every document written before\n§100 deserialises exactly as it did.",
+      "anyOf": [
+        {
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "$ref": "#/$defs/ChtCurve"
+        }
+      ]
+    },
     "ChtSolidSolver": {
       "description": "The outer displacement loop's own settings - SPEC-LIT §96.1. Two knobs,\nboth optional and defaulted; the two entries that are NOT offered\n(`relaxation`, `ddtScheme`) are present as fields so their refusals can\nsay why, exactly as `JsonExact::precision` does.",
       "type": "object",
       "properties": {
+        "coupled": {
+          "description": "`false` (the default) runs §95.3's segregated outer loop; `true` runs\nthe block-coupled solve of §109 - the three displacement components in\none matrix, PBiCGStab with block-DILU, inside the same outer loop and\nits controls (§109.8). Only with a single `material` (§96.3 row 22).",
+          "type": "boolean",
+          "default": false
+        },
         "ddtScheme": {
           "description": "ALWAYS refused (§96.3 row 6) through §95's inertia refusal:\nNewmark, HHT and generalised-alpha are not built.",
           "type": [
@@ -949,6 +1334,99 @@
         }
       },
       "additionalProperties": false
+    },
+    "ChtSource": {
+      "description": "A volumetric source written three ways - SPEC-LIT §100.11. Untagged with\nthe number FIRST, so every document written before §100.11 deserialises\nexactly as it did.",
+      "anyOf": [
+        {
+          "description": "W/m^3.",
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "description": "`q'''(T)`: any of §100.1's three curve forms.",
+          "$ref": "#/$defs/ChtCurve"
+        },
+        {
+          "description": "`q'''(t)`: `{ \"time\": [[t, q], ...] }`.",
+          "$ref": "#/$defs/ChtTimeTable"
+        }
+      ]
+    },
+    "ChtSourceBox": {
+      "description": "One entry of a region's `sourceBoxes` - SPEC-LIT §100.11.",
+      "type": "object",
+      "properties": {
+        "bounds": {
+          "description": "The closed box the covered cells' centroids fall in - §18's test.",
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "source": {
+          "$ref": "#/$defs/ChtSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "bounds",
+        "source"
+      ]
+    },
+    "ChtSutherland": {
+      "description": "(S100.4) as a case writes it: `value` is the property at `TRef`.",
+      "type": "object",
+      "properties": {
+        "S": {
+          "type": "number",
+          "format": "double"
+        },
+        "TRef": {
+          "type": "number",
+          "format": "double"
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "value": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "TRef",
+        "S",
+        "range"
+      ]
+    },
+    "ChtTimeTable": {
+      "description": "(S100.11) as a case writes it.",
+      "type": "object",
+      "properties": {
+        "time": {
+          "description": "`[[t, q'''], ...]`, `t` in s and strictly increasing from `t >= 0`,\n`q'''` in W/m^3.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "time"
+      ]
     },
     "JsonBounds": {
       "type": "object",

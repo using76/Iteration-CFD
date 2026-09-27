@@ -25,7 +25,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 207 source files under
+line "No GPL-licensed source was consulted." All 227 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -208,8 +208,12 @@ Amagine3D (https://github.com/amagine-ai/Amagine3D, commit e608dc6)
 Reference material
 ================================================================================
 
-Neither of these is redistributed in this repository. `reference/` is git-
-ignored and must be cloned separately; nothing in the build depends on it.
+Neither of these is redistributed in this repository. What `reference/` DOES
+carry is the answer keys `ofgpu-validate` is held against - small tables of
+published numbers, each named in `reference/PROVENANCE.md` with its source,
+DOI or URL, licence and SHA-256; those files are tracked. Everything else
+under `reference/` is git-ignored and must be cloned separately; nothing in
+the build depends on it.
 
 Fire Dynamics Simulator (FDS)
   Developed by the National Institute of Standards and Technology (NIST).

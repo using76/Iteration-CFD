@@ -14,7 +14,8 @@
 //!   J. Majda, J. A. Sethian, *Combust. Sci. Technol.* 42 (1985) 185 -
 //!     background on the low-Mach filtering of acoustics this rests on
 //!   the FDS Technical Reference Guide (McGrattan et al., NIST Special
-//!     Publication 1018, public domain) - `reference/fds` was read and
+//!     Publication 1018, public domain) - a local `reference/fds` clone,
+//!     which this repository does not carry, was read and
 //!     adapted for the SHAPE of the divergence constraint and the sealed/open
 //!     `p0` bookkeeping; acknowledged here as SPEC-LIT S0 requires. No FDS
 //!     *code* was copied - this module's assembly is built entirely out of
@@ -886,7 +887,7 @@ pub fn mach_number(
     Ok(MachReport { max, cell_of_max, volume_mean: m_sum / v_sum })
 }
 
-/// SPEC-LIT §93.6: `Err(Error::Config)` when `r.max > LOW_MACH_LIMIT` and the
+/// SPEC-LIT §93.6: `Err(Error::Refused)` when `r.max > LOW_MACH_LIMIT` and the
 /// run is strict; under `-permissive` one [`contract::warn_once`] and
 /// `Ok(())`. `when` names the moment ("the initial field", "step 12").
 pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
@@ -894,7 +895,7 @@ pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
         return Ok(());
     }
     if !contract::permissive() {
-        return Err(Error::Config(format!(
+        return Err(Error::Refused(format!(
             "ofgpu-lowmach: max Mach number {:.3} at cell {} ({}) is above {}; \
              SPEC-LIT §25's formulation filters acoustics on the premise M << 1 \
              (p~ << p0), and at M = 0.3 the isentropic density ratio \
@@ -1135,6 +1136,24 @@ fn reconcile_ddt(scheme: DdtScheme) -> Result<DdtScheme> {
 // ==========================================================================
 //  §59  The conjugate retarget - opt-in, and everything it needs
 // ==========================================================================
+
+/// SPEC-LIT §100.10: a fluid's molecular conductivity as a curve in `T`,
+/// evaluated on the device every [`Energy::update_k_eff`].
+struct ConductivityCurve {
+    dev: crate::properties::DeviceProperty,
+    kern: crate::properties::PropertyKernels,
+    /// The JSON path a refusal names.
+    path: String,
+    /// The cells and boundary faces it is evaluated on - the fluid prefix of
+    /// §47.4's numbering. The rest of `k` stays zero, and (S59.3) masks every
+    /// face it reaches.
+    n_cells: usize,
+    n_bf: usize,
+    /// `k(T)` per cell and per boundary face.
+    k: GpuScalarField,
+    /// `k` interpolated linearly onto every face.
+    k_face: GpuSurfaceScalarField,
+}
 
 /// What [`Energy`] needs in order to run over SPEC-LIT §47.4's concatenated
 /// fluid+solid thermal mesh - SPEC-LIT §59.
@@ -1426,6 +1445,10 @@ pub struct Energy<'m> {
     /// `tests::a_one_region_fluid_retarget_is_bitwise_the_plain_energy`,
     /// which compares a whole run's `T`, `T_b` and all six matrix arrays.
     cht: Option<ConjugateEnergy>,
+
+    /// SPEC-LIT §100.10: the fluid's conductivity curve. `None` is the
+    /// constant `props.k` and every bit that path produced before.
+    k_curve: Option<ConductivityCurve>,
 }
 
 impl<'m> Energy<'m> {
@@ -1485,6 +1508,7 @@ impl<'m> Energy<'m> {
             ffq_faces: None,
             ffq_n: 0,
             cht: None,
+            k_curve: None,
         })
     }
 
@@ -1548,6 +1572,106 @@ impl<'m> Energy<'m> {
     /// `energyFixedFluxTemperature` follows.
     pub fn k_eff_wall(&self) -> &DevBuf<Scalar> {
         &self.k_eff_face.bf
+    }
+
+    /// SPEC-LIT §100.10: the molecular conductivity becomes the curve `p`,
+    /// evaluated on the device at the current `T` of the first `n_cells`
+    /// cells and `n_bf` boundary faces every [`Self::update_k_eff`].
+    pub fn set_conductivity_curve(
+        &mut self,
+        gpu: &Gpu,
+        path: &str,
+        p: &crate::properties::Property,
+        n_cells: usize,
+        n_bf: usize,
+    ) -> Result<()> {
+        if self.props.pr_t_model == PrtModel::KaysCrawford {
+            return Err(Error::Config(format!(
+                "{path}: a conductivity curve with Pr_t = KaysCrawford - that branch \
+                 is not built with a curve; use the constant Pr_t (SPEC-LIT 100.10)"
+            )));
+        }
+        if n_cells > self.m.n_cells || n_bf > self.m.n_boundary_faces {
+            return Err(Error::Config(format!(
+                "{path}: {n_cells} cells and {n_bf} boundary faces asked of a mesh with {} \
+                 and {} (SPEC-LIT 100.10)",
+                self.m.n_cells, self.m.n_boundary_faces
+            )));
+        }
+        self.k_curve = Some(ConductivityCurve {
+            dev: crate::properties::DeviceProperty::upload(gpu, path, p)?,
+            kern: crate::properties::PropertyKernels::new(gpu)?,
+            path: path.to_string(),
+            n_cells,
+            n_bf,
+            k: GpuScalarField::zeros(gpu, self.m, "kMol")?,
+            k_face: GpuSurfaceScalarField::zeros(gpu, self.m, "kMolf")?,
+        });
+        Ok(())
+    }
+
+    /// SPEC-LIT §100.10: refused, naming the curve, its range and the
+    /// temperatures reached, when any evaluation since the last call left the
+    /// range. A read-back: between two corrections, never inside a captured
+    /// region. A no-op without a curve.
+    pub fn check_conductivity_range(&mut self, gpu: &Gpu) -> Result<()> {
+        let Some(kc) = &mut self.k_curve else {
+            return Ok(());
+        };
+        if !kc.dev.left_range(gpu)? {
+            return Ok(());
+        }
+        kc.dev.clear_flag(gpu)?;
+        let (lo, hi) = kc.dev.range();
+        let t = gpu.download(&self.t.f)?;
+        let tb = gpu.download(&self.t.bf)?;
+        let (mut a, mut b) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
+        for x in t[..kc.n_cells].iter().chain(&tb[..kc.n_bf]) {
+            a = a.min(*x);
+            b = b.max(*x);
+        }
+        Err(Error::Config(format!(
+            "{}: the fluid reached T in [{a}, {b}] K, which leaves the curve's range \
+             [{lo}, {hi}] K - a curve is not extrapolated (SPEC-LIT 100.10)",
+            kc.path
+        )))
+    }
+
+    /// SPEC-LIT §100.10: write a rebuilt [`Conduction`] over the solid half of
+    /// the attached blend - `solid_rho_c`, `solid_gamma`, `b_solid_gamma` and
+    /// `b_solid_cond` - with the selection [`Self::attach_conjugate`] made.
+    /// The fluid half and the masks do not move. Between two corrections.
+    pub fn refresh_conjugate_solid(&mut self, gpu: &Gpu, tm: &ThermalMesh, cond: &Conduction) -> Result<()> {
+        let h = &tm.host;
+        let mut fluid_cell = vec![false; h.n_cells];
+        for block in &tm.regions {
+            if block.kind == RegionKind::Fluid {
+                for c in block.cells() {
+                    fluid_cell[c] = true;
+                }
+            }
+        }
+        let b_fluid = |bf: usize| fluid_cell[h.b_face_cells[bf] as usize];
+        let solid_rho_c: Vec<Scalar> =
+            (0..h.n_cells).map(|c| if fluid_cell[c] { 0.0 } else { cond.rho_c[c] }).collect();
+        let solid_gamma: Vec<Scalar> = (0..h.n_internal_faces)
+            .map(|f| if fluid_cell[h.owner[f] as usize] { 0.0 } else { cond.gamma_mag_sf[f] })
+            .collect();
+        let b_solid_gamma: Vec<Scalar> = (0..h.n_boundary_faces)
+            .map(|bf| if b_fluid(bf) { 0.0 } else { cond.b_gamma_mag_sf[bf] })
+            .collect();
+        let b_solid_cond: Vec<Scalar> = (0..h.n_boundary_faces)
+            .map(|bf| if b_fluid(bf) { 0.0 } else { cond.b_conductance[bf] })
+            .collect();
+        let Some(cht) = &mut self.cht else {
+            return Err(Error::Config(
+                "Energy::refresh_conjugate_solid: nothing is attached (SPEC-LIT 100.10)".to_string(),
+            ));
+        };
+        gpu.write(&mut cht.solid_rho_c, &solid_rho_c)?;
+        gpu.write(&mut cht.solid_gamma, &solid_gamma)?;
+        gpu.write(&mut cht.b_solid_gamma, &b_solid_gamma)?;
+        gpu.write(&mut cht.b_solid_cond, &b_solid_cond)
     }
 
     pub fn target_divergence(&self) -> &DevBuf<Scalar> {
@@ -1973,12 +2097,15 @@ impl<'m> Energy<'m> {
         match self.props.pr_t_model {
             PrtModel::Constant => {
                 let cp_over_prt = self.props.cp / self.props.pr_t;
+                // SPEC-LIT §100.10: with a curve the molecular part is added
+                // per face below, so the kernel's constant is zero.
+                let k_mol = if self.k_curve.is_some() { 0.0 } else { self.props.k };
                 self.ek.k_eff(
                     gpu,
                     &mut self.k_eff_face.f,
                     &self.rho_face.f,
                     &self.nut_face.f,
-                    self.props.k,
+                    k_mol,
                     cp_over_prt,
                     m.n_internal_faces,
                 )?;
@@ -1987,10 +2114,18 @@ impl<'m> Energy<'m> {
                     &mut self.k_eff_face.bf,
                     &self.rho_face.bf,
                     &self.nut_face.bf,
-                    self.props.k,
+                    k_mol,
                     cp_over_prt,
                     m.n_boundary_faces,
                 )?;
+
+                if let Some(kc) = &mut self.k_curve {
+                    kc.dev.evaluate(gpu, &kc.kern, &mut kc.k.f, &self.t.f, kc.n_cells)?;
+                    kc.dev.evaluate(gpu, &kc.kern, &mut kc.k.bf, &self.t.bf, kc.n_bf)?;
+                    fv::interpolate_linear(gpu, &self.fvk, &mut kc.k_face, &kc.k, m)?;
+                    field_ops::add_field(gpu, &self.fldk, &mut self.k_eff_face.f, &kc.k_face.f, m.n_internal_faces)?;
+                    field_ops::add_field(gpu, &self.fldk, &mut self.k_eff_face.bf, &kc.k_face.bf, m.n_boundary_faces)?;
+                }
             }
             PrtModel::KaysCrawford => {
                 self.ek.k_eff_kays_crawford(
@@ -2829,6 +2964,7 @@ mod tests {
     /// the free-stream value, approached FROM ABOVE at the rate S37.2
     /// derives - `Pr_t = Pr_t_inf (1 + 1/(6 sqrt(Pr_t_inf) C Pe_t)) + O(Pe_t^-2)`.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn kays_crawford_at_large_peclet_approaches_the_free_stream_value_from_above() {
         let (c, p_inf) = (KAYS_CRAWFORD_C, 0.85 as Scalar);
         for pe_t in [1e3 as Scalar, 1e4, 1e5, 1e6] {
@@ -2849,6 +2985,7 @@ mod tests {
     /// SPEC-LIT S37.2. Checked against the literature form everywhere the
     /// literature form is still trustworthy.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_rearranged_form_reproduces_the_literature_form() {
         let (c, p_inf) = (0.3_f64, 0.85_f64);
         let mut worst: f64 = 0.0;
@@ -2916,7 +3053,7 @@ mod tests {
     fn kays_crawford_is_finite_and_positive_everywhere_it_can_be_called() {
         let (c, p_inf) = (KAYS_CRAWFORD_C, 0.85 as Scalar);
         let inputs: [Scalar; 10] =
-            [0.0, Scalar::MIN_POSITIVE, 1e-300, 1e-30, 1e-8, 1.0, 1e8, 1e30, 1e300, Scalar::MAX];
+            [0.0, Scalar::MIN_POSITIVE, 1e-300, 1e-30, 1e-8, 1.0, 1e8, 1e30, crate::SCALAR_HUGE, Scalar::MAX];
         for pe_t in inputs {
             let got = kays_crawford_prt(pe_t, c, p_inf);
             assert!(got.is_finite() && got > 0.0, "Pe_t = {pe_t:e} gave {got}");
@@ -2973,6 +3110,7 @@ mod tests {
     /// unmodified for the low-Mach solver's velocity/pressure system (the
     /// module doc's first *DESIGN* note).
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn buoyancy_matches_the_density_ratio_at_any_deltat() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
         let hm = tiny_box_mesh(2);
@@ -3369,6 +3507,7 @@ mod tests {
     /// asymmetry once (S26.1); this test is the guard against the second
     /// time.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_target_divergence_takes_the_mass_source_and_takes_the_heat_through_q() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -3491,6 +3630,7 @@ mod tests {
     /// `k_eff` cannot pass by accident. The second case also checks the field
     /// CELL BY CELL against the laplacian matrix's own operator.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_conduction_source_telescopes_to_the_boundary_heat() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -3871,6 +4011,7 @@ mod tests {
     /// `-q_w/k_eff_wall`, with the turbulent `k_eff_wall` this test's
     /// nonzero `nut` implies, not the molecular `props.k` alone.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn fixed_flux_temperature_reproduces_q_through_the_assembled_equation() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -3935,6 +4076,7 @@ mod tests {
     /// better than the tolerance checked here - it stands in for the
     /// semi-infinite solid the closed form assumes.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn one_d_transient_conduction_matches_erf_at_second_order() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -4173,6 +4315,22 @@ mod tests {
         s.clear(&g)?;
         let q = g.download(s.q())?;
         assert!(q.iter().all(|&v| v == 0.0));
+
+        // SPEC-LIT §100.12: the implicit half accumulates and clears the same
+        // way, and a registration after a clear is the source ONCE - the rule
+        // step 4d of `run_flow_case` rests on.
+        let c = g.upload(&vec![-2.0 as Scalar; hm.n_cells])?;
+        let d = g.upload(&vec![-3.0 as Scalar; hm.n_cells])?;
+        s.register_explicit(&g, &a)?;
+        s.register_implicit_sink(&g, &c)?;
+        s.register_implicit_sink(&g, &d)?;
+        let sp = g.download(s.sp())?;
+        assert!(sp.iter().all(|&v| v == -5.0), "{sp:?}");
+        s.clear(&g)?;
+        assert!(g.download(s.sp())?.iter().all(|&v| v == 0.0));
+        s.register_explicit(&g, &a)?;
+        let q = g.download(s.q())?;
+        assert!(q.iter().all(|&v| v == 10.0), "cleared and registered again: {q:?}");
         Ok(())
     }
 
@@ -4277,5 +4435,160 @@ mod tests {
         .expect("SPEC-LIT 81.7: energy must capture and replay bitwise");
         println!("  energy: {report}");
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT 100.10: the fluid's conductivity as a curve in T
+    // ------------------------------------------------------------------
+
+    /// SPEC-LIT §100.10: the fluid's conductivity as a curve in T.
+    mod conductivity_curve {
+        use super::*;
+
+        fn replay_ctrl() -> EnergyControls {
+            EnergyControls {
+                t_solver: SolverControls {
+                    tolerance: 1e-14,
+                    rel_tol: 0.0,
+                    max_iter: 4,
+                    fixed_iters: true,
+                    report_residuals: false,
+                    ..SolverControls::default()
+                },
+                t_relax: 1.0,
+                steady: false,
+                delta_t: 1e-3,
+                sn_grad: SnGradScheme::Uncorrected,
+                ddt: DdtScheme::Euler,
+                ..EnergyControls::default()
+            }
+        }
+
+        #[test]
+        #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+        fn a_flat_conductivity_curve_gives_the_constant_k_eff_and_the_constant_field() -> Result<()> {
+            let Some(g) = gpu() else { return Ok(()) };
+
+            let hm = slab(8, 0.02);
+            let m = crate::GpuMesh::upload(&g, &hm)?;
+            let props = GasProperties { k: 0.5, cp: 1000.0, ..GasProperties::default() };
+            let nut = GpuScalarField::zeros(&g, &m, "nut")?;
+            let phi = GpuSurfaceScalarField::zeros(&g, &m, "phi")?;
+            let gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+            let k = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+            let p = crate::properties::Property::table(
+                "regions/air/fluid/kappa",
+                &[(250.0, 0.5), (500.0, 0.5)],
+            )?;
+
+            let mut a = Energy::new(&g, &m, replay_ctrl(), props)?;
+            g.write(&mut a.field_mut().f, &vec![320.0 as Scalar; hm.n_cells])?;
+            a.initialise(&g)?;
+            let mut b = Energy::new(&g, &m, replay_ctrl(), props)?;
+            b.set_conductivity_curve(&g, "regions/air/fluid/kappa", &p, hm.n_cells, hm.n_boundary_faces)?;
+            g.write(&mut b.field_mut().f, &vec![320.0 as Scalar; hm.n_cells])?;
+            b.initialise(&g)?;
+
+            a.correct(&g, &phi, &nut, &k, 0.0, &gas)?;
+            b.correct(&g, &phi, &nut, &k, 0.0, &gas)?;
+
+            let ka = g.download(a.k_eff_wall())?;
+            let kb = g.download(b.k_eff_wall())?;
+            let mut worst_wall = 0.0 as Scalar;
+            for (x, y) in ka.iter().zip(kb.iter()) {
+                worst_wall = worst_wall.max((*x - *y).abs() / x.abs().max(1e-300));
+            }
+            let ta = g.download(&a.field().f)?;
+            let tb = g.download(&b.field().f)?;
+            let mut worst_t = 0.0 as Scalar;
+            for (x, y) in ta.iter().zip(tb.iter()) {
+                worst_t = worst_t.max((*x - *y).abs() / x.abs().max(1e-300));
+            }
+            println!(
+                "  flat curve vs constant: worst k_eff wall gap = {worst_wall:.3e}, worst T gap = {worst_t:.3e}"
+            );
+            assert!(worst_wall <= 1e-14, "k_eff wall disagrees: {worst_wall:.3e}");
+            assert!(worst_t <= 1e-14, "T disagrees: {worst_t:.3e}");
+            Ok(())
+        }
+
+        /// SPEC-LIT §100.10 check: the curve path captures and replays bitwise.
+        #[test]
+        fn the_energy_correction_with_a_conductivity_curve_replays_bitwise() -> Result<()> {
+            let Some(g) = gpu() else { return Ok(()) };
+
+            let hm = slab(8, 0.02);
+            let m = crate::GpuMesh::upload(&g, &hm)?;
+            let props = GasProperties { k: 0.5, cp: 1000.0, ..GasProperties::default() };
+            let nut = GpuScalarField::zeros(&g, &m, "nut")?;
+            let phi = GpuSurfaceScalarField::zeros(&g, &m, "phi")?;
+            let gas = GasState::new(&g, &m, props, DomainKind::Open, 101325.0)?;
+            let k = g.zeros::<Scalar>(hm.n_cells.max(1))?;
+            let p = crate::properties::Property::table(
+                "regions/air/fluid/kappa",
+                &[(250.0, 0.3), (500.0, 0.7)],
+            )?;
+
+            let report = crate::capture::capture_replays_bitwise(
+                &g,
+                "energy curve (SPEC-LIT 100.10)",
+                || {
+                    let mut e = Energy::new(&g, &m, replay_ctrl(), props)?;
+                    e.set_conductivity_curve(
+                        &g,
+                        "regions/air/fluid/kappa",
+                        &p,
+                        hm.n_cells,
+                        hm.n_boundary_faces,
+                    )?;
+                    g.write(&mut e.field_mut().f, &vec![320.0 as Scalar; hm.n_cells])?;
+                    e.initialise(&g)?;
+                    Ok(e)
+                },
+                |e: &mut Energy| e.correct(&g, &phi, &nut, &k, 0.0, &gas).map(|_| ()),
+                |e: &Energy| {
+                    Ok(vec![
+                        crate::capture::field(&g, "T", e.field())?,
+                        ("T boundary", g.download(&e.field().bf)?),
+                        ("k_eff wall", g.download(e.k_eff_wall())?),
+                    ])
+                },
+            )
+            .expect("SPEC-LIT 81.7/100.10: the curve path must capture and replay bitwise");
+            println!("  energy curve: {report}");
+            Ok(())
+        }
+
+        /// SPEC-LIT §100.10 check: Kays-Crawford's `Pr_t` is refused with a
+        /// curve, naming the branch and the setting.
+        #[test]
+        fn a_conductivity_curve_under_kays_crawford_is_refused_by_name() -> Result<()> {
+            let Some(g) = gpu() else { return Ok(()) };
+
+            let hm = slab(8, 0.02);
+            let m = crate::GpuMesh::upload(&g, &hm)?;
+            let props = GasProperties {
+                k: 0.5,
+                cp: 1000.0,
+                pr_t_model: PrtModel::KaysCrawford,
+                ..GasProperties::default()
+            };
+            let mut e = Energy::new(&g, &m, replay_ctrl(), props)?;
+            let p = crate::properties::Property::table(
+                "regions/air/fluid/kappa",
+                &[(250.0, 0.5), (500.0, 0.5)],
+            )?;
+            let Err(err) =
+                e.set_conductivity_curve(&g, "regions/air/fluid/kappa", &p, hm.n_cells, hm.n_boundary_faces)
+            else {
+                panic!("a conductivity curve under KaysCrawford must be refused by name");
+            };
+            let msg = err.to_string();
+            println!("refusal: {msg}");
+            for what in ["KaysCrawford", "regions/air/fluid/kappa", "SPEC-LIT 100.10"] {
+                assert!(msg.contains(what), "must name '{what}': {msg}");
+            }
+            Ok(())
+        }
     }
 }

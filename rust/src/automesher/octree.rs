@@ -33,6 +33,7 @@
 use std::collections::HashSet;
 
 use crate::error::{Error, Result};
+use crate::Scalar;
 
 /// Index bits per axis in a packed key (§92.9): a level-6 lattice index must
 /// fit, so the base grid is capped at 2^20 / 2^max_level cells per axis.
@@ -445,10 +446,10 @@ impl Background {
             }
             let n = (((hi - lo) / d.base_size).round() as usize).max(1);
             axes[a] = crate::blockgen::GradedAxis {
-                lo,
-                hi,
+                lo: lo as Scalar,
+                hi: hi as Scalar,
                 n,
-                expansion: d.grading[a],
+                expansion: d.grading[a] as Scalar,
                 two_sided: false,
             };
         }
@@ -1112,7 +1113,7 @@ mod tests {
         assert!(rep.ldu_ordered, "faces not in upper-triangular order");
         assert_eq!(rep.n_regions, 1, "{} regions", rep.n_regions);
 
-        let box_volume = 6.0f64 * 6.0 * 6.0;
+        let box_volume = 6.0 as Scalar * 6.0 * 6.0;
         let rel = ((rep.total_volume - box_volume) / box_volume).abs();
         assert!(
             rel < 1e-12,
@@ -1196,7 +1197,7 @@ mod tests {
     use crate::surface::SoupTri;
 
     /// The 12 outward-wound triangles of an axis-aligned box, all on patch 0.
-    fn box_soup(lo: [f64; 3], hi: [f64; 3]) -> Vec<SoupTri> {
+    fn box_soup(lo: [Scalar; 3], hi: [Scalar; 3]) -> Vec<SoupTri> {
         let v = crate::Vec3::new;
         let p = [
             v(lo[0], lo[1], lo[2]),
@@ -1270,7 +1271,7 @@ mod tests {
             }
             tris = next;
         }
-        tris.into_iter().map(|t| (0u32, t.map(|p| crate::Vec3::new(p[0], p[1], p[2])))).collect()
+        tris.into_iter().map(|t| (0u32, t.map(|p| crate::Vec3::new(p[0] as Scalar, p[1] as Scalar, p[2] as Scalar)))).collect()
     }
 
     /// One band over one patch, the cap matching the trees the tests build.
@@ -1301,7 +1302,7 @@ mod tests {
 
     /// §92.3's gate over an emitted tree, plus the partition the gate reads:
     /// one region, closed to 1e-12, upper-triangular, the block's own volume.
-    fn assert_gate(tree: &Octree, bg: &Background, volume: f64) {
+    fn assert_gate(tree: &Octree, bg: &Background, volume: Scalar) {
         let raw = emit(tree, bg, &patch_names()).expect("emit");
         let mut host = crate::io::polymesh::build_host_mesh(&raw).expect("host mesh");
         host.compute_geometry(&raw.points, &raw.faces).expect("geometry");
@@ -1495,18 +1496,18 @@ mod tests {
         // `h = 1.0` is the level-0 cell's own longest edge; this spec's
         // `feature_level` is 0, so (92.37) asks nothing whatever `h` is.
         let parts = band_surfaces(&surf, &spec).expect("band surfaces");
-        let fs = extract(&surf, spec.feature_angle_deg).expect("features");
+        let fs = extract(&surf, spec.feature_angle_deg as Scalar).expect("features");
         let idx = BandIndex::new(&parts, &surf, &fs, &spec, 1.0).expect("band index");
         let centre = crate::Vec3::new(3.5, 3.5, 3.5);
         assert_eq!(idx.level_at(centre, 0.0, 1.0), 0, "(92.1) alone must not refine this cell");
         assert_eq!(
-            idx.level_at(centre, 3.0f64.sqrt() / 2.0, 1.0),
+            idx.level_at(centre, 3.0f64.sqrt() as Scalar / 2.0, 1.0),
             1,
             "(92.22) must refine a cell the surface passes through"
         );
         // And the ring is outside both: 1.299 m away, past the half-diagonal.
         let ring = crate::Vec3::new(2.5, 3.5, 3.5);
-        assert_eq!(idx.level_at(ring, 3.0f64.sqrt() / 2.0, 1.0), 0, "the ring is not touched");
+        assert_eq!(idx.level_at(ring, 3.0f64.sqrt() as Scalar / 2.0, 1.0), 0, "the ring is not touched");
 
         // The whole stage then refines exactly the eight cells the box sits in.
         let mut tree = Octree::uniform(bg.base_n(), 1).expect("tree");
@@ -1595,7 +1596,7 @@ mod tests {
         for leaf in tree.leaves() {
             let (c, e) = leaf_centre_edges(&bg, l, leaf);
             let h = e[0].max(e[1]).max(e[2]);
-            let d = edge_dist([c.x, c.y, c.z]);
+            let d = edge_dist([c.x as f64, c.y as f64, c.z as f64]) as Scalar;
             if d <= h {
                 assert_eq!(
                     leaf.level, 2,
@@ -1862,7 +1863,7 @@ impl<'s> BandIndex<'s> {
             // inside.
             let mut l = 0u32;
             for band in &part.bands {
-                if d <= band.distance {
+                if d <= band.distance as Scalar {
                     l = l.max(band.level);
                 }
             }
@@ -1945,9 +1946,9 @@ pub fn refine_to_surface(
     // The `wants_features` guard is the supervising session's.
     let wants_features = spec.levels.iter().any(|b| b.feature_level > 0);
     let fs = if wants_features {
-        extract(surf, spec.feature_angle_deg)?
+        extract(surf, spec.feature_angle_deg as Scalar)?
     } else {
-        FeatureSet::empty(spec.feature_angle_deg)
+        FeatureSet::empty(spec.feature_angle_deg as Scalar)
     };
     // §23.4's "~ the mesh spacing": the smallest base cell edge, the finest
     // spacing any query of this tree can be asked on.

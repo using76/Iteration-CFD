@@ -349,7 +349,7 @@
           "type": "string"
         },
         "supplyTemperatureSweep": {
-          "description": "A supply-temperature sweep for §55.4's free-cooling ceiling: the\nhighest supply temperature at which `RCI_HI` stays at 100 %.",
+          "description": "`[lo, hi, step]` in kelvin: one extra solve at `lo, lo+step, .., <= hi` (at most 16), moving\nthe supply patch's inlet temperature; §55.4's ceiling is the highest holding `RCI_HI` at 100 %.",
           "type": [
             "array",
             "null"

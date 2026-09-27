@@ -55,6 +55,18 @@ reference the pressure, zero-gradient elsewhere, and an isothermal 293.15 K.
 `racecar.fields/` stays in the folder as that era's originals, for reference
 only; the recipe no longer uses it.
 
+솔버는 `0/`을 건드리지 않습니다. 정상해석은 최종 상태를 반복 횟수로 이름 붙인
+디렉터리에 씁니다 — `-iters 3000`이면 `racecar_case/3000/`. 같은 케이스를 다시
+돌리면 `0/`의 초기장에서 시작합니다. 이전 해에서 이어 가려면 `-restartWrite N`으로
+`restart.mcr`을 남기고 `-restartFrom racecar_case/restart.mcr -iters N`으로
+재개하십시오(N회를 더 돕니다; SPEC-LIT §44.9).
+
+The solver never touches `0/`. A steady run writes its final state to a directory
+named by its iteration count — `-iters 3000` writes `racecar_case/3000/`. Running
+the case again starts from the initial fields in `0/`. To continue from the
+previous answer, leave a `restart.mcr` with `-restartWrite N` and resume with
+`-restartFrom racecar_case/restart.mcr -iters N` (N more iterations; SPEC-LIT §44.9).
+
 어떤 드라이버로 풀지는 여전히 중요합니다. `ofgpu-k-epsilon`과 `ofgpu-k-omega`는
 이름 그대로 난류 두 방정식만 풀고 **속도장은 건드리지 않습니다**(얼린 `U` 위에서
 돕니다). 그러니 그 둘로 이 케이스를 돌리면 유선은 직선이고 컨투어는 균일합니다 —

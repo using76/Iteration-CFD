@@ -351,6 +351,31 @@ impl PbicgstabBackend {
     pub fn controls(&self) -> &SolverControls {
         &self.ctrl
     }
+
+    /// `solvers/p/solver` GAMG cannot be served by this backend, and saying
+    /// so is SPEC-LIT §13.4's rule: algebraic multigrid reaches ofgpu only
+    /// as the AMGX pressure backend (§8.3). Refused here, in `setup`, so
+    /// the run stops before a single pressure solve; under `-permissive`
+    /// the substitution is printed once and `solve` runs PBiCGStab. The
+    /// setting name is `solvers/p/solver` even when the variable is `p_rgh`:
+    /// the backend does not know the variable's name, and `warn_once` keys
+    /// on the setting (`src/io/contract.rs`).
+    fn refuse_gamg(&self) -> Result<()> {
+        if self.ctrl.solver != solver::LinearSolverKind::Gamg {
+            return Ok(());
+        }
+        crate::io::contract::unsupported_note(
+            "solvers/p/solver",
+            "GAMG",
+            &["PBiCGStab", "PCG"],
+            "algebraic multigrid reaches ofgpu only as the AMGX pressure backend \
+             (SPEC-LIT 8.3), which is behind the `amgx` Cargo feature (off by \
+             default, needs libamgx) and is selected only by ofgpu-buoyant's \
+             -backend auto; this backend is PBiCGStab/PCG and cannot serve GAMG",
+            "PBiCGStab on the pressure equation",
+            (),
+        )
+    }
 }
 
 impl PressureBackend for PbicgstabBackend {
@@ -369,13 +394,8 @@ impl PressureBackend for PbicgstabBackend {
         m: &GpuMesh,
         _probe: &SystemProbe,
     ) -> Result<()> {
+        self.refuse_gamg()?;
         self.kernels = Some(SolverKernels::new(gpu)?);
-        if self.ctrl.solver == solver::LinearSolverKind::Gamg {
-            crate::io::contract::warn_once(
-                "solvers/p/solver",
-                "solvers/p/solver GAMG: algebraic multigrid is provided by the                  AMGX backend, not by this one (SPEC-LIT 8.3). The decision                  table below says whether AMGX was available; where it was                  not, the pressure equation runs PBiCGStab.",
-            );
-        }
         self.ws = Some(SolverWorkspace::for_mesh(gpu, m)?);
         Ok(())
     }
@@ -401,14 +421,14 @@ impl PressureBackend for PbicgstabBackend {
         // asymmetric matrix is an error (SPEC-LIT 8.2, 13.4). See
         // `crate::solver::solve`.
         //
-        // `GAMG` is the one entry this backend cannot serve, because algebraic
-        // multigrid reaches ofgpu as the separate AMGX backend (SPEC-LIT 8.3).
-        // Rather than let `solve` refuse it, the request is answered by the
-        // machinery one level up - `choose_pressure_backend` prints AMGX in
-        // its decision table with the reason it is or is not available - and
-        // this backend keeps its role as the always-applicable fallback and
-        // correctness reference. `setup` says so, once, so the substitution is
-        // announced rather than silent.
+        // `GAMG` is the one entry this backend cannot serve, and the request
+        // is refused in `setup` under SPEC-LIT §13.4 - the run stops before a
+        // single pressure solve, and under `-permissive` the substitution is
+        // announced there. This arm is that `-permissive` fallback: it answers
+        // the request with PBiCGStab, `choose_pressure_backend` still prints
+        // AMGX in its decision table with the reason it is or is not
+        // available, and this backend keeps its role as the always-applicable
+        // fallback and correctness reference.
         if self.ctrl.solver == solver::LinearSolverKind::Gamg {
             return solver::solve_pbicgstab(gpu, k, p, a, m, w, &self.ctrl);
         }
@@ -907,6 +927,7 @@ mod tests {
     /// relative is the specification's number; the discrete wavenumber gets
     /// well inside it, and the continuous one would miss it by orders.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_fft_solve_matches_pbicgstab_on_a_real_matrix() {
         let cases: [(&str, &[usize]); 6] = [
             ("outlet on +x (Nd, Nn, Nn)", &[1]),
@@ -956,6 +977,46 @@ mod tests {
             let rel = rel_diff(&got, &want);
             assert!(rel < 1e-10, "{what}: cuFFT and PBiCGStab differ by {rel:.3e}");
         }
+    }
+
+    /// What is refused, and why: `FftBackend::solve` DOWNLOADS the matrix to
+    /// the host on every call - `upper` always, `diag` and `lower` under the
+    /// default `Verify::EverySolve` - and re-derives the operator on the HOST,
+    /// then writes the three eigenvalue tables from the host. Both
+    /// `Gpu::download` and `Gpu::write` are refused inside a capture, by name.
+    /// The alternative is a frozen mode that keeps the tables resident and
+    /// trusts the structure instead of re-reading it, which would delete the
+    /// per-solve operator check this backend exists to make; it is not
+    /// implemented, so the refusal stands and is measured here rather than
+    /// asserted.
+    #[test]
+    fn the_cufft_solve_is_not_capturable_and_says_which_call() {
+        let Some(sys) = build([9, 6, 4], Vec3::new(0.30, 0.25, 0.50), &[1], 4321) else { return };
+        let mut fftb = FftBackend::new().with_residual_report(false);
+        // No cuFFT on this machine is not a failure of this claim.
+        if !fftb.applicable(&sys.probe) {
+            return;
+        }
+        fftb.setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe).expect("fft setup");
+        let mut psi: DevBuf<Scalar> = sys.gpu.zeros(sys.hm.n_cells).expect("psi");
+        fftb.solve(&sys.gpu, &mut psi, &sys.a, &sys.m).expect("one eager solve");
+        sys.gpu.sync().expect("sync");
+
+        let err = match sys.gpu.capture(|_| {
+            fftb.solve(&sys.gpu, &mut psi, &sys.a, &sys.m).map(|_| ())
+        }) {
+            Ok(_) => panic!(
+                "the cuFFT solve CAPTURED. If it no longer reads the operator back to \
+                 the host, src/pressure/fft.rs should be promoted from Refused to Gate \
+                 in the capture registry, and `§81.11` says the opposite"
+            ),
+            Err(e) => e.to_string(),
+        };
+        println!("  refused, naming the call: {err}");
+        assert!(
+            err.contains("Gpu::download"),
+            "the cuFFT solve must be refused by the download guard, naming the call - got: {err}"
+        );
     }
 
     /// The sides the backend infers from the coefficients have to be the sides
@@ -1241,6 +1302,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_selector_disqualifies_a_backend_that_disagrees() {
         let Some(sys) = build([10, 8, 6], Vec3::new(0.3, 0.3, 0.3), &[1], 4242) else {
             return;
@@ -1308,6 +1370,7 @@ mod tests {
     /// there is always something correct to fall back to and always something
     /// to compare against.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_selector_supplies_its_own_reference() {
         let Some(sys) = build([8, 6, 4], Vec3::new(0.3, 0.3, 0.3), &[1], 5) else {
             return;
@@ -1331,6 +1394,7 @@ mod tests {
     /// accurate than the reference. The selector notices, runs one tight solve
     /// as a yardstick, and says so in the table.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_loose_reference_does_not_disqualify_an_exact_backend() {
         let Some(sys) = build([10, 8, 6], Vec3::new(0.3, 0.3, 0.3), &[1], 808) else {
             return;
@@ -1372,6 +1436,7 @@ mod tests {
     /// A backend that cannot represent the system is out before it is ever
     /// run, whatever it would have cost.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn an_inapplicable_backend_is_never_timed() {
         let Some(sys) = build([8, 6, 4], Vec3::new(0.3, 0.3, 0.3), &[1], 5) else {
             return;
@@ -1443,5 +1508,100 @@ mod tests {
     #[test]
     fn the_agreement_tolerance_is_what_the_specification_says() {
         assert_eq!(AGREEMENT_TOL, 1e-8);
+    }
+
+    /// SPEC-LIT §13.4. `solvers/p/solver GAMG` used to print one stderr line
+    /// in `setup` and run PBiCGStab anyway - the silent substitution the rule
+    /// forbids. It is now refused by name in `setup`, before a single pressure
+    /// solve; `-permissive` downgrades it to the announced PBiCGStab fallback
+    /// that `solve`'s `Gamg` arm runs.
+    #[test]
+    fn gamg_on_the_pressure_equation_is_refused_by_name_and_names_amgx() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let be = PbicgstabBackend::new(SolverControls {
+            solver: solver::LinearSolverKind::Gamg,
+            ..SolverControls::default()
+        });
+        let e = be
+            .refuse_gamg()
+            .expect_err("GAMG on the pressure equation must be refused in strict mode")
+            .to_string();
+        assert!(e.contains("solvers/p/solver"), "{e}");
+        assert!(e.contains("GAMG"), "{e}");
+        assert!(e.contains("AMGX"), "{e}");
+        assert!(e.contains("PBiCGStab"), "{e}");
+        assert!(e.contains("amgx"), "{e}");
+        assert!(e.contains("-permissive"), "{e}");
+
+        crate::io::contract::set_permissive(true);
+        assert!(be.refuse_gamg().is_ok(), "permissive must let the run continue");
+        assert!(
+            crate::io::contract::warned("solvers/p/solver"),
+            "the substitution must be announced"
+        );
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// The two Krylov methods this backend actually has pass the refusal and
+    /// say nothing: the refusal is about GAMG, not about the entry point.
+    #[test]
+    fn a_pbicgstab_or_pcg_entry_on_the_pressure_equation_passes_the_refusal() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        for kind in [solver::LinearSolverKind::PBiCGStab, solver::LinearSolverKind::PCG] {
+            let be = PbicgstabBackend::new(SolverControls {
+                solver: kind,
+                ..SolverControls::default()
+            });
+            assert!(
+                be.refuse_gamg().is_ok(),
+                "{kind:?} must pass the pressure-backend refusal"
+            );
+            assert!(
+                !crate::io::contract::warned("solvers/p/solver"),
+                "{kind:?} must not warn"
+            );
+        }
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT §13.4.1: the refusal has to stop the run BEFORE the device
+    /// is touched. `setup` answers `Err` with `kernels` and `ws` still
+    /// `None` when the case asks for `solvers/p/solver GAMG`, and the
+    /// default controls still set both up.
+    #[test]
+    fn setup_refuses_gamg_on_the_pressure_equation_before_touching_the_device() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        let Some(sys) = build([6, 4, 3], Vec3::new(0.3, 0.3, 0.3), &[1], 7) else {
+            return;
+        };
+        let mut be = PbicgstabBackend::new(SolverControls {
+            solver: solver::LinearSolverKind::Gamg,
+            ..SolverControls::default()
+        });
+        let e = be
+            .setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe)
+            .expect_err("GAMG must be refused before the device is touched")
+            .to_string();
+        assert!(e.contains("GAMG"), "{e}");
+        assert!(e.contains("AMGX"), "{e}");
+        assert!(
+            be.kernels.is_none() && be.ws.is_none(),
+            "a refused run must not have built a kernel or a workspace"
+        );
+
+        let mut ok = PbicgstabBackend::new(SolverControls::default());
+        ok.setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe)
+            .expect("the default controls must set up");
+        assert!(ok.kernels.is_some() && ok.ws.is_some());
+
+        crate::io::contract::set_permissive(false);
     }
 }

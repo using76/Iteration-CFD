@@ -208,6 +208,7 @@ fn a_manifest_that_breaks_a_rule_is_refused_by_name() {
 /// and the pairing numbers R2 measures on it are zero to within the fan's
 /// one-ulp centroid (exact areas and normals - the fixture is dyadic).
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_layout_round_trips_through_disk_and_load_checks_r1_to_r6() {
     let d = scratch("roundtrip");
     let regions = write_two_zone_layout(&d);
@@ -249,6 +250,7 @@ fn the_layout_round_trips_through_disk_and_load_checks_r1_to_r6() {
 /// The split's two regions ARE the sub-blocks - topology, coordinates
 /// and built geometry bitwise, and one conformal pair between them.
 #[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_two_zone_block_splits_into_two_standalone_regions_with_one_conformal_pair() {
     let (regions, ifaces, _) = split_fixture();
     let (lo, up) = (&regions[0].1, &regions[1].1);
@@ -339,9 +341,9 @@ fn a_two_zone_block_splits_into_two_standalone_regions_with_one_conformal_pair()
         // that is zero on BOTH sides (+0.0, the fixture's x and y) does not
         // fail on the sign of zero: a.x + b.x is +0.0 iff a.x == -b.x
         // exactly, for every finite pair including the zeros.
-        assert_eq!((a.x + b.x).to_bits(), 0.0f64.to_bits(), "Sf x {k}");
-        assert_eq!((a.y + b.y).to_bits(), 0.0f64.to_bits(), "Sf y {k}");
-        assert_eq!((a.z + b.z).to_bits(), 0.0f64.to_bits(), "Sf z {k}");
+        assert_eq!((a.x + b.x).to_bits(), (0.0 as Scalar).to_bits(), "Sf x {k}");
+        assert_eq!((a.y + b.y).to_bits(), (0.0 as Scalar).to_bits(), "Sf y {k}");
+        assert_eq!((a.z + b.z).to_bits(), (0.0 as Scalar).to_bits(), "Sf z {k}");
         assert!(
             (lm.b_cf[ifl.start + k] - um.b_cf[ifu.start + k]).mag() <= 1e-14,
             "interface centroid {k}"
@@ -383,4 +385,262 @@ fn split_refuses_what_it_cannot_carry() {
     });
     let e = split_by_zones(&cyc, &zones_of(&raw)).unwrap_err().to_string();
     assert!(e.contains("periodic") && e.contains("31.1"), "{e}");
+}
+
+// ==========================================================================
+//  R8 - the case half (SPEC-LIT §97): a case naming the manifest, and
+//  Gate 97-B, the split run against the block run
+// ==========================================================================
+
+use crate::cht::run_case;
+use crate::io::case_cht::read_cht_case;
+
+fn gpu() -> Option<crate::Gpu> {
+    crate::Gpu::new(0).ok()
+}
+
+/// The Gate 97-B documents out of one template. `with_manifest`: the case
+/// names `mesh/regions.json`, carries no per-region mesh and no
+/// `interfaces` (document B). Otherwise both regions carry the block mesh
+/// and the one explicit interface (document A); `imported` swaps the block
+/// meshes for `polyMesh` references into the layout (document C).
+/// `extra_lower` splices into `lower`'s object, `extra_interfaces` follows
+/// the regions.
+fn gate_97b_case(
+    with_manifest: bool,
+    imported: bool,
+    extra_lower: &str,
+    extra_interfaces: &str,
+) -> String {
+    let top_mesh = if with_manifest {
+        "  \"mesh\": { \"regions\": \"mesh/regions.json\" },\n"
+    } else {
+        ""
+    };
+    let region_mesh = |name: &str| {
+        if with_manifest {
+            String::new()
+        } else if imported {
+            format!("    \"mesh\": {{ \"polyMesh\": \"mesh/{name}/polyMesh\" }},\n")
+        } else {
+            let (zlo, zhi, zmap) = if name == "lower" {
+                ("0.0", "1.0", "\"zmin\":\"zmin\",\"zmax\":\"lower_to_upper\"")
+            } else {
+                ("1.0", "2.0", "\"zmin\":\"upper_to_lower\",\"zmax\":\"zmax\"")
+            };
+            format!(
+                "    \"mesh\": {{ \"bounds\": {{ \"min\": [0.0, 0.0, {zlo}], \"max\": \
+                 [1.0, 1.0, {zhi}] }}, \"cells\": [4, 4, 4], \"boundaries\": {{ \
+                 \"xmin\":\"xmin\",\"xmax\":\"xmax\",\"ymin\":\"ymin\",\"ymax\":\
+                 \"ymax\",{zmap} }} }},\n"
+            )
+        }
+    };
+    let interfaces = if with_manifest {
+        ""
+    } else {
+        "\n  \"interfaces\": [ { \"regionA\": \"lower\", \"patchA\": \
+         \"lower_to_upper\", \"regionB\": \"upper\", \"patchB\": \"upper_to_lower\" } ],"
+    };
+    let (lower_mesh, upper_mesh) = (region_mesh("lower"), region_mesh("upper"));
+    format!(
+        r#"{{
+{top_mesh}  "name": "gate97b",
+  "regions": [
+    {{
+      "name": "lower",
+{lower_mesh}{extra_lower}      "material": {{ "rho": 2330.0, "c": 700.0, "kappa": 148.0 }},
+      "patches": [
+        {{ "match": "zmin", "T": {{ "type": "fixedValue", "value": 380.0 }} }},
+        {{ "match": "xmin", "T": {{ "type": "zeroGradient" }} }}, {{ "match": "xmax", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "ymin", "T": {{ "type": "zeroGradient" }} }}, {{ "match": "ymax", "T": {{ "type": "zeroGradient" }} }}
+      ]
+    }},
+    {{
+      "name": "upper",
+{upper_mesh}      "material": {{ "rho": 8960.0, "c": 385.0, "kappa": 400.0 }},
+      "patches": [
+        {{ "match": "zmax", "T": {{ "type": "fixedValue", "value": 300.0 }} }},
+        {{ "match": "xmin", "T": {{ "type": "zeroGradient" }} }}, {{ "match": "xmax", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "ymin", "T": {{ "type": "zeroGradient" }} }}, {{ "match": "ymax", "T": {{ "type": "zeroGradient" }} }}
+      ]
+    }}
+  ],{interfaces}{extra_interfaces}
+  "initial": {{ "T": 340.0 }},
+  "run": {{ "steady": true }},
+  "numerics": {{ "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-30, "maxIter": 4000 }}
+}}"#
+    )
+}
+
+/// R8: the case naming the manifest and the case listing the split regions
+/// explicitly lower to the same thing - and every conflict is noted or
+/// refused by name (SPEC-LIT §97).
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn a_case_that_names_the_manifest_and_one_that_lists_the_split_regions_explicitly_lower_to_the_same_thing() {
+    let d = scratch("r8");
+    write_two_zone_layout(&d);
+    fs::write(d.join("b.jsonc"), gate_97b_case(true, false, "", "")).unwrap();
+    fs::write(d.join("c.jsonc"), gate_97b_case(false, true, "", "")).unwrap();
+    let lower = |p: &Path| {
+        read_cht_case(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display())).lower_in(Some(&d))
+    };
+    let (lb, lc) = (
+        lower(&d.join("b.jsonc")).expect("lower the manifest case"),
+        lower(&d.join("c.jsonc")).expect("lower the explicit case"),
+    );
+    assert_eq!(lb.region_names, lc.region_names);
+    assert_eq!(lb.kinds, lc.kinds);
+    assert_eq!(lb.interfaces.len(), 1);
+    for (b, c) in lb.interfaces.iter().zip(&lc.interfaces) {
+        assert_eq!((b.region_a, &b.patch_a, b.region_b, &b.patch_b), (c.region_a, &c.patch_a, c.region_b, &c.patch_b));
+        assert_eq!(b.r_c, c.r_c);
+    }
+    for r in 0..lb.meshes.len() {
+        let pn = |m: &HostMesh| m.patches.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        assert_eq!(pn(&lb.meshes[r]), pn(&lc.meshes[r]), "patch names, region {r}");
+        assert_eq!(lb.meshes[r].owner, lc.meshes[r].owner, "owner, region {r}");
+        assert_eq!(lb.meshes[r].neighbour, lc.meshes[r].neighbour, "neighbour, region {r}");
+        for (a, b) in lb.raw[r].points.iter().zip(&lc.raw[r].points) {
+            assert!(same_point(*a, *b), "raw points differ bitwise in region {r}");
+        }
+    }
+    // A case region neither in the manifest nor carrying a `mesh`.
+    let plain = gate_97b_case(true, false, "", "");
+    let rogue = plain.replace("  \"regions\": [\n", "  \"regions\": [\n    { \"name\": \"rogue\", \"kind\": \"solid\", \"material\": { \"rho\": 1.0, \"c\": 1.0, \"kappa\": 1.0 }, \"patches\": [] },\n");
+    assert_ne!(rogue, plain);
+    fs::write(d.join("rogue.jsonc"), rogue).unwrap();
+    let e = lower(&d.join("rogue.jsonc")).expect_err("rogue").to_string();
+    assert!(e.contains("regions/rogue") && e.contains("neither a `mesh`"), "{e}");
+    // A manifest region the case does not declare.
+    let partial = r#"{"name":"gate97bPartial","mesh":{"regions":"mesh/regions.json"},"regions":[{"name":"lower","material":{"rho":2330.0,"c":700.0,"kappa":148.0},"patches":[{"match":"zmin","T":{"type":"fixedValue","value":380.0}},{"match":"xmin","T":{"type":"zeroGradient"}},{"match":"xmax","T":{"type":"zeroGradient"}},{"match":"ymin","T":{"type":"zeroGradient"}},{"match":"ymax","T":{"type":"zeroGradient"}},{"match":"lower_to_upper","T":{"type":"zeroGradient"}}]}],"initial":{"T":340.0},"run":{"steady":true},"numerics":{"solver":"PCG","preconditioner":"DIC","tolerance":1e-30,"maxIter":4000}}"#;
+    fs::write(d.join("partial.jsonc"), partial).unwrap();
+    let e = lower(&d.join("partial.jsonc")).expect_err("partial").to_string();
+    assert!(e.contains("'upper'") && e.contains("which the manifest cannot carry"), "{e}");
+    // Without a manifest, a region without a `mesh` is refused by name.
+    let nomesh = r#"{"name":"gate97bNoMesh","regions":[{"name":"lower","material":{"rho":2330.0,"c":700.0,"kappa":148.0},"patches":[{"match":"zmin","T":{"type":"fixedValue","value":380.0}}]}],"interfaces":[{"regionA":"lower","patchA":"lower_to_upper","regionB":"upper","patchB":"upper_to_lower"}],"initial":{"T":340.0},"run":{"steady":true},"numerics":{"solver":"PCG","preconditioner":"DIC","tolerance":1e-30,"maxIter":4000}}"#;
+    fs::write(d.join("nomesh.jsonc"), nomesh).unwrap();
+    let e = lower(&d.join("nomesh.jsonc")).expect_err("no mesh").to_string();
+    assert!(e.contains("regions/lower/mesh") && e.contains("no `mesh.regions` manifest"), "{e}");
+    // A kind the manifest disagrees with: both kinds and the manifest path.
+    let flipped = gate_97b_case(true, false, "", "").replace(
+        "      \"name\": \"lower\",\n",
+        "      \"name\": \"lower\",\n      \"kind\": \"fluid\",\n",
+    );
+    assert_ne!(flipped, gate_97b_case(true, false, "", ""));
+    fs::write(d.join("flipped.jsonc"), flipped).unwrap();
+    let e = lower(&d.join("flipped.jsonc")).expect_err("kind clash").to_string();
+    assert!(e.contains("regions/lower/kind") && e.contains("fluid") && e.contains("solid"), "{e}");
+    // The explicit mesh wins with a printed note; the case's own interface
+    // keeps its `Rc`; a patch given a different partner is refused naming
+    // both pairs.
+    let extra = "    \"mesh\": { \"bounds\": { \"min\": [0.0, 0.0, 0.0], \"max\": [1.0, 1.0, 1.0] }, \"cells\": [4, 4, 4], \"boundaries\": { \"xmin\":\"xmin\", \"xmax\":\"xmax\", \"ymin\":\"ymin\", \"ymax\":\"ymax\", \"zmin\":\"zmin\", \"zmax\":\"lower_to_upper\" } },\n";
+    fs::write(d.join("noted.jsonc"), gate_97b_case(true, false, extra, "")).unwrap();
+    let ln = lower(&d.join("noted.jsonc")).expect("noted");
+    assert_eq!(ln.notes.len(), 1);
+    assert!(ln.notes[0].contains("lower"), "{}", ln.notes[0]);
+    let rc_if = "\n  \"interfaces\": [ { \"regionA\": \"lower\", \"patchA\": \"lower_to_upper\", \"regionB\": \"upper\", \"patchB\": \"upper_to_lower\", \"Rc\": 1e-4 } ],";
+    fs::write(d.join("rc.jsonc"), gate_97b_case(true, false, "", rc_if)).unwrap();
+    let lr = lower(&d.join("rc.jsonc")).expect("rc");
+    assert!(lr.notes.is_empty() && lr.interfaces.len() == 1 && lr.interfaces[0].r_c == 1e-4);
+    let clash_if = "\n  \"interfaces\": [ { \"regionA\": \"lower\", \"patchA\": \"lower_to_upper\", \"regionB\": \"upper\", \"patchB\": \"zmax\" } ],";
+    // The case's interface claims `zmax`, so the document gives the patch no
+    // `patches` rule - otherwise the "named twice" refusal fires before the
+    // manifest's pair ever reaches the merge.
+    let clash_doc = gate_97b_case(true, false, "", clash_if).replace(
+        "        { \"match\": \"zmax\", \"T\": { \"type\": \"fixedValue\", \"value\": 300.0 } },\n",
+        "",
+    );
+    assert_ne!(clash_doc, gate_97b_case(true, false, "", clash_if));
+    fs::write(d.join("clash.jsonc"), clash_doc).unwrap();
+    let e = lower(&d.join("clash.jsonc")).expect_err("clash").to_string();
+    assert!(e.contains("lower_to_upper") && e.contains("zmax"), "{e}");
+    fs::remove_dir_all(&d).ok();
+}
+
+/// **Gate 97-B** (SPEC-LIT §97): the split two-zone block, run through the
+/// manifest, IS the block run - bitwise. `bt` is compared PER PATCH BY
+/// NAME over the CONCATENATED mesh: `ThermalMesh::build` extends the
+/// concatenated boundary arrays region by region in each region's OWN
+/// patch order, and the two documents put `upper`'s patches in different
+/// orders (`upper_to_lower` and `zmax` swapped), so an entry-by-entry
+/// comparison would fail on a correct solve. The start to index `bt` with
+/// is therefore the one `sol.mesh.host.patches` already carries
+/// (`"<region>:<patch>"`, `start = p.start + boundary_face_offset`), never
+/// the region-local `meshes[r].patches[i].start`. `t` is per CELL and the
+/// cell numbering is the same in both documents, so it compares
+/// entry-by-entry as it stands.
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn gate_97b_a_split_two_zone_block_run_through_the_manifest_is_bitwise_the_block_run() {
+    let Some(gpu) = gpu() else { return };
+    let d = scratch("gate97b");
+    write_two_zone_layout(&d);
+    fs::write(d.join("a.jsonc"), gate_97b_case(false, false, "", "")).unwrap();
+    fs::write(d.join("b.jsonc"), gate_97b_case(true, false, "", "")).unwrap();
+    let lower = |p: &Path| {
+        read_cht_case(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display())).lower_in(Some(&d))
+    };
+    let la = lower(&d.join("a.jsonc")).expect("lower the block case");
+    let lb = lower(&d.join("b.jsonc")).expect("lower the manifest case");
+    // Before the run: A5's per-patch equalities between the LOWERED meshes,
+    // matched BY NAME everywhere (`upper`'s patch order differs), so a
+    // failure localises to geometry or to the solve - never to the compare.
+    for (r, name) in la.region_names.iter().enumerate() {
+        assert_eq!(la.meshes[r].n_cells, lb.meshes[r].n_cells, "{name} cells");
+        assert_eq!(la.raw[r].neighbour, lb.raw[r].neighbour, "{name} neighbour");
+        assert_eq!(&la.raw[r].owner[..la.raw[r].neighbour.len()], &lb.raw[r].owner[..lb.raw[r].neighbour.len()]);
+        for c in 0..la.meshes[r].n_cells {
+            assert_eq!(la.meshes[r].v[c].to_bits(), lb.meshes[r].v[c].to_bits(), "{name} v cell {c}");
+            assert!(same_point(la.meshes[r].c[c], lb.meshes[r].c[c]), "{name} c cell {c}");
+        }
+        let mut na: Vec<&str> = la.meshes[r].patches.iter().map(|p| p.name.as_str()).collect();
+        let mut nb: Vec<&str> = lb.meshes[r].patches.iter().map(|p| p.name.as_str()).collect();
+        na.sort_unstable();
+        nb.sort_unstable();
+        assert_eq!(na, nb, "{name} patch names");
+        for pname in na {
+            let qa = la.meshes[r].patches.iter().find(|p| p.name == pname).unwrap();
+            let qb = lb.meshes[r].patches.iter().find(|p| p.name == pname).unwrap();
+            assert_eq!(qa.size, qb.size, "{name}:{pname} size");
+            for k in 0..qa.size {
+                let (ia, ib) = (qa.start + k, qb.start + k);
+                assert!(same_point(la.meshes[r].b_sf[ia], lb.meshes[r].b_sf[ib]), "{name}:{pname} b_sf {k}");
+                assert!(same_point(la.meshes[r].b_cf[ia], lb.meshes[r].b_cf[ib]), "{name}:{pname} b_cf {k}");
+            }
+        }
+    }
+    let sa = run_case(&gpu, &la).expect("run the block case");
+    let sb = run_case(&gpu, &lb).expect("run the manifest case");
+    let max_rel = sa.t.iter().zip(&sb.t).map(|(a, b)| (a - b).abs() / a.abs().max(1.0)).fold(0.0 as Scalar, Scalar::max);
+    assert_eq!(sa.t.len(), sb.t.len(), "t length");
+    for (i, (a, b)) in sa.t.iter().zip(&sb.t).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "t differs at cell {i}: {a} vs {b} (max relative difference {max_rel:e})");
+    }
+    let cat_start = |sol: &crate::cht::ChtSolution, r: usize, p: &str| {
+        let want = format!("{}:{p}", sol.mesh.regions[r].name);
+        sol.mesh.host.patches.iter().find(|q| q.name == want).unwrap_or_else(|| panic!("no patch {want}")).start
+    };
+    for (r, name) in la.region_names.iter().enumerate() {
+        for pa in &la.meshes[r].patches {
+            let (ia, ib) = (cat_start(&sa, r, &pa.name), cat_start(&sb, r, &pa.name));
+            for k in 0..pa.size {
+                assert_eq!(sa.bt[ia + k].to_bits(), sb.bt[ib + k].to_bits(),
+                    "bt {name}:{} [{k}]: {} vs {}", pa.name, sa.bt[ia + k], sb.bt[ib + k]);
+            }
+        }
+    }
+    assert_eq!(sa.steps, sb.steps, "steps");
+    assert_eq!(sa.pair_flux.0.len(), sb.pair_flux.0.len(), "pair_flux (a) length");
+    assert_eq!(sa.pair_flux.1.len(), sb.pair_flux.1.len(), "pair_flux (b) length");
+    for (i, (x, y)) in sa.pair_flux.0.iter().zip(&sb.pair_flux.0).enumerate() {
+        assert_eq!(x.to_bits(), y.to_bits(), "pair_flux(a)[{i}]: {x} vs {y}");
+    }
+    for (i, (x, y)) in sa.pair_flux.1.iter().zip(&sb.pair_flux.1).enumerate() {
+        assert_eq!(x.to_bits(), y.to_bits(), "pair_flux(b)[{i}]: {x} vs {y}");
+    }
+    println!("Gate 97-B: {} cells, {} boundary faces, bitwise identical; steps {}, {} flux pairs",
+        sa.t.len(), sa.bt.len(), sa.steps, sa.pair_flux.0.len());
+    fs::remove_dir_all(&d).ok();
 }

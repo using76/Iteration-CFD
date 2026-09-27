@@ -70,7 +70,9 @@ pub const NU_MAX: Scalar = 0.45;
 /// end-loaded cantilever converges at 5:1 in 306 and 331 outer iterations on
 /// two meshes a refinement apart, and at 10:1 reaches six decades on NO mesh,
 /// with NO accelerator, in 2000 outer iterations. Inclusive: 5 is accepted,
-/// anything above is refused.
+/// anything above is refused. The block-coupled solve does not move it:
+/// Gate 95-A holds for that solve at 2.5:1 and misses at 5:1 and 10:1
+/// (§109.7).
 pub const SLENDERNESS_MAX: Scalar = 5.0;
 
 /// The largest `max|u| / min_c V_c^(1/3)` a coupled case may report before
@@ -79,12 +81,15 @@ pub const SLENDERNESS_MAX: Scalar = 5.0;
 pub const MOTION_RATIO_MAX: Scalar = 0.1;
 
 pub mod bc;
+pub mod block;
 pub mod case;
+pub mod coupled;
 pub mod displacement;
 pub mod fixtures;
 pub mod materials;
 pub mod outer;
 pub mod prototype;
+pub mod restated;
 pub mod stress;
 
 pub use materials::{BondTreatment, MaterialMap};
@@ -179,10 +184,11 @@ impl Material {
                  incompressibility - docs/09-thermal-structural-plan.md F.1a \
                  measured 71 outer iterations at nu = 0.45 on a 20^3 block, 615 \
                  at nu = 0.49, and no convergence in 2000 at nu = 0.49 on a \
-                 jittered block, where a near-incompressible solid entered here \
-                 would stall at a residual read as converged. The route is a \
-                 block-coupled solve (Cardiff, Tuković, Jasak & Ivanković 2016, \
-                 DOI 10.1016/j.compstruc.2016.07.004), which is not built",
+                 jittered block. The block-coupled solve (SPEC-LIT §109; \
+                 Cardiff, Tuković, Jasak & Ivanković 2016, DOI \
+                 10.1016/j.compstruc.2016.07.004) is built and is measured on \
+                 bending (Gate 95-A), not on incompressibility: nu above 0.45 \
+                 stays refused in both modes until a gate above it is measured",
                 self.nu
             )));
         }
@@ -224,8 +230,6 @@ pub enum NotBuilt {
         /// `(3 lambda + 2 mu)^2 alpha^2 T_0 / ((lambda + 2 mu) rho c)`.
         delta: Scalar,
     },
-    /// The 3x3 block-coupled solve a near-incompressible solid needs.
-    BlockCoupled,
 }
 
 /// The refusal, as an [`Error::Config`] naming the feature, the setting that
@@ -271,13 +275,6 @@ pub fn refuse(what: NotBuilt, setting: &str) -> Error {
             "{head}: two-way coupling is not built - the -T_0 (3 lambda + 2 mu) \
              alpha d(tr eps)/dt term is not carried into the energy equation; \
              delta = {delta:.3e} is what that omits"
-        )),
-        NotBuilt::BlockCoupled => Error::Config(format!(
-            "{head}: a block-coupled solve is not built - Cardiff, Tuković, Jasak \
-             & Ivanković, *Comput. Struct.* 175 (2016) 100-122, DOI \
-             10.1016/j.compstruc.2016.07.004 is the route a near-incompressible \
-             case has to take, and a 3x3 coefficient per face breaks the \
-             one-entry-per-face LDU storage of SPEC-LIT §1"
         )),
     }
 }
@@ -336,7 +333,7 @@ fn symmetric_eigenvalues(c: [[Scalar; 3]; 3]) -> [Scalar; 3] {
         + b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]);
     let phi = (det / 2.0).clamp(-1.0, 1.0).acos() / 3.0;
     let e0 = q + 2.0 * p * phi.cos();
-    let e2 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::FRAC_PI_3).cos();
+    let e2 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::FRAC_PI_3 as Scalar).cos();
     // The trace is exact, so the middle one costs no third cosine.
     [e0, c[0][0] + c[1][1] + c[2][2] - e0 - e2, e2]
 }
@@ -435,11 +432,12 @@ pub fn slenderness(m: &HostMesh) -> Scalar {
 /// the mechanism the measurement is consistent with, and it is why the
 /// criterion is a shape and not a material.
 ///
-/// The route is the block-coupled matrix - P. Cardiff, Ž. Tuković, H. Jasak,
+/// The route was the block-coupled matrix - P. Cardiff, Ž. Tuković, H. Jasak,
 /// A. Ivanković, *Comput. Struct.* 175 (2016) 100-122, DOI
-/// 10.1016/j.compstruc.2016.07.004 - which solves all three components at
-/// once and never defers the coupling at all. It is not built: a `3x3`
-/// coefficient per face breaks SPEC-LIT §1's one-entry-per-face LDU storage.
+/// 10.1016/j.compstruc.2016.07.004. It is built as `crate::solid::coupled`
+/// (§109), a second matrix format beside SPEC-LIT §1's LDU storage, and
+/// Gate 95-A measured it: it converges the 10:1 beam on the two finer meshes,
+/// and misses the gate at 5:1 and 10:1 (§109.7), so this refusal is unchanged.
 pub fn refuse_bending_dominated_slender_body(m: &HostMesh) -> Result<()> {
     let s = slenderness(m);
     // The relative slack is so that the body the sweep MEASURED at 5:1 -
@@ -448,7 +446,17 @@ pub fn refuse_bending_dominated_slender_body(m: &HostMesh) -> Result<()> {
     // slenderness is forgiven.
     if s > SLENDERNESS_MAX * (1.0 + 1.0e-9) {
         return Err(Error::Config(format!(
-            "solid: the region's slenderness is {s:.2}, above the measured edge              {SLENDERNESS_MAX} - the segregated displacement loop does not converge on a              bending-dominated slender body. docs/09-thermal-structural-plan.md F.1b              measured the end-loaded cantilever converging in 306 and 331 outer              iterations at 5:1 on two meshes, and stalling at a contraction of 0.95 to              1.00 at 10:1 on every mesh, with bare Picard, with Aitken, with Anderson at              three depths and with the implicit split enlarged three ways. The route is a              block-coupled solve (Cardiff, Tuković, Jasak & Ivanković 2016, DOI              10.1016/j.compstruc.2016.07.004), which is not built"
+            "solid: the region's slenderness is {s:.2}, above the measured edge \
+             {SLENDERNESS_MAX} - the segregated displacement loop does not \
+             converge on a bending-dominated slender body. \
+             docs/09-thermal-structural-plan.md F.1b measured the end-loaded \
+             cantilever converging in 306 and 331 outer iterations at 5:1 on \
+             two meshes, and stalling at a contraction of 0.95 to 1.00 at 10:1 \
+             on every mesh. The block-coupled solve of SPEC-LIT §109 (Cardiff, \
+             Tuković, Jasak & Ivanković 2016, DOI \
+             10.1016/j.compstruc.2016.07.004; mechanics.solver.coupled: true) \
+             is built, and Gate 95-A holds for it at 2.5:1 only - it misses at \
+             5:1 and 10:1 (SPEC-LIT §109.7) - so this edge is not lifted by it"
         )));
     }
     Ok(())

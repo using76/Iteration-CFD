@@ -72,7 +72,8 @@
       buoyant flows", J. Res. NBS 83 (1978) 297 - the low-Mach split whose
       divergence constraint (S25.1) the vapour's volume enters
     The FDS Technical Reference Guide (NIST SP 1018-1, US-government public
-      domain, vendored at reference/fds), "The Divergence" - the same
+      domain, read in a local reference/fds clone that
+      this repository does not carry), "The Divergence" - the same
       D_SOURCE term, of which the constant-molar-mass gas of S25 keeps
       mdot/rho and nothing else
     ASHRAE Handbook - Fundamentals (2017), ch. 1 - the adiabatic-saturation

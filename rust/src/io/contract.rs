@@ -99,6 +99,9 @@ pub const PERMISSIVE_USAGE: &str =
 ///   source.
 /// * `fallback_name` says what `-permissive` substitutes, in words. It is
 ///   printed, so it has to be the truth.
+///
+/// The strict-mode error is `Error::Refused` - its own variant, so a driver
+/// can map a refusal to its own exit code without reading the message.
 pub fn unsupported<T>(
     setting: &str,
     value: &str,
@@ -113,7 +116,7 @@ pub fn unsupported<T>(
     };
 
     if !permissive() {
-        return Err(Error::Config(format!(
+        return Err(Error::Refused(format!(
             "{setting}: \"{value}\" is not supported by ofgpu{menu}\n  \
              (run with -permissive to substitute {fallback_name} and continue)"
         )));
@@ -148,7 +151,7 @@ pub fn unsupported_note<T>(
     };
 
     if !permissive() {
-        return Err(Error::Config(format!(
+        return Err(Error::Refused(format!(
             "{setting}: \"{value}\" is not supported by ofgpu{menu}
                note: {note}
                (run with -permissive to substitute {fallback_name} and continue)"
@@ -277,5 +280,26 @@ mod tests {
         set_permissive(false);
         let e = unreadable("nu", "banana", "a number", 1e-5f64).unwrap_err();
         assert!(e.to_string().contains("banana"));
+    }
+
+    #[test]
+    fn a_refusal_is_its_own_variant() {
+        let _g = permissive_test_guard();
+        set_permissive(false);
+
+        assert!(matches!(
+            unsupported("x", "y", &["z"], "w", 0).unwrap_err(),
+            Error::Refused(_)
+        ));
+        assert!(matches!(
+            unsupported_note("x", "y", &[], "note", "fb", ()).unwrap_err(),
+            Error::Refused(_)
+        ));
+        // A parse failure is not a refusal - it stays `Config`, so §31.4's
+        // exit-code mapping sends only refused-by-name settings to code 3.
+        assert!(matches!(
+            unreadable("x", "y", "a number", 0).unwrap_err(),
+            Error::Config(_)
+        ));
     }
 }

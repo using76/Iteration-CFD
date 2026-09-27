@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::blockgen::{self, BlockSpec, GradedAxis};
 use crate::cht::flow::{
-    Buoyancy, FlowCase, FlowControls, FlowRegion, FluidMaterial, Openings,
+    Buoyancy, FlowCase, FlowControls, FlowRadiation, FlowRegion, FluidMaterial, Openings,
 };
 use crate::cht::{
     Conductivity, InterfaceRequest, PairingTolerances, RegionKind, SolidMaterial,
@@ -79,6 +79,9 @@ use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis, JsonOutput}
 use crate::io::output_plan::{OutputFormat, OutputPlan};
 use crate::io::polymesh::{build_host_mesh, read_poly_mesh, PolyMeshRaw};
 use crate::mesh::{HostMesh, PatchKind};
+use crate::properties::{Piece, Property};
+use crate::cht::volumetric::{LoweredSource, SourceLaw, TimeTable};
+use crate::sources::CellSelector;
 use crate::solid::{BondTreatment, Material, NotBuilt};
 use crate::{Label, Scalar, Vec3};
 
@@ -97,6 +100,19 @@ pub struct ChtCase {
     /// (SPEC-LIT §47.4), so it is the case's own decision and not this
     /// reader's.
     pub regions: Vec<ChtRegion>,
+    /// R8: the region LAYOUT the case composes from - `mesh/regions.json`,
+    /// one polyMesh per region (SPEC-LIT §97). The path is RELATIVE TO THE
+    /// CASE FILE'S DIRECTORY, resolved through the same rules a region's
+    /// own `polyMesh` path follows. `None` is every case written before §97,
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<ChtMeshManifest>,
+    /// SPEC-LIT §98.7: the directory, RELATIVE TO THE CASE FILE'S DIRECTORY,
+    /// whose `constant/radiationProperties` §51.1 reads - the enclosure a
+    /// conjugate case radiates in. A path and not a block: SPEC-LIT 51.1 keeps
+    /// one place for those entries. `None` is every case written before §98.7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radiation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<ChtInterface>,
     /// SPEC-LIT §9's face body force. **Required by a fluid region and
@@ -137,7 +153,12 @@ pub struct ChtRegion {
     /// can be at most one (§47.4's numbering invariant).
     #[serde(default = "solid_kind")]
     pub kind: String,
-    pub mesh: ChtRegionMesh,
+    /// One region's mesh: an axis-aligned block this reader builds, or a
+    /// polyMesh (or a single-volume `.msh`) read from disk - SPEC-LIT §97.1.
+    /// `None` is legal exactly when the case names a `mesh.regions` manifest
+    /// that lists this region (R8): the manifest's own mesh is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<ChtRegionMesh>,
     /// A **solid** region's material - SPEC-LIT §46.5. Required on a solid
     /// region and refused on a fluid one, which carries [`Self::fluid`]
     /// instead.
@@ -153,10 +174,15 @@ pub struct ChtRegion {
     /// `run` - in both directions (row 14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mechanics: Option<ChtMechanics>,
-    /// Uniform volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1). The
-    /// die's own dissipation, in the case this format exists for.
+    /// Volumetric heat source `q'''`, W/m^3 - SPEC-LIT (S46.1): the die's
+    /// own dissipation, in the case this format exists for. A number, a
+    /// curve in `T`, or a table in `t` (SPEC-LIT §100.11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<f64>,
+    pub source: Option<ChtSource>,
+    /// SPEC-LIT §100.11: boxes whose sources ADD on the cells of this region
+    /// whose centroids they hold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_boxes: Vec<ChtSourceBox>,
     /// One rule per patch. Every patch must appear here or in an
     /// `interfaces` entry; see the module doc.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -207,6 +233,16 @@ pub struct ChtPolyMeshRef {
     pub poly_mesh: String,
 }
 
+/// R8's `mesh.regions` - the region LAYOUT a case composes from (SPEC-LIT
+/// §97): one polyMesh per region and the conformal interface patch pairs,
+/// written by `ofgpu-regions split`. One key, and the path is RELATIVE TO
+/// THE CASE FILE'S DIRECTORY exactly as a region's own `polyMesh` path is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtMeshManifest {
+    pub regions: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChtBoundaries {
@@ -232,12 +268,16 @@ impl ChtBoundaries {
 pub struct ChtMaterial {
     /// `rho_s`, kg/m^3.
     pub rho: f64,
-    /// `c_s`, J/(kg K).
-    pub c: f64,
+    /// `c_s`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).
+    pub c: ChtScalarOrCurve,
     /// `k_s`: one number for an isotropic material, three for `diag(kx,ky,kz)`
     /// in the MESH axes. Nine is a §13.4 error naming the two that are
     /// implemented - SPEC-LIT §46.4.
     pub kappa: ChtKappa,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A fluid region's constant properties - SPEC-LIT §60.2.
@@ -245,18 +285,23 @@ pub struct ChtMaterial {
 /// Four numbers, and `Pr = mu cp/kappa` is DERIVED from them and printed
 /// rather than stated: a case that stated both could contradict itself, and
 /// the reader would have to pick a winner.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChtFluid {
     /// `rho_f` at `buoyancy.TRef`, kg/m^3.
     pub rho: f64,
-    /// `c_p`, J/(kg K).
-    pub cp: f64,
+    /// `c_p`, J/(kg K). A number or a curve in T (SPEC-LIT §100.2).
+    pub cp: ChtScalarOrCurve,
     /// `k_f`, W/(m K). A **scalar**: an anisotropic fluid conductivity is not
     /// a thing, and three or nine components are a §13.4 error.
-    pub kappa: f64,
-    /// Dynamic viscosity, Pa s.
-    pub mu: f64,
+    /// A number or a curve in T (SPEC-LIT §100.2).
+    pub kappa: ChtScalarOrCurve,
+    /// Dynamic viscosity, Pa s. A number or a curve in T (SPEC-LIT §100.2).
+    pub mu: ChtScalarOrCurve,
+    /// SPEC-LIT §100.13: register viscous dissipation as a heat source of
+    /// the fluid. Absent or `false`: no term, the bits as before.
+    #[serde(default, rename = "viscousDissipation", skip_serializing_if = "is_false")]
+    pub viscous_dissipation: bool,
 }
 
 /// `kappa` written either way. A user with an isotropic material should not
@@ -267,6 +312,8 @@ pub struct ChtFluid {
 pub enum ChtKappa {
     Isotropic(f64),
     Components(Vec<f64>),
+    /// A curve in T (SPEC-LIT §100.2) - isotropic.
+    Curve(ChtCurve),
 }
 
 impl ChtKappa {
@@ -274,6 +321,149 @@ impl ChtKappa {
         match self {
             Self::Isotropic(k) => vec![*k as Scalar],
             Self::Components(v) => v.iter().map(|x| *x as Scalar).collect(),
+            Self::Curve(_) => Vec::new(),
+        }
+    }
+}
+
+/// A property entry written as a number or as a curve in `T` - SPEC-LIT
+/// §100.2. Untagged with the number FIRST, so every document written before
+/// §100 deserialises exactly as it did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChtScalarOrCurve {
+    Number(f64),
+    Curve(ChtCurve),
+}
+
+impl ChtScalarOrCurve {
+    /// §100.2: the number as `Property::Constant`, or the curve lowered and
+    /// validated under `path`.
+    pub fn lower(&self, path: &str) -> Result<Property> {
+        match self {
+            Self::Number(x) => Ok(Property::Constant(*x as Scalar)),
+            Self::Curve(c) => c.lower(path),
+        }
+    }
+}
+
+/// A volumetric source written three ways - SPEC-LIT §100.11. Untagged with
+/// the number FIRST, so every document written before §100.11 deserialises
+/// exactly as it did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChtSource {
+    /// W/m^3.
+    Number(f64),
+    /// `q'''(T)`: any of §100.1's three curve forms.
+    Curve(ChtCurve),
+    /// `q'''(t)`: `{ "time": [[t, q], ...] }`.
+    Time(ChtTimeTable),
+}
+
+/// (S100.11) as a case writes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtTimeTable {
+    /// `[[t, q'''], ...]`, `t` in s and strictly increasing from `t >= 0`,
+    /// `q'''` in W/m^3.
+    pub time: Vec<[f64; 2]>,
+}
+
+/// One entry of a region's `sourceBoxes` - SPEC-LIT §100.11.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtSourceBox {
+    /// The closed box the covered cells' centroids fall in - §18's test.
+    pub bounds: JsonBounds,
+    pub source: ChtSource,
+}
+
+/// §100.1's three curve forms, one key each: `{ "table": .. }`,
+/// `{ "polynomial": .. }`, `{ "sutherland": .. }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ChtCurve {
+    /// (S100.2): `[[T, value], ...]`, `T` in K and strictly increasing.
+    Table(Vec<[f64; 2]>),
+    /// (S100.3).
+    Polynomial(ChtPolynomial),
+    /// (S100.4).
+    Sutherland(ChtSutherland),
+}
+
+/// (S100.3) as a case writes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtPolynomial {
+    /// The exponents `e_j`, one per coefficient of every piece.
+    pub exponents: Vec<f64>,
+    /// The pieces, contiguous and ascending in `T`.
+    pub pieces: Vec<ChtPolynomialPiece>,
+    /// `T_s`, K. Default 1.
+    #[serde(default = "one_f64")]
+    pub scale: f64,
+    /// `F`. Default 1.
+    #[serde(default = "one_f64")]
+    pub factor: f64,
+}
+
+fn one_f64() -> f64 {
+    1.0
+}
+
+/// One piece of (S100.3): its closed range in K and one coefficient per
+/// exponent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtPolynomialPiece {
+    pub range: [f64; 2],
+    pub coefficients: Vec<f64>,
+}
+
+/// (S100.4) as a case writes it: `value` is the property at `TRef`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtSutherland {
+    pub value: f64,
+    #[serde(rename = "TRef")]
+    pub t_ref: f64,
+    #[serde(rename = "S")]
+    pub s: f64,
+    pub range: [f64; 2],
+}
+
+impl ChtCurve {
+    /// §100.1: the curve as a validated [`Property`], every refusal naming
+    /// `path`.
+    pub fn lower(&self, path: &str) -> Result<Property> {
+        match self {
+            Self::Table(k) => {
+                let knots: Vec<(Scalar, Scalar)> =
+                    k.iter().map(|p| (p[0] as Scalar, p[1] as Scalar)).collect();
+                Property::table(path, &knots)
+            }
+            Self::Polynomial(p) => {
+                let e: Vec<Scalar> = p.exponents.iter().map(|x| *x as Scalar).collect();
+                let pieces: Vec<Piece> = p
+                    .pieces
+                    .iter()
+                    .map(|q| Piece {
+                        lo: q.range[0] as Scalar,
+                        hi: q.range[1] as Scalar,
+                        coefficients: q.coefficients.iter().map(|c| *c as Scalar).collect(),
+                    })
+                    .collect();
+                Property::polynomial(path, &e, &pieces, p.scale as Scalar, p.factor as Scalar)
+            }
+            Self::Sutherland(s) => Property::sutherland(
+                path,
+                s.value as Scalar,
+                s.t_ref as Scalar,
+                s.s as Scalar,
+                s.range[0] as Scalar,
+                s.range[1] as Scalar,
+            ),
         }
     }
 }
@@ -338,6 +528,48 @@ pub enum ChtScalarBc {
         #[serde(rename = "inletValue")]
         inlet_value: f64,
     },
+    /// SPEC-LIT §98.1: the face loses heat at a film coefficient `h`,
+    /// W/(m^2 K), to an ambient at `TInf`, K, that nobody meshed -
+    /// `-k dT/dn = h (T_b - TInf)`. A wall condition, on a solid or a fluid
+    /// region.
+    #[serde(rename = "externalConvection")]
+    ExternalConvection {
+        h: ChtFilmCoefficient,
+        #[serde(rename = "TInf")]
+        t_inf: f64,
+    },
+    /// SPEC-LIT §98.1: grey radiation at `emissivity`, in (0, 1], to a
+    /// surround at `TEnv`, K, large enough that its temperature does not
+    /// move - `-k dT/dn = eps sigma (T_b^4 - TEnv^4)`.
+    #[serde(rename = "externalRadiation")]
+    ExternalRadiation {
+        emissivity: f64,
+        #[serde(rename = "TEnv")]
+        t_env: f64,
+    },
+    /// SPEC-LIT §98.1: both on one face, summed - the `h_total` a datasheet
+    /// quotes (S98.4).
+    #[serde(rename = "externalConvectionRadiation")]
+    ExternalConvectionRadiation {
+        h: ChtFilmCoefficient,
+        #[serde(rename = "TInf")]
+        t_inf: f64,
+        emissivity: f64,
+        #[serde(rename = "TEnv")]
+        t_env: f64,
+    },
+    /// SPEC-LIT §98.7: a wall of the FLUID region that radiates in the
+    /// enclosure the case's `radiation` names - §50.8's grey diffuse wall.
+    /// `emissivity`, in (0, 1], defaults to `radiationProperties`' own; `q` is
+    /// §50.3's external flux, W/m^2, delivered to the face from outside
+    /// (default zero: an adiabatic, re-radiating wall).
+    #[serde(rename = "s2sWall")]
+    S2sWall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emissivity: Option<f64>,
+        #[serde(default)]
+        q: f64,
+    },
     /// The 2-D front/back plane: the patch contributes to no surface integral
     /// at all.
     ///
@@ -350,6 +582,46 @@ pub enum ChtScalarBc {
     /// naming the axis.
     #[serde(rename = "empty")]
     Empty,
+}
+
+impl ChtScalarBc {
+    /// One of §98's three words - a wall condition, legal on no opening.
+    fn is_external(&self) -> bool {
+        matches!(
+            self,
+            Self::ExternalConvection { .. }
+                | Self::ExternalRadiation { .. }
+                | Self::ExternalConvectionRadiation { .. }
+        )
+    }
+}
+
+/// SPEC-LIT §98.1's `h`: a number, W/(m^2 K), or §98.4's correlation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ChtFilmCoefficient {
+    Value(f64),
+    Correlation(ChtCorrelation),
+}
+
+/// SPEC-LIT §98.4: Churchill & Chu's vertical-plate correlation (S98.6),
+/// evaluated ONCE at lowering from the Rayleigh number stated here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChtCorrelation {
+    /// `"churchillChu"`, the one that exists.
+    pub correlation: String,
+    /// The Rayleigh number on `L`, in `[1e-1, 1e12]`.
+    #[serde(rename = "Ra")]
+    pub ra: f64,
+    /// The ambient fluid's Prandtl number.
+    #[serde(rename = "Pr")]
+    pub pr: f64,
+    /// The ambient fluid's conductivity, W/(m K).
+    pub kappa: f64,
+    /// The plate's height, m.
+    #[serde(rename = "L")]
+    pub l: f64,
 }
 
 /// One conformal interface between two regions - SPEC-LIT §47.4/§47.5.
@@ -373,6 +645,12 @@ pub struct ChtInterface {
     pub thickness_layers: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kappa_layers: Option<Vec<f64>>,
+    /// SPEC-LIT §98.7: the interface radiates in the enclosure `radiation`
+    /// names, from its fluid side, at this grey emissivity in (0, 1] - through
+    /// §98.8's cell source, never through the interface's triple. Absent: it
+    /// does not radiate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emissivity: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -422,7 +700,7 @@ pub struct ChtNumerics {
     /// `PCG` (the default - a pure conduction matrix is symmetric, including
     /// its coupled interface entries, SPEC-LIT §47.2) or `PBiCGStab`.
     pub solver: String,
-    /// `DIC`, `DILU` or `diagonal`.
+    /// `DIC`, `DILU`, `diagonal` or `none`.
     pub preconditioner: String,
     pub tolerance: f64,
     pub max_iter: u32,
@@ -434,6 +712,25 @@ pub struct ChtNumerics {
     /// refused without one**, for the same §13.4.1 reason as `buoyancy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<ChtFlow>,
+    /// SPEC-LIT §100.7: the conduction path's outer loop. Refused on a case
+    /// with a fluid region, and on one with nothing nonlinear in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer: Option<ChtOuter>,
+}
+
+/// SPEC-LIT §100.7's `numerics.outer` block: the conduction path's outer
+/// loop. Both entries optional; absent, the loop runs §98.3's criterion
+/// and cap, so a case that states nothing runs as it did.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChtOuter {
+    /// (S100.7)'s `epsilon`: a step stops when `max|T - T_prev| <= epsilon
+    /// max|T|`. In `(0, 1)`. Absent: `1e-10` (`1e-4` in the f32 build).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<f64>,
+    /// The most passes one step may take before it is refused. Absent: 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_outer: Option<u32>,
 }
 
 /// SPEC-LIT §60.1's `numerics.flow` block - the SIMPLE loop's own settings.
@@ -491,6 +788,7 @@ impl Default for ChtNumerics {
             max_iter: 2000,
             n_non_orthogonal_correctors: 0,
             flow: None,
+            outer: None,
         }
     }
 }
@@ -535,13 +833,14 @@ pub struct ChtMechanics {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChtElastic {
-    /// Young's modulus `E`, Pa.
+    /// Young's modulus `E`, Pa. A number or a curve in T (SPEC-LIT §100.2).
     #[serde(rename = "E")]
-    pub e: f64,
+    pub e: ChtScalarOrCurve,
     /// Poisson's ratio, in (-1, 0.5) and at most the measured edge 0.45.
     pub nu: f64,
     /// Linear thermal expansion coefficient `alpha`, 1/K.
-    pub alpha: f64,
+    /// A number or a curve in T (SPEC-LIT §100.2).
+    pub alpha: ChtScalarOrCurve,
     /// The stress-free temperature, K: the thermal strain is
     /// `alpha (T - TRef)`, so `alpha > 0` without it is refused (§96.3
     /// row 3), and it without `alpha` is a reference nothing reads (row 4).
@@ -625,6 +924,12 @@ pub struct ChtSolidSolver {
     /// The outer loop's iteration cap. Default `500`.
     #[serde(default = "default_solid_max_outer")]
     pub max_outer: u32,
+    /// `false` (the default) runs §95.3's segregated outer loop; `true` runs
+    /// the block-coupled solve of §109 - the three displacement components in
+    /// one matrix, PBiCGStab with block-DILU, inside the same outer loop and
+    /// its controls (§109.8). Only with a single `material` (§96.3 row 22).
+    #[serde(default)]
+    pub coupled: bool,
     /// ALWAYS refused (§96.3 row 7): the outer loop is Aitken delta-squared
     /// on the increment and its first omega is 1 - a static relaxation
     /// factor is not offered.
@@ -641,6 +946,7 @@ impl Default for ChtSolidSolver {
         Self {
             tolerance: default_solid_tolerance(),
             max_outer: default_solid_max_outer(),
+            coupled: false,
             relaxation: None,
             ddt_scheme: None,
         }
@@ -685,6 +991,14 @@ pub enum LoweredBc {
     /// rewritten from the sign of the face flux every outer iteration by
     /// `field_ops::update_inlet_outlet`.
     InletOutlet(Scalar),
+    /// SPEC-LIT §98.2: the external loss, whose triple (S98.3) is written
+    /// from the face's own `C_b` - once on a face that only convects,
+    /// re-linearised every Newton pass (§98.3) on one that radiates.
+    External(crate::cht::ambient::ExternalLoss),
+    /// SPEC-LIT §98.7: a wall of the enclosure, at its resolved emissivity and
+    /// external flux `q`, W/m^2. Its triple is (S50.12), rewritten by
+    /// `S2s::update` every SIMPLE iteration (§98.8).
+    S2sWall { emissivity: Scalar, q: Scalar },
 }
 
 impl LoweredBc {
@@ -694,8 +1008,62 @@ impl LoweredBc {
             Self::ZeroGradient => BcKind::ZeroGradient,
             Self::FixedFlux(_) => BcKind::FixedFluxTemperature,
             Self::InletOutlet(_) => BcKind::InletOutlet,
+            Self::External(_) => BcKind::Mixed,
+            Self::S2sWall { .. } => BcKind::S2sWall,
         }
     }
+}
+
+/// SPEC-LIT §98.7: the enclosure a conjugate case radiates in, resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredRadiation {
+    /// `radiation`, as the case wrote it.
+    pub dir: String,
+    /// §51.1's dictionary, read from `<dir>/constant/radiationProperties`.
+    pub config: crate::s2s::S2sConfig,
+    /// `(index into interfaces, emissivity)`, one per radiating interface.
+    pub interfaces: Vec<(usize, Scalar)>,
+}
+
+/// SPEC-LIT §100.6: the conduction curves one solid region wrote - `None`
+/// where it wrote a number - and the region's JSON path
+/// (`regions/<name>/material`), which every refusal names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConductionCurves {
+    pub kappa: Option<Property>,
+    pub c: Option<Property>,
+    pub path: String,
+}
+
+/// SPEC-LIT §100.7: the outer loop's criterion and cap, resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OuterControls {
+    /// (S100.7)'s `epsilon`.
+    pub tolerance: Scalar,
+    /// Passes per step before the refusal.
+    pub max_outer: usize,
+    /// `true` when the case wrote `numerics.outer`.
+    pub stated: bool,
+}
+
+impl Default for OuterControls {
+    /// §98.3's two numbers.
+    fn default() -> Self {
+        Self {
+            tolerance: crate::cht::ambient::NEWTON_RTOL,
+            max_outer: crate::cht::ambient::NEWTON_MAX_PASSES,
+            stated: false,
+        }
+    }
+}
+
+/// SPEC-LIT §100.3: the curves one elastic zone wrote - `None` where it
+/// wrote a number - and the zone's JSON path an evaluation's refusal names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElasticCurves {
+    pub e: Option<Property>,
+    pub alpha: Option<Property>,
+    pub path: String,
 }
 
 /// SPEC-LIT §96.2: one elastic zone of a region's `mechanics` block,
@@ -709,6 +1077,10 @@ pub struct LoweredElasticZone {
     /// The zone's `TRef`, K - present because §96.3 row 3 required it
     /// whenever `alpha > 0`.
     pub t_ref: Scalar,
+    /// §100.3: `E(T)`/`alpha(T)` if the case wrote curves; `material`
+    /// then holds their values at the lower end of each range, a placeholder
+    /// `crate::solid::case::run_stress` replaces.
+    pub curves: ElasticCurves,
 }
 
 /// A mechanical patch condition, resolved onto §95's per-component
@@ -737,6 +1109,8 @@ pub struct SolidOuterControls {
     pub tolerance: Scalar,
     /// The outer loop's iteration cap.
     pub max_outer: usize,
+    /// `true`: the block-coupled solve (§109.8).
+    pub coupled: bool,
 }
 
 /// A region's `mechanics` block, everything resolved - what
@@ -786,6 +1160,10 @@ pub struct LoweredChtCase {
     /// - SPEC-LIT (S59.3) masks every coefficient it produces on a fluid face
     /// away, because a fluid face carries the LIVE `k_eff`.
     pub materials: Vec<SolidMaterial>,
+    /// `[n_regions]` SPEC-LIT §100.6: `Some` exactly on a solid region that
+    /// wrote a curve for `kappa` or `c`; `materials` then holds the curves'
+    /// values at `initial_t`, the placeholder the first pass solves with.
+    pub conduction_curves: Vec<Option<ConductionCurves>>,
     /// `[n_regions]`, `Some` exactly on the fluid region - SPEC-LIT §60.2.
     pub fluids: Vec<Option<FluidMaterial>>,
     /// SPEC-LIT §9's body force. `Some` exactly when there is a fluid region.
@@ -797,16 +1175,34 @@ pub struct LoweredChtCase {
     pub openings: Option<Openings>,
     /// `[n_regions]` uniform volumetric source, W/m^3.
     pub sources: Vec<Scalar>,
+    /// SPEC-LIT §100.11: every source that is not a region's number - a
+    /// curve in `T`, a table in `t`, a box - in case order. Empty on every
+    /// case written before §100.11.
+    pub volumetric: Vec<LoweredSource>,
+    /// SPEC-LIT §100.14: the fluid's `mu` curve and its JSON path; `None` is
+    /// the number `FluidMaterial::mu` carries.
+    pub viscosity: Option<(Property, String)>,
+    /// SPEC-LIT §100.13: register viscous dissipation on the fluid.
+    pub viscous_dissipation: bool,
+    /// R8's notes, one per region the manifest ALSO lists but the case gives
+    /// its own `mesh` to: the explicit form wins and the conflict is printed
+    /// by `ofgpu-cht` (`  note: ...`), never silently swallowed (SPEC-LIT
+    /// §97).
+    pub notes: Vec<String>,
     pub interfaces: Vec<InterfaceRequest>,
     /// `(region, patch name, condition)`, one per patch that is not an
     /// interface.
     pub patch_bcs: Vec<(usize, String, LoweredBc)>,
+    /// SPEC-LIT §98.7: `Some` exactly when the case names an enclosure.
+    pub radiation: Option<LoweredRadiation>,
     pub initial_t: Scalar,
     pub steady: bool,
     pub end_time: Scalar,
     pub delta_t: Scalar,
     pub solver: SolverControls,
     pub n_non_orthogonal_correctors: usize,
+    /// SPEC-LIT §100.7: the conduction path's outer loop.
+    pub outer: OuterControls,
     pub tolerances: PairingTolerances,
 }
 
@@ -854,6 +1250,15 @@ impl LoweredChtCase {
             t_solver: self.solver,
             n_non_orthogonal_correctors: self.n_non_orthogonal_correctors,
             tolerances: self.tolerances,
+            conduction_curves: self.conduction_curves.clone(),
+            volumetric: self.volumetric.clone(),
+            viscosity: self.viscosity.clone(),
+            viscous_dissipation: self.viscous_dissipation,
+            radiation: self.radiation.as_ref().map(|r| FlowRadiation {
+                config: r.config,
+                interfaces: r.interfaces.clone(),
+                raw: &self.raw,
+            }),
             p0: AMBIENT_PRESSURE,
         })
     }
@@ -905,8 +1310,13 @@ impl ChtCase {
         let mut meshes = Vec::new();
         let mut raws = Vec::new();
         let mut materials = Vec::new();
+        let mut conduction_curves: Vec<Option<ConductionCurves>> = Vec::new();
+        let t0 = self.initial.t as Scalar;
         let mut fluids: Vec<Option<FluidMaterial>> = Vec::new();
         let mut sources = Vec::new();
+        let mut volumetric: Vec<LoweredSource> = Vec::new();
+        let mut viscosity: Option<(Property, String)> = None;
+        let mut viscous_dissipation = false;
         // Which patches of which region have been spoken for, and by what.
         let mut claimed: Vec<BTreeMap<String, &'static str>> = Vec::new();
         // §97.2: each region's own patch names, as the BUILT mesh spells
@@ -916,6 +1326,25 @@ impl ChtCase {
         // SPEC-LIT §96.2: one lowered `mechanics` per region, `None` when
         // the region says nothing.
         let mut mechanics: Vec<Option<LoweredMechanics>> = Vec::new();
+        // R8's notes - one per region the manifest also lists but the case
+        // gives its own `mesh` to. `ofgpu-cht` prints them; nothing swallows
+        // them.
+        let mut notes: Vec<String> = Vec::new();
+        // R8: the layout the case composes from, loaded BEFORE the region
+        // loop so every region can look its manifest entry up by name. The
+        // manifest path resolves through the SAME four checks a region's own
+        // `polyMesh` path follows - there is no second mechanism.
+        let layout = match &self.mesh {
+            Some(m) => {
+                let path = resolve_case_path("mesh/regions", case_dir, &m.regions)?;
+                Some(crate::io::regions::load(&path)?)
+            }
+            None => None,
+        };
+        let by_name: BTreeMap<&str, &crate::io::regions::LoadedRegion> = match &layout {
+            Some(l) => l.regions.iter().map(|r| (r.name.as_str(), r)).collect(),
+            None => BTreeMap::new(),
+        };
 
         for (i, r) in self.regions.iter().enumerate() {
             let kind = match r.kind.as_str() {
@@ -1013,8 +1442,67 @@ impl ChtCase {
                     }
                 }
             }
-            let (mesh, rmesh) =
-                build_region_mesh(r, kind, &empties, &flow_patches, case_dir)?;
+            // R8, the four (mesh, manifest) combinations. The case's own
+            // `mesh` wins over the manifest's, and the conflict is a printed
+            // `note`, not a silence; a region with neither is refused by
+            // name.
+            let (mesh, rmesh) = match (&r.mesh, by_name.get(r.name.as_str())) {
+                (Some(_), manifest) => {
+                    let out =
+                        build_region_mesh(r, kind, &empties, &flow_patches, case_dir)?;
+                    if manifest.is_some() {
+                        notes.push(format!(
+                            "regions/{}: the case gives `mesh` and {} also \
+                             lists the region; the case's mesh is used (R8: \
+                             the explicit form wins)",
+                            r.name,
+                            self.mesh
+                                .as_ref()
+                                .map(|m| m.regions.as_str())
+                                .unwrap_or_default()
+                        ));
+                    }
+                    out
+                }
+                (None, Some(l)) => {
+                    let lkind = match l.kind {
+                        RegionKind::Fluid => "fluid",
+                        RegionKind::Solid => "solid",
+                    };
+                    if lkind != r.kind {
+                        return Err(Error::Config(format!(
+                            "regions/{}/kind: the case says '{}' and the \
+                             manifest {} says '{}' - the two name the \
+                             region's physics, and they must agree",
+                            r.name,
+                            r.kind,
+                            self.mesh
+                                .as_ref()
+                                .map(|m| m.regions.as_str())
+                                .unwrap_or_default(),
+                            lkind
+                        )));
+                    }
+                    check_imported_patches(&r.name, kind, &l.raw, &empties, &flow_patches)?;
+                    (l.mesh.clone(), l.raw.clone())
+                }
+                (None, None) => {
+                    return Err(match &self.mesh {
+                        Some(m) => Error::Config(format!(
+                            "regions/{}: neither a `mesh` nor an entry in {} - \
+                             a region the case composes from a layout still \
+                             needs its own `mesh`, unless the manifest names \
+                             it (R8)",
+                            r.name, m.regions
+                        )),
+                        None => Error::Config(format!(
+                            "regions/{}/mesh: required when the case has no \
+                             `mesh.regions` manifest",
+                            r.name
+                        )),
+                    });
+                }
+            };
 
             // SPEC-LIT §97.2: for an IMPORTED region the patch list lives on
             // disk, not in the document - so the `seen` set, and every
@@ -1034,27 +1522,101 @@ impl ChtCase {
             // are measured on.
             let mech = lower_mechanics(i, r, &mesh, &empties, &patch_names)?;
 
-            let (mat, fluid) = match (kind, &r.material, &r.fluid) {
+            let (mat, fluid, curves) = match (kind, &r.material, &r.fluid) {
                 (RegionKind::Solid, Some(m), None) => {
-                    let mat = SolidMaterial {
-                        name: r.name.clone(),
-                        rho: m.rho as Scalar,
-                        c: m.c as Scalar,
-                        k: Conductivity::parse(
-                            &m.kappa.values(),
-                            &format!("regions/{}/material/kappa", r.name),
-                        )?,
+                    // SPEC-LIT §100.6: a number is the constant it always was;
+                    // a curve is lowered, every sample must be positive, and
+                    // the material holds its value at the initial T.
+                    let base = format!("regions/{}/material", r.name);
+                    let kappa_path = format!("{base}/kappa");
+                    let (k, kappa_curve) = match &m.kappa {
+                        ChtKappa::Curve(cv) => {
+                            let p = cv.lower(&kappa_path)?;
+                            let v = p.value(&kappa_path, t0)?;
+                            (Conductivity::Isotropic(v), Some(p))
+                        }
+                        _ => (
+                            Conductivity::parse(
+                                &m.kappa.values(),
+                                &format!("regions/{}/material/kappa", r.name),
+                            )?,
+                            None,
+                        ),
                     };
+                    let c_path = format!("{base}/c");
+                    let c_prop = m.c.lower(&c_path)?;
+                    let c = c_prop.value(&c_path, t0)?;
+                    let c_curve = (!c_prop.is_constant()).then_some(c_prop);
+                    for (p, s, what) in
+                        [(&kappa_curve, &kappa_path, "kappa"), (&c_curve, &c_path, "c")]
+                    {
+                        let Some(p) = p else { continue };
+                        for t in p.samples() {
+                            let v = p.value(s, t)?;
+                            if !(v > 0.0) || !v.is_finite() {
+                                return Err(Error::Config(format!(
+                                    "{s}: at T = {t} K the curve gives {what} = {v:e}, which \
+                                     is not positive (SPEC-LIT 100.6)"
+                                )));
+                            }
+                        }
+                    }
+                    let mat = SolidMaterial { name: r.name.clone(), rho: m.rho as Scalar, c, k };
                     mat.validate()?;
-                    (mat, None)
+                    let curves = (kappa_curve.is_some() || c_curve.is_some()).then(|| {
+                        ConductionCurves { kappa: kappa_curve, c: c_curve, path: base.clone() }
+                    });
+                    (mat, None, curves)
                 }
                 (RegionKind::Fluid, None, Some(f)) => {
+                    let base = format!("regions/{}/fluid", r.name);
+                    // SPEC-LIT §100.10: the fluid's kappa may be a curve; the
+                    // material then holds its value at the initial T.
+                    let kappa_path = format!("{base}/kappa");
+                    let kappa_prop = f.kappa.lower(&kappa_path)?;
+                    let kappa = kappa_prop.value(&kappa_path, t0)?;
+                    for t in kappa_prop.samples() {
+                        let v = kappa_prop.value(&kappa_path, t)?;
+                        if !(v > 0.0) || !v.is_finite() {
+                            return Err(Error::Config(format!(
+                                "{kappa_path}: at T = {t} K the curve gives kappa = {v:e}, which \
+                                 is not positive (SPEC-LIT 100.10)"
+                            )));
+                        }
+                    }
+                    let fluid_curves = (!kappa_prop.is_constant()).then(|| ConductionCurves {
+                        kappa: Some(kappa_prop.clone()),
+                        c: None,
+                        path: base.clone(),
+                    });
+                    // SPEC-LIT §100.14: the fluid's mu may be a curve; the
+                    // material then holds its value at the initial T.
+                    let mu_path = format!("{base}/mu");
+                    let mu_prop = f.mu.lower(&mu_path)?;
+                    let mu = mu_prop.value(&mu_path, t0)?;
+                    for t in mu_prop.samples() {
+                        let v = mu_prop.value(&mu_path, t)?;
+                        if !(v > 0.0) || !v.is_finite() {
+                            return Err(Error::Config(format!(
+                                "{mu_path}: at T = {t} K the curve gives mu = {v:e}, which is \
+                                 not positive (SPEC-LIT 100.14)"
+                            )));
+                        }
+                    }
+                    if !mu_prop.is_constant() {
+                        viscosity = Some((mu_prop.clone(), mu_path.clone()));
+                    }
+                    viscous_dissipation = f.viscous_dissipation;
                     let fl = FluidMaterial {
                         name: r.name.clone(),
                         rho: f.rho as Scalar,
-                        cp: f.cp as Scalar,
-                        kappa: f.kappa as Scalar,
-                        mu: f.mu as Scalar,
+                        cp: number_only(
+                            &f.cp,
+                            &format!("{base}/cp"),
+                            "the energy equation's rho cp is built from a constant",
+                        )?,
+                        kappa,
+                        mu,
                     };
                     fl.validate()?;
                     // The conduction entry a fluid region still needs; every
@@ -1066,7 +1628,7 @@ impl ChtCase {
                         c: fl.cp,
                         k: Conductivity::Isotropic(fl.kappa),
                     };
-                    (mat, Some(fl))
+                    (mat, Some(fl), fluid_curves)
                 }
                 (RegionKind::Solid, None, _) => {
                     return Err(Error::Config(format!(
@@ -1112,13 +1674,19 @@ impl ChtCase {
             // balance, a solid region's source reaches. Nothing is refused
             // here any more, and nothing is dropped either.
 
+            // SPEC-LIT §100.11: the region's `source` and its boxes, on the
+            // region's own mesh. `region_names.len()` is this region's index.
+            let (source_number, source_terms) =
+                lower_sources(r, region_names.len(), &mesh, t0, self.run.steady)?;
             region_names.push(r.name.clone());
             kinds.push(kind);
             meshes.push(mesh);
             raws.push(rmesh);
             materials.push(mat);
+            conduction_curves.push(curves);
             fluids.push(fluid);
-            sources.push(r.source.unwrap_or(0.0) as Scalar);
+            sources.push(source_number);
+            volumetric.extend(source_terms);
             claimed.push(seen);
             all_patch_names.push(patch_names);
             mechanics.push(mech);
@@ -1135,8 +1703,62 @@ impl ChtCase {
         }
         let has_fluid = kinds.iter().any(|k| *k == RegionKind::Fluid);
 
+        // SPEC-LIT §98.7 rows 11-13: the enclosure, read BEFORE the patch
+        // rules - an `s2sWall` that states no emissivity takes its dictionary's.
+        let enclosure: Option<(String, crate::s2s::S2sConfig)> = match &self.radiation {
+            None => None,
+            Some(p) => {
+                if !has_fluid {
+                    return Err(Error::Config(format!(
+                        "radiation = '{p}': an enclosure is the fluid volume of a conjugate \
+                         case, and no region has `\"kind\": \"fluid\"` (SPEC-LIT 98.7)"
+                    )));
+                }
+                if let Some(d) = case_dir {
+                    let base = if d.as_os_str().is_empty() { Path::new(".") } else { d };
+                    let joined = base.join(p);
+                    if !joined.exists() {
+                        return Err(Error::Config(format!(
+                            "radiation: '{}' does not exist (case directory '{}'). It is the \
+                             directory whose constant/radiationProperties the enclosure is \
+                             read from (SPEC-LIT 98.7)",
+                            joined.display(),
+                            base.display()
+                        )));
+                    }
+                }
+                let dir = resolve_case_path("radiation", case_dir, p)?;
+                let crate::radiation::RadiationConfig::S2s(cfg) =
+                    crate::radiation::RadiationConfig::from_case(&dir)?;
+                Some((p.clone(), cfg))
+            }
+        };
+        let s2s_eps: Option<Scalar> = enclosure.as_ref().map(|(_, c)| c.emissivity);
+
+        // R8: with a manifest, every region it lists must be IN the case -
+        // the manifest carries no `material` and no `patches` rule, and a
+        // region needs both, which is exactly why the case cannot silently
+        // drop one of the layout's regions.
+        if let Some(l) = &layout {
+            for lr in &l.regions {
+                if !index.contains_key(lr.name.as_str()) {
+                    return Err(Error::Config(format!(
+                        "the layout {} lists region '{}', which the case does \
+                         not declare - a region needs a `material` and \
+                         `patches`, which the manifest cannot carry (R8)",
+                        self.mesh
+                            .as_ref()
+                            .map(|m| m.regions.as_str())
+                            .unwrap_or_default(),
+                        lr.name
+                    )));
+                }
+            }
+        }
+
         // ---- interfaces --------------------------------------------------
         let mut interfaces = Vec::new();
+        let mut radiating_interfaces: Vec<(usize, Scalar)> = Vec::new();
         for (i, f) in self.interfaces.iter().enumerate() {
             let ra = *index.get(f.region_a.as_str()).ok_or_else(|| {
                 Error::Config(format!(
@@ -1205,6 +1827,32 @@ impl ChtCase {
             }
 
             interfaces.push(InterfaceRequest::new(ra, &f.patch_a, rb, &f.patch_b, r_c));
+
+            // SPEC-LIT §98.7 rows 15, 18 and 19: a radiating interface.
+            if let Some(e) = f.emissivity {
+                let at = format!("interfaces[{i}]/emissivity");
+                if enclosure.is_none() {
+                    return Err(Error::Config(format!(
+                        "{at}: a radiating interface radiates in the enclosure the case's \
+                         `radiation` names, and this case names none (SPEC-LIT 98.7)"
+                    )));
+                }
+                if kinds[ra] != RegionKind::Fluid && kinds[rb] != RegionKind::Fluid {
+                    return Err(Error::Config(format!(
+                        "{at}: neither '{}' nor '{}' is the fluid region, and the enclosure is \
+                         the fluid volume - there is no enclosure between two solids \
+                         (SPEC-LIT 98.7)",
+                        f.region_a, f.region_b
+                    )));
+                }
+                if !(e > 0.0 && e <= 1.0) {
+                    return Err(Error::Config(format!(
+                        "{at} = {e}: a grey emissivity lies in (0, 1]; leave the entry out on an \
+                         interface that does not radiate (SPEC-LIT 98.7)"
+                    )));
+                }
+                radiating_interfaces.push((interfaces.len() - 1, e as Scalar));
+            }
         }
 
         // ---- patch rules -------------------------------------------------
@@ -1284,6 +1932,23 @@ impl ChtCase {
                              it cannot also be an opening (SPEC-LIT 79.2)"
                         )))
                     }
+                    (ChtScalarBc::S2sWall { .. }, i, o) if i || o => {
+                        return Err(Error::Config(format!(
+                            "{path}/T: `s2sWall` is a WALL of the enclosure (SPEC-LIT 98.7) and \
+                             this patch is an `{}`. An `inlet` carries `fixedValue`; an `outlet` \
+                             carries `inletOutlet` or `zeroGradient`",
+                            rule.kind
+                        )))
+                    }
+                    (bc, i, o) if bc.is_external() && (i || o) => {
+                        return Err(Error::Config(format!(
+                            "{path}/T: an external heat-loss condition is a WALL condition - \
+                             the heat a wall loses to an ambient nobody meshed (SPEC-LIT \
+                             98.1) - and this patch is an `{}`. An `inlet` carries \
+                             `fixedValue`; an `outlet` carries `inletOutlet` or `zeroGradient`",
+                            rule.kind
+                        )))
+                    }
                     (ChtScalarBc::InletOutlet { .. }, _, true) => {}
                     (ChtScalarBc::InletOutlet { .. }, _, false) => {
                         return Err(Error::Config(format!(
@@ -1314,6 +1979,15 @@ impl ChtCase {
                     _ => {}
                 }
 
+                // SPEC-LIT §98.7 row 16: the enclosure is the fluid volume.
+                if matches!(rule.t, ChtScalarBc::S2sWall { .. }) && kinds[r] != RegionKind::Fluid {
+                    return Err(Error::Config(format!(
+                        "{path}/T: `s2sWall` on a solid region. The enclosure is the fluid volume \
+                         and its walls are the fluid region's; a solid's surface radiates into it \
+                         across an interface, with the interface's `emissivity` (SPEC-LIT 98.7)"
+                    )));
+                }
+
                 if is_inlet {
                     inlets.push((region.name.clone(), rule.match_.clone(), opening_u));
                 }
@@ -1321,7 +1995,93 @@ impl ChtCase {
                     outlets.push((region.name.clone(), rule.match_.clone()));
                 }
 
-                patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t)));
+                patch_bcs.push((r, rule.match_.clone(), lower_bc(&rule.t, &path, s2s_eps)?));
+            }
+        }
+
+        // ---- R8: the manifest's interfaces -------------------------------
+        //
+        // The case's own `interfaces[]` entries went in first and keep their
+        // `Rc`; a manifest interface is added only when no case entry already
+        // names the same unordered patch pair, and REFUSED when a case entry
+        // names one of its two patches with a different partner. The claim
+        // runs after the `patches` rules have claimed theirs, so a patch a
+        // rule already named is refused as claimed - the same refusal a case
+        // interface meets (R8: the explicit form wins, but a patch cannot
+        // have two partners).
+        if let Some(l) = &layout {
+            let manifest_named =
+                self.mesh.as_ref().map(|m| m.regions.as_str()).unwrap_or_default();
+            for mi in &l.interfaces {
+                let (na, nb) =
+                    (&l.manifest.regions[mi.region_a].name, &l.manifest.regions[mi.region_b].name);
+                let ra = *index.get(na.as_str()).ok_or_else(|| {
+                    Error::Config(format!(
+                        "the layout {manifest_named} pairs region '{na}', which \
+                         the case does not declare (R8)"
+                    ))
+                })?;
+                let rb = *index.get(nb.as_str()).ok_or_else(|| {
+                    Error::Config(format!(
+                        "the layout {manifest_named} pairs region '{nb}', which \
+                         the case does not declare (R8)"
+                    ))
+                })?;
+                let (pa, pb) = (&mi.patch_a, &mi.patch_b);
+                let same_pair = |q: &InterfaceRequest| {
+                    (q.region_a == ra && q.patch_a == *pa && q.region_b == rb && q.patch_b == *pb)
+                        || (q.region_a == rb && q.patch_a == *pb && q.region_b == ra && q.patch_b == *pa)
+                };
+                if interfaces.iter().any(same_pair) {
+                    continue; // the case's own entry - and its `Rc` - already cover it
+                }
+                let clash = interfaces.iter().find(|q| {
+                    let mine = [(ra, pa.as_str()), (rb, pb.as_str())];
+                    let theirs = [
+                        (q.region_a, q.patch_a.as_str()),
+                        (q.region_b, q.patch_b.as_str()),
+                    ];
+                    mine.iter().any(|m| theirs.iter().any(|t| t.0 == m.0 && t.1 == m.1))
+                        && !same_pair(q)
+                });
+                if let Some(q) = clash {
+                    return Err(Error::Config(format!(
+                        "interfaces: the case's pair ('{}' of '{}' <-> '{}' of \
+                         '{}') collides with the manifest {manifest_named}'s \
+                         pair ('{}' of '{}' <-> '{}' of '{}') - a patch cannot \
+                         have two partners (R8: the explicit form wins, and \
+                         this case entry names the manifest's patch, with a \
+                         different partner)",
+                        q.patch_a, region_names[q.region_a],
+                        q.patch_b, region_names[q.region_b],
+                        pa, na, pb, nb,
+                    )));
+                }
+                for (ri, patch) in [(ra, pa.as_str()), (rb, pb.as_str())] {
+                    match claimed[ri].get_mut(patch) {
+                        None => {
+                            return Err(Error::Config(format!(
+                                "the manifest's interface: region '{}' has no patch \
+                                 '{patch}'. It has: {}",
+                                region_names[ri],
+                                all_patch_names[ri].join(", ")
+                            )));
+                        }
+                        Some(slot) if *slot != "unnamed" => {
+                            return Err(Error::Config(format!(
+                                "the manifest's interface: patch '{patch}' of region \
+                                 '{}' is already claimed by a {slot}. A patch carries \
+                                 ONE condition (SPEC-LIT 47.6), so an interface face \
+                                 cannot also have a `patches` rule",
+                                region_names[ri]
+                            )));
+                        }
+                        Some(slot) => *slot = "interface",
+                    }
+                }
+                // r_c = 0: perfect contact (SPEC-LIT 47.2) - the manifest
+                // carries no resistance, and `Rc` is the case's own spelling.
+                interfaces.push(InterfaceRequest::new(ra, pa, rb, pb, 0.0));
             }
         }
 
@@ -1654,6 +2414,35 @@ impl ChtCase {
             None => None,
         };
 
+        // SPEC-LIT §98.7 row 14: an enclosure nothing radiates in.
+        let radiation = match enclosure {
+            None => None,
+            Some((dir, config)) => {
+                let walls = patch_bcs
+                    .iter()
+                    .filter(|(_, _, bc)| matches!(bc, LoweredBc::S2sWall { .. }))
+                    .count();
+                if walls == 0 && radiating_interfaces.is_empty() {
+                    return Err(Error::Config(format!(
+                        "radiation = '{dir}': the enclosure names nothing that radiates - no \
+                         `s2sWall` patch and no interface `emissivity`. An enclosure nothing \
+                         radiates in is a setting the solver would ignore (SPEC-LIT 13.4.1; \
+                         SPEC-LIT 98.7)"
+                    )));
+                }
+                Some(LoweredRadiation { dir, config, interfaces: radiating_interfaces })
+            }
+        };
+
+        let radiates = patch_bcs
+            .iter()
+            .any(|(_, _, bc)| matches!(bc, LoweredBc::External(l) if l.radiates()));
+        let curved = conduction_curves.iter().any(Option::is_some);
+        // SPEC-LIT §100.12: a source curve in T makes a conduction step nonlinear.
+        let source_curve = volumetric.iter().any(|s| matches!(s.law, SourceLaw::Temperature(_)));
+        let outer =
+            lower_outer(self.numerics.outer.as_ref(), has_fluid, curved || radiates || source_curve)?;
+
         Ok(LoweredChtCase {
             name: self.name.clone(),
             region_names,
@@ -1664,19 +2453,26 @@ impl ChtCase {
             stress,
             output,
             materials,
+            conduction_curves,
             fluids,
             buoyancy,
             flow,
             openings,
             sources,
+            volumetric,
+            viscosity,
+            viscous_dissipation,
+            notes,
             interfaces,
             patch_bcs,
+            radiation,
             initial_t: self.initial.t as Scalar,
             steady: self.run.steady,
             end_time,
             delta_t,
             solver,
             n_non_orthogonal_correctors: self.numerics.n_non_orthogonal_correctors as usize,
+            outer,
             tolerances: PairingTolerances::default(),
         })
     }
@@ -1728,20 +2524,22 @@ fn lower_mechanics(
     // `material` is one zone named after the region.
     let mut zones = Vec::new();
     if let Some(m) = &mech.material {
-        let (material, t_ref) = lower_elastic(m, &format!("{path}/material"))?;
+        let (material, t_ref, curves) = lower_elastic(m, &format!("{path}/material"))?;
         zones.push(LoweredElasticZone {
             name: r.name.clone(),
             material,
             t_ref,
+            curves,
         });
     } else if let Some(list) = &mech.materials {
         for z in list {
-            let (material, t_ref) =
+            let (material, t_ref, curves) =
                 lower_elastic(&z.material, &format!("{path}/materials/{}", z.name))?;
             zones.push(LoweredElasticZone {
                 name: z.name.clone(),
                 material,
                 t_ref,
+                curves,
             });
         }
     }
@@ -1901,9 +2699,19 @@ fn lower_mechanics(
              and its first omega is 1 (SPEC-LIT §95). Delete `relaxation`"
         )));
     }
+    // Row 22: the block operator of §109 carries one material per region.
+    if mech.solver.coupled && mech.materials.is_some() {
+        return Err(Error::Config(format!(
+            "{path}/solver/coupled: `coupled: true` with `materials` is not offered - \
+             the block-coupled operator of SPEC-LIT §109 carries one material per \
+             region, and the bond face of §95.8 written as a 3x3 face block is not \
+             built. Use one `material`, or `coupled: false` (SPEC-LIT 96.3 row 22)"
+        )));
+    }
     let solver = SolidOuterControls {
         tolerance: mech.solver.tolerance as Scalar,
         max_outer: mech.solver.max_outer as usize,
+        coupled: mech.solver.coupled,
     };
 
     Ok(Some(LoweredMechanics {
@@ -1916,12 +2724,162 @@ fn lower_mechanics(
     }))
 }
 
+/// SPEC-LIT §100.7: `numerics.outer`, resolved. Absent, §98.3's criterion
+/// and cap; refused where nothing would read it.
+fn lower_outer(o: Option<&ChtOuter>, has_fluid: bool, nonlinear: bool) -> Result<OuterControls> {
+    let Some(o) = o else {
+        return Ok(OuterControls::default());
+    };
+    if has_fluid {
+        return Err(Error::Config(
+            "numerics/outer: a case with a fluid region runs the SIMPLE loop, whose \
+             outer iterations and stop are numerics.flow's (SPEC-LIT 100.7)"
+                .to_string(),
+        ));
+    }
+    if !nonlinear {
+        return Err(Error::Config(
+            "numerics/outer: nothing in this case is nonlinear - no curve in a solid's \
+             kappa or c, no source curve in T and no radiating face - so the conduction \
+             problem is solved in one pass and nothing would read the block \
+             (SPEC-LIT 100.7). Remove it"
+                .to_string(),
+        ));
+    }
+    let d = OuterControls::default();
+    let tolerance = match o.tolerance {
+        None => d.tolerance,
+        Some(t) if t > 0.0 && t < 1.0 => t as Scalar,
+        Some(t) => {
+            return Err(Error::Config(format!(
+                "numerics/outer/tolerance = {t}: (S100.7)'s epsilon is relative and \
+                 must lie in (0, 1) (SPEC-LIT 100.7)"
+            )))
+        }
+    };
+    let max_outer = match o.max_outer {
+        None => d.max_outer,
+        Some(0) => {
+            return Err(Error::Config(
+                "numerics/outer/maxOuter = 0: a step needs at least one pass \
+                 (SPEC-LIT 100.7)"
+                    .to_string(),
+            ))
+        }
+        Some(n) => n as usize,
+    };
+    Ok(OuterControls { tolerance, max_outer, stated: true })
+}
+
+/// SPEC-LIT §100.11: a region's `source` and `sourceBoxes`, lowered on its
+/// own mesh - the region's number, which `sources` carries exactly as
+/// before, and one [`LoweredSource`] per curve, table or box.
+fn lower_sources(
+    r: &ChtRegion,
+    region: usize,
+    mesh: &HostMesh,
+    t0: Scalar,
+    steady: bool,
+) -> Result<(Scalar, Vec<LoweredSource>)> {
+    let base = format!("regions/{}", r.name);
+    let mut out = Vec::new();
+    let number = match &r.source {
+        None => 0.0,
+        Some(ChtSource::Number(q)) => *q as Scalar,
+        Some(s) => {
+            let path = format!("{base}/source");
+            let law = lower_law(s, &path, t0, steady)?;
+            out.push(LoweredSource { path, region, cells: None, law });
+            0.0
+        }
+    };
+    for (i, b) in r.source_boxes.iter().enumerate() {
+        let v = |a: [f64; 3]| Vec3::new(a[0] as Scalar, a[1] as Scalar, a[2] as Scalar);
+        let sel = CellSelector::Box { min: v(b.bounds.min), max: v(b.bounds.max) };
+        let cells = sel.select(mesh);
+        if cells.is_empty() {
+            return Err(Error::Config(format!(
+                "{base}/sourceBoxes/{i}/bounds: the {} holds the centroid of no cell of region \
+                 '{}' - a source that heats nothing is a setting the solver would ignore \
+                 (SPEC-LIT 13.4.1; SPEC-LIT 100.11)",
+                sel.describe(),
+                r.name
+            )));
+        }
+        let path = format!("{base}/sourceBoxes/{i}/source");
+        let law = lower_law(&b.source, &path, t0, steady)?;
+        out.push(LoweredSource { path, region, cells: Some(cells), law });
+    }
+    Ok((number, out))
+}
+
+/// SPEC-LIT §100.11 rows 1-4: one source's law, validated under `path`.
+fn lower_law(s: &ChtSource, path: &str, t0: Scalar, steady: bool) -> Result<SourceLaw> {
+    match s {
+        ChtSource::Number(q) => Ok(SourceLaw::Number(*q as Scalar)),
+        ChtSource::Curve(c) => {
+            let p = c.lower(path)?;
+            if let Some((lo, hi)) = p.range() {
+                if !(t0 >= lo && t0 <= hi) {
+                    return Err(Error::Config(format!(
+                        "{path}: the curve's range [{lo}, {hi}] K does not contain the case's \
+                         initial temperature {t0} K (SPEC-LIT 100.11)"
+                    )));
+                }
+            }
+            for ts in p.samples() {
+                let s_p = p.slope(path, ts)?;
+                if s_p > 0.0 {
+                    return Err(Error::Config(format!(
+                        "{path}: at T = {ts} K the curve rises, S_P = dq/dT = {s_p:e} W/(m^3 K) \
+                         > 0; Patankar's split needs S_P <= 0, and a rising source is refused, \
+                         not lagged (SPEC-LIT 100.12)"
+                    )));
+                }
+            }
+            Ok(SourceLaw::Temperature(p))
+        }
+        ChtSource::Time(tt) => {
+            if steady {
+                return Err(Error::Config(format!(
+                    "{path}: a table in t on a steady case - there is no time to read it at. The \
+                     conduction path's transient reads it at the end of every step; the \
+                     conjugate path, a case with a fluid region, is steady only (SPEC-LIT 100.11)"
+                )));
+            }
+            let knots: Vec<(Scalar, Scalar)> =
+                tt.time.iter().map(|k| (k[0] as Scalar, k[1] as Scalar)).collect();
+            Ok(SourceLaw::Time(TimeTable::new(path, &knots)?))
+        }
+    }
+}
+
+/// SPEC-LIT §100.2: an entry whose consumer is still built from a constant.
+/// The number exactly as before, or the curve lowered - so a malformed one
+/// is refused for its own reason first - and then refused naming `consumer`.
+fn number_only(v: &ChtScalarOrCurve, path: &str, consumer: &str) -> Result<Scalar> {
+    match v {
+        ChtScalarOrCurve::Number(x) => Ok(*x as Scalar),
+        ChtScalarOrCurve::Curve(c) => Err(refused_curve(&c.lower(path)?, path, consumer)),
+    }
+}
+
+/// §100.2's refusal of a valid curve that its consumer cannot read yet.
+fn refused_curve(p: &Property, path: &str, consumer: &str) -> Error {
+    Error::Config(format!(
+        "{path}: a curve in T ({}) is read and valid, but {consumer} (SPEC-LIT 100.2); \
+         write a number",
+        p.describe()
+    ))
+}
+
 /// One elastic material, validated under its JSON path - SPEC-LIT §96.3
 /// rows 1-5. [`crate::solid::Material::validate`] refuses `E <= 0`, the `nu`
 /// range and the measured 0.45 edge with its own messages; this wraps it
 /// with the path and adds what the case format knows that the struct does
 /// not: `alpha < 0`, the `TRef` pairing, and `rho`.
-fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
+/// SPEC-LIT §100.3: a curve for E or alpha is lowered and validated at its samples.
+fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar, ElasticCurves)> {
     if let Some(rho) = m.rho {
         return Err(Error::Config(format!(
             "{path}/rho = {rho}: nothing in SPEC-LIT 95's static solve reads a \
@@ -1930,10 +2888,18 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
              the region's density)"
         )));
     }
+    // SPEC-LIT §100.3: a number is the constant it always was; a curve is
+    // lowered, and the zone's constants are its values at the LOWER end of
+    // its range - a placeholder `crate::solid::case::run_stress` replaces.
+    let e_path = format!("{path}/E");
+    let alpha_path = format!("{path}/alpha");
+    let e = m.e.lower(&e_path)?;
+    let alpha = m.alpha.lower(&alpha_path)?;
+    let at_lo = |p: &Property, s: &str| p.value(s, p.range().map_or(0.0, |r| r.0));
     let mat = Material {
-        e: m.e as Scalar,
+        e: at_lo(&e, &e_path)?,
         nu: m.nu as Scalar,
-        alpha: m.alpha as Scalar,
+        alpha: at_lo(&alpha, &alpha_path)?,
     };
     mat.validate()
         .map_err(|e| Error::Config(format!("{path}: {e}")))?;
@@ -1944,9 +2910,28 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
             mat.alpha
         )));
     }
+    // §100.3 (§100.5 row 7): every sample of a curve, with the zone's
+    // other constants.
+    for t in e.samples() {
+        let at = Material { e: e.value(&e_path, t)?, ..mat };
+        at.validate().map_err(|err| {
+            Error::Config(format!("{e_path}: at T = {t} K the curve fails: {err} (SPEC-LIT 100.3)"))
+        })?;
+    }
+    for t in alpha.samples() {
+        let a = alpha.value(&alpha_path, t)?;
+        if !(a >= 0.0) || !a.is_finite() {
+            return Err(Error::Config(format!(
+                "{alpha_path}: at T = {t} K the curve gives alpha = {a:e}, which is negative \
+                 or not finite - a negative expansion coefficient is a sign error, not a \
+                 material (SPEC-LIT 100.3)"
+            )));
+        }
+    }
+    let alpha_curve = !alpha.is_constant();
     let t_ref = match m.t_ref {
         Some(t) => {
-            if mat.alpha == 0.0 {
+            if mat.alpha == 0.0 && !alpha_curve {
                 return Err(Error::Config(format!(
                     "{path}/TRef = {t} is given with alpha = 0 - a reference \
                      nothing reads, which is the setting the solver ignores \
@@ -1956,6 +2941,13 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
             t as Scalar
         }
         None => {
+            if alpha_curve {
+                return Err(Error::Config(format!(
+                    "{path}/TRef: alpha is a curve in T but TRef is not given - the thermal \
+                     strain is alpha(T) (T - TRef), alpha the secant coefficient from TRef \
+                     (SPEC-LIT 100.3). Give TRef, the stress-free temperature"
+                )));
+            }
             if mat.alpha > 0.0 {
                 return Err(Error::Config(format!(
                     "{path}/TRef: alpha = {} is given but TRef is not - the \
@@ -1967,22 +2959,128 @@ fn lower_elastic(m: &ChtElastic, path: &str) -> Result<(Material, Scalar)> {
             0.0
         }
     };
-    Ok((mat, t_ref))
+    let curves = ElasticCurves {
+        e: (!e.is_constant()).then_some(e),
+        alpha: alpha_curve.then_some(alpha),
+        path: path.to_string(),
+    };
+    Ok((mat, t_ref, curves))
 }
 
-fn lower_bc(bc: &ChtScalarBc) -> LoweredBc {
-    match bc {
+fn lower_bc(bc: &ChtScalarBc, path: &str, s2s_eps: Option<Scalar>) -> Result<LoweredBc> {
+    use crate::cht::ambient::ExternalLoss;
+    Ok(match bc {
         ChtScalarBc::FixedValue { value } => LoweredBc::FixedValue(*value as Scalar),
         ChtScalarBc::ZeroGradient => LoweredBc::ZeroGradient,
         ChtScalarBc::FixedFluxTemperature { q } => LoweredBc::FixedFlux(*q as Scalar),
         ChtScalarBc::InletOutlet { inlet_value } => {
             LoweredBc::InletOutlet(*inlet_value as Scalar)
         }
+        // SPEC-LIT §98.7: a wall of the enclosure `radiation` names, at its
+        // own emissivity or the dictionary's.
+        ChtScalarBc::S2sWall { emissivity, q } => {
+            let Some(default) = s2s_eps else {
+                return Err(Error::Config(format!(
+                    "{path}/T: `s2sWall` radiates in the enclosure the case's `radiation` \
+                     names, and this case names none. Add `\"radiation\": \"<dir>\"`, the \
+                     directory whose constant/radiationProperties says `radiationModel \
+                     viewFactor` (SPEC-LIT 98.7)"
+                )));
+            };
+            let eps = match emissivity {
+                Some(e) => lower_emissivity(*e, path)?,
+                None => default,
+            };
+            if !q.is_finite() {
+                return Err(Error::Config(format!(
+                    "{path}/T/q = {q}: the external flux delivered to the face, W/m^2, has to \
+                     be finite (SPEC-LIT 98.7)"
+                )));
+            }
+            LoweredBc::S2sWall { emissivity: eps, q: *q as Scalar }
+        }
         // An `empty` patch contributes to no surface integral, so the triple
         // written on it is never read. `run_flow_case` skips those faces by
         // the mesh's own `PatchKind`, which is where the fact lives.
         ChtScalarBc::Empty => LoweredBc::ZeroGradient,
+        // SPEC-LIT §98.1: `h = 0` on the word that only radiates and
+        // `emissivity = 0` on the one that only convects.
+        ChtScalarBc::ExternalConvection { h, t_inf } => LoweredBc::External(ExternalLoss {
+            h: lower_film(h, path)?,
+            t_inf: lower_absolute(*t_inf, &format!("{path}/T/TInf"), "the ambient temperature")?,
+            emissivity: 0.0,
+            t_env: 0.0,
+        }),
+        ChtScalarBc::ExternalRadiation { emissivity, t_env } => LoweredBc::External(ExternalLoss {
+            h: 0.0,
+            t_inf: 0.0,
+            emissivity: lower_emissivity(*emissivity, path)?,
+            t_env: lower_absolute(*t_env, &format!("{path}/T/TEnv"), "the surround's temperature")?,
+        }),
+        ChtScalarBc::ExternalConvectionRadiation { h, t_inf, emissivity, t_env } => {
+            LoweredBc::External(ExternalLoss {
+                h: lower_film(h, path)?,
+                t_inf: lower_absolute(*t_inf, &format!("{path}/T/TInf"), "the ambient temperature")?,
+                emissivity: lower_emissivity(*emissivity, path)?,
+                t_env: lower_absolute(*t_env, &format!("{path}/T/TEnv"), "the surround's temperature")?,
+            })
+        }
+    })
+}
+
+/// SPEC-LIT §98.5 rows 1 and 5-7: `h` as a number, or through (S98.6).
+fn lower_film(h: &ChtFilmCoefficient, path: &str) -> Result<Scalar> {
+    let at = format!("{path}/T/h");
+    match h {
+        ChtFilmCoefficient::Value(v) => {
+            if !(*v > 0.0) || !v.is_finite() {
+                return Err(Error::Config(format!(
+                    "{at} = {v}: a film coefficient has to be finite and positive, W/(m^2 K); \
+                     h = 0 is `zeroGradient` under another name (SPEC-LIT 98.5)"
+                )));
+            }
+            Ok(*v as Scalar)
+        }
+        ChtFilmCoefficient::Correlation(c) => {
+            if c.correlation != "churchillChu" {
+                return Err(Error::Config(format!(
+                    "{at}/correlation = \"{}\" is not implemented. Available: churchillChu \
+                     (SPEC-LIT 98.4)",
+                    c.correlation
+                )));
+            }
+            crate::cht::ambient::churchill_chu_h(
+                &at,
+                c.ra as Scalar,
+                c.pr as Scalar,
+                c.kappa as Scalar,
+                c.l as Scalar,
+            )
+        }
     }
+}
+
+/// SPEC-LIT §98.5 rows 2 and 4: an absolute temperature, K.
+fn lower_absolute(t: f64, at: &str, what: &str) -> Result<Scalar> {
+    if !(t > 0.0) || !t.is_finite() {
+        return Err(Error::Config(format!(
+            "{at} = {t}: {what} is absolute, K, and has to be finite and positive \
+             (SPEC-LIT 98.5)"
+        )));
+    }
+    Ok(t as Scalar)
+}
+
+/// SPEC-LIT §98.5 row 3.
+fn lower_emissivity(e: f64, path: &str) -> Result<Scalar> {
+    if !(e > 0.0 && e <= 1.0) {
+        return Err(Error::Config(format!(
+            "{path}/T/emissivity = {e}: a grey emissivity lies in [0, 1], and 0 radiates \
+             nothing - `zeroGradient` under another name - so this condition takes (0, 1] \
+             (SPEC-LIT 98.5)"
+        )));
+    }
+    Ok(e as Scalar)
 }
 
 /// A `divSchemes` entry, through the same reader every other case uses -
@@ -2011,11 +3109,15 @@ fn lower_precon(name: &str) -> Result<Preconditioner> {
     match name {
         "DIC" => Ok(Preconditioner::Dic),
         "DILU" => Ok(Preconditioner::Dilu),
-        "diagonal" | "none" => Ok(Preconditioner::Diagonal),
+        "diagonal" => Ok(Preconditioner::Diagonal),
+        // `none` used to lower to Jacobi - a silent substitution (SPEC-LIT
+        // 13.4). The crate has `Preconditioner::None` and `solver::solve`
+        // runs it, so the case gets what it asked for.
+        "none" => Ok(Preconditioner::None),
         other => crate::io::contract::unsupported(
             "numerics/preconditioner",
             other,
-            &["DIC", "DILU", "diagonal"],
+            &["DIC", "DILU", "diagonal", "none"],
             "DIC, the incomplete Cholesky factorisation (SPEC-LIT 21)",
             Preconditioner::Dic,
         ),
@@ -2047,7 +3149,19 @@ fn build_region_mesh(
     openings: &[&str],
     case_dir: Option<&Path>,
 ) -> Result<(HostMesh, PolyMeshRaw)> {
-    let b = match &r.mesh {
+    // `lower_in` resolved R8's four (mesh, manifest) combinations before
+    // calling; this function builds the case's OWN mesh, so `None` - legal
+    // only through a manifest entry - is refused with the same message the
+    // combination check would have raised.
+    let Some(mesh_src) = r.mesh.as_ref() else {
+        return Err(Error::Config(format!(
+            "regions/{}/mesh: required when the case has no `mesh.regions` \
+             manifest - a region the case composes from a layout still needs \
+             its own `mesh`, unless the manifest names it (R8)",
+            r.name
+        )));
+    };
+    let b = match mesh_src {
         ChtRegionMesh::Block(b) => b,
         ChtRegionMesh::PolyMesh(pr) => {
             let path = resolve_mesh_path(&r.name, case_dir, &pr.poly_mesh)?;
@@ -2169,17 +3283,19 @@ fn build_region_mesh(
     Ok((mesh, raw))
 }
 
-/// §97.2's path refusals, in this order. On success the JOINED path is
+/// §97.2's path refusals, in this order, for ANY path a case names - a
+/// region's own `polyMesh` and the `mesh.regions` manifest alike. `setting`
+/// is the message prefix the refusals carry. On success the JOINED path is
 /// returned - not the canonical one, so the reader's own error messages keep
 /// printing the path as the case spelled it against the case directory.
-fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
+fn resolve_case_path(setting: &str, case_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
     let path = Path::new(p);
     // 1. No directory at all. `lower()` is this shape, and a polyMesh path
     //    is RELATIVE TO THE CASE FILE'S DIRECTORY - there is nothing to
     //    resolve it against.
     let Some(dir) = case_dir else {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{p}' is relative to the case file's \
+            "{setting}: '{p}' is relative to the case file's \
              directory, and this document was lowered without one. Call \
              `ChtCase::lower_in(Some(&case_dir))` - as `ofgpu-cht` does with \
              `case_path.parent()` - to import a polyMesh region"
@@ -2191,7 +3307,7 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
     // 2. Absolute.
     if path.is_absolute() {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{p}' is absolute. The path must be \
+            "{setting}: '{p}' is absolute. The path must be \
              RELATIVE to the case file's directory - a case that only opens from \
              one absolute location is a case that cannot be moved (SPEC-LIT 97.2)"
         )));
@@ -2200,7 +3316,7 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
     let joined = dir.join(path);
     if !joined.exists() {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{}' does not exist (case directory \
+            "{setting}: '{}' does not exist (case directory \
              '{}'). A polyMesh directory, a case root or `constant` holding one, \
              or a single-volume `.msh` file",
             joined.display(),
@@ -2215,7 +3331,7 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
         .unwrap_or(false);
     if !inside {
         return Err(Error::Config(format!(
-            "regions/{region}/mesh/polyMesh: '{}' resolves outside the case \
+            "{setting}: '{}' resolves outside the case \
              directory '{}'. A case is self-contained: its regions' meshes live \
              under the directory the case file is in (SPEC-LIT 97.2)",
             joined.display(),
@@ -2223,6 +3339,10 @@ fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<P
         )));
     }
     Ok(joined)
+}
+
+fn resolve_mesh_path(region: &str, case_dir: Option<&Path>, p: &str) -> Result<PathBuf> {
+    resolve_case_path(&format!("regions/{region}/mesh/polyMesh"), case_dir, p)
 }
 
 /// §97.2's patch-TYPE refusals on an imported region. The patch list is the

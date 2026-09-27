@@ -680,6 +680,11 @@ pub struct OutputPipeline {
     /// `true` when the case's `output` block built this, `false` for the
     /// command line - so a driver can say which is in force.
     from_case: bool,
+    /// What a stage's interval is quoted IN by [`Self::describe`] - `"s"`
+    /// unless the driver says otherwise: `-writeEvery` drives the SAME
+    /// schedule with the driver's iteration count as the clock
+    /// (SPEC-LIT §44.4). Disclosure only; the arithmetic never reads it.
+    clock_unit: &'static str,
 }
 
 impl OutputPipeline {
@@ -709,6 +714,7 @@ impl OutputPipeline {
             restart: None,
             restart_spec: None,
             from_case: false,
+            clock_unit: "s",
         })
     }
 
@@ -745,7 +751,7 @@ impl OutputPipeline {
         let restart = plan
             .restart
             .map(|r| Checkpoints::new(root.to_path_buf(), restart_stem, r.keep, r.interval));
-        Ok(Self { stages, restart, restart_spec: plan.restart, from_case: true })
+        Ok(Self { stages, restart, restart_spec: plan.restart, from_case: true, clock_unit: "s" })
     }
 
     /// Start every schedule from `t0` - a restart resumes at its own time.
@@ -811,6 +817,14 @@ impl OutputPipeline {
         self.restart.is_some()
     }
 
+    /// Name the clock the driver is feeding the schedule, for the
+    /// disclosure line alone - `"iterations"` when `-writeEvery` drives
+    /// the SAME `next = t0 + W` arithmetic with the iteration count as its
+    /// clock (SPEC-LIT §44.4). The schedule itself is unit-blind.
+    pub fn set_clock_unit(&mut self, unit: &'static str) {
+        self.clock_unit = unit;
+    }
+
     /// The disclosure line SPEC-LIT §13.4.2 asks of every setting that
     /// reached the solver: what will be written, how often, of what, at what
     /// precision.
@@ -827,7 +841,7 @@ impl OutputPipeline {
                 s.label,
                 formats.join(", "),
                 if s.interval > 0.0 {
-                    format!("every {} s", s.interval)
+                    format!("every {} {}", s.interval, self.clock_unit)
                 } else {
                     "final state only".to_string()
                 },
@@ -895,6 +909,46 @@ pub fn refuse_output_named_twice(plan: &OutputPlan, cli_flags: &[&str]) -> Resul
     )
 }
 
+/// SPEC-LIT §44.1 on the command-line route: `-output nvdb` / `-output vdb`
+/// ask for a dense voxel grid, and a mesh `cartesian::detect` refuses has no
+/// lattice to sample onto. The two volume writers refuse this themselves -
+/// at the FIRST WRITE, which on a steady run is the final write, after the
+/// whole run, and `-output nvdb,foam` then lost the foam write too. Raised
+/// here, before any writer is built, it is raised before anything runs, it
+/// names WHY (`detect`'s own reason) and what does work, and the empty
+/// `VDB/` directory `NvdbWriter::new` would have made is never made.
+///
+/// `not_cartesian` is `cartesian::detect(hm).err()`: `None` on a Cartesian
+/// box, `Some(reason)` otherwise. Strict: `Err` naming the format, the
+/// reason and the menu (§13.4). `-permissive`: one warning per volume format
+/// and the list comes back with `nvdb`/`vdb` dropped, the rest in order -
+/// which is exactly the substitution the warning printed (§13.4.2).
+pub fn drop_volume_formats_on_a_non_cartesian_mesh(
+    formats: &[OutputFormat],
+    not_cartesian: Option<&str>,
+) -> Result<Vec<OutputFormat>> {
+    let Some(reason) = not_cartesian else { return Ok(formats.to_vec()) };
+    let mut kept = Vec::with_capacity(formats.len());
+    for f in formats {
+        if !matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb) {
+            kept.push(*f);
+            continue;
+        }
+        contract::unsupported_note(
+            &format!("-output {}", f.name()),
+            "a non-Cartesian mesh",
+            &["foam", "vtu", "usda (boundary surface only)"],
+            &format!(
+                "a .{} file is a dense voxel grid and this mesh is not a recognised uniform Cartesian box: {reason}. foam and vtu preserve the polyhedra",
+                f.name()
+            ),
+            &format!("dropping {} from -output", f.name()),
+            (),
+        )?;
+    }
+    Ok(kept)
+}
+
 // ==========================================================================
 //  Tests
 // ==========================================================================
@@ -903,7 +957,7 @@ pub fn refuse_output_named_twice(plan: &OutputPlan, cli_flags: &[&str]) -> Resul
 mod tests {
     use super::*;
     use crate::io::case_json::{JsonExact, JsonOutput, JsonRestart, JsonVisualisation};
-    use crate::io::contract::{permissive_test_guard, reset_warnings, set_permissive};
+    use crate::io::contract::{permissive_test_guard, reset_warnings, set_permissive, warned};
     use crate::Scalar;
 
     fn vis(format: &str) -> JsonVisualisation {
@@ -1246,5 +1300,52 @@ mod tests {
         assert!(!p.any_due(0.25));
         assert!(p.any_due(0.5));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §44.4: the disclosure line quotes the interval in the clock
+    /// the driver is feeding - seconds until the driver names iterations,
+    /// and the schedule arithmetic never knows the difference.
+    #[test]
+    fn the_disclosure_line_names_the_clock_unit() {
+        let dir = std::env::temp_dir().join(format!("ofgpu_pipeline_clock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut p =
+            OutputPipeline::from_command_line(&dir, "x", &[OutputFormat::Foam], 10.0).expect("pipeline");
+        assert!(
+            p.describe().contains("every 10 s"),
+            "the default unit is seconds: {}",
+            p.describe()
+        );
+        p.set_clock_unit("iterations");
+        assert_eq!(
+            p.describe(),
+            "output output (command line): foam | every 10 iterations | fields: every field | precision fp32"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT §44.1 on the command line, and §13.4's two modes of it.
+    #[test]
+    fn the_command_line_volume_formats_are_dropped_on_a_non_cartesian_mesh_naming_the_reason() {
+        use super::drop_volume_formats_on_a_non_cartesian_mesh as drop_volume;
+        let _g = permissive_test_guard();
+        let all = [OutputFormat::Nvdb, OutputFormat::Foam, OutputFormat::Vdb, OutputFormat::Vtu];
+        let why = "cell volumes are not uniform (cell 7 is 1.000000e-03, cell 0 is 2.000000e-03)";
+        set_permissive(false);
+        reset_warnings();
+        assert_eq!(drop_volume(&all, None).unwrap(), all.to_vec(), "Cartesian: the identity");
+        let exact = [OutputFormat::Foam, OutputFormat::Vtu];
+        assert_eq!(drop_volume(&exact, Some(why)).unwrap(), exact.to_vec(), "no volume format: the identity");
+        assert!(!warned("-output nvdb") && !warned("-output vdb"), "and nothing to warn about");
+        let s = drop_volume(&all, Some(why)).unwrap_err().to_string();
+        for want in ["-output nvdb", "a non-Cartesian mesh", why, "foam", "vtu", "-permissive"] {
+            assert!(s.contains(want), "strict must say {want:?}: {s}");
+        }
+        reset_warnings();
+        set_permissive(true);
+        let kept = drop_volume(&all, Some(why)).expect("permissive");
+        assert_eq!(kept, vec![OutputFormat::Foam, OutputFormat::Vtu], "the substitution the warning named");
+        assert!(warned("-output nvdb") && warned("-output vdb"), "one warning per volume format");
+        set_permissive(false);
     }
 }

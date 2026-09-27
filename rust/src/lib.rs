@@ -45,6 +45,7 @@
 //! `PROVENANCE.md` is the per-file record for the whole tree. No GPL-licensed
 //! source was consulted.
 
+pub mod ale_flow;
 pub mod adapt;
 pub mod automesher;
 pub mod decompose;
@@ -80,6 +81,7 @@ pub mod radiation;
 pub mod s2s;
 pub mod precon;
 pub mod pressure;
+pub mod properties;
 pub mod scalar_transport;
 pub mod simple;
 pub mod solid;
@@ -88,6 +90,7 @@ pub mod sources;
 pub mod species;
 pub mod timescheme;
 pub mod turbulence;
+pub mod turek_hron;
 pub mod vof;
 pub mod vv;
 pub mod walldistance;
@@ -132,6 +135,23 @@ pub mod kernels {
 pub type Scalar = f32;
 #[cfg(not(feature = "single"))]
 pub type Scalar = f64;
+
+/// A positive floor far below any physical quantity and far above the bottom
+/// of [`Scalar`]'s range: `1e-300` in f64, `1e-30` in f32, each about 10^8
+/// above its type's smallest normal (SPEC-LIT 112.1). A `Scalar`-typed
+/// `1e-300` literal is `0.0` in the single build, silently.
+#[cfg(feature = "single")]
+pub const SCALAR_FLOOR: Scalar = 1e-30;
+#[cfg(not(feature = "single"))]
+pub const SCALAR_FLOOR: Scalar = 1e-300;
+
+/// The large finite value that mirrors [`SCALAR_FLOOR`]: `1e300` in f64,
+/// `1e30` in f32 (SPEC-LIT 112.1). A `Scalar`-typed `1e300` literal does not
+/// compile in the single build.
+#[cfg(feature = "single")]
+pub const SCALAR_HUGE: Scalar = 1e30;
+#[cfg(not(feature = "single"))]
+pub const SCALAR_HUGE: Scalar = 1e300;
 
 /// A mesh index. `i32` matches what the ASCII case format carries and
 /// is what the kernels index with.
@@ -238,5 +258,61 @@ mod provenance_audit {
                  (it is the number an acquirer checks first)"
             );
         }
+    }
+
+    /// **`docs/11` S2.** The FDS clone is a path into a LOCAL copy of the
+    /// NIST tree: `.gitignore` tracks only `reference/PROVENANCE.md` and
+    /// `reference/ghia1982/` under `reference/`, so a file that tells a
+    /// reader this repository CARRIES that tree tells them something
+    /// false. Every source file that cites the clone says in its own words
+    /// that it is not carried, and none of it names the copy as one this
+    /// repository ships. The two needles are built with `concat!` so this
+    /// file does not match its own rule - the device
+    /// `every_reported_gate_has_a_scope` uses.
+    #[test]
+    fn no_source_file_claims_this_repository_carries_the_fds_clone() {
+        let clone: &str = concat!("reference/", "fds");
+        let claim: &str = concat!("vend", "ored");
+        const SENTINEL: &str = "this repository does not carry";
+        let mut citing = Vec::new();
+        let mut silent = Vec::new();
+        let mut claiming = Vec::new();
+        for p in sources() {
+            let t = fs::read_to_string(&p).unwrap_or_default();
+            if !t.contains(clone) {
+                continue;
+            }
+            citing.push(rel(&p));
+            if !t.contains(SENTINEL) {
+                silent.push(rel(&p));
+            }
+            if t.contains(claim) {
+                claiming.push(rel(&p));
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "{} source file(s) cite the FDS clone without saying \"{SENTINEL}\" \
+             on one unbroken line:\n  {}",
+            silent.len(),
+            silent.join("\n  ")
+        );
+        assert!(
+            claiming.is_empty(),
+            "{} source file(s) still call the FDS clone something this \
+             repository does not do to it:\n  {}",
+            claiming.len(),
+            claiming.join("\n  ")
+        );
+        assert_eq!(
+            citing.len(),
+            13,
+            "thirteen source files cite the clone; found {citing:?}"
+        );
+        println!(
+            "  [S2] {} source file(s) cite the local FDS clone, every one of \
+             them saying this repository does not carry it",
+            citing.len()
+        );
     }
 }

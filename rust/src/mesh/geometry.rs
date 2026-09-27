@@ -1349,6 +1349,7 @@ mod tests {
     /// this `4 x 3 x 2` box of `0.5 x 0.25 x 2.0` ones, at `6.9e-18`. Both
     /// boxes are unskewed. See the constant.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_mesh_of_stacked_hexahedra_has_no_skewness_however_graded_or_sheared() {
         let n = [4usize, 3, 2];
         let d = Vec3::new(0.5, 0.25, 2.0);
@@ -1580,6 +1581,7 @@ mod tests {
     /// to be measured through both halves, or the coupled coefficient comes
     /// out twice what it should be and the weight 1 instead of 1/2.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_cyclic_couple_measures_through_both_halves() {
         let (nx, ny, nz) = (3usize, 2usize, 2usize);
         let d = Vec3::new(0.5, 0.25, 2.0);

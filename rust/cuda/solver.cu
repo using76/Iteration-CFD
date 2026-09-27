@@ -790,7 +790,11 @@ extern "C" __global__ void solPUpdateCg
 //
 //  One thread each. They exist so that no iteration of either solver has to
 //  tell the host a number: rho, alpha, omega and beta are read from device
-//  memory, combined, and written straight back.
+//  memory, combined, and written straight back. The Krylov loops of
+//  src/solver.rs no longer launch them per sweep: section 7 does the same
+//  arithmetic in thread 0 of the reduction that feeds it (SPEC-LIT 113.1).
+//  They stay for the setup of a solve, the test before the first sweep,
+//  src/distsolve.rs, and as the reference the fused loop is tested against.
 // ==========================================================================
 
 extern "C" __global__ void solSetScalar(ofscalar* dst, ofscalar value)
@@ -890,4 +894,179 @@ extern "C" __global__ void solPackReport
     out3[0] = initialRes[0];
     out3[1] = finalRes[0];
     out3[2] = normFactor[0];
+}
+
+
+// ==========================================================================
+//  7. Stage two, fused with the scalar update it feeds (SPEC-LIT 113.1)
+//
+//  Each kernel is solSumStage2 (or solSum2Stage2) with its body unchanged,
+//  and then, in thread 0, the arithmetic of the one-thread kernel of
+//  section 6 that the Krylov loop used to launch next: the same loads, the
+//  same IEEE operations in the same order. The sum is used from the
+//  register it was stored from, which holds exactly the stored value.
+//  offset stays a runtime argument, as in solSumStage2: acc + 0 turns a -0
+//  sum into +0, and a folded constant need not.
+// ==========================================================================
+
+//- out = sum(partials) + offset ; q = safeDiv(num, out)
+extern "C" __global__ void solSumStage2Divide
+(
+    ofscalar* __restrict__ out,
+    ofscalar* __restrict__ q,
+    const ofscalar* __restrict__ num,
+    const ofscalar* __restrict__ partials,
+    oflabel nParts,
+    ofscalar offset
+)
+{
+    ofscalar acc = 0;
+    for (oflabel i = (oflabel)threadIdx.x; i < nParts; i += (oflabel)blockDim.x)
+    {
+        acc += partials[i];
+    }
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0)
+    {
+        const ofscalar d = acc + offset;
+        out[0] = d;
+        q[0] = safeDiv_(num[0], d);
+    }
+}
+
+
+//- rho = sum(partials) + offset ;
+//  beta = safeDiv(rho, rhoOld)*safeDiv(alpha, omega) ; rhoOld = rho
+//
+//  solBetaBicg, and the end-of-sweep rhoOld = rho copy, which moves here
+//  because nothing reads rhoOld between the two points.
+extern "C" __global__ void solSumStage2Beta
+(
+    ofscalar* __restrict__ rho,
+    ofscalar* __restrict__ beta,
+    ofscalar* __restrict__ rhoOld,
+    const ofscalar* __restrict__ alpha,
+    const ofscalar* __restrict__ omega,
+    const ofscalar* __restrict__ partials,
+    oflabel nParts,
+    ofscalar offset
+)
+{
+    ofscalar acc = 0;
+    for (oflabel i = (oflabel)threadIdx.x; i < nParts; i += (oflabel)blockDim.x)
+    {
+        acc += partials[i];
+    }
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0)
+    {
+        const ofscalar r = acc + offset;
+        rho[0] = r;
+        beta[0] = safeDiv_(r, rhoOld[0])*safeDiv_(alpha[0], omega[0]);
+        rhoOld[0] = r;
+    }
+}
+
+
+//- out = sum(partials) + offset ; q = safeDiv(out, prev) ; prev = out
+//
+//  PCG's beta = rho'/rho followed by rho = rho'.
+extern "C" __global__ void solSumStage2Ratio
+(
+    ofscalar* __restrict__ out,
+    ofscalar* __restrict__ q,
+    ofscalar* __restrict__ prev,
+    const ofscalar* __restrict__ partials,
+    oflabel nParts,
+    ofscalar offset
+)
+{
+    ofscalar acc = 0;
+    for (oflabel i = (oflabel)threadIdx.x; i < nParts; i += (oflabel)blockDim.x)
+    {
+        acc += partials[i];
+    }
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0)
+    {
+        const ofscalar v = acc + offset;
+        out[0] = v;
+        q[0] = safeDiv_(v, prev[0]);
+        prev[0] = v;
+    }
+}
+
+
+//- outA = sum(partialsA), outB = sum(partialsB) ; q = safeDiv(outA, outB)
+extern "C" __global__ void solSum2Stage2Divide
+(
+    ofscalar* __restrict__ outA,
+    ofscalar* __restrict__ outB,
+    ofscalar* __restrict__ q,
+    const ofscalar* __restrict__ partialsA,
+    const ofscalar* __restrict__ partialsB,
+    oflabel nParts
+)
+{
+    ofscalar a = 0;
+    ofscalar b = 0;
+    for (oflabel i = (oflabel)threadIdx.x; i < nParts; i += (oflabel)blockDim.x)
+    {
+        a += partialsA[i];
+        b += partialsB[i];
+    }
+
+    a = blockSum_(a);
+    __syncthreads();
+    b = blockSum_(b);
+
+    if (threadIdx.x == 0)
+    {
+        outA[0] = a;
+        outB[0] = b;
+        q[0] = safeDiv_(a, b);
+    }
+}
+
+
+//- res = sum(partials) + offset, then solConvergenceTest's test on it.
+//
+//  The flag is sticky exactly as in solConvergenceTest: set to 1 once the
+//  test is met, never cleared here.
+extern "C" __global__ void solSumStage2Converged
+(
+    ofscalar* __restrict__ res,
+    oflabel* __restrict__ flag,
+    const ofscalar* __restrict__ partials,
+    oflabel nParts,
+    ofscalar offset,
+    const ofscalar* __restrict__ res0,
+    const ofscalar* __restrict__ normFactor,
+    ofscalar tolerance,
+    ofscalar relTol,
+    oflabel iter,
+    oflabel minIter
+)
+{
+    ofscalar acc = 0;
+    for (oflabel i = (oflabel)threadIdx.x; i < nParts; i += (oflabel)blockDim.x)
+    {
+        acc += partials[i];
+    }
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0)
+    {
+        const ofscalar r = acc + offset;
+        res[0] = r;
+        if (iter >= minIter)
+        {
+            bool done = r <= tolerance*normFactor[0];
+            if (relTol > (ofscalar)0) done = done || (r <= relTol*res0[0]);
+            if (done) flag[0] = 1;
+        }
+    }
 }

@@ -29,8 +29,9 @@
 //!
 //! So none of it happens. `rho`, `alpha`, `omega`, `beta`, the normalisation
 //! factor and the residuals are all one-element device buffers. The scalar
-//! updates ([`solBetaBicg`](../../cuda/solver.cu), `solDivideScalar`) are
-//! one-thread kernels that read those buffers and write them back, and the
+//! updates are done by thread 0 of the stage-two reduction that produces
+//! their operand (`solSumStage2Beta` and its siblings in `cuda/solver.cu`,
+//! SPEC-LIT 113.1), which reads those buffers and writes them back, and the
 //! vector updates take the same pointers and dereference them on the device.
 //! An iteration is therefore a pure sequence of launches with no host
 //! decision in it, which is the precondition for capturing a whole timestep
@@ -39,7 +40,8 @@
 //! The one remaining host round-trip is the convergence test, and
 //! [`SolverControls`] can switch it off two ways:
 //!
-//! * `check_interval` sets how often the (sticky) device flag is sampled;
+//! * `check_interval` (`solvers/<var>/checkInterval`, SPEC-LIT 113.3) sets how
+//!   often the (sticky) device flag is sampled;
 //! * `fixed_iters` skips the test altogether and runs exactly `max_iter`
 //!   sweeps;
 //! * `report_residuals` off skips the end-of-solve read-back as well.
@@ -47,7 +49,8 @@
 //! `fixed_iters` and `report_residuals = false` together give a solve that
 //! touches the host exactly zero times, which
 //! `a_fixed_iteration_solve_captures_into_a_cuda_graph` in this file proves
-//! by capturing one.
+//! by capturing one. Inside a capture, a solve with either still on is refused
+//! by name before it launches anything (SPEC-LIT 113.2).
 //!
 //! # Preconditioners
 //!
@@ -174,6 +177,12 @@ pub struct SolverKernels {
     pub sum2_pair: CudaFunction,
     pub max2: CudaFunction,
     pub max2_pair: CudaFunction,
+    // stage two fused with the scalar update it feeds (SPEC-LIT 113.1)
+    pub sum2_divide: CudaFunction,
+    pub sum2_beta: CudaFunction,
+    pub sum2_ratio: CudaFunction,
+    pub sum2_pair_divide: CudaFunction,
+    pub sum2_converged: CudaFunction,
     // vectors
     pub amul: CudaFunction,
     pub copy: CudaFunction,
@@ -217,6 +226,11 @@ impl SolverKernels {
             sum2_pair: k.func("solSum2Stage2")?,
             max2: k.func("solMaxStage2")?,
             max2_pair: k.func("solMax2Stage2")?,
+            sum2_divide: k.func("solSumStage2Divide")?,
+            sum2_beta: k.func("solSumStage2Beta")?,
+            sum2_ratio: k.func("solSumStage2Ratio")?,
+            sum2_pair_divide: k.func("solSum2Stage2Divide")?,
+            sum2_converged: k.func("solSumStage2Converged")?,
 
             amul: k.func("solAmul")?,
             copy: k.func("solCopy")?,
@@ -324,7 +338,7 @@ pub struct SolverWorkspace {
 
     /// Landing pad for [`Self::flag`]. Page-locked so the copy is a plain DMA
     /// with no staging buffer behind it.
-    flag_host: PinnedHostSlice<Label>,
+    pub(crate) flag_host: PinnedHostSlice<Label>,
 
     /// The wait that makes that copy safe to read.
     ///
@@ -337,7 +351,7 @@ pub struct SolverWorkspace {
     /// before the read. Created with the default flags, i.e. spin rather than
     /// block, because this wait is on the critical path of the iteration and
     /// `check_interval` already exists to make it rare.
-    flag_event: CudaEvent,
+    pub(crate) flag_event: CudaEvent,
 }
 
 impl SolverWorkspace {
@@ -779,6 +793,262 @@ pub(crate) fn divide_scalar(
             .arg(num)
             .arg(den)
             .launch(one_thread())?;
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  Stage two fused with the scalar update it feeds - SPEC-LIT 113.1
+//
+//  Each helper is `device_dot` (or `device_dot2`, `device_sum_mag`) with its
+//  stage-two launch replaced by a kernel of `cuda/solver.cu` section 7, which
+//  does the next one-thread kernel's arithmetic in the same launch. The
+//  stage-one launch and its arguments are exactly those of the helper it
+//  replaces, and `offset` is the same `0.0` `finish_sum` passes.
+// ==========================================================================
+
+/// The fused helpers run only inside a Krylov loop, which an empty system
+/// never reaches; an empty one here is a caller's mistake, named.
+fn refuse_empty(n: usize, who: &str) -> Result<()> {
+    if n == 0 {
+        return Err(Error::Config(format!(
+            "{who}: an empty system reaches no Krylov loop (SPEC-LIT 113.1)"
+        )));
+    }
+    Ok(())
+}
+
+/// `rho = (r0,r)`, then `beta = (rho/rho_old)·(alpha/omega)` and
+/// `rho_old = rho`, in one stage-two launch: `device_dot`, `solBetaBicg`
+/// and the end-of-sweep `copy_scalar` of the unfused loop.
+pub(crate) fn bicg_rho_and_beta(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    n: usize,
+) -> Result<()> {
+    refuse_empty(n, "bicg_rho_and_beta")?;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    let np = to_label(nparts)?;
+    let offset: Scalar = 0.0;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.dot1)
+            .arg(&mut w.partials)
+            .arg(&w.r0)
+            .arg(&w.r)
+            .arg(&nl)
+            .launch(cfg)?;
+        gpu.stream()
+            .launch_builder(&k.sum2_beta)
+            .arg(&mut w.rho)
+            .arg(&mut w.beta)
+            .arg(&mut w.rho_old)
+            .arg(&w.alpha)
+            .arg(&w.omega)
+            .arg(&w.partials)
+            .arg(&np)
+            .arg(&offset)
+            .launch(one_block())?;
+    }
+    Ok(())
+}
+
+/// `out = (a,b)`, then `q = num/out` guarded, in one stage-two launch:
+/// `device_dot` followed by `divide_scalar(q, num, out)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dot_then_divide(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    out: &mut DevBuf<Scalar>,
+    q: &mut DevBuf<Scalar>,
+    num: &DevBuf<Scalar>,
+    a: &DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
+    partials: &mut DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    refuse_empty(n, "dot_then_divide")?;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    let np = to_label(nparts)?;
+    let offset: Scalar = 0.0;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.dot1)
+            .arg(&mut *partials)
+            .arg(a)
+            .arg(b)
+            .arg(&nl)
+            .launch(cfg)?;
+        gpu.stream()
+            .launch_builder(&k.sum2_divide)
+            .arg(&mut *out)
+            .arg(&mut *q)
+            .arg(num)
+            .arg(&*partials)
+            .arg(&np)
+            .arg(&offset)
+            .launch(one_block())?;
+    }
+    Ok(())
+}
+
+/// `out = (a,b)`, then `q = out/prev` guarded and `prev = out`, in one
+/// stage-two launch: PCG's `device_dot`, `divide_scalar(beta, num, rho)` and
+/// `copy_scalar(rho, num)`.
+#[allow(clippy::too_many_arguments)]
+fn dot_then_ratio(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    out: &mut DevBuf<Scalar>,
+    q: &mut DevBuf<Scalar>,
+    prev: &mut DevBuf<Scalar>,
+    a: &DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
+    partials: &mut DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    refuse_empty(n, "dot_then_ratio")?;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    let np = to_label(nparts)?;
+    let offset: Scalar = 0.0;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.dot1)
+            .arg(&mut *partials)
+            .arg(a)
+            .arg(b)
+            .arg(&nl)
+            .launch(cfg)?;
+        gpu.stream()
+            .launch_builder(&k.sum2_ratio)
+            .arg(&mut *out)
+            .arg(&mut *q)
+            .arg(&mut *prev)
+            .arg(&*partials)
+            .arg(&np)
+            .arg(&offset)
+            .launch(one_block())?;
+    }
+    Ok(())
+}
+
+/// `ab = (a,b)` and `aa = (a,a)`, then `q = ab/aa` guarded, in one
+/// stage-two launch: `device_dot2` followed by `divide_scalar(q, ab, aa)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dot2_then_divide(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    ab: &mut DevBuf<Scalar>,
+    aa: &mut DevBuf<Scalar>,
+    q: &mut DevBuf<Scalar>,
+    a: &DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
+    partials_ab: &mut DevBuf<Scalar>,
+    partials_aa: &mut DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    refuse_empty(n, "dot2_then_divide")?;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    let np = to_label(nparts)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.dot2_1)
+            .arg(&mut *partials_ab)
+            .arg(&mut *partials_aa)
+            .arg(a)
+            .arg(b)
+            .arg(&nl)
+            .launch(cfg)?;
+        gpu.stream()
+            .launch_builder(&k.sum2_pair_divide)
+            .arg(&mut *ab)
+            .arg(&mut *aa)
+            .arg(&mut *q)
+            .arg(&*partials_ab)
+            .arg(&*partials_aa)
+            .arg(&np)
+            .launch(one_block())?;
+    }
+    Ok(())
+}
+
+/// `res = sum|x|`, then the convergence test of [`convergence_test`] on it,
+/// in one stage-two launch: `device_sum_mag` followed by
+/// `convergence_test(flag, res, res0, norm_factor, ctrl, iter)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sum_mag_then_test(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    res: &mut DevBuf<Scalar>,
+    flag: &mut DevBuf<Label>,
+    x: &DevBuf<Scalar>,
+    res0: &DevBuf<Scalar>,
+    norm_factor: &DevBuf<Scalar>,
+    partials: &mut DevBuf<Scalar>,
+    ctrl: &SolverControls,
+    iter: Label,
+    n: usize,
+) -> Result<()> {
+    refuse_empty(n, "sum_mag_then_test")?;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    let np = to_label(nparts)?;
+    let offset: Scalar = 0.0;
+    let tol = ctrl.tolerance;
+    let rel = ctrl.rel_tol;
+    let min_iter = ctrl.min_iter;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.sum_mag1)
+            .arg(&mut *partials)
+            .arg(x)
+            .arg(&nl)
+            .launch(cfg)?;
+        gpu.stream()
+            .launch_builder(&k.sum2_converged)
+            .arg(&mut *res)
+            .arg(&mut *flag)
+            .arg(&*partials)
+            .arg(&np)
+            .arg(&offset)
+            .arg(res0)
+            .arg(norm_factor)
+            .arg(&tol)
+            .arg(&rel)
+            .arg(&iter)
+            .arg(&min_iter)
+            .launch(one_block())?;
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 113.2: inside a CUDA-graph capture, a solve that would make a
+/// host round-trip is refused by name before it launches anything.
+pub(crate) fn refuse_round_trip_in_capture(gpu: &Gpu, ctrl: &SolverControls, who: &str) -> Result<()> {
+    if !gpu.is_capturing() {
+        return Ok(());
+    }
+    if !ctrl.fixed_iters {
+        return Err(Error::Config(format!(
+            "{who} was called inside a CUDA-graph capture with fixed_iters off. A \
+             checking solve reads its convergence flag back to the host every \
+             check_interval sweeps, and a graph cannot record a decision the host \
+             makes. Set fixed_iters on and report_residuals off for a captured \
+             solve - SPEC-LIT 113.2 and SPEC-LIT 81.3"
+        )));
+    }
+    if ctrl.report_residuals {
+        return Err(Error::Config(format!(
+            "{who} was called inside a CUDA-graph capture with report_residuals \
+             on. The end-of-solve residual report is a device-to-host copy, and a \
+             graph cannot record one. Set report_residuals off for a captured \
+             solve - SPEC-LIT 113.2 and SPEC-LIT 81.3"
+        )));
     }
     Ok(())
 }
@@ -1400,7 +1670,7 @@ pub(crate) fn convergence_test(
 /// the landing pad last time - which is a *plausible* value, so the bug shows
 /// up as a solve that stops one check too early or too late rather than as a
 /// crash. See the note on [`SolverWorkspace::flag_event`].
-fn read_flag(
+pub(crate) fn read_flag(
     gpu: &Gpu,
     flag: &DevBuf<Label>,
     host: &mut PinnedHostSlice<Label>,
@@ -1412,7 +1682,7 @@ fn read_flag(
     Ok(host.as_slice()?.first().copied().unwrap_or(0) != 0)
 }
 
-fn check_workspace(w: &SolverWorkspace, n: usize) -> Result<()> {
+pub(crate) fn check_workspace(w: &SolverWorkspace, n: usize) -> Result<()> {
     if w.n < n {
         return Err(Error::Config(format!(
             "solver: workspace is sized for {} cells, the system has {n}",
@@ -1423,7 +1693,7 @@ fn check_workspace(w: &SolverWorkspace, n: usize) -> Result<()> {
 }
 
 /// Turn the three device scalars into the reported pair, in one copy.
-fn collect_report(
+pub(crate) fn collect_report(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -1505,6 +1775,7 @@ pub fn solve_pbicgstab(
         return Ok(perf);
     }
     perf.converged = false;
+    refuse_round_trip_in_capture(gpu, ctrl, "solve_pbicgstab")?;
 
     check_workspace(w, n)?;
     if psi.len() < n {
@@ -1552,63 +1823,54 @@ pub fn solve_pbicgstab(
         for it in 0..max_iter {
             let iters = it + 1;
 
-            device_dot(gpu, k, &mut w.rho, &w.r0, &w.r, &mut w.partials, n)?;
-
-            // beta = (rho/rho_old)·(alpha/omega)
-            unsafe {
-                gpu.stream()
-                    .launch_builder(&k.beta_bicg)
-                    .arg(&mut w.beta)
-                    .arg(&w.rho)
-                    .arg(&w.rho_old)
-                    .arg(&w.alpha)
-                    .arg(&w.omega)
-                    .launch(one_thread())?;
-            }
+            // rho = (r0,r); beta = (rho/rho_old)·(alpha/omega); rho_old = rho,
+            // in one stage-two launch (SPEC-LIT 113.1).
+            bicg_rho_and_beta(gpu, k, w, n)?;
 
             bicg_p_update(gpu, k, w, n)?;
             precondition_ws(gpu, k, w, PreconTarget::PHat, a, m, precon, n)?;
             amul(gpu, k, &mut w.v, &w.p_hat, a, m)?;
 
-            device_dot(gpu, k, &mut w.den, &w.r0, &w.v, &mut w.partials, n)?;
-            divide_scalar(gpu, k, &mut w.alpha, &w.rho, &w.den)?;
+            // alpha = rho/(r0,v)
+            dot_then_divide(gpu, k, &mut w.den, &mut w.alpha, &w.rho, &w.r0, &w.v, &mut w.partials, n)?;
 
             bicg_s_update(gpu, k, w, n)?;
             precondition_ws(gpu, k, w, PreconTarget::SHat, a, m, precon, n)?;
             amul(gpu, k, &mut w.t, &w.s_hat, a, m)?;
 
             // (t,s) and (t,t) in one pass, then omega = (t,s)/(t,t).
-            device_dot2(
+            dot2_then_divide(
                 gpu,
                 k,
                 &mut w.num,
                 &mut w.den,
+                &mut w.omega,
                 &w.t,
                 &w.s,
                 &mut w.partials,
                 &mut w.partials_b,
                 n,
             )?;
-            divide_scalar(gpu, k, &mut w.omega, &w.num, &w.den)?;
 
             bicg_x_update(gpu, k, psi, w, n)?;
             bicg_r_update(gpu, k, w, n)?;
-            copy_scalar(gpu, k, &mut w.rho_old, &w.rho)?;
 
             perf.n_iterations = iters;
 
             if checking && iters % interval == 0 {
-                device_sum_mag(gpu, k, &mut w.final_res, &w.r, &mut w.partials, n)?;
                 let itl = to_label(iters)?;
-                convergence_test(
+                sum_mag_then_test(
                     gpu,
                     k,
+                    &mut w.final_res,
                     &mut w.flag,
-                    &w.final_res,
+                    &w.r,
                     &w.initial_res,
                     &w.norm_factor,
+                    &mut w.partials,
                     ctrl,
                     itl,
+                    n,
                 )?;
                 if read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)? {
                     perf.converged = true;
@@ -1622,7 +1884,7 @@ pub fn solve_pbicgstab(
     Ok(perf)
 }
 
-fn bicg_p_update(
+pub(crate) fn bicg_p_update(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -1643,7 +1905,7 @@ fn bicg_p_update(
     Ok(())
 }
 
-fn bicg_s_update(
+pub(crate) fn bicg_s_update(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -1663,7 +1925,7 @@ fn bicg_s_update(
     Ok(())
 }
 
-fn bicg_x_update(
+pub(crate) fn bicg_x_update(
     gpu: &Gpu,
     k: &SolverKernels,
     psi: &mut DevBuf<Scalar>,
@@ -1685,7 +1947,7 @@ fn bicg_x_update(
     Ok(())
 }
 
-fn bicg_r_update(
+pub(crate) fn bicg_r_update(
     gpu: &Gpu,
     k: &SolverKernels,
     w: &mut SolverWorkspace,
@@ -1752,6 +2014,7 @@ pub fn solve_pcg(
         return Ok(perf);
     }
     perf.converged = false;
+    refuse_round_trip_in_capture(gpu, ctrl, "solve_pcg")?;
 
     check_workspace(w, n)?;
     if psi.len() < n {
@@ -1793,8 +2056,8 @@ pub fn solve_pcg(
             let iters = it + 1;
 
             amul(gpu, k, &mut w.v, &w.p, a, m)?;
-            device_dot(gpu, k, &mut w.den, &w.p, &w.v, &mut w.partials, n)?;
-            divide_scalar(gpu, k, &mut w.alpha, &w.rho, &w.den)?;
+            // alpha = rho/(p,q), in one stage-two launch (SPEC-LIT 113.1).
+            dot_then_divide(gpu, k, &mut w.den, &mut w.alpha, &w.rho, &w.p, &w.v, &mut w.partials, n)?;
 
             cg_axpy(gpu, k, psi, &w.p, &w.alpha, n)?;
             cg_axmy(gpu, k, w, n)?;
@@ -1802,17 +2065,19 @@ pub fn solve_pcg(
             perf.n_iterations = iters;
 
             if checking && iters % interval == 0 {
-                device_sum_mag(gpu, k, &mut w.final_res, &w.r, &mut w.partials, n)?;
                 let itl = to_label(iters)?;
-                convergence_test(
+                sum_mag_then_test(
                     gpu,
                     k,
+                    &mut w.final_res,
                     &mut w.flag,
-                    &w.final_res,
+                    &w.r,
                     &w.initial_res,
                     &w.norm_factor,
+                    &mut w.partials,
                     ctrl,
                     itl,
+                    n,
                 )?;
                 if read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)? {
                     perf.converged = true;
@@ -1820,11 +2085,9 @@ pub fn solve_pcg(
                 }
             }
 
-            // z = M^-1 r ; beta = (r,z)/rho ; p = z + beta·p
+            // z = M^-1 r ; beta = (r,z)/rho ; rho = (r,z) ; p = z + beta·p
             precondition_ws(gpu, k, w, PreconTarget::PHatFromR, a, m, precon, n)?;
-            device_dot(gpu, k, &mut w.num, &w.r, &w.p_hat, &mut w.partials, n)?;
-            divide_scalar(gpu, k, &mut w.beta, &w.num, &w.rho)?;
-            copy_scalar(gpu, k, &mut w.rho, &w.num)?;
+            dot_then_ratio(gpu, k, &mut w.num, &mut w.beta, &mut w.rho, &w.r, &w.p_hat, &mut w.partials, n)?;
             cg_p_update(gpu, k, w, n)?;
         }
     }
@@ -3460,6 +3723,7 @@ mod tests {
     /// only - the one exact statement relating the per-region numbers to
     /// the global one.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_ranged_residuals_partition_the_global_residual() {
         let n = 19;
         let Some(r) = rig(n, 2024, false) else { return };
@@ -3526,5 +3790,490 @@ mod tests {
             (got - want).abs() / want < ROUNDOFF,
             "device {got:.15e} vs host {want:.15e}"
         );
+    }
+
+    // ======================================================================
+    //  SPEC-LIT 113.1: the fused loops against the loops as they stood
+    //
+    //  `unfused_pbicgstab` and `unfused_pcg` below are `solve_pbicgstab` and
+    //  `solve_pcg` copied verbatim from before SPEC-LIT 113.1 - every scalar
+    //  update a one-thread launch of its own. They are the reference the fused
+    //  loops are held to, bit for bit, and nothing but these tests calls them.
+    // ======================================================================
+
+    type Solve = fn(
+        &Gpu,
+        &SolverKernels,
+        &mut DevBuf<Scalar>,
+        &GpuLduMatrix,
+        &GpuMesh,
+        &mut SolverWorkspace,
+        &SolverControls,
+    ) -> Result<SolverPerformance>;
+
+    /// Every value of `buf` as its bits: `==` on floats calls `-0 == +0`
+    /// equal and `NaN != NaN` different, and this comparison must do neither.
+    fn bits_of(gpu: &Gpu, buf: &DevBuf<Scalar>) -> Vec<u64> {
+        gpu.download(buf).expect("download").iter().map(|v| v.to_bits() as u64).collect()
+    }
+    fn unfused_pbicgstab(
+        gpu: &Gpu,
+        k: &SolverKernels,
+        psi: &mut DevBuf<Scalar>,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        w: &mut SolverWorkspace,
+        ctrl: &SolverControls,
+    ) -> Result<SolverPerformance> {
+        let n = a.n_cells;
+        let mut perf = SolverPerformance {
+            converged: true,
+            ..Default::default()
+        };
+        if n == 0 {
+            return Ok(perf);
+        }
+        perf.converged = false;
+
+        check_workspace(w, n)?;
+        if psi.len() < n {
+            return Err(Error::Config(format!(
+                "solve_pbicgstab: psi holds {} values, the system has {n} cells",
+                psi.len()
+            )));
+        }
+
+        let precon = effective_preconditioner(ctrl.precon, w)?;
+        build_preconditioner(gpu, k, w, a, m, precon)?;
+
+        // ---- r = b - A·psi, and the normalisation the residual is measured in.
+        // device_norm_factor leaves A·psi in w.apsi, so the residual is one
+        // subtraction rather than a second matrix product.
+        device_norm_factor(gpu, k, w, &*psi, a, m)?;
+        vec_sub(gpu, k, &mut w.r, &a.source, &w.apsi, n)?;
+        vec_copy(gpu, k, &mut w.r0, &w.r, n)?;
+
+        device_sum_mag(gpu, k, &mut w.initial_res, &w.r, &mut w.partials, n)?;
+        // Report honestly if the loop never runs.
+        copy_scalar(gpu, k, &mut w.final_res, &w.initial_res)?;
+
+        gpu.fill_zero(&mut w.p)?;
+        gpu.fill_zero(&mut w.v)?;
+        gpu.fill_zero(&mut w.flag)?;
+        set_scalar(gpu, k, &mut w.rho_old, 1.0)?;
+        set_scalar(gpu, k, &mut w.alpha, 1.0)?;
+        set_scalar(gpu, k, &mut w.omega, 1.0)?;
+
+        let max_iter = ctrl.max_iter.max(0) as usize;
+        let interval = ctrl.check_interval.max(1) as usize;
+        let checking = !ctrl.fixed_iters;
+
+        // An already-converged system must not be iterated: that is where a
+        // pressure equation spends most of a steady run.
+        if checking {
+            convergence_test(
+                gpu, k, &mut w.flag, &w.initial_res, &w.initial_res, &w.norm_factor, ctrl, 0,
+            )?;
+            perf.converged = read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)?;
+        }
+
+        if !perf.converged {
+            for it in 0..max_iter {
+                let iters = it + 1;
+
+                device_dot(gpu, k, &mut w.rho, &w.r0, &w.r, &mut w.partials, n)?;
+
+                // beta = (rho/rho_old)·(alpha/omega)
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&k.beta_bicg)
+                        .arg(&mut w.beta)
+                        .arg(&w.rho)
+                        .arg(&w.rho_old)
+                        .arg(&w.alpha)
+                        .arg(&w.omega)
+                        .launch(one_thread())?;
+                }
+
+                bicg_p_update(gpu, k, w, n)?;
+                precondition_ws(gpu, k, w, PreconTarget::PHat, a, m, precon, n)?;
+                amul(gpu, k, &mut w.v, &w.p_hat, a, m)?;
+
+                device_dot(gpu, k, &mut w.den, &w.r0, &w.v, &mut w.partials, n)?;
+                divide_scalar(gpu, k, &mut w.alpha, &w.rho, &w.den)?;
+
+                bicg_s_update(gpu, k, w, n)?;
+                precondition_ws(gpu, k, w, PreconTarget::SHat, a, m, precon, n)?;
+                amul(gpu, k, &mut w.t, &w.s_hat, a, m)?;
+
+                // (t,s) and (t,t) in one pass, then omega = (t,s)/(t,t).
+                device_dot2(
+                    gpu,
+                    k,
+                    &mut w.num,
+                    &mut w.den,
+                    &w.t,
+                    &w.s,
+                    &mut w.partials,
+                    &mut w.partials_b,
+                    n,
+                )?;
+                divide_scalar(gpu, k, &mut w.omega, &w.num, &w.den)?;
+
+                bicg_x_update(gpu, k, psi, w, n)?;
+                bicg_r_update(gpu, k, w, n)?;
+                copy_scalar(gpu, k, &mut w.rho_old, &w.rho)?;
+
+                perf.n_iterations = iters;
+
+                if checking && iters % interval == 0 {
+                    device_sum_mag(gpu, k, &mut w.final_res, &w.r, &mut w.partials, n)?;
+                    let itl = to_label(iters)?;
+                    convergence_test(
+                        gpu,
+                        k,
+                        &mut w.flag,
+                        &w.final_res,
+                        &w.initial_res,
+                        &w.norm_factor,
+                        ctrl,
+                        itl,
+                    )?;
+                    if read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)? {
+                        perf.converged = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        finish_solve(gpu, k, psi, a, m, w, ctrl, &mut perf)?;
+        Ok(perf)
+    }
+
+    fn unfused_pcg(
+        gpu: &Gpu,
+        k: &SolverKernels,
+        psi: &mut DevBuf<Scalar>,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        w: &mut SolverWorkspace,
+        ctrl: &SolverControls,
+    ) -> Result<SolverPerformance> {
+        let n = a.n_cells;
+        let mut perf = SolverPerformance {
+            converged: true,
+            ..Default::default()
+        };
+        if n == 0 {
+            return Ok(perf);
+        }
+        perf.converged = false;
+
+        check_workspace(w, n)?;
+        if psi.len() < n {
+            return Err(Error::Config(format!(
+                "solve_pcg: psi holds {} values, the system has {n} cells",
+                psi.len()
+            )));
+        }
+
+        let precon = effective_preconditioner(ctrl.precon, w)?;
+        build_preconditioner(gpu, k, w, a, m, precon)?;
+
+        device_norm_factor(gpu, k, w, &*psi, a, m)?;
+        vec_sub(gpu, k, &mut w.r, &a.source, &w.apsi, n)?;
+
+        device_sum_mag(gpu, k, &mut w.initial_res, &w.r, &mut w.partials, n)?;
+        copy_scalar(gpu, k, &mut w.final_res, &w.initial_res)?;
+
+        gpu.fill_zero(&mut w.flag)?;
+
+        // z = M^-1 r ; p = z ; rho = (r,z)
+        precondition_ws(gpu, k, w, PreconTarget::PHatFromR, a, m, precon, n)?;
+        vec_copy(gpu, k, &mut w.p, &w.p_hat, n)?;
+        device_dot(gpu, k, &mut w.rho, &w.r, &w.p_hat, &mut w.partials, n)?;
+
+        let max_iter = ctrl.max_iter.max(0) as usize;
+        let interval = ctrl.check_interval.max(1) as usize;
+        let checking = !ctrl.fixed_iters;
+
+        if checking {
+            convergence_test(
+                gpu, k, &mut w.flag, &w.initial_res, &w.initial_res, &w.norm_factor, ctrl, 0,
+            )?;
+            perf.converged = read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)?;
+        }
+
+        if !perf.converged {
+            for it in 0..max_iter {
+                let iters = it + 1;
+
+                amul(gpu, k, &mut w.v, &w.p, a, m)?;
+                device_dot(gpu, k, &mut w.den, &w.p, &w.v, &mut w.partials, n)?;
+                divide_scalar(gpu, k, &mut w.alpha, &w.rho, &w.den)?;
+
+                cg_axpy(gpu, k, psi, &w.p, &w.alpha, n)?;
+                cg_axmy(gpu, k, w, n)?;
+
+                perf.n_iterations = iters;
+
+                if checking && iters % interval == 0 {
+                    device_sum_mag(gpu, k, &mut w.final_res, &w.r, &mut w.partials, n)?;
+                    let itl = to_label(iters)?;
+                    convergence_test(
+                        gpu,
+                        k,
+                        &mut w.flag,
+                        &w.final_res,
+                        &w.initial_res,
+                        &w.norm_factor,
+                        ctrl,
+                        itl,
+                    )?;
+                    if read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)? {
+                        perf.converged = true;
+                        break;
+                    }
+                }
+
+                // z = M^-1 r ; beta = (r,z)/rho ; p = z + beta·p
+                precondition_ws(gpu, k, w, PreconTarget::PHatFromR, a, m, precon, n)?;
+                device_dot(gpu, k, &mut w.num, &w.r, &w.p_hat, &mut w.partials, n)?;
+                divide_scalar(gpu, k, &mut w.beta, &w.num, &w.rho)?;
+                copy_scalar(gpu, k, &mut w.rho, &w.num)?;
+                cg_p_update(gpu, k, w, n)?;
+            }
+        }
+
+        finish_solve(gpu, k, psi, a, m, w, ctrl, &mut perf)?;
+        Ok(perf)
+    }
+
+    /// One solve, twice on the same workspace: from zero, then again from the
+    /// first answer. The solutions' bits and `[iterations, converged, initial
+    /// residual bits, final residual bits]` for each.
+    #[allow(clippy::too_many_arguments)]
+    fn twice(
+        solve: Solve,
+        gpu: &Gpu,
+        k: &SolverKernels,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        n: usize,
+        ctrl: &SolverControls,
+    ) -> (Vec<Vec<u64>>, Vec<[u64; 4]>) {
+        let mut psi: DevBuf<Scalar> = gpu.zeros(n).expect("psi");
+        let mut w = SolverWorkspace::for_mesh(gpu, m).expect("workspace");
+        let mut sols = Vec::new();
+        let mut reps = Vec::new();
+        for _ in 0..2 {
+            let p = solve(gpu, k, &mut psi, a, m, &mut w, ctrl).expect("solve");
+            sols.push(bits_of(gpu, &psi));
+            reps.push([
+                p.n_iterations as u64,
+                p.converged as u64,
+                p.initial_residual.to_bits() as u64,
+                p.final_residual.to_bits() as u64,
+            ]);
+        }
+        (sols, reps)
+    }
+
+    /// The scenarios SPEC-LIT 113.1 lists: fixed solves of 1, 7 and 40
+    /// sweeps, and checking solves at `check_interval` 1 and 3.
+    fn scenarios(precon: Preconditioner) -> Vec<(String, SolverControls)> {
+        let base = SolverControls { precon, ..tight() };
+        let mut v = Vec::new();
+        for sweeps in [1, 7, 40] {
+            let c = SolverControls { max_iter: sweeps, fixed_iters: true, ..base };
+            v.push((format!("fixed, {sweeps} sweeps"), c));
+        }
+        for interval in [1, 3] {
+            let c = SolverControls { check_interval: interval, ..base };
+            v.push((format!("checking, interval {interval}"), c));
+        }
+        v
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_same(
+        what: &str,
+        fused: Solve,
+        unfused: Solve,
+        gpu: &Gpu,
+        k: &SolverKernels,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        n: usize,
+        precon: Preconditioner,
+    ) {
+        for (name, ctrl) in scenarios(precon) {
+            let (fs, fr) = twice(fused, gpu, k, a, m, n, &ctrl);
+            let (us, ur) = twice(unfused, gpu, k, a, m, n, &ctrl);
+            for pass in 0..2 {
+                let first = fs[pass].iter().zip(&us[pass]).position(|(x, y)| x != y);
+                assert!(
+                    first.is_none(),
+                    "{what}, {name}, solve {}: cell {:?} differs from the unfused loop (SPEC-LIT 113.1)",
+                    pass + 1,
+                    first
+                );
+                assert_eq!(
+                    fr[pass], ur[pass],
+                    "{what}, {name}, solve {}: [iterations, converged, initial, final] differ from the unfused loop (SPEC-LIT 113.1)",
+                    pass + 1
+                );
+            }
+        }
+    }
+
+    /// SPEC-LIT 113.1: the fused PBiCGStab loop is the unfused one, bit for bit.
+    #[test]
+    fn the_fused_pbicgstab_is_the_unfused_one_bit_for_bit() {
+        {
+            let n = 29;
+            let Some(r) = rig(n, 606, false) else { return };
+            assert_same(
+                "PBiCGStab, dense 29 cells, diagonal",
+                solve_pbicgstab,
+                unfused_pbicgstab,
+                &r.gpu, &r.k, &r.a, &r.m, n,
+                Preconditioner::Diagonal,
+            );
+        }
+        let Some(st) = structured([12, 10, 8], false) else { return };
+        let nc = st.hm.n_cells;
+        assert_same(
+            "PBiCGStab, 12x10x8 block, DILU",
+            solve_pbicgstab,
+            unfused_pbicgstab,
+            &st.gpu, &st.k, &st.a, &st.m, nc,
+            Preconditioner::Dilu,
+        );
+    }
+
+    /// SPEC-LIT 113.1: the fused PCG loop is the unfused one, bit for bit.
+    #[test]
+    fn the_fused_pcg_is_the_unfused_one_bit_for_bit() {
+        {
+            let n = 29;
+            let Some(r) = rig(n, 606, true) else { return };
+            assert_same(
+                "PCG, dense 29 cells, diagonal",
+                solve_pcg,
+                unfused_pcg,
+                &r.gpu, &r.k, &r.a, &r.m, n,
+                Preconditioner::Diagonal,
+            );
+        }
+        let Some(st) = structured([12, 10, 8], true) else { return };
+        let nc = st.hm.n_cells;
+        assert_same(
+            "PCG, 12x10x8 block, DIC",
+            solve_pcg,
+            unfused_pcg,
+            &st.gpu, &st.k, &st.a, &st.m, nc,
+            Preconditioner::Dic,
+        );
+    }
+
+    /// Kernel nodes of a fixed-iteration solve of `sweeps` sweeps, captured
+    /// and replayed through the §81.5 protocol.
+    fn census(r: &Rig, n: usize, solve: Solve, sweeps: Label) -> usize {
+        let ctrl = SolverControls {
+            max_iter: sweeps,
+            fixed_iters: true,
+            report_residuals: false,
+            ..tight()
+        };
+        crate::capture::capture_replays_bitwise(
+            &r.gpu,
+            "census (SPEC-LIT 113.1)",
+            || {
+                let psi: DevBuf<Scalar> = r.gpu.zeros(n)?;
+                let w = SolverWorkspace::for_mesh(&r.gpu, &r.m)?;
+                Ok((psi, w))
+            },
+            |(psi, w): &mut (DevBuf<Scalar>, SolverWorkspace)| {
+                solve(&r.gpu, &r.k, psi, &r.a, &r.m, w, &ctrl).map(|_| ())
+            },
+            |(psi, _): &(DevBuf<Scalar>, SolverWorkspace)| {
+                Ok(vec![crate::capture::buf(&r.gpu, "psi", psi)?])
+            },
+        )
+        .expect("SPEC-LIT 81.7: the solve must capture and replay bitwise")
+        .shape
+        .kernel
+    }
+
+    /// SPEC-LIT 113.1: the fold is in the captured graph. Four kernel nodes a
+    /// sweep fewer for PBiCGStab, three for PCG, and the census SPEC-LIT
+    /// quotes for 12 PBiCGStab sweeps on this rig.
+    #[test]
+    fn the_fused_loops_launch_fewer_kernels_a_sweep() {
+        let n = 29;
+        {
+            let Some(r) = rig(n, 606, false) else { return };
+            let (u6, f6) = (census(&r, n, unfused_pbicgstab, 6), census(&r, n, solve_pbicgstab, 6));
+            let (u12, f12) = (census(&r, n, unfused_pbicgstab, 12), census(&r, n, solve_pbicgstab, 12));
+            println!("census: PBiCGStab 6 sweeps {u6} -> {f6}, 12 sweeps {u12} -> {f12} kernel nodes");
+            assert_eq!(u12, 232, "the unfused 12-sweep census is not the 232 SPEC-LIT 113.1 quotes");
+            assert_eq!(f12, 184, "the fused 12-sweep census is not the 184 SPEC-LIT 113.1 quotes");
+            assert_eq!(u6 - f6, 4 * 6, "PBiCGStab, 6 sweeps: not four fewer kernels a sweep");
+            assert_eq!(u12 - f12, 4 * 12, "PBiCGStab, 12 sweeps: not four fewer kernels a sweep");
+        }
+        let Some(r) = rig(n, 606, true) else { return };
+        let (u6, f6) = (census(&r, n, unfused_pcg, 6), census(&r, n, solve_pcg, 6));
+        let (u12, f12) = (census(&r, n, unfused_pcg, 12), census(&r, n, solve_pcg, 12));
+        println!("census: PCG 6 sweeps {u6} -> {f6}, 12 sweeps {u12} -> {f12} kernel nodes");
+        assert_eq!(u6 - f6, 3 * 6, "PCG, 6 sweeps: not three fewer kernels a sweep");
+        assert_eq!(u12 - f12, 3 * 12, "PCG, 12 sweeps: not three fewer kernels a sweep");
+    }
+
+    /// SPEC-LIT 113.2: inside a capture, a checking solve and a reporting
+    /// solve are refused by name, and a refusal leaves nothing armed.
+    #[test]
+    fn a_round_trip_solve_is_refused_by_name_inside_a_capture() {
+        let n = 29;
+        let Some(r) = rig(n, 606, true) else { return };
+        let mut psi: DevBuf<Scalar> = r.gpu.zeros(n).expect("psi");
+        let mut w = SolverWorkspace::for_mesh(&r.gpu, &r.m).expect("workspace");
+
+        let checking = SolverControls { report_residuals: false, ..tight() };
+        let reporting = SolverControls {
+            max_iter: 5,
+            fixed_iters: true,
+            report_residuals: true,
+            ..tight()
+        };
+        let solvers: [(&str, Solve); 2] = [("solve_pbicgstab", solve_pbicgstab), ("solve_pcg", solve_pcg)];
+        for (who, solve) in solvers {
+            for (setting, ctrl) in [("fixed_iters", &checking), ("report_residuals", &reporting)] {
+                let err = r
+                    .gpu
+                    .capture(|_| solve(&r.gpu, &r.k, &mut psi, &r.a, &r.m, &mut w, ctrl).map(|_| ()))
+                    .err()
+                    .expect("a round-trip solve inside a capture must be refused");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains(who) && msg.contains(setting) && msg.contains("SPEC-LIT 113.2"),
+                    "{who} with {setting} was not refused by name: {msg}"
+                );
+            }
+        }
+
+        // Nothing left armed: the same Gpu still captures a fixed-iteration solve.
+        let fixed = SolverControls {
+            max_iter: 5,
+            fixed_iters: true,
+            report_residuals: false,
+            ..tight()
+        };
+        let g = r
+            .gpu
+            .capture(|_| solve_pbicgstab(&r.gpu, &r.k, &mut psi, &r.a, &r.m, &mut w, &fixed).map(|_| ()))
+            .expect("a fixed-iteration capture after the refusals");
+        assert!(g.is_some(), "the fixed-iteration capture after the refusals recorded nothing");
     }
 }

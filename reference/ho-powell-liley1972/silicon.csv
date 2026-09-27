@@ -1,0 +1,17 @@
+# C. Y. Ho, R. W. Powell and P. E. Liley, "Thermal conductivity of the elements: a comprehensive
+# review", J. Phys. Chem. Ref. Data 1 (1972) 279-421, p. 394, "Thermal conductivity of silicon",
+# recommended values, solid: T (K) and k (W cm^-1 K^-1), the printed rows from 300 to 600 K only.
+# The source's remarks: the values are for high-purity silicon; those at 300 K and above are
+# recommended values, considered accurate to within 5 % of the true values from 300 to 1000 K.
+# knot = 1 marks the five rows Gate 100-B leg 1 builds its table from; knot = 0 the four rows it
+# holds that table against. The flag is this repository's; the numbers are the source's.
+t,k,knot
+300,1.48,1
+323.2,1.33,0
+350,1.19,1
+373.2,1.08,0
+400,0.989,1
+473.2,0.814,0
+500,0.762,1
+573.2,0.651,0
+600,0.619,1

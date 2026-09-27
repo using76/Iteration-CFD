@@ -397,6 +397,9 @@ fn reject_div<T: Copy>(setting: &str, raw: &str, name: &str, fallback: T) -> Res
 /// `limitedLinear 1` keeps meaning "fully limited". *DESIGN*, and the reason
 /// the coefficient is no longer thrown away: the previous reader mapped every
 /// `limitedLinear` to `β = 1` whatever the case wrote.
+///
+/// A coefficient outside those ranges is a §13.4 error at parse time; the
+/// clamp in `fv.rs` is what `-permissive` substitutes.
 pub fn parse_div(setting: &str, raw: &str) -> Result<DivEntry> {
     let mut w = words(raw);
 
@@ -441,6 +444,22 @@ pub fn parse_div(setting: &str, raw: &str) -> Result<DivEntry> {
         }
     };
 
+    // A coefficient the case wrote outside the range SPEC-LIT states for
+    // the scheme. `fv.rs` clamps it silently; the case has to be told
+    // (SPEC-LIT 13.4), and under -permissive the clamped value is what runs.
+    let in_range = |what: &str, c: Scalar, lo: Scalar, hi: Scalar| -> Result<Scalar> {
+        if c >= lo && c <= hi {
+            return Ok(c);
+        }
+        let clamped = if c.is_nan() { lo } else { c.clamp(lo, hi) };
+        unreadable(
+            setting,
+            raw,
+            &format!("{name} <{what}> in [{lo}, {hi}]: {c} would be clamped to {clamped}"),
+            clamped,
+        )
+    };
+
     let scheme = match name {
         "linear" => DivScheme::Central,
         "upwind" => DivScheme::Upwind,
@@ -459,18 +478,26 @@ pub fn parse_div(setting: &str, raw: &str) -> Result<DivEntry> {
         "QUICK" | "quick" => DivScheme::Quick,
         "QUICKUnlimited" | "quickUnlimited" => DivScheme::QuickUnlimited,
 
-        "Gamma" | "gamma" => DivScheme::Gamma(need("beta_m 0.1..0.5")?),
+        "Gamma" | "gamma" => {
+            DivScheme::Gamma(in_range("beta_m", need("beta_m 0.1..0.5")?, 0.1, 0.5)?)
+        }
 
-        "blended" => DivScheme::Blended(need("gamma 0..1")?),
+        "blended" => DivScheme::Blended(in_range("gamma", need("gamma 0..1")?, 0.0, 1.0)?),
 
         // SPEC-LIT §11.5 DESIGN: 0.75 when the case does not say. It is a
         // tuning constant, not a canonical value, and the doc comment on
         // `DivScheme::LinearUpwindBlended` says so.
-        "linearUpwindBlended" => DivScheme::LinearUpwindBlended(coeff.unwrap_or(0.75)),
+        "linearUpwindBlended" => DivScheme::LinearUpwindBlended(match coeff {
+            Some(c) => in_range("gamma", c, 0.0, 1.0)?,
+            None => 0.75,
+        }),
 
-        "limitedLinear" | "Sweby" | "sweby" => {
-            DivScheme::Limited(Limiter::Sweby(need("beta 1..2")?))
-        }
+        "limitedLinear" | "Sweby" | "sweby" => DivScheme::Limited(Limiter::Sweby(in_range(
+            "beta",
+            need("beta 1..2")?,
+            1.0,
+            2.0,
+        )?)),
 
         "vanLeer" | "vanleer" => DivScheme::Limited(Limiter::VanLeer),
         "vanAlbada" | "vanalbada" => DivScheme::Limited(Limiter::VanAlbada),
@@ -1011,5 +1038,64 @@ mod tests {
         assert_ne!(u, k);
         assert_ne!(u, t);
         assert_ne!(k, t);
+    }
+
+    /// SPEC-LIT §13.4 and §13.4.4's audit. `fv.rs` clamps an out-of-range
+    /// coefficient silently; the case has to be told at parse time, naming
+    /// the range SPEC-LIT states for the scheme. The bounds themselves are
+    /// inclusive - the clamps stay exactly as they are.
+    #[test]
+    fn a_scheme_coefficient_outside_its_range_is_refused_by_name() {
+        let _g = strict();
+        for (raw, range) in [
+            ("Gauss limitedLinear 0.5", "[1, 2]"),
+            ("Gauss Gamma 0.05", "[0.1, 0.5]"),
+            ("Gauss blended 1.5", "[0, 1]"),
+            ("Gauss linearUpwindBlended -0.1", "[0, 1]"),
+        ] {
+            let e = parse_div("divSchemes/div(phi,U)", raw)
+                .expect_err(&format!("{raw} is outside its range"));
+            let msg = e.to_string();
+            assert!(msg.contains(raw), "{msg}");
+            assert!(msg.contains(range), "{msg}");
+            assert!(msg.contains("-permissive"), "{msg}");
+        }
+
+        for raw in [
+            "Gauss limitedLinear 1",
+            "Gauss limitedLinear 2",
+            "Gauss Gamma 0.1",
+            "Gauss Gamma 0.5",
+            "Gauss blended 0",
+            "Gauss blended 1",
+        ] {
+            assert!(
+                parse_div("divSchemes/div(phi,U)", raw).is_ok(),
+                "{raw} sits on an inclusive bound and must parse"
+            );
+        }
+    }
+
+    /// `-permissive` runs what `fv.rs` runs today: the CLAMPED coefficient,
+    /// the one the TVD/NVD proofs cover.
+    #[test]
+    fn permissive_takes_the_clamped_coefficient() {
+        let _g = crate::io::contract::permissive_test_guard();
+        set_permissive(true);
+        assert_eq!(
+            parse_div("divSchemes/div(phi,U)", "Gauss limitedLinear 0.5")
+                .unwrap()
+                .scheme,
+            DivScheme::Limited(Limiter::Sweby(1.0))
+        );
+        assert_eq!(
+            parse_div("divSchemes/div(phi,U)", "Gauss Gamma 0.05").unwrap().scheme,
+            DivScheme::Gamma(0.1)
+        );
+        assert_eq!(
+            parse_div("divSchemes/div(phi,U)", "Gauss blended 1.5").unwrap().scheme,
+            DivScheme::Blended(1.0)
+        );
+        set_permissive(false);
     }
 }

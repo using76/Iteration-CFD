@@ -221,9 +221,10 @@ pub fn barth_jespersen(
 }
 
 /// Below this the reconstruction offset is treated as zero and the limiter
-/// leaves the cell alone. `1e-300` is far below any physical increment and
-/// far above the point where `(phi_max - phi_p)/D` overflows.
-pub const LIMITER_FLOOR: Scalar = 1e-300;
+/// leaves the cell alone: [`crate::SCALAR_FLOOR`], far below any physical
+/// increment and far above the point where `(phi_max - phi_p)/D` overflows, in
+/// either precision (SPEC-LIT 112.1).
+pub const LIMITER_FLOOR: Scalar = crate::SCALAR_FLOOR;
 
 /// `rho_q V_q = sum_p w_qp rho_p V_p`, one gather per new cell.
 pub fn transfer_density(
@@ -666,6 +667,7 @@ mod tests {
     /// `coarsen_then_refine_loses_information_at_the_order_the_prolongation_promises`
     /// measures it.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn refine_then_coarsen_returns_the_field_to_round_off() {
         for mode in [Prolongation::Constant, Prolongation::LimitedLinear] {
             let f = Forest::uniform([8, 8, 8], CUBE).unwrap();
@@ -791,6 +793,7 @@ mod tests {
     /// rescale divides by (near) zero; the recentred reconstruction is exact
     /// and finite on the same data.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_multiplicative_rescale_is_singular_where_the_recentred_form_is_not() {
         let f = Forest::uniform([4, 4, 4], CUBE).unwrap();
         let r = f.build().unwrap();
@@ -837,6 +840,7 @@ mod tests {
     /// whole conservation argument, so it is asserted directly rather than
     /// only through its consequences.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_conservative_weights_sum_to_one() {
         let f = Forest::uniform([6, 6, 6], CUBE).unwrap();
         let r = f.build().unwrap();

@@ -35,6 +35,14 @@
 
 #define OFPATCH_EMPTY 2
 
+//  SPEC-LIT 112.1: one floor per precision, the same distance above each
+//  precision's smallest normal.
+#ifdef OFGPU_SINGLE
+#define OFGPU_ADAPT_TINY ((ofscalar)1e-30f)
+#else
+#define OFGPU_ADAPT_TINY ((ofscalar)1e-300)
+#endif
+
 //- The number of entries of the sorted array `a[0..n)` strictly below `v`.
 //  Spelled out rather than pulled from thrust because the host reference in
 //  src/adapt/rebuild.rs spells the same loop, and the two must agree on the
@@ -330,8 +338,8 @@ extern "C" __global__ void adaptLimiter
         const ofvec3 xq = cNew[ownChild[i]];
         const ofscalar d = dot3(g, mkvec(xq.x - xb.x, xq.y - xb.y, xq.z - xb.z));
         ofscalar s = 1;
-        if (d > ofscalar(1e-300))       s = ofmin_(ofscalar(1), (hi - phiP)/d);
-        else if (d < ofscalar(-1e-300)) s = ofmin_(ofscalar(1), (lo - phiP)/d);
+        if (d > OFGPU_ADAPT_TINY)       s = ofmin_(ofscalar(1), (hi - phiP)/d);
+        else if (d < -OFGPU_ADAPT_TINY) s = ofmin_(ofscalar(1), (lo - phiP)/d);
         psi = ofmin_(psi, ofmax_(s, ofscalar(0)));
     }
     out[p] = psi;

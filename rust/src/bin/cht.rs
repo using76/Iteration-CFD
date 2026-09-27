@@ -48,7 +48,7 @@ use common::output_root;
 use ofgpu::cht::flow::{run_flow_case, ChtFlowSolution};
 use ofgpu::cht::{run_case, ChtSolution};
 use ofgpu::error::{IoContext, Result};
-use ofgpu::io::case_cht::{read_cht_case, LoweredChtCase};
+use ofgpu::io::case_cht::{read_cht_case, LoweredBc, LoweredChtCase};
 use ofgpu::solid::case::{banner_lines, run_stress, summary_lines, thermal_converged, write_region_vtu};
 use ofgpu::{Gpu, Scalar};
 
@@ -114,6 +114,11 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
     // The case directory is what a region's `polyMesh` path is resolved
     // against (SPEC-LIT 97.2); all-block cases never touch it.
     let low = case.lower_in(case_path.parent())?;
+    // R8's conflict notes - the explicit form won, and the reader says so
+    // (SPEC-LIT 97).
+    for n in &low.notes {
+        println!("  note: {n}");
+    }
 
     println!(
         "ofgpu-cht | case '{}' | {} | {}",
@@ -136,6 +141,32 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
                 f64::from(f.alpha()),
                 f64::from(f.pr()),
             );
+            if let Some(p) = low.conduction_curves[i].as_ref().and_then(|c| c.kappa.as_ref()) {
+                println!(
+                    "    kappa: {} - evaluated on the device at the current T inside every \
+                     energy correction (SPEC-LIT 100.10); the k above is the curve at the initial T",
+                    p.describe()
+                );
+            }
+            // SPEC-LIT §100.14 and §100.13.
+            if let Some((p, _)) = &low.viscosity {
+                println!(
+                    "    mu: {} - nu_lam = mu(T)/rho rewritten from the current T every SIMPLE \
+                     iteration (SPEC-LIT 100.14); the mu above is the curve at the initial T",
+                    p.describe()
+                );
+            }
+            if low.viscous_dissipation {
+                println!("    viscous dissipation: a heat source every SIMPLE iteration (SPEC-LIT 100.13)");
+            }
+            // SPEC-LIT §100.11: a fluid region's sources, which this branch skipped.
+            if low.sources[i] != 0.0 {
+                println!("    source {:.4e} W/m^3", f64::from(low.sources[i]));
+            }
+            for s in low.volumetric.iter().filter(|s| s.region == i) {
+                let cells = s.cells.as_ref().map_or(String::new(), |c| format!(", {} cells", c.len()));
+                println!("    source {} ({}{cells})", s.law.describe(), s.path);
+            }
             continue;
         }
         let m = &low.materials[i];
@@ -150,8 +181,24 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
             f64::from(m.diffusivity()),
             f64::from(m.effusivity()),
         );
+        if let Some(cv) = &low.conduction_curves[i] {
+            let say = |p: &Option<ofgpu::properties::Property>| {
+                p.as_ref().map_or("the number above".to_string(), |c| c.describe())
+            };
+            println!(
+                "    kappa: {}; c: {} - rebuilt from the current T every outer pass (SPEC-LIT \
+                 100.6); the numbers above are the curves at the initial T",
+                say(&cv.kappa),
+                say(&cv.c)
+            );
+        }
         if low.sources[i] != 0.0 {
             println!("    source {:.4e} W/m^3", f64::from(low.sources[i]));
+        }
+        // SPEC-LIT §100.11: a curve, a table in t, a box.
+        for s in low.volumetric.iter().filter(|s| s.region == i) {
+            let cells = s.cells.as_ref().map_or(String::new(), |c| format!(", {} cells", c.len()));
+            println!("    source {} ({}{cells})", s.law.describe(), s.path);
         }
     }
     if let Some(b) = &low.buoyancy {
@@ -162,6 +209,34 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
             f64::from(b.g.y),
             f64::from(b.g.z),
             f64::from(b.t_ref)
+        );
+    }
+
+    // SPEC-LIT §98.7: the enclosure, BEFORE the run.
+    if let Some(r) = &low.radiation {
+        let walls: Vec<String> = low
+            .patch_bcs
+            .iter()
+            .filter_map(|(reg, p, bc)| match bc {
+                LoweredBc::S2sWall { emissivity, q } => Some(format!(
+                    "{}:{p} eps {} q {} W/m^2",
+                    low.region_names[*reg],
+                    f64::from(*emissivity),
+                    f64::from(*q)
+                )),
+                _ => None,
+            })
+            .collect();
+        println!(
+            "  radiation: {}/constant/radiationProperties - viewFactor, emissivity {}, \
+             radiationRelaxation {}, radiositySweeps {} (0 is the (S50.8) count); s2sWall: {}; \
+             radiating interfaces: {} (SPEC-LIT 98.7)",
+            r.dir,
+            f64::from(r.config.emissivity),
+            f64::from(r.config.relaxation),
+            r.config.sweeps,
+            if walls.is_empty() { "none".to_string() } else { walls.join(", ") },
+            r.interfaces.len()
         );
     }
 
@@ -322,6 +397,57 @@ fn report_flow(low: &LoweredChtCase, sol: &ChtFlowSolution) {
         }
         println!("  largest interface temperature JUMP: {:.6e} K", f64::from(worst_jump));
     }
+
+    // SPEC-LIT §100.12-§100.13: what the sources and the dissipation delivered.
+    if sol.source_power != 0.0 || low.viscous_dissipation {
+        println!(
+            "\n  volumetric sources {:+.6e} W; viscous dissipation {:+.6e} W (SPEC-LIT 100.13)",
+            f64::from(sol.source_power),
+            f64::from(sol.dissipation_power)
+        );
+    }
+
+    // SPEC-LIT §98.8: the enclosure, and the split it makes checkable.
+    if let Some(e) = &sol.enclosure {
+        println!(
+            "\n  enclosure (SPEC-LIT 98.8): {} radiating faces, {} updates, radiationRelaxation {}, \
+             {} sweeps",
+            e.faces.len(),
+            e.updates,
+            f64::from(e.relaxation),
+            e.sweeps
+        );
+        println!("    view factors: {}", e.view_factors);
+        println!(
+            "    SUM A q_r = {:+.6e} W against SUM A |q_r| = {:.6e} W; radiosity residual {:.3e}",
+            f64::from(e.net_power),
+            f64::from(e.gross_power),
+            f64::from(e.radiosity_residual)
+        );
+        for (region, patch, bc) in &low.patch_bcs {
+            if !matches!(bc, LoweredBc::S2sWall { .. }) {
+                continue;
+            }
+            if let Ok((q_ext, q_in, q_rad, lin)) = sol.radiative_split(*region, patch) {
+                println!(
+                    "    {}:{patch}: external {:+.6e}, conducted in {:+.6e}, radiated out {:+.6e}, \
+                     (S98.10) L {:.3e} W",
+                    low.region_names[*region],
+                    f64::from(q_ext),
+                    f64::from(q_in),
+                    f64::from(q_rad),
+                    f64::from(lin)
+                );
+            }
+        }
+        if e.faces.iter().any(|f| f.interface) {
+            println!(
+                "    radiating interfaces: radiated {:+.6e} W, (S98.9) cell source {:+.6e} W",
+                f64::from(sol.interface_radiated()),
+                f64::from(e.interface_source)
+            );
+        }
+    }
 }
 
 fn write_flow_csv(path: &Path, sol: &ChtFlowSolution) -> Result<()> {
@@ -371,6 +497,15 @@ fn report(low: &LoweredChtCase, sol: &ChtSolution) {
     }
 
     println!("\n  steps {} | last residual {:.3e}", sol.steps, f64::from(sol.residual));
+    if !sol.outer_changes.is_empty() {
+        println!(
+            "  outer loop: {} passes in the last step, last relative change {:.3e} against \
+             {:e} (SPEC-LIT 100.7)",
+            sol.outer_changes.len(),
+            f64::from(*sol.outer_changes.last().unwrap()),
+            f64::from(low.outer.tolerance)
+        );
+    }
 
     // The per-region story behind that global number (the §13.4.2 rule of
     // saying what was used, applied to the linear solve): one line per
