@@ -26147,24 +26147,43 @@ returns and moves nothing. With `F` of (92.34) at the run's
 2^max_level` and `tol = 0.1 h_f`:
 
 ```
-t_e(p)  = clamp( (p - x_a).(x_b - x_a) / |x_b - x_a|^2 , 0, 1 ),   e = (a, b) in F
+C       = the capture chains: the polylines of (92.35) at the run's feature_angle_deg, each cut
+          again at every point where the curve turns further than 30 deg; a closed polyline
+          with no such point is one closed chain, one with any is re-rooted there and cut
+arc_c(s), s in [0, L_c]    the arclength along chain c
+s_c(p), d_c(p), f_c(p)     the nearest point of c to p: arclength, distance, foot (the smaller s on a tie)
 
-w = (p, q) in W covers e  iff  |p - proj_e(p)| <= tol,  |q - proj_e(q)| <= tol
-                          and  |(q - p).(x_b - x_a)| >= cos(30 deg) |q - p| |x_b - x_a|
+w = (p, q) in W covers c  iff  d_c(p) <= tol,  d_c(q) <= tol,  k = f_c(q) - f_c(p) != 0,
+                               |(q - p).k| >= cos(30 deg) |q - p| |k|,
+                          and  D <= |q - p| + 2 tol
+  D, the covered arc: |s_c(q) - s_c(p)|, or on a closed chain L_c - |s_c(q) - s_c(p)| across the seam
+     when that is shorter
 
-I_e             = union over the w covering e of [ min(t_e(p), t_e(q)), max(t_e(p), t_e(q)) ]
-sharp_length    = sum over e in F of |x_b - x_a|
-captured_length = sum over e in F of |I_e| |x_b - x_a|                          (92.62)
+I_c             = union over the w covering c of their arcs (mod L_c on a closed chain)
+sharp_length    = sum over e in F of |x_b - x_a|   ( = sum over c of L_c )
+captured_length = sum over c of |I_c|                                                   (92.62)
 ```
 
 It is computed with the attraction on or off - a surface's sharp length does
 not depend on a knob - so `feature_tolerance = 0` reports how little of the
 edge its chamfer holds rather than nothing. A covering edge runs ALONG the
 feature edge, within 30 degrees, with both ends within `tol`: a face diagonal
-that merely ends on the edge covers nothing. The union is per feature edge,
-so two wall edges over one stretch count it once and `captured_length <=
-sharp_length` by construction. `tol` is a tenth of the finest cell, so a
-chamfer half a cell off the edge does not count; it exceeds (92.28)'s default
+that merely ends on the edge covers nothing. The union is per chain, so two
+wall edges over one stretch count it once and `captured_length <=
+sharp_length` by construction. It is measured along CHAINS, not per feature
+segment, because an STL splits a straight edge into collinear segments whose
+joints need not be mesh points: a wall edge across a joint has neither
+end-pair within `tol` of one segment, and the per-segment measure this
+paragraph first stated (the builds of commits 0fa9e2b to 7178685, release
+binary 7ff16117) read a corpus box whose 12 edges the mesh reproduces
+exactly at 3.458 of 8.178 m, 0.4229, where along its 12 chains it is 8.178 of 8.178 m. The direction a covering edge must run
+along is the chord between its two feet, which on a one-segment chain is the
+segment's own direction, so there the measure is the per-segment one. The
+covered arc may exceed the edge by at most `2 tol`: a short wall edge whose
+ends land on the two arms of a chain that bends back on itself (a hairpin
+within `tol` of itself) would otherwise be credited with the whole bend.
+`tol` is a tenth of the finest cell, so a chamfer half a cell off the edge
+does not count; it exceeds (92.28)'s default
 dead band `eps = 1e-3 base_size` by the factor `100 / 2^max_level` - 1.56 at
 level 6 - and falls below it at level 7 and deeper, where a point the band
 left at `eps` may not count; that is recorded here rather than hidden.
@@ -26201,6 +26220,11 @@ the only kind it accepts.
 | the same mesh with the point at one edge's middle pulled half a cell off it | `captured_length` falls by exactly that edge's length |
 | the off-lattice cube, the attraction on and off | the capture is larger with it on; both are printed |
 | a smooth sphere | `sharp_length` and `captured_length` are both 0 |
+| a polyline with a 45-degree kink, a closed square and a closed 16-gon, at a feature angle of 60 degrees | cut at the kink into chains of 2 and 1; the square into 4 open chains of 1; the 16-gon stays one closed chain of `32 sin(pi/16)` |
+| a one-segment chain against the per-segment cover test | the same interval wherever that test gives one of positive length, and no cover wherever it gives none |
+| a closed 16-gon and wall edges between the midpoints of its sides | the edge across the seam covers one side's length across it, and the 16 edges cover the whole loop |
+| a hairpin chain and a short wall edge from one arm to the other | no cover: the arc exceeds the edge by more than `2 tol` |
+| a cube on the cell planes whose STL splits each edge into 3 collinear segments | `captured_length` equals `sharp_length`, 24, where the per-segment measure reads 0; pulling the point at one edge's middle off it takes that edge's 2 away |
 
 ---
 

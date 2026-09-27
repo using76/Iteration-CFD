@@ -113,7 +113,9 @@ feature-edge capture is a hard constraint instead. So:
 
 **Feature-edge capture is scored** as `outcome.feature_capture` and the failure flag **F3e**. Since
 2026-09-27 the automesher MEASURES it: `stages[snap].feature_capture` = {`sharp_length_m`,
-`captured_length_m`, `tol_m`} (SPEC-LIT (92.62), binary 0fa9e2b or later). A summary from an older binary
+`captured_length_m`, `tol_m`} (SPEC-LIT (92.62), binary 0fa9e2b or later; measured along the capture chains
+of collinear feature segments since the L0c build, binary `72f7851e`, and per feature segment by the builds
+before it, `7ff16117` included - section D's table below says what that changes). A summary from an older binary
 falls back to the count proxy (`stages[snap]`: `n_feature_edges`, `n_snapped_to_edge`,
 `n_snapped_to_corner`). The summary's own `config.snap.feature_tolerance` is read either way. The rows
 are tried in order and the first that applies decides:
@@ -145,32 +147,42 @@ R-PLANE config (the probes `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap`)
 
 #### The measured share on the tuning rows, for D-L5 (2026-09-27)
 
-Measured by the supervisor on the 97 tuning rows lreplay re-meshed on the binary `7ff16117` (every R-PLANE
-row plus 60 stratified, `lreplay.py --run`; tuning only - the test split is spent and was not read), as
-`captured_length_m / sharp_length_m` from each row's own summary:
+Measured by the supervisor on the 97 tuning rows lreplay re-meshed on the binary `72f7851e` (the L0c build:
+(92.62) along the capture chains; every R-PLANE row plus 60 stratified, `lreplay.py --run --expect-equal`,
+97 of 97 meshes byte-equal to the recorded ones; tuning only - the test split is spent and was not read), as
+`captured_length_m / sharp_length_m` from each row's own summary. The per-segment numbers of the binary
+`7ff16117` on the same rows are in brackets:
 
 | rows | n | scored | the (92.62) share as the mesher measures it |
 |---|---|---|---|
 | no sharp edge | 3 | null, F3e false | — |
-| the R-PLANE path | 37 | 1.0, F3e false | min 0.423, median 0.809, max 1.000; 35 of 37 below 0.95 |
-| `feature_tolerance = 0` off the R-PLANE path | 28 | 0.0, F3e true | min 0, median 0.187, max 0.808; 9 of 28 exactly 0 |
-| the attraction on | 29 | the share; F3e false on all 29 | min 0.006, median 0.237, max 0.976; 19 at or below 0.5, 27 below 0.95 |
+| the R-PLANE path | 37 | 1.0, F3e false | min 0.988, median 1.000, max 1.000; 36 of 37 at 1.000, none below 0.95 (min 0.423, median 0.809; 35 below 0.95) |
+| `feature_tolerance = 0` off the R-PLANE path | 28 | 0.0, F3e true | min 0, median 0.335, max 0.891; 3 of 28 exactly 0, 20 at or below 0.5 (median 0.187, max 0.808; 9 exactly 0) |
+| the attraction on | 29 | the share; F3e false on all 29 | min 0.119, median 0.9998, max 1.000; 10 at or below 0.5, 12 below 0.95, none at 0 (median 0.237; 19 at or below 0.5, 27 below 0.95) |
 
-By family, the attraction-on rows: A 8 (0.115 to 0.338, median 0.146), B 9 (0.006 to 0.826, median 0.043),
-D 6 (0.758 to 0.976, median 0.885), E 2 (0.242, 0.967), F 1 (0.494), G 3 (0.073, 0.224, 0.939). The 13
-probes read 0.022 to 0.470 on the wings and the wing-body, 0.972 on the off-lattice box at L4 and 0.9994 to
-0.9997 on the cubes.
+By family, the attraction-on rows: A 8 (0.172 to 0.527, median 0.270), B 9 (all 1.000), D 6 (0.9997 to 1.000),
+E 2 (0.252, 0.9998), F 1 (0.567), G 3 (0.119, 0.264, 0.991). The attraction-on share is two-moded: 12 rows
+at or below 0.567 (8 wings, E-1-033, F-1-056, G-1-093, G-1-095) and 17 at or above 0.9907, none between, so
+any threshold in (0.567, 0.9907] fails the same 12. The wings stay low because they cannot be resolved at their
+cell size: A-1-041's blunt trailing edge is two chains 1.9 mm apart at h_f 11.4 mm. The B lathes read 1.000
+because the recorded default radius (E4) pulls a band of points onto each rim (20 to 27 % of their boundary points pinned); that
+pinning is F3a's to report, not F3e's. The one R-PLANE row below 1, G-1-089 (0.988), has two diagonal edges of 0.051 m and one
+of 0.049 m that no lattice line reproduces. The 13 probes (0.022 to 0.470 on the wings and the wing-body,
+0.972 on the off-lattice box at L4, 0.9994 to 0.9997 on the cubes) were measured per segment and were not
+re-measured.
 
-**Today's (92.62) under-reads an edge the STL splits into segments**, and the R-PLANE row shows it: those
-edges are lattice lines reproduced exactly (5.7e-14 m), yet they read 0.81 at the median. A wall edge counts
-only when BOTH its ends lie within `tol_m` of ONE feature segment, so a wall edge that straddles the joint of
-two collinear segments counts for neither. On D-1-042 attempt 1 (R-PLANE; 128 segments of 1.4 to 1.6 h_f
-forming 12 straight edges, 91 % of their ends off the lattice) a brute-force recount over the snapped mesh
-gives 3.45825 of 8.178 m = 0.4229 per segment, the mesher's own number, and 8.178 of 8.178 m = 1.000 against
-the 12 collinear chains; D-1-072 and D-1-112, whose segment ends are lattice points, read 1.000 as measured.
-A threshold near 0.95 on today's measure would fail meshes whose edges are exact, so D-L5 needs either
-(92.62) measured along the feature-edge polyline (a Rust change, the snap.rs owner's) or a threshold set
-against these numbers.
+**(92.62) is measured along chains since the L0c build.** The per-segment form (`0fa9e2b` to `7178685`)
+credited a wall edge only when BOTH its ends lay within `tol_m` of ONE feature segment, so a wall edge
+across the joint of two collinear segments counted for neither. That under-read the R-PLANE rows, whose
+edges are lattice lines reproduced exactly (5.7e-14 m), at a median of 0.81. The chain form groups the
+segments into chains, which stop at corners and at turns over 30°. It measures the arclength between the
+feet of each wall edge's ends and unions it per chain. `tol_m` and the 30° are unchanged, and so is
+`sharp_length_m`. D-1-042 attempt 1 (R-PLANE; 128 segments of 1.4 to 1.6 h_f in 12 straight edges) reads
+8.178 of 8.178 m, where the per-segment form read 3.45825 (0.4229). A supervisor oracle written
+independently of the Rust agrees with it to the last bit there and on nine other meshes, among them two
+closed lathe rims. D-1-072 and D-1-112 read 1.000 under both forms. The probe boxes whose edges are single
+segments read exactly what they read before (boxn at L4: 0.99988 at tau h_f/2, 0.414 at ft 0). The
+threshold is the user's decision D-L5: until it is set, F3e is true only at a share of exactly 0.
 
 F3e is optional in the attempt-row schema, so a row scored before 2026-09-26 still validates; the scorer
 writes it on every row since, and `schema.check_attempt` holds F3e true exactly when `feature_capture` is 0.
@@ -641,10 +653,11 @@ different in `/snap/feature_tolerance` alone). `rules.py --ft-gate --campaign DI
 G-FT-RADIUS 2026-09-27 (`rules/G-FT-RADIUS.json`, binary 7ff16117…5a83, on 48e29bd): PASS. 36 of the 60 are
 F3-clean at attempt 1 (the gate is 20), where the committed rules campaign's attempt 1 at the default radius was
 F3a–F3d-clean on none of the same 60; by family A 0, B 7, D 9, E 5, F 7, G 8 of 10. The flags set are F3b 10,
-F3c 13, F3d 6 and F3e 3 (B-1-005, B-1-041 and B-1-077 capture 0), and E-1-032 is refused by PF-YPLUS before it
+F3c 13, F3d 6 and F3e 3 (B-1-005, B-1-041 and B-1-077 capture 0 per segment; the L0c chain form
+reads 0.789, 0.789 and 0.859 on the same configs, so F3e does not fire on them), and E-1-032 is refused by PF-YPLUS before it
 meshes. The capture share (92.62) over the 59 meshes has median 0.7315 (A 0.287, B 0.500, D 0.858, E 0.951,
-F 0.907, G 0.745), min 0 and max 0.978. (92.62) under-reads an edge that the STL splits into collinear segments
-(section D), so these shares are lower bounds. Identity: plane 37/37, smooth 44/44, sharp 276/276 (only
+F 0.907, G 0.745), min 0 and max 0.978. These shares are per segment (binary 7ff16117), which under-reads an edge the STL splits into
+collinear segments, so they are lower bounds; the L0c chain form reads higher (section D). Identity: plane 37/37, smooth 44/44, sharp 276/276 (only
 `/snap/feature_tolerance` differs), refused 15/15. The wings (family A) stay F3-dirty at h_f/2, as the AM-L plan
 feared: their trailing edges are the thin, near-180° case.
 
