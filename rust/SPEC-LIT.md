@@ -26422,7 +26422,50 @@ The hanging-node line is (92.33)'s, for (92.33)'s reason and one more: because
 `d_h` is the mean of its parents' whole DISPLACEMENT VECTORS and (92.43)'s
 schedule is global, the hanging node's copy at level `k` is the exact midpoint
 of its parents' copies at level `k`, at every level, so the split side faces of
-the paragraph after next close exactly.
+(92.49) close exactly.
+
+**Row 1 follows the wall normal where the wall face would fail.** A wall face
+is a boundary face until a layer cell is put behind it; then it is the level-n
+face of (92.48) and G4 measures it (the paragraph "What the layer stage
+INHERITS" below). Its angle there is known BEFORE anything moves: it is the
+angle between the face's area vector and the line from its owner's centre to
+its own centre, which is exactly what G4 reads once the top layer cell's centre
+lies along the face normal. Where that predicted angle is large, the shrink
+moves the interior points of the row-1 cell as well, so the cell follows the
+wall normal instead of keeping the cut cell's lopsided shape:
+
+```
+theta_f = angle( Sf , C_f - C_owner(f) ),  f in Lf, on the INPUT mesh,
+          with §92.3's own centroids; 0 on a wall on the cell planes    (92.63)
+R1*     = { owner(f) : f in Lf, theta_f > THETA_ON },   THETA_ON = 45 deg
+
+W(j)    = { i in L, not pinned by (92.42) : (i, j) is an edge of a face
+            of a cell of R1* }
+J       = { j : j in neither L nor any boundary face, W(j) not empty }  (92.64)
+
+y_j     = mean_{i in W(j)} ( x_i + D_i + |x_j - x_i| n_i )
+d_j     = mean_{i in W(j)} D_i + beta ( y_j - x_j - mean_{i in W(j)} D_i ),
+          beta = 1                                                      (92.65)
+```
+
+(92.46) then holds `d_j` for every `j` in `J` from `d^(0)` on, exactly as it
+holds `D_i` on `L`; every other point relaxes as before, and the hanging-node
+line still runs last, so a hanging `j` takes its parents' mean. `d_j` is
+computed from the `D_i` in force each time (92.46) runs, so a retreat that
+halves `D_i` moves `j` with it; the re-seating part `|x_j - x_i| n_i -
+(x_j - x_i)` is not halved by it. Wall points, stage 4's output and every
+number §92.12 reports are untouched: only interior points of row-1 cells move,
+and only in this stage. On a wall on the cell planes `theta_f` is 0 up to
+rounding, `R1*` and `J` are empty and the stage is bit for bit what it was; the
+snapped cube's worst `theta_f` is 38.9 deg, so it is untouched too. `THETA_ON`
+is this project's own number, like `kappa` and `c` of (92.44): a prototype
+that re-seated EVERY row-1 cell with `beta = 1` left 48 cells with an inverted
+pyramid on the level-3 sphere, and the same step applied only past 45 deg left
+none, against a predicted maximum of 76.6 deg a level-n maximum of 64.9 deg
+(two layers, `T = 0.0184`). Rebuilding the near-wall cells body-fitted before
+the prisms go in is the idea of Delanaye, Aftosmis, Berger, Liu & Pulliam, AIAA
+99-0777 (1999), DOI 10.2514/6.1999-777; the construction here is this
+project's own.
 
 **The retreat, and WHICH MESH it measures.** The ladder is thickness first and
 layers second, which is the order §92.2 stage 6 states. It runs twice, on the
@@ -26602,7 +26645,10 @@ t1_mean   = t_1 mean_frac          t1_min = t_1 min_f tau_f            (92.50)
 
 `full` is the fraction of the patch's area that received the full stack;
 `mean_frac` is the fraction of the nominal thickness the patch received on
-average. A dropped patch reports `n_layers = 0` and the reason.
+average. A dropped patch reports `n_layers = 0` and the reason. Each row also
+carries `n_reseated_points`: the largest number of points (92.64) re-seated
+for the patch over every round the run ran with it, 0 when the re-seat never
+acted on it.
 
 **The trace, and what a drop is blamed on.** A drop's reason names the check
 that fired LAST, and with two ladders nested that is not always the one that
@@ -26691,7 +26737,11 @@ ONE very thin layer gives 79.8 — worse, not better; below `cell_frac = 0.10` t
 patch loses its layers by name instead. This is stated rather than worked
 around: the mesher does not weaken G4 to make its own output pass. It is also
 why the validation below runs on a cube and not on the sphere §92.2's stage list
-would suggest.
+would suggest. Those numbers are the wall as stage 4 leaves it, and they still
+hold for it. What changed is that this stage now moves the cut cell's centroid
+before the level-n face is measured - (92.63)-(92.65), the instrument two
+paragraphs below, not a threshold - and with it the level-2 sphere keeps three
+layers of `first_thickness` 0.05 with a worst angle of 66.06 deg.
 
 **The ammonia site is NOT the favourable first row, and the earlier claim that
 it was is withdrawn.** That claim read the site's walls off its geometry —
@@ -26714,9 +26764,10 @@ alignment step in stage 4 — placing the level-0 point along the WALL FACE's ow
 normal instead of along (92.40)'s averaged point normal, so that a newly
 internalised wall face is aligned with the line to its owner's centre — or a G4
 rule of its own for that face, since `70` was calibrated on a face between two
-ordinary cells and is measuring a different quantity here. Both change numbers
-this document fixes; both belong to whoever owns §92.3, and neither is
-written.
+ordinary cells and is measuring a different quantity here. The first is now
+written, moved from stage 4 into this stage so that stage 4's output and every
+mesh without layers stay what they were: (92.63)-(92.65). The second loosens a
+gate and is not written.
 
 **What this stage does NOT do.** The layer count is uniform over a patch: a
 point that cannot carry the stack costs its whole patch, not just its own
@@ -26765,13 +26816,18 @@ solver can run.
 | `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
 | a box standing on the domain floor, SNAPPED, 3 layers | every cell closes to `1e-12` relative. The assertion is closure and not a quality number, so it catches a mis-wound face and nothing else; the thresholds are opened past every refusal on purpose. Before (92.53) was applied: 13 cells open, worst `2.96e-1` |
 | one internal face of an emitted mesh reversed by hand | (92.54) refuses it, naming that cell — the check is not vacuous |
-| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured with the trace, the sphere REACHES the outer ladder: two outer retreats on G4 alone, every failing face a level-n face (312, then 360), cap the thickness until the inner ladder's floor `min_thickness * T = 1.995e-2` fires — `drop_cause` `thin_after_caps`; the row below is the case that gives up in the outer ladder itself |
-| the same box, at `quality`'s own thresholds | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
+| a snapped wall at G4's `70` that the layers cannot survive | the snapped floor box: the re-seat (92.63)-(92.65) acts on its row-1 cells and the shrunk mesh still fails the gate after every retreat; `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Before the re-seat this row was the level-2 sphere, which reached the outer ladder (two outer retreats on G4 alone, 312 then 360 level-n faces) and dropped as `thin_after_caps`; it now keeps its layers (the three-layer sphere row below) |
+| the snapped cube, at `quality`'s own thresholds, with no wall face past 45 deg so the re-seat does not act | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
 | the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
 | the castellated cube that keeps its stack | the trace is one inner and one outer pass, both in round 0, and no row names a cause |
-| the snapped floor box with no floor | `retreat_limit` outer retreats at rungs 0, 1, ..., each naming its gates, then an `outer_gate` give-up dropping the cube, then the pass on the empty set |
-| the snapped level-2 sphere | its row names a cause, the trace names the give-up, and a `thin_after_caps` drop comes after at least one outer retreat; the trace is printed |
+| the snapped cube with no floor | `retreat_limit` outer retreats at rungs 0, 1, ..., each naming its gates, then an `outer_gate` give-up dropping the cube, then the pass on the empty set |
+| the snapped level-2 sphere, eight layers of 0.006 at growth 1.0 | the re-seat acts on 888 points; the row names `thin_after_caps`, the trace names the give-up, and the drop comes after at least one outer retreat; the trace is printed |
 | the level-n count | equals the number of G4 subjects whose point list is a layer face's, on the floor box's first extruded attempt |
+| the re-seat of one point (92.65) | two wall points below `(0,0,1)` give `(0.5, 0, 0.3571067811865476)` at `beta = 1`, the mean `D` at `beta = 0`; a point straight above its one wall point moves by that point's `D` |
+| a wall on the cell planes | `theta_f` under 1e-4 deg on every layer face, `J` empty, every row's `n_reseated_points` 0 |
+| the snapped cube | worst `theta_f` 38.93 deg, `J` empty |
+| the snapped level-2 sphere | worst `theta_f` 80.25 deg, 1632 of 2592 faces past 45 deg, 804 row-1 cells, `J` 888 points, each with at most 3 wall points, and the row reports 888 |
+| the snapped level-2 sphere, three layers of 0.05 | the patch KEEPS its layers: the re-seat moves 888 points, the gate passes at its own thresholds with a worst non-orthogonality of 66.06 deg, the trace is one inner and one outer pass, the cell count is `C + 3 x 2592`; `full` 0 and `mean_frac` 0.346 - the (92.45) limiter, not G4, sets the thickness now |
 
 ### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
 

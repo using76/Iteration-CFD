@@ -36,7 +36,7 @@
 //! No GPL-licensed source was consulted.
 
 use crate::error::{Error, Result};
-use crate::io::polymesh::PolyMeshRaw;
+use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
 use crate::surface::{Surface, TriIndex};
 use crate::{Scalar, Vec3};
 
@@ -497,6 +497,9 @@ pub struct Shrunk {
     /// Every measurement the inner ladder took, in order, all in round 0:
     /// the caller numbers the round.
     pub ladder: Vec<LadderEntry>,
+    /// Per patch of the caller's patch set, by name in that set's order,
+    /// the largest `|J_q|` over this call's rounds.
+    pub reseated: Vec<(String, usize)>,
 }
 
 /// Which ladder of (92.47) a trace entry comes from: the inner one measures
@@ -657,6 +660,151 @@ fn level_n_g4(rep: &quality::QualityReport, mesh: &PolyMeshRaw, first_cell: usiz
     n
 }
 
+/// (92.63)'s `THETA_ON`, in degrees: a wall face whose predicted level-n
+/// angle exceeds it has its row-1 cell re-seated by the shrink. This
+/// project's own number, like `KAPPA` and `MARCH_C` of (92.44); on a wall
+/// on the cell planes the angle is 0, so nothing is re-seated.
+pub const RESEAT_THETA_ON_DEG: Scalar = 45.0;
+
+/// (92.64): the interior points of row-1 cells the shrink holds at (92.65)'s
+/// displacement, for ONE patch set.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Reseat {
+    /// J, ascending.
+    pub points: Vec<usize>,
+    /// W(j) for each point of `points`, in the same order, ascending.
+    pub wall: Vec<Vec<usize>>,
+    /// `|J_q|` for each entry of the field's `patches`, in that order.
+    pub per_patch: Vec<usize>,
+}
+
+/// (92.63): one predicted level-n angle per face of `mesh` - G4's own
+/// expression, read on the INPUT mesh, where a wall face is still a
+/// boundary face. Internal faces carry 0.0.
+pub fn predicted_angles(mesh: &PolyMeshRaw) -> Result<Vec<Scalar>> {
+    let m = build_host_mesh(mesh)?;
+    let n_faces = mesh.faces.len();
+    let n_internal = m.n_internal_faces;
+    let mut theta = vec![0.0 as Scalar; n_faces];
+    for fa in n_internal..n_faces {
+        let bf = fa - n_internal;
+        let s = m.b_sf[bf];
+        let d = m.b_cf[bf] - m.c[m.b_face_cells[bf] as usize];
+        let (mag_s, mag_d) = (s.mag(), d.mag());
+        if !(mag_s > 0.0) || !(mag_d > 0.0) {
+            continue;
+        }
+        theta[fa] = (s.dot(d) / (mag_s * mag_d))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+    }
+    Ok(theta)
+}
+
+/// (92.64): R1*, W and J, from the angles, the field, the shrink's own
+/// boundary flags and the per-cell face lists. Pure: reads only its
+/// arguments.
+fn reseat_set(
+    mesh: &PolyMeshRaw,
+    theta: &[Scalar],
+    f: &Field,
+    is_b: &[bool],
+    cell_faces: &[Vec<usize>],
+) -> Reseat {
+    let n_points = mesh.points.len();
+    // R1*: the owner cells of the triggering layer faces.
+    let mut r1 = vec![false; cell_faces.len()];
+    for &fa in &f.faces {
+        if theta[fa] > RESEAT_THETA_ON_DEG {
+            r1[mesh.owner[fa] as usize] = true;
+        }
+    }
+    // W: for every face of an R1* cell, every cyclic edge, each ordering.
+    let mut w: Vec<Vec<usize>> = vec![Vec::new(); n_points];
+    for (c, &bad) in r1.iter().enumerate() {
+        if !bad {
+            continue;
+        }
+        for &fa in &cell_faces[c] {
+            let face = &mesh.faces[fa];
+            for k in 0..face.len() {
+                let a = face[k] as usize;
+                let b = face[(k + 1) % face.len()] as usize;
+                for (i, j) in [(a, b), (b, a)] {
+                    if f.is_layer[i]
+                        && !f.pinned[i]
+                        && !f.is_layer[j]
+                        && !is_b[j]
+                        && !w[j].contains(&i)
+                    {
+                        w[j].push(i);
+                    }
+                }
+            }
+        }
+    }
+    for list in w.iter_mut() {
+        list.sort_unstable();
+    }
+    let points: Vec<usize> = (0..n_points).filter(|&j| !w[j].is_empty()).collect();
+    build_reseat(f, mesh, theta, &w, &points, cell_faces)
+}
+
+/// `|J_q|` per patch of the field, and the `Reseat` itself: the J points
+/// lying on a face of the owner cell of some triggering face of `q`.
+fn build_reseat(
+    f: &Field,
+    mesh: &PolyMeshRaw,
+    theta: &[Scalar],
+    w: &[Vec<usize>],
+    points: &[usize],
+    cell_faces: &[Vec<usize>],
+) -> Reseat {
+    let mut per_patch = Vec::with_capacity(f.patches.len());
+    let mut on_q = vec![false; mesh.points.len()];
+    for &q in &f.patches {
+        for flag in on_q.iter_mut() {
+            *flag = false;
+        }
+        for (k, &fa) in f.faces.iter().enumerate() {
+            if f.face_patch[k] != q || theta[fa] <= RESEAT_THETA_ON_DEG {
+                continue;
+            }
+            for &fc in &cell_faces[mesh.owner[fa] as usize] {
+                for &p in &mesh.faces[fc] {
+                    on_q[p as usize] = true;
+                }
+            }
+        }
+        per_patch.push(points.iter().filter(|&&j| on_q[j]).count());
+    }
+    Reseat {
+        points: points.to_vec(),
+        wall: w.iter().filter(|l| !l.is_empty()).cloned().collect(),
+        per_patch,
+    }
+}
+
+/// (92.65) for ONE point: `xj` the point itself, `wall` its
+/// `(x_i, D_i, n_i)` in order, `beta` the pull toward the wall-following
+/// position. Zero for an empty `wall`.
+pub fn reseat_disp(xj: Vec3, wall: &[(Vec3, Vec3, Vec3)], beta: Scalar) -> Vec3 {
+    if wall.is_empty() {
+        return Vec3::ZERO;
+    }
+    let mut md = Vec3::ZERO;
+    let mut y = Vec3::ZERO;
+    for &(xi, di, ni) in wall {
+        md = md + di;
+        y = y + xi + di + (xj - xi).mag() * ni;
+    }
+    let over = wall.len() as Scalar;
+    let md = md / over;
+    let y = y / over;
+    md + (y - xj - md) * beta
+}
+
 /// What took the points under the floor: the outer ladder's cap where any
 /// of them carries one, else the inner ladder's halving where any of them
 /// took one, else the proposed thickness itself.
@@ -692,6 +840,7 @@ fn shrink_on(
             dropped: Vec::new(),
             drop_causes: Vec::new(),
             ladder: Vec::new(),
+            reseated: Vec::new(),
         });
     }
     let st = stack(spec)?;
@@ -782,6 +931,18 @@ fn shrink_on(
         list.dedup();
     }
     let hanging = find_hanging(&mesh.points, &mesh.faces);
+    // The re-seat plan's inputs, built ONCE: the predicted level-n angle of
+    // every face, and each cell's faces ascending by id - `owner` runs in
+    // face order, the internal faces add their neighbours in the same
+    // order.
+    let theta = predicted_angles(mesh)?;
+    let mut cell_faces: Vec<Vec<usize>> = vec![Vec::new(); n_cells];
+    for (fa, &c) in mesh.owner.iter().enumerate() {
+        cell_faces[c as usize].push(fa);
+    }
+    for fa in 0..n_internal {
+        cell_faces[mesh.neighbour[fa] as usize].push(fa);
+    }
     // The outer patch loop: (92.40) through (92.47) for one patch set at a
     // time, dropping ONE patch per round - the one carrying the most
     // offending layer points, ties to the lower patch index - and
@@ -793,8 +954,12 @@ fn shrink_on(
     let mut retreats = 0usize;
     let mut drop_causes: Vec<(String, DropCause)> = Vec::new();
     let mut ladder: Vec<LadderEntry> = Vec::new();
+    // (92.64)'s per-patch counts, one counter per entry of the caller's
+    // patch set, the max taken over the rounds each patch ran in.
+    let mut reseated_max = vec![0usize; patches0.len()];
     loop {
         if patches.is_empty() {
+            let reseated = named_reseated(mesh, patches0, &reseated_max);
             return Ok(Shrunk {
                 mesh: mesh.clone(),
                 field: empty_field(n_points),
@@ -802,6 +967,7 @@ fn shrink_on(
                 dropped,
                 drop_causes,
                 ladder,
+                reseated,
             });
         }
         let mut f = field(mesh, &idx, &patches, spec, &st)?;
@@ -819,6 +985,16 @@ fn shrink_on(
                 f.thickness[i] = f.thickness[i] * caps[i];
             }
         }
+        // (92.64): the row-1 interior points this round holds, and the
+        // per-patch counts merged into the run's counters.
+        let rs = reseat_set(mesh, &theta, &f, &is_b, &cell_faces);
+        for (k, &p) in patches.iter().enumerate() {
+            let pos = patches0
+                .iter()
+                .position(|&q| q == p)
+                .expect("a round's patch is one of the caller's");
+            reseated_max[pos] = reseated_max[pos].max(rs.per_patch[k]);
+        }
         // The retreat ladder: halve D at the layer points the failing cells
         // carry, re-run the relaxation, and try again, up to
         // `retreat_limit` times.
@@ -827,7 +1003,7 @@ fn shrink_on(
         let mut give_up: Option<(Vec<usize>, String)> = None;
         let mut halvings = 0usize;
         loop {
-            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec);
+            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points);
             let mut work = mesh.clone();
             for i in 0..work.points.len() {
                 work.points[i] = work.points[i] + d[i];
@@ -918,6 +1094,7 @@ fn shrink_on(
         }
         retreats += halvings;
         if accepted {
+            let reseated = named_reseated(mesh, patches0, &reseated_max);
             return Ok(Shrunk {
                 mesh: PolyMeshRaw {
                     points: pts_out,
@@ -928,6 +1105,7 @@ fn shrink_on(
                 dropped,
                 drop_causes,
                 ladder,
+                reseated,
             });
         }
         let (offenders, reason) = give_up.expect("the ladder ended in a give-up");
@@ -969,6 +1147,20 @@ fn shrink_on(
     }
 }
 
+/// The run's re-seat counters, named: per entry of the caller's patch set,
+/// in its order.
+fn named_reseated(
+    mesh: &PolyMeshRaw,
+    patches0: &[usize],
+    reseated_max: &[usize],
+) -> Vec<(String, usize)> {
+    patches0
+        .iter()
+        .zip(reseated_max.iter())
+        .map(|(&p, &n)| (mesh.patches[p].name.clone(), n))
+        .collect()
+}
+
 /// Shrink the boundary inward by the layer thickness and relax the interior
 /// behind it, until the gate is satisfied or the patches give their layers
 /// up. `spec.n == 0`, or an empty `layers.patches`, returns the input mesh
@@ -988,6 +1180,7 @@ pub fn shrink(
             dropped: Vec::new(),
             drop_causes: Vec::new(),
             ladder: Vec::new(),
+            reseated: Vec::new(),
         });
     }
     let all_patches = resolve_patches(mesh, spec)?;
@@ -1062,21 +1255,43 @@ fn failing_points(
 /// hanging node rides its parents: `d_h <- (d_a + d_b) / 2`, applied to the
 /// DISPLACEMENT and last, because the next unit's split faces close only if
 /// a hanging node's copy stays the exact midpoint of its parents' copies at
-/// every level - (92.33)'s line, for (92.33)'s reason and one more.
+/// every level - (92.33)'s line, for (92.33)'s reason and one more. The
+/// points of `rs` hold (92.65)'s displacement as the layer points hold
+/// theirs.
 fn relax(
     f: &Field,
     all_nbrs: &[Vec<u32>],
     is_b: &[bool],
     hanging: &[(u32, [u32; 2])],
     spec: &LayerSpec,
+    rs: &Reseat,
+    x: &[Vec3],
 ) -> Vec<Vec3> {
     let n = f.disp.len();
+    // Each re-seat point's displacement, computed ONCE from the `D_i` in
+    // force at THIS call, so a retreat that halves `D_i` moves the point
+    // with it while the re-seating part stays whole - (92.65).
+    let held: HashMap<usize, Vec3> = rs
+        .points
+        .iter()
+        .enumerate()
+        .map(|(k, &j)| {
+            let wall: Vec<(Vec3, Vec3, Vec3)> =
+                rs.wall[k].iter().map(|&i| (x[i], f.disp[i], f.normal[i])).collect();
+            (j, reseat_disp(x[j], &wall, 1.0))
+        })
+        .collect();
     let mut d = f.disp.clone();
+    for (&j, &dj) in held.iter() {
+        d[j] = dj;
+    }
     for _ in 0..spec.smoothing_passes {
         let mut next = vec![Vec3::ZERO; n];
         for i in 0..n {
             next[i] = if f.is_layer[i] {
                 f.disp[i]
+            } else if let Some(&dj) = held.get(&i) {
+                dj
             } else if is_b[i] {
                 Vec3::ZERO
             } else {
@@ -1157,6 +1372,8 @@ pub struct PatchLayers {
     /// What drove the give-up, when a ladder of (92.47) dropped the patch;
     /// `None` on a kept patch and where no ladder ran for it.
     pub drop_cause: Option<DropCause>,
+    /// (92.64): how many interior points of row-1 cells the shrink re-seated for this patch - the largest count over every round the run ran with the patch in its set; 0 means the re-seat never acted on it.
+    pub n_reseated_points: usize,
 }
 
 impl PatchLayers {
@@ -1272,11 +1489,18 @@ pub fn add_layers(
     // §92.13), and the outer round it is at.
     let mut trace: Vec<LadderEntry> = Vec::new();
     let mut round = 0usize;
+    // (92.64)'s per-patch re-seat counts, the max over every attempt the
+    // run made, by patch name.
+    let mut reseated: HashMap<String, usize> = HashMap::new();
     let n_points = mesh.points.len();
     let n_faces = mesh.faces.len();
     let n_internal = mesh.neighbour.len().min(n_faces);
     loop {
         let mut a = attempt(mesh, surf, spec, t, &patches, &caps)?;
+        for row in &a.report.patches {
+            let e = reseated.entry(row.name.clone()).or_insert(0);
+            *e = (*e).max(row.n_reseated_points);
+        }
         let this_round = round;
         round += 1;
         for mut e in std::mem::take(&mut a.report.ladder) {
@@ -1326,6 +1550,7 @@ pub fn add_layers(
                     t1_min: 0.0,
                     dropped: Some(format!("patch \"{name}\": {reason}")),
                     drop_cause: Some(DropCause::OuterGate),
+                    n_reseated_points: 0,
                 });
             }
             a.report.retreats += extra_retreats;
@@ -1334,6 +1559,9 @@ pub fn add_layers(
             e.g4_level_n = g4_n;
             trace.push(e);
             a.report.ladder = trace;
+            for row in a.report.patches.iter_mut() {
+                row.n_reseated_points = reseated.get(&row.name).copied().unwrap_or(0);
+            }
             return Ok(a);
         }
         // No layer cell was inserted, so the gate's failure is the INPUT
@@ -1520,6 +1748,11 @@ fn attempt(
                 t1_min: 0.0,
                 dropped: Some(reason),
                 drop_cause,
+                n_reseated_points: shrunk
+                    .reseated
+                    .iter()
+                    .find(|(nm, _)| nm == &patch.name)
+                    .map_or(0, |(_, n)| *n),
             });
         }
         let report = LayerReport {
@@ -1937,6 +2170,11 @@ fn attempt(
                     t1_min: 0.0,
                     dropped: Some(reason),
                     drop_cause,
+                    n_reseated_points: shrunk
+                        .reseated
+                        .iter()
+                        .find(|(nm, _)| nm == &patch.name)
+                        .map_or(0, |(_, n)| *n),
                 });
             }
             Some(_) => {
@@ -1987,6 +2225,11 @@ fn attempt(
                     t1_min: st.t[0] * if area > 0.0 { tau_min_all } else { 0.0 },
                     dropped: None,
                     drop_cause: None,
+                    n_reseated_points: shrunk
+                        .reseated
+                        .iter()
+                        .find(|(nm, _)| nm == &patch.name)
+                        .map_or(0, |(_, n)| *n),
                 };
                 row.area_frac_tau_ge = TAU_GE_BETAS.map(|b| row.frac_tau_ge(b));
                 patches_rep.push(row);
@@ -3344,46 +3587,60 @@ pub(crate) mod tests {
         );
     }
 
-    /// The snapped SPHERE cannot carry layers at G4's 70 degrees - 92.13
-    /// measures why - and the specified answer (92.47) is that the patch
-    /// loses its layers BY NAME and the run continues, not that the run
-    /// stops naming hundreds of faces the user cannot act on.
+    /// A snapped wall the layers cannot survive at G4's 70 degrees loses them
+    /// BY NAME and the run continues (92.47), rather than the run stopping on a
+    /// list of faces the user cannot act on. The case is the snapped floor box:
+    /// the re-seat of (92.63)-(92.65) acts on its row-1 cells and the shrunk
+    /// mesh still fails the gate after every retreat.
     #[test]
     fn a_wall_the_layers_cannot_survive_loses_them_by_name() {
-        let (surf, mesh) = snapped_sphere_case();
+        let (surf, mesh) = snapped_floor_box_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
         let before = cell_count(&mesh);
-        let out = add_layers(&mesh, &surf, &sphere_layers(0.05), &thresholds())
+        let out = add_layers(&mesh, &surf, &spec, &thresholds())
             .expect("the patch loses its layers by name; the run continues");
         assert_eq!(cell_count(&out.mesh), before, "no layer cell survives");
         let row = out
             .report
             .patches
             .iter()
-            .find(|p| p.name == "sphere")
-            .expect("the report carries a row for the sphere");
+            .find(|p| p.name == "cube")
+            .expect("the report carries a row for the cube");
         assert_eq!(row.n_layers, 0);
         let reason = row.dropped.as_ref().expect("the row says why");
         assert!(!reason.is_empty());
-        println!("layers: the sphere row's reason: {reason}");
+        assert!(row.n_reseated_points > 0);
+        assert!(row.drop_cause.is_some());
+        println!(
+            "layers: the cube row: reason {reason}; n_reseated_points {}; drop_cause {:?}",
+            row.n_reseated_points,
+            row.drop_cause
+        );
         assert!(
-            out.report.summary().contains("sphere"),
+            out.report.summary().contains("cube"),
             "{}",
             out.report.summary()
         );
     }
 
     /// Written by the supervising session. The OUTER ladder of (92.47), the
-    /// one that measures the EXTRUDED mesh: a snapped box standing on the
-    /// floor passes the shrink's own gate and then fails on the layer cells
-    /// themselves, so the thickness retreats `retreat_limit` times and the
-    /// patch loses its layers BY NAME - `add_layers` returns the snapped
-    /// mesh and the reason, and does NOT refuse with a list of faces the
-    /// user cannot act on. The sphere case above takes two outer retreats
-    /// too, but the shrink's floor then drops it (`thin_after_caps`); this
-    /// one gives up in the outer ladder itself.
+    /// one that measures the EXTRUDED mesh: the snapped cube - every wall
+    /// face under (92.63)'s 45 degrees, so the re-seat does not act - passes
+    /// the shrink's own gate and then fails on the layer cells themselves,
+    /// so the thickness retreats `retreat_limit` times and the patch loses
+    /// its layers BY NAME - `add_layers` returns the snapped mesh and the
+    /// reason, and does NOT refuse with a list of faces the user cannot act
+    /// on.
     #[test]
     fn a_snapped_wall_retreats_on_the_extruded_mesh_then_gives_up_by_name() {
-        let (surf, mesh) = snapped_floor_box_case();
+        let (surf, mesh) = snapped_cube_case();
         let spec = LayerSpec {
             patches: vec!["cube".to_string()],
             n: 3,
@@ -3411,6 +3668,7 @@ pub(crate) mod tests {
             .find(|p| p.name == "cube")
             .expect("the named patch has a row");
         assert_eq!(row.n_layers, 0);
+        assert_eq!(row.n_reseated_points, 0);
         let reason = row.dropped.as_ref().expect("the row says why");
         assert!(reason.contains("retreat"), "{reason}");
         assert!(reason.contains("92.13"), "{reason}");
@@ -3540,12 +3798,24 @@ pub(crate) mod tests {
             .expect("layers");
         let (surf_s, mesh_s) = snapped_sphere_case();
         let d = add_layers(&mesh_s, &surf_s, &sphere_layers(0.05), &thresholds())
+            .expect("layers on the snapped sphere");
+        let (surf_c, mesh_c) = snapped_cube_case();
+        let spec_e = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        let e = add_layers(&mesh_c, &surf_c, &spec_e, &thresholds())
             .expect("the patch loses its layers by name; the run continues");
-        let cases: [(&str, &LayerReport, bool); 4] = [
+        let cases: [(&str, &LayerReport, bool); 5] = [
             ("a", &a.report, true),
             ("b", &b.report, true),
             ("c", &c.report, true),
-            ("d", &d.report, false),
+            ("d", &d.report, true),
+            ("e", &e.report, false),
         ];
         for (case, report, want_kept) in cases {
             let mut kept = 0usize;
@@ -3588,7 +3858,7 @@ pub(crate) mod tests {
     }
 
     /// The per-row half of `tau_ge_one_is_the_full_area_fraction`, shared by
-    /// all four of its cases.
+    /// all five of its cases.
     fn check_tau_ge_row(row: &PatchLayers) {
         assert_eq!(
             row.frac_tau_ge(1.0).to_bits(),
@@ -3971,13 +4241,14 @@ pub(crate) mod tests {
         assert!(out.report.patches.iter().all(|p| p.drop_cause.is_none()));
     }
 
-    /// The snapped floor box with no floor gives up in the OUTER ladder:
+    /// The snapped cube with no floor - no wall face past (92.63)'s 45
+    /// degrees, so the re-seat does not act - gives up in the OUTER ladder:
     /// `retreat_limit` outer retreats at rungs 0, 1, ..., each naming the
     /// gates that failed, then the give-up that drops the cube as
     /// `outer_gate`, then the pass on the empty set the run returns on.
     #[test]
     fn the_outer_ladder_names_the_gates_it_gave_up_on() {
-        let (surf, mesh) = snapped_floor_box_case();
+        let (surf, mesh) = snapped_cube_case();
         let spec = LayerSpec {
             patches: vec!["cube".to_string()],
             n: 3,
@@ -3988,7 +4259,7 @@ pub(crate) mod tests {
         };
         let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
         for e in &out.report.ladder {
-            eprintln!("floor box ladder {e:?}");
+            eprintln!("snapped cube ladder {e:?}");
         }
         check_ladder(&out.report.ladder);
         check_rows(&out);
@@ -4008,14 +4279,22 @@ pub(crate) mod tests {
         assert_eq!(row.drop_cause, Some(DropCause::OuterGate));
     }
 
-    /// The snapped level-2 sphere: whichever ladder drops it, the row says
-    /// which, the trace names the give-up, and a drop at the floor after
-    /// caps comes after at least one outer retreat. Printed for the record.
+    /// The snapped level-2 sphere with eight layers of 0.006 at growth 1.0:
+    /// the re-seat acts on its row-1 cells, the outer ladder still retreats
+    /// on the extruded mesh, and the caps take the stack under the floor -
+    /// thin_after_caps, after at least one outer retreat. Printed for the
+    /// record.
     #[test]
     fn the_sphere_drop_names_what_drove_it() {
         let (surf, mesh) = snapped_sphere_case();
-        let out =
-            add_layers(&mesh, &surf, &sphere_layers(0.05), &thresholds()).expect("layers");
+        let spec = LayerSpec {
+            patches: vec!["sphere".to_string()],
+            n: 8,
+            first_thickness: 0.006,
+            growth: 1.0,
+            ..LayerSpec::default()
+        };
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
         for e in &out.report.ladder {
             eprintln!("sphere ladder {e:?}");
         }
@@ -4024,6 +4303,8 @@ pub(crate) mod tests {
         let row = out.report.patches.iter().find(|p| p.name == "sphere").expect("row");
         let cause = row.drop_cause.expect("the sphere loses its layers and says what drove it");
         eprintln!("sphere drop_cause {}", cause.as_str());
+        assert_eq!(cause, DropCause::ThinAfterCaps);
+        assert_eq!(row.n_reseated_points, 888);
         let quit = out
             .report
             .ladder
@@ -4091,5 +4372,289 @@ pub(crate) mod tests {
         let got = level_n_g4(&a.quality, &a.mesh, a.extrusion.first_cell);
         eprintln!("floor box attempt 0: G4 {g4}, level-n {got}, by point list {brute}");
         assert_eq!(got, brute);
+    }
+
+    /// What the shrink's FIRST round re-seats: the field and graphs of
+    /// `shrink_on`'s first round, and the (92.64) plan over them.
+    fn reseat_of(mesh: &PolyMeshRaw, surf: &Surface, spec: &LayerSpec) -> Reseat {
+        let patches = resolve_patches(mesh, spec).expect("resolve_patches");
+        let st = stack(spec).expect("stack");
+        let n_faces = mesh.faces.len();
+        let n_internal = mesh.neighbour.len().min(n_faces);
+        let n_points = mesh.points.len();
+        let hint = (surf.bbox.1 - surf.bbox.0).mag() / 100.0;
+        let idx = TriIndex::new(surf, hint).expect("TriIndex");
+        let f = field(mesh, &idx, &patches, spec, &st).expect("field");
+        let mut is_b = vec![false; n_points];
+        for fi in n_internal..n_faces {
+            for &p in &mesh.faces[fi] {
+                is_b[p as usize] = true;
+            }
+        }
+        let n_cells = mesh
+            .owner
+            .iter()
+            .chain(mesh.neighbour.iter())
+            .copied()
+            .max()
+            .map_or(0, |m| m as usize + 1);
+        let mut cell_faces: Vec<Vec<usize>> = vec![Vec::new(); n_cells];
+        for (fa, &c) in mesh.owner.iter().enumerate() {
+            cell_faces[c as usize].push(fa);
+        }
+        for fa in 0..n_internal {
+            cell_faces[mesh.neighbour[fa] as usize].push(fa);
+        }
+        let theta = predicted_angles(mesh).expect("predicted_angles");
+        reseat_set(mesh, &theta, &f, &is_b, &cell_faces)
+    }
+
+    /// The largest predicted angle over the patch faces `shrink_on` walks.
+    fn worst_theta(mesh: &PolyMeshRaw, spec: &LayerSpec) -> (usize, Scalar) {
+        let theta = predicted_angles(mesh).expect("predicted_angles");
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let patches = resolve_patches(mesh, spec).expect("resolve_patches");
+        let mut worst: Scalar = 0.0;
+        let mut nf = 0usize;
+        for &p in &patches {
+            let patch = &mesh.patches[p];
+            for j in 0..patch.size {
+                let fa = n_internal + patch.start + j;
+                if fa < theta.len() {
+                    worst = worst.max(theta[fa]);
+                    nf += 1;
+                }
+            }
+        }
+        (nf, worst)
+    }
+
+    #[test]
+    fn the_reseat_moves_a_row_one_point_along_the_wall_normal() {
+        let xj = Vec3::new(0.0, 0.0, 1.0);
+        let wall = vec![
+            (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.1), Vec3::new(0.0, 0.0, 1.0)),
+            (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.2), Vec3::new(0.0, 0.0, 1.0)),
+        ];
+        let d1 = reseat_disp(xj, &wall, 1.0);
+        eprintln!("reseat beta=1 {d1:?}");
+        assert!((d1.x - 0.5).abs() < 1e-15);
+        assert!((d1.y - 0.0).abs() < 1e-15);
+        assert!((d1.z - 0.3571067811865476).abs() < 1e-15);
+        let d2 = reseat_disp(xj, &wall, 0.5);
+        eprintln!("reseat beta=0.5 {d2:?}");
+        assert!((d2.x - 0.25).abs() < 1e-15);
+        assert!((d2.y - 0.0).abs() < 1e-15);
+        assert!((d2.z - 0.2535533905932738).abs() < 1e-15);
+        let d0 = reseat_disp(xj, &wall, 0.0);
+        eprintln!("reseat beta=0 {d0:?}");
+        assert!((d0.x).abs() < 1e-15 && (d0.y).abs() < 1e-15);
+        assert!((d0.z - 0.15).abs() < 1e-15);
+
+        let d3 = reseat_disp(
+            Vec3::new(0.0, 1.0, 0.0),
+            &[(
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.1, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+            )],
+            1.0,
+        );
+        eprintln!("reseat x-diag {d3:?}");
+        assert!((d3.x - 1.1).abs() < 1e-15);
+        assert!((d3.y + 1.0).abs() < 1e-15);
+        assert!((d3.z).abs() < 1e-15);
+        let d4 = reseat_disp(
+            Vec3::new(0.5, 0.5, 1.5),
+            &[(
+                Vec3::new(0.5, 0.5, 1.0),
+                Vec3::new(0.0, 0.0, 0.02),
+                Vec3::new(0.0, 0.0, 1.0),
+            )],
+            1.0,
+        );
+        eprintln!("reseat straight above {d4:?}");
+        assert!((d4.x).abs() < 1e-15 && (d4.y).abs() < 1e-15);
+        assert!((d4.z - 0.02).abs() < 1e-15);
+        let d5 = reseat_disp(xj, &[], 1.0);
+        eprintln!("reseat empty wall {d5:?}");
+        assert_eq!(d5, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_wall_on_the_cell_planes_predicts_no_angle_and_reseats_nothing() {
+        let cases = [
+            ("cube", castellated_cube_case(), cube_layers(0.02)),
+            ("gap", castellated_gap_case(), gap_layers(0.0)),
+        ];
+        for (name, (surf, mesh), spec) in cases {
+            let (nf, worst) = worst_theta(&mesh, &spec);
+            eprintln!("theta {name}: worst {worst:.3e} deg over {nf} layer faces");
+            assert!(worst < 1e-4, "{name}: worst theta {worst}");
+            let rs = reseat_of(&mesh, &surf, &spec);
+            eprintln!("reseat {name}: {} points", rs.points.len());
+            assert!(rs.points.is_empty(), "{name}: J is not empty");
+            assert!(rs.wall.is_empty(), "{name}: W is not empty");
+            assert!(
+                rs.per_patch.iter().all(|&c| c == 0),
+                "{name}: per_patch {:?}",
+                rs.per_patch
+            );
+            let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+            assert!(
+                out.report.patches.iter().all(|r| r.n_reseated_points == 0),
+                "{name}: a row reseated points: {:?}",
+                out.report
+                    .patches
+                    .iter()
+                    .map(|r| (&r.name, r.n_reseated_points))
+                    .collect::<Vec<_>>()
+            );
+            eprintln!(
+                "reseat {name}: all n_reseated_points 0 across {} row(s)",
+                out.report.patches.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_snapped_cube_stays_under_the_threshold() {
+        let (surf, mesh) = snapped_cube_case();
+        let spec = cube_layers(0.02);
+        let (nf, worst) = worst_theta(&mesh, &spec);
+        eprintln!("theta snapped cube: worst {worst:.6} deg over {nf} faces");
+        assert_eq!(nf, 24, "the cube patch has 24 faces");
+        assert!(worst > 38.93 && worst < 38.94, "worst theta {worst}");
+        let rs = reseat_of(&mesh, &surf, &spec);
+        eprintln!("reseat snapped cube: {} points", rs.points.len());
+        assert!(rs.points.is_empty(), "the cube re-seats nothing");
+    }
+
+    #[test]
+    fn the_snapped_sphere_reseats_its_row_one_points() {
+        let (surf, mesh) = snapped_sphere_case();
+        let spec = sphere_layers(0.05);
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let patch = mesh
+            .patches
+            .iter()
+            .find(|p| p.name == "sphere")
+            .expect("the sphere patch");
+        assert_eq!(patch.size, 2592, "the sphere patch has 2592 faces");
+        let theta = predicted_angles(&mesh).expect("predicted_angles");
+        let faces: Vec<usize> =
+            (0..patch.size).map(|j| n_internal + patch.start + j).collect();
+        let worst = faces.iter().map(|&fa| theta[fa]).fold(0.0, Scalar::max);
+        let n_trigger = faces.iter().filter(|&&fa| theta[fa] > RESEAT_THETA_ON_DEG).count();
+        let mut owners: Vec<usize> = faces
+            .iter()
+            .filter(|&&fa| theta[fa] > RESEAT_THETA_ON_DEG)
+            .map(|&fa| mesh.owner[fa] as usize)
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        eprintln!("theta sphere: worst {worst:.6} deg, {n_trigger} past 45, {} owners", owners.len());
+        assert!(worst > 80.25 && worst < 80.26, "worst theta {worst}");
+        assert_eq!(n_trigger, 1632);
+        assert_eq!(owners.len(), 804);
+
+        let rs = reseat_of(&mesh, &surf, &spec);
+        eprintln!("reseat sphere: {} points, per_patch {:?}", rs.points.len(), rs.per_patch);
+        assert_eq!(rs.points.len(), 888);
+        assert_eq!(rs.per_patch, vec![888]);
+        let mut worst_w = 0usize;
+        for w in &rs.wall {
+            assert!((1..=3).contains(&w.len()), "a W(j) has {} entries", w.len());
+            worst_w = worst_w.max(w.len());
+        }
+        eprintln!("reseat sphere: largest W(j) holds {worst_w} wall points");
+        assert_eq!(worst_w, 3);
+        assert!(
+            rs.points.windows(2).all(|w| w[0] < w[1]),
+            "J is not strictly ascending"
+        );
+        let mut is_b = vec![false; mesh.points.len()];
+        for fi in n_internal..mesh.faces.len() {
+            for &p in &mesh.faces[fi] {
+                is_b[p as usize] = true;
+            }
+        }
+        assert!(
+            rs.points.iter().all(|&j| !is_b[j]),
+            "a J point sits on a boundary face"
+        );
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "sphere")
+            .expect("the sphere row");
+        eprintln!(
+            "reseat sphere row: n_reseated_points {}, n_layers {}, full_area_frac {:.6}, drop_cause {:?}",
+            row.n_reseated_points,
+            row.n_layers,
+            row.full_area_frac,
+            row.drop_cause.as_ref().map(|c| c.as_str())
+        );
+        assert_eq!(row.n_reseated_points, 888);
+        for e in &out.report.ladder {
+            eprintln!("sphere ladder {e:?}");
+        }
+    }
+
+    /// The snapped level-2 sphere with three layers of 0.05 KEEPS them: the
+    /// re-seat of (92.63)-(92.65) moves 888 row-1 points, the gate passes at
+    /// its own thresholds with every level-n face under 70 degrees, and the
+    /// trace is one inner and one outer pass. The (92.45) limiter, not G4,
+    /// now sets the thickness: full 0, mean_frac 0.346.
+    #[test]
+    fn the_snapped_sphere_keeps_its_layers_where_the_reseat_acts() {
+        let (surf, mesh) = snapped_sphere_case();
+        assert_eq!(cell_count(&mesh), 4920);
+        let out = add_layers(&mesh, &surf, &sphere_layers(0.05), &thresholds())
+            .expect("layers on the snapped sphere");
+        assert_eq!(cell_count(&out.mesh), 4920 + 3 * 2592);
+        assert!(out.quality.passed());
+        assert!(
+            (out.quality.max_non_orth_deg - 66.05797649243732).abs() < 1e-9,
+            "max_non_orth_deg {}",
+            out.quality.max_non_orth_deg
+        );
+        assert!(out.quality.max_non_orth_deg < 70.0);
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "sphere")
+            .expect("the report carries a row for the sphere");
+        assert_eq!(row.n_layers, 3);
+        assert!(row.dropped.is_none(), "{:?}", row.dropped);
+        assert!(row.drop_cause.is_none(), "{:?}", row.drop_cause);
+        assert_eq!(row.n_reseated_points, 888);
+        assert_eq!(row.full_area_frac, 0.0);
+        assert!(
+            (row.mean_frac - 0.34603400766355).abs() < 1e-9,
+            "mean_frac {}",
+            row.mean_frac
+        );
+        check_ladder(&out.report.ladder);
+        check_rows(&out);
+        let names = vec!["sphere".to_string()];
+        assert_eq!(
+            out.report.ladder,
+            vec![
+                LadderEntry::new(Ladder::Inner, 0, &names, &[], Outcome::Pass, None),
+                LadderEntry::new(Ladder::Outer, 0, &names, &[], Outcome::Pass, None),
+            ]
+        );
+        eprintln!(
+            "reseat keeps: cells {} -> {}, max_non_orth_deg {:.6}, mean_frac {:.12}, full_area_frac {}",
+            cell_count(&mesh),
+            cell_count(&out.mesh),
+            out.quality.max_non_orth_deg,
+            row.mean_frac,
+            row.full_area_frac
+        );
     }
 }

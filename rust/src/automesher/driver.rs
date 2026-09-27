@@ -376,6 +376,7 @@ fn layer_patch_json(p: &super::layers::PatchLayers) -> serde_json::Value {
         "t1_min": p.t1_min,
         "dropped": p.dropped,
         "drop_cause": p.drop_cause.map(|c| c.as_str()),
+        "n_reseated_points": p.n_reseated_points,
     })
 }
 
@@ -1789,6 +1790,7 @@ mod tests {
             "t1_mean",
             "t1_min",
             "dropped",
+            "n_reseated_points",
         ] {
             assert!(r.get(key).is_some(), "missing {key} in {r}");
         }
