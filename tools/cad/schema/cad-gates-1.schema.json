@@ -1,0 +1,53 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad-gates/1",
+  "title": "locked loop constants",
+  "description": "The study's locked loop constants: the promotion gate, the ladder and the stopping rule of docs/16 §E.6-§E.7 and CAD-15's solve classification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+      "schema",
+      "loop_level",
+      "confirm_level",
+      "max_evals",
+      "init_design",
+      "stall_k",
+      "llm_reject_k",
+      "sobol_pool",
+      "ties_promote",
+      "llm_law_change_needs_card",
+      "stop_rule"
+    ],
+  "properties": {
+      "schema": {"const": "cad-gates/1"},
+      "loop_level": {"$ref": "#/$defs/Level"},
+      "confirm_level": {"$ref": "#/$defs/Level"},
+      "max_evals": {"type": "integer", "minimum": 1},
+      "init_design": {"type": "integer", "minimum": 1},
+      "stall_k": {"type": "integer", "minimum": 1},
+      "llm_reject_k": {"type": "integer", "minimum": 1},
+      "sobol_pool": {"type": "integer", "minimum": 1},
+      "ties_promote": {"const": false},
+      "llm_law_change_needs_card": {"const": true},
+      "stop_rule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+              "residual_decades",
+              "cont_err_max",
+              "window_iters",
+              "dp_rel_change_max",
+              "cd_rel_change_max"
+            ],
+          "properties": {
+              "residual_decades": {"type": "number", "exclusiveMinimum": 0},
+              "cont_err_max": {"type": "number", "exclusiveMinimum": 0},
+              "window_iters": {"type": "integer", "minimum": 1},
+              "dp_rel_change_max": {"type": "number", "exclusiveMinimum": 0},
+              "cd_rel_change_max": {"type": "number", "exclusiveMinimum": 0}
+            }
+        }
+    },
+  "$defs": {"Level": {"type": "string", "pattern": "^L[0-9]$"}}
+}

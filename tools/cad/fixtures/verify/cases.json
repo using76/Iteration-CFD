@@ -1,0 +1,1341 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 \uc8fc\uc2dd\ud68c\uc0ac \uc774\ud130\ub808\uc774\uc158\uc988 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "evidence": {
+  "path": "probes.json",
+  "sha": "1111111111111111111111111111111111111111111111111111111111111111"
+ },
+ "cases": [
+  {
+   "name": "le_pass_clear",
+   "why": "3+0.5 <= 4",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 3.0,
+    "unit": "m",
+    "u_meas": 0.5,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 3.0,
+    "u": 0.5
+   }
+  },
+  {
+   "name": "le_pass_boundary_equal",
+   "why": "3.5+0.5 == 4: PASS iff m+u <= b+tol, equality passes",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 3.5,
+    "unit": "m",
+    "u_meas": 0.5,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 3.5,
+    "u": 0.5
+   }
+  },
+  {
+   "name": "le_fail_clear",
+   "why": "5-0.5 > 4",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 5.0,
+    "unit": "m",
+    "u_meas": 0.5,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "fail",
+    "reason_id": null,
+    "m": 5.0,
+    "u": 0.5
+   }
+  },
+  {
+   "name": "le_straddle_ne",
+   "why": "u straddles b: 4+0.5 > 4 and 4-0.5 <= 4",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 4.0,
+    "unit": "m",
+    "u_meas": 0.5,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 4.0,
+    "u": 0.5
+   }
+  },
+  {
+   "name": "le_fail_boundary_equal_is_ne",
+   "why": "4.5-0.5 == 4 is not > 4, and 4.5+0.5 > 4",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 4.5,
+    "unit": "m",
+    "u_meas": 0.5,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 4.5,
+    "u": 0.5
+   }
+  },
+  {
+   "name": "le_tol_pass_boundary",
+   "why": "3.75+0.5 == 4+0.25",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.25,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 3.75,
+    "unit": "m",
+    "u_meas": 0.5,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 3.75,
+    "u": 0.5
+   }
+  },
+  {
+   "name": "ge_pass_boundary_equal",
+   "why": "2.25-0.25 == 2: PASS iff m-u >= b-tol",
+   "check": {
+    "req_id": "REQ-002",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": ">=",
+    "lo": 2.0,
+    "hi": null,
+    "tol": 0.0,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 2.25,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 2.25,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "ge_fail_boundary_equal_is_ne",
+   "why": "1.75+0.25 == 2 is not < 2",
+   "check": {
+    "req_id": "REQ-002",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": ">=",
+    "lo": 2.0,
+    "hi": null,
+    "tol": 0.0,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 1.75,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 1.75,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "ge_fail_clear",
+   "why": "1.5+0.25 < 2",
+   "check": {
+    "req_id": "REQ-002",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": ">=",
+    "lo": 2.0,
+    "hi": null,
+    "tol": 0.0,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 1.5,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "fail",
+    "reason_id": null,
+    "m": 1.5,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "ge_tol_pass_boundary",
+   "why": "1.75-0.25 == 2-0.5",
+   "check": {
+    "req_id": "REQ-002",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": ">=",
+    "lo": 2.0,
+    "hi": null,
+    "tol": 0.5,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 1.75,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 1.75,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "eq_pass_boundary_equal",
+   "why": "|8.25-8|+0.25 == 0.5",
+   "check": {
+    "req_id": "REQ-003",
+    "primitive": "plane_distance",
+    "args": {
+     "feature": null,
+     "where": [
+      "contraction_start",
+      "exit_plane"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "==",
+    "lo": 8.0,
+    "hi": 8.0,
+    "tol": 0.5,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "plane_distance",
+    "feature": null,
+    "where": [
+     "contraction_start",
+     "exit_plane"
+    ],
+    "value": 8.25,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 8.25,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "eq_fail",
+   "why": "|9-8|-0.25 = 0.75 > 0.5",
+   "check": {
+    "req_id": "REQ-003",
+    "primitive": "plane_distance",
+    "args": {
+     "feature": null,
+     "where": [
+      "contraction_start",
+      "exit_plane"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "==",
+    "lo": 8.0,
+    "hi": 8.0,
+    "tol": 0.5,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "plane_distance",
+    "feature": null,
+    "where": [
+     "contraction_start",
+     "exit_plane"
+    ],
+    "value": 9.0,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "fail",
+    "reason_id": null,
+    "m": 9.0,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "eq_straddle_ne",
+   "why": "|8.5-8|+0.25 = 0.75 > 0.5 and 0.5-0.25 <= 0.5",
+   "check": {
+    "req_id": "REQ-003",
+    "primitive": "plane_distance",
+    "args": {
+     "feature": null,
+     "where": [
+      "contraction_start",
+      "exit_plane"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "==",
+    "lo": 8.0,
+    "hi": 8.0,
+    "tol": 0.5,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "plane_distance",
+    "feature": null,
+    "where": [
+     "contraction_start",
+     "exit_plane"
+    ],
+    "value": 8.5,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 8.5,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "eq_fail_boundary_equal_is_ne",
+   "why": "|7.25-8|-0.25 == 0.5 is not > 0.5",
+   "check": {
+    "req_id": "REQ-003",
+    "primitive": "plane_distance",
+    "args": {
+     "feature": null,
+     "where": [
+      "contraction_start",
+      "exit_plane"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "==",
+    "lo": 8.0,
+    "hi": 8.0,
+    "tol": 0.5,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "plane_distance",
+    "feature": null,
+    "where": [
+     "contraction_start",
+     "exit_plane"
+    ],
+    "value": 7.25,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 7.25,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "eq_exact_count_fail",
+   "why": "n_solids 2 against == 1 with tol 0 and u 0",
+   "check": {
+    "req_id": "SYS-SOLID",
+    "primitive": "n_solids",
+    "args": {
+     "feature": null,
+     "where": [
+      "fluid"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "==",
+    "lo": 1.0,
+    "hi": 1.0,
+    "tol": 0.0,
+    "u": 0.0,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "n_solids",
+    "feature": null,
+    "where": [],
+    "value": 2.0,
+    "unit": "1",
+    "u_meas": 0.0,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "fail",
+    "reason_id": null,
+    "m": 2.0,
+    "u": 0.0
+   }
+  },
+  {
+   "name": "in_pass_lower_boundary_equal",
+   "why": "2.25-0.25 == 2 and 2.25+0.25 <= 4",
+   "check": {
+    "req_id": "REQ-004",
+    "primitive": "diameter_at_plane",
+    "args": {
+     "feature": "exit_plane",
+     "where": [
+      "exit_plane"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "in",
+    "lo": 2.0,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "diameter_at_plane",
+    "feature": null,
+    "where": [
+     "exit_plane"
+    ],
+    "value": 2.25,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 2.25,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "in_straddle_upper_ne",
+   "why": "4+0.25 > 4, 4-0.25 <= 4, 4-0.25 >= 2",
+   "check": {
+    "req_id": "REQ-004",
+    "primitive": "diameter_at_plane",
+    "args": {
+     "feature": "exit_plane",
+     "where": [
+      "exit_plane"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "in",
+    "lo": 2.0,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "diameter_at_plane",
+    "feature": null,
+    "where": [
+     "exit_plane"
+    ],
+    "value": 4.0,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 4.0,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "in_fail_below",
+   "why": "1.5+0.25 < 2",
+   "check": {
+    "req_id": "REQ-004",
+    "primitive": "diameter_at_plane",
+    "args": {
+     "feature": "exit_plane",
+     "where": [
+      "exit_plane"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "in",
+    "lo": 2.0,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "diameter_at_plane",
+    "feature": null,
+    "where": [
+     "exit_plane"
+    ],
+    "value": 1.5,
+    "unit": "m",
+    "u_meas": 0.25,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "fail",
+    "reason_id": null,
+    "m": 1.5,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "u_record_larger_than_check",
+   "why": "u = max(check u 0.25, record u_meas 0.5) = 0.5: 3.625+0.5 > 4 and 3.625-0.5 <= 4 (with 0.25 it would pass)",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.25,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 3.625,
+    "unit": "m",
+    "u_meas": 0.5,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 3.625,
+    "u": 0.5
+   }
+  },
+  {
+   "name": "cfd_u_max_of_gci_and_band",
+   "why": "check u null: u = max(gci 0.03125, band 0.0625) = 0.0625; 0.125+0.0625 <= 0.3",
+   "check": {
+    "req_id": "SYS-MACH",
+    "primitive": "mach_max",
+    "args": {
+     "feature": null,
+     "where": [
+      "fluid"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 0.3,
+    "tol": 0.0,
+    "u": null,
+    "hardness": "hard",
+    "repr": "cfd"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "mach_max",
+    "feature": null,
+    "where": [
+     "fluid"
+    ],
+    "value": 0.125,
+    "unit": "1",
+    "u_meas": null,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": {
+    "gci_fine": 0.03125,
+    "repeat_band": 0.0625
+   },
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 0.125,
+    "u": 0.0625
+   }
+  },
+  {
+   "name": "cfd_u_absent_is_ne_not_zero",
+   "why": "check u null and no CFD u: u null never means u = 0 (with 0 it would pass)",
+   "check": {
+    "req_id": "SYS-MACH",
+    "primitive": "mach_max",
+    "args": {
+     "feature": null,
+     "where": [
+      "fluid"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 0.3,
+    "tol": 0.0,
+    "u": null,
+    "hardness": "hard",
+    "repr": "cfd"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "mach_max",
+    "feature": null,
+    "where": [
+     "fluid"
+    ],
+    "value": 0.125,
+    "unit": "1",
+    "u_meas": null,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 0.125,
+    "u": null
+   }
+  },
+  {
+   "name": "cfd_u_gci_only_straddle_ne",
+   "why": "u = gci 0.25 (band null): 0.125+0.25 > 0.3 and 0.125-0.25 <= 0.3",
+   "check": {
+    "req_id": "SYS-MACH",
+    "primitive": "mach_max",
+    "args": {
+     "feature": null,
+     "where": [
+      "fluid"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 0.3,
+    "tol": 0.0,
+    "u": null,
+    "hardness": "hard",
+    "repr": "cfd"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "mach_max",
+    "feature": null,
+    "where": [
+     "fluid"
+    ],
+    "value": 0.125,
+    "unit": "1",
+    "u_meas": null,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": {
+    "gci_fine": 0.25,
+    "repeat_band": null
+   },
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 0.125,
+    "u": 0.25
+   }
+  },
+  {
+   "name": "missing_record",
+   "why": "no measurement for the row",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": null,
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-MISSING",
+    "m": null,
+    "u": null
+   }
+  },
+  {
+   "name": "raised_measurement",
+   "why": "the measurement slot holds an exception object",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": "RAISE",
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-ERROR",
+    "m": null,
+    "u": null
+   }
+  },
+  {
+   "name": "error_record",
+   "why": "status error (the primitive caught its own raise)",
+   "check": {
+    "req_id": "REQ-001",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": 4.0,
+    "tol": 0.0,
+    "u": 0.5,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": null,
+    "unit": "m",
+    "u_meas": null,
+    "method": "fixture",
+    "status": "error",
+    "reason_id": "MEAS-ERROR",
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-ERROR",
+    "m": null,
+    "u": null
+   }
+  },
+  {
+   "name": "refused_record",
+   "why": "status refused: the primitive declined, so there is no measurement",
+   "check": {
+    "req_id": "REQ-005",
+    "primitive": "meridian_min_wall",
+    "args": {
+     "feature": null,
+     "where": [
+      "wetted",
+      "outer"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": ">=",
+    "lo": 0.5,
+    "hi": null,
+    "tol": 0.0,
+    "u": 0.0078125,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "meridian_min_wall",
+    "feature": null,
+    "where": [
+     "wetted",
+     "outer"
+    ],
+    "value": null,
+    "unit": "m",
+    "u_meas": null,
+    "method": "fixture",
+    "status": "refused",
+    "reason_id": "MEAS-XCHECK",
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-MISSING",
+    "m": null,
+    "u": null
+   }
+  },
+  {
+   "name": "is_true_pass",
+   "why": "boolean primitive value 1, no uncertainty",
+   "check": {
+    "req_id": "SYS-VALID",
+    "primitive": "valid",
+    "args": {
+     "feature": null,
+     "where": [
+      "fluid"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "is_true",
+    "lo": null,
+    "hi": null,
+    "tol": 0.0,
+    "u": 0.0,
+    "hardness": "hard",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "valid",
+    "feature": null,
+    "where": [],
+    "value": 1.0,
+    "unit": "1",
+    "u_meas": 0.0,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 1.0,
+    "u": 0.0
+   }
+  },
+  {
+   "name": "is_true_fail",
+   "why": "boolean primitive value 0",
+   "check": {
+    "req_id": "SYS-WATERTIGHT",
+    "primitive": "watertight",
+    "args": {
+     "feature": null,
+     "where": [
+      "fluid"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "is_true",
+    "lo": null,
+    "hi": null,
+    "tol": 0.0,
+    "u": 0.0,
+    "hardness": "hard",
+    "repr": "stl"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "watertight",
+    "feature": null,
+    "where": [],
+    "value": 0.0,
+    "unit": "1",
+    "u_meas": 0.0,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "fail",
+    "reason_id": null,
+    "m": 0.0,
+    "u": 0.0
+   }
+  },
+  {
+   "name": "objective_measured_pass",
+   "why": "objective row: lo and hi null, no bound to violate; m and u carried for the gate",
+   "check": {
+    "req_id": "REQ-006",
+    "primitive": "extent_along_axis",
+    "args": {
+     "feature": null,
+     "where": [
+      "body"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": "<=",
+    "lo": null,
+    "hi": null,
+    "tol": 0.0,
+    "u": 0.125,
+    "hardness": "objective",
+    "repr": "brep"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "extent_along_axis",
+    "feature": null,
+    "where": [
+     "body"
+    ],
+    "value": 0.0625,
+    "unit": "m",
+    "u_meas": 0.125,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "pass",
+    "reason_id": null,
+    "m": 0.0625,
+    "u": 0.125
+   }
+  },
+  {
+   "name": "objective_cfd_u_absent_ne",
+   "why": "objective row on a CFD primitive with u null and no CFD u",
+   "check": {
+    "req_id": "REQ-007",
+    "primitive": "mach_max",
+    "args": {
+     "feature": null,
+     "where": [
+      "fluid"
+     ],
+     "Re": null,
+     "level": null
+    },
+    "op": ">=",
+    "lo": null,
+    "hi": null,
+    "tol": 0.0,
+    "u": null,
+    "hardness": "objective",
+    "repr": "cfd"
+   },
+   "record": {
+    "schema": "cad-measure/1",
+    "primitive": "mach_max",
+    "feature": null,
+    "where": [
+     "fluid"
+    ],
+    "value": 0.125,
+    "unit": "1",
+    "u_meas": null,
+    "method": "fixture",
+    "status": "ok",
+    "reason_id": null,
+    "detail": ""
+   },
+   "cfd": null,
+   "want": {
+    "verdict": "not_evaluable",
+    "reason_id": "NE-UNCERTAIN",
+    "m": 0.125,
+    "u": null
+   }
+  }
+ ]
+}

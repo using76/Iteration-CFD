@@ -1,0 +1,59 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad-verdict/1",
+  "title": "one evaluation's verdicts",
+  "description": "The row verdicts of one evaluation and the derived design verdict of docs/16 §E.4; hardness is carried because the derivation needs it; bound to the requirements lock and the sha of the checks it was judged under (docs/16a §F).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "study_id", "requirements_lock", "checks_sha", "eval_key", "design_verdict", "verdicts"],
+  "properties": {
+      "schema": {"const": "cad-verdict/1"},
+      "study_id": {"$ref": "#/$defs/StudyId"},
+      "requirements_lock": {"$ref": "#/$defs/Sha"},
+      "checks_sha": {"$ref": "#/$defs/Sha"},
+      "eval_key": {"$ref": "#/$defs/Sha"},
+      "design_verdict": {"enum": ["feasible", "infeasible", "not_evaluable"]},
+      "verdicts": {
+          "type": "array",
+          "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                  "req_id",
+                  "primitive",
+                  "feature",
+                  "hardness",
+                  "m",
+                  "u",
+                  "verdict",
+                  "reason_id",
+                  "evidence_path",
+                  "evidence_sha"
+                ],
+              "properties": {
+                  "req_id": {"$ref": "#/$defs/ReqId"},
+                  "primitive": {"$ref": "#/$defs/Name"},
+                  "feature": {"$ref": "#/$defs/NameOrNull"},
+                  "hardness": {"$ref": "#/$defs/Hardness"},
+                  "m": {"type": ["number", "null"]},
+                  "u": {"type": ["number", "null"], "minimum": 0},
+                  "verdict": {"enum": ["pass", "fail", "not_evaluable"]},
+                  "reason_id": {"enum": ["NE-UNCERTAIN", "NE-MISSING", "NE-ERROR", null]},
+                  "evidence_path": {"type": ["string", "null"]},
+                  "evidence_sha": {"$ref": "#/$defs/ShaOrNull"}
+                }
+            },
+          "minItems": 1
+        }
+    },
+  "$defs": {
+      "StudyId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+      "Sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "ReqId": {"type": "string", "pattern": "^(REQ-[0-9]{3}|SYS-[A-Z]+)$"},
+      "Name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "Hardness": {"enum": ["hard", "soft", "objective"]},
+      "ShaOrNull": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+    }
+}

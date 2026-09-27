@@ -134,6 +134,76 @@ NVIDIA CUDA Toolkit, cuFFT, cuBLAS
   linking and redistribution of applications built against it. Not redistributed
   here; the toolkit must be installed separately.
 
+--------------------------------------------------------------------------------
+Apache-2.0 text reproduced in this repository
+--------------------------------------------------------------------------------
+
+AI-CAD (https://github.com/ai-cad-labs/ai-cad, commit c7503b4)
+  Apache License 2.0; the full licence text is `LICENSE-APACHE-2.0.ai-cad` at the
+  repository root, byte-identical to that commit's LICENSE (sha256
+  a79ae6730c833592b4759e8cd8b08f63abb378ff13cd88eca7f318af1351999f).
+
+  What is reproduced, and where (docs/16-cad-loop-plan.md §A, decision D-5):
+  the `_HINTS` table and `match_hint()` of `.shared/tools/cadquery_executor.py`
+  (lines 93-146 at c7503b4), copied VERBATIM into `tools/cad/hints.py` by unit
+  CAD-04, where the file keeps AI-CAD's attribution and carries the mark
+  "modified by Iteration-CFD (Iterations Co., Ltd.)" beside every change; and
+  the "Methods That DO NOT EXIST" table of
+  `.shared/skills/cadquery-anti-hallucination/SKILL.md`, used as reference text
+  in the CAD tranche's coding briefs. Everything else docs/16 takes from AI-CAD
+  is an idea, reimplemented and cited, not copied text. AI-CAD is not a
+  dependency: nothing imports or runs it.
+
+  AI-CAD's NOTICE file reads, in full:
+
+    AI-CAD
+    Copyright 2026 The ai-cad-labs project
+
+    This product includes software developed by Saifuddin Raja and the AI-CAD Labs contributors and maintainers.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+  Those reproduced parts remain under Apache-2.0; nothing in the meteor-cfd
+  licence restricts any right you have in them under their own terms.
+
+Amagine3D (https://github.com/amagine-ai/Amagine3D, commit e608dc6)
+  Apache License 2.0; the full licence text is `LICENSE-APACHE-2.0.amagine3d` at
+  the repository root, byte-identical to the LICENSE blob of commit
+  e608dc61d5ac70238d96d9c4f3fba00b6cc9dc21 (sha256
+  cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30).
+
+  Amagine3D's NOTICE file names its copyright as:
+
+    Amagine3D
+    Copyright 2026 amagine-ai
+
+  Copied files (docs/16a-amagine-borrow.md §J, decision D-10): the four
+  functions `_missing_snapshot`, `_same_file_state`, `_hash_descriptor` and
+  `stable_file_snapshot` of `skills/text-a3d/freshness_check.py` (lines 14-107
+  at e608dc6), copied VERBATIM into a marked block of
+  `tools/cad/common.py` by unit AMG-3 (one inserted line, marked), and, only
+  if the AMG-11 brief copies it rather than rewrites it, the PNG `chunk()`
+  helper of
+  `packages/a3d-runtime/src/vision-probe.ts` (lines 18-34); each copied block
+  carries Amagine3D's attribution and the mark "modified by Iteration-CFD"
+  beside every changed line. Everything else docs/16a takes from Amagine3D is
+  an idea, reimplemented and cited, not copied text. The build123d paragraph
+  of Amagine3D's NOTICE is not carried, because nothing build123d-derived is
+  copied. Amagine3D is not a dependency: nothing imports or runs it.
+
+  Those reproduced parts remain under Apache-2.0; nothing in the meteor-cfd
+  licence restricts any right you have in them under their own terms.
+
 ================================================================================
 Reference material
 ================================================================================

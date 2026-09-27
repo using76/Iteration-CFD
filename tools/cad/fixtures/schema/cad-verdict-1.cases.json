@@ -1,0 +1,118 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-verdict/1",
+  "valid": [
+    {
+      "name": "g4_start_mixed",
+      "instance": {
+        "schema": "cad-verdict/1",
+        "study_id": "g4_nozzle",
+        "requirements_lock": "2222222222222222222222222222222222222222222222222222222222222222",
+        "checks_sha": "3333333333333333333333333333333333333333333333333333333333333333",
+        "eval_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "design_verdict": "infeasible",
+        "verdicts": [
+          {
+            "req_id": "REQ-001",
+            "primitive": "diameter_at_plane",
+            "feature": "contraction_start",
+            "hardness": "hard",
+            "m": 0.06,
+            "u": 1e-09,
+            "verdict": "pass",
+            "reason_id": null,
+            "evidence_path": "probes.json",
+            "evidence_sha": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          {
+            "req_id": "REQ-003",
+            "primitive": "meridian_min_wall",
+            "feature": null,
+            "hardness": "hard",
+            "m": 0.0018759,
+            "u": 1e-08,
+            "verdict": "fail",
+            "reason_id": null,
+            "evidence_path": "probes.json",
+            "evidence_sha": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          {
+            "req_id": "REQ-005",
+            "primitive": "post_cd",
+            "feature": "exit_plane",
+            "hardness": "hard",
+            "m": null,
+            "u": null,
+            "verdict": "not_evaluable",
+            "reason_id": "NE-MISSING",
+            "evidence_path": null,
+            "evidence_sha": null
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "verdict_upper",
+      "path": "verdicts[0].verdict",
+      "op": "set",
+      "value": "PASS",
+      "errors": [
+        "cad-verdict/1: verdicts[0].verdict: not one of [\"pass\", \"fail\", \"not_evaluable\"]"
+      ]
+    },
+    {
+      "name": "reason_unknown",
+      "path": "verdicts[2].reason_id",
+      "op": "set",
+      "value": "NE-GUESS",
+      "errors": [
+        "cad-verdict/1: verdicts[2].reason_id: not one of [\"NE-UNCERTAIN\", \"NE-MISSING\", \"NE-ERROR\", null]"
+      ]
+    },
+    {
+      "name": "design_verdict_typo",
+      "path": "design_verdict",
+      "op": "set",
+      "value": "feasable",
+      "errors": [
+        "cad-verdict/1: design_verdict: not one of [\"feasible\", \"infeasible\", \"not_evaluable\"]"
+      ]
+    },
+    {
+      "name": "m_missing",
+      "path": "verdicts[0].m",
+      "op": "delete",
+      "errors": [
+        "cad-verdict/1: verdicts[0].m: required field missing"
+      ]
+    },
+    {
+      "name": "eval_key_empty",
+      "path": "eval_key",
+      "op": "set",
+      "value": "",
+      "errors": [
+        "cad-verdict/1: eval_key: does not match ^[0-9a-f]{64}$"
+      ]
+    },
+    {
+      "name": "requirements_lock_missing",
+      "path": "requirements_lock",
+      "op": "delete",
+      "errors": [
+        "cad-verdict/1: requirements_lock: required field missing"
+      ]
+    },
+    {
+      "name": "checks_sha_short",
+      "path": "checks_sha",
+      "op": "set",
+      "value": "333333333333333333333333333333333333333333333333333333333333333",
+      "errors": [
+        "cad-verdict/1: checks_sha: does not match ^[0-9a-f]{64}$"
+      ]
+    }
+  ]
+}

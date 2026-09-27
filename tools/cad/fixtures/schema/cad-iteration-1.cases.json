@@ -1,0 +1,107 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-iteration/1",
+  "valid": [
+    {
+      "name": "start_solved",
+      "instance": {
+        "schema": "cad-iteration/1",
+        "study_id": "g4_nozzle",
+        "n": 0,
+        "eval_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "params_sha": "2222222222222222222222222222222222222222222222222222222222222222",
+        "template_id": "nozzle_contraction/1",
+        "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requirements_lock": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333",
+        "env_sha": "4444444444444444444444444444444444444444444444444444444444444444",
+        "level": "L1",
+        "origin": "start",
+        "stage_reached": "judge",
+        "solve_class": "steady",
+        "design_verdict": "infeasible",
+        "n_hard_pass": 4,
+        "n_hard_fail": 1,
+        "n_hard_ne": 0,
+        "objective": 0.07,
+        "objective_u": 1e-09,
+        "verdict_sha": "5555555555555555555555555555555555555555555555555555555555555555",
+        "cache_hit": false
+      }
+    },
+    {
+      "name": "optimiser_refused_before_mesh",
+      "instance": {
+        "schema": "cad-iteration/1",
+        "study_id": "g4_nozzle",
+        "n": 1,
+        "eval_key": "6666666666666666666666666666666666666666666666666666666666666666",
+        "params_sha": "7777777777777777777777777777777777777777777777777777777777777777",
+        "template_id": "nozzle_contraction/1",
+        "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requirements_lock": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333",
+        "env_sha": "4444444444444444444444444444444444444444444444444444444444444444",
+        "level": "L1",
+        "origin": "optimiser",
+        "stage_reached": "readiness",
+        "solve_class": "not_run",
+        "design_verdict": "infeasible",
+        "n_hard_pass": 2,
+        "n_hard_fail": 1,
+        "n_hard_ne": 3,
+        "objective": null,
+        "objective_u": null,
+        "verdict_sha": null,
+        "cache_hit": true
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "n_negative",
+      "path": "n",
+      "op": "set",
+      "value": -1,
+      "errors": [
+        "cad-iteration/1: n: below minimum 0"
+      ]
+    },
+    {
+      "name": "n_fractional",
+      "path": "n",
+      "op": "set",
+      "value": 1.5,
+      "errors": [
+        "cad-iteration/1: n: expected integer, got number"
+      ]
+    },
+    {
+      "name": "cache_hit_string",
+      "path": "cache_hit",
+      "op": "set",
+      "value": "false",
+      "errors": [
+        "cad-iteration/1: cache_hit: expected boolean, got string"
+      ]
+    },
+    {
+      "name": "solve_class_converged",
+      "path": "solve_class",
+      "op": "set",
+      "value": "converged",
+      "errors": [
+        "cad-iteration/1: solve_class: not one of [\"steady\", \"unsteady\", \"diverged\", \"refused\", \"not_run\"]"
+      ]
+    },
+    {
+      "name": "wall_time_field",
+      "path": "wall_time_s",
+      "op": "set",
+      "value": 12.3,
+      "errors": [
+        "cad-iteration/1: wall_time_s: unknown field"
+      ]
+    }
+  ]
+}

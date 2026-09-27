@@ -1,0 +1,83 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-gates/1",
+  "valid": [
+    {
+      "name": "plan_constants",
+      "instance": {
+        "schema": "cad-gates/1",
+        "loop_level": "L1",
+        "confirm_level": "L2",
+        "max_evals": 24,
+        "init_design": 6,
+        "stall_k": 3,
+        "llm_reject_k": 2,
+        "sobol_pool": 256,
+        "ties_promote": false,
+        "llm_law_change_needs_card": true,
+        "stop_rule": {
+          "residual_decades": 4,
+          "cont_err_max": 1e-06,
+          "window_iters": 200,
+          "dp_rel_change_max": 1e-05,
+          "cd_rel_change_max": 1e-05
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "ties_promote_true",
+      "path": "ties_promote",
+      "op": "set",
+      "value": true,
+      "errors": [
+        "cad-gates/1: ties_promote: must equal false"
+      ]
+    },
+    {
+      "name": "max_evals_zero",
+      "path": "max_evals",
+      "op": "set",
+      "value": 0,
+      "errors": [
+        "cad-gates/1: max_evals: below minimum 1"
+      ]
+    },
+    {
+      "name": "max_evals_string",
+      "path": "max_evals",
+      "op": "set",
+      "value": "24",
+      "errors": [
+        "cad-gates/1: max_evals: expected integer, got string"
+      ]
+    },
+    {
+      "name": "window_fractional",
+      "path": "stop_rule.window_iters",
+      "op": "set",
+      "value": 200.5,
+      "errors": [
+        "cad-gates/1: stop_rule.window_iters: expected integer, got number"
+      ]
+    },
+    {
+      "name": "cont_err_missing",
+      "path": "stop_rule.cont_err_max",
+      "op": "delete",
+      "errors": [
+        "cad-gates/1: stop_rule.cont_err_max: required field missing"
+      ]
+    },
+    {
+      "name": "loosen_field",
+      "path": "loosen",
+      "op": "set",
+      "value": true,
+      "errors": [
+        "cad-gates/1: loosen: unknown field"
+      ]
+    }
+  ]
+}

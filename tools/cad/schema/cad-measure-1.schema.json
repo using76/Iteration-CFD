@@ -1,0 +1,41 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad-measure/1",
+  "title": "one primitive measurement",
+  "description": "One primitive's measurement as docs/16 §E.2 defines it: value, unit, uncertainty and status, with a boolean primitive writing value 1 or 0 and unit 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+      "schema",
+      "primitive",
+      "feature",
+      "where",
+      "value",
+      "unit",
+      "u_meas",
+      "method",
+      "status",
+      "reason_id",
+      "detail"
+    ],
+  "properties": {
+      "schema": {"const": "cad-measure/1"},
+      "primitive": {"$ref": "#/$defs/Name"},
+      "feature": {"$ref": "#/$defs/NameOrNull"},
+      "where": {"type": "array", "items": {"$ref": "#/$defs/Name"}},
+      "value": {"type": ["number", "null"]},
+      "unit": {"$ref": "#/$defs/Unit"},
+      "u_meas": {"type": ["number", "null"], "minimum": 0},
+      "method": {"type": "string", "minLength": 1},
+      "status": {"enum": ["ok", "refused", "error"]},
+      "reason_id": {"$ref": "#/$defs/RuleIdOrNull"},
+      "detail": {"type": "string"}
+    },
+  "$defs": {
+      "Name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "Unit": {"enum": ["m", "m2", "m3", "rad", "m/s", "m3/s", "kg/s", "Pa", "K", "1"]},
+      "RuleIdOrNull": {"type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9]*(-[A-Z0-9]+)*$"}
+    }
+}

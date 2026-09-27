@@ -1,0 +1,22 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "a_int": 1,
+  "b_neg": -7,
+  "c_float": 0.1,
+  "d_exp": 1e-7,
+  "e_big": 12345678901234567890,
+  "f_true": true,
+  "g_false": false,
+  "h_null": null,
+  "i_ascii": "nozzle",
+  "j_unicode": "노즐 수축부 θ",
+  "k_symbols": "a/b <c> &d; tab-free, x^2 = 4 %",
+  "l_list": [3, 1, 2],
+  "m_nested": {"z": 1, "a": {"y": [], "b": {}}},
+  "n_empty_str": "",
+  "o_float_int": 2.0,
+  "p_pi": 3.141592653589793,
+  "Q_upper": "sorts before lowercase",
+  "r_list_obj": [{"b": 2, "a": 1}],
+  "s_neg_zero": -0.0
+}

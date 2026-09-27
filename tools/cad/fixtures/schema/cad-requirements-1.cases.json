@@ -1,0 +1,393 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-requirements/1",
+  "valid": [
+    {
+      "name": "g4_brief",
+      "instance": {
+        "schema": "cad-requirements/1",
+        "study_id": "g4_nozzle",
+        "template_id": "nozzle_contraction/1",
+        "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "brief_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "attachments": [],
+        "operating_point": {
+          "fluid": "air",
+          "T_K": 293.15,
+          "p0_Pa": 101325.0,
+          "U_exit_m_s": null,
+          "Q_m3_s": 0.00707,
+          "mdot_kg_s": null,
+          "flow_source": "brief",
+          "flow_quote": null,
+          "fluid_source": "assumed",
+          "T_K_source": "assumed",
+          "p0_Pa_source": "assumed"
+        },
+        "rows": [
+          {
+            "id": "REQ-001",
+            "ears": "The nozzle shall have an inlet diameter of 0.06 m at contraction_start.",
+            "quantity": "inlet_diameter",
+            "feature": "contraction_start",
+            "op": "==",
+            "value": 0.06,
+            "upper": null,
+            "tol_abs": 1e-06,
+            "tol_rel": null,
+            "unit": "m",
+            "kind": "geometric",
+            "method": "geometry",
+            "condition": {
+              "Re": null,
+              "level": null
+            },
+            "hardness": "hard",
+            "source": "brief",
+            "quote": "60 mm inlet",
+            "locks_params": [
+              "D_i"
+            ],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
+          },
+          {
+            "id": "REQ-002",
+            "ears": "The nozzle shall have an exit diameter of 0.02 m at exit_plane.",
+            "quantity": "exit_diameter",
+            "feature": "exit_plane",
+            "op": "==",
+            "value": 0.02,
+            "upper": null,
+            "tol_abs": 1e-06,
+            "tol_rel": null,
+            "unit": "m",
+            "kind": "geometric",
+            "method": "geometry",
+            "condition": {
+              "Re": null,
+              "level": null
+            },
+            "hardness": "hard",
+            "source": "brief",
+            "quote": "20 mm exit",
+            "locks_params": [
+              "CR"
+            ],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
+          },
+          {
+            "id": "REQ-003",
+            "ears": "The nozzle shall have a normal wall thickness of at least 0.003 m.",
+            "quantity": "min_wall_normal",
+            "feature": null,
+            "op": ">=",
+            "value": 0.003,
+            "upper": null,
+            "tol_abs": null,
+            "tol_rel": null,
+            "unit": "m",
+            "kind": "geometric",
+            "method": "geometry",
+            "condition": {
+              "Re": null,
+              "level": null
+            },
+            "hardness": "hard",
+            "source": "brief",
+            "quote": "normal wall >= 3 mm",
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
+          },
+          {
+            "id": "REQ-004",
+            "ears": "When running at Re 30000 on L1, the nozzle shall be free of separation.",
+            "quantity": "separation_free",
+            "feature": "wall_contraction",
+            "op": "is_true",
+            "value": null,
+            "upper": null,
+            "tol_abs": null,
+            "tol_rel": null,
+            "unit": "1",
+            "kind": "performance",
+            "method": "cfd",
+            "condition": {
+              "Re": 30000.0,
+              "level": "L1"
+            },
+            "hardness": "hard",
+            "source": "brief",
+            "quote": "no separation",
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
+          },
+          {
+            "id": "REQ-005",
+            "ears": "When running at Re 30000 on L1, the nozzle shall have a Cd of at least 0.96.",
+            "quantity": "Cd",
+            "feature": "exit_plane",
+            "op": ">=",
+            "value": 0.96,
+            "upper": null,
+            "tol_abs": null,
+            "tol_rel": null,
+            "unit": "1",
+            "kind": "performance",
+            "method": "cfd",
+            "condition": {
+              "Re": 30000.0,
+              "level": "L1"
+            },
+            "hardness": "hard",
+            "source": "brief",
+            "quote": "Cd >= 0.96",
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
+          },
+          {
+            "id": "SYS-MACH",
+            "ears": "The flow shall have a maximum Mach number of at most 0.3.",
+            "quantity": "mach_max",
+            "feature": null,
+            "op": "<=",
+            "value": 0.3,
+            "upper": null,
+            "tol_abs": null,
+            "tol_rel": null,
+            "unit": "1",
+            "kind": "performance",
+            "method": "cfd",
+            "condition": {
+              "Re": null,
+              "level": null
+            },
+            "hardness": "hard",
+            "source": "system",
+            "quote": null,
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "high",
+            "standard_ref": null
+          }
+        ],
+        "objective": {
+          "quantity": "total_length",
+          "sense": "min"
+        },
+        "created_by": {
+          "provider": "anthropic",
+          "model": "claude-opus-5-5"
+        },
+        "approved_by": "user",
+        "lock_sha": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "declaration_sha": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "vocab_sha": "9999999999999999999999999999999999999999999999999999999999999999",
+        "supersedes_study": null,
+        "supersedes_lock": null,
+        "change_kind": "new",
+        "change_reason": null,
+        "evidence_sha": null
+      }
+    },
+    {
+      "name": "water_mdot_one_row",
+      "instance": {
+        "schema": "cad-requirements/1",
+        "study_id": "water_mdot",
+        "template_id": "nozzle_contraction/1",
+        "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "brief_sha": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "attachments": [
+          "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        ],
+        "operating_point": {
+          "fluid": "water",
+          "T_K": 293.15,
+          "p0_Pa": 101325.0,
+          "U_exit_m_s": null,
+          "Q_m3_s": null,
+          "mdot_kg_s": 7.07,
+          "flow_source": "brief",
+          "flow_quote": null,
+          "fluid_source": "assumed",
+          "T_K_source": "assumed",
+          "p0_Pa_source": "assumed"
+        },
+        "rows": [
+          {
+            "id": "REQ-001",
+            "ears": "The nozzle shall have a contraction ratio between 4 and 9.",
+            "quantity": "contraction_ratio",
+            "feature": null,
+            "op": "in",
+            "value": 4.0,
+            "upper": 9.0,
+            "tol_abs": null,
+            "tol_rel": 0.001,
+            "unit": "1",
+            "kind": "geometric",
+            "method": "geometry",
+            "condition": {
+              "Re": null,
+              "level": null
+            },
+            "hardness": "soft",
+            "source": "sketch_label",
+            "quote": "CR 4-9",
+            "locks_params": [],
+            "ticked": false,
+            "confidence": "medium",
+            "standard_ref": null
+          }
+        ],
+        "objective": null,
+        "created_by": {
+          "provider": "glm",
+          "model": "glm-5.3-flash"
+        },
+        "approved_by": "user",
+        "lock_sha": null,
+        "declaration_sha": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "vocab_sha": "9999999999999999999999999999999999999999999999999999999999999999",
+        "supersedes_study": null,
+        "supersedes_lock": null,
+        "change_kind": "new",
+        "change_reason": null,
+        "evidence_sha": null
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "fluid_oil",
+      "path": "operating_point.fluid",
+      "op": "set",
+      "value": "oil",
+      "errors": [
+        "cad-requirements/1: operating_point.fluid: not one of [\"air\", \"water\"]"
+      ]
+    },
+    {
+      "name": "op_strict_less",
+      "path": "rows[0].op",
+      "op": "set",
+      "value": "<",
+      "errors": [
+        "cad-requirements/1: rows[0].op: not one of [\"<=\", \">=\", \"==\", \"in\", \"is_true\"]"
+      ]
+    },
+    {
+      "name": "quote_missing",
+      "path": "rows[1].quote",
+      "op": "delete",
+      "errors": [
+        "cad-requirements/1: rows[1].quote: required field missing"
+      ]
+    },
+    {
+      "name": "id_free_form",
+      "path": "rows[2].id",
+      "op": "set",
+      "value": "R-3",
+      "errors": [
+        "cad-requirements/1: rows[2].id: does not match ^(REQ-[0-9]{3}|SYS-[A-Z]+)$"
+      ]
+    },
+    {
+      "name": "objective_sense_word",
+      "path": "objective.sense",
+      "op": "set",
+      "value": "minimise",
+      "errors": [
+        "cad-requirements/1: objective.sense: not one of [\"min\", \"max\"]"
+      ]
+    },
+    {
+      "name": "value_as_string",
+      "path": "rows[0].value",
+      "op": "set",
+      "value": "0.06",
+      "errors": [
+        "cad-requirements/1: rows[0].value: expected number, null, got string"
+      ]
+    },
+    {
+      "name": "attachments_five",
+      "path": "attachments",
+      "op": "set",
+      "value": [
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      ],
+      "errors": [
+        "cad-requirements/1: attachments: more than 4 items"
+      ]
+    },
+    {
+      "name": "level_word",
+      "path": "rows[3].condition.level",
+      "op": "set",
+      "value": "fine",
+      "errors": [
+        "cad-requirements/1: rows[3].condition.level: does not match ^L[0-9]$"
+      ]
+    },
+    {
+      "name": "T_K_zero",
+      "path": "operating_point.T_K",
+      "op": "set",
+      "value": 0,
+      "errors": [
+        "cad-requirements/1: operating_point.T_K: at or below exclusive minimum 0"
+      ]
+    },
+    {
+      "name": "confidence_word",
+      "path": "rows[0].confidence",
+      "op": "set",
+      "value": "certain",
+      "errors": [
+        "cad-requirements/1: rows[0].confidence: not one of [\"high\", \"medium\", \"low\"]"
+      ]
+    },
+    {
+      "name": "change_kind_edit",
+      "path": "change_kind",
+      "op": "set",
+      "value": "edit",
+      "errors": [
+        "cad-requirements/1: change_kind: not one of [\"new\", \"target_change\", \"evidence_correction\"]"
+      ]
+    },
+    {
+      "name": "flow_source_default",
+      "path": "operating_point.flow_source",
+      "op": "set",
+      "value": "default",
+      "errors": [
+        "cad-requirements/1: operating_point.flow_source: not one of [\"brief\", \"sketch_label\", \"assumed\", null]"
+      ]
+    },
+    {
+      "name": "declaration_sha_missing",
+      "path": "declaration_sha",
+      "op": "delete",
+      "errors": [
+        "cad-requirements/1: declaration_sha: required field missing"
+      ]
+    }
+  ]
+}

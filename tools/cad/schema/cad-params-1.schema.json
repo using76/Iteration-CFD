@@ -1,0 +1,36 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad-params/1",
+  "title": "one parameter vector",
+  "description": "One parameter vector of docs/16 §D S2 and §D S11: a start vector, a candidate or a stable design, every value carrying its provenance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "template_id", "template_sha", "values"],
+  "properties": {
+      "schema": {"const": "cad-params/1"},
+      "template_id": {"$ref": "#/$defs/TemplateId"},
+      "template_sha": {"$ref": "#/$defs/Sha"},
+      "values": {
+          "type": "array",
+          "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "real", "choice", "provenance"],
+              "properties": {
+                  "name": {"$ref": "#/$defs/Name"},
+                  "real": {"type": ["number", "null"]},
+                  "choice": {"$ref": "#/$defs/NameOrNull"},
+                  "provenance": {"enum": ["user_text", "sketch_label", "default", "llm_choice", "optimiser"]}
+                }
+            },
+          "minItems": 1
+        }
+    },
+  "$defs": {
+      "TemplateId": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}/[1-9][0-9]*$"},
+      "Sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "Name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
+    }
+}

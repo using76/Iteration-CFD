@@ -1,0 +1,157 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-checks/1",
+  "valid": [
+    {
+      "name": "g4_compiled",
+      "instance": {
+        "schema": "cad-checks/1",
+        "study_id": "g4_nozzle",
+        "requirements_lock": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "checks": [
+          {
+            "req_id": "REQ-001",
+            "primitive": "diameter_at_plane",
+            "args": {
+              "feature": "contraction_start",
+              "where": [
+                "contraction_start"
+              ],
+              "Re": null,
+              "level": null
+            },
+            "op": "==",
+            "lo": 0.06,
+            "hi": 0.06,
+            "tol": 1e-06,
+            "u": 1e-09,
+            "hardness": "hard",
+            "repr": "brep"
+          },
+          {
+            "req_id": "REQ-003",
+            "primitive": "meridian_min_wall",
+            "args": {
+              "feature": null,
+              "where": [
+                "wetted",
+                "outer"
+              ],
+              "Re": null,
+              "level": null
+            },
+            "op": ">=",
+            "lo": 0.003,
+            "hi": null,
+            "tol": 0,
+            "u": 1e-08,
+            "hardness": "hard",
+            "repr": "brep"
+          },
+          {
+            "req_id": "REQ-004",
+            "primitive": "wall_reversal_free",
+            "args": {
+              "feature": "wall_contraction",
+              "where": [
+                "wall_contraction"
+              ],
+              "Re": 30000.0,
+              "level": "L1"
+            },
+            "op": "is_true",
+            "lo": null,
+            "hi": null,
+            "tol": 0,
+            "u": 0,
+            "hardness": "hard",
+            "repr": "brep"
+          },
+          {
+            "req_id": "REQ-005",
+            "primitive": "post_cd",
+            "args": {
+              "feature": "exit_plane",
+              "where": [
+                "exit_plane"
+              ],
+              "Re": 30000.0,
+              "level": "L1"
+            },
+            "op": ">=",
+            "lo": 0.96,
+            "hi": null,
+            "tol": 0,
+            "u": null,
+            "hardness": "hard",
+            "repr": "brep"
+          }
+        ],
+        "declaration_sha": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "tol_negative",
+      "path": "checks[0].tol",
+      "op": "set",
+      "value": -1,
+      "errors": [
+        "cad-checks/1: checks[0].tol: below minimum 0"
+      ]
+    },
+    {
+      "name": "where_missing",
+      "path": "checks[0].args.where",
+      "op": "delete",
+      "errors": [
+        "cad-checks/1: checks[0].args.where: required field missing"
+      ]
+    },
+    {
+      "name": "op_single_equals",
+      "path": "checks[1].op",
+      "op": "set",
+      "value": "=",
+      "errors": [
+        "cad-checks/1: checks[1].op: not one of [\"<=\", \">=\", \"==\", \"in\", \"is_true\"]"
+      ]
+    },
+    {
+      "name": "lock_null",
+      "path": "requirements_lock",
+      "op": "set",
+      "value": null,
+      "errors": [
+        "cad-checks/1: requirements_lock: expected string, got null"
+      ]
+    },
+    {
+      "name": "where_with_space",
+      "path": "checks[0].args.where[0]",
+      "op": "set",
+      "value": "exit plane",
+      "errors": [
+        "cad-checks/1: checks[0].args.where[0]: does not match ^[A-Za-z][A-Za-z0-9_]{0,63}$"
+      ]
+    },
+    {
+      "name": "repr_step",
+      "path": "checks[0].repr",
+      "op": "set",
+      "value": "step",
+      "errors": [
+        "cad-checks/1: checks[0].repr: not one of [\"brep\", \"stl\", \"mesh\", \"cfd\"]"
+      ]
+    },
+    {
+      "name": "declaration_sha_missing",
+      "path": "declaration_sha",
+      "op": "delete",
+      "errors": [
+        "cad-checks/1: declaration_sha: required field missing"
+      ]
+    }
+  ]
+}

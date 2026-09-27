@@ -1,0 +1,340 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "kind": "cad-template/1",
+  "valid": [
+    {
+      "name": "nozzle_contraction_1",
+      "instance": {
+        "schema": "cad-template/1",
+        "template_id": "nozzle_contraction/1",
+        "title": "axisymmetric subsonic contraction on +x",
+        "axis": "+x",
+        "units": "m",
+        "params": [
+          {
+            "name": "D_i",
+            "kind": "real",
+            "unit": "m",
+            "min": null,
+            "max": null,
+            "default_real": 0.06,
+            "choices": [],
+            "default_choice": null,
+            "role": "intent",
+            "only_when": null
+          },
+          {
+            "name": "CR",
+            "kind": "real",
+            "unit": "1",
+            "min": null,
+            "max": null,
+            "default_real": 9.0,
+            "choices": [],
+            "default_choice": null,
+            "role": "intent",
+            "only_when": null
+          },
+          {
+            "name": "L_over_Di",
+            "kind": "real",
+            "unit": "1",
+            "min": 0.5,
+            "max": 1.5,
+            "default_real": 1.0,
+            "choices": [],
+            "default_choice": null,
+            "role": "design",
+            "only_when": null
+          },
+          {
+            "name": "law",
+            "kind": "choice",
+            "unit": "1",
+            "min": null,
+            "max": null,
+            "default_real": null,
+            "choices": [
+              "poly3",
+              "poly5",
+              "poly7",
+              "cubic_matched"
+            ],
+            "default_choice": "poly5",
+            "role": "design",
+            "only_when": null
+          },
+          {
+            "name": "x_m",
+            "kind": "real",
+            "unit": "1",
+            "min": 0.2,
+            "max": 0.8,
+            "default_real": 0.5,
+            "choices": [],
+            "default_choice": null,
+            "role": "design",
+            "only_when": "law=cubic_matched"
+          },
+          {
+            "name": "Lx_over_De",
+            "kind": "real",
+            "unit": "1",
+            "min": 0.25,
+            "max": 1.0,
+            "default_real": 0.5,
+            "choices": [],
+            "default_choice": null,
+            "role": "design",
+            "only_when": null
+          },
+          {
+            "name": "Lu_over_Di",
+            "kind": "real",
+            "unit": "1",
+            "min": 0.5,
+            "max": 0.5,
+            "default_real": 0.5,
+            "choices": [],
+            "default_choice": null,
+            "role": "design",
+            "only_when": null
+          },
+          {
+            "name": "t_wall",
+            "kind": "real",
+            "unit": "m",
+            "min": 0.001,
+            "max": 0.01,
+            "default_real": 0.003,
+            "choices": [],
+            "default_choice": null,
+            "role": "design",
+            "only_when": null
+          }
+        ],
+        "planes": [
+          {
+            "name": "inlet",
+            "description": "x = -Lu"
+          },
+          {
+            "name": "contraction_start",
+            "description": "x = 0"
+          },
+          {
+            "name": "exit_plane",
+            "description": "x = L"
+          },
+          {
+            "name": "outlet",
+            "description": "x = L + Lx"
+          }
+        ],
+        "tags": [
+          {
+            "name": "inlet",
+            "kind": "face",
+            "description": "velocity inlet disc"
+          },
+          {
+            "name": "outlet",
+            "kind": "face",
+            "description": "pressure outlet disc"
+          },
+          {
+            "name": "slip_upstream",
+            "kind": "face",
+            "description": "slip pipe upstream of x = 0"
+          },
+          {
+            "name": "wall_contraction",
+            "kind": "face",
+            "description": "no-slip contraction wall"
+          },
+          {
+            "name": "wall_exit",
+            "kind": "face",
+            "description": "no-slip exit tube wall"
+          },
+          {
+            "name": "wetted",
+            "kind": "edge",
+            "description": "meridian wetted curve"
+          },
+          {
+            "name": "outer",
+            "kind": "edge",
+            "description": "meridian outer wall curve"
+          }
+        ],
+        "catalogue": [
+          {
+            "quantity": "inlet_diameter",
+            "primitive": "diameter_at_plane",
+            "where": [
+              "contraction_start"
+            ],
+            "kind": "geometric",
+            "method": "geometry",
+            "unit": "m",
+            "u_kind": "abs",
+            "u_meas": 1e-09
+          },
+          {
+            "quantity": "exit_diameter",
+            "primitive": "diameter_at_plane",
+            "where": [
+              "exit_plane"
+            ],
+            "kind": "geometric",
+            "method": "geometry",
+            "unit": "m",
+            "u_kind": "abs",
+            "u_meas": 1e-09
+          },
+          {
+            "quantity": "contraction_ratio",
+            "primitive": "area_ratio",
+            "where": [
+              "contraction_start",
+              "exit_plane"
+            ],
+            "kind": "geometric",
+            "method": "geometry",
+            "unit": "1",
+            "u_kind": "rel",
+            "u_meas": 1e-09
+          },
+          {
+            "quantity": "min_wall_normal",
+            "primitive": "meridian_min_wall",
+            "where": [
+              "wetted",
+              "outer"
+            ],
+            "kind": "geometric",
+            "method": "geometry",
+            "unit": "m",
+            "u_kind": "abs",
+            "u_meas": 1e-08
+          },
+          {
+            "quantity": "n_solids",
+            "primitive": "solid_count",
+            "where": [
+              "part"
+            ],
+            "kind": "geometric",
+            "method": "geometry",
+            "unit": "1",
+            "u_kind": "exact",
+            "u_meas": 0
+          },
+          {
+            "quantity": "Cd",
+            "primitive": "post_cd",
+            "where": [
+              "exit_plane"
+            ],
+            "kind": "performance",
+            "method": "cfd",
+            "unit": "1",
+            "u_kind": "cfd",
+            "u_meas": null
+          }
+        ],
+        "profile_rules": [
+          "PRF-BOX",
+          "PRF-RMIN",
+          "PRF-MONO",
+          "PRF-SELFX",
+          "PRF-FACE2D",
+          "PRF-DERIV"
+        ],
+        "standards": []
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "axis_missing",
+      "path": "axis",
+      "op": "delete",
+      "errors": [
+        "cad-template/1: axis: required field missing"
+      ]
+    },
+    {
+      "name": "axis_on_z",
+      "path": "axis",
+      "op": "set",
+      "value": "+z",
+      "errors": [
+        "cad-template/1: axis: must equal \"+x\""
+      ]
+    },
+    {
+      "name": "param_kind_unknown",
+      "path": "params[3].kind",
+      "op": "set",
+      "value": "categorical",
+      "errors": [
+        "cad-template/1: params[3].kind: not one of [\"real\", \"choice\"]"
+      ]
+    },
+    {
+      "name": "param_role_fixed",
+      "path": "params[0].role",
+      "op": "set",
+      "value": "fixed",
+      "errors": [
+        "cad-template/1: params[0].role: not one of [\"design\", \"intent\"]"
+      ]
+    },
+    {
+      "name": "u_meas_negative",
+      "path": "catalogue[0].u_meas",
+      "op": "set",
+      "value": -1e-09,
+      "errors": [
+        "cad-template/1: catalogue[0].u_meas: below minimum 0"
+      ]
+    },
+    {
+      "name": "tag_extra_field",
+      "path": "tags[0].colour",
+      "op": "set",
+      "value": "red",
+      "errors": [
+        "cad-template/1: tags[0].colour: unknown field"
+      ]
+    },
+    {
+      "name": "profile_rule_unprefixed",
+      "path": "profile_rules[0]",
+      "op": "set",
+      "value": "BOX",
+      "errors": [
+        "cad-template/1: profile_rules[0]: does not match ^PRF-[A-Z0-9]+$"
+      ]
+    },
+    {
+      "name": "standards_missing",
+      "path": "standards",
+      "op": "delete",
+      "errors": [
+        "cad-template/1: standards: required field missing"
+      ]
+    },
+    {
+      "name": "standards_not_list",
+      "path": "standards",
+      "op": "set",
+      "value": "none",
+      "errors": [
+        "cad-template/1: standards: expected array, got string"
+      ]
+    }
+  ]
+}

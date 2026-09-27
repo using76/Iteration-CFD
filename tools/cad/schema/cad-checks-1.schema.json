@@ -1,0 +1,57 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cad-checks/1",
+  "title": "compiled assertions",
+  "description": "The requirement set compiled to typed primitive assertions by reqs.py compile (docs/16 §E.4), locked by the requirements lock sha and bound to the template declaration's sha; each check names the representation it is judged on (docs/16a §F).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "study_id", "requirements_lock", "declaration_sha", "checks"],
+  "properties": {
+      "schema": {"const": "cad-checks/1"},
+      "study_id": {"$ref": "#/$defs/StudyId"},
+      "requirements_lock": {"$ref": "#/$defs/Sha"},
+      "declaration_sha": {"$ref": "#/$defs/Sha"},
+      "checks": {
+          "type": "array",
+          "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["req_id", "primitive", "args", "op", "lo", "hi", "tol", "u", "hardness", "repr"],
+              "properties": {
+                  "req_id": {"$ref": "#/$defs/ReqId"},
+                  "primitive": {"$ref": "#/$defs/Name"},
+                  "args": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["feature", "where", "Re", "level"],
+                      "properties": {
+                          "feature": {"$ref": "#/$defs/NameOrNull"},
+                          "where": {"type": "array", "items": {"$ref": "#/$defs/Name"}},
+                          "Re": {"type": ["number", "null"], "exclusiveMinimum": 0},
+                          "level": {"$ref": "#/$defs/LevelOrNull"}
+                        }
+                    },
+                  "op": {"$ref": "#/$defs/Op"},
+                  "lo": {"type": ["number", "null"]},
+                  "hi": {"type": ["number", "null"]},
+                  "tol": {"type": "number", "minimum": 0},
+                  "u": {"type": ["number", "null"], "minimum": 0},
+                  "hardness": {"$ref": "#/$defs/Hardness"},
+                  "repr": {"enum": ["brep", "stl", "mesh", "cfd"]}
+                }
+            },
+          "minItems": 1
+        }
+    },
+  "$defs": {
+      "StudyId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+      "Sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "ReqId": {"type": "string", "pattern": "^(REQ-[0-9]{3}|SYS-[A-Z]+)$"},
+      "Name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
+      "LevelOrNull": {"type": ["string", "null"], "pattern": "^L[0-9]$"},
+      "Op": {"enum": ["<=", ">=", "==", "in", "is_true"]},
+      "Hardness": {"enum": ["hard", "soft", "objective"]}
+    }
+}
