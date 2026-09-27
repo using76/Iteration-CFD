@@ -1,0 +1,19 @@
+{
+  "schema": "cad-gates/1",
+  "loop_level": "L1",
+  "confirm_level": "L2",
+  "max_evals": 24,
+  "init_design": 6,
+  "stall_k": 3,
+  "llm_reject_k": 2,
+  "sobol_pool": 256,
+  "ties_promote": false,
+  "llm_law_change_needs_card": true,
+  "stop_rule": {
+    "residual_decades": 4,
+    "cont_err_max": 1e-06,
+    "window_iters": 200,
+    "dp_rel_change_max": 1e-05,
+    "cd_rel_change_max": 1e-05
+  }
+}

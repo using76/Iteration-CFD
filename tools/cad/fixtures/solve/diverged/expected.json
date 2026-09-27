@@ -1,0 +1,88 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "iters": 600,
+  "write_every": 50,
+  "returncode": 2,
+  "result": {
+    "class": "diverged",
+    "reason_id": "SOLVE-DIVERGED",
+    "detail": "",
+    "run_end": {
+      "word": "diverged",
+      "detail": "diverged at outer iteration 137: a field went non-finite (NaN/Inf)",
+      "exit_code": 2
+    },
+    "n_lines": 15,
+    "iterations": [
+      {
+        "iter": 0,
+        "U_res": 0.874,
+        "p_res": 1.0,
+        "cont_err": 0.00021,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662,
+        "M_cell": 17,
+        "M_mean": 0.031,
+        "finite": true
+      },
+      {
+        "iter": 50,
+        "U_res": 0.61,
+        "p_res": 0.043,
+        "cont_err": 3.7e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0711,
+        "M_cell": 17,
+        "M_mean": 0.031,
+        "finite": true
+      },
+      {
+        "iter": 100,
+        "U_res": 3.9,
+        "p_res": 0.87,
+        "cont_err": 0.0012,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.118,
+        "M_cell": 17,
+        "M_mean": 0.031,
+        "finite": true
+      },
+      {
+        "iter": 137,
+        "U_res": "nan",
+        "p_res": "nan",
+        "cont_err": "nan",
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.2412,
+        "M_cell": 17,
+        "M_mean": "nan",
+        "finite": false
+      }
+    ],
+    "mach_max": 0.2412,
+    "mach_refusal": null,
+    "criteria": null,
+    "failed": [],
+    "window": null
+  }
+}

@@ -1,0 +1,286 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "iters": 600,
+  "write_every": 50,
+  "returncode": 0,
+  "result": {
+    "class": "unsteady",
+    "reason_id": "SOLVE-UNSTEADY",
+    "detail": "",
+    "run_end": {
+      "word": "budget",
+      "detail": "600 iterations reached",
+      "exit_code": 0
+    },
+    "n_lines": 23,
+    "iterations": [
+      {
+        "iter": 0,
+        "U_res": 0.874,
+        "p_res": 1.25,
+        "cont_err": 0.00021,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0671,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 50,
+        "U_res": 0.449826,
+        "p_res": 0.3569,
+        "cont_err": 0.000116739,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0674904,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 100,
+        "U_res": 0.156178,
+        "p_res": 0.08738,
+        "cont_err": 4.25114e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.06727,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 150,
+        "U_res": 0.0420594,
+        "p_res": 0.02777,
+        "cont_err": 1.72366e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0667836,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 200,
+        "U_res": 0.016887,
+        "p_res": 0.01214,
+        "cont_err": 1.08695e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0667923,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 250,
+        "U_res": 0.00993581,
+        "p_res": 0.004773,
+        "cont_err": 5.17599e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0672824,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 300,
+        "U_res": 0.00448977,
+        "p_res": 0.00142,
+        "cont_err": 1.76583e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0674872,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 350,
+        "U_res": 0.00344326,
+        "p_res": 0.00106,
+        "cont_err": 1.8996e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0670861,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 400,
+        "U_res": 0.00245339,
+        "p_res": 0.0009613,
+        "cont_err": 2.49538e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0667068,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 450,
+        "U_res": 0.00306892,
+        "p_res": 0.001253,
+        "cont_err": 2.17962e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0669427,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 500,
+        "U_res": 0.00432679,
+        "p_res": 0.001552,
+        "cont_err": 1.68029e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0674247,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 550,
+        "U_res": 0.0042589,
+        "p_res": 0.001467,
+        "cont_err": 2.14859e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0673987,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      },
+      {
+        "iter": 599,
+        "U_res": 0.0029963,
+        "p_res": 0.001116,
+        "cont_err": 2.50847e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0669149,
+        "M_cell": 20311,
+        "M_mean": 0.0305,
+        "finite": true
+      }
+    ],
+    "mach_max": 0.0674904,
+    "mach_refusal": null,
+    "criteria": {
+      "U_decades": {
+        "value": 2.4649261383526713,
+        "limit": 4,
+        "pass": false
+      },
+      "p_decades": {
+        "value": 3.0492458184064963,
+        "limit": 4,
+        "pass": false
+      },
+      "cont_err": {
+        "value": 2.50847e-06,
+        "limit": 1e-06,
+        "pass": false
+      },
+      "dp_rel_change": {
+        "value": 0.004721405000015237,
+        "limit": 1e-05,
+        "pass": false
+      },
+      "Cd_rel_change": {
+        "value": 0.0023581007884575216,
+        "limit": 1e-05,
+        "pass": false
+      }
+    },
+    "failed": [
+      "U_decades",
+      "p_decades",
+      "cont_err",
+      "dp_rel_change",
+      "Cd_rel_change"
+    ],
+    "window": {
+      "iters": [
+        400,
+        450,
+        500,
+        550,
+        600
+      ],
+      "dp": [
+        285.00686677708126,
+        283.1931332229188,
+        283.6894849705449,
+        285.23155231794175,
+        283.8911870479533
+      ],
+      "Cd": [
+        0.9697497717342854,
+        0.9728502282657147,
+        0.9720017480607351,
+        0.9693656867891293,
+        0.9716569518133105
+      ]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+# meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. Fixture log in the ofgpu-lowmach stdout format (lowmach.rs print_report and run_end_line at bceb799); the numbers are synthetic.
+ofgpu-lowmach (fixture) - case constant/polyMesh: 40560 cells
+Numerics (SPEC-LIT §13.4.1 - what this run will actually use)
+    ddt                   steadyState
+turbulence model: laminar
+sources: none
+  Mach number (SPEC-LIT §93.5) on the initial field: M max 0 (cell 0) mean 0; the §25 premise is M << 1 and the run refuses above 0.3 (-permissive warns instead)
+iter      0  |U| res 0.874  |p| res 1.000e+00  contErr 0.00021  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662 (cell 20311) mean 0.0304
+iter     50  |U| res 0.361026  |p| res 4.376e-01  contErr 7.7297e-05  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662008 (cell 20311) mean 0.0304
+iter    100  |U| res 0.14913  |p| res 1.915e-01  contErr 2.84515e-05  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662017 (cell 20311) mean 0.0304
+iter    150  |U| res 0.0616015  |p| res 8.379e-02  contErr 1.04725e-05  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662025 (cell 20311) mean 0.0304
+iter    200  |U| res 0.0254459  |p| res 3.667e-02  contErr 3.85471e-06  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662033 (cell 20311) mean 0.0304
+iter    250  |U| res 0.010511  |p| res 1.605e-02  contErr 1.41885e-06  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662042 (cell 20311) mean 0.0304
+iter    300  |U| res 0.00434182  |p| res 7.021e-03  contErr 5.2225e-07  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.066205 (cell 20311) mean 0.0304
+iter    350  |U| res 0.00179349  |p| res 3.072e-03  contErr 1.9223e-07  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662058 (cell 20311) mean 0.0304
+iter    400  |U| res 0.000740841  |p| res 1.344e-03  contErr 7.07563e-08  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662067 (cell 20311) mean 0.0304
+iter    450  |U| res 0.000306021  |p| res 5.883e-04  contErr 2.6044e-08  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662075 (cell 20311) mean 0.0304
+iter    500  |U| res 0.000126409  |p| res 2.574e-04  contErr 9.58631e-09  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662083 (cell 20311) mean 0.0304
+iter    550  |U| res 5.22162e-05  |p| res 1.127e-04  contErr 3.52854e-09  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.0662092 (cell 20311) mean 0.0304
+iter    599  |U| res 2.19539e-05  |p| res 5.012e-05  contErr 1.32501e-09  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.06621 (cell 20311) mean 0.0304
+done in 812.4 s
+memory: 1.21 GB device, 40560 cells (fixture)
+run ended: budget | 600 iterations reached | exit code 0
