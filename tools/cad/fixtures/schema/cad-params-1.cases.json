@@ -8,6 +8,8 @@
         "schema": "cad-params/1",
         "template_id": "nozzle_contraction/1",
         "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requirements_lock": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "base_stable_eval_key": null,
         "values": [
           {
             "name": "D_i",
@@ -60,6 +62,8 @@
         "schema": "cad-params/1",
         "template_id": "nozzle_contraction/1",
         "template_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requirements_lock": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "base_stable_eval_key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "values": [
           {
             "name": "D_i",
@@ -156,6 +160,23 @@
       "value": "0.5",
       "errors": [
         "cad-params/1: values[2].real: expected number, null, got string"
+      ]
+    },
+    {
+      "name": "requirements_lock_missing",
+      "path": "requirements_lock",
+      "op": "delete",
+      "errors": [
+        "cad-params/1: requirements_lock: required field missing"
+      ]
+    },
+    {
+      "name": "base_stable_eval_key_upper",
+      "path": "base_stable_eval_key",
+      "op": "set",
+      "value": "ABC",
+      "errors": [
+        "cad-params/1: base_stable_eval_key: does not match ^[0-9a-f]{64}$"
       ]
     }
   ]

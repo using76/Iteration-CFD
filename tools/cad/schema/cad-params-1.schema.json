@@ -6,11 +6,13 @@
   "description": "One parameter vector of docs/16 §D S2 and §D S11: a start vector, a candidate or a stable design, every value carrying its provenance.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "template_id", "template_sha", "values"],
+  "required": ["schema", "template_id", "template_sha", "requirements_lock", "base_stable_eval_key", "values"],
   "properties": {
       "schema": {"const": "cad-params/1"},
       "template_id": {"$ref": "#/$defs/TemplateId"},
       "template_sha": {"$ref": "#/$defs/Sha"},
+      "requirements_lock": {"$ref": "#/$defs/Sha"},
+      "base_stable_eval_key": {"$ref": "#/$defs/ShaOrNull"},
       "values": {
           "type": "array",
           "items": {
@@ -30,6 +32,7 @@
   "$defs": {
       "TemplateId": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}/[1-9][0-9]*$"},
       "Sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "ShaOrNull": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
       "Name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"},
       "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
     }
