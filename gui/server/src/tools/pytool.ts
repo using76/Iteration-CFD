@@ -19,14 +19,14 @@ export async function runPyTool(
   ctx: Pick<ToolContext, 'config' | 'workspaceRoot' | 'signal'>,
   scriptRel: string,
   args: string[],
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ ok: true; run: PyToolRun } | { ok: false; result: ToolResult }> {
   const scriptAbs = path.isAbsolute(scriptRel) ? scriptRel : path.join(ctx.workspaceRoot, scriptRel)
   if (!fs.existsSync(scriptAbs)) {
     return { ok: false, result: fail('TOOL_MISSING', `${scriptRel} is not on this machine (looked for ${scriptAbs}); it lands with the feat/automesher branch`) }
   }
   const t0 = performance.now()
-  const res = await spawnCapture([pythonCommand(ctx.config), scriptAbs, ...args], { cwd: ctx.workspaceRoot, timeoutMs: opts.timeoutMs ?? 120_000, signal: ctx.signal })
+  const res = await spawnCapture([pythonCommand(ctx.config), scriptAbs, ...args], { cwd: opts.cwd ?? ctx.workspaceRoot, timeoutMs: opts.timeoutMs ?? 120_000, signal: ctx.signal, env: opts.env })
   const run: PyToolRun = { argv: [scriptAbs, ...args], exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr, timedOut: res.timedOut, ms: Math.round(performance.now() - t0) }
   if (res.timedOut) return { ok: false, result: fail('TIMEOUT', `${scriptRel} did not finish within ${Math.round((opts.timeoutMs ?? 120_000) / 1000)} s`) }
   // An abort kills the child with SIGKILL, which surfaces as exitCode null

@@ -13,7 +13,6 @@ import { QuickActions } from './QuickActions'
 export function AssistantPanel() {
   const t = useT()
   const connection = useSessionStore((s) => s.connection)
-  const mode = useSessionStore((s) => s.hello?.mode ?? null)
   const llm = useSessionStore((s) => s.hello?.llm ?? null)
   const title = useSessionStore((s) => s.session?.title ?? null)
   const approvals = useSessionStore((s) => s.session?.pendingApprovals.length ?? 0)
@@ -23,7 +22,9 @@ export function AssistantPanel() {
   const closeHistory = useCallback(() => setHistoryOpen(false), [])
   const [menu, openMenu] = useContextMenu()
 
-  const status = connection !== 'online' ? 'offline' : llm === 'mock' || mode === 'demo' ? 'demo' : 'online'
+  // A demo server that carries a real key shows "online" for the assistant:
+  // only the scripted mock client (or a dead socket) is the demo badge's business.
+  const status = connection !== 'online' ? 'offline' : llm === 'mock' ? 'demo' : 'online'
   const statusText = status === 'offline' ? (connection === 'connecting' ? t('conn.connecting') : t('assistant.offline')) : status === 'demo' ? t('assistant.demo') : t('assistant.online')
 
   return (

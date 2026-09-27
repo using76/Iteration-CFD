@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { compileUserRegex } from '../regex.js'
 import type { RunManager } from '../runs/types.js'
 import { errorMessage, fail, okResult, type ToolDef } from './context.js'
+import { refuseRunStart } from './writeGuards.js'
 
 export const RUN_WAIT_MAX_SECONDS = 120
 const TERMINAL: ReadonlySet<RunInfo['status']> = new Set(['done', 'failed', 'killed', 'diverged'])
@@ -64,6 +65,7 @@ export const runStart: ToolDef<typeof StartSchema> = {
   description:
     'Start an ofgpu binary on a case and return immediately with a runId. Flags are validated against the registry (unknown flags are refused). JSONC cases run only with ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-cht, ofgpu-datacentre and ofgpu-decompose; the others need an OpenFOAM case directory. Follow with run_wait. Do not start a second GPU solver while one is running.',
   schema: StartSchema,
+  refuse: refuseRunStart,
   async run(input, ctx) {
     const spec = getBinary(input.binary)
     if (!spec) return fail('UNKNOWN_BINARY', `unknown binary ${input.binary}`)

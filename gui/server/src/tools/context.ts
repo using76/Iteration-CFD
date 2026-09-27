@@ -21,6 +21,8 @@ export interface ToolContext {
   settings: SessionSettings
   /** Id of the tool_use block being served (used to name overflow files). */
   toolUseId: string
+  /** The provider and model serving this turn, when the agent loop is the caller (recorded by tools that write decisions). */
+  llm?: { provider: string; model: string }
 }
 
 export interface ToolError {
@@ -56,6 +58,12 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
    * An explicit timeoutMs still wins.
    */
   kind?: 'long'
+  /**
+   * A synchronous veto on the raw call - after forgive, before zod and before
+   * any approval card: a named refusal, or null to go on. The agent loop and
+   * runTool both run it, so a refused call never reaches the user or `run`.
+   */
+  refuse?: (input: unknown) => ToolResult | null
 }
 
 export function fail(code: string, message: string): ToolResult {

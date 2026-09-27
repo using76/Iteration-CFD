@@ -4,6 +4,7 @@
 import { z } from 'zod'
 import { Boolish, CameraPresetSchema, ColormapNameSchema, FieldComponentSchema, RangeTupleSchema, RepresentationModeSchema, TimeIndexSchema, Vec3Schema, ViewerCommandSchema, ViewerLayerSummarySchema, ViewerResultSchema, ViewerStateSchema } from './viewerCommands'
 import type { DatasetProgress } from './viewerDataset'
+import { RUN_END_WORDS } from './residuals'
 
 // ---------------------------------------------------------------------------
 // Runs
@@ -11,6 +12,7 @@ import type { DatasetProgress } from './viewerDataset'
 
 export const RunStatusSchema = z.enum(['queued', 'running', 'done', 'failed', 'killed', 'diverged'])
 export type RunStatus = z.infer<typeof RunStatusSchema>
+export const RunEndWordSchema = z.enum(RUN_END_WORDS)
 
 /** Grouped machine scalars; `hostname` is the Machine primary key and the struct's main field. */
 export const MachineRefSchema = z.object({
@@ -68,6 +70,10 @@ export const RunInfoSchema = z.object({
   meshId: z.string().nullable().optional(),
   /** The Machine this run ran on: N1's struct, `hostname` its main field. Null only when unreadable. */
   machine: MachineRefSchema.nullable().optional(),
+  /** The driver's own `run ended:` word; absent when it printed none (every run before it, every other driver). */
+  endWord: RunEndWordSchema.optional(),
+  /** The `<detail>` of that line; absent with endWord. */
+  endDetail: z.string().optional(),
 })
 export type RunInfo = z.infer<typeof RunInfoSchema>
 
@@ -108,6 +114,9 @@ export type LogLine = z.infer<typeof LogLineSchema>
 // GPU, problems, hello
 // ---------------------------------------------------------------------------
 
+export const GpuProcessSchema = z.object({ pid: z.number(), name: z.string(), memUsedMB: z.number().nullable() })
+export type GpuProcess = z.infer<typeof GpuProcessSchema>
+
 export const GpuStateSchema = z.object({
   state: z.enum(['ready', 'busy', 'absent', 'demo']),
   name: z.string().nullable(),
@@ -115,6 +124,12 @@ export const GpuStateSchema = z.object({
   memTotalMB: z.number().nullable(),
   /** Where the numbers came from. */
   source: z.enum(['nvidia-smi', 'probe', 'demo', 'none']),
+  /** Processes holding a context on the card, as `nvidia-smi --query-compute-apps` lists them
+   *  (basename only; on Windows WDDM every process with a graphics context appears and
+   *  per-process memory is null). Nullish: an older server sends neither; null = not queried;
+   *  [] = none. Sorted by memory then pid and cut at 64 — processCount is the uncut total. */
+  processes: z.array(GpuProcessSchema).nullish(),
+  processCount: z.number().nullish(),
 })
 export type GpuState = z.infer<typeof GpuStateSchema>
 
@@ -146,6 +161,38 @@ export const ServerHelloSchema = z.object({
   platform: z.string(),
 })
 export type ServerHello = z.infer<typeof ServerHelloSchema>
+
+/** Where the key the server would use came from; the raw key never leaves the server. */
+export const LlmKeyViewSchema = z.object({
+  set: z.boolean(),
+  source: z.enum(['ui', 'env', 'file']).nullable(),
+})
+export type LlmKeyView = z.infer<typeof LlmKeyViewSchema>
+
+/** The redacted LLM state the settings UI reads: which provider is live, which keys exist, never the keys themselves. */
+export const LlmStateViewSchema = z.object({
+  /** The provider the next turn will stream from. */
+  provider: z.enum(['anthropic', 'zai', 'mock']),
+  /** The model id the next turn will name. */
+  model: z.string(),
+  keys: z.object({
+    anthropic: LlmKeyViewSchema,
+    zai: LlmKeyViewSchema,
+  }),
+  /** The model ids currently configured per provider (what the model inputs prefill). */
+  models: z.object({ anthropic: z.string(), zai: z.string() }),
+})
+export type LlmStateView = z.infer<typeof LlmStateViewSchema>
+
+/** Body of POST /api/llm/settings. A present field replaces the stored value; null clears it; undefined leaves it untouched. */
+export const LlmSettingsPatchSchema = z.object({
+  provider: z.enum(['anthropic', 'zai', 'mock']).nullable().optional(),
+  anthropicKey: z.string().nullable().optional(),
+  zaiKey: z.string().nullable().optional(),
+  anthropicModel: z.string().nullable().optional(),
+  zaiModel: z.string().nullable().optional(),
+})
+export type LlmSettingsPatch = z.infer<typeof LlmSettingsPatchSchema>
 
 // ---------------------------------------------------------------------------
 // Sessions and the UI projection of the conversation
@@ -580,7 +627,8 @@ export const UiSelectionSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('cell'),
     id: z.number(),
-    center: z.tuple([z.number(), z.number(), z.number()]),
+    /** Cell centre when the client can compute it (a structured grid without holes, or a point probe); null for a pixel pick on a cut-cell or unstructured mesh. */
+    center: z.tuple([z.number(), z.number(), z.number()]).nullable(),
     // What the probe tool read there. Optional so a client that only picks a
     // cell still parses - and so the model can read back the number it asked
     // the operator's screen for instead of only the cell id.
@@ -676,6 +724,10 @@ export const UiStateSchema = z.object({
   /** The GUI's own connection state, e.g. "connected" or "reconnecting". */
   connection: z.string().nullish(),
   locale: z.enum(['ko', 'en']).nullish(),
+  /** The run compare_run overlaid on the residual chart; null or absent = no overlay. */
+  compareRunId: z.string().nullish(),
+  /** The split viewport (split_view / focus_view / link_cameras); null or absent = one viewport. */
+  views: z.object({ split: z.boolean(), focused: ViewIdSchema, camerasLinked: z.boolean(), datasetA: z.string().nullable(), datasetB: z.string().nullable() }).nullish(),
 })
 export type UiState = z.infer<typeof UiStateSchema>
 
@@ -732,6 +784,8 @@ export const DatasetProgressSchema = z.object({
 
 export const ServerMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('hello'), hello: ServerHelloSchema, sessions: z.array(SessionSummarySchema), runs: z.array(RunInfoSchema) }),
+  /** The LLM provider/model changed at runtime (POST /api/llm/settings); hello carries the same values on the next connect. */
+  z.object({ t: z.literal('llm.changed'), llm: LlmStateViewSchema }),
   z.object({ t: z.literal('pong'), ts: z.number() }),
   z.object({ t: z.literal('error'), message: z.string(), fatal: z.boolean() }),
 
@@ -791,6 +845,7 @@ export type { DatasetProgress }
 export const REST = {
   health: '/api/health',
   hello: '/api/hello',
+  llmSettings: '/api/llm/settings',
   registry: '/api/registry',
   caseSchema: '/api/schema/case-1.json',
   fsTree: '/api/fs/tree',
@@ -945,3 +1000,9 @@ export const ChatResponseSchema = z.object({
   runs: z.array(z.string()),
 })
 export type ChatResponse = z.infer<typeof ChatResponseSchema>
+
+/** The one line a going-down server owes a session whose turn is still running: to the log
+ *  and to that session's window, so the restart tsx watch is about to do is not a mystery. */
+export function activeTurnWarning(turn: { sessionId: string; turnId: string }): string {
+  return `turn ${turn.turnId} of session ${turn.sessionId} is active; restarting the server kills it (no server-code edits while a turn is running)`
+}

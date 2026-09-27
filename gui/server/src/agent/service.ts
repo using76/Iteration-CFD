@@ -4,12 +4,14 @@
 import fsp from 'node:fs/promises'
 import type { BetaContentBlockParam, BetaMessageParam, BetaTextBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import type { ChatRequest, ChatResponse, ClientMsg, ClientMsgOf, CustomToolSummary, PendingApproval, ServerMsg, SessionSettings, SessionState, SessionSummary, UiBlock, UiMessage, UserContext } from '@cfd/shared'
-import { CHAT_TIMEOUT_DEFAULT_MS } from '@cfd/shared'
+import { activeTurnWarning, CHAT_TIMEOUT_DEFAULT_MS } from '@cfd/shared'
 import { attachmentObjectBlocks, dehydrateAttachmentImages, MAX_ATTACHMENT_IDS, visionMode } from '../attachments/blocks.js'
 import { looksBinary } from '../attachments/sniff.js'
 import { createAttachmentStore } from '../attachments/store.js'
+import { readVisionVerdict } from '../attachments/visionProbe.js'
 import type { ServerConfig } from '../config.js'
 import type { DatasetService } from '../datasets/types.js'
+import type { Logger } from '../log.js'
 import type { RunManager } from '../runs/types.js'
 import { loadCustomTools } from '../tools/custom.js'
 import { mergeTools } from '../tools/defaults.js'
@@ -19,22 +21,30 @@ import { resolveInWorkspace } from '../workspace/paths.js'
 import { createAnthropicClient } from './anthropic.js'
 import { createApprovalManager, type ApprovalManager } from './approvals.js'
 import { emptyUsage, type LlmClient } from './llm.js'
+import type { LlmSettingsHandle } from './llmSettings.js'
 import { runTurn, type TurnOutcome } from './loop.js'
 import { createMockLlm } from './mockLlm.js'
 import { loadPolicyOverrides, type PolicyOverrides } from './policy.js'
 import { runNoticeText, runNoticeUserText } from './prompt.js'
 import { buildQuickMessage } from './quick.js'
 import { createZaiClient } from './zai.js'
+import { lintSession } from './grounding.js'
 import { appendUserTurn, createSessionStore, newId, stateOf, summaryOf, type SessionRecord, type SessionStore } from './session.js'
 import { ChatError, type AgentService } from './types.js'
+
+// The warning's wording lives in @cfd/shared so the web reducer's test can assert the same
+// string the server sends; every existing importer still reads it from this module.
+export { activeTurnWarning }
 
 export interface AgentServiceDeps {
   config: ServerConfig
   hub: Hub
   runs: RunManager
   datasets: DatasetService
-  /** Injected by tests; defaults to the Anthropic client or the mock per config.llm. */
+  /** Injected by tests; defaults to the runtime settings handle's client, else one built from config. */
   llm?: LlmClient
+  /** The runtime provider/key settings (main wires one); the client is re-read per turn, so a key entered mid-session counts. */
+  llmSettings?: LlmSettingsHandle
   store?: SessionStore
   overrides?: PolicyOverrides
   retryDelayMs?: number
@@ -62,7 +72,11 @@ const AGENT_FRAMES = new Set<ClientMsg['t']>(['session.open', 'session.new', 'se
 export function createAgentService(deps: AgentServiceDeps): AgentService {
   const { config, hub, runs, datasets } = deps
   const store = deps.store ?? createSessionStore(config.sessionsDir, config.model)
-  const llm = deps.llm ?? (config.llm === 'mock' ? createMockLlm({ model: config.model }) : config.llm === 'zai' ? createZaiClient(config) : createAnthropicClient(config))
+  // The client a turn uses is picked when the turn starts: the runtime handle
+  // reflects a key or provider the user entered mid-session. Tests that inject
+  // `llm` keep their client, and the config-built one stays as the last resort.
+  const staticLlm: LlmClient | null = deps.llm ?? (config.llm === 'mock' ? createMockLlm({ model: config.model }) : config.llm === 'zai' ? createZaiClient(config) : createAnthropicClient(config))
+  const llmForTurn = (): LlmClient => deps.llm ?? deps.llmSettings?.client() ?? staticLlm!
   const overrides = deps.overrides ?? loadPolicyOverrides(config.configDir)
   const runtimes = new Map<string, SessionRuntime>()
   let customTools: CustomToolSummary[] = []
@@ -115,7 +129,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       hub,
       runs,
       datasets,
-      llm,
+      llm: llmForTurn(),
       approvals: rt.approvals,
       overrides,
       store,
@@ -186,7 +200,9 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       try {
         // N5's memoised handle: the same instance the REST routes hold, so there is no second database.
         const handle = await ontologyHandle({ config, runs, hub: undefined })
-        const attached = await attachmentObjectBlocks(context.attachmentIds, { mode: visionMode(config), store: createAttachmentStore(config), mirror: handle.store })
+        const active = llmForTurn()
+        const mode = visionMode({ llm: active.kind, vision: config.vision }, active.kind === 'zai' ? readVisionVerdict(config.cacheDir, active.kind, active.model) : null)
+        const attached = await attachmentObjectBlocks(context.attachmentIds, { mode, store: createAttachmentStore(config), mirror: handle.store })
         blocks.push(...attached.blocks)
         notices.push(...attached.notices)
         warnings.push(...attached.warnings)
@@ -443,6 +459,10 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       const rec = store.get(id)
       return rec ? state(rec) : null
     },
+    groundingOf: (id) => {
+      const rec = store.get(id)
+      return rec ? { ...lintSession(rec.messages), repairs: rec.repairs ?? [] } : null
+    },
     createSession,
     chat,
     deleteSession: (id) => {
@@ -451,6 +471,7 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       return exists
     },
     notifyRunEnded,
+    activeTurns: () => [...runtimes].filter(([, rt]) => rt.active).map(([sessionId, rt]) => ({ sessionId, turnId: rt.active!.turnId })),
     async shutdown() {
       const waits: Promise<unknown>[] = []
       for (const [id, rt] of runtimes) {
@@ -461,4 +482,22 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       await Promise.all(waits)
     },
   }
+}
+
+/** What a going-down server does about turns that are still running: one line per turn, to the
+ *  log at `warn` and to that turn's own session window as a non-fatal `error` frame, BEFORE the
+ *  hub closes. Returns the lines it sent, in order, so a caller (and a test) can see them. */
+export function warnActiveTurns(
+  agent: Pick<AgentService, 'activeTurns'> | null | undefined,
+  hub: Pick<Hub, 'sendToSession'>,
+  log: Pick<Logger, 'warn'>,
+): string[] {
+  const lines: string[] = []
+  for (const turn of agent?.activeTurns() ?? []) {
+    const line = activeTurnWarning(turn)
+    log.warn(line)
+    hub.sendToSession(turn.sessionId, { t: 'error', message: line, fatal: false })
+    lines.push(line)
+  }
+  return lines
 }

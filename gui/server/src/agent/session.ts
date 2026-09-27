@@ -6,6 +6,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import { DEFAULT_SESSION_SETTINGS, type CustomToolSummary, type PendingApproval, type SessionSettings, type SessionState, type SessionSummary, type ToolCallRecord, type UiMessage } from '@cfd/shared'
+import type { GroundingRepair } from './grounding.js'
 import { projectUser } from './ui-projection.js'
 
 export interface SessionRecord {
@@ -22,6 +23,8 @@ export interface SessionRecord {
   allowedTools: string[]
   /** The case the conversation was about (the last active file or quick-action case a turn named); absent in records written before it was kept. */
   casePath?: string | null
+  /** The grounding repair rounds of this session (agent/groundingRepair.ts); absent until one runs. */
+  repairs?: GroundingRepair[]
 }
 
 export const TITLE_MAX = 60
@@ -119,6 +122,7 @@ export function createSessionStore(dir: string, model: string): SessionStore {
           toolCalls: partial.toolCalls ?? [],
           runs: partial.runs ?? [],
           allowedTools: partial.allowedTools ?? [],
+          ...(Array.isArray(partial.repairs) ? { repairs: partial.repairs } : {}),
         }
         repairDanglingToolUses(rec.messages)
         records.set(rec.id, rec)

@@ -1,6 +1,6 @@
 // The whole "3D Viewer" tab: toolbar, canvas, legend, overlays.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { t, type CameraPreset, type ColormapName, type FieldComponent, type ViewerCommand, type ViewerState } from '@cfd/shared'
+import { t, type CameraPreset, type ColormapName, type FieldComponent, type ViewerCommand, type ViewerState, type ViewId } from '@cfd/shared'
 import { demoDatasetPath, getViewerController, type ViewerOverlayInfo } from '../api/viewerApi'
 import { fieldTitle, type ViewerController } from '../controller/ViewerController'
 import type { LayerEntry, ViewerTool } from '../controller/model'
@@ -19,6 +19,8 @@ export interface Viewer3DProps {
   overlay: ViewerOverlayInfo | null
   locale: 'ko' | 'en'
   onOpenResiduals?: () => void
+  /** Which viewport half this instance drives; 'A' is the original singleton. */
+  view?: ViewId
 }
 
 const PRESET_IDS = { streamlines: 'preset-streamlines', slice: 'preset-slice', iso: 'preset-iso' } as const
@@ -33,8 +35,8 @@ function isErrorMessage(m: string | null): boolean {
   return !!m && /^(NO_[A-Z_]+|LOAD_FAILED|INVALID|INTERNAL|TIMEOUT|NOT_A_VECTOR_FIELD): /.test(m)
 }
 
-export function Viewer3D({ overlay, locale }: Viewer3DProps) {
-  const controller = useMemo(() => getViewerController(), [])
+export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps) {
+  const controller = useMemo(() => getViewerController(viewId), [viewId])
   const state = useViewerState(controller)
   const hostRef = useRef<HTMLDivElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -70,8 +72,15 @@ export function Viewer3D({ overlay, locale }: Viewer3DProps) {
         // Dev only: the controller that actually owns a canvas, published so a
         // script can drive the viewer the way the assistant does. Importing the
         // module from outside is not enough -- an HMR pass gives the module a
-        // second URL and therefore a second, canvas-less singleton.
-        if (import.meta.env.DEV) (window as unknown as { __viewer?: ViewerController }).__viewer = controller
+        // second URL and therefore a second, canvas-less singleton. Both halves
+        // are published under their view id: with only the A half readable, the
+        // follower's camera is invisible to any test and a linked orbit cannot
+        // be checked at all. `__viewer` stays as the A alias it has always been.
+        if (import.meta.env.DEV) {
+          const published = window as unknown as Record<string, ViewerController>
+          published[`__viewer_${viewId}`] = controller
+          if (viewId === 'A') published.__viewer = controller
+        }
         const demo = demoDatasetPath()
         if (demo && !controller.dataset) void controller.execute({ type: 'load', path: demo, timeIndex: null, field: null })
       } catch (err) {

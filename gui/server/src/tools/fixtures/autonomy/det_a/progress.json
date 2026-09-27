@@ -1,0 +1,12 @@
+{
+ "campaign_id": "det_a",
+ "mode": "rules",
+ "n_done": 20,
+ "n_live": 0,
+ "n_rows": 29,
+ "n_total": 20,
+ "peak_rss_mib": 3086.9921875,
+ "schema": "autonomy-campaign-progress/1",
+ "system": "rules",
+ "t": "2026-09-24T14:33:44Z"
+}

@@ -380,4 +380,30 @@ describe('mock script', () => {
     expect(call?.name).toBe('ontology_query')
     expect((call?.input as { objectType?: string }).objectType).toBe('Attachment')
   })
+
+  it('drives the split viewport with three gui_control calls, one per turn', () => {
+    expect(detectScenario('split-test: put the two results side by side')).toBe('split')
+    const ask: BetaMessageParam = { role: 'user', content: 'split-test: put the two results side by side' }
+    const answered = (id: string, input: Record<string, unknown>): BetaMessageParam[] => [
+      { role: 'assistant', content: [{ type: 'tool_use', id, name: 'gui_control', input }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: '{"ok":true}' }] },
+    ]
+    const callOf = (messages: BetaMessageParam[]) =>
+      planResponse(messages, { errorThrown: false }).blocks.find((b) => b.type === 'tool_use') as { name: string; input: Record<string, unknown> } | undefined
+    const first = callOf([ask])
+    expect(first?.name).toBe('gui_control')
+    expect(first?.input.type).toBe('split_view')
+    expect(first?.input.on).toBe(true)
+    const soFar = [ask, ...answered('g1', first!.input)]
+    const second = callOf(soFar)
+    expect(second?.input.type).toBe('open_result_in_view')
+    expect(second?.input.view).toBe('B')
+    expect(second?.input.path).toBe('demo://channel2d')
+    const third = callOf([...soFar, ...answered('g2', second!.input)])
+    expect(third?.input.type).toBe('link_cameras')
+    expect(third?.input.on).toBe(true)
+    const end = planResponse([...soFar, ...answered('g2', second!.input), ...answered('g3', third!.input)], { errorThrown: false })
+    expect(end.stopReason).toBe('end_turn')
+    expect(end.blocks.find((b) => b.type === 'tool_use')).toBeUndefined()
+  })
 })

@@ -1,0 +1,269 @@
+{
+  "case_dir": "wing_a_L4_case",
+  "config": {
+    "castellation": {
+      "keep_region": "seed",
+      "min_faces": 4,
+      "seed_point": [
+        -2.9,
+        -2.9,
+        -2.4
+      ]
+    },
+    "domain": {
+      "base_size": 0.5,
+      "extent": [
+        -3.0,
+        7.0,
+        -3.0,
+        3.0,
+        -2.5,
+        2.5
+      ],
+      "grading": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "input": {
+      "surfaces": [
+        {
+          "name": null,
+          "path": "wing_a.stl"
+        }
+      ]
+    },
+    "layers": {
+      "cell_frac": 0.5,
+      "first_thickness": 0.002,
+      "growth": 1.3,
+      "medial_frac": 0.5,
+      "min_thickness": 0.002,
+      "n": 3,
+      "normal_passes": 3,
+      "patches": [
+        "wing"
+      ],
+      "retreat_limit": 4,
+      "smoothing": 0.5,
+      "smoothing_passes": 4
+    },
+    "output": {
+      "case_dir": "wing_a_L4_case",
+      "name": "wing_a_L4"
+    },
+    "quality": {
+      "max_closure": 1e-10,
+      "max_cond": 10000.0,
+      "max_non_orth_deg": 70.0,
+      "min_thickness_ratio": 0.05,
+      "report_non_orth_deg": 60.0
+    },
+    "refinement": {
+      "feature_angle_deg": 30.0,
+      "levels": [
+        {
+          "bands": [
+            {
+              "distance": 0.1,
+              "level": 4
+            },
+            {
+              "distance": 0.5,
+              "level": 3
+            },
+            {
+              "distance": 1.5,
+              "level": 2
+            }
+          ],
+          "feature_level": 4,
+          "patch": "wing"
+        }
+      ],
+      "max_level": 4
+    },
+    "snap": {
+      "feature_tolerance": 0.5,
+      "iterations": 30,
+      "max_area_ratio": 4.0,
+      "smoothing": 0.5,
+      "smoothing_passes": 3,
+      "tolerance": 0.001,
+      "undo_limit": 4
+    }
+  },
+  "config_path": "wing_a_L4.json",
+  "identity": {
+    "host": null,
+    "mesh_id": "m_cd390aedf36667a2",
+    "run_id": null,
+    "schema": 1,
+    "tool": "ofgpu-automesher",
+    "written_at": "2026-09-23T12:26:07Z"
+  },
+  "layout": null,
+  "mesh": {
+    "n_boundary_faces": 8258,
+    "n_cells": 78244,
+    "n_internal_faces": 240296,
+    "n_points": 96661,
+    "patches": [
+      {
+        "kind": "patch",
+        "name": "xMin",
+        "size": 120
+      },
+      {
+        "kind": "patch",
+        "name": "xMax",
+        "size": 120
+      },
+      {
+        "kind": "patch",
+        "name": "yMin",
+        "size": 425
+      },
+      {
+        "kind": "patch",
+        "name": "yMax",
+        "size": 425
+      },
+      {
+        "kind": "patch",
+        "name": "zMin",
+        "size": 240
+      },
+      {
+        "kind": "patch",
+        "name": "zMax",
+        "size": 240
+      },
+      {
+        "kind": "wall",
+        "name": "wing",
+        "size": 6688
+      }
+    ]
+  },
+  "name": "wing_a_L4",
+  "note": "A real ofgpu-automesher <name>_summary.json (92.57) from the docs/15 survey probe wing_a_L4, mesh tree c93e4c1 release binary. Only case_dir, config_path, the config's two paths and identity.host were rewritten; every number is as the binary wrote it. Named *.automesher.json, not *_summary.json, so the ontology importer never folds it.",
+  "quality": {
+    "ldu_ordered": true,
+    "max_closure": 2.6195358293402878e-15,
+    "max_closure_cell": 42021,
+    "max_cond": 118.20323989134643,
+    "max_cond_cell": 44087,
+    "max_non_orth_deg": 69.99964846432114,
+    "mean_non_orth_deg": 4.598862898356212,
+    "min_thickness_cell": 44212,
+    "min_thickness_ratio": 0.07549411169956041,
+    "min_volume": 2.0304579009294713e-06,
+    "min_volume_cell": 44047,
+    "n_cells": 78244,
+    "n_duplicate_faces": 0,
+    "n_non_orth_over_report": 1562,
+    "n_regions": 1,
+    "passed": true,
+    "region_sizes": [
+      78244
+    ]
+  },
+  "stages": [
+    {
+      "balance_splits": 196,
+      "base_n": [
+        20,
+        12,
+        10
+      ],
+      "max_level": 4,
+      "n_leaves": 85924,
+      "refine_splits": 11736,
+      "seconds": 7.4355498,
+      "stage": "octree"
+    },
+    {
+      "n_cells": 78244,
+      "n_dropped_components": 0,
+      "removed": {
+        "off_region": 0,
+        "pinch": 0,
+        "solid": 7680,
+        "starved": 0,
+        "unrepaired_pinch": 0
+      },
+      "seconds": 0.5605131,
+      "stage": "castellate",
+      "wall_faces": 6688,
+      "wall_patches": {
+        "wing": 6688
+      }
+    },
+    {
+      "converged": false,
+      "iterations": 30,
+      "max_residual": 0.01672681859180182,
+      "max_step": 0.0,
+      "n_abandoned": 15,
+      "n_boundary_points": 6690,
+      "n_feature_corners": 2,
+      "n_feature_edges": 264,
+      "n_pinned": 2702,
+      "n_scaled_back": 7941,
+      "n_snapped_to_corner": 2,
+      "n_snapped_to_edge": 1764,
+      "p99_residual": 0.014714009820472744,
+      "seconds": 31.5880219,
+      "stage": "snap"
+    },
+    {
+      "n_regions": 1,
+      "seconds": 0.0,
+      "skipped": true,
+      "stage": "split"
+    },
+    {
+      "n_layer_cells": 0,
+      "n_layer_points": 0,
+      "n_side_boundary": 0,
+      "n_side_internal": 0,
+      "n_split_sides": 0,
+      "patches": [
+        {
+          "dropped": "patch \"wing\": the gate still failed after 4 retreat(s)",
+          "full_area_frac": 0.0,
+          "mean_frac": 0.0,
+          "n_faces": 6688,
+          "n_layers": 0,
+          "name": "wing",
+          "t1_mean": 0.0,
+          "t1_min": 0.0,
+          "t1_requested": 0.002
+        }
+      ],
+      "retreats": 4,
+      "seconds": 1.6783443,
+      "stage": "layers"
+    }
+  ],
+  "stopped_after": null,
+  "surface": {
+    "bbox": [
+      0.0,
+      -1.5,
+      -0.04235619522,
+      1.0,
+      1.5,
+      0.0791798384
+    ],
+    "n_points": 3000,
+    "n_triangles": 5996,
+    "patches": [
+      "wing"
+    ]
+  },
+  "tool": "ofgpu-automesher",
+  "total_seconds": 41.2828161
+}

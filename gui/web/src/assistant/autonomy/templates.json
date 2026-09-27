@@ -1,0 +1,228 @@
+{
+ "$comment": "The narration templates of tools/autonomy/explain.py (TEMPLATES, FLAG_ORDER, TERMINAL_OF) at mesh-tree commit 4f56fd1, dumped by json.dump(sort_keys=True); the studio's attempt cards render records against them.",
+ "explain_schema": "autonomy-explain/1",
+ "flag_order": [
+  "F1",
+  "F2",
+  "F3a",
+  "F3b",
+  "F3c",
+  "F3d",
+  "F4",
+  "F5"
+ ],
+ "schema": "autonomy-explain-templates/1",
+ "templates": {
+  "PF-BUDGET": {
+   "because": "a config whose octree alone exceeds the budget would fail on cost",
+   "layer": "preflight",
+   "title": "check the octree probe's leaf count against the cell budget"
+  },
+  "PF-CONFIG": {
+   "because": "the mirror of the parser refuses what the mesher would refuse, on the same field",
+   "layer": "preflight",
+   "title": "check that the mesher's own parser and validator accept the config"
+  },
+  "PF-DOMAIN": {
+   "because": "a surface that touches the domain boundary without spanning it cannot be meshed as a body",
+   "layer": "preflight",
+   "title": "check that the domain holds the surface with margin"
+  },
+  "PF-FLAGS": {
+   "because": "no run may pass the permissive flag",
+   "layer": "preflight",
+   "title": "check the command line for forbidden flags"
+  },
+  "PF-KNOBS": {
+   "because": "a config the mesher would reject, or a knob outside the table, is refused before any run",
+   "layer": "preflight",
+   "title": "check every settings leaf against the whitelist, its range and the mesher's parser"
+  },
+  "PF-NONORTH": {
+   "because": "a two-to-one octree transition sets a non-orthogonality floor that no refined mesh can go below",
+   "layer": "preflight",
+   "title": "check that the non-orthogonality ceiling clears the octree floor"
+  },
+  "PF-PATCH": {
+   "because": "a layer or band on a patch the surface does not have is refused by the mesher",
+   "layer": "preflight",
+   "title": "check that every named patch is one of the surface's own"
+  },
+  "PF-QUALITY": {
+   "because": "the gate that judges a mesh is fixed; a config that alters it is refused",
+   "layer": "preflight",
+   "title": "check that the quality block equals the reference"
+  },
+  "PF-SURFACE": {
+   "because": "an open or inverted surface cannot be meshed, so it is refused before any run",
+   "layer": "preflight",
+   "title": "check that every surface is closed and consistently wound"
+  },
+  "PF-THIN": {
+   "because": "a first layer too thin for its wall cells makes every layer cell fail the quality gate, so the mesher drops them",
+   "layer": "preflight",
+   "title": "check the first layer against the thickness-ratio gate at the wall edge"
+  },
+  "PF-YPLUS": {
+   "because": "the first layer must meet y+ at most one while the stack fits under the cell limiter, at a level the octree can reach",
+   "layer": "preflight",
+   "title": "check that the a priori y+ window is non-empty and reachable"
+  },
+  "R-BUDGET": {
+   "because": "far-field bands are coarsened first and the wall last, so the cells fit with the least loss at the wall",
+   "layer": "rule",
+   "title": "coarsen the ladder until the predicted cells fit the budget"
+  },
+  "R-CURV": {
+   "because": "a wall cell larger than a fraction of the curvature radius cannot follow the surface",
+   "layer": "rule",
+   "title": "refine the wall where the curvature radius is small"
+  },
+  "R-DOM": {
+   "because": "the domain keeps fixed multiples of the reference length upstream, downstream and on each side",
+   "layer": "rule",
+   "title": "set the base cell size and the domain extent from the reference length"
+  },
+  "R-FEAT": {
+   "because": "sharp edges need finer cells to be captured by the snap",
+   "layer": "rule",
+   "title": "raise the feature level where the body has sharp edges"
+  },
+  "R-GAP": {
+   "because": "a gap needs several cells across it to be resolved",
+   "layer": "rule",
+   "title": "refine the wall where two surfaces face each other across a small gap"
+  },
+  "R-PLANE": {
+   "because": "when the faces lie on the lattice the walls need no snapping, and the layers are delivered",
+   "layer": "rule",
+   "title": "put a commensurate body's faces on cell planes"
+  },
+  "R-WIN": {
+   "because": "the wall cell must be thick enough for the stack under the limiter and thin enough for the thickness-ratio gate",
+   "layer": "rule",
+   "title": "pick the wall level and the growth inside the feasible window"
+  },
+  "R-YP": {
+   "because": "the flat-plate skin-friction correlation gives the friction velocity, and the first cell height follows from y+ at most one",
+   "layer": "rule",
+   "title": "set the first layer thickness from the a priori wall unit"
+  },
+  "RM-BUDGET-FAR": {
+   "because": "a run over the cell budget or out of time sheds far-field cells first",
+   "layer": "remedy",
+   "title": "halve the far-field band distances"
+  },
+  "RM-BUDGET-FEAT": {
+   "because": "after the far field, the feature refinement is the next cost to shed",
+   "layer": "remedy",
+   "title": "drop the feature bump to the wall level"
+  },
+  "RM-BUDGET-WALL": {
+   "because": "the wall level is the last cost to shed, and never below the level that y+ needs",
+   "layer": "remedy",
+   "title": "coarsen the whole refinement ladder one level, not below the y+ floor"
+  },
+  "RM-CAPABILITY-LIMITED": {
+   "because": "the mesher drops layers on a snapped wall by name, so no further trial is spent on them",
+   "layer": "remedy",
+   "title": "end the geometry: the layers are limited by the mesher's capability"
+  },
+  "RM-EXHAUSTED": {
+   "because": "each remedy fires at most twice, no config is revisited, and the attempt count is capped",
+   "layer": "remedy",
+   "title": "end the geometry: the attempts or the remedies are spent"
+  },
+  "RM-LAYER-FIT": {
+   "because": "the stack is trimmed by the limiter, so the growth or the first layer is lowered until it fits",
+   "layer": "remedy",
+   "title": "fit the stack under the cell limiter"
+  },
+  "RM-NO-REMEDY": {
+   "because": "a surface defect, a config the mesher rejects, a harness fault or a quality gate is not something a bounded edit may change",
+   "layer": "remedy",
+   "title": "end the geometry: the failure is outside the remedy table"
+  },
+  "RM-PASS": {
+   "because": "no failure flag is set and no requested layer patch is dropped or trimmed",
+   "layer": "remedy",
+   "title": "end the geometry: the attempt passes"
+  },
+  "RM-PLANE": {
+   "because": "a layer drop on a snapped wall goes to the plane rule when the body is commensurate",
+   "layer": "remedy",
+   "title": "put the body on cell planes with the plane rule"
+  },
+  "RM-PLANE-FINER": {
+   "because": "a finer divisor shrinks the wall cell so that the stack meets the corner bound",
+   "layer": "remedy",
+   "title": "take the next lattice divisor on the plane path"
+  },
+  "RM-SNAP-FT": {
+   "because": "the pilot sweep found that it unpins the snap on every feature-bearing body, at the cost of the edges not being captured",
+   "layer": "remedy",
+   "title": "switch the feature attraction off"
+  },
+  "RM-SNAP-REFINE": {
+   "because": "the snapped surface misses area, so the lattice is too coarse for the body",
+   "layer": "remedy",
+   "title": "refine the whole refinement ladder one level"
+  },
+  "RM-SNAP-WALL": {
+   "because": "the pilot sweep found one level coarser the only snap-clean change with the feature attraction on",
+   "layer": "remedy",
+   "title": "coarsen the whole refinement ladder one level, not below the y+ floor"
+  },
+  "RM-T1-RAISE": {
+   "because": "the first layer is thinner than the thickness-ratio gate allows, and a thicker one still meets y+",
+   "layer": "remedy",
+   "title": "raise the first layer to its y+ bound"
+  },
+  "RM-T1-REFINE": {
+   "because": "smaller wall cells let the same first layer pass the thickness-ratio gate",
+   "layer": "remedy",
+   "title": "refine the whole refinement ladder one level"
+  },
+  "RM-TOPO-REFINE": {
+   "because": "a missing wall patch or a split fluid region means the lattice is too coarse for the body's topology",
+   "layer": "remedy",
+   "title": "refine the whole refinement ladder one level"
+  },
+  "WL-FLAG": {
+   "because": "the permissive flag would let a mesh past the quality gate, and it is never passed",
+   "layer": "preflight",
+   "title": "refuse a forbidden command-line flag"
+  },
+  "WL-FORBIDDEN": {
+   "because": "the quality gate, the permissive flag and the layer limiters are never tuned: the loop improves meshes, it does not loosen the gate that judges them",
+   "layer": "preflight",
+   "title": "refuse an edit to a knob outside the action space"
+  },
+  "WL-POINTER": {
+   "because": "every edit names one config leaf by an RFC pointer",
+   "layer": "preflight",
+   "title": "refuse an edit whose target is not a JSON pointer"
+  },
+  "WL-RANGE": {
+   "because": "the knob table bounds every knob, including the ones the mesher's validator leaves unchecked",
+   "layer": "preflight",
+   "title": "refuse an edit whose value lies outside the knob's legal range"
+  },
+  "WL-TYPE": {
+   "because": "the knob table declares each knob's type, and the mesher's parser would reject another",
+   "layer": "preflight",
+   "title": "refuse an edit whose value has the wrong type"
+  },
+  "WL-UNLISTED": {
+   "because": "only knobs in the locked legal-range table may be changed",
+   "layer": "preflight",
+   "title": "refuse an edit to a knob that is not on the whitelist"
+  }
+ },
+ "terminal_of": {
+  "RM-CAPABILITY-LIMITED": "CAPABILITY-LIMITED",
+  "RM-EXHAUSTED": "EXHAUSTED",
+  "RM-NO-REMEDY": "NO-REMEDY",
+  "RM-PASS": "PASS"
+ }
+}

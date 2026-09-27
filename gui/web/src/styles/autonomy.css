@@ -1,0 +1,112 @@
+/* The autonomy campaign tab: tables, attempt cards and the round chart. */
+.campaign-tab {
+  overflow: auto;
+  padding: 12px;
+  height: 100%;
+}
+
+.campaign-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.campaign-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-md);
+  margin-bottom: 8px;
+}
+
+.campaign-view > div {
+  margin-bottom: 8px;
+}
+
+.campaign-table-wrap table,
+.campaign-summary-wrap table,
+.attempt-card table {
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.campaign-table-wrap th,
+.campaign-table-wrap td,
+.campaign-summary-wrap th,
+.campaign-summary-wrap td {
+  padding: 3px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.campaign-table-wrap tbody tr[data-testid='campaign-row'] {
+  cursor: pointer;
+}
+
+.campaign-table-wrap tbody tr[data-testid='campaign-row']:hover {
+  background: var(--bg-hover);
+}
+
+.campaign-table-wrap tr[data-testid='campaign-detail'] > td {
+  background: var(--bg-panel-alt);
+}
+
+.campaign-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: var(--fs-sm);
+}
+
+.attempt-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  padding: 8px 10px;
+  margin: 8px 0;
+  font-size: var(--fs-sm);
+}
+
+.attempt-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.attempt-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.round-chart-plot {
+  min-height: 180px;
+  min-width: 240px;
+}
+
+.campaign-attempts {
+  display: block;
+}
+
+.campaign-table-wrap tr[data-testid='campaign-row'] > td:first-child,
+.campaign-table-wrap .pill,
+.attempt-head .pill {
+  white-space: nowrap;
+}
+
+.campaign-table-wrap tr[data-testid='campaign-row'] > td:last-child {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  max-width: 72ch;
+}
+
+/* app.css hides uPlot's legend for the residual chart's own; this chart has two lines and keeps it. */
+.round-chart .uplot .u-legend {
+  display: table;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}

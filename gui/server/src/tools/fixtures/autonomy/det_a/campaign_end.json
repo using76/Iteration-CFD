@@ -1,0 +1,24 @@
+{
+ "campaign_id": "det_a",
+ "harness_errors": 0,
+ "max_live_mesher": 6,
+ "n_geometries": 20,
+ "n_rows": 29,
+ "orphans": [],
+ "peak_frac": 0.10921418221342973,
+ "peak_rss_mib": 3086.9921875,
+ "peak_used_frac": 0.85,
+ "ram_total_mib": 28265.48828125,
+ "schema": "autonomy-campaign-end/1",
+ "streams": 6,
+ "t_end": "2026-09-24T14:33:45Z",
+ "terminals": {
+  "CAPABILITY-LIMITED": 9,
+  "EXHAUSTED": 3,
+  "NO-REMEDY": 1,
+  "PASS": 4,
+  "REFUSED": 1,
+  "SURFACE-OPEN": 2
+ },
+ "wall_seconds": 322.0639653999824
+}

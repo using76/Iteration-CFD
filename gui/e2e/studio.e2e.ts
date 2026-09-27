@@ -6,10 +6,11 @@ import { expect, test } from '@playwright/test'
 
 test.describe.configure({ mode: 'serial' })
 
+// Relative: the request fixture resolves against baseURL, and Vite proxies /api to the server.
 test('health and hello', async ({ request }) => {
-  const health = await request.get('http://127.0.0.1:8787/api/health')
+  const health = await request.get('/api/health')
   expect(health.ok()).toBeTruthy()
-  const hello = await (await request.get('http://127.0.0.1:8787/api/hello')).json()
+  const hello = await (await request.get('/api/hello')).json()
   expect(hello.mode).toBe('demo')
   expect(hello.llm).toBe('mock')
 })
@@ -67,12 +68,13 @@ test('chat: open the 3D viewer with a slice and streamlines', async ({ page }) =
   await page.screenshot({ path: 'e2e/screenshots/04-viewer.png' })
 })
 
+// Relative: the request fixture resolves against baseURL, and Vite proxies /api to the server.
 test('residual CSV export endpoint', async ({ request }) => {
-  const runs = await (await request.get('http://127.0.0.1:8787/api/runs')).json()
+  const runs = await (await request.get('/api/runs')).json()
   expect(Array.isArray(runs)).toBeTruthy()
   const solver = runs.find((r: { binary: string }) => r.binary === 'ofgpu-k-epsilon')
   expect(solver).toBeTruthy()
-  const csv = await request.get(`http://127.0.0.1:8787/api/runs/${solver.id}/residuals.csv`)
+  const csv = await request.get(`/api/runs/${solver.id}/residuals.csv`)
   expect(csv.ok()).toBeTruthy()
   const text = await csv.text()
   expect(text.split('\n')[0]).toMatch(/^iter,/)

@@ -60,6 +60,81 @@ export interface MeshQuality {
   subjects: MeshGateSubject[]
 }
 
+/** One per-patch row of the automesher's layer stage (driver.rs, (92.57)), under the binary's own key names. */
+export interface MeshLayerRow {
+  /** The region on a split run (`stages[layers].regions[].name`); null on a one-mesh run. */
+  region: string | null
+  name: string
+  n_layers: number | null
+  n_faces: number | null
+  full_area_frac: number | null
+  mean_frac: number | null
+  /** Metres. The first layer asked for, and the area-weighted mean and the minimum achieved. */
+  t1_requested: number | null
+  t1_mean: number | null
+  t1_min: number | null
+  /** Why the patch lost its layers; null when it kept them. */
+  dropped: string | null
+  /** Any key the binary adds later, verbatim. */
+  [extra: string]: unknown
+}
+
+export interface MeshLayersStage {
+  skipped: boolean
+  seconds: number | null
+  n_layer_cells: number | null
+  n_layer_points: number | null
+  n_side_internal: number | null
+  n_side_boundary: number | null
+  n_split_sides: number | null
+  retreats: number | null
+  /** Every patch row in written order - on a split run, every region's rows, flattened. */
+  patches: MeshLayerRow[]
+  /** A split run's region objects without their `patches`; null on a one-mesh run. */
+  regions: Record<string, unknown>[] | null
+  [extra: string]: unknown
+}
+
+export interface MeshSnapStage {
+  seconds: number | null
+  n_boundary_points: number | null
+  iterations: number | null
+  converged: boolean | null
+  max_step: number | null
+  max_residual: number | null
+  p99_residual: number | null
+  n_scaled_back: number | null
+  n_pinned: number | null
+  n_abandoned: number | null
+  n_feature_edges: number | null
+  n_feature_corners: number | null
+  n_snapped_to_edge: number | null
+  n_snapped_to_corner: number | null
+  [extra: string]: unknown
+}
+
+export interface MeshSurfaceFacts {
+  n_triangles: number | null
+  n_points: number | null
+  /** [xmin, ymin, zmin, xmax, ymax, zmax] as (92.57) writes it. */
+  bbox: [number, number, number, number, number, number] | null
+  patches: string[]
+  [extra: string]: unknown
+}
+
+/** What the automesher's summary says per stage; null for every other tool. */
+export interface MeshAutomesherFacts {
+  surface: MeshSurfaceFacts | null
+  /** `stages[octree]`, `[castellate]`, `[split]`: every key verbatim. */
+  octree: Record<string, unknown> | null
+  castellate: Record<string, unknown> | null
+  snap: MeshSnapStage | null
+  split: Record<string, unknown> | null
+  layers: MeshLayersStage | null
+  /** `stages[].stage` in written order: what the run did. */
+  stages: string[]
+}
+
 export interface MeshSummaryRecord {
   /** The binary (or `step_mesh`) that produced the numbers. */
   tool: string
@@ -82,6 +157,8 @@ export interface MeshSummaryRecord {
   }
   patches: MeshPatchInfo[]
   quality: MeshQuality
+  /** The automesher's stage block; null for other tools, absent in a record written before it existed. */
+  automesher?: MeshAutomesherFacts | null
 }
 
 export const MESH_SUMMARY_FILE = '.meshSummary.json'
@@ -140,10 +217,11 @@ export interface MeshLogFacts {
   summaryJsonPath: string | null
   /** The case directory a `[convert] <dir>:` or `... cells -> <dir>` line named. */
   caseDirHint: string | null
+  automesher: MeshAutomesherFacts | null
 }
 
 export function emptyLogFacts(): MeshLogFacts {
-  return { tools: [], cells: null, points: null, faces: null, internalFaces: null, boundaryFaces: null, regions: null, regionSizes: null, patches: [], quality: emptyQuality(), polyMeshPath: null, summaryJsonPath: null, caseDirHint: null }
+  return { tools: [], cells: null, points: null, faces: null, internalFaces: null, boundaryFaces: null, regions: null, regionSizes: null, patches: [], quality: emptyQuality(), polyMeshPath: null, summaryJsonPath: null, caseDirHint: null, automesher: null }
 }
 
 const seen = (f: MeshLogFacts, tool: string): void => {
@@ -322,6 +400,126 @@ function pickQuality(q: Record<string, unknown>, key: string): number | null {
 }
 
 /**
+ * The stage block of the automesher's `<name>_summary.json` (92.57): the
+ * surface facts and the per-stage objects, under the binary's own snake_case
+ * key names. Every returned object is a shallow copy of what the binary
+ * wrote, so keys it adds later survive verbatim; a typed key that arrives as
+ * the wrong JSON type becomes null instead of being coerced. A malformed
+ * input yields nulls, never a throw.
+ */
+export function parseAutomesherStages(o: Record<string, unknown>): MeshAutomesherFacts {
+  const stages: string[] = []
+  let octree: Record<string, unknown> | null = null
+  let castellate: Record<string, unknown> | null = null
+  let snap: MeshSnapStage | null = null
+  let split: Record<string, unknown> | null = null
+  let layers: MeshLayersStage | null = null
+  if (Array.isArray(o.stages)) {
+    for (const raw of o.stages) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const s = raw as Record<string, unknown>
+      if (typeof s.stage !== 'string') continue
+      stages.push(s.stage)
+      if (s.stage === 'octree' && !octree) octree = { ...s }
+      else if (s.stage === 'castellate' && !castellate) castellate = { ...s }
+      else if (s.stage === 'snap' && !snap) snap = normaliseSnap(s)
+      else if (s.stage === 'split' && !split) split = { ...s }
+      else if (s.stage === 'layers' && !layers) layers = normaliseLayers(s)
+    }
+  }
+  return { surface: parseAutomesherSurface(o.surface), octree, castellate, snap, split, layers, stages }
+}
+
+function normaliseSnap(src: Record<string, unknown>): MeshSnapStage {
+  return {
+    ...src,
+    seconds: pickQuality(src, 'seconds'),
+    n_boundary_points: pickQuality(src, 'n_boundary_points'),
+    iterations: pickQuality(src, 'iterations'),
+    converged: typeof src.converged === 'boolean' ? src.converged : null,
+    max_step: pickQuality(src, 'max_step'),
+    max_residual: pickQuality(src, 'max_residual'),
+    p99_residual: pickQuality(src, 'p99_residual'),
+    n_scaled_back: pickQuality(src, 'n_scaled_back'),
+    n_pinned: pickQuality(src, 'n_pinned'),
+    n_abandoned: pickQuality(src, 'n_abandoned'),
+    n_feature_edges: pickQuality(src, 'n_feature_edges'),
+    n_feature_corners: pickQuality(src, 'n_feature_corners'),
+    n_snapped_to_edge: pickQuality(src, 'n_snapped_to_edge'),
+    n_snapped_to_corner: pickQuality(src, 'n_snapped_to_corner'),
+  }
+}
+
+function normaliseLayers(src: Record<string, unknown>): MeshLayersStage {
+  const patches: MeshLayerRow[] = []
+  if (Array.isArray(src.patches)) for (const row of src.patches) patches.push(...normaliseLayerRows(row, null))
+  let regions: Record<string, unknown>[] | null = null
+  if (Array.isArray(src.regions)) {
+    regions = []
+    for (const raw of src.regions) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const r = raw as Record<string, unknown>
+      const copy: Record<string, unknown> = { ...r }
+      delete copy.patches
+      regions.push(copy)
+      const name = typeof r.name === 'string' ? r.name : null
+      if (Array.isArray(r.patches)) for (const row of r.patches) patches.push(...normaliseLayerRows(row, name))
+    }
+  }
+  return {
+    ...src,
+    skipped: src.skipped === true,
+    seconds: pickQuality(src, 'seconds'),
+    n_layer_cells: pickQuality(src, 'n_layer_cells'),
+    n_layer_points: pickQuality(src, 'n_layer_points'),
+    n_side_internal: pickQuality(src, 'n_side_internal'),
+    n_side_boundary: pickQuality(src, 'n_side_boundary'),
+    n_split_sides: pickQuality(src, 'n_split_sides'),
+    retreats: pickQuality(src, 'retreats'),
+    patches,
+    regions,
+  }
+}
+
+/** One layer row, kept only when it is an object with a string `name`; stamped with its region. */
+function normaliseLayerRows(raw: unknown, region: string | null): MeshLayerRow[] {
+  if (typeof raw !== 'object' || raw === null) return []
+  const r = raw as Record<string, unknown>
+  if (typeof r.name !== 'string') return []
+  return [
+    {
+      ...r,
+      name: r.name,
+      region,
+      n_layers: pickQuality(r, 'n_layers'),
+      n_faces: pickQuality(r, 'n_faces'),
+      full_area_frac: pickQuality(r, 'full_area_frac'),
+      mean_frac: pickQuality(r, 'mean_frac'),
+      t1_requested: pickQuality(r, 't1_requested'),
+      t1_mean: pickQuality(r, 't1_mean'),
+      t1_min: pickQuality(r, 't1_min'),
+      dropped: typeof r.dropped === 'string' ? r.dropped : null,
+    },
+  ]
+}
+
+function parseAutomesherSurface(src: unknown): MeshSurfaceFacts | null {
+  if (typeof src !== 'object' || src === null) return null
+  const s = src as Record<string, unknown>
+  const raw = s.bbox
+  const bbox = Array.isArray(raw) && raw.length === 6 && raw.every((v) => typeof v === 'number' && Number.isFinite(v))
+    ? (raw as [number, number, number, number, number, number])
+    : null
+  return {
+    ...s,
+    n_triangles: pickQuality(s, 'n_triangles'),
+    n_points: pickQuality(s, 'n_points'),
+    bbox,
+    patches: Array.isArray(s.patches) ? s.patches.filter((p): p is string => typeof p === 'string') : [],
+  }
+}
+
+/**
  * The automesher's own `<name>_summary.json` (92.57) - the same numbers the
  * quality block prints, plus the patch list and the stop rule.
  */
@@ -354,6 +552,7 @@ export function parseAutomesherSummary(json: unknown): Partial<MeshLogFacts> & {
   f.regionSizes = Array.isArray(q.region_sizes) ? q.region_sizes.filter((v): v is number => typeof v === 'number') : null
   f.stoppedAfter = typeof o.stopped_after === 'string' ? o.stopped_after : null
   f.totalSeconds = typeof o.total_seconds === 'number' ? o.total_seconds : null
+  f.automesher = parseAutomesherStages(o)
   return f
 }
 
@@ -415,6 +614,7 @@ export function buildMeshSummary(tool: string, caseDir: string, facts: Partial<M
     counts,
     patches: facts.patches ?? [],
     quality: { ...emptyQuality(), ...q, subjects: q.subjects ?? [] },
+    automesher: facts.automesher ?? null,
   }
 }
 

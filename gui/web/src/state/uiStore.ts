@@ -1,7 +1,7 @@
 // Layout and preference state, persisted to localStorage (versioned).
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { Locale } from '@cfd/shared'
+import type { Locale, ViewId } from '@cfd/shared'
 
 export type Theme = 'light' | 'dark'
 export type ActivityView = 'explorer' | 'search' | 'scm' | 'run' | 'extensions' | 'cfd'
@@ -10,8 +10,10 @@ export type BottomTab = 'terminal' | 'logs' | 'problems' | 'output'
 export type Tab =
   | { id: string; kind: 'file'; path: string }
   | { id: 'viewer'; kind: 'viewer' }
-  | { id: 'residuals'; kind: 'residuals'; runId: string | null }
+  | { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null }
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
+  | { id: string; kind: 'geometry'; path: string }
+  | { id: string; kind: 'campaign'; path: string }
 
 export type PanelLayout = Record<string, number>
 
@@ -37,6 +39,9 @@ export interface UiState {
   settingsOpen: boolean
   cursor: { line: number; col: number } | null
   composerPrefill: { text: string; nonce: number } | null
+  viewSplit: boolean
+  focusedView: ViewId
+  camerasLinked: boolean
 }
 
 export interface UiActions {
@@ -53,7 +58,13 @@ export interface UiActions {
   openTab(tab: Tab): void
   openFile(path: string): void
   openViewerTab(): void
+  openGeometryTab(path: string): void
+  openCampaignTab(path: string): void
   openResidualsTab(runId: string | null): void
+  setCompareRun(runId: string | null): void
+  setViewSplit(on: boolean): void
+  setFocusedView(view: ViewId): void
+  setCamerasLinked(on: boolean): void
   openDiffTab(id: string, path: string, toolUseId: string | null): void
   closeTab(id: string): void
   closeOtherTabs(id: string): void
@@ -100,6 +111,9 @@ const INITIAL: UiState = {
   settingsOpen: false,
   cursor: null,
   composerPrefill: null,
+  viewSplit: false,
+  focusedView: 'A',
+  camerasLinked: false,
 }
 
 export function fileTabId(path: string): string {
@@ -176,17 +190,55 @@ export const useUiStore = create<UiStore>()(
         set((s) => ({ tabs: upsertTab(s.tabs, tab), activeTabId: tab.id }))
       },
       openFile(path) {
-        get().openTab({ id: fileTabId(path), kind: 'file', path })
+        // A campaign directory opens as one campaign tab, not as the raw
+        // campaign.json text: the directory ('' at the workspace root) is the tab.
+        if (path.split('/').pop() === 'campaign.json') {
+          get().openCampaignTab(path.slice(0, path.length - 'campaign.json'.length).replace(/\/+$/, ''))
+          return
+        }
+        // Surface files are geometry, not text: a binary STL in the text editor
+        // is mojibake and a STEP is 60 KB of B-rep noise — show the 3D view.
+        if (/\.(step|stp|stl|obj)$/i.test(path)) get().openGeometryTab(path)
+        else get().openTab({ id: fileTabId(path), kind: 'file', path })
       },
       openViewerTab() {
         get().openTab({ id: 'viewer', kind: 'viewer' })
       },
+      openGeometryTab(path) {
+        get().openTab({ id: `geometry:${path}`, kind: 'geometry', path })
+      },
+      openCampaignTab(path) {
+        const p = path.replace(/\/+$/, '')
+        get().openTab({ id: `campaign:${p}`, kind: 'campaign', path: p })
+      },
       openResidualsTab(runId) {
         set((s) => {
           const existing = s.tabs.find((t) => t.kind === 'residuals')
-          const tab: Tab = { id: 'residuals', kind: 'residuals', runId: runId ?? (existing?.kind === 'residuals' ? existing.runId : null) }
+          const tab: Tab = {
+            id: 'residuals',
+            kind: 'residuals',
+            runId: runId ?? (existing?.kind === 'residuals' ? existing.runId : null),
+            compareRunId: existing?.kind === 'residuals' ? (existing.compareRunId ?? null) : null,
+          }
           return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals', activeRunId: runId ?? s.activeRunId }
         })
+      },
+      setCompareRun(runId) {
+        set((s) => {
+          const existing = s.tabs.find((t) => t.kind === 'residuals')
+          const primary = existing?.kind === 'residuals' ? existing.runId : s.activeRunId
+          const tab: Tab = { id: 'residuals', kind: 'residuals', runId: primary, compareRunId: runId }
+          return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals' }
+        })
+      },
+      setViewSplit(on) {
+        set(on ? { viewSplit: true } : { viewSplit: false, focusedView: 'A', camerasLinked: false })
+      },
+      setFocusedView(view) {
+        set({ focusedView: view })
+      },
+      setCamerasLinked(on) {
+        set({ camerasLinked: on })
       },
       openDiffTab(id, path, toolUseId) {
         get().openTab({ id, kind: 'diff', path, toolUseId })

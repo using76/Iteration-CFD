@@ -54,5 +54,7 @@ export interface SceneView {
   screenshot(req: ScreenshotRequest): Promise<ScreenshotResult>
   /** Cell index under a canvas point (select tool), or -1. */
   pick(clientX: number, clientY: number): number
+  /** The canvas rect in CSS pixels, window coordinates - the same rect `pick` measures against. */
+  viewport(): { left: number; top: number; width: number; height: number }
   dispose(): void
 }
