@@ -26445,7 +26445,7 @@ J       = { j : j in neither L nor any boundary face, W(j) not empty }  (92.64)
 
 y_j     = mean_{i in W(j)} ( x_i + D_i + |x_j - x_i| n_i )
 d_j     = mean_{i in W(j)} D_i + beta ( y_j - x_j - mean_{i in W(j)} D_i ),
-          beta = 1                                                      (92.65)
+          beta = beta_j: 1 until (92.66) lowers it                      (92.65)
 ```
 
 (92.46) then holds `d_j` for every `j` in `J` from `d^(0)` on, exactly as it
@@ -26494,6 +26494,34 @@ its layers, and the stage restarts with it removed from P_L
 if any T_i < layers.min_thickness * T at accept: that patch loses its layers
                                                                        (92.47)
 ```
+
+**The pull is taken back before the thickness is.** A re-seat can itself be
+what fails: on the snapped floor box the row-1 points (92.65) holds at
+`beta = 1` leave cells on the shrunk mesh that G1 and G4 name at every rung of
+the inner ladder, and halving `D_i` cannot mend them, because the re-seating
+part of `d_j` is not halved by it. So a failure either ladder would answer
+with a halving of `D` first lowers `beta` where the failing cells carry a
+re-seated point:
+
+```
+at a failure (92.47) would answer by halving D:
+    Jf = { j in J : j is a point of a cell of fail, beta_j > 0 }
+    if Jf is not empty and this ladder has taken fewer than 3 beta rungs
+       on this patch set:
+        beta_j <- beta_j / 2 if beta_j > 1/4, else 0,    for every j in Jf
+        re-run (92.46) (inner), or the whole stage (outer); no D_i changes
+    otherwise: halve D_i as (92.47) says                                (92.66)
+```
+
+`beta_j` runs 1, 1/2, 1/4, 0; at 0, `d_j` is the mean `D_i` of its wall
+points, the translate-only form. The rung is not a retreat: `retreats` counts
+halvings of `D` alone, and the trace names the rung `beta`. The outer ladder
+carries `beta` into the next attempt as it carries the caps, from the value the
+attempt's inner ladder left in force; both start again at 1 when a patch loses
+its layers and the stage is recomputed. With `layers.retreat_limit` unchanged,
+each ladder takes at most 3 more measurements per patch set. Where `J` is
+empty - every wall on the cell planes, and the snapped cube - no rung is ever
+taken and the stage is bit for bit what it was.
 
 The outer ladder is not decoration. An earlier form of this section had only
 the inner one, which gates a mesh differing from its input in `points` ALONE —
@@ -26648,7 +26676,11 @@ t1_mean   = t_1 mean_frac          t1_min = t_1 min_f tau_f            (92.50)
 average. A dropped patch reports `n_layers = 0` and the reason. Each row also
 carries `n_reseated_points`: the largest number of points (92.64) re-seated
 for the patch over every round the run ran with it, 0 when the re-seat never
-acted on it.
+acted on it. It also carries `beta_rungs`, the (92.66) rungs either ladder
+took on a patch set holding the patch, and `level_n_non_orth_max_deg`, the
+largest G4 angle over the patch's level-n faces on the returned mesh - null on
+a patch without layers: the near-wall non-orthogonality the solver will see,
+reported rather than hidden inside a passing gate.
 
 **The trace, and what a drop is blamed on.** A drop's reason names the check
 that fired LAST, and with two ladders nested that is not always the one that
@@ -26658,11 +26690,13 @@ ladder's floor `min_thickness * T` fires first, and the reason then reads as a
 thickness failure. So the report also keeps the ladders' trace, `ladder`: one
 entry per measurement either ladder took, in the order taken - which ladder;
 the outer round (one extrusion attempt, counted from 0; an inner entry carries
-the round that ran it); the rung (the halvings that ladder had taken on this
-patch set); the patch set by name; each failing gate of §92.3 with its failed
+the round that ran it); the rung (the halvings of `D` that ladder had taken on this patch set) and
+`beta_rung` (its rungs of (92.66) there); the patch set by name; each failing
+gate of §92.3 with its failed
 count; how many of the G4 subjects are level-n faces, internal faces whose
 owner is an input cell and whose neighbour a layer cell (always 0 on the inner
-ladder, whose mesh has no layer cell); the outcome, `pass`, `retreat` or
+ladder, whose mesh has no layer cell); the outcome, `pass`, `retreat`, `beta`
+(a rung of (92.66), with `beta_points`, how many points it lowered) or
 `give_up`; and on a give-up its class and the patch that lost its layers. Each
 patch row carries `drop_cause`, the class of the give-up that dropped it:
 
@@ -26801,6 +26835,8 @@ solver can run.
 | a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
 | a patch that lost its layers | its row names `drop_cause`, the class of the last give-up in `ladder` that names it; the trace ends on the outer pass the run returned on; the mesh, the reason and the log are bit for bit what they are without it |
 | the report of a patch that kept its layers | says the achieved first layer in METRES (`t1_mean`, `t1_min`), not only as a fraction |
+| a failure whose failing cells carry a re-seated point with `beta_j > 0` | that ladder lowers `beta` there (92.66) before it halves any `D_i`, at most 3 times per patch set; the rung adds nothing to `retreats` and the trace names it `beta` |
+| a patch that kept its layers | reports `level_n_non_orth_max_deg`, never above the returned mesh's worst non-orthogonality; a patch without layers reports null |
 
 **Validation**
 
@@ -26828,6 +26864,10 @@ solver can run.
 | the snapped cube | worst `theta_f` 38.93 deg, `J` empty |
 | the snapped level-2 sphere | worst `theta_f` 80.25 deg, 1632 of 2592 faces past 45 deg, 804 row-1 cells, `J` 888 points, each with at most 3 wall points, and the row reports 888 |
 | the snapped level-2 sphere, three layers of 0.05 | the patch KEEPS its layers: the re-seat moves 888 points, the gate passes at its own thresholds with a worst non-orthogonality of 66.06 deg, the trace is one inner and one outer pass, the cell count is `C + 3 x 2592`; `full` 0 and `mean_frac` 0.346 - the (92.45) limiter, not G4, sets the thickness now |
+| the step of (92.66) | 1, 1/2, 1/4, 0, and 0 stays 0; at `beta = 1/4` the two wall points below `(0,0,1)` give `(0.125, 0, 0.20177669529663692)` |
+| a wall on the cell planes, and the snapped cube | no `beta` entry in the trace and every row's `beta_rungs` 0; the castellated goldens are unchanged |
+| every case that ran a ladder | each `beta` entry names its gates and lowers at least one point, no ladder takes more than 3 on one patch set, each entry's `beta_rung` counts the `beta` entries before it, and each row's `beta_rungs` is the count of `beta` entries naming its patch |
+| the snapped sphere at 8 layers, `first_thickness` 0.0021, `growth` 1.0 (AM-L's G-L-b, 2026-09-27) | MEASURED, NOT MET: the stack is dropped `thin_after_caps`; the outer ladder takes 3 `beta` rungs, but the failure that drives it is G5, not G4 (G5 200, 1984, then 3072 to 6216 failing cells as the caps halve, against G4 48 to 120), and (92.66) lowers only the pull of re-seated points; the 2-layer shipped example keeps both layers (G-L-a), and why G5 grows at 8 layers is open |
 
 ### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
 

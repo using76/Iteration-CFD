@@ -377,6 +377,8 @@ fn layer_patch_json(p: &super::layers::PatchLayers) -> serde_json::Value {
         "dropped": p.dropped,
         "drop_cause": p.drop_cause.map(|c| c.as_str()),
         "n_reseated_points": p.n_reseated_points,
+        "beta_rungs": p.beta_rungs,
+        "level_n_non_orth_max_deg": p.level_n_non_orth_max_deg,
     })
 }
 
@@ -395,12 +397,14 @@ fn ladder_json(ladder: &[super::layers::LadderEntry]) -> serde_json::Value {
                 "ladder": e.ladder.as_str(),
                 "round": e.round,
                 "rung": e.rung,
+                "beta_rung": e.beta_rung,
                 "patches": e.patches,
                 "gates": gates,
                 "g4_level_n": e.g4_level_n,
                 "outcome": e.outcome.as_str(),
                 "give_up": e.give_up.map(|c| c.as_str()),
                 "dropped": e.dropped,
+                "beta_points": e.beta_points,
             })
         })
         .collect();
@@ -1791,6 +1795,8 @@ mod tests {
             "t1_min",
             "dropped",
             "n_reseated_points",
+            "beta_rungs",
+            "level_n_non_orth_max_deg",
         ] {
             assert!(r.get(key).is_some(), "missing {key} in {r}");
         }

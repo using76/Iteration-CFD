@@ -500,6 +500,12 @@ pub struct Shrunk {
     /// Per patch of the caller's patch set, by name in that set's order,
     /// the largest `|J_q|` over this call's rounds.
     pub reseated: Vec<(String, usize)>,
+    /// Per input point, the (92.66) pull in force when the shrink returned -
+    /// the caller's `betas` where no rung lowered it.
+    pub beta: Vec<Scalar>,
+    /// The `J` of the round the shrink accepted; empty when no round was
+    /// accepted.
+    pub reseat_points: Vec<usize>,
 }
 
 /// Which ladder of (92.47) a trace entry comes from: the inner one measures
@@ -527,6 +533,9 @@ pub enum Outcome {
     Pass,
     /// The gate failed and the offending thickness was halved.
     Retreat,
+    /// A rung of (92.66): the gate failed on cells carrying a re-seated
+    /// point, whose pull was lowered; no thickness was halved.
+    Beta,
     /// The patch set gave up: one patch lost its layers.
     GiveUp,
 }
@@ -537,6 +546,7 @@ impl Outcome {
         match self {
             Outcome::Pass => "pass",
             Outcome::Retreat => "retreat",
+            Outcome::Beta => "beta",
             Outcome::GiveUp => "give_up",
         }
     }
@@ -587,6 +597,9 @@ pub struct LadderEntry {
     /// The halvings this ladder had taken on this patch set before the
     /// measurement.
     pub rung: usize,
+    /// The (92.66) rungs this ladder had taken on this patch set before the
+    /// measurement.
+    pub beta_rung: usize,
     /// The patch set the measurement ran on, by name.
     pub patches: Vec<String>,
     /// Each failing gate of §92.3 with its `n_failed`, in the report's order.
@@ -600,6 +613,9 @@ pub struct LadderEntry {
     pub give_up: Option<DropCause>,
     /// On a give-up, the patch that lost its layers.
     pub dropped: Option<String>,
+    /// On a `Beta` entry, how many re-seated points it lowered; 0 on every
+    /// other entry.
+    pub beta_points: usize,
 }
 
 impl LadderEntry {
@@ -617,12 +633,14 @@ impl LadderEntry {
             ladder,
             round: 0,
             rung,
+            beta_rung: 0,
             patches: patches.to_vec(),
             gates: gates.to_vec(),
             g4_level_n: 0,
             outcome,
             give_up,
             dropped: None,
+            beta_points: 0,
         }
     }
 }
@@ -658,6 +676,51 @@ fn level_n_g4(rep: &quality::QualityReport, mesh: &PolyMeshRaw, first_cell: usiz
         }
     }
     n
+}
+
+/// Per patch of `mesh`, in order: the largest G4 angle over the patch's
+/// level-n faces (92.48) on `out` - `None` where the patch carries no such
+/// face, all `None` where no layer cell exists. The angle is quality's G4
+/// expression on the host mesh of `out`, read owner -> neighbour.
+fn level_n_non_orth_max(
+    mesh: &PolyMeshRaw,
+    out: &PolyMeshRaw,
+    ex: &Extrusion,
+) -> Result<Vec<Option<Scalar>>> {
+    let mut res = vec![None; mesh.patches.len()];
+    if ex.n == 0 || ex.layer_faces.is_empty() {
+        return Ok(res);
+    }
+    let m = build_host_mesh(out)?;
+    let n_internal_in = mesh.neighbour.len().min(mesh.faces.len());
+    for f in 0..m.n_internal_faces {
+        let (o, nb) = (m.owner[f] as usize, m.neighbour[f] as usize);
+        if !(o < ex.first_cell && nb >= ex.first_cell) {
+            continue;
+        }
+        let d = m.c[nb] - m.c[o];
+        let (mag_s, mag_d) = (m.mag_sf[f], d.mag());
+        if !(mag_s > 0.0) || !(mag_d > 0.0) {
+            continue;
+        }
+        let theta = (m.sf[f].dot(d) / (mag_s * mag_d))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        let fa = ex.layer_faces[(nb - ex.first_cell) / ex.n];
+        if fa < n_internal_in {
+            continue;
+        }
+        let rel = fa - n_internal_in;
+        if let Some(k) = mesh
+            .patches
+            .iter()
+            .position(|p| rel >= p.start && rel < p.start + p.size)
+        {
+            res[k] = Some(res[k].map_or(theta, |v: Scalar| v.max(theta)));
+        }
+    }
+    Ok(res)
 }
 
 /// (92.63)'s `THETA_ON`, in degrees: a wall face whose predicted level-n
@@ -805,6 +868,20 @@ pub fn reseat_disp(xj: Vec3, wall: &[(Vec3, Vec3, Vec3)], beta: Scalar) -> Vec3 
     md + (y - xj - md) * beta
 }
 
+/// (92.66): the beta rungs one ladder may take on one patch set - the steps
+/// 1 -> 1/2 -> 1/4 -> 0.
+pub const BETA_RUNG_LIMIT: usize = 3;
+
+/// (92.66)'s step: `b / 2` while `b > 1/4`, else 0 - so 1, 1/2, 1/4, 0, and
+/// 0 stays 0.
+pub fn beta_step(b: Scalar) -> Scalar {
+    if b > 0.25 {
+        b / 2.0
+    } else {
+        0.0
+    }
+}
+
 /// What took the points under the floor: the outer ladder's cap where any
 /// of them carries one, else the inner ladder's halving where any of them
 /// took one, else the proposed thickness itself.
@@ -821,6 +898,9 @@ fn thin_cause(offenders: &[usize], caps: &[Scalar], halved: &[bool]) -> DropCaus
 /// [`shrink`]'s body at a CALLER'S patch set and per-point retreat cap: the
 /// ladder runs over `patches0` alone, and every layer point's proposed
 /// displacement and thickness come in already scaled by `caps[i]`.
+///
+/// `betas` is the per-point pull (92.66) the caller carries in - one entry
+/// per input point, the re-seat points' starting `beta_j`.
 fn shrink_on(
     mesh: &PolyMeshRaw,
     surf: &Surface,
@@ -828,6 +908,7 @@ fn shrink_on(
     t: &QualityThresholds,
     patches0: &[usize],
     caps: &[Scalar],
+    betas: &[Scalar],
 ) -> Result<Shrunk> {
     let n_faces = mesh.faces.len();
     let n_internal = mesh.neighbour.len().min(n_faces);
@@ -841,6 +922,8 @@ fn shrink_on(
             drop_causes: Vec::new(),
             ladder: Vec::new(),
             reseated: Vec::new(),
+            beta: vec![1.0; n_points],
+            reseat_points: Vec::new(),
         });
     }
     let st = stack(spec)?;
@@ -968,6 +1051,8 @@ fn shrink_on(
                 drop_causes,
                 ladder,
                 reseated,
+                beta: betas.to_vec(),
+                reseat_points: Vec::new(),
             });
         }
         let mut f = field(mesh, &idx, &patches, spec, &st)?;
@@ -1002,8 +1087,12 @@ fn shrink_on(
         let mut pts_out = mesh.points.clone();
         let mut give_up: Option<(Vec<usize>, String)> = None;
         let mut halvings = 0usize;
+        // (92.66): this round's pull starts from the caller's betas, and the
+        // beta rungs count from 0 on every patch set.
+        let mut beta = betas.to_vec();
+        let mut beta_rungs = 0usize;
         loop {
-            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points);
+            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points, &beta);
             let mut work = mesh.clone();
             for i in 0..work.points.len() {
                 work.points[i] = work.points[i] + d[i];
@@ -1029,9 +1118,11 @@ fn shrink_on(
                     .collect();
                 if !zero.is_empty() {
                     cause = Some(DropCause::ZeroDisp);
-                    ladder.push(LadderEntry::new(
+                    let mut e = LadderEntry::new(
                         Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
-                    ));
+                    );
+                    e.beta_rung = beta_rungs;
+                    ladder.push(e);
                     give_up = Some((
                         zero,
                         "the applied displacement is zero at a layer point -                          a layer cell there would have a side face of zero area"
@@ -1039,16 +1130,20 @@ fn shrink_on(
                     ));
                 } else if !thin.is_empty() {
                     cause = Some(thin_cause(&thin, caps, &halved));
-                    ladder.push(LadderEntry::new(
+                    let mut e = LadderEntry::new(
                         Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
-                    ));
+                    );
+                    e.beta_rung = beta_rungs;
+                    ladder.push(e);
                     give_up = Some((thin, format!(
                         "the thickness fell below min_thickness * T = {limit:.3e}"
                     )));
                 } else {
-                    ladder.push(LadderEntry::new(
+                    let mut e = LadderEntry::new(
                         Ladder::Inner, halvings, &names, &gates, Outcome::Pass, None,
-                    ));
+                    );
+                    e.beta_rung = beta_rungs;
+                    ladder.push(e);
                     accepted = true;
                     pts_out = work.points;
                     for i in 0..n_points {
@@ -1060,12 +1155,35 @@ fn shrink_on(
                 }
                 break;
             }
+            // (92.66): before any give-up check or halving, a failure whose
+            // failing cells carry a live re-seat point takes the pull back
+            // there - never a halving of `D`, never a retreat.
+            let mut live = vec![false; n_points];
+            for &j in &rs.points {
+                live[j] = beta[j] > 0.0;
+            }
+            let jf = failing_points(&rep, mesh, n_internal, &live, &cell_points);
+            if !jf.is_empty() && beta_rungs < BETA_RUNG_LIMIT {
+                for &j in &jf {
+                    beta[j] = beta_step(beta[j]);
+                }
+                let mut e = LadderEntry::new(
+                    Ladder::Inner, halvings, &names, &gates, Outcome::Beta, None,
+                );
+                e.beta_rung = beta_rungs;
+                e.beta_points = jf.len();
+                ladder.push(e);
+                beta_rungs += 1;
+                continue;
+            }
             let fail_pts = failing_points(&rep, mesh, n_internal, &f.is_layer, &cell_points);
             if halvings >= spec.retreat_limit {
                 cause = Some(DropCause::InnerGate);
-                ladder.push(LadderEntry::new(
+                let mut e = LadderEntry::new(
                     Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
-                ));
+                );
+                e.beta_rung = beta_rungs;
+                ladder.push(e);
                 give_up = Some((fail_pts, format!(
                     "the gate still failed after {halvings} retreat(s)"
                 )));
@@ -1073,18 +1191,21 @@ fn shrink_on(
             }
             if fail_pts.is_empty() {
                 cause = Some(DropCause::InnerGate);
-                ladder.push(LadderEntry::new(
+                let mut e = LadderEntry::new(
                     Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
-                ));
+                );
+                e.beta_rung = beta_rungs;
+                ladder.push(e);
                 give_up = Some((
                     fail_pts,
                     "the gate failed on cells no layer point reaches".to_string(),
                 ));
                 break;
             }
-            ladder.push(LadderEntry::new(
-                Ladder::Inner, halvings, &names, &gates, Outcome::Retreat, None,
-            ));
+            let mut e =
+                LadderEntry::new(Ladder::Inner, halvings, &names, &gates, Outcome::Retreat, None);
+            e.beta_rung = beta_rungs;
+            ladder.push(e);
             for &i in &fail_pts {
                 halved[i] = true;
                 f.disp[i] = f.disp[i] * 0.5;
@@ -1106,6 +1227,8 @@ fn shrink_on(
                 drop_causes,
                 ladder,
                 reseated,
+                beta,
+                reseat_points: rs.points.clone(),
             });
         }
         let (offenders, reason) = give_up.expect("the ladder ended in a give-up");
@@ -1181,6 +1304,8 @@ pub fn shrink(
             drop_causes: Vec::new(),
             ladder: Vec::new(),
             reseated: Vec::new(),
+            beta: vec![1.0; n_points],
+            reseat_points: Vec::new(),
         });
     }
     let all_patches = resolve_patches(mesh, spec)?;
@@ -1190,6 +1315,7 @@ pub fn shrink(
         spec,
         t,
         &all_patches,
+        &vec![1.0 as Scalar; n_points],
         &vec![1.0 as Scalar; n_points],
     )
 }
@@ -1257,7 +1383,7 @@ fn failing_points(
 /// a hanging node's copy stays the exact midpoint of its parents' copies at
 /// every level - (92.33)'s line, for (92.33)'s reason and one more. The
 /// points of `rs` hold (92.65)'s displacement as the layer points hold
-/// theirs.
+/// theirs; each re-seat point's pull is its own `beta_j` (92.66).
 fn relax(
     f: &Field,
     all_nbrs: &[Vec<u32>],
@@ -1266,6 +1392,7 @@ fn relax(
     spec: &LayerSpec,
     rs: &Reseat,
     x: &[Vec3],
+    beta: &[Scalar],
 ) -> Vec<Vec3> {
     let n = f.disp.len();
     // Each re-seat point's displacement, computed ONCE from the `D_i` in
@@ -1278,7 +1405,7 @@ fn relax(
         .map(|(k, &j)| {
             let wall: Vec<(Vec3, Vec3, Vec3)> =
                 rs.wall[k].iter().map(|&i| (x[i], f.disp[i], f.normal[i])).collect();
-            (j, reseat_disp(x[j], &wall, 1.0))
+            (j, reseat_disp(x[j], &wall, beta[j]))
         })
         .collect();
     let mut d = f.disp.clone();
@@ -1374,6 +1501,14 @@ pub struct PatchLayers {
     pub drop_cause: Option<DropCause>,
     /// (92.64): how many interior points of row-1 cells the shrink re-seated for this patch - the largest count over every round the run ran with the patch in its set; 0 means the re-seat never acted on it.
     pub n_reseated_points: usize,
+    /// (92.66): the beta rungs either ladder took on a patch set holding
+    /// this patch, over the whole run - the count of the trace's `beta`
+    /// entries whose patch set names it.
+    pub beta_rungs: usize,
+    /// The largest G4 angle over this patch's level-n faces (92.48) on the
+    /// returned mesh - the near-wall non-orthogonality the solver sees;
+    /// `None` on a patch that has no layers.
+    pub level_n_non_orth_max_deg: Option<Scalar>,
 }
 
 impl PatchLayers {
@@ -1455,6 +1590,10 @@ pub struct Layered {
     pub report: LayerReport,
     pub extrusion: Extrusion,
     pub quality: quality::QualityReport,
+    /// The shrink's own (92.66) pull, handed to the outer ladder.
+    pub beta: Vec<Scalar>,
+    /// The shrink's own `J`.
+    pub reseat_points: Vec<usize>,
 }
 
 /// SPEC-LIT §92.2 stage 6 / §92.13 end to end: shrink, extrude, renumber,
@@ -1484,6 +1623,10 @@ pub fn add_layers(
     let mut caps = vec![1.0 as Scalar; mesh.points.len()];
     let mut halvings = 0usize;
     let mut extra_retreats = 0usize;
+    // (92.66): the pull the outer ladder carries into the next attempt, as
+    // it carries the caps, and its own rung counter.
+    let mut betas = vec![1.0 as Scalar; mesh.points.len()];
+    let mut beta_rungs = 0usize;
     let mut dropped: Vec<(String, String)> = Vec::new();
     // The whole trace, both ladders, read off and moving nothing (SPEC-LIT
     // §92.13), and the outer round it is at.
@@ -1496,7 +1639,7 @@ pub fn add_layers(
     let n_faces = mesh.faces.len();
     let n_internal = mesh.neighbour.len().min(n_faces);
     loop {
-        let mut a = attempt(mesh, surf, spec, t, &patches, &caps)?;
+        let mut a = attempt(mesh, surf, spec, t, &patches, &caps, &betas)?;
         for row in &a.report.patches {
             let e = reseated.entry(row.name.clone()).or_insert(0);
             *e = (*e).max(row.n_reseated_points);
@@ -1551,16 +1694,41 @@ pub fn add_layers(
                     dropped: Some(format!("patch \"{name}\": {reason}")),
                     drop_cause: Some(DropCause::OuterGate),
                     n_reseated_points: 0,
+                    beta_rungs: 0,
+                    level_n_non_orth_max_deg: None,
                 });
             }
             a.report.retreats += extra_retreats;
             let mut e = LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Pass, None);
             e.round = this_round;
             e.g4_level_n = g4_n;
+            e.beta_rung = beta_rungs;
             trace.push(e);
             a.report.ladder = trace;
             for row in a.report.patches.iter_mut() {
                 row.n_reseated_points = reseated.get(&row.name).copied().unwrap_or(0);
+            }
+            // (92.66)'s report fields, read off the final trace and the
+            // returned mesh: the beta rungs each row's patch set took, and
+            // the near-wall angle its level-n faces hand the solver.
+            let non_orth = level_n_non_orth_max(mesh, &a.mesh, &a.extrusion)?;
+            for row in a.report.patches.iter_mut() {
+                row.beta_rungs = a
+                    .report
+                    .ladder
+                    .iter()
+                    .filter(|e| {
+                        e.outcome == Outcome::Beta && e.patches.iter().any(|nm| *nm == row.name)
+                    })
+                    .count();
+                row.level_n_non_orth_max_deg = if row.dropped.is_none() && row.n_layers > 0 {
+                    mesh.patches
+                        .iter()
+                        .position(|p| p.name == row.name)
+                        .and_then(|k| non_orth[k])
+                } else {
+                    None
+                };
             }
             return Ok(a);
         }
@@ -1625,6 +1793,28 @@ pub fn add_layers(
             .collect();
         let fail_pts =
             failing_points(&a.quality, &a.mesh, n_internal_out, &is_layer, &cell_points);
+        // (92.66): before any give-up check or halving, a failure whose
+        // failing cells carry a live re-seat point takes the pull back
+        // there - the caps, the halvings and the drop are untouched.
+        let mut live = vec![false; n_points];
+        for &j in &a.reseat_points {
+            live[j] = a.beta[j] > 0.0;
+        }
+        let jf = failing_points(&a.quality, &a.mesh, n_internal_out, &live, &cell_points);
+        if !jf.is_empty() && beta_rungs < BETA_RUNG_LIMIT {
+            let mut e =
+                LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Beta, None);
+            e.round = this_round;
+            e.g4_level_n = g4_n;
+            e.beta_rung = beta_rungs;
+            e.beta_points = jf.len();
+            trace.push(e);
+            for &j in &jf {
+                betas[j] = beta_step(a.beta[j]);
+            }
+            beta_rungs += 1;
+            continue;
+        }
         if fail_pts.is_empty() || halvings >= spec.retreat_limit {
             // The patch that loses its layers: the one carrying the most
             // offending layer points, ties to the lower patch index. An
@@ -1668,6 +1858,7 @@ pub fn add_layers(
             );
             e.round = this_round;
             e.g4_level_n = g4_n;
+            e.beta_rung = beta_rungs;
             e.dropped = Some(mesh.patches[vp].name.clone());
             trace.push(e);
             dropped.push((mesh.patches[vp].name.clone(), reason));
@@ -1677,10 +1868,13 @@ pub fn add_layers(
             // double-counted (92.50)'s retreat total.
             caps = vec![1.0 as Scalar; n_points];
             halvings = 0;
+            betas = vec![1.0 as Scalar; n_points];
+            beta_rungs = 0;
         } else {
             let mut e = LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Retreat, None);
             e.round = this_round;
             e.g4_level_n = g4_n;
+            e.beta_rung = beta_rungs;
             trace.push(e);
             for &i in &fail_pts {
                 caps[i] = caps[i] * 0.5;
@@ -1702,6 +1896,7 @@ fn attempt(
     t: &QualityThresholds,
     patches0: &[usize],
     caps: &[Scalar],
+    betas: &[Scalar],
 ) -> Result<Layered> {
     let st = stack(spec)?;
     let n = st.n;
@@ -1716,7 +1911,7 @@ fn attempt(
         .copied()
         .max()
         .map_or(0, |m| m as usize + 1);
-    let shrunk = shrink_on(mesh, surf, spec, t, patches0, caps)?;
+    let shrunk = shrink_on(mesh, surf, spec, t, patches0, caps, betas)?;
     let field = &shrunk.field;
     // Nothing to do: no layers were asked for, or every named patch gave
     // its layers up in the shrink. The input mesh comes back bit for bit.
@@ -1753,6 +1948,8 @@ fn attempt(
                     .iter()
                     .find(|(nm, _)| nm == &patch.name)
                     .map_or(0, |(_, n)| *n),
+                beta_rungs: 0,
+                level_n_non_orth_max_deg: None,
             });
         }
         let report = LayerReport {
@@ -1779,6 +1976,8 @@ fn attempt(
                 n,
             },
             quality,
+            beta: shrunk.beta,
+            reseat_points: shrunk.reseat_points,
         });
     }
 
@@ -2175,6 +2374,8 @@ fn attempt(
                         .iter()
                         .find(|(nm, _)| nm == &patch.name)
                         .map_or(0, |(_, n)| *n),
+                    beta_rungs: 0,
+                    level_n_non_orth_max_deg: None,
                 });
             }
             Some(_) => {
@@ -2230,6 +2431,8 @@ fn attempt(
                         .iter()
                         .find(|(nm, _)| nm == &patch.name)
                         .map_or(0, |(_, n)| *n),
+                    beta_rungs: 0,
+                    level_n_non_orth_max_deg: None,
                 };
                 row.area_frac_tau_ge = TAU_GE_BETAS.map(|b| row.frac_tau_ge(b));
                 patches_rep.push(row);
@@ -2257,6 +2460,8 @@ fn attempt(
             n,
         },
         quality,
+        beta: shrunk.beta,
+        reseat_points: shrunk.reseat_points,
     })
 }
 
@@ -4180,6 +4385,9 @@ pub(crate) mod tests {
             match e.outcome {
                 Outcome::Pass => assert!(e.gates.is_empty() && quiet, "{e:?}"),
                 Outcome::Retreat => assert!(!e.gates.is_empty() && quiet, "{e:?}"),
+                Outcome::Beta => {
+                    assert!(!e.gates.is_empty() && quiet && e.beta_points > 0, "{e:?}")
+                }
                 Outcome::GiveUp => assert!(e.give_up.is_some() && e.dropped.is_some(), "{e:?}"),
             }
             match e.give_up {
@@ -4350,7 +4558,16 @@ pub(crate) mod tests {
         };
         let patches = resolve_patches(&mesh, &spec).expect("patches");
         let caps = vec![1.0 as Scalar; mesh.points.len()];
-        let a = attempt(&mesh, &surf, &spec, &thresholds(), &patches, &caps).expect("attempt");
+        let a = attempt(
+            &mesh,
+            &surf,
+            &spec,
+            &thresholds(),
+            &patches,
+            &caps,
+            &vec![1.0 as Scalar; mesh.points.len()],
+        )
+        .expect("attempt");
         let key = |ps: &[crate::Label]| {
             let mut v = ps.to_vec();
             v.sort_unstable();
@@ -4656,5 +4873,274 @@ pub(crate) mod tests {
             row.mean_frac,
             row.full_area_frac
         );
+    }
+
+    /// The shape (92.66) puts on a run, whatever the case. Also runs
+    /// [`check_ladder`] and [`check_rows`].
+    fn check_beta(out: &Layered) {
+        check_ladder(&out.report.ladder);
+        check_rows(out);
+        for e in &out.report.ladder {
+            if e.outcome == Outcome::Beta {
+                assert!(!e.gates.is_empty(), "{e:?}");
+                assert!(e.beta_points > 0, "{e:?}");
+                assert!(e.give_up.is_none() && e.dropped.is_none(), "{e:?}");
+            }
+        }
+        // Per ladder, the rungs taken on the patch set in force: the count
+        // resets when the set changes - and, on the inner ladder, when the
+        // round does - and no count passes the limit.
+        let mut counts: Vec<((Ladder, Vec<String>, Option<usize>), usize)> = Vec::new();
+        for e in &out.report.ladder {
+            let key = (
+                e.ladder,
+                e.patches.clone(),
+                if e.ladder == Ladder::Inner { Some(e.round) } else { None },
+            );
+            let c = counts
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map_or(0, |(_, c)| *c);
+            assert_eq!(e.beta_rung, c, "{e:?}");
+            let c = if e.outcome == Outcome::Beta { c + 1 } else { c };
+            assert!(c <= BETA_RUNG_LIMIT, "{e:?}");
+            match counts.iter_mut().find(|(k, _)| *k == key) {
+                Some(slot) => slot.1 = c,
+                None => counts.push((key, c)),
+            }
+        }
+        for p in &out.report.patches {
+            let n = out
+                .report
+                .ladder
+                .iter()
+                .filter(|e| e.outcome == Outcome::Beta && e.patches.iter().any(|nm| *nm == p.name))
+                .count();
+            assert_eq!(p.beta_rungs, n, "{}", p.name);
+        }
+        for p in &out.report.patches {
+            if p.dropped.is_some() || p.n_layers == 0 {
+                assert_eq!(p.level_n_non_orth_max_deg, None, "{}", p.name);
+            } else {
+                let v = p
+                    .level_n_non_orth_max_deg
+                    .expect("a kept row carries its level-n angle");
+                assert!(v.is_finite() && v >= 0.0, "{} {v}", p.name);
+                assert!(v <= out.quality.max_non_orth_deg + 1e-9, "{} {v}", p.name);
+            }
+        }
+    }
+
+    /// (92.66)'s step and its limit: 1, 1/2, 1/4, 0, and 0 stays 0; the
+    /// pull at beta 1/4 is a quarter of the way to the wall-following
+    /// position; the trace names the rung `beta`.
+    #[test]
+    fn the_beta_step_runs_one_half_quarter_zero() {
+        assert_eq!(beta_step(1.0), 0.5);
+        assert_eq!(beta_step(0.5), 0.25);
+        assert_eq!(beta_step(0.25), 0.0);
+        assert_eq!(beta_step(0.0), 0.0);
+        assert_eq!(BETA_RUNG_LIMIT, 3);
+        let wall = vec![
+            (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.1), Vec3::new(0.0, 0.0, 1.0)),
+            (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.2), Vec3::new(0.0, 0.0, 1.0)),
+        ];
+        let d = reseat_disp(Vec3::new(0.0, 0.0, 1.0), &wall, 0.25);
+        eprintln!("beta step: reseat_disp at beta 1/4 = ({}, {}, {})", d.x, d.y, d.z);
+        assert!((d.x - 0.125).abs() < 1e-15, "{d:?}");
+        assert!(d.y.abs() < 1e-15, "{d:?}");
+        assert!((d.z - 0.20177669529663692).abs() < 1e-15, "{d:?}");
+        assert_eq!(Outcome::Beta.as_str(), "beta");
+    }
+
+    /// A wall on the cell planes has no re-seat point, so no beta rung is
+    /// ever taken: no `beta` entry, every counter 0, and the kept rows
+    /// still report their level-n angle.
+    #[test]
+    fn a_wall_on_the_cell_planes_takes_no_beta_rung() {
+        for (name, case, spec) in [
+            ("cube", castellated_cube_case(), cube_layers(0.02)),
+            ("gap", castellated_gap_case(), gap_layers(0.0)),
+        ] {
+            let (surf, mesh) = case;
+            let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect(name);
+            check_beta(&out);
+            for e in &out.report.ladder {
+                assert!(e.outcome != Outcome::Beta, "{e:?}");
+                assert_eq!(e.beta_rung, 0, "{e:?}");
+                assert_eq!(e.beta_points, 0, "{e:?}");
+            }
+            for p in &out.report.patches {
+                assert_eq!(p.beta_rungs, 0, "{}", p.name);
+                if p.dropped.is_none() && p.n_layers > 0 {
+                    eprintln!(
+                        "beta {name} patch \"{}\": level_n_non_orth_max_deg {:?}",
+                        p.name, p.level_n_non_orth_max_deg
+                    );
+                }
+            }
+        }
+    }
+
+    /// The snapped cube has no wall face past 45 degrees, so `J` is empty
+    /// and the outer ladder gives up as before: no `beta` entry anywhere,
+    /// `retreats` 4, and the row reports null.
+    #[test]
+    fn the_snapped_cube_takes_no_beta_rung() {
+        let (surf, mesh) = snapped_cube_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        check_beta(&out);
+        for e in &out.report.ladder {
+            assert!(e.outcome != Outcome::Beta, "{e:?}");
+        }
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the report carries a row for the cube");
+        assert_eq!(row.beta_rungs, 0);
+        assert_eq!(row.n_layers, 0);
+        assert_eq!(row.level_n_non_orth_max_deg, None);
+        assert_eq!(row.drop_cause, Some(DropCause::OuterGate));
+        assert_eq!(out.report.retreats, 4);
+        eprintln!(
+            "beta snapped cube: retreats {}, beta_rungs {}, level_n_non_orth_max_deg {:?}",
+            out.report.retreats, row.beta_rungs, row.level_n_non_orth_max_deg
+        );
+    }
+
+    /// The snapped floor box's pull is what fails the gate, so the FIRST
+    /// measurement is a beta rung on the inner ladder - the volume gate
+    /// names cells carrying re-seated points - and only then do the
+    /// halvings follow.
+    #[test]
+    fn the_floor_box_takes_the_pull_back_before_the_thickness() {
+        let (surf, mesh) = snapped_floor_box_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        check_beta(&out);
+        let first = out.report.ladder.first().expect("a trace");
+        assert!(first.ladder == Ladder::Inner, "{first:?}");
+        assert_eq!(first.round, 0, "{first:?}");
+        assert_eq!(first.rung, 0, "{first:?}");
+        assert_eq!(first.beta_rung, 0, "{first:?}");
+        assert!(first.outcome == Outcome::Beta, "{first:?}");
+        assert!(first.beta_points > 0, "{first:?}");
+        assert!(
+            first.gates.iter().any(|(g, _)| *g == Gate::Volume),
+            "the first entry does not name G1: {first:?}"
+        );
+        for e in &out.report.ladder {
+            eprintln!("beta floor ladder {e:?}");
+        }
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the report carries a row for the cube");
+        eprintln!(
+            "beta floor cube: n_layers {} full_area_frac {} drop_cause {:?} dropped {:?} n_reseated_points {} beta_rungs {} level_n_non_orth_max_deg {:?} max_non_orth_deg {}",
+            row.n_layers,
+            row.full_area_frac,
+            row.drop_cause,
+            row.dropped,
+            row.n_reseated_points,
+            row.beta_rungs,
+            row.level_n_non_orth_max_deg,
+            out.quality.max_non_orth_deg
+        );
+    }
+
+    /// The snapped sphere with eight layers lowers its pull on the OUTER
+    /// ladder: a failing extruded mesh's cells carry re-seated points, so
+    /// a `beta` entry names the outer ladder before any cap is halved.
+    #[test]
+    fn the_sphere_with_eight_layers_lowers_its_pull_on_the_outer_ladder() {
+        let (surf, mesh) = snapped_sphere_case();
+        let spec = LayerSpec {
+            patches: vec!["sphere".to_string()],
+            n: 8,
+            first_thickness: 0.006,
+            growth: 1.0,
+            ..LayerSpec::default()
+        };
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        check_beta(&out);
+        assert!(
+            out.report
+                .ladder
+                .iter()
+                .any(|e| e.ladder == Ladder::Outer && e.outcome == Outcome::Beta),
+            "no outer beta rung: {:?}",
+            out.report.ladder
+        );
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "sphere")
+            .expect("the report carries a row for the sphere");
+        assert!(row.beta_rungs >= 1, "{row:?}");
+        assert_eq!(row.n_reseated_points, 888);
+        for e in &out.report.ladder {
+            eprintln!("beta sphere8 ladder {e:?}");
+        }
+        eprintln!(
+            "beta sphere8: n_layers {} full_area_frac {} drop_cause {:?} dropped {:?} n_reseated_points {} beta_rungs {} level_n_non_orth_max_deg {:?} max_non_orth_deg {}",
+            row.n_layers,
+            row.full_area_frac,
+            row.drop_cause,
+            row.dropped,
+            row.n_reseated_points,
+            row.beta_rungs,
+            row.level_n_non_orth_max_deg,
+            out.quality.max_non_orth_deg
+        );
+    }
+
+    /// The snapped sphere that KEEPS its three layers reports the worst G4
+    /// angle over its level-n faces - above the 45-degree re-seat trigger,
+    /// never above the mesh's worst non-orthogonality.
+    #[test]
+    fn the_kept_sphere_reports_its_level_n_angle() {
+        let (surf, mesh) = snapped_sphere_case();
+        let out = add_layers(&mesh, &surf, &sphere_layers(0.05), &thresholds())
+            .expect("layers on the snapped sphere");
+        check_beta(&out);
+        for e in &out.report.ladder {
+            assert!(e.outcome != Outcome::Beta, "{e:?}");
+        }
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "sphere")
+            .expect("the report carries a row for the sphere");
+        assert_eq!(row.n_layers, 3);
+        assert_eq!(row.beta_rungs, 0);
+        let v = row
+            .level_n_non_orth_max_deg
+            .expect("the kept sphere reports its level-n angle");
+        assert!(45.0 < v, "{v}");
+        assert!(v <= 66.05797649243732 + 1e-9, "{v}");
+        eprintln!("beta sphere level_n_non_orth_max_deg {v:.17}");
+        eprintln!("beta sphere max_non_orth_deg {:.17}", out.quality.max_non_orth_deg);
     }
 }
