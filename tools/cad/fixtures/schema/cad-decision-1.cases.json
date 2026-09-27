@@ -18,7 +18,19 @@
         "sobol_index": null,
         "ei": null,
         "reason": "no pool point is predicted feasible",
-        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333"
+        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333",
+        "requirements_lock": "4444444444444444444444444444444444444444444444444444444444444444",
+        "base_stable_eval_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "resolved": [
+          "SYS-VALID"
+        ],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [
+          "REQ-003",
+          "SYS-MACH"
+        ],
+        "not_reevaluated": []
       }
     },
     {
@@ -37,7 +49,14 @@
         "sobol_index": 17,
         "ei": 0.0021,
         "reason": "constrained EI maximum over the pool",
-        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333"
+        "gates_lock": "3333333333333333333333333333333333333333333333333333333333333333",
+        "requirements_lock": "4444444444444444444444444444444444444444444444444444444444444444",
+        "base_stable_eval_key": null,
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
       }
     }
   ],
@@ -84,6 +103,49 @@
       "value": "",
       "errors": [
         "cad-decision/1: reason: shorter than 1"
+      ]
+    },
+    {
+      "name": "requirements_lock_missing",
+      "path": "requirements_lock",
+      "op": "delete",
+      "errors": [
+        "cad-decision/1: requirements_lock: required field missing"
+      ]
+    },
+    {
+      "name": "base_key_short",
+      "path": "base_stable_eval_key",
+      "op": "set",
+      "value": "abc",
+      "errors": [
+        "cad-decision/1: base_stable_eval_key: does not match ^[0-9a-f]{64}$"
+      ]
+    },
+    {
+      "name": "resolved_bad_id",
+      "path": "resolved[0]",
+      "op": "set",
+      "value": "REQ-1",
+      "errors": [
+        "cad-decision/1: resolved[0]: does not match ^(REQ-[0-9]{3}|SYS-[A-Z]+)$"
+      ]
+    },
+    {
+      "name": "not_reevaluated_string",
+      "path": "not_reevaluated",
+      "op": "set",
+      "value": "SYS-MACH",
+      "errors": [
+        "cad-decision/1: not_reevaluated: expected array, got string"
+      ]
+    },
+    {
+      "name": "new_fail_missing",
+      "path": "new_fail",
+      "op": "delete",
+      "errors": [
+        "cad-decision/1: new_fail: required field missing"
       ]
     }
   ]

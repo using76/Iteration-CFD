@@ -1,0 +1,4 @@
+# meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted.
+# sha256 over the BYTES of gates.json (the value solve.py records as gates.sha256), in sha256sum format
+# locked 2026-09-27 by CAD-16 before any tuning (docs/16 §E.6-§E.7); relocking is the user's decision - never rewrite this file to make a number pass
+8c59f024d1241e16ce959c09487a79f229caa0ec805ab573794dd328e3cb103c  gates.json
