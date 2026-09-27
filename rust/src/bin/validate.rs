@@ -3244,7 +3244,7 @@ fn run(c: &mut Checks) -> Result<()> {
     check_cantilever(c, &gpu)?;
     c.leave_gate();
 
-    println!("\n=== Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (three meshes each, SPEC-LIT 95.11) ===");
+    println!("\n=== Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (three meshes each, LE10 four with its study on the finest three, SPEC-LIT 95.11) ===");
     c.enter_gate("Gate 95-G boundary-point fit (Lame ring)");
     check_boundary_point_fit(c, &gpu)?;
     c.leave_gate();
@@ -22634,6 +22634,18 @@ const RESTATED_95G: &str = "95-G reference: ESRD (2018)'s RESTATEMENT of NAFEMS 
 const NO_STUDY_95G: &str =
     "three meshes were run and their point values could not form a study; the reason is printed above";
 
+/// SPEC-LIT 94.3's declaration for LE10, whose study takes its finest three.
+const NO_STUDY_95G_LE10: &str = "four meshes were run and the point values of the finest three could not \
+                                 form a study; the reason is printed above";
+
+/// Gate 95-G LE10's meshes `(n_t, n_phi, n_z)`, coarsest first, each the
+/// one before it halved in every direction (SPEC-LIT 95.11). The fourth
+/// is the user's decision of 2026-09-25; the bar is read on the finest.
+const LE10_MESHES: [(usize, usize, usize); 4] = [(6, 12, 4), (12, 24, 8), (24, 48, 16), (48, 96, 32)];
+
+/// How many of `LE10_MESHES`' finest meshes SPEC-LIT 94's study takes.
+const LE10_STUDY_LEVELS: usize = 3;
+
 /// Which outer loop a Gate 95-G mesh runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Loop95g {
@@ -22692,8 +22704,8 @@ impl Point95g {
 }
 
 /// SPEC-LIT 94's study of a Gate 95-G point value over its three meshes
-/// (`levels` coarse first), or 94.3's declaration when they cannot form one.
-fn study_95g(c: &mut Checks, what: &str, mut levels: Vec<vv::Level>) -> Uncertainty {
+/// (`levels` coarse first), or 94.3's `declaration` when they cannot form one.
+fn study_95g(c: &mut Checks, what: &str, mut levels: Vec<vv::Level>, declaration: &'static str) -> Uncertainty {
     // The study reads the FINEST level first.
     levels.reverse();
     match vv::grid_study(&levels) {
@@ -22703,7 +22715,7 @@ fn study_95g(c: &mut Checks, what: &str, mut levels: Vec<vv::Level>) -> Uncertai
         }
         Err(e) => {
             c.note(&format!("  {what}: no study - {e}"));
-            Uncertainty::SingleMesh(NO_STUDY_95G)
+            Uncertainty::SingleMesh(declaration)
         }
     }
 }
@@ -22830,7 +22842,7 @@ fn check_boundary_point_fit(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     c.check("Gate 95-G ring: sigma_tt at the bore point, finest mesh (nr = 48), rel", errs[2], 0.01);
     c.check("Gate 95-G ring: order of the bore-point error, 0.9 - p", 0.9 - order, 0.0);
     c.note(&format!("  closed form (S95.28) {target:.6e} Pa; observed order of the point error p = {order:.3}"));
-    let unc = study_95g(c, "bore-point sigma_tt", levels);
+    let unc = study_95g(c, "bore-point sigma_tt", levels, NO_STUDY_95G);
     let ok = conv.iter().all(|&v| v) && errs[2] <= 0.01 && 0.9 - order <= 0.0;
     if !ok {
         c.report(GateReport {
@@ -22892,7 +22904,7 @@ fn check_nafems_le1(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         errs[2],
         0.03,
     );
-    let unc = study_95g(c, "LE1 sigma_yy(D)", levels);
+    let unc = study_95g(c, "LE1 sigma_yy(D)", levels, NO_STUDY_95G);
     if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
         c.report(GateReport {
             verdict: Verdict::Misses,
@@ -22914,23 +22926,26 @@ fn check_nafems_le1(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 }
 
 /// Gate 95-G, NAFEMS LE10 as restated (SPEC-LIT 95.11): the thick plate,
-/// its line constraint a mid-plane band, sigma_yy at D - run by the
-/// segregated loop and by the block-coupled one, each held to the bar.
+/// its line constraint a mid-plane band, sigma_yy at D on the four
+/// `LE10_MESHES` - the bar on the finest, SPEC-LIT 94's study on the
+/// `LE10_STUDY_LEVELS` finest - run by the segregated loop and by the
+/// block-coupled one, each held to the bar.
 fn check_nafems_le10(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::solid::restated;
     c.note(RESTATED_95G);
     let target = NAFEMS_LE10_SYY_D;
+    let fine = LE10_MESHES.len() - 1;
+    let nz_fine = LE10_MESHES[fine].2;
     let mut detail: Vec<String> = Vec::new();
     let mut short: Vec<String> = Vec::new();
     let mut first_unc: Option<Uncertainty> = None;
     for mode in [Loop95g::Segregated, Loop95g::BlockCoupled] {
         let name = mode.name();
         let mut levels: Vec<vv::Level> = Vec::new();
-        let mut errs = [Scalar::NAN; 3];
-        let mut fits = [Scalar::NAN; 3];
-        let mut conv = [false; 3];
-        let meshes = [(6usize, 12usize, 4usize), (12, 24, 8), (24, 48, 16)];
-        for (idx, (n_t, n_phi, n_z)) in meshes.into_iter().enumerate() {
+        let mut errs = [Scalar::NAN; LE10_MESHES.len()];
+        let mut fits = [Scalar::NAN; LE10_MESHES.len()];
+        let mut conv = [false; LE10_MESHES.len()];
+        for (idx, (n_t, n_phi, n_z)) in LE10_MESHES.into_iter().enumerate() {
             let p = match restated::le10_plate(n_t, n_phi, n_z) {
                 Ok(b) => {
                     if idx == 0 && mode == Loop95g::Segregated {
@@ -22955,17 +22970,28 @@ fn check_nafems_le10(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             detail.push(line);
         }
         c.check(
-            &format!("Gate 95-G LE10 {name}: sigma_yy(D) on the finest mesh (n_z = 16), rel to the restated -5.38 MPa"),
-            errs[2],
+            &format!(
+                "Gate 95-G LE10 {name}: sigma_yy(D) on the finest mesh (n_z = {nz_fine}), rel to the restated -5.38 MPa"
+            ),
+            errs[fine],
             0.03,
         );
-        let unc = study_95g(c, &format!("LE10 {name} sigma_yy(D)"), levels);
-        if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
+        let studied = &LE10_MESHES[LE10_MESHES.len() - LE10_STUDY_LEVELS..];
+        let names: Vec<String> = studied.iter().map(|m| format!("n_z = {}", m.2)).collect();
+        c.note(&format!(
+            "  LE10 {name}: the study takes {}; n_z = {} is run and printed",
+            names.join(", "),
+            LE10_MESHES[0].2
+        ));
+        let tail = levels.split_off(levels.len() - LE10_STUDY_LEVELS);
+        let unc = study_95g(c, &format!("LE10 {name} sigma_yy(D), finest three"), tail, NO_STUDY_95G_LE10);
+        if !(conv.iter().all(|&v| v) && errs[fine] <= 0.03) {
             short.push(format!(
-                "{name}: converged {}/3, finest sigma_yy(D) {:.4e} Pa, {:+.2} %",
+                "{name}: converged {}/{}, finest sigma_yy(D) {:.4e} Pa, {:+.2} %",
                 conv.iter().filter(|&&v| v).count(),
-                fits[2],
-                100.0 * (fits[2] - target) / target.abs()
+                LE10_MESHES.len(),
+                fits[fine],
+                100.0 * (fits[fine] - target) / target.abs()
             ));
             if first_unc.is_none() {
                 first_unc = Some(unc);
@@ -23028,7 +23054,7 @@ fn check_nafems_le11(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         errs[2],
         0.03,
     );
-    let unc = study_95g(c, "LE11 sigma_zz(A)", levels);
+    let unc = study_95g(c, "LE11 sigma_zz(A)", levels, NO_STUDY_95G);
     if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
         c.report(GateReport {
             verdict: Verdict::Misses,
@@ -23047,4 +23073,34 @@ fn check_nafems_le11(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod le10_refine {
+    use super::*;
+
+    /// SPEC-LIT 95.11: LE10's four meshes are one refinement by two in every
+    /// direction apart, the first three are N1's, every n_z is even (the band
+    /// is the two layers either side of the mid-plane), the study takes the
+    /// finest three, and the finest builds with the band where it should be.
+    #[test]
+    fn le10_runs_four_meshes_each_halved_and_studies_the_finest_three() {
+        assert_eq!(LE10_MESHES.len(), 4, "four LE10 meshes");
+        assert_eq!(LE10_STUDY_LEVELS, 3, "the study takes three");
+        assert_eq!(&LE10_MESHES[..3], &[(6, 12, 4), (12, 24, 8), (24, 48, 16)], "the first three are N1's");
+        for w in LE10_MESHES.windows(2) {
+            assert_eq!((w[1].0, w[1].1, w[1].2), (2 * w[0].0, 2 * w[0].1, 2 * w[0].2), "halved: {w:?}");
+        }
+        assert!(LE10_MESHES.iter().all(|m| m.2 % 2 == 0), "every n_z even");
+        let (n_t, n_phi, n_z) = LE10_MESHES[LE10_MESHES.len() - 1];
+        let b = ofgpu::solid::restated::le10_plate(n_t, n_phi, n_z).expect("the finest LE10 mesh builds");
+        let r = b.mesh.check();
+        println!("finest LE10: {} cells, min volume {:e}", b.mesh.n_cells, r.min_volume);
+        assert_eq!(b.mesh.n_cells, n_t * n_phi * n_z);
+        assert_eq!(b.mesh.n_cells, 147_456);
+        assert!(r.min_volume > 0.0, "positive volumes");
+        let band = b.mesh.patches.iter().find(|p| p.name == "outer_mid").expect("the band patch");
+        assert_eq!(band.size, 2 * n_phi, "the band is two layers of outer faces");
+        assert_eq!(b.stencil.len(), 8, "the 2 x 2 x 2 corner stencil");
+    }
 }

@@ -29091,7 +29091,8 @@ Benchmarks Guide's LE11 page
 states the same test with the axis along `z` ("sigma_zz = -105 MPa at point
 A"; "uz = 0 on the plane z = 0 and the face HIH'I'"), and this section uses
 the `z` frame throughout. The bar is docs/09's: within `3 %` of the target
-on the finest of three meshes, with §94's study of the point value beside it.
+on the finest mesh - of three, or of LE10's four - with §94's study of the
+point value over the three finest beside it.
 
 **LE1, the elliptic membrane, in plane stress.** A quarter of the region
 between the ellipses `(x/2)^2 + y^2 = 1` (AD) and
@@ -29148,9 +29149,10 @@ its effect is part of the discretisation error the study measures. ESRD's
 note is the other choice, recorded and not taken: "Since constraints along a
 line are incompatible with 3D-elasticity, the StressCheck results were
 obtained by fixing the z-displacement of the face BCB'C'" - a choice worth
-2.4-2.6 % of the answer (ESRD's -5.24 and -5.25 MPa). Three meshes,
-`(n_t, n_phi, n_z) = (6, 12, 4), (12, 24, 8), (24, 48, 16)`, the map
-(S95.25) in plan.
+2.4-2.6 % of the answer (ESRD's -5.24 and -5.25 MPa). Four meshes,
+`(n_t, n_phi, n_z) = (6, 12, 4), (12, 24, 8), (24, 48, 16), (48, 96, 32)`,
+the map (S95.25) in plan; §94's study takes the finest three and the bar is
+read on the finest (the fourth mesh: the end of this section).
 
 **LE11, the solid cylinder/taper/sphere under a temperature field.**
 Axisymmetric about `z` and modelled as the quarter `x >= 0`, `y >= 0`. In the
@@ -29250,10 +29252,11 @@ nearest cell's value and both relative errors; per body, its slenderness
 (`Verdict::Misses`, `How::Live`) whose `against` names the restatement and
 not the primary, whose headline carries the finest point value and its
 error, and whose uncertainty is §94's study of the point value over the
-three meshes - or, when three values cannot form one, §94.3's single-mesh
-declaration saying so. The three targets are answer keys `nafems-le1`,
-`nafems-le10` and `nafems-le11` of `reference/PROVENANCE.md`, `literal` rows
-that name the restatement as their source.
+three meshes (LE10: its three finest) - or, when three values cannot form
+one, §94.3's single-mesh declaration saying so. The three targets are
+answer keys `nafems-le1`, `nafems-le10` and `nafems-le11` of
+`reference/PROVENANCE.md`, `literal` rows that name the restatement as their
+source.
 
 **Gate 95-G, measured** on 2026-09-25 on the machine of record (one RTX 5070 Ti, f64; another
 workflow was compiling on the CPU), with the meshes and controls above and nothing tuned:
@@ -29285,6 +29288,57 @@ constraint is part of what the refinement changes. A finer LE10 level, a wider s
 graded mesh at D is a decision for another unit, not a retry of this one. LE1 and LE11 hold
 against the RESTATEMENT; that is a statement about ESRD's restated numbers, not about the NAFEMS
 primary, which was not read.
+
+**LE10's fourth mesh, the user's decision of 2026-09-25.** The measurement
+above left LE10 short of its bar with both loops converged, and the user
+decided to add a finer mesh at D and measure again, the gate's definition
+and its `3 %` bar unchanged. The mesh added is `(48, 96, 32)`, 147,456
+cells: the third mesh halved in every direction, not one graded toward D.
+A graded mesh was the other choice, recorded and not taken: §94's study
+assumes geometrically similar levels, which a grading toward D does not
+keep unless it is the same grading at every level, and grading `z` toward
+the loaded face would coarsen the mid-plane, where the band that stands
+for the line constraint lives. Halving closes the band at the rate of
+the rest of the mesh, to `2 (0.6)/32 = 0.0375 m`, and shrinks D's
+`2 x 2 x 2` stencil (S95.27) by two like every other cell. The study takes
+the three finest meshes, `n_z = 8, 16, 32`, finest first, as Gate 105-C's
+does since §105.13, and the coarsest, `n_z = 4`, is run and printed
+beside them. Nothing else moved: the two loops and their controls, the
+fit (S95.27), the stencil, the band's definition, the restated target and
+the `3 %` bar. LE10's scope grows from 8 rows to 10, one converged row per
+loop at `n_z = 32`, and its two bar rows name `n_z = 32`; `ofgpu-validate`
+gains one host test that pins the four meshes. The measurement follows.
+
+**Gate 95-G LE10, measured on four meshes** on 2026-09-27 on the machine of record (one RTX
+5070 Ti, f64, the card not shared), with the meshes and controls above and nothing tuned:
+
+```text
+                       n_z = 4       n_z = 8       n_z = 16      n_z = 32    finest    bar
+  LE10 segregated    -3.988007e6   -4.784563e6   -5.166283e6   -5.267040e6    2.10 %    3 %    holds
+  LE10 block-coupled -3.838860e6   -4.804854e6   -5.200692e6   -5.299294e6    1.50 %    3 %    holds
+```
+
+Both loops converged on every mesh: 68, 72, 85 and 92 outer iterations segregated (50,859
+linear at `n_z = 32`), 46, 56, 56 and 50 block-coupled (15,922 linear). The first three columns
+are digit-identical to the measurement above. §94's studies over the finest three: segregated
+monotone, `p = 1.922`, `phi_ext = -5.303173e6`, `U_fine = 4.517e4` (Fs 1.25, power series);
+block-coupled monotone, `p = 2.005`, `phi_ext = -5.332400e6`, `U_fine = 9.927e4` (Fs 3, second
+order). The nearest cell's own value is 7.7 % (segregated) and 7.2 % (block-coupled) off at
+`n_z = 32`, where the fit is 2.1 % and 1.5 %.
+
+What this says, and what it does not. LE10 now holds its bar on both loops and its scope
+registers nothing, so the ring's order row is the one shortfall of Gate 95-G left. Over the
+finest three the observed order is near two (1.92, 2.01), where over the coarsest three it was
+1.06 and 1.29: the coarsest pair falls at a lower rate than the finer ones, and the earlier
+extrapolations past the target (-5.52 and -5.48 MPa) leaned on it. Over the finest three both
+extrapolations stop short of the restated -5.38 MPa, by 1.43 % (segregated) and 0.89 %
+(block-coupled); the block-coupled band `phi_fine +- U_fine` contains the restated value and the
+segregated one does not. That remaining gap is smaller than the 2.4-2.6 % ESRD's own face
+constraint is worth, and the band that stands for the line constraint is still this section's
+modelling choice, not the restated condition; nothing measured here separates the two.
+The full run: `ofgpu-validate` 1021/1026, its five failing rows Gate 95-A's four at 5:1 and
+10:1 and the ring's order row; every row outside LE10's scope is digit-identical to the run of
+2026-09-26 (§105.14), and the registry's gates with the verdict of a shortfall fall from 6 to 5.
 
 
 ## 96. What a thermo-elastic case says, the refusal list, and the pair tests
@@ -32995,7 +33049,7 @@ schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
-tests and **13** binary tests. So the second invocation of the house command reports
+tests and **14** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
 race above fires), and `-- --ignored` under the feature runs exactly the tests that do
@@ -33005,7 +33059,8 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three.
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
+105-D's `ofgpu-lowmach` test).
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
