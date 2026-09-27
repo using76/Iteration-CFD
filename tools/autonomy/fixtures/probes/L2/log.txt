@@ -1,0 +1,45 @@
+ofgpu-automesher (SPEC-LIT §92, hex-dominant path)
+[stl] <survey>\am\..\box_sphere.stl: 9024 triangle(s), 1 patch(es)
+surface: 9024 triangle(s), 4514 point(s)
+  bbox lo (4.000, 4.000, 4.000), hi (6.000, 6.000, 6.000)
+  sphere: 9024 triangles, 12.555 m^2
+plan: base grid 10 x 10 x 10 cells (base_size 1.000 m), max level 3, finest cell 0.12500 m
+=== stage 1/5  octree ===
+automesher: 14832 cells, 46716 internal faces, 600 boundary faces, 17767 points
+  volume: min 0.001953 (cell 1823); regions: 1 (14832 cells)
+  closure: max 0.000e0 (cell 0)
+  non-orthogonality: max 25.239 deg, mean 3.631 deg, 0 face(s) past the report mark
+  thickness: min tau 3.000000 (cell 541); conditioning: max cond 1.000 (cell 0)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+--- octree: 1.8 s
+=== stage 2/5  castellate ===
+automesher: 12880 cells, 40128 internal faces, 1848 boundary faces, 17767 points
+  volume: min 0.001953 (cell 1823); regions: 1 (12880 cells)
+  closure: max 0.000e0 (cell 0)
+  non-orthogonality: max 25.239 deg, mean 4.046 deg, 0 face(s) past the report mark
+  thickness: min tau 3.000000 (cell 541); conditioning: max cond 1.000 (cell 0)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+--- castellate: 0.1 s
+=== stage 3/5  snap ===
+snap: 1250 boundary points, 7 iteration(s), converged
+snap: max step 6.657e-4, residual max 1.061e-3, p99 9.928e-4
+snap: 0 point(s) scaled back, 0 pinned, 0 iterate(s) abandoned
+snap: 0 feature edge(s), 0 corner(s); last iterate 0 point(s) to an edge, 0 to a corner
+--- snap: 1.0 s
+=== stage 4/5  split ===
+split: skipped - castellation.bodies is empty
+--- split: 0.0 s
+=== stage 5/5  layers ===
+layers: 0 cell(s) behind 1248 face(s), 0 new point(s), 4 retreat(s)
+layers: 0 internal side face(s), 0 boundary side face(s), 0 from a split edge
+layers: patch "sphere": the gate still failed after 4 retreat(s) on the layer cells themselves - the extruded mesh could not be brought inside the gate: layers are supported on a wall that castellates onto the cell planes, and a snapped wall carries its own non-orthogonality into the level-n face (SPEC-LIT 92.13)
+--- layers: 1.0 s
+automesher: 12880 cells, 40128 internal faces, 1848 boundary faces, 17767 points
+  volume: min 0.000472 (cell 7675); regions: 1 (12880 cells)
+  closure: max 3.696e-15 (cell 1803)
+  non-orthogonality: max 30.118 deg, mean 5.135 deg, 0 face(s) past the report mark
+  thickness: min tau 0.450895 (cell 5871); conditioning: max cond 6.298 (cell 7223)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+ofgpu-automesher: wrote <survey>\am\case_L2\constant\polyMesh (12880 cells)
+ofgpu-automesher: wrote <survey>\am\case_L2\L2_summary.json
+ofgpu-automesher: total 3.9 s

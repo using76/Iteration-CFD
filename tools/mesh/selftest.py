@@ -23,6 +23,13 @@ Fluent mesh (-fluent) and both must be written. With the building declared as
 a region, the tool runs three more times (dry-run, full, from-checkpoint)
 plus one with `interface_names: false`, and four refusals are checked.
 
+Then three T1 checks: variant_from_checkpoint.py against a case whose
+out_dir is not <case dir>/mesh (copy + refusal), run.log through
+STEP_MESH_LOG (banner first, refusal last, no stale log), and the box-floor
+refusal (fluid.largest / fluid.tag) with its non-refusal twin.
+Last, tools/autonomy/selftest.py (the autonomous-setup schemas and gate lock) must
+pass.
+
     python tools/mesh/selftest.py [--keep]
 
 The scratch directory is printed; --keep preserves it for inspection instead
@@ -31,6 +38,7 @@ of deleting it after a pass.
 from __future__ import annotations
 
 import argparse
+import filecmp
 import json
 import os
 import re
@@ -44,6 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 STEP_MESH = os.path.join(HERE, 'step_mesh.py')
 CONVERTER = os.path.join(REPO, 'rust', 'target', 'release', 'ofgpu-convert-mesh.exe')
+VARIANT = os.path.join(HERE, 'diag', 'variant_from_checkpoint.py')
 
 sys.path.insert(0, HERE)
 from mesh_identity import mesh_id  # noqa: E402
@@ -71,7 +80,7 @@ def build_step(step_path):
         gmsh.finalize()
 
 
-def write_config(cfg_path, step_path, out_dir):
+def write_config(cfg_path, step_path, out_dir, **overrides):
     cfg = {
         'step': step_path,
         'scale': 1.0,
@@ -92,6 +101,7 @@ def write_config(cfg_path, step_path, out_dir):
                  'sliver_edge_m': 0.6, 'sliver_vol_m3': 0.2, 'thin_push_m': 0.0},
         'classification': {'wall_prefix': 'wall_', 'big_roof_is_ground_m2': 2000.0},
     }
+    cfg.update(overrides)
     with open(cfg_path, 'w', encoding='utf-8') as f:
         json.dump(cfg, f, indent=1)
     return cfg
@@ -114,10 +124,11 @@ def write_regions_config(cfg_path, step_path, out_dir, interface_names=True, **o
     return cfg
 
 
-def run(cfg_path, out, extra=()):
+def run(cfg_path, out, extra=(), env=None):
     t = time.time()
     p = subprocess.run([sys.executable, STEP_MESH, cfg_path, *extra],
-                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+                       capture_output=True, text=True, encoding='utf-8', errors='replace',
+                       env=env)
     took = time.time() - t
     if p.returncode != 0:
         print('--- step_mesh.py stdout ----------------------------------------')
@@ -277,6 +288,158 @@ def check_region_refusals(step_path, out_dir, work):
         print('  [refusal: %s] exit 1, stderr names "%s"' % (label, needle))
 
 
+def check_variant_tool(work, cfg_path, out_dir):
+    """variant_from_checkpoint.py copies the checkpoint from the case's out_dir/work - the
+    selftest config lives at <scratch>/selftest.json with out_dir <scratch>/out, not
+    <case dir>/mesh - and refuses a missing checkpoint, out_dir or name before anything
+    is written; the variant then meshes with --from-checkpoint."""
+    p = subprocess.run([sys.executable, VARIANT, cfg_path, 'v1', 'sizes.pool=3.5'],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+    assert p.returncode == 0, 'variant_from_checkpoint.py exited %d: %s' % (
+        p.returncode, p.stderr[-300:])
+    v1 = os.path.join(work, 'v1')
+    for ext in ('.brep', '.json'):
+        src = os.path.join(out_dir, 'work', 'selftest_pools' + ext)
+        dst = os.path.join(v1, 'mesh', 'work', 'selftest_pools' + ext)
+        assert os.path.isfile(dst), 'the variant tool copied no %s' % ext
+        assert filecmp.cmp(src, dst, shallow=False), 'the copied %s differs from the source' % ext
+    vj = os.path.join(v1, 'v1.json')
+    with open(vj, encoding='utf-8') as f:
+        vd = json.load(f)
+    assert vd['out_dir'] == os.path.join(v1, 'mesh').replace('\\', '/'), \
+        "the variant config's out_dir is %r" % vd['out_dir']
+    assert vd['sizes']['pool'] == 3.5, \
+        'the override did not land: sizes.pool = %r' % vd['sizes'].get('pool')
+    assert 'checkpoint copied from' in p.stdout, p.stdout[-500:]
+    print('  [ok] variant_from_checkpoint.py: checkpoint taken from %s, variant meshed'
+          % os.path.join(out_dir, 'work'))
+    with open(cfg_path, encoding='utf-8') as f:
+        d = json.load(f)
+    d['out_dir'] = os.path.join(work, 'out_nock')
+    nock = os.path.join(work, 'selftest_nock.json')
+    with open(nock, 'w', encoding='utf-8') as f:
+        json.dump(d, f, indent=1)
+    p = subprocess.run([sys.executable, VARIANT, nock, 'v2'],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+    assert p.returncode == 1, 'a missing checkpoint: exit %d, expected 1' % p.returncode
+    assert 'the checkpoint is missing' in p.stderr, p.stderr[-300:]
+    assert not os.path.exists(os.path.join(work, 'v2')), 'the refusal wrote <case dir>/v2'
+    print('  [refusal: missing checkpoint] exit 1, stderr names "the checkpoint is missing"')
+    del d['out_dir']
+    noout = os.path.join(work, 'selftest_noout.json')
+    with open(noout, 'w', encoding='utf-8') as f:
+        json.dump(d, f, indent=1)
+    p = subprocess.run([sys.executable, VARIANT, noout, 'v3'],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+    assert p.returncode == 1 and '"out_dir"' in p.stderr, p.stderr[-300:]
+    del d['name']
+    d['out_dir'] = out_dir
+    noname = os.path.join(work, 'selftest_noname.json')
+    with open(noname, 'w', encoding='utf-8') as f:
+        json.dump(d, f, indent=1)
+    p = subprocess.run([sys.executable, VARIANT, noname, 'v4'],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+    assert p.returncode == 1 and '"name"' in p.stderr, p.stderr[-300:]
+    p = run(vj, os.path.join(v1, 'mesh'), ('--from-checkpoint',))
+    assert p.returncode == 0, '--from-checkpoint on the variant exited %d' % p.returncode
+    assert os.path.isfile(os.path.join(v1, 'mesh', 'selftest.msh')), \
+        'the variant run wrote no selftest.msh'
+
+
+def check_tee(work, step_path):
+    """run.log through ONE handle: with STEP_MESH_LOG set, the log keeps stdout and stderr in
+    print order - the import banner first, the last refusal last - and the tee is installed
+    before parse_args and load_config, so a config refusal lands in the log and a stale log
+    from the previous run never survives."""
+    out_tee = os.path.join(work, 'out_tee')
+    log_path = os.path.join(out_tee, 'work', 'run.log')
+    env = dict(os.environ, STEP_MESH_LOG=log_path)
+    cases = (
+        ('a healthy dry-run', {}, 0, 'z_g = 0.0', None, True),
+        ('a missing STEP', {'step': os.path.join(work, 'missing.step')}, 1,
+         'step_mesh: the STEP file does not exist', None, True),
+        # a config refusal dies before the tee has anything to log but the refusal itself:
+        # the log must hold it alone, with no stale line from the run before
+        ('a bad fluid tag', {'fluid': {'tag': 'x'}}, 1,
+         'config.fluid.tag: expected an integer solid tag',
+         'the STEP file does not exist', False),
+    )
+    for label, overrides, want, needle, stale, banner in cases:
+        cfg_path = os.path.join(work, 'selftest_tee.json')
+        write_config(cfg_path, step_path, out_tee, **overrides)
+        p = subprocess.run([sys.executable, STEP_MESH, cfg_path, '--dry-run'],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', env=env)
+        assert p.returncode == want, '%s: exit %d, expected %d\n%s' % (
+            label, p.returncode, want, p.stderr[-300:])
+        with open(log_path, encoding='utf-8') as f:
+            lines = f.read().splitlines()
+        nonempty = [l for l in lines if l.strip()]
+        text = '\n'.join(lines)
+        if banner:
+            assert lines[1].startswith('========== [ 1/10] import'), \
+                '%s: the log does not open with the import banner: %r' % (label, lines[:2])
+            print('  [ok] run.log: banner first, %s last (%d lines)' % (needle, len(nonempty)))
+        else:
+            print('  [ok] run.log: refusal only, no stale log (%d lines)' % len(nonempty))
+        assert needle in nonempty[-1], '%s: the log ends with %r' % (label, nonempty[-1])
+        if stale:
+            assert stale not in text, 'a stale log line survived: %r' % stale
+        if want == 0:
+            combined = p.stdout + p.stderr
+            assert all(l in combined for l in nonempty), \
+                '%s: a log line never reached stdout or stderr' % label
+
+
+def check_floor_refusal(work, step_path):
+    """The floor check: the fluid solid's own bbox and floor reach the summary; one flat face
+    spanning the whole footprint under a trim plane above it is refused by name before the cut;
+    the same box with the trim at or below its floor is never refused."""
+    out_f = os.path.join(work, 'out_floor')
+    cases = (
+        ('a box fluid under the trim', {'fluid': {'largest': True}, 'trim': {'below_z': 1.0}},
+         1, 'step_mesh: fluid.largest: the fluid solid (tag 1) has one flat floor at z = 0'),
+        ('the same box, fluid by tag', {'fluid': {'tag': 1}, 'trim': {'below_z': 1.0}},
+         1, 'step_mesh: fluid.tag: the fluid solid (tag 1) has one flat floor at z = 0'),
+        ('the trim below the floor', {'fluid': {'largest': True}, 'trim': {'below_z': -1.0}},
+         0, ''),
+    )
+    for label, overrides, want, needle in cases:
+        cfg_path = os.path.join(work, 'selftest_floor.json')
+        write_config(cfg_path, step_path, out_f, **overrides)
+        p = subprocess.run([sys.executable, STEP_MESH, cfg_path, '--dry-run'],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace')
+        assert p.returncode == want, '%s: exit %d, expected %d\n%s' % (
+            label, p.returncode, want, p.stderr[-300:])
+        if label == 'a box fluid under the trim':
+            assert needle in p.stderr, p.stderr[-300:]
+            assert 'trim.below_z = 1 lies above it' in p.stderr, p.stderr[-300:]
+            assert '[ 2/10] cut' not in p.stdout, 'the run reached the cut stage'
+            print('  [refusal: box floor under the trim] exit 1, stderr names "fluid.largest"')
+        elif label == 'the same box, fluid by tag':
+            assert needle in p.stderr, p.stderr[-300:]
+            print('  [refusal: box floor under the trim] exit 1, stderr names "fluid.tag"')
+        else:
+            assert 'DRY RUN' in p.stdout, 'the non-refusing run did not print DRY RUN'
+    with open(os.path.join(out_f, 'work', 'dry_run_summary.json'), encoding='utf-8') as f:
+        s = json.load(f)
+    assert s['fluid_floor'] == {'z': 0.0, 'flat_faces': 1, 'full_footprint': 1}, s['fluid_floor']
+    assert len(s['fluid_bbox']) == 6, s['fluid_bbox']
+    print('  [ok] fluid_floor %s' % s['fluid_floor'])
+
+
+def check_autonomy():
+    """tools/autonomy/selftest.py - the autonomous-setup package's own gate - passes."""
+    script = os.path.join(REPO, 'tools', 'autonomy', 'selftest.py')
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    p = subprocess.run([sys.executable, script], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', env=env, timeout=1800)
+    oks = [l for l in p.stdout.splitlines() if l.startswith('[ok]')]
+    assert p.returncode == 0 and 'SELFTEST PASS' in p.stdout, \
+        'tools/autonomy/selftest.py failed (exit %d): %s' % (p.returncode, (p.stdout + p.stderr)[-2000:])
+    print('  [ok] tools/autonomy/selftest.py: %d checks' % len(oks))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Mesh a tiny STEP through step_mesh.py, in seconds.')
     ap.add_argument('--keep', action='store_true', help='keep the scratch directory')
@@ -358,6 +521,10 @@ def main(argv=None):
         check_regions('regions interface_names=false', out_n,
                       os.path.join(out_n, 'selftest.msh'), interface_names=False)
         check_region_refusals(step, out_r, work)
+        check_variant_tool(work, cfg_path, out_dir)
+        check_tee(work, step)
+        check_floor_refusal(work, step)
+        check_autonomy()
         print('  [--] %s is left for the M4 converter (a --keep run preserves it)' % msh_r)
 
         print('SELFTEST PASS')

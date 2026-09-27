@@ -1,0 +1,6 @@
+# campaign am15-fixture: 3 geometries, 6 rows, Clopper-Pearson intervals at confidence 0.95
+D/easy: n 1, MFR 0 [0, 0.975], strict 0 [0, 0.975], BLC_8 1, BLC_full 1, median cells 87166, mean attempts 1, capability-limited 0
+D/all: n 1, MFR 0 [0, 0.975], strict 0 [0, 0.975], BLC_8 1, BLC_full 1, median cells 87166, mean attempts 1, capability-limited 0
+X/probe: n 2, MFR 0.5 [0.0125791, 0.987421], strict 1 [0.158114, 1], BLC_8 0, BLC_full 0, median cells 299390, mean attempts 2.5, capability-limited 1
+X/all: n 2, MFR 0.5 [0.0125791, 0.987421], strict 1 [0.158114, 1], BLC_8 0, BLC_full 0, median cells 299390, mean attempts 2.5, capability-limited 1
+all/all: n 3, MFR 0.333333 [0.00840376, 0.905701], strict 0.666667 [0.0942993, 0.991596], BLC_8 0.333333, BLC_full 0.333333, median cells 87166, mean attempts 2, capability-limited 1

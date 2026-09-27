@@ -1,0 +1,45 @@
+ofgpu-automesher (SPEC-LIT §92, hex-dominant path)
+[stl] <survey>\am\cubep.stl: 12 triangle(s), 1 patch(es)
+surface: 12 triangle(s), 8 point(s)
+  bbox lo (1.000, 1.000, 1.000), hi (2.500, 2.500, 2.500)
+  cube: 12 triangles, 13.500 m^2
+plan: base grid 4 x 4 x 4 cells (base_size 1.000 m), max level 1, finest cell 0.50000 m
+=== stage 1/5  octree ===
+automesher: 253 cells, 711 internal faces, 177 boundary faces, 404 points
+  volume: min 0.125000 (cell 0); regions: 1 (253 cells)
+  closure: max 0.000e0 (cell 0)
+  non-orthogonality: max 25.239 deg, mean 3.834 deg, 0 face(s) past the report mark
+  thickness: min tau 3.000000 (cell 0); conditioning: max cond 1.000 (cell 0)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+--- octree: 0.0 s
+=== stage 2/5  castellate ===
+automesher: 226 cells, 603 internal faces, 231 boundary faces, 404 points
+  volume: min 0.125000 (cell 0); regions: 1 (226 cells)
+  closure: max 0.000e0 (cell 0)
+  non-orthogonality: max 25.239 deg, mean 4.520 deg, 0 face(s) past the report mark
+  thickness: min tau 3.000000 (cell 0); conditioning: max cond 1.000 (cell 0)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+--- castellate: 0.0 s
+=== stage 3/5  snap ===
+snap: 56 boundary points, 12 iteration(s), converged
+snap: max step 6.258e-4, residual max 1.186e-3, p99 1.039e-3
+snap: 0 point(s) scaled back, 0 pinned, 0 iterate(s) abandoned
+snap: 12 feature edge(s), 8 corner(s); last iterate 48 point(s) to an edge, 8 to a corner
+--- snap: 0.0 s
+=== stage 4/5  split ===
+split: skipped - castellation.bodies is empty
+--- split: 0.0 s
+=== stage 5/5  layers ===
+layers: 0 cell(s) behind 54 face(s), 0 new point(s), 0 retreat(s)
+layers: 0 internal side face(s), 0 boundary side face(s), 0 from a split edge
+layers: patch "cube": the thickness fell below min_thickness * T = 7.980e-3
+--- layers: 0.0 s
+automesher: 226 cells, 603 internal faces, 231 boundary faces, 404 points
+  volume: min 0.059883 (cell 97); regions: 1 (226 cells)
+  closure: max 6.617e-16 (cell 171)
+  non-orthogonality: max 37.996 deg, mean 9.195 deg, 0 face(s) past the report mark
+  thickness: min tau 0.745189 (cell 97); conditioning: max cond 4.632 (cell 196)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+ofgpu-automesher: wrote <survey>\am\case_cubep_defaults\constant\polyMesh (226 cells)
+ofgpu-automesher: wrote <survey>\am\case_cubep_defaults\cubep_defaults_summary.json
+ofgpu-automesher: total 0.0 s

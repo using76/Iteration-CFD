@@ -1,0 +1,327 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "fingerprints": {
+  "box.stl": {
+   "area_m2": 2.5,
+   "bbox": [
+    0.0,
+    1.0,
+    -0.25,
+    0.25,
+    -0.25,
+    0.25
+   ],
+   "commensurate": true,
+   "curvature_radius_p50_m": null,
+   "curvature_radius_p5_m": null,
+   "curvature_radius_p95_m": null,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "box",
+   "inner_thickness_m": null,
+   "lattice_base_size_m": 0.5,
+   "n_triangles": 3072,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 2.5,
+     "name": "body"
+    }
+   ],
+   "planar_frac": 1.0,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 8.0,
+   "stl_sha256": "c8eda21b9fc574525d4312e841dad52b8dfa128e472c14f86c06ea8e1e9dfc72",
+   "volume_m3": 0.25
+  },
+  "box_sphere.stl": {
+   "area_m2": 12.555159119617405,
+   "bbox": [
+    4.0,
+    6.0,
+    4.0,
+    6.0,
+    4.0,
+    6.0
+   ],
+   "commensurate": false,
+   "curvature_radius_p50_m": 0.9976466996493477,
+   "curvature_radius_p5_m": 0.9824990443076064,
+   "curvature_radius_p95_m": 0.9979625165524887,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "box_sphere",
+   "inner_thickness_m": null,
+   "lattice_base_size_m": null,
+   "n_triangles": 9024,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 12.555159119617405,
+     "name": "sphere"
+    }
+   ],
+   "planar_frac": 0.0,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 0.0,
+   "stl_sha256": "1ac7e34aea9257edc998e4c6fcdac12c005ac6200113d72116fc05a03ef0461c",
+   "volume_m3": 4.181319209986699
+  },
+  "cube.stl": {
+   "area_m2": 5.999999999999998,
+   "bbox": [
+    1.3,
+    2.3,
+    1.3,
+    2.3,
+    1.3,
+    2.3
+   ],
+   "commensurate": true,
+   "curvature_radius_p50_m": null,
+   "curvature_radius_p5_m": null,
+   "curvature_radius_p95_m": null,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "cube",
+   "inner_thickness_m": null,
+   "lattice_base_size_m": 0.9999999999999998,
+   "n_triangles": 12,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 5.999999999999998,
+     "name": "cube"
+    }
+   ],
+   "planar_frac": 1.0,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 11.999999999999998,
+   "stl_sha256": "3afbcb818897d571773e23f9ce41858bf668a9d6500e7d5ef9d11237d09c3bcc",
+   "volume_m3": 0.9999999999999991
+  },
+  "cubep.stl": {
+   "area_m2": 13.5,
+   "bbox": [
+    1.0,
+    2.5,
+    1.0,
+    2.5,
+    1.0,
+    2.5
+   ],
+   "commensurate": true,
+   "curvature_radius_p50_m": null,
+   "curvature_radius_p5_m": null,
+   "curvature_radius_p95_m": null,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "cubep",
+   "inner_thickness_m": null,
+   "lattice_base_size_m": 1.5,
+   "n_triangles": 12,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 13.5,
+     "name": "cube"
+    }
+   ],
+   "planar_frac": 1.0,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 18.0,
+   "stl_sha256": "b9248ca9d6cf44a89a2263320ede75e5c945413006998ba0b4a73049310e2255",
+   "volume_m3": 3.375
+  },
+  "rev.stl": {
+   "area_m2": 0.4878854393039955,
+   "bbox": [
+    0.0,
+    1.0,
+    -0.1,
+    0.1,
+    -0.1,
+    0.1
+   ],
+   "commensurate": false,
+   "curvature_radius_p50_m": 0.09974783324493228,
+   "curvature_radius_p5_m": 0.045439861015713866,
+   "curvature_radius_p95_m": 0.09975921672040208,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "rev",
+   "inner_thickness_m": 0.20000000001037357,
+   "lattice_base_size_m": null,
+   "n_triangles": 10112,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 0.4878854393039955,
+     "name": "body"
+    }
+   ],
+   "planar_frac": 0.0,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 0.0,
+   "stl_sha256": "405ab384ff8dfc93bba93a2768ab94c34ac9a214244262cce619c37eacf6f2f9",
+   "volume_m3": 0.020902157018672554
+  },
+  "rev2.stl": {
+   "area_m2": 0.4878854393039955,
+   "bbox": [
+    0.0,
+    1.0,
+    -0.1,
+    0.1,
+    -0.1,
+    0.1
+   ],
+   "commensurate": false,
+   "curvature_radius_p50_m": 0.09974783324493228,
+   "curvature_radius_p5_m": 0.045439861015713866,
+   "curvature_radius_p95_m": 0.09975921672040208,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "rev2",
+   "inner_thickness_m": 0.20000000001037357,
+   "lattice_base_size_m": null,
+   "n_triangles": 10112,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 0.4878854393039955,
+     "name": "body"
+    }
+   ],
+   "planar_frac": 0.0,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 0.0,
+   "stl_sha256": "5585c6833b541ba58379c5aed48e2ef4f14806b88b421f5ac52d2c6e7620e691",
+   "volume_m3": 0.020902157018672554
+  },
+  "wb.stl": {
+   "area_m2": 10.529419365009215,
+   "bbox": [
+    -1.5,
+    3.5,
+    -0.25,
+    2.0,
+    -0.25,
+    0.25
+   ],
+   "commensurate": false,
+   "curvature_radius_p50_m": 0.249019990382016,
+   "curvature_radius_p5_m": 0.24870204907146545,
+   "curvature_radius_p95_m": 4.622301782817424,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "wb",
+   "inner_thickness_m": 0.11130054971658797,
+   "lattice_base_size_m": null,
+   "n_triangles": 16628,
+   "outer_gap_m": 0.9129981192256831,
+   "patches": [
+    {
+     "area_m2": 10.529419365009215,
+     "name": "Created by Gmsh"
+    }
+   ],
+   "planar_frac": 0.03834711997537754,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 13.12100723220657,
+   "stl_sha256": "d5d8ef678b2475b1e8811e8dea752af70e84cb1165ccfa5a7ec1c77261fd81d9",
+   "volume_m3": 1.0440445967108838
+  },
+  "wing_a.stl": {
+   "area_m2": 6.288127839555913,
+   "bbox": [
+    0.0,
+    1.0,
+    -1.5,
+    1.5,
+    -0.04235619522,
+    0.0791798384
+   ],
+   "commensurate": false,
+   "curvature_radius_p50_m": 3.7585915948397908,
+   "curvature_radius_p5_m": 0.17106847545349566,
+   "curvature_radius_p95_m": 32.99653740944912,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "wing_a",
+   "inner_thickness_m": 0.12048843260930381,
+   "lattice_base_size_m": null,
+   "n_triangles": 5996,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 6.288127839555913,
+     "name": "wing"
+    }
+   ],
+   "planar_frac": 0.025998149346475367,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 7.083098768582273,
+   "stl_sha256": "6e03ce98ffb7184c1aa2d5b312b93a5090d13e5f4f74de104cd057f95f05bb74",
+   "volume_m3": 0.2452195300237562
+  },
+  "wing_b.stl": {
+   "area_m2": 4.336066039093696,
+   "bbox": [
+    0.0,
+    1.415294619,
+    -1.5,
+    1.5,
+    -0.06000519835,
+    0.06000519835
+   ],
+   "commensurate": false,
+   "curvature_radius_p50_m": 2.414754668708613,
+   "curvature_radius_p5_m": 0.09670531917907135,
+   "curvature_radius_p95_m": 6.166684218437114,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "wing_b",
+   "inner_thickness_m": 0.12001112614493635,
+   "lattice_base_size_m": null,
+   "n_triangles": 5996,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 4.336066039093696,
+     "name": "wing"
+    }
+   ],
+   "planar_frac": 0.006027116518059892,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 4.838746175463724,
+   "stl_sha256": "2ab7fd91d643077049e5a02d78a8c872f8b9b9c00369d3dafba768dc81617db8",
+   "volume_m3": 0.12740241173129763
+  },
+  "wing_c.stl": {
+   "area_m2": 4.723455267692194,
+   "bbox": [
+    -0.0004433330224,
+    1.170586216,
+    -1.5,
+    1.5,
+    -0.04191583512,
+    0.1136979599
+   ],
+   "commensurate": false,
+   "curvature_radius_p50_m": 1.9580882150391699,
+   "curvature_radius_p5_m": 0.09855124855216879,
+   "curvature_radius_p95_m": 20.496778715339087,
+   "feature_angle_deg": 30.0,
+   "geometry_id": "wing_c",
+   "inner_thickness_m": 0.1500383248545833,
+   "lattice_base_size_m": null,
+   "n_triangles": 6046,
+   "outer_gap_m": null,
+   "patches": [
+    {
+     "area_m2": 4.723455267692194,
+     "name": "wing"
+    }
+   ],
+   "planar_frac": 0.010910890127903786,
+   "schema": "autonomy-fingerprint/1",
+   "sharp_edge_length_m": 8.185825694348434,
+   "stl_sha256": "818d2daf01dcc66e6b87f3f4bfc2efdbc0bbf0b73ec7ccae2a67c7d5f221c92b",
+   "volume_m3": 0.1803792832970331
+  }
+ },
+ "note": "features.fingerprint of the ten probe STLs named by fixtures/probes/labels.json, computed by the AM-10 supervisor on 2026-09-24 at tree 3afd66e. box_sphere.stl (the shipped example) is wound inward and features.py refuses it (signed volume -4.18); its row is computed on the reversed-winding copy, so stl_sha256 is the original file's and every field remedies.py reads (commensurate, lattice, sharp edges, curvature, gap, bbox, area) is winding-invariant. The STLs themselves are not committed except cube.stl and cubep.stl.",
+ "schema": "autonomy-remedy-fingerprints/1"
+}

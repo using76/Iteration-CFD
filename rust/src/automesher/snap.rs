@@ -6,7 +6,8 @@
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! Snapping - SPEC-LIT §92.11, the implementation-level companion to §92.2
-//! stage 4. Stage 3 leaves a staircase; this stage moves the boundary points
+//! stage 4. A kept body's interface points join `B` as §92.15 says.
+//! Stage 3 leaves a staircase; this stage moves the boundary points
 //! onto the STL and undoes any move that breaks a cell. The stage moves
 //! `points` and nothing else: the face lists, `owner`, `neighbour` and the
 //! patches leave as they entered them, so `PolyMeshRaw::points` is the only
@@ -56,6 +57,29 @@ use super::SnapSpec;
 //  The report
 // ==========================================================================
 
+/// One surface patch's wall area, as (92.32) measures it: the mesh's wall
+/// faces carrying the patch name plus the region-interface faces (92.32)
+/// assigns to it, before the first move and on the points the stage returns.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PatchArea {
+    pub name: String,
+    /// The patch's own area on the surface, `surf.patch_area[k]`.
+    pub stl_area: Scalar,
+    pub castellated_area: Scalar,
+    pub snapped_area: Scalar,
+}
+
+impl PatchArea {
+    /// `snapped_area / stl_area`; `None` when the surface area is not positive.
+    pub fn ratio(&self) -> Option<Scalar> {
+        (self.stl_area > 0.0).then(|| self.snapped_area / self.stl_area)
+    }
+    /// `castellated_area / stl_area` - the ratio (92.32) refuses on.
+    pub fn castellated_ratio(&self) -> Option<Scalar> {
+        (self.stl_area > 0.0).then(|| self.castellated_area / self.stl_area)
+    }
+}
+
 /// What stage 4 did, per SPEC-LIT §92.11.
 #[derive(Debug, Clone, Default)]
 pub struct SnapReport {
@@ -76,6 +100,11 @@ pub struct SnapReport {
     pub n_scaled_back: usize,
     /// Points that ended PINNED - alpha driven to zero, or fixed by (92.30).
     pub n_pinned: usize,
+    /// The pinned points that lie in `B` of (92.27). `n_pinned` also counts
+    /// the non-wall points (92.31) pins with a failing cell when it abandons
+    /// an iterate, and the domain points (92.30) pins, so it can exceed
+    /// `n_boundary_points`; this count cannot.
+    pub n_pinned_boundary: usize,
     /// Iterates abandoned whole by (92.31).
     pub n_abandoned: usize,
     /// Feature edges (92.34) the surface carried, and corners (92.35).
@@ -85,6 +114,8 @@ pub struct SnapReport {
     /// branch. Counted from the last iterate that ran, not cumulatively.
     pub n_snapped_to_edge: usize,
     pub n_snapped_to_corner: usize,
+    /// One row per surface patch, in `surf.patch_names` order.
+    pub patch_areas: Vec<PatchArea>,
 }
 
 impl SnapReport {
@@ -138,10 +169,30 @@ pub struct Snapped {
 /// gate. `base_size` is `domain.base_size`, the length `snap.tolerance`
 /// scales (92.28). `feature_angle_deg` is §92.12's dihedral, the angle
 /// (92.34) classifies the feature edges at and (92.38) snaps onto them by.
-/// Only `mesh.points` changes.
+/// Only `mesh.points` changes. Every cell is fluid - see [`snap_regions`]
+/// for the region-aware entry point.
 pub fn snap(
     mesh: &PolyMeshRaw,
     surf: &Surface,
+    base_size: Scalar,
+    feature_angle_deg: Scalar,
+    spec: &SnapSpec,
+    t: &QualityThresholds,
+) -> Result<Snapped> {
+    snap_regions(mesh, surf, None, base_size, feature_angle_deg, spec, t)
+}
+
+/// [`snap`] over a mesh whose cells belong to regions: `region_of_cell`
+/// (`None` = every cell fluid; `Some` must have one entry per cell) adds every
+/// INTERNAL face whose two cells lie in different regions to the wall-face
+/// set - its points join `B` of (92.27), move by (92.28) onto the merged
+/// surface, which holds the body's own triangles, and count toward (92.32)'s
+/// area under the surface patch (92.26)'s nearest triangle names. The
+/// interface stays internal: only `points` change, as in [`snap`].
+pub fn snap_regions(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    region_of_cell: Option<&[i32]>,
     base_size: Scalar,
     feature_angle_deg: Scalar,
     spec: &SnapSpec,
@@ -169,6 +220,15 @@ pub fn snap(
             "snap: the mesh has no cells - there is no boundary to snap"
                 .to_string(),
         ));
+    }
+    if let Some(r) = region_of_cell {
+        if r.len() != n_cells {
+            return Err(Error::Mesh(format!(
+                "snap: region_of_cell has {} entries but the mesh has {} cells",
+                r.len(),
+                n_cells
+            )));
+        }
     }
     if !(0.0..=1.0).contains(&spec.smoothing) {
         return Err(Error::Mesh(format!(
@@ -213,28 +273,61 @@ pub fn snap(
             domain_face[f] = true;
         }
     }
-    // (92.32), before any point moves: a wall patch carrying more than
-    // max_area_ratio times its own surface area is geometry the cells never
-    // resolved, and snapping it would collapse the cell that reached it.
-    // The test is one-sided on purpose: a_mesh <= a_surf is a patch running
-    // partly outside the domain, and is legal.
-    for patch in &mesh.patches {
-        if !wall_name.contains(patch.name.as_str()) {
-            continue;
-        }
-        let mut a_mesh = 0.0;
-        for j in 0..patch.size {
-            let f = n_internal + patch.start + j;
-            if f < n_faces {
-                a_mesh += face_area_vector(&mesh.points, &mesh.faces[f]).mag();
+    // A declared body's interface: an INTERNAL face whose two cells lie in
+    // different regions joins the wall-face set, so its points move with
+    // (92.28) onto the surface that holds the body's own triangles. The face
+    // itself stays internal - only its points move.
+    if let Some(r) = region_of_cell {
+        for f in 0..n_internal {
+            if r[mesh.owner[f] as usize] != r[mesh.neighbour[f] as usize] {
+                wall_face[f] = true;
             }
         }
-        let a_surf = surf
-            .patch_names
-            .iter()
-            .position(|n| *n == patch.name)
-            .map(|k| surf.patch_area[k])
-            .unwrap_or(0.0);
+    }
+    // (92.32), before any point moves: a patch of the SURFACE carrying more
+    // than max_area_ratio times its own area over the mesh's wall faces AND
+    // the region interfaces is geometry the cells never resolved, and
+    // snapping it would collapse the cell that reached it. The test is
+    // one-sided on purpose: a_mesh <= a_surf is a patch running partly
+    // outside the domain, and is legal.
+    // The index, built once, outside the loop - (92.26)'s nearest triangle
+    // names the surface patch an interface face's area lands on.
+    let idx = TriIndex::new(surf, base_size)?;
+    let mut iface_area = vec![0.0; surf.patch_names.len()];
+    // The same faces, kept with the patch (92.32) assigned them, so the
+    // report can re-measure them on the returned points.
+    let mut iface_patch: Vec<(usize, usize)> = Vec::new();
+    for f in 0..n_internal {
+        if !wall_face[f] {
+            continue;
+        }
+        let ps = &mesh.faces[f];
+        let mut c = [0.0; 3];
+        for &p in ps {
+            let q = mesh.points[p as usize];
+            c[0] += q.x;
+            c[1] += q.y;
+            c[2] += q.z;
+        }
+        let n = ps.len() as Scalar;
+        let centre = Vec3::new(c[0] / n, c[1] / n, c[2] / n);
+        let (t, _) = idx.nearest_triangle(centre);
+        iface_area[surf.tri_patch[t] as usize] +=
+            face_area_vector(&mesh.points, ps).mag();
+        iface_patch.push((f, surf.tri_patch[t] as usize));
+    }
+    let mut patch_areas: Vec<PatchArea> = Vec::new();
+    for (k, name) in surf.patch_names.iter().enumerate() {
+        let mut a_mesh = iface_area[k];
+        if let Some(patch) = mesh.patches.iter().find(|p| p.name == *name) {
+            for j in 0..patch.size {
+                let f = n_internal + patch.start + j;
+                if f < n_faces {
+                    a_mesh += face_area_vector(&mesh.points, &mesh.faces[f]).mag();
+                }
+            }
+        }
+        let a_surf = surf.patch_area[k];
         let unresolved = a_surf <= 0.0 && a_mesh > 0.0
             || a_surf > 0.0 && a_mesh > spec.max_area_ratio * a_surf;
         if unresolved {
@@ -248,13 +341,19 @@ pub fn snap(
                  has {} m^2 - a ratio of {}, over the max_area_ratio of {}; \
                  the cells that reached this patch never resolved it, so \
                  snapping would collapse them (SPEC-LIT §92.11, 92.32)",
-                patch.name,
+                name,
                 sig3(a_mesh),
                 sig3(a_surf),
                 sig3(ratio),
                 sig3(spec.max_area_ratio),
             )));
         }
+        patch_areas.push(PatchArea {
+            name: name.clone(),
+            stl_area: a_surf,
+            castellated_area: a_mesh,
+            snapped_area: 0.0,
+        });
     }
     // The arrival check. G3 and G7 are topological: no motion of the points
     // can mend either, so a mesh that fails one on arrival is refused at
@@ -285,7 +384,9 @@ pub fn snap(
     }
     let mut wall_nbrs: Vec<Vec<u32>> = vec![Vec::new(); n_points];
     let mut is_b = vec![false; n_points];
-    for f in n_internal..n_faces {
+    // Every face: the loop skips the non-wall faces itself, and an interface
+    // face IS one since the classification above.
+    for f in 0..n_faces {
         if !wall_face[f] {
             continue;
         }
@@ -348,8 +449,6 @@ pub fn snap(
     // edge, each mapped to its parent edge, longest first so a hanging node
     // of a hanging node is re-seated after its parents.
     let hanging = find_hanging(&mesh.points, &mesh.faces);
-    // The index, built once, outside the loop.
-    let idx = TriIndex::new(surf, base_size)?;
     // (92.38)'s attraction, prepared once: the surface's sharp edges
     // (92.34) chained into polylines and indexed for (92.36) queries. A
     // `feature_tolerance` of zero turns the stage off entirely - no
@@ -606,9 +705,14 @@ pub fn snap(
     }
     report.n_scaled_back = scaled_back.iter().filter(|&&s| s).count();
     report.n_pinned = pinned.iter().filter(|&&p| p).count();
+    report.n_pinned_boundary = (0..n_points).filter(|&i| pinned[i] && is_b[i]).count();
     // The gate: a mesh that still fails leaves as §92.3's own refusal text.
     let mut out = mesh.clone();
     out.points = pts;
+    // Each patch's area once more, on the points the stage returns: the
+    // (92.32) walk unchanged, measured twice.
+    patch_areas_on(&out.points, &out, n_internal, &iface_patch, &mut patch_areas);
+    report.patch_areas = patch_areas;
     let quality = quality::check(&out, t)?;
     Ok(Snapped {
         mesh: out,
@@ -620,6 +724,35 @@ pub fn snap(
 // ==========================================================================
 //  Helpers
 // ==========================================================================
+
+/// Each surface patch's area on `points`: the (92.32) walk - the region
+/// interface faces assigned to the patch, in the order they were recorded,
+/// then the boundary faces of the mesh patch carrying its name - with
+/// `face_area_vector` measured on `points` rather than the mesh's own.
+fn patch_areas_on(
+    points: &[Vec3],
+    mesh: &PolyMeshRaw,
+    n_internal: usize,
+    iface_patch: &[(usize, usize)],
+    rows: &mut [PatchArea],
+) {
+    for (k, row) in rows.iter_mut().enumerate() {
+        let mut a = iface_patch
+            .iter()
+            .filter(|&(_, kk)| *kk == k)
+            .map(|&(f, _)| face_area_vector(points, &mesh.faces[f]).mag())
+            .sum::<Scalar>();
+        if let Some(patch) = mesh.patches.iter().find(|p| p.name == row.name) {
+            for j in 0..patch.size {
+                let f = n_internal + patch.start + j;
+                if f < mesh.faces.len() {
+                    a += face_area_vector(points, &mesh.faces[f]).mag();
+                }
+            }
+        }
+        row.snapped_area = a;
+    }
+}
 
 /// (92.39): the corner claim, from the CURRENT positions - for every corner
 /// `k`, the boundary point `i` of `B`, not pinned, minimising
@@ -818,6 +951,200 @@ fn sig3(v: Scalar) -> String {
 }
 
 // ==========================================================================
+//  Feature-edge capture - read off a mesh, moves nothing
+// ==========================================================================
+
+/// How much of the surface's sharp-edge length the mesh's wall edges lie
+/// along - SPEC-LIT §92.12, equation (92.62). It is read off a mesh and
+/// moves nothing, so no stage's output depends on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FeatureCapture {
+    /// The summed length of the feature edges (92.34), in metres.
+    pub sharp_length: Scalar,
+    /// Per feature edge, the length the union of its covered parameter
+    /// intervals spans, summed, in metres; never above `sharp_length`.
+    pub captured_length: Scalar,
+    /// The distance both ends of a covering wall edge lie within.
+    pub tol: Scalar,
+}
+
+/// A covering wall edge runs within this many degrees of the feature
+/// edge's direction.
+pub const CAPTURE_ANGLE_DEG: Scalar = 30.0;
+
+/// The cover test of (92.62): the parameter interval `[t0, t1]` of the
+/// segment `a`-`b` that the mesh edge `p`-`q` covers, or `None` when an end
+/// lies further than `tol` from the segment, the edge runs more than
+/// `CAPTURE_ANGLE_DEG` off the segment's direction, or either is of zero
+/// length.
+pub(crate) fn covered_interval(
+    p: Vec3,
+    q: Vec3,
+    a: Vec3,
+    b: Vec3,
+    tol: Scalar,
+) -> Option<(Scalar, Scalar)> {
+    let ab = b - a;
+    let l2 = ab.mag_sqr();
+    let pq = q - p;
+    let lpq = pq.mag();
+    if !(l2 > 0.0) || !(lpq > 0.0) {
+        return None;
+    }
+    let tp = ((p - a).dot(ab) / l2).clamp(0.0, 1.0);
+    let tq = ((q - a).dot(ab) / l2).clamp(0.0, 1.0);
+    if (p - (a + ab * tp)).mag() > tol || (q - (a + ab * tq)).mag() > tol {
+        return None;
+    }
+    let cos_min = CAPTURE_ANGLE_DEG.to_radians().cos();
+    if pq.dot(ab).abs() < cos_min * lpq * l2.sqrt() {
+        return None;
+    }
+    Some((tp.min(tq), tp.max(tq)))
+}
+
+/// The length of the union of the intervals `iv`, which it sorts in place.
+pub(crate) fn union_length(iv: &mut [(Scalar, Scalar)]) -> Scalar {
+    iv.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.total_cmp(&y.1)));
+    let mut total: Scalar = 0.0;
+    let mut cur: Option<(Scalar, Scalar)> = None;
+    for &(s, e) in iv.iter() {
+        cur = match cur {
+            Some((cs, ce)) if s <= ce => Some((cs, ce.max(e))),
+            Some((cs, ce)) => {
+                total += ce - cs;
+                Some((s, e))
+            }
+            None => Some((s, e)),
+        };
+    }
+    if let Some((cs, ce)) = cur {
+        total += ce - cs;
+    }
+    total
+}
+
+/// The faces the stage calls wall faces: a boundary face whose patch name
+/// is one of the surface's, and - with regions - an internal face between
+/// two cells of different regions.
+fn wall_face_mask(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    region_of_cell: Option<&[i32]>,
+) -> Vec<bool> {
+    let n_faces = mesh.faces.len();
+    let n_internal = mesh.neighbour.len().min(n_faces);
+    let names: HashSet<&str> = surf.patch_names.iter().map(|s| s.as_str()).collect();
+    let mut wall = vec![false; n_faces];
+    for patch in &mesh.patches {
+        if !names.contains(patch.name.as_str()) {
+            continue;
+        }
+        for j in 0..patch.size {
+            let f = n_internal + patch.start + j;
+            if f < n_faces {
+                wall[f] = true;
+            }
+        }
+    }
+    if let Some(r) = region_of_cell {
+        for f in 0..n_internal {
+            let (o, n) = (mesh.owner[f] as usize, mesh.neighbour[f] as usize);
+            if o < r.len() && n < r.len() && r[o] != r[n] {
+                wall[f] = true;
+            }
+        }
+    }
+    wall
+}
+
+/// (92.62): the sharp length of `surf` at `feature_angle_deg`, and the part
+/// of it the wall edges of `mesh` cover within `tol`. Reads; moves nothing.
+pub fn feature_capture(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    region_of_cell: Option<&[i32]>,
+    feature_angle_deg: Scalar,
+    tol: Scalar,
+) -> Result<FeatureCapture> {
+    if !(tol > 0.0) || !tol.is_finite() {
+        return Err(Error::Mesh(format!(
+            "feature capture: the tolerance must be positive and finite, got {tol}"
+        )));
+    }
+    let fs = features::extract(surf, feature_angle_deg)?;
+    let seg = |e: usize| (fs.points[fs.edges[e][0] as usize], fs.points[fs.edges[e][1] as usize]);
+    let mut out = FeatureCapture { tol, ..FeatureCapture::default() };
+    for e in 0..fs.edges.len() {
+        let (a, b) = seg(e);
+        out.sharp_length += (b - a).mag();
+    }
+    if fs.edges.is_empty() {
+        return Ok(out);
+    }
+    // Buckets of side g >= 2 tol, the segments sampled at most g apart: a
+    // point within tol of a segment is within g of a sample, so in one of
+    // the 27 buckets around that sample's.
+    let g = (2.0 * tol).max(out.sharp_length / 4.0e6);
+    let key = |p: Vec3| {
+        [(p.x / g).floor() as i64, (p.y / g).floor() as i64, (p.z / g).floor() as i64]
+    };
+    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+    for e in 0..fs.edges.len() {
+        let (a, b) = seg(e);
+        let n = (((b - a).mag() / g).ceil().max(1.0)) as usize;
+        for k in 0..=n {
+            let c = key(a + (b - a) * ((k as Scalar) / (n as Scalar)));
+            let list = grid.entry(c).or_default();
+            if list.last() != Some(&(e as u32)) {
+                list.push(e as u32);
+            }
+        }
+    }
+    let wall = wall_face_mask(mesh, surf, region_of_cell);
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    for (f, face) in mesh.faces.iter().enumerate() {
+        if wall[f] {
+            for k in 0..face.len() {
+                let (a, b) = (face[k] as u32, face[(k + 1) % face.len()] as u32);
+                edges.push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    let mut covered: Vec<Vec<(Scalar, Scalar)>> = vec![Vec::new(); fs.edges.len()];
+    let mut cand: Vec<u32> = Vec::new();
+    for &(i, j) in &edges {
+        let (p, q) = (mesh.points[i as usize], mesh.points[j as usize]);
+        let c = key(p);
+        cand.clear();
+        for dz in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if let Some(list) = grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
+                        cand.extend_from_slice(list);
+                    }
+                }
+            }
+        }
+        cand.sort_unstable();
+        cand.dedup();
+        for &e in &cand {
+            let (a, b) = seg(e as usize);
+            if let Some(iv) = covered_interval(p, q, a, b, tol) {
+                covered[e as usize].push(iv);
+            }
+        }
+    }
+    for e in 0..fs.edges.len() {
+        let (a, b) = seg(e);
+        out.captured_length += union_length(&mut covered[e]) * (b - a).mag();
+    }
+    Ok(out)
+}
+
+// ==========================================================================
 //  Tests
 // ==========================================================================
 
@@ -825,12 +1152,15 @@ fn sig3(v: Scalar) -> String {
 mod tests {
     use super::*;
     use crate::automesher::castellate::castellate;
-    use crate::automesher::castellate::tests::{box_soup, sphere_soup, thresholds};
+    use crate::automesher::castellate::tests::{
+        box_soup, mesh_fingerprint, sphere_soup, thresholds,
+    };
     use crate::automesher::octree::{
         patch_names, refine_to_surface, Background, Octree,
     };
     use crate::automesher::{
-        CastellationSpec, DistanceBand, DomainSpec, RefinementBand, RefinementSpec,
+        BodySpec, CastellationSpec, DistanceBand, DomainSpec, RefinementBand,
+        RefinementSpec,
     };
 
     /// The background over `extent` at `base`, and the tree `max_level` deep
@@ -1409,5 +1739,532 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Requirement 2's pin (M6 Run 1): with no bodies the snapped sphere
+    /// mesh is bit for bit what it was before the run's edits. The constant
+    /// was pinned before any other edit.
+    const PINNED_SPHERE_SNAP_NO_BODY: u64 = 0x0637e67a829f905e;
+
+    #[test]
+    fn the_snapped_mesh_without_bodies_is_pinned() {
+        let (surf, mesh) = sphere_case();
+        let snapped =
+            snap(&mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap");
+        let v = mesh_fingerprint(&snapped.mesh);
+        eprintln!("fingerprint snapped_sphere_no_body = {v:#018x}");
+        assert_eq!(v, PINNED_SPHERE_SNAP_NO_BODY);
+        // `snap` IS `snap_regions(.., None, ..)`, and an all-`-1` slice is
+        // the same no-body walk: the same mesh bit for bit, the same pin.
+        let n_cells = mesh
+            .owner
+            .iter()
+            .chain(mesh.neighbour.iter())
+            .copied()
+            .max()
+            .unwrap() as usize
+            + 1;
+        let all_fluid = vec![-1i32; n_cells];
+        let via_regions = snap_regions(
+            &mesh,
+            &surf,
+            Some(&all_fluid),
+            1.0,
+            30.0,
+            &SnapSpec::default(),
+            &thresholds(),
+        )
+        .expect("snap_regions");
+        assert_eq!(mesh_fingerprint(&via_regions.mesh), PINNED_SPHERE_SNAP_NO_BODY);
+    }
+
+    /// Requirement 11 (M6 Run 1): a region slice that is not one entry per
+    /// cell is refused by name, with both lengths.
+    #[test]
+    fn a_region_slice_of_the_wrong_length_is_refused() {
+        let (_surf, mesh) = sphere_case();
+        let n_cells = mesh
+            .owner
+            .iter()
+            .chain(mesh.neighbour.iter())
+            .copied()
+            .max()
+            .unwrap() as usize
+            + 1;
+        let err = snap_regions(
+            &mesh,
+            &_surf,
+            Some(&vec![-1i32; 3]),
+            1.0,
+            30.0,
+            &SnapSpec::default(),
+            &thresholds(),
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("region_of_cell"), "{err}");
+        assert!(text.contains(&format!("{n_cells}")), "{err}");
+        assert!(text.contains('3'), "{err}");
+    }
+
+    /// Requirement 8 (M6 Run 1): with the sphere declared a body, the
+    /// interface points join `B` of (92.27) and land on the sphere; the
+    /// topology and the total volume are the castellated mesh's own, and the
+    /// fluid/body split of the volume is (about) the block minus the sphere.
+    #[test]
+    fn a_kept_sphere_is_snapped_along_its_interface() {
+        let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "sphere".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast_spec = CastellationSpec {
+            bodies: vec![BodySpec {
+                name: "sphere".to_string(),
+                patches: vec!["sphere".to_string()],
+            }],
+            ..Default::default()
+        };
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &cast_spec,
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped = snap_regions(
+            &cast.mesh,
+            &surf,
+            Some(&cast.region_of_cell),
+            1.0,
+            30.0,
+            &SnapSpec::default(),
+            &thresholds(),
+        )
+        .expect("snap_regions");
+        eprintln!("{}", snapped.report.summary());
+        assert!(snapped.report.n_boundary_points > 0);
+        assert!(
+            snapped.report.p99_residual < 0.06,
+            "p99 residual {} not under 0.06",
+            snapped.report.p99_residual
+        );
+        // The topology is unchanged: only points moved.
+        assert_eq!(snapped.mesh.faces, cast.mesh.faces);
+        assert_eq!(snapped.mesh.owner, cast.mesh.owner);
+        assert_eq!(snapped.mesh.neighbour, cast.mesh.neighbour);
+        let mut host =
+            crate::io::polymesh::build_host_mesh(&snapped.mesh).expect("host mesh");
+        host.compute_geometry(&snapped.mesh.points, &snapped.mesh.faces)
+            .expect("geometry");
+        let total = host.check().total_volume;
+        eprintln!("snap: total volume {total:.6} vs the block's 512.0");
+        assert!(
+            (total - 512.0).abs() / 512.0 < 1e-9,
+            "nothing was removed, so the total is 512 to 1e-9: {total}"
+        );
+        assert!(snapped.quality.passed());
+        // The split: the fluid keeps (about) the block minus the sphere, the
+        // body holds (about) the sphere.
+        let mut fluid = 0.0;
+        let mut body = 0.0;
+        for (c, r) in cast.region_of_cell.iter().enumerate() {
+            if *r < 0 {
+                fluid += host.v[c];
+            } else {
+                body += host.v[c];
+            }
+        }
+        let want = soup_volume(&sphere_soup(3.0, [4.0; 3]));
+        eprintln!(
+            "snap: fluid {fluid:.6} vs {:.6} ({:.3} % off); body {body:.6} vs \
+             {want:.6} ({:.3} % off)",
+            512.0 - want,
+            100.0 * (fluid - (512.0 - want)).abs() / (512.0 - want),
+            100.0 * (body - want).abs() / want
+        );
+        assert!(
+            (fluid - (512.0 - want)).abs() / (512.0 - want) < 0.01,
+            "fluid volume {fluid} vs {}",
+            512.0 - want
+        );
+        assert!(
+            (body - want).abs() / want < 0.05,
+            "body volume {body} vs {want}"
+        );
+    }
+
+    /// Requirement 9 (M6 Run 1): a kept body far finer than a cell is still
+    /// refused by (92.32), whose area now counts the interface faces.
+    #[test]
+    fn a_kept_body_finer_than_a_cell_is_refused_by_area() {
+        let (tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 0);
+        let surf = Surface::from_soup(
+            sphere_soup(0.2, [4.5; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let cast_spec = CastellationSpec {
+            bodies: vec![BodySpec {
+                name: "sphere".to_string(),
+                patches: vec!["sphere".to_string()],
+            }],
+            ..Default::default()
+        };
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &cast_spec,
+            &thresholds(),
+        )
+        .expect("castellate");
+        assert_eq!(
+            cast.region_of_cell.iter().filter(|r| **r == 0).count(),
+            1,
+            "the one leaf whose centre (4.5, 4.5, 4.5) is inside"
+        );
+        let err = snap_regions(
+            &cast.mesh,
+            &surf,
+            Some(&cast.region_of_cell),
+            1.0,
+            30.0,
+            &SnapSpec::default(),
+            &thresholds(),
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        eprintln!("refusal: {text}");
+        assert!(text.contains("sphere"), "{err}");
+        assert!(text.contains("max_area_ratio"), "{err}");
+        assert!(text.contains("92.32"), "{err}");
+    }
+
+    /// The on-plane cube's report carries its one patch with castellated
+    /// and snapped areas each the geometry's own 24 m^2 - the snap moved
+    /// nothing, so both walks measure the same unit quads - both ratios 1,
+    /// and no pinned point of any kind, wall or otherwise.
+    #[test]
+    fn the_cube_on_the_cell_planes_reports_its_whole_area() {
+        let (tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 0);
+        let surf = Surface::from_soup(
+            box_soup([1.0; 3], [3.0; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped =
+            snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap");
+        assert_eq!(snapped.report.patch_areas.len(), 1);
+        let row = &snapped.report.patch_areas[0];
+        assert_eq!(row.name, "cube");
+        let near = |a: Scalar, b: Scalar| (a - b).abs() <= 1e-12 * b.abs();
+        assert!(near(row.stl_area, 24.0), "stl area {}", row.stl_area);
+        assert!(
+            near(row.castellated_area, 24.0),
+            "castellated area {}",
+            row.castellated_area
+        );
+        assert!(
+            near(row.snapped_area, 24.0),
+            "snapped area {}",
+            row.snapped_area
+        );
+        let r = row.ratio().expect("ratio");
+        let cr = row.castellated_ratio().expect("castellated ratio");
+        assert!((r - 1.0).abs() <= 1e-12, "ratio {r}");
+        assert!((cr - 1.0).abs() <= 1e-12, "castellated ratio {cr}");
+        assert_eq!(snapped.report.n_pinned_boundary, 0);
+    }
+
+    /// An abandoned iterate pins more than the boundary: the pinned points
+    /// that lie in B of (92.27) stay inside the boundary count and under
+    /// the pinned total, and with the mesh returned unmoved each patch's
+    /// re-measured area is bit for bit the castellated one.
+    #[test]
+    fn an_abandoned_iterate_pins_more_than_the_boundary() {
+        let (tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 0);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let mut t = thresholds();
+        t.max_non_orth_deg = 1e-3;
+        t.report_non_orth_deg = 1e-3;
+        let snapped = snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &t)
+            .expect("the arrival mesh is orthogonal, so the gate is satisfiable");
+        eprintln!(
+            "n_pinned {} n_pinned_boundary {} n_boundary_points {}",
+            snapped.report.n_pinned,
+            snapped.report.n_pinned_boundary,
+            snapped.report.n_boundary_points
+        );
+        assert!(snapped.report.n_pinned_boundary > 0);
+        assert!(
+            snapped.report.n_pinned_boundary <= snapped.report.n_boundary_points,
+            "a boundary-only count cannot exceed the boundary points"
+        );
+        assert!(
+            snapped.report.n_pinned_boundary < snapped.report.n_pinned,
+            "the pinned total also counts points outside B"
+        );
+        for row in &snapped.report.patch_areas {
+            assert_eq!(
+                row.snapped_area.to_bits(),
+                row.castellated_area.to_bits(),
+                "the mesh came back unmoved, so the two walks agree exactly"
+            );
+        }
+    }
+
+    /// The snapped sphere's mesh area lands within ten per cent of its
+    /// surface's own, and the snap moved the castellated mesh toward that:
+    /// a staircase over-reports a curved surface's area (by up to sqrt(3)),
+    /// so the castellated ratio sits above the snapped one.
+    #[test]
+    fn the_snapped_sphere_area_is_near_its_surface_area() {
+        let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "sphere".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped =
+            snap(&cast.mesh, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+                .expect("snap");
+        assert_eq!(snapped.report.patch_areas.len(), 1);
+        let row = &snapped.report.patch_areas[0];
+        assert_eq!(row.name, "sphere");
+        let r = row.ratio().expect("ratio");
+        let cr = row.castellated_ratio().expect("castellated ratio");
+        eprintln!("sphere snapped ratio {r} castellated ratio {cr}");
+        assert!(0.9 < r && r < 1.1, "ratio {r} not in (0.9, 1.1)");
+        assert!(cr > r, "castellated ratio {cr} not under snapped ratio {r}");
+    }
+
+    /// With the sphere declared a body, the interface faces (92.32) assigns
+    /// to the patch count toward its areas, and the snapped mesh still
+    /// covers the geometry: one row, a positive castellated area that
+    /// includes those interfaces, and a snapped ratio within ten per cent.
+    #[test]
+    fn the_interface_area_counts_toward_the_snapped_ratio() {
+        let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            sphere_soup(3.0, [4.0; 3]),
+            vec!["sphere".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "sphere".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast_spec = CastellationSpec {
+            bodies: vec![BodySpec {
+                name: "sphere".to_string(),
+                patches: vec!["sphere".to_string()],
+            }],
+            ..Default::default()
+        };
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &cast_spec,
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped = snap_regions(
+            &cast.mesh,
+            &surf,
+            Some(&cast.region_of_cell),
+            1.0,
+            30.0,
+            &SnapSpec::default(),
+            &thresholds(),
+        )
+        .expect("snap_regions");
+        assert_eq!(snapped.report.patch_areas.len(), 1);
+        let row = &snapped.report.patch_areas[0];
+        assert_eq!(row.name, "sphere");
+        let r = row.ratio().expect("ratio");
+        let cr = row.castellated_ratio().expect("castellated ratio");
+        eprintln!("body snapped ratio {r} castellated ratio {cr}");
+        assert!(row.castellated_area > 0.0, "interface area must count");
+        assert!(0.9 < r && r < 1.1, "ratio {r} not in (0.9, 1.1)");
+    }
+
+    /// The `a_cube_on_the_cell_planes_is_snapped_bit_for_bit` case, its
+    /// castellated mesh only: a cube spanning [1, 3]^3 at base size 1 and
+    /// level 0, so every wall face lies on a cube face and every wall edge
+    /// along a cube edge lies on that edge.
+    fn plane_cube_case() -> (Surface, PolyMeshRaw) {
+        let (tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 0);
+        let surf = Surface::from_soup(box_soup([1.0; 3], [3.0; 3]), vec!["cube".to_string()])
+            .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        (surf, cast.mesh)
+    }
+
+    /// On the cell planes the capture is the whole sharp length: 12 edges
+    /// of 2, every one held by the wall edges along it.
+    #[test]
+    fn the_capture_on_the_cell_planes_is_the_whole_sharp_length() {
+        let (surf, mesh) = plane_cube_case();
+        let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
+        eprintln!("plane cube capture {c:?}");
+        assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert!((c.captured_length - c.sharp_length).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert_eq!(c.tol, 0.1);
+    }
+
+    /// Pull the mesh point at the middle of one cube edge half a cell off
+    /// it, in a copy of the mesh: the two wall edges through it no longer
+    /// cover that edge, and the capture falls by exactly its length, 2.
+    #[test]
+    fn a_point_pulled_off_an_edge_uncovers_that_edge() {
+        let (surf, mut mesh) = plane_cube_case();
+        let mid = Vec3::new(2.0, 1.0, 1.0);
+        let i = (0..mesh.points.len())
+            .min_by(|&a, &b| {
+                (mesh.points[a] - mid).mag().total_cmp(&(mesh.points[b] - mid).mag())
+            })
+            .expect("points");
+        assert!((mesh.points[i] - mid).mag() <= 1e-12, "no mesh point at the edge's middle");
+        mesh.points[i] = Vec3::new(2.0, 0.5, 0.5);
+        let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
+        eprintln!("pulled point capture {c:?}");
+        assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert!((c.captured_length - 22.0).abs() <= 1e-12 * 24.0, "{c:?}");
+    }
+
+    /// A smooth sphere has no sharp length, so nothing to capture, and the
+    /// tolerance is reported as given.
+    #[test]
+    fn a_sphere_has_no_sharp_length() {
+        let (surf, cast) = sphere_case();
+        let snapped = snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+            .expect("snap");
+        let c = feature_capture(&snapped.mesh, &surf, None, 30.0, 0.025).expect("capture");
+        assert_eq!(c, FeatureCapture { sharp_length: 0.0, captured_length: 0.0, tol: 0.025 });
+    }
+
+    /// The off-lattice cube holds more of its edges with the attraction on
+    /// than with it off - the chamfer of `feature_tolerance` 0 is what the
+    /// capture exists to show. Both are printed for the record.
+    #[test]
+    fn the_attraction_raises_the_capture_on_an_off_lattice_cube() {
+        let (surf, cast) = cube_case();
+        let on = snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
+            .expect("snap on");
+        let off_spec = SnapSpec { feature_tolerance: 0.0, ..SnapSpec::default() };
+        let off = snap(&cast, &surf, 1.0, 30.0, &off_spec, &thresholds()).expect("snap off");
+        let c_on = feature_capture(&on.mesh, &surf, None, 30.0, 0.05).expect("on");
+        let c_off = feature_capture(&off.mesh, &surf, None, 30.0, 0.05).expect("off");
+        eprintln!("off-lattice cube capture on {c_on:?} off {c_off:?}");
+        for c in [c_on, c_off] {
+            assert!((c.sharp_length - 12.0).abs() <= 1e-12 * 12.0, "{c:?}");
+            assert!(0.0 <= c.captured_length, "{c:?}");
+            assert!(c.captured_length <= c.sharp_length * (1.0 + 1e-12), "{c:?}");
+        }
+        assert!(c_on.captured_length > c_off.captured_length, "on {c_on:?} off {c_off:?}");
+    }
+
+    /// The union counts an overlap once and a gap not at all.
+    #[test]
+    fn the_union_counts_an_overlap_once() {
+        let mut a = vec![(0.5, 1.0), (0.0, 0.5), (0.2, 0.3)];
+        assert_eq!(union_length(&mut a), 1.0);
+        let mut b = vec![(0.5, 0.75), (0.0, 0.25)];
+        assert_eq!(union_length(&mut b), 0.5);
+        let mut c: Vec<(Scalar, Scalar)> = Vec::new();
+        assert_eq!(union_length(&mut c), 0.0);
+    }
+
+    /// The cover test on its own: both ends within `tol` AND the direction
+    /// within 30 degrees, or no cover; the interval is clamped to the
+    /// segment and ordered.
+    #[test]
+    fn the_cover_test_needs_both_ends_near_and_the_direction_along() {
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let v = |x: f64, y: f64| Vec3::new(x, y, 0.0);
+        let cov = |p: Vec3, q: Vec3| covered_interval(p, q, a, b, 0.1);
+        assert_eq!(cov(v(0.2, 0.05), v(0.6, -0.05)), Some((0.2, 0.6)));
+        assert_eq!(cov(v(0.6, -0.05), v(0.2, 0.05)), Some((0.2, 0.6)));
+        assert_eq!(cov(v(0.2, 0.05), v(0.6, 0.2)), None);
+        assert_eq!(cov(v(0.5, 0.0), v(0.5, 0.09)), None);
+        assert_eq!(cov(v(0.5, 0.0), v(0.55, 0.05)), None);
+        assert!(cov(v(0.5, 0.0), v(0.6, 0.05)).is_some());
+        assert_eq!(cov(v(-0.05, 0.0), v(0.3, 0.0)), Some((0.0, 0.3)));
+        assert_eq!(cov(v(0.3, 0.0), v(0.3, 0.0)), None);
     }
 }

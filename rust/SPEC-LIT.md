@@ -25257,7 +25257,7 @@ that as a stated absence rather than an omission.
 
 | Check | Expected |
 |---|---|
-| the output of every path | a real-point `PolyMeshRaw`, written by `io::polymesh::write_poly_mesh_raw` |
+| the output of every path | one real-point `PolyMeshRaw` per region, written by `io::polymesh::write_poly_mesh_raw` - a run with no declared body writes one region; a run with `castellation.bodies` writes §92.15's layout |
 | every emitted mesh | passes G1-G7 of §92.3, or the run refused |
 | a refusal | names the gate, the subject it failed on (a cell, or a face for G4 and G7) and its id, its centroid, the measured value and the threshold, in §92.3's exact per-gate form |
 | `AutomeshConfig` | round-trips through serde, and `emit_schema` is generated from the same types that parse it, as `io::case_json` does it |
@@ -25652,6 +25652,7 @@ would renumber every face list for nothing.
 |---|---|
 | a surface entirely outside the domain | every leaf fluid, and the castellated mesh is §92.9's emitted mesh, cell for cell and face for face |
 | a leaf whose centre is inside the surface | removed, whether or not the surface cuts it; a leaf whose centre is outside is kept, likewise |
+| a leaf inside a declared body | kept as that body's region; its interface faces stay internal (§92.15) |
 | an axis-aligned box STL cut from a block on its own cell planes | the wall faces lie ON those planes exactly — no tolerance, because the points are (92.20)'s lattice points |
 | the fluid volume against an analytic solid | within one cell layer's worth of volume, and better as the level rises |
 | a solid that seals a pocket (a slab under a lid) | the pocket is a separate component of (92.4) and is dropped; the emitted mesh has one cell region |
@@ -26057,6 +26058,28 @@ value of zero turns the attraction off entirely, which is what the second
 validation row below runs and what makes "a surface with no feature edges is
 returned bit for bit" testable on a surface that HAS them.
 
+**Erratum (2026-09-26): half a BASE cell is not half a WALL cell.** The
+paragraph above defends `feature_tolerance = 0.5` as "the furthest a wall point
+of a cell the edge passes through can be from it". That holds for a wall at
+level 0 and at no other level: `tau` is measured in `base_size`, so at wall
+level `L` it is `2^(L-1)` wall cells - 8 of them at level 4, 32 at level 6 -
+and every point of a band that wide is sent onto the one feature line, where
+(92.31)'s guarded step halves the collapsing cells and pins their points.
+Measured on an off-lattice box (side 1.1 m at (1.03, 1.07, 1.01), base 0.5 m,
+the attraction on in every run): at level 4, `tau / h_f = 8` pins 3386 of 7492
+points, 4 pins 584, and 1 or less pins none and converges in 4-5 iterations;
+at level 3, 4 pins 84 and 2 or less pins none. At `tau = h_f / 2` the level-4
+box carries 412 points on its edges against the ~422 lattice points along its
+13.2 m of edge, and two layers are delivered over its whole 7.261 m² - the
+STL's 6 x 1.21 - where `feature_tolerance = 0` chamfers it to 7.206 m². On a
+refined wall it is the default radius that pins sharp bodies, not a limit of
+the attraction. (92.38) is NOT changed: `tau` stays
+`feature_tolerance * base_size`, because a knob that keeps its meaning is what
+every committed configuration was written against. A configuration that wants
+half a wall cell asks for it, `feature_tolerance = 0.5 * 2^-L` at the wall's
+level `L`; `tau = feature_tolerance * h_local` is the alternative this erratum
+records and does not adopt. (92.62) below is how a run reports the difference.
+
 **Where the attraction actually earns its place, and where (92.28) already
 had the answer.** A CONVEX feature seen from the fluid — the edge of a solid
 block — has an outward Voronoi wedge, and for a point inside that wedge the
@@ -26115,6 +26138,40 @@ anyway. A corner that stays unclaimed while the mesh is refined enough to
 resolve it does not occur on any case run here; if it ever does, it is visible
 in the report's corner count rather than silent.
 
+**How much of the sharp length the mesh holds.** Neither branch of (92.38)
+says afterwards whether the wall ended up ON the edges: the report's edge and
+corner counts count points, not length. The capture reads the mesh the stage
+returns and moves nothing. With `F` of (92.34) at the run's
+`feature_angle_deg`, `W` the wall edges - consecutive point pairs of the faces
+(92.27) calls wall faces, region interfaces included - `h_f = base_size /
+2^max_level` and `tol = 0.1 h_f`:
+
+```
+t_e(p)  = clamp( (p - x_a).(x_b - x_a) / |x_b - x_a|^2 , 0, 1 ),   e = (a, b) in F
+
+w = (p, q) in W covers e  iff  |p - proj_e(p)| <= tol,  |q - proj_e(q)| <= tol
+                          and  |(q - p).(x_b - x_a)| >= cos(30 deg) |q - p| |x_b - x_a|
+
+I_e             = union over the w covering e of [ min(t_e(p), t_e(q)), max(t_e(p), t_e(q)) ]
+sharp_length    = sum over e in F of |x_b - x_a|
+captured_length = sum over e in F of |I_e| |x_b - x_a|                          (92.62)
+```
+
+It is computed with the attraction on or off - a surface's sharp length does
+not depend on a knob - so `feature_tolerance = 0` reports how little of the
+edge its chamfer holds rather than nothing. A covering edge runs ALONG the
+feature edge, within 30 degrees, with both ends within `tol`: a face diagonal
+that merely ends on the edge covers nothing. The union is per feature edge,
+so two wall edges over one stretch count it once and `captured_length <=
+sharp_length` by construction. `tol` is a tenth of the finest cell, so a
+chamfer half a cell off the edge does not count; it exceeds (92.28)'s default
+dead band `eps = 1e-3 base_size` by the factor `100 / 2^max_level` - 1.56 at
+level 6 - and falls below it at level 7 and deeper, where a point the band
+left at `eps` may not count; that is recorded here rather than hidden.
+`sharp_length` is what `tools/autonomy/features.py` reports as
+`sharp_edge_length_m` for the same STL at the same angle, on a closed surface,
+the only kind it accepts.
+
 **What must hold**
 
 | Check | Expected |
@@ -26127,6 +26184,7 @@ in the report's corner count rather than silent.
 | two boundary points near one corner | at most one of them is moved onto it, by (92.39); the other takes the edge branch |
 | the mesh feature snapping returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message — the guard of (92.31) is unchanged |
 | a surface with no feature edges | `snap` returns exactly what it returned before this section, bit for bit |
+| the capture (92.62) of any run | at most the sharp length; the mesh, the report's other fields and the log are bit for bit what they are without it |
 
 **Validation**
 
@@ -26139,6 +26197,10 @@ in the report's corner count rather than silent.
 | the same case with `feature_tolerance = 0` | no point takes either branch of (92.38), the run is bit for bit the run before this section, and seven of the eight corners have no mesh point within 0.1 of them. The eighth is the one the geometry hands to (92.28) for free: the castellated block's own corner faces it up the body diagonal from 0.2 of a cell, and a point outside a CONVEX corner projects onto the corner — measured, and asserted as measured rather than as wished |
 | the snapped mesh of the cube case | no two points within 1e-9 of each other — what (92.39) buys, asserted directly rather than inferred from the gate |
 | `feat` against a linear scan over the segments | the same point and the same distance, at points beside a segment, beyond its end, and on it |
+| a cube on the cell planes, castellated | `sharp_length` is 12 times the side to 1e-12 relative, and `captured_length` equals it: every wall edge along a cube edge lies on that edge |
+| the same mesh with the point at one edge's middle pulled half a cell off it | `captured_length` falls by exactly that edge's length |
+| the off-lattice cube, the attraction on and off | the capture is larger with it on; both are printed |
+| a smooth sphere | `sharp_length` and `captured_length` are both 0 |
 
 ---
 
@@ -26518,6 +26580,37 @@ t1_mean   = t_1 mean_frac          t1_min = t_1 min_f tau_f            (92.50)
 `mean_frac` is the fraction of the nominal thickness the patch received on
 average. A dropped patch reports `n_layers = 0` and the reason.
 
+**The trace, and what a drop is blamed on.** A drop's reason names the check
+that fired LAST, and with two ladders nested that is not always the one that
+caused it: the outer ladder's retreats reach the shrink as caps, so a wall that
+fails G4 on its level-n faces is thinned by the OUTER ladder until the INNER
+ladder's floor `min_thickness * T` fires first, and the reason then reads as a
+thickness failure. So the report also keeps the ladders' trace, `ladder`: one
+entry per measurement either ladder took, in the order taken - which ladder;
+the outer round (one extrusion attempt, counted from 0; an inner entry carries
+the round that ran it); the rung (the halvings that ladder had taken on this
+patch set); the patch set by name; each failing gate of §92.3 with its failed
+count; how many of the G4 subjects are level-n faces, internal faces whose
+owner is an input cell and whose neighbour a layer cell (always 0 on the inner
+ladder, whose mesh has no layer cell); the outcome, `pass`, `retreat` or
+`give_up`; and on a give-up its class and the patch that lost its layers. Each
+patch row carries `drop_cause`, the class of the give-up that dropped it:
+
+| `drop_cause` | the give-up |
+|---|---|
+| `inner_gate` | the inner ladder: the gate still failed on the shrunk mesh after the last retreat, or failed on cells no layer point reaches, or the inner ladder's own halvings took a point under the floor |
+| `outer_gate` | the outer ladder: the gate still failed on the extruded mesh after the last retreat, or failed on cells no layer point reaches |
+| `thin_after_caps` | the floor, at a point the outer ladder had capped: the gates its outer entries name drove the thickness down |
+| `thin_proposed` | the floor, at a point neither ladder had thinned: (92.45)'s proposal after its limiters was under it |
+| `zero_disp` | a layer point whose applied displacement is zero |
+
+The floor's class is read over every point under it: a cap on any of them names
+the caps, else a halving on any names the inner ladder, else the proposal.
+`drop_cause` is null on a kept patch and where no ladder ran for the patch
+(`layers.n = 0`, a patch with no layer face). Both are read off the ladders and
+move nothing: the mesh, the reasons and the log are bit for bit what they are
+without them.
+
 The report prints `t1_mean` and `t1_min` IN METRES beside the fractions,
 because the fraction alone hides a limiter the user did not write down. On the
 snapped sphere the run reported `full 0.0%, mean frac 0.346` and the binding
@@ -26631,6 +26724,7 @@ solver can run.
 | a side face's winding | fixed by the topology (92.53), never by the sign of a dot product against a cell centre |
 | a snapped wall | closes exactly all the same — (92.54) holds on it even where the gate does not |
 | a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
+| a patch that lost its layers | its row names `drop_cause`, the class of the last give-up in `ladder` that names it; the trace ends on the outer pass the run returned on; the mesh, the reason and the log are bit for bit what they are without it |
 | the report of a patch that kept its layers | says the achieved first layer in METRES (`t1_mean`, `t1_min`), not only as a fraction |
 
 **Validation**
@@ -26647,9 +26741,13 @@ solver can run.
 | `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
 | a box standing on the domain floor, SNAPPED, 3 layers | every cell closes to `1e-12` relative. The assertion is closure and not a quality number, so it catches a mis-wound face and nothing else; the thresholds are opened past every refusal on purpose. Before (92.53) was applied: 13 cells open, worst `2.96e-1` |
 | one internal face of an emitted mesh reversed by hand | (92.54) refuses it, naming that cell — the check is not vacuous |
-| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured, the sphere gives up in the INNER ladder — two halvings take the applied thickness under `min_thickness * T = 1.995e-2` — so it never reaches the outer one; the row below is the case that does |
+| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured with the trace, the sphere REACHES the outer ladder: two outer retreats on G4 alone, every failing face a level-n face (312, then 360), cap the thickness until the inner ladder's floor `min_thickness * T = 1.995e-2` fires — `drop_cause` `thin_after_caps`; the row below is the case that gives up in the outer ladder itself |
 | the same box, at `quality`'s own thresholds | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
 | the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
+| the castellated cube that keeps its stack | the trace is one inner and one outer pass, both in round 0, and no row names a cause |
+| the snapped floor box with no floor | `retreat_limit` outer retreats at rungs 0, 1, ..., each naming its gates, then an `outer_gate` give-up dropping the cube, then the pass on the empty set |
+| the snapped level-2 sphere | its row names a cause, the trace names the give-up, and a `thin_after_caps` drop comes after at least one outer retreat; the trace is printed |
+| the level-n count | equals the number of G4 subjects whose point list is a layer face's, on the floor box's first extruded attempt |
 
 ### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
 
@@ -26669,15 +26767,23 @@ stage, so until there was a driver nobody owned them: **when a run stops**, and
 #### 92.14.1 The stage sequence, and the stop rule
 
 The stages that produce a
-mesh, in order, are the four that return one:
+mesh, in order, are the five of the list - four that return one mesh, and
+the split, which returns the layout:
 
 ```
-S         = [ octree, castellate, snap, layers ]                      (92.55)
+S         = [ octree, castellate, snap, split, layers ]               (92.55)
 
 stopAfter = s in S:  the stages up to and including s are run, the mesh
                      s returned is written, and the run exits 0
 stopAfter absent:    every stage in S is run
 ```
+
+The fifth entry, the split (§92.15.4), returns no mesh of its own - it
+returns the layout - and a run with no `castellation.bodies` records it and
+skips it (`{"skipped": true, "n_regions": 1}`, `seconds` 0), so every
+banner's denominator is 5 whether or not the run splits. A run stopped at
+`-stopAfter snap` with bodies declared has not split yet: it writes ONE mesh,
+the body's cells inside it, no wall patch for the body.
 
 Stage 0 (the background block) and stage 2 (the 2:1 balance) are not in (92.55)
 because neither returns a mesh of its own: stage 0 is the block the octree
@@ -26698,7 +26804,7 @@ changes is how much geometry the mesh has, not whether it is solvable.
 time after:
 
 ```
-=== stage 2/4  castellate ===
+=== stage 2/5  castellate ===
 --- castellate: 412.8 s
 ```
 
@@ -26754,6 +26860,8 @@ input a plan for the next run has. The driver writes, beside the case:
                 "n_boundary_faces",
                 "patches": [ { "name", "kind", "size" }, ... ] },
   "quality":  { the measured numbers of §92.3's report, gate by gate },
+  "layout":   null, or §92.15.6's { "manifest", "regions", "interfaces" }
+                when the split ran - "mesh"/"quality" stay the fluid's,
   "total_seconds",
   "config":   the config exactly as it parsed }                       (92.57)
 ```
@@ -26762,6 +26870,33 @@ input a plan for the next run has. The driver writes, beside the case:
 records is the config the run actually used, defaults filled in, which is the
 thing a second run has to match. The patch list is the FINAL one, after
 (92.56).
+
+Two stage rows carry numbers read off a stage's output that change nothing in it. The snap row adds
+`h_f_m`, the finest cell size `base_size / 2^max_level`; `p99_over_h` and `max_over_h`, §92.11's p99 and
+largest residual over B divided by it; `n_pinned_boundary`, the pinned points that lie in B of (92.27) —
+`n_pinned` also counts the non-wall points of every cell an abandoned iterate of (92.31) pins, and the
+domain points (92.30) pins, so it can exceed `n_boundary_points` and this count cannot; and `area_ratio`,
+one row per surface patch, `{ "name", "stl_area_m2", "castellated_area_m2", "snapped_area_m2",
+"castellated_ratio", "ratio" }`: the area (92.32) measures — the patch's wall faces plus the region
+interfaces it assigns to the patch — before the first move and again on the points the stage returns,
+each over the patch's own surface area, and null when that area is zero. The octree row adds
+`gate_passed` and `max_non_orth_deg`, the verdict and the worst face of §92.3's measurement of the leaf
+mesh; a full run records them and does not refuse on them. The snap row also carries `feature_capture`,
+`{ "sharp_length_m", "captured_length_m", "tol_m" }`: (92.62) of §92.12 at `tol_m = 0.1 h_f`, measured on
+the points the stage returns, and null only when §92.12's extraction refuses the run's `feature_angle_deg`.
+
+The layers row of each layer patch — on the single-mesh path and in each region's `patches` — carries
+`area`, (92.50)'s `sum A_f` in m² (on a dropped patch, the input mesh's own area of the patch), and
+`area_frac_tau_ge`, three rows `{ "beta", "area_frac" }` at beta = 0.5, 0.8 and 0.95, each
+`sum { A_f : tau_f >= beta - 1e-9 } / sum A_f`: the share of the patch's area whose face got at least
+that fraction of `T`. The sum runs over the same faces in the same order as `full`, so the same share at
+beta = 1 is `full_area_frac` bit for bit; a dropped patch reports 0 at every beta. Like the snap and
+octree additions, they are read off the stage's report and change nothing in the mesh.
+The layers row - on the single-mesh path and in each region's row - also carries `ladder`, §92.13's
+trace, `[ { "ladder", "round", "rung", "patches", "gates": [ { "gate", "n_failed" } ], "g4_level_n",
+"outcome", "give_up", "dropped" } ]`, empty on a skipped stage or region; and each layer patch row
+carries `drop_cause`, §92.13's class of the give-up that dropped it, or null. Both are read off the
+ladders and change nothing in the mesh.
 
 `identity` is the mesh's own name and the run's. `mesh_id` is
 `"m_" + fnv1a64(<case_dir as configured, '\' -> '/', no trailing '/'> + newline + <name>)` in 16 hex digits — deterministic,
@@ -26784,7 +26919,11 @@ and `-check` is how a mesh that already exists is judged.
 `-check` runs §92.3's gate, with this config's
 thresholds, on a polyMesh that already exists — the config's own
 `output.case_dir` by default, or a directory named after the flag. It measures
-and prints and does not write. It is the mode that answers "is this mesh
+and prints and does not write. When the directory holds a written layout -
+`mesh/regions.json`, §92.15.6 - it iterates the layout instead of one mesh:
+`io::regions::load` applies docs/10 §C's R1-R6 and its pairing refusals,
+§92.3's gate runs on every region's polyMesh, and each interface's three
+pairing worsts print. Otherwise it is the mode that answers "is this mesh
 solvable", about a mesh from this mesher, from `ofgpu-convert-mesh`, or from
 anywhere else.
 
@@ -26805,12 +26944,260 @@ anywhere else.
 | Case | The test |
 |---|---|
 | a box with a sphere in it, full pipeline | the run reaches the layer stage, writes `constant/polyMesh` and the summary, and exits 0; `-check` on the written case passes with the same numbers the run printed |
+| a box with a body declared | the run writes `mesh/regions.json` and two polyMesh directories; `-check` loads and pairs them (§92.15.6) |
 | the same config with `-stopAfter octree` | a mesh with no wall patch is written, its cell count is the leaf count, and the summary's `stopped_after` is `"octree"` |
 | `-stopAfter features` against `-stopAfter snap` | the two runs write identical `points` files |
 | a `patch_names` key that names no patch | refused by name, and `constant/polyMesh` does not exist afterwards |
 | two `patch_names` values that collide | refused naming both source patches |
 | a config whose gate cannot be met | exit 1, §92.3's refusal on stderr, and no `constant/polyMesh` and no `<name>_summary.json` written |
 | the summary's `mesh.patches` | equals the boundary file's patches, name for name and size for size |
+
+---
+
+### 92.15 Regions: the cells a declared body keeps, the interface they share, and the meshes the run writes
+
+The implementation-level companion to the regions work, appended after
+§92.14 - every citation already pointing into §92.1-§92.14 keeps its number.
+Until the run took a `castellation.bodies` entry, the automesher could mesh a
+body only by deleting it: (92.23) removes every leaf whose centre is inside
+the surface, which is right for a building the wind flows around and wrong
+for a body a conjugate case must SOLVE on (§47.4). A conjugate mesh needs two
+things that deletion cannot give - the body's own cells, and the two sides of
+the interface being THE SAME FACES, docs/10 §C R2's pairing by index, face k
+to face k, which two independent face sets meet only by luck. This section
+specifies the path that keeps a declared closed body as a region of its own:
+the castellation walk runs once per region, snap moves the shared interface
+points onto the body's own triangles, the split into one polyMesh per region
+comes AFTER snap, layers grow per region, and the run writes §97's layout
+(`mesh/regions.json` and one `<region>/polyMesh` per region, docs/10 §C).
+
+The whole path is `castellation.bodies`' decision. Empty - the default, and
+every config written before this section - is today's mesher exactly, bit for
+bit: four pinned fingerprints hold that
+(`the_castellated_mesh_without_bodies_is_pinned`, cube `0x1941cd5cc045b35d`
+and sphere `0x4133037a9c4931e8`; `the_snapped_mesh_without_bodies_is_pinned`,
+`0x0637e67a829f905e`; `the_full_run_without_bodies_is_pinned`,
+`0xaaab7b6052cce5be`), and with bodies empty `region_of_cell` is all `-1`
+and `body_names` is empty.
+
+#### 92.15.1 A declared body, and the region of a leaf
+
+A `castellation.bodies[]` entry is `{ name, patches }`: `patches` are the STL
+solid names whose triangles together form ONE closed shell, and `name` is the
+region's name in the layout and the prefix of its interface patches
+(`<name>_to_fluid`). A body may take its solid's own name - `sphere` over
+patch `sphere` is the normal case - but `fluid` and the six domain patch
+names are refused, and a patch belongs to one body only. The region of a leaf
+centre `c(P)`:
+
+```
+region(P) = k     if inside(body_k, c(P)) for the one declared body k
+                  (two bodies claiming one leaf is refused, below)
+          = -1    if not inside(surf, c(P))                           (92.58)
+          = removed otherwise - (92.23)'s centre test on the MERGED
+            surface, unchanged; a body's own leaves are exempt from it
+```
+
+Each body is classified on its OWN sub-surface - the triangles of its
+patches alone, `octree::band_surfaces`' pattern - by `surface::classify`'s
+`classify_points` (`castellate::classify_regions`, §23.3's pipeline called
+and not re-implemented). Four refusals, each by name:
+
+- a body naming a patch the surface lacks. The config never sees the STL, so
+  this fires at castellation, not at validation;
+- a body whose shell is not closed - `edge_defects` must be `(0, 0)` on the
+  sub-surface. No permissive path: `require_closed`'s `-permissive` downgrade
+  is the bin's for the MERGED surface, never for a body;
+- a leaf inside two bodies. The MERGED parity cannot see this - a sphere
+  wholly inside a cube reads OUTSIDE in the merged answer, two crossings - so
+  the overlap check reads the per-body answers, not the merged one
+  (`classify_regions_names_the_body_and_refuses_what_it_cannot`: the cube
+  `[2,6]^3` in `[0,8]^3` gives 64 leaves region 0, 448 region `-1`, none
+  `-2`);
+- a body holding NO leaf centre: it is finer than the cells that reached it,
+  and the refusal says to raise the level near its patches or remove it.
+
+#### 92.15.2 The walk, once per region
+
+Each region is a mesh of its own after the split, so (92.24)'s removal walk
+runs once per region - the fluid with the spec as written, each body with
+`keep_region = "largest"` and no seed - and W1's pinch (92.25) and W2's
+component rule (92.4) hold on every region's own boundary, the interface
+included:
+
+```
+K_r = the fixed point of (92.24) on { P : region(P) = r }
+refused: a cell (92.24) would remove from the union no K_r removed    (92.59)
+```
+
+The second line of (92.59) is a CHECK, not a repair - inherited from
+§92.10's W1, which only removes: after the per-region walks, the union of
+what survived is scanned once with `keep_set` as it stands, and a pinch or a
+disconnected component that appears only ACROSS regions - a body pinched
+against the fluid, a body touching no fluid cell - is refused by name and the
+run stops. What a body lost on its own mask is counted into
+`Removed::per_body` (so a report reads `per_body [("blob", 1)]` beside the
+totals), and what the merged classification marked for deletion but the body
+keeps is `kept_in_bodies`, so `solid` stays "removed as solid" exactly as
+§92.10's table says. `a_body_hourglass_loses_one_cell_of_the_body` walks an
+hourglass body and it loses exactly one cell - `per_body [("blob", 1)]`,
+`pinch` 1, `solid` 2, 5 cells kept;
+`a_body_disconnected_from_the_fluid_is_refused` refuses a 9-cell body that
+touches no fluid cell with `not face-connected`.
+
+#### 92.15.3 The interface stays internal, and snap moves it
+
+The face between a fluid cell and a body cell is INTERNAL in the castellated
+mesh: the face walk of §92.10 keeps every face whose two cells survived,
+whatever their regions. That is the whole reason the split can come later -
+nothing about the interface exists yet except which cells own it. Nothing was
+removed either: the kept cube of `a_declared_cube_is_kept_as_its_own_region`
+castellates to the full 8x8x8 block, 512 cells and 1344 internal faces, with
+`wall_faces` 0 and no wall patch for the body.
+
+Snap gains the interface points. §92.11's set `B` of boundary points becomes:
+
+```
+B = { i : point i is carried by a wall face, or by an internal face whose
+          two cells lie in different regions }                        (92.60)
+```
+
+(`snap::snap_regions`, the one function; `snap` is it with no regions given.)
+The interface faces also count toward (92.32)'s area, under (92.26)'s
+nearest-triangle patch, so a kept body far finer than a cell is refused by
+name like any unresolved geometry -
+`a_kept_body_finer_than_a_cell_is_refused_by_area`: 6 m^2 of wall against
+0.478 m^2 of geometry, ratio 12.5 over `max_area_ratio` 4. Why points, not
+new faces: the two sides SHARE the points, so the interface is conformal by
+construction and §47.4's pairing - docs/10 §C R2's face k to face k - holds
+bit for bit. `a_kept_sphere_is_snapped_along_its_interface` moves 2594
+boundary points onto the sphere at p99 residual 6.498e-3 (gate < 0.06) and
+conserves the box volume to 512.000000 at 1e-9 relative - nothing was
+removed - split 409.155474 fluid / 102.844526 body, 0.057 % and 0.227 % off
+the analytic parts.
+
+#### 92.15.4 The split, after snap
+
+(92.55) above has five entries now, and the split is the one that returns a
+LAYOUT instead of a mesh. It runs on the SNAPPED mesh, before layers - so a
+stack grown on one side can never face a split that would have to cut through
+it. The zones are the regions of (92.58), cell ids ascending:
+
+```
+zones = [ ("fluid", { c : region(c) = -1 }),
+          (name_k, { c : region(c) = k }) for each declared body k ]  (92.61)
+```
+
+through `io::regions::split_by_zones` (§97, docs/10 §C R1-R3, R5, R7): the
+fluid is `regions[0]`, each region's cell numbering is its own, and the
+interface patches are `fluid_to_<name_k>` / `<name_k>_to_fluid`, type
+`patch`, the k-th face of one the k-th face of the other with reversed
+winding. Each region passes G1-G7 on its OWN mesh - G3's one-region rule is
+what the split exists to deliver. With `castellation.bodies` empty the split
+stage is RECORDED and SKIPPED - counts `{"skipped": true, "n_regions": 1}`,
+`seconds` 0 - so every banner's denominator is 5 whether or not the run
+splits, and a no-body log reads against the same stage list as a body log.
+The cube of §92.15.3 splits into regions `["fluid", "cube"]`, kinds
+`[fluid, solid]`, the cube region 8 cells, the interface 24 faces
+(`a_declared_body_becomes_its_own_region`). `-stopAfter snap` on a body run
+stops BEFORE the split and writes ONE mesh - the body's cells inside it, no
+wall patch for the body, `layout` null
+(`stopping_before_and_after_the_split`).
+
+#### 92.15.5 Layers, per region
+
+`layers.patches` names the SPLIT names - `fluid_to_<body>` and
+`<body>_to_fluid` - not the STL solid's name: after the split no region's
+mesh carries a patch called `cube`, so a config that says `cube` is refused
+naming every region's patches
+(`a_layer_patch_that_no_region_has_is_refused`). One `LayerSpec` serves
+every region: a patch only one region has grows layers there, and the other
+region's row says `skipped`. The level-0 faces of a stack keep the input
+faces' point lists and coordinates (§92.13), on either side, so the
+interface is still face k to face k after BOTH sides grow - measured at
+162 = 3 x 54 layer cells on each side, `dropped` null, zero retreats, and
+the layered layout's pairing worsts 0.000e0
+(`layers_grow_on_both_sides_of_the_interface`). `output.patch_names` is
+applied per region and NEVER to an interface patch: the interface names are
+the layout's contract (docs/10 §C R3), and a key that names one is refused
+(`patch_names_apply_per_region_and_never_to_an_interface`).
+
+**A body whose shell lies ON the cell planes needs its feature attraction
+and smoothing OFF.** This is a measured limitation, stated the way §92.13
+states what its stage inherits. The driver's layer fixture
+(`driver::tests::planar_config`) runs the body case with `SnapSpec {
+feature_tolerance: 0.0, smoothing_passes: 0, .. }`, and the reason is
+measured, not designed: on such a body the interface is already on the
+surface, and the DEFAULT feature attraction and smoothing still slide the
+interface points tangentially along it - 26 edge and 6 corner attractions,
+`max_step` 9e-4, residual 0.026, every snap gate still passing - which moves
+them off the cell planes §92.13's extrusion reads, and both sides then grow
+0 layer cells. With the attraction off, both sides grow 162. Neither
+`layers.rs` nor `snap.rs` was changed for this: a tangential slide is a
+legal move of every rule §92.11 states - the dead band (92.28) bounds it and
+the gates pass - and it is not a defect either stage could see. The fixture
+turns the two knobs off; a user whose body sits on the cell planes does the
+same, and this section does not call that a fix.
+
+#### 92.15.6 What the run writes, and `-check`
+
+With bodies declared the run writes the layout and ONLY the layout
+(docs/10 §C, §97): `<case_dir>/mesh/regions.json` and
+`<case_dir>/mesh/<region>/polyMesh` per region, through
+`io::regions::write_layout` - and NO `constant/polyMesh` on this path. The
+summary's (92.57) gains `"layout"` after `"quality"`: `null` on a no-body run
+and on any run stopped before the split; on a body run the object, quoting
+the keys the driver writes - `"manifest"` (`"mesh/regions.json"`),
+`"regions"`, each with `"name"`, `"kind"` (`fluid`/`solid`), `"n_points"`,
+`"n_cells"`, `"n_internal_faces"`, `"n_boundary_faces"`, `"patches"`
+(`name`, `kind`, `size`) and its OWN full quality block - and
+`"interfaces"`, each with the `"regions"` pair, the `"patches"` pair and
+`"faces"`. The summary's top-level `"mesh"` and `"quality"` stay the FLUID
+region's, so every reader of one mesh keeps working
+(`the_summary_carries_the_layout`).
+
+`-check` on a case that holds `mesh/regions.json` iterates the LAYOUT, not
+one mesh: `io::regions::load` applies docs/10 §C R1-R6 and its own pairing
+refusals, then §92.3's gate runs on every region's polyMesh, each interface
+prints its three pairing worsts, and any region that fails fails the run.
+`the_layout_of_a_body_run_loads_and_pairs` measures the written cube layout
+at worst centroid 3.948e-15, worst area 4.026e-16, worst normal 2.220e-16 -
+all under the 1e-12 the test asserts.
+
+**What must hold**
+
+| Claim | Why it holds |
+|---|---|
+| the no-body path is bit for bit today's mesher | the four pins of this section's second paragraph, constants in their tests; `region_of_cell` all `-1`, `body_names` empty |
+| a run's stages are the five of (92.55) | the split is recorded-and-skipped without bodies; `Stage::parse` accepts `split` and its refusal names six spellings |
+| a kept body survives castellation | (92.58) and (92.59); `per_body` and `kept_in_bodies` keep §92.10's totals honest; a cross-region pinch is refused by name, not repaired |
+| the interface is conformal by construction | both sides share the snapped points (92.60); R2's pairing measured at 3.948e-15 / 4.026e-16 / 2.220e-16 |
+| every region passes the gate alone | the split runs §92.3's check per region and refuses by region name; G3 is one region per region mesh |
+| layers survive on both sides of an interface | 3 x 54 per side, `dropped` null, layered pairing worsts 0.000e0 |
+| a refused run writes nothing | §92.14.4 unchanged: the layout is written by the bin, only after `run` returns Ok |
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| the four no-body fingerprints | `the_castellated_mesh_without_bodies_is_pinned` (`0x1941cd5cc045b35d`, `0x4133037a9c4931e8`), `the_snapped_mesh_without_bodies_is_pinned` (`0x0637e67a829f905e`), `the_full_run_without_bodies_is_pinned` (`0xaaab7b6052cce5be`) |
+| a declared cube kept as a region | `a_declared_cube_is_kept_as_its_own_region` - 512 cells, `removed.solid` 0, `wall_faces` 0, `wall_patches [("cube", 0)]`, 64 cells in region 0, `n_regions` 1, `neighbour.len()` 1344 |
+| a body hourglass, and a body touching no fluid | `a_body_hourglass_loses_one_cell_of_the_body` - `per_body [("blob", 1)]`, `pinch` 1, `solid` 2, 5 cells kept; `a_body_disconnected_from_the_fluid_is_refused` |
+| the kept sphere snapped along its interface | `a_kept_sphere_is_snapped_along_its_interface` - 2594 points, p99 6.498e-3 (< 0.06), total 512.000000 (1e-9 relative), fluid 409.155474 (0.057 %), body 102.844526 (0.227 %) |
+| a kept body finer than a cell | `a_kept_body_finer_than_a_cell_is_refused_by_area` - 6 m^2 against 0.478 m^2, ratio 12.5 over 4, (92.32) in the refusal |
+| the split of the cube | `a_declared_body_becomes_its_own_region` - regions `["fluid", "cube"]`, the cube region 8 cells, the interface 24 faces, patches `[xMin, xMax, yMin, yMax, zMin, zMax, fluid_to_cube]` / `[cube_to_fluid]` |
+| the layout loads and pairs | `the_layout_of_a_body_run_loads_and_pairs` - worsts 3.948e-15 / 4.026e-16 / 2.220e-16, `interfaces[0].faces == Some(24)` |
+| layers on both sides | `layers_grow_on_both_sides_of_the_interface` - 162 = 3 x 54 each side, `dropped` null, worsts 0.000e0 |
+| renames and refusals by name | `patch_names_apply_per_region_and_never_to_an_interface`; `a_layer_patch_that_no_region_has_is_refused`; `a_region_slice_of_the_wrong_length_is_refused` (a `region_of_cell` slice of the wrong length, refused with both lengths) |
+
+What this section does NOT claim: no solver in this tree reads
+`regions.json` - docs/10 §C R8 is chain R's K1, and until it lands a layout
+is written and checked, not solved; a pinch or a disconnected component
+across regions is REFUSED, not repaired; one `LayerSpec` serves every
+region, so no per-region thickness; `sections.py` has no `--region` - it
+takes one `<region>/polyMesh` directory per plot; and §92.15.5's
+planar-body limitation stands as stated - the fixture turns the attraction
+off, the mesher does not.
 
 ---
 

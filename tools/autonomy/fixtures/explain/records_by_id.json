@@ -1,0 +1,3120 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py); WL-SHARP-FT0 refuse added 2026-09-26 (FEAT-CONSTRAINT: preflight on cubep_nofeat's config with the cubep fingerprint)",
+ "records": [
+  {
+   "cite": "gates.json cell_budget; docs/15 §D.1 F5",
+   "edits": [],
+   "formula": "n_leaves <= cell_budget",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-BUDGET: the octree probe has 68454 leaves <= cell_budget 2000000",
+   "rule_id": "PF-BUDGET",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "octree.n_leaves",
+    "op": "<=",
+    "source": "gates.json",
+    "threshold": 2000000,
+    "value": 68454
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "gates.json cell_budget; docs/15 §D.1 F5",
+   "edits": [],
+   "formula": "n_leaves <= cell_budget",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-BUDGET: the octree probe has 3000000 leaves > cell_budget 2000000 (gates.json; docs/15 §D.1 F5)",
+   "rule_id": "PF-BUDGET",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "octree.n_leaves",
+    "op": "<=",
+    "source": "gates.json",
+    "threshold": 2000000,
+    "value": 3000000
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "automesher.rs:111-253, mod.rs:526 (validate), serde deny_unknown_fields",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-CONFIG: the mesher refuses this config: castellation.seed_point: keep_region = \"seed\" needs a seed_point, got none",
+   "rule_id": "PF-CONFIG",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "/castellation/seed_point",
+    "op": "==",
+    "source": "ofgpu-automesher -dryRun, mirrored",
+    "threshold": "the mesher's parser and validator",
+    "value": null
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "automesher.rs:509 (stage 0); SPEC-LIT §92.2",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-DOMAIN: the extent, base_size or the surface bbox is missing or malformed",
+   "rule_id": "PF-DOMAIN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "automesher.rs:509 (stage 0); SPEC-LIT §92.2",
+   "edits": [],
+   "formula": "span or margin per axis",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-DOMAIN: the surface sits inside the domain with margin or spans it on every axis",
+   "rule_id": "PF-DOMAIN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/domain/extent",
+    "op": "==",
+    "source": "automesher.rs:509 (stage 0)",
+    "threshold": "span or one base_size of margin, per axis",
+    "value": [
+     -1.7584000000000002,
+     3.7680000000000007,
+     -1.6485,
+     1.6171000000000004,
+     -1.5072,
+     1.7584000000000004
+    ]
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "automesher.rs:509 (stage 0); SPEC-LIT §92.2",
+   "edits": [],
+   "formula": "span or margin per axis",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-DOMAIN: on y the surface [-0.141, 0.141] neither sits inside the domain [-0.166, 1.617] with one base_size (0.251) of margin nor spans past it on both sides (automesher.rs:509, SPEC-LIT §92.2 stage 0)",
+   "rule_id": "PF-DOMAIN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "/domain/extent",
+    "op": "<=",
+    "source": "automesher.rs:509 (stage 0)",
+    "threshold": [
+     -0.39250000000000007,
+     0.39250000000000007
+    ],
+    "value": [
+     -0.16572149590508634,
+     1.6171000000000004
+    ]
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §C L0 (c); tools/autonomy/schema/knobs.json",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-FLAGS: no forbidden flag on the command line",
+   "rule_id": "PF-FLAGS",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "argv",
+    "op": "not_in",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": [
+     "-permissive"
+    ],
+    "value": []
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L0 (d); tools/autonomy/schema/knobs.json",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-KNOBS: every settings leaf is whitelisted and in range, the patch names are the STL's own, and the mesher's own parser takes the config",
+   "rule_id": "PF-KNOBS",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/",
+    "op": "in",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": "schema/knobs.json whitelist",
+    "value": "the config's settings leaves"
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L0 (e); docs/15 §B fact 4",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-NONORTH: the refinement block is malformed; no floor check",
+   "rule_id": "PF-NONORTH",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "docs/15 §C L0 (e); docs/15 §B fact 4",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-NONORTH: max_non_orth_deg 70.0 clears the 25.2394 deg floor at refinement level 4",
+   "rule_id": "PF-NONORTH",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/quality/max_non_orth_deg",
+    "op": ">=",
+    "source": "docs/15 §B fact 4",
+    "threshold": 25.239401820678918,
+    "value": 70.0
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L0 (e); docs/15 §B fact 4",
+   "edits": [],
+   "formula": "max_non_orth_deg >= atan(sqrt(2)/3)",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-NONORTH: quality.max_non_orth_deg = 20.0 is below the 25.2394 deg floor a 2:1 octree transition sets (atan(sqrt(2)/3); docs/15 §B fact 4): every refined mesh would fail G4",
+   "rule_id": "PF-NONORTH",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "/quality/max_non_orth_deg",
+    "op": ">=",
+    "source": "docs/15 §B fact 4",
+    "threshold": 25.239401820678918,
+    "value": 20.0
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §C L0 (d); preflight-only: -dryRun does not check patch names (automesher.rs:433)",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-PATCH: /layers/patches: [\"nosuch\"] not in the STL's patches (body)",
+   "rule_id": "PF-PATCH",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "/layers/patches",
+    "op": "in",
+    "source": "tools/geom/stl_repair.py patches",
+    "threshold": [
+     "body"
+    ],
+    "value": [
+     "nosuch"
+    ]
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §C L0 (b), §H: the loop never loosens the gate that judges it (SPEC-LIT §92.3)",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-QUALITY: the quality block is byte-equal to the reference",
+   "rule_id": "PF-QUALITY",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/quality",
+    "op": "==",
+    "source": "schema.canonical_sha256",
+    "threshold": "e40671ae76c7f1db554f27d631d374a46dc3095adf0f1f259bdd8bb34eb6816a",
+    "value": "e40671ae76c7f1db554f27d631d374a46dc3095adf0f1f259bdd8bb34eb6816a"
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L0 (b), §H: the loop never loosens the gate that judges it (SPEC-LIT §92.3)",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-QUALITY: max_non_orth_deg 34.88545807113026 != reference 70.0",
+   "rule_id": "PF-QUALITY",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/quality",
+    "op": "==",
+    "source": "the config against REFERENCE_QUALITY",
+    "threshold": {
+     "max_closure": 1e-10,
+     "max_cond": 10000.0,
+     "max_non_orth_deg": 70.0,
+     "min_thickness_ratio": 0.05,
+     "report_non_orth_deg": 60.0
+    },
+    "value": {
+     "max_non_orth_deg": 34.88545807113026
+    }
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §C L0 (a); tools/geom/stl_repair.py before/orientation; automesher.rs:433",
+   "edits": [],
+   "formula": "",
+   "inputs": [
+    {
+     "name": "surface 0 <work>/D-1-002.stl",
+     "unit": "",
+     "value": {
+      "flipped_components": 0,
+      "non_manifold_edges": 0,
+      "open_edges": 0,
+      "reoriented_triangles": 0,
+      "triangles": 1776
+     }
+    },
+    {
+     "name": "bbox",
+     "unit": "m",
+     "value": [
+      0.0,
+      -0.1413,
+      0.0,
+      0.5338,
+      0.1413,
+      0.3768
+     ]
+    }
+   ],
+   "layer": "preflight",
+   "message": "PF-SURFACE: 1 surface(s) closed and consistently wound",
+   "rule_id": "PF-SURFACE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/input/surfaces",
+    "op": "==",
+    "source": "tools/geom/stl_repair.py --json",
+    "threshold": 1,
+    "value": 1
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L0 (a); tools/geom/stl_repair.py before/orientation; automesher.rs:433",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-SURFACE: input.surfaces: at least one STL is required",
+   "rule_id": "PF-SURFACE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "/input/surfaces",
+    "op": "not_in",
+    "source": "the config",
+    "threshold": "a non-empty list of {path: str}",
+    "value": []
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "layers.rs:1292-1316 (92.51); docs/15 §D.3 caution 1",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-THIN: first_thickness or min_thickness_ratio is not a positive number",
+   "rule_id": "PF-THIN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "layers.rs:1292-1316 (92.51); docs/15 §D.3 caution 1",
+   "edits": [],
+   "formula": "3 * t1 / h >= min_thickness_ratio",
+   "inputs": [
+    {
+     "name": "t1_m",
+     "unit": "m",
+     "value": 0.0006237
+    },
+    {
+     "name": "h_m",
+     "unit": "m",
+     "value": 0.015700000000000002
+    },
+    {
+     "name": "ratio",
+     "unit": "",
+     "value": 0.11917834394904457
+    },
+    {
+     "name": "source",
+     "unit": "",
+     "value": "predicted"
+    },
+    {
+     "name": "level",
+     "unit": "",
+     "value": 4
+    },
+    {
+     "name": "patch",
+     "unit": "",
+     "value": "body"
+    }
+   ],
+   "layer": "preflight",
+   "message": "PF-THIN: 3 * 0.0006237 / 0.015700000000000002 = 0.11917834394904457 >= min_thickness_ratio = 0.05",
+   "rule_id": "PF-THIN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/layers/first_thickness",
+    "op": ">=",
+    "source": "the config against min_thickness_ratio",
+    "threshold": 0.05,
+    "value": 0.0006237
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "layers.rs:1292-1316 (92.51); docs/15 §D.3 caution 1",
+   "edits": [],
+   "formula": "3 * t1 / h >= min_thickness_ratio",
+   "inputs": [
+    {
+     "name": "t1_m",
+     "unit": "m",
+     "value": 0.0006237
+    },
+    {
+     "name": "h_m",
+     "unit": "m",
+     "value": 0.25120000000000003
+    },
+    {
+     "name": "ratio",
+     "unit": "",
+     "value": 0.007448646496815286
+    },
+    {
+     "name": "source",
+     "unit": "",
+     "value": "predicted"
+    },
+    {
+     "name": "level",
+     "unit": "",
+     "value": 0
+    },
+    {
+     "name": "patch",
+     "unit": "",
+     "value": "body"
+    }
+   ],
+   "layer": "preflight",
+   "message": "PF-THIN: 3 * 0.0006237 / 0.25120000000000003 = 0.007448646496815286 < min_thickness_ratio = 0.05 (SPEC-LIT §92.51); every layer cell would fail G5 (h: base_size/2**L on a castellated wall - a prediction on a snapped one)",
+   "rule_id": "PF-THIN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "/layers/first_thickness",
+    "op": ">=",
+    "source": "the config against min_thickness_ratio",
+    "threshold": 0.05,
+    "value": 0.0006237
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §D.3 (R-WIN); schema.a_priori_wall (SPEC-LIT §32.5.6)",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "PF-YPLUS: no usable flow spec, growth, cell_frac, min_thickness_ratio or base_size",
+   "rule_id": "PF-YPLUS",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "docs/15 §D.3 (R-WIN); schema.a_priori_wall (SPEC-LIT §32.5.6)",
+   "edits": [],
+   "formula": "lo <= base/2**L <= hi for some L",
+   "inputs": [
+    {
+     "name": "t1_m",
+     "unit": "m",
+     "value": 0.0006237177534241192
+    },
+    {
+     "name": "S",
+     "unit": "",
+     "value": 12.572118712421178
+    },
+    {
+     "name": "lo",
+     "unit": "m",
+     "value": 0.015682907278185335
+    },
+    {
+     "name": "hi",
+     "unit": "m",
+     "value": 0.037423065205447144
+    },
+    {
+     "name": "landing",
+     "unit": "level",
+     "value": [
+      3,
+      4
+     ]
+    }
+   ],
+   "layer": "preflight",
+   "message": "PF-YPLUS: the window [0.015682907278185335, 0.037423065205447144] m is landed by level(s) [3, 4]",
+   "rule_id": "PF-YPLUS",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "landing levels",
+    "op": ">=",
+    "source": "docs/15 §D.3 (R-WIN)",
+    "threshold": 1,
+    "value": [
+     3,
+     4
+    ]
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §D.3 (R-WIN); schema.a_priori_wall (SPEC-LIT §32.5.6)",
+   "edits": [],
+   "formula": "t1*S/cell_frac <= h <= 3*t1/min_thickness_ratio",
+   "inputs": [
+    {
+     "name": "t1_m",
+     "unit": "m",
+     "value": 0.0006237177534241192
+    },
+    {
+     "name": "S",
+     "unit": "",
+     "value": 906.5242543620445
+    },
+    {
+     "name": "lo",
+     "unit": "m",
+     "value": 1.1308305427103384
+    },
+    {
+     "name": "hi",
+     "unit": "m",
+     "value": 0.037423065205447144
+    },
+    {
+     "name": "landing",
+     "unit": "level",
+     "value": []
+    }
+   ],
+   "layer": "preflight",
+   "message": "PF-YPLUS: the §D.3 window is empty at n = 40, g = 1.126: t1*S/cell_frac = 1.1308305427103384 m > 3*t1/min_thickness_ratio = 0.037423065205447144 m (y+ = 1 a priori, t1 = 0.0006237177534241192 m)",
+   "rule_id": "PF-YPLUS",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/layers/growth",
+    "op": ">",
+    "source": "docs/15 §D.3 (R-WIN)",
+    "threshold": 0.037423065205447144,
+    "value": 1.1308305427103384
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §C L1 R-BUDGET; gates.json cell_budget; docs/15 §D.1 F5; predict_cells calibrated on 11 octree probes 2026-09-24 (predicted/measured leaves 0.795-1.523)",
+   "edits": [
+    {
+     "from": 0.5,
+     "pointer": "/refinement/levels/0/bands/1/distance",
+     "to": 0.125
+    },
+    {
+     "from": 1.5,
+     "pointer": "/refinement/levels/0/bands/2/distance",
+     "to": 0.375
+    }
+   ],
+   "formula": "leaves = n_base + sum_l 7/8 * V_l / h_l^3, V_l = min(offset bbox, 2*A*d_l + 4/3*pi*d_l^3), d_l = the widest band at level >= l + one parent cell; + feature cells along the sharp edges; + n * A / h_wall^2 layer cells",
+   "inputs": [
+    {
+     "name": "cell_budget",
+     "unit": "cells",
+     "value": 2000000
+    },
+    {
+     "name": "target",
+     "unit": "cells",
+     "value": 1400000.0
+    },
+    {
+     "name": "ladder",
+     "unit": "cells",
+     "value": [
+      {
+       "far": 1.0,
+       "feature": false,
+       "predicted": 1845302,
+       "wall": 1.0,
+       "wall_level": 5
+      },
+      {
+       "far": 0.5,
+       "feature": false,
+       "predicted": 1506652,
+       "wall": 1.0,
+       "wall_level": 5
+      },
+      {
+       "far": 0.25,
+       "feature": false,
+       "predicted": 1365389,
+       "wall": 1.0,
+       "wall_level": 5
+      }
+     ]
+    },
+    {
+     "name": "predicted",
+     "unit": "cells",
+     "value": 1365389
+    }
+   ],
+   "layer": "rule",
+   "message": "R-BUDGET: the rules' bands predict 1845302 cells > 1400000; 2 rung(s) later (far-field bands first, then the wall band, then the feature bump, then the wall level) wall level 5, far x0.25, wall x1, feature bump dropped predicts 1365389 cells <= 1400000",
+   "rule_id": "R-BUDGET",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "predicted_cells",
+    "op": "<=",
+    "source": "rules.predict_cells (docs/15 §C R-BUDGET)",
+    "threshold": 1400000.0,
+    "value": 1845302
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L1 R-BUDGET; gates.json cell_budget; docs/15 §D.1 F5; predict_cells calibrated on 11 octree probes 2026-09-24 (predicted/measured leaves 0.795-1.523)",
+   "edits": [],
+   "formula": "leaves = n_base + sum_l 7/8 * V_l / h_l^3, V_l = min(offset bbox, 2*A*d_l + 4/3*pi*d_l^3), d_l = the widest band at level >= l + one parent cell; + feature cells along the sharp edges; + n * A / h_wall^2 layer cells",
+   "inputs": [
+    {
+     "name": "cell_budget",
+     "unit": "cells",
+     "value": 2000000
+    },
+    {
+     "name": "target",
+     "unit": "cells",
+     "value": 1400000.0
+    },
+    {
+     "name": "ladder",
+     "unit": "cells",
+     "value": [
+      {
+       "far": 1.0,
+       "feature": false,
+       "predicted": 91484,
+       "wall": 1.0,
+       "wall_level": 4
+      }
+     ]
+    },
+    {
+     "name": "predicted",
+     "unit": "cells",
+     "value": 91484
+    }
+   ],
+   "layer": "rule",
+   "message": "R-BUDGET: the predicted 91484 cells (68364 octree leaves, 0 feature, 23120 layer cells) fit 0.7 * cell_budget = 1400000; nothing is coarsened",
+   "rule_id": "R-BUDGET",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "predicted_cells",
+    "op": "<=",
+    "source": "rules.predict_cells (docs/15 §C R-BUDGET)",
+    "threshold": 1400000.0,
+    "value": 91484
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L1 R-CURV; features.py curvature_radius_p5_m",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "rule",
+   "message": "R-CURV: R-PLANE owns the wall level (it bounds h by r/8 already)",
+   "rule_id": "R-CURV",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "docs/15 §C L1 R-CURV; features.py curvature_radius_p5_m",
+   "edits": [
+    {
+     "from": 1.27,
+     "pointer": "/layers/growth",
+     "to": 1.0
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 6
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 5
+    },
+    {
+     "from": 2,
+     "pointer": "/refinement/levels/0/bands/2/level",
+     "to": 4
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/max_level",
+     "to": 6
+    }
+   ],
+   "formula": "h <= r / 8: the smallest L with base/2**L <= r/8, capped at max_level",
+   "inputs": [
+    {
+     "name": "r",
+     "unit": "m",
+     "value": 0.045439861015713866
+    },
+    {
+     "name": "h_max",
+     "unit": "m",
+     "value": 0.005679982626964233
+    },
+    {
+     "name": "h_before",
+     "unit": "m",
+     "value": 0.03125
+    },
+    {
+     "name": "h_after",
+     "unit": "m",
+     "value": 0.0078125
+    },
+    {
+     "name": "wall_level_before",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "wall_level_after",
+     "unit": "1",
+     "value": 6
+    },
+    {
+     "name": "capped",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "growth",
+     "unit": "1",
+     "value": 1.0
+    }
+   ],
+   "layer": "rule",
+   "message": "R-CURV: the 5th-percentile curvature radius is 0.04544 m, so h <= r/8 = 0.00568 m; wall level 4 -> 6 (h 0.03125 -> 0.007812 m) (capped at max_level 6: r/h = 5.82 < 8); growth 1.000; no growth fits cell_frac*h at this level (n*t1 = 0.005837 m > 0.003906 m): the cell_frac limiter will trim the stack",
+   "rule_id": "R-CURV",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.curvature_radius_p5_m / 8",
+    "op": "<",
+    "source": "features.py; docs/15 §C R-CURV",
+    "threshold": 0.03125,
+    "value": 0.005679982626964233
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L1 R-CURV; features.py curvature_radius_p5_m",
+   "edits": [],
+   "formula": "h <= r / 8: the smallest L with base/2**L <= r/8, capped at max_level",
+   "inputs": [
+    {
+     "name": "r",
+     "unit": "m",
+     "value": 0.9824990443076064
+    },
+    {
+     "name": "h_max",
+     "unit": "m",
+     "value": 0.1228123805384508
+    },
+    {
+     "name": "h",
+     "unit": "m",
+     "value": 0.03125
+    }
+   ],
+   "layer": "rule",
+   "message": "R-CURV: h = 0.03125 m <= r/8 = 0.1228 m already",
+   "rule_id": "R-CURV",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.curvature_radius_p5_m / 8",
+    "op": "<",
+    "source": "features.py; docs/15 §C R-CURV",
+    "threshold": 0.03125,
+    "value": 0.1228123805384508
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L1 R-DOM; docs/15 §B L4 recipe; automesher octree.rs:446 (n_a = round((hi - lo)/base_size))",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/domain/extent",
+     "to": [
+      -3.0,
+      7.0,
+      -3.0,
+      3.0,
+      -3.0,
+      3.0
+     ]
+    },
+    {
+     "from": null,
+     "pointer": "/domain/base_size",
+     "to": 0.5
+    }
+   ],
+   "formula": "base = 0.5 L_ref (4 decimals); extent = bbox - [3, 2.5, 2.5] L_ref and + [6, 2.5, 2.5] L_ref, floored/ceiled to multiples of base",
+   "inputs": [
+    {
+     "name": "l_ref",
+     "unit": "m",
+     "value": 1.0
+    },
+    {
+     "name": "base_size",
+     "unit": "m",
+     "value": 0.5
+    },
+    {
+     "name": "bbox",
+     "unit": "m",
+     "value": [
+      0.0,
+      1.0,
+      -0.25,
+      0.25,
+      -0.25,
+      0.25
+     ]
+    },
+    {
+     "name": "margins",
+     "unit": "m",
+     "value": [
+      3.0,
+      6.0,
+      2.5,
+      2.5,
+      2.5,
+      2.5
+     ]
+    },
+    {
+     "name": "n_base_cells",
+     "unit": "cells",
+     "value": 2880
+    }
+   ],
+   "layer": "rule",
+   "message": "R-DOM: base_size = 0.5 * L_ref = 0.5 m; domain = bbox + 3 L_ref upstream, 6 L_ref downstream and 2.5 L_ref on each side, on multiples of base_size: 20 x 12 x 12 = 2880 base cells",
+   "rule_id": "R-DOM",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.bbox",
+    "op": ">=",
+    "source": "features.py bbox; docs/15 §C R-DOM",
+    "threshold": [
+     3.0,
+     6.0,
+     2.5,
+     2.5,
+     2.5,
+     2.5
+    ],
+    "value": [
+     0.0,
+     1.0,
+     -0.25,
+     0.25,
+     -0.25,
+     0.25
+    ]
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L1 R-FEAT; docs/15 §K G-PILOT caution 1",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "rule",
+   "message": "R-FEAT: R-PLANE owns this body: its edges lie on lattice lines and the attraction is off",
+   "rule_id": "R-FEAT",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "docs/15 §C L1 R-FEAT; docs/15 §K G-PILOT caution 1; features.py sharp_edge_length_m",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/feature_level",
+     "to": 6
+    },
+    {
+     "from": 5,
+     "pointer": "/refinement/max_level",
+     "to": 6
+    }
+   ],
+   "formula": "feature_level = wall level + 1 when sharp_edge_length_m > 0",
+   "inputs": [
+    {
+     "name": "sharp_edge_length_m",
+     "unit": "m",
+     "value": 13.12100723220657
+    },
+    {
+     "name": "feature_angle_deg",
+     "unit": "deg",
+     "value": 30.0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 5
+    },
+    {
+     "name": "feature_level",
+     "unit": "1",
+     "value": 6
+    }
+   ],
+   "layer": "rule",
+   "message": "R-FEAT: 13.12 m of sharp edge at 30 deg, so feature_level = wall level + 1 = 6. snap.feature_tolerance stays at its default 0.5: 0 would switch the feature attraction off and leave the edges unsnapped (docs/15 §K G-PILOT caution 1; G-FID guards it)",
+   "rule_id": "R-FEAT",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.sharp_edge_length_m",
+    "op": ">",
+    "source": "features.py",
+    "threshold": 0.0,
+    "value": 13.12100723220657
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L1 R-FEAT; features.py sharp_edge_length_m",
+   "edits": [],
+   "formula": "feature_level = wall level + 1 when sharp_edge_length_m > 0",
+   "inputs": [
+    {
+     "name": "sharp_edge_length_m",
+     "unit": "m",
+     "value": 0.0
+    }
+   ],
+   "layer": "rule",
+   "message": "R-FEAT: no sharp edge at 30 deg",
+   "rule_id": "R-FEAT",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.sharp_edge_length_m",
+    "op": ">",
+    "source": "features.py",
+    "threshold": 0.0,
+    "value": 0.0
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L1 R-GAP; features.py outer_gap_m",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "rule",
+   "message": "R-GAP: R-PLANE owns the wall level (it bounds h by gap/3 already)",
+   "rule_id": "R-GAP",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "docs/15 §C L1 R-GAP; features.py outer_gap_m",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "rule",
+   "message": "R-GAP: no outer gap (features.py)",
+   "rule_id": "R-GAP",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.outer_gap_m / 3",
+    "op": "==",
+    "source": "features.py",
+    "threshold": null,
+    "value": null
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L1 R-PLANE; SPEC-LIT §92.15.5; features.py lattice_base_size_m; the box-corner G5 bound measured on cubep 2026-09-24 (docs/15 §K)",
+   "edits": [
+    {
+     "from": [
+      -3.0,
+      7.0,
+      -3.0,
+      3.0,
+      -3.0,
+      3.0
+     ],
+     "pointer": "/domain/extent",
+     "to": [
+      -3.2941176470588234,
+      7.058823529411765,
+      -3.0735294117647056,
+      3.0441176470588234,
+      -3.0735294117647056,
+      3.0441176470588234
+     ]
+    },
+    {
+     "from": 0.5,
+     "pointer": "/domain/base_size",
+     "to": 0.47058823529411764
+    },
+    {
+     "from": null,
+     "pointer": "/snap/feature_tolerance",
+     "to": 0.0
+    },
+    {
+     "from": null,
+     "pointer": "/snap/smoothing_passes",
+     "to": 0
+    }
+   ],
+   "formula": "h = s/m, m = ceil(s/h_max), h_max = min(0.70*3*t1/min_thickness_ratio, gap/3, r_p5/8); level = round(log2(0.5 L_ref / h)); base = h * 2**level; extent_lo = bbox_lo - ceil(margin/base)*base",
+   "inputs": [
+    {
+     "name": "s",
+     "unit": "m",
+     "value": 0.5
+    },
+    {
+     "name": "m",
+     "unit": "1",
+     "value": 17
+    },
+    {
+     "name": "h",
+     "unit": "m",
+     "value": 0.029411764705882353
+    },
+    {
+     "name": "h_over_t1",
+     "unit": "1",
+     "value": 40.312177502579985
+    },
+    {
+     "name": "kappa",
+     "unit": "1",
+     "value": 0.7
+    },
+    {
+     "name": "h_max",
+     "unit": "m",
+     "value": 0.03064316935679999
+    },
+    {
+     "name": "lo",
+     "unit": "m",
+     "value": 0.011673611673599999
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "base_size",
+     "unit": "m",
+     "value": 0.47058823529411764
+    }
+   ],
+   "layer": "rule",
+   "message": "R-PLANE: the body is commensurate with lattice spacing s = 0.5 m; h = s/17 = 0.0294118 m (h/t1 = 40.31 <= 42.00, 0.70 of the G5 edge: the box-corner bound); wall level 4 at base_size 0.470588 m (0.471 L_ref); the extent starts on the body's own faces, so every face lies on a cell plane; snap.feature_tolerance = 0 and snap.smoothing_passes = 0 (SPEC-LIT §92.15.5): the edges already lie on lattice lines, so the attraction has nothing to do",
+   "rule_id": "R-PLANE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.lattice_base_size_m / m",
+    "op": "in",
+    "source": "features.py lattice; docs/15 §C R-PLANE",
+    "threshold": [
+     0.011673611673599999,
+     0.03064316935679999
+    ],
+    "value": 0.029411764705882353
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L1 R-PLANE",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "rule",
+   "message": "R-PLANE: the body is not commensurate with an octree lattice (features.py): its walls will be snapped",
+   "rule_id": "R-PLANE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "fingerprint.commensurate",
+    "op": "==",
+    "source": "features.py",
+    "threshold": true,
+    "value": false
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §D.3 (R-WIN); layers.rs:127-133 (the stack), layers.rs:449 (t_i = min(T, medial, cell_frac*h_i)), layers.rs:1292-1316 (92.51)",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/layers/growth",
+     "to": 1.254
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/patch",
+     "to": "body"
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/0/distance",
+     "to": 0.1
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 4
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/1/distance",
+     "to": 0.5
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 3
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/2/distance",
+     "to": 1.5
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/2/level",
+     "to": 2
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/max_level",
+     "to": 4
+    }
+   ],
+   "formula": "lo = t1*S(g)/cell_frac with S(g) = sum g^k, k < n (g -> 1: S = n); hi = kappa*3*t1/min_thickness_ratio; the coarsest level with lo <= base/2**L <= hi; growth = the largest k/1000 with t1*S(g) <= cell_frac*h",
+   "inputs": [
+    {
+     "name": "t1",
+     "unit": "m",
+     "value": 0.0007296
+    },
+    {
+     "name": "n",
+     "unit": "1",
+     "value": 8
+    },
+    {
+     "name": "cell_frac",
+     "unit": "1",
+     "value": 0.5
+    },
+    {
+     "name": "min_thickness_ratio",
+     "unit": "1",
+     "value": 0.05
+    },
+    {
+     "name": "kappa",
+     "unit": "1",
+     "value": 0.7
+    },
+    {
+     "name": "lo",
+     "unit": "m",
+     "value": 0.011673611673599999
+    },
+    {
+     "name": "hi",
+     "unit": "m",
+     "value": 0.03064316935679999
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "h",
+     "unit": "m",
+     "value": 0.029411764705882353
+    },
+    {
+     "name": "h_over_t1",
+     "unit": "1",
+     "value": 40.312177502579985
+    },
+    {
+     "name": "growth",
+     "unit": "1",
+     "value": 1.254
+    },
+    {
+     "name": "T",
+     "unit": "m",
+     "value": 0.01469188147564703
+    },
+    {
+     "name": "cell_frac_h",
+     "unit": "m",
+     "value": 0.014705882352941176
+    }
+   ],
+   "layer": "rule",
+   "message": "R-WIN: at n = 8 the window is h in [0.01167, 0.03064] m (h/t1 in [16.00, 42.00]: the stack limiter T <= cell_frac*h below, the G5 edge 3*t1/h >= 0.05 above, times 0.70 for the box corners); wall level 4 gives h = 0.0294118 m (h/t1 = 40.31); growth 1.254 is the largest step with T = 0.0146919 m <= cell_frac*h = 0.0147059 m",
+   "rule_id": "R-WIN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "h_wall / t1",
+    "op": "in",
+    "source": "docs/15 §D.3",
+    "threshold": [
+     16.000016,
+     41.99995799999999
+    ],
+    "value": 40.312177502579985
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "SPEC-LIT §32.5.6 (solver tree, feat/core-2 d272391, rust/SPEC-LIT.md:3898-3899); Schlichting & Gersten, Boundary-Layer Theory, 8th ed., Springer (2000); docs/15 §D.3 (R-YP)",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/layers/patches",
+     "to": [
+      "body"
+     ]
+    },
+    {
+     "from": null,
+     "pointer": "/layers/n",
+     "to": 8
+    },
+    {
+     "from": null,
+     "pointer": "/layers/first_thickness",
+     "to": 0.0007296
+    }
+   ],
+   "formula": "Re_L = U*L/nu; C_F = 1.328/sqrt(Re_L) (Re_L < 5e5) else 0.455/log10(Re_L)**2.58; u_tau = U*sqrt(C_F/2); t1 = y+ * nu / u_tau, floored to 4 significant digits",
+   "inputs": [
+    {
+     "name": "u_ref",
+     "unit": "m/s",
+     "value": 0.3
+    },
+    {
+     "name": "l_ref",
+     "unit": "m",
+     "value": 1.0
+    },
+    {
+     "name": "nu",
+     "unit": "m2/s",
+     "value": 1.5e-05
+    },
+    {
+     "name": "re_l",
+     "unit": "1",
+     "value": 20000.0
+    },
+    {
+     "name": "cf_a_priori",
+     "unit": "1",
+     "value": 0.009390378054157352
+    },
+    {
+     "name": "u_tau_a_priori",
+     "unit": "m/s",
+     "value": 0.020556434818252915
+    },
+    {
+     "name": "t1_raw",
+     "unit": "m",
+     "value": 0.0007296985169179665
+    },
+    {
+     "name": "t1",
+     "unit": "m",
+     "value": 0.0007296
+    },
+    {
+     "name": "yplus_a_priori",
+     "unit": "1",
+     "value": 0.9998649895598217
+    },
+    {
+     "name": "n",
+     "unit": "1",
+     "value": 8
+    }
+   ],
+   "layer": "rule",
+   "message": "R-YP: Re_L = 20000, C_F = 0.00939038 (laminar, Re_L < 5e5), u_tau = 0.0205564 m/s; t1 = y+ * nu / u_tau = 0.000729699 m, floored to 0.0007296 m (a priori y+ = 0.999865 <= 1); 8 layers on body",
+   "rule_id": "R-YP",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "flow.re_l",
+    "op": "<",
+    "source": "the manifest row's flow (docs/15 §D.3)",
+    "threshold": 500000.0,
+    "value": 20000.0
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L2; rules.py R-BUDGET's ladder (far-field bands first); docs/15 §D.1 F5",
+   "edits": [
+    {
+     "from": 0.5,
+     "pointer": "/refinement/levels/0/bands/1/distance",
+     "to": 0.25
+    },
+    {
+     "from": 1.5,
+     "pointer": "/refinement/levels/0/bands/2/distance",
+     "to": 0.75
+    }
+   ],
+   "formula": "d' = max(d/2, 3*base/2**level, d'_prev) for every band below the wall level",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F5"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "octree"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 5
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "9d19c41e94d46999ba6c0078d4f8e3cfccb111b7a03a53f534b28bff85e58893"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "06ecc79a4b0ef356faf97f0de3eaced586197590c8361668dd4a0588cfb6243e"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-BUDGET-FAR: F5 at stage octree (outcome.n_cells = 2000001 > 2000000; gates.json cell_budget (docs/15 §D.1 F5)) -> halve the far-field band distances (fire 1 of 2, attempt 2 of 4): /refinement/levels/0/bands/1/distance 0.5 -> 0.25; /refinement/levels/0/bands/2/distance 1.5 -> 0.75",
+   "rule_id": "RM-BUDGET-FAR",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.n_cells",
+    "op": ">",
+    "source": "gates.json cell_budget (docs/15 §D.1 F5)",
+    "threshold": 2000000,
+    "value": 2000001
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L2; rules.py R-BUDGET's ladder (the feature bump); docs/15 §D.1 F5",
+   "edits": [
+    {
+     "from": 6,
+     "pointer": "/refinement/levels/0/feature_level",
+     "to": 5
+    },
+    {
+     "from": 6,
+     "pointer": "/refinement/max_level",
+     "to": 5
+    }
+   ],
+   "formula": "feature_level' = wall_level where feature_level > wall_level; max_level' = the largest level left",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F5"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "octree"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 5
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "9d19c41e94d46999ba6c0078d4f8e3cfccb111b7a03a53f534b28bff85e58893"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "fe39d3b17236610f01f540e258612d26350d7134b4f87716f6e13037a1610bd5"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": [
+      {
+       "rule_id": "RM-BUDGET-FAR",
+       "why": "fired twice"
+      }
+     ]
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-BUDGET-FEAT: F5 at stage octree (outcome.n_cells = 2000001 > 2000000; gates.json cell_budget (docs/15 §D.1 F5)) -> drop the feature bump to the wall level (fire 1 of 2, attempt 4 of 4): /refinement/levels/0/feature_level 6 -> 5; /refinement/max_level 6 -> 5",
+   "rule_id": "RM-BUDGET-FEAT",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.n_cells",
+    "op": ">",
+    "source": "gates.json cell_budget (docs/15 §D.1 F5)",
+    "threshold": 2000000,
+    "value": 2000001
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L2, §D.3 (y+ <= 1 needs h_wall <= 60 t1); rules.py R-BUDGET's ladder (the wall level last)",
+   "edits": [
+    {
+     "from": 5,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 4
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 3
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/bands/2/level",
+     "to": 2
+    },
+    {
+     "from": 5,
+     "pointer": "/refinement/levels/0/feature_level",
+     "to": 4
+    },
+    {
+     "from": 5,
+     "pointer": "/refinement/max_level",
+     "to": 4
+    }
+   ],
+   "formula": "every band level and feature_level - 1, max_level - 1; wall' >= floor = the smallest L with base/2**L <= 3*t1/min_thickness_ratio",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 6
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F5"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "octree"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 5
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "fe39d3b17236610f01f540e258612d26350d7134b4f87716f6e13037a1610bd5"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "09b8204d7403ea80380b7281921e411ac258728794c9f557307361c781d5f794"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": [
+      {
+       "rule_id": "RM-BUDGET-FAR",
+       "why": "fired twice"
+      },
+      {
+       "rule_id": "RM-BUDGET-FEAT",
+       "why": "no feature level above the wall level"
+      }
+     ]
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-BUDGET-WALL: F5 at stage octree (outcome.n_cells = 2000001 > 2000000; gates.json cell_budget (docs/15 §D.1 F5)) -> coarsen the whole refinement ladder one level, not below the y+ floor (fire 1 of 2, attempt 5 of 6): /refinement/levels/0/bands/0/level 5 -> 4; /refinement/levels/0/bands/1/level 4 -> 3; /refinement/levels/0/bands/2/level 3 -> 2; /refinement/levels/0/feature_level 5 -> 4; /refinement/max_level 5 -> 4",
+   "rule_id": "RM-BUDGET-WALL",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.n_cells",
+    "op": ">",
+    "source": "gates.json cell_budget (docs/15 §D.1 F5)",
+    "threshold": 2000000,
+    "value": 2000001
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "SPEC-LIT §92.13 (layers on a snapped wall are attempted, retreated and given up by name); docs/15 §C L2, §I-1: only AM-L changes this",
+   "edits": [],
+   "formula": "",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "layer:min_thickness"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "layers"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 2
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "6021bb00ef841e60aa18b186f83b41056022e2d41869babdbcb563a892e3a490"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": null
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-CAPABILITY-LIMITED: layer:min_thickness at stage layers (outcome.patches[sphere].layer_class = \"min_thickness\" == \"min_thickness\"; score.classify_drop (the layers.rs drop text)) on a snapped wall - the body does not qualify for R-PLANE: R-PLANE does not apply (features.py: commensurate False); SPEC-LIT §92.13 drops layers there, so sphere are CAPABILITY-LIMITED and no more trials are spent on their layers",
+   "rule_id": "RM-CAPABILITY-LIMITED",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.patches[sphere].layer_class",
+    "op": "==",
+    "source": "score.classify_drop (the layers.rs drop text)",
+    "threshold": "min_thickness",
+    "value": "min_thickness"
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §C L2 (each remedy at most twice per geometry, no config sha revisited); gates.json attempts_k",
+   "edits": [],
+   "formula": "",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F3"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "snap"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "a04ccbafba492c76274d9eac787e0fd0d1edd341faae1ada53b30daa3f7ead5d"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": null
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": [
+      {
+       "rule_id": "RM-SNAP-WALL",
+       "why": "below the y+ floor (wall 3 -> 2 < floor 3)"
+      },
+      {
+       "rule_id": "RM-SNAP-FT",
+       "why": "the attraction is already off"
+      }
+     ]
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-EXHAUSTED: F3 at stage snap (outcome.pinned_frac = 0.133423 > 0.05; score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)) remains: RM-SNAP-WALL below the y+ floor (wall 3 -> 2 < floor 3); RM-SNAP-FT the attraction is already off",
+   "rule_id": "RM-EXHAUSTED",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.pinned_frac",
+    "op": ">",
+    "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+    "threshold": 0.05,
+    "value": 0.1334231805929919
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §D.3; layers.rs:440-450 (t_i = min(T, medial, cell_frac*h_i)); cell_frac is read, never written (docs/15 §I-5)",
+   "edits": [
+    {
+     "from": 0.05,
+     "pointer": "/layers/first_thickness",
+     "to": 0.01666
+    },
+    {
+     "from": null,
+     "pointer": "/layers/growth",
+     "to": 1.0
+    }
+   ],
+   "formula": "growth' = the largest k/1000 with t1*S(g) <= cell_frac*h_wall; if none, t1' = t1_floor(cell_frac*h_wall/n) and growth 1.0, kept only while 3*t1'/h_wall >= min_thickness_ratio",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "layer:no_full_stack"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "layers"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "bfddcd6025050a7b3165303a23be575bfa6076275accd14dd62bb98af433adbd"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "667b67469d249d69c58d7f3aaf5a906d1c0319dd29405e9f9ca89e3c345a9061"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-LAYER-FIT: layer:no_full_stack at stage layers (outcome.patches[cube].layer_class = \"no_full_stack\" == \"no_full_stack\"; score.classify_drop (the layers.rs drop text)) -> fit the stack under the cell_frac limiter (fire 1 of 2, attempt 2 of 4): /layers/first_thickness 0.05 -> 0.01666; /layers/growth absent -> 1",
+   "rule_id": "RM-LAYER-FIT",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.patches[cube].layer_class",
+    "op": "==",
+    "source": "score.classify_drop (the layers.rs drop text)",
+    "threshold": "no_full_stack",
+    "value": "no_full_stack"
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L2: outside the remedy table",
+   "edits": [],
+   "formula": "",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "gate@castellate"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "castellate"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "72769e6d2933baada63cfb156757b59da5789ab0daba6e53a87ef11d0111afcf"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": null
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-NO-REMEDY: gate@castellate at stage castellate (outcome.failure_class = \"gate_G4@castellate\" == \"gate_G4@castellate\"; score.py failure enum (docs/15 §D.1 F1)) is outside the remedy table: a quality gate at castellate: no remedy touches the quality block",
+   "rule_id": "RM-NO-REMEDY",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.failure_class",
+    "op": "==",
+    "source": "score.py failure enum (docs/15 §D.1 F1)",
+    "threshold": "gate_G4@castellate",
+    "value": "gate_G4@castellate"
+   },
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "docs/15 §D.1, §D.2",
+   "edits": [],
+   "formula": "",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "pass"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": null
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "a50c6d562626ba055283d898a218058e9290c8cec411a953d227fae62e6e30dd"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": null
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-PASS: attempt 1 passes: no F flag of docs/15 §D.1 and no requested layer patch dropped or trimmed",
+   "rule_id": "RM-PASS",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.failure",
+    "op": "==",
+    "source": "score.py (docs/15 §D.1, §D.2)",
+    "threshold": false,
+    "value": false
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "docs/15 §C L2 (a snapped-wall drop goes to R-PLANE if the geometry qualifies); SPEC-LIT §92.15.5; rules.py R-PLANE",
+   "edits": [
+    {
+     "from": [
+      0,
+      4,
+      0,
+      4,
+      0,
+      4
+     ],
+     "pointer": "/domain/extent",
+     "to": [
+      -2.1999999999999993,
+      8.799999999999999,
+      -1.699999999999999,
+      5.299999999999999,
+      -1.699999999999999,
+      5.299999999999999
+     ]
+    },
+    {
+     "from": 1.0,
+     "pointer": "/domain/base_size",
+     "to": 0.4999999999999999
+    },
+    {
+     "from": 1,
+     "pointer": "/refinement/max_level",
+     "to": 0
+    },
+    {
+     "from": 3,
+     "pointer": "/layers/n",
+     "to": 8
+    },
+    {
+     "from": 0.05,
+     "pointer": "/layers/first_thickness",
+     "to": 0.02307
+    },
+    {
+     "from": null,
+     "pointer": "/layers/growth",
+     "to": 1.085
+    },
+    {
+     "from": null,
+     "pointer": "/snap/feature_tolerance",
+     "to": 0.0
+    },
+    {
+     "from": null,
+     "pointer": "/snap/smoothing_passes",
+     "to": 0
+    },
+    {
+     "from": "cube",
+     "pointer": "/refinement/levels/0/patch",
+     "to": null
+    },
+    {
+     "from": 0.0,
+     "pointer": "/refinement/levels/0/bands/0/distance",
+     "to": null
+    },
+    {
+     "from": 1,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": null
+    }
+   ],
+   "formula": "domain, refinement, snap.feature_tolerance = 0, snap.smoothing_passes = 0 and the layer stack from rules.setup when its R-PLANE applies; every other key kept",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "layer:min_thickness"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "layers"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "66df49e632e73bea6d3567d93e5ff7849db11675dbeacc6114f0492f0d0bdee4"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "7f1f1a5974899ff8aa48a08864802cc6e56f5a564a14dc25e3e6d825f57da8ca"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-PLANE: layer:min_thickness at stage layers (outcome.patches[cube].layer_class = \"min_thickness\" == \"min_thickness\"; score.classify_drop (the layers.rs drop text)) -> put the body on cell planes with R-PLANE (rules.setup's config for this geometry and flow) (fire 1 of 2, attempt 2 of 4): /domain/extent [0, 4, 0, 4, 0, 4] -> [-2.2, 8.8, -1.7, 5.3, -1.7, 5.3]; /domain/base_size 1 -> 0.5; /refinement/max_level 1 -> 0; /layers/n 3 -> 8; /layers/first_thickness 0.05 -> 0.02307; /layers/growth absent -> 1.085 (+5 more)",
+   "rule_id": "RM-PLANE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.patches[cube].layer_class",
+    "op": "==",
+    "source": "score.classify_drop (the layers.rs drop text)",
+    "threshold": "min_thickness",
+    "value": "min_thickness"
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §K G-RULES (the box-corner bound: 42.9 t1 delivers, 43.0 drops on cubep); rules.py R-PLANE",
+   "edits": [
+    {
+     "from": 1.265,
+     "pointer": "/layers/growth",
+     "to": 1.259
+    },
+    {
+     "from": [
+      -2.4285714285714284,
+      8.83673469387755,
+      -1.9387755102040813,
+      5.408163265306123,
+      -1.9387755102040813,
+      5.408163265306123
+     ],
+     "pointer": "/domain/extent",
+     "to": [
+      -2.36,
+      8.68,
+      -1.88,
+      5.319999999999999,
+      -1.88,
+      5.319999999999999
+     ]
+    },
+    {
+     "from": 0.4897959183673469,
+     "pointer": "/domain/base_size",
+     "to": 0.48
+    }
+   ],
+   "formula": "m' = round(s/h_wall) + 1; h' = s/m' >= n*t1/cell_frac; level' = round(log2(0.5 L_ref/h')); base' = h'*2**level'; growth' = the largest step fitting cell_frac*h'",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "layer:min_thickness"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "layers"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": true
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "4c28dece6982c6d314df7276e97f395ef85a68a03c138fee28072111cf673baa"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "6241b08b056364e7e8b63a1f039195021b25051c22a031750fbba8ae799b5082"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-PLANE-FINER: layer:min_thickness at stage layers (outcome.patches[cube].layer_class = \"min_thickness\" == \"min_thickness\"; score.classify_drop (the layers.rs drop text)) -> take the next lattice divisor h = s/(m+1), the extent re-aligned on the body's faces (fire 1 of 2, attempt 2 of 4): /layers/growth 1.265 -> 1.259; /domain/extent [-2.42857, 8.83673, -1.93878, 5.40816, -1.93878, 5.40816] -> [-2.36, 8.68, -1.88, 5.32, -1.88, 5.32]; /domain/base_size 0.489796 -> 0.48",
+   "rule_id": "RM-PLANE-FINER",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.patches[cube].layer_class",
+    "op": "==",
+    "source": "score.classify_drop (the layers.rs drop text)",
+    "threshold": "min_thickness",
+    "value": "min_thickness"
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §K G-PILOT (feature_tolerance 0 unpinned 10 of 10 feature-bearing geometries; caution 1: the edges are then not captured, G-FID guards it)",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/snap/feature_tolerance",
+     "to": 0.0
+    }
+   ],
+   "formula": "feature_tolerance' = 0.0 when the body has sharp edges and the attraction is on",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F3"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "snap"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "4ecd790d86c1e62a714038ef96b77ab9b965fdf4c4789e168bf8fbe8d91dd45f"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "a04ccbafba492c76274d9eac787e0fd0d1edd341faae1ada53b30daa3f7ead5d"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": [
+      {
+       "rule_id": "RM-SNAP-WALL",
+       "why": "below the y+ floor (wall 3 -> 2 < floor 3)"
+      }
+     ]
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-SNAP-FT: F3 at stage snap (outcome.pinned_frac = 0.133423 > 0.05; score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)) -> switch the feature attraction off (snap.feature_tolerance = 0) (fire 1 of 2, attempt 2 of 4): /snap/feature_tolerance absent -> 0",
+   "rule_id": "RM-SNAP-FT",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.pinned_frac",
+    "op": ">",
+    "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+    "threshold": 0.05,
+    "value": 0.1334231805929919
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §D.1 F3d (area ratio outside [0.98, 1.02]); rules.predict_cells",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/patch",
+     "to": "sphere"
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/0/distance",
+     "to": 1.5
+    },
+    {
+     "from": null,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 1
+    },
+    {
+     "from": 0,
+     "pointer": "/refinement/max_level",
+     "to": 1
+    }
+   ],
+   "formula": "as RM-TOPO-REFINE",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F3d"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "snap"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "d62cca3d605fcabb9b2762c5d0bff9da40a3a11320d04d8b9bfe7de06f7ae11c"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "e8d963087a83d9eb443fdc128bafdfcef60c274fb02ae0e3b74a3ef056d562b2"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-SNAP-REFINE: F3d at stage snap (outcome.flags.F3d = true not_in [0.98, 1.02]; score.py stages[snap].area_ratio (docs/15 §D.1 F3d)) -> refine the whole refinement ladder one level (the snapped surface misses area: the lattice is too coarse for the body) (fire 1 of 2, attempt 2 of 4): /refinement/levels/0/patch absent -> \"sphere\"; /refinement/levels/0/bands/0/distance absent -> 1.5; /refinement/levels/0/bands/0/level absent -> 1; /refinement/max_level 0 -> 1",
+   "rule_id": "RM-SNAP-REFINE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.flags.F3d",
+    "op": "not_in",
+    "source": "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)",
+    "threshold": [
+     0.98,
+     1.02
+    ],
+    "value": true
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §K G-PILOT (wall level -1 was the only F3-clean knob with the attraction on: B-1-002, B-1-004); docs/15 §D.3",
+   "edits": [
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 2
+    },
+    {
+     "from": 2,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 1
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/max_level",
+     "to": 2
+    }
+   ],
+   "formula": "as RM-BUDGET-WALL; never on the R-PLANE path",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F3"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "snap"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "08631238c6717a060f284db44741dc11e2f45e653f4fa1bf038de8dead5e4a2c"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "2499af1ea18706624f9826accb72d3aabc6c18f2c5757594e8a32eafb83816f4"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-SNAP-WALL: F3 at stage snap (outcome.pinned_frac = 0.1728 > 0.05; score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)) -> coarsen the whole refinement ladder one level, not below the y+ floor (fire 1 of 2, attempt 2 of 4): /refinement/levels/0/bands/0/level 3 -> 2; /refinement/levels/0/bands/1/level 2 -> 1; /refinement/max_level 3 -> 2",
+   "rule_id": "RM-SNAP-WALL",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.pinned_frac",
+    "op": ">",
+    "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+    "threshold": 0.05,
+    "value": 0.1728
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §D.3 (R-YP); layers.rs:1292-1316 (92.51): 3*t1/h_min >= min_thickness_ratio",
+   "edits": [
+    {
+     "from": 0.0001,
+     "pointer": "/layers/first_thickness",
+     "to": 0.02307
+    }
+   ],
+   "formula": "t1' = t1_floor(y+ nu / u_tau) (R-YP) when t1 < t1'; growth kept while the stack fits cell_frac*h_wall, else the largest growth that fits",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "layer_t1_G5"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "layers"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": null
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "89bc2012d213a01568517e66e6d86e3124dd36673dad0e4f15436c2efa3316f3"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "e3c3b73c58122a7c10aae302c7efcdff8b58a62dd9ceb5066398df99118f06dd"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    },
+    {
+     "name": "h_min",
+     "unit": "m",
+     "value": 0.03757424300735249
+    },
+    {
+     "name": "predicted_ratio",
+     "unit": "1",
+     "value": 1.8419532759836854
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-T1-RAISE: layer_t1_G5 at stage layers (outcome.failure_class = \"layer_t1_G5\" == \"layer_t1_G5\"; score.py failure enum (docs/15 §D.1 F1)) -> raise the first layer to the y+ = 1 bound (fire 1 of 2, attempt 2 of 4): /layers/first_thickness 0.0001 -> 0.02307",
+   "rule_id": "RM-T1-RAISE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.failure_class",
+    "op": "==",
+    "source": "score.py failure enum (docs/15 §D.1 F1)",
+    "threshold": "layer_t1_G5",
+    "value": "layer_t1_G5"
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "layers.rs:1292-1316 (92.51); rules.predict_cells",
+   "edits": [
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 4
+    },
+    {
+     "from": 2,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 3
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/max_level",
+     "to": 4
+    },
+    {
+     "from": 1.3,
+     "pointer": "/layers/growth",
+     "to": 1.0
+    }
+   ],
+   "formula": "as RM-TOPO-REFINE, then the growth refit at the new h_wall",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 2
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "layer_t1_G5"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "layers"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "e3c3b73c58122a7c10aae302c7efcdff8b58a62dd9ceb5066398df99118f06dd"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "5b0dcbf5e552d8a9df36c4425589688d828c089ddf4f9e0464d9b66ebcaa0c55"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": [
+      {
+       "rule_id": "RM-T1-RAISE",
+       "why": "t1 = 0.02307 m is already at the y+ = 1 bound 0.02307 m"
+      }
+     ]
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-T1-REFINE: layer_t1_G5 at stage layers (outcome.failure_class = \"layer_t1_G5\" == \"layer_t1_G5\"; score.py failure enum (docs/15 §D.1 F1)) -> refine the whole refinement ladder one level so the wall edges shrink under 60 t1 (fire 1 of 2, attempt 3 of 4): /refinement/levels/0/bands/0/level 3 -> 4; /refinement/levels/0/bands/1/level 2 -> 3; /refinement/max_level 3 -> 4; /layers/growth 1.3 -> 1",
+   "rule_id": "RM-T1-REFINE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.failure_class",
+    "op": "==",
+    "source": "score.py failure enum (docs/15 §D.1 F1)",
+    "threshold": "layer_t1_G5",
+    "value": "layer_t1_G5"
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L2, §D.1 F4 (a wall patch absent or n_regions != 1); rules.predict_cells",
+   "edits": [
+    {
+     "from": 4,
+     "pointer": "/refinement/levels/0/bands/0/level",
+     "to": 5
+    },
+    {
+     "from": 3,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": 4
+    },
+    {
+     "from": 2,
+     "pointer": "/refinement/levels/0/bands/2/level",
+     "to": 3
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/levels/0/feature_level",
+     "to": 5
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/max_level",
+     "to": 5
+    }
+   ],
+   "formula": "every band level + 1 (none past max_level 6), feature_level + 1 capped at 6; predicted cells <= 0.7*cell_budget",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F4"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "castellate"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "34f6325e0647f963c9e6effdeb4d364d69b3a870eba03dcfaaeba35c89b0ee0a"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "777159621a675215d927f5070bec50b160b980a4bb6a34651815f47c2a65bca7"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-TOPO-REFINE: F4 at stage castellate (outcome.flags.F4 = true == true; score.py stages[castellate].wall_patches, quality.n_regions (docs/15 §D.1 F4)) -> refine the whole refinement ladder one level (fire 1 of 2, attempt 2 of 4): /refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 4 -> 5; /refinement/max_level 4 -> 5",
+   "rule_id": "RM-TOPO-REFINE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:42Z",
+   "trigger": {
+    "observable": "outcome.flags.F4",
+    "op": "==",
+    "source": "score.py stages[castellate].wall_patches, quality.n_regions (docs/15 §D.1 F4)",
+    "threshold": true,
+    "value": true
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "docs/15 §C L0 (c): no -permissive, ever",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "WL-FLAG: -permissive is forbidden (docs/15 §C L0 (c): no -permissive, ever)",
+   "rule_id": "WL-FLAG",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "-permissive",
+    "op": "==",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": "-permissive",
+    "value": "-permissive"
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §I-5 (D-D): a limiter, out of the action space",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/layers/cell_frac",
+     "to": 0.42292191889673314
+    }
+   ],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "WL-FORBIDDEN: /layers/cell_frac is out of the action space (docs/15 §I-5 (D-D): a limiter, out of the action space)",
+   "rule_id": "WL-FORBIDDEN",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/layers/cell_frac",
+    "op": "==",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": "/layers/cell_frac",
+    "value": 0.42292191889673314
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "RFC 6901 JSON Pointer",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "WL-POINTER: 'nope' is not a JSON Pointer",
+   "rule_id": "WL-POINTER",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "nope",
+    "op": "==",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": "nope",
+    "value": 1
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "default 30; 60 measured as enough for the 1e-6 dead band",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/snap/iterations",
+     "to": 414
+    }
+   ],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "WL-RANGE: /snap/iterations = 414 is above its maximum 200 (cite default 30; 60 measured as enough for the 1e-6 dead band)",
+   "rule_id": "WL-RANGE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/snap/iterations",
+    "op": ">=",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": [
+     0,
+     200
+    ],
+    "value": 414
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "tools/autonomy/README.md section D (the user's decision of 2026-09-26); docs/15 §K G-PILOT caution 1; SPEC-LIT (92.38)",
+   "edits": [],
+   "formula": "refuse when sharp_edge_length_m > 0 and feature_tolerance == 0 and not plane_path",
+   "inputs": [
+    {
+     "name": "sharp_edge_length_m",
+     "unit": "m",
+     "value": 18.0
+    },
+    {
+     "name": "feature_angle_deg",
+     "unit": "deg",
+     "value": 30.0
+    },
+    {
+     "name": "plane_path",
+     "unit": "1",
+     "value": false
+    }
+   ],
+   "layer": "preflight",
+   "message": "WL-SHARP-FT0: snap.feature_tolerance = 0 on a body with 18 m of sharp edge at 30 deg switches the feature attraction off, so its edges are not captured; the user's decision of 2026-09-26 forbids it off the R-PLANE path",
+   "rule_id": "WL-SHARP-FT0",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-26T05:48:32Z",
+   "trigger": {
+    "observable": "/snap/feature_tolerance",
+    "op": ">",
+    "source": "features.py sharp_edge_length_m; preflight.plane_path",
+    "threshold": 0.0,
+    "value": 0.0
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "rust/src/automesher/mod.rs:243",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/snap/iterations",
+     "to": 3.0
+    }
+   ],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "WL-TYPE: /snap/iterations needs a int, got 3.0",
+   "rule_id": "WL-TYPE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:44Z",
+   "trigger": {
+    "observable": "/snap/iterations",
+    "op": "==",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": "int",
+    "value": 3.0
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "docs/15 §C L0 (d)",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/layers/min_thickness",
+     "to": 0.022135176591315704
+    }
+   ],
+   "formula": "",
+   "inputs": [],
+   "layer": "preflight",
+   "message": "WL-UNLISTED: /layers/min_thickness is not a whitelisted knob",
+   "rule_id": "WL-UNLISTED",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-24T10:17:43Z",
+   "trigger": {
+    "observable": "/layers/min_thickness",
+    "op": "not_in",
+    "source": "tools/autonomy/schema/knobs.json",
+    "threshold": "/layers/min_thickness",
+    "value": 0.022135176591315704
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  }
+ ],
+ "schema": "autonomy-explain-records-by-id/1"
+}

@@ -1,0 +1,120 @@
+{
+ "alpha": 0.05,
+ "campaign_id": "am15-fixture",
+ "confidence": 0.95,
+ "groups": [
+  {
+   "attempts_mean": 1.0,
+   "blc8_mean": 1.0,
+   "blc_full_mean": 1.0,
+   "capability_limited": 0,
+   "cells_median": 87166,
+   "fail": 0,
+   "family": "D",
+   "mfr": 0.0,
+   "mfr_ci": [
+    0.0,
+    0.975
+   ],
+   "n": 1,
+   "stratum": "easy",
+   "strict": 0,
+   "strict_ci": [
+    0.0,
+    0.975
+   ],
+   "strict_rate": 0.0
+  },
+  {
+   "attempts_mean": 1.0,
+   "blc8_mean": 1.0,
+   "blc_full_mean": 1.0,
+   "capability_limited": 0,
+   "cells_median": 87166,
+   "fail": 0,
+   "family": "D",
+   "mfr": 0.0,
+   "mfr_ci": [
+    0.0,
+    0.975
+   ],
+   "n": 1,
+   "stratum": "all",
+   "strict": 0,
+   "strict_ci": [
+    0.0,
+    0.975
+   ],
+   "strict_rate": 0.0
+  },
+  {
+   "attempts_mean": 2.5,
+   "blc8_mean": 0.0,
+   "blc_full_mean": 0.0,
+   "capability_limited": 1,
+   "cells_median": 299390.0,
+   "fail": 1,
+   "family": "X",
+   "mfr": 0.5,
+   "mfr_ci": [
+    0.01257911709342505,
+    0.9874208829065749
+   ],
+   "n": 2,
+   "stratum": "probe",
+   "strict": 2,
+   "strict_ci": [
+    0.15811388300841897,
+    1.0
+   ],
+   "strict_rate": 1.0
+  },
+  {
+   "attempts_mean": 2.5,
+   "blc8_mean": 0.0,
+   "blc_full_mean": 0.0,
+   "capability_limited": 1,
+   "cells_median": 299390.0,
+   "fail": 1,
+   "family": "X",
+   "mfr": 0.5,
+   "mfr_ci": [
+    0.01257911709342505,
+    0.9874208829065749
+   ],
+   "n": 2,
+   "stratum": "all",
+   "strict": 2,
+   "strict_ci": [
+    0.15811388300841897,
+    1.0
+   ],
+   "strict_rate": 1.0
+  },
+  {
+   "attempts_mean": 2.0,
+   "blc8_mean": 0.3333333333333333,
+   "blc_full_mean": 0.3333333333333333,
+   "capability_limited": 1,
+   "cells_median": 87166,
+   "fail": 1,
+   "family": "all",
+   "mfr": 0.3333333333333333,
+   "mfr_ci": [
+    0.008403758659612636,
+    0.9057006759497539
+   ],
+   "n": 3,
+   "stratum": "all",
+   "strict": 2,
+   "strict_ci": [
+    0.09429932405024609,
+    0.9915962413403874
+   ],
+   "strict_rate": 0.6666666666666666
+  }
+ ],
+ "n_geometries": 3,
+ "n_rows": 6,
+ "schema": "autonomy-explain-summary/1"
+}

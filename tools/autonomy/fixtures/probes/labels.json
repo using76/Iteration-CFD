@@ -1,0 +1,2374 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted. G-SCORER fixtures: the docs/15 survey probes. The 27 that wrote a summary were re-run on 2026-09-24 with the mesh tree's binary at 77a33b5 (sha256 054bba67...) so their summaries carry n_pinned_boundary, area_ratio and area_frac_tau_ge; the 4 refused runs keep their 2026-09-23 logs (refusal re-confirmed). Hand labels and expected numbers are the supervisor's, computed from the summary JSON and the STL independently of score.py, under the user's decisions of 2026-09-24 (F3a boundary-only, F3d wired, BLC_beta exact). Re-frozen 2026-09-26 for the user's decision that feature-edge capture is a hard constraint on a body with sharp edges: every probe row carries its STL fingerprint's sharp_edge_length_m (30 deg) and plane_path (remedies.on_plane on its config), and every expect carries F3e and feature_capture, computed from the summary's snap stage (n_feature_edges, n_snapped_to_edge, n_snapped_to_corner) and its config's feature_tolerance; cubep_nofeat, cubep_nofeat_cf, cubep_nosnap flip to fail. Re-frozen 2026-09-27 for the capture signal (92.62): the 13 sharp probes whose attraction reached an edge were re-run with the mesh tree's release binary (sha256 7ff16117..., output-only since 054bba67 by L1b's replay), every mesh number equal; the re-run's stages[snap].feature_capture is spliced into their frozen summary.json and nothing else in it changes; their expect carries feature_capture = captured_length_m / sharp_length_m and F3e false (every share is above 0).",
+ "flow": {
+  "u_ref_m_s": 0.003,
+  "l_ref_m": 1.0,
+  "nu_m2_s": 1.5e-05,
+  "note": "AM-2 fixture flow, chosen by the supervisor so the y+ indicator is exercised on both sides: Re_L 200, laminar C_F, y+(0.02 m) = 0.867 <= 1, y+(0.05 m) = 2.17 > 1. Not a physical claim about any probe."
+ },
+ "betas": [
+  0.5,
+  0.8,
+  0.95
+ ],
+ "probes": [
+  {
+   "id": "L1",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at min_thickness * T = 1.820e-3; re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9969",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.6378363,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.21668384866156212,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "L2",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "the gate still failed after 4 retreat(s) on the layer cells themselves ... (SPEC-LIT 92.13); re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9969",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.8554436,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.43336769732312425,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "L3",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at min_thickness * T = 1.100e-3; re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9969",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.4825483,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.21668384866156212,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "NO15",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 1,
+   "wall_seconds": null,
+   "hand_label": "as NO25 with a 15 deg ceiling",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": "castellate",
+    "failure_class": "gate_G4@castellate",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 1.6,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F3e": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "NO25",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 1,
+   "wall_seconds": null,
+   "hand_label": "octree printed gate: FAILED without refusing; castellate refused G4 on 6432 faces at 25.239 > 25",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": "castellate",
+    "failure_class": "gate_G4@castellate",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 1.6,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F3e": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "NO26",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "no layers; 288 of 1250 boundary points pinned (23 %): F3a; re-frozen 2026-09-24: boundary-only pinned 216/1250 (17.3 %), area ratio sphere 1.0005",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 12880,
+    "pinned_frac": 0.1728,
+    "p99_over_hf": 0.08738138894468009,
+    "max_over_hf": 0.0873858884572835,
+    "h_f_m": 0.125,
+    "seconds": 3.6495436,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": false,
+      "row": false
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "NO28",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "no layers; 528 scaled back, 0 pinned, converged: pass; re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9980",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.04611351619030872,
+    "max_over_hf": 0.046402456158353825,
+    "h_f_m": 0.125,
+    "seconds": 3.0055485,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": false,
+      "row": false
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": false,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "box_L4",
+   "stl": "box.stl",
+   "patch_areas_m2": {
+    "body": 2.5
+   },
+   "n_triangles": 3072,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "out of iterations, 1672/2562 pinned (65 %): F3a F3b F3c; retreat give-up; re-frozen 2026-09-24: boundary-only pinned 836/2562 (32.6 %), area ratio body 1.0781; re-frozen 2026-09-27: feature_capture 0.9722 (7.7774 of 8.0000 m within 0.003125 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 42480,
+    "pinned_frac": 0.3263075722092115,
+    "p99_over_hf": 0.3690682809688841,
+    "max_over_hf": 0.6719398219782704,
+    "h_f_m": 0.03125,
+    "seconds": 17.1776318,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "body",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": true,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.9721691747650183
+   },
+   "sharp_edge_length_m": 8.0,
+   "plane_path": false
+  },
+  {
+   "id": "box_sphere",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "the shipped example: exit 0, sphere layers dropped at min_thickness * T = 4.600e-3; re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9969",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.3715532,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "coarse",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "no layers requested (n = 0), max_level 0, 26 boundary points converged: pass; the unresolved sphere is what F3d (AM-R2 area ratio) would catch; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio sphere 0.8793",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 992,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0011669713580153898,
+    "max_over_hf": 0.0011669713580153898,
+    "h_f_m": 1.0,
+    "seconds": 0.0562706,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": false,
+      "row": false
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": true,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "cube_cf",
+   "stl": "cube.stl",
+   "patch_areas_m2": {
+    "cube": 5.999999999999998
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at 1.995e-2; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-27: feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 196,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0043849052512140675,
+    "max_over_hf": 0.0043849052512140675,
+    "h_f_m": 0.5,
+    "seconds": 0.0114345,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": 0.999372058996764
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
+  },
+  {
+   "id": "cube_n5",
+   "stl": "cube.stl",
+   "patch_areas_m2": {
+    "cube": 5.999999999999998
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at 4.522e-2; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-27: feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 196,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0043849052512140675,
+    "max_over_hf": 0.0043849052512140675,
+    "h_f_m": 0.5,
+    "seconds": 0.0102335,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": 0.999372058996764
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
+  },
+  {
+   "id": "cube_ok",
+   "stl": "cube.stl",
+   "patch_areas_m2": {
+    "cube": 5.999999999999998
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "unit cube off the planes: dropped at 4.600e-3; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-27: feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 196,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0043849052512140675,
+    "max_over_hf": 0.0043849052512140675,
+    "h_f_m": 0.5,
+    "seconds": 0.0095482,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": 0.999372058996764
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
+  },
+  {
+   "id": "cubep_cf",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "retreat give-up (92.13); re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003; re-frozen 2026-09-27: feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 226,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0020786091044560427,
+    "max_over_hf": 0.0023710315566513778,
+    "h_f_m": 0.5,
+    "seconds": 0.0332839,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": 0.9996538304623344
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
+  },
+  {
+   "id": "cubep_defaults",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at 7.980e-3; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003; re-frozen 2026-09-27: feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 226,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0020786091044560427,
+    "max_over_hf": 0.0023710315566513778,
+    "h_f_m": 0.5,
+    "seconds": 0.0126534,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": 0.9996538304623344
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
+  },
+  {
+   "id": "cubep_nofeat",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "feature_tolerance 0: 3 layers on 54 faces, full 100 %, t1 2.000e-2 of 2.000e-2: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (feature_tolerance 0), so F3e is true and the run fails",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 388,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0,
+    "max_over_hf": 0.0,
+    "h_f_m": 0.5,
+    "seconds": 0.0080941,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 1.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 3,
+      "dropped": false,
+      "full_area_frac": 1.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 1.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": true,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
+  },
+  {
+   "id": "cubep_nofeat_cf",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "3 layers on 54 faces, full 0.0 %, mean frac 0.251, t1 1.253e-2 of 5.000e-2 - NO face received the full stack; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (feature_tolerance 0), so F3e is true and the run fails",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:no_full_stack",
+    "n_cells": 388,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0,
+    "max_over_hf": 0.0,
+    "h_f_m": 0.5,
+    "seconds": 0.0088037,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 3,
+      "dropped": false,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.2506265664160401
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": true,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
+  },
+  {
+   "id": "cubep_nosnap",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "snap.iterations 0: full 100 %: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (no point took the edge or corner branch), so F3e is true and the run fails",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": null,
+    "n_cells": 388,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0,
+    "max_over_hf": 0.0,
+    "h_f_m": 0.5,
+    "seconds": 0.0084636,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 1.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 3,
+      "dropped": false,
+      "full_area_frac": 1.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 1.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": true,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
+  },
+  {
+   "id": "cubep_ok",
+   "stl": "cubep.stl",
+   "patch_areas_m2": {
+    "cube": 13.5
+   },
+   "n_triangles": 12,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "on-plane cube, default snap moves the wall: retreat give-up (92.13); re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003; re-frozen 2026-09-27: feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 226,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.0020786091044560427,
+    "max_over_hf": 0.0023710315566513778,
+    "h_f_m": 0.5,
+    "seconds": 0.0318281,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "cube",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": 0.9996538304623344
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
+  },
+  {
+   "id": "ok",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "layers: patch sphere: the thickness fell below min_thickness * T = 4.600e-3; re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9969",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.4741083,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "rev2_L4",
+   "stl": "rev2.stl",
+   "patch_areas_m2": {
+    "body": 0.4878854393039955
+   },
+   "n_triangles": 10112,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "converged, 0 pinned, p99/h_f 0.017: not a failure; layers given up on the snapped wall (92.13): strict failure; re-frozen 2026-09-24: boundary-only pinned 0/650 (0.0 %), area ratio body 0.9805",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 22856,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.01691587697090773,
+    "max_over_hf": 0.016924028934665967,
+    "h_f_m": 0.03125,
+    "seconds": 6.2431976,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "body",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "rev_L4",
+   "stl": "rev.stl",
+   "patch_areas_m2": {
+    "body": 0.4878854393039955
+   },
+   "n_triangles": 10112,
+   "exit_code": 1,
+   "wall_seconds": 0.062,
+   "hand_label": "error: surface/closed: 16 open edge(s), exit 1 in 62 ms, before any banner",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": null,
+    "failure_class": "surface_closed",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 0.062,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F3e": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "thick_stack",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "dropped at min_thickness * T = 4.522e-2; re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9969",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.5366929000000003,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 2.1668384866156214,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "thin_t1",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 1,
+   "wall_seconds": null,
+   "hand_label": "error: 3 * 0.0001 / 0.03757 = 0.007984 < min_thickness_ratio = 0.05 (92.51), exit 1 in stage 5",
+   "expect": {
+    "exit_code": 1,
+    "last_stage": "layers",
+    "failure_class": "layer_t1_G5",
+    "n_cells": null,
+    "pinned_frac": null,
+    "p99_over_hf": null,
+    "max_over_hf": null,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": false
+     }
+    ],
+    "missing_signals": [],
+    "seconds": 2.9,
+    "flags": {
+     "F1": true,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": null,
+     "F3e": null,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "tight_nonorth",
+   "stl": "box_sphere.stl",
+   "patch_areas_m2": {
+    "sphere": 12.555159119617405
+   },
+   "n_triangles": 9024,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "max_non_orth 35: final 30.118 deg passes; layers dropped at 4.600e-3; re-frozen 2026-09-24: boundary-only pinned 0/1250 (0.0 %), area ratio sphere 0.9969",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:min_thickness",
+    "n_cells": 12880,
+    "pinned_frac": 0.0,
+    "p99_over_hf": 0.007942650144291711,
+    "max_over_hf": 0.008489472498244636,
+    "h_f_m": 0.125,
+    "seconds": 3.5283172,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "sphere",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.8667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": false,
+     "F3b": false,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": false,
+    "strict_failure": true,
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
+  },
+  {
+   "id": "wb_L4",
+   "stl": "wb.stl",
+   "patch_areas_m2": {
+    "body": 10.529419365009215
+   },
+   "n_triangles": 16628,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "1774/12808 pinned (14 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1074/12808 (8.4 %), area ratio body 1.2956; re-frozen 2026-09-27: feature_capture 0.4481 (5.8791 of 13.1210 m within 0.003125 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 115313,
+    "pinned_frac": 0.08385384134915677,
+    "p99_over_hf": 0.6920475069195369,
+    "max_over_hf": 1.8558444653442463,
+    "h_f_m": 0.03125,
+    "seconds": 99.4767639,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "body",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": true,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.44806700456930093
+   },
+   "sharp_edge_length_m": 13.12100723220657,
+   "plane_path": false
+  },
+  {
+   "id": "wing_a_L3",
+   "stl": "wing_a.stl",
+   "patch_areas_m2": {
+    "wing": 6.288127839555913
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "416/1484 pinned (28 %): F3a F3b; re-frozen 2026-09-24: boundary-only pinned 198/1484 (13.3 %), area ratio wing 0.9941; re-frozen 2026-09-27: feature_capture 0.0217 (0.1536 of 7.0831 m within 0.00625 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 11234,
+    "pinned_frac": 0.1334231805929919,
+    "p99_over_hf": 0.4010443092786121,
+    "max_over_hf": 0.40104826218788076,
+    "h_f_m": 0.0625,
+    "seconds": 5.9700955,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": false,
+     "F3d": false,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.021680282402871825
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
+  },
+  {
+   "id": "wing_a_L4",
+   "stl": "wing_a.stl",
+   "patch_areas_m2": {
+    "wing": 6.288127839555913
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "2702/6690 pinned (40 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1377/6690 (20.6 %), area ratio wing 1.1651; re-frozen 2026-09-27: feature_capture 0.0468 (0.3312 of 7.0831 m within 0.003125 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 78244,
+    "pinned_frac": 0.20582959641255605,
+    "p99_over_hf": 0.4708483142551278,
+    "max_over_hf": 0.5352581949376582,
+    "h_f_m": 0.03125,
+    "seconds": 41.901499,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": true,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.046762062164462805
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
+  },
+  {
+   "id": "wing_a_L5",
+   "stl": "wing_a.stl",
+   "patch_areas_m2": {
+    "wing": 6.288127839555913
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "9802/27558 pinned (36 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 4984/27558 (18.1 %), area ratio wing 1.1729; re-frozen 2026-09-27: feature_capture 0.3325 (2.3548 of 7.0831 m within 0.0015625 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 585900,
+    "pinned_frac": 0.18085492415995355,
+    "p99_over_hf": 0.47786671951107845,
+    "max_over_hf": 0.5969281976378795,
+    "h_f_m": 0.015625,
+    "seconds": 293.2922696,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": true,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.332459854902898
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
+  },
+  {
+   "id": "wing_b_L4",
+   "stl": "wing_b.stl",
+   "patch_areas_m2": {
+    "wing": 4.336066039093696
+   },
+   "n_triangles": 5996,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "2623/4872 pinned (54 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1418/4872 (29.1 %), area ratio wing 1.1777; re-frozen 2026-09-27: feature_capture 0.4702 (2.2754 of 4.8387 m within 0.003125 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 61490,
+    "pinned_frac": 0.29105090311986864,
+    "p99_over_hf": 0.5732519873188513,
+    "max_over_hf": 2.2870399001821817,
+    "h_f_m": 0.03125,
+    "seconds": 33.880016,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": true,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.4702389404533761
+   },
+   "sharp_edge_length_m": 4.838746175463724,
+   "plane_path": false
+  },
+  {
+   "id": "wing_c_L4",
+   "stl": "wing_c.stl",
+   "patch_areas_m2": {
+    "wing": 4.723455267692194
+   },
+   "n_triangles": 6046,
+   "exit_code": 0,
+   "wall_seconds": null,
+   "hand_label": "2278/5384 pinned (42 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1183/5384 (22.0 %), area ratio wing 1.2711; re-frozen 2026-09-27: feature_capture 0.4448 (3.6410 of 8.1858 m within 0.003125 m, (92.62)), F3e false",
+   "expect": {
+    "exit_code": 0,
+    "last_stage": "layers",
+    "failure_class": "layer_dropped:retreat_snapped",
+    "n_cells": 64370,
+    "pinned_frac": 0.21972511144130757,
+    "p99_over_hf": 0.5579538771791831,
+    "max_over_hf": 2.2734792552217797,
+    "h_f_m": 0.03125,
+    "seconds": 34.4976077,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "patches": [
+     {
+      "name": "wing",
+      "requested": true,
+      "n_layers": 0,
+      "dropped": true,
+      "full_area_frac": 0.0,
+      "yplus_a_priori": 0.08667353946462485,
+      "delivered": false,
+      "t1_min_over_requested": 0.0
+     }
+    ],
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "missing_signals": [
+     "F2: -check was not run on this attempt (the campaign runs it on its audit sample); F2 is false"
+    ],
+    "flags": {
+     "F1": false,
+     "F2": false,
+     "F3a": true,
+     "F3b": true,
+     "F3c": true,
+     "F3d": true,
+     "F3e": false,
+     "F4": false,
+     "F5": false
+    },
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.4447885876385161
+   },
+   "sharp_edge_length_m": 8.185825694348434,
+   "plane_path": false
+  }
+ ],
+ "variants": [
+  {
+   "id": "cubep_nofeat",
+   "flow": {
+    "u_ref_m_s": 10.0,
+    "l_ref_m": 1.0,
+    "nu_m2_s": 1.5e-05,
+    "note": "air at 10 m/s over 1 m: y+ of a 0.02 m first layer is far above 1"
+   },
+   "betas": [
+    0.5,
+    0.8,
+    0.95
+   ],
+   "expect": {
+    "yplus_a_priori": 655.0925391932913,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.8,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     },
+     {
+      "beta": 0.95,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "failure_class": null,
+    "verdict": "fail"
+   }
+  },
+  {
+   "id": "cubep_nofeat_cf",
+   "flow": {
+    "u_ref_m_s": 0.001,
+    "l_ref_m": 1.0,
+    "nu_m2_s": 1.5e-05,
+    "note": "Re_L 66.7: y+ of a 0.05 m first layer is 0.95 <= 1"
+   },
+   "betas": [
+    0.25,
+    0.5
+   ],
+   "expect": {
+    "yplus_a_priori": 0.9505732741667087,
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "blc_beta_a_priori": [
+     {
+      "beta": 0.25,
+      "lo": 1.0,
+      "hi": 1.0,
+      "exact": false
+     },
+     {
+      "beta": 0.5,
+      "lo": 0.0,
+      "hi": 0.0,
+      "exact": true
+     }
+    ],
+    "failure_class": "layer_dropped:no_full_stack",
+    "verdict": "fail"
+   }
+  }
+ ]
+}

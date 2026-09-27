@@ -1,0 +1,121 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "git_sha": "5a8d1cf08dc8213140b9fac5f0f456c69d658e96",
+ "opened_at": "2026-09-25T17:16:32Z",
+ "plan": {
+  "audit_mod": 10,
+  "baselines": {
+   "b0-lhs": "03ee0ac451a0474bd3339028f1364e18745336ba890b2e46a06b324285d79a59",
+   "b0-template": "7685d908ada56902576840d03baef07476408bb7e969a4739fb8d9a3fac79a59"
+  },
+  "binary_sha256": "054bba67c8650082431ac01325e497208a9bc663c4760a36f7472ff62814a90b",
+  "campaigns": [
+   [
+    "full",
+    "full",
+    [],
+    false,
+    "all"
+   ],
+   [
+    "b0-template",
+    "b0-template",
+    [],
+    false,
+    "all"
+   ],
+   [
+    "gdet-1",
+    "full",
+    [],
+    false,
+    "gdet"
+   ],
+   [
+    "gdet-2",
+    "full",
+    [],
+    false,
+    "gdet"
+   ],
+   [
+    "no-remedies",
+    "full",
+    [
+     "remedies"
+    ],
+    true,
+    "all"
+   ],
+   [
+    "no-optimiser",
+    "rules+prior",
+    [],
+    true,
+    "all"
+   ],
+   [
+    "rules",
+    "rules",
+    [],
+    true,
+    "all"
+   ],
+   [
+    "no-prior",
+    "rules+opt",
+    [],
+    true,
+    "all"
+   ],
+   [
+    "no-preflight",
+    "full",
+    [
+     "preflight"
+    ],
+    true,
+    "all"
+   ]
+  ],
+  "gates_sha256": "93cc1648563ec0ac96b81d837e8625c9b98140114c094e63ee20b793a1aef1aa",
+  "gdet_ids": [
+   "A-1-043",
+   "A-1-045",
+   "A-1-059",
+   "A-1-084",
+   "B-1-101",
+   "B-1-103",
+   "B-1-115",
+   "B-1-117",
+   "D-1-009",
+   "D-1-021",
+   "D-1-028",
+   "E-1-034",
+   "E-1-044",
+   "E-1-047",
+   "F-1-013",
+   "F-1-052",
+   "F-1-058",
+   "G-1-006",
+   "G-1-062",
+   "G-1-080"
+  ],
+  "knobs_sha256": "60a021602ffb9e2c4ac59b0851745113162a86988bf562a6cd4db30cccc0b0ba",
+  "manifest": {
+   "n": 180,
+   "sha256": "69a6c9399b5ace39696ebbc2b6123214f0b5134f7cfb8b8709e392a871fb010a",
+   "source": "test"
+  },
+  "models": {
+   "optimiser": "12bcf6d6cfb4b65b02e21d3dd838520d6a579c5bc87536fab6085a3c42061117",
+   "optimiser_train": "47b15020cd110bec7a7df6249a2886ead0eb9821328989c6473732954fb95d76",
+   "prior": "1d14cf38a4fb4b676859d0cebf44a75c8f482aa98cbc1ee42c878040601b8298"
+  },
+  "ram_guard_mib": 8192.0,
+  "rehearsal": false,
+  "streams": 6
+ },
+ "plan_sha256": "1ceecf603ac7964695555acdf73d3f4794effc78774470f674a0b790af0470eb",
+ "schema": "autonomy-eval-lock/1"
+}

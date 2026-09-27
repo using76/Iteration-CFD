@@ -8,6 +8,7 @@ OpenCASCADE kernel.
 
     python tools/geom/geom_tool.py info   <file> [--json <out.json>] [--scale S]
     python tools/geom/geom_tool.py export <file> --out <path> [--scale S] [--stl-size M]
+    python tools/geom/geom_tool.py repair <file.stl> [--out <path.stl>] [--json <out.json>] [--weld REL] [--max-hole-edges N] [--ascii | --binary]
 
 STEP/STP, BREP, IGES, XAO and STL are read; STEP, BREP, XAO and STL are
 written, by the extension of --out. A STEP keeps neither names nor materials
@@ -457,7 +458,10 @@ def parse_args(argv):
     p = argparse.ArgumentParser(
         prog='geom_tool',
         description="List and export geometry files on gmsh's OpenCASCADE kernel.")
-    sub = p.add_subparsers(dest='cmd', required=True, metavar='{info,export,edit}')
+    sub = p.add_subparsers(dest='cmd', required=True, metavar='{info,export,edit,repair}')
+    pr = sub.add_parser('repair', help='repair an STL to watertight where it can be, and report what it could not')
+    import stl_repair
+    stl_repair.add_arguments(pr)
     pi = sub.add_parser('info', help='list the solids (or IGES surfaces / STL faces) of a file')
     pi.add_argument('file', help='a .step/.stp/.brep/.iges/.igs/.xao/.stl file')
     pi.add_argument('--json', metavar='OUT',
@@ -484,6 +488,9 @@ def main(argv=None):
     args = parse_args(argv)
     if args.cmd == 'info':
         return cmd_info(args)
+    if args.cmd == 'repair':
+        import stl_repair
+        return stl_repair.run_repair(args)
     if args.cmd == 'edit':
         import geom_edit
         return geom_edit.run_edit(args, sys.modules[__name__])

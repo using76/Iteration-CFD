@@ -1,0 +1,45 @@
+ofgpu-automesher (SPEC-LIT §92, hex-dominant path)
+[stl] box.stl: 3072 triangle(s), 1 patch(es)
+surface: 3072 triangle(s), 1538 point(s)
+  bbox lo (0.000, -0.250, -0.250), hi (1.000, 0.250, 0.250)
+  body: 3072 triangles, 2.500 m^2
+plan: base grid 20 x 12 x 10 cells (base_size 0.500 m), max level 4, finest cell 0.03125 m
+=== stage 1/5  octree ===
+automesher: 49328 cells, 153208 internal faces, 1120 boundary faces, 55849 points
+  volume: min 0.000031 (cell 10314); regions: 1 (49328 cells)
+  closure: max 0.000e0 (cell 0)
+  non-orthogonality: max 25.239 deg, mean 2.541 deg, 0 face(s) past the report mark
+  thickness: min tau 3.000000 (cell 2038); conditioning: max cond 1.000 (cell 0)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+--- octree: 2.3 s
+=== stage 2/5  castellate ===
+automesher: 42480 cells, 131048 internal faces, 3680 boundary faces, 55849 points
+  volume: min 0.000031 (cell 10314); regions: 1 (42480 cells)
+  closure: max 0.000e0 (cell 0)
+  non-orthogonality: max 25.239 deg, mean 2.798 deg, 0 face(s) past the report mark
+  thickness: min tau 3.000000 (cell 2038); conditioning: max cond 1.000 (cell 0)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+--- castellate: 0.3 s
+=== stage 3/5  snap ===
+snap: 2562 boundary points, 30 iteration(s), out of iterations
+snap: max step 0.000e0, residual max 2.100e-2, p99 1.153e-2
+snap: 4340 point(s) scaled back, 1672 pinned, 12 iterate(s) abandoned
+snap: 192 feature edge(s), 8 corner(s); last iterate 1786 point(s) to an edge, 8 to a corner
+--- snap: 13.8 s
+=== stage 4/5  split ===
+split: skipped - castellation.bodies is empty
+--- split: 0.0 s
+=== stage 5/5  layers ===
+layers: 0 cell(s) behind 2560 face(s), 0 new point(s), 4 retreat(s)
+layers: 0 internal side face(s), 0 boundary side face(s), 0 from a split edge
+layers: patch "body": the gate still failed after 4 retreat(s)
+--- layers: 0.8 s
+automesher: 42480 cells, 131048 internal faces, 3680 boundary faces, 55849 points
+  volume: min 0.000004 (cell 24437); regions: 1 (42480 cells)
+  closure: max 2.267e-15 (cell 17040)
+  non-orthogonality: max 70.000 deg, mean 5.622 deg, 1375 face(s) past the report mark
+  thickness: min tau 0.069193 (cell 14325); conditioning: max cond 87.318 (cell 21059)
+  duplicate faces: 0; ldu ordered: yes; gate: passed
+ofgpu-automesher: wrote box_L4_case\constant\polyMesh (42480 cells)
+ofgpu-automesher: wrote box_L4_case\box_L4_summary.json
+ofgpu-automesher: total 17.3 s

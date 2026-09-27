@@ -1,0 +1,23 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.iterations.invalid/autonomy/manifest_row.schema.json",
+  "title": "ManifestRow",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "autonomy-manifest/1"},
+    "geometry_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+    "family": {"enum": ["A", "B", "C", "D", "E", "F", "G", "X"]},
+    "generator": {"type": "string", "minLength": 1},
+    "params": {"type": "object"},
+    "seed": {"type": "integer", "minimum": 0},
+    "split": {"enum": ["tuning", "test", "reported"]},
+    "stratum": {"enum": ["easy", "medium", "hard"]},
+    "commensurate": {"type": "boolean"},
+    "stl_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "flow": {"$ref": "flow_spec.schema.json"}
+  },
+  "required": ["schema", "geometry_id", "family", "generator", "params", "seed",
+               "split", "stratum", "commensurate", "stl_sha256", "flow"]
+}

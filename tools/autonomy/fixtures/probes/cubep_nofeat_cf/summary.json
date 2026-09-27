@@ -1,0 +1,287 @@
+{
+  "case_dir": "<survey>\\am\\case_cubep_nofeat_cf",
+  "config": {
+    "castellation": {
+      "keep_region": "largest",
+      "min_faces": 4,
+      "seed_point": null
+    },
+    "domain": {
+      "base_size": 1.0,
+      "extent": [
+        0.0,
+        4.0,
+        0.0,
+        4.0,
+        0.0,
+        4.0
+      ],
+      "grading": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "input": {
+      "surfaces": [
+        {
+          "name": null,
+          "path": "<survey>\\am\\cubep.stl"
+        }
+      ]
+    },
+    "layers": {
+      "cell_frac": 0.1,
+      "first_thickness": 0.05,
+      "growth": 1.3,
+      "medial_frac": 0.5,
+      "min_thickness": 0.0,
+      "n": 3,
+      "normal_passes": 0,
+      "patches": [
+        "cube"
+      ],
+      "retreat_limit": 4,
+      "smoothing": 0.5,
+      "smoothing_passes": 4
+    },
+    "output": {
+      "case_dir": "<survey>\\am\\case_cubep_nofeat_cf",
+      "name": "cubep_nofeat_cf"
+    },
+    "quality": {
+      "max_closure": 1e-10,
+      "max_cond": 10000.0,
+      "max_non_orth_deg": 70.0,
+      "min_thickness_ratio": 0.05,
+      "report_non_orth_deg": 60.0
+    },
+    "refinement": {
+      "feature_angle_deg": 30.0,
+      "levels": [
+        {
+          "bands": [
+            {
+              "distance": 0.0,
+              "level": 1
+            }
+          ],
+          "feature_level": 0,
+          "patch": "cube"
+        }
+      ],
+      "max_level": 1
+    },
+    "snap": {
+      "feature_tolerance": 0.0,
+      "iterations": 30,
+      "max_area_ratio": 4.0,
+      "smoothing": 0.5,
+      "smoothing_passes": 3,
+      "tolerance": 0.001,
+      "undo_limit": 4
+    }
+  },
+  "config_path": "<survey>\\am\\cubep_nofeat_cf.json",
+  "identity": {
+    "host": "MAIN_M",
+    "mesh_id": "m_7d17f88142bc1036",
+    "run_id": null,
+    "schema": 1,
+    "tool": "ofgpu-automesher",
+    "written_at": "2026-09-24T07:24:16Z"
+  },
+  "layout": null,
+  "mesh": {
+    "n_boundary_faces": 231,
+    "n_cells": 388,
+    "n_internal_faces": 1089,
+    "n_points": 572,
+    "patches": [
+      {
+        "kind": "patch",
+        "name": "xMin",
+        "size": 43
+      },
+      {
+        "kind": "patch",
+        "name": "xMax",
+        "size": 16
+      },
+      {
+        "kind": "patch",
+        "name": "yMin",
+        "size": 43
+      },
+      {
+        "kind": "patch",
+        "name": "yMax",
+        "size": 16
+      },
+      {
+        "kind": "patch",
+        "name": "zMin",
+        "size": 43
+      },
+      {
+        "kind": "patch",
+        "name": "zMax",
+        "size": 16
+      },
+      {
+        "kind": "wall",
+        "name": "cube",
+        "size": 54
+      }
+    ]
+  },
+  "name": "cubep_nofeat_cf",
+  "quality": {
+    "ldu_ordered": true,
+    "max_closure": 3.893974084971219e-15,
+    "max_closure_cell": 282,
+    "max_cond": 62.121831580386726,
+    "max_cond_cell": 337,
+    "max_non_orth_deg": 29.62090833160828,
+    "mean_non_orth_deg": 5.472493437720122,
+    "min_thickness_cell": 370,
+    "min_thickness_ratio": 0.0545965433529249,
+    "min_volume": 0.002386569895201826,
+    "min_volume_cell": 286,
+    "n_cells": 388,
+    "n_duplicate_faces": 0,
+    "n_non_orth_over_report": 0,
+    "n_regions": 1,
+    "passed": true,
+    "region_sizes": [
+      388
+    ]
+  },
+  "stages": [
+    {
+      "balance_splits": 0,
+      "base_n": [
+        4,
+        4,
+        4
+      ],
+      "gate_passed": true,
+      "max_level": 1,
+      "max_non_orth_deg": 25.239401820678985,
+      "n_leaves": 253,
+      "refine_splits": 27,
+      "seconds": 0.0013016,
+      "stage": "octree"
+    },
+    {
+      "n_cells": 226,
+      "n_dropped_components": 0,
+      "removed": {
+        "off_region": 0,
+        "pinch": 0,
+        "solid": 27,
+        "starved": 0,
+        "unrepaired_pinch": 0
+      },
+      "seconds": 0.0016879,
+      "stage": "castellate",
+      "wall_faces": 54,
+      "wall_patches": {
+        "cube": 54
+      }
+    },
+    {
+      "area_ratio": [
+        {
+          "castellated_area_m2": 13.5,
+          "castellated_ratio": 1.0,
+          "name": "cube",
+          "ratio": 1.0,
+          "snapped_area_m2": 13.5,
+          "stl_area_m2": 13.5
+        }
+      ],
+      "converged": true,
+      "h_f_m": 0.5,
+      "iterations": 1,
+      "max_over_h": 0.0,
+      "max_residual": 0.0,
+      "max_step": 0.0,
+      "n_abandoned": 0,
+      "n_boundary_points": 56,
+      "n_feature_corners": 0,
+      "n_feature_edges": 0,
+      "n_pinned": 0,
+      "n_pinned_boundary": 0,
+      "n_scaled_back": 0,
+      "n_snapped_to_corner": 0,
+      "n_snapped_to_edge": 0,
+      "p99_over_h": 0.0,
+      "p99_residual": 0.0,
+      "seconds": 0.0022402,
+      "stage": "snap"
+    },
+    {
+      "n_regions": 1,
+      "seconds": 0.0,
+      "skipped": true,
+      "stage": "split"
+    },
+    {
+      "n_layer_cells": 162,
+      "n_layer_points": 168,
+      "n_side_boundary": 0,
+      "n_side_internal": 324,
+      "n_split_sides": 0,
+      "patches": [
+        {
+          "area": 13.5,
+          "area_frac_tau_ge": [
+            {
+              "area_frac": 0.0,
+              "beta": 0.5
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.8
+            },
+            {
+              "area_frac": 0.0,
+              "beta": 0.95
+            }
+          ],
+          "dropped": null,
+          "full_area_frac": 0.0,
+          "mean_frac": 0.2506265664160399,
+          "n_faces": 54,
+          "n_layers": 3,
+          "name": "cube",
+          "t1_mean": 0.012531328320801997,
+          "t1_min": 0.012531328320802004,
+          "t1_requested": 0.05
+        }
+      ],
+      "retreats": 0,
+      "seconds": 0.0033138,
+      "stage": "layers"
+    }
+  ],
+  "stopped_after": null,
+  "surface": {
+    "bbox": [
+      1.0,
+      1.0,
+      1.0,
+      2.5,
+      2.5,
+      2.5
+    ],
+    "n_points": 8,
+    "n_triangles": 12,
+    "patches": [
+      "cube"
+    ]
+  },
+  "tool": "ofgpu-automesher",
+  "total_seconds": 0.0088037
+}

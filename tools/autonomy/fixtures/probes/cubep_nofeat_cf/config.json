@@ -1,0 +1,51 @@
+{
+ "input": {
+  "surfaces": [
+   {
+    "path": "<survey>\\am\\cubep.stl"
+   }
+  ]
+ },
+ "domain": {
+  "extent": [
+   0,
+   4,
+   0,
+   4,
+   0,
+   4
+  ],
+  "base_size": 1.0
+ },
+ "refinement": {
+  "levels": [
+   {
+    "patch": "cube",
+    "bands": [
+     {
+      "distance": 0.0,
+      "level": 1
+     }
+    ]
+   }
+  ],
+  "max_level": 1
+ },
+ "layers": {
+  "patches": [
+   "cube"
+  ],
+  "n": 3,
+  "first_thickness": 0.05,
+  "normal_passes": 0,
+  "min_thickness": 0.0,
+  "cell_frac": 0.1
+ },
+ "output": {
+  "case_dir": "<survey>\\am\\case_cubep_nofeat_cf",
+  "name": "cubep_nofeat_cf"
+ },
+ "snap": {
+  "feature_tolerance": 0.0
+ }
+}

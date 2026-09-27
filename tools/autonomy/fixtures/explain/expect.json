@@ -1,0 +1,233 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "clopper_pearson": [
+  [
+   0,
+   10,
+   0.0,
+   0.3084971078187608
+  ],
+  [
+   5,
+   10,
+   0.18708602844739852,
+   0.8129139715526015
+  ],
+  [
+   10,
+   10,
+   0.6915028921812392,
+   1.0
+  ],
+  [
+   1,
+   3,
+   0.008403758659612636,
+   0.9057006759497539
+  ],
+  [
+   0,
+   1,
+   0.0,
+   0.975
+  ],
+  [
+   3,
+   180,
+   0.003450344196972937,
+   0.047932200496390916
+  ],
+  [
+   36,
+   36,
+   0.902606244085508,
+   1.0
+  ],
+  [
+   7,
+   36,
+   0.08194363976520888,
+   0.3602480161750254
+  ],
+  [
+   0,
+   420,
+   0.0,
+   0.008744588043961133
+  ]
+ ],
+ "golden": {
+  "D-1-002": {
+   "counts": {
+    "## attempt ": 1,
+    "end ": 1,
+    "moved: ": 0,
+    "record ": 17
+   },
+   "must_contain": [
+    "# D-1-002: 1 attempt(s), split tuning, campaign am15-fixture, terminal PASS\n",
+    "## attempt 1: rule R-WIN, stage focus none\n",
+    "decided: pick the wall level and the growth inside the feasible window\n",
+    "why: h_wall / t1 = 26.2016 in [16, 42] (docs/15 §D.3)\n",
+    "edits: none\n",
+    "record R-YP [rule apply]: set the first layer thickness from the a priori wall unit; because ",
+    "record R-PLANE [rule apply]: put a commensurate body's faces on cell planes; because ",
+    "record R-CURV [rule abstain]: ",
+    "record R-BUDGET [rule pass]: ",
+    "record PF-THIN [preflight pass]: check the first layer against the thickness-ratio gate at the wall edge; because ",
+    "record PF-BUDGET [preflight pass]: ",
+    "observed: verdict pass, failure class none, flags none, cells 87166, pinned 0,",
+    "layers: body 8 layers, full 1, delivered\n",
+    "end RM-PASS [remedy pass]: end the geometry: the attempt passes; because "
+   ],
+   "must_not_contain": [
+    "moved:",
+    "capability-limited",
+    "refused: "
+   ]
+  },
+  "box_sphere": {
+   "counts": {
+    "## attempt ": 1,
+    "end ": 1,
+    "moved: ": 0,
+    "record ": 0
+   },
+   "must_contain": [
+    "# box_sphere: 1 attempt(s), split reported, campaign am15-fixture, terminal CAPABILITY-LIMITED\n",
+    "## attempt 1: default, stage focus none\n",
+    "decided: the config as given: no rule chose it\n",
+    "why: no trigger\n",
+    "edits: none\n",
+    "predicted: none\n",
+    "observed: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 12880, pinned 0, p99/h_f 0.00794265, max/h_f 0.00848947, BLC_8 0, BLC_full 0, 3.39397 s\n",
+    "layers: sphere 0 layers, full 0, not delivered (min_thickness), capability-limited\n",
+    "end RM-CAPABILITY-LIMITED [remedy refuse]: end the geometry: the layers are limited by the mesher's capability; because "
+   ],
+   "must_not_contain": [
+    "moved:",
+    "record "
+   ]
+  },
+  "wing_a_L3": {
+   "counts": {
+    "## attempt ": 4,
+    "end ": 1,
+    "moved: ": 3,
+    "record ": 3
+   },
+   "must_contain": [
+    "# wing_a_L3: 4 attempt(s), split reported, campaign am15-fixture, terminal EXHAUSTED\n",
+    "## attempt 1: default, stage focus none\n",
+    "observed: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b, cells 11234, pinned 0.133423, p99/h_f 0.401044, max/h_f 0.401048,",
+    "## attempt 2: remedy RM-SNAP-FT, stage focus snap\n",
+    "decided: switch the feature attraction off\n",
+    "why: outcome.pinned_frac = 0.133423 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\n",
+    "edits: /snap/feature_tolerance absent -> 0\n",
+    "record RM-SNAP-FT [remedy apply]: switch the feature attraction off; because ",
+    "observed: verdict fail, failure class layer_dropped:retreat_snapped, flags F3d, cells 11234, pinned 0,",
+    "moved: outcome.pinned_frac 0.133423 -> 0 (attempt 1 -> 2)\n",
+    "## attempt 3: remedy RM-SNAP-REFINE, stage focus snap\n",
+    "why: outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))\n",
+    "edits: /refinement/levels/0/bands/0/level 3 -> 4; /refinement/levels/0/bands/1/level 2 -> 3; /refinement/levels/0/bands/2/level 1 -> 2; /refinement/levels/0/feature_level 3 -> 4; /refinement/max_level 3 -> 4\n",
+    "moved: outcome.flags.F3d true -> true (attempt 2 -> 3); unchanged\n",
+    "## attempt 4: remedy RM-SNAP-REFINE, stage focus snap\n",
+    "cells 585900,",
+    "layers: wing 0 layers, full 0, not delivered (retreat_snapped)\n",
+    "end RM-EXHAUSTED [remedy refuse]: end the geometry: the attempts or the remedies are spent; because "
+   ],
+   "must_not_contain": [
+    "capability-limited"
+   ]
+  }
+ },
+ "note": "the supervisor's labels for AM-15, written from rows.jsonl / records.json and the brief's formats, not from explain.py",
+ "schema": "autonomy-explain-expect/1",
+ "summary": {
+  "groups": [
+   {
+    "fail": 0,
+    "family": "D",
+    "mfr_ci": [
+     0.0,
+     0.975
+    ],
+    "n": 1,
+    "stratum": "easy",
+    "strict": 0,
+    "strict_ci": [
+     0.0,
+     0.975
+    ]
+   },
+   {
+    "fail": 0,
+    "family": "D",
+    "mfr_ci": [
+     0.0,
+     0.975
+    ],
+    "n": 1,
+    "stratum": "all",
+    "strict": 0,
+    "strict_ci": [
+     0.0,
+     0.975
+    ]
+   },
+   {
+    "fail": 1,
+    "family": "X",
+    "mfr_ci": [
+     0.01257911709342505,
+     0.9874208829065749
+    ],
+    "n": 2,
+    "stratum": "probe",
+    "strict": 2,
+    "strict_ci": [
+     0.15811388300841897,
+     1.0
+    ]
+   },
+   {
+    "fail": 1,
+    "family": "X",
+    "mfr_ci": [
+     0.01257911709342505,
+     0.9874208829065749
+    ],
+    "n": 2,
+    "stratum": "all",
+    "strict": 2,
+    "strict_ci": [
+     0.15811388300841897,
+     1.0
+    ]
+   },
+   {
+    "fail": 1,
+    "family": "all",
+    "mfr_ci": [
+     0.008403758659612636,
+     0.9057006759497539
+    ],
+    "n": 3,
+    "stratum": "all",
+    "strict": 2,
+    "strict_ci": [
+     0.09429932405024609,
+     0.9915962413403874
+    ]
+   }
+  ],
+  "must_contain": [
+   "# campaign am15-fixture: 3 geometries, 6 rows, Clopper-Pearson intervals at confidence 0.95\n",
+   "D/easy: n 1, MFR 0 [0, 0.975], strict 0 [0, 0.975], BLC_8 1, BLC_full 1, median cells 87166, mean attempts 1, capability-limited 0\n",
+   "D/all: n 1, MFR 0 [0, 0.975], strict 0 [0, 0.975], BLC_8 1, BLC_full 1, median cells 87166, mean attempts 1, capability-limited 0\n",
+   "X/probe: n 2, MFR 0.5 [0.0125791, 0.987421], strict 1 [0.158114, 1], BLC_8 0, BLC_full 0, median cells 299390, mean attempts 2.5, capability-limited 1\n",
+   "X/all: n 2, MFR 0.5 [0.0125791, 0.987421], strict 1 [0.158114, 1], BLC_8 0, BLC_full 0, median cells 299390, mean attempts 2.5, capability-limited 1\n",
+   "all/all: n 3, MFR 0.333333 [0.00840376, 0.905701], strict 0.666667 [0.0942993, 0.991596], BLC_8 0.333333, BLC_full 0.333333, median cells 87166, mean attempts 2, capability-limited 1\n"
+  ]
+ }
+}

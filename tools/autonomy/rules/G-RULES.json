@@ -1,0 +1,3906 @@
+{
+ "binary_sha256": "054bba67c8650082431ac01325e497208a9bc663c4760a36f7472ff62814a90b",
+ "date": "2026-09-24",
+ "git_head": "7e8e14ff866e5f46ca24c256514496f0f221d312",
+ "parts": {
+  "1": {
+   "checks": {
+    "a_t1_floored": true,
+    "a_t1_raw": true,
+    "a_yplus": true,
+    "b_window": true,
+    "c_refused": true,
+    "d_plane": true,
+    "d_preflight": true
+   },
+   "runs": {
+    "A": {
+     "T_over_cell_frac_h": 0.999624,
+     "dropped": null,
+     "exit_code": 0,
+     "full_area_frac": 1.0,
+     "growth": 1.265,
+     "h_over_t1": 41.958,
+     "mean_frac": 1.0,
+     "n_layers": 8,
+     "t1": 0.0007296
+    },
+    "B": {
+     "T_over_cell_frac_h": 1.003318,
+     "dropped": null,
+     "exit_code": 0,
+     "full_area_frac": 0.0,
+     "growth": 1.266,
+     "h_over_t1": 41.958,
+     "mean_frac": 0.996693,
+     "n_layers": 8,
+     "t1": 0.0007296
+    },
+    "C": {
+     "T_over_cell_frac_h": 0.698331,
+     "exit_code": 1,
+     "g5_line": "error: layers: the first layer is thinner than the quality gate allows - 3 * 0.0005096938775510203 / 0.030612244897958885 = 0.04995000000000047 < min_thickness_ratio = 0.05 (92.51); every layer cell would fail G5, so none is inserted",
+     "g5_ratio": 0.04995000000000047,
+     "growth": 1.265,
+     "h_over_t1": 60.06,
+     "t1": 0.0005096938775510203
+    },
+    "D": {
+     "T_over_cell_frac_h": 0.699729,
+     "dropped": "patch \"cube\": the thickness fell below min_thickness * T = 1.071e-3",
+     "exit_code": 0,
+     "full_area_frac": 0.0,
+     "growth": 1.265,
+     "h_over_t1": 59.94,
+     "mean_frac": 0.0,
+     "n_layers": 0,
+     "t1": 0.0005107142857142856
+    },
+    "F": {
+     "T_over_cell_frac_h": 0.749958,
+     "dropped": "patch \"cube\": the thickness fell below min_thickness * T = 1.148e-3",
+     "exit_code": 0,
+     "full_area_frac": 0.0,
+     "growth": 1.2,
+     "h_over_t1": 44.0,
+     "mean_frac": 0.0,
+     "n_layers": 0,
+     "t1": 0.0006957328385899814
+    }
+   },
+   "verdict": "PASS"
+  },
+  "2": {
+   "applied": 59,
+   "refused": 1,
+   "rows": 60,
+   "verdict": "PASS"
+  },
+  "2A": {
+   "applied": 11,
+   "failed": [],
+   "fired": {
+    "R-BUDGET": 8,
+    "R-CURV": 7,
+    "R-DOM": 12,
+    "R-FEAT": 12,
+    "R-WIN": 12,
+    "R-YP": 12
+   },
+   "refused": 1,
+   "refused_ids": [
+    "A-1-009"
+   ],
+   "rows": [
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-012",
+     "growth": 1.056,
+     "h_over_t1": 19.52864756828781,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.7626,
+     "predicted_leaves": 965562,
+     "predicted_total": 1304488,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 547808,
+     "refused": [],
+     "rung": [
+      0.25,
+      1.0
+     ],
+     "seconds": 0.577,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-001",
+     "growth": 1.097,
+     "h_over_t1": 22.657809381237527,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.6304,
+     "predicted_leaves": 898370,
+     "predicted_total": 1181606,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 550998,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.213,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-000",
+     "growth": 1.152,
+     "h_over_t1": 27.7295676869675,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 2.1209,
+     "predicted_leaves": 824944,
+     "predicted_total": 1201580,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 388954,
+     "refused": [],
+     "rung": [
+      0.25,
+      0.5
+     ],
+     "seconds": 0.201,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-003",
+     "growth": 1.0,
+     "h_over_t1": 14.40841932457786,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 2.0479,
+     "predicted_leaves": 871289,
+     "predicted_total": 1283385,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 425456,
+     "refused": [],
+     "rung": [
+      0.25,
+      0.5
+     ],
+     "seconds": 0.201,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 3
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-002",
+     "growth": 1.234,
+     "h_over_t1": 37.520308692120224,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.9357,
+     "predicted_leaves": 819456,
+     "predicted_total": 1340653,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 423333,
+     "refused": [],
+     "rung": [
+      0.25,
+      0.25
+     ],
+     "seconds": 0.2,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT"
+     ],
+     "geometry_id": "A-1-004",
+     "growth": 1.038,
+     "h_over_t1": 18.340814706241602,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.3428,
+     "predicted_leaves": 1007192,
+     "predicted_total": 1243206,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 750084,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.196,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 5,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-005",
+     "growth": 1.256,
+     "h_over_t1": 40.601272889682896,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.9922,
+     "predicted_leaves": 428933,
+     "predicted_total": 575838,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 215306,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.207,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": null,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "A-1-009",
+     "growth": 1.178,
+     "h_over_t1": 30.49940798376184,
+     "pf_verdicts": null,
+     "plane": false,
+     "pred_over_probe": null,
+     "predicted_leaves": 2779554,
+     "predicted_total": 4224115,
+     "preflight_refused": null,
+     "preflight_verdict": null,
+     "probe_exit": null,
+     "probe_n_leaves": null,
+     "rederived": true,
+     "refused": [
+      "R-BUDGET"
+     ],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.193,
+     "stratum": "medium",
+     "verdict": "refuse",
+     "verdicts": {
+      "R-BUDGET": "refuse",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 6
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "A-1-006",
+     "growth": 1.259,
+     "h_over_t1": 41.04667753770892,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.4337,
+     "predicted_leaves": 1040994,
+     "predicted_total": 1290876,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 726088,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.185,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-010",
+     "growth": 1.303,
+     "h_over_t1": 48.315677966101696,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.8598,
+     "predicted_leaves": 996007,
+     "predicted_total": 1346366,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 535554,
+     "refused": [],
+     "rung": [
+      0.25,
+      1.0
+     ],
+     "seconds": 0.195,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "A-1-007",
+     "growth": 1.347,
+     "h_over_t1": 56.78277040611179,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.6062,
+     "predicted_leaves": 920154,
+     "predicted_total": 1205585,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 572863,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.217,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "A",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "A-1-011",
+     "growth": 1.307,
+     "h_over_t1": 48.990046838407494,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.3662,
+     "predicted_leaves": 1098488,
+     "predicted_total": 1362721,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 804061,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.194,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    }
+   ],
+   "verdict": "PASS",
+   "wall_levels": {
+    "4": 1,
+    "5": 10
+   }
+  },
+  "2B": {
+   "applied": 12,
+   "failed": [],
+   "fired": {
+    "R-BUDGET": 4,
+    "R-CURV": 8,
+    "R-DOM": 12,
+    "R-FEAT": 6,
+    "R-WIN": 12,
+    "R-YP": 12
+   },
+   "refused": 0,
+   "refused_ids": [],
+   "rows": [
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-BUDGET"
+     ],
+     "geometry_id": "B-1-003",
+     "growth": 1.178,
+     "h_over_t1": 30.456824636137735,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.0934,
+     "predicted_leaves": 637016,
+     "predicted_total": 750130,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 582592,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 1.183,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 6
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN"
+     ],
+     "geometry_id": "B-1-000",
+     "growth": 1.207,
+     "h_over_t1": 33.89976958525346,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.7947,
+     "predicted_leaves": 946932,
+     "predicted_total": 989952,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1191488,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.551,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 6
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT"
+     ],
+     "geometry_id": "B-1-002",
+     "growth": 1.0,
+     "h_over_t1": 6.9678274907749085,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.8188,
+     "predicted_leaves": 1066473,
+     "predicted_total": 1129902,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1302528,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.384,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 3
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-BUDGET"
+     ],
+     "geometry_id": "B-1-015",
+     "growth": 1.08,
+     "h_over_t1": 21.337710299548625,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.0973,
+     "predicted_leaves": 619116,
+     "predicted_total": 728335,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 564200,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.917,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "B-1-001",
+     "growth": 1.204,
+     "h_over_t1": 33.55460132366845,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.0742,
+     "predicted_leaves": 662813,
+     "predicted_total": 781494,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 617004,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.517,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 6
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT"
+     ],
+     "geometry_id": "B-1-005",
+     "growth": 1.0,
+     "h_over_t1": 8.260227132070801,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.8427,
+     "predicted_leaves": 1139342,
+     "predicted_total": 1215157,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1351976,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.33,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV"
+     ],
+     "geometry_id": "B-1-033",
+     "growth": 1.0,
+     "h_over_t1": 8.928356592877767,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.8446,
+     "predicted_leaves": 1107302,
+     "predicted_total": 1177704,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1311040,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.809,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "B-1-004",
+     "growth": 1.174,
+     "h_over_t1": 30.067641882974044,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.8571,
+     "predicted_leaves": 1232489,
+     "predicted_total": 1324185,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1437964,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.334,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 6
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "B-1-011",
+     "growth": 1.0,
+     "h_over_t1": 11.382561512839798,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.0725,
+     "predicted_leaves": 642961,
+     "predicted_total": 757358,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 599504,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.315,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV"
+     ],
+     "geometry_id": "B-1-036",
+     "growth": 1.08,
+     "h_over_t1": 21.3386567403138,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.851,
+     "predicted_leaves": 1129328,
+     "predicted_total": 1203416,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1327032,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.847,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV"
+     ],
+     "geometry_id": "B-1-006",
+     "growth": 1.0,
+     "h_over_t1": 11.538930429128737,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.7936,
+     "predicted_leaves": 944331,
+     "predicted_total": 986916,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1189976,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.604,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "B",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT"
+     ],
+     "geometry_id": "B-1-013",
+     "growth": 1.128,
+     "h_over_t1": 25.406993204983014,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 0.8038,
+     "predicted_leaves": 1026915,
+     "predicted_total": 1083544,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 1277504,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.541,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 5
+    }
+   ],
+   "verdict": "PASS",
+   "wall_levels": {
+    "6": 12
+   }
+  },
+  "2D": {
+   "applied": 12,
+   "failed": [],
+   "fired": {
+    "R-BUDGET": 6,
+    "R-CURV": 3,
+    "R-DOM": 12,
+    "R-FEAT": 8,
+    "R-PLANE": 4,
+    "R-WIN": 12,
+    "R-YP": 12
+   },
+   "refused": 0,
+   "refused_ids": [],
+   "rows": [
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-PLANE",
+      "R-WIN"
+     ],
+     "geometry_id": "D-1-002",
+     "growth": 1.137,
+     "h_over_t1": 26.201602136181577,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": true,
+     "pred_over_probe": 1.1913,
+     "predicted_leaves": 81549,
+     "predicted_total": 111309,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 68454,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.373,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "abstain",
+      "R-DOM": "apply",
+      "R-FEAT": "abstain",
+      "R-GAP": "abstain",
+      "R-PLANE": "apply",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "D-1-001",
+     "growth": 1.199,
+     "h_over_t1": 32.94815740162398,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.3397,
+     "predicted_leaves": 514026,
+     "predicted_total": 607834,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 383692,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.041,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "D-1-038",
+     "growth": 1.026,
+     "h_over_t1": 17.55601866014072,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.1391,
+     "predicted_leaves": 876642,
+     "predicted_total": 1041499,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 769608,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.022,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-PLANE",
+      "R-WIN"
+     ],
+     "geometry_id": "D-1-008",
+     "growth": 1.128,
+     "h_over_t1": 25.36231884057971,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": true,
+     "pred_over_probe": 1.092,
+     "predicted_leaves": 210422,
+     "predicted_total": 265718,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 192690,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.036,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "abstain",
+      "R-DOM": "apply",
+      "R-FEAT": "abstain",
+      "R-GAP": "abstain",
+      "R-PLANE": "apply",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "D-1-003",
+     "growth": 1.358,
+     "h_over_t1": 59.21442687747035,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.2969,
+     "predicted_leaves": 377754,
+     "predicted_total": 435568,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 291264,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.027,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "D-1-055",
+     "growth": 1.0,
+     "h_over_t1": 16.0194245020843,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.1493,
+     "predicted_leaves": 1104704,
+     "predicted_total": 1318673,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 961174,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.033,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-PLANE",
+      "R-WIN"
+     ],
+     "geometry_id": "D-1-010",
+     "growth": 1.19,
+     "h_over_t1": 31.83322303110523,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": true,
+     "pred_over_probe": 1.2005,
+     "predicted_leaves": 42493,
+     "predicted_total": 56013,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 35397,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.029,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "abstain",
+      "R-DOM": "apply",
+      "R-FEAT": "abstain",
+      "R-GAP": "abstain",
+      "R-PLANE": "apply",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "D-1-005",
+     "growth": 1.34,
+     "h_over_t1": 55.29275923718712,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.4117,
+     "predicted_leaves": 1037957,
+     "predicted_total": 1397118,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 735228,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.297,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "D-1-071",
+     "growth": 1.201,
+     "h_over_t1": 33.20852534562212,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.1379,
+     "predicted_leaves": 993320,
+     "predicted_total": 1183390,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 872922,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.034,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 6
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-PLANE",
+      "R-WIN"
+     ],
+     "geometry_id": "D-1-016",
+     "growth": 1.257,
+     "h_over_t1": 40.7566638005159,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": true,
+     "pred_over_probe": 0.9548,
+     "predicted_leaves": 579635,
+     "predicted_total": 666435,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 607060,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.044,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "abstain",
+      "R-DOM": "apply",
+      "R-FEAT": "abstain",
+      "R-GAP": "abstain",
+      "R-PLANE": "apply",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "D-1-007",
+     "growth": 1.189,
+     "h_over_t1": 31.709939883913762,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.1366,
+     "predicted_leaves": 876306,
+     "predicted_total": 1040985,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 770956,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.034,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 6
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "D",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "D-1-078",
+     "growth": 1.089,
+     "h_over_t1": 21.979290822407627,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.1425,
+     "predicted_leaves": 931501,
+     "predicted_total": 1108228,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 815326,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.039,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 5
+    }
+   ],
+   "verdict": "PASS",
+   "wall_levels": {
+    "4": 2,
+    "5": 5,
+    "6": 5
+   }
+  },
+  "2E": {
+   "applied": 12,
+   "failed": [],
+   "fired": {
+    "R-BUDGET": 4,
+    "R-CURV": 1,
+    "R-DOM": 12,
+    "R-FEAT": 7,
+    "R-GAP": 7,
+    "R-WIN": 12,
+    "R-YP": 12
+   },
+   "refused": 0,
+   "refused_ids": [],
+   "rows": [
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": 5,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "E-1-002",
+     "growth": 1.325,
+     "h_over_t1": 52.39373356704645,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.9629,
+     "predicted_leaves": 189318,
+     "predicted_total": 238710,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 96448,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.442,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-GAP"
+     ],
+     "geometry_id": "E-1-001",
+     "growth": 1.077,
+     "h_over_t1": 21.099161502005103,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.118,
+     "predicted_leaves": 678913,
+     "predicted_total": 856947,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 607280,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.611,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "apply",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-GAP",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "E-1-000",
+     "growth": 1.082,
+     "h_over_t1": 21.453193033381716,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.5094,
+     "predicted_leaves": 768304,
+     "predicted_total": 1180251,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 509020,
+     "refused": [],
+     "rung": [
+      0.25,
+      0.25
+     ],
+     "seconds": 0.078,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "apply",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 6,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN"
+     ],
+     "geometry_id": "E-1-004",
+     "growth": 1.269,
+     "h_over_t1": 42.66143701682583,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.2907,
+     "predicted_leaves": 103203,
+     "predicted_total": 147072,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 79956,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.616,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-GAP",
+      "R-FEAT"
+     ],
+     "geometry_id": "E-1-003",
+     "growth": 1.119,
+     "h_over_t1": 24.574851842308686,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.4927,
+     "predicted_leaves": 617021,
+     "predicted_total": 726372,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 413368,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.069,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "apply",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-GAP",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "E-1-023",
+     "growth": 1.05,
+     "h_over_t1": 19.166317553414327,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.5934,
+     "predicted_leaves": 929707,
+     "predicted_total": 1224281,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 583484,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.217,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "apply",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": 5,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "E-1-005",
+     "growth": 1.21,
+     "h_over_t1": 34.2770341669602,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.8527,
+     "predicted_leaves": 219763,
+     "predicted_total": 289299,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 118615,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.21,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "E-1-009",
+     "growth": 1.215,
+     "h_over_t1": 34.90833607365998,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.5739,
+     "predicted_leaves": 703036,
+     "predicted_total": 837054,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 446674,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.083,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-GAP",
+      "R-FEAT",
+      "R-BUDGET"
+     ],
+     "geometry_id": "E-1-056",
+     "growth": 1.069,
+     "h_over_t1": 20.482966796032773,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.5784,
+     "predicted_leaves": 987548,
+     "predicted_total": 1307746,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 625654,
+     "refused": [],
+     "rung": [
+      0.5,
+      1.0
+     ],
+     "seconds": 0.334,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "apply",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-CURV"
+     ],
+     "geometry_id": "E-1-007",
+     "growth": 1.051,
+     "h_over_t1": 19.18455623197693,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.0659,
+     "predicted_leaves": 520135,
+     "predicted_total": 648987,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 487956,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 1.813,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "apply",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-GAP"
+     ],
+     "geometry_id": "E-1-010",
+     "growth": 1.0,
+     "h_over_t1": 15.108130144432367,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.0902,
+     "predicted_leaves": 527300,
+     "predicted_total": 658239,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 483672,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 1.769,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "apply",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "E",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-GAP",
+      "R-BUDGET"
+     ],
+     "geometry_id": "E-1-058",
+     "growth": 1.062,
+     "h_over_t1": 20.00046921921922,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.1235,
+     "predicted_leaves": 728322,
+     "predicted_total": 921532,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 648240,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.517,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "apply",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "pass",
+      "R-GAP": "apply",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 4
+    }
+   ],
+   "verdict": "PASS",
+   "wall_levels": {
+    "4": 3,
+    "5": 8,
+    "6": 1
+   }
+  },
+  "2F": {
+   "applied": 12,
+   "failed": [],
+   "fired": {
+    "R-DOM": 12,
+    "R-FEAT": 9,
+    "R-PLANE": 3,
+    "R-WIN": 12,
+    "R-YP": 12
+   },
+   "refused": 0,
+   "refused_ids": [],
+   "rows": [
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-PLANE",
+      "R-WIN"
+     ],
+     "geometry_id": "F-1-003",
+     "growth": 1.149,
+     "h_over_t1": 27.389705882352942,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": true,
+     "pred_over_probe": 1.2499,
+     "predicted_leaves": 151960,
+     "predicted_total": 195096,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 121577,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.311,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "abstain",
+      "R-DOM": "apply",
+      "R-FEAT": "abstain",
+      "R-GAP": "abstain",
+      "R-PLANE": "apply",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-001",
+     "growth": 1.289,
+     "h_over_t1": 45.903190914007574,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.345,
+     "predicted_leaves": 335666,
+     "predicted_total": 384585,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 249572,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.023,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 5,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-002",
+     "growth": 1.291,
+     "h_over_t1": 46.291466722303355,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 2.0039,
+     "predicted_leaves": 111239,
+     "predicted_total": 136120,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 55510,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.041,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-PLANE",
+      "R-WIN"
+     ],
+     "geometry_id": "F-1-006",
+     "growth": 1.019,
+     "h_over_t1": 17.15555555555556,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": true,
+     "pred_over_probe": 1.1369,
+     "predicted_leaves": 109005,
+     "predicted_total": 133741,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 95876,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.021,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "abstain",
+      "R-DOM": "apply",
+      "R-FEAT": "abstain",
+      "R-GAP": "abstain",
+      "R-PLANE": "apply",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 5,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-007",
+     "growth": 1.178,
+     "h_over_t1": 30.4323006665021,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 2.198,
+     "predicted_leaves": 99350,
+     "predicted_total": 116237,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 45200,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.028,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 4,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-005",
+     "growth": 1.34,
+     "h_over_t1": 55.455868089233746,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 3.0457,
+     "predicted_leaves": 26906,
+     "predicted_total": 29456,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 8834,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.02,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 3,
+     "win_level": 3
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 4,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-009",
+     "growth": 1.338,
+     "h_over_t1": 54.974724264705884,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 4.0929,
+     "predicted_leaves": 54108,
+     "predicted_total": 60374,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 13220,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.043,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "abstain",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 3,
+     "win_level": 3
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 5,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-016",
+     "growth": 1.353,
+     "h_over_t1": 58.0918184149782,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 2.5575,
+     "predicted_leaves": 118039,
+     "predicted_total": 135354,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 46154,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.031,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 4,
+     "win_level": 4
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-008",
+     "growth": 1.297,
+     "h_over_t1": 47.25518548065416,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.3669,
+     "predicted_leaves": 380975,
+     "predicted_total": 443151,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 278714,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.022,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": null,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-PLANE",
+      "R-WIN"
+     ],
+     "geometry_id": "F-1-012",
+     "growth": 1.014,
+     "h_over_t1": 16.820625947883634,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": true,
+     "pred_over_probe": 1.0856,
+     "predicted_leaves": 129989,
+     "predicted_total": 156709,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 119741,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.019,
+     "stratum": "easy",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "abstain",
+      "R-DOM": "apply",
+      "R-FEAT": "abstain",
+      "R-GAP": "abstain",
+      "R-PLANE": "apply",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-022",
+     "growth": 1.237,
+     "h_over_t1": 37.836109296755936,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.4436,
+     "predicted_leaves": 390117,
+     "predicted_total": 443986,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 270236,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.026,
+     "stratum": "medium",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    },
+    {
+     "dryrun_error": null,
+     "dryrun_exit": 0,
+     "family": "F",
+     "feature_level": 6,
+     "fired": [
+      "R-YP",
+      "R-DOM",
+      "R-WIN",
+      "R-FEAT"
+     ],
+     "geometry_id": "F-1-010",
+     "growth": 1.25,
+     "h_over_t1": 39.72756976333451,
+     "pf_verdicts": {
+      "PF-BUDGET": "pass",
+      "PF-DOMAIN": "pass",
+      "PF-FLAGS": "pass",
+      "PF-KNOBS": "pass",
+      "PF-NONORTH": "pass",
+      "PF-QUALITY": "pass",
+      "PF-SURFACE": "pass",
+      "PF-THIN": "pass",
+      "PF-YPLUS": "pass"
+     },
+     "plane": false,
+     "pred_over_probe": 1.561,
+     "predicted_leaves": 535401,
+     "predicted_total": 624743,
+     "preflight_refused": [],
+     "preflight_verdict": "pass",
+     "probe_exit": 0,
+     "probe_n_leaves": 342994,
+     "refused": [],
+     "rung": [
+      1.0,
+      1.0
+     ],
+     "seconds": 0.037,
+     "stratum": "hard",
+     "verdict": "apply",
+     "verdicts": {
+      "R-BUDGET": "pass",
+      "R-CURV": "pass",
+      "R-DOM": "apply",
+      "R-FEAT": "apply",
+      "R-GAP": "pass",
+      "R-PLANE": "pass",
+      "R-WIN": "apply",
+      "R-YP": "apply"
+     },
+     "wall_level": 5,
+     "win_level": 5
+    }
+   ],
+   "verdict": "PASS",
+   "wall_levels": {
+    "3": 2,
+    "4": 4,
+    "5": 6
+   }
+  },
+  "3": {
+   "abstained": [
+    "F-1-009"
+   ],
+   "applied": 34,
+   "counts": {
+    "box_c": [
+     21,
+     21
+    ],
+    "lcorner_c": [
+     5,
+     6
+    ],
+    "plate_c": [
+     8,
+     8
+    ]
+   },
+   "faces_ok": 34,
+   "live": [
+    {
+     "exit_code": 0,
+     "geometry_id": "D-1-002",
+     "layers": {
+      "dropped": null,
+      "full_area_frac": 1.0,
+      "mean_frac": 1.0,
+      "n_layers": 8
+     },
+     "shape": "box_c",
+     "snap_max_over_h": 2.404564606299065e-14
+    },
+    {
+     "exit_code": 0,
+     "geometry_id": "F-1-006",
+     "layers": {
+      "dropped": null,
+      "full_area_frac": 1.0,
+      "mean_frac": 1.0,
+      "n_layers": 8
+     },
+     "shape": "plate_c",
+     "snap_max_over_h": 1.0371936281019459e-14
+    },
+    {
+     "exit_code": 0,
+     "geometry_id": "F-1-003",
+     "layers": {
+      "dropped": null,
+      "full_area_frac": 1.0,
+      "mean_frac": 1.0,
+      "n_layers": 8
+     },
+     "shape": "lcorner_c",
+     "snap_max_over_h": 9.388759126347192e-13
+    }
+   ],
+   "rows": 35,
+   "rows_out": [
+    {
+     "applied": true,
+     "geometry_id": "D-1-002",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 1.4210854715202004e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-008",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-010",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 3.552713678800501e-15,
+      "worst_face": 1.4210854715202004e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-016",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 1.7763568394002505e-15,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-018",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 3.552713678800501e-15,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-024",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 5.684341886080802e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-032",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-040",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-042",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 1.4210854715202004e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-056",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-058",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 1.4210854715202004e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-064",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-066",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 3.552713678800501e-15,
+      "worst_face": 1.4210854715202004e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-072",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-080",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-082",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 1.7763568394002505e-15,
+      "worst_face": 1.4210854715202004e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-088",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 5.684341886080802e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-098",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 5.684341886080802e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-104",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-106",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 3.552713678800501e-15,
+      "worst_face": 5.684341886080802e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "D-1-112",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "box_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-003",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "lcorner_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-006",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-009",
+     "h_over_t1": 15.165441176470589,
+     "r_plane": "abstain",
+     "shape": "lcorner_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-012",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-018",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-027",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "lcorner_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-030",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-036",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-039",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "lcorner_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-042",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 5.684341886080802e-14
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-045",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 2.842170943040401e-14
+     },
+     "r_plane": "apply",
+     "shape": "lcorner_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-048",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 5.684341886080802e-14
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-051",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 5.684341886080802e-14
+     },
+     "r_plane": "apply",
+     "shape": "lcorner_c"
+    },
+    {
+     "applied": true,
+     "geometry_id": "F-1-054",
+     "plane_check": {
+      "ok": true,
+      "worst_block": 0.0,
+      "worst_face": 0.0
+     },
+     "r_plane": "apply",
+     "shape": "plate_c"
+    }
+   ],
+   "verdict": "PASS"
+  }
+ },
+ "schema": "autonomy-rules-gate/1",
+ "verdict": "PASS"
+}

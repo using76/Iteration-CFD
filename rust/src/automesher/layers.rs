@@ -492,6 +492,182 @@ pub struct Shrunk {
     pub field: Field,
     pub retreats: usize,
     pub dropped: Vec<(String, String)>,
+    /// What drove each drop of `dropped`, by patch name, in the same order.
+    pub drop_causes: Vec<(String, DropCause)>,
+    /// Every measurement the inner ladder took, in order, all in round 0:
+    /// the caller numbers the round.
+    pub ladder: Vec<LadderEntry>,
+}
+
+/// Which ladder of (92.47) a trace entry comes from: the inner one measures
+/// the SHRUNK mesh, the outer one the EXTRUDED mesh (SPEC-LIT §92.13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ladder {
+    Inner,
+    Outer,
+}
+
+impl Ladder {
+    /// The name the summary prints.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Ladder::Inner => "inner",
+            Ladder::Outer => "outer",
+        }
+    }
+}
+
+/// What one measurement of a ladder led to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The gate passed, and on the inner ladder the floor held.
+    Pass,
+    /// The gate failed and the offending thickness was halved.
+    Retreat,
+    /// The patch set gave up: one patch lost its layers.
+    GiveUp,
+}
+
+impl Outcome {
+    /// The name the summary prints.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Pass => "pass",
+            Outcome::Retreat => "retreat",
+            Outcome::GiveUp => "give_up",
+        }
+    }
+}
+
+/// What drove a patch's give-up in (92.47), whichever ladder took it: a
+/// drop names the gate that caused it, however the two ladders nest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropCause {
+    /// The inner ladder: the gate still failed on the shrunk mesh after the
+    /// last retreat, or failed on cells no layer point reaches, or its own
+    /// halvings took a point under the floor.
+    InnerGate,
+    /// The outer ladder: the gate still failed on the extruded mesh after
+    /// the last retreat, or failed on cells no layer point reaches.
+    OuterGate,
+    /// The floor `min_thickness * T` at a point the outer ladder had capped:
+    /// gate failures on the extruded mesh took it there.
+    ThinAfterCaps,
+    /// The floor at a point neither ladder had thinned: the thickness the
+    /// field proposed, after its limiters, was under it.
+    ThinProposed,
+    /// A layer point whose applied displacement is zero.
+    ZeroDisp,
+}
+
+impl DropCause {
+    /// The name the summary prints.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DropCause::InnerGate => "inner_gate",
+            DropCause::OuterGate => "outer_gate",
+            DropCause::ThinAfterCaps => "thin_after_caps",
+            DropCause::ThinProposed => "thin_proposed",
+            DropCause::ZeroDisp => "zero_disp",
+        }
+    }
+}
+
+/// One measurement either ladder of (92.47) took, in the order taken. Read
+/// off the ladders; it moves nothing, so no mesh depends on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LadderEntry {
+    pub ladder: Ladder,
+    /// The outer round - one extrusion attempt of [`add_layers`] - counted
+    /// from 0; an inner entry carries the round that ran it.
+    pub round: usize,
+    /// The halvings this ladder had taken on this patch set before the
+    /// measurement.
+    pub rung: usize,
+    /// The patch set the measurement ran on, by name.
+    pub patches: Vec<String>,
+    /// Each failing gate of §92.3 with its `n_failed`, in the report's order.
+    pub gates: Vec<(Gate, usize)>,
+    /// Of the G4 subjects, the faces between an input cell and a layer cell:
+    /// the level-n faces of (92.48). Always 0 on the inner ladder, whose mesh
+    /// has no layer cell.
+    pub g4_level_n: usize,
+    pub outcome: Outcome,
+    /// On a give-up, what drove it.
+    pub give_up: Option<DropCause>,
+    /// On a give-up, the patch that lost its layers.
+    pub dropped: Option<String>,
+}
+
+impl LadderEntry {
+    /// An entry of round 0 with no level-n count and no dropped patch; the
+    /// ladders fill those in where they know them.
+    pub fn new(
+        ladder: Ladder,
+        rung: usize,
+        patches: &[String],
+        gates: &[(Gate, usize)],
+        outcome: Outcome,
+        give_up: Option<DropCause>,
+    ) -> Self {
+        LadderEntry {
+            ladder,
+            round: 0,
+            rung,
+            patches: patches.to_vec(),
+            gates: gates.to_vec(),
+            g4_level_n: 0,
+            outcome,
+            give_up,
+            dropped: None,
+        }
+    }
+}
+
+/// The short name of a gate - `G4` of `G4 (non-orthogonality)`.
+pub fn gate_label(g: Gate) -> &'static str {
+    g.name().split(' ').next().unwrap_or("")
+}
+
+/// Each failing gate of `rep` with its `n_failed`, in the report's order.
+fn failing_gates(rep: &quality::QualityReport) -> Vec<(Gate, usize)> {
+    rep.failures.iter().map(|g| (g.gate, g.n_failed)).collect()
+}
+
+/// How many of `rep`'s G4 subjects are level-n faces of `mesh`: internal
+/// faces whose owner is an input cell and whose neighbour is a layer cell,
+/// the layer cells being the ids from `first_cell` on (92.48).
+fn level_n_g4(rep: &quality::QualityReport, mesh: &PolyMeshRaw, first_cell: usize) -> usize {
+    let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+    let mut n = 0usize;
+    for g in &rep.failures {
+        if !matches!(g.gate, Gate::NonOrth) {
+            continue;
+        }
+        for s in &g.subjects {
+            let f = s.id;
+            if f < n_internal
+                && (mesh.owner[f] as usize) < first_cell
+                && (mesh.neighbour[f] as usize) >= first_cell
+            {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// What took the points under the floor: the outer ladder's cap where any
+/// of them carries one, else the inner ladder's halving where any of them
+/// took one, else the proposed thickness itself.
+fn thin_cause(offenders: &[usize], caps: &[Scalar], halved: &[bool]) -> DropCause {
+    if offenders.iter().any(|&i| caps[i] < 1.0) {
+        DropCause::ThinAfterCaps
+    } else if offenders.iter().any(|&i| halved[i]) {
+        DropCause::InnerGate
+    } else {
+        DropCause::ThinProposed
+    }
 }
 
 /// [`shrink`]'s body at a CALLER'S patch set and per-point retreat cap: the
@@ -514,6 +690,8 @@ fn shrink_on(
             field: empty_field(n_points),
             retreats: 0,
             dropped: Vec::new(),
+            drop_causes: Vec::new(),
+            ladder: Vec::new(),
         });
     }
     let st = stack(spec)?;
@@ -613,6 +791,8 @@ fn shrink_on(
     let mut patches = patches0.to_vec();
     let mut dropped: Vec<(String, String)> = Vec::new();
     let mut retreats = 0usize;
+    let mut drop_causes: Vec<(String, DropCause)> = Vec::new();
+    let mut ladder: Vec<LadderEntry> = Vec::new();
     loop {
         if patches.is_empty() {
             return Ok(Shrunk {
@@ -620,9 +800,17 @@ fn shrink_on(
                 field: empty_field(n_points),
                 retreats,
                 dropped,
+                drop_causes,
+                ladder,
             });
         }
         let mut f = field(mesh, &idx, &patches, spec, &st)?;
+        // The trace of this round, read off the ladder and moving nothing
+        // (SPEC-LIT §92.13): the patch set by name, the points the ladder
+        // halved, and what drove the give-up if there is one.
+        let names: Vec<String> = patches.iter().map(|&p| mesh.patches[p].name.clone()).collect();
+        let mut halved = vec![false; n_points];
+        let mut cause: Option<DropCause> = None;
         // (92.47)'s retreat, carried in from the EXTRUSION's own ladder: the
         // caller's cap scales what this round proposes, point by point.
         for i in 0..f.is_layer.len() {
@@ -645,6 +833,7 @@ fn shrink_on(
                 work.points[i] = work.points[i] + d[i];
             }
             let rep = quality::measure_capped(&work, t, usize::MAX)?;
+            let gates = failing_gates(&rep);
             if rep.passed() {
                 // Written by the supervising session: the thickness a point
                 // CARRIES is `|d_i|` after the relaxation's hanging line and
@@ -663,16 +852,27 @@ fn shrink_on(
                     .filter(|&i| f.is_layer[i] && d[i].mag() < limit)
                     .collect();
                 if !zero.is_empty() {
+                    cause = Some(DropCause::ZeroDisp);
+                    ladder.push(LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                    ));
                     give_up = Some((
                         zero,
                         "the applied displacement is zero at a layer point -                          a layer cell there would have a side face of zero area"
                             .to_string(),
                     ));
                 } else if !thin.is_empty() {
+                    cause = Some(thin_cause(&thin, caps, &halved));
+                    ladder.push(LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                    ));
                     give_up = Some((thin, format!(
                         "the thickness fell below min_thickness * T = {limit:.3e}"
                     )));
                 } else {
+                    ladder.push(LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::Pass, None,
+                    ));
                     accepted = true;
                     pts_out = work.points;
                     for i in 0..n_points {
@@ -686,19 +886,31 @@ fn shrink_on(
             }
             let fail_pts = failing_points(&rep, mesh, n_internal, &f.is_layer, &cell_points);
             if halvings >= spec.retreat_limit {
+                cause = Some(DropCause::InnerGate);
+                ladder.push(LadderEntry::new(
+                    Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                ));
                 give_up = Some((fail_pts, format!(
                     "the gate still failed after {halvings} retreat(s)"
                 )));
                 break;
             }
             if fail_pts.is_empty() {
+                cause = Some(DropCause::InnerGate);
+                ladder.push(LadderEntry::new(
+                    Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                ));
                 give_up = Some((
                     fail_pts,
                     "the gate failed on cells no layer point reaches".to_string(),
                 ));
                 break;
             }
+            ladder.push(LadderEntry::new(
+                Ladder::Inner, halvings, &names, &gates, Outcome::Retreat, None,
+            ));
             for &i in &fail_pts {
+                halved[i] = true;
                 f.disp[i] = f.disp[i] * 0.5;
                 f.thickness[i] = f.thickness[i] * 0.5;
             }
@@ -714,6 +926,8 @@ fn shrink_on(
                 field: f,
                 retreats,
                 dropped,
+                drop_causes,
+                ladder,
             });
         }
         let (offenders, reason) = give_up.expect("the ladder ended in a give-up");
@@ -745,6 +959,11 @@ fn shrink_on(
             }
         }
         let vp = patches[victim];
+        let c = cause.expect("a give-up names its cause");
+        if let Some(e) = ladder.last_mut() {
+            e.dropped = Some(mesh.patches[vp].name.clone());
+        }
+        drop_causes.push((mesh.patches[vp].name.clone(), c));
         dropped.push((mesh.patches[vp].name.clone(), reason));
         patches.remove(victim);
     }
@@ -767,6 +986,8 @@ pub fn shrink(
             field: empty_field(n_points),
             retreats: 0,
             dropped: Vec::new(),
+            drop_causes: Vec::new(),
+            ladder: Vec::new(),
         });
     }
     let all_patches = resolve_patches(mesh, spec)?;
@@ -900,6 +1121,10 @@ pub struct Extrusion {
     pub n: usize,
 }
 
+/// The thresholds `beta` the summary reports `area_frac_tau_ge` at: the
+/// share of a patch's area whose face got at least `beta` of `T` (92.50).
+pub const TAU_GE_BETAS: [Scalar; 3] = [0.5, 0.8, 0.95];
+
 /// (92.50), per patch.
 #[derive(Debug, Clone)]
 pub struct PatchLayers {
@@ -910,6 +1135,12 @@ pub struct PatchLayers {
     pub area: Scalar,
     /// The fraction of the patch's AREA that got the full stack.
     pub full_area_frac: Scalar,
+    /// `frac_tau_ge(beta)` at each of `TAU_GE_BETAS`; `0.0` on a dropped
+    /// patch.
+    pub area_frac_tau_ge: [Scalar; 3],
+    /// `(A_f, tau_f)` of (92.50) for every layer face of the patch, in the
+    /// order `full` sums them; empty on a dropped patch.
+    pub face_area_tau: Vec<(Scalar, Scalar)>,
     /// The area-weighted mean of the fraction of `T` actually achieved.
     pub mean_frac: Scalar,
     /// The first layer ASKED for, metres - `st.t[0]`, `0.0` when no stack
@@ -923,6 +1154,28 @@ pub struct PatchLayers {
     pub t1_min: Scalar,
     /// `Some(reason)` when the patch lost its layers.
     pub dropped: Option<String>,
+    /// What drove the give-up, when a ladder of (92.47) dropped the patch;
+    /// `None` on a kept patch and where no ladder ran for it.
+    pub drop_cause: Option<DropCause>,
+}
+
+impl PatchLayers {
+    /// The share of `area` whose face got at least `beta` of `T` - (92.50)'s
+    /// `full` with `1` replaced by `beta`, over the same faces in the same
+    /// order, so `frac_tau_ge(1.0)` is `full_area_frac` bit for bit.
+    pub fn frac_tau_ge(&self, beta: Scalar) -> Scalar {
+        let mut s = 0.0;
+        for &(a, tau) in &self.face_area_tau {
+            if tau >= beta - 1e-9 {
+                s += a;
+            }
+        }
+        if self.area > 0.0 {
+            s / self.area
+        } else {
+            0.0
+        }
+    }
 }
 
 /// What the extrusion did, for the run log and the tests.
@@ -936,6 +1189,8 @@ pub struct LayerReport {
     /// Side faces that came from cutting an edge at a hanging node (92.49).
     pub n_split_sides: usize,
     pub retreats: usize,
+    /// Every measurement either ladder of (92.47) took, in the order taken.
+    pub ladder: Vec<LadderEntry>,
 }
 
 impl LayerReport {
@@ -1013,11 +1268,24 @@ pub fn add_layers(
     let mut halvings = 0usize;
     let mut extra_retreats = 0usize;
     let mut dropped: Vec<(String, String)> = Vec::new();
+    // The whole trace, both ladders, read off and moving nothing (SPEC-LIT
+    // §92.13), and the outer round it is at.
+    let mut trace: Vec<LadderEntry> = Vec::new();
+    let mut round = 0usize;
     let n_points = mesh.points.len();
     let n_faces = mesh.faces.len();
     let n_internal = mesh.neighbour.len().min(n_faces);
     loop {
         let mut a = attempt(mesh, surf, spec, t, &patches, &caps)?;
+        let this_round = round;
+        round += 1;
+        for mut e in std::mem::take(&mut a.report.ladder) {
+            e.round = this_round;
+            trace.push(e);
+        }
+        let names: Vec<String> = patches.iter().map(|&p| mesh.patches[p].name.clone()).collect();
+        let gates = failing_gates(&a.quality);
+        let g4_n = level_n_g4(&a.quality, &a.mesh, a.extrusion.first_cell);
         // The attempt passed the gate on the extruded mesh: the run
         // continues, and every patch an earlier round gave up carries its
         // row - zero layers, the reason, the input mesh's own face count and
@@ -1050,14 +1318,22 @@ pub fn add_layers(
                     n_faces: patch.size,
                     area: patch_area(mesh, n_internal, patch),
                     full_area_frac: 0.0,
+                    area_frac_tau_ge: [0.0; 3],
+                    face_area_tau: Vec::new(),
                     mean_frac: 0.0,
                     t1_requested,
                     t1_mean: 0.0,
                     t1_min: 0.0,
                     dropped: Some(format!("patch \"{name}\": {reason}")),
+                    drop_cause: Some(DropCause::OuterGate),
                 });
             }
             a.report.retreats += extra_retreats;
+            let mut e = LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Pass, None);
+            e.round = this_round;
+            e.g4_level_n = g4_n;
+            trace.push(e);
+            a.report.ladder = trace;
             return Ok(a);
         }
         // No layer cell was inserted, so the gate's failure is the INPUT
@@ -1159,6 +1435,13 @@ pub fn add_layers(
                  planes, and a snapped wall carries its own non-orthogonality into the \
                  level-n face (SPEC-LIT 92.13)"
             );
+            let mut e = LadderEntry::new(
+                Ladder::Outer, halvings, &names, &gates, Outcome::GiveUp, Some(DropCause::OuterGate),
+            );
+            e.round = this_round;
+            e.g4_level_n = g4_n;
+            e.dropped = Some(mesh.patches[vp].name.clone());
+            trace.push(e);
             dropped.push((mesh.patches[vp].name.clone(), reason));
             patches.remove(victim);
             // Written by the supervising session: each halving already counted
@@ -1167,6 +1450,10 @@ pub fn add_layers(
             caps = vec![1.0 as Scalar; n_points];
             halvings = 0;
         } else {
+            let mut e = LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Retreat, None);
+            e.round = this_round;
+            e.g4_level_n = g4_n;
+            trace.push(e);
             for &i in &fail_pts {
                 caps[i] = caps[i] * 0.5;
             }
@@ -1209,6 +1496,8 @@ fn attempt(
         let mut patches = Vec::new();
         for &p in &named {
             let patch = &mesh.patches[p];
+            let drop_cause =
+                shrunk.drop_causes.iter().find(|(nm, _)| nm == &patch.name).map(|(_, c)| *c);
             let reason = match shrunk.dropped.iter().find(|(nm, _)| nm == &patch.name) {
                 Some((_, r)) => format!("patch \"{}\": {r}", patch.name),
                 None if n == 0 => format!(
@@ -1223,11 +1512,14 @@ fn attempt(
                 n_faces: patch.size,
                 area: patch_area(mesh, n_internal, patch),
                 full_area_frac: 0.0,
+                area_frac_tau_ge: [0.0; 3],
+                face_area_tau: Vec::new(),
                 mean_frac: 0.0,
                 t1_requested: if n == 0 { 0.0 } else { st.t[0] },
                 t1_mean: 0.0,
                 t1_min: 0.0,
                 dropped: Some(reason),
+                drop_cause,
             });
         }
         let report = LayerReport {
@@ -1238,6 +1530,7 @@ fn attempt(
             n_side_boundary: 0,
             n_split_sides: 0,
             retreats: shrunk.retreats,
+            ladder: shrunk.ladder.clone(),
         };
         // §92.3's gate, run on the mesh that came back - which is the
         // input's, so this is a formality that costs nothing.
@@ -1622,6 +1915,8 @@ fn attempt(
         let patch = &mesh.patches[p];
         match field.patches.iter().position(|&q| q == p) {
             None => {
+                let drop_cause =
+                    shrunk.drop_causes.iter().find(|(nm, _)| nm == &patch.name).map(|(_, c)| *c);
                 let reason = match shrunk.dropped.iter().find(|(nm, _)| nm == &patch.name) {
                     Some((_, r)) => format!("patch \"{}\": {r}", patch.name),
                     None => {
@@ -1634,11 +1929,14 @@ fn attempt(
                     n_faces: patch.size,
                     area: patch_area(mesh, n_internal, patch),
                     full_area_frac: 0.0,
+                    area_frac_tau_ge: [0.0; 3],
+                    face_area_tau: Vec::new(),
                     mean_frac: 0.0,
                     t1_requested: st.t[0],
                     t1_mean: 0.0,
                     t1_min: 0.0,
                     dropped: Some(reason),
+                    drop_cause,
                 });
             }
             Some(_) => {
@@ -1647,6 +1945,7 @@ fn attempt(
                 let mut wsum = 0.0;
                 let mut tau_min_all = Scalar::INFINITY;
                 let mut nf = 0usize;
+                let mut face_area_tau: Vec<(Scalar, Scalar)> = Vec::new();
                 for (j, &f) in field.faces.iter().enumerate() {
                     if field.face_patch[j] != p {
                         continue;
@@ -1663,6 +1962,7 @@ fn attempt(
                         .map(|q| field.disp[*q as usize].mag())
                         .fold(Scalar::INFINITY, Scalar::min);
                     let tau = tau_min / st.total;
+                    face_area_tau.push((a, tau));
                     area += a;
                     if tau >= 1.0 - 1e-9 {
                         full += a;
@@ -1671,12 +1971,14 @@ fn attempt(
                     tau_min_all = tau_min_all.min(tau);
                 }
                 let mean_frac = if area > 0.0 { wsum / area } else { 0.0 };
-                patches_rep.push(PatchLayers {
+                let mut row = PatchLayers {
                     name: patch.name.clone(),
                     n_layers: n,
                     n_faces: nf,
                     area,
                     full_area_frac: if area > 0.0 { full / area } else { 0.0 },
+                    area_frac_tau_ge: [0.0; 3],
+                    face_area_tau,
                     mean_frac,
                     t1_requested: st.t[0],
                     t1_mean: st.t[0] * mean_frac,
@@ -1684,7 +1986,10 @@ fn attempt(
                     // limiter's own number, in metres.
                     t1_min: st.t[0] * if area > 0.0 { tau_min_all } else { 0.0 },
                     dropped: None,
-                });
+                    drop_cause: None,
+                };
+                row.area_frac_tau_ge = TAU_GE_BETAS.map(|b| row.frac_tau_ge(b));
+                patches_rep.push(row);
             }
         }
     }
@@ -1696,6 +2001,7 @@ fn attempt(
         n_side_boundary,
         n_split_sides,
         retreats: shrunk.retreats,
+        ladder: shrunk.ladder.clone(),
     };
     Ok(Layered {
         mesh: out,
@@ -1915,7 +2221,7 @@ fn split_edge(mp: &Midpoints, a: u32, b: u32, depth: u32) -> Result<Vec<(u32, u3
 // ==========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::automesher::castellate::castellate;
     use crate::automesher::castellate::tests::{box_soup, sphere_soup, thresholds};
@@ -3072,8 +3378,9 @@ mod tests {
     /// themselves, so the thickness retreats `retreat_limit` times and the
     /// patch loses its layers BY NAME - `add_layers` returns the snapped
     /// mesh and the reason, and does NOT refuse with a list of faces the
-    /// user cannot act on. The sphere case above gives up inside the shrink,
-    /// so it does not reach this path; this one does.
+    /// user cannot act on. The sphere case above takes two outer retreats
+    /// too, but the shrink's floor then drops it (`thin_after_caps`); this
+    /// one gives up in the outer ladder itself.
     #[test]
     fn a_snapped_wall_retreats_on_the_extruded_mesh_then_gives_up_by_name() {
         let (surf, mesh) = snapped_floor_box_case();
@@ -3182,5 +3489,607 @@ mod tests {
             "t1_mean {} vs 0.02 * tau, tau = 0.05/0.0798",
             row.t1_mean
         );
+    }
+
+    /// The row `area` of (92.50) is the patch's own area: on the on-plane
+    /// cube the rows' areas sum to the STL's area for the patch to 1e-12
+    /// relative, and the recorded `(A_f, tau_f)` pairs re-sum to the row's
+    /// `area` bit for bit, in the order `full` sums them.
+    #[test]
+    fn the_row_areas_sum_to_the_cube_area() {
+        let (surf, mesh) = castellated_cube_case();
+        let out = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("layers");
+        let k = surf
+            .patch_names
+            .iter()
+            .position(|n| n == "cube")
+            .expect("the surface names the cube");
+        let a_stl = surf.patch_area[k];
+        let sum: Scalar = out.report.patches.iter().map(|p| p.area).sum();
+        eprintln!("row areas sum {sum:.9} vs STL area {a_stl:.9}");
+        assert!(((sum - a_stl) / a_stl).abs() <= 1e-12, "{sum} vs {a_stl}");
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the named patch has a row");
+        assert!(row.dropped.is_none(), "{:?}", row.dropped);
+        assert_eq!(row.face_area_tau.len(), row.n_faces);
+        let mut from_pairs = 0.0;
+        for &(a, _) in &row.face_area_tau {
+            from_pairs += a;
+        }
+        assert_eq!(from_pairs.to_bits(), row.area.to_bits());
+    }
+
+    /// The tau shares at every beta of `TAU_GE_BETAS` are the rows'
+    /// `frac_tau_ge` recomputed, order down to `full_area_frac` at beta = 1
+    /// bit for bit, sit under the Markov bound `beta * share <= mean_frac`,
+    /// and vanish with no `(A_f, tau_f)` pairs on a dropped row.
+    #[test]
+    fn tau_ge_one_is_the_full_area_fraction() {
+        let (surf, mesh) = castellated_cube_case();
+        let a = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("layers");
+        let lim = LayerSpec { cell_frac: 0.10, ..cube_layers(0.02) };
+        let b = add_layers(&mesh, &surf, &lim, &thresholds()).expect("layers");
+        let (surf_g, mesh_g) = castellated_gap_case();
+        let c = add_layers(&mesh_g, &surf_g, &gap_layers(0.0), &thresholds())
+            .expect("layers");
+        let (surf_s, mesh_s) = snapped_sphere_case();
+        let d = add_layers(&mesh_s, &surf_s, &sphere_layers(0.05), &thresholds())
+            .expect("the patch loses its layers by name; the run continues");
+        let cases: [(&str, &LayerReport, bool); 4] = [
+            ("a", &a.report, true),
+            ("b", &b.report, true),
+            ("c", &c.report, true),
+            ("d", &d.report, false),
+        ];
+        for (case, report, want_kept) in cases {
+            let mut kept = 0usize;
+            let mut dropped = 0usize;
+            for row in &report.patches {
+                eprintln!(
+                    "{case} \"{}\": full {:.6}, ge {:.6} {:.6} {:.6}, mean {:.6}",
+                    row.name,
+                    row.full_area_frac,
+                    row.area_frac_tau_ge[0],
+                    row.area_frac_tau_ge[1],
+                    row.area_frac_tau_ge[2],
+                    row.mean_frac
+                );
+                check_tau_ge_row(row);
+                if row.dropped.is_some() {
+                    dropped += 1;
+                } else {
+                    kept += 1;
+                }
+            }
+            if want_kept {
+                assert!(kept > 0, "{case}: no non-dropped row");
+            } else {
+                assert!(dropped > 0, "{case}: no dropped row");
+            }
+        }
+        let cube = b
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the named patch has a row");
+        assert!(
+            cube.area_frac_tau_ge[0] > cube.area_frac_tau_ge[1],
+            "the limiter's tau sits between 0.5 and 0.8: {:.6} vs {:.6}",
+            cube.area_frac_tau_ge[0],
+            cube.area_frac_tau_ge[1]
+        );
+    }
+
+    /// The per-row half of `tau_ge_one_is_the_full_area_fraction`, shared by
+    /// all four of its cases.
+    fn check_tau_ge_row(row: &PatchLayers) {
+        assert_eq!(
+            row.frac_tau_ge(1.0).to_bits(),
+            row.full_area_frac.to_bits()
+        );
+        for i in 0..3 {
+            assert_eq!(
+                row.area_frac_tau_ge[i].to_bits(),
+                row.frac_tau_ge(TAU_GE_BETAS[i]).to_bits()
+            );
+        }
+        assert!(row.area_frac_tau_ge[0] >= row.area_frac_tau_ge[1]);
+        assert!(row.area_frac_tau_ge[1] >= row.area_frac_tau_ge[2]);
+        assert!(row.area_frac_tau_ge[2] >= row.full_area_frac);
+        assert!(row.area_frac_tau_ge[0] <= 1.0 + 1e-12);
+        for i in 0..3 {
+            assert!(
+                TAU_GE_BETAS[i] * row.area_frac_tau_ge[i] <= row.mean_frac + 1e-12,
+                "beta {} share {} vs mean {}",
+                TAU_GE_BETAS[i],
+                row.area_frac_tau_ge[i],
+                row.mean_frac
+            );
+        }
+        if row.dropped.is_some() {
+            assert_eq!(row.area_frac_tau_ge, [0.0; 3]);
+            assert!(row.face_area_tau.is_empty());
+        }
+    }
+
+    /// Byte-for-byte goldens of stage 6's output on the castellated-wall
+    /// cases, where every wall face lies on a cell plane, and a printed (not
+    /// asserted) report of the snapped cases. A golden is SHA-256 over the
+    /// emitted mesh, written at the commit this module landed on; it changes
+    /// only when the layer stage's output on these cases does.
+    pub(crate) mod castellated_goldens {
+        use super::*;
+
+        /// SHA-256, FIPS 180-4 (NIST, 2015) section 6.2, as 64 lowercase
+        /// hex digits.
+        pub(crate) fn sha256_hex(msg: &[u8]) -> String {
+            const K: [u32; 64] = [
+                0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+                0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+                0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+                0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+                0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+                0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+                0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+                0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+                0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+                0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+                0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+                0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+                0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+                0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+                0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+                0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+            ];
+            let mut h: [u32; 8] = [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+            ];
+            let mut m = msg.to_vec();
+            let bit_len = (msg.len() as u64).wrapping_mul(8);
+            m.push(0x80);
+            while m.len() % 64 != 56 {
+                m.push(0);
+            }
+            m.extend_from_slice(&bit_len.to_be_bytes());
+            for block in m.chunks_exact(64) {
+                let mut w = [0u32; 64];
+                for t in 0..16 {
+                    let q = &block[4 * t..4 * t + 4];
+                    w[t] = u32::from_be_bytes([q[0], q[1], q[2], q[3]]);
+                }
+                for t in 16..64 {
+                    let (a, b) = (w[t - 15], w[t - 2]);
+                    let s0 = a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3);
+                    let s1 = b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10);
+                    w[t] = w[t - 16]
+                        .wrapping_add(s0)
+                        .wrapping_add(w[t - 7])
+                        .wrapping_add(s1);
+                }
+                let mut v = h;
+                for t in 0..64 {
+                    let [a, b, c, d, e, f, g, hh] = v;
+                    let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                    let ch = (e & f) ^ (!e & g);
+                    let t1 = hh
+                        .wrapping_add(s1)
+                        .wrapping_add(ch)
+                        .wrapping_add(K[t])
+                        .wrapping_add(w[t]);
+                    let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                    let maj = (a & b) ^ (a & c) ^ (b & c);
+                    let t2 = s0.wrapping_add(maj);
+                    v = [t1.wrapping_add(t2), a, b, c, d.wrapping_add(t1), e, f, g];
+                }
+                for k in 0..8 {
+                    h[k] = h[k].wrapping_add(v[k]);
+                }
+            }
+            h.iter().map(|x| format!("{x:08x}")).collect()
+        }
+
+        /// SHA-256 over every count, every point's f64 bits, every face,
+        /// owner, neighbour and patch-table entry of `m`, in order,
+        /// little-endian.
+        pub(crate) fn mesh_sha256(m: &PolyMeshRaw) -> String {
+            let mut b: Vec<u8> = b"PolyMeshRaw/v1\0".to_vec();
+            let n = [m.points.len(), m.faces.len(), m.owner.len()];
+            for k in n.into_iter().chain([m.neighbour.len(), m.patches.len()]) {
+                b.extend_from_slice(&(k as u64).to_le_bytes());
+            }
+            for p in &m.points {
+                for v in [p.x, p.y, p.z] {
+                    b.extend_from_slice(&(v as f64).to_bits().to_le_bytes());
+                }
+            }
+            for f in &m.faces {
+                b.extend_from_slice(&(f.len() as u64).to_le_bytes());
+                for q in f {
+                    b.extend_from_slice(&(*q as i64).to_le_bytes());
+                }
+            }
+            for o in m.owner.iter().chain(m.neighbour.iter()) {
+                b.extend_from_slice(&(*o as i64).to_le_bytes());
+            }
+            for p in &m.patches {
+                let kind = format!("{:?}", p.kind);
+                for s in [p.name.as_str(), p.type_name.as_str(), kind.as_str()] {
+                    b.extend_from_slice(s.as_bytes());
+                    b.push(0);
+                }
+                b.extend_from_slice(&(p.start as u64).to_le_bytes());
+                b.extend_from_slice(&(p.size as u64).to_le_bytes());
+                let nbr = p.nbr_patch.map_or(-1i64, |k| k as i64);
+                b.extend_from_slice(&nbr.to_le_bytes());
+            }
+            sha256_hex(&b)
+        }
+
+        /// What stage 6 returns on one case, hashed: the mesh when it returns
+        /// one, `refused:` and the hash of the refusal's text when it refuses.
+        fn run_case(surf: &Surface, mesh: &PolyMeshRaw, spec: &LayerSpec) -> String {
+            match add_layers(mesh, surf, spec, &thresholds()) {
+                Ok(out) => mesh_sha256(&out.mesh),
+                Err(e) => format!("refused:{}", sha256_hex(e.to_string().as_bytes())),
+            }
+        }
+
+        /// The case of `a_two_to_one_transition_emits_split_sides`, its setup
+        /// and layer spec copied unchanged: feature refinement takes the cells
+        /// along the cube's edges to level 2, so the castellated wall carries
+        /// 2:1 transitions and the extrusion emits split sides.
+        fn two_to_one_case() -> (Surface, PolyMeshRaw, LayerSpec) {
+            let (mut tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 2);
+            let surf = Surface::from_soup(box_soup([1.1; 3], [3.1; 3]), vec!["cube".to_string()])
+                .expect("surface");
+            let spec = RefinementSpec {
+                levels: vec![RefinementBand {
+                    patch: "cube".to_string(),
+                    bands: vec![DistanceBand { distance: 0.0, level: 1 }],
+                    feature_level: 2,
+                }],
+                feature_angle_deg: 30.0,
+                max_level: 2,
+            };
+            refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+            let cast = castellate(
+                &tree,
+                &bg,
+                &surf,
+                &patch_names(),
+                &CastellationSpec::default(),
+                &thresholds(),
+            )
+            .expect("castellate");
+            let lspec = LayerSpec {
+                patches: vec!["cube".to_string()],
+                n: 2,
+                first_thickness: 0.01,
+                normal_passes: 0,
+                min_thickness: 0.0,
+                ..LayerSpec::default()
+            };
+            (surf, cast.mesh, lspec)
+        }
+
+        /// The castellated-wall cases, by golden name; each is built afresh.
+        fn castellated_cases() -> Vec<(&'static str, Surface, PolyMeshRaw, LayerSpec)> {
+            let mut smoothed = cube_layers(0.02);
+            smoothed.normal_passes = LayerSpec::default().normal_passes;
+            let (c1s, c1m) = castellated_cube_case();
+            let (c2s, c2m) = castellated_cube_case();
+            let (c3s, c3m) = castellated_cube_case();
+            let (g1s, g1m) = castellated_gap_case();
+            let (g2s, g2m) = castellated_gap_case();
+            let (ts, tm, tl) = two_to_one_case();
+            vec![
+                ("box_minus_cube", c1s, c1m, smoothed),
+                ("box_minus_cube_normal_passes_0", c2s, c2m, cube_layers(0.02)),
+                ("slot", g1s, g1m, gap_layers(0.0)),
+                ("slot_with_floor", g2s, g2m, gap_layers(0.9)),
+                ("two_to_one_split_sides", ts, tm, tl),
+                ("thin_t1_refusal", c3s, c3m, cube_layers(0.5 / 200.0)),
+            ]
+        }
+
+        /// Written from the output of the commit this module landed on.
+        const GOLDENS: [(&str, &str); 6] = [
+            ("box_minus_cube", "50a122b585c3808af769fa7c10e8685561e5c014c65686cfd2e6832926fb4e76"),
+            ("box_minus_cube_normal_passes_0", "6a66264cf1b2822b7d317440a2cd5f43c83ff7e531c72d8d0cd4f6fa8224d617"),
+            ("slot", "8864f6af86014970c34146d02a572c8e38d30d8cd5f40697822494c6a894e8b9"),
+            ("slot_with_floor", "3ce1d2e9882accd2859b8f51d0e65e9eb158366ec27224d4c99ab2838f54a4a7"),
+            ("two_to_one_split_sides", "b131581b6e4411aa5d274ec376153ac7a38806dab82832b4b590ae3153cad72e"),
+            ("thin_t1_refusal", "refused:307046d9b46bd9358add4273f97ea40beda48fc10292a7c73cb7bab51069fe8e"),
+        ];
+
+        /// The FIPS 180-4 example messages give their published digests.
+        #[test]
+        fn sha256_matches_the_published_vectors() {
+            let two_block = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+            let million = vec![b'a'; 1_000_000];
+            let cases: [(&[u8], &str); 4] = [
+                (&b""[..], "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+                (&b"abc"[..], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+                (&two_block[..], "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+                (&million[..], "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"),
+            ];
+            for (msg, want) in cases {
+                assert_eq!(sha256_hex(msg), want, "message of {} bytes", msg.len());
+            }
+        }
+
+        /// Every castellated-wall case returns the mesh (or the refusal) it
+        /// returned when the goldens were written, bit for bit.
+        #[test]
+        fn the_castellated_layer_cases_are_golden() {
+            let mut bad: Vec<String> = Vec::new();
+            for (name, surf, mesh, spec) in castellated_cases() {
+                let got = run_case(&surf, &mesh, &spec);
+                eprintln!("golden {name} = {got}");
+                let want = GOLDENS.iter().find(|g| g.0 == name).map(|g| g.1);
+                if want != Some(got.as_str()) {
+                    bad.push(format!("{name}: got {got}, want {want:?}"));
+                }
+            }
+            assert!(bad.is_empty(), "the goldens differ: {bad:#?}");
+            for (name, h) in GOLDENS {
+                assert_eq!(
+                    name == "thin_t1_refusal",
+                    h.starts_with("refused:"),
+                    "{name}: only the thin first layer is a refusal"
+                );
+            }
+        }
+
+        /// One flipped bit in one emitted point changes the hash, and
+        /// flipping it back restores it: the goldens are not vacuous.
+        #[test]
+        fn a_flipped_point_bit_changes_the_golden() {
+            let (surf, mesh) = castellated_cube_case();
+            let mut out = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+                .expect("layers");
+            let name = "box_minus_cube_normal_passes_0";
+            let want = GOLDENS.iter().find(|g| g.0 == name).expect("golden").1;
+            assert_eq!(mesh_sha256(&out.mesh), want);
+            let i = out.mesh.points.len() - 1;
+            let x = out.mesh.points[i].x;
+            out.mesh.points[i].x = Scalar::from_bits(x.to_bits() ^ 1);
+            assert_ne!(mesh_sha256(&out.mesh), want);
+            out.mesh.points[i].x = x;
+            assert_eq!(mesh_sha256(&out.mesh), want);
+        }
+
+        /// The snapped cases' hashes, printed for the record and NOT
+        /// asserted: a snapped wall is what later layer work may change.
+        #[test]
+        fn the_snapped_layer_cases_are_reported() {
+            let floor = LayerSpec {
+                patches: vec!["cube".to_string()],
+                n: 3,
+                first_thickness: 0.02,
+                growth: 1.3,
+                min_thickness: 0.0,
+                ..LayerSpec::default()
+            };
+            let cases = [
+                ("snapped_cube", snapped_cube_case(), cube_layers(0.02)),
+                ("snapped_floor_box", snapped_floor_box_case(), floor),
+                ("snapped_sphere_t1_0.02", snapped_sphere_case(), sphere_layers(0.02)),
+                ("snapped_sphere_t1_0.05", snapped_sphere_case(), sphere_layers(0.05)),
+            ];
+            for (name, (surf, mesh), spec) in cases {
+                let got = run_case(&surf, &mesh, &spec);
+                eprintln!("snapped {name} = {got}");
+                assert!(got.len() == 64 || got.starts_with("refused:"), "{name}: {got}");
+            }
+        }
+    }
+
+    /// The shape every trace has, whatever the case: rounds numbered in
+    /// order with each inner entry ahead of its round's outer one, gates
+    /// listed exactly where a gate failed, a cause and a patch exactly on a
+    /// give-up, level-n faces only on the outer ladder and never more than
+    /// G4 failed on, and a last entry that is the outer pass the run
+    /// returned on.
+    fn check_ladder(trace: &[LadderEntry]) {
+        let mut next_outer = 0usize;
+        for e in trace {
+            assert_eq!(e.round, next_outer, "{e:?}");
+            if e.ladder == Ladder::Outer {
+                next_outer += 1;
+            }
+            let quiet = e.give_up.is_none() && e.dropped.is_none();
+            match e.outcome {
+                Outcome::Pass => assert!(e.gates.is_empty() && quiet, "{e:?}"),
+                Outcome::Retreat => assert!(!e.gates.is_empty() && quiet, "{e:?}"),
+                Outcome::GiveUp => assert!(e.give_up.is_some() && e.dropped.is_some(), "{e:?}"),
+            }
+            match e.give_up {
+                Some(DropCause::OuterGate) => {
+                    assert!(e.ladder == Ladder::Outer && !e.gates.is_empty(), "{e:?}")
+                }
+                Some(DropCause::InnerGate) => assert_eq!(e.ladder, Ladder::Inner, "{e:?}"),
+                Some(_) => assert!(e.ladder == Ladder::Inner && e.gates.is_empty(), "{e:?}"),
+                None => {}
+            }
+            let g4: usize =
+                e.gates.iter().filter(|(g, _)| *g == Gate::NonOrth).map(|(_, n)| *n).sum();
+            assert!(e.g4_level_n <= g4, "{e:?}");
+            if e.ladder == Ladder::Inner {
+                assert_eq!(e.g4_level_n, 0, "{e:?}");
+            }
+        }
+        let last = trace.last().expect("a run that returned has a trace");
+        assert!(last.ladder == Ladder::Outer && last.outcome == Outcome::Pass, "{last:?}");
+    }
+
+    /// Each row's `drop_cause` is the cause of the LAST give-up in the trace
+    /// that names its patch, and a row that was not dropped has none.
+    fn check_rows(out: &Layered) {
+        for p in &out.report.patches {
+            let last = out
+                .report
+                .ladder
+                .iter()
+                .rev()
+                .find(|e| e.dropped.as_deref() == Some(p.name.as_str()));
+            if p.dropped.is_none() {
+                assert!(p.drop_cause.is_none(), "{p:?}");
+            }
+            if let Some(c) = p.drop_cause {
+                assert!(p.dropped.is_some(), "{p:?}");
+                assert_eq!(last.and_then(|e| e.give_up), Some(c), "{}", p.name);
+            }
+        }
+    }
+
+    /// A stack the castellated cube keeps leaves the shortest trace there
+    /// is: one inner pass and one outer pass, in round 0, on the one patch,
+    /// and no row names a cause.
+    #[test]
+    fn a_kept_stack_leaves_one_inner_and_one_outer_pass() {
+        let (surf, mesh) = castellated_cube_case();
+        let out = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds()).expect("layers");
+        check_ladder(&out.report.ladder);
+        check_rows(&out);
+        let names = vec!["cube".to_string()];
+        assert_eq!(
+            out.report.ladder,
+            vec![
+                LadderEntry::new(Ladder::Inner, 0, &names, &[], Outcome::Pass, None),
+                LadderEntry::new(Ladder::Outer, 0, &names, &[], Outcome::Pass, None),
+            ]
+        );
+        assert!(out.report.patches.iter().all(|p| p.drop_cause.is_none()));
+    }
+
+    /// The snapped floor box with no floor gives up in the OUTER ladder:
+    /// `retreat_limit` outer retreats at rungs 0, 1, ..., each naming the
+    /// gates that failed, then the give-up that drops the cube as
+    /// `outer_gate`, then the pass on the empty set the run returns on.
+    #[test]
+    fn the_outer_ladder_names_the_gates_it_gave_up_on() {
+        let (surf, mesh) = snapped_floor_box_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        let out = add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        for e in &out.report.ladder {
+            eprintln!("floor box ladder {e:?}");
+        }
+        check_ladder(&out.report.ladder);
+        check_rows(&out);
+        let outer: Vec<&LadderEntry> =
+            out.report.ladder.iter().filter(|e| e.ladder == Ladder::Outer).collect();
+        let rungs: Vec<usize> =
+            outer.iter().filter(|e| e.outcome == Outcome::Retreat).map(|e| e.rung).collect();
+        assert_eq!(rungs, (0..spec.retreat_limit).collect::<Vec<usize>>());
+        assert_eq!(outer.len(), spec.retreat_limit + 2);
+        let quit = outer[spec.retreat_limit];
+        assert_eq!(quit.outcome, Outcome::GiveUp, "{quit:?}");
+        assert_eq!(quit.give_up, Some(DropCause::OuterGate), "{quit:?}");
+        assert_eq!(quit.dropped.as_deref(), Some("cube"), "{quit:?}");
+        assert_eq!(quit.rung, spec.retreat_limit, "{quit:?}");
+        assert!(outer[spec.retreat_limit + 1].patches.is_empty());
+        let row = out.report.patches.iter().find(|p| p.name == "cube").expect("row");
+        assert_eq!(row.drop_cause, Some(DropCause::OuterGate));
+    }
+
+    /// The snapped level-2 sphere: whichever ladder drops it, the row says
+    /// which, the trace names the give-up, and a drop at the floor after
+    /// caps comes after at least one outer retreat. Printed for the record.
+    #[test]
+    fn the_sphere_drop_names_what_drove_it() {
+        let (surf, mesh) = snapped_sphere_case();
+        let out =
+            add_layers(&mesh, &surf, &sphere_layers(0.05), &thresholds()).expect("layers");
+        for e in &out.report.ladder {
+            eprintln!("sphere ladder {e:?}");
+        }
+        check_ladder(&out.report.ladder);
+        check_rows(&out);
+        let row = out.report.patches.iter().find(|p| p.name == "sphere").expect("row");
+        let cause = row.drop_cause.expect("the sphere loses its layers and says what drove it");
+        eprintln!("sphere drop_cause {}", cause.as_str());
+        let quit = out
+            .report
+            .ladder
+            .iter()
+            .rposition(|e| e.dropped.as_deref() == Some("sphere"))
+            .expect("a give-up names the sphere");
+        if cause == DropCause::ThinAfterCaps {
+            assert!(out.report.ladder[..quit]
+                .iter()
+                .any(|e| e.ladder == Ladder::Outer && e.outcome == Outcome::Retreat));
+        }
+    }
+
+    /// The floor's classes on their own: a capped point names the caps
+    /// whatever else holds, a halved one the inner ladder, neither the
+    /// proposal; and the short gate names the summary prints.
+    #[test]
+    fn the_floor_names_what_thinned_the_point() {
+        let caps = [1.0, 0.5, 1.0];
+        let halved = [false, false, true];
+        assert_eq!(thin_cause(&[0, 1], &caps, &halved), DropCause::ThinAfterCaps);
+        assert_eq!(thin_cause(&[1, 2], &caps, &halved), DropCause::ThinAfterCaps);
+        assert_eq!(thin_cause(&[0, 2], &caps, &halved), DropCause::InnerGate);
+        assert_eq!(thin_cause(&[0], &caps, &halved), DropCause::ThinProposed);
+        assert_eq!(gate_label(Gate::NonOrth), "G4");
+        assert_eq!(gate_label(Gate::Thickness), "G5");
+        assert_eq!(DropCause::ThinAfterCaps.as_str(), "thin_after_caps");
+    }
+
+    /// `level_n_g4` against a count by point lists: on the floor box's
+    /// first extruded attempt, the G4 subjects whose face has the point list
+    /// of one of the input's layer faces - the level-n face is that face.
+    #[test]
+    fn the_level_n_count_matches_the_layer_faces_by_point_list() {
+        let (surf, mesh) = snapped_floor_box_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.02,
+            growth: 1.3,
+            min_thickness: 0.0,
+            ..LayerSpec::default()
+        };
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let caps = vec![1.0 as Scalar; mesh.points.len()];
+        let a = attempt(&mesh, &surf, &spec, &thresholds(), &patches, &caps).expect("attempt");
+        let key = |ps: &[crate::Label]| {
+            let mut v = ps.to_vec();
+            v.sort_unstable();
+            v
+        };
+        let layer: std::collections::HashSet<Vec<crate::Label>> =
+            a.extrusion.layer_faces.iter().map(|&f| key(&mesh.faces[f])).collect();
+        let (mut g4, mut brute) = (0usize, 0usize);
+        for g in &a.quality.failures {
+            if g.gate == Gate::NonOrth {
+                g4 += g.n_failed;
+                for s in &g.subjects {
+                    if layer.contains(&key(&a.mesh.faces[s.id])) {
+                        brute += 1;
+                    }
+                }
+            }
+        }
+        let got = level_n_g4(&a.quality, &a.mesh, a.extrusion.first_cell);
+        eprintln!("floor box attempt 0: G4 {g4}, level-n {got}, by point list {brute}");
+        assert_eq!(got, brute);
     }
 }

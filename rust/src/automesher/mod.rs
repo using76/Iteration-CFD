@@ -34,6 +34,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::io::polymesh::check_patch_name;
 
 // ==========================================================================
 //  The config tree - SPEC-LIT §92.2's pipeline, one struct per stage
@@ -186,6 +187,10 @@ pub struct CastellationSpec {
     /// is a hole in the addressing, not a control volume.
     #[serde(default = "d_min_faces")]
     pub min_faces: usize,
+    /// Closed bodies kept as regions of their own. Empty (the default) is
+    /// today's castellation exactly: every solid leaf is removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bodies: Vec<BodySpec>,
 }
 
 /// [`CastellationSpec::keep_region`]'s two choices - SPEC-LIT §92.2 stage 3.
@@ -199,13 +204,31 @@ pub enum KeepRegion {
     Seed,
 }
 
+/// One `castellation.bodies[]` entry: a closed body the run KEEPS as a region
+/// of its own instead of removing it as solid (SPEC-LIT §92.10 (92.23) removes
+/// every leaf whose centre is inside the surface; a declared body is the
+/// exception). `patches` are the STL solid names that together form ONE
+/// closed shell; `name` is the region's name in the layout (docs/10 §C,
+/// SPEC-LIT §97) and the prefix of its interface patches `<name>_to_fluid`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BodySpec {
+    pub name: String,
+    pub patches: Vec<String>,
+}
+
 fn d_min_faces() -> usize {
     4
 }
 
 impl Default for CastellationSpec {
     fn default() -> Self {
-        Self { keep_region: KeepRegion::default(), seed_point: None, min_faces: d_min_faces() }
+        Self {
+            keep_region: KeepRegion::default(),
+            seed_point: None,
+            min_faces: d_min_faces(),
+            bodies: Vec::new(),
+        }
     }
 }
 
@@ -591,6 +614,56 @@ impl AutomeshConfig {
                     .to_string(),
             ));
         }
+        // The declared bodies of `castellation.bodies`: every refusal names
+        // the field path and the name that broke the rule, before any
+        // meshing work.
+        let box_names = octree::patch_names();
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, b) in self.castellation.bodies.iter().enumerate() {
+            check_patch_name(&b.name, "body name").map_err(|e| {
+                Error::Mesh(format!("castellation.bodies[{i}].name: {e}"))
+            })?;
+            if b.name == "fluid" {
+                return Err(Error::Mesh(format!(
+                    "castellation.bodies[{i}].name: \"fluid\" is the fluid region's \
+                     own name - a body cannot take it"
+                )));
+            }
+            if box_names.iter().any(|q| q == &b.name) {
+                return Err(Error::Mesh(format!(
+                    "castellation.bodies[{i}].name: \"{}\" is a domain patch name - \
+                     the six box patches are {:?}",
+                    b.name, box_names
+                )));
+            }
+            if seen.contains(&b.name.as_str()) {
+                return Err(Error::Mesh(format!(
+                    "castellation.bodies[{i}].name: \"{}\" is declared twice",
+                    b.name
+                )));
+            }
+            seen.push(&b.name);
+            if b.patches.is_empty() {
+                return Err(Error::Mesh(format!(
+                    "castellation.bodies[{i}].patches: empty - a body is a set of \
+                     STL patch names, got none"
+                )));
+            }
+            for (j, other) in self.castellation.bodies.iter().enumerate() {
+                if j >= i {
+                    break;
+                }
+                for p in &b.patches {
+                    if other.patches.iter().any(|q| q == p) {
+                        return Err(Error::Mesh(format!(
+                            "castellation.bodies[{i}].patches: \"{}\" is also a patch \
+                             of body \"{}\" - a patch belongs to one body",
+                            p, other.name
+                        )));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -671,6 +744,10 @@ mod config_tests {
             keep_region: KeepRegion::Seed,
             seed_point: Some([1.0, 1.0, 1.0]),
             min_faces: 6,
+            bodies: vec![BodySpec {
+                name: "hull".to_string(),
+                patches: vec!["hull_deck".to_string(), "hull_keel".to_string()],
+            }],
         };
         cfg.snap.iterations = 10;
         cfg.snap.tolerance = 1e-4;
@@ -727,5 +804,45 @@ mod config_tests {
         cfg.refinement.max_level = 7;
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("max_level"), "{err}");
+    }
+
+    /// M6 Run 1: each rule a body can break is refused by the field path and
+    /// the name that broke it. A body whose name equals one of its own patch
+    /// names is LEGAL (the normal case) and is not in this list.
+    #[test]
+    fn a_body_that_breaks_a_rule_is_refused_by_name() {
+        let body = |name: &str, patches: &[&str]| BodySpec {
+            name: name.to_string(),
+            patches: patches.iter().map(|p| p.to_string()).collect(),
+        };
+        let cases: Vec<(Vec<BodySpec>, &str)> = vec![
+            (vec![body("bad name", &["hull"])], "bad name"),
+            (vec![body("fluid", &["hull"])], "fluid"),
+            (vec![body("xMin", &["hull"])], "xMin"),
+            (vec![body("blob", &["a"]), body("blob", &["b"])], "blob"),
+            (vec![body("hull", &[])], "castellation.bodies[0].patches"),
+            (
+                vec![body("one", &["p"]), body("two", &["p"])],
+                "castellation.bodies[1].patches",
+            ),
+        ];
+        for (bodies, needle) in cases {
+            let mut cfg = minimal();
+            cfg.castellation.bodies = bodies;
+            let err = cfg.validate().unwrap_err();
+            let text = err.to_string();
+            assert!(text.contains("castellation.bodies["), "{err}");
+            assert!(text.contains(needle), "{needle} not in {err}");
+        }
+        // The default config is the same walk as before the field existed:
+        // absent from the re-serialised config, so the summary is too.
+        assert!(
+            !serde_json::to_string(&minimal()).unwrap().contains("\"bodies\""),
+            "an empty bodies list must not serialise"
+        );
+        // The normal case survives: a body named after its own patch.
+        let mut cfg = minimal();
+        cfg.castellation.bodies = vec![body("sphere", &["sphere"])];
+        cfg.validate().expect("a body may take its patch's name");
     }
 }

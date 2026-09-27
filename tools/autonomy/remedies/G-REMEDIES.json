@@ -1,0 +1,800 @@
+{
+ "binary_sha256": "054bba67c8650082431ac01325e497208a9bc663c4760a36f7472ff62814a90b",
+ "date": "2026-09-24",
+ "git_head": "3afd66ed48c8f2c93ce47969ce4282d48345e46a",
+ "parts": {
+  "1": {
+   "box_sphere_loop": {
+    "attempts": 1,
+    "capability_limited": [
+     "sphere"
+    ],
+    "ok": true,
+    "terminal": "CAPABILITY-LIMITED"
+   },
+   "n_bad": 0,
+   "probes": [
+    {
+     "error": "",
+     "id": "L1",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "L2",
+     "key": "layer:retreat_snapped",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "L3",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "NO15",
+     "key": "gate@castellate",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "NO25",
+     "key": "gate@castellate",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "NO26",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "NO28",
+     "key": "pass",
+     "ok": true,
+     "rule_id": "RM-PASS",
+     "terminal": "PASS",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "box_L4",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "box_sphere",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "coarse",
+     "key": "F3d",
+     "ok": true,
+     "rule_id": "RM-SNAP-REFINE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "cube_cf",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-PLANE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "cube_n5",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-PLANE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "cube_ok",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-PLANE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "cubep_cf",
+     "key": "layer:retreat_snapped",
+     "ok": true,
+     "rule_id": "RM-PLANE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "cubep_defaults",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-PLANE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "cubep_nofeat",
+     "key": "pass",
+     "ok": true,
+     "rule_id": "RM-PASS",
+     "terminal": "PASS",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "cubep_nofeat_cf",
+     "key": "layer:no_full_stack",
+     "ok": true,
+     "rule_id": "RM-LAYER-FIT",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "cubep_nosnap",
+     "key": "pass",
+     "ok": true,
+     "rule_id": "RM-PASS",
+     "terminal": "PASS",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "cubep_ok",
+     "key": "layer:retreat_snapped",
+     "ok": true,
+     "rule_id": "RM-PLANE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "ok",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "rev2_L4",
+     "key": "layer:retreat_snapped",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "rev_L4",
+     "key": "surface_closed",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "thick_stack",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "thin_t1",
+     "key": "layer_t1_G5",
+     "ok": true,
+     "rule_id": "RM-T1-RAISE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "tight_nonorth",
+     "key": "layer:min_thickness",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "wb_L4",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "wing_a_L3",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-FT",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "wing_a_L4",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "wing_a_L5",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "wing_b_L4",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "wing_c_L4",
+     "key": "F3",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    }
+   ],
+   "rule_histogram": {
+    "RM-BUDGET-FAR": 2,
+    "RM-BUDGET-FEAT": 1,
+    "RM-BUDGET-WALL": 1,
+    "RM-CAPABILITY-LIMITED": 10,
+    "RM-EXHAUSTED": 10,
+    "RM-LAYER-FIT": 1,
+    "RM-NO-REMEDY": 9,
+    "RM-PASS": 4,
+    "RM-PLANE": 7,
+    "RM-PLANE-FINER": 1,
+    "RM-SNAP-FT": 3,
+    "RM-SNAP-REFINE": 1,
+    "RM-SNAP-WALL": 10,
+    "RM-T1-RAISE": 1,
+    "RM-T1-REFINE": 1,
+    "RM-TOPO-REFINE": 1
+   },
+   "sequences": [
+    {
+     "error": "",
+     "id": "S01",
+     "ok": true,
+     "rule_id": "RM-SNAP-FT",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S02",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S03",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S04",
+     "ok": true,
+     "rule_id": "RM-SNAP-FT",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S05",
+     "ok": true,
+     "rule_id": "RM-BUDGET-FAR",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S06",
+     "ok": true,
+     "rule_id": "RM-BUDGET-FEAT",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S07",
+     "ok": true,
+     "rule_id": "RM-BUDGET-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S08",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S09",
+     "ok": true,
+     "rule_id": "RM-TOPO-REFINE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S10",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S11",
+     "ok": true,
+     "rule_id": "RM-T1-REFINE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S12",
+     "ok": true,
+     "rule_id": "RM-PLANE-FINER",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S13",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S14",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S15",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S16",
+     "ok": true,
+     "rule_id": "RM-BUDGET-FAR",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S17",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S18",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S19",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S20",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S21",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S22",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S23",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S24",
+     "ok": true,
+     "rule_id": "RM-NO-REMEDY",
+     "terminal": "NO-REMEDY",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S25",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S26",
+     "ok": true,
+     "rule_id": "RM-PASS",
+     "terminal": "PASS",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S27",
+     "ok": true,
+     "rule_id": "RM-SNAP-WALL",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S28",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S29",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S30",
+     "ok": true,
+     "rule_id": "RM-PLANE",
+     "terminal": null,
+     "verdict": "apply"
+    },
+    {
+     "error": "",
+     "id": "S31",
+     "ok": true,
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "terminal": "CAPABILITY-LIMITED",
+     "verdict": "terminal"
+    },
+    {
+     "error": "",
+     "id": "S32",
+     "ok": true,
+     "rule_id": "RM-EXHAUSTED",
+     "terminal": "EXHAUSTED",
+     "verdict": "terminal"
+    }
+   ],
+   "terminal_histogram": {
+    "CAPABILITY-LIMITED": 10,
+    "EXHAUSTED": 10,
+    "NO-REMEDY": 9,
+    "PASS": 4,
+    "apply": 30
+   },
+   "verdict": "PASS"
+  },
+  "2": {
+   "n_constants": 2004,
+   "n_set_calls": 35,
+   "verdict": "PASS",
+   "violations": [],
+   "writes": {
+    "_rm_budget_far": [
+     "/refinement/levels"
+    ],
+    "_rm_budget_feat": [
+     "/refinement/levels",
+     "/refinement/max_level"
+    ],
+    "_rm_budget_wall": [
+     "/refinement/levels",
+     "/refinement/max_level"
+    ],
+    "_rm_layer_fit": [
+     "/layers/first_thickness",
+     "/layers/growth"
+    ],
+    "_rm_plane": [
+     "/domain/base_size",
+     "/domain/extent",
+     "/layers/first_thickness",
+     "/layers/growth",
+     "/layers/n",
+     "/layers/patches",
+     "/refinement/levels",
+     "/refinement/max_level",
+     "/snap/feature_tolerance",
+     "/snap/smoothing_passes"
+    ],
+    "_rm_plane_finer": [
+     "/domain/base_size",
+     "/domain/extent",
+     "/layers/growth",
+     "/refinement/levels",
+     "/refinement/max_level"
+    ],
+    "_rm_snap_ft": [
+     "/snap/feature_tolerance"
+    ],
+    "_rm_snap_refine": [
+     "/refinement/levels",
+     "/refinement/max_level"
+    ],
+    "_rm_snap_wall": [
+     "/refinement/levels",
+     "/refinement/max_level"
+    ],
+    "_rm_t1_raise": [
+     "/layers/first_thickness",
+     "/layers/growth"
+    ],
+    "_rm_t1_refine": [
+     "/layers/growth",
+     "/refinement/levels",
+     "/refinement/max_level"
+    ],
+    "_rm_topo_refine": [
+     "/refinement/levels",
+     "/refinement/max_level"
+    ]
+   }
+  },
+  "3": {
+   "loops": {
+    "attempts": {
+     "1": 172,
+     "2": 90,
+     "3": 29,
+     "4": 9
+    },
+    "n": 300,
+    "terminals": {
+     "CAPABILITY-LIMITED": 61,
+     "EXHAUSTED": 87,
+     "NO-REMEDY": 107,
+     "PASS": 45
+    },
+    "violations": 0
+   },
+   "n_bad": 0,
+   "n_records": 3928,
+   "property": {
+    "apply": 188,
+    "n": 600,
+    "terminal": 412,
+    "violations": 0
+   },
+   "rule_histogram": {
+    "RM-BUDGET-FAR": 306,
+    "RM-BUDGET-FEAT": 1,
+    "RM-BUDGET-WALL": 61,
+    "RM-CAPABILITY-LIMITED": 328,
+    "RM-EXHAUSTED": 643,
+    "RM-LAYER-FIT": 37,
+    "RM-NO-REMEDY": 1187,
+    "RM-PASS": 230,
+    "RM-PLANE": 99,
+    "RM-PLANE-FINER": 43,
+    "RM-SNAP-FT": 96,
+    "RM-SNAP-REFINE": 119,
+    "RM-SNAP-WALL": 553,
+    "RM-T1-RAISE": 93,
+    "RM-T1-REFINE": 27,
+    "RM-TOPO-REFINE": 105
+   },
+   "sweep": {
+    "n": 2853,
+    "violations": 0
+   },
+   "verdict": "PASS"
+  },
+  "4": {
+   "n_bad": 0,
+   "probes": [
+    {
+     "attempts": 2,
+     "blc8_a_priori": 0.0,
+     "blc_full_a_priori": 0.0,
+     "failure_class": "layer_dropped:min_thickness",
+     "full_area_frac": 0.0,
+     "id": "cube_cf",
+     "n_layers": 0,
+     "rule_ids": [
+      "RM-PLANE"
+     ],
+     "seconds": 0.24,
+     "skip_why": [
+      "below the window's lower edge: the next divisor s/3 = 0.3333 m < n*t1/cell_frac = 1.846 m"
+     ],
+     "terminal": "EXHAUSTED"
+    },
+    {
+     "attempts": 2,
+     "blc8_a_priori": 1.0,
+     "blc_full_a_priori": 1.0,
+     "failure_class": null,
+     "full_area_frac": 1.0,
+     "id": "cube_n5",
+     "n_layers": 8,
+     "rule_ids": [
+      "RM-PLANE"
+     ],
+     "seconds": 0.16,
+     "skip_why": [],
+     "terminal": "PASS"
+    },
+    {
+     "attempts": 2,
+     "blc8_a_priori": 1.0,
+     "blc_full_a_priori": 1.0,
+     "failure_class": null,
+     "full_area_frac": 1.0,
+     "id": "cube_ok",
+     "n_layers": 8,
+     "rule_ids": [
+      "RM-PLANE"
+     ],
+     "seconds": 0.17,
+     "skip_why": [],
+     "terminal": "PASS"
+    },
+    {
+     "attempts": 2,
+     "blc8_a_priori": 0.0,
+     "blc_full_a_priori": 0.0,
+     "failure_class": "layer_dropped:retreat_snapped",
+     "full_area_frac": 0.0,
+     "id": "cubep_cf",
+     "n_layers": 0,
+     "rule_ids": [
+      "RM-PLANE"
+     ],
+     "seconds": 0.14,
+     "skip_why": [
+      "below the window's lower edge: the next divisor s/3 = 0.5 m < n*t1/cell_frac = 1.846 m"
+     ],
+     "terminal": "EXHAUSTED"
+    },
+    {
+     "attempts": 2,
+     "blc8_a_priori": 1.0,
+     "blc_full_a_priori": 1.0,
+     "failure_class": null,
+     "full_area_frac": 1.0,
+     "id": "cubep_defaults",
+     "n_layers": 8,
+     "rule_ids": [
+      "RM-PLANE"
+     ],
+     "seconds": 0.07,
+     "skip_why": [],
+     "terminal": "PASS"
+    },
+    {
+     "attempts": 2,
+     "blc8_a_priori": 1.0,
+     "blc_full_a_priori": 1.0,
+     "failure_class": null,
+     "full_area_frac": 1.0,
+     "id": "cubep_ok",
+     "n_layers": 8,
+     "rule_ids": [
+      "RM-PLANE"
+     ],
+     "seconds": 0.07,
+     "skip_why": [],
+     "terminal": "PASS"
+    }
+   ],
+   "verdict": "PASS"
+  }
+ },
+ "schema": "autonomy-remedies-gate/1",
+ "verdict": "PASS"
+}

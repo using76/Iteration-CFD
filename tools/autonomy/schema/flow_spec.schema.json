@@ -1,0 +1,15 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.iterations.invalid/autonomy/flow_spec.schema.json",
+  "title": "FlowSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "u_ref_m_s": {"type": "number", "exclusiveMinimum": 0},
+    "l_ref_m": {"type": "number", "exclusiveMinimum": 0},
+    "nu_m2_s": {"type": "number", "exclusiveMinimum": 0},
+    "note": {"type": "string"}
+  },
+  "required": ["u_ref_m_s", "l_ref_m", "nu_m2_s"]
+}

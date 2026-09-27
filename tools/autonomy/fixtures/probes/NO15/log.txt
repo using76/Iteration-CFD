@@ -1,0 +1,29 @@
+ofgpu-automesher (SPEC-LIT §92, hex-dominant path)
+[stl] <survey>\am\..\box_sphere.stl: 9024 triangle(s), 1 patch(es)
+surface: 9024 triangle(s), 4514 point(s)
+  bbox lo (4.000, 4.000, 4.000), hi (6.000, 6.000, 6.000)
+  sphere: 9024 triangles, 12.555 m^2
+plan: base grid 10 x 10 x 10 cells (base_size 1.000 m), max level 3, finest cell 0.12500 m
+=== stage 1/5  octree ===
+automesher: 14832 cells, 46716 internal faces, 600 boundary faces, 17767 points
+  volume: min 0.001953 (cell 1823); regions: 1 (14832 cells)
+  closure: max 0.000e0 (cell 0)
+  non-orthogonality: max 25.239 deg, mean 3.631 deg, 6720 face(s) past the report mark
+  thickness: min tau 3.000000 (cell 541); conditioning: max cond 1.000 (cell 0)
+  duplicate faces: 0; ldu ordered: yes; gate: FAILED
+--- octree: 1.6 s
+=== stage 2/5  castellate ===
+
+error: automesher: quality gate G4 (non-orthogonality) failed on 6432 face(s)
+  face 130 at (4.250000, 4.250000, 1.000000) between cell 44 and cell 144: theta = 25.239, need < 15
+  face 131 at (4.750000, 4.250000, 1.000000) between cell 44 and cell 145: theta = 25.239, need < 15
+  face 132 at (4.250000, 4.750000, 1.000000) between cell 44 and cell 152: theta = 25.239, need < 15
+  face 133 at (4.750000, 4.750000, 1.000000) between cell 44 and cell 153: theta = 25.239, need < 15
+  face 136 at (5.250000, 4.250000, 1.000000) between cell 45 and cell 146: theta = 25.239, need < 15
+  face 137 at (5.750000, 4.250000, 1.000000) between cell 45 and cell 147: theta = 25.239, need < 15
+  face 138 at (5.250000, 4.750000, 1.000000) between cell 45 and cell 154: theta = 25.239, need < 15
+  face 139 at (5.750000, 4.750000, 1.000000) between cell 45 and cell 155: theta = 25.239, need < 15
+  face 165 at (4.250000, 5.250000, 1.000000) between cell 54 and cell 160: theta = 25.239, need < 15
+  face 166 at (4.750000, 5.250000, 1.000000) between cell 54 and cell 161: theta = 25.239, need < 15
+  ... and 6422 more
+  face(s) past the limit: 130, 131, 132, 133, 136, 137, 138, 139, 165, 166, ...

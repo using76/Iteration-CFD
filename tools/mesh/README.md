@@ -35,7 +35,10 @@ region instead.
 
 On Windows, `run_step_mesh.cmd <config.json> [flags]` runs the tool in the
 current console — the stage banners print as they happen — and copies every
-line to `<out_dir>/work/run.log`.
+line of its stdout and stderr, in order, to `<out_dir>/work/run.log` (one
+handle; a refusal or a traceback is the log's last line, never written over
+its head). gmsh's own `Info :` lines are printed from C++ and stay in the
+console.
 
 `mesh_case.sh <case.json> [--from-checkpoint] [--no-geometry] [--no-fluent]` is
 the whole chain for one case: `run_step_mesh.cmd`, the fluid solid of the meshed
@@ -59,7 +62,7 @@ judges a mesh is `solver_test/` (`test_cases.sh <iters> <write> <caseDir>...`).
 
 | # | stage | what happens |
 |---|-------|--------------|
-| 1 | import | STEP in at `scale` (`Geometry.OCCScaling`, so `0.001` for mm STEP); the fluid solid found by tag or as the largest, its mass reported |
+| 1 | import | STEP in at `scale` (`Geometry.OCCScaling`, so `0.001` for mm STEP); the fluid solid found by tag or as the largest, its mass reported; its own bbox and floor measured — one flat face spanning the whole footprint under a `trim.below_z` above it is refused by name (`fluid.largest` / `fluid.tag`) before the cut: a box is not a terrain-floored fluid |
 | 2 | cut | per-solid repairs, the sink stretch, optional fuse, one boolean cut, sealed pockets dropped and listed, near-touching solid pairs recorded (see `solids.touch_warn_m`) |
 | 3 | ground heights | per point, an `isInside` scan from z = −1 in 0.25 m steps |
 | 4 | classification | every boundary face into exactly one patch (see below) |
@@ -114,7 +117,7 @@ Unknown keys are refused by name; missing keys take these defaults. `step`,
   "scale":      0.001,                    // Geometry.OCCScaling, applied BEFORE the import (mm -> m)
   "out_dir":    "path",                   // required; work files go to out_dir/work
   "name":       "site",                   // prefixes every output and checkpoint file
-  "fluid":      {"tag": 1},               // the fluid solid's tag, or {"largest": true}
+  "fluid":      {"tag": 1},               // the fluid solid's tag, or {"largest": true}; a flat box floor the trim would remove is refused
   "domain_box": [xmin, ymin, zmin, xmax, ymax, zmax],  // required; the outer faces are classified against it
   "outer_tol":  0.05,                     // tolerance of the top/west/east/south/north tests
   "solids": {
@@ -340,7 +343,13 @@ and the `--from-checkpoint` path reruns the post stage with `sliver_rel: 0.01,
 sliver_edge_rel: 0.25` and prints the flat-tet notes. With the building
 declared as a region, the tool runs three more times (dry-run, full,
 from-checkpoint) plus one with `interface_names: false`, and four refusals
-are checked; a `--keep` run leaves `out_regions/selftest.msh` for M4. When
+are checked; a `--keep` run leaves `out_regions/selftest.msh` for M4. Three
+more checks: the diag tool `variant_from_checkpoint.py` copies the checkpoint
+from the case's `out_dir` (here not `<case dir>/mesh`) and refuses a missing
+one by name; with `STEP_MESH_LOG` set, `run.log` keeps the import banner first
+and a refusal last, and a config refusal never leaves a stale log; a box fluid
+under `trim.below_z: 1.0` is refused by name (`fluid.largest`, `fluid.tag`)
+and the same box with the trim below its floor is not. When
 `rust/target/release/ofgpu-convert-mesh.exe` is built, the mesh is also
 converted to a case's `polyMesh` and to a Fluent mesh. Seconds, no STEP input
 needed.
@@ -478,6 +487,11 @@ plus Turek-Hron level 2 under `tempfile.mkdtemp` and asserts the M5 table;
   the run continues without that pool.
 - STEP units are whatever `scale` says they are; the tool never inspects the
   file's unit declaration, it just multiplies.
+- **`run.log` carries Python's lines only.** gmsh prints its
+  `Info :`/`Warning :`/`Error :` lines from C++ straight to the console; the
+  tee sees `sys.stdout` and `sys.stderr`, not the file descriptors. A gmsh
+  error is visible in the console and in the tool's own `step_mesh:` line,
+  not in the log.
 
 ## The Fluent converter: `ofgpu-convert-mesh` is the official one
 

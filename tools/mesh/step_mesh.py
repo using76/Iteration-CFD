@@ -68,6 +68,7 @@ SEA_TOL = 0.06                     # tolerance of the sea_z match
 POOL_Z_TOL = 0.1                   # a pool piece must sit this near its z_g
 POOL_PAD = 0.5                     # slack of the pool bbox / centre-radius tests
 ROOF_PAD = 0.3                     # slack of the "face belongs to solid X" test
+FLOOR_AREA_TOL = 1e-3              # a floor face within this fraction of the footprint area IS the floor
 ROOF_Z_TOL = 0.1                   # a roof face sits this near its solid's top
 HULL_PAD = 0.5                     # slack of the ship-hull bbox test
 BIG_ROOF_XY = 100.0                # a slab longer than this, both ways, is terrain
@@ -145,29 +146,35 @@ _IDENTITY = None     # (tool, out_dir, name_with_tag, run_id), resolved in main(
 
 
 def _install_tee() -> None:
-    """run_step_mesh.cmd sets STEP_MESH_LOG: every line also goes to that file."""
+    """run_step_mesh.cmd sets STEP_MESH_LOG: every line of stdout and stderr also goes to that
+    file, in the order printed, through ONE handle - two handles each at their own offset let a
+    late stderr line overwrite the head of the log (the mesh_v7 run of 2026-09-17). Line-flushed,
+    so a killed run keeps what it printed. gmsh's own `Info :` lines are printed from C++ and
+    reach the console only."""
     path = os.environ.get('STEP_MESH_LOG')
     if not path:
         return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    logf = open(path, 'w', encoding='utf-8')
 
     class Tee:
         def __init__(self, stream):
             self.stream = stream
-            self.file = open(path, 'w', encoding='utf-8')
 
         def write(self, s):
             try:
                 self.stream.write(s)
             except Exception:
                 pass
-            self.file.write(s)
+            logf.write(s)
+            logf.flush()
 
         def flush(self):
             try:
                 self.stream.flush()
             except Exception:
                 pass
-            self.file.flush()
+            logf.flush()
 
     sys.stdout = Tee(sys.stdout)
     sys.stderr = Tee(sys.stderr)
@@ -734,6 +741,41 @@ def region_groups(cfg):
 
 
 # ------------------------------------------------------------ stage 1: import
+def floor_check(cfg, fluid):
+    """The fluid solid's own bbox and floor, before the cut. One flat face at z_min with the area of
+    the whole x-y footprint is a box floor, not terrain; if the trim plane lies above it the trim
+    would cut the floor away whole and the site would classify as sea (the v3 run of 2026-09-17:
+    a flat box added to a STEP without a fluid solid meshed, four inlets on a floor that became
+    wall_sea_surface). A terrain floor is many faces, none of them the whole footprint."""
+    bb = gmsh.model.getBoundingBox(3, fluid)
+    btol = cfg['outer_tol']
+    dx, dy = bb[3] - bb[0], bb[4] - bb[1]
+    foot = dx * dy
+    z_floor = round(bb[2], 3) + 0.0      # OCC pads the bbox (-1e-07 on a box at z = 0); '+ 0.0' turns -0.0 into 0.0
+    floor = []
+    for d, sf in gmsh.model.getBoundary([(3, fluid)], oriented=False):
+        b = gmsh.model.getBoundingBox(2, sf)
+        if abs(b[2] - bb[2]) < btol and abs(b[5] - bb[2]) < btol:
+            floor.append(gmsh.model.occ.getMass(2, sf))
+    full = [a for a in floor if abs(a - foot) <= FLOOR_AREA_TOL * foot]
+    SUMMARY['fluid_bbox'] = [round(v, 3) + 0.0 for v in bb]
+    SUMMARY['fluid_floor'] = {'z': z_floor, 'flat_faces': len(floor),
+                              'full_footprint': len(full)}
+    log('fluid bbox x[%.1f,%.1f] y[%.1f,%.1f] z[%.2f,%.2f]; floor at z = %g: %d flat face(s), '
+        '%d spanning the whole %.0f x %.0f m footprint'
+        % (bb[0], bb[3], bb[1], bb[4], bb[2], bb[5], z_floor, len(floor), len(full), dx, dy))
+    trim = cfg['trim']
+    if not full or not trim or trim.get('below_z') is None:
+        return
+    z_trim = float(trim['below_z'])
+    if z_trim > z_floor + btol:
+        die('fluid.%s: the fluid solid (tag %d) has one flat floor at z = %g spanning its whole '
+            '%.0f x %.0f m footprint - a box, no terrain - and trim.below_z = %g lies above it, so '
+            'the trim would cut the floor away whole and the site would be classified as sea; '
+            'mesh a STEP whose fluid solid is floored by the terrain, or set trim to null'
+            % ('largest' if cfg['fluid']['largest'] else 'tag', fluid, z_floor, dx, dy, z_trim))
+
+
 def import_stage(cfg, args, work):
     """The STEP in, the fluid solid found, its mass reported (or the checkpoint in)."""
     stage(1, 'import')
@@ -817,6 +859,7 @@ def import_stage(cfg, args, work):
     SUMMARY['solids_imported'] = len(vols) - 1
     # every solid's bbox drives the classification; healing may renumber but a bbox does not move
     SUMMARY['solid_bboxes'] = {tg: list(gmsh.model.getBoundingBox(3, tg)) for tg in tags if tg != fluid}
+    floor_check(cfg, fluid)
     record_regions(cfg, fluid)
     tick('import', t)
 
@@ -3125,12 +3168,12 @@ def parse_args(argv):
 
 
 def main(argv=None):
+    _install_tee()
     args = parse_args(argv)
     if args.run_id is not None and not is_run_id(args.run_id):
         die("--run-id: '%s' is not a run id - 1 to 64 characters from "
             '[A-Za-z0-9._-]' % args.run_id)
     cfg = load_config(args.config)
-    _install_tee()
     out_dir, work = cfg['out_dir'], os.path.join(cfg['out_dir'], 'work')
     os.makedirs(work, exist_ok=True)
     SUMMARY.update({'gmsh': gmsh.__version__, 'timings_s': {}, 'points': {}, 'groups': {},

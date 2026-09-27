@@ -1,0 +1,91 @@
+{
+ "input": {
+  "surfaces": [
+   {
+    "path": "<survey>\\am\\..\\box_sphere.stl"
+   }
+  ]
+ },
+ "domain": {
+  "extent": [
+   0.0,
+   10.0,
+   0.0,
+   10.0,
+   0.0,
+   10.0
+  ],
+  "base_size": 1.0,
+  "grading": [
+   1.0,
+   1.0,
+   1.0
+  ]
+ },
+ "refinement": {
+  "levels": [
+   {
+    "patch": "sphere",
+    "bands": [
+     {
+      "distance": 0.5,
+      "level": 3
+     },
+     {
+      "distance": 2.0,
+      "level": 2
+     }
+    ]
+   }
+  ],
+  "feature_angle_deg": 30.0,
+  "max_level": 3
+ },
+ "castellation": {
+  "keep_region": "seed",
+  "seed_point": [
+   0.5,
+   0.5,
+   0.5
+  ],
+  "min_faces": 4
+ },
+ "snap": {
+  "iterations": 30,
+  "tolerance": 0.001,
+  "smoothing_passes": 3,
+  "smoothing": 0.5,
+  "undo_limit": 4,
+  "max_area_ratio": 4.0,
+  "feature_tolerance": 0.5
+ },
+ "layers": {
+  "patches": [
+   "sphere"
+  ],
+  "n": 2,
+  "first_thickness": 0.02,
+  "growth": 1.3,
+  "min_thickness": 0.1,
+  "medial_frac": 0.5
+ },
+ "quality": {
+  "max_closure": 1e-10,
+  "max_non_orth_deg": 35.0,
+  "report_non_orth_deg": 30.0,
+  "min_thickness_ratio": 0.05,
+  "max_cond": 10000.0
+ },
+ "output": {
+  "case_dir": "<survey>\\am\\case_tight_nonorth",
+  "name": "tight_nonorth",
+  "patch_names": {
+   "xMin": "inlet",
+   "xMax": "outlet",
+   "yMin": "side_y0",
+   "yMax": "side_y1",
+   "zMin": "ground",
+   "zMax": "top"
+  }
+ }
+}
