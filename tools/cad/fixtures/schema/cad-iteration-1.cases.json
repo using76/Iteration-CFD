@@ -6,6 +6,7 @@
       "name": "start_solved",
       "instance": {
         "schema": "cad-iteration/1",
+        "kind": "eval",
         "study_id": "g4_nozzle",
         "n": 0,
         "eval_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -33,6 +34,7 @@
       "name": "optimiser_refused_before_mesh",
       "instance": {
         "schema": "cad-iteration/1",
+        "kind": "eval",
         "study_id": "g4_nozzle",
         "n": 1,
         "eval_key": "6666666666666666666666666666666666666666666666666666666666666666",
@@ -101,6 +103,15 @@
       "value": 12.3,
       "errors": [
         "cad-iteration/1: wall_time_s: unknown field"
+      ]
+    },
+    {
+      "name": "kind_genesis",
+      "path": "kind",
+      "op": "set",
+      "value": "genesis",
+      "errors": [
+        "cad-iteration/1: kind: must equal \"eval\""
       ]
     }
   ]

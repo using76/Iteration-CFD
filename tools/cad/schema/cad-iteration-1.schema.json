@@ -3,11 +3,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "cad-iteration/1",
   "title": "one iteration row",
-  "description": "One row of iterations.jsonl, docs/16 §D S10; it has no timestamp and no duration on purpose, so an interrupted and an uninterrupted run write byte-identical rows.",
+  "description": "One eval row of iterations.jsonl (kind eval); row 0 is the genesis row, whose exact keys gate.GENESIS_KEYS define, docs/16a §F; docs/16 §D S10; it has no timestamp and no duration on purpose, so an interrupted and an uninterrupted run write byte-identical rows.",
   "type": "object",
   "additionalProperties": false,
   "required": [
       "schema",
+      "kind",
       "study_id",
       "n",
       "eval_key",
@@ -32,6 +33,7 @@
     ],
   "properties": {
       "schema": {"const": "cad-iteration/1"},
+      "kind": {"const": "eval"},
       "study_id": {"$ref": "#/$defs/StudyId"},
       "n": {"type": "integer", "minimum": 0},
       "eval_key": {"$ref": "#/$defs/Sha"},
