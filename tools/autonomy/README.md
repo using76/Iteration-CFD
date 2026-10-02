@@ -102,7 +102,9 @@ feature-edge capture is a hard constraint instead. So:
 
 - `preflight.py` refuses it by name, **`WL-SHARP-FT0`** (in the PF-KNOBS group), whenever the fingerprint is
   given; `RM-SNAP-FT` never applies to such a body and is skipped by name; the prior's remedy paths reach
-  it only through that skip; the optimiser's box offers `feature_tolerance` in {0.25, 0.5} there. The B0
+  it only through that skip; the optimiser's box offers the attraction radius in {h_f/8, h_f/4, h_f/2}
+  there (the box re-declared 2026-10-02, optimise.py). Since 2026-10-02 `RM-SNAP-TAU` halves the attraction
+  radius instead, floored at h_f/8 and never 0. The B0
   baselines are the comparison systems and keep their sealed configs.
 - **The R-PLANE path is the one exception** (`preflight.plane_path`, the predicate `remedies.on_plane` has
   always used: a commensurate body, `feature_tolerance = 0`, `smoothing_passes = 0`, the lattice spacing a
@@ -202,7 +204,9 @@ below `feature_capture_min` (0 until 2026-10-02). `rules/G-FT-RADIUS.json` was w
 measured rows hold a share below 0.5 with F3e false); it is kept as the record of that run, not re-scored.
 A campaign run before 2026-09-26 — every committed bundle so far — no longer replays where `RM-SNAP-FT`
 fired: `campaign.replay` re-runs today's remedy table, and that is this decision taking effect, not a
-determinism fault. Any new headline claim is measured on a fresh test seed (the user's decision of
+determinism fault. A campaign run before 2026-10-02 — the AM-L campaign L5 included — no longer replays
+where `RM-SNAP-TAU` would now fire: `campaign.replay` re-runs today's remedy table. Any new headline claim
+is measured on a fresh test seed (the user's decision of
 2026-09-26).
 
 ## score.py
@@ -654,8 +658,8 @@ bodies off R-PLANE are the only configs that change; every R-PLANE and every smo
 `ft_radius_of(records)` tells which one a campaign used (an R-FEAT apply record that edits
 `/snap/feature_tolerance`). `optimise.rows_from` and prior.py's G-PRIOR rows rebuild recorded attempt-1 configs
 with it, so the committed bundles still reproduce, and optimise.py's live selftest replays its committed attempt 1
-under the recorded rules. `RM-SNAP-FT` stays refused on a sharp body; a halve-tau remedy is left to L6, the owners
-of the optimiser and the prior, because a new applicable snap remedy moves where the optimiser acts.
+under the recorded rules. `RM-SNAP-FT` stays refused on a sharp body; the halve-tau remedy landed as
+`RM-SNAP-TAU` (2026-10-02), because a new applicable snap remedy moves where the optimiser acts.
 
 The gate, fixed before the run: 60 sharp non-plane tuning bodies, 10 per family A, B, D, E, F and G
 (`rules.py --ft-sample`: the strata round robin, each stratum in sha256(`ft-radius/1`|id) order), meshed at
@@ -716,7 +720,7 @@ numbers and F3 flags are equal on the 59 rows both campaigns meshed. The 26 chan
 ## remedies.py — L2 remedies
 
 AM-10's L2: after a failed attempt, `diagnose` names the key and the earliest failing stage from score.py's
-closed failure enum; `propose` walks a twelve-row table in priority order. Keys and their stage: F1's
+closed failure enum; `propose` walks a thirteen-row table in priority order. Keys and their stage: F1's
 `surface_closed`/`config`/`io`/`crash`, `gate@octree|castellate|split|layers` and F2 end NO-REMEDY (stage
 None; the gate keys keep their stage); `timeout` and F5 → octree; F4 → castellate; F3a/F3b/F3c, F3d and
 `gate@snap` → snap; `layer_t1_G5`, `layer:min_thickness`, `layer:retreat_snapped`, `layer:no_full_stack` →
@@ -729,6 +733,10 @@ Since 2026-09-26 RM-SNAP-FT never applies on a body with sharp edges (skipped by
 - RM-TOPO-REFINE (F4; castellate) — the ladder one level finer, predicted cells ≤ 0.7·cell_budget.
 - RM-SNAP-WALL (F3, gate@snap; snap) — the ladder one level coarser, never on the R-PLANE path (G-PILOT's only F3-clean knob with the attraction on).
 - RM-SNAP-FT (F3, gate@snap; snap) — `snap.feature_tolerance = 0`; caution 1 applies and G-FID guards it.
+- RM-SNAP-TAU (F3, gate@snap; snap, since 2026-10-02) — `snap.feature_tolerance = feature_tolerance / 2`
+  (tau' = feature_tolerance' · base_size, (92.38)), never below `TAU_FLOOR` = 0.125 = h_f/8 and never to 0;
+  skipped when the body has no sharp edge, sits on the R-PLANE path or already sits at tolerance 0, and
+  refused when the halving would fall under the floor.
 - RM-SNAP-REFINE (F3d; snap) — the ladder one level finer (the lattice missed the body's area).
 - RM-T1-RAISE (layer_t1_G5; layers) — t1 raised to its y⁺ = 1 bound; RM-T1-REFINE (same key) — the ladder finer, growth refit.
 - RM-PLANE (a layer drop; layers) — rules.setup's R-PLANE config, the ten pointers only.
@@ -952,7 +960,7 @@ in `prior/G-PRIOR.json`, `prior/G-PRIOR.md` and `prior/prior_model.json`, writte
 supervisor's run. For later units — AM-14: `prior/tuning_rules.json.gz`
 (`baseline.read_bundle`) holds every rules attempt on the tuning split with its outcome;
 AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
-`prior/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
+`prior/aml/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
 (the ablation "-prior" is then equal to it by construction).
 
 **The re-measure under the 2026-09-26 rule (PRIOR-FIX).** AM-16's held-out G-OPT miss
@@ -980,6 +988,19 @@ round, so the control is not worse, G-PRIOR FAILs and the prior ships DISABLED
 body with sharp edges off the R-PLANE path passes with any measured config, so the prior
 has nothing to transfer yet; it is re-gated when AM-L gives snap an attraction-on pass.
 
+**The re-gate after AM-L (2026-10-02).** With the AM-L L5 rules campaign in hand (its rows also in
+`aml/tuning_rules_L5.json.gz`) the prior is re-gated by its own rule: `G-PRIOR PASS: attempt-1 passes
+rules 241/420, real 241/420, shuffled 240, 241, 241 (mean 240.667); the prior ships enabled; family B:
+rules 84, real 84, shuffled 84, 84, 84`. Real equals rules on every one of the 420 geometries — 0 gains,
+0 losses: the prior keeps every attempt 1 (pool 372 fingerprinted, 17 features kept, bank 243,
+d_abstain 0.225634; PR-KNN 0, PR-KEEP 285, PR-FAR 71), so the pass comes from one shuffled-control loss:
+the gate's only round is G-1-022 (ends NO-REMEDY, failure True), where shuffle-0 applies the control
+side's single new config (PR-KNN) and it fails (loss 1, pass 240) while the real prior never leaves the
+rules attempt; the other two shuffles match rules at 241. The prior ships ENABLED from
+`prior/aml/` — `G-PRIOR.json`, `G-PRIOR.md`, `prior_model.json`, and the bundles `tuning_rules.json.gz`
+and `eval_r1.json.gz` — and changes no tuning attempt. `prior/` keeps the AM-13 and PRIOR-FIX gate as the
+record of that run; optimise.py's SOURCES still read its bundles.
+
 ## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
 
 In modes `rules+opt` and `full`, campaign.py calls `optimise.propose` only where the remedies end
@@ -1000,7 +1021,10 @@ out-of-geometry CV. The box is relative to the L1 config the hook rebuilds with 
 level offset {-1, 0, +1} shifts every band level (clipped [0, 6]); band distances scale by
 0.5 * 4 ** u in [0.5, 2] (rounded to 6 decimals); feature offset {0, 1, 2} sets
 `feature_level = min(6, wall + f)` (f = 0 zeroes an existing one); `snap.feature_tolerance`
-{0, 0.25, 0.5} ({0.25, 0.5} on a body with sharp edges, section D); `snap.smoothing_passes` {0..3}; `layers.growth` in [1.1, the L1 growth]. 256
+{0, 0.25, 0.5} — re-declared 2026-10-02 (the user's decisions D-L4 and 2026-09-26): on a body with sharp
+edges the box is instead `pick(0.25, 0.5, 1.0) · h_f/2` at the point's own `max_level`, i.e. the radius in
+{h_f/8, h_f/4, h_f/2} (R-FEAT's radius and RM-SNAP-TAU's two halvings; tolerance 0 is refused there,
+section D) and a body without a sharp edge keeps {0, 0.25, 0.5} byte-identical; `snap.smoothing_passes` {0..3}; `layers.growth` in [1.1, the L1 growth]. 256
 scrambled Sobol points (seeded by the geometry id) fill the box; L0 is the config-level preflight
 without the octree probe (a PF-THIN refusal drops the point) and the campaign's own veto re-checks
 the pick with the probe. The pick is lexicographic: p_fail <= 0.2 within the cell budget, then max
@@ -1018,6 +1042,15 @@ worse; the optimiser ships disabled unless both hold. Departures: docs/15 §G's 
 trials" becomes the deployed one-campaign round; the box, L0, reuse and the training rows are as
 above; the importances are seeded permutation AUC drops. The numbers are in `optimise/G-OPT.json`,
 `optimise/G-OPT.md` and `optimise/opt_model.json`, written by the supervisor's run.
+
+**The CV half re-run on the AM-L rows (2026-10-02).** `optimise.py --cv --extra tools/autonomy/aml/tuning_rules_L5.json.gz`
+re-runs G-OPT's CV half with the AM-L rows first (413 new of 3,184 rows kept, 1,322 duplicates dropped, a
+new result winning a re-meshed (geometry, config sha)): AUC 0.984850 (threshold ≥ 0.75) holds, BLC_8
+RMSE 0.153714 (threshold ≤ 0.15) does not — `rmse_le` false, the half FAILS. The new rows out of fold:
+413 rows of 356 geometries, 152 failures, AUC 0.975600, BLC_8 RMSE 0.298512; cross-fitted alone AUC
+0.971693, BLC_8 RMSE 0.300194. The report is `optimise/G-OPT-CV.json` and `.md` (`--cv` writes nothing
+else), and on a FAIL the optimiser still ships enabled — by the user's choice of 2026-09-26, until the
+user says otherwise; the shipped model is not refitted here.
 
 For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
 `optimise/opt_model.json` and `optimise/train.json.gz` and refits in seconds; when it is disabled
@@ -1114,7 +1147,7 @@ surface matched its row's stl sha and fingerprint, and nothing fired; each run t
 
 `aml.py` turns the AM-L re-measure into one report: rules campaigns run on the HEAD binary (`campaign.py --run --manifest tuning --mode rules`, the supervisor's) against the committed rules campaign, family by family. The after side is a subset campaign and a full campaign directory; the subset is 120 tuning geometries drawn by the salted hash `aml-L5/1` within each (family, stratum) stratum — one per stratum, then the largest remainders — subset sha256 `4379f251`; `--plan` prints it, `--ids-only` the ids. The before side is `prior/tuning_rules.json.gz`: its failures, strict failures, BLC and CAPABILITY-LIMITED numbers are as run, and its failures are also given as `rescore/FEAT-CONSTRAINT.json` re-scored them (its rows predate the capture and drop-cause records). Per geometry the table carries the terminal, failure, strict failure, BLC a priori, the R-PLANE qualification, the CAPABILITY-LIMITED wall-area share of `baseline.area_split`, the `feature_capture` share, F3e, and the lost wall split by the layer stage's `drop_cause` (`inner_gate`, `outer_gate`, `thin_after_caps`, `thin_proposed`, `zero_disp`, else `unrecorded`) read from the case summary's layers stage; the rows fold into families, tier1, non-plane and all, and `--inspect` prints one campaign's numbers. The gates are integrity only: no harness error, no orphan, peak RAM <= 60 %, at most 6 live meshers, and the replay reproducing; a family whose MFR rises against the re-scored before is named. The proposed G-BLC-1 target is the tier-1 per-geometry BLC mean minus 1.96 standard errors, floored to 0.01, never below 0 — proposed only, the user decides it (D-L9). The ledger entry is written between the `<!-- BEGIN aml.py --ledger (AM-L L5) -->` and `<!-- END aml.py --ledger (AM-L L5) -->` markers of docs/15 §K by `--ledger --write`; `--check` re-derives every stored number from its inputs.
 
-For later units — L6: `prior.py --gate --rules DIR` takes the full campaign directory, whose rows are also in `aml/tuning_rules_L5.json.gz`; L7 locks the G-BLC-1 target before a fresh test seed opens.
+For later units — L6 (done, 2026-10-02): `prior.py --gate --rules DIR` took the full campaign directory (its rows also in `aml/tuning_rules_L5.json.gz`), re-gated the prior into `prior/aml/` (G-PRIOR PASS, no gain) and re-ran G-OPT's CV half on the new rows (FAIL on BLC_8 RMSE), beside the halve-tau remedy `RM-SNAP-TAU`; L7 locks the G-BLC-1 target before a fresh test seed opens.
 
 Measured (L5, 2026-10-02, tuning only, release binary `3d90ce91` at tree `3969bf8`, 6 streams): the subset campaign (120 geometries, 120 rows, 3,637 s) and the full campaign (420 geometries, 413 rows, 11,008 s) each had 0 harness errors, 0 orphans, at most 6 live meshers, peaks of 28.7 % and 22.9 % of RAM and a clean replay (227 and 785 decisions); the subset's 120 geometries are identical in the full campaign. MFR 0.810 (re-scored before, 340/420) -> 0.421 (177/420), no family rising (A 84 -> 81, B 55 -> 0, D 64 -> 11, E 29 -> 12, F 29 -> 16, G 79 -> 57); strict 0.862 -> 0.795; BLC_8 0.140 -> 0.205 (tier 1 0.075 -> 0.143); CAPABILITY-LIMITED wall 0.681 -> 0.636, of which `inner_gate` 0.233, `thin_proposed` 0.271 and `thin_after_caps` 0.131. R-CURV on against off (`baseline.py --rcurv`, 133 pairs): failure 33 against 55, CAPABILITY-LIMITED 0.812 against 0.962, cells median 762,285 against 50,048. Proposed G-BLC-1 targets (the user's D-L9): tier-1 BLC_8 0.09, BLC_full 0.05. The numbers are in `aml/L5.json` and `aml/L5.md` (`--check` passes), the campaign rows in `aml/tuning_rules_L5.json.gz`, R-CURV in `aml/R-CURV.json`, and the docs/15 §K entry was written by `--ledger --write`.
 
@@ -1165,10 +1198,11 @@ Measured (L5, 2026-10-02, tuning only, release binary `3d90ce91` at tree `3969bf
     python tools/autonomy/baseline.py --rcurv --out DIR                     # baseline/R-CURV.json and .md
     python tools/autonomy/baseline.py --check                               # the report, the bundles and the seal
     python tools/autonomy/prior.py --plan --rules DIR                      # G-PRIOR's decisions and rounds, nothing run
-    python tools/autonomy/prior.py --gate --rules DIR --work DIR           # prior/G-PRIOR.json, .md and prior_model.json
+    python tools/autonomy/prior.py --gate --rules DIR --work DIR           # prior/aml/G-PRIOR.json, .md, prior_model.json, eval_r1.json.gz
     python tools/autonomy/prior.py --check                                 # the report, the bundles and the model rebuild
     python tools/autonomy/optimise.py --plan                               # the training rows, the surrogate CV, the refinement set
     python tools/autonomy/optimise.py --refine --work DIR                  # optimise/G-OPT.json, .md, opt_model.json, train.json.gz
+    python tools/autonomy/optimise.py --cv --extra BUNDLE.json.gz          # G-OPT's CV half on extra rows: optimise/G-OPT-CV.json and .md
     python tools/autonomy/optimise.py --check                              # the report, the bundles, the train rebuild and the refit
 
     python tools/autonomy/evaluate.py --plan                               # the seal, the campaigns, the G-DET ids; nothing opened

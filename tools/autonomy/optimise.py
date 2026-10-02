@@ -27,6 +27,7 @@ enabled only when the CV holds AND it beats the rules on the tuning split.
     python tools/autonomy/optimise.py --selftest
     python tools/autonomy/optimise.py --plan
     python tools/autonomy/optimise.py --refine --work DIR [--rounds N] [--streams N]
+    python tools/autonomy/optimise.py --cv --extra PATH [--extra PATH ...]
     python tools/autonomy/optimise.py --check
 """
 import argparse
@@ -101,9 +102,10 @@ HYPER = {"max_iter": 200, "learning_rate": 0.05, "max_leaf_nodes": 15,
 WALL_OFFSETS = (-1, 0, 1)
 FEATURE_OFFSETS = (0, 1, 2)
 FEATURE_TOLS = (0.0, 0.25, 0.5)
-# a body with sharp edges (README section D, 2026-09-26): feature_tolerance 0 is
-# refused there
-FEATURE_TOLS_SHARP = (0.25, 0.5)
+# a body with sharp edges: tau / (h_f / 2) - h_f/8, h_f/4 and h_f/2 at the point's
+# own max_level (R-FEAT's radius and RM-SNAP-TAU's two halvings); feature_tolerance
+# 0 is refused there (README section D)
+FEATURE_TAU_SHARP = (0.25, 0.5, 1.0)
 SMOOTHING = (0, 1, 2, 3)
 BAND_SCALE = (0.5, 2.0)
 GROWTH_LO = 1.1
@@ -382,8 +384,8 @@ def fold_of(gid):
     return zlib.crc32(gid.encode("ascii")) % FOLDS
 
 
-def cross_fit(X, y_fail, y_blc, y_lc, groups):
-    """Fold ensembles (fold f trains without fold f) and the out-of-fold CV."""
+def _oof(X, y_fail, y_blc, y_lc, groups):
+    """cross_fit's engine: (fold ensembles, out-of-fold p/b/l, per-fold rows)."""
     folds = [fold_of(g) for g in groups]
     ens_by_fold = {}
     p = numpy.full(len(groups), numpy.nan)
@@ -400,9 +402,14 @@ def cross_fit(X, y_fail, y_blc, y_lc, groups):
                                       [groups[i] for i in numpy.where(tr)[0]])
         pr = predict(ens_by_fold[f], X[te])
         p[te], b[te], l[te] = pr["p_fail"], pr["blc8"], pr["log_cells"]
+    return ens_by_fold, p, b, l, fold_rows
+
+
+def _metrics(y_fail, p, b, l, y_blc, y_lc, groups, fold_rows):
+    """The CV metrics dict from out-of-fold predictions (cross_fit's output)."""
     pos = y_blc > 0
     fin = numpy.isfinite(y_lc)
-    metrics = {
+    return {
         "auc": float(roc_auc_score(y_fail, p))
         if y_fail.any() and not y_fail.all() else None,
         "blc8_rmse": float(numpy.sqrt(numpy.mean((b - y_blc) ** 2))),
@@ -415,7 +422,12 @@ def cross_fit(X, y_fail, y_blc, y_lc, groups):
         "n_geometries": len(set(groups)),
         "folds": sorted(fold_rows),
         "fold_rows": {str(f): n for f, n in sorted(fold_rows.items())}}
-    return ens_by_fold, metrics
+
+
+def cross_fit(X, y_fail, y_blc, y_lc, groups):
+    """Fold ensembles (fold f trains without fold f) and the out-of-fold CV."""
+    ens_by_fold, p, b, l, fold_rows = _oof(X, y_fail, y_blc, y_lc, groups)
+    return ens_by_fold, _metrics(y_fail, p, b, l, y_blc, y_lc, groups, fold_rows)
 
 
 # --- (C5) the Sobol pool in the six-knob box around the L1 config ------------
@@ -462,8 +474,12 @@ def point_config(l1, u, fp):
             e["feature_level"] = 0
     cfg["refinement"]["max_level"] = max(lv + [0])
     snap = cfg.setdefault("snap", {})
-    snap["feature_tolerance"] = pick(
-        FEATURE_TOLS_SHARP if fp["sharp_edge_length_m"] > 0 else FEATURE_TOLS, u[3])
+    if fp["sharp_edge_length_m"] > 0:
+        # tau / (h_f / 2) of FEATURE_TAU_SHARP at this point's own max_level
+        snap["feature_tolerance"] = pick(FEATURE_TAU_SHARP, u[3]) * 0.5 \
+            * 2 ** -cfg["refinement"]["max_level"]
+    else:
+        snap["feature_tolerance"] = pick(FEATURE_TOLS, u[3])
     snap["smoothing_passes"] = pick(SMOOTHING, u[4])
     growth = None
     if "layers" in cfg:
@@ -1156,6 +1172,7 @@ def refine(work, *, sources=None, rounds=ROUNDS, streams=6,
                          "band_scale": list(BAND_SCALE),
                          "feature_offsets": list(FEATURE_OFFSETS),
                          "feature_tolerances": list(FEATURE_TOLS),
+                         "feature_tau_sharp": list(FEATURE_TAU_SHARP),
                          "smoothing_passes": list(SMOOTHING),
                          "growth_lo": GROWTH_LO},
                  "pool_n": 2 ** POOL_M, "sobol_seed": SOBOL_SEED,
@@ -1371,7 +1388,7 @@ def check(report_dir=REPORT_DIR):
                 break
             try:
                 named.append((s["file"], baseline.read_bundle(p)))
-            except (baseline.BaselineError, OSError, ValueError) as e:
+            except (baseline.BaselineError, OSError, ValueError, zlib.error) as e:
                 oks, why = False, "%s: %s" % (p, e)
                 break
         add("sources", oks, why)
@@ -1391,7 +1408,7 @@ def check(report_dir=REPORT_DIR):
             bundles_why.append(r["bundle"]["file"])
             try:
                 round_named.append((r["bundle"]["file"], baseline.read_bundle(p)))
-            except (baseline.BaselineError, OSError, ValueError) as e:
+            except (baseline.BaselineError, OSError, ValueError, zlib.error) as e:
                 bundles_ok, bundles_why = False, "%s: %s" % (p, e)
                 break
         if bundles_ok and bundles_why:
@@ -1416,7 +1433,7 @@ def check(report_dir=REPORT_DIR):
             try:
                 train_obj = json.loads(gzip.decompress(open(tp, "rb").read())
                                        .decode("utf-8"))
-            except (OSError, ValueError) as e:
+            except (OSError, ValueError, zlib.error, EOFError) as e:
                 train_obj = None
     rebuild_ok, rebuild_why = False, mp
     if rep is not None and model is not None and train_obj is not None:
@@ -1468,6 +1485,131 @@ def check(report_dir=REPORT_DIR):
             "verdict": "PASS" if all(i["ok"] for i in items) else "FAIL"}
 
 
+# --- the CV half on new rows (G-OPT-CV) ----------------------------------------
+
+CV_SCHEMA = "autonomy-opt-cv/1"
+CV_REPORT = "G-OPT-CV.json"
+CV_REPORT_MD = "G-OPT-CV.md"
+EXTRA_OOF_KEYS = ("n", "n_fail", "n_pos", "n_geometries", "auc", "blc8_rmse",
+                  "blc8_rmse_zero", "log_cells_rmse")
+
+
+def _committed_base():
+    """[(name, bundle, file sha256)] of the committed training set, as check()
+    rebuilds it: the committed G-OPT.json's sources in order, then its rounds'
+    bundles in order; every file sha256 must equal the report's, else OptError
+    names it."""
+    rp = os.path.join(REPORT_DIR, REPORT_NAME)
+    rep = _read_json_or_none(rp)
+    if rep is None:
+        raise OptError("no committed %s to take the base rows from" % rp)
+    named = []
+    for s in rep.get("sources") or []:
+        p = s["file"] if os.path.isabs(s["file"]) \
+            else os.path.join(HERE, s["file"])
+        if not os.path.isfile(p):
+            raise OptError("no source file %s" % p)
+        h = _file_sha256(p)
+        if h != s["sha256"]:
+            raise OptError("%s holds %s, the report says %s"
+                           % (p, h[:12], s["sha256"][:12]))
+        named.append((s["file"], baseline.read_bundle(p), h))
+    for r in rep.get("rounds") or []:
+        p = os.path.join(REPORT_DIR, r["bundle"]["file"])
+        if not os.path.isfile(p):
+            raise OptError("no round bundle %s" % p)
+        h = _file_sha256(p)
+        if h != r["bundle"]["sha256"]:
+            raise OptError("%s holds %s, the report says %s"
+                           % (p, h[:12], r["bundle"]["sha256"][:12]))
+        named.append((r["bundle"]["file"], baseline.read_bundle(p), h))
+    return named
+
+
+def cv(extra, *, base=None, report_dir=REPORT_DIR, write=True):
+    """G-OPT's CV half re-run with the extra bundles' rows in front.
+
+    `extra` is a list of bundle paths (naming and the tuning-split seal like
+    every source); `base` None means the committed training set.  The EXTRA rows
+    come first, so where a new campaign re-meshed a (geometry, config sha) its
+    new outcome wins.  cv NEVER writes or changes G-OPT.json, G-OPT.md,
+    opt_model.json, train.json.gz or a round bundle; it writes G-OPT-CV.json
+    and G-OPT-CV.md only."""
+    named_extra = load_sources(extra)
+    named_base = _committed_base() if base is None else load_sources(base)
+    named = named_extra + named_base
+    for name, bundle, _sha in named:
+        check_bundle(bundle, name)
+    gates = schema.load_gates()
+    knobs = schema.load_knobs()
+    mrows = {r["geometry_id"]: r for r in campaign.load_manifest("tuning", "rules")}
+    rows, dup = training_rows([(n, b) for n, b, _s in named], mrows, gates, knobs)
+    X, yf, yb, ylc, gr = matrix(rows)
+    _ens, p, b, l, fold_rows = _oof(X, yf, yb, ylc, gr)
+    cvm = _metrics(yf, p, b, l, yb, ylc, gr, fold_rows)
+    eset = {n for n, _b, _s in named_extra}
+    m = numpy.array([r["source"] in eset for r in rows], dtype=bool)
+    ge = [g for g, mm in zip(gr, m) if mm]
+    moof = _metrics(yf[m], p[m], b[m], l[m], yb[m], ylc[m], ge, {})
+    extra_oof = {k: moof[k] for k in EXTRA_OOF_KEYS}
+    _ens2, extra_cv = cross_fit(X[m], yf[m], yb[m], ylc[m], ge)
+    conditions = {"auc_ge": cvm["auc"] is not None and cvm["auc"] >= AUC_MIN,
+                  "rmse_le": cvm["blc8_rmse"] <= RMSE_MAX}
+    verdict = "PASS" if all(conditions.values()) else "FAIL"
+    model = _read_json_or_none(os.path.join(REPORT_DIR, MODEL_NAME))
+    enabled = bool(model.get("enabled")) if isinstance(model, dict) else False
+    if verdict == "PASS":
+        why = ("the CV half holds on the new rows; the shipped model and its "
+               "enabled flag stay as the committed opt_model.json has them")
+    else:
+        why = ("the CV half fails on the new rows; the optimiser stays enabled by "
+               "the user's choice of 2026-09-26 (docs/15 section F said a G-OPT "
+               "miss ships it disabled) until the user says otherwise; the shipped "
+               "model is not refitted here")
+    kept = collections.Counter(r["source"] for r in rows)
+    rep = {"$comment": HEADER, "schema": CV_SCHEMA,
+           "date": time.strftime("%Y-%m-%d"), "verdict": verdict,
+           "conditions": conditions,
+           "thresholds": {"auc_min": AUC_MIN, "rmse_max": RMSE_MAX},
+           "cv": cvm, "extra_oof": extra_oof, "extra_cv": extra_cv,
+           "sources": [{"file": n, "sha256": s, "n_rows_kept": int(kept.get(n, 0))}
+                       for n, _b, s in named],
+           "n_duplicates": dup,
+           "ship": {"enabled": enabled, "why": why}}
+    if write:
+        os.makedirs(report_dir, exist_ok=True)
+        _dump_json(os.path.join(report_dir, CV_REPORT), rep)
+        _write_text(os.path.join(report_dir, CV_REPORT_MD), _cv_md(rep))
+    return rep
+
+
+def _cv_md(rep):
+    """The G-OPT-CV report as markdown; every number from the report object."""
+    ship = rep["ship"]
+    out = ["<!-- %s -->" % HEADER, "",
+           "# G-OPT-CV - the CV half re-run on new rows", "",
+           "- date: %s" % rep["date"],
+           "- verdict: %s" % rep["verdict"],
+           "- rows: %d (of which %d from the extra bundles), %d duplicates"
+           % (rep["cv"]["n"], rep["extra_oof"]["n"], rep["n_duplicates"]),
+           "- CV: fail AUC %.6f (>= %.2f %s), BLC_8 RMSE %.6f (<= %.2f %s)"
+           % (rep["cv"]["auc"], rep["thresholds"]["auc_min"],
+              rep["conditions"]["auc_ge"], rep["cv"]["blc8_rmse"],
+              rep["thresholds"]["rmse_max"], rep["conditions"]["rmse_le"]),
+           "- the extra rows out of fold: AUC %.6f, BLC_8 RMSE %.6f; alone: "
+           "AUC %.6f, BLC_8 RMSE %.6f"
+           % (rep["extra_oof"]["auc"], rep["extra_oof"]["blc8_rmse"],
+              rep["extra_cv"]["auc"], rep["extra_cv"]["blc8_rmse"]),
+           "- the optimiser ships %s (the committed opt_model.json's enabled); %s"
+           % ("enabled" if ship["enabled"] else "DISABLED", ship["why"]),
+           "", "## Sources (row order)", "",
+           "| file | sha256 | rows kept |", "| --- | --- | --- |"]
+    for s in rep["sources"]:
+        out.append("| %s | %s | %d |"
+                   % (s["file"], s["sha256"][:12], s["n_rows_kept"]))
+    return "\n".join(out) + "\n"
+
+
 # --- (C13) the CLI -------------------------------------------------------------
 
 
@@ -1513,6 +1655,20 @@ def _cli_check(report_dir):
     return 0 if res["verdict"] == "PASS" else 1
 
 
+def _cli_cv(extra, report_dir=REPORT_DIR):
+    rep = cv(extra, report_dir=report_dir)
+    print("G-OPT-CV %s: rows %d (%d new), AUC %.6f, BLC_8 RMSE %.6f "
+          "(thresholds %.2f / %.2f); new rows out of fold AUC %.6f, "
+          "BLC_8 RMSE %.6f; alone AUC %.6f, BLC_8 RMSE %.6f; the optimiser ships %s"
+          % (rep["verdict"], rep["cv"]["n"], rep["extra_oof"]["n"],
+             rep["cv"]["auc"], rep["cv"]["blc8_rmse"],
+             rep["thresholds"]["auc_min"], rep["thresholds"]["rmse_max"],
+             rep["extra_oof"]["auc"], rep["extra_oof"]["blc8_rmse"],
+             rep["extra_cv"]["auc"], rep["extra_cv"]["blc8_rmse"],
+             "enabled" if rep["ship"]["enabled"] else "DISABLED"))
+    return 0
+
+
 def main(argv=None):
     ap = _ArgParser(prog="optimise.py",
                     description="the L4 optimiser of docs/15 §C (G-OPT)")
@@ -1525,6 +1681,11 @@ def main(argv=None):
                          "opt_model.json, train.json.gz")
     ap.add_argument("--check", action="store_true",
                     help="the committed report, bundles, train rebuild and refit")
+    ap.add_argument("--cv", action="store_true",
+                    help="the CV half re-run with the --extra bundles' rows in "
+                         "front: optimise/G-OPT-CV.json and .md")
+    ap.add_argument("--extra", action="append", default=None,
+                    help="an extra training bundle path (repeatable; --cv only)")
     ap.add_argument("--work", help="the refinement rounds' work directory")
     ap.add_argument("--rounds", type=int, default=ROUNDS)
     ap.add_argument("--streams", type=int, default=6)
@@ -1538,6 +1699,10 @@ def main(argv=None):
             return _cli_check(a.report_dir)
         if a.plan:
             return _cli_plan()
+        if a.cv:
+            if not a.extra:
+                ap.exit(2, "optimise: --cv needs --extra\n")
+            return _cli_cv(a.extra, report_dir=a.report_dir)
         if a.refine:
             if not a.work:
                 ap.exit(2, "optimise: --refine needs --work\n")
@@ -1552,7 +1717,7 @@ def main(argv=None):
             split.SplitSealed, split.SplitError) as e:
         sys.stderr.write("optimise: %s\n" % e)
         return 2
-    ap.error("one of --selftest, --plan, --refine, --check is required")
+    ap.error("one of --selftest, --plan, --refine, --cv, --check is required")
 
 
 # --- (C14) the selftest ---------------------------------------------------------
@@ -1593,7 +1758,7 @@ def _harness(H):
 
 
 def selftest():
-    """(C14): eleven [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
+    """(C14): twelve [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
     t0 = time.perf_counter()
     tmp = tempfile.mkdtemp()
     H = {"tmp": tmp}
@@ -1602,7 +1767,7 @@ def selftest():
               (_g5_decide, "decide"), (_g6_rank, "rank"),
               (_g7_hook, "hook seam"), (_g8_refine, "refine"),
               (_g9_refine_a, "refine A"), (_g10_live, "live"),
-              (_g11_check_cli, "check and CLI"))
+              (_g11_check_cli, "check and CLI"), (_g12_cv, "cv"))
     try:
         try:
             _harness(H)
@@ -1626,7 +1791,7 @@ def _g1_constants(H):
     assert list(FEATURES[:17]) == list(prior.FEATURES) and len(FEATURES) == 31
     assert MEMBERS == 5 and POOL_M == 8 and 2 ** POOL_M == 256
     assert FEATURE_TOLS == (0.0, 0.25, 0.5) \
-        and FEATURE_TOLS_SHARP == (0.25, 0.5)
+        and FEATURE_TAU_SHARP == (0.25, 0.5, 1.0)
     for rid in OPT_IDS:
         assert rid in explain.TEMPLATES \
             and explain.TEMPLATES[rid]["layer"] == "optimiser", rid
@@ -1681,8 +1846,11 @@ def _g2_rows(H):
     orows, dup2 = training_rows([(n, b) for n, b, _s in
                                  load_sources(H["osrc"])], H["mrows"],
                                 H["gates"], H["knobs"])
-    assert (len(orows), dup2) == (104, 0), (len(orows), dup2)
-    assert sum(1 for r in orows if r["fail"]) == 62, \
+    # the oracle campaigns spend RM-SNAP-TAU's two fires on five geometries
+    # (F-1-009, D-1-001, D-1-027, F-1-025, D-1-073, attempts 2 and 3), ten rows
+    # more than the 24 the spent table gave
+    assert (len(orows), dup2) == (114, 0), (len(orows), dup2)
+    assert sum(1 for r in orows if r["fail"]) == 72, \
         sum(1 for r in orows if r["fail"])
     assert len({r["geometry_id"] for r in orows}) == 16, \
         len({r["geometry_id"] for r in orows})
@@ -1724,13 +1892,14 @@ def _g3_pool(H):
     assert remedies._get(l1, "/layers/growth") == 1.34
     assert "snap" not in l1
     pc, kn = point_config(l1, [0.5] * 6, fp)
+    # u[3] = 0.5 picks tau = h_f/2 of the point's own max_level 4: ft = 0.015625
     assert kn == {"wall_offset": 0, "band_scale": 1.0, "feature_offset": 1,
-                  "feature_tolerance": 0.5, "smoothing_passes": 2,
+                  "feature_tolerance": 0.015625, "smoothing_passes": 2,
                   "growth": 1.22}, kn
-    assert schema.canonical_sha256(pc).startswith("7ff2856a0591"), \
+    assert schema.canonical_sha256(pc).startswith("66523ca5a435"), \
         schema.canonical_sha256(pc)[:12]
     feats = config_features(pc, fp)
-    want = [3, -0.300984, -1.204074, -0.726951, 0.176091, 1, 0.5, 2, 1.22,
+    want = [3, -0.300984, -1.204074, -0.726951, 0.176091, 1, 0.015625, 2, 1.22,
             1.742763, 8, 4.729018, 0.0, 4]
     assert all(abs(a - b) <= 1e-6 for a, b in zip(feats, want)), feats
     assert abs(feats[CONFIG_FEATURES.index("log10_wallband_over_lmax")]
@@ -1740,7 +1909,7 @@ def _g3_pool(H):
                   {"pointer": "/refinement/levels/0/bands/0/distance",
                    "from": 0.1755375, "to": 0.175538},
                   {"pointer": "/snap/feature_tolerance", "from": None,
-                   "to": 0.5},
+                   "to": 0.015625},
                   {"pointer": "/snap/smoothing_passes", "from": None, "to": 2}]
     assert json.dumps(edits, sort_keys=True) == \
         json.dumps(want_edits, sort_keys=True), edits
@@ -1823,21 +1992,30 @@ def _g5_decide(H):
     c = res["counts"]
     assert (c["pool_n"], c["unique_n"], c["visited_n"], c["edit_refused_n"],
             c["l0_refused_n"], c["l0_pass_n"], c["feasible_n"]) == \
-        (256, 256, 0, 0, 29, 227, 14), c
+        (256, 256, 0, 0, 29, 227, 39), c
     pk = res["pick"]
-    assert pk["sobol_index"] == 7, pk["sobol_index"]
+    assert pk["sobol_index"] == 33, pk["sobol_index"]
     # the box is centred on today's L1, whose growth WIN-2TO1 fits at the feature
-    # level (1.151, not the recorded 1.34), so the pick's config and scores moved
-    assert pk["config_sha256"].startswith("8fb496e8d71e"), \
+    # level (1.151, not the recorded 1.34), and the sharp-body radius is tau/h_f/2
+    # of the point's own max_level, so the pick's config and scores moved
+    assert pk["config_sha256"].startswith("45e83b45fafa"), \
         pk["config_sha256"][:12]
-    assert abs(pk["p_fail"] - 0.140108) <= 1e-6, pk["p_fail"]
-    assert abs(pk["p_fail_std"] - 0.033052) <= 1e-6, pk["p_fail_std"]
-    assert abs(pk["blc8_a_priori"] - 0.018721) <= 1e-6, pk["blc8_a_priori"]
-    assert abs(pk["log_cells"] - 3.961202) <= 1e-6, pk["log_cells"]
-    assert [r["sobol_index"] for r in res["runners_up"]] == [130, 93, 191], \
+    assert abs(pk["p_fail"] - 0.065768) <= 1e-6, pk["p_fail"]
+    assert abs(pk["p_fail_std"] - 0.066139) <= 1e-6, pk["p_fail_std"]
+    assert abs(pk["blc8_a_priori"] - 0.841) <= 1e-6, pk["blc8_a_priori"]
+    assert abs(pk["log_cells"] - 4.622895) <= 1e-6, pk["log_cells"]
+    assert [r["sobol_index"] for r in res["runners_up"]] == [245, 249, 177], \
         [r["sobol_index"] for r in res["runners_up"]]
-    assert pk["knobs"]["feature_tolerance"] in FEATURE_TOLS_SHARP
-    assert pk["knobs"]["smoothing_passes"] == 2
+    # the sharp-body box: the pick's feature_tolerance is r * h_f / 2 of its own
+    # point config at some r of FEATURE_TAU_SHARP
+    l1g5 = l1_of(ctx, H["gates"], H["knobs"])
+    cfgg5, _kng5 = point_config(l1g5, sobol("D-1-073")[pk["sobol_index"]],
+                                ctx["fingerprint"])
+    ftg5 = pk["knobs"]["feature_tolerance"]
+    mlg5 = cfgg5["refinement"]["max_level"]
+    assert any(abs(ftg5 - r * 0.5 * 2 ** -mlg5) <= 1e-15
+               for r in FEATURE_TAU_SHARP), (ftg5, mlg5)
+    assert pk["knobs"]["smoothing_passes"] == 1
     assert schema.errors(res["record"], "DecisionRecord") == []
     assert not [e["pointer"] for e in res["edits"]
                 if e["pointer"].startswith("/layers/")
@@ -1850,8 +2028,8 @@ def _g5_decide(H):
     assert res_a["counts"]["feasible_n"] == 0
     assert res_a["counts"]["l0_pass_n"] == 256
     H["a_res"] = res_a
-    print("[ok] decide: D-1-073 OPT-PICK index 249 (p_fail 0.043409, BLC_8 "
-          "0.76712, 22 feasible of 227); A-1-000 OPT-NOFEAS")
+    print("[ok] decide: D-1-073 OPT-PICK index 33 (p_fail 0.065768, BLC_8 "
+          "0.841, 39 feasible of 227); A-1-000 OPT-NOFEAS")
 
 
 def _g6_rank(H):
@@ -1924,37 +2102,44 @@ def _g8_refine(H):
         rep["refinement_set"]["geometry_ids"]
     r1 = baseline.read_bundle(os.path.join(rep8, "refine_r1.json.gz"))
     rows = {(r["geometry_id"], r["attempt"]): r for r in r1["attempts"]}
-    assert rows[("D-1-073", 2)]["decided_by"] == "optimiser"
-    assert rows[("D-1-073", 2)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("D-1-073", 2)]["prediction"]["p_fail"] - 0.094653) <= 1e-6, \
-        rows[("D-1-073", 2)]["prediction"]["p_fail"]
-    assert rows[("F-1-025", 2)]["decided_by"] == "optimiser"
-    assert rows[("F-1-025", 2)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("F-1-025", 2)]["prediction"]["p_fail"] - 0.193727) <= 1e-6, \
-        rows[("F-1-025", 2)]["prediction"]["p_fail"]
+    # RM-SNAP-TAU spends attempts 2 and 3 on the sharp bodies, so the optimiser's
+    # proposal comes at attempt 4 (D-1-073); its pick fails the wall oracle, the
+    # table is spent twice over on the others, and nothing is rescued
+    assert rows[("D-1-073", 2)]["decided_by"] == "remedy" \
+        and rows[("D-1-073", 2)]["rule_id"] == "RM-SNAP-TAU", \
+        (rows[("D-1-073", 2)]["decided_by"], rows[("D-1-073", 2)]["rule_id"])
+    assert rows[("D-1-073", 4)]["decided_by"] == "optimiser"
+    assert rows[("D-1-073", 4)]["rule_id"] == "OPT-PICK"
+    assert abs(rows[("D-1-073", 4)]["prediction"]["p_fail"] - 0.127181) <= 1e-6, \
+        rows[("D-1-073", 4)]["prediction"]["p_fail"]
+    assert rows[("F-1-025", 2)]["decided_by"] == "remedy" \
+        and rows[("F-1-025", 2)]["rule_id"] == "RM-SNAP-TAU", \
+        (rows[("F-1-025", 2)]["decided_by"], rows[("F-1-025", 2)]["rule_id"])
+    assert not [k for k, r in rows.items() if r["decided_by"] == "optimiser"
+                if k != ("D-1-073", 4)], "an unexpected optimiser row"
     sidx = {}
     for ln in r1["records"]:
         for i in ln["record"]["inputs"]:
             if i["name"] == "sobol_index":
                 sidx[(ln["geometry_id"], ln["attempt"])] = i["value"]
-    assert sidx[("D-1-073", 2)] == 0, sidx
-    assert sidx[("F-1-025", 2)] == 12, sidx
+    assert sidx[("D-1-073", 4)] == 0, sidx
+    assert ("F-1-025", 2) not in sidx, sidx
     ends = {g["geometry_id"]: g for g in r1["geometries"]}
-    assert ends["D-1-073"]["terminal"] == "PASS"
-    assert ends["F-1-025"]["terminal"] == "PASS"
-    assert rep["rounds"][0]["rescued"] == ["D-1-073", "F-1-025"]
-    assert rep["rounds"][1]["rescued"] == ["D-1-073", "F-1-025"]
+    assert ends["D-1-073"]["terminal"] == "EXHAUSTED"
+    assert ends["F-1-025"]["terminal"] == "EXHAUSTED"
+    assert rep["rounds"][0]["rescued"] == []
+    assert rep["rounds"][1]["rescued"] == []
     assert rep["systems"]["rules"]["failures"] == 6
     assert abs(rep["systems"]["rules"]["mfr"] - 0.375) <= 1e-12
-    assert rep["systems"]["round-2"]["failures"] == 4
+    assert rep["systems"]["round-2"]["failures"] == 6
     assert rep["cv"]["auc"] >= 0.75 and rep["cv"]["blc8_rmse"] == 0.0
-    assert rep["conditions"]["beats_rules"] is True
-    assert rep["verdict"] == "PASS" and rep["enabled"] is True
+    assert rep["conditions"]["beats_rules"] is False
+    assert rep["verdict"] == "PASS" and rep["enabled"] is False
     for n in ("G-OPT.json", "G-OPT.md", "opt_model.json", "train.json.gz",
               "refine_r1.json.gz", "refine_r2.json.gz"):
         assert os.path.isfile(os.path.join(rep8, n)), n
     model = _read_json_or_none(os.path.join(rep8, "opt_model.json"))
-    # the 104 oracle rows (group 2) plus round 1's two optimiser rows
+    # the 114 oracle rows (group 2) plus round 1's one optimiser row
     assert model["train"]["n_rows"] >= 106, model["train"]["n_rows"]
     H["rep8"] = rep8
     m1 = os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns
@@ -1998,9 +2183,11 @@ def _g8_refine(H):
     finally:
         om._MODEL.clear()
         om._MODEL.update(saved)
-    print("[ok] refine on the oracle: D-1-073 and F-1-025 rescued in round 1 "
-          "(indices 0 and 12), MFR 0.375 -> 0.25, PASS and enabled; a re-run reuses "
-          "both rounds and gives an equal report; check PASS")
+    print("[ok] refine on the oracle: RM-SNAP-TAU spends attempts 2-3 on the "
+          "sharp bodies and D-1-073's proposal comes at attempt 4 (index 0, p_fail "
+          "0.127181) and fails, nothing rescued, MFR 0.375, the CV half PASSes but "
+          "the ablation bar is missed so the optimiser ships disabled; a re-run "
+          "reuses both rounds and gives an equal report; check PASS")
 
 
 def _g9_refine_a(H):
@@ -2061,32 +2248,41 @@ def _g10_live(H):
              "quiet": True}, attempt_fn=A, probe_fn=P, snap_fn=S,
             hooks={"optimiser": make_hook(lambda gid: (H["folds"][4], 4),
                                           model_sha256="selftest")})
-        lr = {r["attempt"]: r for r in campaign.load_rows(live)
-              if r["geometry_id"] == "D-1-073"}
+        rows = [r for r in campaign.load_rows(live)
+                if r["geometry_id"] == "D-1-073"]
+        lr = {r["attempt"]: r for r in rows}
         comm = {r["attempt"]: r for r in H["rb"]["attempts"]
                 if r["geometry_id"] == "D-1-073"}
         assert (lr[1]["config_sha"], lr[1]["decided_by"], lr[1]["rule_id"]) == \
             (comm[1]["config_sha"], comm[1]["decided_by"],
              comm[1]["rule_id"]), 1
         # the committed attempt 2 is RM-SNAP-FT, refused since 2026-09-26, so the
-        # live campaign cannot replay it and the optimiser's first pick takes over
-        assert lr[2]["decided_by"] == "optimiser" and lr[2]["rule_id"] == "OPT-PICK", \
+        # live campaign cannot replay it and RM-SNAP-TAU (the radius halved, the
+        # attraction on) takes attempts 2 and 3 before the optimiser acts
+        assert lr[2]["decided_by"] == "remedy" and lr[2]["rule_id"] == "RM-SNAP-TAU", \
             (lr[2]["decided_by"], lr[2]["rule_id"])
+        assert lr[3]["decided_by"] == "remedy" and lr[3]["rule_id"] == "RM-SNAP-TAU", \
+            (lr[3]["decided_by"], lr[3]["rule_id"])
+        assert lr[4]["decided_by"] == "optimiser" and lr[4]["rule_id"] == "OPT-PICK", \
+            (lr[4]["decided_by"], lr[4]["rule_id"])
+        assert [r["attempt"] for r in rows
+                if r["decided_by"] == "optimiser"] == [4], "optimiser rows"
+        geoms = {g["geometry_id"]: g for g in campaign.load_geometries(live)}
+        assert campaign.terminal_of(geoms["D-1-073"]) == "PASS", \
+            geoms["D-1-073"]["terminal"]
         assert end["harness_errors"] == 0 and end["orphans"] == []
         assert end["max_live_mesher"] <= 2, end["max_live_mesher"]
-        # the first optimiser row is now attempt 2 (the committed attempt 2 is the
-        # refused RM-SNAP-FT), so only attempt 1 is verified against the campaign
-        verify_round(1, live,
-                     [r for r in H["rb"]["attempts"]
-                      if r["geometry_id"] == "D-1-073" and r["attempt"] == 1],
-                     ["D-1-073"])
+        # today's remedy table extends the committed prefix with two RM-SNAP-TAU
+        # rows, so only attempt 1 is compared, by the first assertion above
+        # (verify_round stays exercised by the refine groups 8 and 9)
     finally:
         rules.setup = setup0
-    oc = lr[2]["outcome"]
+    oc = lr[4]["outcome"]
     print("[ok] live: rules+opt through the mesher at 2 streams on D-1-073: row "
-          "1 replayed from the rules campaign, row 2 the optimiser's pick %s "
-          "(exit %s, %s), 0 harness errors, 0 orphans, at most 2 meshers; verify "
-          "ok" % (lr[2]["config_sha"][:12], oc["exit_code"], oc["failure_class"]))
+          "1 replayed from the rules campaign, rows 2-3 RM-SNAP-TAU, row 4 the "
+          "optimiser's pick %s (exit %s, %s), terminal PASS, 0 harness errors, "
+          "0 orphans, at most 2 meshers"
+          % (lr[4]["config_sha"][:12], oc["exit_code"], oc["failure_class"]))
 
 
 def _g11_check_cli(H):
@@ -2112,6 +2308,19 @@ def _g11_check_cli(H):
     res2 = check(t2)
     assert res2["verdict"] == "FAIL"
     assert not next(i for i in res2["items"] if i["name"] == "model sha")["ok"]
+    # a reserved deflate block type: the two block-type bits of the first deflate
+    # byte (these files have a 10-byte gzip header, FLG 0) make decompression raise
+    # zlib.error, not a CRC OSError
+    t3 = os.path.join(tmp, "rep_t3")
+    shutil.copytree(H["rep8"], t3)
+    p3 = os.path.join(t3, "train.json.gz")
+    data = bytearray(open(p3, "rb").read())
+    data[10] |= 0x06
+    with open(p3, "wb") as f:
+        f.write(bytes(data))
+    res3 = check(t3)
+    assert res3["verdict"] == "FAIL"
+    assert not next(i for i in res3["items"] if i["name"] == "train file")["ok"]
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     p1 = subprocess.run([sys.executable, __file__, "--plan"], capture_output=True,
                         text=True, encoding="utf-8", errors="replace", env=env,
@@ -2132,8 +2341,68 @@ def _g11_check_cli(H):
                          os.path.join(tmp, "nothing")], capture_output=True,
                         text=True, encoding="utf-8", env=env, timeout=300)
     assert p4.returncode == 1, (p4.returncode, p4.stdout[-400:])
-    print("[ok] check: two tampers FAIL by name; the CLI plans on the committed "
-          "data, refuses a refine without --work, and checks")
+    print("[ok] check: two tampers and a reserved deflate block type FAIL by "
+          "name; the CLI plans on the committed data, refuses a refine without "
+          "--work, and checks")
+
+
+def _g12_cv(H):
+    tmp = H["tmp"]
+    # (a) the extra rows are the first bundle's, its sources entry is the extra,
+    # a re-run is equal beyond the date, and the committed G-OPT files untouched
+    out = os.path.join(tmp, "cv_out")
+    r1 = cv([H["osrc"][0]], base=[H["osrc"][1], H["osrc"][2]], report_dir=out)
+    r0 = rows_from(baseline.read_bundle(H["osrc"][0]), "extra", H["mrows"],
+                   H["gates"], H["knobs"])
+    assert r1["extra_oof"]["n"] == len(r0), (r1["extra_oof"]["n"], len(r0))
+    assert r1["sources"][0]["file"] == \
+        os.path.abspath(H["osrc"][0]).replace(os.sep, "/"), r1["sources"][0]
+    for n in (REPORT_NAME, REPORT_MD, MODEL_NAME, TRAIN_NAME):
+        assert not os.path.isfile(os.path.join(out, n)), n
+    r2 = cv([H["osrc"][0]], base=[H["osrc"][1], H["osrc"][2]], report_dir=out)
+    a, b = dict(r1), dict(r2)
+    a.pop("date"), b.pop("date")
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+    # (b) an evaluate-split extra raises SplitSealed before any row, nothing written
+    ev = os.path.join(tmp, "cv_eval.json.gz")
+    be = baseline.read_bundle(H["osrc"][0])
+    be["campaign"]["split_mode"] = split.EVALUATE
+    baseline.write_bundle(be, ev)
+    outb = os.path.join(tmp, "cv_out_b")
+    try:
+        cv([ev], base=[H["osrc"][1], H["osrc"][2]], report_dir=outb)
+    except split.SplitSealed as e:
+        assert "tuning split only" in str(e), str(e)
+    else:
+        raise AssertionError("the evaluate extra bundle was not refused")
+    assert not os.path.isdir(outb), outb
+    # (c) the reproduce check: the committed G-OPT-CV.json beyond the date
+    rc = cv([os.path.abspath(os.path.join(HERE, "aml", "tuning_rules_L5.json.gz"))],
+            write=False)
+    want = _read_json_or_none(os.path.join(REPORT_DIR, CV_REPORT))
+    assert want is not None, "the committed G-OPT-CV.json is missing"
+    a, b = dict(rc), dict(want)
+    a.pop("date"), b.pop("date")
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True), \
+        "the committed G-OPT-CV.json does not reproduce"
+    # (d) the CLI refuses --cv without --extra
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    pc = subprocess.run([sys.executable, __file__, "--cv"], capture_output=True,
+                        text=True, encoding="utf-8", errors="replace", env=env,
+                        timeout=300)
+    assert pc.returncode == 2 and "--cv needs --extra" in (pc.stderr or ""), \
+        (pc.returncode, pc.stderr)
+    print("[ok] cv: rows %d (%d new), AUC %.6f, BLC_8 RMSE %.6f; the new rows out "
+          "of fold AUC %.6f, BLC_8 RMSE %.6f; alone AUC %.6f, BLC_8 RMSE %.6f; "
+          "verdict %s (auc_ge %s, rmse_le %s), the optimiser ships %s; an "
+          "evaluate extra raises SplitSealed before any write; the committed "
+          "G-OPT-CV.json reproduces; --cv without --extra exits 2"
+          % (r1["cv"]["n"], r1["extra_oof"]["n"], r1["cv"]["auc"],
+             r1["cv"]["blc8_rmse"], r1["extra_oof"]["auc"],
+             r1["extra_oof"]["blc8_rmse"], r1["extra_cv"]["auc"],
+             r1["extra_cv"]["blc8_rmse"], r1["verdict"],
+             r1["conditions"]["auc_ge"], r1["conditions"]["rmse_le"],
+             "enabled" if r1["ship"]["enabled"] else "DISABLED"))
 
 
 if __name__ == "__main__":

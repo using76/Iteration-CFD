@@ -1,7 +1,7 @@
 {
  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
  "schema": "autonomy-remedy-labels/1",
- "note": "The AM-10 supervisor's labels, 2026-09-24, tree 3afd66e: for each of the 31 G-SCORER probes (fixtures/probes, flow = labels.json's flow) the key, the stage and the tabled remedy or terminal; then 32 sequence cases (a config, an outcome, a firing history). 'edits' is the complete pointer -> to map (floats within 1e-12); 'skipped_why' maps a skipped row to a substring of its reason. Written from the logs and the AM-10 table, never from remedies.py. Re-frozen 2026-09-26 (FEAT-CONSTRAINT, the user's decision that feature-edge capture is a hard constraint on a body with sharp edges): RM-SNAP-FT never applies on such a body (wing_a_L3, S01 and S04 now name it skipped; S25 moves to the wing_a setup config with RM-SNAP-WALL's config already seen, so the revisit path keeps its case), the three probes whose snap captured no sharp edge (cubep_nofeat, cubep_nofeat_cf, cubep_nosnap) and S15 end NO-REMEDY on key F3e, and S33 is a synthetic F3e.",
+ "note": "The AM-10 supervisor's labels, 2026-09-24, tree 3afd66e: for each of the 31 G-SCORER probes (fixtures/probes, flow = labels.json's flow) the key, the stage and the tabled remedy or terminal; then 32 sequence cases (a config, an outcome, a firing history). 'edits' is the complete pointer -> to map (floats within 1e-12); 'skipped_why' maps a skipped row to a substring of its reason. Written from the logs and the AM-10 table, never from remedies.py. Re-frozen 2026-09-26 (FEAT-CONSTRAINT, the user's decision that feature-edge capture is a hard constraint on a body with sharp edges): RM-SNAP-FT never applies on such a body (wing_a_L3, S01 and S04 now name it skipped; S25 moves to the wing_a setup config with RM-SNAP-WALL's config already seen, so the revisit path keeps its case), the three probes whose snap captured no sharp edge (cubep_nofeat, cubep_nofeat_cf, cubep_nosnap) and S15 end NO-REMEDY on key F3e, and S33 is a synthetic F3e. Re-pinned 2026-10-02 (AM-L: RM-SNAP-TAU halves the attraction radius, never below h_f/8 and never to 0): wing_a_L3, S01, S04 and S25 now apply it (0.25 on the probe's default radius, 0.00390625 on the rules config's 0.0078125; S04 lands exactly on the floor); S02, S28 and S29 name its skip; S34 is the floor refusal and S35 the two-fire cap.",
  "flows": {
   "worked": {
    "u_ref_m_s": 0.3,
@@ -458,12 +458,14 @@
    "id": "wing_a_L3",
    "key": "F3",
    "stage": "snap",
-   "verdict": "terminal",
-   "terminal": "EXHAUSTED",
-   "rule_id": "RM-EXHAUSTED",
-   "edits": {},
+   "verdict": "apply",
+   "terminal": null,
+   "rule_id": "RM-SNAP-TAU",
+   "edits": {
+    "/snap/feature_tolerance": 0.25
+   },
    "capability_limited": [],
-   "note": "F3a 0.133; wall 3 is the floor (3 -> 2 < 3); 2026-09-26: the attraction may not go off on a body with sharp edges, so the table is spent",
+   "note": "F3a 0.133; wall 3 is the floor (3 -> 2 < 3); the attraction may not go off (2026-09-26), so RM-SNAP-TAU halves its radius: feature_tolerance 0.5 -> 0.25 at max_level 3 (tau 4 h_f -> 2 h_f, above the floor h_f/8)",
    "skipped_why": {
     "RM-SNAP-WALL": "below the y+ floor",
     "RM-SNAP-FT": "refused on a body with sharp edges"
@@ -547,10 +549,12 @@
     "RM-SNAP-WALL": 1
    },
    "expect": {
-    "verdict": "terminal",
-    "rule_id": "RM-EXHAUSTED",
-    "terminal": "EXHAUSTED",
-    "edits": {},
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-TAU",
+    "terminal": null,
+    "edits": {
+     "/snap/feature_tolerance": 0.25
+    },
     "attempt": 2,
     "skipped_why": {
      "RM-SNAP-WALL": "below the y+ floor",
@@ -577,7 +581,8 @@
     "attempt": 3,
     "skipped_why": {
      "RM-SNAP-WALL": "below the y+ floor",
-     "RM-SNAP-FT": "the attraction is already off"
+     "RM-SNAP-FT": "the attraction is already off",
+     "RM-SNAP-TAU": "the attraction is already off"
     }
    }
   },
@@ -614,10 +619,12 @@
     "RM-SNAP-WALL": 1
    },
    "expect": {
-    "verdict": "terminal",
-    "rule_id": "RM-EXHAUSTED",
-    "terminal": "EXHAUSTED",
-    "edits": {},
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-TAU",
+    "terminal": null,
+    "edits": {
+     "/snap/feature_tolerance": 0.00390625
+    },
     "attempt": 2,
     "skipped_why": {
      "RM-SNAP-WALL": "below the y+ floor",
@@ -978,10 +985,12 @@
     "RM-SNAP-WALL"
    ],
    "expect": {
-    "verdict": "terminal",
-    "rule_id": "RM-EXHAUSTED",
-    "terminal": "EXHAUSTED",
-    "edits": {},
+    "verdict": "apply",
+    "rule_id": "RM-SNAP-TAU",
+    "terminal": null,
+    "edits": {
+     "/snap/feature_tolerance": 0.00390625
+    },
     "attempt": 2,
     "skipped_why": {
      "RM-SNAP-WALL": "revisits config sha",
@@ -1031,7 +1040,8 @@
     "attempt": 1,
     "skipped_why": {
      "RM-SNAP-WALL": "below the y+ floor",
-     "RM-SNAP-FT": "no sharp edge"
+     "RM-SNAP-FT": "no sharp edge",
+     "RM-SNAP-TAU": "no sharp edge"
     }
    }
   },
@@ -1047,7 +1057,8 @@
     "attempt": 1,
     "skipped_why": {
      "RM-SNAP-WALL": "on the R-PLANE path",
-     "RM-SNAP-FT": "the attraction is already off"
+     "RM-SNAP-FT": "the attraction is already off",
+     "RM-SNAP-TAU": "on the R-PLANE path"
     }
    }
   },
@@ -1109,6 +1120,49 @@
     "terminal": "NO-REMEDY",
     "edits": {},
     "attempt": 1
+   }
+  },
+  {
+   "id": "S34",
+   "config": "rules:wing_a.stl:worked",
+   "outcome": "synthetic:F3a",
+   "config_edits": {
+    "/snap/feature_tolerance": 0.001953125
+   },
+   "seed_seen": [
+    "RM-SNAP-WALL"
+   ],
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 2,
+    "skipped_why": {
+     "RM-SNAP-WALL": "revisits config sha",
+     "RM-SNAP-FT": "refused on a body with sharp edges",
+     "RM-SNAP-TAU": "below the floor h_f/8"
+    }
+   }
+  },
+  {
+   "id": "S35",
+   "config": "probe:wing_a_L3",
+   "outcome": "probe:wing_a_L3",
+   "fired": {
+    "RM-SNAP-TAU": 2
+   },
+   "expect": {
+    "verdict": "terminal",
+    "rule_id": "RM-EXHAUSTED",
+    "terminal": "EXHAUSTED",
+    "edits": {},
+    "attempt": 3,
+    "skipped_why": {
+     "RM-SNAP-WALL": "below the y+ floor",
+     "RM-SNAP-FT": "refused on a body with sharp edges",
+     "RM-SNAP-TAU": "fired twice"
+    }
    }
   }
  ]
