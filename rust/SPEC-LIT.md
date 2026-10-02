@@ -32140,6 +32140,115 @@ registry's own) were not re-run - the run was stopped in Gate 105-C - and
 none of them builds an `Energy` or a `GasState`. The library suite is
 2138 passed and 11 ignored, as before.
 
+### 105.18 Why backward's stroke was refused from about step 130 - a diagnosis
+
+**What was refused.** Under `backward`, §105.12's stroke duct (static, and on its
+sine law) was refused by §93.6's Mach guard on the binary before §105.17 (08e10bb),
+at a STEP COUNT, not a time (the guard's own step numbers): static at step 140 of
+160 (`dt = 1.5625e-3`, `M` 3.771) and step 132 of 320 (`dt = 7.8125e-4`, `M` 0.318);
+moving at step 141 of 160 (`M` 2.890) and step 134 of 320 (`M` 0.926); 80 steps
+(`dt = 3.125e-3`) ran to the end. `Euler` ran every count to the end. The user's
+decision of 2026-09-27 made the work a diagnosis: no numerics change.
+
+**How it was measured.** The binaries of 08e10bb and 81ae68e (§105.17) on the same
+case files, the static case with an `output.restart` block writing an exact `f64`
+`.mcr` checkpoint every step (§44's series; a moving case refuses an output block,
+§105.12, so the moving runs were read from the `-check 1` lines, six digits). No
+code was added to measure it. The readout is `max |T - 293.15|` over the cells:
+the case is isothermal, inlet and initial `T` both 293.15 K, so any deviation is
+the scheme's.
+
+**Table 1**, the static stroke, `max |T - 293.15|` in K after the step named,
+08e10bb, `backward`:
+
+| steps (dt)      | step 20   | step 40  | step 60  | step 80  | step 100 | step 120 | end                 |
+|-----------------|-----------|----------|----------|----------|----------|----------|---------------------|
+| 80 (3.125e-3)   | 5.946e-11 | 1.919e-8 | 5.920e-6 | 1.818e-3 | -        | -        | 80 steps, exit 0    |
+| 160 (1.5625e-3) | 7.145e-11 | 1.444e-8 | 3.470e-6 | 8.867e-4 | 2.345e-1 | 7.599e1  | refused at step 140 |
+| 320 (7.8125e-4) | 1.833e-10 | 5.674e-8 | 1.754e-5 | 5.454e-3 | 1.705    | 1.186e3  | refused at step 132 |
+
+The growth per step fitted from step 20 to step 80 is 1.3328, 1.3129 and 1.3322 at
+the three `dt`, a factor of 4 apart in `dt`; the first step's deviation is
+`5.684e-14` K (one ulp of 293.15) or `1.137e-13` K.
+
+**Table 2**, the same readout at the end of the run, every case running to the end:
+
+| binary, scheme    | 80 steps  | 160 steps | 320 steps |
+|-------------------|-----------|-----------|-----------|
+| 08e10bb, Euler    | 2.463e-10 | 1.076e-9  | 1.152e-7  |
+| 81ae68e, Euler    | 1.990e-12 | 1.137e-12 | 5.798e-12 |
+| 81ae68e, backward | -         | 6.310e-12 | 8.470e-12 |
+
+On 81ae68e every one of the sixteen runs (static and moving, `Euler` and
+`backward`, 120, 140, 160 and 320 steps) ends with exit 0, `T` printed
+`[293.15, 293.15]` on its last line and `M max` at most `0.00218509`.
+
+**The cause.** Before §105.17, `rho` and `rho^{n-1}` were built from `T^{n-1}` and
+`T^{n-2}`, and `T^{n-2}` was never rotated (§105.17 states the defect). With
+`rho T = p0 / R_s` at every level, the conservative BDF2 row for an isothermal
+cell, linearised in `e_k = T^k / T_0 - 1`, is
+`(3/2)(e_n - e_{n-1}) - 2(e_{n-1} - e_{n-2}) = dt (spatial terms)`. Its
+characteristic polynomial `(3/2) z^2 - (7/2) z + 2` has the roots `4/3` and `1`,
+and `dt` multiplies only the spatial terms, so the root `4/3` stays as `dt` goes
+to 0: the recurrence breaks the root condition (it is not zero-stable), and
+round-off grows by `4/3` per STEP whatever `dt` is. That is the measured 1.31 to
+1.33. From one ulp, `(4/3)^n` reaches 1 K near step 106; measured, the deviation
+passes 1 K between steps 100 and 110 at `dt = 1.5625e-3` and between steps 80 and
+100 at `dt = 7.8125e-4`. Then `T` runs away (static, 160 steps: `T`
+max 977.8 K after step 126, 7790.9 K after step 130, `4.020e9` K after step 139),
+`rho` falls toward 0, `U` follows, and §93.6 reads a Mach number off fields that
+have already left the physical range. The `Euler` row of the same defect,
+`(e_n - e_{n-1}) - (e_{n-1} - e_{n-2})`, has the double root `1`: marginal, the
+slow growth of table 2's first row and no refusal within 320 steps. After
+§105.17, `backward`'s row `rho* cp (3/2 T^n - 2 T^{n-1} + 1/2 T^{n-2})` has the
+roots `1` and `1/3` and `Euler`'s the root `1`: both zero-stable, and table 2's
+last two rows stay at round-off.
+
+**What it rules out.**
+
+* A `dt`-dependent instability (CFL, stiffness): the growth per step is the same
+  at three `dt` a factor of 4 apart, and the refusal comes at a step count (140,
+  132), not a time (0.219 s, 0.103 s).
+* The PIMPLE outer loop and BDF2's coefficients on `U` and `p`: two pressure
+  correctors and one outer corrector every step; `Ux` follows the static case's
+  exact `0.5 + t` (at step 100 of 160, `Ux` in `[0.656249879, 0.656249997]`
+  against `0.65625`) and the printed `p` residual is `1.443e-11` at step 81,
+  until `T` has left round-off.
+* The moving mesh and the boundary treatment: the static case, which has no
+  motion block, fails the same way; the moving case's printed `T` max grows by
+  about 1.34 per step from step 80 (293.152 K) to step 100 (293.846 K).
+* A real Mach-number problem: `M max` was `0.00199946` at step 121 of the static
+  160-step run, with `T` max already 398 K.
+* The cause sits in the energy and density path, and §105.17 (81ae68e) removed it.
+
+**The regression test.** `ofgpu-lowmach`'s
+`the_backward_stroke_runs_past_its_old_mach_refusal_with_t_at_round_off` runs the
+stroke under `backward`, static and moving, at 160 and 320 steps to `t = 0.25`,
+and holds that each run ends with all its steps, `|RunEnd::t_mean - 293.15| <=
+1e-9` K and `RunEnd::ux_mean` within `1e-5` of 0.75 (static) or within `5e-6` of
+`stroke_exact()` (moving). On 08e10bb its runs were refused (table 1), so it
+fails there; Gate 105-D, which stops at 80 steps, could not see the defect.
+Measured on the card at 81ae68e plus this test (each line is `RunEnd::ux_mean`, its
+error against the exact `Ux`, `RunEnd::t_mean` and its deviation from 293.15 K):
+
+| case            | `Ux`               | error         | `T` deviation (K) |
+|-----------------|--------------------|---------------|-------------------|
+| static, 160     | 7.499999300811e-1  | -6.991887e-8  | +1.819e-12        |
+| static, 320     | 7.499999901968e-1  | -9.803237e-9  | +6.480e-12        |
+| moving, 160     | 7.224478490375e-1  | +6.105691e-7  | +0.000e0          |
+| moving, 320     | 7.224473935452e-1  | +1.550768e-7  | +6.253e-13        |
+
+The moving pair's observed order, `log2(6.105691e-7 / 1.550768e-7)`, is 1.98: the
+second order §105.16 measures at 40 and 80 steps holds at 160 and 320 too. That is a
+reading, not a bound: Gate 105-D still stops at 80 steps, and extending it is the
+user's decision.
+
+House items: no numerics change, no new file, no kernel, no capture row;
+`ofgpu-lowmach` gains one test (49), marked for f32 like Gate 105-D, which moves
+§112.3's binary count from 15 to 16. Not diagnosed here: a sealed copy of
+§105.17's heated duct is refused by §93.6 at step 0 (`M` about `1.4e12`) on both
+binaries.
+
 ---
 
 ## 110. The published fluid gates — channel DNS, backward-facing step, buoyant plume
@@ -32779,7 +32888,7 @@ schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
-tests and **15** binary tests. So the second invocation of the house command reports
+tests and **16** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
 race above fires), and `-- --ignored` under the feature runs exactly the tests that do
@@ -32790,7 +32899,8 @@ and holds them to the two bold numbers in this paragraph (it is itself one more 
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
 where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
-105-D's `ofgpu-lowmach` test).
+105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's) and §105.18 one (the `backward`
+stroke's regression test).
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):

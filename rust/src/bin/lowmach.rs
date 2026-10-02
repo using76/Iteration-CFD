@@ -6041,6 +6041,42 @@ mod lowmach_tests {
         }
     }
 
+    /// SPEC-LIT 105.18: under `backward` the stroke duct, static and moving,
+    /// runs past its old Mach refusals to 160 and 320 steps with `T` at
+    /// round-off and `Ux` on the exact answer.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_backward_stroke_runs_past_its_old_mach_refusal_with_t_at_round_off() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::ale_flow::stroke_exact;
+        let exact_moving = stroke_exact() as f64;
+        for (motion, kind, exact, bound) in
+            [("", "static", 0.75, 1e-5), (STROKE_MOTION, "moving", exact_moving, 5e-6)]
+        {
+            for n in [160usize, 320] {
+                let text = stroke_case_text(motion, "");
+                let replaced = text.replace("\"ddt\": \"Euler\"", "\"ddt\": \"backward\"");
+                assert_ne!(replaced, text, "the stroke case must name its ddt");
+                let dt = format!("{}", 0.25 / n as f64);
+                let args = ["-endTime", "0.25", "-deltaT", dt.as_str(), "-check", "1000"];
+                let (_, end) =
+                    run_case_text_end(&replaced, &format!("bdfdiag_{kind}_{n}"), &args);
+                let dev = end.t_mean - 293.15;
+                let e = end.ux_mean - exact;
+                println!(
+                    "stroke regression: backward {kind} {n} steps: Ux {:.12e} err {e:+.6e} T \
+                     {:.12e} dev {dev:+.3e}",
+                    end.ux_mean, end.t_mean
+                );
+                assert_eq!(end.steps, n, "{kind}: {n} steps asked, {} run", end.steps);
+                assert!(dev.abs() <= 1e-9, "{kind} {n} steps: T dev {dev:e} K");
+                assert!(e.abs() <= bound, "{kind} {n} steps: Ux error {e:e} against {exact}");
+            }
+        }
+    }
+
     #[test]
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_moving_wall_named_in_the_motion_block_carries_the_mesh_velocity() {
