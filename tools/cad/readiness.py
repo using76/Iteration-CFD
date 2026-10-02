@@ -326,6 +326,12 @@ def rule_tags(ctx):
     fluid = _load_shape(ctx, "fluid.brep")
     meridian = _load_shape(ctx, "meridian.brep")
     decl_faces, decl_edges, decl_planes = _decl_lists(decl)
+    # docs/16 section H.5 item 4: the box carries both upstream tags and a build carries exactly
+    # the one its upstream_role names, so the other role's <role>_upstream tag is not wanted here.
+    # A geom.json without the key is a slip build (the box's original, and only, role until then).
+    role = (geom.get("params") or {}).get("upstream_role", "slip")
+    other = {"slip": "wall", "wall": "slip"}.get(role)
+    want_faces = sorted(t for t in decl_faces if t != (other + "_upstream" if other else None))
     values = {"n_face_tags": len(tags["face_tags"]), "n_fluid_faces": len(fluid.Faces()),
               "n_meridian_edges": len(meridian.Edges())}
     if not (tags["template_id"] == geom["template_id"] == decl["template_id"]):
@@ -334,9 +340,9 @@ def rule_tags(ctx):
                                          decl["template_id"])), values
     if geom["declaration_sha"] != common.sha256_file(ctx["declaration_path"]):
         return False, "declaration_sha", "geom.json's declaration_sha does not match the declaration file", values
-    if sorted(tags["face_tags"]) != sorted(decl_faces):
+    if sorted(tags["face_tags"]) != want_faces:
         return False, "face_tags", ("face tags %s are not the declared %s"
-                                    % (sorted(tags["face_tags"]), sorted(decl_faces))), values
+                                    % (sorted(tags["face_tags"]), want_faces)), values
     fidx = []
     for name in sorted(tags["face_tags"]):
         fidx.extend(tags["face_tags"][name])
@@ -346,16 +352,16 @@ def rule_tags(ctx):
     patches = tags["stl_patches"]
     if len(set(patches)) != len(patches):
         return False, "stl_patches", "tags.json has duplicate stl patch names", values
-    if sorted(patches) != sorted(decl_faces):
+    if sorted(patches) != want_faces:
         return False, "stl_patches", ("stl patches %s are not the declared face names %s"
-                                      % (sorted(patches), sorted(decl_faces))), values
+                                      % (sorted(patches), want_faces)), values
     for name in sorted(tags["face_tags"]):
         area = 0.0
         for i in tags["face_tags"][name]:
             area += export.face_props(fluid.Faces()[i])
         if not area > 0.0:
             return False, "face_area", ("face tag %s has total area %.6e m^2, not > 0" % (name, area)), values
-    want = sorted(decl_faces + ["axis"])
+    want = sorted(want_faces + ["axis"])
     if sorted(tags["meridian_edges"]) != want:
         return False, "meridian_partition", ("meridian edge tags %s are not the declared %s"
                                              % (sorted(tags["meridian_edges"]), want)), values

@@ -90,7 +90,7 @@ STANDIN_VERSION = "1"
 STANDIN_SEEDS = ("standin-1", "standin-2", "standin-3", "standin-4", "standin-5")
 STANDIN_OBJECTIVE = {"quantity": "total_length", "sense": "min"}
 STANDIN_START = {"D_i": 0.06, "CR": 9.0, "L_over_Di": 0.5, "law": "poly7", "x_m": None,
-                 "Lx_over_De": 0.5, "Lu_over_Di": 0.5, "t_wall": 0.003}
+                 "Lx_over_De": 0.5, "Lu_over_Di": 0.5, "upstream_role": "slip", "t_wall": 0.003}
 STANDIN_CONTINUOUS_OPTIMUM_M = 0.05287678884639893
 POOL_OPTIMA = {"standin-1": 0.05405279815196991, "standin-2": 0.05363740659318864,
                "standin-3": 0.05570419779513031, "standin-4": 0.05449305105023086,
@@ -100,7 +100,7 @@ POOL_NFEAS = {"standin-1": 346, "standin-2": 347, "standin-3": 340, "standin-4":
 STANDIN_DETAIL = "CAD-17 analytic stand-in"
 STANDIN_START_PROVENANCE = {"D_i": "user_text", "CR": "user_text", "L_over_Di": "llm_choice",
                             "law": "llm_choice", "Lx_over_De": "default", "Lu_over_Di": "default",
-                            "t_wall": "user_text"}
+                            "upstream_role": "default", "t_wall": "user_text"}
 _Z_TRACK = []                      # module-private: every LOO z RMS propose fitted (selftest T6c)
 PREFILTER_JSON = "prefilter.jsonl"
 DECISIONS_JSON = "decisions.jsonl"
@@ -116,8 +116,9 @@ USAGE = ("usage: python optimise_cad.py --selftest" + chr(10)
 def design_space(decl) -> dict:
     """The searched / fixed split of the declaration (docs/16 §H.1's box): laws in declaration order,
     the searched reals (role design, min < max) each with min, max, default_real and only_when, and
-    every other real as fixed. A searched real is ACTIVE for a law when its only_when is null or
-    equals law=<that law> (x_m is cubic only)."""
+    everything else as fixed - every other real, and every choice param other than law, in the
+    declaration's own order (reals and choices interleaved as declared). A searched real is ACTIVE
+    for a law when its only_when is null or equals law=<that law> (x_m is cubic only)."""
     laws = None
     searched, fixed = [], []
     for p in decl["params"]:
@@ -126,6 +127,10 @@ def design_space(decl) -> dict:
     if not laws:
         raise ValueError("CADOPT-DOC: the declaration has no choice param named law")
     for p in decl["params"]:
+        if p["kind"] == "choice":
+            if p["name"] != "law":
+                fixed.append(p["name"])
+            continue
         if p["kind"] != "real":
             continue
         if p["role"] == "design" and p["min"] is not None and p["max"] is not None and p["min"] < p["max"]:
@@ -194,15 +199,15 @@ def features(params, decl) -> list:
 
 
 def optimiser_provenance(decl) -> dict:
-    """The provenance of a pool candidate: role intent -> user_text, a fixed design real
-    (min == max) -> default, everything the pool chose (law and the active searched reals) ->
-    optimiser."""
+    """The provenance of a pool candidate: law -> optimiser, any param with role intent (real or
+    choice) -> user_text, a fixed design real (min == max) -> default, everything else the pool
+    chose (the active searched reals) -> optimiser."""
     prov = {}
     for p in decl["params"]:
-        if p["kind"] == "choice":
-            prov[p["name"]] = "optimiser"
-        elif p["role"] == "intent":
+        if p["role"] == "intent":
             prov[p["name"]] = "user_text"
+        elif p["kind"] == "choice":
+            prov[p["name"]] = "optimiser"
         elif p["min"] is not None and p["max"] is not None and p["min"] == p["max"]:
             prov[p["name"]] = "default"
         else:
@@ -934,7 +939,7 @@ _FIVE_RUNS_CACHE = {}
 
 def _t1() -> None:
     decl, _ts, _ds, _g, _gl = _decl_gates()
-    fixed = {"D_i": 0.06, "CR": 9.0, "Lu_over_Di": 0.5}
+    fixed = {"D_i": 0.06, "CR": 9.0, "Lu_over_Di": 0.5, "upstream_role": "slip"}
     cands = pool("standin-1", decl, fixed, 256)
     assert len(cands) == 1024, len(cands)
     for li in range(4):
@@ -943,9 +948,9 @@ def _t1() -> None:
     c0 = cands[0]
     want0 = {"L_over_Di": 1.2219172902405262, "x_m": None, "Lx_over_De": 0.37060008640401065,
              "t_wall": 0.008190682037733496, "D_i": 0.06, "CR": 9.0, "Lu_over_Di": 0.5,
-             "law": "poly3"}
+             "upstream_role": "slip", "law": "poly3"}
     assert c0["params"] == want0, c0["params"]
-    assert c0["params_sha"] == "dc75a51dc965768a676be0351a8d0abf88e6d50257758b4a4ec3a515f1853261"
+    assert c0["params_sha"] == "138eb618b1cba408e8cddba29f397e8051d20d6f3ede7909c71335fb16a0fd16"
     c768 = cands[768]
     assert c768["params"]["L_over_Di"] == 1.356941606849432
     assert c768["params"]["x_m"] == 0.7960821827873588
@@ -975,19 +980,20 @@ def _t1() -> None:
 
 def _t2() -> None:
     decl, template_sha, _ds2, _g, _gl = _decl_gates()
-    fixed = {"D_i": 0.06, "CR": 9.0, "Lu_over_Di": 0.5}
+    fixed = {"D_i": 0.06, "CR": 9.0, "Lu_over_Di": 0.5, "upstream_role": "slip"}
     cands = pool("standin-1", decl, fixed, 256)
     prov = optimiser_provenance(decl)
     d0 = params_doc(cands[0]["params"], decl, template_sha, "b" * 64, None, prov)
     d768 = params_doc(cands[768]["params"], decl, template_sha, "b" * 64, "c" * 64, prov)
     assert schema.errors(d0, "cad-params/1") == []
     assert schema.errors(d768, "cad-params/1") == []
-    assert len(d0["values"]) == 7, len(d0["values"])
-    assert len(d768["values"]) == 8, len(d768["values"])
+    assert len(d0["values"]) == 8, len(d0["values"])
+    assert len(d768["values"]) == 9, len(d768["values"])
     by_name = dict((v["name"], v) for v in d0["values"])
     assert by_name["D_i"]["provenance"] == "user_text"
     assert by_name["CR"]["provenance"] == "user_text"
-    assert by_name["Lu_over_Di"]["provenance"] == "default"
+    assert by_name["Lu_over_Di"]["provenance"] == "user_text"
+    assert by_name["upstream_role"]["provenance"] == "user_text"
     for n in ("L_over_Di", "Lx_over_De", "t_wall", "law"):
         assert by_name[n]["provenance"] == "optimiser", n
     broken = copy.deepcopy(d0)
@@ -998,13 +1004,13 @@ def _t2() -> None:
                       standin_checks("standin-1"), dict(STANDIN_START), dict(STANDIN_START_PROVENANCE))
     assert doc["base_stable_eval_key"] is None
     assert doc["requirements_lock"] == standin_checks("standin-1")["requirements_lock"]
-    print("[ok] T2 params docs: candidate 0 has 7 values and 768 has 8, provenance by role, the"
+    print("[ok] T2 params docs: candidate 0 has 8 values and 768 has 9, provenance by role, the"
           " schema names a missing requirements_lock, the start doc has a null base")
 
 
 def _t3() -> None:
     decl, _ts, _ds2, _g, _gl = _decl_gates()
-    fixed = {"D_i": 0.06, "CR": 9.0, "Lu_over_Di": 0.5}
+    fixed = {"D_i": 0.06, "CR": 9.0, "Lu_over_Di": 0.5, "upstream_role": "slip"}
     cands = pool("standin-1", decl, fixed, 256)
     f0 = features(cands[0]["params"], decl)
     f768 = features(cands[768]["params"], decl)

@@ -9,7 +9,10 @@ write_polymesh emits, byte for byte, what this repository's own Rust writer
 (rust/src/io/polymesh.rs, write_poly_mesh_raw) emits: the counted `N (`
 list bodies, points at 17 significant digits ('%.17g', C's %.*g), the
 boundary dictionary carrying type/nFaces/startFace, LF line endings.
-read_polymesh reads the same five files back. A file format is not a work:
+read_polymesh reads the same five files back, and a boundary patch carrying
+a cyclic pair's `neighbourPatch` - which write_polymesh writes from a
+4-tuple, in rust/src/io/polymesh.rs write_boundary_file's layout - reads
+back under that key. A file format is not a work:
 this is an independent implementation written from this repository's Rust
 source, not from anyone's polyMesh writer. regions_selftest.py verifies the
 bytes against rust/target/release/ofgpu-convert-mesh.
@@ -78,12 +81,22 @@ def write_polymesh(pm_dir, points, faces, owner, neighbour, patches):
 
     points is an (n, 3) float64 array; faces a list of int lists, internal
     FIRST; owner one label per face; neighbour the n_internal_faces labels;
-    patches [(name, type, n_faces)] in order, startFace derived. Returns
-    {'nPoints', 'nCells', 'nFaces', 'nInternalFaces'} - the note's numbers.
+    patches [(name, type, n_faces)] or [(name, type, n_faces, neighbour_patch)]
+    in order, startFace derived - a 4-tuple whose 4th element is a non-empty
+    str writes, between its type and nFaces lines, the boundary entry's
+    `neighbourPatch  <name>;` line, and that name must be another entry's
+    name. Returns {'nPoints', 'nCells', 'nFaces', 'nInternalFaces'} - the
+    note's numbers.
     """
     os.makedirs(pm_dir, exist_ok=True)
-    for name, _, _ in patches:
+    rows = [(e[0], e[1], e[2], (e[3] if len(e) > 3 else None)) for e in patches]
+    names = set(r[0] for r in rows)
+    for name, _, _, nbr in rows:
         check_patch_name(name, 'patch')
+        if nbr:
+            check_patch_name(nbr, 'neighbourPatch')
+            if nbr not in names:
+                raise ValueError("neighbourPatch '%s' names no patch in %s" % (nbr, sorted(names)))
     n_if = len(neighbour)
     n_cells = max(list(owner) + list(neighbour)) + 1
     note = 'nPoints:%d  nCells:%d  nFaces:%d  nInternalFaces:%d' % (
@@ -101,8 +114,10 @@ def write_polymesh(pm_dir, points, faces, owner, neighbour, patches):
         _write(os.path.join(pm_dir, obj), ''.join(out) + ')', 'labelList', obj, note)
     out = ['%d\n(\n' % len(patches)]
     start = n_if
-    for name, tname, n_f in patches:
+    for name, tname, n_f, nbr in rows:
         out.append('    %s\n    {\n        type            %s;\n' % (name, tname))
+        if nbr:
+            out.append('        neighbourPatch  %s;\n' % nbr)
         out.append('        nFaces          %d;\n' % n_f)
         out.append('        startFace       %d;\n    }\n' % start)
         start += n_f
@@ -150,9 +165,14 @@ def read_polymesh(pm_dir):
     assert len(neighbour) == n_nei <= n_faces, (len(neighbour), n_nei, n_faces)
     with open(os.path.join(pm_dir, 'boundary'), encoding='utf-8') as f:
         btxt = re.sub(r'/\*.*?\*/', ' ', f.read(), flags=re.S)
-    patches = [{'name': nm, 'type': tp, 'nFaces': int(nf), 'startFace': int(sf)}
-               for nm, tp, nf, sf in re.findall(
-                   r'\n\s*([A-Za-z_][\w]*)\s*\{\s*type\s+(\w+);[^}]*?nFaces\s+(\d+);'
-                   r'\s*startFace\s+(\d+);', btxt)]
+    patches = []
+    for nm, tp, nbr, nf, sf in re.findall(
+            r'\n\s*([A-Za-z_][\w]*)\s*\{\s*type\s+(\w+);'
+            r'(?:[^}]*?neighbourPatch\s+([A-Za-z_][\w]*);)?'
+            r'[^}]*?nFaces\s+(\d+);\s*startFace\s+(\d+);', btxt):
+        row = {'name': nm, 'type': tp, 'nFaces': int(nf), 'startFace': int(sf)}
+        if nbr:
+            row['neighbourPatch'] = nbr
+        patches.append(row)
     return {'points': vals.reshape(-1, 3), 'faces': faces, 'owner': owner,
             'neighbour': neighbour, 'patches': patches}

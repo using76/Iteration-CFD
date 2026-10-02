@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CHECKS = (("common.py", 14), ("schema.py", 6), ("schema_fixtures.py", 13), ("measure.py", 43), ("hints.py", 4), ("runner.py", 12), ("template_gc3.py", 12), ("export.py", 15), ("readiness.py", 23), ("reqs.py", 45), ("verify.py", 15), ("mutate.py", 18), ("wedge_mesh.py", 13), ("thwaites.py", 15), ("turb_integral.py", 15), ("mesh_fidelity.py", 11), ("case_writer.py", 9), ("post.py", 13), ("solve.py", 15), ("gate.py", 12), ("optimise_cad.py", 12), ("loop.py", 12))   # (script, min [ok]); later units append
+CHECKS = (("common.py", 14), ("schema.py", 6), ("schema_fixtures.py", 13), ("measure.py", 43), ("hints.py", 4), ("runner.py", 12), ("template_gc3.py", 13), ("export.py", 15), ("readiness.py", 23), ("reqs.py", 45), ("verify.py", 15), ("mutate.py", 18), ("wedge_mesh.py", 20), ("pipe_mesh.py", 10), ("thwaites.py", 15), ("turb_integral.py", 15), ("mesh_fidelity.py", 11), ("case_writer.py", 9), ("post.py", 13), ("solve.py", 15), ("gate.py", 12), ("optimise_cad.py", 12), ("loop.py", 12))   # (script, min [ok]); later units append
 
 _TALLY = []                                     # each child's n_ok, for the final count
 
