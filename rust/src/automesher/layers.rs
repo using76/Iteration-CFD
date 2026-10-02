@@ -5143,4 +5143,809 @@ pub(crate) mod tests {
         eprintln!("beta sphere level_n_non_orth_max_deg {v:.17}");
         eprintln!("beta sphere max_non_orth_deg {:.17}", out.quality.max_non_orth_deg);
     }
+
+    // ---- §92.13's probe ---------------------------------------------------
+    //
+    // Diagnosis only: which cells fail G5 on a snapped layer config, cell by
+    // cell and round by round, printed. It asserts nothing but that its own
+    // step-by-step reproduction of add_layers's outer ladder of (92.47)
+    // agrees with the trace the real call took. No threshold, limiter or
+    // ladder rule is changed by it, and nothing here runs unless
+    // AUTOMESHER_G5_PROBE names a config path.
+
+    use crate::mesh::HostMesh;
+
+    /// The median of `v`, destroying its order: the two middles' mean on an
+    /// even length.
+    fn g5p_p50(v: &mut Vec<Scalar>) -> Scalar {
+        v.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        if v.is_empty() {
+            return 0.0;
+        }
+        if v.len() % 2 == 1 {
+            v[v.len() / 2]
+        } else {
+            0.5 * (v[v.len() / 2 - 1] + v[v.len() / 2])
+        }
+    }
+
+    /// The hint the shrink gives its index: the mean edge length over the
+    /// layer patches' faces.
+    fn g5p_hint(m: &PolyMeshRaw, patches: &[usize]) -> Scalar {
+        let n_internal = m.neighbour.len().min(m.faces.len());
+        let mut sum = 0.0 as Scalar;
+        let mut cnt = 0usize;
+        for &p in patches {
+            let patch = &m.patches[p];
+            for j in 0..patch.size {
+                let f = n_internal + patch.start + j;
+                if f >= m.faces.len() {
+                    continue;
+                }
+                let face = &m.faces[f];
+                for k in 0..face.len() {
+                    let a = m.points[face[k] as usize];
+                    let b = m.points[face[(k + 1) % face.len()] as usize];
+                    sum += (a - b).mag();
+                    cnt += 1;
+                }
+            }
+        }
+        assert!(cnt > 0, "no layer face to build the index hint from");
+        sum / (cnt as Scalar)
+    }
+
+    /// G5's planar grouping (§92.3): the largest planar face group's area
+    /// over a cell's faces, given as (outward unit normal, |Sf|).
+    fn g5p_a_max(c_faces: &[(Vec3, Scalar)]) -> Scalar {
+        let cos_tol = quality::PLANAR_GROUP_DEG.to_radians().cos();
+        let mut groups: Vec<(Vec3, Scalar)> = Vec::new();
+        for (n, area) in c_faces {
+            match groups
+                .iter_mut()
+                .find(|(g, _): &&mut (Vec3, Scalar)| g.dot(*n) >= cos_tol)
+            {
+                Some((_, a)) => *a += *area,
+                None => groups.push((*n, *area)),
+            }
+        }
+        groups.iter().map(|(_, a)| *a).fold(0.0, Scalar::max)
+    }
+
+    /// The A_max of (92.14) for one cell of a host mesh.
+    fn g5p_a_max_of(hm: &HostMesh, c: usize) -> Scalar {
+        let mut c_faces: Vec<(Vec3, Scalar)> = Vec::new();
+        for k in hm.cf_offset[c] as usize..hm.cf_offset[c + 1] as usize {
+            let f = hm.cf_face[k] as usize;
+            let mag = hm.mag_sf[f];
+            if mag <= 0.0 {
+                continue;
+            }
+            let sign = if hm.cf_own[k] != 0 { 1.0 } else { -1.0 };
+            c_faces.push((hm.sf[f] * (sign / mag), mag));
+        }
+        for k in hm.bcf_offset[c] as usize..hm.bcf_offset[c + 1] as usize {
+            let bf = hm.bcf_face[k] as usize;
+            let mag = hm.b_mag_sf[bf];
+            if mag <= 0.0 {
+                continue;
+            }
+            c_faces.push((hm.b_sf[bf] * (1.0 / mag), mag));
+        }
+        g5p_a_max(&c_faces)
+    }
+
+    /// `3 V / A_max^1.5` of (92.14), the value G5 fails a cell on.
+    fn g5p_tau(hm: &HostMesh, c: usize) -> Scalar {
+        if hm.v[c] <= 0.0 {
+            return Scalar::INFINITY;
+        }
+        let amax = g5p_a_max_of(hm, c);
+        if amax <= 0.0 {
+            return Scalar::INFINITY;
+        }
+        3.0 * hm.v[c] / amax.powf(1.5)
+    }
+
+    /// A variation the stack or the ladder refused, named short.
+    fn g5p_refused(name: &str, value: &str, e: &Error) {
+        let msg: String = format!("{e}").chars().take(120).collect();
+        println!("g5probe vary {name} {value} refused {msg}");
+    }
+
+    #[test]
+    #[ignore]
+    fn a_probe_measures_which_cells_fail_g5_on_a_snapped_layer_config() {
+        let Ok(cfg_str) = std::env::var("AUTOMESHER_G5_PROBE") else {
+            println!("g5probe skipped: AUTOMESHER_G5_PROBE is unset");
+            return;
+        };
+        let cfg_path = std::path::PathBuf::from(cfg_str.clone());
+        let cfg =
+            crate::automesher::read_config(&cfg_path).expect("read the probe config");
+        cfg.validate().expect("validate the probe config");
+        let dir = cfg_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        let mut parts: Vec<Surface> = Vec::new();
+        for s in &cfg.input.surfaces {
+            let mut part = crate::surface::stl::read_stl(dir.join(&s.path))
+                .expect("read the probe surface");
+            if let Some(name) = &s.name {
+                part.patch_names = vec![name.clone()];
+                part.tri_patch = vec![0; part.tris.len()];
+                part.patch_area = vec![part.patch_area.iter().sum()];
+            }
+            parts.push(part);
+        }
+        let surf = if parts.len() == 1 {
+            parts.pop().expect("one surface")
+        } else {
+            Surface::merge(parts).expect("merge the probe surfaces")
+        };
+        surf.require_closed().expect("the probe surface is closed");
+        let mut quiet = |_: &str| {};
+        let out = crate::automesher::driver::run(
+            &cfg,
+            &surf,
+            Some(crate::automesher::driver::Stage::Snap),
+            &mut quiet,
+        )
+        .expect("the stages up to snap");
+        let m = out.mesh;
+        let thr = cfg.quality.thresholds();
+        let spec0 = cfg.layers.clone();
+        let st0 = stack(&spec0).expect("the probe stack");
+        let patches = if spec0.patches.is_empty() {
+            Vec::new()
+        } else {
+            resolve_patches(&m, &spec0).expect("the probe patches")
+        };
+        let hm_m = build_host_mesh(&m).expect("host mesh of the snapped mesh");
+        let n_internal_m = m.neighbour.len().min(m.faces.len());
+        println!(
+            "g5probe config {} n {} t1 {:.6e} g {:.6e} T {:.6e} cell_frac {:.6e} medial_frac {:.6e} retreat_limit {}",
+            cfg_str, spec0.n, spec0.first_thickness, spec0.growth, st0.total,
+            spec0.cell_frac, spec0.medial_frac, spec0.retreat_limit
+        );
+        let mut wall: Vec<(usize, Scalar)> = Vec::new();
+        let mut short_min = Scalar::INFINITY;
+        for &p in &patches {
+            let patch = &m.patches[p];
+            for j in 0..patch.size {
+                let f = n_internal_m + patch.start + j;
+                if f >= m.faces.len() {
+                    continue;
+                }
+                wall.push((f, hm_m.b_mag_sf[f - n_internal_m]));
+                let pts = &m.faces[f];
+                for k in 0..pts.len() {
+                    let a = m.points[pts[k] as usize];
+                    let b = m.points[pts[(k + 1) % pts.len()] as usize];
+                    short_min = short_min.min((a - b).mag());
+                }
+            }
+        }
+        let mut areas: Vec<Scalar> = wall.iter().map(|&(_, a)| a).collect();
+        let area_max = areas.iter().copied().fold(0.0, Scalar::max);
+        let flat_floor = area_max.sqrt() / 60.0;
+        println!(
+            "g5probe wall faces {} area_max {:.6e} flat_floor {:.6e} area_p50 {:.6e} short_edge_min {:.6e}",
+            wall.len(),
+            area_max,
+            flat_floor,
+            g5p_p50(&mut areas),
+            short_min
+        );
+        let layered = add_layers(&m, &surf, &spec0, &thr).expect("layers end to end");
+        for e in layered
+            .report
+            .ladder
+            .iter()
+            .filter(|e| e.ladder == Ladder::Outer)
+        {
+            let gates = e
+                .gates
+                .iter()
+                .map(|(g, c)| format!("{}:{}", gate_label(*g), c))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!(
+                "g5probe trace round {} outcome {} rung {} beta_rung {} gates {}",
+                e.round,
+                e.outcome.as_str(),
+                e.rung,
+                e.beta_rung,
+                gates
+            );
+        }
+        let row0 = layered
+            .report
+            .patches
+            .iter()
+            .find(|r| Some(&r.name) == spec0.patches.first())
+            .or_else(|| layered.report.patches.first());
+        let (nl, fu, dc, br) = match row0 {
+            Some(r) => (
+                r.n_layers,
+                r.full_area_frac,
+                r.drop_cause.map(|c| c.as_str()).unwrap_or("none"),
+                r.beta_rungs,
+            ),
+            None => (0, 0.0, "none", 0),
+        };
+        println!(
+            "g5probe final n_layers {} full {:.6e} drop_cause {} retreats {} beta_rungs {}",
+            nl, fu, dc, layered.report.retreats, br
+        );
+        let outer_trace: Vec<LadderEntry> = layered
+            .report
+            .ladder
+            .iter()
+            .filter(|e| e.ladder == Ladder::Outer)
+            .cloned()
+            .collect();
+        let f0 = {
+            let hint = g5p_hint(&m, &patches);
+            let idx = TriIndex::new(&surf, hint).expect("the probe's tri index");
+            field(&m, &idx, &patches, &spec0, &st0).expect("the probe's field")
+        };
+        g5p_emulate(
+            &m, &surf, &spec0, &thr, &patches, &st0, &hm_m, n_internal_m,
+            &outer_trace, &f0,
+        );
+        let n_points = m.points.len();
+        let b1 = vec![1.0 as Scalar; n_points];
+        for mult in [0.90f64, 0.95, 1.00, 1.05, 1.10, 1.20, 1.43] {
+            let mut s = spec0.clone();
+            s.first_thickness = spec0.first_thickness * mult;
+            g5p_vary(&m, &surf, &thr, &patches, &s, "t1", &format!("{mult:.2}"), &b1);
+        }
+        for nn in [1usize, 2, 4, 8] {
+            let mut s = spec0.clone();
+            s.n = nn;
+            g5p_vary(&m, &surf, &thr, &patches, &s, "n", &nn.to_string(), &b1);
+        }
+        for gv in [1.0f64, 1.05, 1.1, 1.2] {
+            let mut s = spec0.clone();
+            s.growth = gv;
+            g5p_vary(&m, &surf, &thr, &patches, &s, "g", &format!("{gv:.2}"), &b1);
+        }
+        for cf in [spec0.cell_frac, 1.0] {
+            let mut s = spec0.clone();
+            s.cell_frac = cf;
+            g5p_vary(&m, &surf, &thr, &patches, &s, "cell_frac", &format!("{cf:.2}"), &b1);
+        }
+        let b0 = vec![0.0 as Scalar; n_points];
+        let s1 = g5p_vary(&m, &surf, &thr, &patches, &spec0, "beta", "1", &b1);
+        let s0 = g5p_vary(&m, &surf, &thr, &patches, &spec0, "beta", "0", &b0);
+        if let (Some(x), Some(y)) = (&s1, &s0) {
+            println!("g5probe beta_same_set {}", x == y);
+        }
+        g5p_bisect(&m, &surf, &thr, &patches, &spec0, flat_floor);
+    }
+
+    /// The outer ladder of (92.47), reproduced step by step from the same
+    /// `attempt` calls `add_layers` makes, asserting every round against the
+    /// trace the real call took and printing every failing G5 cell.
+    #[allow(clippy::too_many_arguments)]
+    fn g5p_emulate(
+        m: &PolyMeshRaw,
+        surf: &Surface,
+        spec: &LayerSpec,
+        thr: &quality::QualityThresholds,
+        patches: &[usize],
+        st: &Stack,
+        hm_m: &HostMesh,
+        n_internal_m: usize,
+        trace: &[LadderEntry],
+        f0: &Field,
+    ) {
+        let n_points = m.points.len();
+        let mut patches_e = patches.to_vec();
+        let mut caps = vec![1.0 as Scalar; n_points];
+        let mut betas = vec![1.0 as Scalar; n_points];
+        let mut halvings = 0usize;
+        let mut beta_rungs = 0usize;
+        let mut prev: Option<std::collections::BTreeSet<usize>> = None;
+        let mut r = 0usize;
+        loop {
+            let a = attempt(m, surf, spec, thr, &patches_e, &caps, &betas)
+                .expect("the probe's attempt");
+            let hm_a = build_host_mesh(&a.mesh).expect("host mesh of the attempt");
+            let rep =
+                quality::measure_capped(&a.mesh, thr, usize::MAX).expect("the probe's measure");
+            let g5f = rep.failures.iter().find(|f| f.gate == Gate::Thickness);
+            let g5_total = g5f.map(|f| f.n_failed).unwrap_or(0);
+            let cells: Vec<usize> = g5f
+                .map(|f| f.subjects.iter().map(|s| s.id).collect())
+                .unwrap_or_default();
+            let te = trace
+                .get(r)
+                .unwrap_or_else(|| panic!("the trace has no outer entry for round {r}"));
+            let (emu, fail_pts, jf): (Outcome, Vec<usize>, Vec<usize>) = if a.quality.passed() {
+                (Outcome::Pass, Vec::new(), Vec::new())
+            } else {
+                let n = a.extrusion.n;
+                let mut slots = vec![
+                    0usize;
+                    a.extrusion
+                        .slot_of_point
+                        .iter()
+                        .filter(|&&s| s >= 0)
+                        .count()
+                ];
+                for (i, &s) in a.extrusion.slot_of_point.iter().enumerate() {
+                    if s >= 0 {
+                        slots[s as usize] = i;
+                    }
+                }
+                let orig_of = |p: crate::Label| -> usize {
+                    let p = p as usize;
+                    if p < n_points {
+                        p
+                    } else {
+                        slots[(p - n_points) / n]
+                    }
+                };
+                let n_faces_out = a.mesh.faces.len();
+                let n_internal_out = a.mesh.neighbour.len().min(n_faces_out);
+                let n_cells_out = a
+                    .mesh
+                    .owner
+                    .iter()
+                    .chain(a.mesh.neighbour.iter())
+                    .copied()
+                    .max()
+                    .map_or(0, |x| x as usize + 1);
+                let mut cell_points: Vec<Vec<u32>> = vec![Vec::new(); n_cells_out];
+                for (f, face) in a.mesh.faces.iter().enumerate() {
+                    for &p in face {
+                        cell_points[a.mesh.owner[f] as usize].push(orig_of(p) as u32);
+                    }
+                    if f < n_internal_out {
+                        for &p in face {
+                            cell_points[a.mesh.neighbour[f] as usize].push(orig_of(p) as u32);
+                        }
+                    }
+                }
+                for list in cell_points.iter_mut() {
+                    list.sort_unstable();
+                    list.dedup();
+                }
+                let is_layer: Vec<bool> = a
+                    .extrusion
+                    .slot_of_point
+                    .iter()
+                    .map(|&s| s >= 0)
+                    .collect();
+                let fp = failing_points(&a.quality, &a.mesh, n_internal_out, &is_layer, &cell_points);
+                let mut live = vec![false; n_points];
+                for &j in &a.reseat_points {
+                    live[j] = a.beta[j] > 0.0;
+                }
+                let jf = failing_points(&a.quality, &a.mesh, n_internal_out, &live, &cell_points);
+                let oc = if !jf.is_empty() && beta_rungs < BETA_RUNG_LIMIT {
+                    Outcome::Beta
+                } else if fp.is_empty() || halvings >= spec.retreat_limit {
+                    Outcome::GiveUp
+                } else {
+                    Outcome::Retreat
+                };
+                (oc, fp, jf)
+            };
+            assert_eq!(te.round, r, "round");
+            assert_eq!(te.outcome, emu, "round {r} outcome");
+            assert_eq!(te.rung, halvings, "round {r} rung");
+            assert_eq!(te.beta_rung, beta_rungs, "round {r} beta_rung");
+            assert_eq!(&failing_gates(&a.quality), &te.gates, "round {r} gates");
+            let mut step_pts = 0usize;
+            match emu {
+                Outcome::Beta => {
+                    step_pts = jf.len();
+                    for &j in &jf {
+                        betas[j] = beta_step(a.beta[j]);
+                    }
+                    beta_rungs += 1;
+                }
+                Outcome::GiveUp => {
+                    let mut counts = vec![0usize; patches_e.len()];
+                    for (k, &p) in patches_e.iter().enumerate() {
+                        let patch = &m.patches[p];
+                        let mut seen = vec![false; n_points];
+                        for j in 0..patch.size {
+                            let fa = n_internal_m + patch.start + j;
+                            if fa >= m.faces.len() {
+                                continue;
+                            }
+                            for &pt in &m.faces[fa] {
+                                seen[pt as usize] = true;
+                            }
+                        }
+                        for &i in &fail_pts {
+                            if seen[i] {
+                                counts[k] += 1;
+                            }
+                        }
+                    }
+                    let mut victim = 0usize;
+                    for k in 1..counts.len() {
+                        if counts[k] > counts[victim] {
+                            victim = k;
+                        }
+                    }
+                    patches_e.remove(victim);
+                    caps = vec![1.0 as Scalar; n_points];
+                    halvings = 0;
+                    betas = vec![1.0 as Scalar; n_points];
+                    beta_rungs = 0;
+                }
+                Outcome::Retreat => {
+                    step_pts = fail_pts.len();
+                    for &i in &fail_pts {
+                        caps[i] *= 0.5;
+                    }
+                    halvings += 1;
+                }
+                Outcome::Pass => {}
+            }
+            let mut hist: std::collections::BTreeMap<u64, usize> = Default::default();
+            for (i, &s) in a.extrusion.slot_of_point.iter().enumerate() {
+                if s >= 0 {
+                    *hist.entry(caps[i].to_bits()).or_insert(0) += 1;
+                }
+            }
+            let mut keys: Vec<Scalar> = hist
+                .keys()
+                .map(|b| Scalar::from_bits(*b))
+                .collect();
+            keys.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+            let caps_s = keys
+                .iter()
+                .map(|k| format!("{}:{}", k, hist[&k.to_bits()]))
+                .collect::<Vec<_>>()
+                .join(",");
+            let n = a.extrusion.n;
+            let first = a.extrusion.first_cell;
+            let mut by_k = vec![0usize; n];
+            let mut jset: std::collections::BTreeSet<usize> = Default::default();
+            let owners: std::collections::BTreeSet<usize> = a
+                .extrusion
+                .layer_faces
+                .iter()
+                .map(|&f| m.owner[f] as usize)
+                .collect();
+            let mut row1 = 0usize;
+            let mut other = 0usize;
+            let mut taus: Vec<Scalar> = Vec::new();
+            for &c in &cells {
+                taus.push(g5p_tau(&hm_a, c));
+                if c >= first {
+                    by_k[(c - first) % n] += 1;
+                    jset.insert((c - first) / n);
+                } else if owners.contains(&c) {
+                    row1 += 1;
+                } else {
+                    other += 1;
+                }
+            }
+            let (persist, fresh) = match &prev {
+                None => (0usize, cells.len()),
+                Some(p) => {
+                    let cur: std::collections::BTreeSet<usize> = cells.iter().copied().collect();
+                    (cur.intersection(p).count(), cur.difference(p).count())
+                }
+            };
+            let mut ts = taus.clone();
+            let tau_p50 = g5p_p50(&mut ts);
+            let tau_min = ts.first().copied().unwrap_or(0.0);
+            println!(
+                "g5probe round {} g5_total {} g5_seen_by_ladder {} layer_by_k [{}] row1 {} other {} faces {} persist {} new {} tau_min {:.6e} tau_p50 {:.6e} fail_pts {} caps [{}]",
+                r,
+                g5_total,
+                g5_total.min(quality::GATE_CELL_CAP),
+                by_k.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+                row1,
+                other,
+                jset.len(),
+                persist,
+                fresh,
+                tau_min,
+                tau_p50,
+                step_pts,
+                caps_s
+            );
+            if r == 0 {
+                g5p_face_table(&a, m, patches, st, f0, &hm_a, hm_m, n_internal_m, &cells);
+            }
+            prev = Some(cells.iter().copied().collect());
+            match emu {
+                Outcome::Pass | Outcome::GiveUp => break,
+                _ => {}
+            }
+            if patches_e.is_empty() || a.extrusion.layer_faces.is_empty() {
+                panic!("the emulation reached the ladder's refusal - the trace should have ended");
+            }
+            r += 1;
+        }
+    }
+
+    /// The round-0 wall faces with a failing layer cell, worst first, with
+    /// the failing cell's tau decomposed against its wall face.
+    #[allow(clippy::too_many_arguments)]
+    fn g5p_face_table(
+        a: &Layered,
+        m: &PolyMeshRaw,
+        patches: &[usize],
+        st: &Stack,
+        f0: &Field,
+        hm_a: &HostMesh,
+        hm_m: &HostMesh,
+        n_internal_m: usize,
+        cells: &[usize],
+    ) {
+        let n = a.extrusion.n;
+        let first = a.extrusion.first_cell;
+        let mut per_face: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+        for &c in cells {
+            if c >= first {
+                per_face.entry((c - first) / n).or_default().push(c);
+            }
+        }
+        let mut rows: Vec<(Scalar, usize, usize, Scalar, usize)> = Vec::new();
+        for (&block, cs) in &per_face {
+            let fa = a.extrusion.layer_faces[block];
+            let a_wall = hm_m.b_mag_sf[fa - n_internal_m];
+            let mut best = (Scalar::INFINITY, 0usize, 0usize);
+            for &c in cs.iter() {
+                let t = g5p_tau(hm_a, c);
+                if t < best.0 {
+                    best = (t, (c - first) % n, c);
+                }
+            }
+            rows.push((best.0, best.1, best.2, a_wall, fa));
+        }
+        rows.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, &(tmin, kmin, cell, a_wall, fa)) in rows.iter().enumerate().take(300) {
+            let block = (cell - first) / n;
+            let mut d_min = Scalar::INFINITY;
+            let mut d_max = 0.0 as Scalar;
+            let mut ti_min = Scalar::INFINITY;
+            let mut dir = Vec3::ZERO;
+            let mut dir_n = 0usize;
+            for &p in &m.faces[fa] {
+                let p = p as usize;
+                let s = a.extrusion.slot_of_point[p];
+                if s < 0 {
+                    continue;
+                }
+                let s = s as usize;
+                let x0 = a.mesh.points[a.extrusion.level_point[0][s] as usize];
+                let xn = a.mesh.points[a.extrusion.level_point[n][s] as usize];
+                let d = x0 - xn;
+                let dm = d.mag();
+                d_min = d_min.min(dm / st.total);
+                d_max = d_max.max(dm / st.total);
+                if dm > 0.0 {
+                    dir = dir + d * (1.0 / dm);
+                    dir_n += 1;
+                }
+                ti_min = ti_min.min(f0.thickness[p] / st.total);
+            }
+            let where_face = patches.iter().enumerate().find_map(|(pi, &p)| {
+                let patch = &m.patches[p];
+                (n_internal_m + patch.start..n_internal_m + patch.start + patch.size)
+                    .position(|f| f == fa)
+                    .map(|o| (pi, o))
+            });
+            let (pidx, pj) = where_face.expect("a failing face of a layer patch");
+            let name = &m.patches[patches[pidx]].name;
+            let p_a = a
+                .mesh
+                .patches
+                .iter()
+                .find(|q| &q.name == name)
+                .expect("the wall patch on the extruded mesh");
+            let normal = hm_a.b_sf[p_a.start + pj].normalised();
+            let mean_dir = if dir_n > 0 {
+                dir * (1.0 / dir_n as Scalar)
+            } else {
+                Vec3::ZERO
+            };
+            let tilt = if dir_n > 0 {
+                normal
+                    .dot(mean_dir.normalised())
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees()
+            } else {
+                0.0
+            };
+            let v = hm_a.v[cell];
+            let amax = g5p_a_max_of(hm_a, cell);
+            let t_k = st.t[kmin];
+            let amax_over = amax / a_wall;
+            let v_over = v / (a_wall * t_k);
+            println!(
+                "g5probe face j {} area {:.6e} tau_min {:.6e} k_min {} amax_over_awall {:.6e} v_over_awall_tk {:.6e} d_over_t_min {:.6e} d_over_t_max {:.6e} tilt_deg {:.6e} ti_over_t_min {:.6e}",
+                block, a_wall, tmin, kmin, amax_over, v_over, d_min, d_max, tilt, ti_min
+            );
+            if i < 5 {
+                let est = 3.0 * t_k / a_wall.sqrt() * v_over / amax_over.powf(1.5);
+                println!(
+                    "g5probe face_check j {} tau {:.6e} estimate {:.6e}",
+                    block, tmin, est
+                );
+            }
+        }
+        let mut fail_pts: std::collections::BTreeSet<usize> = Default::default();
+        for &block in per_face.keys() {
+            for &p in &m.faces[a.extrusion.layer_faces[block]] {
+                fail_pts.insert(p as usize);
+            }
+        }
+        let mut limited = 0usize;
+        let mut limited_on = 0usize;
+        let mut n_slots = 0usize;
+        for (i, &s) in a.extrusion.slot_of_point.iter().enumerate() {
+            if s < 0 {
+                continue;
+            }
+            n_slots += 1;
+            if f0.thickness[i] < st.total * (1.0 - 1e-12) {
+                limited += 1;
+                if fail_pts.contains(&i) {
+                    limited_on += 1;
+                }
+            }
+        }
+        println!(
+            "g5probe limiter points {} limited {} limited_on_failing_faces {} of {}",
+            n_slots,
+            limited,
+            limited_on,
+            fail_pts.len()
+        );
+    }
+
+    /// One variation: one attempt at caps 1 and the given betas, then the
+    /// full run, on the one changed spec value.
+    fn g5p_vary(
+        m: &PolyMeshRaw,
+        surf: &Surface,
+        thr: &quality::QualityThresholds,
+        patches: &[usize],
+        spec: &LayerSpec,
+        name: &str,
+        value: &str,
+        betas: &[Scalar],
+    ) -> Option<std::collections::BTreeSet<usize>> {
+        let caps = vec![1.0 as Scalar; m.points.len()];
+        let r0 = match attempt(m, surf, spec, thr, patches, &caps, betas) {
+            Ok(a) => a,
+            Err(e) => {
+                g5p_refused(name, value, &e);
+                return None;
+            }
+        };
+        let rep = quality::measure_capped(&r0.mesh, thr, usize::MAX).expect("the probe's measure");
+        let g5f = rep.failures.iter().find(|f| f.gate == Gate::Thickness);
+        let g5_total = g5f.map(|f| f.n_failed).unwrap_or(0);
+        let set: std::collections::BTreeSet<usize> = g5f
+            .map(|f| f.subjects.iter().map(|s| s.id).collect())
+            .unwrap_or_default();
+        let n = r0.extrusion.n;
+        let first = r0.extrusion.first_cell;
+        let mut by_k = vec![0usize; n];
+        let mut js: std::collections::BTreeSet<usize> = Default::default();
+        for &c in &set {
+            if c >= first {
+                by_k[(c - first) % n] += 1;
+                js.insert((c - first) / n);
+            }
+        }
+        let full = match add_layers(m, surf, spec, thr) {
+            Ok(f) => f,
+            Err(e) => {
+                g5p_refused(name, value, &e);
+                return Some(set);
+            }
+        };
+        let row = full
+            .report
+            .patches
+            .iter()
+            .find(|r| Some(&r.name) == spec.patches.first())
+            .or_else(|| full.report.patches.first());
+        let (nl, fu, dc, br) = match row {
+            Some(r) => (
+                r.n_layers,
+                r.full_area_frac,
+                r.drop_cause.map(|c| c.as_str()).unwrap_or("none"),
+                r.beta_rungs,
+            ),
+            None => (0, 0.0, "none", 0),
+        };
+        let rounds = full
+            .report
+            .ladder
+            .iter()
+            .filter(|e| e.ladder == Ladder::Outer)
+            .count();
+        println!(
+            "g5probe vary {name} {value} r0_g5 {} r0_faces {} r0_layer_by_k [{}] final_n_layers {} full {:.6e} drop_cause {} outer_rounds {} retreats {} beta_rungs {}",
+            g5_total,
+            js.len(),
+            by_k.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+            nl,
+            fu,
+            dc,
+            rounds,
+            full.report.retreats,
+            br
+        );
+        Some(set)
+    }
+
+    /// The smallest t1 in `[t1, 1.5 t1]` whose round-0 attempt has zero G5
+    /// cells, by 14 halvings, and what the full run does there.
+    fn g5p_bisect(
+        m: &PolyMeshRaw,
+        surf: &Surface,
+        thr: &quality::QualityThresholds,
+        patches: &[usize],
+        spec: &LayerSpec,
+        flat_floor: Scalar,
+    ) {
+        let zero = |t1: f64| -> bool {
+            let mut s = spec.clone();
+            s.first_thickness = t1;
+            let caps = vec![1.0 as Scalar; m.points.len()];
+            let betas = vec![1.0 as Scalar; m.points.len()];
+            match attempt(m, surf, &s, thr, patches, &caps, &betas) {
+                Ok(a) => {
+                    let rep = quality::measure_capped(&a.mesh, thr, usize::MAX)
+                        .expect("the probe's measure");
+                    !rep.failures.iter().any(|f| f.gate == Gate::Thickness)
+                }
+                Err(_) => false,
+            }
+        };
+        let hi0 = spec.first_thickness * 1.5;
+        if !zero(hi0) {
+            println!("g5probe bisect none_below {:.6e}", hi0);
+            return;
+        }
+        let mut lo = spec.first_thickness;
+        let mut hi = hi0;
+        for _ in 0..14 {
+            let mid = 0.5 * (lo + hi);
+            if zero(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let mut s = spec.clone();
+        s.first_thickness = hi;
+        let full = add_layers(m, surf, &s, thr).expect("the bisect's full run");
+        let row = full
+            .report
+            .patches
+            .iter()
+            .find(|r| Some(&r.name) == spec.patches.first())
+            .or_else(|| full.report.patches.first());
+        let (nl, fu) = match row {
+            Some(r) => (r.n_layers, r.full_area_frac),
+            None => (0, 0.0),
+        };
+        println!(
+            "g5probe bisect t1_zero_g5 {:.6e} over_flat_floor {:.6e} final_n_layers {} full {:.6e}",
+            hi,
+            hi / flat_floor,
+            nl,
+            fu
+        );
+    }
 }

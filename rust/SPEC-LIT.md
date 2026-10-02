@@ -26867,7 +26867,69 @@ solver can run.
 | the step of (92.66) | 1, 1/2, 1/4, 0, and 0 stays 0; at `beta = 1/4` the two wall points below `(0,0,1)` give `(0.125, 0, 0.20177669529663692)` |
 | a wall on the cell planes, and the snapped cube | no `beta` entry in the trace and every row's `beta_rungs` 0; the castellated goldens are unchanged |
 | every case that ran a ladder | each `beta` entry names its gates and lowers at least one point, no ladder takes more than 3 on one patch set, each entry's `beta_rung` counts the `beta` entries before it, and each row's `beta_rungs` is the count of `beta` entries naming its patch |
-| the snapped sphere at 8 layers, `first_thickness` 0.0021, `growth` 1.0 (AM-L's G-L-b, 2026-09-27) | MEASURED, NOT MET: the stack is dropped `thin_after_caps`; the outer ladder takes 3 `beta` rungs, but the failure that drives it is G5, not G4 (G5 200, 1984, then 3072 to 6216 failing cells as the caps halve, against G4 48 to 120), and (92.66) lowers only the pull of re-seated points; the 2-layer shipped example keeps both layers (G-L-a), and why G5 grows at 8 layers is open |
+| the snapped sphere at 8 layers, `first_thickness` 0.0021, `growth` 1.0 (AM-L's G-L-b, 2026-09-27) | MEASURED, NOT MET: the stack is dropped `thin_after_caps`; the outer ladder takes 3 `beta` rungs, but the failure that drives it is G5, not G4 (G5 200, 1984, then 3072 to 6216 failing cells as the caps halve, against G4 48 to 120), and (92.66) lowers only the pull of re-seated points; the 2-layer shipped example keeps both layers (G-L-a), and why G5 grows is measured in the paragraph below the table |
+
+**Why G5 grows on the snapped sphere at eight layers (measured).** The probe measures both
+configs cell by cell: the level-3 sphere (n 8, `first_thickness` 0.0021, growth 1.0) and the
+level-4 one (n 8, 0.00118, 1.0). At round 0 every failing G5 cell is a layer cell - level 3:
+200 cells behind 48 of the patch's wall faces, level 4: 1080 behind 144 - and no input cell
+fails at any round of either run. The cells spread over all eight layer indices with the most
+at k 7, the cell against the input cell (k 0 is the wall's own first layer): level 3 has 8,
+16, 16, 16, 32, 32, 32, 48 cells over k 0..7, level 4 has 128, 128, 136, 136, 136, 136, 136,
+144, and the failing faces are the patch's largest - on level 3 the worst is 1.575e-2 m^2
+against a 1.074e-2 median, on level 4 the worst failing face is 3.897e-3 m^2 against the
+patch's largest 3.956e-3 and median 2.770e-3. The smallest
+tau is 4.928e-2 on level 3 and 4.670e-2 on level 4, against 0.05. The two ratios the probe
+prints for a face, its largest area group and its volume, each over the wall's, combine to
+the factor by which that cell's tau differs from a flat prism's `3 t_k / sqrt(A_wall)`:
+`v_over_awall_tk / amax_over_awall^1.5` on the worst level-3 face is
+1.023093 / 1.027933^1.5 = 0.9817, so the k 7 cell is a flat prism's tau times 0.9817,
+because the cell widens away from the convex wall - its largest face group 1.028 A_wall,
+its volume only 1.023 A_wall t_k (tilt 0.83 degrees) - while t1 0.0021 is only 1.0040
+times the flat floor 2.0916e-3 of that face, and the bisected 1.019 below is the
+reciprocal of the same factor (1/0.9817 = 1.0187). On the worst level-4 face the factor
+is 0.8413 / 1.0144^1.5 = 0.8235 (1.014 A_wall, 0.841 A_wall t_k, tilt 1.22 degrees), and
+it is the volume (the limited depth 0.7277), not the flare, that sets it. The achieved
+stack depth is d/T = 1.0 at every point of every failing
+level-3 face; on level 4 it falls to 0.7277 - the (92.45) limiter, not the requested
+thickness, sets the stack there: 384 of 4874 layer points are limited, 304 of the 464 points
+of the failing faces among them, and with `cell_frac` 1.0 the level-4 round 0 has ZERO
+failing G5 cells and the run keeps all 8 layers, full 1.0. On level 3 the limiter does not
+bind: T_i/T is 1.0 on the failing faces, no point of 1250 is limited, and `cell_frac` 1.0
+changes nothing - the same 200 cells and the same `thin_after_caps`. The caps halving spreads
+the failure: the level-3 G5 totals by round are 200, 1984, 3072, 3072, 3072, 3072, 6216
+(level 4: 1080, 3768, 7360, then the inner give-up), every failing cell of one round still
+fails in the next (new cells: 1784 at round 1, 1088 at round 2, 3144 at round 6, none
+between), and the ladder's own view of the failing cells is capped at 200 a round - 200 seen
+at round 6, where 6216 fail. The three beta rungs of (92.66) lower only the pull of 40
+re-seated points and leave the totals at 3072 (persist 3072, new 0, twice); with every beta
+at 0 instead of 1 the round-0 failing set is the same cell set on both configs
+(`beta_same_set` true). In t1 the
+level-3 threshold is a knife edge: bisecting round 0 to zero G5 cells gives 2.131e-3, 1.019
+times the flat floor sqrt(A_max)/60 = 2.092e-3, and 1.05 t1 passes at attempt 1 with all 8
+layers full 1.0; on level 4 the same bisection gives 1.472e-3, 1.404 times that level's floor
+of 1.048e-3, keeping 8 layers at full 0.8735 there. In n the round-0 counts go 384, 24, 56,
+200 for n = 1, 2, 4, 8 on level 3 and 872, 896, 0, 1080 on level 4, where n 4 keeps all 4
+layers full 1.0. `vary n` holds t1 and so shrinks T = n t1 with it, to 0.0021 at n 1 on
+level 3 - and the probe rerun at n 1 measures why that is more cells than n 8's 200 at the
+same t1 (round 0 `g5_total` 384, `tau_min` 2.917e-2): at the failing faces' points the
+stack is limited to as little as 0.123 T (worst face `ti_over_t_min` 1.230469e-1; 152 of
+the 1250 layer points limited, all 152 of them among the 826 failing points), and
+`cell_frac * h_i` cannot be the limiting term there - `short_edge_min` 3.757e-2 gives
+`0.5 * h_i >= 1.879e-2`, past T = 2.1e-3 - so by elimination it is (92.44)'s medial term,
+and the only surface within `s_max = T / medial_frac` of the wall is the sphere itself,
+whose snapped points lie up to the snap residual off the STL (`residual max 1.061e-3`, the
+release binary's log of the G-L-b run). At `medial_frac` 1.0 the same config limits 248 of
+its 1046 failing points instead of 152, to as little as 0.109 T. The release binary's own
+runs at the G-L-b stack on level 3, T 0.0168 at growth 1.0, hold T and thicken t1 instead:
+n 1 (t1 0.0168), n 2 (0.0084) and n 4 (0.0042) each keep all their layers, `full_area_frac`
+1.0, no `drop_cause`, no retreat. In growth the failures move to the wall's own layer: at
+g 1.2 level 3 has 416 cells, 288 of them at k 0, and level 4 has 1304, 920 of them at k 0;
+as arithmetic, g 1.2 asks T = 0.0021 * (1.2^8 - 1) / 0.2 = 3.465e-2, against the
+`0.5 * h_i` bound 1.879e-2 of the shortest edge. No threshold,
+limiter or ladder rule is changed by this measurement, and the probe is the ignored test
+`a_probe_measures_which_cells_fail_g5_on_a_snapped_layer_config`, run with
+`AUTOMESHER_G5_PROBE` set to a config path.
 
 ### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
 
