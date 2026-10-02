@@ -31948,10 +31948,12 @@ iteration after `initialise` - the pressure selector's - which moves `U` and
 instead, with the driver's own field kernels and without the counter, and
 its first step differences against the post-bootstrap state as it always
 did. Under `Euler` the row does not depend on the counter, and a steady run
-still calls `begin_time_step` on every unit of work. Nothing else changes: `ofgpu-lowmach` still calls
-`Energy::advance_time_step` and `GasState::advance_time_levels` on every
-transient step, `ofgpu-plume` has no such call (its equations are Euler),
-and no library loop, kernel or solver control moves.
+still calls `begin_time_step` on every unit of work. Nothing else changed
+then: `ofgpu-lowmach` still called `Energy::advance_time_step` and
+`GasState::advance_time_levels` on every transient step (§105.17 has since
+moved both, with `T`'s own rotation, to the second step on), `ofgpu-plume`
+has no such call (its equations are Euler), and no library loop, kernel or
+solver control moved.
 
 Gate 105-D is `ofgpu-lowmach`'s test
 `gate_105d_backward_starts_from_the_euler_row_and_the_stroke_is_second_order`:
@@ -31980,18 +31982,22 @@ The gate stops at 80 steps, not at §105.10's 320, because under `backward`
 this driver's stroke is refused by §93.6's Mach guard from 140 steps on -
 the static case at 140 steps on the HEAD binary already, the moving case at
 160 there and at 140 after this change - while `Euler` runs to 320. The
-start does not cause it and it is not diagnosed here. The static error is
+start does not cause it and it is not diagnosed here (§105.17's rotation
+removed it: on that unit's binary both `backward` stroke cases run to 160
+and to 320 steps, `M max` at most `0.0022`). The static error is
 not zero under either scheme (a few `1e-6`, second order in `dt`): the
 two-corrector PIMPLE step's own splitting, not the time scheme, and it is
 what bends the moving case's coarse-pair order away from 2.
 
-Read, not measured, and not changed here: `Energy::correct` refreshes `T`'s
-first old level only and nothing in `ofgpu-lowmach` rotates the second, so
-the energy equation's `backward` row reads the initial `T` as `T^{n-2}` on
-every later step, and its own step counter still reaches 1 during the first
-step. `T` under `backward` is therefore not claimed second order; that is a
-numerics decision for the user. The stroke cases are isothermal, so the
-gate does not see it.
+Measured after this section was written, and changed by §105.17 on the
+user's decision of 2026-10-02: the energy equation's old levels were not
+only unrotated at `T^{n-2}` but one step stale under `Euler` as well,
+because `GasState::update_density` built `rho^{n-1}` from `T^{n-2}`. On
+§105.17's uniformly heated duct the HEAD binary wrote `3386.69 K` against
+the exact `385.127 K` at 20 `Euler` steps, and `backward` diverged. §105.17
+rotates `T` with `U` and `p`, makes the energy equation's `backward` row
+second order, and is gated by Gate 105-E. The stroke cases are isothermal,
+so Gate 105-D sees neither.
 
 What moved, the full list: §105.12's static `backward` numbers above, the
 moving `backward` numbers above, and the fields of any `backward` run of
@@ -32022,6 +32028,117 @@ bootstrap: skipping the first step's rotation had moved all seven of its
 House items. No new file; no capture row - `src/bin/` is outside the capture
 registry; no kernel changed. `ofgpu-lowmach` gains one test (47); the gate
 census of `ofgpu-validate` is unchanged, Gate 105-D being a driver test.
+
+### 105.17 The energy equation's time levels - Gate 105-E
+
+The user's decision of 2026-10-02. Before it, `ofgpu-lowmach`'s unit of
+work called `GasState::update_density` at its top, building `rho`,
+`rho^{n-1}` and `rho^{n-2}` from `T`, `T^{n-1}` and `T^{n-2}`, and only
+then did `Energy::correct` store `T`'s first old level. So `rho^{n-1}` was
+built from `T^{n-2}` while it multiplied `T^{n-1}` in §26's conservative
+`d(rho cp T)/dt`, and nothing rotated `T^{n-2}` at all. With
+`rho T = p0 / R_s` at every level the derivative's only information about
+`T` sat in that lag: on a uniformly heated open domain the `Euler` row
+became `(p0/R_s)(T^n/T^{n-1} - T^{n-1}/T^{n-2})/dt`, a second difference,
+and the error grew as `dt` shrank. Two changes, and nothing else:
+
+* `ofgpu-lowmach` opens a transient time step from the SECOND step on, and
+  opening one is four calls in this order, before the unit of work's
+  `update_density`: `Simple::begin_time_step`,
+  `Energy::advance_time_levels` (`T`'s `f00 <- f0 <- f`),
+  `Energy::advance_time_step` and `GasState::advance_time_levels`. The
+  first step opens nothing, so the energy equation's counter is 0 during
+  it and `backward` takes its Euler row, as §105.16 does for `U` and `p`;
+  `rho^{n-1}` is now built from `T^{n-1}`. A restart seeds `T`'s two old
+  levels from the restored field, because its first step is an Euler-row
+  step too. `Energy::correct` still stores `T`'s first old level on entry:
+  after the rotation that copy changes nothing in this driver, and every
+  other caller of `Energy` relies on it.
+* Under `backward` only, `Energy`'s time derivative is the
+  non-conservative `rho* cp ddt(T)`: all three `rho cp` levels
+  `fvm_ddt_rho` reads are `cp p0 / (R_s T*)`, with
+  `T* = 2 T^{n-1} - T^{n-2}` cell by cell and `p0` the current
+  thermodynamic pressure, the one `update_density` gives `rho`. The
+  conservative row cannot be made second order here by any rotation:
+  `rho^n` is `rho(T^{n-1})` after one outer corrector, and with it the
+  BDF2 row collapses to `(3/2)(p0/R_s)(T^n/T^{n-1} - 1)/dt`. `Euler` keeps
+  the conservative form, which after the rotation is
+  `rho^{n-1} cp (T^n - T^{n-1})/dt`, `rho` and `rho^{n-1}` being built
+  from the same `T`. A steady run, and every other caller of `Energy`,
+  runs the launches it ran before. `p0` is not extrapolated: §25.2's
+  sealed `p0` equation is explicit Euler, so a sealed transient's `T` is
+  not claimed second order.
+
+Gate 105-E is `ofgpu-lowmach`'s test
+`gate_105e_a_uniformly_heated_duct_is_first_order_under_euler_and_second_order_under_backward`:
+an open 16x1x1 duct, 1 x 0.1 x 0.1 m, a wall at `xmin`, an open outlet at
+`xmax`, symmetry sides, laminar, `T = 300 K` and `U = 0` at the start,
+`-heaterPower 3548` spread over the domain (`Q = 354 800 W/m3`), §25's
+default gas. `T` stays uniform in space, so each cell solves
+`rho cp dT/dt = Q` with `rho = p0 / (R_s T)`: `dT/dt = lambda T`,
+`lambda = Q R_s / (p0 cp) = 0.99916 1/s`, and the exact answer is
+`T = 300 exp(lambda t)`, `385.1265 K` at `t = 0.25`. Runs of 20, 40 and 80
+steps to `t = 0.25`, read through `RunEnd::t_mean`, the arithmetic mean of
+the internal cells' `T` at the end. Tolerances: every run within `1e-3 K`
+of a uniform-cell model of the discrete step (`384.531216`, `384.827534`,
+`384.976701` K under `Euler`; `385.072749`, `385.112940`, `385.123125` K
+under `backward`), and the fine pair's observed order `log2(e_40 / e_80)`
+within `0.1` of 1 under `Euler` and within `0.2` of 2 under `backward`.
+Measured on the card:
+
+| scheme   | 20 steps          | 40 steps          | 80 steps          | p coarse | p fine |
+|----------|-------------------|-------------------|-------------------|----------|--------|
+| Euler    | 384.531216 (-5.953311e-1) | 384.827534 (-2.990128e-1) | 384.976701 (-1.498458e-1) | 0.99     | 1.00   |
+| backward | 385.072749 (-5.379809e-2) | 385.112940 (-1.360700e-2) | 385.123125 (-3.421487e-3) | 1.98     | 1.99   |
+
+Each cell is `T` in K and, in brackets, its error against
+`300 exp(lambda t)`. Before the change, on the HEAD binary (08e10bb):
+`Euler` `3386.69`, `34209.5` and `3.48996e6 K`; `backward` `1.986e8 K` at
+20 steps, a non-finite pressure at outer iteration 38 of 40 (exit 2), and
+§93.6's Mach guard at step 36 of 80 (exit 3).
+
+House items. No new file, no kernel, no capture row - the `backward`
+density is existing `field_ops` launches on one new scratch buffer of
+`Energy`. `ofgpu-lowmach` gains one test (48), marked for f32 like Gate
+105-D, which moves §112.3's binary count from 14 to 15; the library's test
+count is unchanged.
+
+Measured on 2026-10-02, the HEAD binaries (08e10bb) against this unit's on
+the same inputs, every written field file compared byte for byte.
+Identical: `ofgpu-lowmach` on the stroke case moving under `Euler` at 20,
+40, 80, 160 and 320 steps (25 files) and moving under `backward` at 20 and
+40 (10 files); `cases/plume.jsonc` steady for 5 iterations (7 files);
+`ofgpu-buoyant` and `ofgpu-plume` on copies of `cases/plumeB`, steady,
+`Euler` and `backward` (36 files). On the static stroke under `Euler` (20
+to 320 steps) and under `backward` (20, 40) only `U`'s transverse
+components move, by at most `2.2e-34` m/s, and Gate 105-D's fourteen
+printed numbers are §105.16's table to the last digit. Moved, every
+transient run whose `T` changes: the heated duct as Gate 105-E reads it
+(its `U` only in the transverse `1e-34`: the target divergence
+`Q R_s / (p0 cp)` does not depend on `T`); `cases/plume.jsonc` switched to
+PIMPLE for three steps of `0.01` s, under `Euler` max `|dT|` 44.12 K
+against a max `T` of 406.6 K, `|dU|` 1.083e-2 against 1.742 m/s, `|dp|`
+1.022 against 8.809, and under `backward` `|dT|` 23.35 K against 381.0,
+`|dU|` 1.6e-3, `|dp|` 0.2267; the `backward` stroke at 80 steps in `T`'s
+sixth written digit (`1e-3` and `2e-3` K). The `backward` stroke at 160 and
+320 steps, static and moving, which §93.6's guard refused on the HEAD
+binary (static at step 140, moving at 134), now runs to the end. A sealed
+copy of the heated duct is refused by §93.6 at step 0 on both binaries
+(`M` about `1.4e12`, not diagnosed here); its `Euler` refusal is the same
+line, and its `backward` one now prints the `Euler` number, its first
+step being the Euler row. The restart gate of §31.2
+(`restart_matches_a_continuous_run_p0_included`, an `Euler` sealed box):
+first post-restart pressure residual `3.468646e-2` -> `3.299514e-2` in both
+runs, total-enthalpy gap `1.256e-6` -> `0`, `|U|` residual continuous
+`4.679e-2` -> `4.413e-2` and restarted `4.776e-2` -> `4.413e-2`.
+`ofgpu-validate`: its first 979 rows, every one through Gate 105-B, are
+byte-identical to 08e10bb's run, the five known failing rows of Gate 95-A
+and Gate 95-G among them and every row that builds an `Energy` or a
+`GasState` (§25's `p0`, §59's conjugate retarget, §77's vapour coupling).
+The other 47 (Gate 105-C, Gate 94-D, the §110 and §37 recorded rows, the
+registry's own) were not re-run - the run was stopped in Gate 105-C - and
+none of them builds an `Energy` or a `GasState`. The library suite is
+2138 passed and 11 ignored, as before.
 
 ---
 
@@ -32662,7 +32779,7 @@ schema it generates is byte-identical to the shipped one. It is not marked.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
-tests and **14** binary tests. So the second invocation of the house command reports
+tests and **15** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
 race above fires), and `-- --ignored` under the feature runs exactly the tests that do

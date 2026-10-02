@@ -441,6 +441,31 @@ pub struct IterReport {
     pub finite: bool,
 }
 
+/// Open a transient time step from the SECOND step on - SPEC-LIT 105.16 and
+/// 105.17. The first step opens nothing, so every equation's counter is 0
+/// during it and `backward` takes its Euler row there, as §105.10's gate loops
+/// start. From the second step on, opening one is exactly these four calls in
+/// this order, `T`'s own rotation among them and ahead of the unit of work's
+/// `GasState::update_density`, which builds `rho^{n-1}` from `T^{n-1}` only if
+/// the rotation has happened.
+fn open_time_step(
+    gpu: &Gpu,
+    s: &mut Simple,
+    energy: &mut Energy,
+    gas: &mut GasState,
+    dt: Scalar,
+    step: usize,
+) -> Result<()> {
+    if step == 0 {
+        return Ok(());
+    }
+    s.begin_time_step(gpu, dt)?;
+    energy.advance_time_levels(gpu)?;
+    energy.advance_time_step(dt);
+    gas.advance_time_levels();
+    Ok(())
+}
+
 /// One pass of the module doc's "one unit of work" - SPEC-LIT §25/§26,
 /// assembled out of [`ofgpu::simple::Simple::correct_outer_low_mach`] and
 /// [`ofgpu::energy::Energy::correct`] with nothing else in between.
@@ -1955,6 +1980,11 @@ fn run(o: &Options) -> Result<RunEnd> {
         let t_field = find_restart_field(rd, "T")?;
         gpu.write(&mut energy.field_mut().f, &from_restart_scalars(&t_field.internal))?;
         gpu.write(&mut energy.field_mut().bf, &from_restart_scalars(&t_field.boundary))?;
+        // SPEC-LIT 105.17: the restarted run's first step is an Euler-row
+        // step, and its old level must be the restored field, not the
+        // cold-start one - seed both of `T`'s old levels from the restore.
+        let fk = FieldKernels::new(&gpu)?;
+        ofgpu::field_ops::seed_old_time(&gpu, &fk, energy.field_mut())?;
     }
 
     // SPEC-LIT §25.2: the requirement of substance in the module doc's
@@ -2342,15 +2372,13 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     for step in 0..n_steps {
         if transient {
-            // SPEC-LIT 105.16: the FIRST step opens no time step, so the
-            // counter is 0 during it and `backward` takes its Euler row, as
-            // §105.10's gate loops start; `initialise` already made `U`'s and
-            // `p`'s old level the starting field.
-            if step > 0 {
-                s.begin_time_step(&gpu, dt)?;
-            }
-            energy.advance_time_step(dt);
-            gas.advance_time_levels();
+            // SPEC-LIT 105.16 and 105.17: the FIRST step opens no time step,
+            // so the counter is 0 during it and `backward` takes its Euler
+            // row, as §105.10's gate loops start; `initialise` already made
+            // `U`'s and `p`'s old level the starting field. From the second
+            // step on, opening one rotates `T`'s levels too, ahead of the
+            // unit of work's `update_density`.
+            open_time_step(&gpu, &mut s, &mut energy, &mut gas, dt, step)?;
             t_phys += f64::from(dt);
         } else {
             // SPEC-LIT §44.9: a steady run's clock is its iteration counter -
@@ -2490,12 +2518,17 @@ fn run(o: &Options) -> Result<RunEnd> {
         let u = gpu.download(&s.u().f)?;
         u.iter().map(|v| f64::from(v.x)).sum::<f64>() / u.len().max(1) as f64
     };
+    let t_mean = {
+        let t = gpu.download(&energy.field().f)?;
+        t.iter().map(|v| f64::from(*v)).sum::<f64>() / t.len().max(1) as f64
+    };
     // How the run ended, for `main`'s last line (SPEC-LIT §31.4).
     let run_end = RunEnd {
         steps: n_steps,
         transient,
         t_end: t_phys,
         ux_mean,
+        t_mean,
     };
 
     mem.sample(&gpu)?;
@@ -3283,6 +3316,10 @@ struct RunEnd {
     /// six digits. It feeds no output.
     #[cfg_attr(not(test), allow(dead_code))]
     ux_mean: f64,
+    /// The arithmetic mean of the internal cells' `T` at the end - Gate
+    /// 105-E's readout (SPEC-LIT 105.17). It feeds no output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    t_mean: f64,
 }
 
 /// SPEC-LIT §31.4: 0 the budget was reached, 2 diverged, 3 refused by name
@@ -3821,6 +3858,11 @@ mod lowmach_tests {
             let t_field = find_restart_field(rd, "T")?;
             gpu.write(&mut energy.field_mut().f, &from_restart_scalars(&t_field.internal))?;
             gpu.write(&mut energy.field_mut().bf, &from_restart_scalars(&t_field.boundary))?;
+            // SPEC-LIT 105.17: the restarted run's first step is an Euler-row
+            // step, and its old level must be the restored field, not the
+            // cold-start one - seed both of `T`'s old levels from the restore.
+            let fk = FieldKernels::new(gpu)?;
+            ofgpu::field_ops::seed_old_time(gpu, &fk, energy.field_mut())?;
         }
 
         // SPEC-LIT §25.2: the restart's own `p0`, not the cold-start default
@@ -3850,10 +3892,9 @@ mod lowmach_tests {
         nu: Scalar,
         backend: &mut dyn PressureBackend,
         k_zeros: &DevBuf<Scalar>,
+        step: usize,
     ) -> Result<IterReport> {
-        stack.s.begin_time_step(gpu, dt)?;
-        stack.energy.advance_time_step(dt);
-        stack.gas.advance_time_levels();
+        open_time_step(gpu, &mut stack.s, &mut stack.energy, &mut stack.gas, dt, step)?;
 
         let flow = FlowState::new(stack.s.u(), stack.s.phi(), nu);
         stack.turb.correct(gpu, &flow, None)?;
@@ -3927,8 +3968,17 @@ mod lowmach_tests {
         // checked against below.
         let mut cont_p_residual_step21: Scalar = 0.0;
         for i in 0..40 {
-            cont_report =
-                step_once(&gpu, &mesh, &mut cont, dt, &heater, nu, &mut cont_backend, &k_zeros)?;
+            cont_report = step_once(
+                &gpu,
+                &mesh,
+                &mut cont,
+                dt,
+                &heater,
+                nu,
+                &mut cont_backend,
+                &k_zeros,
+                i,
+            )?;
             assert!(cont_report.finite, "continuous run went non-finite at step {i}");
             if i == 20 {
                 cont_p_residual_step21 = cont_report.p_residual;
@@ -3941,8 +3991,17 @@ mod lowmach_tests {
         let mut half_backend = new_backend(&gpu)?;
         let mut t_phys: Scalar = 0.0;
         for i in 0..20 {
-            let r =
-                step_once(&gpu, &mesh, &mut half, dt, &heater, nu, &mut half_backend, &k_zeros)?;
+            let r = step_once(
+                &gpu,
+                &mesh,
+                &mut half,
+                dt,
+                &heater,
+                nu,
+                &mut half_backend,
+                &k_zeros,
+                i,
+            )?;
             assert!(r.finite, "first half went non-finite at step {i}");
             t_phys += dt;
         }
@@ -3986,6 +4045,7 @@ mod lowmach_tests {
                 nu,
                 &mut resumed_backend,
                 &k_zeros,
+                i,
             )?;
             assert!(resumed_report.finite, "resumed run went non-finite at step {i}");
             if i == 0 {
@@ -5206,8 +5266,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0 });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0 });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0 });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5227,8 +5287,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0 });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0 });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0 });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5892,6 +5952,92 @@ mod lowmach_tests {
             } else {
                 assert!((p_fine - 1.0).abs() <= 0.1, "Euler p fine {p_fine} (coarse {p_coarse})");
             }
+        }
+    }
+
+    /// Gate 105-E's case (SPEC-LIT 105.17): an open 16x1x1 duct, a wall at
+    /// `xmin`, an open outlet at `xmax`, symmetry sides, laminar, `T = 300 K`
+    /// and `U = 0` at the start. `ddt` names the case's ddt scheme.
+    fn heated_duct_case_text(ddt: &str) -> String {
+        r#"{
+  "name": "heatedDuct",
+  "mesh": { "kind": "cartesian", "bounds": { "min": [0,0,0], "max": [1.0,0.1,0.1] }, "cells": [16,1,1],
+    "boundaries": { "xmin": "closed", "xmax": "outlet", "ymin": "sideA", "ymax": "sideB", "zmin": "sideC", "zmax": "sideD" } },
+  "physics": { "gravity": [0,0,0], "fluid": { "nu": 0.01, "Pr": 0.71, "Prt": 0.85, "TRef": 300.0 }, "buoyancy": "densityRatio" },
+  "patches": [
+    { "match": "closed", "kind": "wall", "U": { "type": "fixedValue", "value": [0,0,0] }, "p": { "type": "zeroGradient" }, "T": { "type": "zeroGradient" } },
+    { "match": "outlet", "kind": "open", "U": { "type": "zeroGradient" }, "p": { "type": "fixedValue", "value": 0.0 }, "T": { "type": "zeroGradient" } },
+    { "match": "side.*", "kind": "symmetry" } ],
+  "initial": { "U": [0,0,0], "T": 300.0, "p": 0.0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "DDT",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 } ] },
+  "run": { "endTime": 0.25, "deltaT": 0.0125 }
+}
+"#
+        .replace("DDT", ddt)
+    }
+
+    /// Gate 105-E (SPEC-LIT 105.17): a uniformly heated duct whose `T` stays
+    /// uniform in space, first order under `Euler` and second order under
+    /// `backward`, read through `RunEnd::t_mean`.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn gate_105e_a_uniformly_heated_duct_is_first_order_under_euler_and_second_order_under_backward() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let r_s = f64::from(ofgpu::energy::GasProperties::default().r_s());
+        let lambda = (3548.0 / 0.01) * r_s / (101325.0 * 1006.0);
+        let exact = 300.0 * (lambda * 0.25).exp();
+        const STEPS: [usize; 3] = [20, 40, 80];
+        for ddt in ["Euler", "backward"] {
+            let mut t_mean = [0.0f64; 3];
+            for (i, &n) in STEPS.iter().enumerate() {
+                let dt = format!("{}", 0.25 / n as f64);
+                let args = [
+                    "-endTime", "0.25", "-deltaT", dt.as_str(), "-heaterPower", "3548", "-check",
+                    "1000",
+                ];
+                let (_, end) = run_case_text_end(
+                    &heated_duct_case_text(ddt),
+                    &format!("g105e_{ddt}_{n}"),
+                    &args,
+                );
+                assert_eq!(end.steps, n, "{ddt}: {n} steps asked, {} run", end.steps);
+                t_mean[i] = end.t_mean;
+                let e = end.t_mean - exact;
+                println!("gate 105-E: {ddt} {n} steps: T {:.6} K err {e:+.6e}", end.t_mean);
+            }
+            let p_coarse = ((t_mean[0] - exact) / (t_mean[1] - exact)).abs().log2();
+            let p_fine = ((t_mean[1] - exact) / (t_mean[2] - exact)).abs().log2();
+            println!("gate 105-E: {ddt}: p coarse {p_coarse:.4}, p fine {p_fine:.4}");
+            let want: [f64; 3] = if ddt == "Euler" {
+                [384.531216, 384.827534, 384.976701]
+            } else {
+                [385.072749, 385.112940, 385.123125]
+            };
+            for (i, &n) in STEPS.iter().enumerate() {
+                assert!(
+                    (t_mean[i] - want[i]).abs() <= 1e-3,
+                    "{ddt} {n} steps: t_mean {:.6} K, want {:.6} K",
+                    t_mean[i],
+                    want[i]
+                );
+            }
+            let (want_p, tol_p) = if ddt == "Euler" { (1.0, 0.1) } else { (2.0, 0.2) };
+            assert!(
+                (p_fine - want_p).abs() <= tol_p,
+                "{ddt} p fine {p_fine} (coarse {p_coarse})"
+            );
         }
     }
 
