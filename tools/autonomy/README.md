@@ -13,8 +13,9 @@
   AttemptRow (`autonomy-attempt/1`), GateConstants, Knobs.
 - `schema/knobs.json` — the 21-knob whitelist, the forbidden pointers (`/quality` prefix,
   `/layers/cell_frac`, `/layers/medial_frac`) and the forbidden flag `-permissive`.
-- `gates.json` — the §I-3 gate constants, adopted 2026-09-23. `gates.lock` — their sha256 lock,
-  written once before any tuning; relocking is the user's decision (docs/15 §F).
+- `gates.json` — the §I-3 gate constants, adopted 2026-09-23, and `feature_capture_min` (F3e, the user's
+  decision D-L5). `gates.lock` — their sha256 lock, written once before any tuning and relocked once, on
+  2026-10-02, for `feature_capture_min` alone; relocking is the user's decision (docs/15 §F).
 - `fixtures/good.json` — one good instance per kind: flow, manifest, fingerprint, decision, attempt.
 
 ## The binding definitions (docs/15 §D, verbatim)
@@ -128,7 +129,7 @@ are tried in order and the first that applies decides:
 | the R-PLANE path | 1.0 | false | — |
 | `feature_tolerance = 0` | 0.0 | **true** | — |
 | no `stages[snap]` report (a re-score from the rows alone) | null | null | named |
-| the signal is present: `captured_length_m / sharp_length_m` | that share | **true** only at 0 | — |
+| the signal is present: `captured_length_m / sharp_length_m` | that share | **true** below `feature_capture_min` (0.5) | — |
 | the signal is present with `sharp_length_m = 0` (no feature edge at the run's `feature_angle_deg`) | 0.0 | **true** | — |
 | the signal is present but null (the extraction refused the run's angle) | null | null | named |
 | no signal: `n_feature_edges = 0` or no point took the edge or corner branch | 0.0 | **true** | — |
@@ -140,9 +141,12 @@ malformed signal (a key missing, a length not finite or negative, `tol_m` not po
 sharp length) raises `ScoreParseError` by name. The R-PLANE and `feature_tolerance = 0` rows still decide
 before the measurement: at ft 0 the capture depends on how the edges happen to sit on the lattice (the
 user's D-L0a-FT0: boxn at L4 holds 0.414 at ft 0 against 0.99988 at tau = h_f/2), and the decision of
-2026-09-26 forbids ft 0 off the R-PLANE path whatever it holds. A pass threshold on the share is a new gate
-constant and the user's decision (D-L5): until it is set F3e is true only when the share is exactly 0, so
-no constant changed and `gates.lock` is not relocked. A body that merely sits on cell planes without the
+2026-09-26 forbids ft 0 off the R-PLANE path whatever it holds. The pass threshold is the gate constant
+`feature_capture_min` = 0.5 (the user's decision D-L5, 2026-09-27; `gates.lock` relocked on 2026-10-02 for
+this constant alone): F3e is true when the share is below 0.5, and a share of exactly 0.5 passes. D-L5 sets
+it for the chain form of (92.62) (binary `72f7851e` and later). A summary carries no form marker, so one
+written by an earlier binary (per segment, which under-reads; see below) is judged by the same constant:
+re-measure it before scoring it. A body that merely sits on cell planes without the
 R-PLANE config (the probes `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap`) is still not credited.
 
 #### The measured share on the tuning rows, for D-L5 (2026-09-27)
@@ -158,7 +162,7 @@ Measured by the supervisor on the 97 tuning rows lreplay re-meshed on the binary
 | no sharp edge | 3 | null, F3e false | — |
 | the R-PLANE path | 37 | 1.0, F3e false | min 0.988, median 1.000, max 1.000; 36 of 37 at 1.000, none below 0.95 (min 0.423, median 0.809; 35 below 0.95) |
 | `feature_tolerance = 0` off the R-PLANE path | 28 | 0.0, F3e true | min 0, median 0.335, max 0.891; 3 of 28 exactly 0, 20 at or below 0.5 (median 0.187, max 0.808; 9 exactly 0) |
-| the attraction on | 29 | the share; F3e false on all 29 | min 0.119, median 0.9998, max 1.000; 10 at or below 0.5, 12 below 0.95, none at 0 (median 0.237; 19 at or below 0.5, 27 below 0.95) |
+| the attraction on | 29 | the share; F3e true on the 10 below 0.5 (since 2026-10-02) | min 0.119, median 0.9998, max 1.000; 10 at or below 0.5, 12 below 0.95, none at 0 (median 0.237; 19 at or below 0.5, 27 below 0.95) |
 
 By family, the attraction-on rows: A 8 (0.172 to 0.527, median 0.270), B 9 (all 1.000), D 6 (0.9997 to 1.000),
 E 2 (0.252, 0.9998), F 1 (0.567), G 3 (0.119, 0.264, 0.991). The attraction-on share is two-moded: 12 rows
@@ -167,9 +171,17 @@ any threshold in (0.567, 0.9907] fails the same 12. The wings stay low because t
 cell size: A-1-041's blunt trailing edge is two chains 1.9 mm apart at h_f 11.4 mm. The B lathes read 1.000
 because the recorded default radius (E4) pulls a band of points onto each rim (20 to 27 % of their boundary points pinned); that
 pinning is F3a's to report, not F3e's. The one R-PLANE row below 1, G-1-089 (0.988), has two diagonal edges of 0.051 m and one
-of 0.049 m that no lattice line reproduces. The 13 probes (0.022 to 0.470 on the wings and the wing-body,
-0.972 on the off-lattice box at L4, 0.9994 to 0.9997 on the cubes) were measured per segment and were not
-re-measured.
+of 0.049 m that no lattice line reproduces. The 13 probes were re-measured in the chain form on
+2026-10-02 (`fixtures/probes/README.md`): 0.4849 to 0.7956 on the wings and the wing-body (0.022 to 0.470
+per segment), 0.9997 on the off-lattice box at L4 (0.972), 0.9994 to 0.9997 on the cubes (unchanged), so
+only `wing_a_L3` (0.4849) is below 0.5.
+
+**Re-scored under D-L5 (2026-10-02)** by `score.feature_capture` on the same 97 rows' own summaries (the
+L3 build `3d90ce91`; its (92.62) signal is bit-equal to `72f7851e`'s on all 97; tuning only): F3e is true
+on 38 of 97, 28 at `feature_tolerance = 0` (as before) and 10 with the attraction on. By family: A 12 of 13
+(5 at ft 0, and 7 of the 8 attraction-on wings - all but A-1-023 at 0.527), B 5 of 16 (all at ft 0), D 5
+of 31 (all at ft 0), E 5 of 7 (4 at ft 0, and E-1-033 at 0.252), F 5 of 20 (all at ft 0; F-1-056 passes
+at 0.567), G 6 of 10 (4 at ft 0, and G-1-093 at 0.264 and G-1-095 at 0.119). Under the 0 rule it was 28.
 
 **(92.62) is measured along chains since the L0c build.** The per-segment form (`0fa9e2b` to `7178685`)
 credited a wall edge only when BOTH its ends lay within `tol_m` of ONE feature segment, so a wall edge
@@ -182,10 +194,12 @@ feet of each wall edge's ends and unions it per chain. `tol_m` and the 30° are 
 independently of the Rust agrees with it to the last bit there and on nine other meshes, among them two
 closed lathe rims. D-1-072 and D-1-112 read 1.000 under both forms. The probe boxes whose edges are single
 segments read exactly what they read before (boxn at L4: 0.99988 at tau h_f/2, 0.414 at ft 0). The
-threshold is the user's decision D-L5: until it is set, F3e is true only at a share of exactly 0.
+threshold is the user's decision D-L5: since 2026-10-02 F3e is true below `feature_capture_min` 0.5.
 
 F3e is optional in the attempt-row schema, so a row scored before 2026-09-26 still validates; the scorer
-writes it on every row since, and `schema.check_attempt` holds F3e true exactly when `feature_capture` is 0.
+writes it on every row since, and `schema.check_attempt` holds F3e true exactly when `feature_capture` is
+below `feature_capture_min` (0 until 2026-10-02). `rules/G-FT-RADIUS.json` was written under the 0 rule and per segment (14 of its 59
+measured rows hold a share below 0.5 with F3e false); it is kept as the record of that run, not re-scored.
 A campaign run before 2026-09-26 — every committed bundle so far — no longer replays where `RM-SNAP-FT`
 fired: `campaign.replay` re-runs today's remedy table, and that is this decision taking effect, not a
 determinism fault. Any new headline claim is measured on a fresh test seed (the user's decision of
@@ -227,7 +241,7 @@ but it makes `strict_failure` true, so the two can never be traded out of sight.
   at least beta of the stack, at 0.5, 0.8 and 0.95): `exact: true`, lo = hi. A row without the field, or a
   beta the rows do not report, falls back to the per-patch Markov bounds from `t1_min`, the area-weighted
   `mean_frac` and `full_area_frac` (`exact: false`), and `missing_signals` says which.
-- **F3e is feature-edge capture** (the user's decision of 2026-09-26, section D): `score_run` takes the fingerprint's `sharp_edge_length_m` and the config's `plane_path`, writes `outcome.feature_capture` and `flags.F3e` by section D's table, and `score.feature_capture` is that table as a function (rescore.py calls it). The probes' labels carry both inputs; `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap` fail F3e. Since 2026-09-27 `score.measured_capture` reads `stages[snap].feature_capture` (92.62) wherever a summary carries it; the 13 probes whose attraction reached an edge score their measured share (0.0217 to 0.9997) and pass F3e.
+- **F3e is feature-edge capture** (the user's decision of 2026-09-26, section D): `score_run` takes the fingerprint's `sharp_edge_length_m` and the config's `plane_path`, writes `outcome.feature_capture` and `flags.F3e` by section D's table, and `score.feature_capture` is that table as a function (rescore.py calls it). The probes' labels carry both inputs; `cubep_nofeat`, `cubep_nofeat_cf` and `cubep_nosnap` fail F3e. Since 2026-09-27 `score.measured_capture` reads `stages[snap].feature_capture` (92.62) wherever a summary carries it; the 13 probes whose attraction reached an edge score their measured share, in the chain form since 2026-10-02 (0.4849 to 0.9997), and all but `wing_a_L3` (0.4849, below `feature_capture_min`) pass F3e. `measured_capture` and `feature_capture` take an optional `gates` (default: the locked `gates.json`); `score_run` passes its own.
 
 `missing_signals` names what a report lacks instead of guessing: the `-check` that was not run, and — only
 on a summary that lacks them — the `area_ratio` rows, the octree gate fields and the per-face tau shares.
@@ -255,9 +269,10 @@ they disagree.
 | cell_budget | 2000000 |
 | delivered_min_layers | 8 |
 | yplus_max_a_priori | 1.0 |
+| feature_capture_min | 0.5 (F3e; D-L5, relocked 2026-10-02) |
 | adopted | 2026-09-23 |
 
-Whole-gates-file sha256 over canonical JSON: `93cc1648563ec0ac96b81d837e8625c9b98140114c094e63ee20b793a1aef1aa`. The lock lives in `gates.lock` — the hash of
+Whole-gates-file sha256 over canonical JSON: `8d5fe95689fc7277332e935187a0f4b6ac1a8f34bba2c1388255280c547e5d13`. The lock lives in `gates.lock` — the hash of
 the parsed file, one hash per field, and the hash of `schema/knobs.json`. **Relocking is the user's
 decision (docs/15 §F)**: a constant that proves infeasible goes back to the user; it is never relaxed
 quietly, and this file is never rewritten to make a number pass.

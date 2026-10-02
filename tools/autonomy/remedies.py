@@ -659,8 +659,10 @@ def diagnose(outcome: dict, gates: dict) -> dict:
             "not_in", "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)")}
     if fl.get("F3e") is True:
         return {"key": "F3e", "stage": "snap", "trigger": trig(
-            "outcome.feature_capture", outcome.get("feature_capture"), 0.0, "==",
-            "score.py stages[snap] feature attraction (README section D, 2026-09-26)")}
+            "outcome.feature_capture", outcome.get("feature_capture"),
+            gates["feature_capture_min"], "<",
+            "score.py stages[snap].feature_capture (92.62) against gates.json "
+            "feature_capture_min (README section D, D-L5)")}
     if fl.get("F2") is True:
         return {"key": "F2", "stage": None, "trigger": trig(
             "outcome.flags.F2", True, True, "==", "-check (docs/15 §D.1 F2)")}

@@ -10,6 +10,7 @@
   "cell_budget": 2000000,
   "delivered_min_layers": 8,
   "yplus_max_a_priori": 1.0,
+  "feature_capture_min": 0.5,
   "adopted": "2026-09-23",
   "source": "docs/15 §I-3 (D-B) adopted as recommended 2026-09-23: pinned <= 5 %, p99 <= 0.1 h_f, max <= 0.5 h_f, area ratio in [0.98, 1.02], K = 4 attempts, cell budget 2 M; §D.2: delivered = n_layers >= 8, y+ <= 1 a priori. Locked before any tuning; relocking is the user's decision (§F)."
 }

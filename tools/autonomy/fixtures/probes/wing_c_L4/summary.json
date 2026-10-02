@@ -215,7 +215,7 @@
       ],
       "converged": false,
       "feature_capture": {
-        "captured_length_m": 3.640961849244319,
+        "captured_length_m": 5.75934411689026,
         "sharp_length_m": 8.185825694348443,
         "tol_m": 0.003125
       },
