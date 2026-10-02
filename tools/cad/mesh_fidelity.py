@@ -3,7 +3,10 @@
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
 """mesh_fidelity.py - AMG-9 (docs/16a §B.2, §G.1 AMG-9): the wedge polyMesh boundary that wedge_mesh.py (CAD-11)
-writes, judged per patch against the BRep it was meshed from, at scale 1.
+writes, judged per patch against the BRep it was meshed from, at scale 1. The patch map is picked from the
+mesh's own boundary names by patch_map: the laminar slip_upstream six, or - for the turbulent nozzle of
+docs/16 §H.5 (CAD-25's run_turb wedge, CAD-27's post_turb) - the wall_upstream six, whose tags must exist
+in tags.json (MFID-PATCH:tags otherwise).
 
 Every boundary vertex must lie within TOL["vertex_m"] of its patch's tagged BRep faces (the points file is written
 with 17 significant digits, so the 1e-9 m gate is the binding one), and every boundary face centre within the
@@ -55,8 +58,20 @@ AXIS_R = 1e-12                # m: a vertex this close to the axis has no azimut
 N_EDGE_SAMPLES = 1024         # per meridian edge, for the reference extents
 REVOLVED = (("inlet", ("inlet",)), ("outlet", ("outlet",)),
             ("wall_nozzle", ("wall_contraction", "wall_exit")), ("slip_upstream", ("slip_upstream",)))
+REVOLVED_WALL = (("inlet", ("inlet",)), ("outlet", ("outlet",)),
+                 ("wall_nozzle", ("wall_contraction", "wall_exit")), ("wall_upstream", ("wall_upstream",)))
 SIDES = (("wedge_front", -0.5), ("wedge_back", 0.5))   # the meridian rotated about +x by this fraction of theta
 PATCH_ORDER = ("inlet", "outlet", "wall_nozzle", "slip_upstream", "wedge_front", "wedge_back")
+PATCH_ORDER_WALL = ("inlet", "outlet", "wall_nozzle", "wall_upstream", "wedge_front", "wedge_back")
+
+
+def patch_map(names):
+    """(revolved, order) when the boundary names are exactly that order six (any order); None
+    otherwise (MFID-PATCH:names). The laminar slip map first, then the no-slip upstream one."""
+    for revolved, order in ((REVOLVED, PATCH_ORDER), (REVOLVED_WALL, PATCH_ORDER_WALL)):
+        if len(names) == len(order) and sorted(names) == sorted(order):
+            return revolved, order
+    return None
 GEOM_FILES = ("geom.json", "tags.json", "fluid.brep", "meridian.brep")
 MESH_FILES = ("boundary", "faces", "neighbour", "owner", "points")
 REFUSAL_IDS = ("MFID-BIND", "MFID-PATCH", "MFID-SCALE", "MFID-VERTEX", "MFID-CENTRE")
@@ -111,14 +126,15 @@ def _rho_min(edges):
     raise RuntimeError("curvature_radius_min: %s %s" % (rec["reason_id"], rec["detail"]))
 
 
-def load_brep(geom_dir, theta):
-    """{patch: (tags, FaceSet, rho_min or None)} for the six patches, plus the meridian shape."""
+def load_brep(geom_dir, theta, revolved=REVOLVED):
+    """{patch: (tags, FaceSet, rho_min or None)} for the six patches of the given patch map, plus the
+    meridian shape."""
     tags = common.read_json(os.path.join(geom_dir, "tags.json"))
     fluid = cq.Shape.importBrep(os.path.join(geom_dir, "fluid.brep"))
     meridian = cq.Shape.importBrep(os.path.join(geom_dir, "meridian.brep"))
     ff, me, medges = fluid.Faces(), tags["meridian_edges"], meridian.Edges()
     out = {}
-    for name, names in REVOLVED:
+    for name, names in revolved:
         faces = [ff[i].wrapped for t in names for i in tags["face_tags"][t]]
         out[name] = (list(names), FaceSet(faces), _rho_min([medges[i] for t in names for i in me[t]]))
     mface = meridian.Faces()[0].wrapped
@@ -280,10 +296,12 @@ def _report(status_fields, inputs, theta_deg, scale, patches):
 
 
 def check(geom_dir, case_dir, theta_deg=THETA_DEG, between_hook=None):
-    """The fidelity report (REPORT_KEYS). Order: MFID-BIND (every input a stable regular file), MFID-PATCH (the six
-    names, both wedge sides typed wedge), then MFID-SCALE, MFID-VERTEX and MFID-CENTRE, every failure listed in
-    that order; the inputs are hashed again after the judgement (between_hook, a selftest hook, runs first) and
-    a change refuses MFID-BIND whatever else failed. reason_id is the first failing stage."""
+    """The fidelity report (REPORT_KEYS). Order: MFID-BIND (every input a stable regular file), MFID-PATCH
+    (patch_map: the six laminar slip-upstream names or the six wall-upstream ones, MFID-PATCH:names when
+    neither; both wedge sides typed wedge; MFID-PATCH:tags when the chosen map names a tag absent from
+    tags.json), then MFID-SCALE, MFID-VERTEX and MFID-CENTRE, every failure listed in that order; the inputs
+    are hashed again after the judgement (between_hook, a selftest hook, runs first) and a change refuses
+    MFID-BIND whatever else failed. reason_id is the first failing stage."""
     theta = math.radians(theta_deg)
     before = _snapshots(geom_dir, case_dir)
     inputs = dict((n, s["sha256"]) for n, s in before)
@@ -293,18 +311,24 @@ def check(geom_dir, case_dir, theta_deg=THETA_DEG, between_hook=None):
     pm = polymesh_write.read_polymesh(os.path.join(case_dir, "constant", "polyMesh"))
     types = dict((p["name"], p["type"]) for p in pm["patches"])
     bad = []
-    if len(pm["patches"]) != len(PATCH_ORDER) or sorted(types) != sorted(PATCH_ORDER):
+    pmap = patch_map(sorted(types))
+    if pmap is None or len(pm["patches"]) != 6:
         bad.append("MFID-PATCH:names")
     elif types["wedge_front"] != "wedge" or types["wedge_back"] != "wedge":
         bad.append("MFID-PATCH:wedge_types")
     if bad:
         return _report(bad, inputs, theta_deg, None, {})
+    revolved, order = pmap
+    tags = common.read_json(os.path.join(geom_dir, "tags.json"))
+    if any(t not in tags["face_tags"] or t not in tags["meridian_edges"]
+           for _n, names in revolved for t in names):
+        return _report(["MFID-PATCH:tags"], inputs, theta_deg, None, {})
     geom = common.read_json(os.path.join(geom_dir, "geom.json"))
-    brep, meridian = load_brep(geom_dir, theta)
+    brep, meridian = load_brep(geom_dir, theta, revolved)
     scale, fields = scale_row(pm, geom, meridian, theta)
-    patches = dict((name, patch_row(pm, name, brep[name], theta)) for name in PATCH_ORDER)
-    fields += ["MFID-VERTEX:" + n for n in PATCH_ORDER if patches[n]["n_vertex_over"]]
-    fields += ["MFID-CENTRE:" + n for n in PATCH_ORDER if patches[n]["n_centre_over"]]
+    patches = dict((name, patch_row(pm, name, brep[name], theta)) for name in order)
+    fields += ["MFID-VERTEX:" + n for n in order if patches[n]["n_vertex_over"]]
+    fields += ["MFID-CENTRE:" + n for n in order if patches[n]["n_centre_over"]]
     if between_hook is not None:
         between_hook(case_dir)
     after = dict(_snapshots(geom_dir, case_dir))
@@ -400,6 +424,10 @@ def selftest():
     import wedge_mesh
     t0 = time.time()
     assert THETA_DEG == wedge_mesh.RECIPE["theta_deg"] and PATCH_ORDER == wedge_mesh.GROUPS
+    assert PATCH_ORDER_WALL == wedge_mesh.GROUPS_WALL
+    assert patch_map(sorted(PATCH_ORDER)) == (REVOLVED, PATCH_ORDER)
+    assert patch_map(sorted(PATCH_ORDER_WALL)) == (REVOLVED_WALL, PATCH_ORDER_WALL)
+    assert patch_map(("inlet", "outlet", "wall_nozzle", "wedge_front", "wedge_back")) is None
     with tempfile.TemporaryDirectory() as td:
         geom = os.path.join(td, "geom")
         res = export.run_pipeline(export.TEMPLATE, dict(export.NOMINAL), geom)
@@ -540,6 +568,30 @@ def selftest():
         assert abs(b - (sag + 1e-8 / (8 * 0.034) + 1e-9)) <= 1e-18, b
         print("[ok] judge_patch: a centre 1e-15 m over its bound and a vertex 1e-16 m over 1e-9 m each fail alone; "
               "NaN fails; centre_bound is R(1 - cos 2.5 deg) + h^2/(8 rho) + 1e-9")
+        # T12: the turbulent nozzle wedge (no-slip upstream) checks ok through the wall-role map
+        gt = os.path.join(td, "geom_turb")
+        res = export.run_pipeline(export.TEMPLATE, dict(export.TURB_NOMINAL), gt)
+        assert res["status"] == "ok", (res["status"], res["rule"], res["message"])
+        wt = wedge_mesh.run_turb(gt, os.path.join(td, "wedge_turb"), U_e=60.0, levels=(0,))
+        assert wt["status"] == "ok", (wt["rule"], wt["message"])
+        rep = check(gt, os.path.join(td, "wedge_turb", "L0", "case"))
+        assert rep["status"] == "ok" and rep["fields"] == [] and rep["reason_id"] is None, rep["fields"]
+        assert rep["scale"]["pass"], rep["scale"]
+        assert rep["patches"]["wall_upstream"]["tags"] == ["wall_upstream"], rep["patches"]["wall_upstream"]
+        vmax = max(p["vertex_max_m"] for p in rep["patches"].values())
+        assert vmax < 1e-13, vmax
+        print("[ok] the turbulent wall-upstream L0 wedge checks ok through the wall-role map, "
+              "max vertex %g m" % vmax)
+
+        # T13: slip_upstream renamed wall_upstream has no tag in the laminar tags.json: MFID-PATCH:tags
+        c13 = _fx_copy_case(case[1], os.path.join(td, "t13", "case"))
+        _fx_retype(c13, "slip_upstream", new_name="wall_upstream")
+        rep = check(geom, c13)
+        assert rep["fields"] == ["MFID-PATCH:tags"], rep["fields"]
+        assert rep["reason_id"] == "MFID-PATCH" and rep["scale"] is None and rep["patches"] == {}
+        assert check(geom, case[1])["fields"] == []
+        print("[ok] slip_upstream renamed wall_upstream refuses MFID-PATCH:tags; the unmodified L1 stays ok")
+
     print("selftest wall %.1f s" % (time.time() - t0))
     print("SELFTEST PASS")
 

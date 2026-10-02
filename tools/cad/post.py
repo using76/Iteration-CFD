@@ -15,9 +15,18 @@ Pohlhausen's quartic profile (1921, ZAMM 1(4):252-290, DOI 10.1002/zamm.19210010
 delta*/delta = 3/10) and the degree-2 triangle (edge midpoints) and tetrahedron (4-point, Keast 1986, DOI
 10.1016/0045-7825(86)90059-9) quadrature rules are used only by the selftest's planted fields.
 
+post_turb (docs/16 §H.5, §I CAD-27) reads a turbulent lowmach case - TG0's periodic pipe (geom_dir None,
+driven by its constant/fvSources momentumSource) or the turbulent nozzle - into a cad-post-turb/1 doc:
+the wall shear tau_w = (nu + nut_f) |u_t,P| / d_P and u_tau from it, y+, u+ and f, the log-law band and
+the core defect of the pipe with its rho g_x V balance and x-invariance, and for the nozzle the laminar
+metrics plus the wall-shear term inside the axial momentum balance and K(x), p(x) by -nu d(1/U_e)/dx
+(Kline et al. 1967; arXiv:2306.05972) from the CFD edge velocity. The laminar post() and its cad-post/1
+doc are unchanged.
+
 Usage:
   python post.py --selftest
   python post.py run CASE_DIR TIME GEOM_DIR OUT_JSON
+  python post.py run-turb CASE_DIR TIME GEOM_DIR OUT_JSON   (GEOM_DIR - for a pipe)
   python post.py fx-tet GEOM_DIR MSH_PATH
 """
 import ast
@@ -35,6 +44,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import common
 import reqs
+import thwaites
+import turb_integral
 sys.path.insert(0, os.path.join(common.REPO, "tools", "mesh"))
 import polymesh_write
 import regions_check
@@ -57,6 +68,20 @@ DOWN_DE = 0.25                # docs/16 §H.4 G1: downstream station x = exit_pl
 STATIONS = ("upstream", "exit_plane", "downstream")
 INPUT_KEYS = ("case.json", "polyMesh/boundary", "polyMesh/faces", "polyMesh/neighbour", "polyMesh/owner",
               "polyMesh/points", "fields/U", "fields/p", "geom/geom.json", "geom/tags.json")
+VERSION_TURB = "cad-post-turb/1"
+CASE_TURB_VERSION = "cad-case-turb/1"
+DIMS_NUT = "[0 2 -1 0 0 0 0]"
+PATCHES_PIPE = {"periodic_a": "cyclic", "periodic_b": "cyclic", "wall": "wall", "wedge_front": "wedge",
+                "wedge_back": "wedge"}
+PATCHES_TURB = ("inlet", "outlet", "wall_nozzle", "wall_upstream", "wedge_front", "wedge_back")
+WALLS_PIPE = ("wall",)
+WALLS_TURB = ("wall_nozzle", "wall_upstream")
+LOGLAW_YPLUS_MIN = 30.0          # docs/16 §H.5 TB3: 30 <= y+ <= 0.2 Re_tau
+LOGLAW_RE_TAU_FRAC = 0.2
+YPLUS_LIMIT = 1.0                # docs/16 §H.5 TG1: y+1 <= 1
+INPUT_KEYS_TURB_PIPE = ("case.json", "polyMesh/boundary", "polyMesh/faces", "polyMesh/neighbour",
+                        "polyMesh/owner", "polyMesh/points", "fields/U", "fields/p", "fields/nut")
+INPUT_KEYS_TURB_NOZZLE = INPUT_KEYS_TURB_PIPE + ("geom/geom.json", "geom/tags.json")
 DOC_KEYS = ("version", "status", "reason_id", "message", "time", "inputs", "mesh_fidelity", "wedge",
             "operating_point", "units", "stations", "exit_profile", "metrics", "momentum", "reversal", "edge")
 MFID_KEYS = ("status", "reason_id", "fields", "theta_mesh_rad", "scale_pass", "report_sha256")
@@ -90,8 +115,30 @@ METRICS = (   # (name, unit, where, definition) - the order of the doc's metrics
     ("reversal_fraction", "1", ["wall_nozzle"], "area of wall_nozzle faces whose owner has u_x < 0 / area"),
     ("separation_free", "1", ["wall_nozzle"], "1 when no wall_nozzle owner cell has u_x < 0, else 0"),
 )
+DOC_TURB_KEYS = ("version", "status", "reason_id", "message", "time", "kind", "inputs", "mesh_fidelity",
+                 "wedge", "operating_point", "units", "wall_shear", "pipe", "nozzle")
+WEDGE_TURB_KEYS = ("theta_mesh_rad", "factor", "factor_formula", "theta_source", "sin_ratio_minus_1")
+OP_POST_TURB_KEYS = ("fluid", "rho_kg_m3", "nu_m2_s", "c_m_s", "model", "wall", "re_tau", "u_tau_case_m_s",
+                     "g_x_m_s2", "U_b_case_m_s", "U_exit_case_m_s", "Q_case_m3_s", "yplus1_apriori")
+UNITS_TURB_KEYS = ("U_dimensions", "p_dimensions", "p_kind", "nut_dimensions")
+WALL_SHEAR_KEYS = ("n_faces", "area_m2", "tau_mean_m2_s2", "u_tau_m_s", "yplus1_max", "yplus1_mean",
+                   "yplus1_frac_le1", "method")
+WALL_SHEAR_METHOD = ("tau_w = (nu + nut_f) |u_t,P| / d_P, d_P = (C_f - C_P) . n_f; u_tau = sqrt(area-mean tau_w); "
+                     "y+ = d_P sqrt(tau_w,f) / nu")
+PIPE_KEYS = ("R_m", "L_m", "V_m3", "D_m", "R_wall_face_m", "n_radial", "U_b_m_s", "Re_D", "u_tau_m_s",
+             "Re_tau", "f", "U_axis_m_s", "core_defect", "x_invariance", "profile", "loglaw",
+             "shear_force_N", "body_force_N", "balance_rel")
+PROFILE_KEYS = ("r_m", "y_m", "u_m_s", "y_plus", "u_plus")
+LOGLAW_KEYS = ("y_plus_min", "y_plus_max", "n_cells", "dev_max")
+NOZZLE_KEYS = ("stations", "exit_profile", "metrics", "momentum", "reversal", "edge", "momentum_turb",
+               "accel")
+MOMENTUM_TURB_KEYS = ("x_a_m", "x_b_m", "I_a", "I_b", "W", "S", "P_a", "P_b", "residual", "closure")
+ACCEL_KEYS = ("x_m", "U_edge_m_s", "u_tau_m_s", "K", "K_max", "p", "p_min", "method", "reason_id")
+ACCEL_METHOD = "K = -nu d(1/U_e)/dx by thwaites.sg_derivative; p = -K (U_e/u_tau)^3"
 USAGE = ("usage: python post.py --selftest" + chr(10)
          + "       python post.py run CASE_DIR TIME GEOM_DIR OUT_JSON" + chr(10)
+         + "       python post.py run-turb CASE_DIR TIME GEOM_DIR OUT_JSON   (GEOM_DIR - for a pipe)"
+         + chr(10)
          + "       python post.py fx-tet GEOM_DIR MSH_PATH")
 
 
@@ -811,6 +858,408 @@ def _refused_doc(rule, detail, time_name, inputs):
     return doc
 
 
+def momentum_turb(mesh, st, p_kin, shear):
+    """The MOMENTUM_TURB_KEYS block (CAD-27): x_a, x_b, I, W, P exactly the laminar momentum block's, plus
+    S = factor sum of tau_x,f |S_f| over the faces of BOTH wall patches with x_a < C_f,x < x_b, the residual
+    I_a - I_b - W - S, and closure residual / |P_a - P_b| (None when P_a == P_b)."""
+    mom, _c = _momentum_block(mesh, st, p_kin)
+    x_a, x_b = mom["x_a_m"], mom["x_b_m"]
+    s_sum = 0.0
+    for name in WALLS_TURB:
+        stf, nf, _t = mesh["patch_range"][name]
+        cfx = mesh["Cf"][stf:stf + nf, 0]
+        sel = (cfx > x_a) & (cfx < x_b)
+        Sf = mesh["Sf"][stf:stf + nf]
+        mag = np.sqrt(_dot3(Sf, Sf))
+        s_sum += st["factor"] * float(np.sum(shear["faces"][name]["tau_x"][sel] * mag[sel]))
+    residual = mom["I_a"] - mom["I_b"] - mom["W"] - s_sum
+    return {"x_a_m": x_a, "x_b_m": x_b, "I_a": mom["I_a"], "I_b": mom["I_b"], "W": mom["W"], "S": s_sum,
+            "P_a": mom["P_a"], "P_b": mom["P_b"], "residual": residual,
+            "closure": None if mom["P_a"] == mom["P_b"] else residual / abs(mom["P_a"] - mom["P_b"])}
+
+
+def _wedge_normals(mesh):
+    """The two wedge sides' summed face normals, unit (the angle mesh_fidelity.scale_row measures)."""
+    out = []
+    for name in ("wedge_front", "wedge_back"):
+        st, nf, _t = mesh["patch_range"][name]
+        s = np.sum(mesh["Sf"][st:st + nf], axis=0)
+        out.append(s / np.linalg.norm(s))
+    return out
+
+
+def _wall_vertex_rmax(mesh, names):
+    """The largest vertex radius over the named wall patches."""
+    vs = set()
+    for name in names:
+        st, nf, _t = mesh["patch_range"][name]
+        for f in range(st, st + nf):
+            vs.update(mesh["faces"][f])
+    pts = mesh["points"][np.array(sorted(vs), dtype=np.int64)]
+    return float(np.max(np.hypot(pts[:, 1], pts[:, 2])))
+
+
+def _turb_input_paths(case_dir, time_name, geom_dir):
+    """The turbulent inputs by key; the geom entries only for a nozzle (the pipe has no BRep)."""
+    pm = os.path.join(case_dir, "constant", "polyMesh")
+    paths = {"case.json": os.path.join(case_dir, "case.json"),
+             "polyMesh/boundary": os.path.join(pm, "boundary"),
+             "polyMesh/faces": os.path.join(pm, "faces"),
+             "polyMesh/neighbour": os.path.join(pm, "neighbour"),
+             "polyMesh/owner": os.path.join(pm, "owner"),
+             "polyMesh/points": os.path.join(pm, "points"),
+             "fields/U": os.path.join(case_dir, time_name, "U"),
+             "fields/p": os.path.join(case_dir, time_name, "p"),
+             "fields/nut": os.path.join(case_dir, time_name, "nut")}
+    if geom_dir is not None:
+        paths["geom/geom.json"] = os.path.join(geom_dir, "geom.json")
+        paths["geom/tags.json"] = os.path.join(geom_dir, "tags.json")
+    return paths
+
+
+def _refused_turb(rule, detail, time_name, geom_dir, inputs):
+    """A refused cad-post-turb/1 doc: every DOC_TURB_KEYS key, kind from geom_dir, None elsewhere."""
+    doc = dict((k, None) for k in DOC_TURB_KEYS)
+    doc["version"] = VERSION_TURB
+    doc["status"] = "refused"
+    doc["reason_id"] = rule
+    doc["message"] = detail
+    doc["time"] = time_name
+    doc["kind"] = "nozzle" if geom_dir is not None else "pipe"
+    doc["inputs"] = dict(inputs)
+    return doc
+
+
+def post_turb(case_dir, time_name, geom_dir=None, between_hook=None):
+    """The cad-post-turb/1 doc (DOC_TURB_KEYS) of docs/16 §H.5 and §I CAD-27: the turbulent reader for
+    TG0's periodic pipe (geom_dir None) and the turbulent nozzle; never raises Refused - a refusal comes
+    back as the doc with status "refused". between_hook(case_dir) runs after the blocks, before the second
+    hash."""
+    inputs = {}
+    try:
+        return _post_turb(case_dir, time_name, geom_dir, between_hook, inputs)
+    except Refused as r:
+        return _refused_turb(r.rule, r.detail, time_name, geom_dir, inputs)
+
+
+def _turb_bind(case_dir, time_name, geom_dir, kind, inputs):
+    """The first POST-BIND: every input of the kind's key set hashed (unbound files None), case.json's
+    version, kind-against-geom_dir, the polyMesh shas, and the nozzle's geom.json sha all checked."""
+    paths = _turb_input_paths(case_dir, time_name, geom_dir)
+    keys = INPUT_KEYS_TURB_NOZZLE if kind == "nozzle" else INPUT_KEYS_TURB_PIPE
+    for key in keys:
+        snap = common.stable_file_snapshot(paths[key])
+        if snap["stable"] is not True:
+            inputs[key] = None
+            raise Refused("POST-BIND", "%s: not a stable regular file (unbound)" % key)
+        inputs[key] = snap["sha256"]
+    case = common.read_json(paths["case.json"])
+    if case.get("version") != CASE_TURB_VERSION:
+        raise Refused("POST-BIND", "case.json version %r is not %s" % (case.get("version"), CASE_TURB_VERSION))
+    ckind = case.get("kind")
+    if ckind not in ("pipe", "nozzle") or (ckind == "pipe") != (geom_dir is None):
+        raise Refused("POST-BIND", "case kind %r against geom_dir %s"
+                      % (ckind, "absent" if geom_dir is None else "given"))
+    for n in ("boundary", "faces", "neighbour", "owner", "points"):
+        key = "polyMesh/" + n
+        if case["files"]["constant/polyMesh/" + n] != inputs[key]:
+            raise Refused("POST-BIND", "%s: sha differs from case.json" % key)
+    if kind == "nozzle" and case["inputs"]["geom.json"] != inputs["geom/geom.json"]:
+        raise Refused("POST-BIND", "geom/geom.json: sha differs from case.json")
+    return paths, keys, case
+
+
+def _post_turb(case_dir, time_name, geom_dir, between_hook, inputs):
+    """post_turb's body: the rules in order - BIND, PATCH, SCALE, FIELD, UNITS - then the blocks."""
+    kind = "nozzle" if geom_dir is not None else "pipe"
+    if (not isinstance(time_name, str) or not time_name or time_name in (".", "..")
+            or "/" in time_name or chr(92) in time_name):
+        raise Refused("POST-BIND", "time %r is not a single path component" % (time_name,))
+    paths, keys, case = _turb_bind(case_dir, time_name, geom_dir, kind, inputs)
+    mesh = load_mesh(os.path.join(case_dir, "constant", "polyMesh"))
+    _turb_patches(mesh, kind)
+    theta, factor, theta_source, mfid_block = _turb_scale(mesh, kind, geom_dir, case_dir)
+    patch_sizes = dict((name, rng[1]) for name, rng in mesh["patch_range"].items())
+    U = read_field(paths["fields/U"], 3, mesh["n_cells"], patch_sizes)
+    p = read_field(paths["fields/p"], 1, mesh["n_cells"], patch_sizes)
+    nut = read_field(paths["fields/nut"], 1, mesh["n_cells"], patch_sizes)
+    dims_u = " ".join(U["dimensions"].split())
+    dims_p = " ".join(p["dimensions"].split())
+    dims_n = " ".join(nut["dimensions"].split())
+    if dims_u != DIMS_U:
+        raise Refused("POST-UNITS", "U dimensions %s, want %s" % (dims_u, DIMS_U))
+    p_kind = DIMS_P.get(dims_p)
+    if p_kind is None:
+        raise Refused("POST-UNITS", "p dimensions %s are neither kinematic nor static" % dims_p)
+    if dims_n != DIMS_NUT:
+        raise Refused("POST-UNITS", "nut dimensions %s, want %s" % (dims_n, DIMS_NUT))
+    op = case["operating_point"]
+    if op["fluid"] not in reqs.RHO_TABLE:
+        raise Refused("POST-UNITS", "fluid %r is not in the density table" % (op["fluid"],))
+    rho = reqs.RHO_TABLE[op["fluid"]]
+    p_kin = p
+    if p_kind == "static":
+        p_kin = {"dimensions": p["dimensions"], "internal": p["internal"] / rho,
+                 "patches": dict((name, {"type": row["type"],
+                                         "value": None if row["value"] is None else row["value"] / rho})
+                                 for name, row in p["patches"].items())}
+    units = {"U_dimensions": dims_u, "p_dimensions": dims_p, "p_kind": p_kind, "nut_dimensions": dims_n}
+    return _turb_blocks(case, time_name, kind, inputs, paths, keys, mesh, U, nut, p_kin, op, units,
+                        rho, theta, factor, theta_source, mfid_block, between_hook, case_dir)
+
+
+def _turb_blocks(case, time_name, kind, inputs, paths, keys, mesh, U, nut, p_kin, op, units,
+                 rho, theta, factor, theta_source, mfid_block, between_hook, case_dir):
+    """The pipe or nozzle blocks (POST-STATION inside), between_hook, the second hash, and the ok doc."""
+    nu = op["nu_m2_s"]
+    shear = wall_shear(mesh, U, nut, nu, WALLS_TURB if kind == "nozzle" else WALLS_PIPE, factor)
+    pipe_row = None
+    nozzle_row = None
+    if kind == "pipe":
+        ctx = {"factor": factor, "nu_m2_s": nu, "g_x_m_s2": op["g_x_m_s2"], "rho_kg_m3": rho, "shear": shear}
+        pipe_row = pipe_block(mesh, U, nut, ctx)
+    else:
+        tags = common.read_json(paths["geom/tags.json"])
+        ctx = {"factor": factor, "theta_mesh_rad": theta,
+               "planes": dict((row["name"], row["x"]) for row in tags["planes"]),
+               "rho_kg_m3": rho, "c_m_s": op["c_m_s"]}
+        computed = metrics(mesh, U, p_kin, ctx)
+        nozzle_row = dict(computed)
+        nozzle_row["momentum_turb"] = momentum_turb(mesh, _metrics_run(mesh, U, p_kin, ctx), p_kin, shear)
+        stf, nfwf, _t = mesh["patch_range"]["wall_nozzle"]
+        wf = np.arange(stf, stf + nfwf, dtype=np.int64)
+        order = np.lexsort((wf, mesh["C"][mesh["owner"][wf], 0]))
+        nozzle_row["accel"] = accel(computed["edge"]["x_m"], computed["edge"]["U_edge_m_s"],
+                                    [float(v) for v in shear["faces"]["wall_nozzle"]["u_tau_f"][order]],
+                                    nu)
+    if between_hook is not None:
+        between_hook(case_dir)
+    _turb_rebind(paths, keys, inputs)
+    turb = case["turbulence"]
+    doc = dict((k, None) for k in DOC_TURB_KEYS)
+    doc["version"] = VERSION_TURB
+    doc["status"] = "ok"
+    doc["reason_id"] = None
+    doc["message"] = ""
+    doc["time"] = time_name
+    doc["kind"] = kind
+    doc["inputs"] = dict(inputs)
+    doc["mesh_fidelity"] = mfid_block
+    doc["wedge"] = {"theta_mesh_rad": theta, "factor": factor, "factor_formula": "2*pi/theta_mesh_rad",
+                    "theta_source": theta_source, "sin_ratio_minus_1": math.sin(theta) / theta - 1.0}
+    doc["operating_point"] = {"fluid": op["fluid"], "rho_kg_m3": rho, "nu_m2_s": op["nu_m2_s"],
+                              "c_m_s": op["c_m_s"], "model": turb["model"], "wall": turb["wall"],
+                              "re_tau": op["re_tau"], "u_tau_case_m_s": op["u_tau_m_s"],
+                              "g_x_m_s2": op["g_x_m_s2"], "U_b_case_m_s": op["U_b_m_s"],
+                              "U_exit_case_m_s": op["U_exit_m_s"], "Q_case_m3_s": op["Q_m3_s"],
+                              "yplus1_apriori": turb["yplus1_apriori"]}
+    doc["units"] = units
+    doc["wall_shear"] = shear["rows"]
+    doc["pipe"] = pipe_row
+    doc["nozzle"] = nozzle_row
+    return doc
+
+
+def _turb_patches(mesh, kind):
+    """POST-PATCH: the kind's boundary names exactly, the pipe's types by PATCHES_PIPE, the nozzle's
+    wedges typed wedge and its WALLS_TURB patches wall."""
+    want_names = sorted(PATCHES_PIPE if kind == "pipe" else PATCHES_TURB)
+    if sorted(mesh["patch_range"]) != want_names:
+        raise Refused("POST-PATCH", "patches %s are not exactly %s"
+                      % (",".join(sorted(mesh["patch_range"])), ",".join(want_names)))
+    if kind == "pipe":
+        want_types = dict(PATCHES_PIPE)
+    else:
+        want_types = dict((n, "wall") for n in WALLS_TURB)
+        want_types.update(wedge_front="wedge", wedge_back="wedge")
+    for name, want in want_types.items():
+        got = mesh["patch_range"][name][2]
+        if got != want:
+            raise Refused("POST-PATCH", "%s is typed %s, want %s" % (name, got, want))
+
+
+def _turb_scale(mesh, kind, geom_dir, case_dir):
+    """POST-SCALE: (theta, factor, theta_source, mesh_fidelity block or None). The nozzle takes theta from
+    mesh_fidelity.check after its scale-1 pass; the pipe from the two wedge sides' summed face normals
+    (mesh_fidelity.scale_row's angle), refused unless it equals pipe_mesh.RECIPE["theta_deg"] within
+    TOL["theta_rad"] and the wall vertices' largest radius and the points' x span equal RECIPE R_m and L_m
+    within TOL["scale_rel"] (relative). factor = 2 pi / theta."""
+    import mesh_fidelity
+    import pipe_mesh
+    if kind == "nozzle":
+        rep = mesh_fidelity.check(geom_dir, case_dir)
+        if rep["status"] != "ok" or rep["scale"]["pass"] is not True:
+            raise Refused("POST-SCALE", "mesh_fidelity %s: %s" % (rep["reason_id"], ",".join(rep["fields"])))
+        theta = rep["scale"]["theta_mesh_rad"]
+        block = {"status": rep["status"], "reason_id": rep["reason_id"], "fields": list(rep["fields"]),
+                 "theta_mesh_rad": theta, "scale_pass": rep["scale"]["pass"],
+                 "report_sha256": common.sha256_of(rep)}
+        return theta, 2.0 * math.pi / theta, "mesh_fidelity", block
+    nf_, nb_ = _wedge_normals(mesh)
+    theta = float(math.atan2(float(np.linalg.norm(np.cross(nf_, nb_))), abs(float(np.dot(nf_, nb_)))))
+    theta_want = math.radians(pipe_mesh.RECIPE["theta_deg"])
+    if abs(theta - theta_want) > mesh_fidelity.TOL["theta_rad"]:
+        raise Refused("POST-SCALE", "wedge normals angle %r rad, want %r within %r"
+                      % (theta, theta_want, mesh_fidelity.TOL["theta_rad"]))
+    rel = mesh_fidelity.TOL["scale_rel"]
+    r_wall = _wall_vertex_rmax(mesh, WALLS_PIPE)
+    if abs(r_wall - pipe_mesh.RECIPE["R_m"]) > rel * pipe_mesh.RECIPE["R_m"]:
+        raise Refused("POST-SCALE", "wall vertex radius %r m, want %r within %r rel"
+                      % (r_wall, pipe_mesh.RECIPE["R_m"], rel))
+    span = float(np.max(mesh["points"][:, 0]) - np.min(mesh["points"][:, 0]))
+    if abs(span - pipe_mesh.RECIPE["L_m"]) > rel * pipe_mesh.RECIPE["L_m"]:
+        raise Refused("POST-SCALE", "points x span %r m, want %r within %r rel"
+                      % (span, pipe_mesh.RECIPE["L_m"], rel))
+    return theta, 2.0 * math.pi / theta, "wedge_normals", None
+
+
+def _turb_rebind(paths, keys, inputs):
+    """The second POST-BIND: any input changed while it was read is a refusal."""
+    for key in keys:
+        snap = common.stable_file_snapshot(paths[key])
+        if snap["stable"] is not True or snap["sha256"] != inputs[key]:
+            raise Refused("POST-BIND", "%s changed while it was read" % key)
+
+
+def accel(x, u_edge, u_tau, nu):
+    """K = -nu d(1/U_e)/dx by thwaites.sg_derivative and p = -K (U_e/u_tau)^3 (CAD-27, decisions D1/D5);
+    POST-UNDEFINED (K and p None) when any U_e is None or <= 0, fewer than thwaites.SG_WINDOW stations, or
+    x not strictly increasing; p is None only where u_tau is None or <= 0. Pure; lists of floats out."""
+    xs = [float(v) for v in x]
+    ue = [None if v is None else float(v) for v in u_edge]
+    ut = [None if v is None else float(v) for v in u_tau]
+    out = {"x_m": xs, "U_edge_m_s": ue, "u_tau_m_s": ut, "K": None, "K_max": None, "p": None,
+           "p_min": None, "method": ACCEL_METHOD, "reason_id": UNDEFINED_ID}
+    defined = (len(xs) >= thwaites.SG_WINDOW and all(v is not None and v > 0.0 for v in ue)
+               and all(xs[i + 1] > xs[i] for i in range(len(xs) - 1)))
+    if not defined:
+        return out
+    k = [-nu * float(d) for d in thwaites.sg_derivative(np.asarray(xs), [1.0 / v for v in ue])]
+    ps = [None if t is None or t <= 0.0 else -k[i] * (ue[i] / t) ** 3 for i, t in enumerate(ut)]
+    good = [v for v in ps if v is not None]
+    out["K"] = k
+    out["K_max"] = max(k)
+    out["p"] = ps
+    out["p_min"] = min(good) if good else None
+    out["reason_id"] = None
+    return out
+
+
+def _radial_groups(mesh):
+    """The radial groups of F7: cells sorted by |C_P| (stable), a new group when |C_P| exceeds the
+    group's first by more than FLAT_TOL_M. Returns (groups, rc)."""
+    rc = np.hypot(mesh["C"][:, 1], mesh["C"][:, 2])
+    order = np.argsort(rc, kind="stable")
+    groups = []
+    start = 0
+    for i in range(1, len(order) + 1):
+        if i == len(order) or rc[order[i]] - rc[order[start]] > FLAT_TOL_M:
+            groups.append(order[start:i])
+            start = i
+    return groups, rc
+
+
+def pipe_block(mesh, U, nut, ctx):
+    """The PIPE_KEYS block of the periodic pipe (CAD-27, F7 = decision D4; TB0-TB4): bulk velocity, the
+    area-equivalent diameter, f and Re from the wall u_tau, the axis fit through the two innermost radial
+    groups, the core defect, x-invariance, the wall-inward profile, the log-law band, and the rho g_x V
+    force balance. ctx: factor, nu_m2_s, g_x_m_s2, rho_kg_m3, shear (wall_shear's internal dict).
+    POST-STATION under 2 radial groups or when the groups are of unequal size."""
+    groups, rc = _radial_groups(mesh)
+    sizes = sorted(set(int(g.size) for g in groups))
+    if len(groups) < 2 or len(sizes) != 1:
+        raise Refused("POST-STATION", "%d radial group(s) of sizes %s"
+                      % (len(groups), ",".join(str(s) for s in sizes)))
+    factor = ctx["factor"]
+    nu = ctx["nu_m2_s"]
+    ux = U["internal"][:, 0]
+    vol = mesh["V"]
+    v_tot = factor * float(np.sum(vol))
+    u_b = float(np.sum(ux * vol)) / float(np.sum(vol))
+    u_tau = ctx["shear"]["rows"]["wall"]["u_tau_m_s"]
+    stw, nfw, _t = mesh["patch_range"]["wall"]
+    vs = set()
+    for f in range(stw, stw + nfw):
+        vs.update(mesh["faces"][f])
+    pts = mesh["points"][np.array(sorted(vs), dtype=np.int64)]
+    r_wf = float(np.mean(np.hypot(mesh["Cf"][stw:stw + nfw, 1], mesh["Cf"][stw:stw + nfw, 2])))
+    l_span = float(np.max(mesh["points"][:, 0]) - np.min(mesh["points"][:, 0]))
+    row = {"R_m": float(np.max(np.hypot(pts[:, 1], pts[:, 2]))), "L_m": l_span, "V_m3": v_tot,
+           "D_m": 2.0 * math.sqrt(v_tot / (math.pi * l_span)), "R_wall_face_m": r_wf,
+           "n_radial": len(groups), "U_b_m_s": u_b,
+           "Re_D": None if u_b == 0.0 else u_b * (2.0 * math.sqrt(v_tot / (math.pi * l_span))) / nu,
+           "u_tau_m_s": u_tau,
+           "Re_tau": None if u_tau in (None, 0.0) else u_tau * math.sqrt(v_tot / (math.pi * l_span)) / nu,
+           "f": None if u_tau in (None, 0.0) or u_b == 0.0 else 8.0 * (u_tau / u_b) ** 2}
+    means = sorted((float(rc[g[0]]), float(np.mean(ux[g]))) for g in groups)
+    row["U_axis_m_s"] = _axis_fit(means[0][1], means[1][1], means[0][0], means[1][0])
+    row["core_defect"] = None if u_tau in (None, 0.0) else (row["U_axis_m_s"] - u_b) / u_tau
+    devs = []
+    for g in groups:
+        m = float(np.mean(ux[g]))
+        devs.extend(np.abs(ux[g] - m))
+    row["x_invariance"] = None if u_b == 0.0 else float(np.max(devs)) / u_b
+    row["profile"] = [{"r_m": r, "y_m": r_wf - r, "u_m_s": um,
+                       "y_plus": None if u_tau in (None, 0.0) else (r_wf - r) * u_tau / nu,
+                       "u_plus": None if u_tau in (None, 0.0) else um / u_tau}
+                      for r, um in sorted(means, reverse=True)]
+    if u_tau in (None, 0.0):
+        row["loglaw"] = {"y_plus_min": None, "y_plus_max": None, "n_cells": 0, "dev_max": None}
+    else:
+        yp = (r_wf - rc) * u_tau / nu
+        sel = (yp >= LOGLAW_YPLUS_MIN) & (yp <= LOGLAW_RE_TAU_FRAC * row["Re_tau"])
+        n_sel = int(np.count_nonzero(sel))
+        if n_sel == 0:
+            row["loglaw"] = {"y_plus_min": None, "y_plus_max": None, "n_cells": 0, "dev_max": None}
+        else:
+            dev = np.abs(ux[sel] / u_tau - turb_integral.u_plus_log(yp[sel]))
+            row["loglaw"] = {"y_plus_min": float(np.min(yp[sel])), "y_plus_max": float(np.max(yp[sel])),
+                             "n_cells": n_sel, "dev_max": float(np.max(dev))}
+    Sf = mesh["Sf"][stw:stw + nfw]
+    mag = np.sqrt(_dot3(Sf, Sf))
+    shear_f = factor * float(np.sum(ctx["shear"]["faces"]["wall"]["tau_x"] * mag))
+    g_x = ctx["g_x_m_s2"]
+    row["shear_force_N"] = ctx["rho_kg_m3"] * shear_f
+    row["body_force_N"] = None if g_x is None else ctx["rho_kg_m3"] * g_x * v_tot
+    row["balance_rel"] = None if g_x is None or row["body_force_N"] == 0.0 \
+        else row["shear_force_N"] / row["body_force_N"] - 1.0
+    return row
+
+
+def wall_shear(mesh, U, nut, nu, names, factor):
+    """The wall shear of docs/16 §H.5 (CAD-27, decisions D2/D3) per patch: tau_w,f = (nu + nut_f) |u_t,P| / d_P
+    with u_t,P the owner's tangential velocity, d_P = (C_f - C_P) . n_f, and y+_f = d_P sqrt(tau_w,f) / nu.
+    Returns {"rows": {name: WALL_SHEAR_KEYS row}} for the doc plus "faces" {name: {"tau_w", "tau_x",
+    "u_tau_f"}} arrays for pipe_block and momentum_turb - stripped before the doc is built."""
+    rows, faces = {}, {}
+    for name in names:
+        st, nf, _t = mesh["patch_range"][name]
+        oc = mesh["owner"][st:st + nf]
+        Sf = mesh["Sf"][st:st + nf]
+        mag = np.sqrt(_dot3(Sf, Sf))
+        n = Sf / mag[:, None]
+        u_P = U["internal"][oc]
+        u_t = u_P - _dot3(u_P, n)[:, None] * n
+        nut_f = face_values(mesh, nut, name)
+        d_P = _dot3(mesh["Cf"][st:st + nf] - mesh["C"][oc], n)
+        tau_w = (nu + nut_f) * np.sqrt(_dot3(u_t, u_t)) / d_P
+        tau_x = (nu + nut_f) * u_t[:, 0] / d_P
+        if nf == 0:
+            rows[name] = {"n_faces": 0, "area_m2": None, "tau_mean_m2_s2": None, "u_tau_m_s": None,
+                          "yplus1_max": None, "yplus1_mean": None, "yplus1_frac_le1": None,
+                          "method": WALL_SHEAR_METHOD}
+        else:
+            tau_mean = float(np.sum(mag * tau_w)) / float(np.sum(mag))
+            yplus = d_P * np.sqrt(tau_w) / nu
+            rows[name] = {"n_faces": int(nf), "area_m2": factor * float(np.sum(mag)),
+                          "tau_mean_m2_s2": tau_mean, "u_tau_m_s": math.sqrt(tau_mean),
+                          "yplus1_max": float(np.max(yplus)), "yplus1_mean": float(np.mean(yplus)),
+                          "yplus1_frac_le1": float(np.count_nonzero(yplus <= YPLUS_LIMIT)) / int(nf),
+                          "method": WALL_SHEAR_METHOD}
+        faces[name] = {"tau_w": tau_w, "tau_x": tau_x, "u_tau_f": np.sqrt(tau_w)}
+    return {"rows": rows, "faces": faces}
+
+
 def post(case_dir, time_name, geom_dir, between_hook=None):
     """The cad-post/1 doc (DOC_KEYS) by the rules of (C4); never raises Refused - a refusal comes back as the doc
     with status "refused". between_hook(case_dir), a selftest hook, runs after the metrics and before the second
@@ -1000,6 +1449,12 @@ def main(argv):
         doc = post(os.path.abspath(argv[1]), argv[2], os.path.abspath(argv[3]))
         write_doc(argv[4], doc)
         print(common.canonical_json({"status": doc["status"], "reason_id": doc["reason_id"]}))
+        return 0 if doc["status"] == "ok" else 1
+    if len(argv) == 5 and argv[0] == "run-turb":
+        geom_dir = None if argv[3] == "-" else os.path.abspath(argv[3])
+        doc = post_turb(os.path.abspath(argv[1]), argv[2], geom_dir)
+        write_doc(argv[4], doc)
+        print(common.canonical_json({"reason_id": doc["reason_id"], "status": doc["status"]}))
         return 0 if doc["status"] == "ok" else 1
     if len(argv) == 3 and argv[0] == "fx-tet":
         return _fx_tet(argv[1], argv[2])
@@ -1785,6 +2240,380 @@ def _t13(td, gdir, cdir, doc7):
     print("[ok] determinism and the CLI: identical bytes, no path, exits 0 / 1 / 2")
 
 
+def _t14(pcase, case):
+    """A planted Poiseuille pipe (docs/16 §I CAD-27): f Re_D = 64 through the same f path, the oracle
+    numbers, x-invariance, and one perturbed cell caught."""
+    import pipe_mesh
+    mesh = load_mesh(os.path.join(pcase, "constant", "polyMesh"))
+    types = _fx_types_turb(case)
+    r_p = pipe_mesh.RECIPE["R_m"] * math.cos(math.radians(2.5))
+
+    def fn_u(pt):
+        u = 2.0 * (1.0 - (pt[:, 1] ** 2 + pt[:, 2] ** 2) / r_p ** 2)
+        return np.stack([u, np.zeros_like(u), np.zeros_like(u)], axis=1)
+
+    U, p, nut = _fx_plant_c(mesh, fn_u, lambda pt: np.zeros(len(pt)),
+                            lambda pt: np.zeros(len(pt)), types)
+    _fx_write_turb(pcase, "9", U, p, nut)
+    doc = post_turb(pcase, "9")
+    assert doc["status"] == "ok", (doc["status"], doc["reason_id"], doc["message"])
+    assert doc["kind"] == "pipe" and doc["wedge"]["theta_source"] == "wedge_normals"
+    assert doc["pipe"] is not None and doc["nozzle"] is None and doc["mesh_fidelity"] is None
+    pb = doc["pipe"]
+    assert abs(pb["f"] * pb["Re_D"] / 64.0 - 1.0) <= 1e-3, pb["f"] * pb["Re_D"]
+    assert abs(pb["f"] * pb["Re_D"] / 63.97539743517225 - 1.0) <= 1e-9
+    assert abs(pb["U_b_m_s"] / 1.0005960972173311 - 1.0) <= 1e-12, pb["U_b_m_s"]
+    assert abs(pb["u_tau_m_s"] / 0.0492712232359498 - 1.0) <= 1e-9
+    assert abs(pb["Re_D"] / 3298.024866681143 - 1.0) <= 1e-9
+    assert abs(pb["D_m"] / 0.04996827103156937 - 1.0) <= 1e-12
+    assert pb["n_radial"] == 40
+    assert abs(pb["U_axis_m_s"] / 2.0 - 1.0) <= 1e-12
+    assert abs(pb["core_defect"] / 20.2837241932624 - 1.0) <= 1e-9
+    assert pb["x_invariance"] <= 1e-12, pb["x_invariance"]
+    assert len(pb["profile"]) == 40
+    assert all(pb["profile"][i]["y_m"] < pb["profile"][i + 1]["y_m"] for i in range(39))
+    u2 = U["internal"].copy()
+    u2[87, 0] += 1e-3
+    _fx_write_turb(pcase, "9", dict(U, internal=u2), p, nut)
+    doc2 = post_turb(pcase, "9")
+    assert abs(doc2["pipe"]["x_invariance"] / 0.0007495439047455829 - 1.0) <= 1e-6, doc2["pipe"]["x_invariance"]
+    print("[ok] pipe Poiseuille: f Re_D %.9f, U_b %.13f, x_invariance %.1e -> %.9f perturbed"
+          % (pb["f"] * pb["Re_D"], pb["U_b_m_s"], pb["x_invariance"], doc2["pipe"]["x_invariance"]))
+
+
+def _t15(pcase, case, mesh):
+    """A planted log-law pipe: u_tau back from the wall shear to 1e-12, the log-law band clean."""
+    import turb_integral as ti
+    types = _fx_types_turb(case)
+    u_tau0 = 0.34970481600000003
+    nu = case["operating_point"]["nu_m2_s"]
+    stw, nfw, _t = mesh["patch_range"]["wall"]
+    r_wf = float(np.mean(np.hypot(mesh["Cf"][stw:stw + nfw, 1], mesh["Cf"][stw:stw + nfw, 2])))
+
+    def fn_u(pt):
+        yp = (r_wf - np.hypot(pt[:, 1], pt[:, 2])) * u_tau0 / nu
+        up = yp.copy()
+        m = yp > 11.0
+        up[m] = ti.u_plus_log(yp[m])
+        return np.stack([u_tau0 * up, np.zeros_like(up), np.zeros_like(up)], axis=1)
+
+    U, p, nut = _fx_plant_c(mesh, fn_u, lambda pt: np.zeros(len(pt)),
+                            lambda pt: np.zeros(len(pt)), types)
+    _fx_write_turb(pcase, "9", U, p, nut)
+    doc = post_turb(pcase, "9")
+    assert doc["status"] == "ok", (doc["status"], doc["reason_id"], doc["message"])
+    ws = doc["wall_shear"]["wall"]
+    assert abs(ws["u_tau_m_s"] / u_tau0 - 1.0) <= 1e-12, ws["u_tau_m_s"]
+    assert abs(doc["pipe"]["Re_tau"] / 576.3240444239149 - 1.0) <= 1e-9
+    assert abs(ws["yplus1_max"] / 0.12215872536815109 - 1.0) <= 1e-9
+    assert ws["yplus1_frac_le1"] == 1.0
+    ll = doc["pipe"]["loglaw"]
+    assert ll["n_cells"] == 36 and ll["dev_max"] <= 1e-9, ll
+    rc = np.hypot(mesh["C"][:, 1], mesh["C"][:, 2])
+    ux = U["internal"][:, 0]
+    for r in doc["pipe"]["profile"]:
+        g = np.abs(rc - r["r_m"]) <= 1e-12
+        assert abs(r["u_plus"] - float(np.mean(ux[g])) / u_tau0) <= 1e-9
+        assert abs(r["y_plus"] / ((r_wf - r["r_m"]) * u_tau0 / nu) - 1.0) <= 1e-9
+    print("[ok] pipe log law: u_tau to %.1e rel, loglaw %d cells dev %.1e"
+          % (abs(ws["u_tau_m_s"] / u_tau0 - 1.0), ll["n_cells"], ll["dev_max"]))
+
+
+def _t16(pcase, case, mesh):
+    """A planted balanced pipe field: the wedge-scaled wall shear force equals rho g_x V."""
+    types = _fx_types_turb(case)
+    nu = case["operating_point"]["nu_m2_s"]
+    g_x = case["operating_point"]["g_x_m_s2"]
+    rho = reqs.RHO_TABLE["air"]
+    stw, nfw, _t = mesh["patch_range"]["wall"]
+    Sf = mesh["Sf"][stw:stw + nfw]
+    mag = np.sqrt(_dot3(Sf, Sf))
+
+    def side(name):
+        st, nf, _t2 = mesh["patch_range"][name]
+        s = np.sum(mesh["Sf"][st:st + nf], axis=0)
+        return s / np.linalg.norm(s)
+
+    nf_, nb_ = side("wedge_front"), side("wedge_back")
+    theta = math.atan2(float(np.linalg.norm(np.cross(nf_, nb_))), abs(float(np.dot(nf_, nb_))))
+    factor = 2.0 * math.pi / theta
+    V = factor * float(np.sum(mesh["V"]))
+    a_w = factor * float(np.sum(mag))
+    tau0 = g_x * V / a_w
+    oc = mesh["owner"][stw:stw + nfw]
+    d_p0 = float(np.mean(_dot3(mesh["Cf"][stw:stw + nfw] - mesh["C"][oc], Sf / mag[:, None])))
+    rc_wall = float(np.mean(np.hypot(mesh["C"][oc, 1], mesh["C"][oc, 2])))
+
+    def fn_u(pt):
+        hit = np.abs(np.hypot(pt[:, 1], pt[:, 2]) - rc_wall) <= 1e-12
+        u = np.where(hit, tau0 * d_p0 / nu, 0.0)
+        return np.stack([u, np.zeros_like(u), np.zeros_like(u)], axis=1)
+
+    U, p, nut = _fx_plant_c(mesh, fn_u, lambda pt: np.zeros(len(pt)),
+                            lambda pt: np.zeros(len(pt)), types)
+    _fx_write_turb(pcase, "9", U, p, nut)
+    doc = post_turb(pcase, "9")
+    assert doc["status"] == "ok", (doc["status"], doc["reason_id"], doc["message"])
+    pb = doc["pipe"]
+    assert abs(pb["body_force_N"] / 0.0023101187039260922 - 1.0) <= 1e-12, pb["body_force_N"]
+    assert abs(pb["shear_force_N"] / (rho * g_x * V) - 1.0) <= 1e-9
+    assert abs(pb["balance_rel"]) <= 1e-9, pb["balance_rel"]
+    assert abs(doc["wall_shear"]["wall"]["tau_mean_m2_s2"] / 0.12217706205927206 - 1.0) <= 1e-9
+    print("[ok] pipe balance: shear/(rho g_x V) - 1 = %.2e, balance_rel %.2e"
+          % (pb["shear_force_N"] / (rho * g_x * V) - 1.0, pb["balance_rel"]))
+
+
+def _t17(ncase, gdir, case, mesh):
+    """A planted 1/7-power exit layer: theta/delta = 7/72 within 0.5 % through the laminar path."""
+    types = _fx_types_turb(case)
+    tags = common.read_json(os.path.join(gdir, "tags.json"))
+    planes = dict((q["name"], q["x"]) for q in tags["planes"])
+    le = [lay for lay in layers(mesh) if abs(lay["x"] - planes["exit_plane"]) <= FLAT_TOL_M]
+    assert len(le) == 1, len(le)
+    r_e = le[0]["R"]
+    delta = 0.1 * r_e
+
+    def fn_u(pt):
+        y = np.maximum(r_e * math.cos(math.radians(2.5)) - np.hypot(pt[:, 1], pt[:, 2]), 0.0)
+        u = 50.0 * np.minimum(1.0, y / delta) ** (1.0 / 7.0)
+        return np.stack([u, np.zeros_like(u), np.zeros_like(u)], axis=1)
+
+    U, p, nut = _fx_plant_c(mesh, fn_u, lambda pt: np.zeros(len(pt)),
+                            lambda pt: np.zeros(len(pt)), types)
+    _fx_write_turb(ncase, "9", U, p, nut)
+    doc = post_turb(ncase, "9", gdir)
+    assert doc["status"] == "ok", (doc["status"], doc["reason_id"], doc["message"])
+    assert doc["kind"] == "nozzle" and doc["pipe"] is None
+    assert doc["mesh_fidelity"]["status"] == "ok" and doc["mesh_fidelity"]["scale_pass"] is True
+    assert doc["wedge"]["theta_source"] == "mesh_fidelity"
+    me = doc["nozzle"]["metrics"]
+    assert abs(me["theta_exit"]["value"] / delta / (7.0 / 72.0) - 1.0) <= 5e-3
+    assert abs(me["theta_exit"]["value"] / delta / 0.09704604709164305 - 1.0) <= 1e-9
+    assert abs(me["H_exit"]["value"] / 1.2859604217303642 - 1.0) <= 1e-9
+    print("[ok] nozzle 1/7 layer: theta/delta = %.11f (7/72 within 0.5 %%), H = %.13f"
+          % (me["theta_exit"]["value"] / delta, me["H_exit"]["value"]))
+
+
+def _t18(ncase, gdir, case, mesh):
+    """An analytic sink flow: K = nu/30 at every station by the 1/U form, every p None at u_tau 0,
+    and the accel() undefined cases."""
+    types = _fx_types_turb(case)
+    nu = case["operating_point"]["nu_m2_s"]
+
+    def fn_u(pt):
+        z = np.zeros(len(pt))
+        return np.stack([z, z, z], axis=1)
+
+    def fn_p(pt):
+        us = 30.0 / (1.0 - pt[:, 0])
+        return np.where(pt[:, 0] >= 0.0, -us * us / 2.0, 0.0)
+
+    U, p, nut = _fx_plant_c(mesh, fn_u, fn_p, lambda pt: np.zeros(len(pt)), types)
+    _fx_write_turb(ncase, "9", U, p, nut)
+    doc = post_turb(ncase, "9", gdir)
+    assert doc["status"] == "ok", (doc["status"], doc["reason_id"], doc["message"])
+    ac = doc["nozzle"]["accel"]
+    assert len(ac["x_m"]) == 60 and ac["reason_id"] is None
+    k_want = nu / 30.0
+    assert max(abs(k / k_want - 1.0) for k in ac["K"]) <= 1e-6, max(abs(k / k_want - 1.0) for k in ac["K"])
+    assert abs(ac["K_max"] / k_want - 1.0) <= 1e-6
+    assert all(v is None for v in ac["p"]) and ac["p_min"] is None
+    xs = list(np.linspace(0.0, 0.5, 41))
+    ue = [30.0 / (1.0 - v) for v in xs]
+    a = accel(xs, ue, [1.5] * 41, nu)
+    assert a["reason_id"] is None and max(abs(k / k_want - 1.0) for k in a["K"]) <= 1e-9
+    assert all(abs(a["p"][i] / (-a["K"][i] * (ue[i] / 1.5) ** 3) - 1.0) <= 1e-12 for i in range(41))
+    a2 = accel(xs, [None] + ue[1:], [1.5] * 41, nu)
+    assert a2["reason_id"] == UNDEFINED_ID and a2["K"] is None and a2["p"] is None
+    ut2 = [1.5] * 41
+    ut2[7] = 0.0
+    a3 = accel(xs, ue, ut2, nu)
+    assert a3["reason_id"] is None and a3["p"][7] is None
+    assert all(a3["p"][i] is not None for i in range(41) if i != 7)
+    a4 = accel(xs[:10], ue[:10], [1.5] * 10, nu)
+    assert a4["reason_id"] == UNDEFINED_ID
+    print("[ok] sink flow: K = nu/30 to %.1e rel on %d stations, p None at u_tau 0, POST-UNDEFINED 3 ways"
+          % (max(abs(k / k_want - 1.0) for k in ac["K"]), len(ac["x_m"])))
+
+
+def _t19(ncase, gdir, case, mesh):
+    """The nozzle wall-shear block and the S term inside the axial momentum residual."""
+    types = _fx_types_turb(case)
+
+    def fn_u(pt):
+        u = np.where(pt[:, 0] < 0.2, 30.0, 1.0)
+        return np.stack([u, np.zeros_like(u), np.zeros_like(u)], axis=1)
+
+    U, p, nut = _fx_plant_c(mesh, fn_u, lambda pt: -50.0 * pt[:, 0],
+                            lambda pt: np.zeros(len(pt)), types)
+    _fx_write_turb(ncase, "9", U, p, nut)
+    doc = post_turb(ncase, "9", gdir)
+    assert doc["status"] == "ok", (doc["status"], doc["reason_id"], doc["message"])
+    ws = doc["wall_shear"]
+    noz, ups = ws["wall_nozzle"], ws["wall_upstream"]
+    assert noz["n_faces"] == 60 and ups["n_faces"] == 57
+    assert abs(noz["area_m2"] / 0.4349966540758174 - 1.0) <= 1e-12, noz["area_m2"]
+    for got, want in ((noz["tau_mean_m2_s2"], 68.31392631410176), (noz["u_tau_m_s"], 8.265223911915621),
+                      (noz["yplus1_max"], 2.3960394284990674), (noz["yplus1_mean"], 1.149147798783713),
+                      (ups["u_tau_m_s"], 12.526063833801757)):
+        assert abs(got / want - 1.0) <= 1e-9, (got, want)
+    assert noz["yplus1_frac_le1"] == 38 / 60 and ups["yplus1_frac_le1"] == 0.0
+    mt = doc["nozzle"]["momentum_turb"]
+    assert mt["x_a_m"] == -0.07368421052631585 and mt["x_b_m"] == 0.5030330085889999
+    assert abs(mt["S"] / 40.26774747920834 - 1.0) <= 1e-9, mt["S"]
+    tol = 1e-12 * max(1.0, abs(mt["I_a"]))
+    assert abs(mt["residual"] - (mt["I_a"] - mt["I_b"] - mt["W"] - mt["S"])) <= tol
+    assert abs(mt["residual"] - (doc["nozzle"]["momentum"]["residual"] - mt["S"])) <= tol
+    assert mt["closure"] == mt["residual"] / abs(mt["P_a"] - mt["P_b"])
+    assert sorted(doc["nozzle"]) == sorted(NOZZLE_KEYS)
+    print("[ok] nozzle shear: S %.9f, residual the laminar one minus S, closure residual/|dP|" % mt["S"])
+    return doc
+
+
+def _t20(td, gdir_lam, cdir_lam, pcase, gdir, ncase):
+    """The refusals by id: the laminar case, both kind mismatches, a missing nut, a changed nut, nut
+    units, a scaled pipe, a retyped wall_upstream; the laminar reader still refuses the turbulent case;
+    then determinism (identical canonical bytes, no path inside) and the run-turb CLI 0 / 0 / 1 / 2."""
+    import mesh_fidelity
+    common.atomic_write(os.path.join(cdir_lam, "7", "nut"),
+                        "FoamFile { format ascii; class volScalarField; object nut; }" + chr(10)
+                        + "dimensions [0 2 -1 0 0 0 0];" + chr(10)
+                        + "internalField uniform 0;" + chr(10) + "boundaryField { }" + chr(10))
+    doc = post_turb(cdir_lam, "7", gdir_lam)
+    assert doc["status"] == "refused" and doc["reason_id"] == "POST-BIND", (doc["reason_id"], doc["message"])
+    assert "cad-case-turb/1" in doc["message"], doc["message"]
+    doc = post_turb(ncase, "9")
+    assert doc["reason_id"] == "POST-BIND", doc["message"]
+    doc = post_turb(pcase, "9", gdir)
+    assert doc["reason_id"] == "POST-BIND", doc["message"]
+    c = _fx_copy_tree(ncase, os.path.join(td, "t20_nonut"))
+    os.remove(os.path.join(c, "9", "nut"))
+    doc = post_turb(c, "9", gdir)
+    assert doc["reason_id"] == "POST-BIND" and doc["inputs"]["fields/nut"] is None, doc["message"]
+    c = _fx_copy_tree(ncase, os.path.join(td, "t20_changed"))
+    doc = post_turb(c, "9", gdir, between_hook=lambda d: _append(os.path.join(d, "9", "nut")))
+    assert doc["reason_id"] == "POST-BIND" and "changed" in doc["message"], doc["message"]
+    c = _fx_copy_tree(ncase, os.path.join(td, "t20_units"))
+    pth = os.path.join(c, "9", "nut")
+    with open(pth, encoding="utf-8") as f:
+        text = f.read()
+    common.atomic_write(pth, text.replace("[0 2 -1 0 0 0 0]", "[0 2 -2 0 0 0 0]"))
+    doc = post_turb(c, "9", gdir)
+    assert doc["reason_id"] == "POST-UNITS", doc["message"]
+    c = _fx_copy_tree(pcase, os.path.join(td, "t20_scaled"))
+    mesh_fidelity._fx_scale_points(c, 1.001)
+    _fx_rebind(c, ("boundary", "faces", "neighbour", "owner", "points"))
+    doc = post_turb(c, "9")
+    assert doc["reason_id"] == "POST-SCALE", doc["message"]
+    c = _fx_copy_tree(ncase, os.path.join(td, "t20_retyped"))
+    mesh_fidelity._fx_retype(c, "wall_upstream", new_type="patch")
+    _fx_rebind(c, ("boundary",))
+    doc = post_turb(c, "9", gdir)
+    assert doc["reason_id"] == "POST-PATCH", doc["message"]
+    doc = post(ncase, "9", gdir)
+    assert doc["status"] == "refused" and doc["reason_id"] == "POST-PATCH", doc["message"]
+    text1 = common.canonical_json(post_turb(ncase, "9", gdir))
+    text2 = common.canonical_json(post_turb(ncase, "9", gdir))
+    assert text1 == text2
+    for bad in (td, td.replace(chr(92), "/"), "C:"):
+        assert bad not in text1, bad
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    out = os.path.join(td, "out_turb.json")
+    pr = subprocess.run([sys.executable, os.path.abspath(__file__), "run-turb", ncase, "9", gdir, out],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, env=env)
+    assert pr.returncode == 0, (pr.returncode, pr.stdout[-200:], pr.stderr[-300:])
+    with open(out, "rb") as f:
+        blob = f.read()
+    assert blob == (text1 + chr(10)).encode("utf-8")
+    out2 = os.path.join(td, "out_pipe.json")
+    pr = subprocess.run([sys.executable, os.path.abspath(__file__), "run-turb", pcase, "9", "-", out2],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, env=env)
+    assert pr.returncode == 0, (pr.returncode, pr.stdout[-200:], pr.stderr[-300:])
+    pr = subprocess.run([sys.executable, os.path.abspath(__file__), "run-turb", pcase, "nope", "-", out2],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, env=env)
+    assert pr.returncode == 1 and "POST-BIND" in pr.stdout, (pr.returncode, pr.stdout[:200])
+    pr = subprocess.run([sys.executable, os.path.abspath(__file__), "run-turb", "x"],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, env=env)
+    assert pr.returncode == 2, pr.returncode
+    print("[ok] refusals, determinism, run-turb CLI: POST-BIND/POST-UNITS/POST-SCALE/POST-PATCH, "
+          "identical bytes with no path inside, exits 0 / 0 / 1 (POST-BIND) / 2")
+
+
+def _fx_types_turb(case):
+    """Each patch's U, p and nut types from the case's own patch rows."""
+    return dict((row["name"], (row["U"]["type"], row["p"]["type"], row["nut"]["type"]))
+                for row in case["patches"])
+
+
+def _fx_plant_c(mesh, fn_u, fn_p, fn_n, types):
+    """CENTROID plants: internal = fn(C_P); a patch whose BC carries a value gets fn's face average (the
+    degree-2 fan rule of _face_avg) on its faces."""
+    u_fa = _flat(_face_avg(mesh, fn_u))
+    p_fa = _flat(_face_avg(mesh, fn_p))
+    n_fa = _flat(_face_avg(mesh, fn_n))
+    U = {"dimensions": DIMS_U, "internal": fn_u(mesh["C"]), "patches": {}}
+    p = {"dimensions": "[0 2 -2 0 0 0 0]", "internal": fn_p(mesh["C"]).reshape(-1), "patches": {}}
+    nut = {"dimensions": DIMS_NUT, "internal": fn_n(mesh["C"]).reshape(-1), "patches": {}}
+    for name, (ut, pt, nt) in types.items():
+        st, nf, _t = mesh["patch_range"][name]
+        U["patches"][name] = {"type": ut, "value": None if ut not in NEED_VALUE else u_fa[st:st + nf]}
+        p["patches"][name] = {"type": pt, "value": None if pt not in NEED_VALUE else p_fa[st:st + nf]}
+        nut["patches"][name] = {"type": nt, "value": None if nt not in NEED_VALUE else n_fa[st:st + nf]}
+    return U, p, nut
+
+
+def _fx_write_turb(cdir, time_name, U, p, nut):
+    """U, p and nut into the time directory (created); U's inletOutlet row carries inletValue 0."""
+    os.makedirs(os.path.join(cdir, time_name), exist_ok=True)
+    _fx_write_field(os.path.join(cdir, time_name, "U"), DIMS_U, "volVectorField", "U", time_name,
+                    U["internal"], _fx_rows_of(U, True))
+    _fx_write_field(os.path.join(cdir, time_name, "p"), "[0 2 -2 0 0 0 0]", "volScalarField", "p",
+                    time_name, p["internal"], _fx_rows_of(p))
+    _fx_write_field(os.path.join(cdir, time_name, "nut"), DIMS_NUT, "volScalarField", "nut", time_name,
+                    nut["internal"], _fx_rows_of(nut))
+
+
+def _fx_turb_chain(td):
+    """The L0 pipe, the TURB_NOMINAL geometry (export.py run in a FRESH child process, as case_writer.py's
+    selftest does - OCCT numbers STEP products with a process-global counter), its L0 turbulent wedge at
+    U_e 60, the locked turbulent study, and both cases (docs/16 §H.5, the pattern of case_writer.py)."""
+    import case_writer
+    import export
+    import pipe_mesh
+    import wedge_mesh
+    pdir = os.path.join(td, "pipe")
+    res = pipe_mesh.run(pdir, levels=(0,))
+    assert res["status"] == "ok", (res["status"], res["rule"], res["message"])
+    gdir = os.path.join(td, "geom_turb")
+    pparams = os.path.join(td, "turb_params.json")
+    common.write_json(pparams, dict(export.TURB_NOMINAL))
+    r = subprocess.run([sys.executable, os.path.join(HERE, "export.py"), "run", export.TEMPLATE, pparams, gdir],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert r.returncode == 0, (r.returncode, r.stdout[-200:], r.stderr[-300:])
+    wdir = os.path.join(td, "wedge_turb")
+    res = wedge_mesh.run_turb(gdir, wdir, U_e=60.0, levels=(0,))
+    assert res["status"] == "ok", (res["status"], res["rule"], res["message"])
+    sdir = os.path.join(td, "study")
+    doc = common.read_json(os.path.join(common.FIXTURES, "reqs", "golden",
+                                        "v3_exit_velocity.json"))["requirements"]
+    for row_ in doc["rows"]:
+        if row_["id"] == "REQ-001":
+            row_["value"] = 0.30
+        if row_["id"] == "REQ-002":
+            row_["value"] = 0.30 / math.sqrt(2.0)
+    doc["operating_point"]["U_exit_m_s"] = 60.0
+    doc["operating_point"]["flow_quote"] = "at %r m/s" % 60.0
+    doc["lock_sha"] = reqs.lock_sha_of(doc)
+    reqs.write_locked(sdir, doc)
+    pcase = os.path.join(td, "case_pipe")
+    res = case_writer.write_pipe_case(pdir, 0, 576.69, pcase)
+    assert res["status"] == "ok", (res["status"], res["rule"], res["message"])
+    ncase = os.path.join(td, "case_nozzle")
+    res = case_writer.write_turb_case(wdir, 0, gdir, sdir, ncase)
+    assert res["status"] == "ok", (res["status"], res["rule"], res["message"])
+    return gdir, pcase, ncase
+
+
 def _wrap(inputs_shas, res):
     """An ok doc wrapper around an in-memory metrics() result, for records() in the selftest."""
     doc = dict((k, None) for k in DOC_KEYS)
@@ -1799,7 +2628,8 @@ def _wrap(inputs_shas, res):
 
 
 def selftest() -> None:
-    """T1..T13 of docs/16 section I CAD-14: geometry, the reader, the four plan gates, the refusals, the CLI."""
+    """T1..T13 of docs/16 section I CAD-14: geometry, the reader, the four plan gates, the refusals, the
+    CLI; T14..T20 of section I CAD-27: the turbulent pipe and nozzle through post_turb."""
     import time
     t0 = time.time()
     with tempfile.TemporaryDirectory() as td:
@@ -1829,6 +2659,19 @@ def selftest() -> None:
         _t12(td, gdir, cdir, case)
         _t13(td, gdir, cdir, doc7)
         del p_field
+        ttd = os.path.join(td, "turb")
+        gt, pcase, ncase = _fx_turb_chain(ttd)
+        case_p = common.read_json(os.path.join(pcase, "case.json"))
+        case_n = common.read_json(os.path.join(ncase, "case.json"))
+        _t14(pcase, case_p)
+        mesh_p = load_mesh(os.path.join(pcase, "constant", "polyMesh"))
+        _t15(pcase, case_p, mesh_p)
+        _t16(pcase, case_p, mesh_p)
+        mesh_n = load_mesh(os.path.join(ncase, "constant", "polyMesh"))
+        _t17(ncase, gt, case_n, mesh_n)
+        _t18(ncase, gt, case_n, mesh_n)
+        _t19(ncase, gt, case_n, mesh_n)
+        _t20(ttd, gdir, cdir, pcase, gt, ncase)
     print("SELFTEST PASS (%.1f s)" % (time.time() - t0))
 
 
