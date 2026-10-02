@@ -761,3 +761,28 @@ second claim (AM-L's G-BLC-1) needs a fresh test seed and a new lock.
   feature-edge counts the seal lacks; the feature-share rule for feature_tolerance 0; the -preflight RAM guard (8,192
   MiB); G-OPT decided as written with the optimiser's marginal beside it; -remedies runs K = 1; the plan lock; the
   G-DET draw; the tier-0 stratum by the manifest's commensurate flag; surface ends count as failures everywhere.
+
+<!-- BEGIN aml.py --ledger (AM-L L5) -->
+
+### The tuning re-measure (AM-L L5), 2026-10-02: MFR 0.810 -> 0.421, tier-1 BLC_8 0.075 -> 0.143
+
+Run by `campaign.py --run --manifest tuning --mode rules` on the 120-geometry subset and then all 420 tuning geometries, `baseline.py --rcurv`, then `aml.py --report`; binary sha256 `3d90ce91…923b`, tree `3969bf8`; the report is `tools/autonomy/aml/L5.json` (and `.md`), the bundle `tuning_rules_L5.json.gz` (sha256 `75acc3b0…2615`). These are tuning numbers, not a result; the test split is spent.
+
+- **Integrity:** subset 120 geometries, 120 rows, 0 harness errors, 0 orphans, peak 28.7 %, max live 6, replay 227 decisions: PASS; full 420 geometries, 413 rows, 0 harness errors, 0 orphans, peak 22.9 %, max live 6, replay 785 decisions: PASS.
+- **Family by family** (failures as run / re-scored -> after, strict, BLC_8, BLC_full, CAPABILITY-LIMITED area before -> after, capture median, F3e, F3e only with the attraction on)
+  - A: 78 / 84 -> 81, strict 1.000 -> 1.000, BLC_8 0.000 -> 0.000, BLC_full 0.000 -> 0.000, CAPABILITY-LIMITED 0.845 -> 0.869, capture median 0.299, F3e 49, F3e only with the attraction on 5
+  - B: 5 / 55 -> 0, strict 0.964 -> 0.857, BLC_8 0.036 -> 0.143, BLC_full 0.022 -> 0.007, CAPABILITY-LIMITED 0.964 -> 0.857, capture median 0.916, F3e 0, F3e only with the attraction on 0
+  - D: 13 / 64 -> 11, strict 0.607 -> 0.512, BLC_8 0.405 -> 0.488, BLC_full 0.395 -> 0.450, CAPABILITY-LIMITED 0.560 -> 0.500, capture median 1.000, F3e 1, F3e only with the attraction on 1
+  - E: 18 / 29 -> 12, strict 0.952 -> 0.905, BLC_8 0.048 -> 0.095, BLC_full 0.048 -> 0.047, CAPABILITY-LIMITED 0.881 -> 0.881, capture median 0.957, F3e 1, F3e only with the attraction on 0
+  - F: 17 / 29 -> 16, strict 0.667 -> 0.524, BLC_8 0.333 -> 0.476, BLC_full 0.333 -> 0.455, CAPABILITY-LIMITED 0.548 -> 0.452, capture median 1.000, F3e 5, F3e only with the attraction on 0
+  - G: 62 / 79 -> 57, strict 0.929 -> 0.893, BLC_8 0.071 -> 0.107, BLC_full 0.060 -> 0.078, CAPABILITY-LIMITED 0.321 -> 0.286, capture median 0.870, F3e 4, F3e only with the attraction on 0
+  - tier1: 118 / - -> 109, strict 0.925 -> 0.857, BLC_8 0.075 -> 0.143, BLC_full 0.071 -> 0.086, CAPABILITY-LIMITED 0.841 -> 0.798, capture median 0.801, F3e 55, F3e only with the attraction on 5
+  - all: 193 / 340 -> 177, strict 0.862 -> 0.795, BLC_8 0.140 -> 0.205, BLC_full 0.134 -> 0.157, CAPABILITY-LIMITED 0.681 -> 0.636, capture median 0.904, F3e 60, F3e only with the attraction on 6
+- **MFR rises against FEAT-CONSTRAINT's re-scored rules number:** none
+- **Why the lost wall was lost** (all): CAPABILITY-LIMITED 0.636; inner_gate 0.233; thin_after_caps 0.131; thin_proposed 0.271.
+- **The subset:** 120 geometries, MFR 0.383, 120 equal / 0 differ against the full campaign.
+- **R-CURV on and off:** 133 pairs, failure 33 -> 55, F3 32 -> 54, cells median 762285 -> 50048.
+- **Proposed G-BLC-1 target:** BLC_8 target 0.09 (lower 95 % bound 0.099566), BLC_full target 0.05 (lower 95 % bound 0.052423); proposed from the tuning split; the user decides it (D-L9) and the evaluation unit locks it before a fresh test seed is opened.
+- **Where the run departs from the plan:** The subset is 120 tuning geometries drawn by a salted hash within each (family, stratum) stratum, one per stratum and the rest by largest remainder; the plan row names a stratified subset without a rule. The before side is the committed rules campaign (binary 054bba67, scored before the 2026-09-26 rule): its strict failure, BLC and CAPABILITY-LIMITED numbers are as run, and its failures are also given as FEAT-CONSTRAINT re-scored them; its rows carry no drop_cause and no capture share. CAPABILITY-LIMITED is the wall-area share of baseline.area_split on each geometry's final attempt (a requested patch dropped min_thickness or retreat_snapped on a geometry the R-PLANE predicate does not qualify for), and the terminal count is reported beside it. R-CURV on and off is baseline.py --rcurv on the same binary (attempt 1 only, no remedies); its F3 column here counts F3a-F3e where baseline's own report counts F3a-F3d.
+
+<!-- END aml.py --ledger (AM-L L5) -->

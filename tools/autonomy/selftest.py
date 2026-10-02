@@ -35,7 +35,10 @@ rescore.py --selftest (the 2026-09-26 re-score: the capture kinds, a
 four-geometry re-score under both readings, the identity and seal refusals,
 determinism and the CLI), then lreplay.py --selftest (the replay of recorded
 tuning rows: the sample, the config rebuild, the seal, the verdicts, a
-scripted run and one live R-PLANE row), then
+scripted run and one live R-PLANE row), then aml.py --selftest (the AM-L tuning
+re-measure report: the subset, the before table against baseline's groups,
+the drop causes, F3e, integrity, the target and R-CURV, the report, check,
+ledger and CLI), then
 sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
@@ -85,7 +88,7 @@ def main():
               ("remedies.py", 13), ("explain.py", 14),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 12),
               ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6),
-              ("lreplay.py", 6))
+              ("lreplay.py", 6), ("aml.py", 7))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:

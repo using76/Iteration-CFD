@@ -902,6 +902,8 @@ layers and scores config (F1), not F4. The numbers are in `baseline/B0.json`, `b
 record written before SURFACE-REFUSED existed is read under it, and `harness_errors_zero` still requires zero.
 Since 2026-09-27 `FLAG_KEYS` counts F3e and a group's `F3` count is the geometries with any of F3a-F3e;
 `B0.json` and `B0.md` were written before and are not regenerated, and `--rcurv`'s F3 cost keeps F3a-F3d.
+Since 2026-10-02 (L5) `--rcurv` hands each arm's fingerprint to `campaign.run_attempt`, which needs it since
+FEAT-CONSTRAINT; before that every pair ended `harness error: KeyError: 'fp'` (133 of 133 on the first L5 run).
 
 For later units — AM-13/AM-14: the tuning rows of both baselines are in
 `baseline/tuning_<system>.json.gz` (`baseline.read_bundle`); B0-LHS's 1,680 rows are random-knob
@@ -1108,6 +1110,14 @@ sound; on the L0 binary `7ff16117` (built from fd37cc1, L0a's feature capture an
 `equal`, so both output-only units left every sampled corpus mesh byte-identical. In both runs every regenerated
 surface matched its row's stl sha and fingerprint, and nothing fired; each run took about 53 minutes of wall time.
 
+## aml.py — the AM-L tuning re-measure (L5)
+
+`aml.py` turns the AM-L re-measure into one report: rules campaigns run on the HEAD binary (`campaign.py --run --manifest tuning --mode rules`, the supervisor's) against the committed rules campaign, family by family. The after side is a subset campaign and a full campaign directory; the subset is 120 tuning geometries drawn by the salted hash `aml-L5/1` within each (family, stratum) stratum — one per stratum, then the largest remainders — subset sha256 `4379f251`; `--plan` prints it, `--ids-only` the ids. The before side is `prior/tuning_rules.json.gz`: its failures, strict failures, BLC and CAPABILITY-LIMITED numbers are as run, and its failures are also given as `rescore/FEAT-CONSTRAINT.json` re-scored them (its rows predate the capture and drop-cause records). Per geometry the table carries the terminal, failure, strict failure, BLC a priori, the R-PLANE qualification, the CAPABILITY-LIMITED wall-area share of `baseline.area_split`, the `feature_capture` share, F3e, and the lost wall split by the layer stage's `drop_cause` (`inner_gate`, `outer_gate`, `thin_after_caps`, `thin_proposed`, `zero_disp`, else `unrecorded`) read from the case summary's layers stage; the rows fold into families, tier1, non-plane and all, and `--inspect` prints one campaign's numbers. The gates are integrity only: no harness error, no orphan, peak RAM <= 60 %, at most 6 live meshers, and the replay reproducing; a family whose MFR rises against the re-scored before is named. The proposed G-BLC-1 target is the tier-1 per-geometry BLC mean minus 1.96 standard errors, floored to 0.01, never below 0 — proposed only, the user decides it (D-L9). The ledger entry is written between the `<!-- BEGIN aml.py --ledger (AM-L L5) -->` and `<!-- END aml.py --ledger (AM-L L5) -->` markers of docs/15 §K by `--ledger --write`; `--check` re-derives every stored number from its inputs.
+
+For later units — L6: `prior.py --gate --rules DIR` takes the full campaign directory, whose rows are also in `aml/tuning_rules_L5.json.gz`; L7 locks the G-BLC-1 target before a fresh test seed opens.
+
+Measured (L5, 2026-10-02, tuning only, release binary `3d90ce91` at tree `3969bf8`, 6 streams): the subset campaign (120 geometries, 120 rows, 3,637 s) and the full campaign (420 geometries, 413 rows, 11,008 s) each had 0 harness errors, 0 orphans, at most 6 live meshers, peaks of 28.7 % and 22.9 % of RAM and a clean replay (227 and 785 decisions); the subset's 120 geometries are identical in the full campaign. MFR 0.810 (re-scored before, 340/420) -> 0.421 (177/420), no family rising (A 84 -> 81, B 55 -> 0, D 64 -> 11, E 29 -> 12, F 29 -> 16, G 79 -> 57); strict 0.862 -> 0.795; BLC_8 0.140 -> 0.205 (tier 1 0.075 -> 0.143); CAPABILITY-LIMITED wall 0.681 -> 0.636, of which `inner_gate` 0.233, `thin_proposed` 0.271 and `thin_after_caps` 0.131. R-CURV on against off (`baseline.py --rcurv`, 133 pairs): failure 33 against 55, CAPABILITY-LIMITED 0.812 against 0.962, cells median 762,285 against 50,048. Proposed G-BLC-1 targets (the user's D-L9): tier-1 BLC_8 0.09, BLC_full 0.05. The numbers are in `aml/L5.json` and `aml/L5.md` (`--check` passes), the campaign rows in `aml/tuning_rules_L5.json.gz`, R-CURV in `aml/R-CURV.json`, and the docs/15 §K entry was written by `--ledger --write`.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -1115,6 +1125,11 @@ surface matched its row's stl sha and fingerprint, and nothing fired; each run t
     python tools/autonomy/rescore.py --run [--cases SOURCE=DIR ...]   # the 2026-09-26 re-score of the tuning bundles
     python tools/autonomy/lreplay.py --plan [--list]                                                 # the replay sample
     python tools/autonomy/lreplay.py --run --work DIR --out FILE [--binary EXE] [--expect-equal]      # re-mesh and byte-compare
+    python tools/autonomy/aml.py --plan [--ids-only]                                                 # the L5 subset
+    python tools/autonomy/aml.py --inspect DIR                                                       # one campaign's integrity and families
+    python tools/autonomy/aml.py --report --subset DIR --full DIR [--rcurv FILE] [--bundle]          # aml/L5.json and L5.md
+    python tools/autonomy/aml.py --check                                                             # the report against its inputs
+    python tools/autonomy/aml.py --ledger [--write]                                                  # the docs/15 §K entry
     python tools/autonomy/schema.py --print-lock          # the lock lines, no comments
     python tools/autonomy/schema.py --validate KIND FILE  # valid / one error per line
     python tools/deps_licences.py --python                # the Python-side licences above
