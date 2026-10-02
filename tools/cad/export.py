@@ -79,9 +79,13 @@ BUILD_TIMEOUT_S = 180
 STL_REPAIR = os.path.join(common.REPO, "tools", "geom", "stl_repair.py")
 TEMPLATE = os.path.join(HERE, "templates", "nozzle_contraction", "template.py")
 NOMINAL = {"D_i": 0.06, "CR": 9.0, "L_over_Di": 1.0, "law": "poly5", "x_m": None,
-           "Lx_over_De": 0.5, "Lu_over_Di": 0.5, "t_wall": 0.003}
+           "Lx_over_De": 0.5, "Lu_over_Di": 0.5, "upstream_role": "slip", "t_wall": 0.003}
 CORNER = {"D_i": 0.06, "CR": 9.0, "L_over_Di": 0.5, "law": "cubic_matched", "x_m": 0.8,
-          "Lx_over_De": 1.0, "Lu_over_Di": 0.5, "t_wall": 0.01}
+          "Lx_over_De": 1.0, "Lu_over_Di": 0.5, "upstream_role": "slip", "t_wall": 0.01}
+# The turbulent nominal of docs/16 section H.5 (lines 521-523): D_i 0.30, CR 2, poly5, L/D_i 1.5,
+# a 0.60 m no-slip upstream pipe, air at 293.15 K; the turbulent recipe meshes it at y+1 = 1.
+TURB_NOMINAL = {"D_i": 0.30, "CR": 2.0, "L_over_Di": 1.5, "law": "poly5", "x_m": None,
+                "Lx_over_De": 0.5, "Lu_over_Di": 2.0, "upstream_role": "wall", "t_wall": 0.003}
 BREP_FILES = ("fluid.brep", "body.brep", "meridian.brep", "wall_meridian.brep")
 EXPORT_FILES = ("fluid.step", "body.step", "meridian.step", "fluid_named.stl", "stl_repair.json",
                 "tags.json", "probes.json", "geom.json")
@@ -824,7 +828,7 @@ def export_build(out_dir, value, template_path):
         write_step(shp, p(name))
     lin = STL_LIN_REL * value["derived"]["D_e"]
     decl = common.read_json(os.path.join(os.path.dirname(template_path), "template.json"))
-    order = [t["name"] for t in decl["tags"] if t["kind"] == "face"]
+    order = [t["name"] for t in decl["tags"] if t["kind"] == "face" and t["name"] in value["face_tags"]]
     stl = write_named_stl(cq.Shape.importBrep(p("fluid.brep")), value["face_tags"], order,
                           p("fluid_named.stl"), lin, STL_ANG_RAD)
     report = stl_report(p("fluid_named.stl"), p("stl_repair.json"))

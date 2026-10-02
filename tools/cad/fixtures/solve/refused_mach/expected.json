@@ -1,0 +1,77 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "iters": 600,
+  "write_every": 50,
+  "returncode": 3,
+  "result": {
+    "class": "refused",
+    "reason_id": "SOLVE-MACH",
+    "detail": "",
+    "run_end": {
+      "word": "refused",
+      "detail": "ofgpu-lowmach: max Mach number 0.312 at cell 4711 (step 118) is above 0.3; SPEC-LIT §25's formulation filters acoustics on the premise M << 1 (p~ << p0), and at M = 0.3 the isentropic density ratio rho/rho0 = (1 + 0.2 M^2)^-2.5 is already 0.956, a 4.4 % density change. The run stops (SPEC-LIT §93.6); -permissive continues with a warning",
+      "exit_code": 3
+    },
+    "n_lines": 13,
+    "iterations": [
+      {
+        "iter": 0,
+        "U_res": 0.874,
+        "p_res": 1.0,
+        "cont_err": 0.00021,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.081,
+        "M_cell": 4711,
+        "M_mean": 0.071,
+        "finite": true
+      },
+      {
+        "iter": 50,
+        "U_res": 0.33,
+        "p_res": 0.0071,
+        "cont_err": 1.9e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.193,
+        "M_cell": 4711,
+        "M_mean": 0.071,
+        "finite": true
+      },
+      {
+        "iter": 100,
+        "U_res": 0.12,
+        "p_res": 0.0012,
+        "cont_err": 4.4e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.287,
+        "M_cell": 4711,
+        "M_mean": 0.071,
+        "finite": true
+      }
+    ],
+    "mach_max": 0.287,
+    "mach_refusal": {
+      "M": 0.312,
+      "cell": 4711,
+      "when": "step 118",
+      "limit": 0.3
+    },
+    "criteria": null,
+    "failed": [],
+    "window": null
+  }
+}

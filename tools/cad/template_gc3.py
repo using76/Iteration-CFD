@@ -10,6 +10,7 @@ import math
 import os
 import sys
 import tempfile
+import time
 
 import numpy as np
 import cadquery as cq
@@ -29,7 +30,7 @@ TEMPLATE_JSON = os.path.join(HERE, "templates", "nozzle_contraction", "template.
 INJECT = os.path.join(HERE, "fixtures", "template", "prf_inject.py")
 TIMEOUT_S = 180
 NOMINAL = {"D_i": 0.06, "CR": 9.0, "L_over_Di": 1.0, "law": "poly5", "x_m": None,
-           "Lx_over_De": 0.5, "Lu_over_Di": 0.5, "t_wall": 0.003}
+           "Lx_over_De": 0.5, "Lu_over_Di": 0.5, "upstream_role": "slip", "t_wall": 0.003}
 JOBS = []                                       # every runner job this gate made, in order
 
 
@@ -118,6 +119,7 @@ def curvature_truth():
 
 
 def selftest():
+    t0 = time.time()
     with tempfile.TemporaryDirectory() as td:
         # (G1) the generated declaration equals declare() and is a valid cad-template/1
         decl = common.read_json(TEMPLATE_JSON)
@@ -198,6 +200,30 @@ def selftest():
         assert abs(ax.startPoint().y) <= 1e-12 and abs(ax.endPoint().y) <= 1e-12, "the axis edge leaves y = 0"
         assert len(wts["ends"]) == 2, "the wall meridian has %d end edges" % (len(wts["ends"]),)
         print("[ok] tags: %d fluid faces, %d meridian edges, %d wall edges each carry exactly one tag after a BREP reload" % (len(fluid.Faces()), len(meridian.Edges()), len(wall_m.Edges())))
+
+        # (G4b) the wall role: Lu/D_i 2.0 tags the upstream face wall_upstream; the geometry does not move
+        r_wall = job(dict(NOMINAL, Lu_over_Di=2.0, upstream_role="wall"), td, "wall_role")
+        assert r_wall["status"] == "ok", "wall role run %r: %s" % (r_wall["status"], r_wall["message"])
+        vw = r_wall["value"]
+        assert vw["status"] == "ok", "wall role refused: %r %r" % (vw.get("rule"), vw.get("detail"))
+        assert sorted(vw["face_tags"]) == ["inlet", "outlet", "wall_contraction", "wall_exit", "wall_upstream"], sorted(vw["face_tags"])
+        assert sorted(vw["meridian_edges"]) == ["axis", "inlet", "outlet", "wall_contraction", "wall_exit", "wall_upstream"], sorted(vw["meridian_edges"])
+        assert "slip_upstream" not in vw["face_tags"] and "slip_upstream" not in vw["meridian_edges"], "a wall-role build carries slip_upstream"
+        out_wall = os.path.join(td, "wall_role")
+        fluid_w = load(out_wall, "fluid.brep")
+        meridian_w = load(out_wall, "meridian.brep")
+        wall_mw = load(out_wall, "wall_meridian.brep")
+        assert sorted(i for lst in vw["face_tags"].values() for i in lst) == list(range(len(fluid_w.Faces()))), "wall role: fluid face tags are not a partition"
+        assert sorted(i for lst in vw["meridian_edges"].values() for i in lst) == list(range(len(meridian_w.Edges()))), "wall role: meridian tags are not a partition"
+        assert sorted(i for lst in vw["wall_edges"].values() for i in lst) == list(range(len(wall_mw.Edges()))), "wall role: wall tags are not a partition"
+        cw = fluid_w.Faces()[vw["face_tags"]["wall_upstream"][0]].Center().x
+        assert -0.12 < cw < 0, "wall_upstream face centre x %r is not in (-0.12, 0)" % (cw,)
+        truth_w = volume_truth(dict(NOMINAL, Lu_over_Di=2.0))
+        vrel = abs(vw["checks"]["fluid_volume_m3"] - truth_w) / truth_w
+        assert vrel <= 1e-6, "wall role fluid volume rel %r vs truth" % (vrel,)
+        brel = abs(vw["checks"]["body_volume_m3"] - val["checks"]["body_volume_m3"]) / val["checks"]["body_volume_m3"]
+        assert brel <= 1e-12, "wall role body volume rel %r vs the nominal" % (brel,)
+        print("[ok] wall role: Lu/D_i 2.0 tags the upstream face wall_upstream (no slip_upstream), fluid volume rel %s vs truth, body volume unchanged" % (vrel,))
 
         # (G5) r'' = 0 at both ends of the wetted law, within 1e-6 1/m, for poly5 and poly7
         def end_second(mer, idx):
@@ -284,6 +310,9 @@ def selftest():
         for xm in (0.2, 0.8):
             for lo, lx, tw in itertools.product((0.5, 1.5), (0.25, 1.0), (0.001, 0.01)):
                 defs.append(("cubic_matched", dict(NOMINAL, law="cubic_matched", x_m=xm, L_over_Di=lo, Lx_over_De=lx, t_wall=tw)))
+        COMBOS = ((0.5, "slip"), (2.0, "wall"), (2.0, "slip"), (0.5, "wall"))
+        defs = [(law, dict(prm, Lu_over_Di=COMBOS[i % 4][0], upstream_role=COMBOS[i % 4][1]))
+                for i, (law, prm) in enumerate(defs)]
         corners = []
         corner_s = 0.0
         for i, (law, prm) in enumerate(defs):
@@ -297,10 +326,18 @@ def selftest():
             bd = load(odir, "body.brep")
             assert measure.n_solids(fl)["value"] == 1 and measure.valid(fl)["value"] == 1, "corner %d (%s): the fluid is not 1 valid solid" % (i, law)
             assert measure.n_solids(bd)["value"] == 1 and measure.valid(bd)["value"] == 1, "corner %d (%s): the body is not 1 valid solid" % (i, law)
+            up = "wall_upstream" if prm["upstream_role"] == "wall" else "slip_upstream"
+            other = "slip_upstream" if up == "wall_upstream" else "wall_upstream"
+            assert up in v["face_tags"] and other not in v["face_tags"], "corner %d (%s): face_tags %r" % (i, law, sorted(v["face_tags"]))
             corner_s = corner_s + r["wall_s"]
             corners.append((law, prm, v, odir))
         assert len(corners) == 40, "%d corners ran, want 40" % (len(corners),)
-        print("[ok] box corners: 40 of 40 build (poly3 8, poly5 8, poly7 8, cubic_matched 16), each 1 valid fluid and 1 valid body solid, %s s" % (round(corner_s, 1),))
+        for law in ("poly3", "poly5", "poly7", "cubic_matched"):
+            for combo in COMBOS:
+                n = sum(1 for l2, p2, v2, o2 in corners
+                        if l2 == law and (p2["Lu_over_Di"], p2["upstream_role"]) == combo)
+                assert n >= 2, (law, combo, n)
+        print("[ok] box corners: 40 of 40 build (poly3 8, poly5 8, poly7 8, cubic_matched 16), each 1 valid fluid and 1 valid body solid, %s s, every law at the 4 (Lu, role) corners" % (round(corner_s, 1),))
 
         # (G10) at every corner the outer wall is the true (trimmed where needed) normal offset
         worst_e = 0.0
@@ -324,23 +361,28 @@ def selftest():
                 n_trim = n_trim + 1
         print("[ok] box corners: worst |min wall - t| %s m (<= 1e-8), worst offset fidelity %s m (<= 1e-9), trimmed exactly where t > rho_min (%d corners)" % (worst_e, worst_f, n_trim))
 
-        # (G11) the six refusal fixtures, each hitting its own PRF id and writing no BREP
-        for want, prm in (("PRF-BOX", dict(NOMINAL, L_over_Di=0.4)),
-                          ("PRF-RMIN", dict(NOMINAL, D_i=-0.06)),
-                          ("PRF-MONO", dict(NOMINAL, CR=0.5)),
-                          ("PRF-SELFX", dict(NOMINAL, D_i=0.006, L_over_Di=0.5, Lx_over_De=0.25, t_wall=0.01))):
-            r = job(prm, td, "refuse_" + want)
+        # (G11) the refusal fixtures, each hitting its own PRF id and writing no BREP
+        norole = dict((k, v) for k, v in NOMINAL.items() if k != "upstream_role")
+        for want, nm, prm in (("PRF-BOX", "box_l", dict(NOMINAL, L_over_Di=0.4)),
+                              ("PRF-BOX", "box_lu04", dict(NOMINAL, Lu_over_Di=0.4)),
+                              ("PRF-BOX", "box_lu21", dict(NOMINAL, Lu_over_Di=2.1)),
+                              ("PRF-BOX", "box_role", dict(NOMINAL, upstream_role="noslip")),
+                              ("PRF-BOX", "box_norole", norole),
+                              ("PRF-RMIN", "rmin", dict(NOMINAL, D_i=-0.06)),
+                              ("PRF-MONO", "mono", dict(NOMINAL, CR=0.5)),
+                              ("PRF-SELFX", "selfx", dict(NOMINAL, D_i=0.006, L_over_Di=0.5, Lx_over_De=0.25, t_wall=0.01))):
+            r = job(prm, td, "refuse_" + nm)
             assert r["status"] == "ok", "%s run %r: %s" % (want, r["status"], r["message"])
             v = r["value"]
             assert v["status"] == "refused", "%s: value status %r" % (want, v["status"])
             assert v["rule"] == want, "%s: got %r (%s)" % (want, v["rule"], v["detail"])
             assert v["files"] == {}, "%s: files %r" % (want, v["files"])
-            assert [f for f in os.listdir(os.path.join(td, "refuse_" + want)) if f.endswith(".brep")] == [], "%s wrote a BREP" % (want,)
+            assert [f for f in os.listdir(os.path.join(td, "refuse_" + nm)) if f.endswith(".brep")] == [], "%s wrote a BREP" % (want,)
         for want, case in (("PRF-DERIV", "deriv"), ("PRF-FACE2D", "face2d")):
             r = job({"template": TEMPLATE, "case": case, "params": dict(NOMINAL)}, td, "refuse_" + want, module=INJECT)
             assert r["status"] == "ok", "%s run %r: %s" % (want, r["status"], r["message"])
             assert r["value"]["rule"] == want, "%s: got %r (%s)" % (want, r["value"]["rule"], r["value"]["detail"])
-        print("[ok] refusals: 6 of 6 fixtures hit PRF-BOX, PRF-RMIN, PRF-MONO, PRF-DERIV, PRF-SELFX, PRF-FACE2D and write no BREP")
+        print("[ok] refusals: 6 of 6 fixtures hit PRF-BOX, PRF-RMIN, PRF-MONO, PRF-DERIV, PRF-SELFX, PRF-FACE2D and write no BREP; PRF-BOX also on Lu 0.4, Lu 2.1, role noslip, role missing")
 
         # (G12) every build ran in a runner child; this process never imported the template
         assert "nozzle_template_under_test" not in sys.modules, "the template fixture ran in this process"
@@ -350,6 +392,7 @@ def selftest():
             f = getattr(m, "__file__", None)
             assert not (isinstance(f, str) and os.path.abspath(f).startswith(tpl_dir)), "this process imported %r" % (f,)
         print("[ok] isolation: %d runner jobs; this process never imported template.py" % (len(JOBS),))
+    print("gc3 wall %.1f s" % (time.time() - t0))
     print("SELFTEST PASS")
     return 0
 

@@ -1,0 +1,13 @@
+# meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. Fixture log in the ofgpu-lowmach stdout format (lowmach.rs print_report and run_end_line at bceb799); the numbers are synthetic.
+ofgpu-lowmach (fixture) - case constant/polyMesh: 40560 cells
+Numerics (SPEC-LIT §13.4.1 - what this run will actually use)
+    ddt                   steadyState
+turbulence model: laminar
+sources: none
+  Mach number (SPEC-LIT §93.5) on the initial field: M max 0 (cell 0) mean 0; the §25 premise is M << 1 and the run refuses above 0.3 (-permissive warns instead)
+iter      0  |U| res 0.874  |p| res 1.000e+00  contErr 0.00021  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.081 (cell 4711) mean 0.071
+iter     50  |U| res 0.33  |p| res 7.100e-03  contErr 1.9e-05  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.193 (cell 4711) mean 0.071
+iter    100  |U| res 0.12  |p| res 1.200e-03  contErr 4.4e-06  T [293.15, 293.15] K  rho [1.20412, 1.20412] kg/m3  p0 101325 Pa  dp0/dt 0 Pa/s  M max 0.287 (cell 4711) mean 0.071
+
+error: ofgpu-lowmach: max Mach number 0.312 at cell 4711 (step 118) is above 0.3; SPEC-LIT §25's formulation filters acoustics on the premise M << 1 (p~ << p0), and at M = 0.3 the isentropic density ratio rho/rho0 = (1 + 0.2 M^2)^-2.5 is already 0.956, a 4.4 % density change. The run stops (SPEC-LIT §93.6); -permissive continues with a warning
+run ended: refused | ofgpu-lowmach: max Mach number 0.312 at cell 4711 (step 118) is above 0.3; SPEC-LIT §25's formulation filters acoustics on the premise M << 1 (p~ << p0), and at M = 0.3 the isentropic density ratio rho/rho0 = (1 + 0.2 M^2)^-2.5 is already 0.956, a 4.4 % density change. The run stops (SPEC-LIT §93.6); -permissive continues with a warning | exit code 3

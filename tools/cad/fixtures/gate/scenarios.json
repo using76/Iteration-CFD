@@ -1,0 +1,510 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. CAD-16 promotion-gate scenario tables (docs/16 §E.6, docs/16a §B.1): supervisor-written, built on fixtures/reqs/golden/v1_nominal.json; every hard row passes unless listed in fail or ne; the objective is REQ-006 (minimise total_length); numbers are dyadic so every boundary equality is exact.",
+  "cases": [
+    {
+      "name": "S01_tie",
+      "why": "all hard rows pass in both and the objective is equal: ties never promote",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-TIE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S02_objective_not_evaluable",
+      "why": "all hard rows pass in both but the candidate's objective has no u: not evaluable, no promotion",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.046875,
+        "obj_u": null
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-OBJNE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S03_strict_objective_gain",
+      "why": "all hard rows pass in both and the objective falls by 0.015625 >> u 2^-30",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.046875,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "promote",
+        "rule_id": "GATE-OBJ",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S04_gain_inside_u",
+      "why": "all hard rows pass; the objective falls by 2^-31, inside u 2^-30",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.06249999953433871,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-NOISE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S05_gain_inside_repeat_band",
+      "why": "all hard rows pass; the objective falls by 0.015625, inside the repeat band 0.03125",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.046875,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.03125,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-NOISE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S06_gain_equals_noise",
+      "why": "all hard rows pass; the gain 0.03125 equals max(u) 0.03125: 'more than' is strict",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 0.03125
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.03125,
+        "obj_u": 0.03125
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-NOISE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S07_regress_equal_count",
+      "why": "REQ-003 passes in stable and fails in the candidate, REQ-004 the other way round",
+      "stable": {
+        "fail": [
+          "REQ-004"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [
+          "REQ-003"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-REGRESS",
+        "resolved": [
+          "REQ-004"
+        ],
+        "regressed": [
+          "REQ-003"
+        ],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S08_regress_despite_more_passes",
+      "why": "the candidate fixes three rows but loses SYS-MACH: 9 hard passes against 7 still regress",
+      "stable": {
+        "fail": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [
+          "SYS-MACH"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-REGRESS",
+        "resolved": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003"
+        ],
+        "regressed": [
+          "SYS-MACH"
+        ],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S09_candidate_ne_on_passing_row",
+      "why": "SYS-MACH passes in stable and is not evaluable in the candidate",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [
+          "SYS-MACH"
+        ],
+        "soft": "pass",
+        "obj_m": 0.046875,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-NE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": [
+          "SYS-MACH"
+        ]
+      }
+    },
+    {
+      "name": "S10_candidate_ne_on_failing_row",
+      "why": "REQ-004 fails in stable and is not evaluable in the candidate: not_reevaluated, never resolved",
+      "stable": {
+        "fail": [
+          "REQ-004"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [
+          "REQ-004"
+        ],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-NE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": [
+          "REQ-004"
+        ]
+      }
+    },
+    {
+      "name": "S11_strict_more_passes",
+      "why": "the candidate fixes REQ-003 and keeps failing REQ-004; a worse objective does not matter",
+      "stable": {
+        "fail": [
+          "REQ-003",
+          "REQ-004"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [
+          "REQ-004"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.09375,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "promote",
+        "rule_id": "GATE-MORE",
+        "resolved": [
+          "REQ-003"
+        ],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [
+          "REQ-004"
+        ],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S12_first_feasible",
+      "why": "stable is infeasible on REQ-003 and the candidate is feasible",
+      "stable": {
+        "fail": [
+          "REQ-003"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.09375,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "promote",
+        "rule_id": "GATE-MORE",
+        "resolved": [
+          "REQ-003"
+        ],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S13_equal_count_not_all_pass",
+      "why": "both fail REQ-003 only; the better objective counts only when every hard row passes in both",
+      "stable": {
+        "fail": [
+          "REQ-003"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [
+          "REQ-003"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.046875,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "reject",
+        "rule_id": "GATE-TIE",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [
+          "REQ-003"
+        ],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S14_stable_ne_candidate_new_fail",
+      "why": "stable: SYS-MACH NE, REQ-003 fail (8 hard passes); candidate: SYS-MACH fail, REQ-003 pass (9): promoted, SYS-MACH is new_fail",
+      "stable": {
+        "fail": [
+          "REQ-003"
+        ],
+        "ne": [
+          "SYS-MACH"
+        ],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [
+          "SYS-MACH"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "promote",
+        "rule_id": "GATE-MORE",
+        "resolved": [
+          "REQ-003"
+        ],
+        "regressed": [],
+        "new_fail": [
+          "SYS-MACH"
+        ],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S15_soft_row_ignored",
+      "why": "the soft row REQ-005 fails in the candidate; the gate reads hard rows and the objective only",
+      "stable": {
+        "fail": [],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "candidate": {
+        "fail": [],
+        "ne": [],
+        "soft": "fail",
+        "obj_m": 0.046875,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "promote",
+        "rule_id": "GATE-OBJ",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    },
+    {
+      "name": "S16_no_stable_yet",
+      "why": "no stable design yet and the candidate has no hard not_evaluable row: it becomes the first stable",
+      "stable": null,
+      "candidate": {
+        "fail": [
+          "REQ-003"
+        ],
+        "ne": [],
+        "soft": "pass",
+        "obj_m": 0.0625,
+        "obj_u": 9.313225746154785e-10
+      },
+      "repeat_band": 0.0,
+      "want": {
+        "decision": "promote",
+        "rule_id": "GATE-FIRST",
+        "resolved": [],
+        "regressed": [],
+        "new_fail": [
+          "REQ-003"
+        ],
+        "remaining": [],
+        "not_reevaluated": []
+      }
+    }
+  ]
+}

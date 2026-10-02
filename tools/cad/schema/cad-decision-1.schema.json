@@ -3,7 +3,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "cad-decision/1",
   "title": "one loop, gate or optimiser decision",
-  "description": "One decision of the loop, the promotion gate or the optimiser of docs/16 §E.6-§E.7, named by its rule id; CAD-17 abstains instead of guessing.",
+  "description": "One decision of the loop, the promotion gate or the optimiser of docs/16 §E.6-§E.7, named by its rule id; CAD-17 abstains instead of guessing. Every row names the requirements lock and the stable eval key it was proposed against, and carries the requirement deltas resolved, regressed, new_fail, remaining and not_reevaluated (docs/16a §B.1, §F).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,7 +20,14 @@
       "sobol_index",
       "ei",
       "reason",
-      "gates_lock"
+      "gates_lock",
+      "requirements_lock",
+      "base_stable_eval_key",
+      "resolved",
+      "regressed",
+      "new_fail",
+      "remaining",
+      "not_reevaluated"
     ],
   "properties": {
       "schema": {"const": "cad-decision/1"},
@@ -48,13 +55,21 @@
       "sobol_index": {"type": ["integer", "null"], "minimum": 0},
       "ei": {"type": ["number", "null"]},
       "reason": {"type": "string", "minLength": 1},
-      "gates_lock": {"$ref": "#/$defs/Sha"}
+      "gates_lock": {"$ref": "#/$defs/Sha"},
+      "requirements_lock": {"$ref": "#/$defs/Sha"},
+      "base_stable_eval_key": {"$ref": "#/$defs/ShaOrNull"},
+      "resolved": {"type": "array", "items": {"$ref": "#/$defs/ReqId"}},
+      "regressed": {"type": "array", "items": {"$ref": "#/$defs/ReqId"}},
+      "new_fail": {"type": "array", "items": {"$ref": "#/$defs/ReqId"}},
+      "remaining": {"type": "array", "items": {"$ref": "#/$defs/ReqId"}},
+      "not_reevaluated": {"type": "array", "items": {"$ref": "#/$defs/ReqId"}}
     },
   "$defs": {
       "StudyId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
       "RuleId": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*(-[A-Z0-9]+)*$"},
       "ShaOrNull": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
       "Sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "ReqId": {"type": "string", "pattern": "^(REQ-[0-9]{3}|SYS-[A-Z]+)$"},
       "NameOrNull": {"type": ["string", "null"], "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$"}
     }
 }

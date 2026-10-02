@@ -87,11 +87,26 @@
       "kind": "real",
       "unit": "1",
       "min": 0.5,
-      "max": 0.5,
+      "max": 2.0,
       "default_real": 0.5,
       "choices": [],
       "default_choice": null,
-      "role": "design",
+      "role": "intent",
+      "only_when": null
+    },
+    {
+      "name": "upstream_role",
+      "kind": "choice",
+      "unit": "1",
+      "min": null,
+      "max": null,
+      "default_real": null,
+      "choices": [
+        "slip",
+        "wall"
+      ],
+      "default_choice": "slip",
+      "role": "intent",
       "only_when": null
     },
     {
@@ -139,7 +154,12 @@
     {
       "name": "slip_upstream",
       "kind": "face",
-      "description": "slip pipe from x = -Lu to x = 0"
+      "description": "slip pipe from x = -Lu to x = 0 (upstream_role slip)"
+    },
+    {
+      "name": "wall_upstream",
+      "kind": "face",
+      "description": "no-slip pipe from x = -Lu to x = 0 (upstream_role wall)"
     },
     {
       "name": "wall_contraction",

@@ -10,6 +10,9 @@ https://ntrs.nasa.gov/api/citations/19890004382/downloads/19890004382.pdf; the 5
 r = R_i - (R_i - R_e)(10 xi^3 - 15 xi^4 + 6 xi^5) with xi = x/L) and Morel's two matched
 cubics (T. Morel, J. Fluids Eng. 97(2):225-233, 1975, DOI 10.1115/1.3447255; the law
 only, no chart transcribed), joined C1 at x_m with r' = 0 at both ends of both pieces.
+The upstream pipe from x = -Lu to x = 0 is a slip wall or a no-slip wall by the intent
+parameter upstream_role, so a turbulent boundary layer can be carried to the law start
+(docs/16 section H.5 item 4).
 
 Sections in order: params, profile, PRF, faces, solids, COMPOSE. The runner entries are
 build(params, out_dir), which returns one result record and writes four BREP files, and
@@ -63,6 +66,8 @@ N_MONO = 201            # samples per law piece for PRF-RMIN / PRF-MONO
 DERIV_TOL = 1e-9        # dimensionless: |dr/dx| at the ends, and its jump at a junction
 CLASS_TOL = 1e-10       # m: geometric tag classification
 LAWS = ("poly3", "poly5", "poly7", "cubic_matched")
+ROLES = ("slip", "wall")
+UPSTREAM_TAG = {"slip": "slip_upstream", "wall": "wall_upstream"}
 POLY = {"poly3": (0.0, 0.0, 3.0, -2.0),
         "poly5": (0.0, 0.0, 0.0, 10.0, -15.0, 6.0),
         "poly7": (0.0, 0.0, 0.0, 0.0, 35.0, -84.0, 70.0, -20.0)}   # f(xi) monomial coefficients, r = R_i - (R_i - R_e) f
@@ -82,8 +87,10 @@ PARAMS = [
      "choices": [], "default_choice": None, "role": "design", "only_when": "law=cubic_matched"},
     {"name": "Lx_over_De", "kind": "real", "unit": "1", "min": 0.25, "max": 1.0, "default_real": 0.5,
      "choices": [], "default_choice": None, "role": "design", "only_when": None},
-    {"name": "Lu_over_Di", "kind": "real", "unit": "1", "min": 0.5, "max": 0.5, "default_real": 0.5,
-     "choices": [], "default_choice": None, "role": "design", "only_when": None},
+    {"name": "Lu_over_Di", "kind": "real", "unit": "1", "min": 0.5, "max": 2.0, "default_real": 0.5,
+     "choices": [], "default_choice": None, "role": "intent", "only_when": None},
+    {"name": "upstream_role", "kind": "choice", "unit": "1", "min": None, "max": None, "default_real": None,
+     "choices": ["slip", "wall"], "default_choice": "slip", "role": "intent", "only_when": None},
     {"name": "t_wall", "kind": "real", "unit": "m", "min": 0.001, "max": 0.01, "default_real": 0.003,
      "choices": [], "default_choice": None, "role": "design", "only_when": None},
 ]
@@ -93,7 +100,8 @@ PLANES = [{"name": "inlet", "description": "x = -Lu, the velocity inlet"},
           {"name": "outlet", "description": "x = L + Lx, the pressure outlet"}]
 TAGS = [{"name": "inlet", "kind": "face", "description": "velocity inlet disc at x = -Lu"},
         {"name": "outlet", "kind": "face", "description": "pressure outlet disc at x = L + Lx"},
-        {"name": "slip_upstream", "kind": "face", "description": "slip pipe from x = -Lu to x = 0"},
+        {"name": "slip_upstream", "kind": "face", "description": "slip pipe from x = -Lu to x = 0 (upstream_role slip)"},
+        {"name": "wall_upstream", "kind": "face", "description": "no-slip pipe from x = -Lu to x = 0 (upstream_role wall)"},
         {"name": "wall_contraction", "kind": "face", "description": "no-slip wall of the contraction law, x = 0 to L"},
         {"name": "wall_exit", "kind": "face", "description": "no-slip exit tube wall, x = L to L + Lx"},
         {"name": "wetted", "kind": "edge", "description": "meridian wetted curve: the law, then the exit tube"},
@@ -152,6 +160,8 @@ def domain_rules(p):
                 % (", ".join(missing), ", ".join(unknown)))
     if not isinstance(p["law"], str) or p["law"] not in LAWS:
         return ("PRF-BOX", "law %r is not one of poly3, poly5, poly7, cubic_matched" % (p["law"],))
+    if not isinstance(p["upstream_role"], str) or p["upstream_role"] not in ROLES:
+        return ("PRF-BOX", "upstream_role %r is not one of slip, wall" % (p["upstream_role"],))
     for row in PARAMS:
         if row["kind"] != "real":
             continue
@@ -504,9 +514,9 @@ def make_face(w):
     return None
 
 
-def classify_meridian(face, d):
+def classify_meridian(face, d, role="slip"):
     """Tag every edge of the fluid meridian face by the geometry of its midpoint."""
-    tags = {"axis": [], "inlet": [], "outlet": [], "slip_upstream": [], "wall_contraction": [],
+    tags = {"axis": [], "inlet": [], "outlet": [], UPSTREAM_TAG[role]: [], "wall_contraction": [],
             "wall_exit": []}
     for i, e in enumerate(face.Edges()):
         q = e.positionAt(0.5)
@@ -517,7 +527,7 @@ def classify_meridian(face, d):
         elif abs(q.x - d["x_outlet"]) <= CLASS_TOL:
             tags["outlet"].append(i)
         elif d["x_inlet"] < q.x < 0:
-            tags["slip_upstream"].append(i)
+            tags[UPSTREAM_TAG[role]].append(i)
         elif 0 < q.x < d["L"]:
             tags["wall_contraction"].append(i)
         elif d["L"] < q.x < d["x_outlet"]:
@@ -563,9 +573,9 @@ def stage_check(name, s):
         raise RuntimeError("stage check failed: %s is not a valid solid" % (name,))
 
 
-def classify_fluid(solid, d):
+def classify_fluid(solid, d, role="slip"):
     """Tag every face of the fluid solid by the geometry of its centre of mass."""
-    tags = {"inlet": [], "outlet": [], "slip_upstream": [], "wall_contraction": [], "wall_exit": []}
+    tags = {"inlet": [], "outlet": [], UPSTREAM_TAG[role]: [], "wall_contraction": [], "wall_exit": []}
     for i, f in enumerate(solid.Faces()):
         c = f.Center()
         plane = f.geomType() == "PLANE"
@@ -574,7 +584,7 @@ def classify_fluid(solid, d):
         elif plane and abs(c.x - d["x_outlet"]) <= CLASS_TOL:
             tags["outlet"].append(i)
         elif not plane and d["x_inlet"] < c.x < 0:
-            tags["slip_upstream"].append(i)
+            tags[UPSTREAM_TAG[role]].append(i)
         elif not plane and 0 < c.x < d["L"]:
             tags["wall_contraction"].append(i)
         elif not plane and d["L"] < c.x < d["x_outlet"]:
@@ -606,8 +616,8 @@ def build(params, out_dir):
     stage_check("fluid", fluid)
     body = revolve(prof["wall_face"])
     stage_check("body", body)
-    face_tags = classify_fluid(fluid, d)
-    meridian_edges = classify_meridian(prof["fluid_face"], d)
+    face_tags = classify_fluid(fluid, d, p["upstream_role"])
+    meridian_edges = classify_meridian(prof["fluid_face"], d, p["upstream_role"])
     wall_edges = classify_wall(prof["wall_face"], prof["wetted"], d["t"])
     for name, shape in (("fluid.brep", fluid), ("body.brep", body),
                         ("meridian.brep", prof["fluid_face"]), ("wall_meridian.brep", prof["wall_face"])):

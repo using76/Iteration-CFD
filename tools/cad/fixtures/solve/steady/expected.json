@@ -1,0 +1,280 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+  "iters": 600,
+  "write_every": 50,
+  "returncode": 0,
+  "result": {
+    "class": "steady",
+    "reason_id": null,
+    "detail": "",
+    "run_end": {
+      "word": "budget",
+      "detail": "600 iterations reached",
+      "exit_code": 0
+    },
+    "n_lines": 23,
+    "iterations": [
+      {
+        "iter": 0,
+        "U_res": 0.874,
+        "p_res": 1.0,
+        "cont_err": 0.00021,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 50,
+        "U_res": 0.361026,
+        "p_res": 0.4376,
+        "cont_err": 7.7297e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662008,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 100,
+        "U_res": 0.14913,
+        "p_res": 0.1915,
+        "cont_err": 2.84515e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662017,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 150,
+        "U_res": 0.0616015,
+        "p_res": 0.08379,
+        "cont_err": 1.04725e-05,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662025,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 200,
+        "U_res": 0.0254459,
+        "p_res": 0.03667,
+        "cont_err": 3.85471e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662033,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 250,
+        "U_res": 0.010511,
+        "p_res": 0.01605,
+        "cont_err": 1.41885e-06,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662042,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 300,
+        "U_res": 0.00434182,
+        "p_res": 0.007021,
+        "cont_err": 5.2225e-07,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.066205,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 350,
+        "U_res": 0.00179349,
+        "p_res": 0.003072,
+        "cont_err": 1.9223e-07,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662058,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 400,
+        "U_res": 0.000740841,
+        "p_res": 0.001344,
+        "cont_err": 7.07563e-08,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662067,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 450,
+        "U_res": 0.000306021,
+        "p_res": 0.0005883,
+        "cont_err": 2.6044e-08,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662075,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 500,
+        "U_res": 0.000126409,
+        "p_res": 0.0002574,
+        "cont_err": 9.58631e-09,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662083,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 550,
+        "U_res": 5.22162e-05,
+        "p_res": 0.0001127,
+        "cont_err": 3.52854e-09,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.0662092,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      },
+      {
+        "iter": 599,
+        "U_res": 2.19539e-05,
+        "p_res": 5.012e-05,
+        "cont_err": 1.32501e-09,
+        "T_min": 293.15,
+        "T_max": 293.15,
+        "rho_min": 1.20412,
+        "rho_max": 1.20412,
+        "p0": 101325.0,
+        "dp0dt": 0.0,
+        "M_max": 0.06621,
+        "M_cell": 20311,
+        "M_mean": 0.0304,
+        "finite": true
+      }
+    ],
+    "mach_max": 0.06621,
+    "mach_refusal": null,
+    "criteria": {
+      "U_decades": {
+        "value": 4.599999750970725,
+        "limit": 4,
+        "pass": true
+      },
+      "p_decades": {
+        "value": 4.299988937677887,
+        "limit": 4,
+        "pass": true
+      },
+      "cont_err": {
+        "value": 1.32501e-09,
+        "limit": 1e-06,
+        "pass": true
+      },
+      "dp_rel_change": {
+        "value": 2.9999999998828165e-06,
+        "limit": 1e-05,
+        "pass": true
+      },
+      "Cd_rel_change": {
+        "value": 1.999999999972002e-06,
+        "limit": 1e-05,
+        "pass": true
+      }
+    },
+    "failed": [],
+    "window": {
+      "iters": [
+        400,
+        450,
+        500,
+        550,
+        600
+      ],
+      "dp": [
+        284.13835241249996,
+        284.138139309375,
+        284.13792620625,
+        284.137713103125,
+        284.1375
+      ],
+      "Cd": [
+        0.97130805738,
+        0.971308543035,
+        0.97130902869,
+        0.971309514345,
+        0.97131
+      ]
+    }
+  }
+}

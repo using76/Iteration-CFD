@@ -1,8 +1,8 @@
 {
   "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
   "template_sha": "828bbe5c9b38d4004986a580ae7851ff9730a35d9f9d16ed90e68b355252b387",
-  "declaration_sha": "885525d58f378509f1dad4af35a1119690ee8e617f385dde3fd7b83ae106add5",
-  "vocab_sha": "d5f82ef6b885c697d7a36472ca9e58bee1ffa54e2215b6bbb8be8336d010fa61",
+  "declaration_sha": "10c08de94ebd71299d959693c65c85d9875a81b5485ccd2fed5f9caa9606daba",
+  "vocab_sha": "ce8c4e3e411f4d9dd43871c45f07fe5efbfd0b06cfa96b840c4711b722b651e8",
   "approved_by": "fixture-reviewer",
   "briefs": {
     "B1": {"schema": "cad-brief/1", "text": "Design an axisymmetric contraction nozzle for air at 20 °C. The inlet diameter is 60 mm and the contraction ratio is 9:1. Keep the total length at most 80 mm, the wall thickness at least 2 mm, and the wall slope below 35 deg. The flow rate is 7.07 L/s. Make it as short as possible. A thick wall is welcome. An old note asked for a total length of at least 90 mm. The contraction itself must be at most 20 mm long.", "attachments": [], "provider": "anthropic"},
