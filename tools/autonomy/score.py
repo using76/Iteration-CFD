@@ -202,10 +202,11 @@ def _fcap_args(sharp_edge_length_m, plane_path):
         raise ValueError("plane_path %r is not a bool" % (plane_path,))
 
 
-def measured_capture(fc):
+def measured_capture(fc, gates=None):
     """(feature_capture, F3e, missing-signal text or None) from stages[snap].feature_capture,
     SPEC-LIT (92.62): the share of the mesher's own sharp-edge length the snapped wall
-    edges hold. F3e is true only at share 0 until the user sets a pass threshold."""
+    edges hold. F3e is true when the share is below gates.json feature_capture_min
+    (the user's decision D-L5); a share equal to it passes."""
     if fc is None:
         return None, None, M_FCAP_NULL
     if not isinstance(fc, dict) or any(k not in fc for k in FCAP_SIGNAL_KEYS):
@@ -224,12 +225,15 @@ def measured_capture(fc):
     if sharp == 0:
         return 0.0, True, None
     share = min(1.0, held / sharp)
-    return share, share == 0, None
+    if gates is None:
+        gates = schema.load_gates()
+    return share, share < gates["feature_capture_min"], None
 
 
-def feature_capture(sharp_edge_length_m, plane_path, feature_tolerance, snap):
+def feature_capture(sharp_edge_length_m, plane_path, feature_tolerance, snap, gates=None):
     """(feature_capture, F3e, missing-signal text or None): the user's decision of
-    2026-09-26 - feature-edge capture is a hard constraint on a body with sharp edges."""
+    2026-09-26 - feature-edge capture is a hard constraint on a body with sharp edges.
+    The measured share is judged against gates.json feature_capture_min (D-L5)."""
     _fcap_args(sharp_edge_length_m, plane_path)
     if sharp_edge_length_m is None:
         return None, None, M_FCAP_NOFP
@@ -242,7 +246,7 @@ def feature_capture(sharp_edge_length_m, plane_path, feature_tolerance, snap):
     if snap is None:
         return None, None, M_FCAP_NOSNAP
     if "feature_capture" in snap:
-        return measured_capture(snap["feature_capture"])
+        return measured_capture(snap["feature_capture"], gates)
     gone = [k for k in FCAP_SNAP_KEYS if k not in snap]
     if gone:
         raise ScoreParseError("score_run: stages[snap] carries no %s - the feature-edge row "
@@ -379,7 +383,8 @@ def score_run(*, exit_code, stdout, stderr, summary, config, patch_areas_m2, flo
     ft_eff = (cfg.get("snap") or {}).get("feature_tolerance")
     if isinstance(ft_eff, bool) or not isinstance(ft_eff, (int, float)):
         raise ScoreParseError("score_run: the summary's config carries no snap.feature_tolerance")
-    fcap, f3e, fnote = feature_capture(sharp_edge_length_m, plane_path, ft_eff, snap)
+    fcap, f3e, fnote = feature_capture(sharp_edge_length_m, plane_path, ft_eff, snap,
+                                       gates=gates)
     flags = {
         "F1": False,
         "F2": check_exit is not None and check_exit != 0,
@@ -1031,7 +1036,8 @@ def _signal_rows() -> list:
         ((18.0, False, 0.5, {"feature_capture": sig(18.0, 0.0)}), (0.0, True, None)),
         ((18.0, False, 0.5, {"feature_capture": sig(0.0, 0.0)}), (0.0, True, None)),
         ((18.0, False, 0.5, {"feature_capture": None}), (None, None, M_FCAP_NULL)),
-        ((18.0, False, 0.5, dict(legacy0, feature_capture=sig(18.0, 4.5))), (0.25, False, None)),
+        ((18.0, False, 0.5, dict(legacy0, feature_capture=sig(18.0, 4.5))), (0.25, True, None)),
+        ((18.0, False, 0.5, {"feature_capture": sig(16.0, 7.0)}), (0.4375, True, None)),
         ((18.0, False, 0.5, {"feature_capture": sig(18.0, 18.0 * (1 + 1e-12))}),
          (1.0, False, None)),
         ((18.0, True, 0.0, {"feature_capture": sig(18.0, 4.5)}), (1.0, False, None)),
@@ -1069,7 +1075,16 @@ def _feature_capture(labels: dict, results: dict, lines: list) -> None:
     for args, want in table:
         got = feature_capture(*args)
         assert got == want, (args, got, want)
-    assert len(table) == 17 and len({str(w) for _a, w in table}) == 9  # 10 branches, 9 values
+    assert len(table) == 18 and len({str(w) for _a, w in table}) == 10  # 10 branches, 10 values
+    G = schema.load_gates()
+    quarter = {"sharp_length_m": 18.0, "captured_length_m": 4.5, "tol_m": 0.05}
+    assert G["feature_capture_min"] == 0.5
+    assert feature_capture(18.0, False, 0.5, {"feature_capture": quarter},
+                           gates=dict(G, feature_capture_min=0.25)) == (0.25, False, None)
+    assert feature_capture(18.0, False, 0.5, {"feature_capture": quarter},
+                           gates=dict(G, feature_capture_min=0.2501)) == (0.25, True, None)
+    assert measured_capture({"sharp_length_m": 18.0, "captured_length_m": 9.0, "tol_m": 0.05},
+                            gates=dict(G, feature_capture_min=0.5000001)) == (0.5, True, None)
     for sig in _bad_signals():
         try:
             feature_capture(18.0, False, 0.5, {"feature_capture": sig})
@@ -1103,10 +1118,12 @@ def _feature_capture(labels: dict, results: dict, lines: list) -> None:
             measured[row["id"]] = fc
         assert M_FCAP not in oc["missing_signals"], row["id"]
         assert outcome_errors(oc) == [], (row["id"], outcome_errors(oc))
-    assert sorted(trues) == ["cubep_nofeat", "cubep_nofeat_cf", "cubep_nosnap"], trues
+    assert sorted(trues) == ["cubep_nofeat", "cubep_nofeat_cf", "cubep_nosnap",
+                             "wing_a_L3"], trues
     assert sorted(measured) == sorted(MEASURED_PROBES), sorted(measured)
-    assert all(results[p]["flags"]["F3e"] is False for p in MEASURED_PROBES)
-    assert nones == 4 and falses == 24, (nones, falses)
+    assert all(results[p]["flags"]["F3e"] is (results[p]["feature_capture"] < 0.5)
+               for p in MEASURED_PROBES)
+    assert nones == 4 and falses == 23, (nones, falses)
     row = next(r for r in labels["probes"] if r["id"] == "cube_ok")
     d = os.path.join(PROBES_DIR, "cube_ok")
     log = _norm(open(os.path.join(d, "log.txt"), encoding="utf-8").read())
@@ -1122,10 +1139,12 @@ def _feature_capture(labels: dict, results: dict, lines: list) -> None:
     assert outcome_errors(oc) == [], outcome_errors(oc)
     lo, hi = min(measured.values()), max(measured.values())
     lines.append("[ok] F3e feature capture: 10 branches by table, 5 bad inputs and 6 bad "
-                 "signals refused; on the 31 probes 3 fail F3e (cubep_nofeat, "
-                 "cubep_nofeat_cf, cubep_nosnap), the 13 sharp runs with the attraction on "
-                 "score their measured capture (92.62), %.4f to %.4f, and pass F3e, 11 "
-                 "bodies without a sharp edge are false, 4 refused runs are null" % (lo, hi))
+                 "signals refused; the threshold is gates.json feature_capture_min 0.5 "
+                 "(D-L5), read from the gates; on the 31 probes 4 fail F3e (cubep_nofeat, "
+                 "cubep_nofeat_cf, cubep_nosnap, wing_a_L3), the 13 sharp runs with the "
+                 "attraction on score their measured capture (92.62), %.4f to %.4f, and 12 "
+                 "of them pass F3e, 11 bodies without a sharp edge are false, 4 refused "
+                 "runs are null" % (lo, hi))
 
 
 def _content_hash(lines: list) -> None:

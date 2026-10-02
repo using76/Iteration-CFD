@@ -19,7 +19,7 @@ patches, invariance, schema and speed), then preflight.py --selftest (the L0 che
 (the L1 setup rules: the worked example, the §D.3 window and fit_growth, R-DOM,
 R-PLANE on cubep and corpus boxes, R-CURV, R-GAP and R-FEAT, the R-BUDGET
 predictor and ladder, setup on five corpus rows against preflight and -dryRun,
-the whitelist, the records, determinism and the CLI), then remedies.py --selftest (the L2 remedies: the table, diagnose, the 31 probe fixtures and 33 sequences, box_sphere CAPABILITY-LIMITED after 1 try, the static scan, 600 single steps and 300 loops, the synthetic outcomes, the records, determinism, the veto and the CLI), then explain.py --selftest (the explanations: 52 templates and the static rule-id scan, the fixture records, rows and timestamps, the moved measurements, three golden geometries, the campaign summary and Clopper-Pearson, the audit, determinism, the CLI and the optimiser records that end a geometry), then campaign.py --selftest (the campaign
+the whitelist, the records, determinism and the CLI), then remedies.py --selftest (the L2 remedies: the table, diagnose, the 31 probe fixtures and 35 sequences, box_sphere CAPABILITY-LIMITED after 1 try, the static scan, 600 single steps and 300 loops, the synthetic outcomes, the records, determinism, the veto and the CLI), then explain.py --selftest (the explanations: 53 templates and the static rule-id scan, the fixture records, rows and timestamps, the moved measurements, three golden geometries, the campaign summary and Clopper-Pearson, the audit, determinism, the CLI and the optimiser records that end a geometry), then campaign.py --selftest (the campaign
 runner: the modes, the two baselines, the sealed split, observe, a fake rules
 campaign, replay, the veto and the ablations, the hooks, the PID runner and
 RAM admission, the audit sample and the comparator, resume, and a live
@@ -35,7 +35,10 @@ rescore.py --selftest (the 2026-09-26 re-score: the capture kinds, a
 four-geometry re-score under both readings, the identity and seal refusals,
 determinism and the CLI), then lreplay.py --selftest (the replay of recorded
 tuning rows: the sample, the config rebuild, the seal, the verdicts, a
-scripted run and one live R-PLANE row), then
+scripted run and one live R-PLANE row), then aml.py --selftest (the AM-L tuning
+re-measure report: the subset, the before table against baseline's groups,
+the drop causes, F3e, integrity, the target and R-CURV, the report, check,
+ledger and CLI), then
 sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
@@ -85,7 +88,7 @@ def main():
               ("remedies.py", 13), ("explain.py", 14),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 12),
               ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6),
-              ("lreplay.py", 6))
+              ("lreplay.py", 6), ("aml.py", 7))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:

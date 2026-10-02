@@ -961,8 +961,8 @@ fn sig3(v: Scalar) -> String {
 pub struct FeatureCapture {
     /// The summed length of the feature edges (92.34), in metres.
     pub sharp_length: Scalar,
-    /// Per feature edge, the length the union of its covered parameter
-    /// intervals spans, summed, in metres; never above `sharp_length`.
+    /// Per capture chain, the arclength the union of its covered intervals
+    /// spans, summed, in metres; never above `sharp_length`.
     pub captured_length: Scalar,
     /// The distance both ends of a covering wall edge lie within.
     pub tol: Scalar,
@@ -977,6 +977,8 @@ pub const CAPTURE_ANGLE_DEG: Scalar = 30.0;
 /// lies further than `tol` from the segment, the edge runs more than
 /// `CAPTURE_ANGLE_DEG` off the segment's direction, or either is of zero
 /// length.
+/// Kept as the one-segment reference the chain cover is tested against.
+#[cfg(test)]
 pub(crate) fn covered_interval(
     p: Vec3,
     q: Vec3,
@@ -1058,8 +1060,187 @@ fn wall_face_mask(
     wall
 }
 
+/// One capture chain of (92.62): feature points in order, closed iff the
+/// first point is the last, with the arclength at each point.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CaptureChain {
+    /// The chain's points in order along it; `points[k]` and
+    /// `points[k + 1]` join the segment of index `k`.
+    pub(crate) points: Vec<Vec3>,
+    /// The arclength at each point, `arc[0]` 0 and strictly rising.
+    pub(crate) arc: Vec<Scalar>,
+    /// True when the chain is a closed loop with no cut point: the first
+    /// point is the last, its neighbours the second and the
+    /// second-to-last point.
+    pub(crate) closed: bool,
+}
+
+impl CaptureChain {
+    /// The chain's length: its last `arc` value, 0 when it has none.
+    pub(crate) fn length(&self) -> Scalar {
+        self.arc.last().copied().unwrap_or(0.0)
+    }
+}
+
+/// The open chain of `pts[a..=b]`, its arclength accumulated from `a`.
+fn chain_piece(pts: &[Vec3], a: usize, b: usize, closed: bool) -> CaptureChain {
+    let points = pts[a..=b].to_vec();
+    let mut arc = Vec::with_capacity(points.len());
+    arc.push(0.0);
+    for k in 0..points.len() - 1 {
+        arc.push(arc[k] + (points[k + 1] - points[k]).mag());
+    }
+    CaptureChain { points, arc, closed }
+}
+
+/// The capture chains of (92.62): every polyline of (92.35), cut again at
+/// each interior point whose turn exceeds `CAPTURE_ANGLE_DEG` - a closed
+/// polyline with no such point stays one closed chain, one with any is
+/// re-rooted at its first cut point and cut open there.
+pub(crate) fn capture_chains(fs: &features::FeatureSet) -> Vec<CaptureChain> {
+    // The turn at `v` between its neighbours `u` and `w`, in degrees; a
+    // zero-length neighbour vector is a turn above any angle.
+    let turn = |u: Vec3, v: Vec3, w: Vec3| -> Scalar {
+        let (a, b) = (u - v, w - v);
+        let (la, lb) = (a.mag(), b.mag());
+        if !(la > 0.0) || !(lb > 0.0) {
+            return CAPTURE_ANGLE_DEG + 1.0;
+        }
+        180.0 - (a.dot(b) / (la * lb)).clamp(-1.0, 1.0).acos().to_degrees()
+    };
+    let mut chains: Vec<CaptureChain> = Vec::new();
+    for pl in &fs.polylines {
+        if pl.len() < 2 {
+            continue;
+        }
+        let pts: Vec<Vec3> = pl.iter().map(|&i| fs.points[i as usize]).collect();
+        if pts.first() != pts.last() {
+            // Open: a cut point ends one chain and starts the next.
+            let mut start = 0usize;
+            for i in 1..pts.len() - 1 {
+                if turn(pts[i - 1], pts[i], pts[i + 1]) > CAPTURE_ANGLE_DEG {
+                    chains.push(chain_piece(&pts, start, i, false));
+                    start = i;
+                }
+            }
+            chains.push(chain_piece(&pts, start, pts.len() - 1, false));
+            continue;
+        }
+        insert_closed_chains(&pts, &turn, &mut chains);
+    }
+    chains
+}
+
+/// The closed half of `capture_chains`: `pts[0]` is `pts[m]`, every point
+/// interior. No cut is one closed chain; any cut re-roots the ring at its
+/// first cut point and cuts it open there.
+fn insert_closed_chains(
+    pts: &[Vec3],
+    turn: &impl Fn(Vec3, Vec3, Vec3) -> Scalar,
+    chains: &mut Vec<CaptureChain>,
+) {
+    let m = pts.len() - 1;
+    let ring = &pts[..m];
+    let cuts: Vec<usize> = (0..m)
+        .filter(|&i| turn(ring[(i + m - 1) % m], ring[i], ring[(i + 1) % m]) > CAPTURE_ANGLE_DEG)
+        .collect();
+    if cuts.is_empty() {
+        chains.push(chain_piece(pts, 0, m, true));
+        return;
+    }
+    // Re-root at the first cut point, then cut as an open polyline.
+    let mut open = ring[cuts[0]..].to_vec();
+    open.extend_from_slice(&ring[..cuts[0]]);
+    open.push(open[0]);
+    let mut start = 0usize;
+    for i in 1..open.len() - 1 {
+        if turn(open[i - 1], open[i], open[i + 1]) > CAPTURE_ANGLE_DEG {
+            chains.push(chain_piece(&open, start, i, false));
+            start = i;
+        }
+    }
+    chains.push(chain_piece(&open, start, open.len() - 1, false));
+}
+
+/// The nearest point of the listed segments of `c` to `p`: its arclength
+/// `s`, its distance `d` and the foot, the smaller `s` on an exact tie of
+/// `d`. `None` when no listed segment has a nonzero length.
+pub(crate) fn project_on_chain(
+    p: Vec3,
+    c: &CaptureChain,
+    segs: &[usize],
+) -> Option<(Scalar, Scalar, Vec3)> {
+    let mut best: Option<(Scalar, Scalar, Vec3)> = None;
+    for &k in segs {
+        let (a, b) = (c.points[k], c.points[k + 1]);
+        let ab = b - a;
+        let l2 = ab.mag_sqr();
+        if !(l2 > 0.0) {
+            continue;
+        }
+        let l = l2.sqrt();
+        let t = ((p - a).dot(ab) / l2).clamp(0.0, 1.0);
+        let f = a + ab * t;
+        let s = c.arc[k] + t * l;
+        let d = (p - f).mag();
+        let better = match best {
+            None => true,
+            Some((bs, bd, _)) => d < bd || (d == bd && s < bs),
+        };
+        if better {
+            best = Some((s, d, f));
+        }
+    }
+    best
+}
+
+/// The cover test of (92.62) along a chain, `fp`/`fq` the projections of
+/// `p`/`q`: the covered arc as `[s0, s1]`, `s0 <= s1` always, or `None`
+/// when an end lies further than `tol` from the chain, the edge or the
+/// chord of the two feet is of zero length, the edge runs more than
+/// `CAPTURE_ANGLE_DEG` off that chord, or the arc exceeds the edge by more
+/// than `2 tol`. Across the seam of a closed chain the interval runs from
+/// `hi` to `lo + L`.
+pub(crate) fn chain_cover(
+    p: Vec3,
+    q: Vec3,
+    fp: (Scalar, Scalar, Vec3),
+    fq: (Scalar, Scalar, Vec3),
+    c: &CaptureChain,
+    tol: Scalar,
+) -> Option<(Scalar, Scalar)> {
+    let (s_p, d_p, f_p) = fp;
+    let (s_q, d_q, f_q) = fq;
+    if d_p > tol || d_q > tol {
+        return None;
+    }
+    let pq = q - p;
+    let lpq = pq.mag();
+    if !(lpq > 0.0) {
+        return None;
+    }
+    let k = f_q - f_p;
+    let lk = k.mag();
+    if !(lk > 0.0) {
+        return None;
+    }
+    if pq.dot(k).abs() < CAPTURE_ANGLE_DEG.to_radians().cos() * lpq * lk {
+        return None;
+    }
+    let (lo, hi) = if s_p <= s_q { (s_p, s_q) } else { (s_q, s_p) };
+    let span = hi - lo;
+    let l = c.length();
+    let across = c.closed && l - span < span;
+    if (if across { l - span } else { span }) > lpq + 2.0 * tol {
+        return None;
+    }
+    Some(if across { (hi, lo + l) } else { (lo, hi) })
+}
+
 /// (92.62): the sharp length of `surf` at `feature_angle_deg`, and the part
 /// of it the wall edges of `mesh` cover within `tol`. Reads; moves nothing.
+/// The cover is measured along the capture chains, so a wall edge across
+/// the joint of two collinear feature segments counts.
 pub fn feature_capture(
     mesh: &PolyMeshRaw,
     surf: &Surface,
@@ -1082,22 +1263,25 @@ pub fn feature_capture(
     if fs.edges.is_empty() {
         return Ok(out);
     }
-    // Buckets of side g >= 2 tol, the segments sampled at most g apart: a
-    // point within tol of a segment is within g of a sample, so in one of
-    // the 27 buckets around that sample's.
+    let chains = capture_chains(&fs);
+    // Buckets of side g >= 2 tol, the chains' segments sampled at most g
+    // apart: a point within tol of a segment is within g of a sample, so
+    // in one of the 27 buckets around that sample's.
     let g = (2.0 * tol).max(out.sharp_length / 4.0e6);
     let key = |p: Vec3| {
         [(p.x / g).floor() as i64, (p.y / g).floor() as i64, (p.z / g).floor() as i64]
     };
-    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
-    for e in 0..fs.edges.len() {
-        let (a, b) = seg(e);
-        let n = (((b - a).mag() / g).ceil().max(1.0)) as usize;
-        for k in 0..=n {
-            let c = key(a + (b - a) * ((k as Scalar) / (n as Scalar)));
-            let list = grid.entry(c).or_default();
-            if list.last() != Some(&(e as u32)) {
-                list.push(e as u32);
+    let mut grid: HashMap<[i64; 3], Vec<(u32, u32)>> = HashMap::new();
+    for (ci, c) in chains.iter().enumerate() {
+        for k in 0..c.points.len() - 1 {
+            let (a, b) = (c.points[k], c.points[k + 1]);
+            let n = (((b - a).mag() / g).ceil().max(1.0)) as usize;
+            for j in 0..=n {
+                let c3 = key(a + (b - a) * ((j as Scalar) / (n as Scalar)));
+                let list = grid.entry(c3).or_default();
+                if list.last() != Some(&(ci as u32, k as u32)) {
+                    list.push((ci as u32, k as u32));
+                }
             }
         }
     }
@@ -1113,33 +1297,72 @@ pub fn feature_capture(
     }
     edges.sort_unstable();
     edges.dedup();
-    let mut covered: Vec<Vec<(Scalar, Scalar)>> = vec![Vec::new(); fs.edges.len()];
-    let mut cand: Vec<u32> = Vec::new();
-    for &(i, j) in &edges {
-        let (p, q) = (mesh.points[i as usize], mesh.points[j as usize]);
-        let c = key(p);
-        cand.clear();
+    let mut covered: Vec<Vec<(Scalar, Scalar)>> = vec![Vec::new(); chains.len()];
+    let mut cand_p: Vec<(u32, u32)> = Vec::new();
+    let mut cand_q: Vec<(u32, u32)> = Vec::new();
+    let mut segs_p: Vec<usize> = Vec::new();
+    let mut segs_q: Vec<usize> = Vec::new();
+    let around = |cx: [i64; 3], out: &mut Vec<(u32, u32)>| {
         for dz in -1i64..=1 {
             for dy in -1i64..=1 {
                 for dx in -1i64..=1 {
-                    if let Some(list) = grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
-                        cand.extend_from_slice(list);
+                    if let Some(list) = grid.get(&[cx[0] + dx, cx[1] + dy, cx[2] + dz]) {
+                        out.extend_from_slice(list);
                     }
                 }
             }
         }
-        cand.sort_unstable();
-        cand.dedup();
-        for &e in &cand {
-            let (a, b) = seg(e as usize);
-            if let Some(iv) = covered_interval(p, q, a, b, tol) {
-                covered[e as usize].push(iv);
+        out.sort_unstable();
+        out.dedup();
+    };
+    for &(i, j) in &edges {
+        let (p, q) = (mesh.points[i as usize], mesh.points[j as usize]);
+        cand_p.clear();
+        around(key(p), &mut cand_p);
+        cand_q.clear();
+        around(key(q), &mut cand_q);
+        // The chains both ends name, each end projected over its own
+        // candidate segments only, never the whole chain.
+        let mut a = 0usize;
+        while a < cand_p.len() {
+            let ci = cand_p[a].0;
+            let mut b = a;
+            while b < cand_p.len() && cand_p[b].0 == ci {
+                b += 1;
             }
+            let qs = cand_q.partition_point(|&(c, _)| c < ci);
+            if qs < cand_q.len() && cand_q[qs].0 == ci {
+                let mut qe = qs;
+                while qe < cand_q.len() && cand_q[qe].0 == ci {
+                    qe += 1;
+                }
+                segs_p.clear();
+                segs_p.extend(cand_p[a..b].iter().map(|&(_, s)| s as usize));
+                segs_q.clear();
+                segs_q.extend(cand_q[qs..qe].iter().map(|&(_, s)| s as usize));
+                let c = &chains[ci as usize];
+                if let (Some(fp), Some(fq)) = (
+                    project_on_chain(p, c, &segs_p),
+                    project_on_chain(q, c, &segs_q),
+                ) {
+                    if let Some((s0, s1)) = chain_cover(p, q, fp, fq, c, tol) {
+                        // An interval ending past L runs across the seam:
+                        // store the two pieces either side of it.
+                        let l = c.length();
+                        if s1 > l {
+                            covered[ci as usize].push((s0, l));
+                            covered[ci as usize].push((0.0, s1 - l));
+                        } else {
+                            covered[ci as usize].push((s0, s1));
+                        }
+                    }
+                }
+            }
+            a = b;
         }
     }
-    for e in 0..fs.edges.len() {
-        let (a, b) = seg(e);
-        out.captured_length += union_length(&mut covered[e]) * (b - a).mag();
+    for c in covered.iter_mut() {
+        out.captured_length += union_length(c);
     }
     Ok(out)
 }
@@ -2269,5 +2492,360 @@ mod tests {
         assert!(cov(v(0.5, 0.0), v(0.6, 0.05)).is_some());
         assert_eq!(cov(v(-0.05, 0.0), v(0.3, 0.0)), Some((0.0, 0.3)));
         assert_eq!(cov(v(0.3, 0.0), v(0.3, 0.0)), None);
+    }
+
+    /// The closed regular 16-gon of radius 1 in z = 0, point k at angle
+    /// 2 pi k / 16, ids 0..16 with the last the first again.
+    fn gon16_set() -> features::FeatureSet {
+        let mut pts = Vec::new();
+        for k in 0..16 {
+            let a = 2.0 * std::f64::consts::PI * (k as f64) / 16.0;
+            pts.push(Vec3::new(a.cos(), a.sin(), 0.0));
+        }
+        let mut pl: Vec<u32> = (0..16u32).collect();
+        pl.push(0);
+        features::FeatureSet {
+            points: pts,
+            edges: Vec::new(),
+            edge_patches: Vec::new(),
+            polylines: vec![pl],
+            corners: Vec::new(),
+            feature_angle_deg: 60.0,
+        }
+    }
+
+    /// The six faces of the box, each split into `k` x `k` squares, each
+    /// square two triangles wound OUTWARD like `box_soup`'s faces, patch 0.
+    /// The coordinate along axis `d` at grid index `i` is
+    /// `lo[d] + (hi[d] - lo[d]) * i / k`, the same expression on every
+    /// face, so shared points weld bit for bit.
+    fn grid_box_soup(lo: [f64; 3], hi: [f64; 3], k: usize) -> Vec<(u32, [Vec3; 3])> {
+        let g = |d: usize, i: usize| lo[d] + (hi[d] - lo[d]) * (i as f64) / (k as f64);
+        let mut soup: Vec<(u32, [Vec3; 3])> = Vec::new();
+        for &(a, b, f, hi_f) in &[
+            (0usize, 1usize, 2usize, false),
+            (0, 1, 2, true),
+            (0, 2, 1, false),
+            (0, 2, 1, true),
+            (1, 2, 0, false),
+            (1, 2, 0, true),
+        ] {
+            let p = |u: usize, v: usize| {
+                let mut x = [0.0; 3];
+                x[a] = g(a, u);
+                x[b] = g(b, v);
+                x[f] = if hi_f { hi[f] } else { lo[f] };
+                Vec3::new(x[0], x[1], x[2])
+            };
+            for i in 0..k {
+                for j in 0..k {
+                    let (c00, c10, c11, c01) =
+                        (p(i, j), p(i + 1, j), p(i + 1, j + 1), p(i, j + 1));
+                    // The two triangles, wound outward like box_soup's.
+                    let (t1, t2) = match (a, f, hi_f) {
+                        (0, 2, false) => ([c00, c11, c10], [c00, c01, c11]),
+                        (0, 1, true) => ([c10, c00, c01], [c10, c01, c11]),
+                        (1, 0, false) => ([c00, c01, c11], [c00, c11, c10]),
+                        _ => ([c00, c10, c11], [c00, c11, c01]),
+                    };
+                    soup.push((0u32, t1));
+                    soup.push((0u32, t2));
+                }
+            }
+        }
+        soup
+    }
+
+    /// `plane_cube_case` with `grid_box_soup([1, 3]^3, 3)` in place of
+    /// `box_soup`: the same setup and castellation, the STL splitting every
+    /// cube edge into 3 collinear segments.
+    fn grid_cube_case() -> (Surface, PolyMeshRaw) {
+        let (tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 0);
+        let surf = Surface::from_soup(
+            grid_box_soup([1.0; 3], [3.0; 3], 3),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        (surf, cast.mesh)
+    }
+
+    /// The chains cut a polyline where it turns further than the capture
+    /// angle: a 45-degree kink into 2 and 1, a closed square into 4 open
+    /// chains of 1, a closed 16-gon one closed chain.
+    #[test]
+    fn the_chains_cut_a_polyline_where_it_turns_further_than_the_capture_angle() {
+        let fs_of = |points: Vec<Vec3>, pl: Vec<u32>| features::FeatureSet {
+            points,
+            edges: Vec::new(),
+            edge_patches: Vec::new(),
+            polylines: vec![pl],
+            corners: Vec::new(),
+            feature_angle_deg: 60.0,
+        };
+        let s05 = 0.5f64.sqrt();
+        let a = fs_of(
+            vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0 + s05, s05, 0.0),
+            ],
+            vec![0, 1, 2, 3],
+        );
+        let ch = capture_chains(&a);
+        assert_eq!(ch.len(), 2, "{ch:?}");
+        assert!(ch.iter().all(|c| !c.closed), "{ch:?}");
+        assert_eq!(ch[0].points.len(), 3, "{:?}", ch[0].points);
+        assert!((ch[0].length() - 2.0).abs() <= 1e-12, "{}", ch[0].length());
+        assert_eq!(ch[1].points.len(), 2, "{:?}", ch[1].points);
+        assert!((ch[1].length() - 1.0).abs() <= 1e-12, "{}", ch[1].length());
+        eprintln!("chain cut open: lengths {} {}", ch[0].length(), ch[1].length());
+        let b = fs_of(
+            vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            vec![0, 1, 2, 3, 0],
+        );
+        let ch = capture_chains(&b);
+        assert_eq!(ch.len(), 4, "{ch:?}");
+        for c in &ch {
+            assert!(!c.closed, "{c:?}");
+            assert_eq!(c.points.len(), 2, "{:?}", c.points);
+            assert!((c.length() - 1.0).abs() <= 1e-12, "{}", c.length());
+        }
+        assert_eq!(ch[0].points[0], Vec3::new(0.0, 0.0, 0.0), "{:?}", ch[0].points);
+        assert_eq!(ch[0].points[1], Vec3::new(1.0, 0.0, 0.0), "{:?}", ch[0].points);
+        eprintln!("chain cut closed square: {} chains of 1", ch.len());
+        let ch = capture_chains(&gon16_set());
+        assert_eq!(ch.len(), 1, "{ch:?}");
+        assert!(ch[0].closed, "{:?}", ch[0]);
+        assert_eq!(ch[0].points.len(), 17, "{} points", ch[0].points.len());
+        for w in ch[0].arc.windows(2) {
+            assert!(w[0] < w[1], "arc not rising: {:?}", ch[0].arc);
+        }
+        let want = 32.0 * (std::f64::consts::PI / 16.0).sin();
+        assert!((ch[0].length() - want).abs() <= 1e-12, "{} vs {want}", ch[0].length());
+        eprintln!("chain 16-gon: closed length {}", ch[0].length());
+    }
+
+    /// On one segment the chain cover is the segment cover: the same
+    /// intervals where that one is of positive length, no cover where it
+    /// has none.
+    #[test]
+    fn on_one_segment_the_chain_cover_is_the_segment_cover() {
+        let fs = features::FeatureSet {
+            points: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)],
+            edges: Vec::new(),
+            edge_patches: Vec::new(),
+            polylines: vec![vec![0, 1]],
+            corners: Vec::new(),
+            feature_angle_deg: 60.0,
+        };
+        let ch = &capture_chains(&fs)[0];
+        let segs = [0usize];
+        let v = |x: f64, y: f64| Vec3::new(x, y, 0.0);
+        let cases: [(Vec3, Vec3, Option<(f64, f64)>); 8] = [
+            (v(0.2, 0.05), v(0.6, -0.05), Some((0.2, 0.6))),
+            (v(0.6, -0.05), v(0.2, 0.05), Some((0.2, 0.6))),
+            (v(0.2, 0.05), v(0.6, 0.2), None),
+            (v(0.5, 0.0), v(0.5, 0.09), None),
+            (v(0.5, 0.0), v(0.55, 0.05), None),
+            (v(0.5, 0.0), v(0.6, 0.05), Some((0.5, 0.6))),
+            (v(-0.05, 0.0), v(0.3, 0.0), Some((0.0, 0.3))),
+            (v(0.3, 0.0), v(0.3, 0.0), None),
+        ];
+        for (p, q, want) in cases {
+            let fp = project_on_chain(p, ch, &segs).expect("p projects");
+            let fq = project_on_chain(q, ch, &segs).expect("q projects");
+            let got = chain_cover(p, q, fp, fq, ch, 0.1);
+            match (got, want) {
+                (Some((s0, s1)), Some((t0, t1))) => {
+                    assert!((s0 - t0).abs() <= 1e-15 && (s1 - t1).abs() <= 1e-15, "{got:?}");
+                }
+                (None, None) => {}
+                _ => panic!("cover {got:?} vs segment {want:?} for {p:?} {q:?}"),
+            }
+            let seg = covered_interval(p, q, ch.points[0], ch.points[1], 0.1)
+                .filter(|&(t0, t1)| t1 > t0);
+            match (got, seg) {
+                (None, None) => {}
+                (Some((s0, s1)), Some((t0, t1))) => {
+                    assert!((s0 - t0).abs() <= 1e-15 && (s1 - t1).abs() <= 1e-15, "{got:?}");
+                }
+                _ => panic!("agreement {got:?} vs {seg:?} for {p:?} {q:?}"),
+            }
+        }
+        eprintln!("capture on one segment: {} cases agree", cases.len());
+    }
+
+    /// A closed chain is covered across its seam: the edge between the
+    /// midpoints of the last and first sides covers one side's length
+    /// across the seam, and the 16 edges cover the whole loop.
+    #[test]
+    fn a_closed_chain_is_covered_across_its_seam() {
+        let ch = &capture_chains(&gon16_set())[0];
+        let l = 2.0 * (std::f64::consts::PI / 16.0).sin();
+        let segs: Vec<usize> = (0..16).collect();
+        let mid = |k: usize| {
+            let (a, b) = (ch.points[k], ch.points[(k + 1) % 16]);
+            a + (b - a) * 0.5
+        };
+        let (p, q) = (mid(15), mid(0));
+        let fp = project_on_chain(p, ch, &segs).expect("p projects");
+        let fq = project_on_chain(q, ch, &segs).expect("q projects");
+        assert!(fp.1 <= 1e-15, "{}", fp.1);
+        assert!(fq.1 <= 1e-15, "{}", fq.1);
+        assert!((fp.0 - 15.5 * l).abs() <= 1e-12, "{} vs {}", fp.0, 15.5 * l);
+        assert!((fq.0 - 0.5 * l).abs() <= 1e-12, "{} vs {}", fq.0, 0.5 * l);
+        let iv = chain_cover(p, q, fp, fq, ch, 0.05).expect("seam cover");
+        assert!(
+            (iv.0 - 15.5 * l).abs() <= 1e-12 && (iv.1 - 16.5 * l).abs() <= 1e-12,
+            "{iv:?}"
+        );
+        eprintln!("capture seam interval {iv:?} against L {}", ch.length());
+        let mut ivs: Vec<(Scalar, Scalar)> = Vec::new();
+        for k in 0..16 {
+            let (p, q) = (mid(k), mid((k + 1) % 16));
+            let fp = project_on_chain(p, ch, &segs).expect("p projects");
+            let fq = project_on_chain(q, ch, &segs).expect("q projects");
+            if let Some((s0, s1)) = chain_cover(p, q, fp, fq, ch, 0.05) {
+                if s1 > ch.length() {
+                    ivs.push((s0, ch.length()));
+                    ivs.push((0.0, s1 - ch.length()));
+                } else {
+                    ivs.push((s0, s1));
+                }
+            }
+        }
+        let total = union_length(&mut ivs);
+        assert!((total - 16.0 * l).abs() <= 1e-12, "{total} vs {}", 16.0 * l);
+        assert!((total - ch.length()).abs() <= 1e-12, "{total} vs {}", ch.length());
+        eprintln!("capture seam loop: union {total} of L {}", ch.length());
+    }
+
+    /// A hairpin does not carry a short edge round its bend: the arc from
+    /// one arm to the other exceeds the edge by more than `2 tol`.
+    #[test]
+    fn a_hairpin_does_not_carry_a_short_edge_round_its_bend() {
+        let mut pts = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
+        for j in 1..=8 {
+            let a = (-90.0 + 22.5 * (j as f64)).to_radians();
+            pts.push(Vec3::new(1.0 + 0.04 * a.cos(), 0.04 + 0.04 * a.sin(), 0.0));
+        }
+        pts.push(Vec3::new(0.0, 0.08, 0.0));
+        assert_eq!(pts.len(), 11, "{} points", pts.len());
+        let fs = features::FeatureSet {
+            points: pts,
+            edges: Vec::new(),
+            edge_patches: Vec::new(),
+            polylines: vec![(0..11u32).collect()],
+            corners: Vec::new(),
+            feature_angle_deg: 60.0,
+        };
+        let chains = capture_chains(&fs);
+        assert_eq!(chains.len(), 1, "{chains:?}");
+        assert!(!chains[0].closed, "{:?}", chains[0]);
+        let ch = &chains[0];
+        let segs: Vec<usize> = (0..ch.points.len() - 1).collect();
+        let p = Vec3::new(0.5, 0.0, 0.0);
+        let q = Vec3::new(0.55, 0.08, 0.0);
+        let fp = project_on_chain(p, ch, &segs).expect("p projects");
+        let fq = project_on_chain(q, ch, &segs).expect("q projects");
+        assert!(fp.1 <= 1e-15, "{}", fp.1);
+        assert!(fq.1 <= 1e-15, "{}", fq.1);
+        assert!(chain_cover(p, q, fp, fq, ch, 0.05).is_none(), "hairpin cover");
+        let q2 = Vec3::new(0.6, 0.0, 0.0);
+        let fq2 = project_on_chain(q2, ch, &segs).expect("q2 projects");
+        let iv = chain_cover(p, q2, fp, fq2, ch, 0.05).expect("straight cover");
+        assert!((iv.0 - 0.5).abs() <= 1e-12 && (iv.1 - 0.6).abs() <= 1e-12, "{iv:?}");
+        eprintln!("capture hairpin: length {} straight {iv:?}", ch.length());
+    }
+
+    /// A subdivided cube on the cell planes is captured whole: 36 feature
+    /// edges in 12 chains, `captured_length` 24 where the per-segment
+    /// measure reads 0.
+    #[test]
+    fn a_subdivided_cube_on_the_cell_planes_is_captured_whole() {
+        let (surf, mesh) = grid_cube_case();
+        let fs = features::extract(&surf, 30.0).expect("features");
+        assert_eq!(fs.edges.len(), 36, "{} edges", fs.edges.len());
+        assert_eq!(fs.polylines.len(), 12, "{} polylines", fs.polylines.len());
+        assert_eq!(fs.corners.len(), 8, "{} corners", fs.corners.len());
+        let chains = capture_chains(&fs);
+        assert_eq!(chains.len(), 12, "{} chains", chains.len());
+        for c in &chains {
+            assert!(!c.closed, "{c:?}");
+            assert!((c.length() - 2.0).abs() <= 1e-12, "{}", c.length());
+        }
+        let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
+        eprintln!("subdivided cube capture {c:?}");
+        assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert!((c.captured_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
+        // The per-segment reading on the same mesh, for the record and as
+        // proof the chain matters: every wall edge is 1 long and every
+        // segment 2/3, so no wall edge has both ends within 0.1 of one
+        // segment.
+        let wall = wall_face_mask(&mesh, &surf, None);
+        let mut wedges: Vec<(u32, u32)> = Vec::new();
+        for (f, face) in mesh.faces.iter().enumerate() {
+            if wall[f] {
+                for k in 0..face.len() {
+                    let (a, b) = (face[k] as u32, face[(k + 1) % face.len()] as u32);
+                    wedges.push((a.min(b), a.max(b)));
+                }
+            }
+        }
+        wedges.sort_unstable();
+        wedges.dedup();
+        let mut per_seg: Vec<Vec<(Scalar, Scalar)>> = vec![Vec::new(); fs.edges.len()];
+        for &(i, j) in &wedges {
+            let (p, q) = (mesh.points[i as usize], mesh.points[j as usize]);
+            for e in 0..fs.edges.len() {
+                let (a, b) =
+                    (fs.points[fs.edges[e][0] as usize], fs.points[fs.edges[e][1] as usize]);
+                if let Some(iv) = covered_interval(p, q, a, b, 0.1) {
+                    per_seg[e].push(iv);
+                }
+            }
+        }
+        let mut total = 0.0;
+        for e in 0..fs.edges.len() {
+            let (a, b) =
+                (fs.points[fs.edges[e][0] as usize], fs.points[fs.edges[e][1] as usize]);
+            total += union_length(&mut per_seg[e]) * (b - a).mag();
+        }
+        assert_eq!(total, 0.0, "per-segment capture {total}");
+        eprintln!("capture per-segment reading on the same mesh: {total}");
+    }
+
+    /// Pull the mesh point at the middle of one subdivided cube edge half
+    /// a cell off it: the chain measure takes that edge's 2 away, 24 to 22.
+    #[test]
+    fn a_point_pulled_off_a_subdivided_edge_uncovers_that_edge() {
+        let (surf, mut mesh) = grid_cube_case();
+        let mid = Vec3::new(2.0, 1.0, 1.0);
+        let i = (0..mesh.points.len())
+            .min_by(|&a, &b| {
+                (mesh.points[a] - mid).mag().total_cmp(&(mesh.points[b] - mid).mag())
+            })
+            .expect("points");
+        assert!((mesh.points[i] - mid).mag() <= 1e-12, "no mesh point at the edge's middle");
+        mesh.points[i] = Vec3::new(2.0, 0.5, 0.5);
+        let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
+        eprintln!("subdivided pulled point capture {c:?}");
+        assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
+        assert!((c.captured_length - 22.0).abs() <= 1e-12 * 24.0, "{c:?}");
     }
 }

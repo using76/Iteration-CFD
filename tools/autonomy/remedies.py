@@ -6,7 +6,7 @@
 remedies.py - the L2 remedies (docs/15 §C's L2 row, AM-10).
 
 After a failed attempt, `diagnose` names the key and the earliest failing
-stage from score.py's closed failure enum; `propose` walks a table of twelve
+stage from score.py's closed failure enum; `propose` walks a table of thirteen
 remedies in priority order, each firing at most MAX_FIRES times per geometry
 and never revisiting a config sha, and ends the geometry in one of four
 terminals: PASS, CAPABILITY-LIMITED, EXHAUSTED or NO-REMEDY. `loop` runs the
@@ -55,6 +55,7 @@ TERMINAL_ID = {"PASS": "RM-PASS", "CAPABILITY-LIMITED": "RM-CAPABILITY-LIMITED",
                "EXHAUSTED": "RM-EXHAUSTED", "NO-REMEDY": "RM-NO-REMEDY"}
 FT_FORBIDDEN_WHY = ("feature_tolerance 0 is refused on a body with sharp edges off the R-PLANE path (WL-SHARP-FT0, the user's decision of 2026-09-26)")
 DROP_KEYS = ("layer:min_thickness", "layer:retreat_snapped")
+TAU_FLOOR = 0.125         # RM-SNAP-TAU's floor: tau never below h_f / 8, and never 0
 NO_REMEDY_KEYS = ("surface_closed", "config", "io", "crash", "gate@octree", "gate@castellate",
                   "gate@split", "gate@layers", "F2", "F3e")
 CONTAINERS = ("/refinement/levels",)     # the one non-leaf pointer _set may write
@@ -104,6 +105,15 @@ REMEDIES = (
                 "sharp edges (WL-SHARP-FT0), and a body without one has no edge to release",
      "cite": "docs/15 §K G-PILOT (feature_tolerance 0 unpinned 10 of 10 feature-bearing "
              "geometries; caution 1: the edges are then not captured, G-FID guards it)"},
+    {"id": "RM-SNAP-TAU", "keys": ("F3", "gate@snap"), "stage": "snap",
+     "fn": "_rm_snap_tau",
+     "what": "halve the feature attraction radius, never below h_f/8 and never to 0",
+     "formula": "feature_tolerance' = feature_tolerance / 2 while tau' = "
+                "feature_tolerance' * base_size >= h_f / 8, "
+                "h_f = base_size / 2**max_level",
+     "cite": "SPEC-LIT §92.12 (92.38) erratum 2026-09-26 (the default radius is "
+             "2^(L-1) wall cells at wall level L and pins sharp bodies); rules.py "
+             "R-FEAT (tau = h_f / 2)"},
     {"id": "RM-SNAP-REFINE", "keys": ("F3d",), "stage": "snap",
      "fn": "_rm_snap_refine",
      "what": "refine the whole refinement ladder one level (the snapped surface misses area: "
@@ -352,7 +362,7 @@ def _qualifies(ctx, gates, knobs):
 _QUAL_CACHE = {}
 
 
-# --- the twelve remedies (C5): (after | None, why | None, extra inputs) -------
+# --- the thirteen remedies (C5): (after | None, why | None, extra inputs) -----
 
 def _coarsen(ctx, gates, knobs, plane_guard):
     """The shared coarsen guards; the pack (levels, max_level) goes back for _set."""
@@ -466,6 +476,27 @@ def _rm_snap_ft(ctx, gates, knobs):
     if _get(before, "/snap/feature_tolerance") == 0:
         return None, "the attraction is already off", []
     return None, FT_FORBIDDEN_WHY, []
+
+
+def _rm_snap_tau(ctx, gates, knobs):
+    before = ctx["config"]
+    if ctx["fingerprint"].get("sharp_edge_length_m", 0) <= 0:
+        return None, "no sharp edge (features.py)", []
+    if on_plane(before, ctx["fingerprint"]):
+        return None, "on the R-PLANE path (the plane owns the snap knobs)", []
+    ft = _get(before, "/snap/feature_tolerance")
+    if ft == 0:
+        return None, "the attraction is already off", []
+    ml = _get(before, "/refinement/max_level")
+    r = (ft / 2) * 2 ** ml
+    if r < TAU_FLOOR * (1 - 1e-12):
+        return None, "tau/2 = %s h_f is below the floor h_f/8" % _fmt(r), []
+    after = copy.deepcopy(before)
+    _set(after, "/snap/feature_tolerance", ft / 2)
+    return after, None, [{"name": "tau_over_h_f", "value": ft * 2 ** ml, "unit": "1"},
+                         {"name": "tau_over_h_f_after", "value": r, "unit": "1"},
+                         {"name": "tau_floor_over_h_f", "value": TAU_FLOOR,
+                          "unit": "1"}]
 
 
 def _rm_t1_raise(ctx, gates, knobs):
@@ -659,8 +690,10 @@ def diagnose(outcome: dict, gates: dict) -> dict:
             "not_in", "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)")}
     if fl.get("F3e") is True:
         return {"key": "F3e", "stage": "snap", "trigger": trig(
-            "outcome.feature_capture", outcome.get("feature_capture"), 0.0, "==",
-            "score.py stages[snap] feature attraction (README section D, 2026-09-26)")}
+            "outcome.feature_capture", outcome.get("feature_capture"),
+            gates["feature_capture_min"], "<",
+            "score.py stages[snap].feature_capture (92.62) against gates.json "
+            "feature_capture_min (README section D, D-L5)")}
     if fl.get("F2") is True:
         return {"key": "F2", "stage": None, "trigger": trig(
             "outcome.flags.F2", True, True, "==", "-check (docs/15 §D.1 F2)")}
@@ -1548,7 +1581,7 @@ def selftest() -> int:
 
     def g1():
         ids = [r["id"] for r in REMEDIES]
-        assert len(ids) == len(set(ids)) == 12, "the table needs 12 unique rows"
+        assert len(ids) == len(set(ids)) == 13, "the table needs 13 unique rows"
         pat = __import__("re").compile(r"^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$")
         for r in REMEDIES:
             assert pat.match(r["id"]), "%s is not a DecisionRecord rule id" % r["id"]
@@ -1563,7 +1596,7 @@ def selftest() -> int:
         assert len(routed) == 21, "21 keys routed, have %d: %s" % (len(routed), sorted(routed))
         for k in ("surface_closed", "gate@snap", "pass", "layer:min_thickness"):
             assert k in routed, "%s unrouted" % k
-        return ("[ok] table: 12 remedies, 4 terminals, 21 keys routed "
+        return ("[ok] table: 13 remedies, 4 terminals, 21 keys routed "
                 "(RM-BUDGET-FAR ... RM-LAYER-FIT)")
 
     def g2():
@@ -1603,7 +1636,7 @@ def selftest() -> int:
         ptxt = ", ".join("%s %d" % (k, n) for k, n in
                          sorted(pc.items(), key=lambda kv: (-kv[1], kv[0])))
         return p_results, s_results, ("[ok] fixtures: 31/31 probes get the tabled remedy (%s)"
-                                      % ptxt), "[ok] sequences: 33/33 as labelled"
+                                      % ptxt), "[ok] sequences: 35/35 as labelled"
 
     def g5():
         ctx = probe_ctx("box_sphere", plabels, fps)
@@ -1623,7 +1656,7 @@ def selftest() -> int:
         sc = static_scan(knobs=knobs)
         assert sc["ok"], "static scan: %s" % sc["violations"]
         n_fn = len(sc["writes"])
-        assert n_fn == 11, "11 _rm_* functions with writes, have %d" % n_fn
+        assert n_fn == 12, "12 _rm_* functions with writes, have %d" % n_fn
         wr = "; ".join("%s[%s]" % (k[3:], ",".join(
             "levels" if p in CONTAINERS else p.rsplit("/", 1)[-1] for p in v))
             for k, v in sorted(sc["writes"].items()))
@@ -1650,7 +1683,7 @@ def selftest() -> int:
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
-        return ("[ok] static scan: %d _set calls in 11 _rm_* functions, 0 violations; "
+        return ("[ok] static scan: %d _set calls in 12 _rm_* functions, 0 violations; "
                 "writes %s" % (sc["n_set_calls"], wr))
 
     def g7():
@@ -1768,14 +1801,14 @@ def selftest() -> int:
         out = (p.stdout or "").strip().splitlines()
         last = out[-1]
         before = out[-2] if len(out) > 1 else ""
-        assert p.returncode == 0 and last == "TERMINAL EXHAUSTED", \
+        assert p.returncode == 0 and last.startswith("REMEDY RM-SNAP-TAU "), \
             "exit %d, last %r" % (p.returncode, last)
-        assert "refused on a body with sharp edges" in before, before
+        assert "halve the feature attraction radius" in before, before
         q = run("--probe", "NOPE")
         assert q.returncode == 2 and "remedies:" in (q.stderr or ""), \
             "exit %d, err %r" % (q.returncode, (q.stderr or "")[:80])
-        return "[ok] cli: --probe wing_a_L3 exit 0 ends TERMINAL EXHAUSTED (RM-SNAP-FT " \
-            "refused by name); --probe NOPE exit 2"
+        return "[ok] cli: --probe wing_a_L3 exit 0 applies RM-SNAP-TAU (RM-SNAP-FT " \
+            "refused by name, the radius halved instead); --probe NOPE exit 2"
 
     for g, name, fn in ((1, "the table", g1), (2, "diagnose", g2),
                         (3, "fixtures", lambda: g34()[2]),

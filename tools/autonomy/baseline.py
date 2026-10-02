@@ -1002,7 +1002,7 @@ def rcurv(out, *, streams=6, binary=None, ids=None, limit=None,
         def arm_of(pair, which, k):
             cfg = pair["cfg_" + which]
             gctx = {"gid": pair["geometry_id"], "areas": pair["obs"]["areas"],
-                    "flow": pair["mrow"]["flow"], "audit": []}
+                    "flow": pair["mrow"]["flow"], "audit": [], "fp": pair["fp"]}
             probe = campaign.octree_probe(c, gctx, cfg, k)
             pf = preflight.preflight(cfg, fingerprint=pair["fp"],
                                      flow=pair["mrow"]["flow"],

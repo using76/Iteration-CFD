@@ -17,11 +17,13 @@
     "cell_budget": {"type": "integer", "minimum": 1},
     "delivered_min_layers": {"type": "integer", "minimum": 1, "maximum": 100},
     "yplus_max_a_priori": {"type": "number", "exclusiveMinimum": 0},
+    "feature_capture_min": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
     "adopted": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
     "source": {"type": "string", "minLength": 1}
   },
   "required": ["$comment", "schema", "pinned_frac_max", "p99_residual_over_hf_max",
                "max_residual_over_hf_max", "area_ratio_min", "area_ratio_max",
                "attempts_k", "cell_budget", "delivered_min_layers", "yplus_max_a_priori",
+               "feature_capture_min",
                "adopted", "source"]
 }

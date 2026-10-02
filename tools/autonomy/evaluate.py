@@ -316,8 +316,8 @@ def plan_of(manifest_info, rehearsal, gdet, streams, binary, baselines):
             "binary_sha256": _sha256_of_file(binary),
             "gates_sha256": campaign.sha(schema.load_gates()),
             "knobs_sha256": campaign.sha(schema.load_knobs()),
-            "models": {"prior": _sha256_of_file(os.path.join(HERE, "prior",
-                                                             "prior_model.json")),
+            "models": {"prior": _sha256_of_file(os.path.join(prior.REPORT_DIR,
+                                                             prior.MODEL_NAME)),
                        "optimiser": _sha256_of_file(os.path.join(HERE, "optimise",
                                                                  "opt_model.json")),
                        "optimiser_train": _sha256_of_file(os.path.join(
@@ -914,7 +914,7 @@ def load_context(report_dir):
 
 
 def tuning_context():
-    p = _read_json(os.path.join(HERE, "prior", "G-PRIOR.json"))
+    p = _read_json(os.path.join(prior.REPORT_DIR, prior.REPORT_NAME))
     o = _read_json(os.path.join(HERE, "optimise", "G-OPT.json"))
     curve = []
     for k in ("rules", "round-1", "round-2", "round-3", "round-4", "round-5"):
@@ -1070,7 +1070,7 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
         if write:
             _dump_json(os.path.join(report_dir, CONTEXT_NAME),
                        {"$comment": HEADER, "schema": CONTEXT_SCHEMA,
-                        "note": "the tuning context (prior/G-PRIOR.json and "
+                        "note": "the tuning context (prior/aml/G-PRIOR.json and "
                                 "optimise/G-OPT.json) as it stood when this "
                                 "evaluation's report was first written",
                         "context": tuning})
@@ -2141,7 +2141,10 @@ def _selftest():
         assert au["ok"] and au["record_order"]["bad"] == [], au["record_order"]
         last = max(r["attempt"] for r in rows_f if r["geometry_id"] == "F-1-009")
         tags = recs_f["F-1-009"]
-        assert any(e and t["record"]["rule_id"] == "OPT-NOFEAS" for t, e in
+        # RM-SNAP-TAU spends attempts 2-3 on this sharp body and the attempt-4
+        # pick fails too, so the terminal RM-EXHAUSTED (not an optimiser record
+        # after it) ends the geometry
+        assert any(e and t["record"]["rule_id"] == "RM-EXHAUSTED" for t, e in
                    zip(tags, explain.ends_geometry(tags, last))), tags
         assert rep["systems"]["b0-template"]["failures"] == 4
         assert rep["gates"]["G-FID"]["verdict"] == UNDECIDED

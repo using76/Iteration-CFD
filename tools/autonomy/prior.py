@@ -22,11 +22,14 @@ part abstains (PR-PARTIAL).  G-PRIOR (docs/15 §F) measures, on the tuning
 split and leave-one-geometry-out, whether the real prior's attempt-1 pass rate
 beats rules-only's and a shuffled-fingerprint control; if either condition
 fails the model ships DISABLED and records PR-DISABLED on every geometry.
+The current gate's report and the shipped model live in prior/aml/ (the AM-L
+tuning campaign's re-gate); prior/ keeps the AM-13 / PRIOR-FIX gate as the
+record of that run, and its bundles are optimise.py's SOURCES.
 
     python tools/autonomy/prior.py --selftest
     python tools/autonomy/prior.py --plan --rules DIR
     python tools/autonomy/prior.py --gate --rules DIR --work DIR
-    python tools/autonomy/prior.py --check
+    python tools/autonomy/prior.py --check [--report-dir prior/aml|prior]
 """
 import argparse
 import copy
@@ -65,7 +68,11 @@ class PriorError(ValueError):
     """A refused request or a harness inconsistency - never a verdict."""
 
 
-REPORT_DIR = os.path.join(HERE, "prior")
+REPORT_DIR = os.path.join(HERE, "prior", "aml")   # the current gate: the AM-L tuning
+# campaign's report and the SHIPPED model (_MODEL follows it).  AM13_DIR is the
+# AM-13 / PRIOR-FIX gate of 2026-09-25/26, kept as the record of that run;
+# optimise.py's SOURCES read its bundles.
+AM13_DIR = os.path.join(HERE, "prior")
 MODEL_NAME = "prior_model.json"
 REPORT_NAME = "G-PRIOR.json"
 REPORT_MD = "G-PRIOR.md"
@@ -158,6 +165,9 @@ DEPARTURES = (
     "a winning path is re-applied only whole: when one of its remedies is refused by "
     "its own guard here, the rest is a config no neighbour passed with, and the prior "
     "abstains PR-PARTIAL",
+    "the gate's report and the shipped model live in prior/aml/ since 2026-10-02 "
+    "(the AM-L tuning campaign); prior/ keeps the AM-13 and PRIOR-FIX gate as the "
+    "record of that run and the bundles optimise.py's SOURCES read",
 )
 
 
@@ -322,7 +332,7 @@ def rule_passes(bundle):
     return out
 
 
-def bank_from(bundle):
+def bank_from(bundle, transfer=TRANSFER):
     """One entry per passing geometry: its earliest passing attempt under the
     2026-09-26 rule, and the transferred remedies it needed on the way
     (layer-stage remedies dropped)."""
@@ -353,15 +363,27 @@ def bank_from(bundle):
         out.append({"geometry_id": gid, "family": end["family"], "attempt": p,
                     "path": [att[a]["rule_id"] for a in range(2, p + 1)
                              if att[a]["decided_by"] == "remedy"
-                             and att[a]["rule_id"] in TRANSFER],
+                             and att[a]["rule_id"] in transfer],
                     "fingerprint_sha256":
                         schema.canonical_sha256(end["fingerprint"]),
                     "edge_class": edge_class(end["fingerprint"])})
     return out
 
 
-def build(bundle):
-    """The model: the pool's scaler and abstention distance, the bank with z."""
+def build(bundle, transfer=None):
+    """The model: the pool's scaler and abstention distance, the bank with z.
+
+    transfer None means the module's TRANSFER; a list rebuilds the bank under a
+    recorded transfer list (check's model rebuild) - an id that is not a
+    remedy-table id is a PriorError naming it."""
+    if transfer is None:
+        transfer = TRANSFER
+    else:
+        transfer = tuple(transfer)
+        unknown = [t for t in transfer if t not in _REMEDY_BY_ID]
+        if unknown:
+            raise PriorError("transfer: %s is not a remedy-table id"
+                             % ", ".join(unknown))
     pool = [g for g in bundle["geometries"] if g.get("fingerprint") is not None]
     pool.sort(key=lambda g: g["geometry_id"])
     if len(pool) < 2:
@@ -371,7 +393,7 @@ def build(bundle):
     d_abs = d_abstain([standardise(features(g["fingerprint"]), scaler)
                        for g in pool])
     bank = []
-    for e in bank_from(bundle):
+    for e in bank_from(bundle, transfer):
         e = dict(e)
         e["z"] = standardise(features(_pool_fp(pool, e["geometry_id"])),
                              scaler).tolist()
@@ -381,7 +403,7 @@ def build(bundle):
             "features": list(FEATURES),
             "kept": [f for f, k in zip(FEATURES, scaler["kept"]) if k],
             "scaler": scaler, "d_abstain": d_abs,
-            "d_abstain_pct": D_ABSTAIN_PCT, "transfer": list(TRANSFER),
+            "d_abstain_pct": D_ABSTAIN_PCT, "transfer": list(transfer),
             "null_policy": list(NULL_POLICY), "excluded": dict(EXCLUDED),
             "pool_n": len(pool), "bank_n": len(bank), "bank": bank,
             "source": {"campaign_id": head["campaign_id"],
@@ -1242,8 +1264,12 @@ def _check_models(rep, pm, bpath, mp, items, report_dir, rp_path):
     else:
         why_r = bpath
         try:
-            rebuilt = model_sha(build(baseline.read_bundle(bpath)))
-        except (PriorError, baseline.BaselineError, ValueError, KeyError) as e:
+            # the recorded transfer list: a gate written under an older table
+            # rebuilds under its own ids (a non-table id fails by name)
+            rebuilt = model_sha(build(baseline.read_bundle(bpath),
+                                      transfer=(pm.get("transfer") or [])))
+        except (PriorError, baseline.BaselineError, ValueError, KeyError,
+                zlib.error, EOFError) as e:
             rebuilt, why_r = None, "%s: %s" % (bpath, e)
         add("model rebuild", rebuilt is not None and rebuilt == msha,
             msha if rebuilt is not None else why_r)
@@ -1357,7 +1383,9 @@ def main(argv=None):
     ap.add_argument("--work", help="the evaluation rounds' work directory")
     ap.add_argument("--streams", type=int, default=6)
     ap.add_argument("--binary", default=None)
-    ap.add_argument("--report-dir", dest="report_dir", default=REPORT_DIR)
+    ap.add_argument("--report-dir", dest="report_dir", default=REPORT_DIR,
+                    help="the report directory (default prior/aml; the AM-13 "
+                         "record is prior)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
@@ -1463,7 +1491,7 @@ def _g1_constants(H):
     assert len(FEATURES) == 17 and K == 3 and SHUFFLES == 3 and EPS == 1e-6
     assert TRANSFER == ("RM-BUDGET-FAR", "RM-BUDGET-FEAT", "RM-BUDGET-WALL",
                         "RM-TOPO-REFINE", "RM-SNAP-WALL", "RM-SNAP-FT",
-                        "RM-SNAP-REFINE"), TRANSFER
+                        "RM-SNAP-TAU", "RM-SNAP-REFINE"), TRANSFER
     for rid in PR_IDS:
         assert rid in explain.TEMPLATES and \
             explain.TEMPLATES[rid]["layer"] == "prior", rid
@@ -1496,7 +1524,7 @@ def _g1_constants(H):
         assert "no prior model" in str(e), str(e)
     else:
         raise AssertionError("a missing model was not refused")
-    print("[ok] constants: 17 features, k 3, 3 shuffles, 7 transferable remedies, "
+    print("[ok] constants: 17 features, k 3, 3 shuffles, 8 transferable remedies, "
           "6 PR ids templated; an evaluate campaign is refused before any other "
           "file, a b0-template campaign and a missing model are refused by name")
 
@@ -1954,6 +1982,20 @@ def _g11_check_cli(H):
     it2 = {i["name"]: i for i in ck2["items"]}
     assert it2["model rebuild"]["ok"] is False and it2["model sha"]["ok"] is False
     assert ck2["verdict"] == "FAIL"
+    # a reserved deflate block type in the rules bundle: the two block-type bits
+    # of the first deflate byte (a 10-byte gzip header, FLG 0) make decompression
+    # raise zlib.error, not a CRC OSError - check returns FAIL, never raises
+    c3 = _copy_dir(rdir, os.path.join(H["tmp"], "check-deflate"))
+    p3 = os.path.join(c3, RULES_BUNDLE)
+    data = bytearray(open(p3, "rb").read())
+    data[10] |= 0x06
+    with open(p3, "wb") as f:
+        f.write(bytes(data))
+    ck3 = check(c3)
+    it3 = {i["name"]: i for i in ck3["items"]}
+    assert it3["rules bundle"]["ok"] is False \
+        and it3["model rebuild"]["ok"] is False and ck3["verdict"] == "FAIL", \
+        (ck3["verdict"], it3)
     p = _child(["--plan", "--rules", H["R1"]])
     # every prior config is already meshed on this oracle, so the plan has no
     # round left to run (2026-09-26)
@@ -1967,9 +2009,9 @@ def _g11_check_cli(H):
         (p.returncode, p.stdout[-400:])
     p = _child(["--check", "--report-dir", os.path.join(H["tmp"], "nothing")])
     assert p.returncode == 1, (p.returncode, p.stdout[-400:])
-    print("[ok] check: PASS on the gate's files, a flipped round-bundle byte and "
-          "an edited model FAIL by name; the CLI plans the rounds it has, refuses "
-          "a gate without --rules, and checks")
+    print("[ok] check: PASS on the gate's files, a flipped round-bundle byte, an "
+          "edited model and a reserved deflate block type FAIL by name; the CLI "
+          "plans the rounds it has, refuses a gate without --rules, and checks")
 
 
 def _g12_rule(H):
@@ -2003,8 +2045,9 @@ def _g12_rule(H):
         optimise.apply_edits(cfg1, a2row["config_delta"]))
     assert [e["geometry_id"] for e in bank_from(b3)] == \
         ["D-1-010", "D-1-077", "E-1-010", "F-1-011", "G-1-016"]
-    # (c) the committed rules campaign under the rule
-    bc = baseline.read_bundle(os.path.join(REPORT_DIR, RULES_BUNDLE))
+    # (c) the committed rules campaign under the rule (the AM-13 record's bundle;
+    # the current gate's bundle is the AM-L tuning campaign's)
+    bc = baseline.read_bundle(os.path.join(AM13_DIR, RULES_BUNDLE))
     okc = rule_passes(bc)
     assert sum(1 for v in okc.values() if v) == 81, \
         sum(1 for v in okc.values() if v)

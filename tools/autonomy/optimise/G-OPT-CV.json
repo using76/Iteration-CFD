@@ -1,0 +1,138 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "conditions": {
+  "auc_ge": true,
+  "rmse_le": false
+ },
+ "cv": {
+  "auc": 0.9848501676711345,
+  "blc8_rmse": 0.1537142221007169,
+  "blc8_rmse_pos": 0.46773118767248867,
+  "blc8_rmse_zero": 0.2580366535453138,
+  "brier": 0.043821059920505244,
+  "fold_rows": {
+   "0": 642,
+   "1": 515,
+   "2": 645,
+   "3": 668,
+   "4": 714
+  },
+  "folds": [
+   0,
+   1,
+   2,
+   3,
+   4
+  ],
+  "log_cells_rmse": 0.054451065969543286,
+  "n": 3184,
+  "n_fail": 2286,
+  "n_geometries": 372,
+  "n_pos": 212
+ },
+ "date": "2026-10-02",
+ "extra_cv": {
+  "auc": 0.9716928816293607,
+  "blc8_rmse": 0.300193597112459,
+  "blc8_rmse_pos": 0.48828152943248676,
+  "blc8_rmse_zero": 0.5018126947672209,
+  "brier": 0.06309662563506267,
+  "fold_rows": {
+   "0": 86,
+   "1": 64,
+   "2": 81,
+   "3": 91,
+   "4": 91
+  },
+  "folds": [
+   0,
+   1,
+   2,
+   3,
+   4
+  ],
+  "log_cells_rmse": 0.08664534771953813,
+  "n": 413,
+  "n_fail": 152,
+  "n_geometries": 356,
+  "n_pos": 104
+ },
+ "extra_oof": {
+  "auc": 0.9755999193385763,
+  "blc8_rmse": 0.2985118495810679,
+  "blc8_rmse_zero": 0.5018126947672209,
+  "log_cells_rmse": 0.05923281137614274,
+  "n": 413,
+  "n_fail": 152,
+  "n_geometries": 356,
+  "n_pos": 104
+ },
+ "n_duplicates": 1322,
+ "schema": "autonomy-opt-cv/1",
+ "ship": {
+  "enabled": true,
+  "why": "the CV half fails on the new rows; the optimiser stays enabled by the user's choice of 2026-09-26 (docs/15 section F said a G-OPT miss ships it disabled) until the user says otherwise; the shipped model is not refitted here"
+ },
+ "sources": [
+  {
+   "file": "aml/tuning_rules_L5.json.gz",
+   "n_rows_kept": 413,
+   "sha256": "75acc3b0ca373ed191964e39e85542c281bda1b917e1960f98168ab27bec2615"
+  },
+  {
+   "file": "prior/tuning_rules.json.gz",
+   "n_rows_kept": 724,
+   "sha256": "583556b03bca685fd072ff2d5587ea8e5ef542d014f46feb98e954010a380075"
+  },
+  {
+   "file": "prior/eval_r1.json.gz",
+   "n_rows_kept": 116,
+   "sha256": "7be7de56cdf45cc4fb0abe462d70a979209c5c0e3d646bf47cf56ff327ccdd9b"
+  },
+  {
+   "file": "prior/eval_r2.json.gz",
+   "n_rows_kept": 24,
+   "sha256": "fa554d60d698fe45451aa78031a6cf75157b37833a70d6a3c268541879006612"
+  },
+  {
+   "file": "baseline/tuning_b0-template.json.gz",
+   "n_rows_kept": 372,
+   "sha256": "8d0309e70701908c2e29ff2f5a1ae8b6bae3360993c18e2c9c44281d9e560da7"
+  },
+  {
+   "file": "baseline/tuning_b0-lhs.json.gz",
+   "n_rows_kept": 1488,
+   "sha256": "6b98b08ceb8cb8784f50c9277fd6157fbbec862eb0431c0c5fbf28f12d2bb68a"
+  },
+  {
+   "file": "refine_r1.json.gz",
+   "n_rows_kept": 20,
+   "sha256": "7a86d7e55c7da56c2ec70e79e7ac823518317d949b77853dff14eb228fd65a29"
+  },
+  {
+   "file": "refine_r2.json.gz",
+   "n_rows_kept": 7,
+   "sha256": "d131b8a8d44a392821bc3af0e20b625259fa105eb333fe6a763a331a80bd0036"
+  },
+  {
+   "file": "refine_r3.json.gz",
+   "n_rows_kept": 8,
+   "sha256": "a6a6f6781394178096c4590e7509158bf0479a29f72ac857d5d43d4f1eb4e7a0"
+  },
+  {
+   "file": "refine_r4.json.gz",
+   "n_rows_kept": 5,
+   "sha256": "f7465d1aea6c643b805fb752152f49247100362f8ee8b5bc618d9063de516ca6"
+  },
+  {
+   "file": "refine_r5.json.gz",
+   "n_rows_kept": 7,
+   "sha256": "9808fea2da61e8dea49c433c4fbccfb1ebfe9721a15030c98ffdb621f7a2d496"
+  }
+ ],
+ "thresholds": {
+  "auc_min": 0.75,
+  "rmse_max": 0.15
+ },
+ "verdict": "FAIL"
+}
