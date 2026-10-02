@@ -1393,6 +1393,9 @@ pub struct Energy<'m> {
     rho_cp: DevBuf<Scalar>,
     rho_cp0: DevBuf<Scalar>,
     rho_cp00: DevBuf<Scalar>,
+    /// SPEC-LIT 105.17's `T* = 2 T^{n-1} - T^{n-2}`, written only under
+    /// `backward` - the `T*` the three `rho*` levels divide by.
+    t_star: DevBuf<Scalar>,
 
     rho_face: GpuSurfaceScalarField,
     nut_face: GpuSurfaceScalarField,
@@ -1486,6 +1489,7 @@ impl<'m> Energy<'m> {
             rho_cp: gpu.zeros(one(n))?,
             rho_cp0: gpu.zeros(one(n))?,
             rho_cp00: gpu.zeros(one(n))?,
+            t_star: gpu.zeros(one(n))?,
 
             rho_face: GpuSurfaceScalarField::zeros(gpu, m, "rhoTf")?,
             nut_face: GpuSurfaceScalarField::zeros(gpu, m, "nutTf")?,
@@ -1754,10 +1758,20 @@ impl<'m> Energy<'m> {
     }
 
     /// Advance the ddt scheme's own time-step bookkeeping - call ONCE per
-    /// time step, alongside [`GasState::advance_time_levels`] and
-    /// [`field_ops::advance_time_levels`] on `T` itself.
+    /// transient time step from the SECOND step on (SPEC-LIT 105.17), next to
+    /// [`Self::advance_time_levels`], [`GasState::advance_time_levels`] and
+    /// [`field_ops::advance_time_levels`] on `T` itself - never once per
+    /// outer corrector.
     pub fn advance_time_step(&mut self, next_dt: Scalar) {
         self.ddt.advance(next_dt);
+    }
+
+    /// Rotate `T`'s time levels: `f00 <- f0 <- f`, in that order - SPEC-LIT
+    /// 105.17. Call ONCE per transient time step from the SECOND step on,
+    /// BEFORE [`GasState::update_density`], next to [`Self::advance_time_step`]
+    /// and [`GasState::advance_time_levels`] - never once per outer corrector.
+    pub fn advance_time_levels(&mut self, gpu: &Gpu) -> Result<()> {
+        field_ops::advance_time_levels(gpu, &self.fldk, &mut self.t)
     }
 
     // ---- §59 the conjugate retarget --------------------------------------
@@ -2058,9 +2072,30 @@ impl<'m> Energy<'m> {
 
     // ---- assembly pieces -----------------------------------------------
 
+    /// Refresh the three `rho cp` levels. Under `backward` they are SPEC-LIT
+    /// 105.17's `rho* cp = cp p0 / (R_s T*)` on all three levels, with
+    /// `T* = 2 T^{n-1} - T^{n-2}` cell by cell and `p0` the current
+    /// thermodynamic pressure - the non-conservative `rho* cp ddt(T)`, because
+    /// the conservative BDF2 row cannot be second order here: one outer
+    /// corrector has run, so `rho^n` is `rho(T^{n-1})`, and with it the row
+    /// collapses to `(3/2)(p0/R_s)(T^n/T^{n-1} - 1)/dt`. Any other scheme runs
+    /// the launches it always ran, `gas.rho()` level by level.
     fn refresh_rho_cp(&mut self, gpu: &Gpu, gas: &GasState) -> Result<()> {
         let n = self.m.n_cells;
         let cp = self.props.cp;
+
+        if self.ddt.scheme == DdtScheme::Backward {
+            let rs = gas.props().r_s();
+            field_ops::copy_field(gpu, &self.fldk, &mut self.t_star, &self.t.f00, n)?;
+            field_ops::scale_field(gpu, &self.fldk, &mut self.t_star, -1.0, n)?;
+            field_ops::add_field(gpu, &self.fldk, &mut self.t_star, &self.t.f0, n)?;
+            field_ops::add_field(gpu, &self.fldk, &mut self.t_star, &self.t.f0, n)?;
+            for level in [&mut self.rho_cp, &mut self.rho_cp0, &mut self.rho_cp00] {
+                field_ops::set_field(gpu, &self.fldk, level, cp * gas.p0() / rs, n)?;
+                field_ops::divide_field(gpu, &self.fldk, level, &self.t_star, n)?;
+            }
+            return self.blend_rho_cp(gpu);
+        }
 
         field_ops::copy_field(gpu, &self.fldk, &mut self.rho_cp, &gas.rho().f, n)?;
         field_ops::scale_field(gpu, &self.fldk, &mut self.rho_cp, cp, n)?;
