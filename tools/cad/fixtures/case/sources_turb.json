@@ -1,0 +1,229 @@
+{
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. Verbatim spans of the solver tree at 08e10bb, quoted read-only for the turbulent case writer (docs/16 section I CAD-26).",
+  "sources": [
+    {
+      "id": "registry",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/models/registry.rs",
+      "blob": "bc88a480537ca36204bab024c22ec65e19fb0124",
+      "lines": [
+        253,
+        270
+      ],
+      "what": "REGISTRY: every model spelling ofgpu builds (CASE-MODEL)",
+      "text": "const REGISTRY: &[(&str, RasModel)] = &[\n    (\"laminar\", RasModel::Laminar),\n    (\"kEpsilon\", RasModel::KEpsilon),\n    (\"KEpsilon\", RasModel::KEpsilon),\n    (\"LaunderSharmaKE\", RasModel::LaunderSharmaKE),\n    (\"realizableKE\", RasModel::RealizableKE),\n    (\"RealizableKE\", RasModel::RealizableKE),\n    (\"RNGkEpsilon\", RasModel::RNGkEpsilon),\n    (\"RNGKEpsilon\", RasModel::RNGkEpsilon),\n    (\"kOmega\", RasModel::KOmega),\n    (\"KOmega\", RasModel::KOmega),\n    (\"kOmegaSST\", RasModel::KOmegaSST),\n    (\"kOmegaSSTLM\", RasModel::KOmegaSstLM),\n    (\"kOmegaSSTGamma\", RasModel::KOmegaSstGamma),\n    (\"KOmegaSST\", RasModel::KOmegaSST),\n    (\"SpalartAllmaras\", RasModel::SpalartAllmaras),\n    (\"SpalartAllmarras\", RasModel::SpalartAllmaras),\n];\n",
+      "text_sha256": "356cd068c0fc91a2b0cb1da149bcacfed1cd374020cce4824b723eda448a0d35"
+    },
+    {
+      "id": "bc_names",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/field.rs",
+      "blob": "59c01566a64d7b4d8b44c537619c6d46f45e52bf",
+      "lines": [
+        358,
+        408
+      ],
+      "what": "IMPLEMENTED_BC_NAMES: every patch type the field reader accepts",
+      "text": "pub const IMPLEMENTED_BC_NAMES: &[&str] = &[\n    \"fixedValue\",\n    \"noSlip\",\n    \"zeroGradient\",\n    \"fixedGradient\",\n    \"uniformFixedGradient\",\n    \"mixed\",\n    \"freestream\",\n    \"freestreamVelocity\",\n    \"freestreamPressure\",\n    \"calculated\",\n    \"empty\",\n    \"symmetry\",\n    \"symmetryPlane\",\n    \"slip\",\n    \"wedge\",\n    \"cyclic\",\n    \"cyclicSlip\",\n    \"processor\",\n    \"inletOutlet\",\n    \"turbulentIntensityKineticEnergyInlet\",\n    \"turbulentMixingLengthDissipationRateInlet\",\n    \"turbulentMixingLengthFrequencyInlet\",\n    \"pressureInletOutletVelocity\",\n    \"fixedFluxPressure\",\n    \"totalPressure\",\n    \"movingWallVelocity\",\n    \"flowRateInletVelocity\",\n    \"nutkWallFunction\",\n    \"nutUWallFunction\",\n    \"nutLowReWallFunction\",\n    \"epsilonWallFunction\",\n    \"omegaWallFunction\",\n    \"kqRWallFunction\",\n    \"kLowReWallFunction\",\n    \"thermalWallFunction\",\n    \"nutkRoughWallFunction\",\n    \"nutURoughWallFunction\",\n    \"wernerWengleWallFunction\",\n    \"fixedFluxTemperature\",\n    \"constantAlphaContactAngle\",\n    \"dynamicAlphaContactAngle\",\n    \"coupledTemperature\",\n    \"thermalContactResistance\",\n    \"greyDiffusiveRadiationViewFactor\",\n    \"s2sWall\",\n    \"fanPressure\",\n    \"fan\",\n    \"porousJumpPressure\",\n    \"porousBafflePressure\",\n];\n",
+      "text_sha256": "532da66e8ee74cd16b50e215321c5d0abec19dab38eb93d7b6b85cbb3551f250"
+    },
+    {
+      "id": "bc_kinds",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/field.rs",
+      "blob": "59c01566a64d7b4d8b44c537619c6d46f45e52bf",
+      "lines": [
+        421,
+        433
+      ],
+      "what": "BcKind::from_name: noSlip is fixedValue; slip and wedge are Symmetry; cyclic; calculated",
+      "text": "    pub fn from_name(name: &str, field: &str, patch: &str) -> Result<Self> {\n        let k = match name {\n            \"fixedValue\" | \"noSlip\" => Self::FixedValue,\n            \"zeroGradient\" => Self::ZeroGradient,\n            \"fixedGradient\" | \"uniformFixedGradient\" => Self::FixedGradient,\n            \"mixed\" | \"freestream\" | \"freestreamVelocity\" => Self::Mixed,\n            // Its own condition now, and only for a field that says so: a\n            // value written by a model and never solved for.\n            \"calculated\" => Self::Calculated,\n            \"empty\" => Self::Empty,\n            \"symmetry\" | \"symmetryPlane\" | \"slip\" | \"wedge\" => Self::Symmetry,\n            \"cyclic\" | \"cyclicSlip\" | \"processor\" => Self::Cyclic,\n            \"inletOutlet\" | \"freestreamPressure\" => Self::InletOutlet,\n",
+      "text_sha256": "f831cd399887955eb393f77930b38ea41163d676e34a00040b01ef44b1c9bbb9"
+    },
+    {
+      "id": "inlet_turb",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/field_setup.rs",
+      "blob": "3bbd8105572d32c2eb0059ed6a453f5a1fab932a",
+      "lines": [
+        336,
+        430
+      ],
+      "what": "turbulentIntensity and mixingLength read per patch; k = 3/2 (I |U|)^2 and omega = k^1/2/(C_mu^1/4 L)",
+      "text": "    // patch, so that a missing or unreadable one is reported against the\n    // condition that wanted it (SPEC-LIT 13.4) rather than defaulted.\n    let intensity = match kind {\n        BcKind::TurbulentIntensityKineticEnergyInlet => Some(spec.required_number(\n            \"turbulentIntensity\",\n            patch,\n            \"turbulentIntensityKineticEnergyInlet\",\n        )?),\n        _ => None,\n    };\n    let mixing_length = match kind {\n        BcKind::TurbulentMixingLengthDissipationRateInlet\n        | BcKind::TurbulentMixingLengthFrequencyInlet => {\n            let l = spec.required_number(\"mixingLength\", patch, &spec.type_name)?;\n            if !(l > 0.0) {\n                return Err(Error::Field {\n                    field: patch.to_string(),\n                    msg: format!(\"{}: mixingLength must be positive, not {l}\", spec.type_name),\n                });\n            }\n            Some(l)\n        }\n        _ => None,\n    };\n    let p0 = match kind {\n        BcKind::TotalPressure => Some(spec.required_number(\"p0\", patch, \"totalPressure\")?),\n        _ => None,\n    };\n    // SPEC-LIT §32.2: the fixed wall heat flux, read once here so a missing\n    // or unreadable `q` is reported against the condition that wanted it\n    // (§13.4), same convention as `p0`/`turbulentIntensity` above.\n    let q_flux = match kind {\n        BcKind::FixedFluxTemperature => {\n            Some(spec.required_number(\"q\", patch, \"fixedFluxTemperature\")?)\n        }\n        _ => None,\n    };\n    // SPEC-LIT 39.3: the contact angle, read here on the same convention -\n    // a missing or unreadable `theta0` is reported against the condition that\n    // wanted it. `cos_deg` is what maps ninety degrees to EXACTLY zero, which\n    // is the whole of 39.2's trap: cos(pi/2) is 6.1e-17 and would move every\n    // recorded VOF measurement for a case that asked for nothing.\n    let cos_theta0 = match kind {\n        BcKind::ContactAngle => Some(crate::contact_angle::cos_deg(\n            spec.required_number(\"theta0\", patch, &spec.type_name)?,\n        )),\n        _ => None,\n    };\n\n    let cmu = aux.inputs.cmu();\n\n    for i in 0..n {\n        let (fr, rv, rg) = match kind {\n            BcKind::FixedValue => (1.0, value[i], 0.0),\n            BcKind::FixedGradient => (0.0, 0.0, grad[i]),\n            BcKind::Mixed => (vfrac[i], rvalue[i], rgrad[i]),\n\n            // The fraction is rewritten every iteration from the face flux\n            // (inflow -> Dirichlet at inletValue, outflow -> zeroGradient).\n            // Seeding it as inflow is the safe start: it holds a sensible\n            // value on the first assembly, before any flux exists.\n            BcKind::InletOutlet => (1.0, inlet[i], 0.0),\n\n            // k = 3/2 (I |U|)^2 - the definition of the turbulence intensity\n            // I as the ratio of the r.m.s. velocity fluctuation to the mean,\n            // with the three components equal (Launder & Spalding 1974).\n            // Flux-switched, exactly as inletOutlet is.\n            BcKind::TurbulentIntensityKineticEnergyInlet => {\n                let i_t = intensity.unwrap_or(0.0);\n                let mag_u = aux\n                    .u(i, patch, \"turbulentIntensityKineticEnergyInlet\")?\n                    .mag();\n                let iu = i_t * mag_u;\n                (1.0, 1.5 * iu * iu, 0.0)\n            }\n\n            // epsilon = C_mu^{3/4} k^{3/2}/L: the equilibrium dissipation of\n            // an eddy of size L carrying energy k (Launder & Spalding 1974).\n            BcKind::TurbulentMixingLengthDissipationRateInlet => {\n                let l = mixing_length.unwrap_or(1.0);\n                let kb = aux\n                    .k(i, patch, \"turbulentMixingLengthDissipationRateInlet\")?\n                    .max(0.0);\n                (1.0, cmu.powf(0.75) * kb * kb.sqrt() / l, 0.0)\n            }\n\n            // omega = epsilon/(C_mu k) applied to the same relation, i.e.\n            // k^{1/2}/(C_mu^{1/4} L) (Wilcox).\n            BcKind::TurbulentMixingLengthFrequencyInlet => {\n                let l = mixing_length.unwrap_or(1.0);\n                let kb = aux\n                    .k(i, patch, \"turbulentMixingLengthFrequencyInlet\")?\n                    .max(0.0);\n                (1.0, kb.sqrt() / (cmu.powf(0.25) * l), 0.0)\n            }\n",
+      "text_sha256": "6cadfc026e49b1d9451e7ad4f62533cd1a653ad4d2dd991f98b9a49d3ad3f867"
+    },
+    {
+      "id": "wall_rows",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/io/case.rs",
+      "blob": "97f854b2f9b1e2531604d1c752c62c9ad6af6526",
+      "lines": [
+        281,
+        373
+      ],
+      "what": "WallTreatment rows: standard nutk/kqR/omegaWF, lowRe nutLowRe/kLowRe/omega zeroGradient",
+      "text": "pub enum WallTreatment {\n    Standard,\n    /// SPEC-LIT §15.1: `nut` gets `y+` from the local velocity (the inverse\n    /// Spalding law) rather than from `k`.\n    Spalding,\n    /// SPEC-LIT §15.3/§29.2: the Cebeci & Bradshaw roughness downshift.\n    /// Requires `Ks` - see [`Roughness::resolve`].\n    Rough,\n    /// SPEC-LIT §15.2: the mesh resolves the viscous sublayer, so NO wall\n    /// model constrains any of the four fields - `eps`/`omega` fall back to\n    /// plain `zeroGradient` rather than the `*WallFunction` that would\n    /// otherwise constrain their wall-adjacent cell (SPEC-LIT §29.1's own\n    /// running example of the contradiction this preset mechanism exists to\n    /// rule out: `nutLowReWallFunction` together with `epsilonWallFunction`).\n    LowRe,\n}\n\nimpl WallTreatment {\n    /// Under the `SPEC-LIT` §13.4 rule; `\"\"` (the case named none) is\n    /// `standard`, the OpenFOAM-compatible default.\n    pub fn from_name(s: &str) -> Result<Self> {\n        match s {\n            \"standard\" | \"\" => Ok(Self::Standard),\n            \"spalding\" => Ok(Self::Spalding),\n            \"rough\" => Ok(Self::Rough),\n            \"lowRe\" => Ok(Self::LowRe),\n            other => unsupported(\n                \"RAS/wallTreatment\",\n                other,\n                &[\"standard\", \"spalding\", \"rough\", \"lowRe\"],\n                \"standard\",\n                Self::Standard,\n            ),\n        }\n    }\n\n    pub fn name(self) -> &'static str {\n        match self {\n            Self::Standard => \"standard\",\n            Self::Spalding => \"spalding\",\n            Self::Rough => \"rough\",\n            Self::LowRe => \"lowRe\",\n        }\n    }\n\n    /// `nut`'s patch type under this row - SPEC-LIT §29.1's table.\n    pub fn nut_type(self) -> &'static str {\n        match self {\n            Self::Standard => \"nutkWallFunction\",\n            Self::Spalding => \"nutUWallFunction\",\n            Self::Rough => \"nutkRoughWallFunction\",\n            Self::LowRe => \"nutLowReWallFunction\",\n        }\n    }\n\n    /// `k`'s patch type under this row.\n    pub fn k_type(self) -> &'static str {\n        match self {\n            Self::LowRe => \"kLowReWallFunction\",\n            _ => \"kqRWallFunction\",\n        }\n    }\n\n    /// `epsilon`'s patch type under this row.\n    ///\n    /// `lowRe` pins NO wall FUNCTION (SPEC-LIT §15.2/§29.1), but it does pin\n    /// a wall VALUE: SPEC-LIT §33.2's homogeneous Dirichlet,\n    /// `epsilon_tilde = 0`, which is what makes the only model this row is\n    /// valid under (`LaunderSharmaKE`) correct at the wall rather than\n    /// merely unconstrained there. `fixedValue` with no `value` entry is `0`\n    /// by construction (`apply_wall_treatment_defaults` writes no `value`,\n    /// and an absent one defaults to zero) - there is still no distinct\n    /// low-Re-NAMED `epsilon` wall condition in this solver, only a plain\n    /// one asked to hold a specific value.\n    pub fn epsilon_type(self) -> &'static str {\n        match self {\n            Self::LowRe => \"fixedValue\",\n            _ => \"epsilonWallFunction\",\n        }\n    }\n\n    /// `omega`'s patch type under this row - same reasoning as\n    /// [`Self::epsilon_type`].\n    pub fn omega_type(self) -> &'static str {\n        match self {\n            Self::LowRe => \"zeroGradient\",\n            _ => \"omegaWallFunction\",\n        }\n    }\n\n    /// SPEC-LIT §29.3: every row applies the Jayatilleke thermal wall\n    /// function to `T` on walls when the energy equation is solved, except\n    /// `lowRe`, which pins the molecular resistance the resolved mesh already\n",
+      "text_sha256": "e23751a54361ce841c3aa4d32d776a5f03cace1f8bcbdda86cc222bd45a890be"
+    },
+    {
+      "id": "wall_row_families",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/field_setup.rs",
+      "blob": "3bbd8105572d32c2eb0059ed6a453f5a1fab932a",
+      "lines": [
+        1571,
+        1610
+      ],
+      "what": "the wall-row families: nutLowRe is LowRe, omegaWallFunction is Full, fixedValue has no family",
+      "text": "enum WallRowFamily {\n    Full,\n    LowRe,\n}\n\nfn nut_family(k: BcKind) -> Option<WallRowFamily> {\n    if k.is_nut_wall_function() {\n        Some(WallRowFamily::Full)\n    } else if k.is_nut_low_re() {\n        Some(WallRowFamily::LowRe)\n    } else {\n        None\n    }\n}\n\nfn k_family(k: BcKind) -> Option<WallRowFamily> {\n    match k {\n        BcKind::KqRWallFunction => Some(WallRowFamily::Full),\n        BcKind::KLowReWallFunction => Some(WallRowFamily::LowRe),\n        _ => None,\n    }\n}\n\n/// `epsilon`'s and `omega`'s own patch types can only ever DECLARE `Full`\n/// (`epsilonWallFunction`/`omegaWallFunction` - SPEC-LIT §6.4); there is no\n/// distinct low-Re-NAMED condition for either. SPEC-LIT §29.1's `lowRe` row\n/// completes `omega` with plain `zeroGradient` and `epsilon` with plain\n/// `fixedValue` (0 - SPEC-LIT §33.2's homogeneous Dirichlet), and EITHER\n/// reads as \"no opinion\" here, not a second family: `constrains_wall_cell`\n/// is false for both, exactly as it is for `zeroGradient` - a `lowRe` row's\n/// `epsilon` never conflicts with another field's `Full` opinion, it simply\n/// never has one of its own to conflict with.\nfn eps_omega_family(k: BcKind) -> Option<WallRowFamily> {\n    if k.constrains_wall_cell() {\n        Some(WallRowFamily::Full)\n    } else {\n        None\n    }\n}\n\n",
+      "text_sha256": "eeed123da8a9b9721c0e013963ae515218e3972ff066058e44d5a271f440d27a"
+    },
+    {
+      "id": "omega_wall",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/wallfunctions.rs",
+      "blob": "d03874505b252bc05d50986aaa0c0d46cf422d04",
+      "lines": [
+        194,
+        209
+      ],
+      "what": "omegaWallFunction pins the root-sum-square of the log branch and Wilcox's 6 nu/(beta_1 y^2)",
+      "text": "/// `omega` in the wall-adjacent cell: the root-sum-square blend of\n/// `sqrt(k)/(C_mu^{1/4} kappa y)` and Wilcox's `6 nu/(beta_1 y^2)`.\n#[inline]\npub fn omega_wall(\n    k: Scalar,\n    y: Scalar,\n    nu: Scalar,\n    kappa: Scalar,\n    cmu: Scalar,\n    beta1: Scalar,\n) -> Scalar {\n    let w_log = k.max(0.0).sqrt() / (cmu.powf(0.25) * kappa * y);\n    let w_vis = 6.0 * nu / (beta1 * y * y);\n    (w_log * w_log + w_vis * w_vis).sqrt()\n}\n\n",
+      "text_sha256": "f7366115094bf4b3c58cdd8f6f159c0f41b2d598dd739c77330764c78db8daee"
+    },
+    {
+      "id": "fv_sources",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/sources.rs",
+      "blob": "e3af13552ff4f95ba017eef8db6b5e69c767b4a4",
+      "lines": [
+        1477,
+        1510
+      ],
+      "what": "constant/fvSources: one sub-dictionary per source, selection box, sphere or all",
+      "text": "/// One source's dictionary entry, as [`read_sources`] understands it.\n///\n/// *DESIGN.* The format is ours: OpenFOAM expresses this through `fvModels`,\n/// `fvOptions` and `topoSet`, none of which this project has, and inventing a\n/// partial imitation of them would be worse than a small honest format of our\n/// own. `constant/fvSources` (or `system/fvSources`) holds one sub-dictionary\n/// per source:\n///\n/// ```text\n/// heater\n/// {\n///     type        heatRelease;    // the equation it acts on is `field`\n///     field       T;\n///     Q           50000;          // W\n///     rhoCp       1206;           // J/(m3 K) - rho*c_p\n///     selection   box;\n///     min         (0.4 0.4 0.0);\n///     max         (0.6 0.6 0.2);\n/// }\n///\n/// filter\n/// {\n///     type        porousDrag;     // acts on U\n///     d           250;            // nu/K, 1/s\n///     f           40;             // C_F,  1/m\n///     selection   sphere;\n///     centre      (1 1 0.5);\n///     radius      0.3;\n/// }\n/// ```\n///\n/// `selection` is `box`, `sphere` or `all`. Every other `type` is an ERROR\n/// naming what is available, per SPEC-LIT §13.4 - a source the solver cannot\n/// apply must not be read and dropped.\n",
+      "text_sha256": "cc9b592648b23ea568b3d69d6869458b767740107eb9ec9fa8b7b60c8828582c"
+    },
+    {
+      "id": "momentum_source",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/sources.rs",
+      "blob": "e3af13552ff4f95ba017eef8db6b5e69c767b4a4",
+      "lines": [
+        1623,
+        1626
+      ],
+      "what": "momentumSource reads a bodyForce vector",
+      "text": "            \"momentumSource\" => {\n                let b = vector(&d, &key(\"bodyForce\"), &name)?;\n                (Some(SourceTerm::BodyForce(b)), None)\n            }\n",
+      "text_sha256": "84ae03e48a97d2799bc645b9328bde1acb6a3ab17e7f2c3ea218093aaa785a8b"
+    },
+    {
+      "id": "selector",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/sources.rs",
+      "blob": "e3af13552ff4f95ba017eef8db6b5e69c767b4a4",
+      "lines": [
+        1744,
+        1777
+      ],
+      "what": "read_selector: selection all",
+      "text": "fn read_selector(d: &crate::io::dict::FoamDict, name: &str) -> Result<CellSelector> {\n    let key = |k: &str| format!(\"{name}/{k}\");\n    match d.get_or(&key(\"selection\"), \"\") {\n        \"box\" => {\n            let min = vector(d, &key(\"min\"), name)?;\n            let max = vector(d, &key(\"max\"), name)?;\n            if !(max.x >= min.x && max.y >= min.y && max.z >= min.z) {\n                return Err(Error::Config(format!(\n                    \"source \\\"{name}\\\": the box's max corner is not above its min corner\"\n                )));\n            }\n            Ok(CellSelector::Box { min, max })\n        }\n        \"sphere\" => {\n            let centre = vector(d, &key(\"centre\"), name)\n                .or_else(|_| vector(d, &key(\"center\"), name))?;\n            let radius = required(d, &key(\"radius\"), name, \"the sphere's radius\")?;\n            if !(radius > 0.0) {\n                return Err(Error::Config(format!(\n                    \"source \\\"{name}\\\": the sphere's radius is {radius}\"\n                )));\n            }\n            Ok(CellSelector::Sphere { centre, radius })\n        }\n        \"all\" => Ok(CellSelector::All),\n        \"\" => Err(Error::Config(format!(\n            \"source \\\"{name}\\\": no `selection` entry. This project selects a \\\n             source's cells geometrically (SPEC-LIT §18): box, sphere or all\"\n        ))),\n        other => Err(Error::Config(format!(\n            \"source \\\"{name}\\\": selection \\\"{other}\\\" is not one this solver \\\n             understands. Available: box, sphere, all (SPEC-LIT §18, §13.4)\"\n        ))),\n    }\n",
+      "text_sha256": "0172397df4310ba13e5b549950492de0ec0414faf0cd0f09b522d40807c9d3b5"
+    },
+    {
+      "id": "constant_ras",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/src/blockgen.rs",
+      "blob": "9da5f98982fcee57e90403f6858047e5aee18151",
+      "lines": [
+        4290,
+        4316
+      ],
+      "what": "write_constant(): the RAS momentumTransport dictionary of the solver's own case generator",
+      "text": "fn write_constant(case_dir: &Path, nu: Scalar, model: &str, extra: &str) -> Result<()> {\n    let dir = case_dir.join(\"constant\");\n\n    write_dict(\n        &dir,\n        \"physicalProperties\",\n        &format!(\n            \"viscosityModel  constant;\\n\\nnu              [0 2 -1 0 0 0 0] {};{extra}\",\n            fmt_g(nu)\n        ),\n    )?;\n\n    // No `blended` entry. ofgpu always blends the two branches of the law\n    // of the wall, so there is nothing for a switch to select; see the note\n    // beside `WallFunctionCoeffs` in `io::case` for why the switch was\n    // removed rather than implemented.\n    write_dict(\n        &dir,\n        \"momentumTransport\",\n        &format!(\n            \"simulationType  RAS;\\n\\nRAS\\n{{\\n\\\n             \\x20   model           {model};\\n\\\n             \\x20   turbulence      on;\\n\\\n             \\x20   printCoeffs     on;\\n\\\n}}\"\n        ),\n    )\n",
+      "text_sha256": "d1cf24e6742169a6b93999f3c5776133877132cf9c59d9f46120d9b5ea9338f2"
+    },
+    {
+      "id": "spec_wall_treatment",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/SPEC-LIT.md",
+      "blob": "98c7fcf9e6b84accffada0278410234b5878218d",
+      "lines": [
+        1506,
+        1506
+      ],
+      "what": "SPEC-LIT: wallTreatment lowRe is accepted with LaunderSharmaKE only",
+      "text": "| `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |\n",
+      "text_sha256": "1e6aa2fef3f4d6090f473191b480d6c4b4375534fbc05cbbc800b208b5d16173"
+    },
+    {
+      "id": "spec_low_re",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/SPEC-LIT.md",
+      "blob": "98c7fcf9e6b84accffada0278410234b5878218d",
+      "lines": [
+        1622,
+        1634
+      ],
+      "what": "SPEC-LIT 15.2: nutLowRe is nu_t,w = 0; omega's viscous branch pairs with it",
+      "text": "### 15.2 Resolved sublayer (`nutLowRe`)\n\n```\nnu_t,w = 0\n```\n\nThat is the whole model, and the point of it. `nutLowRe` declares that the mesh\nresolves the viscous sublayer (`y+ ≲ 1`), so no wall function is wanted; the\nmolecular viscosity alone carries the wall shear. Applying a wall function to\nsuch a patch adds turbulent viscosity that the mesh is already resolving, and\noverpredicts the wall shear stress.\n\n`kLowRe` and `omega`'s viscous branch pair with it.\n",
+      "text_sha256": "466370a3af08d028edd09abfa33ca9a0eb731ba19d50dd1a44fb80bc6765675d"
+    },
+    {
+      "id": "spec_which_patches",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/SPEC-LIT.md",
+      "blob": "98c7fcf9e6b84accffada0278410234b5878218d",
+      "lines": [
+        1689,
+        1702
+      ],
+      "what": "SPEC-LIT 15.5: each field's own patch type decides; fixedValue 0 on nut is the correct low-Re setup",
+      "text": "### 15.5 Which patches get a wall function\n\n*DESIGN, and a correctness requirement.* The decision must come from **each\nfield's own patch type**, not from another field's:\n\n- `nut`'s patch type decides whether `nu_t` gets a wall value.\n- `epsilon`/`omega`'s patch type decides whether their wall cell is constrained.\n- `k`'s patch type decides which of §15.4 applies.\n\nDeriving one from another produces two opposite silent failures: a\n`fixedValue 0` on `nut` (the correct low-Re setup) overwritten by a wall\nfunction because `epsilon` asked for one; and a `nutkWallFunction` left inert\nbecause `epsilon` did not. Both give a plausible field and a wrong wall shear.\n\n",
+      "text_sha256": "7566646247ca9a5087035e8d3d25537ec1dc2a201f6df010beff1f2007e67742"
+    },
+    {
+      "id": "spec_presets",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/SPEC-LIT.md",
+      "blob": "98c7fcf9e6b84accffada0278410234b5878218d",
+      "lines": [
+        2828,
+        2849
+      ],
+      "what": "SPEC-LIT 29.1: the preset rows and the consistency contract",
+      "text": "*DESIGN — presets.* One setting names a consistent family; it EXPANDS to the\nper-field boundary types at case-build time, so the per-face kernel\narchitecture of §4 is untouched:\n\n```\nwallTreatment\n  standard   nut: nutk      k: kqR     eps: epsilonWF   omega: omegaWF\n  spalding   nut: nutU      k: kqR     eps: epsilonWF   omega: omegaWF\n  rough      nut: rough(Ks,Cs) k: kqR  eps: epsilonWF   omega: omegaWF\n  lowRe      nut: nutLowRe  k: kLowRe  eps/omega: viscous branch pinned\n```\n\nPrecedence, most specific wins: explicit per-field patch type > per-patch\n`wallTreatment` override > the case-level default (`standard` when absent).\n`rough` requires `Ks` (sand-grain height, m) and accepts `Cs` (default 0.5).\n\n*DESIGN — the consistency contract.* Whatever route selected them, the four\nper-field types on one wall patch must belong to one row of the table above\n(nut may differ between standard/spalding/rough rows - those three share the\nk/eps/omega columns). A mixed row is a §13.4 error naming the patch, the\noffending pair, and the consistent completions; `-permissive` substitutes the\nrow implied by the NUT choice and says so.\n",
+      "text_sha256": "fcf72df67a1f0766b0582d46edd3712610a3d12b44b3ff05e505464052c70007"
+    },
+    {
+      "id": "spec_lowre_walls",
+      "tree": "Iteration-CFD-solver feat/core-2",
+      "commit": "08e10bbc3296be772a6fcd117c55734168212e5c",
+      "file": "rust/SPEC-LIT.md",
+      "blob": "98c7fcf9e6b84accffada0278410234b5878218d",
+      "lines": [
+        3980,
+        3991
+      ],
+      "what": "SPEC-LIT 33.2: k = 0 at the wall; lowRe valid for LaunderSharmaKE only",
+      "text": "### 33.2 Wall and initial conditions\n\n```\nk = 0              at the wall (no-slip: no fluctuation)\nepsilon_tilde = 0  at the wall (the whole point of the tilde form)\nnu_t = 0           at the wall (this is nutLowRe, section 15.2, and it is\n                   now CORRECT rather than merely quiet)\n```\n\nHomogeneous Dirichlet on both, which is why this model needs no special wall\ntreatment at all — the mesh does the work. `wallTreatment lowRe` becomes\nvalid for this model and only for it (§29.1, §32's validity gate).\n",
+      "text_sha256": "62a65bb47305c91f940351aeece7fb4f116e87df8d56aab653e2feb73c7276ee"
+    }
+  ]
+}
