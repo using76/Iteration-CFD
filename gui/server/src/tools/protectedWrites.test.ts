@@ -69,6 +69,8 @@ const PROTECTED_CASES = [
   'cad/studies.jsonl',
   'cad/v1/edits/v1.cad9.json',
   'cad/v1/cad_edits.jsonl',
+  'cad/authoring/conical_diffuser.jsonl',
+  'cad/authoring/conical_diffuser.1.admission.json',
   'tools\\cad\\gates.lock',
   'TOOLS/CAD/GATES.LOCK',
   './tools/x/../cad/split.lock',

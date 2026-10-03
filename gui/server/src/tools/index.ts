@@ -14,6 +14,7 @@ import { caseCreate, caseEdit, caseRead, caseValidate } from './case.js'
 import { cadBuild, cadEvaluate, cadStudyStatus } from './cadLoop.js'
 import { cadProposeEdit } from './cadEdit.js'
 import { cadRequirementsApply, cadRequirementsPropose, cadTemplateList } from './cadReqs.js'
+import { cadTemplateFreeze, cadTemplatePropose } from './cadTemplate.js'
 import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { customToolCreate, customToolRun } from './custom.js'
 import { forgive } from './forgive.js'
@@ -86,6 +87,8 @@ export const TOOLS: ToolDef[] = [
   cadEvaluate,
   cadStudyStatus,
   cadProposeEdit,
+  cadTemplatePropose,
+  cadTemplateFreeze,
 ]
 
 const byName = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]))

@@ -151,6 +151,7 @@ export function protectedPath(p: string): string | null {
     const b = segs[i + 2]
     if (a === 'proposals') return 'requirements proposal'
     if (a === 'studies.jsonl') return 'studies registry'
+    if (a === 'authoring') return 'template authoring'
     if (b === 'requirements') return 'requirements'
     if (b === 'study') return 'study'
     if (b === 'edits') return 'cad edit'

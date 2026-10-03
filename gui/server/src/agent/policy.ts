@@ -48,7 +48,7 @@ function baseKind(name: string): 'read' | 'mutate' | 'long' | 'ui' | null {
 }
 
 /** Tools that always wait for a person: no session setting, allowlist or policy.json `auto` relaxes them (docs/15 §C L5). */
-export const ALWAYS_ASK: ReadonlySet<string> = new Set(['autonomy_propose_edit', 'cad_propose_edit', 'cad_requirements_propose'])
+export const ALWAYS_ASK: ReadonlySet<string> = new Set(['autonomy_propose_edit', 'cad_propose_edit', 'cad_requirements_propose', 'cad_template_freeze'])
 
 export function classifyTool(name: string, input: unknown, ctx: PolicyInput): ToolPolicy {
   const base: ToolPolicy = ctx.overrides[name] ?? (TOOL_META as Record<string, { policy: ToolPolicy } | undefined>)[name]?.policy ?? 'ask'

@@ -51,6 +51,8 @@ export const TOOL_NAMES = [
   'cad_evaluate',
   'cad_study_status',
   'cad_propose_edit',
+  'cad_template_propose',
+  'cad_template_freeze',
 ] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
@@ -112,6 +114,8 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   cad_evaluate: { name: 'cad_evaluate', kind: 'mutate', policy: 'ask', label: { ko: '설계 평가', en: 'Evaluate the study' } },
   cad_study_status: { name: 'cad_study_status', kind: 'read', policy: 'auto', label: { ko: '설계 스터디 상태', en: 'Study status' } },
   cad_propose_edit: { name: 'cad_propose_edit', kind: 'mutate', policy: 'ask', label: { ko: '설계 파라미터 편집 제안', en: 'Propose a CAD parameter edit' } },
+  cad_template_propose: { name: 'cad_template_propose', kind: 'mutate', policy: 'ask', label: { ko: '설계 템플릿 후보 제안', en: 'Propose a candidate template' } },
+  cad_template_freeze: { name: 'cad_template_freeze', kind: 'mutate', policy: 'ask', label: { ko: '설계 템플릿 동결', en: 'Freeze a template' } },
 }
 
 export function toolPolicy(name: string): ToolPolicy {
@@ -380,6 +384,14 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
     case 'cad_propose_edit': {
       const n = fmtInt(Number(r.n ?? 0))
       return ko ? `편집 제안 ${String(r.study_id ?? '')} cad${n}: ${String(r.outcome ?? '')}` : `Proposed edit ${String(r.study_id ?? '')} cad${n}: ${String(r.outcome ?? '')}`
+    }
+    case 'cad_template_propose': {
+      const n = fmtInt(Number(r.n ?? 0))
+      const state = String(r.status ?? r.rule ?? '')
+      return ko ? `템플릿 후보 ${String(r.candidate_id ?? '')} ${n}차: ${state}` : `Candidate ${String(r.candidate_id ?? '')} attempt ${n}: ${state}`
+    }
+    case 'cad_template_freeze': {
+      return ko ? `템플릿 동결 ${String(r.template_id ?? '')}` : `Froze ${String(r.template_id ?? '')}`
     }
     default:
       return name
