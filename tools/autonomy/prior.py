@@ -668,7 +668,8 @@ def decide_all(bundle, model, gates, knobs):
         s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
                         campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
                         ft_radius=rules.ft_radius_of(bundle.get("records") or []),
-                        win_2to1=rules.win_2to1_of(bundle.get("records") or []))
+                        win_2to1=rules.win_2to1_of(bundle.get("records") or []),
+                        glb=rules.glb_of(bundle.get("records") or []))
         if s["refused"]:
             raise PriorError("rules.setup refuses %s: %s"
                              % (gid, ", ".join(s["refused"])))
@@ -1633,6 +1634,7 @@ _WANT_BANK = {
     "D-1-010": (1, []),
     "D-1-077": (2, ["RM-SNAP-WALL"]),
     "E-1-010": (2, ["RM-SNAP-WALL"]),
+    "F-1-009": (2, ["RM-SNAP-WALL"]),   # GLB-CONFIG: the margin's level 4 drops on RM-SNAP-WALL
     "F-1-011": (2, ["RM-SNAP-WALL"]),
     "G-1-016": (1, []),
 }
@@ -1646,13 +1648,14 @@ def _g5_bank(H):
     assert all(e["edge_class"] == ("smooth" if e["geometry_id"] == "E-1-010"
                                    else "sharp") for e in bank)
     m = H["model"]
-    assert m["bank_n"] == 6 and all(len(e["z"]) == 17 for e in m["bank"])
+    # GLB-CONFIG: the margin's level 4 on F-1-009 drops on RM-SNAP-WALL, so the
+    # bank is back to 7 passing geometries (was 6 before GLB-CONFIG)
+    assert m["bank_n"] == 7 and all(len(e["z"]) == 17 for e in m["bank"])
     assert m["null_policy"] == list(NULL_POLICY)
     assert m["source"]["content_sha256"] == bundle_sha(H["B1"])
     assert m["enabled"] is False and m["gate"] is None
     b2 = copy.deepcopy(H["B1"])
-    # F-1-009 left the bank (its only passing attempt needed the refused lever),
-    # so the gap test cuts a banked geometry's middle attempt instead
+    # the gap test cuts a banked geometry's middle attempt
     b2["attempts"] = [r for r in b2["attempts"]
                       if not (r["geometry_id"] == "A-1-000" and r["attempt"] == 1)]
     try:
@@ -1661,18 +1664,21 @@ def _g5_bank(H):
         assert "incomplete" in str(e), str(e)
     else:
         raise AssertionError("a bundle with a gap in the attempts was not refused")
-    print("[ok] bank: 6 passing geometries with their remedy paths, E-1-004 and "
-          "F-1-009 absent; the model carries the null policy and the source sha")
+    print("[ok] bank: 7 passing geometries with their remedy paths, E-1-004 "
+          "absent; the model carries the null policy and the source sha")
 
 
 def _g6_apply(H):
     cfg, ctx = H["cfg"], H["ctx"]
+    # GLB-CONFIG: F-1-009's fresh attempt 1 sits on the margin's level 4, so the
+    # wall step to 3 clears the y+ floor and lands; RM-SNAP-FT is skipped by name
     after, skipped = apply_path(cfg["F-1-009"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
                                 ctx["F-1-009"], H["gates"], H["knobs"])
-    assert after is None
-    assert [x["rule_id"] for x in skipped] == ["RM-SNAP-WALL", "RM-SNAP-FT"]
-    assert "below the y+ floor" in skipped[0]["why"], skipped[0]
-    assert skipped[1]["why"] == remedies.FT_FORBIDDEN_WHY, skipped[1]
+    assert after is not None
+    assert [x["rule_id"] for x in skipped] == ["RM-SNAP-FT"]
+    assert skipped[0]["why"] == remedies.FT_FORBIDDEN_WHY, skipped[0]
+    assert after["refinement"]["levels"][0]["bands"][0]["level"] == 3, \
+        after["refinement"]["levels"][0]["bands"]
     after2, skipped2 = apply_path(cfg["E-1-004"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
                                   ctx["E-1-004"], H["gates"], H["knobs"])
     assert after2 is None
@@ -1708,8 +1714,8 @@ def _g6_apply(H):
         pass
     else:
         raise AssertionError("a path outside the transfer table was not refused")
-    print("[ok] apply: F-1-009's wall step is skipped at the y+ floor and RM-SNAP-FT "
-          "by name, so its path changes nothing; E-1-004 and D-1-010 change nothing; "
+    print("[ok] apply: F-1-009's wall step lands on the margin's level 4 with "
+          "RM-SNAP-FT skipped by name; E-1-004 and D-1-010 change nothing; "
           "A-1-000's path lands on its attempt-2 config with RM-SNAP-FT skipped by "
           "name; no edit in the layers block")
 
@@ -1723,9 +1729,10 @@ def _g7_gate(H):
     s = rep["systems"]
     assert s["rules"]["pass"] == 2 and s["real"]["pass"] == 5, \
         (s["rules"]["pass"], s["real"]["pass"])
-    assert s["shuffle-0"]["pass"] == 2 and s["shuffle-1"]["pass"] == 3 \
+    # GLB-CONFIG: shuffle-0 keeps 5 on the margined attempt-1 configs (was 2)
+    assert s["shuffle-0"]["pass"] == 5 and s["shuffle-1"]["pass"] == 3 \
         and s["shuffle-2"]["pass"] == 4
-    assert abs(rep["shuffled_mean_pass"] - 3.0) <= 1e-9
+    assert abs(rep["shuffled_mean_pass"] - 4.0) <= 1e-9
     assert s["real"]["decisions"] == {"PR-KNN": 3, "PR-KEEP": 2,
                                       "PR-FAR": 3}, s["real"]["decisions"]
     assert s["real"]["statuses"] == {"reused": 3, "PR-KEEP": 2,
@@ -1738,7 +1745,7 @@ def _g7_gate(H):
         assert os.path.isfile(os.path.join(rdir, name)), name
     with open(os.path.join(rdir, MODEL_NAME), encoding="utf-8") as f:
         pm = json.load(f)
-    assert pm["enabled"] is True and pm["bank_n"] == 6 and pm["pool_n"] == 8
+    assert pm["enabled"] is True and pm["bank_n"] == 7 and pm["pool_n"] == 8
     grow = {g["geometry_id"]: g for g in rep["geometries"]}
     assert grow["F-1-009"]["real"]["rule_id"] == "PR-FAR"
     assert rep["focus"] is None, rep["focus"]     # IDS8 holds no family-B geometry
@@ -1837,17 +1844,17 @@ def _g9_hook(H):
     rows = campaign.load_rows(out)
     by1 = {r["geometry_id"]: r for r in rows if r["attempt"] == 1}
     prior_gids = sorted(g for g, r in by1.items() if r["decided_by"] == "prior")
-    # F-1-009 left the bank (2026-09-26): its only path held the refused lever,
-    # so the model no longer fires there; E-1-010 is now PR-FAR - its edge class
+    # GLB-CONFIG: F-1-009 is back in the bank on the margin's level 4, so the
+    # model fires there again; E-1-010 is still PR-FAR - its edge class
     # holds one entry, fewer than k
-    assert prior_gids == ["A-1-000", "D-1-077", "F-1-011"], \
+    assert prior_gids == ["A-1-000", "D-1-077", "F-1-009", "F-1-011"], \
         prior_gids
     assert all(by1[g]["rule_id"] == "PR-KNN" for g in prior_gids)
-    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 5, \
+    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 6, \
         sum(1 for r in by1.values() if r["outcome"]["failure"] is False)
     assert end["harness_errors"] == 0
     rp = campaign.replay(out)
-    assert rp["ok"] and rp["hook_decisions"] == 3, rp
+    assert rp["ok"] and rp["hook_decisions"] == 4, rp
     recs = campaign.load_records(out)
     assert explain.audit(rows, recs)["ok"], "audit failed"
     for gid in sorted(recs):
@@ -1863,8 +1870,7 @@ def _g9_hook(H):
     pm_mod = importlib.import_module("prior")
     old = dict(pm_mod._MODEL)
     try:
-        # F-1-009 no longer takes a prior decision (2026-09-26): the model's
-        # bank lost it, so the importlib leg runs F-1-011 instead
+        # the importlib leg runs F-1-011 (a banked PR-KNN gid) beside D-1-010
         ids2 = ["F-1-011", "D-1-010"]
         pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
@@ -2043,8 +2049,9 @@ def _g12_rule(H):
     cfg1 = optimise.apply_edits(H["cfg"]["A-1-000"], a1row["config_delta"])
     a2row["config_sha"] = schema.canonical_sha256(
         optimise.apply_edits(cfg1, a2row["config_delta"]))
+    # GLB-CONFIG: F-1-009 is banked again on the margin's level 4
     assert [e["geometry_id"] for e in bank_from(b3)] == \
-        ["D-1-010", "D-1-077", "E-1-010", "F-1-011", "G-1-016"]
+        ["D-1-010", "D-1-077", "E-1-010", "F-1-009", "F-1-011", "G-1-016"]
     # (c) the committed rules campaign under the rule (the AM-13 record's bundle;
     # the current gate's bundle is the AM-L tuning campaign's)
     bc = baseline.read_bundle(os.path.join(AM13_DIR, RULES_BUNDLE))
@@ -2089,7 +2096,9 @@ def _g12_rule(H):
         e["path"] = ["RM-SNAP-WALL", "RM-SNAP-FT"]
     zqF = standardise(features(fp9), H["model"]["scaler"])
     dD = decide(zqF, foldF, m9, H["ctx"]["F-1-009"], H["gates"], H["knobs"])
-    assert dD["rule_id"] == "PR-NOEDIT", dD
+    # GLB-CONFIG: on the margin's level 4 the neighbours' wall step lands, so the
+    # path applies in part and F-1-009 abstains PR-PARTIAL (was PR-NOEDIT)
+    assert dD["rule_id"] == "PR-PARTIAL" and dD["verdict"] == "abstain", dD["rule_id"]
     # (f) an old bank is refused
     fold5 = copy.deepcopy(fold)
     for e in fold5:

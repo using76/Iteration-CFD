@@ -639,13 +639,13 @@ the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0,
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
 - R-PLANE reads commensurability, writes `/domain/*`, `/snap/*`: h = s/m, the extent starts on the body's own faces, so every face lies on a cell plane.
-- R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter, taken at the finest level on the patch: h/2 on a sharp body off R-PLANE below max_level, where R-FEAT will put the edges (WIN-2TO1).
+- R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter, taken at the finest level on the patch: h/2 on a sharp body off R-PLANE below max_level, where R-FEAT will put the edges (WIN-2TO1); off R-PLANE it prefers the G5 edge h ≤ 60·t1·d/K with the convex-wall margin K = 1.10 after the (92.45) depth d, and every floor stays at the plain edge's level (GLB-CONFIG).
 - R-CURV reads r_p5 and raises the wall level to h ≤ r_p5/8.
 - R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
 - R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1, then asks for the attraction radius tau = h_f/2 (SPEC-LIT §92.12's erratum: the default 0.5 is half a BASE cell, 2^(L−1) wall cells at wall level L, and pins a refined sharp body).
 - R-BUDGET predicts cells (never probes: one costs up to 150 s) and coarsens far-field bands, then the wall band, then the feature bump, then the wall level, until 0.7·cell_budget fits.
 
-Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 on every snapped wall (§92.13 drops their layers anyway; a tighter window there costs a whole octree level for no capture). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
+Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 as the floor on every snapped wall and, since GLB-CONFIG (2026-10-03), prefers 60/1.10 there when the margin holds after the (92.45) depth (below). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
 
 G-RULES 2026-09-24 (`rules/G-RULES.json`, binary 054bba67…a90b, HEAD 7e8e14f): PASS. Part 1, the worked example plus five live cube runs at h/t1 41.96: A 8 layers, full_area_frac 1.0; B (first growth over the limiter) 8 layers, full 0.0 — the limiter binds and the stack survives; C exit 1 on the G5 early check (0.04995 < 0.05); D and F exit 0 with 0 layers, dropped under min_thickness·T. Part 2, 60 tuning rows: 59 applied, 1 refused (A-1-009, R-BUDGET, re-derived), preflight pass 59/59 with a live octree probe, -dryRun 0 59/59; wall levels A {4:1, 5:10}, B {6:12}, D {4:2, 5:5, 6:5}, E {4:3, 5:8, 6:1}, F {3:2, 4:4, 5:6}; predicted/probe leaves 0.79–4.09 (median 1.30 over the 59 probes, conservative). Part 3: R-PLANE applied 34/35 commensurate rows (box_c 21/21, plate_c 8/8, lcorner_c 5/6); F-1-009 abstains (h/t1 15.2 < 16); 34/34 plane checks ok (worst 5.7e-14); three live runs' snap max_over_h ≤ 9.4e-13, and all three delivered 8 layers with full_area_frac 1.0 (reported, not gated).
 
@@ -716,6 +716,37 @@ configs preflight clears 8 PF-YPLUS refusals and adds none, and -dryRun exits 0 
 numbers and F3 flags are equal on the 59 rows both campaigns meshed. The 26 changed rows that still drop name
 `inner_gate` (18), `thin_proposed` (7) and `thin_after_caps` (1, F-1-025): what is left is L2/L3's and L5's, not the
 2:1 window.
+
+**GLB-CONFIG (2026-10-03, the user's decision on G-L-b).** Off R-PLANE R-WIN also builds the §D.3 window with the G5
+edge divided by the convex-wall margin K = 1.10 (the user's own factor) and, when that window applies AND the G5 edge
+after the (92.45) depth still clears `min_thickness_ratio`·K, it puts the wall one level finer than the plain edge;
+otherwise it keeps the plain edge's level and says so. R-WIN runs before any mesh exists, so it predicts
+sqrt(A_max) of the snapped wall by the wall cell size h: the release binary's measured zero-G5 t1 on the snapped
+sphere is 1.011 and 1.023 h/60 at levels 2 and 3 (both covered by K = 1.10) but 1.413 h/60 at level 4, where the
+(92.45) limiter binds at the shortest snapped edge (0.2198 h) that the rule cannot see — K does not cover level 4.
+The measured sqrt(A_max)/h is 1.0040 and 1.0063 on the snapped sphere at levels 3 and 4, 1.000–1.077 on nine sampled
+tuning walls and 1.167 / 1.293 on two wings, so the margin multiplies h/60. Every floor stays at the plain edge's
+level: R-BUDGET's floor is `win_level` (the plain edge's), and when the budget coarsens below R-WIN's margined level
+its record says the margin is given up. `setup(..., glb=False)` is the rule set every committed campaign was
+recorded under and `glb_of(records)` tells which one a campaign used (an R-WIN apply record carrying the input
+`margin`); `optimise.rows_from`, optimise.py's selftest and prior.py's G-PRIOR rows pass it beside `ft_radius` and
+`win_2to1`, and the G-FT-RADIUS and G-WIN-2TO1 identities rebuild with glb False, so their committed reports still
+reproduce.
+
+G-GLB-CONFIG 2026-10-03 (`rules/G-GLB-CONFIG.json`, the committed L5 bundle): PASS. 420 tuning rows, 48 without a
+fingerprint; 37 plane, 15 refused (the same 15 both ways), 320 snapped; identity 356/356; preflight refusals
+(PF-SURFACE aside) 1 and 1, differing on 0 rows; `margin_met` 1 on 320 of 320 snapped; finer 46, of which the budget
+gave the margin up on 7 (A-1-007, A-1-021, A-1-034, A-1-069, D-1-005, E-1-050, F-1-050); changed configs 9 —
+A-1-053, D-1-003, D-1-073, E-1-015, F-1-005, F-1-009, F-1-016, F-1-025, G-1-054 at wall levels 4→5, 5→6, 3→4, 5→6,
+3→4, 3→4, 4→5, 4→5, 4→5 and growth 1.159→1.0, 1.17→1.17, 1.151→1.0, 1.161→1.161, 1.152→1.0, 1.15→1.0, 1.165→1.0,
+1.158→1.0, 1.156→1.0. The supervisor's attempt-1 meshes of those 9 configs on binary 3d90ce91… (before and after,
+same binary): 8-layer delivery goes 1 → 3 rows (D-1-003 full 0.847, E-1-015 0.822, F-1-009 0.661 gain a stack;
+G-1-054 loses its 0.902 stack, `thin_proposed`, snap p99/h 0.020 → 0.392); F-1-005's plain config stops the mesher
+(`layers: patch "body" is not a patch of the mesh`) and under the margin meshes and drops its layers
+(`thin_proposed`); with a live octree probe preflight refuses none of the 18 configs (leaves 8,834–786,262). Over
+the 356 attempt-1 configs the mean BLC_8 goes 0.2416 → 0.2472 and BLC_full 0.1640 → 0.1680; rows with BLC_8 > 0:
+86 → 88. The box_sphere G-L-b row on the release binary at `first_thickness` 0.0023 = 1.10·sqrt(A_max)/60: 8
+layers, `full_area_frac` 1.0, `level_n_non_orth_max_deg` 67.80 < 70, no retreat, no `drop_cause`.
 
 ## remedies.py — L2 remedies
 

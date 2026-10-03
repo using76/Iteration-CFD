@@ -2141,10 +2141,11 @@ def _selftest():
         assert au["ok"] and au["record_order"]["bad"] == [], au["record_order"]
         last = max(r["attempt"] for r in rows_f if r["geometry_id"] == "F-1-009")
         tags = recs_f["F-1-009"]
-        # RM-SNAP-TAU spends attempts 2-3 on this sharp body and the attempt-4
-        # pick fails too, so the terminal RM-EXHAUSTED (not an optimiser record
-        # after it) ends the geometry
-        assert any(e and t["record"]["rule_id"] == "RM-EXHAUSTED" for t, e in
+        # GLB-CONFIG: R-WIN's margin puts attempt 1 at wall level 4 while the
+        # floor stays the plain edge's 3, so RM-SNAP-WALL's coarsening to 3
+        # lands and its attempt-2 mesh passes the preflight: the terminal
+        # RM-PASS ends the geometry (no RM-SNAP-TAU run, no RM-EXHAUSTED)
+        assert any(e and t["record"]["rule_id"] == "RM-PASS" for t, e in
                    zip(tags, explain.ends_geometry(tags, last))), tags
         assert rep["systems"]["b0-template"]["failures"] == 4
         assert rep["gates"]["G-FID"]["verdict"] == UNDECIDED

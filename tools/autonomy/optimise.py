@@ -207,6 +207,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
     # before WIN-2TO1 with the growth fitted at the wall level)
     ftr = rules.ft_radius_of(bundle.get("records") or [])
     w21 = rules.win_2to1_of(bundle.get("records") or [])
+    glb = rules.glb_of(bundle.get("records") or [])
     for gid in sorted(by_geom):
         att = by_geom[gid]
         if sorted(att) != list(range(1, max(att) + 1)):
@@ -219,7 +220,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
         else:
             s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
                             campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
-                            ft_radius=ftr, win_2to1=w21)
+                            ft_radius=ftr, win_2to1=w21, glb=glb)
             if s["refused"]:
                 raise OptError("rules.setup refuses %s (%s): %s"
                                % (gid, source, ", ".join(s["refused"])))
@@ -1849,9 +1850,10 @@ def _g2_rows(H):
     # the oracle campaigns spend RM-SNAP-TAU's two fires on five geometries
     # (F-1-009, D-1-001, D-1-027, F-1-025, D-1-073, attempts 2 and 3), ten rows
     # more than the 24 the spent table gave
-    assert (len(orows), dup2) == (114, 0), (len(orows), dup2)
-    assert sum(1 for r in orows if r["fail"]) == 72, \
-        sum(1 for r in orows if r["fail"])
+    # GLB-CONFIG: the margined attempt-1 configs feed the oracle, 111 rows (was 114)
+    assert (len(orows), dup2) == (111, 0), (len(orows), dup2)
+    assert sum(1 for r in orows if r["fail"]) == 62, \
+        sum(1 for r in orows if r["fail"])   # GLB-CONFIG: was 72
     assert len({r["geometry_id"] for r in orows}) == 16, \
         len({r["geometry_id"] for r in orows})
     b = baseline.read_bundle(H["osrc"][0])
@@ -1884,7 +1886,8 @@ def _g3_pool(H):
     s = rules.setup(H["mrows"][gid], fp, campaign.stl_rel(gid),
                     campaign.case_rel(gid), gid, gates=H["gates"],
                     knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]),
-                    win_2to1=rules.win_2to1_of(H["rb"]["records"]))
+                    win_2to1=rules.win_2to1_of(H["rb"]["records"]),
+                    glb=rules.glb_of(H["rb"]["records"]))
     assert not s["refused"], s["refused"]
     l1 = s["config"]
     assert schema.canonical_sha256(l1).startswith("e31caabef618")
@@ -1990,21 +1993,22 @@ def _g5_decide(H):
     assert res["verdict"] == "apply" and res["rule_id"] == "OPT-PICK", \
         (res["verdict"], res.get("rule_id"))
     c = res["counts"]
+    # GLB-CONFIG: the box is relative to D-1-073's margined L1 (wall 4, growth 1.0)
     assert (c["pool_n"], c["unique_n"], c["visited_n"], c["edit_refused_n"],
             c["l0_refused_n"], c["l0_pass_n"], c["feasible_n"]) == \
-        (256, 256, 0, 0, 29, 227, 39), c
+        (256, 256, 0, 0, 0, 256, 82), c
     pk = res["pick"]
-    assert pk["sobol_index"] == 33, pk["sobol_index"]
-    # the box is centred on today's L1, whose growth WIN-2TO1 fits at the feature
-    # level (1.151, not the recorded 1.34), and the sharp-body radius is tau/h_f/2
-    # of the point's own max_level, so the pick's config and scores moved
-    assert pk["config_sha256"].startswith("45e83b45fafa"), \
+    assert pk["sobol_index"] == 54, pk["sobol_index"]
+    # GLB-CONFIG: the box is centred on today's margined L1 (wall 4, growth 1.0,
+    # the margin's choice, not the recorded 1.34), and the sharp-body radius is
+    # tau/h_f/2 of the point's own max_level, so the pick's config and scores moved
+    assert pk["config_sha256"].startswith("c06684029fe7"), \
         pk["config_sha256"][:12]
-    assert abs(pk["p_fail"] - 0.065768) <= 1e-6, pk["p_fail"]
-    assert abs(pk["p_fail_std"] - 0.066139) <= 1e-6, pk["p_fail_std"]
-    assert abs(pk["blc8_a_priori"] - 0.841) <= 1e-6, pk["blc8_a_priori"]
-    assert abs(pk["log_cells"] - 4.622895) <= 1e-6, pk["log_cells"]
-    assert [r["sobol_index"] for r in res["runners_up"]] == [245, 249, 177], \
+    assert abs(pk["p_fail"] - 0.013131) <= 1e-6, pk["p_fail"]
+    assert abs(pk["p_fail_std"] - 0.003979) <= 1e-6, pk["p_fail_std"]
+    assert abs(pk["blc8_a_priori"] - 0.957594) <= 1e-6, pk["blc8_a_priori"]
+    assert abs(pk["log_cells"] - 5.651058) <= 1e-6, pk["log_cells"]
+    assert [r["sobol_index"] for r in res["runners_up"]] == [117, 193, 33], \
         [r["sobol_index"] for r in res["runners_up"]]
     # the sharp-body box: the pick's feature_tolerance is r * h_f / 2 of its own
     # point config at some r of FEATURE_TAU_SHARP
@@ -2015,7 +2019,7 @@ def _g5_decide(H):
     mlg5 = cfgg5["refinement"]["max_level"]
     assert any(abs(ftg5 - r * 0.5 * 2 ** -mlg5) <= 1e-15
                for r in FEATURE_TAU_SHARP), (ftg5, mlg5)
-    assert pk["knobs"]["smoothing_passes"] == 1
+    assert pk["knobs"]["smoothing_passes"] == 0   # GLB-CONFIG: was 1 on the old box
     assert schema.errors(res["record"], "DecisionRecord") == []
     assert not [e["pointer"] for e in res["edits"]
                 if e["pointer"].startswith("/layers/")
@@ -2095,51 +2099,49 @@ def _g8_refine(H):
                  attempt_fn=prior._wall_oracle,
                  probe_fn=campaign._fake_probe(1000),
                  snap_fn=campaign._fake_snap, quiet=True)
-    # the set grows to six with the lever refused: F-1-009's only fix is gone,
-    # so the optimiser may propose for it again
+    # GLB-CONFIG: F-1-009 is banked again on the margin's level 4, and D-1-073 and
+    # F-1-025 pass the wall oracle on their margined attempt 1, so the set is three
     assert rep["refinement_set"]["geometry_ids"] == \
-        ["D-1-001", "D-1-027", "D-1-073", "E-1-004", "F-1-009", "F-1-025"], \
+        ["D-1-001", "D-1-027", "E-1-004"], \
         rep["refinement_set"]["geometry_ids"]
     r1 = baseline.read_bundle(os.path.join(rep8, "refine_r1.json.gz"))
     rows = {(r["geometry_id"], r["attempt"]): r for r in r1["attempts"]}
-    # RM-SNAP-TAU spends attempts 2 and 3 on the sharp bodies, so the optimiser's
-    # proposal comes at attempt 4 (D-1-073); its pick fails the wall oracle, the
-    # table is spent twice over on the others, and nothing is rescued
-    assert rows[("D-1-073", 2)]["decided_by"] == "remedy" \
-        and rows[("D-1-073", 2)]["rule_id"] == "RM-SNAP-TAU", \
-        (rows[("D-1-073", 2)]["decided_by"], rows[("D-1-073", 2)]["rule_id"])
-    assert rows[("D-1-073", 4)]["decided_by"] == "optimiser"
-    assert rows[("D-1-073", 4)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("D-1-073", 4)]["prediction"]["p_fail"] - 0.127181) <= 1e-6, \
-        rows[("D-1-073", 4)]["prediction"]["p_fail"]
-    assert rows[("F-1-025", 2)]["decided_by"] == "remedy" \
-        and rows[("F-1-025", 2)]["rule_id"] == "RM-SNAP-TAU", \
-        (rows[("F-1-025", 2)]["decided_by"], rows[("F-1-025", 2)]["rule_id"])
+    # GLB-CONFIG: the margined attempt-1 configs feed the wall oracle, so three
+    # geometries refine (was six); RM-SNAP-TAU spends attempts 2 and 3 on the two
+    # sharp bodies, D-1-027's proposal comes at attempt 4 (index 0) and PASSes
+    assert rows[("D-1-027", 4)]["decided_by"] == "optimiser"
+    assert rows[("D-1-027", 4)]["rule_id"] == "OPT-PICK"
+    assert abs(rows[("D-1-027", 4)]["prediction"]["p_fail"] - 0.098546) <= 1e-6, \
+        rows[("D-1-027", 4)]["prediction"]["p_fail"]
+    assert rows[("D-1-001", 2)]["decided_by"] == "remedy" \
+        and rows[("D-1-001", 2)]["rule_id"] == "RM-SNAP-TAU", \
+        (rows[("D-1-001", 2)]["decided_by"], rows[("D-1-001", 2)]["rule_id"])
     assert not [k for k, r in rows.items() if r["decided_by"] == "optimiser"
-                if k != ("D-1-073", 4)], "an unexpected optimiser row"
+                if k != ("D-1-027", 4)], "an unexpected optimiser row"
     sidx = {}
     for ln in r1["records"]:
         for i in ln["record"]["inputs"]:
             if i["name"] == "sobol_index":
                 sidx[(ln["geometry_id"], ln["attempt"])] = i["value"]
-    assert sidx[("D-1-073", 4)] == 0, sidx
-    assert ("F-1-025", 2) not in sidx, sidx
+    assert sidx[("D-1-027", 4)] == 0, sidx
+    assert ("D-1-001", 2) not in sidx, sidx
     ends = {g["geometry_id"]: g for g in r1["geometries"]}
-    assert ends["D-1-073"]["terminal"] == "EXHAUSTED"
-    assert ends["F-1-025"]["terminal"] == "EXHAUSTED"
-    assert rep["rounds"][0]["rescued"] == []
-    assert rep["rounds"][1]["rescued"] == []
-    assert rep["systems"]["rules"]["failures"] == 6
-    assert abs(rep["systems"]["rules"]["mfr"] - 0.375) <= 1e-12
-    assert rep["systems"]["round-2"]["failures"] == 6
+    assert ends["D-1-001"]["terminal"] == "EXHAUSTED"
+    assert ends["D-1-027"]["terminal"] == "PASS"
+    assert ends["E-1-004"]["terminal"] == "EXHAUSTED"
+    assert rep["rounds"][0]["rescued"] == ["D-1-027"]
+    assert rep["rounds"][1]["rescued"] == ["D-1-001", "D-1-027"]
+    assert rep["systems"]["rules"]["failures"] == 3
+    assert abs(rep["systems"]["rules"]["mfr"] - 0.1875) <= 1e-12
+    assert rep["systems"]["round-2"]["failures"] == 1
     assert rep["cv"]["auc"] >= 0.75 and rep["cv"]["blc8_rmse"] == 0.0
-    assert rep["conditions"]["beats_rules"] is False
-    assert rep["verdict"] == "PASS" and rep["enabled"] is False
+    assert rep["conditions"]["beats_rules"] is True
+    assert rep["verdict"] == "PASS" and rep["enabled"] is True
     for n in ("G-OPT.json", "G-OPT.md", "opt_model.json", "train.json.gz",
               "refine_r1.json.gz", "refine_r2.json.gz"):
         assert os.path.isfile(os.path.join(rep8, n)), n
     model = _read_json_or_none(os.path.join(rep8, "opt_model.json"))
-    # the 114 oracle rows (group 2) plus round 1's one optimiser row
+    # the 111 oracle rows (group 2) plus round 1's optimiser row
     assert model["train"]["n_rows"] >= 106, model["train"]["n_rows"]
     H["rep8"] = rep8
     m1 = os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns
@@ -2184,9 +2186,9 @@ def _g8_refine(H):
         om._MODEL.clear()
         om._MODEL.update(saved)
     print("[ok] refine on the oracle: RM-SNAP-TAU spends attempts 2-3 on the "
-          "sharp bodies and D-1-073's proposal comes at attempt 4 (index 0, p_fail "
-          "0.127181) and fails, nothing rescued, MFR 0.375, the CV half PASSes but "
-          "the ablation bar is missed so the optimiser ships disabled; a re-run "
+          "sharp bodies and D-1-027's proposal comes at attempt 4 (index 0, p_fail "
+          "0.098546) and passes, round 0 rescues D-1-027, MFR 0.1875, the CV half "
+          "PASSes and beats_rules holds so the optimiser ships enabled; a re-run "
           "reuses both rounds and gives an equal report; check PASS")
 
 
@@ -2240,7 +2242,8 @@ def _g10_live(H):
     setup0 = rules.setup
     rules.setup = functools.partial(
         setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]),
-        win_2to1=rules.win_2to1_of(H["rb"]["records"]))
+        win_2to1=rules.win_2to1_of(H["rb"]["records"]),
+        glb=rules.glb_of(H["rb"]["records"]))
     try:
         end = campaign.run_campaign(
             {"manifest": "tuning", "ids": ["D-1-073"], "out": live,

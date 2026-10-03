@@ -27,6 +27,7 @@ the §D.3 G5 edge; every other wall keeps the full edge (docs/15 §H, §I-1).
     python tools/autonomy/rules.py --ft-sample [--out IDS.txt]
     python tools/autonomy/rules.py --ft-gate --campaign DIR
     python tools/autonomy/rules.py --win-gate --campaign DIR --ref DIR
+    python tools/autonomy/rules.py --glb-gate [--bundle PATH] [--report-dir DIR]
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ G5_RATIO = preflight.REFERENCE_QUALITY["min_thickness_ratio"]     # 0.05
 G5_FACTOR = preflight.G5_FACTOR                                   # 3.0 (layers.rs:1306)
 EDGE_MARGIN = 1e-6      # both window edges are kept this far inside (float h_i)
 CORNER_KAPPA = 0.70     # the box-corner G5 bound, measured 42.9 t1 = 0.715*60 t1 on cubep
+SNAP_G5_K = 1.10        # the convex-wall margin on a snapped wall's G5 edge (GLB-CONFIG): the user's G-L-b factor of 2026-10-03, against a measured zero-G5 t1 of 1.011 and 1.023 h/60 on the snapped sphere at levels 2 and 3
 FT_HALF_H_F = 0.5       # R-FEAT's attraction radius tau = 0.5 h_f (SPEC-LIT §92.12 erratum)
 T1_SIG = 4              # t1 floored to 4 significant digits, so the a priori y+ stays <= 1
 GROWTH_STEP_DIV = 1000  # growth steps are k / 1000
@@ -399,11 +401,12 @@ def r_plane(state: dict) -> dict:
 
 # --- the §D.3 window and R-WIN (C6) -------------------------------------------
 
-def window_level(t1, n, base, cap, *, kappa=1.0, growth=None, h_fixed=None,
+def window_level(t1, n, base, cap, *, kappa=1.0, margin=1.0, growth=None, h_fixed=None,
                  knobs=None) -> dict:
     """The §D.3 feasible window: the stack limiter below, the G5 edge above;
-    the coarsest landing level, or h_fixed kept (the R-PLANE path)."""
-    hi = kappa * G5_FACTOR * t1 / G5_RATIO * (1 - EDGE_MARGIN)
+    the coarsest landing level, or h_fixed kept (the R-PLANE path).  `margin`
+    divides the G5 edge (GLB-CONFIG's convex-wall margin K, 1.0 = today's edge)."""
+    hi = kappa * G5_FACTOR * t1 / (G5_RATIO * margin) * (1 - EDGE_MARGIN)
     s = n if growth is None else stack_total(1.0, growth, n)
     lo = t1 * s / CELL_FRAC * (1 + EDGE_MARGIN)
     out = {"verdict": "apply", "reason": None, "lo": lo, "hi": hi, "level": None,
@@ -486,20 +489,74 @@ def r_win(state: dict) -> dict:
                     [], "docs/15 §D.3 (R-WIN); layers.rs:127-133 (the stack), "
                     "layers.rs:449 (t_i = min(T, medial, cell_frac*h_i)), "
                     "layers.rs:1292-1316 (92.51)", msg)
+    # GLB-CONFIG: off R-PLANE the wall may sit on the G5 edge with the convex-wall
+    # margin K when the margin holds after the (92.45) depth; every floor
+    # (state["win_level"], R-BUDGET's and the remedies') stays at the plain edge.
+    margin_in, margin_f, margin_m = [], "", ""
+    plain_level = None
+    if not plane and state["glb"]:
+        w0 = w
+        wK = window_level(t1, n, base, cap, kappa=1.0, margin=SNAP_G5_K, **kw)
+        got = {}
+        for tag, cand in (("p", w0), ("k", wK)):
+            if cand["verdict"] != "apply":
+                continue
+            rt = _fine_ratio(state, cand["level"])
+            if rt > 1 and state.get("requested_growth") is None:
+                cand["fit"] = fit_growth(t1, n, cand["h"] / rt, state["knobs"])
+                cand["growth"] = cand["fit"] if cand["fit"] is not None else 1.0
+                cand["T"] = stack_total(t1, cand["growth"], n)
+            d = min(1.0, CELL_FRAC * (cand["h"] / rt) / cand["T"])
+            got[tag] = (rt, d, G5_FACTOR * t1 * d / cand["h"])
+        met = wK["verdict"] == "apply" and got["k"][2] >= G5_RATIO * SNAP_G5_K
+        w = wK if met else w0
+        ratio, d, g5d = got["k" if met else "p"]
+        plain_level, plain_h = w0["level"], w0["h"]
+        margin_in = [
+            {"name": "margin", "value": SNAP_G5_K, "unit": "1"},
+            {"name": "margin_met", "value": 1 if met else 0, "unit": "1"},
+            {"name": "plain_level", "value": plain_level, "unit": "1"},
+            {"name": "plain_h", "value": plain_h, "unit": "m"},
+            {"name": "depth", "value": d, "unit": "1"},
+            {"name": "g5_after_depth", "value": g5d, "unit": "1"}]
+        margin_f = ("; off R-PLANE: hi_K = 3*t1/(min_thickness_ratio*K), K = 1.1, kept "
+                    "when 3*t1*d/h >= K*min_thickness_ratio after the (92.45) depth "
+                    "d = min(1, cell_frac*h_lim/T), else the plain hi")
+        if met and w["level"] > plain_level:
+            margin_m = ("; the convex-wall margin K = 1.1 puts the wall at level %d "
+                        "(h = %.4g m), one level finer than the plain edge's %d: "
+                        "3*t1*d/h = %.4g >= 0.055 after the (92.45) depth d = %.4g"
+                        % (w["level"], w["h"], plain_level, g5d, d))
+        elif met:
+            margin_m = ("; the convex-wall margin K = 1.1 holds at the plain edge's "
+                        "level %d: 3*t1*d/h = %.4g >= 0.055 (d = %.4g)"
+                        % (plain_level, g5d, d))
+        else:
+            margin_m = ("; the convex-wall margin K = 1.1 is not met (3*t1*d/h = %.4g "
+                        "< 0.055 after the (92.45) depth d = %.4g, or no level lands "
+                        "under it), so the plain edge's level %d is kept"
+                        % (g5d, d, plain_level))
     level = plane["level"] if plane else w["level"]
     ratio = _fine_ratio(state, level)
     if ratio > 1 and state.get("requested_growth") is None:
         w["fit"] = fit_growth(t1, n, w["h"] / ratio, state["knobs"])
         w["growth"] = w["fit"] if w["fit"] is not None else 1.0
         w["T"] = stack_total(t1, w["growth"], n)
-    state["win_level"] = level
+    state["win_level"] = plain_level if plain_level is not None else level
+    state["win_margin_level"] = level
     _apply_levels(state, level, 1.0, 1.0, False)
     state["config"]["layers"]["growth"] = w["growth"]
     state["growth"] = w["growth"]
     edits = _edit_records(state)
     if ratio > 1:
-        return _win_fine(state, w, level, ratio, edits)
+        return _win_fine(state, w, level, ratio, edits, margin_in, margin_f, margin_m)
     extra = ", times 0.70 for the box corners" if plane else ""
+    msg = ("R-WIN: at n = %d the window is h in [%.4g, %.4g] m (h/t1 in "
+           "[%.2f, %.2f]: the stack limiter T <= cell_frac*h below, the G5 edge "
+           "3*t1/h >= %g above%s); wall level %d gives h = %.6g m (h/t1 = %.2f); "
+           "growth %.3f is the largest step with T = %.6g m <= cell_frac*h = %.6g m"
+           % (n, w["lo"], w["hi"], w["lo"] / t1, w["hi"] / t1, G5_RATIO, extra,
+              level, w["h"], w["h"] / t1, w["growth"], w["T"], CELL_FRAC * w["h"]))
     return _rec("R-WIN", "apply",
                 {"observable": "h_wall / t1", "value": w["h"] / t1,
                  "threshold": [w["lo"] / t1, w["hi"] / t1], "op": "in",
@@ -516,23 +573,20 @@ def r_win(state: dict) -> dict:
                  {"name": "h_over_t1", "value": w["h"] / t1, "unit": "1"},
                  {"name": "growth", "value": w["growth"], "unit": "1"},
                  {"name": "T", "value": w["T"], "unit": "m"},
-                 {"name": "cell_frac_h", "value": CELL_FRAC * w["h"], "unit": "m"}],
+                 {"name": "cell_frac_h", "value": CELL_FRAC * w["h"], "unit": "m"}]
+                + margin_in,
                 "lo = t1*S(g)/cell_frac with S(g) = sum g^k, k < n (g -> 1: S = n); "
                 "hi = kappa*3*t1/min_thickness_ratio; the coarsest level with "
                 "lo <= base/2**L <= hi; growth = the largest k/1000 with "
-                "t1*S(g) <= cell_frac*h",
+                "t1*S(g) <= cell_frac*h" + margin_f,
                 edits, "docs/15 §D.3 (R-WIN); layers.rs:127-133 (the stack), "
                 "layers.rs:449 (t_i = min(T, medial, cell_frac*h_i)), "
                 "layers.rs:1292-1316 (92.51)",
-                "R-WIN: at n = %d the window is h in [%.4g, %.4g] m (h/t1 in "
-                "[%.2f, %.2f]: the stack limiter T <= cell_frac*h below, the G5 edge "
-                "3*t1/h >= %g above%s); wall level %d gives h = %.6g m (h/t1 = %.2f); "
-                "growth %.3f is the largest step with T = %.6g m <= cell_frac*h = %.6g m"
-                % (n, w["lo"], w["hi"], w["lo"] / t1, w["hi"] / t1, G5_RATIO, extra,
-                   level, w["h"], w["h"] / t1, w["growth"], w["T"], CELL_FRAC * w["h"]))
+                msg + margin_m)
 
 
-def _win_fine(state: dict, w: dict, level: int, ratio: int, edits: list) -> dict:
+def _win_fine(state: dict, w: dict, level: int, ratio: int, edits: list,
+              margin_in: list = (), margin_f: str = "", margin_m: str = "") -> dict:
     """R-WIN's apply on a sharp body off R-PLANE below max_level (WIN-2TO1): R-FEAT
     puts the sharp edges at level + 1, so the growth fits cell_frac * h / 2 there.  A
     stack fitted to the wall level is cut to half at every feature-level point, and
@@ -571,12 +625,14 @@ def _win_fine(state: dict, w: dict, level: int, ratio: int, edits: list) -> dict
                  {"name": "T", "value": T, "unit": "m"},
                  {"name": "cell_frac_h_fine", "value": CELL_FRAC * hf, "unit": "m"},
                  {"name": "tau_fine", "value": tau, "unit": "1"},
-                 {"name": "g5_beside_fine", "value": g5, "unit": "1"}],
+                 {"name": "g5_beside_fine", "value": g5, "unit": "1"}]
+                + list(margin_in),
                 "lo = t1*S(g)/cell_frac with S(g) = sum g^k, k < n (g -> 1: S = n); "
                 "hi = 3*t1/min_thickness_ratio; the coarsest level with lo <= "
                 "base/2**L <= hi; R-FEAT puts the sharp edges at L + 1, so growth = "
                 "the largest k/1000 with t1*S(g) <= cell_frac*h/2 (1.0 when none fits); "
-                "tau_f = min(1, cell_frac*(h/2)/T), G5 beside it = 3*t1*tau_f/h",
+                "tau_f = min(1, cell_frac*(h/2)/T), G5 beside it = 3*t1*tau_f/h"
+                + margin_f,
                 edits, "docs/15 §D.3 (R-WIN); layers.rs:127-133 (the stack), "
                 "layers.rs:449 (t_i = min(T, medial, cell_frac*h_i)), "
                 "layers.rs:1292-1316 (92.51); docs/15 §G.1 AM-L (WIN-2TO1)",
@@ -591,7 +647,7 @@ def _win_fine(state: dict, w: dict, level: int, ratio: int, edits: list) -> dict
                 "them (WIN-2TO1)"
                 % (n, w["lo"], w["hi"], w["lo"] / t1, w["hi"] / t1, G5_RATIO, level,
                    h, h / t1, level + 1, hf, how, tau, g5,
-                   ">=" if g5 >= G5_RATIO else "<", G5_RATIO))
+                   ">=" if g5 >= G5_RATIO else "<", G5_RATIO) + margin_m)
 
 
 # --- R-CURV, R-GAP, R-FEAT (C7) -----------------------------------------------
@@ -898,6 +954,11 @@ def r_budget(state: dict) -> dict:
     suffix = ("; the wall level is back at R-WIN's %d" % floor) \
         if lw == floor and lw != entry_wall else ""
     suffix += ft_txt
+    if state.get("win_margin_level") is not None \
+            and lw < state["win_margin_level"]:
+        suffix += ("; the convex-wall margin is given up for the budget: wall level "
+                   "%d is under R-WIN's margined %d, at or above its plain edge's %d"
+                   % (lw, state["win_margin_level"], state["win_level"]))
     return _rec("R-BUDGET", "apply", trig, pred_in, _BUDGET_FORMULA,
                 _edit_records(state), _BUDGET_CITE,
                 "R-BUDGET: the rules' bands predict %d cells > %d; %d rung(s) later "
@@ -917,8 +978,10 @@ RULE_FN = {"R-YP": r_yp, "R-DOM": r_dom, "R-PLANE": r_plane, "R-WIN": r_win,
 
 def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str, *,
           flow=None, gates=None, knobs=None, requested_growth=None,
-          ft_radius=True, win_2to1=True) -> dict:
-    """The eight L1 rules on one geometry; the autonomy-rules/1 result out."""
+          ft_radius=True, win_2to1=True, glb=True) -> dict:
+    """The eight L1 rules on one geometry; the autonomy-rules/1 result out.
+    glb=False is the rule set every committed campaign was recorded under
+    (GLB-CONFIG off)."""
     gates = gates or schema.load_gates()
     knobs = knobs or schema.load_knobs()
     errs = schema.errors(fingerprint, "Fingerprint")
@@ -936,10 +999,11 @@ def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str,
                                                      knobs)["max"],
              "patches": patches, "requested_growth": requested_growth,
              "t1": None, "n": None, "base": None, "plane": None, "win_level": None,
+             "win_margin_level": None,
              "wall_level": None, "rung": (1.0, 1.0), "feature": False,
              "feature_level": None, "growth": None, "stop": None, "predicted": None,
              "ft_radius": bool(ft_radius), "ft_set": False,
-             "win_2to1": bool(win_2to1)}
+             "win_2to1": bool(win_2to1), "glb": bool(glb)}
     records = []
     for rid in RULES:
         if state["stop"] is not None:
@@ -1002,6 +1066,23 @@ def win_2to1_of(records) -> bool:
                 or rec.get("rule_id") not in ("R-WIN", "R-CURV", "R-GAP", "R-BUDGET"):
             continue
         if any(i.get("name") == "fine_ratio" for i in rec.get("inputs") or []):
+            return True
+    return False
+
+
+def glb_of(records) -> bool:
+    """Which R-WIN a recorded campaign ran under: True when one of its R-WIN apply
+    records carries the input margin (GLB-CONFIG, the convex-wall margin K on the
+    G5 edge off R-PLANE), False for a campaign recorded before it.  A reader that
+    rebuilds recorded attempt-1 configs passes setup(..., glb=glb_of(r)) beside
+    ft_radius_of(r) and win_2to1_of(r); a campaign with no such record rebuilds
+    under the plain edge, so either value rebuilds it."""
+    for item in records:
+        rec = item.get("record", item) if isinstance(item, dict) else None
+        if not isinstance(rec, dict) or rec.get("rule_id") != "R-WIN" \
+                or rec.get("verdict") != "apply":
+            continue
+        if any(i.get("name") == "margin" for i in rec.get("inputs") or []):
             return True
     return False
 
@@ -1555,7 +1636,7 @@ def gate(parts, out_dir: str, streams: int = 6, binary: str | None = None) -> in
 # --- the selftest (C12) --------------------------------------------------------
 
 def selftest() -> int:
-    """19 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
+    """20 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
     import random
     import shutil
     import tempfile
@@ -1732,15 +1813,16 @@ def selftest() -> int:
                    res["summary"]["base_size_m"], res["summary"]["growth"],
                    n_on - 2, h_t1))
 
-    def curv_gap_case(gid, over, which):
-        res = setup_of(gid, fp_of(gid, over))
+    def curv_gap_case(gid, over, which, **kw):
+        res = setup_of(gid, fp_of(gid, over), **kw)
         idx = {"R-CURV": 4, "R-GAP": 5}[which]
         return res, res["records"][idx]
 
     def g7():
         res, rec = curv_gap_case("A-1-000", {}, "R-CURV")
         ins = {i["name"]: i["value"] for i in rec["inputs"]}
-        assert rec["verdict"] == "apply" and ins["wall_level_before"] == 4 \
+        # GLB-CONFIG: R-WIN's convex-wall margin puts A-1-000 at level 5 before R-CURV
+        assert rec["verdict"] == "apply" and ins["wall_level_before"] == 5 \
             and ins["wall_level_after"] == 6, (rec["verdict"], ins)
         h5, h6 = 0.5624 / 32, 0.5624 / 64
         assert h6 < ins["h_max"] < h5 and abs(ins["h_max"] - 0.1012 / 8) < 2e-4, \
@@ -1752,10 +1834,17 @@ def selftest() -> int:
         assert rec3["verdict"] == "apply" and ins3["wall_level_after"] == 6 \
             and ins3["capped"] == 1 and "capped" in rec3["message"]
         _, rec4 = curv_gap_case("A-1-000", {"curvature_radius_p5_m": None,
-                                            "outer_gap_m": 0.06}, "R-GAP")
-        ins4 = {i["name"]: i["value"] for i in rec4["inputs"]}
-        assert rec4["verdict"] == "apply" and ins4["wall_level_before"] == 4 \
-            and ins4["wall_level_after"] == 5
+                                            "outer_gap_m": 0.06}, "R-GAP", glb=False)
+        # the committed campaigns' rule set (glb False): R-GAP 4->5 on the plain edge
+        assert rec4["verdict"] == "apply" \
+            and ins_of(rec4)["wall_level_before"] == 4 \
+            and ins_of(rec4)["wall_level_after"] == 5, rec4
+        # GLB-CONFIG: under the default rules the margin's level 5 holds the gap
+        # bound already, so the same case passes at the margin's 5
+        res4m, rec4m = curv_gap_case("A-1-000", {"curvature_radius_p5_m": None,
+                                                 "outer_gap_m": 0.06}, "R-GAP")
+        assert rec4m["verdict"] == "pass" \
+            and res4m["summary"]["wall_level"] == 5, (rec4m, res4m["summary"])
         _, rec5 = curv_gap_case("A-1-000", {"curvature_radius_p5_m": None,
                                             "outer_gap_m": 10.0}, "R-GAP")
         assert rec5["verdict"] == "pass"
@@ -1775,15 +1864,17 @@ def selftest() -> int:
                 want = fit if fit is not None else 1.0
                 for e in growth_edits:
                     assert abs(e["to"] - want) < 1e-12, (e, want)
-        return ("raise, pass and cap on 6 synthetic fingerprints (R-CURV 4->6, "
-                "pass, 6 capped; R-GAP 4->5, pass, 6 capped)")
+        return ("raise, pass and cap on 6 synthetic fingerprints (R-CURV 5->6, "
+                "pass, 6 capped; R-GAP 4->5 on the plain edge, pass at the "
+                "margin's 5, cap 6)")
 
     def ins_of(rec):
         return {i["name"]: i["value"] for i in rec["inputs"]}
 
     def g8():
         res_a = setup_of("A-1-000", fp_of("A-1-000", {"curvature_radius_p5_m": 10.0}))
-        assert res_a["summary"]["feature_level"] == 5, res_a["summary"]
+        # GLB-CONFIG: R-WIN's margin puts A-1-000 at wall level 5, so the edges sit at 6
+        assert res_a["summary"]["feature_level"] == 6, res_a["summary"]
         res_b = setup_of("A-1-000", fp_of("A-1-000", {"curvature_radius_p5_m": 1e-4}))
         assert res_b["summary"]["feature_level"] == 6
         rec_f = res_b["records"][6]
@@ -2147,6 +2238,80 @@ def selftest() -> int:
                 "a broken identity, a preflight refusal added, a -dryRun failure or a "
                 "harness error")
 
+    def g20():
+        wK = window_level(0.0007296, 8, 0.5, 6, knobs=knobs, margin=1.10)
+        assert abs(wK["hi"] - 0.039796323839999995) <= 1e-15 and wK["level"] == 4 \
+            and wK["growth"] == 1.27, wK
+        w2 = window_level(0.0007296, 8, 0.5, 6, knobs=knobs, margin=2.0)
+        assert abs(w2["hi"] - 0.021887978112) <= 1e-15, w2["hi"]
+        assert (w2["level"], w2["h"], w2["growth"]) == (5, 0.015625, 1.081), w2
+        # (b) D-1-003: the margin moves the wall 5 -> 6, every floor stays at 5
+        b0 = setup_of("D-1-003", glb=False)
+        b1 = setup_of("D-1-003")
+        assert b0["summary"]["wall_level"] == 5 and b0["summary"]["growth"] == 1.17
+        s = b1["summary"]
+        assert s["wall_level"] == 6 and s["win_level"] == 5 and s["growth"] == 1.17 \
+            and s["predicted_total"] == 1188901, s
+        w = ins_of(b1["records"][3])
+        assert w["margin"] == 1.1 and w["margin_met"] == 1
+        assert w["plain_level"] == 5 and w["plain_h"] == 0.01498125
+        assert w["depth"] == 1.0 \
+            and abs(w["g5_after_depth"] - 0.10132665832290365) <= 1e-12, w
+        assert "one level finer" in b1["records"][3]["message"]
+        # (c) F-1-009: the 2:1 path, 3 -> 4 at growth 1.0
+        c0 = setup_of("F-1-009", glb=False)
+        c1 = setup_of("F-1-009")
+        assert c0["summary"]["wall_level"] == 3 and c0["summary"]["growth"] == 1.15
+        s = c1["summary"]
+        assert s["wall_level"] == 4 and s["feature_level"] == 5 and s["growth"] == 1.0 \
+            and s["win_level"] == 3, s
+        w = ins_of(c1["records"][3])
+        assert w["fine_ratio"] == 2 and abs(w["depth"] - w["tau_fine"]) <= 1e-12 \
+            and abs(w["depth"] - 0.8589800666360294) <= 1e-12 \
+            and abs(w["g5_after_depth"] - 0.09375) <= 1e-12, w
+        # (d) A-1-007: R-BUDGET gives the margin up, the config is the plain one
+        d0 = setup_of("A-1-007", glb=False)
+        d1 = setup_of("A-1-007")
+        assert d0["config_sha256"] == d1["config_sha256"]
+        assert d1["summary"]["wall_level"] == 5 and d1["summary"]["win_level"] == 5
+        w = ins_of(d1["records"][3])
+        assert w["margin_met"] == 1 and w["h"] == 0.0070609375, w
+        assert "the convex-wall margin is given up for the budget" \
+            in d1["records"][7]["message"], d1["records"][7]["message"]
+        # (e) F-1-001 at a requested growth: the margin is not met, the sha is plain
+        e0 = setup_of("F-1-001", requested_growth=1.2, glb=False)
+        e1 = setup_of("F-1-001", requested_growth=1.2)
+        w = ins_of(e1["records"][3])
+        assert w["margin_met"] == 0 \
+            and abs(w["depth"] - 0.695541472003459) <= 1e-12 \
+            and abs(w["g5_after_depth"] - 0.04545706680651766) <= 1e-12, w
+        assert "is not met" in e1["records"][3]["message"]
+        assert e1["config_sha256"] == e0["config_sha256"]
+        # (f) B-1-000: the margin holds at the plain edge's level 6
+        f0 = setup_of("B-1-000", glb=False)
+        f1 = setup_of("B-1-000")
+        w = ins_of(f1["records"][3])
+        assert w["margin_met"] == 1 and w["plain_level"] == 6, w
+        assert f1["summary"]["win_level"] == 6 and f1["summary"]["wall_level"] == 6
+        assert f1["config_sha256"] == f0["config_sha256"]
+        assert "holds at the plain edge's level" in f1["records"][3]["message"]
+        # (g) the R-PLANE cube is identical under both rule sets
+        cu1 = cube_setup()
+        cu0 = cube_setup(glb=False)
+        assert cu1["config_sha256"] == cu0["config_sha256"]
+        plain = [{k: v for k, v in r.items() if k != "t"} for r in cu1["records"]]
+        assert plain == [{k: v for k, v in r.items() if k != "t"}
+                         for r in cu0["records"]]
+        assert all(all(i["name"] != "margin" for i in r["inputs"])
+                   for r in cu1["records"])
+        # (h) glb_of tells the two rule sets apart
+        assert glb_of(b1["records"]) is True
+        assert glb_of([{"record": r} for r in b1["records"]]) is True
+        assert glb_of(b0["records"]) is False and glb_of([]) is False
+        return ("D-1-003's wall 5 -> 6 (win_level 5), F-1-009's 3 -> 4 at growth 1.0, "
+                "A-1-007's R-BUDGET gives the margin up to the same config sha, the "
+                "R-PLANE cube identical, on the K = 1.1 margin off R-PLANE")
+
     failed = 0
     try:
         for name, fn in (("R-YP", g1), ("R-WIN", g2), ("window table", g3),
@@ -2155,7 +2320,8 @@ def selftest() -> int:
                          ("setup", g10), ("whitelist", g11), ("records", g12),
                          ("determinism", g13), ("cli", g14), ("FT-RADIUS rule", g15),
                          ("FT-RADIUS gate", g16), ("WIN-2TO1 rule", g17),
-                         ("WIN-2TO1 gate", g18), ("WIN-2TO1 verdict", g19)):
+                         ("WIN-2TO1 gate", g18), ("WIN-2TO1 verdict", g19),
+                         ("GLB-CONFIG rule", g20)):
             failed += group(name, fn)
             if failed:
                 for l in lines:
@@ -2182,7 +2348,7 @@ FT_HEADER = ("meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (I
              "Source-available, not Open Source. No GPL-licensed source was consulted.")
 
 
-def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False) -> list:
+def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False, glb=False) -> list:
     """Every tuning row, classed by setup on the fingerprint the committed rules
     campaign recorded: no_fingerprint, refused, plane (R-PLANE), smooth (no sharp edge)
     or sharp (the rows FT-RADIUS changes); the stl and case paths are campaign.py's.
@@ -2197,7 +2363,7 @@ def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False) -> list:
              "row": row, "fingerprint": fp, "result": None, "class": "no_fingerprint"}
         if fp is not None:
             res = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
-                        gates=gates, knobs=knobs, win_2to1=win_2to1)
+                        gates=gates, knobs=knobs, win_2to1=win_2to1, glb=glb)
             p["result"] = res
             if res["verdict"] != "apply":
                 p["class"] = "refused"
@@ -2261,7 +2427,8 @@ def ft_identity(pop, bundle, gates=None, knobs=None) -> dict:
                 sorted(end["refused"]) == sorted(new["refused"])
         else:
             old = setup(p["row"], p["fingerprint"], "stl/%s.stl" % gid, "cases/%s" % gid,
-                        gid, gates=gates, knobs=knobs, ft_radius=False, win_2to1=False)
+                        gid, gates=gates, knobs=knobs, ft_radius=False, win_2to1=False,
+                        glb=False)
             ok = r1 is None or r1["config_sha"] == old["config_sha256"]
             if cls in ("plane", "smooth"):
                 ok = ok and new["config_sha256"] == old["config_sha256"]
@@ -2766,6 +2933,130 @@ def win_gate(cdir, ref_dir, bundle_path=FT_BUNDLE, report_dir=REPORT_DIR,
     return 0 if summ["verdict"] == "PASS" else 1
 
 
+# --- the GLB-CONFIG gate: the tuning bundle under the convex-wall margin --------
+
+AML_BUNDLE = os.path.join(HERE, "aml", "tuning_rules_L5.json.gz")
+GLB_SCHEMA = "autonomy-glb-config-gate/1"
+
+
+def glb_gate(bundle_path: str = AML_BUNDLE, report_dir: str = REPORT_DIR) -> int:
+    """The GLB-CONFIG gate over the committed L5 rules bundle: every tuning attempt 1
+    rebuilt by the rules it was recorded under (glb False) and again with the
+    convex-wall margin on.  PASS needs the recorded identity complete, no rules
+    refusal moved, no preflight refusal added or removed (PF-SURFACE set aside: the
+    bundle carries no STL files) and every changed pointer an allowed one; writes
+    G-GLB-CONFIG.json."""
+    import hashlib
+    import lreplay
+    import split
+    bundle = lreplay.load_bundle(bundle_path)
+    gates, knobs = schema.load_gates(), schema.load_knobs()
+    ends = {g["geometry_id"]: g for g in bundle["geometries"]}
+    att1 = {r["geometry_id"]: r for r in bundle["attempts"] if r["attempt"] == 1}
+    counts = {"rows": 0, "no_fingerprint": 0, "plane": 0, "refused": 0, "snapped": 0}
+    identity = {"n": 0, "bad": []}
+    pf = {"n0": 0, "n1": 0, "bad": []}
+    margin = {"met": 0, "not_met": 0, "finer": 0, "given_up": 0}
+    changed, refuse_bad, pointer_bad = [], [], []
+    for row in split.load("tuning", "rules"):
+        gid = row["geometry_id"]
+        fp = (ends.get(gid) or {}).get("fingerprint")
+        if fp is None:
+            counts["no_fingerprint"] += 1
+            continue
+        counts["rows"] += 1
+        res0 = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
+                     gates=gates, knobs=knobs, glb=False)
+        res1 = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
+                     gates=gates, knobs=knobs, glb=True)
+        cls = "refused" if res1["refused"] else \
+            ("plane" if res1["summary"]["plane"] else "snapped")
+        counts[cls] += 1
+        if res0["refused"] != res1["refused"]:
+            refuse_bad.append(gid)
+        a1 = att1.get(gid)
+        if a1 is not None and a1.get("decided_by") == "rule":
+            identity["n"] += 1
+            if a1.get("config_sha") != res0["config_sha256"]:
+                identity["bad"].append(gid)
+        pfs = []
+        for res in (res0, res1):
+            if res["config"] is None:
+                pfs.append(None)
+                continue
+            pfres = preflight.preflight(res["config"], fingerprint=fp,
+                                        flow=row["flow"], gates=gates, knobs=knobs)
+            pfs.append(sorted(r for r in pfres["refused"] if r != "PF-SURFACE"))
+        for res, key in zip(pfs, ("n0", "n1")):
+            if res is not None:
+                pf[key] += 1 if res else 0
+        if None not in pfs and pfs[0] != pfs[1]:
+            pf["bad"].append(gid)
+        if res0["config"] is not None and res1["config"] is not None \
+                and res0["config_sha256"] != res1["config_sha256"]:
+            eds = diff_edits(res0["config"], res1["config"])
+            bad = [e["pointer"] for e in eds
+                   if not e["pointer"].startswith("/refinement/")
+                   and e["pointer"] not in ("/layers/growth",
+                                            "/snap/feature_tolerance")]
+            if bad:
+                pointer_bad.append({gid: bad})
+            changed.append({"geometry_id": gid,
+                            "wall_level": [res0["summary"]["wall_level"],
+                                           res1["summary"]["wall_level"]],
+                            "growth": [res0["config"]["layers"]["growth"],
+                                       res1["config"]["layers"]["growth"]],
+                            "predicted_cells": [res0["summary"]["predicted_total"],
+                                                res1["summary"]["predicted_total"]],
+                            "pointers": [e["pointer"] for e in eds]})
+        if cls == "snapped":
+            rec = next(r for r in res1["records"] if r["rule_id"] == "R-WIN")
+            ins = {i["name"]: i["value"] for i in rec["inputs"]}
+            margin["met" if ins.get("margin_met") == 1 else "not_met"] += 1
+            if ins.get("h", 1e9) < ins.get("plain_h", 0.0):
+                margin["finer"] += 1
+                if "margin is given up" in res1["records"][7]["message"]:
+                    margin["given_up"] += 1
+    ok = not (identity["bad"] or refuse_bad or pf["bad"] or pointer_bad)
+    git = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True,
+                         text=True)
+    with open(bundle_path, "rb") as f:
+        bsha = hashlib.sha256(f.read()).hexdigest()
+    report = {"$comment": FT_HEADER, "schema": GLB_SCHEMA,
+              "date": schema._now_iso()[:10], "git_head": git.stdout.strip(),
+              "bundle": os.path.relpath(bundle_path, REPO).replace(os.sep, "/"),
+              "bundle_sha256": bsha, "counts": counts, "identity": identity,
+              "rules_refusals_changed": refuse_bad, "preflight": pf, "margin": margin,
+              "changed": changed, "verdict": "PASS" if ok else "FAIL"}
+    os.makedirs(report_dir, exist_ok=True)
+    out = os.path.join(report_dir, "G-GLB-CONFIG.json")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=1, sort_keys=True)
+        fh.write("\n")
+    print("G-GLB-CONFIG %s: %d tuning rows, %d without a fingerprint; plane %d, "
+          "refused %d, snapped %d; identity %d/%d; rules refusals changed %d; "
+          "preflight refusals %d and %d, differing %d; margin met %d of %d snapped, "
+          "finer %d, given up %d; changed configs %d"
+          % (report["verdict"], counts["rows"], counts["no_fingerprint"],
+             counts["plane"], counts["refused"], counts["snapped"],
+             identity["n"] - len(identity["bad"]), identity["n"], len(refuse_bad),
+             pf["n0"], pf["n1"], len(pf["bad"]), margin["met"], margin["met"]
+             + margin["not_met"], margin["finer"], margin["given_up"], len(changed)))
+    return 0 if ok else 1
+
+
+def _cli_glb_gate(argv: list[str]) -> int:
+    ap = _ArgParser(prog="rules.py --glb-gate")
+    ap.add_argument("--bundle", default=AML_BUNDLE)
+    ap.add_argument("--report-dir", default=REPORT_DIR)
+    args = ap.parse_args(argv)
+    try:
+        return glb_gate(args.bundle, report_dir=args.report_dir)
+    except (RulesError, OSError, ValueError, schema.SchemaError) as e:
+        sys.stderr.write("rules: %s\n" % e)
+        return 2
+
+
 # --- the CLI (C9) ---------------------------------------------------------------
 
 class _ArgParser(argparse.ArgumentParser):
@@ -2932,6 +3223,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cli_ft_gate(argv[1:])
     if argv[0] == "--win-gate":
         return _cli_win_gate(argv[1:])
+    if argv[0] == "--glb-gate":
+        return _cli_glb_gate(argv[1:])
     ap = _ArgParser(prog="rules.py", description="the L1 setup rules (AM-9)")
     ap.add_argument("stl", nargs="?")
     ap.add_argument("--id")
