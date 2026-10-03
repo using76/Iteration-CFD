@@ -18,14 +18,27 @@ function cargoBins(): Array<{ name: string; path: string }> {
   return out
 }
 
-/** The concatenated string literal of `fn usage()` with Rust's `\`-newline continuations and `{}` expanded. */
+/** The concatenated string literal of `fn usage()` with Rust's `\`-newline continuations and `{}` expanded.
+ *  Three shapes, tried in order: `eprintln!("<literal>")`; `eprintln!("{}", usage_text())`, whose
+ *  literal is the first one in `fn usage_text()`'s `format!`; and `fn usage() -> String { "<literal>" }`. */
 function usageText(source: string): string {
-  const m = source.match(/fn usage\(\)\s*\{\s*eprintln!\(\s*"((?:[^"\\]|\\[\s\S])*)"/)
-  if (!m) throw new Error('no fn usage() literal')
-  return m[1]
-    .replace(/\\\r?\n\s*/g, '')
-    .replace(/\\n/g, '\n')
-    .replace(/\{\}/g, '\n  -permissive     downgrade unsupported-setting errors to warnings')
+  const expand = (lit: string): string =>
+    lit
+      .replace(/\\\r?\n\s*/g, '')
+      .replace(/\\n/g, '\n')
+      .replace(/\{\}/g, '\n  -permissive     downgrade unsupported-setting errors to warnings')
+  const LIT = '"((?:[^"\\\\]|\\\\[\\s\\S])*)"'
+  const direct = source.match(new RegExp(`fn usage\\(\\)\\s*\\{\\s*eprintln!\\(\\s*${LIT}`))
+  if (direct && direct[1] !== '{}') return expand(direct[1])
+  const text = source.match(/fn usage\(\)\s*\{\s*eprintln!\(\s*"\{\}",\s*usage_text\(\)\)/)
+  if (text) {
+    const t = source.match(new RegExp(`fn usage_text\\(\\)\\s*->\\s*String\\s*\\{[\\s\\S]*?format!\\(\\s*${LIT}`))
+    if (!t) throw new Error('no fn usage() literal')
+    return expand(t[1])
+  }
+  const ret = source.match(new RegExp(`fn usage\\(\\)\\s*->\\s*String\\s*\\{\\s*${LIT}`))
+  if (ret) return expand(ret[1])
+  throw new Error('no fn usage() literal')
 }
 
 function constUsage(source: string): string {

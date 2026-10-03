@@ -88,6 +88,7 @@ const GRAPH: FlagSpec = { name: '-graph', type: 'flag', description: 'Capture th
 const END_TIME: FlagSpec = { name: '-endTime', type: 'time', description: 'Transient mode: physical end time in seconds.' }
 const DELTA_T: FlagSpec = { name: '-deltaT', type: 'time', description: 'Time step in seconds.' }
 const WRITE_INTERVAL: FlagSpec = { name: '-writeInterval', type: 'time', description: 'Seconds of physical time between writes.' }
+const WRITE_EVERY: FlagSpec = { name: '-writeEvery', type: 'int', description: 'Steady mode: write every N iterations (a transient run refuses it - it has -writeInterval).' }
 const OUTER_ITERS: FlagSpec = { name: '-outerIters', type: 'int', description: 'PIMPLE outer correctors per time step.' }
 const NO_POTENTIAL: FlagSpec = { name: '-noPotential', type: 'flag', description: 'Skip the potential-flow initial flux.' }
 const INLET_PATCH: FlagSpec = { name: '-inletPatch', type: 'string', description: 'Name of the inlet patch for the potential-flow start.' }
@@ -327,7 +328,7 @@ export const BINARIES: BinarySpec[] = [
       { name: '-sealed', type: 'flag', description: 'Closed enclosure: thermodynamic pressure p0 evolves.' },
       { name: '-p0', type: 'float', description: 'Initial thermodynamic pressure in Pa.' },
       { name: '-heaterPower', type: 'float', description: 'Heater power in W.' },
-      OUTPUT_LIST, WRITE_INTERVAL, RESTART_WRITE, RESTART_FROM, PERMISSIVE,
+      OUTPUT_LIST, WRITE_INTERVAL, WRITE_EVERY, RESTART_WRITE, RESTART_FROM, PERMISSIVE,
     ],
     accepts: ['jsonc', 'foamDir'],
     builds: ['kEpsilon', 'realizableKE', 'RNGkEpsilon', 'kOmega', 'kOmegaSST', 'kOmegaSSTLM', 'LaunderSharmaKE', 'Smagorinsky', 'WALE', 'kEqn', 'SSTDES', 'SSTDDES', 'SSTIDDES', 'laminar'],
@@ -484,8 +485,7 @@ export const BINARIES: BinarySpec[] = [
   {
     name: 'ofgpu-regions',
     source: 'src/bin/regions.rs',
-    pending: true,
-    purpose: 'The region layout of docs/10 §C: `split <polyMeshDir> <outDir> [-fluid <zone>]` turns one polyMesh with cellZones into one polyMesh per zone plus regions.json (R7); `check <regions.json>` prints the layout and solver pairing reports and refuses a layout that breaks R1-R6; `list <regions.json>` lists the regions. Declared ahead of its Cargo target (solver unit S11); offered once the binary exists.',
+    purpose: 'The region layout of docs/10 §C: `split <polyMeshDir> <outDir> [-fluid <zone>]` turns one polyMesh with cellZones into one polyMesh per zone plus regions.json (R7); `check <regions.json>` prints the layout and solver pairing reports and refuses a layout that breaks R1-R6; `list <regions.json>` lists the regions.',
     summary: 'Region layout: split a zoned polyMesh, check or list a regions.json.',
     kind: 'mesh',
     positionals: [
@@ -501,6 +501,32 @@ export const BINARIES: BinarySpec[] = [
     longRunning: false,
     gpu: false,
     usageKind: 'constUsage',
+  },
+  {
+    name: 'ofgpu-sample',
+    source: 'src/bin/sample.rs',
+    purpose: 'The post-processing sampler the published fluid gates of SPEC-LIT §110 record their measurements with; it reads a written time and never solves. `column <case> <time> <axis> <c1> <c2> [-at v1,v2,...] [-mean]` prints the cells whose centres lie on the line along <axis> through (c1, c2) - coordinate, Ux Uy Uz, T when present, cell volume - sorted along <axis>; `wall <case> <time> <patch> <axis>` prints every face of <patch> sorted along <axis> with its owner-cell velocity and distance, then every sign change of the owner-cell <axis> velocity as a crossing (the reattachment search of Gate 110-B). <case> is a .jsonc case file or an OpenFOAM case directory, passed as a positional after the subcommand (not as casePath); fields come from its output root /<time>/U and /T.',
+    summary: 'Sample a cell column or a wall patch from a written time (SPEC-LIT §110 gates).',
+    kind: 'analysis',
+    positionals: [
+      { name: 'command', type: 'enum', values: ['column', 'wall'], description: 'column | wall' },
+      { name: 'case', type: 'path', description: 'A .jsonc case file or an OpenFOAM case directory' },
+      { name: 'time', type: 'string', description: 'The written time directory to read, e.g. 2000' },
+      { name: 'axisOrPatch', type: 'string', description: 'column: the axis x|y|z; wall: the patch name' },
+      { name: 'c1OrAxis', type: 'string', description: 'column: <c1>, the first non-axis coordinate (x-y-z order, axis omitted); wall: the axis x|y|z' },
+      { name: 'c2', type: 'string', optional: true, description: 'column only: <c2>, the second non-axis coordinate' },
+    ],
+    flags: [
+      { name: '-at', type: 'list', description: "column: stations along <axis>, comma separated, each linearly interpolated between the two nearest cell centres; a station outside the column's range is refused." },
+      { name: '-mean', type: 'flag', description: 'column: also print the cell-volume-weighted mean of each column.' },
+    ],
+    accepts: [],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: [], restart: false, csv: false },
+    longRunning: false,
+    gpu: false,
+    usageKind: 'usageFn',
   },
 ]
 
