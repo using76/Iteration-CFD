@@ -5,6 +5,8 @@
 """loop.py - the study loop of stage S11 (docs/16 §D, §I CAD-18): from locked requirements to a
 confirmed stable design, every evaluation built in a temp dir and moved whole into cache/<eval_key>,
 promotion one atomic replace of the params/stable.json pointer, resume by one deterministic walk.
+The study's evaluator is "stub" (the CAD-18 stand-in), "cfd" (the real S3-S10 path, CAD-21) or
+"cfd_turb" (its turbulent twin through run_turb and write_turb_case, docs/16 §H.5).
 
 The walk is the ONLY writer: a row already on disk must equal the row the walk re-derives
 (LOOP-RESUME), the frontier is where the walk appends, and replay is the same walk in verify-only
@@ -40,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import admit  # noqa: E402
 import common  # noqa: E402
+import evaluate_cfd  # noqa: E402
 import gate  # noqa: E402
 import optimise_cad  # noqa: E402
 import reqs  # noqa: E402
@@ -56,7 +59,7 @@ KILL_POINTS = ("after_propose_row", "after_build", "after_replace", "after_itera
                "after_history")
 KILL_EXIT = 77
 STATUSES = ("new", "running", "paused", "confirmed", "confirmation_failed", "infeasible")
-EVALUATORS = ("stub",)
+EVALUATORS = ("stub", "cfd", "cfd_turb")
 STUB_VERSION = "1"
 STUB_ENV = {"stub": STUB_VERSION}
 STUB_CASE_WRITER = "stub/1"
@@ -184,10 +187,20 @@ class _Log:
         return row, True
 
 
-def eval_parts(study, params, level, template_sha, declaration_sha, lock_sha, gates_lock) -> dict:
-    """Exactly reqs.EVAL_KEY_PARTS for the stub evaluator (docs/16 §D): the level lives in the mesh
-    recipe version, so an L1 and an L2 evaluation of the same params never share a key."""
-    del study
+def eval_parts(evaluator, params, level, template_sha, declaration_sha, lock_sha, gates_lock) -> dict:
+    """Exactly reqs.EVAL_KEY_PARTS for the study's evaluator (docs/16 §D): the level lives in the
+    mesh recipe version, so an L1 and an L2 evaluation of the same params never share a key.
+    None and "stub" give the stub's parts; "cfd" and "cfd_turb" delegate to evaluate_cfd's
+    eval_parts / eval_parts_turb."""
+    if evaluator not in (None, "stub"):
+        if evaluator == "cfd":
+            return evaluate_cfd.eval_parts(params, level, template_sha, declaration_sha, lock_sha,
+                                           gates_lock)
+        if evaluator == "cfd_turb":
+            return evaluate_cfd.eval_parts_turb(params, level, template_sha, declaration_sha,
+                                                lock_sha, gates_lock)
+        raise ValueError("LOOP-EVALUATOR: evaluator %r is not one of %s"
+                         % (evaluator, ", ".join(EVALUATORS)))
     return {"template_sha": template_sha, "declaration_sha": declaration_sha, "params": params,
             "requirements_lock": lock_sha, "gates_lock": gates_lock, "env": dict(STUB_ENV),
             "mesh_recipe_version": "stub/1@" + level, "case_writer_version": STUB_CASE_WRITER,
@@ -371,10 +384,12 @@ def _replace_dir(src, dst) -> None:
 
 
 def evaluate_one(study_dir, params, level, checks_doc, requirements_doc, template_sha,
-                 declaration_sha, gates_lock, live) -> tuple:
+                 declaration_sha, gates_lock, live, evaluator="stub", eval_kwargs=None) -> tuple:
     """(verdict doc, eval doc, eval_key) of one evaluation (docs/16a §H): a cache hit validates and
-    never touches the entry; a miss is built in tmp/<ek>/ and moved whole by ONE os.replace."""
-    parts = eval_parts(None, params, level, template_sha, declaration_sha,
+    never touches the entry; a miss is built in tmp/<ek>/ and moved whole by ONE os.replace. The
+    evaluator is the study's ("stub", "cfd" or "cfd_turb"); eval_kwargs (the selftest's fakes only)
+    is forwarded to evaluate_cfd.evaluate / evaluate_turb, never to the stub."""
+    parts = eval_parts(evaluator, params, level, template_sha, declaration_sha,
                        requirements_doc["lock_sha"], gates_lock)
     ek = reqs.eval_key(parts)
     cache = os.path.join(study_dir, "cache", ek)
@@ -386,7 +401,12 @@ def evaluate_one(study_dir, params, level, checks_doc, requirements_doc, templat
     if os.path.exists(tmp):
         shutil.rmtree(tmp)
     os.makedirs(tmp)
-    stage = stub_evaluate(params, level, checks_doc, tmp)
+    if evaluator in ("cfd", "cfd_turb"):
+        run = evaluate_cfd.evaluate if evaluator == "cfd" else evaluate_cfd.evaluate_turb
+        stage = run(params, level, checks_doc, tmp, study_dir, **(eval_kwargs or {}))
+        EVALUATOR_CALLS[0] += 1
+    else:
+        stage = stub_evaluate(params, level, checks_doc, tmp)
     measurements = common.read_json(os.path.join(tmp, "measurements.json"))
     cfd_u = common.read_json(os.path.join(tmp, "cfd_u.json"))
     files = dict((name, common.sha256_file(os.path.join(tmp, name)))
@@ -401,7 +421,7 @@ def evaluate_one(study_dir, params, level, checks_doc, requirements_doc, templat
                                     if os.path.isfile(os.path.join(tmp, n))))
     common.write_json(os.path.join(tmp, "eval.json"),
                       {"schema": "cad-eval/1", "eval_key": ek, "parts": parts, "level": level,
-                       "evaluator": "stub", "stage_reached": stage["stage_reached"],
+                       "evaluator": evaluator, "stage_reached": stage["stage_reached"],
                        "solve_class": stage["solve_class"], "files": files})
     _kill("after_build")
     _replace_dir(tmp, cache)
@@ -669,16 +689,17 @@ def _walk(study_dir, registry_path, mode, unattended, progress, intake_edit=None
         if pdoc is not None and live and new_eval:
             common.write_json(os.path.join(study_dir, "params", "proposal.json"), pdoc)
         verdict, ev, ek = evaluate_one(study_dir, params, level, checks, doc, template_sha,
-                                       declaration_sha, gates_lock, live)
+                                       declaration_sha, gates_lock, live,
+                                       evaluator=study["evaluator"])
         t = verify.tally(verdict)
         cache_hit = ek in r["eval_keys"]
         row = {"schema": "cad-iteration/1", "kind": "eval", "study_id": doc["study_id"],
                "n": r["n_eval_rows"], "eval_key": ek, "params_sha": params_sha,
                "template_id": doc["template_id"], "template_sha": doc["template_sha"],
                "requirements_lock": doc["lock_sha"], "gates_lock": gates_lock,
-               "env_sha": common.sha256_of(eval_parts(None, params, level, template_sha,
-                                                      declaration_sha, doc["lock_sha"],
-                                                      gates_lock)["env"]),
+               "env_sha": common.sha256_of(eval_parts(study["evaluator"], params, level,
+                                                      template_sha, declaration_sha,
+                                                      doc["lock_sha"], gates_lock)["env"]),
                "level": level, "origin": origin,
                "stage_reached": ev["stage_reached"], "solve_class": ev["solve_class"],
                "design_verdict": verdict["design_verdict"], "n_hard_pass": t["n_hard_pass"],
@@ -782,6 +803,12 @@ def _walk(study_dir, registry_path, mode, unattended, progress, intake_edit=None
             first_frontier()
 
     # ---- the prefilter rows (docs/16 §I CAD-18): pool order, CAND_KEYS equal, replay re-derives
+    def pf_record(cand_params):
+        """The study evaluator's prefilter record of one candidate (stub or the real CAD one)."""
+        if study["evaluator"] in ("cfd", "cfd_turb"):
+            return evaluate_cfd.prefilter(cand_params, checks)
+        return stub_prefilter(cand_params, checks)
+
     fixed = dict((name, study["start"]["params"][name])
                  for name in optimise_cad.design_space(decl)["fixed"])
     cands = optimise_cad.pool(study["study_id"], decl, fixed, gates["sobol_pool"])
@@ -790,6 +817,7 @@ def _walk(study_dir, registry_path, mode, unattended, progress, intake_edit=None
     if len(pf_disk) > len(cands):
         raise ValueError("LOOP-PREFILTER: prefilter.jsonl holds %d rows against a pool of %d"
                          % (len(pf_disk), len(cands)))
+    pf_new = {}
     for i, cand in enumerate(cands):
         rec_i = None
         if i < len(pf_disk):
@@ -800,23 +828,24 @@ def _walk(study_dir, registry_path, mode, unattended, progress, intake_edit=None
                 raise ValueError("LOOP-PREFILTER: prefilter.jsonl:%d is not pool candidate %d"
                                  % (i, i))
             if deep:
-                rec_i = stub_prefilter(cand["params"], checks)
+                rec_i = pf_record(cand["params"])
                 if common.canonical_json(rec_i) != common.canonical_json(row["prefilter"]):
                     raise _Mismatch("%s:%d" % (PF_JSON, i))
             rec_i = rec_i or row["prefilter"]
         else:
             if not live:
                 raise _Frontier(r["last_kind"])
-            rec_i = stub_prefilter(cand["params"], checks)
+            rec_i = pf_record(cand["params"])
             common.jsonl_append(pf_path, dict([(k, cand[k]) for k in optimise_cad.CAND_KEYS]
                                               + [("prefilter", rec_i)]))
+            pf_new[cand["params_sha"]] = rec_i
             on_appended(True)
     pf_map = {}
     for i, cand in enumerate(cands):
         if i < len(pf_disk):
             pf_map[cand["params_sha"]] = pf_disk[i]["prefilter"]
-        elif mode == "run":
-            pf_map[cand["params_sha"]] = stub_prefilter(cand["params"], checks)
+        elif cand["params_sha"] in pf_new and mode == "run":
+            pf_map[cand["params_sha"]] = pf_new[cand["params_sha"]]
 
     def _stable_params():
         if r["pointer"] is None:
@@ -1360,13 +1389,16 @@ def _t1() -> None:
     e = _refuse(init, study, os.path.join(td, "req"), sd, os.path.join(td, "studies.jsonl"))
     assert str(e).startswith("LOOP-IMMUTABLE"), str(e)
     td2 = _mktemp_dir()
-    reqs.write_locked(os.path.join(td2, "req"), common.read_json(gate.GOLDEN_V1)["requirements"])
+    stale = common.read_json(gate.GOLDEN_V1)["requirements"]   # the golden is current now, so a
+    stale["template_sha"] = "0" * 64                           # stale template sha is planted
+    stale["lock_sha"] = reqs.lock_sha_of(stale)
+    reqs.write_locked(os.path.join(td2, "req"), stale)
     e = _refuse(init, os.path.join(td2, "study"), os.path.join(td2, "req"), dict(START_DOC),
                 os.path.join(td2, "studies.jsonl"))
     assert str(e).startswith("LOOP-TEMPLATE"), str(e)
     td3 = _mktemp_dir()
     reqs.write_locked(os.path.join(td3, "req"), _fx_doc())
-    bad = {"evaluator": "cfd", "repeat_band": STUB_REPEAT_BAND, "start": dict(START_DOC["start"])}
+    bad = {"evaluator": "nope", "repeat_band": STUB_REPEAT_BAND, "start": dict(START_DOC["start"])}
     e = _refuse(init, os.path.join(td3, "study"), os.path.join(td3, "req"), bad,
                 os.path.join(td3, "studies.jsonl"))
     assert str(e).startswith("LOOP-EVALUATOR"), str(e)

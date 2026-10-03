@@ -1,0 +1,153 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "git_sha": "1b628045cae6e30315cd7a69592cbc5073fc4ab2",
+ "opened_at": "2026-10-03T15:23:52Z",
+ "plan": {
+  "audit_mod": 10,
+  "baselines": {
+   "b0-lhs": "not measured",
+   "b0-template": "measured fresh"
+  },
+  "binary_sha256": "3d90ce9156119b16ee6fdd1359c5913152ebc29be3e218ebb903fe70900d923b",
+  "campaigns": [
+   [
+    "full",
+    "full",
+    [],
+    false,
+    "all"
+   ],
+   [
+    "b0-template",
+    "b0-template",
+    [],
+    false,
+    "all"
+   ],
+   [
+    "gdet-1",
+    "full",
+    [],
+    false,
+    "gdet"
+   ],
+   [
+    "gdet-2",
+    "full",
+    [],
+    false,
+    "gdet"
+   ],
+   [
+    "no-remedies",
+    "full",
+    [
+     "remedies"
+    ],
+    true,
+    "all"
+   ],
+   [
+    "no-optimiser",
+    "rules+prior",
+    [],
+    true,
+    "all"
+   ],
+   [
+    "rules",
+    "rules",
+    [],
+    true,
+    "all"
+   ],
+   [
+    "no-prior",
+    "rules+opt",
+    [],
+    true,
+    "all"
+   ],
+   [
+    "no-preflight",
+    "full",
+    [
+     "preflight"
+    ],
+    true,
+    "all"
+   ]
+  ],
+  "fresh": {
+   "blc1": {
+    "blc8_min": 0.09,
+    "blc_full_min": 0.05,
+    "families": [
+     "A",
+     "B",
+     "E",
+     "F"
+    ]
+   },
+   "fid_metrics": [
+    "p99_over_hf",
+    "pinned_frac",
+    "feature_share",
+    "feature_capture"
+   ],
+   "reduced": {
+    "d_commensurate": true,
+    "gdet_families": [
+     "D",
+     "F"
+    ],
+    "per_family": 1,
+    "salt": "reduced:"
+   },
+   "scopes": [
+    "reduced",
+    "full"
+   ],
+   "seed": 2
+  },
+  "gates_sha256": "8d5fe95689fc7277332e935187a0f4b6ac1a8f34bba2c1388255280c547e5d13",
+  "gdet_ids": [
+   "A-2-026",
+   "A-2-060",
+   "A-2-079",
+   "A-2-099",
+   "B-2-037",
+   "B-2-042",
+   "B-2-088",
+   "B-2-116",
+   "D-2-021",
+   "D-2-033",
+   "D-2-044",
+   "E-2-001",
+   "E-2-017",
+   "E-2-020",
+   "F-2-022",
+   "F-2-028",
+   "F-2-056",
+   "G-2-033",
+   "G-2-071",
+   "G-2-086"
+  ],
+  "knobs_sha256": "60a021602ffb9e2c4ac59b0851745113162a86988bf562a6cd4db30cccc0b0ba",
+  "manifest": {
+   "n": 180,
+   "sha256": "3bd59a3dde90f1929ec61888b40b20cc40a598f6543805584e9ca7a88b675bb9",
+   "source": "test2"
+  },
+  "models": {
+   "optimiser": "0b23c4799d82ffc5d3bd05eca7393460bea2bf0a67e9b6b4fb9b7ab811879c02",
+   "optimiser_train": "85e2c2f1c4dcbb1e551c48436bf50e50cefaefa71329cf6bdfa6ef4a1a3949ec",
+   "prior": "ff11c71d51c3d4247face3c35a7e5af13a3a86b8fac43f073858926921a88abb"
+  },
+  "ram_guard_mib": 8192.0,
+  "rehearsal": false,
+  "streams": 6
+ },
+ "plan_sha256": "60a05a97624b0875fbaa536804748d063bfea28a7a83ad90f63702256bdd1063",
+ "schema": "autonomy-eval-lock/1"
+}

@@ -1,0 +1,27 @@
+{
+  "evaluator": "cfd",
+  "repeat_band": 0.0,
+  "start": {
+    "params": {
+      "D_i": 0.06,
+      "CR": 9.0,
+      "L_over_Di": 0.5,
+      "law": "poly7",
+      "x_m": null,
+      "Lx_over_De": 0.5,
+      "Lu_over_Di": 0.5,
+      "upstream_role": "slip",
+      "t_wall": 0.004
+    },
+    "provenance": {
+      "D_i": "user_text",
+      "CR": "user_text",
+      "L_over_Di": "llm_choice",
+      "law": "llm_choice",
+      "Lx_over_De": "default",
+      "Lu_over_Di": "default",
+      "upstream_role": "default",
+      "t_wall": "llm_choice"
+    }
+  }
+}

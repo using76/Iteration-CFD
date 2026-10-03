@@ -107,7 +107,10 @@ TAGS = [{"name": "inlet", "kind": "face", "description": "velocity inlet disc at
         {"name": "wetted", "kind": "edge", "description": "meridian wetted curve: the law, then the exit tube"},
         {"name": "outer", "kind": "edge", "description": "meridian outer wall: the true normal offset of the wetted curve by t_wall"}]
 # watertight / axis / units are measured by export.py (the stl_repair report, the fluid's faces and
-# geom.json); the performance rows belong to CAD-14's post.py and are not catalogued yet.
+# geom.json); the performance rows (docs/16 §E.2) are measured by post.py from the solved case,
+# never by measure.py. k_max_apriori is the a priori acceleration parameter of docs/16 §H.5 item 5
+# on the 1-D area rule (turb_integral.k_max_1d) at the row's condition Re (Re_De), computed from
+# the parameters, never from the BREP.
 CATALOGUE = [
     {"quantity": "inlet_diameter", "primitive": "diameter_at_plane", "where": ["contraction_start"],
      "kind": "geometric", "method": "geometry", "unit": "m", "u_kind": "abs", "u_meas": 1e-9},
@@ -138,6 +141,25 @@ CATALOGUE = [
      "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
     {"quantity": "units", "primitive": "units_m", "where": ["fluid"], "kind": "geometric",
      "method": "geometry", "unit": "1", "u_kind": "exact", "u_meas": 0.0},
+    {"quantity": "separation_free", "primitive": "separation_free",
+     "where": ["wall_contraction", "wall_exit"], "kind": "performance", "method": "cfd",
+     "unit": "1", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "exit_nonuniformity", "primitive": "exit_nonuniformity", "where": ["exit_plane"],
+     "kind": "performance", "method": "cfd", "unit": "1", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "Cd", "primitive": "Cd", "where": ["exit_plane"], "kind": "performance",
+     "method": "cfd", "unit": "1", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "dp_loss", "primitive": "dp_loss", "where": ["fluid"], "kind": "performance",
+     "method": "cfd", "unit": "Pa", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "p0_loss_axis", "primitive": "p0_loss_axis", "where": ["fluid"],
+     "kind": "performance", "method": "cfd", "unit": "1", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "theta_exit", "primitive": "theta_exit", "where": ["exit_plane"],
+     "kind": "performance", "method": "cfd", "unit": "m", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "mach_max", "primitive": "mach_max", "where": ["fluid"], "kind": "performance",
+     "method": "cfd", "unit": "1", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "mass_imbalance", "primitive": "mass_imbalance", "where": ["fluid"],
+     "kind": "performance", "method": "cfd", "unit": "1", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "k_max_apriori", "primitive": "k_max_1d", "where": ["wall_contraction"],
+     "kind": "geometric", "method": "geometry", "unit": "1", "u_kind": "rel", "u_meas": 1e-9},
 ]
 PROFILE_RULES = ["PRF-BOX", "PRF-RMIN", "PRF-MONO", "PRF-DERIV", "PRF-SELFX", "PRF-FACE2D"]
 STANDARDS = []   # docs/16a §F: the frozen table a row sourced standard must cite (REQ-STD); none for the nozzle

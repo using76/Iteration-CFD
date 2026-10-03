@@ -341,6 +341,115 @@
       "unit": "1",
       "u_kind": "exact",
       "u_meas": 0.0
+    },
+    {
+      "quantity": "separation_free",
+      "primitive": "separation_free",
+      "where": [
+        "wall_contraction",
+        "wall_exit"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "1",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "exit_nonuniformity",
+      "primitive": "exit_nonuniformity",
+      "where": [
+        "exit_plane"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "1",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "Cd",
+      "primitive": "Cd",
+      "where": [
+        "exit_plane"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "1",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "dp_loss",
+      "primitive": "dp_loss",
+      "where": [
+        "fluid"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "Pa",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "p0_loss_axis",
+      "primitive": "p0_loss_axis",
+      "where": [
+        "fluid"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "1",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "theta_exit",
+      "primitive": "theta_exit",
+      "where": [
+        "exit_plane"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "m",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "mach_max",
+      "primitive": "mach_max",
+      "where": [
+        "fluid"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "1",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "mass_imbalance",
+      "primitive": "mass_imbalance",
+      "where": [
+        "fluid"
+      ],
+      "kind": "performance",
+      "method": "cfd",
+      "unit": "1",
+      "u_kind": "cfd",
+      "u_meas": null
+    },
+    {
+      "quantity": "k_max_apriori",
+      "primitive": "k_max_1d",
+      "where": [
+        "wall_contraction"
+      ],
+      "kind": "geometric",
+      "method": "geometry",
+      "unit": "1",
+      "u_kind": "rel",
+      "u_meas": 1e-09
     }
   ],
   "profile_rules": [

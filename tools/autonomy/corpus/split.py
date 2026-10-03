@@ -60,6 +60,8 @@ EVALUATE = "evaluate"
 MANIFEST_DIR = os.path.join(_HERE, "manifests")
 LOCK_REL = "tools/autonomy/corpus/manifests/split.lock"
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
+FRESH_SEEDS = (2,)           # corpus seeds that may carry a fresh held-out split
+FRESH_SPLITS = {"test2": 2}  # split name -> its corpus seed
 
 
 class SplitError(ValueError):
@@ -87,9 +89,10 @@ def quotas(counts: dict, n_test: int) -> dict:
     return {s: q.get(s, 0) for s in STRATA}
 
 
-def pool(sizes=None) -> dict:
-    """{family: [rows]} from gen.make_row(CORPUS_SEED, i) - no bytes, no
-    STLs, just the manifest rows.  sizes overrides {family: (n, n_test)}."""
+def pool(sizes=None, seed=CORPUS_SEED) -> dict:
+    """{family: [rows]} from gen.make_row(seed, i) - no bytes, no STLs,
+    just the manifest rows.  sizes overrides {family: (n, n_test)}; the
+    default seed is the corpus seed, a fresh seed passes its own."""
     if sizes is None:
         sizes = {fam: (n, t) for fam, _m, n, t in FAMILY_TABLE}
     out = {}
@@ -97,13 +100,14 @@ def pool(sizes=None) -> dict:
         if fam not in sizes:
             continue
         gen = importlib.import_module(mod)
-        out[fam] = [gen.make_row(CORPUS_SEED, i)[0] for i in range(sizes[fam][0])]
+        out[fam] = [gen.make_row(seed, i)[0] for i in range(sizes[fam][0])]
     return out
 
 
-def assign(pooldict: dict, sizes: dict) -> tuple:
+def assign(pooldict: dict, sizes: dict, seed=CORPUS_SEED,
+           spent=SPENT) -> tuple:
     """(tuning_rows, test_rows): per family and stratum, the test quota is
-    drawn with default_rng([SPLIT_SALT, CORPUS_SEED, family ordinal,
+    drawn with default_rng([SPLIT_SALT, seed, family ordinal,
     stratum ordinal]) over the sorted non-spent candidate ids; everything
     else is tuning.  Both lists sorted by (family, geometry_id)."""
     tuning, test = [], []
@@ -120,11 +124,11 @@ def assign(pooldict: dict, sizes: dict) -> tuple:
             by_s.setdefault(r["stratum"], []).append(r["geometry_id"])
         test_ids = set()
         for s in STRATA:
-            cands = sorted(i for i in by_s.get(s, []) if i not in SPENT)
+            cands = sorted(i for i in by_s.get(s, []) if i not in spent)
             if len(cands) < q[s]:
                 raise SplitError("%s %s: %d candidates < test quota %d"
                                  % (fam, s, len(cands), q[s]))
-            rng = np.random.default_rng([SPLIT_SALT, CORPUS_SEED, fam_ord,
+            rng = np.random.default_rng([SPLIT_SALT, seed, fam_ord,
                                          STRATA.index(s)])
             perm = rng.permutation(len(cands))
             test_ids.update(cands[int(i)] for i in perm[:q[s]])
@@ -215,6 +219,79 @@ def write(out_dir=MANIFEST_DIR, sizes=None) -> dict:
     return files
 
 
+
+def fresh_dir(seed: int, out_dir=MANIFEST_DIR) -> str:
+    """The fresh seed's own directory under the manifests: seed2/."""
+    return os.path.join(out_dir, "seed%d" % seed)
+
+
+def fresh_lock_bytes(seed, test_b: bytes, test_ids: list,
+                     sizes: dict) -> bytes:
+    """The fresh write-once lock: ASCII, LF, a trailing newline, no time,
+    no path - the fresh test manifest's sha256 and ids are sealed here."""
+    fam_line = " ".join("%s %d/%d" % (fam, sizes[fam][0], sizes[fam][1])
+                        for fam, _m, _n, _t in FAMILY_TABLE if fam in sizes)
+    lines = [
+        "# autonomy-split/1 - a FRESH test seed for a second claim (docs/15 "
+        "section F), written once by",
+        "# tools/autonomy/corpus/split.py --write-fresh. Only mode evaluate "
+        "reads its test manifest; the",
+        "# seed-1 split and its lock are untouched. split.py refuses to "
+        "overwrite this file.",
+        "schema autonomy-split/1",
+        "fresh_test_seed %d" % seed,
+        "corpus_seed %d" % seed,
+        "split_salt %d" % SPLIT_SALT,
+        "families " + fam_line,
+        "test test.jsonl rows %d sha256 %s"
+        % (len(test_ids), hashlib.sha256(test_b).hexdigest()),
+        "test_ids " + " ".join(sorted(test_ids)),
+    ]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def build_fresh_files(seed, sizes=None) -> dict:
+    """The two fresh files, purely in memory: the seed-`seed` pool drawn
+    with no spent ids, ONLY its test rows kept (the tuning remainder is
+    never written)."""
+    if sizes is None:
+        sizes = {fam: (n, t) for fam, _m, n, t in FAMILY_TABLE}
+    _tuning, test_rows = assign(pool(sizes, seed), sizes, seed, spent=())
+    tb = manifest_bytes(test_rows)
+    return {"test.jsonl": tb,
+            "split.lock": fresh_lock_bytes(
+                seed, tb, [r["geometry_id"] for r in test_rows], sizes)}
+
+
+def write_fresh(seed, out_dir=MANIFEST_DIR, sizes=None) -> dict:
+    """Write the two fresh files ONCE into fresh_dir(seed, out_dir),
+    refused before anything is written."""
+    if seed not in FRESH_SEEDS:
+        raise SplitError("fresh seed %d is not one of %s"
+                         % (seed, ", ".join(str(s) for s in FRESH_SEEDS)))
+    if seed == CORPUS_SEED:
+        raise SplitError("fresh seed %d is the corpus seed itself" % seed)
+    d = fresh_dir(seed, out_dir)
+    for name in ("split.lock", "test.jsonl"):
+        if os.path.exists(os.path.join(d, name)):
+            raise SplitError("%s exists in %s: a fresh seed is written once"
+                             % (name, d))
+    files = build_fresh_files(seed, sizes)
+    os.makedirs(d, exist_ok=True)
+    for name in sorted(files):
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(files[name])
+    return files
+
+
+def fresh_test_ids(seed, out_dir=MANIFEST_DIR) -> list:
+    """The fresh lock's test ids, [] when no fresh lock is present."""
+    p = os.path.join(fresh_dir(seed, out_dir), "split.lock")
+    if not os.path.isfile(p):
+        return []
+    return (read_lock(p).get("test_ids") or "").split()
+
+
 # --- the sealed guard -------------------------------------------------------
 
 
@@ -238,7 +315,7 @@ def load(split: str, mode: str, out_dir=MANIFEST_DIR) -> list:
     """The rows of one manifest.  mode "evaluate" is the ONLY mode that may
     read the held-out test split, and the seal is checked BEFORE any file
     is opened (docs/15 §E, §F)."""
-    if split not in ("tuning", "test"):
+    if split not in ("tuning", "test") and split not in FRESH_SPLITS:
         raise SplitError("split: %r is not tuning or test" % (split,))
     if not isinstance(mode, str) or not mode:
         raise SplitError("mode: %r is not a non-empty string" % (mode,))
@@ -247,6 +324,17 @@ def load(split: str, mode: str, out_dir=MANIFEST_DIR) -> list:
             "the test split is sealed: mode %r may not read it (docs/15 §E: "
             "only mode evaluate reads the held-out split, in the evaluation "
             "unit)" % (mode,))
+    if split in FRESH_SPLITS:
+        if mode != EVALUATE:
+            raise SplitSealed(
+                "the fresh test split %s is sealed: mode %r may not read it "
+                "(docs/15 §F: only mode evaluate reads a held-out split, "
+                "in the evaluation unit)" % (split, mode))
+        return [json.loads(ln)
+                for ln in _read_checked("test",
+                                        fresh_dir(FRESH_SPLITS[split],
+                                                  out_dir)
+                                        ).decode("ascii").splitlines()]
     return [json.loads(ln)
             for ln in _read_checked(split, out_dir).decode("ascii").splitlines()]
 
@@ -256,6 +344,8 @@ def _manifest_ids(out_dir: str) -> tuple:
     tdata = _read_checked("tuning", out_dir)
     lock = read_lock(os.path.join(out_dir, "split.lock"))
     test_ids = set((lock.get("test_ids") or "").split())
+    for s in FRESH_SEEDS:
+        test_ids.update(fresh_test_ids(s, out_dir))
     tuning_ids = {json.loads(ln)["geometry_id"]
                   for ln in tdata.decode("ascii").splitlines()}
     return test_ids, tuning_ids
@@ -454,6 +544,105 @@ def _check_rest(out_dir, tun, test_rows, s_ids, lines) -> list:
     return lines
 
 
+
+def check_fresh(seed, out_dir=MANIFEST_DIR, sizes=None) -> list:
+    """The 6 [split] fresh lines over the fresh seed's two files; raises
+    SplitError naming the first failure (sizes None = FAMILY_TABLE's)."""
+    if sizes is None:
+        sizes = {fam: (n, t) for fam, _m, n, t in FAMILY_TABLE}
+    d = fresh_dir(seed, out_dir)
+    test_rows = [json.loads(ln)
+                 for ln in _read_checked("test", d).decode("ascii").splitlines()]
+    lock = read_lock(os.path.join(d, "split.lock"))
+    lines = ["[split] fresh seed %d: test.jsonl %d rows, sha256 equal to "
+             "seed%d/split.lock" % (seed, len(test_rows), seed)]
+
+    def per(rows, key):
+        c = {}
+        for r in rows:
+            c[r[key]] = c.get(r[key], 0) + 1
+        return c
+
+    pd = pool(sizes, seed)
+    bad = []
+    for fam, _m, _n, _t in FAMILY_TABLE:
+        if fam not in sizes:
+            continue
+        tcc = per([r for r in test_rows if r["family"] == fam], "stratum")
+        q = quotas(per(pd[fam], "stratum"), sizes[fam][1])
+        for s in STRATA:
+            if tcc.get(s, 0) != q.get(s, 0):
+                bad.append("%s %s: test %d != quota %d"
+                           % (fam, s, tcc.get(s, 0), q.get(s, 0)))
+    if bad:
+        raise SplitError("fresh stratified: " + "; ".join(bad))
+    counts = ", ".join("%s %d" % (f, per(test_rows, "family").get(f, 0))
+                       for f, _m, _n, _t in FAMILY_TABLE if f in sizes)
+    lines.append("[split] fresh counts: %s, every (family, stratum) count "
+                 "equal to its quota in the seed-%d pool" % (counts, seed))
+    tun = [json.loads(ln) for ln in
+           _read_checked("tuning", out_dir).decode("ascii").splitlines()]
+    s_ids = set(r["geometry_id"] for r in test_rows)
+    s_sha = set(r["stl_sha256"] for r in test_rows)
+    sh_ids = len(s_ids & set(r["geometry_id"] for r in tun))
+    sh_sha = len(s_sha & set(r["stl_sha256"] for r in tun))
+    lock1 = read_lock(os.path.join(out_dir, "split.lock"))
+    sh_test1 = len(s_ids & set((lock1.get("test_ids") or "").split()))
+    if sh_ids or sh_sha or sh_test1:
+        raise SplitError("fresh disjoint: %d ids and %d stl_sha256 shared "
+                         "with tuning.jsonl, %d ids shared with the seed-1 "
+                         "test lock" % (sh_ids, sh_sha, sh_test1))
+    lines.append("[split] fresh disjoint: %d ids and %d stl_sha256 shared "
+                 "with tuning.jsonl, %d ids shared with the seed-1 test lock"
+                 % (sh_ids, sh_sha, sh_test1))
+    errs = []
+    for r in test_rows:
+        if r["split"] != "test":
+            raise SplitError("fresh row %s: split field %r is not \"test\""
+                             % (r["geometry_id"], r["split"]))
+        errs += schema.errors(r, "ManifestRow")
+    if errs:
+        raise SplitError("fresh rows: %s" % errs[0])
+    if (lock.get("test_ids") or "").split() != sorted(r["geometry_id"]
+                                                      for r in test_rows):
+        raise SplitError("fresh lock test_ids != test.jsonl ids")
+    lines.append("[split] fresh rows: %d valid ManifestRow, split \"test\", "
+                 "lock test_ids equal test.jsonl ids" % len(test_rows))
+    files = build_fresh_files(seed, sizes)
+    if any(files[n] != _raw(n, d) for n in ("test.jsonl", "split.lock")):
+        raise SplitError("fresh regen: the in-process rebuild differs from "
+                         "the files in %s" % d)
+    lines.append("[split] fresh regen: in-process byte-identical (2 files)")
+    if os.path.abspath(out_dir) != os.path.abspath(MANIFEST_DIR):
+        lines.append("[split] fresh lock history: not in the tree")
+        return lines
+    rel = "tools/autonomy/corpus/manifests/seed%d/split.lock" % seed
+    r = subprocess.run(["git", "-C", REPO, "log", "--format=%H", "--", rel],
+                       capture_output=True, timeout=120)
+    if r.returncode != 0:
+        raise SplitError("git log failed: %s"
+                         % r.stderr.decode("utf-8", "replace").strip())
+    commits = r.stdout.decode("ascii").split()
+    if len(commits) >= 2:
+        raise SplitError("seed%d/split.lock was rewritten: %d commits touch it"
+                         % (seed, len(commits)))
+    if len(commits) == 1:
+        r2 = subprocess.run(["git", "-C", REPO, "show", "%s:%s"
+                             % (commits[0], rel)], capture_output=True,
+                            timeout=120)
+        if r2.returncode != 0 or r2.stdout != _raw("split.lock", d):
+            raise SplitError("seed%d/split.lock differs from its commit %s"
+                             % (seed, commits[0]))
+        lines.append("[split] fresh lock history: %d commit(s) touch "
+                     "seed%d/split.lock; working copy equals %s"
+                     % (len(commits), seed, commits[0][:8]))
+    else:
+        lines.append("[split] fresh lock history: %d commit(s) touch "
+                     "seed%d/split.lock; not yet committed"
+                     % (len(commits), seed))
+    return lines
+
+
 # --- the selftest -----------------------------------------------------------
 
 
@@ -649,13 +838,81 @@ def _selftest() -> int:
         return "%d in-tree rows validate as ManifestRow; G parents at " \
             "index >= 1000" % len(rows)
 
+    def group_fresh():
+        SMALL_F = {"D": (8, 3), "F": (8, 3)}
+        WANT_IDS = ["D-2-002", "D-2-003", "D-2-005",
+                    "F-2-002", "F-2-003", "F-2-004"]
+        WANT_SHA = ("a99d8e8d235316e8779f71f1e71ef9d253f17946a56cd4e931a"
+                    "45a915e9e44bf")
+        d = tempfile.mkdtemp(prefix="split_fresh_")
+        try:
+            for name in ("split.lock", "tuning.jsonl"):
+                shutil.copy(os.path.join(MANIFEST_DIR, name),
+                            os.path.join(d, name))
+            files = write_fresh(2, d, SMALL_F)
+            ids = sorted(json.loads(ln)["geometry_id"] for ln in
+                         files["test.jsonl"].decode("ascii").splitlines())
+            assert ids == WANT_IDS, ids
+            assert hashlib.sha256(files["test.jsonl"]).hexdigest() == WANT_SHA
+            try:
+                write_fresh(2, d, SMALL_F)
+            except SplitError as e:
+                assert "written once" in str(e), e
+            else:
+                raise AssertionError("the second fresh write was not refused")
+            try:
+                write_fresh(1, d, SMALL_F)
+            except SplitError:
+                pass
+            else:
+                raise AssertionError("fresh seed 1 was not refused")
+            tp = os.path.join(d, "seed2", "test.jsonl")
+            os.remove(tp)
+            try:
+                load("test2", "rules", d)
+            except SplitSealed:
+                pass
+            else:
+                raise AssertionError("the fresh seal did not refuse before "
+                                     "opening")
+            with open(tp, "wb") as f:
+                f.write(files["test.jsonl"])
+            assert len(load("test2", EVALUATE, d)) == 6
+            try:
+                refuse_test("D-2-002", "rules", d)
+            except SplitSealed:
+                pass
+            else:
+                raise AssertionError("a fresh test id passed the guard")
+            assert refuse_test("D-2-002", EVALUATE, d) == "test"
+            lines = check_fresh(2, d, SMALL_F)
+            assert len(lines) == 6, lines
+            assert lines[0].startswith("[split] fresh seed 2"), lines[0]
+            assert lines[-1] == "[split] fresh lock history: not in the tree"
+            data = bytearray(open(tp, "rb").read())
+            data[0] ^= 0xFF
+            open(tp, "wb").write(bytes(data))
+            try:
+                check_fresh(2, d, SMALL_F)
+            except SplitError as e:
+                assert "sha256" in str(e), e
+            else:
+                raise AssertionError("a flipped fresh byte was accepted")
+            f1 = build_fresh_files(2, SMALL_F)
+            f2 = build_fresh_files(2, SMALL_F)
+            assert f1 == f2 and sorted(f1) == ["split.lock", "test.jsonl"]
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        return "fresh seed 2: the 6 ids and sha of the oracle, write-once, "             "sealed outside evaluate, check_fresh 6 lines"
+
     groups = [("[ok] quotas", group_quotas),
               ("[ok] check", group_check),
               ("[ok] sealed", group_sealed),
               ("[ok] tamper", group_tamper),
               ("[ok] write-once", group_write_once),
               ("[ok] spent", group_spent),
-              ("[ok] rows", group_rows)]
+              ("[ok] rows", group_rows),
+              ("[ok] fresh seed", group_fresh)]
     for name, fn in groups:
         try:
             note = fn()
@@ -674,6 +931,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="split",
                                  description=__doc__.splitlines()[0])
     ap.add_argument("--write", action="store_true")
+    ap.add_argument("--write-fresh", type=int, default=None)
+    ap.add_argument("--check-fresh", type=int, default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--guard", default=None)
@@ -690,6 +949,24 @@ def main(argv=None) -> int:
                          files["test.jsonl"].count(b"\n"), out))
         print("test.jsonl sha256 %s"
               % hashlib.sha256(files["test.jsonl"]).hexdigest())
+        return 0
+    if args.write_fresh is not None:
+        out = args.out or MANIFEST_DIR
+        files = write_fresh(args.write_fresh, out)
+        print("wrote seed%d/test.jsonl (%d rows), seed%d/split.lock"
+              % (args.write_fresh, files["test.jsonl"].count(b"\n"),
+                 args.write_fresh))
+        print("test.jsonl sha256 %s"
+              % hashlib.sha256(files["test.jsonl"]).hexdigest())
+        return 0
+    if args.check_fresh is not None:
+        try:
+            for ln in check_fresh(args.check_fresh, args.out or MANIFEST_DIR):
+                print(ln)
+        except (SplitError, SplitSealed) as e:
+            print("FRESH CHECK FAIL: %s" % e)
+            return 1
+        print("FRESH CHECK PASS")
         return 0
     if args.check:
         try:

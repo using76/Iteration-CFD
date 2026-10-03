@@ -2,12 +2,12 @@
 
 # G-OPT-CV - the CV half re-run on new rows
 
-- date: 2026-10-02
+- date: 2026-10-03
 - verdict: FAIL
 - rows: 3184 (of which 413 from the extra bundles), 1322 duplicates
 - CV: fail AUC 0.984850 (>= 0.75 True), BLC_8 RMSE 0.153714 (<= 0.15 False)
 - the extra rows out of fold: AUC 0.975600, BLC_8 RMSE 0.298512; alone: AUC 0.971693, BLC_8 RMSE 0.300194
-- the optimiser ships enabled (the committed opt_model.json's enabled); the CV half fails on the new rows; the optimiser stays enabled by the user's choice of 2026-09-26 (docs/15 section F said a G-OPT miss ships it disabled) until the user says otherwise; the shipped model is not refitted here
+- the optimiser ships DISABLED (optimise/aml/opt_model.json's enabled); the CV half fails on the new rows; the shipped model (optimise/aml/opt_model.json) and its enabled flag are unchanged here (the user's decision of 2026-10-03: disabled until G-OPT passes)
 
 ## Sources (row order)
 
