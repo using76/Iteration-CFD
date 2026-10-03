@@ -318,10 +318,10 @@ def plan_of(manifest_info, rehearsal, gdet, streams, binary, baselines):
             "knobs_sha256": campaign.sha(schema.load_knobs()),
             "models": {"prior": _sha256_of_file(os.path.join(prior.REPORT_DIR,
                                                              prior.MODEL_NAME)),
-                       "optimiser": _sha256_of_file(os.path.join(HERE, "optimise",
-                                                                 "opt_model.json")),
+                       "optimiser": _sha256_of_file(os.path.join(
+                           optimise.SHIP_DIR, optimise.MODEL_NAME)),
                        "optimiser_train": _sha256_of_file(os.path.join(
-                           HERE, "optimise", "train.json.gz"))},
+                           optimise.SHIP_DIR, optimise.TRAIN_NAME))},
             "baselines": dict(baselines),
             "ram_guard_mib": RAM_GUARD_MIB, "audit_mod": campaign.AUDIT_MOD}
 

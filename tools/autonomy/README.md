@@ -992,7 +992,8 @@ supervisor's run. For later units — AM-14: `prior/tuning_rules.json.gz`
 (`baseline.read_bundle`) holds every rules attempt on the tuning split with its outcome;
 AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
 `prior/aml/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
-(the ablation "-prior" is then equal to it by construction).
+(the ablation "-prior" is then equal to it by construction); while `USER_SHIP` disables the shipped
+prior, attempt1 records PR-DISABLED "by the user's decision" even though the gate's model is enabled.
 
 **The re-measure under the 2026-09-26 rule (PRIOR-FIX).** AM-16's held-out G-OPT miss
 came through family B, where the prior's paths regressed the lathes against rules-only
@@ -1031,6 +1032,12 @@ rules attempt; the other two shuffles match rules at 241. The prior ships ENABLE
 `prior/aml/` — `G-PRIOR.json`, `G-PRIOR.md`, `prior_model.json`, and the bundles `tuning_rules.json.gz`
 and `eval_r1.json.gz` — and changes no tuning attempt. `prior/` keeps the AM-13 and PRIOR-FIX gate as the
 record of that run; optimise.py's SOURCES still read its bundles.
+
+**Shipped disabled by the user (2026-10-03).** The gate's PASS stands as the record in `prior/aml/`, but it
+was vacuous — real equals rules on every one of the 420 tuning geometries (0 gains, 0 losses) — so the
+user's decision of 2026-10-03 ships the prior DISABLED: while `USER_SHIP` disables it, `prior.attempt1`
+records PR-DISABLED "by the user's decision" on every attempt 1 of the gate's enabled model, and attempt 1
+stays the rules' config.
 
 ## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
 
@@ -1080,12 +1087,22 @@ new result winning a re-meshed (geometry, config sha)): AUC 0.984850 (threshold 
 RMSE 0.153714 (threshold ≤ 0.15) does not — `rmse_le` false, the half FAILS. The new rows out of fold:
 413 rows of 356 geometries, 152 failures, AUC 0.975600, BLC_8 RMSE 0.298512; cross-fitted alone AUC
 0.971693, BLC_8 RMSE 0.300194. The report is `optimise/G-OPT-CV.json` and `.md` (`--cv` writes nothing
-else), and on a FAIL the optimiser still ships enabled — by the user's choice of 2026-09-26, until the
-user says otherwise; the shipped model is not refitted here.
+else), and on a FAIL the optimiser still ships enabled (until 2026-10-03; see the refit below) — by
+the user's choice of 2026-09-26, until the user says otherwise; the shipped model is not refitted here.
+
+**The refit on the AM-L rows (2026-10-03).** `optimise.py --refit --extra tools/autonomy/aml/tuning_rules_L5.json.gz`
+re-fits the same five-member ensemble on the AM-L rows first, then the AM-14 training set (the committed
+`optimise/G-OPT.json`'s sources and its five round bundles): rows 3184 (413 new), 1322 duplicates dropped,
+fail AUC 0.984850 (threshold ≥ 0.75) holds, BLC_8 RMSE 0.153714 (threshold ≤ 0.15) does not — `rmse_le`
+false, the CV half FAILS. A refit runs no refinement round, so G-OPT's tuning ablation half (`beats_rules`)
+is not measured and a refit never ships the optimiser enabled (`optimise.py --refine` measures it). The
+optimiser therefore ships DISABLED from `optimise/aml/` (`G-OPT.json`, `G-OPT.md`, `opt_model.json`,
+`train.json.gz`) by the user's decision of 2026-10-03 — disabled until G-OPT passes — and `optimise/`
+keeps the AM-14 gate as the record of that run.
 
 For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
-`optimise/opt_model.json` and `optimise/train.json.gz` and refits in seconds; when it is disabled
-it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the committed model was fitted before that rule and is not refitted.
+`optimise/aml/opt_model.json` and `optimise/aml/train.json.gz` and refits in seconds; when it is disabled
+it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the shipped model is the 2026-10-03 refit (its training rows include attempts meshed before that rule), and it ships disabled.
 
 ## evaluate.py — the held-out evaluation (G-FAIL, G-BLC-0 and the guards)
 
@@ -1234,6 +1251,7 @@ Measured (L5, 2026-10-02, tuning only, release binary `3d90ce91` at tree `3969bf
     python tools/autonomy/optimise.py --plan                               # the training rows, the surrogate CV, the refinement set
     python tools/autonomy/optimise.py --refine --work DIR                  # optimise/G-OPT.json, .md, opt_model.json, train.json.gz
     python tools/autonomy/optimise.py --cv --extra BUNDLE.json.gz          # G-OPT's CV half on extra rows: optimise/G-OPT-CV.json and .md
+    python tools/autonomy/optimise.py --refit --extra BUNDLE.json.gz       # the refit on extra rows: optimise/aml/G-OPT.json, .md, opt_model.json, train.json.gz
     python tools/autonomy/optimise.py --check                              # the report, the bundles, the train rebuild and the refit
 
     python tools/autonomy/evaluate.py --plan                               # the seal, the campaigns, the G-DET ids; nothing opened

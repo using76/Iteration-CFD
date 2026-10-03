@@ -106,6 +106,10 @@ CHECK_SCHEMA = "autonomy-prior-check/1"
 DECISION_SCHEMA = "autonomy-prior-decision/1"
 HEADER = baseline.HEADER                   # the "$comment" of every JSON it writes
 _MODEL = {"path": os.path.join(REPORT_DIR, MODEL_NAME), "v": None, "key": None}
+# the user's ship decision over the gate's: None leaves the gate's enabled flag in force
+USER_SHIP = {"enabled": False, "date": "2026-10-03",
+             "why": "its G-PRIOR pass was vacuous: real equals rules on every "
+                    "tuning geometry"}
 _REMEDY_BY_ID = {r["id"]: r for r in remedies.REMEDIES}
 
 
@@ -578,27 +582,39 @@ def decide(zq, bank, model, ctx, gates, knobs):
             "record": rec, "vote": v, "skipped": skipped}
 
 
-def disabled_decision(model):
-    """The abstain decision recorded on every geometry when the prior ships disabled."""
+def disabled_decision(model, user=None):
+    """The abstain decision recorded on every geometry when the prior ships
+    disabled; `user` (USER_SHIP) records the user's ship decision over the
+    gate's enabled flag."""
     g = model["gate"]
-    msg = ("PR-DISABLED: the prior ships disabled (G-PRIOR %s: attempt-1 passes "
-           "rules %s, real %s, shuffled mean %s of %s); attempt 1 stays the rules' "
-           "config" % (g["verdict"], explain.fmt(g["rules_pass"]),
-                       explain.fmt(g["real_pass"]),
-                       explain.fmt(g["shuffled_mean_pass"]), explain.fmt(g["n"])))
+    inputs = [{"name": "verdict", "value": g["verdict"], "unit": ""},
+              {"name": "rules_pass", "value": g["rules_pass"], "unit": ""},
+              {"name": "real_pass", "value": g["real_pass"], "unit": ""},
+              {"name": "shuffled_mean_pass",
+               "value": g["shuffled_mean_pass"], "unit": ""},
+              {"name": "n", "value": g["n"], "unit": ""},
+              {"name": "model_sha256", "value": model_sha(model), "unit": ""}]
+    head = "PR-DISABLED: the prior ships disabled"
+    formula = ("the gate did not earn the prior its place, so the setup rules "
+               "decide attempt one")
+    tail = ""
+    if user is not None:
+        head += " by the user's decision"
+        inputs.append({"name": "user_disabled", "value": user["date"],
+                       "unit": ""})
+        formula = ("the user disabled the prior, so the setup rules decide "
+                   "attempt one")
+        tail = "; %s" % user["why"]
+    msg = ("%s (G-PRIOR %s: attempt-1 passes rules %s, real %s, shuffled mean "
+           "%s of %s%s); attempt 1 stays the rules' config"
+           % (head, g["verdict"], explain.fmt(g["rules_pass"]),
+              explain.fmt(g["real_pass"]), explain.fmt(g["shuffled_mean_pass"]),
+              explain.fmt(g["n"]), tail))
     rec = _record("PR-DISABLED", "abstain",
                   {"observable": "prior.enabled", "value": False, "threshold": False,
                    "op": "==",
                    "source": "prior/G-PRIOR.json (docs/15 §F G-PRIOR)"},
-                  [{"name": "verdict", "value": g["verdict"], "unit": ""},
-                   {"name": "rules_pass", "value": g["rules_pass"], "unit": ""},
-                   {"name": "real_pass", "value": g["real_pass"], "unit": ""},
-                   {"name": "shuffled_mean_pass",
-                    "value": g["shuffled_mean_pass"], "unit": ""},
-                   {"name": "n", "value": g["n"], "unit": ""},
-                   {"name": "model_sha256", "value": model_sha(model), "unit": ""}],
-                  "the gate did not earn the prior its place, so the setup rules "
-                  "decide attempt one", [],
+                  inputs, formula, [],
                   "docs/15 §F G-PRIOR; tools/autonomy/prior.py --gate", msg, 0.0)
     return {"schema": DECISION_SCHEMA, "geometry_id": None, "verdict": "abstain",
             "rule_id": "PR-DISABLED", "config": None, "edits": [], "record": rec,
@@ -643,8 +659,17 @@ def make_hook(model):
 
 
 def attempt1(ctx):
-    """The hook campaign.py's HOOKS names; the model comes from prior_model.json."""
-    return make_hook(load_model())(ctx)
+    """The hook campaign.py's HOOKS names; the model comes from prior_model.json.
+
+    While USER_SHIP disables the shipped prior, an ENABLED model still records
+    PR-DISABLED here - "by the user's decision"; make_hook itself is unchanged
+    (the gate's own seam and the live group use it)."""
+    model = load_model()
+    if model.get("enabled") and USER_SHIP is not None \
+            and not USER_SHIP["enabled"]:
+        d = disabled_decision(model, USER_SHIP)
+        return {"verdict": d["verdict"], "record": d["record"]}
+    return make_hook(model)(ctx)
 
 
 def decide_all(bundle, model, gates, knobs):
@@ -1490,6 +1515,9 @@ def _setup_of(H, gid):
 
 def _g1_constants(H):
     assert len(FEATURES) == 17 and K == 3 and SHUFFLES == 3 and EPS == 1e-6
+    assert USER_SHIP == {"enabled": False, "date": "2026-10-03",
+                         "why": "its G-PRIOR pass was vacuous: real equals rules "
+                                "on every tuning geometry"}, USER_SHIP
     assert TRANSFER == ("RM-BUDGET-FAR", "RM-BUDGET-FEAT", "RM-BUDGET-WALL",
                         "RM-TOPO-REFINE", "RM-SNAP-WALL", "RM-SNAP-FT",
                         "RM-SNAP-TAU", "RM-SNAP-REFINE"), TRANSFER
@@ -1869,9 +1897,12 @@ def _g9_hook(H):
     campaign._check_hook(res, "prior", H["cfg"]["F-1-009"], H["knobs"])
     pm_mod = importlib.import_module("prior")
     old = dict(pm_mod._MODEL)
+    old_ship = pm_mod.USER_SHIP
     try:
-        # the importlib leg runs F-1-011 (a banked PR-KNN gid) beside D-1-010
+        # the importlib leg runs F-1-011 (a banked PR-KNN gid) beside D-1-010;
+        # the gate's own seam, so the user's ship decision stands aside here
         ids2 = ["F-1-011", "D-1-010"]
+        pm_mod.USER_SHIP = None
         pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out2 = os.path.join(H["tmp"], "hook-import")
@@ -1898,6 +1929,30 @@ def _g9_hook(H):
         recs3 = campaign.load_records(out3)
         assert sum(1 for gid in recs3 for t in recs3[gid]
                    if t["record"]["rule_id"] == "PR-DISABLED") == 2
+        # the shipped prior is disabled by the user's decision (USER_SHIP) even
+        # though this model's gate enabled it: attempt 1 stays the rules'
+        # config and PR-DISABLED says so, grounded on both geometries
+        pm_mod.USER_SHIP = old_ship
+        pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
+        pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
+        out5 = os.path.join(H["tmp"], "hook-user")
+        _fake_prior_campaign(out5, ids2)
+        by5 = {r["geometry_id"]: r
+               for r in campaign.load_rows(out5) if r["attempt"] == 1}
+        assert all(r["decided_by"] == "rule" for r in by5.values()), by5
+        recs5 = campaign.load_records(out5)
+        dis5 = [t for gid in recs5 for t in recs5[gid]
+                if t["record"]["rule_id"] == "PR-DISABLED"]
+        assert len(dis5) == 2, dis5
+        for t in dis5:
+            assert "by the user's decision" in t["record"]["message"], \
+                t["record"]["message"]
+            assert t["record"]["inputs"][-1] == \
+                {"name": "user_disabled", "value": "2026-10-03", "unit": ""}, \
+                t["record"]["inputs"][-1]
+            card5 = explain.card(t["record"])
+            assert explain.ungrounded(card5["line"], [t["record"]]) == [], \
+                card5["line"]
         pm_mod._MODEL["path"] = os.path.join(H["tmp"], "absent.json")
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out4 = os.path.join(H["tmp"], "hook-absent")
@@ -1908,10 +1963,12 @@ def _g9_hook(H):
     finally:
         pm_mod._MODEL.clear()
         pm_mod._MODEL.update(old)
+        pm_mod.USER_SHIP = old_ship
     print("[ok] hook seam: make_hook in a fake rules+prior campaign (3 prior rows, "
           "5 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
           "disabled model, a missing model ends each geometry HARNESS-ERROR; every "
-          "PR card grounded, audit and replay ok")
+          "PR card grounded, audit and replay ok; the shipped prior disabled by "
+          "the user's decision (PR-DISABLED on both)")
 
 
 def _g10_live(H):
