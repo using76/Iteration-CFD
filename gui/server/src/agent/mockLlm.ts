@@ -592,14 +592,24 @@ const CAD_ROWS = [
   { quantity: 'total_length', feature: null, op: '<=', value: null, upper: null, tol_abs: null, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'objective', source: 'brief', quote: 'Make it as short as possible' },
 ]
 
+// The same six rows and the flow quote against the fixed Korean brief (T10b): reqs.py grounds
+// every quote in the user's own turns, so the Korean path quotes the Korean words - verbatim
+// substrings of that brief, in CAD_ROWS row order.
+const CAD_QUOTES_KO = ['입구 지름은 60 mm', '수축비는 9:1', '전체 길이는 80 mm 이하', '벽 두께는 2 mm 이상', '벽 기울기는 35 deg 미만', '가능한 한 짧게 만들어 줘']
+const CAD_ROWS_KO = CAD_ROWS.map((r, i) => ({ ...r, quote: CAD_QUOTES_KO[i] }))
+const CAD_OPPOINT_KO = { ...CAD_OPPOINT, flow: { ...CAD_OPPOINT.flow, quote: '유량은 7.07 L/s' } }
+
 /** The CAD loop: list, propose (an ask - the card is the tick), apply; script on the latest result. */
 function scenarioCad(f: Facts): MockPlan {
   const last = f.lastResult
+  const studyId = f.korean ? 'mock_nozzle_ko' : 'mock_nozzle'
+  const rows = f.korean ? CAD_ROWS_KO : CAD_ROWS
+  const oppoint = f.korean ? CAD_OPPOINT_KO : CAD_OPPOINT
   if (!last) return useTools([tool(CAD_LIST, {})])
   if (last.name === CAD_LIST) {
     if (!last.ok) return done([text(`cad_template_list failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
     const templates = Array.isArray(last.data.templates) ? (last.data.templates as Array<Record<string, unknown>>) : []
-    return useTools([tool(CAD_PROPOSE, { template_id: 'nozzle_contraction/1', vocab_sha: String(templates[0]?.vocab_sha ?? ''), study_id: 'mock_nozzle', operating_point: CAD_OPPOINT, rows: CAD_ROWS })])
+    return useTools([tool(CAD_PROPOSE, { template_id: 'nozzle_contraction/1', vocab_sha: String(templates[0]?.vocab_sha ?? ''), study_id: studyId, operating_point: oppoint, rows })])
   }
   if (last.name === CAD_PROPOSE) {
     if (!last.ok) return done([text(`Refused: ${String((last.data.error as { message?: string } | undefined)?.message ?? 'no message')}`)])
@@ -628,6 +638,13 @@ function scenarioCad(f: Facts): MockPlan {
   if (last.name === CAD_STATUS) {
     if (!last.ok) return done([text(`cad_study_status failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
     const st = (last.data.status ?? {}) as Record<string, unknown>
+    if (f.korean) {
+      return done([
+        text(
+          `스터디 ${String(last.data.study_id)} 상태는 ${String(st.status)}입니다: 평가 ${String(st.n_evals)}회, 결정 ${String(st.n_decisions)}건; 안정 설계는 ${String(st.stable_design_verdict)}, 목적값 ${String(st.stable_objective)}.`,
+        ),
+      ])
+    }
     return done([
       text(
         `Study ${String(last.data.study_id)} is ${String(st.status)}: ${String(st.n_evals)} evaluations and ${String(st.n_decisions)} decisions; the stable design is ${String(st.stable_design_verdict)} with objective ${String(st.stable_objective)}.`,

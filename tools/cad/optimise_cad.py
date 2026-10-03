@@ -408,7 +408,8 @@ def _propose_doc(ctx, cand) -> dict:
 def start(study_id, n, decl, template_sha, gates_lock, checks_doc, params, provenance) -> tuple:
     """The CADOPT-START decision: the study's given start vector, refused as CADOPT-DOC when its
     names are not exactly the declared ones, its law is not a choice, an active searched real is
-    outside its box, or a fixed real misses its min == max value. Returns (params doc, row)."""
+    outside its box, an inactive searched real is not null, or a fixed real misses its
+    min == max value. Returns (params doc, row)."""
     names = sorted(p["name"] for p in decl["params"])
     if sorted(params.keys()) != names:
         raise ValueError("CADOPT-DOC: the start's parameters %s are not exactly the declared %s"
@@ -423,6 +424,11 @@ def start(study_id, n, decl, template_sha, gates_lock, checks_doc, params, prove
         if active and not (s["min"] <= float(params[s["name"]]) <= s["max"]):
             raise ValueError("CADOPT-DOC: the start's %s value %r is outside its box [%r, %r]"
                              % (s["name"], params[s["name"]], s["min"], s["max"]))
+    for s in ds["searched"]:
+        active = s["only_when"] is None or s["only_when"] == "law=" + law
+        if not active and params[s["name"]] is not None:
+            raise ValueError("CADOPT-DOC: the start's %s is inactive for law %s and must be null,"
+                             " got %r" % (s["name"], law, params[s["name"]]))
     for p in decl["params"]:
         if p["kind"] == "real" and p["min"] is not None and p["min"] == p["max"] \
                 and float(params[p["name"]]) != float(p["min"]):
@@ -1295,6 +1301,24 @@ def _t12(runs) -> None:
           " base_stable_eval_key chains through the stable, and the start fails REQ-002 and REQ-003")
 
 
+def _t13() -> None:
+    decl, template_sha, _ds2, _g, _gl = _decl_gates()
+    args = ("standin-1", 0, decl, template_sha, "d" * 64, standin_checks("standin-1"))
+    try:
+        start(*args, dict(STANDIN_START, x_m=0.5), dict(STANDIN_START_PROVENANCE))
+        raise AssertionError("start(x_m=0.5, law poly7) did not raise")
+    except ValueError as e:
+        assert str(e).startswith("CADOPT-DOC: the start's x_m is inactive for law poly7"
+                                 " and must be null, got 0.5"), e
+    doc, _row = start(*args, dict(STANDIN_START, law="cubic_matched", x_m=0.5),
+                      dict(STANDIN_START_PROVENANCE, x_m="llm_choice"))
+    assert doc["base_stable_eval_key"] is None
+    doc, _row = start(*args, dict(STANDIN_START), dict(STANDIN_START_PROVENANCE))
+    assert doc["base_stable_eval_key"] is None
+    print("[ok] T13 start: an inactive non-null x_m is refused before the doc with the exact"
+          " CADOPT-DOC text, cubic_matched carries x_m 0.5 and the null start stays accepted")
+
+
 def _t5(root) -> list:
     a = _t5a()
     b = _t5b(root)
@@ -1305,7 +1329,7 @@ def _t5(root) -> list:
 
 
 def selftest() -> None:
-    """The CAD-17 gate: T1-T12, one [ok] line each, SELFTEST PASS at the end."""
+    """The CAD-17 gate: T1-T13, one [ok] line each, SELFTEST PASS at the end."""
     with tempfile.TemporaryDirectory() as root:
         runs = _five_runs(root)
         _t1()
@@ -1321,6 +1345,7 @@ def selftest() -> None:
         _t10(root)
         _t11(root)
         _t12(runs)
+        _t13()
     print("SELFTEST PASS")
 
 

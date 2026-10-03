@@ -4,6 +4,8 @@
 // returns the table, cad_evaluate initialises the study once and walks the stub loop to its rest
 // points, cad_study_status reads without writing, the grounding lint covers the two campaign tools,
 // the mock LLM takes brief B1 to a confirmed stub study, and the constants equal the Python ones.
+// STUDIO-E2E adds T3b (an inactive non-null x_m is refused before the study is written) and T10b
+// (the mock takes the Korean brief to a confirmed stub study under study id mock_nozzle_ko).
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
@@ -172,6 +174,13 @@ describe('cad loop tools', () => {
     expect((noStart.error as { message: string }).message).toContain('start {params, provenance}')
   })
 
+  it('T3b: an inactive non-null x_m on the start is refused before the study is written', async () => {
+    const res = await runTool('cad_evaluate', { study_id: 'v1_nominal', start: { params: { ...START.params, x_m: 0.5 }, provenance: START.provenance } }, ctx())
+    expect(fileCode(res)).toBe('CADOPT-DOC')
+    expect(fs.existsSync(path.join(ws.root, 'cad', 'v1_nominal', 'study', 'study.json'))).toBe(false)
+    expect(fs.existsSync(path.join(ws.root, 'cad', 'studies.jsonl'))).toBe(false)
+  })
+
   it('T4: cad_evaluate initialises once and runs to the LLM-consult pause', async () => {
     const res = await runTool('cad_evaluate', { study_id: 'v1_nominal', start: START }, ctx())
     expect(res.ok).toBe(true)
@@ -291,6 +300,34 @@ describe('cad loop tools', () => {
     expect(body.study_id).toBe('mock_nozzle')
     expect(body.status.status).toBe('confirmed')
     expect(textOf(rec.messages[rec.messages.length - 1]).startsWith('Study mock_nozzle is confirmed:')).toBe(true)
+  })
+
+  const BRIEF_KO =
+    '20 °C 공기용 축대칭 수축 노즐을 설계해 줘. 입구 지름은 60 mm이고 수축비는 9:1이야. 전체 길이는 80 mm 이하, 벽 두께는 2 mm 이상, 벽 기울기는 35 deg 미만으로 해 줘. 유량은 7.07 L/s야. 가능한 한 짧게 만들어 줘. 요구사항을 잠근 다음 cad_build로 설계를 만들고, cad_evaluate로 평가하고, cad_study_status로 결과를 보여 줘.'
+
+  it('T10b: the mock takes the Korean brief to a confirmed stub study', async () => {
+    const deps = makeDeps(ws)
+    const rec = deps.store.create({ locale: 'ko' })
+    appendUserTurn(rec, { role: 'user', content: BRIEF_KO }, { synthetic: false, entitle: true })
+    const turn = runTurn(rec, 'g2-10b', new AbortController().signal, deps)
+    const approval = (n: number) =>
+      (deps.hub.of('tool.approval_request')[n] as { approval: { toolUseIds: string[]; calls: Array<{ name: string }> } }).approval
+    await until(() => deps.hub.of('tool.approval_request').length === 1, 120000)
+    expect(approval(0).calls[0].name).toBe('cad_requirements_propose')
+    deps.approvals.resolve(approval(0).toolUseIds, 'approved')
+    await until(() => deps.hub.of('tool.approval_request').length === 2, 120000)
+    expect(approval(1).calls[0].name).toBe('cad_evaluate')
+    deps.approvals.resolve(approval(1).toolUseIds, 'approved')
+    await turn
+    const withResults = rec.messages.filter((m) => toolResultsOf(m).length > 0)
+    const results = toolResultsOf(withResults[withResults.length - 1])
+    expect(results).toHaveLength(1)
+    expect(results[0].is_error).toBe(false)
+    const body = JSON.parse(results[0].content) as { kind: string; study_id: string; status: { status: string } }
+    expect(body.kind).toBe('cadStudyStatus')
+    expect(body.study_id).toBe('mock_nozzle_ko')
+    expect(body.status.status).toBe('confirmed')
+    expect(textOf(rec.messages[rec.messages.length - 1]).startsWith('스터디 mock_nozzle_ko 상태는 confirmed입니다:')).toBe(true)
   })
 
   it('T11: the constants the tools pass equal the Python ones', async () => {
