@@ -190,3 +190,18 @@ export function appendUserTurn(rec: SessionRecord, message: BetaMessageParam, op
   }
   return ui
 }
+
+/**
+ * The session's own user turns: the text blocks of every non-synthetic user
+ * message, in order - a message's blocks joined with one newline, messages
+ * with a blank line. This is the only text a grounding tool may cite
+ * (cad_requirements_propose's brief.json); no user turn gives ''.
+ */
+export function userTurnText(rec: Pick<SessionRecord, 'ui'>): string {
+  const turns: string[] = []
+  for (const m of rec.ui) {
+    if (m.role !== 'user' || m.synthetic) continue
+    turns.push(m.blocks.filter((b): b is Extract<typeof b, { kind: 'text' }> => b.kind === 'text').map((b) => b.text).join('\n'))
+  }
+  return turns.join('\n\n')
+}

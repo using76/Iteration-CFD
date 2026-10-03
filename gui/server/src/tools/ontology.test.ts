@@ -56,7 +56,8 @@ function runRow(id: string, label: string, over: Record<string, unknown> = {}): 
 describe('ontology tools', () => {
   it('registers the three tools in all five places', async () => {
     expect(TOOLS.map((t) => t.name)).toEqual([...TOOL_NAMES])
-    expect(TOOLS.slice(-3).map((t) => t.name)).toEqual(['ontology_query', 'ontology_act', 'ontology_apply'])
+    // GUI-1 appended the cad trio after the ontology tools: the ontology trio is the three before it.
+    expect(TOOLS.slice(-6, -3).map((t) => t.name)).toEqual(['ontology_query', 'ontology_act', 'ontology_apply'])
     for (const n of ['ontology_query', 'ontology_act', 'ontology_apply']) expect(summarizeToolCall(n, {}, {}, true, 'en')).not.toBe(n)
     const hook = ontologyPreviewFor({ config: cfg, runs }, 's_1')
     const withHook = await approvalPreview(ONTOLOGY_ACT_TOOL, { action: 'startRun', parameters: VALID }, cfg.workspaceRoot, hook, 'tu_reg')

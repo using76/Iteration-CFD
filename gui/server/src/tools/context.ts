@@ -23,6 +23,8 @@ export interface ToolContext {
   toolUseId: string
   /** The provider and model serving this turn, when the agent loop is the caller (recorded by tools that write decisions). */
   llm?: { provider: string; model: string }
+  /** The session's own user turns, joined - the only text a grounding tool (cad_requirements_propose) may cite. */
+  userText?: string
 }
 
 export interface ToolError {
@@ -64,6 +66,13 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
    * runTool both run it, so a refused call never reaches the user or `run`.
    */
   refuse?: (input: unknown) => ToolResult | null
+  /**
+   * The approval card's text, computed by the tool itself before the card is
+   * drawn (cad_requirements_propose checks the proposal so the card shows the
+   * real verdict). The loop prefers it over approvalPreview; what the operator
+   * saw is what the approved run applies.
+   */
+  preview?: (input: z.infer<S>, ctx: ToolContext) => Promise<string | null>
 }
 
 export function fail(code: string, message: string): ToolResult {

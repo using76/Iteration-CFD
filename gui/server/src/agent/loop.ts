@@ -20,7 +20,7 @@ import { groundReply } from './groundingRepair.js'
 import { emptyUsage, type LlmClient } from './llm.js'
 import { classifyTool, type PolicyOverrides } from './policy.js'
 import { BUDGET_EXHAUSTED_TEXT, buildVolatileContext, foldContextIntoUser, systemParam, volatileSystemMessage } from './prompt.js'
-import { appendUserTurn, newId, type SessionRecord, type SessionStore } from './session.js'
+import { appendUserTurn, newId, userTurnText, type SessionRecord, type SessionStore } from './session.js'
 import { createStreamProjector, projectAssistant, type AssistantExtras, type UiStopReason } from './ui-projection.js'
 
 export const MAX_TOOL_ROUNDS = 40
@@ -389,12 +389,28 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       emitCall(call)
     }
 
+    // One ToolContext per tool_use, built here so the approval previews and the
+    // execution see the same session - including the user's own words a
+    // grounding tool (cad_requirements_propose) builds its brief from.
+    const toolCtx = (tu: BetaToolUseBlock): ToolContext => ({
+      config: deps.config,
+      hub: deps.hub,
+      runs: deps.runs,
+      datasets: deps.datasets,
+      sessionId,
+      signal,
+      workspaceRoot: deps.config.workspaceRoot,
+      settings: rec.settings,
+      toolUseId: tu.id,
+      llm: { provider: deps.llm.kind, model: model ?? deps.llm.model },
+      userText: userTurnText(rec),
+    })
+
     const execute = async (tu: BetaToolUseBlock, call: ToolCallRecord, input: unknown) => {
       call.status = 'running'
       call.startedAt = Date.now()
       emitCall(call)
-      const ctx: ToolContext = { config: deps.config, hub: deps.hub, runs: deps.runs, datasets: deps.datasets, sessionId, signal, workspaceRoot: deps.config.workspaceRoot, settings: rec.settings, toolUseId: tu.id, llm: { provider: deps.llm.kind, model: model ?? deps.llm.model } }
-      settle(tu, call, input, await runTool(tu.name, input, ctx))
+      settle(tu, call, input, await runTool(tu.name, input, toolCtx(tu)))
     }
 
     for (const tu of toolUses) {
@@ -438,7 +454,15 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     }
 
     if (asks.length) {
-      const previews = await Promise.all(asks.map((a) => approvalPreview(a.tu.name, a.input, deps.config.workspaceRoot, deps.ontologyPreview, a.tu.id).catch(() => null)))
+      // A tool that computes its own card (cad_requirements_propose checks the
+      // proposal so the card shows the real verdict) wins over the generic preview.
+      const previews = await Promise.all(
+        asks.map((a) => {
+          const tool = getTool(a.tu.name)
+          const p = tool?.preview ? tool.preview(a.input, toolCtx(a.tu)) : approvalPreview(a.tu.name, a.input, deps.config.workspaceRoot, deps.ontologyPreview, a.tu.id)
+          return p.catch(() => null)
+        }),
+      )
       const req = deps.approvals.request(
         turnId,
         asks.map((a, i) => ({ toolUseId: a.tu.id, name: a.tu.name, input: a.input, summary: toolLabel(a.tu.name, locale), preview: previews[i] })),

@@ -11,6 +11,7 @@ import { toWorkspaceRel } from '../workspace/paths.js'
 import { autonomyAttempts } from './autonomy.js'
 import { autonomyProposeEdit } from './autonomyEdit.js'
 import { caseCreate, caseEdit, caseRead, caseValidate } from './case.js'
+import { cadRequirementsApply, cadRequirementsPropose, cadTemplateList } from './cadReqs.js'
 import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { customToolCreate, customToolRun } from './custom.js'
 import { forgive } from './forgive.js'
@@ -76,6 +77,9 @@ export const TOOLS: ToolDef[] = [
   ontologyQuery,
   ontologyAct,
   ontologyApply,
+  cadTemplateList,
+  cadRequirementsPropose,
+  cadRequirementsApply,
 ]
 
 const byName = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]))

@@ -44,6 +44,9 @@ export const TOOL_NAMES = [
   'ontology_query',
   'ontology_act',
   'ontology_apply',
+  'cad_template_list',
+  'cad_requirements_propose',
+  'cad_requirements_apply',
 ] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
@@ -98,6 +101,9 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   ontology_query: { name: 'ontology_query', kind: 'read', policy: 'auto', label: { ko: '온톨로지 조회', en: 'Query the ontology' } },
   ontology_act: { name: 'ontology_act', kind: 'mutate', policy: 'ask', label: { ko: '변경 제안', en: 'Propose a change' } },
   ontology_apply: { name: 'ontology_apply', kind: 'mutate', policy: 'auto', label: { ko: '제안 적용', en: 'Apply a proposal' } },
+  cad_template_list: { name: 'cad_template_list', kind: 'read', policy: 'auto', label: { ko: '설계 템플릿 목록', en: 'List CAD templates' } },
+  cad_requirements_propose: { name: 'cad_requirements_propose', kind: 'mutate', policy: 'ask', label: { ko: '요구사항 제안', en: 'Propose requirements' } },
+  cad_requirements_apply: { name: 'cad_requirements_apply', kind: 'mutate', policy: 'auto', label: { ko: '요구사항 잠금', en: 'Lock requirements' } },
 }
 
 export function toolPolicy(name: string): ToolPolicy {
@@ -340,6 +346,16 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
         : (ko ? `제안 생성: ${String(i.action ?? '')} (객체 ${r.objects ?? 0}, 링크 ${r.links ?? 0})` : `Proposed ${String(i.action ?? '')} (${r.objects ?? 0} objects, ${r.links ?? 0} links)`)
     case 'ontology_apply':
       return ko ? `적용됨: ${String(r.action ?? '')} (${String(r.editId ?? '')})` : `Applied ${String(r.action ?? '')} (edit ${String(r.editId ?? '')})`
+    case 'cad_template_list': {
+      const n = fmtInt((r.templates as unknown[] | undefined)?.length ?? 0)
+      return ko ? `설계 템플릿 ${n}건 조회` : `Listed ${n} CAD template(s)`
+    }
+    case 'cad_requirements_propose': {
+      const n = fmtInt((r.rows as unknown[] | undefined)?.length ?? 0)
+      return ko ? `요구사항 제안 ${String(r.status ?? '')} (행 ${n}건)` : `Proposed requirements (${String(r.status ?? '')}, ${n} row(s))`
+    }
+    case 'cad_requirements_apply':
+      return ko ? `요구사항 잠금 (${String(r.study_id ?? '')}, 잠금 ${String(r.lock_sha ?? '').slice(0, 12)})` : `Locked requirements (${String(r.study_id ?? '')}, lock ${String(r.lock_sha ?? '').slice(0, 12)})`
     default:
       return name
   }

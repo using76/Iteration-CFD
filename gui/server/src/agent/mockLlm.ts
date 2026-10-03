@@ -145,7 +145,7 @@ export function extractFacts(messages: BetaMessageParam[]): Facts {
 // The script
 // ---------------------------------------------------------------------------
 
-type Scenario = 'refuse' | 'long' | 'error' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'propose' | 'campaign' | 'run' | 'default'
+type Scenario = 'refuse' | 'long' | 'error' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'propose' | 'campaign' | 'cad' | 'run' | 'default'
 
 export function detectScenario(text: string): Scenario {
   const t = text.toLowerCase()
@@ -156,6 +156,8 @@ export function detectScenario(text: string): Scenario {
   // the autonomy scenarios name their tool, so they answer before any word a later arm claims
   if (t.includes('autonomy_propose_edit')) return 'propose'
   if (t.includes('autonomy_attempts')) return 'campaign'
+  // the CAD loop names its tool too, or says nozzle (GUI-1)
+  if (t.includes('cad_requirements') || /\bnozzle\b|노즐/.test(t)) return 'cad'
   // first of the natural arms: every ontology prompt also carries a word a later
   // arm claims (case, run, mesh, show) and the ladder returns on the first match
   if (/\bontology\b|온톨로지/.test(t)) return 'ontology'
@@ -545,6 +547,47 @@ function scenarioPropose(f: Facts): MockPlan {
   return done([text(`Proposed ${String(e.pointer ?? '')} = ${JSON.stringify(e.to ?? null)} (preflight pass): ${String(res.data.proposed ?? '')}`)])
 }
 
+const CAD_LIST = 'cad_template_list'
+const CAD_PROPOSE = 'cad_requirements_propose'
+const CAD_APPLY = 'cad_requirements_apply'
+
+/**
+ * The v1_nominal fixture rows of tools/cad/fixtures/reqs/cases.json without the ears key (the
+ * server renders EARS), with the v1 operating point. They ground only in brief B1's text, the
+ * fixed brief of the T10 gate - never send a row the user's own words do not carry.
+ */
+const CAD_OPPOINT = { fluid: 'air', T_K: 293.15, p0_Pa: 101325.0, flow: { field: 'Q_m3_s', value: 7.07, unit: 'L/s', source: 'brief', quote: 'The flow rate is 7.07 L/s' } }
+const CAD_ROWS = [
+  { quantity: 'inlet_diameter', feature: 'contraction_start', op: '==', value: 60, upper: null, tol_abs: 0.001, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'The inlet diameter is 60 mm' },
+  { quantity: 'contraction_ratio', feature: null, op: '==', value: 9, upper: null, tol_abs: null, tol_rel: 1e-06, unit: '-', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'the contraction ratio is 9:1' },
+  { quantity: 'total_length', feature: null, op: '<=', value: 80, upper: null, tol_abs: null, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'total length at most 80 mm' },
+  { quantity: 'min_wall_normal', feature: null, op: '>=', value: 2, upper: null, tol_abs: null, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'the wall thickness at least 2 mm' },
+  { quantity: 'max_wall_slope', feature: null, op: '<=', value: 35, upper: null, tol_abs: null, tol_rel: null, unit: 'deg', condition: { Re: null, level: null }, hardness: 'soft', source: 'brief', quote: 'the wall slope below 35 deg' },
+  { quantity: 'total_length', feature: null, op: '<=', value: null, upper: null, tol_abs: null, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'objective', source: 'brief', quote: 'Make it as short as possible' },
+]
+
+/** The CAD loop: list, propose (an ask - the card is the tick), apply; script on the latest result. */
+function scenarioCad(f: Facts): MockPlan {
+  const last = f.lastResult
+  if (!last) return useTools([tool(CAD_LIST, {})])
+  if (last.name === CAD_LIST) {
+    if (!last.ok) return done([text(`cad_template_list failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    const templates = Array.isArray(last.data.templates) ? (last.data.templates as Array<Record<string, unknown>>) : []
+    return useTools([tool(CAD_PROPOSE, { template_id: 'nozzle_contraction/1', vocab_sha: String(templates[0]?.vocab_sha ?? ''), study_id: 'mock_nozzle', operating_point: CAD_OPPOINT, rows: CAD_ROWS })])
+  }
+  if (last.name === CAD_PROPOSE) {
+    if (!last.ok) return done([text(`Refused: ${String((last.data.error as { message?: string } | undefined)?.message ?? 'no message')}`)])
+    if (last.data.status === 'ok') return useTools([tool(CAD_APPLY, { proposalId: String(last.data.proposalId) })])
+    const qs = Array.isArray(last.data.questions) ? (last.data.questions as Array<Record<string, unknown>>) : []
+    return done([text(qs.map((q) => `${String(q.id)}: ${String(q.text)}`).join('\n'))])
+  }
+  if (last.name === CAD_APPLY) {
+    if (!last.ok) return done([text(`cad_requirements_apply failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    return done([text(`Locked requirements for study ${String(last.data.study_id)}: ${String(last.data.requirements)} (lock ${String(last.data.lock_sha).slice(0, 12)}).`)])
+  }
+  return done([text('Read cad_template_list first, then propose the requirement rows.')])
+}
+
 export function planResponse(messages: BetaMessageParam[], state: MockState): MockPlan {
   const f = extractFacts(messages)
   if (f.runNotice) return runNoticeReply(f)
@@ -580,6 +623,8 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
       return scenarioPropose(f)
     case 'campaign':
       return scenarioCampaign(f)
+    case 'cad':
+      return scenarioCad(f)
     case 'run':
       return scenarioRun(f)
     default:
