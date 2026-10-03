@@ -89,6 +89,7 @@ npm run drive -- --autopilot --ui --case cases/plume.jsonc     # 헤드리스 �
 - `--autopilot` — `autoApprove: 'all'`로 둔다. 없으면 `'reads'`로 두고 받는 `tool.approval_request`를 프린트한 뒤 모두 승인한다.
 - `--ui` — GUI가 없을 때 그 자리를 대신한다: 시작에 `ui.state`를 보내고 모든 `ui.command`에 `ui.result ok:true`로 답한다(`gui_control`·`gui_state`가 동작).
 - `--url`(기본 `ws://127.0.0.1:$CFD_PORT/ws`, `CFD_PORT`가 없으면 8787), `--case`(기본 `cases/plume.jsonc`), `--prompt`, `--timeout`(초, 기본 900).
+- `--locale ko|en` (기본 `en`) - 세션 언어를 정한다; 어시스턴트가 받는 언어 지시와 `--ui` 대역 화면의 `locale`이 이를 따른다.
 - 실행이 done/converged로 끝나고 마지막 어시스턴트 메시지에 텍스트가 있으면 exit 0, 아니면 1. 실행을 요구하지 않은 프롬프트(예: 화면만 조작)는 어시스턴트 답변만 있으면 exit 0. 실제 LLM은 `CFD_LLM=zai CFD_DEMO=1 npx tsx server/src/main.ts` 로. 데모 모드(`CFD_DEMO=1`)는 `CFD_LLM`이 없으면 언제나 대본형 모의 어시스턴트를 쓴다 — 디스크에 있는 키를 쓰지 않는다.
 
 ## 실제 GPU 기기에서의 체크리스트
