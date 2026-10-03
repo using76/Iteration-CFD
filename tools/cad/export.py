@@ -471,7 +471,7 @@ def selftest():
     me = os.path.abspath(__file__)
     with tempfile.TemporaryDirectory() as td:
         decl = common.read_json(os.path.join(os.path.dirname(TEMPLATE), "template.json"))
-        quantities = [r["quantity"] for r in decl["catalogue"]]
+        quantities = [r["quantity"] for r in decl["catalogue"] if r["method"] == "geometry"]
 
         def run_cli(params, out):
             pj = os.path.join(td, os.path.basename(out) + "_params.json")
@@ -951,6 +951,8 @@ def measure_catalogue(catalogue, shapes, planes, meridian, wall_m, value, report
 
     rows = []
     for row in catalogue:
+        if row.get("method") != "geometry":
+            continue                      # performance rows (docs/16 §E.2): post.py measures them
         rec = one(row)
         errs = schema.errors(rec, SCHEMA_MEASURE)
         if errs:

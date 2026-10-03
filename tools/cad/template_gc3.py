@@ -24,6 +24,7 @@ import common  # noqa: E402
 import schema  # noqa: E402
 import runner  # noqa: E402
 import measure  # noqa: E402
+import post  # noqa: E402
 
 TEMPLATE = os.path.join(HERE, "templates", "nozzle_contraction", "template.py")
 TEMPLATE_JSON = os.path.join(HERE, "templates", "nozzle_contraction", "template.json")
@@ -128,14 +129,23 @@ def selftest():
         assert r["value"] == decl, "template.json differs from declare()"
         assert schema.errors(decl, "cad-template/1") == [], "declaration violates cad-template/1"
         ok_where = set(p["name"] for p in decl["planes"]) | set(t["name"] for t in decl["tags"]) | {"fluid", "body"}
+        post_names = set(m[0] for m in post.METRICS)
         for row in decl["catalogue"]:
+            assert set(row["where"]) <= ok_where, "where %r names no plane, tag, fluid or body" % (row["where"],)
+            if row["method"] != "geometry":
+                assert row["kind"] == "performance", "non-geometry row %r is kind %r" % (row["quantity"], row["kind"])
+                assert row["method"] == "cfd" and row["u_kind"] == "cfd", \
+                    "performance row %r is %s/%s" % (row["quantity"], row["method"], row["u_kind"])
+                assert row["u_meas"] is None, "performance row %r carries u_meas" % (row["quantity"],)
+                assert row["primitive"] in post_names, \
+                    "performance primitive %r is not a post.METRICS name" % (row["primitive"],)
+                continue
             assert row["primitive"] in measure.PRIMITIVES, "catalogue primitive %r is not a measure primitive" % (row["primitive"],)
             kind, num = measure.U_MEAS[row["primitive"]]
             if row["u_kind"] == "exact":
                 assert (kind, num) == ("abs", 0.0) and row["u_meas"] == 0.0, "u_meas of %r does not match U_MEAS" % (row["quantity"],)
             else:
                 assert (row["u_kind"], row["u_meas"]) == (kind, num), "u_meas of %r does not match U_MEAS" % (row["quantity"],)
-            assert set(row["where"]) <= ok_where, "where %r names no plane, tag, fluid or body" % (row["where"],)
         want_rules = ["PRF-BOX", "PRF-RMIN", "PRF-MONO", "PRF-DERIV", "PRF-SELFX", "PRF-FACE2D"]
         assert decl["profile_rules"] == want_rules, "profile_rules %r" % (decl["profile_rules"],)
         print("[ok] declaration: template.json equals declare() and is a valid cad-template/1; %d catalogue rows on measure primitives with their u_meas" % (len(decl["catalogue"]),))

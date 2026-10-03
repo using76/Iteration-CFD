@@ -578,7 +578,7 @@ GOLDEN_NOZZLE_TURB = os.path.join(common.FIXTURES, "case", "golden_nozzle_turb.j
 # OCCT numbers every STEP product with a process-global counter, so a geom.json sha would otherwise
 # depend on how many exports ran before it in the same process; a fresh child process always pins
 # the first-export bytes below.
-TURB_GEOM_SHA = "6ab0a294bc247aa9733e60b748854aeacc3c0e31f97bc8dac21ebca20fdcef98"
+TURB_GEOM_SHA = "ed899257470937ccadd05329b03f32eb96a973bbfec800007e1877388e1ba8c4"
 
 DIFFERENCES_TURB = (
     "wall row (resolved): nut fixedValue 0, k fixedValue 0, omega omegaWallFunction - SPEC-LIT 15.5 calls"

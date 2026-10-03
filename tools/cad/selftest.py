@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CHECKS = (("common.py", 14), ("schema.py", 6), ("schema_fixtures.py", 13), ("measure.py", 43), ("hints.py", 4), ("runner.py", 12), ("template_gc3.py", 13), ("export.py", 15), ("readiness.py", 23), ("reqs.py", 45), ("verify.py", 15), ("mutate.py", 18), ("wedge_mesh.py", 20), ("pipe_mesh.py", 10), ("thwaites.py", 15), ("turb_integral.py", 15), ("mesh_fidelity.py", 13), ("case_writer.py", 17), ("post.py", 20), ("solve.py", 15), ("gate.py", 12), ("optimise_cad.py", 12), ("loop.py", 12), ("cases/poiseuille/poiseuille.py", 9), ("cases/nozzle_nominal/nozzle_nominal.py", 7))   # (script, min [ok]); later units append
+CHECKS = (("common.py", 14), ("schema.py", 6), ("schema_fixtures.py", 13), ("measure.py", 43), ("hints.py", 4), ("runner.py", 12), ("template_gc3.py", 13), ("export.py", 15), ("readiness.py", 23), ("reqs.py", 45), ("verify.py", 15), ("mutate.py", 18), ("wedge_mesh.py", 20), ("pipe_mesh.py", 10), ("thwaites.py", 15), ("turb_integral.py", 15), ("mesh_fidelity.py", 13), ("case_writer.py", 17), ("post.py", 20), ("solve.py", 15), ("gate.py", 12), ("optimise_cad.py", 12), ("loop.py", 12), ("evaluate_cfd.py", 7), ("cases/poiseuille/poiseuille.py", 9), ("cases/nozzle_nominal/nozzle_nominal.py", 7), ("studies/g4_nozzle/g4.py", 5))   # (script, min [ok]); later units append
 
 _TALLY = []                                     # each child's n_ok, for the final count
 
