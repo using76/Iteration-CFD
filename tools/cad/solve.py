@@ -56,6 +56,7 @@ SOLVE_KEYS = ("version", "class", "reason_id", "message", "case_dir", "geom_dir"
               "check_every", "write_every", "p0_Pa", "gates", "before", "after", "written", "returncode", "log",
               "result")
 TOP_LEVEL = ("0", "case.json", "constant", "system")     # a cold case directory holds exactly these
+CASE_VERSIONS = ("cad-case/1", "cad-case-turb/1")        # the cold case.json versions launch admits
 
 
 class Refused(Exception):
@@ -364,10 +365,11 @@ def _launch_run(doc, case_dir, geom_dir, out_dir, iters, stop_rule, prefix, exe,
                       % (list(TOP_LEVEL), sorted(os.listdir(case_dir))))
     case = common.read_json(os.path.join(case_dir, "case.json"))
     p0 = (case.get("operating_point") or {}).get("p0_Pa") if isinstance(case, dict) else None
-    if (not isinstance(case, dict) or case.get("version") != "cad-case/1" or case.get("status") != "ok"
+    if (not isinstance(case, dict) or case.get("version") not in CASE_VERSIONS or case.get("status") != "ok"
             or case.get("cold_start") is not True or isinstance(p0, bool)
             or not isinstance(p0, (int, float)) or not math.isfinite(p0) or p0 <= 0):
-        return refuse("SOLVE-COLD", "case.json is not an ok cold cad-case/1 with a positive finite p0_Pa")
+        return refuse("SOLVE-COLD", "case.json is not an ok cold cad-case/1 or cad-case-turb/1 with a"
+                      " positive finite p0_Pa")
     p0 = float(p0)
     doc["p0_Pa"] = p0
     disk = _case_files(case_dir)                                                      # 6.

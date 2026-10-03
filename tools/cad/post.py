@@ -387,6 +387,59 @@ def read_field(path, n_comp, n_cells, patch_sizes):
     return {"dimensions": dims, "internal": arr, "patches": patches}
 
 
+def nut_boundary_empty(path, n_cells, patch_sizes):
+    """True when the written field's PARSED boundaryField has no patch entry (the solver's nut
+    format, comments and whitespace irrelevant); read as n_comp 1, POST-FIELD when the file
+    does not parse."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    try:
+        _dims, _arr, blocks = _read_field_text(text, 1, n_cells, patch_sizes)
+    except Refused:
+        raise
+    except ValueError as e:
+        raise Refused("POST-FIELD", "%s: %s" % (os.path.basename(path), e))
+    return not blocks
+
+
+def read_nut(path, case_dir, case, kind, n_cells, patch_sizes):
+    """One nut field whose written boundaryField may be empty (the solver writes nut without
+    patch rows): the written file is parsed once and the decision comes from the PARSED
+    boundaryField - with at least one patch entry this is exactly read_field of the file;
+    with none the dimensions and internal values come from that one parse and every patch row
+    from the case's own 0/nut - whose sha256 must match case.json (POST-BIND) and whose wall
+    patches must all be fixedValue there (POST-FIELD naming the patch), keeping the 0/nut
+    value, while every other patch keeps its 0/nut type with a None value so face_values takes
+    the owner cell."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    try:
+        dims, arr, blocks = _read_field_text(text, 1, n_cells, patch_sizes)
+    except Refused:
+        raise
+    except ValueError as e:
+        raise Refused("POST-FIELD", "%s: %s" % (os.path.basename(path), e))
+    if blocks:
+        return read_field(path, 1, n_cells, patch_sizes)
+    zero = os.path.join(case_dir, "0", "nut")
+    snap = common.stable_file_snapshot(zero)
+    if snap["stable"] is not True or snap["sha256"] != (case.get("files") or {}).get("0/nut"):
+        raise Refused("POST-BIND", "0/nut: sha differs from case.json")
+    ref = read_field(zero, 1, n_cells, patch_sizes)
+    walls = WALLS_TURB if kind == "nozzle" else WALLS_PIPE
+    patches = {}
+    for name in patch_sizes:
+        row = ref["patches"][name]
+        if name in walls:
+            if row["type"] != "fixedValue":
+                raise Refused("POST-FIELD", "nut: written without a boundaryField and wall patch %s has "
+                              "0/nut type %s" % (name, row["type"]))
+            patches[name] = {"type": row["type"], "value": row["value"]}
+        else:
+            patches[name] = {"type": row["type"], "value": None}
+    return {"dimensions": dims, "internal": arr, "patches": patches}
+
+
 def face_values(mesh, field, name):
     """The values on one patch's faces by the rule of (C5) (its value; noSlip zero; slip tangential; else owner)."""
     st, nf, _t = mesh["patch_range"][name]
@@ -982,7 +1035,7 @@ def _post_turb(case_dir, time_name, geom_dir, between_hook, inputs):
     patch_sizes = dict((name, rng[1]) for name, rng in mesh["patch_range"].items())
     U = read_field(paths["fields/U"], 3, mesh["n_cells"], patch_sizes)
     p = read_field(paths["fields/p"], 1, mesh["n_cells"], patch_sizes)
-    nut = read_field(paths["fields/nut"], 1, mesh["n_cells"], patch_sizes)
+    nut = read_nut(paths["fields/nut"], case_dir, case, kind, mesh["n_cells"], patch_sizes)
     dims_u = " ".join(U["dimensions"].split())
     dims_p = " ".join(p["dimensions"].split())
     dims_n = " ".join(nut["dimensions"].split())
