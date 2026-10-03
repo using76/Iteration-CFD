@@ -5,6 +5,8 @@
 """loop.py - the study loop of stage S11 (docs/16 §D, §I CAD-18): from locked requirements to a
 confirmed stable design, every evaluation built in a temp dir and moved whole into cache/<eval_key>,
 promotion one atomic replace of the params/stable.json pointer, resume by one deterministic walk.
+The study's evaluator is "stub" (the CAD-18 stand-in), "cfd" (the real S3-S10 path, CAD-21) or
+"cfd_turb" (its turbulent twin through run_turb and write_turb_case, docs/16 §H.5).
 
 The walk is the ONLY writer: a row already on disk must equal the row the walk re-derives
 (LOOP-RESUME), the frontier is where the walk appends, and replay is the same walk in verify-only
@@ -54,7 +56,7 @@ KILL_POINTS = ("after_propose_row", "after_build", "after_replace", "after_itera
                "after_history")
 KILL_EXIT = 77
 STATUSES = ("new", "running", "paused", "confirmed", "confirmation_failed", "infeasible")
-EVALUATORS = ("stub", "cfd")
+EVALUATORS = ("stub", "cfd", "cfd_turb")
 STUB_VERSION = "1"
 STUB_ENV = {"stub": STUB_VERSION}
 STUB_CASE_WRITER = "stub/1"
@@ -185,13 +187,17 @@ class _Log:
 def eval_parts(evaluator, params, level, template_sha, declaration_sha, lock_sha, gates_lock) -> dict:
     """Exactly reqs.EVAL_KEY_PARTS for the study's evaluator (docs/16 §D): the level lives in the
     mesh recipe version, so an L1 and an L2 evaluation of the same params never share a key.
-    None and "stub" give the stub's parts; "cfd" delegates to evaluate_cfd.eval_parts."""
+    None and "stub" give the stub's parts; "cfd" and "cfd_turb" delegate to evaluate_cfd's
+    eval_parts / eval_parts_turb."""
     if evaluator not in (None, "stub"):
-        if evaluator != "cfd":
-            raise ValueError("LOOP-EVALUATOR: evaluator %r is not one of %s"
-                             % (evaluator, ", ".join(EVALUATORS)))
-        return evaluate_cfd.eval_parts(params, level, template_sha, declaration_sha, lock_sha,
-                                       gates_lock)
+        if evaluator == "cfd":
+            return evaluate_cfd.eval_parts(params, level, template_sha, declaration_sha, lock_sha,
+                                           gates_lock)
+        if evaluator == "cfd_turb":
+            return evaluate_cfd.eval_parts_turb(params, level, template_sha, declaration_sha,
+                                                lock_sha, gates_lock)
+        raise ValueError("LOOP-EVALUATOR: evaluator %r is not one of %s"
+                         % (evaluator, ", ".join(EVALUATORS)))
     return {"template_sha": template_sha, "declaration_sha": declaration_sha, "params": params,
             "requirements_lock": lock_sha, "gates_lock": gates_lock, "env": dict(STUB_ENV),
             "mesh_recipe_version": "stub/1@" + level, "case_writer_version": STUB_CASE_WRITER,
@@ -378,8 +384,8 @@ def evaluate_one(study_dir, params, level, checks_doc, requirements_doc, templat
                  declaration_sha, gates_lock, live, evaluator="stub", eval_kwargs=None) -> tuple:
     """(verdict doc, eval doc, eval_key) of one evaluation (docs/16a §H): a cache hit validates and
     never touches the entry; a miss is built in tmp/<ek>/ and moved whole by ONE os.replace. The
-    evaluator is the study's ("stub" or "cfd"); eval_kwargs (the selftest's fakes only) is
-    forwarded to evaluate_cfd.evaluate, never to the stub."""
+    evaluator is the study's ("stub", "cfd" or "cfd_turb"); eval_kwargs (the selftest's fakes only)
+    is forwarded to evaluate_cfd.evaluate / evaluate_turb, never to the stub."""
     parts = eval_parts(evaluator, params, level, template_sha, declaration_sha,
                        requirements_doc["lock_sha"], gates_lock)
     ek = reqs.eval_key(parts)
@@ -392,9 +398,9 @@ def evaluate_one(study_dir, params, level, checks_doc, requirements_doc, templat
     if os.path.exists(tmp):
         shutil.rmtree(tmp)
     os.makedirs(tmp)
-    if evaluator == "cfd":
-        stage = evaluate_cfd.evaluate(params, level, checks_doc, tmp, study_dir,
-                                      **(eval_kwargs or {}))
+    if evaluator in ("cfd", "cfd_turb"):
+        run = evaluate_cfd.evaluate if evaluator == "cfd" else evaluate_cfd.evaluate_turb
+        stage = run(params, level, checks_doc, tmp, study_dir, **(eval_kwargs or {}))
         EVALUATOR_CALLS[0] += 1
     else:
         stage = stub_evaluate(params, level, checks_doc, tmp)
@@ -794,7 +800,7 @@ def _walk(study_dir, registry_path, mode, unattended, progress, intake_edit=None
     # ---- the prefilter rows (docs/16 §I CAD-18): pool order, CAND_KEYS equal, replay re-derives
     def pf_record(cand_params):
         """The study evaluator's prefilter record of one candidate (stub or the real CAD one)."""
-        if study["evaluator"] == "cfd":
+        if study["evaluator"] in ("cfd", "cfd_turb"):
             return evaluate_cfd.prefilter(cand_params, checks)
         return stub_prefilter(cand_params, checks)
 

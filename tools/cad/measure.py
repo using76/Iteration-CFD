@@ -58,6 +58,7 @@ from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import schema
+import turb_integral
 
 SCHEMA_KIND = "cad-measure/1"
 AXIS_TOL = 1e-12          # m: a circle centre / meridian edge may leave the axis / plane z = 0 by this much
@@ -70,7 +71,7 @@ U_MEAS = {                # (kind, value): "abs" in the record's unit, "rel" tim
     "plane_distance": ("abs", 1e-9), "meridian_min_wall": ("abs", 1e-8), "slope_max": ("rel", 1e-6),
     "curvature_radius_min": ("rel", 1e-6), "n_solids": ("abs", 0.0), "valid": ("abs", 0.0),
     "watertight": ("abs", 0.0), "axis_x": ("abs", 0.0), "units_m": ("abs", 0.0), "section_at_plane": ("rel", 1e-9),
-    "wall_min_tagged": ("abs", 1e-8),
+    "wall_min_tagged": ("abs", 1e-8), "k_max_1d": ("rel", 1e-9),
 }
 REFUSED = {"wall_distance_3d": "MEAS-3D-WALL"}
 UNITS_TOL = 1e-9          # m: gmsh vs BREP x-span in geom.json (docs/16 §H.3 GC-5)
@@ -955,13 +956,32 @@ def wall_min_tagged(shape, tag_a, tag_b, feature=None, n_ray=RAY_N):
         return _error("wall_min_tagged", "m", method, "MEAS-ERROR", ("%s: %s" % (type(e).__name__, e))[:300], feature)
 
 
+def k_max_1d(params, re_de, feature=None, where=("wall_contraction",)):
+    """The a priori acceleration parameter K_max of docs/16 §H.5 item 5 on the 1-D area rule, exact
+    from the wall law's stationary points (turb_integral.k_max_1d) at Re_De re_de: a record computed
+    from the parameters alone, never from the BREP. A re_de that is not a finite positive number is
+    refused MEAS-RE; a turb_integral refusal (its TI-* ids) is an error record MEAS-ERROR."""
+    method = "turb_integral.k_max_1d/1-D area rule"
+    if isinstance(re_de, bool) or not isinstance(re_de, (int, float)) \
+            or not math.isfinite(float(re_de)) or float(re_de) <= 0.0:
+        return _refused("k_max_1d", "1", method, "MEAS-RE",
+                        "re_de %r is not a finite positive number" % (re_de,), feature, where)
+    try:
+        value = turb_integral.k_max_1d(params["law"], params["CR"], params["L_over_Di"],
+                                       float(re_de), params.get("x_m"))["K_max"]
+    except ValueError as e:
+        return _error("k_max_1d", "1", method, "MEAS-ERROR", str(e)[:300], feature, where)
+    return _ok("k_max_1d", value, "1", method, feature=feature, where=where)
+
+
 PRIMITIVES = {"cylinder_radius": cylinder_radius, "cone_semi_angle": cone_semi_angle, "volume": volume,
               "diameter_at_plane": diameter_at_plane, "area_ratio": area_ratio,
               "extent_along_axis": extent_along_axis, "plane_distance": plane_distance,
               "meridian_min_wall": meridian_min_wall, "slope_max": slope_max,
               "curvature_radius_min": curvature_radius_min, "n_solids": n_solids, "valid": valid,
               "watertight": watertight, "axis_x": axis_x, "units_m": units_m,
-              "section_at_plane": section_at_plane, "wall_min_tagged": wall_min_tagged}
+              "section_at_plane": section_at_plane, "wall_min_tagged": wall_min_tagged,
+              "k_max_1d": k_max_1d}
 
 assert set(PRIMITIVES) == set(U_MEAS), "the primitive registry and U_MEAS must name the same set"
 
@@ -1126,7 +1146,7 @@ def _fx_ramp(z_top=None):
 
 
 def selftest():
-    """GC-1: every primitive against an analytic answer; 43 [ok] lines, then SELFTEST PASS."""
+    """GC-1: every primitive against an analytic answer; 44 [ok] lines, then SELFTEST PASS."""
     seen = []
 
     def keep(rec):
@@ -1750,6 +1770,23 @@ def selftest():
     assert rms["status"] == "refused" and rms["reason_id"] == "MEAS-MULTISOLID", "M43 two solids %r" % (rms,)
     print("[ok] untagged sets refused MEAS-3D-WALL four ways (face lists, no area, a bool area, wall_distance_3d); "
           "an empty tag MEAS-EMPTY; two solids MEAS-MULTISOLID")
+
+    # (M44)
+    tg4_params = {"D_i": 0.30, "CR": 2.0, "L_over_Di": 0.5, "law": "poly7", "x_m": None,
+                  "Lx_over_De": 0.5, "Lu_over_Di": 2.0, "upstream_role": "wall", "t_wall": 0.004}
+    kp = k_max_1d(tg4_params, 630000.0)
+    kp3 = k_max_1d(dict(tg4_params, law="poly3", L_over_Di=0.6), 630000.0)
+    kr = k_max_1d(tg4_params, None)
+    ke = k_max_1d({"law": "nope", "CR": 2.0, "L_over_Di": 0.5, "x_m": None}, 630000.0)
+    assert abs(kp["value"] / 4.966618287407307e-06 - 1.0) <= 1e-12, kp["value"]
+    assert abs(kp3["value"] / 2.8505770491696314e-06 - 1.0) <= 1e-12, kp3["value"]
+    assert kp["u_meas"] == 1e-9 * kp["value"] and kp["unit"] == "1" and kp["status"] == "ok", kp
+    assert kp["method"] == "turb_integral.k_max_1d/1-D area rule" and kp["where"] == ["wall_contraction"], kp
+    assert kr["status"] == "refused" and kr["reason_id"] == "MEAS-RE" and kr["value"] is None, kr
+    assert ke["status"] == "error" and ke["reason_id"] == "MEAS-ERROR" and ke["value"] is None, ke
+    print("[ok] k_max_1d: poly7 L/D 0.5 gives %r and poly3 L/D 0.6 %r at Re_De 630000 (1e-12 rel),"
+          " re_de None refused MEAS-RE, a bad law errors MEAS-ERROR, all records schema-valid"
+          % (kp["value"], kp3["value"]))
 
     # (M21)
     bad = [r for r in seen if schema.errors(r, "cad-measure/1") != []]

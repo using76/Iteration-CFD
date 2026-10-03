@@ -438,6 +438,18 @@
       "unit": "1",
       "u_kind": "cfd",
       "u_meas": null
+    },
+    {
+      "quantity": "k_max_apriori",
+      "primitive": "k_max_1d",
+      "where": [
+        "wall_contraction"
+      ],
+      "kind": "geometric",
+      "method": "geometry",
+      "unit": "1",
+      "u_kind": "rel",
+      "u_meas": 1e-09
     }
   ],
   "profile_rules": [

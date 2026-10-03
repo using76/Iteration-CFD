@@ -108,7 +108,9 @@ TAGS = [{"name": "inlet", "kind": "face", "description": "velocity inlet disc at
         {"name": "outer", "kind": "edge", "description": "meridian outer wall: the true normal offset of the wetted curve by t_wall"}]
 # watertight / axis / units are measured by export.py (the stl_repair report, the fluid's faces and
 # geom.json); the performance rows (docs/16 §E.2) are measured by post.py from the solved case,
-# never by measure.py.
+# never by measure.py. k_max_apriori is the a priori acceleration parameter of docs/16 §H.5 item 5
+# on the 1-D area rule (turb_integral.k_max_1d) at the row's condition Re (Re_De), computed from
+# the parameters, never from the BREP.
 CATALOGUE = [
     {"quantity": "inlet_diameter", "primitive": "diameter_at_plane", "where": ["contraction_start"],
      "kind": "geometric", "method": "geometry", "unit": "m", "u_kind": "abs", "u_meas": 1e-9},
@@ -156,6 +158,8 @@ CATALOGUE = [
      "method": "cfd", "unit": "1", "u_kind": "cfd", "u_meas": None},
     {"quantity": "mass_imbalance", "primitive": "mass_imbalance", "where": ["fluid"],
      "kind": "performance", "method": "cfd", "unit": "1", "u_kind": "cfd", "u_meas": None},
+    {"quantity": "k_max_apriori", "primitive": "k_max_1d", "where": ["wall_contraction"],
+     "kind": "geometric", "method": "geometry", "unit": "1", "u_kind": "rel", "u_meas": 1e-9},
 ]
 PROFILE_RULES = ["PRF-BOX", "PRF-RMIN", "PRF-MONO", "PRF-DERIV", "PRF-SELFX", "PRF-FACE2D"]
 STANDARDS = []   # docs/16a §F: the frozen table a row sourced standard must cite (REQ-STD); none for the nozzle
