@@ -494,6 +494,18 @@ ManifestRows without `split` (AM-7's split.py adds it); STLs are never committed
   read — **nobody reads a test row's outcome before the evaluation unit
   (docs/15 §F)**.
 
+The fresh test seed — a second claim (docs/15 §F) needs a fresh test seed and
+  a new lock, so `split.py --write-fresh 2` writes `manifests/seed2/{test.jsonl,
+  split.lock}` ONCE: one pool per family at corpus seed 2 with the seed-1
+  sizes, the same stratified largest-remainder draw (salt 17, no spent ids),
+  and only its 180 test rows kept — the tuning remainder is never written. The
+  split name is `test2`, sealed outside mode evaluate exactly like the seed-1
+  test split (`refuse_test` seals a fresh id too, so a tuning/rules campaign
+  cannot touch it). `--check-fresh 2` re-derives the counts against the
+  seed-2 pool, the disjointness against tuning.jsonl and the seed-1 test
+  lock, the in-memory regen and the lock history. The seed-1 split and its
+  lock are never rewritten.
+
 ## sensitivity.py — G-PILOT
 
 - `sensitivity.py` — docs/15 §B's measured failure turned into a decision: a
@@ -639,13 +651,13 @@ the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0,
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
 - R-PLANE reads commensurability, writes `/domain/*`, `/snap/*`: h = s/m, the extent starts on the body's own faces, so every face lies on a cell plane.
-- R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter, taken at the finest level on the patch: h/2 on a sharp body off R-PLANE below max_level, where R-FEAT will put the edges (WIN-2TO1).
+- R-WIN reads t1, n, base, writes `/refinement/*`, `growth`: the coarsest level inside the §D.3 window, then the largest growth under the stack limiter, taken at the finest level on the patch: h/2 on a sharp body off R-PLANE below max_level, where R-FEAT will put the edges (WIN-2TO1); off R-PLANE it prefers the G5 edge h ≤ 60·t1·d/K with the convex-wall margin K = 1.10 after the (92.45) depth d, and every floor stays at the plain edge's level (GLB-CONFIG).
 - R-CURV reads r_p5 and raises the wall level to h ≤ r_p5/8.
 - R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
 - R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1, then asks for the attraction radius tau = h_f/2 (SPEC-LIT §92.12's erratum: the default 0.5 is half a BASE cell, 2^(L−1) wall cells at wall level L, and pins a refined sharp body).
 - R-BUDGET predicts cells (never probes: one costs up to 150 s) and coarsens far-field bands, then the wall band, then the feature bump, then the wall level, until 0.7·cell_budget fits.
 
-Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 on every snapped wall (§92.13 drops their layers anyway; a tighter window there costs a whole octree level for no capture). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
+Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 as the floor on every snapped wall and, since GLB-CONFIG (2026-10-03), prefers 60/1.10 there when the margin holds after the (92.45) depth (below). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
 
 G-RULES 2026-09-24 (`rules/G-RULES.json`, binary 054bba67…a90b, HEAD 7e8e14f): PASS. Part 1, the worked example plus five live cube runs at h/t1 41.96: A 8 layers, full_area_frac 1.0; B (first growth over the limiter) 8 layers, full 0.0 — the limiter binds and the stack survives; C exit 1 on the G5 early check (0.04995 < 0.05); D and F exit 0 with 0 layers, dropped under min_thickness·T. Part 2, 60 tuning rows: 59 applied, 1 refused (A-1-009, R-BUDGET, re-derived), preflight pass 59/59 with a live octree probe, -dryRun 0 59/59; wall levels A {4:1, 5:10}, B {6:12}, D {4:2, 5:5, 6:5}, E {4:3, 5:8, 6:1}, F {3:2, 4:4, 5:6}; predicted/probe leaves 0.79–4.09 (median 1.30 over the 59 probes, conservative). Part 3: R-PLANE applied 34/35 commensurate rows (box_c 21/21, plate_c 8/8, lcorner_c 5/6); F-1-009 abstains (h/t1 15.2 < 16); 34/34 plane checks ok (worst 5.7e-14); three live runs' snap max_over_h ≤ 9.4e-13, and all three delivered 8 layers with full_area_frac 1.0 (reported, not gated).
 
@@ -716,6 +728,37 @@ configs preflight clears 8 PF-YPLUS refusals and adds none, and -dryRun exits 0 
 numbers and F3 flags are equal on the 59 rows both campaigns meshed. The 26 changed rows that still drop name
 `inner_gate` (18), `thin_proposed` (7) and `thin_after_caps` (1, F-1-025): what is left is L2/L3's and L5's, not the
 2:1 window.
+
+**GLB-CONFIG (2026-10-03, the user's decision on G-L-b).** Off R-PLANE R-WIN also builds the §D.3 window with the G5
+edge divided by the convex-wall margin K = 1.10 (the user's own factor) and, when that window applies AND the G5 edge
+after the (92.45) depth still clears `min_thickness_ratio`·K, it puts the wall one level finer than the plain edge;
+otherwise it keeps the plain edge's level and says so. R-WIN runs before any mesh exists, so it predicts
+sqrt(A_max) of the snapped wall by the wall cell size h: the release binary's measured zero-G5 t1 on the snapped
+sphere is 1.011 and 1.023 h/60 at levels 2 and 3 (both covered by K = 1.10) but 1.413 h/60 at level 4, where the
+(92.45) limiter binds at the shortest snapped edge (0.2198 h) that the rule cannot see — K does not cover level 4.
+The measured sqrt(A_max)/h is 1.0040 and 1.0063 on the snapped sphere at levels 3 and 4, 1.000–1.077 on nine sampled
+tuning walls and 1.167 / 1.293 on two wings, so the margin multiplies h/60. Every floor stays at the plain edge's
+level: R-BUDGET's floor is `win_level` (the plain edge's), and when the budget coarsens below R-WIN's margined level
+its record says the margin is given up. `setup(..., glb=False)` is the rule set every committed campaign was
+recorded under and `glb_of(records)` tells which one a campaign used (an R-WIN apply record carrying the input
+`margin`); `optimise.rows_from`, optimise.py's selftest and prior.py's G-PRIOR rows pass it beside `ft_radius` and
+`win_2to1`, and the G-FT-RADIUS and G-WIN-2TO1 identities rebuild with glb False, so their committed reports still
+reproduce.
+
+G-GLB-CONFIG 2026-10-03 (`rules/G-GLB-CONFIG.json`, the committed L5 bundle): PASS. 420 tuning rows, 48 without a
+fingerprint; 37 plane, 15 refused (the same 15 both ways), 320 snapped; identity 356/356; preflight refusals
+(PF-SURFACE aside) 1 and 1, differing on 0 rows; `margin_met` 1 on 320 of 320 snapped; finer 46, of which the budget
+gave the margin up on 7 (A-1-007, A-1-021, A-1-034, A-1-069, D-1-005, E-1-050, F-1-050); changed configs 9 —
+A-1-053, D-1-003, D-1-073, E-1-015, F-1-005, F-1-009, F-1-016, F-1-025, G-1-054 at wall levels 4→5, 5→6, 3→4, 5→6,
+3→4, 3→4, 4→5, 4→5, 4→5 and growth 1.159→1.0, 1.17→1.17, 1.151→1.0, 1.161→1.161, 1.152→1.0, 1.15→1.0, 1.165→1.0,
+1.158→1.0, 1.156→1.0. The supervisor's attempt-1 meshes of those 9 configs on binary 3d90ce91… (before and after,
+same binary): 8-layer delivery goes 1 → 3 rows (D-1-003 full 0.847, E-1-015 0.822, F-1-009 0.661 gain a stack;
+G-1-054 loses its 0.902 stack, `thin_proposed`, snap p99/h 0.020 → 0.392); F-1-005's plain config stops the mesher
+(`layers: patch "body" is not a patch of the mesh`) and under the margin meshes and drops its layers
+(`thin_proposed`); with a live octree probe preflight refuses none of the 18 configs (leaves 8,834–786,262). Over
+the 356 attempt-1 configs the mean BLC_8 goes 0.2416 → 0.2472 and BLC_full 0.1640 → 0.1680; rows with BLC_8 > 0:
+86 → 88. The box_sphere G-L-b row on the release binary at `first_thickness` 0.0023 = 1.10·sqrt(A_max)/60: 8
+layers, `full_area_frac` 1.0, `level_n_non_orth_max_deg` 67.80 < 70, no retreat, no `drop_cause`.
 
 ## remedies.py — L2 remedies
 
@@ -961,7 +1004,8 @@ supervisor's run. For later units — AM-14: `prior/tuning_rules.json.gz`
 (`baseline.read_bundle`) holds every rules attempt on the tuning split with its outcome;
 AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
 `prior/aml/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
-(the ablation "-prior" is then equal to it by construction).
+(the ablation "-prior" is then equal to it by construction); while `USER_SHIP` disables the shipped
+prior, attempt1 records PR-DISABLED "by the user's decision" even though the gate's model is enabled.
 
 **The re-measure under the 2026-09-26 rule (PRIOR-FIX).** AM-16's held-out G-OPT miss
 came through family B, where the prior's paths regressed the lathes against rules-only
@@ -1000,6 +1044,12 @@ rules attempt; the other two shuffles match rules at 241. The prior ships ENABLE
 `prior/aml/` — `G-PRIOR.json`, `G-PRIOR.md`, `prior_model.json`, and the bundles `tuning_rules.json.gz`
 and `eval_r1.json.gz` — and changes no tuning attempt. `prior/` keeps the AM-13 and PRIOR-FIX gate as the
 record of that run; optimise.py's SOURCES still read its bundles.
+
+**Shipped disabled by the user (2026-10-03).** The gate's PASS stands as the record in `prior/aml/`, but it
+was vacuous — real equals rules on every one of the 420 tuning geometries (0 gains, 0 losses) — so the
+user's decision of 2026-10-03 ships the prior DISABLED: while `USER_SHIP` disables it, `prior.attempt1`
+records PR-DISABLED "by the user's decision" on every attempt 1 of the gate's enabled model, and attempt 1
+stays the rules' config.
 
 ## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
 
@@ -1049,12 +1099,22 @@ new result winning a re-meshed (geometry, config sha)): AUC 0.984850 (threshold 
 RMSE 0.153714 (threshold ≤ 0.15) does not — `rmse_le` false, the half FAILS. The new rows out of fold:
 413 rows of 356 geometries, 152 failures, AUC 0.975600, BLC_8 RMSE 0.298512; cross-fitted alone AUC
 0.971693, BLC_8 RMSE 0.300194. The report is `optimise/G-OPT-CV.json` and `.md` (`--cv` writes nothing
-else), and on a FAIL the optimiser still ships enabled — by the user's choice of 2026-09-26, until the
-user says otherwise; the shipped model is not refitted here.
+else), and on a FAIL the optimiser still ships enabled (until 2026-10-03; see the refit below) — by
+the user's choice of 2026-09-26, until the user says otherwise; the shipped model is not refitted here.
+
+**The refit on the AM-L rows (2026-10-03).** `optimise.py --refit --extra tools/autonomy/aml/tuning_rules_L5.json.gz`
+re-fits the same five-member ensemble on the AM-L rows first, then the AM-14 training set (the committed
+`optimise/G-OPT.json`'s sources and its five round bundles): rows 3184 (413 new), 1322 duplicates dropped,
+fail AUC 0.984850 (threshold ≥ 0.75) holds, BLC_8 RMSE 0.153714 (threshold ≤ 0.15) does not — `rmse_le`
+false, the CV half FAILS. A refit runs no refinement round, so G-OPT's tuning ablation half (`beats_rules`)
+is not measured and a refit never ships the optimiser enabled (`optimise.py --refine` measures it). The
+optimiser therefore ships DISABLED from `optimise/aml/` (`G-OPT.json`, `G-OPT.md`, `opt_model.json`,
+`train.json.gz`) by the user's decision of 2026-10-03 — disabled until G-OPT passes — and `optimise/`
+keeps the AM-14 gate as the record of that run.
 
 For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
-`optimise/opt_model.json` and `optimise/train.json.gz` and refits in seconds; when it is disabled
-it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the committed model was fitted before that rule and is not refitted.
+`optimise/aml/opt_model.json` and `optimise/aml/train.json.gz` and refits in seconds; when it is disabled
+it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the shipped model is the 2026-10-03 refit (its training rows include attempts meshed before that rule), and it ships disabled.
 
 ## evaluate.py — the held-out evaluation (G-FAIL, G-BLC-0 and the guards)
 
@@ -1095,6 +1155,20 @@ its report outside `evaluate/`. The departures from docs/15 §F are listed in th
 `evaluate/EVAL.json` and the results page `evaluate/EVAL.md`, written by the supervisor's run; the test split is
 then spent. The report reads its tuning context from `evaluate/tuning_context.json`, written the first time a
 report is written, so re-measuring G-PRIOR later (as on 2026-09-26) leaves the committed evaluation checkable.
+
+A fresh-seed evaluation (the second claim): `evaluate.py --run --manifest test2 --scope reduced|full --work DIR`
+runs the nine campaigns on corpus seed 2's fresh test split under ONE plan lock in `evaluate/seed2/opened.lock`,
+results in `evaluate/seed2/<scope>/`. No sealed baseline exists for the fresh seed: B0-template is meshed fresh
+with the same binary and is the baseline of G-FAIL, G-BLC-0, G-FID and G-COST; B0-LHS is not measured and is left
+out of G-ABL. **G-BLC-1** (headline 2, tier 1: A, B, E, F) passes when the full system's mean a-priori BLC_8 over
+those geometries is at least 0.09 and its mean BLC_full at least 0.05 — the targets the user fixed (D-L9) from the
+tuning re-measure before the seed was opened. G-FID gains the F3e row: among passing meshes the median chain-form
+feature-capture share no lower than B0-template's, per family. The reduced scope runs a pre-registered subset under
+the same lock — per family the first id by sha256('reduced:' + id), family D drawn among its commensurate rows,
+G-DET on the subset's D and F ids — and its verdicts are REDUCED, never a headline; the full scope runs all 180
+geometries under the same plan. Both learned layers ship disabled (2026-10-03), so G-OPT is reported, not decided.
+`python tools/autonomy/evaluate.py --run --manifest test2 --scope reduced --work DIR` then
+`python tools/autonomy/evaluate.py --check --scope reduced`.
 
 ## rescore.py — the tuning campaigns under the 2026-09-26 rule (FEAT-CONSTRAINT)
 
@@ -1203,6 +1277,7 @@ Measured (L5, 2026-10-02, tuning only, release binary `3d90ce91` at tree `3969bf
     python tools/autonomy/optimise.py --plan                               # the training rows, the surrogate CV, the refinement set
     python tools/autonomy/optimise.py --refine --work DIR                  # optimise/G-OPT.json, .md, opt_model.json, train.json.gz
     python tools/autonomy/optimise.py --cv --extra BUNDLE.json.gz          # G-OPT's CV half on extra rows: optimise/G-OPT-CV.json and .md
+    python tools/autonomy/optimise.py --refit --extra BUNDLE.json.gz       # the refit on extra rows: optimise/aml/G-OPT.json, .md, opt_model.json, train.json.gz
     python tools/autonomy/optimise.py --check                              # the report, the bundles, the train rebuild and the refit
 
     python tools/autonomy/evaluate.py --plan                               # the seal, the campaigns, the G-DET ids; nothing opened

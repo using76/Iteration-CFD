@@ -93,6 +93,7 @@ LABELS = {"full": "full", "no-preflight": "-preflight", "no-remedies": "-remedie
           "no-prior": "-prior", "no-optimiser": "-optimiser",
           "rules": "rules + remedies only", "b0-template": "B0-template (sealed)",
           "b0-lhs": "B0-LHS best of 4 (sealed)"}
+LABELS_FRESH = {"b0-template": "B0-template (measured fresh)"}   # no seal: meshed here
 FAMILIES = ("A", "B", "D", "E", "F", "G")
 TIER0_FAMILIES = ("D", "F")
 TEST_N = 180
@@ -152,6 +153,45 @@ DEPARTURES = (
 )
 FID_METRICS = (("p99_over_hf", "le"), ("pinned_frac", "le"), ("feature_share", "ge"))
 
+# --- the fresh second claim (docs/15 section F): corpus seed 2 under a new lock
+FRESH_SPLIT = "test2"
+FRESH_SEED = 2
+FRESH_DIR = os.path.join(REPORT_DIR, "seed2")   # the fresh lock lives here; each scope reports in FRESH_DIR/<scope>
+SCOPES = ("reduced", "full")
+REDUCED_SALT = "reduced:"
+REDUCED_GDET_FAMILIES = ("D", "F")
+BLC1_8_MIN = 0.09
+BLC1_FULL_MIN = 0.05        # docs/15 section F G-BLC-1, the user's targets (D-L9, 2026-10-03)
+FID_METRICS_FRESH = FID_METRICS + (("feature_capture", "ge"),)   # the F3e row
+FRESH_PLAN = {"seed": FRESH_SEED, "scopes": list(SCOPES),
+              "reduced": {"salt": REDUCED_SALT, "per_family": 1,
+                          "d_commensurate": True,
+                          "gdet_families": list(REDUCED_GDET_FAMILIES)},
+              "blc1": {"families": list(baseline.TIER1),
+                       "blc8_min": BLC1_8_MIN,
+                       "blc_full_min": BLC1_FULL_MIN},
+              "fid_metrics": [m for m, _op in FID_METRICS_FRESH]}
+FRESH_DEPARTURES = (
+    "The fresh test seed is corpus seed 2: one pool per family at seed 2 with the seed-1 sizes, the same stratified "
+    "largest-remainder draw (salt 17, no spent ids), and only its 180 test rows are written, to "
+    "corpus/manifests/seed2/ under a new write-once lock; the seed-1 split and its lock are untouched and spent.",
+    "No sealed baseline exists for the fresh seed: B0-template is meshed fresh in this evaluation with the same "
+    "binary and is the baseline of G-FAIL, G-BLC-0, G-FID and G-COST; B0-LHS is not measured and is left out of G-ABL.",
+    "G-BLC-1 (tier 1: A, B, E, F) passes when the full system's mean a-priori BLC_8 over those geometries is at least "
+    "0.09 and its mean BLC_full at least 0.05, the targets the user fixed (D-L9) from the tuning re-measure before "
+    "this seed was opened.",
+    "G-FID gains the F3e row: among passing meshes the median chain-form feature-capture share is no lower than "
+    "B0-template's, per family.",
+    "A reduced scope runs a pre-registered subset under the same lock: per family the first id by sha256('reduced:' "
+    "+ id), family D drawn among its commensurate rows, G-DET on the subset's D and F ids. Its verdicts are REDUCED "
+    "and never a headline; the full scope runs all 180 geometries under the same plan.",
+    "Both learned layers ship disabled (2026-10-03), so full, -prior, -optimiser and rules + remedies mesh the same "
+    "configs and G-OPT is reported, not decided.",
+    "The fresh test manifest is opened by each scope (split.load('test2', 'evaluate')) only after the write-once lock "
+    "records the plan; the reduced and full scopes share that one plan, and a run with any other plan is refused: "
+    "the seed is spent (§F).",
+)
+
 
 def _dump_json(path, obj):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -199,7 +239,10 @@ def verify_seal(report_dir=baseline.REPORT_DIR):
     return out
 
 
-def lock_test_ids():
+def lock_test_ids(manifest="test"):
+    """The seed-1 lock's test ids, or the fresh lock's for FRESH_SPLIT."""
+    if manifest == FRESH_SPLIT:
+        return split.fresh_test_ids(FRESH_SEED)
     lock = split.read_lock(os.path.join(split.MANIFEST_DIR, "split.lock"))
     return lock["test_ids"].split()
 
@@ -227,16 +270,52 @@ def gdet_ids(ids, n=GDET_N):
     return sorted(out)
 
 
+def reduced_ids(rows) -> list:
+    """The reduced scope: per family, in FAMILIES order, the first id by
+    sha256('reduced:' + id); family D drawn among its commensurate rows,
+    falling back to every D row when none is.  A family with no row is
+    skipped.  Sorted."""
+    by = {}
+    for r in rows:
+        by.setdefault(r["family"], []).append(r)
+    out = []
+    for fam in FAMILIES:
+        cands = by.get(fam) or []
+        if fam == "D":
+            com = [r for r in cands if r.get("commensurate") is True]
+            cands = com or cands
+        if not cands:
+            continue
+        pick = min(cands, key=lambda r: hashlib.sha256(
+            (REDUCED_SALT + r["geometry_id"]).encode("ascii")).hexdigest())
+        out.append(pick["geometry_id"])
+    return sorted(out)
+
+
+def reduced_gdet(ids) -> list:
+    """The reduced scope's G-DET subset: its D and F ids, sorted."""
+    return sorted(i for i in ids if i[0] in REDUCED_GDET_FAMILIES)
+
+
 # --- (C3) the split, opened once, and the baselines --------------------------
 
 def open_split(manifest):
-    """The evaluation's only manifest readers; "test" opens the sealed split."""
+    """The evaluation's only manifest readers; "test" opens the sealed
+    split, FRESH_SPLIT the fresh one (mode evaluate only)."""
     if manifest == "test":
         rows = split.load("test", split.EVALUATE)
         if len(rows) != TEST_N:
             raise EvalError("open_split: the test split holds %d rows, not %d"
                             % (len(rows), TEST_N))
         return {"source": "test", "sha256": campaign.manifest_sha("test"),
+                "rows": rows, "rehearsal": False}
+    if manifest == FRESH_SPLIT:
+        rows = split.load(FRESH_SPLIT, split.EVALUATE)
+        if len(rows) != TEST_N:
+            raise EvalError("open_split: the fresh split holds %d rows, "
+                            "not %d" % (len(rows), TEST_N))
+        return {"source": FRESH_SPLIT,
+                "sha256": campaign.manifest_sha(FRESH_SPLIT),
                 "rows": rows, "rehearsal": False}
     rows = campaign.load_manifest(manifest, split.EVALUATE)
     for r in rows:
@@ -305,8 +384,11 @@ def bundle_sha(b):
 
 # --- (C4) the plan and the write-once lock -----------------------------------
 
-def plan_of(manifest_info, rehearsal, gdet, streams, binary, baselines):
-    return {"manifest": {"source": manifest_info["source"],
+def plan_of(manifest_info, rehearsal, gdet, streams, binary, baselines,
+            fresh=None):
+    """The locked plan; the key "fresh" is present ONLY when fresh is not
+    None, so the seed-1 plan and its sha are unchanged."""
+    out = {"manifest": {"source": manifest_info["source"],
                          "sha256": manifest_info["sha256"],
                          "n": manifest_info["n"]},
             "rehearsal": rehearsal,
@@ -318,12 +400,15 @@ def plan_of(manifest_info, rehearsal, gdet, streams, binary, baselines):
             "knobs_sha256": campaign.sha(schema.load_knobs()),
             "models": {"prior": _sha256_of_file(os.path.join(prior.REPORT_DIR,
                                                              prior.MODEL_NAME)),
-                       "optimiser": _sha256_of_file(os.path.join(HERE, "optimise",
-                                                                 "opt_model.json")),
+                       "optimiser": _sha256_of_file(os.path.join(
+                           optimise.SHIP_DIR, optimise.MODEL_NAME)),
                        "optimiser_train": _sha256_of_file(os.path.join(
-                           HERE, "optimise", "train.json.gz"))},
+                           optimise.SHIP_DIR, optimise.TRAIN_NAME))},
             "baselines": dict(baselines),
             "ram_guard_mib": RAM_GUARD_MIB, "audit_mod": campaign.AUDIT_MOD}
+    if fresh is not None:
+        out["fresh"] = dict(fresh)
+    return out
 
 
 def write_lock(report_dir, plan):
@@ -610,6 +695,7 @@ def fid_rows(out, bundle):
                      "n_feature_edges": nfe, "n_snapped_to_edge": nse,
                      "feature_tolerance": ft, "sharp_edge_length_m": sharp,
                      "feature_share": feature_share(nfe, nse, ft, sharp),
+                     "feature_capture": row["outcome"].get("feature_capture"),
                      "summary": has_summary})
     return rows
 
@@ -749,6 +835,42 @@ def g_blc0(ends_full, ends_b0, tier0_ids, other_ids):
     return out
 
 
+def g_blc1(ends_full, ends_b0, tier1_ids):
+    """docs/15 section F G-BLC-1: the full system's mean a-priori BLC_8 over
+    the tier-1 geometries (baseline.TIER1, commensurate F rows included) at
+    least BLC1_8_MIN and its mean BLC_full at least BLC1_FULL_MIN."""
+    out = {"verdict": UNDECIDED, "n": len(tier1_ids), "ids": list(tier1_ids),
+           "families": list(baseline.TIER1),
+           "targets": {"blc8": BLC1_8_MIN, "blc_full": BLC1_FULL_MIN},
+           "blc8_mean": None, "blc_full_mean": None,
+           "conditions": {"blc8_ge_target": False, "blc_full_ge_target": False},
+           "per_family": {},
+           "b0": {"blc8_mean": None, "blc_full_mean": None}}
+    if not tier1_ids:
+        return out
+    m8 = _mean(ends_full[i]["blc8_a_priori"] for i in tier1_ids)
+    mf = _mean(ends_full[i]["blc_full_a_priori"] for i in tier1_ids)
+    conditions = {"blc8_ge_target": m8 >= BLC1_8_MIN - EPS,
+                  "blc_full_ge_target": mf >= BLC1_FULL_MIN - EPS}
+    per = {}
+    for f in baseline.TIER1:
+        fids = [i for i in tier1_ids if ends_full[i].get("family") == f]
+        if fids:
+            per[f] = {"n": len(fids),
+                      "blc8_mean": _mean(ends_full[i]["blc8_a_priori"]
+                                         for i in fids),
+                      "blc_full_mean": _mean(ends_full[i]["blc_full_a_priori"]
+                                             for i in fids)}
+    out.update({"blc8_mean": m8, "blc_full_mean": mf, "conditions": conditions,
+                "per_family": per,
+                "b0": {"blc8_mean": _mean(ends_b0[i]["blc8_a_priori"]
+                                          for i in tier1_ids),
+                       "blc_full_mean": _mean(ends_b0[i]["blc_full_a_priori"]
+                                              for i in tier1_ids)},
+                "verdict": PASS if all(conditions.values()) else FAIL})
+    return out
+
+
 def g_qual(quals, static):
     totals = {"configs": 0, "sha_bad": 0, "quality_bad": 0, "edits": 0, "edits_bad": 0}
     for q in quals.values():
@@ -761,7 +883,7 @@ def g_qual(quals, static):
             "static": static, "totals": totals}
 
 
-def g_fid(fid_full, fid_b0, seal_equal):
+def g_fid(fid_full, fid_b0, seal_equal, metrics=FID_METRICS):
     present = [f for f in FAMILIES
                if any(r["family"] == f for r in fid_full)
                or any(r["family"] == f for r in fid_b0)]
@@ -771,8 +893,8 @@ def g_fid(fid_full, fid_b0, seal_equal):
     for f in present:
         ff = [r for r in fid_full if r["family"] == f]
         fb = [r for r in fid_b0 if r["family"] == f]
-        metrics = {}
-        for m, op in FID_METRICS:
+        fm = {}
+        for m, op in metrics:
             vf = _median([r[m] for r in ff if r.get(m) is not None])
             vb = _median([r[m] for r in fb if r.get(m) is not None])
             comp = vf is not None and vb is not None
@@ -783,12 +905,12 @@ def g_fid(fid_full, fid_b0, seal_equal):
                     worse.append([f, m])
             else:
                 ok = None
-            metrics[m] = {"full": vf, "b0": vb, "comparable": comp, "ok": ok}
+            fm[m] = {"full": vf, "b0": vb, "comparable": comp, "ok": ok}
         per[f] = {"n_full": len(ff), "n_b0": len(fb),
                   "n_ft0_sharp": sum(1 for r in ff if r.get("feature_tolerance") == 0
                                      and r.get("sharp_edge_length_m") is not None
                                      and r["sharp_edge_length_m"] > 0),
-                  "metrics": metrics}
+                  "metrics": fm}
     if not seal_equal:
         verdict = UNDECIDED
     elif worse:
@@ -891,6 +1013,8 @@ def g_opt(systems):
 def g_abl(systems, tuning):
     table = []
     for name in ABL_ORDER:
+        if name not in systems:
+            continue
         st = systems[name]
         row = {"name": name, "label": LABELS[name]}
         row.update(dict((k, v) for k, v in st.items() if k != "per_family"))
@@ -941,14 +1065,94 @@ def tuning_context():
 # --- (C9) run and report ------------------------------------------------------
 
 def run(work, *, manifest="test", baselines=None, gdet_n=None, streams=6,
-        report_dir=REPORT_DIR, binary=None, attempt_fn=None, probe_fn=None,
-        snap_fn=None, hooks=None, quiet=False):
+        report_dir=None, binary=None, attempt_fn=None, probe_fn=None,
+        snap_fn=None, hooks=None, quiet=False, scope=None):
     binary = binary or campaign.BINARY_DEFAULT
     if not isinstance(streams, int) or isinstance(streams, bool) \
             or not 1 <= streams <= campaign.MAX_STREAMS:
         raise EvalError("streams: %r is not an int in 1..%d"
                         % (streams, campaign.MAX_STREAMS))
-    if manifest == "test":
+    if scope is not None:
+        if scope not in SCOPES:
+            raise EvalError("scope: %r is not one of %s"
+                            % (scope, ", ".join(SCOPES)))
+        if manifest == "test":
+            raise EvalError("the seed-1 test split is spent: a scope runs on "
+                            "the fresh split %s or a rehearsal file"
+                            % FRESH_SPLIT)
+        if manifest == FRESH_SPLIT:
+            if attempt_fn or probe_fn or snap_fn or hooks or baselines \
+                    or gdet_n is not None:
+                raise EvalError("the fresh evaluation runs the real system on "
+                                "B0-template measured fresh: no fakes, no "
+                                "hooks, no --baselines, no --gdet-n")
+            want_dir = os.path.join(FRESH_DIR, scope)
+            if report_dir is None:
+                report_dir = want_dir
+            elif os.path.abspath(report_dir) != os.path.abspath(want_dir):
+                raise EvalError("a %s run of the fresh seed reports in %s "
+                                "(--report-dir)" % (scope, want_dir))
+            ids_all = lock_test_ids(FRESH_SPLIT)
+            rehearsal = False
+            fresh_seed = FRESH_SEED
+        else:
+            if baselines or gdet_n is not None:
+                raise EvalError("a fresh rehearsal measures B0-template "
+                                "fresh: no --baselines and no --gdet-n")
+            if report_dir is None:
+                raise EvalError("a fresh rehearsal needs --report-dir "
+                                "(outside evaluate/)")
+            if os.path.abspath(report_dir) == os.path.abspath(REPORT_DIR) \
+                    or os.path.abspath(report_dir).startswith(
+                        os.path.abspath(REPORT_DIR) + os.sep):
+                raise EvalError("a rehearsal writes its report outside "
+                                "evaluate/ (--report-dir)")
+            opened = open_split(manifest)
+            ids_all = [r["geometry_id"] for r in opened["rows"]]
+            rehearsal = True
+            fresh_seed = None
+        lock_dir = os.path.dirname(report_dir)
+        gdet_all = gdet_ids(ids_all)
+        source = FRESH_SPLIT if manifest == FRESH_SPLIT \
+            else os.path.abspath(manifest).replace(os.sep, "/")
+        base_fresh = {"b0-template": "measured fresh",
+                      "b0-lhs": "not measured"}
+        plan = plan_of({"source": source,
+                        "sha256": campaign.manifest_sha(source),
+                        "n": len(ids_all)}, rehearsal, gdet_all, streams,
+                       binary, base_fresh, fresh=FRESH_PLAN)
+        write_lock(lock_dir, plan)
+        if manifest == FRESH_SPLIT:
+            opened = open_split(FRESH_SPLIT)
+        if opened["sha256"] != plan["manifest"]["sha256"] \
+                or len(opened["rows"]) != plan["manifest"]["n"]:
+            raise EvalError("the opened split (%s, n %d) differs from the "
+                            "locked plan (%s, n %d)"
+                            % (opened["sha256"], len(opened["rows"]),
+                               plan["manifest"]["sha256"],
+                               plan["manifest"]["n"]))
+        meta = meta_of(opened)
+        rows_all = opened["rows"]
+        by_gid = dict((r["geometry_id"], r) for r in rows_all)
+        scope_ids = reduced_ids(rows_all) if scope == "reduced" \
+            else [r["geometry_id"] for r in rows_all]
+        meta["ids"] = scope_ids
+        meta["n"] = len(scope_ids)
+        fams = dict((f, 0) for f in FAMILIES)
+        tier0 = []
+        for gid in scope_ids:
+            r = by_gid[gid]
+            if r["family"] in fams:
+                fams[r["family"]] += 1
+            if r["family"] in TIER0_FAMILIES and r.get("commensurate") is True:
+                tier0.append(gid)
+        meta["families"] = fams
+        meta["tier0_ids"] = tier0
+        meta["fresh"] = {"seed": fresh_seed, "scope": scope,
+                         "n_manifest": len(rows_all)}
+        gdet = reduced_gdet(scope_ids) if scope == "reduced" else gdet_all
+    elif manifest == "test":
+        report_dir = report_dir or REPORT_DIR
         if attempt_fn or probe_fn or snap_fn or hooks or baselines \
                 or gdet_n is not None:
             raise EvalError("the evaluation runs the real system on the sealed "
@@ -970,6 +1174,7 @@ def run(work, *, manifest="test", baselines=None, gdet_n=None, streams=6,
                                                         plan["manifest"]["n"]))
         base = load_baselines(meta, report_dir)
     else:
+        report_dir = report_dir or REPORT_DIR
         if os.path.abspath(report_dir) == os.path.abspath(REPORT_DIR):
             raise EvalError("a rehearsal writes its report outside evaluate/ "
                             "(--report-dir)")
@@ -1013,7 +1218,18 @@ def run(work, *, manifest="test", baselines=None, gdet_n=None, streams=6,
            "b0-template": fid_rows(outs["b0-template"], bundles["b0-template"])}
     gdet_facts = {"compare": campaign.compare(outs["gdet-1"], outs["gdet-2"]),
                   "vs_full": compare_subset(outs["full"], outs["gdet-1"], gdet)}
-    sc = seal_compare(bundles["b0-template"], base["b0-template"])
+    if scope is not None:
+        sc = None
+        runs_base = {"b0-template": {"source": "measured fresh",
+                                     "file_sha256": None},
+                     "b0-lhs": {"source": "not measured",
+                                "file_sha256": None}}
+    else:
+        sc = seal_compare(bundles["b0-template"], base["b0-template"])
+        runs_base = dict((s, {"source": "sealed" if not meta["rehearsal"]
+                              else BASELINE_COPY % s,
+                              "file_sha256": base_sha[s]})
+                         for s in baseline.SYSTEMS)
     s = remedies.static_scan()
     static = {"remedies_scan_ok": s["ok"], "violations": s["violations"],
               "flag_literals": flag_literals(knobs)}
@@ -1022,10 +1238,7 @@ def run(work, *, manifest="test", baselines=None, gdet_n=None, streams=6,
             "meta": dict((k, v) for k, v in meta.items() if k != "rows"),
             "gdet_ids": gdet, "campaigns": infos, "fid": fid, "gdet": gdet_facts,
             "seal_compare": sc, "static": static,
-            "baselines": dict((s, {"source": "sealed" if not meta["rehearsal"]
-                                   else BASELINE_COPY % s,
-                                   "file_sha256": base_sha[s]})
-                              for s in baseline.SYSTEMS)}
+            "baselines": runs_base}
     _dump_json(os.path.join(report_dir, RUNS_NAME), runs)
     return report(report_dir, quiet=quiet)
 
@@ -1035,7 +1248,9 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
     if not os.path.isfile(rpath):
         raise EvalError("report: %s is missing" % rpath)
     runs = _read_json(rpath)
-    lpath = os.path.join(report_dir, LOCK_NAME)
+    fresh = runs["meta"].get("fresh")
+    lpath = os.path.join(os.path.dirname(report_dir) if fresh else report_dir,
+                         LOCK_NAME)
     if not os.path.isfile(lpath):
         raise EvalError("report: %s is missing" % lpath)
     lock = _read_json(lpath)
@@ -1049,18 +1264,25 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
         if _sha256_of_file(bpath) != c["bundle"]["sha256"]:
             raise EvalError("bundle drift: %s" % bpath)
         bundles[c["name"]] = baseline.read_bundle(bpath)
-    base = load_baselines(runs["meta"], report_dir)
+    base = None if fresh else load_baselines(runs["meta"], report_dir)
     ends = dict((name, dict((g["geometry_id"], g) for g in b["geometries"]))
                 for name, b in bundles.items())
-    ends_b0t = dict((g["geometry_id"], g) for g in base["b0-template"]["geometries"])
-    ends_b0l = dict((g["geometry_id"], g) for g in base["b0-lhs"]["geometries"])
+    if fresh:
+        ends_b0t = dict((g["geometry_id"], g)
+                        for g in bundles["b0-template"]["geometries"])
+    else:
+        ends_b0t = dict((g["geometry_id"], g)
+                        for g in base["b0-template"]["geometries"])
+        ends_b0l = dict((g["geometry_id"], g)
+                        for g in base["b0-lhs"]["geometries"])
     ids = runs["meta"]["ids"]
     systems = {}
     for name in ("full", "no-preflight", "no-remedies", "no-prior", "no-optimiser",
                  "rules"):
         systems[name] = system_stats(ends[name], ids)
     systems["b0-template"] = system_stats(ends_b0t, ids)
-    systems["b0-lhs"] = system_stats(ends_b0l, ids)
+    if not fresh:
+        systems["b0-lhs"] = system_stats(ends_b0l, ids)
     tier0 = runs["meta"]["tier0_ids"]
     replays = dict((c["name"], c["replay"]) for c in runs["campaigns"])
     gates_const = schema.load_gates()
@@ -1074,6 +1296,15 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
                                 "optimise/G-OPT.json) as it stood when this "
                                 "evaluation's report was first written",
                         "context": tuning})
+    if fresh:
+        fid_rep = g_fid(runs["fid"]["full"], runs["fid"]["b0-template"], True,
+                        metrics=FID_METRICS_FRESH)
+    else:
+        fid_rep = g_fid(runs["fid"]["full"], runs["fid"]["b0-template"],
+                        runs["seal_compare"]["equal"])
+    opt_rep = g_opt(systems)
+    if fresh:
+        opt_rep["verdict"] = REPORTED
     gate_reps = {
         "G-FAIL": g_fail(systems["full"], systems["b0-template"],
                          [(ends_b0t[i]["failure"] is True,
@@ -1082,16 +1313,22 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
                           [i for i in ids if i not in set(tier0)]),
         "G-QUAL": g_qual(dict((c["name"], c["qual"]) for c in runs["campaigns"]),
                          runs["static"]),
-        "G-FID": g_fid(runs["fid"]["full"], runs["fid"]["b0-template"],
-                       runs["seal_compare"]["equal"]),
+        "G-FID": fid_rep,
         "G-COST": g_cost(ends["full"], ends_b0t, ids, bundles["full"]["end"],
                          bundles["full"]["campaign"], gates_const),
         "G-DET": g_det(runs["gdet"]["compare"], replays["gdet-1"], replays["gdet-2"],
                        runs["gdet"]["vs_full"]),
         "G-EXPL": g_expl(dict((c["name"], bundles[c["name"]]["summary"]["audit"])
                               for c in runs["campaigns"])),
-        "G-OPT": g_opt(systems),
+        "G-OPT": opt_rep,
         "G-ABL": g_abl(systems, tuning)}
+    if fresh:
+        tier1_ids = [i for i in ids if ends["full"][i].get("family")
+                     in baseline.TIER1]
+        gate_reps["G-BLC-1"] = g_blc1(ends["full"], ends_b0t, tier1_ids)
+        for row in gate_reps["G-ABL"]["table"]:
+            if row["name"] in LABELS_FRESH:
+                row["label"] = LABELS_FRESH[row["name"]]
     decisions = {}
     for name in ("full", "no-preflight", "no-remedies", "no-prior", "no-optimiser"):
         cnt = {}
@@ -1132,6 +1369,16 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
                         "G-BLC-0": gate_reps["G-BLC-0"]["verdict"]},
            "decisions": decisions, "tuning": tuning,
            "departures": list(DEPARTURES), "doi": DOI}
+    if fresh:
+        rep["fresh"] = {"seed": fresh["seed"], "scope": fresh["scope"],
+                        "reduced": fresh["scope"] == "reduced", "ids": ids,
+                        "gdet_ids": runs["gdet_ids"],
+                        "n_manifest": fresh["n_manifest"]}
+        rep["headline"]["G-BLC-1"] = gate_reps["G-BLC-1"]["verdict"]
+        stale = ("The sealed B0-template rows",
+                 "The test manifest is opened once")
+        rep["departures"] = [d for d in DEPARTURES
+                             if not d.startswith(stale)] + list(FRESH_DEPARTURES)
     if write:
         _dump_json(os.path.join(report_dir, REPORT_NAME), rep)
         _write_text(os.path.join(report_dir, REPORT_MD), report_md(rep))
@@ -1183,6 +1430,23 @@ def verdict_lines(rep):
                       _b(bl["conditions"]["blc_full_ge_080"]),
                       explain.fmt(float(bl["b0"]["blc8_mean"])),
                       explain.fmt(float(bl["b0"]["blc_full_mean"]))))
+    if rep.get("fresh"):
+        b1 = g["G-BLC-1"]
+        if b1["verdict"] == UNDECIDED and b1["n"] == 0:
+            out.append("G-BLC-1 UNDECIDED: no tier-1 geometry")
+        else:
+            out.append("G-BLC-1 %s: tier 1 (%s A/B/E/F) BLC_8 %s "
+                       "(>= %.2f %s), BLC_full %s (>= %.2f %s), a priori; "
+                       "B0-template %s / %s"
+                       % (b1["verdict"], str(b1["n"]),
+                          explain.fmt(float(b1["blc8_mean"])),
+                          b1["targets"]["blc8"],
+                          _b(b1["conditions"]["blc8_ge_target"]),
+                          explain.fmt(float(b1["blc_full_mean"])),
+                          b1["targets"]["blc_full"],
+                          _b(b1["conditions"]["blc_full_ge_target"]),
+                          explain.fmt(float(b1["b0"]["blc8_mean"])),
+                          explain.fmt(float(b1["b0"]["blc_full_mean"]))))
     q = g["G-QUAL"]
     out.append("G-QUAL %s: %s configs, %s off the reference quality block, "
                "%s of %s edits outside the whitelist, %s config sha mismatches, "
@@ -1193,11 +1457,17 @@ def verdict_lines(rep):
                   str(len(q["static"]["flag_literals"])),
                   _b(q["static"]["remedies_scan_ok"])))
     fd = g["G-FID"]
-    out.append("G-FID %s: %s family metrics compared, worse %s, re-measured "
-               "B0-template equal to the seal %s"
-               % (fd["verdict"], str(fd["compared"]),
-                  _fmt_list(["%s:%s" % (w[0], w[1]) for w in fd["worse"]]),
-                  _b(fd["seal_equal"])))
+    if rep.get("fresh"):
+        out.append("G-FID %s: %s family metrics compared, worse %s, "
+                   "B0-template measured fresh"
+                   % (fd["verdict"], str(fd["compared"]),
+                      _fmt_list(["%s:%s" % (w[0], w[1]) for w in fd["worse"]])))
+    else:
+        out.append("G-FID %s: %s family metrics compared, worse %s, re-measured "
+                   "B0-template equal to the seal %s"
+                   % (fd["verdict"], str(fd["compared"]),
+                      _fmt_list(["%s:%s" % (w[0], w[1]) for w in fd["worse"]]),
+                      _b(fd["seal_equal"])))
     co = g["G-COST"]
     items = co["items"]
     out.append("G-COST %s: cells %s (%s), over budget %s (%s), wall %s s at %s "
@@ -1238,6 +1508,8 @@ def verdict_lines(rep):
                            % (row["label"], explain.fmt(float(row["mfr"])),
                               explain.fmt(float(row["blc8_mean"])))
                            for row in ab["table"]))
+    if rep.get("fresh") and rep["fresh"]["reduced"]:
+        out = ["REDUCED " + ln for ln in out]
     return out
 
 
@@ -1250,8 +1522,19 @@ def _r3(v):
 def report_md(rep):
     """THE results page - a pure function of the report dict."""
     L = []
-    L.append("# Autonomous mesh setup: the held-out evaluation (docs/15 §F)")
-    L.append("")
+    fr = rep.get("fresh")
+    if fr:
+        L.append("# Fresh-seed evaluation (corpus seed 2, scope %s)"
+                 % fr["scope"])
+        L.append("")
+        if fr["reduced"]:
+            L.append("REDUCED: a pre-registered subset of %d of the %d fresh "
+                     "test geometries; these verdicts are not a headline."
+                     % (len(fr["ids"]), fr["n_manifest"]))
+            L.append("")
+    else:
+        L.append("# Autonomous mesh setup: the held-out evaluation (docs/15 §F)")
+        L.append("")
     if rep["rehearsal"]:
         L.append("**REHEARSAL on tuning geometries - not a result.**")
         L.append("")
@@ -1270,26 +1553,38 @@ def report_md(rep):
     L.append("Every BLC number is a priori (docs/15 §D.3) until the solved y+ check "
              "(G-YPLUS) exists.")
     L.append("")
-    L.append("Every rule on this page was fixed before the test split was opened. "
-             "A missed gate is reported as missed and is not re-run with other "
-             "settings; the test split is now spent, and a second claim needs a "
-             "fresh test seed and a new lock (docs/15 §F).")
+    if fr:
+        L.append("Every rule on this page was fixed before the fresh test split "
+                 "was opened. A missed gate is reported as missed and is not "
+                 "re-run with other settings; the full scope runs under the same "
+                 "locked plan, and a run with any other plan is refused "
+                 "(docs/15 §F).")
+    else:
+        L.append("Every rule on this page was fixed before the test split was opened. "
+                 "A missed gate is reported as missed and is not re-run with other "
+                 "settings; the test split is now spent, and a second claim needs a "
+                 "fresh test seed and a new lock (docs/15 §F).")
     L.append("")
     g = rep["gates"]
-    lines = dict(zip(("G-FAIL", "G-BLC-0", "G-QUAL", "G-FID", "G-COST", "G-DET",
-                      "G-EXPL", "G-OPT", "G-ABL"), verdict_lines(rep)))
+    NAMES = (("G-FAIL", "G-BLC-0")
+             + (("G-BLC-1",) if fr else ())
+             + ("G-QUAL", "G-FID", "G-COST", "G-DET", "G-EXPL", "G-OPT",
+                "G-ABL"))
+    lines = dict(zip(NAMES, verdict_lines(rep)))
     L.append("## Headlines")
     L.append("")
     L.append(lines["G-FAIL"])
     L.append("")
     L.append(lines["G-BLC-0"])
     L.append("")
+    if fr:
+        L.append(lines["G-BLC-1"])
+        L.append("")
     L.append("## Gates")
     L.append("")
     L.append("| gate | verdict | numbers |")
     L.append("|---|---|---|")
-    for name in ("G-FAIL", "G-BLC-0", "G-QUAL", "G-FID", "G-COST", "G-DET",
-                 "G-EXPL", "G-OPT", "G-ABL"):
+    for name in NAMES:
         ln = lines[name]
         v = ln.split(": ", 1)[0].split(" ", 1)[1]
         nums = ln.split(": ", 1)[1] if ": " in ln else ""
@@ -1297,23 +1592,39 @@ def report_md(rep):
     L.append("")
     L.append("## Mesh failure per family (G-FAIL)")
     L.append("")
-    L.append("| family | n | B0-template | B0-LHS best | full | full MFR [95 % CI] | full strict |")
-    L.append("|---|---|---|---|---|---|---|")
     fams = [f for f in FAMILIES if f in rep["systems"]["full"]["per_family"]]
-    for f in fams:
-        pf = rep["systems"]["full"]["per_family"][f]
-        b0 = rep["systems"]["b0-template"]["per_family"].get(f, {})
-        bl = rep["systems"]["b0-lhs"]["per_family"].get(f, {})
-        L.append("| %s | %d | %d | %d | %d | %s [%s, %s] | %d |"
-                 % (f, pf["n"], b0.get("failures", 0), bl.get("failures", 0),
-                    pf["failures"], _r3(pf["mfr"]), _r3(pf["mfr_ci"][0]),
-                    _r3(pf["mfr_ci"][1]), pf["strict"]))
     allf = rep["systems"]["full"]
-    L.append("| all | %d | %d | %d | %d | %s [%s, %s] | %d |"
-             % (allf["n"], rep["systems"]["b0-template"]["failures"],
-                rep["systems"]["b0-lhs"]["failures"], allf["failures"],
-                _r3(allf["mfr"]), _r3(allf["mfr_ci"][0]), _r3(allf["mfr_ci"][1]),
-                allf["strict"]))
+    if fr:
+        L.append("| family | n | B0-template | full | full MFR [95 % CI] | "
+                 "full strict |")
+        L.append("|---|---|---|---|---|---|")
+        for f in fams:
+            pf = rep["systems"]["full"]["per_family"][f]
+            b0 = rep["systems"]["b0-template"]["per_family"].get(f, {})
+            L.append("| %s | %d | %d | %d | %s [%s, %s] | %d |"
+                     % (f, pf["n"], b0.get("failures", 0), pf["failures"],
+                        _r3(pf["mfr"]), _r3(pf["mfr_ci"][0]),
+                        _r3(pf["mfr_ci"][1]), pf["strict"]))
+        L.append("| all | %d | %d | %d | %s [%s, %s] | %d |"
+                 % (allf["n"], rep["systems"]["b0-template"]["failures"],
+                    allf["failures"], _r3(allf["mfr"]), _r3(allf["mfr_ci"][0]),
+                    _r3(allf["mfr_ci"][1]), allf["strict"]))
+    else:
+        L.append("| family | n | B0-template | B0-LHS best | full | full MFR [95 % CI] | full strict |")
+        L.append("|---|---|---|---|---|---|---|")
+        for f in fams:
+            pf = rep["systems"]["full"]["per_family"][f]
+            b0 = rep["systems"]["b0-template"]["per_family"].get(f, {})
+            bl = rep["systems"]["b0-lhs"]["per_family"].get(f, {})
+            L.append("| %s | %d | %d | %d | %d | %s [%s, %s] | %d |"
+                     % (f, pf["n"], b0.get("failures", 0), bl.get("failures", 0),
+                        pf["failures"], _r3(pf["mfr"]), _r3(pf["mfr_ci"][0]),
+                        _r3(pf["mfr_ci"][1]), pf["strict"]))
+        L.append("| all | %d | %d | %d | %d | %s [%s, %s] | %d |"
+                 % (allf["n"], rep["systems"]["b0-template"]["failures"],
+                    rep["systems"]["b0-lhs"]["failures"], allf["failures"],
+                    _r3(allf["mfr"]), _r3(allf["mfr_ci"][0]),
+                    _r3(allf["mfr_ci"][1]), allf["strict"]))
     L.append("")
     bl0 = g["G-BLC-0"]
     L.append("## Boundary-layer capture, a priori (G-BLC-0)")
@@ -1337,13 +1648,38 @@ def report_md(rep):
              "wall, which this mesher cannot grow (docs/15 §I-1); they are "
              "reported, never gated.")
     L.append("")
+    if fr:
+        b1 = g["G-BLC-1"]
+        L.append("## G-BLC-1 (headline 2, tier 1)")
+        L.append("")
+        if b1["n"]:
+            L.append("Tier 1 (%d %s geometries): full BLC_8 %s (target "
+                     ">= %.2f), BLC_full %s (target >= %.2f); B0-template "
+                     "%s / %s; a priori."
+                     % (b1["n"], "/".join(b1["families"]),
+                        _r3(b1["blc8_mean"]), b1["targets"]["blc8"],
+                        _r3(b1["blc_full_mean"]), b1["targets"]["blc_full"],
+                        _r3(b1["b0"]["blc8_mean"]),
+                        _r3(b1["b0"]["blc_full_mean"])))
+        else:
+            L.append("No tier-1 geometry.")
+        L.append("")
+        L.append("| family | n | BLC_8 | BLC_full |")
+        L.append("|---|---|---|---|")
+        for f in b1["families"]:
+            if f in b1["per_family"]:
+                st = b1["per_family"][f]
+                L.append("| %s | %d | %s | %s |"
+                         % (f, st["n"], _r3(st["blc8_mean"]),
+                            _r3(st["blc_full_mean"])))
+        L.append("")
     fd = g["G-FID"]
     L.append("## Fidelity (G-FID)")
     L.append("")
     L.append("| family | full meshes | B0 meshes | feature_tolerance 0 on sharp bodies | metric | full median | B0 median | no worse |")
     L.append("|---|---|---|---|---|---|---|---|")
     for f, st in fd["per_family"].items():
-        for m, _op in FID_METRICS:
+        for m, _op in (FID_METRICS_FRESH if fr else FID_METRICS):
             mt = st["metrics"][m]
             L.append("| %s | %d | %d | %d | %s | %s | %s | %s |"
                      % (f, st["n_full"], st["n_b0"], st["n_ft0_sharp"], m,
@@ -1539,7 +1875,9 @@ def check(report_dir=REPORT_DIR):
 
     def _lock():
         runs = _runs()
-        p = os.path.join(report_dir, LOCK_NAME)
+        p = os.path.join(os.path.dirname(report_dir)
+                         if runs["meta"].get("fresh") else report_dir,
+                         LOCK_NAME)
         if not os.path.isfile(p):
             raise EvalError("%s is missing" % p)
         lock = _read_json(p)
@@ -1558,6 +1896,17 @@ def check(report_dir=REPORT_DIR):
 
     def _baselines():
         runs = _runs()
+        if runs["meta"].get("fresh"):
+            for c in runs["campaigns"]:
+                if c["name"] == "b0-template":
+                    bp = os.path.join(report_dir, c["bundle"]["file"])
+                    if not os.path.isfile(bp):
+                        raise EvalError("%s is missing" % bp)
+                    break
+            else:
+                raise EvalError("the fresh baselines item: no b0-template "
+                                "campaign in runs.json")
+            return
         if runs["meta"]["rehearsal"]:
             for s in baseline.SYSTEMS:
                 p = os.path.join(report_dir, BASELINE_COPY % s)
@@ -1628,6 +1977,23 @@ def _cli_plan(report_dir):
     return 0
 
 
+def _cli_plan_fresh():
+    """--plan --manifest test2: the fresh lock's facts, nothing opened."""
+    sha = campaign.manifest_sha(FRESH_SPLIT)
+    ids = lock_test_ids(FRESH_SPLIT)
+    print("[eval] fresh split %s: %d geometries in the fresh lock (manifest "
+          "sha %s), not opened" % (FRESH_SPLIT, len(ids), sha[:12]))
+    print("[eval] campaigns: %s" % ", ".join(c[0] for c in CAMPAIGNS))
+    print("[eval] G-DET ids: %s" % " ".join(gdet_ids(ids)))
+    print("[eval] G-BLC-1 targets: BLC_8 >= %.2f, BLC_full >= %.2f "
+          "(tier 1: %s)"
+          % (BLC1_8_MIN, BLC1_FULL_MIN, "/".join(baseline.TIER1)))
+    lpath = os.path.join(FRESH_DIR, LOCK_NAME)
+    print("[eval] lock: %s"
+          % ("present" if os.path.isfile(lpath) else "absent"))
+    return 0
+
+
 def main(argv=None):
     ap = _ArgParser(prog="evaluate.py")
     ap.add_argument("--selftest", action="store_true")
@@ -1642,16 +2008,28 @@ def main(argv=None):
     ap.add_argument("--manifest", default="test")
     ap.add_argument("--baselines")
     ap.add_argument("--gdet-n", type=int, default=None)
+    ap.add_argument("--scope", choices=list(SCOPES))
     a = ap.parse_args(argv)
-    rdir = a.report_dir or REPORT_DIR
+    if a.report_dir:
+        rdir = a.report_dir
+    elif a.scope:
+        rdir = os.path.join(FRESH_DIR, a.scope)
+    else:
+        rdir = REPORT_DIR
     try:
         if a.selftest:
             return _selftest()
         if a.plan:
+            if a.manifest == FRESH_SPLIT:
+                return _cli_plan_fresh()
             return _cli_plan(rdir)
         if a.run:
             if not a.work:
                 print("evaluate: --run needs --work", file=sys.stderr)
+                return 2
+            if a.manifest == FRESH_SPLIT and not a.scope:
+                print("evaluate: --manifest %s needs --scope (%s)"
+                      % (FRESH_SPLIT, "/".join(SCOPES)), file=sys.stderr)
                 return 2
             sources = None
             if a.baselines:
@@ -1660,10 +2038,11 @@ def main(argv=None):
                     raise EvalError("--baselines is two comma-separated paths "
                                     "(b0-template first)")
                 sources = {"b0-template": parts[0], "b0-lhs": parts[1]}
-            elif a.manifest != "test":
+            elif a.manifest != "test" and a.scope is None:
                 raise EvalError("a rehearsal needs --baselines and --gdet-n")
             run(a.work, manifest=a.manifest, baselines=sources, gdet_n=a.gdet_n,
-                streams=a.streams, report_dir=rdir, binary=a.binary)
+                streams=a.streams, report_dir=a.report_dir, binary=a.binary,
+                scope=a.scope)
             return 0
         if a.report:
             report(rdir)
@@ -2141,10 +2520,11 @@ def _selftest():
         assert au["ok"] and au["record_order"]["bad"] == [], au["record_order"]
         last = max(r["attempt"] for r in rows_f if r["geometry_id"] == "F-1-009")
         tags = recs_f["F-1-009"]
-        # RM-SNAP-TAU spends attempts 2-3 on this sharp body and the attempt-4
-        # pick fails too, so the terminal RM-EXHAUSTED (not an optimiser record
-        # after it) ends the geometry
-        assert any(e and t["record"]["rule_id"] == "RM-EXHAUSTED" for t, e in
+        # GLB-CONFIG: R-WIN's margin puts attempt 1 at wall level 4 while the
+        # floor stays the plain edge's 3, so RM-SNAP-WALL's coarsening to 3
+        # lands and its attempt-2 mesh passes the preflight: the terminal
+        # RM-PASS ends the geometry (no RM-SNAP-TAU run, no RM-EXHAUSTED)
+        assert any(e and t["record"]["rule_id"] == "RM-PASS" for t, e in
                    zip(tags, explain.ends_geometry(tags, last))), tags
         assert rep["systems"]["b0-template"]["failures"] == 4
         assert rep["gates"]["G-FID"]["verdict"] == UNDECIDED
@@ -2158,6 +2538,10 @@ def _selftest():
                        "## Tuning context (not the result)", "## Departures",
                        "in the style of", DOI):
             assert marker in md, marker
+        assert "B0-template (sealed)" in md
+        assert ("the test split is now spent, and a second claim needs a "
+                "fresh test seed and a new lock (docs/15 §F).") in md
+        assert rep["departures"] == list(DEPARTURES)
         mtimes = {}
         for name in [c[0] for c in CAMPAIGNS]:
             mtimes[name] = os.path.getmtime(
@@ -2224,6 +2608,130 @@ def _selftest():
                             capture_output=True, text=True, encoding="utf-8",
                             errors="replace", env=env, timeout=300)
         assert p4.returncode == 1
+    def g9():
+        assert FRESH_SPLIT == "test2" and FRESH_SEED == 2
+        assert FRESH_DIR == os.path.join(REPORT_DIR, "seed2")
+        assert SCOPES == ("reduced", "full") and REDUCED_SALT == "reduced:"
+        assert REDUCED_GDET_FAMILIES == ("D", "F")
+        assert BLC1_8_MIN == 0.09 and BLC1_FULL_MIN == 0.05
+        assert FID_METRICS_FRESH == FID_METRICS + (("feature_capture", "ge"),)
+        assert FRESH_PLAN["seed"] == 2
+        assert FRESH_PLAN["scopes"] == ["reduced", "full"]
+        assert FRESH_PLAN["reduced"] == {"salt": "reduced:", "per_family": 1,
+                                         "d_commensurate": True,
+                                         "gdet_families": ["D", "F"]}
+        assert FRESH_PLAN["blc1"] == {"families": ["A", "B", "E", "F"],
+                                      "blc8_min": 0.09, "blc_full_min": 0.05}
+        assert FRESH_PLAN["fid_metrics"] == ["p99_over_hf", "pinned_frac",
+                                             "feature_share", "feature_capture"]
+        four = [rows[g] for g in ("D-1-010", "D-1-073", "E-1-004", "F-1-009")]
+        assert reduced_ids(four) == ["D-1-010", "E-1-004", "F-1-009"]
+        assert reduced_gdet(["D-1-010", "E-1-004", "F-1-009"]) == ["D-1-010", "F-1-009"]
+        ids1 = ["A-9-000", "B-9-001", "E-9-002", "F-9-003"]
+        ef1 = dict((gid, _hand_end(gid, False, blc8=v8, blcf=vf))
+                   for gid, v8, vf in zip(ids1, (0.2, 0.0, 0.1, 0.06),
+                                          (0.2, 0.0, 0.0, 0.0)))
+        eb1 = dict((gid, _hand_end(gid, False)) for gid in ids1)
+        r1 = g_blc1(ef1, eb1, ids1)
+        assert r1["verdict"] == PASS and r1["n"] == 4 and r1["ids"] == ids1
+        assert abs(r1["blc8_mean"] - 0.09) < 1e-12
+        assert abs(r1["blc_full_mean"] - 0.05) < 1e-12
+        assert r1["conditions"] == {"blc8_ge_target": True,
+                                    "blc_full_ge_target": True}
+        assert sorted(r1["per_family"]) == ["A", "B", "E", "F"]
+        ef2 = dict((gid, _hand_end(gid, False, blc8=v8, blcf=vf))
+                   for gid, v8, vf in zip(ids1, (0.1, 0.0, 0.0, 0.0),
+                                          (0.2, 0.0, 0.0, 0.0)))
+        r2 = g_blc1(ef2, dict((gid, _hand_end(gid, False)) for gid in ids1),
+                    ids1)
+        assert r2["verdict"] == FAIL and abs(r2["blc8_mean"] - 0.025) < 1e-15
+        assert r2["conditions"] == {"blc8_ge_target": False,
+                                    "blc_full_ge_target": True}
+        r3 = g_blc1({}, {}, [])
+        assert r3["verdict"] == UNDECIDED and r3["blc8_mean"] is None
+        ff = [{"family": "B", "p99_over_hf": 0.01, "pinned_frac": 0.0,
+               "feature_share": 0.5, "feature_capture": 0.1}]
+        fb = [{"family": "B", "p99_over_hf": 0.02, "pinned_frac": 0.01,
+               "feature_share": 0.5, "feature_capture": 0.4}]
+        rf = g_fid(ff, fb, True, metrics=FID_METRICS_FRESH)
+        assert rf["worse"] == [["B", "feature_capture"]], rf["worse"]
+        assert rf["compared"] == 4 and rf["verdict"] == FAIL
+        p9 = plan_of({"source": "x", "sha256": "y", "n": 4}, True, ["D-1-010"],
+                     2, campaign.BINARY_DEFAULT,
+                     {"b0-template": "a", "b0-lhs": "b"})
+        assert "fresh" not in p9
+
+    def g10():
+        m10 = os.path.join(tmp, "m10.jsonl")
+        with open(m10, "w", encoding="utf-8", newline="\n") as f:
+            for gid in IDS:
+                f.write(json.dumps(rows[gid], sort_keys=True) + "\n")
+        fr_dir = os.path.join(tmp, "fresh")
+        rep_r = run(os.path.join(tmp, "w10r"), manifest=m10, streams=2,
+                    report_dir=os.path.join(fr_dir, "reduced"), quiet=True,
+                    scope="reduced", **F)
+        lock_path = os.path.join(fr_dir, LOCK_NAME)
+        assert os.path.isfile(lock_path)
+        assert rep_r["fresh"]["reduced"] is True
+        assert rep_r["fresh"]["ids"] == ["D-1-010", "E-1-004", "F-1-009"]
+        assert rep_r["gdet_ids"] == ["D-1-010", "F-1-009"]
+        assert set(rep_r["headline"]) == {"G-FAIL", "G-BLC-0", "G-BLC-1"}
+        assert rep_r["gates"]["G-OPT"]["verdict"] == REPORTED
+        assert "b0-lhs" not in rep_r["systems"]
+        vl = verdict_lines(rep_r)
+        assert vl and all(ln.startswith("REDUCED ") for ln in vl), vl[:2]
+        abl_lab = [r["label"] for r in rep_r["gates"]["G-ABL"]["table"]
+                   if r["name"] == "b0-template"]
+        assert abl_lab and all(
+            lb == LABELS_FRESH["b0-template"] for lb in abl_lab), abl_lab
+        md_r = report_md(rep_r)
+        assert "B0-template (measured fresh)" in md_r
+        assert "B0-template (sealed)" not in md_r
+        assert ("Every rule on this page was fixed before the fresh test split "
+                "was opened. A missed gate is reported as missed and is not "
+                "re-run with other settings; the full scope runs under the same "
+                "locked plan, and a run with any other plan is refused "
+                "(docs/15 §F).") in md_r
+        assert "the test split is now spent" not in md_r
+        assert FRESH_DEPARTURES[-1] in rep_r["departures"]
+        assert not [d for d in rep_r["departures"]
+                    if d.startswith("The sealed B0-template rows")
+                    or d.startswith("The test manifest is opened once")]
+        res_r = check(os.path.join(fr_dir, "reduced"))
+        assert res_r["verdict"] == PASS, [(i["name"], i["why"][:200])
+                                          for i in res_r["items"]
+                                          if not i["ok"]]
+        before = open(lock_path, "rb").read()
+        rep_f = run(os.path.join(tmp, "w10f"), manifest=m10, streams=2,
+                    report_dir=os.path.join(fr_dir, "full"), quiet=True,
+                    scope="full", **F)
+        assert open(lock_path, "rb").read() == before
+        assert rep_f["fresh"]["reduced"] is False
+        assert sorted(rep_f["fresh"]["ids"]) == sorted(IDS)
+        res_f = check(os.path.join(fr_dir, "full"))
+        assert res_f["verdict"] == PASS, [(i["name"], i["why"][:200])
+                                          for i in res_f["items"]
+                                          if not i["ok"]]
+        try:
+            run(os.path.join(tmp, "w10f"), manifest=m10, streams=1,
+                report_dir=os.path.join(fr_dir, "full"), quiet=True,
+                scope="full", **F)
+            raise AssertionError("a changed-stream fresh plan was accepted")
+        except EvalError as e:
+            assert "spent" in str(e), e
+        try:
+            run(os.path.join(tmp, "w10x"), manifest="test2", scope="reduced",
+                attempt_fn=prior._wall_oracle, quiet=True)
+            raise AssertionError("a fake on the fresh split was accepted")
+        except EvalError as e:
+            assert "no fakes" in str(e), e
+        try:
+            run(os.path.join(tmp, "w10y"), manifest="test", scope="reduced",
+                quiet=True)
+            raise AssertionError("a scope on the seed-1 split was accepted")
+        except EvalError as e:
+            assert "spent" in str(e), e
+
     for name, fn in (("constants, the seal, the G-DET ids", g1),
                      ("statistics", g2),
                      ("gates", g3),
@@ -2231,7 +2739,9 @@ def _selftest():
                      ("seam", g5),
                      ("lock", g6),
                      ("run", g7),
-                     ("check and CLI", g8)):
+                     ("check and CLI", g8),
+                     ("fresh gates", g9),
+                     ("fresh rehearsal", g10)):
         if not group(name, fn):
             return 1
     shutil.rmtree(tmp, ignore_errors=True)

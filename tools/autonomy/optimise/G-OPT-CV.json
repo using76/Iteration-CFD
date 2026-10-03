@@ -30,7 +30,7 @@
   "n_geometries": 372,
   "n_pos": 212
  },
- "date": "2026-10-02",
+ "date": "2026-10-03",
  "extra_cv": {
   "auc": 0.9716928816293607,
   "blc8_rmse": 0.300193597112459,
@@ -70,8 +70,8 @@
  "n_duplicates": 1322,
  "schema": "autonomy-opt-cv/1",
  "ship": {
-  "enabled": true,
-  "why": "the CV half fails on the new rows; the optimiser stays enabled by the user's choice of 2026-09-26 (docs/15 section F said a G-OPT miss ships it disabled) until the user says otherwise; the shipped model is not refitted here"
+  "enabled": false,
+  "why": "the CV half fails on the new rows; the shipped model (optimise/aml/opt_model.json) and its enabled flag are unchanged here (the user's decision of 2026-10-03: disabled until G-OPT passes)"
  },
  "sources": [
   {

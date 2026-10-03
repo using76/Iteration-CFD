@@ -23,11 +23,16 @@ rules+opt campaigns over the geometries where that can happen, cross-fitted so
 every proposal comes from a fold ensemble that never saw the geometry; G-OPT
 passes on fail AUC >= 0.75 and BLC_8 RMSE <= 0.15, and the optimiser ships
 enabled only when the CV holds AND it beats the rules on the tuning split.
+The refit (--refit) re-fits the same ensemble on the extra bundles' rows in
+front of the AM-14 training set and writes optimise/aml/ (the shipped model
+since 2026-10-03); a refit runs no refinement round, so the tuning ablation
+half is not measured and the optimiser ships DISABLED until G-OPT passes.
 
     python tools/autonomy/optimise.py --selftest
     python tools/autonomy/optimise.py --plan
     python tools/autonomy/optimise.py --refine --work DIR [--rounds N] [--streams N]
     python tools/autonomy/optimise.py --cv --extra PATH [--extra PATH ...]
+    python tools/autonomy/optimise.py --refit --extra PATH [--extra PATH ...]
     python tools/autonomy/optimise.py --check
 """
 import argparse
@@ -75,6 +80,9 @@ class OptError(ValueError):
 
 
 REPORT_DIR = os.path.join(HERE, "optimise")
+SHIP_DIR = os.path.join(REPORT_DIR, "aml")
+# the shipped model since 2026-10-03: refit on the AM-L rows (optimise/ keeps
+# the AM-14 gate as the record of that run)
 MODEL_NAME = "opt_model.json"
 TRAIN_NAME = "train.json.gz"
 REPORT_NAME = "G-OPT.json"
@@ -121,7 +129,7 @@ GATE_SCHEMA = "autonomy-opt-gate/1"
 TRAIN_SCHEMA = "autonomy-opt-train/1"
 CHECK_SCHEMA = "autonomy-opt-check/1"
 HEADER = baseline.HEADER                   # the "$comment" of every JSON it writes
-_MODEL = {"path": os.path.join(REPORT_DIR, MODEL_NAME), "v": None, "key": None}
+_MODEL = {"path": os.path.join(SHIP_DIR, MODEL_NAME), "v": None, "key": None}
 
 
 # --- (C2) the rebuild: every tuning attempt's config from its row ------------
@@ -207,6 +215,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
     # before WIN-2TO1 with the growth fitted at the wall level)
     ftr = rules.ft_radius_of(bundle.get("records") or [])
     w21 = rules.win_2to1_of(bundle.get("records") or [])
+    glb = rules.glb_of(bundle.get("records") or [])
     for gid in sorted(by_geom):
         att = by_geom[gid]
         if sorted(att) != list(range(1, max(att) + 1)):
@@ -219,7 +228,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
         else:
             s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
                             campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
-                            ft_radius=ftr, win_2to1=w21)
+                            ft_radius=ftr, win_2to1=w21, glb=glb)
             if s["refused"]:
                 raise OptError("rules.setup refuses %s (%s): %s"
                                % (gid, source, ", ".join(s["refused"])))
@@ -698,7 +707,7 @@ def disabled_decision(gate):
     rec = _record(
         "OPT-DISABLED", "abstain",
         {"observable": "optimiser.enabled", "value": False, "threshold": False,
-         "op": "==", "source": "optimise/G-OPT.json (docs/15 §F G-OPT)"},
+         "op": "==", "source": "optimise/aml/G-OPT.json (docs/15 §F G-OPT)"},
         [{"name": "verdict", "value": verdict, "unit": ""},
          {"name": "auc", "value": auc, "unit": "1"},
          {"name": "blc8_rmse", "value": rmse, "unit": "1"},
@@ -791,7 +800,8 @@ def load_model(path=None):
 
 
 def propose(ctx, history):
-    """The hook campaign.py's HOOKS names; the model comes from opt_model.json."""
+    """The hook campaign.py's HOOKS names; the model comes from
+    optimise/aml/opt_model.json (the shipped refit)."""
     return load_model()["hook"](ctx, history)
 
 
@@ -998,6 +1008,43 @@ DEPARTURES = (
 # --- (C10) refine: the rounds, the gate and the artefacts ---------------------
 
 
+def _train_and_model(rows, named, yf, gr, cv, pred_check, importances):
+    """(train_obj, train_bytes, model_obj) as refine builds them (refit too)."""
+    train_rows = [{"geometry_id": r["geometry_id"], "family": r["family"],
+                   "source": r["source"], "attempt": r["attempt"],
+                   "config_sha256": r["config_sha256"],
+                   "x": [None if isinstance(v, float) and math.isnan(v)
+                         else v for v in r["x"]],
+                   "fail": bool(r["fail"]), "blc8": float(r["blc8"]),
+                   "log_cells": r["log_cells"]} for r in rows]
+    train_obj = {"$comment": HEADER, "schema": TRAIN_SCHEMA,
+                 "features": list(FEATURES), "sources": [n for n, _b, _s in named],
+                 "rows": train_rows}
+    train_bytes = gzip.compress(baseline._canonical(train_obj), compresslevel=9,
+                                mtime=0)
+    model_obj = {"$comment": HEADER, "schema": MODEL_SCHEMA,
+                 "features": list(FEATURES), "hyper": dict(HYPER),
+                 "members": MEMBERS, "boot_seed": BOOT_SEED, "folds": FOLDS,
+                 "p_fail_max": P_FAIL_MAX,
+                 "box": {"wall_offsets": list(WALL_OFFSETS),
+                         "band_scale": list(BAND_SCALE),
+                         "feature_offsets": list(FEATURE_OFFSETS),
+                         "feature_tolerances": list(FEATURE_TOLS),
+                         "feature_tau_sharp": list(FEATURE_TAU_SHARP),
+                         "smoothing_passes": list(SMOOTHING),
+                         "growth_lo": GROWTH_LO},
+                 "pool_n": 2 ** POOL_M, "sobol_seed": SOBOL_SEED,
+                 "train": {"file": TRAIN_NAME,
+                           "sha256": hashlib.sha256(train_bytes).hexdigest(),
+                           "content_sha256":
+                               hashlib.sha256(
+                                   baseline._canonical(train_obj)).hexdigest(),
+                           "n_rows": len(rows), "n_fail": int(yf.sum()),
+                           "n_geometries": len(set(gr))},
+                 "pred_check": pred_check, "importances": importances, "cv": cv}
+    return train_obj, train_bytes, model_obj
+
+
 def refine(work, *, sources=None, rounds=ROUNDS, streams=6,
            report_dir=REPORT_DIR, binary=None, attempt_fn=None, probe_fn=None,
            snap_fn=None, write=True, quiet=False):
@@ -1152,38 +1199,9 @@ def refine(work, *, sources=None, rounds=ROUNDS, streams=6,
                   "beats_rules": beats_rules}
     verdict = "PASS" if conditions["auc_ge"] and conditions["rmse_le"] else "FAIL"
     enabled = verdict == "PASS" and beats_rules
-    train_rows = [{"geometry_id": r["geometry_id"], "family": r["family"],
-                   "source": r["source"], "attempt": r["attempt"],
-                   "config_sha256": r["config_sha256"],
-                   "x": [None if isinstance(v, float) and math.isnan(v) else v
-                         for v in r["x"]],
-                   "fail": bool(r["fail"]), "blc8": float(r["blc8"]),
-                   "log_cells": r["log_cells"]} for r in rows]
-    train_obj = {"$comment": HEADER, "schema": TRAIN_SCHEMA,
-                 "features": list(FEATURES), "sources": [n for n, _b, _s in named],
-                 "rows": train_rows}
-    train_bytes = gzip.compress(baseline._canonical(train_obj), compresslevel=9,
-                                mtime=0)
-    model_obj = {"$comment": HEADER, "schema": MODEL_SCHEMA,
-                 "features": list(FEATURES), "hyper": dict(HYPER),
-                 "members": MEMBERS, "boot_seed": BOOT_SEED, "folds": FOLDS,
-                 "p_fail_max": P_FAIL_MAX,
-                 "box": {"wall_offsets": list(WALL_OFFSETS),
-                         "band_scale": list(BAND_SCALE),
-                         "feature_offsets": list(FEATURE_OFFSETS),
-                         "feature_tolerances": list(FEATURE_TOLS),
-                         "feature_tau_sharp": list(FEATURE_TAU_SHARP),
-                         "smoothing_passes": list(SMOOTHING),
-                         "growth_lo": GROWTH_LO},
-                 "pool_n": 2 ** POOL_M, "sobol_seed": SOBOL_SEED,
-                 "train": {"file": TRAIN_NAME,
-                           "sha256": hashlib.sha256(train_bytes).hexdigest(),
-                           "content_sha256":
-                               hashlib.sha256(
-                                   baseline._canonical(train_obj)).hexdigest(),
-                           "n_rows": len(rows), "n_fail": int(yf.sum()),
-                           "n_geometries": len(set(gr))},
-                 "pred_check": pred_check, "importances": importances, "cv": cv}
+    train_obj, train_bytes, model_obj = _train_and_model(rows, named, yf, gr,
+                                                         cv, pred_check,
+                                                         importances)
     msha = model_sha(model_obj)
     model_obj["enabled"] = enabled
     model_obj["gate"] = {"verdict": verdict, "auc": cv["auc"],
@@ -1358,8 +1376,11 @@ def _read_json_or_none(path):
         return None
 
 
-def check(report_dir=REPORT_DIR):
-    """The committed G-OPT artefacts rebuilt; never raises on a bad file."""
+def check(report_dir=SHIP_DIR):
+    """The committed G-OPT artefacts rebuilt; never raises on a bad file.
+
+    The default directory is SHIP_DIR (optimise/aml, the shipped refit);
+    pass optimise/ for the AM-14 record."""
     items = []
 
     def add(name, ok, why):
@@ -1556,16 +1577,17 @@ def cv(extra, *, base=None, report_dir=REPORT_DIR, write=True):
     conditions = {"auc_ge": cvm["auc"] is not None and cvm["auc"] >= AUC_MIN,
                   "rmse_le": cvm["blc8_rmse"] <= RMSE_MAX}
     verdict = "PASS" if all(conditions.values()) else "FAIL"
-    model = _read_json_or_none(os.path.join(REPORT_DIR, MODEL_NAME))
+    model = _read_json_or_none(_MODEL["path"])
     enabled = bool(model.get("enabled")) if isinstance(model, dict) else False
     if verdict == "PASS":
-        why = ("the CV half holds on the new rows; the shipped model and its "
-               "enabled flag stay as the committed opt_model.json has them")
+        why = ("the CV half holds on the new rows; the shipped model "
+               "(optimise/aml/opt_model.json) and its enabled flag are unchanged "
+               "here")
     else:
-        why = ("the CV half fails on the new rows; the optimiser stays enabled by "
-               "the user's choice of 2026-09-26 (docs/15 section F said a G-OPT "
-               "miss ships it disabled) until the user says otherwise; the shipped "
-               "model is not refitted here")
+        why = ("the CV half fails on the new rows; the shipped model "
+               "(optimise/aml/opt_model.json) and its enabled flag are unchanged "
+               "here (the user's decision of 2026-10-03: disabled until G-OPT "
+               "passes)")
     kept = collections.Counter(r["source"] for r in rows)
     rep = {"$comment": HEADER, "schema": CV_SCHEMA,
            "date": time.strftime("%Y-%m-%d"), "verdict": verdict,
@@ -1600,13 +1622,190 @@ def _cv_md(rep):
            "AUC %.6f, BLC_8 RMSE %.6f"
            % (rep["extra_oof"]["auc"], rep["extra_oof"]["blc8_rmse"],
               rep["extra_cv"]["auc"], rep["extra_cv"]["blc8_rmse"]),
-           "- the optimiser ships %s (the committed opt_model.json's enabled); %s"
+           "- the optimiser ships %s (optimise/aml/opt_model.json's enabled); %s"
            % ("enabled" if ship["enabled"] else "DISABLED", ship["why"]),
            "", "## Sources (row order)", "",
            "| file | sha256 | rows kept |", "| --- | --- | --- |"]
     for s in rep["sources"]:
         out.append("| %s | %s | %d |"
                    % (s["file"], s["sha256"][:12], s["n_rows_kept"]))
+    return "\n".join(out) + "\n"
+
+
+# --- the refit on the new rows (optimise/aml, 2026-10-03) -----------------------
+
+REFIT_DEPARTURES = (
+    "a refit runs no refinement round: G-OPT's tuning ablation half "
+    "(beats_rules) is not measured, so a refit never ships the optimiser "
+    "enabled; optimise.py --refine measures it",
+    "the training rows are the extra campaigns' rows first (a re-meshed "
+    "(geometry, config sha) keeps its new outcome), then the AM-14 training "
+    "set: the committed optimise/G-OPT.json's sources and its five round "
+    "bundles",
+    "the shipped model lives in optimise/aml/ since 2026-10-03; optimise/ "
+    "keeps the AM-14 gate as the record of that run")
+
+
+def _am14_base_paths():
+    """[paths] of the committed AM-14 training set: the committed G-OPT.json's
+    sources in order, then its rounds' bundles in order; every file sha256 is
+    checked against that report exactly as _committed_base checks it."""
+    rp = os.path.join(REPORT_DIR, REPORT_NAME)
+    rep = _read_json_or_none(rp)
+    if rep is None:
+        raise OptError("no committed %s to take the base rows from" % rp)
+    paths = []
+    for s in rep.get("sources") or []:
+        p = s["file"] if os.path.isabs(s["file"]) \
+            else os.path.join(HERE, s["file"])
+        if not os.path.isfile(p):
+            raise OptError("no source file %s" % p)
+        h = _file_sha256(p)
+        if h != s["sha256"]:
+            raise OptError("%s holds %s, the report says %s"
+                           % (p, h[:12], s["sha256"][:12]))
+        paths.append(p)
+    for r in rep.get("rounds") or []:
+        p = os.path.join(REPORT_DIR, r["bundle"]["file"])
+        if not os.path.isfile(p):
+            raise OptError("no round bundle %s" % p)
+        h = _file_sha256(p)
+        if h != r["bundle"]["sha256"]:
+            raise OptError("%s holds %s, the report says %s"
+                           % (p, h[:12], r["bundle"]["sha256"][:12]))
+        paths.append(p)
+    return paths
+
+
+def refit(extra, *, base=None, report_dir=SHIP_DIR, write=True, quiet=False):
+    """The optimiser refit on the extra bundles' rows, written to optimise/aml/.
+
+    `extra` is a list of bundle paths (naming and the tuning-split seal like
+    every source); `base` None means the committed AM-14 training set (the
+    committed optimise/G-OPT.json's sources, then its five round bundles,
+    sha-checked like _committed_base).  The EXTRA rows come first, so where a
+    new campaign re-meshed a (geometry, config sha) its new outcome wins.  A
+    refit runs no refinement round, so G-OPT's tuning ablation half is not
+    measured: the model ships enabled only if the CV half holds AND
+    beats_rules is True - from a refit, never (the user's decision of
+    2026-10-03)."""
+    if write and os.path.abspath(report_dir) == os.path.abspath(REPORT_DIR):
+        raise OptError("the refit never writes into %s (the AM-14 record); "
+                       "use %s" % (REPORT_DIR, SHIP_DIR))
+    named_extra = load_sources(extra)
+    named_base = load_sources(_am14_base_paths()) if base is None \
+        else load_sources(base)
+    named = named_extra + named_base
+    for name, bundle, _sha in named:
+        check_bundle(bundle, name)
+    gates = schema.load_gates()
+    knobs = schema.load_knobs()
+    mrows = {r["geometry_id"]: r for r in campaign.load_manifest("tuning", "rules")}
+    rows, dup = training_rows([(n, b) for n, b, _s in named], mrows, gates, knobs)
+    X, yf, yb, ylc, gr = matrix(rows)
+    _folds, cv = cross_fit(X, yf, yb, ylc, gr)
+    full = fit_ensemble(X, yf, yb, ylc, gr)
+    pf_all = predict(full, X)
+    pred_check = [[float(pf_all["p_fail"][i]), float(pf_all["blc8"][i]),
+                   float(pf_all["log_cells"][i])] for i in range(PRED_CHECK_N)]
+    if cv["auc"] is not None:
+        base_auc = float(roc_auc_score(yf, pf_all["p_fail"]))
+        imp = []
+        for jf in range(X.shape[1]):
+            X2 = X.copy()
+            X2[:, jf] = X[numpy.random.default_rng([IMP_SEED, jf]).permutation(
+                len(X)), jf]
+            auc2 = float(roc_auc_score(yf, predict(full, X2)["p_fail"]))
+            imp.append({"feature": FEATURES[jf],
+                        "auc_drop": round(base_auc - auc2, 6)})
+        imp.sort(key=lambda d: (-d["auc_drop"], d["feature"]))
+        importances = imp[:5]
+    else:
+        importances = []
+    conditions = {"auc_ge": cv["auc"] is not None and cv["auc"] >= AUC_MIN,
+                  "rmse_le": cv["blc8_rmse"] <= RMSE_MAX,
+                  "beats_rules": None}
+    verdict = "PASS" if conditions["auc_ge"] and conditions["rmse_le"] else "FAIL"
+    enabled = verdict == "PASS" and conditions["beats_rules"] is True
+    train_obj, train_bytes, model_obj = _train_and_model(rows, named, yf, gr,
+                                                         cv, pred_check,
+                                                         importances)
+    msha = model_sha(model_obj)
+    model_obj["enabled"] = enabled
+    model_obj["gate"] = {"verdict": verdict, "auc": cv["auc"],
+                         "blc8_rmse": cv["blc8_rmse"], "beats_rules": None,
+                         "model_sha256": msha, "report": REPORT_NAME}
+    if verdict == "FAIL":
+        why = ("the CV half fails, so G-OPT fails and the optimiser ships "
+               "DISABLED (the user's decision of 2026-10-03: refit on the AM-L "
+               "rows, disabled until G-OPT passes)")
+    else:
+        why = ("the CV half holds, but a refit measures no tuning ablation "
+               "(optimise.py --refine does), so G-OPT has not passed and the "
+               "optimiser ships DISABLED (the user's decision of 2026-10-03)")
+    kept = collections.Counter(r["source"] for r in rows)
+    n_new = int(sum(kept[n] for n in {n for n, _b, _s in named_extra}))
+    rep = {"$comment": HEADER, "schema": GATE_SCHEMA,
+           "date": time.strftime("%Y-%m-%d"), "kind": "refit",
+           "verdict": verdict, "enabled": enabled, "conditions": conditions,
+           "thresholds": {"auc_min": AUC_MIN, "rmse_max": RMSE_MAX,
+                          "mfr_gain_min": MFR_GAIN_MIN,
+                          "blc_gain_min": BLC_GAIN_MIN, "p_fail_max": P_FAIL_MAX},
+           "cv": cv, "rounds": [],
+           "sources": [{"file": n, "sha256": s,
+                        "content_sha256": hashlib.sha256(
+                            baseline._canonical(b)).hexdigest(),
+                        "n_rows_kept": int(kept.get(n, 0))}
+                       for n, b, s in named],
+           "n_duplicates": dup, "n_new_rows": n_new,
+           "model_sha256": msha, "train": dict(model_obj["train"]),
+           "importances": importances, "ship": {"enabled": enabled, "why": why},
+           "departures": list(REFIT_DEPARTURES)}
+    if write:
+        os.makedirs(report_dir, exist_ok=True)
+        train_path = os.path.join(report_dir, TRAIN_NAME)
+        if os.path.exists(train_path):
+            with open(train_path, "rb") as f:
+                if f.read() != train_bytes:
+                    raise OptError("exists: %s holds a different train file"
+                                   % train_path)
+        else:
+            with open(train_path, "wb") as f:
+                f.write(train_bytes)
+        _dump_json(os.path.join(report_dir, MODEL_NAME), model_obj)
+        _dump_json(os.path.join(report_dir, REPORT_NAME), rep)
+        _write_text(os.path.join(report_dir, REPORT_MD), refit_md(rep))
+    if not quiet:
+        print("G-OPT %s (refit): rows %d (%d new), AUC %.6f (>= %.2f %s), "
+              "BLC_8 RMSE %.6f (<= %.2f %s); the tuning ablation not run; the "
+              "optimiser ships %s"
+              % (verdict, cv["n"], n_new, cv["auc"], AUC_MIN,
+                 conditions["auc_ge"], cv["blc8_rmse"], RMSE_MAX,
+                 conditions["rmse_le"], "enabled" if enabled else "DISABLED"))
+    return rep
+
+
+def refit_md(rep):
+    """The refit's G-OPT report as markdown; every number from the report object."""
+    out = ["<!-- %s -->" % HEADER, "",
+           "# G-OPT - the optimiser refit on new rows", "",
+           "- date: %s" % rep["date"],
+           "- verdict: %s" % rep["verdict"],
+           "- rows: %d (of which %d from the extra bundles), %d duplicates"
+           % (rep["cv"]["n"], rep["n_new_rows"], rep["n_duplicates"]),
+           "- CV: fail AUC %.6f (>= %.2f %s), BLC_8 RMSE %.6f (<= %.2f %s)"
+           % (rep["cv"]["auc"], rep["thresholds"]["auc_min"],
+              rep["conditions"]["auc_ge"], rep["cv"]["blc8_rmse"],
+              rep["thresholds"]["rmse_max"], rep["conditions"]["rmse_le"]),
+           "- beats the rules: not measured (no refinement round)",
+           "- the optimiser ships DISABLED; %s" % rep["ship"]["why"],
+           "", "## Sources (row order)", "",
+           "| file | sha256 | rows kept |", "| --- | --- | --- |"]
+    for s in rep["sources"]:
+        out.append("| %s | %s | %d |"
+                   % (s["file"], s["sha256"][:12], s["n_rows_kept"]))
+    out += ["", "## Departures", ""]
+    out += ["- %s" % d for d in rep["departures"]]
     return "\n".join(out) + "\n"
 
 
@@ -1684,25 +1883,38 @@ def main(argv=None):
     ap.add_argument("--cv", action="store_true",
                     help="the CV half re-run with the --extra bundles' rows in "
                          "front: optimise/G-OPT-CV.json and .md")
+    ap.add_argument("--refit", action="store_true",
+                    help="refit on the --extra bundles' rows in front of the "
+                         "AM-14 training set: optimise/aml/G-OPT.json, .md, "
+                         "opt_model.json, train.json.gz; never ships enabled")
     ap.add_argument("--extra", action="append", default=None,
-                    help="an extra training bundle path (repeatable; --cv only)")
+                    help="an extra training bundle path (repeatable; --cv and "
+                         "--refit)")
     ap.add_argument("--work", help="the refinement rounds' work directory")
     ap.add_argument("--rounds", type=int, default=ROUNDS)
     ap.add_argument("--streams", type=int, default=6)
     ap.add_argument("--binary", default=None)
-    ap.add_argument("--report-dir", dest="report_dir", default=REPORT_DIR)
+    ap.add_argument("--report-dir", dest="report_dir", default=None,
+                    help="the report directory (default: --check and --refit "
+                         "use optimise/aml, the shipped model's directory; "
+                         "--cv and --refine use optimise/)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
     try:
         if a.check:
-            return _cli_check(a.report_dir)
+            return _cli_check(a.report_dir or SHIP_DIR)
         if a.plan:
             return _cli_plan()
         if a.cv:
             if not a.extra:
                 ap.exit(2, "optimise: --cv needs --extra\n")
-            return _cli_cv(a.extra, report_dir=a.report_dir)
+            return _cli_cv(a.extra, report_dir=a.report_dir or REPORT_DIR)
+        if a.refit:
+            if not a.extra:
+                ap.exit(2, "optimise: --refit needs --extra\n")
+            refit(a.extra, report_dir=a.report_dir or SHIP_DIR)
+            return 0
         if a.refine:
             if not a.work:
                 ap.exit(2, "optimise: --refine needs --work\n")
@@ -1711,13 +1923,14 @@ def main(argv=None):
             if not 1 <= a.streams <= 6:
                 raise OptError("--streams must lie in 1..6, got %d" % a.streams)
             refine(a.work, rounds=a.rounds, streams=a.streams,
-                   report_dir=a.report_dir, binary=a.binary)
+                   report_dir=a.report_dir or REPORT_DIR, binary=a.binary)
             return 0
     except (OptError, campaign.CampaignError, baseline.BaselineError,
             split.SplitSealed, split.SplitError) as e:
         sys.stderr.write("optimise: %s\n" % e)
         return 2
-    ap.error("one of --selftest, --plan, --refine, --cv, --check is required")
+    ap.error("one of --selftest, --plan, --refine, --cv, --refit, --check is "
+             "required")
 
 
 # --- (C14) the selftest ---------------------------------------------------------
@@ -1758,7 +1971,7 @@ def _harness(H):
 
 
 def selftest():
-    """(C14): twelve [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
+    """(C14): thirteen [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
     t0 = time.perf_counter()
     tmp = tempfile.mkdtemp()
     H = {"tmp": tmp}
@@ -1767,7 +1980,8 @@ def selftest():
               (_g5_decide, "decide"), (_g6_rank, "rank"),
               (_g7_hook, "hook seam"), (_g8_refine, "refine"),
               (_g9_refine_a, "refine A"), (_g10_live, "live"),
-              (_g11_check_cli, "check and CLI"), (_g12_cv, "cv"))
+              (_g11_check_cli, "check and CLI"), (_g12_cv, "cv"),
+              (_g13_refit, "refit"))
     try:
         try:
             _harness(H)
@@ -1849,9 +2063,10 @@ def _g2_rows(H):
     # the oracle campaigns spend RM-SNAP-TAU's two fires on five geometries
     # (F-1-009, D-1-001, D-1-027, F-1-025, D-1-073, attempts 2 and 3), ten rows
     # more than the 24 the spent table gave
-    assert (len(orows), dup2) == (114, 0), (len(orows), dup2)
-    assert sum(1 for r in orows if r["fail"]) == 72, \
-        sum(1 for r in orows if r["fail"])
+    # GLB-CONFIG: the margined attempt-1 configs feed the oracle, 111 rows (was 114)
+    assert (len(orows), dup2) == (111, 0), (len(orows), dup2)
+    assert sum(1 for r in orows if r["fail"]) == 62, \
+        sum(1 for r in orows if r["fail"])   # GLB-CONFIG: was 72
     assert len({r["geometry_id"] for r in orows}) == 16, \
         len({r["geometry_id"] for r in orows})
     b = baseline.read_bundle(H["osrc"][0])
@@ -1884,7 +2099,8 @@ def _g3_pool(H):
     s = rules.setup(H["mrows"][gid], fp, campaign.stl_rel(gid),
                     campaign.case_rel(gid), gid, gates=H["gates"],
                     knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]),
-                    win_2to1=rules.win_2to1_of(H["rb"]["records"]))
+                    win_2to1=rules.win_2to1_of(H["rb"]["records"]),
+                    glb=rules.glb_of(H["rb"]["records"]))
     assert not s["refused"], s["refused"]
     l1 = s["config"]
     assert schema.canonical_sha256(l1).startswith("e31caabef618")
@@ -1990,21 +2206,22 @@ def _g5_decide(H):
     assert res["verdict"] == "apply" and res["rule_id"] == "OPT-PICK", \
         (res["verdict"], res.get("rule_id"))
     c = res["counts"]
+    # GLB-CONFIG: the box is relative to D-1-073's margined L1 (wall 4, growth 1.0)
     assert (c["pool_n"], c["unique_n"], c["visited_n"], c["edit_refused_n"],
             c["l0_refused_n"], c["l0_pass_n"], c["feasible_n"]) == \
-        (256, 256, 0, 0, 29, 227, 39), c
+        (256, 256, 0, 0, 0, 256, 82), c
     pk = res["pick"]
-    assert pk["sobol_index"] == 33, pk["sobol_index"]
-    # the box is centred on today's L1, whose growth WIN-2TO1 fits at the feature
-    # level (1.151, not the recorded 1.34), and the sharp-body radius is tau/h_f/2
-    # of the point's own max_level, so the pick's config and scores moved
-    assert pk["config_sha256"].startswith("45e83b45fafa"), \
+    assert pk["sobol_index"] == 54, pk["sobol_index"]
+    # GLB-CONFIG: the box is centred on today's margined L1 (wall 4, growth 1.0,
+    # the margin's choice, not the recorded 1.34), and the sharp-body radius is
+    # tau/h_f/2 of the point's own max_level, so the pick's config and scores moved
+    assert pk["config_sha256"].startswith("c06684029fe7"), \
         pk["config_sha256"][:12]
-    assert abs(pk["p_fail"] - 0.065768) <= 1e-6, pk["p_fail"]
-    assert abs(pk["p_fail_std"] - 0.066139) <= 1e-6, pk["p_fail_std"]
-    assert abs(pk["blc8_a_priori"] - 0.841) <= 1e-6, pk["blc8_a_priori"]
-    assert abs(pk["log_cells"] - 4.622895) <= 1e-6, pk["log_cells"]
-    assert [r["sobol_index"] for r in res["runners_up"]] == [245, 249, 177], \
+    assert abs(pk["p_fail"] - 0.013131) <= 1e-6, pk["p_fail"]
+    assert abs(pk["p_fail_std"] - 0.003979) <= 1e-6, pk["p_fail_std"]
+    assert abs(pk["blc8_a_priori"] - 0.957594) <= 1e-6, pk["blc8_a_priori"]
+    assert abs(pk["log_cells"] - 5.651058) <= 1e-6, pk["log_cells"]
+    assert [r["sobol_index"] for r in res["runners_up"]] == [117, 193, 33], \
         [r["sobol_index"] for r in res["runners_up"]]
     # the sharp-body box: the pick's feature_tolerance is r * h_f / 2 of its own
     # point config at some r of FEATURE_TAU_SHARP
@@ -2015,7 +2232,7 @@ def _g5_decide(H):
     mlg5 = cfgg5["refinement"]["max_level"]
     assert any(abs(ftg5 - r * 0.5 * 2 ** -mlg5) <= 1e-15
                for r in FEATURE_TAU_SHARP), (ftg5, mlg5)
-    assert pk["knobs"]["smoothing_passes"] == 1
+    assert pk["knobs"]["smoothing_passes"] == 0   # GLB-CONFIG: was 1 on the old box
     assert schema.errors(res["record"], "DecisionRecord") == []
     assert not [e["pointer"] for e in res["edits"]
                 if e["pointer"].startswith("/layers/")
@@ -2095,51 +2312,49 @@ def _g8_refine(H):
                  attempt_fn=prior._wall_oracle,
                  probe_fn=campaign._fake_probe(1000),
                  snap_fn=campaign._fake_snap, quiet=True)
-    # the set grows to six with the lever refused: F-1-009's only fix is gone,
-    # so the optimiser may propose for it again
+    # GLB-CONFIG: F-1-009 is banked again on the margin's level 4, and D-1-073 and
+    # F-1-025 pass the wall oracle on their margined attempt 1, so the set is three
     assert rep["refinement_set"]["geometry_ids"] == \
-        ["D-1-001", "D-1-027", "D-1-073", "E-1-004", "F-1-009", "F-1-025"], \
+        ["D-1-001", "D-1-027", "E-1-004"], \
         rep["refinement_set"]["geometry_ids"]
     r1 = baseline.read_bundle(os.path.join(rep8, "refine_r1.json.gz"))
     rows = {(r["geometry_id"], r["attempt"]): r for r in r1["attempts"]}
-    # RM-SNAP-TAU spends attempts 2 and 3 on the sharp bodies, so the optimiser's
-    # proposal comes at attempt 4 (D-1-073); its pick fails the wall oracle, the
-    # table is spent twice over on the others, and nothing is rescued
-    assert rows[("D-1-073", 2)]["decided_by"] == "remedy" \
-        and rows[("D-1-073", 2)]["rule_id"] == "RM-SNAP-TAU", \
-        (rows[("D-1-073", 2)]["decided_by"], rows[("D-1-073", 2)]["rule_id"])
-    assert rows[("D-1-073", 4)]["decided_by"] == "optimiser"
-    assert rows[("D-1-073", 4)]["rule_id"] == "OPT-PICK"
-    assert abs(rows[("D-1-073", 4)]["prediction"]["p_fail"] - 0.127181) <= 1e-6, \
-        rows[("D-1-073", 4)]["prediction"]["p_fail"]
-    assert rows[("F-1-025", 2)]["decided_by"] == "remedy" \
-        and rows[("F-1-025", 2)]["rule_id"] == "RM-SNAP-TAU", \
-        (rows[("F-1-025", 2)]["decided_by"], rows[("F-1-025", 2)]["rule_id"])
+    # GLB-CONFIG: the margined attempt-1 configs feed the wall oracle, so three
+    # geometries refine (was six); RM-SNAP-TAU spends attempts 2 and 3 on the two
+    # sharp bodies, D-1-027's proposal comes at attempt 4 (index 0) and PASSes
+    assert rows[("D-1-027", 4)]["decided_by"] == "optimiser"
+    assert rows[("D-1-027", 4)]["rule_id"] == "OPT-PICK"
+    assert abs(rows[("D-1-027", 4)]["prediction"]["p_fail"] - 0.098546) <= 1e-6, \
+        rows[("D-1-027", 4)]["prediction"]["p_fail"]
+    assert rows[("D-1-001", 2)]["decided_by"] == "remedy" \
+        and rows[("D-1-001", 2)]["rule_id"] == "RM-SNAP-TAU", \
+        (rows[("D-1-001", 2)]["decided_by"], rows[("D-1-001", 2)]["rule_id"])
     assert not [k for k, r in rows.items() if r["decided_by"] == "optimiser"
-                if k != ("D-1-073", 4)], "an unexpected optimiser row"
+                if k != ("D-1-027", 4)], "an unexpected optimiser row"
     sidx = {}
     for ln in r1["records"]:
         for i in ln["record"]["inputs"]:
             if i["name"] == "sobol_index":
                 sidx[(ln["geometry_id"], ln["attempt"])] = i["value"]
-    assert sidx[("D-1-073", 4)] == 0, sidx
-    assert ("F-1-025", 2) not in sidx, sidx
+    assert sidx[("D-1-027", 4)] == 0, sidx
+    assert ("D-1-001", 2) not in sidx, sidx
     ends = {g["geometry_id"]: g for g in r1["geometries"]}
-    assert ends["D-1-073"]["terminal"] == "EXHAUSTED"
-    assert ends["F-1-025"]["terminal"] == "EXHAUSTED"
-    assert rep["rounds"][0]["rescued"] == []
-    assert rep["rounds"][1]["rescued"] == []
-    assert rep["systems"]["rules"]["failures"] == 6
-    assert abs(rep["systems"]["rules"]["mfr"] - 0.375) <= 1e-12
-    assert rep["systems"]["round-2"]["failures"] == 6
+    assert ends["D-1-001"]["terminal"] == "EXHAUSTED"
+    assert ends["D-1-027"]["terminal"] == "PASS"
+    assert ends["E-1-004"]["terminal"] == "EXHAUSTED"
+    assert rep["rounds"][0]["rescued"] == ["D-1-027"]
+    assert rep["rounds"][1]["rescued"] == ["D-1-001", "D-1-027"]
+    assert rep["systems"]["rules"]["failures"] == 3
+    assert abs(rep["systems"]["rules"]["mfr"] - 0.1875) <= 1e-12
+    assert rep["systems"]["round-2"]["failures"] == 1
     assert rep["cv"]["auc"] >= 0.75 and rep["cv"]["blc8_rmse"] == 0.0
-    assert rep["conditions"]["beats_rules"] is False
-    assert rep["verdict"] == "PASS" and rep["enabled"] is False
+    assert rep["conditions"]["beats_rules"] is True
+    assert rep["verdict"] == "PASS" and rep["enabled"] is True
     for n in ("G-OPT.json", "G-OPT.md", "opt_model.json", "train.json.gz",
               "refine_r1.json.gz", "refine_r2.json.gz"):
         assert os.path.isfile(os.path.join(rep8, n)), n
     model = _read_json_or_none(os.path.join(rep8, "opt_model.json"))
-    # the 114 oracle rows (group 2) plus round 1's one optimiser row
+    # the 111 oracle rows (group 2) plus round 1's optimiser row
     assert model["train"]["n_rows"] >= 106, model["train"]["n_rows"]
     H["rep8"] = rep8
     m1 = os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns
@@ -2184,9 +2399,9 @@ def _g8_refine(H):
         om._MODEL.clear()
         om._MODEL.update(saved)
     print("[ok] refine on the oracle: RM-SNAP-TAU spends attempts 2-3 on the "
-          "sharp bodies and D-1-073's proposal comes at attempt 4 (index 0, p_fail "
-          "0.127181) and fails, nothing rescued, MFR 0.375, the CV half PASSes but "
-          "the ablation bar is missed so the optimiser ships disabled; a re-run "
+          "sharp bodies and D-1-027's proposal comes at attempt 4 (index 0, p_fail "
+          "0.098546) and passes, round 0 rescues D-1-027, MFR 0.1875, the CV half "
+          "PASSes and beats_rules holds so the optimiser ships enabled; a re-run "
           "reuses both rounds and gives an equal report; check PASS")
 
 
@@ -2240,7 +2455,8 @@ def _g10_live(H):
     setup0 = rules.setup
     rules.setup = functools.partial(
         setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]),
-        win_2to1=rules.win_2to1_of(H["rb"]["records"]))
+        win_2to1=rules.win_2to1_of(H["rb"]["records"]),
+        glb=rules.glb_of(H["rb"]["records"]))
     try:
         end = campaign.run_campaign(
             {"manifest": "tuning", "ids": ["D-1-073"], "out": live,
@@ -2403,6 +2619,106 @@ def _g12_cv(H):
              r1["extra_cv"]["blc8_rmse"], r1["verdict"],
              r1["conditions"]["auc_ge"], r1["conditions"]["rmse_le"],
              "enabled" if r1["ship"]["enabled"] else "DISABLED"))
+
+
+def _g13_refit(H):
+    tmp = H["tmp"]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    # (a) a refit into a fresh dir writes the four files, check PASSes, the
+    # model ships disabled and its hook abstains OPT-DISABLED; a re-run into
+    # the same dir is equal beyond the date and byte-identical in both files
+    ra = os.path.join(tmp, "refit_a")
+    rep = refit([H["osrc"][0]], base=[H["osrc"][1], H["osrc"][2]],
+                report_dir=ra, quiet=True)
+    for n in (REPORT_NAME, REPORT_MD, MODEL_NAME, TRAIN_NAME):
+        assert os.path.isfile(os.path.join(ra, n)), n
+    res = check(ra)
+    assert res["verdict"] == "PASS", [i for i in res["items"] if not i["ok"]]
+    om = importlib.import_module("optimise")
+    saved = dict(om._MODEL)
+    try:
+        v = load_model(os.path.join(ra, MODEL_NAME))
+        assert v["model"]["enabled"] is False
+        res_h = v["hook"](H["d_ctx"],
+                          [{"attempt": 1, "config_sha256": "x", "rule_id": None}])
+        assert res_h["verdict"] == "abstain" and res_h["rule_id"] == "OPT-DISABLED"
+    finally:
+        om._MODEL.clear()
+        om._MODEL.update(saved)
+    train0 = open(os.path.join(ra, TRAIN_NAME), "rb").read()
+    model0 = open(os.path.join(ra, MODEL_NAME), "rb").read()
+    rep2 = refit([H["osrc"][0]], base=[H["osrc"][1], H["osrc"][2]],
+                 report_dir=ra, quiet=True)
+    a, b = dict(rep), dict(rep2)
+    a.pop("date"), b.pop("date")
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+    assert open(os.path.join(ra, TRAIN_NAME), "rb").read() == train0
+    assert open(os.path.join(ra, MODEL_NAME), "rb").read() == model0
+    # (b) a refit into optimise/ is refused by name and the AM-14 record does
+    # not change by one byte
+    sha_m = _file_sha256(os.path.join(REPORT_DIR, MODEL_NAME))
+    sha_g = _file_sha256(os.path.join(REPORT_DIR, REPORT_NAME))
+    try:
+        refit([H["osrc"][0]], base=[H["osrc"][1], H["osrc"][2]],
+              report_dir=REPORT_DIR, quiet=True)
+    except OptError as e:
+        assert "the AM-14 record" in str(e) and SHIP_DIR in str(e), str(e)
+    else:
+        raise AssertionError("a refit into optimise/ was not refused")
+    assert _file_sha256(os.path.join(REPORT_DIR, MODEL_NAME)) == sha_m
+    assert _file_sha256(os.path.join(REPORT_DIR, REPORT_NAME)) == sha_g
+    # (c) an evaluate-split extra raises SplitSealed before any row or write
+    ev = os.path.join(tmp, "refit_eval.json.gz")
+    be = baseline.read_bundle(H["osrc"][0])
+    be["campaign"]["split_mode"] = split.EVALUATE
+    baseline.write_bundle(be, ev)
+    outc = os.path.join(tmp, "refit_c")
+    try:
+        refit([ev], base=[H["osrc"][1], H["osrc"][2]], report_dir=outc,
+              quiet=True)
+    except split.SplitSealed as e:
+        assert "tuning split only" in str(e), str(e)
+    else:
+        raise AssertionError("the evaluate extra bundle was not refused")
+    assert not os.path.isdir(outc), outc
+    # (d) the committed optimise/aml refit reproduces beyond the date
+    rc = refit([os.path.abspath(os.path.join(HERE, "aml",
+                                             "tuning_rules_L5.json.gz"))],
+               write=False, quiet=True)
+    want = _read_json_or_none(os.path.join(SHIP_DIR, REPORT_NAME))
+    assert want is not None, "the committed optimise/aml/G-OPT.json is missing"
+    a, b = dict(rc), dict(want)
+    a.pop("date"), b.pop("date")
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True), \
+        "the committed optimise/aml/G-OPT.json does not reproduce"
+    wmodel = _read_json_or_none(os.path.join(SHIP_DIR, MODEL_NAME))
+    assert rc["model_sha256"] == wmodel["gate"]["model_sha256"]
+    # (e) the CLI: --refit needs --extra; --check reads optimise/aml by
+    # default and optimise/ when told
+    pr = subprocess.run([sys.executable, __file__, "--refit"], capture_output=True,
+                        text=True, encoding="utf-8", errors="replace", env=env,
+                        timeout=300)
+    assert pr.returncode == 2 and "--refit needs --extra" in (pr.stderr or ""), \
+        (pr.returncode, pr.stderr)
+    pc1 = subprocess.run([sys.executable, __file__, "--check"], capture_output=True,
+                         text=True, encoding="utf-8", errors="replace", env=env,
+                         timeout=300)
+    assert pc1.returncode == 0 and "CHECK PASS" in pc1.stdout, \
+        (pc1.returncode, pc1.stdout[-400:], pc1.stderr[-400:])
+    pc2 = subprocess.run([sys.executable, __file__, "--check", "--report-dir",
+                          REPORT_DIR], capture_output=True, text=True,
+                         encoding="utf-8", env=env, timeout=300)
+    assert pc2.returncode == 0 and "CHECK PASS" in pc2.stdout, \
+        (pc2.returncode, pc2.stdout[-400:], pc2.stderr[-400:])
+    print("[ok] refit: rows %d (%d new), AUC %.6f, BLC_8 RMSE %.6f, verdict %s, "
+          "the optimiser ships DISABLED; the four files re-written byte-identical "
+          "beyond the date, check PASS on optimise/aml and optimise/, the hook "
+          "abstains OPT-DISABLED, the AM-14 record refused by name and unchanged, "
+          "an evaluate extra raises SplitSealed before any write, the committed "
+          "optimise/aml/G-OPT.json reproduces (model sha %s), --refit without "
+          "--extra exits 2"
+          % (rc["cv"]["n"], rc["n_new_rows"], rc["cv"]["auc"],
+             rc["cv"]["blc8_rmse"], rc["verdict"], rc["model_sha256"][:12]))
 
 
 if __name__ == "__main__":

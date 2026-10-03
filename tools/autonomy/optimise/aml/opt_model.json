@@ -1,0 +1,191 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "boot_seed": 7,
+ "box": {
+  "band_scale": [
+   0.5,
+   2.0
+  ],
+  "feature_offsets": [
+   0,
+   1,
+   2
+  ],
+  "feature_tau_sharp": [
+   0.25,
+   0.5,
+   1.0
+  ],
+  "feature_tolerances": [
+   0.0,
+   0.25,
+   0.5
+  ],
+  "growth_lo": 1.1,
+  "smoothing_passes": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "wall_offsets": [
+   -1,
+   0,
+   1
+  ]
+ },
+ "cv": {
+  "auc": 0.9848501676711345,
+  "blc8_rmse": 0.1537142221007169,
+  "blc8_rmse_pos": 0.46773118767248867,
+  "blc8_rmse_zero": 0.2580366535453138,
+  "brier": 0.043821059920505244,
+  "fold_rows": {
+   "0": 642,
+   "1": 515,
+   "2": 645,
+   "3": 668,
+   "4": 714
+  },
+  "folds": [
+   0,
+   1,
+   2,
+   3,
+   4
+  ],
+  "log_cells_rmse": 0.054451065969543286,
+  "n": 3184,
+  "n_fail": 2286,
+  "n_geometries": 372,
+  "n_pos": 212
+ },
+ "enabled": false,
+ "features": [
+  "log10_lmax",
+  "mid_over_lmax",
+  "min_over_lmax",
+  "log10_area_over_lmax2",
+  "volume_over_bbox",
+  "log10_1p_sharp_over_lmax",
+  "log10_r5_over_lmax",
+  "log10_r50_over_lmax",
+  "log10_r95_over_lmax",
+  "curv_missing",
+  "log10_inner_over_lmax",
+  "inner_missing",
+  "log10_gap_over_lmax",
+  "gap_missing",
+  "planar_frac",
+  "commensurate",
+  "log10_n_triangles",
+  "wall_level",
+  "log10_base_over_lmax",
+  "log10_hwall_over_lmax",
+  "log10_wallband_over_lmax",
+  "log10_band_over_lmax",
+  "feature_offset",
+  "feature_tolerance",
+  "smoothing_passes",
+  "growth",
+  "log10_hwall_over_t1",
+  "layers_n",
+  "log10_predicted_cells",
+  "on_plane",
+  "max_level"
+ ],
+ "folds": 5,
+ "gate": {
+  "auc": 0.9848501676711345,
+  "beats_rules": null,
+  "blc8_rmse": 0.1537142221007169,
+  "model_sha256": "40f38c282360bb6a37e57c0651eb85084347d8cf53cc30bf0ea61660f568e308",
+  "report": "G-OPT.json",
+  "verdict": "FAIL"
+ },
+ "hyper": {
+  "early_stopping": false,
+  "l2_regularization": 1.0,
+  "learning_rate": 0.05,
+  "max_iter": 200,
+  "max_leaf_nodes": 15,
+  "min_samples_leaf": 20
+ },
+ "importances": [
+  {
+   "auc_drop": 0.200634,
+   "feature": "feature_tolerance"
+  },
+  {
+   "auc_drop": 0.074465,
+   "feature": "log10_1p_sharp_over_lmax"
+  },
+  {
+   "auc_drop": 0.014691,
+   "feature": "min_over_lmax"
+  },
+  {
+   "auc_drop": 0.008861,
+   "feature": "feature_offset"
+  },
+  {
+   "auc_drop": 0.005228,
+   "feature": "log10_predicted_cells"
+  }
+ ],
+ "members": 5,
+ "p_fail_max": 0.2,
+ "pool_n": 256,
+ "pred_check": [
+  [
+   0.9695255426656626,
+   0.0014110079053691904,
+   5.421393958996431
+  ],
+  [
+   0.9907446380702076,
+   0.0019453406150379492,
+   4.753106270717597
+  ],
+  [
+   0.5292280732567921,
+   0.0005681382531842783,
+   5.602939306259597
+  ],
+  [
+   0.9643927114752975,
+   0.0066534815344587135,
+   5.459028528474424
+  ],
+  [
+   0.9855066048258994,
+   0.0073577583378925835,
+   5.436494132660626
+  ],
+  [
+   0.994250809834125,
+   0.002584418688121358,
+   4.716210846739647
+  ],
+  [
+   0.9981363901559958,
+   0.00011105511271464602,
+   4.316269699649048
+  ],
+  [
+   0.9729022558570788,
+   0.00491230397863583,
+   5.80463333500942
+  ]
+ ],
+ "schema": "autonomy-opt-model/1",
+ "sobol_seed": 11,
+ "train": {
+  "content_sha256": "a10d8dcb5cb0d6e0e3e1730cc4c5d0b1705d89661a5fe71677d208c2139b7ef7",
+  "file": "train.json.gz",
+  "n_fail": 2286,
+  "n_geometries": 372,
+  "n_rows": 3184,
+  "sha256": "85e2c2f1c4dcbb1e551c48436bf50e50cefaefa71329cf6bdfa6ef4a1a3949ec"
+ }
+}

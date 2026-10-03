@@ -27298,6 +27298,7 @@ solver can run.
 | a wall on the cell planes, and the snapped cube | no `beta` entry in the trace and every row's `beta_rungs` 0; the castellated goldens are unchanged |
 | every case that ran a ladder | each `beta` entry names its gates and lowers at least one point, no ladder takes more than 3 on one patch set, each entry's `beta_rung` counts the `beta` entries before it, and each row's `beta_rungs` is the count of `beta` entries naming its patch |
 | the snapped sphere at 8 layers, `first_thickness` 0.0021, `growth` 1.0 (AM-L's G-L-b, 2026-09-27) | MEASURED, NOT MET: the stack is dropped `thin_after_caps`; the outer ladder takes 3 `beta` rungs, but the failure that drives it is G5, not G4 (G5 200, 1984, then 3072 to 6216 failing cells as the caps halve, against G4 48 to 120), and (92.66) lowers only the pull of re-seated points; the 2-layer shipped example keeps both layers (G-L-a), and why G5 grows is measured in the paragraph below the table |
+| the same sphere at `first_thickness` 0.0023 = 1.10 sqrt(A_max)/60 (G-L-b restated by the user, 2026-10-03; no Rust change) | MET on the release binary: 8 layers, `full_area_frac` 1.0, `level_n_non_orth_max_deg` 67.80 < 70, no retreat, no `drop_cause`; the setup rules size snapped walls for it with the margin of the paragraph below |
 
 **Why G5 grows on the snapped sphere at eight layers (measured).** The probe measures both
 configs cell by cell: the level-3 sphere (n 8, `first_thickness` 0.0021, growth 1.0) and the
@@ -27360,6 +27361,15 @@ as arithmetic, g 1.2 asks T = 0.0021 * (1.2^8 - 1) / 0.2 = 3.465e-2, against the
 limiter or ladder rule is changed by this measurement, and the probe is the ignored test
 `a_probe_measures_which_cells_fail_g5_on_a_snapped_layer_config`, run with
 `AUTOMESHER_G5_PROBE` set to a config path.
+
+**The margin over the flat floor (measured).** The release binary's zero-G5 `first_thickness` at the outer
+ladder's round 0 (14 bisections, n 8, growth 1.0): level 2 4.213e-3 = 1.011 h/60; level 3 2.131e-3 = 1.023 h/60 =
+1.019 sqrt(A_max)/60 (sqrt(A_max)/h 1.0040); level 4 1.472e-3 = 1.413 h/60 = 1.404 sqrt(A_max)/60
+(sqrt(A_max)/h 1.0063), where (92.45) binds at the shortest snapped edge 0.2198 h (at t1 0.0017 the stack keeps 8
+layers, `t1_min` 8.586e-4, full 0.6846). The setup rules (tools/autonomy/rules.py, R-WIN) predict sqrt(A_max) by h
+and prefer `h <= 3 t1 d / (min_thickness_ratio K)` with K = 1.10 and `d = min(1, cell_frac h_lim / T)`, the (92.45)
+depth they can see; it covers levels 2 and 3, not level 4, whose depth is set by the snapped wall. No threshold,
+limiter or ladder rule is changed.
 
 ### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
 
