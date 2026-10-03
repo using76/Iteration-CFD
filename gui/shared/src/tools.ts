@@ -47,6 +47,9 @@ export const TOOL_NAMES = [
   'cad_template_list',
   'cad_requirements_propose',
   'cad_requirements_apply',
+  'cad_build',
+  'cad_evaluate',
+  'cad_study_status',
 ] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
@@ -104,6 +107,9 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   cad_template_list: { name: 'cad_template_list', kind: 'read', policy: 'auto', label: { ko: '설계 템플릿 목록', en: 'List CAD templates' } },
   cad_requirements_propose: { name: 'cad_requirements_propose', kind: 'mutate', policy: 'ask', label: { ko: '요구사항 제안', en: 'Propose requirements' } },
   cad_requirements_apply: { name: 'cad_requirements_apply', kind: 'mutate', policy: 'auto', label: { ko: '요구사항 잠금', en: 'Lock requirements' } },
+  cad_build: { name: 'cad_build', kind: 'mutate', policy: 'auto', label: { ko: '설계 빌드', en: 'Build the design' } },
+  cad_evaluate: { name: 'cad_evaluate', kind: 'mutate', policy: 'ask', label: { ko: '설계 평가', en: 'Evaluate the study' } },
+  cad_study_status: { name: 'cad_study_status', kind: 'read', policy: 'auto', label: { ko: '설계 스터디 상태', en: 'Study status' } },
 }
 
 export function toolPolicy(name: string): ToolPolicy {
@@ -356,6 +362,19 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
     }
     case 'cad_requirements_apply':
       return ko ? `요구사항 잠금 (${String(r.study_id ?? '')}, 잠금 ${String(r.lock_sha ?? '').slice(0, 12)})` : `Locked requirements (${String(r.study_id ?? '')}, lock ${String(r.lock_sha ?? '').slice(0, 12)})`
+    case 'cad_build': {
+      const n = fmtInt((r.table as unknown[] | undefined)?.length ?? 0)
+      return ko ? `설계 빌드 ${String(r.study_id ?? '')}: ${String(r.status ?? '')} (행 ${n}건)` : `Built ${String(r.study_id ?? '')}: ${String(r.status ?? '')} (${n} rows)`
+    }
+    case 'cad_evaluate': {
+      const st = (r.status ?? {}) as Record<string, unknown>
+      const n = fmtInt(Number(st.n_evals ?? 0))
+      return ko ? `설계 평가 ${String(r.study_id ?? '')}: ${String(st.status ?? '')}, 평가 ${n}회` : `Evaluated ${String(r.study_id ?? '')}: ${String(st.status ?? '')}, ${n} evaluations`
+    }
+    case 'cad_study_status': {
+      const st = (r.status ?? {}) as Record<string, unknown>
+      return ko ? `스터디 ${String(r.study_id ?? '')}: ${String(st.status ?? '')}` : `Study ${String(r.study_id ?? '')}: ${String(st.status ?? '')}`
+    }
     default:
       return name
   }

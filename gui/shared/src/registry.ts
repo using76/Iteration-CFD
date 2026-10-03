@@ -652,6 +652,35 @@ export const PIPELINES: BinarySpec[] = [
     usageKind: 'none',
     pipeline: true,
   },
+  {
+    name: 'cad-loop',
+    source: 'tools/cad/loop.py',
+    purpose:
+      "Walk an initialised CAD study (docs/16 §D S3-S11, the stub evaluator) in the run log: the loop re-derives every row from the study's own inputs, prints one decision/eval line per step and one canonical JSON line last. run walks to the next rest point - attended it stops when the ladder asks for an LLM consult, --unattended runs on to the stop and the L2 confirmation; status reads the rows only; replay re-derives every row and reports the first mismatch. init stays with cad_evaluate, which always passes --registry.",
+    summary: 'CAD study loop: run/status/replay of one initialised study (stub evaluator), one JSON line last.',
+    kind: 'analysis',
+    positionals: [
+      {
+        name: 'verb',
+        type: 'enum',
+        values: ['run', 'status', 'replay'],
+        description: 'run walks the study to its next rest point; status reads the rows only; replay re-derives every row and reports the first mismatch',
+      },
+      { name: 'study', type: 'path', description: 'The study directory cad/<study_id>/study (workspace path)' },
+    ],
+    flags: [
+      { name: '--registry', type: 'path', description: 'Always cad/studies.jsonl, the registry cad_evaluate initialised the study with' },
+      { name: '--unattended', type: 'flag', description: 'run only: the ladder LLM-consult pause does not stop the walk' },
+    ],
+    accepts: [],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: [], restart: false, csv: false },
+    longRunning: true,
+    gpu: false,
+    usageKind: 'none',
+    pipeline: true,
+  },
 ]
 
 export function getBinary(name: string): BinarySpec | undefined {

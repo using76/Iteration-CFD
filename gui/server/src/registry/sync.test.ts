@@ -102,7 +102,7 @@ describe('registry <-> rust sources', () => {
   })
 
   it('geometry_pipelines_shape: geom-tool and regions-from-msh are .py pipelines beside the binaries', () => {
-    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh', 'autonomy-campaign', 'autonomy-preflight'])
+    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh', 'autonomy-campaign', 'autonomy-preflight', 'cad-loop'])
     for (const [name, positionals] of [['geom-tool', ['command', 'file']], ['regions-from-msh', ['msh', 'outDir']]] as const) {
       const pipeline = PIPELINES.find((p) => p.name === name)!
       expect(pipeline.pipeline).toBe(true)
@@ -131,6 +131,30 @@ describe('registry <-> rust sources', () => {
       const declared = [...py.matchAll(/add_argument\('(--[a-z-]+)'/g)].map((m) => m[1])
       for (const f of pipeline.flags) expect(declared, `${pipeline.name} ${f.name}`).toContain(f.name)
     }
+  })
+
+  it('cad_loop_pipeline: loop.py beside the binaries, its verbs and flags from the script itself', () => {
+    const p = PIPELINES.find((x) => x.name === 'cad-loop')!
+    expect(p).toBeTruthy()
+    expect(p.pipeline).toBe(true)
+    expect(BINARY_NAMES).not.toContain('cad-loop')
+    expect(getBinary('cad-loop')).toBe(p)
+    expect(p.source).toBe('tools/cad/loop.py')
+    expect([p.kind, p.gpu, p.longRunning, p.usageKind, p.positionals.map((x) => x.name)]).toEqual(['analysis', false, true, 'none', ['verb', 'study']])
+    expect(p.flags.map((f) => f.name)).toEqual(['--registry', '--unattended'])
+    // The verbs are main()'s own `want` keys minus the ones cad_evaluate owns, and the flags are
+    // the two the USAGE text documents; read the real script at REPO_ROOT, not a fixture.
+    const py = read(path.join(REPO_ROOT, p.source))
+    const want = py.match(/want = \{([^}]*)\}/)![1]
+    const keys = [...want.matchAll(/"([a-z]+)":/g)].map((m) => m[1])
+    const verbs = p.positionals[0].values!
+    for (const v of verbs) expect(keys, `verb ${v} is a main() verb`).toContain(v)
+    for (const v of ['init', 'intake', 'launch']) expect(verbs, `${v} stays with cad_evaluate`).not.toContain(v)
+    const usage = py.match(/^USAGE = \(([\s\S]*?)\)\s*\n\s*\n/m)![1]
+    for (const f of p.flags) expect(usage, `USAGE documents ${f.name}`).toContain(f.name)
+    const verb = p.positionals[0]
+    expect(checkArgValue(verb, 'run')).toBeNull()
+    expect(checkArgValue(verb, 'init')).toMatch(/must be one of/)
   })
 
   it('agrees with driver_for on which driver builds the k-epsilon family', () => {

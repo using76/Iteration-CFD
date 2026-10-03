@@ -550,6 +550,32 @@ function scenarioPropose(f: Facts): MockPlan {
 const CAD_LIST = 'cad_template_list'
 const CAD_PROPOSE = 'cad_requirements_propose'
 const CAD_APPLY = 'cad_requirements_apply'
+const CAD_BUILD = 'cad_build'
+const CAD_EVALUATE = 'cad_evaluate'
+const CAD_STATUS = 'cad_study_status'
+// optimise_cad.py STANDIN_START and STANDIN_START_PROVENANCE verbatim: the start the loop's own
+// golden uses, so the walk reaches the same confirmed stable design the T4/T5 gate measured.
+const CAD_START: Record<string, unknown> = {
+  D_i: 0.06,
+  CR: 9.0,
+  L_over_Di: 0.5,
+  law: 'poly7',
+  x_m: null,
+  Lx_over_De: 0.5,
+  Lu_over_Di: 0.5,
+  upstream_role: 'slip',
+  t_wall: 0.003,
+}
+const CAD_PROVENANCE: Record<string, string> = {
+  D_i: 'user_text',
+  CR: 'user_text',
+  L_over_Di: 'llm_choice',
+  law: 'llm_choice',
+  Lx_over_De: 'default',
+  Lu_over_Di: 'default',
+  upstream_role: 'default',
+  t_wall: 'user_text',
+}
 
 /**
  * The v1_nominal fixture rows of tools/cad/fixtures/reqs/cases.json without the ears key (the
@@ -583,7 +609,30 @@ function scenarioCad(f: Facts): MockPlan {
   }
   if (last.name === CAD_APPLY) {
     if (!last.ok) return done([text(`cad_requirements_apply failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    const studyId = String(last.data.study_id)
+    // The user asked to run it: build the start design, then evaluate, then read the study back.
+    if (/\bcad_evaluate\b|run the study/i.test(f.userText)) return useTools([tool(CAD_BUILD, { study_id: studyId, params: CAD_START })])
     return done([text(`Locked requirements for study ${String(last.data.study_id)}: ${String(last.data.requirements)} (lock ${String(last.data.lock_sha).slice(0, 12)}).`)])
+  }
+  const apply = f.results.find((r) => r.name === CAD_APPLY && r.ok)
+  const studyIdOf = (r: ToolResultFact | undefined): string =>
+    String(r?.data.study_id ?? (r?.input as { study_id?: unknown } | undefined)?.study_id ?? '')
+  if (last.name === CAD_BUILD) {
+    if (!last.ok) return done([text(`cad_build failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    return useTools([tool(CAD_EVALUATE, { study_id: studyIdOf(apply), start: { params: CAD_START, provenance: CAD_PROVENANCE }, unattended: true })])
+  }
+  if (last.name === CAD_EVALUATE) {
+    if (!last.ok) return done([text(`cad_evaluate failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    return useTools([tool(CAD_STATUS, { study_id: studyIdOf(apply) })])
+  }
+  if (last.name === CAD_STATUS) {
+    if (!last.ok) return done([text(`cad_study_status failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    const st = (last.data.status ?? {}) as Record<string, unknown>
+    return done([
+      text(
+        `Study ${String(last.data.study_id)} is ${String(st.status)}: ${String(st.n_evals)} evaluations and ${String(st.n_decisions)} decisions; the stable design is ${String(st.stable_design_verdict)} with objective ${String(st.stable_objective)}.`,
+      ),
+    ])
   }
   return done([text('Read cad_template_list first, then propose the requirement rows.')])
 }

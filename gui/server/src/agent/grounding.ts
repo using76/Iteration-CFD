@@ -5,7 +5,7 @@ import type { Usage } from '@cfd/shared'
 
 export const GROUNDING_SCHEMA = 'autonomy-grounding/1'
 /** A turn that calls one of these explains a campaign; its numbers are what the lint is for. */
-export const CAMPAIGN_TOOLS: readonly string[] = ['autonomy_attempts']
+export const CAMPAIGN_TOOLS: readonly string[] = ['autonomy_attempts', 'cad_evaluate', 'cad_study_status']
 /** An integer below this, written without a decimal point, is a count and must match exactly. */
 export const EXACT_BELOW = 10
 
