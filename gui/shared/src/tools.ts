@@ -50,6 +50,7 @@ export const TOOL_NAMES = [
   'cad_build',
   'cad_evaluate',
   'cad_study_status',
+  'cad_propose_edit',
 ] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
@@ -110,6 +111,7 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   cad_build: { name: 'cad_build', kind: 'mutate', policy: 'auto', label: { ko: '설계 빌드', en: 'Build the design' } },
   cad_evaluate: { name: 'cad_evaluate', kind: 'mutate', policy: 'ask', label: { ko: '설계 평가', en: 'Evaluate the study' } },
   cad_study_status: { name: 'cad_study_status', kind: 'read', policy: 'auto', label: { ko: '설계 스터디 상태', en: 'Study status' } },
+  cad_propose_edit: { name: 'cad_propose_edit', kind: 'mutate', policy: 'ask', label: { ko: '설계 파라미터 편집 제안', en: 'Propose a CAD parameter edit' } },
 }
 
 export function toolPolicy(name: string): ToolPolicy {
@@ -374,6 +376,10 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
     case 'cad_study_status': {
       const st = (r.status ?? {}) as Record<string, unknown>
       return ko ? `스터디 ${String(r.study_id ?? '')}: ${String(st.status ?? '')}` : `Study ${String(r.study_id ?? '')}: ${String(st.status ?? '')}`
+    }
+    case 'cad_propose_edit': {
+      const n = fmtInt(Number(r.n ?? 0))
+      return ko ? `편집 제안 ${String(r.study_id ?? '')} cad${n}: ${String(r.outcome ?? '')}` : `Proposed edit ${String(r.study_id ?? '')} cad${n}: ${String(r.outcome ?? '')}`
     }
     default:
       return name

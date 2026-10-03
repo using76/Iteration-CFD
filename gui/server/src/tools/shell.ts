@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { scrubbedEnv } from '../env.js'
 import { fail, okResult, type ToolDef } from './context.js'
 import { resolveTool } from './paths.js'
+import { refuseShellExec } from './writeGuards.js'
 
 const OUTPUT_CAP = 24 * 1024
 
@@ -74,6 +75,7 @@ export const shellExec: ToolDef<typeof ShellSchema> = {
   name: 'shell_exec',
   description: 'Run an arbitrary program in the workspace (no shell). Disabled by policy unless the operator enables it in config/policy.json; prefer the dedicated tools.',
   schema: ShellSchema,
+  refuse: refuseShellExec,
   async run(input, ctx) {
     const cwd = resolveTool(ctx.workspaceRoot, input.cwd ?? '.', { mustExist: true })
     if (!cwd.ok) return cwd.result

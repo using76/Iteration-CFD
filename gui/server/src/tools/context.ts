@@ -64,8 +64,9 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
    * A synchronous veto on the raw call - after forgive, before zod and before
    * any approval card: a named refusal, or null to go on. The agent loop and
    * runTool both run it, so a refused call never reaches the user or `run`.
+   * ctx is the call's context; a refuser that needs no files ignores it.
    */
-  refuse?: (input: unknown) => ToolResult | null
+  refuse?: (input: unknown, ctx?: ToolContext) => ToolResult | null
   /**
    * The approval card's text, computed by the tool itself before the card is
    * drawn (cad_requirements_propose checks the proposal so the card shows the

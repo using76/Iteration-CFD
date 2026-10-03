@@ -127,7 +127,7 @@ describe('write guards on run_start, file_write and case_edit', () => {
     expect(TOOLS.find((t) => t.name === 'case_edit')?.refuse).toBe(refuseCaseEdit)
     expect(TOOLS.find((t) => t.name === 'autonomy_propose_edit')?.refuse).toBe(refuseEdit)
     // GUI-1's cad_requirements_propose carries its own pre-card veto (CAD-FIELD), not a write guard
-    expect(TOOLS.filter((t) => t.refuse).map((t) => t.name).sort()).toEqual(['autonomy_propose_edit', 'cad_requirements_propose', 'case_edit', 'file_write', 'run_start'])
+    expect(TOOLS.filter((t) => t.refuse).map((t) => t.name).sort()).toEqual(['autonomy_propose_edit', 'cad_propose_edit', 'cad_requirements_propose', 'case_edit', 'custom_tool_create', 'custom_tool_run', 'file_write', 'run_start', 'shell_exec'])
     const props = (name: string): string[] => Object.keys((toolDefinitions().find((d) => d.name === name) as any).input_schema.properties)
     expect(props('run_start')).toEqual(['binary', 'casePath', 'args', 'positionals', 'label'])
     expect(props('file_write')).toEqual(['path', 'content', 'createOnly'])

@@ -12,6 +12,7 @@ import { autonomyAttempts } from './autonomy.js'
 import { autonomyProposeEdit } from './autonomyEdit.js'
 import { caseCreate, caseEdit, caseRead, caseValidate } from './case.js'
 import { cadBuild, cadEvaluate, cadStudyStatus } from './cadLoop.js'
+import { cadProposeEdit } from './cadEdit.js'
 import { cadRequirementsApply, cadRequirementsPropose, cadTemplateList } from './cadReqs.js'
 import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { customToolCreate, customToolRun } from './custom.js'
@@ -84,6 +85,7 @@ export const TOOLS: ToolDef[] = [
   cadBuild,
   cadEvaluate,
   cadStudyStatus,
+  cadProposeEdit,
 ]
 
 const byName = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]))
@@ -262,7 +264,7 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext): P
   const tool = byName.get(name)
   if (!tool) return fail('UNKNOWN_TOOL', `no tool named ${name}`)
   const forgiven = forgiveToolInput(name, input)
-  const refused = tool.refuse?.(forgiven) ?? null
+  const refused = tool.refuse?.(forgiven, ctx) ?? null
   if (refused) return refused
   const parsed = tool.schema.safeParse(forgiven)
   if (!parsed.success) return fail('INVALID_INPUT', `invalid input for ${name}: ${issues(parsed.error)}`)

@@ -14,6 +14,7 @@ import { errorMessage, fail, okResult, type ToolContext, type ToolDef } from './
 import { mergeTools } from './defaults.js'
 import { resolveTool } from './paths.js'
 import { spawnCapture } from './shell.js'
+import { refuseCustomCreate, refuseCustomImpl, refuseCustomRun } from './writeGuards.js'
 
 export const CUSTOM_TOOLS_FILE = 'custom-tools.json'
 export const CUSTOM_NAME_RE = /^[a-z][a-z0-9_]{2,40}$/
@@ -69,6 +70,7 @@ export const customToolCreate: ToolDef<typeof CreateSchema> = {
   description:
     'Register a user-defined tool in this workspace (persisted in gui/config/custom-tools.json) and describe how to run it: either a command line (argv, no shell, {{input.x}} substitution, 60 s) or JavaScript run in node:vm with `input` and a small `cfd` API ({readFile(rel), listDir(rel), stats(root,time,field)}, 10 s). Run it later with custom_tool_run. A js tool is trusted local code, not sandboxed.',
   schema: CreateSchema,
+  refuse: refuseCustomCreate,
   async run(input, ctx) {
     if (!CUSTOM_NAME_RE.test(input.name)) return fail('INVALID_NAME', `name must match ${CUSTOM_NAME_RE}`)
     if ((TOOL_NAMES as readonly string[]).includes(input.name)) return fail('NAME_CLASH', `${input.name} is a built-in tool`)
@@ -178,6 +180,7 @@ export const customToolRun: ToolDef<typeof RunSchema> = {
   name: 'custom_tool_run',
   description: 'Run a custom tool: one registered with custom_tool_create, or one the Studio ships by default (gui/server/tools.defaults.json; the user\'s file wins on a name clash). Returns the command output (stdout/stderr/exit code) or the js return value and console output.',
   schema: RunSchema,
+  refuse: refuseCustomRun,
   async run(input, ctx) {
     const tools = mergeTools(await loadCustomTools(ctx.config.configDir))
     const spec = tools.find((t) => t.name === input.name)
@@ -192,16 +195,22 @@ export const customToolRun: ToolDef<typeof RunSchema> = {
     const args = parsed as Record<string, unknown>
     const missing = missingRequired(spec.inputSchema, args)
     if (missing.length) return fail('INVALID_INPUT', `missing required input: ${missing.join(', ')}`)
+    // The store may hold a tool a person wrote by hand: the CUSTOM-CAD and protected-path
+    // vetoes run again here, on the spec itself, before anything is spawned or run (docs/16 §F).
     if (spec.impl.kind === 'command') {
       const cwd = resolveTool(ctx.workspaceRoot, spec.impl.cwd ?? '.', { mustExist: true })
       if (!cwd.ok) return cwd.result
       const argv = substituteArgv(spec.impl.argv, spec.inputSchema, args)
+      const refused = refuseCustomImpl('custom_tool_run', spec.impl, { cwd: spec.impl.cwd ?? undefined, argv })
+      if (refused) return refused
       const res = await spawnCapture(argv, { cwd: cwd.path.abs, timeoutMs: COMMAND_TIMEOUT_MS, signal: ctx.signal })
       const data = { name: spec.name, argv, ...res }
       if (res.timedOut) return { ...fail('TIMEOUT', `${spec.name} did not finish within ${COMMAND_TIMEOUT_MS / 1000} s`), data }
       if (res.exitCode !== 0) return { ...fail('EXIT', `${spec.name} exited with ${res.exitCode ?? res.signal}`), data }
       return okResult(data)
     }
+    const refusedJs = refuseCustomImpl('custom_tool_run', spec.impl)
+    if (refusedJs) return refusedJs
     try {
       return okResult({ name: spec.name, ...(await runJs(spec as CustomToolSpec & { impl: { kind: 'js' } }, args, ctx)) })
     } catch (err) {

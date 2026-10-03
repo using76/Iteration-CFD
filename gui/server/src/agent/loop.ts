@@ -423,7 +423,7 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       // "null" spelled as a string is the model leaving a field out (forgive.ts)
       const forgiven = forgiveToolInput(tu.name, tu.input)
       // A tool's own veto (autonomy_propose_edit's whitelist) answers before any approval card.
-      const refused = tool.refuse?.(forgiven) ?? null
+      const refused = tool.refuse?.(forgiven, toolCtx(tu)) ?? null
       if (refused) {
         settle(tu, call, tu.input, refused)
         continue
