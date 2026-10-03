@@ -122,6 +122,15 @@ TRANSCRIBED = (
     ("blockgen", "preconditioner  diagonal;", "system/fvSolution", "preconditioner  diagonal;"),
     ("blockgen", "T               0.7;", "system/fvSolution", "T               0.7;"),
 )
+# The two blockgen lines the laminar fvSchemes carries so ofgpu-lowmach's reader (rust/src/io/case.rs
+# read_fv_schemes asks for div(phi,k) and div(phi,epsilon) on EVERY model) does not refuse the case;
+# both are inert for simulationType laminar - no turbulence transport reads them.
+TRANSCRIBED_LAMINAR = (
+    ("blockgen", "div(phi,k)       bounded Gauss upwind;", "system/fvSchemes",
+     "div(phi,k)      bounded Gauss upwind;"),
+    ("blockgen", "div(phi,epsilon) bounded Gauss upwind;", "system/fvSchemes",
+     "div(phi,epsilon) bounded Gauss upwind;"),
+)
 
 _DASH = "-" * 75
 BANNER = ("/*" + _DASH + "*" + chr(92) + chr(10)                       # the solver's own io/fields.rs banner
@@ -228,9 +237,15 @@ _FV_SOLUTION = (
 
 
 def system_files() -> dict:
-    """The three system files: blockgen.rs write_system()'s controlDict, Gate 105-C's fvSchemes/fvSolution."""
+    """The three system files: blockgen.rs write_system()'s controlDict, Gate 105-C's fvSchemes/fvSolution.
+    The laminar fvSchemes also carries div(phi,k) and div(phi,epsilon): the two lines are blockgen.rs
+    write_system()'s, inert for laminar, written because ofgpu-lowmach's fvSchemes reader asks for
+    div(phi,k) and div(phi,epsilon) on every model."""
+    sch = list(_FV_SCHEMES)
+    j = sch.index("    div(phi,T)      bounded Gauss upwind;") + 1
+    sch[j:j] = ["    div(phi,k)      bounded Gauss upwind;", "    div(phi,epsilon) bounded Gauss upwind;"]
     return {"system/controlDict": foam_file("dictionary", "system", "controlDict", chr(10).join(_CONTROL_DICT)),
-            "system/fvSchemes": foam_file("dictionary", "system", "fvSchemes", chr(10).join(_FV_SCHEMES)),
+            "system/fvSchemes": foam_file("dictionary", "system", "fvSchemes", chr(10).join(sch)),
             "system/fvSolution": foam_file("dictionary", "system", "fvSolution", chr(10).join(_FV_SOLUTION))}
 
 
@@ -474,7 +489,8 @@ def _write_case(wedge_dir, level, geom_dir, req_dir, tmp, roles) -> dict:
             "fields": {"U": {"dimensions": "[0 1 -1 0 0 0 0]", "internal": [0.0, 0.0, 0.0]},
                        "p": {"dimensions": "[0 2 -2 0 0 0 0]", "internal": 0.0},
                        "T": {"dimensions": "[0 0 0 1 0 0 0]", "internal": op["T_K"]}},
-            "numerics": {"transcribed": [list(r) for r in TRANSCRIBED], "differences": list(DIFFERENCES)},
+            "numerics": {"transcribed": [list(r) for r in TRANSCRIBED]
+                         + [list(r) for r in TRANSCRIBED_LAMINAR], "differences": list(DIFFERENCES)},
             "sources": [{"id": s["id"], "file": s["file"], "commit": s["commit"], "blob": s["blob"],
                          "lines": s["lines"], "text_sha256": s["text_sha256"]}
                         for s in common.read_json(SOURCES)["sources"]],
@@ -1271,7 +1287,7 @@ def selftest() -> None:
             parent = os.path.dirname(os.path.abspath(out))
             assert not [n for n in os.listdir(parent) if n.startswith(".case-")], parent
 
-        # T1: the two quotes hash to their recorded sha, and all 24 transcribed settings occur in the quote
+        # T1: the two quotes hash to their recorded sha, and all 26 transcribed settings occur in the quote
         # and in the written file (the nominal write of T2 serves here)
         src = common.read_json(SOURCES)
         assert len(src["sources"]) == 2, len(src["sources"])
@@ -1286,11 +1302,18 @@ def selftest() -> None:
             with open(os.path.join(c0, rel.replace("/", os.sep)), "rb") as f:
                 case_texts[rel] = f.read().decode("utf-8")
         quote_text = dict((s["id"], s["text"]) for s in src["sources"])
-        for sid, q_sub, c_file, w_sub in TRANSCRIBED:
+        for sid, q_sub, c_file, w_sub in TRANSCRIBED + TRANSCRIBED_LAMINAR:
             assert q_sub in quote_text[sid], (sid, q_sub)
             assert w_sub in case_texts[c_file], (c_file, w_sub)
-        print("[ok] 2 quotes at bceb799 hash to their recorded sha; 24 transcribed settings occur in their "
-              "quote and in the written case")
+        lam_sch = system_files()["system/fvSchemes"]
+        assert "    div(phi,k)      bounded Gauss upwind;" in lam_sch, "laminar fvSchemes lacks div(phi,k)"
+        assert "    div(phi,epsilon) bounded Gauss upwind;" in lam_sch, "laminar fvSchemes lacks div(phi,epsilon)"
+        turb_sch = turb_system_files()["system/fvSchemes"]
+        assert turb_sch.count("div(phi,k)") == 1, turb_sch.count("div(phi,k)")
+        assert "epsilon" not in turb_sch, "turbulent fvSchemes carries epsilon"
+        print("[ok] 2 quotes at bceb799 hash to their recorded sha; 26 transcribed settings occur in their "
+              "quote and in the written case; the laminar fvSchemes carries the inert div(phi,k)/"
+              "div(phi,epsilon) lines, the turbulent one div(phi,k) once and no epsilon")
 
         # T2: the nominal operating point, the cold start and the canonical, path-free case.json
         case = res["case"]

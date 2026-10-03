@@ -49,6 +49,8 @@ Definitions (fixed before any run):
   D10 G-REPEAT: L1r is a second cold case of the same L1 mesh, solved the same way; the band is
      |a - b| of fRe, u_ratio, shear_balance, dQ_rel and dp_window at the final time;
      fields_bit_identical and log_iter_lines_identical are reported, never assumed (docs/16 §D).
+  D11 GPU share: nvidia-smi before and after each solve (parse_smi, gpu_snapshot, shared_flag) into
+     runs/<name>/gpu.json; shared marks a wall time measured while another job held the GPU; never gated.
 
 Usage:
   python poiseuille.py --selftest
@@ -57,6 +59,7 @@ Usage:
   python poiseuille.py metrics CASE_DIR TIME OUT_JSON
   python poiseuille.py record OUT_DIR RECORD_JSON
   python poiseuille.py gmsh-build LEVEL MSH_PATH   (the fresh child of build_level)
+  python poiseuille.py stage-bin               (copy the pinned GPU binary to its single-link path)
 """
 import json
 import math
@@ -96,7 +99,7 @@ PATCHES = ("inlet", "outlet", "wall", "wedge_front", "wedge_back")
 ROLES = {"inlet": "velocity_inlet", "outlet": "pressure_outlet", "wall": "wall", "wedge_front": "wedge",
          "wedge_back": "wedge"}
 BIN_GPU = os.path.join(CAD, "bin_gpu.json")
-REFUSAL_IDS = ("G0-OUT", "G0-NAME", "G0-MESH", "G0-FIELD", "G0-UNITS", "G0-STATION")
+REFUSAL_IDS = ("G0-OUT", "G0-NAME", "G0-MESH", "G0-FIELD", "G0-UNITS", "G0-STATION", "G0-BIN")
 VERDICT_IDS = ("G0-MISSING", "G0-UNSTEADY", "G0-FRE", "G0-URATIO", "G0-SHEAR", "G0-MASS")
 LEVEL_KEYS = ("name", "level", "nr", "nx", "cells", "elements", "volume_m3", "volume_ref_m3", "volume_rel",
               "patches", "check", "msh_sha256", "polymesh_sha256", "mesh_pass")
@@ -109,18 +112,26 @@ METRIC_KEYS = ("status", "reason_id", "detail", "time", "n_cells", "theta_mesh_r
                "F_shear", "F_shear_first_order", "shear_balance", "shear_balance_first_order")
 RECORD_KEYS = ("version", "recipe", "recipe_sha", "bands", "iters", "gate_level", "binary", "runs",
                "observed_order", "repeat", "g0", "g_repeat")
-RUN_KEYS = ("name", "level", "cells", "mesh", "solve", "wall_s", "metrics")
+RUN_KEYS = ("name", "level", "cells", "mesh", "solve", "wall_s", "gpu", "metrics")
 SOLVE_ROW_KEYS = ("class", "reason_id", "failed", "criteria", "n_iter_lines", "log_sha256", "binary_sha256")
 ORDER_KEYS = ("values", "monotone", "p")
 REPEAT_KEYS = ("names", "classes", "delta", "fields_bit_identical", "field_sha256", "log_iter_lines_identical")
 G0_KEYS = ("verdict", "reasons", "checks")
 G_REPEAT_KEYS = ("status", "band", "bit_identical", "note")
+SMI_TIMEOUT_S = 30
+SHARED_UTIL_PCT = 5            # % utilisation seen before or after a solve that marks its wall time shared
+GPU_NOTE = ("nvidia-smi before and after the solve; shared true means another job held the GPU, so wall_s is "
+            "not a performance number")
+GPU_KEYS = ("before", "after", "shared", "note")
+SNAP_KEYS = ("status", "gpu", "compute_apps", "detail")
+SMI_GPU_KEYS = ("name", "memory_used_mib", "memory_total_mib", "utilization_pct")
 USAGE = ("usage: python poiseuille.py --selftest" + chr(10)
          + "       python poiseuille.py build OUT_DIR" + chr(10)
          + "       python poiseuille.py run OUT_DIR NAME" + chr(10)
          + "       python poiseuille.py metrics CASE_DIR TIME OUT_JSON" + chr(10)
          + "       python poiseuille.py record OUT_DIR RECORD_JSON" + chr(10)
-         + "       python poiseuille.py gmsh-build LEVEL MSH_PATH")
+         + "       python poiseuille.py gmsh-build LEVEL MSH_PATH" + chr(10)
+         + "       python poiseuille.py stage-bin")
 
 
 class Refused(wedge_mesh.Refused):
@@ -327,7 +338,8 @@ def write_case(mesh_dir, level, out_dir):
             "fields": {"U": {"dimensions": "[0 1 -1 0 0 0 0]", "internal": [0.0, 0.0, 0.0]},
                        "p": {"dimensions": "[0 2 -2 0 0 0 0]", "internal": 0.0},
                        "T": {"dimensions": "[0 0 0 1 0 0 0]", "internal": case_writer.STATE["T_K"]}},
-            "numerics": {"transcribed": [list(r) for r in case_writer.TRANSCRIBED],
+            "numerics": {"transcribed": [list(r) for r in case_writer.TRANSCRIBED]
+                         + [list(r) for r in case_writer.TRANSCRIBED_LAMINAR],
                          "differences": list(case_writer.DIFFERENCES)},
             "sources": [{"id": s["id"], "file": s["file"], "commit": s["commit"], "blob": s["blob"],
                          "lines": s["lines"], "text_sha256": s["text_sha256"]}
@@ -556,25 +568,133 @@ def judge(m, solve_class):
     return {"verdict": "PASS" if not reasons else "OPEN", "reasons": reasons, "checks": checks}
 
 
-def run(out_dir, name, iters=ITERS, exe=None, visible=True):
+def parse_smi(gpu_text, apps_text):
+    """S1: (gpu dict of SMI_GPU_KEYS, [{"pid", "process_name"}]); ValueError on a malformed gpu line."""
+    gpu = None
+    for line in gpu_text.splitlines():
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 4:
+            raise ValueError("nvidia-smi gpu line is not 4 comma fields: %r" % (line,))
+        gpu = {"name": parts[0], "memory_used_mib": int(parts[1]),
+               "memory_total_mib": int(parts[2]), "utilization_pct": int(parts[3])}
+        break
+    apps = []
+    for line in apps_text.splitlines():
+        if not line.strip():
+            continue
+        pid_text, _sep, proc = line.partition(",")
+        try:
+            pid = int(pid_text.strip())
+        except ValueError:
+            continue
+        proc = proc.strip().replace(chr(92), "/").rsplit("/", 1)[-1]
+        apps.append({"pid": pid, "process_name": proc})
+    return gpu, apps
+
+
+def gpu_snapshot(smi="nvidia-smi"):
+    """S2: a SNAP_KEYS dict, status ok or unavailable; never raises."""
+    try:
+        gp = subprocess.run([smi, "--query-gpu=name,memory.used,memory.total,utilization.gpu",
+                             "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                            timeout=SMI_TIMEOUT_S)
+        ap = subprocess.run([smi, "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
+                            capture_output=True, text=True, timeout=SMI_TIMEOUT_S)
+        if gp.returncode != 0 or ap.returncode != 0:
+            return {"status": "unavailable", "gpu": None, "compute_apps": [],
+                    "detail": "nvidia-smi returned nonzero"}
+        gpu, apps = parse_smi(gp.stdout, ap.stdout)
+        if gpu is None:
+            return {"status": "unavailable", "gpu": None, "compute_apps": [],
+                    "detail": "nvidia-smi printed no gpu line"}
+        return {"status": "ok", "gpu": gpu, "compute_apps": apps, "detail": ""}
+    except Exception as exc:
+        return {"status": "unavailable", "gpu": None, "compute_apps": [],
+                "detail": "nvidia-smi failed: %s" % type(exc).__name__}
+
+
+def shared_flag(before, after):
+    """S3: True, False or None."""
+    seen, unavailable = [], False
+    for snap in (before, after):
+        u = (snap.get("gpu") or {}).get("utilization_pct") if snap.get("status") == "ok" else None
+        if u is None:
+            unavailable = True
+        else:
+            seen.append(u)
+    if any(u >= SHARED_UTIL_PCT for u in seen):
+        return True
+    return None if unavailable else False
+
+
+def run(out_dir, name, iters=ITERS, exe=None, visible=True, snapshot_fn=None):
     """One solve of cases/<name> into runs/<name> through solve.launch, the D-1 binary of bin_gpu
     when exe is None (G0-NAME for a bad name, G0-OUT when the run directory exists); timed, the
-    solve doc returned and wall.json written."""
+    solve doc returned and wall.json written. An nvidia-smi snapshot (snapshot_fn, gpu_snapshot
+    when None) is taken just before and just after launch and written to runs/<name>/gpu.json with
+    the D11 shared flag; nothing lands in the run directory before launch returns."""
     if name not in NAMES:
         raise Refused("G0-NAME", "name %r is not one of %r" % (name, list(NAMES)))
     rdir = os.path.join(out_dir, "runs", name)
     if os.path.exists(rdir):
         raise Refused("G0-OUT", "%s exists" % rdir)
+    if snapshot_fn is None:
+        snapshot_fn = gpu_snapshot
     print("[g0] solving %s for %d iterations..." % (name, iters))
+    before = snapshot_fn()
     t0 = time.monotonic()
     doc = solve.launch(os.path.join(out_dir, "cases", name), os.path.join(out_dir, "mesh"), rdir, iters,
                        exe=exe, bin_json=None if exe else BIN_GPU, history_fn=history, visible=visible)
     wall_s = time.monotonic() - t0
+    after = snapshot_fn()
     os.makedirs(rdir, exist_ok=True)
     with open(os.path.join(rdir, "wall.json"), "wb") as f:
         f.write((common.canonical_json({"wall_s": wall_s}) + chr(10)).encode("utf-8"))
+    gpu_doc = {"before": before, "after": after, "shared": shared_flag(before, after), "note": GPU_NOTE}
+    with open(os.path.join(rdir, "gpu.json"), "wb") as f:
+        f.write((common.canonical_json(gpu_doc) + chr(10)).encode("utf-8"))
+    bu = (before.get("gpu") or {}).get("utilization_pct")
+    au = (after.get("gpu") or {}).get("utilization_pct")
     print("[g0] %s class %s in %.1f s" % (name, doc.get("class"), wall_s))
+    print("[g0] %s gpu shared %s (before %s%% after %s%%)" % (name, gpu_doc["shared"], bu, au))
     return doc
+
+
+def stage_bin(src, dst, sha256):
+    """Copy src to dst as one fresh single-link file (a temp file in dst's directory, then
+    os.replace) unless dst already passes solve._stable_sha == sha256; G0-BIN when
+    common.sha256_file of src is not sha256 (or src is missing), or when dst afterwards does not
+    pass solve._stable_sha == sha256. Returns "kept" or "copied"."""
+    if solve._stable_sha(dst) == sha256:
+        return "kept"
+    if not os.path.isfile(src) or common.sha256_file(src) != sha256:
+        raise Refused("G0-BIN", "the source %s is missing or does not hash to the pin" % src)
+    dst_dir = os.path.dirname(os.path.abspath(dst))
+    os.makedirs(dst_dir, exist_ok=True)
+    with open(src, "rb") as f_in:
+        fd, tmp = tempfile.mkstemp(dir=dst_dir, suffix=".stage")
+        try:
+            with os.fdopen(fd, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+            os.replace(tmp, dst)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.remove(tmp)                          # never anything but our own temp file
+            raise
+    if solve._stable_sha(dst) != sha256:
+        raise Refused("G0-BIN", "the staged %s does not pass solve's stable-file check" % dst)
+    return "copied"
+
+
+def stage_pinned(bin_json=BIN_GPU):
+    """stage_bin of the ofgpu-lowmach pin in bin_json: dst its path, src its staged_from, both
+    resolved against common.REPO; the {"status", "path", "sha256"} doc, relative paths only."""
+    ent = common.read_json(bin_json)["binaries"]["ofgpu-lowmach"]
+    dst = os.path.normpath(os.path.join(common.REPO, ent["path"]))
+    src = os.path.normpath(os.path.join(common.REPO, ent["staged_from"]))
+    return {"status": stage_bin(src, dst, ent["sha256"]), "path": ent["path"], "sha256": ent["sha256"]}
 
 
 def _fx_plant(case_dir, time_name, p_scale=1.0, outlet_scale=1.0, axis_scale=1.0):
@@ -647,9 +767,11 @@ def record(out_dir):
             wj = os.path.join(out_dir, "runs", name, "wall.json")
             wall_s = common.read_json(wj).get("wall_s") if os.path.isfile(wj) else None
             m = metrics(os.path.join(out_dir, "cases", name), str(iters))
+        gj = os.path.join(out_dir, "runs", name, "gpu.json")
+        gpu = common.read_json(gj) if os.path.isfile(gj) else None
         runs.append({"name": name, "level": LEVEL_OF[name], "cells": lv["cells"],
                      "mesh": dict((k, lv[k]) for k in LEVEL_KEYS if k != "name"),
-                     "solve": solve_row, "wall_s": wall_s, "metrics": m})
+                     "solve": solve_row, "wall_s": wall_s, "gpu": gpu, "metrics": m})
     return _record_tail(out_dir, iters, binary, runs, solves)
 
 
@@ -756,6 +878,13 @@ def main(argv):
             f.write((common.canonical_json(rec) + chr(10)).encode("utf-8"))
         print("g0 %s reasons %s" % (rec["g0"]["verdict"], ",".join(rec["g0"]["reasons"])))
         return 0 if rec["g0"]["verdict"] == "PASS" else 1
+    if argv == ["stage-bin"]:
+        try:
+            print(common.canonical_json(stage_pinned()))
+        except wedge_mesh.Refused as r:
+            sys.stderr.write("refused %s: %s%s" % (r.rule, r.detail, chr(10)))
+            return 1
+        return 0
     sys.stderr.write(USAGE + chr(10))
     return 2
 
@@ -801,10 +930,14 @@ def _t1():
     doc = common.read_json(BIN_GPU)
     assert list(doc["binaries"].keys()) == ["ofgpu-lowmach"]
     ent = doc["binaries"]["ofgpu-lowmach"]
-    assert ent["path"] == "../Iteration-CFD-solver/rust/target/release/ofgpu-lowmach.exe"
+    assert ent["path"] == "rust/target/gpu-pin/ofgpu-lowmach.exe"
+    assert ent["staged_from"] == "../Iteration-CFD-solver/rust/target/release/ofgpu-lowmach.exe"
     assert ent["sha256"] == "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
-    disk = common.sha256_file(os.path.normpath(os.path.join(common.REPO, ent["path"])))
+    disk = common.sha256_file(os.path.normpath(os.path.join(common.REPO, ent["staged_from"])))
     assert disk == ent["sha256"]
+    pin = os.path.normpath(os.path.join(common.REPO, ent["path"]))
+    if os.path.exists(pin):                              # a fresh checkout has no staged copy yet
+        assert solve._stable_sha(pin) == ent["sha256"]
     print("[ok] T1 U_IN 0.15, recipe %s sha %s, bin_gpu pins ofgpu-lowmach and the disk sha matches"
           % (",".join(RECIPE.keys()), rsha))
 
@@ -928,6 +1061,14 @@ def _t5(td, out_A, clean):
           " G0-URATIO only, unsteady/missing judges, G0-UNITS and G0-FIELD refusals with every number None")
 
 
+def _fake_snap(util, apps=None):
+    """An ok nvidia-smi snapshot of utilization util (the SNAP_KEYS shape) for the selftest's snapshot fakes."""
+    return {"status": "ok",
+            "gpu": {"name": "NVIDIA GeForce RTX 5070 Ti", "memory_used_mib": 100,
+                    "memory_total_mib": 16303, "utilization_pct": util},
+            "compute_apps": [] if apps is None else list(apps), "detail": ""}
+
+
 def _t6(td, out_A):
     out_B = os.path.join(td, "outB")
     os.makedirs(out_B)
@@ -935,7 +1076,8 @@ def _t6(td, out_A):
     shutil.copytree(os.path.join(out_A, "cases"), os.path.join(out_B, "cases"))
     shutil.copy(os.path.join(out_A, "build.json"), os.path.join(out_B, "build.json"))
     fake = _fake_bin(td, "104", 1.04)
-    doc = run(out_B, "L0", iters=600, exe=[sys.executable, fake], visible=False)
+    doc = run(out_B, "L0", iters=600, exe=[sys.executable, fake], visible=False,
+              snapshot_fn=lambda: _fake_snap(61, [{"pid": 1, "process_name": "explorer.exe"}]))
     assert doc["class"] == "steady" and doc["reason_id"] is None
     win = doc["result"]["window"]
     assert win["iters"] == [400, 450, 500, 550, 600]
@@ -944,16 +1086,24 @@ def _t6(td, out_A):
     assert len(set(win["dp"])) == 1
     wj = common.read_json(os.path.join(out_B, "runs", "L0", "wall.json"))
     assert isinstance(wj["wall_s"], float) and wj["wall_s"] >= 0.0
-    assert sorted(os.listdir(os.path.join(out_B, "runs", "L0"))) == ["solve.json", "solve.log", "wall.json"]
+    gj = common.read_json(os.path.join(out_B, "runs", "L0", "gpu.json"))
+    assert sorted(gj.keys()) == sorted(GPU_KEYS) and gj["shared"] is True and gj["note"] == GPU_NOTE
+    assert gj["before"]["gpu"]["utilization_pct"] == 61
+    assert gj["after"]["compute_apps"] == [{"pid": 1, "process_name": "explorer.exe"}]
+    assert sorted(os.listdir(os.path.join(out_B, "runs", "L0"))) == [
+        "gpu.json", "solve.json", "solve.log", "wall.json"]
     print("[ok] T6 the fake-binary L0 run is classified steady (Cd = f Re * 1.04 on the five window times,"
-          " dp constant), wall.json holds a non-negative wall_s")
+          " dp constant), wall.json holds a non-negative wall_s and gpu.json the shared=True snapshots")
     return out_B, fake
 
 
 def _t7(td, out_B, fake104):
-    run(out_B, "L1", iters=600, exe=[sys.executable, _fake_bin(td, "101", 1.01)], visible=False)
-    run(out_B, "L2", iters=600, exe=[sys.executable, _fake_bin(td, "1025", 1.0025)], visible=False)
-    run(out_B, "L1r", iters=600, exe=[sys.executable, _fake_bin(td, "101b", 1.01)], visible=False)
+    run(out_B, "L1", iters=600, exe=[sys.executable, _fake_bin(td, "101", 1.01)], visible=False,
+        snapshot_fn=lambda: _fake_snap(0))
+    run(out_B, "L2", iters=600, exe=[sys.executable, _fake_bin(td, "1025", 1.0025)], visible=False,
+        snapshot_fn=lambda: _fake_snap(0))
+    run(out_B, "L1r", iters=600, exe=[sys.executable, _fake_bin(td, "101b", 1.01)], visible=False,
+        snapshot_fn=lambda: _fake_snap(0))
     rec = record(out_B)
     assert list(rec.keys()) == list(RECORD_KEYS)
     assert rec["g0"]["verdict"] == "PASS" and rec["g0"]["reasons"] == []
@@ -967,6 +1117,9 @@ def _t7(td, out_B, fake104):
     assert rec["g_repeat"]["status"] == "recorded"
     assert rec["binary"]["sha256"] == common.sha256_file(fake104)
     assert [r["name"] for r in rec["runs"]] == ["L0", "L1", "L2", "L1r"]
+    assert rec["runs"][0]["gpu"]["shared"] is True and rec["runs"][1]["gpu"]["shared"] is False
+    for r in rec["runs"]:
+        assert list(r.keys()) == list(RUN_KEYS)
     text = common.canonical_json(rec)
     assert out_B not in text and os.path.basename(td) not in text
     assert "C:/" not in text and ("C:" + chr(92)) not in text
@@ -982,7 +1135,8 @@ def _t8(td, out_B):
     for name in os.listdir(os.path.join(a, "cases", "L2")):     # back to a cold case
         if name.isdigit() and name != "0":
             shutil.rmtree(os.path.join(a, "cases", "L2", name))
-    run(a, "L2", iters=600, exe=[sys.executable, _fake_bin(td, "102", 1.02)], visible=False)
+    run(a, "L2", iters=600, exe=[sys.executable, _fake_bin(td, "102", 1.02)], visible=False,
+        snapshot_fn=lambda: _fake_snap(0))
     assert record(a)["g0"]["reasons"] == ["G0-FRE", "G0-SHEAR"]
     b = os.path.join(td, "outB_b")
     shutil.copytree(out_B, b)
@@ -997,6 +1151,7 @@ def _t8(td, out_B):
     shutil.rmtree(os.path.join(c, "runs", "L2"))
     rec_c = record(c)
     assert rec_c["g0"]["reasons"] == ["G0-MISSING", "G0-UNSTEADY"] and rec_c["runs"][2]["solve"] is None
+    assert rec_c["runs"][2]["gpu"] is None
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "poiseuille.py")
     child = dict(os.environ, PYTHONIOENCODING="utf-8")
     rec_path = os.path.join(td, "rec.json")
@@ -1015,12 +1170,12 @@ def _t8(td, out_B):
     pr = subprocess.run([sys.executable, script], capture_output=True, text=True, encoding="utf-8")
     assert pr.returncode == 2
     try:
-        run(out_B, "L9")
+        run(out_B, "L9", snapshot_fn=lambda: _fake_snap(0))
         raise AssertionError("run L9 was not refused")
     except Refused as r:
         assert r.rule == "G0-NAME"
     try:
-        run(out_B, "L0")
+        run(out_B, "L0", snapshot_fn=lambda: _fake_snap(0))
         raise AssertionError("run L0 was not refused")
     except Refused as r:
         assert r.rule == "G0-OUT"
@@ -1028,8 +1183,64 @@ def _t8(td, out_B):
           " solve None) and the CLI (record byte-identical, metrics, usage 2, G0-NAME and G0-OUT)")
 
 
+def _t9(td):
+    gpu, apps = parse_smi("NVIDIA GeForce RTX 5070 Ti, 3896, 16303, 61" + chr(10),
+                          "3092, [Insufficient Permissions]" + chr(10)
+                          + "11592, C:" + chr(92) + "Windows" + chr(92) + "explorer.exe" + chr(10)
+                          + "x, junk" + chr(10))
+    assert gpu == {"name": "NVIDIA GeForce RTX 5070 Ti", "memory_used_mib": 3896,
+                   "memory_total_mib": 16303, "utilization_pct": 61}
+    assert apps == [{"pid": 3092, "process_name": "[Insufficient Permissions]"},
+                    {"pid": 11592, "process_name": "explorer.exe"}]
+    for bad in (("a, b" + chr(10), ""), ("G, 1, 2, x", "")):
+        try:
+            parse_smi(*bad)
+            raise AssertionError("parse_smi accepted %r" % (bad,))
+        except ValueError:
+            pass
+    snap = gpu_snapshot(smi=os.path.join(td, "no_such_smi.exe"))
+    assert snap["status"] == "unavailable" and list(snap.keys()) == list(SNAP_KEYS)
+    assert snap["gpu"] is None and snap["compute_apps"] == []
+
+    def ok(u):
+        return {"status": "ok",
+                "gpu": {"name": "G", "memory_used_mib": 1, "memory_total_mib": 2, "utilization_pct": u},
+                "compute_apps": [], "detail": ""}
+
+    unavail = {"status": "unavailable", "gpu": None, "compute_apps": [], "detail": "nvidia-smi failed"}
+    assert shared_flag(ok(0), ok(0)) is False
+    assert shared_flag(ok(5), ok(0)) is True
+    assert shared_flag(ok(0), ok(61)) is True
+    assert shared_flag(ok(4), ok(4)) is False
+    assert shared_flag(ok(0), unavail) is None
+    assert shared_flag(unavail, ok(61)) is True
+    src = os.path.join(td, "stagebin", "cargo.exe")
+    os.makedirs(os.path.dirname(src))
+    with open(src, "wb") as f:
+        f.write(b"fake gpu binary")
+    sha = common.sha256_file(src)
+    os.link(src, os.path.join(td, "stagebin", "cargo_dep.exe"))
+    assert os.stat(src).st_nlink == 2 and solve._stable_sha(src) is None
+    dst = os.path.join(td, "stagebin", "pin", "x.exe")
+    assert stage_bin(src, dst, sha) == "copied"
+    assert os.stat(dst).st_nlink == 1 and solve._stable_sha(dst) == sha
+    assert stage_bin(src, dst, sha) == "kept"
+    try:
+        stage_bin(src, os.path.join(td, "stagebin", "wrong", "y.exe"), "0" * 64)
+        raise AssertionError("stage_bin accepted a wrong pin")
+    except Refused as r:
+        assert r.rule == "G0-BIN"
+    assert os.stat(src).st_nlink == 2
+    with open(src, "rb") as f:
+        assert f.read() == b"fake gpu binary"
+    print("[ok] T9 parse_smi reads the 5070 Ti line and pid basenames (junk pid skipped) and rejects bad"
+          " gpu lines, gpu_snapshot on a missing executable is unavailable, shared_flag True False None"
+          " on the 5 pct rule, stage_bin copies a 2-link source to a 1-link pin and refuses a wrong sha"
+          " G0-BIN")
+
+
 def selftest():
-    """T1-T8 in one TemporaryDirectory, build(out_A) once and shared; SELFTEST PASS at the end."""
+    """T1-T9 in one TemporaryDirectory, build(out_A) once and shared; SELFTEST PASS at the end."""
     with tempfile.TemporaryDirectory() as td:
         out_A = os.path.join(td, "outA")
         build_doc = build(out_A)
@@ -1041,6 +1252,7 @@ def selftest():
         out_B, fake104 = _t6(td, out_A)
         _t7(td, out_B, fake104)
         _t8(td, out_B)
+        _t9(td)
     print("SELFTEST PASS")
 
 if __name__ == "__main__":

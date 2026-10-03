@@ -1,10 +1,11 @@
 {
-  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. docs/16 D-1 (user decision 2026-10-03): the GPU binary of chain P, the ofgpu-lowmach release build of the solver tree at feat/core-2 90510fc; the path is relative to the repository root and solve.launch refuses it unless its sha256 matches. Kept apart from bin.json so the CPU mesh records do not change.",
+  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. docs/16 D-1 (user decision 2026-10-03): the GPU binary of chain P, the ofgpu-lowmach release build of the solver tree at feat/core-2 90510fc; the path is relative to the repository root and solve.launch refuses it unless its sha256 matches. Kept apart from bin.json so the CPU mesh records do not change. The path is a byte-identical copy staged by poiseuille.py stage-bin under the ignored rust/target/ of this tree, because cargo hard-links its output (nlink 2) and solve.launch's stable-file check refuses a hard link; staged_from is the build it copies.",
   "version": 1,
   "source": {"branch": "feat/core-2", "commit": "90510fc43cf0b602df3e68f48f9ffd8fb8b44729", "build": "cargo build --release --bin ofgpu-lowmach"},
   "binaries": {
     "ofgpu-lowmach": {
-      "path": "../Iteration-CFD-solver/rust/target/release/ofgpu-lowmach.exe",
+      "path": "rust/target/gpu-pin/ofgpu-lowmach.exe",
+      "staged_from": "../Iteration-CFD-solver/rust/target/release/ofgpu-lowmach.exe",
       "sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
     }
   }
