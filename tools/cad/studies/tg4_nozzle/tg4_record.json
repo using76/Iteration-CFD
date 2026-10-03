@@ -1,0 +1,511 @@
+{
+  "version": "cad-tg4/1",
+  "reduced": true,
+  "study_id": "tg4_nozzle",
+  "lock_sha": "13cb026976d87a8544c473dad29f9ea3854620b5b0027fb1c69e0f9aa6c4a74f",
+  "binary": {
+    "name": "ofgpu-lowmach",
+    "path": "rust/target/gpu-pin/ofgpu-lowmach.exe",
+    "sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+  },
+  "tg0": {
+    "source": "tools/cad/cases/pipe_turb/tg0_record.json",
+    "sha256": "2011cc04a099b3f38e1d87df219fac8bf39409d8caeac2f5bcd276bb2ec82f03",
+    "verdict": "OPEN",
+    "reasons": [
+      "TG0-MISSING",
+      "TG0-TB5"
+    ]
+  },
+  "cfd_u": {
+    "source": "tools/cad/cases/nozzle_turb/tg123_record.json",
+    "sha256": "617ac59fc3669e2ff3f8e5fa951d959335305f695d671152d463c2c1c7db6f55",
+    "status": "OPEN",
+    "fields_bit_identical": true,
+    "gci_fine_known": false
+  },
+  "start": {
+    "name": "start",
+    "level": "L1",
+    "eval_key": "500babba30d00ee9ed9a7ad08b57ccc5e8f813835b166a3911c9c2bd4e6bb4d5",
+    "params": {
+      "CR": 2.0,
+      "D_i": 0.3,
+      "L_over_Di": 0.5,
+      "Lu_over_Di": 2.0,
+      "Lx_over_De": 0.5,
+      "law": "poly7",
+      "t_wall": 0.004,
+      "upstream_role": "wall",
+      "x_m": null
+    },
+    "stage_reached": "checks",
+    "solve_class": "not_run",
+    "reason_id": "EVAL-CHECKS",
+    "message": "hard row REQ-005 is fail (None)",
+    "cells": null,
+    "mesh": null,
+    "solve": null,
+    "wall_s": null,
+    "gpu_shared": null,
+    "k_recheck": {
+      "K_lim": 3e-06,
+      "K_apriori_case": null,
+      "K_cfd": null,
+      "pass": false
+    },
+    "reported": null,
+    "design_verdict": "infeasible",
+    "n_hard_pass": 8,
+    "n_hard_fail": 1,
+    "n_hard_ne": 3,
+    "objective": 0.2560660171779823,
+    "verdicts": [
+      {
+        "req_id": "REQ-001",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 0.3,
+        "u": 1e-09
+      },
+      {
+        "req_id": "REQ-002",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 0.21213203435596423,
+        "u": 1e-09
+      },
+      {
+        "req_id": "REQ-003",
+        "verdict": "not_evaluable",
+        "reason_id": "NE-MISSING",
+        "m": null,
+        "u": null
+      },
+      {
+        "req_id": "REQ-004",
+        "verdict": "not_evaluable",
+        "reason_id": "NE-MISSING",
+        "m": null,
+        "u": null
+      },
+      {
+        "req_id": "REQ-005",
+        "verdict": "fail",
+        "reason_id": null,
+        "m": 4.966618287407307e-06,
+        "u": 4.9666182874073074e-15
+      },
+      {
+        "req_id": "REQ-006",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 0.0040000000000000036,
+        "u": 1e-08
+      },
+      {
+        "req_id": "REQ-007",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 0.2560660171779823,
+        "u": 1e-09
+      },
+      {
+        "req_id": "SYS-SOLID",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 1.0,
+        "u": 0.0
+      },
+      {
+        "req_id": "SYS-VALID",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 1.0,
+        "u": 0.0
+      },
+      {
+        "req_id": "SYS-WATERTIGHT",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 1.0,
+        "u": 0.0
+      },
+      {
+        "req_id": "SYS-AXIS",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 1.0,
+        "u": 0.0
+      },
+      {
+        "req_id": "SYS-UNITS",
+        "verdict": "pass",
+        "reason_id": null,
+        "m": 1.0,
+        "u": 0.0
+      },
+      {
+        "req_id": "SYS-MACH",
+        "verdict": "not_evaluable",
+        "reason_id": "NE-MISSING",
+        "m": null,
+        "u": null
+      }
+    ],
+    "source": "reduced"
+  },
+  "precondition": {
+    "start_n_hard_fail": 1,
+    "start_failing_rows": [
+      "REQ-005"
+    ],
+    "K_start": 4.966618287407307e-06,
+    "K_start_plan": 4.97e-06,
+    "K_start_agrees": true,
+    "met": true
+  },
+  "reduced_evals": [
+    {
+      "name": "start",
+      "level": "L1",
+      "eval_key": "500babba30d00ee9ed9a7ad08b57ccc5e8f813835b166a3911c9c2bd4e6bb4d5",
+      "params": {
+        "CR": 2.0,
+        "D_i": 0.3,
+        "L_over_Di": 0.5,
+        "Lu_over_Di": 2.0,
+        "Lx_over_De": 0.5,
+        "law": "poly7",
+        "t_wall": 0.004,
+        "upstream_role": "wall",
+        "x_m": null
+      },
+      "stage_reached": "checks",
+      "solve_class": "not_run",
+      "reason_id": "EVAL-CHECKS",
+      "message": "hard row REQ-005 is fail (None)",
+      "cells": null,
+      "mesh": null,
+      "solve": null,
+      "wall_s": null,
+      "gpu_shared": null,
+      "k_recheck": {
+        "K_lim": 3e-06,
+        "K_apriori_case": null,
+        "K_cfd": null,
+        "pass": false
+      },
+      "reported": null,
+      "design_verdict": "infeasible",
+      "n_hard_pass": 8,
+      "n_hard_fail": 1,
+      "n_hard_ne": 3,
+      "objective": 0.2560660171779823,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.3,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.21213203435596423,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "fail",
+          "reason_id": null,
+          "m": 4.966618287407307e-06,
+          "u": 4.9666182874073074e-15
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.0040000000000000036,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.2560660171779823,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        }
+      ]
+    },
+    {
+      "name": "poly3_l060",
+      "level": "L1",
+      "eval_key": "29bddde047f825c0a24922d95a8a5bb2ff97d69befa26ef1dbd71e65ebd5e372",
+      "params": {
+        "CR": 2.0,
+        "D_i": 0.3,
+        "L_over_Di": 0.6,
+        "Lu_over_Di": 2.0,
+        "Lx_over_De": 0.5,
+        "law": "poly3",
+        "t_wall": 0.004,
+        "upstream_role": "wall",
+        "x_m": null
+      },
+      "stage_reached": "solve",
+      "solve_class": "unsteady",
+      "reason_id": "SOLVE-UNSTEADY",
+      "message": "the solve class is unsteady: ",
+      "cells": 16008,
+      "mesh": {
+        "gc7": {
+          "first_cell": true,
+          "yplus": true,
+          "volume": true,
+          "areas": true,
+          "types": true,
+          "pass": true
+        },
+        "h1_max_m": 3.5607411964725144e-06,
+        "yplus1_max": 0.4998279490911794,
+        "tau_min": 0.001286,
+        "non_orth_max_deg": 20.076
+      },
+      "solve": {
+        "class": "unsteady",
+        "reason_id": "SOLVE-UNSTEADY",
+        "failed": [
+          "U_decades"
+        ],
+        "n_iter_lines": 61,
+        "log_sha256": "c383b89adebb1f4f7039d90a03947325b40e97abd16982091ffc1234d9149fb0",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 141.19458659994416,
+      "gpu_shared": false,
+      "k_recheck": {
+        "K_lim": 3e-06,
+        "K_apriori_case": 2.852801465086711e-06,
+        "K_cfd": 4.0352037194562945e-06,
+        "pass": false
+      },
+      "reported": {
+        "Cd": 1.1447538739265954,
+        "dp": 929.817741350534,
+        "exit_nonuniformity": 0.06738438271490287,
+        "separation_free": 1.0,
+        "mach_max": 0.14007476155295068,
+        "theta_exit": 0.0002623920070300914,
+        "mass_imbalance": 2.5017099475586338e-06,
+        "K_max": 4.0352037194562945e-06
+      },
+      "design_verdict": "not_evaluable",
+      "n_hard_pass": 9,
+      "n_hard_fail": 0,
+      "n_hard_ne": 3,
+      "objective": 0.28606601717798164,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.3,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.21213203435596423,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 2.8505770491696314e-06,
+          "u": 3.0000000000000002e-15
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.0040000000000000036,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.28606601717798164,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        }
+      ]
+    }
+  ],
+  "k_recheck": [
+    {
+      "name": "start",
+      "K_apriori": 4.966618287407307e-06,
+      "K_case": null,
+      "K_cfd": null,
+      "pass": false
+    },
+    {
+      "name": "poly3_l060",
+      "K_apriori": 2.8505770491696314e-06,
+      "K_case": 2.852801465086711e-06,
+      "K_cfd": 4.0352037194562945e-06,
+      "pass": false
+    }
+  ],
+  "loop": {
+    "study_id": "tg4_nozzle",
+    "status": "new",
+    "n_evals": 0,
+    "n_decisions": 0,
+    "stable_eval_key": null,
+    "stable_design_verdict": null,
+    "stable_objective": null,
+    "last_decision": null,
+    "n_iterations": 1
+  },
+  "replay": {
+    "status": "NOT_RUN",
+    "ok": null
+  },
+  "tg4": {
+    "verdict": "OPEN",
+    "reasons": [
+      "TG4-TG0",
+      "TG4-NOT-RUN",
+      "TG4-EVALS",
+      "TG4-CONFIRM",
+      "TG4-REPLAY",
+      "TG4-CFDU",
+      "TG4-KCFD"
+    ]
+  },
+  "deferred": [
+    "The walk's CAD prefilter of 4 x 256 candidates has not run.",
+    "At most 24 L1 evaluations in the walk (docs/16 §E.7) have not run.",
+    "The L2 confirmation at 6000 iterations has not run.",
+    "The deep replay re-deriving every row has not run.",
+    "TG0 must PASS first: no turbulent nozzle number counts while TG0 is OPEN (docs/16 §H.5)."
+  ]
+}

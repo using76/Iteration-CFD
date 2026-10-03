@@ -55,6 +55,7 @@ sys.path.insert(0, HERE)
 import common  # noqa: E402
 import export  # noqa: E402
 import gate  # noqa: E402
+import measure  # noqa: E402
 import mutate  # noqa: E402
 import readiness  # noqa: E402
 import reqs  # noqa: E402
@@ -567,7 +568,13 @@ def _pf_record(params, status, rule_id, objective, rows, reason) -> dict:
 
 
 def _probes_row(out_dir, check) -> dict:
-    """The check's ONE probes.json row record: same primitive, same where list (mutate.measurements)."""
+    """The check's ONE probes.json row record: same primitive, same where list (mutate.measurements).
+    k_max_1d has no probes row: measure.k_max_1d computes the a priori K from geom.json's parameters
+    at the check's Re."""
+    if check["primitive"] == "k_max_1d":
+        return measure.k_max_1d(common.read_json(os.path.join(out_dir, "geom.json"))["params"],
+                                check["args"]["Re"], check["args"]["feature"],
+                                tuple(check["args"]["where"]))
     rows = common.read_json(os.path.join(out_dir, "probes.json"))["rows"]
     hit = [r for r in rows if r["primitive"] == check["primitive"]
            and list(r["where"]) == list(check["args"]["where"])]
@@ -1304,8 +1311,34 @@ def _t5(root) -> list:
     return [a, b]
 
 
+def _t13(root) -> None:
+    """T13: the a priori k_max_1d check is computed from geom.json's parameters, no probes row."""
+    d = os.path.join(root, "t13")
+    os.makedirs(d)
+    params = {"D_i": 0.30, "CR": 2.0, "L_over_Di": 0.5, "law": "poly7", "x_m": None,
+              "Lx_over_De": 0.5, "Lu_over_Di": 2.0, "upstream_role": "wall", "t_wall": 0.004}
+    common.write_json(os.path.join(d, "geom.json"), {"params": params})
+    common.write_json(os.path.join(d, "probes.json"), {"rows": []})
+    check = {"req_id": "REQ-005", "primitive": "k_max_1d",
+             "args": {"feature": None, "where": ["wall_contraction"], "Re": 630000.0, "level": None},
+             "op": "<=", "lo": None, "hi": 3e-6, "tol": 0.0, "u": 3e-15, "hardness": "hard",
+             "repr": "brep"}
+    rec = _probes_row(d, check)
+    assert abs(rec["value"] / 4.966618287407307e-06 - 1.0) <= 1e-12, rec["value"]
+    assert rec["status"] == "ok" and list(rec["where"]) == ["wall_contraction"], rec
+    v = verify.judge(check, rec)
+    assert v["verdict"] == "fail" and v["m"] == rec["value"], v
+    rec_none = _probes_row(d, dict(check, args=dict(check["args"], Re=None)))
+    assert rec_none["status"] == "refused" and rec_none["reason_id"] == "MEAS-RE", rec_none
+    vn = verify.judge(check, rec_none)
+    assert vn["verdict"] == "not_evaluable" and vn["reason_id"] == "NE-MISSING", vn
+    print("[ok] T13 probes row: the k_max_1d check computes the a priori K %.12g from geom.json's"
+          " parameters (judge fail against hi 3e-06), Re None refused MEAS-RE (NE-MISSING)"
+          % (rec["value"],))
+
+
 def selftest() -> None:
-    """The CAD-17 gate: T1-T12, one [ok] line each, SELFTEST PASS at the end."""
+    """The CAD-17 gate: T1-T13, one [ok] line each, SELFTEST PASS at the end."""
     with tempfile.TemporaryDirectory() as root:
         runs = _five_runs(root)
         _t1()
@@ -1321,6 +1354,7 @@ def selftest() -> None:
         _t10(root)
         _t11(root)
         _t12(runs)
+        _t13(root)
     print("SELFTEST PASS")
 
 
