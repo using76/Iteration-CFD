@@ -171,7 +171,7 @@ def _read_jsonl(path):
 
 def load_manifest(source, mode, ids=None, limit=None):
     """The manifest rows, split-sealed and equal to the official corpus rows."""
-    if source in ("tuning", "test"):
+    if source in ("tuning", "test", "test2"):
         rows = split.load(source, mode)
     else:
         with open(source, "r", encoding="utf-8") as f:
@@ -204,10 +204,16 @@ def load_manifest(source, mode, ids=None, limit=None):
 
 
 def manifest_sha(source):
-    """The lock's sha for tuning/test, the file bytes' sha for a FILE."""
+    """The lock's sha for tuning/test/test2, the file bytes' sha for a FILE."""
     if source in ("tuning", "test"):
         lock = split.read_lock(os.path.join(split.MANIFEST_DIR, "split.lock"))
         return lock[source].split(" ")[-1]
+    if source == "test2":
+        lock_path = os.path.join(split.fresh_dir(split.FRESH_SPLITS[source]),
+                                 "split.lock")
+        if not os.path.isfile(lock_path):
+            raise split.SplitError("no split.lock in %s" % lock_path)
+        return split.read_lock(lock_path)["test"].split(" ")[-1]
     return _sha256_of_file(source)
 
 
@@ -1203,8 +1209,8 @@ def run_campaign(opts, *, attempt_fn=None, probe_fn=None, snap_fn=None, hooks=No
               "tag": o["tag"], "mode": o["mode"], "system": o["system"],
               "ablate": sorted(o["ablate"]), "split_mode": split_mode,
               "manifest": {"source": o["manifest"] if o["manifest"] in ("tuning",
-                           "test") else os.path.abspath(o["manifest"]).replace(
-                               os.sep, "/"),
+                           "test", "test2") else os.path.abspath(
+                               o["manifest"]).replace(os.sep, "/"),
                            "sha256": manifest_sha(o["manifest"]), "n": len(rows)},
               "geometry_ids": [r["geometry_id"] for r in rows],
               "binary": os.path.basename(o["binary"]),
@@ -2696,6 +2702,29 @@ def _child_env():
     return dict(os.environ, PYTHONIOENCODING="utf-8")
 
 
+def _g14_fresh_split(H):
+    for mode in ("tuning", "rules"):
+        try:
+            load_manifest("test2", mode)
+        except split.SplitSealed as e:
+            assert "sealed" in str(e) and mode in str(e), e
+        else:
+            raise AssertionError("mode %r read the fresh split" % mode)
+    lock_path = os.path.join(split.fresh_dir(split.FRESH_SPLITS["test2"]),
+                             "split.lock")
+    if os.path.isfile(lock_path):
+        want = split.read_lock(lock_path)["test"].split(" ")[-1]
+        assert manifest_sha("test2") == want, (manifest_sha("test2"), want)
+    else:
+        try:
+            manifest_sha("test2")
+        except split.SplitError as e:
+            assert str(lock_path) in str(e), e
+        else:
+            raise AssertionError("manifest_sha('test2') without a lock passed")
+    return {}
+
+
 
 
 def selftest():
@@ -2762,6 +2791,8 @@ def selftest():
                "replay {d} decisions, {a} audited reruns equal, no polyMesh left, "
                "peak {peak} MiB; the CLI refuses the sealed test manifest and "
                "7 streams", _g13_live, H)
+        _group("fresh split: test2 sealed outside evaluate, manifest_sha reads "
+               "the fresh lock or is refused naming its path", _g14_fresh_split, H)
         print("SELFTEST PASS", flush=True)
         return 0
     except CampaignError as e:

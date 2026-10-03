@@ -494,6 +494,18 @@ ManifestRows without `split` (AM-7's split.py adds it); STLs are never committed
   read — **nobody reads a test row's outcome before the evaluation unit
   (docs/15 §F)**.
 
+The fresh test seed — a second claim (docs/15 §F) needs a fresh test seed and
+  a new lock, so `split.py --write-fresh 2` writes `manifests/seed2/{test.jsonl,
+  split.lock}` ONCE: one pool per family at corpus seed 2 with the seed-1
+  sizes, the same stratified largest-remainder draw (salt 17, no spent ids),
+  and only its 180 test rows kept — the tuning remainder is never written. The
+  split name is `test2`, sealed outside mode evaluate exactly like the seed-1
+  test split (`refuse_test` seals a fresh id too, so a tuning/rules campaign
+  cannot touch it). `--check-fresh 2` re-derives the counts against the
+  seed-2 pool, the disjointness against tuning.jsonl and the seed-1 test
+  lock, the in-memory regen and the lock history. The seed-1 split and its
+  lock are never rewritten.
+
 ## sensitivity.py — G-PILOT
 
 - `sensitivity.py` — docs/15 §B's measured failure turned into a decision: a
@@ -1143,6 +1155,20 @@ its report outside `evaluate/`. The departures from docs/15 §F are listed in th
 `evaluate/EVAL.json` and the results page `evaluate/EVAL.md`, written by the supervisor's run; the test split is
 then spent. The report reads its tuning context from `evaluate/tuning_context.json`, written the first time a
 report is written, so re-measuring G-PRIOR later (as on 2026-09-26) leaves the committed evaluation checkable.
+
+A fresh-seed evaluation (the second claim): `evaluate.py --run --manifest test2 --scope reduced|full --work DIR`
+runs the nine campaigns on corpus seed 2's fresh test split under ONE plan lock in `evaluate/seed2/opened.lock`,
+results in `evaluate/seed2/<scope>/`. No sealed baseline exists for the fresh seed: B0-template is meshed fresh
+with the same binary and is the baseline of G-FAIL, G-BLC-0, G-FID and G-COST; B0-LHS is not measured and is left
+out of G-ABL. **G-BLC-1** (headline 2, tier 1: A, B, E, F) passes when the full system's mean a-priori BLC_8 over
+those geometries is at least 0.09 and its mean BLC_full at least 0.05 — the targets the user fixed (D-L9) from the
+tuning re-measure before the seed was opened. G-FID gains the F3e row: among passing meshes the median chain-form
+feature-capture share no lower than B0-template's, per family. The reduced scope runs a pre-registered subset under
+the same lock — per family the first id by sha256('reduced:' + id), family D drawn among its commensurate rows,
+G-DET on the subset's D and F ids — and its verdicts are REDUCED, never a headline; the full scope runs all 180
+geometries under the same plan. Both learned layers ship disabled (2026-10-03), so G-OPT is reported, not decided.
+`python tools/autonomy/evaluate.py --run --manifest test2 --scope reduced --work DIR` then
+`python tools/autonomy/evaluate.py --check --scope reduced`.
 
 ## rescore.py — the tuning campaigns under the 2026-09-26 rule (FEAT-CONSTRAINT)
 
