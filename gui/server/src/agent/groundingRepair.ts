@@ -3,7 +3,7 @@
 // is shown; what is still ungrounded after that call is shown marked, never silently.
 import type { BetaContentBlockParam, BetaMessage, BetaMessageParam, BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import type { SessionSettings, UiBlock, Usage } from '@cfd/shared'
-import { lintText, nearestSources, REPAIR_SCHEMA, sessionSources, type GroundingRepair, type LintedText, type LintResult, type SourceEntry, type StatedNumber } from './grounding.js'
+import { groundingPools, lintText, nearestSources, REPAIR_SCHEMA, sessionSources, type GroundingRepair, type LintedText, type LintResult, type SourceEntry, type StatedNumber } from './grounding.js'
 import { emptyUsage, type LlmClient } from './llm.js'
 import { systemParam } from './prompt.js'
 
@@ -34,17 +34,27 @@ export function withText(content: readonly Block[], text: string): Block[] {
   return out
 }
 
-/** The findings the model is shown: each flagged number, where it stands, and the closest numbers the tool results hold. */
-export function repairPrompt(text: string, findings: readonly StatedNumber[], sources: readonly SourceEntry[]): string {
+/** The findings the model is shown, in the session's language: each flagged number, where it stands, and the closest numbers the sources hold. */
+export function repairPrompt(text: string, findings: readonly StatedNumber[], sources: readonly SourceEntry[], locale: SessionSettings['locale'] = 'en'): string {
+  const ko = locale === 'ko'
   const lines = findings.map((s) => {
     const near = nearestSources(s, sources).map((e) => `${e.value} (${e.tool} ${e.toolUseId} at ${e.path})`)
     const ctx = text.slice(Math.max(0, s.at - 40), s.at + s.raw.length + 40).replace(/\s+/g, ' ').trim()
-    return `- "${s.raw}" in "...${ctx}...": no tool result holds it.${near.length ? ` The closest numbers the tool results hold: ${near.join('; ')}.` : ''}`
+    return ko
+      ? `- "${s.raw}" ("...${ctx}..."): 어떤 도구 결과에도 없습니다.${near.length ? ` 도구 결과에서 가장 가까운 숫자: ${near.join('; ')}.` : ''}`
+      : `- "${s.raw}" in "...${ctx}...": no tool result holds it.${near.length ? ` The closest numbers the tool results hold: ${near.join('; ')}.` : ''}`
   })
+  if (ko) {
+    return [
+      `${REPAIR_PREFIX} 이 답변은 아직 표시되지 않았습니다. 이 대화의 도구 결과에도 사용자의 말에도 없는 숫자 ${findings.length}개가 들어 있습니다:`,
+      ...lines,
+      '답변 전체를 같은 언어(한국어)로 다시 쓰세요. 각 숫자는 그 숫자가 나온 도구 결과에서 옮기거나(반올림은 괜찮습니다) 사용자가 쓴 그대로, 사용자가 쓴 단위로 두고, 어느 쪽에도 없는 숫자(개수, 목록·표의 순번, 직접 환산하거나 계산한 값 포함)는 빼세요. 단위와 다른 말은 바꾸지 마세요. 도구를 호출하지 말고, 고친 답변만 답하세요.',
+    ].join('\n')
+  }
   return [
-    `${REPAIR_PREFIX} Your reply has not been shown yet. It states ${findings.length} number(s) that no tool result in this conversation holds:`,
+    `${REPAIR_PREFIX} Your reply has not been shown yet. It states ${findings.length} number(s) that neither a tool result in this conversation nor the user's own words hold:`,
     ...lines,
-    'Write the whole reply again: copy each number from the tool result it comes from (rounding it is fine), and leave out any number no tool result holds, a count, a list or table position, or a converted or computed value included. Change nothing else. Do not call a tool; answer with the corrected reply only.',
+    "Write the whole reply again in the language it was written in: copy each number from the tool result it comes from (rounding it is fine) or keep it as the user wrote it, in the user's unit, and leave out any number neither holds - a count, a list or table position, or a value you converted or computed yourself included. Keep every unit and every other word. Do not call a tool; answer with the corrected reply only.",
   ].join('\n')
 }
 
@@ -124,13 +134,13 @@ export async function groundReply(o: GroundReplyInput): Promise<GroundReplyResul
   const draft = textOfBlocks(o.content)
   if (draft.trim() === '') return null
   const sources = sessionSources(o.history)
-  const values = sources.map((e) => e.value)
-  const first = lintText(draft, values)
+  const pools = groundingPools(o.history)
+  const first = lintText(draft, pools.values, pools.si)
   if (first.ungrounded.length === 0) return null
-  const messages: BetaMessageParam[] = [...o.history, { role: 'assistant', content: [{ type: 'text', text: draft }] }, { role: 'user', content: repairPrompt(draft, first.ungrounded, sources) }]
+  const messages: BetaMessageParam[] = [...o.history, { role: 'assistant', content: [{ type: 'text', text: draft }] }, { role: 'user', content: repairPrompt(draft, first.ungrounded, sources, o.locale) }]
   const res = await repairCall({ llm: o.llm, messages, tools: o.tools, maxTokens: o.maxTokens, effort: o.effort, signal: o.signal })
   const text = res.text ?? draft
-  const second = res.text === null ? first : lintText(text, values)
+  const second = res.text === null ? first : lintText(text, pools.values, pools.si)
   const view = (r: LintResult, t: string): LintedText => ({ text: t, checked: r.checked, ungrounded: r.ungrounded.map(({ raw, value, at }) => ({ raw, value, at })) })
   const before = view(first, draft)
   const after = view(second, text)

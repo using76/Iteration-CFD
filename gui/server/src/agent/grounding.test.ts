@@ -1,5 +1,5 @@
-// Proves the grounding lint reads numbers with their written precision, grounds them only on tool
-// results an assistant saw earlier, and finds nothing ungrounded in twenty campaign explanations
+// Proves the grounding lint reads numbers with their written precision, grounds them on the tool
+// results and the user turns an assistant saw earlier, and finds nothing ungrounded in twenty campaign explanations
 // under the scripted mock and under a rounding zai provider alike.
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
@@ -100,7 +100,7 @@ describe('grounding', () => {
     expect(sourceNumbers('not json: 12 and 0.5')).toEqual([12, 0.5])
   })
 
-  it('lintSession grounds a message only on tool results before it, never on the user words', () => {
+  it('lintSession grounds a message on the tool results and the user turns before it', () => {
     const msgs = [
       { role: 'user', content: 'Explain D-1-002; it had 7 attempts' },
       { role: 'assistant', content: [{ type: 'text', text: 'Reading 7 rows.' }, { type: 'tool_use', id: 't1', name: 'autonomy_attempts', input: {} }, { type: 'tool_use', id: 't2', name: 'file_read', input: {} }] },
@@ -111,10 +111,10 @@ describe('grounding', () => {
     ] as BetaMessageParam[]
     const g = lintSession(msgs)
     expect(g.schema).toBe('autonomy-grounding/1')
-    expect(g.messages.map((m) => [m.index, m.turn, m.campaign, m.final, m.checked, m.ungrounded.map((u) => u.raw)])).toEqual([[1, 0, true, false, 1, ['7']], [3, 0, true, true, 4, ['7']], [5, 1, false, true, 2, ['5']]])
+    expect(g.messages.map((m) => [m.index, m.turn, m.campaign, m.final, m.checked, m.ungrounded.map((u) => u.raw)])).toEqual([[1, 0, true, false, 1, []], [3, 0, true, true, 4, []], [5, 1, false, true, 2, ['5']]])
     expect(g.explanations).toBe(1)
     expect(g.checked).toBe(5)
-    expect(g.ungrounded).toBe(2)
+    expect(g.ungrounded).toBe(0)
   })
   it('the mock explains twenty geometries grounded: ten of a studio campaign and ten of the headless one', async () => {
     let total = 0
