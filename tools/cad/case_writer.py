@@ -629,6 +629,21 @@ TRANSCRIBED_TURB = (
     ("selector", "all", "constant/fvSources", "selection       all;", "pipe"),
 )
 
+TRANSCRIBED_TURB_NOZZLE = tuple(r for r in TRANSCRIBED_TURB
+                                if not (r[0] in ("bc_names", "inlet_turb")
+                                        and r[1] in ("turbulentIntensityKineticEnergyInlet",
+                                                     "turbulentIntensity",
+                                                     "turbulentMixingLengthFrequencyInlet",
+                                                     "mixingLength")))
+DIFFERENCES_NOZZLE_TURB = (
+    "inlet k and omega (nozzle): fixedValue k_ref and omega_ref - the values turbulentIntensityKineticEnergyInlet"
+    " and turbulentMixingLengthFrequencyInlet give a uniform inflow by the solver's inlet_turb formulas; the"
+    " pinned 90510fc ofgpu-lowmach builds the turbulence fields with no U and no k to evaluate those two"
+    " conditions from and stops at set-up, so the case names the fixed values; I and l stay in turbulence",
+    "initial U (nozzle): uniform (U_inlet 0 0), still a cold start (no earlier solve); from rest the pinned"
+    " binary's first step reaches M 0.526 at the outlet axis at U_e 60 and the SPEC-LIT 93.6 Mach guard stops"
+    " the run; the pipe keeps its rest state",
+)
 
 def turb_refs(u_ref, intensity, mixing_length_m):
     """(k_ref, omega_ref) by the solver's own inlet formulas (field_setup.rs inlet_turb):
@@ -695,10 +710,8 @@ def bc_table_turb(role, u_in, t_k, k_ref, omega_ref, wall, isothermal_wall, inte
             k_row = {"type": "fixedValue", "value": 0.0}
             nut_row = {"type": "fixedValue", "value": 0.0}
     elif role == "velocity_inlet":
-        k_row = {"type": "turbulentIntensityKineticEnergyInlet",
-                 "turbulentIntensity": intensity, "value": k_ref}
-        omega_row = {"type": "turbulentMixingLengthFrequencyInlet",
-                     "mixingLength": mixing_length_m, "value": omega_ref}
+        k_row = {"type": "fixedValue", "value": k_ref}
+        omega_row = {"type": "fixedValue", "value": omega_ref}
         nut_row = {"type": "calculated", "value": 0.0}
     elif role == "pressure_outlet":
         k_row = {"type": "inletOutlet", "inletValue": k_ref, "value": k_ref}
@@ -1155,7 +1168,7 @@ def _write_turb_body(wedge_dir, level, geom_dir, req_dir, tmp, turb, roles):
                                 "start_face": p["startFace"], "role": role},
                                **dict((f, bcs[f]) for f in FIELDS_TURB)))
     files = dict(("constant/polyMesh/" + nm, common.sha256_bytes(pm_bytes[nm])) for nm in POLYMESH_FILES)
-    internal = {"U": "(0.0 0.0 0.0)", "p": "0.0", "T": fmt(t_k), "k": fmt(k_ref),
+    internal = {"U": _uniform(u_in), "p": "0.0", "T": fmt(t_k), "k": fmt(k_ref),
                 "omega": fmt(omega_ref), "nut": "0.0"}
     written = sorted(turb_constant_files(spec["model"], wedge_mesh.NU_TURB).items()) \
         + sorted(turb_system_files().items()) + sorted(turb_field_files(patch_rows, internal).items())
@@ -1180,10 +1193,14 @@ def _write_turb_body(wedge_dir, level, geom_dir, req_dir, tmp, turb, roles):
                            "u_tau_apriori_m_s": u_tau, "apriori_method": turb_integral.METHOD,
                            "yplus1_apriori": yplus1, "yplus_limit": YPLUS_LIMIT,
                            "K_max_apriori": kmax, "K_lim": turb_integral.K_RELAM, "Re_De": re_de},
-            "patches": patch_rows, "fields": _turb_fields_doc(t_k, k_ref, omega_ref),
+            "patches": patch_rows,
+            "fields": dict(_turb_fields_doc(t_k, k_ref, omega_ref),
+                           U={"dimensions": _DIMS_TURB["U"],
+                              "internal": [u_in[0], u_in[1], u_in[2]]}),
             "numerics": {"transcribed": [list(r) for r in TRANSCRIBED]
-                         + [list(r) for r in TRANSCRIBED_TURB],
-                         "differences": list(DIFFERENCES) + list(DIFFERENCES_TURB)},
+                         + [list(r) for r in TRANSCRIBED_TURB_NOZZLE],
+                         "differences": list(DIFFERENCES) + list(DIFFERENCES_TURB)
+                         + list(DIFFERENCES_NOZZLE_TURB)},
             "sources": _sources_all(), "cold_start": True}
     _emit_turb(tmp, case, written)
     return case
@@ -1610,14 +1627,15 @@ def selftest() -> None:
         gtext = {"pipe": gold_pipe["texts"], "nozzle": gold_nozz["texts"]}
         quote_all = dict(quote_t)
         quote_all.update(dict((s["id"], s["text"]) for s in common.read_json(SOURCES)["sources"]))
-        for sid, q_sub, c_file, w_sub, applies in TRANSCRIBED_TURB:
-            assert q_sub in quote_all[sid], (sid, q_sub)
-            for kind in ("pipe", "nozzle"):
+        for kind, rows_t in (("pipe", TRANSCRIBED_TURB), ("nozzle", TRANSCRIBED_TURB_NOZZLE)):
+            for sid, q_sub, c_file, w_sub, applies in rows_t:
+                assert q_sub in quote_all[sid], (sid, q_sub)
                 if applies in (kind, "both"):
                     assert w_sub in gtext[kind][c_file], (kind, c_file, w_sub)
         print("[ok] 16 quotes at 08e10bb hash to their recorded sha; REGISTRY_MODELS is the parsed "
-              "registry; every emitted BC type is in the bc_names quote; 18 transcription rows hit "
-              "quote and case")
+              "registry; every emitted BC type is in the bc_names quote; %d pipe and %d nozzle "
+              "transcription rows hit quote and case"
+              % (len(TRANSCRIBED_TURB), len(TRANSCRIBED_TURB_NOZZLE)))
 
         # T11: the TG0 pipe case at Re_tau 576.69 - the oracle numbers, the drive line, the six field
         # files, the canonical path-free case.json, byte-identity with the golden (18 files); Re_tau
@@ -1678,9 +1696,19 @@ def selftest() -> None:
         assert not os.path.lexists(os.path.join(ctn, "0", "fvSources"))
         assert nj["mesh"]["gc7_pass"] is True
         with open(os.path.join(ctn, "0", "k"), "r", encoding="utf-8") as f:
-            assert "        turbulentIntensity 0.01;" in f.read()
+            ktxt = f.read()
+        kblock = ("    inlet" + chr(10) + "    {" + chr(10)
+                  + "        type            fixedValue;" + chr(10)
+                  + "        value           uniform 0.13499999999999993;" + chr(10)
+                  + "    }")
+        assert kblock in ktxt, ktxt[:400]
+        assert "turbulentIntensity" not in ktxt and "mixingLength" not in ktxt
         with open(os.path.join(ctn, "0", "omega"), "r", encoding="utf-8") as f:
-            assert "        mixingLength    0.003;" in f.read()
+            otxt = f.read()
+        assert "turbulentIntensity" not in otxt and "mixingLength" not in otxt
+        with open(os.path.join(ctn, "0", "U"), "r", encoding="utf-8") as f:
+            assert ("internalField   uniform " + _uniform(nj["fields"]["U"]["internal"])
+                    + ";") in f.read()
         for rel in sorted(gold_nozz["texts"]):
             with open(os.path.join(ctn, rel.replace("/", os.sep)), "rb") as f:
                 assert f.read().decode("utf-8") == gold_nozz["texts"][rel], rel
@@ -1796,7 +1824,8 @@ def selftest() -> None:
             assert abs(got - want) <= 1e-12 * want, (i, got, want)
             if i == 0.02:
                 with open(os.path.join(ci, "0", "k"), "r", encoding="utf-8") as f:
-                    assert "        turbulentIntensity 0.02;" in f.read()
+                    assert ("        value           uniform "
+                            + fmt(ji["turbulence"]["k_ref_m2_s2"]) + ";") in f.read()
             turb_cases.append(("nozzle I %r" % i, ci))
         wf_dirs = (os.path.join(td, "case_p2358wf"), os.path.join(td, "case_n60wf"))
         for wd_ in wf_dirs:

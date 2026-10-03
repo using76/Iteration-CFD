@@ -64,6 +64,7 @@ FLAT_TOL_M = 1e-12            # a face is flat in x when its vertices' x agree w
 EDGE_REL = 1e-12              # the BL edge face: the first face from the wall with u >= U_c (1 - EDGE_REL)
 NONUNIF_R = 0.8               # docs/16 §E.2: exit non-uniformity over r <= 0.8 R_e
 UP_DI = 0.25                  # docs/16 §E.2 / §H.4: upstream station x = contraction_start - 0.25 D_i
+ENTRY_DI = 0.05               # docs/16 §H.5 TG2a: the entry layer at x = contraction_start - 0.05 D_i
 DOWN_DE = 0.25                # docs/16 §H.4 G1: downstream station x = exit_plane + 0.25 D_e
 STATIONS = ("upstream", "exit_plane", "downstream")
 INPUT_KEYS = ("case.json", "polyMesh/boundary", "polyMesh/faces", "polyMesh/neighbour", "polyMesh/owner",
@@ -96,6 +97,7 @@ METRIC_KEYS = ("value", "unit", "repr", "where", "reason_id", "definition")
 MOMENTUM_KEYS = ("x_a_m", "x_b_m", "I_a", "I_b", "W", "P_a", "P_b", "residual")
 REVERSAL_KEYS = ("n_wall_cells", "n_reversed", "n_bands", "n_sign_changes", "bands_x_m", "area_fraction")
 EDGE_KEYS = ("p0_core", "x_m", "r_wall_m", "U_edge_m_s", "n_undefined")
+ENTRY_KEYS = ("x_target_m", "x_m", "x_inlet_m", "R_m", "n_faces", "U_c_m_s", "edge_rank", "y_edge_m", "theta_m", "dstar_m", "H")
 METRICS = (   # (name, unit, where, definition) - the order of the doc's metrics and of records()
     ("Q_in", "m3/s", ["inlet"], "-F sum(U_f . Sf) over the inlet patch"),
     ("Q_out", "m3/s", ["outlet"], "F sum(U_f . Sf) over the outlet patch"),
@@ -131,7 +133,7 @@ PIPE_KEYS = ("R_m", "L_m", "V_m3", "D_m", "R_wall_face_m", "n_radial", "U_b_m_s"
 PROFILE_KEYS = ("r_m", "y_m", "u_m_s", "y_plus", "u_plus")
 LOGLAW_KEYS = ("y_plus_min", "y_plus_max", "n_cells", "dev_max")
 NOZZLE_KEYS = ("stations", "exit_profile", "metrics", "momentum", "reversal", "edge", "momentum_turb",
-               "accel")
+               "accel", "entry", "edge_upstream")
 MOMENTUM_TURB_KEYS = ("x_a_m", "x_b_m", "I_a", "I_b", "W", "S", "P_a", "P_b", "residual", "closure")
 ACCEL_KEYS = ("x_m", "U_edge_m_s", "u_tau_m_s", "K", "K_max", "p", "p_min", "method", "reason_id")
 ACCEL_METHOD = "K = -nu d(1/U_e)/dx by thwaites.sg_derivative; p = -K (U_e/u_tau)^3"
@@ -868,6 +870,23 @@ def _wall_block(mesh, U, p_kin, st, up):
     return rev_row, edge
 
 
+def edge_rows(mesh, p_kin, p0_core, patch):
+    """An EDGE_KEYS row for `patch`, built like _wall_block's edge: the patch's owner cells in x order (ties by face index), U_edge = sqrt(2 (p0_core - p_owner)) None where negative.
+    r_wall_m is the face-centre radius, _wall_block's own definition, so the upstream and nozzle wall
+    rows join on one r(x)."""
+    stf, nf, _t = mesh["patch_range"][patch]
+    wf = np.arange(stf, stf + nf, dtype=np.int64)
+    oc = mesh["owner"][wf]
+    order = np.lexsort((wf, mesh["C"][oc, 0]))
+    wall_f = wf[order]
+    cells = oc[order]
+    arg = 2.0 * (p0_core - p_kin["internal"][cells])
+    u_edge = [None if a < 0.0 else math.sqrt(float(a)) for a in arg]
+    return {"p0_core": p0_core, "x_m": [float(v) for v in mesh["C"][cells, 0]],
+            "r_wall_m": [float(v) for v in np.hypot(mesh["Cf"][wall_f, 1], mesh["Cf"][wall_f, 2])],
+            "U_edge_m_s": u_edge, "n_undefined": sum(1 for v in u_edge if v is None)}
+
+
 def _exit_nonuniformity(mesh, le, u_face, ex):
     """(max - min) / area-mean of u_x over the exit layer's faces with r_c <= 0.8 R_e."""
     fi = le["faces"]
@@ -1078,7 +1097,19 @@ def _turb_blocks(case, time_name, kind, inputs, paths, keys, mesh, U, nut, p_kin
                "rho_kg_m3": rho, "c_m_s": op["c_m_s"]}
         computed = metrics(mesh, U, p_kin, ctx)
         nozzle_row = dict(computed)
-        nozzle_row["momentum_turb"] = momentum_turb(mesh, _metrics_run(mesh, U, p_kin, ctx), p_kin, shear)
+        st = _metrics_run(mesh, U, p_kin, ctx)
+        nozzle_row["momentum_turb"] = momentum_turb(mesh, st, p_kin, shear)
+        x_target = ctx["planes"]["contraction_start"] - ENTRY_DI * 2.0 * st["lc"]["R"]
+        lay_e = st["_nearest"](x_target)
+        prof_e, th_e, ds_e = _exit_profile(mesh, lay_e, st["u_face"], theta)
+        nozzle_row["entry"] = {"x_target_m": x_target, "x_m": lay_e["x"],
+                               "x_inlet_m": ctx["planes"]["inlet"], "R_m": lay_e["R"],
+                               "n_faces": prof_e["n_faces"], "U_c_m_s": prof_e["U_c_m_s"],
+                               "edge_rank": prof_e["edge_rank"], "y_edge_m": prof_e["y_edge_m"],
+                               "theta_m": th_e, "dstar_m": ds_e,
+                               "H": None if not th_e else ds_e / th_e}
+        nozzle_row["edge_upstream"] = edge_rows(mesh, p_kin, computed["edge"]["p0_core"],
+                                                "wall_upstream")
         stf, nfwf, _t = mesh["patch_range"]["wall_nozzle"]
         wf = np.arange(stf, stf + nfwf, dtype=np.int64)
         order = np.lexsort((wf, mesh["C"][mesh["owner"][wf], 0]))
@@ -2680,6 +2711,54 @@ def _wrap(inputs_shas, res):
     return doc
 
 
+def _t21(ncase, gdir, case, mesh):
+    """The entry layer nearest x = contraction_start - 0.05 D_i (the TG2a station) measured by _exit_profile, and the wall_upstream edge rows."""
+    types = _fx_types_turb(case)
+    tags = common.read_json(os.path.join(gdir, "tags.json"))
+    planes = dict((q["name"], q["x"]) for q in tags["planes"])
+    lays = layers(mesh)
+    lc = [lay for lay in lays if abs(lay["x"] - planes["contraction_start"]) <= FLAT_TOL_M][0]
+    x_target = planes["contraction_start"] - ENTRY_DI * 2.0 * lc["R"]
+    best = min(lays, key=lambda lay: abs(lay["x"] - x_target))
+    R = best["R"]
+    delta = 0.1 * R
+
+    def fn_u(pt):
+        y = np.maximum(R * math.cos(math.radians(2.5)) - np.hypot(pt[:, 1], pt[:, 2]), 0.0)
+        u = 30.0 * np.minimum(1.0, y / delta) ** (1.0 / 7.0)
+        u = np.where(pt[:, 0] < 0.0, u, 30.0)
+        return np.stack([u, np.zeros_like(u), np.zeros_like(u)], axis=1)
+
+    U, p, nut = _fx_plant_c(mesh, fn_u, lambda pt: -50.0 * pt[:, 0],
+                            lambda pt: np.zeros(len(pt)), types)
+    _fx_write_turb(ncase, "9", U, p, nut)
+    doc = post_turb(ncase, "9", gdir)
+    assert doc["status"] == "ok", (doc["status"], doc["reason_id"], doc["message"])
+    en = doc["nozzle"]["entry"]
+    assert en["x_target_m"] == -0.015000000000000006, en["x_target_m"]
+    assert en["x_m"] == -0.01052631578947372, en["x_m"]
+    assert en["x_inlet_m"] == -0.6 and en["n_faces"] == 47, (en["x_inlet_m"], en["n_faces"])
+    assert en["U_c_m_s"] == 30.0 and en["edge_rank"] == 34, (en["U_c_m_s"], en["edge_rank"])
+    assert abs(en["theta_m"] / delta / 0.09689205233387911 - 1.0) <= 1e-9, en["theta_m"] / delta
+    assert abs(en["H"] / 1.2858457977538857 - 1.0) <= 1e-9, en["H"]
+    eu = doc["nozzle"]["edge_upstream"]
+    assert eu["p0_core"] == doc["nozzle"]["edge"]["p0_core"]
+    assert abs(eu["p0_core"] / 453.75 - 1.0) <= 1e-9, eu["p0_core"]
+    assert len(eu["x_m"]) == 57, len(eu["x_m"])
+    assert all(eu["x_m"][i] < eu["x_m"][i + 1] for i in range(len(eu["x_m"]) - 1))
+    pc = eu["p0_core"]
+    for u_got, x_got in zip(eu["U_edge_m_s"], eu["x_m"]):
+        assert abs(u_got / math.sqrt(2.0 * (pc + 50.0 * x_got)) - 1.0) <= 1e-12, (u_got, x_got)
+    assert eu["n_undefined"] == 0
+    for r_got in eu["r_wall_m"]:
+        assert abs(r_got / (R * math.cos(math.radians(2.5))) - 1.0) <= 1e-9, r_got
+    assert sorted(doc["nozzle"]) == sorted(NOZZLE_KEYS)
+    assert sorted(en) == sorted(ENTRY_KEYS)
+    print("[ok] entry layer at x_target -0.015: x_m %.17f, theta/delta %.17f, H %.16f;"
+          " edge_upstream 57 rows at p0_core %.13f with r_wall the layer R cos(2.5 deg)"
+          % (en["x_m"], en["theta_m"] / delta, en["H"], eu["p0_core"]))
+
+
 def selftest() -> None:
     """T1..T13 of docs/16 section I CAD-14: geometry, the reader, the four plan gates, the refusals, the
     CLI; T14..T20 of section I CAD-27: the turbulent pipe and nozzle through post_turb."""
@@ -2725,6 +2804,7 @@ def selftest() -> None:
         _t18(ncase, gt, case_n, mesh_n)
         _t19(ncase, gt, case_n, mesh_n)
         _t20(ttd, gdir, cdir, pcase, gt, ncase)
+        _t21(ncase, gt, case_n, mesh_n)
     print("SELFTEST PASS (%.1f s)" % (time.time() - t0))
 
 
