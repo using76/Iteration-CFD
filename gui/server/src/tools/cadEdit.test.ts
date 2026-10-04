@@ -30,7 +30,7 @@ const START = {
   provenance: { D_i: 'user_text', CR: 'user_text', L_over_Di: 'llm_choice', law: 'llm_choice', Lx_over_De: 'default', Lu_over_Di: 'default', upstream_role: 'default', t_wall: 'user_text' },
 } as const
 
-const STABLE_KEY = 'b4b33ad7af6db8a596841772e7bb8e5bc88195a00d4d30d28d5709b89a5e4a26'
+const STABLE_KEY = '0359447df80e93efbc78ba1bc3c72defbb0f6c15e776e48947ce9937a3a57b82'
 
 /** start.json's bytes written directly: JSON.stringify prints CR's 9.0 as the integer 9, the loop
  * hashes its numbers as it read them, and the eval key splits on that one spelling difference. */
@@ -145,6 +145,11 @@ beforeAll(async () => {
   const geom = path.join(ws.root, 'tools', 'geom')
   await fsp.mkdir(geom, { recursive: true })
   await fsp.copyFile(path.join(REPO_ROOT, 'tools', 'geom', 'stl_repair.py'), path.join(geom, 'stl_repair.py'))
+  // loop.py -> evaluate_cfd -> case_writer/wedge_mesh import these from <REPO>/tools/mesh.
+  const mesh = path.join(ws.root, 'tools', 'mesh')
+  await fsp.mkdir(mesh, { recursive: true })
+  await fsp.copyFile(path.join(REPO_ROOT, 'tools', 'mesh', 'polymesh_write.py'), path.join(mesh, 'polymesh_write.py'))
+  await fsp.copyFile(path.join(REPO_ROOT, 'tools', 'mesh', 'regions_check.py'), path.join(mesh, 'regions_check.py'))
   const r = await spawnCapture(
     [
       pythonCommand(ws.config),
@@ -307,7 +312,7 @@ describe('cad_propose_edit (docs/16 §E.7, §E.8, §F, §I GUI-3)', () => {
     expect(req.calls).toHaveLength(1)
     expect(req.calls[0].name).toBe('cad_propose_edit')
     expect(req.calls[0].preview).toContain(`L_over_Di: 0.9077495532110333 -> 1.2`)
-    expect(req.calls[0].preview).toContain(`stable b4b33ad7af6d`)
+    expect(req.calls[0].preview).toContain(`stable 0359447df80e`)
     deps.approvals.resolve(req.toolUseIds, 'denied')
     await turn
     const results = rec.messages.flatMap((m) => toolResultsOf(m))

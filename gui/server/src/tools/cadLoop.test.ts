@@ -103,6 +103,11 @@ beforeAll(async () => {
   const geom = path.join(ws.root, 'tools', 'geom')
   await fsp.mkdir(geom, { recursive: true })
   await fsp.copyFile(path.join(REPO_ROOT, 'tools', 'geom', 'stl_repair.py'), path.join(geom, 'stl_repair.py'))
+  // loop.py -> evaluate_cfd -> case_writer/wedge_mesh import these from <REPO>/tools/mesh.
+  const mesh = path.join(ws.root, 'tools', 'mesh')
+  await fsp.mkdir(mesh, { recursive: true })
+  await fsp.copyFile(path.join(REPO_ROOT, 'tools', 'mesh', 'polymesh_write.py'), path.join(mesh, 'polymesh_write.py'))
+  await fsp.copyFile(path.join(REPO_ROOT, 'tools', 'mesh', 'regions_check.py'), path.join(mesh, 'regions_check.py'))
   // The locked fixture set, relocked against today's template module by one python run in the copy.
   const r = await spawnCapture(
     [

@@ -1,0 +1,143 @@
+{
+  "schema": "cad-admission/1",
+  "source": "tools/cad/templates/nozzle_contraction/template.py",
+  "source_sha256": "d7a7a55336fa404f4a22ec2aff7288f785cdb116f032eb24cb73d03807e4473f",
+  "template_id": "nozzle_contraction/1",
+  "status": "admitted",
+  "rule": null,
+  "detail": null,
+  "retry_class": null,
+  "point": null,
+  "traceback": null,
+  "hint": null,
+  "drivers_mode": "inferred",
+  "counts": {
+    "sweep": 97,
+    "sobol": 64,
+    "corners": 32,
+    "accepted": 97,
+    "pipelines": 13
+  },
+  "sensitivity": {
+    "inlet_diameter": {
+      "D_i": true,
+      "CR": false,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "exit_diameter": {
+      "D_i": true,
+      "CR": true,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "contraction_ratio": {
+      "D_i": false,
+      "CR": true,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "total_length": {
+      "D_i": true,
+      "CR": true,
+      "L_over_Di": true,
+      "Lx_over_De": true,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "contraction_length": {
+      "D_i": true,
+      "CR": false,
+      "L_over_Di": true,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "min_wall_normal": {
+      "D_i": false,
+      "CR": false,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": true
+    },
+    "max_wall_slope": {
+      "D_i": false,
+      "CR": true,
+      "L_over_Di": true,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "min_curvature_radius": {
+      "D_i": true,
+      "CR": true,
+      "L_over_Di": true,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "n_solids": {
+      "D_i": false,
+      "CR": false,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "valid": {
+      "D_i": false,
+      "CR": false,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "watertight": {
+      "D_i": false,
+      "CR": false,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "axis": {
+      "D_i": false,
+      "CR": false,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    },
+    "units": {
+      "D_i": false,
+      "CR": false,
+      "L_over_Di": false,
+      "Lx_over_De": false,
+      "Lu_over_Di": false,
+      "t_wall": false
+    }
+  },
+  "env": {
+    "cadquery": "2.8.0",
+    "occt": "7.9.3"
+  },
+  "rules": [
+    "ADM-AST-LOCK",
+    "ADM-AST-IMPORT",
+    "ADM-AST-NAME",
+    "ADM-AST-FALLBACK",
+    "ADM-CONTRACT",
+    "ADM-BUILD",
+    "ADM-STAGE",
+    "ADM-DETERM",
+    "ADM-TAGS",
+    "ADM-INSENSITIVE"
+  ]
+}

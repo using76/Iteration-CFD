@@ -21,10 +21,14 @@ probe runs in a runner child through admit_probe.py (entries declare and sweep).
 plus a child process is not a security sandbox on Windows: admission runs only on a user-initiated
 authoring turn, never inside the GUI server process, and is decision D-6 (docs/16 §G).
 
+A frozen template's bytes are immutable per template_id: a person may replace them only with
+`freeze --supersede`, which keeps the old entry under the lock's `superseded` list; the GUI's
+freeze card never passes it.
+
 Usage:
   python admit.py --selftest
   python admit.py check SOURCE_PY RECORD_JSON
-  python admit.py freeze SOURCE_PY RECORD_JSON --by NAME [--lock LOCK]
+  python admit.py freeze SOURCE_PY RECORD_JSON --by NAME [--lock LOCK] [--supersede]
   python admit.py frozen TEMPLATE_DIR [--lock LOCK]
 """
 
@@ -66,6 +70,7 @@ TEMPLATES_LOCK = os.path.join(HERE, "templates.lock")
 ADMISSIBLE_PRIMITIVES = ("diameter_at_plane", "area_ratio", "extent_along_axis", "plane_distance",
                          "meridian_min_wall", "slope_max", "curvature_radius_min", "n_solids", "valid",
                          "axis_x", "watertight", "units_m")     # what export.measure_catalogue dispatches
+PARAM_PRIMITIVES = ("k_max_1d",)    # computed from the parameters at the check's Re (optimise_cad), never on the BREP
 LOCK_NAMES = ("reqs", "write_locked", "apply", "loop", "gate", "admit")
 BANNED_NAMES = {"open", "exec", "eval", "compile", "__import__", "getattr", "setattr", "delattr",
                 "globals", "locals", "vars", "os", "sys", "subprocess", "pathlib", "socket",
@@ -88,7 +93,7 @@ LOCK_ENTRY_KEYS = ("template_id", "source", "source_sha256", "declaration_sha256
 CONTRACT_NAMES = ("TEMPLATE_ID", "PARAMS", "PLANES", "TAGS", "CATALOGUE")
 USAGE = ("usage: python admit.py --selftest" + chr(10)
          + "       python admit.py check SOURCE_PY RECORD_JSON" + chr(10)
-         + "       python admit.py freeze SOURCE_PY RECORD_JSON --by NAME [--lock LOCK]" + chr(10)
+         + "       python admit.py freeze SOURCE_PY RECORD_JSON --by NAME [--lock LOCK] [--supersede]" + chr(10)
          + "       python admit.py frozen TEMPLATE_DIR [--lock LOCK]" + chr(10))
 
 
@@ -429,6 +434,18 @@ def _declare(source_path, tmp):
     return v, None
 
 
+def cfd_primitives() -> tuple:
+    """The names of post.METRICS, in table order: the closed cfd measurement library (import post lazily)."""
+    import post
+    return tuple(row[0] for row in post.METRICS)
+
+
+def measured_at_admission(catalogue) -> list:
+    """The quantities export.measure_catalogue measures, in catalogue order: method geometry, primitive not in PARAM_PRIMITIVES."""
+    return [row["quantity"] for row in catalogue
+            if row.get("method") == "geometry" and row.get("primitive") not in PARAM_PRIMITIVES]
+
+
 def _contract_checks(source_path, v):
     """The five dynamic contract checks, first failure wins; (rule, detail) or None."""
     decl = {"schema": "cad-template/1", "template_id": v["template_id"], "title": v["template_id"],
@@ -439,20 +456,34 @@ def _contract_checks(source_path, v):
     if errs:
         return ("ADM-CONTRACT", "the declaration fails cad-template/1: %s" % (errs[0],))
     import measure
+    import reqs
     quantities = []
     for row in v["catalogue"]:
-        if row["primitive"] not in ADMISSIBLE_PRIMITIVES or row["primitive"] not in measure.PRIMITIVES:
+        primitive = row["primitive"]
+        repr_ = reqs.REPR_BY_PRIMITIVE[primitive] if primitive in reqs.REPR_BY_PRIMITIVE \
+            else reqs.REPR_BY_METHOD.get(row["method"])
+        if repr_ is None:
+            return ("ADM-CONTRACT", "catalogue row %s has method %r, which has no representation in"
+                                    " reqs.REPR_BY_METHOD" % (row["quantity"], row["method"]))
+        if repr_ == "cfd":
+            if primitive not in cfd_primitives():
+                return ("ADM-CONTRACT", "catalogue row %s measures through primitive %r, which"
+                                        " post.py does not measure (repr cfd)"
+                        % (row["quantity"], primitive))
+        elif not (primitive in measure.PRIMITIVES
+                  and (primitive in ADMISSIBLE_PRIMITIVES or primitive in PARAM_PRIMITIVES)):
             return ("ADM-CONTRACT", "catalogue row %s measures through primitive %r, which is"
                                     " neither admissible nor in measure.py"
-                    % (row["quantity"], row["primitive"]))
+                    % (row["quantity"], primitive))
         if row["quantity"] in quantities:
             return ("ADM-CONTRACT", "catalogue row %s repeats an earlier quantity" % (row["quantity"],))
         quantities.append(row["quantity"])
     drivers = v["drivers"]
     if drivers is not None:
         real_names = set(row["name"] for row in v["params"] if row["kind"] == "real")
-        if not isinstance(drivers, dict) or set(drivers) != set(quantities):
-            return ("ADM-CONTRACT", "DRIVERS is not a dict keyed by exactly the catalogue quantities")
+        if not isinstance(drivers, dict) or set(drivers) != set(measured_at_admission(v["catalogue"])):
+            return ("ADM-CONTRACT", "DRIVERS is not a dict keyed by exactly the catalogue quantities"
+                                    " measured at admission")
         for q, lst in drivers.items():
             if not isinstance(lst, list) or any(n not in real_names for n in lst) \
                     or len(set(lst)) != len(lst):
@@ -543,8 +574,9 @@ def _insensitive(rec, v, stage, nom, q0, u0, tmp):
     sides = {}
     for row in checked:
         sides[row["name"]] = _sides_of(row, nom[row["name"]])
-    quantities = [row["quantity"] for row in v["catalogue"]]
-    u_kinds = dict((row["quantity"], row["u_kind"]) for row in v["catalogue"])
+    quantities = measured_at_admission(v["catalogue"])
+    u_kinds = dict((row["quantity"], row["u_kind"]) for row in v["catalogue"]
+                   if row["quantity"] in quantities)
     moved = dict((q, dict((row["name"], False) for row in checked)) for q in quantities)
     n = 0
     for row in checked:
@@ -745,8 +777,12 @@ def _admit_in(source_path, rec, tmp):
 
 
 # ---------------------------------------------------------------- freeze and the lock
-def freeze(source_path, record_path, by, lock_path=TEMPLATES_LOCK) -> dict:
-    """Write the lock entry for one admitted record; ValueError("<ID>: ..."), first failure wins."""
+def freeze(source_path, record_path, by, lock_path=TEMPLATES_LOCK, supersede=False) -> dict:
+    """Write the lock entry for one admitted record; ValueError("<ID>: ..."), first failure wins.
+
+    supersede=True replaces every same-template_id entry at other bytes, keeping the old ones under
+    the lock's `superseded` list; without it the same-id loop stays the FREEZE-IMMUTABLE refusal.
+    """
     if by is None or not str(by).strip():
         raise ValueError("FREEZE-BY: freeze needs the person who froze the template (--by NAME)")
     try:
@@ -769,10 +805,15 @@ def freeze(source_path, record_path, by, lock_path=TEMPLATES_LOCK) -> dict:
     else:
         lock = {"schema": "cad-templates-lock/1", "templates": []}
     tid = rec.get("template_id")
-    for e in lock["templates"]:
-        if e["template_id"] == tid and e["source_sha256"] != src_sha:
-            raise ValueError("FREEZE-IMMUTABLE: the lock holds %s at source_sha256 %r, refusing %r"
-                             % (tid, e["source_sha256"], src_sha))
+    moved = []
+    if supersede:
+        moved = [e for e in lock["templates"]
+                 if e["template_id"] == tid and e["source_sha256"] != src_sha]
+    else:
+        for e in lock["templates"]:
+            if e["template_id"] == tid and e["source_sha256"] != src_sha:
+                raise ValueError("FREEZE-IMMUTABLE: the lock holds %s at source_sha256 %r, refusing %r"
+                                 % (tid, e["source_sha256"], src_sha))
     tj = os.path.join(os.path.dirname(os.path.abspath(source_path)), "template.json")
     decl_sha = common.sha256_file(tj) if os.path.isfile(tj) else None
     entry = {"template_id": tid, "source": rec.get("source"), "source_sha256": src_sha,
@@ -781,6 +822,9 @@ def freeze(source_path, record_path, by, lock_path=TEMPLATES_LOCK) -> dict:
     for k in LOCK_ENTRY_KEYS:
         if k not in entry:
             raise ValueError("FREEZE-IMMUTABLE: the entry lacks %s" % (k,))
+    if moved:
+        lock["superseded"] = lock.get("superseded", []) + [
+            dict(e, superseded_by_sha256=src_sha, superseded_by_person=by) for e in moved]
     lock["templates"] = sorted([e for e in lock["templates"] if e["template_id"] != tid] + [entry],
                                key=lambda e: e["template_id"])
     common.write_json(lock_path, lock)
@@ -885,9 +929,12 @@ def selftest() -> int:
             import measure
             bad = [p for p in ADMISSIBLE_PRIMITIVES if p not in measure.PRIMITIVES]
             assert not bad, bad
+            bad = [p for p in PARAM_PRIMITIVES if p not in measure.PRIMITIVES]
+            assert not bad, bad
             assert set(RETRY_CLASS) == set(RULES), "RETRY_CLASS does not cover RULES"
-            ok("T1 constants: RULES and FREEZE_IDS as decided, %d ADMISSIBLE_PRIMITIVES all in"
-               " measure.PRIMITIVES, RETRY_CLASS covers RULES" % (len(ADMISSIBLE_PRIMITIVES),))
+            ok("T1 constants: RULES and FREEZE_IDS as decided, %d ADMISSIBLE_PRIMITIVES and %d"
+               " PARAM_PRIMITIVES all in measure.PRIMITIVES, RETRY_CLASS covers RULES"
+               % (len(ADMISSIBLE_PRIMITIVES), len(PARAM_PRIMITIVES)))
         except AssertionError as e:
             fail("T1 constants: %r" % (e,))
 
@@ -930,6 +977,61 @@ def selftest() -> int:
                " ADM-AST-NAME, and a re-raising or rebuilding handler is not ADM-AST-FALLBACK")
         except AssertionError as e:
             fail("T6 static rules: %r" % (e,))
+
+        try:    # T9
+            decl9 = common.read_json(os.path.join(NOZZLE_DIR, "template.json"))
+            cat9 = decl9["catalogue"]
+
+            def _v9(catalogue, drivers=None):
+                return {"template_id": decl9["template_id"], "params": decl9["params"],
+                        "planes": decl9["planes"], "tags": decl9["tags"], "catalogue": catalogue,
+                        "profile_rules": decl9["profile_rules"], "standards": decl9["standards"],
+                        "drivers": drivers, "nominal_rule": None}
+
+            td9 = os.path.join(td, "t9")
+            os.makedirs(td9)
+            src9 = os.path.join(td9, "template.py")
+            assert _contract_checks(src9, _v9(cat9)) is None
+            cd_row = [r for r in cat9 if r["quantity"] == "Cd"][0]
+            rule = _contract_checks(src9, _v9(cat9 + [dict(cd_row, quantity="swirl",
+                                                           primitive="swirl_number")]))
+            assert rule is not None and rule[0] == "ADM-CONTRACT" \
+                and "swirl_number" in rule[1] and "post.py" in rule[1], rule
+            inlet_row = [r for r in cat9 if r["quantity"] == "inlet_diameter"][0]
+            rule = _contract_checks(src9, _v9(cat9 + [dict(inlet_row, quantity="throat_area",
+                                                           primitive="throat_area")]))
+            assert rule is not None and rule[0] == "ADM-CONTRACT" \
+                and "throat_area" in rule[1] and "neither admissible" in rule[1], rule
+            assert _contract_checks(src9, _v9(cat9, dict((q, [])
+                                                         for q in measured_at_admission(cat9)))) is None
+            rule = _contract_checks(src9, _v9(cat9, dict((r["quantity"], []) for r in cat9)))
+            assert rule is not None and rule[0] == "ADM-CONTRACT" \
+                and "measured at admission" in rule[1], rule
+            valid_row = [r for r in cat9 if r["quantity"] == "valid"][0]
+            rule = _contract_checks(src9, _v9(cat9 + [dict(valid_row, quantity="looked_at",
+                                                           method="human")]))
+            assert rule is not None and rule[0] == "ADM-CONTRACT" \
+                and "no representation" in rule[1], rule
+            ok("T9 contract: the nozzle's 22-row catalogue passes (8 cfd rows in post.METRICS,"
+               " k_max_1d a parameter primitive); an unknown cfd primitive, an unknown brep"
+               " primitive and a human row are ADM-CONTRACT; DRIVERS must key exactly the measured"
+               " rows")
+        except AssertionError as e:
+            fail("T9 contract: %r" % (e,))
+
+        try:    # T10
+            cat10 = common.read_json(os.path.join(NOZZLE_DIR, "template.json"))["catalogue"]
+            assert measured_at_admission(cat10) == [
+                "inlet_diameter", "exit_diameter", "contraction_ratio", "total_length",
+                "contraction_length", "min_wall_normal", "max_wall_slope", "min_curvature_radius",
+                "n_solids", "valid", "watertight", "axis", "units"], measured_at_admission(cat10)
+            want_cfd = set(r["primitive"] for r in cat10 if r["method"] == "cfd")
+            assert len(want_cfd) == 8 and want_cfd <= set(cfd_primitives()), \
+                (want_cfd, cfd_primitives())
+            ok("T10 measured at admission: the nozzle's 13 geometry rows in catalogue order; the 8"
+               " cfd rows and k_max_apriori are not measured at admission")
+        except AssertionError as e:
+            fail("T10 measured at admission: %r" % (e,))
 
         try:    # T3
             order = [(tag, _fixture_path(rel), ws, wr, wm, words)
@@ -1036,6 +1138,41 @@ def selftest() -> int:
             else:
                 raise AssertionError("a second source at the same id was frozen")
             ok("T4 freeze: an F04 copy claiming pipe_straight/1 is admitted, then FREEZE-IMMUTABLE")
+            try:
+                freeze(f04c, rec4, None, lock_d, supersede=True)
+            except ValueError as e:
+                assert str(e).startswith("FREEZE-BY"), str(e)
+            else:
+                raise AssertionError("a personless supersede froze")
+            e2 = freeze(f04c, rec4, "tester", lock_d, supersede=True)
+            f04_sha = common.sha256_file(f04c)
+            assert tuple(e2) == LOCK_ENTRY_KEYS, tuple(e2)
+            assert e2["source_sha256"] == f04_sha, e2["source_sha256"]
+            lock_s = common.read_json(lock_d)
+            tid_entries = [e for e in lock_s["templates"] if e["template_id"] == "pipe_straight/1"]
+            assert len(tid_entries) == 1 and tid_entries[0]["source_sha256"] == f04_sha, tid_entries
+            sup = lock_s["superseded"]
+            assert len(sup) == 1, sup
+            assert tuple(sup[0]) == LOCK_ENTRY_KEYS + ("superseded_by_sha256",
+                                                       "superseded_by_person"), tuple(sup[0])
+            assert dict((k, sup[0][k]) for k in LOCK_ENTRY_KEYS) == entry, (sup[0], entry)
+            assert sup[0]["superseded_by_sha256"] == f04_sha, sup[0]
+            assert sup[0]["superseded_by_person"] == "tester", sup[0]
+            ok("T4 supersede: FREEZE-BY still first; --supersede replaces pipe_straight/1 with the"
+               " F04 claim and keeps the F03 entry under superseded")
+            with open(lock_d, "rb") as f:
+                before_s = f.read()
+            p = subprocess.run([sys.executable, os.path.abspath(__file__), "freeze", f04c, rec4,
+                                "--by", "tester", "--lock", lock_d, "--supersede"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               env=dict(os.environ, PYTHONIOENCODING="utf-8"), timeout=300)
+            assert p.returncode == 0, (p.returncode, p.stderr[:200])
+            with open(lock_d, "rb") as f:
+                after_s = f.read()
+            assert before_s == after_s, "an identical CLI --supersede changed the lock bytes"
+            assert len(common.read_json(lock_d)["superseded"]) == 1
+            ok("T4 supersede: the CLI --supersede of the same bytes exits 0 and leaves the lock"
+               " bytes unchanged")
         except AssertionError as e:
             fail("T4 freeze: %r" % (e,))
 
@@ -1068,6 +1205,23 @@ def selftest() -> int:
                % os.path.basename(NOZZLE_DIR))
         except (AssertionError, OSError, ValueError) as e:
             fail("T5 check_frozen: %r (the committed lock must exist before finishing)" % (e,))
+
+        try:    # T5s
+            lock_g = os.path.join(td, "lock_superseded.json")
+            common.write_json(lock_g, {"schema": "cad-templates-lock/1", "templates": [],
+                                       "superseded": [dict(check_frozen(NOZZLE_DIR),
+                                                           superseded_by_sha256="0" * 64,
+                                                           superseded_by_person="tester")]})
+            try:
+                check_frozen(NOZZLE_DIR, lock_g)
+            except ValueError as e:
+                assert str(e).startswith("TPL-UNFROZEN:"), str(e)
+            else:
+                raise AssertionError("an entry only under superseded answered check_frozen")
+            ok("T5 superseded: an entry only under superseded never answers check_frozen"
+               " (TPL-UNFROZEN)")
+        except (AssertionError, OSError, ValueError) as e:
+            fail("T5 superseded: %r" % (e,))
 
         try:    # T7
             f01_path = os.path.join(td, "F01.json")
@@ -1144,6 +1298,7 @@ def main(argv=None) -> int:
     if verb == "freeze":
         by = None
         lock = TEMPLATES_LOCK
+        supersede = False
         pos = []
         i = 0
         while i < len(args):
@@ -1156,6 +1311,9 @@ def main(argv=None) -> int:
                 else:
                     lock = args[i + 1]
                 i += 2
+            elif args[i] == "--supersede":
+                supersede = True
+                i += 1
             else:
                 pos.append(args[i])
                 i += 1
@@ -1163,7 +1321,7 @@ def main(argv=None) -> int:
             sys.stderr.write(USAGE)
             return 2
         try:
-            entry = freeze(pos[0], pos[1], by, lock)
+            entry = freeze(pos[0], pos[1], by, lock, supersede=supersede)
         except ValueError as e:
             sys.stderr.write("%s%s" % (e, chr(10)))
             return 1

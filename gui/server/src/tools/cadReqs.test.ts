@@ -102,7 +102,7 @@ describe('cad requirements tools', () => {
     expect(t.dir).toBe('tools/cad/templates/nozzle_contraction')
     expect(t.frozen).toBe(true)
     expect(t.vocab_sha).toBe(SHA)
-    expect(SHA).toBe('ce8c4e3e411f4d9dd43871c45f07fe5efbfd0b06cfa96b840c4711b722b651e8')
+    expect(SHA).toBe('bf74cfb2a0e9c25796e753c53545cb2721ddfcef5dc44a6c9eec6db9602ec790')
     expect(t.vocab.quantities.some((q: { quantity: string }) => q.quantity === 'inlet_diameter')).toBe(true)
     const declPath = path.join(ws.root, 'tools', 'cad', 'templates', 'nozzle_contraction', 'template.json')
     const original = await fsp.readFile(declPath)
