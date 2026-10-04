@@ -14,14 +14,17 @@
 
 """Render the F1 promo from the real solve with Blender Cycles.
 
-Three subcommands (argv after "--"):
+Four subcommands (argv after "--"):
 
 stills     five 1920x1080 stills per the SHOTS table below; every bar-carrying
            still has its colour bar drawn IN THE SAME RENDER
 turntable  --kind cp (Cp field, Standard) or --kind clean (paint, AgX):
            turntable_<kind>/frame_NNNN.png frames, resumable (existing
            non-empty frames are skipped and counted)
-check      judges an --out directory written by the two above into
+reveal     the streamline reveal: 150 frames in which every picked line
+           grows along the flow (reveal/frame_NNNN.png, resumable like the
+           turntable)
+check      judges an --out directory written by the three above into
            render.json and prints GATE PASS / GATE FAIL
 
 The SHOTS table (stills; hidden/shown is hide_render):
@@ -41,10 +44,30 @@ bar's pixels back from the PNG (Non-Color) and demands srgb(ramp colour)
 within BAR_TOL; under AgX the same bar misses by more than 0.04, which is
 what proves which view transform the still went through.
 
+The LOOK (promo-render/2): the old stills were blown out (the hero was 20%
+white-clipped), so scene.py's lights are scaled per view transform
+(LOOK_LIGHT_SCALE: Standard 0.30, AgX 0.60, always from the base energies
+recorded at build time, never cumulative), the studio floor is darker and
+matte (LOOK_FLOOR) and the Cp car field gets a lower coat (LOOK_FIELD_COAT);
+the hero clip fraction drops to 0.0015 with every bar still within BAR_TOL.
+
+The streamline pick (STREAM_PICK): of the 424 solved lines the streamlines
+still and the reveal show the 140 that matter - every front-wing tip line
+(|seed y| >= tip_abs_y), the halo_n highest halo lines (|seed y| <=
+halo_abs_y), and the wheels_n / rw_n wheel and rear-wing-tip lines with the
+most total turning - swept as tubes of radius STREAM_RADIUS = 0.007.
+
+The reveal rule: each picked line's polyline points carry a time
+(reveal_times) that marches from the common front x = X0 at the free-stream
+speed and then along the line at the local speed (floored at
+REVEAL_U_FLOOR); frame f shows the tube where reveal_t <=
+reveal_front(f, T_END), an eased front over frames 1..REVEAL_GROW that holds
+the full lines afterwards, with a glowing REVEAL_HEAD band at the front.
+
 Outputs (all under --out, never inside the repository): stills writes
 <shot>.png, stills.json, CREDITS.txt and LICENSE.txt; turntable writes
-turntable_<kind>/frame_NNNN.png and turntable_<kind>.json; check writes
-render.json.
+turntable_<kind>/frame_NNNN.png and turntable_<kind>.json; reveal writes
+reveal/frame_NNNN.png and reveal.json; check writes render.json.
 
 CC BY 4.0 rule: the car model ("F1 2026 concept" by Qvist_Designs) and every
 file made from it stay outside the repository under --out; the model's
@@ -56,7 +79,8 @@ Run (Blender 5.1, headless):
 blender -b --factory-startup --python-exit-code 1 --python tools/promo/render.py -- --selftest
 blender -b --factory-startup --python-exit-code 1 --python tools/promo/render.py -- stills --glb GLB --sim-geom DIR --post DIR --out DIR [--device GPU|CPU] [--samples N] [--shots hero,side,top_rear,streamlines,slice] [--cp-range LO HI] [--speed-range LO HI]
 blender -b --factory-startup --python-exit-code 1 --python tools/promo/render.py -- turntable --kind cp|clean --glb GLB --sim-geom DIR --out DIR [--post DIR] [--device GPU|CPU] [--samples N] [--frames A-B] [--cp-range LO HI]
-blender -b --factory-startup --python-exit-code 1 --python tools/promo/render.py -- check --out DIR [--frames-expected N]
+blender -b --factory-startup --python-exit-code 1 --python tools/promo/render.py -- reveal --glb GLB --sim-geom DIR --post DIR --out DIR [--device GPU|CPU] [--samples N] [--frames A-B]
+blender -b --factory-startup --python-exit-code 1 --python tools/promo/render.py -- check --out DIR [--frames-expected N] [--reveal-expected N]
 
 It imports ../scene.py (GPL-2.0-or-later too) for the studio scene.
 """
@@ -74,13 +98,14 @@ import time
 
 import numpy as np
 import bpy
+import bpy_extras.object_utils
 from mathutils import Matrix, Vector
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scene as S
 
 TOOL = "tools/promo/render.py"
-VERSION = "promo-render/1"
+VERSION = "promo-render/2"
 N_FRAMES = 240
 BAR = (0.925, 0.945, 0.20, 0.80)   # u0, u1, v0, v1 image fractions; v UP
 BAR_LEVELS = 64
@@ -90,6 +115,26 @@ BAR_SAMPLES = 32
 TEXT_H = 0.03                      # label height, fraction of image height
 PLATE = (0.865, 0.965, 0.15, 0.88)  # plate u0, u1, v0, v1 image fractions; v UP
 LUM_MIN = 0.02
+
+LOOK_LIGHT_SCALE = {"Standard": 0.30, "AgX": 0.60}
+LOOK_FLOOR = {"Base Color": (0.008, 0.008, 0.010, 1.0), "Roughness": 0.5, "Specular IOR Level": 0.15}
+LOOK_FIELD_COAT = 0.4
+LIGHT_BASE = {}                    # light object name -> scene.py energy, recorded in build_scene
+
+STREAM_PICK = {"tip_abs_y": 0.76, "halo_abs_y": 0.14, "halo_n": 16, "wheels_n": 56, "rw_n": 36}
+STREAM_RADIUS = 0.007
+STREAM_SIDES = 8
+STREAM_N_RANGE = (120, 160)
+
+REVEAL_FRAMES = 150
+REVEAL_GROW = 120        # frames 1..120 grow, 121..150 hold the full lines
+REVEAL_EASE = 2.0
+REVEAL_U_FLOOR = 2.0     # m/s
+REVEAL_HEAD = 0.01       # s, the glowing head behind the front
+REVEAL_HEAD_STRENGTH = 4.0
+
+FRAME_MARGIN = 0.02
+CLIP_MAX = 0.005
 
 SHOTS = {
     "hero": {"camera": "cam_hero", "car": "field", "car_cut": False,
@@ -130,8 +175,8 @@ def validate_out(out):
         raise S.SceneRefusal("RD-OUT", "--out " + out + " resolves inside the repository (" + repo + ")")
 
 
-def parse_frames(s):
-    """'A-B' -> (A, B); 'A' -> (A, A); 1 <= A <= B <= N_FRAMES else RD-INPUT."""
+def parse_frames(s, n_max=N_FRAMES):
+    """'A-B' -> (A, B); 'A' -> (A, A); 1 <= A <= B <= n_max else RD-INPUT."""
     text = str(s).strip()
     try:
         if "-" in text:
@@ -141,8 +186,8 @@ def parse_frames(s):
             A = B = int(text)
     except ValueError:
         raise S.SceneRefusal("RD-INPUT", "bad --frames: " + str(s))
-    if not (1 <= A <= B <= N_FRAMES):
-        raise S.SceneRefusal("RD-INPUT", "bad --frames " + str(s) + ": need 1 <= A <= B <= " + str(N_FRAMES))
+    if not (1 <= A <= B <= n_max):
+        raise S.SceneRefusal("RD-INPUT", "bad --frames " + str(s) + ": need 1 <= A <= B <= " + str(n_max))
     return (A, B)
 
 
@@ -289,6 +334,110 @@ def bar_check(path, lo, hi, ramp, rect=BAR):
     return {"max_diff": max_diff, "n": BAR_SAMPLES}
 
 
+def clip_fraction(path, u_max=PLATE[0], level=0.97):
+    """Fraction of the pixels left of the bar whose MIN over R, G, B is >= level."""
+    px = load_px(path)
+    ncol = int(u_max * px.shape[1])
+    return float(np.mean(px[:, :ncol, :].min(axis=2) >= level))
+
+
+def turning(q):
+    """Sum of the direction changes along the polyline q (m, 3) in radians."""
+    q = np.asarray(q, dtype=np.float64)
+    if q.shape[0] < 3:
+        return 0.0
+    d = q[1:] - q[:-1]
+    d = d[np.linalg.norm(d, axis=1) > 1e-12]
+    if d.shape[0] < 2:
+        return 0.0
+    u = d / np.linalg.norm(d, axis=1)[:, None]
+    dots = np.clip(np.einsum("ij,ij->i", u[:-1], u[1:]), -1.0, 1.0)
+    return float(np.arccos(dots).sum())
+
+
+def pick_streamlines(points, offsets, group, seeds, rule=STREAM_PICK):
+    """(sorted kept line indices, counts dict) by the STREAM_PICK rule."""
+    points = np.asarray(points, dtype=np.float64)
+    offsets = [int(v) for v in offsets]
+    g = np.asarray(group)
+    ay = np.abs(np.asarray(seeds, dtype=np.float64)[:, 1])
+    n = len(offsets) - 1
+    zmax = np.empty(n, dtype=np.float64)
+    turn = np.empty(n, dtype=np.float64)
+    for j in range(n):
+        p = points[offsets[j]:offsets[j + 1]]
+        zmax[j] = float(p[:, 2].max())
+        turn[j] = turning(p)
+
+    def top(pool, key, quota):
+        return sorted(pool, key=lambda j: (-key[j], j))[:quota]
+
+    fw = [j for j in range(n) if g[j] == 0 and ay[j] >= rule["tip_abs_y"]]
+    halo = top([j for j in range(n) if g[j] == 0 and ay[j] <= rule["halo_abs_y"]],
+               zmax, rule["halo_n"])
+    wheels = top([j for j in range(n) if g[j] == 1], turn, rule["wheels_n"])
+    rw = top([j for j in range(n) if g[j] == 2], turn, rule["rw_n"])
+    counts = {"fw_tips": len(fw), "halo": len(halo), "wheels": len(wheels), "rw_tips": len(rw)}
+    return sorted(set(fw) | set(halo) | set(wheels) | set(rw)), counts
+
+
+def subset_lines(points, speed, offsets, idx):
+    """The lines of idx concatenated in idx order (offsets restart at 0)."""
+    points = np.asarray(points, dtype=np.float64)
+    speed = np.asarray(speed, dtype=np.float64)
+    ps, us = [], []
+    offs = [0]
+    for j in idx:
+        s0, s1 = int(offsets[j]), int(offsets[j + 1])
+        ps.append(points[s0:s1])
+        us.append(speed[s0:s1])
+        offs.append(offs[-1] + s1 - s0)
+    return (np.concatenate(ps), np.concatenate(us), np.asarray(offs, dtype=np.int64))
+
+
+def reveal_times(points, speed, offsets, u_ref=S.U_SYNTH, u_floor=REVEAL_U_FLOOR):
+    """Per polyline point: the time the growing front reaches it (float64 (m,))."""
+    points = np.asarray(points, dtype=np.float64)
+    speed = np.asarray(speed, dtype=np.float64)
+    offsets = [int(v) for v in offsets]
+    x0 = min(float(points[offsets[j], 0]) for j in range(len(offsets) - 1))
+    t = np.empty(points.shape[0], dtype=np.float64)
+    for j in range(len(offsets) - 1):
+        s0, s1 = offsets[j], offsets[j + 1]
+        q = points[s0:s1]
+        u = speed[s0:s1]
+        t[s0] = (float(q[0, 0]) - x0) / u_ref
+        for k in range(1, s1 - s0):
+            step = float(np.linalg.norm(q[k] - q[k - 1]))
+            umid = 0.5 * (float(u[k - 1]) + float(u[k]))
+            t[s0 + k] = t[s0 + k - 1] + step / max(u_floor, umid)
+    return t
+
+
+def reveal_front(f, t_end):
+    """The front time at 1-based frame f: eased over 1..REVEAL_GROW, then held."""
+    return t_end * min(1.0, (f - 1) / (REVEAL_GROW - 1)) ** REVEAL_EASE
+
+
+def frame_uv(cam_obj, points):
+    """[(u, v)] of world points on the camera's frame (0..1, u right, v up)."""
+    sc = bpy.context.scene
+    bpy.context.view_layer.update()
+    return [(float(uv.x), float(uv.y))
+            for uv in (bpy_extras.object_utils.world_to_camera_view(sc, cam_obj, Vector(p))
+                       for p in points)]
+
+
+def framing_entry(uvs, u_max):
+    """{u_min, u_max, v_min, v_max, pass} for one camera over its framing points."""
+    us = [p[0] for p in uvs]
+    vs = [p[1] for p in uvs]
+    ok = (FRAME_MARGIN <= min(us) and max(us) <= u_max
+          and FRAME_MARGIN <= min(vs) and max(vs) <= 1.0 - FRAME_MARGIN)
+    return {"u_min": float(min(us)), "u_max": float(max(us)),
+            "v_min": float(min(vs)), "v_max": float(max(vs)), "pass": bool(ok)}
+
+
 def gpu_record():
     """nvidia-smi state; null when nvidia-smi is not usable."""
     try:
@@ -317,6 +466,32 @@ def ensure_gpu(device):
     ok = any(d.type == "OPTIX" and d.use for d in prefs.devices)
     if not ok or bpy.context.scene.cycles.device != "GPU":
         raise S.SceneRefusal("RD-GPU", "no OPTIX device enabled or cycles.device != GPU after configure_render")
+
+
+def record_light_base():
+    """LIGHT_BASE: scene.py's energy for every LIGHT object (never hard-coded)."""
+    LIGHT_BASE.clear()
+    for obj in bpy.data.objects:
+        if obj.type == "LIGHT":
+            LIGHT_BASE[obj.name] = float(obj.data.energy)
+
+
+def apply_look_edits():
+    """The C1 material edits on scene.py's objects: dark matte floor, low-coat field."""
+    fb = S._principled(S.MATERIALS["studio_floor"])
+    fb.inputs["Base Color"].default_value = LOOK_FLOOR["Base Color"]
+    fb.inputs["Roughness"].default_value = LOOK_FLOOR["Roughness"]
+    fb.inputs["Specular IOR Level"].default_value = LOOK_FLOOR["Specular IOR Level"]
+    S._principled(S.MATERIALS["car_field"]).inputs["Coat Weight"].default_value = LOOK_FIELD_COAT
+
+
+def apply_look(vt):
+    """Every light's energy = LIGHT_BASE * LOOK_LIGHT_SCALE[vt], from the base each time."""
+    scale = LOOK_LIGHT_SCALE[vt]
+    for name, base in LIGHT_BASE.items():
+        obj = bpy.data.objects.get(name)
+        if obj is not None and obj.type == "LIGHT":
+            obj.data.energy = base * scale
 
 
 def _bar_material():
@@ -357,6 +532,56 @@ def _plate_material():
         em.inputs["Color"].default_value = (0.02, 0.02, 0.025, 1.0)
         em.inputs["Strength"].default_value = 1.0
         nt.links.new(em.outputs["Emission"], nt.nodes["Material Output"].inputs["Surface"])
+    return m
+
+
+def _streamline_reveal_material():
+    """streamline_reveal: speed colour, visible where reveal_t <= reveal_T
+    (a Value node named reveal_T), glowing REVEAL_HEAD band at the front."""
+    m = bpy.data.materials.get("streamline_reveal")
+    if m is not None:
+        return m
+    m = bpy.data.materials.new("streamline_reveal")
+    nt = m.node_tree
+    b = S._principled(m)
+    attr = nt.nodes.new("ShaderNodeAttribute")
+    attr.attribute_name = "speed_rgb"
+    nt.links.new(attr.outputs["Color"], b.inputs["Base Color"])
+    nt.links.new(attr.outputs["Color"], b.inputs["Emission Color"])
+    b.inputs["Emission Strength"].default_value = 0.5
+    b.inputs["Roughness"].default_value = 0.4
+    at = nt.nodes.new("ShaderNodeAttribute")
+    at.attribute_name = "reveal_t"
+    tv = nt.nodes.new("ShaderNodeValue")
+    tv.name = "reveal_T"
+    tv.label = "reveal_T"
+    gt = nt.nodes.new("ShaderNodeMath")
+    gt.operation = "GREATER_THAN"
+    nt.links.new(at.outputs["Fac"], gt.inputs[0])
+    nt.links.new(tv.outputs["Value"], gt.inputs[1])
+    trans = nt.nodes.new("ShaderNodeBsdfTransparent")
+    mix = nt.nodes.new("ShaderNodeMixShader")
+    nt.links.new(gt.outputs["Value"], mix.inputs["Fac"])
+    nt.links.new(b.outputs["BSDF"], mix.inputs[1])
+    nt.links.new(trans.outputs["BSDF"], mix.inputs[2])
+    sub = nt.nodes.new("ShaderNodeMath")
+    sub.operation = "SUBTRACT"
+    nt.links.new(tv.outputs["Value"], sub.inputs[0])
+    sub.inputs[1].default_value = REVEAL_HEAD
+    gt2 = nt.nodes.new("ShaderNodeMath")
+    gt2.operation = "GREATER_THAN"
+    nt.links.new(at.outputs["Fac"], gt2.inputs[0])
+    nt.links.new(sub.outputs["Value"], gt2.inputs[1])
+    k = nt.nodes.new("ShaderNodeMath")
+    k.operation = "MULTIPLY"
+    k.inputs[0].default_value = REVEAL_HEAD_STRENGTH - 0.5
+    nt.links.new(gt2.outputs["Value"], k.inputs[1])
+    add = nt.nodes.new("ShaderNodeMath")
+    add.operation = "ADD"
+    add.inputs[0].default_value = 0.5
+    nt.links.new(k.outputs["Value"], add.inputs[1])
+    nt.links.new(add.outputs["Value"], b.inputs["Emission Strength"])
+    nt.links.new(mix.outputs["Shader"], nt.nodes["Material Output"].inputs["Surface"])
     return m
 
 
@@ -509,10 +734,10 @@ def build_car_cut(car, co):
 
 
 def add_shot_cameras(center):
-    """cam_stream and cam_slice, 50 mm, aimed with scene._aim_at."""
+    """cam_stream and cam_slice by C2; cam_side (scene.py's) re-placed, not duplicated."""
     table = [
-        ("cam_stream", Vector(center) + Vector((1.2, 0.0, -0.1)), (-0.60, -0.62, 0.50), 11.0),
-        ("cam_slice", Vector((float(center[0]) + 1.0, 0.0, 0.55)), (-0.30, -0.90, 0.32), 10.0),
+        ("cam_stream", Vector(center) + Vector((1.3, 0.0, -0.5)), (-0.55, -0.70, 0.58), 13.0),
+        ("cam_slice", Vector((5.0, 0.0, 0.6)), (-0.25, -0.92, 0.30), 16.5),
     ]
     for name, target, direction, dist in table:
         cd = bpy.data.cameras.new(name)
@@ -521,6 +746,10 @@ def add_shot_cameras(center):
         bpy.context.scene.collection.objects.link(obj)
         obj.location = target + Vector(direction).normalized() * dist
         S._aim_at(obj, target)
+    side = bpy.data.objects["cam_side"]
+    target = Vector(center) + Vector((0.45, 0.0, 0.0))
+    side.location = target + Vector((0.0, -1.0, 0.06)).normalized() * 10.5
+    S._aim_at(side, target)
 
 
 def set_view_transform(vt):
@@ -549,9 +778,11 @@ def build_scene(args):
     car = S.import_render_model(args.glb, placement)
     center, bbox_lo, bbox_hi, co = S.car_center(car)
     S.build_materials()
+    apply_look_edits()
     S.add_ground(S.MATERIALS["studio_floor"])
     S.add_world()
     S.add_lights(center)
+    record_light_base()
     S.add_cameras(center)
     add_shot_cameras(center)
     S.add_turntable(center, S.TT_DIR, S.TT_DIST, N_FRAMES)
@@ -565,9 +796,10 @@ def build_scene(args):
 
 
 def prepare_shot(name, car):
-    """View transform, bars, car/car_cut and field visibility for one still."""
+    """View transform, look, bars, car/car_cut and field visibility for one still."""
     row = SHOTS[name]
     set_view_transform(row["vt"])
+    apply_look(row["vt"])
     active = None
     if row["bar"]:
         active = ("bar_cp_" if row["bar"] == "cp" else "bar_speed_") + row["camera"]
@@ -590,6 +822,7 @@ def prepare_turntable(kind, car):
     """One state for a whole turntable run; returns the view transform."""
     vt = "Standard" if kind == "cp" else "AgX"
     set_view_transform(vt)
+    apply_look(vt)
     set_bar_state("bar_cp_cam_turntable" if kind == "cp" else None)
     S.set_car_material(car, "field" if kind == "cp" else "paint")
     car.hide_render = False
@@ -693,17 +926,46 @@ def run_stills(args):
         cp_map = S.apply_surface_field(car, pts, vals, cp_lo, cp_hi)
         say("field cp: " + str(cp_map["n"]) + " car vertices mapped in " + format(time.time() - t0, ".1f")
             + " s, max_dist " + format(cp_map["max_dist"], ".4f") + " m")
+    stream_pick = None
     if "streamlines" in shots:
         t0 = time.time()
-        pts, spd, offs = S.load_streamlines(os.path.join(args.post, "streamlines.npz"))
-        S.add_streamlines(pts, spd, offs, sp_lo, sp_hi, 0.012, 8)
-        say("field streamlines: " + str(len(offs) - 1) + " lines in " + format(time.time() - t0, ".1f") + " s")
+        npz_path = os.path.join(args.post, "streamlines.npz")
+        pts, spd, offs = S.load_streamlines(npz_path)
+        with np.load(npz_path) as z:
+            group = np.asarray(z["group"])
+            seeds = np.asarray(z["seeds"], dtype=np.float64)
+        pick, pick_counts = pick_streamlines(pts, offs, group, seeds)
+        P, U, O = subset_lines(pts, spd, offs, pick)
+        S.add_streamlines(P, U, O, sp_lo, sp_hi, STREAM_RADIUS, STREAM_SIDES)
+        stream_pick = {"n": int(len(pick)), "counts": pick_counts, "index_sum": int(sum(pick))}
+        say("field streamlines: picked " + str(len(pick)) + " of " + str(len(offs) - 1)
+            + " lines " + str(pick_counts) + " in " + format(time.time() - t0, ".1f") + " s")
+    slice_xz = None
     if "slice" in shots:
         t0 = time.time()
         x, z, y0, spd = S.load_slice(os.path.join(args.post, "slice.npz"))
         slc = S.add_slice(x, z, y0, spd, sp_lo, sp_hi)
         slc.visible_shadow = False
+        slice_xz = (x, z)
         say("field slice: " + str(len(x)) + " x " + str(len(z)) + " in " + format(time.time() - t0, ".1f") + " s")
+    _c, f_lo, f_hi, _co = S.car_center(car)
+    corners = [(float(px), float(py), float(pz))
+               for px in (float(f_lo[0]), float(f_hi[0]))
+               for py in (float(f_lo[1]), float(f_hi[1]))
+               for pz in (float(f_lo[2]), float(f_hi[2]))]
+    framing = {}
+    if "streamlines" in shots:
+        framing["cam_stream"] = framing_entry(
+            frame_uv(bpy.data.objects["cam_stream"], corners), 1.0 - FRAME_MARGIN)
+    if "side" in shots:
+        framing["cam_side"] = framing_entry(
+            frame_uv(bpy.data.objects["cam_side"], corners), PLATE[0] - 0.01)
+    if "slice" in shots and slice_xz is not None:
+        x, z = slice_xz
+        pts_f = corners + [(float(x[-1]), 0.0, float(z[0])), (float(x[-1]), 0.0, float(z[-1])),
+                           (float(f_lo[0]), 0.0, float(z[-1]))]
+        framing["cam_slice"] = framing_entry(
+            frame_uv(bpy.data.objects["cam_slice"], pts_f), PLATE[0] - 0.01)
     sc = bpy.context.scene
     shot_reports = {}
     for name in shots:
@@ -729,9 +991,11 @@ def run_stills(args):
             "height": st["height"],
             "lum_std": st["lum_std"],
             "bar_check": bc,
+            "clip_fraction": clip_fraction(path),
         }
         say("still " + name + " " + str(st["width"]) + "x" + str(st["height"]) + " in " + format(secs, ".1f")
-            + " s, view " + vt + ", bar max_diff " + (format(bc["max_diff"], ".4f") if bc else "none"))
+            + " s, view " + vt + ", bar max_diff " + (format(bc["max_diff"], ".4f") if bc else "none")
+            + ", clip_fraction " + format(shot_reports[name]["clip_fraction"], ".4f"))
     gpu_end = gpu_record()
     report = {
         "tool": TOOL,
@@ -742,6 +1006,9 @@ def run_stills(args):
         "samples": int(args.samples),
         "cp_range": [cp_lo, cp_hi],
         "speed_range": [sp_lo, sp_hi],
+        "look": {"light_scale": LOOK_LIGHT_SCALE, "floor": LOOK_FLOOR, "field_coat": LOOK_FIELD_COAT},
+        "stream_pick": stream_pick,
+        "framing": framing,
         "attribution": lic["attribution"],
         "car": {
             "n_vertices": int(len(car.data.vertices)),
@@ -834,6 +1101,107 @@ def run_turntable(args):
     with open(os.path.join(args.out, "turntable_" + kind + ".json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=1)
     say("turntable_" + kind + ".json written: " + str(rendered) + " rendered, " + str(skipped) + " skipped")
+    return 0
+
+
+def validate_reveal_inputs(args):
+    require_arg(args.glb, "glb")
+    require_arg(args.sim_geom, "sim-geom")
+    require_arg(args.post, "post")
+    require_arg(args.out, "out")
+    validate_out(args.out)
+    require_file(args.glb, "--glb")
+    for fn in ("sim_geom.json", "LICENSE.txt", "sim_surface.stl"):
+        require_file(os.path.join(args.sim_geom, fn), "--sim-geom/" + fn)
+    for fn in ("streamlines.npz", "numbers.json"):
+        require_file(os.path.join(args.post, fn), "--post/" + fn)
+
+
+def run_reveal(args):
+    t_total = time.time()
+    validate_reveal_inputs(args)
+    A, B = parse_frames(args.frames, REVEAL_FRAMES)
+    os.makedirs(args.out, exist_ok=True)
+    gpu_start = gpu_record()
+    numbers = _load_json(os.path.join(args.post, "numbers.json"))
+    (cp_lo, cp_hi), (sp_lo, sp_hi) = resolve_ranges(numbers, None, None)
+    car, center, co = build_scene(args)
+    build_bars([], cp_lo, cp_hi, sp_lo, sp_hi)
+    S.set_car_material(car, "paint")
+    cut = bpy.data.objects.get("car_cut")
+    if cut is not None:
+        cut.hide_render = True
+    slc = bpy.data.objects.get("slice")
+    if slc is not None:
+        slc.hide_render = True
+    set_view_transform("AgX")
+    apply_look("AgX")
+    sc = bpy.context.scene
+    sc.camera = bpy.data.objects["cam_stream"]
+    npz_path = os.path.join(args.post, "streamlines.npz")
+    pts, spd, offs = S.load_streamlines(npz_path)
+    with np.load(npz_path) as z:
+        group = np.asarray(z["group"])
+        seeds = np.asarray(z["seeds"], dtype=np.float64)
+    pick, pick_counts = pick_streamlines(pts, offs, group, seeds)
+    P, U, O = subset_lines(pts, spd, offs, pick)
+    tarr = reveal_times(P, U, O)
+    t_end = float(tarr.max())
+    x0 = min(float(P[int(o), 0]) for o in O[:-1])
+    tubes = S.add_streamlines(P, U, O, sp_lo, sp_hi, STREAM_RADIUS, STREAM_SIDES)
+    mat = _streamline_reveal_material()
+    tubes.data.materials.clear()
+    tubes.data.materials.append(mat)
+    rt = tubes.data.attributes.new("reveal_t", "FLOAT", "POINT")
+    rt.data.foreach_set("value", np.repeat(tarr.astype(np.float32), STREAM_SIDES))
+    tubes.data.update()
+    tubes.hide_render = False
+    sc.cycles.transparent_max_bounces = 64
+    tv = mat.node_tree.nodes["reveal_T"]
+    d = os.path.join(args.out, "reveal")
+    os.makedirs(d, exist_ok=True)
+    n = B - A + 1
+    rendered = 0
+    skipped = 0
+    spent = 0.0
+    for i, f in enumerate(range(A, B + 1)):
+        front = reveal_front(f, t_end)
+        tv.outputs["Value"].default_value = front
+        path = os.path.join(d, "frame_%04d.png" % f)
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            skipped += 1
+            say("reveal frame " + str(f) + " (" + str(i + 1) + "/" + str(n) + ") skipped")
+            continue
+        secs = do_render(path)
+        rendered += 1
+        spent += secs
+        eta = (B - f) * (spent / rendered) / 60.0
+        say("reveal frame " + str(f) + " (" + str(i + 1) + "/" + str(n) + ") " + format(secs, ".1f")
+            + " s, T " + format(front, ".3f") + " s, eta " + format(eta, ".1f") + " min")
+    gpu_end = gpu_record()
+    report = {
+        "tool": TOOL,
+        "version": VERSION,
+        "args": args_dict(args),
+        "blender": bpy.app.version_string,
+        "device_used": args.device,
+        "samples": int(args.samples),
+        "view_transform": "AgX",
+        "frames": [A, B],
+        "stream_pick": {"n": int(len(pick)), "counts": pick_counts, "index_sum": int(sum(pick))},
+        "reveal": {"x0": x0, "t_end": t_end, "n_points": int(P.shape[0]),
+                   "grow": REVEAL_GROW, "ease": REVEAL_EASE},
+        "rendered": rendered,
+        "skipped": skipped,
+        "seconds_total": float(time.time() - t_total),
+        "seconds_per_rendered_frame": (spent / rendered) if rendered else None,
+        "gpu_start": gpu_start,
+        "gpu_end": gpu_end,
+    }
+    with open(os.path.join(args.out, "reveal.json"), "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=1)
+    say("reveal.json written: " + str(rendered) + " rendered, " + str(skipped)
+        + " skipped, T_END " + format(t_end, ".4f") + " s")
     return 0
 
 
@@ -1015,6 +1383,100 @@ def run_check(args):
     record("plates", not bad,
            "; ".join(bad) if bad else "plate pixel max channel at (0.955, 0.165): " + ", ".join(det))
 
+    bad = []
+    det = []
+    for name in ("hero", "side", "top_rear"):
+        p = os.path.join(out, name + ".png")
+        if not os.path.isfile(p):
+            bad.append(name + " png missing")
+            continue
+        cf = clip_fraction(p)
+        det.append(name + " " + format(cf, ".4f"))
+        if not cf <= CLIP_MAX:
+            bad.append(name + " clip_fraction " + format(cf, ".4f") + " > " + str(CLIP_MAX))
+    record("exposure", not bad,
+           "; ".join(bad) if bad else "clip_fraction <= " + str(CLIP_MAX) + ": " + ", ".join(det))
+
+    fr = stills.get("framing", {})
+    bad = []
+    for k in ("cam_stream", "cam_side", "cam_slice"):
+        e = fr.get(k)
+        if e is None:
+            bad.append(k + " missing from stills.json framing")
+        elif not e.get("pass"):
+            bad.append(k + " out of frame: " + json.dumps(e, sort_keys=True))
+    record("framing", not bad,
+           "; ".join(bad) if bad else str(len(fr)) + "/3 cameras inside the frame rule")
+
+    sp = stills.get("stream_pick")
+    lo_n, hi_n = STREAM_N_RANGE
+    if sp is None:
+        record("stream_pick", False, "stream_pick missing from stills.json")
+    else:
+        n_pick = int(sp.get("n", -1))
+        record("stream_pick", lo_n <= n_pick <= hi_n,
+               "n " + str(n_pick) + " in [" + str(lo_n) + ", " + str(hi_n) + "]")
+
+    R = int(args.reveal_expected)
+    if R == 0:
+        record("reveal", True, "not requested")
+    else:
+        bad = []
+        d = os.path.join(out, "reveal")
+        if not os.path.isdir(d):
+            bad.append("reveal dir missing: " + d)
+        else:
+            expected = set("frame_%04d.png" % i for i in range(1, R + 1))
+            actual = set(os.listdir(d))
+            extra = sorted(actual - expected)
+            missing = sorted(expected - actual)
+            if extra:
+                bad.append("extra " + ", ".join(extra[:5]))
+            if missing:
+                bad.append("missing " + str(len(missing)) + " e.g. " + missing[0])
+            for i in range(1, R + 1):
+                p = os.path.join(d, "frame_%04d.png" % i)
+                if os.path.isfile(p):
+                    w, h = png_size(p)
+                    if (w, h) != (1920, 1080):
+                        bad.append("frame " + str(i) + " size " + str(w) + "x" + str(h))
+            lums = []
+            for i in sorted(set([1, 1 + R // 2, R])):
+                p = os.path.join(d, "frame_%04d.png" % i)
+                if os.path.isfile(p):
+                    lum = S.image_stats(p)["lum_std"]
+                    lums.append("f" + str(i) + " " + format(lum, ".4f"))
+                    if not lum > LUM_MIN:
+                        bad.append("frame " + str(i) + " lum_std " + format(lum, ".4f")
+                                   + " <= " + str(LUM_MIN))
+            jpath = os.path.join(out, "reveal.json")
+            if os.path.isfile(jpath):
+                j = _load_json(jpath)
+                if j.get("view_transform") != "AgX":
+                    bad.append("reveal.json view " + str(j.get("view_transform")) + " != AgX")
+                npick = (j.get("stream_pick") or {}).get("n")
+                if npick is None or not (lo_n <= int(npick) <= hi_n):
+                    bad.append("reveal.json stream_pick.n " + str(npick) + " outside "
+                               + str(list(STREAM_N_RANGE)))
+            else:
+                bad.append("reveal.json missing")
+            if R == REVEAL_FRAMES:
+                p1 = os.path.join(d, "frame_%04d.png" % 1)
+                p2 = os.path.join(d, "frame_%04d.png" % REVEAL_GROW)
+                if os.path.isfile(p1) and os.path.isfile(p2):
+                    a = load_px(p1)
+                    b = load_px(p2)
+                    if a.shape == b.shape:
+                        mad = float(np.mean(np.abs(a - b)))
+                        lums.append("mad(1," + str(REVEAL_GROW) + ") " + format(mad, ".4f"))
+                        if not mad > 0.01:
+                            bad.append("frames 1/" + str(REVEAL_GROW) + " nearly identical (mad "
+                                       + format(mad, ".4f") + ")")
+                    else:
+                        bad.append("frame size mismatch for the reveal diff test")
+        record("reveal", not bad, "; ".join(bad) if bad
+               else "exactly " + str(R) + " frames 1920x1080; " + ", ".join(lums))
+
     try:
         lpath = os.path.join(out, "LICENSE.txt")
         cpath = os.path.join(out, "CREDITS.txt")
@@ -1080,9 +1542,19 @@ def build_arg_parser():
     pt.add_argument("--frames", default="1-240")
     pt.add_argument("--cp-range", dest="cp_range", type=float, nargs=2, default=None, metavar=("LO", "HI"))
 
+    pr = sub.add_parser("reveal")
+    pr.add_argument("--glb")
+    pr.add_argument("--sim-geom", dest="sim_geom")
+    pr.add_argument("--post")
+    pr.add_argument("--out")
+    pr.add_argument("--device", choices=["GPU", "CPU"], default="GPU")
+    pr.add_argument("--samples", type=int, default=64)
+    pr.add_argument("--frames", default="1-" + str(REVEAL_FRAMES))
+
     pc = sub.add_parser("check")
     pc.add_argument("--out")
     pc.add_argument("--frames-expected", dest="frames_expected", type=int, default=N_FRAMES)
+    pc.add_argument("--reveal-expected", dest="reveal_expected", type=int, default=REVEAL_FRAMES)
     return p
 
 
@@ -1094,13 +1566,15 @@ def dispatch(argv):
         return run_stills(args)
     if args.cmd == "turntable":
         return run_turntable(args)
+    if args.cmd == "reveal":
+        return run_reveal(args)
     if args.cmd == "check":
         return run_check(args)
-    raise S.SceneRefusal("RD-INPUT", "a subcommand is required: stills | turntable | check (or --selftest)")
+    raise S.SceneRefusal("RD-INPUT", "a subcommand is required: stills | turntable | reveal | check (or --selftest)")
 
 
 # ------------------------------- selftest ---------------------------------
-# T1-T9, CPU only, exact expected values; under 120 s in total.
+# T1-T15, CPU only, exact expected values; under 180 s in total.
 
 
 def selftest():
@@ -1294,16 +1768,124 @@ def selftest():
         expect_refusal("RD-INPUT", lambda: dispatch(["check", "--out", d]))
         return "4 refusals: no post dir, post without cp.npz, --out in the repo, check without stills.json"
 
+    def t10():
+        q = [
+            [(0.0, 0.8, 0.2), (1.0, 0.8, 0.2), (2.0, 0.8, 0.2)],
+            [(0.0, 0.0, 0.5), (1.0, 0.0, 0.5), (2.0, 0.0, 0.5)],
+            [(0.0, 0.1, 0.3), (1.0, 0.1, 1.0), (2.0, 0.1, 0.3)],
+            [(0.0, 0.4, 0.2), (1.0, 0.4, 0.2), (2.0, 0.4, 0.2)],
+            [(0.0, 0.5, 0.2), (1.0, 0.5, 0.2), (2.0, 0.5, 0.2)],
+            [(0.0, -0.5, 0.2), (1.0, -0.5, 0.2), (1.0, 0.5, 0.2)],
+            [(0.0, 0.6, 0.5), (1.0, 0.6, 0.5), (2.0, 1.6, 0.5)],
+            [(0.0, -0.6, 0.5), (1.0, -0.6, 0.5), (2.0, -1.6, 0.5)],
+        ]
+        pts = np.asarray([p for line in q for p in line], dtype=np.float64)
+        offs = np.arange(0, 25, 3, dtype=np.int64)
+        group = np.asarray([0, 0, 0, 0, 1, 1, 2, 2], dtype=np.int8)
+        seeds = pts[::3]
+        rule = {"tip_abs_y": 0.76, "halo_abs_y": 0.14, "halo_n": 1, "wheels_n": 1, "rw_n": 1}
+        idx, counts = pick_streamlines(pts, offs, group, seeds, rule)
+        assert idx == [0, 2, 5, 6], str(idx)
+        assert counts == {"fw_tips": 1, "halo": 1, "wheels": 1, "rw_tips": 1}, str(counts)
+        assert abs(turning(pts[15:18]) - math.pi / 2.0) <= 1e-12, str(turning(pts[15:18]))
+        assert abs(turning(pts[18:21]) - math.pi / 4.0) <= 1e-12, str(turning(pts[18:21]))
+        assert turning(np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])) == 0.0
+        P2, U2, O2 = subset_lines(pts, np.arange(24.0), offs, [2, 0])
+        assert O2.tolist() == [0, 3, 6] and P2.shape == (6, 3), str(O2)
+        assert U2.tolist() == [6.0, 7.0, 8.0, 0.0, 1.0, 2.0], str(U2.tolist())
+        return "idx [0, 2, 5, 6], counts 1/1/1/1, turning pi/2 and pi/4, subset in idx order"
+
+    def t11():
+        pts = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [3.0, 0.0, 0.0],
+                          [2.0, 0.0, 0.0], [2.0, 1.0, 0.0]])
+        spd = np.asarray([10.0, 10.0, 30.0, 1.0, 1.0])
+        offs = np.asarray([0, 3, 5], dtype=np.int64)
+        t = reveal_times(pts, spd, offs, u_ref=20.0, u_floor=2.0)
+        want = [0.0, 0.1, 0.2, 0.1, 0.6]
+        assert max(abs(float(t[i]) - want[i]) for i in range(5)) <= 1e-12, str(t)
+        assert reveal_front(1, 1.2) == 0.0
+        assert abs(reveal_front(120, 1.2) - 1.2) <= 1e-12
+        assert abs(reveal_front(150, 1.2) - 1.2) <= 1e-12
+        assert abs(reveal_front(60, 1.2) - 1.2 * (59.0 / 119.0) ** 2) <= 1e-12
+        return "times [0, 0.1, 0.2, 0.1, 0.6], front 0 / 1.2 / 1.2, eased (59/119)^2"
+
+    def t12():
+        d = tempfile.mkdtemp()
+        tmpdirs.append(d)
+        img = bpy.data.images.new("t12clip", 20, 10, alpha=False)
+        px = np.full((10 * 20, 4), 0.5, dtype=np.float32)
+        px[:, 3] = 1.0  # the buffer is premultiplied; alpha 0.5 would halve the colours
+        white = np.tile(np.arange(20) < 4, 10)
+        px[white, :3] = 1.0
+        img.pixels.foreach_set(px.ravel())
+        p = os.path.join(d, "t12.png")
+        img.filepath_raw = p
+        img.file_format = "PNG"
+        img.save()
+        got = clip_fraction(p)
+        assert abs(got - 4.0 / 17.0) <= 1e-9, str(got)
+        return "4/17 (int(0.865 * 20) = 17 columns judged)"
+
+    def t13():
+        S.reset_scene()
+        S.build_materials()
+        S.add_lights((0.0, 0.0, 0.0))
+        record_light_base()
+        apply_look_edits()
+        base = dict(LIGHT_BASE)
+        apply_look("Standard")
+        apply_look("Standard")
+        for obj in bpy.data.objects:
+            if obj.type == "LIGHT":
+                want = base[obj.name] * LOOK_LIGHT_SCALE["Standard"]
+                assert abs(obj.data.energy - want) <= 1e-6 * base[obj.name], obj.name
+        apply_look("AgX")
+        for obj in bpy.data.objects:
+            if obj.type == "LIGHT":
+                want = base[obj.name] * LOOK_LIGHT_SCALE["AgX"]
+                assert abs(obj.data.energy - want) <= 1e-6 * base[obj.name], obj.name
+        fb = S._principled(S.MATERIALS["studio_floor"])
+        assert abs(float(fb.inputs["Roughness"].default_value) - LOOK_FLOOR["Roughness"]) <= 1e-6
+        cb = S._principled(S.MATERIALS["car_field"])
+        assert abs(float(cb.inputs["Coat Weight"].default_value) - LOOK_FIELD_COAT) <= 1e-6
+        return "lights 0.30 twice (not 0.09) then 0.60, floor Roughness 0.5, field coat 0.4"
+
+    def t14():
+        S.reset_scene()
+        sc = bpy.context.scene
+        sc.render.resolution_x = 1920
+        sc.render.resolution_y = 1080
+        cd = bpy.data.cameras.new("t14cam")
+        cd.lens = 50.0
+        cam = bpy.data.objects.new("t14cam", cd)
+        sc.collection.objects.link(cam)
+        cam.location = (0.0, -10.0, 0.0)
+        S._aim_at(cam, (0.0, 0.0, 0.0))
+        got = frame_uv(cam, [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)])
+        want = [(0.5, 0.5), (0.6388888888888888, 0.5), (0.5, 0.7469135802469136)]
+        for (gu, gv), (wu, wv) in zip(got, want):
+            assert abs(gu - wu) <= 1e-6 and abs(gv - wv) <= 1e-6, str(got)
+        return "(0.5, 0.5), (0.638889, 0.5), (0.5, 0.746914)"
+
+    def t15():
+        assert parse_frames("1-150", REVEAL_FRAMES) == (1, 150)
+        expect_refusal("RD-INPUT", lambda: parse_frames("1-151", REVEAL_FRAMES))
+        assert parse_frames("1-240") == (1, 240)
+        return "1-150 ok with n_max 150, 1-151 refused, 1-240 still ok"
+
     for name, fn in (("T1 overlay_rect", t1), ("T2 bar_levels/srgb", t2), ("T3 bar discrimination", t3),
                      ("T4 far_half_faces", t4), ("T5 credits", t5), ("T6 parse_frames", t6),
-                     ("T7 png_size", t7), ("T8 default_ranges", t8), ("T9 refusals", t9)):
+                     ("T7 png_size", t7), ("T8 default_ranges", t8), ("T9 refusals", t9),
+                     ("T10 pick_streamlines", t10), ("T11 reveal_times/front", t11),
+                     ("T12 clip_fraction", t12), ("T13 look", t13), ("T14 frame_uv", t14),
+                     ("T15 parse_frames n_max", t15)):
         run_test(name, fn)
     for d in tmpdirs:
         shutil.rmtree(d, ignore_errors=True)
     if fails:
-        print("SELFTEST FAIL " + str(len(fails)) + "/9: " + ", ".join(fails), flush=True)
+        print("SELFTEST FAIL " + str(len(fails)) + "/15: " + ", ".join(fails), flush=True)
         return 1
-    print("SELFTEST PASS 9/9", flush=True)
+    print("SELFTEST PASS 15/15", flush=True)
     return 0
 
 
