@@ -1,0 +1,50 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>cpturn</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+        }
+        #cpturn-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #cpturn-v {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+      </style>
+      <div id="root" data-composition-id="cpturn" data-width="1920" data-height="1080">
+        <div id="cpturn-wrap">
+          <video
+            id="cpturn-v"
+            src="assets/cp_turntable.mp4"
+            muted
+            playsinline
+            data-start="0"
+            data-duration="7"
+            data-track-index="0"
+          ></video>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#cpturn-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
+        tl.to("#cpturn-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 6.6);
+        window.__timelines["cpturn"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

@@ -1,0 +1,78 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>cad</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #cad-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #cad-zoom {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          will-change: transform;
+        }
+        #cad-v {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        #cad-credit {
+          position: absolute;
+          right: 96px;
+          bottom: 88px;
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          opacity: 0;
+        }
+      </style>
+      <div id="root" data-composition-id="cad" data-width="1920" data-height="1080">
+        <div id="cad-wrap">
+          <div id="cad-zoom">
+            <video
+              id="cad-v"
+              src="assets/cad_turntable.mp4"
+              muted
+              playsinline
+              data-start="0"
+              data-duration="8"
+              data-track-index="0"
+            ></video>
+          </div>
+          <div id="cad-credit">Model: Qvist_Designs · CC BY 4.0</div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#cad-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
+        tl.fromTo("#cad-zoom", { scale: 1.0 }, { scale: 1.03, duration: 8, ease: "none" }, 0);
+        tl.fromTo("#cad-credit", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power1.out" }, 0.8);
+        tl.to("#cad-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 7.6);
+        window.__timelines["cad"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

@@ -13,6 +13,8 @@
 | `tunnel_mesh.py` | no | Prosperity Public License 3.0.0 (the repository's LICENSE) |
 | `solve.py` | no | Prosperity Public License 3.0.0 (the repository's LICENSE) |
 | `post.py` | no | Prosperity Public License 3.0.0 (the repository's LICENSE) |
+| `video_assets.py` | no | Prosperity Public License 3.0.0 (the repository's LICENSE) |
+| `video/` (HyperFrames HTML) | no | Prosperity Public License 3.0.0 (the repository's LICENSE) |
 | `COPYING` | - | the GNU GPL version 2 text (verbatim, from Blender 5.1's license/spdx/GPL-2.0-or-later.txt; line endings LF) |
 | `LICENSE-NOTICE.md` | - | Prosperity Public License 3.0.0 |
 

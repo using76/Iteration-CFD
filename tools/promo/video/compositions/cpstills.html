@@ -1,0 +1,67 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>cpstills</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+        }
+        #cpstills-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #cpstills-wrap .still {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          will-change: transform, opacity;
+        }
+        #cpstills .still img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        #cpstills-s2,
+        #cpstills-s3 {
+          opacity: 0;
+        }
+      </style>
+      <div id="root" data-composition-id="cpstills" data-width="1920" data-height="1080">
+        <div id="cpstills-wrap">
+          <div class="still" id="cpstills-s1">
+            <img src="assets/stills/hero.png" alt="" />
+          </div>
+          <div class="still" id="cpstills-s2">
+            <img src="assets/stills/side.png" alt="" />
+          </div>
+          <div class="still" id="cpstills-s3">
+            <img src="assets/stills/top_rear.png" alt="" />
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#cpstills-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
+        tl.fromTo("#cpstills-s1", { scale: 1.0 }, { scale: 1.04, duration: 2.5, ease: "none" }, 0);
+        tl.to("#cpstills-s1", { opacity: 0, duration: 0.5, ease: "none" }, 2.25);
+        tl.fromTo("#cpstills-s2", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 2.25);
+        tl.fromTo("#cpstills-s2", { scale: 1.0 }, { scale: 1.04, duration: 2.5, ease: "none", immediateRender: false }, 2.5);
+        tl.to("#cpstills-s2", { opacity: 0, duration: 0.5, ease: "none" }, 4.75);
+        tl.fromTo("#cpstills-s3", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 4.75);
+        tl.fromTo("#cpstills-s3", { scale: 1.0 }, { scale: 1.04, duration: 2.5, ease: "none", immediateRender: false }, 5.0);
+        tl.to("#cpstills-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 7.1);
+        window.__timelines["cpstills"] = tl;
+      </script>
+    </template>
+  </body>
+</html>
