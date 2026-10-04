@@ -2712,6 +2712,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -2748,6 +2749,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -2781,6 +2783,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -3198,6 +3201,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -3623,6 +3627,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -4233,6 +4238,7 @@ pub(crate) mod tests {
                 }],
                 feature_angle_deg: 30.0,
                 max_level: 2,
+                boxes: Vec::new(),
             };
             refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
             let cast = castellate(

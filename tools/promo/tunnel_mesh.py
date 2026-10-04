@@ -27,10 +27,10 @@ flat-plate skin friction at x = L, cf = 0.0592 Re_L**(-0.2) - the lowest
 u_tau along the car - u_tau = U*sqrt(cf/2), y_p = yplus*nu/u_tau (first
 cell centre), t1 = 2*y_p (first layer thickness).
 
-The automesher has no box refinement (no such config key), so the wake and
-the wings are refined by per-patch distance bands instead - see
-`band_table`; the rear_wing 3.2 m band and the body 3.2 m band stand in for
-the wake box.
+The wake (to 1.5 L behind the car), a field envelope around the whole car
+and the two wings are refinement boxes (`box_table`, SPEC-LIT §92.16, the
+mesher's `refinement.boxes`); the distance bands are near-wall only
+(`band_table`).
 
 CC BY 4.0 rule: the source is the "F1 2026 concept" render model by
 Qvist_Designs (CC BY 4.0, via Sketchfab). The geometry and every file made
@@ -59,12 +59,13 @@ REQUIRED_PATCHES = ["inlet", "outlet", "side_ymin", "side_ymax", "top", "ground"
 LAYER_PATCHES = ["body", "front_wing", "rear_wing", "wheels", "floor"]
 BAND_PATCHES = ["body", "wheels", "floor", "front_wing", "rear_wing"]
 BANDS_FULL = {
-    "body": [(0.15, 5), (0.45, 4), (0.8, 3), (1.6, 2), (3.2, 1)],
-    "wheels": [(0.15, 5), (0.45, 4), (0.8, 3), (1.6, 2)],
+    "body": [(0.15, 5), (0.45, 4), (0.8, 3)],
+    "wheels": [(0.15, 5), (0.45, 4), (0.8, 3)],
     "floor": [(0.06, 6), (0.45, 4), (0.8, 3)],
-    "front_wing": [(0.04, 6), (0.15, 5), (0.8, 3)],
-    "rear_wing": [(0.04, 6), (0.15, 5), (0.8, 3), (3.2, 2)],
+    "front_wing": [(0.04, 6), (0.15, 5)],
+    "rear_wing": [(0.04, 6), (0.15, 5)],
 }
+BOX_ORDER = ["field", "wake", "front_wing", "rear_wing"]
 _NUMPAT = re.compile("[-+]?[0-9]*[.]?[0-9]+(?:[eE][-+]?[0-9]+)?")
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -99,17 +100,21 @@ def read_stl_bin(path):
     return _read_stl_raw(path)[1]
 
 
+def patch_bbox(geom_dir, name):
+    """(lo, hi) over one patch STL; a missing one refuses TM-GEOM by name."""
+    path = os.path.join(geom_dir, name + ".stl")
+    if not os.path.isfile(path):
+        refuse("TM-GEOM", path + ": missing patch STL " + name)
+    corners = read_stl_bin(path).reshape(-1, 3)
+    return corners.min(axis=0), corners.max(axis=0)
+
+
 def car_bbox(geom_dir):
     """(lo, hi) over the five car patch STLs; a missing one refuses TM-GEOM by name."""
     lo = None
     hi = None
     for name in ("body", "front_wing", "rear_wing", "wheels", "floor"):
-        path = os.path.join(geom_dir, name + ".stl")
-        if not os.path.isfile(path):
-            refuse("TM-GEOM", path + ": missing patch STL " + name)
-        corners = read_stl_bin(path).reshape(-1, 3)
-        mn = corners.min(axis=0)
-        mx = corners.max(axis=0)
+        mn, mx = patch_bbox(geom_dir, name)
         lo = mn if lo is None else np.minimum(lo, mn)
         hi = mx if hi is None else np.maximum(hi, mx)
     return lo, hi
@@ -189,7 +194,28 @@ def band_table(scale):
             for name in BAND_PATCHES]
 
 
-def build_config(geom_dir, out_dir, lo, hi, args):
+def box_table(lo, hi, wings):
+    """The four refinement boxes (SPEC-LIT §92.16) in BOX_ORDER, grown from
+    the car bbox `lo`/`hi` and the two wings' own bboxes: a level-1 field
+    envelope, a level-3 wake reaching 1.5 L behind the tail, and the two
+    level-4 wings. Levels are ABSOLUTE - the mesher caps them at
+    --max-level, and --band-scale does NOT scale boxes."""
+    L = hi[0] - lo[0]
+    f_lo, f_hi = wings["front_wing"]
+    r_lo, r_hi = wings["rear_wing"]
+    return [
+        {"min": [lo[0] - 0.5 * L, lo[1] - 0.5 * L, lo[2]],
+         "max": [hi[0] + 3.0 * L, hi[1] + 0.5 * L, hi[2] + 0.5 * L], "level": 1},
+        {"min": [lo[0] - 0.1 * L, lo[1] - 0.1 * L, lo[2]],
+         "max": [hi[0] + 1.5 * L, hi[1] + 0.1 * L, hi[2] + 0.2 * L], "level": 3},
+        {"min": [f_lo[0] - 0.04 * L, f_lo[1] - 0.04 * L, max(f_lo[2] - 0.04 * L, lo[2])],
+         "max": [f_hi[0] + 0.04 * L, f_hi[1] + 0.04 * L, f_hi[2] + 0.04 * L], "level": 4},
+        {"min": [r_lo[0] - 0.04 * L, r_lo[1] - 0.04 * L, max(r_lo[2] - 0.04 * L, lo[2])],
+         "max": [r_hi[0] + 0.1 * L, r_hi[1] + 0.04 * L, r_hi[2] + 0.04 * L], "level": 4},
+    ]
+
+
+def build_config(geom_dir, out_dir, lo, hi, args, wings):
     """The AutomeshConfig; `snap` is omitted so the mesher's defaults apply."""
     L = hi[0] - lo[0]
     extent = tunnel_extent(lo, hi, args.base)
@@ -199,7 +225,8 @@ def build_config(geom_dir, out_dir, lo, hi, args):
     return {
         "input": {"surfaces": surfaces},
         "domain": {"extent": extent, "base_size": args.base},
-        "refinement": {"levels": band_table(args.band_scale), "max_level": args.max_level},
+        "refinement": {"levels": band_table(args.band_scale), "max_level": args.max_level,
+                       "boxes": box_table(lo, hi, wings)},
         "castellation": {"keep_region": "seed",
                          "seed_point": [lo[0] - 1.5 * L, 0.0, 0.5 * extent[5]]},
         "layers": {"patches": list(LAYER_PATCHES), "n": args.layers,
@@ -335,7 +362,8 @@ def judge(run_rc, summary, check_rc, chk, reduced):
 
 
 def build_report(args, lo, hi, L, floor_gap_m, attribution, extent, slab, wf,
-                 reduced, cfg_path, run_rc, wall_s, summary, check_rc, chk, gate):
+                 reduced, cfg_path, run_rc, wall_s, summary, check_rc, chk, gate,
+                 boxes):
     """The tunnel_mesh.json report (R11)."""
     digest = hashlib.sha256()
     with open(args.binary, "rb") as fh:
@@ -370,6 +398,7 @@ def build_report(args, lo, hi, L, floor_gap_m, attribution, extent, slab, wf,
                    "growth": args.growth, "speed_kmh": args.speed_kmh,
                    "nu": args.nu, "yplus": args.yplus},
         "car": {"lo": lo, "hi": hi, "length_m": L, "floor_gap_m": floor_gap_m},
+        "boxes": [{"name": n, **box} for n, box in zip(BOX_ORDER, boxes)],
         "domain": {"extent": extent, "base_grid": base_grid(extent, args.base), "slab": slab},
         "wall_function": wf,
         "floor_gap_cells_design": floor_gap_m / (args.base / 2 ** min(args.max_level, 6)),
@@ -467,11 +496,11 @@ def _t3():
 
 
 def _t4():
-    want = {"body": [(0.15, 5), (0.45, 4), (0.8, 3), (1.6, 2), (3.2, 1)],
-            "wheels": [(0.15, 5), (0.45, 4), (0.8, 3), (1.6, 2)],
+    want = {"body": [(0.15, 5), (0.45, 4), (0.8, 3)],
+            "wheels": [(0.15, 5), (0.45, 4), (0.8, 3)],
             "floor": [(0.06, 6), (0.45, 4), (0.8, 3)],
-            "front_wing": [(0.04, 6), (0.15, 5), (0.8, 3)],
-            "rear_wing": [(0.04, 6), (0.15, 5), (0.8, 3), (3.2, 2)]}
+            "front_wing": [(0.04, 6), (0.15, 5)],
+            "rear_wing": [(0.04, 6), (0.15, 5)]}
     full = band_table(1.0)
     if [e["patch"] for e in full] != list(want):
         raise AssertionError("patch order " + repr([e["patch"] for e in full]))
@@ -480,8 +509,7 @@ def _t4():
         if got != want[e["patch"]]:
             raise AssertionError(e["patch"] + " bands " + repr(got))
     body = next(e for e in band_table(0.3) if e["patch"] == "body")
-    for b, (d, lvl) in zip(body["bands"],
-                           [(0.045, 5), (0.135, 4), (0.24, 3), (0.48, 2), (0.96, 1)]):
+    for b, (d, lvl) in zip(body["bands"], [(0.045, 5), (0.135, 4), (0.24, 3)]):
         if abs(b["distance"] - d) > 1e-12 or b["level"] != lvl:
             raise AssertionError("scaled band " + repr(b) + " want " + repr((d, lvl)))
 
@@ -489,7 +517,9 @@ def _t4():
 def _t5():
     args = argparse.Namespace(base=0.5, max_level=6, band_scale=1.0, layers=3,
                               growth=1.2, speed_kmh=250.0, nu=1.5e-5, yplus=50.0)
-    cfg = build_config("C:/g", "C:/o", _LO, _HI, args)
+    wings = {"front_wing": ([0.0002, -0.9, 0.0879], [0.9151, 0.9, 0.5538]),
+             "rear_wing": ([4.7974, -0.575, 0.3956], [5.3938, 0.575, 0.9072])}
+    cfg = build_config("C:/g", "C:/o", _LO, _HI, args, wings)
     if set(cfg) != {"input", "domain", "refinement", "castellation", "layers",
                     "quality", "output"}:
         raise AssertionError("top-level keys " + repr(sorted(cfg)))
@@ -512,10 +542,15 @@ def _t5():
                           "report_non_orth_deg": 60.0, "min_thickness_ratio": 0.05,
                           "max_cond": 10000.0}:
         raise AssertionError("quality " + repr(cfg["quality"]))
+    if set(cfg["refinement"]) != {"levels", "max_level", "boxes"}:
+        raise AssertionError("refinement keys " + repr(sorted(cfg["refinement"])))
     if [e["patch"] for e in cfg["refinement"]["levels"]] != ["body", "wheels", "floor",
                                                              "front_wing", "rear_wing"]:
         raise AssertionError("refinement order " +
                              repr([e["patch"] for e in cfg["refinement"]["levels"]]))
+    if [b["level"] for b in cfg["refinement"]["boxes"]] != [1, 3, 4, 4]:
+        raise AssertionError("box levels " +
+                             repr([b["level"] for b in cfg["refinement"]["boxes"]]))
 
 
 def _t6():
@@ -592,10 +627,42 @@ def _t8():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _t9():
+    wings = {"front_wing": ([0.0002, -0.9, 0.0879], [0.9151, 0.9, 0.5538]),
+             "rear_wing": ([4.7974, -0.575, 0.3956], [5.3938, 0.575, 0.9072])}
+    boxes = box_table(_LO, _HI, wings)
+    if [b["level"] for b in boxes] != [1, 3, 4, 4]:
+        raise AssertionError("box levels " + repr([b["level"] for b in boxes]))
+    want = [
+        ([-2.6965460184655967, -3.6376611988889636, 0.0],
+         [21.57449710437504, 3.6376611988889636, 3.792886237417406], 1),
+        ([-0.5391199631019845, -1.4802351435253513, 0.0],
+         [13.484149396761495, 1.4802351435253513, 2.174816695894697], 3),
+        ([-0.21554260553636123, -1.1157426055363613, 0.0],
+         [1.1308426055363612, 1.1157426055363613, 0.7695426055363612], 4),
+        ([4.5816573944636385, -0.7907426055363612, 0.17985739446363877],
+         [5.933156513840903, 0.7907426055363612, 1.1229426055363612], 4),
+    ]
+    for got, (mn, mx, lvl) in zip(boxes, want):
+        if got["level"] != lvl:
+            raise AssertionError("level " + repr(got["level"]) + " want " + repr(lvl))
+        for a in range(3):
+            if abs(got["min"][a] - mn[a]) > 1e-12:
+                raise AssertionError("min[" + str(a) + "] " + repr(got["min"][a])
+                                     + " want " + repr(mn[a]))
+            if abs(got["max"][a] - mx[a]) > 1e-12:
+                raise AssertionError("max[" + str(a) + "] " + repr(got["max"][a])
+                                     + " want " + repr(mx[a]))
+    L = _HI[0] - _LO[0]
+    if abs(boxes[1]["max"][0] - _HI[0] - 1.5 * L) > 1e-12:
+        raise AssertionError("wake reach " + repr(boxes[1]["max"][0] - _HI[0])
+                             + " want " + repr(1.5 * L))
+
+
 def selftest():
-    """T1-T8, no geometry and no mesher; temp files only under tempfile.mkdtemp()."""
+    """T1-T9, no geometry and no mesher; temp files only under tempfile.mkdtemp()."""
     tests = [("T1", _t1), ("T2", _t2), ("T3", _t3), ("T4", _t4),
-             ("T5", _t5), ("T6", _t6), ("T7", _t7), ("T8", _t8)]
+             ("T5", _t5), ("T6", _t6), ("T7", _t7), ("T8", _t8), ("T9", _t9)]
     npass = 0
     for name, fn in tests:
         try:
@@ -639,7 +706,7 @@ def main(argv=None):
         help="the release automesher binary")
     p.add_argument("--dry-run", action="store_true",
                    help="run the mesher -dryRun only, write dryrun.log, exit")
-    p.add_argument("--selftest", action="store_true", help="run T1-T8 and exit")
+    p.add_argument("--selftest", action="store_true", help="run T1-T9 and exit")
     p.add_argument("--timeout", type=float, default=0.0,
                    help="seconds for the mesher subprocess, 0 = none (default 0)")
     args = p.parse_args(argv)
@@ -667,7 +734,11 @@ def main(argv=None):
     extent = tunnel_extent(lo, hi, args.base)
     slab = slab_extent(extent, args.base)
     write_ground_stl(os.path.join(args.out, "ground.stl"), slab)
-    cfg = build_config(args.geom, args.out, lo, hi, args)
+    wings = {}
+    for name in ("front_wing", "rear_wing"):
+        w_lo, w_hi = patch_bbox(args.geom, name)
+        wings[name] = ([float(v) for v in w_lo], [float(v) for v in w_hi])
+    cfg = build_config(args.geom, args.out, lo, hi, args, wings)
     cfg_path = os.path.abspath(os.path.join(args.out, "f1_tunnel.json"))
     with open(cfg_path, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=1)
@@ -703,7 +774,8 @@ def main(argv=None):
 
     gate = judge(run_rc, summary, check_rc, chk, reduced)
     report = build_report(args, lo, hi, L, floor_gap_m, attribution, extent, slab, wf,
-                          reduced, cfg_path, run_rc, wall_s, summary, check_rc, chk, gate)
+                          reduced, cfg_path, run_rc, wall_s, summary, check_rc, chk, gate,
+                          box_table(lo, hi, wings))
     with open(os.path.join(args.out, "tunnel_mesh.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=1)
     lic = os.path.join(args.geom, "LICENSE.txt")

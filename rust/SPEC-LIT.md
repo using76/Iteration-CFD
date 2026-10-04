@@ -25457,7 +25457,8 @@ A leaf whose bounding sphere touches a named patch is refined to the deepest
 level that patch's bands ask for anywhere; it errs toward refining, never away
 from it, and it needs no triangle-box intersection test to say so. `l_feat`
 (92.2) and `l_region` are stages this unit does not build; when they arrive
-they join the same maximum, and (92.22) does not change.
+they join the same maximum, and (92.22) does not change. §92.16 builds
+`l_region` as the box term (92.67).
 
 **What must hold**
 
@@ -27406,6 +27407,76 @@ region, so no per-region thickness; `sections.py` has no `--region` - it
 takes one `<region>/polyMesh` directory per plot; and §92.15.5's
 planar-body limitation stands as stated - the fixture turns the attraction
 off, the mesher does not.
+
+### 92.16 Refinement boxes: the explicit region of stage 1
+
+§92.2 stage 1's third criterion, the explicit region, is the config's
+`refinement.boxes`: axis-aligned boxes, each asking a level of every leaf
+its interior overlaps:
+
+```
+b         = (lo_b, hi_b, L_b), one entry of refinement.boxes;
+            lo_b < hi_b on every axis, L_b >= 1
+[lo_c, hi_c] = leaf c's span on each axis, (92.20) at its two ends
+
+l_box(c)  = max { L_b : lo_c[a] < hi_b[a] and hi_c[a] > lo_b[a], a = x, y, z },
+            0 if no box overlaps c                                     (92.67)
+
+l(c)      = min( max( l_dist(c), l_surf(c), l_feat(c), l_box(c) ), max_level )
+```
+
+`l_box` is §92.2 stage 1's `l_region`, and it joins the same per-leaf
+maximum the bands (92.1) and the surface term (92.22) join, under the same
+cap: a box level above `max_level` is CAPPED, not refused, exactly as a
+band level is. The overlap is STRICT on every axis - `lo_c[a] < hi_b[a]`
+and `hi_c[a] > lo_b[a]` - so a leaf that only touches a box face, edge or
+corner is not refined, and a box whose planes sit on cell planes refines
+exactly the cells it holds, and no touching neighbour. Overlap, not
+centre-inside, is the rule, so a box smaller than a cell, or one straddling
+cell faces, still refines the cells it cuts: the same "errs toward
+refining" choice (92.22) makes about a band narrower than a leaf. A leaf
+asks `l_box` only when the config's `boxes` is not empty, and the span it
+measures with is the leaf's own two corners, evaluated as (92.20) is at the
+two ends of the leaf's span on the finest lattice - §92.9's arithmetic, the
+same call `leaf_centre_edges` makes for the centre.
+
+`validate` refuses a broken box before any meshing work, naming the field
+path, the index and the value, in this order per box: any of the six
+coordinates not finite -
+`refinement.boxes[{i}]: every coordinate must be finite, got min {min:?} max {max:?}`;
+per axis `x`, `y`, `z` with `!(max[a] > min[a])` -
+`refinement.boxes[{i}]: {a}-axis is empty or reversed (min = {lo}, max = {hi})`;
+`level == 0` -
+`refinement.boxes[{i}].level: 0 refines nothing - a box asks for level >= 1`;
+and no positive-volume overlap with `domain.extent` (a box that overlaps no
+cell refines nothing) -
+`refinement.boxes[{i}]: lies outside domain.extent - a box that overlaps no cell refines nothing`.
+
+An empty `boxes` is the default, is not serialised - a config without the
+key re-serialises without it, so the run summary's `config` block (§92.14)
+is the bytes it always was - and the closure it leaves behind is today's
+body line for line: the goldens and pins of §92.14 and §92.15 are the proof
+that a box-free config meshes byte-identically.
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| parse, round-trip, absent when empty | `refinement_boxes_parse_round_trip_and_stay_absent_when_empty` - one box `[1,1,1]-[2,2,2]` level 1 parses, the round-trip config carries one box through serde, `to_string(&minimal())` holds no `"boxes"`, an unknown key `lvl` is refused by name |
+| the four refusals | `a_box_that_breaks_a_rule_is_refused_by_name` - NaN in `min`; a zero-height y-axis (`min = 5, max = 5`); `level: 0`; a box past `xhi`; a box `[10,0,0]-[11,1,1]` touching the `xhi` face only; a second bad box named `refinement.boxes[1]`; and `level: 9` under `max_level: 2` validates, capped not refused |
+| overlap, not centres | `a_box_refines_the_cells_it_overlaps_not_their_centres` - box `[1.9,1.9,1.9]-[2.1,2.1,2.1]` level 1 straddles the x/y/z = 2 cell planes: `(8, 0)`, 120 leaves, every level-1 lower corner in `[1,3)^3` m |
+| a box on cell planes | `a_box_on_cell_planes_refines_exactly_the_cell_inside` - box `[1,1,1]-[2,2,2]` level 1: `(1, 0)`, 71 leaves |
+| the cap | `a_box_level_is_capped_like_a_band_level` - the same box at level 5 under `max_level` 1: `(1, 0)`, 71 leaves |
+| the balance | `a_two_level_box_is_balanced` - box `[0.25,0.25,0.25]-[0.75,0.75,0.75]` level 2: `(9, 3)` splits, 148 leaves = 60 level-0 + 24 level-1 + 64 level-2 |
+| box and band together | `a_box_and_a_band_take_the_maximum` - the band fixture of §92.2 plus box `[0,0,0]-[1,1,1]` level 1: `(9, 0)`, 575 leaves = the band's 568 + the box's 7 |
+| empty changes nothing | `empty_boxes_change_no_leaf` - the same band spec with and without `boxes: vec![]` gives the identical `(level, idx)` leaf list |
+| end to end | `a_refinement_box_adds_exactly_its_cells_end_to_end` - the cube config stopped after the octree: `n_leaves` = N0 + 7 with the box, the summary carries `config.refinement.boxes` with one entry, the box-free summary carries no `boxes` key |
+
+What this section does NOT claim: the boxes are AXIS-ALIGNED only - no
+rotated boxes, no cylinders, no per-box distance shells - and box
+refinement adds no snap, feature or layer behaviour: a box moves the
+octree's levels and nothing else, and every stage after stage 1 runs
+unchanged.
 
 ---
 
