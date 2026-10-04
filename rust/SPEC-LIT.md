@@ -2057,6 +2057,22 @@ binary files sometimes start with "solid" in the comment header, so on parse
 failure fall back to binary. Stored normals are untrustworthy — recompute from
 the winding `(v1-v0)×(v2-v0)` and ignore the stored one.
 
+The reader classifies in three steps, in this order, and never panics on
+non-UTF-8 header bytes. First, if the file is at least 84 bytes long and its
+length equals exactly 84 + 50·n, where n is the little-endian uint32 at bytes
+80..84 (computed in 64-bit arithmetic), the file is binary and is parsed as
+binary without ever trying ASCII: ASCII text has no byte below 0x09 in bytes
+80..84, so an ASCII file would need n ≥ 0x09090909 (about 1.5e8 triangles, a
+7.5 GB file) to collide, which makes the length test unambiguous for every
+real file. Second, otherwise, a file whose first five bytes are "solid"
+(case-insensitive) and whose text parses as ASCII is ASCII; the bytes are
+decoded lossily first, so a non-UTF-8 byte inside a solid name becomes U+FFFD
+in the patch name instead of an error. Third, everything else is binary, and
+the binary reader returns its usual length errors unchanged. A binary file
+whose header is "solid" followed by non-UTF-8 bytes therefore reads as
+binary; keyword matching compares the leading bytes, so no slice lands
+inside a character.
+
 **Patch identity** (docs/05 §4.2): one patch per `solid` name in an ASCII
 file; for a binary file (which has no name) the FILE STEM is the patch name;
 multiple `-stl` arguments merge into one Surface with distinct patches. The
