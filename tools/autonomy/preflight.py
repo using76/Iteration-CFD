@@ -104,7 +104,7 @@ class _ParseErr(Exception):
 
 # (C2) the mesher's config tree, cross-checked against the binary's -schema.
 # Each struct: (field, kind, required) in DECLARATION order - the order serde
-# checks missing fields in. 13 structs, 55 fields.
+# checks missing fields in. 14 structs, 59 fields.
 STRUCTS = {
  "AutomeshConfig": [("$schema", "opt_str", False), ("input", "InputSpec", True),
      ("domain", "DomainSpec", True), ("refinement", "RefinementSpec", False),
@@ -116,10 +116,11 @@ STRUCTS = {
  "DomainSpec": [("extent", "f64x6", True), ("base_size", "f64", True),
      ("grading", "f64x3", False)],
  "RefinementSpec": [("levels", "list:RefinementBand", False), ("feature_angle_deg", "f64", False),
-     ("max_level", "u32", False)],
+     ("max_level", "u32", False), ("boxes", "list:RefinementBox", False)],
  "RefinementBand": [("patch", "str", True), ("bands", "list:DistanceBand", True),
      ("feature_level", "u32", False)],
  "DistanceBand": [("distance", "f64", True), ("level", "u32", True)],
+ "RefinementBox": [("min", "f64x3", True), ("max", "f64x3", True), ("level", "u32", True)],
  "CastellationSpec": [("keep_region", "enum", False), ("seed_point", "opt_f64x3", False),
      ("min_faces", "usize", False), ("bodies", "list:BodySpec", False)],
  "BodySpec": [("name", "str", True), ("patches", "list:str", True)],
@@ -146,6 +147,7 @@ STRUCTS = {
 MESHER_DEFAULTS = {
  "/domain/grading": [1.0, 1.0, 1.0],
  "/refinement/levels": [], "/refinement/feature_angle_deg": 30.0, "/refinement/max_level": 2,
+ "/refinement/boxes": [],
  "/refinement/levels/*/feature_level": 0,
  "/castellation/keep_region": "largest", "/castellation/seed_point": None,
  "/castellation/min_faces": 4,
@@ -498,6 +500,27 @@ def _mirror_validate(cfg):
                     return ("castellation.bodies[%d].patches" % i,
                             "\"%s\" is also a patch of body \"%s\" - a patch belongs "
                             "to one body" % (p, other["name"]))
+    # (C4 stage 3) §92.16's refinement.boxes, in the mesher's own order per
+    # box: finite, then the three axes, then the level, then the domain.
+    e = _vget(cfg, "domain", "extent", None)
+    for i, b in enumerate(_vget(cfg, "refinement", "boxes", [])):
+        bmin, bmax = b["min"], b["max"]
+        if not all(math.isfinite(v) for v in list(bmin) + list(bmax)):
+            return ("refinement.boxes[%d]" % i,
+                    "every coordinate must be finite, got min %r max %r"
+                    % (bmin, bmax))
+        for a, nm in ((0, "x"), (1, "y"), (2, "z")):
+            if not bmax[a] > bmin[a]:
+                return ("refinement.boxes[%d]" % i,
+                        "%s-axis is empty or reversed (min = %r, max = %r)"
+                        % (nm, bmin[a], bmax[a]))
+        if b["level"] == 0:
+            return ("refinement.boxes[%d].level" % i,
+                    "0 refines nothing - a box asks for level >= 1")
+        if not all(bmin[a] < e[2 * a + 1] and bmax[a] > e[2 * a] for a in range(3)):
+            return ("refinement.boxes[%d]" % i,
+                    "lies outside domain.extent - a box that overlaps no cell "
+                    "refines nothing")
     return None
 
 
@@ -2643,7 +2666,8 @@ def _schema_kind_ok(s, kind):
 
 def _selftest_defaults(props, defs):
     """Group 1's 31 default comparisons (29 root default keys + 2 $defs fields)."""
-    skip = {"/domain/grading", "/refinement/levels/*/feature_level", "/castellation/bodies"}
+    skip = {"/domain/grading", "/refinement/levels/*/feature_level", "/castellation/bodies",
+            "/refinement/boxes"}
     got_keys = set()
     n = 0
     for sname in ("refinement", "castellation", "snap", "layers", "quality"):
@@ -2673,6 +2697,10 @@ def _selftest_defaults(props, defs):
         raise AssertionError("CastellationSpec.properties has no bodies")
     if "default" in defs["CastellationSpec"]["properties"]["bodies"]:
         raise AssertionError("CastellationSpec.bodies must carry no default")
+    if "boxes" not in defs["RefinementSpec"]["properties"]:
+        raise AssertionError("RefinementSpec.properties has no boxes")
+    if "default" in defs["RefinementSpec"]["properties"]["boxes"]:
+        raise AssertionError("RefinementSpec.boxes must carry no default")
     if n != 31:
         raise AssertionError("compared %d defaults, expected 31" % n)
     return n

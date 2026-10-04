@@ -1,0 +1,118 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>mesh</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #mesh-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #mesh-zoom {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          will-change: transform;
+        }
+        #mesh-v {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        #mesh-plate {
+          position: absolute;
+          top: 72px;
+          left: 96px;
+          background: rgba(14, 15, 18, 0.82);
+          border-radius: 14px;
+          padding: 28px 36px;
+        }
+        #mesh-count {
+          display: inline-block;
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 96px;
+          font-weight: 700;
+          color: #f1f3f5;
+          line-height: 1.05;
+          transform-origin: center center;
+        }
+        #mesh-label {
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 24px;
+          font-weight: 700;
+          color: #ff5a36;
+          letter-spacing: 0.12em;
+          margin-top: 10px;
+          opacity: 0;
+        }
+        #mesh-line {
+          font-size: 26px;
+          font-weight: 500;
+          color: #f1f3f5;
+          margin-top: 8px;
+          opacity: 0;
+        }
+      </style>
+      <div id="root" data-composition-id="mesh" data-width="1920" data-height="1080">
+        <div id="mesh-wrap">
+          <div id="mesh-zoom">
+            <video
+              id="mesh-v"
+              src="assets/mesh.mp4"
+              muted
+              playsinline
+              data-start="0"
+              data-duration="9"
+              data-track-index="0"
+            ></video>
+          </div>
+          <div id="mesh-plate">
+            <span id="mesh-count">0</span>
+            <div id="mesh-label">셀 · CELLS</div>
+            <div id="mesh-line">약 32분 만에 생성 · built in about 32 min</div>
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        var counter = document.getElementById("mesh-count");
+        var state = { value: 0 };
+        tl.fromTo("#mesh-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
+        tl.fromTo("#mesh-zoom", { scale: 1.0 }, { scale: 1.04, duration: 9, ease: "none" }, 0);
+        tl.to(state, {
+          value: 3235813,
+          duration: 3.0,
+          ease: "power2.out",
+          onUpdate: function () {
+            counter.textContent = Math.round(state.value).toLocaleString("en-US");
+          },
+        }, 0.6);
+        tl.fromTo("#mesh-count", { scale: 0.92 }, { scale: 1.0, duration: 3.0, ease: "power2.out" }, 0.6);
+        tl.fromTo("#mesh-label", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }, 0.5);
+        tl.fromTo("#mesh-line", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }, 0.9);
+        tl.to("#mesh-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 8.6);
+        window.__timelines["mesh"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

@@ -262,12 +262,95 @@ impl Octree {
     /// §92.2 stage 1's level-driven refinement with the criterion LEFT OUT (a
     /// later unit supplies the closure): repeat until nothing changes - for
     /// every present leaf whose `level < min(target(leaf), max_level)`, split
-    /// it. `target` is asked per PRESENT leaf, so a criterion on a whole base
-    /// cell must key its answer through `ancestor(0)`; a split leaf's children
-    /// have their own keys. The leaves of a pass are collected and sorted
-    /// before mutating, so the pass is order-independent. Returns the number
-    /// of splits.
-    pub fn refine(&mut self, target: impl Fn(LeafKey) -> u32) -> usize {
+    /// it. `target` MUST be a pure function of its key (every caller's is):
+    /// a leaf's answer never changes, so the first pass asks it for every
+    /// present leaf and every later pass asks it only for the leaves the
+    /// previous pass created - the same tree, without re-asking the leaves
+    /// that already said no. A pass of at least [`Octree::PAR_MIN`] keys
+    /// evaluates `target` in parallel over std threads, in contiguous chunks
+    /// joined in order. Returns the number of splits.
+    pub fn refine(&mut self, target: impl Fn(LeafKey) -> u32 + Sync) -> usize {
+        let threads =
+            std::thread::available_parallelism().map_or(1, |n| n.get()).min(32);
+        self.refine_threads(target, threads)
+    }
+
+    /// The longest a pass may sit under [`Octree::PAR_MIN`] keys before the
+    /// evaluation stays serial anyway - it never splits differently, only
+    /// slower.
+    const PAR_MIN: usize = 4096;
+
+    /// [`Octree::refine`] with the thread count named - the test's handle on
+    /// the parallel path.
+    pub(crate) fn refine_threads(
+        &mut self,
+        target: impl Fn(LeafKey) -> u32 + Sync,
+        threads: usize,
+    ) -> usize {
+        let mut splits = 0usize;
+        let mut cand: Vec<LeafKey> = self.sorted();
+        loop {
+            let mut want: Vec<u32> = Vec::with_capacity(cand.len());
+            if cand.len() >= Self::PAR_MIN && threads > 1 {
+                let chunk = cand.len().div_ceil(threads);
+                // Shared references only inside the scope: `&target` and the
+                // cap are `Send` because the criterion is `Sync`, the chunks
+                // never overlap.
+                let max_level = self.max_level;
+                let ask = &target;
+                let mut parts: Vec<Vec<u32>> = Vec::new();
+                std::thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    for c in cand.chunks(chunk) {
+                        handles.push(scope.spawn(move || {
+                            c.iter().map(|k| ask(*k).min(max_level)).collect::<Vec<u32>>()
+                        }));
+                    }
+                    for h in handles {
+                        parts.push(h.join().expect("a refine target thread panicked"));
+                    }
+                });
+                for part in parts {
+                    want.extend_from_slice(&part);
+                }
+            } else {
+                want.extend(cand.iter().map(|k| target(*k).min(self.max_level)));
+            }
+            let mut next: Vec<LeafKey> = Vec::new();
+            let mut split_any = false;
+            for (i, k) in cand.iter().enumerate() {
+                if k.level < want[i] {
+                    // Every key here is a present leaf below the cap, so the
+                    // split cannot fail. Returning on a failure rather than
+                    // retrying is what keeps a future bug a wrong answer
+                    // instead of a mesher that spins on the same pass forever.
+                    if self.split(*k).is_err() {
+                        return splits;
+                    }
+                    splits += 1;
+                    split_any = true;
+                    for a in 0..2u32 {
+                        for b in 0..2u32 {
+                            for c in 0..2u32 {
+                                next.push(k.child(a, b, c));
+                            }
+                        }
+                    }
+                }
+            }
+            if !split_any {
+                return splits;
+            }
+            next.sort_by_key(|k| k.pack());
+            cand = next;
+        }
+    }
+
+    /// Today's all-leaves-every-pass body, the reference
+    /// `refine_in_parallel_matches_the_all_leaves_reference` holds the
+    /// parallel walk to.
+    #[cfg(test)]
+    fn refine_reference(&mut self, target: impl Fn(LeafKey) -> u32) -> usize {
         let mut splits = 0usize;
         loop {
             let mut pass: Vec<LeafKey> = self
@@ -279,10 +362,6 @@ impl Octree {
                 return splits;
             }
             for k in pass.drain(..) {
-                // Every key here is a present leaf below the cap, so the split
-                // cannot fail. Returning on a failure rather than retrying is
-                // what keeps a future bug a wrong answer instead of a mesher
-                // that spins on the same pass forever.
                 if self.split(k).is_err() {
                     return splits;
                 }
@@ -1193,7 +1272,7 @@ mod tests {
     //  The surface-driven criterion - (92.1)/(92.22)
     // ======================================================================
 
-    use crate::automesher::{DistanceBand, RefinementBand, RefinementSpec};
+    use crate::automesher::{DistanceBand, RefinementBand, RefinementBox, RefinementSpec};
     use crate::surface::SoupTri;
 
     /// The 12 outward-wound triangles of an axis-aligned box, all on patch 0.
@@ -1284,6 +1363,7 @@ mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
+            boxes: Vec::new(),
         }
     }
 
@@ -1392,6 +1472,46 @@ mod tests {
         }
         assert_eq!(tree.max_level_jump(), 1);
         tree.check_partition().expect("partition");
+    }
+
+    /// §92.16: a box and a band both ask, the leaf takes the MAXIMUM. The
+    /// box's cell is a band would-refine-nothing cell, so the split it adds
+    /// is the box's alone.
+    #[test]
+    fn a_box_and_a_band_take_the_maximum() {
+        let (bg, surf) = block_and_surface(box_soup([3.5; 3], [4.5; 3]), "box");
+        let mut spec = band_spec("box", 0.9, 1);
+        spec.boxes = vec![RefinementBox { min: [0.0; 3], max: [1.0; 3], level: 1 }];
+        let mut tree = Octree::uniform(bg.base_n(), 1).expect("tree");
+        let (splits, bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        // The band's 8 hits (the fixture above) plus the box's own cell at
+        // the domain corner, 2.5 m from the surface and past every band.
+        assert_eq!((splits, bal), (9, 0));
+        assert_eq!(tree.len(), 512 - 9 + 9 * 8);
+        tree.check_partition().expect("partition");
+    }
+
+    /// An empty `boxes` list asks nothing: the leaves are today's, level for
+    /// level and id for id.
+    #[test]
+    fn empty_boxes_change_no_leaf() {
+        let (bg, surf) = block_and_surface(box_soup([3.5; 3], [4.5; 3]), "box");
+        let without = band_spec("box", 0.9, 1);
+        let mut with = band_spec("box", 0.9, 1);
+        with.boxes = vec![];
+        assert_eq!(with, without, "an empty boxes list is the default spec");
+        let mut tree_with = Octree::uniform(bg.base_n(), 1).expect("tree");
+        refine_to_surface(&mut tree_with, &bg, &surf, &with).expect("refine");
+        let mut tree_without = Octree::uniform(bg.base_n(), 1).expect("tree");
+        refine_to_surface(&mut tree_without, &bg, &surf, &without).expect("refine");
+        let with_leaves: Vec<_> =
+            tree_with.leaves().into_iter().map(|lf| (lf.level, lf.idx)).collect();
+        let without_leaves: Vec<_> =
+            tree_without.leaves().into_iter().map(|lf| (lf.level, lf.idx)).collect();
+        assert_eq!(with_leaves.len(), without_leaves.len(), "the same number of leaves");
+        for (w, n) in with_leaves.iter().zip(without_leaves.iter()) {
+            assert_eq!(w, n, "boxes: vec![] changed the leaf set");
+        }
     }
 
     #[test]
@@ -1546,6 +1666,7 @@ mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
+            boxes: Vec::new(),
         };
         let mut tree = Octree::uniform(bg.base_n(), 2).expect("tree");
         let (splits, _bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
@@ -1667,8 +1788,14 @@ mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
+            boxes: Vec::new(),
         };
-        let none = RefinementSpec { levels: vec![], feature_angle_deg: 30.0, max_level: 2 };
+        let none = RefinementSpec {
+            levels: vec![],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+            boxes: Vec::new(),
+        };
         let mut with_zero = Octree::uniform(bg.base_n(), 2).expect("tree");
         refine_to_surface(&mut with_zero, &bg, &surf, &base).expect("refine");
         let mut without = Octree::uniform(bg.base_n(), 2).expect("tree");
@@ -1681,6 +1808,124 @@ mod tests {
         for (z, n) in zero_leaves.iter().zip(none_leaves.iter()) {
             assert_eq!(z, n, "feature_level: 0 changed the leaf set");
         }
+    }
+
+    // ======================================================================
+    //  §92.16 (92.67): the box term
+    // ======================================================================
+
+    /// T3's fixture: the [0,4]^3 block, 1 m cells, one small cube on patch
+    /// "cube", and a spec whose `levels` is EMPTY - only the boxes refine.
+    fn box_fixture() -> (Background, Surface) {
+        let bg = Background::from_domain(&crate::automesher::DomainSpec {
+            extent: [0.0, 4.0, 0.0, 4.0, 0.0, 4.0],
+            base_size: 1.0,
+            grading: [1.0; 3],
+        })
+        .expect("background");
+        let surf = Surface::from_soup(box_soup([3.2; 3], [3.8; 3]), vec!["cube".to_string()])
+            .expect("surface");
+        (bg, surf)
+    }
+
+    /// An empty `levels` with boxes set must work: no band index entries,
+    /// only (92.67).
+    #[test]
+    fn a_box_refines_the_cells_it_overlaps_not_their_centres() {
+        let (bg, surf) = box_fixture();
+        let spec = RefinementSpec {
+            levels: vec![],
+            feature_angle_deg: 30.0,
+            max_level: 1,
+            boxes: vec![RefinementBox { min: [1.9; 3], max: [2.1; 3], level: 1 }],
+        };
+        let mut tree = Octree::uniform(bg.base_n(), 1).expect("tree");
+        let (splits, bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        // The box straddles the x/y/z = 2 cell planes: the eight base cells
+        // around that corner overlap it with positive volume, no centre does.
+        assert_eq!((splits, bal), (8, 0), "one split per overlapped cell");
+        assert_eq!(tree.len(), 64 - 8 + 8 * 8);
+        let m_per_q = 1.0 / (1u32 << 1) as f64;
+        for leaf in tree.leaves() {
+            if leaf.level == 1 {
+                let q = leaf.lower_corner(1);
+                let lo = [q[0] as f64 * m_per_q, q[1] as f64 * m_per_q, q[2] as f64 * m_per_q];
+                assert!(lo.iter().all(|&v| (1.0..3.0).contains(&v)),
+                    "leaf {:?} lower corner {:?} m outside [1,3)^3", leaf, lo);
+            } else {
+                assert_eq!(leaf.level, 0, "leaf {:?} at an unexpected level", leaf);
+            }
+        }
+        assert_eq!(tree.max_level_jump(), 1);
+        tree.check_partition().expect("partition");
+    }
+
+    /// A box whose planes sit ON cell planes refines exactly the cell it
+    /// holds: the strict overlap counts no touching neighbour.
+    #[test]
+    fn a_box_on_cell_planes_refines_exactly_the_cell_inside() {
+        let (bg, surf) = box_fixture();
+        let spec = RefinementSpec {
+            levels: vec![],
+            feature_angle_deg: 30.0,
+            max_level: 1,
+            boxes: vec![RefinementBox { min: [1.0; 3], max: [2.0; 3], level: 1 }],
+        };
+        let mut tree = Octree::uniform(bg.base_n(), 1).expect("tree");
+        let (splits, bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        assert_eq!((splits, bal), (1, 0), "the one cell the box holds");
+        assert_eq!(tree.len(), 64 - 1 + 8);
+        tree.check_partition().expect("partition");
+    }
+
+    /// A level past `max_level` is capped, never refused - the same rule a
+    /// band level lives under (92.1's min(..., max_level)).
+    #[test]
+    fn a_box_level_is_capped_like_a_band_level() {
+        let (bg, surf) = box_fixture();
+        let spec = RefinementSpec {
+            levels: vec![],
+            feature_angle_deg: 30.0,
+            max_level: 1,
+            boxes: vec![RefinementBox { min: [1.0; 3], max: [2.0; 3], level: 5 }],
+        };
+        let mut tree = Octree::uniform(bg.base_n(), 1).expect("tree");
+        let (splits, bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        assert_eq!((splits, bal), (1, 0));
+        assert_eq!(tree.len(), 64 - 1 + 8);
+        tree.check_partition().expect("partition");
+    }
+
+    /// A two-level box: the cell it sits in refines to level 2, and the 2:1
+    /// balance splits exactly the three in-domain face neighbours.
+    #[test]
+    fn a_two_level_box_is_balanced() {
+        let (bg, surf) = box_fixture();
+        let spec = RefinementSpec {
+            levels: vec![],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+            boxes: vec![RefinementBox { min: [0.25; 3], max: [0.75; 3], level: 2 }],
+        };
+        let mut tree = Octree::uniform(bg.base_n(), 2).expect("tree");
+        let (splits, bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        // 1 split to level 1 + 8 splits of the level-1 children = 9; then the
+        // balance: cell (0,0,0)'s +x/+y/+z neighbours only (the - faces are
+        // the domain boundary), 3 cells, 8 leaves each.
+        assert_eq!((splits, bal), (9, 3));
+        assert_eq!(tree.len(), 148);
+        let (mut l0, mut l1, mut l2) = (0usize, 0usize, 0usize);
+        for leaf in tree.leaves() {
+            match leaf.level {
+                0 => l0 += 1,
+                1 => l1 += 1,
+                2 => l2 += 1,
+                other => panic!("leaf at level {other}"),
+            }
+        }
+        assert_eq!((l0, l1, l2), (60, 24, 64));
+        assert_eq!(tree.max_level_jump(), 1);
+        tree.check_partition().expect("partition");
     }
 
     /// A smooth sphere asks for nothing: its largest fold is 22.08 degrees,
@@ -1706,10 +1951,139 @@ mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
+            boxes: Vec::new(),
         };
         let mut tree = Octree::uniform(bg.base_n(), 2).expect("tree");
         let (splits, bal) = refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         assert_eq!((splits, bal, tree.len()), (0, 0, 64), "not one cell refined");
+    }
+
+    /// The parallel walk asks `target` only on the leaves the previous pass
+    /// created; the reference re-asks every leaf every pass. The same tree
+    /// either way - the criterion here is a pure function of the key, which
+    /// is exactly what makes asking only the new leaves the same as asking
+    /// all of them.
+    #[test]
+    fn refine_in_parallel_matches_the_all_leaves_reference() {
+        let sphere_c = [128.3f64, 127.9, 128.1];
+        let target = |k: LeafKey| -> u32 {
+            let lo = k.lower_corner(5);
+            let s = k.size_on_finest(5);
+            let c = [
+                lo[0] as f64 + 0.5 * s as f64,
+                lo[1] as f64 + 0.5 * s as f64,
+                lo[2] as f64 + 0.5 * s as f64,
+            ];
+            let d = ((c[0] - sphere_c[0]).powi(2)
+                + (c[1] - sphere_c[1]).powi(2)
+                + (c[2] - sphere_c[2]).powi(2))
+                .sqrt();
+            // Within one leaf size of the sphere of radius 70, in lattice
+            // units.
+            if (d - 70.0).abs() <= s as f64 {
+                5
+            } else {
+                0
+            }
+        };
+        let mut reference = Octree::uniform([8, 8, 8], 5).expect("uniform");
+        let ref_splits = reference.refine_reference(target);
+        let ref_leaves = reference.leaves();
+        assert!(
+            ref_leaves.len() as f64 > 4096.0 * 8.0 / 7.0,
+            "{} leaves - no pass reached the 4096-key parallel threshold",
+            ref_leaves.len()
+        );
+        for threads in [1usize, 3, 8] {
+            let mut t = Octree::uniform([8, 8, 8], 5).expect("uniform");
+            let splits = t.refine_threads(target, threads);
+            assert_eq!(splits, ref_splits, "threads {threads}: split count");
+            assert_eq!(t.leaves(), ref_leaves, "threads {threads}: leaf set");
+        }
+    }
+
+    /// The bounded `level_at` against the unbounded reference: over a cloud
+    /// of centres and over every leaf of a tree the spec actually refined.
+    /// The box patch's feature_level 4 and the ball's wide 1.5 band are what
+    /// the bounds have to preserve.
+    #[test]
+    fn bounded_level_at_matches_the_unbounded_reference() {
+        let mut soup = box_soup([1.3, 1.3, 1.3], [2.3, 2.3, 2.3]);
+        soup.extend(sphere_soup([5.0, 5.0, 5.0], 1.2).into_iter().map(|(_, t)| (1u32, t)));
+        let surf = Surface::from_soup(soup, vec!["box".to_string(), "ball".to_string()])
+            .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![
+                RefinementBand {
+                    patch: "box".to_string(),
+                    bands: vec![
+                        DistanceBand { distance: 0.3, level: 3 },
+                        DistanceBand { distance: 0.9, level: 2 },
+                    ],
+                    feature_level: 4,
+                },
+                RefinementBand {
+                    patch: "ball".to_string(),
+                    bands: vec![
+                        DistanceBand { distance: 0.2, level: 4 },
+                        DistanceBand { distance: 1.5, level: 1 },
+                    ],
+                    feature_level: 0,
+                },
+            ],
+            feature_angle_deg: 30.0,
+            max_level: 4,
+            boxes: Vec::new(),
+        };
+        let parts = band_surfaces(&surf, &spec).expect("band surfaces");
+        let fs = extract(&surf, spec.feature_angle_deg).expect("features");
+        let idx = BandIndex::new(&parts, &surf, &fs, &spec, 1.0).expect("band index");
+
+        let mut s: u64 = 0x853C49E6748FEA9B;
+        let next = |s: &mut u64| -> f64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((*s >> 11) as f64) / (1u64 << 53) as f64
+        };
+        let mut centres = Vec::with_capacity(5000);
+        for _ in 0..5000 {
+            centres.push(crate::Vec3::new(
+                (10.0 * next(&mut s) - 1.0) as crate::Scalar,
+                (10.0 * next(&mut s) - 1.0) as crate::Scalar,
+                (10.0 * next(&mut s) - 1.0) as crate::Scalar,
+            ));
+        }
+        for c in &centres {
+            for (hd, h) in [(0.05, 0.1), (0.43, 0.5), (0.87, 1.0)] {
+                assert_eq!(
+                    idx.level_at(*c, hd, h),
+                    idx.level_at_reference(*c, hd, h),
+                    "centre ({},{},{}) hd={hd} h={h}",
+                    c.x,
+                    c.y,
+                    c.z
+                );
+            }
+        }
+
+        let bg = Background::from_domain(&crate::automesher::DomainSpec {
+            extent: [0.0, 8.0, 0.0, 8.0, 0.0, 8.0],
+            base_size: 1.0,
+            grading: [1.0; 3],
+        })
+        .expect("background");
+        let mut tree = Octree::uniform(bg.base_n(), 4).expect("tree");
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let l = tree.max_level();
+        for k in tree.leaves() {
+            let (c, e) = leaf_centre_edges(&bg, l, k);
+            let hd = 0.5 * crate::Vec3::new(e[0], e[1], e[2]).mag();
+            let h = e[0].max(e[1]).max(e[2]);
+            assert_eq!(
+                idx.level_at(c, hd, h),
+                idx.level_at_reference(c, hd, h),
+                "leaf {k:?}"
+            );
+        }
     }
 }
 
@@ -1836,7 +2210,7 @@ impl<'s> BandIndex<'s> {
                 None
             };
             indexed.push(BandPart {
-                tri: TriIndex::new(part, cell_hint)?,
+                tri: TriIndex::with_bvh(part, cell_hint)?,
                 bands: band.bands.clone(),
                 feat_level: band.feature_level,
                 feat,
@@ -1850,6 +2224,15 @@ impl<'s> BandIndex<'s> {
     /// longest edge - the cell size (92.37) measures with. Returns the level
     /// the bands and the feature edges ask for, UNCAPPED (`Octree::refine`
     /// applies `max_level`).
+    ///
+    /// Both distance queries are BOUNDED, which is what makes a pass over a
+    /// 1e5-leaf tree affordable: a patch is asked only within the larger of
+    /// `half_diag` and its own farthest band, and its feature edges only
+    /// within `h`. A distance past the bound changes nothing - every band it
+    /// could fall inside and the touch test all sit at or under the bound -
+    /// so the level answered is the unbounded query's, and
+    /// `bounded_level_at_matches_the_unbounded_reference` holds the two
+    /// together.
     pub fn level_at(
         &self,
         centre: crate::Vec3,
@@ -1858,26 +2241,69 @@ impl<'s> BandIndex<'s> {
     ) -> u32 {
         let mut asked = 0u32;
         for part in &self.parts {
+            let mut r = half_diag;
+            for band in &part.bands {
+                r = r.max(band.distance);
+            }
+            let mut l = 0u32;
+            if let Some(d) = part.tri.nearest_distance_within(centre, r) {
+                // (92.1): the deepest band whose distance the cell centre
+                // falls inside.
+                for band in &part.bands {
+                    if d <= band.distance {
+                        l = l.max(band.level);
+                    }
+                }
+                // (92.22): a leaf whose bounding sphere touches the patch is
+                // refined to the deepest level that patch's bands ask for
+                // anywhere - it errs toward refining, never away from it.
+                if d <= half_diag {
+                    for band in &part.bands {
+                        l = l.max(band.level);
+                    }
+                }
+            }
+            // §92.12 (92.37): a leaf within its own longest edge of one of
+            // the patch's feature edges asks that patch's `feature_level`,
+            // uncapped exactly like the band levels.
+            if part.feat_level > 0 {
+                if let Some((_, df, _)) =
+                    part.feat.as_ref().and_then(|f| f.closest_edge_within(centre, h))
+                {
+                    if df <= h {
+                        l = l.max(part.feat_level);
+                    }
+                }
+            }
+            asked = asked.max(l);
+        }
+        asked
+    }
+
+    /// The unbounded body [`bounded_level_at_matches_the_unbounded_reference`]
+    /// holds the bounded `level_at` to: full `nearest_triangle` and
+    /// `closest_edge_point` at every leaf.
+    #[cfg(test)]
+    fn level_at_reference(
+        &self,
+        centre: crate::Vec3,
+        half_diag: crate::Scalar,
+        h: crate::Scalar,
+    ) -> u32 {
+        let mut asked = 0u32;
+        for part in &self.parts {
             let (_, d) = part.tri.nearest_triangle(centre);
-            // (92.1): the deepest band whose distance the cell centre falls
-            // inside.
             let mut l = 0u32;
             for band in &part.bands {
                 if d <= band.distance as Scalar {
                     l = l.max(band.level);
                 }
             }
-            // (92.22): a leaf whose bounding sphere touches the patch is
-            // refined to the deepest level that patch's bands ask for
-            // anywhere - it errs toward refining, never away from it.
             if d <= half_diag {
                 for band in &part.bands {
                     l = l.max(band.level);
                 }
             }
-            // §92.12 (92.37): a leaf within its own longest edge of one of
-            // the patch's feature edges asks that patch's `feature_level`,
-            // uncapped exactly like the band levels.
             if part.feat_level > 0 {
                 if let Some((_, df, _)) =
                     part.feat.as_ref().and_then(|f| f.closest_edge_point(centre))
@@ -1910,6 +2336,48 @@ pub(crate) fn leaf_centre_edges(
     (c, [x[1] - x[0], y[1] - y[0], z[1] - z[0]])
 }
 
+/// A leaf's lower and upper corner in metres, per axis - the same (92.20)
+/// `bg.coord` evaluation as [`leaf_centre_edges`], without the centre. The
+/// two arrays (92.67) measures the box overlap with.
+pub(crate) fn leaf_bounds(
+    bg: &Background,
+    l: u32,
+    k: LeafKey,
+) -> ([crate::Scalar; 3], [crate::Scalar; 3]) {
+    let lo = k.lower_corner(l);
+    let s = k.size_on_finest(l);
+    let x = [bg.coord(0, lo[0], l), bg.coord(0, lo[0] + s, l)];
+    let y = [bg.coord(1, lo[1], l), bg.coord(1, lo[1] + s, l)];
+    let z = [bg.coord(2, lo[2], l), bg.coord(2, lo[2] + s, l)];
+    ([x[0], y[0], z[0]], [x[1], y[1], z[1]])
+}
+
+/// (92.67): the deepest `level` over the boxes whose interior overlaps the
+/// leaf span `[lo, hi]` with positive volume; 0 if none. UNCAPPED -
+/// [`Octree::refine`] applies `max_level`, exactly as it does a band level.
+/// The overlap is STRICT on every axis, so a leaf that only touches a box
+/// face, edge or corner is not overlapped - and a box whose planes sit on
+/// cell planes refines exactly the cells inside it.
+pub fn box_level(
+    boxes: &[super::RefinementBox],
+    lo: [crate::Scalar; 3],
+    hi: [crate::Scalar; 3],
+) -> u32 {
+    let mut asked = 0u32;
+    for b in boxes {
+        if lo[0] < b.max[0] as crate::Scalar
+            && hi[0] > b.min[0] as crate::Scalar
+            && lo[1] < b.max[1] as crate::Scalar
+            && hi[1] > b.min[1] as crate::Scalar
+            && lo[2] < b.max[2] as crate::Scalar
+            && hi[2] > b.min[2] as crate::Scalar
+        {
+            asked = asked.max(b.level);
+        }
+    }
+    asked
+}
+
 /// A leaf's centre and half its diagonal, in metres: (92.20) evaluated at the
 /// two ends of the leaf's own span on the finest lattice - `l` is the TREE's
 /// `max_level`, `bg.coord`'s third argument. These are the two numbers
@@ -1926,10 +2394,11 @@ fn leaf_centre_half_diag(
 }
 
 /// §92.2 stage 1: refine `tree` until every leaf carries the level
-/// (92.1)/(92.22)/§92.12's (92.37) ask of it, then 2:1 balance it (92.21).
-/// Returns `(refine_splits, balance_splits)`. The cap is the tree's own
-/// `max_level` - [`Octree::refine`] applies it, and (92.21)'s splits sit
-/// below the level that triggered them, so balance never passes it (§74.2).
+/// (92.1)/(92.22)/§92.12's (92.37)/§92.16's (92.67) ask of it, then 2:1
+/// balance it (92.21). Returns `(refine_splits, balance_splits)`. The cap is
+/// the tree's own `max_level` - [`Octree::refine`] applies it, and (92.21)'s
+/// splits sit below the level that triggered them, so balance never passes
+/// it (§74.2).
 pub fn refine_to_surface(
     tree: &mut Octree,
     bg: &Background,
@@ -1974,7 +2443,14 @@ pub fn refine_to_surface(
         // own longest edge - both straight off the same three edge lengths.
         let hd = 0.5 * crate::Vec3::new(e[0], e[1], e[2]).mag();
         let h = e[0].max(e[1]).max(e[2]);
-        idx.level_at(c, hd, h)
+        // §92.16 (92.67): the box term joins the same maximum, and the leaf
+        // bounds are only evaluated when a box asks for them - a config
+        // without boxes keeps today's body, line for line.
+        if spec.boxes.is_empty() {
+            return idx.level_at(c, hd, h);
+        }
+        let (lo, hi) = leaf_bounds(bg, l, k);
+        idx.level_at(c, hd, h).max(box_level(&spec.boxes, lo, hi))
     });
     let bal = tree.balance_2to1();
     tree.check_partition()?;

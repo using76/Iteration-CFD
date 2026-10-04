@@ -969,7 +969,7 @@ fn shrink_on(
         let (lo, hi) = surf.bbox;
         (hi - lo).mag() / 100.0
     };
-    let idx = TriIndex::new(surf, hint)?;
+    let idx = TriIndex::with_bvh(surf, hint)?;
     // The three graphs the ladder needs, built once: the whole point graph,
     // the boundary flag, and each cell's points.
     let mut all_nbrs: Vec<Vec<u32>> = vec![Vec::new(); n_points];
@@ -2712,6 +2712,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -2748,6 +2749,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -2781,6 +2783,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -3202,6 +3205,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 1,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -3631,6 +3635,7 @@ pub(crate) mod tests {
             }],
             feature_angle_deg: 30.0,
             max_level: 2,
+            boxes: Vec::new(),
         };
         refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
         let cast = castellate(
@@ -4246,6 +4251,7 @@ pub(crate) mod tests {
                 }],
                 feature_angle_deg: 30.0,
                 max_level: 2,
+                boxes: Vec::new(),
             };
             refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
             let cast = castellate(

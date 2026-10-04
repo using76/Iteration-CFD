@@ -1041,6 +1041,7 @@ mod tests {
                 }],
                 feature_angle_deg: 30.0,
                 max_level: 1,
+                boxes: Vec::new(),
             },
             castellation: CastellationSpec::default(),
             snap: SnapSpec::default(),
@@ -1112,6 +1113,7 @@ mod tests {
                 }],
                 feature_angle_deg: 30.0,
                 max_level: 1,
+                boxes: Vec::new(),
             },
             castellation: CastellationSpec {
                 bodies: vec![BodySpec {
@@ -1235,6 +1237,46 @@ mod tests {
             "{lines:?}"
         );
         assert!(!lines.iter().any(|l| l.starts_with("--- castellate:")));
+    }
+
+    /// §92.16 end to end: the box [0,1]^3 refines exactly the one base cell
+    /// it holds (its 7 siblings), the summary carries the box, and a config
+    /// without boxes serialises no `boxes` key into the summary at all.
+    #[test]
+    fn a_refinement_box_adds_exactly_its_cells_end_to_end() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out0, _) = run_recording(&cfg, &surf, Some(Stage::Octree));
+        let n0 = out0.stages[0].counts.get("n_leaves").unwrap().as_u64().unwrap();
+
+        let mut cfgb = cube_config();
+        cfgb.refinement.boxes = vec![crate::automesher::RefinementBox {
+            min: [0.0; 3],
+            max: [1.0; 3],
+            level: 1,
+        }];
+        let (outb, _) = run_recording(&cfgb, &surf, Some(Stage::Octree));
+        let nb = outb.stages[0].counts.get("n_leaves").unwrap().as_u64().unwrap();
+        assert_eq!(nb, n0 + 7, "the box adds exactly its own cell's 7 siblings");
+
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let sb = summary_json(&cfgb, "cube.automesher.json", &surf, &outb, &ident);
+        let boxes =
+            sb["config"]["refinement"]["boxes"].as_array().expect("boxes in the summary");
+        assert_eq!(boxes.len(), 1, "{}", sb["config"]["refinement"]);
+        assert_eq!(boxes[0]["level"], serde_json::json!(1));
+        assert_eq!(boxes[0]["min"], serde_json::json!([0.0, 0.0, 0.0]));
+        let s0 = summary_json(&cfg, "cube.automesher.json", &surf, &out0, &ident);
+        assert!(
+            s0["config"]["refinement"].get("boxes").is_none(),
+            "a config without boxes must not carry a boxes key: {}",
+            s0["config"]["refinement"]
+        );
     }
 
     #[test]

@@ -125,6 +125,10 @@ Both carry comments on every block. Every key of
 | `refinement.levels[].feature_level` | integer | `0` | A leaf within its own longest edge of one of this patch's feature edges (eq. 92.34) refines to this level (eq. 92.37); 0 is no feature refinement. |
 | `refinement.feature_angle_deg` | number | `30.0` | Dihedral angle past which a triangulation edge is a feature edge (eq. 92.2). |
 | `refinement.max_level` | integer | `2` | The level cap `l(c)` is min'd with (eq. 92.1); 6 is the octree cap §74.2 states and `mesh::refined::build` enforces. |
+| `refinement.boxes` | array | `[]` | Axis-aligned refinement boxes (eq. 92.67); every leaf overlapping a box is refined to at least its level, capped at `max_level`; absent or empty is no box refinement. |
+| `refinement.boxes[].min` | number[3] | *(required)* | The box's lower corner `[x, y, z]`, metres; must be finite. |
+| `refinement.boxes[].max` | number[3] | *(required)* | The box's upper corner `[x, y, z]`, metres; must be finite and strictly greater than `min` on every axis. |
+| `refinement.boxes[].level` | integer | *(required)* | The level every overlapped leaf is refined to at least; >= 1 (0 refines nothing), capped at `max_level`. |
 | `castellation.keep_region` | string | `"largest"` | Which connected component of the fluid survives eq. (92.4): `"largest"` or `"seed"`. |
 | `castellation.seed_point` | number[3] | `null` | The keep point `"seed"` needs; required then, ignored otherwise. |
 | `castellation.min_faces` | integer | `4` | A kept cell with fewer faces than this is dropped - a hole in the addressing, not a control volume. |

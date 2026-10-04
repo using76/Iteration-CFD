@@ -127,6 +127,11 @@ pub struct RefinementSpec {
     /// the octree at 6.
     #[serde(default = "d_max_level")]
     pub max_level: u32,
+    /// SPEC-LIT §92.16 (92.67): axis-aligned boxes; every leaf whose interior
+    /// overlaps a box is refined to at least that box's level. Empty, the
+    /// default, is no box refinement and is not serialised.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boxes: Vec<RefinementBox>,
 }
 
 /// One `refinement.levels[]` entry - one patch's distance bands.
@@ -153,6 +158,18 @@ pub struct DistanceBand {
     pub level: u32,
 }
 
+/// One entry of `refinement.boxes` - an axis-aligned box, SPEC-LIT §92.16.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RefinementBox {
+    /// `[x, y, z]` lower corner, metres.
+    pub min: [f64; 3],
+    /// `[x, y, z]` upper corner, metres.
+    pub max: [f64; 3],
+    /// The level every overlapped leaf is refined to at least (capped at `max_level`).
+    pub level: u32,
+}
+
 fn d_feature_angle() -> f64 {
     30.0
 }
@@ -167,6 +184,7 @@ impl Default for RefinementSpec {
             levels: Vec::new(),
             feature_angle_deg: d_feature_angle(),
             max_level: d_max_level(),
+            boxes: Vec::new(),
         }
     }
 }
@@ -664,6 +682,47 @@ impl AutomeshConfig {
                 }
             }
         }
+        // The declared boxes of `refinement.boxes` (§92.16): the same refusal
+        // style - the field path, the index and the value that broke the rule,
+        // before any meshing work. A level above `max_level` is NOT refused -
+        // it is capped, exactly as a band level is (92.1's min(..., max_level)).
+        let e = &self.domain.extent;
+        for (i, b) in self.refinement.boxes.iter().enumerate() {
+            if !b.min.iter().chain(b.max.iter()).all(|v| v.is_finite()) {
+                return Err(Error::Mesh(format!(
+                    "refinement.boxes[{i}]: every coordinate must be finite, \
+                     got min {:?} max {:?}",
+                    b.min, b.max
+                )));
+            }
+            for (a, name) in [(0usize, "x"), (1, "y"), (2, "z")] {
+                if !(b.max[a] > b.min[a]) {
+                    return Err(Error::Mesh(format!(
+                        "refinement.boxes[{i}]: {name}-axis is empty or reversed \
+                         (min = {}, max = {})",
+                        b.min[a], b.max[a]
+                    )));
+                }
+            }
+            if b.level == 0 {
+                return Err(Error::Mesh(format!(
+                    "refinement.boxes[{i}].level: 0 refines nothing - a box asks \
+                     for level >= 1"
+                )));
+            }
+            if !b
+                .min
+                .iter()
+                .zip(b.max.iter())
+                .enumerate()
+                .all(|(a, (lo, hi))| *lo < e[2 * a + 1] && *hi > e[2 * a])
+            {
+                return Err(Error::Mesh(format!(
+                    "refinement.boxes[{i}]: lies outside domain.extent - a box \
+                     that overlaps no cell refines nothing"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -739,6 +798,7 @@ mod config_tests {
             }],
             feature_angle_deg: 45.0,
             max_level: 3,
+            boxes: vec![RefinementBox { min: [1.0; 3], max: [2.0; 3], level: 1 }],
         };
         cfg.castellation = CastellationSpec {
             keep_region: KeepRegion::Seed,
@@ -844,5 +904,82 @@ mod config_tests {
         let mut cfg = minimal();
         cfg.castellation.bodies = vec![body("sphere", &["sphere"])];
         cfg.validate().expect("a body may take its patch's name");
+    }
+
+    /// SPEC-LIT §92.16: `refinement.boxes` parses, round-trips, and an
+    /// empty list serialises to NOTHING, so a config without boxes keeps
+    /// the summary JSON it always had.
+    #[test]
+    fn refinement_boxes_parse_round_trip_and_stay_absent_when_empty() {
+        let text = minimal_text().replace(
+            "\"output\"",
+            "\"refinement\": {\"boxes\": \
+             [{\"min\": [1,1,1], \"max\": [2,2,2], \"level\": 1}]}, \"output\"",
+        );
+        let cfg = read_config_str(&text, "boxes").unwrap();
+        assert_eq!(cfg.refinement.boxes.len(), 1, "{cfg:?}");
+        assert_eq!(cfg.refinement.boxes[0].min, [1.0, 1.0, 1.0]);
+        assert_eq!(cfg.refinement.boxes[0].max, [2.0, 2.0, 2.0]);
+        assert_eq!(cfg.refinement.boxes[0].level, 1);
+        // The round-trip test's config carries one box through serde.
+        let mut cfg = minimal();
+        cfg.refinement.boxes =
+            vec![RefinementBox { min: [1.0; 3], max: [2.0; 3], level: 2 }];
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back = read_config_str(&json, "round-trip").unwrap();
+        assert_eq!(back, cfg);
+        // Empty: absent from the re-serialised config, so the summary is too.
+        assert!(
+            !serde_json::to_string(&minimal()).unwrap().contains("\"boxes\""),
+            "an empty boxes list must not serialise"
+        );
+        // An unknown key inside a box is refused by name.
+        let text = minimal_text().replace(
+            "\"output\"",
+            "\"refinement\": {\"boxes\": \
+             [{\"min\": [1,1,1], \"max\": [2,2,2], \"lvl\": 1}]}, \"output\"",
+        );
+        let err = read_config_str(&text, "typo").unwrap_err();
+        assert!(err.to_string().contains("lvl"), "{err}");
+    }
+
+    /// §92.16: each rule a box can break is refused by the field path, the
+    /// index and the value. A level above `max_level` is NOT in the list -
+    /// it is capped, exactly as a band level is.
+    #[test]
+    fn a_box_that_breaks_a_rule_is_refused_by_name() {
+        let box6 = |min: [f64; 3], max: [f64; 3], level: u32| RefinementBox { min, max, level };
+        let cases: Vec<(RefinementBox, &str)> = vec![
+            (box6([f64::NAN, 0.0, 0.0], [2.0, 2.0, 2.0], 1),
+             "refinement.boxes[0]: every coordinate must be finite"),
+            (box6([0.0, 5.0, 0.0], [1.0, 5.0, 1.0], 1),
+             "y-axis is empty or reversed"),
+            (box6([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], 0), "refinement.boxes[0].level"),
+            (box6([11.0, 0.0, 0.0], [12.0, 1.0, 1.0], 1),
+             "lies outside domain.extent"),
+            // Touching the xhi face only: xlo = 10 is not < xhi = 10.
+            (box6([10.0, 0.0, 0.0], [11.0, 1.0, 1.0], 1),
+             "lies outside domain.extent"),
+        ];
+        for (b, needle) in cases {
+            let mut cfg = minimal();
+            cfg.refinement.boxes = vec![b];
+            let err = cfg.validate().unwrap_err();
+            let text = err.to_string();
+            assert!(text.contains(needle), "{needle} not in {err}");
+        }
+        // A second box after a good one is named by ITS index.
+        let mut cfg = minimal();
+        cfg.refinement.boxes = vec![
+            box6([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], 1),
+            box6([0.0, 0.0, 0.0], [1.0, 0.0, 1.0], 1),
+        ];
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("refinement.boxes[1]"), "{err}");
+        // A level above max_level validates: it is capped, not refused.
+        let mut cfg = minimal();
+        cfg.refinement.boxes = vec![box6([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], 9)];
+        cfg.refinement.max_level = 2;
+        cfg.validate().expect("a deep level is capped, not refused");
     }
 }
