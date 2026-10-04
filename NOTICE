@@ -6,6 +6,13 @@ Developed in collaboration with, and with contributions from,
 
 Licensed under the Prosperity Public License 3.0.0. See LICENSE.
 
+Exception: tools/promo/scene.py and tools/promo/sim_geom.py are Blender Python
+API scripts and are licensed under the GNU General Public License, version 2
+or (at your option) any later version - see tools/promo/LICENSE-NOTICE.md and
+tools/promo/COPYING. They run as separate programs inside Blender and are
+aggregated with meteor-cfd, not linked into it; everything else stays under
+the Prosperity licence.
+
 Noncommercial use is free: personal study, hobby and amateur work, and use by
 any charitable organisation, educational institution, public safety or health
 organisation, environmental protection organisation or government institution.

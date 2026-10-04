@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 # meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
-# Source-available, not Open Source. See LICENSE at the repository root.
+# This Blender Python API script is free software: you can redistribute it
+# and/or modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation, either version 2 of the License,
+# or (at your option) any later version. It is distributed WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See tools/promo/COPYING for the licence text and
+# tools/promo/LICENSE-NOTICE.md for why this file is not under the
+# repository's Prosperity licence (a separate program run by Blender,
+# aggregated with meteor-cfd, not linked into it).
 # No GPL-licensed source was consulted.
 
 """A reusable Blender studio scene for the F1 2026 promo render model.
