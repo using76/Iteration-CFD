@@ -292,7 +292,7 @@ pub fn snap_regions(
     // outside the domain, and is legal.
     // The index, built once, outside the loop - (92.26)'s nearest triangle
     // names the surface patch an interface face's area lands on.
-    let idx = TriIndex::new(surf, base_size)?;
+    let idx = TriIndex::with_bvh(surf, base_size)?;
     let mut iface_area = vec![0.0; surf.patch_names.len()];
     // The same faces, kept with the patch (92.32) assigned them, so the
     // report can re-measure them on the returned points.

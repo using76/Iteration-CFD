@@ -911,7 +911,7 @@ pub fn castellate(
 
     // The wall index (92.26), one for the whole run, hinted by the tree's
     // finest leaf edge - the length the classifier's jitter uses.
-    let tidx = TriIndex::new(surf, h_min.max(Scalar::MIN_POSITIVE))?;
+    let tidx = TriIndex::with_bvh(surf, h_min.max(Scalar::MIN_POSITIVE))?;
 
     let mut internal: Vec<(crate::Label, crate::Label, Vec<crate::Label>)> = Vec::new();
     let mut box_faces: [Vec<(crate::Label, Vec<crate::Label>)>; 6] =

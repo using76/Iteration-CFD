@@ -24,10 +24,11 @@
 //! the turn of the curve through it (92.35), and chains the feature edges
 //! into polylines between corners, cycles closed at their lowest point.
 //! `FeatureIndex` answers (92.36) - the closest point of the indexed
-//! segments - through a uniform bucket grid built in the shape of
-//! `TriIndex`'s (§23.4): a segment enters every bucket its box touches, a
-//! query walks rings of buckets outward and stops once an unscanned ring
-//! cannot hold anything closer than the best found.
+//! segments - through bounding-volume hierarchies over the segments' and
+//! the corners' boxes, the same median-split tree `TriIndex::with_bvh`
+//! builds (§23.4): a bounded walk prunes whole subtrees once their box sits
+//! past the best found, and the answers stay what a linear scan with the
+//! lower-id tie-break returns, bit for bit.
 //!
 //! What refinement (§92.2 stage 1's `l_feat` from (92.2)) and feature
 //! snapping (§92.2 stage 4, consuming (92.28)'s output) then do with these
@@ -43,7 +44,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{Error, Result};
-use crate::surface::Surface;
+use crate::surface::{Bvh, Surface};
 use crate::{Scalar, Vec3};
 
 // ==========================================================================
@@ -317,23 +318,21 @@ pub fn extract(surf: &Surface, feature_angle_deg: Scalar) -> Result<FeatureSet> 
 //  The index - (92.36)
 // ==========================================================================
 
-/// The feature edges, bucketed for closest-point queries - SPEC-LIT §92.12,
-/// equation (92.36), through a uniform grid in the shape of `TriIndex`'s.
+/// The feature edges indexed for closest-point queries - SPEC-LIT §92.12,
+/// equation (92.36), through two bounding-volume hierarchies: one over the
+/// indexed segments' boxes, one over the corners they carry. Both walks
+/// answer exactly what a linear scan with the lower-id tie-break answers.
 pub struct FeatureIndex<'f> {
     fs: &'f FeatureSet,
     /// Edge ids - indices into `fs.edges` - this index carries, ascending.
     edge_ids: Vec<usize>,
-    /// The low corner of the indexed segments' box, in coordinates - the
-    /// origin the bucket coordinates measure from.
-    lo: Vec3,
-    dims: [usize; 3],
-    /// Bucket edge length per axis (a sentinel 1.0 on an axis the segments
-    /// do not span, so index arithmetic stays finite).
-    cell: [Scalar; 3],
-    /// Bucket -> positions in `edge_ids`.
-    buckets: Vec<Vec<u32>>,
+    /// `edge_ids` position -> box of the segment's two end points; the
+    /// hierarchy's items.
+    edge_bvh: Bvh,
     /// `fs.corners` the indexed edges carry, ascending.
     corners: Vec<u32>,
+    /// Position -> the corner point itself, as a degenerate box.
+    corner_bvh: Bvh,
 }
 
 impl<'f> FeatureIndex<'f> {
@@ -362,48 +361,16 @@ impl<'f> FeatureIndex<'f> {
                 "FeatureIndex cell size must be positive, got {cell_hint}"
             )));
         }
-        let mut lo = Vec3::ZERO;
-        let mut hi = Vec3::ZERO;
-        for (i, &e) in edge_ids.iter().enumerate() {
-            let p = fs.points[fs.edges[e][0] as usize];
-            let q = fs.points[fs.edges[e][1] as usize];
-            lo = if i == 0 { p.cmpt_min(q) } else { lo.cmpt_min(p).cmpt_min(q) };
-            hi = if i == 0 { p.cmpt_max(q) } else { hi.cmpt_max(p).cmpt_max(q) };
-        }
-        let ext = hi - lo;
-        let mut dims = [0usize; 3];
-        for ax in 0..3 {
-            let n = (ext.component(ax) / cell_hint).ceil();
-            dims[ax] = if n.is_finite() { (n as usize).clamp(1, 4096) } else { 1 };
-        }
-        // Bound total memory: halve the largest axis until the bucket count
-        // is sane. The grid is an accelerator, not a truth.
-        while dims[0] * dims[1] * dims[2] > (1 << 20) {
-            let ax = (0..3).max_by_key(|&a| dims[a]).unwrap_or(0);
-            dims[ax] = (dims[ax] + 1) / 2;
-        }
-        let mut cell = [1.0 as Scalar; 3];
-        for ax in 0..3 {
-            let e = ext.component(ax);
-            if e > 0.0 {
-                cell[ax] = e / dims[ax] as Scalar;
-            }
-        }
-
-        let mut buckets = vec![Vec::new(); dims[0] * dims[1] * dims[2]];
-        for (pos, &e) in edge_ids.iter().enumerate() {
-            let a = fs.points[fs.edges[e][0] as usize];
-            let b = fs.points[fs.edges[e][1] as usize];
-            let ilo = Self::coords(lo, cell, dims, a.cmpt_min(b));
-            let ihi = Self::coords(lo, cell, dims, a.cmpt_max(b));
-            for k in ilo[2]..=ihi[2] {
-                for j in ilo[1]..=ihi[1] {
-                    for i in ilo[0]..=ihi[0] {
-                        buckets[i + dims[0] * (j + dims[1] * k)].push(pos as u32);
-                    }
-                }
-            }
-        }
+        let edge_bvh = Bvh::build(
+            &edge_ids
+                .iter()
+                .map(|&e| {
+                    let a = fs.points[fs.edges[e][0] as usize];
+                    let b = fs.points[fs.edges[e][1] as usize];
+                    (a.cmpt_min(b), a.cmpt_max(b))
+                })
+                .collect::<Vec<(Vec3, Vec3)>>(),
+        );
 
         // Corners are useful only where the indexed edges carry them. The
         // membership is taken through a set of the indexed endpoints and not
@@ -422,102 +389,84 @@ impl<'f> FeatureIndex<'f> {
             .copied()
             .filter(|c| carried.contains(c))
             .collect();
+        let corner_bvh = Bvh::build(
+            &corners
+                .iter()
+                .map(|&c| {
+                    let p = fs.points[c as usize];
+                    (p, p)
+                })
+                .collect::<Vec<(Vec3, Vec3)>>(),
+        );
 
-        Ok(FeatureIndex { fs, edge_ids, lo, dims, cell, buckets, corners })
-    }
-
-    /// Bucket coordinates of `p`, clamped into the grid - insertion only;
-    /// queries keep `p` unclamped and measure in index space instead.
-    fn coords(lo: Vec3, cell: [Scalar; 3], dims: [usize; 3], p: Vec3) -> [usize; 3] {
-        let mut c = [0usize; 3];
-        for ax in 0..3 {
-            let f = ((p.component(ax) - lo.component(ax)) / cell[ax]).floor();
-            c[ax] = if f > 0.0 { (f as usize).min(dims[ax] - 1) } else { 0 };
-        }
-        c
+        Ok(FeatureIndex { fs, edge_ids, edge_bvh, corners, corner_bvh })
     }
 
     /// (92.36): the closest point of the indexed edges to `p`, its distance,
     /// and the edge id - an index into `fs.edges`, not into the filtered
     /// list `for_patch` built. `None` when the index carries no edge.
     ///
-    /// Rings of buckets walk outward from `p`'s bucket - the UNCLAMPED
-    /// bucket, so a query outside the box still measures from where `p`
-    /// is. A segment whose box first touches ring `d` sits at least
-    /// `(d-1)*cell_min` from `p` along the axis that names the ring, so
-    /// once that bound exceeds the best distance found, no unscanned
-    /// bucket can hold anything closer and the walk stops. Ties in
-    /// distance go to the lower edge id, the same tie-break the linear
-    /// scan of the unit test uses.
+    /// A walk of the segments' hierarchy, the bound tightening to the best
+    /// squared distance found; a pruned segment's distance exceeds the best
+    /// found strictly, so no tie can hide behind a prune and the answer is
+    /// the linear scan's: the minimum squared distance, ties to the LOWER
+    /// edge id - the same tie-break the unit test's scan uses.
     pub fn closest_edge_point(&self, p: Vec3) -> Option<(Vec3, Scalar, usize)> {
+        self.edge_nearest(p, Scalar::INFINITY)
+            .map(|(d2, e)| {
+                let (q, _) = self.project(p, e);
+                (q, d2.sqrt(), e)
+            })
+    }
+
+    /// The walk both edge queries share: the minimum `(squared distance,
+    /// edge id)` with the lower-id tie-break, searched only where the bound
+    /// `bound` allows - `INFINITY` for the unbounded query, a radius for
+    /// [`FeatureIndex::closest_edge_within`]. A pruned item's distance is
+    /// `> sqrt(bd) + guard` with `bd` the best so far, so it can neither
+    /// beat nor tie; every item at the true minimum is visited.
+    fn edge_nearest(&self, p: Vec3, bound: Scalar) -> Option<(Scalar, usize)> {
         if self.edge_ids.is_empty() {
             return None;
         }
-        let mut base = [0isize; 3];
-        for ax in 0..3 {
-            base[ax] =
-                ((p.component(ax) - self.lo.component(ax)) / self.cell[ax]).floor() as isize;
-        }
-        let c_min = self.cell[0].min(self.cell[1]).min(self.cell[2]);
-        let mut d_max = 0isize;
-        for ax in 0..3 {
-            let b = base[ax];
-            let m = self.dims[ax] as isize - 1;
-            d_max = d_max.max(b.abs().max((b - m).abs()));
-        }
+        let g = self.edge_bvh.guard(p);
         let mut best: Option<(Scalar, usize)> = None;
-        let mut d = 0isize;
-        loop {
-            if let Some((bd, _)) = best {
-                let lb = (d as Scalar - 1.0) * c_min;
-                if lb * lb > bd {
-                    break;
-                }
+        self.edge_bvh.visit_near(p, bound + g, |item| {
+            let e = self.edge_ids[item as usize];
+            let (_, d2) = self.project(p, e);
+            let take = match best {
+                None => true,
+                Some((bd, be)) => d2 < bd || (d2 == bd && e < be),
+            };
+            if take {
+                best = Some((d2, e));
             }
-            if d > d_max {
-                break;
-            }
-            self.scan_ring(p, base, d, &mut best);
-            d += 1;
-        }
-        best.map(|(d2, e)| {
-            let (q, _) = self.project(p, e);
-            (q, d2.sqrt(), e)
-        })
+            let bd = best.map_or(Scalar::INFINITY, |(bd, _)| bd);
+            bd.sqrt().min(bound) + g
+        });
+        best
     }
 
-    /// Every bucket at Chebyshev ring `d` around `base`, measured against
-    /// the segments it carries.
-    fn scan_ring(&self, p: Vec3, base: [isize; 3], d: isize, best: &mut Option<(Scalar, usize)>) {
-        let span = |ax: usize| {
-            (base[ax] - d).max(0)..=(base[ax] + d).min(self.dims[ax] as isize - 1)
-        };
-        for k in span(2) {
-            for j in span(1) {
-                for i in span(0) {
-                    let at = (i - base[0])
-                        .abs()
-                        .max((j - base[1]).abs())
-                        .max((k - base[2]).abs());
-                    if at != d {
-                        continue;
-                    }
-                    let b = &self.buckets
-                        [(i as usize) + self.dims[0] * ((j as usize) + self.dims[1] * (k as usize))];
-                    for &pos in b {
-                        let e = self.edge_ids[pos as usize];
-                        let (_, d2) = self.project(p, e);
-                        let take = match *best {
-                            None => true,
-                            Some((bd, be)) => d2 < bd || (d2 == bd && e < be),
-                        };
-                        if take {
-                            *best = Some((d2, e));
-                        }
-                    }
-                }
+    /// (92.36) under a bound: the closest point of the indexed edges to `p`
+    /// whenever [`FeatureIndex::closest_edge_point`] answers within `r` of
+    /// it - all three values bit for bit its answer - and `None` when the
+    /// nearest edge sits past `r`. What the refinement bands (§92.2) need:
+    /// they ask whether a leaf is within its own cell size of a feature
+    /// edge, never how far past it the nearest edge is.
+    pub fn closest_edge_within(
+        &self,
+        p: Vec3,
+        r: Scalar,
+    ) -> Option<(Vec3, Scalar, usize)> {
+        self.edge_nearest(p, r).and_then(|(d2, e)| {
+            let d = d2.sqrt();
+            if d <= r {
+                let (q, _) = self.project(p, e);
+                Some((q, d, e))
+            } else {
+                None
             }
-        }
+        })
     }
 
     /// (92.36): the closest point of feature edge `e` to `p` and the
@@ -540,10 +489,18 @@ impl<'f> FeatureIndex<'f> {
     }
 
     /// The nearest corner the indexed edges carry: its position, its
-    /// distance, its point id. A linear scan - corners are few.
+    /// distance, its point id. A walk of the corners' hierarchy with the
+    /// same tightening bound the segments' walk uses - a pruned corner sits
+    /// strictly past the best found, so the answer is the linear scan's:
+    /// the minimum squared distance, ties to the lower point id.
     pub fn closest_corner(&self, p: Vec3) -> Option<(Vec3, Scalar, u32)> {
+        if self.corners.is_empty() {
+            return None;
+        }
+        let g = self.corner_bvh.guard(p);
         let mut best: Option<(Scalar, u32)> = None;
-        for &c in &self.corners {
+        self.corner_bvh.visit_near(p, Scalar::INFINITY, |item| {
+            let c = self.corners[item as usize];
             let d = p - self.fs.points[c as usize];
             let d2 = d.mag_sqr();
             let take = match best {
@@ -553,7 +510,9 @@ impl<'f> FeatureIndex<'f> {
             if take {
                 best = Some((d2, c));
             }
-        }
+            let bd = best.map_or(Scalar::INFINITY, |(bd, _)| bd);
+            bd.sqrt() + g
+        });
         best.map(|(d2, c)| (self.fs.points[c as usize], d2.sqrt(), c))
     }
 
@@ -837,6 +796,196 @@ mod tests {
                 msg.contains("feature_angle_deg"),
                 "the refusal names the angle: {msg}"
             );
+        }
+    }
+
+    #[test]
+    fn the_feature_bvh_answers_exactly_what_a_linear_scan_answers() {
+        // Twenty-seven flush cubes on patch 0 (a slab of shared faces, so
+        // the extract sees open-sheet and junction edges too) plus a capped
+        // cylinder on patch 1.
+        let mut soup = Vec::new();
+        for k in 0..3usize {
+            for j in 0..3usize {
+                for i in 0..3usize {
+                    let lo = [1.0 + i as f64, 1.0 + j as f64, 1.0 + k as f64];
+                    let hi = [lo[0] + 0.5, lo[1] + 0.5, lo[2] + 0.5];
+                    for (_, t) in box_soup(lo, hi) {
+                        soup.push((0, t));
+                    }
+                }
+            }
+        }
+        for (_, t) in cylinder_soup(1.0, 2.0, 32, [5.0, 5.0, 5.0]) {
+            soup.push((1, t));
+        }
+        let surf = Surface::from_soup(soup, vec!["cubes".into(), "cyl".into()])
+            .expect("the two-patch surface builds");
+        let fs = extract(&surf, 30.0).expect("the soup extracts");
+        assert!(fs.edges.len() > 100, "{} edges - too thin a test", fs.edges.len());
+
+        // A deterministic LCG spread over a box that swallows both shapes,
+        // plus every corner point and every edge midpoint - the exact-tie
+        // sites.
+        let mut s: u64 = 0x853C49E6748FEA9B;
+        let next = |s: &mut u64| -> f64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((*s >> 11) as f64) / (1u64 << 53) as f64
+        };
+        let mut pts: Vec<Vec3> = Vec::new();
+        for _ in 0..2000 {
+            pts.push(Vec3::new(
+                (10.0 * next(&mut s) - 2.0) as Scalar,
+                (10.0 * next(&mut s) - 2.0) as Scalar,
+                (10.0 * next(&mut s) - 2.0) as Scalar,
+            ));
+        }
+        for h in [0.1, 1.0] {
+            let idx = FeatureIndex::new(&fs, h).expect("the full index builds");
+            let patch1 = FeatureIndex::for_patch(&fs, h, 1).expect("the patch index builds");
+            for index in [&idx, &patch1] {
+                pts.extend(fs.corners.iter().map(|&c| fs.points[c as usize]));
+                pts.extend(index.edge_ids.iter().map(|&e| {
+                    let [a, b] = fs.edges[e];
+                    Vec3::new(
+                        0.5 * (fs.points[a as usize].x + fs.points[b as usize].x),
+                        0.5 * (fs.points[a as usize].y + fs.points[b as usize].y),
+                        0.5 * (fs.points[a as usize].z + fs.points[b as usize].z),
+                    )
+                }));
+                for p in &pts {
+                    // Edges: the walk against a linear scan with the same
+                    // lower-id tie-break, all three values bit for bit.
+                    let (q, dist, e) = index
+                        .closest_edge_point(*p)
+                        .expect("the index carries edges");
+                    let mut best: Option<(f64, usize, Vec3)> = None;
+                    for &eid in &index.edge_ids {
+                        let (rq, rd2) = index.project(*p, eid);
+                        let take = match best {
+                            None => true,
+                            Some((bd, be, _)) => {
+                                rd2 < bd || (rd2 == bd && eid < be)
+                            }
+                        };
+                        if take {
+                            best = Some((rd2, eid, rq));
+                        }
+                    }
+                    let (rd2, re, rq) = best.expect("edges to scan");
+                    assert_eq!(e, re, "edge id at ({},{},{}) h={h}", p.x, p.y, p.z);
+                    assert_eq!(
+                        dist.to_bits(),
+                        (rd2 as Scalar).sqrt().to_bits(),
+                        "distance at ({},{},{}) h={h}",
+                        p.x,
+                        p.y,
+                        p.z
+                    );
+                    for ax in 0..3 {
+                        assert_eq!(
+                            q.component(ax).to_bits(),
+                            rq.component(ax).to_bits(),
+                            "position axis {ax} at ({},{},{}) h={h}",
+                            p.x,
+                            p.y,
+                            p.z
+                        );
+                    }
+                    // Corners: the walk against a linear scan. A patch
+                    // index over rim edges only carries none.
+                    if index.corners.is_empty() {
+                        assert!(index.closest_corner(*p).is_none());
+                        continue;
+                    }
+                    let (cp, cd, cc) = index
+                        .closest_corner(*p)
+                        .expect("the index carries corners");
+                    let mut cbest: Option<(f64, u32)> = None;
+                    for &cand in &index.corners {
+                        let d2 = (*p - fs.points[cand as usize]).mag_sqr() as f64;
+                        let take = match cbest {
+                            None => true,
+                            Some((bd, bc)) => d2 < bd || (d2 == bd && cand < bc),
+                        };
+                        if take {
+                            cbest = Some((d2, cand));
+                        }
+                    }
+                    let (cd2, cc2) = cbest.expect("corners to scan");
+                    assert_eq!(cc, cc2, "corner id at ({},{},{})", p.x, p.y, p.z);
+                    assert_eq!(
+                        cd.to_bits(),
+                        (cd2 as Scalar).sqrt().to_bits(),
+                        "corner distance at ({},{},{})",
+                        p.x,
+                        p.y,
+                        p.z
+                    );
+                    for ax in 0..3 {
+                        assert_eq!(
+                            cp.component(ax).to_bits(),
+                            fs.points[cc2 as usize].component(ax).to_bits(),
+                            "corner position axis {ax}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closest_edge_within_agrees_with_closest_edge_point() {
+        let surf = cube();
+        let fs = extract(&surf, 30.0).expect("a cube extracts");
+        let idx = FeatureIndex::new(&fs, 0.25).expect("the cube index builds");
+        let mut s: u64 = 0x853C49E6748FEA9B;
+        let next = |s: &mut u64| -> f64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((*s >> 11) as f64) / (1u64 << 53) as f64
+        };
+        let mut pts: Vec<Vec3> = Vec::new();
+        for _ in 0..2000 {
+            pts.push(Vec3::new(
+                (10.0 * next(&mut s) - 2.0) as Scalar,
+                (10.0 * next(&mut s) - 2.0) as Scalar,
+                (10.0 * next(&mut s) - 2.0) as Scalar,
+            ));
+        }
+        // The exact-tie sites: every corner point and every edge midpoint.
+        pts.extend(fs.corners.iter().map(|&c| fs.points[c as usize]));
+        pts.extend((0..fs.edges.len()).map(|e| {
+            let [a, b] = fs.edges[e];
+            Vec3::new(
+                0.5 * (fs.points[a as usize].x + fs.points[b as usize].x),
+                0.5 * (fs.points[a as usize].y + fs.points[b as usize].y),
+                0.5 * (fs.points[a as usize].z + fs.points[b as usize].z),
+            )
+        }));
+        for p in &pts {
+            let full = idx.closest_edge_point(*p);
+            let (_, d, _) = full.expect("the cube carries edges");
+            for &r in &[0.0, 0.05, 0.3, 2.0] {
+                let got = idx.closest_edge_within(*p, r);
+                if d <= r {
+                    let (q, dist, e) = got.expect("the nearest edge is within r");
+                    let (fq, fd, fe) = full.unwrap();
+                    assert_eq!(e, fe, "edge id at ({},{},{}) r={r}", p.x, p.y, p.z);
+                    assert_eq!(dist.to_bits(), fd.to_bits(), "distance bits at r={r}");
+                    for ax in 0..3 {
+                        assert_eq!(
+                            q.component(ax).to_bits(),
+                            fq.component(ax).to_bits(),
+                            "position bits axis {ax} at r={r}"
+                        );
+                    }
+                } else {
+                    assert!(
+                        got.is_none(),
+                        "Some at r={r} but the nearest edge is {d} away"
+                    );
+                }
+            }
         }
     }
 

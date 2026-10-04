@@ -23,10 +23,14 @@
 //! file written by one tool repeats bit-identical coordinates. An epsilon
 //! weld would be a silent geometry edit.
 //!
-//! [`TriIndex`] is the §23.4 uniform grid bucket over the bounding box.
-//! No tree: at the sizes a castellated case carries (1e4-1e6 triangles,
-//! queried once per near-surface cell at setup) a flat grid with cell size
-//! near the mesh spacing is both simpler and fast enough.
+//! [`TriIndex`] is the §23.4 uniform grid bucket over the bounding box, and
+//! the grid still decides WHICH of several equidistant triangles a query
+//! returns - its expanding-shell visit order is kept as the tie-break. What
+//! [`TriIndex::with_bvh`] adds is a median-split bounding-volume hierarchy
+//! over the same triangles, Ericson 2005 ch. 6 read as a textbook: the same
+//! answer, found faster, which the automesher (§92.2) needs because its
+//! surfaces mix a small dense body with domain-sized triangles a flat grid's
+//! shells walk past.
 
 pub mod classify;
 pub mod cutcell;
@@ -299,6 +303,9 @@ pub struct TriIndex<'s> {
     /// the surface does not span, so index arithmetic stays finite).
     cell: [Scalar; 3],
     buckets: Vec<Vec<u32>>,
+    /// The bounding-volume hierarchy [`TriIndex::with_bvh`] builds; `new`
+    /// leaves it out and queries stay on the grid alone.
+    bvh: Option<Bvh>,
 }
 
 impl<'s> TriIndex<'s> {
@@ -355,7 +362,28 @@ impl<'s> TriIndex<'s> {
             }
         }
 
-        Ok(TriIndex { surf, lo, hi, dims, cell, buckets })
+        Ok(TriIndex { surf, lo, hi, dims, cell, buckets, bvh: None })
+    }
+
+    /// [`TriIndex::new`]'s grid PLUS a bounding-volume hierarchy over the
+    /// triangles' boxes - what the automesher builds, whose surfaces mix a
+    /// small dense body with domain-sized triangles. The grid stays the
+    /// authority on WHICH equidistant triangle a query returns; the hierarchy
+    /// only gets there faster.
+    pub fn with_bvh(surf: &'s Surface, cell_hint: Scalar) -> Result<TriIndex<'s>> {
+        let mut idx = TriIndex::new(surf, cell_hint)?;
+        let boxes: Vec<(Vec3, Vec3)> = surf
+            .tris
+            .iter()
+            .map(|tri| {
+                let a = surf.points[tri[0] as usize];
+                let b = surf.points[tri[1] as usize];
+                let c = surf.points[tri[2] as usize];
+                (a.cmpt_min(b).cmpt_min(c), a.cmpt_max(b).cmpt_max(c))
+            })
+            .collect();
+        idx.bvh = Some(Bvh::build(&boxes));
+        Ok(idx)
     }
 
     /// Bucket coordinates of `p`, clamped into the grid.
@@ -374,7 +402,50 @@ impl<'s> TriIndex<'s> {
     /// radius around `p`'s bucket, stopping once no unscanned bucket can
     /// hold anything closer than the best found. Distance is exact
     /// point-to-triangle; the grid only orders the candidates.
+    ///
+    /// With a BVH ( [`TriIndex::with_bvh`]) the same minimum is found by
+    /// `Bvh::visit_near`, and among triangles tied at the bitwise-equal
+    /// minimum the one the grid scan would have reached FIRST is returned -
+    /// the shell it is first met in and the scan's own (k, j, i, id) order
+    /// inside that shell, [`TriIndex::legacy_key`]. An early grid stop can
+    /// only leave a tie unvisited in a LATER shell, which loses the key
+    /// comparison, so the two paths pick the same triangle.
     pub fn nearest_triangle(&self, p: Vec3) -> (usize, Scalar) {
+        if let Some(bvh) = &self.bvh {
+            let mut best = Scalar::INFINITY;
+            let mut ties: Vec<u32> = Vec::new();
+            let g = bvh.guard(p);
+            bvh.visit_near(p, Scalar::INFINITY, |t| {
+                let d = self.dist_to_tri(p, t as usize);
+                if d < best {
+                    best = d;
+                    ties.clear();
+                    ties.push(t);
+                } else if d == best {
+                    ties.push(t);
+                }
+                best + g
+            });
+            if ties.is_empty() {
+                return (0, Scalar::INFINITY);
+            }
+            let pick = if ties.len() == 1 {
+                ties[0]
+            } else {
+                let base = Self::coords(self.lo, self.cell, self.dims, p);
+                let mut pick = ties[0];
+                let mut pick_key = self.legacy_key(base, pick);
+                for &t in &ties[1..] {
+                    let k = self.legacy_key(base, t);
+                    if k < pick_key {
+                        pick_key = k;
+                        pick = t;
+                    }
+                }
+                pick
+            };
+            return (pick as usize, best);
+        }
         let base = Self::coords(self.lo, self.cell, self.dims, p);
         // Correction for a query point outside the bbox: shell radius r
         // guarantees distance >= r*min_cell measured from the CLAMPED point,
@@ -458,6 +529,77 @@ impl<'s> TriIndex<'s> {
         (p - cp).mag()
     }
 
+    /// The order the §23.4 shell scan first reaches triangle `t` from
+    /// `base`, as a comparable key: the shell radius it is first met in,
+    /// then the scan's own (k, j, i, id) order of the first of its buckets
+    /// that shell covers. Ranking bitwise ties by this key ranks them the
+    /// way the scan visits them, so the smallest key IS the triangle the
+    /// scan would return.
+    fn legacy_key(&self, base: [usize; 3], t: u32) -> (usize, usize, usize, usize, u32) {
+        let tri = self.surf.tris[t as usize];
+        let (a, b, c) = (
+            self.surf.points[tri[0] as usize],
+            self.surf.points[tri[1] as usize],
+            self.surf.points[tri[2] as usize],
+        );
+        let ilo = Self::coords(self.lo, self.cell, self.dims, a.cmpt_min(b).cmpt_min(c));
+        let ihi = Self::coords(self.lo, self.cell, self.dims, a.cmpt_max(b).cmpt_max(c));
+        // The smallest shell whose ring of buckets meets the triangle's
+        // range: the largest per-axis index gap from `base`.
+        let mut r_t = 0usize;
+        for ax in 0..3 {
+            let gap = if base[ax] < ilo[ax] {
+                ilo[ax] - base[ax]
+            } else if base[ax] > ihi[ax] {
+                base[ax] - ihi[ax]
+            } else {
+                0
+            };
+            r_t = r_t.max(gap);
+        }
+        // The scan visits shell `r_t` in ascending (k, j, i), so the first
+        // of the triangle's buckets it touches is the per-axis low end of
+        // range and shell intersected.
+        let mut first = [0usize; 3];
+        for ax in 0..3 {
+            first[ax] = base[ax].saturating_sub(r_t).max(ilo[ax]);
+        }
+        (r_t, first[2], first[1], first[0], t)
+    }
+
+    /// The exact nearest-triangle distance, answered only when it is
+    /// `<= r_max`: `Some(d)` with the same bits [`TriIndex::nearest_triangle`]
+    /// returns whenever that distance is within `r_max`, `None` otherwise.
+    /// The bound is what lets a caller stop the search early - the refinement
+    /// bands (§92.2) only ever ask whether a leaf is inside a distance they
+    /// already know.
+    pub fn nearest_distance_within(&self, p: Vec3, r_max: Scalar) -> Option<Scalar> {
+        match &self.bvh {
+            Some(bvh) => {
+                let g = bvh.guard(p);
+                let mut best = Scalar::INFINITY;
+                bvh.visit_near(p, r_max + g, |t| {
+                    let d = self.dist_to_tri(p, t as usize);
+                    best = best.min(d);
+                    best.min(r_max) + g
+                });
+                if best <= r_max {
+                    Some(best)
+                } else {
+                    None
+                }
+            }
+            None => {
+                let (_, d) = self.nearest_triangle(p);
+                if d <= r_max {
+                    Some(d)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// All crossings of the line `{(t, y, z) : t in R}` with the surface,
     /// sorted by `t`, each with the triangle it pierced.
     ///
@@ -500,6 +642,201 @@ impl<'s> TriIndex<'s> {
         }
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         hits
+    }
+}
+
+/// Distance from `p` to the axis-aligned box `[lo, hi]`: the square root of
+/// the sum over the axes of the squared gap - zero on every axis `p` already
+/// spans, so 0 inside.
+pub fn box_distance(p: Vec3, lo: Vec3, hi: Vec3) -> Scalar {
+    let gap = |a: Scalar, l: Scalar, h: Scalar| {
+        if a < l {
+            l - a
+        } else if a > h {
+            a - h
+        } else {
+            0.0
+        }
+    };
+    let (dx, dy, dz) = (gap(p.x, lo.x, hi.x), gap(p.y, lo.y, hi.y), gap(p.z, lo.z, hi.z));
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// One node of a [`Bvh`]: the union box of its items, and either two
+/// children or a run of items.
+struct BvhNode {
+    lo: Vec3,
+    hi: Vec3,
+    /// Inner node: the node index of the left child. Leaf: the item run's
+    /// first index into [`Bvh::items`].
+    a: u32,
+    /// Inner node: the node index of the right child. Leaf: the item run's
+    /// length.
+    b: u32,
+    /// Items held; 0 marks an inner node.
+    count: u32,
+}
+
+/// A median-split bounding-volume hierarchy over axis-aligned boxes -
+/// Ericson 2005 ch. 6 read as a textbook. Deterministic by construction: the
+/// same input builds the same tree, and [`Bvh::visit_near`] walks it in a
+/// fixed order. The automesher (§92.2) builds one over a surface's
+/// triangles, whose small dense body defeats the §23.4 grid's shell walk;
+/// the grid keeps the authority on ties, the hierarchy only gets there
+/// faster.
+pub struct Bvh {
+    nodes: Vec<BvhNode>,
+    /// Item ids, reordered by the build; a leaf holds a run of them in
+    /// ascending id.
+    items: Vec<u32>,
+    /// Each item's own box, what a leaf re-checks before visiting.
+    item_boxes: Vec<(Vec3, Vec3)>,
+}
+
+impl Bvh {
+    /// Build over `boxes` - item `i` is `boxes[i]`. A node over more than
+    /// [`Bvh::LEAF`] items splits on the longest axis of the bounding box of
+    /// its items' box CENTRES (ties to the lowest axis), orders its items by
+    /// centre on that axis then id, and halves them; a node over at most
+    /// that many is a leaf holding its items in ascending id.
+    pub fn build(boxes: &[(Vec3, Vec3)]) -> Bvh {
+        let mut bvh = Bvh {
+            nodes: Vec::new(),
+            items: (0..boxes.len() as u32).collect(),
+            item_boxes: boxes.to_vec(),
+        };
+        if !boxes.is_empty() {
+            bvh.build_node(boxes, 0, boxes.len());
+        }
+        bvh
+    }
+
+    const LEAF: usize = 4;
+
+    fn build_node(&mut self, boxes: &[(Vec3, Vec3)], first: usize, last: usize) -> u32 {
+        let mut lo = boxes[self.items[first] as usize].0;
+        let mut hi = boxes[self.items[first] as usize].1;
+        for &it in &self.items[first..last] {
+            let (blo, bhi) = boxes[it as usize];
+            lo = lo.cmpt_min(blo);
+            hi = hi.cmpt_max(bhi);
+        }
+        let count = last - first;
+        if count <= Self::LEAF {
+            self.items[first..last].sort_unstable();
+            let idx = self.nodes.len() as u32;
+            self.nodes
+                .push(BvhNode { lo, hi, a: first as u32, b: count as u32, count: count as u32 });
+            return idx;
+        }
+        // The split axis: the longest extent of the box around the items'
+        // box centres, ties to the lowest axis.
+        let mut clo = Vec3::new(Scalar::INFINITY, Scalar::INFINITY, Scalar::INFINITY);
+        let mut chi = Vec3::new(Scalar::NEG_INFINITY, Scalar::NEG_INFINITY, Scalar::NEG_INFINITY);
+        for &it in &self.items[first..last] {
+            let (blo, bhi) = boxes[it as usize];
+            let c = Vec3::new(
+                0.5 * (blo.x + bhi.x),
+                0.5 * (blo.y + bhi.y),
+                0.5 * (blo.z + bhi.z),
+            );
+            clo = clo.cmpt_min(c);
+            chi = chi.cmpt_max(c);
+        }
+        let (ex, ey, ez) =
+            (chi.x - clo.x, chi.y - clo.y, chi.z - clo.z);
+        let axis = if ex >= ey && ex >= ez {
+            0
+        } else if ey >= ez {
+            1
+        } else {
+            2
+        };
+        self.items[first..last].sort_by(|&x, &y| {
+            let cx = |it: u32| {
+                let (blo, bhi) = boxes[it as usize];
+                0.5 * (blo.component(axis) + bhi.component(axis))
+            };
+            cx(x).total_cmp(&cx(y)).then(x.cmp(&y))
+        });
+        let mid = first + count / 2;
+        // The parent takes its slot BEFORE the children are built, so node 0
+        // is the root - what `visit_near`'s walk starts from.
+        let idx = self.nodes.len() as u32;
+        self.nodes.push(BvhNode { lo, hi, a: 0, b: 0, count: 0 });
+        self.nodes[idx as usize].a = self.build_node(boxes, first, mid);
+        self.nodes[idx as usize].b = self.build_node(boxes, mid, last);
+        idx
+    }
+
+    /// How many items the tree was built over.
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Whether the tree holds no items.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// The root node's box, or `None` on an empty tree.
+    pub fn root_box(&self) -> Option<(Vec3, Vec3)> {
+        self.nodes.first().map(|n| (n.lo, n.hi))
+    }
+
+    /// The slack a bounded query adds to a distance bound so that a triangle
+    /// exactly at the bound is never pruned by rounding in the box test:
+    /// 1e-9 scaled by 1, the root box's diagonal and how far `p` sits from
+    /// the origin.
+    pub fn guard(&self, p: Vec3) -> Scalar {
+        let m = p.x.abs().max(p.y.abs()).max(p.z.abs());
+        match self.nodes.first() {
+            Some(n) => 1e-9 * (1.0 + (n.hi - n.lo).mag() + m),
+            None => 1e-9 * (1.0 + m),
+        }
+    }
+
+    /// Visit the items whose boxes can touch the ball of radius `radius0`
+    /// about `p` - and everything a shrinking bound still allows: each call
+    /// `visit(item)` makes RETURNS the bound's new value, so the caller
+    /// tightens the search as better items come in. Nodes are skipped with
+    /// their whole subtree once their box sits past the current bound; at an
+    /// inner node the nearer child is entered first; a leaf visits its items
+    /// in ascending id.
+    pub fn visit_near(&self, p: Vec3, radius0: Scalar, mut visit: impl FnMut(u32) -> Scalar) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let mut radius = radius0;
+        let mut stack = vec![0u32];
+        while let Some(ni) = stack.pop() {
+            let n = &self.nodes[ni as usize];
+            if box_distance(p, n.lo, n.hi) > radius {
+                continue;
+            }
+            if n.count == 0 {
+                let ln = &self.nodes[n.a as usize];
+                let rn = &self.nodes[n.b as usize];
+                // The nearer child is entered first: push the farther one so
+                // it pops second.
+                if box_distance(p, ln.lo, ln.hi) <= box_distance(p, rn.lo, rn.hi) {
+                    stack.push(n.b);
+                    stack.push(n.a);
+                } else {
+                    stack.push(n.a);
+                    stack.push(n.b);
+                }
+            } else {
+                for k in 0..n.count {
+                    let item = self.items[n.a as usize + k as usize];
+                    let (blo, bhi) = self.item_boxes[item as usize];
+                    if box_distance(p, blo, bhi) > radius {
+                        continue;
+                    }
+                    radius = visit(item);
+                }
+            }
+        }
     }
 }
 
@@ -858,5 +1195,210 @@ mod tests {
 
         // Outside the bounding box: no crossings.
         assert!(idx.crossings_x(1.5, 0.5).is_empty());
+    }
+
+    /// A closed UV sphere - `bands` latitude bands of `segs` segments, both
+    /// pole caps fan-triangulated, wound outward - as a soup.
+    fn uv_sphere(c: Vec3, r: Scalar, bands: usize, segs: usize) -> Vec<SoupTri> {
+        let at = |k: usize, s: usize| {
+            let th = std::f64::consts::PI * k as f64 / bands as f64;
+            let ph = 2.0 * std::f64::consts::PI * (s % segs) as f64 / segs as f64;
+            Vec3::new(
+                (c.x as f64 + r as f64 * th.sin() * ph.cos()) as Scalar,
+                (c.y as f64 + r as f64 * th.sin() * ph.sin()) as Scalar,
+                (c.z as f64 + r as f64 * th.cos()) as Scalar,
+            )
+        };
+        let mut soup: Vec<SoupTri> = Vec::new();
+        for k in 0..bands {
+            for s in 0..segs {
+                if k == 0 {
+                    // North cap: fan from the pole, which is at(k, s) for
+                    // every s.
+                    soup.push((0u32, [at(0, s), at(1, s), at(1, s + 1)]));
+                } else if k == bands - 1 {
+                    // South cap: the mirrored winding.
+                    soup.push((0u32, [at(bands, s), at(bands - 1, s + 1), at(bands - 1, s)]));
+                } else {
+                    let (a, b, d) = (at(k, s), at(k + 1, s), at(k, s + 1));
+                    let cc = at(k + 1, s + 1);
+                    soup.push((0u32, [a, b, d]));
+                    soup.push((0u32, [b, cc, d]));
+                }
+            }
+        }
+        soup
+    }
+
+    /// The deterministic LCG the features tests use.
+    fn lcg_points(n: usize, scale: f64, shift: f64) -> Vec<Vec3> {
+        let mut s: u64 = 0x853C49E6748FEA9B;
+        let mut pts = Vec::with_capacity(n);
+        for _ in 0..n {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let u = ((s >> 11) as f64) / (1u64 << 53) as f64;
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let v = ((s >> 11) as f64) / (1u64 << 53) as f64;
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let w = ((s >> 11) as f64) / (1u64 << 53) as f64;
+            pts.push(Vec3::new(
+                (scale * u + shift) as Scalar,
+                (scale * v + shift) as Scalar,
+                (scale * w + shift) as Scalar,
+            ));
+        }
+        pts
+    }
+
+    /// The T1/T2 query points: the cube's lattice plus the sphere's LCG
+    /// cloud and its far corners.
+    fn t1_points() -> (Vec<Vec3>, Vec<Vec3>) {
+        let cube = (-4..=8i64)
+            .flat_map(|i| {
+                (-4..=8i64).flat_map(move |j| {
+                    (-4..=8i64).map(move |k| {
+                        Vec3::new(i as Scalar / 4.0, j as Scalar / 4.0, k as Scalar / 4.0)
+                    })
+                })
+            })
+            .collect();
+        let mut sphere = lcg_points(3000, 6.0, -3.0);
+        for &x in &[-10.0, 10.0] {
+            for &y in &[-10.0, 10.0] {
+                for &z in &[-10.0, 10.0] {
+                    sphere.push(Vec3::new(x, y, z));
+                }
+            }
+        }
+        (cube, sphere)
+    }
+
+    #[test]
+    fn the_bvh_index_answers_exactly_what_the_grid_answers() {
+        let (cube_pts, sphere_pts) = t1_points();
+
+        // (a) The unit cube at four cell hints, on a lattice dense enough to
+        // land on faces, edges and corners.
+        let cube = cube();
+        let mut tie_points = 0usize;
+        for &p in &cube_pts {
+            let mut min_d = Scalar::INFINITY;
+            let mut n_at_min = 0usize;
+            for t in 0..cube.tris.len() {
+                let tri = cube.tris[t];
+                let q = closest_point_on_triangle(
+                    p,
+                    cube.points[tri[0] as usize],
+                    cube.points[tri[1] as usize],
+                    cube.points[tri[2] as usize],
+                );
+                let d = (p - q).mag();
+                if d < min_d {
+                    min_d = d;
+                    n_at_min = 1;
+                } else if d == min_d {
+                    n_at_min += 1;
+                }
+            }
+            if n_at_min >= 2 {
+                tie_points += 1;
+            }
+        }
+        assert!(tie_points > 100, "only {tie_points} lattice ties - the tie path is not exercised");
+
+        for h in [0.25, 0.3, 0.5, 1.0] {
+            let grid = TriIndex::new(&cube, h).expect("cube grid");
+            let bvh = TriIndex::with_bvh(&cube, h).expect("cube bvh");
+            for &p in &cube_pts {
+                let (gt, gd) = grid.nearest_triangle(p);
+                let (bt, bd) = bvh.nearest_triangle(p);
+                assert_eq!(gt, bt, "cube hint {h}: index at ({},{},{})", p.x, p.y, p.z);
+                assert_eq!(gd.to_bits(), bd.to_bits(), "cube hint {h}: distance bits");
+                let (gq, gt2, gd2) = grid.closest_point(p);
+                let (bq, bt2b, bd2b) = bvh.closest_point(p);
+                assert_eq!(gt2, bt2b, "cube hint {h}: closest_point index");
+                for (a, b) in [(gq, bq), (Vec3::new(gd2, 0.0, 0.0), Vec3::new(bd2b, 0.0, 0.0))] {
+                    for ax in 0..3 {
+                        assert_eq!(
+                            a.component(ax).to_bits(),
+                            b.component(ax).to_bits(),
+                            "cube hint {h}: closest_point bits axis {ax}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // (b) A sphere whose dense body sits beside nothing - the opposite
+        // shape for the shell walk - at three hints, including one so coarse
+        // the grid collapses to a single bucket.
+        let sph_soup = uv_sphere(Vec3::new(0.3, -0.2, 0.1), 1.0, 24, 48);
+        let sph = Surface::from_soup(sph_soup, vec!["sph".into()]).expect("sphere builds");
+        assert!(sph.tris.len() > 2000, "the sphere must be dense: {}", sph.tris.len());
+        for h in [0.05, 0.4, 3.0] {
+            let grid = TriIndex::new(&sph, h).expect("sphere grid");
+            let bvh = TriIndex::with_bvh(&sph, h).expect("sphere bvh");
+            for &p in &sphere_pts {
+                let (gt, gd) = grid.nearest_triangle(p);
+                let (bt, bd) = bvh.nearest_triangle(p);
+                assert_eq!(gt, bt, "sphere hint {h}: index at ({},{},{})", p.x, p.y, p.z);
+                assert_eq!(gd.to_bits(), bd.to_bits(), "sphere hint {h}: distance bits");
+                let (gq, gt2, gd2) = grid.closest_point(p);
+                let (bq, bt2b, bd2b) = bvh.closest_point(p);
+                assert_eq!(gt2, bt2b, "sphere hint {h}: closest_point index");
+                assert_eq!(gd2.to_bits(), bd2b.to_bits(), "sphere hint {h}: distance bits");
+                for ax in 0..3 {
+                    assert_eq!(
+                        gq.component(ax).to_bits(),
+                        bq.component(ax).to_bits(),
+                        "sphere hint {h}: point bits axis {ax}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_distance_within_agrees_with_nearest_triangle() {
+        let (cube_pts, sphere_pts) = t1_points();
+        let cube = cube();
+        let sph_soup = uv_sphere(Vec3::new(0.3, -0.2, 0.1), 1.0, 24, 48);
+        let sph = Surface::from_soup(sph_soup, vec!["sph".into()]).expect("sphere builds");
+        for (surf, pts) in [(&cube, &cube_pts), (&sph, &sphere_pts)] {
+            for h in if surf.patch_names[0] == "cube" {
+                vec![0.25, 1.0]
+            } else {
+                vec![0.05, 3.0]
+            } {
+                let grid = TriIndex::new(surf, h).expect("grid");
+                let bvh = TriIndex::with_bvh(surf, h).expect("bvh");
+                for &p in pts {
+                    let (_, d) = grid.nearest_triangle(p);
+                    for &r in &[0.0, 0.01, 0.1, 0.5, 2.0] {
+                        for (name, idx) in [("grid", &grid), ("bvh", &bvh)] {
+                            match idx.nearest_distance_within(p, r) {
+                                Some(got) => {
+                                    assert!(
+                                        d <= r,
+                                        "{name} hint {h}: Some at r={r} but nearest is {d}"
+                                    );
+                                    assert_eq!(
+                                        got.to_bits(),
+                                        d.to_bits(),
+                                        "{name} hint {h}: bits at r={r}"
+                                    );
+                                }
+                                None => {
+                                    assert!(
+                                        d > r,
+                                        "{name} hint {h}: None at r={r} but nearest is {d}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
