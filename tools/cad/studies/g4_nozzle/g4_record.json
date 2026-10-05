@@ -2,7 +2,7 @@
   "version": "cad-g4/1",
   "reduced": true,
   "study_id": "g4_nozzle",
-  "lock_sha": "d53d204f0f266dd85a0699815bb7c9719efe9aa3db53fd60d48ca8157e4723e0",
+  "lock_sha": "ff4bdf62a96d1c9239957a54d787b7b5599c99badc4422302591a595840838d2",
   "binary": {
     "name": "ofgpu-lowmach",
     "path": "rust/target/gpu-pin/ofgpu-lowmach.exe",
@@ -10,7 +10,7 @@
   },
   "cfd_u": {
     "source": "tools/cad/cases/nozzle_nominal/nominal_record.json",
-    "sha256": "be69e94bbb3d11965546e91b41774032f0c68783238d64281a08358fff9925a3",
+    "sha256": "462f80e6b4c53e91040edce58d9139f6a7377b09267e31c6d1620b9ff6f6a560",
     "status": "OPEN",
     "fields_bit_identical": true,
     "gci_fine_known": false
@@ -18,7 +18,7 @@
   "start": {
     "name": "start",
     "level": "L1",
-    "eval_key": "208212c51f06aa3864f46cd173f3f604afb857cf808dbf47fce1b5f6c01cd198",
+    "eval_key": "851ce482ac84cab446108fa799e1a3fe16f324f136b4b421e467c100587fe286",
     "params": {
       "CR": 9.0,
       "D_i": 0.06,
@@ -30,28 +30,37 @@
       "upstream_role": "slip",
       "x_m": null
     },
-    "stage_reached": "mesh",
-    "solve_class": "not_run",
-    "reason_id": "EVAL-MESH",
-    "message": "gc6 false on check, tau; tau_min 0.027245, non_orth_max_deg 55.54",
-    "cells": 40376,
+    "stage_reached": "solve",
+    "solve_class": "unsteady",
+    "reason_id": "SOLVE-UNSTEADY",
+    "message": "the solve class is unsteady: ",
+    "cells": 40832,
     "mesh": {
       "gc6": {
         "volume": true,
         "areas": true,
-        "check": false,
-        "tau": false,
+        "check": true,
+        "tau": true,
         "first_cell": true,
         "cells": true,
         "types": true,
-        "pass": false
+        "pass": true
       },
-      "tau_min": 0.027245,
-      "non_orth_max_deg": 55.54
+      "tau_min": 0.082382,
+      "non_orth_max_deg": 55.599
     },
-    "solve": null,
-    "wall_s": null,
-    "gpu_shared": null,
+    "solve": {
+      "class": "unsteady",
+      "reason_id": "SOLVE-UNSTEADY",
+      "failed": [
+        "U_decades"
+      ],
+      "n_iter_lines": 25,
+      "log_sha256": "1956330450ae6c9af2e72ab4cd6e8a064910d57e6c8f145429f501e0adec8bb8",
+      "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+    },
+    "wall_s": 124.21027579996735,
+    "gpu_shared": false,
     "design_verdict": "not_evaluable",
     "n_hard_pass": 8,
     "n_hard_fail": 0,
@@ -160,7 +169,7 @@
     {
       "name": "start",
       "level": "L1",
-      "eval_key": "208212c51f06aa3864f46cd173f3f604afb857cf808dbf47fce1b5f6c01cd198",
+      "eval_key": "851ce482ac84cab446108fa799e1a3fe16f324f136b4b421e467c100587fe286",
       "params": {
         "CR": 9.0,
         "D_i": 0.06,
@@ -172,28 +181,37 @@
         "upstream_role": "slip",
         "x_m": null
       },
-      "stage_reached": "mesh",
-      "solve_class": "not_run",
-      "reason_id": "EVAL-MESH",
-      "message": "gc6 false on check, tau; tau_min 0.027245, non_orth_max_deg 55.54",
-      "cells": 40376,
+      "stage_reached": "solve",
+      "solve_class": "unsteady",
+      "reason_id": "SOLVE-UNSTEADY",
+      "message": "the solve class is unsteady: ",
+      "cells": 40832,
       "mesh": {
         "gc6": {
           "volume": true,
           "areas": true,
-          "check": false,
-          "tau": false,
+          "check": true,
+          "tau": true,
           "first_cell": true,
           "cells": true,
           "types": true,
-          "pass": false
+          "pass": true
         },
-        "tau_min": 0.027245,
-        "non_orth_max_deg": 55.54
+        "tau_min": 0.082382,
+        "non_orth_max_deg": 55.599
       },
-      "solve": null,
-      "wall_s": null,
-      "gpu_shared": null,
+      "solve": {
+        "class": "unsteady",
+        "reason_id": "SOLVE-UNSTEADY",
+        "failed": [
+          "U_decades"
+        ],
+        "n_iter_lines": 25,
+        "log_sha256": "1956330450ae6c9af2e72ab4cd6e8a064910d57e6c8f145429f501e0adec8bb8",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 124.21027579996735,
+      "gpu_shared": false,
       "design_verdict": "not_evaluable",
       "n_hard_pass": 8,
       "n_hard_fail": 0,
@@ -294,9 +312,831 @@
       ]
     },
     {
+      "name": "poly5_2",
+      "level": "L1",
+      "eval_key": "19476d6658d3b33c8dbdf8e700a5c2033793887337f84d570868a382ba033365",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 0.5269832713529468,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.3505683282855898,
+        "law": "poly5",
+        "t_wall": 0.008628911086358132,
+        "upstream_role": "slip",
+        "x_m": null
+      },
+      "stage_reached": "judge",
+      "solve_class": "steady",
+      "reason_id": null,
+      "message": "",
+      "cells": 40216,
+      "mesh": {
+        "gc6": {
+          "volume": true,
+          "areas": true,
+          "check": true,
+          "tau": true,
+          "first_cell": true,
+          "cells": true,
+          "types": true,
+          "pass": true
+        },
+        "tau_min": 0.083492,
+        "non_orth_max_deg": 49.863
+      },
+      "solve": {
+        "class": "steady",
+        "reason_id": null,
+        "failed": [],
+        "n_iter_lines": 25,
+        "log_sha256": "1a407f638bc2a29f9527b96ea8e4cb4d7551f0ca3a9c83abbf00dbbdc876c67d",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 110.72711380012333,
+      "gpu_shared": false,
+      "design_verdict": "infeasible",
+      "n_hard_pass": 11,
+      "n_hard_fail": 1,
+      "n_hard_ne": 0,
+      "objective": 0.0386303628468887,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "fail",
+          "reason_id": null,
+          "m": 0.06614482822373143,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.9729010039600623,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.008628911083200682,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.0386303628468887,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.07244696399634931,
+          "u": 0.0
+        }
+      ]
+    },
+    {
+      "name": "poly7_1",
+      "level": "L1",
+      "eval_key": "fd14117faa02abada606594941594502f9f3703e8c165348f37a2b2d23cf1490",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 0.571675842627883,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.5021268385462463,
+        "law": "poly7",
+        "t_wall": 0.009783799922093751,
+        "upstream_role": "slip",
+        "x_m": null
+      },
+      "stage_reached": "solve",
+      "solve_class": "unsteady",
+      "reason_id": "SOLVE-UNSTEADY",
+      "message": "the solve class is unsteady: ",
+      "cells": 40404,
+      "mesh": {
+        "gc6": {
+          "volume": true,
+          "areas": true,
+          "check": true,
+          "tau": true,
+          "first_cell": true,
+          "cells": true,
+          "types": true,
+          "pass": true
+        },
+        "tau_min": 0.082555,
+        "non_orth_max_deg": 51.923
+      },
+      "solve": {
+        "class": "unsteady",
+        "reason_id": "SOLVE-UNSTEADY",
+        "failed": [
+          "U_decades"
+        ],
+        "n_iter_lines": 25,
+        "log_sha256": "905f95c44091ceaeba15077791a3d59f271e289afe52552d937bc084dd780578",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 123.30765039986,
+      "gpu_shared": false,
+      "design_verdict": "not_evaluable",
+      "n_hard_pass": 8,
+      "n_hard_fail": 0,
+      "n_hard_ne": 4,
+      "objective": 0.04434308732859793,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.009783799921135691,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.04434308732859793,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        }
+      ]
+    },
+    {
+      "name": "cubic_matched_0",
+      "level": "L1",
+      "eval_key": "29f7d4e14110c1e66478e2bc506d4d497b82560ff9bb7a0438c8fcd81d9c2678",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 0.6219172831624746,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.5873421200085431,
+        "law": "cubic_matched",
+        "t_wall": 0.00464891172759235,
+        "upstream_role": "slip",
+        "x_m": 0.2379245221614838
+      },
+      "stage_reached": "mesh",
+      "solve_class": "not_run",
+      "reason_id": "WEDGE-TOPO",
+      "message": "wedge_mesh refused with WEDGE-TOPO: block 3 has corners at x [np.float64(0.0074630073979494085), np.float64(0.007463007397949695), np.float64(0.008878162345224), np.float64(0.011194511096924261), np.float64(0.011194511096924542)], want 4 spanning 0.007463007397949695..0.011194511096924542",
+      "cells": null,
+      "mesh": null,
+      "solve": null,
+      "wall_s": null,
+      "gpu_shared": null,
+      "design_verdict": "not_evaluable",
+      "n_hard_pass": 8,
+      "n_hard_fail": 0,
+      "n_hard_ne": 4,
+      "objective": 0.04906187938991935,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.004648911725567036,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.04906187938991935,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        }
+      ]
+    },
+    {
+      "name": "cubic_matched_3",
+      "level": "L1",
+      "eval_key": "54204321fd9a16ff4f893735b01a3fdf24193c1a9ca298dc6a42bfad9966dbbf",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 0.7647978430613875,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.7659226225223392,
+        "law": "cubic_matched",
+        "t_wall": 0.008581444502808153,
+        "upstream_role": "slip",
+        "x_m": 0.6083393512293698
+      },
+      "stage_reached": "mesh",
+      "solve_class": "not_run",
+      "reason_id": "WEDGE-TOPO",
+      "message": "wedge_mesh refused with WEDGE-TOPO: block 7 has corners at x [np.float64(0.02753272235020981), np.float64(0.027532722350209947), np.float64(0.02791539742018), np.float64(0.03212150940857825), np.float64(0.032121509408578275)], want 4 spanning 0.027532722350209947..0.032121509408578275",
+      "cells": null,
+      "mesh": null,
+      "solve": null,
+      "wall_s": null,
+      "gpu_shared": null,
+      "design_verdict": "not_evaluable",
+      "n_hard_pass": 8,
+      "n_hard_fail": 0,
+      "n_hard_ne": 4,
+      "objective": 0.061206323034129984,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.008581444500595682,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.061206323034129984,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        }
+      ]
+    },
+    {
+      "name": "poly3_1",
+      "level": "L1",
+      "eval_key": "451afb7aac249210e760c234f5e31cc54fd5333bd1aeea4c151a5ac065eeb356",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 0.9804832860827446,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.778122894698754,
+        "law": "poly3",
+        "t_wall": 0.006000287075527013,
+        "upstream_role": "slip",
+        "x_m": null
+      },
+      "stage_reached": "judge",
+      "solve_class": "steady",
+      "reason_id": null,
+      "message": "",
+      "cells": 40800,
+      "mesh": {
+        "gc6": {
+          "volume": true,
+          "areas": true,
+          "check": true,
+          "tau": true,
+          "first_cell": true,
+          "cells": true,
+          "types": true,
+          "pass": true
+        },
+        "tau_min": 0.084529,
+        "non_orth_max_deg": 26.997
+      },
+      "solve": {
+        "class": "steady",
+        "reason_id": null,
+        "failed": [],
+        "n_iter_lines": 25,
+        "log_sha256": "31039ff8f05704e9d936fb1b976020bf1095e0c713445fb0520ed8d29fc4a5ff",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 126.96960830013268,
+      "gpu_shared": false,
+      "design_verdict": "infeasible",
+      "n_hard_pass": 11,
+      "n_hard_fail": 1,
+      "n_hard_ne": 0,
+      "objective": 0.07439145505893974,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "fail",
+          "reason_id": null,
+          "m": 0.039362070993325,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.976856190925173,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.006000287075001912,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.07439145505893974,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06942103123129806,
+          "u": 0.0
+        }
+      ]
+    },
+    {
+      "name": "poly7_0",
+      "level": "L1",
+      "eval_key": "104bf0fdcc74621a52098dfc8371720cfaa99ba86b4dbe7c47271903a3af96ce",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 1.0074342973530293,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.821757207158953,
+        "law": "poly7",
+        "t_wall": 0.004064769787713886,
+        "upstream_role": "slip",
+        "x_m": null
+      },
+      "stage_reached": "solve",
+      "solve_class": "unsteady",
+      "reason_id": "SOLVE-UNSTEADY",
+      "message": "the solve class is unsteady: ",
+      "cells": 39488,
+      "mesh": {
+        "gc6": {
+          "volume": true,
+          "areas": true,
+          "check": true,
+          "tau": true,
+          "first_cell": true,
+          "cells": true,
+          "types": true,
+          "pass": true
+        },
+        "tau_min": 0.082958,
+        "non_orth_max_deg": 35.876
+      },
+      "solve": {
+        "class": "unsteady",
+        "reason_id": "SOLVE-UNSTEADY",
+        "failed": [
+          "U_decades"
+        ],
+        "n_iter_lines": 25,
+        "log_sha256": "840055aa5eb35d0523e1d9091897f9d3a29e0615d679281530e1fcc0ab0090e4",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 136.74379900004715,
+      "gpu_shared": false,
+      "design_verdict": "not_evaluable",
+      "n_hard_pass": 8,
+      "n_hard_fail": 0,
+      "n_hard_ne": 4,
+      "objective": 0.07688120198436077,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.004064769786153253,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.07688120198436077,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        }
+      ]
+    },
+    {
       "name": "nominal_poly5_ld1",
       "level": "L1",
-      "eval_key": "12660593c6d76476148af98a9e24832814395c3308725df604f65233c2aa9299",
+      "eval_key": "b7f986657ef57a926d24a62cf3845e103e43d68d55c5db833e33df37c3bb29ab",
       "params": {
         "CR": 9.0,
         "D_i": 0.06,
@@ -312,7 +1152,7 @@
       "solve_class": "steady",
       "reason_id": null,
       "message": "",
-      "cells": 40560,
+      "cells": 40460,
       "mesh": {
         "gc6": {
           "volume": true,
@@ -324,22 +1164,22 @@
           "types": true,
           "pass": true
         },
-        "tau_min": 0.081633,
-        "non_orth_max_deg": 31.983
+        "tau_min": 0.083426,
+        "non_orth_max_deg": 31.982
       },
       "solve": {
         "class": "steady",
         "reason_id": null,
         "failed": [],
         "n_iter_lines": 25,
-        "log_sha256": "4c6cb4d6e78122eed585631f3e7c0390c61e4a3549d898fd93bacd15e096ed65",
+        "log_sha256": "c5bcda6f1a82f14644183bd2546f07f2c165e53715eec65ab7ddc1b6305cb574",
         "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
       },
-      "wall_s": 293.0310821000021,
-      "gpu_shared": true,
+      "wall_s": 146.60624399990775,
+      "gpu_shared": false,
       "design_verdict": "infeasible",
-      "n_hard_pass": 10,
-      "n_hard_fail": 2,
+      "n_hard_pass": 11,
+      "n_hard_fail": 1,
       "n_hard_ne": 0,
       "objective": 0.07000000000000006,
       "verdicts": [
@@ -368,14 +1208,14 @@
           "req_id": "REQ-004",
           "verdict": "fail",
           "reason_id": null,
-          "m": 0.0172877032312891,
+          "m": 0.018243536689665763,
           "u": 0.0
         },
         {
           "req_id": "REQ-005",
-          "verdict": "fail",
+          "verdict": "pass",
           "reason_id": null,
-          "m": 0.9592544563638171,
+          "m": 0.9716755428516375,
           "u": 0.0
         },
         {
@@ -431,23 +1271,23 @@
           "req_id": "SYS-MACH",
           "verdict": "pass",
           "reason_id": null,
-          "m": 0.06959646256374294,
+          "m": 0.0687071016529543,
           "u": 0.0
         }
       ]
     },
     {
-      "name": "probe_poly7_ld075",
+      "name": "poly5_0",
       "level": "L1",
-      "eval_key": "e9a7c1b227eff00f4628fb06f7ed87f820e468c786a19ff91b438f6980417e76",
+      "eval_key": "6bea27f2d373845b098d236eec95cf4fb1f434a0dff2a18c71ee48e047ed7d18",
       "params": {
         "CR": 9.0,
         "D_i": 0.06,
-        "L_over_Di": 0.75,
+        "L_over_Di": 1.4292007582262158,
         "Lu_over_Di": 0.5,
-        "Lx_over_De": 0.5,
-        "law": "poly7",
-        "t_wall": 0.004,
+        "Lx_over_De": 0.514404539950192,
+        "law": "poly5",
+        "t_wall": 0.0059362090015783915,
         "upstream_role": "slip",
         "x_m": null
       },
@@ -455,7 +1295,7 @@
       "solve_class": "steady",
       "reason_id": null,
       "message": "",
-      "cells": 40380,
+      "cells": 40488,
       "mesh": {
         "gc6": {
           "volume": true,
@@ -467,24 +1307,24 @@
           "types": true,
           "pass": true
         },
-        "tau_min": 0.052316,
-        "non_orth_max_deg": 44.171
+        "tau_min": 0.084011,
+        "non_orth_max_deg": 23.601
       },
       "solve": {
         "class": "steady",
         "reason_id": null,
         "failed": [],
         "n_iter_lines": 25,
-        "log_sha256": "e04fc712edae1ebcff9e7e49f8845059dfa2fc0eccb97633ccaf67a7781dec5b",
+        "log_sha256": "b302feed416e10ef7368b21dbb2b320f48d9e6ec1d8db9dca7756548fd18b4d8",
         "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
       },
-      "wall_s": 155.50128099997528,
-      "gpu_shared": true,
-      "design_verdict": "infeasible",
-      "n_hard_pass": 10,
-      "n_hard_fail": 2,
+      "wall_s": 168.886937599862,
+      "gpu_shared": false,
+      "design_verdict": "feasible",
+      "n_hard_pass": 12,
+      "n_hard_fail": 0,
       "n_hard_ne": 0,
-      "objective": 0.05499999999999994,
+      "objective": 0.09604013629257668,
       "verdicts": [
         {
           "req_id": "REQ-001",
@@ -509,30 +1349,30 @@
         },
         {
           "req_id": "REQ-004",
-          "verdict": "fail",
+          "verdict": "pass",
           "reason_id": null,
-          "m": 0.02089680210993721,
+          "m": 0.007703845413445437,
           "u": 0.0
         },
         {
           "req_id": "REQ-005",
-          "verdict": "fail",
+          "verdict": "pass",
           "reason_id": null,
-          "m": 0.9561258446778159,
+          "m": 0.9677868868627333,
           "u": 0.0
         },
         {
           "req_id": "REQ-006",
           "verdict": "pass",
           "reason_id": null,
-          "m": 0.003999999995499257,
+          "m": 0.005936209001246233,
           "u": 1e-08
         },
         {
           "req_id": "REQ-007",
           "verdict": "pass",
           "reason_id": null,
-          "m": 0.05499999999999994,
+          "m": 0.09604013629257668,
           "u": 1e-09
         },
         {
@@ -574,7 +1414,150 @@
           "req_id": "SYS-MACH",
           "verdict": "pass",
           "reason_id": null,
-          "m": 0.07070512756721928,
+          "m": 0.06875185710454168,
+          "u": 0.0
+        }
+      ]
+    },
+    {
+      "name": "poly3_0",
+      "level": "L1",
+      "eval_key": "22d8bd854f01264b53b356921001742be09f9b0412519197e61f0c135fce5eca",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 1.3498692698776722,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.518624788383022,
+        "law": "poly3",
+        "t_wall": 0.004930682034231723,
+        "upstream_role": "slip",
+        "x_m": null
+      },
+      "stage_reached": "judge",
+      "solve_class": "steady",
+      "reason_id": null,
+      "message": "",
+      "cells": 39088,
+      "mesh": {
+        "gc6": {
+          "volume": true,
+          "areas": true,
+          "check": true,
+          "tau": true,
+          "first_cell": true,
+          "cells": true,
+          "types": true,
+          "pass": true
+        },
+        "tau_min": 0.084542,
+        "non_orth_max_deg": 20.307
+      },
+      "solve": {
+        "class": "steady",
+        "reason_id": null,
+        "failed": [],
+        "n_iter_lines": 25,
+        "log_sha256": "64b009c05ec87d9ce567e4948c467ce267a0092197b8ba83fa1be4da148f18b2",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 131.38474599993788,
+      "gpu_shared": false,
+      "design_verdict": "infeasible",
+      "n_hard_pass": 11,
+      "n_hard_fail": 1,
+      "n_hard_ne": 0,
+      "objective": 0.09136465196032084,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "fail",
+          "reason_id": null,
+          "m": 0.02331902579231937,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.9739281166879554,
+          "u": 0.0
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.004930682032730908,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.09136465196032084,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06865903370361313,
           "u": 0.0
         }
       ]
@@ -590,6 +1573,140 @@
     "stable_objective": null,
     "last_decision": null,
     "n_iterations": 1
+  },
+  "prefilter_subset": {
+    "n": 16,
+    "n_pass": 12,
+    "rows": [
+      {
+        "law": "poly3",
+        "sobol_index": 0,
+        "params_sha": "c0fa558e199878fde094a100d5a53ef5a2d5f7e72861ababd748833f287ee6ea",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.09136465196032084
+      },
+      {
+        "law": "poly3",
+        "sobol_index": 1,
+        "params_sha": "4f951412d2c8362514f139973e1e39a0d3c4301e6af3ae95106fedfc84c16100",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.07439145505893974
+      },
+      {
+        "law": "poly3",
+        "sobol_index": 2,
+        "params_sha": "a8dc2b057ab2e4067f8ecd8748baf8446f20d1440549903ba373faab9bbf00c3",
+        "status": "refused",
+        "rule_id": "REQ-006",
+        "objective": 0.03841949117835619
+      },
+      {
+        "law": "poly3",
+        "sobol_index": 3,
+        "params_sha": "0678d4372f22b4f49241ba89a13fe3bc663062becfbf992d57155d6a08cb27e0",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.08616403551306573
+      },
+      {
+        "law": "poly5",
+        "sobol_index": 0,
+        "params_sha": "ed1154d86bcbca94555589c86355cb588d8af99a0b8374199463b4fea45f23d4",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.09604013629257668
+      },
+      {
+        "law": "poly5",
+        "sobol_index": 1,
+        "params_sha": "fb6b083d4259bb2156452845b95b2fa94e9c0a154d970f78ff001a7ffbf4d288",
+        "status": "refused",
+        "rule_id": "REQ-006",
+        "objective": 0.0667176342941822
+      },
+      {
+        "law": "poly5",
+        "sobol_index": 2,
+        "params_sha": "f33d8b17161898c39a6828201ea495b43e712e721f7d42aacf39c687c35e9f77",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.0386303628468887
+      },
+      {
+        "law": "poly5",
+        "sobol_index": 3,
+        "params_sha": "dae54b6ad9084ab627cf44a490788ef9fc3447927cb9b74a309a9b6df98080de",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.08852575019467612
+      },
+      {
+        "law": "poly7",
+        "sobol_index": 0,
+        "params_sha": "29d4dbd31d20a6da84922c0209696196bfe6dc6bcc41cc46bc77a1dcd75e26ea",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.07688120198436077
+      },
+      {
+        "law": "poly7",
+        "sobol_index": 1,
+        "params_sha": "3d665b444917974a501ac60ef14906be345be755b7c15d8300c560be1801fce9",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.04434308732859793
+      },
+      {
+        "law": "poly7",
+        "sobol_index": 2,
+        "params_sha": "5cca53506b1eec7529935bd6ee803ae964d112abe4dc586e92ce370d41e8f25d",
+        "status": "refused",
+        "rule_id": "REQ-006",
+        "objective": 0.071784489452839
+      },
+      {
+        "law": "poly7",
+        "sobol_index": 3,
+        "params_sha": "d6330d849de8f17a098f186ad8792e952c363750ba1c39f82502914789ecd2ef",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.09238612858578565
+      },
+      {
+        "law": "cubic_matched",
+        "sobol_index": 0,
+        "params_sha": "799a211154e0a9447e3ce20883a1de110a9759da90b2f58765ae5952b51b4b57",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.04906187938991935
+      },
+      {
+        "law": "cubic_matched",
+        "sobol_index": 1,
+        "params_sha": "410a09f088076a0f0544549028e6d9c82948e3798c0d062aebaf49b190ee7307",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.0856549406889826
+      },
+      {
+        "law": "cubic_matched",
+        "sobol_index": 2,
+        "params_sha": "f3f2905398f9b243496743dee03c4871156910c67b8c31d0ae2b99e3aff550bb",
+        "status": "refused",
+        "rule_id": "REQ-006",
+        "objective": 0.08464554835110905
+      },
+      {
+        "law": "cubic_matched",
+        "sobol_index": 3,
+        "params_sha": "1e130a5d034db814ed4981602cfca61d68826bcc96837b74d6dda4f67fcf7909",
+        "status": "pass",
+        "rule_id": null,
+        "objective": 0.061206323034129984
+      }
+    ]
   },
   "replay": {
     "status": "NOT_RUN",

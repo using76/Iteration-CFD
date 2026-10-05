@@ -84,7 +84,8 @@ INPUT_KEYS_TURB_PIPE = ("case.json", "polyMesh/boundary", "polyMesh/faces", "pol
                         "polyMesh/owner", "polyMesh/points", "fields/U", "fields/p", "fields/nut")
 INPUT_KEYS_TURB_NOZZLE = INPUT_KEYS_TURB_PIPE + ("geom/geom.json", "geom/tags.json")
 DOC_KEYS = ("version", "status", "reason_id", "message", "time", "inputs", "mesh_fidelity", "wedge",
-            "operating_point", "units", "stations", "exit_profile", "metrics", "momentum", "reversal", "edge")
+            "operating_point", "units", "stations", "exit_profile", "metrics", "momentum", "reversal", "edge",
+            "boundary_flux")
 MFID_KEYS = ("status", "reason_id", "fields", "theta_mesh_rad", "scale_pass", "report_sha256")
 WEDGE_KEYS = ("theta_mesh_rad", "factor", "factor_formula", "inlet_area_mesh_m2", "inlet_area_geom_m2",
               "inlet_area_rel", "sin_ratio_minus_1")
@@ -97,6 +98,14 @@ METRIC_KEYS = ("value", "unit", "repr", "where", "reason_id", "definition")
 MOMENTUM_KEYS = ("x_a_m", "x_b_m", "I_a", "I_b", "W", "P_a", "P_b", "residual")
 REVERSAL_KEYS = ("n_wall_cells", "n_reversed", "n_bands", "n_sign_changes", "bands_x_m", "area_fraction")
 EDGE_KEYS = ("p0_core", "x_m", "r_wall_m", "U_edge_m_s", "n_undefined")
+PRESCRIBED_MESH = ("empty", "symmetry", "symmetryPlane", "wedge")     # mesh.rs:84 + the empty kind
+PRESCRIBED_U = ("fixedValue", "noSlip")                                # fr = 1 conditions
+BFLUX_KEYS = ("patches", "Q_net_m3_s", "Q_other_m3_s", "other_rel", "net_rel", "method")
+BFLUX_ROW_KEYS = ("mesh_type", "U_bc", "rule", "Q_m3_s")
+BFLUX_METHOD = ("solver rule (momentum.cu momFluxIsPrescribed): prescribed when the mesh type is empty, symmetry, "
+                "symmetryPlane or wedge or U is fixedValue/noSlip, Q = F sum(U_b . Sf) with U_b by face_values; "
+                "otherwise owner, Q = F sum(U_P . Sf), the owner cell's flux standing for HbyA_P . Sf - rAU_P |Sf| "
+                "snGrad(p), whose rAU the written fields do not carry")
 ENTRY_KEYS = ("x_target_m", "x_m", "x_inlet_m", "R_m", "n_faces", "U_c_m_s", "edge_rank", "y_edge_m", "theta_m", "dstar_m", "H")
 METRICS = (   # (name, unit, where, definition) - the order of the doc's metrics and of records()
     ("Q_in", "m3/s", ["inlet"], "-F sum(U_f . Sf) over the inlet patch"),
@@ -443,7 +452,9 @@ def read_nut(path, case_dir, case, kind, n_cells, patch_sizes):
 
 
 def face_values(mesh, field, name):
-    """The values on one patch's faces by the rule of (C5) (its value; noSlip zero; slip tangential; else owner)."""
+    """The values on one patch's faces by the rule of (C5) (its value; noSlip zero; the Symmetry family
+    tangential - slip, symmetry, symmetryPlane and wedge, which the solver's field.rs:431 maps to one
+    condition; else owner)."""
     st, nf, _t = mesh["patch_range"][name]
     row = field["patches"][name]
     if row["value"] is not None:
@@ -452,7 +463,7 @@ def face_values(mesh, field, name):
     vector = field["internal"].ndim == 2 and field["internal"].shape[1] == 3
     if vector and ftype == "noSlip":
         return np.zeros((nf, 3))
-    if vector and ftype == "slip":
+    if vector and ftype in ("slip", "symmetry", "symmetryPlane", "wedge"):
         v = field["internal"][mesh["owner"][st:st + nf]]
         Sf = mesh["Sf"][st:st + nf]
         n = Sf / np.sqrt(Sf[:, 0] ** 2 + Sf[:, 1] ** 2 + Sf[:, 2] ** 2)[:, None]
@@ -466,6 +477,30 @@ def patch_flux(mesh, U, name):
     uv = face_values(mesh, U, name)
     Sf = mesh["Sf"][st:st + nf]
     return float(np.sum(uv[:, 0] * Sf[:, 0] + uv[:, 1] * Sf[:, 1] + uv[:, 2] * Sf[:, 2]))
+
+
+def boundary_flux(mesh, U, factor):
+    """The solver-rule flux of every boundary patch, outward positive, scaled by the wedge factor (BFLUX_KEYS)."""
+    patches = {}
+    for name, rng in mesh["patch_range"].items():
+        st, nf, mesh_type = rng
+        u_bc = U["patches"][name]["type"]
+        prescribed = mesh_type in PRESCRIBED_MESH or u_bc in PRESCRIBED_U
+        if prescribed:
+            ub = face_values(mesh, U, name)
+        else:
+            ub = U["internal"][mesh["owner"][st:st + nf]]
+        Sf = mesh["Sf"][st:st + nf]
+        q = factor * float(np.sum(ub[:, 0] * Sf[:, 0] + ub[:, 1] * Sf[:, 1] + ub[:, 2] * Sf[:, 2]))
+        patches[name] = {"mesh_type": mesh_type, "U_bc": u_bc,
+                         "rule": "prescribed" if prescribed else "owner", "Q_m3_s": q}
+    q_net = sum(row["Q_m3_s"] for row in patches.values())
+    q_other = sum(row["Q_m3_s"] for name, row in patches.items() if name not in ("inlet", "outlet"))
+    q_in = None if "inlet" not in patches else -patches["inlet"]["Q_m3_s"]
+    other_rel = None if q_in is None or q_in == 0 else q_other / q_in
+    net_rel = None if q_in is None or q_in == 0 else q_net / q_in
+    return {"patches": patches, "Q_net_m3_s": q_net, "Q_other_m3_s": q_other,
+            "other_rel": other_rel, "net_rel": net_rel, "method": BFLUX_METHOD}
 
 
 def _dot3(x, y):
@@ -1455,6 +1490,7 @@ def _post(case_dir, time_name, geom_dir, between_hook, inputs):
                               "nu_m2_s": op["nu_m2_s"], "Q_case_m3_s": op["Q_m3_s"]}
     doc["units"] = {"U_dimensions": dims_u, "p_dimensions": dims_p, "p_kind": p_kind}
     doc.update(computed)
+    doc["boundary_flux"] = boundary_flux(mesh, U, factor)
     return doc
 
 
@@ -1734,7 +1770,7 @@ def _t1(cdir, gdir):
     assert d_c <= 1e-15 and d_v <= 1e-12, (d_c, d_v)
     lays = layers(mesh)
     assert len(lays) == 515, len(lays)
-    assert set(len(lay["faces"]) for lay in lays) == {30}, sorted(set(len(lay["faces"]) for lay in lays))
+    assert set(len(lay["faces"]) for lay in lays) == {34}, sorted(set(len(lay["faces"]) for lay in lays))
     tags = common.read_json(os.path.join(gdir, "tags.json"))
     planes = dict((q["name"], q["x"]) for q in tags["planes"])
     xs = [lay["x"] for lay in lays]
@@ -1948,7 +1984,7 @@ def _t6(mesh, doc, gdir, cdir, case):
     oc = mesh["owner"][wf]
     order = np.lexsort((wf, mesh["C"][oc, 0]))
     cells = oc[order]
-    assert len(np.unique(cells)) == len(cells) == 900, len(cells)
+    assert len(np.unique(cells)) == len(cells) == 738, len(cells)
 
     def run(ranks):
         u = u_field
@@ -2322,6 +2358,56 @@ def _t13(td, gdir, cdir, doc7):
                             env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         assert pr.returncode == 2, (argv, pr.returncode)
     print("[ok] determinism and the CLI: identical bytes, no path, exits 0 / 1 / 2")
+
+
+def _t22(mesh, case):
+    """The solver's boundary-flux rule (G1-MASS): the Symmetry family projects tangential, a prescribed
+    patch's Q is its projected (or value) flux, an owner patch leaks the owner cell's flux - the leak the
+    CAD-20 slip_upstream=patch typing produced, now measured by the doc's own boundary_flux block."""
+    factor = 2.0 * math.pi / 0.08726646259971649
+    n = mesh["n_cells"]
+    types = _fx_types_wedge(case)
+    U_a = {"dimensions": DIMS_U, "internal": np.tile(np.array([0.0, -1.0, 0.0]), (n, 1)),
+           "patches": dict((nm, {"type": ut, "value": None}) for nm, (ut, _pt) in types.items())}
+
+    def proj(name, u):
+        st, nf, _t = mesh["patch_range"][name]
+        Sf = mesh["Sf"][st:st + nf]
+        nn = Sf / np.sqrt(Sf[:, 0] ** 2 + Sf[:, 1] ** 2 + Sf[:, 2] ** 2)[:, None]
+        got = face_values(mesh, U_a, name)
+        assert np.abs(np.sum(got * nn, axis=1)).max() <= 1e-14, name
+        assert np.abs(got - (u[None, :] - np.sum(u * nn, axis=1)[:, None] * nn)).max() <= 1e-14, name
+
+    proj("slip_upstream", np.array([0.0, -1.0, 0.0]))
+    proj("wedge_front", np.array([0.0, -1.0, 0.0]))
+    rows = boundary_flux(mesh, U_a, factor)["patches"]
+    assert rows["slip_upstream"]["rule"] == "prescribed" \
+        and abs(rows["slip_upstream"]["Q_m3_s"]) <= 1e-15, rows["slip_upstream"]
+    for side in ("wedge_front", "wedge_back"):
+        assert rows[side]["rule"] == "prescribed" and abs(rows[side]["Q_m3_s"]) <= 1e-15, rows[side]
+    assert rows["wall_nozzle"]["rule"] == "prescribed" and rows["wall_nozzle"]["Q_m3_s"] == 0.0, \
+        rows["wall_nozzle"]
+    st, nf, _t = mesh["patch_range"]["slip_upstream"]
+    mesh_c = dict(mesh, patch_range=dict(mesh["patch_range"], slip_upstream=(st, nf, "patch")))
+    U_c = dict(U_a, patches=dict(U_a["patches"], slip_upstream={"type": "slip", "value": None}))
+    q_own = boundary_flux(mesh_c, U_c, factor)["patches"]["slip_upstream"]
+    want_q = -0.005653072602547545
+    assert q_own["rule"] == "owner" and abs(q_own["Q_m3_s"] / want_q - 1.0) <= 1e-12, q_own
+    U_d = {"dimensions": DIMS_U, "internal": np.tile(np.array([2.5, 0.0, 0.0]), (n, 1)),
+           "patches": dict((nm, {"type": ut, "value": None}) for nm, (ut, _pt) in types.items())}
+    for nm, ut in (("inlet", "fixedValue"), ("outlet", "inletOutlet")):
+        stn, nfn, _t = mesh["patch_range"][nm]
+        U_d["patches"][nm] = {"type": ut, "value": np.tile(np.array([2.5, 0.0, 0.0]), (nfn, 1))}
+    bd = boundary_flux(mesh, U_d, factor)
+    rd = bd["patches"]
+    assert abs(bd["Q_other_m3_s"]) <= 1e-15 and abs(bd["other_rel"]) <= 1e-15, \
+        (bd["Q_other_m3_s"], bd["other_rel"])
+    assert bd["Q_net_m3_s"] == rd["outlet"]["Q_m3_s"] + rd["inlet"]["Q_m3_s"], bd["Q_net_m3_s"]
+    assert sorted(bd) == sorted(BFLUX_KEYS), sorted(bd)
+    for row in rd.values():
+        assert sorted(row) == sorted(BFLUX_ROW_KEYS), sorted(row)
+    print("[ok] T22 boundary_flux: slip prescribed |Q| <= 1e-15, owner Q %r (want %r), other_rel %r"
+          % (q_own["Q_m3_s"], want_q, bd["other_rel"]))
 
 
 def _t14(pcase, case):
@@ -2790,6 +2876,7 @@ def selftest() -> None:
         _t10(td, gdir, cdir, case, mesh, doc7, u_field)
         _t12(td, gdir, cdir, case)
         _t13(td, gdir, cdir, doc7)
+        _t22(mesh, case)
         del p_field
         ttd = os.path.join(td, "turb")
         gt, pcase, ncase = _fx_turb_chain(ttd)
