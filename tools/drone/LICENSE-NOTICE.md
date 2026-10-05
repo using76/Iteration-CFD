@@ -17,6 +17,10 @@
 | `isaac_probe.py` | no (isaacsim, omni, carb at run time) | Prosperity Public License 3.0.0 |
 | `post.py` | no | Prosperity Public License 3.0.0 |
 | `render.py` | yes (bpy, mathutils) | GPL-2.0-or-later |
+| `video_assets.py` | no | Prosperity Public License 3.0.0 |
+| `video_audio.py` | no | Prosperity Public License 3.0.0 |
+| `video/` (HyperFrames HTML) | no | Prosperity Public License 3.0.0 |
+| `VIDEO.md` | - | Prosperity Public License 3.0.0 |
 | `LICENSE-NOTICE.md` | - | Prosperity Public License 3.0.0 |
 
 ## Why `sim_geom.py` is GPL-2.0-or-later

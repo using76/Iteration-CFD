@@ -1,0 +1,200 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>bulc</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #070b10;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #bulc-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #bulc-wrap .scene {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        #bulc-s2, #bulc-s3, #bulc-s4, #bulc-s5, #bulc-s6, #bulc-s7 {
+          opacity: 0;
+        }
+        #bulc-grad {
+          position: absolute;
+          inset: 0;
+          height: 320px;
+          background: linear-gradient(rgba(7, 11, 16, 0.85), rgba(7, 11, 16, 0));
+        }
+        #bulc-brand {
+          position: absolute;
+          left: 96px;
+          top: 72px;
+          display: flex;
+          align-items: center;
+          gap: 26px;
+          opacity: 0;
+        }
+        #bulc-brand img {
+          width: 88px;
+          height: 88px;
+          display: block;
+        }
+        #bulc-name {
+          font-size: 72px;
+          font-weight: 800;
+          color: #f1f3f5;
+          line-height: 1.1;
+        }
+        #bulc-sub {
+          font-size: 26px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          margin-top: 4px;
+        }
+        #bulc-src-label {
+          position: absolute;
+          right: 72px;
+          top: 72px;
+          text-align: right;
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.45;
+          background: rgba(7, 11, 16, 0.78);
+          border-radius: 10px;
+          padding: 8px 14px;
+          opacity: 0;
+        }
+        #bulc-policy {
+          position: absolute;
+          left: 1240px;
+          top: 300px;
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          background: rgba(7, 11, 16, 0.78);
+          border-radius: 10px;
+          padding: 8px 14px;
+          opacity: 0;
+        }
+        #bulc-chips {
+          position: absolute;
+          left: 96px;
+          top: 300px;
+          display: flex;
+          gap: 18px;
+        }
+        #bulc-chips .chip {
+          font-size: 28px;
+          font-weight: 700;
+          color: #f1f3f5;
+          line-height: 1.2;
+          border: 1px solid rgba(20, 184, 166, 0.6);
+          border-radius: 8px;
+          padding: 8px 18px;
+          opacity: 0;
+        }
+        #bulc-stat {
+          position: absolute;
+          left: 96px;
+          top: 400px;
+          width: 760px;
+          background: rgba(7, 11, 16, 0.78);
+          border-radius: 14px;
+          padding: 22px 28px;
+          opacity: 0;
+        }
+        #bulc-stat .sname {
+          font-size: 22px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+        }
+        #bulc-stat .sval {
+          font-size: 64px;
+          font-weight: 800;
+          color: #f5a524;
+          line-height: 1.2;
+          margin-top: 4px;
+        }
+        #bulc-stat .ssub {
+          font-size: 18px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          margin-top: 6px;
+        }
+      </style>
+      <div id="root" data-composition-id="bulc" data-width="1920" data-height="1080">
+        <div id="bulc-wrap">
+          <img class="scene" id="bulc-s1" src="assets/bulc/smoke_1.png" alt="" />
+          <img class="scene" id="bulc-s2" src="assets/bulc/smoke_2.png" alt="" />
+          <img class="scene" id="bulc-s3" src="assets/bulc/smoke_3.png" alt="" />
+          <img class="scene" id="bulc-s4" src="assets/bulc/smoke_4.png" alt="" />
+          <img class="scene" id="bulc-s5" src="assets/bulc/smoke_5.png" alt="" />
+          <img class="scene" id="bulc-s6" src="assets/bulc/smoke_6.png" alt="" />
+          <img class="scene" id="bulc-s7" src="assets/bulc/smoke_7.png" alt="" />
+          <div id="bulc-grad"></div>
+          <div id="bulc-brand">
+            <img src="assets/brand/bulc_mark.png" alt="" />
+            <div>
+              <div id="bulc-name">BUL:C</div>
+              <div id="bulc-sub">Fire &amp; evacuation simulator · Meteo Simulation</div>
+            </div>
+          </div>
+          <div id="bulc-src-label">Isaac Sim 6.0 · path-traced smoke from a GPU fire-solver run (isaacsim_cuFFT)</div>
+          <div id="bulc-policy">trained drone policy (cyan)</div>
+          <div id="bulc-chips">
+            <div class="chip" id="bulc-chip1">SMOKE</div>
+            <div class="chip" id="bulc-chip2">HAZE</div>
+            <div class="chip" id="bulc-chip3">FOG</div>
+          </div>
+          <div id="bulc-stat">
+            <div class="sname">camera target visibility in smoke</div>
+            <div class="sval">≈ 40–55 %</div>
+            <div class="ssub">Isaac Sim headless test, extinction K = 8700 × soot density</div>
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#bulc-wrap", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "none" }, 0);
+        tl.fromTo("#bulc-s2", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 1.4);
+        tl.fromTo("#bulc-s3", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 2.8);
+        tl.fromTo("#bulc-s4", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 4.2);
+        tl.fromTo("#bulc-s5", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 5.6);
+        tl.fromTo("#bulc-s6", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 7.0);
+        tl.fromTo("#bulc-s7", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 8.4);
+        tl.fromTo("#bulc-brand", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power1.out" }, 0.4);
+        tl.fromTo("#bulc-src-label", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power1.out" }, 1.0);
+        tl.fromTo("#bulc-policy", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "none" }, 3.0);
+        tl.to("#bulc-policy", { opacity: 0, duration: 0.4, ease: "none" }, 7.6);
+        tl.fromTo("#bulc-chip1", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.25, ease: "power2.out" }, 5.8);
+        tl.fromTo("#bulc-chip2", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.25, ease: "power2.out" }, 6.1);
+        tl.fromTo("#bulc-chip3", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.25, ease: "power2.out" }, 6.4);
+        tl.fromTo("#bulc-stat", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "power1.out" }, 6.8);
+        tl.to("#bulc-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 10.1);
+        window.__timelines["bulc"] = tl;
+      </script>
+    </template>
+  </body>
+</html>
