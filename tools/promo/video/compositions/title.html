@@ -41,8 +41,9 @@
         }
         #title-glow {
           position: absolute;
-          left: -180px;
+          left: 50%;
           top: 50%;
+          margin-left: -550px;
           margin-top: -360px;
           width: 1100px;
           height: 720px;
@@ -58,47 +59,42 @@
           display: flex;
           flex-direction: column;
           justify-content: center;
-          align-items: flex-start;
+          align-items: center;
+          text-align: center;
           padding: 72px 96px 88px 96px;
         }
-        #title-kicker {
-          font-family: "IBM Plex Mono", monospace;
-          font-variant-numeric: tabular-nums;
-          font-size: 26px;
-          font-weight: 700;
-          color: #ff5a36;
-          letter-spacing: 0.08em;
-        }
-        #title-ko {
-          font-size: 88px;
+        #title-name {
+          font-size: 132px;
           font-weight: 800;
           color: #f1f3f5;
-          line-height: 1.15;
-          margin-top: 18px;
+          line-height: 1.1;
         }
-        #title-en {
-          font-size: 40px;
-          font-weight: 400;
+        #title-legal {
+          font-size: 34px;
+          font-weight: 500;
           color: #a7afb8;
-          margin-top: 14px;
+          letter-spacing: 0.04em;
+          line-height: 1.3;
+          margin-top: 6px;
         }
         #title-rule {
           width: 120px;
           height: 2px;
           background: rgba(255, 255, 255, 0.14);
-          margin-top: 28px;
+          margin: 34px auto;
         }
-        #title-ko2 {
-          font-size: 30px;
-          font-weight: 500;
+        #title-sub-ko {
+          font-size: 60px;
+          font-weight: 700;
           color: #f1f3f5;
-          margin-top: 26px;
+          line-height: 1.25;
         }
-        #title-en2 {
-          font-size: 24px;
+        #title-sub-en {
+          font-size: 30px;
           font-weight: 400;
           color: #a7afb8;
-          margin-top: 8px;
+          line-height: 1.3;
+          margin-top: 10px;
         }
       </style>
       <div id="root" data-composition-id="title" data-width="1920" data-height="1080">
@@ -108,27 +104,25 @@
           </div>
           <div id="title-glow"></div>
           <div id="title-block">
-            <div id="title-kicker">Iterations-CFD · meteor-cfd</div>
-            <h1 id="title-ko">실제 F1 레이스카, CAD에서 유동장까지</h1>
-            <div id="title-en">A real F1 car, from CAD to a resolved flow field</div>
+            <div id="title-name">(주)Iterations</div>
+            <div id="title-legal">Iterations Co., Ltd.</div>
             <div id="title-rule"></div>
-            <div id="title-ko2">자체 GPU CFD 스위트 · 한국어 AI 어시스턴트</div>
-            <div id="title-en2">An in-house GPU CFD suite, driven in plain Korean by an AI assistant</div>
+            <div id="title-sub-ko">F1 레이싱카 공력해석 테스트</div>
+            <div id="title-sub-en">F1 race-car aerodynamics test</div>
           </div>
         </div>
       </div>
       <script>
         var tl = gsap.timeline({ paused: true });
         tl.fromTo("#title-bgwrap", { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "power1.out" }, 0);
-        tl.fromTo("#title-bgwrap", { scale: 1.08 }, { scale: 1.0, duration: 5, ease: "none", immediateRender: false }, 0);
-        tl.fromTo("#title-glow", { opacity: 0, scale: 0.85 }, { opacity: 0.3, scale: 1, duration: 0.9, ease: "power2.out" }, 0.25);
-        tl.fromTo("#title-kicker", { opacity: 0, y: 44 }, { opacity: 1, y: 0, duration: 0.14, ease: "power4.out" }, 0.3);
-        tl.fromTo("#title-ko", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.4);
-        tl.fromTo("#title-en", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.5);
-        tl.fromTo("#title-rule", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.12, ease: "power4.out" }, 0.58);
-        tl.fromTo("#title-ko2", { opacity: 0, y: 44 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.66);
-        tl.fromTo("#title-en2", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.13, ease: "power4.out" }, 0.74);
-        tl.to("#title-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 4.6);
+        tl.fromTo("#title-bgwrap", { scale: 1.08 }, { scale: 1.0, duration: 6, ease: "none", immediateRender: false }, 0);
+        tl.fromTo("#title-glow", { opacity: 0 }, { opacity: 0.3, duration: 0.9, ease: "power2.out" }, 0.25);
+        tl.fromTo("#title-name", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.3);
+        tl.fromTo("#title-legal", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 0.45);
+        tl.fromTo("#title-rule", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 0.6);
+        tl.fromTo("#title-sub-ko", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 2.4);
+        tl.fromTo("#title-sub-en", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 2.55);
+        tl.to("#title-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 5.6);
         window.__timelines["title"] = tl;
       </script>
     </template>

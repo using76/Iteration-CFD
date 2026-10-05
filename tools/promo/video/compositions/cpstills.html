@@ -52,14 +52,14 @@
       <script>
         var tl = gsap.timeline({ paused: true });
         tl.fromTo("#cpstills-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
-        tl.fromTo("#cpstills-s1", { scale: 1.0 }, { scale: 1.04, duration: 2.5, ease: "none" }, 0);
-        tl.to("#cpstills-s1", { opacity: 0, duration: 0.5, ease: "none" }, 2.25);
-        tl.fromTo("#cpstills-s2", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 2.25);
-        tl.fromTo("#cpstills-s2", { scale: 1.0 }, { scale: 1.04, duration: 2.5, ease: "none", immediateRender: false }, 2.5);
-        tl.to("#cpstills-s2", { opacity: 0, duration: 0.5, ease: "none" }, 4.75);
-        tl.fromTo("#cpstills-s3", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 4.75);
-        tl.fromTo("#cpstills-s3", { scale: 1.0 }, { scale: 1.04, duration: 2.5, ease: "none", immediateRender: false }, 5.0);
-        tl.to("#cpstills-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 7.1);
+        tl.fromTo("#cpstills-s1", { scale: 1.0 }, { scale: 1.04, duration: 2.0, ease: "none" }, 0);
+        tl.to("#cpstills-s1", { opacity: 0, duration: 0.5, ease: "none" }, 1.75);
+        tl.fromTo("#cpstills-s2", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 1.75);
+        tl.fromTo("#cpstills-s2", { scale: 1.0 }, { scale: 1.04, duration: 2.0, ease: "none", immediateRender: false }, 2.0);
+        tl.to("#cpstills-s2", { opacity: 0, duration: 0.5, ease: "none" }, 3.75);
+        tl.fromTo("#cpstills-s3", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 3.75);
+        tl.fromTo("#cpstills-s3", { scale: 1.0 }, { scale: 1.04, duration: 2.0, ease: "none", immediateRender: false }, 4.0);
+        tl.to("#cpstills-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 5.6);
         window.__timelines["cpstills"] = tl;
       </script>
     </template>

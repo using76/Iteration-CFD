@@ -24,7 +24,7 @@ JOBS, the six film videos in film order:
     | assets/reveal.mp4        | <render>/reveal/%04d             | seq  | -     | -     | -                | -         | -     | 1.5  | 195    |
     | assets/chat.mp4          | <capture>/clips/s1_geometry.mp4  | clip | 0     | 130.5 | -                | -         | 9.0   | 1.5  | 480    |
     | assets/mesh.mp4          | <capture-v1>/clips/s2_mesh.mp4   | clip | 348.5 | 9.0   | 1040:585:460:180 | 1920:1080 | 1.0   | 0    | 270    |
-    | assets/residuals.mp4     | <capture>/clips/s5_residuals.mp4 | clip | 0     | 8.3   | 1170:640:330:84  | 1756:960  | 1.0   | 0.7  | 270    |
+    | assets/residuals.mp4     | <capture>/clips/s5_residuals.mp4 | clip | 0     | 8.3   | 1170:640:330:84  | 1756:960  | 1.0   | 1.7  | 300    |
 
 expected_frames: seq = file count + round(hold * FPS); clip =
 round(t / speed * FPS) + round(hold * FPS). Seconds = frames / FPS.
@@ -85,7 +85,7 @@ JOBS = [
      "scale": "1920:1080", "speed": 1.0, "hold": 0.0},
     {"out": "assets/residuals.mp4", "source": "{capture}/clips/s5_residuals.mp4",
      "kind": "clip", "files": None, "ss": 0, "t": 8.3, "crop": "1170:640:330:84",
-     "scale": "1756:960", "speed": 1.0, "hold": 0.7},
+     "scale": "1756:960", "speed": 1.0, "hold": 1.7},
 ]
 
 
@@ -412,9 +412,9 @@ def _t1():
         "assets/chat.mp4", "assets/mesh.mp4", "assets/residuals.mp4"]
     assert [j["kind"] for j in JOBS] == ["seq", "seq", "seq", "clip", "clip", "clip"]
     got = [expected_frames(j) for j in JOBS]
-    assert got == [240, 240, 195, 480, 270, 270], got
+    assert got == [240, 240, 195, 480, 270, 300], got
     secs = [f / FPS for f in got]
-    assert secs == [8.0, 8.0, 6.5, 16.0, 9.0, 9.0], secs
+    assert secs == [8.0, 8.0, 6.5, 16.0, 9.0, 10.0], secs
     print("[ok] T1 jobs table and expected_frames")
 
 
