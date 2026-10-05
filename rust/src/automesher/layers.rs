@@ -45,7 +45,7 @@ use std::collections::HashMap;
 
 use super::snap::{face_area_vector, find_hanging};
 use crate::adapt::rebuild::ldu_permutation;
-use super::LayerSpec;
+use super::{LayerSpec, LayerTerminate};
 
 // ==========================================================================
 //  The stack
@@ -381,38 +381,16 @@ pub fn field(
         if !is_layer[i] || pinned[i] {
             continue;
         }
-        let mut uniq: Vec<Vec3> = Vec::new();
-        for &u in &us[i] {
-            if !uniq.iter().any(|v| v.dot(u) > 1.0 - 1e-6) {
-                uniq.push(u);
-            }
-        }
-        match uniq.len() {
-            0 => {} // nothing constrains it
-            1 => {
-                let u = uniq[0];
-                let proj = normal[i] - u * normal[i].dot(u);
-                if proj.mag() < 0.1 {
-                    pinned[i] = true;
-                } else {
-                    normal[i] = proj.normalised();
-                }
-            }
-            2 => {
-                let cross = uniq[0].cross(uniq[1]);
-                if cross.mag() < 1e-9 {
-                    // Two planes that do not meet in a line: pinned.
-                    pinned[i] = true;
-                } else {
-                    let c = if cross.dot(normal[i]) < 0.0 {
-                        cross * -1.0
-                    } else {
-                        cross
-                    };
-                    normal[i] = c.normalised();
-                }
-            }
-            _ => pinned[i] = true, // three constraints leave nothing
+        // (92.42) in patch mode, (92.69) in face mode: the merge tolerance
+        // is the face mode's junction angle, the patch mode keeps the exact
+        // 1e-6 dedupe it has always had.
+        let tol = match spec.terminate {
+            LayerTerminate::Patch => None,
+            LayerTerminate::Face => Some(spec.junction_angle_deg),
+        };
+        match constrain_normal(normal[i], &us[i], tol) {
+            Some(n) => normal[i] = n,
+            None => pinned[i] = true, // three constraints leave nothing
         }
     }
     // (92.45): the thickness a point is allowed - the nominal T, the medial
@@ -477,6 +455,226 @@ fn empty_field(n_points: usize) -> Field {
 }
 
 // ==========================================================================
+//  The junction merge, and the per-face termination
+// ==========================================================================
+
+/// (92.42) and (92.69): the normal of a layer point after the non-layer
+/// boundary faces carrying it constrain it. `us` are their outward unit
+/// normals in face order. `tol_deg` None is (92.42) exactly as `field` does
+/// it today (dedupe at u . v > 1 - 1e-6, |U| = 1 project with the 0.1 pin,
+/// |U| = 2 the signed cross product with the 1e-9 pin, |U| >= 3 pinned);
+/// `Some(theta)` is (92.69). `None` returned = the point is pinned (its
+/// thickness is 0).
+pub fn constrain_normal(n: Vec3, us: &[Vec3], tol_deg: Option<Scalar>) -> Option<Vec3> {
+    let uniq: Vec<Vec3> = match tol_deg {
+        // (92.42)'s own dedupe: exact parallelism to 1e-6 - a snapped plane
+        // is not flat to that, which is why the face mode merges by angle
+        // instead.
+        None => {
+            let mut uniq: Vec<Vec3> = Vec::new();
+            for &u in us {
+                if !uniq.iter().any(|v| v.dot(u) > 1.0 - 1e-6) {
+                    uniq.push(u);
+                }
+            }
+            uniq
+        }
+        // (92.69)'s C(i): u joins the first cluster whose representative
+        // agrees with it to within theta_U, else opens one of its own; the
+        // representatives stay in the order they opened.
+        Some(theta) => {
+            let cos = theta.to_radians().cos();
+            let mut reps: Vec<Vec3> = Vec::new();
+            for &u in us {
+                match reps.iter().position(|r| u.dot(*r) >= cos) {
+                    Some(_) => {}
+                    None => reps.push(u),
+                }
+            }
+            reps
+        }
+    };
+    match uniq.len() {
+        0 => Some(n), // nothing constrains it
+        1 => {
+            let u = uniq[0];
+            let proj = n - u * n.dot(u);
+            if proj.mag() < 0.1 {
+                None
+            } else {
+                Some(proj.normalised())
+            }
+        }
+        2 => {
+            let cross = uniq[0].cross(uniq[1]);
+            if cross.mag() < 1e-9 {
+                // Two planes that do not meet in a line: pinned.
+                None
+            } else {
+                let c = if cross.dot(n) < 0.0 {
+                    cross * -1.0
+                } else {
+                    cross
+                };
+                Some(c.normalised())
+            }
+        }
+        // (92.69)'s rank-2/rank-3 line, reached only in face mode: the pair
+        // of representatives whose cross product is largest (ties to the
+        // lowest a, then lowest b) spans the plane the constraints leave;
+        // when every representative stays within theta_U's sine of it the
+        // normal is that line, otherwise nothing is left.
+        _ => {
+            let theta = match tol_deg {
+                Some(t) => t,
+                None => return None, // (92.42): three constraints pin
+            };
+            let (mut a, mut b) = (0usize, 1usize);
+            for i in 0..uniq.len() {
+                for j in (i + 1)..uniq.len() {
+                    if uniq[i].cross(uniq[j]).mag() > uniq[a].cross(uniq[b]).mag() {
+                        a = i;
+                        b = j;
+                    }
+                }
+            }
+            let cr = uniq[a].cross(uniq[b]);
+            if !(cr.mag() > 1e-9) {
+                return None;
+            }
+            let e = cr.normalised();
+            let sin = theta.to_radians().sin();
+            if uniq.iter().all(|r| r.dot(e).abs() <= sin) {
+                let e = if e.dot(n) < 0.0 { e * -1.0 } else { e };
+                Some(e.normalised())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// (92.70): a layer face's class from the anchored flags of its points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceClass {
+    /// No point of the face is anchored: it carries its `n` cells as (92.48).
+    Keep,
+    /// Some but not all of its points are anchored: it tapers to zero in ONE
+    /// wedge cell.
+    Ring,
+    /// Every point of the face is anchored: it goes without layers.
+    Off,
+}
+
+/// (92.70): `face`'s class from `anchored` (indexed by point id).
+pub fn face_class(face: &[crate::Label], anchored: &[bool]) -> FaceClass {
+    let mut any = false;
+    let mut all = true;
+    for &p in face {
+        if anchored[p as usize] {
+            any = true;
+        } else {
+            all = false;
+        }
+    }
+    if all {
+        FaceClass::Off
+    } else if any {
+        FaceClass::Ring
+    } else {
+        FaceClass::Keep
+    }
+}
+
+/// (92.73): what one failing layer point gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalStep {
+    /// `D_i <- D_i / 2`, its halving count up by one.
+    Halve,
+    /// `D_i <- 0`: the point is anchored.
+    Anchor,
+}
+
+/// (92.73): the step one failing layer point takes - a point of a cell G5
+/// names anchors at once (halving `t` halves `V`, so G5's `tau` falls), as
+/// does one at its retreat limit or one whose halving would take it under
+/// the floor; every other failing point halves.
+pub fn local_step(
+    in_g5: bool,
+    halvings: usize,
+    d_mag: Scalar,
+    floor: Scalar,
+    retreat_limit: usize,
+) -> LocalStep {
+    if in_g5 || halvings >= retreat_limit || d_mag / 2.0 < floor {
+        LocalStep::Anchor
+    } else {
+        LocalStep::Halve
+    }
+}
+
+/// (92.73): steps one ladder may take on one patch set in face mode before
+/// (92.47)'s patch rule. This project's own number, like `BETA_RUNG_LIMIT`.
+pub const TERMINATE_STEP_LIMIT: usize = 12;
+
+/// (92.73): the OUTER ladder's per-patch-set state - every counter the
+/// ladder runs on one patch set, and the M and X face marks it carries into
+/// every attempt. A patch drop resets the lot, so the next patch set starts
+/// clean and never at the last set's step limit.
+pub struct FaceLadder {
+    /// (92.47)'s per-point retreat caps. Patch mode halves and zeroes them;
+    /// the face-mode outer ladder moves no point and they stay all ones.
+    pub caps: Vec<Scalar>,
+    /// (92.66)'s pull, carried into every attempt as the caps are.
+    pub betas: Vec<Scalar>,
+    /// (92.70): M, indexed by INPUT face id.
+    pub merged: Vec<bool>,
+    /// (92.70): X, indexed by INPUT face id.
+    pub cut: Vec<bool>,
+    /// (92.73): per-point halving counts. Written by patch mode and by the
+    /// INNER ladder's own bookkeeping only; reset with the rest.
+    pub out_h: Vec<usize>,
+    /// The halvings this patch set took before the last measurement.
+    pub halvings: usize,
+    /// The steps this patch set took - face mode's merges and cuts included.
+    pub steps: usize,
+    /// The (92.66) rungs this patch set took.
+    pub beta_rungs: usize,
+}
+
+impl FaceLadder {
+    /// Fresh state for a run on a mesh of `n_points` points and `n_faces`
+    /// faces.
+    pub fn new(n_points: usize, n_faces: usize) -> Self {
+        let mut fl = FaceLadder {
+            caps: Vec::new(),
+            betas: Vec::new(),
+            merged: Vec::new(),
+            cut: Vec::new(),
+            out_h: Vec::new(),
+            halvings: 0,
+            steps: 0,
+            beta_rungs: 0,
+        };
+        fl.reset(n_points, n_faces);
+        fl
+    }
+
+    /// (92.73): the per-patch-set reset - every counter to zero, the caps
+    /// and the pull back to one, M and X emptied.
+    pub fn reset(&mut self, n_points: usize, n_faces: usize) {
+        self.caps = vec![1.0 as Scalar; n_points];
+        self.betas = vec![1.0 as Scalar; n_points];
+        self.merged = vec![false; n_faces];
+        self.cut = vec![false; n_faces];
+        self.out_h = vec![0; n_points];
+        self.halvings = 0;
+        self.steps = 0;
+        self.beta_rungs = 0;
+    }
+}
+
+// ==========================================================================
 //  The shrink
 // ==========================================================================
 
@@ -536,6 +734,10 @@ pub enum Outcome {
     /// A rung of (92.66): the gate failed on cells carrying a re-seated
     /// point, whose pull was lowered; no thickness was halved.
     Beta,
+    /// A (92.73) step in face mode: the OUTER ladder put faces in M and X -
+    /// no point moved; the INNER ladder anchored failing layer points, their
+    /// `D_i` set to zero.
+    Terminate,
     /// The patch set gave up: one patch lost its layers.
     GiveUp,
 }
@@ -547,6 +749,7 @@ impl Outcome {
             Outcome::Pass => "pass",
             Outcome::Retreat => "retreat",
             Outcome::Beta => "beta",
+            Outcome::Terminate => "terminate",
             Outcome::GiveUp => "give_up",
         }
     }
@@ -571,6 +774,9 @@ pub enum DropCause {
     ThinProposed,
     /// A layer point whose applied displacement is zero.
     ZeroDisp,
+    /// (92.73): every layer face of the patch was terminated - each of its
+    /// points was anchored.
+    Terminated,
 }
 
 impl DropCause {
@@ -582,6 +788,7 @@ impl DropCause {
             DropCause::ThinAfterCaps => "thin_after_caps",
             DropCause::ThinProposed => "thin_proposed",
             DropCause::ZeroDisp => "zero_disp",
+            DropCause::Terminated => "terminated",
         }
     }
 }
@@ -616,6 +823,9 @@ pub struct LadderEntry {
     /// On a `Beta` entry, how many re-seated points it lowered; 0 on every
     /// other entry.
     pub beta_points: usize,
+    /// (92.73): on a `Terminate` entry, how many layer points the step
+    /// anchored; 0 on every other entry.
+    pub terminate_points: usize,
 }
 
 impl LadderEntry {
@@ -641,6 +851,7 @@ impl LadderEntry {
             give_up,
             dropped: None,
             beta_points: 0,
+            terminate_points: 0,
         }
     }
 }
@@ -707,7 +918,12 @@ fn level_n_non_orth_max(
             .clamp(-1.0, 1.0)
             .acos()
             .to_degrees();
-        let fa = ex.layer_faces[(nb - ex.first_cell) / ex.n];
+        // (92.72): the cell's own block, KEEP or RING - a RING cell's block
+        // is one cell wide, so the /n of the patch mode cannot serve.
+        let Some(jf) = ex.layer_face_of_cell(nb) else {
+            continue;
+        };
+        let fa = ex.layer_faces[jf];
         if fa < n_internal_in {
             continue;
         }
@@ -893,6 +1109,53 @@ fn thin_cause(offenders: &[usize], caps: &[Scalar], halved: &[bool]) -> DropCaus
     } else {
         DropCause::ThinProposed
     }
+}
+
+/// (92.73): `F` closed under "a hanging node in `F` adds its parents that
+/// are layer points", recursively - [`find_hanging`]'s map, walked until no
+/// parent is missing.
+fn close_under_hanging(
+    fset: &mut Vec<usize>,
+    hanging: &[(u32, [u32; 2])],
+    is_layer: &[bool],
+) {
+    // The hanging node -> parents map, built once per call: the closure
+    // looks parents up instead of scanning the whole hanging list per
+    // queued point.
+    let mut parents: HashMap<usize, [u32; 2]> = HashMap::with_capacity(hanging.len());
+    for &(h, ab) in hanging {
+        parents.insert(h as usize, ab);
+    }
+    let mut in_set = vec![false; is_layer.len()];
+    for &i in fset.iter() {
+        in_set[i] = true;
+    }
+    let mut queue: Vec<usize> = fset.clone();
+    while let Some(i) = queue.pop() {
+        if let Some(ab) = parents.get(&i) {
+            for &p in ab {
+                let p = p as usize;
+                if is_layer[p] && !in_set[p] {
+                    in_set[p] = true;
+                    fset.push(p);
+                    queue.push(p);
+                }
+            }
+        }
+    }
+    fset.sort_unstable();
+    fset.dedup();
+}
+
+/// (92.70)'s side faces carry a vertex ring that can close a triangle into
+/// a line when one endpoint is anchored: consecutive repeats go first,
+/// then the ring's own wrap-around repeat.
+fn dedupe_cyclic(mut ps: Vec<crate::Label>) -> Vec<crate::Label> {
+    ps.dedup();
+    while ps.len() > 1 && ps[0] == ps[ps.len() - 1] {
+        ps.pop();
+    }
+    ps
 }
 
 /// [`shrink`]'s body at a CALLER'S patch set and per-point retreat cap: the
@@ -1091,14 +1354,102 @@ fn shrink_on(
         // beta rungs count from 0 on every patch set.
         let mut beta = betas.to_vec();
         let mut beta_rungs = 0usize;
+        // (92.73): face mode's per-point halving counts, its step count on
+        // this patch set, and the floor - all no-ops in patch mode. The
+        // anchors are the points the CALLER'S ladder already zeroed (c_i =
+        // 0) plus what this round's pass path zeroes; the re-seat plan and
+        // the hanging mean resurrect neither.
+        let face_mode = spec.terminate == LayerTerminate::Face;
+        let mut hcount = vec![0usize; n_points];
+        let mut anchored: Vec<bool> = caps.iter().map(|c| *c == 0.0).collect();
+        let mut steps = 0usize;
+        let limit = spec.min_thickness * st.total;
         loop {
-            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points, &beta);
+            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points, &beta, &anchored);
             let mut work = mesh.clone();
             for i in 0..work.points.len() {
                 work.points[i] = work.points[i] + d[i];
             }
             let rep = quality::measure_capped(&work, t, usize::MAX)?;
             let gates = failing_gates(&rep);
+            if rep.passed() && face_mode {
+                // (92.73), at a pass: a point the relaxation left at zero is
+                // ANCHORED, never a give-up - the faces around it taper in
+                // the extrusion. A point under the floor is anchored too,
+                // and the ladder measures again; with none under it, accept.
+                let thin: Vec<usize> = (0..n_points)
+                    .filter(|&i| {
+                        f.is_layer[i] && d[i].mag_sqr() > 0.0 && d[i].mag() < limit
+                    })
+                    .collect();
+                if !thin.is_empty() {
+                    // (92.73): the anchored set is CLOSED under hanging
+                    // parents first, so an anchored hanging node's forced
+                    // zero is the mean of anchored (or non-layer, zero)
+                    // parents and (92.46)'s hanging line holds for (92.49)'s
+                    // split sides. The step counts toward the step limit,
+                    // and one that changes no D_i ends the ladder by
+                    // (92.47)'s patch rule.
+                    if steps >= TERMINATE_STEP_LIMIT {
+                        cause = Some(DropCause::InnerGate);
+                        let mut e = LadderEntry::new(
+                            Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                        );
+                        e.beta_rung = beta_rungs;
+                        ladder.push(e);
+                        give_up = Some((thin, format!(
+                            "the pass still left thin points after {steps} terminate step(s)"
+                        )));
+                        break;
+                    }
+                    let mut fset = thin.clone();
+                    close_under_hanging(&mut fset, &hanging, &f.is_layer);
+                    let mut changed = false;
+                    for &i in &fset {
+                        if f.disp[i].mag_sqr() > 0.0 {
+                            changed = true;
+                        }
+                        f.disp[i] = Vec3::ZERO;
+                        f.thickness[i] = 0.0;
+                        anchored[i] = true;
+                    }
+                    if !changed {
+                        cause = Some(DropCause::InnerGate);
+                        let mut e = LadderEntry::new(
+                            Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                        );
+                        e.beta_rung = beta_rungs;
+                        ladder.push(e);
+                        give_up = Some((
+                            fset,
+                            "the thin step changed no layer point".to_string(),
+                        ));
+                        break;
+                    }
+                    let mut e = LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::Terminate, None,
+                    );
+                    e.beta_rung = beta_rungs;
+                    e.terminate_points = fset.len();
+                    ladder.push(e);
+                    steps += 1;
+                    continue;
+                }
+                let mut e = LadderEntry::new(
+                    Ladder::Inner, halvings, &names, &gates, Outcome::Pass, None,
+                );
+                e.beta_rung = beta_rungs;
+                ladder.push(e);
+                accepted = true;
+                pts_out = work.points;
+                for i in 0..n_points {
+                    if f.is_layer[i] {
+                        f.disp[i] = d[i];
+                        f.thickness[i] = d[i].mag();
+                    }
+                }
+                break;
+            }
             if rep.passed() {
                 // Written by the supervising session: the thickness a point
                 // CARRIES is `|d_i|` after the relaxation's hanging line and
@@ -1109,7 +1460,6 @@ fn shrink_on(
                 // point with `|d_i| = 0` would extrude a side face of zero
                 // area - so that check is unconditional, whatever
                 // `min_thickness` is set to (SPEC-LIT §92.13, (92.46)).
-                let limit = spec.min_thickness * st.total;
                 let zero: Vec<usize> = (0..n_points)
                     .filter(|&i| f.is_layer[i] && !(d[i].mag() > 0.0))
                     .collect();
@@ -1177,6 +1527,151 @@ fn shrink_on(
                 continue;
             }
             let fail_pts = failing_points(&rep, mesh, n_internal, &f.is_layer, &cell_points);
+            if face_mode {
+                // (92.73), at a failure: F - the failing cells' MOVING layer
+                // points, closed under hanging parents - takes its local
+                // step point by point, and (92.47)'s patch drop waits for an
+                // empty F, a step that changed nothing, or the step limit.
+                let mut fset: Vec<usize> = fail_pts
+                    .iter()
+                    .copied()
+                    .filter(|&i| f.disp[i].mag_sqr() > 0.0)
+                    .collect();
+                close_under_hanging(&mut fset, &hanging, &f.is_layer);
+                // `in_g5`: the point is a point of a cell G5 names - halving
+                // `t` halves `V`, so no halving can mend a G5 failure.
+                let mut g5_pt = vec![false; n_points];
+                for failure in &rep.failures {
+                    if !matches!(failure.gate, Gate::Thickness) {
+                        continue;
+                    }
+                    for s in &failure.subjects {
+                        if (s.id as usize) < cell_points.len() {
+                            for &p in &cell_points[s.id as usize] {
+                                g5_pt[p as usize] = true;
+                            }
+                        }
+                    }
+                }
+                if fset.is_empty() {
+                    // (92.73)'s F empty: first every re-seat point of a
+                    // failing cell takes its pull to ZERO at once - no
+                    // BETA_RUNG_LIMIT here - and the ladder measures again.
+                    if !jf.is_empty() {
+                        for &j in &jf {
+                            beta[j] = 0.0;
+                        }
+                        let mut e = LadderEntry::new(
+                            Ladder::Inner, halvings, &names, &gates, Outcome::Beta, None,
+                        );
+                        e.beta_rung = beta_rungs;
+                        e.beta_points = jf.len();
+                        ladder.push(e);
+                        continue;
+                    }
+                    // With no such point, F is the moving layer points of
+                    // every cell sharing a point with a failing cell - one
+                    // ring - closed the same way. Only when that is empty
+                    // too does (92.47)'s patch rule answer.
+                    let flags =
+                        failing_cell_flags(&rep, mesh, n_internal, cell_points.len());
+                    let fail_cells: Vec<usize> =
+                        (0..flags.len()).filter(|&c| flags[c]).collect();
+                    let moving: Vec<bool> = (0..n_points)
+                        .map(|i| f.disp[i].mag_sqr() > 0.0)
+                        .collect();
+                    let mut ring = one_ring_moving_points(
+                        &fail_cells, &cell_points, &f.is_layer, &moving,
+                    );
+                    close_under_hanging(&mut ring, &hanging, &f.is_layer);
+                    if ring.is_empty() {
+                        cause = Some(DropCause::InnerGate);
+                        let mut e = LadderEntry::new(
+                            Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                        );
+                        e.beta_rung = beta_rungs;
+                        ladder.push(e);
+                        give_up = Some((
+                            fail_pts,
+                            "the gate failed on cells no moving layer point reaches".to_string(),
+                        ));
+                        break;
+                    }
+                    fset = ring;
+                }
+                if steps >= TERMINATE_STEP_LIMIT {
+                    cause = Some(DropCause::InnerGate);
+                    let mut e = LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                    );
+                    e.beta_rung = beta_rungs;
+                    ladder.push(e);
+                    give_up = Some((fail_pts, format!(
+                        "the gate still failed after {steps} terminate step(s)"
+                    )));
+                    break;
+                }
+                let mut any_halved = false;
+                let mut changed = false;
+                for &i in &fset {
+                    match local_step(
+                        g5_pt[i],
+                        hcount[i],
+                        f.disp[i].mag(),
+                        limit,
+                        spec.retreat_limit,
+                    ) {
+                        LocalStep::Halve => {
+                            if f.disp[i].mag_sqr() > 0.0 {
+                                changed = true;
+                            }
+                            f.disp[i] = f.disp[i] * 0.5;
+                            f.thickness[i] = f.thickness[i] * 0.5;
+                            hcount[i] += 1;
+                            halved[i] = true;
+                            any_halved = true;
+                        }
+                        LocalStep::Anchor => {
+                            if f.disp[i].mag_sqr() > 0.0 {
+                                changed = true;
+                            }
+                            f.disp[i] = Vec3::ZERO;
+                            f.thickness[i] = 0.0;
+                            anchored[i] = true;
+                        }
+                    }
+                }
+                if !changed {
+                    cause = Some(DropCause::InnerGate);
+                    let mut e = LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
+                    );
+                    e.beta_rung = beta_rungs;
+                    ladder.push(e);
+                    give_up = Some((
+                        fail_pts,
+                        "the terminate step changed no layer point".to_string(),
+                    ));
+                    break;
+                }
+                if any_halved {
+                    let mut e = LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::Retreat, None,
+                    );
+                    e.beta_rung = beta_rungs;
+                    ladder.push(e);
+                    halvings += 1;
+                } else {
+                    let mut e = LadderEntry::new(
+                        Ladder::Inner, halvings, &names, &gates, Outcome::Terminate, None,
+                    );
+                    e.beta_rung = beta_rungs;
+                    e.terminate_points = fset.len();
+                    ladder.push(e);
+                }
+                steps += 1;
+                continue;
+            }
             if halvings >= spec.retreat_limit {
                 cause = Some(DropCause::InnerGate);
                 let mut e = LadderEntry::new(
@@ -1320,18 +1815,16 @@ pub fn shrink(
     )
 }
 
-/// The layer points the gate's failure blames: the subject cell for the
-/// cell-named gates, both cells of the face for G4 - whose subject is a
-/// FACE, not a cell id. G3 and G7 name no cell a retreat can serve. The
-/// `is_layer` flags index the same points `cell_points` names.
-fn failing_points(
+/// The cells §92.3's failures blame - the failing-cell flags
+/// [`failing_points`] reads its points off, kept as a vector the one-ring
+/// of (92.73)' walks.
+fn failing_cell_flags(
     rep: &quality::QualityReport,
     mesh: &PolyMeshRaw,
     n_internal: usize,
-    is_layer: &[bool],
-    cell_points: &[Vec<u32>],
-) -> Vec<usize> {
-    let mut is_fail = vec![false; cell_points.len()];
+    n_cells: usize,
+) -> Vec<bool> {
+    let mut is_fail = vec![false; n_cells];
     for failure in &rep.failures {
         match failure.gate {
             Gate::Regions | Gate::Addressing => continue,
@@ -1355,6 +1848,55 @@ fn failing_points(
             }
         }
     }
+    is_fail
+}
+
+/// (92.73)'s one ring: the MOVING layer points of every cell sharing a
+/// point with a failing cell - the set an empty `F` widens to, before
+/// (92.47)'s patch rule. `moving` and `is_layer` index the same points
+/// `cell_points` names.
+fn one_ring_moving_points(
+    fail_cells: &[usize],
+    cell_points: &[Vec<u32>],
+    is_layer: &[bool],
+    moving: &[bool],
+) -> Vec<usize> {
+    let mut touching = vec![false; is_layer.len()];
+    for &c in fail_cells {
+        for &p in &cell_points[c] {
+            touching[p as usize] = true;
+        }
+    }
+    let mut seen = vec![false; is_layer.len()];
+    let mut out = Vec::new();
+    for pts in cell_points.iter() {
+        if !pts.iter().any(|p| touching[*p as usize]) {
+            continue;
+        }
+        for &p in pts {
+            let i = p as usize;
+            if is_layer[i] && moving[i] && !seen[i] {
+                seen[i] = true;
+                out.push(i);
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The layer points the gate's failure blames: the subject cell for the
+/// cell-named gates, both cells of the face for G4 - whose subject is a
+/// FACE, not a cell id. G3 and G7 name no cell a retreat can serve. The
+/// `is_layer` flags index the same points `cell_points` names.
+fn failing_points(
+    rep: &quality::QualityReport,
+    mesh: &PolyMeshRaw,
+    n_internal: usize,
+    is_layer: &[bool],
+    cell_points: &[Vec<u32>],
+) -> Vec<usize> {
+    let is_fail = failing_cell_flags(rep, mesh, n_internal, cell_points.len());
     let mut seen = vec![false; is_layer.len()];
     let mut out = Vec::new();
     for (c, bad) in is_fail.iter().enumerate() {
@@ -1393,11 +1935,15 @@ fn relax(
     rs: &Reseat,
     x: &[Vec3],
     beta: &[Scalar],
+    anchored: &[bool],
 ) -> Vec<Vec3> {
     let n = f.disp.len();
     // Each re-seat point's displacement, computed ONCE from the `D_i` in
     // force at THIS call, so a retreat that halves `D_i` moves the point
-    // with it while the re-seating part stays whole - (92.65).
+    // with it while the re-seating part stays whole - (92.65). A point the
+    // (92.73) ladder ANCHORED takes no displacement at any level, and the
+    // re-seat must not resurrect one - it moves no level copy, so its zero
+    // is the anchor.
     let held: HashMap<usize, Vec3> = rs
         .points
         .iter()
@@ -1410,7 +1956,9 @@ fn relax(
         .collect();
     let mut d = f.disp.clone();
     for (&j, &dj) in held.iter() {
-        d[j] = dj;
+        if !anchored[j] {
+            d[j] = dj;
+        }
     }
     for _ in 0..spec.smoothing_passes {
         let mut next = vec![Vec3::ZERO; n];
@@ -1439,6 +1987,13 @@ fn relax(
     for &(h, ab) in hanging {
         d[h as usize] = (d[ab[0] as usize] + d[ab[1] as usize]) * 0.5;
     }
+    // (92.73): an anchor is a zero at EVERY level, hanging parents and the
+    // re-seat plan included - the pass path's own zeroing stays monotone.
+    for (i, a) in anchored.iter().enumerate() {
+        if *a {
+            d[i] = Vec3::ZERO;
+        }
+    }
     d
 }
 
@@ -1458,9 +2013,38 @@ pub struct Extrusion {
     /// The input face id of each layer face, in the order the cell blocks
     /// were laid out: layer face `j` owns cells `first_cell + j*n .. +n`.
     pub layer_faces: Vec<usize>,
+    /// (92.72): per layer face `j`, the first cell id of its block - in
+    /// patch mode `first_cell + j*n`; in face mode a KEEP face still takes
+    /// `n` cells but a RING face takes ONE wedge cell and an OFF face none.
+    pub cell_start: Vec<usize>,
+    /// (92.72): per layer face `j`, the number of cells its block carries -
+    /// `n` on KEEP, 1 on RING, 0 on OFF.
+    pub cell_count: Vec<usize>,
+    /// The input point ids of the COPYING slots - the moving points of the
+    /// KEEP and RING faces, `L_c ∩ L_m` of (92.72) - in the packed order the
+    /// new level points were laid out in (a copying slot's level-`k` id is
+    /// `n_points + mi*n + k` for its copy index `mi`); an anchored slot, or
+    /// a moving point only on OFF faces, takes no new points at all.
+    pub moving_slots: Vec<usize>,
     /// The input mesh's cell count - the first layer cell's id.
     pub first_cell: usize,
     pub n: usize,
+}
+
+impl Extrusion {
+    /// The index `j` into `layer_faces` of the face whose block carries cell
+    /// `c`, or `None` when `c` is not a layer cell.
+    pub fn layer_face_of_cell(&self, c: usize) -> Option<usize> {
+        if c < self.first_cell {
+            return None;
+        }
+        let j = self.cell_start.partition_point(|&s| s <= c).checked_sub(1)?;
+        if c < self.cell_start[j] + self.cell_count[j] {
+            Some(j)
+        } else {
+            None
+        }
+    }
 }
 
 /// The thresholds `beta` the summary reports `area_frac_tau_ge` at: the
@@ -1509,6 +2093,33 @@ pub struct PatchLayers {
     /// returned mesh - the near-wall non-orthogonality the solver sees;
     /// `None` on a patch that has no layers.
     pub level_n_non_orth_max_deg: Option<Scalar>,
+    /// (92.74): the share of the patch's area whose face is KEEP - the full
+    /// stack where it kept it. 1.0 on a patch-mode kept row, 0 on a dropped
+    /// row.
+    pub kept_area_frac: Scalar,
+    /// (92.74): the share of the patch's area whose face is RING - tapered
+    /// to zero through one wedge cell.
+    pub ring_area_frac: Scalar,
+    /// (92.70): the patch's KEEP / RING / OFF face counts.
+    pub n_keep_faces: usize,
+    pub n_ring_faces: usize,
+    pub n_off_faces: usize,
+    /// (92.70): how many of the patch's layer points are anchored.
+    pub n_anchored_points: usize,
+    /// (92.70'): the patch's RING faces with NO anchored point - the faces
+    /// in M, each carrying one cell of the whole stack. 0 in patch mode and
+    /// on a dropped row.
+    pub n_merged_faces: usize,
+    /// (92.70'): the share of the patch's area carried by the merged faces.
+    pub merged_area_frac: Scalar,
+    /// (92.70): the patch's OFF faces that are in X - the faces a ladder
+    /// CUT, each leaving a step the wall carries. 0 in patch mode and on a
+    /// dropped row.
+    pub n_cut_faces: usize,
+    /// (92.74): the share of the patch's area that carries the WHOLE stack
+    /// thickness - the KEEP faces, plus the faces of M as one merged cell -
+    /// as n cells or as one cell. `kept_area_frac` + the merged share.
+    pub stack_area_frac: Scalar,
 }
 
 impl PatchLayers {
@@ -1573,6 +2184,20 @@ impl LayerReport {
                     if p.full_area_frac == 0.0 {
                         line.push_str(" - NO face received the full stack");
                     }
+                    // (92.74): a stack that ends per face says where, and
+                    // (92.70') how much of the ring carries the whole stack
+                    // as one merged cell.
+                    if p.n_ring_faces + p.n_off_faces > 0 {
+                        line.push_str(&format!(
+                            ", kept {:.1}% of the area, stack {:.1}% (ring {:.1}% of which merged {:.1}%, {} cut face(s), {} anchored point(s))",
+                            100.0 * p.kept_area_frac,
+                            100.0 * p.stack_area_frac,
+                            100.0 * p.ring_area_frac,
+                            100.0 * p.merged_area_frac,
+                            p.n_cut_faces,
+                            p.n_anchored_points
+                        ));
+                    }
                     line.push('\n');
                     s.push_str(&line);
                 }
@@ -1594,6 +2219,10 @@ pub struct Layered {
     pub beta: Vec<Scalar>,
     /// The shrink's own `J`.
     pub reseat_points: Vec<usize>,
+    /// (92.70): the class of every layer face, in `extrusion.layer_faces`'s
+    /// order - the classification this very attempt extruded with, which the
+    /// OUTER ladder's M/X rules read.
+    pub classes: Vec<FaceClass>,
 }
 
 /// SPEC-LIT §92.2 stage 6 / §92.13 end to end: shrink, extrude, renumber,
@@ -1620,13 +2249,16 @@ pub fn add_layers(
     } else {
         resolve_patches(mesh, spec)?
     };
-    let mut caps = vec![1.0 as Scalar; mesh.points.len()];
-    let mut halvings = 0usize;
     let mut extra_retreats = 0usize;
-    // (92.66): the pull the outer ladder carries into the next attempt, as
-    // it carries the caps, and its own rung counter.
-    let mut betas = vec![1.0 as Scalar; mesh.points.len()];
-    let mut beta_rungs = 0usize;
+    let n_points = mesh.points.len();
+    let n_faces = mesh.faces.len();
+    let n_internal = mesh.neighbour.len().min(n_faces);
+    // (92.73): the OUTER ladder's per-patch-set state - the caps, the pull,
+    // M and X, and every counter - reset as a whole when a patch drops. The
+    // OUTER ladder moves no point in face mode; the INPUT mesh's hanging map
+    // is the INNER ladder's, inside `shrink_on`.
+    let face_mode = spec.terminate == LayerTerminate::Face;
+    let mut fl = FaceLadder::new(n_points, n_faces);
     let mut dropped: Vec<(String, String)> = Vec::new();
     // The whole trace, both ladders, read off and moving nothing (SPEC-LIT
     // §92.13), and the outer round it is at.
@@ -1635,11 +2267,10 @@ pub fn add_layers(
     // (92.64)'s per-patch re-seat counts, the max over every attempt the
     // run made, by patch name.
     let mut reseated: HashMap<String, usize> = HashMap::new();
-    let n_points = mesh.points.len();
-    let n_faces = mesh.faces.len();
-    let n_internal = mesh.neighbour.len().min(n_faces);
     loop {
-        let mut a = attempt(mesh, surf, spec, t, &patches, &caps, &betas)?;
+        let mut a = attempt(
+            mesh, surf, spec, t, &patches, &fl.caps, &fl.betas, &fl.merged, &fl.cut,
+        )?;
         for row in &a.report.patches {
             let e = reseated.entry(row.name.clone()).or_insert(0);
             *e = (*e).max(row.n_reseated_points);
@@ -1696,13 +2327,23 @@ pub fn add_layers(
                     n_reseated_points: 0,
                     beta_rungs: 0,
                     level_n_non_orth_max_deg: None,
+                    kept_area_frac: 0.0,
+                    ring_area_frac: 0.0,
+                    n_keep_faces: 0,
+                    n_ring_faces: 0,
+                    n_off_faces: 0,
+                    n_anchored_points: 0,
+                    n_merged_faces: 0,
+                    merged_area_frac: 0.0,
+                    n_cut_faces: 0,
+                    stack_area_frac: 0.0,
                 });
             }
             a.report.retreats += extra_retreats;
-            let mut e = LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Pass, None);
+            let mut e = LadderEntry::new(Ladder::Outer, fl.halvings, &names, &gates, Outcome::Pass, None);
             e.round = this_round;
             e.g4_level_n = g4_n;
-            e.beta_rung = beta_rungs;
+            e.beta_rung = fl.beta_rungs;
             trace.push(e);
             a.report.ladder = trace;
             for row in a.report.patches.iter_mut() {
@@ -1742,23 +2383,17 @@ pub fn add_layers(
         // face point is mapped back to its INPUT id before the failing
         // cells' point sets are built.
         let n = a.extrusion.n;
-        let mut slots = vec![
-            0usize;
-            a.extrusion
-                .slot_of_point
-                .iter()
-                .filter(|&&s| s >= 0)
-                .count()
-        ];
-        for (i, &s) in a.extrusion.slot_of_point.iter().enumerate() {
-            if s >= 0 {
-                slots[s as usize] = i;
-            }
-        }
+        // (92.72): the new level points are laid out over the MOVING slots
+        // in order, so new id p maps back through `moving_slots`.
+        let moving_slots = &a.extrusion.moving_slots;
         let orig_of =
             |p: crate::Label| -> usize {
                 let p = p as usize;
-                if p < n_points { p } else { slots[(p - n_points) / n] }
+                if p < n_points {
+                    p
+                } else {
+                    moving_slots[(p - n_points) / n]
+                }
             };
         let n_faces_out = a.mesh.faces.len();
         let n_internal_out = a.mesh.neighbour.len().min(n_faces_out);
@@ -1801,21 +2436,137 @@ pub fn add_layers(
             live[j] = a.beta[j] > 0.0;
         }
         let jf = failing_points(&a.quality, &a.mesh, n_internal_out, &live, &cell_points);
-        if !jf.is_empty() && beta_rungs < BETA_RUNG_LIMIT {
+        if !jf.is_empty() && fl.beta_rungs < BETA_RUNG_LIMIT {
             let mut e =
-                LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Beta, None);
+                LadderEntry::new(Ladder::Outer, fl.halvings, &names, &gates, Outcome::Beta, None);
             e.round = this_round;
             e.g4_level_n = g4_n;
-            e.beta_rung = beta_rungs;
+            e.beta_rung = fl.beta_rungs;
             e.beta_points = jf.len();
             trace.push(e);
             for &j in &jf {
-                betas[j] = beta_step(a.beta[j]);
+                fl.betas[j] = beta_step(a.beta[j]);
             }
-            beta_rungs += 1;
+            fl.beta_rungs += 1;
             continue;
         }
-        if fail_pts.is_empty() || halvings >= spec.retreat_limit {
+        let mut face_dropping = false;
+        if face_mode {
+            // (92.73) amended: the OUTER ladder moves no point. Every
+            // G5-named layer cell of a KEEP face puts that face in M - the
+            // merge, one cell carrying the whole stack; every other named
+            // layer cell, and the layer face of every level-n face G4 names,
+            // puts its face in X - the cut, no cell, a step the wall
+            // carries. The next attempt re-extrudes with M and X; a round
+            // that adds nothing to either, a failure on a cell that is
+            // neither a layer cell nor at a level-n face, or the step limit
+            // ends the ladder by (92.47)'s patch rule, whose block below
+            // drops the victim with the same reason and the same reset.
+            let mut added = false;
+            let mut unanswerable = false;
+            // The input cells a level-n face reaches: a failure ON one of
+            // these is what the G4 rule's cut answers; a failure on any
+            // other input cell is one no merge or cut can reach.
+            let first_cell = a.extrusion.first_cell;
+            let mut at_level_n = vec![false; first_cell];
+            for fa in 0..n_internal_out {
+                let o = a.mesh.owner[fa] as usize;
+                if o < first_cell && (a.mesh.neighbour[fa] as usize) >= first_cell {
+                    at_level_n[o] = true;
+                }
+            }
+            // M first: a G5-named cell of a face this round puts in M is
+            // answered by the merge and never reaches the X pass.
+            for failure in &a.quality.failures {
+                if !matches!(failure.gate, Gate::Thickness) {
+                    continue;
+                }
+                for s in &failure.subjects {
+                    if let Some(j) = a.extrusion.layer_face_of_cell(s.id) {
+                        let fid = a.extrusion.layer_faces[j];
+                        if a.classes[j] == FaceClass::Keep && !fl.merged[fid] {
+                            fl.merged[fid] = true;
+                            added = true;
+                        }
+                    }
+                }
+            }
+            // X: a RING cell named by any gate (a merge that did not mend
+            // its cell), or a KEEP cell named by a gate other than G5, cuts
+            // its face; so does the layer face of every level-n face G4
+            // names. X wins over M in (92.70)'s classification.
+            for failure in &a.quality.failures {
+                match failure.gate.subject() {
+                    quality::Subject::Cell => {
+                        for s in &failure.subjects {
+                            match a.extrusion.layer_face_of_cell(s.id) {
+                                Some(j) => {
+                                    let answered_by_m = a.classes[j] == FaceClass::Keep
+                                        && matches!(failure.gate, Gate::Thickness);
+                                    let fid = a.extrusion.layer_faces[j];
+                                    if !answered_by_m && !fl.cut[fid] {
+                                        fl.cut[fid] = true;
+                                        added = true;
+                                    }
+                                }
+                                None => {
+                                    let c = s.id;
+                                    if c < first_cell && !at_level_n[c] {
+                                        unanswerable = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    quality::Subject::Face => {
+                        if !matches!(failure.gate, Gate::NonOrth) {
+                            continue;
+                        }
+                        for s in &failure.subjects {
+                            let fa = s.id;
+                            if fa >= n_internal_out {
+                                continue;
+                            }
+                            // G4's face names BOTH its cells, as
+                            // `failing_cell_flags` reads it: a layer cell cuts
+                            // its face - a level-n face's layer cell, or a
+                            // wedge cell whose merged side face leans - and an
+                            // input cell not at a level-n face is a failure
+                            // nothing answers.
+                            for &c in &[
+                                a.mesh.owner[fa] as usize,
+                                a.mesh.neighbour[fa] as usize,
+                            ] {
+                                if let Some(j) = a.extrusion.layer_face_of_cell(c) {
+                                    let fid = a.extrusion.layer_faces[j];
+                                    if !fl.cut[fid] {
+                                        fl.cut[fid] = true;
+                                        added = true;
+                                    }
+                                } else if c < first_cell && !at_level_n[c] {
+                                    unanswerable = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if unanswerable || !added || fl.steps >= TERMINATE_STEP_LIMIT {
+                face_dropping = true;
+            } else {
+                let mut e = LadderEntry::new(
+                    Ladder::Outer, fl.halvings, &names, &gates, Outcome::Terminate, None,
+                );
+                e.round = this_round;
+                e.g4_level_n = g4_n;
+                e.beta_rung = fl.beta_rungs;
+                e.terminate_points = 0;
+                trace.push(e);
+                fl.steps += 1;
+                continue;
+            }
+        }
+        if face_dropping || fail_pts.is_empty() || fl.halvings >= spec.retreat_limit {
             // The patch that loses its layers: the one carrying the most
             // offending layer points, ties to the lower patch index. An
             // empty list blames the first patch - the gate failed on cells
@@ -1847,39 +2598,39 @@ pub fn add_layers(
             }
             let vp = patches[victim];
             let reason = format!(
-                "the gate still failed after {halvings} retreat(s) on the layer \
+                "the gate still failed after {} retreat(s) on the layer \
                  cells themselves - the extruded mesh could not be brought inside the \
                  gate: layers are supported on a wall that castellates onto the cell \
                  planes, and a snapped wall carries its own non-orthogonality into the \
-                 level-n face (SPEC-LIT 92.13)"
+                 level-n face (SPEC-LIT 92.13)",
+                fl.halvings
             );
             let mut e = LadderEntry::new(
-                Ladder::Outer, halvings, &names, &gates, Outcome::GiveUp, Some(DropCause::OuterGate),
+                Ladder::Outer, fl.halvings, &names, &gates, Outcome::GiveUp, Some(DropCause::OuterGate),
             );
             e.round = this_round;
             e.g4_level_n = g4_n;
-            e.beta_rung = beta_rungs;
+            e.beta_rung = fl.beta_rungs;
             e.dropped = Some(mesh.patches[vp].name.clone());
             trace.push(e);
             dropped.push((mesh.patches[vp].name.clone(), reason));
             patches.remove(victim);
-            // Written by the supervising session: each halving already counted
-            // itself in the else branch, so adding `halvings` again here
-            // double-counted (92.50)'s retreat total.
-            caps = vec![1.0 as Scalar; n_points];
-            halvings = 0;
-            betas = vec![1.0 as Scalar; n_points];
-            beta_rungs = 0;
+            // (92.73): EVERY per-patch-set counter, M and X reset when a
+            // patch drops - the next set starts clean, never at the last
+            // set's step limit. (`reset` is one function; before it, a set
+            // that dropped started at the limit and every later patch lost
+            // its layers right after its beta rungs.)
+            fl.reset(n_points, n_faces);
         } else {
-            let mut e = LadderEntry::new(Ladder::Outer, halvings, &names, &gates, Outcome::Retreat, None);
+            let mut e = LadderEntry::new(Ladder::Outer, fl.halvings, &names, &gates, Outcome::Retreat, None);
             e.round = this_round;
             e.g4_level_n = g4_n;
-            e.beta_rung = beta_rungs;
+            e.beta_rung = fl.beta_rungs;
             trace.push(e);
             for &i in &fail_pts {
-                caps[i] = caps[i] * 0.5;
+                fl.caps[i] = fl.caps[i] * 0.5;
             }
-            halvings += 1;
+            fl.halvings += 1;
             extra_retreats += 1;
         }
     }
@@ -1889,6 +2640,7 @@ pub fn add_layers(
 /// [`add_layers`]' ladder calls this once per round and reads
 /// `quality.passed()` - an attempt does not refuse on the gate, because a
 /// gate failure on the layer cells is what the ladder retreats on.
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     mesh: &PolyMeshRaw,
     surf: &Surface,
@@ -1897,6 +2649,8 @@ fn attempt(
     patches0: &[usize],
     caps: &[Scalar],
     betas: &[Scalar],
+    merged: &[bool],
+    cut: &[bool],
 ) -> Result<Layered> {
     let st = stack(spec)?;
     let n = st.n;
@@ -1950,6 +2704,16 @@ fn attempt(
                     .map_or(0, |(_, n)| *n),
                 beta_rungs: 0,
                 level_n_non_orth_max_deg: None,
+                kept_area_frac: 0.0,
+                ring_area_frac: 0.0,
+                n_keep_faces: 0,
+                n_ring_faces: 0,
+                n_off_faces: 0,
+                n_anchored_points: 0,
+                n_merged_faces: 0,
+                merged_area_frac: 0.0,
+                n_cut_faces: 0,
+                stack_area_frac: 0.0,
             });
         }
         let report = LayerReport {
@@ -1972,12 +2736,16 @@ fn attempt(
                 slot_of_point: vec![-1; n_points],
                 level_point: vec![Vec::new(); n + 1],
                 layer_faces: Vec::new(),
+                cell_start: Vec::new(),
+                cell_count: Vec::new(),
+                moving_slots: Vec::new(),
                 first_cell,
                 n,
             },
             quality,
             beta: shrunk.beta,
             reseat_points: shrunk.reseat_points,
+            classes: Vec::new(),
         });
     }
 
@@ -2036,17 +2804,103 @@ fn attempt(
         }
     }
     let n_l = slots.len();
+    // (92.70): a layer point whose applied displacement is exactly the zero
+    // vector is ANCHORED - it takes no level copies at all (its level-k
+    // position is the point itself at every k). The patch mode never accepts
+    // a zero, so `anchored` is empty there and everything below is the
+    // patch-mode layout bit for bit.
+    let anchored_slot: Vec<bool> = slots
+        .iter()
+        .map(|&i| field.disp[i].mag_sqr() == 0.0)
+        .collect();
+    let anchored_pt: Vec<bool> = (0..n_points)
+        .map(|i| field.is_layer[i] && field.disp[i].mag_sqr() == 0.0)
+        .collect();
+    // (92.70): every layer face's class, read once - the cells, the faces
+    // and the sides all branch on it. A face in X is OFF whatever its
+    // points do; a face in M is RING with no anchored point; every point
+    // anchored is OFF whatever M says.
+    let classes: Vec<FaceClass> = field
+        .faces
+        .iter()
+        .map(|&f| {
+            let c = face_class(&mesh.faces[f], &anchored_pt);
+            if cut[f] {
+                FaceClass::Off
+            } else if c == FaceClass::Keep && merged[f] {
+                FaceClass::Ring
+            } else {
+                c
+            }
+        })
+        .collect();
+    // (92.72) amended: L_c, the points of the KEEP and RING faces. Only
+    // L_c ∩ L_m takes level copies - an OFF face's moving point sits at its
+    // shrunk position, the mesh's own point, and needs none.
+    let mut on_stack = vec![false; n_points];
+    for (j, &f) in field.faces.iter().enumerate() {
+        if classes[j] != FaceClass::Off {
+            for &p in &mesh.faces[f] {
+                on_stack[p as usize] = true;
+            }
+        }
+    }
+    let copies_slot: Vec<bool> = (0..n_l)
+        .map(|s| !anchored_slot[s] && on_stack[slots[s]])
+        .collect();
+    // (92.72): P + n |L_c ∩ L_m| - only the COPYING slots take level copies,
+    // packed in slot order, so with nothing anchored or cut the ids are
+    // today's.
+    let moving_of_slot: Vec<usize> = {
+        let mut mi = 0usize;
+        (0..n_l)
+            .map(|s| {
+                let m = mi;
+                if copies_slot[s] {
+                    mi += 1;
+                }
+                m
+            })
+            .collect()
+    };
+    let n_moving = copies_slot.iter().filter(|c| **c).count();
     let mut points = shrunk.mesh.points.clone();
-    points.reserve(n_l * n);
+    points.reserve(n_moving * n);
     let mut level_point: Vec<Vec<u32>> = vec![vec![0u32; n_l]; n + 1];
     for (s, &i) in slots.iter().enumerate() {
-        // Level n is the input point itself, already moved by the shrink.
+        // Level n is the input point itself, already moved by the shrink -
+        // and for a point that takes no copies (anchored, or only on OFF
+        // faces) every level is that same point: the shrink put it where it
+        // stands, or did not move it at all.
         level_point[n][s] = i as u32;
+        if !copies_slot[s] {
+            for lp in level_point.iter_mut().take(n) {
+                lp[s] = i as u32;
+            }
+            continue;
+        }
+        let base = n_points + moving_of_slot[s] * n;
         for k in 0..n {
-            level_point[k][s] = (n_points + s * n + k) as u32;
+            level_point[k][s] = (base + k) as u32;
             // (92.48): x_i^(k) = x_i^orig + f_k D_i, from the INPUT point.
             points.push(mesh.points[i] + field.disp[i] * st.f[k]);
         }
+    }
+    // (92.72): the cell blocks, in field-face order - n cells on KEEP, one
+    // wedge cell on RING, none on OFF. In patch mode this is today's
+    // first_cell + j*n layout exactly.
+    let mut cell_start: Vec<usize> = Vec::with_capacity(field.faces.len());
+    let mut cell_count: Vec<usize> = Vec::with_capacity(field.faces.len());
+    let mut next_cell = first_cell;
+    for cls in &classes {
+        let cnt = match cls {
+            FaceClass::Keep => n,
+            FaceClass::Ring => 1,
+            FaceClass::Off => 0,
+        };
+        cell_start.push(next_cell);
+        cell_count.push(cnt);
+        next_cell += cnt;
     }
 
     // The faces' bookkeeping the sides and the boundary read: which input
@@ -2115,6 +2969,12 @@ fn attempt(
     let mut boundary_sides: Vec<Vec<(usize, usize, usize, crate::Label, Vec<crate::Label>)>> =
         vec![Vec::new(); mesh.patches.len()];
     for (j, &f) in field.faces.iter().enumerate() {
+        // (92.72) amended: an OFF face has no cell and no levels - the step
+        // it leaves is built from its NEIGHBOURS' sides, so it contributes
+        // no segment of its own.
+        if classes[j] == FaceClass::Off {
+            continue;
+        }
         let face = &mesh.faces[f];
         for (e, _) in face.iter().enumerate() {
             let cut = face_segs[f][e].len() > 1;
@@ -2158,69 +3018,156 @@ fn attempt(
                     )));
                 }
                 let g = partners[0];
-                for k in 0..n {
-                    // (92.49)'s quad, read off the level positions.
-                    let mut quad: Vec<crate::Label> = vec![
+                // (92.71): two anchored endpoints close the wedge cell by
+                // themselves - the level-0 edge and the input edge coincide
+                // - so no side face of any kind is emitted between them.
+                if anchored_slot[su] && anchored_slot[sv] {
+                    continue;
+                }
+                let jg = layer_j[g];
+                let gcls = if jg >= 0 {
+                    classes[jg as usize]
+                } else {
+                    FaceClass::Keep
+                };
+                let cf0 = cell_start[j];
+                let cg0 = if jg >= 0 { cell_start[jg as usize] } else { 0 };
+                // cell(f, k) of (92.71): the level-k cell on KEEP, the one
+                // wedge cell on RING - the blocks of (92.72).
+                let cell_k = |cls: FaceClass, s0: usize, k: usize| {
+                    if cls == FaceClass::Keep {
+                        s0 + k
+                    } else {
+                        s0
+                    }
+                };
+                // The side face is wound by the topology, a CONSTANT, not by
+                // a measurement. Directed as `f` winds its segment and
+                // stepped inward by `w`, its area vector is d x w = n_out x d
+                // - the INTERIOR direction of face `f`, always. So the list
+                // as constructed points INTO `f`'s own layer cell `cf`, and a
+                // face is wound out of its owner: `cf` takes the reversed
+                // list, the other cell `cg` the list as constructed. (The
+                // dot product against a cell centre an earlier form read
+                // ~zero at the convex edges of a snapped wall and flipped
+                // the quad there.)
+                let mut emit =
+                    |own_is_cf: bool,
+                     own: usize,
+                     nbr: usize,
+                     mut ps: Vec<crate::Label>,
+                     boundary: bool,
+                     k_slot: usize,
+                     at_ring: bool| {
+                        // (92.71): a RING face's wedge tapers to ZERO at an
+                        // anchored point, so a side face with NO area there
+                        // is the taper's own shape - its area contributes
+                        // nothing, and the closures of (92.54) hold without
+                        // it. A face with a tiny-but-NONZERO area is EMITTED
+                        // whatever `at_ring` says: dropping it would leave
+                        // both its cells open by exactly that area, and the
+                        // closure of (92.54) is topology, not scale - a
+                        // snapped wall's sliver edge closes or nothing does.
+                        // A KEEP face's side is a prism wall, and a zero
+                        // area there is still the thickness going to zero
+                        // where it was not allowed to.
+                        let a_vec = face_area_vector(&points, &ps);
+                        if ps.len() < 3 || a_vec.mag() == 0.0 {
+                            if at_ring {
+                                return Ok(());
+                            }
+                            return Err(Error::Mesh(format!(
+                                "layers: the side face of segment ({u}, {v}) of layer \
+                                 face {f} collapsed to {} point(s) - the thickness \
+                                 went to zero where it was not allowed to",
+                                ps.len()
+                            )));
+                        }
+                        if !at_ring && a_vec.mag() < 1e-14 * diag2 {
+                            return Err(Error::Mesh(format!(
+                                "layers: the side face of segment ({u}, {v}) of layer \
+                                 face {f} has area {:.3e} - the thickness went to zero \
+                                 where it was not allowed to",
+                                a_vec.mag()
+                            )));
+                        }
+                        if own_is_cf {
+                            ps.reverse();
+                        }
+                        if boundary {
+                            boundary_sides[patch_of_bface[g]].push((f, k_slot, si, own as crate::Label, ps));
+                            n_side_boundary += 1;
+                        } else {
+                            internal_sides.push((own, nbr, ps));
+                            n_side_internal += 1;
+                        }
+                        if cut {
+                            n_split_sides += 1;
+                        }
+                        Ok(())
+                    };
+                let piece = |k: usize| -> Vec<crate::Label> {
+                    // (92.49)'s quad at level k, its consecutive duplicates
+                    // removed cyclically - an anchored endpoint's level
+                    // copies are all the point itself.
+                    dedupe_cyclic(vec![
                         level_point[k][su] as crate::Label,
                         level_point[k][sv] as crate::Label,
                         level_point[k + 1][sv] as crate::Label,
                         level_point[k + 1][su] as crate::Label,
-                    ];
-                    let a_vec = face_area_vector(&points, &quad);
-                    if a_vec.mag() < 1e-14 * diag2 {
-                        return Err(Error::Mesh(format!(
-                            "layers: the side quad of segment ({u}, {v}) at level {k} \
-                             of layer face {f} has area {:.3e} - the thickness went \
-                             to zero where it was not allowed to",
-                            a_vec.mag()
-                        )));
+                    ])
+                };
+                let merged = || -> Vec<crate::Label> {
+                    // (92.71)'s one merged face, a RING cell's whole side:
+                    // dedupe(u^(0), v^(0)..v^(n), u^(n)..u^(1)).
+                    let mut ps: Vec<crate::Label> = Vec::with_capacity(2 * n + 2);
+                    ps.push(level_point[0][su] as crate::Label);
+                    for k in 0..=n {
+                        ps.push(level_point[k][sv] as crate::Label);
                     }
-                    // The side quad is wound by the topology, a CONSTANT,
-                    // not by a measurement. Directed as `f` winds its
-                    // segment and stepped inward by `w`, its area vector is
-                    // d x w = n_out x d - the INTERIOR direction of face
-                    // `f`, always. So the quad as constructed points INTO
-                    // `f`'s own layer cell `cf`, and a face is wound out of
-                    // its owner: `cf` takes the reversed list, the other
-                    // cell `cg` the list as constructed. (The dot product
-                    // against a cell centre this replaced reads ~zero at
-                    // the convex edges of a snapped wall and flips the quad
-                    // there.)
-                    if is_layer_face[g] {
-                        if f < g {
-                            let jg = layer_j[g] as usize;
-                            let cf = first_cell + j * n + k;
-                            let cg = first_cell + jg * n + k;
-                            let (own, nbr) = if cf < cg {
-                                (cf, cg)
+                    for k in (1..=n).rev() {
+                        ps.push(level_point[k][su] as crate::Label);
+                    }
+                    dedupe_cyclic(ps)
+                };
+                if is_layer_face[g] && gcls != FaceClass::Off {
+                    if f < g {
+                        if classes[j] == FaceClass::Keep || gcls == FaceClass::Keep {
+                            // (92.71): either face KEEP - the n pieces,
+                            // internal, between cell(f,k) and cell(g,k).
+                            for k in 0..n {
+                                let cf = cell_k(classes[j], cf0, k);
+                                let cg = cell_k(gcls, cg0, k);
+                                let (own, nbr) = if cf < cg {
+                                    (cf, cg)
+                                } else {
+                                    (cg, cf)
+                                };
+                                emit(own == cf, own, nbr, piece(k), false, 0, false)?;
+                            }
+                        } else {
+                            // (92.71): both RING - ONE face, internal,
+                            // between the two wedge cells.
+                            let (own, nbr) = if cf0 < cg0 {
+                                (cf0, cg0)
                             } else {
-                                (cg, cf)
+                                (cg0, cf0)
                             };
-                            if own == cf {
-                                quad.reverse();
-                            }
-                            internal_sides.push((own, nbr, quad));
-                            n_side_internal += 1;
-                            if cut {
-                                n_split_sides += 1;
-                            }
+                            emit(own == cf0, own, nbr, merged(), false, 0, true)?;
+                        }
+                    }
+                } else {
+                    // (92.72) amended: the partner is OFF - a cut face, whose
+                    // wall stepped down to the shrunk position - or on a
+                    // non-layer patch: the side is a BOUNDARY face of that
+                    // patch, owned by `f`'s cell.
+                    if classes[j] == FaceClass::Keep {
+                        for k in 0..n {
+                            let own = cell_k(classes[j], cf0, k);
+                            emit(true, own, 0, piece(k), true, k, false)?;
                         }
                     } else {
-                        // The owner is `f`'s own layer cell, and the quad
-                        // as constructed points into it: the boundary side
-                        // is ALWAYS the reversed list.
-                        quad.reverse();
-                        boundary_sides[patch_of_bface[g]].push((
-                            f,
-                            k,
-                            si,
-                            (first_cell + j * n + k) as crate::Label,
-                            quad,
-                        ));
-                        n_side_boundary += 1;
-                        if cut {
-                            n_split_sides += 1;
-                        }
+                        emit(true, cf0, 0, merged(), true, 0, true)?;
                     }
                 }
             }
@@ -2239,24 +3186,43 @@ fn attempt(
     }
     for (j, &f) in field.faces.iter().enumerate() {
         let face = &mesh.faces[f];
-        for k in 1..=n {
-            if k < n {
-                // Levels 1..n-1 carry the REVERSED point list: the owner is
-                // nearer the wall, so the normal has to point inward.
-                let mut ps: Vec<crate::Label> = face
-                    .iter()
-                    .map(|p| level_point[k][slot_of_point[*p as usize] as usize] as crate::Label)
-                    .collect();
-                ps.reverse();
-                faces.push(ps);
-                owner.push((first_cell + j * n + k - 1) as crate::Label);
-                neighbour.push((first_cell + j * n + k) as crate::Label);
-            } else {
-                // Level n is the input's own face, unchanged, now internal
-                // with the layer's last cell as its neighbour.
+        match classes[j] {
+            // (92.70): an OFF face emits nothing here - it stays the
+            // boundary face it was.
+            FaceClass::Off => {}
+            // (92.71): a RING face's level-n face is the input face itself,
+            // internal, owner its input cell, neighbour the one wedge cell.
+            FaceClass::Ring => {
                 faces.push(face.clone());
                 owner.push(mesh.owner[f]);
-                neighbour.push((first_cell + j * n + n - 1) as crate::Label);
+                neighbour.push(cell_start[j] as crate::Label);
+            }
+            FaceClass::Keep => {
+                for k in 1..=n {
+                    if k < n {
+                        // Levels 1..n-1 carry the REVERSED point list: the
+                        // owner is nearer the wall, so the normal has to
+                        // point inward.
+                        let mut ps: Vec<crate::Label> = face
+                            .iter()
+                            .map(|p| {
+                                level_point[k]
+                                    [slot_of_point[*p as usize] as usize]
+                                    as crate::Label
+                            })
+                            .collect();
+                        ps.reverse();
+                        faces.push(ps);
+                        owner.push((cell_start[j] + k - 1) as crate::Label);
+                        neighbour.push((cell_start[j] + k) as crate::Label);
+                    } else {
+                        // Level n is the input's own face, unchanged, now
+                        // internal with the layer's last cell as neighbour.
+                        faces.push(face.clone());
+                        owner.push(mesh.owner[f]);
+                        neighbour.push((cell_start[j] + n - 1) as crate::Label);
+                    }
+                }
             }
         }
     }
@@ -2291,12 +3257,23 @@ fn attempt(
         if field.patches.contains(&p) {
             for jj in 0..patch.size {
                 let f = n_internal + patch.start + jj;
+                let j = layer_j[f] as usize;
+                // (92.70)-(92.71): a KEEP or RING face's level-0 boundary
+                // face, owned by its first cell (the wedge cell on RING); an
+                // OFF face stays the input face it was, owner its input
+                // cell, carrying no stack at all.
+                if classes[j] == FaceClass::Off {
+                    faces.push(mesh.faces[f].clone());
+                    owner.push(mesh.owner[f]);
+                    n_boundary += 1;
+                    continue;
+                }
                 let ps: Vec<crate::Label> = mesh.faces[f]
                     .iter()
                     .map(|q| level_point[0][slot_of_point[*q as usize] as usize] as crate::Label)
                     .collect();
                 faces.push(ps);
-                owner.push((first_cell + layer_j[f] as usize * n) as crate::Label);
+                owner.push(cell_start[j] as crate::Label);
                 n_boundary += 1;
             }
         } else {
@@ -2376,6 +3353,16 @@ fn attempt(
                         .map_or(0, |(_, n)| *n),
                     beta_rungs: 0,
                     level_n_non_orth_max_deg: None,
+                    kept_area_frac: 0.0,
+                    ring_area_frac: 0.0,
+                    n_keep_faces: 0,
+                    n_ring_faces: 0,
+                    n_off_faces: 0,
+                    n_anchored_points: 0,
+                    n_merged_faces: 0,
+                    merged_area_frac: 0.0,
+                    n_cut_faces: 0,
+                    stack_area_frac: 0.0,
                 });
             }
             Some(_) => {
@@ -2385,11 +3372,31 @@ fn attempt(
                 let mut tau_min_all = Scalar::INFINITY;
                 let mut nf = 0usize;
                 let mut face_area_tau: Vec<(Scalar, Scalar)> = Vec::new();
+                // (92.74)'s coverage, over the patch's own layer faces.
+                let mut kept_a = 0.0;
+                let mut ring_a = 0.0;
+                let mut n_keep_f = 0usize;
+                let mut n_ring_f = 0usize;
+                let mut n_off_f = 0usize;
+                let mut n_anch = 0usize;
+                // (92.70')'s merge, and (92.70)'s cut, over the same faces.
+                let mut n_merged_f = 0usize;
+                let mut merged_a = 0.0;
+                let mut n_cut_f = 0usize;
+                let mut seen_pt = vec![false; n_points];
                 for (j, &f) in field.faces.iter().enumerate() {
                     if field.face_patch[j] != p {
                         continue;
                     }
                     nf += 1;
+                    if cut[f] {
+                        n_cut_f += 1;
+                    }
+                    match classes[j] {
+                        FaceClass::Keep => n_keep_f += 1,
+                        FaceClass::Ring => n_ring_f += 1,
+                        FaceClass::Off => n_off_f += 1,
+                    }
                     let ps0: Vec<crate::Label> = mesh.faces[f]
                         .iter()
                         .map(|q| level_point[0][slot_of_point[*q as usize] as usize] as crate::Label)
@@ -2400,7 +3407,14 @@ fn attempt(
                         .iter()
                         .map(|q| field.disp[*q as usize].mag())
                         .fold(Scalar::INFINITY, Scalar::min);
-                    let tau = tau_min / st.total;
+                    // A CUT face carries no stack whatever its points' pull
+                    // was - the wall stepped away from it - so its tau is
+                    // zero, as an all-anchored face's is.
+                    let tau = if cut[f] {
+                        0.0
+                    } else {
+                        tau_min / st.total
+                    };
                     face_area_tau.push((a, tau));
                     area += a;
                     if tau >= 1.0 - 1e-9 {
@@ -2408,24 +3422,82 @@ fn attempt(
                     }
                     wsum += a * tau;
                     tau_min_all = tau_min_all.min(tau);
+                    match classes[j] {
+                        FaceClass::Keep => kept_a += a,
+                        FaceClass::Ring => {
+                            ring_a += a;
+                            // (92.70'): a RING face with no anchored point
+                            // is a face of M - one cell of the whole stack.
+                            if !mesh.faces[f]
+                                .iter()
+                                .any(|q| anchored_pt[*q as usize])
+                            {
+                                n_merged_f += 1;
+                                merged_a += a;
+                            }
+                        }
+                        FaceClass::Off => {}
+                    }
+                    for q in &mesh.faces[f] {
+                        let q = *q as usize;
+                        if !seen_pt[q] {
+                            seen_pt[q] = true;
+                            if anchored_pt[q] {
+                                n_anch += 1;
+                            }
+                        }
+                    }
                 }
                 let mean_frac = if area > 0.0 { wsum / area } else { 0.0 };
+                // (92.73): a patch whose every layer face is OFF has had its
+                // whole stack terminated - reported, and the mesh goes on.
+                let all_off = nf > 0 && n_off_f == nf;
+                let kept_frac = if area > 0.0 { kept_a / area } else { 0.0 };
+                let ring_frac = if area > 0.0 { ring_a / area } else { 0.0 };
+                // (92.74): the share of the wall that carries the WHOLE stack
+                // thickness - the KEEP faces, plus the faces of M as one
+                // merged cell each.
+                let stack_frac = if area > 0.0 {
+                    (kept_a + merged_a) / area
+                } else {
+                    0.0
+                };
                 let mut row = PatchLayers {
                     name: patch.name.clone(),
-                    n_layers: n,
+                    n_layers: if all_off { 0 } else { n },
                     n_faces: nf,
                     area,
-                    full_area_frac: if area > 0.0 { full / area } else { 0.0 },
+                    full_area_frac: if all_off || area == 0.0 {
+                        0.0
+                    } else {
+                        full / area
+                    },
                     area_frac_tau_ge: [0.0; 3],
-                    face_area_tau,
-                    mean_frac,
+                    face_area_tau: if all_off { Vec::new() } else { face_area_tau },
+                    mean_frac: if all_off { 0.0 } else { mean_frac },
                     t1_requested: st.t[0],
-                    t1_mean: st.t[0] * mean_frac,
+                    t1_mean: if all_off { 0.0 } else { st.t[0] * mean_frac },
                     // The achieved first layer the WORST face got: the
                     // limiter's own number, in metres.
-                    t1_min: st.t[0] * if area > 0.0 { tau_min_all } else { 0.0 },
-                    dropped: None,
-                    drop_cause: None,
+                    t1_min: if all_off {
+                        0.0
+                    } else {
+                        st.t[0] * if area > 0.0 { tau_min_all } else { 0.0 }
+                    },
+                    dropped: if all_off {
+                        Some(format!(
+                            "patch \"{}\": every layer face terminated - anchored \
+                             or cut (SPEC-LIT 92.13, (92.73))",
+                            patch.name
+                        ))
+                    } else {
+                        None
+                    },
+                    drop_cause: if all_off {
+                        Some(DropCause::Terminated)
+                    } else {
+                        None
+                    },
                     n_reseated_points: shrunk
                         .reseated
                         .iter()
@@ -2433,22 +3505,45 @@ fn attempt(
                         .map_or(0, |(_, n)| *n),
                     beta_rungs: 0,
                     level_n_non_orth_max_deg: None,
+                    kept_area_frac: kept_frac,
+                    ring_area_frac: ring_frac,
+                    n_keep_faces: n_keep_f,
+                    n_ring_faces: n_ring_f,
+                    n_off_faces: n_off_f,
+                    n_anchored_points: n_anch,
+                    n_merged_faces: n_merged_f,
+                    merged_area_frac: if area > 0.0 { merged_a / area } else { 0.0 },
+                    n_cut_faces: n_cut_f,
+                    stack_area_frac: stack_frac,
                 };
-                row.area_frac_tau_ge = TAU_GE_BETAS.map(|b| row.frac_tau_ge(b));
+                if !all_off {
+                    row.area_frac_tau_ge = TAU_GE_BETAS.map(|b| row.frac_tau_ge(b));
+                }
                 patches_rep.push(row);
             }
         }
     }
     let report = LayerReport {
         patches: patches_rep,
-        n_layer_cells: n * field.faces.len(),
-        n_layer_points: n * slots.len(),
+        // (92.72): C + n |KEEP| + |RING| cells, P + n |L_c ∩ L_m| points.
+        n_layer_cells: classes.iter().fold(0usize, |s, c| {
+            s + match c {
+                FaceClass::Keep => n,
+                FaceClass::Ring => 1,
+                FaceClass::Off => 0,
+            }
+        }),
+        n_layer_points: n * n_moving,
         n_side_internal,
         n_side_boundary,
         n_split_sides,
         retreats: shrunk.retreats,
         ladder: shrunk.ladder.clone(),
     };
+    let moving_slots: Vec<usize> = (0..n_l)
+        .filter(|&s| copies_slot[s])
+        .map(|s| slots[s])
+        .collect();
     Ok(Layered {
         mesh: out,
         report,
@@ -2456,12 +3551,16 @@ fn attempt(
             slot_of_point,
             level_point,
             layer_faces: field.faces.clone(),
+            cell_start,
+            cell_count,
+            moving_slots,
             first_cell,
             n,
         },
         quality,
         beta: shrunk.beta,
         reseat_points: shrunk.reseat_points,
+        classes,
     })
 }
 
@@ -2678,8 +3777,8 @@ pub(crate) mod tests {
     };
     use crate::automesher::snap;
     use crate::automesher::{
-        CastellationSpec, DistanceBand, DomainSpec, RefinementBand, RefinementSpec,
-        SnapSpec,
+        CastellationSpec, DistanceBand, DomainSpec, LayerTerminate, RefinementBand,
+        RefinementSpec, SnapSpec,
     };
 
     /// The background over `extent` at `base`, and the tree `max_level` deep
@@ -2811,6 +3910,113 @@ pub(crate) mod tests {
             growth: 1.3,
             ..LayerSpec::default()
         }
+    }
+
+    /// (92.69) against (92.42): the angle merge answers where the 1e-6
+    /// dedupe pins, and agrees with it where the planes are independent.
+    #[test]
+    fn a_junction_normal_merges_within_the_angle_tolerance() {
+        let s5 = 5.0f64.to_radians().sin();
+        let c5 = 5.0f64.to_radians().cos();
+        // (a) three near-parallel constraints: (92.42) pins, (92.69) merges
+        // into the one plane and projects.
+        let n = Vec3::new(0.6, 0.0, 0.8);
+        let us = vec![
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(s5, 0.0, -c5),
+            Vec3::new(0.0, s5, -c5),
+        ];
+        assert_eq!(constrain_normal(n, &us, None), None);
+        let got = constrain_normal(n, &us, Some(15.0)).expect("(a) merges");
+        assert!((got - Vec3::new(1.0, 0.0, 0.0)).mag() < 1e-12, "{got:?}");
+        // (b) three independent-ish normals within 45 deg of each other.
+        let n = Vec3::new(0.3, 0.2, 0.9).normalised();
+        let fr = std::f64::consts::FRAC_1_SQRT_2;
+        let us = vec![
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(fr, fr, 0.0),
+        ];
+        assert_eq!(constrain_normal(n, &us, None), None);
+        let got = constrain_normal(n, &us, Some(15.0)).expect("(b) merges");
+        assert!((got - Vec3::new(0.0, 0.0, 1.0)).mag() < 1e-12, "{got:?}");
+        // (c) three orthogonal constraints: both pin.
+        let n = Vec3::new(1.0, 1.0, 1.0).normalised();
+        let us = vec![
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        assert_eq!(constrain_normal(n, &us, None), None);
+        assert_eq!(constrain_normal(n, &us, Some(15.0)), None);
+        // (d) the normal against its own plane: both pin.
+        let us = vec![Vec3::new(0.0, 0.0, -1.0)];
+        assert_eq!(constrain_normal(Vec3::new(0.0, 0.0, 1.0), &us, None), None);
+        assert_eq!(
+            constrain_normal(Vec3::new(0.0, 0.0, 1.0), &us, Some(15.0)),
+            None
+        );
+        // (e) two orthogonal constraints: both take the cross product.
+        let n = Vec3::new(0.5, 0.5, 0.7071).normalised();
+        let us = vec![Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)];
+        for tol in [None, Some(15.0)] {
+            let got = constrain_normal(n, &us, tol).expect("(e) cross");
+            assert!((got - Vec3::new(0.0, 0.0, 1.0)).mag() < 1e-12, "{got:?}");
+        }
+        // (f) nothing constrains the point: unchanged, both.
+        for tol in [None, Some(15.0)] {
+            assert_eq!(constrain_normal(n, &[], tol), Some(n));
+        }
+    }
+
+    /// (92.70) and (92.73): the face class reads the anchored flags, and the
+    /// local step anchors a G5 point, a spent point, or one whose halving
+    /// would fall under the floor.
+    #[test]
+    fn the_face_class_and_the_local_step() {
+        let a = [false, false, false, true];
+        assert_eq!(face_class(&[0, 1, 2, 3], &[false; 4]), FaceClass::Keep);
+        assert_eq!(face_class(&[0, 1, 2, 3], &a), FaceClass::Ring);
+        assert_eq!(face_class(&[0, 1, 2, 3], &[true; 4]), FaceClass::Off);
+        assert_eq!(
+            local_step(false, 0, 1.0, 0.1, 4),
+            LocalStep::Halve
+        );
+        assert_eq!(
+            local_step(false, 4, 1.0, 0.1, 4),
+            LocalStep::Anchor
+        );
+        assert_eq!(
+            local_step(false, 0, 0.15, 0.1, 4),
+            LocalStep::Anchor
+        );
+        assert_eq!(
+            local_step(false, 0, 0.2, 0.1, 4),
+            LocalStep::Halve
+        );
+        assert_eq!(local_step(true, 0, 1.0, 0.1, 4), LocalStep::Anchor);
+        assert_eq!(local_step(false, 3, 1.0, 0.0, 4), LocalStep::Halve);
+        assert_eq!(local_step(false, 4, 1.0, 0.0, 4), LocalStep::Anchor);
+    }
+
+    /// (92.73)'s closure, which the pass branch anchors through: a hanging
+    /// node in the set pulls its layer-point parents in, recursively, so an
+    /// anchored hanging node's forced zero is the mean of anchored parents.
+    #[test]
+    fn the_pass_branch_anchors_a_hanging_node_with_its_parents() {
+        let hanging: Vec<(u32, [u32; 2])> = vec![(5, [1, 2]), (6, [5, 3])];
+        let is_layer = [true; 8];
+        let mut fset = vec![6usize];
+        close_under_hanging(&mut fset, &hanging, &is_layer);
+        assert_eq!(fset, vec![1, 2, 3, 5, 6]);
+        let mut fset = vec![4usize];
+        close_under_hanging(&mut fset, &hanging, &is_layer);
+        assert_eq!(fset, vec![4]);
+        let mut is_layer = [true; 8];
+        is_layer[3] = false;
+        let mut fset = vec![6usize];
+        close_under_hanging(&mut fset, &hanging, &is_layer);
+        assert_eq!(fset, vec![1, 2, 5, 6]);
     }
 
     #[test]
@@ -3285,6 +4491,544 @@ pub(crate) mod tests {
             .copied()
             .max()
             .map_or(0, |x| x as usize + 1)
+    }
+
+    /// (92.70)-(92.72) on the castellated cube: one anchored point rings its
+    /// four faces, every cell closes, and the counts are (92.72)'s.
+    #[test]
+    fn an_anchored_point_rings_its_four_faces_and_every_cell_closes() {
+        let (surf, mesh) = castellated_cube_case();
+        let mut spec = cube_layers(0.02);
+        spec.terminate = LayerTerminate::Face;
+        // The patch-mode run reads F and |L| off, per the brief.
+        let base = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("patch mode");
+        let big_f = base.report.patches[0].n_faces;
+        let big_l = base.report.n_layer_points / spec.n;
+        let big_c = cell_count(&mesh);
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let n_pts = mesh.points.len();
+        let mut caps = vec![1.0 as Scalar; n_pts];
+        let i0 = (0..n_pts)
+            .find(|&i| (mesh.points[i] - Vec3::new(1.5, 1.5, 2.5)).mag() < 1e-12)
+            .expect("the interior top point");
+        caps[i0] = 0.0;
+        let ones = vec![1.0 as Scalar; n_pts];
+        let out = attempt(
+            &mesh,
+            &surf,
+            &spec,
+            &thresholds(),
+            &patches,
+            &caps,
+            &ones,
+            &vec![false; mesh.faces.len()],
+            &vec![false; mesh.faces.len()],
+        )
+        .expect("attempt");
+        assert!(out.quality.passed(), "{:?}", out.quality.max_non_orth_deg);
+        let anchored: Vec<bool> = (0..n_pts)
+            .map(|i| out.extrusion.slot_of_point[i] >= 0 && caps[i] == 0.0)
+            .collect();
+        let row = &out.report.patches[0];
+        assert_eq!(row.n_ring_faces, 4, "{row:?}");
+        assert_eq!(row.n_off_faces, 0);
+        assert_eq!(row.n_keep_faces, big_f - 4);
+        assert_eq!(row.n_anchored_points, 1);
+        assert_eq!(cell_count(&out.mesh), big_c + 3 * (big_f - 4) + 4);
+        assert_eq!(out.mesh.points.len(), n_pts + spec.n * (big_l - 1));
+        // The RING cells, and the merged faces between two of them.
+        let mut ring_cells = std::collections::HashSet::new();
+        for (j, &f) in out.extrusion.layer_faces.iter().enumerate() {
+            if face_class(&mesh.faces[f], &anchored) == FaceClass::Ring {
+                for k in 0..out.extrusion.cell_count[j] {
+                    ring_cells.insert(out.extrusion.cell_start[j] + k);
+                }
+            }
+        }
+        let n_internal_out = out.mesh.neighbour.len().min(out.mesh.faces.len());
+        let mut merged = 0usize;
+        for f in 0..n_internal_out {
+            let (o, nb) = (out.mesh.owner[f] as usize, out.mesh.neighbour[f] as usize);
+            if ring_cells.contains(&o) && ring_cells.contains(&nb) {
+                merged += 1;
+                assert_eq!(out.mesh.faces[f].len(), 5, "face {f}");
+            }
+        }
+        assert_eq!(merged, 4, "four RING-RING merged faces");
+        // (92.74): the ring is the four faces carrying i0, of the patch.
+        assert!((row.kept_area_frac + row.ring_area_frac - 1.0).abs() < 1e-12);
+        let pidx = mesh
+            .patches
+            .iter()
+            .position(|p| p.name == "cube")
+            .expect("the cube patch");
+        let patch = &mesh.patches[pidx];
+        let mut ring_area = 0.0;
+        let mut n_ring = 0usize;
+        for j in 0..patch.size {
+            let f = n_internal + patch.start + j;
+            if mesh.faces[f].iter().any(|&p| p as usize == i0) {
+                ring_area += face_area_vector(&mesh.points, &mesh.faces[f]).mag();
+                n_ring += 1;
+            }
+        }
+        assert_eq!(n_ring, 4);
+        assert!((row.ring_area_frac - ring_area / row.area).abs() < 1e-12);
+    }
+
+    /// (92.70)-(92.72) with a whole face OFF: the input face stays the
+    /// boundary face it was, and no KEEP face touches it.
+    #[test]
+    fn a_face_whose_points_are_all_anchored_is_left_off() {
+        let (surf, mesh) = castellated_cube_case();
+        let mut spec = cube_layers(0.02);
+        spec.terminate = LayerTerminate::Face;
+        let base = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("patch mode");
+        let big_f = base.report.patches[0].n_faces;
+        let big_l = base.report.n_layer_points / spec.n;
+        let big_c = cell_count(&mesh);
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let n_pts = mesh.points.len();
+        let mut caps = vec![1.0 as Scalar; n_pts];
+        let mut anchored_ids = Vec::new();
+        for (i, p) in mesh.points.iter().enumerate() {
+            if (1.45..2.05).contains(&p.x)
+                && (1.45..2.05).contains(&p.y)
+                && (p.z - 2.5).abs() < 1e-12
+            {
+                caps[i] = 0.0;
+                anchored_ids.push(i);
+            }
+        }
+        assert_eq!(anchored_ids.len(), 4, "the four interior top points");
+        let ones = vec![1.0 as Scalar; n_pts];
+        let out = attempt(
+            &mesh,
+            &surf,
+            &spec,
+            &thresholds(),
+            &patches,
+            &caps,
+            &ones,
+            &vec![false; mesh.faces.len()],
+            &vec![false; mesh.faces.len()],
+        )
+        .expect("attempt");
+        assert!(out.quality.passed(), "{:?}", out.quality.max_non_orth_deg);
+        let anchored: Vec<bool> = (0..n_pts)
+            .map(|i| out.extrusion.slot_of_point[i] >= 0 && caps[i] == 0.0)
+            .collect();
+        let row = &out.report.patches[0];
+        assert_eq!(row.n_off_faces, 1, "{row:?}");
+        assert_eq!(row.n_ring_faces, 8);
+        assert_eq!(row.n_keep_faces, big_f - 9);
+        assert_eq!(row.n_anchored_points, 4);
+        assert_eq!(cell_count(&out.mesh), big_c + 3 * (big_f - 9) + 8);
+        assert_eq!(out.mesh.points.len(), n_pts + spec.n * (big_l - 4));
+        // The OFF face: the input face whose every point is anchored, back as
+        // a boundary face with its input point list and its input owner.
+        let pidx = mesh
+            .patches
+            .iter()
+            .position(|p| p.name == "cube")
+            .expect("the cube patch");
+        let patch = &mesh.patches[pidx];
+        let mut off_input = None;
+        for j in 0..patch.size {
+            let f = n_internal + patch.start + j;
+            if mesh.faces[f].iter().all(|&p| anchored[p as usize]) {
+                off_input = Some(f);
+            }
+        }
+        let off_input = off_input.expect("the all-anchored input face");
+        let n_internal_out = out.mesh.neighbour.len().min(out.mesh.faces.len());
+        let off_out = n_internal_out + patch.start
+            + (off_input - n_internal - patch.start);
+        assert_eq!(out.mesh.faces[off_out], mesh.faces[off_input]);
+        assert_eq!(out.mesh.owner[off_out], mesh.owner[off_input]);
+        // No KEEP face shares a point with the OFF face: RING cells and the
+        // input's own cells are all that reach an anchored point.
+        let anchored_set: std::collections::HashSet<usize> =
+            anchored_ids.iter().copied().collect();
+        let mut ring_or_input = ring_cells_of(&mesh, &out.extrusion, &anchored);
+        for c in 0..big_c {
+            ring_or_input.insert(c);
+        }
+        for (fi, face) in out.mesh.faces.iter().enumerate() {
+            if !face.iter().any(|p| anchored_set.contains(&(*p as usize))) {
+                continue;
+            }
+            let o = out.mesh.owner[fi] as usize;
+            let nb = out.mesh.neighbour.get(fi).map(|v| *v as usize);
+            assert!(
+                ring_or_input.contains(&o)
+                    && nb.map_or(true, |nb| ring_or_input.contains(&nb)),
+                "face {fi} at an anchored point is not KEEP-made"
+            );
+        }
+    }
+
+    /// The RING cells of an extrusion, from the anchored flags.
+    fn ring_cells_of(
+        mesh: &PolyMeshRaw,
+        ex: &Extrusion,
+        anchored: &[bool],
+    ) -> std::collections::HashSet<usize> {
+        let mut out = std::collections::HashSet::new();
+        for (j, &f) in ex.layer_faces.iter().enumerate() {
+            if face_class(&mesh.faces[f], anchored) == FaceClass::Ring {
+                for k in 0..ex.cell_count[j] {
+                    out.insert(ex.cell_start[j] + k);
+                }
+            }
+        }
+        out
+    }
+
+    /// (92.70')'s merge: a KEEP face in M carries ONE cell of the whole
+    /// stack with NO anchored point - the G5-failing stack becomes a single
+    /// fat cell, and no point of it moves.
+    #[test]
+    fn a_merged_face_carries_one_cell_of_the_whole_stack() {
+        let (surf, mesh) = castellated_cube_case();
+        let mut spec = cube_layers(0.02);
+        spec.terminate = LayerTerminate::Face;
+        let base = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("patch mode");
+        let big_f = base.report.patches[0].n_faces;
+        let big_l = base.report.n_layer_points / spec.n;
+        let big_c = cell_count(&mesh);
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let n_pts = mesh.points.len();
+        // The top side's centre face: [1.5, 2.0]^2 x {2.5}.
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let centre = (n_internal..mesh.faces.len())
+            .find(|&f| {
+                let face = &mesh.faces[f];
+                face.iter().all(|&p| {
+                    let q = mesh.points[p as usize];
+                    (q.z - 2.5).abs() < 1e-12
+                        && (1.45..2.05).contains(&q.x)
+                        && (1.45..2.05).contains(&q.y)
+                })
+            })
+            .expect("the top centre face");
+        let mut merged = vec![false; mesh.faces.len()];
+        merged[centre] = true;
+        let ones = vec![1.0 as Scalar; n_pts];
+        let caps = vec![1.0 as Scalar; n_pts];
+        let none = vec![false; mesh.faces.len()];
+        let out = attempt(
+            &mesh, &surf, &spec, &thresholds(), &patches, &caps, &ones, &merged, &none,
+        )
+        .expect("attempt");
+        assert!(out.quality.passed(), "{:?}", out.quality.max_non_orth_deg);
+        let row = &out.report.patches[0];
+        assert_eq!(row.n_ring_faces, 1, "{row:?}");
+        assert_eq!(row.n_merged_faces, 1, "{row:?}");
+        assert_eq!(row.n_keep_faces, big_f - 1);
+        assert_eq!(row.n_anchored_points, 0);
+        assert_eq!(cell_count(&out.mesh), big_c + 3 * (big_f - 1) + 1);
+        assert_eq!(out.mesh.points.len(), n_pts + spec.n * big_l);
+        // The merged cell: exactly level 0, level n, and three side pieces
+        // against each of its four KEEP neighbours.
+        let j = out
+            .extrusion
+            .layer_faces
+            .iter()
+            .position(|&f| f == centre)
+            .expect("the merged face's block");
+        assert_eq!(out.extrusion.cell_count[j], 1);
+        let cell = out.extrusion.cell_start[j];
+        let mut n_faces_of_cell = 0usize;
+        for (fi, _) in out.mesh.faces.iter().enumerate() {
+            let o = out.mesh.owner[fi] as usize;
+            let nb = out.mesh.neighbour.get(fi).map(|v| *v as usize);
+            if o == cell || nb == Some(cell) {
+                n_faces_of_cell += 1;
+            }
+        }
+        assert_eq!(n_faces_of_cell, 2 + 4 * 3, "the merged cell's faces");
+    }
+
+    /// (92.70) amended: a CUT face goes OFF with no anchored point at all -
+    /// the input face stays a boundary face of its patch, one step down the
+    /// stack, and the sides its neighbours had against it become boundary
+    /// faces of the step, on the cut face's own patch.
+    #[test]
+    fn a_cut_face_leaves_its_input_face_and_a_step_of_boundary_sides() {
+        let (surf, mesh) = castellated_cube_case();
+        let mut spec = cube_layers(0.02);
+        spec.terminate = LayerTerminate::Face;
+        let base = add_layers(&mesh, &surf, &cube_layers(0.02), &thresholds())
+            .expect("patch mode");
+        let big_f = base.report.patches[0].n_faces;
+        let big_l = base.report.n_layer_points / spec.n;
+        let big_c = cell_count(&mesh);
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let n_pts = mesh.points.len();
+        let ones = vec![1.0 as Scalar; n_pts];
+        let caps = vec![1.0 as Scalar; n_pts];
+        // The top side's centre face: [1.5, 2.0]^2 x {2.5}, T7's face - the
+        // one stack whose cells G5 refuse at this thickness.
+        let centre = (n_internal..mesh.faces.len())
+            .find(|&f| {
+                let face = &mesh.faces[f];
+                face.iter().all(|&p| {
+                    let q = mesh.points[p as usize];
+                    (q.z - 2.5).abs() < 1e-12
+                        && (1.45..2.05).contains(&q.x)
+                        && (1.45..2.05).contains(&q.y)
+                })
+            })
+            .expect("the top centre face");
+        let none: Vec<bool> = vec![false; mesh.faces.len()];
+        let keep = attempt(
+            &mesh, &surf, &spec, &thresholds(), &patches, &caps, &ones, &none, &none,
+        )
+        .expect("all KEEP");
+        let mut cut = vec![false; mesh.faces.len()];
+        cut[centre] = true;
+        let out = attempt(
+            &mesh, &surf, &spec, &thresholds(), &patches, &caps, &ones, &none, &cut,
+        )
+        .expect("cut");
+        assert!(out.quality.passed(), "{:?}", out.quality.max_non_orth_deg);
+        let row = &out.report.patches[0];
+        assert_eq!(row.n_off_faces, 1, "{row:?}");
+        assert_eq!(row.n_cut_faces, 1, "{row:?}");
+        assert_eq!(row.n_ring_faces, 0, "{row:?}");
+        assert_eq!(row.n_keep_faces, big_f - 1, "{row:?}");
+        assert_eq!(row.n_anchored_points, 0, "{row:?}");
+        assert_eq!(cell_count(&out.mesh), big_c + 3 * (big_f - 1), "{row:?}");
+        assert_eq!(out.mesh.points.len(), n_pts + 3 * big_l);
+        assert!(
+            (row.stack_area_frac - row.kept_area_frac).abs() < 1e-12,
+            "{row:?}"
+        );
+        // The cut face is back on the cube patch, its INPUT point list and
+        // input owner, and the cube patch carries exactly the step's sides
+        // more than the all-KEEP run: 4 segments x 3 levels.
+        let pidx = mesh
+            .patches
+            .iter()
+            .position(|p| p.name == "cube")
+            .expect("the cube patch");
+        let n_internal_out = out.mesh.neighbour.len().min(out.mesh.faces.len());
+        let opatch = &out.mesh.patches[pidx];
+        let keep_patch = &keep.mesh.patches[pidx];
+        assert_eq!(opatch.size - keep_patch.size, 4 * 3, "{opatch:?}");
+        let mut cut_out = None;
+        for b in 0..opatch.size {
+            let fi = n_internal_out + opatch.start + b;
+            if out.mesh.faces[fi] == mesh.faces[centre] {
+                cut_out = Some(fi);
+            }
+        }
+        let cut_out = cut_out.expect("the cut face back on the cube patch");
+        assert_eq!(out.mesh.owner[cut_out], mesh.owner[centre]);
+    }
+
+    /// (92.73) amended: the OUTER ladder in face mode moves no point - a
+    /// step only merges and cuts - so no entry is a retreat, every terminate
+    /// entry anchors nothing and names its gates, the trace ends on an outer
+    /// pass, and one patch set takes at most TERMINATE_STEP_LIMIT entries.
+    #[test]
+    fn the_outer_ladder_in_face_mode_moves_no_point() {
+        let (surf, mesh) = snapped_cube_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.06,
+            growth: 1.3,
+            min_thickness: 0.0,
+            terminate: LayerTerminate::Face,
+            ..LayerSpec::default()
+        };
+        let out =
+            add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        let last = out.report.ladder.last().expect("a trace");
+        assert!(
+            last.ladder == Ladder::Outer && last.outcome == Outcome::Pass,
+            "{last:?}"
+        );
+        let mut per_set = 0usize;
+        let mut max_per_set = 0usize;
+        for e in &out.report.ladder {
+            if e.ladder != Ladder::Outer {
+                continue;
+            }
+            if e.outcome == Outcome::GiveUp {
+                per_set = 0;
+                continue;
+            }
+            per_set += 1;
+            max_per_set = max_per_set.max(per_set);
+            assert!(e.outcome != Outcome::Retreat, "{e:?}");
+            if e.outcome == Outcome::Terminate {
+                assert_eq!(e.terminate_points, 0, "{e:?}");
+                assert!(!e.gates.is_empty(), "{e:?}");
+            }
+        }
+        assert!(max_per_set <= TERMINATE_STEP_LIMIT, "{max_per_set}");
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the row");
+        eprintln!("face outer row: {row:?}");
+        for e in &out.report.ladder {
+            eprintln!("face outer ladder {e:?}");
+        }
+    }
+
+    /// (92.73) amended: EVERY per-patch-set counter, M and X reset when a
+    /// patch drops - one function zeroes the lot, so the next patch set
+    /// starts clean and never at the last set's step limit.
+    #[test]
+    fn a_patch_drop_resets_the_face_mode_counters() {
+        let n_points = 7usize;
+        let n_faces = 5usize;
+        let mut fl = FaceLadder::new(n_points, n_faces);
+        fl.caps[3] = 0.5;
+        fl.betas[4] = 0.25;
+        fl.merged[1] = true;
+        fl.cut[2] = true;
+        fl.out_h[5] = 2;
+        fl.halvings = 1;
+        fl.steps = TERMINATE_STEP_LIMIT;
+        fl.beta_rungs = 1;
+        fl.reset(n_points, n_faces);
+        assert!(fl.caps.iter().all(|&c| c == 1.0));
+        assert!(fl.betas.iter().all(|&b| b == 1.0));
+        assert!(fl.merged.iter().all(|m| !m));
+        assert!(fl.cut.iter().all(|c| !c));
+        assert!(fl.out_h.iter().all(|&h| h == 0));
+        assert_eq!(fl.halvings, 0);
+        assert_eq!(fl.steps, 0);
+        assert_eq!(fl.beta_rungs, 0);
+    }
+
+    /// (92.73) on the snapped cube: face mode keeps a ring of stack where
+    /// patch mode gave the whole patch up.
+    #[test]
+    fn the_snapped_cube_in_face_mode_keeps_its_layers_where_it_can() {
+        let (surf, mesh) = snapped_cube_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.06,
+            growth: 1.3,
+            min_thickness: 0.0,
+            terminate: LayerTerminate::Face,
+            ..LayerSpec::default()
+        };
+        let out =
+            add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        assert!(
+            out.quality.passed(),
+            "max non-orth {:?}",
+            out.quality.max_non_orth_deg
+        );
+        let last = out.report.ladder.last().expect("a trace");
+        assert!(
+            last.ladder == Ladder::Outer && last.outcome == Outcome::Pass,
+            "{last:?}"
+        );
+        // (92.73) amended: the OUTER ladder moves no point - a step merges
+        // and cuts, and anchors nothing.
+        for e in &out.report.ladder {
+            if e.ladder == Ladder::Outer && e.outcome == Outcome::Terminate {
+                assert_eq!(e.terminate_points, 0, "{e:?}");
+                assert!(!e.gates.is_empty(), "{e:?}");
+            }
+        }
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the row");
+        assert_eq!(
+            row.n_keep_faces + row.n_ring_faces + row.n_off_faces,
+            row.n_faces,
+            "{row:?}"
+        );
+        assert!(row.kept_area_frac + row.ring_area_frac <= 1.0 + 1e-12);
+        for e in &out.report.ladder {
+            eprintln!("face cube ladder {e:?}");
+        }
+        eprintln!("face cube row: {row:?}");
+        assert!(row.kept_area_frac > 0.0, "{row:?}");
+    }
+
+    /// (92.73) on the snapped floor box, whose pull is what fails: face mode
+    /// anchors its way to a mesh the gate takes.
+    #[test]
+    fn the_floor_box_in_face_mode_meets_the_ground() {
+        let (surf, mesh) = snapped_floor_box_case();
+        let spec = LayerSpec {
+            patches: vec!["cube".to_string()],
+            n: 3,
+            first_thickness: 0.06,
+            growth: 1.3,
+            min_thickness: 0.0,
+            terminate: LayerTerminate::Face,
+            ..LayerSpec::default()
+        };
+        let out =
+            add_layers(&mesh, &surf, &spec, &thresholds()).expect("layers");
+        assert!(
+            out.quality.passed(),
+            "max non-orth {:?}",
+            out.quality.max_non_orth_deg
+        );
+        let last = out.report.ladder.last().expect("a trace");
+        assert!(
+            last.ladder == Ladder::Outer && last.outcome == Outcome::Pass,
+            "{last:?}"
+        );
+        let row = out
+            .report
+            .patches
+            .iter()
+            .find(|p| p.name == "cube")
+            .expect("the row");
+        assert_eq!(
+            row.n_keep_faces + row.n_ring_faces + row.n_off_faces,
+            row.n_faces,
+            "{row:?}"
+        );
+        assert!(row.kept_area_frac > 0.0, "{row:?}");
+        eprintln!("face floor row: {row:?}");
+        for e in &out.report.ladder {
+            eprintln!("face floor ladder {e:?}");
+        }
+    }
+
+    /// R8: with nothing anchored, face mode IS patch mode, bit for bit.
+    #[test]
+    fn face_mode_with_nothing_anchored_is_patch_mode() {
+        let (surf, mesh) = castellated_cube_case();
+        let base = cube_layers(0.02);
+        let mut face_spec = base.clone();
+        face_spec.terminate = LayerTerminate::Face;
+        let a = add_layers(&mesh, &surf, &base, &thresholds()).expect("patch");
+        let b = add_layers(&mesh, &surf, &face_spec, &thresholds()).expect("face");
+        assert_eq!(a.mesh.points, b.mesh.points);
+        assert_eq!(a.mesh.faces, b.mesh.faces);
+        assert_eq!(a.mesh.owner, b.mesh.owner);
+        assert_eq!(a.mesh.neighbour, b.mesh.neighbour);
+        for (pa, pb) in a.mesh.patches.iter().zip(b.mesh.patches.iter()) {
+            assert_eq!(pa.start, pb.start, "patch {}", pa.name);
+            assert_eq!(pa.size, pb.size, "patch {}", pa.name);
+        }
     }
 
     #[test]
@@ -4395,6 +6139,9 @@ pub(crate) mod tests {
                     assert!(!e.gates.is_empty() && quiet && e.beta_points > 0, "{e:?}")
                 }
                 Outcome::GiveUp => assert!(e.give_up.is_some() && e.dropped.is_some(), "{e:?}"),
+                Outcome::Terminate => {
+                    assert!(!e.gates.is_empty() && quiet && e.terminate_points > 0, "{e:?}")
+                }
             }
             match e.give_up {
                 Some(DropCause::OuterGate) => {
@@ -4572,6 +6319,8 @@ pub(crate) mod tests {
             &patches,
             &caps,
             &vec![1.0 as Scalar; mesh.points.len()],
+            &vec![false; mesh.faces.len()],
+            &vec![false; mesh.faces.len()],
         )
         .expect("attempt");
         let key = |ps: &[crate::Label]| {
@@ -5457,8 +7206,11 @@ pub(crate) mod tests {
         let mut prev: Option<std::collections::BTreeSet<usize>> = None;
         let mut r = 0usize;
         loop {
-            let a = attempt(m, surf, spec, thr, &patches_e, &caps, &betas)
-                .expect("the probe's attempt");
+            let a = attempt(
+                m, surf, spec, thr, &patches_e, &caps, &betas,
+                &vec![false; m.faces.len()], &vec![false; m.faces.len()],
+            )
+            .expect("the probe's attempt");
             let hm_a = build_host_mesh(&a.mesh).expect("host mesh of the attempt");
             let rep =
                 quality::measure_capped(&a.mesh, thr, usize::MAX).expect("the probe's measure");
@@ -5595,6 +7347,7 @@ pub(crate) mod tests {
                     halvings += 1;
                 }
                 Outcome::Pass => {}
+                Outcome::Terminate => unreachable!("the oracle emulates patch mode"),
             }
             let mut hist: std::collections::BTreeMap<u64, usize> = Default::default();
             for (i, &s) in a.extrusion.slot_of_point.iter().enumerate() {
@@ -5828,7 +7581,7 @@ pub(crate) mod tests {
         betas: &[Scalar],
     ) -> Option<std::collections::BTreeSet<usize>> {
         let caps = vec![1.0 as Scalar; m.points.len()];
-        let r0 = match attempt(m, surf, spec, thr, patches, &caps, betas) {
+        let r0 = match attempt(m, surf, spec, thr, patches, &caps, betas, &vec![false; m.faces.len()], &vec![false; m.faces.len()]) {
             Ok(a) => a,
             Err(e) => {
                 g5p_refused(name, value, &e);
@@ -5909,7 +7662,7 @@ pub(crate) mod tests {
             s.first_thickness = t1;
             let caps = vec![1.0 as Scalar; m.points.len()];
             let betas = vec![1.0 as Scalar; m.points.len()];
-            match attempt(m, surf, &s, thr, patches, &caps, &betas) {
+            match attempt(m, surf, &s, thr, patches, &caps, &betas, &vec![false; m.faces.len()], &vec![false; m.faces.len()]) {
                 Ok(a) => {
                     let rep = quality::measure_capped(&a.mesh, thr, usize::MAX)
                         .expect("the probe's measure");

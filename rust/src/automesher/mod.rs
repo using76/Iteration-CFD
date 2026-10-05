@@ -222,6 +222,25 @@ pub enum KeepRegion {
     Seed,
 }
 
+/// [`LayerSpec::terminate`]'s two choices - SPEC-LIT §92.13 (92.73): where a
+/// layer stack ends when a point cannot carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LayerTerminate {
+    /// The default: the stack ends per PATCH - a point that cannot carry the
+    /// stack costs its whole patch its layers, and the snapped mesh comes
+    /// back for it.
+    #[default]
+    Patch,
+    /// The stack ends per FACE: the OUTER ladder moves no point - a
+    /// G5-failing KEEP stack merges into one cell of the whole thickness,
+    /// every other failing layer face is cut, leaving a step the wall
+    /// carries - and the INNER ladder still anchors, tapering the faces
+    /// around an anchored point to zero in one wedge cell; only the faces
+    /// whose points are all anchored, or that were cut, go without layers.
+    Face,
+}
+
 /// One `castellation.bodies[]` entry: a closed body the run KEEPS as a region
 /// of its own instead of removing it as solid (SPEC-LIT §92.10 (92.23) removes
 /// every leaf whose centre is inside the surface; a declared body is the
@@ -372,6 +391,31 @@ pub struct LayerSpec {
     /// loses its layers.
     #[serde(default = "d_retreat_limit")]
     pub retreat_limit: usize,
+    /// (92.73): where a layer stack ends - `"patch"` drops a whole patch
+    /// when one of its points cannot carry the stack; `"face"` anchors the
+    /// point and tapers the faces around it to zero in one wedge cell.
+    #[serde(default, skip_serializing_if = "terminate_is_patch")]
+    #[schemars(default)]
+    pub terminate: LayerTerminate,
+    /// (92.69): face mode's angle tolerance the junction normals of a point
+    /// merge within, degrees. Must lie in (0, 90).
+    #[serde(
+        default = "d_junction_angle_deg",
+        skip_serializing_if = "junction_angle_is_default"
+    )]
+    #[schemars(default = "d_junction_angle_deg")]
+    pub junction_angle_deg: f64,
+}
+
+/// [`LayerSpec::terminate`]'s skip predicate: `"patch"` is the default and
+/// is not written out.
+fn terminate_is_patch(t: &LayerTerminate) -> bool {
+    *t == LayerTerminate::Patch
+}
+
+/// [`LayerSpec::junction_angle_deg`]'s skip predicate.
+fn junction_angle_is_default(v: &f64) -> bool {
+    *v == d_junction_angle_deg()
 }
 
 fn d_first_thickness() -> f64 {
@@ -410,6 +454,10 @@ fn d_retreat_limit() -> usize {
     4
 }
 
+fn d_junction_angle_deg() -> f64 {
+    15.0
+}
+
 impl Default for LayerSpec {
     fn default() -> Self {
         Self {
@@ -424,6 +472,8 @@ impl Default for LayerSpec {
             smoothing: d_layer_smoothing(),
             smoothing_passes: d_layer_smoothing_passes(),
             retreat_limit: d_retreat_limit(),
+            terminate: LayerTerminate::Patch,
+            junction_angle_deg: d_junction_angle_deg(),
         }
     }
 }
@@ -622,6 +672,17 @@ impl AutomeshConfig {
             return Err(Error::Mesh(format!(
                 "layers.growth: must be > 0, got {}",
                 self.layers.growth
+            )));
+        }
+        // (92.69): the merge tolerance is an angle, not a fraction - 0 would
+        // merge nothing and 90 would merge everything, and neither is what
+        // the face mode's junction dedupe means.
+        if !(self.layers.junction_angle_deg > 0.0
+            && self.layers.junction_angle_deg < 90.0)
+        {
+            return Err(Error::Mesh(format!(
+                "layers.junction_angle_deg: must lie in (0, 90), got {}",
+                self.layers.junction_angle_deg
             )));
         }
         if self.castellation.keep_region == KeepRegion::Seed
@@ -827,6 +888,8 @@ mod config_tests {
             smoothing: 0.3,
             smoothing_passes: 5,
             retreat_limit: 3,
+            terminate: LayerTerminate::Patch,
+            junction_angle_deg: d_junction_angle_deg(),
         };
         cfg.quality.max_non_orth_deg = 65.0;
         cfg.quality.report_non_orth_deg = 50.0;
@@ -851,6 +914,38 @@ mod config_tests {
         assert_eq!(cfg.layers, LayerSpec::default());
         assert_eq!(cfg.quality, QualitySpec::default());
         assert_eq!(cfg.domain.grading, grading_one());
+    }
+
+    /// (92.69) and (92.73)'s two keys: they parse, they refuse by name, and
+    /// a default config serialises without either.
+    #[test]
+    fn layers_terminate_and_junction_angle_parse_and_refuse() {
+        let spec = |body: &str| {
+            let text = minimal_text().replace(
+                "\"output\"",
+                &format!("\"layers\": {{{body}}}, \"output\""),
+            );
+            read_config_str(&text, "layers")
+        };
+        let cfg = spec("\"terminate\": \"face\"").expect("face parses");
+        assert_eq!(cfg.layers.terminate, LayerTerminate::Face);
+        let err = spec("\"terminate\": \"edge\"").unwrap_err();
+        assert!(err.to_string().contains("edge"), "{err}");
+        for bad in [0.0, 90.0] {
+            let mut cfg = spec("\"junction_angle_deg\": 30.0").expect("30 in range");
+            cfg.layers.junction_angle_deg = bad;
+            let err = cfg.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("layers.junction_angle_deg"),
+                "{err}"
+            );
+        }
+        let cfg = spec("\"junction_angle_deg\": 30.0").expect("30 parses");
+        assert_eq!(cfg.layers.junction_angle_deg, 30.0);
+        // A default LayerSpec serialises with neither key.
+        let json = serde_json::to_string(&LayerSpec::default()).unwrap();
+        assert!(!json.contains("terminate"), "{json}");
+        assert!(!json.contains("junction_angle_deg"), "{json}");
     }
 
     #[test]

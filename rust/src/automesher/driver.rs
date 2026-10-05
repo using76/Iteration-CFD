@@ -379,6 +379,16 @@ fn layer_patch_json(p: &super::layers::PatchLayers) -> serde_json::Value {
         "n_reseated_points": p.n_reseated_points,
         "beta_rungs": p.beta_rungs,
         "level_n_non_orth_max_deg": p.level_n_non_orth_max_deg,
+        "kept_area_frac": p.kept_area_frac,
+        "ring_area_frac": p.ring_area_frac,
+        "n_keep_faces": p.n_keep_faces,
+        "n_ring_faces": p.n_ring_faces,
+        "n_off_faces": p.n_off_faces,
+        "n_anchored_points": p.n_anchored_points,
+        "n_merged_faces": p.n_merged_faces,
+        "merged_area_frac": p.merged_area_frac,
+        "n_cut_faces": p.n_cut_faces,
+        "stack_area_frac": p.stack_area_frac,
     })
 }
 
@@ -405,6 +415,7 @@ fn ladder_json(ladder: &[super::layers::LadderEntry]) -> serde_json::Value {
                 "give_up": e.give_up.map(|c| c.as_str()),
                 "dropped": e.dropped,
                 "beta_points": e.beta_points,
+                "terminate_points": e.terminate_points,
             })
         })
         .collect();
@@ -1866,8 +1877,45 @@ mod tests {
             "n_reseated_points",
             "beta_rungs",
             "level_n_non_orth_max_deg",
+            "kept_area_frac",
+            "ring_area_frac",
+            "n_keep_faces",
+            "n_ring_faces",
+            "n_off_faces",
+            "n_anchored_points",
+            "n_merged_faces",
+            "merged_area_frac",
+            "n_cut_faces",
+            "stack_area_frac",
         ] {
             assert!(r.get(key).is_some(), "missing {key} in {r}");
+        }
+    }
+
+    /// (92.74)'s coverage keys on a face-mode run of the smallest config:
+    /// every layer row reports its keep/ring/off split and every ladder
+    /// entry its terminate count.
+    #[test]
+    fn a_face_mode_cube_run_reports_its_coverage() {
+        let mut cfg = cube_config();
+        cfg.layers.terminate = crate::automesher::LayerTerminate::Face;
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let r = &s["stages"][4]["patches"][0];
+        let kept = r["kept_area_frac"].as_f64().expect("kept_area_frac");
+        assert!((0.0..=1.0).contains(&kept), "{r}");
+        for e in s["stages"][4]["ladder"].as_array().expect("ladder") {
+            assert!(
+                e.get("terminate_points").and_then(|v| v.as_u64()).is_some(),
+                "ladder entry without terminate_points: {e}"
+            );
         }
     }
 

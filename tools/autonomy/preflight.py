@@ -104,7 +104,7 @@ class _ParseErr(Exception):
 
 # (C2) the mesher's config tree, cross-checked against the binary's -schema.
 # Each struct: (field, kind, required) in DECLARATION order - the order serde
-# checks missing fields in. 14 structs, 59 fields.
+# checks missing fields in. 14 structs, 61 fields.
 STRUCTS = {
  "AutomeshConfig": [("$schema", "opt_str", False), ("input", "InputSpec", True),
      ("domain", "DomainSpec", True), ("refinement", "RefinementSpec", False),
@@ -133,7 +133,8 @@ STRUCTS = {
      ("min_thickness", "f64", False), ("medial_frac", "f64", False),
      ("normal_passes", "usize", False), ("cell_frac", "f64", False),
      ("smoothing", "f64", False), ("smoothing_passes", "usize", False),
-     ("retreat_limit", "usize", False)],
+     ("retreat_limit", "usize", False), ("terminate", "enum", False),
+     ("junction_angle_deg", "f64", False)],
  "QualitySpec": [("max_closure", "f64", False), ("max_non_orth_deg", "f64", False),
      ("report_non_orth_deg", "f64", False), ("min_thickness_ratio", "f64", False),
      ("max_cond", "f64", False)],
@@ -143,7 +144,8 @@ STRUCTS = {
 
 
 # (C3) MESHER_DEFAULTS - the binary's own defaults, cross-checked in
-# selftest group 1 against -schema (31 comparisons).
+# selftest group 1 against -schema (31 schema comparisons; the two skip-
+# serialised terminate fields carry no -schema default, see _selftest_defaults).
 MESHER_DEFAULTS = {
  "/domain/grading": [1.0, 1.0, 1.0],
  "/refinement/levels": [], "/refinement/feature_angle_deg": 30.0, "/refinement/max_level": 2,
@@ -159,6 +161,7 @@ MESHER_DEFAULTS = {
  "/layers/min_thickness": 0.1, "/layers/medial_frac": 0.5, "/layers/normal_passes": 3,
  "/layers/cell_frac": 0.5,
  "/layers/smoothing": 0.5, "/layers/smoothing_passes": 4, "/layers/retreat_limit": 4,
+ "/layers/terminate": "patch", "/layers/junction_angle_deg": 15.0,
  "/quality/max_closure": 1e-10, "/quality/max_non_orth_deg": 70.0,
  "/quality/report_non_orth_deg": 60.0, "/quality/min_thickness_ratio": 0.05,
  "/quality/max_cond": 10000.0,
@@ -310,9 +313,12 @@ def _parse(value, kind, path):
                             % _type_desc(value))
         return
     if kind == "enum":
-        if not (isinstance(value, str) and value in ENUM_VALUES):
+        # layers.terminate is its own enum (SPEC-LIT (92.73)): "patch" or
+        # "face"; castellation.keep_region is the ENUM_VALUES pair.
+        vals = ("patch", "face") if path.endswith("/terminate") else ENUM_VALUES
+        if not (isinstance(value, str) and value in vals):
             raise _ParseErr(path, "invalid type: %s, expected %r or %r"
-                            % (_type_desc(value), ENUM_VALUES[0], ENUM_VALUES[1]))
+                            % (_type_desc(value), vals[0], vals[1]))
         return
     if kind in ("f64x3", "f64x6"):
         n = int(kind[4:])
@@ -472,6 +478,9 @@ def _mirror_validate(cfg):
     gr = _vget(cfg, "layers", "growth", 1.3)
     if not gr > 0:
         return ("layers.growth", "must be > 0, got %r" % (gr,))
+    ja = _vget(cfg, "layers", "junction_angle_deg", 15.0)
+    if not (0 < ja < 90):
+        return ("layers.junction_angle_deg", "must lie in (0, 90), got %r" % (ja,))
     if _vget(cfg, "castellation", "keep_region", "largest") == "seed" \
             and _vget(cfg, "castellation", "seed_point", None) is None:
         return ("castellation.seed_point",
@@ -2652,7 +2661,7 @@ def _schema_kind_ok(s, kind):
         return (s.get("type") == ["array", "null"] and s.get("minItems") == 3
                 and s.get("maxItems") == 3)
     if kind == "enum":
-        return s.get("$ref") == "#/$defs/KeepRegion"
+        return s.get("$ref") in ("#/$defs/KeepRegion", "#/$defs/LayerTerminate")
     if kind == "map:str":
         return (s.get("type") == "object"
                 and (s.get("additionalProperties") or {}).get("type") == "string")
@@ -2665,9 +2674,13 @@ def _schema_kind_ok(s, kind):
 
 
 def _selftest_defaults(props, defs):
-    """Group 1's 31 default comparisons (29 root default keys + 2 $defs fields)."""
+    """Group 1's 31 default comparisons (29 root default keys + 2 $defs
+    fields).  The skipped pointers are fields whose serde skip predicate
+    keeps them out of a default config's JSON - schemars 1.2.2 then writes
+    NO default for them into -schema, so their defaults live in
+    MESHER_DEFAULTS alone (SPEC-LIT (92.73)'s terminate pair)."""
     skip = {"/domain/grading", "/refinement/levels/*/feature_level", "/castellation/bodies",
-            "/refinement/boxes"}
+            "/refinement/boxes", "/layers/terminate", "/layers/junction_angle_deg"}
     got_keys = set()
     n = 0
     for sname in ("refinement", "castellation", "snap", "layers", "quality"):
