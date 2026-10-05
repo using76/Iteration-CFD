@@ -12280,6 +12280,13 @@ ratio `|E| > u_val` - the disagreement is NOT the mesh, which is the
 arithmetic beneath the diagnosis above, and it is why the verdict carries
 the Kr = 0.1 study with it into the registry.
 
+**§115, added when the Kr = 0.1 point was diagnosed.** It measured the candidates
+(mesh, Rayleigh-number definition, geometry reading, property temperature and
+buoyancy form, the face mean), ruled each out, and found the reference's
+resistance lower than the stated configuration's by about `0.019/Kr` at every published
+point from `Ra = 500` to `10^5`; with the conductivity ratio scaled by `1.0992489`,
+fitted at the one conduction-dominated point, every 80x80 point agrees to `0.29 %`.
+
 ### 60.6 Gate 6 - Qu & Mudawar (2002)
 
 *Int. J. Heat Mass Transfer* **45** 3973-3985, DOI
@@ -33785,5 +33792,156 @@ tg0 probe: Ux mean ratio b/a 1.020177e0
 Run a's omega does not change in any cell between iterations 4000 and 8000 while its k moves by 2.154e-3;
 run b's omega is still settling at 2.778e-4. The cell mean of `Ux`, arithmetic over the 320 cells, is
 2.02 % higher in run b; table 2's volume-weighted U_b moves by 2.49 %.
+
+---
+
+## 115. Gate 5 at Kr = 0.1 - the secondary reference's wall conducts about 10 % more than the stated one; a diagnosis
+
+`No GPL-licensed source was consulted.`
+
+### 115.1 What Gate 5 records
+
+§60.5 compares the Kaminski & Prakash configuration (wall `0 <= X <= 0.2`,
+fluid `0.2 <= X <= 1`, Pr 0.71, `Nu` by (S60.1) from the cold-wall heat flow)
+against Belazizia *et al.* (2012), a SECONDARY source (§60.5's disclosure:
+the primary table was never read). `ofgpu-validate` reports `-7.11 %` at
+`Ra = 10^4`, `Kr = 0.1`, 40x40. On 80x80 (§60.5's table), `Ra = 10^4`:
+`-7.12 %` / `-3.00 %` / `-0.48 %` at `Kr = 0.1 / 1 / 10`; `Ra = 10^5`:
+`-7.79 %` / `-4.32 %` / `-0.81 %`. This section measures why.
+
+### 115.2 How it was measured
+
+The `ofgpu-cht` binary of this tree at `f3f145c` on case documents generated
+outside the tree, each with the numerics of `cases/kaminskiPrakash.cht.jsonc`
+(relaxation 0.7 / 0.3 / 0.7, Gauss linear, residual `1e-7`, at most 15000
+iterations), 40x40 unless a row says otherwise; `Nu` from the cold-wall heat
+flow by (S60.1); in every run the cold-wall, hot-wall and interface heat
+flows agree to `1.2e-4` or better and the run stopped on its residual. The
+base point reproduces §60.5's 40x40 row exactly (`0.38086`, 4096 iterations).
+Plus a one-dimensional conduction oracle for the face-mean question. No code
+was changed to measure it.
+
+### 115.3 Table 1 - the candidates, and what each measured
+
+(Belazizia *et al.* `0.41 / 1.57 / 2.28` at `Ra = 10^4`, `Kr = 0.1 / 1 / 10`):
+
+| candidate | variant run | Kr = 0.1 | Kr = 1 | Kr = 10 | verdict |
+|---|---|---|---|---|---|
+| mesh | §60.5's 40/60/80 study | change `0.02 %` then `0.00 %`; §94 `U_fine = 9.943e-5` | | | not the mesh |
+| Rayleigh number on the fluid width `0.8` | `Ra = 10^4/0.512 = 19531.25` | `0.39521` (`-3.61 %`) | `1.73877` (`+10.75 %`) | `2.76041` (`+21.07 %`) | not uniform in Kr; ruled out |
+| the same, conduction end | `Ra = 976.5625` | `0.35783` against `0.382` (`-6.33 %`) | | | cannot move conduction; ruled out |
+| geometry: the fluid cavity square, wall outside it (total width 1.2), `Nu` on the fluid width | | `0.37343` (`-8.92 %`) | `1.45871` (`-7.09 %`) | `2.13983` (`-6.15 %`) | ruled out |
+| the same, `Nu` on the total width (x 1.2) | | `0.44812` (`+9.30 %`) | `1.75045` (`+11.49 %`) | `2.56780` (`+12.62 %`) | ruled out |
+| property temperature and the density-ratio buoyancy form | `dT/TRef` `3.3e-5` and `3.3e-3` (`dT` 0.01 and 1.0 K, `g` rescaled to hold `Ra = 10^4`) against `3.3e-4` | `0.38085` and `0.38093` against `0.38086` | | | `2e-4` at most; ruled out |
+| Prandtl number | Pr `0.70` instead of `0.71` | `0.38086` | | | ruled out |
+
+The solver's interface is the exact series resistance (Gate 59-B, `2.5e-9`
+at `Kr = 0.1`). A reference that took the ARITHMETIC mean at the interface
+face of its 90-cell uniform mesh would, in pure conduction (the oracle),
+give `0.36244` (`+1.48 %`), `1.00000` and `1.22563` (`+0.50 %`) against the
+exact `0.35714 / 1.00000 / 1.21951`: a fifth of the `+6.96 %` the reference
+shows at `Kr = 0.1`, and nothing at `Kr = 1`. And at `Kr = 1` the two
+materials are the same, so no face mean of any kind can change anything -
+yet the reference is `+2.07 %` above this solver there at `Ra = 500`
+(`1.03` against `1.00906`). Ruled out.
+
+### 115.4 The cause
+
+At `Ra = 500`, `Kr = 0.1` the flow carries almost nothing: this solver gives
+`0.35735` against the exact conduction limit `0.357143` (`+5.8e-4`), while
+the reference reads `0.382`, `6.96 %` above the exact limit of the STATED
+configuration. Writing the reference's total resistance as this solver's
+minus a deficit, `1/Nu_ref = 1/Nu - c/Kr`, table 2 gives `c` at all nine
+published points (Ra 500 on 40x40, the others on 80x80; the bracket is the
+uncertainty from the reference's last printed digit):
+
+| Ra | Kr = 0.1 | Kr = 1 | Kr = 10 |
+|---|---|---|---|
+| 500 | `0.0181 +/- 0.0003` | `0.0201 +/- 0.0047` | `0.0175 +/- 0.0325` |
+| `10^4` | `0.0187 +/- 0.0003` | `0.0197 +/- 0.0020` | `0.0210 +/- 0.0096` |
+| `10^5` | `0.0183 +/- 0.0002` | `0.0192 +/- 0.0009` | `0.0192 +/- 0.0028` |
+
+`c` runs from `0.0175` to `0.0210` and does not move with `Ra` (500 to
+`10^5`) or with `Kr` (0.1 to 10). A deficit that scales as `1/Kr` is a
+deficit in the solid's resistance `D/Kr`: the reference behaves as a wall
+about `0.181` thick instead of `0.2`, or, equivalently in conduction, as a
+conductivity ratio about `1.099` times the stated one. The data cannot tell
+those two apart; the primary paper could, and it was not read (§60.5).
+
+### 115.5 The confirmation - one parameter, fitted at one point, predicting eight
+
+From the conduction point alone,
+`f = 2.0/(2.0 - (1/0.35735 - 1/0.382)) = 1.0992489`. Table 3, this solver
+run at `Kr x 1.0992489` against Belazizia *et al.*:
+
+| Ra | Kr | mesh | Nu | reference | difference |
+|---|---|---|---|---|---|
+| 500 | 1 | 40x40 | `1.02801` | `1.03` | `-0.19 %` |
+| 500 | 10 | 40x40 | `1.24014` | `1.24` | `+0.01 %` |
+| `10^4` | 0.1 | 40x40 | `0.41067` | `0.41` | `+0.16 %` |
+| `10^4` | 1 | 40x40 | `1.57812` | `1.57` | `+0.52 %` |
+| `10^4` | 10 | 40x40 | `2.28981` | `2.28` | `+0.43 %` |
+| `10^4` | 10 | 80x80 | `2.28046` | `2.28` | `+0.02 %` |
+| `10^5` | 0.1 | 40x40 | `0.46209` | `0.461` | `+0.24 %` |
+| `10^5` | 1 | 40x40 | `2.37336` | `2.35` | `+0.99 %` |
+| `10^5` | 1 | 80x80 | `2.35674` | `2.35` | `+0.29 %` |
+| `10^5` | 10 | 40x40 | `4.31574` | `4.25` | `+1.55 %` |
+| `10^5` | 10 | 80x80 | `4.25331` | `4.25` | `+0.08 %` |
+
+Every 80x80 row is within `0.29 %`; the two 40x40 rows above `0.5 %` are
+the mesh's own (§60.5: `Ra = 10^5`, `Kr = 10` moves `-1.43 %` from 40x40 to
+80x80). Against the stated wall the same nine points disagree by up to
+`-7.79 %`; with one factor fitted at the one point where the flow does
+nothing, they agree to the reference's own printed precision. The miss is
+the reference's conduction, not this solver's convection, interface or mesh.
+
+### 115.6 Options
+
+They are the user's; this unit changes nothing.
+
+* O1 (recommended): Gate 5 keeps its definition, its 3 % bar and every
+  number; its verdict at `Kr <= 1` is read as reference-limited and cites
+  §115. The convection-dominated end (`Kr = 10`) and Gate 59-B carry the
+  claim.
+* O2: obtain Kaminski & Prakash (1986) itself (paywalled) and compare
+  against its own table; that also settles wall thickness against
+  conductivity ratio.
+* O3: replace the secondary reference with another open solution of the
+  same configuration that reproduces the conduction limit at low `Ra`, and
+  keep Belazizia *et al.* only at `Kr = 10`.
+* O4 (not recommended): compare against Belazizia *et al.* at
+  `Kr x 1.0992489` - a factor fitted to the reference is a calibration, not
+  a validation.
+* Not options: changing the interface treatment or loosening the 3 % bar.
+
+### 115.7 The probe and the house items
+
+`gate_5_probe_the_kr_miss_is_a_solid_resistance_offset_in_the_reference`
+runs the six runs of the diagnosis on the card: the fluid-width Rayleigh
+reading at `Kr = 10` (`ra = 19531.25`); the fluid-square geometry reading at
+`Kr = 10` with `width = 1.2` and its total-width `Nu`; `dT/TRef` of
+`3.3e-5` and `3.3e-3` at `Kr = 0.1` against `0.38086`; the `Ra = 500`,
+`Kr = 0.1` conduction point against the exact `0.357143` and the reference's
+`0.382`; and `Kr x 1.0992489` at `Ra = 10^4` against `0.41`. What it holds:
+the fluid-width Rayleigh reading overshoots the reference by more than
+`15 %` at `Kr = 10`, the fluid-square reading fails on both widths, the property temperature is
+innocent to `5e-4`, the `Ra = 500` point is the conduction limit to `1e-3`
+while the reference sits more than `6 %` above it, and the one fitted factor
+lands the reference's number to `1 %`.
+
+Measured on the card (RTX 5070 Ti, f64, 226 s), every run stopped on its
+residual and every number equal to the `ofgpu-cht` run of the same point:
+
+```text
+gate5 probe: fluid-width Ra, Kr 10: Nu 2.76041 hot 2.76047 iface 2.76046 its 1342 conv true
+gate5 probe: fluid-square geometry, Kr 10: Nu 2.13983 hot 2.13991 iface 2.13990 its 1780 conv true total-width Nu 2.56780
+gate5 probe: dT/TRef 3.3e-5: Nu 0.38085 hot 0.38082 iface 0.38082 its 4096 conv true
+gate5 probe: dT/TRef 3.3e-3: Nu 0.38093 hot 0.38090 iface 0.38090 its 4094 conv true
+gate5 probe: conduction, Ra 500, Kr 0.1: Nu 0.35735 hot 0.35731 iface 0.35731 its 5531 conv true exact 0.357143 reference 0.382 is +6.96% above exact
+gate5 probe: Kr x 1.0992489, Ra 1e4, Kr 0.1: Nu 0.41067 hot 0.41064 iface 0.41064 its 4000 conv true against 0.41 +0.16%
+```
+
+House items: no numerics change, no new file, no kernel, no capture row, no
+gate; the library gains one ignored test (2150 listed).
 
 ---
