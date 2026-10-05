@@ -45,8 +45,8 @@ selftest `SELFTEST PASS 6/6`.
 ## Soundtrack
 
 `tools/promo/video/audio/soundtrack.json` is the single source: 10 scenes
-summing to 90.0 s, 12 VO lines, 36 SFX cues, the music descriptor, the mix
-specification and the master gates.
+summing to 90.0 s, 12 VO lines, 33 SFX cues (audio v3), the music descriptor,
+the mix specification and the master gates.
 
 - **Music** — one continuous licensed excerpt, no joins: HeyGen audio library
   id `a0dc53f249ae416f8a7dcc15912581a1` (`assets/music/src/a0dc53f2.mp3`,
@@ -54,11 +54,13 @@ specification and the master gates.
   0-90 s at `bed_gain_db` -11.0, its native final hit at film 79.85 s. Chosen
   by the supervisor's library scan (see `assets/music/src/SOURCES.json` in
   the build project).
-- **SFX** — 36 cues from the licensed HeyGen library set copied (not edited)
+- **SFX** — 33 cues from the licensed HeyGen library set copied (not edited)
   into `assets/sfx/src` (index: `assets/sfx/SFX_INDEX.json` in the build
-  project); kind `sub` is synthesised in `video_audio.py` (an exponential
-  78 -> 40 Hz sine sweep over 0.9 s, envelope exp(-t/0.35), plus a 60 Hz,
-  0.12 s raised-cosine thump, peak 0.9 before gain).
+  project); the v2 build placed 36, three of them the synthesised `sub`
+  thump, which audio v3 removed (kind `sub` stays synthesised in
+  `video_audio.py`: an exponential 78 -> 40 Hz sine sweep over 0.9 s,
+  envelope exp(-t/0.35), plus a 60 Hz, 0.12 s raised-cosine thump, peak 0.9
+  before gain - no v3 cue uses it).
 - **Voice** — local Kokoro-82M, voice `am_michael`, through
   `npx --yes hyperframes@0.8.122 tts` with the scratch kokoro venv as
   `HYPERFRAMES_PYTHON`; `V10` at speed 1.05, everything else at 1.0. Measured
@@ -237,3 +239,25 @@ render: `hyperframes check` passed (0 lint / layout / motion findings, 38/38
 WCAG AA contrast) and an independent faster-whisper pass over the master read
 every line. A copy is at `C:/Users/sdd32/Videos/iteration-cfd-f1-promo-v2.mp4`
 beside v1 and the model's credits file.
+
+## Audio v3 (light SFX)
+
+The user asked for the text-reveal hits to be lighter and less obtrusive
+(PROMO-SFX-LIGHT, 2026-10-05). In `soundtrack.json`'s cues: every synthesised
+`sub` thump is gone (0.25, 72.0, 79.9 s), the five `impact`
+(soft-impact-on-lockup) cues became `airy` at 0.25 and 72.0 s (-14 / -13 dB),
+`ping` at 74.0 and 79.9 s (-17 / -16 dB) and `tick` at 82.0 s (-15 dB), and
+the three `pop` cues dropped from -10 to -13 dB (2.4, 76.75, 78.05 s). VO,
+music, mix, gates and the picture are unchanged; the soundtrack now holds 33
+cues (the `sub` kind stays synthesised in `video_audio.py`, no cue uses it;
+the selftest's cue count and the docstring moved 36 -> 33).
+
+Rebuilt with the same chain: `BUILD OK master I -14.00 LUFS TP -2.00 dBTP`
+(first attempt, ceiling -2.0), `ASR PASS stem 12/12 master 12/12`,
+`CHECK PASS 61/61` with `honesty` clean. The new master was remuxed onto the
+same v2 raw render (`-c:v copy`, AAC-LC 320k, 48 kHz) without re-rendering a
+frame: `C:/Users/sdd32/Videos/iteration-cfd-f1-promo-v3.mp4` - H.264
+1920x1080 30 fps, 2700 video frames, 90.000 s, AAC 48 kHz stereo, -14.0 LUFS
+integrated, -1.9 dBTP, LRA 2.6, 78.7 MB,
+sha256 `ea57a9f8edaf00bc99c3a6e7eb3817fa9e8a173c0af3f82ab51f8a42dbda67f3`.
+v1 and v2 are kept beside it.

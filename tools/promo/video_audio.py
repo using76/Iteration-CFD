@@ -9,8 +9,9 @@
 through `npx --yes hyperframes@0.8.122 tts` into <project>/assets/voice/<ID>.wav
 and writes voice.json (engine, voice, per-line clip seconds, speed and sha256).
 `build` mixes the film soundtrack: the licensed music bed (gained, VO-carved
-and ducked), the placed VO clips, and 36 timed SFX cues (the "sub" kind is
-synthesised here), then masters to -14 LUFS / <= -2.0 dBTP with its own
+and ducked), the placed VO clips, and 33 timed SFX cues (audio v3; the
+synthesised "sub" kind has no cue since then), then masters to -14 LUFS /
+<= -2.0 dBTP with its own
 BS.1770-4 integrated-loudness meter and a 4x-oversampled true-peak limiter,
 verifies the result with ffmpeg ebur128 against the gates and writes
 <project>/assets/audio/master.wav (48 kHz, 24-bit, stereo, exactly 4320000
@@ -1019,7 +1020,7 @@ def selftest():
     data, ids = load_data()
     sc = data["scenes"]
     ok("T1 soundtrack validates", len(sc) == 10 and len(data["vo"]["lines"]) == 12
-       and len(data["sfx"]["cues"]) == 36
+       and len(data["sfx"]["cues"]) == 33
        and sum(len(l["asr_keys"]) for l in data["vo"]["lines"]) == 41
        and abs(sum(s["dur"] for s in sc) - 90.0) < 1e-9
        and abs(sc[0]["start"]) < 1e-12
