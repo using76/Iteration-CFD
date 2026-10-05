@@ -9,7 +9,10 @@ never retried with changed numerics. The log's iter lines (lowmach.rs print_repo
 unsteady, diverged or refused by the stop_rule of tools/cad/gates.json: steady iff the |U| and |p| residuals fall
 at least residual_decades decades from iteration 0 to the last iteration, |contErr| <= cont_err_max, and dp and Cd
 (post.py on each written time of the last window_iters iterations) each change by less than their limit relative
-to the final value. The case directory's sha map is taken before the launch and after the run ended; a case file
+to the final value. A case of kind "pipe" is classified by contErr and the two window changes alone (SPEC-LIT
+114.4: in the periodic pipe two of three velocity components and p are round-off fields, and the binary prints
+only the largest component's residual), the residual decades still computed and reported. The case directory's
+sha map is taken before the launch and after the run ended; a case file
 that changed marks the solve refused (SOLVE-BIND), never steady.
 
 Usage:
@@ -47,6 +50,7 @@ RESULT_IDS = ("SOLVE-LOG", "SOLVE-DIVERGED", "SOLVE-MACH", "SOLVE-REFUSED", "SOL
               "SOLVE-UNSTEADY")
 END_CODES = {"budget": 0, "error": 1, "diverged": 2, "refused": 3}
 CRITERIA = ("U_decades", "p_decades", "cont_err", "dp_rel_change", "Cd_rel_change")
+CRITERIA_PERIODIC = ("cont_err", "dp_rel_change", "Cd_rel_change")   # SPEC-LIT 114.4/114.5 O3: the periodic pipe
 ITER_KEYS = ("iter", "U_res", "p_res", "cont_err", "T_min", "T_max", "rho_min", "rho_max", "p0", "dp0dt",
              "M_max", "M_cell", "M_mean", "finite")
 RESULT_KEYS = ("class", "reason_id", "detail", "run_end", "n_lines", "iterations", "mach_max", "mach_refusal",
@@ -54,7 +58,7 @@ RESULT_KEYS = ("class", "reason_id", "detail", "run_end", "n_lines", "iterations
 HISTORY_KEYS = ("iter", "time", "status", "reason_id", "dp", "Cd", "post_sha256")
 SOLVE_KEYS = ("version", "class", "reason_id", "message", "case_dir", "geom_dir", "binary", "command", "iters",
               "check_every", "write_every", "p0_Pa", "gates", "before", "after", "written", "returncode", "log",
-              "result")
+              "result", "gating")
 TOP_LEVEL = ("0", "case.json", "constant", "system")     # a cold case directory holds exactly these
 CASE_VERSIONS = ("cad-case/1", "cad-case-turb/1")        # the cold case.json versions launch admits
 
@@ -136,8 +140,12 @@ def _base_result(lines):
             "criteria": None, "failed": [], "window": None}
 
 
-def classify(log_text, history, stop_rule, iters, write_every, returncode=None):
-    """Classify one ofgpu-lowmach log by the stop_rule (docs/16 §D S8); never raises on any log text."""
+def classify(log_text, history, stop_rule, iters, write_every, returncode=None, gating=CRITERIA):
+    """Classify one ofgpu-lowmach log by the stop_rule (docs/16 §D S8); never raises on any log text.
+    gating is CRITERIA or CRITERIA_PERIODIC - the criteria rows that decide the class; all five are
+    always computed and reported."""
+    if tuple(gating) != CRITERIA and tuple(gating) != CRITERIA_PERIODIC:
+        raise ValueError("gating %r is neither CRITERIA nor CRITERIA_PERIODIC" % (gating,))
     lines = log_text.splitlines()
     res = _base_result(lines)
     bad_iter = False
@@ -186,7 +194,7 @@ def classify(log_text, history, stop_rule, iters, write_every, returncode=None):
     if end["detail"] != "%d iterations reached" % iters:    # 8. the budget detail
         res["detail"] = "the budget detail %r is not %d iterations" % (end["detail"], iters)
         return res
-    return _steady_steps(res, history, stop_rule, iters, write_every)
+    return _steady_steps(res, history, stop_rule, iters, write_every, gating)
 
 
 def _decades(a, b, limit):
@@ -204,8 +212,10 @@ def _rel(xs, limit):
     return {"value": v, "limit": limit, "pass": v < limit}
 
 
-def _steady_steps(res, history, stop_rule, iters, write_every):
-    """classify's steps 9-13: the budget rows, the Mach sweep and the five criteria."""
+def _steady_steps(res, history, stop_rule, iters, write_every, gating=CRITERIA):
+    """classify's steps 9-13: the budget rows, the Mach sweep and the five criteria; the class is
+    decided by the gating rows alone (the periodic pipe gates on contErr and the two window changes,
+    SPEC-LIT 114.4), the other rows reported with their pass untouched."""
     by_iter = {r["iter"]: r for r in res["iterations"]}
     if 0 not in by_iter or iters - 1 not in by_iter:    # 9. first and last iteration present
         res["detail"] = "the log lacks the iter 0 or the iter %d line" % (iters - 1)
@@ -237,7 +247,7 @@ def _steady_steps(res, history, stop_rule, iters, write_every):
             "dp_rel_change": _rel(res["window"]["dp"], stop_rule["dp_rel_change_max"]),
             "Cd_rel_change": _rel(res["window"]["Cd"], stop_rule["cd_rel_change_max"])}
     res["criteria"] = crit
-    res["failed"] = [k for k in CRITERIA if not crit[k]["pass"]]
+    res["failed"] = [k for k in CRITERIA if k in gating and not crit[k]["pass"]]
     if res["failed"]:
         res["class"], res["reason_id"] = "unsteady", "SOLVE-UNSTEADY"
     else:
@@ -307,7 +317,7 @@ def launch(case_dir, geom_dir, out_dir, iters, exe=None, bin_json=None, gates_pa
     doc = {"version": VERSION, "class": None, "reason_id": None, "message": "", "case_dir": case_dir,
            "geom_dir": geom_dir, "binary": None, "command": None, "iters": iters, "check_every": CHECK_EVERY,
            "write_every": WRITE_EVERY, "p0_Pa": None, "gates": None, "before": None, "after": None,
-           "written": [], "returncode": None, "log": None, "result": None}
+           "written": [], "returncode": None, "log": None, "result": None, "gating": None}
 
     def refuse(rid, message):
         doc["class"], doc["reason_id"], doc["message"] = "refused", rid, message
@@ -372,6 +382,8 @@ def _launch_run(doc, case_dir, geom_dir, out_dir, iters, stop_rule, prefix, exe,
                       " positive finite p0_Pa")
     p0 = float(p0)
     doc["p0_Pa"] = p0
+    gating = CRITERIA_PERIODIC if case.get("kind") == "pipe" else CRITERIA   # SPEC-LIT 114.5 O3
+    doc["gating"] = list(gating)
     disk = _case_files(case_dir)                                                      # 6.
     want = {"case.json"} | set(case.get("files") or {})
     if set(disk) != want:
@@ -404,16 +416,16 @@ def _launch_run(doc, case_dir, geom_dir, out_dir, iters, stop_rule, prefix, exe,
     doc["after"] = after
     grew = sorted(rel for rel in _case_files(case_dir) if rel not in before and not _is_time_top(rel))
     if any(after[rel] != before[rel] for rel in before) or grew:
-        doc["result"] = classify(log_text, [], stop_rule, iters, WRITE_EVERY, proc.returncode)
+        doc["result"] = classify(log_text, [], stop_rule, iters, WRITE_EVERY, proc.returncode, gating=gating)
         if grew:
             return refuse("SOLVE-BIND", "a new file outside a time directory: %s" % grew[0])
         moved = sorted(rel for rel in before if after[rel] != before[rel])
         return refuse("SOLVE-BIND", "a case file changed during the run: %s" % moved[0])
-    result = classify(log_text, [], stop_rule, iters, WRITE_EVERY, proc.returncode)   # 8.
+    result = classify(log_text, [], stop_rule, iters, WRITE_EVERY, proc.returncode, gating=gating)   # 8.
     if result["run_end"] is not None and result["run_end"]["word"] == "budget":
         window = list(range(iters - stop_rule["window_iters"], iters + 1, WRITE_EVERY))
         result = classify(log_text, history_fn(case_dir, geom_dir, window), stop_rule, iters, WRITE_EVERY,
-                          proc.returncode)
+                          proc.returncode, gating=gating)
     doc["result"] = result
     doc["class"], doc["reason_id"] = result["class"], result["reason_id"]
     common.atomic_write(os.path.join(out_dir, "solve.json"), common.canonical_json(doc) + chr(10))
@@ -532,6 +544,42 @@ def selftest():
         assert u["class"] == "unsteady" and u["reason_id"] == "SOLVE-UNSTEADY"
         assert u["failed"] == list(CRITERIA)
         print("[ok] the unsteady fixture fails all five criteria as SOLVE-UNSTEADY")
+        ok += 1
+
+        # P1 (SPEC-LIT 114.4/114.5 O3, TG0-REDO): the residual decades alone fail the default gating;
+        # under CRITERIA_PERIODIC the same log is steady and the decades rows are reported, not gating
+        STp = rep(rep(ST, "|U| res 2.19539e-05", "|U| res 0.1"), "|p| res 5.012e-05", "|p| res 0.05")
+        r = classify(STp, H, rule, 600, 50, 0)
+        assert r["class"] == "unsteady" and r["reason_id"] == "SOLVE-UNSTEADY"
+        assert r["failed"] == ["U_decades", "p_decades"]
+        assert r["criteria"]["U_decades"]["value"] == 0.9415114326344031
+        assert r["criteria"]["p_decades"]["value"] == 1.3010299956639813
+        rp = classify(STp, H, rule, 600, 50, 0, gating=CRITERIA_PERIODIC)
+        assert rp["class"] == "steady" and rp["reason_id"] is None and rp["failed"] == []
+        assert rp["criteria"]["U_decades"]["value"] == 0.9415114326344031
+        assert rp["criteria"]["p_decades"]["value"] == 1.3010299956639813
+        assert rp["criteria"]["U_decades"]["pass"] is False and rp["criteria"]["p_decades"]["pass"] is False
+        print("[ok] P1 periodic gating: residual decades alone no longer gate, the same two values"
+              " reported and passing nowhere")
+        ok += 1
+
+        # P2: under CRITERIA_PERIODIC the contErr and the two window changes still bite, alone
+        h2p = [dict(row) for row in H]
+        h2p[0]["dp"] = h2p[-1]["dp"] * 1.00002
+        r = classify(STp, h2p, rule, 600, 50, 0, gating=CRITERIA_PERIODIC)
+        assert r["class"] == "unsteady" and r["reason_id"] == "SOLVE-UNSTEADY"
+        assert r["failed"] == ["dp_rel_change"]
+        assert r["criteria"]["dp_rel_change"]["value"] == 1.9999999999818947e-05
+        r = classify(rep(STp, "contErr 1.32501e-09", "contErr 1.5e-06"), H, rule, 600, 50, 0,
+                     gating=CRITERIA_PERIODIC)
+        assert r["class"] == "unsteady" and r["failed"] == ["cont_err"]
+        try:
+            classify(STp, H, rule, 600, 50, 0, gating=("U_decades",))
+            raise AssertionError("classify accepted a bogus gating")
+        except ValueError:
+            pass
+        print("[ok] P2 periodic gating still bites: the dp window alone, contErr alone, and a"
+              " partial gating tuple raises ValueError")
         ok += 1
         d = classify(texts["diverged"], hists["diverged"], rule, 600, 50, 2)
         assert d["class"] == "diverged" and d["reason_id"] == "SOLVE-DIVERGED"
@@ -750,6 +798,7 @@ def selftest():
 
         doc, rec, count, out, case7 = run_stub("a", os.path.join(F, "steady", "solve.log"), 0)
         assert doc["class"] == "steady" and doc["reason_id"] is None
+        assert doc["gating"] == list(CRITERIA)
         assert common.read_json(os.path.join(out, "solve.json")) == doc
         assert doc["command"][2:] == [case7, "-iters", "600", "-check", "50", "-writeEvery", "50",
                                       "-p0", "101325.0"]
@@ -768,6 +817,32 @@ def selftest():
         assert same(doc["result"], exps["steady"]["result"])
         assert doc["returncode"] == 0 and doc["binary"]["name"] == "exe"
         print("[ok] one cold launch runs the stub once with the exact argv and tees the log byte for byte")
+        ok += 1
+
+        # P3 (SPEC-LIT 114.5 O3): a case.json of kind "pipe" launches with CRITERIA_PERIODIC in the doc
+        # and solve.json; the laminar stub above keeps CRITERIA; refusals carry gating None
+        case_p = _fx_case(os.path.join(tmp, "case_pipe_kind"))
+        cj_p = common.read_json(os.path.join(case_p, "case.json"))
+        cj_p["kind"] = "pipe"
+        with open(os.path.join(case_p, "case.json"), "wb") as f:
+            f.write((common.canonical_json(cj_p) + chr(10)).encode("utf-8"))
+        geom_p = os.path.join(tmp, "geom_pipe_kind")
+        os.makedirs(geom_p, exist_ok=True)
+        out_p = os.path.join(tmp, "out_pipe_kind")
+        count_p = os.path.join(tmp, "count_pipe_kind.txt")
+        saved = set_env(SOLVE_STUB_LOG=os.path.join(F, "steady", "solve.log"),
+                        SOLVE_STUB_TIMES="400,450,500,550,600", SOLVE_STUB_RC="0",
+                        SOLVE_STUB_COUNT=count_p)
+        try:
+            doc_p = launch(case_p, geom_p, out_p, 600, exe=exe, visible=False, history_fn=lambda d, g, w: H)
+        finally:
+            restore_env(saved)
+        assert doc_p["class"] == "steady" and doc_p["reason_id"] is None
+        assert doc_p["gating"] == list(CRITERIA_PERIODIC)
+        assert common.read_json(os.path.join(out_p, "solve.json"))["gating"] == list(CRITERIA_PERIODIC)
+        print("[ok] P3 a kind-pipe case launch carries gating %s in solve.json, the laminar stub"
+              " keeps CRITERIA, and a pre-admission refusal keeps gating None"
+              % (list(CRITERIA_PERIODIC),))
         ok += 1
 
         def count_lines(path):
@@ -817,9 +892,10 @@ def selftest():
         count10 = os.path.join(tmp, "count10.txt")
         saved = set_env(SOLVE_STUB_COUNT=count10)
 
-        def expect(d, rid, json_out=None):
+        def expect(d, rid, json_out=None, gating=None):
             assert d["class"] == "refused" and d["reason_id"] == rid, (d["reason_id"], d["message"])
             assert d["command"] is None and d["returncode"] is None
+            assert d["gating"] == gating
             assert not os.path.exists(count10)
             if json_out is not None:
                 assert common.read_json(os.path.join(json_out, "solve.json")) == d
@@ -877,13 +953,13 @@ def selftest():
                 f.write(b" // edited after case.json")
             d = launch(case_x, os.path.join(tmp, "g10j"), os.path.join(tmp, "o10j"), 600, exe=exe,
                        visible=False)
-            expect(d, "SOLVE-BIND", os.path.join(tmp, "o10j"))
+            expect(d, "SOLVE-BIND", os.path.join(tmp, "o10j"), gating=list(CRITERIA))
             case_x = _fx_case(os.path.join(tmp, "case10k"))
             with open(os.path.join(case_x, "constant", "polyMesh", "extra"), "wb") as f:
                 f.write(b"x")
             d = launch(case_x, os.path.join(tmp, "g10k"), os.path.join(tmp, "o10k"), 600, exe=exe,
                        visible=False)
-            expect(d, "SOLVE-BIND", os.path.join(tmp, "o10k"))
+            expect(d, "SOLVE-BIND", os.path.join(tmp, "o10k"), gating=list(CRITERIA))
         finally:
             restore_env(saved)
         print("[ok] the pre-launch refusals fire in order, write their doc and launch nothing")
@@ -932,7 +1008,7 @@ def selftest():
         print("[ok] a killed run without its run ended line is SOLVE-LOG and is never retried")
         ok += 1
 
-        assert ok == 15, ok
+        assert ok == 18, ok
         print("SELFTEST PASS")
 
 if __name__ == "__main__":

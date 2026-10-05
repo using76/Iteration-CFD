@@ -42,6 +42,9 @@ Definitions (fixed before any run):
   are not in this tree; nothing is compared); TB7 is the constant NOT_RUN wall-function row;
   TB8 reports whether the first run in NAMES order whose final time directory exists carries
   a wall-distance field, against y_axis_ref_m = R/sqrt(2), Tucker's Poisson y on the axis.
+  TG0-REDO: the pipe cases write k and omega at tolerance 1e-12 (SPEC-LIT 114.5 O1), solve.launch
+  classifies them by contErr and the U_b / f window (O3), and the record's model_form quotes
+  SPEC-LIT 114.3.
 
 Usage:
   python pipe_turb.py --selftest
@@ -96,9 +99,9 @@ BUILD_LEVEL_KEYS = ("level", "nr", "cells", "h1_max_m", "yplus1_max", "check_tau
 BUILD_CASE_KEYS = ("name", "re_tau", "level", "u_tau_m_s", "g_x_m_s2", "U_b_case_m_s", "yplus1_apriori",
                    "case_sha256")
 RECORD_KEYS = ("version", "pipe_recipe_sha", "bands", "iters", "gate_level", "binary", "g0_verdict",
-               "reduced", "runs", "tb5", "tg0", "tb6", "tb7", "tb8")
+               "reduced", "runs", "tb5", "tg0", "tb6", "tb7", "tb8", "model_form")
 RUN_KEYS = ("name", "re_tau", "level", "cells", "solve", "wall_s", "gpu", "nut_boundary", "post", "checks")
-SOLVE_ROW_KEYS = ("class", "reason_id", "failed", "criteria", "iters", "n_iter_lines", "log_sha256",
+SOLVE_ROW_KEYS = ("class", "reason_id", "failed", "gating", "criteria", "iters", "n_iter_lines", "log_sha256",
                   "binary_sha256")
 POST_ROW_KEYS = ("status", "reason_id", "U_b_m_s", "Re_D", "u_tau_m_s", "Re_tau", "f", "U_axis_m_s",
                  "core_defect", "x_invariance", "balance_rel", "loglaw", "yplus1_max")
@@ -114,6 +117,12 @@ TB7_ROW = {"status": "NOT_RUN",
            "reasons": ["pipe_mesh has no y+1 30-60 recipe; the three TG0 levels are resolved-wall meshes",
                        "the solver writes nut without a boundaryField, so a wall-function wall nut is not "
                        "readable and post_turb refuses it by POST-FIELD"]}
+MODEL_FORM = {"bands": ["TB1", "TB3", "TB4"], "source": "SPEC-LIT 114.3, solver tree f3f145c",
+              "quote": "No mesh and no solver setting reaches 4.07 within 10 % with this model, and the f and"
+                       " log-law bands at Re_tau 576.69 are short by the model too, +5.81 % and 1.239.",
+              "reading": "kOmegaSST's centreline eddy viscosity is 0.124 to 0.131 of u_tau R against"
+                         " Reichardt's kappa/6 = 0.0667 (SPEC-LIT 114.3 table 3); TB1, TB3 and TB4 are measured"
+                         " model-form results for SST and their bands are not loosened"}
 USAGE = ("usage: python pipe_turb.py --selftest" + chr(10)
          + "       python pipe_turb.py build OUT_DIR" + chr(10)
          + "       python pipe_turb.py run OUT_DIR NAME [ITERS]" + chr(10)
@@ -302,6 +311,7 @@ def _run_read(out_dir, name):
     s = common.read_json(sj)
     res = s.get("result") or {}
     solve_row = {"class": s.get("class"), "reason_id": s.get("reason_id"), "failed": res.get("failed"),
+                 "gating": s.get("gating"),
                  "criteria": res.get("criteria"), "iters": s.get("iters"),
                  "n_iter_lines": len(res.get("iterations") or []),
                  "log_sha256": (s.get("log") or {}).get("sha256"),
@@ -414,7 +424,7 @@ def record(out_dir):
     return {"version": VERSION, "pipe_recipe_sha": build_doc["pipe_recipe_sha"], "bands": dict(BANDS),
             "iters": dict((str(k), v2) for k, v2 in ITERS.items()), "gate_level": GATE_LEVEL,
             "binary": binary, "g0_verdict": g0v, "reduced": reduced, "runs": runs, "tb5": tb5_rows,
-            "tg0": tg0, "tb6": tb6, "tb7": dict(TB7_ROW), "tb8": tb8}
+            "tg0": tg0, "tb6": tb6, "tb7": dict(TB7_ROW), "tb8": tb8, "model_form": dict(MODEL_FORM)}
 
 
 def main(argv):
@@ -635,6 +645,10 @@ def _t4(td, out):
 
     doc = run(out, "L0_lo", iters=600, exe=[sys.executable, fake], visible=False, snapshot_fn=snap)
     assert doc["class"] == "steady", (doc["class"], doc["reason_id"], doc["message"])
+    assert doc["gating"] == list(solve.CRITERIA_PERIODIC), doc["gating"]
+    with open(os.path.join(out, "cases", "L0_lo", "system", "fvSolution"), "r", encoding="utf-8") as f:
+        fsol_t4 = f.read()
+    assert fsol_t4.count("tolerance       1e-12;") == 2, fsol_t4.count("tolerance       1e-12;")
     rdir = os.path.join(out, "runs", "L0_lo")
     assert sorted(os.listdir(rdir)) == ["gpu.json", "solve.json", "solve.log", "wall.json"]
     rows = history(os.path.join(out, "cases", "L0_lo"), os.path.join(out, "mesh"), [600])
@@ -720,6 +734,8 @@ def _t7(td, out):
     r0 = rec["runs"][0]
     assert r0["name"] == "L0_lo" and r0["re_tau"] == 576.69 and r0["level"] == 0 and r0["cells"] == 160
     assert r0["solve"]["class"] == "steady" and r0["solve"]["iters"] == 600
+    assert r0["solve"]["gating"] == ["cont_err", "dp_rel_change", "Cd_rel_change"], r0["solve"]["gating"]
+    assert rec["model_form"] == MODEL_FORM
     assert r0["nut_boundary"] == "empty"
     assert r0["post"]["status"] == "ok"
     assert abs(r0["post"]["f"] / 0.019398094320480896 - 1.0) <= 1e-9, r0["post"]["f"]
