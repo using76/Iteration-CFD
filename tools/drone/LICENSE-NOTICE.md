@@ -8,6 +8,7 @@
 | File | Imports bpy | Licence |
 |---|---|---|
 | `sim_geom.py` | yes (bpy, bmesh, mathutils) | GPL-2.0-or-later |
+| `tunnel_mesh.py` | no | Prosperity Public License 3.0.0 |
 | `LICENSE-NOTICE.md` | - | Prosperity Public License 3.0.0 |
 
 ## Why `sim_geom.py` is GPL-2.0-or-later
