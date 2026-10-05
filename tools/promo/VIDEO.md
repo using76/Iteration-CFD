@@ -395,3 +395,108 @@ mark, and only then does "Iterations" appear.
   verification rounds are `snapshots-v5b/` and `snapshots-v5c/`. The title
   snapshots ran close to their nominal times this run (v4's ~1 s lag did not
   reappear); the close frames were exact as before.
+
+## v6 (the stagnation-flow opening)
+
+The user asked for the opening to be made with real care
+(PROMO-OPENING-V6, 2026-10-05/06): "Iterations 오프닝 을 좀더 잘만들어보자
+정성스럽게 모든 역량을 들여서, 배경에 지금 세로줄이 나는데 이거 꼭 마크에
+있는 대로만 하지말고 우측으로 갈수록 촘촘해지게 하고 우측이 벽이고
+왼쪽에서 우측으로 유동이 있는데 벽을 맞고 stagnation flow가 형성되는
+벡터장의 화살표와 속도에 따라 벽근처는 파랑색으로 느리고 좌측은 빠르고 그런
+느낌으로 빠르게" - instead of the mark's own line pattern, a graded mesh
+densifying toward a right-hand wall, a stagnation flow of RK4-integrated
+arrow particles hitting it, coloured by speed (fast and warm on the left,
+slow and blue near the wall), and the residual line still converging into
+the mark. The background is the solver's own answer: `title.html`'s
+`#title-field` canvas draws the actual solution of the actual case.
+
+- **Case** — a new `tools/promo/opening_field.py` writes a 56 x 48 channel
+  (`ofgpu-generate-mesh.exe channel <dir> 56 48 1 -extent 0 3.2 -1.35 1.35
+  0 0.1 -grading x=0.08 -grading y=1`, 2688 cells; dx 0.155511 first,
+  0.012441 last, so the vertical lines tighten geometrically toward the
+  wall), retypes the preset's patches (outlet -> no-slip `wall`,
+  bottomWall/topWall -> open `outletBottom`/`outletTop`, back/front stay
+  `empty`), sets `simulationType laminar` and `nu 0.01 m2/s`, and the case
+  is solved on the GPU by the pinned
+  `rust/target/gpu-pin/ofgpu-lowmach.exe`
+  (sha256 `50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c`),
+  `-iters 800 -check 50`: final residuals at iter 799 are |U| 4.006e-10 and
+  |p| 5.919e-09, `wall_seconds 4.26`; nvidia-smi before/after: RTX 5070 Ti
+  1219 MiB 0 % -> 1219 MiB 31 %.
+- **Export** — `opening_field.py export` reads the cell velocities from
+  `800/U`, maps each cell to its (j, i) by centre (never by order), and
+  bilinearly samples a 64 x 54 grid (x = 0.025 + 0.05*i, y = -1.325 + 0.05*j)
+  padded with the inlet/no-slip/zero-gradient boundary values into
+  `tools/promo/video/opening/stagnation_field.json` (119,295 bytes) with a
+  provenance line naming the solver, sha256 50471caa, the case, the
+  residuals and the writing tool.
+  `opening_field.py --selftest` -> `SELFTEST PASS 6/6`;
+  `check` -> `CHECK PASS 8/8`: G1 cells 2688, ratio 0.080000; G3 residuals
+  above; G4 mass balance out 2.6813 (rel 0.00692, gate 0.02); G5 symmetry
+  max|u-u'| 1.00e-08, max|v+v'| 0; G6 centreline strictly decreasing, last
+  0.000161601, max|U| 1.07817; G7 5/5 oracle fixtures within 2e-3; G8 the
+  inlined object equals the JSON file.
+- **Opening timeline** — one pure `drawField(t)` on a proxy tween
+  (deterministic, seek-safe): the graded mesh lines sweep left to right
+  0.02-0.66 s (each grows from the vertical centre, brighter toward the
+  wall); the hatched wall slab slides in 0.42-0.72 s; 986 arrow seeds enter
+  from 0.40 s (each at `0.40 + 0.95*(x_seed+0.45)/3.6`, the near-wall ones
+  last, ~1.35 s) and advect along their RK4 pathlines to rest at 2.30 s;
+  the damped residual line draws 1.15-2.10 s with a soft glow at its head
+  (its width stays the mark's 8.533 px); at 2.30-2.80 s the whole field,
+  mesh and wall compress into the mark under a feathered destination-in
+  mask (no shrinking rectangle, nothing outside the mapped window); the
+  mark forms on top of it (lines 2.62 s, dot 2.74 s back.out(1.7), wave
+  2.78 s - the canvas wave already drew it), wordmark 2.92 s, company line
+  3.22 s, subtitle 3.60/3.75 s holding to the 5.6 s fade.
+- **Speed colour** - sRGB stops at s = 0 `#2f6bff` (blue, the slow
+  near-wall flow), 0.30 `#14b8a6` (teal), 0.65 `#ffc45c` (amber) and 1.00
+  `#ff5a36` (orange, the fast free stream); arrow length scales with
+  speed^0.85.
+- **SFX** - the supervisor retimed the scan cue onto the residual draw: the
+  four title cues are airy -15 dB at 0.05 s (the mesh sweep), scan -16 dB
+  at 1.15 s (the residual line), ping -16 dB at 2.76 s (the dot lands) and
+  tick -14 dB at 3.6 s (the subtitle); `sfx.cues` stays 34.
+  `video_audio.py --selftest` -> `SELFTEST PASS 9/9`.
+- **Review rounds** - (1) run 1's snapshots (`snapshots-v6/`) showed a
+  near-black first third (the mesh too faint at t = 0.15 s) and, during the
+  compression, a hard shrinking rectangle with arrows leaking outside it;
+  run 2 brightened the mesh lines (opacity 0.16 + 0.30, sweep 0.02-0.66 s,
+  growth 0.22 s), moved the residual draw to 1.15-2.10 s with a head glow,
+  and melted the compression into a feathered two-pass destination-in mask
+  (`snapshots-v6b/` - clean in one round). (2) run 3 moved the mask's
+  transparent stops onto the window edges (`featherStops` helper) so the
+  mask holds exactly zero outside the field window; a pixel probe on the
+  2.5 s frame found 0 stray pixels outside the residual line's pass
+  (the old mask leaked 1,428 tinted pixels, max channel 80) in
+  `snapshots-v6c/`, plus the supervisor's own `snapshots-v6-sup1/` and
+  `snapshots-v6-zoom/` review sets. (3) the supervisor's final review
+  accepted the opening and retimed the scan cue to 1.15 s (above).
+- **Check** - `STAGE OK 6 videos 5 stills 12 sources 52.5 s`;
+  `video_assets.py check` 27/27; `hyperframes check` (0.8.122): Runtime 0,
+  Layout 0 issues across 9 samples, Motion 0, Contrast 37/37 WCAG AA,
+  Check passed (lint: 0 errors, the same 2 pre-existing warnings as runs
+  1-2 - the onUpdate DOM-measurement pattern and the inline JSON size; the
+  pin probe offered 0.8.130+ and the pin stays on 0.8.122, as v2-v5).
+- **Audio** - `BUILD OK master I -14.00 LUFS TP -2.00 dBTP` (first
+  attempt), `ASR PASS stem 12/12 master 12/12`, `video_audio.py check`
+  `CHECK PASS 61/61` with `honesty` clean.
+- **Render (v6)** - the same delivery render in a visible console through
+  the shared machine lock (video-v6-render.cmd, lock
+  `iterations_promo_v6_render`): 2700 frames, 1 m 30.0 s, rendered in
+  9 m 40.9 s (screenshot capture, hardware GPU, capture 9 m 18.5 s; the
+  machine was busier than v5's 3 m 26.1 s); nvidia-smi before/after:
+  RTX 5070 Ti 1067 MiB 0 % -> 1308 MiB 0 %. The verified master was remuxed
+  onto the raw render (`-c:v copy`, AAC-LC 320k, 48 kHz,
+  `-shortest -movflags +faststart`):
+  `C:/Users/sdd32/Videos/iteration-cfd-f1-promo-v6.mp4` - H.264 1920x1080
+  30 fps, 2700 video frames, 90.000 s, full `-xerror` decode OK, -14.0 LUFS
+  integrated, -1.8 dBTP, LRA 2.5, 77.5 MB,
+  sha256 `0ca7b2413a3d914e0cdfa00c23a6c3d800130d1bf6c1bb41041dd4970c4e76c7`.
+  v5 is kept beside it; v1-v4 were already absent from that folder before
+  this run.
+- **Frames** - `renders/v6-frames/` in the build project holds frames
+  9/24/45/66/84/102/126 (0.3/0.8/1.5/2.2/2.8/3.4/4.2 s) extracted from the
+  raw render, so the real render can be checked against the review
+  snapshots.

@@ -80,10 +80,10 @@
    "sub": "synth: sine sweep 78 -> 40 Hz over 0.9 s, exponential decay, plus a 60 Hz thump of 0.12 s"
   },
   "cues": [
-   [0.05, "airy", -15.0, "the screen splits into the mark's grid of vertical lines"],
-   [0.9, "scan", -16.0, "the damped residual wave travels right through the lines"],
-   [2.6, "ping", -16.0, "the teal dot lands and the mark is formed"],
-   [3.4, "tick", -14.0, "subtitle F1 레이싱카 공력해석 테스트"],
+   [0.05, "airy", -15.0, "the graded solver mesh sweeps across the frame toward the wall"],
+   [1.15, "scan", -16.0, "the damped residual line sweeps through the stagnation-flow field"],
+   [2.76, "ping", -16.0, "the teal dot lands at the stagnation point and the mark is formed"],
+   [3.6, "tick", -14.0, "subtitle F1 레이싱카 공력해석 테스트"],
    [5.85, "whoosh", -9.0, "dip into cad"],
    [13.35, "whoosh", -9.0, "dip into chat"],
    [14.15, "typing", -14.0, "prompt card"],
