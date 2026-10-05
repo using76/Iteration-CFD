@@ -26705,6 +26705,17 @@ for a segment (u, v) of a KEEP or RING face f, its partner g:
 cells   C + n |KEEP| + |RING|          points   P + n |L_c ∩ L_m|                               (92.72)
 ```
 
+Face mode emits a side face whose area is NONZERO but under the
+`1e-14 * diag2` guard, instead of refusing the run: the guard's threshold is
+the mesh bounding box's squared diagonal - on the full-size F1 tunnel (about
+60 x 24 x 13 m) that is 4.3e-11 m^2 and the run stopped on a side face of
+4.287e-11 m^2, a snapped wall's sliver edge of ~1e-7 m carrying a ~4e-4 m
+stack, not a stack that went to zero - so §92.3's gate judges the
+face's cells and (92.73)'s ladder cuts their faces if they fail; patch mode
+refuses it as before, and an area that is exactly zero, or a polygon of
+fewer than three points, keeps its own behaviour (skipped at a RING taper,
+refused on a KEEP side).
+
 One wedge cell and not a ramp of two or three: a ramp thins every layer of
 the ramp's cells, and on the reduced F1 body `3 t_1 / sqrt(A)` is 0.066
 against G5's 0.05 floor, so no ramp survives — while the merged cell carries
@@ -27087,6 +27098,7 @@ that survives on a sliver reports a small fraction even where it holds.
 | a first layer thinner than `h/60` | refused before any cell is inserted, naming `3 t_1 / h` and `quality.min_thickness_ratio` (92.51) — not discovered as a G5 failure on an inserted cell |
 | every cell of every emitted mesh | closes to `1e-12` RELATIVE (92.54), checked BEFORE §92.3's gate; a cell that does not is a MESHER fault and is refused as one, naming the cell |
 | a side face's winding | fixed by the topology (92.53), never by the sign of a dot product against a cell centre |
+| face mode, a side face of non-zero area under the guard | emitted, judged by the gate; patch mode refuses it as before |
 | a snapped wall | closes exactly all the same — (92.54) holds on it even where the gate does not |
 | a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
 | a patch that lost its layers | its row names `drop_cause`, the class of the last give-up in `ladder` that names it; the trace ends on the outer pass the run returned on; the mesh, the reason and the log are bit for bit what they are without it |

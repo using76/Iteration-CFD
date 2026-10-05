@@ -2921,6 +2921,12 @@ fn attempt(
         b_hi = b_hi.cmpt_max(*q);
     }
     let diag2 = (b_hi - b_lo).mag_sqr();
+    // (92.13): in face mode a side face of NONZERO area under the
+    // `1e-14 * diag2` guard is emitted for the gate to judge - the
+    // full-size F1 tunnel stopped on one of 4.287e-11 m^2 against a
+    // 4.3e-11 m^2 threshold, a sliver edge of the snapped wall carrying a
+    // real stack, not a stack that went to zero. Patch mode refuses it.
+    let face_mode = spec.terminate == LayerTerminate::Face;
 
 
     // ---- the sides: (92.49)'s segments ------------------------------
@@ -3064,13 +3070,16 @@ fn attempt(
                         // is the taper's own shape - its area contributes
                         // nothing, and the closures of (92.54) hold without
                         // it. A face with a tiny-but-NONZERO area is EMITTED
-                        // whatever `at_ring` says: dropping it would leave
-                        // both its cells open by exactly that area, and the
-                        // closure of (92.54) is topology, not scale - a
-                        // snapped wall's sliver edge closes or nothing does.
-                        // A KEEP face's side is a prism wall, and a zero
-                        // area there is still the thickness going to zero
-                        // where it was not allowed to.
+                        // in face mode whatever `at_ring` says: dropping it
+                        // would leave both its cells open by exactly that
+                        // area, and the closure of (92.54) is topology, not
+                        // scale - a snapped wall's sliver edge closes or
+                        // nothing does - so the gate of §92.3 judges its
+                        // cells, and (92.73)'s ladder cuts their faces if
+                        // they fail. Patch mode still refuses it, and a
+                        // KEEP face's side is a prism wall, so a zero area
+                        // there is still the thickness going to zero where
+                        // it was not allowed to.
                         let a_vec = face_area_vector(&points, &ps);
                         if ps.len() < 3 || a_vec.mag() == 0.0 {
                             if at_ring {
@@ -3083,7 +3092,7 @@ fn attempt(
                                 ps.len()
                             )));
                         }
-                        if !at_ring && a_vec.mag() < 1e-14 * diag2 {
+                        if !face_mode && !at_ring && a_vec.mag() < 1e-14 * diag2 {
                             return Err(Error::Mesh(format!(
                                 "layers: the side face of segment ({u}, {v}) of layer \
                                  face {f} has area {:.3e} - the thickness went to zero \
@@ -4576,6 +4585,66 @@ pub(crate) mod tests {
         }
         assert_eq!(n_ring, 4);
         assert!((row.ring_area_frac - ring_area / row.area).abs() < 1e-12);
+    }
+
+    /// (92.13): a side face whose area is NONZERO but under the
+    /// `1e-14 * diag2` guard is EMITTED in face mode - the gate of §92.3
+    /// judges its cells, and (92.73)'s ladder cuts their faces if they fail
+    /// - and is REFUSED in patch mode, the thickness going to zero where it
+    /// was not allowed to. A cap of `1e-12` is not an anchor (`0.0` is):
+    /// the point keeps level copies a hair apart. The sliver lives on the
+    /// segment BETWEEN two such points - a side face is the segment's
+    /// length times the stack at it, so one hair-thin point alone still
+    /// has full-thickness sides along its neighbours, the shape of the
+    /// full-size tunnel's sliver edge of ~1e-7 m carrying a ~4e-4 m stack.
+    #[test]
+    fn a_tiny_side_face_is_emitted_in_face_mode_and_refused_in_patch_mode() {
+        let (surf, mesh) = castellated_cube_case();
+        let mut spec = cube_layers(0.02);
+        spec.terminate = LayerTerminate::Face;
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let n_pts = mesh.points.len();
+        let mut caps = vec![1.0 as Scalar; n_pts];
+        let i0 = (0..n_pts)
+            .find(|&i| (mesh.points[i] - Vec3::new(1.5, 1.5, 2.5)).mag() < 1e-12)
+            .expect("the interior top point");
+        let i1 = (0..n_pts)
+            .find(|&i| (mesh.points[i] - Vec3::new(2.0, 1.5, 2.5)).mag() < 1e-12)
+            .expect("the neighbour on the segment");
+        caps[i0] = 1e-12;
+        caps[i1] = 1e-12;
+        let ones = vec![1.0 as Scalar; n_pts];
+        let no_marks = vec![false; mesh.faces.len()];
+        let out = attempt(
+            &mesh,
+            &surf,
+            &spec,
+            &thresholds(),
+            &patches,
+            &caps,
+            &ones,
+            &no_marks,
+            &no_marks,
+        )
+        .expect("face mode emits a side face of nonzero area");
+        let row = &out.report.patches[0];
+        assert_eq!(row.n_keep_faces, row.n_faces, "{row:?}");
+        assert_eq!(row.n_ring_faces, 0, "{row:?}");
+        assert_eq!(row.n_cut_faces, 0, "{row:?}");
+        // (92.54) ran inside `attempt` - its Ok is every cell closing.
+        let err = attempt(
+            &mesh,
+            &surf,
+            &cube_layers(0.02),
+            &thresholds(),
+            &patches,
+            &caps,
+            &ones,
+            &no_marks,
+            &no_marks,
+        )
+        .expect_err("patch mode refuses the same call");
+        assert!(err.to_string().contains("has area"), "{err}");
     }
 
     /// (92.70)-(92.72) with a whole face OFF: the input face stays the
