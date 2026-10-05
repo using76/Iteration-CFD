@@ -389,7 +389,7 @@
         "tag": "CAP-FAN",
         "kind": "provides",
         "module": "rust/src/fan.rs",
-        "anchor": "rust/src/fan.rs:102",
+        "anchor": "rust/src/fan.rs:105",
         "specSection": "S52",
         "reason": "One curve per whole patch, corrected for density and speed at every evaluation. A curve with fewer than two points, a non-increasing flow column, a rising pressure branch, a non-positive maximum pressure or flow, a non-positive curve density or speed, or an efficiency outside the half-open unit interval is refused by name in `FanCurve::validate`. A fan condition on any field but pressure is structurally impossible: only the fan module rewrites the triple."
       }
@@ -403,7 +403,7 @@
         "tag": "CAP-JUMP",
         "kind": "provides",
         "module": "rust/src/fan.rs",
-        "anchor": "rust/src/fan.rs:638",
+        "anchor": "rust/src/fan.rs:641",
         "specSection": "S53",
         "reason": "A data-centre case can only produce the boundary-patch form; the internal-face form exists and no case key reaches it. A jump condition on a non-pressure field is structurally impossible, and the model gets the flow rate right and the near-tile jet wrong, which the report says on every run that has a jump."
       }
@@ -431,7 +431,7 @@
         "tag": "refuse_baffle_insertion",
         "kind": "refuses",
         "module": "rust/src/fan.rs",
-        "anchor": "rust/src/fan.rs:654",
+        "anchor": "rust/src/fan.rs:657",
         "specSection": "S53.5",
         "reason": "Splitting an existing internal face into a coincident pair of boundary faces is a topology mutation this solver does not perform. The two routes that exist are to emit the coincident pair at mesh-generation time, or to model the plenum as a separate region and use the boundary form. A jump on an ordinary internal face needs no baffle; what it cannot do is make the scalars jump, which is the only thing a baffle adds. The case key exists so that this refusal can fire.",
         "permissiveFallback": "Under the permissive switch the refusal returns an empty internal-face jump, and the caller **discards it**: the tile falls through to its ordinary lowering and becomes a boundary porous jump on the same patch, with the scalars continuous. The behaviour is safe; the comment above the call site describes it wrongly, and D1 fixes that comment."
@@ -446,7 +446,7 @@
         "tag": "refuse_capacitance_fft",
         "kind": "refuses",
         "module": "rust/src/fan.rs",
-        "anchor": "rust/src/fan.rs:674",
+        "anchor": "rust/src/fan.rs:677",
         "specSection": "S52.9",
         "reason": "A fan patch makes a face neither uniformly Dirichlet nor uniformly Neumann, and a jump makes the coefficient non-constant, so the direct Fourier pressure path is not available on a room that has either. The rank-one correction that would put it back is named and not implemented.",
         "permissiveFallback": "pbicgstab"

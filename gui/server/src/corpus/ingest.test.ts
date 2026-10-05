@@ -189,9 +189,10 @@ describe('ingest', () => {
       store,
       `SELECT c.locator AS locator FROM chunk c JOIN chunk_fts ON c.seq = chunk_fts.rowid WHERE chunk_fts MATCH '${ftsQuote('free cooling')}'`,
     )
-    console.log(`FTS5 'free cooling' hits: ${hits.length} (locator ${hits[0]?.locator})`)
-    expect(hits.length).toBe(1)
-    expect(hits[0]!.locator).toBe('55.4')
+    console.log(`FTS5 'free cooling' hits: ${hits.length} (locators ${hits.map((h) => String(h.locator)).sort().join(', ')})`)
+    // Two hits since 2026-09-20 (b048204): §55.4 "free-cooling hours" and the §55.7 "What must hold" table row "the free-cooling ceiling".
+    expect(hits.length).toBe(2)
+    expect(hits.map((h) => String(h.locator)).sort()).toEqual(['55.4', '55.7'])
     const objTables = debugSql(store, "SELECT name AS name FROM sqlite_master WHERE type = 'table' AND name LIKE 'obj_%'")
     expect(objTables.length).toBeGreaterThan(0)
     for (const t of objTables) {

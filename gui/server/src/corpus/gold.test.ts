@@ -10,6 +10,7 @@ import { gate } from './gate.js'
 import type { GateCandidateLink, GateCandidateObject, GateValue, GateWorld } from './gate.js'
 import { checkGoldSet, formatScoreTable, goldText, GoldError, loadGoldSet, resolveEvidence, scoreAgainstGold } from './gold.js'
 import type { GoldLink, GoldObject, GoldSet, PropertyScore } from './gold.js'
+import { sliceByAnchors } from './ingest.js'
 
 const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
 const KEY = (a: string, b: string): string => a + ':' + b
@@ -17,9 +18,12 @@ const must = <T>(value: T | undefined, what: string): T => { if (value === undef
 const countOccurrences = (text: string, needle: string): number => { let n = 0; for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) n += 1; return n }
 const thrown = (run: () => unknown): GoldError | null => { try { run(); return null } catch (e) { return e as GoldError } }
 
-/** The passages of rust/SPEC-LIT.md sections 52 to 55, keyed by subsection number. */
+/** The passages of rust/SPEC-LIT.md sections 52 to 55, keyed by subsection number. The text is
+ *  taken from the `## 52.` heading to the `## 56.` heading with sliceByAnchors — the same anchors
+ *  TIER_A['speclit-52-55'].slice uses — so the test reads the current file rather than stale line numbers. */
 function specLitPassages(): Map<string, string> {
-  const lines = readFileSync(path.join(REPO, 'rust', 'SPEC-LIT.md'), 'utf8').split('\n').slice(8280, 9904)
+  const text = sliceByAnchors(readFileSync(path.join(REPO, 'rust', 'SPEC-LIT.md'), 'utf8'), '## 52.', '## 56.')
+  const lines = text.split('\n')
   const out = new Map<string, string>()
   let locator: string | null = null, buf: string[] = []
   const flush = (): void => { if (locator !== null) out.set(locator, buf.join('\n')) }
@@ -205,7 +209,7 @@ describe('the gold set and its scorer', () => {
     expect(score.properties.some((p) => p.key.startsWith('link:'))).toBe(false)
   })
   it('the SPEC-LIT slice this gold set is written against still starts at section 52 and ends before section 56', () => {
-    const lines = readFileSync(path.join(REPO, 'rust', 'SPEC-LIT.md'), 'utf8').split('\n').slice(8280, 9904)
+    const lines = sliceByAnchors(readFileSync(path.join(REPO, 'rust', 'SPEC-LIT.md'), 'utf8'), '## 52.', '## 56.').split('\n')
     expect(lines[0]?.startsWith('## 52.')).toBe(true)
     expect(lines.some((l) => l.startsWith('## 56.'))).toBe(false)
     expect(PASSAGES.size).toBe(36)

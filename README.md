@@ -10,7 +10,7 @@
 
 시간 적분 루프 전체가 GPU에 머무르도록 설계된 비정렬 격자 유한체적 CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 루프 안에서 장치 메모리 할당도, 필드 데이터의 호스트 전송도 발생하지 않습니다. **단일 GPU 전용**이며, 쓰임새는 비압축성·저마하 유동입니다 — RANS/LES/하이브리드 난류, 부력 플룸, 가변밀도 저마하 유동, 2상 VOF, 켤레 열전달, 면대면 복사, 라그랑주 분무, 팬과 다공성 점프를 갖춘 환기 및 데이터센터 기류. 수치 코어 전체를 공개 문헌으로부터 직접 구현했으며 모든 수식은 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)에 원논문 인용과 함께 명세되어 있습니다. 검증은 인위해법(MMS), 해석해, 공개 벤치마크를 사용합니다. **비교가 불충분합니다. 많은 도움 부탁드립니다.**
 
-Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으로 단정밀도), 대상은 NVIDIA GPU 한 장, 의존성은 cudarc와 thiserror뿐입니다(AMGX는 선택 기능).
+Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으로 단정밀도), 대상은 NVIDIA GPU 한 장. 직접 의존성은 일곱 크레이트 — `cudarc`, `jsonc-parser`, `schemars`, `serde`, `serde_json`, `serde_path_to_error`, `thiserror`(`rust/Cargo.toml`의 `[dependencies]`; 빌드 스크립트에는 `anyhow`가 하나 더 붙습니다) — 이며, 해석된 그래프는 27개 패키지(이 크레이트에 26개를 더한 수)로 전부 [`NOTICE`](NOTICE)에 각자가 실리는 조항과 함께 이름이 올라 있습니다. AMGX는 여전히 선택 기능입니다.
 
 ---
 
@@ -61,18 +61,19 @@ Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으�
 
 ## 현황
 
-**2026-09-08 이 작업 트리에서 실제로 돌려 얻은 출력입니다.** NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, 배정밀도.
+**아래 각 줄은 기록용 머신에서 찍힌, 날짜가 붙은 측정값입니다** — NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, 배정밀도 — 줄마다 측정 날짜와 기록된 곳을 함께 적어 두었습니다.
 
 ```
-cargo test --release   1,774 passed, 0 failed, 6 ignored   (모든 타깃 합계, 18개 스위트)
-                       1,645 passed, 0 failed, 4 ignored   (lib 크레이트만)
+cargo test --release   1,774 passed, 0 failed, 6 ignored   (모든 타깃 합계, 18개 스위트; 2026-09-08)
+                       1,645 passed, 0 failed, 4 ignored   (lib 크레이트만; 2026-09-08)
 
-ofgpu-validate         833 / 833 checks passed
-                       788개는 실시간 계산, 45개는 기록된 측정값 재생
-                       이어서 MISSES 2개와 OPEN 6개를 이름으로 부르는 목록을 출력
+ofgpu-validate         1021 / 1026 checks passed           (2026-09-27, SPEC-LIT §95.11)
+                       실패하는 다섯 행: Gate 95-A의 네 행(5:1·10:1 캔틸레버, §109.7)과
+                       Gate 95-G의 LE10 링 차수 행(§95.11)
+                       이어서 판정이 MISSES 또는 OPEN으로 등록된 게이트 전부를 이름으로 부르는 목록
 ```
 
-그 목록은 손으로 유지되는 것이 아니라, 게이트가 자신의 판정을 보고하는 바로 그 지점에서 들어가는 레지스트리로부터 **생성**됩니다(SPEC-LIT §69). 판정을 출력하는 것과 등록하는 것이 같은 호출이므로 여덟 개 전부가 매 실행 이름으로 불리며, 아홉 번째가 추가되더라도 목록에서 빠질 수 없습니다. **`ofgpu-validate`가 실행하는 모든 항목은 통과합니다. 그것은 "이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다"와 다른 진술이며, 둘을 혼동해서는 안 됩니다.**
+그 목록은 손으로 유지되는 것이 아니라, 게이트가 자신의 판정을 보고하는 바로 그 지점에서 들어가는 레지스트리로부터 **생성**됩니다(SPEC-LIT §69). 판정을 출력하는 것과 등록하는 것이 같은 호출이므로 등록된 판정은 전부 매 실행 이름으로 불리며, 하나가 더 생기더라도 목록에서 빠질 수 없습니다. **`ofgpu-validate`가 실행하는 1026행 가운데 다섯 행은 실패합니다 — 위 블록이 그 다섯 행의 이름을 적어 둡니다 — 그 외의 모든 행은 통과합니다. 그것은 "이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다"와 다른 진술이며, 둘을 혼동해서는 안 됩니다.**
 
 ---
 
@@ -98,7 +99,7 @@ cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 12
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 ```
 
-검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열다섯 개 실행 파일(`ofgpu-lowmach`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
+검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열아홉 개 실행 파일(`ofgpu-lowmach`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
 
 ---
 
@@ -177,7 +178,7 @@ claude mcp add ofgpu -- node mcp\server.mjs
 |---|---|
 | **사용자 안내서** (별도 페이지) | 빌드, 케이스 파일, 설정 계약, 실행, 출력, 못 하는 것 |
 | **기술 안내서** (별도 페이지) | 이산화, 경계조건, 압력–속도, 난류, 저마하, 면대면 복사, 검증, GPU 상주·메쉬 적응·성능 |
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 81개 절. 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 95개 절(§0~§113, 번호 사이 빈 곳 있음). 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | 파일별 출처와 설계 결정, 라이선스 감사 기록, 서드파티 고지 |
 | [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | 시험 케이스 형상, 그리고 `docs/`의 색인 — 모델 카탈로그, GPU 이식성, 입출력 재설계와 JSONC 스키마, 그리고 `ofgpu-lowmach`의 저-마하 정식화와 벽 열전달 게이트 기록 |
 
