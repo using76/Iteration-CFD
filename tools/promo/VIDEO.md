@@ -318,3 +318,80 @@ sha256 `413e7357809ddd12fd80a96a8a396de0e401638d4acd3cb3e37532f0472ac682`,
   sha256 `acbefae957dcdd61520ce915fb2cbaf4eac0c208d9328ee3fcc5d324e1ab6b45`.
   `python tools/promo/video_audio.py check` -> `CHECK PASS 61/61` with
   `honesty` clean. v1, v2 and v3 are kept beside it.
+
+## v5 (the mark's own opening, no meteor-cfd in the close)
+
+The user asked for two changes (PROMO-V5, 2026-10-05): the closing card drops
+"meteor-cfd" and goes straight to the product claim, and the title scene tells
+the mark's own story - the screen splits into the mark's grid of vertical
+lines, a full-frame damped residual travels through it and converges into the
+mark, and only then does "Iterations" appear.
+
+- **Close card** — the `#close-kicker` "meteor-cfd" element is gone (CSS,
+  element and its GSAP cue); the card opens straight onto the headline
+  "AI-driven CFD Solver" at 2.0 s. The per-state column push grows from v4's
+  200 px to 225.6 px (200 + the 51.2 px of column height the kicker
+  contributed, minus the 25.6 px the centred column gains without it), so the
+  headline holds the exact v4 position while it leads the card. The small
+  credit line now reads "meshed and solved with Iterations" (the user's
+  wording; it deliberately differs from the `promo/render/CREDITS.txt` source
+  line, which still says meteor-cfd).
+- **VO V10** — "meteor-cfd. The AI-driven CFD solver." became "The AI-driven
+  CFD solver." (tts "The A.I.-driven C.F.D. solver.", asr keys
+  ["driven", "solver"]), re-voiced with the same Kokoro am_michael command at
+  speed 1.05: clip 2.368 s (was 4.096 s), start kept at 72.5 s (ends 74.868,
+  1.8 s clear of V11). The Korean caption is "AI 기반 CFD 솔버." and the
+  caption window moved to 72.45-75.17 (was 72.45-76.6).
+- **Title scene** — the lockup no longer rises; it is present from frame 0
+  with everything but the opening hidden. The opening lives INSIDE the mark's
+  own svg (`#title-open`, `overflow: visible`), oversized in the mark's user
+  space, so its convergence is registered on the teal dot by construction
+  (`svgOrigin "212 120"`) with no screen-space measurement:
+  - 0.0-0.9 s the screen splits: the mark's line progression (x = 40, 80,
+    112, 138, 158, 174, 186, 196 with opacity 0.12-0.33 in a 240 viewBox)
+    tiled every 600 user units from tile -2 to 3 (48 lines), swept in left to
+    right by a 0.014 s per-line stagger, opacity still rising to the right;
+  - 0.9-2.3 s the damped residual: a full-frame polyline of the mark's law
+    y = A*exp(-4.2 t)*cos(2*pi*3.2 t) (A = 340 user units, t stretched so the
+    amplitude dies ~12 units before the dot), drawn on over 1.4 s while the
+    grid compresses to 0.84 in x around the dot and fades to 0.5;
+  - 2.3-2.7 s convergence: the overlay collapses (scale 0.106, opacity 0,
+    power2.in) onto the dot while the real mark draws on beneath it (wave
+    0.32 s, lines 0.25 s) and the dot lands 2.45-2.7 s (back.out(1.7));
+  - 2.7-3.2 s the wordmark (clean reveal, no bounce), then the company line
+    at 3.02 s; the subtitle lands at 3.4/3.55 s and holds 2.2 s until the
+    5.6 s fade (at least 1.5 s required).
+  - **Dash nub** — v4 left a ~1 px dot of the wave colour at the mark wave's
+    start point (20, 58 user) before its draw began: a [A, A] dasharray with
+    offset A always lands a dash boundary exactly on s = 0 and the round line
+    cap renders it as a nub. v5 uses [L, L + 24] with the draw starting at
+    L + 12; pixel-checked gone (brightest pixel in the nub window of the
+    1.4 s frame is 53,56,56 = background; v4 measured 230,242,240 there).
+- **SFX** — the three title cues became four (33 -> 34): airy -15 dB at
+  0.05 s (the split), scan -16 dB at 0.9 s (the wave), ping -16 dB at 2.6 s
+  (the dot lands), tick -14 dB at 3.4 s (the subtitle). `video_audio.py`'s
+  docstring and the selftest counts moved 33/41 -> 34/40 and T9's V10
+  substring fixture lost "meteor".
+- **Check** — `video_audio.py --selftest` 9/9; `STAGE OK 6 videos 5 stills
+  12 sources`; `video_assets.py check` 27/27; `video_audio.py check` 61/61
+  with `honesty` clean; `hyperframes check` (0.8.122): 0 lint / layout /
+  motion findings, 37/37 WCAG AA (one fewer than v4 - the removed orange
+  kicker was a contrast sample). The pin probe offered 0.8.122 -> 0.8.132 and
+  the pin was kept on purpose, as in v4 (v2-v5 all render on 0.8.122).
+- **Audio** — `BUILD OK master I -14.00 LUFS TP -2.00 dBTP` (first attempt),
+  master sha256 `58318fecd2045451dbc1bed4589319c5bcf5d22bc3b327e7127e17ca4260635c`,
+  `ASR PASS stem 12/12 master 12/12`.
+- **Render (v5)** — the same delivery render in a visible console through the
+  shared machine lock (video-v5-render.cmd): 2700 frames in 3 m 26.1 s
+  (screenshot capture, hardware GPU). The verified master was remuxed onto
+  the raw render (`-c:v copy`, AAC-LC 320k, 48 kHz):
+  `C:/Users/sdd32/Videos/iteration-cfd-f1-promo-v5.mp4` - H.264 1920x1080
+  30 fps, 2700 video frames, 90.000 s, full `-xerror` decode OK, -14.0 LUFS
+  integrated, -1.8 dBTP, LRA 2.5, 79.7 MB,
+  sha256 `9ef72c460961dfa50c5176ef868ddb91286930e1d23c8ab2e29e07e69bdcd9ca`.
+  v1-v4 are kept beside it.
+- **Snapshots** — `snapshots-v5/` in the build project (0.3, 0.8, 1.4, 2.0,
+  2.5, 3.0, 4.0, 73, 76, 80 and 84 s plus contact sheets); the two
+  verification rounds are `snapshots-v5b/` and `snapshots-v5c/`. The title
+  snapshots ran close to their nominal times this run (v4's ~1 s lag did not
+  reappear); the close frames were exact as before.

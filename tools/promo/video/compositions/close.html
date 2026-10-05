@@ -72,21 +72,12 @@
           flex-direction: column;
           align-items: center;
         }
-        #close-kicker {
-          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
-          font-variant-numeric: tabular-nums;
-          font-size: 36px;
-          font-weight: 700;
-          color: #ff5a36;
-          line-height: 1.2;
-        }
         #close-head {
           font-size: 136px;
           font-weight: 800;
           color: #f1f3f5;
           line-height: 1.05;
           text-align: center;
-          margin-top: 8px;
         }
         #close-head .close-ai {
           color: #ff5a36;
@@ -189,7 +180,6 @@
           <div id="close-glow"></div>
           <div id="close-col">
             <div id="close-inner">
-              <div id="close-kicker">meteor-cfd</div>
               <h1 id="close-head"><span class="close-ai">AI</span>-driven CFD Solver</h1>
               <div id="close-value"><span id="close-v1">Set up by AI.</span> <span id="close-v2">Solved on the GPU.</span> <span id="close-v3">Fast and automatic.</span></div>
               <div id="close-rule"></div>
@@ -220,7 +210,7 @@
               <div id="close-credits">
                 <div>Car model: "F1 2026 concept" by Qvist_Designs, CC BY 4.0, via Sketchfab.</div>
                 <div>Licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)</div>
-                <div>Changes: scaled to metres, closed into a watertight simulation surface, meshed and solved with meteor-cfd; the colours on the car, the streamlines and the slice are CFD results and are not part of the original model.</div>
+                <div>Changes: scaled to metres, closed into a watertight simulation surface, meshed and solved with Iterations; the colours on the car, the streamlines and the slice are CFD results and are not part of the original model.</div>
                 <div>Rendered with Blender 5.1.2 (Cycles).</div>
               </div>
               <div id="close-disclaimer">
@@ -234,14 +224,15 @@
       <script>
         var tl = gsap.timeline({ paused: true });
         // The column is laid out for each state, not just the final one: the
-        // block sits pushed down 200 px so the headline is centred while it
+        // block sits pushed down 225.6 px so the headline is centred while it
         // leads the card (film 74-82 s), and moves up as the company block
-        // appears at 10.0 s (film 82.0 s). 200 px keeps the invisible tail
-        // inside the canvas before it exists visually.
-        tl.fromTo("#close-inner", { y: 200 }, { y: 0, duration: 0.7, ease: "power2.inOut" }, 10.0);
+        // appears at 10.0 s (film 82.0 s). The push is v4's 200 px plus the
+        // v5-removed kicker's 51.2 px column height minus the 25.6 px the
+        // centred column itself gains, and keeps the invisible tail inside
+        // the canvas before it exists visually.
+        tl.fromTo("#close-inner", { y: 225.6 }, { y: 0, duration: 0.7, ease: "power2.inOut" }, 10.0);
         tl.fromTo("#close-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
         tl.fromTo("#close-glow", { opacity: 0 }, { opacity: 0.25, duration: 0.9, ease: "power2.out" }, 0.3);
-        tl.fromTo("#close-kicker", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 0.5);
         tl.fromTo("#close-head", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.22, ease: "power4.out" }, 2.0);
         tl.fromTo("#close-v1", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 4.75);
         tl.fromTo("#close-v2", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 6.05);

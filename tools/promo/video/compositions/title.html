@@ -83,6 +83,10 @@
           display: block;
           width: 204.8px;
           height: 153.6px;
+          /* the v5 opening overlay lives in this svg's user space but covers the
+             whole frame, so it has to paint outside the 204.8 x 153.6 box
+             (#root's overflow hidden clips it to the screen) */
+          overflow: visible;
         }
         #title-word {
           font-family: "Bricolage Grotesque", "Noto Sans KR", sans-serif;
@@ -137,8 +141,17 @@
                      (tools/promo/brand/iterations_mark_light_on_dark.svg, same geometry).
                      The viewBox is cropped to the drawn band y 30..210 so the lockup
                      rule "mark height = 1.6 x cap height" measures the drawn mark,
-                     not the empty 240x240 canvas. -->
+                     not the empty 240x240 canvas.
+                     The v5 opening is built INSIDE this svg as #title-open: the
+                     screen-split grid and the full-frame damped wave live in the
+                     mark's own user space, oversized past every edge, so their
+                     convergence (svgOrigin 212 120, the teal dot) is registered on
+                     the mark by construction - no screen-space measurement. -->
                 <svg id="title-mark" viewBox="0 30 240 180" aria-hidden="true">
+                  <g id="title-open">
+                    <g id="title-open-grid"></g>
+                    <polyline id="title-open-wave" fill="none" stroke="#e6f2f0" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+                  </g>
                   <g id="title-mark-lines">
                     <line x1="40" y1="40" x2="40" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.12"/>
                     <line x1="80" y1="40" x2="80" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.15"/>
@@ -163,24 +176,86 @@
         </div>
       </div>
       <script>
+        // ---- the v5 opening overlay, in the mark's user space -----------------
+        // Grid: the mark's own line progression (x = 40, 80, 112, 138, 158, 174,
+        // 186, 196 and opacity 0.12..0.33 in a 240 viewBox) tiled every 600 user
+        // units from tile -2 to 3, so the mesh covers the 1920x1080 frame
+        // wherever the centred lockup sits; opacity still rises to the right.
+        var SVGNS = "http://www.w3.org/2000/svg";
+        var grid = document.getElementById("title-open-grid");
+        var LOCAL_X = [40, 80, 112, 138, 158, 174, 186, 196];
+        var LOCAL_O = [0.12, 0.15, 0.18, 0.21, 0.24, 0.27, 0.30, 0.33];
+        var openLines = [];
+        for (var tile = -2; tile <= 3; tile++) {
+          for (var i = 0; i < 8; i++) {
+            var ln = document.createElementNS(SVGNS, "line");
+            ln.setAttribute("x1", tile * 600 + LOCAL_X[i]);
+            ln.setAttribute("x2", tile * 600 + LOCAL_X[i]);
+            ln.setAttribute("y1", -800);
+            ln.setAttribute("y2", 1200);
+            ln.setAttribute("stroke", "#e6f2f0");
+            ln.setAttribute("stroke-width", "2.4");
+            ln.setAttribute("opacity", Math.min(0.72, LOCAL_O[i] + 0.055 * (tile + 2)).toFixed(3));
+            grid.appendChild(ln);
+            openLines.push(ln);
+          }
+        }
+        // Wave: the mark's law y = A*exp(-4.2 t)*cos(2*pi*3.2 t), time stretched
+        // over the frame (t = 0 at the path's off-screen left start, ~1.0 at the
+        // teal dot), so it enters large on the left and damps out just before
+        // the mark's convergence point (212, 120) - the same shape as the mark's
+        // own wave, two orders of magnitude bigger.
+        var wavePts = [];
+        var WAVE_A = 340, WAVE_X0 = -700, WAVE_X1 = 300, WAVE_V = 1000;
+        for (var x = WAVE_X0; x <= WAVE_X1; x += 4) {
+          var t = (x - WAVE_X0) / WAVE_V;
+          var y = 120 - WAVE_A * Math.exp(-4.2 * t) * Math.cos(2 * Math.PI * 3.2 * t);
+          wavePts.push(x.toFixed(1) + "," + y.toFixed(1));
+        }
+        var openWave = document.getElementById("title-open-wave");
+        openWave.setAttribute("points", wavePts.join(" "));
+
         var tl = gsap.timeline({ paused: true });
         tl.fromTo("#title-bgwrap", { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "power1.out" }, 0);
         tl.fromTo("#title-bgwrap", { scale: 1.08 }, { scale: 1.0, duration: 6, ease: "none", immediateRender: false }, 0);
-        tl.fromTo("#title-glow", { opacity: 0 }, { opacity: 0.3, duration: 0.9, ease: "power2.out" }, 0.25);
-        // The lockup rises as one block, the wave draws on left to right and
-        // damps out, then the converged dot lands. The airy cue sits at
-        // 0.25-0.45 s and the subtitle lands at 2.4 s - both windows kept.
+        // 0.0-0.9 the screen splits into the mark's grid (airy cue 0.05);
+        // the lines sweep in left to right, opacity rising with x.
+        tl.fromTo(openLines,
+          { opacity: 0 },
+          { opacity: function (i, el) { return +el.getAttribute("opacity"); },
+            duration: 0.25, ease: "power1.out", stagger: 0.014 }, 0.02);
+        // 0.9-2.3 the damped residual travels right through the lines (scan cue
+        // 0.9); the lines it passes compress toward the mark and fade. The dash
+        // pattern is [L, L+24] with the draw starting 12 units before the path
+        // begins, so the last dash boundary sits 12 units up-path of the start
+        // and the round line cap cannot leave a zero-length nub there before
+        // the draw begins (a plain [A, A] pattern with offset A always lands
+        // the boundary back on s = 0).
+        var openWaveLen = openWave.getTotalLength();
+        openWave.style.strokeDasharray = openWaveLen + " " + (openWaveLen + 24);
+        tl.fromTo(openWave, { strokeDashoffset: openWaveLen + 12 },
+          { strokeDashoffset: 0, duration: 1.4, ease: "power1.inOut" }, 0.9);
+        tl.to("#title-open-grid", { scaleX: 0.84, svgOrigin: "212 120", duration: 1.4, ease: "power1.inOut" }, 0.9);
+        tl.to("#title-open-grid", { opacity: 0.5, duration: 1.4, ease: "power1.inOut" }, 0.9);
+        // 2.3-2.7 everything converges into the mark's place: the overlay
+        // collapses onto the teal dot (svgOrigin 212 120) while the real mark
+        // draws on beneath it and the dot lands where the wave ends (ping cue
+        // 2.6). The mark's own airy/glow window moves here with it.
+        tl.fromTo("#title-glow", { opacity: 0 }, { opacity: 0.3, duration: 0.9, ease: "power2.out" }, 2.4);
+        tl.to("#title-open", { scale: 0.106, opacity: 0, svgOrigin: "212 120", duration: 0.4, ease: "power2.in" }, 2.3);
+        tl.fromTo("#title-mark-lines", { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "power1.out" }, 2.3);
         var wave = document.getElementById("title-mark-wave");
-        var waveLen = wave.getTotalLength() + 2;
-        wave.style.strokeDasharray = waveLen + " " + waveLen;
-        tl.fromTo("#title-brand", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.3);
-        tl.fromTo("#title-mark-lines", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.3);
-        tl.fromTo("#title-mark-wave", { strokeDashoffset: waveLen }, { strokeDashoffset: 0, duration: 0.8, ease: "power2.out" }, 0.3);
-        tl.fromTo("#title-mark-dot", { opacity: 0, scale: 0, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(1.7)" }, 1.05);
-        tl.fromTo("#title-legal", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 0.45);
-        tl.fromTo("#title-rule", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 0.6);
-        tl.fromTo("#title-sub-ko", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 2.4);
-        tl.fromTo("#title-sub-en", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 2.55);
+        var waveLen = wave.getTotalLength();
+        wave.style.strokeDasharray = waveLen + " " + (waveLen + 24);
+        tl.fromTo("#title-mark-wave", { strokeDashoffset: waveLen + 12 }, { strokeDashoffset: 0, duration: 0.32, ease: "power2.out" }, 2.3);
+        tl.fromTo("#title-mark-dot", { opacity: 0, scale: 0, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.25, ease: "back.out(1.7)" }, 2.45);
+        // 2.7-3.2 the wordmark (clean reveal, no bounce), then the company line.
+        tl.fromTo("#title-word", { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.3, ease: "power2.out" }, 2.7);
+        tl.fromTo("#title-legal", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 3.02);
+        tl.fromTo("#title-rule", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 3.15);
+        // Then the subtitle, on screen 3.4-5.6 s (2.2 s, tick cue 3.4).
+        tl.fromTo("#title-sub-ko", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 3.4);
+        tl.fromTo("#title-sub-en", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 3.55);
         tl.to("#title-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 5.6);
         window.__timelines["title"] = tl;
       </script>
