@@ -11,6 +11,10 @@
 | `tunnel_mesh.py` | no | Prosperity Public License 3.0.0 |
 | `solve.py` | no | Prosperity Public License 3.0.0 |
 | `review.py` | no | Prosperity Public License 3.0.0 |
+| `isaac_export.py` | no | Prosperity Public License 3.0.0 |
+| `isaac_bpy.py` | yes (bpy) | GPL-2.0-or-later |
+| `isaac_vdb.py` | no (openvdb at run time) | Prosperity Public License 3.0.0 |
+| `isaac_probe.py` | no (isaacsim, omni, carb at run time) | Prosperity Public License 3.0.0 |
 | `LICENSE-NOTICE.md` | - | Prosperity Public License 3.0.0 |
 
 ## Why `sim_geom.py` is GPL-2.0-or-later
