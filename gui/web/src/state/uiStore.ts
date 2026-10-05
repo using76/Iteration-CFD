@@ -10,7 +10,7 @@ export type BottomTab = 'terminal' | 'logs' | 'problems' | 'output'
 export type Tab =
   | { id: string; kind: 'file'; path: string }
   | { id: 'viewer'; kind: 'viewer' }
-  | { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null }
+  | { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null; chart?: 'residuals' | 'metrics' }
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
   | { id: string; kind: 'geometry'; path: string }
   | { id: string; kind: 'campaign'; path: string }
@@ -60,7 +60,7 @@ export interface UiActions {
   openViewerTab(): void
   openGeometryTab(path: string): void
   openCampaignTab(path: string): void
-  openResidualsTab(runId: string | null): void
+  openResidualsTab(runId: string | null, chart?: 'residuals' | 'metrics'): void
   setCompareRun(runId: string | null): void
   setViewSplit(on: boolean): void
   setFocusedView(view: ViewId): void
@@ -211,14 +211,17 @@ export const useUiStore = create<UiStore>()(
         const p = path.replace(/\/+$/, '')
         get().openTab({ id: `campaign:${p}`, kind: 'campaign', path: p })
       },
-      openResidualsTab(runId) {
+      openResidualsTab(runId, chart) {
         set((s) => {
           const existing = s.tabs.find((t) => t.kind === 'residuals')
+          // No chart given keeps the tab's current chart, else the residuals chart.
+          const nextChart = chart ?? (existing?.kind === 'residuals' ? (existing.chart ?? 'residuals') : 'residuals')
           const tab: Tab = {
             id: 'residuals',
             kind: 'residuals',
             runId: runId ?? (existing?.kind === 'residuals' ? existing.runId : null),
             compareRunId: existing?.kind === 'residuals' ? (existing.compareRunId ?? null) : null,
+            chart: nextChart,
           }
           return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals', activeRunId: runId ?? s.activeRunId }
         })
@@ -227,7 +230,8 @@ export const useUiStore = create<UiStore>()(
         set((s) => {
           const existing = s.tabs.find((t) => t.kind === 'residuals')
           const primary = existing?.kind === 'residuals' ? existing.runId : s.activeRunId
-          const tab: Tab = { id: 'residuals', kind: 'residuals', runId: primary, compareRunId: runId }
+          // The compare overlay never switches the tab's chart.
+          const tab: Tab = { id: 'residuals', kind: 'residuals', runId: primary, compareRunId: runId, chart: existing?.kind === 'residuals' ? (existing.chart ?? 'residuals') : 'residuals' }
           return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals' }
         })
       },

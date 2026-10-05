@@ -167,7 +167,7 @@ const STEP_INFO: GeometryInfo = {
 }
 
 type GeoTab = { id: string; kind: 'geometry'; path: string }
-type ResTab = { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null }
+type ResTab = { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null; chart?: 'residuals' | 'metrics' }
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
 type RunResult = ResultFrame & { state: UiState }
 
@@ -233,15 +233,15 @@ function harness(tabs: (GeoTab | ResTab)[] = [], cameraBudgetMs?: number) {
     setActiveRun(runId: string | null) {
       ui.activeRunId = runId
     },
-    openResidualsTab(runId: string | null) {
+    openResidualsTab(runId: string | null, chart?: 'residuals' | 'metrics') {
       const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
-      putResTab({ id: 'residuals', kind: 'residuals', runId: runId ?? (prev ? prev.runId : null) })
+      putResTab({ id: 'residuals', kind: 'residuals', runId: runId ?? (prev ? prev.runId : null), chart: chart ?? prev?.chart ?? 'residuals' })
       ui.activeTabId = 'residuals'
       ui.activeRunId = runId ?? ui.activeRunId
     },
     setCompareRun(runId: string | null) {
       const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
-      putResTab({ id: 'residuals', kind: 'residuals', runId: prev ? prev.runId : ui.activeRunId, compareRunId: runId })
+      putResTab({ id: 'residuals', kind: 'residuals', runId: prev ? prev.runId : ui.activeRunId, compareRunId: runId, chart: prev?.chart ?? 'residuals' })
       ui.activeTabId = 'residuals'
     },
     setViewSplit(on: boolean) {
@@ -556,7 +556,7 @@ describe('the viewer commands the bridge drives', () => {
 })
 
 describe('compare_run', () => {
-  const resTab = (runId: string | null, compareRunId?: string | null): ResTab => ({ id: 'residuals', kind: 'residuals', runId, compareRunId })
+  const resTab = (runId: string | null, compareRunId?: string | null): ResTab => ({ id: 'residuals', kind: 'residuals', runId, compareRunId, chart: 'residuals' })
 
   it('compare_run r_2 overlays and subscribes', async () => {
     const h = harness()
@@ -599,6 +599,41 @@ describe('compare_run', () => {
     const r = await h.run({ type: 'compare_run', runId: 'r_1' })
     expect(r.ok).toBe(false)
     expect(r.error).toBe('UNSUPPORTED (compare_run): run "r_1" is the run the chart already follows; pick another or follow_run first')
+  })
+})
+
+describe('show_chart', () => {
+  it('show_chart opens the metrics chart and still refuses surface', async () => {
+    const h = harness([])
+    const r = await h.run({ type: 'show_chart', chart: 'metrics', runId: 'r_1' })
+    expect(r.ok).toBe(true)
+    expect(h.subscribeRun).toHaveBeenCalledWith('r_1')
+    const tab = h.ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
+    expect(tab?.chart).toBe('metrics')
+    expect(tab?.runId).toBe('r_1')
+    expect(r.state.tabs).toEqual([{ id: 'residuals', kind: 'residuals', label: 'metrics' }])
+    // The residuals chart still opens, keeping the tab's run.
+    expect((await h.run({ type: 'show_chart', chart: 'residuals' })).ok).toBe(true)
+    expect(h.ui.tabs.find((t): t is ResTab => t.kind === 'residuals')?.runId).toBe('r_1')
+    const bad = await h.run({ type: 'show_chart', chart: 'surface' })
+    expect(bad.ok).toBe(false)
+    expect(bad.error).toBe('UNSUPPORTED (show_chart): chart "surface" has no tab here (residuals, metrics)')
+  })
+
+  it('run commands forwarded to the window say the server applies them', async () => {
+    const h = harness([])
+    const cmds: UiCommand[] = [
+      { type: 'start_run' },
+      { type: 'stop_run', runId: null },
+      { type: 'set_run_setting', binary: null, flag: null, value: null },
+      { type: 'run', action: 'stop' },
+    ]
+    for (const cmd of cmds) {
+      const r = await h.run(cmd)
+      expect(r.ok).toBe(false)
+      expect(r.error).toBe(`UNSUPPORTED (${cmd.type}): gui_control applies this on the server through run_start / run_stop; this window should not receive it`)
+    }
+    expect(h.ui.tabs).toEqual([])
   })
 })
 

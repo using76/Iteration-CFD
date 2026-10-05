@@ -52,7 +52,9 @@ export function TabBar() {
       : tab.kind === 'viewer'
         ? t('tab.viewer')
         : tab.kind === 'residuals'
-          ? t('tab.residuals')
+          ? tab.chart === 'metrics'
+            ? t('residuals.metricsTitle')
+            : t('tab.residuals')
           : tab.kind === 'geometry'
             ? `${t('tab.geometry')}: ${basename(tab.path)}`
             : tab.kind === 'campaign'

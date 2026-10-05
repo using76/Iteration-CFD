@@ -213,6 +213,21 @@ describe('policy', () => {
     expect(parsePolicyOverrides('{"file_write":"auto"}')).toEqual({ file_write: 'auto' })
     expect(parsePolicyOverrides('nope')).toEqual({})
   })
+
+  it('gui_control run commands are approved exactly as run_start / run_stop', () => {
+    const reads = { settings, allowedTools: [] as string[], overrides: {} }
+    // A delegated start waits like run_start under reads; a plain screen command stays auto.
+    expect(classifyTool('gui_control', { type: 'start_run' }, reads)).toBe('ask')
+    expect(classifyTool('gui_control', { type: 'select_tab', tab: 'results' }, reads)).toBe('auto')
+    expect(classifyTool('gui_control', { type: 'start_run' }, { ...reads, settings: { ...settings, autoApprove: 'all' } })).toBe('auto')
+    expect(classifyTool('gui_control', { type: 'start_run' }, { ...reads, overrides: { run_start: 'never' } })).toBe('never')
+    expect(classifyTool('gui_control', { type: 'stop_run', runId: 'r_1' }, reads)).toBe('ask')
+    expect(classifyTool('gui_control', { type: 'stop_run', runId: 'r_1' }, { ...reads, settings: { ...settings, autoApprove: 'all' } })).toBe('auto')
+    expect(classifyTool('gui_control', { type: 'stop_run', runId: 'r_1' }, { ...reads, overrides: { run_stop: 'never' } })).toBe('never')
+    expect(classifyTool('gui_control', { type: 'run', action: 'run' }, reads)).toBe('ask')
+    expect(classifyTool('gui_control', { type: 'run', action: 'stop' }, reads)).toBe('ask')
+    expect(classifyTool('gui_control', { type: 'set_run_setting', binary: 'ofgpu-k-epsilon' }, reads)).toBe('auto')
+  })
 })
 
 describe('approval manager', () => {

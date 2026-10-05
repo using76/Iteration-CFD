@@ -27,7 +27,9 @@ export function TabHost() {
               ) : tab.kind === 'viewer' ? (
                 <ViewerTab active={active} />
               ) : tab.kind === 'residuals' ? (
-                <ResidualsChart runId={tab.runId} compareRunId={tab.compareRunId ?? null} active={active} />
+                // Keyed by the chart kind: show_chart on an open tab must remount the
+                // chart, or the residuals chart's log scale and hidden series carry over.
+                <ResidualsChart key={tab.chart ?? 'residuals'} runId={tab.runId} compareRunId={tab.compareRunId ?? null} active={active} chart={tab.chart ?? 'residuals'} />
               ) : tab.kind === 'geometry' ? (
                 <GeometryTab path={tab.path} active={active} />
               ) : tab.kind === 'campaign' ? (

@@ -128,7 +128,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
       runId: u.activeRunId,
       sim: null,
       case: casePath ? { path: casePath, name: null, dirty: null } : null,
-      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind })),
+      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind === 'residuals' ? (t.chart ?? 'residuals') : t.kind })),
       run: null,
       viewer: {
         datasetId: vs.datasetId,
@@ -334,11 +334,12 @@ export function createUiBridge(deps: UiBridgeDeps) {
         deps.subscribeRun(cmd.runId)
         return { ok: true }
       case 'show_chart':
-        if (cmd.chart === 'residuals') {
-          ui.getState().openResidualsTab(ui.getState().activeRunId)
+        if (cmd.chart === 'residuals' || cmd.chart === 'metrics') {
+          if (cmd.runId) deps.subscribeRun(cmd.runId)
+          u.openResidualsTab(cmd.runId ?? u.activeRunId, cmd.chart)
           return { ok: true }
         }
-        return unsupported('show_chart', `chart "${cmd.chart}" has no tab here (residuals only)`)
+        return unsupported('show_chart', `chart "${cmd.chart}" has no tab here (residuals, metrics)`)
       case 'set_camera':
       case 'fit_view': {
         // A camera move must be answered inside the hub's 5 s: open the tab
@@ -418,7 +419,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'start_run':
       case 'stop_run':
       case 'set_run_setting':
-        return unsupported(cmd.type, 'runs are driven by the run_start/run_stop tools on this screen, not by gui_control')
+        return unsupported(cmd.type, 'gui_control applies this on the server through run_start / run_stop; this window should not receive it')
       case 'set_tool':
         // The controller replays a tool set before the canvas mounts (attachView), so no mount
         // gate here; it does NOT create the section clip box - Viewer3D's toolbar onTool does

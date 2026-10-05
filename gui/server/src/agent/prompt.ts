@@ -17,7 +17,7 @@ export const GUI_CONTROL_PARAGRAPH = `You can also steer the operator's screen d
 The workspace commands, one line each:
 - open_case {path}: open a case in the studio; save_case {force}: save it (the screen reports dirty when there are unsaved edits, and refuses a case whose validation found errors unless force is set).
 - validate_case {path}: check the case and publish the findings to the Problems list without writing; new_case {template, name, dir}: create one from "empty" or a mesh preset and open it.
-- set_run_setting {binary, flag, value}: change one run setting on the panel; start_run / stop_run {runId}: press the run or stop button.
+- set_run_setting {binary, flag, value} edits this session's run draft on the server (binary first, then flags; value null removes a flag); start_run starts that draft on the case the screen has open and asks the operator exactly like run_start; stop_run {runId} stops a run (null = the run on screen) and asks like run_stop.
 - follow_run {runId}: follow a run from the Runs tab, so the log, the charts and the status bar are about that run.
 - open_mesh_dialog {mode, preset, cells, outputDir, config, check, dryRun, layoutDir}: open the mesh dialog prefilled - cells is one number or [nx, ny, nz] (the 2-D presets are one cell deep), config opens the automesher half, and mode regions with layoutDir meshes a STEP config into fluid + solid region meshes; start_mesh: start the mesh it shows.
 - open_mesh_view {representation, patches}: bring the Mesh tab forward on the open case's own mesh.
