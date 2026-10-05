@@ -1,0 +1,94 @@
+def _main_config(args):
+    """preflight.py CONFIG [options] - the L0 verdict on one config."""
+    config_path, argv, edits, flow, fingerprint = None, [], None, None, None
+    do_octree = do_snap = as_json = False
+    h_min, binary, records_path = None, BINARY_DEFAULT, None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--arg" or a.startswith("--arg="):
+            i, v = _take(args, i, "--arg")
+            argv.append(v)
+        elif a == "--edits" or a.startswith("--edits="):
+            i, v = _take(args, i, "--edits")
+            edits = _read_json_or(v, "--edits")
+        elif a == "--flow" or a.startswith("--flow="):
+            i, v = _take(args, i, "--flow")
+            flow = _read_json_or(v, "--flow")
+        elif a == "--fingerprint" or a.startswith("--fingerprint="):
+            i, v = _take(args, i, "--fingerprint")
+            fingerprint = _read_json_or(v, "--fingerprint")
+        elif a == "--h-wall-min" or a.startswith("--h-wall-min="):
+            i, v = _take(args, i, "--h-wall-min")
+            try:
+                h_min = float(v)
+            except ValueError:
+                raise PreflightError("--h-wall-min needs a number, got %r" % v)
+        elif a == "--binary" or a.startswith("--binary="):
+            i, v = _take(args, i, "--binary")
+            binary = v
+        elif a == "--records" or a.startswith("--records="):
+            i, v = _take(args, i, "--records")
+            records_path = v
+        elif a == "--octree-probe":
+            do_octree = True
+        elif a == "--snap-probe":
+            do_snap = True
+        elif a == "--json":
+            as_json = True
+        elif a.startswith("-"):
+            raise PreflightError("unknown argument %r" % a)
+        elif config_path is None:
+            config_path = a
+        else:
+            raise PreflightError("one CONFIG positional is taken, got a second one %r" % a)
+        i += 1
+    if config_path is None:
+        raise PreflightError("a CONFIG positional is required")
+    config = _read_json_or(config_path, "CONFIG")
+    if not isinstance(config, dict):
+        raise PreflightError("CONFIG %s is not a JSON object" % config_path)
+    probe, tmp = None, None
+    try:
+        if do_octree or do_snap:
+            tmp = tempfile.mkdtemp(prefix="preflight_cli_")
+            if do_snap:
+                h_min = snap_probe(binary, config, tmp)
+            if do_octree:
+                probe = octree_probe(binary, config, tmp)
+        res = preflight(config, argv=argv, edits=edits, fingerprint=fingerprint, flow=flow,
+                        octree_probe=probe, h_wall_min_m=h_min)
+        if records_path:
+            with open(records_path, "a", encoding="utf-8") as fh:
+                for r in res["records"]:
+                    fh.write(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n")
+        if as_json:
+            print(json.dumps(res, indent=1, ensure_ascii=False))
+        else:
+            for r in res["records"]:
+                print("[%s] %s" % (r["verdict"], r["message"]))
+        if res["verdict"] == "pass":
+            print("PREFLIGHT PASS")
+            return 0
+        print("PREFLIGHT REFUSED: %s" % ", ".join(res["refused"]))
+        return 3
+    finally:
+
+def main(argv=None):
+    """The CLI: 0 pass, 3 refused, 2 a caller error, 1 a failed selftest or gate."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    try:
+        if "--selftest" in args:
+            if len(args) != 1:
+                raise PreflightError("--selftest takes no other argument")
+            return selftest()
+        if "--gate" in args:
+            args.remove("--gate")
+            return _main_gate(args)
+        return _main_config(args)
+    except PreflightError as e:
+        print("preflight: %s" % e, file=sys.stderr)
+        return 2
+    except (schema.LockError, schema.SchemaError) as e:
+        print("preflight: %s" % e, file=sys.stderr)
+        return 2

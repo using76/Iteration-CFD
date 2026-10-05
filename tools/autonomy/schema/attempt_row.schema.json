@@ -70,6 +70,7 @@
         "pinned_frac": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "p99_over_hf": {"type": ["number", "null"], "minimum": 0},
         "max_over_hf": {"type": ["number", "null"], "minimum": 0},
+        "feature_capture": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "blc8_a_priori": {"type": "number", "minimum": 0, "maximum": 1},
         "blc_full_a_priori": {"type": "number", "minimum": 0, "maximum": 1},
         "patches": {"type": "array", "items": {"$ref": "#/$defs/PatchOutcome"}},
@@ -109,6 +110,7 @@
         "F3b": {"type": "boolean"},
         "F3c": {"type": "boolean"},
         "F3d": {"type": ["boolean", "null"]},
+        "F3e": {"type": ["boolean", "null"]},
         "F4": {"type": "boolean"},
         "F5": {"type": "boolean"}
       },

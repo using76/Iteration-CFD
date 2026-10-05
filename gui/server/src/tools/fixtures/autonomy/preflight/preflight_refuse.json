@@ -1,0 +1,247 @@
+{
+ "schema": "autonomy-preflight/1",
+ "verdict": "refuse",
+ "refused": [
+  "PF-THIN"
+ ],
+ "records": [
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-SURFACE",
+   "verdict": "pass",
+   "trigger": {
+    "observable": "/input/surfaces",
+    "value": 1,
+    "threshold": 1,
+    "op": "==",
+    "source": "tools/geom/stl_repair.py --json"
+   },
+   "inputs": [
+    {
+     "name": "surface 0 C:\\Users\\sdd32\\AppData\\Local\\Temp\\claude\\C--Users-sdd32-Documents-GitHub-Iteration-CFD\\570dac22-70d3-4425-9689-9d577054f656\\scratchpad\\units\\au\\AG-5-fixtures\\work\\stl/F-1-009.stl",
+     "value": {
+      "open_edges": 0,
+      "non_manifold_edges": 0,
+      "reoriented_triangles": 0,
+      "flipped_components": 0,
+      "triangles": 1770
+     },
+     "unit": ""
+    },
+    {
+     "name": "bbox",
+     "value": [
+      0.0,
+      -0.396,
+      0.0,
+      0.957,
+      0.396,
+      0.7425
+     ],
+     "unit": "m"
+    }
+   ],
+   "formula": "",
+   "edits": [],
+   "cite": "docs/15 §C L0 (a); tools/geom/stl_repair.py before/orientation; automesher.rs:433",
+   "message": "PF-SURFACE: 1 surface(s) closed and consistently wound",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-QUALITY",
+   "verdict": "pass",
+   "trigger": {
+    "observable": "/quality",
+    "value": "e40671ae76c7f1db554f27d631d374a46dc3095adf0f1f259bdd8bb34eb6816a",
+    "threshold": "e40671ae76c7f1db554f27d631d374a46dc3095adf0f1f259bdd8bb34eb6816a",
+    "op": "==",
+    "source": "schema.canonical_sha256"
+   },
+   "inputs": [],
+   "formula": "",
+   "edits": [],
+   "cite": "docs/15 §C L0 (b), §H: the loop never loosens the gate that judges it (SPEC-LIT §92.3)",
+   "message": "PF-QUALITY: the quality block is byte-equal to the reference",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-FLAGS",
+   "verdict": "pass",
+   "trigger": {
+    "observable": "argv",
+    "value": [],
+    "threshold": [
+     "-permissive"
+    ],
+    "op": "not_in",
+    "source": "tools/autonomy/schema/knobs.json"
+   },
+   "inputs": [],
+   "formula": "",
+   "edits": [],
+   "cite": "docs/15 §C L0 (c); tools/autonomy/schema/knobs.json",
+   "message": "PF-FLAGS: no forbidden flag on the command line",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-KNOBS",
+   "verdict": "pass",
+   "trigger": {
+    "observable": "/",
+    "value": "the config's settings leaves",
+    "threshold": "schema/knobs.json whitelist",
+    "op": "in",
+    "source": "tools/autonomy/schema/knobs.json"
+   },
+   "inputs": [],
+   "formula": "",
+   "edits": [],
+   "cite": "docs/15 §C L0 (d); tools/autonomy/schema/knobs.json",
+   "message": "PF-KNOBS: every settings leaf is whitelisted and in range, the patch names are the STL's own, and the mesher's own parser takes the config",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-NONORTH",
+   "verdict": "pass",
+   "trigger": {
+    "observable": "/quality/max_non_orth_deg",
+    "value": 70.0,
+    "threshold": 25.239401820678918,
+    "op": ">=",
+    "source": "docs/15 §B fact 4"
+   },
+   "inputs": [],
+   "formula": "",
+   "edits": [],
+   "cite": "docs/15 §C L0 (e); docs/15 §B fact 4",
+   "message": "PF-NONORTH: max_non_orth_deg 70.0 clears the 25.2394 deg floor at refinement level 4",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-YPLUS",
+   "verdict": "abstain",
+   "trigger": null,
+   "inputs": [],
+   "formula": "",
+   "edits": [],
+   "cite": "docs/15 §D.3 (R-WIN); schema.a_priori_wall (SPEC-LIT §32.5.6)",
+   "message": "PF-YPLUS: no usable flow spec, growth, cell_frac, min_thickness_ratio or base_size",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-THIN",
+   "verdict": "refuse",
+   "trigger": {
+    "observable": "/layers/first_thickness",
+    "value": 1e-05,
+    "threshold": 0.05,
+    "op": ">=",
+    "source": "the config against min_thickness_ratio"
+   },
+   "inputs": [
+    {
+     "name": "t1_m",
+     "value": 1e-05,
+     "unit": "m"
+    },
+    {
+     "name": "h_m",
+     "value": 0.02990625,
+     "unit": "m"
+    },
+    {
+     "name": "ratio",
+     "value": 0.0010031347962382448,
+     "unit": ""
+    },
+    {
+     "name": "source",
+     "value": "predicted",
+     "unit": ""
+    },
+    {
+     "name": "level",
+     "value": 4,
+     "unit": ""
+    },
+    {
+     "name": "patch",
+     "value": "body",
+     "unit": ""
+    }
+   ],
+   "formula": "3 * t1 / h >= min_thickness_ratio",
+   "edits": [],
+   "cite": "layers.rs:1292-1316 (92.51); docs/15 §D.3 caution 1",
+   "message": "PF-THIN: 3 * 1e-05 / 0.02990625 = 0.0010031347962382448 < min_thickness_ratio = 0.05 (SPEC-LIT §92.51); every layer cell would fail G5 (h: base_size/2**L on a castellated wall - a prediction on a snapped one)",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-DOMAIN",
+   "verdict": "pass",
+   "trigger": {
+    "observable": "/domain/extent",
+    "value": [
+     -3.3495,
+     7.1775,
+     -2.871,
+     2.871,
+     -2.3925,
+     3.3495
+    ],
+    "threshold": "span or one base_size of margin, per axis",
+    "op": "==",
+    "source": "automesher.rs:509 (stage 0)"
+   },
+   "inputs": [],
+   "formula": "span or margin per axis",
+   "edits": [],
+   "cite": "automesher.rs:509 (stage 0); SPEC-LIT §92.2",
+   "message": "PF-DOMAIN: the surface sits inside the domain with margin or spans it on every axis",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  },
+  {
+   "schema": "autonomy-decision/1",
+   "layer": "preflight",
+   "rule_id": "PF-BUDGET",
+   "verdict": "abstain",
+   "trigger": null,
+   "inputs": [],
+   "formula": "",
+   "edits": [],
+   "cite": "gates.json cell_budget; docs/15 §D.1 F5",
+   "message": "PF-BUDGET: no octree probe was run",
+   "uncertainty": 0,
+   "t": "2026-09-24T22:35:44Z"
+  }
+ ],
+ "dryrun": {
+  "refuses": false,
+  "field": null,
+  "message": null
+ }
+}
+PREFLIGHT REFUSED: PF-THIN

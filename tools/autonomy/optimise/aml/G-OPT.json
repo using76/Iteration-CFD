@@ -1,0 +1,157 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "conditions": {
+  "auc_ge": true,
+  "beats_rules": null,
+  "rmse_le": false
+ },
+ "cv": {
+  "auc": 0.9848501676711345,
+  "blc8_rmse": 0.1537142221007169,
+  "blc8_rmse_pos": 0.46773118767248867,
+  "blc8_rmse_zero": 0.2580366535453138,
+  "brier": 0.043821059920505244,
+  "fold_rows": {
+   "0": 642,
+   "1": 515,
+   "2": 645,
+   "3": 668,
+   "4": 714
+  },
+  "folds": [
+   0,
+   1,
+   2,
+   3,
+   4
+  ],
+  "log_cells_rmse": 0.054451065969543286,
+  "n": 3184,
+  "n_fail": 2286,
+  "n_geometries": 372,
+  "n_pos": 212
+ },
+ "date": "2026-10-03",
+ "departures": [
+  "a refit runs no refinement round: G-OPT's tuning ablation half (beats_rules) is not measured, so a refit never ships the optimiser enabled; optimise.py --refine measures it",
+  "the training rows are the extra campaigns' rows first (a re-meshed (geometry, config sha) keeps its new outcome), then the AM-14 training set: the committed optimise/G-OPT.json's sources and its five round bundles",
+  "the shipped model lives in optimise/aml/ since 2026-10-03; optimise/ keeps the AM-14 gate as the record of that run"
+ ],
+ "enabled": false,
+ "importances": [
+  {
+   "auc_drop": 0.200634,
+   "feature": "feature_tolerance"
+  },
+  {
+   "auc_drop": 0.074465,
+   "feature": "log10_1p_sharp_over_lmax"
+  },
+  {
+   "auc_drop": 0.014691,
+   "feature": "min_over_lmax"
+  },
+  {
+   "auc_drop": 0.008861,
+   "feature": "feature_offset"
+  },
+  {
+   "auc_drop": 0.005228,
+   "feature": "log10_predicted_cells"
+  }
+ ],
+ "kind": "refit",
+ "model_sha256": "40f38c282360bb6a37e57c0651eb85084347d8cf53cc30bf0ea61660f568e308",
+ "n_duplicates": 1322,
+ "n_new_rows": 413,
+ "rounds": [],
+ "schema": "autonomy-opt-gate/1",
+ "ship": {
+  "enabled": false,
+  "why": "the CV half fails, so G-OPT fails and the optimiser ships DISABLED (the user's decision of 2026-10-03: refit on the AM-L rows, disabled until G-OPT passes)"
+ },
+ "sources": [
+  {
+   "content_sha256": "ca94952992e86b81c2fef745e0aafc33801468926c1980fab02552aaf7f34a0f",
+   "file": "aml/tuning_rules_L5.json.gz",
+   "n_rows_kept": 413,
+   "sha256": "75acc3b0ca373ed191964e39e85542c281bda1b917e1960f98168ab27bec2615"
+  },
+  {
+   "content_sha256": "152e070feb31e0d91bea4c1d12f1c3dde736e0e60f2848909667e7c26ed40758",
+   "file": "prior/tuning_rules.json.gz",
+   "n_rows_kept": 724,
+   "sha256": "583556b03bca685fd072ff2d5587ea8e5ef542d014f46feb98e954010a380075"
+  },
+  {
+   "content_sha256": "bbd918d13a2e0f63267b127097154f34a12fe2ee032dfeb9923e73117ef6b3bf",
+   "file": "prior/eval_r1.json.gz",
+   "n_rows_kept": 116,
+   "sha256": "7be7de56cdf45cc4fb0abe462d70a979209c5c0e3d646bf47cf56ff327ccdd9b"
+  },
+  {
+   "content_sha256": "c2b8a3e70815ae25717f805bbea750409f1974df3bd1c566eee9b0aaa9696ecd",
+   "file": "prior/eval_r2.json.gz",
+   "n_rows_kept": 24,
+   "sha256": "fa554d60d698fe45451aa78031a6cf75157b37833a70d6a3c268541879006612"
+  },
+  {
+   "content_sha256": "c183d78156ca1d78345fd18991b5874fec06557f5510953fb77d072118bfa18c",
+   "file": "baseline/tuning_b0-template.json.gz",
+   "n_rows_kept": 372,
+   "sha256": "8d0309e70701908c2e29ff2f5a1ae8b6bae3360993c18e2c9c44281d9e560da7"
+  },
+  {
+   "content_sha256": "ff3f44b428c41678dc5f2057a58cdd5a753206f621a1bf098b36135655edb2d6",
+   "file": "baseline/tuning_b0-lhs.json.gz",
+   "n_rows_kept": 1488,
+   "sha256": "6b98b08ceb8cb8784f50c9277fd6157fbbec862eb0431c0c5fbf28f12d2bb68a"
+  },
+  {
+   "content_sha256": "bd67d8b62759775fc75d21baf0eeb1f58ee11065ed4368d5aae32307201e5394",
+   "file": "optimise/refine_r1.json.gz",
+   "n_rows_kept": 20,
+   "sha256": "7a86d7e55c7da56c2ec70e79e7ac823518317d949b77853dff14eb228fd65a29"
+  },
+  {
+   "content_sha256": "47db8dcc6c45d8ccb99f03c587aea02e85cf0c2b846583d2e9aee1ac6d6f02b4",
+   "file": "optimise/refine_r2.json.gz",
+   "n_rows_kept": 7,
+   "sha256": "d131b8a8d44a392821bc3af0e20b625259fa105eb333fe6a763a331a80bd0036"
+  },
+  {
+   "content_sha256": "b0d89fdb84fac40282047ee6d0127f0e622fc08dfdab680eb8f5652abbd119f4",
+   "file": "optimise/refine_r3.json.gz",
+   "n_rows_kept": 8,
+   "sha256": "a6a6f6781394178096c4590e7509158bf0479a29f72ac857d5d43d4f1eb4e7a0"
+  },
+  {
+   "content_sha256": "50b79b82737cd234065a387594236617e2482c10099f7a6a47a528933e3ea93f",
+   "file": "optimise/refine_r4.json.gz",
+   "n_rows_kept": 5,
+   "sha256": "f7465d1aea6c643b805fb752152f49247100362f8ee8b5bc618d9063de516ca6"
+  },
+  {
+   "content_sha256": "5ddf029a1bcb37a11d40dee78f2b8798755f1b6c41f16951807b247342127588",
+   "file": "optimise/refine_r5.json.gz",
+   "n_rows_kept": 7,
+   "sha256": "9808fea2da61e8dea49c433c4fbccfb1ebfe9721a15030c98ffdb621f7a2d496"
+  }
+ ],
+ "thresholds": {
+  "auc_min": 0.75,
+  "blc_gain_min": 0.05,
+  "mfr_gain_min": 0.03,
+  "p_fail_max": 0.2,
+  "rmse_max": 0.15
+ },
+ "train": {
+  "content_sha256": "a10d8dcb5cb0d6e0e3e1730cc4c5d0b1705d89661a5fe71677d208c2139b7ef7",
+  "file": "train.json.gz",
+  "n_fail": 2286,
+  "n_geometries": 372,
+  "n_rows": 3184,
+  "sha256": "85e2c2f1c4dcbb1e551c48436bf50e50cefaefa71329cf6bdfa6ef4a1a3949ec"
+ },
+ "verdict": "FAIL"
+}

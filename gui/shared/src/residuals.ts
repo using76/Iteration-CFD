@@ -44,7 +44,22 @@ export type ParsedLine =
   | { kind: 'iterating'; total: number }
   | { kind: 'banner'; tag: string; device: string; memMB: number | null }
   | { kind: 'summary'; iterations: number; seconds: number }
+  | { kind: 'runEnded'; word: RunEndWord; detail: string; exitCode: number }
   | { kind: 'none' }
+
+/** The four ways a driver says its run ended (lowmach.rs `run_end_line`, SPEC-LIT §31.4). */
+export const RUN_END_WORDS = ['budget', 'error', 'refused', 'diverged'] as const
+export type RunEndWord = (typeof RUN_END_WORDS)[number]
+/** The exit code each word is printed with. */
+export const RUN_END_EXIT_CODES: Record<RunEndWord, number> = { budget: 0, error: 1, diverged: 2, refused: 3 }
+
+export interface RunEnded {
+  word: RunEndWord
+  /** The first line of the reason; may itself contain ' | '. */
+  detail: string
+  /** The code the line names, as printed. */
+  exitCode: number
+}
 
 const NUM = String.raw`[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[-+]?(?:nan|NaN|inf|Inf|infinity)`
 const num = (s: string): number => {
@@ -102,6 +117,8 @@ const RE_NAN = /\*\*\* NaN\/Inf \*\*\*/
 const RE_ITERATING = /^\s*iterating (\d+) times/
 const RE_BANNER = /^ofgpu (\S+) \| (.+?) sm_(\d+) \| (\d+) MiB/
 const RE_SUMMARY = new RegExp(String.raw`^\s*(\d+) iterations in (${NUM}) s`)
+// `run ended: <word> | <detail> | exit code <n>` - the LAST line lowmach prints (lowmach.rs run_end_line).
+const RE_RUN_ENDED = /^run ended: (budget|error|refused|diverged) \| (.*) \| exit code (\d+)\s*$/
 
 // Steady drivers: "{it:>7}  epsilon res X (n)  k res X (n)  [T res X (n)]  max dk/k X"
 const RE_STEADY = /^\s*(\d+)\s{2,}(\S.*)$/
@@ -163,8 +180,17 @@ function substitute(line: string): string {
   return s
 }
 
+/** A driver's `run ended:` line, or null for every other line (an unknown word included). */
+export function parseRunEndLine(line: string): RunEnded | null {
+  const m = RE_RUN_ENDED.exec(line.replace(/\r$/, ''))
+  if (!m) return null
+  return { word: m[1] as RunEndWord, detail: m[2], exitCode: Number(m[3]) }
+}
+
 function parseCommon(line: string): ParsedLine | null {
   let m: RegExpMatchArray | null
+  const ended = parseRunEndLine(line)
+  if (ended) return { kind: 'runEnded', ...ended }
   if (RE_NAN.test(line)) return { kind: 'diverged', raw: line }
   if ((m = line.match(RE_CONVERGED))) return { kind: 'converged', message: m[1] ?? '' }
   if ((m = line.match(RE_WRITTEN))) return { kind: 'written', dir: m[1] }

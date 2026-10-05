@@ -81,6 +81,14 @@
 // itself, not a blocker.
 #define S2S_RAY_EPS ((ofscalar)1e-8)
 
+//  SPEC-LIT 112.1: one floor per precision, the same distance above each
+//  precision's smallest normal.
+#ifdef OFGPU_SINGLE
+#define OFGPU_S2S_HUGE ((ofscalar)1e30f)
+#else
+#define OFGPU_S2S_HUGE ((ofscalar)1e300)
+#endif
+
 
 // ==========================================================================
 //  S49.4  Watertight ray/triangle intersection (Woop, Benthin & Wald 2013)
@@ -540,7 +548,7 @@ OFGPU_DEV int s2sRelativeSide
 )
 {
     const ofvec3 ci = g.ctr[i], ni = fn[i];
-    ofscalar hiJ = -1e300;
+    ofscalar hiJ = -OFGPU_S2S_HUGE;
     for (oflabel v = g.vtxOff[j]; v < g.vtxOff[j + 1]; ++v)
     {
         const ofvec3 p = g.vtx[v];
@@ -549,7 +557,7 @@ OFGPU_DEV int s2sRelativeSide
         hiJ = ofmax_(hiJ, d);
     }
     const ofvec3 cj = g.ctr[j], nj = fn[j];
-    ofscalar hiI = -1e300;
+    ofscalar hiI = -OFGPU_S2S_HUGE;
     for (oflabel v = g.vtxOff[i]; v < g.vtxOff[i + 1]; ++v)
     {
         const ofvec3 p = g.vtx[v];

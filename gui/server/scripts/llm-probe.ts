@@ -71,7 +71,7 @@ async function main(): Promise<number> {
     errorName = err instanceof Error ? err.name : null
     errorMessage = err instanceof Error ? err.message : String(err)
   }
-  console.log(`VISION zai image-block: ${verdict}`)
+  console.log(`VISION zai image-block: ${verdict} (superseded by scripts/vision-probe.ts; not a vision verdict)`)
   const record = {
     probedAt: new Date().toISOString(),
     client: client.kind,
@@ -83,6 +83,7 @@ async function main(): Promise<number> {
     errorName,
     errorMessage,
     usage: imageUsage,
+    supersededBy: 'scripts/vision-probe.ts (AMG-11)',
   }
   const probeDir = path.join(config.cacheDir, 'probe')
   await fs.mkdir(probeDir, { recursive: true })

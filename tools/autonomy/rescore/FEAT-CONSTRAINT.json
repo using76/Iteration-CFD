@@ -1,0 +1,290 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "departures": [
+  "`rescore.py --run` re-scores the committed TUNING bundles under the feature-edge rule of section D, with no re-meshing: every attempt's config is rebuilt from its row (`optimise.rows_from`, sha-checked), F3e is decided by `score.feature_capture` from the fingerprint, `preflight.plane_path` and, where a campaign directory is given with `--cases`, the attempt's own `stages[snap]` report, and a geometry passes when one of its attempts that ran still passes.",
+  "It is the MFR of the attempts actually run: a geometry whose passing mesh now fails ended there, so the attempts a re-run would have made instead never ran, and a re-run can only rescue.",
+  "The seal holds (a bundle that is not a tuning campaign is refused); the test split is spent and is not read."
+ ],
+ "inputs": [
+  {
+   "sha256": "8d0309e70701908c2e29ff2f5a1ae8b6bae3360993c18e2c9c44281d9e560da7",
+   "source": "baseline/tuning_b0-template.json.gz"
+  },
+  {
+   "sha256": "6b98b08ceb8cb8784f50c9277fd6157fbbec862eb0431c0c5fbf28f12d2bb68a",
+   "source": "baseline/tuning_b0-lhs.json.gz"
+  },
+  {
+   "sha256": "583556b03bca685fd072ff2d5587ea8e5ef542d014f46feb98e954010a380075",
+   "source": "prior/tuning_rules.json.gz"
+  },
+  {
+   "sha256": "9808fea2da61e8dea49c433c4fbccfb1ebfe9721a15030c98ffdb621f7a2d496",
+   "source": "optimise/refine_r5.json.gz"
+  }
+ ],
+ "rule": "README section D (2026-09-26)",
+ "schema": "autonomy-rescore/1",
+ "systems": {
+  "B0-LHS": {
+   "cases_read": 295,
+   "failures_after": 348,
+   "failures_after_strict": 348,
+   "failures_before": 240,
+   "flipped": 108,
+   "flipped_strict": 108,
+   "mfr_after": 0.8285714285714286,
+   "mfr_after_strict": 0.8285714285714286,
+   "mfr_before": 0.5714285714285714,
+   "mfr_ci_after": [
+    0.7890536508842723,
+    0.8633825158482111
+   ],
+   "mfr_ci_before": [
+    0.522546452318847,
+    0.619297350990387
+   ],
+   "n": 420,
+   "pass_rows": {
+    "no_summary": 0,
+    "plane": 0,
+    "smooth": 129,
+    "unmeasured": 28,
+    "zero": 138
+   },
+   "per_family": {
+    "A": {
+     "failures_after": 84,
+     "failures_after_strict": 84,
+     "failures_before": 84,
+     "n": 84
+    },
+    "B": {
+     "failures_after": 51,
+     "failures_after_strict": 51,
+     "failures_before": 13,
+     "n": 84
+    },
+    "D": {
+     "failures_after": 63,
+     "failures_after_strict": 63,
+     "failures_before": 24,
+     "n": 84
+    },
+    "E": {
+     "failures_after": 27,
+     "failures_after_strict": 27,
+     "failures_before": 18,
+     "n": 42
+    },
+    "F": {
+     "failures_after": 42,
+     "failures_after_strict": 42,
+     "failures_before": 29,
+     "n": 42
+    },
+    "G": {
+     "failures_after": 81,
+     "failures_after_strict": 81,
+     "failures_before": 72,
+     "n": 84
+    }
+   }
+  },
+  "B0-template": {
+   "cases_read": 36,
+   "failures_after": 384,
+   "failures_after_strict": 384,
+   "failures_before": 384,
+   "flipped": 0,
+   "flipped_strict": 0,
+   "mfr_after": 0.9142857142857143,
+   "mfr_after_strict": 0.9142857142857143,
+   "mfr_before": 0.9142857142857143,
+   "mfr_ci_after": [
+    0.883309818285332,
+    0.9392454003748061
+   ],
+   "mfr_ci_before": [
+    0.883309818285332,
+    0.9392454003748061
+   ],
+   "n": 420,
+   "pass_rows": {
+    "no_summary": 0,
+    "plane": 0,
+    "smooth": 36,
+    "unmeasured": 0,
+    "zero": 0
+   },
+   "per_family": {
+    "A": {
+     "failures_after": 84,
+     "failures_after_strict": 84,
+     "failures_before": 84,
+     "n": 84
+    },
+    "B": {
+     "failures_after": 63,
+     "failures_after_strict": 63,
+     "failures_before": 63,
+     "n": 84
+    },
+    "D": {
+     "failures_after": 84,
+     "failures_after_strict": 84,
+     "failures_before": 84,
+     "n": 84
+    },
+    "E": {
+     "failures_after": 29,
+     "failures_after_strict": 29,
+     "failures_before": 29,
+     "n": 42
+    },
+    "F": {
+     "failures_after": 42,
+     "failures_after_strict": 42,
+     "failures_before": 42,
+     "n": 42
+    },
+    "G": {
+     "failures_after": 82,
+     "failures_after_strict": 82,
+     "failures_before": 82,
+     "n": 84
+    }
+   }
+  },
+  "rules": {
+   "cases_read": 228,
+   "failures_after": 340,
+   "failures_after_strict": 376,
+   "failures_before": 193,
+   "flipped": 147,
+   "flipped_strict": 183,
+   "mfr_after": 0.8095238095238095,
+   "mfr_after_strict": 0.8952380952380953,
+   "mfr_before": 0.4595238095238095,
+   "mfr_ci_after": [
+    0.7686461619880273,
+    0.8459747841775813
+   ],
+   "mfr_ci_before": [
+    0.41110388596315073,
+    0.5085178332338979
+   ],
+   "n": 420,
+   "pass_rows": {
+    "no_summary": 0,
+    "plane": 37,
+    "smooth": 44,
+    "unmeasured": 0,
+    "zero": 147
+   },
+   "per_family": {
+    "A": {
+     "failures_after": 84,
+     "failures_after_strict": 84,
+     "failures_before": 78,
+     "n": 84
+    },
+    "B": {
+     "failures_after": 55,
+     "failures_after_strict": 55,
+     "failures_before": 5,
+     "n": 84
+    },
+    "D": {
+     "failures_after": 64,
+     "failures_after_strict": 84,
+     "failures_before": 13,
+     "n": 84
+    },
+    "E": {
+     "failures_after": 29,
+     "failures_after_strict": 29,
+     "failures_before": 18,
+     "n": 42
+    },
+    "F": {
+     "failures_after": 29,
+     "failures_after_strict": 42,
+     "failures_before": 17,
+     "n": 42
+    },
+    "G": {
+     "failures_after": 79,
+     "failures_after_strict": 82,
+     "failures_before": 62,
+     "n": 84
+    }
+   }
+  },
+  "rules+opt": {
+   "cases_read": 235,
+   "failures_after": 340,
+   "failures_after_strict": 376,
+   "failures_before": 178,
+   "flipped": 162,
+   "flipped_strict": 198,
+   "mfr_after": 0.8095238095238095,
+   "mfr_after_strict": 0.8952380952380953,
+   "mfr_before": 0.4238095238095238,
+   "mfr_ci_after": [
+    0.7686461619880273,
+    0.8459747841775813
+   ],
+   "mfr_ci_before": [
+    0.3760421127415704,
+    0.4726578789795142
+   ],
+   "n": 420,
+   "pass_rows": {
+    "no_summary": 0,
+    "plane": 37,
+    "smooth": 44,
+    "unmeasured": 0,
+    "zero": 168
+   },
+   "per_family": {
+    "A": {
+     "failures_after": 84,
+     "failures_after_strict": 84,
+     "failures_before": 76,
+     "n": 84
+    },
+    "B": {
+     "failures_after": 55,
+     "failures_after_strict": 55,
+     "failures_before": 5,
+     "n": 84
+    },
+    "D": {
+     "failures_after": 64,
+     "failures_after_strict": 84,
+     "failures_before": 6,
+     "n": 84
+    },
+    "E": {
+     "failures_after": 29,
+     "failures_after_strict": 29,
+     "failures_before": 13,
+     "n": 42
+    },
+    "F": {
+     "failures_after": 29,
+     "failures_after_strict": 42,
+     "failures_before": 16,
+     "n": 42
+    },
+    "G": {
+     "failures_after": 79,
+     "failures_after_strict": 82,
+     "failures_before": 62,
+     "n": 84
+    }
+   }
+  }
+ }
+}

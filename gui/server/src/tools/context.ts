@@ -21,6 +21,10 @@ export interface ToolContext {
   settings: SessionSettings
   /** Id of the tool_use block being served (used to name overflow files). */
   toolUseId: string
+  /** The provider and model serving this turn, when the agent loop is the caller (recorded by tools that write decisions). */
+  llm?: { provider: string; model: string }
+  /** The session's own user turns, joined - the only text a grounding tool (cad_requirements_propose) may cite. */
+  userText?: string
 }
 
 export interface ToolError {
@@ -56,6 +60,20 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
    * An explicit timeoutMs still wins.
    */
   kind?: 'long'
+  /**
+   * A synchronous veto on the raw call - after forgive, before zod and before
+   * any approval card: a named refusal, or null to go on. The agent loop and
+   * runTool both run it, so a refused call never reaches the user or `run`.
+   * ctx is the call's context; a refuser that needs no files ignores it.
+   */
+  refuse?: (input: unknown, ctx?: ToolContext) => ToolResult | null
+  /**
+   * The approval card's text, computed by the tool itself before the card is
+   * drawn (cad_requirements_propose checks the proposal so the card shows the
+   * real verdict). The loop prefers it over approvalPreview; what the operator
+   * saw is what the approved run applies.
+   */
+  preview?: (input: z.infer<S>, ctx: ToolContext) => Promise<string | null>
 }
 
 export function fail(code: string, message: string): ToolResult {

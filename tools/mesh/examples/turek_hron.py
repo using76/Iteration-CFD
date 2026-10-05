@@ -12,11 +12,11 @@ cylinder is subtracted from the flap BEFORE the fragment, so no lens remains).
 A 2-D fragment, extruded one cell with recombine - hex only, dz thick, forces
 per unit depth are F / dz.
 
-    python tools/mesh/examples/turek_hron.py [--level 1|2|3] [--out DIR] [--dz 0.02]
+    python tools/mesh/examples/turek_hron.py [--level 1|2|3|4] [--out DIR] [--dz 0.02]
 
 Level 1 lands in cases/turekHron/mesh (the two case skeletons point there);
-levels 2 and 3 default to mesh_L2 and mesh_L3. The layout is written through
-M4 (regions_from_msh.py, then regions_check.py) and the sidecar
+levels 2, 3 and 4 default to mesh_L2, mesh_L3 and mesh_L4. The layout is
+written through M4 (regions_from_msh.py, then regions_check.py) and the sidecar
 <out>/turek_hron.json carries the counts, the pairing worsts and the
 benchmark constants.
 """
@@ -36,7 +36,7 @@ L, H = 2.5, 0.41                              # the channel, m
 CY, R = (0.2, 0.2), 0.05                      # cylinder centre and radius
 FX0, FX1, FY0, FY1 = 0.2, 0.6, 0.19, 0.21     # the flap rectangle
 OUT = {1: ('cases', 'turekHron', 'mesh'), 2: ('cases', 'turekHron', 'mesh_L2'),
-       3: ('cases', 'turekHron', 'mesh_L3')}
+       3: ('cases', 'turekHron', 'mesh_L3'), 4: ('cases', 'turekHron', 'mesh_L4')}
 
 
 def build(level, dz):
@@ -116,8 +116,8 @@ def classify(fluid, flap, dz):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description='The Turek-Hron FSI benchmark as a two-region hex mesh through M4.')
-    ap.add_argument('--level', type=int, default=1, choices=(1, 2, 3))
-    ap.add_argument('--out', default=None, help='default cases/turekHron/mesh[_L2|_L3], repo-root relative')
+    ap.add_argument('--level', type=int, default=1, choices=(1, 2, 3, 4))
+    ap.add_argument('--out', default=None, help='default cases/turekHron/mesh[_L2|_L3|_L4], repo-root relative')
     ap.add_argument('--dz', type=float, default=0.02, help='the one-cell depth, m')
     args = ap.parse_args(argv)
     out = os.path.abspath(args.out or os.path.join(recipe.repo_root(), *OUT[args.level]))

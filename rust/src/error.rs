@@ -43,6 +43,13 @@ pub enum Error {
     #[error("{0}")]
     Config(String),
 
+    /// A setting refused BY NAME under SPEC-LIT §13.4 - `contract::unsupported`,
+    /// `contract::unsupported_note` and the low-Mach regime check. Its own
+    /// variant so a driver can map it to an exit code; it prints exactly as
+    /// `Config` does.
+    #[error("{0}")]
+    Refused(String),
+
     /// An outer iteration produced a residual or a flux imbalance that is not
     /// a finite number. Its own variant, rather than a `Config` string,
     /// because a divergence is a result about the case (too coarse, too hot,

@@ -125,6 +125,10 @@ Both carry comments on every block. Every key of
 | `refinement.levels[].feature_level` | integer | `0` | A leaf within its own longest edge of one of this patch's feature edges (eq. 92.34) refines to this level (eq. 92.37); 0 is no feature refinement. |
 | `refinement.feature_angle_deg` | number | `30.0` | Dihedral angle past which a triangulation edge is a feature edge (eq. 92.2). |
 | `refinement.max_level` | integer | `2` | The level cap `l(c)` is min'd with (eq. 92.1); 6 is the octree cap §74.2 states and `mesh::refined::build` enforces. |
+| `refinement.boxes` | array | `[]` | Axis-aligned refinement boxes (eq. 92.67); every leaf overlapping a box is refined to at least its level, capped at `max_level`; absent or empty is no box refinement. |
+| `refinement.boxes[].min` | number[3] | *(required)* | The box's lower corner `[x, y, z]`, metres; must be finite. |
+| `refinement.boxes[].max` | number[3] | *(required)* | The box's upper corner `[x, y, z]`, metres; must be finite and strictly greater than `min` on every axis. |
+| `refinement.boxes[].level` | integer | *(required)* | The level every overlapped leaf is refined to at least; >= 1 (0 refines nothing), capped at `max_level`. |
 | `castellation.keep_region` | string | `"largest"` | Which connected component of the fluid survives eq. (92.4): `"largest"` or `"seed"`. |
 | `castellation.seed_point` | number[3] | `null` | The keep point `"seed"` needs; required then, ignored otherwise. |
 | `castellation.min_faces` | integer | `4` | A kept cell with fewer faces than this is dropped - a hole in the addressing, not a control volume. |
@@ -202,20 +206,24 @@ runs between snap and layers.
 7. **Layers** (`layers::add_layers`, §92.13) - the shrink, the extrusion, and
    the retreat ladder (92.47).
 
-   **`layers.patches` is supported on a wall that CASTELLATES ONTO THE CELL
-   PLANES.** On a snapped wall it is attempted and usually given up: stage 4
-   always runs before stage 6, so the wall face the layer stage turns into an
-   internal face carries whatever non-orthogonality the snap left on it, and
-   §92.13's table measures a snapped sphere at 74-80 degrees against G4's 70 -
-   at every surface resolution from 128 to 8192 triangles, at octree level 3,
-   and at every thickness tried. A snapped axis-aligned box is not safe
-   either: its convex edges tangle the stack (37 folded cells at one offset,
-   an outright negative volume at another). When that happens the patch loses
-   its layers BY NAME, the run returns the snapped mesh, and the summary says
-   which patch and why - it does not refuse with a list of faces you cannot
-   act on. Moving that line needs either a wall-face/owner-centre alignment
-   step in stage 4 or a G4 rule of its own for a newly internalised wall face;
-   both change numbers §92.3 fixes and neither is written.
+   **On a wall that castellates onto the cell planes the stack is exact; on
+   a SNAPPED wall the stage re-seats row 1 first.** Stage 4 always runs
+   before stage 6, so the wall face the layer stage turns into an internal
+   face carries whatever non-orthogonality the snap left on it - §92.13
+   measures a snapped sphere's wall faces at up to 80 degrees against G4's
+   70. Where a wall face's predicted angle passes 45 degrees, the shrink moves
+   the interior points of its row-1 cell along the wall normal
+   ((92.63)-(92.65)), and a gate failure on those cells first takes that pull
+   back in steps (92.66) before any thickness is halved. On the example
+   below, at `first_thickness` 0.008, the sphere keeps both layers on all of
+   its area; at the old 0.02 it keeps them with only 2.9 % of its area at the
+   full thickness, because (92.45) holds the stack to `cell_frac` of the cut
+   cell's shortest edge. Read `n_reseated_points`, `beta_rungs` and
+   `level_n_non_orth_max_deg` on each layers row: the last is the near-wall
+   non-orthogonality the solver will see. A wall the ladders still cannot
+   bring inside the gate loses its layers BY NAME, the run returns the
+   snapped mesh, and the row's `drop_cause` says which ladder gave up - it
+   does not refuse with a list of faces you cannot act on.
 
 ## What a run writes
 
@@ -285,7 +293,7 @@ message. The ones that actually happen:
 | `castellate: no cell survived the walk` | The keep-set (92.4) is empty: usually `castellation.seed_point` is inside the solid, or outside the domain. | Put the seed in open fluid - for a site, high and upwind, e.g. `[-1200, 0, 150]`. |
 | a large `removed.off_region` and dropped boxes under buildings | Working as intended: those are the sealed pockets §92.1 exists for. | Read the boxes in the log. If one of them is a region you wanted, the seed is on the wrong side of a wall. |
 | `snap: patch "X" carries N times its own surface area` (92.32) | The cells never resolved that geometry, and snapping would collapse the one cell that reached it. | Raise `refinement.max_level` or add a tighter distance band for that patch. Raising `snap.max_area_ratio` hides the problem instead of fixing it. |
-| `layers: patch "X": ...` with `n_layers: 0` and a reason | The retreat ladder (92.47) gave up. On a SNAPPED wall this is the expected outcome - see the pipeline note above. | Read the reason. The run continued and the mesh is the snapped one; if you need the layers, the wall has to castellate onto the cell planes. |
+| `layers: patch "X": ...` with `n_layers: 0` and a reason | The retreat ladder (92.47) gave up, after the re-seat (92.63)-(92.66) where it acts. | Read the reason and the row's `drop_cause` (§92.13's table says what drove it). The run continued and the mesh is the snapped one; a wall that castellates onto the cell planes always takes the stack. |
 | `layers: patch "X": 3 layer(s) ... first layer 4.0e-03 m of 4.0e-01 requested` | (92.45)'s cell-size limiter bound, not `first_thickness`. | This is the number to quote, not `first_thickness`. Refine the wall if you need a thicker stack. |
 | gate G4 fails at 70-80 degrees on a snapped wall | (92.13). The snap traded a staircase for a slanted face. | Refine that patch, or relax `quality.max_non_orth_deg` **only** if the solver settings can carry it (`uncorrected` Laplacian, `nNonOrthogonalCorrectors 0`) - and say so in the case. |
 | the run is silent for a long time | It is not: the banner of §92.14.1 is printed before each stage. If nothing new has appeared for an hour, the named stage is the one to look at. | `refinement.max_level` and the base grid together set the leaf count; halving `base_size` is 8x the work. Run `-dryRun` first and read the plan line. |

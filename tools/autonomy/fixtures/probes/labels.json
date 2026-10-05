@@ -1,5 +1,5 @@
 {
- "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted. G-SCORER fixtures: the docs/15 survey probes. The 27 that wrote a summary were re-run on 2026-09-24 with the mesh tree's binary at 77a33b5 (sha256 054bba67...) so their summaries carry n_pinned_boundary, area_ratio and area_frac_tau_ge; the 4 refused runs keep their 2026-09-23 logs (refusal re-confirmed). Hand labels and expected numbers are the supervisor's, computed from the summary JSON and the STL independently of score.py, under the user's decisions of 2026-09-24 (F3a boundary-only, F3d wired, BLC_beta exact).",
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). No GPL-licensed source was consulted. G-SCORER fixtures: the docs/15 survey probes. The 27 that wrote a summary were re-run on 2026-09-24 with the mesh tree's binary at 77a33b5 (sha256 054bba67...) so their summaries carry n_pinned_boundary, area_ratio and area_frac_tau_ge; the 4 refused runs keep their 2026-09-23 logs (refusal re-confirmed). Hand labels and expected numbers are the supervisor's, computed from the summary JSON and the STL independently of score.py, under the user's decisions of 2026-09-24 (F3a boundary-only, F3d wired, BLC_beta exact). Re-frozen 2026-09-26 for the user's decision that feature-edge capture is a hard constraint on a body with sharp edges: every probe row carries its STL fingerprint's sharp_edge_length_m (30 deg) and plane_path (remedies.on_plane on its config), and every expect carries F3e and feature_capture, computed from the summary's snap stage (n_feature_edges, n_snapped_to_edge, n_snapped_to_corner) and its config's feature_tolerance; cubep_nofeat, cubep_nofeat_cf, cubep_nosnap flip to fail. Re-frozen 2026-09-27 for the capture signal (92.62): the 13 sharp probes whose attraction reached an edge were re-run with the mesh tree's release binary (sha256 7ff16117..., output-only since 054bba67 by L1b's replay), every mesh number equal; the re-run's stages[snap].feature_capture is spliced into their frozen summary.json and nothing else in it changes; their expect carries feature_capture = captured_length_m / sharp_length_m and F3e false (every share is above 0). Re-frozen 2026-10-02 for D-L5 (F3e is a chain-form capture share below gates.json feature_capture_min 0.5): the 13 measured probes were re-run with the L0c binary (sha256 72f7851e..., (92.62) along chains, output-only against 7ff16117 by lreplay's 97 rows); every mesh number equal, the chain-form stages[snap].feature_capture replaces the per-segment one in their summary.json and nothing else changes; their expect carries the chain-form share and F3e = share < 0.5.",
  "flow": {
   "u_ref_m_s": 0.003,
   "l_ref_m": 1.0,
@@ -76,13 +76,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "L2",
@@ -148,13 +152,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "L3",
@@ -220,13 +228,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO15",
@@ -277,13 +289,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO25",
@@ -334,13 +350,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO26",
@@ -401,13 +421,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "NO28",
@@ -468,13 +492,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": false,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "box_L4",
@@ -485,7 +513,7 @@
    "n_triangles": 3072,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "out of iterations, 1672/2562 pinned (65 %): F3a F3b F3c; retreat give-up; re-frozen 2026-09-24: boundary-only pinned 836/2562 (32.6 %), area ratio body 1.0781",
+   "hand_label": "out of iterations, 1672/2562 pinned (65 %): F3a F3b F3c; retreat give-up; re-frozen 2026-09-24: boundary-only pinned 836/2562 (32.6 %), area ratio body 1.0781; re-frozen 2026-09-27: feature_capture 0.9722 (7.7774 of 8.0000 m within 0.003125 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.9997 (7.9973 of 8.0000 m within 0.003125 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -540,13 +568,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": 0.9996677423253135
+   },
+   "sharp_edge_length_m": 8.0,
+   "plane_path": false
   },
   {
    "id": "box_sphere",
@@ -612,13 +644,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "coarse",
@@ -679,13 +715,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "cube_cf",
@@ -696,7 +736,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "dropped at 1.995e-2; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "dropped at 1.995e-2; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-27: feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -751,13 +791,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": 0.999372058996764
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
   },
   {
    "id": "cube_n5",
@@ -768,7 +812,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "dropped at 4.522e-2; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "dropped at 4.522e-2; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-27: feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -823,13 +867,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": 0.999372058996764
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
   },
   {
    "id": "cube_ok",
@@ -840,7 +888,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "unit cube off the planes: dropped at 4.600e-3; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "unit cube off the planes: dropped at 4.600e-3; re-frozen 2026-09-24: boundary-only pinned 0/26 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-27: feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.9994 (11.9925 of 12.0000 m within 0.05 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -895,13 +943,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": 0.999372058996764
+   },
+   "sharp_edge_length_m": 11.999999999999998,
+   "plane_path": false
   },
   {
    "id": "cubep_cf",
@@ -912,7 +964,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "retreat give-up (92.13); re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003",
+   "hand_label": "retreat give-up (92.13); re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003; re-frozen 2026-09-27: feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -967,13 +1019,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": 0.9996538304623344
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_defaults",
@@ -984,7 +1040,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "dropped at 7.980e-3; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003",
+   "hand_label": "dropped at 7.980e-3; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003; re-frozen 2026-09-27: feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1039,13 +1095,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": 0.9996538304623344
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_nofeat",
@@ -1056,7 +1116,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "feature_tolerance 0: 3 layers on 54 faces, full 100 %, t1 2.000e-2 of 2.000e-2: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "feature_tolerance 0: 3 layers on 54 faces, full 100 %, t1 2.000e-2 of 2.000e-2: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (feature_tolerance 0), so F3e is true and the run fails",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1111,13 +1171,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": true,
      "F4": false,
      "F5": false
     },
-    "failure": false,
-    "strict_failure": false,
-    "verdict": "pass"
-   }
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_nofeat_cf",
@@ -1128,7 +1192,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "3 layers on 54 faces, full 0.0 %, mean frac 0.251, t1 1.253e-2 of 5.000e-2 - NO face received the full stack; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "3 layers on 54 faces, full 0.0 %, mean frac 0.251, t1 1.253e-2 of 5.000e-2 - NO face received the full stack; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (feature_tolerance 0), so F3e is true and the run fails",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1183,13 +1247,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": true,
      "F4": false,
      "F5": false
     },
-    "failure": false,
-    "strict_failure": false,
-    "verdict": "pass"
-   }
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_nosnap",
@@ -1200,7 +1268,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "snap.iterations 0: full 100 %: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000",
+   "hand_label": "snap.iterations 0: full 100 %: pass, BLC_full 1.0; re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0000; re-frozen 2026-09-26: a body with 18 m of sharp edge whose snap captured none of it (no point took the edge or corner branch), so F3e is true and the run fails",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1255,13 +1323,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": true,
      "F4": false,
      "F5": false
     },
-    "failure": false,
-    "strict_failure": false,
-    "verdict": "pass"
-   }
+    "failure": true,
+    "strict_failure": true,
+    "verdict": "fail",
+    "feature_capture": 0.0
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "cubep_ok",
@@ -1272,7 +1344,7 @@
    "n_triangles": 12,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "on-plane cube, default snap moves the wall: retreat give-up (92.13); re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003",
+   "hand_label": "on-plane cube, default snap moves the wall: retreat give-up (92.13); re-frozen 2026-09-24: boundary-only pinned 0/56 (0.0 %), area ratio cube 1.0003; re-frozen 2026-09-27: feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.9997 (17.9938 of 18.0000 m within 0.05 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1327,13 +1399,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": 0.9996538304623344
+   },
+   "sharp_edge_length_m": 18.0,
+   "plane_path": false
   },
   {
    "id": "ok",
@@ -1399,13 +1475,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "rev2_L4",
@@ -1471,13 +1551,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "rev_L4",
@@ -1528,13 +1612,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "thick_stack",
@@ -1600,13 +1688,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "thin_t1",
@@ -1657,13 +1749,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": null,
+     "F3e": null,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "tight_nonorth",
@@ -1729,13 +1825,17 @@
      "F3b": false,
      "F3c": false,
      "F3d": false,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": false,
     "strict_failure": true,
-    "verdict": "pass"
-   }
+    "verdict": "pass",
+    "feature_capture": null
+   },
+   "sharp_edge_length_m": 0.0,
+   "plane_path": false
   },
   {
    "id": "wb_L4",
@@ -1746,7 +1846,7 @@
    "n_triangles": 16628,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "1774/12808 pinned (14 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1074/12808 (8.4 %), area ratio body 1.2956",
+   "hand_label": "1774/12808 pinned (14 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1074/12808 (8.4 %), area ratio body 1.2956; re-frozen 2026-09-27: feature_capture 0.4481 (5.8791 of 13.1210 m within 0.003125 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.6167 (8.0922 of 13.1210 m within 0.003125 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1801,13 +1901,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": 0.6167335960825464
+   },
+   "sharp_edge_length_m": 13.12100723220657,
+   "plane_path": false
   },
   {
    "id": "wing_a_L3",
@@ -1818,7 +1922,7 @@
    "n_triangles": 5996,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "416/1484 pinned (28 %): F3a F3b; re-frozen 2026-09-24: boundary-only pinned 198/1484 (13.3 %), area ratio wing 0.9941",
+   "hand_label": "416/1484 pinned (28 %): F3a F3b; re-frozen 2026-09-24: boundary-only pinned 198/1484 (13.3 %), area ratio wing 0.9941; re-frozen 2026-09-27: feature_capture 0.0217 (0.1536 of 7.0831 m within 0.00625 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.4849 (3.4343 of 7.0831 m within 0.00625 m, (92.62) along chains), F3e true at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1873,13 +1977,17 @@
      "F3b": true,
      "F3c": false,
      "F3d": false,
+     "F3e": true,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": 0.48485963892233086
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
   },
   {
    "id": "wing_a_L4",
@@ -1890,7 +1998,7 @@
    "n_triangles": 5996,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "2702/6690 pinned (40 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1377/6690 (20.6 %), area ratio wing 1.1651",
+   "hand_label": "2702/6690 pinned (40 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1377/6690 (20.6 %), area ratio wing 1.1651; re-frozen 2026-09-27: feature_capture 0.0468 (0.3312 of 7.0831 m within 0.003125 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.5410 (3.8318 of 7.0831 m within 0.003125 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -1945,13 +2053,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": 0.5409809765825638
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
   },
   {
    "id": "wing_a_L5",
@@ -1962,7 +2074,7 @@
    "n_triangles": 5996,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "9802/27558 pinned (36 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 4984/27558 (18.1 %), area ratio wing 1.1729",
+   "hand_label": "9802/27558 pinned (36 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 4984/27558 (18.1 %), area ratio wing 1.1729; re-frozen 2026-09-27: feature_capture 0.3325 (2.3548 of 7.0831 m within 0.0015625 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.5582 (3.9540 of 7.0831 m within 0.0015625 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -2017,13 +2129,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": 0.5582266638963893
+   },
+   "sharp_edge_length_m": 7.083098768582273,
+   "plane_path": false
   },
   {
    "id": "wing_b_L4",
@@ -2034,7 +2150,7 @@
    "n_triangles": 5996,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "2623/4872 pinned (54 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1418/4872 (29.1 %), area ratio wing 1.1777",
+   "hand_label": "2623/4872 pinned (54 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1418/4872 (29.1 %), area ratio wing 1.1777; re-frozen 2026-09-27: feature_capture 0.4702 (2.2754 of 4.8387 m within 0.003125 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.7956 (3.8497 of 4.8387 m within 0.003125 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -2089,13 +2205,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": 0.7955902437047697
+   },
+   "sharp_edge_length_m": 4.838746175463724,
+   "plane_path": false
   },
   {
    "id": "wing_c_L4",
@@ -2106,7 +2226,7 @@
    "n_triangles": 6046,
    "exit_code": 0,
    "wall_seconds": null,
-   "hand_label": "2278/5384 pinned (42 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1183/5384 (22.0 %), area ratio wing 1.2711",
+   "hand_label": "2278/5384 pinned (42 %): F3a F3b F3c; re-frozen 2026-09-24: boundary-only pinned 1183/5384 (22.0 %), area ratio wing 1.2711; re-frozen 2026-09-27: feature_capture 0.4448 (3.6410 of 8.1858 m within 0.003125 m, (92.62)), F3e false; re-frozen 2026-10-02 (D-L5): chain-form feature_capture 0.7036 (5.7593 of 8.1858 m within 0.003125 m, (92.62) along chains), F3e false at feature_capture_min 0.5",
    "expect": {
     "exit_code": 0,
     "last_stage": "layers",
@@ -2161,13 +2281,17 @@
      "F3b": true,
      "F3c": true,
      "F3d": true,
+     "F3e": false,
      "F4": false,
      "F5": false
     },
     "failure": true,
     "strict_failure": true,
-    "verdict": "fail"
-   }
+    "verdict": "fail",
+    "feature_capture": 0.7035752203796075
+   },
+   "sharp_edge_length_m": 8.185825694348434,
+   "plane_path": false
   }
  ],
  "variants": [
@@ -2209,7 +2333,7 @@
      }
     ],
     "failure_class": null,
-    "verdict": "pass"
+    "verdict": "fail"
    }
   },
   {
@@ -2243,7 +2367,7 @@
      }
     ],
     "failure_class": "layer_dropped:no_full_stack",
-    "verdict": "pass"
+    "verdict": "fail"
    }
   }
  ]

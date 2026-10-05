@@ -267,6 +267,7 @@ fn run(o: &Options) -> Result<()> {
     common::refuse_non_orth_correctors_without_another_equation(&cc, "ofgpu-k-epsilon")?;
     common::refuse_rheology_without_momentum(&cc, "ofgpu-k-epsilon")?;
     common::refuse_unimplemented_blocks(json.as_ref())?;
+    common::refuse_motion_block(json.as_ref(), "ofgpu-k-epsilon")?;
 
     // SPEC-LIT §44, resolved before the mesh is uploaded so a case that asks
     // for something this driver cannot do fails before any kernel launches.
@@ -302,6 +303,17 @@ fn run(o: &Options) -> Result<()> {
             output_plan = None;
         }
     }
+
+    // SPEC-LIT §44.1 on the command-line route: the same early refusal the
+    // case block gets above, with `cartesian::detect`'s own reason in it.
+    // Consulted only when the command line drives (§44.6).
+    let cli_output: Vec<OutputFormat> = match &output_plan {
+        Some(_) => o.output.clone(),
+        None => ofgpu::io::output_plan::drop_volume_formats_on_a_non_cartesian_mesh(
+            &o.output,
+            ofgpu::pressure::cartesian::detect(&hm).err().as_deref(),
+        )?,
+    };
 
     if let Some(l) = &json {
         println!(
@@ -728,7 +740,7 @@ kappa implied by these coefficients {} (S41.3)",
             None => ofgpu::io::OutputPipeline::from_command_line(
                 &out_root,
                 model.tag(),
-                &o.output,
+                &cli_output,
                 0.0,
             )?,
         };

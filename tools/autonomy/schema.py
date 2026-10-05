@@ -505,6 +505,18 @@ def check_attempt(row: dict, gates: dict, knobs: dict) -> list[str]:
                      and oc["max_over_hf"] > gates["max_residual_over_hf_max"]):
         out.append("attempt: outcome.flags.F3c: F3c is max_over_hf > "
                    "max_residual_over_hf_max (docs/15 §D.1)")
+    if ("F3e" in fl) != ("feature_capture" in oc):
+        out.append("attempt: outcome.feature_capture: F3e and feature_capture are written "
+                   "together (the user's decision of 2026-09-26)")
+    elif "F3e" in fl:
+        fc = oc["feature_capture"]
+        if (fl["F3e"] is True) != (fc is not None
+                                   and fc < gates["feature_capture_min"]):
+            out.append("attempt: outcome.flags.F3e: F3e is feature_capture < "
+                       "feature_capture_min on a body with sharp edges (the user's "
+                       "decision D-L5)")
+        elif fc is not None and fl["F3e"] is None:
+            out.append("attempt: outcome.flags.F3e: a measured feature_capture decides F3e")
     if fl["F5"] != (oc["n_cells"] is not None and oc["n_cells"] > gates["cell_budget"]):
         out.append("attempt: outcome.flags.F5: F5 is n_cells > cell_budget (docs/15 §D.1)")
     if fl["F1"] != (oc["exit_code"] != 0 or oc["failure_class"] in F1_CLASSES
@@ -810,7 +822,9 @@ def selftest() -> int:
                  "prediction.t_predicted", "t_end", "outcome.failure",
                  "outcome.strict_failure", "outcome.verdict", "outcome.patches[0].delivered",
                  "fingerprint.geometry_id", "outcome.flags.F3a", "outcome.flags.F3b",
-                 "outcome.flags.F3c", "outcome.flags.F5", "outcome.flags.F1"]
+                 "outcome.flags.F3c", "outcome.flags.F5", "outcome.flags.F1",
+                 "outcome.feature_capture", "outcome.flags.F3e", "outcome.flags.F3e",
+                 "outcome.flags.F3e", "outcome.flags.F3e"]
         bads = []
         b = dict(row0); b["attempt"] = gates["attempts_k"] + 1; bads.append(b)
         b = dict(row0); b["config_delta"] = [dict(row0["config_delta"][0],
@@ -840,10 +854,33 @@ def selftest() -> int:
                 row0["outcome"]["flags"], F5=True)); bads.append(b)
         b = dict(row0); b["outcome"] = dict(row0["outcome"], flags=dict(
                 row0["outcome"]["flags"], F1=True)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], feature_capture=0.0,
+                flags=dict(row0["outcome"]["flags"])); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], feature_capture=0.0,
+                flags=dict(row0["outcome"]["flags"], F3e=False)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], feature_capture=1.0,
+                flags=dict(row0["outcome"]["flags"], F3e=None)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], feature_capture=0.3,
+                flags=dict(row0["outcome"]["flags"], F3e=False)); bads.append(b)
+        b = dict(row0); b["outcome"] = dict(row0["outcome"], feature_capture=0.5,
+                flags=dict(row0["outcome"]["flags"], F3e=True)); bads.append(b)
         for b, path in zip(bads, paths):
             msgs = check_attempt(b, gates, knobs)
             assert any(m.startswith("attempt: %s: " % path) for m in msgs),                 "S-check for %s did not fire: %s" % (path, msgs)
-        lines.append("[ok] semantic refusals: 17 by name")
+        lines.append("[ok] semantic refusals: 22 by name")
+        good = dict(row0); good["outcome"] = dict(row0["outcome"], feature_capture=None,
+                flags=dict(row0["outcome"]["flags"], F3e=False))
+        assert check_attempt(good, gates, knobs) == [], "the F3e-positive row fails"
+        good = dict(row0); good["outcome"] = dict(row0["outcome"], feature_capture=0.5,
+                flags=dict(row0["outcome"]["flags"], F3e=False))
+        assert check_attempt(good, gates, knobs) == [], "the F3e-boundary row fails"
+        good = dict(row0); good["outcome"] = dict(row0["outcome"], feature_capture=0.3,
+                flags=dict(row0["outcome"]["flags"], F3e=True))
+        assert check_attempt(good, gates, knobs) == [], "the F3e-true row fails"
+        good = dict(row0); good["outcome"] = dict(row0["outcome"], feature_capture=0.3,
+                flags=dict(row0["outcome"]["flags"], F3e=False))
+        assert check_attempt(good, dict(gates, feature_capture_min=0.25), knobs) == [], \
+            "the relaxed-gates row fails"
 
         k_names = 0
         for kind in SCHEMAS:

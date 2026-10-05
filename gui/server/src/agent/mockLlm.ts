@@ -145,13 +145,19 @@ export function extractFacts(messages: BetaMessageParam[]): Facts {
 // The script
 // ---------------------------------------------------------------------------
 
-type Scenario = 'refuse' | 'long' | 'error' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'run' | 'default'
+type Scenario = 'refuse' | 'long' | 'error' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'propose' | 'campaign' | 'cad' | 'run' | 'default'
 
 export function detectScenario(text: string): Scenario {
   const t = text.toLowerCase()
   if (t.includes('refuse-test')) return 'refuse'
   if (t.includes('long-test')) return 'long'
   if (t.includes('error-test')) return 'error'
+  if (t.includes('split-test')) return 'split'
+  // the autonomy scenarios name their tool, so they answer before any word a later arm claims
+  if (t.includes('autonomy_propose_edit')) return 'propose'
+  if (t.includes('autonomy_attempts')) return 'campaign'
+  // the CAD loop names its tool too, or says nozzle (GUI-1)
+  if (t.includes('cad_requirements') || /\bnozzle\b|노즐/.test(t)) return 'cad'
   // first of the natural arms: every ontology prompt also carries a word a later
   // arm claims (case, run, mesh, show) and the ladder returns on the first match
   if (/\bontology\b|온톨로지/.test(t)) return 'ontology'
@@ -293,6 +299,38 @@ function scenarioRun(f: Facts): MockPlan {
   }
   const wait = [...f.results].reverse().find((r) => r.name === 'run_wait')
   return done([text(wait ? runSummaryText(ko, wait.data) : ko ? '실행 결과를 확인하지 못했습니다.' : 'The run result could not be read.')])
+}
+
+/** The 2-D synthetic channel every viewer half can open without a server: one of
+ *  the two datasets `getViewerController` builds its SyntheticTransport with. Half
+ *  A already holds the 3-D one, so opening this into half B gives the two halves
+ *  two different dataset ids and nothing has to exist on disk. */
+const SPLIT_DEMO_RESULT = 'demo://channel2d'
+
+/**
+ * The split-viewport scenario: one gui_control per turn, split_view then a
+ * result into half B then link_cameras, advancing on the last result's command
+ * type exactly as the viewer scenario does. It exists so the comparison
+ * commands can be driven in a real browser by a test instead of by a person at
+ * a keyboard; demo mode only, and it changes nothing a real model can reach.
+ */
+function scenarioSplit(f: Facts): MockPlan {
+  const ko = f.korean
+  const last = f.lastResult
+  if (!last) {
+    return useTools([
+      text(ko ? '뷰포트를 둘로 나눕니다.' : 'Splitting the viewport into two halves.'),
+      tool('gui_control', { type: 'split_view', on: true }),
+    ])
+  }
+  if (last.name === 'gui_control' && !last.ok) {
+    const code = String((last.data.error as { code?: string } | undefined)?.code ?? '')
+    return done([text(ko ? `화면 전환에 실패했습니다: ${code}` : `The screen could not be switched: ${code}`)])
+  }
+  const type = String(last.input.type ?? '')
+  if (type === 'split_view') return useTools([tool('gui_control', { type: 'open_result_in_view', view: 'B', path: SPLIT_DEMO_RESULT, timeIndex: null })])
+  if (type === 'open_result_in_view') return useTools([tool('gui_control', { type: 'link_cameras', on: true })])
+  return done([text(ko ? '뷰포트를 나누고 오른쪽 화면에 결과를 연 뒤 카메라를 연동했습니다.' : 'The viewport is split, the second result is open in the right half and the two cameras are linked.')])
 }
 
 /**
@@ -447,6 +485,34 @@ function scenarioDefault(f: Facts): MockPlan {
   ])
 }
 
+/** The mock's explanation of one geometry: every number printed exactly as the autonomy_attempts result holds it. */
+export function campaignExplanation(d: Record<string, unknown>, geometryId: string): string {
+  const isRow = (r: unknown): r is Record<string, unknown> => typeof r === 'object' && r !== null && !Array.isArray(r)
+  const lit = (v: unknown): string => (typeof v === 'number' ? String(v) : Array.isArray(v) ? `[${v.map(lit).join(', ')}]` : v === null || v === undefined ? 'none' : isRow(v) ? JSON.stringify(v) : String(v))
+  const rows = Array.isArray(d.rows) ? d.rows.filter(isRow) : []
+  const lines = [`Geometry ${geometryId} in ${lit(d.out)}: ${lit(d.total)} attempt rows.`]
+  for (const r of rows) {
+    const t = isRow(r.trigger) ? r.trigger : null
+    const o = isRow(r.outcome) ? r.outcome : {}
+    const who = `decided by ${lit(r.decided_by)}${r.rule_id ? ` (${lit(r.rule_id)})` : ''}`
+    const trig = t ? `trigger ${lit(t.observable)} ${lit(t.op)} ${lit(t.threshold)} at ${lit(t.value)}` : 'no trigger'
+    const cls = o.failure_class ? ` (${lit(o.failure_class)})` : ''
+    lines.push(`- Attempt ${lit(r.attempt)}: ${who}; ${trig}; verdict ${lit(o.verdict)}${cls}; ${lit(o.n_cells)} cells.`)
+  }
+  return lines.join('\n')
+}
+
+/** The autonomy_propose_edit call a request spells as "config <path>, pointer <p>, value <v>, reason: <text>"; "pass -permissive" adds the flag. */
+export function proposeInputOf(text: string): Record<string, unknown> {
+  const config = /\bconfig (\S+?),?\s/.exec(text)?.[1] ?? ''
+  const pointer = /\bpointer (\S+?),?\s/.exec(text)?.[1] ?? ''
+  const value = /\bvalue (\S+?)[,.]?(?:\s|$)/.exec(text)?.[1] ?? ''
+  const reason = /\breason: ([^\n]+)/.exec(text)?.[1]?.trim() ?? 'no reason given'
+  const input: Record<string, unknown> = { config, pointer, value, reason }
+  if (/\bpass -permissive\b/.test(text)) input.args = ['-permissive']
+  return input
+}
+
 function runNoticeReply(f: Facts): MockPlan {
   const ko = f.korean
   const m = f.runNotice?.match(/run (\S+) \(([^)]*)\) ended with status (\w+) after (\d+)/) ?? f.runNotice?.match(/실행 (\S+) \(([^)]*)\)이\(가\) (\d+)회 반복 후 (\S+) 상태/)
@@ -459,6 +525,133 @@ function runNoticeReply(f: Facts): MockPlan {
 
 export interface MockState {
   errorThrown: boolean
+}
+
+const EXPLAIN_RE = /autonomy_attempts with out (\S+) and geometryId (\S+?)[,.]?(?:\s|$)/
+
+function scenarioCampaign(f: Facts): MockPlan {
+  const m = EXPLAIN_RE.exec(f.userText)
+  if (!m) return done([text('Name the campaign as "autonomy_attempts with out <dir> and geometryId <id>".')])
+  const [, out, geometryId] = m
+  const res = [...f.results].reverse().find((r) => r.name === 'autonomy_attempts')
+  if (!res) return useTools([tool('autonomy_attempts', { out, view: 'attempts', geometryId, detail: 'brief' })])
+  if (!res.ok) return done([text(`autonomy_attempts failed: ${String((res.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+  return done([text(campaignExplanation(res.data, geometryId))])
+}
+
+function scenarioPropose(f: Facts): MockPlan {
+  const res = [...f.results].reverse().find((r) => r.name === 'autonomy_propose_edit')
+  if (!res) return useTools([tool('autonomy_propose_edit', proposeInputOf(f.userText))])
+  if (!res.ok) return done([text(`Refused: ${String((res.data.error as { message?: string } | undefined)?.message ?? 'no message')}`)])
+  const e = (res.data.edit ?? {}) as Record<string, unknown>
+  return done([text(`Proposed ${String(e.pointer ?? '')} = ${JSON.stringify(e.to ?? null)} (preflight pass): ${String(res.data.proposed ?? '')}`)])
+}
+
+const CAD_LIST = 'cad_template_list'
+const CAD_PROPOSE = 'cad_requirements_propose'
+const CAD_APPLY = 'cad_requirements_apply'
+const CAD_BUILD = 'cad_build'
+const CAD_EVALUATE = 'cad_evaluate'
+const CAD_STATUS = 'cad_study_status'
+// optimise_cad.py STANDIN_START and STANDIN_START_PROVENANCE verbatim: the start the loop's own
+// golden uses, so the walk reaches the same confirmed stable design the T4/T5 gate measured.
+const CAD_START: Record<string, unknown> = {
+  D_i: 0.06,
+  CR: 9.0,
+  L_over_Di: 0.5,
+  law: 'poly7',
+  x_m: null,
+  Lx_over_De: 0.5,
+  Lu_over_Di: 0.5,
+  upstream_role: 'slip',
+  t_wall: 0.003,
+}
+const CAD_PROVENANCE: Record<string, string> = {
+  D_i: 'user_text',
+  CR: 'user_text',
+  L_over_Di: 'llm_choice',
+  law: 'llm_choice',
+  Lx_over_De: 'default',
+  Lu_over_Di: 'default',
+  upstream_role: 'default',
+  t_wall: 'user_text',
+}
+
+/**
+ * The v1_nominal fixture rows of tools/cad/fixtures/reqs/cases.json without the ears key (the
+ * server renders EARS), with the v1 operating point. They ground only in brief B1's text, the
+ * fixed brief of the T10 gate - never send a row the user's own words do not carry.
+ */
+const CAD_OPPOINT = { fluid: 'air', T_K: 293.15, p0_Pa: 101325.0, flow: { field: 'Q_m3_s', value: 7.07, unit: 'L/s', source: 'brief', quote: 'The flow rate is 7.07 L/s' } }
+const CAD_ROWS = [
+  { quantity: 'inlet_diameter', feature: 'contraction_start', op: '==', value: 60, upper: null, tol_abs: 0.001, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'The inlet diameter is 60 mm' },
+  { quantity: 'contraction_ratio', feature: null, op: '==', value: 9, upper: null, tol_abs: null, tol_rel: 1e-06, unit: '-', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'the contraction ratio is 9:1' },
+  { quantity: 'total_length', feature: null, op: '<=', value: 80, upper: null, tol_abs: null, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'total length at most 80 mm' },
+  { quantity: 'min_wall_normal', feature: null, op: '>=', value: 2, upper: null, tol_abs: null, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'hard', source: 'brief', quote: 'the wall thickness at least 2 mm' },
+  { quantity: 'max_wall_slope', feature: null, op: '<=', value: 35, upper: null, tol_abs: null, tol_rel: null, unit: 'deg', condition: { Re: null, level: null }, hardness: 'soft', source: 'brief', quote: 'the wall slope below 35 deg' },
+  { quantity: 'total_length', feature: null, op: '<=', value: null, upper: null, tol_abs: null, tol_rel: null, unit: 'mm', condition: { Re: null, level: null }, hardness: 'objective', source: 'brief', quote: 'Make it as short as possible' },
+]
+
+// The same six rows and the flow quote against the fixed Korean brief (T10b): reqs.py grounds
+// every quote in the user's own turns, so the Korean path quotes the Korean words - verbatim
+// substrings of that brief, in CAD_ROWS row order.
+const CAD_QUOTES_KO = ['입구 지름은 60 mm', '수축비는 9:1', '전체 길이는 80 mm 이하', '벽 두께는 2 mm 이상', '벽 기울기는 35 deg 미만', '가능한 한 짧게 만들어 줘']
+const CAD_ROWS_KO = CAD_ROWS.map((r, i) => ({ ...r, quote: CAD_QUOTES_KO[i] }))
+const CAD_OPPOINT_KO = { ...CAD_OPPOINT, flow: { ...CAD_OPPOINT.flow, quote: '유량은 7.07 L/s' } }
+
+/** The CAD loop: list, propose (an ask - the card is the tick), apply; script on the latest result. */
+function scenarioCad(f: Facts): MockPlan {
+  const last = f.lastResult
+  const studyId = f.korean ? 'mock_nozzle_ko' : 'mock_nozzle'
+  const rows = f.korean ? CAD_ROWS_KO : CAD_ROWS
+  const oppoint = f.korean ? CAD_OPPOINT_KO : CAD_OPPOINT
+  if (!last) return useTools([tool(CAD_LIST, {})])
+  if (last.name === CAD_LIST) {
+    if (!last.ok) return done([text(`cad_template_list failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    const templates = Array.isArray(last.data.templates) ? (last.data.templates as Array<Record<string, unknown>>) : []
+    return useTools([tool(CAD_PROPOSE, { template_id: 'nozzle_contraction/1', vocab_sha: String(templates[0]?.vocab_sha ?? ''), study_id: studyId, operating_point: oppoint, rows })])
+  }
+  if (last.name === CAD_PROPOSE) {
+    if (!last.ok) return done([text(`Refused: ${String((last.data.error as { message?: string } | undefined)?.message ?? 'no message')}`)])
+    if (last.data.status === 'ok') return useTools([tool(CAD_APPLY, { proposalId: String(last.data.proposalId) })])
+    const qs = Array.isArray(last.data.questions) ? (last.data.questions as Array<Record<string, unknown>>) : []
+    return done([text(qs.map((q) => `${String(q.id)}: ${String(q.text)}`).join('\n'))])
+  }
+  if (last.name === CAD_APPLY) {
+    if (!last.ok) return done([text(`cad_requirements_apply failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    const studyId = String(last.data.study_id)
+    // The user asked to run it: build the start design, then evaluate, then read the study back.
+    if (/\bcad_evaluate\b|run the study/i.test(f.userText)) return useTools([tool(CAD_BUILD, { study_id: studyId, params: CAD_START })])
+    return done([text(`Locked requirements for study ${String(last.data.study_id)}: ${String(last.data.requirements)} (lock ${String(last.data.lock_sha).slice(0, 12)}).`)])
+  }
+  const apply = f.results.find((r) => r.name === CAD_APPLY && r.ok)
+  const studyIdOf = (r: ToolResultFact | undefined): string =>
+    String(r?.data.study_id ?? (r?.input as { study_id?: unknown } | undefined)?.study_id ?? '')
+  if (last.name === CAD_BUILD) {
+    if (!last.ok) return done([text(`cad_build failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    return useTools([tool(CAD_EVALUATE, { study_id: studyIdOf(apply), start: { params: CAD_START, provenance: CAD_PROVENANCE }, unattended: true })])
+  }
+  if (last.name === CAD_EVALUATE) {
+    if (!last.ok) return done([text(`cad_evaluate failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    return useTools([tool(CAD_STATUS, { study_id: studyIdOf(apply) })])
+  }
+  if (last.name === CAD_STATUS) {
+    if (!last.ok) return done([text(`cad_study_status failed: ${String((last.data.error as { code?: string } | undefined)?.code ?? 'no code')}`)])
+    const st = (last.data.status ?? {}) as Record<string, unknown>
+    if (f.korean) {
+      return done([
+        text(
+          `스터디 ${String(last.data.study_id)} 상태는 ${String(st.status)}입니다: 평가 ${String(st.n_evals)}회, 결정 ${String(st.n_decisions)}건; 안정 설계는 ${String(st.stable_design_verdict)}, 목적값 ${String(st.stable_objective)}.`,
+        ),
+      ])
+    }
+    return done([
+      text(
+        `Study ${String(last.data.study_id)} is ${String(st.status)}: ${String(st.n_evals)} evaluations and ${String(st.n_decisions)} decisions; the stable design is ${String(st.stable_design_verdict)} with objective ${String(st.stable_objective)}.`,
+      ),
+    ])
+  }
+  return done([text('Read cad_template_list first, then propose the requirement rows.')])
 }
 
 export function planResponse(messages: BetaMessageParam[], state: MockState): MockPlan {
@@ -476,6 +669,8 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
         return { blocks: [], stopReason: 'end_turn', throwError: new Anthropic.RateLimitError(429, { type: 'error', error: { type: 'rate_limit_error', message: 'mock rate limit' } }, 'mock rate limit', new Headers()) }
       }
       return done([text(f.korean ? '재시도 후 정상적으로 응답했습니다.' : 'Recovered after the retry; this is the normal answer.')])
+    case 'split':
+      return scenarioSplit(f)
     case 'ontology':
       return scenarioOntology(f)
     case 'shell':
@@ -490,6 +685,12 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
       return scenarioGui(f)
     case 'viewer':
       return scenarioViewer(f)
+    case 'propose':
+      return scenarioPropose(f)
+    case 'campaign':
+      return scenarioCampaign(f)
+    case 'cad':
+      return scenarioCad(f)
     case 'run':
       return scenarioRun(f)
     default:

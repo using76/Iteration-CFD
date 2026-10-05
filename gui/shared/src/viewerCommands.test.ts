@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { describe, expect, it } from 'vitest'
-import { UiCommandSchema, UiStateSchema } from './protocol.js'
+import { UiCommandSchema, UiSelectionSchema, UiStateSchema } from './protocol.js'
 import { ViewerCommandSchema } from './viewerCommands.js'
 
 // What a weaker model sends must not die in validation: numbers and booleans
@@ -246,13 +246,15 @@ describe('ui command coercion and the workspace commands', () => {
       problems: 2,
       connection: 'connected',
       locale: 'ko',
+      compareRunId: 'r_2',
+      views: { split: true, focused: 'B', camerasLinked: true, datasetA: null, datasetB: 'd_2' },
     }
     expect(UiStateSchema.safeParse(full).success).toBe(true)
     // an older client that sends none of the new keys still validates
     const old: Record<string, unknown> = { ...full }
-    for (const k of ['case', 'tabs', 'run', 'viewer', 'problems', 'connection', 'locale']) delete old[k]
+    for (const k of ['case', 'tabs', 'run', 'viewer', 'problems', 'connection', 'locale', 'compareRunId', 'views']) delete old[k]
     expect(UiStateSchema.safeParse(old).success).toBe(true)
-    expect(UiStateSchema.safeParse({ ...full, case: null, tabs: null, run: null, viewer: null, problems: null, connection: null, locale: null }).success).toBe(true)
+    expect(UiStateSchema.safeParse({ ...full, case: null, tabs: null, run: null, viewer: null, problems: null, connection: null, locale: null, compareRunId: null, views: null }).success).toBe(true)
   })
 
   it('post_warp and a regional open_result parse', () => {
@@ -262,5 +264,10 @@ describe('ui command coercion and the workspace commands', () => {
     expect(off.scale).toBeUndefined()
     expect(parseOk(UiCommandSchema, { type: 'open_result', path: 'cases/x', region: 'flap' })).toMatchObject({ region: 'flap' })
     expect(parseOk(UiCommandSchema, { type: 'open_mesh_dialog', mode: 'regions', layoutDir: 'cases/site/mesh' })).toMatchObject({ mode: 'regions', layoutDir: 'cases/site/mesh' })
+  })
+
+  it('a cell selection may carry a null centre', () => {
+    parseOk(UiSelectionSchema, { kind: 'cell', id: 3, center: null, value: 1.5, field: 'U' })
+    parseOk(UiSelectionSchema, { kind: 'cell', id: 3, center: [0, 1, 2] })
   })
 })

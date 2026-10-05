@@ -808,7 +808,7 @@ No test in this project may compare against another CFD code.
 | Lid-driven cavity | **Ghia, Ghia & Shin, *JCP* 48 (1982) 387–411** | tabulated centreline profiles |
 | Channel flow | **Moser, Kim & Mansour, *Phys. Fluids* 11 (1999) 943** | DNS profiles at Re_tau 180/395/590 |
 | Backward-facing step | **Driver & Seegmiller, *AIAA J.* 23 (1985) 163** | reattachment length |
-| Buoyant plume | **McCaffrey, NBS TN 910 (1979)** centreline correlations | plume temperature and velocity decay |
+| Buoyant plume | **McCaffrey, NBSIR 79-1910 (1979)** centreline correlations | plume temperature and velocity decay |
 
 ---
 
@@ -1481,6 +1481,46 @@ carries an `output` block, `adjustTimeStep: true` and `maxCo`, all three now
 refused; the file says so, in place, rather than continuing to document them
 as settings that do something.
 
+#### 13.4.4 The audit of every name a case can write
+
+§13.4 states the rule and §13.4.1 the test; this subsection is the ledger.
+One row per enumerated setting a case can name, in every case format this
+crate reads (OpenFOAM dictionaries, the JSONC case, the multi-region CHT
+case): what is honoured, which spellings are accepted as the same thing,
+what is refused by name, what `-permissive` substitutes, and the test that
+proves the row. A row's "refused" column is the list a user gets in the
+error; a row's "alias" column is a spelling that reaches the SAME condition
+and is therefore not a substitution. The audit found five silent
+substitutions (marked **was silent**) and closed them; two classes of entry
+that no reader asks for are listed as owed rather than hidden.
+
+| setting | honoured | aliases (same thing) | refused by name | `-permissive` runs | proof |
+|---|---|---|---|---|---|
+| `solvers/<var>/solver` (`src/io/case.rs`, `LinearSolverKind::from_name`) | `PBiCGStab`; `PCG` (symmetric matrices only, checked at solve time, §8.2) | `BiCGStab`, `PBiCCCG`, empty → PBiCGStab; `CG`, `PPCG` → PCG | `GAMG` on every equation: `solver::solve` refuses it naming AMGX (§8.3); on the pressure equation `PbicgstabBackend::setup` refuses it under this rule — **was silent** there (one stderr line, then PBiCGStab); `smoothSolver`, `PBiCG`, `PPCR`, anything else | PBiCGStab | `io::case::tests::an_unimplemented_solver_is_an_error_that_names_it`; `solver::tests::gamg_is_refused_with_the_reason`; `pressure::tests::gamg_on_the_pressure_equation_is_refused_by_name_and_names_amgx`; `pressure::tests::setup_refuses_gamg_on_the_pressure_equation_before_touching_the_device`; the `solvers/p/solver` knob of `ofgpu-buoyant`'s pair test |
+| `solvers/<var>/preconditioner` (`Preconditioner::from_name`) | `none`, `diagonal`, `DIC`, `DILU` | `no`, empty → none; `diag`, `Jacobi` → diagonal; `FDIC` → DIC | `GAMG`, `GaussSeidel`, anything else; `DIC` on an asymmetric matrix (names `DILU`); `DIC`/`DILU` on a mesh-free workspace | diagonal (Jacobi) | `io::case::tests::dic_and_dilu_are_honoured_rather_than_silently_downgraded`; `solver::tests::pcg_on_an_asymmetric_matrix_is_an_error`; `solver::tests::dic_on_an_asymmetric_matrix_is_an_error_that_names_dilu`; the `solvers/p/preconditioner` knob of `ofgpu-buoyant`'s pair test |
+| CHT `numerics.solver`, `numerics.preconditioner` (`src/io/case_cht.rs`) | `PCG`, `PBiCGStab`; `DIC`, `DILU`, `diagonal`, `none` | none | `GAMG`, anything else | PCG; DIC | `io::case_cht::tests::a_preconditioner_of_none_lowers_to_none` — `none` lowered to Jacobi, **was silent**; `io::case_cht::tests::two_cases_differing_only_in_the_preconditioner_produce_different_output` |
+| `ddtSchemes/default` (`src/timescheme.rs`, `DdtScheme::parse`) | `steadyState`, `Euler`, `backward`, `CrankNicolson <θ>` with θ in (0, 1], `localEuler`; a `bounded` prefix is accepted and ignored (documented) | `euler`; `LocalEuler`; `CrankNicholson` | `CoEuler`, `SLTS`, bare `bounded` (recognised, not implemented); anything else; per equation: `CrankNicolson` under implicit relaxation, `localEuler`/`CrankNicolson` on `T`, a steady scheme under DES; in `ofgpu-vof` everything but `Euler` — an UNPARSEABLE name **was silent** there (folded into Euler) | Euler (OpenFOAM route, `read_fv_schemes`); the JSONC route's `numerics.ddt` refusal is NOT downgradable — a stated asymmetry | `timescheme::tests`; `io::case::tests::ddt_schemes_reaches_the_controls_in_full`; `vof::tests::a_ddt_scheme_that_is_not_euler_is_refused_by_name_even_when_unparseable` |
+| `divSchemes/<key>` (`src/io/schemes.rs`, `parse_div`) | the fifteen names of `DIV_AVAILABLE`, `Gauss` integration only, `bounded` prefix honoured (refused in `ofgpu-vof`, §20.3); coefficients `limitedLinear`/`Sweby <β>` in [1, 2] (§7), `Gamma <β_m>` in [0.1, 0.5] (§11.6), `blended`/`linearUpwindBlended <γ>` in [0, 1] (§11.5); `linearUpwind grad(U)`'s trailing word is accepted and ignored (DESIGN, the field's own `gradSchemes` entry is used) | case variants (`quick`, `vanleer`, `minmod`, `superbee`, `muscl`, `gamma`, `sweby`) | the nineteen names of `DIV_KNOWN_UNIMPLEMENTED` (recognised, not implemented) and anything else; a non-`Gauss` integration; a missing coefficient; a coefficient outside its range — **was silent** (clamped in `fv.rs` with no message) | `Gauss upwind`; for a coefficient, the clamped value | `io::schemes::tests` (`every_limiter_of_section_7_is_reachable_by_name`, `an_unimplemented_scheme_is_an_error_naming_it_and_the_menu`, `a_scheme_coefficient_outside_its_range_is_refused_by_name`, `permissive_takes_the_clamped_coefficient`); every driver's `divSchemes` knobs |
+| `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
+| `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
+| `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane`, `wedge` → symmetry; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `uniformFixedValue` (its `uniformValue` Function1 is not read — **was silent**), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else | calculated (a fixed value at the file's `value`); for the three named: calculated, fixedValue at `value`, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_three_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two` |
+| `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
+| `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
+| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane`, `wedge` → symmetry; `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
+| JSONC `motion` block (`src/io/case_json.rs`, `JsonMotion::lower`; §105.12) | `patches[]` rules `fixed`, `slide`, `move` with a `linear` or `sine` law, and `walls`, in `ofgpu-lowmach` on a transient laminar run | none | an unknown key; a law on `fixed`/`slide`; a `move` without one; a sine period that is not positive; a law that moves nothing; in `ofgpu-lowmach` a steady run, `-restartFrom`, `-restartWrite`, `-heaterPower`, `-sealed`, a turbulence model, `sources`, the `output` block, `-output` other than `foam`, a cyclic pair, a wall whose `U` is not a fixed value, a wall whose `U` value is not its law's velocity at `t = 0`, a moving fixed-velocity patch not in `walls`; the whole block in `ofgpu-k-epsilon`, `ofgpu-sample`, `ofgpu-decompose` | NOT downgradable | `io::case_json::tests::{a_motion_block_lowers_to_its_rule_table, a_motion_law_that_moves_nothing_or_has_no_period_is_refused_by_name, the_motion_reader_refuses_a_law_on_a_fixed_patch_and_a_move_without_one}`; `ofgpu-lowmach`'s `the_motion_block_is_refused_by_name_where_it_cannot_be_honoured` and `the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law` |
+
+**Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
+`writeInterval`, `purgeWrite` are read by no driver; the writer is ASCII at `writePrecision`, and
+`cases/plumeB` writes `writeFormat ascii`, which is what it gets. (ii) `solvers/<var>Final` and the
+GAMG/smoothSolver sub-entries (`smoother`, `nSweeps`, `nPreSweeps`, `nPostSweeps`, `cacheAgglomeration`,
+`agglomerator`, `mergeLevels`, `nCellsInCoarsestLevel`) are read by nobody. (iii) `FoamDict::scalar`,
+`::label` and `::bool` return the caller's default on a token they cannot read (`tolerance banana;`,
+`turbulence maybe;`), which is the same defect class in a non-enumerated setting; the
+contract-conformant shape exists (`ofgpu-vof`'s `number_entry`) and applying it everywhere is a unit of
+its own. Each of the three is a §13.4.1 "quieter failure" and each is owed a refusal or a documented
+"read and ignored" entry here.
+
 ---
 
 ## 14. PISO and PIMPLE
@@ -1990,6 +2030,46 @@ already held, plus one reciprocal-diagonal array.
 one, in fewer iterations, and the iteration count must not change when the
 colour ordering changes.
 
+### 21.1 The host twin, and what its disagreement would mean
+
+`src/reference.rs` carries a second implementation of the factorisation above,
+written to the statement of §21 rather than to the kernel. It exists because a
+gather kernel checked against a gather mirror measures the compiler and not the
+arithmetic: the mirror in `src/solver.rs`'s tests walks the same cell→face CSR
+the kernel walks, in the same order, so a mistake in the traversal is invisible
+to it. The twin instead SCATTERS, which is `src/reference.rs`'s rule for every
+loop in the file: for each colour in turn it visits **faces**, `0` to
+`n_internal_faces`, and writes into both of the cells a face joins.
+
+Two things are therefore measurable that were not before.
+
+| what must hold | why | where |
+|---|---|---|
+| `diag(M) = diag(A)` | it is the equation that defines `Dt`, and it is a property of the factorisation alone | `reference.rs`, host only |
+| the forward and backward sweeps compose to `M^-1` | the forward sweep solves `(Dt + L) w = x` and the backward one `(Dt + U) y = Dt w`; nothing else makes the pair an inverse | `reference.rs`, host only |
+| device `rD` and device `M^-1 x` equal the twin's | two different traversals of the same definition | `precon.rs`, one GPU test |
+
+The twin takes the colouring as an argument rather than computing one. The
+colour order IS the ordering `u < v` of the factorisation, so a twin that
+coloured the mesh again would be comparing two different matrices and could
+only agree by accident.
+
+Coupled interface coefficients are not factorised on either side (they live in
+`boundary_coeffs`, not in `upper`/`lower`), so the twin reads neither
+`boundary_coeffs` nor `internal_coeffs` and the meshes it is measured on have
+no cyclic patch. The safe reciprocal of a broken-down row is mirrored in all
+three of its branches, and is measured on a two-cell graph built to fire each
+one.
+
+*Measured*: three meshes, each symmetric and asymmetric, relative difference
+between device and host, `max|dev - host| / max|host|`:
+
+| mesh | cells | colours | `rD` sym / asym | `M^-1 x` sym / asym |
+|---|---|---|---|---|
+| structured hex 5x4x3 | 60 | 2 | 1.82e-16 / 1.79e-16 | 2.39e-16 / 3.21e-16 |
+| one cell deep 12x9x1 | 108 | 2 | 1.45e-16 / 1.45e-16 | 2.78e-16 / 1.38e-16 |
+| 2:1 refined core | 120 | 4 | 1.78e-16 / 2.01e-16 | 3.08e-16 / 2.56e-16 |
+
 ---
 
 ## 22. Validation additions
@@ -2025,7 +2105,7 @@ Extends §10. Same rule: **no test compares against another CFD code.**
 | species | sum of mass fractions | exactly 1 |
 | Turbulent channel | **Moser, Kim & Mansour, *Phys. Fluids* 11 (1999) 943** | DNS profiles, Re_tau 180/395/590 |
 | Backward-facing step | **Driver & Seegmiller, *AIAA J.* 23 (1985) 163** | reattachment length |
-| Buoyant plume | **McCaffrey, NBS TN 910 (1979)** | centreline decay |
+| Buoyant plume | **McCaffrey, NBSIR 79-1910 (1979)** | centreline decay |
 | Dam break | **Martin & Moyce, *Phil. Trans. R. Soc. A* 244 (1952) 312** | surge front position vs time |
 
 ---
@@ -2056,6 +2136,22 @@ Detection: a file is ASCII only if it starts with "solid" AND parses as ASCII;
 binary files sometimes start with "solid" in the comment header, so on parse
 failure fall back to binary. Stored normals are untrustworthy — recompute from
 the winding `(v1-v0)×(v2-v0)` and ignore the stored one.
+
+The reader classifies in three steps, in this order, and never panics on
+non-UTF-8 header bytes. First, if the file is at least 84 bytes long and its
+length equals exactly 84 + 50·n, where n is the little-endian uint32 at bytes
+80..84 (computed in 64-bit arithmetic), the file is binary and is parsed as
+binary without ever trying ASCII: ASCII text has no byte below 0x09 in bytes
+80..84, so an ASCII file would need n ≥ 0x09090909 (about 1.5e8 triangles, a
+7.5 GB file) to collide, which makes the length test unambiguous for every
+real file. Second, otherwise, a file whose first five bytes are "solid"
+(case-insensitive) and whose text parses as ASCII is ASCII; the bytes are
+decoded lossily first, so a non-UTF-8 byte inside a solid name becomes U+FFFD
+in the patch name instead of an error. Third, everything else is binary, and
+the binary reader returns its usual length errors unchanged. A binary file
+whose header is "solid" followed by non-UTF-8 bytes therefore reads as
+binary; keyword matching compares the leading bytes, so no slice lands
+inside a character.
 
 **Patch identity** (docs/05 §4.2): one patch per `solid` name in an ASCII
 file; for a binary file (which has no name) the FILE STEM is the patch name;
@@ -2341,6 +2437,9 @@ nevertheless applied unconditionally. Sources arrive through the §18 registry:
 a model with a volumetric heat term REGISTERS it; the energy module must not
 know any of their internals, and that hook is what keeps every such model out
 of this file.
+Viscous dissipation, Phi of (S100.13), is one such term: the conjugate path
+registers it when a case asks for it, and §26.1's budget carries it in its
+sources entry.
 
 Wall heat transfer: fixed-T and fixed-flux walls via the §4 Robin triple
 (`g_ref = q_w / k_eff`); the convective wall function for temperature
@@ -2983,6 +3082,49 @@ substitutes PIMPLE with one outer corrector and says so.
 This is the same class of defect as every other silent substitution this
 project has removed: the settings were each individually valid, nothing
 warned, and the run produced Inf.
+
+---
+
+### 31.4 How a run ends: the exit code and the last line
+
+A run that stops before its iteration count used to say so only by accident:
+every failure was exit code 1 with an `error:` line on stderr, a diverged
+run was told apart from a mistyped flag by a reader who knew to look for
+`*** NaN/Inf ***` in the residual line, and a run that reached its budget
+ended on whichever post-run report block happened to print last. §13.4.2's
+rule - what the run did is printed, not inferred - applies to how it ended
+as much as to what it used.
+
+*DESIGN - the contract.* `ofgpu-lowmach` ends in exactly one of four ways,
+and the LAST line it writes, on stdout, names which:
+
+```
+run ended: <word> | <detail> | exit code <n>
+```
+
+| word | when | exit code |
+|---|---|---|
+| `budget` | `-iters N` iterations, or `-endTime`, reached | 0 |
+| `diverged` | a field went non-finite (`Error::Diverged`); nothing is written | 2 |
+| `refused` | a setting refused by name under §13.4 (`Error::Refused`), including the §93.6 Mach check | 3 |
+| `error` | anything else - a bad flag, an unreadable case, an I/O or device failure | 1 |
+
+`<detail>` is the first line of the error, or `N iterations reached` /
+`endTime T s reached in N steps`. The line comes after the stderr `error:`
+line on a failure and after every post-run report on success, so `tail -1`
+of the log is the verdict. A refusal is its own error variant so the driver
+maps it to a code without reading its own message.
+
+**A signal is not one of the four.** No handler is installed: a process
+killed by Ctrl-C or by its parent prints no `run ended:` line and exits with
+the operating system's status, and a parent that needs to know reads that
+status (the GUI reports `killed`). Adding a handler is a dependency, and is
+recorded here as not done rather than done silently.
+
+*Test*: the four outcomes map to `0, 2, 3, 1` and to the five exact lines the
+driver's own test builds; a steady run refused by name through `run` is
+`Error::Refused` and code 3; the binary, spawned on a shipped case, ends on
+that line with that status.
 
 ---
 
@@ -3730,6 +3872,66 @@ and now the momentum bounded-convection correction are all off the list:
 | the wall-function leg's kinematic drag balance, as shipped | closes — measured −0.005 % |
 | the `bounded` token toggled on either leg, everything else fixed | changes the drag balance by ~3.8 points (resolved) / ~0.11 points (wall function) and the energy balance by <0.15 points |
 | the convection scheme's ORDER toggled on either leg | changes `Nu` by less than 0.3 % |
+
+#### 32.5.6 The forces on a wall patch, both of them, and the flat-plate estimate beside them
+
+**Schlichting & Gersten, *Boundary-Layer Theory*, 8th ed., Springer (2000)** — the
+laminar (Blasius, *Z. Math. Phys.* 56 (1908) 1–37) and turbulent
+(Prandtl–Schlichting) smooth-plate skin-friction coefficients, used here as a
+comparison number only. No GPL source was consulted: OpenFOAM's `forces` function
+object and every other GPL/LGPL force integrator were not opened; the integrals
+below are this crate's own face sums over its own `Sf`.
+
+§32.5.1 measures the wall traction and reports its projection on one axis. A body
+in a flow needs the other half — the pressure force — and both as VECTORS, so
+this subsection adds, over every `wall`-kind face (a cut face is one, §24.3):
+
+```
+F_v = sum_f tau_f (dU_par,f/|dU_par,f|) A_f     the viscous force ON the wall, N
+F_p = sum_f rho_f p_f Sf_f                      the pressure force ON the wall, N
+```
+
+`tau_f` is exactly §32.5.1's per-face traction in the form that patch's own wall
+treatment selects — nothing is re-derived and nothing is averaged; `F_v . e_hat`
+is §32.5.1's streamwise drag identically. `p` is this solver's KINEMATIC pressure
+(`p/rho`, the momentum equation carries no density — §32.5.2's own correction),
+so `F_p` multiplies by the wall density `rho_f`; `p_f` is the face's evaluated
+boundary value, which on a `zeroGradient` wall is the owner cell's — first
+order, and the same value the momentum equation saw. `Sf` points out of the
+fluid, so both are the force the fluid exerts on the wall.
+
+*DESIGN — the axis.* The projections and the estimate need an axis. Where the
+run has one (a `massFlux` thermostat's direction or the single cyclic pair,
+§32.5.1) it is used and named. Where it has none the report does not guess a
+global axis (§32.5.1: "never guessed"): each patch takes its OWN mean traction
+direction `F_v/|F_v|`, and the line says `DEFAULT` and why. A patch with no
+traction says so and skips.
+
+*The flat-plate estimate*, per patch, is printed for comparison and never added
+to anything: `F_flat = (1/2) rho_b U_ref^2 C_F(Re_L) A_patch`,
+`Re_L = U_ref L/nu`, with `rho_b = rho(T_b)` (§32.5.2), `U_ref` the domain's
+mass-weighted mean of `U . axis`, `L` the extent of the patch's face centres
+along the axis (about one cell short of the geometric length), and
+
+```
+C_F = 1.328 / sqrt(Re_L)                Re_L < 5e5   (Blasius, laminar)
+C_F = 0.455 / (log10 Re_L)^2.58         Re_L >= 5e5  (Prandtl-Schlichting, turbulent, to ~1e9)
+```
+
+`5e5` is the textbook smooth-plate transition and is *DESIGN*; the regime is
+printed with the number. Only `ofgpu-lowmach` prints this block (it is the
+driver with a density field); the constant-density drivers are a later
+decision.
+
+| Check | Expected |
+|---|---|
+| the viscous force vector's projection on the run axis | `force.dot(e_hat)` equals the streamwise drag `drag` for every `e_hat` (+x, -x, and a wall-normal one) — round-off against `tau_w_mag * area`, not a tolerance |
+| Couette between a wall at rest and one at `S H` | each wall's `force` is `± rho nu S` exactly (a `1 x 1` wall is one face) and the two sum to zero to round-off — the STREAMWISE projection cancels, the vectors do not |
+| laminar plane Poiseuille, `n_y = 64` | each wall's `force.x` within 1 % of the closed form `rho g_x (H/2) A`, and the ratio `1 − 1/(2 n_y)` to `1e-12` — the same one-cell gradient §32.5.4's force-balance row names, now on the force vector |
+| a CLOSED box at uniform `p`, every patch a `wall` | pressure force zero to round-off; at linear `p = a x` exactly `a V e_x` — the face-centre rule is exact for a linear field on a hexahedron |
+| `flat_plate_cf` at the textbook transition | Blasius `1.328/sqrt(Re_L)` below `5e5`, Prandtl-Schlichting `0.455/(log10 Re_L)^2.58` from it up, exact as transcribed; `Re_L <= 0` or non-finite is `None`, the estimate SKIPPED |
+| the axis, when the run has none | each patch projects on its OWN mean traction direction, the line says `DEFAULT` and why, and no global axis is guessed (§32.5.1's rule, one level down) |
+| the printed block | `2 n_wall_patches + 3` lines after one blank — `=== wall forces` first, two lines per patch, one `total:`, one units disclosure — and no line matches a run-status pattern |
 
 ---
 
@@ -5431,7 +5633,9 @@ IS run is the realizability sweep and the homogeneous-strain experiments above,
 which are the model's own defining property and are sharper than a
 reattachment length: a wrong `Ustar`, a wrong `A_s`, a wrong `A_0` or a
 confused `S`/`Stil` each change them by a measurable amount, while a
-reattachment length can be right for the wrong reason.
+reattachment length can be right for the wrong reason. §110.3 now runs the geometry this
+paragraph says blockgen cannot build, by carving the step out of one block (castellation,
+§23.4), and holds the reattachment length against the same datum.
 
 ---
 
@@ -5684,6 +5888,9 @@ selected (`.vdb` if `vdb` is in the list, otherwise `.nvdb`), which is a
 correction: `common::build_writers` hard-coded `"vdb"`, so `-output nvdb,usda`
 has always produced a scene pointing at files that do not exist.
 
+The command-line route gets the same early refusal, with `cartesian::detect`'s
+reason in the message (`drop_volume_formats_on_a_non_cartesian_mesh`).
+
 ### 44.2 `visualisation.fields` — write only these, in this order
 
 ```
@@ -5760,6 +5967,19 @@ interval landing exactly on the end time gets one write there, not two.
 seconds" names a schedule they have no clock for. The error names `-endTime`
 /`-deltaT` (`ofgpu-lowmach`) and says the driver writes its final state once.
 `interval` absent runs everywhere.
+
+**The command line, since the steady-run defect was found.** `ofgpu-lowmach`
+used to ZERO a `-writeInterval` given to a steady run, silently - the §13.4
+defect in its purest form, and the reason a session that asked for snapshots
+saw none. It now refuses it by the rule above, naming `-writeEvery` and
+`-endTime`/`-deltaT`. A steady run's schedule is **`-writeEvery N`**: every
+N iterations, driven through the SAME schedule with the iteration count as
+its clock (`W = N`, `t = the iteration count`), so `-iters 30 -writeEvery 10`
+writes the time directories `10`, `20` and `30`, the forced final write
+sharing the last label. The disclosure line says `every N iterations`, never
+`every N s`. A transient run given `-writeEvery` is refused by name - it has a
+clock. The case route's `output.*.interval` keeps its meaning and its refusal
+and gains no iteration form here.
 
 ### 44.5 `restart.keep` — retain N, delete older, and delete nothing else
 
@@ -5838,9 +6058,12 @@ routed through one type instead of three call sites.
 | **`keep` deletes nothing else** | a directory seeded with an unrelated file, a decoy `restart_0.9.mcr` this run did not write, and a subdirectory: after 5 writes with `keep: 1`, all three are still there and exactly one run-written checkpoint remains |
 | precedence | case block + `-output` errors naming both; case block alone runs; command line alone is bitwise unchanged |
 | non-Cartesian mesh | a `visualisation` block on a mesh `cartesian::detect` refuses errors BEFORE the loop, naming `exact` |
+| non-Cartesian mesh, command line | `-output nvdb`/`vdb` on a mesh `cartesian::detect` refuses errors BEFORE the loop in `ofgpu-lowmach` and `ofgpu-k-epsilon`, naming `detect`'s reason and `foam, vtu`; under `-permissive` the volume format is dropped, one warning each, and no `VDB/` is made |
 | `output.restart` in `ofgpu-k-epsilon` | errors by name — that driver has no checkpoint at all — naming the three that do |
 | **§13.4.1 pair** | ten pairs — `output` present/absent, `visualisation.format`, `.interval`, `.fields`, `.precision`, `.usdScene`, `exact.format`, `exact.interval`, `restart.interval`, `restart.keep` — each two runs identical in every byte but one, each REQUIRED to write different bytes. Compared as BYTES, not text: `.vdb`/`.nvdb` are binary and `read_to_string` silently skips them |
 | the default does not move | `cargo test`, `ofgpu-validate` and the gate case's three recorded numbers unchanged |
+| steady + `-writeInterval` (command line) | errors by name, naming `-writeEvery` and `-endTime`/`-deltaT`; `-permissive` writes the final state only |
+| `-writeEvery N` | `-iters 30 -writeEvery 10` writes exactly the directories `10`, `20`, `30`, and `-iters 30` alone writes one; on a transient run it errors by name, naming `-writeInterval` |
 
 
 ### 44.8 What the documented example turned out to be
@@ -5885,6 +6108,48 @@ because the case's `fields` list did not name it; `is_saved_as_half_float` is
 present. The `.usda` carries nine `def Volume` prims and points at
 `./VDB/plumeB_000000.vdb`. That is every one of §44.1, §44.2, §44.3 and §45
 doing what this section says, on the documented example's own text.
+
+---
+
+### 44.9 Where a steady run writes, and what a restart continues
+
+A run never writes into the directory it started from. `ofgpu-lowmach` labelled
+every write `format_time_name(t)`, and on a steady run `t` never moved, so 3000
+iterations ended in `0/` on top of the initial fields: the next run of the same
+case started from the previous answer, and a case could not be re-run from what
+it shipped (the 2026-09-18 race-car session's finding, `docs/14` row R1).
+
+The label of a steady write is the run's iteration count, in the convention
+this crate already reads controlDict's `endTime` by on a steady run (its time
+IS the iteration counter - `io::case`, and the `dt = 1` the steady loop already
+passes): `-iters 200` from a cold start writes `200/`; a run resumed from a
+checkpoint written at iteration 100 that asks for `-iters 100` writes `200/`
+too, because the `.mcr`'s `time` slot carries the count and the loop resumes
+from it. `-iters N` is therefore always "N more". `0/` is what the case
+shipped, and nothing a run does touches it. A transient run keeps
+`format_time_name(t)` with `t = t0 + n * deltaT`, unchanged.
+
+```
+steady:     label = format_time_name(t0 + N),        t0 = 0, or the checkpoint's time
+transient:  label = format_time_name(t0 + n*deltaT),  as before
+```
+
+Two consequences a run says out loud rather than leaves to be discovered. A
+steady checkpoint's time is an iteration count, so a transient run resumed from
+one whose `-endTime` is not above it is refused by name (§13.4) instead of run
+for one step. And the start-time rule is unchanged - `find_start_time` prefers
+`0/` - so re-running a case starts from `0/`; continuing from the previous
+answer is `-restartFrom <root>/restart.mcr`, never the previous answer's own
+directory. The driver prints the final directory before the loop (§13.4.2) and,
+on a resume, which count or time it resumed at.
+
+*Test*: a steady run of 200 iterations and a run of 100 resumed from a
+checkpoint written at 100 write the same bytes - every field file of `200/`
+and the `.mcr` written at 200 - and a polyMesh case's `0/` is byte-identical
+before and after a run. Where the pair is not bitwise, the gap is reported by
+field and magnitude, never hidden (§31.2's rule). The other steady drivers
+label their one write by `endTime` (`"1"` by default) and never wrote `0/`;
+they are outside this subsection.
 
 ---
 
@@ -6730,7 +6995,9 @@ rewrite the same `(fr, refValue, refGrad)` — the same reason §47.6 gives for
 `thermalWallFunction`. So `compressible::turbulentTemperatureRadCoupledMixed`
 is still a §13.4 error; its message now names **both** conditions that exist
 and says a face carries one or the other (§50.8). A genuinely radiating
-conjugate interface — the cell-source route above — remains unbuilt.
+conjugate interface is built by §98.8, through the cell-source route above:
+the interface keeps its coupled triple and the power it radiates is a cell
+source of the solid behind it.
 
 ### 47.11 What must hold
 
@@ -8169,8 +8436,9 @@ localises to the coupling rather than to the geometry — and it exercises the
 whole chain: the buoyant solver, the energy equation, (S50.12), the radiosity
 solve and the Picard lag between them.
 
-Two things stand between here and it, and both are structural rather than
-incidental:
+Two things stood between here and it. The second is gone: §98.7 is the case
+format for a radiating enclosure, §98.8 its driver and Gate 98-C (§98.9) the
+gate that runs them. The one that stands is structural rather than incidental:
 
 1. **The tabulated `Nu_conv`/`Nu_rad` values could not be obtained.** Both
    papers are behind Elsevier's paywall and no open-access reproduction of the
@@ -8178,12 +8446,6 @@ incidental:
    gate against "compare with experiment" instead of against their own
    tabulated numbers with their stated band would be the wrong shape of gate
    for this project.
-2. **The fluid side has no case format for a radiating enclosure.** The model
-   is fully wired and gated as a *library* — `S2s::update` writes the triple,
-   and §51's pair tests drive it from a case document — but no driver binary
-   reads an enclosure definition out of a case directory and runs
-   `ofgpu-buoyant` with it. That is the same boundary §47.14 records for the
-   conjugate model's fluid side, and it is the next step for both.
 
 `ofgpu-validate` prints this omission on every run rather than leaving it
 silent, in the same way §68.12 prints its miss.
@@ -8195,10 +8457,11 @@ silent, in the same way §68.12 prints its miss.
   in §49/§50 that rests on nothing but this project's own measurement.
 * **The Picard lag between the radiosity system and the energy equation has no
   convergence proof** (§50.7). `radiationRelaxation` exists because of that,
-  and it has never been exercised against a case that actually needs it — only
-  against the requirement that it changes the answer.
-* **Specular reflection, non-grey bands and a radiating conjugate interface
-  are all refused by name** (§50.9, §47.10) rather than approximated. The
+  and Gate 98-C (§98.9) now runs it on a live enclosure at three
+  values and prints what each cost.
+* **Specular reflection and non-grey bands are refused by name** (§50.9)
+  rather than approximated; a radiating conjugate interface is no longer on
+  this list - §98.8 builds it. The
   first of those is not a tolerance question: polished aluminium and gold
   plating are exactly the surfaces this model's target application is full of,
   and (S50.1) does not describe them at all.
@@ -8233,14 +8496,14 @@ Boundary side: `T`'s patch entry says `greyDiffusiveRadiationViewFactor` (or
 `s2sWall`), optionally with its own `emissivity` and a `q` (the external flux
 `q_ext`, W/m^2, default `0`).
 
-**What this dictionary does NOT do yet, said here rather than discovered.**
-It configures the model; it does not run one. No driver binary reads an
-enclosure out of a case directory and steps a flow with it — the library API
-(`RadiantFaces`, `S2s::new`, `S2s::update`) is what the gates drive, and
-§50.12 records that boundary. The JSONC case format has no radiation block at
-all — an enclosure is read from `constant/radiationProperties` and from
-nowhere else — so there is no second place for the same entries to be said
-and ignored.
+**What this dictionary does, and where.** It configures the model, and
+since §98.7 a case runs one: `ofgpu-cht` reads an enclosure out of the
+directory a `*.cht.jsonc` case names with `radiation`, and §98.8 steps it
+inside the conjugate SIMPLE loop. The JSONC case format still has no
+radiation block - an enclosure is read from `constant/radiationProperties`
+and from nowhere else - so there is no second place for the same entries to
+be said and ignored. `ofgpu-buoyant` runs none and refuses one by name
+(§98.10).
 
 ### 51.2 The pair tests
 
@@ -8933,7 +9196,8 @@ companion `qfan_test.csv` (`LOSS = 5,5` on both ducts, `HVAC_QFAN=T`) reports
 `dp = (1/2) rho K (Q/A)^2` with `rho = p M_a/(R T) = 1.199338 kg/m^3` at FDS's
 default 20 C and `M_a = 28.85034 g/mol` gives `4.519615 Pa` against FDS's
 `4.5184 Pa` — **2.7e-4 relative**. Both are computed live in the test from
-constants read out of the vendored case files; **no FDS source is read**, only
+constants read out of the FDS case files — read in a local clone that
+this repository does not carry; **no FDS source is read**, only
 its input decks and its published CSVs, which are data.
 
 The closed form for the whole loop, `Q = 0.0491559`, sits between the two FDS
@@ -9747,6 +10011,23 @@ the single most valuable number in a data-centre report, because supply
 temperature is what buys free-cooling hours and free-cooling hours are what
 move PUE.
 
+**The sweep is a case setting, not a flag.** `metrics.supplyTemperatureSweep: [lo, hi, step]`,
+all three in kelvin like every other temperature the case carries, asks for one extra solve
+at each of `lo, lo + step, ..., <= hi` (at most sixteen, refused by name above that), with the
+supply patch's own inlet temperature — an inflow fan's `supplyTemperature` or a tile's
+`plenumTemperature`, whichever `metrics.supplyPatch` names — set to that value and everything
+else the case says re-lowered from it, so a tile's `plenumRelativeHumidity` yields a new `Y_v`
+at each temperature through (S54.2)/(S54.4). The base run is solved first and is the report;
+the sweep is printed beside it as a table of `T_set`, the flux-weighted `T_supply` it produced,
+`RCI_HI` and `RCI_LO`. The **free-cooling ceiling** is the highest `T_set` whose `RCI_HI` is
+*exactly* `100 %` — (S55.1) is exactly 100 when no sample exceeds `T_hi_rec`, so equality is the
+test and never a tolerance — reported in kelvin with the Celsius reading beside it, `null` /
+"not swept" when the case asks for no sweep, and "none" when no swept value holds. `RCI_HI` is
+expected non-increasing in `T_set`; the table says whether it was, and a rise is printed as what
+it is — two solves of one iteration budget that did not reach the same residual — never refused.
+A supply patch that carries no inlet temperature (a `fixedPressure` opening, a wall, an outflow
+fan) has nothing to sweep and is refused by name.
+
 **No standard number is printed as if it had been checked.** The current
 edition is ISO/IEC 30134-2:2026, ed. 2.0, published 2026-01-16, IEC webstore
 publication 111538 — that is catalogue metadata, and it is all of the standard
@@ -9840,6 +10121,7 @@ and the output that must differ:
 | `ashraeClass` (A1–A4) | one word | `RCI_LO` and `RCI_HI` |
 | `samples` (`faces`/`thirds`) | one word | `RCI` and the reported `n` |
 | `supplyTemperature` / `plenumTemperature` | one number | the inlet temperature, hence `RTI` and `SHI` |
+| `supplyTemperatureSweep` | present vs absent | `freeCoolingCeiling` (a temperature vs `null`) and the sweep table (N rows vs `null`) |
 
 Each is a test that **fails by name** if the two runs agree. That is the
 §13.4.1 contract, and it matters more than any individual feature here: six
@@ -9867,6 +10149,7 @@ corresponding pair test.
 | every reduction | `solver::device_sum`; no atomic |
 | determinism | two runs bitwise identical |
 | the pair tests of §55.6 | all of them, each failing by name |
+| the free-cooling ceiling | the highest swept `T_set` whose `RCI_HI == 100 %` exactly; `null` with no sweep; "none" when no swept value holds; the table monotone or flagged |
 
 ### 55.8 Validation
 
@@ -13383,7 +13666,8 @@ performance of turbulent water jets*, Fire Safety Journal 4 (1981) 1-13 — the
 Fluids* 26 (1983) 883, DOI `10.1063/1.864230` — the equation of motion whose
 drag term is the one being returned. The FDS Technical Reference Guide's
 appendix *Fluid-Particle Momentum Transfer* (NIST, US-government public domain,
-vendored at `reference/fds`) states the same conservation principle — the gas
+read in a local `reference/fds` clone that this repository does not carry)
+states the same conservation principle — the gas
 receives the negative of the droplets' momentum change — and its
 `Validation/Theobald_Hose_Stream` input-deck generator is where §68.12's
 columns are transcribed from. **No GPL-licensed source was consulted**, and in
@@ -13760,7 +14044,8 @@ evaporation, no turbulence model, and a single scalar per experiment.
 **The columns** are transcribed from the FDS validation suite's own input-deck
 generator (`Validation/Theobald_Hose_Stream/FDS_Input_Files/Build_Input_Files/
 paramfile.csv` and `build_input_files.py`, NIST, US-government public domain,
-vendored at `reference/fds`): efflux velocity `3.71 sqrt(dP[psi])` m/s, firing
+read in a local `reference/fds` clone that this repository does not carry):
+efflux velocity `3.71 sqrt(dP[psi])` m/s, firing
 angle as `tan(theta)`, droplet diameter one tenth of the bore, the measured
 maximum throw, and `PRIMARY_BREAKUP_LENGTH` — twice Theobald's own Eq. (2)
 correlation for the length at which the jet is 50 % discontinuous.
@@ -17441,7 +17726,8 @@ relation between the heat and mass transfer coefficients whose failure at
 `Le != 1` is exactly what §76.13's gap is made of. **NIST Chemistry WebBook,
 SRD 69** (US-government public domain) — the water-vapour specific heat and the
 critical constants. The **FDS Technical Reference Guide** (NIST SP 1018-1,
-US-government public domain, vendored at `reference/fds`), chapter *Lagrangian
+US-government public domain, read in a local `reference/fds` clone that
+this repository does not carry), chapter *Lagrangian
 Particles* and the appendix *Development of an Implicit Solution for Droplet
 Evaporation*, states the same model set; its `B_T = B_M`
 simplification is offered here as `massTransfer spalding` and is **not** the
@@ -18016,7 +18302,8 @@ satisfy without a clamp. **R. G. Rehm, H. R. Baum**, *The equations of motion
 for thermally driven, buoyant flows*, J. Res. NBS 83 (1978) 297–308 — the
 low-Mach split whose divergence constraint (§25.1) (77.3) enters. The **FDS
 Technical Reference Guide** (NIST SP 1018-1, US-government public domain,
-vendored at `reference/fds`), chapter *The Divergence* — the same `D_SOURCE`
+read in a local `reference/fds` clone that this repository does not carry),
+chapter *The Divergence* — the same `D_SOURCE`
 term in its general variable-molar-mass form, of which §25's constant-`W` gas
 keeps `mdot/rho` and nothing else (§77.6). **ASHRAE Handbook — Fundamentals**
 (2017), ch. 1, eq. 33 — the adiabatic-saturation relation gate 77-D is measured
@@ -20381,7 +20668,7 @@ alternative, per §13.4.
 
 `Gpu` carries an `AtomicBool` set between `begin_capture` and `end_capture`,
 and every host round-trip on that type checks it first: `sync`, `download`,
-`upload`, `write`, `zeros`, `mem_info`, `load`. Each returns an error naming
+`upload`, `write`, `zeros`, `mem_info`, `pool_usage` (§111.2), `load`. Each returns an error naming
 **the call**, the reason a graph cannot hold it, and the alternative — keep the
 value on the device, as `solver.rs` keeps its residuals. A nested `capture` is
 refused too, because it would fold into the outer graph and return `None`,
@@ -20487,9 +20774,10 @@ Four checks, and they fail closed in four different ways.
    a terminal, cycles and dangling owners are errors, and a chain ending at
    `Ungated` makes the *pointing* row ungated too. A new module cannot hide
    behind an owner that has none.
-4. **The debt is capped and only falls.** `UNGATED_CEILING = 3`. Raising it is
-   an edit somebody has to defend in a diff — §80.4's ratchet, applied to
-   coverage instead of citations.
+4. **The debt is capped and only falls.** `UNGATED_CEILING = 0`, and the debt
+   it caps is zero: every module that carried it is now two gates and one
+   measured refusal. Raising it is an edit somebody has to defend in a diff —
+   §80.4's ratchet, applied to coverage instead of citations.
 
 What it does **not** stop: a gate whose `state` closure reads one buffer of the
 five its module writes. That is real, and it is why the protocol's own doc says
@@ -20512,7 +20800,7 @@ that; only reading the gate can.
 
 ### 81.9 The gates, and what they measured
 
-Thirty-seven of fifty-four modules resolved to gated when this was measured, on
+Thirty-six of fifty-two modules resolved to gated when this was measured, on
 an RTX 5070 Ti, CUDA 13.3, default `f64`; `nodes` is `GraphShape::total`, and
 every row replayed three times bit for bit. The counts are a dated measurement
 and §81.14 carries the census as it stands now; the table is quoted for the
@@ -20520,7 +20808,9 @@ SHAPE of the population, which is what does not move.
 
 | module | gate | nodes (kernel / memset) | values compared |
 |---|---|---|---|
+| `simple.rs` | `the_simple_outer_corrector_replays_bitwise` | 523 (479 / 44) | 560 |
 | `solver.rs` | `the_fixed_iteration_solve_replays_bitwise` | 118 (107 / 11) | 29 |
+| `pressure/mod.rs` | `the_pressure_backend_dispatch_replays_bitwise` | 55 (52 / 3) | 64 |
 | `models/k_epsilon.rs` | `a_fixed_iteration_correct_captures_into_a_cuda_graph` | — (pre-existing) | 64 |
 | `parcels.rs`, `parcels/couple.rs`, `parcels/deposit.rs` | three pre-existing gates | — | — |
 | `momentum.rs` | `the_momentum_predictor_replays_bitwise` | 384 (351 / 33) | 192 |
@@ -20537,6 +20827,7 @@ SHAPE of the population, which is what does not move.
 | `psychro.rs` | `the_psychrometric_update_replays_bitwise` | 1 | 320 |
 | `models/des.rs` | `the_des_correction_replays_bitwise` | 1 | 192 |
 | `fan.rs` | `the_fan_source_replays_bitwise` | 1 | 37 |
+| `pressure/fft.rs` | — refused, the per-solve operator read-back (§81.11) | — | — |
 
 **Four of the five pre-existing gates already compared bitwise. The fifth did
 not, and it was `solver.rs`'s** — the module the whole claim rests on.
@@ -20588,9 +20879,9 @@ residual really is zero". Reporting the two as the same number is the confusion
 ### 81.11 The refusals, measured rather than asserted
 
 A refusal written only in prose decays: the module is fixed, or made worse, and
-the sentence beside it stays the same. Both below are **executed**, and each
-must fail *naming the call that makes it impossible*. If either starts to
-succeed, the test fails and says which registry row to promote.
+the sentence beside it stays the same. All three below are **executed**, and
+each must fail *naming the call that makes it impossible*. If any one of them
+starts to succeed, the test fails and says which registry row to promote.
 
 **(a) `vof.rs` — a data-dependent trip count.** `Vof::step` computes the alpha
 Courant number on the device, **downloads it**, and derives from it the MULES
@@ -20615,6 +20906,19 @@ choosing `PCG` in `fvSolution` costs that equation its CUDA graph, whatever
 `fixed_iters` says.** `cht.rs`'s own default controls select `PCG` + `DIC`, and
 its gate therefore runs `PBiCGStab` + `DILU`.
 
+**(c) `pressure/fft.rs` — a safety check that lives on the host.**
+`FftBackend::solve` **downloads** the matrix on every call — `upper` always,
+`diag` and `lower` under the default `Verify::EverySolve` — re-derives the whole
+operator from the download, and then **writes** the three eigenvalue tables
+back from the host. Both calls are refused inside a capture, by name.
+`the_cufft_solve_is_not_capturable_and_says_which_call` runs one eager solve
+and then requires the second to be refused naming `Gpu::download`. The
+alternative is a *frozen* mode — eigenvalue tables resident, plans fixed, the
+structure trusted instead of re-read — which would remove the per-solve
+operator check this backend exists to make: the check is what stands between a
+changed boundary condition and a smooth, plausible, wrong pressure field. It is
+not implemented, so the refusal stands.
+
 `adapt.rs` is refused for a different reason again, and it is the only one that
 is not about the host: AMR *reallocates* every cell-sized buffer, and a captured
 graph holds the old device pointers. Replaying it after a refinement would
@@ -20627,6 +20931,166 @@ is refused because AMGX owns its own streams and allocation and the feature is
 off by default.
 
 ### 81.12 What the graph actually buys — measured, and not what was expected
+
+This section measures what a CUDA graph saves over launching the same
+fixed-iteration k-epsilon work one kernel at a time, with `ofgpu-graph-bench`,
+whose two fixed modes do identical work and must agree bit for bit. It was
+re-taken on 2026-09-24 on the machine named below, after §113 folded the
+one-thread launches out of every Krylov sweep. The reason is that the table
+printed here until then named no driver, no case and no card state, and a
+2026-09-14 run on the same card read 11.84× at 24 000 cells where it printed
+3.06×. **This section now names its machine and what else was on the card.**
+The old tables are kept at the end of the section, as they were printed.
+
+**The machine this section describes.** Measured on 2026-09-24 between 12:55
+and 13:25 (KST), at commit `48908b1` — after §113's fold — in the default
+`f64` release build:
+
+| | |
+|---|---|
+| GPU | NVIDIA GeForce RTX 5070 Ti, 16 303 MiB, sm_120, PCIe gen 5 x16, VBIOS 98.03.58.00.f7 |
+| driver | 596.49, WDDM; the card also drives the desktop's display (`display_active` Enabled) |
+| toolkit | nvcc 13.3 (V13.3.73) |
+| host | AMD Ryzen 9 7950X, 16 cores / 32 threads, Windows 11 Pro 10.0.22631 |
+| compiler | rustc 1.95.0 |
+
+**What else was on the card.** Before and after every run
+`nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu` and
+`nvidia-smi --query-compute-apps=pid,process_name,used_memory` were logged, and
+a watcher logged the compute-apps list every 2–3 s for the whole sweep. The
+desktop's own processes (Explorer, the browsers, the terminal) hold contexts on
+this card all the time, and so does one process `nvidia-smi` will not name
+(PID 3092, `[Insufficient Permissions]`), which was in every sample, the first
+one included. Apart from those the card was idle until 12:57:28. From then on
+the machine owner's mutation-test suite was running: a `python.exe` driver that
+starts one `pytest` process after another, each with a CUDA context of its own.
+The watcher saw 107 distinct `python.exe` contexts, and at least one of them in
+511 of its 739 samples. Nothing was stopped: those processes were not ours to
+stop.
+
+A run counts as **quiet** when no context other than the desktop's and PID
+3092's appears in either `nvidia-smi` reading around it or in any watcher
+sample during it. From the sixth round on (13:03) every run first waited, for
+up to 80–90 s, for three consecutive one-second readings with no such context.
+37 of the 86 runs were quiet; at their start the card read 1 553–3 257 MiB
+used and 0–6 % utilisation. The tables below are the medians of the quiet
+runs. A context that lived for less than the watcher's interval can fall
+between two samples, so "quiet" means that none was seen, not that none
+existed.
+
+The meshes, the harness and the order:
+
+```
+ofgpu-generate-mesh plume   <dir> 15 10 10     #     1 500 cells
+ofgpu-generate-mesh plume   <dir> 60 25 16     #    24 000
+ofgpu-generate-mesh channel <dir> 200 120 1    #    24 000
+ofgpu-generate-mesh plume   <dir> 120 50 40    #   240 000
+ofgpu-generate-mesh plume   <dir> 200 100 40   #   800 000
+ofgpu-generate-mesh plume   <dir> 200 120 100  # 2 400 000
+ofgpu-graph-bench <dir> -iters 300 -sweeps N   # N = 3 on every mesh; 1, 10 and 30 as below
+```
+
+Every row ran once per round, round-robin, so a drift in the card's load falls
+on every row alike; eight rounds, and three more of the two rows that were
+short of quiet runs.
+
+Three solver sweeps, 300 outer iterations, medians of the quiet runs in
+ms/iter; the ratio is the per-launch median over the graph median:
+
+| case, mesh | cells | adaptive | per-launch | graph | ratio | quiet runs |
+|---|---|---|---|---|---|---|
+| plume 15 x 10 x 10 | 1 500 | 0.992 | 1.187 | 0.363 | **3.27×** | 4 of 8 |
+| plume 60 x 25 x 16 | 24 000 | 1.007 | 1.219 | 0.438 | **2.78×** | 3 of 8 |
+| channel 200 x 120 x 1 | 24 000 | 1.492 | 1.252 | 0.413 | **3.03×** | 4 of 8 |
+| plume 120 x 50 x 40 | 240 000 | 2.638 | 2.624 | 2.142 | **1.23×** | 3 of 8 |
+| plume 200 x 100 x 40 | 800 000 | 7.086 | 7.712 | 7.383 | **1.04×** | 3 of 8 |
+| plume 200 x 120 x 100 | 2 400 000 | 20.861 | 23.272 | 23.172 | **1.00×** | 4 of 11 |
+
+Every one of the 86 runs, quiet or not, printed `k vs per-launch: 0 of N cells
+differ, max |diff| 0`.
+
+The same harness with the mesh held at 24 000 cells (plume 60 x 25 x 16) and
+the number of solver sweeps varied:
+
+| sweeps | per-launch ms/iter | graph ms/iter | ratio | quiet runs |
+|---|---|---|---|---|
+| 1 | 0.866 | 0.335 | 2.59× | 4 of 8 |
+| 3 | 1.219 | 0.438 | 2.78× | 3 of 8 |
+| 10 | 2.588 | 0.806 | 3.21× | 4 of 8 |
+| 30 | 5.916 | 1.846 | 3.20× | 3 of 8 |
+
+and at 240 000 cells (plume 120 x 50 x 40), 3 sweeps gives 1.23× while 30
+sweeps gives 11.366 / 9.071 ms, 1.25× (5 of 11 runs quiet).
+
+On a quiet card the old table's shape holds: the ratio falls with mesh size,
+from 3.27× at 1 500 cells to 1.00× at 2 400 000 cells, the row the old table
+never had. The 24 000-cell channel row comes within half a per cent of the
+old 24 000-cell row on both paths, per-launch 1.252 against 1.258 and graph
+0.413 against 0.412; the old section does not say which case its row used, so
+this is a match of numbers, not a proof that it was the same case. The plume
+rows sit lower than the old ratios at the small meshes, 3.27× against 3.70×
+at 1 500 cells and 2.78× against 3.06× at 24 000. §113's fold took launches
+out of every sweep — four a sweep for PBiCGStab, §113 counting 232 kernel
+nodes before it and 184 after for a 12-sweep solve — which lowers the ratio
+where launches dominate; the section does not claim the fold is the whole
+difference, because the old run's cases and card state are not known.
+
+The 11.84× of 2026-09-14 — per-launch 12.099 ms, graph 1.022 ms, the
+24 000-cell channel — was taken while a second process, `fds_gpu.exe`, held
+6.8–7.3 GB and 47–95 % of the card's SM time. **What `docs/11` read as a
+table that no longer reproduces was a contended card, not a different
+machine.** The sweep table keeps its rise, 2.59× at 1 sweep to 3.21× at 10,
+and stops there: 3.20× at 30, where the old table read 3.41×.
+
+The runs that were not quiet, set beside the quiet ones (medians, ms/iter;
+the slowdown is the contended median over the quiet median):
+
+| case, sweeps | contended runs | per-launch | graph | ratio | per-launch slowdown | graph slowdown |
+|---|---|---|---|---|---|---|
+| plume 1 500, 3 | 4 | 2.054 | 0.432 | 4.75× | 1.73× | 1.19× |
+| plume 24 000, 3 | 5 | 2.329 | 0.542 | 4.30× | 1.91× | 1.24× |
+| channel 24 000, 3 | 4 | 1.702 | 0.440 | 3.87× | 1.36× | 1.07× |
+| plume 24 000, 30 | 5 | 10.695 | 2.406 | 4.45× | 1.81× | 1.30× |
+| plume 240 000, 3 | 5 | 3.587 | 2.798 | 1.28× | 1.37× | 1.31× |
+| plume 800 000, 3 | 5 | 9.587 | 8.121 | 1.18× | 1.24× | 1.10× |
+| plume 2 400 000, 3 | 7 | 23.967 | 23.442 | 1.02× | 1.03× | 1.01× |
+
+With the owner's test suite starting CUDA contexts beside it, the per-launch
+path slowed by up to 1.91× and the graph path by up to 1.31×, and at
+2 400 000 cells neither moved by more than 1.03×. On the small meshes the
+ratio rose under contention, to 3.87–4.75×, **because the graph pays the
+contended submission once per iteration and the per-launch path pays it per
+kernel.** The heavier neighbour of 2026-09-14 cost the per-launch path 9.6×
+and the graph path 2.5×. A ratio from this section is therefore a property of
+the card together with what shares it, and none of these figures is
+publishable without its contention column.
+
+**A CUDA graph buys back CPU submission time. That cost is per *launch* and is
+independent of the work each launch does.** So the ratio is governed by
+launches per unit of GPU work, not by cells: it rises with the number of
+kernels in an iteration and falls as each kernel gets more to do. Above roughly
+half a million cells this solver is memory-bandwidth bound and the graph is
+worth a few per cent — which `README.en.md`'s neighbouring paragraph already
+said about launch overhead in general, two sections earlier, without anyone
+joining the two statements.
+
+The practical consequence for this project cuts the helpful way. §38–§79 added
+*more kernels per iteration*, not more work per kernel: the gates above measure
+384 nodes for one momentum predictor and 369 for one species correction, and a
+coupled iteration is the sum of a dozen such modules. At a fixed mesh, today's
+iteration has far more launches to amortise than the 2024 iteration that was
+measured at 3.16×, so the graph is worth **more** now than it was — and the
+place it is worth least is the large mesh, not the small one.
+
+Capture and instantiation cost 0.24–3.25 ms at 1 and 3 sweeps and
+0.82–15.57 ms at 10 and 30, once per run, on every mesh measured. It is
+never the consideration.
+
+**The measurement this section printed until 2026-09-24.** It was committed on
+2026-09-02 (`e475d26`) and names the card (an RTX 5070 Ti) and the harness
+settings, and nothing else: not the driver, the toolkit, the day it was taken,
+the cases behind its cell counts, or what else was running on the card. It is
+kept here as it was printed, its opening sentence included:
 
 The published **3.16×** was measured at 24 000 cells, and it reproduces: this
 machine gives **2.96×** on the same case today. What did not survive is the
@@ -20653,26 +21117,6 @@ cells and vary the number of launches per iteration (solver sweeps):
 
 and at 240 000 cells, 3 sweeps gives 1.25× while 30 sweeps gives 1.38×.
 
-**A CUDA graph buys back CPU submission time. That cost is per *launch* and is
-independent of the work each launch does.** So the ratio is governed by
-launches per unit of GPU work, not by cells: it rises with the number of
-kernels in an iteration and falls as each kernel gets more to do. Above roughly
-half a million cells this solver is memory-bandwidth bound and the graph is
-worth a few per cent — which `README.en.md`'s neighbouring paragraph already
-said about launch overhead in general, two sections earlier, without anyone
-joining the two statements.
-
-The practical consequence for this project cuts the helpful way. §38–§79 added
-*more kernels per iteration*, not more work per kernel: the gates above measure
-384 nodes for one momentum predictor and 369 for one species correction, and a
-coupled iteration is the sum of a dozen such modules. At a fixed mesh, today's
-iteration has far more launches to amortise than the 2024 iteration that was
-measured at 3.16×, so the graph is worth **more** now than it was — and the
-place it is worth least is the large mesh, not the small one.
-
-Capture and instantiation cost 0.3–0.8 ms, once, on every mesh measured. It is
-never the consideration.
-
 ### 81.13 What must hold
 
 | # | claim | held by |
@@ -20684,9 +21128,9 @@ never the consideration.
 | 5 | every device module is classified | `every_device_module_is_classified`: population(disk) `==` registry keys, both directions |
 | 6 | a gate names a test that exists and captures | `every_gate_names_a_test_that_runs_the_protocol` |
 | 7 | `Via` terminates and cannot launder coverage | `every_via_chain_terminates`; a chain ending at `Ungated` counts as ungated |
-| 8 | the ungated debt only falls | `the_ungated_debt_is_within_the_published_ceiling`, ceiling 3 |
+| 8 | the ungated debt only falls | `the_ungated_debt_is_within_the_published_ceiling`, ceiling 0 |
 | 9 | `launch_builder` is the only launch path | `no_other_launch_path` |
-| 10 | the refusals are refusals **today** | `the_refusal_is_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call` |
+| 10 | the refusals are refusals **today** | `the_refusal_is_measured_and_not_asserted`, `a_pcg_solve_is_not_capturable_and_says_which_call`, `the_cufft_solve_is_not_capturable_and_says_which_call` |
 | 11 | defaults are bitwise unchanged | by construction: `mod capture` is `#[cfg(test)]`; the guard adds a relaxed atomic load and no arithmetic; §81.10's report flag defaults to on |
 
 ### 81.14 Validation
@@ -20694,31 +21138,29 @@ never the consideration.
 The registry as the tests print it:
 
 ```
-  CUDA-graph capture registry (48 modules)
-     32  gated
-     10  refused, by name
-      3  outside the iteration
-      3  UNGATED
-    ungated: src/pressure/fft.rs, src/pressure/mod.rs, src/simple.rs
+  CUDA-graph capture registry (53 modules)
+     37  gated
+      4  outside the iteration
+     12  refused, by name
 ```
 
-It read `50 / 36 / 10 / 1 / 3` when §81 was written and the difference is not a
-regression: the population is derived from disk, so it moves as the tree does,
-three rows that were miscounted as one `outside` are three, and the ungated
-debt is where it was. The ceiling only falls, and it did not have to.
+It read `50 / 36 / 10 / 1 / 3` when §81 was written, and `3 UNGATED` right up
+until the debt went to zero: the population is derived from disk, so it moves
+as the tree does - it read `52 / 36` until §105.2 added
+`src/mesh/ale.rs` as a gated row. The ceiling only falls, and the fall to `0 ungated` is the
+one this ratchet exists to record.
 
-The three ungated, named because they should be:
-
-* `src/simple.rs` — the SIMPLE outer loop. The binaries capture it live
-  (`bin/plume.rs`, `bin/buoyant.rs`), and every piece it calls is gated
-  separately, but it has no gate of its own because building a SIMPLE case in a
-  unit test means building a case directory;
-* `src/pressure/mod.rs` — the backend selector. It dispatches to the Krylov
-  solve, which `solver.rs` gates, or to the cuFFT Poisson solve;
-* `src/pressure/fft.rs` — `Via` the selector. cuFFT executes on this crate's
-  stream and *should* capture, but nothing has captured it and cuFFT plan
-  execution is library code this crate does not control. This is the honest
-  gap, and it is the one worth closing next.
+The three ungated were closed one by one, each by name. `src/simple.rs` — the
+SIMPLE outer loop the binaries capture live — is gated by
+`the_simple_outer_corrector_replays_bitwise`: a driven box whose lid moves `U`
+in more than half the cells before anything is compared, five buffers read back
+per iteration. `src/pressure/mod.rs` — the backend selector — is gated by
+`the_pressure_backend_dispatch_replays_bitwise`: a solve through
+`&mut dyn PressureBackend`, the trait-object call every real driver makes. And
+`src/pressure/fft.rs`, which rode `Via` the selector, turned out not to be
+uncaptured but uncapturable: its per-solve operator read-back is refused by
+name, §81.11(c) records why, and it stands as a measured refusal rather than a
+gate.
 
 ### 81.15 What this does not do
 
@@ -20731,9 +21173,13 @@ The three ungated, named because they should be:
   k-epsilon, across mesh size and launch count, and the mechanism it isolates —
   launches per unit of GPU work — is not module-specific. A per-module table
   would need a per-module case and is not here.
-* **It does not fix the three refusals.** Two are structural and one is a
-  correctness check that belongs where it is. All three name their alternative;
-  none of the alternatives is implemented.
+* **It does not fix the refusals.** There are more of them now than when
+  §81.11 first measured two — the newest is `pressure/fft.rs`, whose per-solve
+  operator read-back makes the cuFFT path uncapturable (§81.11(c)) — and the
+  count moves with the tree. Two are structural, one is a correctness check
+  that belongs where it is, and one is a safety check this document declined to
+  trade away for a gate. All of them name their alternative; none of the
+  alternatives is implemented.
 * **It cannot see a module that never joins an iteration.** A kernel launched
   only from a binary, never from a module, is outside the population by
   construction — which is correct, and is also a place to hide.
@@ -25441,7 +25887,8 @@ A leaf whose bounding sphere touches a named patch is refined to the deepest
 level that patch's bands ask for anywhere; it errs toward refining, never away
 from it, and it needs no triangle-box intersection test to say so. `l_feat`
 (92.2) and `l_region` are stages this unit does not build; when they arrive
-they join the same maximum, and (92.22) does not change.
+they join the same maximum, and (92.22) does not change. §92.16 builds
+`l_region` as the box term (92.67).
 
 **What must hold**
 
@@ -26058,6 +26505,28 @@ value of zero turns the attraction off entirely, which is what the second
 validation row below runs and what makes "a surface with no feature edges is
 returned bit for bit" testable on a surface that HAS them.
 
+**Erratum (2026-09-26): half a BASE cell is not half a WALL cell.** The
+paragraph above defends `feature_tolerance = 0.5` as "the furthest a wall point
+of a cell the edge passes through can be from it". That holds for a wall at
+level 0 and at no other level: `tau` is measured in `base_size`, so at wall
+level `L` it is `2^(L-1)` wall cells - 8 of them at level 4, 32 at level 6 -
+and every point of a band that wide is sent onto the one feature line, where
+(92.31)'s guarded step halves the collapsing cells and pins their points.
+Measured on an off-lattice box (side 1.1 m at (1.03, 1.07, 1.01), base 0.5 m,
+the attraction on in every run): at level 4, `tau / h_f = 8` pins 3386 of 7492
+points, 4 pins 584, and 1 or less pins none and converges in 4-5 iterations;
+at level 3, 4 pins 84 and 2 or less pins none. At `tau = h_f / 2` the level-4
+box carries 412 points on its edges against the ~422 lattice points along its
+13.2 m of edge, and two layers are delivered over its whole 7.261 m² - the
+STL's 6 x 1.21 - where `feature_tolerance = 0` chamfers it to 7.206 m². On a
+refined wall it is the default radius that pins sharp bodies, not a limit of
+the attraction. (92.38) is NOT changed: `tau` stays
+`feature_tolerance * base_size`, because a knob that keeps its meaning is what
+every committed configuration was written against. A configuration that wants
+half a wall cell asks for it, `feature_tolerance = 0.5 * 2^-L` at the wall's
+level `L`; `tau = feature_tolerance * h_local` is the alternative this erratum
+records and does not adopt. (92.62) below is how a run reports the difference.
+
 **Where the attraction actually earns its place, and where (92.28) already
 had the answer.** A CONVEX feature seen from the fluid — the edge of a solid
 block — has an outward Voronoi wedge, and for a point inside that wedge the
@@ -26116,6 +26585,59 @@ anyway. A corner that stays unclaimed while the mesh is refined enough to
 resolve it does not occur on any case run here; if it ever does, it is visible
 in the report's corner count rather than silent.
 
+**How much of the sharp length the mesh holds.** Neither branch of (92.38)
+says afterwards whether the wall ended up ON the edges: the report's edge and
+corner counts count points, not length. The capture reads the mesh the stage
+returns and moves nothing. With `F` of (92.34) at the run's
+`feature_angle_deg`, `W` the wall edges - consecutive point pairs of the faces
+(92.27) calls wall faces, region interfaces included - `h_f = base_size /
+2^max_level` and `tol = 0.1 h_f`:
+
+```
+C       = the capture chains: the polylines of (92.35) at the run's feature_angle_deg, each cut
+          again at every point where the curve turns further than 30 deg; a closed polyline
+          with no such point is one closed chain, one with any is re-rooted there and cut
+arc_c(s), s in [0, L_c]    the arclength along chain c
+s_c(p), d_c(p), f_c(p)     the nearest point of c to p: arclength, distance, foot (the smaller s on a tie)
+
+w = (p, q) in W covers c  iff  d_c(p) <= tol,  d_c(q) <= tol,  k = f_c(q) - f_c(p) != 0,
+                               |(q - p).k| >= cos(30 deg) |q - p| |k|,
+                          and  D <= |q - p| + 2 tol
+  D, the covered arc: |s_c(q) - s_c(p)|, or on a closed chain L_c - |s_c(q) - s_c(p)| across the seam
+     when that is shorter
+
+I_c             = union over the w covering c of their arcs (mod L_c on a closed chain)
+sharp_length    = sum over e in F of |x_b - x_a|   ( = sum over c of L_c )
+captured_length = sum over c of |I_c|                                                   (92.62)
+```
+
+It is computed with the attraction on or off - a surface's sharp length does
+not depend on a knob - so `feature_tolerance = 0` reports how little of the
+edge its chamfer holds rather than nothing. A covering edge runs ALONG the
+feature edge, within 30 degrees, with both ends within `tol`: a face diagonal
+that merely ends on the edge covers nothing. The union is per chain, so two
+wall edges over one stretch count it once and `captured_length <=
+sharp_length` by construction. It is measured along CHAINS, not per feature
+segment, because an STL splits a straight edge into collinear segments whose
+joints need not be mesh points: a wall edge across a joint has neither
+end-pair within `tol` of one segment, and the per-segment measure this
+paragraph first stated (the builds of commits 0fa9e2b to 7178685, release
+binary 7ff16117) read a corpus box whose 12 edges the mesh reproduces
+exactly at 3.458 of 8.178 m, 0.4229, where along its 12 chains it is 8.178 of 8.178 m. The direction a covering edge must run
+along is the chord between its two feet, which on a one-segment chain is the
+segment's own direction, so there the measure is the per-segment one. The
+covered arc may exceed the edge by at most `2 tol`: a short wall edge whose
+ends land on the two arms of a chain that bends back on itself (a hairpin
+within `tol` of itself) would otherwise be credited with the whole bend.
+`tol` is a tenth of the finest cell, so a chamfer half a cell off the edge
+does not count; it exceeds (92.28)'s default
+dead band `eps = 1e-3 base_size` by the factor `100 / 2^max_level` - 1.56 at
+level 6 - and falls below it at level 7 and deeper, where a point the band
+left at `eps` may not count; that is recorded here rather than hidden.
+`sharp_length` is what `tools/autonomy/features.py` reports as
+`sharp_edge_length_m` for the same STL at the same angle, on a closed surface,
+the only kind it accepts.
+
 **What must hold**
 
 | Check | Expected |
@@ -26128,6 +26650,7 @@ in the report's corner count rather than silent.
 | two boundary points near one corner | at most one of them is moved onto it, by (92.39); the other takes the edge branch |
 | the mesh feature snapping returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message — the guard of (92.31) is unchanged |
 | a surface with no feature edges | `snap` returns exactly what it returned before this section, bit for bit |
+| the capture (92.62) of any run | at most the sharp length; the mesh, the report's other fields and the log are bit for bit what they are without it |
 
 **Validation**
 
@@ -26140,6 +26663,15 @@ in the report's corner count rather than silent.
 | the same case with `feature_tolerance = 0` | no point takes either branch of (92.38), the run is bit for bit the run before this section, and seven of the eight corners have no mesh point within 0.1 of them. The eighth is the one the geometry hands to (92.28) for free: the castellated block's own corner faces it up the body diagonal from 0.2 of a cell, and a point outside a CONVEX corner projects onto the corner — measured, and asserted as measured rather than as wished |
 | the snapped mesh of the cube case | no two points within 1e-9 of each other — what (92.39) buys, asserted directly rather than inferred from the gate |
 | `feat` against a linear scan over the segments | the same point and the same distance, at points beside a segment, beyond its end, and on it |
+| a cube on the cell planes, castellated | `sharp_length` is 12 times the side to 1e-12 relative, and `captured_length` equals it: every wall edge along a cube edge lies on that edge |
+| the same mesh with the point at one edge's middle pulled half a cell off it | `captured_length` falls by exactly that edge's length |
+| the off-lattice cube, the attraction on and off | the capture is larger with it on; both are printed |
+| a smooth sphere | `sharp_length` and `captured_length` are both 0 |
+| a polyline with a 45-degree kink, a closed square and a closed 16-gon, at a feature angle of 60 degrees | cut at the kink into chains of 2 and 1; the square into 4 open chains of 1; the 16-gon stays one closed chain of `32 sin(pi/16)` |
+| a one-segment chain against the per-segment cover test | the same interval wherever that test gives one of positive length, and no cover wherever it gives none |
+| a closed 16-gon and wall edges between the midpoints of its sides | the edge across the seam covers one side's length across it, and the 16 edges cover the whole loop |
+| a hairpin chain and a short wall edge from one arm to the other | no cover: the arc exceeds the edge by more than `2 tol` |
+| a cube on the cell planes whose STL splits each edge into 3 collinear segments | `captured_length` equals `sharp_length`, 24, where the per-segment measure reads 0; pulling the point at one edge's middle off it takes that edge's 2 away |
 
 ---
 
@@ -26337,7 +26869,50 @@ The hanging-node line is (92.33)'s, for (92.33)'s reason and one more: because
 `d_h` is the mean of its parents' whole DISPLACEMENT VECTORS and (92.43)'s
 schedule is global, the hanging node's copy at level `k` is the exact midpoint
 of its parents' copies at level `k`, at every level, so the split side faces of
-the paragraph after next close exactly.
+(92.49) close exactly.
+
+**Row 1 follows the wall normal where the wall face would fail.** A wall face
+is a boundary face until a layer cell is put behind it; then it is the level-n
+face of (92.48) and G4 measures it (the paragraph "What the layer stage
+INHERITS" below). Its angle there is known BEFORE anything moves: it is the
+angle between the face's area vector and the line from its owner's centre to
+its own centre, which is exactly what G4 reads once the top layer cell's centre
+lies along the face normal. Where that predicted angle is large, the shrink
+moves the interior points of the row-1 cell as well, so the cell follows the
+wall normal instead of keeping the cut cell's lopsided shape:
+
+```
+theta_f = angle( Sf , C_f - C_owner(f) ),  f in Lf, on the INPUT mesh,
+          with §92.3's own centroids; 0 on a wall on the cell planes    (92.63)
+R1*     = { owner(f) : f in Lf, theta_f > THETA_ON },   THETA_ON = 45 deg
+
+W(j)    = { i in L, not pinned by (92.42) : (i, j) is an edge of a face
+            of a cell of R1* }
+J       = { j : j in neither L nor any boundary face, W(j) not empty }  (92.64)
+
+y_j     = mean_{i in W(j)} ( x_i + D_i + |x_j - x_i| n_i )
+d_j     = mean_{i in W(j)} D_i + beta ( y_j - x_j - mean_{i in W(j)} D_i ),
+          beta = beta_j: 1 until (92.66) lowers it                      (92.65)
+```
+
+(92.46) then holds `d_j` for every `j` in `J` from `d^(0)` on, exactly as it
+holds `D_i` on `L`; every other point relaxes as before, and the hanging-node
+line still runs last, so a hanging `j` takes its parents' mean. `d_j` is
+computed from the `D_i` in force each time (92.46) runs, so a retreat that
+halves `D_i` moves `j` with it; the re-seating part `|x_j - x_i| n_i -
+(x_j - x_i)` is not halved by it. Wall points, stage 4's output and every
+number §92.12 reports are untouched: only interior points of row-1 cells move,
+and only in this stage. On a wall on the cell planes `theta_f` is 0 up to
+rounding, `R1*` and `J` are empty and the stage is bit for bit what it was; the
+snapped cube's worst `theta_f` is 38.9 deg, so it is untouched too. `THETA_ON`
+is this project's own number, like `kappa` and `c` of (92.44): a prototype
+that re-seated EVERY row-1 cell with `beta = 1` left 48 cells with an inverted
+pyramid on the level-3 sphere, and the same step applied only past 45 deg left
+none, against a predicted maximum of 76.6 deg a level-n maximum of 64.9 deg
+(two layers, `T = 0.0184`). Rebuilding the near-wall cells body-fitted before
+the prisms go in is the idea of Delanaye, Aftosmis, Berger, Liu & Pulliam, AIAA
+99-0777 (1999), DOI 10.2514/6.1999-777; the construction here is this
+project's own.
 
 **The retreat, and WHICH MESH it measures.** The ladder is thickness first and
 layers second, which is the order §92.2 stage 6 states. It runs twice, on the
@@ -26366,6 +26941,34 @@ its layers, and the stage restarts with it removed from P_L
 if any T_i < layers.min_thickness * T at accept: that patch loses its layers
                                                                        (92.47)
 ```
+
+**The pull is taken back before the thickness is.** A re-seat can itself be
+what fails: on the snapped floor box the row-1 points (92.65) holds at
+`beta = 1` leave cells on the shrunk mesh that G1 and G4 name at every rung of
+the inner ladder, and halving `D_i` cannot mend them, because the re-seating
+part of `d_j` is not halved by it. So a failure either ladder would answer
+with a halving of `D` first lowers `beta` where the failing cells carry a
+re-seated point:
+
+```
+at a failure (92.47) would answer by halving D:
+    Jf = { j in J : j is a point of a cell of fail, beta_j > 0 }
+    if Jf is not empty and this ladder has taken fewer than 3 beta rungs
+       on this patch set:
+        beta_j <- beta_j / 2 if beta_j > 1/4, else 0,    for every j in Jf
+        re-run (92.46) (inner), or the whole stage (outer); no D_i changes
+    otherwise: halve D_i as (92.47) says                                (92.66)
+```
+
+`beta_j` runs 1, 1/2, 1/4, 0; at 0, `d_j` is the mean `D_i` of its wall
+points, the translate-only form. The rung is not a retreat: `retreats` counts
+halvings of `D` alone, and the trace names the rung `beta`. The outer ladder
+carries `beta` into the next attempt as it carries the caps, from the value the
+attempt's inner ladder left in force; both start again at 1 when a patch loses
+its layers and the stage is recomputed. With `layers.retreat_limit` unchanged,
+each ladder takes at most 3 more measurements per patch set. Where `J` is
+empty - every wall on the cell planes, and the snapped cube - no rung is ever
+taken and the stage is bit for bit what it was.
 
 The outer ladder is not decoration. An earlier form of this section had only
 the inner one, which gates a mesh differing from its input in `points` ALONE —
@@ -26517,7 +27120,47 @@ t1_mean   = t_1 mean_frac          t1_min = t_1 min_f tau_f            (92.50)
 
 `full` is the fraction of the patch's area that received the full stack;
 `mean_frac` is the fraction of the nominal thickness the patch received on
-average. A dropped patch reports `n_layers = 0` and the reason.
+average. A dropped patch reports `n_layers = 0` and the reason. Each row also
+carries `n_reseated_points`: the largest number of points (92.64) re-seated
+for the patch over every round the run ran with it, 0 when the re-seat never
+acted on it. It also carries `beta_rungs`, the (92.66) rungs either ladder
+took on a patch set holding the patch, and `level_n_non_orth_max_deg`, the
+largest G4 angle over the patch's level-n faces on the returned mesh - null on
+a patch without layers: the near-wall non-orthogonality the solver will see,
+reported rather than hidden inside a passing gate.
+
+**The trace, and what a drop is blamed on.** A drop's reason names the check
+that fired LAST, and with two ladders nested that is not always the one that
+caused it: the outer ladder's retreats reach the shrink as caps, so a wall that
+fails G4 on its level-n faces is thinned by the OUTER ladder until the INNER
+ladder's floor `min_thickness * T` fires first, and the reason then reads as a
+thickness failure. So the report also keeps the ladders' trace, `ladder`: one
+entry per measurement either ladder took, in the order taken - which ladder;
+the outer round (one extrusion attempt, counted from 0; an inner entry carries
+the round that ran it); the rung (the halvings of `D` that ladder had taken on this patch set) and
+`beta_rung` (its rungs of (92.66) there); the patch set by name; each failing
+gate of §92.3 with its failed
+count; how many of the G4 subjects are level-n faces, internal faces whose
+owner is an input cell and whose neighbour a layer cell (always 0 on the inner
+ladder, whose mesh has no layer cell); the outcome, `pass`, `retreat`, `beta`
+(a rung of (92.66), with `beta_points`, how many points it lowered) or
+`give_up`; and on a give-up its class and the patch that lost its layers. Each
+patch row carries `drop_cause`, the class of the give-up that dropped it:
+
+| `drop_cause` | the give-up |
+|---|---|
+| `inner_gate` | the inner ladder: the gate still failed on the shrunk mesh after the last retreat, or failed on cells no layer point reaches, or the inner ladder's own halvings took a point under the floor |
+| `outer_gate` | the outer ladder: the gate still failed on the extruded mesh after the last retreat, or failed on cells no layer point reaches |
+| `thin_after_caps` | the floor, at a point the outer ladder had capped: the gates its outer entries name drove the thickness down |
+| `thin_proposed` | the floor, at a point neither ladder had thinned: (92.45)'s proposal after its limiters was under it |
+| `zero_disp` | a layer point whose applied displacement is zero |
+
+The floor's class is read over every point under it: a cap on any of them names
+the caps, else a halving on any names the inner ladder, else the proposal.
+`drop_cause` is null on a kept patch and where no ladder ran for the patch
+(`layers.n = 0`, a patch with no layer face). Both are read off the ladders and
+move nothing: the mesh, the reasons and the log are bit for bit what they are
+without them.
 
 The report prints `t1_mean` and `t1_min` IN METRES beside the fractions,
 because the fraction alone hides a limiter the user did not write down. On the
@@ -26575,7 +27218,11 @@ ONE very thin layer gives 79.8 — worse, not better; below `cell_frac = 0.10` t
 patch loses its layers by name instead. This is stated rather than worked
 around: the mesher does not weaken G4 to make its own output pass. It is also
 why the validation below runs on a cube and not on the sphere §92.2's stage list
-would suggest.
+would suggest. Those numbers are the wall as stage 4 leaves it, and they still
+hold for it. What changed is that this stage now moves the cut cell's centroid
+before the level-n face is measured - (92.63)-(92.65), the instrument two
+paragraphs below, not a threshold - and with it the level-2 sphere keeps three
+layers of `first_thickness` 0.05 with a worst angle of 66.06 deg.
 
 **The ammonia site is NOT the favourable first row, and the earlier claim that
 it was is withdrawn.** That claim read the site's walls off its geometry —
@@ -26598,9 +27245,10 @@ alignment step in stage 4 — placing the level-0 point along the WALL FACE's ow
 normal instead of along (92.40)'s averaged point normal, so that a newly
 internalised wall face is aligned with the line to its owner's centre — or a G4
 rule of its own for that face, since `70` was calibrated on a face between two
-ordinary cells and is measuring a different quantity here. Both change numbers
-this document fixes; both belong to whoever owns §92.3, and neither is
-written.
+ordinary cells and is measuring a different quantity here. The first is now
+written, moved from stage 4 into this stage so that stage 4's output and every
+mesh without layers stay what they were: (92.63)-(92.65). The second loosens a
+gate and is not written.
 
 **What this stage does NOT do.** The layer count is uniform over a patch: a
 point that cannot carry the stack costs its whole patch, not just its own
@@ -26632,7 +27280,10 @@ solver can run.
 | a side face's winding | fixed by the topology (92.53), never by the sign of a dot product against a cell centre |
 | a snapped wall | closes exactly all the same — (92.54) holds on it even where the gate does not |
 | a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
+| a patch that lost its layers | its row names `drop_cause`, the class of the last give-up in `ladder` that names it; the trace ends on the outer pass the run returned on; the mesh, the reason and the log are bit for bit what they are without it |
 | the report of a patch that kept its layers | says the achieved first layer in METRES (`t1_mean`, `t1_min`), not only as a fraction |
+| a failure whose failing cells carry a re-seated point with `beta_j > 0` | that ladder lowers `beta` there (92.66) before it halves any `D_i`, at most 3 times per patch set; the rung adds nothing to `retreats` and the trace names it `beta` |
+| a patch that kept its layers | reports `level_n_non_orth_max_deg`, never above the returned mesh's worst non-orthogonality; a patch without layers reports null |
 
 **Validation**
 
@@ -26648,9 +27299,94 @@ solver can run.
 | `first_thickness` set to `h/200` | refused by (92.51)'s arithmetic, with `t_1`, `h`, the ratio and the threshold in the message |
 | a box standing on the domain floor, SNAPPED, 3 layers | every cell closes to `1e-12` relative. The assertion is closure and not a quality number, so it catches a mis-wound face and nothing else; the thresholds are opened past every refusal on purpose. Before (92.53) was applied: 13 cells open, worst `2.96e-1` |
 | one internal face of an emitted mesh reversed by hand | (92.54) refuses it, naming that cell — the check is not vacuous |
-| the snapped sphere at G4's `70` | `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Measured, the sphere gives up in the INNER ladder — two halvings take the applied thickness under `min_thickness * T = 1.995e-2` — so it never reaches the outer one; the row below is the case that does |
-| the same box, at `quality`'s own thresholds | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
+| a snapped wall at G4's `70` that the layers cannot survive | the snapped floor box: the re-seat (92.63)-(92.65) acts on its row-1 cells and the shrunk mesh still fails the gate after every retreat; `add_layers` returns Ok, the patch is reported dropped by name with the reason, the cell count is the input's, and the mesh that comes back is the snapped one. Before the re-seat this row was the level-2 sphere, which reached the outer ladder (two outer retreats on G4 alone, 312 then 360 level-n faces) and dropped as `thin_after_caps`; it now keeps its layers (the three-layer sphere row below) |
+| the snapped cube, at `quality`'s own thresholds, with no wall face past 45 deg so the re-seat does not act | the OUTER ladder of (92.47) is what fires: the shrink passes, the LAYER CELLS fail, the thickness retreats `retreat_limit` = 4 times, and the patch then loses its layers by name with a reason that says what IS supported. `add_layers` returns Ok, the cell count is the input's, and no face list is put in front of the user. Measured at `first_thickness` 0.02, 0.05 and 0.08: all three take four retreats and give up |
 | the achieved first layer | `t1_mean = t_1 * mean_frac` to 1e-12, and printed in metres in the summary line |
+| the castellated cube that keeps its stack | the trace is one inner and one outer pass, both in round 0, and no row names a cause |
+| the snapped cube with no floor | `retreat_limit` outer retreats at rungs 0, 1, ..., each naming its gates, then an `outer_gate` give-up dropping the cube, then the pass on the empty set |
+| the snapped level-2 sphere, eight layers of 0.006 at growth 1.0 | the re-seat acts on 888 points; the row names `thin_after_caps`, the trace names the give-up, and the drop comes after at least one outer retreat; the trace is printed |
+| the level-n count | equals the number of G4 subjects whose point list is a layer face's, on the floor box's first extruded attempt |
+| the re-seat of one point (92.65) | two wall points below `(0,0,1)` give `(0.5, 0, 0.3571067811865476)` at `beta = 1`, the mean `D` at `beta = 0`; a point straight above its one wall point moves by that point's `D` |
+| a wall on the cell planes | `theta_f` under 1e-4 deg on every layer face, `J` empty, every row's `n_reseated_points` 0 |
+| the snapped cube | worst `theta_f` 38.93 deg, `J` empty |
+| the snapped level-2 sphere | worst `theta_f` 80.25 deg, 1632 of 2592 faces past 45 deg, 804 row-1 cells, `J` 888 points, each with at most 3 wall points, and the row reports 888 |
+| the snapped level-2 sphere, three layers of 0.05 | the patch KEEPS its layers: the re-seat moves 888 points, the gate passes at its own thresholds with a worst non-orthogonality of 66.06 deg, the trace is one inner and one outer pass, the cell count is `C + 3 x 2592`; `full` 0 and `mean_frac` 0.346 - the (92.45) limiter, not G4, sets the thickness now |
+| the step of (92.66) | 1, 1/2, 1/4, 0, and 0 stays 0; at `beta = 1/4` the two wall points below `(0,0,1)` give `(0.125, 0, 0.20177669529663692)` |
+| a wall on the cell planes, and the snapped cube | no `beta` entry in the trace and every row's `beta_rungs` 0; the castellated goldens are unchanged |
+| every case that ran a ladder | each `beta` entry names its gates and lowers at least one point, no ladder takes more than 3 on one patch set, each entry's `beta_rung` counts the `beta` entries before it, and each row's `beta_rungs` is the count of `beta` entries naming its patch |
+| the snapped sphere at 8 layers, `first_thickness` 0.0021, `growth` 1.0 (AM-L's G-L-b, 2026-09-27) | MEASURED, NOT MET: the stack is dropped `thin_after_caps`; the outer ladder takes 3 `beta` rungs, but the failure that drives it is G5, not G4 (G5 200, 1984, then 3072 to 6216 failing cells as the caps halve, against G4 48 to 120), and (92.66) lowers only the pull of re-seated points; the 2-layer shipped example keeps both layers (G-L-a), and why G5 grows is measured in the paragraph below the table |
+| the same sphere at `first_thickness` 0.0023 = 1.10 sqrt(A_max)/60 (G-L-b restated by the user, 2026-10-03; no Rust change) | MET on the release binary: 8 layers, `full_area_frac` 1.0, `level_n_non_orth_max_deg` 67.80 < 70, no retreat, no `drop_cause`; the setup rules size snapped walls for it with the margin of the paragraph below |
+
+**Why G5 grows on the snapped sphere at eight layers (measured).** The probe measures both
+configs cell by cell: the level-3 sphere (n 8, `first_thickness` 0.0021, growth 1.0) and the
+level-4 one (n 8, 0.00118, 1.0). At round 0 every failing G5 cell is a layer cell - level 3:
+200 cells behind 48 of the patch's wall faces, level 4: 1080 behind 144 - and no input cell
+fails at any round of either run. The cells spread over all eight layer indices with the most
+at k 7, the cell against the input cell (k 0 is the wall's own first layer): level 3 has 8,
+16, 16, 16, 32, 32, 32, 48 cells over k 0..7, level 4 has 128, 128, 136, 136, 136, 136, 136,
+144, and the failing faces are the patch's largest - on level 3 the worst is 1.575e-2 m^2
+against a 1.074e-2 median, on level 4 the worst failing face is 3.897e-3 m^2 against the
+patch's largest 3.956e-3 and median 2.770e-3. The smallest
+tau is 4.928e-2 on level 3 and 4.670e-2 on level 4, against 0.05. The two ratios the probe
+prints for a face, its largest area group and its volume, each over the wall's, combine to
+the factor by which that cell's tau differs from a flat prism's `3 t_k / sqrt(A_wall)`:
+`v_over_awall_tk / amax_over_awall^1.5` on the worst level-3 face is
+1.023093 / 1.027933^1.5 = 0.9817, so the k 7 cell is a flat prism's tau times 0.9817,
+because the cell widens away from the convex wall - its largest face group 1.028 A_wall,
+its volume only 1.023 A_wall t_k (tilt 0.83 degrees) - while t1 0.0021 is only 1.0040
+times the flat floor 2.0916e-3 of that face, and the bisected 1.019 below is the
+reciprocal of the same factor (1/0.9817 = 1.0187). On the worst level-4 face the factor
+is 0.8413 / 1.0144^1.5 = 0.8235 (1.014 A_wall, 0.841 A_wall t_k, tilt 1.22 degrees), and
+it is the volume (the limited depth 0.7277), not the flare, that sets it. The achieved
+stack depth is d/T = 1.0 at every point of every failing
+level-3 face; on level 4 it falls to 0.7277 - the (92.45) limiter, not the requested
+thickness, sets the stack there: 384 of 4874 layer points are limited, 304 of the 464 points
+of the failing faces among them, and with `cell_frac` 1.0 the level-4 round 0 has ZERO
+failing G5 cells and the run keeps all 8 layers, full 1.0. On level 3 the limiter does not
+bind: T_i/T is 1.0 on the failing faces, no point of 1250 is limited, and `cell_frac` 1.0
+changes nothing - the same 200 cells and the same `thin_after_caps`. The caps halving spreads
+the failure: the level-3 G5 totals by round are 200, 1984, 3072, 3072, 3072, 3072, 6216
+(level 4: 1080, 3768, 7360, then the inner give-up), every failing cell of one round still
+fails in the next (new cells: 1784 at round 1, 1088 at round 2, 3144 at round 6, none
+between), and the ladder's own view of the failing cells is capped at 200 a round - 200 seen
+at round 6, where 6216 fail. The three beta rungs of (92.66) lower only the pull of 40
+re-seated points and leave the totals at 3072 (persist 3072, new 0, twice); with every beta
+at 0 instead of 1 the round-0 failing set is the same cell set on both configs
+(`beta_same_set` true). In t1 the
+level-3 threshold is a knife edge: bisecting round 0 to zero G5 cells gives 2.131e-3, 1.019
+times the flat floor sqrt(A_max)/60 = 2.092e-3, and 1.05 t1 passes at attempt 1 with all 8
+layers full 1.0; on level 4 the same bisection gives 1.472e-3, 1.404 times that level's floor
+of 1.048e-3, keeping 8 layers at full 0.8735 there. In n the round-0 counts go 384, 24, 56,
+200 for n = 1, 2, 4, 8 on level 3 and 872, 896, 0, 1080 on level 4, where n 4 keeps all 4
+layers full 1.0. `vary n` holds t1 and so shrinks T = n t1 with it, to 0.0021 at n 1 on
+level 3 - and the probe rerun at n 1 measures why that is more cells than n 8's 200 at the
+same t1 (round 0 `g5_total` 384, `tau_min` 2.917e-2): at the failing faces' points the
+stack is limited to as little as 0.123 T (worst face `ti_over_t_min` 1.230469e-1; 152 of
+the 1250 layer points limited, all 152 of them among the 826 failing points), and
+`cell_frac * h_i` cannot be the limiting term there - `short_edge_min` 3.757e-2 gives
+`0.5 * h_i >= 1.879e-2`, past T = 2.1e-3 - so by elimination it is (92.44)'s medial term,
+and the only surface within `s_max = T / medial_frac` of the wall is the sphere itself,
+whose snapped points lie up to the snap residual off the STL (`residual max 1.061e-3`, the
+release binary's log of the G-L-b run). At `medial_frac` 1.0 the same config limits 248 of
+its 1046 failing points instead of 152, to as little as 0.109 T. The release binary's own
+runs at the G-L-b stack on level 3, T 0.0168 at growth 1.0, hold T and thicken t1 instead:
+n 1 (t1 0.0168), n 2 (0.0084) and n 4 (0.0042) each keep all their layers, `full_area_frac`
+1.0, no `drop_cause`, no retreat. In growth the failures move to the wall's own layer: at
+g 1.2 level 3 has 416 cells, 288 of them at k 0, and level 4 has 1304, 920 of them at k 0;
+as arithmetic, g 1.2 asks T = 0.0021 * (1.2^8 - 1) / 0.2 = 3.465e-2, against the
+`0.5 * h_i` bound 1.879e-2 of the shortest edge. No threshold,
+limiter or ladder rule is changed by this measurement, and the probe is the ignored test
+`a_probe_measures_which_cells_fail_g5_on_a_snapped_layer_config`, run with
+`AUTOMESHER_G5_PROBE` set to a config path.
+
+**The margin over the flat floor (measured).** The release binary's zero-G5 `first_thickness` at the outer
+ladder's round 0 (14 bisections, n 8, growth 1.0): level 2 4.213e-3 = 1.011 h/60; level 3 2.131e-3 = 1.023 h/60 =
+1.019 sqrt(A_max)/60 (sqrt(A_max)/h 1.0040); level 4 1.472e-3 = 1.413 h/60 = 1.404 sqrt(A_max)/60
+(sqrt(A_max)/h 1.0063), where (92.45) binds at the shortest snapped edge 0.2198 h (at t1 0.0017 the stack keeps 8
+layers, `t1_min` 8.586e-4, full 0.6846). The setup rules (tools/autonomy/rules.py, R-WIN) predict sqrt(A_max) by h
+and prefer `h <= 3 t1 d / (min_thickness_ratio K)` with K = 1.10 and `d = min(1, cell_frac h_lim / T)`, the (92.45)
+depth they can see; it covers levels 2 and 3, not level 4, whose depth is set by the snapped wall. No threshold,
+limiter or ladder rule is changed.
 
 ### 92.14 The driver: the stage sequence behind one command, the names the case gets, and the summary the run leaves
 
@@ -26784,7 +27520,9 @@ one row per surface patch, `{ "name", "stl_area_m2", "castellated_area_m2", "sna
 interfaces it assigns to the patch — before the first move and again on the points the stage returns,
 each over the patch's own surface area, and null when that area is zero. The octree row adds
 `gate_passed` and `max_non_orth_deg`, the verdict and the worst face of §92.3's measurement of the leaf
-mesh; a full run records them and does not refuse on them.
+mesh; a full run records them and does not refuse on them. The snap row also carries `feature_capture`,
+`{ "sharp_length_m", "captured_length_m", "tol_m" }`: (92.62) of §92.12 at `tol_m = 0.1 h_f`, measured on
+the points the stage returns, and null only when §92.12's extraction refuses the run's `feature_angle_deg`.
 
 The layers row of each layer patch — on the single-mesh path and in each region's `patches` — carries
 `area`, (92.50)'s `sum A_f` in m² (on a dropped patch, the input mesh's own area of the patch), and
@@ -26793,6 +27531,11 @@ The layers row of each layer patch — on the single-mesh path and in each regio
 that fraction of `T`. The sum runs over the same faces in the same order as `full`, so the same share at
 beta = 1 is `full_area_frac` bit for bit; a dropped patch reports 0 at every beta. Like the snap and
 octree additions, they are read off the stage's report and change nothing in the mesh.
+The layers row - on the single-mesh path and in each region's row - also carries `ladder`, §92.13's
+trace, `[ { "ladder", "round", "rung", "patches", "gates": [ { "gate", "n_failed" } ], "g4_level_n",
+"outcome", "give_up", "dropped" } ]`, empty on a skipped stage or region; and each layer patch row
+carries `drop_cause`, §92.13's class of the give-up that dropped it, or null. Both are read off the
+ladders and change nothing in the mesh.
 
 `identity` is the mesh's own name and the run's. `mesh_id` is
 `"m_" + fnv1a64(<case_dir as configured, '\' -> '/', no trailing '/'> + newline + <name>)` in 16 hex digits — deterministic,
@@ -27094,6 +27837,76 @@ region, so no per-region thickness; `sections.py` has no `--region` - it
 takes one `<region>/polyMesh` directory per plot; and §92.15.5's
 planar-body limitation stands as stated - the fixture turns the attraction
 off, the mesher does not.
+
+### 92.16 Refinement boxes: the explicit region of stage 1
+
+§92.2 stage 1's third criterion, the explicit region, is the config's
+`refinement.boxes`: axis-aligned boxes, each asking a level of every leaf
+its interior overlaps:
+
+```
+b         = (lo_b, hi_b, L_b), one entry of refinement.boxes;
+            lo_b < hi_b on every axis, L_b >= 1
+[lo_c, hi_c] = leaf c's span on each axis, (92.20) at its two ends
+
+l_box(c)  = max { L_b : lo_c[a] < hi_b[a] and hi_c[a] > lo_b[a], a = x, y, z },
+            0 if no box overlaps c                                     (92.67)
+
+l(c)      = min( max( l_dist(c), l_surf(c), l_feat(c), l_box(c) ), max_level )
+```
+
+`l_box` is §92.2 stage 1's `l_region`, and it joins the same per-leaf
+maximum the bands (92.1) and the surface term (92.22) join, under the same
+cap: a box level above `max_level` is CAPPED, not refused, exactly as a
+band level is. The overlap is STRICT on every axis - `lo_c[a] < hi_b[a]`
+and `hi_c[a] > lo_b[a]` - so a leaf that only touches a box face, edge or
+corner is not refined, and a box whose planes sit on cell planes refines
+exactly the cells it holds, and no touching neighbour. Overlap, not
+centre-inside, is the rule, so a box smaller than a cell, or one straddling
+cell faces, still refines the cells it cuts: the same "errs toward
+refining" choice (92.22) makes about a band narrower than a leaf. A leaf
+asks `l_box` only when the config's `boxes` is not empty, and the span it
+measures with is the leaf's own two corners, evaluated as (92.20) is at the
+two ends of the leaf's span on the finest lattice - §92.9's arithmetic, the
+same call `leaf_centre_edges` makes for the centre.
+
+`validate` refuses a broken box before any meshing work, naming the field
+path, the index and the value, in this order per box: any of the six
+coordinates not finite -
+`refinement.boxes[{i}]: every coordinate must be finite, got min {min:?} max {max:?}`;
+per axis `x`, `y`, `z` with `!(max[a] > min[a])` -
+`refinement.boxes[{i}]: {a}-axis is empty or reversed (min = {lo}, max = {hi})`;
+`level == 0` -
+`refinement.boxes[{i}].level: 0 refines nothing - a box asks for level >= 1`;
+and no positive-volume overlap with `domain.extent` (a box that overlaps no
+cell refines nothing) -
+`refinement.boxes[{i}]: lies outside domain.extent - a box that overlaps no cell refines nothing`.
+
+An empty `boxes` is the default, is not serialised - a config without the
+key re-serialises without it, so the run summary's `config` block (§92.14)
+is the bytes it always was - and the closure it leaves behind is today's
+body line for line: the goldens and pins of §92.14 and §92.15 are the proof
+that a box-free config meshes byte-identically.
+
+**Validation**
+
+| Case | The test |
+|---|---|
+| parse, round-trip, absent when empty | `refinement_boxes_parse_round_trip_and_stay_absent_when_empty` - one box `[1,1,1]-[2,2,2]` level 1 parses, the round-trip config carries one box through serde, `to_string(&minimal())` holds no `"boxes"`, an unknown key `lvl` is refused by name |
+| the four refusals | `a_box_that_breaks_a_rule_is_refused_by_name` - NaN in `min`; a zero-height y-axis (`min = 5, max = 5`); `level: 0`; a box past `xhi`; a box `[10,0,0]-[11,1,1]` touching the `xhi` face only; a second bad box named `refinement.boxes[1]`; and `level: 9` under `max_level: 2` validates, capped not refused |
+| overlap, not centres | `a_box_refines_the_cells_it_overlaps_not_their_centres` - box `[1.9,1.9,1.9]-[2.1,2.1,2.1]` level 1 straddles the x/y/z = 2 cell planes: `(8, 0)`, 120 leaves, every level-1 lower corner in `[1,3)^3` m |
+| a box on cell planes | `a_box_on_cell_planes_refines_exactly_the_cell_inside` - box `[1,1,1]-[2,2,2]` level 1: `(1, 0)`, 71 leaves |
+| the cap | `a_box_level_is_capped_like_a_band_level` - the same box at level 5 under `max_level` 1: `(1, 0)`, 71 leaves |
+| the balance | `a_two_level_box_is_balanced` - box `[0.25,0.25,0.25]-[0.75,0.75,0.75]` level 2: `(9, 3)` splits, 148 leaves = 60 level-0 + 24 level-1 + 64 level-2 |
+| box and band together | `a_box_and_a_band_take_the_maximum` - the band fixture of §92.2 plus box `[0,0,0]-[1,1,1]` level 1: `(9, 0)`, 575 leaves = the band's 568 + the box's 7 |
+| empty changes nothing | `empty_boxes_change_no_leaf` - the same band spec with and without `boxes: vec![]` gives the identical `(level, idx)` leaf list |
+| end to end | `a_refinement_box_adds_exactly_its_cells_end_to_end` - the cube config stopped after the octree: `n_leaves` = N0 + 7 with the box, the summary carries `config.refinement.boxes` with one entry, the box-free summary carries no `boxes` key |
+
+What this section does NOT claim: the boxes are AXIS-ALIGNED only - no
+rotated boxes, no cylinders, no per-box distance shells - and box
+refinement adds no snap, feature or layer behaviour: a box moves the
+octree's levels and nothing else, and every stage after stage 1 runs
+unchanged.
 
 ---
 
@@ -28173,9 +28986,10 @@ relaxation; the ratios between them are not measured, and five is the
 conservative end of that interval for the same reason 0.45 is.
 
 The route for both is **Cardiff, Tuković, Jasak & Ivanković (2016)**: a
-block-coupled matrix that solves the three components at once and never
-defers the coupling. It is not built, and §1's one-entry-per-face LDU storage
-is why.
+block-coupled matrix that solves the three components at once. It is built -
+§109 is the second storage format beside §1's, its solve and the loop around
+it - and Gate 95-A measured it (§109.7): it holds at 2.5:1 and misses at 5:1
+and 10:1, so neither refusal is lifted (§109.8).
 
 **A displacement that has reached the fluid mesh** — `max|u| / min_c
 V_c^{1/3}` above 0.1. An ALE step obeying the space conservation law needs a
@@ -28214,7 +29028,10 @@ count, the observed contraction and the predicted one at `nu = 0.2 / 0.3 /
 0.45`, held to the sweep's own numbers, with bare Picard's divergence at 0.45
 reproduced by name.
 
-**Gate 95-A, the end-loaded cantilever, IS NOT WRITTEN.** It was to measure
+**Gate 95-A, the end-loaded cantilever, is written in §109.6 and measured in
+§109.7, for the block-coupled solve; it holds at 2.5:1 and misses at 5:1 and
+10:1.** The rest of this paragraph is the record of why it could not be
+written for the segregated loop. It was to measure
 observed order on displacement and on cell-centre stress against Timoshenko &
 Goodier ch. 3 on three meshes at `r = 2`, through §94. §F.1b is why it is
 not: at the slenderness that makes a cantilever a bending problem the loop
@@ -28225,15 +29042,16 @@ name, and the 1:1 and 5:1 beams are the bodies it must let through. When the
 block-coupled matrix exists, Gate 95-A is what it has to earn.
 
 **Said plainly: release 1's solid verdict stands on the compact-body gates** —
-95-B, 95-C, 95-F, and the thick-walled cylinder under a radial temperature
-field that the stress section adds. A slender body is refused, with its
+95-B, 95-C, 95-F, and **Gate 95-D**, the thick-walled cylinder under a radial
+temperature field, which §95.10 states in full. A slender body is refused, with its
 measurement in the message. That is a smaller claim than the plan opened
 with, and it is the one the measurement supports.
 
 ### 95.7 What this section does not do
 
-No block-coupled matrix, and therefore no near-incompressible solid and no
-slender one. Both are refused above with the paper that would take them.
+No near-incompressible solid and no slender one past five: §109's block-coupled
+solve exists and does not lift either refusal (§109.8), and both are refused
+above with what was measured.
 
 No large deflection. The Turek-Hron flap of the fluid-structure programme is
 17.5:1 slender and deflects centimetres on a 35 cm span; it is beyond this
@@ -28244,10 +29062,11 @@ No mesh motion, no inertia, no time. The displacement equation here has no
 `ddt` term at all; a transient solid is a different section and is named, not
 squatted on.
 
-No boundary-point stress extrapolation. §94's order study on cell-centre
-stress is what the stress section measures; extrapolating to a boundary POINT
-is a second scheme with a second order, and it gets its own paragraph and its
-own gate when it is written, not a silent reuse of this one.
+No boundary-point stress extrapolation in the gates above. §94's order study
+on cell-centre stress is what they measure; extrapolating to a boundary POINT
+is a second scheme with a second order, and it is written, and gated in its
+own right, in §95.11, where Gate 95-G reads NAFEMS LE1, LE10 and LE11 from a
+restatement.
 
 ### 95.8 Two materials bonded in one region — the series (2 mu + lambda) face coefficient and the traction-continuous bond face
 
@@ -28435,6 +29254,372 @@ R = max |sigma_yy| over the bond cells with |x - l/2| <= h
   / max |sigma_xx| over ALL cells with |x - l/2| <= h                        (S95.20)
 ```
 
+### 95.10 Gate 95-D — the thick-walled cylinder under a radial temperature field, and the chain it tests end to end
+
+Where §95.9's gate is one material with a bond, this one is the chain
+itself. 95-B, 95-C and 95-F each test one link of the thermomechanical
+path; Gate 95-D is the only gate that runs the whole chain in one go:
+the steady temperature comes out of the CONDUCTION solver (`ofgpu::cht`),
+the displacement out of the segregated outer loop of §95.3, and the
+stress out of the readout - and only the last of the three is compared
+with a closed form. A defect in any link - a temperature field wrong by
+a scale factor, a displacement loop that stops short of its fixed point,
+a readout that rotates the stress wrong - shows up here, which is why
+the gate exists even though §95.6's compact bodies are already held.
+
+The body is a quarter annulus with symmetry cuts, `r_in = 0.5 m`,
+`r_out = 1.0 m`, two cells through the thickness in `z`, plane strain
+(`fixtures::quarter_annulus_plane_strain_bcs`). Steel throughout:
+`E = 200 GPa`, `nu = 0.3`, `alpha = 1.2e-5 /K`, and for the conduction
+leg `rho = 7850`, `c = 460`, `kappa = 45`. The inner patch is held at
+`400 K`, the outer at `300 K`, and `T_ref = 300 K`, so
+`DeltaT_in = 100 K` - the difference the stress closed form reads. The
+field is steady and linear, so one conduction solve is the answer and
+the gate takes it in one.
+
+Three meshes: `nr = 12, 24, 48` radial cells, `2 nr` circumferential
+and two in `z`, a refinement ratio `r = 2`. The level size the §94
+study uses is the RADIAL spacing `(r_out - r_in)/nr`, written by hand
+and not taken over the mesh: the two `z` layers stay two at every
+level, so the cell count grows fourfold while the spacing the solution
+actually varies over halves, and a mesh-wide size would misstate the
+order. That is exactly the kind of choice §94 exists to make visible.
+
+The closed form, with `a = r_in`, `b = r_out`, `k = ln(b/a)`,
+`L(r) = ln(b/r)` and `C = alpha E DeltaT_in / (2 (1 - nu) k)`:
+
+```text
+  sigma_rr = C [ -L(r) - (a^2/(b^2 - a^2)) (1 - b^2/r^2) k ]
+  sigma_tt = C [ 1 - L(r) - (a^2/(b^2 - a^2)) (1 + b^2/r^2) k ]
+  sigma_zz = nu (sigma_rr + sigma_tt) - alpha E DeltaT_in L(r) / k         (S95.21)
+```
+
+Timoshenko & Goodier, *Theory of Elasticity*, 3rd ed., the
+thermal-stress chapter's long circular cylinder; Boley & Weiner,
+*Theory of Thermal Stresses*, ch. 9. Both are named in
+`check_thick_cylinder`'s own doc comment - no third source is claimed.
+
+The errors are measured against a scale that is exact, not estimated -
+which is why the gate can quote a relative number at all:
+
+```text
+  S = max over the 2 000 radii r_i = r_in + (r_out - r_in)(i + 1/2)/2000, i = 0..1999,
+      of max( |sigma_rr(r_i)|, |sigma_tt(r_i)|, |sigma_zz(r_i)| )          (S95.22)
+```
+
+Required, on every one of the three meshes: the outer loop must
+CONVERGE - Aitken relaxation, eight decades, `max_outer = 400`, three
+boundary passes, PCG with DIC underneath - and the gate asserts exactly
+that per mesh. On the finest mesh (`nr = 48`) each of
+`Linf|sigma_rr - closed form| / S`, the same for `sigma_thetatheta` and
+the same for `sigma_zz` must be at or under `1e-2`.
+
+Reported and NOT asserted, in §94.3's discipline, and why: the shear
+defect `max|sigma_rtheta| / S` on the finest mesh - the closed form has
+no shear, so this is a pure defect measure, and the gate refuses to put
+a threshold on a quantity whose exact value is zero; the observed order
+of the hoop-stress error between `nr = 24` and `nr = 48`; and a
+three-level §94 grid study on the VOLUME MEAN of von Mises, with the
+closed form's own mean as the datum - composite Simpson, 20 000
+intervals, an error far below `1e-10` relative - printed as a
+validation statement.
+
+Where §95.9 puts its measured table, this section puts none: Gate 95-D
+has not been run for this section's writing, and the three per-mesh
+lines and the study are printed by the run itself. A pass registers
+NOTHING; a miss is ONE `GateReport` (`Verdict::Misses`, `How::Live`,
+gate `Gate 95-D thick cylinder`) whose headline carries the three
+errors and the hoop order, whose detail is the three per-mesh lines the
+run printed, and whose uncertainty is the grid study - §94.3's rule
+that a verdict states its own discretisation error. The gate is
+`check_thick_cylinder` in `ofgpu-validate`, under the scope
+`Gate 95-D thick cylinder`.
+
+
+### 95.11 Gate 95-G — NAFEMS LE1, LE10 and LE11 from a restatement, and the boundary point a cell-centred stress is read at
+
+**A DISCLOSURE, because the gate is only as good as its reference.** The
+primary is *The Standard NAFEMS Benchmarks*, NAFEMS ref. P18 (TNSB Rev. 3,
+October 1990), a purchasable publication with no DOI; on 2026-09-23 it was
+decided not to buy it. **It was therefore never read, and this gate does not
+compare against it.** What it compares against instead is a RESTATEMENT: the
+material, boundary conditions, loads and targets are those of ESRD, Inc.,
+*Benchmarks Guide: The Standard NAFEMS Benchmarks, Linear Elastic Tests*
+(2018), `www.esrd.com/wp-content/uploads/dlm_uploads/Benchmarks-Guide-Standard-NAFEMS-Benchmarks-Linear-Elastic-Tests.pdf`,
+© 2018 ESRD, Inc., read and not redistributed, whose text states them. That
+guide carries every dimension only inside raster figures, so the geometry
+below is taken from other openly published pages that state it in TEXT, each
+named where it is used. It is labelled a restatement everywhere it is used,
+including in `ofgpu-validate`'s own output. Those pages document runs of
+proprietary codes and were read as text; no code's source and no input deck
+was opened, and the GPL FeenoX/Fino examples of these three tests were not
+opened.
+
+The targets, as the restatement prints them:
+
+```text
+  LE1    sigma_yy at D = (2, 0)          =   92.7 MPa   (the tangential edge stress)
+  LE10   sigma_yy at D = (2, 0, 0.6)     =   -5.38 MPa
+  LE11   sigma_zz at A = (1, 0, 0)       = -105 MPa                          (S95.23)
+```
+
+ESRD states LE11 with its axis along `y` ("the direct stress sigma_y at
+point A"; "Uy = 0 on the plane Y = 0 and the face BCDE"); the Abaqus
+Benchmarks Guide's LE11 page
+(`abaqus-docs.mit.edu/2017/English/SIMACAEBMKRefMap/simabmk-c-le11.htm`)
+states the same test with the axis along `z` ("sigma_zz = -105 MPa at point
+A"; "uz = 0 on the plane z = 0 and the face HIH'I'"), and this section uses
+the `z` frame throughout. The bar is docs/09's: within `3 %` of the target
+on the finest mesh - of three, or of LE10's four - with §94's study of the
+point value over the three finest beside it.
+
+**LE1, the elliptic membrane, in plane stress.** A quarter of the region
+between the ellipses `(x/2)^2 + y^2 = 1` (AD) and
+`(x/3.25)^2 + (y/2.75)^2 = 1` (BC), 0.1 m thick; `E = 210 GPa`,
+`nu = 0.3`; symmetry on AB (`x = 0`) and DC (`y = 0`); a uniform outward
+pressure of 10 MPa - a tension - on BC. The ellipses, the thickness and D are
+the text of the README of `github.com/masteryol/FEA-NAFEMS-Benchmarks-ANSYS`
+("Inner ellipse", "Outer ellipse", "Thickness T = 0.1 m", "Point D (X = 2.0
+m, Y = 0 m)"; an ANSYS study, no licence stated), and they are the ellipses
+SimScale's LE10 page states for the plate LE10 is (below).
+
+This solver has no plane-stress formulation. The membrane is meshed as a slab
+one cell thick with `u_z = 0` on both faces - plane strain - and given the
+plane-strain material whose in-plane law is plane stress's exactly
+(Timoshenko & Goodier ch. 2):
+
+```text
+  E* = E (1 + 2 nu) / (1 + nu)^2 ,     nu* = nu / (1 + nu)                   (S95.24)
+```
+
+so `E*/(1 - nu*^2) = E` and `nu*/(1 - nu*) = nu`: the two problems have the
+same in-plane stress field, and `sigma_yy` is read from it. The mesh maps
+the unit block `(t, phi)`, `t in [0, 1]` across the wall and
+`phi in [0, pi/2]` around it, by
+
+```text
+  x = (2 + 1.25 t) cos phi ,     y = (1 + 1.75 t) sin phi                   (S95.25)
+```
+
+- every constant-`t` line an ellipse of the family between AD (`t = 0`)
+and BC (`t = 1`) - with the points of `phi = 0` put on `y = 0` exactly and
+those of `phi = pi/2` on `x = 0` exactly. Three meshes,
+`(n_t, n_phi) = (16, 32), (32, 64), (64, 128)`.
+
+**LE10, the thick plate.** LE1's quarter elliptic annulus, 0.6 m thick,
+`z in [0, 0.6]`; `E = 210 GPa`, `nu = 0.3`; symmetry on DCD'C' (`y = 0`)
+and ABA'B' (`x = 0`); `u_x = u_y = 0` on the outer curved face BCB'C';
+`u_z = 0` along the mid-plane line of BCB'C'; a uniform normal pressure of
+1 MPa on the upper face ABCD (`z = 0.6`). The point table, the two ellipses
+and the thickness are the text of SimScale's validation case "Thick Plate
+Under Pressure" (`www.simscale.com/docs/validation-cases/thick-plate-under-pressure/`:
+A = (0, 1, 0.6), B = (0, 2.75, 0.6), C = (3.25, 0, 0.6), D = (2, 0, 0.6));
+LEAP Australia's "NAFEMS Discovery Benchmark Series - Part 2: Pressure
+Plates" (`www.leapaust.com.au/blog/fea/nafems-discovery-series-part-2-pressure-plates/`)
+says the plate "has the same dimensions as the plate depicted in LE1, but
+with the thickness increased to 0.6 meters", which makes it the second
+source for LE1's ellipses.
+
+A line constraint has no cell-centred counterpart: a boundary condition here
+lives on faces. The line `u_z = 0` is therefore the BAND of outer faces in
+the two cell layers either side of the mid-plane, `2 (0.6)/n_z` high, a patch
+`outer_mid` of its own; as the mesh refines the band closes on the line, and
+its effect is part of the discretisation error the study measures. ESRD's
+note is the other choice, recorded and not taken: "Since constraints along a
+line are incompatible with 3D-elasticity, the StressCheck results were
+obtained by fixing the z-displacement of the face BCB'C'" - a choice worth
+2.4-2.6 % of the answer (ESRD's -5.24 and -5.25 MPa). Four meshes,
+`(n_t, n_phi, n_z) = (6, 12, 4), (12, 24, 8), (24, 48, 16), (48, 96, 32)`,
+the map (S95.25) in plan; §94's study takes the finest three and the bar is
+read on the finest (the fourth mesh: the end of this section).
+
+**LE11, the solid cylinder/taper/sphere under a temperature field.**
+Axisymmetric about `z` and modelled as the quarter `x >= 0`, `y >= 0`. In the
+`(r, z)` half-plane the section is bounded by `z = 0` from A = (1, 0) to
+B = (1.4, 0); the outer sphere `r^2 + z^2 = 1.4^2` from B to
+C = (1.4 cos 30°, 0.7); the taper line from C to G = (1, 1.39); the outer
+cylinder `r = 1` from G to I = (1, 1.79); `z = 1.79` from I to
+H = (1/sqrt 2, 1.79); the bore `r = 1/sqrt 2` from H down to
+E = (1/sqrt 2, 1/sqrt 2); and the inner sphere `r^2 + z^2 = 1` from E back
+to A. Those points are the text of the CEA's "Test elas11 Description
+sheet" for Cast3M (`www-cast3m.cea.fr/html/CasTestsCastem/node9.html`: "PA
+(1, 0)", "PB (1.4, 0)", the cone and sphere points at 30° and 45°, "PH
+(0.7071, 1.79)", "PI (1, 1.79)", "PG (1, 1.39)", "T(r,z) = r + z", the
+vertical displacement null on the upper and lower faces, and the axial
+stress at A, -105 MPa). Precise Simulation's FEATool tutorial "Temperature
+Loading of a Tapered Cylinder"
+(`www.featool.com/doc/Structural_Mechanics_07_temperature_loading1`) builds
+the same section from the same numbers with the axis reversed - the
+rectangle `0.7071..1.4 x -1.79..0`, circles of radius 1 and 1.4, the polygon
+through (1.2124, -0.7), (1, -1.39), (1, -1.79) - and is the second source.
+The bore is written `1/sqrt 2`, the 45° point of the unit sphere, which both
+round to 0.7071.
+
+Material `E = 210 GPa`, `nu = 0.3`, `alpha = 2.3e-4 /°C`; `u_z = 0` on
+`z = 0` (AB) and on `z = 1.79` (HI); symmetry on `x = 0` and `y = 0`; and
+the temperature
+
+```text
+  T = sqrt(x^2 + y^2) + z   [°C],     T_ref = 0                             (S95.26)
+```
+
+evaluated at every cell centre and every boundary-face centre - prescribed,
+not solved: this gate tests a non-uniform thermal load on a curved solid,
+and §95.10's Gate 95-D already tests the conduction link of the chain. The
+mesh maps the unit block `(t, theta, s)`: `s` is the normalised arc length
+along the inner boundary A-E-H and, separately, along the outer one
+B-C-G-I; `(r, z) = (1 - t) inner(s) + t outer(s)`, `x = r cos theta`,
+`y = r sin theta`; the points of `theta = 0`, `theta = pi/2`, `s = 0` and
+`s = 1` are put on `y = 0`, `x = 0`, `z = 0` and `z = 1.79` exactly. Three
+meshes, `(n_t, n_theta, n_s) = (4, 8, 16), (8, 16, 32), (16, 32, 64)`.
+
+**The boundary point, and how a cell-centred stress is read at it.** §95.7
+kept this out of §95 until it could be specified and gated in its own right;
+it is specified here. Every target of (S95.23) is a point on the boundary, at
+a corner of two or three boundary faces, while the stress lives at cell
+centres. The point value is the constant term of a least-squares linear fit
+over a fixed stencil:
+
+```text
+  sigma(P) = a ,   (a, b) = argmin  SUM_{c in S} ( a + b . (x_c - P)/s - sigma_c )^2 ,
+                   s = max_{c in S} |x_c - P|                               (S95.27)
+```
+
+where `S` is the `2 x 2` block of cells (LE1, one layer thick: the fit spans
+`x` and `y` only) or the `2 x 2 x 2` block (LE10, LE11 and the Lamé ring:
+`x`, `y` and `z`) at the point's corner of the mapped block's index space -
+the first two cells from each boundary the point lies on. The normal
+equations are solved by Gaussian elimination with partial pivoting, and a
+stencil that does not span the fit is refused by name, not solved. The fit
+is exact for a linear field and `O(h^2)` for a smooth one; the cell nearest
+the point is printed beside it, so the fit's own contribution is visible.
+The code is `src/solid/restated.rs` (`extrapolate_linear`, the three bodies,
+`lame_ring`); four of its host tests carry §112.3's f32 attribute.
+
+**Its own gate: the Lamé ring.** §95.10's quarter annulus, `r_in = 0.5 m`,
+`r_out = 1.0 m`, two layers in `z`, plane strain, is loaded by an internal
+pressure `p = 1 MPa` and nothing else. The hoop stress at the bore is closed
+form (Timoshenko & Goodier ch. 4):
+
+```text
+  sigma_tt(r_in) = p (r_out^2 + r_in^2) / (r_out^2 - r_in^2) = 5 p / 3        (S95.28)
+```
+
+and it is read with (S95.27) at `P = (r_in, 0, L/2)`, where on the symmetry
+plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10.
+Held: the point value within `1 %` of (S95.28) on the finest mesh, and the
+observed order of its error between the two finest meshes at `p >= 0.9` -
+the bar docs/09's risk 2 wrote for exactly this read-out.
+
+**What is run, and what it registers.** Four scopes in `ofgpu-validate`,
+after Gate 95-A, each its own function and its own gate name:
+`check_boundary_point_fit` (`Gate 95-G boundary-point fit (Lame ring)`),
+`check_nafems_le1` (`Gate 95-G LE1 elliptic membrane (restated)`),
+`check_nafems_le10` (`Gate 95-G LE10 thick plate (restated)`) and
+`check_nafems_le11` (`Gate 95-G LE11 cylinder/taper/sphere (restated)`).
+Every body runs §95.3's segregated outer loop as a case runs it - Anderson
+acceleration at depth five, eight decades, `max_outer = 2000`, three boundary
+passes, BiCGStab with DILU underneath to `1e-12`; LE10, the one of the three
+that is a plate in bending, runs a second time through §109.6's block-coupled
+loop with the same controls, and each run is held to the same bar. Required
+per mesh: the loop converges, and a loop that stops or diverges is reported
+by name as a failed row, never retuned. Required on the finest mesh: the
+point value (S95.27) within the bar. Printed per mesh: the cells, the outer
+and linear iteration counts, the observed contraction, the point value, the
+nearest cell's value and both relative errors; per body, its slenderness
+(95.9). A pass registers NOTHING; a miss is ONE `GateReport` per scope
+(`Verdict::Misses`, `How::Live`) whose `against` names the restatement and
+not the primary, whose headline carries the finest point value and its
+error, and whose uncertainty is §94's study of the point value over the
+three meshes (LE10: its three finest) - or, when three values cannot form
+one, §94.3's single-mesh declaration saying so. The three targets are
+answer keys `nafems-le1`, `nafems-le10` and `nafems-le11` of
+`reference/PROVENANCE.md`, `literal` rows that name the restatement as their
+source.
+
+**Gate 95-G, measured** on 2026-09-25 on the machine of record (one RTX 5070 Ti, f64; another
+workflow was compiling on the CPU), with the meshes and controls above and nothing tuned:
+
+```text
+                                      mesh 1        mesh 2        mesh 3     finest    bar
+  ring   sigma_tt(bore), the fit     1.701161e6    1.688910e6    1.679071e6    0.74 %    1 %    holds
+         order of its error, nr 24 -> 48:  p = 0.842                                   0.9    misses
+  LE1    sigma_yy(D)                 9.074983e7    9.261311e7    9.289492e7    0.21 %    3 %    holds
+  LE10   sigma_yy(D), segregated    -3.988007e6   -4.784563e6   -5.166283e6    3.97 %    3 %    misses
+  LE10   sigma_yy(D), block-coupled -3.838860e6   -4.804854e6   -5.200692e6    3.33 %    3 %    misses
+  LE11   sigma_zz(A)                -1.105979e8   -1.083291e8   -1.067931e8    1.71 %    3 %    holds
+```
+
+Every loop converged on every mesh: 23-85 outer iterations segregated, 46-56 block-coupled on
+LE10. §94's studies of the point values: the ring `p = 0.316`, `phi_ext = 1.672089e6`; LE1
+`p = 2.725`, `phi_ext = 9.311153e7`; LE10 segregated `p = 1.061`, `phi_ext = -5.517532e6`,
+block-coupled `p = 1.287`, `phi_ext = -5.475508e6`; LE11 `p = 0.563`, `phi_ext = -1.035731e8`.
+The nearest cell's own value is 1.0-13.7 % off on the finest meshes where the fit is 0.2-4.0 %:
+the fit is what brings three of the four within their bars.
+
+What the misses say, and what they do not. The ring's point error falls at `p = 0.84`, not 0.9 -
+the order §95.10's Gate 95-D measures for the cell-centre hoop stress itself (0.848): the fit
+carries the cell-centre stress's own order to the boundary and loses none of it, where docs/09's
+risk 2 feared it would. LE10 misses its bar by 0.97 (segregated) and 0.33 (block-coupled) points
+with both loops converged, so it is discretisation error and not the loop; both studies
+extrapolate past the restated -5.38 MPa (-5.52 and -5.48), and the band that stands for the line
+constraint is part of what the refinement changes. A finer LE10 level, a wider stencil or a
+graded mesh at D is a decision for another unit, not a retry of this one. LE1 and LE11 hold
+against the RESTATEMENT; that is a statement about ESRD's restated numbers, not about the NAFEMS
+primary, which was not read.
+
+**LE10's fourth mesh, the user's decision of 2026-09-25.** The measurement
+above left LE10 short of its bar with both loops converged, and the user
+decided to add a finer mesh at D and measure again, the gate's definition
+and its `3 %` bar unchanged. The mesh added is `(48, 96, 32)`, 147,456
+cells: the third mesh halved in every direction, not one graded toward D.
+A graded mesh was the other choice, recorded and not taken: §94's study
+assumes geometrically similar levels, which a grading toward D does not
+keep unless it is the same grading at every level, and grading `z` toward
+the loaded face would coarsen the mid-plane, where the band that stands
+for the line constraint lives. Halving closes the band at the rate of
+the rest of the mesh, to `2 (0.6)/32 = 0.0375 m`, and shrinks D's
+`2 x 2 x 2` stencil (S95.27) by two like every other cell. The study takes
+the three finest meshes, `n_z = 8, 16, 32`, finest first, as Gate 105-C's
+does since §105.13, and the coarsest, `n_z = 4`, is run and printed
+beside them. Nothing else moved: the two loops and their controls, the
+fit (S95.27), the stencil, the band's definition, the restated target and
+the `3 %` bar. LE10's scope grows from 8 rows to 10, one converged row per
+loop at `n_z = 32`, and its two bar rows name `n_z = 32`; `ofgpu-validate`
+gains one host test that pins the four meshes. The measurement follows.
+
+**Gate 95-G LE10, measured on four meshes** on 2026-09-27 on the machine of record (one RTX
+5070 Ti, f64, the card not shared), with the meshes and controls above and nothing tuned:
+
+```text
+                       n_z = 4       n_z = 8       n_z = 16      n_z = 32    finest    bar
+  LE10 segregated    -3.988007e6   -4.784563e6   -5.166283e6   -5.267040e6    2.10 %    3 %    holds
+  LE10 block-coupled -3.838860e6   -4.804854e6   -5.200692e6   -5.299294e6    1.50 %    3 %    holds
+```
+
+Both loops converged on every mesh: 68, 72, 85 and 92 outer iterations segregated (50,859
+linear at `n_z = 32`), 46, 56, 56 and 50 block-coupled (15,922 linear). The first three columns
+are digit-identical to the measurement above. §94's studies over the finest three: segregated
+monotone, `p = 1.922`, `phi_ext = -5.303173e6`, `U_fine = 4.517e4` (Fs 1.25, power series);
+block-coupled monotone, `p = 2.005`, `phi_ext = -5.332400e6`, `U_fine = 9.927e4` (Fs 3, second
+order). The nearest cell's own value is 7.7 % (segregated) and 7.2 % (block-coupled) off at
+`n_z = 32`, where the fit is 2.1 % and 1.5 %.
+
+What this says, and what it does not. LE10 now holds its bar on both loops and its scope
+registers nothing, so the ring's order row is the one shortfall of Gate 95-G left. Over the
+finest three the observed order is near two (1.92, 2.01), where over the coarsest three it was
+1.06 and 1.29: the coarsest pair falls at a lower rate than the finer ones, and the earlier
+extrapolations past the target (-5.52 and -5.48 MPa) leaned on it. Over the finest three both
+extrapolations stop short of the restated -5.38 MPa, by 1.43 % (segregated) and 0.89 %
+(block-coupled); the block-coupled band `phi_fine +- U_fine` contains the restated value and the
+segregated one does not. That remaining gap is smaller than the 2.4-2.6 % ESRD's own face
+constraint is worth, and the band that stands for the line constraint is still this section's
+modelling choice, not the restated condition; nothing measured here separates the two.
+The full run: `ofgpu-validate` 1021/1026, its five failing rows Gate 95-A's four at 5:1 and
+10:1 and the ring's order row; every row outside LE10's scope is digit-identical to the run of
+2026-09-26 (§105.14), and the registry's gates with the verdict of a shortfall fall from 6 to 5.
+
+
 ## 96. What a thermo-elastic case says, the refusal list, and the pair tests
 
 §95 is the solver. This section is the contract that reaches it from a case,
@@ -28466,7 +29651,7 @@ on `run`, and §44.1's `output` block on the case:
         { "match": "loaded", "u": { "type": "traction", "value": [1.0e6, 0.0, 0.0] } },
         { "match": "mid",    "u": { "type": "symmetry" } },
         { "match": "top",    "u": { "type": "free" } } ],
-      "solver": { "tolerance": 1e-6, "maxOuter": 500 }   // both optional, these are the defaults
+      "solver": { "tolerance": 1e-6, "maxOuter": 500, "coupled": false }   // all optional, these are the defaults
     } } ],
 "run":    { "steady": true, "mode": "stress" },      // "thermal" (default) | "stress"
 "output": { "exact": { "format": "vtu" } }           // §44.1's block, unchanged
@@ -28483,6 +29668,7 @@ on `run`, and §44.1's `output` block on the case:
 | `symmetry` | the normal component fixed 0, the tangential traction 0 - the axis is the patch's slot in `-x +x -y +y -z +z`, divided by two |
 | `free` | traction `(0, 0, 0)` |
 | `solver` | `tolerance` (default `1e-6`) is the outer loop's stop, `maxOuter` (default `500`) its iteration cap |
+| `solver.coupled` | `false` (the default): §95's segregated outer loop; `true`: §109's block-coupled solve inside the same loop and its controls (§109.8). Only with a single `material` (96.3 row 22) |
 | `run.mode` | `"thermal"` (the default, §47.14's conduction) or `"stress"` |
 | `output` | §44.1's block; on this run only `exact.format: "vtu"`, written once, is accepted |
 
@@ -28574,7 +29760,7 @@ every region of a thermal-mode run that names `output` — writes `T` only.
 ### 96.3 The refusal list
 
 Every message names the setting's JSON path (`regions/<name>/mechanics/...`,
-`run/mode`, `output/...`) and what to do instead. Rows 1-19 are refused in
+`run/mode`, `output/...`) and what to do instead. Rows 1-19 and 22 are refused in
 the lowering and proved by host tests in `io::case_cht::tests`; rows 20-21
 are runtime refusals, proved with the driver.
 
@@ -28599,6 +29785,7 @@ are runtime refusals, proved with the driver.
 | 17 | the `output` block accepts exactly `exact.format: "vtu"`, once: `output.visualisation` (a multi-region mesh is not one Cartesian lattice), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
 | 18 | `output` on a case with a fluid region - the flow path's VTU is a follow-up, not in this unit |
 | 19 | `mode` that is neither `thermal` nor `stress`, refused listing both |
+| 22 | `mechanics.solver.coupled: true` with `materials` - §109's block operator carries one material per region; the bond face as a 3x3 block is not built |
 
 An `output` field the run did not compute is UNREACHABLE in this format: the
 only field list the block can name is `visualisation.fields`, and row 17
@@ -28608,7 +29795,7 @@ refuses that block whole.
 
 §13.4.1, as §91.4 states it: two case documents identical in every byte but
 one, REQUIRED to produce different output, failing by name if they do not.
-All ten run on the 160-cell bar of the shared fixtures, in seconds, and all
+All eleven run on the 160-cell bar of the shared fixtures, in seconds, and all
 ten start by asserting the two documents actually differ. The measured
 numbers are from the run that wrote this section (RTX 5070 Ti, f64).
 
@@ -28624,6 +29811,7 @@ numbers are from the run that wrote this section (RTX 5070 Ti, f64).
 | 8 | `solver.tolerance` 1e-8 → 1e-2 | the outer iteration counts differ, both converged | 17 → 5 |
 | 9 | `solver.maxOuter` 500 → 2 | `a` converges; `b`'s `run_stress` is refused naming the region and the knob (96.3 row 21) | refusal at 2 iterations |
 | 10 | `bond` series → `linear` | `max|du| > 1e-6 max|u_a|` — the same pair Gate 95-E runs as its second leg | du 1.375e-6, |u_a| 6.099e-5 |
+| 11 | `solver.coupled` false → true | both converged, `max|du| > 0`, and `max|du| <= 0.1 max|u_a|` - two discretisations of one problem (109.7) | 17 → 18, du 6.568e-8, |u_a| 5.484e-5 |
 
 Row 2 is the interesting shape: a pair test whose knob CANNOT move `u` and
 what it does about it. The failure message of every row says "the case said
@@ -28804,5 +29992,4283 @@ Every region of the stack goes through the route, including the grease that
 carries no `mechanics` - the import changes where a mesh COMES FROM and
 nothing about what the solver reads from it, which is the whole claim of the
 section.
+
+---
+
+### 97.5 The region layout — `regions.json`, one polyMesh per region
+
+The layout is a directory, not a mesh: a manifest naming the regions and
+their conformal interface patch pairs, beside one COMPLETE polyMesh per
+region. As a directory it is what every existing driver already reads -
+`<region>/polyMesh` is a polyMesh like any other - and as a manifest it is
+what a CASE composes regions from (97.8) and what `ofgpu-regions` reads
+(97.9):
+
+```
+<case>/mesh/
+  regions.json
+  fluid/polyMesh/{points,faces,owner,neighbour,boundary}
+  flap/polyMesh/{...}
+```
+
+```json
+{
+  "version": 1,
+  "units": "m",
+  "regions": [
+    { "name": "fluid", "kind": "fluid", "polyMesh": "fluid/polyMesh" },
+    { "name": "flap",  "kind": "solid", "polyMesh": "flap/polyMesh", "material": "steel" }
+  ],
+  "interfaces": [
+    { "regions": ["fluid", "flap"], "patches": ["fluid_to_flap", "flap_to_fluid"],
+      "faces": 240, "tolerance": 1e-9 }
+  ],
+  "source": { "tool": "step_mesh", "version": "…", "geometry": "…", "config": "…" }
+}
+```
+
+The rules, with the unit that owns each one's check:
+
+* **R1** Every region's polyMesh is complete and standalone: `owner[f] <
+  neighbour[f]`, internal faces ordered by owner then neighbour, patches
+  contiguous — what `io::polymesh::build_host_mesh` requires. Every
+  existing driver reads `fluid/polyMesh` unchanged.
+  (`tools/mesh/regions_check.py` at the producer; `io::regions::load` at the
+  consumer.)
+* **R2** An interface is a pair of boundary patches, one per region, with
+  the same number of faces, and the k-th face of one is the k-th face of
+  the other with opposite winding (centroid within `tolerance`, normals
+  opposed, areas equal). Pairing is by index; §47.4's centroid hash stays
+  the check and the refusal. (`regions_check.py`; `io::regions::check_layout`.)
+* **R3** Interface patch names are `<this>_to_<other>`; patch `type` is
+  `patch`. (`regions_check.py`; `io::regions::read_manifest`.)
+* **R4** `kind` is `fluid` or `solid`. A solid region carries one
+  `material` name; a solid region that holds two bonded materials (a
+  bimetal strip) is ONE region with a `materials` map per `cellZones`-like
+  list in the case, not two regions. (`io::case_cht`'s `materials` list,
+  §96; `io::regions::read_manifest` for `kind`.)
+* **R5** A region's cell numbering is its own; the manifest never refers to
+  global indices. (`io::regions::split_by_zones` renumbers, 97.7.)
+* **R6** Paths are relative to the manifest's directory.
+  (`io::regions::load`'s path rule, 97.6.)
+* **R7** A single polyMesh with `cellZones` becomes this layout through
+  `ofgpu-regions split`; faces between two zones become the interface
+  pair, ordered identically on both sides. (`ofgpu-regions split`, 97.7.)
+* **R8** A case names the manifest (`"mesh": {"regions": "mesh/regions.json"}`)
+  or lists regions explicitly; both lower to the same `Vec<RegionInput>`
+  plus interface requests; the explicit form wins on conflict and the
+  conflict is named. (`io::case_cht::ChtCase::lower_in`, 97.8.)
+
+---
+
+### 97.6 The decisions the manifest bakes in, and what loading refuses, by name
+
+*DESIGN — one `tolerance` for three inequalities.* The manifest's
+`tolerance` is ONE dimensionless number used for all three R2 inequalities,
+exactly as M4's `regions_check.py` reads it: centroid relative to
+`sqrt(area)`, area relative, `n_A . n_B + 1`; default `1e-9`. The solver's
+own `PairingTolerances` keeps FOUR numbers (§47.4) and is NOT consulted by
+the manifest check — §47.4's check still runs inside `ThermalMesh::couple`
+at solve time, and `ofgpu-regions check` runs it too, under its own
+heading (97.9). Two consumers of one manifest therefore agree, and neither
+silently overrides the other.
+
+*DESIGN — `faces` is optional, `material` is optional in the manifest.*
+`faces`, when present, must equal BOTH patches' face counts — it is a
+cross-check a producer states and a loader verifies, never a number the
+loader invents. `material` is OPTIONAL on a solid region in the manifest,
+because the material BINDS where the case says it (`regions/<name>/
+material`, §47.14's `material` block): M4 writes a `material` only under
+`--material`, and a manifest name nothing reads would be a §13.4.1 defect
+by construction. A `fluid` region carrying `material` IS refused (R4).
+`source` is kept verbatim as data for a human and never read — §13.4: it
+is not a setting.
+
+*DESIGN — whose order wins.* Manifest region ORDER is the producer's; the
+CASE's own `regions[]` order fixes the concatenated numbering (§47.4, the
+doc on `ChtCase.regions`), and `lower_in` walks the case's order. The
+manifest reader still refuses a fluid that is not `regions[0]` of the
+MANIFEST, so a producer cannot write a layout the solver refuses later.
+
+`read_manifest` (and `load` around it) refuses, each by name:
+
+| refused, by name |
+|---|
+| `version` other than 1 - naming the number |
+| `units` other than `m` - the mesh must be scaled by the tool that made it, and the message says so |
+| a region name declared twice |
+| a region name `check_patch_name` refuses - a boundary file carries names, and it must be writable as one |
+| `kind` not `fluid`/`solid` (R4) |
+| a `fluid` region carrying `material` (R4) |
+| more than one fluid, or a fluid that is not `regions[0]` (SPEC-LIT 47.4) |
+| an interface whose two `regions` are the same region, or name a region the manifest does not declare |
+| an interface whose `patches` are not exactly `["<a>_to_<b>", "<b>_to_<a>"]` (R3) - the expected pair is printed |
+| a `tolerance` that is not `> 0` |
+| a `polyMesh` path that is absolute or climbs out with `..` (R6), naming the path |
+| a region's polyMesh that `read_poly_mesh`/`build_host_mesh` refuses, or whose internal faces are not in `(owner, neighbour)` order (R1, naming the first face that breaks it) |
+
+and `check_layout` refuses, per interface: a patch that does not exist in
+its region's mesh (the region's own patch names listed), a patch not typed
+`patch` (R3), unequal patch sizes or a `faces` that disagrees (R2), and
+any face `k` of the three inequalities failing — naming the interface, k,
+the number, the tolerance and R2. Non-conformal (AMI) is refused here by
+the same two checks that refuse it at §47.4 (size, and distance), and for
+the same stated reason: tier D, not implemented.
+
+What a PASS prints. `check_layout` returns one `PairingCheck` per
+interface — `worst_centroid` (of `|Cf_a - Cf_b|/sqrt|Sf_a|`),
+`worst_area` (of `||Sf_a|-|Sf_b||/|Sf_a|`), `worst_normal` (of
+`n_a . n_b + 1`), all dimensionless, worst over all k — and
+`ofgpu-regions check` prints them under `layout R1-R6: PASS` (97.9). On
+the dyadic fixture of 97.7 the areas and normals are 0 and the worst
+centroid is 0 to one ulp of the fan's division (97.10 measures it).
+
+---
+
+### 97.7 `cellZones`, and the split (R7)
+
+The `cellZones` file is a published case-format FILE (ASCII, learned from
+its shape; no code was read):
+
+```
+FoamFile { version 2.0; format ascii; class regIOobject; location "constant/polyMesh"; object cellZones; }
+2
+(
+lower
+{
+    type cellZone;
+    cellLabels      List<label> 3(0 1 2);
+}
+upper
+{
+    type cellZone;
+    cellLabels      List<label>
+3
+(
+3
+4
+)
+;
+}
+)
+```
+
+`polymesh::read_cell_zones` reads it in both the compact `3(0 1 2)` and the
+long counted form, with or without the `List<label>` word, probing the same
+three polyMesh locations `read_poly_mesh` probes. A missing file is refused
+naming the path, `ofgpu-regions split`, and M4's
+`tools/mesh/regions_from_msh.py` — the route a multi-volume `.msh` takes
+instead, because `io::msh` keeps no volume tags (97.2). A zone dictionary
+without `cellLabels` is refused naming the zone.
+
+`regions::split_by_zones` turns one polyMesh plus the zones into the
+layout. The rules, in the order the splitter applies them:
+
+* every zone name passes `check_patch_name`; no zone is empty; every label
+  is a cell of the mesh; every cell is in EXACTLY one zone (the unassigned
+  are counted and the first named; a doubly-assigned cell names both
+  zones);
+* no cyclic patch in the parent. The refusal attributes carefully: a
+  cyclic pair is DECLARED once and matched THEN, by nearest transformed
+  centroid, under the bijection and the `|Sf|`-equal / `Sf`-opposed
+  invariants (SPEC-LIT 31.1); the "face `k` couples to face `k`" ordering
+  is `mesh::geometry::cyclic_pairing`'s own doc comment, not 31.1. A split
+  renumbers and re-partitions the faces of a patch, so neither survives
+  it - split before the cyclic is declared;
+* cell numbering: local = rank of the cell among its zone's cells in
+  ASCENDING global order (R5; deterministic; keeps `owner < neighbour` and
+  the parent's `(owner, neighbour)` order);
+* internal faces of a zone: STABLE-sorted by `(owner, neighbour)` (R1);
+* interface faces: for each parent internal face crossing two zones (in
+  ascending parent face order), the OWNER's zone takes the face with its
+  own loop and the neighbour's zone takes `reverse_face` of it with the
+  neighbour as owner - so the k-th face of BOTH patches is the k-th such
+  parent face (R2's "ordered identically"). Names `<a>_to_<b>` (R3);
+* *DESIGN* `reverse_face` keeps the FIRST vertex and reverses the rest:
+  `[f[0], f[n-1], ..., f[1]]`. The normal flips, and a hex mesher's own
+  outward loop for the opposite face IS this reversal - blockgen's `zMin`
+  quad `[A, D, C, B]` (`boundary_quad` slot 4) is exactly the internal
+  `+z` quad `[A, B, C, D]` (`internal_quad`'s `_ =>` arm) reversed this
+  way - so `face_geometry`'s fan about the vertex average runs in the same
+  order on the split face as on the sub-block's own face, and the split's
+  geometry is bitwise the sub-block's (97.10). A plain reversal
+  `[D, C, B, A]` gives the same normal and a last-bit-different centroid;
+* a boundary face goes to its owner's zone, keeping its patch; a patch
+  with NO face left in a zone is DROPPED there (an empty patch would be a
+  name the case has to claim for nothing);
+* *DESIGN* patch order: the parent's surviving patches in parent order,
+  THEN the interface patches in ascending other-zone index. Nothing reads
+  two patches of one region by position, so the order is free - and 97.10
+  shows `upper`'s two documents indeed differ in it;
+* points: each region keeps only the points it uses, renumbered by FIRST
+  USE walking its faces in output order; coordinates copied unchanged.
+
+`write_layout` writes `<out>/<region>/polyMesh/...` through
+`write_poly_mesh_raw` and `regions.json` in field order, refuses an
+existing `<out>/regions.json` naming it, and stamps `source` with `tool`,
+`version`, `geometry` (the polyMesh directory exactly as typed) and
+`config` (the flags exactly as typed) - the four keys of the example above.
+
+---
+
+### 97.8 The case (R8) — `"mesh": {"regions": ...}`
+
+A case may name the layout:
+
+```jsonc
+{
+  "name": "...",
+  "mesh": { "regions": "mesh/regions.json" },
+  "regions": [
+    { "name": "lower", "material": {...}, "patches": [ ... ] },
+    { "name": "upper", "material": {...}, "patches": [ ... ] }
+  ]
+}
+```
+
+The path resolves through the SAME four checks a region's own `polyMesh`
+path follows (97.2) - `resolve_case_path` is `resolve_mesh_path`'s body
+with the message prefix as a parameter, and `resolve_mesh_path` is a
+one-line delegate, so there is no second mechanism. What the region loop
+then does is the four combinations of (the region says `mesh`, the
+manifest lists the region):
+
+| case `mesh` | manifest lists it | what lowering does |
+|---|---|---|
+| yes | no | the region's own mesh is built, exactly as before §97 |
+| yes | yes | the case's mesh is used AND `LoweredChtCase.notes` gets one string naming the region, the manifest and the choice - printed by `ofgpu-cht` as `  note: ...`, never swallowed |
+| no | yes | kind must agree (else refused naming `regions/<name>/kind`, both kinds and the manifest path); `check_imported_patches` runs; the mesh and the raw are the manifest's own load - no second build |
+| no | no | refused - `regions/<name>: neither a `mesh` nor an entry in <manifest>` when a manifest is named, `regions/<name>/mesh: required when the case has no `mesh.regions` manifest` when not |
+
+After the region loop, every manifest region must appear in the case; the
+first that does not is refused - a region needs a `material` and a
+`patches` rule, which the manifest cannot carry (R8), and silently running
+a three-region layout as two is how a case comes to say something the
+solver ignores (§13.4).
+
+The interfaces MERGE. The case's own `interfaces[]` entries go in first,
+with their `Rc`; then each manifest interface is added unless a case entry
+already names the same unordered patch pair (the case's `Rc` wins); a case
+entry naming one of the manifest interface's two patches with a DIFFERENT
+partner is refused naming both pairs - a patch cannot have two partners.
+A manifest interface carries `r_c = 0`: perfect contact (S47.2), because
+the manifest has no spelling of a resistance and `Rc` is the case's own.
+The claim runs after the `patches` rules have claimed theirs, so a patch a
+rule already named meets the same "already claimed" refusal a case
+interface meets.
+
+---
+
+### 97.9 `ofgpu-regions` — the three subcommands, and the two verdicts
+
+```
+ofgpu-regions split <polyMeshDir> <outDir> [-fluid <zone>]
+ofgpu-regions check <regions.json>
+ofgpu-regions list <regions.json>
+```
+
+`split` reads the polyMesh and its `cellZones` (97.7) and writes the
+layout; `-fluid` moves that zone to `regions[0]` BEFORE the split, so the
+fluid block keeps §47.4's numbering, and with no `-fluid` every region is
+`solid`. It prints, per region, `name kind cells faces patches`, and per
+interface, `a_to_b <-> b_to_a: N faces`. `check` prints the layout's
+verdict and then the solver's; `list` reads the manifest alone - no mesh
+is read.
+
+`check` prints TWO verdicts, and a failure says WHICH failed:
+
+| verdict | printed on pass | what runs under it |
+|---|---|---|
+| `layout R1-R6: PASS` | one line per `PairingCheck` (`worst centroid/sqrt(area) = .., area = .., normal+1 = ..`), then `cell_regions`' connected-component count per region | `regions::load` - the manifest, R6, R1's ordering check, `build_host_mesh`, and the index-pairing check of the one dimensionless `tolerance` |
+| `solver pairing (SPEC-LIT 47.4):` | `InterfaceReport` - pair count, worst centroid/area/normal, non-orthogonality in degrees, total area | `ThermalMesh::build` with `PairingTolerances::default()`, exactly as the solve would pair |
+
+Either failing exits 1. The layout check is the manifest's own word about
+its own meshes; the solver check is §47.4's, and it is the one that would
+run at solve time - which is why it is printed even when the layout check
+passed, and why the two are headed separately rather than summed into one
+PASS.
+
+---
+
+### 97.10 Gate 97-B — the split two-zone block, run through the manifest, IS the block run
+
+The fixture is dyadic by construction: a 4×4×8 union block on
+`[0,1]^2 × [0,2]` (`x`, `y` at 4 cells, `z` at 8), no windows, no cyclic,
+every node coordinate `i/4` - exact in binary - split into `lower` (cells
+whose centre has `z < 1`) and `upper`. The reference each region is held
+to is the 4×4×4 sub-block the zone occupies, written straight from a
+block. Everything the geometry sweep sums is a sum of products of exact
+dyadic numbers, so `Sf`, the centroids' sum and the volumes are exact; the
+centroid itself divides by 3 inside the fan and agrees to the bit whenever
+the LOOP is the same - which `reverse_face`'s first-vertex rule (97.7)
+arranges for the interface, and `compute`'s per-cell order arranges for
+everything else: every cell touches at most one z-patch, and in both patch
+orders the x/y patches precede the z-patch, so the per-cell face sequence
+- internal ascending, then boundary ascending - is the same sequence in
+spite of `upper`'s differing patch ORDER.
+
+The gate runs the dieStack-shaped two-solid case twice over the SAME
+temp directory: document A, both regions block meshes and one explicit
+interface; document B, `"mesh": {"regions": "mesh/regions.json"}`, no
+per-region mesh, no `interfaces` - the manifest supplies them. Before the
+run the two LOWERED cases are held to A5's equalities, every boundary
+comparison matched BY NAME (the documents put `upper`'s patches in
+different orders), so a failure localises to geometry or to the solve.
+Then `t`, `steps`, `pair_flux` and `bt` are compared with no tolerance.
+`bt` is compared PER PATCH BY NAME over the CONCATENATED mesh: §47.4's
+build extends the concatenated boundary arrays region by region in each
+region's OWN patch order, so the last 32 entries are `upper`'s two z-side
+patches in swapped positions - an entry-by-entry comparison would fail on
+a mesh and a solve that are both correct. The patch start `bt` is indexed
+with is the one `sol.mesh.host.patches` carries (`"<region>:<patch>"`,
+`start = p.start + boundary_face_offset`), never the region-local one,
+which for the second region reads the FIRST region's faces instead.
+
+Measured by `io::regions::tests::gate_97b_a_split_two_zone_block_run_through_the_manifest_is_bitwise_the_block_run`:
+
+| Quantity | Value |
+|---|---|
+| cells (both regions) | 128, `t` bitwise identical per cell |
+| boundary faces | 192, `bt` bitwise identical per patch, by name |
+| flux pairs | 16, `pair_flux` bitwise identical |
+| steps | 1 = 1 |
+| max relative difference | 0 - the field IS the same field, bit for bit |
+
+Gate 97-B is registered in `ofgpu-validate` beside §97.4's Gate 97-A: the
+`S97 Gate 97-B region layout` scope runs `check_region_layout`, the twin of
+`check_imported_region`, over the same fixture rebuilt from the public API
+(`blockgen::raw_mesh`, `io::regions::split_by_zones`, `write_layout`) and
+the two documents above, and prints the cell, boundary-face and flux-pair
+counts and the max relative difference beside its three rows. It is
+single-mesh by name (§94.3): one fixture, bit-for-bit identity, no
+discretisation error to extrapolate.
+
+---
+
+### 97.11 What this does not do
+
+| not done | the named route instead |
+|---|---|
+| non-conformal (AMI) interfaces | refused at the layout check AND at §47.4's pairing - tier D, not implemented, for the reasons §47.4 states |
+| a cyclic pair across a split | refused by `split_by_zones`: declare the cyclic AFTER the split, on one region - §31.1's declaration contract and `cyclic_pairing`'s ordering do not survive a renumbering |
+| a multi-volume `.msh` as one mesh | `io::msh` discards volume tags (97.2); the route is `tools/mesh/regions_from_msh.py` writing the layout, loaded here |
+| Fluent multi-zone export | not written; a Fluent export of the layout is M4's tool's business, and this unit changed nothing in the Fluent path |
+| the automesher's own regions | `ofgpu-automesher`'s region output (§92) is a later unit's (M6); nothing here reads or writes it |
+| units other than metres | refused by name - the tool that made the mesh scales it (97.6) |
+
+The layout is a CONTRACT, not a solver feature: the solver's only new
+knowledge is that a case may hand it a manifest's regions and interfaces
+(97.8), and everything it then computes is what it already computed. The
+three N/A house items of a device unit are N/A here too - no `.cu` (so no
+`KERNEL_UNITS` row), no capture-registry `Stance` row (no device module),
+no `build.rs` change - and no solver numerics moved to make any gate pass:
+the gate is bitwise precisely because nothing moved.
+
+---
+
+## 98. A face that exchanges heat with something not meshed — convection to an ambient, grey radiation to a surround, and `h_total`
+
+Until this section a wall of a `*.cht.jsonc` case could hold a temperature,
+be adiabatic, or take a prescribed flux (§32.2). None of the three says what
+the wall of a real enclosure does: lose heat to air nobody meshed, at a film
+coefficient, and radiate to surroundings at an emissivity. This section adds
+the three `T` conditions that say it - on a solid face or on a fluid face -
+written as §4's one triple, and the two closed-form gates that hold them.
+
+The line this section draws is the one between a face whose unmeshed other
+side is a **number the case states** (an ambient temperature, a surround's
+temperature) and a face whose other side is **another face of the same
+enclosure**. The first is here, whole. The second is §50's radiosity system
+reaching a conjugate case, and §98.7-§98.10 are it: a
+face that radiates to its neighbours in an enclosure is not a face that
+radiates to a surround, and nothing below pretends it is.
+
+`No GPL-licensed source was consulted.`
+
+### 98.1 What the case can say
+
+Three new words for a patch's `T` in §47.14's `patches` list, and nothing
+else moves:
+
+```jsonc
+"patches": [
+  { "match": "sides", "T": { "type": "externalConvection", "h": 25.0, "TInf": 300.0 } },
+  { "match": "face",  "T": { "type": "externalRadiation", "emissivity": 0.8, "TEnv": 300.0 } },
+  { "match": "lid",   "T": { "type": "externalConvectionRadiation",
+                             "h": 10.0, "TInf": 300.0, "emissivity": 0.9, "TEnv": 290.0 } },
+  { "match": "plate", "T": { "type": "externalConvection", "TInf": 300.0,
+                             "h": { "correlation": "churchillChu",
+                                    "Ra": 1.0e8, "Pr": 0.71, "kappa": 0.026, "L": 0.2 } } }
+]
+```
+
+| Key | Meaning |
+|---|---|
+| `externalConvection` | `-k dT/dn = h (T_b - TInf)`: the face loses heat at a film coefficient `h` [W/(m^2 K)] to an ambient at `TInf` [K] |
+| `externalRadiation` | `-k dT/dn = eps sigma (T_b^4 - TEnv^4)`: grey radiation at an emissivity `eps` in `(0, 1]` to a surround at `TEnv` [K], large enough that its temperature does not move and none of the face's own emission comes back |
+| `externalConvectionRadiation` | both on one face, summed - the `h_total` a datasheet quotes (S98.4) |
+| `h` | a number, or `{ "correlation": "churchillChu", "Ra", "Pr", "kappa", "L" }`: §98.4's vertical-plate correlation, evaluated ONCE at lowering from the Rayleigh number the case states |
+| where | any wall patch of a solid region OR of a fluid region; refused on an `inlet`, on an `outlet` and on an interface patch (§98.5) |
+
+**The sign.** The loss is written positive OUT of the domain, the way each
+of the two laws is written in every textbook; §32.2's `q` is positive INTO
+the solid. The two conventions are stated side by side here so that a reader
+comparing a `fixedFluxTemperature` with an `externalConvection` does not
+have to derive it.
+
+§47.14's one rule is unchanged: every patch is named exactly once. A case
+that writes none of the three words lowers, runs and prints bit for bit what
+it did before this section.
+
+### 98.2 The triple - convection exactly, radiation by its tangent
+
+**The convective face.** Let `C_b` be the face's cell-to-face conductance
+of (S47.4): `Dhat_b/|Sf|` on a solid face, `k_eff Delta_b` on a fluid one.
+The unmeshed side is a lumped resistance `1/h` whose far end sits at `TInf`,
+so §47.2's triple with `R_c = 0` and the ambient in the place of the cell
+across the interface is, exactly,
+
+```
+fr = h/(h + C_b),     refValue = TInf,     refGrad = 0                      (S98.1)
+```
+
+*Proof.* §4 gives `T_b = fr TInf + (1 - fr) T_P`, so
+`C_b (T_P - T_b) = C_b fr (T_P - TInf) = h (1 - fr)(T_P - TInf) = h (T_b - TInf)`.
+The flux the solid conducts to the face and the flux the face convects away
+are the same number **at every iterate**, not at convergence, and
+`0 < fr < 1` whenever `h` and `C_b` are positive. A face whose conductance is
+not positive is set exactly adiabatic, (S47.8)'s convention. ∎
+
+**The radiating face.** `q_r(T_b) = eps sigma (T_b^4 - TEnv^4)` is not linear
+in `T_b`, so the face carries its tangent about a linearisation point `T*`:
+
+```
+q_r(T_b) ~ a + b T_b,    b = 4 eps sigma T*^3,    a = eps sigma (T*^4 - TEnv^4) - b T*    (S98.2)
+```
+
+With a convective part beside it (`h = 0` on `externalRadiation`, `eps = 0`
+on `externalConvection`) the face's whole loss is one Robin condition:
+
+```
+q_out(T_b) ~ H (T_b - T_ref),    H = h + b,    T_ref = (h TInf - a)/H
+fr = H/(H + C_b),     refValue = T_ref,     refGrad = 0                      (S98.3)
+```
+
+which is (S98.1) with `H` for `h` and `T_ref` for `TInf` - the same triple,
+the same identity, now on the linearised flux. On `externalConvection`
+(S98.3) is (S98.1) in every bit: `H = h` and `T_ref = TInf` are taken, not
+computed. Nothing is carried in `refGrad`, which §47.2 consequence 3 shows
+the assembly would weight by `(1 - fr)`.
+
+**Why the tangent and not the datasheet's form.** The form a datasheet
+quotes,
+
+```
+h_r(T_b)     = eps sigma (T_b^2 + TEnv^2)(T_b + TEnv),     h_r (T_b - TEnv) = q_r(T_b)
+h_total(T_b) = h + h_r(T_b),      and when TEnv = TInf:  q_out = h_total (T_b - TInf)    (S98.4)
+```
+
+is exact as an identity. As a linearisation it is not a tangent: freezing
+`h_r` at `T*` is a secant (Picard) iteration, whose error shrinks by a
+constant factor each pass. The tangent (S98.2) is Newton's, whose error is
+squared each pass - which is what Gate 98-B holds. So the solve uses
+(S98.2) and (S98.4) is what the face REPORTS: `ExternalLoss::h_r` and
+`ExternalLoss::h_total` in `src/cht/ambient.rs`.
+
+**The linearisation residual.** When the run stops, each face's triple still
+carries the tangent about the last `T*`, so the flux the matrix delivered
+and the quartic differ by a term second order in `T_b - T*`. The run reports
+it, relative to the largest loss:
+
+```
+r = max_f | q_out(T_b) - H (T_b - T_ref) |  /  max_f | q_out(T_b) |           (S98.5)
+```
+
+### 98.3 Where the triple is written, and the loop a radiating face needs
+
+**A convective face is static.** On a solid face `C_b` is static (§46: a
+fixed mesh and a fixed `K`), so (S98.1) is written once, in the host loop
+that already writes §32.2's `fixedFluxTemperature`, in both
+`cht::run_case` and `cht::flow::run_flow_case`. On a fluid face
+`C_b = k_eff Delta_b`, and the conjugate flow path is laminar - `nu_t` is
+zero on both meshes and never written - so `k_eff = kappa` in every bit and
+`C_b = kappa Delta_b` is static too - unless `kappa` is a curve, when §100.10 rewrites
+it every iteration. A test holds the conductance the energy
+equation used to that product, on the face (§98.5).
+
+**A radiating face moves with `T_b`.** On the conduction path `run_case` had
+no outer loop at all (`steps = 1` when steady). A case with a radiating face
+now takes Newton passes inside each step: `correct`, read the face values
+back, move every radiating face's `T*` to its `T_b`, rewrite `(fr, refValue)`
+there, and repeat until
+
+```
+max_f |T_b - T*|  <=  1e-10 max_f T_b          (1e-4 in the f32 build)
+```
+
+in at most 50 passes, and a run that does not meet it is REFUSED naming its
+last corrections. The first pass is linearised about the case's initial
+temperature. The host round trip sits between two `correct` calls, so it is
+outside the region `the_solid_side_iteration_replays_bitwise` captures -
+which is `correct` alone - by construction, and `src/cht.rs` keeps its
+capture-registry row as it was. A case with no radiating face takes exactly
+the one `correct` per step it always took. The criterion is §100.7's,
+which a case may state in `numerics.outer`; stated or not, a case with no
+curve takes it with exactly these two numbers.
+
+The linear solver's own tolerance must resolve the criterion: a correction
+that stops shrinking above it has reached the solver's floor, and the
+refusal says to tighten `numerics.tolerance`.
+
+**On the conjugate path the SIMPLE loop is already an outer loop.** Every
+outer iteration re-linearises each radiating face about the `T_b` the
+previous energy solve left, before the next energy solve: one round trip per
+iteration, and only on a case that has such a face. (S98.5) of the triple the
+last solve used is reported as `ChtFlowSolution::external_residual`.
+
+**What a run reports.** `ChtSolution::external_passes` - the last step's
+corrections, K, one per pass, empty when no face radiates;
+`ChtSolution::external_residual` - (S98.5), zero when no face radiates;
+`ChtSolution::b_conductance` and `ChtSolution::patch_heat_flow`, the
+conduction twin of `ChtFlowSolution::patch_heat_flow`, which is what a base
+heat flow is read with.
+
+**What does not move.** `src/energy.rs` is not modified. The three
+conditions are `BcKind::Mixed` faces, which every kernel evaluates through
+§4's one expression; no kernel was added or changed, and no `.cu`,
+`KERNEL_UNITS` or capture-registry row is touched. `src/cht/ambient.rs` is
+host arithmetic plus the one round trip above.
+
+### 98.4 Churchill & Chu, and why no gate runs through it
+
+```
+Nu_L = { 0.825 + 0.387 Ra_L^{1/6} / [1 + (0.492/Pr)^{9/16}]^{8/27} }^2,     1e-1 <= Ra_L <= 1e12
+h    = Nu_L kappa / L                                                        (S98.6)
+```
+
+Churchill & Chu's vertical-plate correlation for every Rayleigh number,
+taken from its restatement in Incropera & DeWitt, *Fundamentals of Heat and
+Mass Transfer* (Wiley), ch. 9 - **not from the paper**: S. W. Churchill and
+H. H. S. Chu, *Int. J. Heat Mass Transfer* 18 (1975) 1323-1329, DOI
+10.1016/0017-9310(75)90243-4, is paywalled and was not read. The five
+coefficients and the range are the `churchill-chu1975` literal row of
+`reference/PROVENANCE.md`: **trusted to a transcription, and gated against
+nothing.** That is the reason no gate runs through the correlation - Gate
+98-A states `h` as a number.
+
+The correlation is evaluated once, at lowering, from the Rayleigh number the
+case writes. A Rayleigh number that follows the face's own `T_b - TInf`,
+which would make `h` a function of the solution, is not built. What holds the
+entry instead: a §13.4.1 pair test (two Rayleigh numbers, two fields), and
+the refusal of a Rayleigh number outside `[1e-1, 1e12]` by name, because a
+correlation is not extrapolated.
+
+### 98.5 The refusal list, the pair tests, and what must hold
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | `h` not finite and positive | the JSON path; `h = 0` is `zeroGradient` under another name |
+| 2 | `TInf` not finite and positive | the JSON path; the ambient temperature is absolute, K |
+| 3 | `emissivity` outside `(0, 1]` | the JSON path; `0` radiates nothing and is `zeroGradient` under another name |
+| 4 | `TEnv` not finite and positive | the JSON path; it enters as `T^4` and must be absolute |
+| 5 | a `correlation` other than `churchillChu` | the JSON path, and the one that exists |
+| 6 | `Ra` outside `[1e-1, 1e12]` | the JSON path and the range (S98.6) states |
+| 7 | `Pr`, `kappa` or `L` not finite and positive | the JSON path |
+| 8 | any of the three on an `inlet` or an `outlet` | the JSON path; they are wall conditions |
+| 9 | any of the three on an interface patch | the patch, named twice - §47.14's one-condition rule; an interface's other side is meshed |
+| 10 | a run whose radiating faces do not meet §98.3's criterion in 50 passes | the case, the criterion, and the last corrections |
+
+**The pair tests (§13.4.1).** Two case documents identical in every byte but
+one, required to produce different fields, each failing by name: on a
+one-region conduction slab, `h`, `TInf`, `emissivity`, `TEnv` and the
+correlation's `Ra`; on the conjugate cavity of §60.1, `h` on the fluid's
+cold wall, `h` on the solid's outer face, and `emissivity` on the fluid's
+cold wall.
+
+| Check | Expected |
+|---|---|
+| the triple, host | (S98.1)'s identity to `1e-13`; the tangent (S98.2) touching the quartic at `T*` with its slope, and its error quadrupling when the offset doubles; (S98.4)'s `h_r` reproducing the quartic |
+| Churchill & Chu, host | rising with `Ra`; at `Pr -> infinity` the Prandtl factor going to one; rows 6 and 7 refused by name |
+| the three spellings lower | onto one `ExternalLoss` each, `h = 0` on the radiation-only word and `emissivity = 0` on the convection-only one, the correlation's `h` equal to (S98.6) |
+| rows 1-9 | each refused, the message naming the JSON path |
+| a convective slab | the heat through the slab `(T_hot - TInf)/(d/k + 1/h)` to `1e-10`, and the face's conducted flux equal to `h |Sf| (T_b - TInf)` to `1e-12` |
+| a radiating slab | `T_b` the root of the quartic to `1e-10`, the Newton passes between three and six, the residual (S98.5) below `1e-10` |
+| a case with no external face | one solve per step, `external_passes` empty, `external_residual` zero |
+| a fluid wall | the conductance the energy equation used equal to `kappa Delta_b` to `1e-14`, and (S98.1)'s identity on the fluid face to `1e-10` |
+| the pair tests | every pair above different, failing by name |
+| the schema | `docs/schema/cht-1.json` regenerated, the three words in its `oneOf` |
+
+Seven of the new library tests carry the f32 attribute, and §112.3's count
+moves by seven: the four host tests of the triple, the tangent, the secant
+and the slab root in `src/cht/ambient.rs`, and the convective slab, the
+radiating slab and the fluid wall in `src/io/case_cht/tests.rs`.
+
+### 98.6 Gates 98-A and 98-B
+
+**Gate 98-A - the straight fin, three meshes.** A fin of conductivity `k`,
+cross-section `A` and wetted perimeter `P`, its base held `theta_b` above the
+ambient and its tip adiabatic, obeys `k A theta'' = h P theta` with
+`theta(0) = theta_b` and `theta'(L) = 0`, so
+`theta = theta_b cosh(m (L - x))/cosh(m L)` and the base heat flow is
+
+```
+q_b = k A theta_b m tanh(m L) = sqrt(h P k A) theta_b tanh(m L),     m^2 = h P/(k A)    (S98.7)
+```
+
+The case: silicon, `k = 148` W/(m K), length `L = 50` mm, thickness
+`t = 1` mm, depth `w = 10` mm; the base `fixedValue` 400 K, the upper and
+lower faces `externalConvection` at `h = 25` W/(m^2 K), `TInf = 300` K; the
+tip and the two depth faces `zeroGradient`, so `P = 2w` and `A = t w`,
+`m = sqrt(2h/(k t)) = 18.38` /m, `m L = 0.919`, and (S98.7) gives
+`q_b = 1.97339` W. The run's base heat flow is
+`ChtSolution::patch_heat_flow` on the base patch - `sum C_b |Sf| (T_b - T_P)`,
+taken the way `ChtFlowSolution::patch_heat_flow` takes it. Three meshes,
+`n_x = 20, 40, 80` with two cells across the thickness throughout, through
+`vv::grid_study` with `h = L/n_x`; the gate is `0.5 %` on the finest mesh,
+and §94's study and GCI are printed beside it.
+
+**What the band contains.** The study sees the discretisation error; it
+cannot separate from it the error of the model (S98.7) is. The solid is
+two-dimensional and the fin equation neglects its transverse gradient,
+which is of relative order `Bi = h (t/2)/k = 8.4e-5` - sixty times inside
+the band at this Biot number. The verdict says both are in it.
+
+**Gate 98-B - the radiating slab, one mesh.** A slab of conductivity `k`
+and thickness `d` with one face held at `T_i` and the other radiating to a
+surround at `TEnv` settles where the conducted flux meets the radiated one:
+
+```
+f(T_b) = eps sigma (T_b^4 - TEnv^4) - (k/d)(T_i - T_b) = 0,
+C = f''(T_r) / (2 f'(T_r)) = 12 eps sigma T_r^2 / (2 (4 eps sigma T_r^3 + k/d))          (S98.8)
+```
+
+The case: `k = 1` W/(m K), `d = 20` mm in twenty cells, `T_i = 500` K, the
+other face `externalRadiation` with `eps = 0.8`, `TEnv = 300` K, the four
+side faces `zeroGradient`, the initial temperature 500 K. **One mesh is the
+whole sequence there is**, and not for convenience: the steady solid profile
+is exactly linear (`a_steady_isotropic_solid_is_exactly_linear`), so the
+discrete conducted flux is `(k/d)(T_i - T_b)` on any uniform mesh, each
+pass of §98.3 is exactly Newton's step on `f`, and `T_b` is the root to
+round-off, with no discretisation error to extrapolate (§94.3). The host
+solves `f = 0` by Newton to `1e-14` relative (`T_r = 464.9498` K), and the
+gate holds:
+
+- `|T_b - T_r| / T_r <= 1e-10`, and the residual (S98.5) `<= 1e-10`;
+- **quadratic convergence**: for every pass whose correction `delta_{k+1}`
+  is above the solver's floor `1e-12 T_r`, the ratio
+  `delta_{k+1} / delta_k^2 <= 2C`, and at least two such ratios. The bound
+  is the theorem, not a tuning: the first linearisation is at 500 K, above
+  the root, and Newton on a convex, increasing `f` from above descends
+  monotonically with every ratio at most `f''(T_k)/(2 f'(T_r))`, which is
+  below `(T_0/T_r)^2 C < 2C` because `T_0/T_r = 1.075 < sqrt 2`.
+
+The corrections the host Newton takes from 500 K are 33.95, 1.096,
+`1.04e-3` and `9.3e-10` K against `C = 8.62e-4` /K - three ratios,
+`9.5e-4`, `8.65e-4` and `8.62e-4`, each already at the asymptotic constant.
+
+**Measured** (RTX 5070 Ti, f64, the `ofgpu-validate` run that landed this
+section). Gate 98-A: `q_b = 1.97269876`, `1.97316727` and `1.97328444` W at
+`n_x = 20, 40, 80`, which is `3.50e-4`, `1.13e-4` and `5.36e-5` off (S98.7);
+the study reads monotone, `p = 1.999`, `phi_ext = 1.973324` W, `U_fine = 4.9e-5`
+W. The extrapolated value sits `3.4e-5` (relative) BELOW (S98.7), outside
+`U_fine`, so §94.3's metric says what is left is not the mesh - and its size is
+of the order of `Bi = 8.4e-5` and its sign is the one a transverse resistance
+gives: the 1-D model's offset the band was said to contain, measured rather
+than argued. Gate 98-B: four Newton passes, corrections 33.95, 1.096,
+`1.04e-3` and `9.33e-10` K, ratios `9.51e-4`, `8.65e-4` and `8.63e-4` against
+`2C = 1.72e-3`; `T_b = 464.9497776245` K, `3.7e-16` from the host's root, and
+the residual (S98.5) `3.9e-16`.
+
+### 98.7 The enclosure a conjugate case radiates in - what the case says
+
+§98.1-§98.6 give a face a surround whose temperature the case states. A face
+of a real enclosure radiates to the other faces of the same enclosure
+instead, and §49-§51 already solve that exchange: the view factors, the
+radiosity system (S50.3), the one rewritten triple (S50.12) and §51.1's
+dictionary. What no case could do was reach them - §50.12's second item.
+Three entries of a `*.cht.jsonc` case do, and nothing else moves:
+
+```jsonc
+"radiation": "enclosure",
+"regions": [ { "name": "air", "kind": "fluid", ...
+  "patches": [
+    { "match": "airTop", "T": { "type": "s2sWall" } },
+    { "match": "lid",    "T": { "type": "s2sWall", "emissivity": 0.3, "q": 250.0 } } ] } ],
+"interfaces": [ { "regionA": "air", "patchA": "airToWall",
+                  "regionB": "wall", "patchB": "wallToAir", "emissivity": 0.9 } ]
+```
+
+| Key | Meaning |
+|---|---|
+| `radiation` | the directory, relative to the case file's directory, whose `constant/radiationProperties` `RadiationConfig::from_case` reads exactly as §51.1 states it: `radiationModel viewFactor`, the required `emissivity`, and every optional entry of that table. A path and not a block, because §51.1 keeps one place for those entries, so nothing can be said twice and read once. The path takes §97.2's rules: relative, existing, inside the case directory |
+| `s2sWall` | a wall of the FLUID region that radiates in the enclosure, grey and diffuse - §50.8's condition, in the JSONC spelling. `emissivity`, in `(0, 1]`, defaults to the dictionary's; `q` is §50.3's `q_ext`, W/m^2, delivered to the face from outside, default `0`: an adiabatic, re-radiating wall |
+| `emissivity` on an interface | the conjugate interface radiates in the enclosure from its fluid side at this emissivity, through §98.8's cell source - never through the interface's triple, which §47.2 owns |
+
+Every radiating face is a face of the fluid region, so the enclosure is the
+fluid volume and the medium is transparent: §50.3's statement that the
+exchange puts no term in any volume holds unchanged. A fluid face that no
+`s2sWall` and no radiating interface names is not in the enclosure; the view
+through it is closed by `ambientTemperature` (§49.6) - a black surface at
+that temperature - and without one a radiating surface that does not close
+is refused by §49.6, as it always was.
+
+The refusals continue §98.5's numbering:
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 11 | `radiation` on a case with no fluid region | `radiation`; the enclosure is a conjugate case's fluid volume |
+| 12 | `radiation` naming a directory that does not exist, is absolute or lies outside the case directory, or a document lowered with no directory | `radiation` and the path - §97.2's rules |
+| 13 | a `radiationProperties` §51.1 refuses | §51.1's own message: no file, no `radiationModel`, no `emissivity`, an entry out of range |
+| 14 | `radiation`, and nothing radiates | `radiation`; an enclosure nothing radiates in is a setting the solver would ignore (§13.4.1) |
+| 15 | an `s2sWall`, or an interface `emissivity`, and no `radiation` | the JSON path, and the key that is missing |
+| 16 | `s2sWall` on a solid region | the JSON path; a solid's surface radiates across an interface, with its `emissivity` |
+| 17 | `s2sWall` on an `inlet` or an `outlet` | the JSON path; it is a wall condition |
+| 18 | an `emissivity` outside `(0, 1]` | the JSON path |
+| 19 | an interface `emissivity` where neither side is the fluid region | the interface; there is no enclosure between two solids |
+
+A case with none of the three entries lowers, runs and prints bit for bit
+what it did before this subsection. The conduction path (`cht::run_case`)
+has no enclosure and never sees one: row 11 stops it at lowering.
+`docs/schema/cht-1.json` is regenerated with the three keys.
+
+| Check | Expected |
+|---|---|
+| a case with all three | lowers: each `s2sWall` to `LoweredBc::S2sWall` with its own or the dictionary's emissivity and its `q`; each radiating interface to `(index, emissivity)`; the dictionary as §51.1 reads it |
+| a case with none of them | no enclosure, on the lowered case and on the driver's |
+| rows 11-16 and 18 | each refused, the message naming what the table says; rows 17 and 19 are built and not separately tested - each needs a fixture (an opening, a second solid) no other check uses |
+
+### 98.8 Where the exchange runs - `S2s::update` in the SIMPLE loop, and the radiating conjugate face
+
+**The construction.** On a case whose `radiation` lowered,
+`cht::flow::run_flow_case` attaches every region's raw polyMesh to the
+thermal mesh (`ThermalMesh::attach_points` - §49.3: `HostMesh` keeps no face
+polygons) and builds one `S2s` over the THERMAL mesh's boundary: every
+`s2sWall` face at its emissivity and `q`, and the fluid-side face of every
+radiating interface at its emissivity and `q = 0`. The view factors, the
+agglomeration, the sweep count and §50.6's memory refusal are `S2s::new`'s,
+unchanged.
+
+**The cadence: once per SIMPLE iteration.** Step 4c of the loop, after step
+4b's re-linearised external faces are written back and before step 5's
+energy solve: copy `Energy::k_eff_wall()` into a scratch array, call
+`S2s::update` on the energy's `T` - gather, solve, relax, net flux,
+broadcast, stamp (§50) - and read back the face temperatures it gathered and
+the irradiation it broadcast. It lies outside the span between step 4a's
+download and its write-back, and outside step 4b's, so no host copy of a
+boundary array is stale across it. `T0` is the `T_b` the previous energy
+solve left and `k_eff` the previous `update_k_eff`'s: §50.7's lag. On the
+first iteration `k_eff` is still zero, the stamp leaves the seeded triple -
+`fr = 0`, `refGrad = q/kappa`, the `eps -> 0` limit of (S50.12) - in place,
+and the gather, the solve and the broadcast run.
+
+**The radiating conjugate face: the cell source.** The stamp writes
+`(fr, refValue, refGrad)` on every radiating face, the fluid side of a
+radiating interface included. `Energy::correct` rewrites both sides of every
+interface from §47.2's `h_G` at its head (`update_conjugate_interface`,
+before the assembly), so an interface is assembled with its coupled triple
+and nothing else - §47.6's one condition per face. What the face radiates
+enters where §47.2 consequence 3 says an interface source must, the cell
+source of the SOLID cell behind it:
+
+```
+S_c += - eps (sigma T0^4 - H_b) |Sf| / V_c,     c the solid cell of the pair        (S98.9)
+```
+
+with `T0` and `H_b` the numbers the stamp read, so the power the surface
+radiates is the power the solid loses, once. The solid cell and not the
+fluid one, because the medium is transparent: a sink in a fluid cell would be
+the volumetric radiative term §50.3 says this model does not have. (S98.9) is
+explicit, lagged one iteration as the irradiation is, and the SIMPLE loop is
+the outer loop that converges both.
+
+**Clear and re-register.** `EnergySources` accumulates. The conjugate path
+registered its one uniform source before the loop and never cleared; a case
+with a radiating interface now clears every iteration, re-registers the
+uniform source from the same array and registers (S98.9), so the source is
+this iteration's and not the sum of every iteration's. A case without a
+radiating interface keeps the one registration before the loop, in every
+bit.
+§100.12 moved the clearing and the registrations, unchanged and in the same
+order, into step 4d, where a source curve in `T` registers between them.
+
+**What a run reports.** `ChtFlowSolution::enclosure`: `S2s::report` of the
+last update - `SUM A_i q_r,i`, `SUM A_i |q_r,i|`, the (S50.3) residual and
+the sweeps - the view-factor report, the updates taken, the relaxation,
+every radiating face with its emissivity, its `q` and the `T0` and `H_b` of
+the last update, and `interface_source`, the device's own sum of the cell
+source over the mesh less the fixed sources and §100.12's explicit part.
+`ChtFlowSolution::interface_radiated` is (S98.9)'s total from the host.
+`ChtFlowSolution::radiative_split` gives one patch's `(Q_ext, Q_in, Q_rad,
+L)`: the external flux delivered to it, `patch_heat_flow`'s conducted heat
+into the domain, `SUM |Sf| eps (sigma T_b^4 - H_b)` at the final `T_b`, and
+the right side of
+
+```
+Q_in + Q_rad - Q_ext = SUM |Sf| eps sigma (T_b - T0)^2 (T_b^2 + 2 T_b T0 + 3 T0^2) = L    (S98.10)
+```
+
+which (S50.12) makes exact on an `s2sWall` patch at every iterate, not at
+convergence: `L` is second order in the last correction, and is the
+enclosure's linearisation residual. It is exact while `k_eff` does not move
+between the stamp and the end of the solve - the laminar constant-`kappa`
+fluid of §98.3; a `kappa` curve (§100.10) adds the one-iteration lag of
+`k_eff` to it.
+
+**Symmetry - a finding against the plan.** `docs/09` expected
+`matrix_is_symmetric` to fire once an interface radiates, and to select an
+asymmetric solver. It cannot. (S98.9) reaches the right-hand side and
+touches neither `upper`, `lower` nor `boundary_coeffs`, so §48.3's
+coupled-pair equality holds as before; and the energy matrix on this path
+was never symmetric, because it carries the convected flux (§26). The solver
+the case names is the solver that runs.
+
+**What does not move.** `src/s2s.rs`, `src/radiation.rs`, `src/energy.rs`
+and every `.cu` are not modified. `src/cht/flow.rs` gains no
+`launch_builder` and no `pub fn correct|step|update|solve|advance`, so it
+stays outside the capture population and `UNGATED_CEILING` does not move. A
+case with no `radiation` takes every statement it took before.
+
+| Check | Expected |
+|---|---|
+| the conjugate box, a live run at `radiationRelaxation 1` | `|SUM A q_r| <= 1e-10 SUM A |q_r|` |
+| every `s2sWall` patch of it | (S98.10) to `1e-9` of `max(|Q_in|, |Q_rad|)` |
+| its radiating interface | `interface_source = -interface_radiated` to `1e-12`; §47.12 Gate 4's imbalance at most `1e-12` |
+| the interface alone, into the black closure | every face's `eps (sigma T0^4 - H_b)` equal to `parallel_plate_flux(T0, T_amb, eps, 1)` to `1e-10` |
+| the pair tests (§13.4.1) | the dictionary's `emissivity`, an interface's `emissivity`, `radiationRelaxation`: each pair different, failing by name |
+
+### 98.9 Gate 98-C - an enclosure with a running flow
+
+§50.12 named the gate that had never existed: an enclosure whose walls
+exchange radiation while a flow runs past them, held end to end. Gate 98-C
+is that gate, on identities and closed forms only - §98.10 says which
+published gate it is not.
+
+**The fixture: the conjugate box of §98.8.** It is the geometry of
+`cases/kaminskiPrakash.cht.jsonc` (§60.5) at `Ra = 1e4`, made
+three-dimensional so that its four side walls are faces of an enclosure
+rather than the empty faces of a one-cell-deep slab. A solid wall `x in [0, 0.2]`
+against a fluid box `x in [0.2, 1]`, `1 x 1` across in `10 x 10` cells, 2
+cells through the wall and 8 through the fluid; `rho = cp = kappa = 1`,
+`mu = 0.71`, buoyancy at `Ra = 1e4` on the unit length - the normalisation of
+§60.1's cavity. The wall's outer face is held at `300.05` K and the fluid's
+far face, `cold`, at `299.95` K; the solid's four sides are adiabatic. The
+enclosure: the fluid's four side walls are `s2sWall` at the dictionary's
+`emissivity 0.8` with `q = 0` - adiabatic and re-radiating - the interface
+radiates at `0.9`, and `cold`, which holds a temperature and is no
+`s2sWall`, is closed by `ambientTemperature 299.95`: a BLACK cold wall, which
+is exactly what §49.6's closure surface is when the one face it stands for
+sits at that temperature. Radiation is not small here: `4 eps sigma T^3` is
+`4.9` W/(m^2 K) at 300 K, against the fluid's `kappa/L = 1`.
+
+**Sixty sweeps, and why.** The box is within 0.1 K of isothermal, so its net
+fluxes are about `5e-4` of the radiosity, and (S50.8)'s `1e-12` of `J` would
+be `2e-9` of them. A `1e-10` balance needs the round-off floor, so the
+dictionary states `radiositySweeps 60`: at `eps_min = 0.8` the Neumann
+series is then `0.2^60` short of its limit. The count is the case's own
+statement through §51.1's entry; nothing in the solve changed.
+
+**(a) The enclosure's power balance, end to end.** On the live run at
+`radiationRelaxation 1`, `S2s::report` of the loop's last update:
+`|SUM A_i q_r,i| <= 1e-10 SUM A_i |q_r,i|`, the closure surface in the sum.
+
+**(b) The split, three ways.** (1) On each of the four walls, (S98.10) to
+`1e-9` of `max(|Q_in|, |Q_rad|)`: what a re-radiating wall receives it
+hands to the fluid, face by face, at every iterate. (2) On the interface,
+(S98.9)'s cell source as the device sums it against the power the faces
+radiate, to `1e-12`: delivered once, and only once. (3) Against the
+two-surface closed forms. Those hold on a live mesh only where the second
+surface's radiosity is uniform, and a black surface at a stated temperature
+is the one such surface a mesh can carry - §49.6's closure surface. So a
+second run radiates from the interface alone, into the closure at `299.95`
+K, the four side walls adiabatic and not in the enclosure. The interface's
+faces are coplanar and see none of each other, so `H_b = sigma T_amb^4` on
+every face and each face's net flux is `parallel_plate_flux(T0, T_amb, eps,
+1)` = `eps sigma (T0^4 - T_amb^4)`, to `1e-10`, and so is
+`concentric_flux(T0, T_amb, eps, 1, 1/4.2)` - the interface against the
+fluid box's five other faces - because at `e2 = 1` its area ratio
+multiplies `1/e2 - 1 = 0`; the gate evaluates both. The grey second surface
+and the unequal areas that ratio would test stay Gates 50-A's and 50-B's, on
+the hand-written `F` they need.
+
+**(c) `radiationRelaxation`, measured.** The enclosure run at `w = 1`, `0.5`
+and `0.3`, each to the case's residual `1e-7` in at most 4000 SIMPLE
+iterations: each must converge, and the iterations each took and the hot
+face's heat flow are printed with the spread of the three. The converged
+answer does not depend on `w` - (S50.13) relaxes the iteration, not its fixed
+point - so the spread is three stopping points, not a model difference. The
+relaxation starts from a zero irradiation (`S2s`'s `H_old`), so the first
+updates of a `w < 1` run see `w H`: what that start costs is part of what
+this leg measures. This is §50.12's "never exercised", run.
+
+Printed beside the verdicts and not gated: the domain's energy balance - the
+heat in through `hot`, out through `cold` by conduction, and into the black
+cold wall by radiation.
+
+### 98.10 What §98 does not do
+
+* **`ofgpu-buoyant` runs no enclosure, and refuses one by name.** Its heat
+  equation is `ScalarTransport`, which has no `Energy::k_eff_wall` for
+  (S50.12) to read, and its loop is the one `-graph` captures (§81.3), which a
+  per-iteration read-back would break. A case directory holding
+  `constant/radiationProperties`, or a `T` with a
+  `greyDiffusiveRadiationViewFactor` or `s2sWall` patch, is refused naming
+  `ofgpu-cht` and §98.7 - where before this section it was seeded adiabatic
+  and run.
+* **§50.12's first item stands.** The coupled cavity of Balaji & Venkateshan
+  and of Akiyama & Chong - its `Nu_conv`/`Nu_rad` tables are behind
+  Elsevier's paywall - is not run. §98 ships with no gate against a published
+  coupled convection-plus-radiation number; Gate 98-C is identities and
+  closed forms.
+* **No enclosure on the conduction path.** Two solids facing each other
+  across a vacuum gap are an enclosure with no fluid in it; §98.7's row 11
+  refuses one.
+* **A solid face radiates only across an interface** - §98.7's row 16.
+* **(S98.9) is explicit.** Patankar's split of the `T^4` sink into
+  `S_C + S_P T_P` would be written in the cell's temperature while the surface
+  emits at the face's; it is not built, and the SIMPLE loop's lag carries the
+  term.
+* **The cadence is every iteration.** §51.1 has no entry for another, and one
+  would be a second place for the exchange's timing to be said.
+
+---
+
+## 100. Properties that are functions of temperature — one evaluator, the curve a case may write, `E(T)` and `alpha(T)` on the solid, and the published tables it is held against
+
+Until this section every property a `*.cht.jsonc` case writes is one
+number: `kappa`, `c`, `cp`, `mu`, `E`, `alpha`. This section adds the
+evaluator a temperature-dependent property needs (§100.1), lets a case write
+a curve in `T` in every one of those entries (§100.2), consumes the two that
+the thermo-elastic solid reads after the thermal solve has converged,
+`E(T)` and `alpha(T)` (§100.3), and holds the evaluator against three
+published tables (§100.4, Gate 100-B).
+
+A curve in a solid's `kappa` or `c` is rebuilt from the current temperature
+on both paths: every outer pass of the conduction path's loop, which states
+its criterion and refuses to stall (§100.6-§100.7, and Gate 100-A, the
+proof that loop converged), and every iteration of the conjugate path's
+SIMPLE loop (§100.10). A fluid's `kappa` is evaluated on the device inside
+every energy correction (§100.10). A fluid's `mu` may be a curve, and the
+momentum equation's laminar viscosity is rebuilt from it every SIMPLE
+iteration (§100.14); its `cp` is still built once, from a constant, and a
+curve there is read, validated and **refused by name** (§100.2), so no run
+silently uses a constant in its place. Viscous dissipation is a source a
+case may ask for (§100.13).
+A volumetric source may be a number, a curve in `T` or a table in `t`,
+over a region or a box (§100.11), and a curve is split Patankar's way
+(§100.12).
+
+The gates of this section are 100-A to 100-D - §100.8, §100.4 and §100.15.
+`docs/09` wrote them under the number before this one, which §69's registry
+reserves for invented gate addresses; those names are not used anywhere in
+the tree.
+
+`No GPL-licensed source was consulted.`
+
+### 100.1 The evaluator - four forms, one range, no extrapolation
+
+`src/properties.rs` holds `Property`, and every curve a case writes lowers
+onto one of its four forms:
+
+```
+p(T) = p0                                                                    (S100.1)
+p(T) = v_i + (T - T_i)/(T_(i+1) - T_i) (v_(i+1) - v_i),   T_i <= T < T_(i+1)  (S100.2)
+p(T) = F sum_j c_(k,j) (T/T_s)^(e_j),   piece k: lo_k <= T <= hi_k            (S100.3)
+p(T) = p_ref (T/T_ref)^(3/2) (T_ref + S)/(T + S)                             (S100.4)
+```
+
+**The constant (S100.1)** is the number a case wrote. It has no range and no
+evaluation: it is the same bits at every temperature, which is what makes
+the constant path of every consumer the path it was before this section.
+
+**The table (S100.2)** is piecewise linear on knots `T_0 < T_1 < ... < T_n`,
+at least two, `T_0 > 0`. The segment used at `T` is the one whose LEFT end
+is the last knot at or below `T`, and the last knot returns its own value,
+so a table returns every knot's value to the bit.
+
+**The series (S100.3)** is a generalised power series in `T/T_s` with real
+exponents `e_j`, one coefficient per exponent on each of one or more pieces,
+times a factor `F`. It is one form for two published families: the
+seven-term `cp/R` of McBride, Zehe & Gordon (NASA/TP-2002-211556, eq. (1)) is
+`e = -2, -1, 0, 1, 2, 3, 4`, `T_s = 1`, two pieces 200-1000 and 1000-6000 K,
+and `F = R/W` turns it into J/(kg K); Kadoya, Matsunaga & Nagashima's dilute
+air, eqs. (3a) and (5a), is `e = 1, 1/2, 0, -1, -2, -3, -4`,
+`T_s = T* = 132.5 K` and `F = H` or `Lambda`. The pieces are contiguous -
+`hi_k` IS `lo_(k+1)` - and a `T` on a shared end belongs to the LOWER piece.
+NASA's own fit constraint (2) makes the two pieces agree at the common
+point, so the choice does not move a printed digit (§100.4 measures it);
+it is stated because a device twin must make the same one. A term whose
+exponent is an integer of magnitude at most 16 is evaluated by repeated
+multiplication (`powi`) and any other by `powf`, for the same reason.
+
+**Sutherland's law (S100.4)** is carried in its textbook form, with the
+three constants and the range the case states; no constant of it is
+supplied by the code.
+
+**The range.** A table's is `[T_0, T_n]`, a series' `[lo_1, hi_last]`,
+Sutherland's the one the case writes. Every lower end must be a positive,
+absolute temperature. An evaluation outside the range is an error naming
+the setting, the temperature and the range: **a curve is not extrapolated**,
+the rule §98.4 applies to Churchill & Chu's Rayleigh range.
+
+**What the evaluator does not check** is the sign of the value. Each
+consumer states what its quantity must be - `E > 0` through §95's
+`Material::validate`, `alpha >= 0` - and checks the values it evaluates.
+
+**Host and device.** The conduction rebuild of §100.6 is host arithmetic:
+its loop is host-driven, because its criterion is a read-back. The
+evaluator's device twin is §100.9's, held to this one to `1e-12` on random
+temperatures and gated for graph capture on its own.
+
+### 100.2 What a case writes - the number, or a curve, in the same entry
+
+```jsonc
+"material": { "rho": 2330.0, "c": 700.0,
+              "kappa": { "table": [[300.0, 148.0], [350.0, 119.0], [400.0, 98.9],
+                                   [500.0, 76.2], [600.0, 61.9]] } },
+"mechanics": {
+  "material": { "E": 200e9, "nu": 0.3, "TRef": 293.15,
+                "alpha": { "polynomial": {
+                  "exponents": [0.0, 1.0],
+                  "pieces": [ { "range": [250.0, 450.0], "coefficients": [1.0e-5, 1.0e-8] } ] } } },
+  ...
+}
+```
+
+(The silicon table is §100.4's leg 1; the `alpha` curve is illustrative.)
+
+| Key | Meaning |
+|---|---|
+| a number | exactly what it meant before this section: the lowered case, and every bit a run prints, are unchanged |
+| `{ "table": [[T, v], ...] }` | (S100.2); `T` in K, `v` in the entry's own unit |
+| `{ "polynomial": { "exponents", "pieces": [{ "range": [lo, hi], "coefficients" }], "scale", "factor" } }` | (S100.3); `scale` is `T_s` and `factor` is `F`, both defaulting to 1 |
+| `{ "sutherland": { "value", "TRef", "S", "range": [lo, hi] } }` | (S100.4); `value` is the property at `TRef` |
+
+The entry is read number-first, so every document written before this
+section deserialises exactly as it did. `kappa` keeps its second spelling,
+three numbers for `diag(kx, ky, kz)` (§46.4); a curve is isotropic, and an
+anisotropic curve is not a form.
+
+**Where a curve is accepted, and what reads it today:**
+
+| entry | a number | a curve |
+|---|---|---|
+| a solid's `material.kappa` | as before | **consumed**: rebuilt every outer pass of the conduction path (§100.6) and every iteration of the conjugate path (§100.10) |
+| a solid's `material.c` | as before | **consumed**: the transient weight is rebuilt every outer pass (§100.6); on the steady conjugate path it weights nothing |
+| a fluid's `fluid.kappa` | as before | **consumed**: evaluated on the device inside every energy correction (§100.10) |
+| a fluid's `fluid.cp` | as before | read, validated, **refused**: §26 carries `cp T` in the convected flux and the budget, and a `cp(T)` wants the enthalpy form, which is not built |
+| a fluid's `fluid.mu` | as before | **consumed**: `nu_lam = mu(T)/rho_f` rewritten every SIMPLE iteration (§100.14) |
+| `mechanics.material.E` and `alpha`, and each zone's | as before | **consumed**: §100.3 |
+
+A refused curve is refused only after it has been validated as a curve, so
+a malformed one is refused for its own reason first; the message then names
+the entry, the curve, and the consumer that does not yet rebuild from it -
+`regions/die/material/kappa: a curve in T (a table of 5 knots on [300, 600]
+K) is read and valid, but the conduction operator's face conductances are
+built once, from a constant (SPEC-LIT 100.2); write a number`.
+
+### 100.3 `E(T)` and `alpha(T)` on the thermo-elastic solid - evaluated per zone, at the zone's mean temperature
+
+§96.2 solves the displacement AFTER the thermal solve has converged, on a `T`
+that no longer moves, so a temperature-dependent elastic constant needs no
+loop: it is evaluated once, from the converged field, before §95.8's
+material map is built.
+
+What it cannot be, in this state of the tree, is evaluated per CELL. Two
+facts of `cuda/solid.cu` say why. The deferred traction a non-bond internal
+face contributes is computed with the ASSEMBLING cell's own `mu` and
+`lambda`, and the thermal load with that cell's own `(3 lambda + 2 mu)
+alpha`. Both are exact when the constants are uniform across the face, which
+is what a zone is. With constants that differ cell to cell, the owner and
+the neighbour would compute two different tractions for one face, and the
+discretisation would stop conserving momentum. A per-cell `E(T)` needs
+face-interpolated constants in those two kernels, which is a change to
+§95's numerics and is not made here.
+
+So each zone `z` is evaluated once:
+
+```
+T_z = sum_(c in z) V_c T_c / sum_(c in z) V_c,     E_z = E(T_z),     alpha_z = alpha(T_z)    (S100.5)
+```
+
+and the zone is then §95's constant-property zone with `(E_z, nu, alpha_z)`:
+every kernel reads the bits it would read had the case written those two
+numbers. The thermal strain stays `alpha_z (T - TRef)`, so **a curve for
+`alpha` is the SECANT coefficient** - the total expansion from `TRef`
+divided by `T - TRef`. A curve of the instantaneous coefficient `d eps/dT`
+is a different quantity; this section does not convert one into the other.
+
+**What the approximation costs is printed, not argued.** After the run each
+zone with a curve reports `T_z`, the range `[T_min, T_max]` of its cells'
+temperatures, and each curve's value at the three, so the spread the mean
+hides is on the screen. Every cell's temperature must lie in the curve's
+range: a zone whose converged range leaves it is refused, naming the curve's
+range and the zone's, even though only `T_z` is evaluated - the case stated
+a curve valid over a range its own solution leaves.
+
+**At lowering** a curve is validated at sample temperatures - every knot of
+a table; both ends and fifteen evenly spaced interior points of any other
+curve - with the zone's other constants: `E > 0` and the `nu` rules through
+§95's `Material::validate`, `alpha >= 0`. `TRef` is required beside an
+`alpha` curve (§96.3 row 3's rule: a curve is never the zero that exempts
+it). The zone's lowered constants carry the curve's values at the LOWER end
+of its range as a placeholder, and the §13.4.2 banner prints the curve and
+says that it is evaluated after the thermal solve.
+
+**The bitwise rule.** A zone that writes numbers builds §95.8's map from its
+lowered constants exactly as before this section.
+
+### 100.4 Gate 100-B - the evaluator against three published tables
+
+`docs/09` names two primaries for this gate that the programme had marked
+paywalled - Glassbrenner & Slack (1964) for silicon and Kadoya, Matsunaga &
+Nagashima (1985) for air - and a third that is public domain. The decision
+of 2026-09-23 was to buy neither and to implement the same function from an
+open, citable source. What was found on 2026-09-25:
+
+* **Kadoya et al. is not paywalled.** *J. Phys. Chem. Ref. Data* 14 (1985)
+  947-970, DOI 10.1063/1.555744, is reprinted in NIST's open JPCRD archive
+  (`srd.nist.gov/JPCRD/jpcrd283.pdf`). That host answered 503 on the day; the
+  copy read is the Internet Archive's of the same URL. The leg uses the
+  primary itself.
+* **Glassbrenner & Slack** (*Phys. Rev.* 134 (1964) A1058, DOI
+  10.1103/PhysRev.134.A1058) is behind the APS paywall and was not read. The
+  open equivalent is **Ho, Powell & Liley**, "Thermal conductivity of the
+  elements: a comprehensive review", *J. Phys. Chem. Ref. Data* 1 (1972)
+  279-421, DOI 10.1063/1.3253100, in the same archive (`jpcrd7.pdf`, the
+  Internet Archive's copy), whose recommended values for high-purity silicon
+  are stated accurate to within 5 % from 300 to 1000 K (p. 394).
+* **McBride, Zehe & Gordon**, NASA/TP-2002-211556 (2002), a US-Government
+  work, is on NASA's technical reports server
+  (`ntrs.nasa.gov/citations/20020085330`, 295 pages).
+
+Every number the gate compares with is a key file under `reference/` with its
+digest (§10). Each leg builds its curve by writing the case format's own JSON
+from the key and lowering it, so the parse, the validation and the evaluator
+are all on the path.
+
+**Leg 1 - silicon (Ho, Powell & Liley, p. 394).** A table of the source's
+five values at 300, 350, 400, 500 and 600 K returns each to the bit, and at
+the source's four other printed temperatures in the range - 323.2, 373.2,
+473.2 and 573.2 K - lies within the 5 % it states. What this proves: that a
+piecewise-linear table of the recommended values represents silicon between
+its knots inside the source's own uncertainty, so the silicon curve a case
+writes can be the recommended table itself. What it does not: Glassbrenner &
+Slack's measurements are not compared, and `dieStack`'s die conductivity is
+an effective anisotropic number that no leg reads.
+
+**Leg 2 - air (Kadoya et al., eqs. (3) and (5), Tables 3, 7, 8, 11, 12).**
+The dilute parts `eta_0(T)` and `lambda_0(T)` as (S100.3) curves from Tables
+7 and 11 (`T* = 132.5 K`, `H = 6.16090e-6 Pa s`, `Lambda = 25.9778e-3
+W/(m K)`), plus the paper's own density series `Delta eta(rho_r)` and
+`Delta lambda(rho_r)`, `rho_r = rho/314.3 kg/m^3`, at 0.1 MPa with `rho`
+from the ideal gas at `M = 28.9644 kg/kmol` (Table 3); held against Tables 8
+and 12 at 0.10 MPa, 250 to 1000 K in 50 K steps (sixteen temperatures), to
+half a unit in the printed last digit - `0.005e-6 Pa s` and `0.005e-3 W/(m
+K)` - plus `1e-3` of the density term, which bounds the ideal-gas density's
+error (`|Z - 1| < 1e-3` over this range at 0.1 MPa). This is the paper's
+function, implemented from the paper and held to the paper's printed
+tables; `docs/09`'s 1 % is looser by more than an order of magnitude.
+
+**Leg 3 - the seven-term `cp/R` (NASA/TP-2002-211556, eq. (1), Appendices A,
+B and D).** `cp/R` for N2, O2, Ar and air as two-piece (S100.3) curves on
+200-1000-6000 K. `Cp(298.15) = R cp/R` with `R = 8.314510 J/(mol K)`
+(Appendix A) against Table B1 to half the printed last digit, `0.0005
+J/(K mol)` - the report's fits are constrained to be exact at 298.15 K (its
+constraint (1)); and the two pieces equal at 1000 K to `1e-8` relative - its
+constraint (2), to the ten digits the coefficients are printed with.
+
+A key that is absent, or whose digest is not the manifest's, makes its leg
+report open by name; it is never passed (§10).
+
+**Measured** on 2026-09-25 in f64 (the gate runs no mesh). Leg 1: the five
+knots returned to the bit; between them the table lies 1.16 %, 1.55 %, 1.09 %
+and 0.97 % above the source at 323.2, 373.2, 473.2 and 573.2 K - always above,
+as a straight chord of a falling, convex curve must - against the 5 % the source
+states. Leg 2: all thirty-two printed values are reproduced within half a
+printed digit, the worst at 0.975 of that bound (viscosity at 650 K, eq. (3)
+`32.5651` against the printed `32.57`), so every printed value is the rounded
+value of the equation as implemented here. Leg 3: `Cp(298.15)` within
+`3.53e-4 J/(K mol)` of Table B1 (O2; N2 `3.50e-4`, Ar `2.75e-4`, air
+`2.7e-5`) against `5e-4`, and the two pieces equal at 1000 K to `2.2e-9`
+relative (N2) or better.
+
+### 100.5 The refusal list, the pair tests, and what must hold
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | a table with fewer than two knots, with temperatures that do not increase strictly, or with a number that is not finite | the JSON path, and which |
+| 2 | a polynomial with no exponent or no piece, a piece whose coefficient count is not the exponent count, pieces that are not contiguous, `scale <= 0`, or `factor = 0` | the JSON path, and which |
+| 3 | Sutherland's law with `value <= 0`, `TRef <= 0` or `S < 0` | the JSON path |
+| 4 | any range that is not ascending or does not start at a positive temperature | the JSON path and the range |
+| 5 | an evaluation outside the range | the JSON path, the temperature and the range |
+| 6 | a curve for a fluid's `cp` | the JSON path, the curve, and the consumer that does not yet rebuild from it (§100.2) |
+| 7 | an `E` or `alpha` curve whose value at a sample temperature fails §95's `validate`, or an `alpha` below zero there | the JSON path and the temperature |
+| 8 | an `alpha` curve without `TRef` | the JSON path |
+| 9 | a zone whose converged temperatures leave its curve's range | the JSON path, the zone's range and the curve's |
+| 10 | a `kappa` or `c` curve that does not contain the case's initial temperature, or whose value at a sample temperature is not positive | the JSON path and the temperature |
+| 11 | a cell whose temperature leaves a `kappa` or `c` curve during the outer loop, or where the curve is not positive | the JSON path, the temperature and the range |
+| 12 | `numerics.outer` on a case with a fluid region, or on one with no curve, no source curve in `T` and no radiating face | `numerics/outer`, and why nothing reads it |
+| 13 | `numerics.outer.tolerance` outside `(0, 1)`, or `maxOuter` of zero | the setting |
+| 14 | a step whose outer loop did not meet (S100.7) in `maxOuter` passes | the criterion, the pass count, the last changes and their contraction (§100.7) |
+| 15 | a fluid whose temperature leaves its `kappa` curve, or a `kappa` curve with Kays-Crawford's `Pr_t` | the JSON path, the temperatures reached and the range; the `Pr_t` model |
+
+**The pair tests (§13.4.1).** On §96's steel bar - clamped, heated linearly
+from 300 to 400 K - an `alpha` curve against the constant `alpha(300 K)`,
+and an `E` curve against the constant `E(300 K)`, each required to move the
+displacement; and the twin: a curve and the constant it evaluates to at
+`T_z` (S100.5), written back as a number, required to give the same
+displacement to `1e-12` relative - which proves where the curve was
+evaluated. On Gate 95-E's bimetal strip as the shipped case, brass's `alpha`
+as a table whose value at the strip's temperature is `2.4e-5` - not `2.0e-5`
+- required to move the tip, and to meet Timoshenko's closed form (S95.19)
+with that `alpha` inside the case's own 10 % band.
+
+| Check | Expected |
+|---|---|
+| the table, host | every knot returned to the bit; the midpoint the mean of its two knots |
+| the series, host | the value its terms give, piece by piece; a shared end taken from the lower piece |
+| Sutherland, host | `value` at `TRef`; `value (T/TRef)^(1/2)` when `S = 0` |
+| the constant, host | its number at every temperature, no range |
+| rows 1-5 | each refused, the message naming the setting |
+| rows 6-9 | each refused, the message naming the JSON path |
+| a number in every entry | the lowered case equal to what it was before this section |
+| the pair tests | every pair above different, the twin equal, failing by name |
+| the schema | `docs/schema/cht-1.json` regenerated, the three curve forms in it |
+| Gate 100-B | the three legs of §100.4, each on its key's digest |
+
+### 100.6 The conduction operator, rebuilt from the current temperature
+
+On the conduction path (`cht::run_case`) a solid's `kappa` and `c` may be
+curves. `Conduction::build` is two halves: the face arithmetic of
+§46.2-§46.4 - the two one-sided conductances in series, (S46.2)'s harmonic
+interface conductivity, and §46.4's two refusals - and the per-cell tensors
+and `rho c` it is handed. `Conduction::rebuild` runs the same face
+arithmetic on new per-cell values and overwrites the face conductances,
+`C_b` and `rho c` in place. The arithmetic was moved, not rewritten, so every
+caller of `build` gets the bits it got before, and a rebuild from the
+tensors a build was made from is that build to the bit (§100.7's checks).
+
+```
+k_c = kappa(T_c) I,        (rho c)_c = rho c(T_c)                        (S100.6)
+```
+
+at the cell temperatures the previous pass left; a region of numbers takes
+exactly the tensors and `rho c` that `uniform_per_region` gives it. The
+alignment and the anisotropy residual of §46.4 are homogeneous of degree
+zero in an isotropic `K`, so a rebuild leaves them where the setup put them,
+to round-off; they are recomputed and the refusals re-run anyway.
+
+**What a rebuilt `C_b` moves**, and is rewritten with it every pass: a
+`fixedFluxTemperature` face's `refGrad = q Delta_b / C_b` (§32.2), and every
+external face's triple (S98.3), convective and radiating alike. Without that
+refresh a `k(T)` solid would deliver `q C_b(T_0)/C_b(T)` through a fixed-flux
+face. `ConjugateHeat::set_conduction` writes the four device arrays - the
+face conductances, the boundary base `update_interfaces` copies from, `C_b`
+and `rho c` - between two `correct` calls, so the capture of `correct` alone
+(`the_solid_side_iteration_replays_bitwise`) and `src/cht.rs`'s row in
+§81.7's registry are untouched.
+
+**Host arithmetic, not a kernel.** The loop is host-driven, because its
+criterion is a read-back that §81.3 refuses inside a capture; a pass costs
+one download of `T`, one pass over the cells and the faces, and four
+uploads. Sharing `build`'s arithmetic is what makes a flat curve its
+constant to the bit.
+
+**The placeholder.** The lowered `SolidMaterial` of a region with a curve
+holds the curve's value at the case's initial temperature, so the setup
+build is the operator the first pass solves with. An initial temperature
+outside the curve's range is refused there, naming the range, and every
+sample (§100.3) of a `kappa` or `c` curve must be positive. During the loop a
+cell whose temperature leaves the range is refused: a curve is not
+extrapolated, not even by a solve that overshoots.
+
+**The transient weight** is `c` at the current iterate,
+`rho c(T^(n+1)) (T^(n+1) - T^n) / dt` - the apparent-heat-capacity form.
+It is first-order consistent and is not conservative across a jump in `c`;
+an enthalpy form is not built.
+
+**On the conjugate path** (`cht::flow::run_flow_case`) the same rebuild runs
+between two SIMPLE iterations, and §100.10 says where its result goes.
+
+### 100.7 The outer loop - the criterion a case may state, and the refusal when it stalls
+
+§98.3's loop, generalised in place. A step of `run_case` whose case has a
+conduction curve or a radiating face takes outer passes: rebuild from `T`
+(§100.6, when a curve is present), `correct`, re-linearise every radiating
+face (§98.3, when one is present), measure - until
+
+```
+max_c |T_c^p - T_c^(p-1)|  <=  epsilon  max_c |T_c^p|                   (S100.7)
+```
+
+over every cell when a curve is present, and §98.3's face criterion with the
+same `epsilon` when a face radiates; both, when both are. A case of numbers
+with no radiating face takes the one `correct` per step it always took: no
+read-back, no rebuild, the same bits.
+
+`numerics.outer` is `{ "tolerance": epsilon, "maxOuter": N }`, both
+optional. Absent, `epsilon` is §98.3's `1e-10` (`1e-4` in the f32 build) and
+`N = 50`, so a radiating case that states nothing runs exactly as it did.
+It is refused on a case with a fluid region, whose outer loop is
+`numerics.flow`'s, and on a case with no curve, no source curve in `T`
+(§100.12) and no radiating face, where nothing would read it (§13.4.1);
+`tolerance` must lie in `(0, 1)` and `maxOuter` must be positive.
+
+**The stall refusal.** A step that has not met (S100.7) after `N` passes is
+refused, naming `epsilon`, `N`, the last four relative changes, the
+radiating faces' last corrections if any, and the ratio of the last two
+changes - near 1 is a stall, above 1 a divergence. No result is returned
+from an unconverged loop. This is a Picard iteration, whose contraction per
+pass is roughly `|dk/dT| Delta T / k`; a curve steep enough to hold it near 1
+needs relaxation, which is not built.
+
+**What a run reports.** `ChtSolution::outer_changes` - the last step's left
+side of (S100.7) over `max|T|`, one per pass, empty when no curve is present;
+`external_passes` as §98.3 says.
+
+| Check | Expected |
+|---|---|
+| a rebuild from a build's own tensors | that build, to the bit; alignment within `1e-14`, residual under §46.4's limit |
+| a region of numbers | the constants `uniform_per_region` gives it, to the bit |
+| a case of numbers, no radiating face | no outer pass |
+| a flat curve | two passes, and the field of its number to `1e-12` |
+| a linear `kappa(T)` on the slab against its mean | the profile bent by more than 1 K, the heat flow Kirchhoff's to `1e-3` |
+| a fixed-flux face with a `kappa` curve | the hot wall conducts `q` to `1e-9` |
+| a convective face with a `kappa` curve | conducted and convected balance to `1e-10` |
+| a radiating face with a `kappa` curve | one loop, the quartic's flux to `1e-9` |
+| a `c` curve on a transient | the field moved; its flat twin the number's to `1e-9` |
+| rows 10-14 of §100.5 | each refused, the message naming the setting |
+
+### 100.8 Gate 100-A - the Kirchhoff slab
+
+A slab `L = 20` mm thick, its walls held at `T1 = 500` K and `T2 = 300` K,
+its four side faces adiabatic, and `kappa(T)` the two-knot table
+`[[250, 1.2], [550, 0.6]]` W/(m K): linear, with slope `s = -0.002`
+W/(m K^2), `kappa(300 K) = 1.1` and `kappa(500 K) = 0.7`. Kirchhoff's
+transform makes the problem linear:
+
+```
+psi(T) = int_T2^T kappa(u) du = kappa(T2) (T - T2) + (s/2) (T - T2)^2        (S100.8)
+psi(T(x)) = psi_1 (1 - x/L),     psi_1 = psi(T1),     q = psi_1 / L          (S100.9)
+T_mean = (1/psi_1) int_T2^T1 T kappa(T) dT                                   (S100.10)
+```
+
+and (S100.8) is inverted as `T = T2 + 2 psi / (kappa(T2) + sqrt(kappa(T2)^2
++ 2 s psi))`, the form with no cancellation. Here `psi_1 = 180` W/m,
+`q = 9000` W/m^2 and `T_mean = 10600/27` K.
+
+**Why the transformed leg is exact.** At the loop's fixed point the two
+halves of a cell carry the same flux through the same `kappa(T_P)` over the
+same distance, so `T_P` is the mean of its two face temperatures and
+`F d = kappa(T_P) (T_w - T_e)`. For a `kappa` linear in `T` its value at the
+midpoint is its mean over `[T_e, T_w]`, so `F d = psi(T_w) - psi(T_e)`
+exactly: the face temperatures of the discrete solution are the exact
+solution's, `psi` of them is linear in `x` to round-off, and `F L = psi_1`.
+An interior face temperature is recovered from its two cells as the series
+interface value `(kappa_P T_P + kappa_N T_N)/(kappa_P + kappa_N)`; a boundary
+one is `ChtSolution::bt`. The cell centres are the midpoints of a curved
+profile, and that is the `O(h^2)` error the untransformed leg measures.
+
+**Leg 1, transformed.** On each of three meshes (20, 40 and 80 cells across
+the slab), the worst `|psi(T_f) - psi_1 (1 - x_f/L)| / psi_1` over every
+face, and `|q L / psi_1 - 1|` with `q` the hot wall's heat flow per unit
+area: both at most `1e-12`. It holds only at the discrete fixed point, which
+is why the gate's case states `numerics.outer.tolerance = 1e-13` - so the
+gate also runs §100.7's stated path.
+
+**Leg 2, untransformed.** The slab's volume-mean temperature on the same
+three meshes, through §94's study: the closed form (S100.10) must lie inside
+the finest mesh's band, `|E| <= U_fine`, and the observed order must be
+within 0.2 of 2. A loop that stopped early leaves an error that does not fall
+with the mesh, so this leg is what proves the loop converged to the answer,
+and not merely to a fixed point of its own.
+
+| Check | Expected |
+|---|---|
+| `psi(T_f)` against (S100.9), every face, three meshes | `<= 1e-12` relative to `psi_1` |
+| `q L / psi_1 - 1`, three meshes | `<= 1e-12` |
+| the mean temperature against (S100.10), finest mesh | `|E| <= U_fine` (§94) |
+| the observed order of the mean temperature | within 0.2 of 2 |
+
+**Measured** (RTX 5070 Ti, 2026-09-25, from the section run on its own before the
+unit landed). Each mesh took 12 outer passes, the last relative change
+5.2e-14, 5.0e-14 and 6.7e-14. Leg 1: the worst `psi(T_f)` is 2.9e-14 of
+`psi_1` and the worst `|q L/psi_1 - 1|` is 2.7e-13. Leg 2: the mean
+temperature is 392.612070, 392.597463 and 392.593810 K against
+392.592593 K; the study reads monotone, `p = 2.000`, `U_fine = 1.52e-3` K,
+`E = 1.22e-3` K, so `|E|/U_fine = 0.80` - the `1/Fs` of a study in its
+asymptotic range. The largest cell-centre error falls by 3.90 and 3.95 per
+halving.
+
+### 100.9 The evaluator on the device
+
+`cuda/properties.cu` evaluates (S100.2), (S100.3) and (S100.4) elementwise,
+one kernel per form, from coefficients `DeviceProperty::upload` puts on the
+device once; a constant has no device form, because its consumer takes the
+constant path it took before this section, and uploading one is refused by
+name. The kernels make §100.1's two stated choices exactly as the host
+does: a table's segment is the one whose left end is the last knot at or
+below `T`, and a series term whose exponent is an integer of magnitude at
+most 16 is evaluated by repeated squaring, any other by `pow`; a `T` on a
+shared end belongs to the lower piece.
+
+**Outside the range.** A kernel cannot refuse. An evaluation outside the
+range writes NaN and raises a one-element flag, and the consumer reads the
+flag between two solves - never inside a captured region - and refuses by
+name, naming the range. NaN rather than the nearest end, because a curve is
+not extrapolated (§100.1), and a value that is silently the end of the
+range is an extrapolation by another name.
+
+**Two gates.** The twin against the host on four curves - a five-knot
+table, a two-piece seven-term series in the NASA form, a one-piece series
+with fractional exponents in Kadoya's form, and Sutherland's law - at 4096
+random temperatures plus every knot, every piece end and both range ends:
+at most `1e-12` relative. And graph capture: `the_property_evaluation_replays_bitwise`
+captures an evaluation whose result feeds the next one's temperatures, and
+requires three replays to reproduce three per-launch iterations bit for bit;
+it is `src/properties.rs`'s row in §81.7's registry.
+
+| Check | Expected |
+|---|---|
+| device against host, four curves, random `T` | `<= 1e-12` relative |
+| an evaluation outside the range | NaN, and the flag raised; cleared by `clear_flag` |
+| a constant uploaded | refused, naming the setting |
+| capture | three replays bitwise |
+
+### 100.10 The conjugate path - the fluid's `k_eff` and the solid's conductances from a curve
+
+On `cht::flow::run_flow_case` a fluid's `kappa` and a solid's `kappa` and
+`c` may be curves. The fluid's `cp` may not (§100.2); its `mu` may, since §100.14.
+
+**The fluid's `k_eff`.** `Energy::set_conductivity_curve` uploads the curve
+(§100.9). Every `update_k_eff` evaluates it at the current `T` of the
+fluid's cells and boundary faces - the fluid prefix of §47.4's numbering -
+interpolates it linearly onto the faces, the convention every face property
+of §25.3 follows, and adds it where the constant was added:
+`k_eff = (0 + rho_f nu_t cp/Pr_t) + k_f`. A case of numbers passes the
+constant exactly as before. The evaluation runs inside `Energy::correct`,
+and a second capture test holds that path bitwise on replay. Before every
+correction the driver checks, on the host, the very temperatures the curve
+is about to be evaluated at - the ones it has already read back to rewrite
+the faces - and refuses a fluid that left the curve's range, naming it and
+the temperatures reached, before a NaN can reach the solve; the device flag,
+read after the correction, is the backstop. Kays-Crawford's
+`Pr_t` is refused with a curve: its branch is not built with one.
+
+**The solid's conductances.** Between two iterations, exactly as on the
+conduction path: download `T`, (S100.6) per cell, `Conduction::rebuild`;
+then `Energy::refresh_conjugate_solid` writes the solid half of (S59.3)'s
+blend - the face conductances, their boundary twin, `C_b` and `rho c` - with
+the same selection `attach_conjugate` made. The fluid half and the masks do
+not move.
+
+**What a moving conductance moves.** A solid `fixedFluxTemperature` face's
+`refGrad`, from the rebuilt `C_b`. Every external face's `C_b` (§98.3): a
+solid face's from the rebuilt operator; a fluid face's as `kappa(T_b)
+Delta_b`, evaluated on the host at the very `T_b` the next `update_k_eff`
+evaluates on the device, so the triple and the conductance the equation
+assembles agree to the twin's round-off. A fluid `fixedFluxTemperature`
+face reads `k_eff_wall` inside the correction already.
+
+**The loop.** The SIMPLE loop is the outer loop and its criterion is
+`numerics.flow`'s; the coefficients are rebuilt at the head of every
+iteration from the previous iteration's `T`, the lag every coefficient of
+that loop carries. `numerics.outer` is refused on a conjugate case (§100.7).
+
+| Check | Expected |
+|---|---|
+| a flat fluid `kappa` curve | the field of its number to `1e-9` K |
+| a fluid `kappa` curve against its value at the initial `T` | the field moved |
+| a fluid wall losing heat to an ambient, `kappa` a curve | conducted and convected balance to `1e-10` |
+| a flat solid `kappa` curve; a sloped one | the number's field to `1e-9` K; the field moved |
+| a fluid that leaves its curve | refused, naming the range (row 15) |
+| `Energy` with a flat curve | the constant's `k_eff` and `T` to `1e-14` |
+| `Energy::correct` with a curve | captured, three replays bitwise |
+| a curve under Kays-Crawford | refused (row 15) |
+
+### 100.11 Volumetric sources that vary - a number, a curve in `T`, a table in `t`, over a region or a box
+
+Until this subsection a region's `source` is one number, `q'''` in W/m^3 on
+every cell of the region (§46.1, §60.3). It may now be written three ways in
+the same entry, and a region may add boxes:
+
+```jsonc
+"source": 5.0e6,
+"source": { "table": [[250.0, 6.0e6], [500.0, 3.5e6]] },
+"source": { "time": [[0.0, 0.0], [1.0, 5.0e6], [10.0, 5.0e6]] },
+"sourceBoxes": [ { "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.005, 0.02, 0.02] },
+                   "source": 2.0e6 } ]
+```
+
+| Key | Meaning |
+|---|---|
+| a number | exactly what it meant before: the lowered case, and every bit a run prints, are unchanged |
+| a curve in `T` (`table`, `polynomial`, `sutherland`) | `q'''(T)` through §100.1's evaluator, its range and its refusal; split per cell by (S100.12) |
+| `{ "time": [[t, q], ...] }` | `q'''(t)`, (S100.11); the conduction path's transient only |
+| `sourceBoxes` | each box's `source`, in any of the three forms, ADDED on the cells of its region whose centroids its closed `bounds` hold - §18's test |
+
+The table in `t` is (S100.2)'s form with time in place of temperature:
+
+```
+q'''(t) = q_i + (t - t_i)/(t_(i+1) - t_i) (q_(i+1) - q_i),   t_i <= t < t_(i+1)     (S100.11)
+```
+
+on knots `0 <= t_0 < t_1 < ... < t_n`, at least two; the last knot returns
+its own value, and a time outside `[t_0, t_n]` is refused, never
+extrapolated. A step of the conduction path's transient reads it at the
+step's end, `t_(n+1) = (n + 1) Delta t`, where the implicit step takes every
+other term. A steady case has no time, and the conjugate path (§59, a case
+with a fluid region) is steady only, so a table in `t` there is refused by
+name.
+
+**A box adds.** A cell's `q'''` is its region's `source` plus the source of
+every box that holds its centroid; two boxes that overlap both add. A box is
+its region's and never reaches another region's cells. A box that holds no
+centroid of its region is refused, naming it: a source that heats nothing is
+a setting the solver would ignore (§13.4.1).
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | a curve in `T` whose slope at one of its samples (every knot of a table; both ends and fifteen interior points of any other curve, §100.3) is positive | the JSON path, the temperature and `S_P` (§100.12) |
+| 2 | a curve in `T` whose range does not contain the case's initial temperature | the JSON path, the temperature and the range |
+| 3 | a table in `t` with fewer than two knots, times that do not increase strictly, a first time below zero, or a number that is not finite | the JSON path, and which |
+| 4 | a table in `t` on a steady case - every case with a fluid region is one | the JSON path, and that the run has no time |
+| 5 | a box that holds no cell centroid of its region | the box's `bounds` path and the region |
+| 6 | during a run: a cell whose temperature leaves a source curve's range, or where its slope is positive | the JSON path, the temperature and the range, or `S_P` |
+| 7 | during a run: a step whose end time leaves the table in `t` | the JSON path, the time and the table's range |
+
+### 100.12 Patankar's split, where each source enters, and the one point it registers
+
+A curve in `T` is linearised per cell about the temperature the previous
+pass or iteration left, `T*_c`:
+
+```
+q'''(T_c) ~ S_C + S_P T_c,   S_P = dq'''/dT at T*_c <= 0,   S_C = q'''(T*_c) - S_P T*_c     (S100.12)
+```
+
+Patankar's §4.2: `S_P` enters the diagonal and strengthens it, `S_C` enters
+the right side, and the split is exact when the curve is linear - a two-knot
+table converges in the pass after the first. `dq'''/dT` is
+`Property::slope`: a table's segment slope (the segment of (S100.2)'s rule,
+the last segment at the last knot), a series' and Sutherland's law's
+derivative. A positive `S_P` would weaken the diagonal (§3.4); it is refused
+by name (rows 1 and 6 of §100.11), not lagged.
+
+**The conduction path.** `ConjugateHeat` carries the implicit array beside
+`q'''` and assembles `fvm_sp(.., S_P, -1)` after `fvm_su`, only once a case
+has set one, so a case without a curve launches exactly what it launched.
+The numbers and the number boxes are one array written once before the
+loop; a table in `t` is written at the head of every step; a curve in `T`
+makes the step nonlinear, so it takes §100.7's outer passes, re-split at the
+head of every pass from that pass's `T`, and (S100.7) stops it -
+`numerics.outer` is read on such a case.
+
+**The conjugate path.** Each region's number and every number box are one
+fixed array, registered once before the loop - §98.8's array, whose total
+`interface_source` is measured beside. A curve in `T` is re-split every
+SIMPLE iteration from the previous iteration's `T`, at **step 4d**, the one
+point every per-iteration source goes through: clear `EnergySources`,
+register the fixed array again, register `S_C` and `S_P`, then (S98.9)'s
+sink (§98.8). A case with neither a curve in `T` nor a radiating interface
+keeps the one registration before the loop, in every bit; a case with a
+radiating interface and no curve registers what §98.8 registered, in the
+same order. `interface_source` is the device's sum of the explicit sources
+less the fixed total and less the last `S_C` total, so it stays (S98.9)'s
+alone.
+
+**What a run reports.** `ChtSolution::source_power` and
+`ChtFlowSolution::source_power`: `SUM_c (S_C + S_P T_c) V_c` over the arrays
+the last solve assembled, at the `T` it returned - the whole volumetric power
+the domain received, W; zero when the case has none. At a converged steady
+state it is the heat the boundaries carry out.
+
+| Check | Expected |
+|---|---|
+| the slope of a table | its segment's, to the bit; the last knot the last segment's |
+| the slope of a series and of Sutherland's law | their derivative, to `1e-7` of a central difference |
+| a table in `t` | every knot to the bit, a midpoint the mean; a time outside it refused |
+| a flat curve in `T`; a flat table in `t` | the number's field to `1e-9` K; the transient number's field to the bit |
+| a curve linear in `T` | two passes, the second's change below `1e-12`; the boundaries carry out `source_power` to `1e-9` |
+| a curve against its value at the initial `T`; a ramp in `t` against its flat twin; a box against none | each field moved (§13.4.1) |
+| a number box | `source_power` its value times its cells' volume, to `1e-12` |
+| a flat curve on the conjugate path | the number's field to `1e-9` K, and the same `source_power` |
+| a curve beside a radiating interface | `interface_source` the power the interface radiates, to `1e-12` |
+| rows 1-5 and 7 of §100.11 | each refused, the message naming the setting |
+
+Seven of the new library tests carry §112.3's f32 attribute: the series
+slope, and the six that run a case.
+
+### 100.13 Viscous dissipation - a metered, non-negative source
+
+```
+Phi = 2 mu (S - (1/3)(div u) I) : (S - (1/3)(div u) I)
+    = 2 mu S:S - (2/3) mu (div u)^2  >=  0,        S = (grad u + (grad u)^T)/2        (S100.13)
+```
+
+A case asks for it on its fluid, `"fluid": { ..., "viscousDissipation": true }`.
+The conjugate path then forms (S100.13) per fluid cell every SIMPLE
+iteration at step 4d (§100.12), from that iteration's velocity after the
+pressure correction - its Gauss gradient, the one §3 takes everywhere - and
+`mu` at the temperature the previous iteration left (the number, or
+§100.14's curve), and registers it as an explicit source in §18's registry.
+Written as the square of the deviatoric strain, Phi is non-negative cell by
+cell by construction: there is no clip and nothing to meter away.
+`ChtFlowSolution::dissipation_power` is `SUM_c Phi_c V_c` of the last
+registration, and §26.1's budget carries it in its sources entry, where it
+carries every registered term. Absent or `false`, no gradient is taken and
+nothing is registered: the bits of every case before this subsection.
+
+**Resolved and modelled.** This path is laminar: `nu_t` is zero on both of
+its meshes (§59.4), so `mu` in (S100.13) is the molecular viscosity and Phi
+is the whole dissipation of the resolved field. On a RAS path the mean-flow
+part would be (S100.13) with `mu`, and the turbulent part is the `rho
+epsilon` of the model's own `k` budget; writing `mu + mu_t` into (S100.13) as
+well would count that part twice. No RAS path registers Phi, and none is
+claimed.
+
+**Where it enters.** Step 4d's order becomes: clear, the fixed array, a
+curve's `S_C` and `S_P`, Phi, then (S98.9)'s sink. `interface_source`
+subtracts Phi's total as it subtracts the others, so it stays (S98.9)'s.
+
+**A fixture where Phi runs away.** §98.8's box is normalised to `Ra = 1e4`
+with `rho = cp = kappa = 1`, so its Gebhart number `g beta L / cp` is about
+`7e4`: viscous heating drives the buoyancy that drives it. Measured on the
+box with Phi on, `SUM Phi V` is `2.5e2` W after two iterations, `1.4e6` W
+after three and `1.3e11` W after twenty, while the same run computing Phi
+without registering it, or registering zeros, stays where it was: the
+growth is the heating feeding back through the flow. No gate runs Phi on
+that box; the check beside a radiating interface below runs two
+iterations, because the identity it holds is exact at every iterate.
+
+### 100.14 `mu(T)` - the momentum equation's laminar viscosity from a curve
+
+```
+nu_lam,c = mu(T_c) / rho_f,        nu_lam,b = mu(T_b) / rho_f                       (S100.14)
+```
+
+A fluid's `mu` may be a curve (§100.1). The momentum equation is kinematic
+(§5) and is written with the fluid's constant `rho_f`, so the laminar
+viscosity it reads is (S100.14), on every fluid cell and every fluid boundary
+face, from the temperature the previous iteration left. At the head of every
+SIMPLE iteration - step 1b, before the momentum predictor -
+`Momentum::set_laminar_viscosity` writes the two arrays `update_viscosity`
+adds `nu_t` to. They are the arrays §38's rheology writes on a non-Newtonian
+case, which is why a curve and a non-Newtonian model are refused together.
+`div(nu_eff (grad U)^T)` is on (§38.5) and is no longer zero. The material's
+`mu` is the curve at the initial temperature: what the first iteration uses
+and what the banner prints. A fluid that leaves the curve is refused, naming
+the temperature and the range (§100.1). Gate 100-D measures what it moves.
+`rho` stays the constant it was: `rho(T)` is §79.6's buoyancy on a closed
+cavity, and `cp` is still refused (§100.2).
+
+| # | what the case wrote | refused, naming |
+|---|---|---|
+| 1 | a fluid `mu` curve whose range does not contain the initial temperature, or that is not positive at one of its samples | the JSON path and the temperature |
+| 2 | during a run: a fluid temperature outside the `mu` curve's range | the JSON path, the temperature and the range |
+| 3 | a `mu` curve under a non-Newtonian viscosity model | the model - not reachable from a `*.cht.jsonc` case, whose fluid is Newtonian; `Momentum::set_laminar_viscosity` refuses it |
+
+| Check | Expected |
+|---|---|
+| Phi of a simple shear `du/dy = gamma` | `mu gamma^2`, to the bit |
+| Phi of a pure dilatation, and of a pure rotation | zero, to the bit |
+| Phi of random gradients | non-negative in every cell |
+| `Momentum::set_laminar_viscosity` | reaches `nu_eff` to the bit; a wrong length and a rheology model refused |
+| a flat `mu` curve on the duct | the number's field to `1e-9` K |
+| a sloped `mu` curve; Phi on | each field moved (§13.4.1) |
+| Phi on the duct, its heater off, whose flow does not depend on `T` | `U` unchanged to `1e-6` of its largest component; every watt of Phi leaves through the openings, by the outlet's enthalpy and by conduction, to `1e-4` |
+| Phi beside a radiating interface, two iterations | `interface_source` the radiated power to `1e-12` |
+| rows 1 of §100.14 | refused, the message naming the JSON path |
+
+Three of the new library tests carry §112.3's f32 attribute: the three that
+run a case.
+
+### 100.15 Gates 100-C and 100-D
+
+**Gate 100-C - Brinkman's plane Poiseuille with viscous heating.** Fully
+developed laminar flow between parallel plates `H` apart at mean speed
+`U_m`, `u = 6 U_m s (1 - s)` with `s = y/H`, heats itself by (S100.13) at
+`Phi = mu (du/dy)^2 = 36 mu U_m^2 (1 - 2 s)^2 / H^2`. The axial derivatives
+are zero, so `k theta'' = -Phi` with `theta = T - T_w`. With both walls held
+at `T_w`, and with the top wall adiabatic instead:
+
+```
+theta(s) = (3/4) Br (1 - (1 - 2 s)^4),                  mean over s  (3/5) Br          (S100.15)
+theta(s) = Br (6 s + (3/4)(1 - (1 - 2 s)^4)),            mean over s  (18/5) Br         (S100.16)
+```
+
+in K, with `Br = mu U_m^2 / (k 1 K)`. H. C. Brinkman, *Appl. Sci. Res.* A2
+(1951) 120-124, DOI 10.1007/BF00411976, posed the problem; the paper was not
+read, and both forms are derived here from the lines above: integrate twice,
+`theta(0) = 0`, and `theta(1) = 0` or `theta'(1) = 0`.
+
+**The fixture.** A fluid-only conjugate case, `H = 1` across and `L = 20`
+along, one cell deep between `empty` faces, `rho = cp = kappa = mu = 1` and
+`viscousDissipation` on; a uniform inlet at `U = 1` and 300 K, an
+`inletOutlet` outlet, `bottom` held at 300 K and `top` held (S100.15) or
+adiabatic (S100.16). So `Br = 1` and `Re = Pe = 1` on `H`: the flow and the
+temperature develop within a few `H` of the inlet, and the middle third,
+`x` in `[L/3, 2L/3]`, is fully developed. Three meshes, `ny = 8, 16, 32`
+across and `5 ny + 1` along, so a column of cells is centred on `x = L/2`.
+
+**What is held.** (1) The mean rise over the middle third, the volume mean
+of `T - 300` over its cells, against the closed form's mean, to `1 %` on the
+finest mesh, with §94's study beside it. (2) The profile of the column
+centred on `x = L/2` against the closed form at its cell centres, the
+largest deviation over the largest rise, to `1 %` on the finest mesh. (3) On
+every mesh, `SUM Phi V` against the enthalpy the outlet carries out less the
+heat conducted in through the four patches, to `1e-6` - §26.1's balance,
+closed with Phi in it. Every run must converge on its own residual. No
+published number is compared against; there is no answer key.
+
+**Gate 100-D - Gate 6 with water's `mu(T)` live.** Qu & Mudawar's
+micro-channel - §79's document and driver unchanged - with the water's `mu`
+a table in `T` in place of the number §79.12's Disclosure 2 fixes at the
+inlet temperature. **Disclosure 3:** the table is liquid water's viscosity at
+0.1 MPa from 10 to 80 C, standard tabulated values (as the CRC Handbook of
+Chemistry and Physics tabulates them from the IAPWS 2008 formulation),
+transcribed and not keyed: no viscosity is compared against anything. At
+20 C it reads `1.0016e-3` Pa s against Disclosure 2's `1.002e-3`, 0.04 %
+apart. The inlet speed is Gate 6's, `Re = 140` with the inlet `mu`, so the
+mass flow is Gate 6's and what moves is the viscosity's distribution -
+thinner at the heated wall.
+
+Gate 6's two live levels run again with the table. Each must converge and
+close §79.7's three identities with Gate 6's own bars; the coarse level runs
+with the number too, and the curve must move `R_t,out` (§13.4.1); the finer
+level's two resistances must lie inside Kawano et al.'s bars, which is Gate
+6's criterion, and the movement against §79.12's constant-`mu` rows is
+printed for both levels. Disclosure 2's `R_t,out` 0.235 -> about 0.27 is a
+different change - `mu` at the mean fluid temperature inside `Re` at a fixed
+`Re`, which cuts the mass flow by a fifth; this gate does not make it, and it
+prints both numbers so a reader can tell them apart. The movement's
+direction is measured; its absolute size is not held against a published
+viscosity, because no key for water's is carried (§100.4's rule), and Gate
+6's band is not changed.
+
+| Check | Expected |
+|---|---|
+| (S100.15) and (S100.16), on the host | their walls, `k theta'' = -Phi`, and their means |
+| Gate 100-C, both variants | the mean rise and the profile within `1 %` on `ny = 32`; the study printed |
+| Gate 100-C, every mesh | converged; the balance with Phi in it to `1e-6` |
+| Gate 100-D, each level | converged; §79.7's identities with Gate 6's bars |
+| Gate 100-D, the coarse pair | `R_t,out` moved by the curve |
+| Gate 100-D, the finer level | both resistances inside Kawano et al.'s bars |
+
+---
+
+## 105. ALE motion and the space conservation law — the mesh that moves, and the volume it sweeps
+
+The mesh moves and the volume it computes moves with it. This section owns:
+the resident points and face CSR beside a `GpuMesh` (`src/mesh/ale.rs`,
+`src/mesh/ale/tests.rs`, `cuda/ale.cu`), the in-place recompute of the sixteen
+§82 geometry arrays from resident points, the swept volume of a face held
+bitwise against its host twin, the mesh flux `phi_mesh` weighted by the time
+scheme's own coefficients, the volume history `v0`/`v00`, and the ALE time
+derivative. Gate 105-A (§105.5) holds the space conservation law to 1e-12 on a
+box in prescribed sinusoidal motion, over 100 steps, in euler and backward,
+with a uniform flow uniform to round-off.
+
+§105.1-§105.6 do not own the relative flux in the solver, the moving wall,
+the point smoother or the case block. §105.7-§105.10 own the first three,
+with Gate 105-B; the case block is §105.12's, and §105.11 lists what
+is still not claimed. §105.13-§105.15 own the Turek-Hron benchmark on the card, with Gate 105-C.
+
+No GPL-licensed source was consulted. The sources are this crate's own
+`cuda/meshgeom.cu` and `src/mesh/geometry.rs` (the fan of §2.1), SPEC-LIT §2,
+§3.3, §13.3, §81, §82, and two papers cited by DOI only: Demirdžić & Perić
+(1988), DOI 10.1002/fld.1650080906 (the space conservation law), and Thomas &
+Lombard (1979), DOI 10.2514/3.61273 (the geometric conservation law).
+
+### 105.1 What moves, and what does not
+
+The points move; the topology never does. `owner`, `neighbour`, the face to
+point CSR, the patch table and the cell to face maps are fixed at upload, and
+a mesh in this tree never gains or loses a face or a point. What motion
+invalidates is the sixteen geometry arrays §82 defines, and they are
+RECOMPUTED from the moved points at every step - not integrated forward, and
+not carried by any flux register.
+
+`GpuMesh::total_volume` is the volume at upload. After the first move it is
+stale, and it stays stale by design: re-folding it is
+`AleMesh::total_volume`'s job, which downloads `gm.v` and folds the first
+`n_cells` entries in ascending cell id - the same fold `GpuMesh::upload` used,
+so the two numbers agree exactly whenever the mesh has not moved.
+
+A mesh moves in this tree only through the API of this section:
+`AleMesh::set_points`, a host write that §81.3's guard refuses inside a
+capture, or a device kernel of the caller's own writing the resident `points`
+buffer. There is no second path that writes `GpuMesh` state, and §105.2
+records what the type therefore no longer promises.
+
+### 105.2 The resident recompute, written through a shared borrow
+
+`Simple<'m>`, `Momentum<'m>`, `Energy` and `RasCore` each hold a `&'m GpuMesh`
+for their whole life. An `&mut GpuMesh` in the recompute's signature would
+therefore force the next unit to rebuild every solver object on every time
+step, so the recompute writes through a SHARED borrow:
+`AleMesh::recompute_in_place(&mut self, gpu, gm: &GpuMesh)` takes `gm` by
+reference and writes its sixteen arrays in place, each output argument passed
+`.arg(&gm.X) // written in place: SPEC-LIT 105.2`.
+
+That is sound in THIS crate for three reasons, all facts of `src/device.rs`
+and not hopes: `Gpu::new` disables cudarc's event tracking BEFORE the first
+allocation, so no `.arg(&buf)` carries a `SyncOnDrop`; there is exactly one
+stream, so every launch runs in issue order and there is no cross-stream
+hazard for tracking to guard; and no host reference points into device memory.
+With tracking off, `.arg(&buf)` and `.arg(&mut buf)` push the identical device
+pointer - the mutability is a host-side aliasing statement, and the device
+cannot see it. The mutable state the recompute owns - points, CSR, scratch,
+history - lives in `AleMesh`, which the caller holds `&mut`. The plan's name
+`GpuGeometry::recompute_in_place` lands on `AleMesh` because a `GpuGeometry`
+is a transient that `GpuMesh::from_device_geometry` consumes, and after
+construction there is no `GpuGeometry` left to call a method on.
+
+What the shared borrow costs: the type no longer says immutable. A caller
+that derived a host value from the geometry - `total_volume`, a downloaded
+`v`, a plot - holds the value of the mesh that was uploaded, not of the mesh
+that lives there now (§105.1).
+
+The recompute is §82's four kernels in the same order with the same argument
+order, reading the resident points and CSR instead of an upload, so after a
+move the device geometry is BITWISE the host sweep on the moved points:
+`the_recomputed_geometry_is_the_host_sweep_on_the_moved_points`, on `5`
+fixtures.
+
+The capture stance: `src/mesh/ale.rs` launches kernels and owns an iteration
+entry point, so §81.7's registry classifies it, and its row is `Gate` -
+`the_ale_step_replays_bitwise` - which printed `12 nodes (6 kernel, 0 memset,
+6 memcpy); 3 replays bitwise over 16 buffer(s) / 1833 value(s)`.
+
+`set_points` is a host write and §81.3's guard refuses it inside a capture by
+name; a device-side motion - a `memcpy_dtod` from a spare buffer - is
+capturable, and is what the gate itself iterates with. §82.8's `Outside`
+stance is about building a mesh and still holds for `src/mesh/gpugeom.rs`; the
+sentence added to its registry row records that the same four kernels also run
+INSIDE a step from `src/mesh/ale.rs`, which carries its own row.
+
+### 105.3 The swept volume of a face
+
+One thread per face. The face's vertices move linearly over the step from
+`x^n` to `x^{n+1}`, and the fan of §2.1 moves with them. Each level has its
+own vertex average `x_avg`; for the fan triangle of edge `(a, c)` the normal
+`N(t) = (a - x_avg) x (c - x_avg)` is quadratic in the step fraction `t`,
+while every vertex moves at a constant velocity over the step, so the
+integrand of the triangle's swept volume is a quadratic in `t` - which
+Simpson's rule integrates exactly on the three points `t = 0, 1/2, 1`:
+
+```text
+dV_tri = (d_xavg + d_a + d_c) . (N^n + 4 N^{n+1/2} + N^{n+1}) / 36
+dV_f   = sum over the fan's triangles, in CSR order
+```
+
+with `d_p = p^{n+1} - p^n` the displacement of point `p` over the step.
+`dV_f` is positive when the face moves along its `Sf` - the owner grows - and
+a face whose vertices do not move sweeps exactly `0.0`, because every
+difference in the expression vanishes.
+
+The identity the space conservation law stands on: summed over a cell with
+owner sign `s`, `sum_f s dV_f = V_fan^{n+1} - V_fan^n` in exact arithmetic,
+because every ruled surface swept between two fan triangles is shared by
+exactly two of them with opposite orientation. It holds with boundary faces
+sweeping too: a uniform dilation of a whole box, walls included, closes it to
+`7.289e-16` (`the_volume_drift_is_the_worst_step_and_not_the_last`).
+
+§2.2's pyramid volume differs from the fan volume by
+`(1/3) sum_f s Sf.(Cf - x_avg)`. For a triangle `Cf = x_avg` exactly, so the
+two agree. For a quadrilateral the offset vanishes identically, planar or
+warped: with `q_i = x_i - x_avg` (so `sum q_i = 0`), diagonals
+`d1 = q2 - q0` and `d2 = q3 - q1`, the area vector is
+`Sf = (1/2) d1 x d2`, and every fan triangle's centroid offset
+`(q_i + q_{i+1})/3` is `+-(d1 +- d2)/6`, which lies in the plane spanned by
+the two diagonals - the plane `Sf` is normal to. So on every mesh whose faces
+have at most four vertices the space conservation law holds to round-off
+against the geometry §82 recomputes, however warped the faces.
+
+A face of five or more vertices breaks it by the warp:
+`a_quadrilateral_keeps_its_centroid_offset_normal_to_sf_and_a_pentagon_does_not`
+measured `1.038e-16` at worst over three warped quads and `1.771e-2` for the
+pentagon. The route that would close
+it there - advancing `v` by the swept volumes instead of recomputing it, as
+docs/09's §105 row puts it - changes what `v` means for every operator in the
+tree, and is not taken.
+
+The kernel is compiled with `-fmad=false` and is BITWISE its host twin:
+`the_swept_volume_kernel_is_its_host_twin_bitwise`. The contracted build of
+the same source differs on `125` of `868` faces
+(`the_contraction_the_ale_unit_turns_off_is_real`) - that is the flag buying
+the bits, measured and not believed.
+
+### 105.4 The mesh flux, the volume history and the ALE time derivative
+
+§13.3's three-level form is `aN psi^{n+1} + a0 psi^n + a00 psi^{n-1}` with
+`aN + a0 + a00 = 0`. Applying the same form to the volume itself and moving
+the old levels to the right gives the mesh flux, per face:
+
+```text
+aN V^{n+1} + a0 V^n + a00 V^{n-1} = aN dV^{n+1} - a00 dV^n
+phi_mesh,f = aN dV_f^{n+1} - a00 dV_f^n
+```
+
+- euler: `phi_mesh,f` is `dV_f/dt`, the swept-volume flux itself;
+- backward at constant `dt`: `(1.5 dV_f^{n+1} - 0.5 dV_f^n)/dt`.
+
+This is the ONE weighting for which the scheme's own discrete space
+conservation law holds: summing the flux form of a cell returns §105.3's
+volume identity with the scheme's coefficients already on it.
+
+The volume history: `v0` is `V^n`, the volume at `psi0`'s level, and `v00` is
+`V^{n-1}`, the volume at `psi00`'s level. `advance` rotates them BEFORE the
+move (`v00 <- v0 <- v`), the same rotation order §13.3 requires of `psi`.
+
+The two ddt kernels put the geometry on the levels. `tsDdtGeneralV` puts
+`aN V^{n+1}` on the diagonal and `a0 V^n psi^n + a00 V^{n-1} psi^{n-1}` in the
+source, reading `V^{n+1}` from the mesh's own `v` AFTER the move and `V^n`,
+`V^{n-1}` from the history; `tsDdtGeneralRhoV` likewise with each level's
+density, so the discrete form conserves `rho psi`. The existing
+`tsDdtGeneral` is untouched, and on a mesh that does not move the new kernel
+agrees with it to `3.210e-16` relative at worst (both diagonals bitwise)
+(`the_ale_ddt_reduces_to_the_static_ddt_on_a_mesh_that_does_not_move`); the
+difference that remains is association only, in the order the products fold.
+
+`advance` runs, in this order, all on the one stream and nothing else:
+`v00 <- v0 <- v` and `swept0 <- swept` as device-to-device copies; the swept
+volume of every face from `points_old` and `points`; the in-place geometry
+recompute of §105.2; `phi_mesh` on internal and boundary faces at once; and
+`points_old <- points` as its last act. Nothing downloads, nothing allocates,
+nothing syncs - which is what makes the step capturable.
+
+### 105.5 Gate 105-A - space conservation and the uniform state
+
+The fixture: a uniform box 6x5x4, cell `0.2 x 0.25 x 0.3`, no refinement - a
+box lists no hanging node, and moving one would tear the mesh, so the gate
+moves a uniform box only. Every interior point moves by `interior_sinusoid`
+with amplitude `0.03` and period `0.5`; every boundary point is returned
+EXACTLY, which is what makes every boundary face's swept volume exactly zero.
+`dt = 0.01`, 100 steps, euler and backward. Over the run no cell falls below
+`0.8846` of its rest volume.
+
+The uniform state: `U = (0.7, -0.4, 0.25)`, `psi = 1` Dirichlet on every
+boundary face. The residual is the ALE ddt plus Gauss upwind of
+`phi - phi_mesh` assembled at `psi = 1` and evaluated on the constant field -
+`A 1 - b` - which is zero exactly when the space conservation law holds and
+each cell closes its own balance. This proves the uniform state by DIRECT
+assembly; the same statement through the SIMPLE loop is §105.10's.
+
+```text
+| scheme   | steps | cells | worst SCL | scheme SCL | uniform | volume drift | boundary phi_mesh | min V/V0 |
+| euler    | 100   | 120   | 1.535e-15 | 1.531e-15  | 1.770e-15 | 2.591e-15    | 0.0               | 0.884630 |
+| backward | 100   | 120   | 1.535e-15 | 1.798e-15  | 1.997e-15 | 2.591e-15    | 0.0               | 0.884630 |
+```
+
+Tolerances: `worst SCL`, `scheme SCL`, `uniform` and `volume drift` at most
+1e-12 each, `volume drift` the worst step's and not the last's;
+`boundary phi_mesh` exactly `0.0`; `v0`/`v00` bitwise `V^n`/`V^{n-1}`
+after every step. The same ten rows run in `ofgpu-validate` under the gate
+scope `SPEC-LIT 105.5 Gate 105-A space conservation`, entered and left around
+one function, so the reported-gate census stays 19 literals / 17 distinct.
+
+### 105.6 What is not claimed, and the house items
+
+Not claimed here: faces of five or more vertices close only to the warp
+(§105.3); the relative flux `phi - phi_mesh` in the momentum predictor, the
+pressure equation, turbulence and energy; the smoother for interior points;
+the moving-wall boundary condition; the case block that prescribes a motion;
+any time-order measurement. Those are the next units'.
+
+House items. Three new files - `cuda/ale.cu`, `src/mesh/ale.rs`,
+`src/mesh/ale/tests.rs` - and the source-file count is 213. `ale.cu` is the
+last entry of build.rs's `KERNEL_UNITS` and the second unit of
+`FMAD_OFF_UNITS`: its swept volume is held BITWISE against
+`mesh::ale::host_swept_volumes`, and nvcc's multiply-add contraction would
+break that on every non-axis-aligned face. The capture row is `Gate`,
+`the_ale_step_replays_bitwise`; `src/mesh/gpugeom.rs` stays `Outside`. No
+existing kernel changed and no solver numerics moved to make any gate here
+pass.
+
+### 105.7 The relative flux, and which consumer reads which
+
+`Simple` holds the moving mesh as an `Option`: the `AleMesh`, a resident
+`phi - phi_mesh` named "phiRel", and the moving-wall face list. `None` is
+every caller that existed before this section, and on that path the only
+thing the field does is fail two `if let` tests and pick `&self.phi` in one
+`match` in the outer corrector - no launch changes, no argument changes, no
+order changes.
+
+The consumers of the flux in `src/simple.rs`, measured with `grep -n` on the
+tree this section was written from (the insertions this section describes
+shift the lines; the consumers do not move):
+
+| line | consumer | reads, when a motion is attached |
+|---|---|---|
+| 543 | `flow_state()` - every turbulence model, species and scalar through `FlowState.phi` | `phi_rel` |
+| 756-757 | `update_inlet_outlet_vector`/`_scalar` | `phi_rel` (the switch is on the flux through the moving face) |
+| 792 | `momentum.solve` - `div_scheme_weights`, `fvm_div_gauss`, `fvm_div_bounded_correction`, `fvm_div_correction`, `update_local_step` | `phi_rel`, plus the moving mesh for the time derivative |
+| 798 | `momentum.assemble_only` | the same |
+| 826 | `FlowDevices::update` (fan, porous jump) | refused with a motion |
+| 849 | `correct_flux_and_velocity(&mut self.phi)` | absolute - it writes `phi` |
+| 1072 | `continuity_error` | absolute |
+| `assemble_pressure` | `momentum.phi_hbya()` | absolute |
+
+The pressure equation and the continuity error stay on the ABSOLUTE flux,
+and that is exact, not an approximation:
+
+```text
+the volume balance of a cell on a moving mesh, which Gate 105-A holds to
+round-off (§105.4):
+
+    aN V^{n+1} + a0 V^n + a00 V^{n-1} - sum_f phi_mesh,f = 0
+
+it says where the volumes went. With it closed, the incompressible
+continuity statement the pressure equation enforces is about the absolute
+flux alone:
+
+    sum_f phi_f = 0
+
+the relative flux closes no cell: its cell sum is minus the cell's mesh
+flux, which is not zero on a moving mesh.
+```
+
+Which time derivative goes with which convective form. With a motion
+attached and `bounded_convection == false` (the conservative form
+`div(phi_rel U)`), the momentum time derivative is §105.4's
+`AleMesh::fvm_ddt`, each level carrying its own volume. With
+`bounded_convection == true` (`div(phi_rel U) - U div(phi_rel)`, the
+non-conservative form) it stays the static `Ddt::add`. Both annihilate a
+uniform `U`: the first because the discrete space conservation law holds,
+the second identically.
+
+```text
+conservative: aN V^{n+1} U^{n+1} + a0 V^n U^n + a00 V^{n-1} U^{n-1} + Σ_f phi_rel,f U_f
+bounded:      V^{n+1} (aN U^{n+1} + a0 U^n + a00 U^{n-1}) + Σ_f phi_rel,f U_f - U_P Σ_f phi_rel,f
+```
+
+Mixing them - the ALE derivative plus the bounded correction - counts the
+volume change twice, and is wrong. The `match` in `assemble_component` makes
+it impossible: the bounded form keeps the static term, its consistent
+partner.
+
+`attach_motion` refuses a steady run and the schemes `localEuler` and
+`CrankNicolson` - a moving mesh needs `Euler` or `backward`, and the LTS
+path has no time for the mesh to move in - and it refuses the fan and
+porous-jump patches of §52 and §53. `flow_state()` hands out `phi_rel` while
+a motion is attached, which routes every model through `FlowState` without
+editing a model file. The drivers' own call sites that read the flux for a
+convective term - energy's `phi_conv` through `src/cht/flow.rs`, the
+drivers' `update_inlet_outlet` calls - are §105.12's, and no driver
+can attach a motion before it. A `Simple` with no motion launches exactly
+what it launched before this section; the supervisor's byte-for-byte
+checksum of written fields is recorded by the commit, not here.
+
+### 105.8 The moving wall
+
+The moving wall's velocity is written by a kernel, never by a host write.
+`Gpu::write` is refused inside a CUDA graph capture (§81.3), so a per-step
+host write of the wall's `refValue` would break any captured region; the
+value is computed on the device by `aleMovingWallVelocity` from the mesh
+flux and the face areas. On each listed boundary face,
+
+    refValue = b_sf (phi_mesh_b / (b_sf . b_sf))
+
+the vector normal to the face whose flux through it is the mesh flux, and
+the face's velocity condition is `fixedValue` (`fr = 1`). After that,
+`momPhiHbyABoundary` writes the face flux as `U_b . Sf`, which is then
+exactly `phi_mesh,b`, so nothing crosses the wall. The piston gate of
+§105.10 measures the largest boundary imbalance over the piston's faces at
+0.0 - exact, on every step - of the mesh flux.
+
+The value is the NORMAL mesh velocity only: a wall whose law moves it
+tangentially is refused by `MeshMotion::wall_faces` ("a tangential wall
+velocity is not implemented"). The crate's own `movingWallVelocity`
+condition strips the face-normal component of the cell value instead of
+computing the mesh velocity, and is NOT the condition used here; on a
+prescribed mesh motion the mesh flux is the truth the velocity condition
+has to reproduce.
+
+### 105.9 The point smoother
+
+The interior points are moved by host-side inverse-distance weighting, the
+two-term weight of Luke, Collins & Blades (2012), DOI
+10.1016/j.jcp.2011.09.021, with the parameters chosen here and stated as
+ours. For a free point at rest position `x`,
+
+```text
+d(x) = sum_i w_i d_i / sum_i w_i
+w_i  = (L / r_i)^3 + (alpha L / r_i)^5,    r_i = |x - x_i|
+L     the diagonal of the control points' rest bounding box
+alpha = 5 max_i |d_i| / L
+```
+
+over the control points `x_i` (rest positions) with prescribed displacements
+`d_i`. The paper's rotational part, its per-node area weights and its
+boundary-node reduction are NOT implemented. Displacements are measured from
+the REST position, never incrementally, so nothing drifts. The cost is
+`O(N_free N_control)` per call, on the host; `AleMesh::set_points` then
+writes the points, and that host write is why a prescribed-motion step is
+not capturable as a whole - `move_mesh` and the outer corrector are
+(§105.10).
+
+Which points the laws move and which the smoother moves is a per-patch rule
+table, and every patch of the mesh must be named exactly once:
+
+| rule | meaning |
+|---|---|
+| `Fixed` | the points stay where they are; control points with zero displacement |
+| `Slide` | the points are moved by the smoother, like interior points - a plane the mesh slides along |
+| `Move(law)` | every point of the patch is displaced by the law |
+
+The classification walks the boundary faces patch by patch and gives each
+point of each face a state. A `Move` point stays `Move` unless it meets a
+different law or a `Fixed` point - refused, naming the point id; a `Fixed`
+point stays `Fixed` unless it meets a `Move` - refused; `Slide` never
+overrides anything. Control points are every `Move` and `Fixed` point, in
+ascending point id; the free points are all the others. A rule other than
+`Fixed` on a `Cyclic` patch is refused. A slide plane is kept exactly: a
+point stays in its plane exactly when no control displacement has a
+component along the plane's normal, and then every `w_i d_i`, and so the
+weighted sum, has zero normal component exactly. At the gate amplitudes the
+smallest cell keeps 0.8021156375 of its rest volume on the piston and
+1.0000285445 on the stroke
+(§105.10).
+
+### 105.10 Gate 105-B - the piston and the stroking outlet
+
+The plan document writes the piston as `u = x (dx_w/dt) / x_w`. That is the
+velocity of a gas compressed uniformly in a CLOSED cylinder, and this
+solver is incompressible: there its `div u` is `(dx_w/dt) / x_w`, not zero,
+so it cannot carry that state. The incompressible piston is the OPEN one:
+the wall at `x_w(t)` pushes the fluid out through an open end, `U = dx_w/dt`
+everywhere, and the mesh velocity between the two ends is what the smoother
+makes it - so the relative flux is NOT zero in the interior, and the gate
+exercises it.
+
+(a) The piston, at constant speed `dx_w/dt = -c`: the exact state is
+`U = (-c, 0, 0)`, `p = 0`, and it must hold to round-off through the whole
+SIMPLE loop - moving wall, smoother, `phi_rel`, the ALE time derivative,
+both convective forms, euler and backward. The box is 8x3x3 cells of
+0.125 x 0.25 x 0.25, `c = 0.5`, `dt = 0.005`, 40 steps; `xmin` is `Fixed`,
+`xmax` is the moving wall `Move(linear, -c)`, the four sides `Slide`; the
+patch kinds are `Generic` on `xmin`, `Wall` on `xmax` and symmetry on the
+four sides. `U` is seeded `(-c, 0, 0)` with zero-gradient on the inlet and
+symmetry on the sides, `p` is seeded zero with `p = 0` on the inlet, and
+`phi` is the exact uniform flux.
+
+(b) The time order is measured on a STROKING OUTLET, not on an accelerating
+piston. At a face whose flux the velocity condition prescribes,
+`momForceFluxBoundary` writes zero force flux, so the reconstructed
+pressure force in the adjacent cell carries half of a wall-normal pressure
+gradient. An accelerating piston has one (`dp/dn = -d2x_w/dt2`), so its
+wall cell's velocity is wrong by `O(dt d2x_w/dt2)` each step and the
+pressure near the wall by `O(h d2x_w/dt2)`, an error that does not fall
+with `dt` and hides the time order - measured on a 1-D model of this
+corrector before this gate was written. That is the outer corrector of §5,
+and changing it is a numerics decision for the user, not made here. The
+stroking outlet has no prescribed-flux face with a pressure gradient across
+it: a 1-D channel `x` in `[0, L(t)]`, `p = P0` at `x = 0`, `p = 0` at the
+moving end `L(t) = L0 + a sin(2 pi t / T_p)`, symmetry on the sides, so
+`U(t)` is uniform and `dU/dt = P0 / L(t)` exactly,
+`U(T) = U0 + P0 integral over [0, T] of ds / L(s)`. On the 1-D model at the
+step counts below the orders are euler `p = 1.004` and backward
+`p = 2.034`. The mesh is 16x1x1 cells of 0.0625 x 0.1 x 0.1, `L0 = 1.0`,
+`a = 0.2`, `T_p = 1.0`, `T = 0.25`, `U0 = 0.5`, `P0 = 1.0`, steps 320, 160,
+80, finest first; `xmin` is `Fixed` with `p = P0`, `xmax` is the moving
+outlet with `p = 0`, the four sides `Slide` with zero-gradient `U`.
+
+The step loop. The first step does NOT call `begin_time_step`, so
+`TimeState::step` is 0 during it and `DdtScheme::Backward.coeffs` returns
+the Euler row of §13.3 for the momentum derivative AND for
+`AleMesh::advance` - both read `momentum.ddt.state`. Every later step calls
+`begin_time_step` first. Starting BDF2 with two equal old levels instead is
+a first-order error when `dU/dt(0)` is not zero, and the stroke's
+`dU/dt(0) = P0 / L0`. Each step then moves the points by the law at
+`(k+1) dt`, advances the mesh with the momentum ddt's own coefficients,
+writes the moving walls' value, re-evaluates `U`'s boundary, refreshes
+`phi_rel`, and only then runs the outer correctors. Tolerances: uniform
+state `1e-10`, relative flux through the wall `1e-12`, cell continuity
+`1e-10`, order band `|p - p_scheme| <= 0.1`, finest-level error against the
+exact value `5e-4` (euler) and `5e-6` (backward), and the extrapolated
+value must sit nearer the exact one than the finest.
+
+Measured on the card, the run this section ships:
+
+```text
+| piston   | form         | steps | cells | worst U  | worst p | wall flux | continuity | min V/V0 |
+| euler    | conservative | 40    | 72    | 2.531e-14 | 1.637e-11 | 0.000e0   | 3.415e-16  | 8.0211563746e-1 |
+| euler    | bounded      | 40    | 72    | 2.554e-14 | 1.632e-11 | 0.000e0   | 4.692e-16  | 8.0211563746e-1 |
+| backward | conservative | 40    | 72    | 4.719e-14 | 6.354e-11 | 0.000e0   | 5.281e-16  | 8.0211563746e-1 |
+| backward | bounded      | 40    | 72    | 4.752e-14 | 6.337e-11 | 0.000e0   | 4.108e-16  | 8.0211563746e-1 |
+
+| stroke   | 320 steps | 160 steps | 80 steps | exact | p | finest error | extrapolated error |
+| euler    | 7.2251240486e-1 | 7.2257769565e-1 | 7.2270865053e-1 | 7.2244723847e-1 | 1.004118 | 9.020e-5 | 3.415e-7 |
+| backward | 7.2244739974e-1 | 7.2244789023e-1 | 7.2244989887e-1 | 7.2244723847e-1 | 2.033915 | 2.232e-7 | 1.385e-8 |
+```
+
+(the stroke columns are the volume-weighted mean of `U_x` at `T`, to ten
+significant digits; both errors relative to the exact value.) One moving
+step - `move_mesh` plus one outer corrector - captures and replays
+bitwise: 659 nodes (598 kernel, 55 memset, 6 memcpy); 3 replays bitwise
+over 9 buffer(s) / 324 value(s). `ofgpu-validate` carries the same fourteen rows under the gate
+scope `SPEC-LIT 105.10 Gate 105-B the flow on a moving mesh`, entered and
+left around one function, so the reported-gate census stays 19 literals /
+17 distinct.
+
+### 105.11 What is not claimed, and the house items
+
+Not claimed here: tangential moving walls; rotations in the smoother; a
+device smoother; a moving mesh in any driver but `ofgpu-lowmach`, whose
+`motion` case block is §105.12's; the energy and turbulence equations' time derivatives on a
+moving mesh in the conservative form - their bounded form keeps the static
+term, which §105.7's argument covers for a constant density only; the wall
+distance a turbulence model reads is computed once and is stale after a
+move; pressure backends that assume a fixed Cartesian mesh; faces of five
+or more vertices (§105.3).
+
+House items. Four new files - `src/mesh/motion.rs`,
+`src/mesh/motion/tests.rs`, `src/ale_flow.rs`, `src/ale_flow/tests.rs` - and
+the source-file count is 217. Two kernels are appended to `cuda/ale.cu`,
+which stays in `FMAD_OFF_UNITS`: the wall value is held bitwise against its
+host formula by the test named
+`the_relative_flux_and_the_wall_value_are_what_they_say_bitwise`. No new
+capture row: the two new kernels are launched from `src/mesh/ale.rs`, whose
+`Gate` row stands, and `src/mesh/motion.rs` and `src/ale_flow.rs` launch
+nothing and drive no iteration - the moving step that captures is the
+proof. No existing kernel changed and no solver numerics moved to make any
+gate here pass.
+
+### 105.12 The motion case block, and the one driver that runs it
+
+A case asks for the moving mesh of §105.7-§105.10 with a `motion` block, a
+field of the JSONC case beside `sources`:
+
+```jsonc
+"motion": {
+  "patches": [
+    { "patch": "inlet",  "rule": "fixed" },
+    { "patch": "outlet", "rule": "move",
+      "law": { "kind": "sine", "amplitude": [0.2, 0, 0], "period": 1.0 } },
+    { "patch": "sideA",  "rule": "slide" }
+  ],
+  "walls": ["piston"]
+}
+```
+
+One rule per boundary patch - `fixed`, `slide`, or `move` with a `linear`
+(`velocity`) or `sine` (`amplitude`, `period`) law - and `walls`, the `move`
+patches whose `U` condition is the moving wall's (§105.8). The reader
+refuses, naming the path: an unknown key anywhere in the block, a `law` on a
+`fixed` or `slide` patch, and a `move` without a `law`. `JsonMotion::lower`
+refuses by name a law that moves nothing and a sine period that is not
+positive and finite. Everything patch-level - that every patch of the mesh
+is named exactly once, unknown patch names, cyclic rules, conflicting point
+claims, a tangential wall - is `MeshMotion::new`'s and
+`MeshMotion::wall_faces`'s refusals (§105.9), not the reader's.
+
+`ofgpu-lowmach` is the one driver that runs the block: it is the only
+driver that reads a JSONC case AND runs `Simple` transiently. `ofgpu-cht`
+cannot host it - its fluid path hard-codes the steady ddt - and
+`ofgpu-k-epsilon`, `ofgpu-sample` (both commands) and `ofgpu-decompose`
+refuse the whole block by name through `common::refuse_motion_block`.
+
+Per time step, in this order: `begin_time_step` (every step, first step
+included), `points_at` at the step's END time, `set_points`, `move_mesh`,
+then the turbulence correct and the outer corrector exactly as before.
+`move_mesh` advances the mesh with the momentum ddt's own coefficients,
+writes the moving walls' value and refreshes the relative flux. Four flux
+reads route through `Simple::convective_flux` (§105.7): T's
+`update_inlet_outlet_scalar`, `Energy::correct`, and the two `FlowState`s
+the turbulence model and the per-step corrector read. The restart writer's
+`s.phi()` stays ABSOLUTE, and so do the pressure equation and the
+continuity error inside `Simple` (§105.7). With no motion attached
+`convective_flux` hands out `phi` itself - the same buffer - so a case
+without `motion` writes byte-identical output.
+
+What a moving run refuses, by name, before any field is set up, none of it
+downgradable under `-permissive`: a steady run (a moving mesh needs time to
+move in); `-restartFrom` and `-restartWrite` (a checkpoint carries no mesh
+points and no volume history); `-heaterPower` (spread over the rest
+volume); `-sealed` (the sealed `p0` equation holds the domain volume fixed);
+any turbulence model but laminar (a model's wall distance and time
+derivatives are the static mesh's); a `sources[]` entry (a source's volume
+integral is the rest mesh's); the case's `output` block and any `-output`
+but `foam` (the volume writers take the rest points); a cyclic pair (the
+periodic reports divide by the rest volume); a `motion.walls` patch whose
+`U` is not a fixed value (the moving wall's velocity is written as a
+fixedValue, §105.8); a `motion.walls` patch whose `U` value is not its law's
+velocity at `t = 0` (the value seeds the first step's flux before the first
+`move_mesh` writes the wall's own; a wall written at rest under a moving law
+starts the run with a flux the mesh contradicts); a `move` patch whose `U`
+IS a fixed value that `walls` does not list (a fixed velocity on a moving
+patch pushes fluid through it).
+The written time directories carry the FIELDS only; the points at time `t`
+are the case's `points_at(t)`, reproducible from the case file.
+
+The energy equation is solved in its bounded form with the static time
+derivative (§105.11), which keeps a uniform temperature exactly; transport
+of a non-uniform temperature at variable density on a moving mesh is not
+claimed.
+
+The measurement (§105.10 (b)'s stroking outlet as an `ofgpu-lowmach` case:
+16x1x1 cells, laminar, isothermal, `Euler`, `dt = 0.003125`, 80 steps to
+`T = 0.25`): the static case writes `Ux` `0.750000000` against its exact
+`U0 + P0 T / L0 = 0.75` - Euler integrates a constant acceleration exactly
+- and the moving case, the outlet on the sine law, writes `Ux` `0.722709000` against
+`stroke_exact()` = `0.722447238`, far from the static `0.75`. The piston of
+§105.10 (a) as a case - the wall on a `linear` law at `-c`, listed in
+`walls`, its case value `-c` - keeps `|Ux + c|` at `0` in the written field,
+`|Uy| + |Uz|` at `1.883e-16` and `|p|` at `3.965e-12` over ten steps, while
+the same case without the block, its closed end a wall at rest, sits
+`5.614900000e-1` away. Written at rest under the same law, the wall's case
+value seeded the first step's flux against the moving mesh: a pressure
+impulse of `0.125` after one step that decayed to `5.5e-3` after ten - the
+measurement that made the value a refusal.
+
+Measured on this driver before §105.16 changed it: `ofgpu-lowmach` called
+`begin_time_step` before its FIRST step too, so the time state's step
+counter was 1 during it and `backward` took the BDF2 row with two equal old
+levels, not the Euler row §105.10's loops start from. With `dU/dt(0)` not
+zero that start is first order. The static stroke case under `backward`
+(`U0 + P0 T / L0 = 0.75`, the same 16x1x1 duct, no `motion`) wrote `Ux`
+errors of `-6.252e-3`, `-3.126e-3` and `-1.563e-3` at 20, 40 and 80 steps -
+`-dt P0 / (2 L0)`, halving with the step - where `Euler` writes `3e-6`,
+`-1e-6` and `0` (the six-digit write). The user decided on 2026-09-24 that
+the drivers start `backward` from the Euler row; §105.16 does it and lists
+what moved. A moving run's mesh advance takes the same coefficients as its
+momentum, so the space conservation law still closes.
+
+House items. No new file - the source-file count stays 217; no new capture
+row - `src/bin/` is outside the capture registry, and nothing here launches
+a kernel of its own; no kernel and no solver numerics changed;
+`docs/schema/case-1.json` is the regenerated schema, never hand-edited.
+
+### 105.13 Turek-Hron on the card - the rig, the forces and the wobble
+
+The CFD benchmark of S. Turek and J. Hron, "Proposal for numerical
+benchmarking of fluid-structure interaction between an elastic object and
+laminar incompressible flow", LNCSE 53, Springer (2006) 371-385,
+DOI 10.1007/3-540-34596-5_15, sits on the card. The source of every number
+this section states is that paper. The geometry: a channel `L = 2.5` by
+`H = 0.41`; a cylinder of radius `0.05` centred at `(0.2, 0.2)`; a flap
+`[0.2, 0.6] x [0.19, 0.21]` rigidly fixed behind it, its wetted face the
+patch the forces are read on together with the cylinder's. The fluid:
+`rho = 1000`, `nu = 1e-3`. The tests: CFD1, CFD2 and CFD3, at a parabolic
+mean inflow `Ubar` of 0.2, 1 and 2 - Reynolds numbers 20, 100 and 200 on
+the cylinder diameter. The CFD tests take the flag as a RIGID object, so
+no structure is solved here: the flap is fixed geometry, and the only
+motion anywhere is the interior wobble defined below.
+
+The meshes come from `python tools/mesh/examples/turek_hron.py --level 1`
+to `--level 4` - gmsh, recombined, ONE cell deep, hex only. They land at
+`cases/turekHron/mesh`, `cases/turekHron/mesh_L2`,
+`cases/turekHron/mesh_L3` and `cases/turekHron/mesh_L4`, paths
+`.gitignore` covers: the meshes are regenerated by the recipe rather than
+kept, and nothing in the tree reads them but this module. `h_near` is
+0.005, 0.0025, 0.00125 and 0.000625 along the levels and each level has
+about four times the previous one's cells. The
+fluid region names eight patches - `empty_back`, `empty_front`,
+`wall_top`, `cylinder`, `wall_bottom`, `inlet`, `outlet`,
+`fluid_to_flap`. The rig reads `fluid/polyMesh` with `read_poly_mesh` and
+`build_host_mesh`, refuses any other patch set by name, and turns
+`cylinder` and `fluid_to_flap` into walls (the recipe writes them as plain
+`patch`), so both of §32.5.6's integrators take their rows there.
+
+The conditions. The inflow is the paper's parabola
+`u(0, y) = 1.5 Ubar y (H - y) / (H/2)^2`, evaluated at each inlet face
+centre. No-slip on the two channel walls, the cylinder and the flap. At the
+outlet `p = 0` and zero-gradient `U` - the paper's do-nothing condition.
+`empty` front and back. CFD3 starts through the paper's ramp
+`u(t, 0, y) = u(0, y) (1 - cos(pi t / 2)) / 2` for `t < 2`, and holds the
+full profile from `t = 2` on.
+
+The forces. Drag and lift are the force on `cylinder` and `fluid_to_flap`
+TOGETHER - the paper's S1 and S2 - per unit depth, `F / dz`, with `dz` the
+one-cell depth the rig measures. They come from §32.5.6's two integrators
+unchanged: `pressure_force` (the face pressure is the evaluated boundary
+value, the owner cell's on a zero-gradient wall) for the pressure part and
+`wall_shear`'s viscous form for the viscous part. On a rigid no-slip wall
+the traction of the full Newtonian stress is `-p n + mu dU_par/dn`: the
+normal viscous stress vanishes because `dU_par` is wall-parallel by
+construction, and the transpose term vanishes because `dU/dn` there has no
+normal component either, so the viscous form IS the paper's
+`mu (grad u + grad u^T) n` on these walls. There is no second face sum of
+`p Sf` and no second shear formula anywhere in the module.
+
+CFD1 and CFD2 are steady SIMPLE runs on all four levels: `alpha_U` 0.7
+against `alpha_p` 0.3 (§5.2's pairing), `linearUpwind`, corrected snGrad,
+one non-orthogonal corrector, PCG with DIC on the pressure. Each run is
+seeded with the inflow profile over the cells and the inlet faces. The
+stopping rule is checked every 100 iterations after the first 300: the run
+stops when its drag and lift have both moved less than `1e-7 |drag|`
+between consecutive checks. The budgets are 4,000, 8,000, 16,000 and
+40,000 iterations along the levels; a run that exhausts its budget is
+reported as such and never extended. Each level's typical size is
+`h = sqrt(A / N)` with `A` the fluid volume divided by its depth -
+§94.1's 2-D form - and the three FINEST levels - L4, L3 and L2 - go
+through `vv::grid_study`, finest first; L1 is run and printed beside
+them but is not in the study.
+
+The fourth level and the finest-three study are the user's decision of
+2026-09-24, after the three-level study measured below put CFD2's lift
+outside 2 % with its coarse level far outside the asymptotic range. The
+gate's definition, its 2 per cent on the extrapolated value, its stopping
+rule and its solver controls did not change: a finer level was added, and
+the study moved to the finest three.
+
+CFD3 is transient: `backward`, `dt = 0.001`, one outer corrector of two
+PISO passes with no non-orthogonal corrector, no relaxation, and the
+CONSERVATIVE convective form -
+§105.7's partner of the ALE time derivative, not the bounded one. A static
+run spins up to `t = 8` through the ramp; its flow state is copied to the
+host; then two continuations of 1,500 steps start from that one state,
+each on its own freshly uploaded mesh, and the first step of each runs
+without `begin_time_step` (§105.10, so `backward` takes its Euler row in
+both runs alike). The static continuation moves nothing. The moving one
+attaches the wobble below through `AleMesh::set_points` and
+`Simple::move_mesh` with an empty wall list - no wall moves. Each
+continuation's drag and lift are reduced over their last four lift
+periods: the upward crossings of the lift about its window mean,
+interpolated linearly between samples; per period the mean as
+`(max + min)/2` and the amplitude as `(max - min)/2`, with each extreme
+refined by the parabola through it and its two neighbours; the four
+periods averaged; the frequency four over the span of the four periods.
+
+The wobble is an analytic displacement field, not a smoother, and it is
+new code for a reason: with every patch `Fixed`, §105.9's smoother is fed
+only zero control displacements and no point moves at all, so
+`MeshMotion`'s rule table cannot express this case.
+
+```text
+d(x, t) = A s(x) sin(2 pi t / T) e
+s(x)    = sin^2(pi (x - x0)/(x1 - x0)) * sin^2(pi (y - y0)/(y1 - y0))
+          inside the box, exactly 0 on and outside it
+x0 = 0.7   x1 = 2.3   y0 = 0     y1 = H = 0.41
+A  = 0.004 T  = 0.3   e  = (1, 1, 0)/sqrt 2
+```
+
+Walls fixed means exactly this: the points of every non-`empty` patch are
+copied bitwise, and `Wobble::new` refuses a box whose shape is above
+`1e-12` at any of them, naming the patch. The points of the two `empty`
+planes move in their own plane - `e` has no z component - so the one-cell
+prism stays a prism. Every point of the body and of the cells touching it
+lies at `x <= 0.6 + h_near < x0 = 0.7`, so the forces are read on geometry
+the wobble never moves.
+
+### 105.14 Gate 105-C - the published steady forces and the wobbling wake
+
+The answer key is one `kind = literal` row, `turek-hron2006`, of
+`reference/PROVENANCE.md`, and the constants sit in `validate.rs` under
+their `// answer-key: turek-hron2006` marker. The numbers, as published:
+CFD1 drag 14.2929, lift 1.11905; CFD2 drag 136.700, lift 10.5343 - both at
+the authors' level 6+0. CFD3 at level 4+0, `dt = 0.005`: drag
+439.45 ± 5.6183 [4.3956 Hz], lift -11.893 ± 437.81 [4.3956 Hz]. The CFD3
+row is a band printed beside the gate, never a check of this run: the run
+takes one mesh, and the published value came from a finer one.
+
+The gate's 23 rows, by what each holds. Per case and level (two cases on
+four levels): the steady run met its stopping rule within its budget. Per case:
+both finest-three studies could be formed (§94.1 refuses ill-behaved
+triplets by name, and a refusal is reported, not worked around). Per case,
+for drag and for lift:
+`|phi_ext - published| / |published| <= 0.02` - the 2 per cent is on the
+EXTRAPOLATED value - `vv::grid_study`'s `phi_ext` (§94.1-§94.2: the
+Richardson estimate when the triplet converges monotonically, the
+least-squares fit otherwise) - never on a single level's number. CFD3, nine rows: no point of a
+non-`empty` patch moves (exactly 0); no point upstream of `x0 = 0.7` moves
+(exactly 0); the wake moved by at least half the amplitude; no cell lost a
+fifth of its volume; both runs reached the four lift periods they are
+reduced over; and `|moving - static| / |static| <= 0.005` for drag mean,
+drag amplitude, lift mean and lift amplitude - literally for all four,
+the lift mean included, although it is small against its amplitude. If it
+does not hold the row fails and the gate says so; the statistic is not
+redefined to make it hold.
+
+What a miss does. The comparison row fails in the tally AND the case
+registers a miss through §69's registry - `Verdict::Misses`, carrying its
+mesh study where there is one, `Uncertainty::SingleMesh` where the
+comparison is same-mesh, as CFD3's is. That is the Gate 94-D pattern: a
+miss reaches the summary by construction and is never tuned away.
+
+A missing mesh level is not a failure of the solver. The section checks
+for the four meshes before anything runs; where one is absent the gate
+reports `Verdict::Open` by name, skips its eight comparison rows by name,
+and prints the `python tools/mesh/examples/turek_hron.py --level N`
+command that generates what is missing - a checkout that has not run the
+recipe has not earned a verdict, and that is not the solver's fault.
+
+The measured numbers of this gate are recorded below by the supervisor who
+ran it on the card.
+
+The three-level measurement that led to the fourth level:
+
+Measured on 2026-09-23 on the RTX 5070 Ti, the three meshes of 6,188,
+25,145 and 98,220 cells, `ofgpu-validate` 936/937 with this gate's 21 rows:
+
+```text
+CFD1 drag  L1 14.1073  L2 14.1739  L3 14.2436   monotone diverging, no order;
+           the weighted first-order fit's phi_ext 14.2852   0.054 % from 14.2929
+CFD1 lift  L1 1.09241  L2 1.12040  L3 1.12663   monotone, p = 2.125,
+           phi_ext 1.12916, GCI_fine 2.12e-3              0.904 % from 1.11905
+CFD2 drag  L1 140.802  L2 137.286  L3 136.650   monotone, p = 2.425,
+           phi_ext 136.283, GCI_fine 1.38e-3              0.305 % from 136.700
+CFD2 lift  L1 6.79086  L2 10.5204  L3 10.8174   monotone, p = 3.601 (outside
+           the fits' range), the second-order fit's
+           phi_ext 11.3338                                7.590 % from 10.5343
+```
+
+CFD2's lift is a miss, registered as one: its coarse level (6.79) is far
+outside the asymptotic range an extrapolation assumes, and the fit through
+it lands 7.6 % high while the finest level alone is 2.687 % low. Nothing was
+tuned; a finer triplet, not a different fit, is what would move it. CFD1's
+drag triplet diverges slightly (its differences grow, 0.067 then 0.070), so
+§94.2 carries it on a fixed-exponent fit and reports no order. The steady
+runs met their stopping rule in 900, 2,700 and 8,500 iterations (CFD1) and
+800, 2,200 and 4,800 (CFD2), well inside their budgets.
+
+CFD3 on L1: static drag 468.043 ± 5.2653 and lift -44.584 ± 433.455 at
+4.3901 Hz; wobbling drag 468.042 ± 5.2642 and lift -44.568 ± 433.457 at the
+same frequency. The four relative differences are 1.9e-6 (drag mean),
+2.04e-4 (drag amplitude), 3.55e-4 (lift mean) and 4.6e-6 (lift amplitude),
+against 0.005. The moving mesh's smallest cell kept 0.978406 of its rest
+volume, the largest displacement was 3.974e-3, every wall and every point
+upstream of `x0` stayed at exactly zero displacement, and the worst
+continuity error was 3.878e-8 in both runs. Beside the published level-4+0
+band the static L1 run's drag mean is 6.5 % high, its lift amplitude 1.0 %
+low and its frequency 0.13 % low - one coarse mesh, a band and not a gate.
+The gate costs about 35 minutes of the card: each L3 steady run 460-570 s,
+the CFD3 spin-up 560-760 s, each continuation about two minutes.
+
+Measured on 2026-09-26 on the RTX 5070 Ti, the four meshes of 6,188,
+25,145, 98,220 and 398,407 cells, `ofgpu-validate` 1017/1024 with this
+gate's 23 rows all passing - the seven failing rows are Gate 95-A's four
+and Gate 95-G's three, none of them this gate's. The study takes L2, L3
+and L4:
+
+```text
+CFD1 drag  L1 14.1073  L2 14.1739  L3 14.2436  L4 14.2673   monotone,
+           p = 1.607, phi_ext 14.2786, GCI_fine 9.96e-4   0.100 % from 14.2929
+CFD1 lift  L1 1.09241  L2 1.12040  L3 1.12663  L4 1.11917   oscillatory
+           diverging, no order; the weighted first-order fit's
+           phi_ext 1.11979, U_fine 3.47e-2                0.066 % from 1.11905
+CFD2 drag  L1 140.802  L2 137.286  L3 136.650  L4 136.671   oscillatory,
+           no order; the second-order fit's phi_ext 136.556,
+           U_fine 0.318                                   0.105 % from 136.700
+CFD2 lift  L1 6.79086  L2 10.5204  L3 10.8174  L4 10.5319   oscillatory,
+           no order; the weighted first-order fit's
+           phi_ext 10.5782, U_fine 1.379                  0.417 % from 10.5343
+```
+
+CFD2's lift now holds, and the gate registers no verdict: the summary's
+list of missed gates holds six where it held seven. What moved it is the
+finer level, not a fit: every force, iteration count and residual of L1
+to L3 and of CFD3 is digit for digit the 2026-09-23 run's, and the finest
+level alone is 0.022 % from the published lift. Three of the four finest
+triplets oscillate, so §94.1 reports no observed order for them and §94.2
+carries each on a fixed-order fit with a safety factor of 3; the CFD2 lift
+band is wide - `U_fine` 1.379 is 13 % of the value - and it is printed
+beside the row, not folded into it. The L4 runs met their stopping rule in
+28,500 iterations (CFD1) and 15,200 (CFD2) of their 40,000. The card was
+shared with other programs for the whole run, so its wall clock is not the
+gate's cost: CFD1 L4 took 6,325 s, CFD2 L4 17,220 s, the L3 runs 4,163 s
+and 3,087 s against 567 s and 458 s on 2026-09-23, and the CFD3 spin-up
+3,208 s.
+
+### 105.15 What is not claimed, and the house items
+
+Not claimed here: the paper's FSI tests - the flag is rigid throughout, so
+no structural solver, no coupling and no elastic body is exercised; a flap
+that moves; a moving wall on a curved patch (the moving wall of §105.8 is
+untouched here, and the wobble's walls are all fixed); CFD3 on L2, L3 or
+L4 - CFD3 runs on one mesh and its 0.5 per cent is a same-mesh comparison
+between a static and a wobbling wake, not a discretisation estimate; a
+JSONC case or a driver that runs Turek-Hron - `cases/turekHron/*.jsonc`
+stay skeletons because the JSONC case format holds a blockgen box only and
+cannot carry a polyMesh; the wall pressure to better than the owner cell's
+value on a zero-gradient wall, which §32.5.6's first order is.
+
+House items. Two new files - `src/turek_hron.rs` and
+`src/turek_hron/tests.rs` - and the source-file count is 219. No capture
+row: the module launches no kernel of its own and declares none of the
+registry's iteration entry points; the steps it drives are `Simple`'s, and
+the step that captures is §105.10's. No kernel and no solver numerics
+changed. One answer-key row and marker, ten markers in the census. The
+gate census is 22 literals, 18 names. Twelve tests, two of them ignored
+because they need the generated L1 mesh; the other ten pass on any
+checkout with a card and no mesh at all. The fourth level added one test
+(the study takes the three finest of four levels) and no file; the gate
+census and the answer-key markers are unchanged.
+
+### 105.16 A driver's first step takes backward's Euler row - Gate 105-D
+
+The user's decision of 2026-09-24. `ofgpu-lowmach` and `ofgpu-buoyant`
+called `Simple::begin_time_step` before a transient run's FIRST step, so
+`TimeState::step` was 1 during it and `DdtScheme::Backward.coeffs` returned
+the BDF2 row of §13.3 over two equal old levels - a first-order start
+whenever `dU/dt(0)` is not zero (§105.12 measured it). Both drivers now open
+a time step with `begin_time_step` from the SECOND step on, the order
+§105.10's gate loops already use: during the first step the counter is 0
+and `backward` takes its Euler row, for the momentum derivative and, on a
+moving mesh, for `AleMesh::advance`, which reads the same state.
+In `ofgpu-lowmach`, `Simple::initialise` has already made `U`'s and `p`'s
+old level the starting field, so the rotation the first step no longer calls
+would have copied the same values. `ofgpu-buoyant` runs one bootstrap SIMPLE
+iteration after `initialise` - the pressure selector's - which moves `U` and
+`p` past those levels, so it makes that rotation once before its loop
+instead, with the driver's own field kernels and without the counter, and
+its first step differences against the post-bootstrap state as it always
+did. Under `Euler` the row does not depend on the counter, and a steady run
+still calls `begin_time_step` on every unit of work. Nothing else changed
+then: `ofgpu-lowmach` still called `Energy::advance_time_step` and
+`GasState::advance_time_levels` on every transient step (§105.17 has since
+moved both, with `T`'s own rotation, to the second step on), `ofgpu-plume`
+has no such call (its equations are Euler), and no library loop, kernel or
+solver control moved.
+
+Gate 105-D is `ofgpu-lowmach`'s test
+`gate_105d_backward_starts_from_the_euler_row_and_the_stroke_is_second_order`:
+§105.12's stroking-outlet case, static and on its sine law, under `Euler`
+and `backward`, at 20, 40 and 80 steps to `T = 0.25`, read through
+`RunEnd::ux_mean` - the arithmetic mean of the internal cells' `U_x` at the
+end of the run, because the written field carries six digits. Tolerances:
+every static error within `1e-5` of `0.75`; on the moving case the fine
+pair's observed order `p = log2(e_40 / e_80)` within `0.2` of 2 under
+`backward` and within `0.1` of 1 under `Euler`, and the 80-step `backward`
+error within `5e-6` of `stroke_exact()`. Measured on the card:
+
+| scheme   | case   | 20 steps | 40 steps | 80 steps | p coarse | p fine |
+|----------|--------|----------|----------|----------|----------|--------|
+| Euler    | static | +3.452e-6 | -1.175e-6 | -2.816e-7 |          |        |
+| backward | static | +3.996e-6 | -1.918e-6 | -4.396e-7 |          |        |
+| Euler    | moving | +1.076e-3 | +5.257e-4 | +2.614e-4 | 1.03     | 1.01   |
+| backward | moving | +6.452e-5 | +1.089e-5 | +2.447e-6 | 2.57     | 2.15   |
+
+Before the change, from the six-digit written fields of the HEAD binary
+(94095d9): `backward` static `-6.252e-3`, `-3.126e-3`, `-1.563e-3`, and
+`backward` moving `-6.179e-3`, `-3.104e-3`, `-1.556e-3` - order 0.99 and
+1.00, the start's `-dt dU/dt(0) / 2` swamping the scheme.
+
+The gate stops at 80 steps, not at §105.10's 320, because under `backward`
+this driver's stroke is refused by §93.6's Mach guard from 140 steps on -
+the static case at 140 steps on the HEAD binary already, the moving case at
+160 there and at 140 after this change - while `Euler` runs to 320. The
+start does not cause it and it is not diagnosed here (§105.17's rotation
+removed it: on that unit's binary both `backward` stroke cases run to 160
+and to 320 steps, `M max` at most `0.0022`). The static error is
+not zero under either scheme (a few `1e-6`, second order in `dt`): the
+two-corrector PIMPLE step's own splitting, not the time scheme, and it is
+what bends the moving case's coarse-pair order away from 2.
+
+Measured after this section was written, and changed by §105.17 on the
+user's decision of 2026-10-02: the energy equation's old levels were not
+only unrotated at `T^{n-2}` but one step stale under `Euler` as well,
+because `GasState::update_density` built `rho^{n-1}` from `T^{n-2}`. On
+§105.17's uniformly heated duct the HEAD binary wrote `3386.69 K` against
+the exact `385.127 K` at 20 `Euler` steps, and `backward` diverged. §105.17
+rotates `T` with `U` and `p`, makes the energy equation's `backward` row
+second order, and is gated by Gate 105-E. The stroke cases are isothermal,
+so Gate 105-D sees neither.
+
+What moved, the full list: §105.12's static `backward` numbers above, the
+moving `backward` numbers above, and the fields of any `backward` run of
+either driver from its first step on. `ofgpu-validate` does not move: none
+of its rows runs either driver, and its §105 loops are the library's, which
+already started from the Euler row.
+
+Measured on 2026-09-26, the HEAD binaries (94095d9) against this unit's on
+the same inputs, every written field file compared byte for byte.
+Identical: `ofgpu-lowmach` on the stroke case under `Euler` at 20, 40, 80,
+160 and 320 steps, static and moving (50 files), and on
+`cases/plume.jsonc` steady for 5 iterations and, switched to PIMPLE, under
+`Euler` for three steps of `0.01` s (14 files); `ofgpu-buoyant` on a copy
+of `cases/plumeB` steady for 5 iterations and, switched to PIMPLE, under
+`Euler` for three steps (14 files); `ofgpu-plume` on the same copies,
+steady, `Euler` and `backward` (15 files) - its executable is itself
+byte-identical. Moved, every `backward` run: `ofgpu-buoyant` on plumeB, max
+`|dU|` 1.727e-2 m/s against a max `|U|` of 1.924, `|dT|` 0.192 K, `|dp|`
+0.170; `ofgpu-lowmach` on the heated plume case, max `|dU|` 6.989e-2
+against 1.740, `|dT|` 0.151 K, `|dp|` 0.335; the stroke's `U` by the
+`1.56e-3` of the start, and its isothermal `T` in the sixth written digit
+(`1e-3` K). Every exit code is unchanged, the four `backward` stroke runs at
+160 and 320 steps that §93.6's guard refuses on both binaries included.
+Measuring the first Run of this unit is what found `ofgpu-buoyant`'s
+bootstrap: skipping the first step's rotation had moved all seven of its
+`Euler` files.
+
+House items. No new file; no capture row - `src/bin/` is outside the capture
+registry; no kernel changed. `ofgpu-lowmach` gains one test (47); the gate
+census of `ofgpu-validate` is unchanged, Gate 105-D being a driver test.
+
+### 105.17 The energy equation's time levels - Gate 105-E
+
+The user's decision of 2026-10-02. Before it, `ofgpu-lowmach`'s unit of
+work called `GasState::update_density` at its top, building `rho`,
+`rho^{n-1}` and `rho^{n-2}` from `T`, `T^{n-1}` and `T^{n-2}`, and only
+then did `Energy::correct` store `T`'s first old level. So `rho^{n-1}` was
+built from `T^{n-2}` while it multiplied `T^{n-1}` in §26's conservative
+`d(rho cp T)/dt`, and nothing rotated `T^{n-2}` at all. With
+`rho T = p0 / R_s` at every level the derivative's only information about
+`T` sat in that lag: on a uniformly heated open domain the `Euler` row
+became `(p0/R_s)(T^n/T^{n-1} - T^{n-1}/T^{n-2})/dt`, a second difference,
+and the error grew as `dt` shrank. Two changes, and nothing else:
+
+* `ofgpu-lowmach` opens a transient time step from the SECOND step on, and
+  opening one is four calls in this order, before the unit of work's
+  `update_density`: `Simple::begin_time_step`,
+  `Energy::advance_time_levels` (`T`'s `f00 <- f0 <- f`),
+  `Energy::advance_time_step` and `GasState::advance_time_levels`. The
+  first step opens nothing, so the energy equation's counter is 0 during
+  it and `backward` takes its Euler row, as §105.16 does for `U` and `p`;
+  `rho^{n-1}` is now built from `T^{n-1}`. A restart seeds `T`'s two old
+  levels from the restored field, because its first step is an Euler-row
+  step too. `Energy::correct` still stores `T`'s first old level on entry:
+  after the rotation that copy changes nothing in this driver, and every
+  other caller of `Energy` relies on it.
+* Under `backward` only, `Energy`'s time derivative is the
+  non-conservative `rho* cp ddt(T)`: all three `rho cp` levels
+  `fvm_ddt_rho` reads are `cp p0 / (R_s T*)`, with
+  `T* = 2 T^{n-1} - T^{n-2}` cell by cell and `p0` the current
+  thermodynamic pressure, the one `update_density` gives `rho`. The
+  conservative row cannot be made second order here by any rotation:
+  `rho^n` is `rho(T^{n-1})` after one outer corrector, and with it the
+  BDF2 row collapses to `(3/2)(p0/R_s)(T^n/T^{n-1} - 1)/dt`. `Euler` keeps
+  the conservative form, which after the rotation is
+  `rho^{n-1} cp (T^n - T^{n-1})/dt`, `rho` and `rho^{n-1}` being built
+  from the same `T`. A steady run, and every other caller of `Energy`,
+  runs the launches it ran before. `p0` is not extrapolated: §25.2's
+  sealed `p0` equation is explicit Euler, so a sealed transient's `T` is
+  not claimed second order.
+
+Gate 105-E is `ofgpu-lowmach`'s test
+`gate_105e_a_uniformly_heated_duct_is_first_order_under_euler_and_second_order_under_backward`:
+an open 16x1x1 duct, 1 x 0.1 x 0.1 m, a wall at `xmin`, an open outlet at
+`xmax`, symmetry sides, laminar, `T = 300 K` and `U = 0` at the start,
+`-heaterPower 3548` spread over the domain (`Q = 354 800 W/m3`), §25's
+default gas. `T` stays uniform in space, so each cell solves
+`rho cp dT/dt = Q` with `rho = p0 / (R_s T)`: `dT/dt = lambda T`,
+`lambda = Q R_s / (p0 cp) = 0.99916 1/s`, and the exact answer is
+`T = 300 exp(lambda t)`, `385.1265 K` at `t = 0.25`. Runs of 20, 40 and 80
+steps to `t = 0.25`, read through `RunEnd::t_mean`, the arithmetic mean of
+the internal cells' `T` at the end. Tolerances: every run within `1e-3 K`
+of a uniform-cell model of the discrete step (`384.531216`, `384.827534`,
+`384.976701` K under `Euler`; `385.072749`, `385.112940`, `385.123125` K
+under `backward`), and the fine pair's observed order `log2(e_40 / e_80)`
+within `0.1` of 1 under `Euler` and within `0.2` of 2 under `backward`.
+Measured on the card:
+
+| scheme   | 20 steps          | 40 steps          | 80 steps          | p coarse | p fine |
+|----------|-------------------|-------------------|-------------------|----------|--------|
+| Euler    | 384.531216 (-5.953311e-1) | 384.827534 (-2.990128e-1) | 384.976701 (-1.498458e-1) | 0.99     | 1.00   |
+| backward | 385.072749 (-5.379809e-2) | 385.112940 (-1.360700e-2) | 385.123125 (-3.421487e-3) | 1.98     | 1.99   |
+
+Each cell is `T` in K and, in brackets, its error against
+`300 exp(lambda t)`. Before the change, on the HEAD binary (08e10bb):
+`Euler` `3386.69`, `34209.5` and `3.48996e6 K`; `backward` `1.986e8 K` at
+20 steps, a non-finite pressure at outer iteration 38 of 40 (exit 2), and
+§93.6's Mach guard at step 36 of 80 (exit 3).
+
+House items. No new file, no kernel, no capture row - the `backward`
+density is existing `field_ops` launches on one new scratch buffer of
+`Energy`. `ofgpu-lowmach` gains one test (48), marked for f32 like Gate
+105-D, which moves §112.3's binary count from 14 to 15; the library's test
+count is unchanged.
+
+Measured on 2026-10-02, the HEAD binaries (08e10bb) against this unit's on
+the same inputs, every written field file compared byte for byte.
+Identical: `ofgpu-lowmach` on the stroke case moving under `Euler` at 20,
+40, 80, 160 and 320 steps (25 files) and moving under `backward` at 20 and
+40 (10 files); `cases/plume.jsonc` steady for 5 iterations (7 files);
+`ofgpu-buoyant` and `ofgpu-plume` on copies of `cases/plumeB`, steady,
+`Euler` and `backward` (36 files). On the static stroke under `Euler` (20
+to 320 steps) and under `backward` (20, 40) only `U`'s transverse
+components move, by at most `2.2e-34` m/s, and Gate 105-D's fourteen
+printed numbers are §105.16's table to the last digit. Moved, every
+transient run whose `T` changes: the heated duct as Gate 105-E reads it
+(its `U` only in the transverse `1e-34`: the target divergence
+`Q R_s / (p0 cp)` does not depend on `T`); `cases/plume.jsonc` switched to
+PIMPLE for three steps of `0.01` s, under `Euler` max `|dT|` 44.12 K
+against a max `T` of 406.6 K, `|dU|` 1.083e-2 against 1.742 m/s, `|dp|`
+1.022 against 8.809, and under `backward` `|dT|` 23.35 K against 381.0,
+`|dU|` 1.6e-3, `|dp|` 0.2267; the `backward` stroke at 80 steps in `T`'s
+sixth written digit (`1e-3` and `2e-3` K). The `backward` stroke at 160 and
+320 steps, static and moving, which §93.6's guard refused on the HEAD
+binary (static at step 140, moving at 134), now runs to the end. A sealed
+copy of the heated duct is refused by §93.6 at step 0 on both binaries
+(`M` about `1.4e12`, not diagnosed here); its `Euler` refusal is the same
+line, and its `backward` one now prints the `Euler` number, its first
+step being the Euler row. The restart gate of §31.2
+(`restart_matches_a_continuous_run_p0_included`, an `Euler` sealed box):
+first post-restart pressure residual `3.468646e-2` -> `3.299514e-2` in both
+runs, total-enthalpy gap `1.256e-6` -> `0`, `|U|` residual continuous
+`4.679e-2` -> `4.413e-2` and restarted `4.776e-2` -> `4.413e-2`.
+`ofgpu-validate`: its first 979 rows, every one through Gate 105-B, are
+byte-identical to 08e10bb's run, the five known failing rows of Gate 95-A
+and Gate 95-G among them and every row that builds an `Energy` or a
+`GasState` (§25's `p0`, §59's conjugate retarget, §77's vapour coupling).
+The other 47 (Gate 105-C, Gate 94-D, the §110 and §37 recorded rows, the
+registry's own) were not re-run - the run was stopped in Gate 105-C - and
+none of them builds an `Energy` or a `GasState`. The library suite is
+2138 passed and 11 ignored, as before.
+
+### 105.18 Why backward's stroke was refused from about step 130 - a diagnosis
+
+**What was refused.** Under `backward`, §105.12's stroke duct (static, and on its
+sine law) was refused by §93.6's Mach guard on the binary before §105.17 (08e10bb),
+at a STEP COUNT, not a time (the guard's own step numbers): static at step 140 of
+160 (`dt = 1.5625e-3`, `M` 3.771) and step 132 of 320 (`dt = 7.8125e-4`, `M` 0.318);
+moving at step 141 of 160 (`M` 2.890) and step 134 of 320 (`M` 0.926); 80 steps
+(`dt = 3.125e-3`) ran to the end. `Euler` ran every count to the end. The user's
+decision of 2026-09-27 made the work a diagnosis: no numerics change.
+
+**How it was measured.** The binaries of 08e10bb and 81ae68e (§105.17) on the same
+case files, the static case with an `output.restart` block writing an exact `f64`
+`.mcr` checkpoint every step (§44's series; a moving case refuses an output block,
+§105.12, so the moving runs were read from the `-check 1` lines, six digits). No
+code was added to measure it. The readout is `max |T - 293.15|` over the cells:
+the case is isothermal, inlet and initial `T` both 293.15 K, so any deviation is
+the scheme's.
+
+**Table 1**, the static stroke, `max |T - 293.15|` in K after the step named,
+08e10bb, `backward`:
+
+| steps (dt)      | step 20   | step 40  | step 60  | step 80  | step 100 | step 120 | end                 |
+|-----------------|-----------|----------|----------|----------|----------|----------|---------------------|
+| 80 (3.125e-3)   | 5.946e-11 | 1.919e-8 | 5.920e-6 | 1.818e-3 | -        | -        | 80 steps, exit 0    |
+| 160 (1.5625e-3) | 7.145e-11 | 1.444e-8 | 3.470e-6 | 8.867e-4 | 2.345e-1 | 7.599e1  | refused at step 140 |
+| 320 (7.8125e-4) | 1.833e-10 | 5.674e-8 | 1.754e-5 | 5.454e-3 | 1.705    | 1.186e3  | refused at step 132 |
+
+The growth per step fitted from step 20 to step 80 is 1.3328, 1.3129 and 1.3322 at
+the three `dt`, a factor of 4 apart in `dt`; the first step's deviation is
+`5.684e-14` K (one ulp of 293.15) or `1.137e-13` K.
+
+**Table 2**, the same readout at the end of the run, every case running to the end:
+
+| binary, scheme    | 80 steps  | 160 steps | 320 steps |
+|-------------------|-----------|-----------|-----------|
+| 08e10bb, Euler    | 2.463e-10 | 1.076e-9  | 1.152e-7  |
+| 81ae68e, Euler    | 1.990e-12 | 1.137e-12 | 5.798e-12 |
+| 81ae68e, backward | -         | 6.310e-12 | 8.470e-12 |
+
+On 81ae68e every one of the sixteen runs (static and moving, `Euler` and
+`backward`, 120, 140, 160 and 320 steps) ends with exit 0, `T` printed
+`[293.15, 293.15]` on its last line and `M max` at most `0.00218509`.
+
+**The cause.** Before §105.17, `rho` and `rho^{n-1}` were built from `T^{n-1}` and
+`T^{n-2}`, and `T^{n-2}` was never rotated (§105.17 states the defect). With
+`rho T = p0 / R_s` at every level, the conservative BDF2 row for an isothermal
+cell, linearised in `e_k = T^k / T_0 - 1`, is
+`(3/2)(e_n - e_{n-1}) - 2(e_{n-1} - e_{n-2}) = dt (spatial terms)`. Its
+characteristic polynomial `(3/2) z^2 - (7/2) z + 2` has the roots `4/3` and `1`,
+and `dt` multiplies only the spatial terms, so the root `4/3` stays as `dt` goes
+to 0: the recurrence breaks the root condition (it is not zero-stable), and
+round-off grows by `4/3` per STEP whatever `dt` is. That is the measured 1.31 to
+1.33. From one ulp, `(4/3)^n` reaches 1 K near step 106; measured, the deviation
+passes 1 K between steps 100 and 110 at `dt = 1.5625e-3` and between steps 80 and
+100 at `dt = 7.8125e-4`. Then `T` runs away (static, 160 steps: `T`
+max 977.8 K after step 126, 7790.9 K after step 130, `4.020e9` K after step 139),
+`rho` falls toward 0, `U` follows, and §93.6 reads a Mach number off fields that
+have already left the physical range. The `Euler` row of the same defect,
+`(e_n - e_{n-1}) - (e_{n-1} - e_{n-2})`, has the double root `1`: marginal, the
+slow growth of table 2's first row and no refusal within 320 steps. After
+§105.17, `backward`'s row `rho* cp (3/2 T^n - 2 T^{n-1} + 1/2 T^{n-2})` has the
+roots `1` and `1/3` and `Euler`'s the root `1`: both zero-stable, and table 2's
+last two rows stay at round-off.
+
+**What it rules out.**
+
+* A `dt`-dependent instability (CFL, stiffness): the growth per step is the same
+  at three `dt` a factor of 4 apart, and the refusal comes at a step count (140,
+  132), not a time (0.219 s, 0.103 s).
+* The PIMPLE outer loop and BDF2's coefficients on `U` and `p`: two pressure
+  correctors and one outer corrector every step; `Ux` follows the static case's
+  exact `0.5 + t` (at step 100 of 160, `Ux` in `[0.656249879, 0.656249997]`
+  against `0.65625`) and the printed `p` residual is `1.443e-11` at step 81,
+  until `T` has left round-off.
+* The moving mesh and the boundary treatment: the static case, which has no
+  motion block, fails the same way; the moving case's printed `T` max grows by
+  about 1.34 per step from step 80 (293.152 K) to step 100 (293.846 K).
+* A real Mach-number problem: `M max` was `0.00199946` at step 121 of the static
+  160-step run, with `T` max already 398 K.
+* The cause sits in the energy and density path, and §105.17 (81ae68e) removed it.
+
+**The regression test.** `ofgpu-lowmach`'s
+`the_backward_stroke_runs_past_its_old_mach_refusal_with_t_at_round_off` runs the
+stroke under `backward`, static and moving, at 160 and 320 steps to `t = 0.25`,
+and holds that each run ends with all its steps, `|RunEnd::t_mean - 293.15| <=
+1e-9` K and `RunEnd::ux_mean` within `1e-5` of 0.75 (static) or within `5e-6` of
+`stroke_exact()` (moving). On 08e10bb its runs were refused (table 1), so it
+fails there; Gate 105-D, which stops at 80 steps, could not see the defect.
+Measured on the card at 81ae68e plus this test (each line is `RunEnd::ux_mean`, its
+error against the exact `Ux`, `RunEnd::t_mean` and its deviation from 293.15 K):
+
+| case            | `Ux`               | error         | `T` deviation (K) |
+|-----------------|--------------------|---------------|-------------------|
+| static, 160     | 7.499999300811e-1  | -6.991887e-8  | +1.819e-12        |
+| static, 320     | 7.499999901968e-1  | -9.803237e-9  | +6.480e-12        |
+| moving, 160     | 7.224478490375e-1  | +6.105691e-7  | +0.000e0          |
+| moving, 320     | 7.224473935452e-1  | +1.550768e-7  | +6.253e-13        |
+
+The moving pair's observed order, `log2(6.105691e-7 / 1.550768e-7)`, is 1.98: the
+second order §105.16 measures at 40 and 80 steps holds at 160 and 320 too. That is a
+reading, not a bound: Gate 105-D still stops at 80 steps, and extending it is the
+user's decision.
+
+House items: no numerics change, no new file, no kernel, no capture row;
+`ofgpu-lowmach` gains one test (49), marked for f32 like Gate 105-D, which moves
+§112.3's binary count from 15 to 16. Not diagnosed here: a sealed copy of
+§105.17's heated duct is refused by §93.6 at step 0 (`M` about `1.4e12`) on both
+binaries.
+
+---
+
+## 110. The published fluid gates — channel DNS, backward-facing step, buoyant plume
+
+Section 10's validation table has promised three rows against published fluid data that no
+section of this file defined: the Moser–Kim–Mansour (1999) channel-DNS mean profiles, the
+Driver & Seegmiller (1985) reattachment length, and McCaffrey's (1979) buoyant-plume
+centreline correlations. This section defines them. Each is one gate of `ofgpu-validate` —
+**Gate 110-A**, **Gate 110-B**, **Gate 110-C** — built on the shape Gate 94-D gave the
+lid-driven cavity: the comparison runs against an answer-key file under `reference/`, the
+band is stated before any run is made against it, and every number a verdict is quoted
+with is a printed output of a named driver run. What none of the three gets that the
+cavity has is a key in the tree; §110.1 says why that is the design and not an omission.
+
+`No GPL-licensed source was consulted.`
+
+### 110.1 What the three gates are, and why each one replays a driver run
+
+**The three rows, and the fifth kind of correct.** §10's table names the channel, the step
+and the plume beside the cavity; all four are the fifth entry of §10's own list of what
+"correct" is allowed to mean here — published experimental or benchmark data, never the
+output of another CFD program. The cavity has run live on three meshes per Reynolds
+number since Gate 94-D. These three are recorded-run gates, for the reason below, and
+this subsection is the contract they share: key first, then the key's own consistency
+rows, then the band, then the verdict.
+
+**The key store.** Every number a gate of this section compares against lives in an
+answer-key file under `reference/`, named by a row of `reference/PROVENANCE.md` that
+carries its source, DOI or URL, licence and SHA-256. The loader
+(`validate_key::load_text`) reads a key back through that manifest and refuses by name a
+key whose file is absent or whose digest is not the manifest's; the gate then prints the
+digest line — `answer key <id>: reference/<file> sha256 <hex>` — beside its verdict, so
+the number the verdict stands on is the number the manifest vouches for. A key that is
+not in the tree is not a skip and never a quiet pass: the gate reports not closed, by
+name (§10's fifth kind, held honest through the registry of §69). **None of the three
+keys of this section is distributed with this tree** — the DNS files because their host
+states no redistribution terms, the other two by the same decision of 2026-09-20: they are transcriptions a user
+types from the fenced blocks of §110.3 and §110.4 — so on a clean clone every gate of
+this section reports not closed, with five `answer key <id> missing` lines between them.
+That is the designed behaviour, not a failure; §110.5's *Placing a key* says what a user
+who wants a gate closed writes where.
+
+**Why each gate replays a driver run.** A live multi-minute GPU run belongs in a driver
+invocation a human chooses to make, not in `cargo test` — the rule `ofgpu-validate`
+states beside its Launder-Sharma channel section, and these three obey it twice over, because each needs a
+converged steady state at three mesh levels before it has a number to compare. Each gate
+therefore splits in two: the RECIPE (§110.5), which a human runs in `ofgpu-lowmach`, and
+the VERDICT, which `ofgpu-validate` computes from the recorded outputs of that run
+against the key. A record whose slot is empty is reported as no driver run recorded yet;
+the verdict half never invents a number, and a run that diverged is recorded as exactly
+that — a finding, never a reason to change the case's numerics.
+
+**The verdict discipline.** Transcribed from §32.4 and §94.3, and binding on all three
+gates: every band statement names what it was evaluated at — the mesh level and the
+input the number was taken at; a weaker verdict is never reported as, summarised as, or
+promoted to a stronger one; a result that lands within the uncertainty of a band edge is
+reported UNDECIDED, not as inside it. Three meshes per gate, through §94's
+`grid_study`, with the datum's stated uncertainty `u_D` (`0` where the reference states
+none, and said so where it is `0`) and `u_input` measured rather than assumed (94.10).
+The kind of datum decides what an outside-band result IS: against a published
+measurement it is a miss; against a correlation it leaves the gate open, reported and
+never asserted as a pass it is not.
+
+### 110.2 Gate 110-A — the plane channel against Moser, Kim & Mansour (1999)
+
+**The datum.** Moser, Kim & Mansour, *Phys. Fluids* 11 (1999) 943, DOI
+`10.1063/1.869966` — DNS mean-velocity profiles of the plane channel at `Re_tau =
+178.12 / 392.24 / 587.19`, the headers' own values of the three `.means` files the
+hosting page `http://turbulence.oden.utexas.edu/MKM_1999.html` serves at `http://turbulence.oden.utexas.edu/data/MKM/chan<N>/profiles/chan<N>.means` (columns `y  y+  Umean
+dUmean/dy  Wmean  dWmean/dy  Pmean`; `Umean` normalised by `U_tau`, `y` by `h`; header
+`ny = 129 / 257 / 257`). The page states no licence or terms of use, so the files are
+read as data and are NOT distributed with this tree. Key ids `mkm99-chan180`,
+`mkm99-chan395`, `mkm99-chan590`, expected at `reference/mkm99/chan{180,395,590}.means`.
+
+**The case, and the force balance that fixes `u_tau`.** The periodic channel drives
+itself: in the steady state the body force balances the wall shear exactly, so the
+friction velocity is fixed by the case's own inputs and needs no wall measurement to
+define —
+
+```text
+u_tau = sqrt(g_x h),   Re_tau = u_tau h / nu,   so   g_x = (Re_tau nu / h)^2 / h
+h = 0.02 m (half the 0.04 m channel height, mesh.bounds), nu = 1.5e-5 m2/s (physics.fluid.nu)
+Re_tau = 178.12 -> g_x = 0.89231 m/s2 ;  392.24 -> 4.32709 ;  587.19 -> 9.69728
+```
+
+— the same balance `cases/channelPeriodicFluxLowRe.jsonc` closes to −0.000 % as run
+(§32.5.2). The three case files are that case's body with the body force of the balance
+above, 64 cells wall-normal, the thermostat deleted and the walls adiabatic: the DNS
+profiles are an isothermal-flow statistic, so `T` rides at `zeroGradient` and nothing
+heats the channel.
+
+**The functionals.**
+
+```text
+y+ = y u_tau / nu,   u+ = u_x / u_tau,   U_b+ = (1/h) integral_0^h u+ dy
+DNS side:  U_b+ by trapezoid over the key's own (y, Umean) rows, y in [0, 1] (already
+           scaled by h)
+our side:  the cell-volume-weighted mean of u+ over the wall-to-centre column the
+           sampler prints
+```
+
+**The bands, stated before any run.**
+
+```text
+B1  |U_b+_sim - U_b+_DNS| / U_b+_DNS <= 0.05    on the finest mesh, u_num from the
+    three-mesh study; undecided within u_val/D of the 5 % edge (S32.4)
+B2  max over DNS rows with 30 <= y+ <= Re_tau of |u+_sim(y+) - u+_DNS(y+)| <= 1.0 wall
+    unit, u+_sim linearly interpolated in y+ from the recorded finest-mesh column
+B3  our own sublayer: |u+ - y+|/y+ <= 0.02 on every recorded cell with y+ <= 4 - a
+    self-check against §15.2's resolved-sublayer law, not a verdict
+u_D = 0 - the DNS files state no uncertainty, and this section says so (§94.3)
+u_input = the relative disagreement between the wall shear the driver MEASURES and
+    g_x h, quoted beside the verdict, never folded into the band
+datum kind: published data - an outside-band result is a miss against a measurement
+```
+
+**The mesh study.** The level is the mean wall-normal spacing, `h_level = 2h / N_y`,
+`N_y = 32, 64, 128` (uniform ratio 2 with the case's two-sided wall grading kept);
+`value = U_b+`; finest first, as §94.1 requires.
+
+**Expected, stated in advance (UNVERIFIED).** §33.3's Launder-Sharma channel run
+reproduced `u+ = y+` below y+ 5 (worst deviation 0.8 % at y+ 4.4) and the log law
+within ~1 % at y+ 30–35 (`docs/07-lowmach-solver.md` §1.1) — on a far coarser mesh,
+without fully settling. B1 is expected inside at all three `Re_tau`; B2 is expected
+near its limit at `Re_tau = 178.12`, where the profile is shortest and the log region
+the interpolation must cross is least forgiving.
+
+### 110.3 Gate 110-B — the backward-facing step against Driver & Seegmiller (1985)
+
+**The datum.** Driver, D. M. and Seegmiller, H. L., "Features of a Reattaching Turbulent
+Shear Layer in Divergent Channel Flow," *AIAA Journal* 23 (2) (1985) 163–171, DOI
+`10.2514/3.8890`. The number the gate holds against is quoted from the NASA Turbulence
+Modeling Resource's 2D backward-facing-step validation page (a US Government work, read
+2026-09-18): **`x_r/H = 6.26 ± 0.10`**, `Re_H` approximately 36 000 on the step height,
+`M = 0.128`, inflow boundary layer approximately 1.5`H`, `Re_theta = 5 000`; and on the
+same resource's SST results page, "Reattachment is predicted by the SSTm model near
+`x/H = 6.50`".
+
+**The geometry, UNVERIFIED against the paper.** The upstream channel height is taken as
+**8H** and the downstream one as **9H** (expansion ratio 1.125), the step height as
+**H = 1.27 cm** and the reference velocity as **U_ref = 44.2 m/s** — assumed, not
+confirmed; the TMR page confirms only the quantities quoted above, and this section
+says so rather than lending them the page's authority. It costs the gate nothing in
+kind: the run is incompressible at `U_ref = 10`, `H = 1`, `nu = 2.7778e-4` —
+`Re_H = U_ref H / nu = 36 000` — so the datum's `x_r/H` is compared against the same
+non-dimensional number the experiment reports, and the physical centimetres never
+enter.
+
+**The castellated step, and why it has no cut cells.** §40.7 records why this gate was
+NOT run here: `blockgen` builds one rectangular block, and its `CaseKind::Step` is
+documented in its own source as the outlet box, not a step. §110.3 runs the geometry by
+carving: `cases/backstep.stl` is one closed box lying over the upstream half of the
+domain — floor at `y = 1H`, step face at `x = 0` — and `ofgpu-generate-mesh -- step ...
+-stl step=backstep.stl` removes every cell whose CENTRE the box contains and skins the
+exposed faces as wall patches: §23.4's castellation, the same path the race-car sample
+takes. No cut cells are used and none are needed. The box edges are cell-aligned by
+construction at every level of the sequence (the step lands on whole cell columns), so
+the stair-step IS the geometry and there is no small-cell merge to argue with; the
+reattachment search runs on the lower wall's own cells, from the corner eddy's
+circulation to the far field.
+
+**The measurement, and the inputs stated beside it.**
+
+```text
+datum   x_r/H = 6.26 +- 0.10     ->  D = 6.26,  u_D = 0.10
+x_r     = the largest x on the patch lowerWall at which the owner-cell u_x changes
+          sign from negative (upstream) to positive (downstream), linearly
+          interpolated between the two face centres; the corner eddy's earlier
+          sign change near x < 1H is not it, and the LARGEST is what the gate takes
+verdict band = the datum's own +-0.10: |x_r/H - 6.26| <= 0.10 inside; within u_num
+          of that edge undecided (S32.4); else a miss against the measurement
+u_input = the inflow boundary layer: delta_99/H at x = -4H, measured from the run's
+          own column and printed beside the datum's "approximately 1.5H". A mismatch
+          is an INPUT DIFFERENCE - reported, never folded into the band (S32.4)
+Re_H = U_ref H / nu = 36 000 ; M = 0.128 in the experiment, incompressible here
+study level = the streamwise spacing dx: 0.2H, 0.1H, 0.05H, with dy = dx/2,
+          value = x_r/H
+```
+
+**Prediction, stated in advance.** The TMR's SSTm reattaches near `x/H = 6.50`; this
+crate's `kOmegaSST` is expected near there too, which is OUTSIDE the datum's ±0.10 on
+the high side — the gate is stated expecting its first recorded verdict to be a miss,
+and the record says so either way.
+
+**The key, verbatim.** A user who wants this gate closed writes these bytes to
+`reference/driver_seegmiller_1985/reattachment.txt`:
+
+```text
+# Driver, D. M. and Seegmiller, H. L., "Features of a Reattaching Turbulent Shear Layer in Divergent
+# Channel Flow", AIAA Journal 23 (2) (1985) 163-171. DOI 10.2514/3.8890.
+# Datum quoted from the NASA Turbulence Modeling Resource, 2D Backward Facing Step validation page
+# (https://tmbwg.github.io/turbmodels/backstep_val.html, read 2026-09-18), a US Government work:
+# "x/Hreattach = 6.26 +- 0.10"; Re_H approximately 36,000; M = 0.128; inflow boundary layer ~1.5H.
+# key value uncertainty
+x_r_over_H 6.26 0.10
+```
+
+### 110.4 Gate 110-C — the buoyant plume against McCaffrey (1979)
+
+**The datum.** B. J. McCaffrey, *Purely Buoyant Diffusion Flames: Some Experimental
+Results*, **NBSIR 79-1910**, National Bureau of Standards, 1979 — US Government work,
+public domain. (§10's and §22's plume rows carried a wrong report identifier — a
+technical-note number, not this report — until this section landed; both now read
+NBSIR 79-1910.) Table 1's weighted
+averages, in the three regimes of `z/Q^(2/5)`, are the correlation the gate holds
+against. **The constants below are a transcription of the 2026-09-18 reading of the
+report (archive.org item `purelybuoyantdif7919mcca`) and have NOT been re-confirmed
+against the report's Table 1 by the section that now gates on them.** What stands
+between that transcription and a silently wrong gate is the key's own four continuity
+checks: the report's regime boundaries ARE the intersections of its fits, so a
+mistyped constant fails them at the 1–3 % level.
+
+**The case, and the declared heat release rate.** The inlet is a HOT-GAS INLET, NOT A
+FLAME — the case header says so and so does the recipe. All of `Q` enters as enthalpy,
+nothing radiates, and `Q` itself is declared, not measured:
+
+```text
+Q = rho_in U_in A_in cp (T_in - T_inf),   rho_in = p0 / (R_s T_in)
+p0 = 101325 Pa, R_s = 287.05 J/(kg K), cp = 1006 J/(kg K), T_in = 1173.15 K,
+T_inf = 293.15 K, A_in = 0.30 m x 0.30 m = 0.09 m2 (the report's burner:
+"a 0.30 m square porous refractory burner")
+-> rho_in = 0.30089 kg/m3 ; Q per (m/s) of U_in = 23 973 W ; Q = 57.5 kW <=> U_in = 2.3985 m/s
+```
+
+57.5 kW is the largest of the five fires the report ran — 14.4, 21.7, 33.0, 44.9,
+57.5 kW. `cases/plumeMcCaffrey.jsonc` is `cases/plume.jsonc`'s body re-bounded to a
+3.3 m x 3.3 m x 4 m box, the burner a 0.3 m square window of whole cells in the floor,
+and the top boundary the open one. The bounds sit at ±1.65 m, not ±1.5 m, for a reason
+the header repeats: with ±1.5 m and 30 cells the coarse mesh's cell centres would fall
+exactly on the burner edge ±0.15 m, making the inlet area — and therefore `Q` — depend
+on rounding; at ±1.65 m the burner is 3 x 3, 6 x 6 and 12 x 12 whole cells at the three
+levels, 0.09 m2 each, and no centre lies within 0.0125 m of the edge.
+
+**The correlation.**
+
+```text
+flame region        (z/Q^(2/5) <= 0.0796 m kW^(-2/5)):   V / z^(1/2) = 6.84 m^(1/2) s^-1 ;   dT = 797 C
+intermittent region (0.0796 < z/Q^(2/5) <= 0.195):        V / Q^(1/5) = 1.93 m s^-1 kW^(-1/5) ;
+                                                          dT z / Q^(2/5) = 62.9 C m kW^(-2/5)
+plume region        (z/Q^(2/5) > 0.195):                  V z^(1/3) / Q^(1/3) = 1.12 m^(4/3) s^-1 kW^(-1/3) ;
+                                                          dT z^(5/3) / Q^(2/3) = 21.6 C m^(5/3) kW^(-2/3)
+and throughout:     V / sqrt(2 g z dT / T0) ~ 0.9   (0.935 in the table)
+so in the plume region:   dT_c(z) = 21.6 Q^(2/3) z^(-5/3),   w_c(z) = 1.12 Q^(1/3) z^(-1/3),
+                          Q in kW, z in m;   at Q = 57.5 kW, Q^(2/5) = 5.0567 and the
+                          plume region begins at z = 0.986 m
+```
+
+**What is predicted, and what is expected to miss.**
+
+```text
+stations  z = 1.25, 1.50, 1.75, 2.00, 2.25, 2.50 m
+          (z/Q^(2/5) = 0.247 ... 0.494, all in the plume region)
+P1  dT_c,sim(z) / dT_c,McC(z; Q) - 1  within +-0.15 at every station
+P2  w_c,sim(z)  / w_c,McC(z; Q)  - 1  within +-0.15 at every station
+P3  the least-squares slope of ln dT_c,sim against ln z over the six stations
+    within -5/3 +- 0.25
+P4  (a number, not a verdict) the implied convective fraction
+    chi_c = mean over stations of (dT_c,McC(z; Q) / dT_c,sim(z))^(3/2)
+u_D = 0 (Table 1 states no uncertainty on the averages; said so); the datum is a
+    CORRELATION - an outside-band P1/P2 leaves the gate open, reported and never
+    asserted as a pass it is not
+study functional: dT_c at z = 2.00 m; level = the cell size, 0.10 / 0.05 / 0.025 m
+```
+
+**The expectation, stated before the run, with its source.** McCaffrey's flames are
+real fires, and radiative loss is 20–40 % of `Q` — the paragraph that planned this
+gate (`docs/09-thermal-structural-plan.md`, its plume gate, which that document numbers
+Gate 101-C in its own pre-renumbering scheme) says a non-radiating solver is expected to sit high,
+and the arithmetic is: `dT` high by `(1/(1-chi_r))^(2/3)` = +16 % to +41 % over the
+radiative range, `w` high by `(1/(1-chi_r))^(1/3)` = +8 % to +19 %. P1 and P2 are
+therefore expected OUTSIDE their bands, and that miss is the measurement the gate
+exists to take — it is what would make the case for participating media if that is
+ever built. P3, the decay EXPONENT, is the part a non-radiating solver can close:
+radiation is a sink, not a reshaper of `z`. P4 is printed beside the sentence above —
+the convective fraction the run implies — and asserted as nothing.
+
+**Where the sampled column actually is.** On the two finer meshes no cell centre sits
+on `x = y = 0`; the column the sampler takes is the NEAREST one, `dx/2` off the axis
+in both coordinates, and every number P1–P4 is quoted with that offset standing.
+
+**The key, verbatim.** A user who wants this gate closed writes these bytes to
+`reference/mccaffrey_1979/centreline_table1.txt`:
+
+```text
+# McCaffrey, B. J., "Purely Buoyant Diffusion Flames: Some Experimental Results", NBSIR 79-1910,
+# National Bureau of Standards, 1979. US Government work, public domain. Table 1, weighted averages.
+# z = vertical height above burner [m]; Q = nominal heat release rate [kW]; V centreline velocity [m/s];
+# dT centreline temperature rise above ambient [C]. Regime boundaries in z/Q^(2/5) [m kW^(-2/5)].
+# key value
+boundary_flame_intermittent 0.0796
+boundary_intermittent_plume 0.195
+flame_V_over_sqrt_z 6.84
+flame_dT 797
+intermittent_V_over_Q15 1.93
+intermittent_dT_z_over_Q25 62.9
+plume_V_z13_over_Q13 1.12
+plume_dT_z53_over_Q23 21.6
+buoyancy_constant 0.935
+```
+
+### 110.5 The recipe, and the record
+
+**The channel.** `cases/channelDns{180,395,590}.jsonc` at `ofgpu-lowmach`, 40 000
+iterations, `-check 5000`. The mesh sequence `N_y = 32 / 64 / 128` runs on scratch
+copies of each file with ONLY `cells` edited — the shipped file is the 64 level — and
+`ofgpu-sample column cases/channelDns<N>.jsonc 40000 y 0.045 0.02 -mean` takes the column (a steady run writes its final state to the directory named by its iteration count, §44.9).
+The sampler's x is 0.045 m, not the 0.04 m mid-plane: 0.04 is a tie between two
+cell-centre columns, and although the sampler's nearest rule breaks ties toward the
+lower index deterministically, the recipe never asks it to.
+
+**The step.** From `cases/`: `backstep.cmd backstep_c 700 90`, `backstep_m 1400 180`,
+`backstep_f 2800 360` — dx = 0.2H / 0.1H / 0.05H, dy = dx/2, the study's three levels.
+The recipe generates the castellated mesh from `backstep.stl`, swaps `kEpsilon` for
+`kOmegaSST` and the `Re_H = 36 000` viscosity (the recipe, not the code, is where that
+is decided), runs `ofgpu-lowmach` 6 000 iterations, and prints the two measurements the
+record needs: the reattachment search (`ofgpu-sample wall <case> 6000 lowerWall x`) and
+the inflow column (`ofgpu-sample column <case> 6000 y -4 0.5 -at 0.5,1,1.5,2,2.5,3,4,5`),
+whose delta_99 is the input difference §110.3 reports beside the band.
+
+**The plume.** `cases/plumeMcCaffrey.jsonc` at `ofgpu-lowmach`, 4 000 iterations,
+`-check 500`. The sequence `cells [33,33,40] / [66,66,80] / [132,132,160]` — 0.10 /
+0.05 / 0.025 m — runs on scratch copies with only `cells` edited (the shipped file is
+the 66 level), and `ofgpu-sample column cases/plumeMcCaffrey.jsonc 4000 z 0 0 -at
+1.25,1.5,1.75,2.0,2.25,2.5` takes the six stations.
+
+**Placing a key.** None of the three keys is distributed — the user decided on
+2026-09-20 that the DNS files are not tracked (their host states no terms), and the
+other two are transcriptions this document prints instead. To close a gate locally, a
+user writes the key file under `reference/` at the path the gate names — the MKM files
+from the URLs of §110.2, the other two exactly as the fenced blocks of §110.3 and
+§110.4 print them — adds its row to `reference/PROVENANCE.md` in that table's shape
+with the `sha256sum` digest, and adds an `// answer-key: <id>` marker at the
+`key::load_text` call in `validate.rs`. The manifest test holds rows and markers
+against each other in both directions and asserts their number (nine today), so a key
+exists to the code exactly when the manifest and a call site both name it — which is
+what keeps a key nobody can vouch for from reaching a verdict. The gate then loads the
+key, prints its digest line beside the verdict, and runs the key's own consistency
+rows; the recorded runs are still this subsection's to make.
+
+**Results.** Every cell below is filled by the run that produced it; until then none
+has been made, and no verdict in this table is a claim.
+
+| gate | datum | finest-mesh value | study | verdict |
+|---|---|---|---|---|
+| Gate 110-A Re_tau 178.12 | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-A Re_tau 392.24 | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-A Re_tau 587.19 | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-B reattachment | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-C plume centreline | not yet run | not yet run | not yet run | not yet run |
+
+---
+
+## 111. Device memory — what a cell costs, what the card holds, and the cliff that was a reading
+
+`docs/11` §B.1 recorded, from four runs on 2026-09-14, that between 4,720,000 and
+4,800,000 cells the k-ε benchmark's device footprint stepped from 498 to 1870 bytes per
+cell, and it read the step as the stream-ordered memory pool asking the driver for
+~6 GB that no source line requests. This section is the diagnosis that plan asked for.
+The step is not an allocation. It is the whole-card free-memory reading changing what
+it counts while a second process holds memory on the same card, and every per-cell
+figure this crate prints now comes from a reading that cannot do that. No allocation,
+kernel, scheme or solver control changed; a case writes byte-identical fields before
+and after.
+
+`No GPL-licensed source was consulted.` The sources are this tree's own code, the CUDA
+driver API's documented stream-ordered allocator entry points (`cuDeviceGetMemPool`,
+`cuMemPoolGetAttribute`), and the measurements below.
+
+### 111.1 The diagnosis — what was measured, and what it rules out
+
+Every run below is `ofgpu-bench <nx> <ny> <nz> -model kEpsilon` on the machine of record
+(one RTX 5070 Ti, 16,303 MiB, driver 596.49, f64), taken 2026-09-23 and 2026-09-24 at
+HEAD `af8f7fd`. "Card" is `mem_get_info`'s whole-device figure, `total - free`, which is
+what `ofgpu-bench` printed until this section; "pool" is this process's own pool, §111.2.
+B/cell is the k-ε model's step over the mesh-only reading, divided by the cell count.
+
+**Idle card** (only the desktop resident, 1.3–2.6 GB):
+
+| cells | card, mesh only (MiB) | card, after k-ε (MiB) | card B/cell | ms/iter |
+|---|---|---|---|---|
+| 4,720,000 | 4,113 | 6,357 | 499 | 36.2 |
+| 4,800,000 | 4,145 | 6,453 | 504 | 36.8 |
+| 6,000,000 | 4,881 | 7,733 | 498 | 46.3 |
+| 8,000,000 | 6,065 | 9,845 | 495 | 66.8 |
+| 10,000,000 | 7,249 | 13,109 | 614 | 76.0 |
+| 12,000,000 | 8,433 | 15,162 | 588 | 90.9 |
+| 13,000,000 | 9,009 | 15,668 | 537 | 98.8 |
+
+There is no step at 4.72–4.80 M on an idle card, and throughput holds at 120–132 Mcell
+iterations per second up to 13 M cells. The 10 M row was taken three times: the card
+reading after k-ε came out 13,109, 13,330 and 11,989 MiB, while the pool reading of the
+third run was 5,958 MiB after the mesh and 10,703 MiB after the model — 497.5 B/cell,
+the same as every other size. The whole-card figure moved by 1.3 GB between runs of an
+identical allocation sequence because the other processes on the card moved.
+
+**A second process on the card.** A second `ofgpu-bench 400 250 68` (6.8 M cells, 7,297
+MiB in its own pool, 99 % SM) held the card while the probe ran, which is the condition
+of 2026-09-14 (a second CUDA process held ~7.1 GB then):
+
+| cells | card, mesh only | card, after k-ε | card B/cell | pool, mesh only | pool, after k-ε | pool B/cell | ms/iter |
+|---|---|---|---|---|---|---|---|
+| 4,720,000 | 4,113 | 12,161 | **1,788** | 2,825 | 5,081 | 501 | 92.5 |
+| 4,800,000 | 4,145 | 12,346 | **1,792** | 2,874 | 5,169 | 501 | 94.4 |
+| 6,000,000 | 9,223 | 14,876 | 988 | 3,585 | 6,446 | 500 | 387.8 |
+
+The 2026-09-14 figure (1,870–1,924 B/cell) reproduces in the card column, and in the
+same runs the pool column is 500–501 B/cell. The mesh-only card reading of the 4.72 M
+row (4,113 MiB) is the idle one although `nvidia-smi` reported 8,847 MiB in use before
+the probe started: under the Windows display driver the whole-device reading does not
+count the other process until something forces it to, and then it counts all of it. The
+step is that switch. Where it falls and how much of the neighbour it adds are
+properties of the neighbour: an earlier pair of runs, with the neighbour holding 8.2 GB,
+read 984 and 998 B/cell at the same two sizes, the mesh-only reading already counting it.
+
+**What it rules out.** The pool's release threshold (`CU_MEMPOOL_ATTR_RELEASE_THRESHOLD`)
+is 0, the driver default, and in every run above the pool's reserved bytes exceeded its
+used bytes by at most 31 MiB: the pool does not hoard. A trace of every allocation
+(§111.2's `OFGPU_MEM_TRACE`) at 8 M and 10 M cells requested 8,574.7 and 10,703.1 MiB
+in 129 allocations each, and at 10 M the pool's used bytes (10,703 MiB) matched the
+requested sum to the MiB; no allocation in the k-ε constructor is larger than the per-cell arithmetic says.
+
+**What is real.** Throughput under contention. With the neighbour resident, 4.72 M cells
+ran 2.6× slower (92.5 against 36.2 ms/iter), which is two processes sharing the SMs.
+6 M cells ran 8.4× slower (387.8 against 46.3), because the two pools plus the desktop
+then exceed the card's 16 GB and the display driver pages device memory to the host
+rather than refusing the allocation. That is the "8 M cells thrashes" of `docs/11`, and
+it is a limit of the card's occupancy, not of this code. It cannot be predicted from
+inside the process, because the one reading that could — the card's free memory — is the
+reading that does not see the neighbour.
+
+### 111.2 The reading that counts only this process
+
+`Gpu::pool_usage()` (`src/device.rs`) returns `PoolUsage { used, reserved, used_high,
+release_threshold }` from the device's current memory pool — the pool every
+`Gpu::zeros` and `Gpu::upload` draws from, since `cudarc` allocates with
+`cuMemAllocAsync`. `used` is the bytes handed to live buffers of this process and no
+other; it is what every per-cell figure is now computed from. It excludes the CUDA
+context, the loaded kernel modules and any library that allocates outside the pool, so
+it is a lower bound on the process's residency and an exact count of what the solver
+asked for. It is a host query and is refused during a capture, like `mem_info` (§81.3).
+
+`ofgpu-bench` prints both readings on each memory line, the pool one first and named as
+this process's; `ofgpu-lowmach`'s device-memory line keeps its whole-card difference and
+adds the pool's peak. `resident_mib` (`src/bin/common/mod.rs`) is documented as the
+whole-card figure it is.
+
+Setting `OFGPU_MEM_TRACE` in the environment makes `Gpu::zeros` and `Gpu::upload`
+synchronise the stream after each allocation and print one line to stderr naming the
+calling source line, the bytes requested, the pool's used bytes and the card's free
+bytes. The synchronise is what makes the trace attributable: without it the card
+reading lags the queued work and charges an allocation to a later line. Unset, which is
+the default, the only cost is one read of an initialised flag per allocation.
+
+### 111.3 The memory model, and the test that holds it
+
+On a hex block, the `ofgpu-bench` k-ε case costs, in bytes of this process's pool:
+
+* mesh and frozen flow: **622.2 B/cell**,
+* the k-ε model (constructor and `init`): **494.3 B/cell**,
+* together: **1116.5 B/cell**, plus a fixed **64 MiB** (measured 55 MiB, rounded up).
+
+The two slopes are the pool readings of the 4.72 M and 10 M rows above, differenced;
+the 4.80 M and 10 M rows (one 400 × 250 cross-section) give 621.9 and 494.0, and the
+4.72 M and 6.8 M rows 622.6 and 494.5. The constructor arithmetic of the k-ε footprint — nine per-cell field arrays,
+the gradient, the matrix, the solver workspace and four face arrays at 2.97 internal
+faces per cell — comes to about 491 B/cell, within 1 % of the measured model slope.
+
+Checked after the change, on an idle card: `ofgpu-bench`'s model line predicted 5,090,
+5,175, 10,712 and 13,906 MiB at 4.72, 4.80, 10 and 13 M cells, and the pool read 5,081,
+5,169, 10,703 and 13,895 MiB after k-ε — within 0.2 % at every size, 13 M included. A
+400-cell `ofgpu-lowmach` case (`cases/channelPeriodicFluxLowRe.jsonc`, 50 iterations)
+wrote byte-identical fields before and after.
+
+`the_kepsilon_case_costs_linear_bytes_per_cell` (`src/bin/bench.rs`) builds the same
+case at 400 × 250 × 2, × 4 and × 6 (200,000 to 600,000 cells), reads the pool after the
+mesh and after the model at each size, and asserts that the two successive slopes of
+each agree within 1 % — bytes per cell are linear — and that each is within 2 % of the
+constant above. It refuses by name when the card reports less than 2 GiB free, rather
+than measure a card that is paging.
+
+### 111.4 Cells that fit in N GiB
+
+Cells of the k-ε benchmark case that fit in N GiB of pool memory, from §111.3's model
+(`fits_in` in `src/bin/bench.rs`, the fixed 64 MiB taken off first):
+
+| pool memory | cells |
+|---|---|
+| 2 GiB | 1.86 M cells |
+| 4 GiB | 3.79 M cells |
+| 6 GiB | 5.71 M cells |
+| 8 GiB | 7.63 M cells |
+| 10 GiB | 9.56 M cells |
+| 12 GiB | 11.48 M cells |
+| 14 GiB | 13.40 M cells |
+| 16 GiB | 15.33 M cells |
+
+`the_fit_table_in_spec_lit_is_the_one_the_model_computes` rebuilds every row of this
+table from the constants in the code and fails if any row, or any of the four constants
+of §111.3, is missing from this file: the table cannot drift from the model.
+
+The pool is not the whole card. On the machine of record with only the desktop resident,
+about 1.26 GiB sits outside it — the desktop, the CUDA context and the modules; the 10 M
+row read 7,249 MiB on the card against 5,958 in the pool — so the 16,302 MiB card leaves
+about 14.66 GiB for the pool, 14.04 M cells by the model. 13,000,000 cells ran there at
+98.8 ms/iter with the card at 15,668 of 16,302 MiB. `docs/11` put the real ceiling at
+6.0–6.5 M; that was the ceiling beside a 7 GB neighbour, and the idle ceiling — 13 M
+measured, 14.04 M modelled — is 2.0–2.3 times it.
+
+### 111.5 What this does not cover
+
+The model is the `ofgpu-bench` k-ε case on a hex block. Another model, a polyhedral mesh
+with a different face count per cell, or a driver that adds its own fields costs a
+different number per cell; §111.2's reading measures any of them, and the table speaks
+for this one. The table is in pool memory: what the card leaves for the pool depends on
+everything else resident on it, which only the card's owner controls.
+
+---
+
+## 112. Single precision — the f32 build, its floors, and what it holds
+
+The crate has carried a `single` feature since the first port (`Cargo.toml`): it makes
+`Scalar` an `f32` on the host (`src/lib.rs`) and `ofscalar` a `float` on the device
+(`cuda/ofgpu_device.cuh`), and `build.rs` passes `-DOFGPU_SINGLE` to every kernel unit
+so the two agree, which `types::tests::layout_matches_device` pins. Nothing had ever
+built it. §67.11 recorded in passing that it did not compile, and `docs/11` §B.6 found
+the defect nothing could catch while it did not: a floor written `1e-300` is `0` in
+`float`. This section makes the build compile, gives every such floor a value that
+means the same thing in both precisions, and publishes what changes at f32. The f64
+build is bitwise what it was: every edit made for f32 is either inside an
+`OFGPU_SINGLE` / `feature = "single"` arm or a cast that is the identity in f64.
+
+`No GPL-licensed source was consulted.` The sources are this tree's own code, the IEEE
+754 binary32 and binary64 formats (their smallest normal numbers, 2^-126 and 2^-1022,
+and their largest finite ones), and the measurements below.
+
+### 112.1 The floors — one value per precision, the same distance from the bottom
+
+A floor such as `max(x, 1e-300)` exists to keep a logarithm, a square root or a
+division finite on a degenerate input without touching any physical value. `1e-300`
+does that in f64 because it is about 10^8 above the smallest normal double
+(2.2e-308) and hundreds of decades below any physical quantity. In f32 the same
+literal is below even the smallest subnormal float (1.4e-45) and rounds to `0`, with
+no diagnostic from nvcc or rustc: the floor vanishes and `log(0)`, `1/0` and `0/0`
+come back. The opposite literal, `1e300`, is out of range in f32; rustc refuses it
+as a compile error (`overflowing_literals`), and in CUDA C++ converting it to `float` is
+undefined.
+
+The rule, which `cuda/solver.cu`'s `OFGPU_TINY` (`1e-30f` / `1e-290`),
+`cuda/meshgeom.cu`'s `OFGEOM_MIN_POSITIVE` and `cuda/gmtrans.cu`'s `OFGM_MIN_POSITIVE`
+already followed: **each precision gets its own floor, the same distance above its
+own smallest normal.** f32's smallest normal is 1.18e-38, so the f32 floor is `1e-30`
+and the matching large value is `1e30`. The f64 arm keeps the literal it had, byte
+for byte.
+
+| where | what it floors | f64 (unchanged) | f32 |
+|---|---|---|---|
+| `SCALAR_FLOOR` in `src/lib.rs` | every host floor that was a `Scalar`-typed `1e-300` | `1e-300` | `1e-30` |
+| `SCALAR_HUGE` in `src/lib.rs` | every host `Scalar`-typed `1e300` | `1e300` | `1e30` |
+| `OFGPU_LES_TINY`, `cuda/les.cu` | the Deardorff aspect ratios before `log` | `1e-300` | `1e-30f` |
+| `OFGPU_SST_TINY`, `cuda/sst.cu` | `omega` and `y` in the blending functions | `1e-300` | `1e-30f` |
+| `OFGPU_WF_TINY`, `cuda/wallfunctions.cu` | `wfPow`'s argument before `log` | `1e-300` | `1e-30f` |
+| `OFGPU_FAN_TINY`, `cuda/fan.cu` | the extrapolation curvature `k` | `1e-300` | `1e-30f` |
+| `OFGPU_ADAPT_TINY`, `cuda/adapt.cu` | the band in which the transfer limiter leaves a cell alone | `1e-300` | `1e-30f` |
+| `OFGPU_S2S_HUGE`, `cuda/s2s.cu` | the start of the two half-space maxima | `1e300` | `1e30f` |
+| `OFGPU_DBL_MIN`, `cuda/solid.cu` | `Vec3::normalised`'s threshold | `2.2250738585072014e-308` | `1.17549435e-38f` |
+
+The host twins follow: `adapt::transfer::LIMITER_FLOOR` is `SCALAR_FLOOR`, and the host
+floors in `src/fan.rs`, `src/wallfunctions.rs`, `src/s2s.rs`, `ofgpu-lowmach` and the
+gate code of `ofgpu-validate` read `SCALAR_FLOOR` where they read a `Scalar` `1e-300`.
+A `1e-300` that is an `f64` (a value already widened with `f64::from`) is not dead in
+either build and stays. Two tests hold this: `types::tests` checks that both constants
+are finite, non-zero and invertible in the build being tested and that the f64 values
+are the historical ones, and a scan of `cuda/` refuses a `1e-300`, `1e300` or
+`2.2250738585072014e-308` anywhere but the double arm of an `#ifdef OFGPU_SINGLE`
+block.
+
+### 112.2 The build, the second invocation, and the rule that keeps f64 bitwise
+
+At `8c935c3`, `cargo test --release --features single --no-run` stopped at 64 type
+errors in the library and 279 in its tests, before a single binary or lint was
+reached. Almost all were one shape: a value declared `f64` (a configuration field, a
+literal array, a helper's parameter) meeting a `Scalar`. The fixes are of three kinds
+only:
+
+1. **A type written `f64` becomes `Scalar`, or a cast `as Scalar` / `f64::from` is
+   added**, where the value meets `Scalar` arithmetic. In f64 both are the identity:
+   the same operations on the same values in the same order.
+2. **A literal outside f32's range becomes a paired constant**: `SCALAR_FLOOR`,
+   `SCALAR_HUGE`, or a local `#[cfg(feature = "single")]` / `#[cfg(not(...))]` pair
+   whose f64 arm is the old literal verbatim.
+3. **A test whose subject is f64 itself** (an f64 bit pattern, a digit count only a
+   double carries) is compiled only without the feature, `#[cfg(not(feature =
+   "single"))]`, as `blockgen.rs` and `ofgpu-datacentre` already did. Each is named in
+   §112.3.
+
+No tolerance, scheme, iteration count or physical constant changed in the f64 build;
+where a check is given its own f32 value, §112.3 names it with both values.
+The claim that f64 did not move is checked four ways, not asserted: the SASS of every
+f64 kernel unit (`cuobjdump -sass`, which carries no line table) hashes the same
+before and after; three `ofgpu-buoyant` runs, one `ofgpu-cht` run, three
+`ofgpu-lowmach` runs and one `ofgpu-k-epsilon` run write byte-identical fields; the f64
+test suites list and pass the same tests; and `ofgpu-validate` prints all 937 of its
+rows, name, error and tolerance, byte for byte as it did at `af8f7fd` (936 of 937, the
+same one miss).
+
+The house command (`README.md`) is now two invocations:
+
+```
+cargo test --release
+cargo test --release --features single --target-dir target/single
+```
+
+The second builds into its own directory because the feature changes every kernel
+unit and the library: sharing `target/release` would leave whichever precision was
+built last in `target/release/*.exe`, and a driver run from there would silently be
+the other precision.
+
+### 112.3 The test suites at f32 — what passes, what does not, and why
+
+Measured on 2026-09-24 on the machine of record (one RTX 5070 Ti, 16,303 MiB, driver
+596.49, idle but for the desktop: 1.3-1.5 GB resident), with the tree of §112.1-112.2 and
+before any test below was marked. `cargo test --release --features single --target-dir
+target/single`:
+
+| suite | listed | passed | failed | did not finish | ignored before |
+|---|---|---|---|---|---|
+| library (`--lib`) | 2018 | 1576 | 428 | 4 | 10 |
+| the 18 binaries' tests (`--bins`) | 272 | 258 | 14 | 0 | 0 |
+
+The same tree in f64 lists 2019 library tests (the extra one is `blockgen`'s f64-only
+digit test) and passes 2009 with the same 10 ignored, and passes all 272 binary tests.
+One of the 14 binary failures is not an f32 failure: `ofgpu-datacentre`'s
+`the_shipped_dc_schema_is_the_generated_one` read an empty file because its sibling test
+was rewriting it at that moment, the race between the two schema tests that fails the
+same way in f64 and passes when re-run; re-run under the feature it passes, and the
+schema it generates is byte-identical to the shipped one. It is not marked.
+
+Every other test in the failed and did-not-finish columns now carries
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
+tests and **16** binary tests. So the second invocation of the house command reports
+1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
+test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
+race above fires), and `-- --ignored` under the feature runs exactly the tests that do
+not hold at f32 (plus the ten that were ignored before, in both builds). The attribute
+does nothing without the feature: the f64 lists and results are the ones above.
+`types::tests::the_f32_failure_count_is_the_one_spec_lit_states` counts the attributes
+and holds them to the two bold numbers in this paragraph (it is itself one more library
+test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
+paragraph was measured; a later section that adds such a test moves the bold number and says so
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
+105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's) and §105.18 one (the `backward`
+stroke's regression test).
+
+**Why they fail**, read from their own messages (the four that did not finish were
+stopped after 95 minutes; in f64 each takes seconds):
+
+* **Most are a tolerance written for double round-off** — `1e-12` or `1e-14` between a
+  device result and its host twin or a closed form — meeting single round-off, which is
+  about `1e-7`. Nothing is wrong with the arithmetic they check; the check was never
+  written to hold in f32, and no f32 tolerance was written here (§112.2).
+* **A production refusal whose threshold lies below f32 round-off.** The largest is the
+  conduction solver's `ANISOTROPY_RESIDUAL_LIMIT = 1e-10` (`src/cht.rs`, §46.4): on an
+  axis-aligned mesh the residual it reads is `1.19e-7` in f32 — exactly one unit in the
+  last place at 1 — so every conduction case is refused, and 56 library tests fail on it.
+  Its own documentation asks for a threshold "loose enough that a mesh generator's
+  last-bit noise on `Sf` and `C` cannot trip it"; in f32, `1e-10` is not. The conjugate
+  interface's conformity and area checks (`1e-7`, `1e-9`), the radiating-surface closure
+  check, the pressure backend's probe solve and the wet-bulb iteration refuse at least 33
+  more the same way.
+* **A pin of an f64 value**: a JSON double's bit pattern, a fixture's `RCI_HI` of
+  `99.999_999_9`, which f32 rounds to exactly 100, and `ofgpu-bench`'s memory model, whose
+  constants are f64 bytes per cell (the f32 mesh-and-flow slope is 377.0 B/cell against
+  §111.3's 622.2).
+* **Four that do not finish**: `ale_flow::tests::gate_105b_the_stroking_outlet_has_the_scheme_time_order`,
+  `models::k_omega_sst::tests::forcing_f1_to_zero_reproduces_the_transformed_k_epsilon`,
+  `solid::tests::gate_95_e_the_bimetal_curvature_is_timoshenko_s` and
+  `solid::tests::the_linear_bond_leaves_an_interface_stress_the_series_bond_removes`.
+
+By module, the 432 library tests are: io 56, models 52, cht 44, parcels 42, solid 27,
+s2s 25, automesher 23, fv 16, fan 13, wallfunctions 11, pressure 11, mesh 10, rheology 9,
+blockgen 9, and 84 across 22 more modules. The 13 binary tests are: `ofgpu-lowmach` 4,
+`ofgpu-datacentre` 2, `ofgpu-sample` 2, `ofgpu-validate` 2, and one each in `ofgpu-bench`,
+`ofgpu-buoyant` and `ofgpu-regions`.
+
+### 112.4 `ofgpu-validate` at f32, section by section
+
+`target/single/release/ofgpu-validate.exe -json …`, 2026-09-24 05:56, 3.5 s, exit 2:
+
+```
+validation aborted: conduction: the anisotropy residual |E - Dhat n (n.d)|/(Dhat |d|) is
+0.00000011920926 at internal face 376, limit 0.0000000001
+```
+
+The run stops at the first conduction case, which is the first case of section 8, for
+the reason §112.3 gives. The f64 column is `af8f7fd`'s run (936 of 937, the one miss
+being Gate 105-C's CFD2 lift, §105.14); §111 and this section change nothing
+`ofgpu-validate` computes in f64 (§112.2: every row is byte-identical).
+
+The verdict is read from the rows, with no tolerance changed: **holds** — every row
+passes at its f64 tolerance; **loosens** — some rows miss their f64 tolerance, but every
+miss is an error below `1e-5` (84 single-precision units in the last place at 1), so the
+arithmetic is right to single precision and the tolerance is double's (the worst error is
+printed: it is what an f32 tolerance would have to admit); **fails** — the section cannot
+be taken in f32.
+
+| # | section | f64 | f32 | at f32 |
+|---|---|---|---|---|
+| 1 | 3-D graded block | 71/71 | 18/71 | **loosens**: 53 rows miss an f64 tolerance, worst err 9.1e-06 |
+| 2 | 3-D sheared block (non-orthogonal) | 36/36 | 11/36 | **loosens**: 25 rows miss an f64 tolerance, worst err 5.5e-06 |
+| 3 | 3-D block with 2:1 refinement interfaces | 35/35 | 18/35 | **loosens**: 17 rows miss an f64 tolerance, worst err 1.8e-06 |
+| 4 | the adapt: refine, coarsen, and what a rebuild costs | 34/34 | 30/34 | **loosens**: 4 rows miss an f64 tolerance, worst err 2.6e-07 |
+| 5 | 2-D block with empty front and back | 37/37 | 13/37 | **loosens**: 24 rows miss an f64 tolerance, worst err 9.4e-06 |
+| 6 | linear solvers | 6/6 | 1/6 | **loosens**: 5 rows miss an f64 tolerance, worst err 4.8e-07 |
+| 7 | method of manufactured solutions, -lap(psi) = f | 6/6 | 6/6 | **holds** |
+| 8 | observed order and reported uncertainty (SPEC-LIT 94) | 10/10 | aborted | **fails**: the run stops at this section's first case, above |
+| 9 | buoyancy | 12/12 | not reached | not reached |
+| 10 | buoyancy production, sources, species, phi I/O | 14/14 | not reached | not reached |
+| 11 | volume of fluid (SPEC-LIT 20, the 22 rows) | 16/16 | not reached | not reached |
+| 12 | msh hex closure, cut-cell closure (SPEC-LIT 23, 24) | 10/10 | not reached | not reached |
+| 13 | the low-Mach reference pressure (SPEC-LIT 25) | 3/3 | not reached | not reached |
+| 14 | wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29) | 5/5 | not reached | not reached |
+| 15 | Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30) | 9/9 | not reached | not reached |
+| 16 | periodic domains: cyclic-pair invariants (SPEC-LIT 31.1) | 4/4 | not reached | not reached |
+| 17 | the thermal wall-function gate, redesigned (SPEC-LIT 32) | 27/27 | not reached | not reached |
+| 18 | Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3) | 10/10 | not reached | not reached |
+| 19 | resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) | 3/3 | not reached | not reached |
+| 20 | the bulk-temperature thermostat (SPEC-LIT 35) | 15/15 | not reached | not reached |
+| 21 | thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2) | 5/5 | not reached | not reached |
+| 22 | bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5) | 10/10 | not reached | not reached |
+| 23 | Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2) | 10/10 | not reached | not reached |
+| 24 | realizable and RNG k-epsilon (SPEC-LIT 40, 41) | 39/39 | not reached | not reached |
+| 25 | the output block, and fp16 voxels (SPEC-LIT 44, 45) | 22/22 | not reached | not reached |
+| 26 | conjugate heat transfer (SPEC-LIT 46, 47, 48) | 16/16 | not reached | not reached |
+| 27 | the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows) | 6/6 | not reached | not reached |
+| 28 | an equation that lives on a region - Gate 93-A (SPEC-LIT 93) | 8/8 | not reached | not reached |
+| 29 | the conjugate fluid/solid interface (SPEC-LIT 59, 60) | 48/48 | not reached | not reached |
+| 30 | surface-to-surface radiation (SPEC-LIT 49, 50, 51) | 47/47 | not reached | not reached |
+| 31 | fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55) | 83/83 | not reached | not reached |
+| 32 | Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58) | 43/43 | not reached | not reached |
+| 33 | gamma-Re_theta transition (SPEC-LIT 88, 89) | 20/20 | not reached | not reached |
+| 34 | the 2015 gamma transition model (SPEC-LIT 90) | 24/24 | not reached | not reached |
+| 35 | Lagrangian parcels (SPEC-LIT 66) | 11/11 | not reached | not reached |
+| 36 | the parcel sort and gather-shaped deposition (SPEC-LIT 67) | 12/12 | not reached | not reached |
+| 37 | two-way coupling of the dispersed phase (SPEC-LIT 68) | 13/13 | not reached | not reached |
+| 38 | droplet heating and evaporation (SPEC-LIT 76) | 12/12 | not reached | not reached |
+| 39 | the vapour into the gas (SPEC-LIT 77) | 14/14 | not reached | not reached |
+| 40 | droplet-wall impact (SPEC-LIT 78) | 45/45 | not reached | not reached |
+| 41 | Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10) | 6/6 | not reached | not reached |
+| 42 | Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) | 3/3 | not reached | not reached |
+| 43 | the imported region (SPEC-LIT 97) | 5/5 | not reached | not reached |
+| 44 | the region layout (SPEC-LIT 97) | 3/3 | not reached | not reached |
+| 45 | Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) | 10/10 | not reached | not reached |
+| 46 | Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10) | 14/14 | not reached | not reached |
+| 47 | Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over three meshes, CFD3 on a wobbling mesh (SPEC-LIT 105.14) | 20/21 | not reached | not reached |
+| 48 | lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) | 8/8 | not reached | not reached |
+| 49 | Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2) | 0 rows (open) | not reached | not reached |
+| 50 | Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3) | 0 rows (open) | not reached | not reached |
+| 51 | Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4) | 16/16 | not reached | not reached |
+
+Seven of the 51 sections are reached: 225 rows, 97 pass at their f64 tolerance, 128 miss
+it by at most `9.4e-6`, and none misses it by more. Section 8 onward, 44 sections and 712 of
+the f64 run's 937 rows, is not reached, so for them this section can say only that f32 does
+not get there. Gates 94-A to 94-D, 95-D, 95-E, 105-A to 105-C and 110-C are among them.
+
+### 112.5 What this does not cover, and the decision it leaves
+
+* **It does not make f32 a supported configuration.** It makes it build, keeps its floors
+  alive, and states what holds. The f64 build remains the one every gate is taken in.
+* **No speed or memory figure** is taken for f32 (§111's model is an f64 measurement), and
+  mixed precision is not attempted.
+* **The decision.** `ANISOTROPY_RESIDUAL_LIMIT` and the conjugate interface's tolerances
+  are guards whose right value depends on the precision, like the floors of §112.1: in
+  f64 each sits far above round-off, in f32 below it. Giving each an f32 value (a limit
+  near `1e-5` would sit about 84 units in the last place above the f32 noise and far below
+  any misalignment §46's tests construct) would let `ofgpu-validate` run past section 8 in
+  f32 and let most of the 89 refused tests run. It changes what the f32 build accepts,
+  so it is left to whoever owns those guards; the f64 values stay as they are either way.
+
+---
+
+## 113. The Krylov loop without one-thread launches, and the flag read a case can space out
+
+`docs/11` §B.4 counted four one-thread kernels among the launches of every PBiCGStab
+sweep, and a convergence flag read back to the host after every sweep because
+`check_interval` defaulted to 1 and no case could set it. This section records three
+changes to `src/solver.rs` and `cuda/solver.cu`. Every scalar update the two Krylov loops
+launched as a one-thread kernel is now done by thread 0 of the stage-two reduction that
+produces its operand, with the same loads and the same IEEE operations in the same
+order, so the fused loop is the unfused one bit for bit, and a test holds it to a
+verbatim copy of the loop as it stood. A solve that would make a host round-trip inside
+a CUDA-graph capture is refused by name before it launches anything. And
+`checkInterval` is a case keyword, with the default §113.4 measures. No scheme,
+tolerance, stopping rule, operand order or preconditioner changed.
+
+`No GPL-licensed source was consulted.` The sources are Saad (2003) §6.7 and §7.4.2 and
+van der Vorst (1992) for the two algorithms (§8.1, §8.2), and this tree's own code.
+
+### 113.1 The fold — each scalar update rides on the reduction that feeds it
+
+A reduction here is two launches: stage one writes one partial per block, stage two
+(`solSumStage2`, `solSum2Stage2`) adds the partials in one block and thread 0 stores the
+sum. The loop then launched a one-thread kernel to read that sum back from device memory
+and combine it with other device scalars. The fused stage-two kernels keep stage two's
+body unchanged and let thread 0, which already holds the sum in a register, do the
+one-thread kernel's arithmetic before it exits:
+
+| loop | one-thread launches removed | fused stage two | what thread 0 computes after the sum `s` |
+|---|---|---|---|
+| PBiCGStab | `solBetaBicg`, and the end-of-sweep `solCopyScalar` of `rho` into `rho_old` | `solSumStage2Beta` | `rho = s + 0`; `beta = safeDiv(rho, rho_old)·safeDiv(alpha, omega)`; `rho_old = rho` |
+| PBiCGStab | `solDivideScalar` for `alpha` | `solSumStage2Divide` | `den = s + 0`; `alpha = safeDiv(rho, den)` |
+| PBiCGStab | `solDivideScalar` for `omega` | `solSum2Stage2Divide` | `num = s_a`, `den = s_b`; `omega = safeDiv(num, den)` |
+| PCG | `solDivideScalar` for `alpha` | `solSumStage2Divide` | `den = s + 0`; `alpha = safeDiv(rho, den)` |
+| PCG | `solDivideScalar` for `beta`, and `solCopyScalar` of the new `rho` | `solSumStage2Ratio` | `num = s + 0`; `beta = safeDiv(num, rho)`; `rho = num` |
+| both, at every check | `solConvergenceTest` | `solSumStage2Converged` | `res = s + 0`; the §8.4 test against the tolerance and `relTol`; `flag = 1` once it is met |
+
+Why it is the same answer to the bit. (1) Thread 0's register holds exactly the value
+stage two stored: nothing on this card carries extra precision between a register and
+memory. (2) The `+ 0` is still the runtime `offset` argument `solSumStage2` takes. It is
+not a literal, because `s + 0.0` turns a `-0` sum into `+0` and a folded constant need
+not. (3) `safeDiv` is the same guarded quotient with the same `OFGPU_TINY`, and each
+product and comparison has the same operands in the same order. None of them is an
+add after a multiply, so no fused multiply-add can form where there was none. (4)
+`rho_old = rho` moved from the end of a sweep to the moment `beta` is formed. Nothing
+reads `rho_old` between those two points, so the next sweep sees the same value.
+
+The one-thread kernels themselves stay. The setup of a solve and the test before the
+first sweep still use them, and so does `src/distsolve.rs`, whose per-part protocol is
+unchanged. They are also what the fused loop is tested against.
+
+What a sweep saves: in a fixed-iteration solve, four launches a sweep for PBiCGStab and
+three for PCG; in a checking sweep, one more (the convergence test). The capture census
+of §81.4 counts it. A 12-sweep fixed-iteration PBiCGStab solve on the dense 29-cell rig
+of `src/solver.rs`'s tests captured **232** kernel nodes before this section and **184**
+after.
+
+The proof is three tests in `src/solver.rs`. `the_fused_pbicgstab_is_the_unfused_one_bit_for_bit`
+and `the_fused_pcg_is_the_unfused_one_bit_for_bit` keep a verbatim copy of each loop as
+it stood before this section and require every value of the solution, the iteration
+count, the converged flag and both reported residuals to be bitwise equal. They cover a
+dense 29-cell system and a 12 x 10 x 8 hex block, the diagonal preconditioner and the
+multi-colour DIC and DILU of §21. They cover fixed solves of 1, 7 and 40 sweeps and
+checking solves at `check_interval` 1 and 3, each started once from zero and once more
+from the first answer. `the_fused_loops_launch_fewer_kernels_a_sweep` captures both
+loops at 6 and 12 sweeps and requires the census difference to be exactly four and
+three kernel nodes a sweep.
+
+### 113.2 A host round-trip inside a capture is refused by the solve, by name
+
+A checking solve reads its flag back to the host every `check_interval` sweeps. With
+`report_residuals` on, it also copies the residual triple back once at the end. A CUDA
+graph can record neither. Until this section, such a solve was kept out of every
+capture only by its caller setting `fixed_iters` on and `report_residuals` off. One
+that did not set them reached the flag read, whose event record fails inside a capture
+with `CUDA_ERROR_CAPTURED_EVENT`: a driver error that names neither the solve nor the
+setting.
+
+`solve_pbicgstab` and `solve_pcg` now ask `Gpu::is_capturing` (§81.3) before they launch
+anything. Inside a capture they refuse `fixed_iters` off and `report_residuals` on. Each
+refusal names the function, the setting, why a graph cannot hold it, and what to set
+instead. Outside a capture nothing changes. The proof is
+`a_round_trip_solve_is_refused_by_name_inside_a_capture`, which also captures a
+fixed-iteration solve on the same `Gpu` right after the refusals, to show that a
+refusal leaves nothing armed.
+
+### 113.3 `checkInterval` — the case keyword, and the default
+
+`solvers/<var>/checkInterval N;` in `system/fvSolution` sets how many sweeps pass between
+two reads of the convergence flag for that equation. `N` must be a whole number of at
+least 1. Anything else is refused by name rather than defaulted, because a silently
+defaulted interval is a solve that drains the pipeline when the case said it should
+not, or overshoots when the case said it should not. A JSONC case's solver rule has no
+such key and takes the default.
+
+What the interval means is unchanged. The flag is sticky, so a wider interval never
+misses a convergence. It overshoots by up to `N - 1` sweeps, and those sweeps update
+the solution (`a_wider_check_interval_only_overshoots`). So a different interval is a
+different stopping sweep and a different answer, within the tolerance but not to the
+bit. The fold of §113.1 is bitwise at every interval. Changing the interval is not.
+
+`checkInterval` defaults to **1** (`DEFAULT_CHECK_INTERVAL` in `src/io/case.rs`), and
+§113.4 is the measurement that default rests on. The code paths that set their own
+interval keep it: the CHT lowering (10), Turek–Hron (5), the pressure selector's
+reference solve (20), and the gates of `ofgpu-validate` that set 10.
+`check_interval_is_read_and_a_bad_one_is_refused_by_name` and
+`the_default_check_interval_is_the_one_spec_lit_states` in `src/io/case.rs` hold the
+keyword and this paragraph to the code.
+
+### 113.4 What it buys, measured
+
+Every figure below was taken on the machine of record (one RTX 5070 Ti, 16,303 MiB,
+driver 596.49, f64) on 2026-09-24, before this section (HEAD `f0a3762`) and after it,
+with `nvidia-smi --query-compute-apps` logged next to every run. The cases are
+`ofgpu-generate-mesh plume <dir> <nx> <ny> <nz>` at 60 x 25 x 16 (24,000 cells),
+98 x 42 x 20 (82,320), 120 x 50 x 40 (240,000) and 200 x 120 x 100 (2,400,000). Each
+is run by two drivers. `ofgpu-plume <dir> -iters 60` holds the flow frozen: a
+potential-flow prologue, then k-ε and T. `ofgpu-buoyant <dir> -iters 60 -backend
+pbicgstab` is steady SIMPLE on U, p, k, ε and T. The timed figure is each driver's own
+per-iteration line, the median of three runs, and the fields each run writes are
+compared byte for byte with the run before this section.
+
+**The answer did not move.** Every field every run wrote is byte-identical to the run
+before this section:
+
+| mesh | cells | `ofgpu-plume` fields | `ofgpu-buoyant` fields | potential-flow sweeps |
+|---|---|---|---|---|
+| 60 x 25 x 16 | 24,000 | identical, 5 files | identical, 7 files | 144 |
+| 98 x 42 x 20 | 82,320 | identical | identical | 212 |
+| 98 x 42 x 20, `p` and `Phi` on PCG + DIC | 82,320 | identical | identical | 294 |
+| 120 x 50 x 40 | 240,000 | identical | identical | 328 |
+| 200 x 120 x 100 | 2,400,000 | identical | identical | 832 |
+
+The same runs with `checkInterval 1;` written into every solver dictionary are
+byte-identical to the default runs. `ofgpu-validate` reports 936/937 checks, and all
+937 rows are byte-identical to the rows at `f0a3762`. That includes the CHT, Turek–Hron
+and selector solves that check at an interval of their own, and the one failing row,
+Gate 105-C CFD2 lift, which was failing before.
+
+**The fold, on the wall clock.** The card was shared for most of the day. Another
+user's `fds_gpu.exe` held about 8 GB at 78–98 % SM from about 10:00 to 10:40, and after
+that short-lived Python processes kept opening GPU contexts. So every timing below was
+taken alternating a build of `f0a3762` with this one, case by case, and each row says
+how loaded the card was. In the quietest window (12:03–12:05, 29 of the 48 run starts
+reading 0–3 % SM and none above 57 %, a reading that includes the tail of the run
+before), the medians of three runs, in ms per iteration or per unit of work, were:
+
+| mesh | cells | `ofgpu-plume` before → after | `ofgpu-buoyant` before → after |
+|---|---|---|---|
+| 60 x 25 x 16 | 24,000 | 2.413 → 2.169 (−10.1 %) | 19.91 → 17.56 (−11.8 %) |
+| 98 x 42 x 20 | 82,320 | 2.682 → 2.610 (−2.7 %) | 25.69 → 23.27 (−9.4 %) |
+| 98 x 42 x 20, PCG | 82,320 | 2.846 → 2.490 (−12.5 %) | 29.57 → 26.55 (−10.2 %) |
+
+At 240,000 cells in the same window this build's run starts read 12–25 % SM, and it
+came out slower: `ofgpu-plume` 4.805 → 6.072, `ofgpu-buoyant` 70.10 → 71.18. So the
+larger meshes were timed again on a loaded card (up to 94 % SM at a run start), and the
+figure is the fastest of alternating runs: the least disturbed run, not an idle one.
+`ofgpu-plume` gave 4.981 → 4.652 ms (−6.6 %, eight pairs) at 240,000 cells and
+39.74 → 37.27 ms (−6.2 %, three pairs) at 2,400,000. The idle figures before this
+section, taken the same morning, were 4.63 and 37.4. `ofgpu-buoyant` at 2,400,000 cells
+was not re-timed on a quiet card.
+
+The fixed-iteration benches do the same work either side, so they isolate the fold.
+Five alternating pairs, card lightly loaded (medians, fastest in brackets):
+`ofgpu-graph-bench <60 x 25 x 16> -iters 300 -sweeps 3` per-launch 1.362 → 1.232
+(1.304 → 1.212) ms/iter, CUDA graph 0.540 → 0.454 (0.454 → 0.432), adaptive 1.054 →
+1.047. Every run reported `0 of 24000 cells differ`. `ofgpu-bench 400 200 1 -iters 50
+-fixedIters 3`: k-ε 1.590 → 1.577, k-ω 1.700 → 1.545.
+
+**The interval, and why the default stays 1.** The same case was run with
+`checkInterval N;` in every solver dictionary, round-robin (every `N` once per round,
+five rounds at 24,000 cells and three at 240,000), on a card loaded to between 0 and
+94 % SM. Medians, ms:
+
+| run | N = 1 | N = 2 | N = 4 | N = 8 |
+|---|---|---|---|---|
+| `ofgpu-plume`, 24,000 cells | 3.177 | 3.304 | 3.684 | 5.133 |
+| `ofgpu-plume`, 240,000 cells | 7.169 | 6.754 | 8.167 | 9.621 |
+| `ofgpu-buoyant`, 24,000 cells, fastest round | 23.11 | 23.77 | 23.84 | 28.53 |
+
+With `checkInterval` on the pressure equation only, `ofgpu-buoyant` gave 39.76 / 37.89
+/ 40.81 ms for `N` = 1 / 4 / 16 at 24,000 cells, and 58.91 / 59.62 / 61.96 at 240,000.
+
+In these cases U, k, ε and T converge in one to five sweeps. A wider interval runs every
+one of those solves past its converged sweep, up to `N - 1` extra sweeps, and those
+sweeps cost more than the drains they save: 23–62 % at `N = 8`. `N = 2` is inside the
+noise. The pressure equation alone at `N = 4` came out about 5 % faster at 24,000 cells and
+not at all at 240,000. So the default is not moved. The keyword exists for a case whose
+long solves a wider interval does pay for, and changing it changes that case's answer
+within its tolerance, as §113.3 says.
+
+### 113.5 What this does not do
+
+- **It does not remove the drain.** A checking solve still waits on a pinned copy of
+  the flag every `check_interval` sweeps. Removing the wait needs a read the host polls
+  instead of waiting on: a ring of events, or a loop the device ends itself with a
+  conditional graph node. Neither is attempted.
+- **It does not make the interval free.** The sweeps after convergence still update the
+  solution, so the interval is part of the answer. A loop whose updates stop on the
+  device at the converged sweep would make any interval give the interval-1 answer. It
+  would also change the answer of every path that sets its own interval today (§113.3),
+  so it is a numerics decision and was not taken.
+- `src/distsolve.rs` still launches the one-thread kernels. Its reductions finish in
+  its own `reduce_into`, and folding it there is a separate change, with its own
+  bitwise gate, left undone.
+- No JSONC key: a JSONC case's linear solvers take the default interval.
+- The timings are from a shared card, and each row says how loaded it was. None of them
+  is an idle-card figure; the quietest-window table is the closest. None replaces §81.12.
+
+---
+
+## 109. The block-coupled solid matrix — a second storage format beside §1, its assembly, and what it does not yet solve
+
+§95 solves three scalar systems because §1's storage holds one coefficient
+per face, and §95.5 measured what that costs: a Poisson ratio above 0.45 and
+a bending-dominated slender body are refused by name, with Cardiff, Tuković,
+Jasak & Ivanković (2016, DOI `10.1016/j.compstruc.2016.07.004`) named as the
+route. This section builds the first half of that route — the matrix — and
+says exactly what "block-coupled" means here, which is less than the paper
+and more than §95. The second half, the solve around it and Gate 95-A, is
+written after this section and not with it.
+
+Written from: §1 (the storage this sits beside), §2.4, §3.5, §4, §95.1,
+§95.2 (the boundary statement, kept per component), §95.8 (what is refused);
+Cardiff, Tuković, Jasak & Ivanković, *Comput. Struct.* 175 (2016) 100-122,
+DOI `10.1016/j.compstruc.2016.07.004` — the IDEA of one cell-centred
+finite-volume matrix for the three displacement components, cited for that
+and for nothing else: every coefficient below is derived from (95.3) and
+(95.5), the paper's formulae are not quoted, and its own implicit tangential
+stencil is not built (§109.4). **OpenFOAM and solids4foam are GPL and were
+not opened**; no solid-mechanics solver of any licence was consulted.
+
+### 109.1 The storage — one `3x3` per cell and per face-direction, one vector per cell
+
+*DESIGN*: beside §1's `diag/upper/lower/source` of scalars, a SECOND format
+with the same shape and `3x3` entries: `diag [n_cells]`, `upper [n_if]`,
+`lower [n_if]` are blocks indexed `(row component, column component)`, and
+`source [n_cells]` is a vector per cell. `upper[f]` is the owner's row and
+`lower[f]` the neighbour's, exactly as in §1. There is no boundary-coefficient
+pair: a boundary face folds into `diag` and `source` at assembly, because the
+operator refuses every coupled patch (cyclic, processor, interface) through
+§95's own `check_patches`, and nothing decomposes it — §71's split of a matrix
+across a cut is a later section's, if it is ever wanted here. The product is
+the ordinary block product:
+
+```text
+  (A u)_c = diag[c] u_c + sum_{f: owner[f] = c} upper[f] u_{neighbour[f]}
+                        + sum_{f: neighbour[f] = c} lower[f] u_{owner[f]}                  (109.2)
+```
+
+with `(T v)_i = sum_j T_ij v_j` for a block `T`. The device keeps the blocks in
+the row-major nine-scalar layout the gradient already uses; §1's `G_ij =
+du_j/dx_i` convention is for gradients and is not what a block's indices mean.
+
+### 109.2 The assembly — the normal-derivative row implicit in all three terms
+
+Write the face gradient as its normal row plus its tangential rows,
+`G_f = n (x) (G_f.n) + G'_f`, with `G.a` the vector `(G.a)_j = sum_i a_i G_ij`
+(§1: `grad(u).Sf` at `a = Sf`). Then `sigma_f.Sf` less its thermal term,
+`mu G_f.Sf + mu G_f^T.Sf + lambda tr(G_f) Sf`, splits: the normal row gives
+`|Sf| [mu I + (mu + lambda) n n^T] (G_f.n)` (because `(n (x) g).Sf = |Sf| g`,
+`(n (x) g)^T.Sf = |Sf| n (n.g)` and `tr(n (x) g) = n.g`) and the tangential
+rows give `mu G'_f^T.Sf + lambda tr(G'_f) Sf`, with `G'_f.Sf = 0`. §95 makes
+`(2 mu + lambda) G_f.Sf` implicit and defers the rest; here the normal row is
+the two-point estimate `Delta_f (u_N - u_P)` in ALL THREE terms, so the face
+coefficient is a `3x3` and the component coupling `(mu + lambda) n n^T` sits
+in the matrix. With `o = owner[f]`, `n = Sf/|Sf|`, `Delta_f` §2.4's
+non-orthogonal delta coefficient:
+
+```text
+  B_f = |Sf| Delta_f [ mu_o I + (mu_o + lambda_o) n n^T ]                                  (109.1)
+  upper[f] = -B_f     lower[f] = -B_f     diag[P] += B_f     diag[N] += B_f
+```
+
+(the sign of §3.2's laplacian as `src/reference.rs` assembles it, so that
+equilibrium reads `A u = source`). What the two-point stencil cannot see —
+the tangential rows, and §2.4's correction of the normal row — stays
+explicit, from §3.5's interpolated gradient `Gbar_f = w G_P + (1 - w) G_N`,
+`G'_f = Gbar_f - n (x) (Gbar_f.n)`, `k_f` the over-relaxed correction vector,
+evaluated with the ROW cell's `mu_c, lambda_c` and added to the owner's row,
+subtracted from the neighbour's:
+
+```text
+  q_f = |Sf| [ mu_c I + (mu_c + lambda_c) n n^T ] (Gbar_f.k_f)
+        + mu_c G'_f^T.Sf + lambda_c tr(G'_f) Sf                                            (109.3)
+```
+
+A boundary face keeps §95.2's statement per component. With `P_b` the
+diagonal `0/1` matrix of the FIXED components, `Q_b = I - P_b`,
+`M_b = mu_c I + (mu_c + lambda_c) n n^T`, `k_b = n - (Cf_b - C_c) Delta_b`,
+`G'_b = G_c - n (x) (G_c.n)`, `v_b` the prescribed value, `t_b` the prescribed
+traction and `ub_b` the evaluated boundary displacement (§4's triple with
+`fr` in {0,1}, so a free component carries `u_c + refGrad/Delta_b` with
+`refGrad` the traction condition (95.5) solved at the face):
+
+```text
+  diag[c]   += |Sf_b| Delta_b  P_b M_b P_b
+  source[c] += P_b [ |Sf_b| M_b ( P_b (Delta_b v_b + G_c.k_b) + Q_b Delta_b (ub_b - u_c) )
+                     + mu_c G'_b^T.Sf_b + lambda_c tr(G'_b) Sf_b ]
+             + Q_b t_b |Sf_b|                                                                (109.4)
+```
+
+A fixed row carries the whole `(sigma_b.Sf_b)_i`, its fixed columns implicit
+and corrected as a `fr = 1` face of §2.4 is, its free columns explicit; a free
+row carries `t_i |Sf_b|` and nothing else (Demirdžić & Muzaferija 1994). The
+thermal load is §95's masked face gather, unchanged:
+
+```text
+  source[c] -= beta_c [ sum_f (+-)(T_f - T_ref,c) Sf + sum_b P_b (T_b - T_ref,c) Sf_b ]      (109.5)
+```
+
+One material per region: a bonded region (§95.8) is refused by name, and
+the route — the series coefficient written as a face block — changes one line
+of (109.1) when it is taken.
+
+### 109.3 What is measured, and what "matches §95" means
+
+The residual and the scale every gate of this section is read against:
+
+```text
+  r = A u - source
+  scale = max_c ||diag[c]||_F  *  max_c |u_c|
+  gate:  max_c |r_c| <= 1e-12 scale                                                          (109.6)
+```
+
+**Gate 109-A, the patch test and the cube.** On §95.6's graded orthogonal
+block with `u = A x + b` prescribed face by face, and on the `10^3` cube in
+the free-expansion state of Gate 95-B, `max|r| <= 1e-12 scale` — on the host
+against the exact Green-Gauss gradient, and on the device with the segregated
+operator's own residual printed beside it, the two equal to the same
+tolerance. That is the plan's "matches the segregated operator's residual to
+round-off", and it is a statement about LINEAR fields on ORTHOGONAL meshes
+only. On any other state the two operators differ, per internal face, by
+
+```text
+  (mu + lambda) |Sf| (I - n n^T) [ Gbar_f.n - Delta_f (u_N - u_P) - Gbar_f.k_f ]                (109.7)
+```
+
+— the tangential part of the mismatch between the Green-Gauss normal
+derivative and the two-point one, `O(h)`, zero exactly where (109.6) holds.
+The two operators therefore have DIFFERENT discrete fixed points that agree to
+discretisation order, which is the observation §95.1 already makes about
+`kappa` and is stated here so that nobody measures §95's converged field
+against this section's and calls the difference a defect.
+
+**Gate 109-B, the device twin.** `diag`, `upper`, `lower`, `source` and `A u`
+from the kernels against the scatter-shaped host assembly to `1e-12` relative,
+on the uniform cube, the trigonometrically jittered cube and the graded block,
+with a non-linear state and a temperature gradient — the crate's habit of one
+orthogonal, one non-orthogonal and one graded mesh.
+
+**Gate 109-C, capture.** One assembly (the four memsets of the zeroing and
+two kernels) plus one product captures and replays bitwise under §81's
+protocol; the row in §81's registry is a `Gate`.
+
+**Symmetry, a finding.** `B_f^T = B_f`, `upper[f] = lower[f]` and
+`P_b M_b P_b` symmetric make the block matrix symmetric by construction, and
+the host test asserts the dense `3n x 3n` expansion equal to its transpose TO
+THE BIT on a jittered mesh. The solve that follows this section may therefore
+be block-PCG with a block incomplete-Cholesky preconditioner; §8.2's refusal
+of PCG on an asymmetric matrix is not touched.
+
+**At single precision.** The host legs of Gate 109-A, the host product
+against the dense expansion and the direct dense solve bound DOUBLE round-off
+(`1e-12`, `1e-14`, `1e-10`) and carry §112.3's f32 attribute, and so do Gate
+109-B and the device leg of Gate 109-A: six library tests. The symmetry
+check, the capture gate and the refusals hold at f32 and do not carry it.
+No f32 tolerance is written for this section, for §112.2's reason.
+
+### 109.4 What this section does not do
+
+No solve here. §109.5 solves this matrix, §109.6 iterates the loop around it and states
+Gate 95-A, §109.7 measures the gate, and §109.8 says what a case can ask for and what the
+refusals now say.
+
+No implicit tangential derivative. Cardiff et al. (2016) put the tangential
+rows of the face gradient into the matrix through a stencil on the face's
+vertices, which is wider than one entry per face; (109.3) keeps them explicit.
+Whether the compact coupling of (109.1) alone converges the 10:1 cantilever of
+§95.5 is not known and is what the solve has to measure; if it does not, the
+wider stencil is a THIRD format and gets its own paragraph.
+
+No bonded region, no coupled patch, no decomposition: refused by name at
+construction, with the route stated in §109.2.
+
+### 109.5 The block-coupled solve — BiCGStab on the flat system, block-DILU and block-Jacobi
+
+*DESIGN*: the system of §109.1 is solved as ONE Krylov system of `3 n_cells`
+unknowns, cell-major, so that its vectors are byte for byte the per-cell
+vectors of §109.1:
+
+```text
+  x[3 c + i] = u_i(c),   i in {0, 1, 2},   c in 0..n_cells                                  (109.8)
+```
+
+The method is §8.1's BiCGStab — the scalar systems' own loop, the same
+device-resident scalar updates in the same order, over this length — with
+(109.2) as the product. The matrix is symmetric (§109.3), so §8.2's conjugate
+gradient would be lawful too; BiCGStab is used because it is the loop the tree
+already trusts, and a symmetric solver is a later choice, not a correction.
+The preconditioner is §21's multi-colour no-fill factorisation with a `3x3`
+block where §21 has a number, every product kept in its order because blocks
+do not commute:
+
+```text
+  Dt_v = A_vv - sum_{colour(u) < colour(v)} A_vu Dt_u^-1 A_uv,      rD_v = Dt_v^-1
+  forward,  colours ascending:  y_v = rD_v ( y_v - sum_{colour(u) < colour(v)} A_vu y_u )
+  backward, colours descending: y_v = y_v - rD_v sum_{colour(u) > colour(v)} A_vu y_u        (109.9)
+```
+
+with `A_vu = upper[f]` when `v` owns `f` and `lower[f]` when it does not (§1).
+A block whose determinant is zero is inverted from the cell's own `diag`
+instead, and from the identity if that is singular too — §21's safe
+reciprocal written for a block: it degrades one row to block-Jacobi and never
+enters the residual. Block-Jacobi is the comparison:
+
+```text
+  rD_v = diag[v]^-1,      y_v = rD_v x_v                                                     (109.10)
+```
+
+The residual is §8.4 applied literally to the flat vector:
+
+```text
+  m = (1/(3n)) sum_k x_k,      x_ref = (m, m, m) in every cell
+  norm = sum_k |(A x)_k - (A x_ref)_k| + sum_k |b_k - (A x_ref)_k| + eps
+  res  = sum_k |b_k - (A x)_k| / norm                                                        (109.11)
+```
+
+— `x_ref` a constant vector field, still in the null space of a
+traction-only operator, which is the property §8.4 asks of it.
+
+**What is measured.** Block-DILU on the device equals a host factorisation
+that walks the face list rather than the kernels' per-cell lists to
+7.4e-16 on the uniform, the jittered and the graded block, and block-Jacobi
+equals the host `3x3` inverse likewise. Because a host twin can copy a
+kernel's slip, the block inverse is also checked by multiplication: `rD`
+times a full non-symmetric `diag` block is the identity, and a factorisation
+whose `Dt` is exactly singular lands on `diag^-1` (the first transcription had
+one cofactor wrong and divided the fallback by its determinant instead of
+inverting it, in both halves, and passed its host comparison). Shuffling the
+cells inside each colour leaves `rD` and `M^-1 y` unchanged to the bit —
+§21's schedule independence; reversing the colour order is a different and
+equally lawful factorisation, which on `block(6)` at `1e-5` needs the same
+ten iterations as the ascending order. On `block(6)` (648 unknowns, free
+expansion) BiCGStab with block-DILU reaches (109.11) `<= 1e-12` in 18
+iterations, block-Jacobi in 36, and the answer matches the direct solve of
+the dense `3n x 3n` expansion to 8.6e-14. A fixed-iteration solve of six
+sweeps reports the true residual of a host recomputation to `1e-10`
+relative, its normalisation formed once from the starting state as §8.4
+forms it. A fixed-iteration solve captures and replays bitwise
+under §81's protocol (110 nodes: 106 kernel, 4 memset, 0 memcpy); its row in
+§81's registry is a `Gate`.
+
+**At single precision.** The two host-reference tests, the dense comparison
+and the fixed-iteration report bound double round-off and carry §112.3's f32
+attribute: four library tests. The inverse, schedule, capture and refusal
+tests hold at f32 and do not carry it.
+
+What this subsection does not do: the outer loop that re-assembles
+(109.3)'s explicit rows around this solve, the case knob, and Gate 95-A are
+the next subsections' work; §109.4's "no solve" is superseded by this
+subsection and is amended when they land.
+
+### 109.6 The outer loop around the block map, and Gate 95-A
+
+*DESIGN*: (109.3)'s tangential rows and §2.4's correction are explicit, so
+one block solve is not the answer: it is one application of a map,
+
+```text
+  F(u) = A(u)^-1 b(u):  correct the boundary of u, assemble (109.1)-(109.5) at u,
+                        solve (109.8)-(109.11) from x = u                                    (109.12)
+```
+
+and the displacement is its fixed point. The loop around it is §95.3's,
+transcribed with `F` in place of the three scalar solves: the same
+relaxations (bare Picard, Aitken, Anderson of depth five by default), the
+same stopping quantity `r = F(u) - u` and its decades, the same million-fold
+divergence refusal, the same report, and the same closing boundary
+correction so that the gradient a stress read-out takes belongs to the
+accepted `u`. What differs is the split: §95's implicit half is
+`(2 mu + lambda)` times a laplacian per component, this one's is (109.1), and
+the observed contraction of the two is what a slender body separates:
+
+```text
+  q_obs = geometric mean of the last ten |r_k| / |r_(k-1)|                                   (109.13)
+```
+
+printed beside §95.3's predicted `(mu + lambda)/(2 mu + lambda)`, which is
+the segregated split's number and is kept so that the two loops print the
+same columns.
+
+**What is measured.** The free-expansion state of Gate 95-B is a fixed point
+of the block map to 0.0 (the warm start is the exact state, the block solve
+runs zero iterations), and Gate 95-C's linear field on the graded block
+to 0.0. From rest, on the `8^3` block with three symmetry planes, the
+loop finds the free-expansion state in 20 outer iterations (observed
+contraction 0.33) against the segregated loop's 22 outer iterations
+(observed contraction 0.44), to 1.1e-10 of the exact field.
+
+**Gate 95-A** is the end-loaded cantilever of Timoshenko & Goodier ch. 3 in
+plane strain - span `l` along `x`, depth `2c = 0.2`, one cell through the
+thickness with symmetry planes on both faces, the closed form's parabolic
+shear on the free end and its own displacement on the built-in end, `E = 200`
+GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on three meshes
+of cubic cells with `n_y = 4, 8, 16` through the depth. Per ratio: the loop
+converges on every mesh, the observed order of the cell-centre displacement
+error is at least 1.9, that of the cell-centre stress error at least 0.9, and
+the finest mesh's tip deflection is within 5 % of the closed form; §94's
+study of the tip deflection is its uncertainty. The measured table is §109.7's.
+
+### 109.7 Gate 95-A, measured
+
+`ofgpu-validate`, RTX 5070 Ti, f64, the controls of §109.6: the block solve
+to (109.11) `1e-12` per application, Anderson of depth five, eight decades of
+`r = F(u) - u` or 1000 outer iterations. `e_tip`, `e_u`, `e_xx`, `e_xy` are
+the relative tip-deflection error and the three error measures of §109.6
+(`e_u` a maximum over cells against the largest exact displacement; the two
+stress errors volume-weighted rms against `P l c / I`).
+
+| ratio | `n_y` | cells | outer | `q_obs` | BiCGStab | `e_tip` | `e_u` | `e_xx` | `e_xy` |
+|---|---|---|---|---|---|---|---|---|---|
+| 2.5:1 | 4 | 40 | 93 | 0.641 | 1663 | 2.71e-2 | 2.75e-2 | 1.44e-2 | 1.34e-2 |
+| 2.5:1 | 8 | 160 | 33 | 0.545 | 1203 | 4.02e-3 | 4.05e-3 | 3.91e-3 | 4.88e-3 |
+| 2.5:1 | 16 | 640 | 31 | 0.479 | 2363 | 6.73e-4 | 6.97e-4 | 1.35e-3 | 1.74e-3 |
+| 5:1 | 4 | 80 | diverged at 673 | - | - | - | - | - | - |
+| 5:1 | 8 | 320 | 200 | 0.682 | 10198 | 1.98e-5 | 5.78e-4 | 3.76e-3 | 3.44e-3 |
+| 5:1 | 16 | 1280 | 52 | 0.553 | 6124 | 2.59e-4 | 2.63e-4 | 1.34e-3 | 1.23e-3 |
+| 10:1 | 4 | 160 | 1000, not converged | 0.992 | 68571 | - | - | - | - |
+| 10:1 | 8 | 640 | 730 | 0.826 | 84432 | 1.40e-3 | 1.40e-3 | 3.66e-3 | 2.43e-3 |
+| 10:1 | 16 | 2560 | 200 | 0.626 | 43339 | 5.66e-4 | 5.66e-4 | 1.32e-3 | 8.64e-4 |
+
+**2.5:1 holds**: converged on all three meshes, `p_u = 2.54`, `p_sigma =
+1.49`, the finest tip 0.07 % off the closed form; §94's study of the tip is
+monotone with `p = 2.79` and `U_fine = 2.6e-7` (0.78 % of the tip).
+**5:1 misses**: the coarsest mesh diverges - Anderson's residual grows a
+million-fold at outer iteration 673 - and the displacement error falls at
+`p_u = 1.14` between the two finer meshes; `p_sigma = 1.49` and the finest
+tip is 0.026 % off. **10:1 misses**: the coarsest mesh stalls at `q_obs =
+0.992` to the cap, and `p_u = 1.31`; `p_sigma = 1.47`, the finest tip 0.057 %
+off. The two studies of 5:1 and 10:1 read nothing, because their coarse level
+is not a converged solve.
+
+What the block solve changes, read beside the segregated loop on the same
+`n_y = 8` beams with the same controls (the ignored measurement
+`the_block_coupled_cantilever_sweep`): 2.5:1 in 33 outer iterations against
+53; 5:1 in 200 against no convergence in 1000 (`q_obs` 1.04); 10:1 in 730
+against no convergence in 1000 (`q_obs` 1.0008). The block-coupled loop
+converges the slender beams the segregated one stalls on, on the meshes that
+resolve them, and it does NOT yet earn Gate 95-A there: the coarse mesh does
+not converge and the displacement order is short of 1.9. Which of the two
+explicit parts of (109.3) - the tangential rows or §2.4's correction - sets
+that order is not measured here; §109.4's third format is the named next step.
+
+### 109.8 The case knob, and what the refusals now say
+
+`mechanics.solver.coupled` (default `false`) picks the map §95.3's loop
+iterates: `false` is §95's three scalar solves, bitwise what it always was;
+`true` is (109.12). The loop controls are the same either way - Anderson of
+depth five, `tolerance` as decades of `r = F(u) - u`, `maxOuter` and its
+refusal (§96.3 row 21) - and the block solve's own linear controls are the
+case's one `numerics` block, whose `solver` and `preconditioner` name the
+scalar systems' method and are not read by it: it is always BiCGStab with
+block-DILU, and `GAMG` is refused by name. `coupled: true` with `materials`
+is refused at lowering (§96.3 row 22).
+
+The rule for the refusals is the user's, recorded 2026-09-23: the
+slenderness refusal is lifted only at the aspect ratios where Gate 95-A
+holds. It holds at 2.5:1, which the segregated edge of five already accepts,
+so nothing is lifted: `SLENDERNESS_MAX` stays five and
+`refuse_bending_dominated_slender_body` refuses what it refused, with a
+message that says what the block solve measured. The refusal is still not
+called by the case path, as it never was - the shipped bimetal strip and die
+stack score above five and converge - and the banner prints each mechanical
+region's slenderness with its verdict and the method that will run. `nu`
+above 0.45 stays refused in both modes: Gate 95-A measures bending, not
+incompressibility. The `not built` refusal of a block-coupled solve is gone
+with the feature built.
 
 ---

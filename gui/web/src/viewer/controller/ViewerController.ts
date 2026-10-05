@@ -40,6 +40,27 @@ export class ViewerError extends Error {
   }
 }
 
+/** The 3-D canvas rect in CSS pixels, window coordinates. */
+export interface ViewportRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+export interface ProbeHit {
+  cell: number
+  /** The coloured field's value in that cell (its selected component), or null when no field is coloured / cached. */
+  value: number | null
+  field: string | null
+  /** Cell centre when known; see centerFor(). */
+  center: [number, number, number] | null
+}
+
+export type ProbeOutcome =
+  | { ok: true; hit: ProbeHit }
+  | { ok: false; code: 'NO_VIEWER' | 'NO_DATASET' | 'NO_STRUCTURED_GRID' | 'MISS'; message: string }
+
 type Listener = (state: ViewerState) => void
 
 const DEFAULT_CAMERA: CameraPose = { position: [10, 10, 10], target: [0, 0, 0], projection: 'perspective' }
@@ -133,11 +154,41 @@ export class ViewerController {
     if (!this.view || !this.dataset) return null
     const cell = this.view.pick(clientX, clientY)
     if (cell < 0) return null
-    const raw = this.cachedField(this.field?.name ?? '', this.timeIndex)
-    if (!raw || !this.field) return { cell, value: null }
-    const c = this.field.components
-    const value = c === 1 ? raw[cell] : scalarOf(raw.subarray(cell * 3, cell * 3 + 3), 3, this.field.component)[0]
-    return { cell, value }
+    return { cell, value: this.valueAt(cell) }
+  }
+
+  /** The canvas rect in CSS pixels (window coordinates), or null with no canvas mounted. */
+  viewport(): ViewportRect | null {
+    return this.view ? this.view.viewport() : null
+  }
+
+  /** Cell under a window pixel and the coloured field's value there. */
+  probePixel(clientX: number, clientY: number): ProbeOutcome {
+    if (!this.view) return { ok: false, code: 'NO_VIEWER', message: 'no viewer canvas is mounted' }
+    if (!this.dataset) return { ok: false, code: 'NO_DATASET', message: 'no result is loaded in the viewer' }
+    const cell = this.view.pick(clientX, clientY)
+    if (cell < 0) return { ok: false, code: 'MISS', message: 'no cell under that point' }
+    return { ok: true, hit: { cell, value: this.valueAt(cell), field: this.field?.name ?? null, center: this.centerFor(cell, null) } }
+  }
+
+  /** Cell containing a world point (structured grids only) and the coloured field's value there. */
+  probePoint(point: [number, number, number]): ProbeOutcome {
+    if (!this.dataset) return { ok: false, code: 'NO_DATASET', message: 'no result is loaded in the viewer' }
+    const g = this.dataset.grid
+    if (!g) {
+      return {
+        ok: false,
+        code: 'NO_STRUCTURED_GRID',
+        message: `${this.dataset.manifest.name} has no structured grid (${this.dataset.manifest.source}); a world point cannot be located - probe by fx,fy, x,y or at:"center"`,
+      }
+    }
+    const i = g.locateAxis(0, point[0])
+    const j = g.locateAxis(1, point[1])
+    const k = g.locateAxis(2, point[2])
+    if (i < 0 || j < 0 || k < 0) return { ok: false, code: 'MISS', message: 'the point lies outside the domain' }
+    const cell = g.cellIndex(i, j, k)
+    if (cell < 0) return { ok: false, code: 'MISS', message: 'the point lies inside a body (no cell there)' }
+    return { ok: true, hit: { cell, value: this.valueAt(cell), field: this.field?.name ?? null, center: this.centerFor(cell, [i, j, k]) } }
   }
 
   /** Attach the renderer; rebuilds everything the model already holds. */
@@ -703,6 +754,30 @@ export class ViewerController {
     const blob = ds ? this.loader.fieldRef(ds.manifest, name, timeIndex) : null
     if (!ds || !blob) return null
     return (this.loader.cache.get(scopedKey(ds.manifest.id, blob.key)) as Float32Array | undefined) ?? null
+  }
+
+  /** The coloured field's value in one cell (its selected component), or null when no field is coloured / cached. */
+  private valueAt(cell: number): number | null {
+    const raw = this.cachedField(this.field?.name ?? '', this.timeIndex)
+    if (!raw || !this.field) return null
+    const c = this.field.components
+    return c === 1 ? raw[cell] : scalarOf(raw.subarray(cell * 3, cell * 3 + 3), 3, this.field.component)[0]
+  }
+
+  /** Cell centre when it can be known: from the site for a point probe, from the cell on a hole-free grid;
+   *  null on a cut-cell mesh (centerOf is wrong when index is set - StructuredGrid.ts says so). */
+  private centerFor(cell: number, site: [number, number, number] | null): [number, number, number] | null {
+    const g = this.dataset?.grid
+    if (!g) return null
+    if (site) {
+      const c = g.centerOfSite(site[0], site[1], site[2])
+      return [c[0], c[1], c[2]]
+    }
+    if (g.index === null) {
+      const c = g.centerOf(cell)
+      return [c[0], c[1], c[2]]
+    }
+    return null
   }
 
   private resolvePosition(axis: 'x' | 'y' | 'z', position: SlicePosition): number {

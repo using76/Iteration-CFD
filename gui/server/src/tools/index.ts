@@ -8,7 +8,13 @@ import type { BetaImageBlockParam, BetaTextBlockParam, BetaTool, BetaToolResultB
 import { TOOL_NAMES } from '@cfd/shared'
 import { z } from 'zod'
 import { toWorkspaceRel } from '../workspace/paths.js'
+import { autonomyAttempts } from './autonomy.js'
+import { autonomyProposeEdit } from './autonomyEdit.js'
 import { caseCreate, caseEdit, caseRead, caseValidate } from './case.js'
+import { cadBuild, cadEvaluate, cadStudyStatus } from './cadLoop.js'
+import { cadProposeEdit } from './cadEdit.js'
+import { cadRequirementsApply, cadRequirementsPropose, cadTemplateList } from './cadReqs.js'
+import { cadTemplateFreeze, cadTemplatePropose } from './cadTemplate.js'
 import { errorMessage, fail, type ToolContext, type ToolDef, type ToolResult } from './context.js'
 import { customToolCreate, customToolRun } from './custom.js'
 import { forgive } from './forgive.js'
@@ -54,6 +60,8 @@ export const TOOLS: ToolDef[] = [
   geometryEdit,
   meshRegions,
   regionsCheck,
+  autonomyAttempts,
+  autonomyProposeEdit,
   residualsGet,
   viewerCommand,
   plotResiduals,
@@ -72,6 +80,15 @@ export const TOOLS: ToolDef[] = [
   ontologyQuery,
   ontologyAct,
   ontologyApply,
+  cadTemplateList,
+  cadRequirementsPropose,
+  cadRequirementsApply,
+  cadBuild,
+  cadEvaluate,
+  cadStudyStatus,
+  cadProposeEdit,
+  cadTemplatePropose,
+  cadTemplateFreeze,
 ]
 
 const byName = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]))
@@ -249,7 +266,10 @@ export function toolTimeoutMs(tool: ToolDef, ctx: Pick<ToolContext, 'config'>): 
 export async function runTool(name: string, input: unknown, ctx: ToolContext): Promise<ToolResult> {
   const tool = byName.get(name)
   if (!tool) return fail('UNKNOWN_TOOL', `no tool named ${name}`)
-  const parsed = tool.schema.safeParse(forgiveToolInput(name, input))
+  const forgiven = forgiveToolInput(name, input)
+  const refused = tool.refuse?.(forgiven, ctx) ?? null
+  if (refused) return refused
+  const parsed = tool.schema.safeParse(forgiven)
   if (!parsed.success) return fail('INVALID_INPUT', `invalid input for ${name}: ${issues(parsed.error)}`)
   if (ctx.signal.aborted) return fail('CANCELLED', 'cancelled by user')
   try {

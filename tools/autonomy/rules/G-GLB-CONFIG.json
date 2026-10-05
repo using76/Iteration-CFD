@@ -1,0 +1,250 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 \uc8fc\uc2dd\ud68c\uc0ac \uc774\ud130\ub808\uc774\uc158\uc988 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "bundle": "tools/autonomy/aml/tuning_rules_L5.json.gz",
+ "bundle_sha256": "75acc3b0ca373ed191964e39e85542c281bda1b917e1960f98168ab27bec2615",
+ "changed": [
+  {
+   "geometry_id": "A-1-053",
+   "growth": [
+    1.159,
+    1.0
+   ],
+   "pointers": [
+    "/layers/growth",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/level",
+    "/refinement/levels/0/feature_level",
+    "/refinement/max_level",
+    "/snap/feature_tolerance"
+   ],
+   "predicted_cells": [
+    216212,
+    1014922
+   ],
+   "wall_level": [
+    4,
+    5
+   ]
+  },
+  {
+   "geometry_id": "D-1-003",
+   "growth": [
+    1.17,
+    1.17
+   ],
+   "pointers": [
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/distance",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/distance",
+    "/refinement/levels/0/bands/2/level"
+   ],
+   "predicted_cells": [
+    435568,
+    1188901
+   ],
+   "wall_level": [
+    5,
+    6
+   ]
+  },
+  {
+   "geometry_id": "D-1-073",
+   "growth": [
+    1.151,
+    1.0
+   ],
+   "pointers": [
+    "/layers/growth",
+    "/refinement/levels/0/bands/0/distance",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/level",
+    "/refinement/levels/0/feature_level",
+    "/refinement/max_level",
+    "/snap/feature_tolerance"
+   ],
+   "predicted_cells": [
+    53582,
+    161153
+   ],
+   "wall_level": [
+    3,
+    4
+   ]
+  },
+  {
+   "geometry_id": "E-1-015",
+   "growth": [
+    1.161,
+    1.161
+   ],
+   "pointers": [
+    "/refinement/levels/0/bands/0/distance",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/distance",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/distance",
+    "/refinement/levels/0/bands/2/level"
+   ],
+   "predicted_cells": [
+    650028,
+    1342438
+   ],
+   "wall_level": [
+    5,
+    6
+   ]
+  },
+  {
+   "geometry_id": "F-1-005",
+   "growth": [
+    1.152,
+    1.0
+   ],
+   "pointers": [
+    "/layers/growth",
+    "/refinement/levels/0/bands/0/distance",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/level",
+    "/refinement/levels/0/feature_level",
+    "/refinement/max_level",
+    "/snap/feature_tolerance"
+   ],
+   "predicted_cells": [
+    29456,
+    82449
+   ],
+   "wall_level": [
+    3,
+    4
+   ]
+  },
+  {
+   "geometry_id": "F-1-009",
+   "growth": [
+    1.15,
+    1.0
+   ],
+   "pointers": [
+    "/layers/growth",
+    "/refinement/levels/0/bands/0/distance",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/level",
+    "/refinement/levels/0/feature_level",
+    "/refinement/max_level",
+    "/snap/feature_tolerance"
+   ],
+   "predicted_cells": [
+    60374,
+    168482
+   ],
+   "wall_level": [
+    3,
+    4
+   ]
+  },
+  {
+   "geometry_id": "F-1-016",
+   "growth": [
+    1.165,
+    1.0
+   ],
+   "pointers": [
+    "/layers/growth",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/level",
+    "/refinement/levels/0/feature_level",
+    "/refinement/max_level",
+    "/snap/feature_tolerance"
+   ],
+   "predicted_cells": [
+    135354,
+    528075
+   ],
+   "wall_level": [
+    4,
+    5
+   ]
+  },
+  {
+   "geometry_id": "F-1-025",
+   "growth": [
+    1.158,
+    1.0
+   ],
+   "pointers": [
+    "/layers/growth",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/level",
+    "/refinement/levels/0/feature_level",
+    "/refinement/max_level",
+    "/snap/feature_tolerance"
+   ],
+   "predicted_cells": [
+    97403,
+    382602
+   ],
+   "wall_level": [
+    4,
+    5
+   ]
+  },
+  {
+   "geometry_id": "G-1-054",
+   "growth": [
+    1.156,
+    1.0
+   ],
+   "pointers": [
+    "/layers/growth",
+    "/refinement/levels/0/bands/0/level",
+    "/refinement/levels/0/bands/1/level",
+    "/refinement/levels/0/bands/2/level",
+    "/refinement/levels/0/feature_level",
+    "/refinement/max_level",
+    "/snap/feature_tolerance"
+   ],
+   "predicted_cells": [
+    141534,
+    553239
+   ],
+   "wall_level": [
+    4,
+    5
+   ]
+  }
+ ],
+ "counts": {
+  "no_fingerprint": 48,
+  "plane": 37,
+  "refused": 15,
+  "rows": 372,
+  "snapped": 320
+ },
+ "date": "2026-10-03",
+ "git_head": "30333c77cb4469ee5274250b8651eb0dacfdd242",
+ "identity": {
+  "bad": [],
+  "n": 356
+ },
+ "margin": {
+  "finer": 46,
+  "given_up": 7,
+  "met": 320,
+  "not_met": 0
+ },
+ "preflight": {
+  "bad": [],
+  "n0": 1,
+  "n1": 1
+ },
+ "rules_refusals_changed": [],
+ "schema": "autonomy-glb-config-gate/1",
+ "verdict": "PASS"
+}

@@ -192,6 +192,6 @@ export const DC_CAPABILITY_ANCHORS: Record<string, Anchor> = Object.freeze({
   'CAP-GATE-WALLVALID': { file: 'rust/src/bin/datacentre.rs', symbol: 'WallFunctionCoeffs::default()' },
   'CAP-FIELDOUT-DC': { file: 'rust/src/bin/datacentre.rs', symbol: 'fn write_csv(' },
   'CAP-TRANSIENT-DC': { file: 'rust/src/io/case_dc.rs', symbol: 'pub struct DcRun' },
-  'CAP-SWEEP-DC': { file: 'rust/src/io/case_dc.rs', symbol: 'supply_temperature_sweep' },
+  'CAP-SWEEP-DC': { file: 'rust/src/io/case_dc.rs', symbol: 'pub supply_temperature_sweep:' },
   'CAP-COIL': { file: 'rust/src/io/case_dc.rs', symbol: 'pub struct DcFan' },
 })

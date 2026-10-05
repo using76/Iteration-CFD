@@ -1,0 +1,58 @@
+{
+ "domain": {
+  "base_size": 0.4785,
+  "extent": [
+   -3.3495,
+   7.1775,
+   -2.871,
+   2.871,
+   -2.3925,
+   3.3495
+  ]
+ },
+ "input": {
+  "surfaces": [
+   {
+    "path": "stl/F-1-009.stl"
+   }
+  ]
+ },
+ "layers": {
+  "first_thickness": 0.001088,
+  "growth": 1.338,
+  "n": 8,
+  "patches": [
+   "body"
+  ]
+ },
+ "output": {
+  "case_dir": "cases/F-1-009",
+  "name": "F-1-009"
+ },
+ "refinement": {
+  "levels": [
+   {
+    "bands": [
+     {
+      "distance": 0.1794375,
+      "level": 3
+     },
+     {
+      "distance": 0.47850000000000004,
+      "level": 2
+     },
+     {
+      "distance": 1.4355000000000002,
+      "level": 1
+     }
+    ],
+    "feature_level": 4,
+    "patch": "body"
+   }
+  ],
+  "max_level": 4
+ },
+ "snap": {
+  "feature_tolerance": 0.0
+ }
+}

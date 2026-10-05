@@ -52,8 +52,12 @@
 #define OFPATCH_PROCESSOR 5
 #define OFPATCH_INTERFACE 6
 
-//- Vec3::normalised stays zero below this magnitude.
+//- Vec3::normalised stays zero below this magnitude. Paired per precision, SPEC-LIT 112.1.
+#ifdef OFGPU_SINGLE
+#define OFGPU_DBL_MIN 1.17549435e-38f
+#else
 #define OFGPU_DBL_MIN 2.2250738585072014e-308
+#endif
 
 // --------------------------------------------------------------------------
 //  Contractions, in SPEC-LIT section 1's index convention G_ij = du_j/dx_i -

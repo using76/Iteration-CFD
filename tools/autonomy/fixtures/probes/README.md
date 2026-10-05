@@ -31,3 +31,28 @@ user's three decisions: F3a is `n_pinned_boundary / n_boundary_points`, F3d is e
 `score.py` never writes it.
 The docs/15 text counts "26 probes"; the surveys' saved outputs hold 31 distinct runs (21 box_sphere and
 cube probes, 10 corpus probes; the 12 timing replicas of wing_b L4 are not frozen), and all 31 are here.
+
+**The capture signal (2026-09-27).** The 13 probes with a sharp edge whose attraction reached it (`box_L4`,
+`cube_cf`, `cube_n5`, `cube_ok`, `cubep_cf`, `cubep_defaults`, `cubep_ok`, `wb_L4`, `wing_a_L3`, `wing_a_L4`,
+`wing_a_L5`, `wing_b_L4`, `wing_c_L4`) were re-run, in a fresh mirror of the survey tree, with the mesh tree's
+release binary (sha256 `7ff16117...`; output-only against `054bba67...` by lreplay's 97-row replay). Every
+mesh number of every re-run summary equals the frozen one; what differs is the time fields, `identity`, the
+mirror's paths, and the keys the binary adds (`stages[snap].feature_capture`, (92.62), and the layer stage's
+`ladder` and `drop_cause`). **Only `stages[snap].feature_capture` was spliced into those 13 `summary.json`
+files, at its sorted key position; every other byte is the 2026-09-24 freeze.** Their `labels.json` expect
+carries `feature_capture = captured_length_m / sharp_length_m` and `F3e: false`; every share is above 0.
+The other 18 probes are unchanged: their F3e does not depend on the signal (no sharp edge, the attraction
+off, or a refused run).
+
+**The chain form and D-L5 (2026-10-02).** The 13 `feature_capture` signals above were measured per feature
+segment (binary `7ff16117`), and the user's D-L5 threshold applies to the chain form of (92.62) (the L0c build,
+binary `72f7851e`, and later). So the 13 probes were re-run once more, in a fresh mirror of the survey tree,
+with `72f7851e`. Every mesh number of every re-run summary equals the frozen one again (the differences are
+the time fields, `identity`, the mirror's paths, and the layer stage's `ladder` and `drop_cause` keys). Only
+the value of `stages[snap].feature_capture` was replaced; its keys, their order and every other byte are as
+before. `sharp_length_m` and `tol_m` are bit-equal; `captured_length_m` changed on the 7 corpus probes and on
+none of the 6 cubes (their edges are single segments). The chain-form shares are 0.4849 (`wing_a_L3`), 0.5410
+(`wing_a_L4`), 0.5582 (`wing_a_L5`), 0.6167 (`wb_L4`), 0.7036 (`wing_c_L4`), 0.7956 (`wing_b_L4`), 0.9997
+(`box_L4`) and 0.9994 / 0.9997 on the cubes, where the per-segment form read 0.0217 to 0.9722 on the corpus
+probes. Their `labels.json` expect carries the chain-form share and `F3e = share < 0.5` (gates.json
+`feature_capture_min`), so `wing_a_L3` fails F3e and the other 12 pass it.

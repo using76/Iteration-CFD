@@ -11,7 +11,8 @@
 //! ```text
 //! ofgpu-lowmach <case> [options]
 //!
-//!   -iters N          steady outer iterations (default 1000)
+//!   -iters N          steady outer iterations (default 1000); after
+//!                     -restartFrom, N MORE (SPEC-LIT §44.9)
 //!   -check N          print diagnostics every N iterations (default 50)
 //!   -permissive       downgrade unsupported-setting errors to warnings
 //!
@@ -27,11 +28,14 @@
 //!                     over the whole domain - SPEC-LIT §18's registry.
 //!
 //!   -output LIST      comma list of foam,vtu,nvdb,vdb,usda (default: foam)
-//!   -writeInterval W  write every W seconds of PHYSICAL time (transient
-//!                     only; absent means "write the final state only")
+//!   -writeInterval W  write every W seconds of PHYSICAL time - TRANSIENT
+//!                     runs only; a steady run refuses it by name (§44.4)
+//!   -writeEvery N     write every N iterations - the STEADY run's schedule
+//!                     (§44.4); a transient run refuses it by name
 //!   -restartWrite N   write a `.mcr` checkpoint every N steps
 //!   -restartFrom FILE resume from a checkpoint - p0 and dp0dt included
 //!                     (SPEC-LIT §25.2/§31.2)
+//!                     a steady checkpoint's time is its iteration count (§44.9)
 //! ```
 //!
 //! Written from `ofgpu SPEC-LIT.md` sections 25 (the low-Mach formulation)
@@ -126,6 +130,15 @@
 //! model's own fields (`k`/`epsilon` or `k`/`omega`, `nut` - SPEC-LIT
 //! §30.2's `CoupledTurbulence::output_fields`) and `rho` - `write_time`,
 //! below, `ofgpu-buoyant`/`ofgpu-vof`'s own `io::writer` seam.
+//!
+//! Where the final state goes - SPEC-LIT §44.9: a transient run labels it by
+//! its end time; a steady run labels it by its ITERATION COUNT (`-iters 200`
+//! writes `200/`), and a `.mcr` written by a steady run carries that count in
+//! its `time` slot, so `-restartFrom` continues it (`-iters N` is N more).
+//! `0/` is what the case shipped and is never written. A transient run
+//! resumed from a steady checkpoint needs `-endTime` above the count, and is
+//! refused by name otherwise.
+//!
 //! `-restartWrite N`/`-restartFrom FILE` are
 //! `restart::write_restart`/`read_restart`, in the `.mcr` format of
 //! `docs/05-io-redesign.md` §4.6.
@@ -137,6 +150,17 @@
 //! and `ofgpu::restart`'s "Version 2: `dp0dt`" note for the one part of that
 //! state the `.mcr` format did not carry until this section's own gate test
 //! found the gap.
+//!
+//! # How a run ends (SPEC-LIT §31.4)
+//!
+//! The LAST line the driver writes, on stdout, names how it ended:
+//! `run ended: <word> | <detail> | exit code <n>`. The four words and
+//! their codes: `budget` (0) - the `-iters`/`-endTime` budget was
+//! reached; `diverged` (2) - a field went non-finite, and nothing is
+//! written; `refused` (3) - a setting refused by name under §13.4,
+//! including the §93.6 Mach check; `error` (1) - everything else. No
+//! signal handler is installed: a killed process prints no line, and
+//! the parent reads the operating system's termination status.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -156,6 +180,11 @@ use ofgpu::field_setup::{
 };
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField, RawVectorField};
+use ofgpu::io::case_json::{LoweredCase, LoweredMotion};
+use ofgpu::mesh::ale::AleMesh;
+use ofgpu::mesh::gpugeom::flatten_faces;
+use ofgpu::mesh::motion::{MeshMotion, PatchMotion};
+use ofgpu::mesh::PatchKind;
 use ofgpu::models::{
     build_coupled, select_turbulence_model, CoupledTurbulence, RasModel, ThermalCtx,
 };
@@ -181,6 +210,7 @@ use ofgpu::restart::{self, RestartData};
 //  Command line
 // ==========================================================================
 
+#[derive(Debug)]
 struct Options {
     case_path: PathBuf,
     n_iters: i64,
@@ -192,10 +222,16 @@ struct Options {
     heater_power: Scalar,
     /// `-output foam|vtu|nvdb|vdb|usda`, comma list.
     output: Vec<OutputFormat>,
-    /// `-writeInterval W` - write every W seconds of PHYSICAL time. Non-
-    /// positive means "not given": only the final state is written, exactly
-    /// as `ofgpu-buoyant`/`ofgpu-vof` treat an absent `-writeInterval`.
+    /// `-writeInterval W` - write every W seconds of PHYSICAL time.
+    /// TRANSIENT runs only; a steady run refuses it by name (SPEC-LIT
+    /// §44.4) instead of the silent zero it used to suffer. Non-positive
+    /// means "not given": only the final state is written.
     write_interval: f64,
+    /// `-writeEvery N` - write every N ITERATIONS, the steady run's own
+    /// schedule (SPEC-LIT §44.4): the same `next = t0 + W` arithmetic with
+    /// the iteration count as its clock. A transient run refuses it by
+    /// name - it has a clock, `-writeInterval`.
+    write_every: Option<u64>,
     /// `-restartWrite N` - write a `.mcr` checkpoint every N steps.
     restart_write: Option<u64>,
     /// `-restartFrom FILE` - load state from a checkpoint, skipping
@@ -203,8 +239,8 @@ struct Options {
     /// potential-flow-equivalent `phi` seed, and every field's own initial
     /// condition).
     restart_from: Option<PathBuf>,
-    /// Which of `-output`, `-writeInterval`, `-restartWrite` this command
-    /// line actually NAMED - SPEC-LIT §44.6.
+    /// Which of `-output`, `-writeInterval`, `-writeEvery`, `-restartWrite`
+    /// this command line actually NAMED - SPEC-LIT §44.6.
     ///
     /// Not the same question as "what are they set to": `-output` defaults to
     /// `foam` and `write_interval` to `0`, so every run has values for all
@@ -219,7 +255,7 @@ fn usage() {
     eprintln!(
         "usage: ofgpu-lowmach <case> [-iters N] [-check N] [-endTime T] [-deltaT dt]\n       \
          [-sealed] [-p0 PA] [-heaterPower W] [-output LIST]\n       \
-         [-writeInterval W] [-restartWrite N] [-restartFrom FILE] [-permissive]"
+         [-writeInterval W] [-writeEvery N] [-restartWrite N] [-restartFrom FILE] [-permissive]"
     );
 }
 
@@ -249,6 +285,7 @@ fn parse(args: &[String]) -> Result<Options> {
         heater_power: 0.0,
         output: vec![OutputFormat::Foam],
         write_interval: 0.0,
+        write_every: None,
         restart_write: None,
         restart_from: None,
         output_flags: Vec::new(),
@@ -286,6 +323,16 @@ fn parse(args: &[String]) -> Result<Options> {
                 o.write_interval = parse_time("-writeInterval", &next_arg(args, &mut i)?)?;
                 o.output_flags.push("-writeInterval");
             }
+            "-writeEvery" => {
+                let n = atoi(&next_arg(args, &mut i)?);
+                if n <= 0 {
+                    return Err(Error::Config(
+                        "-writeEvery needs a positive iteration count".to_string(),
+                    ));
+                }
+                o.write_every = Some(n as u64);
+                o.output_flags.push("-writeEvery");
+            }
             "-restartWrite" => {
                 let n = atoi(&next_arg(args, &mut i)?);
                 if n <= 0 {
@@ -318,6 +365,37 @@ fn parse(args: &[String]) -> Result<Options> {
     }
     if o.n_iters <= 0 {
         return Err(Error::Config(format!("-iters is {}; it must be positive", o.n_iters)));
+    }
+
+    // SPEC-LIT §44.4: `-writeInterval` is seconds of PHYSICAL time, and a
+    // steady run advances an iteration counter, not a clock - refused by
+    // name here, exactly as the case route's `output.*.interval` is, rather
+    // than the silent zero this driver used to apply.
+    if !(o.end_time > 0.0) && o.write_interval > 0.0 {
+        ofgpu::io::contract::unsupported_note(
+            "-writeInterval",
+            &format!("{}", o.write_interval),
+            &[],
+            "-writeInterval is seconds of PHYSICAL time, and this ofgpu-lowmach run is steady - it advances an iteration counter, not a clock. Use -writeEvery N to write every N iterations, or -endTime T -deltaT dt for a transient run; without either it writes its final state once",
+            "the final state only",
+            (),
+        )?;
+        o.write_interval = 0.0;
+    }
+    // ... and the mirror image: `-writeEvery` counts iterations, which a
+    // transient run has no use for - it has a clock.
+    if o.end_time > 0.0 {
+        if let Some(n) = o.write_every {
+            ofgpu::io::contract::unsupported_note(
+                "-writeEvery",
+                &format!("{n}"),
+                &[],
+                "-writeEvery counts iterations, and this ofgpu-lowmach run is transient (-endTime/-deltaT given) - it has a clock. Use -writeInterval W to write every W seconds of physical time",
+                "the -writeInterval schedule only",
+                (),
+            )?;
+            o.write_every = None;
+        }
     }
 
     Ok(o)
@@ -361,6 +439,31 @@ pub struct IterReport {
     /// False the moment `T`, `rho`, `U` or `p` is caught holding a NaN or an
     /// infinity - the §25/§26 gate this driver exists to demonstrate.
     pub finite: bool,
+}
+
+/// Open a transient time step from the SECOND step on - SPEC-LIT 105.16 and
+/// 105.17. The first step opens nothing, so every equation's counter is 0
+/// during it and `backward` takes its Euler row there, as §105.10's gate loops
+/// start. From the second step on, opening one is exactly these four calls in
+/// this order, `T`'s own rotation among them and ahead of the unit of work's
+/// `GasState::update_density`, which builds `rho^{n-1}` from `T^{n-1}` only if
+/// the rotation has happened.
+fn open_time_step(
+    gpu: &Gpu,
+    s: &mut Simple,
+    energy: &mut Energy,
+    gas: &mut GasState,
+    dt: Scalar,
+    step: usize,
+) -> Result<()> {
+    if step == 0 {
+        return Ok(());
+    }
+    s.begin_time_step(gpu, dt)?;
+    energy.advance_time_levels(gpu)?;
+    energy.advance_time_step(dt);
+    gas.advance_time_levels();
+    Ok(())
 }
 
 /// One pass of the module doc's "one unit of work" - SPEC-LIT §25/§26,
@@ -413,7 +516,7 @@ pub fn outer_iteration(
     // `U` and `p` at its own top - `crate::field_ops::update_inlet_outlet`'s
     // own doc: "faces of every other kind are untouched", so this is a no-op
     // wherever the case gave `T` a plain fixedValue/zeroGradient instead.
-    update_inlet_outlet_scalar(gpu, &fk, energy.field_mut(), s.phi())?;
+    update_inlet_outlet_scalar(gpu, &fk, energy.field_mut(), s.convective_flux())?;
 
     gas.update_density(gpu, energy.field())?;
 
@@ -447,7 +550,7 @@ pub fn outer_iteration(
         is_final,
     )?;
 
-    energy.correct(gpu, s.phi(), nut, k, nu, gas)?;
+    energy.correct(gpu, s.convective_flux(), nut, k, nu, gas)?;
 
     if let Some(dt) = dt_for_p0 {
         // SPEC-LIT §25.2 integrates the SAME `Q` §25.1's constraint uses, and
@@ -911,6 +1014,140 @@ fn load_initial_fields(
     }
 }
 
+/// SPEC-LIT 105.12: what a moving-mesh run of this driver cannot honour,
+/// refused by name before a single field is set up. Not downgradable under
+/// `-permissive`: there is nothing to substitute.
+fn refuse_motion_combinations(o: &Options, l: &LoweredCase, model: RasModel, hm: &HostMesh) -> Result<()> {
+    if l.motion.is_none() {
+        return Ok(());
+    }
+    let refuse = |what: &str, why: &str| -> Result<()> {
+        Err(Error::Config(format!("motion: {what} - {why} (SPEC-LIT 105.12)")))
+    };
+    let writers = "the volume writers take the rest points; a moving mesh writes -output foam";
+    let checkpoint = "a checkpoint carries no mesh points and no volume history";
+    if !(o.end_time > 0.0) {
+        return refuse("a steady run", "a moving mesh needs time to move in; give -endTime and -deltaT");
+    }
+    if o.restart_from.is_some() {
+        return refuse("-restartFrom", checkpoint);
+    }
+    if o.restart_write.is_some() {
+        return refuse("-restartWrite", checkpoint);
+    }
+    if o.heater_power != 0.0 {
+        return refuse("-heaterPower", "the heater is spread over the rest volume, and the volume moves");
+    }
+    if o.sealed {
+        return refuse("-sealed", "the sealed p0 equation holds the domain volume fixed");
+    }
+    if model != RasModel::Laminar {
+        return refuse(
+            model.name(),
+            "a turbulence model's wall distance and time derivatives are the static mesh's; a moving mesh runs laminar",
+        );
+    }
+    if !l.sources.is_empty() {
+        return refuse("sources", "a source's volume integral is the rest mesh's");
+    }
+    if l.output.is_some() {
+        return refuse("the case's output block", writers);
+    }
+    if let Some(f) = o.output.iter().find(|f| !matches!(f, OutputFormat::Foam)) {
+        return refuse(&format!("-output {}", f.name()), writers);
+    }
+    if hm.patches.iter().any(|p| p.kind == PatchKind::Cyclic) {
+        return refuse("a cyclic pair", "the periodic channel's reports divide by the rest volume");
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 105.8 and SPEC-LIT 105.12: a moving wall's velocity is written as
+/// a fixed value, so every `motion.walls` patch must carry one - at its law's
+/// velocity at `t = 0`, the value the first step's flux is seeded from - and
+/// a `move` patch that carries one must be listed as a wall.
+fn check_motion_walls(l: &LoweredCase) -> Result<()> {
+    let Some(lm) = &l.motion else { return Ok(()) };
+    let u_type = |name: &str| -> Result<(String, BcKind)> {
+        let spec = l.u_field.boundary.get(name).ok_or_else(|| {
+            Error::Config(format!("motion: patch {name} has no U condition in this case (SPEC-LIT 105.12)"))
+        })?;
+        Ok((spec.type_name.clone(), BcKind::from_name(&spec.type_name, "U", name)?))
+    };
+    for w in &lm.walls {
+        let (t, k) = u_type(w)?;
+        if k != BcKind::FixedValue {
+            return Err(Error::Config(format!(
+                "motion: motion.walls names {w}, whose U condition is {t}; a moving wall's velocity \
+                 is written as a fixedValue (SPEC-LIT 105.8)"
+            )));
+        }
+        // The case's value is what `seed_phi_from_u` builds the first step's
+        // flux from, before the first `move_mesh` writes the wall's own
+        // velocity: a wall written at any other velocity starts the run with
+        // a flux the moving mesh contradicts, and an impulsive pressure
+        // transient the case never asked for.
+        let law = lm.rules.iter().find_map(|(n, r)| match r {
+            PatchMotion::Move(d) if n == w => Some(*d),
+            _ => None,
+        });
+        if let Some(d) = law {
+            let v0 = match d {
+                ofgpu::mesh::motion::Displacement::Linear { velocity } => velocity,
+                ofgpu::mesh::motion::Displacement::Sine { amplitude, period } => {
+                    amplitude * (2.0 * std::f64::consts::PI as Scalar / period)
+                }
+            };
+            let u = l.u_field.boundary[w.as_str()].value_v.first().copied().unwrap_or(ofgpu::Vec3::ZERO);
+            let scale = v0.mag().max(u.mag()).max(Scalar::MIN_POSITIVE);
+            if (u - v0).mag() > 1e-9 * scale {
+                return Err(Error::Config(format!(
+                    "motion: motion.walls names {w}, whose U value ({} {} {}) is not its law's \
+                     velocity at t = 0 ({} {} {}); the first step's flux is seeded from the case's \
+                     value - write the law's velocity (SPEC-LIT 105.12)",
+                    u.x, u.y, u.z, v0.x, v0.y, v0.z
+                )));
+            }
+        }
+    }
+    for (name, rule) in &lm.rules {
+        if matches!(rule, PatchMotion::Move(_)) && !lm.walls.contains(name) && u_type(name)?.1 == BcKind::FixedValue {
+            return Err(Error::Config(format!(
+                "motion: patch {name} moves and its U is a fixed value, but motion.walls does not name \
+                 it; a fixed velocity on a moving patch would push fluid through it - list it in \
+                 motion.walls (SPEC-LIT 105.12)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 105.12: build the case's motion on its own block mesh and attach
+/// it to `s`. Returns the motion the loop moves the points with.
+fn attach_case_motion(
+    gpu: &Gpu,
+    hm: &HostMesh,
+    mesh: &GpuMesh,
+    s: &mut Simple<'_>,
+    l: &LoweredCase,
+    lm: &LoweredMotion,
+) -> Result<MeshMotion> {
+    let raw = ofgpu::blockgen::raw_mesh(&l.block)?;
+    let motion = MeshMotion::new(hm, &raw.points, &raw.faces, &lm.rule_table())?;
+    let wall_faces = motion.wall_faces(hm, &lm.wall_names())?;
+    let csr = flatten_faces(&raw.faces);
+    let ale = AleMesh::new(gpu, hm, mesh, &raw.points, &csr)?;
+    s.attach_motion(gpu, ale, &wall_faces)?;
+    println!(
+        "motion (SPEC-LIT 105.12): {} patch rules, {} control points, {} free points, {} moving-wall faces; \
+         the written time directories carry the fields, the points at time t are the case's points_at(t)",
+        lm.rules.len(),
+        motion.n_control(),
+        motion.n_free(),
+        wall_faces.len()
+    );
+    Ok(motion)
+}
 /// `Simple` owns `U` and `phi` in the same struct, so
 /// `field_setup::compute_phi_from_u(gpu, s.phi_mut(), s.u(), hm)` cannot be
 /// called directly - the two accessors borrow all of `s`, mutably and
@@ -1304,17 +1541,24 @@ momentum predictor {}{}",
 /// iteration, and a `cuMemGetInfo` per step would put a driver round trip
 /// and a stream synchronise inside the wall time a run is also being judged
 /// on.
+///
+/// The pool figure counts this process alone; the whole-card difference
+/// above can also move when another process on the card allocates or frees
+/// (SPEC-LIT 111.1).
 struct MemWatch {
     baseline_free: usize,
     total: usize,
     peak: usize,
+    pool_baseline: u64,
+    pool_peak: u64,
 }
 
 impl MemWatch {
     fn new(gpu: &Gpu) -> Result<Self> {
         gpu.sync()?;
         let (free, total) = gpu.mem_info()?;
-        Ok(Self { baseline_free: free, total, peak: 0 })
+        let pool_baseline = gpu.pool_usage()?.used;
+        Ok(Self { baseline_free: free, total, peak: 0, pool_baseline, pool_peak: 0 })
     }
 
     /// One sample. `saturating_sub` because the baseline is a device-wide
@@ -1325,6 +1569,9 @@ impl MemWatch {
         gpu.sync()?;
         let (free, _) = gpu.mem_info()?;
         self.peak = self.peak.max(self.baseline_free.saturating_sub(free));
+        self.pool_peak = self
+            .pool_peak
+            .max(gpu.pool_usage()?.used.saturating_sub(self.pool_baseline));
         Ok(())
     }
 
@@ -1337,17 +1584,20 @@ impl MemWatch {
         let used_now = self.total.saturating_sub(self.baseline_free);
         format!(
             "device memory: {} MiB peak allocated by this run | {} MiB was already \
-             resident of {} MiB before it started | {} B/cell over {} cells",
+             resident of {} MiB before it started | {} B/cell over {} cells \
+             | {} MiB peak in this process's own pool, {} B/cell (SPEC-LIT 111.2)",
             self.peak >> 20,
             used_now >> 20,
             self.total >> 20,
             g(self.peak as f64 / n_cells.max(1) as f64),
-            n_cells
+            n_cells,
+            self.pool_peak >> 20,
+            g(self.pool_peak as f64 / n_cells.max(1) as f64)
         )
     }
 }
 
-fn run(o: &Options) -> Result<()> {
+fn run(o: &Options) -> Result<RunEnd> {
     let t_total = Instant::now();
 
     let gpu = Gpu::new(0)?;
@@ -1371,9 +1621,13 @@ fn run(o: &Options) -> Result<()> {
         Some(p) => {
             let rd = restart::read_restart(p, mesh_hash)?;
             println!(
-                "restart: loaded {} (t = {} s, p0 = {} Pa, mesh hash 0x{:016x} matches)",
+                "restart: loaded {} ({}, p0 = {} Pa, mesh hash 0x{:016x} matches)",
                 p.display(),
-                g(rd.time),
+                if o.end_time > 0.0 {
+                    format!("t = {} s", g(rd.time))
+                } else {
+                    format!("iteration {} - a steady run resumes its count here (SPEC-LIT §44.9)", g(rd.time))
+                },
                 g(rd.p0),
                 mesh_hash
             );
@@ -1502,6 +1756,12 @@ fn run(o: &Options) -> Result<()> {
     }
     common::refuse_unimplemented_blocks(lowered.as_ref())?;
 
+    // SPEC-LIT 105.12: the `motion` block's refusals, before a field exists.
+    if let Some(l) = &lowered {
+        refuse_motion_combinations(o, l, selection.model, &hm)?;
+        check_motion_walls(l)?;
+    }
+
     // SPEC-LIT §44: the `output` block, which used to be part of the refusal
     // above. Resolved here, before a single field is set up, so a case that
     // asks for something impossible fails before any kernel launches -
@@ -1537,6 +1797,17 @@ fn run(o: &Options) -> Result<()> {
             output_plan = None;
         }
     }
+
+    // SPEC-LIT §44.1 on the command-line route: the same early refusal the
+    // case block gets above, with `cartesian::detect`'s own reason in it.
+    // Consulted only when the command line drives (§44.6).
+    let cli_output: Vec<OutputFormat> = match &output_plan {
+        Some(_) => o.output.clone(),
+        None => ofgpu::io::output_plan::drop_volume_formats_on_a_non_cartesian_mesh(
+            &o.output,
+            ofgpu::pressure::cartesian::detect(&hm).err().as_deref(),
+        )?,
+    };
 
     let gas_props = ctrls.gas;
     let simple_ctrl = ctrls.simple;
@@ -1577,6 +1848,15 @@ fn run(o: &Options) -> Result<()> {
     } else {
         seed_phi_from_u(&gpu, &mesh, &mut s, &hm)?;
     }
+
+    // SPEC-LIT 105.12: the case's moving mesh, attached once U, p and phi are seated.
+    let motion: Option<MeshMotion> = match lowered.as_ref() {
+        Some(l) => match &l.motion {
+            Some(lm) => Some(attach_case_motion(&gpu, &hm, &mesh, &mut s, l, lm)?),
+            None => None,
+        },
+        None => None,
+    };
 
     // ---- turbulence -----------------------------------------------------
     //
@@ -1634,7 +1914,7 @@ fn run(o: &Options) -> Result<()> {
         }
     }
 
-    let flow0 = FlowState::new(s.u(), s.phi(), cc.nu);
+    let flow0 = FlowState::new(s.u(), s.convective_flux(), cc.nu);
     turb.initialise(&gpu, &flow0)?;
 
     // ---- energy / gas state ----------------------------------------------
@@ -1700,6 +1980,11 @@ fn run(o: &Options) -> Result<()> {
         let t_field = find_restart_field(rd, "T")?;
         gpu.write(&mut energy.field_mut().f, &from_restart_scalars(&t_field.internal))?;
         gpu.write(&mut energy.field_mut().bf, &from_restart_scalars(&t_field.boundary))?;
+        // SPEC-LIT 105.17: the restarted run's first step is an Euler-row
+        // step, and its old level must be the restored field, not the
+        // cold-start one - seed both of `T`'s old levels from the restore.
+        let fk = FieldKernels::new(&gpu)?;
+        ofgpu::field_ops::seed_old_time(&gpu, &fk, energy.field_mut())?;
     }
 
     // SPEC-LIT §25.2: the requirement of substance in the module doc's
@@ -1990,8 +2275,11 @@ fn run(o: &Options) -> Result<()> {
         None => ofgpu::io::OutputPipeline::from_command_line(
             &out_root_for_writers,
             "lowmach",
-            &o.output,
-            if transient { o.write_interval } else { 0.0 },
+            &cli_output,
+            // SPEC-LIT §44.4: a transient run schedules in seconds; a
+            // steady one feeds the SAME schedule its iteration count as
+            // the clock, via `-writeEvery N` (W = N).
+            if transient { o.write_interval } else { o.write_every.map_or(0.0, |n| n as f64) },
         )?,
     };
     // §44.2's EARLY half: the names this run is about to build, checked
@@ -2004,6 +2292,12 @@ fn run(o: &Options) -> Result<()> {
         let refs: Vec<&str> = available.iter().map(String::as_str).collect();
         plan.check_fields(&refs)?;
     }
+    // SPEC-LIT §44.4: the disclosure line names the clock the schedule is
+    // driven by - `every 10 iterations`, never `every 10 s`, for a steady
+    // run's `-writeEvery`.
+    if !transient && o.write_every.is_some() {
+        pipeline.set_clock_unit("iterations");
+    }
     println!("{}", pipeline.describe());
 
     // ---- the loop ----------------------------------------------------
@@ -2012,12 +2306,46 @@ fn run(o: &Options) -> Result<()> {
     // `Schedule::t0` doc for why `t` at step `n` is `t0 + n*dt`, never
     // `n*dt` alone.
     let t0: f64 = restart_data.as_ref().map_or(0.0, |d| d.time);
+    // SPEC-LIT §44.9: a steady checkpoint's `time` is an iteration count, so
+    // a transient run resumed from one with an `-endTime` at or below it
+    // would run exactly one step (`n_steps` floors at 1 below) and say
+    // nothing. §13.4: refuse by name instead.
+    if transient && t0 >= o.end_time {
+        return Err(Error::Config(format!(
+            "-endTime {} is not above the checkpoint's time {}: a checkpoint written by a steady run \
+             carries its iteration count as its time (SPEC-LIT §44.9), so a transient continuation \
+             needs -endTime above {}, or a checkpoint from a transient run",
+            g(o.end_time),
+            g(t0),
+            g(t0)
+        )));
+    }
     let n_steps = if transient {
         (((o.end_time - t0) / o.delta_t).round().max(1.0)) as usize
     } else {
         o.n_iters as usize
     };
     let mut t_phys: f64 = t0;
+    // SPEC-LIT §13.4.2/§44.9: where the final state goes, said before the
+    // loop rather than discovered after it. `0/` is never a candidate.
+    let final_label = if transient {
+        format_time_name((t0 + n_steps as f64 * o.delta_t) as Scalar)
+    } else {
+        format_time_name((t0 + n_steps as f64) as Scalar)
+    };
+    println!(
+        "output final state: {}  ({})",
+        output_root(&o.case_path).join(&final_label).display(),
+        if transient {
+            format!("transient: the label is the end time; t0 = {} s", g(t0))
+        } else {
+            format!(
+                "steady: the label is the iteration count {} + {} (SPEC-LIT §44.9); 0/ is not written",
+                g(t0),
+                n_steps
+            )
+        }
+    );
     // Every schedule starts from the restart's own time, not from zero -
     // SPEC-LIT §44.4, and exactly the `next_write = t0 + W` this replaces.
     pipeline.start(t0);
@@ -2044,13 +2372,39 @@ fn run(o: &Options) -> Result<()> {
 
     for step in 0..n_steps {
         if transient {
-            s.begin_time_step(&gpu, dt)?;
-            energy.advance_time_step(dt);
-            gas.advance_time_levels();
+            // SPEC-LIT 105.16 and 105.17: the FIRST step opens no time step,
+            // so the counter is 0 during it and `backward` takes its Euler
+            // row, as §105.10's gate loops start; `initialise` already made
+            // `U`'s and `p`'s old level the starting field. From the second
+            // step on, opening one rotates `T`'s levels too, ahead of the
+            // unit of work's `update_density`.
+            open_time_step(&gpu, &mut s, &mut energy, &mut gas, dt, step)?;
             t_phys += f64::from(dt);
+        } else {
+            // SPEC-LIT §44.9: a steady run's clock is its iteration counter -
+            // the reading `io::case` already takes for controlDict's `endTime`
+            // on a steady run, and the `dt = 1.0` this loop already passes.
+            // It feeds no equation (`outer_iteration` gets `None` for dt on a
+            // steady run); it names the final directory and the checkpoint's
+            // `time`, so a resumed run continues the count instead of
+            // writing `0/` over the case's initial fields.
+            t_phys += 1.0;
         }
 
-        let flow = FlowState::new(s.u(), s.phi(), cc.nu);
+        // SPEC-LIT 105.12: the points at this step's end time, then the mesh
+        // advance, the moving walls' value and the relative flux - all before
+        // anything below reads the flux.
+        if let Some(mm) = &motion {
+            let pts = mm.points_at(t_phys as Scalar);
+            s.motion_mut()
+                .ok_or_else(|| {
+                    Error::Config("ofgpu-lowmach: internal error - the motion is not attached".to_string())
+                })?
+                .set_points(&gpu, &pts)?;
+            s.move_mesh(&gpu)?;
+        }
+
+        let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
         // SPEC-LIT §17/§30.2: `g`/`Prt` feed `G_b`; `self.buoy` (built once
         // by `build_coupled` from `models::buoyancy_settings`) is `None`
         // whenever the case has no gravity, and gates the whole term off
@@ -2089,7 +2443,10 @@ fn run(o: &Options) -> Result<()> {
         if !report.finite {
             eprintln!("[ofgpu-lowmach] a field went non-finite at step {step} - stopping");
             print_report(step, &report);
-            return Err(Error::Config("solution diverged (NaN/Inf)".to_string()));
+            return Err(Error::Diverged {
+                iteration: step,
+                what: "a field went non-finite (NaN/Inf)".to_string(),
+            });
         }
 
         // SPEC-LIT §93.6: the premise is re-checked on the field every
@@ -2108,7 +2465,11 @@ fn run(o: &Options) -> Result<()> {
             mem.sample(&gpu)?;
         }
 
-        if transient && pipeline.any_due(t_phys) {
+        // Both clocks feed the SAME schedule (SPEC-LIT §44.4): seconds on
+        // a transient run, the iteration count on a steady one. A steady
+        // run with no `-writeEvery` has a 0 interval, which `any_due`
+        // never fires on.
+        if pipeline.any_due(t_phys) {
             write_time(
                 &gpu,
                 &s,
@@ -2152,6 +2513,23 @@ fn run(o: &Options) -> Result<()> {
             )?;
         }
     }
+
+    let ux_mean = {
+        let u = gpu.download(&s.u().f)?;
+        u.iter().map(|v| f64::from(v.x)).sum::<f64>() / u.len().max(1) as f64
+    };
+    let t_mean = {
+        let t = gpu.download(&energy.field().f)?;
+        t.iter().map(|v| f64::from(*v)).sum::<f64>() / t.len().max(1) as f64
+    };
+    // How the run ended, for `main`'s last line (SPEC-LIT §31.4).
+    let run_end = RunEnd {
+        steps: n_steps,
+        transient,
+        t_end: t_phys,
+        ux_mean,
+        t_mean,
+    };
 
     mem.sample(&gpu)?;
     println!("done in {} s", g(t_total.elapsed().as_secs_f64()));
@@ -2328,15 +2706,15 @@ fn run(o: &Options) -> Result<()> {
                     // It is also what makes a wall-function mesh a CONTROL for
                     // §37's experiment.
                     use ofgpu::wallfunctions::{jayatilleke_p, t_plus, u_tau_of};
-                    let u_tau = u_tau_of(k_p, f64::from(wc.cmu));
+                    let u_tau = u_tau_of(k_p as Scalar, wc.cmu) as f64;
                     let tp_plus = t_plus(
-                        yplus,
-                        f64::from(gas_props.pr),
-                        f64::from(gas_props.pr_t),
-                        f64::from(wc.kappa),
-                        f64::from(wc.e),
-                        jayatilleke_p(f64::from(gas_props.pr), f64::from(gas_props.pr_t)),
-                    );
+                        yplus as Scalar,
+                        gas_props.pr,
+                        gas_props.pr_t,
+                        wc.kappa,
+                        wc.e,
+                        jayatilleke_p(gas_props.pr, gas_props.pr_t),
+                    ) as f64;
                     let rho_c = f64::from(rho_bf[bf]);
                     if tp_plus > 0.0 && u_tau > 0.0 && rho_c > 0.0 {
                         let t_w = t_p + q_face * tp_plus / (rho_c * f64::from(gas_props.cp) * u_tau);
@@ -2864,6 +3242,25 @@ fn run(o: &Options) -> Result<()> {
                     }
                 }
             }
+
+            // SPEC-LIT §32.5.6: both forces on every wall patch, as vectors,
+            // and the flat-plate estimate beside them - printed AFTER the
+            // §32.5 block so that block's lines stay exactly what the
+            // recorded logs and the GUI read. `p` is this crate's kinematic
+            // pressure, so the pressure force carries the wall density.
+            {
+                use ofgpu::wallfunctions::{drag_report, pressure_force};
+                let p_bf = gpu.download(&s.p().bf)?;
+                let pf = pressure_force(&hm, &p_bf, &rho_bf);
+                let rho_ref = f64::from(gas.rho_at(t_b as Scalar));
+                let report = drag_report(
+                    &hm, &ws, &pf, e_hat, &u_i, &rho_i, rho_ref as Scalar, cc.nu,
+                );
+                println!();
+                for line in report.lines(&hm, &g) {
+                    println!("{line}");
+                }
+            }
         }
 
         // SPEC-LIT §33.2: "The solver should MEASURE and report" the worst
@@ -2905,27 +3302,72 @@ fn run(o: &Options) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(run_end)
+}
+
+/// How a completed `run` stopped, so `main` can name the way (SPEC-LIT §31.4).
+#[derive(Debug)]
+struct RunEnd {
+    steps: usize,
+    transient: bool,
+    t_end: f64,
+    /// The arithmetic mean of the internal cells' `U_x` at the end - Gate
+    /// 105-D's readout (SPEC-LIT 105.16), since the written field carries
+    /// six digits. It feeds no output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    ux_mean: f64,
+    /// The arithmetic mean of the internal cells' `T` at the end - Gate
+    /// 105-E's readout (SPEC-LIT 105.17). It feeds no output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    t_mean: f64,
+}
+
+/// SPEC-LIT §31.4: 0 the budget was reached, 2 diverged, 3 refused by name
+/// under §13.4, 1 every other error (a parse error included).
+fn exit_code(outcome: &Result<RunEnd>) -> u8 {
+    match outcome {
+        Ok(_) => 0,
+        Err(Error::Diverged { .. }) => 2,
+        Err(Error::Refused(_)) => 3,
+        Err(_) => 1,
+    }
+}
+
+/// SPEC-LIT §31.4/§13.4.2: the LAST line the driver writes names how it
+/// ended - `run ended: <word> | <detail> | exit code <n>`. `<detail>` is
+/// the first line of the error, never a whole multi-line refusal.
+fn run_end_line(outcome: &Result<RunEnd>) -> String {
+    let (word, detail) = match outcome {
+        Ok(end) if end.transient => (
+            "budget",
+            format!("endTime {} s reached in {} steps", g(end.t_end), end.steps),
+        ),
+        Ok(end) => ("budget", format!("{} iterations reached", end.steps)),
+        Err(e) => {
+            let word = match e {
+                Error::Diverged { .. } => "diverged",
+                Error::Refused(_) => "refused",
+                _ => "error",
+            };
+            let first = e.to_string().lines().next().unwrap_or("").to_string();
+            (word, first)
+        }
+    };
+    format!("run ended: {word} | {detail} | exit code {}", exit_code(outcome))
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    let o = match parse(&args) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("\nerror: {e}");
-            return ExitCode::from(1);
-        }
+    let outcome = match parse(&args) {
+        Ok(o) => run(&o),
+        Err(e) => Err(e),
     };
-
-    match run(&o) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("\nerror: {e}");
-            ExitCode::from(1)
-        }
+    if let Err(e) = &outcome {
+        eprintln!("\nerror: {e}");
     }
+    println!("{}", run_end_line(&outcome));
+    ExitCode::from(exit_code(&outcome))
 }
 
 // ==========================================================================
@@ -2971,8 +3413,13 @@ mod lowmach_tests {
 
     #[test]
     fn output_and_restart_flags_parse() {
-        let o = parse(&argv(&["case", "-output", "foam,vtu", "-writeInterval", "0.5"]))
-            .expect("a valid -output/-writeInterval pair");
+        // SPEC-LIT §44.4: `-writeInterval` needs the clock a transient
+        // command line has; a steady one is refused (see
+        // `a_steady_run_refuses_write_interval_...` below).
+        let o = parse(&argv(&[
+            "case", "-output", "foam,vtu", "-writeInterval", "0.5", "-endTime", "2", "-deltaT", "0.5",
+        ]))
+        .expect("a valid -output/-writeInterval pair on a transient command line");
         assert_eq!(o.output, vec![OutputFormat::Foam, OutputFormat::Vtu]);
         assert!((o.write_interval - 0.5).abs() < 1e-12);
 
@@ -3411,6 +3858,11 @@ mod lowmach_tests {
             let t_field = find_restart_field(rd, "T")?;
             gpu.write(&mut energy.field_mut().f, &from_restart_scalars(&t_field.internal))?;
             gpu.write(&mut energy.field_mut().bf, &from_restart_scalars(&t_field.boundary))?;
+            // SPEC-LIT 105.17: the restarted run's first step is an Euler-row
+            // step, and its old level must be the restored field, not the
+            // cold-start one - seed both of `T`'s old levels from the restore.
+            let fk = FieldKernels::new(gpu)?;
+            ofgpu::field_ops::seed_old_time(gpu, &fk, energy.field_mut())?;
         }
 
         // SPEC-LIT §25.2: the restart's own `p0`, not the cold-start default
@@ -3440,10 +3892,9 @@ mod lowmach_tests {
         nu: Scalar,
         backend: &mut dyn PressureBackend,
         k_zeros: &DevBuf<Scalar>,
+        step: usize,
     ) -> Result<IterReport> {
-        stack.s.begin_time_step(gpu, dt)?;
-        stack.energy.advance_time_step(dt);
-        stack.gas.advance_time_levels();
+        open_time_step(gpu, &mut stack.s, &mut stack.energy, &mut stack.gas, dt, step)?;
 
         let flow = FlowState::new(stack.s.u(), stack.s.phi(), nu);
         stack.turb.correct(gpu, &flow, None)?;
@@ -3517,8 +3968,17 @@ mod lowmach_tests {
         // checked against below.
         let mut cont_p_residual_step21: Scalar = 0.0;
         for i in 0..40 {
-            cont_report =
-                step_once(&gpu, &mesh, &mut cont, dt, &heater, nu, &mut cont_backend, &k_zeros)?;
+            cont_report = step_once(
+                &gpu,
+                &mesh,
+                &mut cont,
+                dt,
+                &heater,
+                nu,
+                &mut cont_backend,
+                &k_zeros,
+                i,
+            )?;
             assert!(cont_report.finite, "continuous run went non-finite at step {i}");
             if i == 20 {
                 cont_p_residual_step21 = cont_report.p_residual;
@@ -3531,8 +3991,17 @@ mod lowmach_tests {
         let mut half_backend = new_backend(&gpu)?;
         let mut t_phys: Scalar = 0.0;
         for i in 0..20 {
-            let r =
-                step_once(&gpu, &mesh, &mut half, dt, &heater, nu, &mut half_backend, &k_zeros)?;
+            let r = step_once(
+                &gpu,
+                &mesh,
+                &mut half,
+                dt,
+                &heater,
+                nu,
+                &mut half_backend,
+                &k_zeros,
+                i,
+            )?;
             assert!(r.finite, "first half went non-finite at step {i}");
             t_phys += dt;
         }
@@ -3576,6 +4045,7 @@ mod lowmach_tests {
                 nu,
                 &mut resumed_backend,
                 &k_zeros,
+                i,
             )?;
             assert!(resumed_report.finite, "resumed run went non-finite at step {i}");
             if i == 0 {
@@ -3948,6 +4418,7 @@ mod lowmach_tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn relaxation_reaches_each_equation_by_its_own_name() {
         let b = controls_for(&Knobs::default());
         assert!((f64::from(b.simple.momentum.u_relax) - 0.7).abs() < 1e-12);
@@ -4042,6 +4513,7 @@ mod lowmach_tests {
     }
 
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn prt_reaches_the_gas_properties() {
         let a = controls_for(&Knobs::default());
         let b = controls_for(&Knobs { prt: 0.5, ..Knobs::default() });
@@ -4337,6 +4809,24 @@ mod lowmach_tests {
         out.iter().map(|(n, _)| n.clone()).collect()
     }
 
+    /// The time directories a run wrote: the first path component of each
+    /// name, kept when it parses as a number, deduplicated and in numeric
+    /// order. A `-writeEvery`/`-writeInterval` schedule is proved by
+    /// COUNTING and NAMING these (SPEC-LIT §44.4), not by trusting the log.
+    fn time_dirs(names: &[String]) -> Vec<String> {
+        let mut v: Vec<(f64, String)> = Vec::new();
+        for n in names {
+            let head = n.split('/').next().unwrap_or(n);
+            if let Ok(t) = head.parse::<f64>() {
+                if !v.iter().any(|(x, _)| *x == t) {
+                    v.push((t, head.to_string()));
+                }
+            }
+        }
+        v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        v.into_iter().map(|(_, s)| s).collect()
+    }
+
     // The `output` blocks the pairs below turn. Every one of them is a
     // complete, valid block, so the pair differs in exactly one entry.
     const OUT_VDB: &str = r#", "output": { "visualisation": { "format": "vdb" } }"#;
@@ -4542,6 +5032,11 @@ mod lowmach_tests {
         if Gpu::new(0).is_err() {
             return;
         }
+        // Every assertion below is a STRICT-mode one, and another test in
+        // this binary now sets the process-wide permissive flag - take the
+        // guard so the two cannot interleave (`contract::permissive_test_guard`
+        // documents exactly this flake).
+        let _g = ofgpu::io::contract::permissive_test_guard();
         let case = |k: &Knobs, tag: &str, extra: &[&str]| -> Result<()> {
             let dir = scratch_dir(tag);
             let path = dir.join("case.jsonc");
@@ -4550,7 +5045,7 @@ mod lowmach_tests {
                 vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
             args.extend(extra.iter().map(|s| (*s).to_string()));
             let o = parse(&args).expect("the command line must parse");
-            run(&o)
+            run(&o).map(drop)
         };
         let d = Knobs::default;
 
@@ -4560,6 +5055,9 @@ mod lowmach_tests {
         let m = format!("{e}");
         assert!(m.contains("output.visualisation.interval"), "{m}");
         assert!(m.contains("-endTime"), "the error must say how to get a clock: {m}");
+        // SPEC-LIT §31.4: a refusal is its own variant and its own exit code.
+        assert!(matches!(e, Error::Refused(_)));
+        assert_eq!(exit_code(&Err(e)), 3);
 
         // §44.6 - the case and the command line both naming the output.
         let e = case(
@@ -4622,6 +5120,7 @@ mod lowmach_tests {
     /// The transient half of the same test: `numerics.ddt` is a SCHEME, and
     /// `Euler` and `backward` must not produce the same answer.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_ddt_scheme_changes_what_the_run_writes() {
         if Gpu::new(0).is_err() {
             return;
@@ -4634,6 +5133,983 @@ mod lowmach_tests {
             euler, backward,
             "ddt Euler and ddt backward wrote bit-identical fields: the case's \
              time scheme is not reaching the solver (SPEC-LIT 13.4.1)"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §44.9 - where a steady run writes, and what a restart continues
+    // ----------------------------------------------------------------------
+
+    /// `run_knobs_bytes`, but also returning the output root - the pair test
+    /// hands run A's `restart.mcr` to run B, so it needs the path.
+    fn run_knobs_at(k: &Knobs, tag: &str, extra: &[&str]) -> (PathBuf, Vec<(String, Vec<u8>)>) {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, knob_case_text(k)).expect("write case");
+        let mut args: Vec<String> =
+            vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+        args.extend(extra.iter().map(|s| (*s).to_string()));
+        let o = parse(&args).expect("the knob command line must parse");
+        run(&o).expect("the knob case must run");
+        let root = common::json_case_output_dir(&path);
+        let out = written_bytes(&root);
+        assert!(!out.is_empty(), "the run wrote nothing to compare");
+        (root, out)
+    }
+
+    /// SPEC-LIT §44.9: `0/` is what the case shipped and stays byte-identical;
+    /// the final state of `-iters 3` is `3/`. The polyMesh route, because the
+    /// JSONC route never had a `0/` to overwrite.
+    #[test]
+    fn a_steady_run_leaves_0_alone_and_writes_its_iteration_count() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::blockgen::{write_case, CaseKind};
+        let case = scratch_dir("r1zero").join("case");
+        write_case(&case, CaseKind::Big, 6, 4, 4).expect("generate the big case");
+        let before = written_bytes(&case.join("0"));
+        assert!(!before.is_empty(), "the generator wrote no 0/");
+        let case_s = case.to_string_lossy().to_string();
+        let o = parse(&argv(&[case_s.as_str(), "-iters", "3", "-check", "100"])).expect("parse");
+        run(&o).expect("the big case must run");
+        let after = written_bytes(&case.join("0"));
+        assert_eq!(before, after, "0/ changed: the run wrote over the initial fields (SPEC-LIT 44.9)");
+        assert!(!case.join("0").join("rho").exists(), "0/rho appeared: the run wrote into 0/");
+        for f in ["U", "p", "T", "rho", "k", "epsilon", "nut"] {
+            assert!(case.join("3").join(f).exists(), "3/{f} is missing: the final state is not labelled by the iteration count");
+        }
+        println!("steady label gate: 0/ unchanged ({} files), final state in 3/", before.len());
+    }
+
+    /// docs/14 row R1's gate, SPEC-LIT §44.9: run 200 against restart-from-100
+    /// + run 100, BITWISE - every field file of `200/` and the `.mcr` written
+    /// at 200. Not bitwise is a failure that prints the gap per field
+    /// (§31.2: "report the gap rather than hiding it"), never a tolerance.
+    #[test]
+    fn a_restart_from_a_written_checkpoint_reproduces_the_continued_run_bitwise() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let (a_root, a) =
+            run_knobs_at(&d, "r1a", &["-iters", "100", "-restartWrite", "100", "-check", "100"]);
+        let a_mcr = a_root.join("restart.mcr");
+        assert!(a_mcr.exists(), "run A wrote no restart.mcr: {:?}", written_names(&a));
+        assert!(written_names(&a).contains(&"100/U".to_string()), "run A's label: {:?}", written_names(&a));
+        let a_mcr_s = a_mcr.to_string_lossy().to_string();
+        let (b_root, b) = run_knobs_at(
+            &d,
+            "r1b",
+            &["-restartFrom", a_mcr_s.as_str(), "-iters", "100", "-restartWrite", "100", "-check", "100"],
+        );
+        let (c_root, c) =
+            run_knobs_at(&d, "r1c", &["-iters", "200", "-restartWrite", "200", "-check", "100"]);
+
+        // The steady clock: the checkpoint's time IS the count, and B continues it.
+        let hash = restart::mesh_hash(&load_case(&b_root.with_file_name("case.jsonc")).expect("load").0);
+        let a_data = restart::read_restart(&a_mcr, hash).expect("read A's checkpoint");
+        assert_eq!(a_data.time, 100.0, "a steady checkpoint's time is its iteration count");
+        let names_b = written_names(&b);
+        assert!(names_b.contains(&"200/U".to_string()), "B did not write 200/: {names_b:?}");
+        assert!(
+            names_b.iter().all(|n| !n.starts_with("100/") && !n.starts_with("0/")),
+            "B wrote a directory it must not: {names_b:?}"
+        );
+
+        // Bitwise.
+        assert_eq!(names_b, written_names(&c), "B and C wrote different file sets");
+        let differing: Vec<&String> =
+            b.iter().zip(&c).filter(|(x, y)| x.1 != y.1).map(|(x, _)| &x.0).collect();
+        if !differing.is_empty() {
+            let bd = restart::read_restart(&b_root.join("restart.mcr"), hash).expect("read B's checkpoint");
+            let cd = restart::read_restart(&c_root.join("restart.mcr"), hash).expect("read C's checkpoint");
+            let gap = |x: &[f64], y: &[f64]| x.iter().zip(y).map(|(p, q)| (p - q).abs()).fold(0.0, f64::max);
+            for (fb, fc) in bd.fields.iter().zip(&cd.fields) {
+                println!(
+                    "restart gap {}: internal max |delta| = {}, boundary max |delta| = {}",
+                    fb.name,
+                    sci(gap(&fb.internal, &fc.internal), 3),
+                    sci(gap(&fb.boundary, &fc.boundary), 3)
+                );
+            }
+            panic!("SPEC-LIT 44.9: the resumed run is not bitwise the continued run; differing files: {differing:?}");
+        }
+        println!("restart bitwise gate: {} files identical between the resumed and the continued run", b.len());
+    }
+
+    /// SPEC-LIT §44.9/§13.4: a transient continuation of a steady checkpoint
+    /// whose `-endTime` does not reach the count is refused by name, not run
+    /// for one step.
+    #[test]
+    fn a_transient_run_refuses_a_checkpoint_its_end_time_does_not_reach() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let (a_root, _) = run_knobs_at(&d, "r1t", &["-iters", "5", "-restartWrite", "5", "-check", "100"]);
+        let mcr = a_root.join("restart.mcr").to_string_lossy().to_string();
+        let dir = scratch_dir("r1u");
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, knob_case_text(&d)).expect("write case");
+        let path_s = path.to_string_lossy().to_string();
+        let o = parse(&argv(&[
+            path_s.as_str(), "-restartFrom", mcr.as_str(), "-endTime", "0.001", "-deltaT", "0.001", "-check", "100",
+        ]))
+        .expect("parse");
+        let e = run(&o).expect_err("t0 = 5 with -endTime 0.001 must be refused, not run for one step");
+        let msg = format!("{e}");
+        assert!(msg.contains("-endTime"), "the refusal must name the flag: {msg}");
+        assert!(msg.contains("iteration count"), "the refusal must say why: {msg}");
+    }
+
+    /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
+    #[test]
+    fn exit_codes_name_the_four_ways_a_run_ends() {
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0 });
+        let diverged = Err(Error::Diverged {
+            iteration: 12,
+            what: "a field went non-finite (NaN/Inf)".to_string(),
+        });
+        let refused = Err(Error::Refused(
+            "-writeInterval: \"10\" is not supported by ofgpu\n  (run with -permissive to substitute the final state only and continue)"
+                .to_string(),
+        ));
+        let other = Err(Error::Config("boom".to_string()));
+        assert_eq!(exit_code(&steady), 0);
+        assert_eq!(exit_code(&transient), 0);
+        assert_eq!(exit_code(&diverged), 2);
+        assert_eq!(exit_code(&refused), 3);
+        assert_eq!(exit_code(&other), 1);
+    }
+
+    /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
+    #[test]
+    fn the_last_line_names_the_reason() {
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0 });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0 });
+        let diverged = Err(Error::Diverged {
+            iteration: 12,
+            what: "a field went non-finite (NaN/Inf)".to_string(),
+        });
+        let refused = Err(Error::Refused(
+            "-writeInterval: \"10\" is not supported by ofgpu\n  (run with -permissive to substitute the final state only and continue)"
+                .to_string(),
+        ));
+        let other = Err(Error::Config("boom".to_string()));
+        assert_eq!(
+            run_end_line(&steady),
+            "run ended: budget | 30 iterations reached | exit code 0"
+        );
+        assert_eq!(
+            run_end_line(&transient),
+            "run ended: budget | endTime 0.03 s reached in 30 steps | exit code 0"
+        );
+        assert_eq!(
+            run_end_line(&diverged),
+            "run ended: diverged | diverged at outer iteration 12: a field went non-finite (NaN/Inf) | exit code 2"
+        );
+        assert_eq!(
+            run_end_line(&refused),
+            "run ended: refused | -writeInterval: \"10\" is not supported by ofgpu | exit code 3"
+        );
+        assert_eq!(run_end_line(&other), "run ended: error | boom | exit code 1");
+    }
+
+    /// SPEC-LIT §44.4: `-writeEvery N` parses into an iteration count and
+    /// refuses a non-positive one, exactly like `-restartWrite` beside it,
+    /// and names itself to §44.6's list of flags a case may not be doubled
+    /// by.
+    #[test]
+    fn write_every_parses_and_needs_a_positive_count() {
+        let o = parse(&argv(&["case", "-writeEvery", "10"])).expect("a positive iteration count");
+        assert_eq!(o.write_every, Some(10));
+        assert_eq!(o.output_flags, vec!["-writeEvery"]);
+
+        assert!(
+            parse(&argv(&["case", "-writeEvery", "0"])).is_err(),
+            "-writeEvery needs a positive iteration count"
+        );
+    }
+
+    /// SPEC-LIT §44.4: the command line gets the refusal the case route has
+    /// always had - a steady run has no clock for `-writeInterval`, a
+    /// transient one no iteration counter for `-writeEvery` - and under
+    /// `-permissive` the substitution the warning names actually happens.
+    #[test]
+    fn a_steady_run_refuses_write_interval_and_a_transient_one_refuses_write_every() {
+        let _g = ofgpu::io::contract::permissive_test_guard();
+        ofgpu::io::contract::set_permissive(false);
+
+        let e = parse(&argv(&["case", "-iters", "30", "-writeInterval", "10"]))
+            .expect_err("a steady command line must refuse -writeInterval by name");
+        assert!(matches!(e, Error::Refused(_)), "a refusal is its own variant");
+        let m = format!("{e}");
+        assert!(m.contains("-writeInterval"), "{m}");
+        assert!(m.contains("-writeEvery"), "the refusal names the steady schedule: {m}");
+        assert!(m.contains("-endTime"), "the refusal names how to get a clock: {m}");
+
+        let e = parse(&argv(&[
+            "case", "-endTime", "0.03", "-deltaT", "0.001", "-writeEvery", "10",
+        ]))
+        .expect_err("a transient command line must refuse -writeEvery by name");
+        assert!(matches!(e, Error::Refused(_)));
+        let m = format!("{e}");
+        assert!(m.contains("-writeEvery"), "{m}");
+        assert!(m.contains("-writeInterval"), "the refusal names the clock it has: {m}");
+
+        // The clock each mode has, named where it is: both parse.
+        parse(&argv(&["case", "-iters", "30", "-writeEvery", "10"]))
+            .expect("a steady run may schedule by iterations");
+        parse(&argv(&[
+            "case", "-endTime", "0.03", "-deltaT", "0.001", "-writeInterval", "0.01",
+        ]))
+        .expect("a transient run may schedule by seconds");
+
+        // §13.4: under -permissive, the substitution named in the warning.
+        ofgpu::io::contract::set_permissive(true);
+        let o = parse(&argv(&["case", "-iters", "30", "-writeInterval", "10"]))
+            .expect("permissive substitutes the final state only");
+        assert_eq!(o.write_interval, 0.0, "\"the final state only\"");
+        let o = parse(&argv(&[
+            "case", "-endTime", "0.03", "-deltaT", "0.001", "-writeEvery", "10",
+        ]))
+        .expect("permissive keeps the -writeInterval schedule");
+        assert_eq!(o.write_every, None, "\"the -writeInterval schedule only\"");
+        ofgpu::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT §44.4, the command-line gate: `-iters 30 -writeEvery 10`
+    /// names the time directories 10, 20 and 30, and the same case without
+    /// the flag writes its final state alone, in the same `30/` the
+    /// schedule ends on. Two runs differing in one flag must write
+    /// different output (SPEC-LIT §13.4.1).
+    #[test]
+    fn write_every_names_three_directories() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let we = run_knobs_bytes(&d, "we10", &["-iters", "30", "-writeEvery", "10", "-check", "100"]);
+        let names = written_names(&we);
+        let dirs = time_dirs(&names);
+        assert_eq!(dirs, vec!["10", "20", "30"], "the -writeEvery schedule: {names:?}");
+        for t in ["10", "20", "30"] {
+            assert!(names.contains(&format!("{t}/U")), "{t}/U is missing: {names:?}");
+        }
+
+        // One flag fewer: one directory, the final state, and it is the
+        // same `30/` the scheduled run ended on.
+        let plain = run_knobs_bytes(&d, "we0", &["-iters", "30", "-check", "100"]);
+        let plain_dirs = time_dirs(&written_names(&plain));
+        assert_eq!(
+            plain_dirs,
+            vec!["30"],
+            "a steady run with no schedule writes its final state alone: {:?}",
+            written_names(&plain)
+        );
+        assert_eq!(plain_dirs.last(), dirs.last(), "the two runs must end on the same label");
+    }
+
+    /// SPEC-LIT §44.4: the transient schedule keeps its own meaning - three
+    /// directories in PHYSICAL seconds, the forced final write sharing the
+    /// last label (`0.03`), exactly §44.4's "one write there, not two".
+    #[test]
+    fn write_interval_names_three_directories_on_a_transient_run() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let wi = run_knobs_bytes(
+            &Knobs::default(),
+            "wi01",
+            &["-endTime", "0.03", "-deltaT", "0.001", "-writeInterval", "0.01", "-check", "100"],
+        );
+        let names = written_names(&wi);
+        assert_eq!(
+            time_dirs(&names),
+            vec!["0.01", "0.02", "0.03"],
+            "the -writeInterval schedule: {names:?}"
+        );
+    }
+
+    /// SPEC-LIT §44.4/§44.9: a steady run's snapshots continue across a
+    /// restart. Run A writes `10/`, `20/` and a checkpoint carrying 20;
+    /// run B, resumed from it for 10 MORE iterations with the same
+    /// `-writeEvery`, writes exactly one new directory, `30/` - not a
+    /// second `10/` from a counter that restarted. And what B writes is
+    /// not what a fresh 10-iteration run writes: `-restartFrom` reached
+    /// the solver (SPEC-LIT §13.4.1).
+    #[test]
+    fn restart_from_continues_the_run_and_writes_its_own_snapshots() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let d = Knobs::default();
+        let (a_root, a) = run_knobs_at(
+            &d,
+            "wea",
+            &["-iters", "20", "-writeEvery", "10", "-restartWrite", "20", "-check", "100"],
+        );
+        let a_names = written_names(&a);
+        assert_eq!(time_dirs(&a_names), vec!["10", "20"], "run A's schedule: {a_names:?}");
+        let a_mcr = a_root.join("restart.mcr");
+        assert!(a_mcr.exists(), "run A wrote no restart.mcr: {a_names:?}");
+
+        let a_mcr_s = a_mcr.to_string_lossy().to_string();
+        let (_, b) = run_knobs_at(
+            &d,
+            "web",
+            &["-restartFrom", a_mcr_s.as_str(), "-iters", "10", "-writeEvery", "10", "-check", "100"],
+        );
+        let b_names = written_names(&b);
+        let b_dirs = time_dirs(&b_names);
+        assert_eq!(
+            b_dirs,
+            vec!["30"],
+            "the resumed run continues the count, it does not restart it: {b_names:?}"
+        );
+
+        // A restarted run is not a fresh one: B's `30/U` is the field at
+        // ITERATION 30, C's `10/U` the field at iteration 10.
+        let (_, c) = run_knobs_at(&d, "wec", &["-iters", "10", "-writeEvery", "10", "-check", "100"]);
+        let b_u = b.iter().find(|(n, _)| n == "30/U").map(|(_, v)| v.clone());
+        let c_u = c.iter().find(|(n, _)| n == "10/U").map(|(_, v)| v.clone());
+        assert_ne!(
+            b_u.expect("B wrote 30/U"),
+            c_u.expect("C wrote 10/U"),
+            "the restarted run's 30/U is byte-identical to a fresh run's 10/U: -restartFrom did not reach the solver"
+        );
+    }
+
+    /// SPEC-LIT §44.1 on the command line: `-output nvdb` on a mesh
+    /// `cartesian::detect` refuses is refused BEFORE the loop, naming the
+    /// reason - not at the final write, after the whole run, with `foam` lost.
+    #[test]
+    fn the_command_line_volume_formats_are_refused_before_the_loop_naming_the_reason() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        // Another test in this binary sets the process-wide permissive flag;
+        // every assertion here is a STRICT-mode one, so take the same guard
+        // `the_drivers_own_output_refusals_fire_by_name` takes.
+        let _g = ofgpu::io::contract::permissive_test_guard();
+        // The duct, graded in y: cell volumes are no longer uniform.
+        let graded = knob_case_text(&Knobs::default()).replace(
+            "\"cells\":  [10, 5, 3],",
+            "\"cells\":  [10, 5, 3],\n    \"grading\": { \"y\": { \"expansion\": 4.0 } },",
+        );
+        assert!(graded.contains("\"grading\""), "knob_case_text's cells line moved - fix the anchor");
+        let dir = scratch_dir("nvdb_graded");
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, &graded).expect("write case");
+        let case_arg = path.to_string_lossy().to_string();
+        let args: Vec<String> =
+            ["ofgpu-lowmach", case_arg.as_str(), "-iters", "2", "-output", "foam,nvdb"]
+                .iter().map(|s| s.to_string()).collect();
+        let o = parse(&args).expect("the command line must parse");
+        let e = run(&o).expect_err("nvdb on a graded mesh must be refused");
+        let m = format!("{e}");
+        for want in ["-output nvdb", "cell volumes are not uniform", "vtu", "foam", "-permissive"] {
+            assert!(m.contains(want), "the refusal must say {want:?}: {m}");
+        }
+        let out = common::json_case_output_dir(&path);
+        assert!(written_state(&out).is_empty(), "refused BEFORE the loop: nothing may be written");
+        assert!(!out.join("VDB").exists(), "no empty VDB/ directory may be left behind");
+        // SPEC-LIT §13.4.1's pair: the un-graded duct, same command line, runs and writes the .nvdb.
+        let uniform = run_knobs_bytes(&Knobs::default(), "nvdb_uniform", &["-iters", "2", "-output", "foam,nvdb"]);
+        assert!(uniform.iter().any(|(n, _)| n.ends_with(".nvdb")), "the uniform duct must write the .nvdb");
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT 105.12 - the `motion` case block, and the one driver that runs it
+    // ----------------------------------------------------------------------
+
+    /// SPEC-LIT 105.10 (b)'s stroking outlet as an `ofgpu-lowmach` case (SPEC-LIT 105.12).
+    const STROKE_MOTION: &str = r#", "motion": { "patches": [
+      { "patch": "inlet", "rule": "fixed" },
+      { "patch": "outlet", "rule": "move", "law": { "kind": "sine", "amplitude": [0.2, 0, 0], "period": 1.0 } },
+      { "patch": "sideA", "rule": "slide" }, { "patch": "sideB", "rule": "slide" },
+      { "patch": "sideC", "rule": "slide" }, { "patch": "sideD", "rule": "slide" } ] }"#;
+
+    /// SPEC-LIT 105.10 (a)'s piston as a case (SPEC-LIT 105.12).
+    const PISTON_MOTION: &str = r#", "motion": { "patches": [
+      { "patch": "open", "rule": "fixed" },
+      { "patch": "piston", "rule": "move", "law": { "kind": "linear", "velocity": [-0.5, 0, 0] } },
+      { "patch": "sideA", "rule": "slide" }, { "patch": "sideB", "rule": "slide" },
+      { "patch": "sideC", "rule": "slide" }, { "patch": "sideD", "rule": "slide" } ],
+      "walls": ["piston"] }"#;
+
+    /// [`PISTON_MOTION`] without its `walls` entry - the inconsistency
+    /// `check_motion_walls` refuses.
+    const PISTON_MOTION_NO_WALLS: &str = r#", "motion": { "patches": [
+      { "patch": "open", "rule": "fixed" },
+      { "patch": "piston", "rule": "move", "law": { "kind": "linear", "velocity": [-0.5, 0, 0] } },
+      { "patch": "sideA", "rule": "slide" }, { "patch": "sideB", "rule": "slide" },
+      { "patch": "sideC", "rule": "slide" }, { "patch": "sideD", "rule": "slide" } ] }"#;
+
+    const STROKE_ARGS: [&str; 6] = ["-endTime", "0.25", "-deltaT", "0.003125", "-check", "1000"];
+    const PISTON_ARGS: [&str; 6] = ["-endTime", "0.05", "-deltaT", "0.005", "-check", "1000"];
+
+    /// The numerics both motion cases share (SPEC-LIT 105.12): PIMPLE with two
+    /// correctors, Euler, first-order upwind, relaxation 1, tight linear solves.
+    const MOTION_NUMERICS: &str = r#"
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss upwind",
+      "div(phi,T)": "bounded Gauss upwind"
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  }"#;
+
+    /// SPEC-LIT 105.10 (b)'s stroking outlet as a case (SPEC-LIT 105.12): a
+    /// 16x1x1 duct, laminar, isothermal, Euler. `extra` and then `motion` are
+    /// appended after the `"run"` object.
+    fn stroke_case_text(motion: &str, extra: &str) -> String {
+        format!(
+            r#"{{
+  "name": "strokeMotion",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0, 0, 0], "max": [1.0, 0.1, 0.1] }},
+    "cells":  [16, 1, 1],
+    "boundaries": {{
+      "xmin": "inlet", "xmax": "outlet",
+      "ymin": "sideA", "ymax": "sideB",
+      "zmin": "sideC", "zmax": "sideD"
+    }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 0.01, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "patches": [
+    {{
+      "match": "inlet", "kind": "inlet",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 1.0 }},
+      "T": {{ "type": "fixedValue", "value": 293.15 }}
+    }},
+    {{
+      "match": "outlet", "kind": "open",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 0.0 }},
+      "T": {{ "type": "zeroGradient" }}
+    }},
+    {{ "match": "side.*", "kind": "symmetry" }}
+  ],
+  "initial": {{ "U": [0.5, 0, 0], "T": 293.15, "p": 0.0 }},{MOTION_NUMERICS},
+  "run": {{ "endTime": 0.25, "deltaT": 0.003125 }}{extra}{motion}
+}}"#
+        )
+    }
+
+    /// SPEC-LIT 105.10 (a)'s piston as a case (SPEC-LIT 105.12): an 8x3x3 box
+    /// with a moving wall at `xmax` and an open end at `xmin`, laminar,
+    /// isothermal, Euler. `wall_u` is the piston patch's `U` value as the case
+    /// writes it, e.g. `[-0.5, 0, 0]`.
+    fn piston_case_text(motion: &str, wall_u: &str) -> String {
+        format!(
+            r#"{{
+  "name": "pistonMotion",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0, 0, 0], "max": [1.0, 0.75, 0.75] }},
+    "cells":  [8, 3, 3],
+    "boundaries": {{
+      "xmin": "open", "xmax": "piston",
+      "ymin": "sideA", "ymax": "sideB",
+      "zmin": "sideC", "zmax": "sideD"
+    }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 0.01, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "patches": [
+    {{
+      "match": "open", "kind": "open",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 0.0 }},
+      "T": {{ "type": "zeroGradient" }}
+    }},
+    {{
+      "match": "piston", "kind": "wall",
+      "U": {{ "type": "fixedValue", "value": {wall_u} }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "zeroGradient" }}
+    }},
+    {{ "match": "side.*", "kind": "symmetry" }}
+  ],
+  "initial": {{ "U": [-0.5, 0, 0], "T": 293.15, "p": 0.0 }},{MOTION_NUMERICS},
+  "run": {{ "endTime": 0.05, "deltaT": 0.005 }}{motion}
+}}"#
+        )
+    }
+
+    /// Write a case text and run it exactly as `run_knobs` does; the output root.
+    fn run_case_text(text: &str, tag: &str, args: &[&str]) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, text).expect("write case");
+        let mut a: Vec<String> =
+            vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+        a.extend(args.iter().map(|s| (*s).to_string()));
+        let o = parse(&a).expect("the command line must parse");
+        run(&o).expect("the case must run");
+        common::json_case_output_dir(&path)
+    }
+
+    /// [`run_case_text`], also handing back how the run ended - Gate 105-D
+    /// reads `RunEnd::ux_mean` (SPEC-LIT 105.16).
+    fn run_case_text_end(text: &str, tag: &str, args: &[&str]) -> (PathBuf, RunEnd) {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, text).expect("write case");
+        let mut a: Vec<String> =
+            vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+        a.extend(args.iter().map(|s| (*s).to_string()));
+        let o = parse(&a).expect("the command line must parse");
+        let end = run(&o).expect("the case must run");
+        (common::json_case_output_dir(&path), end)
+    }
+
+    /// The mean internal `Ux` of a written time directory, and its cells.
+    fn mean_ux(root: &Path, time: Scalar, n_cells: usize) -> (f64, Vec<ofgpu::Vec3>) {
+        let f = read_vector_field(&root.join(format_time_name(time)).join("U"), n_cells)
+            .expect("read the written U");
+        let n = f.internal.len() as f64;
+        let mean = f.internal.iter().map(|u| u.x as f64).sum::<f64>() / n;
+        (mean, f.internal)
+    }
+
+    /// Write a case text and lower it, exactly as `common::load_case` does.
+    fn lower_text(text: &str, tag: &str) -> LoweredCase {
+        let dir = scratch_dir(tag);
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, text).expect("write case");
+        read_case_jsonc(&path)
+            .expect("the case must parse")
+            .lower()
+            .expect("the case must lower")
+    }
+
+    #[test]
+    fn the_motion_block_is_refused_by_name_where_it_cannot_be_honoured() {
+        let l = lower_text(&stroke_case_text(STROKE_MOTION, ""), "l1move");
+        let hm = ofgpu::blockgen::build_mesh(&l.block).expect("the duct builds");
+
+        // The honoured path: path + STROKE_ARGS, laminar - no refusal.
+        let mut ok_args: Vec<&str> = vec!["case.jsonc"];
+        ok_args.extend_from_slice(&STROKE_ARGS);
+        let o = parse(&argv(&ok_args)).expect("parse");
+        assert!(
+            refuse_motion_combinations(&o, &l, RasModel::Laminar, &hm).is_ok(),
+            "a transient laminar moving run must be honoured"
+        );
+
+        let refuses = |args: Vec<&str>, model: RasModel, want: &str| {
+            let o = parse(&argv(&args)).expect("parse");
+            let e = match refuse_motion_combinations(&o, &l, model, &hm) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("expected a refusal naming {want}"),
+            };
+            println!("refusal: {e}");
+            assert!(
+                e.contains("motion: ") && e.contains("SPEC-LIT 105.12") && e.contains(want),
+                "wanted {want:?}: {e}"
+            );
+        };
+
+        refuses(vec!["case.jsonc"], RasModel::Laminar, "a steady run");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-restartFrom", "x.mcr"]);
+        refuses(a, RasModel::Laminar, "-restartFrom");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-restartWrite", "5"]);
+        refuses(a, RasModel::Laminar, "-restartWrite");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-heaterPower", "10"]);
+        refuses(a, RasModel::Laminar, "-heaterPower");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.push("-sealed");
+        refuses(a, RasModel::Laminar, "-sealed");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        a.extend_from_slice(&["-output", "foam,vtu"]);
+        refuses(a, RasModel::Laminar, "-output vtu");
+        let mut a: Vec<&str> = vec!["case.jsonc"];
+        a.extend_from_slice(&STROKE_ARGS);
+        refuses(a, RasModel::KEpsilon, RasModel::KEpsilon.name());
+
+        let l_src = lower_text(
+            &stroke_case_text(
+                STROKE_MOTION,
+                r#", "sources": [ { "type": "momentumSource", "field": "U", "bodyForce": [0.0, 0.0, 0.0] } ]"#,
+            ),
+            "l1src",
+        );
+        let hm_src = ofgpu::blockgen::build_mesh(&l_src.block).expect("the duct builds");
+        let o = parse(&argv(&ok_args)).expect("parse");
+        let e = match refuse_motion_combinations(&o, &l_src, RasModel::Laminar, &hm_src) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected a refusal naming sources"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("sources"), "{e}");
+
+        let l_out = lower_text(&stroke_case_text(STROKE_MOTION, OUT_VDB), "l1out");
+        let hm_out = ofgpu::blockgen::build_mesh(&l_out.block).expect("the duct builds");
+        let e = match refuse_motion_combinations(&o, &l_out, RasModel::Laminar, &hm_out) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected a refusal naming the output block"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("output block"), "{e}");
+
+        // A case without `motion` is never refused here, not even a steady one.
+        let l_stat = lower_text(&stroke_case_text("", ""), "l1stat");
+        let hm_stat = ofgpu::blockgen::build_mesh(&l_stat.block).expect("the duct builds");
+        let o_steady = parse(&argv(&["case.jsonc"])).expect("parse");
+        assert!(
+            refuse_motion_combinations(&o_steady, &l_stat, RasModel::Laminar, &hm_stat).is_ok(),
+            "a static case is never refused by the motion checks"
+        );
+
+        // `check_motion_walls`: a wall whose U is not a fixed value, a moving
+        // fixed-velocity patch outside `walls`, and the consistent piston.
+        let wall_motion = format!(
+            "{}, \"walls\": [\"outlet\"] }}",
+            STROKE_MOTION.strip_suffix(" }").expect("motion shape"),
+        );
+        let l_wall = lower_text(&stroke_case_text(&wall_motion, ""), "l1wall");
+        let e = match check_motion_walls(&l_wall) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("walls on a zeroGradient U must be refused"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("outlet") && e.contains("fixedValue"), "{e}");
+
+        let l_pw = lower_text(&piston_case_text(PISTON_MOTION_NO_WALLS, "[-0.5, 0, 0]"), "l1pw");
+        let e = match check_motion_walls(&l_pw) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a moving fixed-velocity patch outside walls must be refused"),
+        };
+        println!("refusal: {e}");
+        assert!(e.contains("motion.walls"), "{e}");
+
+        // A moving wall's case value seeds the first step's flux, so it must be
+        // the law's velocity at t = 0 - a wall written "at rest" is refused.
+        let l_rest = lower_text(&piston_case_text(PISTON_MOTION, "[0, 0, 0]"), "l1rest");
+        let e = match check_motion_walls(&l_rest) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a moving wall whose case value is not its t = 0 velocity must be refused"),
+        };
+        println!("refusal: {e}");
+        assert!(
+            e.contains("piston") && e.contains("velocity at t = 0") && e.contains("SPEC-LIT 105.12"),
+            "{e}"
+        );
+
+        let l_p = lower_text(&piston_case_text(PISTON_MOTION, "[-0.5, 0, 0]"), "l1p");
+        assert!(
+            check_motion_walls(&l_p).is_ok(),
+            "the piston's walls are consistent with its motion"
+        );
+    }
+
+    #[test]
+    fn a_driver_that_cannot_move_a_mesh_refuses_the_motion_block_by_name() {
+        let l_moving = lower_text(&stroke_case_text(STROKE_MOTION, ""), "l2move");
+        let e = match common::refuse_motion_block(Some(&l_moving), "ofgpu-k-epsilon") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("ofgpu-k-epsilon must refuse the motion block"),
+        };
+        println!("refusal: {e}");
+        assert!(
+            e.contains("ofgpu-k-epsilon") && e.contains("ofgpu-lowmach") && e.contains("motion"),
+            "{e}"
+        );
+
+        let l_static = lower_text(&stroke_case_text("", ""), "l2stat");
+        assert!(
+            common::refuse_motion_block(Some(&l_static), "ofgpu-k-epsilon").is_ok(),
+            "a case without motion is every case this driver has ever run"
+        );
+        assert!(common::refuse_motion_block(None, "ofgpu-k-epsilon").is_ok());
+    }
+
+    #[test]
+    fn the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::ale_flow::{
+            stroke_exact, STROKE_A, STROKE_L0, STROKE_N, STROKE_P0, STROKE_PERIOD, STROKE_T,
+            STROKE_U0,
+        };
+        assert_eq!(STROKE_L0, 1.0);
+        assert_eq!(STROKE_A, 0.2);
+        assert_eq!(STROKE_PERIOD, 1.0);
+        assert_eq!(STROKE_T, 0.25);
+        assert_eq!(STROKE_U0, 0.5);
+        assert_eq!(STROKE_P0, 1.0);
+        assert_eq!(STROKE_N, [16, 1, 1]);
+
+        let root_static = run_case_text(&stroke_case_text("", ""), "l3stat", &STROKE_ARGS);
+        let root_moving = run_case_text(&stroke_case_text(STROKE_MOTION, ""), "l3move", &STROKE_ARGS);
+        assert_ne!(
+            written_bytes(&root_static),
+            written_bytes(&root_moving),
+            "the motion block changed nothing the run wrote"
+        );
+
+        let (static_ux, _) = mean_ux(&root_static, 0.25, 16);
+        let (moving_ux, _) = mean_ux(&root_moving, 0.25, 16);
+        let exact_static = 0.75_f64;
+        let exact_moving = stroke_exact() as f64;
+        println!(
+            "stroke: static Ux {:.9} (exact 0.75, err {:.9e}); moving Ux {:.9} (exact {:.9}, err {:.9e})",
+            static_ux,
+            static_ux - exact_static,
+            moving_ux,
+            exact_moving,
+            moving_ux - exact_moving
+        );
+        assert!(
+            (static_ux - exact_static).abs() <= 1e-5,
+            "static {static_ux} against 0.75"
+        );
+        assert!(
+            (moving_ux - exact_moving).abs() <= 2e-3,
+            "moving {moving_ux} against {exact_moving}"
+        );
+        assert!(
+            (moving_ux - 0.75).abs() >= 1e-2,
+            "moving {moving_ux} must sit far from the static 0.75"
+        );
+    }
+
+    /// Gate 105-D (SPEC-LIT 105.16): the stroking outlet of SPEC-LIT 105.12,
+    /// static and on its sine law, under Euler and backward at 20, 40 and 80
+    /// steps, read through `RunEnd::ux_mean`.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn gate_105d_backward_starts_from_the_euler_row_and_the_stroke_is_second_order() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::ale_flow::stroke_exact;
+        const STEPS: [usize; 3] = [20, 40, 80];
+        let exact_moving = stroke_exact() as f64;
+        let err = |motion: &str, ddt: &str, n: usize, exact: f64| -> f64 {
+            let text = stroke_case_text(motion, "");
+            let text = if ddt == "backward" {
+                let t = text.replace("\"ddt\": \"Euler\"", "\"ddt\": \"backward\"");
+                assert_ne!(t, text, "the stroke case must name its ddt");
+                t
+            } else {
+                text
+            };
+            let kind = if motion.is_empty() { "static" } else { "moving" };
+            let dt = format!("{}", 0.25 / n as f64);
+            let args = ["-endTime", "0.25", "-deltaT", dt.as_str(), "-check", "1000"];
+            let (_, end) = run_case_text_end(&text, &format!("g105d_{ddt}_{kind}_{n}"), &args);
+            assert_eq!(end.steps, n, "{ddt} {kind}: {n} steps asked, {} run", end.steps);
+            let e = end.ux_mean - exact;
+            println!("gate 105-D: {ddt} {kind} {n} steps: Ux {:.12e} err {e:+.6e}", end.ux_mean);
+            e
+        };
+        for ddt in ["Euler", "backward"] {
+            for n in STEPS {
+                let e = err("", ddt, n, 0.75);
+                assert!(e.abs() <= 1e-5, "{ddt} static {n} steps: error {e:e} against 0.75");
+            }
+            let e: Vec<f64> =
+                STEPS.iter().map(|&n| err(STROKE_MOTION, ddt, n, exact_moving)).collect();
+            let p_coarse = (e[0] / e[1]).abs().log2();
+            let p_fine = (e[1] / e[2]).abs().log2();
+            println!("gate 105-D: {ddt} moving: p coarse {p_coarse:.4}, p fine {p_fine:.4}");
+            if ddt == "backward" {
+                assert!((p_fine - 2.0).abs() <= 0.2, "backward p fine {p_fine} (coarse {p_coarse})");
+                assert!(e[2].abs() <= 5e-6, "backward 80-step error {:e}", e[2]);
+            } else {
+                assert!((p_fine - 1.0).abs() <= 0.1, "Euler p fine {p_fine} (coarse {p_coarse})");
+            }
+        }
+    }
+
+    /// Gate 105-E's case (SPEC-LIT 105.17): an open 16x1x1 duct, a wall at
+    /// `xmin`, an open outlet at `xmax`, symmetry sides, laminar, `T = 300 K`
+    /// and `U = 0` at the start. `ddt` names the case's ddt scheme.
+    fn heated_duct_case_text(ddt: &str) -> String {
+        r#"{
+  "name": "heatedDuct",
+  "mesh": { "kind": "cartesian", "bounds": { "min": [0,0,0], "max": [1.0,0.1,0.1] }, "cells": [16,1,1],
+    "boundaries": { "xmin": "closed", "xmax": "outlet", "ymin": "sideA", "ymax": "sideB", "zmin": "sideC", "zmax": "sideD" } },
+  "physics": { "gravity": [0,0,0], "fluid": { "nu": 0.01, "Pr": 0.71, "Prt": 0.85, "TRef": 300.0 }, "buoyancy": "densityRatio" },
+  "patches": [
+    { "match": "closed", "kind": "wall", "U": { "type": "fixedValue", "value": [0,0,0] }, "p": { "type": "zeroGradient" }, "T": { "type": "zeroGradient" } },
+    { "match": "outlet", "kind": "open", "U": { "type": "zeroGradient" }, "p": { "type": "fixedValue", "value": 0.0 }, "T": { "type": "zeroGradient" } },
+    { "match": "side.*", "kind": "symmetry" } ],
+  "initial": { "U": [0,0,0], "T": 300.0, "p": 0.0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "DDT",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 } ] },
+  "run": { "endTime": 0.25, "deltaT": 0.0125 }
+}
+"#
+        .replace("DDT", ddt)
+    }
+
+    /// Gate 105-E (SPEC-LIT 105.17): a uniformly heated duct whose `T` stays
+    /// uniform in space, first order under `Euler` and second order under
+    /// `backward`, read through `RunEnd::t_mean`.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn gate_105e_a_uniformly_heated_duct_is_first_order_under_euler_and_second_order_under_backward() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let r_s = f64::from(ofgpu::energy::GasProperties::default().r_s());
+        let lambda = (3548.0 / 0.01) * r_s / (101325.0 * 1006.0);
+        let exact = 300.0 * (lambda * 0.25).exp();
+        const STEPS: [usize; 3] = [20, 40, 80];
+        for ddt in ["Euler", "backward"] {
+            let mut t_mean = [0.0f64; 3];
+            for (i, &n) in STEPS.iter().enumerate() {
+                let dt = format!("{}", 0.25 / n as f64);
+                let args = [
+                    "-endTime", "0.25", "-deltaT", dt.as_str(), "-heaterPower", "3548", "-check",
+                    "1000",
+                ];
+                let (_, end) = run_case_text_end(
+                    &heated_duct_case_text(ddt),
+                    &format!("g105e_{ddt}_{n}"),
+                    &args,
+                );
+                assert_eq!(end.steps, n, "{ddt}: {n} steps asked, {} run", end.steps);
+                t_mean[i] = end.t_mean;
+                let e = end.t_mean - exact;
+                println!("gate 105-E: {ddt} {n} steps: T {:.6} K err {e:+.6e}", end.t_mean);
+            }
+            let p_coarse = ((t_mean[0] - exact) / (t_mean[1] - exact)).abs().log2();
+            let p_fine = ((t_mean[1] - exact) / (t_mean[2] - exact)).abs().log2();
+            println!("gate 105-E: {ddt}: p coarse {p_coarse:.4}, p fine {p_fine:.4}");
+            let want: [f64; 3] = if ddt == "Euler" {
+                [384.531216, 384.827534, 384.976701]
+            } else {
+                [385.072749, 385.112940, 385.123125]
+            };
+            for (i, &n) in STEPS.iter().enumerate() {
+                assert!(
+                    (t_mean[i] - want[i]).abs() <= 1e-3,
+                    "{ddt} {n} steps: t_mean {:.6} K, want {:.6} K",
+                    t_mean[i],
+                    want[i]
+                );
+            }
+            let (want_p, tol_p) = if ddt == "Euler" { (1.0, 0.1) } else { (2.0, 0.2) };
+            assert!(
+                (p_fine - want_p).abs() <= tol_p,
+                "{ddt} p fine {p_fine} (coarse {p_coarse})"
+            );
+        }
+    }
+
+    /// SPEC-LIT 105.18: under `backward` the stroke duct, static and moving,
+    /// runs past its old Mach refusals to 160 and 320 steps with `T` at
+    /// round-off and `Ux` on the exact answer.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_backward_stroke_runs_past_its_old_mach_refusal_with_t_at_round_off() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        use ofgpu::ale_flow::stroke_exact;
+        let exact_moving = stroke_exact() as f64;
+        for (motion, kind, exact, bound) in
+            [("", "static", 0.75, 1e-5), (STROKE_MOTION, "moving", exact_moving, 5e-6)]
+        {
+            for n in [160usize, 320] {
+                let text = stroke_case_text(motion, "");
+                let replaced = text.replace("\"ddt\": \"Euler\"", "\"ddt\": \"backward\"");
+                assert_ne!(replaced, text, "the stroke case must name its ddt");
+                let dt = format!("{}", 0.25 / n as f64);
+                let args = ["-endTime", "0.25", "-deltaT", dt.as_str(), "-check", "1000"];
+                let (_, end) =
+                    run_case_text_end(&replaced, &format!("bdfdiag_{kind}_{n}"), &args);
+                let dev = end.t_mean - 293.15;
+                let e = end.ux_mean - exact;
+                println!(
+                    "stroke regression: backward {kind} {n} steps: Ux {:.12e} err {e:+.6e} T \
+                     {:.12e} dev {dev:+.3e}",
+                    end.ux_mean, end.t_mean
+                );
+                assert_eq!(end.steps, n, "{kind}: {n} steps asked, {} run", end.steps);
+                assert!(dev.abs() <= 1e-9, "{kind} {n} steps: T dev {dev:e} K");
+                assert!(e.abs() <= bound, "{kind} {n} steps: Ux error {e:e} against {exact}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn a_moving_wall_named_in_the_motion_block_carries_the_mesh_velocity() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let root_moving =
+            run_case_text(&piston_case_text(PISTON_MOTION, "[-0.5, 0, 0]"), "l4move", &PISTON_ARGS);
+        let root_static = run_case_text(&piston_case_text("", "[0, 0, 0]"), "l4stat", &PISTON_ARGS);
+        let (_, ucells) = mean_ux(&root_moving, 0.05, 72);
+        let mp = read_scalar_field(
+            &root_moving.join(format_time_name(0.05)).join("p"),
+            72,
+        )
+        .expect("read the written p");
+        let worst_ux = ucells.iter().map(|u| (u.x + 0.5).abs() as f64).fold(0.0_f64, f64::max);
+        let worst_trans = ucells
+            .iter()
+            .map(|u| (u.y.abs() + u.z.abs()) as f64)
+            .fold(0.0_f64, f64::max);
+        let worst_p = mp.internal.iter().map(|v| v.abs() as f64).fold(0.0_f64, f64::max);
+        let (_, scells) = mean_ux(&root_static, 0.05, 72);
+        let worst_static = scells.iter().map(|u| (u.x + 0.5).abs() as f64).fold(0.0_f64, f64::max);
+        println!(
+            "piston: moving max|Ux+0.5| {:.9e} max|Uy|+|Uz| {:.9e} max|p| {:.9e}; static max|Ux+0.5| {:.9e}",
+            worst_ux, worst_trans, worst_p, worst_static
+        );
+        assert!(worst_ux <= 1e-6, "the moving wall must keep U = -c: {worst_ux}");
+        assert!(worst_trans <= 1e-6, "transverse drift: {worst_trans}");
+        assert!(worst_p <= 1e-6, "the open piston stays at p = 0: {worst_p}");
+        assert!(
+            worst_static >= 0.1,
+            "the fixed closed end stops the flow: {worst_static}"
         );
     }
 }

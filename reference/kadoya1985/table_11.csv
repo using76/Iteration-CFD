@@ -1,0 +1,23 @@
+# K. Kadoya, N. Matsunaga and A. Nagashima, J. Phys. Chem. Ref. Data 14 (1985) 947-970, Table 11
+# (p. 961), the constants of eq. (5): lambda = Lambda [lambda_0(T_r) + Delta_lambda(rho_r)],
+# lambda_0 = C_1 T_r + C_0.5 T_r^0.5 + sum over i = 0..-4 of C_i T_r^i, Delta_lambda = sum over
+# i = 1..5 of D_i rho_r^i, T_r = T/T*, rho_r = rho/rho*. The printed digit groups are written
+# without the space.
+# kind 0: index 1 = T* (K), 2 = rho* (kg/m^3), 3 = Lambda (1e-3 W/(m K));
+# kind 1: index = the exponent i of C_i; kind 2: index = the power i of D_i.
+kind,index,value
+0,1,132.5
+0,2,314.3
+0,3,25.9778
+1,1,0.239503
+1,0.5,0.00649768
+1,0,1.00000
+1,-1,-1.92615
+1,-2,2.00383
+1,-3,-1.07553
+1,-4,0.229414
+2,1,0.402287
+2,2,0.356603
+2,3,-0.163159
+2,4,0.138059
+2,5,-0.0201725

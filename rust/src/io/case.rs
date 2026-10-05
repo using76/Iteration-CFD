@@ -158,6 +158,10 @@ impl LinearSolverKind {
 //  Controls
 // ==========================================================================
 
+/// Sweeps between two reads of the convergence flag when a case does not
+/// say (`solvers/<var>/checkInterval`, SPEC-LIT 113.3).
+pub const DEFAULT_CHECK_INTERVAL: Label = 1;
+
 /// One equation's linear-solver settings, read from `solvers/<var>`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolverControls {
@@ -173,6 +177,8 @@ pub struct SolverControls {
     /// How often the convergence flag is DMA'd to the host. `1` checks every
     /// iteration, which is the conventional behaviour; larger values trade
     /// fewer syncs for overshooting by up to `check_interval - 1` iterations.
+    /// Read from `solvers/<var>/checkInterval`; the default is
+    /// [`DEFAULT_CHECK_INTERVAL`] (SPEC-LIT 113.3).
     pub check_interval: Label,
 
     /// Ignore the residual test and run exactly `max_iter` sweeps. Zero host
@@ -193,7 +199,7 @@ impl Default for SolverControls {
             max_iter: 1000,
             min_iter: 0,
             precon: Preconditioner::Diagonal,
-            check_interval: 1,
+            check_interval: DEFAULT_CHECK_INTERVAL,
             fixed_iters: false,
             report_residuals: true,
         }
@@ -1252,6 +1258,26 @@ pub fn read_solver_controls(
     sc.rel_tol = fv_solution.scalar(&format!("{p}relTol"), sc.rel_tol);
     sc.max_iter = fv_solution.label(&format!("{p}maxIter"), sc.max_iter);
     sc.min_iter = fv_solution.label(&format!("{p}minIter"), sc.min_iter);
+
+    // SPEC-LIT 113.3: sweeps between two reads of the convergence flag.
+    // Read strictly - a whole number, at least 1 - because a silently
+    // defaulted interval is a solve that drains the pipeline, or overshoots,
+    // when the case said it should not.
+    let ci_key = format!("{p}checkInterval");
+    if let Some(raw) = fv_solution.get(&ci_key) {
+        let tok = raw.split_whitespace().next().unwrap_or("");
+        match tok.parse::<Label>() {
+            Ok(v) if v >= 1 => sc.check_interval = v,
+            _ => {
+                return Err(Error::Config(format!(
+                    "{ci_key} is `{}`: it is the number of sweeps between two reads \
+                     of the convergence flag, so it must be a whole number of at \
+                     least 1 (SPEC-LIT 113.3)",
+                    raw.trim()
+                )));
+            }
+        }
+    }
 
     // The entry is a bare word, sometimes followed by a sub-dictionary; take
     // the first token.
@@ -2571,6 +2597,52 @@ mod tests {
         read_solver_controls(&mut k, &d, "k").unwrap();
         assert_eq!(k.solver, LinearSolverKind::PCG);
         assert_eq!(k.precon, Preconditioner::None);
+    }
+
+    /// SPEC-LIT 113.3: `checkInterval` is read, and anything that is not a
+    /// whole number of at least 1 is refused by name.
+    #[test]
+    fn check_interval_is_read_and_a_bad_one_is_refused_by_name() {
+        let src = r#"
+            solvers
+            {
+                p { solver PCG; preconditioner DIC; checkInterval 8; }
+                U { solver PBiCGStab; }
+                a { checkInterval 0; }
+                b { checkInterval -3; }
+                c { checkInterval 2.5; }
+                d { checkInterval many; }
+            }
+        "#;
+        let d = FoamDict::parse(src, "fvSolution").unwrap();
+
+        let mut p = SolverControls::default();
+        read_solver_controls(&mut p, &d, "p").unwrap();
+        assert_eq!(p.check_interval, 8);
+
+        let mut u = SolverControls::default();
+        read_solver_controls(&mut u, &d, "U").unwrap();
+        assert_eq!(u.check_interval, DEFAULT_CHECK_INTERVAL);
+
+        for var in ["a", "b", "c", "d"] {
+            let mut sc = SolverControls::default();
+            let err = read_solver_controls(&mut sc, &d, var)
+                .expect_err("a bad checkInterval must be refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("solvers/{var}/checkInterval")) && msg.contains("SPEC-LIT 113.3"),
+                "solvers/{var}/checkInterval was not refused by name: {msg}"
+            );
+        }
+    }
+
+    /// SPEC-LIT 113.3 states the default, and the code and the text agree.
+    #[test]
+    fn the_default_check_interval_is_the_one_spec_lit_states() {
+        const SPEC: &str = include_str!("../../SPEC-LIT.md");
+        assert_eq!(SolverControls::default().check_interval, DEFAULT_CHECK_INTERVAL);
+        let sentence = format!("`checkInterval` defaults to **{DEFAULT_CHECK_INTERVAL}**");
+        assert!(SPEC.contains(&sentence), "SPEC-LIT 113.3 does not say {sentence:?}");
     }
 
     #[test]

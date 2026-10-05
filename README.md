@@ -370,9 +370,9 @@ claude mcp add ofgpu -- node mcp\server.mjs
 - Wibron, E., Ljung, A.-L., & Lundström, T. S. *Energies*, 12(8) (2019) 1473. DOI `10.3390/en12081473` — **CC-BY-4.0, licence verified live through the Crossref REST API**, but **the full text was not reachable from this environment**, so §55.8's six-configuration ranking gate is **NOT run** and only the one relation the abstract states is gated. — §55.8
 ### 검증 데이터
 - Ghia, U., Ghia, K. N., & Shin, C. T. *Journal of Computational Physics*, 48 (1982) 387–411. — the lid-driven cavity's tabulated centreline profiles
-- Moser, R. D., Kim, J., & Mansour, N. N. *Physics of Fluids*, 11 (1999) 943. — DNS channel profiles at `Re_tau` 180 / 395 / 590, and the sublayer `k+ ≈ C_v (y+)^2` with `C_v ≈ 0.07` of §15.2
-- Driver, D. M., & Seegmiller, H. L. *AIAA Journal*, 23 (1985) 163–171. — the backward-facing step's reattachment length, `x_r/h = 6.26 ± 0.10`. Named in §22 and **NOT run** by §41's section.
-- McCaffrey, B. J. **NBS TN 910** (1979). — the buoyant plume's centreline temperature and velocity decay correlations, `ΔT ~ z^{−5/3}` in the plume region
+- Moser, R. D., Kim, J., & Mansour, N. N. *Physics of Fluids*, 11 (1999) 943. — DNS channel profiles at `Re_tau` 180 / 395 / 590, and the sublayer `k+ ≈ C_v (y+)^2` with `C_v ≈ 0.07` of §15.2. The key files' host states no redistribution terms, so they are not distributed; gated by SPEC-LIT §110.2 Gate 110-A
+- Driver, D. M., & Seegmiller, H. L. *AIAA Journal*, 23 (1985) 163–171. — the backward-facing step's reattachment length, `x_r/h = 6.26 ± 0.10`. Gated by SPEC-LIT §110.3 Gate 110-B — the "NOT run" of §40.7 is retired: the step is now carved out of one block
+- McCaffrey, B. J. **NBSIR 79-1910** (1979). — the buoyant plume's centreline temperature and velocity decay correlations, `ΔT ~ z^{−5/3}` in the plume region. US Government work, public domain. Gated by SPEC-LIT §110.4 Gate 110-C
 - Martin, J. C., & Moyce, W. J. *Philosophical Transactions of the Royal Society A*, 244 (1952) 312. — the dam break's surge-front position against time
 
 ---

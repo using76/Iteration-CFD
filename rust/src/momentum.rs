@@ -88,6 +88,7 @@ use crate::io::dict::FoamDict;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::GpuMesh;
+use crate::mesh::ale::AleMesh;
 use crate::rheology::{self, RheologyCoeffs, RheologyKernels};
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Tensor, Vec3};
@@ -823,6 +824,32 @@ impl<'m> Momentum<'m> {
         self.ctrl.u_relax
     }
 
+    /// SPEC-LIT §100.14: write the laminar viscosity, per cell and per
+    /// boundary face - (S100.14)'s `mu(T)/rho_f` from a case's curve. Between
+    /// two outer iterations, never inside a captured region. Refused under a
+    /// non-Newtonian model, whose `update_rheology` owns the same two arrays.
+    pub fn set_laminar_viscosity(&mut self, gpu: &Gpu, nu: &[Scalar], b_nu: &[Scalar]) -> Result<()> {
+        if self.rheok.is_some() {
+            return Err(Error::Config(format!(
+                "Momentum::set_laminar_viscosity: the viscosityModel is {}, whose rheology \
+                 writes the laminar viscosity; a curve in T and a non-Newtonian model cannot \
+                 both write it (SPEC-LIT 100.14)",
+                self.ctrl.rheology.model.name()
+            )));
+        }
+        let (n, nbf) = (self.m.n_cells, self.m.n_boundary_faces);
+        if nu.len() != n || b_nu.len() != nbf {
+            return Err(Error::Config(format!(
+                "Momentum::set_laminar_viscosity: {} cell and {} face values for a mesh of {n} \
+                 cells and {nbf} boundary faces (SPEC-LIT 100.14)",
+                nu.len(),
+                b_nu.len()
+            )));
+        }
+        gpu.write(&mut self.nu_lam, nu)?;
+        gpu.write(&mut self.b_nu_lam, b_nu)
+    }
+
     /// Volumetric sources on the momentum equation - SPEC-LIT §18.
     ///
     /// A body force per unit mass, or Darcy-Forchheimer porous drag. The drag
@@ -1268,6 +1295,22 @@ impl<'m> Momentum<'m> {
         phi: &GpuSurfaceScalarField,
         nut: &GpuScalarField,
     ) -> Result<[SolverPerformance; 3]> {
+        self.solve_on(gpu, u, phi, nut, None)
+    }
+
+    /// [`Self::solve`] on a moving mesh - SPEC-LIT 105.7. `phi` is the flux
+    /// the convective terms read (the relative flux when the mesh moves) and
+    /// `ale` the moving mesh whose volume history the time derivative reads in
+    /// the conservative form (SPEC-LIT 105.7 says which form reads which).
+    /// `None` is [`Self::solve`], launch for launch.
+    pub fn solve_on(
+        &mut self,
+        gpu: &Gpu,
+        u: &mut GpuVectorField,
+        phi: &GpuSurfaceScalarField,
+        nut: &GpuScalarField,
+        ale: Option<&AleMesh>,
+    ) -> Result<[SolverPerformance; 3]> {
         let m = self.m;
         let n = m.n_cells;
         if n == 0 {
@@ -1289,7 +1332,7 @@ impl<'m> Momentum<'m> {
         // which is right on an orthogonal mesh and not enough on a skewed one.
         // This loop used to exist for the pressure equation alone.
         for _pass in 0..=self.ctrl.n_non_orth_correctors {
-            perf = self.solve_once(gpu, u, phi)?;
+            perf = self.solve_once(gpu, u, phi, ale)?;
         }
 
         Ok(perf)
@@ -1314,6 +1357,19 @@ impl<'m> Momentum<'m> {
         phi: &GpuSurfaceScalarField,
         nut: &GpuScalarField,
     ) -> Result<()> {
+        self.assemble_only_on(gpu, u, phi, nut, None)
+    }
+
+    /// [`Self::assemble_only`] on a moving mesh - see [`Self::solve_on`] for
+    /// the two extra arguments.
+    pub fn assemble_only_on(
+        &mut self,
+        gpu: &Gpu,
+        u: &GpuVectorField,
+        phi: &GpuSurfaceScalarField,
+        nut: &GpuScalarField,
+        ale: Option<&AleMesh>,
+    ) -> Result<()> {
         let n = self.m.n_cells;
         if n == 0 {
             return Ok(());
@@ -1322,7 +1378,7 @@ impl<'m> Momentum<'m> {
         self.update_viscosity(gpu, u, nut)?;
         self.update_div_weights(gpu, u, phi)?;
         for c in 0..3 {
-            self.assemble_component(gpu, u, phi, c as Label)?;
+            self.assemble_component(gpu, u, phi, c as Label, ale)?;
         }
         Ok(())
     }
@@ -1333,12 +1389,13 @@ impl<'m> Momentum<'m> {
         gpu: &Gpu,
         u: &mut GpuVectorField,
         phi: &GpuSurfaceScalarField,
+        ale: Option<&AleMesh>,
     ) -> Result<[SolverPerformance; 3]> {
         let m = self.m;
         let n = m.n_cells;
 
         for c in 0..3 {
-            self.assemble_component(gpu, u, phi, c as Label)?;
+            self.assemble_component(gpu, u, phi, c as Label, ale)?;
         }
 
         let mut perf = [SolverPerformance::default(); 3];
@@ -1450,6 +1507,7 @@ impl<'m> Momentum<'m> {
         u: &GpuVectorField,
         phi: &GpuSurfaceScalarField,
         cmpt: Label,
+        ale: Option<&AleMesh>,
     ) -> Result<()> {
         let m = self.m;
         let n = m.n_cells;
@@ -1466,9 +1524,17 @@ impl<'m> Momentum<'m> {
 
         {
             // SPEC-LIT 13: the scheme `ddtSchemes` named, applied to the two
-            // old levels of THIS component.
-            let Self { ddt, a, uc, .. } = self;
-            ddt.add(gpu, a, m, &uc.f0, &uc.f00, 1.0)?;
+            // old levels of THIS component. On a moving mesh (SPEC-LIT 105.7)
+            // the conservative form reads each level's own volume; the bounded
+            // form keeps the static term, its consistent partner.
+            let Self { ddt, a, uc, ctrl, .. } = self;
+            match ale {
+                Some(ale) if !ctrl.bounded_convection => {
+                    let c = ddt.state.coeffs(ddt.scheme)?;
+                    ale.fvm_ddt(gpu, a, m, &uc.f0, &uc.f00, c, 1.0)?;
+                }
+                _ => ddt.add(gpu, a, m, &uc.f0, &uc.f00, 1.0)?,
+            }
         }
         {
             let Self { fvk, a, uc, .. } = self;
@@ -2193,5 +2259,46 @@ mod tests {
             ..MomentumControls::default()
         };
         newtonian.validate().expect("a uniform viscosity has no transpose term to lose");
+    }
+
+    /// SPEC-LIT §100.14: the laminar viscosity written from the host reaches
+    /// `nu_eff` to the bit; a wrong length and a rheology model are refused.
+    #[test]
+    fn the_laminar_viscosity_is_written_and_a_rheology_model_refuses_it() {
+        use crate::rheology::{RheologyCoeffs, RheologyModel};
+        let Some(gpu) = Gpu::new(0).ok() else { return };
+        let (mut hm, points, faces) =
+            crate::mesh::topology::tests::box_mesh([3, 3, 3], crate::Vec3::new(0.1, 0.1, 0.1));
+        hm.compute_geometry(&points, &faces).expect("box geometry");
+        hm.build_cell_face_maps();
+        let m = crate::GpuMesh::upload(&gpu, &hm).expect("upload");
+        let mut mom = Momentum::new(&gpu, &m, MomentumControls::default(), BuoyancyCoeffs::default())
+            .expect("a Newtonian equation");
+        let nu: Vec<Scalar> = (0..hm.n_cells).map(|i| 1.0e-3 * (1.0 + i as Scalar)).collect();
+        let b_nu: Vec<Scalar> = vec![0.25; hm.n_boundary_faces];
+        mom.set_laminar_viscosity(&gpu, &nu, &b_nu).expect("a Newtonian equation takes it");
+        let u = GpuVectorField::zeros(&gpu, &m, "U").expect("U");
+        let nut = GpuScalarField::zeros(&gpu, &m, "nut").expect("nut");
+        mom.update_viscosity(&gpu, &u, &nut).expect("update_viscosity");
+        assert_eq!(gpu.download(&mom.nu_eff.f).unwrap(), nu, "nu_eff = nu_lam + 0");
+        assert_eq!(gpu.download(&mom.nu_eff.bf).unwrap(), b_nu);
+
+        let e = mom.set_laminar_viscosity(&gpu, &nu[1..], &b_nu).unwrap_err().to_string();
+        println!("{e}");
+        assert!(e.contains("set_laminar_viscosity") && e.contains("SPEC-LIT 100.14"), "{e}");
+        let rheology = RheologyCoeffs {
+            model: RheologyModel::HerschelBulkley,
+            rho: 1000.0,
+            tau0: 2.0,
+            k: 0.35,
+            n: 0.6,
+            m_reg: 1000.0,
+            ..RheologyCoeffs::default()
+        };
+        let ctrl = MomentumControls { rheology, ..MomentumControls::default() };
+        let mut hb = Momentum::new(&gpu, &m, ctrl, BuoyancyCoeffs::default()).expect("Herschel-Bulkley");
+        let e = hb.set_laminar_viscosity(&gpu, &nu, &b_nu).unwrap_err().to_string();
+        println!("{e}");
+        assert!(e.contains("HerschelBulkley") && e.contains("SPEC-LIT 100.14"), "{e}");
     }
 }

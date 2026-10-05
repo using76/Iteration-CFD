@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { clampLine, compileUserRegex } from '../regex.js'
 import { fail, okResult, type ToolDef } from './context.js'
 import { globMatcher, isHiddenDir, resolveTool } from './paths.js'
+import { refuseFileWrite } from './writeGuards.js'
 
 export const TEXT_CAP = 32 * 1024
 /** Same ceiling the REST route uses (workspace/fs.ts MAX_FILE_BYTES). */
@@ -213,6 +214,7 @@ export const fileWrite: ToolDef<typeof WriteSchema> = {
   name: 'file_write',
   description: 'Create or overwrite a text file in the workspace (needs approval). Refuses .jsonc case files: edit those with case_edit so comments survive and the result is validated.',
   schema: WriteSchema,
+  refuse: refuseFileWrite,
   async run(input, ctx) {
     if (/\.jsonc$/i.test(input.path)) return fail('USE_CASE_EDIT', 'case files are edited with case_edit (JSON pointer edits, comments preserved), not rewritten')
     const r = resolveTool(ctx.workspaceRoot, input.path)

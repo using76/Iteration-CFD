@@ -1,0 +1,101 @@
+# tools/autonomy/campaign.py at mesh-tree commit 3f0827c: line 136 and lines 1586-1683, verbatim
+TIME_KEYS = ("campaign_id", "t_start", "t_end")
+
+def _strip_row(r):
+    x = copy.deepcopy(r)
+    for k in TIME_KEYS:
+        x.pop(k, None)
+    if isinstance(x.get("outcome"), dict):
+        x["outcome"]["seconds"] = None
+    if x.get("prediction") is not None:
+        x["prediction"]["t_predicted"] = None
+    for e in x.get("constraint_refusals") or []:
+        if isinstance(e, dict) and "t" in e:
+            e["t"] = None
+    return x
+
+
+def _strip_geom(g):
+    x = copy.deepcopy(g)
+    for k in TIME_KEYS:
+        x.pop(k, None)
+    x.pop("seconds", None)
+    for tag in x.get("records") or []:
+        if isinstance(tag, dict) and isinstance(tag.get("record"), dict) \
+                and "t" in tag["record"]:
+            tag["record"]["t"] = None
+    return x
+
+
+def _first_diff(a, b, path=""):
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b)):
+            if k not in a or k not in b:
+                return path + "/" + k
+            d = _first_diff(a[k], b[k], path + "/" + k)
+            if d is not None:
+                return d
+        return None
+    if isinstance(a, list) and isinstance(b, list):
+        for i in range(max(len(a), len(b))):
+            if i >= len(a) or i >= len(b):
+                return "%s/%d" % (path, i)
+            d = _first_diff(a[i], b[i], "%s/%d" % (path, i))
+            if d is not None:
+                return d
+        return None
+    if json.dumps(a, sort_keys=True) != json.dumps(b, sort_keys=True):
+        return path or "/"
+    return None
+
+
+def compare(dir_a, dir_b):
+    """Two runs of one campaign: equal apart from the time fields (G-DET)."""
+    rows_a = {(r["geometry_id"], r["attempt"]): r for r in load_rows(dir_a)}
+    rows_b = {(r["geometry_id"], r["attempt"]): r for r in load_rows(dir_b)}
+    row_diffs = []
+    for key in sorted(set(rows_a) | set(rows_b)):
+        if key not in rows_a or key not in rows_b:
+            row_diffs.append({"key": list(key), "path": "/"})
+            continue
+        p = _first_diff(_strip_row(rows_a[key]), _strip_row(rows_b[key]))
+        if p is not None:
+            row_diffs.append({"key": list(key), "path": p})
+    geoms_a = {g["geometry_id"]: g for g in load_geometries(dir_a)}
+    geoms_b = {g["geometry_id"]: g for g in load_geometries(dir_b)}
+    geom_diffs = []
+    for gid in sorted(set(geoms_a) | set(geoms_b)):
+        if gid not in geoms_a or gid not in geoms_b:
+            geom_diffs.append({"key": [gid], "path": "/"})
+            continue
+        p = _first_diff(_strip_geom(geoms_a[gid]), _strip_geom(geoms_b[gid]))
+        if p is not None:
+            geom_diffs.append({"key": [gid], "path": p})
+    content_compared = 0
+    content_equal = 0
+    for key in sorted(set(rows_a) & set(rows_b)):
+        ca, cb = rows_a[key].get("content_sha256"), rows_b[key].get("content_sha256")
+        if ca is not None and cb is not None:
+            content_compared += 1
+            content_equal += 1 if ca == cb else 0
+
+    def audit_of(d):
+        out = {"n": 0, "equal": 0}
+        for g in load_geometries(d):
+            for e in g["audit"]:
+                out["n"] += 1
+                if e["equal"]:
+                    out["equal"] += 1
+        return out
+
+    audit_a = audit_of(dir_a)
+    audit_b = audit_of(dir_b)
+    ok = (len(rows_a) == len(rows_b) and not row_diffs and not geom_diffs
+          and content_compared == content_equal and audit_a == audit_b)
+    return {"schema": COMPARE_SCHEMA, "rows_a": len(rows_a), "rows_b": len(rows_b),
+            "rows_equal": len(rows_a) == len(rows_b),
+            "n_row_diffs": len(row_diffs), "row_diffs": row_diffs[:20],
+            "content_compared": content_compared, "content_equal": content_equal,
+            "n_geometry_diffs": len(geom_diffs), "geometry_diffs": geom_diffs[:20],
+            "audit_a": audit_a, "audit_b": audit_b, "ok": ok}
+

@@ -33,6 +33,8 @@
 //! `SHI`/`RHI`; the per-fan operating points and shaft powers; and the PUE
 //! **inputs**. It does **not** print a PUE (§55.4): PUE is a facility energy
 //! ratio and a room model cannot compute one.
+//! When the case carries `metrics.supplyTemperatureSweep`, it also runs §55.4's
+//! sweep and prints the free-cooling ceiling beside the PUE inputs.
 //!
 //! Where the case carries a porous jump it also prints §53.6's caveat, naming
 //! what a pressure-jump tile gets wrong.
@@ -47,7 +49,7 @@ use ofgpu::dcmetrics::{
 use ofgpu::error::Result;
 use ofgpu::fan::FlowDevices;
 use ofgpu::field::{BcKind, GpuScalarField};
-use ofgpu::io::case_dc::{DcCase, LoweredDcCase};
+use ofgpu::io::case_dc::{DcCase, LoweredDcCase, SupplySweep};
 use ofgpu::mesh::{GpuMesh, PatchKind};
 use ofgpu::models::k_epsilon::{KEpsilon, KEpsilonCoeffs};
 use ofgpu::momentum::{BuoyancyCoeffs, MomentumControls};
@@ -168,7 +170,12 @@ fn run(
     }
 
     let gpu = Gpu::new(0)?;
-    let sol = solve(&gpu, &lowered)?;
+    let mut sol = solve(&gpu, &lowered)?;
+    if let Some(sw) = &lowered.supply_sweep {
+        let result = run_sweep(&gpu, &case, sw)?;
+        sol.report.pue.free_cooling_ceiling = ceiling_of(&result.points);
+        sol.sweep = Some(result);
+    }
 
     print_report(&lowered, &sol);
 
@@ -196,6 +203,79 @@ fn run(
     Ok(())
 }
 
+// ---- D5: per-wall §6.4 y+ and the EQ-B4 mixed-convection ratio -----------
+
+/// EQ-B4's regime thresholds: `forced` below, `natural` above, `mixed`
+/// between. The seed's prose carries no numbers; one decade either side of
+/// one is the house choice, and both are printed in the caveat text.
+const GR_RE2_FORCED_BELOW: f64 = 0.1;
+/// See [`GR_RE2_FORCED_BELOW`].
+const GR_RE2_NATURAL_ABOVE: f64 = 10.0;
+
+/// Division floor for EQ-B4's approach speed, m/s: a stagnant first cell
+/// must not divide by zero. The reported speed is the unfloored mean.
+const U_FLOOR: f64 = 1e-6;
+
+/// `Scalar` widened to the f64 the report carries, correct under either
+/// precision feature. Identity under the default f64 build - which is why
+/// the conversion is spelled once here, behind an `allow`: the house clippy
+/// gate counts warnings, and an identity conversion at every call site of
+/// the wall table would add ten.
+#[allow(clippy::useless_conversion)]
+fn wide(x: Scalar) -> f64 {
+    f64::from(x)
+}
+
+/// §6.4: y+ = C_mu^(1/4) y sqrt(k_P) / nu, the expression `lowmach.rs` prints per patch.
+fn y_plus(k_p: f64, y: f64, nu: f64, cmu: f64) -> f64 {
+    cmu.powf(0.25) * y * k_p.max(0.0).sqrt() / nu
+}
+
+/// EQ-B4 (Incropera & DeWitt section 9.9): Gr/Re^2 = g beta dT L / U^2 - no
+/// SPEC-LIT section; the mixed-convection criterion the seed carries.
+fn gr_over_re2(g: f64, beta: f64, dt: f64, l: f64, u: f64) -> f64 {
+    g * beta * dt * l / (u * u)
+}
+
+/// `forced` below [`GR_RE2_FORCED_BELOW`], `natural` above
+/// [`GR_RE2_NATURAL_ABOVE`], `mixed` between.
+fn regime_word(x: f64) -> &'static str {
+    if x < GR_RE2_FORCED_BELOW {
+        "forced"
+    } else if x > GR_RE2_NATURAL_ABOVE {
+        "natural"
+    } else {
+        "mixed"
+    }
+}
+
+/// The wall-function coefficients this driver passes to `KEpsilon::new` and
+/// reads back for §6.4's y+ - one binding, so §15.6's "the same C_mu in the
+/// model and at the wall" is a fact of this file and a test below pins it.
+fn wall_coeffs() -> ofgpu::io::case::WallFunctionCoeffs {
+    ofgpu::io::case::WallFunctionCoeffs::default()
+}
+
+/// One wall patch's §6.4 y+ triple and its EQ-B4 mixed-convection ratio,
+/// computed on the host after the last corrector, as `lowmach.rs` does.
+#[derive(Debug, Clone)]
+struct WallPatchReport {
+    patch: String,
+    y_plus_min: f64,
+    y_plus_mean: f64,
+    y_plus_max: f64,
+    /// `|T_w - T_P|`, area-weighted; `None` when the case gives the wall no
+    /// temperature (`adiabaticWall`), so Gr/Re^2 is undefined there.
+    delta_t: Option<f64>,
+    /// Area-weighted first-cell speed, m/s - what the log law is fitted to.
+    approach_speed: f64,
+    /// The room's extent along gravity, m - one length per run.
+    length_scale: f64,
+    gr_over_re2: Option<f64>,
+    /// `forced` | `mixed` | `natural` | `notApplicable`.
+    regime: &'static str,
+}
+
 /// What one run produced.
 struct RoomSolution {
     report: MetricReport,
@@ -219,6 +299,161 @@ struct RoomSolution {
     /// paragraph reports. Carried out of the loop so the document can say it
     /// too.
     probe: Option<ProbeSummary>,
+    /// §55.4's sweep, when the case asked for one.
+    sweep: Option<SweepResult>,
+    /// §6.4 y+ and EQ-B4 Gr/Re^2 per wall patch; empty when the case has no wall.
+    wall_patches: Vec<WallPatchReport>,
+}
+
+/// One point of §55.4's sweep: the supply temperature the case was SET to, the
+/// flux-weighted one the solve produced, and the two indices.
+#[derive(Debug, Clone, PartialEq)]
+struct SweepPoint {
+    t_set: Scalar,
+    t_supply: Scalar,
+    rci_hi: Scalar,
+    rci_lo: Scalar,
+}
+
+/// The sweep's outcome: every point, and whether `RCI_HI` came out
+/// non-increasing in `t_set`.
+#[derive(Debug, Clone, PartialEq)]
+struct SweepResult {
+    points: Vec<SweepPoint>,
+    monotone: bool,
+}
+
+/// §55.4's ceiling: the highest swept `t_set` whose `RCI_HI` is exactly
+/// `100.0` - which `rci_hi` returns exactly when no sample exceeds the
+/// recommended limit, so equality is the test and never a tolerance.
+/// Order-independent; `None` when no swept value holds.
+fn ceiling_of(points: &[SweepPoint]) -> Option<Scalar> {
+    let mut best: Option<Scalar> = None;
+    for p in points {
+        if p.rci_hi == 100.0 {
+            best = Some(match best {
+                Some(b) if b > p.t_set => b,
+                _ => p.t_set,
+            });
+        }
+    }
+    best
+}
+
+/// §55.4: `RCI_HI` is expected non-increasing in `t_set`. Round-off of one
+/// part in a million per cent is not a rise; a real rise is a physical
+/// impossibility a fixed iteration budget can still produce, and is
+/// reported, never refused.
+fn sweep_is_monotone(points: &[SweepPoint]) -> bool {
+    let mut by_t: Vec<&SweepPoint> = points.iter().collect();
+    by_t.sort_by(|a, b| {
+        a.t_set
+            .partial_cmp(&b.t_set)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    by_t.windows(2).all(|w| w[1].rci_hi <= w[0].rci_hi + 1e-6)
+}
+
+/// The largest rise of `RCI_HI` between consecutive swept temperatures and
+/// the pair that produced it - the `NOT monotone` print. `None` when the
+/// table is monotone in the `sweep_is_monotone` sense.
+fn worst_rise(points: &[SweepPoint]) -> Option<(Scalar, Scalar, Scalar)> {
+    let mut by_t: Vec<&SweepPoint> = points.iter().collect();
+    by_t.sort_by(|a, b| {
+        a.t_set
+            .partial_cmp(&b.t_set)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut worst: Option<(Scalar, Scalar, Scalar)> = None;
+    for w in by_t.windows(2) {
+        let rise = w[1].rci_hi - w[0].rci_hi;
+        if rise > 1e-6 && worst.map_or(true, |(d, _, _)| rise > d) {
+            worst = Some((rise, w[0].t_set, w[1].t_set));
+        }
+    }
+    worst
+}
+
+/// The printed sweep block: empty when the run carried no sweep.
+fn sweep_lines(s: &RoomSolution) -> Vec<String> {
+    let Some(sw) = &s.sweep else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "--- supply-temperature sweep (SPEC-LIT 55.4): {} solve(s) beside the base run ---",
+        sw.points.len()
+    ));
+    lines.push("  T_set          T_supply       RCI_HI       RCI_LO".to_string());
+    for p in &sw.points {
+        lines.push(format!(
+            "  {:8.2} K   {:8.3} K   {:8.3} %   {:8.3} %",
+            p.t_set, p.t_supply, p.rci_hi, p.rci_lo
+        ));
+    }
+    if sw.monotone {
+        lines.push("  monotone in T_set: yes".to_string());
+    } else {
+        let (d, a, b) = worst_rise(&sw.points).unwrap_or((0.0, 0.0, 0.0));
+        lines.push(format!(
+            "  NOT monotone in T_set: RCI_HI rises by {d:.3} between {a:.2} K and {b:.2} K - \
+             two solves of the same iteration budget did not reach the same residual; the \
+             ceiling below still uses the exact-100 rule"
+        ));
+    }
+    match s.report.pue.free_cooling_ceiling {
+        Some(k) => {
+            let c = k - 273.15;
+            lines.push(format!(
+                "  free-cooling ceiling: {k:.2} K ({c:.2} C) - the highest swept supply \
+                 temperature holding RCI_HI at exactly 100 %"
+            ));
+        }
+        None => {
+            let lowest = sw.points.iter().min_by(|a, b| {
+                a.t_set
+                    .partial_cmp(&b.t_set)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if let Some(p) = lowest {
+                lines.push(format!(
+                    "  free-cooling ceiling: none - no swept supply temperature holds RCI_HI \
+                     at 100 %; the lowest, {:.2} K, gives {:.3} %",
+                    p.t_set, p.rci_hi
+                ));
+            }
+        }
+    }
+    lines
+}
+
+/// §55.4's sweep: re-solve the case at every swept supply temperature,
+/// ascending, ALL of them - the monotone verdict needs every point. The
+/// re-lowered cases' notes are not printed again; the base run printed them.
+fn run_sweep(gpu: &Gpu, case: &DcCase, sweep: &SupplySweep) -> Result<SweepResult> {
+    let n = sweep.temperatures.len();
+    let mut points = Vec::new();
+    for (i, t) in sweep.temperatures.iter().enumerate() {
+        println!(
+            "\n=== sweep {}/{}: {} \"{}\" set to {:.2} K ({:.2} C) ===",
+            i + 1,
+            n,
+            sweep.what,
+            sweep.patch,
+            t,
+            t - 273.15
+        );
+        let lc_t = case.with_supply_temperature(f64::from(*t))?.lower()?;
+        let s_t = solve(gpu, &lc_t)?;
+        points.push(SweepPoint {
+            t_set: *t,
+            t_supply: s_t.report.t_supply,
+            rci_hi: s_t.report.rci_hi,
+            rci_lo: s_t.report.rci_lo,
+        });
+    }
+    let monotone = sweep_is_monotone(&points);
+    Ok(SweepResult { points, monotone })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -494,13 +729,16 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
     // draft of this driver did (Q ran away to 5e3 m^3/s in ten iterations on
     // a 400-cell box). SPEC-LIT S6's standard k-epsilon with S15's wall
     // functions is what a room-airflow model needs and what this uses.
+    // §15.6: the SAME C_mu must reach the model and the wall treatment; the
+    // one binding below is what both read, and a test pins the two equal.
+    let wc = wall_coeffs();
     let mut turb = KEpsilon::new(
         gpu,
         hm,
         &mesh,
         KEpsilonCoeffs::default(),
         tctrl_turb,
-        ofgpu::io::case::WallFunctionCoeffs::default(),
+        wc,
         &wall_faces,
         &ofgpu::field_setup::NutRoughness::none(nbf),
     )?;
@@ -712,6 +950,101 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
         }
     };
 
+    // D5: per-wall §6.4 y+ and EQ-B4 Gr/Re^2, host work on the state the run
+    // just reported - the loop's last `correct_buoyant`/`correct` wrote the
+    // fields, so this is the reported state. It runs once per sweep point
+    // too, so it stays cheap and mute. The wall rule is the `None` arm of
+    // the pressure loop above: a patch is a wall iff its pressure rule is
+    // `None` and it is not `empty` - exactly the faces `wall_faces.nut` was
+    // set for, which is what y+ diagnoses. No DC patch is
+    // `PatchKind::Wall` (the lowering builds every patch as `"patch"`), and
+    // a `symmetry` rule lowers to `None` as well, so it is reported as the
+    // no-slip wall this driver already treats it as.
+    let k_host = gpu.download(&turb.k().f)?;
+    let u_host = gpu.download(&simple.u().f)?;
+    let g_mag = (lc.air.gravity[0] * lc.air.gravity[0]
+        + lc.air.gravity[1] * lc.air.gravity[1]
+        + lc.air.gravity[2] * lc.air.gravity[2])
+        .sqrt();
+    // One length per run: the room's extent along gravity, over EVERY
+    // boundary face.
+    let length_scale = if g_mag < 1e-30 {
+        0.0
+    } else {
+        let ghat = [
+            lc.air.gravity[0] / g_mag,
+            lc.air.gravity[1] / g_mag,
+            lc.air.gravity[2] / g_mag,
+        ];
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for c in &hm.b_cf {
+            let d =
+                wide(c.x) * ghat[0] + wide(c.y) * ghat[1] + wide(c.z) * ghat[2];
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        hi - lo
+    };
+    let beta = 1.0 / lc.air.t_ref;
+    let cmu = wide(wc.cmu);
+    let mut wall_patches: Vec<WallPatchReport> = Vec::new();
+    for pi in &hm.patches {
+        if pi.kind == PatchKind::Empty {
+            continue;
+        }
+        // A fan's or a tile's patch is absent from the map entirely, so
+        // `Some(None)` is a wall and nothing else is.
+        if !matches!(lc.patch_pressure.get(&pi.name), Some(None)) {
+            continue;
+        }
+        if pi.size == 0 {
+            continue;
+        }
+        let t_w = lc.patch_temperature.get(&pi.name).and_then(|t| *t);
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        let mut y_sum = 0.0;
+        let mut w_sum = 0.0;
+        let mut dt_sum = 0.0;
+        let mut u_sum = 0.0;
+        for bf in pi.start..pi.start + pi.size {
+            let cell = hm.b_face_cells[bf] as usize;
+            let yp = y_plus(
+                wide(k_host[cell]),
+                wide(hm.b_y[bf]),
+                lc.air.nu,
+                cmu,
+            );
+            y_min = y_min.min(yp);
+            y_max = y_max.max(yp);
+            y_sum += yp;
+            let w = wide(hm.b_mag_sf[bf]);
+            w_sum += w;
+            if let Some(t_w) = t_w {
+                dt_sum += w * (wide(t_w) - wide(t_host[cell])).abs();
+            }
+            u_sum += w * wide(u_host[cell].mag());
+        }
+        // y+ is a FACE-COUNT mean, as `lowmach.rs` prints it; dT and U are
+        // area-weighted. The U floor guards the ratio's division only.
+        let delta_t = t_w.map(|_| dt_sum / w_sum.max(1e-30));
+        let approach_speed = u_sum / w_sum.max(1e-30);
+        let gr = delta_t
+            .map(|dt| gr_over_re2(g_mag, beta, dt, length_scale, approach_speed.max(U_FLOOR)));
+        wall_patches.push(WallPatchReport {
+            patch: pi.name.clone(),
+            y_plus_min: y_min,
+            y_plus_mean: y_sum / pi.size as f64,
+            y_plus_max: y_max,
+            delta_t,
+            approach_speed,
+            length_scale,
+            gr_over_re2: gr,
+            regime: gr.map_or("notApplicable", regime_word),
+        });
+    }
+
     Ok(RoomSolution {
         report: MetricReport {
             rci_hi: rci_hi(hi, n_samples, lc.class),
@@ -742,6 +1075,8 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
         molar_caveat,
         patch_flow,
         probe: probe_out,
+        sweep: None,
+        wall_patches,
     })
 }
 
@@ -813,6 +1148,13 @@ fn print_report(lc: &LoweredDcCase, s: &RoomSolution) {
         }
     }
     println!("\n{}", r.pue.describe());
+    let sweep = sweep_lines(s);
+    if !sweep.is_empty() {
+        println!();
+        for l in sweep {
+            println!("{l}");
+        }
+    }
 
     if let Some(c) = &s.jump_caveat {
         println!("\n--- S53.6 ---\n  {c}");
@@ -826,6 +1168,9 @@ fn print_report(lc: &LoweredDcCase, s: &RoomSolution) {
     }
     if let Some(c) = &s.molar_caveat {
         println!("\n--- S54.4 ---\n  {c}");
+    }
+    if !s.wall_patches.is_empty() {
+        println!("\n--- S6.4 ---\n  {}", wall_validity_text(&s.wall_patches));
     }
 }
 
@@ -845,6 +1190,23 @@ fn write_csv(path: &Path, lc: &LoweredDcCase, s: &RoomSolution) -> Result<()> {
     let _ = writeln!(out, "dT_equipment,{},K", r.dt_equipment);
     let _ = writeln!(out, "IT_heat,{},W", r.pue.it_heat);
     let _ = writeln!(out, "fan_shaft_power,{},W", r.pue.fan_power);
+    match r.pue.free_cooling_ceiling {
+        Some(k) => {
+            let _ = writeln!(out, "free_cooling_ceiling,{k},K");
+        }
+        None => {
+            let _ = writeln!(out, "free_cooling_ceiling,not swept,K");
+        }
+    }
+    if let Some(sw) = &s.sweep {
+        let _ = writeln!(out, "sweep_monotone,{},-", sw.monotone);
+        for (i, p) in sw.points.iter().enumerate() {
+            let _ = writeln!(out, "sweep_{i}_T_set,{},K", p.t_set);
+            let _ = writeln!(out, "sweep_{i}_T_supply,{},K", p.t_supply);
+            let _ = writeln!(out, "sweep_{i}_RCI_HI,{},%", p.rci_hi);
+            let _ = writeln!(out, "sweep_{i}_RCI_LO,{},%", p.rci_lo);
+        }
+    }
     for (patch, q, dp, w) in &s.fans {
         let _ = writeln!(out, "fan_{patch}_Q,{q},m3/s");
         let _ = writeln!(out, "fan_{patch}_dp,{dp},Pa");
@@ -890,6 +1252,20 @@ struct PueDoc<'a> {
     fan_power_each: &'a [Scalar],
     it_heat: Scalar,
     free_cooling_ceiling: Option<Scalar>,
+    /// §55.4's sweep, one row per solve, ascending in `t_supply_set`; `null` when no sweep.
+    supply_temperature_sweep: Option<Vec<SweepPointDoc>>,
+    /// Whether `RCI_HI` was non-increasing in `t_supply_set`; `null` when no sweep.
+    sweep_monotone: Option<bool>,
+}
+
+/// One row of the sweep table, in document key order.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SweepPointDoc {
+    t_supply_set: Scalar,
+    t_supply: Scalar,
+    rci_hi: Scalar,
+    rci_lo: Scalar,
 }
 
 /// The S55 report, field for field what `print_report` prints.
@@ -961,6 +1337,21 @@ struct CaveatDoc {
     text: String,
 }
 
+/// One `wallPatches[]` entry - `WallPatchReport` field for field.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WallPatchDoc<'a> {
+    patch: &'a str,
+    y_plus_min: f64,
+    y_plus_mean: f64,
+    y_plus_max: f64,
+    delta_t: Option<f64>,
+    approach_speed: f64,
+    length_scale: f64,
+    gr_over_re2: Option<f64>,
+    regime: &'static str,
+}
+
 /// The document itself. The FIELD ORDER is the document's key order and must
 /// not be rearranged: a reader diffing two runs reads it top to bottom.
 /// No key is ever omitted - an unknown value serialises as `null`.
@@ -989,6 +1380,7 @@ struct DcReportDoc<'a> {
     t_inlet_max: Scalar,
     rack_inlets: Vec<RackInletDoc<'a>>,
     patch_flow: Vec<PatchFlowDoc<'a>>,
+    wall_patches: Vec<WallPatchDoc<'a>>,
     continuity: ContinuityDoc,
     supersaturation: Option<SupersaturationDoc>,
     caveats: Vec<CaveatDoc>,
@@ -1179,20 +1571,56 @@ fn supersaturation_text(cells: usize, worst: Scalar) -> String {
     )
 }
 
-/// The five caveat kinds and the section each one's text answers to, in the
-/// document's fixed order. A kind outside these five does not exist. Both
+/// The §6.4 / EQ-B4 paragraph `print_report` prints and the document carries
+/// as the `wallValidity6.4` caveat - one function so they cannot drift.
+fn wall_validity_text(rows: &[WallPatchReport]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let head = format!(
+        "wall-function validity per wall patch (S6.4 y+ = Cmu^(1/4) y sqrt(k_P)/nu; \
+         EQ-B4 Gr/Re^2 = g beta dT L/U^2 with beta = 1/T_ref, L = {:.3} m along gravity, \
+         U = the patch's area-weighted first-cell speed; forced below {}, natural above {}, \
+         mixed between): ",
+        rows[0].length_scale, GR_RE2_FORCED_BELOW, GR_RE2_NATURAL_ABOVE
+    );
+    let body: Vec<String> = rows
+        .iter()
+        .map(|w| {
+            let gr = match w.gr_over_re2 {
+                None => "not applicable (the case gives this wall no temperature)".to_string(),
+                Some(x) => format!(
+                    "{:.3} (dT {:.2} K, U {:.3} m/s) -> {}",
+                    x,
+                    w.delta_t.unwrap_or(f64::NAN),
+                    w.approach_speed,
+                    w.regime
+                ),
+            };
+            format!(
+                "{} y+ min {:.2} | mean {:.2} | max {:.2}, Gr/Re^2 {}",
+                w.patch, w.y_plus_min, w.y_plus_mean, w.y_plus_max, gr
+            )
+        })
+        .collect();
+    format!("{head}{}", body.join("; "))
+}
+
+/// The six caveat kinds and the section each one's text answers to, in the
+/// document's fixed order. A kind outside these six does not exist. Both
 /// spellings live in this one table so the document and its tests read the
-/// same five pairs.
-const CAVEATS: [(&str, &str); 5] = [
+/// same six pairs.
+const CAVEATS: [(&str, &str); 6] = [
     ("porousJump53.6", "S53.6"),
     ("molarMass54.4", "S54.4"),
     ("supersaturation54.5", "S54.5"),
     ("fftUnavailable52.8", "S52.8"),
     ("asymmetricMatrix52.2", "S52.2"),
+    ("wallValidity6.4", "S6.4"),
 ];
 
 /// The caveats the run earned, in the document's fixed order, each only when
-/// it fired. Five kinds exist; no sixth kind does.
+/// it fired. Six kinds exist; no seventh kind does.
 fn caveats_of(s: &RoomSolution) -> Vec<CaveatDoc> {
     let mut out = Vec::new();
     let mut push = |which: usize, text: String| {
@@ -1217,6 +1645,9 @@ fn caveats_of(s: &RoomSolution) -> Vec<CaveatDoc> {
         if !p.symmetric {
             push(4, ASYMMETRIC_MATRIX_TEXT.to_string());
         }
+    }
+    if !s.wall_patches.is_empty() {
+        push(5, wall_validity_text(&s.wall_patches));
     }
     out
 }
@@ -1286,6 +1717,18 @@ fn build_document<'a>(
                 fan_power_each: &s.report.pue.fan_power_each,
                 it_heat: s.report.pue.it_heat,
                 free_cooling_ceiling: s.report.pue.free_cooling_ceiling,
+                supply_temperature_sweep: s.sweep.as_ref().map(|sw| {
+                    sw.points
+                        .iter()
+                        .map(|p| SweepPointDoc {
+                            t_supply_set: p.t_set,
+                            t_supply: p.t_supply,
+                            rci_hi: p.rci_hi,
+                            rci_lo: p.rci_lo,
+                        })
+                        .collect()
+                }),
+                sweep_monotone: s.sweep.as_ref().map(|sw| sw.monotone),
             },
         },
         fans,
@@ -1299,6 +1742,21 @@ fn build_document<'a>(
             .patch_flow
             .iter()
             .map(|(patch, q)| PatchFlowDoc { patch, q: *q })
+            .collect(),
+        wall_patches: s
+            .wall_patches
+            .iter()
+            .map(|w| WallPatchDoc {
+                patch: &w.patch,
+                y_plus_min: w.y_plus_min,
+                y_plus_mean: w.y_plus_mean,
+                y_plus_max: w.y_plus_max,
+                delta_t: w.delta_t,
+                approach_speed: w.approach_speed,
+                length_scale: w.length_scale,
+                gr_over_re2: w.gr_over_re2,
+                regime: w.regime,
+            })
             .collect(),
         continuity: ContinuityDoc {
             net,
@@ -1343,13 +1801,13 @@ fn write_document(path: &Path, doc: &DcReportDoc) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The 25 keys of the document, in document order. Order is asserted on
+    /// The 26 keys of the document, in document order. Order is asserted on
     /// the PRETTY TEXT, never on the parsed object: `serde_json::Map` sorts.
-    const TOP_KEYS: [&str; 25] = [
+    const TOP_KEYS: [&str; 26] = [
         "schema", "runId", "casePath", "caseSha256", "caseName", "startedAt", "endedAt",
         "wallSeconds", "gitSha", "gitDirty", "machine", "nCells", "nBoundaryFaces", "iterations",
         "ashraeClass", "rciSamples", "notes", "report", "fans", "tInletMax", "rackInlets",
-        "patchFlow", "continuity", "supersaturation", "caveats",
+        "patchFlow", "wallPatches", "continuity", "supersaturation", "caveats",
     ];
 
     /// The smallest complete case this format accepts. Transcribed from
@@ -1448,6 +1906,35 @@ mod tests {
                 constant_coefficient: false,
                 non_separable_reason: "a fan patch".to_string(),
             }),
+            sweep: None,
+            // D5: one adiabatic wall (no dT, so no Gr/Re^2) and one heated
+            // wall, so both JSON shapes have a row. The heated row's ratio is
+            // the seed's hall example at this fixture's 1.5 m height and
+            // 0.2 m/s.
+            wall_patches: vec![
+                WallPatchReport {
+                    patch: "south".to_string(),
+                    y_plus_min: 30.5,
+                    y_plus_mean: 32.25,
+                    y_plus_max: 34.0,
+                    delta_t: None,
+                    approach_speed: 0.35,
+                    length_scale: 1.5,
+                    gr_over_re2: None,
+                    regime: "notApplicable",
+                },
+                WallPatchReport {
+                    patch: "heated".to_string(),
+                    y_plus_min: 98.0,
+                    y_plus_mean: 101.5,
+                    y_plus_max: 105.0,
+                    delta_t: Some(7.2),
+                    approach_speed: 0.2,
+                    length_scale: 1.5,
+                    gr_over_re2: Some(gr_over_re2(9.81, 1.0 / 295.15, 7.2, 1.5, 0.2)),
+                    regime: "mixed",
+                },
+            ],
         }
     }
 
@@ -1472,11 +1959,95 @@ mod tests {
         serde_json::from_str(&doc_text(&lc, sol, run_id)).unwrap()
     }
 
+    // ---- D5: §6.4 y+ and the EQ-B4 ratio --------------------------------
+
     #[test]
-    fn the_document_has_the_twenty_five_keys_in_order() {
+    fn y_plus_is_the_low_mach_expression() {
+        // The hand value for §6.4's y+ = C_mu^(1/4) y sqrt(k_P) / nu.
+        let got = y_plus(0.01, 0.05, 1.5e-5, 0.09);
+        assert!((got - 182.574).abs() / 182.574 < 1e-3, "{got}");
+        // Bit for bit against the inline expression `lowmach.rs` compiles,
+        // on three hand triples.
+        let triples: [(f64, f64, f64, f64); 3] = [
+            (0.0625, 3.0e-4, 1.5e-5, 0.09),
+            (1.0, 0.01, 1.0e-5, 0.09),
+            (0.0, 0.05, 1.5e-5, 0.09),
+        ];
+        for &(k_p, y, nu, cmu) in &triples {
+            let inline = cmu.powf(0.25) * y * k_p.max(0.0).sqrt() / nu;
+            assert_eq!(y_plus(k_p, y, nu, cmu).to_bits(), inline.to_bits());
+        }
+        // A negative k clamps, exactly as the `.max(0.0)` in `lowmach.rs`.
+        assert_eq!(y_plus(-1.0, 0.05, 1.5e-5, 0.09), 0.0);
+    }
+
+    #[test]
+    fn gr_over_re2_reproduces_the_seed_examples() {
+        // EQ-B4's seed prose: "A hall at 2 m/s gives about 0.18 and a
+        // stalled aisle at 0.2 m/s about 18".
+        let hall = gr_over_re2(9.81, 1.0 / 295.15, 7.2, 3.0, 2.0);
+        assert!((hall - 0.18).abs() / 0.18 < 0.01, "{hall}");
+        let stalled = gr_over_re2(9.81, 1.0 / 295.15, 7.2, 3.0, 0.2);
+        assert!((stalled - 18.0).abs() / 18.0 < 0.01, "{stalled}");
+    }
+
+    #[test]
+    fn the_regime_word_switches_at_a_tenth_and_at_ten() {
+        assert_eq!(regime_word(0.0999), "forced");
+        assert_eq!(regime_word(0.1), "mixed");
+        assert_eq!(regime_word(0.18), "mixed");
+        assert_eq!(regime_word(10.0), "mixed");
+        assert_eq!(regime_word(10.001), "natural");
+        assert_eq!(regime_word(18.0), "natural");
+    }
+
+    #[test]
+    fn wall_coefficients_agree_with_the_model() {
+        // §15.6: one C_mu in the model and at the wall (both 0.09 today,
+        // `io/case.rs` and `k_epsilon.rs`).
+        assert_eq!(
+            wide(wall_coeffs().cmu),
+            wide(KEpsilonCoeffs::default().cmu)
+        );
+    }
+
+    #[test]
+    fn json_wall_numbers_equal_the_computed_ones_bit_for_bit() {
+        let s = solution();
+        let v = value(&s, Some("r_1"));
+        let rows = v["wallPatches"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let heated = &s.wall_patches[1];
+        assert_eq!(
+            rows[1]["yPlusMean"].as_f64().unwrap().to_bits(),
+            heated.y_plus_mean.to_bits()
+        );
+        assert_eq!(
+            rows[1]["grOverRe2"].as_f64().unwrap().to_bits(),
+            heated.gr_over_re2.unwrap().to_bits()
+        );
+        // The adiabatic row carries nulls, never a stale zero.
+        assert!(rows[0]["grOverRe2"].is_null());
+    }
+
+    #[test]
+    fn an_adiabatic_wall_has_no_gr_over_re2() {
+        let text = wall_validity_text(&solution().wall_patches);
+        assert!(text.contains("not applicable (the case gives this wall no temperature)"));
+        // The heated row's regime word - with the arrow, so the prefix's
+        // "mixed between" cannot satisfy it.
+        assert!(text.contains("-> mixed"));
+        // The conventions are named so a reader can recompute the ratio.
+        assert!(text.contains("beta = 1/T_ref"));
+        assert!(text.contains("L = 1.500 m along gravity"));
+        assert!(text.contains("U = the patch's area-weighted first-cell speed"));
+    }
+
+    #[test]
+    fn the_document_has_the_twenty_six_keys_in_order() {
         let text = doc_text(&lowered(), &solution(), Some("r_1"));
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(v.as_object().unwrap().len(), 25);
+        assert_eq!(v.as_object().unwrap().len(), 26);
         let nl = '\n';
         let mut last = 0;
         for k in TOP_KEYS {
@@ -1484,6 +2055,19 @@ mod tests {
                 .find(&format!("{nl}  \"{k}\":"))
                 .unwrap_or_else(|| panic!("top-level key `{k}` missing from the document"));
             assert!(at > last, "top-level key `{k}` is out of order");
+            last = at;
+        }
+        // Each wallPatches entry carries its nine keys in document order too,
+        // read off the pretty text like the top level.
+        let mut last = 0;
+        for k in [
+            "patch", "yPlusMin", "yPlusMean", "yPlusMax", "deltaT", "approachSpeed",
+            "lengthScale", "grOverRe2", "regime",
+        ] {
+            let at = text
+                .find(&format!("{nl}      \"{k}\":"))
+                .unwrap_or_else(|| panic!("wallPatches key `{k}` missing from the document"));
+            assert!(at > last, "wallPatches key `{k}` is out of order");
             last = at;
         }
     }
@@ -1495,6 +2079,10 @@ mod tests {
         s.molar_caveat = None;
         s.supersaturation = None;
         s.probe = None;
+        // The wall table is a caveat trigger too, so the zero-caveat
+        // assertion below wants it empty; its nulls are checked further
+        // down, on the all-firing fixture.
+        s.wall_patches = Vec::new();
         s.fans[0].0 = "absent".to_string();
         let v = value(&s, None);
         for k in ["caseSha256", "supersaturation"] {
@@ -1503,11 +2091,41 @@ mod tests {
         assert!(v["machine"]["device"].is_null());
         assert!(v["machine"]["computeCapability"].is_null());
         assert!(v["report"]["pue"]["freeCoolingCeiling"].is_null());
+        assert!(v["report"]["pue"]["supplyTemperatureSweep"].is_null());
+        assert!(v["report"]["pue"]["sweepMonotone"].is_null());
         assert!(v["fans"][0]["outerResidualPct"].is_null());
         assert_eq!(v["caveats"].as_array().unwrap().len(), 0);
         for k in TOP_KEYS {
             assert!(v.get(k).is_some(), "key `{k}` is missing");
         }
+
+        // D5: the wall table's absent numbers are nulls with every key
+        // present, on the all-firing fixture whose first row is adiabatic.
+        let full = value(&solution(), None);
+        let rows = full["wallPatches"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            for k in [
+                "patch", "yPlusMin", "yPlusMean", "yPlusMax", "deltaT", "approachSpeed",
+                "lengthScale", "grOverRe2", "regime",
+            ] {
+                assert!(row.get(k).is_some(), "wallPatches key `{k}` is missing");
+            }
+        }
+        assert!(rows[0]["deltaT"].is_null());
+        assert!(rows[0]["grOverRe2"].is_null());
+        assert!(rows[1]["deltaT"].as_f64().is_some());
+
+        // A run with no wall: an empty table and no wallValidity6.4 caveat.
+        let mut bare = solution();
+        bare.wall_patches = Vec::new();
+        let v = value(&bare, None);
+        assert_eq!(v["wallPatches"].as_array().unwrap().len(), 0);
+        assert!(!v["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["kind"].as_str().unwrap() == "wallValidity6.4"));
     }
 
     #[test]
@@ -1523,7 +2141,134 @@ mod tests {
         );
     }
 
+    /// A swept `t_set` of one degree above the base's 295.15-ish fixture
+    /// values, so the points read like the shipped case's kelvin grid.
+    fn sp(t_set: Scalar, rci_hi: Scalar) -> SweepPoint {
+        SweepPoint {
+            t_set,
+            t_supply: t_set + 2.0,
+            rci_hi,
+            rci_lo: 100.0,
+        }
+    }
+
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_ceiling_is_the_highest_swept_temperature_holding_exactly_one_hundred() {
+        let pts = vec![
+            sp(285.15, 100.0),
+            sp(287.15, 100.0),
+            sp(289.15, 99.999_999_9),
+            sp(291.15, 97.0),
+        ];
+        assert_eq!(ceiling_of(&pts), Some(287.15), "99.999_999_9 is not exactly 100");
+        let all_hold: Vec<SweepPoint> = [285.15, 287.15, 289.15]
+            .iter()
+            .map(|t| sp(*t, 100.0))
+            .collect();
+        assert_eq!(ceiling_of(&all_hold), Some(289.15), "every point holds: the last");
+        let none_hold: Vec<SweepPoint> = [285.15, 287.15].iter().map(|t| sp(*t, 99.9)).collect();
+        assert_eq!(ceiling_of(&none_hold), None, "nothing holds: no ceiling");
+        let mut shuffled = pts.clone();
+        shuffled.swap(0, 3);
+        shuffled.swap(1, 2);
+        assert_eq!(ceiling_of(&shuffled), Some(287.15), "the rule is order-independent");
+    }
+
+    #[test]
+    fn the_sweep_verdict_tolerates_round_off_and_flags_a_rise() {
+        let m = |rcis: &[Scalar]| {
+            let pts: Vec<SweepPoint> = rcis
+                .iter()
+                .enumerate()
+                .map(|(i, r)| sp(285.15 + i as Scalar, *r))
+                .collect();
+            sweep_is_monotone(&pts)
+        };
+        assert!(m(&[100.0, 100.0, 98.0, 95.0]), "a fall is never a rise");
+        assert!(!m(&[100.0, 98.0, 99.0]), "a real rise is flagged");
+        assert!(m(&[100.0, 100.0 + 5e-7]), "two solves at 100 differ by round-off only");
+        assert!(!m(&[100.0, 100.0 + 5e-6]), "beyond round-off is a rise");
+    }
+
+    #[test]
+    fn the_sweep_block_names_the_ceiling_the_document_carries() {
+        let mut s = solution();
+        s.report.pue.free_cooling_ceiling = Some(287.15);
+        s.sweep = Some(SweepResult {
+            points: vec![sp(283.15, 100.0), sp(287.15, 100.0), sp(291.15, 97.5)],
+            monotone: true,
+        });
+        let lines = sweep_lines(&s);
+        assert!(
+            lines.iter().any(|l| l.contains("287.15 K (14.00 C)")),
+            "the printed ceiling is the document's: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("monotone in T_set: yes")),
+            "{lines:?}"
+        );
+        s.sweep = None;
+        assert!(sweep_lines(&s).is_empty(), "no sweep, no block");
+    }
+
+    #[test]
+    fn a_swept_solution_carries_its_table_and_ceiling_bit_for_bit() {
+        let mut s = solution();
+        s.report.pue.free_cooling_ceiling = Some(287.15);
+        s.sweep = Some(SweepResult {
+            points: vec![sp(285.15, 100.0), sp(289.15, 98.25), sp(293.15, 91.7)],
+            monotone: true,
+        });
+        let text = doc_text(&lowered(), &s, Some("r_1"));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let json_k = v["report"]["pue"]["freeCoolingCeiling"].as_f64().unwrap();
+        // In f32 the bitwise pin below does not exist (SPEC-LIT 112.2); the
+        // unwrap above still checks the field is a number.
+        #[cfg(feature = "single")]
+        let _ = json_k;
+        #[cfg(not(feature = "single"))]
+        assert_eq!(
+            json_k.to_bits(),
+            f64::from(s.report.pue.free_cooling_ceiling.unwrap()).to_bits()
+        );
+        let table = v["report"]["pue"]["supplyTemperatureSweep"]
+            .as_array()
+            .expect("the sweep table is an array");
+        assert_eq!(table.len(), 3);
+        assert_eq!(v["report"]["pue"]["sweepMonotone"], serde_json::json!(true));
+        // The four keys, in document order, on the PRETTY TEXT - parsed
+        // objects sort, so the order is asserted on the text itself.
+        let anchor = text.find("\"supplyTemperatureSweep\"").expect("the table key");
+        let mut at = anchor;
+        for k in ["tSupplySet", "tSupply", "rciHi", "rciLo"] {
+            let at_k = text[at..]
+                .find(&format!("\"{k}\":"))
+                .unwrap_or_else(|| panic!("key `{k}` missing from the first row"))
+                + at;
+            assert!(at_k > at, "key `{k}` out of order");
+            at = at_k;
+        }
+    }
+
+    #[test]
+    fn the_shipped_case_declares_a_sweep_the_reader_turns_into_five_solves() {
+        let c = DcCase::read(Path::new("../cases/coldAisle.dc.jsonc"))
+            .expect("the shipped case parses");
+        let lc = c.lower().expect("the shipped case lowers");
+        let sw = lc
+            .supply_sweep
+            .as_ref()
+            .expect("the shipped case declares a sweep");
+        assert_eq!(sw.patch, "floorSupply");
+        assert_eq!(sw.temperatures.len(), 5, "285.15 to 293.15 step 2");
+        let r = |a: Scalar, b: Scalar| (a - b).abs() / a.abs().max(b.abs()).max(1e-300);
+        assert!(r(sw.temperatures[0], 285.15) < 1e-12);
+        assert!(r(sw.temperatures[4], 293.15) < 1e-12);
+    }
+
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn continuity_is_one_computation_printed_and_serialised() {
         let s = solution();
         let v = value(&s, None);
@@ -1566,10 +2311,14 @@ mod tests {
             caveats[4]["text"].as_str().unwrap(),
             ASYMMETRIC_MATRIX_TEXT
         );
+        assert_eq!(
+            caveats[5]["text"].as_str().unwrap(),
+            wall_validity_text(&s.wall_patches)
+        );
     }
 
     #[test]
-    fn the_five_caveat_kinds_are_spelled_exactly_once_each() {
+    fn the_six_caveat_kinds_are_spelled_exactly_once_each() {
         let v = value(&solution(), None);
         let caveats = v["caveats"].as_array().unwrap();
         assert_eq!(caveats.len(), CAVEATS.len());
@@ -1587,11 +2336,14 @@ mod tests {
                 "molarMass54.4",
                 "supersaturation54.5",
                 "fftUnavailable52.8",
-                "asymmetricMatrix52.2"
+                "asymmetricMatrix52.2",
+                "wallValidity6.4"
             ]
         );
         for (k, r) in CAVEATS {
-            assert_eq!(r, format!("S{}", &k[k.len() - 4..]));
+            let number = k.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+            assert!(!number.is_empty() && number.contains('.'), "{k}");
+            assert_eq!(r, format!("S{number}"));
         }
 
         let mut nothing = solution();
@@ -1599,6 +2351,7 @@ mod tests {
         nothing.molar_caveat = None;
         nothing.supersaturation = None;
         nothing.probe = None;
+        nothing.wall_patches = Vec::new();
         assert_eq!(value(&nothing, None)["caveats"].as_array().unwrap().len(), 0);
 
         // `cells == 0` fires no caveat but keeps the object: the case DID ask
@@ -1607,6 +2360,7 @@ mod tests {
         dry.jump_caveat = None;
         dry.molar_caveat = None;
         dry.probe = None;
+        dry.wall_patches = Vec::new();
         dry.supersaturation = Some((0, 0.0));
         let v2 = value(&dry, None);
         assert_eq!(v2["caveats"].as_array().unwrap().len(), 0);

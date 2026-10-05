@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! ofgpu-generate-mesh <case> <outputDir> [nx ny nz] [-stl [name=]path]... [-permissive]
-//! ofgpu-generate-mesh big <outputDir> [n] [-stl ...]  (cube of n per side)
+//! ofgpu-generate-mesh big <outputDir> [n | nx ny nz] [-stl ...]  (one n: a cube of n per side; three: per axis, e.g. big dir 128 52 41)
 //!
 //! channel  plane channel, graded to both walls, 2-D (200 x 120 x 1)
 //! cavity   lid-driven cavity, 2-D                   (128 x 128 x 1)
@@ -94,17 +94,22 @@ mod common;
 
 use common::atoi;
 
-fn usage() {
-    eprintln!(
+fn usage_text() -> String {
+    format!(
         "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak> <outputDir> \
          [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]]\n       \
          [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]... \
          [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-cyclic x|y|z] \
          [-permissive]\n       \
-         ofgpu-generate-mesh big <outputDir> [n] [-stl ...]   # n^3 cells\n\
+         ofgpu-generate-mesh big <outputDir> [n | nx ny nz] [-stl ...]   # one n: an n^3 cube; three: per axis, e.g. big dir 128 52 41\n       \
+         resolution: none (the preset's own), three numbers nx ny nz, or - big only - one n; two are refused\n\
          {}",
         contract::PERMISSIVE_USAGE
-    );
+    )
+}
+
+fn usage() {
+    eprintln!("{}", usage_text());
 }
 
 /// `-cyclic x|y|z` - SPEC-LIT §31.1. Only `translate` exists (the transform
@@ -356,23 +361,8 @@ fn run(args: &[String]) -> Result<()> {
         Error::Config(format!("generate_cases: unknown case '{name}'"))
     })?;
 
-    let (mut nx, mut ny, mut nz) = kind.default_resolution();
-
-    // One trailing argument means "cube of n per side", and only for `big`:
-    // the 2-D cases have an `empty` front and back that a third dimension
-    // would make illegal.
-    if kind == CaseKind::Big && positional.len() == 3 {
-        let n = atoi(positional[2]);
-        nx = clamp_dim(n)?;
-        ny = nx;
-        nz = nx;
-    }
-
-    if positional.len() >= 5 {
-        nx = clamp_dim(atoi(positional[2]))?;
-        ny = clamp_dim(atoi(positional[3]))?;
-        nz = clamp_dim(atoi(positional[4]))?;
-    }
+    let res: Vec<&str> = positional[2..].iter().map(|s| s.as_str()).collect();
+    let (nx, ny, nz) = resolve_dims(kind, &res)?;
 
     if cutcell && stl_args.is_empty() {
         usage();
@@ -486,6 +476,32 @@ fn clamp_dim(v: i64) -> Result<usize> {
     Ok(v as usize)
 }
 
+/// The cell counts the positional arguments after `<case> <outputDir>` name.
+///
+/// None: the preset's own resolution. Three: `nx ny nz`, one per axis. One,
+/// for `big` only: a cube of `n` per side - the 2-D presets have an `empty`
+/// front and back that a third dimension would make illegal. Any other count
+/// is refused by name (SPEC-LIT §13.4): two numbers used to fall through to
+/// the preset's default without a word.
+fn resolve_dims(kind: CaseKind, res: &[&str]) -> Result<(usize, usize, usize)> {
+    let (dx, dy, dz) = kind.default_resolution();
+    match res {
+        [] => Ok((dx, dy, dz)),
+        [n] if kind == CaseKind::Big => {
+            let n = clamp_dim(atoi(n))?;
+            Ok((n, n, n))
+        }
+        [x, y, z] => Ok((clamp_dim(atoi(x))?, clamp_dim(atoi(y))?, clamp_dim(atoi(z))?)),
+        _ => Err(Error::Config(format!(
+            "generate_cases: {} takes no resolution (the preset's own {dx} x {dy} x {dz}) or three (nx ny nz){}; got {}: \"{}\"",
+            kind.as_str(),
+            if kind == CaseKind::Big { " or one n (an n^3 cube)" } else { "" },
+            res.len(),
+            res.join(" ")
+        ))),
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
@@ -543,5 +559,33 @@ mod tests {
         for s in ["w=2", "=2", "z", "z=", "z=abc", "z=0", "z=-3", "x=1=2"] {
             assert!(parse_grading(s).is_err(), "'{s}' must be refused");
         }
+    }
+
+    #[test]
+    fn the_usage_documents_the_per_axis_resolution_of_big() {
+        let u = usage_text();
+        for want in ["big <outputDir> [n | nx ny nz]", "big dir 128 52 41", "[nx ny nz]", "-permissive"] {
+            assert!(u.contains(want), "usage must say {want:?}:\n{u}");
+        }
+    }
+
+    #[test]
+    fn big_takes_one_n_or_three_and_refuses_two_by_name() {
+        assert_eq!(resolve_dims(CaseKind::Big, &["128", "52", "41"]).unwrap(), (128, 52, 41));
+        assert_eq!(resolve_dims(CaseKind::Big, &["128"]).unwrap(), (128, 128, 128));
+        assert_eq!(resolve_dims(CaseKind::Big, &[]).unwrap(), (160, 160, 160));
+        let e = resolve_dims(CaseKind::Big, &["128", "52"]).unwrap_err().to_string();
+        for want in ["big", "nx ny nz", "n^3", "\"128 52\""] {
+            assert!(e.contains(want), "two numbers must be refused naming {want:?}: {e}");
+        }
+        let e = resolve_dims(CaseKind::Channel, &["200"]).unwrap_err().to_string();
+        assert!(e.contains("channel") && !e.contains("n^3"), "one n is big-only: {e}");
+        assert!(resolve_dims(CaseKind::Big, &["128", "52", "41", "7"]).is_err(), "four must be refused");
+    }
+
+    #[test]
+    fn a_zero_resolution_component_is_still_refused() {
+        let e = resolve_dims(CaseKind::Big, &["0", "5", "5"]).unwrap_err().to_string();
+        assert!(e.contains("bad resolution component 0"), "{e}");
     }
 }

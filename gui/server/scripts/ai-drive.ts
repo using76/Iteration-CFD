@@ -6,6 +6,7 @@
 //   CFD_DEMO=1 npx tsx server/src/main.ts &
 //   npx tsx server/scripts/ai-drive.ts --autopilot --ui --case cases/plume.jsonc
 // The script never sees an API key: those are read by the server alone.
+// With --campaign it runs the autonomy neutrality scenario instead (ai-drive-campaign.ts).
 import WebSocket from 'ws'
 import {
   CHAT_TIMEOUT_MAX_MS,
@@ -22,12 +23,13 @@ import {
   type UiState,
   type Usage,
 } from '@cfd/shared'
+import { CAMPAIGN_USAGE, driveCampaign, parseCampaignOptions } from './ai-drive-campaign.js'
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
-interface Options {
+export interface Options {
   url: string
   casePath: string
   prompt: string | null
@@ -38,9 +40,11 @@ interface Options {
   ui: boolean
   /** Drive the conversation over POST /api/chat instead of the WebSocket. */
   http: boolean
+  /** Session language: read back from session.state and carried by the language instruction of every LLM call. */
+  locale: 'ko' | 'en'
 }
 
-const USAGE_LINE = 'usage: npx tsx server/scripts/ai-drive.ts [--url ws://127.0.0.1:$CFD_PORT/ws] [--case cases/plume.jsonc] [--prompt "<text>"] [--autopilot] [--timeout 900] [--ui] [--http]'
+const USAGE_LINE = `usage: npx tsx server/scripts/ai-drive.ts [--url ws://127.0.0.1:$CFD_PORT/ws] [--case cases/plume.jsonc] [--prompt "<text>"] [--autopilot] [--timeout 900] [--ui] [--http] [--locale ko|en]\n   or: ${CAMPAIGN_USAGE.replace(/^usage: /, '')}`
 
 /** The server this drives is the one CFD_PORT names, so the two agree without a flag. */
 function defaultUrl(): string {
@@ -48,8 +52,8 @@ function defaultUrl(): string {
   return `ws://127.0.0.1:${Number.isInteger(port) && port > 0 ? port : 8787}/ws`
 }
 
-function parseOptions(argv: string[]): Options {
-  const o: Options = { url: defaultUrl(), casePath: 'cases/plume.jsonc', prompt: null, autopilot: false, timeoutSec: 900, ui: false, http: false }
+export function parseOptions(argv: string[]): Options {
+  const o: Options = { url: defaultUrl(), casePath: 'cases/plume.jsonc', prompt: null, autopilot: false, timeoutSec: 900, ui: false, http: false, locale: 'en' }
   for (let i = 0; i < argv.length; i++) {
     const val = (): string => {
       const v = argv[++i]
@@ -64,6 +68,12 @@ function parseOptions(argv: string[]): Options {
       case '--autopilot': o.autopilot = true; break
       case '--ui': o.ui = true; break
       case '--http': o.http = true; break
+      case '--locale': {
+        const v = val()
+        if (v !== 'ko' && v !== 'en') throw new Error(`--locale wants ko or en (got ${v})`)
+        o.locale = v
+        break
+      }
       default: throw new Error(`unknown option ${argv[i]}\n${USAGE_LINE}`)
     }
   }
@@ -124,7 +134,7 @@ interface Waiter {
   fail(err: Error): void
 }
 
-async function drive(opts: Options): Promise<number> {
+export async function drive(opts: Options): Promise<number> {
   const prompt = opts.prompt ?? `Run the case ${opts.casePath} with the default solver, wait for it to finish, then summarise the final residuals and whether it converged. Use gui_control to show the Velocity field when the run ends.`
   const promptWantsRun = /\brun\b|solver|솔버|실행/i.test(prompt)
 
@@ -142,8 +152,19 @@ async function drive(opts: Options): Promise<number> {
 
   const ws = new WebSocket(opts.url)
   const waiters = new Set<Waiter>()
+  // Frames no waiter has claimed yet. The server writes hello straight after the
+  // upgrade response, so 'open' and the first 'message' can land in the same
+  // turn and a waiter registered only after `await opened` would never see it.
+  const unclaimed: ServerMsg[] = []
 
   function waitFor<T>(what: string, timeoutMs: number, pick: (m: ServerMsg) => T | null): Promise<T> {
+    for (let i = 0; i < unclaimed.length; i++) {
+      const v = pick(unclaimed[i])
+      if (v !== null) {
+        unclaimed.splice(i, 1)
+        return Promise.resolve(v as T)
+      }
+    }
     return new Promise<T>((resolve, reject) => {
       const w: Waiter = {
         handle: (m) => {
@@ -215,7 +236,13 @@ async function drive(opts: Options): Promise<number> {
       say(`!! dropped invalid frame: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`)
       return
     }
-    for (const w of [...waiters]) if (w.handle(r.data)) break
+    if (unclaimed.push(r.data) > 256) unclaimed.shift()
+    for (const w of [...waiters]) {
+      if (w.handle(r.data)) {
+        unclaimed.splice(unclaimed.indexOf(r.data), 1)
+        break
+      }
+    }
     handle(r.data)
   }
 
@@ -233,7 +260,7 @@ async function drive(opts: Options): Promise<number> {
   const uiState: UiState = {
     activeTab: 'ai', activeStep: null, rightTab: null, tool: 'select', frame: null, projection: 'Perspective',
     showAxes: true, showColorBars: true, selection: null, runId: null, sim: null,
-    case: null, tabs: [], run: null, viewer: null, problems: 0, connection: 'connected', locale: 'en',
+    case: null, tabs: [], run: null, viewer: null, problems: 0, connection: 'connected', locale: opts.locale,
   }
   let standInTab = 0
   let standInLayer = 0
@@ -496,8 +523,11 @@ async function drive(opts: Options): Promise<number> {
   send({ t: 'session.new' })
   const session = await waitFor('session.state', 10_000, (m) => (m.t === 'session.state' ? m.session : null))
   state.sessionId = session.id
-  say(`session ${session.id} (autoApprove=${opts.autopilot ? 'all' : 'reads'})`)
-  send({ t: 'settings.set', sessionId: session.id, patch: { autoApprove: opts.autopilot ? 'all' : 'reads' } })
+  say(`session ${session.id} (autoApprove=${opts.autopilot ? 'all' : 'reads'}, locale=${opts.locale})`)
+  send({ t: 'settings.set', sessionId: session.id, patch: { autoApprove: opts.autopilot ? 'all' : 'reads', locale: opts.locale } })
+  // The locale sits in the volatile context of every LLM call the server makes,
+  // so hold the prompt until a session.state confirms the server read the patch.
+  await waitFor('session.state', 10_000, (m) => (m.t === 'session.state' && m.session.settings.locale === opts.locale ? m.session : null))
   if (opts.ui) {
     say('standing in for the GUI: every ui.command is answered ok')
     pushUiState()
@@ -569,6 +599,7 @@ async function driveHttp(opts: Options): Promise<number> {
       attachments: [opts.casePath],
       activeFile: opts.casePath,
       autoApprove: opts.autopilot ? 'all' : 'reads',
+      locale: opts.locale,
       timeoutMs: Math.min(opts.timeoutSec * 1000, CHAT_TIMEOUT_MAX_MS),
     }),
   })
@@ -647,14 +678,21 @@ async function driveHttp(opts: Options): Promise<number> {
 }
 
 async function main(): Promise<number> {
-  const opts = parseOptions(process.argv.slice(2))
+  const argv = process.argv.slice(2)
+  if (argv.includes('--campaign')) return driveCampaign(parseCampaignOptions(argv, defaultUrl()))
+  const opts = parseOptions(argv)
   return opts.http ? driveHttp(opts) : drive(opts)
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((err: unknown) => {
-    endStream()
-    console.error(`ai-drive failed: ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(2)
-  })
+// The entry guard of src/main.ts: a test imports this module for parseOptions
+// and drive, so connect and exit only when this file is the process entry.
+const invokedDirectly = process.argv[1] && /[\\/]ai-drive\.(ts|js)$/.test(process.argv[1])
+if (invokedDirectly) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((err: unknown) => {
+      endStream()
+      console.error(`ai-drive failed: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(2)
+    })
+}

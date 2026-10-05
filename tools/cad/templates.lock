@@ -1,0 +1,29 @@
+{
+  "schema": "cad-templates-lock/1",
+  "templates": [
+    {
+      "template_id": "nozzle_contraction/1",
+      "source": "tools/cad/templates/nozzle_contraction/template.py",
+      "source_sha256": "d7a7a55336fa404f4a22ec2aff7288f785cdb116f032eb24cb73d03807e4473f",
+      "declaration_sha256": "d69f027c8ae8f9ef577caa4ffb3b1e04c314563c5c3fd1041b7bc8f917b1183b",
+      "cadquery": "2.8.0",
+      "occt": "7.9.3",
+      "frozen_by": "using76",
+      "admission_sha256": "27fd1457f7f7d9b9443c56739ea3910920ab511f32c36306bd31c1e334f22d89"
+    }
+  ],
+  "superseded": [
+    {
+      "template_id": "nozzle_contraction/1",
+      "source": "tools/cad/templates/nozzle_contraction/template.py",
+      "source_sha256": "d353260e02fbd67c58460aac18c36496dcbd0f5f4244d1b243d098aad9f4c174",
+      "declaration_sha256": "10c08de94ebd71299d959693c65c85d9875a81b5485ccd2fed5f9caa9606daba",
+      "cadquery": "2.8.0",
+      "occt": "7.9.3",
+      "frozen_by": "using76",
+      "admission_sha256": "5eab15b82f840e877ae4d0314db3168cce03f77d3e1dbffb077b9c48b011b701",
+      "superseded_by_sha256": "d7a7a55336fa404f4a22ec2aff7288f785cdb116f032eb24cb73d03807e4473f",
+      "superseded_by_person": "using76"
+    }
+  ]
+}

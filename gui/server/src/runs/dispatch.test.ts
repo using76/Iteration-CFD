@@ -3,6 +3,7 @@
 // place a run request's free string (a --tag value) could otherwise become a
 // second command.
 import { describe, expect, it } from 'vitest'
+import { BINARIES } from '@cfd/shared'
 import { STATIC_SYSTEM } from '../prompts/system.js'
 import { availableBinaries, buildArgv, pipelineCommandLine, pipelineSpawn, quoteForCmd } from './dispatch.js'
 
@@ -37,10 +38,15 @@ describe('pipeline spawn', () => {
   })
 })
 
-describe('pending binaries', () => {
-  it('availableBinaries never offers a pending entry, even in demo mode', () => {
-    expect(availableBinaries({ binDir: null, workspaceRoot: '/nowhere', demo: true }, ['ofgpu-cht', 'ofgpu-regions'])).toEqual(['ofgpu-cht'])
+// ofgpu-regions and ofgpu-sample are Cargo targets now, so nothing in the
+// registry is pending any more: every declared ofgpu-* binary is offered in
+// demo mode, and in real mode only the ones actually built on this machine.
+describe('arrived binaries', () => {
+  it('availableBinaries offers ofgpu-regions and ofgpu-sample once they are Cargo targets', () => {
+    expect(availableBinaries({ binDir: null, workspaceRoot: '/nowhere', demo: true }, ['ofgpu-cht', 'ofgpu-regions', 'ofgpu-sample'])).toEqual(['ofgpu-cht', 'ofgpu-regions', 'ofgpu-sample'])
     expect(availableBinaries({ binDir: null, workspaceRoot: '/nowhere', demo: false }, ['ofgpu-regions'])).toEqual([])
-    expect(STATIC_SYSTEM).not.toContain('ofgpu-regions')
+    expect(STATIC_SYSTEM).toContain('ofgpu-regions')
+    expect(STATIC_SYSTEM).toContain('ofgpu-sample')
+    expect(BINARIES.some((b) => b.pending === true)).toBe(false)
   })
 })

@@ -137,9 +137,10 @@ recipe used to carry is gone. Which driver solves what is
 [§6](#6-choosing-a-solver--where-people-go-wrong) — in short, the
 turbulence-only drivers solve two turbulence equations on a frozen `U`.
 
-When it finishes, `racecar_case/0/` holds `U`, `p`, `T`, `k`, `epsilon`,
-`omega` and `nut` in OpenFOAM ASCII. Open it in the Studio's 3D viewer, or
-read it straight into ParaView.
+When it finishes, `racecar_case/3000/` (the iteration count is the directory
+name) holds `U`, `p`, `T`, `rho`, `k`, `epsilon` and `nut` in OpenFOAM ASCII, and
+`0/` still holds the initial fields. Open it in the Studio's 3D viewer, or read
+it straight into ParaView.
 
 Details: [`cases/racecar.md`](../cases/racecar.md).
 
@@ -205,7 +206,8 @@ ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
 ```
 
 Presets: `channel`, `cavity`, `step`, `big`, `plume`, `room`, `damBreak`. `big`
-is a 1 m cube tunnel and takes a **single** cell count (`n³`).
+is a 1 m cube tunnel and takes either one cell count (`n`, an `n³` cube) or three,
+one per axis (`nx ny nz`, e.g. `big dir 128 52 41`); two numbers are refused by name.
 
 What comes out is a complete, ready-to-run case: `constant/polyMesh`,
 `constant/physicalProperties`, `constant/momentumTransport`,
@@ -1136,15 +1138,26 @@ The case has no `constant/g` and its floor patch is not named `bottomWall`,
 needs gravity. **Do not add `g` just to rotate the viewer** — gravity enters the
 equations and changes the solution.
 
+### `-output nvdb` is refused on a cut-cell or graded mesh
+
+`nvdb`/`vdb` are voxel grids that exist only on a uniform Cartesian box. On any
+other mesh the solver refuses before the loop, naming the reason (for example
+`cell volumes are not uniform`). Take a cut-cell run's results with `-output
+foam,vtu`. With `-permissive`, only `nvdb` is dropped from the list and the other
+formats are written as asked.
+
 ### `-output "U,p"` is rejected
 
 `-output` takes formats. Choose from `foam`, `vtu`, `nvdb`, `vdb`, `usda`.
 
-### Results land in `0/` rather than `1/`
+### Which directory the results land in
 
-`startTime`, `endTime` and `writeControl` in `system/controlDict` decide that. A
-steady driver writes the final state only, into whichever time directory those
-settings name. Keep a copy of the initial fields elsewhere if you need them.
+A steady `ofgpu-lowmach` run names its final directory by its iteration count
+(`-iters 3000` → `3000/`; a `-restartFrom` continuation keeps counting). It never
+writes `0/`. The other steady drivers (`ofgpu-k-epsilon` and friends) name it by
+`system/controlDict`'s `endTime` (`1/` by default). To continue from the previous
+answer use `-restartFrom`; re-running the case starts from the initial fields in
+`0/` (SPEC-LIT §44.9).
 
 ### Refused for an unsupported setting
 

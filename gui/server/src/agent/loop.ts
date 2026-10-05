@@ -15,10 +15,12 @@ import { meshArgs } from '../tools/mesh.js'
 import type { Hub } from '../ws/types.js'
 import { describeError, isAbortError, isRetryableError, isSystemRoleRejection } from './anthropic.js'
 import type { ApprovalManager } from './approvals.js'
+import { CAMPAIGN_TOOLS } from './grounding.js'
+import { groundReply } from './groundingRepair.js'
 import { emptyUsage, type LlmClient } from './llm.js'
 import { classifyTool, type PolicyOverrides } from './policy.js'
 import { BUDGET_EXHAUSTED_TEXT, buildVolatileContext, foldContextIntoUser, systemParam, volatileSystemMessage } from './prompt.js'
-import { appendUserTurn, newId, type SessionRecord, type SessionStore } from './session.js'
+import { appendUserTurn, newId, userTurnText, type SessionRecord, type SessionStore } from './session.js'
 import { createStreamProjector, projectAssistant, type AssistantExtras, type UiStopReason } from './ui-projection.js'
 
 export const MAX_TOOL_ROUNDS = 40
@@ -138,6 +140,8 @@ export async function approvalPreview(name: string, input: unknown, workspaceRoo
     }
     case 'shell_exec':
       return Array.isArray(i.argv) ? (i.argv as string[]).join(' ') : null
+    case 'autonomy_propose_edit':
+      return `${String(i.config)}\n${String(i.pointer)} = ${typeof i.value === 'string' ? i.value : JSON.stringify(i.value)}\n${String(i.reason ?? '')}`
     default:
       return ontology ? await ontology(name, input, toolUseId) : null
   }
@@ -162,6 +166,13 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
   let suggestRounds = 0
   let lastRoundSignature: string | null = null
   let identicalRounds = 0
+  /** A round of this turn called a campaign tool: the reply that ends it is linted, and repaired once, before it is shown (groundingRepair.ts). */
+  let campaignTurn = false
+  /** Such a turn's text frames, held until the round is known to need no repair. */
+  const held: ServerMsg[] = []
+  const release = (): void => {
+    for (const m of held.splice(0)) emit(m)
+  }
   const firstMessageId = newId('m')
   emit({ t: 'turn.start', sessionId, turnId, messageId: firstMessageId })
 
@@ -230,13 +241,14 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       now: deps.now ? deps.now() : new Date(),
     })
     const messages = foldContext ? foldContextIntoUser(rec.messages, volatile) : [...rec.messages, volatileSystemMessage(volatile)]
-    const projector = createStreamProjector(emit, sessionId, messageId)
+    const projector = createStreamProjector(campaignTurn ? (m: ServerMsg) => (m.t === 'msg.block_start' || m.t === 'msg.delta' ? void held.push(m) : emit(m)) : emit, sessionId, messageId)
     let final: BetaMessage
     try {
       const stream = deps.llm.stream({ system: systemParam(), messages, tools: toolDefinitions(), maxTokens: MAX_TOKENS, effort: rec.settings.effort, signal })
       for await (const ev of stream.events) projector.onEvent(ev)
       final = await stream.finalMessage()
     } catch (err) {
+      release()
       if (signal.aborted || isAbortError(err)) {
         await repairPartial(projector.completeContent(), messageId, 'cancelled', 'CANCELLED', 'cancelled by user', null)
         return finish('cancelled')
@@ -265,6 +277,17 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     rounds++
     model = final.model
     addUsage(usage, final.usage)
+    // suggest_followups is the end of a turn, so the text beside it is the reply (seen live: explanation and chips in one message)
+    const replyEnds = final.content.filter(isToolUse).every((tu) => tu.name === 'suggest_followups') && final.stop_reason !== 'refusal' && final.stop_reason !== 'max_tokens' && final.stop_reason !== 'model_context_window_exceeded'
+    const grounding = campaignTurn && replyEnds ? await groundReply({ llm: deps.llm, tools: toolDefinitions(), maxTokens: MAX_TOKENS, effort: rec.settings.effort, signal, history: rec.messages, content: final.content, turnId, locale }) : null
+    if (grounding) {
+      held.length = 0
+      usage.inputTokens += grounding.record.usage.inputTokens
+      usage.outputTokens += grounding.record.usage.outputTokens
+      usage.cacheReadTokens += grounding.record.usage.cacheReadTokens
+      usage.cacheWriteTokens += grounding.record.usage.cacheWriteTokens
+      rec.repairs = [...(rec.repairs ?? []), grounding.record]
+    } else release()
 
     if (final.stop_reason === 'refusal') {
       // A refusal can arrive mid-stream with a finished tool_use already in the
@@ -286,10 +309,12 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     }
 
     const toolUses = final.content.filter(isToolUse)
+    if (toolUses.some((tu) => CAMPAIGN_TOOLS.includes(tu.name))) campaignTurn = true
     const calls = new Map<string, ToolCallRecord>()
     for (const tu of toolUses) calls.set(tu.id, newCall(tu, locale))
     const stopReason: UiStopReason = final.stop_reason === 'tool_use' ? 'tool_use' : 'end_turn'
-    const ui = appendAssistant(final.content, stopReason, messageId, calls)
+    const ui = appendAssistant(grounding ? grounding.content : final.content, stopReason, messageId, calls)
+    if (grounding) ui.blocks = [...projectAssistant(ui.id, grounding.display, calls, { createdAt: ui.createdAt, stopReason, model }).blocks, grounding.notice]
     await persist()
     emit({ t: 'msg.done', sessionId, message: ui })
 
@@ -364,12 +389,28 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
       emitCall(call)
     }
 
+    // One ToolContext per tool_use, built here so the approval previews and the
+    // execution see the same session - including the user's own words a
+    // grounding tool (cad_requirements_propose) builds its brief from.
+    const toolCtx = (tu: BetaToolUseBlock): ToolContext => ({
+      config: deps.config,
+      hub: deps.hub,
+      runs: deps.runs,
+      datasets: deps.datasets,
+      sessionId,
+      signal,
+      workspaceRoot: deps.config.workspaceRoot,
+      settings: rec.settings,
+      toolUseId: tu.id,
+      llm: { provider: deps.llm.kind, model: model ?? deps.llm.model },
+      userText: userTurnText(rec),
+    })
+
     const execute = async (tu: BetaToolUseBlock, call: ToolCallRecord, input: unknown) => {
       call.status = 'running'
       call.startedAt = Date.now()
       emitCall(call)
-      const ctx: ToolContext = { config: deps.config, hub: deps.hub, runs: deps.runs, datasets: deps.datasets, sessionId, signal, workspaceRoot: deps.config.workspaceRoot, settings: rec.settings, toolUseId: tu.id }
-      settle(tu, call, input, await runTool(tu.name, input, ctx))
+      settle(tu, call, input, await runTool(tu.name, input, toolCtx(tu)))
     }
 
     for (const tu of toolUses) {
@@ -380,7 +421,14 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
         continue
       }
       // "null" spelled as a string is the model leaving a field out (forgive.ts)
-      const parsed = tool.schema.safeParse(forgiveToolInput(tu.name, tu.input))
+      const forgiven = forgiveToolInput(tu.name, tu.input)
+      // A tool's own veto (autonomy_propose_edit's whitelist) answers before any approval card.
+      const refused = tool.refuse?.(forgiven, toolCtx(tu)) ?? null
+      if (refused) {
+        settle(tu, call, tu.input, refused)
+        continue
+      }
+      const parsed = tool.schema.safeParse(forgiven)
       if (!parsed.success) {
         settle(tu, call, tu.input, fail('INVALID_INPUT', `invalid input for ${tu.name}: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`))
         continue
@@ -406,7 +454,15 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
     }
 
     if (asks.length) {
-      const previews = await Promise.all(asks.map((a) => approvalPreview(a.tu.name, a.input, deps.config.workspaceRoot, deps.ontologyPreview, a.tu.id).catch(() => null)))
+      // A tool that computes its own card (cad_requirements_propose checks the
+      // proposal so the card shows the real verdict) wins over the generic preview.
+      const previews = await Promise.all(
+        asks.map((a) => {
+          const tool = getTool(a.tu.name)
+          const p = tool?.preview ? tool.preview(a.input, toolCtx(a.tu)) : approvalPreview(a.tu.name, a.input, deps.config.workspaceRoot, deps.ontologyPreview, a.tu.id)
+          return p.catch(() => null)
+        }),
+      )
       const req = deps.approvals.request(
         turnId,
         asks.map((a, i) => ({ toolUseId: a.tu.id, name: a.tu.name, input: a.input, summary: toolLabel(a.tu.name, locale), preview: previews[i] })),

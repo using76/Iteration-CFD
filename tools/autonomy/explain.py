@@ -24,11 +24,13 @@ compares three golden texts.  No mesher, no solver, no clock in any text.
     python tools/autonomy/explain.py --rows R.jsonl [--records REC.json] [--geometry ID] [--json]
     python tools/autonomy/explain.py --summary --rows R.jsonl (--meta M.json | --manifest tuning|test) [--json]
     python tools/autonomy/explain.py --audit --rows R.jsonl [--records REC.json]
+    python tools/autonomy/explain.py --audit --bundle BUNDLE.json.gz
 """
 from __future__ import annotations
 
 import ast
 import copy
+import gzip
 import json
 import math
 import os
@@ -37,6 +39,7 @@ import re
 import statistics
 import sys
 import tempfile
+import zlib
 from datetime import timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -60,7 +63,7 @@ LAYER_OF_PREFIX = {"PF": "preflight", "WL": "preflight", "R": "rule", "RM": "rem
 EXEMPT_IDS = {"PF-TEST": ("remedies.py",)}     # test scaffolding: allowed only in these files
 TERMINAL_IDS = tuple(remedies.TERMINAL_ID.values())
 TERMINAL_OF = {v: k for k, v in remedies.TERMINAL_ID.items()}
-FLAG_ORDER = ("F1", "F2", "F3a", "F3b", "F3c", "F3d", "F4", "F5")
+FLAG_ORDER = ("F1", "F2", "F3a", "F3b", "F3c", "F3d", "F3e", "F4", "F5")
 NUM_RE = re.compile(r"(?<![A-Za-z0-9_.])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 GOLDEN_IDS = ("box_sphere", "wing_a_L3", "D-1-002")
 
@@ -93,6 +96,12 @@ TEMPLATES = {
                 "title": "refuse a forbidden command-line flag",
                 "because": "the permissive flag would let a mesh past the quality gate, and it is "
                            "never passed"},
+    "WL-SHARP-FT0": {"layer": "preflight",
+                     "title": "refuse switching the feature attraction off on a body with sharp edges",
+                     "because": "the user decided that a body with sharp edges must have its edges "
+                                "captured, and a zero feature tolerance stops the snap pulling any point "
+                                "onto an edge; only the cell-plane path, whose edges lie on lattice "
+                                "lines, keeps it at zero"},
     "PF-SURFACE": {"layer": "preflight",
                    "title": "check that every surface is closed and consistently wound",
                    "because": "an open or inverted surface cannot be meshed, so it is refused before "
@@ -190,6 +199,10 @@ TEMPLATES = {
                    "title": "switch the feature attraction off",
                    "because": "the pilot sweep found that it unpins the snap on every feature-bearing "
                               "body, at the cost of the edges not being captured"},
+    "RM-SNAP-TAU": {"layer": "remedy",
+                    "title": "halve the feature attraction radius",
+                    "because": "a smaller radius releases the points pinned along the feature lines "
+                               "while the attraction stays on"},
     "RM-SNAP-REFINE": {"layer": "remedy",
                        "title": "refine the whole refinement ladder one level",
                        "because": "the snapped surface misses area, so the lattice is too coarse for "
@@ -245,11 +258,42 @@ TEMPLATES = {
                   "title": "abstain: the neighbours' remedies change nothing here",
                   "because": "the transferred remedies are refused by their own guards on this "
                              "config, or the body is on the plane path"},
+    "PR-PARTIAL": {"layer": "prior",
+                   "title": "abstain: the neighbours' remedy path applies only in part here",
+                   "because": "a transferred remedy is refused by its own guard on this config, and "
+                              "a part of the path is a config no neighbour passed with"},
     "PR-DISABLED": {"layer": "prior",
                     "title": "abstain: the prior ships disabled",
                     "because": "the prior did not earn its place on the tuning split, so the setup "
                                "rules decide attempt one"},
+    "OPT-PICK": {"layer": "optimiser",
+                 "title": "propose the surrogate's pick from the Sobol pool",
+                 "because": "the remedies are spent, and the surrogate predicts this config passes "
+                            "with the most boundary-layer capture for its cells"},
+    "OPT-NOFEAS": {"layer": "optimiser",
+                   "title": "abstain: no pool config is predicted to pass within the budget",
+                   "because": "a proposal the surrogate expects to fail would spend an attempt "
+                              "for nothing"},
+    "OPT-PLANE": {"layer": "optimiser",
+                  "title": "abstain: the body is on the plane path",
+                  "because": "the plane rule owns the refinement and snap knobs of a commensurate "
+                             "body"},
+    "OPT-DISABLED": {"layer": "optimiser",
+                     "title": "abstain: the optimiser ships disabled",
+                     "because": "the optimiser did not earn its place on the tuning split, so the "
+                                "remedies' terminal stands"},
 }
+
+
+# An optimiser record written after the remedies' terminal on a geometry's last
+# attempt ends the geometry (campaign.py: no attempt follows it); one text per id.
+END_TEMPLATES = {
+    "OPT-PICK": "the pick is not run: preflight's veto refused it, so no attempt follows and the remedies' terminal stands",
+    "OPT-NOFEAS": "no attempt follows, so the remedies' terminal stands",
+    "OPT-PLANE": "no attempt follows, so the remedies' terminal stands",
+    "OPT-DISABLED": "no attempt follows, so the remedies' terminal stands",
+}
+END_WHY = "an optimiser record that ends the geometry before its run ended"
 
 
 # --- the formatting of one value (docs/15 §C explain row) --------------------
@@ -289,6 +333,33 @@ def template(rule_id: str) -> dict:
         raise ExplainError("no template for rule id %r (TEMPLATES has %d ids)"
                            % (rule_id, len(TEMPLATES)))
     return tp
+
+
+def end_template(rule_id: str) -> str:
+    """The end-of-geometry text of one optimiser rule id; ExplainError when none."""
+    t = END_TEMPLATES.get(rule_id)
+    if t is None:
+        raise ExplainError("no end-of-geometry template for rule id %r "
+                           "(END_TEMPLATES has %d ids)"
+                           % (rule_id, len(END_TEMPLATES)))
+    return t
+
+
+def ends_geometry(tags: list, last_attempt) -> list:
+    """Which tagged records end their geometry: a remedies' terminal, or an optimiser record after it on the last attempt."""
+    ends = []
+    seen_terminal = set()
+    for tag in tags:
+        rid = tag["record"]["rule_id"]
+        if rid in TERMINAL_IDS:
+            seen_terminal.add(tag["attempt"])
+            ends.append(True)
+        elif TEMPLATES.get(rid, {}).get("layer") == "optimiser" \
+                and tag["attempt"] == last_attempt and tag["attempt"] in seen_terminal:
+            ends.append(True)
+        else:
+            ends.append(False)
+    return ends
 
 
 # --- the static scan (docs/15 §F G-EXPL: every rule_id has a template) -------
@@ -430,13 +501,18 @@ def explain_geometry(rows: list, records=None) -> dict:
             raise ExplainError("a record is tagged attempt %s, which %s has no row for"
                                % (tag["attempt"], gid))
     by_attempt = {a: {"pre": [], "end": []} for a in attempts}
-    for tag in tags:
+    ends = ends_geometry(tags, rows[-1]["attempt"])
+    for tag, e in zip(tags, ends):
         c = card(tag["record"])
+        if e and c["rule_id"] not in TERMINAL_IDS:
+            c = dict(c, ends_geometry=True, end_note=end_template(c["rule_id"]))
         tgt = by_attempt[tag["attempt"]]
-        (tgt["end"] if c["rule_id"] in TERMINAL_IDS else tgt["pre"]).append(c)
+        (tgt["end"] if e else tgt["pre"]).append(c)
     terminal = "none recorded"
-    if by_attempt[rows[-1]["attempt"]]["end"]:
-        terminal = TERMINAL_OF[by_attempt[rows[-1]["attempt"]]["end"][-1]["rule_id"]]
+    for c in reversed(by_attempt[rows[-1]["attempt"]]["end"]):
+        if c["rule_id"] in TERMINAL_IDS:
+            terminal = TERMINAL_OF[c["rule_id"]]
+            break
     lines = ["# %s: %d attempt(s), split %s, campaign %s, terminal %s"
              % (gid, len(rows), split_name, campaign, terminal)]
     out_attempts = []
@@ -519,7 +595,10 @@ def explain_geometry(rows: list, records=None) -> dict:
         if moved_text is not None:
             lines.append("moved: %s" % moved_text)
         for c in end:
-            lines.append("end %s" % c["line"])
+            if c.get("ends_geometry"):
+                lines.append("end %s; %s" % (c["line"], c["end_note"]))
+            else:
+                lines.append("end %s" % c["line"])
         out_attempts.append({"attempt": a, "decided_by": r["decided_by"], "rule_id": rid,
                              "stage_focus": r["stage_focus"], "decided": decided,
                              "why": r["trigger"], "why_text": trigger_text(r["trigger"]),
@@ -547,7 +626,7 @@ def explain_geometry(rows: list, records=None) -> dict:
 
 
 def audit(rows: list, records=None, gates=None, knobs=None) -> dict:
-    """Validate every row and check prediction, record and trigger order."""
+    """Validate every row and check prediction, record and trigger order (an optimiser record that ends its geometry is checked against its run's end)."""
     gates = gates or schema.load_gates()
     knobs = knobs or schema.load_knobs()
     records = records or {}
@@ -577,8 +656,11 @@ def audit(rows: list, records=None, gates=None, knobs=None) -> dict:
         by_geom.setdefault(r["geometry_id"], {})[r["attempt"]] = r
     checked = 0
     bad = []
+    end_untemplated = set()
     for gid2 in sorted(records):
-        for tag in records[gid2]:
+        last = max(by_geom[gid2]) if by_geom.get(gid2) else None
+        ends = ends_geometry(records[gid2], last)
+        for tag, e in zip(records[gid2], ends):
             rec = tag["record"]
             rule_ids.add(rec["rule_id"])
             row = by_geom.get(gid2, {}).get(tag["attempt"])
@@ -592,6 +674,12 @@ def audit(rows: list, records=None, gates=None, knobs=None) -> dict:
                     bad.append({"geometry_id": gid2, "attempt": tag["attempt"],
                                 "rule_id": rec["rule_id"],
                                 "why": "a terminal record before its run ended"})
+            elif e:
+                if rec["rule_id"] not in END_TEMPLATES:
+                    end_untemplated.add(rec["rule_id"])
+                if schema._parse_iso(rec["t"]) < schema._parse_iso(row["t_end"]):
+                    bad.append({"geometry_id": gid2, "attempt": tag["attempt"],
+                                "rule_id": rec["rule_id"], "why": END_WHY})
             elif schema._parse_iso(rec["t"]) > schema._parse_iso(row["t_start"]):
                 bad.append({"geometry_id": gid2, "attempt": tag["attempt"],
                             "rule_id": rec["rule_id"],
@@ -614,7 +702,8 @@ def audit(rows: list, records=None, gates=None, knobs=None) -> dict:
                                          "attempt": r["attempt"],
                                          "observable": r["trigger"]["observable"],
                                          "trigger": r["trigger"]["value"], "previous": v})
-    untemplated = sorted(rid for rid in rule_ids if rid not in TEMPLATES)
+    untemplated = sorted(set(rid for rid in rule_ids if rid not in TEMPLATES)
+                         | end_untemplated)
     return {"schema": AUDIT_SCHEMA, "n_rows": len(rows),
             "n_valid": len(rows) - len(invalid), "invalid": invalid,
             "rule_ids": sorted(rule_ids), "untemplated": untemplated,
@@ -865,7 +954,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 46, len(TEMPLATES)
+    assert len(TEMPLATES) == 53, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -874,9 +963,10 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 6, "R": 8, "RM": 16, "PR": 5}, counts
-    print("[ok] templates: 46 rule ids (PF 11, WL 6, R 8, RM 16, PR 5), each "
-          "with its "
+    assert counts == {"PF": 11, "WL": 7, "R": 8, "RM": 17, "PR": 6,
+                      "OPT": 4}, counts
+    print("[ok] templates: 53 rule ids (PF 11, WL 7, R 8, RM 17, PR 6, OPT 4), "
+          "each with its "
           "prefix's layer, no digit in any template")
 
 
@@ -896,7 +986,7 @@ def _g2_static_scan():
     finally:
         os.remove(planted)
         os.rmdir(tmp)
-    print("[ok] static scan: 46 ids in %d source files, all templated, none dead, "
+    print("[ok] static scan: 53 ids in %d source files, all templated, none dead, "
           "PF-TEST only in remedies.py; module tables templated; a planted "
           "RM-NEW-THING is reported missing" % sc["files"])
 
@@ -904,18 +994,18 @@ def _g2_static_scan():
 def _g3_records():
     fx = load_fixtures()
     recs = fx["records_by_id"]
-    assert len(recs) == 59, len(recs)
+    assert len(recs) == 61, len(recs)
     ids = set()
     for rec in recs:
         c = card(rec)
         assert c["line"].startswith(rec["rule_id"] + " "), rec["rule_id"]
         ids.add(rec["rule_id"])
         assert ungrounded(c["line"], [rec]) == [], rec["rule_id"]
-    fx_ids = {r for r in TEMPLATES if not r.startswith("PR-")}
+    fx_ids = {r for r in TEMPLATES if not r.startswith(("PR-", "OPT-"))}
     assert ids == fx_ids, ids ^ fx_ids
     for v in [0.0, 1.0, 0.1334231805929919, 3, True, None, "a", [1.5, None], {"k": 1}]:
         assert fmt(v) == remedies._fmt(v), (v, fmt(v), remedies._fmt(v))
-    print("[ok] records: 59 fixture records of 41 ids render, every line starts with "
+    print("[ok] records: 61 fixture records of 43 ids render, every line starts with "
           "its rule id, 0 ungrounded; fmt == remedies._fmt on 9 values")
 
 
@@ -1234,15 +1324,191 @@ def _g13_cli():
           "exits 2 on the seal; --geometry NOPE exits 2")
 
 
+def _g14_tables():
+    ROUNDS = os.path.join(HERE, "optimise", "refine_r%d.json.gz")
+    opt_ids = {r for r in TEMPLATES if TEMPLATES[r]["layer"] == "optimiser"}
+    assert set(END_TEMPLATES) == opt_ids, sorted(set(END_TEMPLATES) ^ opt_ids)
+    for v in list(END_TEMPLATES.values()) + [END_WHY]:
+        assert not NUM_RE.search(v), v
+    assert end_template("OPT-PICK") == END_TEMPLATES["OPT-PICK"]
+    try:
+        end_template("RM-PASS")
+        raise AssertionError("end_template(RM-PASS) did not raise")
+    except ExplainError as e:
+        assert "end-of-geometry template" in str(e), e
+    counts = ({"OPT-NOFEAS": 75, "OPT-PICK": 12}, {"OPT-NOFEAS": 74, "OPT-PICK": 14},
+              {"OPT-NOFEAS": 73, "OPT-PICK": 14}, {"OPT-NOFEAS": 72, "OPT-PICK": 14},
+              {"OPT-NOFEAS": 72, "OPT-PICK": 13})
+    checked = (3469, 3460, 3490, 3510, 3500)
+    for n in range(1, 6):
+        rows, recs = bundle_rows(ROUNDS % n)
+        au = audit(rows, recs)
+        assert au["ok"] and au["record_order"]["bad"] == [], \
+            (n, au["record_order"]["bad"][:2], au["untemplated"])
+        assert au["record_order"]["checked"] == checked[n - 1], \
+            (n, au["record_order"]["checked"])
+        by_rule = {}
+        for g in sorted(recs):
+            last = max(r["attempt"] for r in rows if r["geometry_id"] == g)
+            for t, e in zip(recs[g], ends_geometry(recs[g], last)):
+                rid = t["record"]["rule_id"]
+                if e and rid.startswith("OPT-"):
+                    by_rule[rid] = by_rule.get(rid, 0) + 1
+        assert by_rule == counts[n - 1], (n, by_rule)
+
+
+def _g14_synth():
+    fx = load_fixtures()
+    _, recs1 = bundle_rows(os.path.join(HERE, "optimise", "refine_r1.json.gz"))
+    nofeas = copy.deepcopy(next(t["record"] for t in recs1["A-1-000"]
+                                if t["attempt"] == 3
+                                and t["record"]["rule_id"] == "OPT-NOFEAS"))
+    nofeas["t"] = "2026-09-24T10:16:27Z"
+    pick = copy.deepcopy(next(t["record"] for t in recs1["D-1-027"]
+                              if t["attempt"] == 2
+                              and t["record"]["rule_id"] == "OPT-PICK"))
+    pick["t"] = "2026-09-24T10:16:27Z"
+    wrows = [r for r in fx["rows"] if r["geometry_id"] == "wing_a_L3"]
+    for rec in (nofeas, pick):
+        recs = copy.deepcopy(fx["records"])
+        recs["wing_a_L3"].append({"attempt": 4, "record": rec})
+        au = audit(fx["rows"], recs)
+        assert au["ok"] and au["record_order"]["bad"] == [], au["record_order"]
+        assert au["record_order"]["checked"] == 24, au["record_order"]["checked"]
+        obj = explain_geometry(wrows, recs["wing_a_L3"])
+        assert obj["terminal"] == "EXHAUSTED", obj["terminal"]
+        a4 = obj["attempts"][3]
+        assert not [c for c in a4["records"] if c["rule_id"].startswith("OPT-")]
+        assert [c["rule_id"] for c in a4["end"]] == ["RM-EXHAUSTED", rec["rule_id"]], \
+            [c["rule_id"] for c in a4["end"]]
+        last_card = a4["end"][-1]
+        assert last_card["ends_geometry"] is True
+        assert last_card["end_note"] == END_TEMPLATES[rec["rule_id"]]
+        want = "end %s; %s" % (last_card["line"], END_TEMPLATES[rec["rule_id"]])
+        assert obj["text"].rstrip("\n").split("\n")[-1] == want, obj["text"][-200:]
+        assert ungrounded(obj["text"],
+                          wrows + [t["record"] for t in recs["wing_a_L3"]]) == []
+    assert "veto" in END_TEMPLATES["OPT-PICK"]
+
+
+def _g14_faults():
+    fx = load_fixtures()
+    _, recs1 = bundle_rows(os.path.join(HERE, "optimise", "refine_r1.json.gz"))
+    nofeas = copy.deepcopy(next(t["record"] for t in recs1["A-1-000"]
+                                if t["attempt"] == 3
+                                and t["record"]["rule_id"] == "OPT-NOFEAS"))
+    nofeas["t"] = "2026-09-24T10:16:27Z"
+    early = copy.deepcopy(nofeas)
+    early["t"] = "2026-09-24T10:16:25Z"
+    recs = copy.deepcopy(fx["records"])
+    recs["wing_a_L3"].append({"attempt": 4, "record": early})
+    au = audit(fx["rows"], recs)
+    assert au["record_order"]["bad"] == [{"geometry_id": "wing_a_L3", "attempt": 4,
+                                          "rule_id": "OPT-NOFEAS", "why": END_WHY}], \
+        au["record_order"]["bad"]
+    recs = copy.deepcopy(fx["records"])
+    tags = recs["wing_a_L3"]
+    idx = next(i for i, t in enumerate(tags)
+               if t["attempt"] == 4 and t["record"]["rule_id"] == "RM-EXHAUSTED")
+    tags.insert(idx, {"attempt": 4, "record": copy.deepcopy(nofeas)})
+    au = audit(fx["rows"], recs)
+    assert au["record_order"]["bad"] == [{"geometry_id": "wing_a_L3", "attempt": 4,
+                                          "rule_id": "OPT-NOFEAS",
+                                          "why": "a decision record after its run started"}], \
+        au["record_order"]["bad"]
+    recs = copy.deepcopy(fx["records"])
+    recs["wing_a_L3"].append({"attempt": 3, "record": copy.deepcopy(nofeas)})
+    au = audit(fx["rows"], recs)
+    assert au["record_order"]["bad"] == [{"geometry_id": "wing_a_L3", "attempt": 3,
+                                          "rule_id": "OPT-NOFEAS",
+                                          "why": "a decision record after its run started"}], \
+        au["record_order"]["bad"]
+
+
+def _g14_selftest_id():
+    fx = load_fixtures()
+    _, recs1 = bundle_rows(os.path.join(HERE, "optimise", "refine_r1.json.gz"))
+    nofeas = copy.deepcopy(next(t["record"] for t in recs1["A-1-000"]
+                                if t["attempt"] == 3
+                                and t["record"]["rule_id"] == "OPT-NOFEAS"))
+    nofeas["t"] = "2026-09-24T10:16:27Z"
+    nofeas["rule_id"] = "OPT-SELFTEST"
+    recs = copy.deepcopy(fx["records"])
+    recs["wing_a_L3"].append({"attempt": 4, "record": nofeas})
+    TEMPLATES["OPT-SELFTEST"] = {"layer": "optimiser",
+                                 "title": "a selftest optimiser id",
+                                 "because": "the end-template check"}
+    try:
+        au = audit(fx["rows"], recs)
+        assert au["untemplated"] == ["OPT-SELFTEST"] and au["ok"] is False, au
+        assert au["record_order"]["bad"] == [], au["record_order"]["bad"]
+        try:
+            explain_geometry([r for r in fx["rows"]
+                              if r["geometry_id"] == "wing_a_L3"],
+                             recs["wing_a_L3"])
+            raise AssertionError("explain_geometry did not raise")
+        except ExplainError as e:
+            assert "end-of-geometry template" in str(e), e
+    finally:
+        del TEMPLATES["OPT-SELFTEST"]
+
+
+def _g14_cli():
+    import subprocess
+    ROUNDS = os.path.join(HERE, "optimise", "refine_r%d.json.gz")
+    q = subprocess.run([sys.executable, __file__, "--audit", "--bundle", ROUNDS % 1],
+                       capture_output=True, encoding="utf-8", errors="replace",
+                       timeout=120)
+    assert q.returncode == 0 and json.loads(q.stdout)["ok"] is True, \
+        (q.returncode, q.stderr[-300:])
+    q = subprocess.run([sys.executable, __file__, "--audit", "--bundle", ROUNDS % 1,
+                        "--rows", os.path.join(FIXTURE_DIR, "rows.jsonl")],
+                       capture_output=True, encoding="utf-8", errors="replace",
+                       timeout=120)
+    assert q.returncode == 2 and "not both" in q.stderr, (q.returncode, q.stderr[-300:])
+    with open(ROUNDS % 1, "rb") as f:
+        data = f.read()
+    i = len(data) // 2
+    data = data[:i] + bytes([data[i] ^ 0xFF]) + data[i + 1:]
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "refine_r1.json.gz")
+        with open(p, "wb") as f:
+            f.write(data)
+        try:
+            bundle_rows(p)
+            raise AssertionError("bundle_rows did not raise")
+        except ExplainError as e:
+            assert "does not decompress" in str(e), e
+        try:
+            bundle_rows(os.path.join(td, "nope.json.gz"))
+            raise AssertionError("bundle_rows did not raise")
+        except ExplainError as e:
+            assert "no such bundle file" in str(e), e
+
+
+def _g14_optimiser_end():
+    _g14_tables()
+    _g14_synth()
+    _g14_faults()
+    _g14_selftest_id()
+    _g14_cli()
+    print("[ok] optimiser end: the AM-14 rounds audit ok with 0 bad records "
+          "(ending optimiser records 87, 88, 87, 86, 85); an optimiser record after "
+          "the terminal on the last attempt ends the geometry, renders after it and "
+          "is checked against its run's end; 4 planted faults each reported; "
+          "--audit --bundle reads a bundle")
+
+
 def selftest() -> int:
-    """The 13 G-EXPL groups; [ok] per group, SELFTEST PASS at the end."""
+    """The 14 G-EXPL groups; [ok] per group, SELFTEST PASS at the end."""
     groups = [("templates", _g1_templates), ("static scan", _g2_static_scan),
               ("records", _g3_records), ("rows", _g4_rows),
               ("timestamps", _g5_timestamps), ("moved", _g6_moved),
               ("golden", _g7_golden), ("summary", _g8_summary),
               ("clopper-pearson", _g9_clopper_pearson),
               ("summary property", _g10_property), ("audit", _g11_audit_faults),
-              ("determinism", _g12_determinism), ("cli", _g13_cli)]
+              ("determinism", _g12_determinism), ("cli", _g13_cli),
+              ("optimiser end", _g14_optimiser_end)]
     for name, fn in groups:
         try:
             fn()
@@ -1390,7 +1656,7 @@ def _usage() -> str:
     return ("usage: explain.py --selftest | --gate | --write-golden | "
             "--rows FILE [--records FILE] [--geometry ID] [--json] | "
             "--summary --rows FILE (--meta FILE | --manifest tuning|test) [--json] | "
-            "--audit --rows FILE [--records FILE]")
+            "--audit --rows FILE [--records FILE] | --audit --bundle FILE.json.gz")
 
 
 def _load_rows(path: str) -> list:
@@ -1407,6 +1673,27 @@ def _load_records_maybe(path) -> dict:
         return json.load(f)["records"]
 
 
+def bundle_rows(path: str) -> tuple:
+    """(rows, records) of a campaign bundle (baseline.py's gzip JSON) for audit;
+    records grouped by geometry in file order."""
+    if not os.path.isfile(path):
+        raise ExplainError("no such bundle file: %s" % path)
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        b = json.loads(gzip.decompress(data).decode("utf-8"))
+    except (OSError, EOFError, ValueError, zlib.error) as e:
+        raise ExplainError("bundle: %s does not decompress: %s" % (path, e))
+    if not isinstance(b, dict) or not isinstance(b.get("attempts"), list) \
+            or not isinstance(b.get("records"), list):
+        raise ExplainError("bundle: %s holds no attempts and records" % path)
+    out = {}
+    for ln in b["records"]:
+        out.setdefault(ln["geometry_id"], []).append(
+            {"attempt": ln["attempt"], "record": ln["record"]})
+    return (b["attempts"], out)
+
+
 def _parse_opts(rest: list) -> tuple:
     pos, vals, flags = [], {}, set()
     i = 0
@@ -1415,7 +1702,8 @@ def _parse_opts(rest: list) -> tuple:
         if a == "--json":
             flags.add(a)
             i += 1
-        elif a in ("--rows", "--records", "--geometry", "--meta", "--manifest"):
+        elif a in ("--rows", "--records", "--geometry", "--meta", "--manifest",
+                   "--bundle"):
             if i + 1 >= len(rest):
                 raise ExplainError("%s needs a value" % a)
             vals[a] = rest[i + 1]
@@ -1481,8 +1769,15 @@ def _cli_summary(rest: list) -> int:
 
 def _cli_audit(rest: list) -> int:
     pos, vals, _flags = _parse_opts(rest)
-    au = audit(_load_rows(_rows_path(pos, vals)),
-               _load_records_maybe(vals.get("--records")) or None)
+    if "--bundle" in vals:
+        if "--rows" in vals or pos or "--records" in vals:
+            raise ExplainError("--audit takes --bundle FILE or --rows FILE "
+                               "[--records FILE], not both")
+        rows, recs = bundle_rows(vals["--bundle"])
+        au = audit(rows, recs)
+    else:
+        au = audit(_load_rows(_rows_path(pos, vals)),
+                   _load_records_maybe(vals.get("--records")) or None)
     sys.stdout.write(_dump(au))
     return 0 if au["ok"] else 1
 

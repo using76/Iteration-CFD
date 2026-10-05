@@ -7,12 +7,12 @@
 // running run when launch throws (launch() below).
 import path from 'node:path'
 import readline from 'node:readline'
-import { BINARY_NAMES, checkArgValue, getBinary, LogLineParser, RESIDUAL_SERIES_ORDER, type LogLine, type MetricRecord, type ResidualRecord, type RunInfo, type RunStatus } from '@cfd/shared'
+import { BINARY_NAMES, checkArgValue, getBinary, LogLineParser, RESIDUAL_SERIES_ORDER, type LogLine, type MetricRecord, type ResidualRecord, type RunEndWord, type RunInfo, type RunStatus } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import { createGpuMonitor, type GpuMonitor } from '../gpu/index.js'
 import { silentLogger, type Logger } from '../log.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
-import { availableBinaries as detectBinaries, buildArgv, dispatch, killTree } from './dispatch.js'
+import { availableBinaries as detectBinaries, buildArgv, dispatch, killTree, type DispatchOptions, type SpawnedRun } from './dispatch.js'
 import { collectRunProvenance } from './provenance.js'
 import { loadPastRuns, nullRunFiles, openRun, readPastLog, readPastSeries, type RunFiles } from './store.js'
 import { isTerminal, RunRequestError, type LogWindow, type RunEvent, type RunManagerHandle, type StartRunOptions, type WaitOptions } from './types.js'
@@ -45,12 +45,30 @@ export interface RunManagerDeps {
   log?: Logger
   /** Injected in tests so the monitor never shells out to nvidia-smi. */
   gpuMonitor?: GpuMonitor
+  /** Injected in tests: spawn something other than the registry's binary. Defaults to dispatch. */
+  dispatch?: (opts: DispatchOptions) => SpawnedRun
+}
+
+/**
+ * The status a run gets when its process closes. The driver's own `run ended:` word decides when it
+ * printed one - refused and error are both `failed`, and `endWord` is what tells them apart; diverged is
+ * `diverged`. With no word (every other driver, and any run before the line existed) this is exactly
+ * the rule it replaces: a signal or a stop is `killed`, exit 0 with no error is `done`, anything else is
+ * `failed`, and a run already marked `diverged` by a NaN line stays `diverged`.
+ */
+export function closeStatus(end: { code: number | null; signal: string | null; current: RunStatus; endWord: RunEndWord | undefined; error: string | null }): RunStatus {
+  if (end.signal !== null || end.current === 'killed') return 'killed'
+  if (end.endWord === 'diverged') return 'diverged'
+  if (end.endWord === 'refused' || end.endWord === 'error') return 'failed'
+  if (end.code === 0) return end.error ? 'failed' : 'done'
+  return end.current === 'diverged' ? 'diverged' : 'failed'
 }
 
 export async function createRunManager(deps: RunManagerDeps): Promise<RunManagerHandle> {
   const { config } = deps
   const log = deps.log ?? silentLogger
   const gpuMonitor = deps.gpuMonitor ?? createGpuMonitor({ demo: config.demo })
+  const spawnRun = deps.dispatch ?? dispatch
 
   const runs = new Map<string, LiveRun>()
   const handlers = new Set<(ev: RunEvent) => void>()
@@ -170,7 +188,13 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
     // stop() wait forever.
     try {
       r.files = await openRun(config.runsDir, r.info.id, log)
-      const spawned = dispatch({ config, binary: r.info.binary, argv: buildArgv({ casePath: r.info.casePath, positionals: r.positionals, args: r.args }), cwd: config.workspaceRoot })
+      // stop() can cancel a queued run while openRun is awaited. Spawning it anyway
+      // started a process nothing tracked, whose close then found endedAt set.
+      if (r.info.status !== 'queued') {
+        void r.files.close()
+        return
+      }
+      const spawned = spawnRun({ config, binary: r.info.binary, argv: buildArgv({ casePath: r.info.casePath, positionals: r.positionals, args: r.args }), cwd: config.workspaceRoot })
       r.proc = spawned
       r.info.argv = spawned.argv
       r.info.mode = spawned.mode
@@ -204,9 +228,9 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
       finish(r, { status: 'failed', exitCode: null, signal: null, error: err.message })
     })
     child.on('close', (code, signal) => {
-      if (isTerminal(r.info.status)) return
-      const killed = signal !== null || r.info.status === 'killed'
-      const status: RunStatus = killed ? 'killed' : code === 0 ? (r.info.error ? 'failed' : 'done') : 'failed'
+      // endedAt, not the status: a NaN line and stop() both set a terminal status before the process closes.
+      if (r.info.endedAt) return
+      const status = closeStatus({ code, signal: signal ?? null, current: r.info.status, endWord: r.info.endWord, error: r.info.error })
       finish(r, { status, exitCode: code, signal: signal ?? null, error: r.info.error })
     })
   }
@@ -271,6 +295,13 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
           break
         case 'error':
           r.info.error = r.info.error ?? ev.message
+          changed = true
+          break
+        case 'runEnded':
+          r.info.endWord = ev.word
+          r.info.endDetail = ev.detail
+          // A driver that ended badly names why; keep the first error line if one came earlier.
+          if (ev.word !== 'budget') r.info.error = r.info.error ?? (ev.detail !== '' ? ev.detail : ev.word)
           changed = true
           break
         case 'iterating':

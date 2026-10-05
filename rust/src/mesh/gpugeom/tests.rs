@@ -16,7 +16,7 @@ fn gpu() -> Option<Gpu> {
 /// A mesh, its points and its face point lists, under a name for the failure
 /// message. The tuple is what both `geometry::compute` and the device sweep
 /// take, so it is the shape a fixture has to be.
-type Fixture = (String, HostMesh, Vec<Vec3>, Vec<Vec<Label>>);
+pub(crate) type Fixture = (String, HostMesh, Vec<Vec3>, Vec<Vec<Label>>);
 
 /// The meshes the bitwise gate runs on, and why each one is here.
 ///
@@ -24,7 +24,7 @@ type Fixture = (String, HostMesh, Vec<Vec3>, Vec<Vec<Label>>);
 /// or the gate is a claim about the arrays that happen to be non-zero on a
 /// uniform box - which is most of them, but not `skew_corr`, not
 /// `non_orth_corr`, not `b_weights` and not a `weight` away from one half.
-fn fixtures() -> Vec<Fixture> {
+pub(crate) fn fixtures() -> Vec<Fixture> {
     let mut out = Vec::new();
     let cube = Vec3::new(0.25, 0.2, 0.3);
 
@@ -188,7 +188,7 @@ fn same_vectors(what: &str, a: &[Vec3], b: &[Vec3]) -> Option<String> {
 ///
 /// All sixteen of them, named, so that a failure says which quantity moved.
 /// Nothing here is allowed to be "close": see the gate below.
-fn differences(host: &HostMesh, dev: &HostMesh) -> Vec<String> {
+pub(crate) fn differences(host: &HostMesh, dev: &HostMesh) -> Vec<String> {
     let mut bad: Vec<String> = Vec::new();
     for (w, a, b) in [
         ("v", &host.v, &dev.v),
@@ -263,7 +263,7 @@ fn the_device_sweep_is_bitwise_identical_to_the_host_sweep() {
 /// The read-back is the TEST's, not the path's: a resident mesh downloads
 /// nothing but `v`, and the only way to ask whether the sixteen arrays on the
 /// device are the right bits is to look at them.
-fn read_back(g: &Gpu, gm: &crate::mesh::GpuMesh, shape: &HostMesh) -> HostMesh {
+pub(crate) fn read_back(g: &Gpu, gm: &crate::mesh::GpuMesh, shape: &HostMesh) -> HostMesh {
     fn cut<T: Clone>(mut v: Vec<T>, n: usize) -> Vec<T> {
         v.truncate(n);
         v

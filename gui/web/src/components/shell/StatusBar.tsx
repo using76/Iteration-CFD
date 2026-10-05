@@ -6,6 +6,7 @@ import { useMetaStore } from '../../state/metaStore'
 import { flattenProblems, useSessionStore } from '../../state/sessionStore'
 import { selectActiveTab, useUiStore } from '../../state/uiStore'
 import { Icon } from '../common/Icon'
+import { gpuProcessView, ownRunPids } from './gpuProcesses'
 
 const LANG_LABEL: Record<string, string> = { json: 'JSONC', rust: 'Rust', markdown: 'Markdown', python: 'Python', ini: 'TOML', yaml: 'YAML', typescript: 'TypeScript', javascript: 'JavaScript', cpp: 'C++', shell: 'Shell', plaintext: 'Plain Text', makefile: 'Makefile', html: 'HTML', css: 'CSS' }
 
@@ -13,6 +14,7 @@ export function StatusBar() {
   const t = useT()
   const hello = useSessionStore((s) => s.hello)
   const gpu = useSessionStore((s) => s.gpu)
+  const runs = useSessionStore((s) => s.runs)
   const connection = useSessionStore((s) => s.connection)
   const problems = useSessionStore((s) => s.problems)
   const rootName = useExplorerStore((s) => s.rootName)
@@ -38,6 +40,7 @@ export function StatusBar() {
   const gpuState = gpu?.state ?? 'absent'
   const gpuText = gpuState === 'ready' ? t('status.gpuReady') : gpuState === 'busy' ? t('status.gpuBusy') : gpuState === 'demo' ? t('status.gpuDemo') : t('status.gpuAbsent')
   const gpuMem = gpu && gpu.memTotalMB !== null ? ` ${formatGB(gpu.memUsedMB)}/${formatGB(gpu.memTotalMB)} GB` : ''
+  const view = useMemo(() => gpuProcessView(gpu, ownRunPids(runs), t), [gpu, runs, t])
   const connText = connection === 'online' ? t('conn.online') : connection === 'offline' ? t('conn.offline') : t('conn.connecting')
   const lang = tab?.kind === 'file' ? (LANG_LABEL[languageFor(tab.path)] ?? languageFor(tab.path)) : tab?.kind === 'diff' ? (LANG_LABEL[languageFor(tab.path)] ?? 'Diff') : tab?.kind === 'viewer' ? '3D' : tab?.kind === 'residuals' ? 'Chart' : ''
 
@@ -53,9 +56,10 @@ export function StatusBar() {
       <button className={`status-item clickable${counts.errors ? ' danger' : ''}`} onClick={() => setBottomTab('problems')} data-testid="status-problems" title={t('status.problems')}>
         <Icon name="error" size={13} /> {counts.errors} <Icon name="warning" size={13} /> {counts.warnings}
       </button>
-      <span className={`status-item ${gpuState === 'ready' ? 'ok' : gpuState === 'busy' ? 'warn' : gpuState === 'absent' ? 'danger' : ''}`} data-testid="status-gpu">
+      <span className={`status-item ${gpuState === 'ready' ? 'ok' : gpuState === 'busy' ? 'warn' : gpuState === 'absent' ? 'danger' : ''}`} data-testid="status-gpu" title={view.tooltip}>
         <span className={`dot ${gpuState === 'ready' ? 'dot-ok' : gpuState === 'busy' ? 'dot-warn' : gpuState === 'demo' ? 'dot-accent' : 'dot-danger'}`} /> {gpuText}
         {gpuMem}
+        {view.count !== null ? ` · ${view.count}` : null}
       </span>
       <span className="grow" />
       {cursor && (tab?.kind === 'file' || tab?.kind === 'diff') ? <span className="status-item">{t('status.lnCol', { line: cursor.line, col: cursor.col })}</span> : null}

@@ -1,0 +1,447 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "baselines": {
+  "b0-lhs": {
+   "file_sha256": null,
+   "source": "not measured"
+  },
+  "b0-template": {
+   "file_sha256": null,
+   "source": "measured fresh"
+  }
+ },
+ "campaigns": [
+  {
+   "ablate": [],
+   "bundle": {
+    "bytes": 22575,
+    "content_sha256": "df019a02cd0f5f7bc05e1c252a91b4389c77dbdf5a85ec0aeaf294a760cc3a26",
+    "file": "eval_full.json.gz",
+    "sha256": "77e1205da8fec7a2689c0a2b79e04975da98dea6e73e74845b85297689c0d1a1"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 9,
+    "ram_guarded": 0,
+    "reused": 0
+   },
+   "name": "full",
+   "qual": {
+    "configs": 9,
+    "edits": 8,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 14,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "full"
+  },
+  {
+   "ablate": [],
+   "bundle": {
+    "bytes": 5497,
+    "content_sha256": "5d9db76b05e4437bb3c77ca22d31eeca49b78ba701dbad44d87891d2c70997df",
+    "file": "eval_b0-template.json.gz",
+    "sha256": "acb126d7b3145380a44eaaa4e8cb03bccc7505a21b571b5007e259068695d4b6"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 5,
+    "ram_guarded": 0,
+    "reused": 0
+   },
+   "name": "b0-template",
+   "qual": {
+    "configs": 5,
+    "edits": 0,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 5,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "b0-template"
+  },
+  {
+   "ablate": [],
+   "bundle": {
+    "bytes": 13657,
+    "content_sha256": "c5cbdbc94ba4ca4528ee0bd53934b27e9c838316da1eae9a89f339cdd08a0a66",
+    "file": "eval_gdet-1.json.gz",
+    "sha256": "2b9d47d4f010eab3cdf5beaa092227fe04a5bf4dd31749712e71913ce6807ab9"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 4,
+    "ram_guarded": 0,
+    "reused": 0
+   },
+   "name": "gdet-1",
+   "qual": {
+    "configs": 4,
+    "edits": 2,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 6,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "full"
+  },
+  {
+   "ablate": [],
+   "bundle": {
+    "bytes": 13749,
+    "content_sha256": "2e907ecb48518bcfe0171c5085dd7b0414563df2e5d3c2b595c715c516bd32d9",
+    "file": "eval_gdet-2.json.gz",
+    "sha256": "baac975eb80bb67c4133bab3ce3699798ef6bafc278d437edb2c4f3e3334397b"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 4,
+    "ram_guarded": 0,
+    "reused": 0
+   },
+   "name": "gdet-2",
+   "qual": {
+    "configs": 4,
+    "edits": 2,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 6,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "full"
+  },
+  {
+   "ablate": [
+    "remedies"
+   ],
+   "bundle": {
+    "bytes": 17285,
+    "content_sha256": "a3822a10efe76f63d7c1cb98906a2e447e0dfe36b09939c8ba40a3556f02b41b",
+    "file": "eval_no-remedies.json.gz",
+    "sha256": "8f0c14f99f6c44f56c4e3602c02a0ce1e83ea470f5167df8d1910dbc84e6e1cf"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 0,
+    "ram_guarded": 0,
+    "reused": 5
+   },
+   "name": "no-remedies",
+   "qual": {
+    "configs": 5,
+    "edits": 0,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 10,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "full"
+  },
+  {
+   "ablate": [],
+   "bundle": {
+    "bytes": 23300,
+    "content_sha256": "7949f17e7955bb1cf162cd863d49b26d2ea668ae6f3a69bbcbf8d61055dd692b",
+    "file": "eval_no-optimiser.json.gz",
+    "sha256": "ad3e154d8536f9f25cdffff7536f01b4e396c1a09abc27f4e94062cf049ed574"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 0,
+    "ram_guarded": 0,
+    "reused": 9
+   },
+   "name": "no-optimiser",
+   "qual": {
+    "configs": 9,
+    "edits": 8,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 14,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "rules+prior"
+  },
+  {
+   "ablate": [],
+   "bundle": {
+    "bytes": 22353,
+    "content_sha256": "b0aa1414d644e3462bacc35669464cc82f91a06260bbea003fe096dc21270f92",
+    "file": "eval_rules.json.gz",
+    "sha256": "c7667125dc24415197219333ab6619abac1b4d46f5a1936055662d1bb2f30ee6"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 0,
+    "ram_guarded": 0,
+    "reused": 9
+   },
+   "name": "rules",
+   "qual": {
+    "configs": 9,
+    "edits": 8,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 14,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "rules"
+  },
+  {
+   "ablate": [],
+   "bundle": {
+    "bytes": 23360,
+    "content_sha256": "b925353dda5aa995a8c33170b874c3cf8fc48fa891d5504dc10c70a78e3a7bba",
+    "file": "eval_no-prior.json.gz",
+    "sha256": "8ae691d0139e25fbc496ffa6aab2d297e30ff0dfd314bac7b00f47e792268f78"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 0,
+    "ram_guarded": 0,
+    "reused": 9
+   },
+   "name": "no-prior",
+   "qual": {
+    "configs": 9,
+    "edits": 8,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 14,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "rules+opt"
+  },
+  {
+   "ablate": [
+    "preflight"
+   ],
+   "bundle": {
+    "bytes": 20173,
+    "content_sha256": "8937d1132307d736dad8947ebdeb21a780010317896b51f29d1b10ebf59b39ff",
+    "file": "eval_no-preflight.json.gz",
+    "sha256": "fc30e9e2d495dd201e17bd4182eb685502764029c9e6bc17c4f94d726b186626"
+   },
+   "counts": {
+    "guard_probes": 0,
+    "guarded": [],
+    "meshed": 0,
+    "ram_guarded": 0,
+    "reused": 9
+   },
+   "name": "no-preflight",
+   "qual": {
+    "configs": 9,
+    "edits": 8,
+    "edits_bad": 0,
+    "quality_bad": 0,
+    "sha_bad": 0
+   },
+   "replay": {
+    "decisions": 14,
+    "hook_decisions": 0,
+    "mismatches": [],
+    "ok": true
+   },
+   "system": "full"
+  }
+ ],
+ "fid": {
+  "b0-template": [
+   {
+    "attempt": 1,
+    "family": "B",
+    "feature_capture": null,
+    "feature_share": null,
+    "feature_tolerance": 0.5,
+    "geometry_id": "B-2-033",
+    "n_feature_edges": 0,
+    "n_snapped_to_edge": 0,
+    "p99_over_hf": 0.016423034385030056,
+    "pinned_frac": 0.0,
+    "sharp_edge_length_m": 0.0,
+    "summary": true
+   },
+   {
+    "attempt": 1,
+    "family": "E",
+    "feature_capture": null,
+    "feature_share": null,
+    "feature_tolerance": 0.5,
+    "geometry_id": "E-2-058",
+    "n_feature_edges": 0,
+    "n_snapped_to_edge": 0,
+    "p99_over_hf": 0.015852032305050796,
+    "pinned_frac": 0.0,
+    "sharp_edge_length_m": 0.0,
+    "summary": true
+   }
+  ],
+  "full": [
+   {
+    "attempt": 1,
+    "family": "D",
+    "feature_capture": 1.0,
+    "feature_share": 0.0,
+    "feature_tolerance": 0.0,
+    "geometry_id": "D-2-106",
+    "n_feature_edges": 0,
+    "n_snapped_to_edge": 0,
+    "p99_over_hf": 2.0058961506583933e-14,
+    "pinned_frac": 0.0,
+    "sharp_edge_length_m": 8.505600000000001,
+    "summary": true
+   },
+   {
+    "attempt": 1,
+    "family": "B",
+    "feature_capture": null,
+    "feature_share": null,
+    "feature_tolerance": 0.5,
+    "geometry_id": "B-2-033",
+    "n_feature_edges": 0,
+    "n_snapped_to_edge": 0,
+    "p99_over_hf": 0.061670956078826875,
+    "pinned_frac": 0.0,
+    "sharp_edge_length_m": 0.0,
+    "summary": true
+   },
+   {
+    "attempt": 1,
+    "family": "E",
+    "feature_capture": null,
+    "feature_share": null,
+    "feature_tolerance": 0.5,
+    "geometry_id": "E-2-058",
+    "n_feature_edges": 0,
+    "n_snapped_to_edge": 0,
+    "p99_over_hf": 0.03155488469830109,
+    "pinned_frac": 0.0,
+    "sharp_edge_length_m": 0.0,
+    "summary": true
+   }
+  ]
+ },
+ "gdet": {
+  "compare": {
+   "audit_a": {
+    "equal": 0,
+    "n": 0
+   },
+   "audit_b": {
+    "equal": 0,
+    "n": 0
+   },
+   "content_compared": 4,
+   "content_equal": 4,
+   "geometry_diffs": [],
+   "n_geometry_diffs": 0,
+   "n_row_diffs": 0,
+   "ok": true,
+   "row_diffs": [],
+   "rows_a": 4,
+   "rows_b": 4,
+   "rows_equal": true,
+   "schema": "autonomy-campaign-compare/1"
+  },
+  "vs_full": {
+   "content_compared": 4,
+   "content_equal": 4,
+   "n_row_diffs": 0,
+   "ok": true,
+   "row_diffs": [],
+   "rows": 4
+  }
+ },
+ "gdet_ids": [
+  "D-2-106",
+  "F-2-026"
+ ],
+ "meta": {
+  "families": {
+   "A": 1,
+   "B": 1,
+   "D": 1,
+   "E": 1,
+   "F": 1,
+   "G": 1
+  },
+  "fresh": {
+   "n_manifest": 180,
+   "scope": "reduced",
+   "seed": 2
+  },
+  "ids": [
+   "A-2-077",
+   "B-2-033",
+   "D-2-106",
+   "E-2-058",
+   "F-2-026",
+   "G-2-074"
+  ],
+  "n": 6,
+  "rehearsal": false,
+  "sha256": "3bd59a3dde90f1929ec61888b40b20cc40a598f6543805584e9ca7a88b675bb9",
+  "source": "test2",
+  "tier0_ids": [
+   "D-2-106"
+  ]
+ },
+ "plan_sha256": "60a05a97624b0875fbaa536804748d063bfea28a7a83ad90f63702256bdd1063",
+ "schema": "autonomy-eval-runs/1",
+ "seal_compare": null,
+ "static": {
+  "flag_literals": [],
+  "remedies_scan_ok": true,
+  "violations": []
+ }
+}

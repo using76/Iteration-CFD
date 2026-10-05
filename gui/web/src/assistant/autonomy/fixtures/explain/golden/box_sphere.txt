@@ -1,0 +1,10 @@
+# box_sphere: 1 attempt(s), split reported, campaign am15-fixture, terminal CAPABILITY-LIMITED
+
+## attempt 1: default, stage focus none
+decided: the config as given: no rule chose it
+why: no trigger
+edits: none
+predicted: none
+observed: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 12880, pinned 0, p99/h_f 0.00794265, max/h_f 0.00848947, BLC_8 0, BLC_full 0, 3.39397 s
+layers: sphere 0 layers, full 0, not delivered (min_thickness), capability-limited
+end RM-CAPABILITY-LIMITED [remedy refuse]: end the geometry: the layers are limited by the mesher's capability; because the mesher drops layers on a snapped wall by name, so no further trial is spent on them. RM-CAPABILITY-LIMITED: layer:min_thickness at stage layers (outcome.patches[sphere].layer_class = "min_thickness" == "min_thickness"; score.classify_drop (the layers.rs drop text)) on a snapped wall - the body does not qualify for R-PLANE: R-PLANE does not apply (features.py: commensurate False); SPEC-LIT §92.13 drops layers there, so sphere are CAPABILITY-LIMITED and no more trials are spent on their layers (cite: SPEC-LIT §92.13 (layers on a snapped wall are attempted, retreated and given up by name); docs/15 §C L2, §I-1: only AM-L changes this)

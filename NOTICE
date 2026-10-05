@@ -6,6 +6,13 @@ Developed in collaboration with, and with contributions from,
 
 Licensed under the Prosperity Public License 3.0.0. See LICENSE.
 
+Exception: tools/promo/scene.py and tools/promo/sim_geom.py are Blender Python
+API scripts and are licensed under the GNU General Public License, version 2
+or (at your option) any later version - see tools/promo/LICENSE-NOTICE.md and
+tools/promo/COPYING. They run as separate programs inside Blender and are
+aggregated with meteor-cfd, not linked into it; everything else stays under
+the Prosperity licence.
+
 Noncommercial use is free: personal study, hobby and amateur work, and use by
 any charitable organisation, educational institution, public safety or health
 organisation, environmental protection organisation or government institution.
@@ -25,7 +32,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 207 source files under
+line "No GPL-licensed source was consulted." All 227 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -208,8 +215,12 @@ Amagine3D (https://github.com/amagine-ai/Amagine3D, commit e608dc6)
 Reference material
 ================================================================================
 
-Neither of these is redistributed in this repository. `reference/` is git-
-ignored and must be cloned separately; nothing in the build depends on it.
+Neither of these is redistributed in this repository. What `reference/` DOES
+carry is the answer keys `ofgpu-validate` is held against - small tables of
+published numbers, each named in `reference/PROVENANCE.md` with its source,
+DOI or URL, licence and SHA-256; those files are tracked. Everything else
+under `reference/` is git-ignored and must be cloned separately; nothing in
+the build depends on it.
 
 Fire Dynamics Simulator (FDS)
   Developed by the National Institute of Standards and Technology (NIST).

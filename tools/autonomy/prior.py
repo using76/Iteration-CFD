@@ -14,16 +14,22 @@ the winning path's refinement and snap remedies are re-applied to this
 geometry's L1 config through remedies.py's own functions, guards and _commit -
 a wall level never drops below this geometry's y+ floor, the R-PLANE path is
 left alone, and the layers block is never touched.  The prior abstains by name
-(PR-FAR, PR-KEEP, PR-NOEDIT) when the neighbours are too far, needed nothing,
-or the path changes nothing here.  G-PRIOR (docs/15 §F) measures, on the tuning
+(PR-FAR, PR-KEEP, PR-NOEDIT, PR-PARTIAL) when the neighbours are too far,
+needed nothing, or the path changes nothing here.  Since 2026-09-26 the bank is
+read under README section D's feature-edge rule, only neighbours of the query's
+edge class (with a sharp edge or without) vote, and a path that applies only in
+part abstains (PR-PARTIAL).  G-PRIOR (docs/15 §F) measures, on the tuning
 split and leave-one-geometry-out, whether the real prior's attempt-1 pass rate
 beats rules-only's and a shuffled-fingerprint control; if either condition
 fails the model ships DISABLED and records PR-DISABLED on every geometry.
+The current gate's report and the shipped model live in prior/aml/ (the AM-L
+tuning campaign's re-gate); prior/ keeps the AM-13 / PRIOR-FIX gate as the
+record of that run, and its bundles are optimise.py's SOURCES.
 
     python tools/autonomy/prior.py --selftest
     python tools/autonomy/prior.py --plan --rules DIR
     python tools/autonomy/prior.py --gate --rules DIR --work DIR
-    python tools/autonomy/prior.py --check
+    python tools/autonomy/prior.py --check [--report-dir prior/aml|prior]
 """
 import argparse
 import copy
@@ -53,6 +59,7 @@ import explain
 import preflight
 import remedies
 import rules
+import score
 import schema
 import split
 
@@ -61,7 +68,11 @@ class PriorError(ValueError):
     """A refused request or a harness inconsistency - never a verdict."""
 
 
-REPORT_DIR = os.path.join(HERE, "prior")
+REPORT_DIR = os.path.join(HERE, "prior", "aml")   # the current gate: the AM-L tuning
+# campaign's report and the SHIPPED model (_MODEL follows it).  AM13_DIR is the
+# AM-13 / PRIOR-FIX gate of 2026-09-25/26, kept as the record of that run;
+# optimise.py's SOURCES read its bundles.
+AM13_DIR = os.path.join(HERE, "prior")
 MODEL_NAME = "prior_model.json"
 REPORT_NAME = "G-PRIOR.json"
 REPORT_MD = "G-PRIOR.md"
@@ -76,8 +87,11 @@ AUDIT_OFF = 2 ** 40                        # audit_mod for the evaluation rounds
 STD_MIN = 1e-12                            # a feature whose pool std is not above this is dropped
 TRANSFER_STAGES = ("octree", "castellate", "snap")
 TRANSFER = tuple(r["id"] for r in remedies.REMEDIES if r["stage"] in TRANSFER_STAGES)
-PR_IDS = ("PR-KNN", "PR-KEEP", "PR-FAR", "PR-NOEDIT", "PR-DISABLED")
+PR_IDS = ("PR-KNN", "PR-KEEP", "PR-FAR", "PR-NOEDIT", "PR-PARTIAL",
+          "PR-DISABLED")
 VARIANTS = ("real", "shuffle-0", "shuffle-1", "shuffle-2")
+EDGE_CLASSES = ("sharp", "smooth")         # the 2026-09-26 feature-edge rule
+FOCUS_FAMILY = "B"  # the family the held-out G-OPT miss named; the report states it
 FEATURES = ("log10_lmax", "mid_over_lmax", "min_over_lmax", "log10_area_over_lmax2",
             "volume_over_bbox", "log10_1p_sharp_over_lmax", "log10_r5_over_lmax",
             "log10_r50_over_lmax", "log10_r95_over_lmax", "curv_missing",
@@ -92,6 +106,10 @@ CHECK_SCHEMA = "autonomy-prior-check/1"
 DECISION_SCHEMA = "autonomy-prior-decision/1"
 HEADER = baseline.HEADER                   # the "$comment" of every JSON it writes
 _MODEL = {"path": os.path.join(REPORT_DIR, MODEL_NAME), "v": None, "key": None}
+# the user's ship decision over the gate's: None leaves the gate's enabled flag in force
+USER_SHIP = {"enabled": False, "date": "2026-10-03",
+             "why": "its G-PRIOR pass was vacuous: real equals rules on every "
+                    "tuning geometry"}
 _REMEDY_BY_ID = {r["id"]: r for r in remedies.REMEDIES}
 
 
@@ -124,7 +142,7 @@ EXCLUDED = {
 DEPARTURES = (
     "\"leave-one-group-out\" and \"leave-one-geometry-out\" are the same fold here: each "
     "geometry is one group and contributes at most one bank entry (its earliest attempt "
-    "with no F flag)",
+    "with no F flag, read under README section D's rule of 2026-09-26)",
     "docs/15 §C L3 says the prior \"transfers only refinement and snap knobs\"; the tree "
     "transfers them as a remedy PATH - the refinement and snap remedies (stages octree, "
     "castellate, snap) the neighbour needed before it passed are re-applied to this "
@@ -141,6 +159,19 @@ DEPARTURES = (
     "definition); strict passes are reported, not gated. A geometry with no attempt-1 row "
     "(SURFACE-OPEN, SURFACE-REFUSED, REFUSED) is a first-attempt failure in every "
     "variant, as MFR counts it",
+    "the bank is read under README section D's rule of 2026-09-26: an attempt of a "
+    "committed rules campaign that passed with feature_tolerance 0 on a body with "
+    "sharp edges off the R-PLANE path is an F3e failure, read the way rescore.py "
+    "reads it (score.feature_capture on the rebuilt config), so it is not a bank entry",
+    "only bank entries of the query's edge class vote (sharp: a sharp edge length above "
+    "zero; smooth: none), because the rule splits the action space there (RM-SNAP-FT, "
+    "the optimiser's box, WL-SHARP-FT0); too few of them is PR-FAR",
+    "a winning path is re-applied only whole: when one of its remedies is refused by "
+    "its own guard here, the rest is a config no neighbour passed with, and the prior "
+    "abstains PR-PARTIAL",
+    "the gate's report and the shipped model live in prior/aml/ since 2026-10-02 "
+    "(the AM-L tuning campaign); prior/ keeps the AM-13 and PRIOR-FIX gate as the "
+    "record of that run and the bundles optimise.py's SOURCES read",
 )
 
 
@@ -267,41 +298,96 @@ def bundle_sha(bundle):
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
-def bank_from(bundle):
-    """One entry per passing geometry: its earliest passing attempt and the
-    transferred remedies it needed on the way (layer-stage remedies dropped)."""
+def edge_class(fp):
+    """'sharp' when the fingerprint has a sharp edge (sharp_edge_length_m > 0), else
+    'smooth': the 2026-09-26 rule splits the action space there (RM-SNAP-FT, the
+    optimiser's box, WL-SHARP-FT0)."""
+    return "sharp" if (fp.get("sharp_edge_length_m") or 0) > 0 else "smooth"
+
+
+def rule_failure(outcome, config, fp):
+    """True when the outcome fails under README section D (2026-09-26): its own failure flag,
+    or a pass meshed with feature_tolerance 0 on a body with sharp edges off the R-PLANE path
+    (F3e) - a row scored before the rule is read the way rescore.py reads it."""
+    if outcome is None or outcome["failure"] is not False:
+        return True
+    ft = (config.get("snap") or {}).get(
+        "feature_tolerance", preflight.MESHER_DEFAULTS["/snap/feature_tolerance"])
+    _fc, f3e, _note = score.feature_capture(
+        fp["sharp_edge_length_m"], preflight.plane_path(config, fp), ft, None)
+    return f3e is True
+
+
+def rule_passes(bundle):
+    """(geometry_id, attempt) -> whether the attempt passes under the 2026-09-26 rule."""
+    import optimise   # optimise imports this module at its top: no top-level import
+    gates, knobs = schema.load_gates(), schema.load_knobs()
+    mrows = {r["geometry_id"]: r for r in campaign.load_manifest(
+        "tuning", "rules", ids=bundle["campaign"]["geometry_ids"])}
+    raw = {(r["geometry_id"], r["attempt"]): r for r in bundle["attempts"]}
+    out = {}
+    try:
+        for tr in optimise.rows_from(bundle, "prior bank", mrows, gates, knobs):
+            key = (tr["geometry_id"], tr["attempt"])
+            out[key] = not rule_failure(raw[key]["outcome"], tr["config"],
+                                        tr["fingerprint"])
+    except optimise.OptError as e:
+        raise PriorError("reconstruct: %s" % e)
+    return out
+
+
+def bank_from(bundle, transfer=TRANSFER):
+    """One entry per passing geometry: its earliest passing attempt under the
+    2026-09-26 rule, and the transferred remedies it needed on the way
+    (layer-stage remedies dropped)."""
     ends = {g["geometry_id"]: g for g in bundle["geometries"]}
     by = {}
     for r in bundle["attempts"]:
         by.setdefault(r["geometry_id"], {})[r["attempt"]] = r
-    out = []
-    for gid in sorted(by):
+    for gid in sorted(by):                  # completeness before anything else is read
         att = by[gid]
         want = list(range(1, max(att) + 1))
         if sorted(att) != want:
             raise PriorError("incomplete: %s carries attempts %s, not 1..%d"
                              % (gid, sorted(att), max(att)))
+        if ends.get(gid) is None:
+            raise PriorError("incomplete: no end record for %s" % gid)
+    ok = rule_passes(bundle)
+    out = []
+    for gid in sorted(by):
+        att = by[gid]
         p = None
-        for a in want:
-            if att[a]["outcome"]["failure"] is False:
+        for a in sorted(att):
+            if ok[(gid, a)]:
                 p = a
                 break
         if p is None:
             continue
-        end = ends.get(gid)
-        if end is None:
-            raise PriorError("incomplete: no end record for %s" % gid)
+        end = ends[gid]
         out.append({"geometry_id": gid, "family": end["family"], "attempt": p,
                     "path": [att[a]["rule_id"] for a in range(2, p + 1)
                              if att[a]["decided_by"] == "remedy"
-                             and att[a]["rule_id"] in TRANSFER],
+                             and att[a]["rule_id"] in transfer],
                     "fingerprint_sha256":
-                        schema.canonical_sha256(end["fingerprint"])})
+                        schema.canonical_sha256(end["fingerprint"]),
+                    "edge_class": edge_class(end["fingerprint"])})
     return out
 
 
-def build(bundle):
-    """The model: the pool's scaler and abstention distance, the bank with z."""
+def build(bundle, transfer=None):
+    """The model: the pool's scaler and abstention distance, the bank with z.
+
+    transfer None means the module's TRANSFER; a list rebuilds the bank under a
+    recorded transfer list (check's model rebuild) - an id that is not a
+    remedy-table id is a PriorError naming it."""
+    if transfer is None:
+        transfer = TRANSFER
+    else:
+        transfer = tuple(transfer)
+        unknown = [t for t in transfer if t not in _REMEDY_BY_ID]
+        if unknown:
+            raise PriorError("transfer: %s is not a remedy-table id"
+                             % ", ".join(unknown))
     pool = [g for g in bundle["geometries"] if g.get("fingerprint") is not None]
     pool.sort(key=lambda g: g["geometry_id"])
     if len(pool) < 2:
@@ -311,7 +397,7 @@ def build(bundle):
     d_abs = d_abstain([standardise(features(g["fingerprint"]), scaler)
                        for g in pool])
     bank = []
-    for e in bank_from(bundle):
+    for e in bank_from(bundle, transfer):
         e = dict(e)
         e["z"] = standardise(features(_pool_fp(pool, e["geometry_id"])),
                              scaler).tolist()
@@ -321,7 +407,7 @@ def build(bundle):
             "features": list(FEATURES),
             "kept": [f for f, k in zip(FEATURES, scaler["kept"]) if k],
             "scaler": scaler, "d_abstain": d_abs,
-            "d_abstain_pct": D_ABSTAIN_PCT, "transfer": list(TRANSFER),
+            "d_abstain_pct": D_ABSTAIN_PCT, "transfer": list(transfer),
             "null_policy": list(NULL_POLICY), "excluded": dict(EXCLUDED),
             "pool_n": len(pool), "bank_n": len(bank), "bank": bank,
             "source": {"campaign_id": head["campaign_id"],
@@ -388,15 +474,17 @@ def _record(rid, verdict, trigger, inputs, formula, edits, cite, message,
     return rec
 
 
-FORMULA = ("k-NN (k = 3) on the RMS distance of standardised fingerprint "
-           "features; weight 1/(d + 1e-6); the remedy path with the largest summed "
-           "weight wins, ties to the nearest; its refinement and snap remedies are "
-           "re-applied through remedies.py")
+FORMULA = ("k-NN (k = 3) on the RMS distance of standardised fingerprint features, "
+           "among the passing tuning geometries of the query's edge class (with a "
+           "sharp edge, or without one); weight 1/(d + 1e-6); the remedy path with "
+           "the largest summed weight wins, ties to the nearest; its refinement and "
+           "snap remedies are re-applied through remedies.py, and only whole: a path "
+           "that applies in part abstains")
 CITE = ("docs/15 §C L3 prior, §F G-PRIOR; tools/autonomy/remedies.py "
         "(the transferred refinement and snap remedies)")
 
 
-def _inputs(v, skipped, model, bank_n):
+def _inputs(v, skipped, model, bank_n, edge_cls, class_n):
     return [{"name": "neighbours", "value": list(v["neighbours"]), "unit": ""},
             {"name": "distances", "value": [float(d) for d in v["distances"]],
              "unit": "1"},
@@ -410,6 +498,8 @@ def _inputs(v, skipped, model, bank_n):
             {"name": "d_abstain", "value": float(model["d_abstain"]), "unit": "1"},
             {"name": "k", "value": int(model["k"]), "unit": "1"},
             {"name": "bank_n", "value": int(bank_n), "unit": "1"},
+            {"name": "edge_class", "value": edge_cls, "unit": ""},
+            {"name": "class_n", "value": int(class_n), "unit": "1"},
             {"name": "model_sha256", "value": model_sha(model), "unit": ""}]
 
 
@@ -430,7 +520,13 @@ def _nb_text(v):
 
 def decide(zq, bank, model, ctx, gates, knobs):
     """One prior decision on one geometry: the vote, the config, the record."""
-    v = vote(zq, bank, model["d_abstain"], model["k"])
+    for e in bank:
+        if "edge_class" not in e:
+            raise PriorError("the model's bank carries no edge class (built before "
+                             "2026-09-26): run prior.py --gate")
+    cls = edge_class(ctx["fingerprint"])
+    same = [e for e in bank if e["edge_class"] == cls]
+    v = vote(zq, same, model["d_abstain"], model["k"])
     skipped = []
     after = None
     if v["kind"] in ("few", "far"):
@@ -439,61 +535,86 @@ def decide(zq, bank, model, ctx, gates, knobs):
         rid = "PR-KEEP"
     else:
         after, skipped = apply_path(ctx["config"], v["winner"], ctx, gates, knobs)
-        rid = "PR-KNN" if after is not None else "PR-NOEDIT"
+        if after is None:
+            rid = "PR-NOEDIT"
+        elif skipped:
+            rid, after = "PR-PARTIAL", None
+        else:
+            rid = "PR-KNN"
     verdict = "apply" if after is not None else "abstain"
     edits = rules.diff_edits(ctx["config"], after) if after is not None else []
     if rid == "PR-KNN":
-        msg = ("PR-KNN: the %d nearest passing tuning geometries (%s) lie within "
-               "d_abstain %s; their path %s won the vote and is re-applied here: %s"
-               % (model["k"], _nb_text(v), explain.fmt(model["d_abstain"]),
+        msg = ("PR-KNN: the %d nearest passing tuning geometries of edge class %s "
+               "(%s) lie within d_abstain %s; their path %s won the vote and is "
+               "re-applied here: %s"
+               % (model["k"], cls, _nb_text(v), explain.fmt(model["d_abstain"]),
                   " + ".join(v["winner"]), explain.edits_text(edits)))
     elif rid == "PR-KEEP":
-        msg = ("PR-KEEP: the %d nearest passing tuning geometries (%s) passed with "
-               "the setup rules' own config; attempt 1 stays the rules' config"
-               % (model["k"], _nb_text(v)))
+        msg = ("PR-KEEP: the %d nearest passing tuning geometries of edge class %s "
+               "(%s) passed with the setup rules' own config; attempt 1 stays the "
+               "rules' config" % (model["k"], cls, _nb_text(v)))
+    elif rid == "PR-PARTIAL":
+        msg = ("PR-PARTIAL: the neighbours' path %s applies only in part here (%s); "
+               "a part of a path is a config no neighbour passed with, so attempt 1 "
+               "stays the rules' config"
+               % (" + ".join(v["winner"]),
+                  "; ".join("%s: %s" % (s["rule_id"], s["why"]) for s in skipped)))
     elif v["kind"] == "few":
-        msg = ("PR-FAR: the bank holds %d passing tuning geometries, fewer than "
-               "k = %d; the prior abstains" % (len(bank), model["k"]))
+        msg = ("PR-FAR: the bank holds %d passing tuning geometries of edge class "
+               "%s, fewer than k = %d; the prior abstains"
+               % (len(same), cls, model["k"]))
     elif v["kind"] == "far":
-        msg = ("PR-FAR: the nearest passing tuning geometry %s is at %s > d_abstain "
-               "%s; the prior abstains" % (v["neighbours"][0],
-                                           explain.fmt(v["nearest"]),
-                                           explain.fmt(model["d_abstain"])))
+        msg = ("PR-FAR: the nearest passing tuning geometry of edge class %s, %s, "
+               "is at %s > d_abstain %s; the prior abstains"
+               % (cls, v["neighbours"][0], explain.fmt(v["nearest"]),
+                  explain.fmt(model["d_abstain"])))
     else:
         msg = ("PR-NOEDIT: the neighbours' path %s changes nothing here (%s); "
                "attempt 1 stays the rules' config"
                % (" + ".join(v["winner"]),
                   "; ".join("%s: %s" % (s["rule_id"] or "R-PLANE", s["why"])
                             for s in skipped)))
-    rec = _record(rid, verdict, _trigger(v, model), _inputs(v, skipped, model,
-                                                            len(bank)),
+    rec = _record(rid, verdict, _trigger(v, model),
+                  _inputs(v, skipped, model, len(bank), cls, len(same)),
                   FORMULA, edits, CITE, msg, v["nearest"] or 0.0)
     return {"schema": DECISION_SCHEMA, "geometry_id": ctx["geometry_id"],
             "verdict": verdict, "rule_id": rid, "config": after, "edits": edits,
             "record": rec, "vote": v, "skipped": skipped}
 
 
-def disabled_decision(model):
-    """The abstain decision recorded on every geometry when the prior ships disabled."""
+def disabled_decision(model, user=None):
+    """The abstain decision recorded on every geometry when the prior ships
+    disabled; `user` (USER_SHIP) records the user's ship decision over the
+    gate's enabled flag."""
     g = model["gate"]
-    msg = ("PR-DISABLED: the prior ships disabled (G-PRIOR %s: attempt-1 passes "
-           "rules %s, real %s, shuffled mean %s of %s); attempt 1 stays the rules' "
-           "config" % (g["verdict"], explain.fmt(g["rules_pass"]),
-                       explain.fmt(g["real_pass"]),
-                       explain.fmt(g["shuffled_mean_pass"]), explain.fmt(g["n"])))
+    inputs = [{"name": "verdict", "value": g["verdict"], "unit": ""},
+              {"name": "rules_pass", "value": g["rules_pass"], "unit": ""},
+              {"name": "real_pass", "value": g["real_pass"], "unit": ""},
+              {"name": "shuffled_mean_pass",
+               "value": g["shuffled_mean_pass"], "unit": ""},
+              {"name": "n", "value": g["n"], "unit": ""},
+              {"name": "model_sha256", "value": model_sha(model), "unit": ""}]
+    head = "PR-DISABLED: the prior ships disabled"
+    formula = ("the gate did not earn the prior its place, so the setup rules "
+               "decide attempt one")
+    tail = ""
+    if user is not None:
+        head += " by the user's decision"
+        inputs.append({"name": "user_disabled", "value": user["date"],
+                       "unit": ""})
+        formula = ("the user disabled the prior, so the setup rules decide "
+                   "attempt one")
+        tail = "; %s" % user["why"]
+    msg = ("%s (G-PRIOR %s: attempt-1 passes rules %s, real %s, shuffled mean "
+           "%s of %s%s); attempt 1 stays the rules' config"
+           % (head, g["verdict"], explain.fmt(g["rules_pass"]),
+              explain.fmt(g["real_pass"]), explain.fmt(g["shuffled_mean_pass"]),
+              explain.fmt(g["n"]), tail))
     rec = _record("PR-DISABLED", "abstain",
                   {"observable": "prior.enabled", "value": False, "threshold": False,
                    "op": "==",
                    "source": "prior/G-PRIOR.json (docs/15 §F G-PRIOR)"},
-                  [{"name": "verdict", "value": g["verdict"], "unit": ""},
-                   {"name": "rules_pass", "value": g["rules_pass"], "unit": ""},
-                   {"name": "real_pass", "value": g["real_pass"], "unit": ""},
-                   {"name": "shuffled_mean_pass",
-                    "value": g["shuffled_mean_pass"], "unit": ""},
-                   {"name": "n", "value": g["n"], "unit": ""},
-                   {"name": "model_sha256", "value": model_sha(model), "unit": ""}],
-                  "the gate did not earn the prior its place, so the setup rules "
-                  "decide attempt one", [],
+                  inputs, formula, [],
                   "docs/15 §F G-PRIOR; tools/autonomy/prior.py --gate", msg, 0.0)
     return {"schema": DECISION_SCHEMA, "geometry_id": None, "verdict": "abstain",
             "rule_id": "PR-DISABLED", "config": None, "edits": [], "record": rec,
@@ -538,8 +659,17 @@ def make_hook(model):
 
 
 def attempt1(ctx):
-    """The hook campaign.py's HOOKS names; the model comes from prior_model.json."""
-    return make_hook(load_model())(ctx)
+    """The hook campaign.py's HOOKS names; the model comes from prior_model.json.
+
+    While USER_SHIP disables the shipped prior, an ENABLED model still records
+    PR-DISABLED here - "by the user's decision"; make_hook itself is unchanged
+    (the gate's own seam and the live group use it)."""
+    model = load_model()
+    if model.get("enabled") and USER_SHIP is not None \
+            and not USER_SHIP["enabled"]:
+        d = disabled_decision(model, USER_SHIP)
+        return {"verdict": d["verdict"], "record": d["record"]}
+    return make_hook(model)(ctx)
 
 
 def decide_all(bundle, model, gates, knobs):
@@ -561,7 +691,10 @@ def decide_all(bundle, model, gates, knobs):
             continue
         fp = end["fingerprint"]
         s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
-                        campaign.case_rel(gid), gid, gates=gates, knobs=knobs)
+                        campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
+                        ft_radius=rules.ft_radius_of(bundle.get("records") or []),
+                        win_2to1=rules.win_2to1_of(bundle.get("records") or []),
+                        glb=rules.glb_of(bundle.get("records") or []))
         if s["refused"]:
             raise PriorError("rules.setup refuses %s: %s"
                              % (gid, ", ".join(s["refused"])))
@@ -898,6 +1031,24 @@ def _systems_and_report(head, bundle, model, systems, geom_out, fams, n, rounds,
     row["shuffled_mean"] = sum(row[v] for v in VARIANTS
                                if v.startswith("shuffle-")) / 3.0
     rep_fams["all"] = row
+    per_fam_dec, elig = {}, {g["geometry_id"]: g["eligible"] for g in geom_out}
+    for g in geom_out:
+        if not g["eligible"]:
+            continue
+        fd = per_fam_dec.setdefault(g["family"], {v: {} for v in VARIANTS})
+        for name in VARIANTS:
+            rid = g[name]["rule_id"]
+            fd[name][rid] = fd[name].get(rid, 0) + 1
+    per_fam_dec = {fam: per_fam_dec[fam] for fam in sorted(per_fam_dec)}
+    focus = None
+    if FOCUS_FAMILY in per_fam_dec:
+        ends = {g["geometry_id"]: g for g in bundle["geometries"]}
+        ec = {"sharp": 0, "smooth": 0}
+        for gid in fams[FOCUS_FAMILY]:
+            if elig[gid]:
+                ec[edge_class(ends[gid]["fingerprint"])] += 1
+        focus = dict(rep_fams[FOCUS_FAMILY],
+                     decisions=per_fam_dec[FOCUS_FAMILY], edge_classes=ec)
     pool = [g for g in bundle["geometries"] if g.get("fingerprint") is not None]
     null_counts = {}
     for f in CURV + ("inner_thickness_m", "outer_gap_m", "lattice_base_size_m"):
@@ -921,7 +1072,9 @@ def _systems_and_report(head, bundle, model, systems, geom_out, fams, n, rounds,
                            if x != "pass_gids"} for k in systems},
            "shuffled_mean_pass": shuffled_mean_pass,
            "shuffled_mean_rate": shuffled_mean_pass / n,
-           "per_family": rep_fams, "rounds": [], "rules_campaign": {},
+           "per_family": rep_fams,
+           "per_family_decisions": per_fam_dec, "focus": focus,
+           "rounds": [], "rules_campaign": {},
            "geometries": geom_out, "departures": list(DEPARTURES)}
     return _report_and_bundles(head, bundle, shipped, rep, round_infos,
                                report_dir, write)
@@ -994,14 +1147,16 @@ def report_md(rep):
     a.append("")
     a.append("## Decisions")
     a.append("")
-    a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | reused | ran | refused |")
-    a.append("|---|---|---|---|---|---|---|---|")
+    a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | PR-PARTIAL | "
+             "reused | ran | refused |")
+    a.append("|---|---|---|---|---|---|---|---|---|")
     for name in VARIANTS:
         s = rep["systems"][name]
         dec, st = s["decisions"], s["statuses"]
-        a.append("| %s | %d | %d | %d | %d | %d | %d | %d |"
+        a.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d |"
                  % (name, dec.get("PR-KNN", 0), dec.get("PR-KEEP", 0),
                     dec.get("PR-FAR", 0), dec.get("PR-NOEDIT", 0),
+                    dec.get("PR-PARTIAL", 0),
                     st.get("reused", 0), st.get("ran", 0), st.get("refused", 0)))
     a.append("")
     a.append("## Per family")
@@ -1013,6 +1168,28 @@ def report_md(rep):
                  % (row["family"], row["n"], row["rules"], row["real"],
                     row["shuffle-0"], row["shuffle-1"], row["shuffle-2"],
                     _f3(row["shuffled_mean"])))
+    a.append("")
+    a.append("## Family %s" % FOCUS_FAMILY)
+    a.append("")
+    focus = rep["focus"]
+    if focus is None:
+        a.append("- family %s is not in this campaign." % FOCUS_FAMILY)
+    else:
+        a.append("- n %d (%d with sharp edges, %d without, of the eligible); "
+                 "attempt-1 passes rules %d, real %d, shuffled %d, %d, %d (mean %s)"
+                 % (focus["n"], focus["edge_classes"]["sharp"],
+                    focus["edge_classes"]["smooth"], focus["rules"],
+                    focus["real"], focus["shuffle-0"], focus["shuffle-1"],
+                    focus["shuffle-2"], _f3(focus["shuffled_mean"])))
+        a.append("")
+        a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | PR-PARTIAL |")
+        a.append("|---|---|---|---|---|---|")
+        for name in VARIANTS:
+            dec = focus["decisions"][name]
+            a.append("| %s | %d | %d | %d | %d | %d |"
+                     % (name, dec.get("PR-KNN", 0), dec.get("PR-KEEP", 0),
+                        dec.get("PR-FAR", 0), dec.get("PR-NOEDIT", 0),
+                        dec.get("PR-PARTIAL", 0)))
     a.append("")
     a.append("## Null policy")
     a.append("")
@@ -1113,8 +1290,12 @@ def _check_models(rep, pm, bpath, mp, items, report_dir, rp_path):
     else:
         why_r = bpath
         try:
-            rebuilt = model_sha(build(baseline.read_bundle(bpath)))
-        except (PriorError, baseline.BaselineError, ValueError, KeyError) as e:
+            # the recorded transfer list: a gate written under an older table
+            # rebuilds under its own ids (a non-table id fails by name)
+            rebuilt = model_sha(build(baseline.read_bundle(bpath),
+                                      transfer=(pm.get("transfer") or [])))
+        except (PriorError, baseline.BaselineError, ValueError, KeyError,
+                zlib.error, EOFError) as e:
             rebuilt, why_r = None, "%s: %s" % (bpath, e)
         add("model rebuild", rebuilt is not None and rebuilt == msha,
             msha if rebuilt is not None else why_r)
@@ -1139,7 +1320,8 @@ class _ArgParser(argparse.ArgumentParser):
 
 
 def _counts_line(variant, decisions, measured):
-    dec = {"PR-KNN": 0, "PR-KEEP": 0, "PR-FAR": 0, "PR-NOEDIT": 0}
+    dec = {"PR-KNN": 0, "PR-KEEP": 0, "PR-FAR": 0, "PR-NOEDIT": 0,
+           "PR-PARTIAL": 0}
     m = w = 0
     for d in decisions:
         if not d["eligible"]:
@@ -1153,9 +1335,9 @@ def _counts_line(variant, decisions, measured):
             else:
                 w += 1
     return ("[prior] %s: PR-KNN %d, PR-KEEP %d, PR-FAR %d, PR-NOEDIT %d, "
-            "measured %d, new %d"
+            "PR-PARTIAL %d, measured %d, new %d"
             % (variant, dec["PR-KNN"], dec["PR-KEEP"], dec["PR-FAR"],
-               dec["PR-NOEDIT"], m, w))
+               dec["PR-NOEDIT"], dec["PR-PARTIAL"], m, w))
 
 
 def _plan_lines(model, decisions, measured, rounds):
@@ -1197,12 +1379,19 @@ def _cli_run(a):
     rep = gate(a.rules, a.work, streams=a.streams, report_dir=a.report_dir,
                binary=a.binary, quiet=False)
     s = rep["systems"]
-    print("G-PRIOR %s: attempt-1 passes rules %d/%d, real %d/%d, shuffled %d, %d, "
-          "%d (mean %.3f); the prior ships %s"
-          % (rep["verdict"], s["rules"]["pass"], rep["n_tuning"],
-             s["real"]["pass"], rep["n_tuning"], s["shuffle-0"]["pass"],
-             s["shuffle-1"]["pass"], s["shuffle-2"]["pass"],
-             rep["shuffled_mean_pass"], "enabled" if rep["enabled"] else "DISABLED"))
+    line = ("G-PRIOR %s: attempt-1 passes rules %d/%d, real %d/%d, shuffled %d, "
+            "%d, %d (mean %.3f); the prior ships %s"
+            % (rep["verdict"], s["rules"]["pass"], rep["n_tuning"],
+               s["real"]["pass"], rep["n_tuning"], s["shuffle-0"]["pass"],
+               s["shuffle-1"]["pass"], s["shuffle-2"]["pass"],
+               rep["shuffled_mean_pass"],
+               "enabled" if rep["enabled"] else "DISABLED"))
+    if rep["focus"] is not None:
+        line += ("; family %s: rules %d, real %d, shuffled %d, %d, %d"
+                 % (FOCUS_FAMILY, rep["focus"]["rules"], rep["focus"]["real"],
+                    rep["focus"]["shuffle-0"], rep["focus"]["shuffle-1"],
+                    rep["focus"]["shuffle-2"]))
+    print(line)
     return 0
 
 
@@ -1220,7 +1409,9 @@ def main(argv=None):
     ap.add_argument("--work", help="the evaluation rounds' work directory")
     ap.add_argument("--streams", type=int, default=6)
     ap.add_argument("--binary", default=None)
-    ap.add_argument("--report-dir", dest="report_dir", default=REPORT_DIR)
+    ap.add_argument("--report-dir", dest="report_dir", default=REPORT_DIR,
+                    help="the report directory (default prior/aml; the AM-13 "
+                         "record is prior)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
@@ -1243,7 +1434,7 @@ IDS8 = ("D-1-010", "G-1-016", "F-1-009", "D-1-077", "F-1-011", "A-1-000",
 
 def _oracle_attempt(kind_of):
     def attempt(c, gctx, config, a, n_leaves):
-        kind = kind_of(config)
+        kind = kind_of(config, gctx)
         t_start = schema._now_iso()
         oc = remedies.synthetic_outcome(kind, config, gctx["fp"], gctx["flow"],
                                         c.gates)
@@ -1257,10 +1448,48 @@ def _oracle_attempt(kind_of):
     return attempt
 
 
-_ft_oracle = _oracle_attempt(
-    lambda config: "pass"
-    if remedies._get(config, "/snap/feature_tolerance") == 0 else "F3a")
-_pass_oracle = _oracle_attempt(lambda config: "pass")
+_L1_WALL = {}
+
+
+def _l1_wall(gctx):
+    """The setup rules' wall level for this geometry (the oracles' reference), cached."""
+    gid = gctx["gid"]
+    if gid not in _L1_WALL:
+        s = rules.setup(gctx["mrow"], gctx["fp"], campaign.stl_rel(gid),
+                        campaign.case_rel(gid), gid)
+        _L1_WALL[gid] = None if s["refused"] else remedies.wall_level(s["config"])
+    return _L1_WALL[gid]
+
+
+def _wall_kind(config, gctx):
+    """The selftests' fake mesher since 2026-09-26 (feature_tolerance 0 is no longer a
+    lever on a body with sharp edges): the R-PLANE path passes; any other config passes
+    one wall level or more below the setup rules' and fails F3a otherwise (docs/15 §K
+    G-PILOT: wall level -1 was the only F3-clean knob with the attraction on)."""
+    if remedies.on_plane(config, gctx["fp"]):
+        return "pass"
+    w = _l1_wall(gctx)
+    return "pass" if w is not None and remedies.wall_level(config) < w else "F3a"
+
+
+def _mixed_kind(config, gctx):
+    """A second fake mesher for the round mechanics: families A, B and G pass one wall
+    level below the setup rules' (F3a otherwise), D, E and F one level above (F3d
+    otherwise); the R-PLANE path passes."""
+    if remedies.on_plane(config, gctx["fp"]):
+        return "pass"
+    w = _l1_wall(gctx)
+    if w is None:
+        return "F3a"
+    d = remedies.wall_level(config) - w
+    if gctx["gid"][0] in "ABG":
+        return "pass" if d < 0 else "F3a"
+    return "pass" if d > 0 else "F3d"
+
+
+_wall_oracle = _oracle_attempt(_wall_kind)
+_mixed_oracle = _oracle_attempt(_mixed_kind)
+_pass_oracle = _oracle_attempt(lambda config, gctx: "pass")
 
 
 def _run_oracle(out, attempt_fn, ids=IDS8):
@@ -1286,9 +1515,12 @@ def _setup_of(H, gid):
 
 def _g1_constants(H):
     assert len(FEATURES) == 17 and K == 3 and SHUFFLES == 3 and EPS == 1e-6
+    assert USER_SHIP == {"enabled": False, "date": "2026-10-03",
+                         "why": "its G-PRIOR pass was vacuous: real equals rules "
+                                "on every tuning geometry"}, USER_SHIP
     assert TRANSFER == ("RM-BUDGET-FAR", "RM-BUDGET-FEAT", "RM-BUDGET-WALL",
                         "RM-TOPO-REFINE", "RM-SNAP-WALL", "RM-SNAP-FT",
-                        "RM-SNAP-REFINE"), TRANSFER
+                        "RM-SNAP-TAU", "RM-SNAP-REFINE"), TRANSFER
     for rid in PR_IDS:
         assert rid in explain.TEMPLATES and \
             explain.TEMPLATES[rid]["layer"] == "prior", rid
@@ -1321,8 +1553,8 @@ def _g1_constants(H):
         assert "no prior model" in str(e), str(e)
     else:
         raise AssertionError("a missing model was not refused")
-    print("[ok] constants: 17 features, k 3, 3 shuffles, 7 transferable remedies, "
-          "5 PR ids templated; an evaluate campaign is refused before any other "
+    print("[ok] constants: 17 features, k 3, 3 shuffles, 8 transferable remedies, "
+          "6 PR ids templated; an evaluate campaign is refused before any other "
           "file, a b0-template campaign and a missing model are refused by name")
 
 
@@ -1426,11 +1658,12 @@ def _g4_vote(H):
 
 
 _WANT_BANK = {
-    "A-1-000": (3, ["RM-SNAP-WALL", "RM-SNAP-FT"]),
+    "A-1-000": (2, ["RM-SNAP-WALL"]),
     "D-1-010": (1, []),
-    "D-1-077": (3, ["RM-SNAP-WALL", "RM-SNAP-FT"]),
-    "F-1-009": (2, ["RM-SNAP-FT"]),
-    "F-1-011": (3, ["RM-SNAP-WALL", "RM-SNAP-FT"]),
+    "D-1-077": (2, ["RM-SNAP-WALL"]),
+    "E-1-010": (2, ["RM-SNAP-WALL"]),
+    "F-1-009": (2, ["RM-SNAP-WALL"]),   # GLB-CONFIG: the margin's level 4 drops on RM-SNAP-WALL
+    "F-1-011": (2, ["RM-SNAP-WALL"]),
     "G-1-016": (1, []),
 }
 
@@ -1439,45 +1672,55 @@ def _g5_bank(H):
     got = {e["geometry_id"]: (e["attempt"], e["path"])
            for e in bank_from(H["B1"])}
     assert got == _WANT_BANK, got
+    bank = bank_from(H["B1"])
+    assert all(e["edge_class"] == ("smooth" if e["geometry_id"] == "E-1-010"
+                                   else "sharp") for e in bank)
     m = H["model"]
-    assert m["bank_n"] == 6 and all(len(e["z"]) == 17 for e in m["bank"])
+    # GLB-CONFIG: the margin's level 4 on F-1-009 drops on RM-SNAP-WALL, so the
+    # bank is back to 7 passing geometries (was 6 before GLB-CONFIG)
+    assert m["bank_n"] == 7 and all(len(e["z"]) == 17 for e in m["bank"])
     assert m["null_policy"] == list(NULL_POLICY)
     assert m["source"]["content_sha256"] == bundle_sha(H["B1"])
     assert m["enabled"] is False and m["gate"] is None
     b2 = copy.deepcopy(H["B1"])
+    # the gap test cuts a banked geometry's middle attempt
     b2["attempts"] = [r for r in b2["attempts"]
-                      if not (r["geometry_id"] == "F-1-009" and r["attempt"] == 1)]
+                      if not (r["geometry_id"] == "A-1-000" and r["attempt"] == 1)]
     try:
         bank_from(b2)
     except PriorError as e:
         assert "incomplete" in str(e), str(e)
     else:
         raise AssertionError("a bundle with a gap in the attempts was not refused")
-    print("[ok] bank: 6 passing geometries with their remedy paths, E-1-004 and "
-          "E-1-010 absent; the model carries the null policy and the source sha")
+    print("[ok] bank: 7 passing geometries with their remedy paths, E-1-004 "
+          "absent; the model carries the null policy and the source sha")
 
 
 def _g6_apply(H):
     cfg, ctx = H["cfg"], H["ctx"]
+    # GLB-CONFIG: F-1-009's fresh attempt 1 sits on the margin's level 4, so the
+    # wall step to 3 clears the y+ floor and lands; RM-SNAP-FT is skipped by name
     after, skipped = apply_path(cfg["F-1-009"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
                                 ctx["F-1-009"], H["gates"], H["knobs"])
-    edits = rules.diff_edits(cfg["F-1-009"], after)
-    assert edits == [{"pointer": "/snap/feature_tolerance", "from": None,
-                      "to": 0.0}], edits
-    assert skipped == [{"rule_id": "RM-SNAP-WALL",
-                        "why": "below the y+ floor (wall 3 -> 2 < floor 3)"}], skipped
+    assert after is not None
+    assert [x["rule_id"] for x in skipped] == ["RM-SNAP-FT"]
+    assert skipped[0]["why"] == remedies.FT_FORBIDDEN_WHY, skipped[0]
+    assert after["refinement"]["levels"][0]["bands"][0]["level"] == 3, \
+        after["refinement"]["levels"][0]["bands"]
     after2, skipped2 = apply_path(cfg["E-1-004"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
                                   ctx["E-1-004"], H["gates"], H["knobs"])
     assert after2 is None
     assert [x["rule_id"] for x in skipped2] == ["RM-SNAP-WALL", "RM-SNAP-FT"]
     assert skipped2[1] == {"rule_id": "RM-SNAP-FT",
                            "why": "no sharp edge (features.py)"}, skipped2[1]
-    after3, _sk = apply_path(cfg["A-1-000"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
-                             ctx["A-1-000"], H["gates"], H["knobs"])
-    assert schema.canonical_sha256(after3) == H["att3_sha"]["A-1-000"]
-    after4, _sk = apply_path(cfg["A-1-000"], ["RM-SNAP-FT"], ctx["A-1-000"],
-                             H["gates"], H["knobs"])
-    assert schema.canonical_sha256(after4) not in H["A1_shas"]
+    after3, skipped3 = apply_path(cfg["A-1-000"], ["RM-SNAP-WALL", "RM-SNAP-FT"],
+                                  ctx["A-1-000"], H["gates"], H["knobs"])
+    assert schema.canonical_sha256(after3) == H["att2_sha"]["A-1-000"]
+    assert skipped3 == [{"rule_id": "RM-SNAP-FT",
+                         "why": remedies.FT_FORBIDDEN_WHY}], skipped3
+    after4, skipped4 = apply_path(cfg["A-1-000"], ["RM-SNAP-FT"], ctx["A-1-000"],
+                                  H["gates"], H["knobs"])
+    assert after4 is None and skipped4 == skipped3, (after4, skipped4)
     after5, skipped5 = apply_path(cfg["D-1-010"], ["RM-SNAP-FT"], ctx["D-1-010"],
                                   H["gates"], H["knobs"])
     assert after5 is None
@@ -1488,6 +1731,7 @@ def _g6_apply(H):
     d = decide(zq, fold, model, ctx["A-1-000"], H["gates"], H["knobs"])
     assert d["rule_id"] == "PR-KNN" and d["verdict"] == "apply", d["rule_id"]
     assert schema.errors(d["record"], "DecisionRecord") == []
+    edits = rules.diff_edits(cfg["A-1-000"], after3)
     for es in (edits, d["edits"]):
         for x in es:
             assert not x["pointer"].startswith("/layers")
@@ -1498,55 +1742,87 @@ def _g6_apply(H):
         pass
     else:
         raise AssertionError("a path outside the transfer table was not refused")
-    print("[ok] apply: F-1-009 gets feature_tolerance 0 with the wall step skipped "
-          "at the y+ floor; E-1-004 and D-1-010 change nothing; A-1-000's path "
-          "lands on its attempt-3 config; no edit in the layers block")
+    print("[ok] apply: F-1-009's wall step lands on the margin's level 4 with "
+          "RM-SNAP-FT skipped by name; E-1-004 and D-1-010 change nothing; "
+          "A-1-000's path lands on its attempt-2 config with RM-SNAP-FT skipped by "
+          "name; no edit in the layers block")
 
 
 def _g7_gate(H):
     work = os.path.join(H["tmp"], "work")
     rdir = os.path.join(H["tmp"], "rep")
-    rep = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_ft_oracle,
+    rep = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_wall_oracle,
                probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
                quiet=True)
     s = rep["systems"]
     assert s["rules"]["pass"] == 2 and s["real"]["pass"] == 5, \
         (s["rules"]["pass"], s["real"]["pass"])
-    assert s["shuffle-0"]["pass"] == 4 and s["shuffle-1"]["pass"] == 3 \
-        and s["shuffle-2"]["pass"] == 3
-    assert abs(rep["shuffled_mean_pass"] - 10.0 / 3.0) <= 1e-9
-    assert s["real"]["decisions"] == {"PR-KNN": 4, "PR-KEEP": 2, "PR-FAR": 1,
-                                      "PR-NOEDIT": 1}, s["real"]["decisions"]
-    assert s["real"]["statuses"] == {"reused": 4, "PR-KEEP": 2, "PR-FAR": 1,
-                                     "PR-NOEDIT": 1}, s["real"]["statuses"]
+    # GLB-CONFIG: shuffle-0 keeps 5 on the margined attempt-1 configs (was 2)
+    assert s["shuffle-0"]["pass"] == 5 and s["shuffle-1"]["pass"] == 3 \
+        and s["shuffle-2"]["pass"] == 4
+    assert abs(rep["shuffled_mean_pass"] - 4.0) <= 1e-9
+    assert s["real"]["decisions"] == {"PR-KNN": 3, "PR-KEEP": 2,
+                                      "PR-FAR": 3}, s["real"]["decisions"]
+    assert s["real"]["statuses"] == {"reused": 3, "PR-KEEP": 2,
+                                     "PR-FAR": 3}, s["real"]["statuses"]
     assert s["real"]["gain"] == 3 and s["real"]["loss"] == 0
-    assert len(rep["rounds"]) == 1 and rep["rounds"][0]["geometry_ids"] == \
-        ["D-1-077"], rep["rounds"]
-    assert s["shuffle-1"]["statuses"].get("ran") == 1, s["shuffle-1"]["statuses"]
+    assert rep["rounds"] == [], rep["rounds"]
     assert rep["conditions"] == {"real_ge_rules": True, "shuffled_worse": True}
     assert rep["verdict"] == "PASS" and rep["enabled"] is True
-    for name in (REPORT_NAME, REPORT_MD, MODEL_NAME, RULES_BUNDLE,
-                 ROUND_BUNDLE % 1):
+    for name in (REPORT_NAME, REPORT_MD, MODEL_NAME, RULES_BUNDLE):
         assert os.path.isfile(os.path.join(rdir, name)), name
     with open(os.path.join(rdir, MODEL_NAME), encoding="utf-8") as f:
         pm = json.load(f)
-    assert pm["enabled"] is True and pm["bank_n"] == 6 and pm["pool_n"] == 8
+    assert pm["enabled"] is True and pm["bank_n"] == 7 and pm["pool_n"] == 8
     grow = {g["geometry_id"]: g for g in rep["geometries"]}
     assert grow["F-1-009"]["real"]["rule_id"] == "PR-FAR"
+    assert rep["focus"] is None, rep["focus"]     # IDS8 holds no family-B geometry
+    with open(os.path.join(rdir, REPORT_MD), encoding="utf-8") as f:
+        md7 = f.read()
+    assert "## Family B" in md7 and "is not in this campaign" in md7, md7
     H["shipped"] = pm
-    cj = os.path.join(work, "round_1", campaign.FILES["campaign"])
-    mtime = os.stat(cj).st_mtime
-    rep2 = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_ft_oracle,
+    rep2 = gate(H["R1"], work, streams=2, report_dir=rdir, attempt_fn=_wall_oracle,
                 probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
                 quiet=True)
-    assert os.stat(cj).st_mtime == mtime, "round 1 was not reused"
     r1 = dict(rep)
     r2 = dict(rep2)
     r1.pop("date")
     r2.pop("date")
     assert r1 == r2, "the re-run's report differs beyond the date"
-    print("[ok] gate on the oracle campaign: rules 2, real 5, shuffled 4 3 3 (mean "
-          "3.333), one round of one geometry (D-1-077), PASS and enabled; a re-run "
+    # the mixed oracle: a round runs, the control is not worse, the prior ships disabled
+    mwork = os.path.join(H["tmp"], "work_mixed")
+    mrdir = os.path.join(H["tmp"], "rep_mixed")
+    mrules = os.path.join(H["tmp"], "rules_mixed")
+    _run_oracle(mrules, _mixed_oracle)
+    mrep = gate(mrules, mwork, streams=2, report_dir=mrdir, attempt_fn=_mixed_oracle,
+                probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
+                quiet=True)
+    ms = mrep["systems"]
+    assert ms["real"]["pass"] == 2, ms["real"]["pass"]
+    assert ms["real"]["statuses"].get("ran") == 2, ms["real"]["statuses"]
+    assert len(mrep["rounds"]) == 1 and mrep["rounds"][0]["geometry_ids"] == \
+        ["D-1-077", "F-1-011"], mrep["rounds"]
+    assert ms["shuffle-0"]["pass"] == 3 and ms["shuffle-1"]["pass"] == 2 \
+        and ms["shuffle-2"]["pass"] == 2
+    assert abs(mrep["shuffled_mean_pass"] - 7.0 / 3.0) <= 1e-9
+    assert mrep["conditions"] == {"real_ge_rules": True, "shuffled_worse": False}
+    assert mrep["verdict"] == "FAIL" and mrep["enabled"] is False
+    assert os.path.isfile(os.path.join(mrdir, ROUND_BUNDLE % 1)), "round bundle"
+    cj = os.path.join(mwork, "round_1", campaign.FILES["campaign"])
+    mtime = os.stat(cj).st_mtime
+    mrep2 = gate(mrules, mwork, streams=2, report_dir=mrdir,
+                 attempt_fn=_mixed_oracle, probe_fn=campaign._fake_probe(1000),
+                 snap_fn=campaign._fake_snap, quiet=True)
+    assert os.stat(cj).st_mtime == mtime, "the mixed round was not reused"
+    m1 = dict(mrep)
+    m2 = dict(mrep2)
+    m1.pop("date")
+    m2.pop("date")
+    assert m1 == m2, "the mixed re-run's report differs beyond the date"
+    print("[ok] gate on the oracle campaign: rules 2, real 5, shuffled 2 3 4 (mean "
+          "3.000), no round (every prior config already meshed), PASS and enabled; "
+          "on the mixed oracle one round of two geometries (D-1-077, F-1-011) runs, "
+          "the shuffled control is not worse so it FAILs disabled, and a re-run "
           "reuses the round and gives an equal report")
 
 
@@ -1584,7 +1860,7 @@ def _fake_prior_campaign(out, ids, hooks=None):
     return campaign.run_campaign(
         {"manifest": "tuning", "ids": list(ids), "out": out, "mode": "rules+prior",
          "ablate": ("remedies",), "streams": 2, "quiet": True},
-        attempt_fn=_ft_oracle, probe_fn=campaign._fake_probe(1000),
+        attempt_fn=_wall_oracle, probe_fn=campaign._fake_probe(1000),
         snap_fn=campaign._fake_snap, hooks=hooks)
 
 
@@ -1596,13 +1872,17 @@ def _g9_hook(H):
     rows = campaign.load_rows(out)
     by1 = {r["geometry_id"]: r for r in rows if r["attempt"] == 1}
     prior_gids = sorted(g for g, r in by1.items() if r["decided_by"] == "prior")
-    assert prior_gids == ["A-1-000", "D-1-077", "E-1-010", "F-1-009", "F-1-011"], \
+    # GLB-CONFIG: F-1-009 is back in the bank on the margin's level 4, so the
+    # model fires there again; E-1-010 is still PR-FAR - its edge class
+    # holds one entry, fewer than k
+    assert prior_gids == ["A-1-000", "D-1-077", "F-1-009", "F-1-011"], \
         prior_gids
     assert all(by1[g]["rule_id"] == "PR-KNN" for g in prior_gids)
-    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 6
+    assert sum(1 for r in by1.values() if r["outcome"]["failure"] is False) == 6, \
+        sum(1 for r in by1.values() if r["outcome"]["failure"] is False)
     assert end["harness_errors"] == 0
     rp = campaign.replay(out)
-    assert rp["ok"] and rp["hook_decisions"] == 5, rp
+    assert rp["ok"] and rp["hook_decisions"] == 4, rp
     recs = campaign.load_records(out)
     assert explain.audit(rows, recs)["ok"], "audit failed"
     for gid in sorted(recs):
@@ -1617,16 +1897,20 @@ def _g9_hook(H):
     campaign._check_hook(res, "prior", H["cfg"]["F-1-009"], H["knobs"])
     pm_mod = importlib.import_module("prior")
     old = dict(pm_mod._MODEL)
+    old_ship = pm_mod.USER_SHIP
     try:
-        ids2 = ["F-1-009", "D-1-010"]
+        # the importlib leg runs F-1-011 (a banked PR-KNN gid) beside D-1-010;
+        # the gate's own seam, so the user's ship decision stands aside here
+        ids2 = ["F-1-011", "D-1-010"]
+        pm_mod.USER_SHIP = None
         pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out2 = os.path.join(H["tmp"], "hook-import")
         _fake_prior_campaign(out2, ids2)
         by2 = {r["geometry_id"]: r
                for r in campaign.load_rows(out2) if r["attempt"] == 1}
-        assert by2["F-1-009"]["decided_by"] == "prior" and \
-            by2["F-1-009"]["rule_id"] == "PR-KNN", by2["F-1-009"]
+        assert by2["F-1-011"]["decided_by"] == "prior" and \
+            by2["F-1-011"]["rule_id"] == "PR-KNN", by2["F-1-011"]
         assert by2["D-1-010"]["decided_by"] == "rule"
         recs2 = campaign.load_records(out2)
         assert any(t["attempt"] == 1 and t["record"]["rule_id"] == "PR-KEEP"
@@ -1645,6 +1929,30 @@ def _g9_hook(H):
         recs3 = campaign.load_records(out3)
         assert sum(1 for gid in recs3 for t in recs3[gid]
                    if t["record"]["rule_id"] == "PR-DISABLED") == 2
+        # the shipped prior is disabled by the user's decision (USER_SHIP) even
+        # though this model's gate enabled it: attempt 1 stays the rules'
+        # config and PR-DISABLED says so, grounded on both geometries
+        pm_mod.USER_SHIP = old_ship
+        pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
+        pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
+        out5 = os.path.join(H["tmp"], "hook-user")
+        _fake_prior_campaign(out5, ids2)
+        by5 = {r["geometry_id"]: r
+               for r in campaign.load_rows(out5) if r["attempt"] == 1}
+        assert all(r["decided_by"] == "rule" for r in by5.values()), by5
+        recs5 = campaign.load_records(out5)
+        dis5 = [t for gid in recs5 for t in recs5[gid]
+                if t["record"]["rule_id"] == "PR-DISABLED"]
+        assert len(dis5) == 2, dis5
+        for t in dis5:
+            assert "by the user's decision" in t["record"]["message"], \
+                t["record"]["message"]
+            assert t["record"]["inputs"][-1] == \
+                {"name": "user_disabled", "value": "2026-10-03", "unit": ""}, \
+                t["record"]["inputs"][-1]
+            card5 = explain.card(t["record"])
+            assert explain.ungrounded(card5["line"], [t["record"]]) == [], \
+                card5["line"]
         pm_mod._MODEL["path"] = os.path.join(H["tmp"], "absent.json")
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out4 = os.path.join(H["tmp"], "hook-absent")
@@ -1655,39 +1963,43 @@ def _g9_hook(H):
     finally:
         pm_mod._MODEL.clear()
         pm_mod._MODEL.update(old)
-    print("[ok] hook seam: make_hook in a fake rules+prior campaign (5 prior rows, "
-          "6 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
+        pm_mod.USER_SHIP = old_ship
+    print("[ok] hook seam: make_hook in a fake rules+prior campaign (3 prior rows, "
+          "5 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
           "disabled model, a missing model ends each geometry HARNESS-ERROR; every "
-          "PR card grounded, audit and replay ok")
+          "PR card grounded, audit and replay ok; the shipped prior disabled by "
+          "the user's decision (PR-DISABLED on both)")
 
 
 def _g10_live(H):
     mlive = copy.deepcopy(H["shipped"])
     mlive["d_abstain"] = 1e9
     for e in mlive["bank"]:
-        e["path"] = ["RM-SNAP-FT"]
+        e["path"] = ["RM-SNAP-WALL"]
     mlive["enabled"] = True
     out = os.path.join(H["tmp"], "live")
     end = campaign.run_campaign(
-        {"manifest": "tuning", "ids": ["F-1-009", "D-1-010"], "out": out,
+        {"manifest": "tuning", "ids": ["A-1-000", "D-1-010"], "out": out,
          "mode": "rules+prior", "ablate": ("remedies",), "streams": 2,
          "audit_mod": AUDIT_OFF, "quiet": True},
         hooks={"prior": make_hook(mlive)})
     by1 = {r["geometry_id"]: r
            for r in campaign.load_rows(out) if r["attempt"] == 1}
-    f = by1["F-1-009"]
+    f = by1["A-1-000"]
     assert f["decided_by"] == "prior" and f["rule_id"] == "PR-KNN", \
         (f["decided_by"], f["rule_id"])
-    assert f["config_delta"] == [{"pointer": "/snap/feature_tolerance",
-                                  "from": None, "to": 0.0}], f["config_delta"]
+    after, _sk = apply_path(H["cfg"]["A-1-000"], ["RM-SNAP-WALL"],
+                            H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert f["config_delta"] == rules.diff_edits(H["cfg"]["A-1-000"], after), \
+        f["config_delta"]
     assert by1["D-1-010"]["decided_by"] == "rule"
     recs = campaign.load_records(out)
     assert any(t["attempt"] == 1 and t["record"]["rule_id"] == "PR-NOEDIT"
                for t in recs["D-1-010"])
     assert end["harness_errors"] == 0, end["harness_errors"]
     assert end["orphans"] == [] and end["max_live_mesher"] <= 2
-    print("[ok] live: rules+prior through the mesher at 2 streams: F-1-009 attempt "
-          "1 decided by the prior (feature_tolerance 0, exit %s, %s), D-1-010 by "
+    print("[ok] live: rules+prior through the mesher at 2 streams: A-1-000 attempt "
+          "1 decided by the prior (RM-SNAP-WALL, exit %s, %s), D-1-010 by "
           "the rules (PR-NOEDIT on the plane); 0 harness errors, 0 orphans, at "
           "most 2 meshers"
           % (f["outcome"]["exit_code"], f["outcome"]["failure_class"]))
@@ -1710,7 +2022,10 @@ def _g11_check_cli(H):
     rdir = os.path.join(H["tmp"], "rep")
     ck = check(rdir)
     assert ck["verdict"] == "PASS", ck
-    c1 = _copy_dir(rdir, os.path.join(H["tmp"], "check-flip"))
+    # the flipped byte needs a round bundle: only the mixed gate (rep_mixed)
+    # ran a round, the wall gate's rounds list is empty by design
+    c1 = _copy_dir(os.path.join(H["tmp"], "rep_mixed"),
+                   os.path.join(H["tmp"], "check-flip"))
     p1 = os.path.join(c1, ROUND_BUNDLE % 1)
     data = bytearray(open(p1, "rb").read())
     data[len(data) // 2] ^= 0x01
@@ -1730,8 +2045,24 @@ def _g11_check_cli(H):
     it2 = {i["name"]: i for i in ck2["items"]}
     assert it2["model rebuild"]["ok"] is False and it2["model sha"]["ok"] is False
     assert ck2["verdict"] == "FAIL"
+    # a reserved deflate block type in the rules bundle: the two block-type bits
+    # of the first deflate byte (a 10-byte gzip header, FLG 0) make decompression
+    # raise zlib.error, not a CRC OSError - check returns FAIL, never raises
+    c3 = _copy_dir(rdir, os.path.join(H["tmp"], "check-deflate"))
+    p3 = os.path.join(c3, RULES_BUNDLE)
+    data = bytearray(open(p3, "rb").read())
+    data[10] |= 0x06
+    with open(p3, "wb") as f:
+        f.write(bytes(data))
+    ck3 = check(c3)
+    it3 = {i["name"]: i for i in ck3["items"]}
+    assert it3["rules bundle"]["ok"] is False \
+        and it3["model rebuild"]["ok"] is False and ck3["verdict"] == "FAIL", \
+        (ck3["verdict"], it3)
     p = _child(["--plan", "--rules", H["R1"]])
-    assert p.returncode == 0 and "rounds 1" in p.stdout, \
+    # every prior config is already meshed on this oracle, so the plan has no
+    # round left to run (2026-09-26)
+    assert p.returncode == 0 and "rounds 0" in p.stdout, \
         (p.returncode, p.stdout[-400:], p.stderr[-400:])
     p = _child(["--gate", "--rules", H["R1"]])
     assert p.returncode == 2 and "needs --rules and --work" in (p.stderr or ""), \
@@ -1741,13 +2072,108 @@ def _g11_check_cli(H):
         (p.returncode, p.stdout[-400:])
     p = _child(["--check", "--report-dir", os.path.join(H["tmp"], "nothing")])
     assert p.returncode == 1, (p.returncode, p.stdout[-400:])
-    print("[ok] check: PASS on the gate's files, a flipped round-bundle byte and "
-          "an edited model FAIL by name; the CLI plans one round, refuses a gate "
-          "without --rules, and checks")
+    print("[ok] check: PASS on the gate's files, a flipped round-bundle byte, an "
+          "edited model and a reserved deflate block type FAIL by name; the CLI "
+          "plans the rounds it has, refuses a gate without --rules, and checks")
+
+
+def _g12_rule(H):
+    # (a) the rule reads one attempt: its flag, or an F3e pass on a sharp body
+    cfg9, fp9 = H["cfg"]["F-1-009"], H["ctx"]["F-1-009"]["fingerprint"]
+    assert rule_failure({"failure": False}, cfg9, fp9) is False
+    cfg_ft = copy.deepcopy(cfg9)
+    cfg_ft.setdefault("snap", {})["feature_tolerance"] = 0.0
+    assert rule_failure({"failure": False}, cfg_ft, fp9) is True
+    cfg4, fp4 = H["cfg"]["E-1-004"], H["ctx"]["E-1-004"]["fingerprint"]
+    cfg4_ft = copy.deepcopy(cfg4)
+    cfg4_ft.setdefault("snap", {})["feature_tolerance"] = 0.0
+    assert rule_failure({"failure": False}, cfg4_ft, fp4) is False
+    assert rule_failure({"failure": False}, H["cfg"]["D-1-010"],
+                        H["ctx"]["D-1-010"]["fingerprint"]) is False
+    assert rule_failure({"failure": True}, cfg9, fp9) is True
+    # (b) the bank under the rule on the oracle bundle
+    import optimise
+    rows1 = {(r["geometry_id"], r["attempt"]): r for r in H["B1"]["attempts"]}
+    assert rule_passes(H["B1"]) == \
+        {k: v["outcome"]["failure"] is False for k, v in rows1.items()}
+    b3 = copy.deepcopy(H["B1"])
+    a1row = [r for r in H["B1"]["attempts"]
+             if r["geometry_id"] == "A-1-000" and r["attempt"] == 1][0]
+    a2row = [r for r in b3["attempts"]
+             if r["geometry_id"] == "A-1-000" and r["attempt"] == 2][0]
+    a2row["config_delta"] = list(a2row["config_delta"]) + \
+        [{"pointer": "/snap/feature_tolerance", "from": None, "to": 0.0}]
+    cfg1 = optimise.apply_edits(H["cfg"]["A-1-000"], a1row["config_delta"])
+    a2row["config_sha"] = schema.canonical_sha256(
+        optimise.apply_edits(cfg1, a2row["config_delta"]))
+    # GLB-CONFIG: F-1-009 is banked again on the margin's level 4
+    assert [e["geometry_id"] for e in bank_from(b3)] == \
+        ["D-1-010", "D-1-077", "E-1-010", "F-1-009", "F-1-011", "G-1-016"]
+    # (c) the committed rules campaign under the rule (the AM-13 record's bundle;
+    # the current gate's bundle is the AM-L tuning campaign's)
+    bc = baseline.read_bundle(os.path.join(AM13_DIR, RULES_BUNDLE))
+    okc = rule_passes(bc)
+    assert sum(1 for v in okc.values() if v) == 81, \
+        sum(1 for v in okc.values() if v)
+    assert len({gid for (gid, _a), v in okc.items() if v}) == 80
+    assert len(bank_from(bc)) == 80
+    # (d) the edge class: only same-class entries vote
+    assert edge_class(fp9) == "sharp" and edge_class(fp4) == "smooth"
+    zq4 = standardise(features(fp4), H["model"]["scaler"])
+    d4 = decide(zq4, H["model"]["bank"], H["model"], H["ctx"]["E-1-004"],
+                H["gates"], H["knobs"])
+    assert d4["rule_id"] == "PR-FAR" and d4["vote"]["kind"] == "few", d4
+    assert "of edge class smooth" in d4["record"]["message"]
+    zqA = standardise(features(H["ctx"]["A-1-000"]["fingerprint"]),
+                      H["model"]["scaler"])
+    fold = [e for e in H["model"]["bank"] if e["geometry_id"] != "A-1-000"]
+    dA = decide(zqA, fold, H["model"], H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert dA["rule_id"] == "PR-KNN" and \
+        dA["vote"]["neighbours"] == ["D-1-077", "F-1-011", "D-1-010"], dA["vote"]
+    fold2 = copy.deepcopy(fold)
+    [e for e in fold2 if e["geometry_id"] == "D-1-077"][0]["edge_class"] = "smooth"
+    dB = decide(zqA, fold2, H["model"], H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert "D-1-077" not in dB["vote"]["neighbours"], dB["vote"]
+    # (e) a path that applies only in part abstains PR-PARTIAL
+    m9 = dict(H["model"], d_abstain=1e9)
+    fold3 = copy.deepcopy(fold)
+    for e in fold3:
+        e["path"] = ["RM-SNAP-WALL", "RM-SNAP-FT"]
+    dC = decide(zqA, fold3, m9, H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    assert dC["rule_id"] == "PR-PARTIAL" and dC["verdict"] == "abstain", dC
+    assert dC["config"] is None and dC["edits"] == []
+    assert dC["skipped"] == [{"rule_id": "RM-SNAP-FT",
+                              "why": remedies.FT_FORBIDDEN_WHY}], dC["skipped"]
+    assert schema.errors(dC["record"], "DecisionRecord") == []
+    assert explain.ungrounded(explain.card(dC["record"])["line"],
+                              [dC["record"]]) == []
+    foldF = copy.deepcopy([e for e in H["model"]["bank"]
+                           if e["geometry_id"] != "F-1-009"])
+    for e in foldF:
+        e["path"] = ["RM-SNAP-WALL", "RM-SNAP-FT"]
+    zqF = standardise(features(fp9), H["model"]["scaler"])
+    dD = decide(zqF, foldF, m9, H["ctx"]["F-1-009"], H["gates"], H["knobs"])
+    # GLB-CONFIG: on the margin's level 4 the neighbours' wall step lands, so the
+    # path applies in part and F-1-009 abstains PR-PARTIAL (was PR-NOEDIT)
+    assert dD["rule_id"] == "PR-PARTIAL" and dD["verdict"] == "abstain", dD["rule_id"]
+    # (f) an old bank is refused
+    fold5 = copy.deepcopy(fold)
+    for e in fold5:
+        del e["edge_class"]
+    try:
+        decide(zqA, fold5, H["model"], H["ctx"]["A-1-000"], H["gates"], H["knobs"])
+    except PriorError as e:
+        assert "edge class" in str(e), str(e)
+    else:
+        raise AssertionError("a bank without edge classes was not refused")
+    print("[ok] the 2026-09-26 rule: a feature_tolerance 0 pass on a sharp body "
+          "leaves the bank, the committed rules campaign keeps 81 passing rows on "
+          "80 geometries; only same-class neighbours vote; a partial path abstains "
+          "PR-PARTIAL; an old bank is refused")
 
 
 def selftest():
-    """(C14): eleven [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
+    """(C14): twelve [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
     t0 = time.perf_counter()
     tmp = tempfile.mkdtemp()
     H = {"tmp": tmp}
@@ -1755,13 +2181,14 @@ def selftest():
               (_g3_scaler, "scaler"), (_g4_vote, "vote"), (_g5_bank, "bank"),
               (_g6_apply, "apply"), (_g7_gate, "gate"), (_g8_disabled, "disabled"),
               (_g9_hook, "hook seam"), (_g10_live, "live"),
-              (_g11_check_cli, "check and CLI"))
+              (_g11_check_cli, "check and CLI"),
+              (_g12_rule, "the rule, the edge class, the whole path"))
     try:
         try:
             H["gates"] = schema.load_gates()
             H["knobs"] = schema.load_knobs()
             H["R1"] = os.path.join(tmp, "rules")
-            _run_oracle(H["R1"], _ft_oracle)
+            _run_oracle(H["R1"], _wall_oracle)
             H["B1"] = baseline.bundle_dir(H["R1"])
             H["model"] = build(H["B1"])
             H["ends"] = {g["geometry_id"]: g for g in H["B1"]["geometries"]}
@@ -1774,7 +2201,7 @@ def selftest():
             rows_by = {}
             for r in H["B1"]["attempts"]:
                 rows_by.setdefault(r["geometry_id"], {})[r["attempt"]] = r
-            H["att3_sha"] = {"A-1-000": rows_by["A-1-000"][3]["config_sha"]}
+            H["att2_sha"] = {"A-1-000": rows_by["A-1-000"][2]["config_sha"]}
             H["A1_shas"] = {r["config_sha"] for r in rows_by["A-1-000"].values()}
         except Exception as e:
             print("SELFTEST FAIL: harness: %s: %s" % (type(e).__name__, e))

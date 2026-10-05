@@ -1,0 +1,136 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>title</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #title-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #title-bgwrap {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          will-change: transform;
+        }
+        #title-bgwrap img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          opacity: 0.22;
+          filter: blur(2px) brightness(0.6);
+        }
+        #title-glow {
+          position: absolute;
+          left: -180px;
+          top: 50%;
+          margin-top: -360px;
+          width: 1100px;
+          height: 720px;
+          background: radial-gradient(closest-side, rgba(255, 90, 54, 0.55), rgba(255, 90, 54, 0) 70%);
+          opacity: 0;
+          z-index: 1;
+          will-change: opacity, transform;
+        }
+        #title-block {
+          position: absolute;
+          inset: 0;
+          z-index: 2;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          align-items: flex-start;
+          padding: 72px 96px 88px 96px;
+        }
+        #title-kicker {
+          font-family: "IBM Plex Mono", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 26px;
+          font-weight: 700;
+          color: #ff5a36;
+          letter-spacing: 0.08em;
+        }
+        #title-ko {
+          font-size: 88px;
+          font-weight: 800;
+          color: #f1f3f5;
+          line-height: 1.15;
+          margin-top: 18px;
+        }
+        #title-en {
+          font-size: 40px;
+          font-weight: 400;
+          color: #a7afb8;
+          margin-top: 14px;
+        }
+        #title-rule {
+          width: 120px;
+          height: 2px;
+          background: rgba(255, 255, 255, 0.14);
+          margin-top: 28px;
+        }
+        #title-ko2 {
+          font-size: 30px;
+          font-weight: 500;
+          color: #f1f3f5;
+          margin-top: 26px;
+        }
+        #title-en2 {
+          font-size: 24px;
+          font-weight: 400;
+          color: #a7afb8;
+          margin-top: 8px;
+        }
+      </style>
+      <div id="root" data-composition-id="title" data-width="1920" data-height="1080">
+        <div id="title-wrap">
+          <div id="title-bgwrap">
+            <img id="title-bg" src="assets/stills/streamlines.png" alt="" />
+          </div>
+          <div id="title-glow"></div>
+          <div id="title-block">
+            <div id="title-kicker">Iterations-CFD · meteor-cfd</div>
+            <h1 id="title-ko">실제 F1 레이스카, CAD에서 유동장까지</h1>
+            <div id="title-en">A real F1 car, from CAD to a resolved flow field</div>
+            <div id="title-rule"></div>
+            <div id="title-ko2">자체 GPU CFD 스위트 · 한국어 AI 어시스턴트</div>
+            <div id="title-en2">An in-house GPU CFD suite, driven in plain Korean by an AI assistant</div>
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#title-bgwrap", { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "power1.out" }, 0);
+        tl.fromTo("#title-bgwrap", { scale: 1.08 }, { scale: 1.0, duration: 5, ease: "none", immediateRender: false }, 0);
+        tl.fromTo("#title-glow", { opacity: 0, scale: 0.85 }, { opacity: 0.3, scale: 1, duration: 0.9, ease: "power2.out" }, 0.25);
+        tl.fromTo("#title-kicker", { opacity: 0, y: 44 }, { opacity: 1, y: 0, duration: 0.14, ease: "power4.out" }, 0.3);
+        tl.fromTo("#title-ko", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.4);
+        tl.fromTo("#title-en", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.5);
+        tl.fromTo("#title-rule", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.12, ease: "power4.out" }, 0.58);
+        tl.fromTo("#title-ko2", { opacity: 0, y: 44 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.66);
+        tl.fromTo("#title-en2", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.13, ease: "power4.out" }, 0.74);
+        tl.to("#title-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 4.6);
+        window.__timelines["title"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

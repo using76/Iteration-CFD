@@ -40,6 +40,7 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import admit  # noqa: E402
 import common  # noqa: E402
 import evaluate_cfd  # noqa: E402
 import gate  # noqa: E402
@@ -49,8 +50,10 @@ import schema  # noqa: E402
 import turb_integral  # noqa: E402
 import verify  # noqa: E402
 
+TEMPLATES_LOCK = admit.TEMPLATES_LOCK
 REFUSAL_IDS = ("LOOP-STUDY", "LOOP-TEMPLATE", "LOOP-EVALUATOR", "LOOP-IMMUTABLE", "LOOP-LINEAGE", "LOOP-CHECKS",
-               "LOOP-PREFILTER", "LOOP-CACHE", "LOOP-RESUME", "LOOP-BUSY", "LOOP-CLOSED", "LOOP-MAXEVALS")
+               "LOOP-PREFILTER", "LOOP-CACHE", "LOOP-RESUME", "LOOP-BUSY", "LOOP-CLOSED", "LOOP-MAXEVALS",
+               "TPL-UNFROZEN")
 INTAKE_IDS = ("CAD-EDIT", "CAD-LOCKED", "GATE-STALE", "CAD-INTENT", "CAD-RANGE")   # checked in this order
 KILL_POINTS = ("after_propose_row", "after_build", "after_replace", "after_iteration_row", "after_gate_row",
                "after_history")
@@ -433,6 +436,7 @@ def init(study_dir, requirements_dir, start_doc, registry_path=gate.REGISTRY) ->
     gates, gates_lock = gate.load_gates()
     doc = reqs.read_locked(requirements_dir)                     # GATE-LOCK passes through
     decl, template_sha, declaration_sha = reqs.load_template(reqs.NOZZLE_DIR)
+    admit.check_frozen(reqs.NOZZLE_DIR, TEMPLATES_LOCK)          # TPL-UNFROZEN passes through
     if doc["template_sha"] != template_sha:
         raise ValueError("LOOP-TEMPLATE: the locked set names template_sha %r but today's"
                          " template.py hashes to %r" % (doc["template_sha"], template_sha))
@@ -499,6 +503,7 @@ def _pre_walk(study_dir, registry_path):
     gate.lock_anchor(study_dir, gates_lock, registry_path)       # GATE-LOCK passes through
     doc = reqs.read_locked(study_dir)
     decl, template_sha, declaration_sha = reqs.load_template(reqs.NOZZLE_DIR)
+    admit.check_frozen(reqs.NOZZLE_DIR, TEMPLATES_LOCK)          # TPL-UNFROZEN passes through
     checks = reqs.compile_checks(doc, decl, declaration_sha)     # GATE-LOCK passes through
     on_disk = common.read_json(os.path.join(study_dir, "checks.json"))
     if common.canonical_json(on_disk) != common.canonical_json(checks):
@@ -1882,8 +1887,30 @@ def _t12() -> None:
           " --help, no studies.jsonl")
 
 
+def _t13() -> None:
+    """TPL-UNFROZEN (CAD-23): a lock that does not hold the nozzle stops init and run alike."""
+    global TEMPLATES_LOCK
+    td = _mktemp_dir()
+    req_dir = os.path.join(td, "req")
+    reqs.write_locked(req_dir, _fx_doc())
+    bad = os.path.join(td, "templates.lock")
+    common.write_json(bad, {"schema": "cad-templates-lock/1", "templates": []})
+    saved = TEMPLATES_LOCK
+    _td2, study2, reg2 = _copy_ref("t13_unfrozen")     # built while the real lock still answers
+    try:
+        TEMPLATES_LOCK = bad
+        e = _refuse(init, os.path.join(td, "study13"), req_dir, dict(START_DOC))
+        assert str(e).startswith("TPL-UNFROZEN:"), str(e)
+        e = _refuse(run, study2, reg2)
+        assert str(e).startswith("TPL-UNFROZEN:"), str(e)
+    finally:
+        TEMPLATES_LOCK = saved
+    print("[ok] T13 TPL-UNFROZEN: init of a fresh study and run of the reference study both"
+          " refuse while the lock does not hold the nozzle, and the constant is restored")
+
+
 def selftest() -> None:
-    """The CAD-18 gate: T1-T12, one [ok] line each, SELFTEST PASS at the end."""
+    """The CAD-18 gate: T1-T13, one [ok] line each, SELFTEST PASS at the end."""
     try:
         _t1()
         _t2()
@@ -1897,6 +1924,7 @@ def selftest() -> None:
         _t10()
         _t11()
         _t12()
+        _t13()
     finally:
         _cleanup_temps()
     print("SELFTEST PASS")

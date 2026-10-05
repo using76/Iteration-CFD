@@ -1,0 +1,121 @@
+{
+ "attempts": [
+  {
+   "attempt": 1,
+   "decided": "the config as given: no rule chose it",
+   "decided_by": "default",
+   "edits": [],
+   "edits_text": "none",
+   "end": [
+    {
+     "because": "the mesher drops layers on a snapped wall by name, so no further trial is spent on them",
+     "cite": "SPEC-LIT §92.13 (layers on a snapped wall are attempted, retreated and given up by name); docs/15 §C L2, §I-1: only AM-L changes this",
+     "edits": [],
+     "inputs": [
+      {
+       "name": "attempt",
+       "unit": "1",
+       "value": 1
+      },
+      {
+       "name": "k",
+       "unit": "1",
+       "value": 4
+      },
+      {
+       "name": "key",
+       "unit": "1",
+       "value": "layer:min_thickness"
+      },
+      {
+       "name": "stage_focus",
+       "unit": "1",
+       "value": "layers"
+      },
+      {
+       "name": "fires_before",
+       "unit": "1",
+       "value": 0
+      },
+      {
+       "name": "wall_level",
+       "unit": "1",
+       "value": 3
+      },
+      {
+       "name": "floor_level",
+       "unit": "1",
+       "value": 0
+      },
+      {
+       "name": "on_plane",
+       "unit": "1",
+       "value": false
+      },
+      {
+       "name": "config_sha256_before",
+       "unit": "",
+       "value": "7ad3e362e4447dadbb79fffbb754d59b345a383df63ee9534e57f8f2d7cc4f7b"
+      },
+      {
+       "name": "config_sha256_after",
+       "unit": "",
+       "value": null
+      },
+      {
+       "name": "skipped",
+       "unit": "1",
+       "value": []
+      }
+     ],
+     "layer": "remedy",
+     "line": "RM-CAPABILITY-LIMITED [remedy refuse]: end the geometry: the layers are limited by the mesher's capability; because the mesher drops layers on a snapped wall by name, so no further trial is spent on them. RM-CAPABILITY-LIMITED: layer:min_thickness at stage layers (outcome.patches[sphere].layer_class = \"min_thickness\" == \"min_thickness\"; score.classify_drop (the layers.rs drop text)) on a snapped wall - the body does not qualify for R-PLANE: R-PLANE does not apply (features.py: commensurate False); SPEC-LIT §92.13 drops layers there, so sphere are CAPABILITY-LIMITED and no more trials are spent on their layers (cite: SPEC-LIT §92.13 (layers on a snapped wall are attempted, retreated and given up by name); docs/15 §C L2, §I-1: only AM-L changes this)",
+     "message": "RM-CAPABILITY-LIMITED: layer:min_thickness at stage layers (outcome.patches[sphere].layer_class = \"min_thickness\" == \"min_thickness\"; score.classify_drop (the layers.rs drop text)) on a snapped wall - the body does not qualify for R-PLANE: R-PLANE does not apply (features.py: commensurate False); SPEC-LIT §92.13 drops layers there, so sphere are CAPABILITY-LIMITED and no more trials are spent on their layers",
+     "rule_id": "RM-CAPABILITY-LIMITED",
+     "t": "2026-09-24T10:13:55Z",
+     "title": "end the geometry: the layers are limited by the mesher's capability",
+     "trigger": {
+      "observable": "outcome.patches[sphere].layer_class",
+      "op": "==",
+      "source": "score.classify_drop (the layers.rs drop text)",
+      "threshold": "min_thickness",
+      "value": "min_thickness"
+     },
+     "trigger_text": "outcome.patches[sphere].layer_class = \"min_thickness\" == \"min_thickness\" (score.classify_drop (the layers.rs drop text))",
+     "verdict": "refuse"
+    }
+   ],
+   "layers_text": "sphere 0 layers, full 0, not delivered (min_thickness), capability-limited",
+   "moved": null,
+   "moved_text": null,
+   "observed": {
+    "blc8_a_priori": 0.0,
+    "blc_full_a_priori": 0.0,
+    "failure_class": "layer_dropped:min_thickness",
+    "flags_true": [],
+    "max_over_hf": 0.008489472498244636,
+    "n_cells": 12880,
+    "p99_over_hf": 0.007942650144291711,
+    "pinned_frac": 0.0,
+    "seconds": 3.393971799989231,
+    "verdict": "pass"
+   },
+   "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 12880, pinned 0, p99/h_f 0.00794265, max/h_f 0.00848947, BLC_8 0, BLC_full 0, 3.39397 s",
+   "prediction": null,
+   "prediction_text": "none",
+   "records": [],
+   "refused": [],
+   "rule_id": null,
+   "stage_focus": null,
+   "why": null,
+   "why_text": "no trigger"
+  }
+ ],
+ "campaign_id": "am15-fixture",
+ "geometry_id": "box_sphere",
+ "n_attempts": 1,
+ "schema": "autonomy-explain/1",
+ "split": "reported",
+ "terminal": "CAPABILITY-LIMITED",
+ "text": "# box_sphere: 1 attempt(s), split reported, campaign am15-fixture, terminal CAPABILITY-LIMITED\n\n## attempt 1: default, stage focus none\ndecided: the config as given: no rule chose it\nwhy: no trigger\nedits: none\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 12880, pinned 0, p99/h_f 0.00794265, max/h_f 0.00848947, BLC_8 0, BLC_full 0, 3.39397 s\nlayers: sphere 0 layers, full 0, not delivered (min_thickness), capability-limited\nend RM-CAPABILITY-LIMITED [remedy refuse]: end the geometry: the layers are limited by the mesher's capability; because the mesher drops layers on a snapped wall by name, so no further trial is spent on them. RM-CAPABILITY-LIMITED: layer:min_thickness at stage layers (outcome.patches[sphere].layer_class = \"min_thickness\" == \"min_thickness\"; score.classify_drop (the layers.rs drop text)) on a snapped wall - the body does not qualify for R-PLANE: R-PLANE does not apply (features.py: commensurate False); SPEC-LIT §92.13 drops layers there, so sphere are CAPABILITY-LIMITED and no more trials are spent on their layers (cite: SPEC-LIT §92.13 (layers on a snapped wall are attempted, retreated and given up by name); docs/15 §C L2, §I-1: only AM-L changes this)\n"
+}

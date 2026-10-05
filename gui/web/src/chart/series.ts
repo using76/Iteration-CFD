@@ -93,3 +93,48 @@ export function formatResidual(v: number): string {
   if (a >= 1e-3 && a < 1e4) return v.toPrecision(3).replace(/\.?0+$/, '')
   return v.toExponential(1)
 }
+
+/** The chart key a compare run's field is drawn under: `<runId>:<field>` (run ids are `r_<n>`, hub-issued). */
+export function compareKey(runId: string, key: string): string {
+  return `${runId}:${key}`
+}
+
+export function isCompareKey(key: string, compareRunId: string | null): boolean {
+  return compareRunId !== null && key.startsWith(compareRunId + ':')
+}
+
+/** Primary keys in seriesKeys order, then the compare run's keys prefixed; [] compare when compareRunId is null. */
+export function pairKeys(primary: ResidualRecord[], compare: ResidualRecord[], compareRunId: string | null): string[] {
+  const keys = seriesKeys(primary)
+  if (compareRunId === null) return keys
+  for (const k of seriesKeys(compare)) keys.push(compareKey(compareRunId, k))
+  return keys
+}
+
+/** Two runs on one x axis: the sorted union of both x sets, null where a run has no record at that x.
+ *  With compareRunId null this is exactly shapeResiduals(primary, keys, opts). */
+export function shapeResidualsPair(
+  primary: ResidualRecord[],
+  compare: ResidualRecord[],
+  keys: string[],
+  compareRunId: string | null,
+  opts: ShapeOptions,
+): ShapedSeries {
+  if (compareRunId === null) return shapeResiduals(primary, keys, opts)
+  const a = shapeResiduals(primary, keys, opts)
+  // The compare run's records store the bare field names; shape it under the
+  // unprefixed base keys so each prefixed row reads its own run's field.
+  const b = shapeResiduals(
+    compare,
+    keys.map((k) => (isCompareKey(k, compareRunId) ? k.slice(compareRunId.length + 1) : k)),
+    opts,
+  )
+  const x = [...new Set([...a.x, ...b.x])].sort((p, q) => p - q)
+  const ys = keys.map((k, i) => {
+    const own = isCompareKey(k, compareRunId) ? b : a
+    const m = new Map<number, number | null>()
+    for (let j = 0; j < own.x.length; j++) m.set(own.x[j], own.ys[i][j])
+    return x.map((t) => m.get(t) ?? null)
+  })
+  return { keys, x, ys, count: primary.length + compare.length }
+}

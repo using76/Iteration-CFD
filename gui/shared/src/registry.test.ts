@@ -32,12 +32,16 @@ describe('checkArgValue', () => {
   })
 })
 
-describe('pending binaries', () => {
-  it('a pending binary is in BINARIES with its flag but marked pending', () => {
+describe('arrived binaries', () => {
+  it('ofgpu-regions and ofgpu-sample are offered, not pending', () => {
     const regions = getBinary('ofgpu-regions')
-    expect(regions?.pending).toBe(true)
+    expect(regions?.pending).not.toBe(true)
     expect(regions?.flags.map((f) => f.name)).toEqual(['-fluid'])
     expect(getBinary('ofgpu-cht')?.writes.formats).toEqual(['vtu'])
+    const sample = getBinary('ofgpu-sample')
+    expect(sample?.flags.map((f) => f.name)).toEqual(['-at', '-mean'])
+    expect(sample?.gpu).toBe(false)
+    expect(sample?.positionals.map((p) => p.name)).toEqual(['command', 'case', 'time', 'axisOrPatch', 'c1OrAxis', 'c2'])
   })
 })
 

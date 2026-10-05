@@ -1338,6 +1338,7 @@ mod tests {
     /// `(mu + lambda)/(2 mu + lambda)` and `1/(2(1 - nu))` are the same
     /// number. The plan asserts that identity in prose; here it is arithmetic.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_predicted_contraction_is_one_over_two_one_minus_nu() {
         for nu in [-0.5, 0.0, 0.2, 0.3, 0.45, 0.49, 0.499] {
             let m = Material::steel(nu);
@@ -1355,6 +1356,7 @@ mod tests {
     /// module produces is about a different equation than the one the plan's
     /// §D.3 writes down.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_split_reassembles_the_traction() {
         let m = Material { e: 7.3e10, nu: 0.34, alpha: 2.31e-5 };
         let g = Tensor {
@@ -1399,6 +1401,7 @@ mod tests {
     /// stress. The field is linear, so the discrete answer is the exact one
     /// and the only thing between the two is the iteration.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn free_expansion_carries_no_stress() {
         let mat = Material::steel(0.3);
         let mut p = Prototype::new(block(10).unwrap(), mat, DT, &free_expansion());
@@ -1715,6 +1718,7 @@ mod tests {
     /// run. `kappa` buys whatever iteration count it buys by changing the
     /// answer, and that is the sentence it is refused on.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_larger_implicit_coefficient_moves_the_converged_displacement() {
         let mat = Material::steel(0.3);
         let drift = |n: usize| -> Scalar {

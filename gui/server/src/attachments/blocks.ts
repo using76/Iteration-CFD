@@ -8,21 +8,20 @@ import type { BetaContentBlockParam, BetaImageBlockParam } from '@anthropic-ai/s
 import type { SessionRecord } from '../agent/session.js'
 import type { ServerConfig } from '../config.js'
 import type { OntologyStore } from '../ontology/store.js'
+import type { ProbeStatus } from './visionProbe.js'
 import { isAttachmentId, type AttachmentStore } from './store.js'
 
 export type VisionMode = 'blocks' | 'describe'
 
 /**
- * CFD_VISION wins; otherwise the provider decides. anthropic and mock have
- * always been sent image blocks, and z.ai's Anthropic-compatible endpoint
- * accepted one on 2026-09-15 — probe verdict SUPPORTED
- * (gui/.cache/probe/zai-image-block.json, stop_reason end_turn) — so its
- * default is the literal below. CFD_VISION=describe is how a user turns
- * images off for every provider at once.
+ * CFD_VISION wins; otherwise the provider decides. anthropic and mock are sent image blocks. z.ai is sent them only
+ * when its vision-probe record (scripts/vision-probe.ts, <cacheDir>/probe/vision/) says 'passed' (user decision D-8,
+ * docs/16a D.11): the 2026-09-15 zai-image-block.json "SUPPORTED" tested only for the absence of NO_IMAGE and is
+ * superseded. CFD_VISION=describe turns images off for every provider at once.
  */
-export function visionMode(config: Pick<ServerConfig, 'llm' | 'vision'>): VisionMode {
+export function visionMode(config: Pick<ServerConfig, 'llm' | 'vision'>, probe: ProbeStatus | null = null): VisionMode {
   if (config.vision === 'blocks' || config.vision === 'describe') return config.vision
-  if (config.llm === 'zai') return 'blocks' // the probe's answer; flip to 'describe' if the endpoint regresses
+  if (config.llm === 'zai') return probe === 'passed' ? 'blocks' : 'describe'
   return 'blocks'
 }
 

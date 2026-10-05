@@ -46,6 +46,40 @@ mod common;
 use common::{atoi, precision_name, resident_mib, sci};
 
 // ==========================================================================
+//  The memory model, SPEC-LIT 111.3 and 111.4
+// ==========================================================================
+
+/// Pool bytes per cell of the mesh and the frozen flow, measured (§111.3).
+const MESH_FLOW_BYTES_PER_CELL: f64 = 622.2;
+/// Pool bytes per cell of the k-epsilon model, constructor and `init` (§111.3).
+const KEPSILON_BYTES_PER_CELL: f64 = 494.3;
+/// The whole case, per cell.
+const CASE_BYTES_PER_CELL: f64 = MESH_FLOW_BYTES_PER_CELL + KEPSILON_BYTES_PER_CELL;
+/// The fixed part, MiB (measured 55, rounded up).
+const POOL_INTERCEPT_MIB: f64 = 64.0;
+/// The sizes of SPEC-LIT 111.4's table, GiB of pool memory.
+#[cfg(test)]
+const FIT_TABLE_GIB: [u32; 8] = [2, 4, 6, 8, 10, 12, 14, 16];
+
+/// Cells of the k-epsilon benchmark case that fit in `gib` GiB of pool memory.
+#[cfg(test)]
+fn fits_in(gib: f64) -> usize {
+    let bytes = gib * 1_073_741_824.0 - POOL_INTERCEPT_MIB * 1_048_576.0;
+    (bytes / CASE_BYTES_PER_CELL).floor().max(0.0) as usize
+}
+
+/// One row of SPEC-LIT 111.4's table, exactly as that section prints it.
+#[cfg(test)]
+fn fit_table_row(gib: u32) -> String {
+    format!("| {gib} GiB | {:.2} M cells |", fits_in(f64::from(gib)) as f64 / 1e6)
+}
+
+/// Pool bytes the whole k-epsilon case is predicted to hold at `n_cells`.
+fn predicted_case_bytes(n_cells: usize) -> f64 {
+    POOL_INTERCEPT_MIB * 1_048_576.0 + CASE_BYTES_PER_CELL * n_cells as f64
+}
+
+// ==========================================================================
 //  The frozen flow every model is run against
 // ==========================================================================
 
@@ -258,9 +292,16 @@ impl BenchModel for KOmega<'_> {
     }
 }
 
-fn report_memory(gpu: &Gpu, tag: &str) -> Result<()> {
+/// Both readings: this process's own pool first (SPEC-LIT 111.2), then the
+/// whole card, which also counts every other process on it.
+fn report_memory(gpu: &Gpu, tag: &str, n_cells: usize) -> Result<()> {
+    let own = gpu.pool_usage()?.used;
     let (used, total) = resident_mib(gpu)?;
-    println!("       {tag}: {used} MiB resident of {total} MiB");
+    println!(
+        "       {tag}: {} MiB in this process's pool, {:.1} B/cell | {used} MiB resident on the whole card of {total} MiB",
+        own >> 20,
+        own as f64 / n_cells.max(1) as f64
+    );
     Ok(())
 }
 
@@ -275,7 +316,7 @@ fn run_model(
     model.init(gpu, flow)?;
     gpu.sync()?;
 
-    report_memory(gpu, name)?;
+    report_memory(gpu, name, n_cells)?;
 
     // Warm-up: the first launch of every kernel pays for module loading.
     for _ in 0..3 {
@@ -299,6 +340,30 @@ fn run_model(
     );
 
     Ok(())
+}
+
+/// The k-epsilon model the benchmark times, built and seeded exactly as
+/// `run` has always built it. Shared with the memory-model test.
+fn kepsilon_for<'a>(gpu: &Gpu, b: &'a Bench, ctrl: TurbulenceControls) -> Result<KEpsilon<'a>> {
+    // A synthetic benchmark geometry, not a case file - no `nut` field to
+    // read `Ks`/`Cs` from, so every wall face is smooth.
+    let no_roughness = ofgpu::field_setup::NutRoughness::none(b.hm.n_boundary_faces);
+    let mut model = KEpsilon::new(
+        gpu,
+        &b.hm,
+        &b.mesh,
+        KEpsilonCoeffs::default(),
+        ctrl,
+        WallFunctionCoeffs::default(),
+        &b.wf_faces,
+        &no_roughness,
+    )?;
+
+    init_scalar(gpu, model.k_mut(), &b.hm, "k", 0.01, true)?;
+    init_scalar(gpu, model.epsilon_mut(), &b.hm, "epsilon", 0.1, true)?;
+    init_scalar(gpu, model.nut_mut(), &b.hm, "nut", 0.0, true)?;
+
+    Ok(model)
 }
 
 // ==========================================================================
@@ -403,7 +468,12 @@ fn run(o: &Options) -> Result<()> {
         sci(f64::from(max_div_phi(&gpu, &b.phi, &b.hm)?), 0)
     );
 
-    report_memory(&gpu, "mesh only")?;
+    report_memory(&gpu, "mesh only", b.hm.n_cells)?;
+
+    println!(
+        "       memory model (SPEC-LIT 111.3): mesh + flow + k-epsilon predicted at {} MiB, {CASE_BYTES_PER_CELL:.1} B/cell",
+        (predicted_case_bytes(b.hm.n_cells) / 1_048_576.0).round() as u64
+    );
 
     let mut ctrl = TurbulenceControls {
         steady: true,
@@ -433,21 +503,7 @@ fn run(o: &Options) -> Result<()> {
     let no_roughness = ofgpu::field_setup::NutRoughness::none(b.hm.n_boundary_faces);
 
     if o.which == "kEpsilon" || o.which == "both" {
-        let mut model = KEpsilon::new(
-            &gpu,
-            &b.hm,
-            &b.mesh,
-            KEpsilonCoeffs::default(),
-            ctrl,
-            wc,
-            &b.wf_faces,
-            &no_roughness,
-        )?;
-
-        init_scalar(&gpu, model.k_mut(), &b.hm, "k", 0.01, true)?;
-        init_scalar(&gpu, model.epsilon_mut(), &b.hm, "epsilon", 0.1, true)?;
-        init_scalar(&gpu, model.nut_mut(), &b.hm, "nut", 0.0, true)?;
-
+        let mut model = kepsilon_for(&gpu, &b, ctrl)?;
         run_model(&gpu, "kEpsilon", &mut model, &flow, o.n_iters, b.hm.n_cells)?;
     }
 
@@ -483,5 +539,102 @@ fn main() -> ExitCode {
             eprintln!("\nbenchmark aborted: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gpu() -> Option<Gpu> {
+        Gpu::new(0).ok()
+    }
+
+    /// The pool cost of the k-epsilon case is linear in the cell count and
+    /// matches the constants of SPEC-LIT 111.3, so the "cells that fit"
+    /// table stays an interpolation rather than a guess.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn the_kepsilon_case_costs_linear_bytes_per_cell() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no CUDA device: the memory model was not measured");
+            return;
+        };
+        let (free, _) = gpu.mem_info().unwrap();
+        assert!(
+            free >= 2 << 30,
+            "the memory-model test needs 2 GiB free and the card reports {} MiB free: it refuses rather than measure a card that is paging (SPEC-LIT 111.3)",
+            free >> 20
+        );
+        let fk = FieldKernels::new(&gpu).unwrap();
+        let mut rows: Vec<(usize, u64, u64)> = Vec::new();
+        for nz in [2usize, 4, 6] {
+            gpu.sync().unwrap();
+            let base = gpu.pool_usage().unwrap().used;
+            let b = build_flow(&gpu, &fk, 400, 250, nz).unwrap();
+            gpu.sync().unwrap();
+            let mesh = gpu.pool_usage().unwrap().used - base;
+            {
+                let ctrl = TurbulenceControls { steady: true, ..Default::default() };
+                let mut model = kepsilon_for(&gpu, &b, ctrl).unwrap();
+                let flow = FlowState::new(&b.u, &b.phi, b.nu);
+                BenchModel::init(&mut model, &gpu, &flow).unwrap();
+                gpu.sync().unwrap();
+                let total = gpu.pool_usage().unwrap().used - base;
+                rows.push((b.hm.n_cells, mesh, total - mesh));
+            }
+        }
+        let cells: Vec<usize> = rows.iter().map(|r| r.0).collect();
+        let mesh_s01 = (rows[1].1 - rows[0].1) as f64 / (rows[1].0 - rows[0].0) as f64;
+        let mesh_s12 = (rows[2].1 - rows[1].1) as f64 / (rows[2].0 - rows[1].0) as f64;
+        let model_s01 = (rows[1].2 - rows[0].2) as f64 / (rows[1].0 - rows[0].0) as f64;
+        let model_s12 = (rows[2].2 - rows[1].2) as f64 / (rows[2].0 - rows[1].0) as f64;
+        println!(
+            "memory model: mesh+flow {:.1} / {:.1} B/cell, k-epsilon {:.1} / {:.1} B/cell over {:?} cells",
+            mesh_s01, mesh_s12, model_s01, model_s12, cells
+        );
+        for (s01, s12, name) in
+            [(mesh_s01, mesh_s12, "mesh+flow"), (model_s01, model_s12, "k-epsilon")]
+        {
+            assert!(
+                (s01 - s12).abs() <= 0.01 * s12,
+                "{name}'s bytes per cell are not linear: {s01:.1} then {s12:.1} B/cell over the three sizes"
+            );
+        }
+        assert!(
+            (mesh_s12 - MESH_FLOW_BYTES_PER_CELL).abs() <= 0.02 * MESH_FLOW_BYTES_PER_CELL,
+            "the mesh+flow slope {mesh_s12:.1} B/cell is outside 2% of the measured constant {MESH_FLOW_BYTES_PER_CELL:.1} B/cell (SPEC-LIT 111.3)"
+        );
+        assert!(
+            (model_s12 - KEPSILON_BYTES_PER_CELL).abs() <= 0.02 * KEPSILON_BYTES_PER_CELL,
+            "the k-epsilon slope {model_s12:.1} B/cell is outside 2% of the measured constant {KEPSILON_BYTES_PER_CELL:.1} B/cell (SPEC-LIT 111.3)"
+        );
+    }
+
+    /// SPEC-LIT 111.4's table is rebuilt here from the code's constants: the
+    /// published table cannot drift from the model, and neither can the
+    /// constants of §111.3.
+    #[test]
+    fn the_fit_table_in_spec_lit_is_the_one_the_model_computes() {
+        const SPEC: &str = include_str!("../../SPEC-LIT.md");
+        for g in FIT_TABLE_GIB {
+            let row = fit_table_row(g);
+            assert!(
+                SPEC.contains(&row),
+                "SPEC-LIT 111.4's table lost the row the model computes: {row}"
+            );
+        }
+        for constant in [
+            format!("**{MESH_FLOW_BYTES_PER_CELL:.1} B/cell**"),
+            format!("**{KEPSILON_BYTES_PER_CELL:.1} B/cell**"),
+            format!("**{CASE_BYTES_PER_CELL:.1} B/cell**"),
+            format!("**{POOL_INTERCEPT_MIB:.0} MiB**"),
+        ] {
+            assert!(
+                SPEC.contains(&constant),
+                "SPEC-LIT 111.3 lost the constant the code computes: {constant}"
+            );
+        }
+        assert_eq!(fit_table_row(8), "| 8 GiB | 7.63 M cells |");
     }
 }

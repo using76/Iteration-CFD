@@ -196,6 +196,14 @@ OFGPU_DEV ofscalar ofabs_(ofscalar a) { return a < (ofscalar)0 ? -a : a; }
 #define OFGPU_WF_A ((ofscalar)0.01)
 #define OFGPU_WF_B ((ofscalar)5)
 
+//  SPEC-LIT 112.1: one floor per precision, the same distance above each
+//  precision's smallest normal.
+#ifdef OFGPU_SINGLE
+#define OFGPU_WF_TINY ((ofscalar)1e-30f)
+#else
+#define OFGPU_WF_TINY ((ofscalar)1e-300)
+#endif
+
 
 // ==========================================================================
 //  The blended law of the wall
@@ -527,7 +535,7 @@ extern "C" __global__ void wfYPlus
 //  power will not do.
 OFGPU_DEV ofscalar wfPow(ofscalar x, ofscalar p)
 {
-    return ofexp_(p*oflog_(ofmax_(x, (ofscalar)1e-300)));
+    return ofexp_(p*oflog_(ofmax_(x, OFGPU_WF_TINY)));
 }
 
 //- Werner-Wengle's A, B - see src/wallfunctions.rs's WW_A/WW_B, pinned

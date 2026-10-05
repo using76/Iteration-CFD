@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LogLineParser, classifyLine } from './residuals'
+import { LogLineParser, RUN_END_EXIT_CODES, classifyLine, parseRunEndLine } from './residuals'
 
 // Every fixture line below is built from the println! format string in the
 // named Rust source, with numbers in the exact shape `sci()` / `g()` print.
@@ -183,5 +183,38 @@ describe('cht driver', () => {
     const lm = classifyLine(lines[1], 'cht')
     expect(lm).toHaveLength(1)
     expect(lm[0].kind === 'residual' && lm[0].rec.fields).toEqual({ U: 0.0012, p: 3.4e-5, continuity: 1e-7 })
+  })
+})
+
+describe('run ended line (lowmach.rs run_end_line)', () => {
+  const cases = [
+    { line: 'run ended: budget | 30 iterations reached | exit code 0', word: 'budget', detail: '30 iterations reached', exitCode: 0 },
+    { line: 'run ended: budget | endTime 0.03 s reached in 30 steps | exit code 0', word: 'budget', detail: 'endTime 0.03 s reached in 30 steps', exitCode: 0 },
+    { line: 'run ended: diverged | diverged at outer iteration 12: a field went non-finite (NaN/Inf) | exit code 2', word: 'diverged', detail: 'diverged at outer iteration 12: a field went non-finite (NaN/Inf)', exitCode: 2 },
+    { line: 'run ended: refused | -writeInterval: "10" is not supported by ofgpu | exit code 3', word: 'refused', detail: '-writeInterval: "10" is not supported by ofgpu', exitCode: 3 },
+    { line: 'run ended: error | boom | exit code 1', word: 'error', detail: 'boom', exitCode: 1 },
+  ] as const
+
+  it.each(cases)('$word: $detail', ({ line, word, detail, exitCode }) => {
+    expect(parseRunEndLine(line)).toEqual({ word, detail, exitCode })
+    expect(RUN_END_EXIT_CODES[word]).toBe(exitCode)
+    for (const style of ['lowmach', 'kEpsilon', 'none'] as const) {
+      expect(classifyLine(line, style)).toEqual([{ kind: 'runEnded', word, detail, exitCode }])
+    }
+  })
+
+  it('keeps a detail with " | " whole, keeps an empty detail, and drops a trailing CR', () => {
+    expect(parseRunEndLine('run ended: error | a | b | exit code 1')).toEqual({ word: 'error', detail: 'a | b', exitCode: 1 })
+    expect(parseRunEndLine('run ended: error |  | exit code 1')).toEqual({ word: 'error', detail: '', exitCode: 1 })
+    expect(parseRunEndLine('run ended: budget | 30 iterations reached | exit code 0\r')).toEqual({ word: 'budget', detail: '30 iterations reached', exitCode: 0 })
+  })
+
+  it('does not mistake old or foreign lines for a run end', () => {
+    expect(parseRunEndLine('run ended: timeout | x | exit code 4')).toBeNull()
+    expect(parseRunEndLine('  run ended: budget | x | exit code 0')).toBeNull()
+    expect(parseRunEndLine('run ended: budget | x')).toBeNull()
+    expect(parseRunEndLine('converged')).toBeNull()
+    expect(parseRunEndLine('error: boom')).toBeNull()
+    expect(classifyLine('error: boom', 'lowmach')).toEqual([{ kind: 'error', message: 'boom' }])
   })
 })

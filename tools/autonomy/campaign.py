@@ -171,7 +171,7 @@ def _read_jsonl(path):
 
 def load_manifest(source, mode, ids=None, limit=None):
     """The manifest rows, split-sealed and equal to the official corpus rows."""
-    if source in ("tuning", "test"):
+    if source in ("tuning", "test", "test2"):
         rows = split.load(source, mode)
     else:
         with open(source, "r", encoding="utf-8") as f:
@@ -204,10 +204,16 @@ def load_manifest(source, mode, ids=None, limit=None):
 
 
 def manifest_sha(source):
-    """The lock's sha for tuning/test, the file bytes' sha for a FILE."""
+    """The lock's sha for tuning/test/test2, the file bytes' sha for a FILE."""
     if source in ("tuning", "test"):
         lock = split.read_lock(os.path.join(split.MANIFEST_DIR, "split.lock"))
         return lock[source].split(" ")[-1]
+    if source == "test2":
+        lock_path = os.path.join(split.fresh_dir(split.FRESH_SPLITS[source]),
+                                 "split.lock")
+        if not os.path.isfile(lock_path):
+            raise split.SplitError("no split.lock in %s" % lock_path)
+        return split.read_lock(lock_path)["test"].split(" ")[-1]
     return _sha256_of_file(source)
 
 
@@ -797,7 +803,9 @@ def run_attempt(c, gctx, config, a, n_leaves):
                              timed_out=job["timed_out"], wall_seconds=job["seconds"],
                              check_exit=check_exit,
                              case_dir=case if job["exit_code"] == 0 else None,
-                             gates=c.gates)
+                             gates=c.gates,
+                             sharp_edge_length_m=gctx["fp"]["sharp_edge_length_m"],
+                             plane_path=preflight.plane_path(config, gctx["fp"]))
         if audited:
             gctx["audit"].append({"attempt": a, "check_exit": check_exit,
                                   "content_sha256": sc["content_sha256"],
@@ -1092,7 +1100,7 @@ def _run_system(c, gctx, mrow):
                 and len(history) < k:
             c.append_record(gid, a, prop["record"])
             rm_written = True
-            op = c.hooks["optimiser"](ctx, history)
+            op = c.hooks["optimiser"](dict(ctx, cwd=c.dir), history)
             _check_hook(op, "optimiser", cfg, c.knobs)
             if op["verdict"] == "apply" and (veto is None or veto(op["config"]) == []):
                 nxt = ("optimiser", op)
@@ -1201,8 +1209,8 @@ def run_campaign(opts, *, attempt_fn=None, probe_fn=None, snap_fn=None, hooks=No
               "tag": o["tag"], "mode": o["mode"], "system": o["system"],
               "ablate": sorted(o["ablate"]), "split_mode": split_mode,
               "manifest": {"source": o["manifest"] if o["manifest"] in ("tuning",
-                           "test") else os.path.abspath(o["manifest"]).replace(
-                               os.sep, "/"),
+                           "test", "test2") else os.path.abspath(
+                               o["manifest"]).replace(os.sep, "/"),
                            "sha256": manifest_sha(o["manifest"]), "n": len(rows)},
               "geometry_ids": [r["geometry_id"] for r in rows],
               "binary": os.path.basename(o["binary"]),
@@ -2204,7 +2212,7 @@ def _g5_observe(H):
 
 
 _G6_IDS = ("D-1-010", "F-1-009", "G-1-016", "G-1-026", "F-1-005")
-_G6_SCRIPT = {"D-1-010": ["pass"], "F-1-009": ["F3a"], "G-1-016": ["F3a"],
+_G6_SCRIPT = {"D-1-010": ["pass"], "F-1-009": ["F3d"], "G-1-016": ["F3a"],
               "F-1-005": ["retreat_snapped"]}
 
 
@@ -2369,16 +2377,6 @@ def _hook_record(layer, rid, verdict, edits, message):
 def _g9_hooks(H):
     pid = "-".join(("PR", "FAKE"))
     oid = "-".join(("OPT", "FAKE"))
-    for mode, want in (("rules+opt", "optimise.py"),):
-        out = os.path.join(H["tmp"], "g9-missing-" + mode.replace("+", "-"))
-        try:
-            run_campaign({"manifest": "tuning", "mode": mode, "out": out,
-                          "ids": ["D-1-010"], "streams": 2, "quiet": True})
-        except CampaignError as e:
-            assert want in str(e), str(e)
-        else:
-            raise CampaignError("group 9: %s was not refused" % mode)
-        assert not os.path.exists(out)
     explain.TEMPLATES[pid] = {"layer": "prior", "title": "the selftest prior",
                               "because": "the selftest exercises the hook seam"}
     explain.TEMPLATES[oid] = {"layer": "optimiser",
@@ -2392,7 +2390,9 @@ def _g9_hooks(H):
                     "record": _hook_record("prior", pid, "abstain", [],
                                            "the selftest prior abstains")}
         after = copy.deepcopy(cfg)
-        after.setdefault("snap", {})["smoothing_passes"] = 1
+        # a snap knob off the R-PLANE predicate: smoothing_passes 1 on this sharp
+        # plane body is refused since 2026-09-26 (WL-SHARP-FT0 vetoes the pick)
+        after.setdefault("snap", {})["iterations"] = 10
         edits = rules.diff_edits(cfg, after)
         return {"verdict": "apply", "config": after, "edits": edits,
                 "record": _hook_record("prior", pid, "apply", edits,
@@ -2702,6 +2702,29 @@ def _child_env():
     return dict(os.environ, PYTHONIOENCODING="utf-8")
 
 
+def _g14_fresh_split(H):
+    for mode in ("tuning", "rules"):
+        try:
+            load_manifest("test2", mode)
+        except split.SplitSealed as e:
+            assert "sealed" in str(e) and mode in str(e), e
+        else:
+            raise AssertionError("mode %r read the fresh split" % mode)
+    lock_path = os.path.join(split.fresh_dir(split.FRESH_SPLITS["test2"]),
+                             "split.lock")
+    if os.path.isfile(lock_path):
+        want = split.read_lock(lock_path)["test"].split(" ")[-1]
+        assert manifest_sha("test2") == want, (manifest_sha("test2"), want)
+    else:
+        try:
+            manifest_sha("test2")
+        except split.SplitError as e:
+            assert str(lock_path) in str(e), e
+        else:
+            raise AssertionError("manifest_sha('test2') without a lock passed")
+    return {}
+
+
 
 
 def selftest():
@@ -2750,7 +2773,7 @@ def selftest():
         _group("veto and ablation: PF-BUDGET refuses attempt 1 (REFUSED, 0 rows); "
                "-preflight runs with the refusal recorded; -remedies ends after 1 "
                "attempt (EXHAUSTED, K = 1)", _g8_veto_ablation, H)
-        _group("hooks: rules+opt refused without optimise.py (prior.py is present); "
+        _group("hooks: prior.py and optimise.py are present; "
                "a fake prior decides attempt 1; a fake optimiser runs "
                "after EXHAUSTED with its prediction before t_start; replay "
                "reproduces both", _g9_hooks, H)
@@ -2768,6 +2791,8 @@ def selftest():
                "replay {d} decisions, {a} audited reruns equal, no polyMesh left, "
                "peak {peak} MiB; the CLI refuses the sealed test manifest and "
                "7 streams", _g13_live, H)
+        _group("fresh split: test2 sealed outside evaluate, manifest_sha reads "
+               "the fresh lock or is refused naming its path", _g14_fresh_split, H)
         print("SELFTEST PASS", flush=True)
         return 0
     except CampaignError as e:

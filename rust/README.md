@@ -41,6 +41,7 @@ cargo test --release --lib provenance_audit
 ```
 cargo test --release   1,645 passed, 0 failed, 4 ignored (lib 크레이트)
                        1,774 passed, 0 failed, 6 ignored (모든 타깃 합계)
+cargo test --release --features single --target-dir target/single   1,577 passed, 0 failed, 442 ignored (lib, f32 — SPEC-LIT §112.3)
 ofgpu-validate         833 / 833 checks passed
                        (788개는 실시간 계산, 45개는 기록된 측정값 재생)
 ```
@@ -82,6 +83,7 @@ ofgpu-validate         833 / 833 checks passed
 ```bash
 cargo build --release
 cargo test --release
+cargo test --release --features single --target-dir target/single
 ```
 
 `build.rs`가 나머지를 합니다 — CUDA 툴킷 탐색, `vswhere` → `vcvars64.bat`로 MSVC
@@ -91,7 +93,7 @@ cargo test --release
 | 환경변수 / feature | 뜻 |
 |---|---|
 | `OFGPU_CUDA_ARCH` | 대상 아키텍처, 기본 `120` (RTX 50xx) |
-| `--features single` | f32로 전환. 커널까지 같이 바뀝니다 |
+| `--features single` | f32로 전환. 커널까지 같이 바뀝니다. 위 두 번째 `cargo test`가 이 빌드를 따로(`target/single`) 시험합니다 — SPEC-LIT §112 |
 | `--features amgx` | AMGX 압력 backend. 기본 비활성 — `../README.md` 제한사항 참고 |
 
 > **PTX가 아니라 CUBIN을 내보냅니다.** 드라이버는 자기가 아는 ISA 버전의 PTX만
@@ -102,12 +104,14 @@ cargo test --release
 
 ## 실행
 
-바이너리는 18개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
+바이너리는 19개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
 
 ```bash
 cargo run --release --bin ofgpu-generate-mesh -- channel ../cases/ch 200 120 1
 cargo run --release --bin ofgpu-k-epsilon     -- ../cases/ch -iters 4000 -check 400
 cargo run --release --bin ofgpu-validate
+# 영역 레이아웃 (SPEC-LIT §97): cellZones가 있는 polyMesh를 영역별 polyMesh + regions.json으로 나누고 검사
+cargo run --release --bin ofgpu-regions -- split <polyMeshDir> <outDir> && cargo run --release --bin ofgpu-regions -- check <outDir>/regions.json
 cargo run --release --bin ofgpu-bench         -- 2000 1000 1 -iters 30
 
 # 저-마하 가변밀도 솔버 (SPEC-LIT §25/§26). JSONC 케이스를 읽습니다:
@@ -163,7 +167,7 @@ rust/
     ├── vof.rs                                 2상 VOF
     ├── blockgen.rs restart.rs potential_flow.rs
     ├── reference.rs                           독립 CPU 구현 (검증 전용)
-    └── bin/                                   바이너리 18개
+    └── bin/                                   바이너리 19개
 ```
 
 ## 알려진 제약

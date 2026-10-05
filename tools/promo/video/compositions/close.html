@@ -1,0 +1,185 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>close</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #close-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #close-bgwrap {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+        }
+        #close-bgwrap img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          opacity: 0.12;
+          filter: blur(3px) brightness(0.5);
+        }
+        #close-glow {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          margin-left: -700px;
+          margin-top: -450px;
+          width: 1400px;
+          height: 900px;
+          background: radial-gradient(closest-side, rgba(255, 90, 54, 0.5), rgba(255, 90, 54, 0) 70%);
+          opacity: 0;
+          z-index: 1;
+          will-change: opacity, transform;
+        }
+        #close-col {
+          position: absolute;
+          inset: 0;
+          z-index: 2;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 72px 96px 88px 96px;
+        }
+        #close-inner {
+          max-width: 1500px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+        }
+        #close-name {
+          font-size: 104px;
+          font-weight: 800;
+          color: #f1f3f5;
+          line-height: 1.1;
+          text-align: center;
+        }
+        #close-product {
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 40px;
+          font-weight: 700;
+          color: #ff5a36;
+          margin-top: 10px;
+        }
+        #close-ko {
+          font-size: 34px;
+          font-weight: 600;
+          color: #f1f3f5;
+          margin-top: 22px;
+          text-align: center;
+        }
+        #close-en {
+          font-size: 26px;
+          font-weight: 400;
+          color: #a7afb8;
+          margin-top: 6px;
+          text-align: center;
+        }
+        #close-company {
+          font-size: 22px;
+          font-weight: 400;
+          color: #f1f3f5;
+          margin-top: 20px;
+          text-align: center;
+        }
+        #close-rule {
+          width: 120px;
+          height: 2px;
+          background: rgba(255, 255, 255, 0.14);
+          margin-top: 24px;
+        }
+        #close-credits {
+          align-self: flex-start;
+          margin-top: 24px;
+          opacity: 0;
+        }
+        #close-credits div {
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.55;
+        }
+        #close-disclaimer {
+          margin-top: 22px;
+          text-align: center;
+          opacity: 0;
+        }
+        #close-disclaimer-ko {
+          font-size: 22px;
+          font-weight: 400;
+          color: #f1f3f5;
+        }
+        #close-disclaimer-en {
+          font-size: 22px;
+          font-weight: 400;
+          color: #f1f3f5;
+          margin-top: 4px;
+        }
+      </style>
+      <div id="root" data-composition-id="close" data-width="1920" data-height="1080">
+        <div id="close-wrap">
+          <div id="close-bgwrap">
+            <img src="assets/stills/streamlines.png" alt="" />
+          </div>
+          <div id="close-glow"></div>
+          <div id="close-col">
+            <div id="close-inner">
+              <div id="close-name">Iterations-CFD</div>
+              <div id="close-product">meteor-cfd</div>
+              <div id="close-ko">GPU 상주 유한체적 전산유체역학 솔버</div>
+              <div id="close-en">A GPU-resident finite volume CFD solver</div>
+              <div id="close-company">주식회사 이터레이션즈 · 협력 및 기여 주식회사 메테오시뮬레이션 · Iterations Co., Ltd. · in collaboration with Meteo Simulation Co., Ltd.</div>
+              <div id="close-rule"></div>
+              <div id="close-credits">
+                <div>Car model: "F1 2026 concept" by Qvist_Designs, CC BY 4.0, via Sketchfab.</div>
+                <div>Licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)</div>
+                <div>Changes: scaled to metres, closed into a watertight simulation surface, meshed and solved with meteor-cfd; the colours on the car, the streamlines and the slice are CFD results and are not part of the original model.</div>
+                <div>Rendered with Blender 5.1.2 (Cycles).</div>
+              </div>
+              <div id="close-disclaimer">
+                <div id="close-disclaimer-ko">시연용 계산입니다 - 화면의 결과는 검증된 공력 수치가 아닙니다.</div>
+                <div id="close-disclaimer-en">Demonstration run - the results shown are not validated aerodynamic figures.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#close-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
+        tl.fromTo("#close-glow", { opacity: 0, scale: 0.85 }, { opacity: 0.25, scale: 1, duration: 0.9, ease: "power2.out" }, 0.3);
+        tl.fromTo("#close-name", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.3);
+        tl.fromTo("#close-product", { opacity: 0, y: 50 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.42);
+        tl.fromTo("#close-ko", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.52);
+        tl.fromTo("#close-en", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.14, ease: "power4.out" }, 0.62);
+        tl.fromTo("#close-company", { opacity: 0, y: 36 }, { opacity: 1, y: 0, duration: 0.14, ease: "power4.out" }, 0.72);
+        tl.fromTo("#close-rule", { opacity: 0 }, { opacity: 1, duration: 0.12, ease: "power1.out" }, 0.8);
+        tl.fromTo("#close-credits", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 2.0);
+        tl.fromTo("#close-disclaimer", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 2.2);
+        tl.to("#close-wrap", { opacity: 0, duration: 0.8, ease: "none" }, 8.2);
+        window.__timelines["close"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

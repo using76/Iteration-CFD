@@ -375,7 +375,40 @@ fn layer_patch_json(p: &super::layers::PatchLayers) -> serde_json::Value {
         "t1_mean": p.t1_mean,
         "t1_min": p.t1_min,
         "dropped": p.dropped,
+        "drop_cause": p.drop_cause.map(|c| c.as_str()),
+        "n_reseated_points": p.n_reseated_points,
+        "beta_rungs": p.beta_rungs,
+        "level_n_non_orth_max_deg": p.level_n_non_orth_max_deg,
     })
+}
+
+/// The layers row's `ladder`: one entry per measurement either ladder of
+/// (92.47) took, in the order taken (SPEC-LIT §92.13).
+fn ladder_json(ladder: &[super::layers::LadderEntry]) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = ladder
+        .iter()
+        .map(|e| {
+            let gates: Vec<serde_json::Value> = e
+                .gates
+                .iter()
+                .map(|(g, n)| json!({ "gate": super::layers::gate_label(*g), "n_failed": n }))
+                .collect();
+            json!({
+                "ladder": e.ladder.as_str(),
+                "round": e.round,
+                "rung": e.rung,
+                "beta_rung": e.beta_rung,
+                "patches": e.patches,
+                "gates": gates,
+                "g4_level_n": e.g4_level_n,
+                "outcome": e.outcome.as_str(),
+                "give_up": e.give_up.map(|c| c.as_str()),
+                "dropped": e.dropped,
+                "beta_points": e.beta_points,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
 }
 
 /// The layers stage on a split run: `layers.patches` names the SPLIT patch
@@ -439,6 +472,7 @@ fn layers_regions_stage(
                 "skipped": true,
                 "n_layer_cells": 0,
                 "patches": [],
+                "ladder": [],
             }));
             continue;
         }
@@ -459,6 +493,7 @@ fn layers_regions_stage(
             "n_split_sides": lay.report.n_split_sides,
             "retreats": lay.report.retreats,
             "patches": patches,
+            "ladder": ladder_json(&lay.report.ladder),
         }));
         totals.0 += lay.report.n_layer_cells;
         totals.1 += lay.report.n_layer_points;
@@ -624,6 +659,24 @@ pub fn run(
             })
         })
         .collect();
+    // (92.62), read off the mesh the stage returns and moving nothing: the
+    // sharp length and the part of it the wall edges hold within a tenth of
+    // h_f, with the attraction on or off; null only when the feature
+    // extraction refuses the run's feature angle.
+    let feature_capture = match super::snap::feature_capture(
+        &snapped.mesh,
+        surf,
+        Some(&cast_region),
+        cfg.refinement.feature_angle_deg as Scalar,
+        (0.1 * h_f) as Scalar,
+    ) {
+        Ok(c) => json!({
+            "sharp_length_m": c.sharp_length,
+            "captured_length_m": c.captured_length,
+            "tol_m": c.tol,
+        }),
+        Err(_) => serde_json::Value::Null,
+    };
     let counts = json!({
         "n_boundary_points": snapped.report.n_boundary_points,
         "iterations": snapped.report.iterations,
@@ -643,6 +696,7 @@ pub fn run(
         "max_over_h": snapped.report.max_residual as f64 / h_f,
         "n_pinned_boundary": snapped.report.n_pinned_boundary,
         "area_ratio": area_ratio,
+        "feature_capture": feature_capture,
     });
     let log = report_lines(progress, &snapped.report.summary());
     elapsed(progress, Stage::Snap, seconds);
@@ -690,6 +744,7 @@ pub fn run(
             "n_split_sides": 0,
             "retreats": 0,
             "patches": [],
+            "ladder": [],
         });
         let log = report_lines(
             progress,
@@ -718,6 +773,7 @@ pub fn run(
             "n_split_sides": lay.report.n_split_sides,
             "retreats": lay.report.retreats,
             "patches": patches,
+            "ladder": ladder_json(&lay.report.ladder),
         });
         let log = report_lines(progress, &lay.report.summary());
         elapsed(progress, Stage::Layers, seconds);
@@ -985,6 +1041,7 @@ mod tests {
                 }],
                 feature_angle_deg: 30.0,
                 max_level: 1,
+                boxes: Vec::new(),
             },
             castellation: CastellationSpec::default(),
             snap: SnapSpec::default(),
@@ -1056,6 +1113,7 @@ mod tests {
                 }],
                 feature_angle_deg: 30.0,
                 max_level: 1,
+                boxes: Vec::new(),
             },
             castellation: CastellationSpec {
                 bodies: vec![BodySpec {
@@ -1179,6 +1237,46 @@ mod tests {
             "{lines:?}"
         );
         assert!(!lines.iter().any(|l| l.starts_with("--- castellate:")));
+    }
+
+    /// §92.16 end to end: the box [0,1]^3 refines exactly the one base cell
+    /// it holds (its 7 siblings), the summary carries the box, and a config
+    /// without boxes serialises no `boxes` key into the summary at all.
+    #[test]
+    fn a_refinement_box_adds_exactly_its_cells_end_to_end() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out0, _) = run_recording(&cfg, &surf, Some(Stage::Octree));
+        let n0 = out0.stages[0].counts.get("n_leaves").unwrap().as_u64().unwrap();
+
+        let mut cfgb = cube_config();
+        cfgb.refinement.boxes = vec![crate::automesher::RefinementBox {
+            min: [0.0; 3],
+            max: [1.0; 3],
+            level: 1,
+        }];
+        let (outb, _) = run_recording(&cfgb, &surf, Some(Stage::Octree));
+        let nb = outb.stages[0].counts.get("n_leaves").unwrap().as_u64().unwrap();
+        assert_eq!(nb, n0 + 7, "the box adds exactly its own cell's 7 siblings");
+
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let sb = summary_json(&cfgb, "cube.automesher.json", &surf, &outb, &ident);
+        let boxes =
+            sb["config"]["refinement"]["boxes"].as_array().expect("boxes in the summary");
+        assert_eq!(boxes.len(), 1, "{}", sb["config"]["refinement"]);
+        assert_eq!(boxes[0]["level"], serde_json::json!(1));
+        assert_eq!(boxes[0]["min"], serde_json::json!([0.0, 0.0, 0.0]));
+        let s0 = summary_json(&cfg, "cube.automesher.json", &surf, &out0, &ident);
+        assert!(
+            s0["config"]["refinement"].get("boxes").is_none(),
+            "a config without boxes must not carry a boxes key: {}",
+            s0["config"]["refinement"]
+        );
     }
 
     #[test]
@@ -1738,8 +1836,137 @@ mod tests {
             "t1_mean",
             "t1_min",
             "dropped",
+            "n_reseated_points",
+            "beta_rungs",
+            "level_n_non_orth_max_deg",
         ] {
             assert!(r.get(key).is_some(), "missing {key} in {r}");
+        }
+    }
+
+    /// `cube_config()` end to end: the mesh the run emits is the one it
+    /// emitted when the layer stage's castellated goldens were written, bit
+    /// for bit, hashed as they are.
+    #[test]
+    fn the_cube_config_run_is_golden() {
+        const GOLDEN: &str = "3b257be84dc343e6b66432eca0ead5d7e150203a2c5984001e28a4b3fd95d5e3";
+        let (out, _) = run_recording(&cube_config(), &cube_surface(), None);
+        let got = crate::automesher::layers::tests::castellated_goldens::mesh_sha256(&out.mesh);
+        eprintln!("golden cube_config_end_to_end = {got}");
+        assert_eq!(got, GOLDEN);
+    }
+
+    /// The snap row carries (92.62)'s capture of the mesh the stage returns:
+    /// the cube's 12 edges of 1 m, a tenth of the finest cell as the
+    /// tolerance, and a captured length above 0 and at most the sharp one.
+    #[test]
+    fn the_snap_row_reports_the_feature_capture() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let fc = &s["stages"][2]["feature_capture"];
+        eprintln!("cube_config feature_capture {fc}");
+        let sharp = fc["sharp_length_m"].as_f64().unwrap();
+        let got = fc["captured_length_m"].as_f64().unwrap();
+        assert!((sharp - 12.0).abs() <= 1e-12 * 12.0, "sharp {sharp}");
+        assert_eq!(fc["tol_m"].as_f64().unwrap(), 0.1 * 0.5);
+        assert!(0.0 < got && got <= sharp * (1.0 + 1e-12), "captured {got} of {sharp}");
+    }
+
+    /// With the cube declared a body its wall is the region interface, and
+    /// the capture reads the interface faces' edges: the same 12 m of sharp
+    /// length, and some of it held.
+    #[test]
+    fn a_body_run_captures_along_its_interface() {
+        let cfg = body_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let fc = &s["stages"][2]["feature_capture"];
+        eprintln!("body_config feature_capture {fc}");
+        let sharp = fc["sharp_length_m"].as_f64().unwrap();
+        let got = fc["captured_length_m"].as_f64().unwrap();
+        assert!((sharp - 12.0).abs() <= 1e-12 * 12.0, "sharp {sharp}");
+        assert!(0.0 < got && got <= sharp * (1.0 + 1e-12), "captured {got} of {sharp}");
+    }
+
+    /// The snapped cube of `cube_config()` loses its layers: the layers row
+    /// carries the trace - the inner ladder of round 0 first, the outer pass
+    /// the run returned on last - and the cube's row names a cause, the one
+    /// the last give-up naming the cube names.
+    #[test]
+    fn the_layer_row_names_its_drop_cause_and_carries_its_ladder() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let row = &s["stages"][4];
+        let ladder = row["ladder"].as_array().expect("the layers row has a ladder");
+        for e in ladder {
+            eprintln!("cube_config ladder {e}");
+        }
+        assert_eq!(ladder[0]["ladder"], "inner");
+        assert_eq!(ladder[0]["round"], 0);
+        let last = ladder.last().unwrap();
+        assert_eq!(last["ladder"], "outer");
+        assert_eq!(last["outcome"], "pass");
+        let p = &row["patches"][0];
+        assert_eq!(p["name"], "cube");
+        let cause = p["drop_cause"].as_str().expect("the dropped cube names its cause");
+        let classes = ["inner_gate", "outer_gate", "thin_after_caps", "thin_proposed", "zero_disp"];
+        assert!(classes.contains(&cause), "{cause}");
+        let quit = ladder.iter().rev().find(|e| e["dropped"] == "cube").expect("a give-up");
+        assert_eq!(quit["give_up"], cause);
+        for key in ["ladder", "round", "rung", "patches", "gates", "g4_level_n", "outcome"] {
+            assert!(quit.get(key).is_some(), "missing {key} in {quit}");
+        }
+    }
+
+    /// On a split run each region's layers row carries its own trace, ending
+    /// on the outer pass, and a patch row names a cause only where it was
+    /// dropped.
+    #[test]
+    fn each_region_layer_row_carries_its_ladder() {
+        let cfg = planar_config();
+        let surf = planar_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let rows = out.stages[4].counts["regions"].as_array().cloned().unwrap();
+        for r in &rows {
+            let ladder = r["ladder"].as_array().expect("a region row has a ladder");
+            eprintln!("region {} ladder entries {}", r["name"], ladder.len());
+            if r.get("skipped").is_some() {
+                assert!(ladder.is_empty(), "{r}");
+                continue;
+            }
+            let last = ladder.last().expect("a region that ran has a trace");
+            assert_eq!(last["outcome"], "pass", "{r}");
+            for p in r["patches"].as_array().unwrap() {
+                if p["dropped"].is_null() {
+                    assert!(p["drop_cause"].is_null(), "{p}");
+                }
+                if !p["drop_cause"].is_null() {
+                    assert!(!p["dropped"].is_null(), "{p}");
+                }
+            }
         }
     }
 }

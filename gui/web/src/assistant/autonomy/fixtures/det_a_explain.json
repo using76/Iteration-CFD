@@ -1,0 +1,1595 @@
+{
+ "$comment": "explain.explain_geometry(rows, end_record['records']) of tools/autonomy/explain.py at mesh-tree commit 4f56fd1, for every geometry of the det_a campaign (gui/server/src/tools/fixtures/autonomy/det_a) that has attempt rows; written by the supervisor, not by the studio.",
+ "campaign_id": "det_a",
+ "geometries": {
+  "A-1-002": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "coarsen the ladder until the predicted cells fit the budget",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "wing 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 1.014247224132668,
+      "n_cells": 298435,
+      "p99_over_hf": 0.5114175030923409,
+      "pinned_frac": 0.10465316921661107,
+      "seconds": 171.8220442000311,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 298435, pinned 0.104653, p99/h_f 0.511418, max/h_f 1.01425, BLC_8 0, BLC_full 0, 171.822 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-BUDGET",
+     "stage_focus": null,
+     "why": {
+      "observable": "predicted_cells",
+      "op": "<=",
+      "source": "rules.predict_cells (docs/15 §C R-BUDGET)",
+      "threshold": 1400000.0,
+      "value": 2537987
+     },
+     "why_text": "predicted_cells = 2537987 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "wing 0 layers, full 0, not delivered (min_thickness)",
+     "moved": {
+      "after": 0.0,
+      "before": 0.10465316921661107,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.104653 -> 0 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [
+       "F3d"
+      ],
+      "max_over_hf": 0.03289290908807874,
+      "n_cells": 298435,
+      "p99_over_hf": 0.029910912004544744,
+      "pinned_frac": 0.0,
+      "seconds": 34.7146201999858,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:min_thickness, flags F3d, cells 298435, pinned 0, p99/h_f 0.0299109, max/h_f 0.0328929, BLC_8 0, BLC_full 0, 34.7146 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.10465316921661107
+     },
+     "why_text": "outcome.pinned_frac = 0.104653 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "A-1-002",
+   "n_attempts": 2,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# A-1-002: 2 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-BUDGET, stage focus none\ndecided: coarsen the ladder until the predicted cells fit the budget\nwhy: predicted_cells = 2537987 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 298435, pinned 0.104653, p99/h_f 0.511418, max/h_f 1.01425, BLC_8 0, BLC_full 0, 171.822 s\nlayers: wing 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.104653 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict fail, failure class layer_dropped:min_thickness, flags F3d, cells 298435, pinned 0, p99/h_f 0.0299109, max/h_f 0.0328929, BLC_8 0, BLC_full 0, 34.7146 s\nlayers: wing 0 layers, full 0, not delivered (min_thickness)\nmoved: outcome.pinned_frac 0.104653 -> 0 (attempt 1 -> 2)\n"
+  },
+  "A-1-005": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "coarsen the ladder until the predicted cells fit the budget",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "wing 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 2.2170386459936298,
+      "n_cells": 192012,
+      "p99_over_hf": 0.9874039636157624,
+      "pinned_frac": 0.07851657235246565,
+      "seconds": 116.7039100000402,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 192012, pinned 0.0785166, p99/h_f 0.987404, max/h_f 2.21704, BLC_8 0, BLC_full 0, 116.704 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-BUDGET",
+     "stage_focus": null,
+     "why": {
+      "observable": "predicted_cells",
+      "op": "<=",
+      "source": "rules.predict_cells (docs/15 §C R-BUDGET)",
+      "threshold": 1400000.0,
+      "value": 2845668
+     },
+     "why_text": "predicted_cells = 2845668 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "wing 0 layers, full 0, not delivered (min_thickness)",
+     "moved": {
+      "after": 0.0,
+      "before": 0.07851657235246565,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.0785166 -> 0 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 0.6672007189369202,
+      "n_cells": 192012,
+      "p99_over_hf": 0.042809301759111525,
+      "pinned_frac": 0.0,
+      "seconds": 57.01350470003672,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:min_thickness, flags F3c F3d, cells 192012, pinned 0, p99/h_f 0.0428093, max/h_f 0.667201, BLC_8 0, BLC_full 0, 57.0135 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.07851657235246565
+     },
+     "why_text": "outcome.pinned_frac = 0.0785166 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "A-1-005",
+   "n_attempts": 2,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# A-1-005: 2 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-BUDGET, stage focus none\ndecided: coarsen the ladder until the predicted cells fit the budget\nwhy: predicted_cells = 2845668 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 192012, pinned 0.0785166, p99/h_f 0.987404, max/h_f 2.21704, BLC_8 0, BLC_full 0, 116.704 s\nlayers: wing 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.0785166 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict fail, failure class layer_dropped:min_thickness, flags F3c F3d, cells 192012, pinned 0, p99/h_f 0.0428093, max/h_f 0.667201, BLC_8 0, BLC_full 0, 57.0135 s\nlayers: wing 0 layers, full 0, not delivered (min_thickness)\nmoved: outcome.pinned_frac 0.0785166 -> 0 (attempt 1 -> 2)\n"
+  },
+  "B-1-003": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "coarsen the ladder until the predicted cells fit the budget",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.06637991322651451,
+      "n_cells": 470872,
+      "p99_over_hf": 0.06197322469564096,
+      "pinned_frac": 0.0,
+      "seconds": 80.19531490001827,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 470872, pinned 0, p99/h_f 0.0619732, max/h_f 0.0663799, BLC_8 0, BLC_full 0, 80.1953 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-BUDGET",
+     "stage_focus": null,
+     "why": {
+      "observable": "predicted_cells",
+      "op": "<=",
+      "source": "rules.predict_cells (docs/15 §C R-BUDGET)",
+      "threshold": 1400000.0,
+      "value": 1471884
+     },
+     "why_text": "predicted_cells = 1471884 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "B-1-003",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# B-1-003: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-BUDGET, stage focus none\ndecided: coarsen the ladder until the predicted cells fit the budget\nwhy: predicted_cells = 1471884 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))\nedits: none\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 470872, pinned 0, p99/h_f 0.0619732, max/h_f 0.0663799, BLC_8 0, BLC_full 0, 80.1953 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\n"
+  },
+  "B-1-011": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "coarsen the ladder until the predicted cells fit the budget",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 0.7938861633408338,
+      "n_cells": 491168,
+      "p99_over_hf": 0.6574241687771606,
+      "pinned_frac": 0.24851206014409521,
+      "seconds": 239.34646829997655,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 491168, pinned 0.248512, p99/h_f 0.657424, max/h_f 0.793886, BLC_8 0, BLC_full 0, 239.346 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-BUDGET",
+     "stage_focus": null,
+     "why": {
+      "observable": "predicted_cells",
+      "op": "<=",
+      "source": "rules.predict_cells (docs/15 §C R-BUDGET)",
+      "threshold": 1400000.0,
+      "value": 1480716
+     },
+     "why_text": "predicted_cells = 1480716 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))"
+    },
+    {
+     "attempt": 2,
+     "decided": "coarsen the whole refinement ladder one level, not below the y+ floor",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": 6,
+       "pointer": "/refinement/levels/0/bands/0/level",
+       "to": 5
+      },
+      {
+       "from": 5,
+       "pointer": "/refinement/levels/0/bands/1/level",
+       "to": 4
+      },
+      {
+       "from": 4,
+       "pointer": "/refinement/levels/0/bands/2/level",
+       "to": 3
+      },
+      {
+       "from": 6,
+       "pointer": "/refinement/levels/0/feature_level",
+       "to": 5
+      },
+      {
+       "from": 6,
+       "pointer": "/refinement/max_level",
+       "to": 5
+      }
+     ],
+     "edits_text": "/refinement/levels/0/bands/0/level 6 -> 5; /refinement/levels/0/bands/1/level 5 -> 4; /refinement/levels/0/bands/2/level 4 -> 3; /refinement/levels/0/feature_level 6 -> 5; /refinement/max_level 6 -> 5",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": {
+      "after": 0.26408602150537636,
+      "before": 0.24851206014409521,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.248512 -> 0.264086 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 0.8639897683192381,
+      "n_cells": 64800,
+      "p99_over_hf": 0.6328619072420131,
+      "pinned_frac": 0.26408602150537636,
+      "seconds": 31.290242900024168,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 64800, pinned 0.264086, p99/h_f 0.632862, max/h_f 0.86399, BLC_8 0, BLC_full 0, 31.2902 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-WALL",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.24851206014409521
+     },
+     "why_text": "outcome.pinned_frac = 0.248512 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    },
+    {
+     "attempt": 3,
+     "decided": "coarsen the whole refinement ladder one level, not below the y+ floor",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": 5,
+       "pointer": "/refinement/levels/0/bands/0/level",
+       "to": 4
+      },
+      {
+       "from": 4,
+       "pointer": "/refinement/levels/0/bands/1/level",
+       "to": 3
+      },
+      {
+       "from": 3,
+       "pointer": "/refinement/levels/0/bands/2/level",
+       "to": 2
+      },
+      {
+       "from": 5,
+       "pointer": "/refinement/levels/0/feature_level",
+       "to": 4
+      },
+      {
+       "from": 5,
+       "pointer": "/refinement/max_level",
+       "to": 4
+      }
+     ],
+     "edits_text": "/refinement/levels/0/bands/0/level 5 -> 4; /refinement/levels/0/bands/1/level 4 -> 3; /refinement/levels/0/bands/2/level 3 -> 2; /refinement/levels/0/feature_level 5 -> 4; /refinement/max_level 5 -> 4",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": {
+      "after": 0.26436781609195403,
+      "before": 0.26408602150537636,
+      "from_attempt": 2,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 3,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.264086 -> 0.264368 (attempt 2 -> 3)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 0.5414993911426002,
+      "n_cells": 11368,
+      "p99_over_hf": 0.42068924644455474,
+      "pinned_frac": 0.26436781609195403,
+      "seconds": 5.823048499994911,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 11368, pinned 0.264368, p99/h_f 0.420689, max/h_f 0.541499, BLC_8 0, BLC_full 0, 5.82305 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-WALL",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.26408602150537636
+     },
+     "why_text": "outcome.pinned_frac = 0.264086 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    },
+    {
+     "attempt": 4,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": {
+      "after": 0.0,
+      "before": 0.26436781609195403,
+      "from_attempt": 3,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 4,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.264368 -> 0 (attempt 3 -> 4)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.017163258670070954,
+      "n_cells": 11368,
+      "p99_over_hf": 0.01579132362683455,
+      "pinned_frac": 0.0,
+      "seconds": 2.210966599988751,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 11368, pinned 0, p99/h_f 0.0157913, max/h_f 0.0171633, BLC_8 0, BLC_full 0, 2.21097 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.26436781609195403
+     },
+     "why_text": "outcome.pinned_frac = 0.264368 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "B-1-011",
+   "n_attempts": 4,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# B-1-011: 4 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-BUDGET, stage focus none\ndecided: coarsen the ladder until the predicted cells fit the budget\nwhy: predicted_cells = 1480716 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 491168, pinned 0.248512, p99/h_f 0.657424, max/h_f 0.793886, BLC_8 0, BLC_full 0, 239.346 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-WALL, stage focus snap\ndecided: coarsen the whole refinement ladder one level, not below the y+ floor\nwhy: outcome.pinned_frac = 0.248512 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /refinement/levels/0/bands/0/level 6 -> 5; /refinement/levels/0/bands/1/level 5 -> 4; /refinement/levels/0/bands/2/level 4 -> 3; /refinement/levels/0/feature_level 6 -> 5; /refinement/max_level 6 -> 5\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 64800, pinned 0.264086, p99/h_f 0.632862, max/h_f 0.86399, BLC_8 0, BLC_full 0, 31.2902 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\nmoved: outcome.pinned_frac 0.248512 -> 0.264086 (attempt 1 -> 2)\n\n## attempt 3: remedy RM-SNAP-WALL, stage focus snap\ndecided: coarsen the whole refinement ladder one level, not below the y+ floor\nwhy: outcome.pinned_frac = 0.264086 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /refinement/levels/0/bands/0/level 5 -> 4; /refinement/levels/0/bands/1/level 4 -> 3; /refinement/levels/0/bands/2/level 3 -> 2; /refinement/levels/0/feature_level 5 -> 4; /refinement/max_level 5 -> 4\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 11368, pinned 0.264368, p99/h_f 0.420689, max/h_f 0.541499, BLC_8 0, BLC_full 0, 5.82305 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\nmoved: outcome.pinned_frac 0.264086 -> 0.264368 (attempt 2 -> 3)\n\n## attempt 4: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.264368 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 11368, pinned 0, p99/h_f 0.0157913, max/h_f 0.0171633, BLC_8 0, BLC_full 0, 2.21097 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\nmoved: outcome.pinned_frac 0.264368 -> 0 (attempt 3 -> 4)\n"
+  },
+  "B-1-015": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "coarsen the ladder until the predicted cells fit the budget",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.06644715768893816,
+      "n_cells": 458754,
+      "p99_over_hf": 0.06067892426752886,
+      "pinned_frac": 0.0,
+      "seconds": 79.45986840000842,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 458754, pinned 0, p99/h_f 0.0606789, max/h_f 0.0664472, BLC_8 0, BLC_full 0, 79.4599 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-BUDGET",
+     "stage_focus": null,
+     "why": {
+      "observable": "predicted_cells",
+      "op": "<=",
+      "source": "rules.predict_cells (docs/15 §C R-BUDGET)",
+      "threshold": 1400000.0,
+      "value": 1445221
+     },
+     "why_text": "predicted_cells = 1445221 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "B-1-015",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# B-1-015: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-BUDGET, stage focus none\ndecided: coarsen the ladder until the predicted cells fit the budget\nwhy: predicted_cells = 1445221 <= 1.4e+06 (rules.predict_cells (docs/15 §C R-BUDGET))\nedits: none\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 458754, pinned 0, p99/h_f 0.0606789, max/h_f 0.0664472, BLC_8 0, BLC_full 0, 79.4599 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\n"
+  },
+  "D-1-002": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "pick the wall level and the growth inside the feasible window",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 8 layers, full 1, delivered",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 1.0,
+      "blc_full_a_priori": 1.0,
+      "failure_class": null,
+      "flags_true": [],
+      "max_over_hf": 2.404564606299065e-14,
+      "n_cells": 87166,
+      "p99_over_hf": 1.9765399309293572e-14,
+      "pinned_frac": 0.0,
+      "seconds": 4.213344499934465,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class none, flags none, cells 87166, pinned 0, p99/h_f 1.97654e-14, max/h_f 2.40456e-14, BLC_8 1, BLC_full 1, 4.21334 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-WIN",
+     "stage_focus": null,
+     "why": {
+      "observable": "h_wall / t1",
+      "op": "in",
+      "source": "docs/15 §D.3",
+      "threshold": [
+       16.000016,
+       41.999957999999985
+      ],
+      "value": 26.201602136181577
+     },
+     "why_text": "h_wall / t1 = 26.2016 in [16, 42] (docs/15 §D.3)"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "D-1-002",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# D-1-002: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-WIN, stage focus none\ndecided: pick the wall level and the growth inside the feasible window\nwhy: h_wall / t1 = 26.2016 in [16, 42] (docs/15 §D.3)\nedits: none\npredicted: none\nobserved: verdict pass, failure class none, flags none, cells 87166, pinned 0, p99/h_f 1.97654e-14, max/h_f 2.40456e-14, BLC_8 1, BLC_full 1, 4.21334 s\nlayers: body 8 layers, full 1, delivered\n"
+  },
+  "D-1-008": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "pick the wall level and the growth inside the feasible window",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 8 layers, full 1, delivered",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 1.0,
+      "blc_full_a_priori": 1.0,
+      "failure_class": null,
+      "flags_true": [],
+      "max_over_hf": 3.2696905703730265e-14,
+      "n_cells": 219330,
+      "p99_over_hf": 3.1722835856381085e-14,
+      "pinned_frac": 0.0,
+      "seconds": 11.42738890007604,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class none, flags none, cells 219330, pinned 0, p99/h_f 3.17228e-14, max/h_f 3.26969e-14, BLC_8 1, BLC_full 1, 11.4274 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-WIN",
+     "stage_focus": null,
+     "why": {
+      "observable": "h_wall / t1",
+      "op": "in",
+      "source": "docs/15 §D.3",
+      "threshold": [
+       16.000016,
+       41.999957999999985
+      ],
+      "value": 25.36231884057971
+     },
+     "why_text": "h_wall / t1 = 25.3623 in [16, 42] (docs/15 §D.3)"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "D-1-008",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# D-1-008: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-WIN, stage focus none\ndecided: pick the wall level and the growth inside the feasible window\nwhy: h_wall / t1 = 25.3623 in [16, 42] (docs/15 §D.3)\nedits: none\npredicted: none\nobserved: verdict pass, failure class none, flags none, cells 219330, pinned 0, p99/h_f 3.17228e-14, max/h_f 3.26969e-14, BLC_8 1, BLC_full 1, 11.4274 s\nlayers: body 8 layers, full 1, delivered\n"
+  },
+  "D-1-010": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "pick the wall level and the growth inside the feasible window",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 8 layers, full 1, delivered",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 1.0,
+      "blc_full_a_priori": 1.0,
+      "failure_class": null,
+      "flags_true": [],
+      "max_over_hf": 1.850127759689967e-14,
+      "n_cells": 45161,
+      "p99_over_hf": 1.846750173182404e-14,
+      "pinned_frac": 0.0,
+      "seconds": 1.8111453000456095,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class none, flags none, cells 45161, pinned 0, p99/h_f 1.84675e-14, max/h_f 1.85013e-14, BLC_8 1, BLC_full 1, 1.81115 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-WIN",
+     "stage_focus": null,
+     "why": {
+      "observable": "h_wall / t1",
+      "op": "in",
+      "source": "docs/15 §D.3",
+      "threshold": [
+       16.000016,
+       41.99995799999999
+      ],
+      "value": 31.83322303110523
+     },
+     "why_text": "h_wall / t1 = 31.8332 in [16, 42] (docs/15 §D.3)"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "D-1-010",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# D-1-010: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-WIN, stage focus none\ndecided: pick the wall level and the growth inside the feasible window\nwhy: h_wall / t1 = 31.8332 in [16, 42] (docs/15 §D.3)\nedits: none\npredicted: none\nobserved: verdict pass, failure class none, flags none, cells 45161, pinned 0, p99/h_f 1.84675e-14, max/h_f 1.85013e-14, BLC_8 1, BLC_full 1, 1.81115 s\nlayers: body 8 layers, full 1, delivered\n"
+  },
+  "E-1-002": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "raise the feature level where the body has sharp edges",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 1.2976615776895437,
+      "n_cells": 77316,
+      "p99_over_hf": 1.0818541594623492,
+      "pinned_frac": 0.2614366361689702,
+      "seconds": 41.93054410000332,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 77316, pinned 0.261437, p99/h_f 1.08185, max/h_f 1.29766, BLC_8 0, BLC_full 0, 41.9305 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-FEAT",
+     "stage_focus": null,
+     "why": {
+      "observable": "fingerprint.sharp_edge_length_m",
+      "op": ">",
+      "source": "features.py",
+      "threshold": 0.0,
+      "value": 4.567297634585376
+     },
+     "why_text": "fingerprint.sharp_edge_length_m = 4.5673 > 0 (features.py)"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": {
+      "after": 0.0,
+      "before": 0.2614366361689702,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.261437 -> 0 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.48117750482646426,
+      "n_cells": 77316,
+      "p99_over_hf": 0.06719637012507787,
+      "pinned_frac": 0.0,
+      "seconds": 19.267824199981987,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 77316, pinned 0, p99/h_f 0.0671964, max/h_f 0.481178, BLC_8 0, BLC_full 0, 19.2678 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.2614366361689702
+     },
+     "why_text": "outcome.pinned_frac = 0.261437 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "E-1-002",
+   "n_attempts": 2,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# E-1-002: 2 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-FEAT, stage focus none\ndecided: raise the feature level where the body has sharp edges\nwhy: fingerprint.sharp_edge_length_m = 4.5673 > 0 (features.py)\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 77316, pinned 0.261437, p99/h_f 1.08185, max/h_f 1.29766, BLC_8 0, BLC_full 0, 41.9305 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.261437 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 77316, pinned 0, p99/h_f 0.0671964, max/h_f 0.481178, BLC_8 0, BLC_full 0, 19.2678 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\nmoved: outcome.pinned_frac 0.261437 -> 0 (attempt 1 -> 2)\n"
+  },
+  "E-1-004": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "pick the wall level and the growth inside the feasible window",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.01651548458241895,
+      "n_cells": 64212,
+      "p99_over_hf": 0.01592007735403642,
+      "pinned_frac": 0.0,
+      "seconds": 15.235913899959996,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 64212, pinned 0, p99/h_f 0.0159201, max/h_f 0.0165155, BLC_8 0, BLC_full 0, 15.2359 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-WIN",
+     "stage_focus": null,
+     "why": {
+      "observable": "h_wall / t1",
+      "op": "in",
+      "source": "docs/15 §D.3",
+      "threshold": [
+       16.000016,
+       59.99994
+      ],
+      "value": 42.66143701682583
+     },
+     "why_text": "h_wall / t1 = 42.6614 in [16, 59.9999] (docs/15 §D.3)"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "E-1-004",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# E-1-004: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-WIN, stage focus none\ndecided: pick the wall level and the growth inside the feasible window\nwhy: h_wall / t1 = 42.6614 in [16, 59.9999] (docs/15 §D.3)\nedits: none\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 64212, pinned 0, p99/h_f 0.0159201, max/h_f 0.0165155, BLC_8 0, BLC_full 0, 15.2359 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\n"
+  },
+  "E-1-005": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "raise the feature level where the body has sharp edges",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 1.30655583008896,
+      "n_cells": 90635,
+      "p99_over_hf": 1.1333437155503028,
+      "pinned_frac": 0.07971014492753623,
+      "seconds": 58.03058369993232,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 90635, pinned 0.0797101, p99/h_f 1.13334, max/h_f 1.30656, BLC_8 0, BLC_full 0, 58.0306 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-FEAT",
+     "stage_focus": null,
+     "why": {
+      "observable": "fingerprint.sharp_edge_length_m",
+      "op": ">",
+      "source": "features.py",
+      "threshold": 0.0,
+      "value": 3.3048845095486463
+     },
+     "why_text": "fingerprint.sharp_edge_length_m = 3.30488 > 0 (features.py)"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": {
+      "after": 0.0,
+      "before": 0.07971014492753623,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.0797101 -> 0 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.4866095862087816,
+      "n_cells": 90635,
+      "p99_over_hf": 0.03512357054893667,
+      "pinned_frac": 0.0,
+      "seconds": 29.88945770007558,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 90635, pinned 0, p99/h_f 0.0351236, max/h_f 0.48661, BLC_8 0, BLC_full 0, 29.8895 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.07971014492753623
+     },
+     "why_text": "outcome.pinned_frac = 0.0797101 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "E-1-005",
+   "n_attempts": 2,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# E-1-005: 2 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-FEAT, stage focus none\ndecided: raise the feature level where the body has sharp edges\nwhy: fingerprint.sharp_edge_length_m = 3.30488 > 0 (features.py)\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 90635, pinned 0.0797101, p99/h_f 1.13334, max/h_f 1.30656, BLC_8 0, BLC_full 0, 58.0306 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.0797101 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 90635, pinned 0, p99/h_f 0.0351236, max/h_f 0.48661, BLC_8 0, BLC_full 0, 29.8895 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\nmoved: outcome.pinned_frac 0.0797101 -> 0 (attempt 1 -> 2)\n"
+  },
+  "F-1-002": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "raise the feature level where the body has sharp edges",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 1.1870235504673656,
+      "n_cells": 52288,
+      "p99_over_hf": 1.052327045793969,
+      "pinned_frac": 0.16855172413793104,
+      "seconds": 24.863916600006633,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 52288, pinned 0.168552, p99/h_f 1.05233, max/h_f 1.18702, BLC_8 0, BLC_full 0, 24.8639 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-FEAT",
+     "stage_focus": null,
+     "why": {
+      "observable": "fingerprint.sharp_edge_length_m",
+      "op": ">",
+      "source": "features.py",
+      "threshold": 0.0,
+      "value": 4.988625792423051
+     },
+     "why_text": "fingerprint.sharp_edge_length_m = 4.98863 > 0 (features.py)"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness)",
+     "moved": {
+      "after": 0.0030344827586206895,
+      "before": 0.16855172413793104,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.168552 -> 0.00303448 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 0.8880733639555735,
+      "n_cells": 52288,
+      "p99_over_hf": 0.06677230841561684,
+      "pinned_frac": 0.0030344827586206895,
+      "seconds": 17.31694230006542,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:min_thickness, flags F3c F3d, cells 52288, pinned 0.00303448, p99/h_f 0.0667723, max/h_f 0.888073, BLC_8 0, BLC_full 0, 17.3169 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.16855172413793104
+     },
+     "why_text": "outcome.pinned_frac = 0.168552 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "F-1-002",
+   "n_attempts": 2,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# F-1-002: 2 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-FEAT, stage focus none\ndecided: raise the feature level where the body has sharp edges\nwhy: fingerprint.sharp_edge_length_m = 4.98863 > 0 (features.py)\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 52288, pinned 0.168552, p99/h_f 1.05233, max/h_f 1.18702, BLC_8 0, BLC_full 0, 24.8639 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.168552 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict fail, failure class layer_dropped:min_thickness, flags F3c F3d, cells 52288, pinned 0.00303448, p99/h_f 0.0667723, max/h_f 0.888073, BLC_8 0, BLC_full 0, 17.3169 s\nlayers: body 0 layers, full 0, not delivered (min_thickness)\nmoved: outcome.pinned_frac 0.168552 -> 0.00303448 (attempt 1 -> 2)\n"
+  },
+  "F-1-005": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "raise the feature level where the body has sharp edges",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full absent, not delivered",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "config",
+      "flags_true": [
+       "F1"
+      ],
+      "max_over_hf": null,
+      "n_cells": null,
+      "p99_over_hf": null,
+      "pinned_frac": null,
+      "seconds": 0.4433398999972269,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class config, flags F1, cells absent, pinned absent, p99/h_f absent, max/h_f absent, BLC_8 0, BLC_full 0, 0.44334 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-FEAT",
+     "stage_focus": null,
+     "why": {
+      "observable": "fingerprint.sharp_edge_length_m",
+      "op": ">",
+      "source": "features.py",
+      "threshold": 0.0,
+      "value": 2.4340388501179246
+     },
+     "why_text": "fingerprint.sharp_edge_length_m = 2.43404 > 0 (features.py)"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "F-1-005",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# F-1-005: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-FEAT, stage focus none\ndecided: raise the feature level where the body has sharp edges\nwhy: fingerprint.sharp_edge_length_m = 2.43404 > 0 (features.py)\nedits: none\npredicted: none\nobserved: verdict fail, failure class config, flags F1, cells absent, pinned absent, p99/h_f absent, max/h_f absent, BLC_8 0, BLC_full 0, 0.44334 s\nlayers: body 0 layers, full absent, not delivered\n"
+  },
+  "F-1-007": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "raise the feature level where the body has sharp edges",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 0.8434524815190123,
+      "n_cells": 43804,
+      "p99_over_hf": 0.5852564239288707,
+      "pinned_frac": 0.28240469208211144,
+      "seconds": 18.444567799917422,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 43804, pinned 0.282405, p99/h_f 0.585256, max/h_f 0.843452, BLC_8 0, BLC_full 0, 18.4446 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-FEAT",
+     "stage_focus": null,
+     "why": {
+      "observable": "fingerprint.sharp_edge_length_m",
+      "op": ">",
+      "source": "features.py",
+      "threshold": 0.0,
+      "value": 6.337160000000001
+     },
+     "why_text": "fingerprint.sharp_edge_length_m = 6.33716 > 0 (features.py)"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": {
+      "after": 0.0,
+      "before": 0.28240469208211144,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.282405 -> 0 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.02224594981231333,
+      "n_cells": 43804,
+      "p99_over_hf": 0.02128611356029188,
+      "pinned_frac": 0.0,
+      "seconds": 3.4136461999733,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 43804, pinned 0, p99/h_f 0.0212861, max/h_f 0.0222459, BLC_8 0, BLC_full 0, 3.41365 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.28240469208211144
+     },
+     "why_text": "outcome.pinned_frac = 0.282405 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "F-1-007",
+   "n_attempts": 2,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# F-1-007: 2 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-FEAT, stage focus none\ndecided: raise the feature level where the body has sharp edges\nwhy: fingerprint.sharp_edge_length_m = 6.33716 > 0 (features.py)\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 43804, pinned 0.282405, p99/h_f 0.585256, max/h_f 0.843452, BLC_8 0, BLC_full 0, 18.4446 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.282405 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 43804, pinned 0, p99/h_f 0.0212861, max/h_f 0.0222459, BLC_8 0, BLC_full 0, 3.41365 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\nmoved: outcome.pinned_frac 0.282405 -> 0 (attempt 1 -> 2)\n"
+  },
+  "F-1-009": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "raise the feature level where the body has sharp edges",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (retreat_snapped)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:retreat_snapped",
+      "flags_true": [
+       "F3a",
+       "F3b",
+       "F3c",
+       "F3d"
+      ],
+      "max_over_hf": 0.8492934065725117,
+      "n_cells": 12556,
+      "p99_over_hf": 0.8487974914890999,
+      "pinned_frac": 0.0576271186440678,
+      "seconds": 6.8255351999541745,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 12556, pinned 0.0576271, p99/h_f 0.848797, max/h_f 0.849293, BLC_8 0, BLC_full 0, 6.82554 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-FEAT",
+     "stage_focus": null,
+     "why": {
+      "observable": "fingerprint.sharp_edge_length_m",
+      "op": ">",
+      "source": "features.py",
+      "threshold": 0.0,
+      "value": 11.55
+     },
+     "why_text": "fingerprint.sharp_edge_length_m = 11.55 > 0 (features.py)"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": {
+      "after": 0.0,
+      "before": 0.0576271186440678,
+      "from_attempt": 1,
+      "observable": "outcome.pinned_frac",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.pinned_frac 0.0576271 -> 0 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.01534702407337396,
+      "n_cells": 12556,
+      "p99_over_hf": 0.015289807900311795,
+      "pinned_frac": 0.0,
+      "seconds": 1.6091720999684185,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 12556, pinned 0, p99/h_f 0.0152898, max/h_f 0.015347, BLC_8 0, BLC_full 0, 1.60917 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.pinned_frac",
+      "op": ">",
+      "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+      "threshold": 0.05,
+      "value": 0.0576271186440678
+     },
+     "why_text": "outcome.pinned_frac = 0.0576271 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "F-1-009",
+   "n_attempts": 2,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# F-1-009: 2 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-FEAT, stage focus none\ndecided: raise the feature level where the body has sharp edges\nwhy: fingerprint.sharp_edge_length_m = 11.55 > 0 (features.py)\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:retreat_snapped, flags F3a F3b F3c F3d, cells 12556, pinned 0.0576271, p99/h_f 0.848797, max/h_f 0.849293, BLC_8 0, BLC_full 0, 6.82554 s\nlayers: body 0 layers, full 0, not delivered (retreat_snapped)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.pinned_frac = 0.0576271 > 0.05 (score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 12556, pinned 0, p99/h_f 0.0152898, max/h_f 0.015347, BLC_8 0, BLC_full 0, 1.60917 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\nmoved: outcome.pinned_frac 0.0576271 -> 0 (attempt 1 -> 2)\n"
+  },
+  "G-1-016": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "pick the wall level and the growth inside the feasible window",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 8 layers, full 1, delivered",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 1.0,
+      "blc_full_a_priori": 1.0,
+      "failure_class": null,
+      "flags_true": [],
+      "max_over_hf": 4.4811085798687235e-15,
+      "n_cells": 44778,
+      "p99_over_hf": 2.8341019109815434e-15,
+      "pinned_frac": 0.0,
+      "seconds": 1.8072669999673963,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class none, flags none, cells 44778, pinned 0, p99/h_f 2.8341e-15, max/h_f 4.48111e-15, BLC_8 1, BLC_full 1, 1.80727 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-WIN",
+     "stage_focus": null,
+     "why": {
+      "observable": "h_wall / t1",
+      "op": "in",
+      "source": "docs/15 §D.3",
+      "threshold": [
+       16.000016,
+       41.999957999999985
+      ],
+      "value": 27.344521224086872
+     },
+     "why_text": "h_wall / t1 = 27.3445 in [16, 42] (docs/15 §D.3)"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "G-1-016",
+   "n_attempts": 1,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# G-1-016: 1 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-WIN, stage focus none\ndecided: pick the wall level and the growth inside the feasible window\nwhy: h_wall / t1 = 27.3445 in [16, 42] (docs/15 §D.3)\nedits: none\npredicted: none\nobserved: verdict pass, failure class none, flags none, cells 44778, pinned 0, p99/h_f 2.8341e-15, max/h_f 4.48111e-15, BLC_8 1, BLC_full 1, 1.80727 s\nlayers: body 8 layers, full 1, delivered\n"
+  },
+  "G-1-027": {
+   "attempts": [
+    {
+     "attempt": 1,
+     "decided": "raise the feature level where the body has sharp edges",
+     "decided_by": "rule",
+     "edits": [],
+     "edits_text": "none",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness)",
+     "moved": null,
+     "moved_text": null,
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [
+       "F3b",
+       "F3d"
+      ],
+      "max_over_hf": 0.23674992246679052,
+      "n_cells": 33332,
+      "p99_over_hf": 0.22840699157272676,
+      "pinned_frac": 0.027777777777777776,
+      "seconds": 12.430732000037096,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:min_thickness, flags F3b F3d, cells 33332, pinned 0.0277778, p99/h_f 0.228407, max/h_f 0.23675, BLC_8 0, BLC_full 0, 12.4307 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "R-FEAT",
+     "stage_focus": null,
+     "why": {
+      "observable": "fingerprint.sharp_edge_length_m",
+      "op": ">",
+      "source": "features.py",
+      "threshold": 0.0,
+      "value": 5.821199999999999
+     },
+     "why_text": "fingerprint.sharp_edge_length_m = 5.8212 > 0 (features.py)"
+    },
+    {
+     "attempt": 2,
+     "decided": "switch the feature attraction off",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": null,
+       "pointer": "/snap/feature_tolerance",
+       "to": 0.0
+      }
+     ],
+     "edits_text": "/snap/feature_tolerance absent -> 0",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness)",
+     "moved": {
+      "after": 0.07562324316898832,
+      "before": 0.22840699157272676,
+      "from_attempt": 1,
+      "observable": "outcome.p99_over_hf",
+      "to_attempt": 2,
+      "unchanged": false
+     },
+     "moved_text": "outcome.p99_over_hf 0.228407 -> 0.0756232 (attempt 1 -> 2)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [
+       "F3d"
+      ],
+      "max_over_hf": 0.0756875625097745,
+      "n_cells": 33332,
+      "p99_over_hf": 0.07562324316898832,
+      "pinned_frac": 0.0,
+      "seconds": 4.628823900013231,
+      "verdict": "fail"
+     },
+     "observed_text": "verdict fail, failure class layer_dropped:min_thickness, flags F3d, cells 33332, pinned 0, p99/h_f 0.0756232, max/h_f 0.0756876, BLC_8 0, BLC_full 0, 4.62882 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-FT",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.p99_over_hf",
+      "op": ">",
+      "source": "score.py stages[snap] p99_residual / h_f (docs/15 §D.1 F3b)",
+      "threshold": 0.1,
+      "value": 0.22840699157272676
+     },
+     "why_text": "outcome.p99_over_hf = 0.228407 > 0.1 (score.py stages[snap] p99_residual / h_f (docs/15 §D.1 F3b))"
+    },
+    {
+     "attempt": 3,
+     "decided": "refine the whole refinement ladder one level",
+     "decided_by": "remedy",
+     "edits": [
+      {
+       "from": 4,
+       "pointer": "/refinement/levels/0/bands/0/level",
+       "to": 5
+      },
+      {
+       "from": 3,
+       "pointer": "/refinement/levels/0/bands/1/level",
+       "to": 4
+      },
+      {
+       "from": 2,
+       "pointer": "/refinement/levels/0/bands/2/level",
+       "to": 3
+      },
+      {
+       "from": 5,
+       "pointer": "/refinement/levels/0/feature_level",
+       "to": 6
+      },
+      {
+       "from": 5,
+       "pointer": "/refinement/max_level",
+       "to": 6
+      }
+     ],
+     "edits_text": "/refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 5 -> 6; /refinement/max_level 5 -> 6",
+     "end": [],
+     "layers_text": "body 0 layers, full 0, not delivered (min_thickness), capability-limited",
+     "moved": {
+      "after": false,
+      "before": true,
+      "from_attempt": 2,
+      "observable": "outcome.flags.F3d",
+      "to_attempt": 3,
+      "unchanged": false
+     },
+     "moved_text": "outcome.flags.F3d true -> false (attempt 2 -> 3)",
+     "observed": {
+      "blc8_a_priori": 0.0,
+      "blc_full_a_priori": 0.0,
+      "failure_class": "layer_dropped:min_thickness",
+      "flags_true": [],
+      "max_over_hf": 0.03178565653298813,
+      "n_cells": 220972,
+      "p99_over_hf": 0.03178565653298813,
+      "pinned_frac": 0.0,
+      "seconds": 17.443313500029035,
+      "verdict": "pass"
+     },
+     "observed_text": "verdict pass, failure class layer_dropped:min_thickness, flags none, cells 220972, pinned 0, p99/h_f 0.0317857, max/h_f 0.0317857, BLC_8 0, BLC_full 0, 17.4433 s",
+     "prediction": null,
+     "prediction_text": "none",
+     "records": [],
+     "refused": [],
+     "rule_id": "RM-SNAP-REFINE",
+     "stage_focus": "snap",
+     "why": {
+      "observable": "outcome.flags.F3d",
+      "op": "not_in",
+      "source": "score.py stages[snap].area_ratio (docs/15 §D.1 F3d)",
+      "threshold": [
+       0.98,
+       1.02
+      ],
+      "value": true
+     },
+     "why_text": "outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))"
+    }
+   ],
+   "campaign_id": "det_a",
+   "geometry_id": "G-1-027",
+   "n_attempts": 3,
+   "schema": "autonomy-explain/1",
+   "split": "tuning",
+   "terminal": "none recorded",
+   "text": "# G-1-027: 3 attempt(s), split tuning, campaign det_a, terminal none recorded\n\n## attempt 1: rule R-FEAT, stage focus none\ndecided: raise the feature level where the body has sharp edges\nwhy: fingerprint.sharp_edge_length_m = 5.8212 > 0 (features.py)\nedits: none\npredicted: none\nobserved: verdict fail, failure class layer_dropped:min_thickness, flags F3b F3d, cells 33332, pinned 0.0277778, p99/h_f 0.228407, max/h_f 0.23675, BLC_8 0, BLC_full 0, 12.4307 s\nlayers: body 0 layers, full 0, not delivered (min_thickness)\n\n## attempt 2: remedy RM-SNAP-FT, stage focus snap\ndecided: switch the feature attraction off\nwhy: outcome.p99_over_hf = 0.228407 > 0.1 (score.py stages[snap] p99_residual / h_f (docs/15 §D.1 F3b))\nedits: /snap/feature_tolerance absent -> 0\npredicted: none\nobserved: verdict fail, failure class layer_dropped:min_thickness, flags F3d, cells 33332, pinned 0, p99/h_f 0.0756232, max/h_f 0.0756876, BLC_8 0, BLC_full 0, 4.62882 s\nlayers: body 0 layers, full 0, not delivered (min_thickness)\nmoved: outcome.p99_over_hf 0.228407 -> 0.0756232 (attempt 1 -> 2)\n\n## attempt 3: remedy RM-SNAP-REFINE, stage focus snap\ndecided: refine the whole refinement ladder one level\nwhy: outcome.flags.F3d = true not_in [0.98, 1.02] (score.py stages[snap].area_ratio (docs/15 §D.1 F3d))\nedits: /refinement/levels/0/bands/0/level 4 -> 5; /refinement/levels/0/bands/1/level 3 -> 4; /refinement/levels/0/bands/2/level 2 -> 3; /refinement/levels/0/feature_level 5 -> 6; /refinement/max_level 5 -> 6\npredicted: none\nobserved: verdict pass, failure class layer_dropped:min_thickness, flags none, cells 220972, pinned 0, p99/h_f 0.0317857, max/h_f 0.0317857, BLC_8 0, BLC_full 0, 17.4433 s\nlayers: body 0 layers, full 0, not delivered (min_thickness), capability-limited\nmoved: outcome.flags.F3d true -> false (attempt 2 -> 3)\n"
+  }
+ },
+ "schema": "autonomy-explain-set/1"
+}

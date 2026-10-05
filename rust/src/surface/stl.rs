@@ -14,10 +14,19 @@
 //!   Barill, Dickson, Schmidt, Levin & Jacobson, *ACM TOG* 37(4) (2018).
 //! No GPL-licensed source was consulted.
 //!
-//! Detection (§23.1): a file is ASCII only if it starts with "solid" AND
-//! parses as ASCII. Binary exporters routinely write "solid ..." into the
-//! 80-byte comment header, so an ASCII parse failure falls back to binary
-//! rather than erroring - the two conditions together are unambiguous.
+//! Detection (§23.1), in this order: (1) a file at least 84 bytes long
+//! whose length is exactly 84 + 50*n, with n the little-endian u32 count
+//! at bytes 80..84 (computed in u64), is BINARY and is never tried as
+//! ASCII - ASCII text has no byte below 0x09 in bytes 80..84, so an ASCII
+//! file would need n >= 0x09090909 (about 1.5e8 triangles, a 7.5 GB file)
+//! to collide, which makes the length test unambiguous for every real
+//! file; (2) else, a file that starts with "solid" (case-insensitive) AND
+//! parses as ASCII is ASCII, read through a lossy decode so non-UTF-8
+//! bytes only fail the grammar, never panic; (3) else BINARY, with the
+//! usual length errors. Binary exporters routinely write "solid ..." into
+//! the 80-byte comment header, so a binary file whose header carries
+//! non-UTF-8 bytes reads as binary - keywords are matched on the leading
+//! bytes, so no mid-character slice is ever taken.
 //!
 //! Patch identity (§23.1): one patch per `solid` name in an ASCII file; a
 //! binary file has no name, so the FILE STEM becomes the patch name.
@@ -55,17 +64,34 @@ pub fn read_stl(path: impl AsRef<Path>) -> Result<Surface> {
 /// Public so tests - and anything that already holds the bytes - need no
 /// fixture files on disk.
 pub fn parse_stl(bytes: &[u8], stem: &str, origin: &str) -> Result<Surface> {
-    let starts_solid = bytes.len() >= 5 && bytes[..5].eq_ignore_ascii_case(b"solid");
+    // Step 1: a file whose length is exactly 84 + 50*n, with n the
+    // little-endian u32 count at bytes 80..84 (computed in u64), is BINARY
+    // and is never tried as ASCII. ASCII text has no byte below 0x09 in
+    // bytes 80..84, so an ASCII file would need n >= 0x09090909 (about
+    // 1.5e8 triangles, a 7.5 GB file) to collide - the length test is
+    // unambiguous for every real file.
+    if bytes.len() >= BIN_HEADER + 4 {
+        let mut cnt = [0u8; 4];
+        cnt.copy_from_slice(&bytes[BIN_HEADER..BIN_HEADER + 4]);
+        let n = u32::from_le_bytes(cnt) as u64;
+        let expected = (BIN_HEADER + 4) as u64 + BIN_TRI_BYTES as u64 * n;
+        if bytes.len() as u64 == expected {
+            let (soup, names) = parse_binary(bytes, stem, origin)?;
+            return Surface::from_soup(soup, names);
+        }
+    }
 
-    if starts_solid {
-        // ASCII candidate. Binary garbage is not valid UTF-8 and does not
-        // follow the facet grammar, so a real binary file drops through.
+    // Step 2: an ASCII candidate - "solid" prefix AND the strict ASCII
+    // grammar, on the lossy decode. A non-UTF-8 byte only fails the
+    // grammar here; with the byte-wise keyword test it can never panic.
+    if bytes.len() >= 5 && bytes[..5].eq_ignore_ascii_case(b"solid") {
         let text = String::from_utf8_lossy(bytes);
         if let Ok((soup, names)) = parse_ascii(&text, stem) {
             return Surface::from_soup(soup, names);
         }
     }
 
+    // Step 3: binary, with the usual length errors for what is left over.
     let (soup, names) = parse_binary(bytes, stem, origin)?;
     Surface::from_soup(soup, names)
 }
@@ -204,8 +230,15 @@ fn parse_ascii(text: &str, stem: &str) -> std::result::Result<(Vec<SoupTri>, Vec
 /// If `line` starts with `kw` as a whole word (case-insensitive), return
 /// the trimmed remainder; solid names may contain spaces, so the remainder
 /// is the rest of the line, not one token.
+///
+/// The prefix test compares BYTES, never a `&str` slice: lossy decoding
+/// turns a non-UTF-8 byte into a 3-byte U+FFFD, so `line[..kw.len()]`
+/// could land inside a character - comparing bytes cannot, and once the
+/// leading bytes ARE the ASCII keyword, `kw.len()` is a char boundary and
+/// the slice below is safe on any input.
 fn strip_keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
-    if line.len() < kw.len() || !line[..kw.len()].eq_ignore_ascii_case(kw) {
+    let lb = line.as_bytes();
+    if lb.len() < kw.len() || !lb[..kw.len()].eq_ignore_ascii_case(kw.as_bytes()) {
         return None;
     }
     let rest = &line[kw.len()..];
@@ -261,6 +294,82 @@ mod tests {
         b
     }
 
+    /// F1: the closed box [0,2]x[0,2]x[0,1] on the unit grid - 16 surface
+    /// squares, two triangles each, all wound outward (32 triangles, the
+    /// 18-point 3x3x2 surface lattice, signed volume +4), as binary STL
+    /// bytes with `header` (padded/truncated to 80 bytes) and zero stored
+    /// normals, like `binary_cube`.
+    fn binary_box(header: &[u8]) -> Vec<u8> {
+        // One quad, re-ordered so its first-triangle winding faces `out`.
+        fn square(mut q: [[f32; 3]; 4], out: [f32; 3]) -> [[f32; 3]; 4] {
+            let (ab, ac) = (
+                [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]],
+                [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]],
+            );
+            let n = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            if n[0] * out[0] + n[1] * out[1] + n[2] * out[2] < 0.0 {
+                q.reverse();
+            }
+            q
+        }
+        let mut quads: Vec<[[f32; 3]; 4]> = Vec::new();
+        // Top (z=1) and bottom (z=0): 2x2 unit squares each in (x, y).
+        for i in 0..2u32 {
+            for j in 0..2u32 {
+                let (x0, y0) = (i as f32, j as f32);
+                let (x1, y1) = (x0 + 1.0, y0 + 1.0);
+                quads.push(square(
+                    [[x0, y0, 1.0], [x1, y0, 1.0], [x1, y1, 1.0], [x0, y1, 1.0]],
+                    [0.0, 0.0, 1.0],
+                ));
+                quads.push(square(
+                    [[x0, y0, 0.0], [x0, y1, 0.0], [x1, y1, 0.0], [x1, y0, 0.0]],
+                    [0.0, 0.0, -1.0],
+                ));
+            }
+        }
+        // The four sides: two unit squares each, the long axis 2, height 1.
+        for j in 0..2u32 {
+            let (y0, y1) = (j as f32, j as f32 + 1.0);
+            quads.push(square(
+                [[0.0, y0, 0.0], [0.0, y0, 1.0], [0.0, y1, 1.0], [0.0, y1, 0.0]],
+                [-1.0, 0.0, 0.0],
+            ));
+            quads.push(square(
+                [[2.0, y0, 0.0], [2.0, y1, 0.0], [2.0, y1, 1.0], [2.0, y0, 1.0]],
+                [1.0, 0.0, 0.0],
+            ));
+            quads.push(square(
+                [[y0, 0.0, 0.0], [y1, 0.0, 0.0], [y1, 0.0, 1.0], [y0, 0.0, 1.0]],
+                [0.0, -1.0, 0.0],
+            ));
+            quads.push(square(
+                [[y0, 2.0, 0.0], [y0, 2.0, 1.0], [y1, 2.0, 1.0], [y1, 2.0, 0.0]],
+                [0.0, 1.0, 0.0],
+            ));
+        }
+
+        let mut b = vec![0u8; 80];
+        b[..header.len().min(80)].copy_from_slice(&header[..header.len().min(80)]);
+        b.extend_from_slice(&((quads.len() * 2) as u32).to_le_bytes());
+        for q in &quads {
+            for tri in [[0usize, 1, 2], [0, 2, 3]] {
+                b.extend_from_slice(&[0u8; 12]); // stored normal, ignored
+                for v in [q[tri[0]], q[tri[1]], q[tri[2]]] {
+                    b.extend_from_slice(&v[0].to_le_bytes());
+                    b.extend_from_slice(&v[1].to_le_bytes());
+                    b.extend_from_slice(&v[2].to_le_bytes());
+                }
+                b.extend_from_slice(&[0u8; 2]); // attribute byte count
+            }
+        }
+        b
+    }
+
     /// The cube as ASCII, split into named solids by triangle ranges.
     fn ascii_cube(solids: &[(&str, std::ops::Range<usize>)]) -> String {
         let p = cube_points();
@@ -288,6 +397,51 @@ mod tests {
         }
     }
 
+    /// Header H: "solid" + newline + two non-UTF-8 bytes, zero-padded.
+    fn header_h() -> Vec<u8> {
+        let mut h = vec![0u8; 80];
+        h[..8].copy_from_slice(b"solid\n\xff\xff");
+        h
+    }
+
+    #[test]
+    fn binary_header_solid_then_non_utf8_reads_as_binary() {
+        let s = parse_stl(&binary_box(&header_h()), "box", "<memory>")
+            .expect("exact binary length is binary, whatever the header says");
+        assert_eq!(s.tris.len(), 32);
+        assert_eq!(s.points.len(), 18, "the 3x3x2 surface lattice");
+        assert_eq!(s.patch_names, vec!["box".to_string()]);
+        assert!((s.patch_area[0] - 16.0).abs() < 1e-12);
+        assert_eq!(s.edge_defects(), (0, 0));
+    }
+
+    #[test]
+    fn strip_keyword_never_slices_inside_a_char() {
+        assert_eq!(strip_keyword("\u{FFFD}\u{FFFD}", "facet"), None);
+        assert_eq!(strip_keyword("\u{FFFD}\u{FFFD}\0\0", "endsolid"), None);
+        assert_eq!(strip_keyword("so\u{e9}lid x", "solid"), None);
+        assert_eq!(strip_keyword("SOLID part", "solid"), Some("part"));
+        assert_eq!(strip_keyword("solidify", "solid"), None);
+    }
+
+    #[test]
+    fn every_prefix_of_a_solid_headed_binary_returns_without_panic() {
+        let bytes = binary_box(&header_h());
+        let (mut oks, mut errs) = (0usize, 0usize);
+        for l in 0..=bytes.len() {
+            match parse_stl(&bytes[..l], "box", "<memory>") {
+                Ok(s) => {
+                    assert_eq!(l, bytes.len(), "only the full buffer parses");
+                    assert_eq!(s.tris.len(), 32);
+                    oks += 1;
+                }
+                Err(_) => errs += 1,
+            }
+        }
+        assert_eq!(oks, 1, "the full buffer, and nothing shorter");
+        assert_eq!(errs, bytes.len(), "every proper prefix is a clean Err");
+    }
+
     #[test]
     fn binary_cube_reads_12_tris_and_welds_8_points() {
         let s = parsed(&binary_cube(b"any old comment"));
@@ -298,6 +452,32 @@ mod tests {
         assert_eq!(s.edge_defects(), (0, 0));
         // Stored normals were zero; these are recomputed from winding.
         assert_eq!(s.normals[6], Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn ascii_solid_name_with_a_latin1_byte_still_reads_as_ascii() {
+        let text = ascii_cube(&[("cafX", 0..12)]);
+        let bytes = text
+            .as_bytes()
+            .iter()
+            .map(|&b| if b == b'X' { 0xE9 } else { b })
+            .collect::<Vec<u8>>();
+        let s = parsed(&bytes);
+        assert_eq!(s.tris.len(), 12);
+        assert_eq!(s.points.len(), 8);
+        assert_eq!(s.patch_names, vec!["caf\u{FFFD}".to_string()]);
+    }
+
+    #[test]
+    fn header_bytes_never_change_a_length_matched_binary() {
+        for k in 0..80usize {
+            let mut h = header_h();
+            h[k] = 0xC3;
+            let s = parse_stl(&binary_box(&h), "box", "<memory>")
+                .expect("exact length decides binary, not the header");
+            assert_eq!(s.tris.len(), 32, "k = {k}");
+            assert_eq!(s.points.len(), 18, "k = {k}");
+        }
     }
 
     #[test]

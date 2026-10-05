@@ -20,5 +20,7 @@ ofgpu-lowmach racecar_case -iters 3000 -check 250 -output foam || exit /b 1
 
 echo.
 echo Done. Open cases\racecar_case in the Studio's 3D viewer.
-echo The solver overwrites 0\p and 0\T as it goes; racecar.fields keeps the originals.
+echo The result is in racecar_case\3000 (the iteration count); 0\ still holds the initial fields.
+echo To continue the run instead of restarting it: add -restartWrite 500 above, then
+echo   ofgpu-lowmach racecar_case -restartFrom racecar_case\restart.mcr -iters 1000 -check 250 -output foam
 endlocal

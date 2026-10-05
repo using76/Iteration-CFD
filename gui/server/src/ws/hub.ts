@@ -349,14 +349,18 @@ export function createHub(deps: HubDeps): HubHandle {
   }
 
   // Every browser tab hosts the studio UI, so unlike pickViewer there is no
-  // "has it mounted" tier: any client of the session can carry a command, the
-  // most recently active one is the better target.
+  // "has it mounted" tier — but a tab that has actually reported a uiState is
+  // the one whose bridge demonstrably answers. A stale window loaded before a
+  // code change never reports, never answers, and would otherwise win on
+  // freshness alone and eat every screen command until someone reloads it.
   function pickUi(sessionId: string | null | undefined): Client | null {
     const candidates = candidatesFor(sessionId)
     if (!candidates.length) return null
+    const withUi = candidates.filter((c) => c.uiState !== null)
+    const pool = withUi.length ? withUi : candidates
     const score = (c: Client) => Math.max(c.lastActive, c.lastUiAt)
-    candidates.sort((a, b) => score(b) - score(a))
-    return candidates[0]
+    pool.sort((a, b) => score(b) - score(a))
+    return pool[0]
   }
 
   const hub: HubHandle = {

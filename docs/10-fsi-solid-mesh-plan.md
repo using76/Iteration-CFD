@@ -537,6 +537,15 @@ it is written with §109 and not before. S12–S14 (§105, ALE and the space con
 they are fluid and mesh work and do not touch the solid loop — and may proceed in parallel. S15–S18 do not start
 until §109's cantilever passes.
 
+**§109a is landed (B1, 2026-09-24): the matrix, not yet the solve.** SPEC-LIT §109 is the second storage format
+(one 3×3 per cell and per face-direction) and the assembly into it, host and device, diffed to round-off. Its face
+coefficient makes only the NORMAL-derivative row of the face gradient implicit; the tangential rows stay explicit
+(the 2016 paper's vertex stencil is not built). The block operator and §95's segregated one therefore have
+different discrete fixed points that agree to discretisation order, and they coincide to round-off only where
+(109.7) vanishes — the patch test and the free-expansion cube, Gate 109-A. A converged §109 field compared with a
+converged §95 field will differ by O(h), and that is not a defect. Whether this compact coupling alone carries
+Gate 95-A's 10:1 cantilever is what §109b (B2) measures.
+
 
 **S12 §105a** resident geometry (points `DevBuf`, face CSR, scratch resident; `GpuGeometry::recompute_in_place(gm)`),
 swept-volume kernel per face (fan about `x_avg`, same order as `face_geometry`), volume history `v0/v00`, ALE

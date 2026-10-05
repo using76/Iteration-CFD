@@ -24,6 +24,8 @@ export const TOOL_NAMES = [
   'geometry_edit',
   'mesh_regions',
   'regions_check',
+  'autonomy_attempts',
+  'autonomy_propose_edit',
   'residuals_get',
   'viewer_command',
   'plot_residuals',
@@ -42,6 +44,15 @@ export const TOOL_NAMES = [
   'ontology_query',
   'ontology_act',
   'ontology_apply',
+  'cad_template_list',
+  'cad_requirements_propose',
+  'cad_requirements_apply',
+  'cad_build',
+  'cad_evaluate',
+  'cad_study_status',
+  'cad_propose_edit',
+  'cad_template_propose',
+  'cad_template_freeze',
 ] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
@@ -76,6 +87,8 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   geometry_edit: { name: 'geometry_edit', kind: 'mutate', policy: 'ask', label: { ko: '지오메트리 편집', en: 'Edit geometry' } },
   mesh_regions: { name: 'mesh_regions', kind: 'long', policy: 'ask', label: { ko: '영역 격자 생성', en: 'Mesh regions' } },
   regions_check: { name: 'regions_check', kind: 'read', policy: 'auto', label: { ko: '영역 레이아웃 검사', en: 'Check regions' } },
+  autonomy_attempts: { name: 'autonomy_attempts', kind: 'read', policy: 'auto', label: { ko: '자율 격자 시도 조회', en: 'Read autonomy attempts' } },
+  autonomy_propose_edit: { name: 'autonomy_propose_edit', kind: 'mutate', policy: 'ask', label: { ko: '자율 격자 편집 제안', en: 'Propose an autonomy edit' } },
   residuals_get: { name: 'residuals_get', kind: 'read', policy: 'auto', label: { ko: '잔차 조회', en: 'Get residuals' } },
   viewer_command: { name: 'viewer_command', kind: 'ui', policy: 'auto', label: { ko: '3D 뷰어', en: '3D viewer' } },
   plot_residuals: { name: 'plot_residuals', kind: 'ui', policy: 'auto', label: { ko: '잔차 플롯', en: 'Plot residuals' } },
@@ -94,6 +107,15 @@ export const TOOL_META: Record<ToolName, ToolMeta> = {
   ontology_query: { name: 'ontology_query', kind: 'read', policy: 'auto', label: { ko: '온톨로지 조회', en: 'Query the ontology' } },
   ontology_act: { name: 'ontology_act', kind: 'mutate', policy: 'ask', label: { ko: '변경 제안', en: 'Propose a change' } },
   ontology_apply: { name: 'ontology_apply', kind: 'mutate', policy: 'auto', label: { ko: '제안 적용', en: 'Apply a proposal' } },
+  cad_template_list: { name: 'cad_template_list', kind: 'read', policy: 'auto', label: { ko: '설계 템플릿 목록', en: 'List CAD templates' } },
+  cad_requirements_propose: { name: 'cad_requirements_propose', kind: 'mutate', policy: 'ask', label: { ko: '요구사항 제안', en: 'Propose requirements' } },
+  cad_requirements_apply: { name: 'cad_requirements_apply', kind: 'mutate', policy: 'auto', label: { ko: '요구사항 잠금', en: 'Lock requirements' } },
+  cad_build: { name: 'cad_build', kind: 'mutate', policy: 'auto', label: { ko: '설계 빌드', en: 'Build the design' } },
+  cad_evaluate: { name: 'cad_evaluate', kind: 'mutate', policy: 'ask', label: { ko: '설계 평가', en: 'Evaluate the study' } },
+  cad_study_status: { name: 'cad_study_status', kind: 'read', policy: 'auto', label: { ko: '설계 스터디 상태', en: 'Study status' } },
+  cad_propose_edit: { name: 'cad_propose_edit', kind: 'mutate', policy: 'ask', label: { ko: '설계 파라미터 편집 제안', en: 'Propose a CAD parameter edit' } },
+  cad_template_propose: { name: 'cad_template_propose', kind: 'mutate', policy: 'ask', label: { ko: '설계 템플릿 후보 제안', en: 'Propose a candidate template' } },
+  cad_template_freeze: { name: 'cad_template_freeze', kind: 'mutate', policy: 'ask', label: { ko: '설계 템플릿 동결', en: 'Freeze a template' } },
 }
 
 export function toolPolicy(name: string): ToolPolicy {
@@ -194,6 +216,20 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
       if (r.ok) return ko ? `레이아웃 통과 (${base})` : `Layout OK (${base})`
       const v = fmtInt((r.violations as unknown[] | undefined)?.length ?? 0)
       return ko ? `레이아웃 위반 ${v}건` : `Layout violates ${v} rule(s)`
+    }
+    case 'autonomy_attempts': {
+      const cid = String(r.campaignId ?? i.out ?? '')
+      const v = String(r.view ?? i.view ?? 'attempts')
+      if (v === 'summary') return ko ? `캠페인 ${cid} 요약 조회` : `Read the summary of campaign ${cid}`
+      if (v === 'status') return ko ? `캠페인 ${cid}: ${r.finished ? '완료' : '진행 중'}` : `Campaign ${cid}: ${r.finished ? 'finished' : 'running'}`
+      const what = v === 'geometries' ? (ko ? '형상 기록' : 'geometry records') : ko ? '시도' : 'attempts'
+      return ko ? `캠페인 ${cid} ${what} ${fmtInt(Number(r.returned ?? 0))}/${fmtInt(Number(r.total ?? 0))}건 조회` : `Read ${fmtInt(Number(r.returned ?? 0))} of ${fmtInt(Number(r.total ?? 0))} ${what} of campaign ${cid}`
+    }
+    case 'autonomy_propose_edit': {
+      const e = (r.edit ?? {}) as Record<string, unknown>
+      const p = String(e.pointer ?? i.pointer ?? '')
+      const to = JSON.stringify(e.to ?? i.value ?? null)
+      return ko ? `자율 격자 편집 제안 ${p} = ${to} (사전 점검 통과, ${String(r.proposed ?? '')})` : `Proposed ${p} = ${to} (preflight pass, ${String(r.proposed ?? '')})`
     }
     case 'residuals_get':
       return ko ? '잔차 시계열 조회' : 'Fetched residual series'
@@ -322,6 +358,41 @@ export function summarizeToolCall(name: string, input: unknown, result: unknown,
         : (ko ? `제안 생성: ${String(i.action ?? '')} (객체 ${r.objects ?? 0}, 링크 ${r.links ?? 0})` : `Proposed ${String(i.action ?? '')} (${r.objects ?? 0} objects, ${r.links ?? 0} links)`)
     case 'ontology_apply':
       return ko ? `적용됨: ${String(r.action ?? '')} (${String(r.editId ?? '')})` : `Applied ${String(r.action ?? '')} (edit ${String(r.editId ?? '')})`
+    case 'cad_template_list': {
+      const n = fmtInt((r.templates as unknown[] | undefined)?.length ?? 0)
+      return ko ? `설계 템플릿 ${n}건 조회` : `Listed ${n} CAD template(s)`
+    }
+    case 'cad_requirements_propose': {
+      const n = fmtInt((r.rows as unknown[] | undefined)?.length ?? 0)
+      return ko ? `요구사항 제안 ${String(r.status ?? '')} (행 ${n}건)` : `Proposed requirements (${String(r.status ?? '')}, ${n} row(s))`
+    }
+    case 'cad_requirements_apply':
+      return ko ? `요구사항 잠금 (${String(r.study_id ?? '')}, 잠금 ${String(r.lock_sha ?? '').slice(0, 12)})` : `Locked requirements (${String(r.study_id ?? '')}, lock ${String(r.lock_sha ?? '').slice(0, 12)})`
+    case 'cad_build': {
+      const n = fmtInt((r.table as unknown[] | undefined)?.length ?? 0)
+      return ko ? `설계 빌드 ${String(r.study_id ?? '')}: ${String(r.status ?? '')} (행 ${n}건)` : `Built ${String(r.study_id ?? '')}: ${String(r.status ?? '')} (${n} rows)`
+    }
+    case 'cad_evaluate': {
+      const st = (r.status ?? {}) as Record<string, unknown>
+      const n = fmtInt(Number(st.n_evals ?? 0))
+      return ko ? `설계 평가 ${String(r.study_id ?? '')}: ${String(st.status ?? '')}, 평가 ${n}회` : `Evaluated ${String(r.study_id ?? '')}: ${String(st.status ?? '')}, ${n} evaluations`
+    }
+    case 'cad_study_status': {
+      const st = (r.status ?? {}) as Record<string, unknown>
+      return ko ? `스터디 ${String(r.study_id ?? '')}: ${String(st.status ?? '')}` : `Study ${String(r.study_id ?? '')}: ${String(st.status ?? '')}`
+    }
+    case 'cad_propose_edit': {
+      const n = fmtInt(Number(r.n ?? 0))
+      return ko ? `편집 제안 ${String(r.study_id ?? '')} cad${n}: ${String(r.outcome ?? '')}` : `Proposed edit ${String(r.study_id ?? '')} cad${n}: ${String(r.outcome ?? '')}`
+    }
+    case 'cad_template_propose': {
+      const n = fmtInt(Number(r.n ?? 0))
+      const state = String(r.status ?? r.rule ?? '')
+      return ko ? `템플릿 후보 ${String(r.candidate_id ?? '')} ${n}차: ${state}` : `Candidate ${String(r.candidate_id ?? '')} attempt ${n}: ${state}`
+    }
+    case 'cad_template_freeze': {
+      return ko ? `템플릿 동결 ${String(r.template_id ?? '')}` : `Froze ${String(r.template_id ?? '')}`
+    }
     default:
       return name
   }

@@ -1,0 +1,133 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>chat</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #chat-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #chat-outer {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          transform-origin: 50% 50%;
+          will-change: transform;
+        }
+        #chat-inner {
+          position: absolute;
+          inset: 0;
+          will-change: transform;
+        }
+        #chat-v {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        #chat-badge {
+          position: absolute;
+          top: 72px;
+          right: 96px;
+          background: rgba(14, 15, 18, 0.82);
+          border-radius: 10px;
+          padding: 10px 18px;
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 22px;
+          font-weight: 400;
+          color: #f1f3f5;
+          opacity: 0;
+        }
+        #chat-card {
+          position: absolute;
+          top: 72px;
+          left: 360px;
+          width: 1200px;
+          background: rgba(14, 15, 18, 0.82);
+          border-radius: 14px;
+          padding: 26px 34px;
+          opacity: 0;
+        }
+        #chat-card-label {
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 20px;
+          font-weight: 700;
+          color: #ff5a36;
+          letter-spacing: 0.06em;
+        }
+        #chat-card-ko {
+          font-size: 34px;
+          font-weight: 700;
+          color: #f1f3f5;
+          line-height: 1.4;
+          margin-top: 12px;
+        }
+        #chat-card-en {
+          font-size: 24px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          margin-top: 8px;
+        }
+      </style>
+      <div id="root" data-composition-id="chat" data-width="1920" data-height="1080">
+        <div id="chat-wrap">
+          <div id="chat-outer">
+            <div id="chat-inner" data-layout-allow-overflow="true">
+              <video
+                id="chat-v"
+                src="assets/chat.mp4"
+                muted
+                playsinline
+                data-start="0"
+                data-duration="16"
+                data-track-index="0"
+              ></video>
+            </div>
+          </div>
+          <div id="chat-badge">9배속 · 9x speed</div>
+          <div id="chat-card">
+            <div id="chat-card-label">사용자 요청 · User prompt</div>
+            <div id="chat-card-ko">“geometry/f1_sim.stl 에 있는 F1 레이스카 형상을 열어서 보여줘.”</div>
+            <div id="chat-card-en">“Open the F1 race-car geometry in geometry/f1_sim.stl and show it to me.”</div>
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#chat-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
+        tl.fromTo("#chat-outer", { scale: 1.0 }, { scale: 1.8, duration: 2.5, ease: "power2.inOut" }, 9.0);
+        tl.fromTo("#chat-inner", { x: 0, y: 0 }, { x: -427, y: -110, duration: 2.5, ease: "power2.inOut" }, 9.0);
+        tl.fromTo("#chat-badge", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.5);
+        tl.to("#chat-badge", { opacity: 0, duration: 0.3, ease: "none" }, 13.7);
+        tl.fromTo("#chat-card", { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "power1.out" }, 0.6);
+        tl.fromTo("#chat-card-label", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.14, ease: "power4.out" }, 0.65);
+        tl.fromTo("#chat-card-ko", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 0.75);
+        tl.fromTo("#chat-card-en", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.88);
+        tl.to("#chat-card", { opacity: 0, duration: 0.4, ease: "none" }, 5.6);
+        tl.to("#chat-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 15.6);
+        window.__timelines["chat"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

@@ -19,6 +19,8 @@ its rule id, the value against its limit and a cite:
                   serde parser (document order, deny_unknown_fields) and
                   validate (mod.rs:526) plus its surface read - so a config
                   the mirror refuses is refused here before any run.
+                  WL-SHARP-FT0 (2026-09-26) refuses feature_tolerance 0 on a
+                  body with sharp edges off the R-PLANE path.
   (e) PF-NONORTH  no quality ceiling under the 25.2394 deg floor a 2:1
                   octree transition sets (atan(sqrt(2)/3)).
   (f) PF-YPLUS    the §D.3 y+ window non-empty at some level 0..6, and
@@ -69,10 +71,10 @@ CHECKS = (("a", "PF-SURFACE"), ("b", "PF-QUALITY"), ("c", "PF-FLAGS"), ("d", "PF
           ("h", "PF-BUDGET"))
 REFUSAL_IDS = ("PF-SURFACE", "PF-QUALITY", "WL-FLAG", "WL-POINTER", "WL-FORBIDDEN", "WL-UNLISTED",
                "WL-TYPE", "WL-RANGE", "PF-PATCH", "PF-CONFIG", "PF-NONORTH", "PF-YPLUS",
-               "PF-THIN", "PF-DOMAIN", "PF-BUDGET")
+               "PF-THIN", "PF-DOMAIN", "PF-BUDGET", "WL-SHARP-FT0")
 CHECK_OF = {"WL-FLAG": "PF-FLAGS", "WL-POINTER": "PF-KNOBS", "WL-FORBIDDEN": "PF-KNOBS",
             "WL-UNLISTED": "PF-KNOBS", "WL-TYPE": "PF-KNOBS", "WL-RANGE": "PF-KNOBS",
-            "PF-PATCH": "PF-KNOBS", "PF-CONFIG": "PF-KNOBS"}
+            "PF-PATCH": "PF-KNOBS", "PF-CONFIG": "PF-KNOBS", "WL-SHARP-FT0": "PF-KNOBS"}
 NON_ORTH_FLOOR_DEG = math.degrees(math.atan(math.sqrt(2.0) / 3.0))   # 25.239401820678918
 G5_FACTOR = 3.0                                                      # layers.rs:1306
 REFERENCE_QUALITY = {"max_closure": 1e-10, "max_non_orth_deg": 70.0,
@@ -102,7 +104,7 @@ class _ParseErr(Exception):
 
 # (C2) the mesher's config tree, cross-checked against the binary's -schema.
 # Each struct: (field, kind, required) in DECLARATION order - the order serde
-# checks missing fields in. 13 structs, 55 fields.
+# checks missing fields in. 14 structs, 59 fields.
 STRUCTS = {
  "AutomeshConfig": [("$schema", "opt_str", False), ("input", "InputSpec", True),
      ("domain", "DomainSpec", True), ("refinement", "RefinementSpec", False),
@@ -114,10 +116,11 @@ STRUCTS = {
  "DomainSpec": [("extent", "f64x6", True), ("base_size", "f64", True),
      ("grading", "f64x3", False)],
  "RefinementSpec": [("levels", "list:RefinementBand", False), ("feature_angle_deg", "f64", False),
-     ("max_level", "u32", False)],
+     ("max_level", "u32", False), ("boxes", "list:RefinementBox", False)],
  "RefinementBand": [("patch", "str", True), ("bands", "list:DistanceBand", True),
      ("feature_level", "u32", False)],
  "DistanceBand": [("distance", "f64", True), ("level", "u32", True)],
+ "RefinementBox": [("min", "f64x3", True), ("max", "f64x3", True), ("level", "u32", True)],
  "CastellationSpec": [("keep_region", "enum", False), ("seed_point", "opt_f64x3", False),
      ("min_faces", "usize", False), ("bodies", "list:BodySpec", False)],
  "BodySpec": [("name", "str", True), ("patches", "list:str", True)],
@@ -144,6 +147,7 @@ STRUCTS = {
 MESHER_DEFAULTS = {
  "/domain/grading": [1.0, 1.0, 1.0],
  "/refinement/levels": [], "/refinement/feature_angle_deg": 30.0, "/refinement/max_level": 2,
+ "/refinement/boxes": [],
  "/refinement/levels/*/feature_level": 0,
  "/castellation/keep_region": "largest", "/castellation/seed_point": None,
  "/castellation/min_faces": 4,
@@ -496,6 +500,27 @@ def _mirror_validate(cfg):
                     return ("castellation.bodies[%d].patches" % i,
                             "\"%s\" is also a patch of body \"%s\" - a patch belongs "
                             "to one body" % (p, other["name"]))
+    # (C4 stage 3) §92.16's refinement.boxes, in the mesher's own order per
+    # box: finite, then the three axes, then the level, then the domain.
+    e = _vget(cfg, "domain", "extent", None)
+    for i, b in enumerate(_vget(cfg, "refinement", "boxes", [])):
+        bmin, bmax = b["min"], b["max"]
+        if not all(math.isfinite(v) for v in list(bmin) + list(bmax)):
+            return ("refinement.boxes[%d]" % i,
+                    "every coordinate must be finite, got min %r max %r"
+                    % (bmin, bmax))
+        for a, nm in ((0, "x"), (1, "y"), (2, "z")):
+            if not bmax[a] > bmin[a]:
+                return ("refinement.boxes[%d]" % i,
+                        "%s-axis is empty or reversed (min = %r, max = %r)"
+                        % (nm, bmin[a], bmax[a]))
+        if b["level"] == 0:
+            return ("refinement.boxes[%d].level" % i,
+                    "0 refines nothing - a box asks for level >= 1")
+        if not all(bmin[a] < e[2 * a + 1] and bmax[a] > e[2 * a] for a in range(3)):
+            return ("refinement.boxes[%d]" % i,
+                    "lies outside domain.extent - a box that overlaps no cell "
+                    "refines nothing")
     return None
 
 
@@ -954,6 +979,9 @@ def preflight_checks(config, *, argv, records, q_eff, q_eff_b, q_raw, surface, g
     patch_leaves = _pf_knob_leaves(config, knobs, records)
     if surface.get("readable"):
         _pf_patch(surface, patch_leaves, records)
+    r = _pf_sharp_ft0(config, fingerprint)
+    if r is not None:
+        records.append(r)
     if len(records) == n0:
         records.append(_rec(
             "PF-KNOBS", "pass",
@@ -978,6 +1006,86 @@ def preflight_checks(config, *, argv, records, q_eff, q_eff_b, q_raw, surface, g
              "threshold": "the mesher's parser and validator", "op": "==",
              "source": "ofgpu-automesher -dryRun, mirrored"}))
     return m
+
+
+def _ptr_get(config, pointer):
+    """The value at a JSON pointer, or the mesher's default when a key is missing."""
+    node = config
+    for seg in pointer.split("/")[1:]:
+        if isinstance(node, dict) and seg in node:
+            node = node[seg]
+        else:
+            return MESHER_DEFAULTS.get(pointer)
+    return node
+
+
+def _ptr_wall_level(config):
+    """The largest band level over every refinement entry; 0 when there is no band."""
+    top = 0
+    for e in _ptr_get(config, "/refinement/levels") or []:
+        for b in e.get("bands") or []:
+            top = max(top, b["level"])
+    return top
+
+
+def plane_path(config, fingerprint):
+    """True when the config puts the body on the R-PLANE path (docs/15 §C L1 R-PLANE): a commensurate body, snap.feature_tolerance and snap.smoothing_passes 0, the lattice spacing a whole multiple of the wall cell, the extent on the body's faces - the one config on which a body with sharp edges keeps feature_tolerance 0 (README section D, 2026-09-26). False on a malformed config."""
+    try:
+        if fingerprint.get("commensurate") is not True:
+            return False
+        s = fingerprint.get("lattice_base_size_m")
+        if not (isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0):
+            return False
+        if _ptr_get(config, "/snap/feature_tolerance") != 0:
+            return False
+        if _ptr_get(config, "/snap/smoothing_passes") != 0:
+            return False
+        h = config["domain"]["base_size"] / 2 ** _ptr_wall_level(config)
+        q = s / h
+        if abs(q - round(q)) > 1e-9 or round(q) < 1:
+            return False
+        bb = fingerprint["bbox"]
+        ext = config["domain"]["extent"]
+        for a in range(3):
+            q = (bb[2 * a] - ext[2 * a]) / h
+            if abs(q - round(q)) > 1e-9:
+                return False
+        return True
+    except (TypeError, KeyError, AttributeError, ValueError, IndexError,
+            ZeroDivisionError, OverflowError):
+        return False
+
+
+_CITE_FT0 = ("tools/autonomy/README.md section D (the user's decision of 2026-09-26); "
+             "docs/15 §K G-PILOT caution 1; SPEC-LIT (92.38)")
+
+
+def _pf_sharp_ft0(config, fingerprint):
+    """WL-SHARP-FT0: feature_tolerance 0 on a body with sharp edges, off the R-PLANE
+    path, is refused (2026-09-26); None when it does not apply or no fingerprint is given."""
+    if not isinstance(config, dict) or not isinstance(fingerprint, dict):
+        return None
+    sel = fingerprint.get("sharp_edge_length_m")
+    if isinstance(sel, bool) or not isinstance(sel, (int, float)) or not sel > 0:
+        return None
+    ft = _vget(config, "snap", "feature_tolerance", 0.5)
+    if isinstance(ft, bool) or not isinstance(ft, (int, float)) or ft != 0:
+        return None
+    if plane_path(config, fingerprint):
+        return None
+    fa = fingerprint.get("feature_angle_deg", 30.0)
+    return _rec("WL-SHARP-FT0", "refuse",
+                "WL-SHARP-FT0: snap.feature_tolerance = 0 on a body with %.6g m of sharp edge "
+                "at %g deg switches the feature attraction off, so its edges are not captured; "
+                "the user's decision of 2026-09-26 forbids it off the R-PLANE path" % (sel, fa),
+                _CITE_FT0,
+                {"observable": "/snap/feature_tolerance", "value": ft, "threshold": 0.0,
+                 "op": ">", "source": "features.py sharp_edge_length_m; preflight.plane_path"},
+                [{"name": "sharp_edge_length_m", "value": sel, "unit": "m"},
+                 {"name": "feature_angle_deg", "value": fa, "unit": "deg"},
+                 {"name": "plane_path", "value": False, "unit": "1"}],
+                "refuse when sharp_edge_length_m > 0 and feature_tolerance == 0 "
+                "and not plane_path")
 
 
 def _pf_knob_leaves(config, knobs, records):
@@ -2558,7 +2666,8 @@ def _schema_kind_ok(s, kind):
 
 def _selftest_defaults(props, defs):
     """Group 1's 31 default comparisons (29 root default keys + 2 $defs fields)."""
-    skip = {"/domain/grading", "/refinement/levels/*/feature_level", "/castellation/bodies"}
+    skip = {"/domain/grading", "/refinement/levels/*/feature_level", "/castellation/bodies",
+            "/refinement/boxes"}
     got_keys = set()
     n = 0
     for sname in ("refinement", "castellation", "snap", "layers", "quality"):
@@ -2588,6 +2697,10 @@ def _selftest_defaults(props, defs):
         raise AssertionError("CastellationSpec.properties has no bodies")
     if "default" in defs["CastellationSpec"]["properties"]["bodies"]:
         raise AssertionError("CastellationSpec.bodies must carry no default")
+    if "boxes" not in defs["RefinementSpec"]["properties"]:
+        raise AssertionError("RefinementSpec.properties has no boxes")
+    if "default" in defs["RefinementSpec"]["properties"]["boxes"]:
+        raise AssertionError("RefinementSpec.boxes must carry no default")
     if n != 31:
         raise AssertionError("compared %d defaults, expected 31" % n)
     return n
@@ -3022,8 +3135,72 @@ def _selftest_determinism(binary, tmp, shared):
             "apart from t"]
 
 
+def _selftest_sharp_ft0(binary, tmp, shared):
+    """Group 13: WL-SHARP-FT0 (the user's decision of 2026-09-26) by case."""
+    gates, knobs = schema.load_gates(), schema.load_knobs()
+    with open(os.path.join(PROBES_DIR, "cubep_nofeat", "config.json"),
+              encoding="utf-8") as fh:
+        base = json.load(fh)
+    with open(os.path.join(HERE, "fixtures", "remedies", "fingerprints.json"),
+              encoding="utf-8") as fh:
+        fp = json.load(fh)["fingerprints"]["cubep.stl"]
+
+    def make(mut=None, fpm=None):
+        c = copy.deepcopy(base)
+        c["input"]["surfaces"][0]["path"] = CUBEP_STL
+        c["output"]["case_dir"] = os.path.join(tmp, "ft0case").replace(os.sep, "/")
+        if mut:
+            mut(c)
+        f = copy.deepcopy(fp)
+        if fpm:
+            fpm(f)
+        return c, f
+
+    def refused_by(res, rid="WL-SHARP-FT0"):
+        for r in res["records"]:
+            if r["rule_id"] == rid and r["verdict"] == "refuse":
+                return r
+        return None
+
+    cfg, fp1 = make()
+    res = preflight(cfg, fingerprint=fp1, flow=FLOW_OK, gates=gates,
+                    knobs=knobs)
+    refused_rec = refused_by(res)
+    if refused_rec is None or not refused_rec["message"].startswith("WL-SHARP-FT0: "):
+        raise AssertionError("case 1: WL-SHARP-FT0 not refused: %r" % res["refused"])
+
+    if any(r["rule_id"] == "PF-KNOBS" and r["verdict"] == "pass" for r in res["records"]):
+        raise AssertionError("case 1: a PF-KNOBS pass record stands beside the refusal")
+    cfg2, fp2 = make(lambda c: c["snap"].update(smoothing_passes=0))
+    res2 = preflight(cfg2, fingerprint=fp2, flow=FLOW_OK, gates=gates, knobs=knobs)
+    if not plane_path(cfg2, fp2):
+        raise AssertionError("case 2: the R-PLANE variant is not a plane path")
+    if refused_by(res2) is not None:
+        raise AssertionError("case 2: WL-SHARP-FT0 refused on the R-PLANE path")
+    cfg3, fp3 = make(lambda c: c["snap"].update(feature_tolerance=0.5))
+    res3 = preflight(cfg3, fingerprint=fp3, flow=FLOW_OK, gates=gates, knobs=knobs)
+    if refused_by(res3) is not None:
+        raise AssertionError("case 3: WL-SHARP-FT0 refused at feature_tolerance 0.5")
+    cfg4, fp4 = make(fpm=lambda f: f.update(sharp_edge_length_m=0.0))
+    res4 = preflight(cfg4, fingerprint=fp4, flow=FLOW_OK, gates=gates, knobs=knobs)
+    if refused_by(res4) is not None:
+        raise AssertionError("case 4: WL-SHARP-FT0 refused without a sharp edge")
+    cfg5 = make()[0]
+    res5 = preflight(cfg5, fingerprint=None, flow=FLOW_OK, gates=gates, knobs=knobs)
+    if refused_by(res5) is not None:
+        raise AssertionError("case 5: WL-SHARP-FT0 refused without a fingerprint")
+    if plane_path({}, fp) or plane_path(cfg, {}):
+        raise AssertionError("case 6: plane_path true on a malformed input")
+    if plane_path(cfg, fp1) is not False:
+        raise AssertionError("case 7: the off-plane base config is a plane path")
+    return ["[ok] WL-SHARP-FT0: feature_tolerance 0 on cubep (18 m of sharp edge) "
+            "refused by name in the PF-KNOBS group; the R-PLANE variant, "
+            "feature_tolerance 0.5, a body without a sharp edge and no fingerprint "
+            "are not; plane_path is False on a malformed config"]
+
+
 def selftest() -> int:
-    """(C11): the 12 groups; [ok] per group, SELFTEST PASS, or FAIL naming it."""
+    """(C11): the 13 groups; [ok] per group, SELFTEST PASS, or FAIL naming it."""
     binary = BINARY_DEFAULT
     if not os.path.isfile(binary):
         print("SELFTEST FAIL: no automesher binary at %s" % binary)
@@ -3033,7 +3210,7 @@ def selftest() -> int:
     groups = (_selftest_schema, _selftest_constants, _selftest_mirror_cases,
               _selftest_random, _selftest_fixtures, _selftest_clean, _selftest_survey,
               _selftest_cthin, _selftest_domain, _selftest_records, _selftest_cli,
-              _selftest_determinism)
+              _selftest_determinism, _selftest_sharp_ft0)
     try:
         box_stl = os.path.join(tmp, "box_sphere.stl")
         p = subprocess.run([sys.executable, BOX_SPHERE_GEN, box_stl], capture_output=True,

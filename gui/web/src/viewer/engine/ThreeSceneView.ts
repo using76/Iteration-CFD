@@ -198,6 +198,11 @@ export class ThreeSceneView implements SceneView {
     return { base64: toPngBase64(final), width: final.width, height: final.height }
   }
 
+  viewport(): { left: number; top: number; width: number; height: number } {
+    const r = this.engine.canvas.getBoundingClientRect()
+    return { left: r.left, top: r.top, width: r.width, height: r.height }
+  }
+
   pick(clientX: number, clientY: number): number {
     if (!this.surface || !this.dataset) return -1
     const hit = this.engine.raycast(clientX, clientY, [this.surface.mesh])

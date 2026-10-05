@@ -1,0 +1,157 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>solve</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #0e0f12;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #solve-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #solve-h1 {
+          position: absolute;
+          top: 72px;
+          left: 96px;
+          font-size: 44px;
+          font-weight: 700;
+          color: #f1f3f5;
+          line-height: 1.2;
+          opacity: 0;
+        }
+        #solve-h2 {
+          position: absolute;
+          top: 138px;
+          left: 96px;
+          font-size: 26px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.2;
+          opacity: 0;
+        }
+        #solve-chartwrap {
+          position: absolute;
+          top: 190px;
+          left: 96px;
+          width: 1180px;
+          height: 645px;
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          border-radius: 12px;
+          overflow: hidden;
+          clip-path: inset(0 100% 0 0);
+        }
+        #solve-v {
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+        }
+        #solve-tiles {
+          position: absolute;
+          top: 190px;
+          left: 1340px;
+          width: 484px;
+          display: flex;
+          flex-direction: column;
+          gap: 24px;
+        }
+        #solve-tiles .tile {
+          background: #171a1f;
+          border-radius: 12px;
+          padding: 22px 26px;
+        }
+        #solve-tiles .tlabel {
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          letter-spacing: 0.06em;
+        }
+        #solve-tiles .tvalue {
+          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
+          font-variant-numeric: tabular-nums;
+          font-size: 44px;
+          font-weight: 700;
+          color: #f1f3f5;
+          line-height: 1.2;
+          margin-top: 6px;
+        }
+        #solve-tiles .tsub {
+          font-size: 22px;
+          font-weight: 400;
+          color: #a7afb8;
+          margin-top: 4px;
+        }
+      </style>
+      <div id="root" data-composition-id="solve" data-width="1920" data-height="1080">
+        <div id="solve-wrap">
+          <div id="solve-h1">GPU 해석 · 잔차 수렴</div>
+          <div id="solve-h2">GPU solve - residuals</div>
+          <div id="solve-chartwrap">
+            <video
+              id="solve-v"
+              src="assets/residuals.mp4"
+              muted
+              playsinline
+              data-start="0"
+              data-duration="9"
+              data-track-index="0"
+            ></video>
+          </div>
+          <div id="solve-tiles">
+            <div class="tile" id="solve-tile1">
+              <div class="tlabel">GPU</div>
+              <div class="tvalue">RTX 5070 Ti</div>
+              <div class="tsub">NVIDIA GeForce · 1장 single card</div>
+            </div>
+            <div class="tile" id="solve-tile2">
+              <div class="tlabel">자유류 · FREE STREAM</div>
+              <div class="tvalue">250 km/h</div>
+              <div class="tsub">69.4 m/s</div>
+            </div>
+            <div class="tile" id="solve-tile3">
+              <div class="tlabel">스텝 · STEPS</div>
+              <div class="tvalue">1,000</div>
+              <div class="tsub">의사-과도 · pseudo-transient</div>
+            </div>
+            <div class="tile" id="solve-tile4">
+              <div class="tlabel">해석 시간 · SOLVE TIME</div>
+              <div class="tvalue">약 2시간 17분</div>
+              <div class="tsub">about 2 h 17 min · 공유 GPU shared GPU</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#solve-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
+        tl.fromTo("#solve-h1", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.3, ease: "power4.out" }, 0.3);
+        tl.fromTo("#solve-h2", { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.25, ease: "power4.out" }, 0.4);
+        tl.fromTo("#solve-chartwrap", { clipPath: "inset(0 100% 0 0)" }, { clipPath: "inset(0 0% 0 0)", duration: 4, ease: "none" }, 0.5);
+        tl.fromTo("#solve-tile1", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.16, ease: "power4.out" }, 1.0);
+        tl.fromTo("#solve-tile2", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.16, ease: "power4.out" }, 1.12);
+        tl.fromTo("#solve-tile3", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.16, ease: "power4.out" }, 1.24);
+        tl.fromTo("#solve-tile4", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.16, ease: "power4.out" }, 1.36);
+        tl.to("#solve-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 8.6);
+        window.__timelines["solve"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

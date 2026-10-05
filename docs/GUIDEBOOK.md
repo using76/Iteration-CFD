@@ -130,9 +130,9 @@ ofgpu-lowmach racecar_case -iters 3000 -check 250 -output foam
 [§6](#6-솔버-고르기--가장-많이-틀리는-곳) — 요약하면 난류 전용 드라이버는
 얼린 `U` 위에서 난류 두 방정식만 풉니다.
 
-끝나면 `racecar_case/0/`에 `U`, `p`, `T`, `k`, `epsilon`, `omega`, `nut`이
-OpenFOAM ASCII로 들어 있습니다. Studio의 3D 뷰어로 열거나 ParaView로 바로
-읽힙니다.
+끝나면 `racecar_case/3000/`(반복 횟수가 디렉터리 이름입니다)에 `U`, `p`, `T`,
+`rho`, `k`, `epsilon`, `nut`이 OpenFOAM ASCII로 들어 있고, `0/`은 초기장 그대로입니다.
+Studio의 3D 뷰어로 열거나 ParaView로 바로 읽힙니다.
 
 자세한 것은 [`cases/racecar.md`](../cases/racecar.md).
 
@@ -200,7 +200,7 @@ ofgpu-generate-mesh <preset> <outputDir> [nx ny nz] [-stl [name=]path]...
 ```
 
 프리셋: `channel`, `cavity`, `step`, `big`, `plume`, `room`, `damBreak`.
-`big`은 한 변 1 m의 정육면체 풍동이고 셀 수를 **하나만** 받습니다(`n³`).
+`big`은 한 변 1 m의 정육면체 풍동이고 셀 수를 하나(`n`, `n³` 정육면체)로 받거나 축별로 셋(`nx ny nz`, 예: `big dir 128 52 41`)으로 받습니다. 둘만 주면 이름을 대고 거부합니다.
 
 생성되는 것은 바로 돌릴 수 있는 완전한 케이스입니다 — `constant/polyMesh`,
 `constant/physicalProperties`, `constant/momentumTransport`,
@@ -1065,16 +1065,25 @@ ofgpu-validate
 넣으십시오. **뷰어를 돌리려는 목적만으로 `g`를 넣지 마십시오** — 중력은
 방정식에 실제로 들어가고 해가 달라집니다.
 
+### 컷셀·경사 격자에서 `-output nvdb`가 거절됨
+
+`nvdb`/`vdb`는 균일 카테시안 상자에만 있는 복셀 격자입니다. 격자가 그 상자가 아니면
+솔버는 루프에 들어가기 전에 이유(예: `cell volumes are not uniform`)를 대고 거절합니다.
+컷셀 해석의 산출물은 `-output foam,vtu`로 받으십시오. `-permissive`를 주면 `nvdb`만
+목록에서 빠지고 나머지 형식은 그대로 쓰입니다.
+
 ### `-output "U,p"` 가 거절됨
 
 `-output`은 형식 목록입니다. `foam`, `vtu`, `nvdb`, `vdb`, `usda` 중에서
 고르십시오.
 
-### 결과가 `1/`이 아니라 `0/`에 쓰임
+### 결과가 어느 디렉터리에 쓰이는가
 
-`system/controlDict`의 `startTime`/`endTime`/`writeControl`이 정합니다. 정상해석
-드라이버는 최종 상태만 쓰며, 어느 시간 디렉터리에 쓸지는 이 설정을 따릅니다.
-초기장을 보존하려면 원본을 따로 두십시오.
+`ofgpu-lowmach`의 정상해석은 반복 횟수를 디렉터리 이름으로 씁니다(`-iters 3000` →
+`3000/`; `-restartFrom`으로 이어 돌리면 이어진 횟수). `0/`은 절대 쓰지 않습니다. 다른
+정상해석 드라이버(`ofgpu-k-epsilon` 등)는 `system/controlDict`의 `endTime`을 이름으로
+씁니다(기본 `1/`). 이전 해에서 이어 가려면 `-restartFrom`을 쓰십시오 — 케이스를 다시
+돌리면 `0/`의 초기장에서 시작합니다(SPEC-LIT §44.9).
 
 ### 인식되지 않는 설정으로 거절됨
 

@@ -1,6 +1,6 @@
 {
  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
- "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py)",
+ "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py); WL-SHARP-FT0 refuse added 2026-09-26 (FEAT-CONSTRAINT: preflight on cubep_nofeat's config with the cubep fingerprint); RM-SNAP-TAU apply added 2026-10-02 (AM-L: remedies.propose on the wing_a_L3 probe, whose snap pins at the default radius)",
  "records": [
   {
    "cite": "gates.json cell_budget; docs/15 §D.1 F5",
@@ -2545,6 +2545,112 @@
    "verdict": "apply"
   },
   {
+   "cite": "SPEC-LIT §92.12 (92.38) erratum 2026-09-26 (the default radius is 2^(L-1) wall cells at wall level L and pins sharp bodies); rules.py R-FEAT (tau = h_f / 2)",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/snap/feature_tolerance",
+     "to": 0.25
+    }
+   ],
+   "formula": "feature_tolerance' = feature_tolerance / 2 while tau' = feature_tolerance' * base_size >= h_f / 8, h_f = base_size / 2**max_level",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F3"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "snap"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "4ecd790d86c1e62a714038ef96b77ab9b965fdf4c4789e168bf8fbe8d91dd45f"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "24f85c3459d3175f9d51b0d7d843e98ea43534f8751d4638d71d12f68794bd0a"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": [
+      {
+       "rule_id": "RM-SNAP-WALL",
+       "why": "below the y+ floor (wall 3 -> 2 < floor 3)"
+      },
+      {
+       "rule_id": "RM-SNAP-FT",
+       "why": "feature_tolerance 0 is refused on a body with sharp edges off the R-PLANE path (WL-SHARP-FT0, the user's decision of 2026-09-26)"
+      }
+     ]
+    },
+    {
+     "name": "tau_over_h_f",
+     "unit": "1",
+     "value": 4.0
+    },
+    {
+     "name": "tau_over_h_f_after",
+     "unit": "1",
+     "value": 2.0
+    },
+    {
+     "name": "tau_floor_over_h_f",
+     "unit": "1",
+     "value": 0.125
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-SNAP-TAU: F3 at stage snap (outcome.pinned_frac = 0.133423 > 0.05; score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)) -> halve the feature attraction radius, never below h_f/8 and never to 0 (fire 1 of 2, attempt 2 of 4): /snap/feature_tolerance absent -> 0.25",
+   "rule_id": "RM-SNAP-TAU",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-02T10:45:30Z",
+   "trigger": {
+    "observable": "outcome.pinned_frac",
+    "op": ">",
+    "source": "score.py stages[snap] n_pinned_boundary / n_boundary_points (docs/15 §D.1 F3a)",
+    "threshold": 0.05,
+    "value": 0.1334231805929919
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
    "cite": "docs/15 §K G-PILOT (wall level -1 was the only F3-clean knob with the attraction on: B-1-002, B-1-004); docs/15 §D.3",
    "edits": [
     {
@@ -3023,6 +3129,42 @@
      200
     ],
     "value": 414
+   },
+   "uncertainty": 0,
+   "verdict": "refuse"
+  },
+  {
+   "cite": "tools/autonomy/README.md section D (the user's decision of 2026-09-26); docs/15 §K G-PILOT caution 1; SPEC-LIT (92.38)",
+   "edits": [],
+   "formula": "refuse when sharp_edge_length_m > 0 and feature_tolerance == 0 and not plane_path",
+   "inputs": [
+    {
+     "name": "sharp_edge_length_m",
+     "unit": "m",
+     "value": 18.0
+    },
+    {
+     "name": "feature_angle_deg",
+     "unit": "deg",
+     "value": 30.0
+    },
+    {
+     "name": "plane_path",
+     "unit": "1",
+     "value": false
+    }
+   ],
+   "layer": "preflight",
+   "message": "WL-SHARP-FT0: snap.feature_tolerance = 0 on a body with 18 m of sharp edge at 30 deg switches the feature attraction off, so its edges are not captured; the user's decision of 2026-09-26 forbids it off the R-PLANE path",
+   "rule_id": "WL-SHARP-FT0",
+   "schema": "autonomy-decision/1",
+   "t": "2026-09-26T05:48:32Z",
+   "trigger": {
+    "observable": "/snap/feature_tolerance",
+    "op": ">",
+    "source": "features.py sharp_edge_length_m; preflight.plane_path",
+    "threshold": 0.0,
+    "value": 0.0
    },
    "uncertainty": 0,
    "verdict": "refuse"

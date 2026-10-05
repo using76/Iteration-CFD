@@ -63,8 +63,9 @@
 //!     water-vapour specific heat and the critical constants
 //!   K. McGrattan, S. Hostikka, R. McDermott, J. Floyd, M. Vanella et al.,
 //!     *Fire Dynamics Simulator Technical Reference Guide*, NIST SP 1018-1
-//!     (NIST, US-Government public domain; `reference/fds/LICENSE.md` read
-//!     verbatim) - chapter "Lagrangian Particles" and appendix "Development
+//!     (NIST, US-Government public domain; its `LICENSE.md` read verbatim in
+//!     a local `reference/fds` clone, which this repository does not carry)
+//!     - chapter "Lagrangian Particles" and appendix "Development
 //!     of an Implicit Solution for Droplet Evaporation". Its `B_T = B_M`
 //!     simplification is [`MassTransfer::Spalding`] here, offered and NOT
 //!     the default, with (76.6) saying why

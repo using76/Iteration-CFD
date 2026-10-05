@@ -16,8 +16,8 @@
 //!   Swarztrauber, SIAM Review 19 (1977) 490
 //!   Roache, "Verification and Validation in Computational Science and
 //!     Engineering" (1998) - the method of manufactured solutions
-//!   Ghia, Ghia & Shin, J. Comput. Phys. 48 (1982) 387 - the benchmark data
-//!     at the bottom of this file
+//!   Ghia, Ghia & Shin, J. Comput. Phys. 48 (1982) 387 - the benchmark data,
+//!     read from reference/ghia1982/ through validate_key (SPEC-LIT section 10)
 //!   Issa, J. Comput. Phys. 62 (1986) 40 - PISO, SPEC-LIT.md section 14
 //!   Rodi, J. Geophys. Res. 92 (1987) 5305, and Henkes, van der Vlugt &
 //!     Hoogendoorn, Int. J. Heat Mass Transfer 34 (1991) 377 - the buoyancy
@@ -46,8 +46,9 @@
 //!    question with a unique answer, so this measures arithmetic, not physics;
 //! 4. a **manufactured solution** (Roache 1998) solved end to end and refined,
 //!    with the observed order of convergence measured;
-//! 5. **published experimental or benchmark data**, at the bottom of the file
-//!    and `#[ignore]`d so it does not slow the normal run.
+//! 5. **published experimental or benchmark data** - Ghia's cavity as a live
+//!    three-mesh section (Gate 94-D) and the tabulated gates, each key read
+//!    from a file under reference/ where one exists, its sha256 printed.
 //!
 //! Exit code 0 means every check passed, 1 that one did not, 2 that the run
 //! could not be completed at all.
@@ -59,6 +60,15 @@ use std::process::ExitCode;
 
 use ofgpu::blockgen;
 use ofgpu::blockgen::{write_block_mesh, BlockSpec, GradedAxis};
+use ofgpu::{SCALAR_FLOOR, SCALAR_HUGE};
+
+/// `to_bits` result width: u64 in double, u32 in single. Same idea as the
+/// test-module aliases elsewhere; lives at module level because the
+/// determinism gates (not only the tests) compare bit patterns.
+#[cfg(not(feature = "single"))]
+type Bits = u64;
+#[cfg(feature = "single")]
+type Bits = u32;
 use ofgpu::energy::{DomainKind, EnergySources, GasProperties, GasState};
 use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{
@@ -91,13 +101,17 @@ use ofgpu::models::{RealizableKeCoeffs, RngKeCoeffs};
 use ofgpu::turbulence::TurbulenceControls;
 use ofgpu::vof::{Vof, VofControls, VofProperties};
 use cudarc::driver::PushKernelArg;
-use ofgpu::{cfg_for, DevBuf, Gpu, GpuMesh, KernelSet, Label, Result, Scalar, Tensor, Vec3};
+use ofgpu::vv;
+use ofgpu::{cfg_for, DevBuf, Error, Gpu, GpuMesh, KernelSet, Label, Result, Scalar, Tensor, Vec3};
 
 #[path = "common/mod.rs"]
 mod common;
 
 #[path = "validate_json/mod.rs"]
 mod json;
+
+#[path = "validate_key/mod.rs"]
+mod key;
 
 use common::sci;
 
@@ -3058,8 +3072,8 @@ fn run(c: &mut Checks) -> Result<()> {
     // had not fully settled (|U| residual ~5e-2, plateauing on the
     // periodic pressure equation's own null space, SPEC-LIT §31.1) even
     // then. That disqualifies it from both this fast, always-run suite and
-    // from `published_benchmarks`' own ignored-but-quick convention (the
-    // Ghia cavity cases below finish in seconds) - a live multi-minute GPU
+    // from the always-run cavity section (Gate 94-D, three meshes per Re,
+    // its wall time printed) - a live multi-minute GPU
     // run belongs in a driver invocation a human chooses to make, not in
     // `cargo test`. What IS cheap - and unconditionally true regardless of
     // any live run - is the damping functions' own analytic table.
@@ -3216,7 +3230,7 @@ fn run(c: &mut Checks) -> Result<()> {
     check_buckingham_reiner(c);
     check_contact_angle_jurin(c);
     check_non_newtonian_channel(c, &gpu, &k)?;
-    println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes) ===");
+    println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10) ===");
     c.enter_gate("Gate 95-D thick cylinder");
     check_thick_cylinder(c, &gpu)?;
     c.leave_gate();
@@ -3225,9 +3239,101 @@ fn run(c: &mut Checks) -> Result<()> {
     check_solid_bimetal(c, &gpu)?;
     c.leave_gate();
 
+    println!("\n=== Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (three meshes each, SPEC-LIT 109.6) ===");
+    c.enter_gate("Gate 95-A cantilever");
+    check_cantilever(c, &gpu)?;
+    c.leave_gate();
+
+    println!("\n=== Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (three meshes each, LE10 four with its study on the finest three, SPEC-LIT 95.11) ===");
+    c.enter_gate("Gate 95-G boundary-point fit (Lame ring)");
+    check_boundary_point_fit(c, &gpu)?;
+    c.leave_gate();
+    c.enter_gate("Gate 95-G LE1 elliptic membrane (restated)");
+    check_nafems_le1(c, &gpu)?;
+    c.leave_gate();
+    c.enter_gate("Gate 95-G LE10 thick plate (restated)");
+    check_nafems_le10(c, &gpu)?;
+    c.leave_gate();
+    c.enter_gate("Gate 95-G LE11 cylinder/taper/sphere (restated)");
+    check_nafems_le11(c, &gpu)?;
+    c.leave_gate();
+
     // SPEC-LIT S97 - the imported region, and Gate 97-A.
     c.enter_gate("S97 Gate 97-A imported region");
     check_imported_region(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT S97 - the region layout, and Gate 97-B.
+    c.enter_gate("S97 Gate 97-B region layout");
+    check_region_layout(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 98.6 - the face that exchanges heat with something not meshed.
+    println!("\n=== Gate 98-A: the straight fin, three meshes, against (S98.7) (SPEC-LIT 98.6) ===");
+    c.enter_gate("SPEC-LIT 98.6 Gate 98-A straight fin");
+    check_straight_fin(c, &gpu)?;
+    c.leave_gate();
+    println!("\n=== Gate 98-B: the slab radiating to a surround, its Newton passes (SPEC-LIT 98.6) ===");
+    c.enter_gate("SPEC-LIT 98.6 Gate 98-B radiating slab");
+    check_radiating_slab(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 98.9 - the enclosure with a running flow.
+    println!("\n=== Gate 98-C: an enclosure on a live conjugate flow, its balance, split and relaxation (SPEC-LIT 98.9) ===");
+    c.enter_gate("SPEC-LIT 98.9 Gate 98-C enclosure with a running flow");
+    check_enclosure_flow(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 100.4 - the evaluator against three published tables.
+    println!("\n=== Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4) ===");
+    c.enter_gate("SPEC-LIT 100.4 Gate 100-B published property tables");
+    check_gate_100b_silicon(c)?;
+    check_gate_100b_air(c)?;
+    check_gate_100b_nasa(c)?;
+    c.leave_gate();
+    // SPEC-LIT 100.8 - the Kirchhoff slab, and Gate 100-A.
+    println!("\n=== Gate 100-A: the Kirchhoff slab, kappa linear in T, three meshes (SPEC-LIT 100.8) ===");
+    c.enter_gate("SPEC-LIT 100.8 Gate 100-A Kirchhoff slab");
+    check_kirchhoff_slab(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 100.15 - Brinkman's channel, Gate 100-C.
+    println!("\n=== Gate 100-C: Brinkman's plane Poiseuille with viscous heating, two walls, three meshes each (SPEC-LIT 100.15) ===");
+    c.enter_gate("SPEC-LIT 100.15 Gate 100-C Brinkman plane Poiseuille");
+    check_brinkman_channel(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 100.15 - Gate 6 with the water's mu(T) live, Gate 100-D.
+    println!("\n=== Gate 100-D: Qu & Mudawar's micro-channel with water's mu(T) live (SPEC-LIT 100.15) ===");
+    c.enter_gate("SPEC-LIT 100.15 Gate 100-D Qu & Mudawar with mu(T)");
+    check_qm_viscosity(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 105 - the moving mesh, and Gate 105-A.
+    println!("\n=== Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) ===");
+    c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
+    check_ale_space_conservation(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 105.10 - the SIMPLE loop on a moving mesh, and Gate 105-B.
+    println!("\n=== Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10) ===");
+    c.enter_gate("SPEC-LIT 105.10 Gate 105-B the flow on a moving mesh");
+    check_ale_flow(c, &gpu)?;
+    c.leave_gate();
+    // SPEC-LIT 105.14 - Turek-Hron CFD1/CFD2 on four meshes, studied through the finest three, CFD3 on a wobbling mesh, Gate 105-C.
+    println!("\n=== Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over four meshes (the study on the finest three), CFD3 on a wobbling mesh (SPEC-LIT 105.14) ===");
+    c.enter_gate("SPEC-LIT 105.14 Gate 105-C Turek-Hron");
+    check_turek_hron(c, &gpu)?;
+    c.leave_gate();
+    println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
+    c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
+    published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
+    c.leave_gate();
+    // SPEC-LIT 110 - the published fluid gates: on this tree every one of
+    // the three takes the missing-key path (SPEC-LIT §110.1), and says so by name.
+    println!("\n=== Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2) ===");
+    c.enter_gate("SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)");
+    check_channel_dns(c)?;
+    c.leave_gate();
+    println!("\n=== Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3) ===");
+    c.enter_gate("SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)");
+    check_backstep_reattachment(c)?;
+    c.leave_gate();
+    println!("\n=== Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4) ===");
+    c.enter_gate("SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)");
+    check_mccaffrey_plume(c)?;
     c.leave_gate();
     c.replaying(check_kays_crawford_experiment_replay);
 
@@ -3966,7 +4072,7 @@ fn blasius_similarity(eta_max: Scalar, n: usize) -> BlasiusSimilarity {
     let mut fa = march(a).0 - 1.0;
     let mut fb = march(b).0 - 1.0;
     for _ in 0..80 {
-        if (fb - fa).abs() < 1e-300 || fb.abs() < 1e-14 {
+        if (fb - fa).abs() < SCALAR_FLOOR || fb.abs() < 1e-14 {
             break;
         }
         let cnew = b - fb * (b - a) / (fb - fa);
@@ -4133,7 +4239,7 @@ fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             sp_ok &= su == 0.0 && sp >= 0.0 && susp == -(a + b);
             let emitted = su - susp * g - sp * g;
             let want = (a + b) * g - (a + b * cf.ce2) * g * g;
-            worst_split = worst_split.max((emitted - want).abs() / want.abs().max(1e-300));
+            worst_split = worst_split.max((emitted - want).abs() / want.abs().max(SCALAR_FLOOR));
         }
     }
     c.require("§90.11 the split keeps Sp >= 0 at every state, gamma = 0 included", sp_ok);
@@ -4185,7 +4291,7 @@ fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     );
     for shift in [0.5 as Scalar, 1.0, 2.0, 5.0] {
         let got = gm_row(5.0 + shift);
-        let pc = |v: Scalar, b: Scalar| 100.0 * (v - b) / b.abs().max(1e-300);
+        let pc = |v: Scalar, b: Scalar| 100.0 * (v - b) / b.abs().max(SCALAR_FLOOR);
         table += &format!(
             "        shift +{:.1} m/s      : Re_V {:+.3} %, Re_thetac {:+.3} %, \
              F_onset {:+.3} %, F_PG {:+.3} %\n",
@@ -4250,7 +4356,7 @@ fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let mut worst_gm = 0.0 as Scalar;
     let mut bits_gm = 0usize;
     for (a, b) in rtc_rest.iter().zip(&rtc_moved) {
-        worst_gm = worst_gm.max((a - b).abs() / b.abs().max(1e-300));
+        worst_gm = worst_gm.max((a - b).abs() / b.abs().max(SCALAR_FLOOR));
         if a.to_bits() == b.to_bits() {
             bits_gm += 1;
         }
@@ -4440,7 +4546,7 @@ fn check_gamma_transition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         let mut worst = 0.0 as Scalar;
         let mut bits = 0usize;
         for (a, b) in plain.iter().zip(gamma) {
-            worst = worst.max((a - b).abs() / b.abs().max(a.abs()).max(1e-300));
+            worst = worst.max((a - b).abs() / b.abs().max(a.abs()).max(SCALAR_FLOOR));
             if a.to_bits() == b.to_bits() {
                 bits += 1;
             }
@@ -5297,7 +5403,7 @@ fn check_per_region_residual(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let err = if lhs > 0.0 { (lhs - sum).abs() / lhs } else { sum };
     c.check(
         "Gate 93-B leg A: r_g N_g = sum_k r_k N_k - the region residuals partition the global one",
-        err,
+        err as Scalar,
         1e-10,
     );
 
@@ -5963,8 +6069,8 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             "Gate 59-B, Kr = {kr}: Nu = {} against the exact series resistance {} \
              ({:+.2e} relative); the three heat flows (cold wall, hot wall, interface) \
              spread by {:.2e}",
-            sci(nu.cold, 9),
-            sci(exact, 9),
+            sci(f64::from(nu.cold), 9),
+            sci(f64::from(exact), 9),
             f64::from(nu.cold / exact - 1.0),
             f64::from(nu.spread()),
         ));
@@ -5997,6 +6103,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     {
         const N: usize = 50;
         let nu = run_kp_document(gpu, &dvd_document(N, 1.0e4, 4000, 1e-7), N, false)?;
+        // answer-key: devahldavis1983
         // de Vahl Davis (1983), Int. J. Numer. Meth. Fluids 3, 249-264, quoted
         // from Qi et al., Nanoscale Research Letters 8 (2013) 56, Table 3
         // (open access), which lists it beside two other codes'.
@@ -6005,7 +6112,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             "Gate 59-A, de Vahl Davis (1983) at Ra = 1e4 on {N}x{N}: Nu = {} against the \
              published {PUBLISHED} ({:+.2}%); the two walls agree to {:.2e}; {} iterations, \
              converged {}",
-            sci(nu.cold, 6),
+            sci(f64::from(nu.cold), 6),
             f64::from(100.0 * (nu.cold / PUBLISHED - 1.0)),
             f64::from(nu.spread()),
             nu.iterations,
@@ -6056,6 +6163,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         use ofgpu::vv;
         const N: usize = 40;
         const RA: Scalar = 1.0e4;
+        // answer-key: belazizia2012
         // Belazizia et al. (2012) Fig. 6, at Ra = 1e4, D = 0.2, Pr = 0.7.
         const PUBLISHED: [(Scalar, Scalar); 3] = [(0.1, 0.41), (1.0, 1.57), (10.0, 2.28)];
 
@@ -6071,11 +6179,11 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                 "Gate 5, Ra = 1e4, Kr = {kr}, {N}x{N}: Nu = {} (cold wall) / {} (hot wall) / \
                  {} (interface), spread {:.2e}; the analytic conduction limit is {} and \
                  Belazizia et al. read {pubv} -> {:+.2}%; {} iterations, converged {}",
-                sci(nu.cold, 6),
-                sci(nu.hot, 6),
-                sci(nu.interface, 6),
+                sci(f64::from(nu.cold), 6),
+                sci(f64::from(nu.hot), 6),
+                sci(f64::from(nu.interface), 6),
                 f64::from(nu.spread()),
-                sci(floor, 6),
+                sci(f64::from(floor), 6),
                 f64::from(100.0 * (nu.cold / pubv - 1.0)),
                 nu.iterations,
                 nu.converged,
@@ -6242,6 +6350,7 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 //  §79.12's Disclosure 2.
 // ==========================================================================
 
+// answer-key: qu-mudawar2002
 /// Qu & Mudawar's Table 1, in metres, and the three band edges the nine boxes
 /// of §79.8 are cut on.
 const QM_L: f64 = 10.0e-3;
@@ -6258,6 +6367,7 @@ const QM_RHO: f64 = 998.2;
 const QM_CP: f64 = 4182.0;
 const QM_MU: f64 = 1.002e-3;
 
+// answer-key: qu-mudawar2002-fig4
 /// The digitisation of Qu & Mudawar Fig. 4(b) and 4(c) at `Re ~ 140`, in
 /// `C cm^2/W` - SPEC-LIT (79.14). Kawano *et al.*'s marker, the two ends of
 /// its error bar, and Qu & Mudawar's own prediction curve.
@@ -7221,7 +7331,7 @@ fn smooth_u_tau_reference(u_mag: Scalar, y: Scalar, nu: Scalar, kappa: Scalar, e
     if !(u_mag > 0.0) {
         return 0.0;
     }
-    let mut u_tau: Scalar = (nu * u_mag / y).max(1e-300).sqrt();
+    let mut u_tau: Scalar = (nu * u_mag / y).max(SCALAR_FLOOR).sqrt();
     for _ in 0..10 {
         let u_plus = u_mag / u_tau;
         let ku = kappa * u_plus;
@@ -7233,8 +7343,8 @@ fn smooth_u_tau_reference(u_mag: Scalar, y: Scalar, nu: Scalar, kappa: Scalar, e
         if !(df.abs() > 0.0) {
             break;
         }
-        let next = (u_tau - f / df).max(1e-300);
-        let done = (next - u_tau).abs() <= 1e-6 * next.abs().max(1e-300);
+        let next = (u_tau - f / df).max(SCALAR_FLOOR);
+        let done = (next - u_tau).abs() <= 1e-6 * next.abs().max(SCALAR_FLOOR);
         u_tau = next;
         if done {
             break;
@@ -7386,11 +7496,11 @@ fn check_werner_wengle(c: &mut Checks) {
         let u_c = ww_branch_speed(nu, h);
         let at = tau_w_werner_wengle(u_c, h, nu);
         let viscous_closed_form = 2.0 * nu * u_c / h;
-        worst_at = worst_at.max((at - viscous_closed_form).abs() / viscous_closed_form.max(1e-300));
+        worst_at = worst_at.max((at - viscous_closed_form).abs() / viscous_closed_form.max(SCALAR_FLOOR));
 
         let below = tau_w_werner_wengle(u_c * (1.0 - 1e-9), h, nu);
         let above = tau_w_werner_wengle(u_c * (1.0 + 1e-9), h, nu);
-        let scale = at.max(1e-300);
+        let scale = at.max(SCALAR_FLOOR);
         worst_below = worst_below.max((below - at).abs() / scale);
         worst_above = worst_above.max((above - at).abs() / scale);
     }
@@ -7451,7 +7561,7 @@ fn check_werner_wengle_inversion(c: &mut Checks) {
             f64::from(ww_branch_speed(nu, h))
         ));
         let got = tau_w_werner_wengle(u_p, h, nu);
-        worst_viscous = worst_viscous.max((got - tau_w_target).abs() / tau_w_target.max(1e-300));
+        worst_viscous = worst_viscous.max((got - tau_w_target).abs() / tau_w_target.max(SCALAR_FLOOR));
     }
     c.check(
         "WW viscous branch: invert then reapply reproduces tau_w (S30.3 gate)",
@@ -8385,8 +8495,8 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         // would be a failure is growth that ACCELERATES, which is a CSF
         // feeding its own velocity field. So the two successive ratios are
         // compared with each other rather than with 2.
-        let r1 = u[1] / u[0].max(1e-300);
-        let r2 = u[2] / u[1].max(1e-300);
+        let r1 = u[1] / u[0].max(SCALAR_FLOOR);
+        let r2 = u[2] / u[1].max(SCALAR_FLOOR);
         c.note(&format!(
             "spurious current growth ratios {:.3} then {:.3} over equal \
              doublings of the interval",
@@ -8395,7 +8505,7 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         ));
         c.check(
             "spurious interface currents do not accelerate",
-            (r2 - r1).max(0.0) / r1.max(1e-300),
+            (r2 - r1).max(0.0) / r1.max(SCALAR_FLOOR),
             0.05,
         );
         c.check(
@@ -10151,9 +10261,9 @@ fn check_nu_correlations(c: &mut Checks) {
 
     c.note(&format!(
         "Nu_DB = {}, Nu_Gn = {}, ratio = {} (Dittus-Boelter's own +-20-25% band)",
-        sci(nu_db, 4),
-        sci(nu_gn, 4),
-        sci(nu_db / nu_gn, 4)
+        sci(f64::from(nu_db), 4),
+        sci(f64::from(nu_gn), 4),
+        sci(f64::from(nu_db / nu_gn), 4)
     ));
     c.check(
         "Dittus-Boelter and Gnielinski agree within Dittus-Boelter's own +-25% band",
@@ -10257,10 +10367,10 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
             let f = darcy_friction_factor(tau_force, rho, u_b);
             c.note(&format!(
                 "laminar plane Poiseuille: U_b = {} m/s, Re_Dh = {}, f = {}, f*Re = {}",
-                sci(u_b, 4),
-                sci(re, 4),
-                sci(f, 4),
-                sci(f * re, 6),
+                sci(f64::from(u_b), 4),
+                sci(f64::from(re), 4),
+                sci(f64::from(f), 4),
+                sci(f64::from(f * re), 6),
             ));
             c.check(
                 "darcy_friction_factor gives Shah & London's f*Re = 96 for parallel plates",
@@ -10403,10 +10513,10 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
         c.note(&format!(
             "Re = {}: Petukhov pipe f = {} gives Nu_Gn = {}; an 8% higher (plane-channel) f \
              gives {} - {:+.1}%, comparable with Gnielinski's whole +-10% band",
-            sci(re, 4),
-            sci(f_pipe, 4),
-            sci(lo, 4),
-            sci(hi, 4),
+            sci(f64::from(re), 4),
+            sci(f64::from(f_pipe), 4),
+            sci(f64::from(lo), 4),
+            sci(f64::from(hi), 4),
             (hi / lo - 1.0) * 100.0,
         ));
         c.require(
@@ -10560,36 +10670,36 @@ fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
     c.note(&format!(
         "{leg}: D_h = {} m, Re = {}, Nu_measured = {}, T_mean (from the thermostat's own law) \
          = {} K, rho_b = {} kg/m3, rho_bar = {} kg/m3",
-        sci(v.d_h, 4),
-        sci(v.re, 5),
-        sci(v.nu_measured, 4),
-        sci(v.t_mean, 6),
-        sci(v.rho_b, 5),
-        sci(v.rho_bar, 5),
+        sci(f64::from(v.d_h), 4),
+        sci(f64::from(v.re), 5),
+        sci(f64::from(v.nu_measured), 4),
+        sci(f64::from(v.t_mean), 6),
+        sci(f64::from(v.rho_b), 5),
+        sci(f64::from(v.rho_bar), 5),
     ));
     c.note(&format!(
         "{leg}: f MEASURED at the wall = {} (tau_w = {} Pa) | viscous form on the same faces = \
          {} (tau_w = {} Pa) | Petukhov smooth-PIPE f = {} - the measurement is {:+.1}% of it",
-        sci(v.f_measured, 4),
-        sci(v.tau_w_measured, 4),
-        sci(v.f_viscous, 4),
-        sci(v.tau_w_viscous, 4),
-        sci(v.f_pipe, 4),
+        sci(f64::from(v.f_measured), 4),
+        sci(f64::from(v.tau_w_measured), 4),
+        sci(f64::from(v.f_viscous), 4),
+        sci(f64::from(v.tau_w_viscous), 4),
+        sci(f64::from(v.f_pipe), 4),
         (v.f_measured / v.f_pipe - 1.0) * 100.0,
     ));
     c.note(&format!(
         "{leg}: the SUPERSEDED body-force inference was f = {} (tau_w = {} Pa) - {:+.1}% of the \
          measurement. Every Reynolds-analogy verdict once quoted at it was too generous \
          (SPEC-LIT 32.5.3)",
-        sci(v.f_inferred, 4),
-        sci(v.tau_w_inferred, 4),
+        sci(f64::from(v.f_inferred), 4),
+        sci(f64::from(v.tau_w_inferred), 4),
         (v.f_inferred / v.f_measured - 1.0) * 100.0,
     ));
     c.note(&format!(
         "{leg}: kinematic force balance (S32.5.2's correction): wall sink {} m4/s2 against \
          (g.e_hat) V = {} m4/s2 - {:+.3}%",
-        sci(v.kin_sink, 5),
-        sci(CHANNEL_KIN_FORCE, 5),
+        sci(f64::from(v.kin_sink), 5),
+        sci(f64::from(CHANNEL_KIN_FORCE), 5),
         (v.kin_sink / CHANNEL_KIN_FORCE - 1.0) * 100.0,
     ));
     c.note(&format!(
@@ -10597,13 +10707,13 @@ fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
          ({:+.1}%) | REYNOLDS-ANALOGY verdict (Gnielinski at the MEASURED f): Nu_Gn = {} \
          ({:+.1}%), and at the viscous f {} ({:+.1}%) | Dittus-Boelter: Nu_DB = {} ({:+.1}%) \
          | energy-balance uncertainty on Nu: +-{:.1}% (S32.4)",
-        sci(v.nu_gn_pipe, 4),
+        sci(f64::from(v.nu_gn_pipe), 4),
         (v.nu_measured / v.nu_gn_pipe - 1.0) * 100.0,
-        sci(v.nu_gn_realised, 4),
+        sci(f64::from(v.nu_gn_realised), 4),
         (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
-        sci(v.nu_gn_viscous, 4),
+        sci(f64::from(v.nu_gn_viscous), 4),
         (v.nu_measured / v.nu_gn_viscous - 1.0) * 100.0,
-        sci(v.nu_db, 4),
+        sci(f64::from(v.nu_db), 4),
         (v.nu_measured / v.nu_db - 1.0) * 100.0,
         v.energy_gap.abs() * 100.0,
     ));
@@ -10913,7 +11023,7 @@ fn check_launder_sharma_damping_functions(c: &mut Checks) {
     let fmu0 = f_mu(0.0);
     let want_fmu0 = (-3.4 as Scalar).exp();
     c.check("f_mu(Re_t = 0) = exp(-3.4) (SPEC-LIT 33.3)", (fmu0 - want_fmu0).abs(), 1e-12);
-    c.note(&format!("f_mu(0) = {} (~1/30th of its Re_t -> infinity value)", sci(fmu0, 4)));
+    c.note(&format!("f_mu(0) = {} (~1/30th of its Re_t -> infinity value)", sci(f64::from(fmu0), 4)));
 
     let f2_0 = f2(0.0);
     c.check("f_2(Re_t = 0) = 0.7 (SPEC-LIT 33.3)", (f2_0 - 0.7).abs(), 1e-12);
@@ -10982,7 +11092,7 @@ fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
 
     c.note(&format!(
         "replayed: worst wall-adjacent y+ = {}, {} / 400 cells at y+ < 20 ({} wall faces)",
-        sci(report.max_first_cell_y_plus, 4),
+        sci(f64::from(report.max_first_cell_y_plus), 4),
         report.cells_below_y_plus_20,
         report.n_wall_faces,
     ));
@@ -11084,8 +11194,8 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
         "a persistent {} W/m3 forcing settles T_mean at target + {} K, not at target exactly \
          (the ordinary steady-state error of a proportional-only controller) - \
          docs/07-lowmach-solver.md S1.1's own {} W leg measured a {} K offset the same way",
-        sci(q_forcing, 4),
-        sci(q_forcing * tau / rho_cp, 4),
+        sci(f64::from(q_forcing), 4),
+        sci(f64::from(q_forcing * tau / rho_cp), 4),
         sci(3.2, 2),
         sci(0.426, 3),
     ));
@@ -11157,13 +11267,13 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
              integral {} W -> {} W ({:.0}x smaller); its PRESCRIBED half {} W -> {} W, round-off \
              both times - which is the measurement that refuted \"the correction removes the \
              prescribed dilatation\"",
-            sci(gap_before as Scalar, 6),
-            sci(gap_after as Scalar, 6),
-            sci(corr_before as Scalar, 6),
-            sci(corr_after as Scalar, 6),
+            sci(f64::from(gap_before as Scalar), 6),
+            sci(f64::from(gap_after as Scalar), 6),
+            sci(f64::from(corr_before as Scalar), 6),
+            sci(f64::from(corr_after as Scalar), 6),
             (corr_before as Scalar / corr_after as Scalar).abs(),
-            sci(presc_before as Scalar, 3),
-            sci(presc_after as Scalar, 3),
+            sci(f64::from(presc_before as Scalar), 3),
+            sci(f64::from(presc_after as Scalar), 3),
         ));
         c.require(
             &format!("{leg} leg: the correction's PRESCRIBED half is round-off BEFORE the fix \
@@ -11193,7 +11303,7 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
          uniform sink, +3.26% at massFlux, +3.11% after S32.5.5's momentum fix, +3.35% under \
          S37's KaysCrawford - all of it S25.1's `Q` implemented without its conduction term, \
          and all of it closed by S26.1. S32.4's uncertainty on Nu is now +-{:.5}%",
-        sci(500.0 * CHANNEL_WALL_AREA, 4),
+        sci(f64::from(500.0 * CHANNEL_WALL_AREA), 4),
         v.energy_gap * 100.0,
         v.energy_gap.abs() * 100.0,
     ));
@@ -11208,8 +11318,8 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
          `bounded` convection correction, applied to the momentum equation by a driver that \
          ignored this case's own div(phi,U) entry, and restoring that entry by hand reproduces \
          it exactly",
-        sci(v.kin_sink, 5),
-        sci(CHANNEL_KIN_FORCE, 5),
+        sci(f64::from(v.kin_sink), 5),
+        sci(f64::from(CHANNEL_KIN_FORCE), 5),
         (v.kin_sink / CHANNEL_KIN_FORCE - 1.0) * 100.0,
     ));
     // The balance closes now, so it is ASSERTED rather than only noted - which
@@ -11268,14 +11378,14 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
         headline: format!(
             "resolved leg Nu is {:+.1}% of it at the MEASURED f = {} - outside the band",
             (v.nu_measured / v.nu_gn_realised - 1.0) * 100.0,
-            sci(v.f_measured, 4),
+            sci(f64::from(v.f_measured), 4),
         ),
         detail: vec![format!(
             "  The +6.8% once asserted here was taken at an INFERRED f of {} (SPEC-LIT \
              32.5.3). That measured f is only {:+.1}% of the Petukhov pipe f, so this leg \
              now transports very nearly the right MOMENTUM and too much HEAT - a THERMAL \
              finding, with nothing left on the momentum side to carry it (SPEC-LIT 32.5.5)",
-            sci(v.f_inferred, 4),
+            sci(f64::from(v.f_inferred), 4),
             (v.f_measured / v.f_pipe - 1.0) * 100.0,
         )],
     });
@@ -11289,10 +11399,10 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
          at massFlux with the substituted momentum entry) \
          against the ratio Gnielinski predicts from the two legs' own MEASURED viscous-form \
          friction factors, {} - the meshes measure f = {} and {} at the SAME body force",
-        sci(v.nu_measured / w.nu_measured, 4),
-        sci(v.nu_gn_viscous / w.nu_gn_viscous, 4),
-        sci(v.f_viscous, 4),
-        sci(w.f_viscous, 4),
+        sci(f64::from(v.nu_measured / w.nu_measured), 4),
+        sci(f64::from(v.nu_gn_viscous / w.nu_gn_viscous), 4),
+        sci(f64::from(v.f_viscous), 4),
+        sci(f64::from(w.f_viscous), 4),
     ));
 }
 
@@ -11327,20 +11437,24 @@ fn check_kays_crawford_prt(c: &mut Checks) {
     c.note(&format!(
         "Kays-Crawford C = {}, Pr_t_inf = {} -> sublayer limit 2*Pr_t_inf = {} \
          (Kays 1994 reports 1.5-1.9 for air)",
-        sci(C, 3),
-        sci(p_inf, 3),
-        sci(2.0 * p_inf, 4),
+        sci(f64::from(C), 3),
+        sci(f64::from(p_inf), 3),
+        sci(f64::from(2.0 * p_inf), 4),
     ));
 
     // ---- limit 1: Pe_t -> 0, the conduction sublayer --------------------
     let mut worst_sublayer: Scalar = 0.0;
     for pi in [0.7 as Scalar, 0.85, 0.9, 1.0] {
-        for pe in [0.0 as Scalar, 1e-300, Scalar::MIN_POSITIVE] {
+        for pe in [0.0 as Scalar, SCALAR_FLOOR, Scalar::MIN_POSITIVE] {
             worst_sublayer = worst_sublayer.max((kays_crawford_prt(pe, C, pi) - 2.0 * pi).abs());
         }
     }
+    #[cfg(not(feature = "single"))]
+    let sublayer_row = "Pe_t -> 0 gives Pr_t = 2*Pr_t_inf exactly, at Pe_t = 0 and 1e-300 (S37.2)";
+    #[cfg(feature = "single")]
+    let sublayer_row = "Pe_t -> 0 gives Pr_t = 2*Pr_t_inf exactly, at Pe_t = 0 and 1e-30 (§37.2)";
     c.check(
-        "Pe_t -> 0 gives Pr_t = 2*Pr_t_inf exactly, at Pe_t = 0 and 1e-300 (S37.2)",
+        sublayer_row,
         worst_sublayer,
         0.0,
     );
@@ -11414,10 +11528,10 @@ fn check_kays_crawford_prt(c: &mut Checks) {
     c.note(&format!(
         "at Pe_t = 1e8 the literature form returns {} against the true {}, an error of {:.2}% \
          from cancellation alone; S37.2's form returns {}",
-        sci(lit_1e8 as Scalar, 6),
-        sci(p_inf, 6),
+        sci(f64::from(lit_1e8 as Scalar), 6),
+        sci(f64::from(p_inf), 6),
         100.0 * (lit_1e8 / f64::from(p_inf) - 1.0).abs(),
-        sci(ours_1e8 as Scalar, 6),
+        sci(f64::from(ours_1e8 as Scalar), 6),
     ));
     c.require(
         "the literature form HAS lost its digits by Pe_t = 1e8 (which is why S37.2 rearranges it)",
@@ -11426,7 +11540,7 @@ fn check_kays_crawford_prt(c: &mut Checks) {
 
     // ---- nothing anywhere in the domain of definition is a NaN -----------
     let mut all_usable = kays_crawford_prt(Scalar::INFINITY, C, p_inf) == p_inf;
-    for pe in [0.0 as Scalar, Scalar::MIN_POSITIVE, 1e-300, 1e-30, 1.0, 1e30, 1e300, Scalar::MAX] {
+    for pe in [0.0 as Scalar, Scalar::MIN_POSITIVE, SCALAR_FLOOR, 1e-30, 1.0, 1e30, SCALAR_HUGE, Scalar::MAX] {
         let got = kays_crawford_prt(pe, C, p_inf);
         all_usable &= got.is_finite() && got > 0.0;
     }
@@ -11443,16 +11557,16 @@ fn check_kays_crawford_prt(c: &mut Checks) {
     // the `Pr_t` pair below is what this function computes from it, and the
     // replay that follows is what the runs actually used.
     for (leg, r_lo, r_hi) in [
-        ("wall function (y+ 58)", 16.8627 as Scalar, 28.6496),
+        ("wall function (y+ 58)", 16.8627 as Scalar, 28.6496 as Scalar),
         ("resolved (y+ 0.0019)", 3.91576e-7, 35.5161),
     ] {
         c.note(&format!(
             "{leg}: nu_t/nu in [{}, {}] gives Pr_t in [{}, {}] against the constant {}",
-            sci(r_lo, 4),
-            sci(r_hi, 4),
-            sci(kays_crawford_prt(r_hi * 0.71, C, p_inf), 5),
-            sci(kays_crawford_prt(r_lo * 0.71, C, p_inf), 5),
-            sci(p_inf, 3),
+            sci(f64::from(r_lo), 4),
+            sci(f64::from(r_hi), 4),
+            sci(f64::from(kays_crawford_prt(r_hi * 0.71, C, p_inf)), 5),
+            sci(f64::from(kays_crawford_prt(r_lo * 0.71, C, p_inf)), 5),
+            sci(f64::from(p_inf), 3),
         ));
     }
 }
@@ -11533,12 +11647,12 @@ fn check_kays_crawford_experiment_replay(c: &mut Checks) {
              Pr_t in [{}, {}]",
             r.leg,
             r.model,
-            sci(r.nu_measured, 6),
-            sci(r.d_t, 6),
-            sci(r.u_b, 6),
+            sci(f64::from(r.nu_measured), 6),
+            sci(f64::from(r.d_t), 6),
+            sci(f64::from(r.u_b), 6),
             r.energy_gap * 100.0,
-            sci(r.prt_min, 6),
-            sci(r.prt_max, 6),
+            sci(f64::from(r.prt_min), 6),
+            sci(f64::from(r.prt_max), 6),
         ));
     }
 
@@ -11569,11 +11683,11 @@ fn check_kays_crawford_experiment_replay(c: &mut Checks) {
         shift[i] = 1.0 - after.nu_measured / before.nu_measured;
         c.note(&format!(
             "{leg}: Nu {} -> {} ({:+.2}%), dT {} -> {} K ({:+.2}%) on the PrtModel token alone",
-            sci(before.nu_measured, 6),
-            sci(after.nu_measured, 6),
+            sci(f64::from(before.nu_measured), 6),
+            sci(f64::from(after.nu_measured), 6),
             (after.nu_measured / before.nu_measured - 1.0) * 100.0,
-            sci(before.d_t, 6),
-            sci(after.d_t, 6),
+            sci(f64::from(before.d_t), 6),
+            sci(f64::from(after.d_t), 6),
             (after.d_t / before.d_t - 1.0) * 100.0,
         ));
         c.require(
@@ -11613,10 +11727,10 @@ fn check_kays_crawford_experiment_replay(c: &mut Checks) {
         c.note(&format!(
             "{leg}: absolute-prediction verdict (Gnielinski at the pipe f = {}) moves from \
              {:+.1}% to {:+.1}% of Nu_Gn = {}",
-            sci(f_pipe, 5),
+            sci(f64::from(f_pipe), 5),
             (before.nu_measured / nu_gn - 1.0) * 100.0,
             (after.nu_measured / nu_gn - 1.0) * 100.0,
-            sci(nu_gn, 6),
+            sci(f64::from(nu_gn), 6),
         ));
     }
     let f_pipe_b = gnielinski_f(26329.7 as Scalar);
@@ -11652,8 +11766,8 @@ fn check_kays_crawford_experiment_replay(c: &mut Checks) {
          viscous-form measured f implies about 1.12 either way, so the KaysCrawford ratio is \
          BELOW its momentum-implied value - S32.5.5's momentum decomposition of the two-mesh \
          gap does not survive applying the same thermal correction to both legs",
-        sci(rc.nu_measured / wc.nu_measured, 5),
-        sci(rk.nu_measured / wk.nu_measured, 5),
+        sci(f64::from(rc.nu_measured / wc.nu_measured), 5),
+        sci(f64::from(rk.nu_measured / wk.nu_measured), 5),
     ));
 }
 
@@ -11675,11 +11789,11 @@ fn check_thermostat_weighting_experiment_replay(c: &mut Checks) {
         c.note(&format!(
             "{leg}: Nu {} -> {} ({:+.2}%), dT {} -> {} K ({:+.2}%) on the uniform -> massFlux \
              thermostat weighting alone (SPEC-LIT 35.3.2)",
-            sci(*nu_uniform, 6),
-            sci(*nu_massflux, 6),
+            sci(f64::from(*nu_uniform), 6),
+            sci(f64::from(*nu_massflux), 6),
             (nu_massflux / nu_uniform - 1.0) * 100.0,
-            sci(*dt_uniform, 6),
-            sci(*dt_massflux, 6),
+            sci(f64::from(*dt_uniform), 6),
+            sci(f64::from(*dt_massflux), 6),
             (dt_massflux / dt_uniform - 1.0) * 100.0,
         ));
         c.require(
@@ -11699,8 +11813,8 @@ fn check_thermostat_weighting_experiment_replay(c: &mut Checks) {
     c.note(&format!(
         "so the two-mesh ratio falls from {} to {}: this mechanism accounts for {:.3} of the \
          {:.3} excess, about {:.0}% of it, measured rather than argued",
-        sci(r_uniform, 4),
-        sci(WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2, 4),
+        sci(f64::from(r_uniform), 4),
+        sci(f64::from(WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2), 4),
         r_uniform - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2,
         r_uniform - 1.0,
         100.0 * (r_uniform - WEIGHTING_EXPERIMENT[0].2 / WEIGHTING_EXPERIMENT[1].2)
@@ -11737,7 +11851,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
             "{} leg, div(phi,U) = `{}`: Nu = {}, drag balance {:+.3}%, energy balance {:+.3}%",
             r.leg,
             r.div_entry,
-            sci(r.nu_measured, 6),
+            sci(f64::from(r.nu_measured), 6),
             r.drag_gap * 100.0,
             r.energy_gap * 100.0,
         ));
@@ -11803,8 +11917,8 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
                 "{leg} leg, `bounded` = {bounded}: first order -> second order moves Nu by \
                  {:+.2}% ({} -> {})",
                 shift * 100.0,
-                sci(first.nu_measured, 6),
-                sci(second.nu_measured, 6),
+                sci(f64::from(first.nu_measured), 6),
+                sci(f64::from(second.nu_measured), 6),
             ));
         }
     }
@@ -11871,7 +11985,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
              balance {:+.4}%",
             r.leg,
             r.div_entry,
-            sci(r.nu_measured, 6),
+            sci(f64::from(r.nu_measured), 6),
             r.drag_gap * 100.0,
             r.energy_gap * 100.0,
         ));
@@ -11919,20 +12033,977 @@ const BOUNDED_AFTER_S261: [BoundedRun; 2] = [
 ];
 
 // ==========================================================================
+//  SPEC-LIT 110 - the published fluid gates: record types, keys, verdicts
+//
+//  Three gates compare this crate against numbers somebody else produced:
+//  110-A the Moser-Kim-Mansour channel DNS, 110-B the Driver & Seegmiller
+//  reattachment, 110-C the McCaffrey plume centreline. None of their keys
+//  is distributed with this tree (SPEC-LIT 110.1, the user's decision of
+//  2026-09-20), so on THIS tree every gate takes the missing-key path; the
+//  verdict logic for a recorded run is written here anyway and exercised
+//  by `mod published_fluid_gates` on synthetic records, so that a run
+//  changes DATA, not code.
+// ==========================================================================
+
+/// One Re_tau leg of Gate 110-A as RECORDED from `ofgpu-lowmach` +
+/// `ofgpu-sample` (SPEC-LIT 110.5). Arrays are coarse to fine; the study
+/// reverses them before `vv::grid_study`.
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct ChannelDnsRecord {
+    re_tau: Scalar,                     // the key file's header value the case was built for
+    body_force: Scalar,                 // g_x of the case, m/s2
+    n_y: [usize; 3],                    // coarse, medium, fine
+    u_b_plus: [Scalar; 3],              // U_b / u_tau per mesh, u_tau = sqrt(g_x h)
+    tau_w_measured_kin: Scalar,         // the driver's MEASURED wall shear on the finest mesh, m2/s2 (tau_w / rho)
+    iterations: usize,
+    residual_u: Scalar,                 // the finest run's final |U| residual
+    profile_fine: &'static [(Scalar, Scalar)], // (y from the wall [m], u_x [m/s]) wall-to-centre, finest mesh
+}
+
+/// One backward-facing-step run as RECORDED (SPEC-LIT 110.5's recipe).
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct StepRecord {
+    n_cells: [usize; 3], dx_over_h: [Scalar; 3], x_r_over_h: [Scalar; 3],
+    delta99_over_h_at_minus_4h: [Scalar; 3], u_ref: [Scalar; 3], iterations: usize, residual_u: Scalar,
+}
+
+/// One plume run as RECORDED (SPEC-LIT 110.5's recipe).
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct PlumeRecord {
+    q_kw: Scalar, n_cells: [usize; 3], cell_size: [Scalar; 3],
+    stations_m: [Scalar; 6], dt_c: [[Scalar; 6]; 3], w_c: [[Scalar; 6]; 3], iterations: usize, residual_u: Scalar,
+}
+
+const CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [None, None, None]; // 178.12, 392.24, 587.19
+const STEP_RECORD: Option<&StepRecord> = None;
+const PLUME_RECORD: Option<&PlumeRecord> = None;
+
+/// The five answer keys the three gates read, id and expected file under
+/// `reference/` (SPEC-LIT 110.1). None is distributed: no manifest row, no
+/// `// answer-key:` marker - a key exists to the code exactly when the user
+/// places BOTH the file and its manifest row.
+const MKM_KEYS: [(&str, &str); 3] = [
+    ("mkm99-chan180", "mkm99/chan180.means"),
+    ("mkm99-chan395", "mkm99/chan395.means"),
+    ("mkm99-chan590", "mkm99/chan590.means"),
+];
+const DS_KEY: (&str, &str) =
+    ("driver-seegmiller1985", "driver_seegmiller_1985/reattachment.txt");
+const MC_KEY: (&str, &str) =
+    ("mccaffrey1979-table1", "mccaffrey_1979/centreline_table1.txt");
+
+/// One MKM `.means` file, parsed: the header's `Re_tau` and `ny`, and one
+/// `(y, y+, u+)` row per data line - columns 1, 2 and 3 of the host's nine
+/// (`y y+ Umean ...`, SPEC-LIT 110.2).
+struct MkmProfile {
+    re_tau: Scalar,
+    ny: usize,
+    rows: Vec<(Scalar, Scalar, Scalar)>,
+}
+
+/// The McCaffrey Table 1 transcription (SPEC-LIT 110.4's fenced block): the
+/// two regime boundaries in `z/Q^(2/5)` and the seven constants.
+#[allow(dead_code)] // RECORDED fields: a run fills the whole record; the verdict reads what it reads
+struct McCaffreyKey {
+    b_flame_int: Scalar,     // 0.0796 m kW^(-2/5)
+    b_int_plume: Scalar,     // 0.195 m kW^(-2/5)
+    flame_v: Scalar,         // 6.84  - V / sqrt(z)
+    flame_dt: Scalar,        // 797 C
+    int_v: Scalar,           // 1.93  - V / Q^(1/5)
+    int_dt: Scalar,          // 62.9  - dT z / Q^(2/5)
+    plume_v: Scalar,         // 1.12  - V z^(1/3) / Q^(1/3)
+    plume_dt: Scalar,        // 21.6  - dT z^(5/3) / Q^(2/3)
+    buoyancy: Scalar,        // 0.935 - V / sqrt(2 g z dT / T0)
+}
+
+/// Where a comparison error sits in its band, given the band's half-width
+/// and the uncertainty quoted beside the comparison (SPEC-LIT 32.4): inside;
+/// undecided because the uncertainty reaches the edge; or outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Band {
+    Inside,
+    Undecided,
+    Outside,
+}
+
+fn band_of(e_abs: Scalar, band: Scalar, u_val: Scalar) -> Band {
+    if e_abs <= band {
+        Band::Inside
+    } else if e_abs <= band + u_val {
+        Band::Undecided
+    } else {
+        Band::Outside
+    }
+}
+
+/// The one line a missing key is named by (SPEC-LIT 110.1's wording, S1):
+/// the id, the file that would hold it, and the reader's own refusal.
+fn answer_key_missing_line(id: &str, file: &str, why: &ofgpu::Error) -> String {
+    format!(
+        "answer key {id} missing: reference/{file} is not in this tree and \
+         reference/PROVENANCE.md has no row for it (not distributed, SPEC-LIT 110.1) - {why}"
+    )
+}
+
+/// Parse one MKM `.means` file (SPEC-LIT 110.2): `%`-comment header lines
+/// carry `Re_tau = <r>` and `ny = <n>` in either order; every other
+/// non-empty line is whitespace-separated data whose first three fields are
+/// `y y+ Umean`. It cannot go through `key::load_from`, which parses CSV -
+/// this file is whitespace-separated (S2).
+fn parse_mkm_means(text: &str) -> Result<MkmProfile> {
+    let number_after = |label: &str, line: &str| -> Option<Scalar> {
+        let mut words = line.split_whitespace();
+        while let Some(w) = words.next() {
+            if w == label {
+                let mut rest = words.clone();
+                if rest.next() == Some("=") {
+                    if let Some(v) = rest.next() {
+                        // the host's headers comma-separate on one line
+                        return v.trim_end_matches([',', ';']).parse().ok();
+                    }
+                }
+                return None;
+            }
+        }
+        None
+    };
+    let (mut re_tau, mut ny) = (None, None);
+    let mut rows: Vec<(Scalar, Scalar, Scalar)> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('%') {
+            let body = t.trim_start_matches('%');
+            if re_tau.is_none() {
+                re_tau = number_after("Re_tau", body);
+            }
+            if ny.is_none() {
+                ny = number_after("ny", body).map(|v| v as usize);
+            }
+            continue;
+        }
+        if t.is_empty() {
+            continue;
+        }
+        let mut f = t.split_whitespace();
+        let (y, yp, up) = match (f.next(), f.next(), f.next()) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => {
+                return Err(Error::Config(format!(
+                    "mkm99 .means: data row '{t}' has fewer than three fields"
+                )))
+            }
+        };
+        let (y, yp, up) = (y.parse(), yp.parse(), up.parse());
+        let (y, yp, up) = match (y, yp, up) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            _ => {
+                return Err(Error::Config(format!(
+                    "mkm99 .means: data row '{t}' is not three numbers"
+                )))
+            }
+        };
+        rows.push((y, yp, up));
+    }
+    let re_tau = re_tau.ok_or_else(|| {
+        Error::Config("mkm99 .means: no '% Re_tau = <r>' header line".to_string())
+    })?;
+    let ny = ny.ok_or_else(|| {
+        Error::Config("mkm99 .means: no '% ny = <n>' header line".to_string())
+    })?;
+    if rows.is_empty() {
+        return Err(Error::Config("mkm99 .means: no data rows".to_string()));
+    }
+    Ok(MkmProfile { re_tau, ny, rows })
+}
+
+/// Parse the Driver & Seegmiller transcription (SPEC-LIT 110.3's fenced
+/// block): one data row `x_r_over_H <D> <u_D>` past `#` comment lines.
+fn parse_ds_key(text: &str) -> Result<(Scalar, Scalar)> {
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        if f[0] == "x_r_over_H" {
+            if f.len() < 3 {
+                return Err(Error::Config(
+                    "driver-seegmiller1985 key: `x_r_over_H` row needs a value and an \
+                     uncertainty"
+                        .to_string(),
+                ));
+            }
+            let d = f[1].parse().map_err(|_| {
+                Error::Config(format!("driver-seegmiller1985 key: '{}' is not a number", f[1]))
+            })?;
+            let u = f[2].parse().map_err(|_| {
+                Error::Config(format!("driver-seegmiller1985 key: '{}' is not a number", f[2]))
+            })?;
+            return Ok((d, u));
+        }
+    }
+    Err(Error::Config(
+        "driver-seegmiller1985 key: no `x_r_over_H <value> <uncertainty>` row".to_string(),
+    ))
+}
+
+/// Parse the McCaffrey Table 1 transcription (SPEC-LIT 110.4's fenced
+/// block): `key value` rows past `#` comments; all nine are required.
+fn parse_mc_key(text: &str) -> Result<McCaffreyKey> {
+    const NAMES: [&str; 9] = [
+        "boundary_flame_intermittent",
+        "boundary_intermittent_plume",
+        "flame_V_over_sqrt_z",
+        "flame_dT",
+        "intermittent_V_over_Q15",
+        "intermittent_dT_z_over_Q25",
+        "plume_V_z13_over_Q13",
+        "plume_dT_z53_over_Q23",
+        "buoyancy_constant",
+    ];
+    let mut vals = [None; 9];
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let mut f = t.split_whitespace();
+        let (Some(name), Some(value)) = (f.next(), f.next()) else {
+            return Err(Error::Config(format!(
+                "mccaffrey1979-table1 key: row '{t}' is not `key value`"
+            )));
+        };
+        let Some(slot) = NAMES.iter().position(|n| *n == name) else {
+            return Err(Error::Config(format!(
+                "mccaffrey1979-table1 key: unknown key name '{name}'"
+            )));
+        };
+        let v: Scalar = value.parse().map_err(|_| {
+            Error::Config(format!("mccaffrey1979-table1 key: '{value}' is not a number"))
+        })?;
+        vals[slot] = Some(v);
+    }
+    let missing: Vec<&str> = NAMES
+        .iter()
+        .zip(vals.iter())
+        .filter(|(_, v)| v.is_none())
+        .map(|(n, _)| *n)
+        .collect();
+    if !missing.is_empty() {
+        return Err(Error::Config(format!(
+            "mccaffrey1979-table1 key: missing rows {}",
+            missing.join(", ")
+        )));
+    }
+    let [b_flame_int, b_int_plume, flame_v, flame_dt, int_v, int_dt, plume_v, plume_dt, buoyancy] =
+        vals.map(|v| v.expect("checked above"));
+    Ok(McCaffreyKey {
+        b_flame_int,
+        b_int_plume,
+        flame_v,
+        flame_dt,
+        int_v,
+        int_dt,
+        plume_v,
+        plume_dt,
+        buoyancy,
+    })
+}
+
+/// Gate 110-A's functionals, PURE so `mod published_fluid_gates` can drive
+/// them on a synthetic profile (contract C-VERDICT, written in Run 1 so a
+/// recorded run changes data, not code). From the recorded wall-to-centre
+/// column `(y, u_x)` at the case's own `u_tau = sqrt(g_x h)`:
+///
+/// 1. `U_b+_sim` - the cell-height-weighted mean of `u+ = u_x/u_tau`, the
+///    cell heights taken between consecutive `y` midpoints;
+/// 2. `U_b+_DNS` - the trapezoid integral of the key's own `(y, y+, u+)`
+///    rows over their span (`y` is already scaled by `h`, so the integral
+///    over [0, 1] IS the bulk);
+/// 3. B2's sup-norm - max over key rows with `30 <= y+ <= Re_tau` of
+///    `|u+_sim(y+) - u+_DNS(y+)|`, `u+_sim` linearly interpolated in `y+`
+///    from the column;
+/// 4. B3's worst sublayer deviation - max over recorded cells with
+///    `y+ <= 4` of `|u+/y+ - 1|` (a self-check, not a verdict).
+fn channel_functionals(
+    profile_fine: &[(Scalar, Scalar)],
+    u_tau: Scalar,
+    nu: Scalar,
+    dns: &MkmProfile,
+) -> Result<(Scalar, Scalar, Scalar, Scalar)> {
+    if profile_fine.len() < 2 {
+        return Err(Error::Config(
+            "channel DNS record: the recorded column needs two or more cells".to_string(),
+        ));
+    }
+    let yp: Vec<Scalar> = profile_fine.iter().map(|(y, _)| y * u_tau / nu).collect();
+    let up: Vec<Scalar> = profile_fine.iter().map(|(_, ux)| ux / u_tau).collect();
+    // Cell heights between consecutive midpoints: cell 0 is y[0]..m0, cell i
+    // is m_{i-1}..m_i, and the last cell runs from m_n to y_n.
+    let mut w = vec![0.0; yp.len()];
+    let mid = |a: Scalar, b: Scalar| (a + b) / 2.0;
+    w[0] = mid(yp[0], yp[1]) - yp[0];
+    for i in 1..yp.len() - 1 {
+        w[i] = mid(yp[i], yp[i + 1]) - mid(yp[i - 1], yp[i]);
+    }
+    let n = yp.len() - 1;
+    w[n] = yp[n] - mid(yp[n - 1], yp[n]);
+    let num: Scalar = w.iter().zip(up.iter()).map(|(wi, ui)| wi * ui).sum();
+    let den: Scalar = w.iter().sum();
+    if !(den > 0.0) {
+        return Err(Error::Config(
+            "channel DNS record: the recorded column has zero height".to_string(),
+        ));
+    }
+    let ub_sim = num / den;
+    // The DNS side: trapezoid over the key's own rows, y already in half-heights.
+    let (y0, yl) = (dns.rows[0].0, dns.rows[dns.rows.len() - 1].0);
+    let span = yl - y0;
+    if !(span > 0.0) {
+        return Err(Error::Config(
+            "mkm99 .means: rows do not span a positive y range".to_string(),
+        ));
+    }
+    let mut acc = 0.0;
+    for t in dns.rows.windows(2) {
+        acc += (t[1].0 - t[0].0) * (t[0].2 + t[1].2) / 2.0;
+    }
+    let ub_dns = acc / span;
+    // B2's sup-norm over the key's log-region rows, `u+_sim` interpolated in
+    // `y+` (the recorded column is sorted wall to centre, so `yp` ascends).
+    let mut b2 = 0.0 as Scalar;
+    for &(_y, yp_row, up_row) in &dns.rows {
+        if yp_row < 30.0 || yp_row > dns.re_tau {
+            continue;
+        }
+        let j = yp.partition_point(|&p| p < yp_row);
+        let sim = if j < yp.len() && yp[j] == yp_row {
+            up[j]
+        } else if j == 0 || j >= yp.len() {
+            continue;
+        } else {
+            let t = (yp_row - yp[j - 1]) / (yp[j] - yp[j - 1]);
+            up[j - 1] + t * (up[j] - up[j - 1])
+        };
+        b2 = b2.max((sim - up_row).abs());
+    }
+    // B3's worst sublayer deviation, on the recorded cells themselves.
+    let b3 = yp
+        .iter()
+        .zip(up.iter())
+        .filter(|(&p, _)| p > 0.0 && p <= 4.0)
+        .map(|(&p, &u)| (u / p - 1.0).abs())
+        .fold(0.0 as Scalar, Scalar::max);
+    Ok((ub_sim, ub_dns, b2, b3))
+}
+
+/// Gate 110-C's P3: the least-squares slope of `ln dT_c` against `ln z` - a
+/// pure power law `dT = a z^b` returns its exponent `b` to machine precision.
+fn plume_exponent(z: &[Scalar; 6], dt_c: &[Scalar; 6]) -> Scalar {
+    let xs: Vec<f64> = z.iter().map(|v| f64::from(*v)).map(|v| v.ln()).collect();
+    let ys: Vec<f64> = dt_c.iter().map(|v| f64::from(*v)).map(|v| v.ln()).collect();
+    let n = xs.len() as f64;
+    let (sx, sy) = (xs.iter().sum::<f64>(), ys.iter().sum::<f64>());
+    let sxx: f64 = xs.iter().map(|x| x * x).sum();
+    let sxy: f64 = xs.iter().zip(ys.iter()).map(|(x, y)| x * y).sum();
+    ((n * sxy - sx * sy) / (n * sxx - sx * sx)) as Scalar
+}
+
+/// The one way Gate 110-A registers a verdict - and the only place in this
+/// file carrying its `gate` literal, so the registry's name is spelled once
+/// (SPEC-LIT 69.3) and every path through the gate reports BY NAME.
+fn report_110a(
+    c: &mut Checks,
+    verdict: Verdict,
+    how: How,
+    headline: String,
+    detail: Vec<String>,
+    uncertainty: Option<Uncertainty>,
+) {
+    c.report(GateReport {
+        verdict,
+        how,
+        gate: "SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)",
+        against:
+            "Moser, Kim & Mansour (1999) DNS mean-velocity profiles, reference/mkm99/chan{180,395,590}.means, u_D = 0 (none stated)",
+        headline,
+        detail,
+        uncertainty,
+    });
+}
+
+/// Gate 110-B's single report site - its `gate` literal is spelled here and
+/// nowhere else (SPEC-LIT 69.3).
+fn report_110b(
+    c: &mut Checks,
+    verdict: Verdict,
+    how: How,
+    headline: String,
+    uncertainty: Option<Uncertainty>,
+) {
+    c.report(GateReport {
+        verdict,
+        how,
+        gate: "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+        against:
+            "Driver & Seegmiller (1985) x_r/H = 6.26 +- 0.10, reference/driver_seegmiller_1985/reattachment.txt",
+        headline,
+        detail: vec![],
+        uncertainty,
+    });
+}
+
+/// Gate 110-C's single report site - its `gate` literal is spelled here and
+/// nowhere else (SPEC-LIT 69.3).
+fn report_110c(
+    c: &mut Checks,
+    verdict: Verdict,
+    how: How,
+    headline: String,
+    uncertainty: Option<Uncertainty>,
+) {
+    c.report(GateReport {
+        verdict,
+        how,
+        gate: "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
+        against:
+            "McCaffrey (1979) NBSIR 79-1910 Table 1 plume-region correlations at the declared Q, reference/mccaffrey_1979/centreline_table1.txt",
+        headline,
+        detail: vec![],
+        uncertainty,
+    });
+}
+
+/// The uncertainty every not-yet-run gate carries while its record is
+/// `None`: the three-mesh study is a property of the RUN, not of this tree
+/// (SPEC-LIT 110.5).
+fn not_yet_run_uncertainty() -> Option<Uncertainty> {
+    Some(Uncertainty::SingleMesh(
+        "no driver run recorded yet; the three-mesh study is taken when the runs are (SPEC-LIT 110.5)",
+    ))
+}
+
+/// The channel cases' own constants (SPEC-LIT 110.2): `h = 0.02 m` and the
+/// air viscosity the three cases share. `u_tau = sqrt(g_x h)` needs both.
+const H_CHANNEL: Scalar = 0.02;
+const NU_CHANNEL: Scalar = 1.5e-5;
+
+/// Gate 110-A: load the three MKM keys and the record slots, then hand the
+/// verdict to [`check_channel_dns_on`] - Gate 94-D's split, so the smoke
+/// tests can drive the verdict logic on synthetic records (S7).
+fn check_channel_dns(c: &mut Checks) -> Result<()> {
+    let mut keys: [Option<MkmProfile>; 3] = [None, None, None];
+    for (i, (id, file)) in MKM_KEYS.iter().enumerate() {
+        match key::load_text(id) {
+            Ok((line, text)) => {
+                c.note(&line);
+                match parse_mkm_means(&text) {
+                    Ok(p) => keys[i] = Some(p),
+                    Err(why) => c.note(&why.to_string()),
+                }
+            }
+            Err(why) => c.note(&answer_key_missing_line(id, file, &why)),
+        }
+    }
+    check_channel_dns_on(c, keys, CHANNEL_DNS_RECORDS)
+}
+
+/// The worker behind [`check_channel_dns`]: parsed keys and record slots are
+/// parameters so `mod published_fluid_gates` can exercise every path here
+/// without any file on disk (S7). Key consistency rows run only for a key
+/// that loaded; the verdict runs only when a key AND its record both exist.
+fn check_channel_dns_on(
+    c: &mut Checks,
+    keys: [Option<MkmProfile>; 3],
+    records: [Option<&ChannelDnsRecord>; 3],
+) -> Result<()> {
+    // The key's own consistency rows (C-KEYCHK), per loaded file.
+    for (i, k) in keys.iter().enumerate() {
+        let Some(p) = k else { continue };
+        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
+        c.check(
+            &format!("MKM99 {leg}: header ny equals the row count"),
+            (p.rows.len() as Scalar - p.ny as Scalar).abs(),
+            0.0,
+        );
+        let last = p.rows[p.rows.len() - 1];
+        c.check(
+            &format!("MKM99 {leg}: last y+ equals the header Re_tau to 0.1%"),
+            (last.1 / p.re_tau - 1.0).abs(),
+            1e-3,
+        );
+        let monotone = p.rows.windows(2).all(|t| t[1].2 >= t[0].2);
+        c.require(
+            &format!("MKM99 {leg}: Umean is non-decreasing from the wall to the centre"),
+            monotone,
+        );
+        let sub = p
+            .rows
+            .iter()
+            .filter(|r| r.1 > 0.0 && r.1 <= 4.0)
+            .map(|r| (r.2 / r.1 - 1.0).abs())
+            .fold(0.0 as Scalar, Scalar::max);
+        c.check(
+            &format!("MKM99 {leg}: sublayer rows y+ <= 4 obey u+ = y+ to 3% (SPEC-LIT 15.2)"),
+            sub,
+            0.03,
+        );
+    }
+    let any_missing = keys.iter().any(Option::is_none);
+    let any_record = records.iter().any(Option::is_some);
+    if any_missing || !any_record {
+        // Not closed, BY NAME - and by exactly one report, because a gate
+        // that has not run has one thing to say, not three.
+        if any_missing {
+            let ids: Vec<&str> = MKM_KEYS
+                .iter()
+                .zip(keys.iter())
+                .filter(|(_, k)| k.is_none())
+                .map(|((id, _), _)| *id)
+                .collect();
+            report_110a(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
+                     110.1); no comparison was run",
+                    ids.join(", ")
+                ),
+                vec![],
+                not_yet_run_uncertainty(),
+            );
+        } else {
+            report_110a(
+                c,
+                Verdict::Open,
+                How::Live,
+                "no driver run recorded yet - run SPEC-LIT 110.5's recipe and record it"
+                    .to_string(),
+                vec![],
+                not_yet_run_uncertainty(),
+            );
+        }
+        return Ok(());
+    }
+    // C-VERDICT, per leg: the key and the record both exist.
+    for i in 0..3 {
+        let (Some(key), Some(rec)) = (&keys[i], records[i]) else {
+            continue;
+        };
+        let u_tau = (rec.body_force * H_CHANNEL).sqrt();
+        let (_ub_sim, ub_dns, b2, b3) =
+            channel_functionals(rec.profile_fine, u_tau, NU_CHANNEL, key)?;
+        let levels: Vec<ofgpu::vv::Level> = (0..3)
+            .rev()
+            .map(|j| ofgpu::vv::Level {
+                h: 2.0 * H_CHANNEL / rec.n_y[j] as Scalar,
+                value: rec.u_b_plus[j],
+            })
+            .collect();
+        let study = vv::grid_study(&levels)?;
+        let u_input = (rec.tau_w_measured_kin / (rec.body_force * H_CHANNEL) - 1.0).abs() * ub_dns;
+        let val = vv::validation(rec.u_b_plus[2], ub_dns, study.u_fine, u_input, 0.0);
+        c.note(&study.one_line());
+        c.note(&val.one_line("U_b+ on the finest mesh"));
+        c.note(&format!(
+            "u_input (S32.4): the driver's measured wall shear misses g_x h by \
+             {} relative - quoted, never folded into the band",
+            sci(f64::from(u_input), 3)
+        ));
+        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
+        match band_of(val.e.abs() / ub_dns, 0.05, val.u_val / ub_dns) {
+            Band::Inside => c.check(
+                &format!(
+                    "Gate 110-A {leg}: U_b+ within 5% of the DNS at the case's own u_tau \
+                     (absolute prediction, SPEC-LIT S110.2)"
+                ),
+                val.e.abs() / ub_dns,
+                0.05,
+            ),
+            Band::Undecided => report_110a(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "undecided: |E|/D = {} is within u_val/D = {} of the 5% edge (S32.4)",
+                    sci(f64::from(val.e.abs() / ub_dns), 3),
+                    sci(f64::from(val.u_val / ub_dns), 3)
+                ),
+                vec![],
+                Some(Uncertainty::Study(study)),
+            ),
+            Band::Outside => report_110a(
+                c,
+                Verdict::Misses,
+                How::Live,
+                format!(
+                    "U_b+ = {} against the DNS {} - {:+.1}% of D, outside the 5% band; the \
+                     study's order p = {}",
+                    sci(f64::from(rec.u_b_plus[2]), 5),
+                    sci(f64::from(ub_dns), 5),
+                    100.0 * val.e / ub_dns,
+                    study
+                        .p
+                        .map(|p| format!("{:.3}", f64::from(p)))
+                        .unwrap_or_else(|| "n/a".to_string())
+                ),
+                vec![],
+                Some(Uncertainty::Study(study)),
+            ),
+        }
+        c.check(
+            &format!(
+                "Gate 110-A {leg}: B2 sup-norm of |u+_sim - u+_DNS| over 30 <= y+ <= Re_tau \
+                 within 1.0 wall unit (SPEC-LIT S110.2)"
+            ),
+            b2,
+            1.0,
+        );
+        c.check(
+            &format!(
+                "Gate 110-A {leg}: B3 self-check, recorded cells with y+ <= 4 obey u+ = y+ \
+                 to 2% (not a verdict, SPEC-LIT S110.2)"
+            ),
+            b3,
+            0.02,
+        );
+    }
+    Ok(())
+}
+
+/// Gate 110-B: load the Driver & Seegmiller key and the record slot, then
+/// hand the verdict to [`check_backstep_reattachment_on`] (S7's split).
+fn check_backstep_reattachment(c: &mut Checks) -> Result<()> {
+    let key = match key::load_text(DS_KEY.0) {
+        Ok((line, text)) => {
+            c.note(&line);
+            match parse_ds_key(&text) {
+                Ok(k) => Some(k),
+                Err(why) => {
+                    c.note(&why.to_string());
+                    None
+                }
+            }
+        }
+        Err(why) => {
+            c.note(&answer_key_missing_line(DS_KEY.0, DS_KEY.1, &why));
+            None
+        }
+    };
+    check_backstep_reattachment_on(c, key, STEP_RECORD)
+}
+
+/// The worker behind [`check_backstep_reattachment`]: the parsed key
+/// `(D, u_D)` and the record slot are parameters (S7). With the key present
+/// and a record recorded, the datum's own +-0.10 IS the band - `u_num` from
+/// the three-mesh study decides undecided at its edge (SPEC-LIT 110.3) - and
+/// the inflow boundary layer and reference velocity are INPUT DIFFERENCES,
+/// printed beside the verdict, never folded in (S32.4).
+fn check_backstep_reattachment_on(
+    c: &mut Checks,
+    key: Option<(Scalar, Scalar)>,
+    rec: Option<&StepRecord>,
+) -> Result<()> {
+    if let Some((d, u_d)) = key {
+        c.check(
+            "D&S 1985 key: x_r/H = 6.26 with u_D = 0.10, as the TMR page states it",
+            (d - 6.26).abs() + (u_d - 0.10).abs(),
+            0.0,
+        );
+    }
+    let (Some((d, u_d)), Some(r)) = (key, rec) else {
+        if key.is_none() {
+            report_110b(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
+                     110.1); no comparison was run",
+                    DS_KEY.0
+                ),
+                not_yet_run_uncertainty(),
+            );
+        } else {
+            report_110b(
+                c,
+                Verdict::Open,
+                How::Live,
+                "no driver run recorded yet - run SPEC-LIT 110.5's recipe and record it"
+                    .to_string(),
+                not_yet_run_uncertainty(),
+            );
+        }
+        return Ok(());
+    };
+    let levels: Vec<ofgpu::vv::Level> = (0..3)
+        .rev()
+        .map(|j| ofgpu::vv::Level { h: r.dx_over_h[j], value: r.x_r_over_h[j] })
+        .collect();
+    let study = vv::grid_study(&levels)?;
+    let val = vv::validation(r.x_r_over_h[2], d, study.u_fine, 0.0, u_d);
+    c.note(&format!(
+        "input difference (S110.3): delta_99/H at x = -4H = {:.4}/{:.4}/{:.4} across the \
+         study, the datum says approximately 1.5H",
+        r.delta99_over_h_at_minus_4h[0],
+        r.delta99_over_h_at_minus_4h[1],
+        r.delta99_over_h_at_minus_4h[2]
+    ));
+    c.note(&format!(
+        "input difference (S110.3): u_ref = {:.2}/{:.2}/{:.2} across the study, the \
+         experiment's 44.2 m/s is UNVERIFIED",
+        r.u_ref[0], r.u_ref[1], r.u_ref[2]
+    ));
+    c.note(&study.one_line());
+    c.note(&val.one_line("x_r/H on the finest mesh"));
+    match band_of(val.e.abs(), 0.10, study.u_fine) {
+        Band::Inside => c.check(
+            "Gate 110-B: x_r/H within the datum's own +-0.10 (absolute prediction, \
+             SPEC-LIT S110.3)",
+            val.e.abs(),
+            0.10,
+        ),
+        Band::Undecided => report_110b(
+            c,
+            Verdict::Open,
+            How::Live,
+            format!(
+                "undecided: |E| = {} is within u_num = {} of the 0.10 edge (S32.4)",
+                sci(f64::from(val.e.abs()), 3),
+                sci(f64::from(study.u_fine), 3)
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+        Band::Outside => report_110b(
+            c,
+            Verdict::Misses,
+            How::Live,
+            format!(
+                "x_r/H = {:.3} against 6.26 - {:+.1}% of D, outside the datum's own \
+                 +-0.10; the study's order p = {}",
+                r.x_r_over_h[2],
+                100.0 * val.e / d,
+                study
+                    .p
+                    .map(|p| format!("{:.3}", f64::from(p)))
+                    .unwrap_or_else(|| "n/a".to_string())
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+    }
+    Ok(())
+}
+
+/// Gate 110-C: load the McCaffrey key and the record slot, then hand the
+/// verdict to [`check_mccaffrey_plume_on`] (S7's split).
+fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
+    let key = match key::load_text(MC_KEY.0) {
+        Ok((line, text)) => {
+            c.note(&line);
+            match parse_mc_key(&text) {
+                Ok(k) => Some(k),
+                Err(why) => {
+                    c.note(&why.to_string());
+                    None
+                }
+            }
+        }
+        Err(why) => {
+            c.note(&answer_key_missing_line(MC_KEY.0, MC_KEY.1, &why));
+            None
+        }
+    };
+    check_mccaffrey_plume_on(c, key.as_ref(), PLUME_RECORD)
+}
+
+/// The worker behind [`check_mccaffrey_plume`]: the parsed key and record
+/// slot are parameters (S7). The transcription's four continuity rows run
+/// for a key that loaded (C-KEYCHK - the report's regime boundaries ARE the
+/// intersections of its fits, so a mistyped constant fails them); with a
+/// record, P1/P2 hold against the correlation with a +-15% band whose
+/// outside is an open verdict, P3 is the exponent a non-radiating solver
+/// CAN close, and P4 is a number asserted as nothing (SPEC-LIT 110.4).
+fn check_mccaffrey_plume_on(
+    c: &mut Checks,
+    key: Option<&McCaffreyKey>,
+    rec: Option<&PlumeRecord>,
+) -> Result<()> {
+    if let Some(k) = key {
+        c.check(
+            "McCaffrey Table 1: velocity is continuous at z/Q^(2/5) = 0.0796 to 1%",
+            (k.flame_v * k.b_flame_int.sqrt() / k.int_v - 1.0).abs(),
+            0.01,
+        );
+        c.check(
+            "McCaffrey Table 1: velocity is continuous at z/Q^(2/5) = 0.195 to 1%",
+            (k.plume_v * k.b_int_plume.powf(-1.0 / 3.0) / k.int_v - 1.0).abs(),
+            0.01,
+        );
+        c.check(
+            "McCaffrey Table 1: temperature is continuous at 0.0796 to 2%",
+            (k.int_dt / k.b_flame_int / k.flame_dt - 1.0).abs(),
+            0.02,
+        );
+        c.check(
+            "McCaffrey Table 1: temperature is continuous at 0.195 to 3%",
+            (k.plume_dt * k.b_int_plume.powf(-5.0 / 3.0) / (k.int_dt / k.b_int_plume) - 1.0)
+                .abs(),
+            0.03,
+        );
+    }
+    let (Some(k), Some(r)) = (key, rec) else {
+        if key.is_none() {
+            report_110c(
+                c,
+                Verdict::Open,
+                How::Live,
+                format!(
+                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
+                     110.1); no comparison was run",
+                    MC_KEY.0
+                ),
+                not_yet_run_uncertainty(),
+            );
+        } else {
+            report_110c(
+                c,
+                Verdict::Open,
+                How::Live,
+                "no driver run recorded yet - run SPEC-LIT 110.5's recipe and record it"
+                    .to_string(),
+                not_yet_run_uncertainty(),
+            );
+        }
+        return Ok(());
+    };
+    // The plume-region correlations at the declared Q (SPEC-LIT 110.4):
+    // dT_c = plume_dt Q^(2/3) z^(-5/3), w_c = plume_v Q^(1/3) z^(-1/3).
+    let dt_mcc = |z: Scalar| k.plume_dt * r.q_kw.powf(2.0 / 3.0) * z.powf(-5.0 / 3.0);
+    let w_mcc = |z: Scalar| k.plume_v * r.q_kw.powf(1.0 / 3.0) * z.powf(-1.0 / 3.0);
+    // The worst station of each, kept SIGNED: the band reads its magnitude,
+    // the headline its sign (high is the side S110.4 predicts; low is not).
+    let (mut s_t, mut s_w) = (0.0 as Scalar, 0.0 as Scalar);
+    for i in 0..6 {
+        let e_t = r.dt_c[2][i] / dt_mcc(r.stations_m[i]) - 1.0;
+        let e_w = r.w_c[2][i] / w_mcc(r.stations_m[i]) - 1.0;
+        if e_t.abs() > s_t.abs() {
+            s_t = e_t;
+        }
+        if e_w.abs() > s_w.abs() {
+            s_w = e_w;
+        }
+    }
+    let (r_t, r_w) = (s_t.abs(), s_w.abs());
+    let p3 = plume_exponent(&r.stations_m, &r.dt_c[2]);
+    // P4, printed and asserted as nothing: the convective fraction the run
+    // implies, BEFORE the numbers (S110.4).
+    let chi: Scalar = (0..6)
+        .map(|i| (dt_mcc(r.stations_m[i]) / r.dt_c[2][i]).powf(1.5))
+        .sum::<Scalar>()
+        / 6.0;
+    c.note(
+        "McCaffrey's flames are real fires; a non-radiating solver injects all of Q as \
+         enthalpy and is EXPECTED TO SIT HIGH on P1 and P2 (S110.4)",
+    );
+    c.note(&format!(
+        "P4 (a number, not a verdict): the implied convective fraction chi_c = {:.3} - \
+         what a participating medium would have to carry if one were ever built",
+        chi
+    ));
+    let levels: Vec<ofgpu::vv::Level> = (0..3)
+        .rev()
+        .map(|j| ofgpu::vv::Level {
+            h: r.cell_size[j],
+            value: r.dt_c[j][3], // dT_c at z = 2.00 m, the study functional
+        })
+        .collect();
+    let study = vv::grid_study(&levels)?;
+    let val = vv::validation(r.dt_c[2][3], dt_mcc(2.0), study.u_fine, 0.0, 0.0);
+    c.note(&study.one_line());
+    c.note(&val.one_line("dT_c at z = 2.00 m"));
+    c.check(
+        "Gate 110-C: centreline dT decays as z^(-5/3) within +-0.25 in the exponent \
+         (SPEC-LIT S110.4)",
+        (p3 + 5.0 / 3.0).abs(),
+        0.25,
+    );
+    // P1 and P2 each: inside, undecided, or outside a correlation - and an
+    // outside band is Verdict::Open, never the measurement word, because the
+    // datum is a correlation and the section expects this very miss.
+    let band1 = band_of(r_t, 0.15, val.u_val / dt_mcc(2.0));
+    let band2 = band_of(r_w, 0.15, val.u_val / dt_mcc(2.0));
+    let worst = if band1 == Band::Outside || band2 == Band::Outside {
+        Band::Outside
+    } else if band1 == Band::Undecided || band2 == Band::Undecided {
+        Band::Undecided
+    } else {
+        Band::Inside
+    };
+    match worst {
+        Band::Inside => {
+            c.check(
+                "Gate 110-C: P1, centreline dT within 15% of the correlation at every \
+                 station (SPEC-LIT S110.4)",
+                r_t,
+                0.15,
+            );
+            c.check(
+                "Gate 110-C: P2, centreline w within 15% of the correlation at every \
+                 station (SPEC-LIT S110.4)",
+                r_w,
+                0.15,
+            );
+        }
+        Band::Undecided => report_110c(
+            c,
+            Verdict::Open,
+            How::Live,
+            format!(
+                "undecided: P1/P2 worst {:.3} is within u_val/D = {:.3} of the 15% edge \
+                 (S32.4)",
+                r_t.max(r_w),
+                val.u_val / dt_mcc(2.0)
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+        Band::Outside => report_110c(
+            c,
+            Verdict::Open,
+            How::Live,
+            format!(
+                "P1 worst {:+.1}%, P2 worst {:+.1}% - outside the +-15% band, {} (S110.4)",
+                100.0 * s_t,
+                100.0 * s_w,
+                if s_t > 0.0 && s_w > 0.0 {
+                    "on the high side a non-radiating solver was predicted to sit on: the \
+                     correlation does not close without radiative loss, which is the \
+                     measurement this gate exists to take"
+                } else {
+                    "NOT the high side the section predicted for a non-radiating solver - \
+                     a deficit radiation cannot explain"
+                },
+            ),
+            Some(Uncertainty::Study(study)),
+        ),
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  Published benchmarks
 //
-//  These run a whole flow to steady state and take minutes, so they are
-//  `#[ignore]`d and never slow `cargo test`. Run them with
+//  The published-benchmark section `run` calls: the lid-driven cavity of
+//  Ghia, Ghia & Shin (1982) as Gate 94-D (SPEC-LIT §94.4), live on three
+//  meshes per Reynolds number and in the always-run suite since K3, its
+//  answer key read from `reference/` through the answer-key reader.
 //
-//      cargo test --release --bin ofgpu-validate -- --ignored --nocapture
-//
-//  They are the only place in this file where the answer is compared with
+//  This is the only place in this file where the answer is compared with
 //  numbers somebody else produced - and those numbers are *published
 //  benchmark data*, not the output of another program we ran. SPEC-LIT
 //  section 0 rule 4 forbids the second, not the first.
 // ==========================================================================
 
-#[cfg(test)]
 mod published_benchmarks {
     use super::*;
     use ofgpu::fv::interpolate_vector_flux;
@@ -11948,66 +13019,9 @@ mod published_benchmarks {
     //
     //  Unit square, lid at y = 1 moving in +x at u = 1, Re = U L / nu.
     //  Their solutions are on a 129 x 129 uniform grid.
+    //  The tables are reference/ghia1982/table_I_u.csv and table_II_v.csv (see reference/PROVENANCE.md).
     // ----------------------------------------------------------------------
 
-    /// Table I, the `y` column.
-    const GHIA_Y: [f64; 17] = [
-        1.0000, 0.9766, 0.9688, 0.9609, 0.9531, 0.8516, 0.7344, 0.6172, 0.5000,
-        0.4531, 0.2813, 0.1719, 0.1016, 0.0703, 0.0625, 0.0547, 0.0000,
-    ];
-
-    /// Table I, `u` at Re = 100.
-    const GHIA_U_RE100: [f64; 17] = [
-        1.00000, 0.84123, 0.78871, 0.73722, 0.68717, 0.23151, 0.00332, -0.13641,
-        -0.20581, -0.21090, -0.15662, -0.10150, -0.06434, -0.04775, -0.04192,
-        -0.03717, 0.00000,
-    ];
-
-    /// Table I, `u` at Re = 400.
-    const GHIA_U_RE400: [f64; 17] = [
-        1.00000, 0.75837, 0.68439, 0.61756, 0.55892, 0.29093, 0.16256, 0.02135,
-        -0.11477, -0.17119, -0.32726, -0.24299, -0.14612, -0.10338, -0.09266,
-        -0.08186, 0.00000,
-    ];
-
-    /// Table II, the `x` column.
-    const GHIA_X: [f64; 17] = [
-        1.0000, 0.9688, 0.9609, 0.9531, 0.9453, 0.9063, 0.8594, 0.8047, 0.5000,
-        0.2344, 0.2266, 0.1563, 0.0938, 0.0781, 0.0703, 0.0625, 0.0000,
-    ];
-
-    /// Table II, `v` at Re = 100.
-    const GHIA_V_RE100: [f64; 17] = [
-        0.00000, -0.05906, -0.07391, -0.08864, -0.10313, -0.16914, -0.22445,
-        -0.24533, 0.05454, 0.17527, 0.17507, 0.16077, 0.12317, 0.10890, 0.10091,
-        0.09233, 0.00000,
-    ];
-
-    /// Table II, `v` at Re = 400.
-    ///
-    /// The entry at `x = 0.9063`, `-0.23827`, is reproduced here as the paper
-    /// prints it, and it is **wrong in the paper**. It breaks the monotone run
-    /// between `-0.22847` at `x = 0.9453` and the profile's minimum
-    /// `-0.44993` at `x = 0.8594`, where every neighbouring Reynolds number
-    /// varies smoothly, and it is the only station in either table at which
-    /// this solver misses by more than 0.007. Other authors have noticed:
-    /// Nilsson & Wallin, *Lid driven cavity flow using finite difference and
-    /// radial basis function methods*, Uppsala University report 22015 (2022)
-    /// section 5.2, exclude "the reference y-velocity value at x = 0.9063 with
-    /// Re = 400" from their own comparison for the same reason.
-    ///
-    /// It is kept in the constant because the constant is a transcription of
-    /// the paper, not an edited version of it; [`GHIA_V_RE400_ERRATUM`] names
-    /// the station the comparison leaves out.
-    const GHIA_V_RE400: [f64; 17] = [
-        0.00000, -0.12146, -0.15663, -0.19254, -0.22847, -0.23827, -0.44993,
-        -0.38598, 0.05188, 0.30174, 0.30203, 0.28124, 0.22965, 0.20920, 0.19713,
-        0.18360, 0.00000,
-    ];
-
-    /// Index into [`GHIA_X`] of the station excluded from the Re = 400
-    /// `v` comparison; see [`GHIA_V_RE400`]. Nothing else is ever excluded.
-    const GHIA_V_RE400_ERRATUM: &[usize] = &[5];
 
     // ----------------------------------------------------------------------
     //  Sampling a structured 2-D field
@@ -12378,24 +13392,23 @@ mod published_benchmarks {
     ///
     /// `v_skip` names stations of Table II left out of the *worst-difference*
     /// figure; they are still printed, marked, so nothing is hidden. Only the
-    /// erratum of [`GHIA_V_RE400`] is ever passed here.
-    #[allow(clippy::too_many_arguments)]
+    /// Re = 400 erratum station of Table II is ever passed here.
     fn compare(
         m: &HostMesh,
         u: &[Vec3],
         n: usize,
-        u_table: &[f64; 17],
-        v_table: &[f64; 17],
-        v_skip: &[usize],
+        g: &key::Ghia,
+        re: u32,
         label: &str,
     ) -> (f64, f64) {
+        let (u_table, v_table, v_skip) = g.columns(re).expect("Re is 100 or 400");
         // No slip on -x, +x and -y; the lid on +y carries u = 1, v = 0.
         let us = Sampled::new(m, u, n, 0, [0.0, 0.0, 0.0, 1.0]);
         let vs = Sampled::new(m, u, n, 1, [0.0, 0.0, 0.0, 0.0]);
 
         println!("\n{label}  -- Ghia, Ghia & Shin (1982) Table I, u at x = 0.5");
         let mut worst_u = 0.0f64;
-        for (i, y) in GHIA_Y.iter().enumerate() {
+        for (i, y) in g.y.iter().enumerate() {
             let got = us.at(0.5, *y);
             let want = u_table[i];
             worst_u = worst_u.max((got - want).abs());
@@ -12404,7 +13417,7 @@ mod published_benchmarks {
 
         println!("\n{label}  -- Table II, v at y = 0.5");
         let mut worst_v = 0.0f64;
-        for (i, x) in GHIA_X.iter().enumerate() {
+        for (i, x) in g.x.iter().enumerate() {
             let got = vs.at(*x, 0.5);
             let want = v_table[i];
             let skipped = v_skip.contains(&i);
@@ -12422,6 +13435,11 @@ mod published_benchmarks {
         (worst_u, worst_v)
     }
 
+    /// SPEC-LIT §94.4 Gate 94-D: §10's lid-driven cavity row, run live on
+    /// three meshes per Reynolds number against Ghia, Ghia & Shin (1982)
+    /// Tables I and II, read from `reference/` through the answer-key reader
+    /// with its sha256 printed at the top of the section.
+    ///
     /// The printed table is the evidence; the tolerance is the tripwire.
     ///
     /// Ghia's numbers come from a 129 x 129 grid and a different
@@ -12432,46 +13450,246 @@ mod published_benchmarks {
     /// speed of 1 is roughly three times the difference actually observed at
     /// 80 x 80, and a solver with a sign error, a broken wall condition or a
     /// first-order convection scheme misses by an order of magnitude more.
-    #[allow(clippy::too_many_arguments)]
-    fn run_case(
-        re: Scalar,
-        n: usize,
-        iters: usize,
-        u_t: &[f64; 17],
-        v_t: &[f64; 17],
-        v_skip: &[usize],
-        tol: f64,
-    ) {
-        let gpu = Gpu::new(0).expect("no CUDA device");
-        let k = Kernels::new(&gpu).expect("kernels");
-
-        let (m, u, res, its) = cavity(&gpu, &k, re, n, iters).expect("cavity");
-        let label = format!("lid-driven cavity, Re = {}, {n} x {n}", f64::from(re));
-        println!("\n{label}: {its} SIMPLE iterations, momentum residual {res:.3e}");
-
-        let (du, dv) = compare(&m, &u, n, u_t, v_t, v_skip, &label);
-        assert!(du < tol, "u centreline differs from Ghia by {du:.4} (> {tol})");
-        assert!(dv < tol, "v centreline differs from Ghia by {dv:.4} (> {tol})");
+    pub(super) fn check_ghia_cavity(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
+        let key = match key::ghia_1982() {
+            Ok(key) => key,
+            Err(why) => {
+                let why = why.to_string();
+                c.note(&why);
+                c.report(GateReport {
+                    verdict: Verdict::Open,
+                    how: How::Live,
+                    gate: "SPEC-LIT 94.4 Gate 94-D lid-driven cavity",
+                    against: "Ghia, Ghia & Shin (1982) Tables I and II",
+                    headline: "the answer key is absent from reference/, so no comparison was run"
+                        .to_string(),
+                    detail: vec![why],
+                    uncertainty: Some(Uncertainty::SingleMesh(
+                        "no mesh was run: the answer key was absent",
+                    )),
+                });
+                return Ok(());
+            }
+        };
+        for kf in &key.keys {
+            c.note(&kf.digest_line());
+        }
+        check_ghia_cavity_on(c, gpu, k, &key, &[40, 56, 80], &[(100.0, 3000), (400.0, 6000)])
     }
 
-    #[test]
-    #[ignore = "runs a flow to steady state; minutes, not seconds"]
-    fn ghia_lid_driven_cavity_re_100() {
-        run_case(100.0, 80, 3000, &GHIA_U_RE100, &GHIA_V_RE100, &[], 0.02);
-    }
-
-    #[test]
-    #[ignore = "runs a flow to steady state; minutes, not seconds"]
-    fn ghia_lid_driven_cavity_re_400() {
-        run_case(
-            400.0,
-            80,
-            6000,
-            &GHIA_U_RE400,
-            &GHIA_V_RE400,
-            GHIA_V_RE400_ERRATUM,
-            0.02,
+    /// The worker behind [`check_ghia_cavity`]: the mesh sizes and the
+    /// (Re, iteration budget) list are parameters so the smoke test can run
+    /// the same section on tiny meshes in seconds. `ns` must be strictly
+    /// increasing; the finest level - the one the check rows and the (94.10)
+    /// lines stand on - is the last.
+    fn check_ghia_cavity_on(
+        c: &mut Checks,
+        gpu: &Gpu,
+        k: &Kernels,
+        key: &key::Ghia,
+        ns: &[usize],
+        res: &[(Scalar, usize)],
+    ) -> Result<()> {
+        use ofgpu::vv::{self, Level};
+        assert!(
+            !ns.is_empty() && ns.windows(2).all(|w| w[0] < w[1]),
+            "ns must be strictly increasing, finest last: {ns:?}"
         );
+        for &(re, max_iters) in res {
+            let (u_table, v_table, v_skip) = match key.columns(re as u32) {
+                Some(cols) => cols,
+                None => {
+                    c.require(
+                        &format!("Gate 94-D Re {}: the key tabulates this Reynolds number", re),
+                        false,
+                    );
+                    continue;
+                }
+            };
+            let mut lv_u: Vec<Level> = Vec::new();
+            let mut lv_v: Vec<Level> = Vec::new();
+            let mut du = 0.0f64;
+            let mut dv = 0.0f64;
+            for &n in ns {
+                let t = std::time::Instant::now();
+                let (m, u, resid, its) = cavity(gpu, k, re, n, max_iters)?;
+                let secs = t.elapsed().as_secs_f64();
+                c.note(&format!(
+                    "Re {}: {} x {}, {} SIMPLE iterations, momentum residual {:.3e}, {:.1} s",
+                    re, n, n, its, resid, secs
+                ));
+                let label = format!("lid-driven cavity, Re = {}, {n} x {n}", f64::from(re));
+                let (worst_u, worst_v) = compare(&m, &u, n, key, re as u32, &label);
+                du = worst_u;
+                dv = worst_v;
+                let uc = Sampled::new(&m, &u, n, 0, [0.0, 0.0, 0.0, 1.0]).at(0.5, 0.5);
+                let vc = Sampled::new(&m, &u, n, 1, [0.0, 0.0, 0.0, 0.0]).at(0.5, 0.5);
+                let h = vv::h_of(1.0, m.n_cells, 2)?;
+                lv_u.push(Level { h, value: uc as Scalar });
+                lv_v.push(Level { h, value: vc as Scalar });
+            }
+            // The rows a verdict stands on are the FINEST level's (§94.7).
+            let n_finest = ns[ns.len() - 1];
+            let erratum = if v_skip.is_empty() { "" } else { ", erratum station excluded" };
+            let name_u = format!(
+                "Gate 94-D Re {}: worst |u - Ghia| over Table I at {n_finest} x {n_finest}, lid speed 1",
+                re
+            );
+            let name_v = format!(
+                "Gate 94-D Re {}: worst |v - Ghia| over Table II at {n_finest} x {n_finest}, lid speed 1{erratum}",
+                re
+            );
+            c.check(&name_u, du as Scalar, 0.02);
+            c.check(&name_v, dv as Scalar, 0.02);
+            let missed = !(du <= 0.02 && du.is_finite()) || !(dv <= 0.02 && dv.is_finite());
+
+            // The §94 declaration, judged by nobody: u and v at the cavity
+            // centre - the one station both tables print exactly - each with a
+            // three-level study and (94.10)'s E +/- u_val against the datum.
+            lv_u.reverse();
+            lv_v.reverse();
+            let study_u = vv::grid_study(&lv_u);
+            let study_v = vv::grid_study(&lv_v);
+            let iu = key.y.iter().position(|&y| y == 0.5);
+            let iv = key.x.iter().position(|&x| x == 0.5);
+            let ns_txt = ns.iter().rev().map(|n| n.to_string()).collect::<Vec<_>>().join("/");
+            let vals = |lv: &[Level]| {
+                lv.iter().map(|l| format!("{:.5}", l.value)).collect::<Vec<_>>().join(" / ")
+            };
+            let mut six: Vec<String> = Vec::new();
+            six.push(format!("  u at (0.5, 0.5), levels {}: {}", ns_txt, vals(&lv_u)));
+            match &study_u {
+                Ok(s) => {
+                    six.push(format!("  {}", s.one_line()));
+                    match iu {
+                        Some(i) => {
+                            let val =
+                                vv::validation(lv_u[0].value, u_table[i] as Scalar, s.u_fine, 0.0, 0.0);
+                            six.push(format!(
+                                "  {}",
+                                val.one_line("u at the cavity centre, finest mesh")
+                            ));
+                        }
+                        None => six.push("  the key tabulates no y = 0.5 station".to_string()),
+                    }
+                }
+                Err(e) => six.push(format!("  study refused by name: {e}")),
+            }
+            six.push(format!("  v at (0.5, 0.5), levels {}: {}", ns_txt, vals(&lv_v)));
+            match &study_v {
+                Ok(s) => {
+                    six.push(format!("  {}", s.one_line()));
+                    match iv {
+                        Some(i) => {
+                            let val =
+                                vv::validation(lv_v[0].value, v_table[i] as Scalar, s.u_fine, 0.0, 0.0);
+                            six.push(format!(
+                                "  {}",
+                                val.one_line("v at the cavity centre, finest mesh")
+                            ));
+                        }
+                        None => six.push("  the key tabulates no x = 0.5 station".to_string()),
+                    }
+                }
+                Err(e) => six.push(format!("  study refused by name: {e}")),
+            }
+            for line in &six {
+                c.note(line);
+            }
+            let detail = six;
+            c.require(
+                &format!(
+                    "Gate 94-D Re {}: both three-level studies at the cavity centre could be formed (SPEC-LIT 94.1)",
+                    re
+                ),
+                study_u.is_ok() && study_v.is_ok(),
+            );
+            c.require(
+                &format!("Gate 94-D Re {}: the key tabulates the centre station", re),
+                iu.is_some() && iv.is_some(),
+            );
+            if missed {
+                let uncertainty = match study_u {
+                    Ok(s) => Some(Uncertainty::Study(s)),
+                    Err(_) => Some(Uncertainty::SingleMesh(
+                        "three meshes were run but the finest triplet was refused by name; the reason is printed above",
+                    )),
+                };
+                c.report(GateReport {
+                    verdict: Verdict::Misses,
+                    how: How::Live,
+                    gate: "SPEC-LIT 94.4 Gate 94-D lid-driven cavity",
+                    against: "Ghia, Ghia & Shin (1982) Tables I and II, 129 x 129 grid, centreline profiles",
+                    headline: format!(
+                        "Re {re}: worst |du| {du:.4}, worst |dv| {dv:.4} at {n_finest} x {n_finest} against 0.02"
+                    ),
+                    detail,
+                    uncertainty,
+                });
+            }
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// This file's own text at compile time.
+        const SRC: &str = include_str!("validate.rs");
+
+        #[test]
+        fn nothing_in_this_file_is_ignored_any_more() {
+            assert_eq!(
+                SRC.matches(concat!("#[", "ignore")).count(),
+                0,
+                "an ignore attribute crept back in: the published benchmarks run live"
+            );
+        }
+
+        #[test]
+        #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+        fn the_sampler_returns_walls_and_the_bilinear_centre() {
+            let m = make_mesh(
+                &scratch_dir("sampler4"),
+                &MeshSpec {
+                    n: [4, 4, 1],
+                    l: [1.0, 1.0, 0.25],
+                    two_d: true,
+                    ..Default::default()
+                },
+            )
+            .expect("mesh");
+            let mut u = Vec::new();
+            for cell in m.c.iter() {
+                u.push(Vec3::new(cell.x, 0.0, 0.0));
+            }
+            // Walls in `-x +x -y +y` order: here the +x wall carries 1.
+            let s = Sampled::new(&m, &u, 4, 0, [0.0, 1.0, 0.0, 0.0]);
+            assert!((s.at(0.5, 0.5) - 0.5).abs() < 1e-12);
+            assert_eq!(s.at(0.0, 0.3), 0.0);
+            assert_eq!(s.at(1.0, 0.5), 1.0);
+            assert!((s.at(0.375, 0.5) - 0.375).abs() < 1e-12);
+        }
+        #[test]
+        fn the_cavity_section_runs_end_to_end_on_tiny_meshes() {
+            let Ok(gpu) = Gpu::new(0) else { return };
+            let k = Kernels::new(&gpu).expect("kernels");
+            let key = key::ghia_1982().expect("the Ghia key is tracked in reference/");
+            let mut c = Checks::new();
+            c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
+            let ran = check_ghia_cavity_on(&mut c, &gpu, &k, &key, &[8, 12, 16], &[(100.0, 60)]);
+            assert!(ran.is_ok(), "the section did not run to the end: {ran:?}");
+            assert!(
+                c.transcript.borrow().iter().any(|(l, _)| l.contains("E = S - D"))
+                    || c
+                        .transcript
+                        .borrow()
+                        .iter()
+                        .any(|(l, _)| l.contains("study refused by name")),
+                "neither a (94.10) line nor a named study refusal in the transcript"
+            );
+            assert!(c.total >= 3, "expected at least 3 rows, got {}", c.total);
+        }
     }
 }
 
@@ -12716,10 +13934,10 @@ fn check_non_newtonian_channel(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result
             "powerLaw n = {}: L2 {} at 16 cells, {} at 32, order {order:.2}; \
              u_max {} against the closed form {}",
             n_index,
-            sci(e1, 3),
-            sci(e2, 3),
-            sci(peak, 5),
-            sci(exact, 5),
+            sci(f64::from(e1), 3),
+            sci(f64::from(e2), 3),
+            sci(f64::from(peak), 5),
+            sci(f64::from(exact), 5),
         ));
         c.check(
             &format!("powerLaw n = {n_index} converges at second order to the S38.9 profile"),
@@ -12739,9 +13957,9 @@ fn check_non_newtonian_channel(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result
     let (e, peak, exact) = hb_channel_solve(gpu, k, 64, height, g_x, &co)?;
     c.note(&format!(
         "powerLaw n = 1, K = nu: L2 {} at 64 cells; u_max {} against the parabola {}",
-        sci(e, 3),
-        sci(peak, 6),
-        sci(exact, 6)
+        sci(f64::from(e), 3),
+        sci(f64::from(peak), 6),
+        sci(f64::from(exact), 6)
     ));
     c.check(
         "powerLaw with n = 1 reproduces the Newtonian parabola (S38.8's reduction)",
@@ -12766,10 +13984,10 @@ fn check_non_newtonian_channel(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result
     c.note(&format!(
         "HerschelBulkley n = 1, y0/h = {}: L2 {} at 64 cells; u_max {} against the \
          closed form {} ({:+.2}%)",
-        sci(bn, 3),
-        sci(e, 3),
-        sci(peak, 5),
-        sci(exact, 5),
+        sci(f64::from(bn), 3),
+        sci(f64::from(e), 3),
+        sci(f64::from(peak), 5),
+        sci(f64::from(exact), 5),
         100.0 * f64::from((peak - exact) / exact)
     ));
     c.check(
@@ -13070,6 +14288,7 @@ fn check_parcel_coupling(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     theobald
 }
 
+// answer-key: theobald1981-fds-deck
 /// The 90 Theobald (1981) hose-stream experiments, and what this solver makes
 /// of them - SPEC-LIT §68.12.
 ///
@@ -13078,7 +14297,8 @@ fn check_parcel_coupling(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 /// 1-13. The columns are transcribed from the input-deck generator of the
 /// FDS validation suite, `Validation/Theobald_Hose_Stream/FDS_Input_Files/
 /// Build_Input_Files/paramfile.csv`, which is US-government public domain
-/// (NIST) and vendored in this repository under `reference/fds`; its
+/// (NIST) and was read in a local FDS clone - this repository does not carry
+/// `reference/fds`, and the ninety rows below are the transcription; its
 /// `build_input_files.py` shows exactly how each column was derived from the
 /// experimental record:
 ///
@@ -13762,7 +14982,7 @@ fn check_buckingham_reiner(c: &mut Checks) {
             relax: 1.0,
         };
         let err = (apparent_viscosity(&co, gdot_ref) - ideal).abs() / ideal;
-        errs.push(format!("m = {}: {}", sci(m, 2), sci(err, 3)));
+        errs.push(format!("m = {}: {}", sci(f64::from(m), 2), sci(f64::from(err), 3)));
         if err >= prev {
             monotone = false;
         }
@@ -13770,7 +14990,7 @@ fn check_buckingham_reiner(c: &mut Checks) {
     }
     c.note(&format!(
         "regularised Bingham against the ideal law at gdot = {}: {}",
-        sci(gdot_ref, 3),
+        sci(f64::from(gdot_ref), 3),
         errs.join(", ")
     ));
     c.require(
@@ -13805,7 +15025,7 @@ fn check_contact_angle_jurin(c: &mut Checks) {
     c.note(&format!(
         "cos(pi/2) = {} - not zero, which is why S39.2 special-cases ninety degrees \
          on the host AND guards the kernel with an `enabled` flag",
-        sci(raw, 6)
+        sci(f64::from(raw), 6)
     ));
     c.require("cos(pi/2) is not bitwise zero (S39.2's trap is real)", raw != 0.0);
     c.require("and cos_deg(90) is (S39.2's fix)", cos_deg(90.0) == 0.0);
@@ -13818,7 +15038,7 @@ fn check_contact_angle_jurin(c: &mut Checks) {
     let mut prev = Scalar::INFINITY;
     for deg in [0.0 as Scalar, 30.0, 60.0, 90.0, 120.0, 150.0] {
         let h = jurin_height(sigma, deg, rho, g, r);
-        rises.push(format!("{deg} deg: {} mm", sci(1000.0 * h, 4)));
+        rises.push(format!("{deg} deg: {} mm", sci(f64::from(1000.0 * h), 4)));
         if deg < 90.0 && !(h > 0.0) {
             ok_sign = false;
         }
@@ -13871,8 +15091,8 @@ fn check_contact_angle_jurin(c: &mut Checks) {
     for ca in [1e-4 as Scalar, 1e-3, 1e-2, 1e-1] {
         angles.push(format!(
             "Ca = {}: {} deg",
-            sci(ca, 1),
-            sci(acos_deg(cos_theta_dynamic(CA::JiangOhSlattery, ce, ce, ce, ca, 0.0)), 4)
+            sci(f64::from(ca), 1),
+            sci(f64::from(acos_deg(cos_theta_dynamic(CA::JiangOhSlattery, ce, ce, ce, ca, 0.0))), 4)
         ));
     }
     c.note(&format!(
@@ -14180,12 +15400,11 @@ fn check_ke_variant_closed_forms(c: &mut Checks) {
         f64::from(cross), f64::from(f(100.0)),
     ));
     c.check("SPEC-LIT 41.1: C_e2* crosses zero at eta = 5.8581", (cross - 5.858_139).abs(), 1e-4);
-    c.check(
-        "SPEC-LIT 41.1: and stays finite at eta = 1e120 (the overflow the \
-         divided-through form removes)",
-        if f(1e120).is_finite() { 0.0 } else { 1.0 },
-        0.0,
-    );
+    #[cfg(not(feature = "single"))]
+    let (eta_huge, huge_row): (Scalar, &str) = (1e120, "SPEC-LIT 41.1: and stays finite at eta = 1e120 (the overflow the divided-through form removes)");
+    #[cfg(feature = "single")]
+    let (eta_huge, huge_row): (Scalar, &str) = (1e30, "SPEC-LIT 41.1: and stays finite at eta = 1e30 (the overflow the divided-through form removes)");
+    c.check(huge_row, if f(eta_huge).is_finite() { 0.0 } else { 1.0 }, 0.0);
 
     // ---- the homogeneous-shear fixed points ------------------------------
     let (eta_std, p_std) = standard_homogeneous_shear(ke.c1, ke.c2, ke.cmu);
@@ -14557,8 +15776,9 @@ fn check_strained_realizability_live(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 //  What is NOT here, and is said out loud rather than left out quietly:
 //  §50.11's coupled cavity gate (Balaji & Venkateshan 1993/1994; Akiyama &
 //  Chong 1997) needs the paper's own tabulated Nu_conv/Nu_rad, which are
-//  behind Elsevier's paywall, AND a fluid-side case format for a radiating
-//  enclosure that does not exist yet. §50.12 records both. The summary line
+//  behind Elsevier's paywall. The fluid-side case format it also needed exists
+//  since §98.7, and Gate 98-C (§98.9) runs an enclosure on it. §50.12 records
+//  what is left. The summary line
 //  says so on every run.
 // ==========================================================================
 
@@ -15060,8 +16280,9 @@ fn check_surface_to_surface_radiation(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         "NOT RUN, and not replayed either: S50.11's coupled cavity gate (Balaji & \
          Venkateshan 1993/1994, Akiyama & Chong 1997). It needs the papers' own \
          tabulated Nu_conv/Nu_rad - behind Elsevier's paywall, no open-access \
-         reproduction reachable - AND a fluid-side case format for a radiating \
-         enclosure, which does not exist. SPEC-LIT S50.12 records both.",
+         reproduction reachable. The fluid-side case format it also needed exists \
+         now (SPEC-LIT 98.7) and Gate 98-C runs an enclosure on it; SPEC-LIT 50.12 \
+         records what is left.",
     );
 
     Ok(())
@@ -15076,8 +16297,9 @@ fn check_surface_to_surface_radiation(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 //  computed live on this machine.
 //
 //  ONE external dataset is used and it is public domain: NIST's FDS HVAC
-//  verification decks (`reference/fds/Verification/HVAC/fan_test.fds`,
-//  `qfan_test.fds`) and their published CSVs. The FDS SOURCE is not read -
+//  verification decks (`Verification/HVAC/fan_test.fds`, `qfan_test.fds`)
+//  and their published CSVs, read in a local `reference/fds` clone that this
+//  repository does not carry. The FDS SOURCE is not read -
 //  only its input files and its results, which are data.
 //
 //  What is NOT here, and is said out loud rather than left out quietly:
@@ -15093,7 +16315,7 @@ fn check_data_centre(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     /// Relative error between two scalars. `validate.rs`'s own `rel` measures
     /// an error against a whole field, which is a different question.
     fn rel(a: Scalar, b: Scalar) -> Scalar {
-        let s = a.abs().max(b.abs()).max(1e-300);
+        let s = a.abs().max(b.abs()).max(SCALAR_FLOOR);
         (a - b).abs() / s
     }
 
@@ -16165,7 +17387,7 @@ fn check_parcels(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let a = eager(gpu)?;
     let b = eager(gpu)?;
 
-    let bits = |v: &[Vec3]| -> Vec<u64> {
+    let bits = |v: &[Vec3]| -> Vec<Bits> {
         v.iter()
             .flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
             .collect()
@@ -16551,7 +17773,7 @@ fn check_parcel_deposition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         if l.count != r.count {
             return 1.0;
         }
-        let bits = |v: &[Scalar]| -> Vec<u64> { v.iter().map(|x| x.to_bits()).collect() };
+        let bits = |v: &[Scalar]| -> Vec<Bits> { v.iter().map(|x| x.to_bits()).collect() };
         if bits(&l.weight) != bits(&r.weight)
             || bits(&l.mass) != bits(&r.mass)
             || bits(&l.volume_fraction) != bits(&r.volume_fraction)
@@ -18260,7 +19482,7 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 }
 
 // ==========================================================================
-//  Gate 95-D - the thick cylinder heated through the conduction solver
+//  Gate 95-D (§95.10) - the thick cylinder heated through the conduction solver
 // ==========================================================================
 
 /// The thermomechanical chain on three quarter-annulus meshes: the steady
@@ -18269,8 +19491,10 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 /// the thick-walled cylinder's closed form (Timoshenko & Goodier, *Theory
 /// of Elasticity*, 3rd ed., the thermal-stress chapter's long circular
 /// cylinder; Boley & Weiner, *Theory of Thermal Stresses*, ch. 9), plane
-/// strain, on the mean von Mises a mesh study. A pass prints and registers
-/// nothing; a miss is one report carrying the study.
+/// strain, on the mean von Mises a mesh study. §95.10 states the gate: the
+/// body, the three meshes, the closed form (S95.21), the scale (S95.22), and
+/// which numbers are asserted and which only reported. A pass prints and
+/// registers nothing; a miss is one report carrying the study.
 fn check_thick_cylinder(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::cht::{
         Conduction, ConjugateControls, ConjugateHeat, PairingTolerances, RegionInput, RegionKind,
@@ -18448,7 +19672,7 @@ fn check_thick_cylinder(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             verdict: Verdict::Misses,
             how: How::Live,
             gate: "Gate 95-D thick cylinder",
-            against: "Timoshenko & Goodier closed form, plane strain, three meshes r = 2",
+            against: "SPEC-LIT 95.10, Timoshenko & Goodier closed form, plane strain, r = 2",
             headline: format!(
                 "e_rr {:.2e} e_tt {:.2e} e_zz {:.2e} on the finest mesh, hoop-stress order p = {p_hoop:.2}",
                 e_rs[2], e_ts[2], e_zs[2]
@@ -18622,6 +19846,1794 @@ fn check_solid_bimetal(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 }
 
 // ==========================================================================
+//  SPEC-LIT §105 - the moving mesh
+// ==========================================================================
+
+/// Gate 105-A (SPEC-LIT 105.5): the space conservation law, the scheme's own
+/// flux form of it, the uniform-flow residual of the ALE ddt plus Gauss
+/// upwind of `phi - phi_mesh`, the total-volume drift, and the bitwise
+/// volume history with the boundary flux that must be exactly zero - on the
+/// 6x5x4 box in prescribed sinusoidal motion, euler and backward, 100 steps.
+fn check_ale_space_conservation(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::mesh::ale::gate_105a;
+    use ofgpu::timescheme::DdtScheme;
+
+    for (name, scheme) in
+        [("euler", DdtScheme::Euler), ("backward", DdtScheme::Backward)]
+    {
+        let r = gate_105a(gpu, scheme)?;
+        c.note(&format!(
+            "{name}: {} steps, {} cells, worst SCL {:.3e}, scheme SCL {:.3e}, \
+             uniform {:.3e}, volume drift {:.3e}, boundary phi_mesh {}, \
+             min V/V0 {:.6}, history bitwise {}, worst at step {} cell {}",
+            r.steps, r.n_cells, r.worst_scl, r.worst_scheme, r.worst_uniform,
+            r.volume_drift, r.boundary_flux_max, r.min_volume_ratio,
+            r.history_bitwise, r.worst_step, r.worst_cell
+        ));
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): the space conservation law, 100 steps"),
+            r.worst_scl,
+            1e-12,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): the scheme's own flux form"),
+            r.worst_scheme,
+            1e-12,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): a uniform flow stays uniform"),
+            r.worst_uniform,
+            1e-12,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.5 Gate 105-A ({name}): total volume drift"),
+            r.volume_drift,
+            1e-12,
+        );
+        c.require(
+            &format!(
+                "SPEC-LIT 105.5 Gate 105-A ({name}): bitwise history, boundary phi_mesh zero"
+            ),
+            r.history_bitwise && r.steps == 100 && r.boundary_flux_max == 0.0,
+        );
+    }
+    Ok(())
+}
+
+/// Gate 105-B (SPEC-LIT 105.10): the piston's uniform state through the whole
+/// SIMPLE loop in both convective forms, no relative flux through the moving
+/// wall, the absolute flux that closes every cell, the stroking outlet's time
+/// order on three step counts, the finest level against the exact value, and
+/// the extrapolation toward it - euler and backward, seven rows each.
+fn check_ale_flow(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::ale_flow::{
+        expected_order, fine_tolerance, gate_105b, CONTINUITY_TOL, ORDER_BAND, UNIFORM_TOL,
+        WALL_FLUX_TOL,
+    };
+    use ofgpu::timescheme::DdtScheme;
+
+    for (name, scheme) in
+        [("euler", DdtScheme::Euler), ("backward", DdtScheme::Backward)]
+    {
+        let r = gate_105b(gpu, scheme)?;
+        c.note(&format!(
+            "{name} piston conservative: worst U {:.3e}, worst p {:.3e}, wall flux {:.3e}, \
+             continuity {:.3e}, min V/V0 {:.10e}, stroke {:.6}",
+            r.conservative.worst_u, r.conservative.worst_p, r.conservative.worst_wall_flux,
+            r.conservative.worst_continuity, r.conservative.min_volume_ratio,
+            r.conservative.stroke
+        ));
+        c.note(&format!(
+            "{name} piston bounded: worst U {:.3e}, worst p {:.3e}, wall flux {:.3e}, \
+             continuity {:.3e}, min V/V0 {:.10e}, stroke {:.6}",
+            r.bounded.worst_u, r.bounded.worst_p, r.bounded.worst_wall_flux,
+            r.bounded.worst_continuity, r.bounded.min_volume_ratio, r.bounded.stroke
+        ));
+        c.note(&format!(
+            "{name} stroke: exact {:.10e}, p {:.6e}, err_fine {:.3e}, err_ext {:.3e}; levels: \
+             320 steps {:.10e}, 160 steps {:.10e}, 80 steps {:.10e} (spreads {:.3e}, {:.3e}, {:.3e})",
+            r.stroke.exact, r.stroke.p, r.stroke.err_fine, r.stroke.err_ext,
+            r.stroke.runs[0].value, r.stroke.runs[1].value, r.stroke.runs[2].value,
+            r.stroke.runs[0].spread, r.stroke.runs[1].spread, r.stroke.runs[2].spread
+        ));
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the piston keeps the uniform state, conservative form"),
+            r.conservative.worst_u.max(r.conservative.worst_p),
+            UNIFORM_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the piston keeps the uniform state, bounded form"),
+            r.bounded.worst_u.max(r.bounded.worst_p),
+            UNIFORM_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): no relative flux through the moving wall"),
+            r.conservative.worst_wall_flux.max(r.bounded.worst_wall_flux),
+            WALL_FLUX_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the absolute flux closes every cell"),
+            r.conservative.worst_continuity.max(r.bounded.worst_continuity),
+            CONTINUITY_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): observed time order on three steps"),
+            (r.stroke.p - expected_order(scheme)).abs(),
+            ORDER_BAND,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the finest step against the exact solution"),
+            r.stroke.err_fine,
+            fine_tolerance(scheme),
+        );
+        c.require(
+            &format!("SPEC-LIT 105.10 Gate 105-B ({name}): the extrapolation moves toward the exact solution"),
+            r.stroke.err_ext < r.stroke.err_fine,
+        );
+    }
+    Ok(())
+}
+
+// answer-key: turek-hron2006
+/// Turek & Hron (2006), CFD1 and CFD2 at level 6+0: (drag, lift), N per
+/// metre of depth.
+const TH_CFD1: (Scalar, Scalar) = (14.2929, 1.11905);
+const TH_CFD2: (Scalar, Scalar) = (136.700, 10.5343);
+/// CFD3 at level 4+0, dt 0.005: [mean, amplitude, frequency in Hz], drag
+/// then lift - a band beside the gate.
+const TH_CFD3_DRAG: [Scalar; 3] = [439.45, 5.6183, 4.3956];
+const TH_CFD3_LIFT: [Scalar; 3] = [-11.893, 437.81, 4.3956];
+
+/// Gate 105-C (SPEC-LIT 105.14): the Turek-Hron benchmark on the card.
+/// CFD1 and CFD2 run steady on each of the four generated meshes and
+/// their drag and lift go through a grid study of the finest three
+/// (L2, L3, L4), the gate on the EXTRAPOLATED value against the
+/// published one (2 per cent). CFD3 spins up statically to t = 8 s and
+/// forks into two 1,500-step continuations from that one state - static
+/// and wobbling - whose drag and lift are reduced over their last four
+/// lift periods and compared, 0.5 per cent per statistic, on the one
+/// mesh. A missing mesh is not a solver failure: the gate opens by name
+/// and skips its comparison rows.
+/// A miss fails its row AND registers a MISSES verdict with its study -
+/// the Gate 94-D pattern - so it reaches the summary and is never tuned
+/// away.
+fn check_turek_hron(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::turek_hron::{self, Case};
+
+    const NOT_GENERATED: &str = "the Turek-Hron meshes are not generated";
+    let absent: Vec<usize> = (1..=turek_hron::LEVEL_DIRS.len())
+        .filter(|&l| !turek_hron::mesh_dir(l).join("points").is_file())
+        .collect();
+    if !absent.is_empty() {
+        let mut detail: Vec<String> = Vec::new();
+        for l in &absent {
+            detail.push(format!(
+                "level {l}: {} is absent - generate it from the repository root with \
+                 `python tools/mesh/examples/turek_hron.py --level {l}`",
+                turek_hron::mesh_dir(*l).display()
+            ));
+        }
+        for line in &detail {
+            c.note(line);
+        }
+        for case in [Case::Cfd1, Case::Cfd2] {
+            for quantity in ["drag", "lift"] {
+                c.skip(
+                    &format!("SPEC-LIT 105.14 Gate 105-C ({}): {quantity}, extrapolated over three meshes, against Turek & Hron", case.name()),
+                    NOT_GENERATED,
+                );
+            }
+        }
+        for statistic in ["drag mean", "drag amplitude", "lift mean", "lift amplitude"] {
+            c.skip(
+                &format!("SPEC-LIT 105.14 Gate 105-C (CFD3): {statistic}, wobbling mesh against the static mesh"),
+                NOT_GENERATED,
+            );
+        }
+        c.report(GateReport {
+            verdict: Verdict::Open,
+            how: How::Live,
+            gate: "SPEC-LIT 105.14 Gate 105-C Turek-Hron",
+            against: "Turek & Hron (2006), CFD1/CFD2 level 6+0 and CFD3 level 4+0",
+            headline: "the Turek-Hron meshes are not generated, so no comparison was run".to_string(),
+            detail,
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "no mesh was run: the Turek-Hron meshes were not generated",
+            )),
+        });
+        return Ok(());
+    }
+    // Steady CFD1 and CFD2 on all four levels, notes first, then the rows.
+    let studies = turek_hron::steady_studies(gpu)?;
+    let published =
+        |case: Case| if case == Case::Cfd1 { TH_CFD1 } else { TH_CFD2 };
+    let mut notes: Vec<Vec<String>> = Vec::with_capacity(studies.len());
+    for study in &studies {
+        let (pd, pl) = published(study.case);
+        let mut n = Vec::new();
+        for run in &study.runs {
+            n.push(format!(
+                "{} L{}: {} cells, h {:.4e}, {} SIMPLE iterations, stopping rule met {}, \
+                 residual {:.3e}, drag {:.6}, lift {:.6}, {:.1} s",
+                run.case.name(), run.level, run.n_cells, run.h, run.iterations,
+                run.converged, run.residual, run.forces.drag, run.forces.lift, run.seconds
+            ));
+        }
+        for (quantity, one, err_ext) in [
+            ("drag", &study.drag, turek_hron::extrapolated_error(&study.drag, pd)),
+            ("lift", &study.lift, turek_hron::extrapolated_error(&study.lift, pl)),
+        ] {
+            let value = |r: &turek_hron::SteadyRun| {
+                if quantity == "drag" { r.forces.drag } else { r.forces.lift }
+            };
+            let published_q = if quantity == "drag" { pd } else { pl };
+            let err_fine = (value(&study.runs[0]) - published_q).abs() / published_q.abs();
+            let all: Vec<String> = study
+                .runs
+                .iter()
+                .rev()
+                .map(|r| format!("L{} {:.6}", r.level, value(r)))
+                .collect();
+            let studied: Vec<String> = study
+                .runs
+                .iter()
+                .take(turek_hron::STUDY_LEVELS)
+                .rev()
+                .map(|r| format!("L{}", r.level))
+                .collect();
+            let (line, gci) = match one {
+                Ok(s) => (
+                    s.one_line(),
+                    s.triplet
+                        .gci_fine
+                        .map(|g| format!("{:.3e}", f64::from(g)))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                ),
+                Err(e) => (format!("study refused by name: {e}"), "n/a".to_string()),
+            };
+            n.push(format!(
+                "{quantity}: {}; the study takes {}; {line}; gci_fine {gci}; \
+                 err_fine {err_fine:.3e}, err_ext {err_ext:.3e}, published {published_q:.6}",
+                all.join(", "),
+                studied.join(", ")
+            ));
+        }
+        notes.push(n);
+    }
+    for (study, note) in studies.iter().zip(&notes) {
+        let (pd, pl) = published(study.case);
+        // Every case prints its four levels, its two studies and both
+        // errors, whether or not it holds (SPEC-LIT 105.14).
+        for line in note {
+            c.note(line);
+        }
+        for run in &study.runs {
+            c.require(
+                &format!("SPEC-LIT 105.14 Gate 105-C ({} L{}): the steady run met its stopping rule within its budget", run.case.name(), run.level),
+                run.converged,
+            );
+        }
+        c.require(
+            &format!("SPEC-LIT 105.14 Gate 105-C ({}): the three-level drag and lift studies could be formed (SPEC-LIT 94.1)", study.case.name()),
+            study.drag.is_ok() && study.lift.is_ok(),
+        );
+        let err_drag = turek_hron::extrapolated_error(&study.drag, pd);
+        let err_lift = turek_hron::extrapolated_error(&study.lift, pl);
+        c.check(
+            &format!("SPEC-LIT 105.14 Gate 105-C ({}): drag, extrapolated over three meshes, against Turek & Hron", study.case.name()),
+            err_drag,
+            turek_hron::STEADY_TOL,
+        );
+        c.check(
+            &format!("SPEC-LIT 105.14 Gate 105-C ({}): lift, extrapolated over three meshes, against Turek & Hron", study.case.name()),
+            err_lift,
+            turek_hron::STEADY_TOL,
+        );
+        if !(err_drag <= turek_hron::STEADY_TOL && err_lift <= turek_hron::STEADY_TOL) {
+            // The study of the quantity that missed - the lift's when the
+            // lift is the one outside 2 %, the drag's otherwise.
+            let missed = if err_lift <= turek_hron::STEADY_TOL { &study.drag } else { &study.lift };
+            let uncertainty = match missed {
+                Ok(s) => Some(Uncertainty::Study(s.clone())),
+                Err(_) => Some(Uncertainty::SingleMesh(
+                    "four meshes were run but the finest-three study was refused by name; the reason is printed above",
+                )),
+            };
+            let phi = |one: &std::result::Result<ofgpu::vv::GridStudy, String>| match one {
+                Ok(s) => f64::from(s.phi_ext),
+                Err(_) => f64::NAN,
+            };
+            c.report(GateReport {
+                verdict: Verdict::Misses,
+                how: How::Live,
+                gate: "SPEC-LIT 105.14 Gate 105-C Turek-Hron",
+                against: "Turek & Hron (2006) CFD1/CFD2, level 6+0, drag and lift on cylinder and flap",
+                headline: format!(
+                    "{}: drag extrapolated {:.4} (err {:.3}%), lift extrapolated {:.4} (err {:.3}%) against 2 %",
+                    study.case.name(),
+                    phi(&study.drag),
+                    f64::from(err_drag) * 100.0,
+                    phi(&study.lift),
+                    f64::from(err_lift) * 100.0,
+                ),
+                detail: note.clone(),
+                uncertainty,
+            });
+        }
+    }
+    // CFD3: one mesh, a static and a wobbling continuation of one state.
+    let r = turek_hron::cfd3(gpu)?;
+    let mut n3 = Vec::new();
+    n3.push(format!(
+        "spin-up to t = {:.1} s: {:.1} s",
+        (ofgpu::turek_hron::CFD3_SPIN_STEPS as f64) * f64::from(ofgpu::turek_hron::CFD3_DT),
+        r.traces.spin_seconds
+    ));
+    let say = |one: &std::result::Result<ofgpu::turek_hron::Periodic, String>| match one {
+        Ok(p) => format!(
+            "{:.4} ± {:.4} [{:.4} Hz]",
+            f64::from(p.mean), f64::from(p.amplitude), f64::from(p.frequency)
+        ),
+        Err(e) => format!("reduction refused by name: {e}"),
+    };
+    for tr in [&r.traces.static_run, &r.traces.moving] {
+        n3.push(format!(
+            "{}: {} steps, {:.1} s, worst continuity {:.3e}, min V/V0 {:.6}, \
+             boundary disp {:.3e}, upstream disp {:.3e}, max disp {:.3e}",
+            if tr.moving { "moving" } else { "static" },
+            tr.drag.len(), tr.seconds, tr.worst_continuity, tr.min_volume_ratio,
+            tr.max_boundary_displacement, tr.max_upstream_displacement, tr.max_displacement
+        ));
+    }
+    n3.push(format!("static drag: {}, static lift: {}", say(&r.static_drag), say(&r.static_lift)));
+    n3.push(format!("moving drag: {}, moving lift: {}", say(&r.moving_drag), say(&r.moving_lift)));
+    n3.push(format!(
+        "relative, wobbling against static: drag mean {:.3e}, drag amplitude {:.3e}, \
+         lift mean {:.3e}, lift amplitude {:.3e}",
+        f64::from(r.rel[0]), f64::from(r.rel[1]), f64::from(r.rel[2]), f64::from(r.rel[3])
+    ));
+    n3.push(format!(
+        "static CFD3 on L{}: drag {}, lift {}; Turek & Hron level 4+0 publish {:.2} ± {:.4} [{:.4}], \
+         {:.3} ± {:.2} [{:.4}] - a band beside the gate, not the gate",
+        r.level, say(&r.static_drag), say(&r.static_lift),
+        TH_CFD3_DRAG[0], TH_CFD3_DRAG[1], TH_CFD3_DRAG[2],
+        TH_CFD3_LIFT[0], TH_CFD3_LIFT[1], TH_CFD3_LIFT[2]
+    ));
+    for line in &n3 {
+        c.note(line);
+    }
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): the wobble moves no point of a non-empty patch",
+        r.traces.moving.max_boundary_displacement,
+        0.0,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): the wobble leaves every point upstream of x = 0.7 at rest",
+        r.traces.moving.max_upstream_displacement,
+        0.0,
+    );
+    c.require(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): the wobble moved the wake by at least half its amplitude",
+        r.traces.moving.max_displacement >= 0.5 * r.law.amplitude,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): no cell of the moving mesh lost a fifth of its volume",
+        (1.0 - r.traces.moving.min_volume_ratio).max(0.0),
+        0.2,
+    );
+    c.require(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): both runs reached the lift periods they are reduced over",
+        r.static_drag.is_ok() && r.static_lift.is_ok() && r.moving_drag.is_ok() && r.moving_lift.is_ok(),
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): drag mean, wobbling mesh against the static mesh",
+        r.rel[0],
+        turek_hron::CFD3_TOL,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): drag amplitude, wobbling mesh against the static mesh",
+        r.rel[1],
+        turek_hron::CFD3_TOL,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): lift mean, wobbling mesh against the static mesh",
+        r.rel[2],
+        turek_hron::CFD3_TOL,
+    );
+    c.check(
+        "SPEC-LIT 105.14 Gate 105-C (CFD3): lift amplitude, wobbling mesh against the static mesh",
+        r.rel[3],
+        turek_hron::CFD3_TOL,
+    );
+    if !(r.rel[0] <= turek_hron::CFD3_TOL
+        && r.rel[1] <= turek_hron::CFD3_TOL
+        && r.rel[2] <= turek_hron::CFD3_TOL
+        && r.rel[3] <= turek_hron::CFD3_TOL)
+    {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 105.14 Gate 105-C Turek-Hron",
+            against: "the static CFD3 run on the same mesh (SPEC-LIT 105.14)",
+            headline: format!(
+                "CFD3: wobbling against static, drag mean {:.3}%, drag amplitude {:.3}%, \
+                 lift mean {:.3}%, lift amplitude {:.3}% against 0.5 %",
+                f64::from(r.rel[0]) * 100.0, f64::from(r.rel[1]) * 100.0,
+                f64::from(r.rel[2]) * 100.0, f64::from(r.rel[3]) * 100.0,
+            ),
+            detail: n3.clone(),
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one mesh, L1: the wobbling run is compared with the static run on the same mesh, not extrapolated",
+            )),
+        });
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §98 - the face that exchanges heat with something not meshed
+// ==========================================================================
+
+/// Gate 98-A's fin as a case document (SPEC-LIT 98.6): silicon, 50 mm long,
+/// 1 mm thick, 10 mm deep, `nx` cells along it and two across it; the base
+/// held at 400 K, the two broad faces losing heat at h = 25 to 300 K, the
+/// tip and the two depth faces adiabatic - so P = 2w and A = t w.
+fn gate_98a_fin(nx: usize) -> String {
+    format!(
+        r#"{{
+  "name": "gate98aFin",
+  "regions": [
+    {{
+      "name": "fin",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.05, 0.001, 0.01] }},
+        "cells": [{nx}, 2, 1],
+        "boundaries": {{
+          "xmin": "base", "xmax": "tip",
+          "ymin": "lower", "ymax": "upper", "zmin": "front", "zmax": "back"
+        }}
+      }},
+      "material": {{ "rho": 2330.0, "c": 700.0, "kappa": 148.0 }},
+      "patches": [
+        {{ "match": "base",  "T": {{ "type": "fixedValue", "value": 400.0 }} }},
+        {{ "match": "tip",   "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "lower", "T": {{ "type": "externalConvection", "h": 25.0, "TInf": 300.0 }} }},
+        {{ "match": "upper", "T": {{ "type": "externalConvection", "h": 25.0, "TInf": 300.0 }} }},
+        {{ "match": "front", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "back",  "T": {{ "type": "zeroGradient" }} }}
+      ]
+    }}
+  ],
+  "initial": {{ "T": 350.0 }},
+  "run": {{ "steady": true }},
+  "numerics": {{
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 4000
+  }}
+}}"#
+    )
+}
+
+/// Gate 98-A (SPEC-LIT 98.6): the fin's base heat flow, read with
+/// `ChtSolution::patch_heat_flow` the way `ChtFlowSolution::patch_heat_flow`
+/// reads one, against (S98.7) on three meshes - 0.5 % on the finest, with
+/// §94's study and GCI beside it. The band holds the discretisation error
+/// AND the 1-D model's O(Bi) offset, and the verdict says so.
+fn check_straight_fin(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::ambient::fin_heat_flow;
+    use ofgpu::cht::run_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let (h, k, t, w, l, theta_b): (Scalar, Scalar, Scalar, Scalar, Scalar, Scalar) =
+        (25.0, 148.0, 1.0e-3, 1.0e-2, 0.05, 100.0);
+    let q_exact = fin_heat_flow(h, 2.0 * w, k, t * w, l, theta_b);
+    let m_l = (h * 2.0 * w / (k * t * w)).sqrt() * l;
+    let bi = h * (0.5 * t) / k;
+    c.note(&format!(
+        "  (S98.7): m L = {m_l:.4}, q_b = {q_exact:.6} W, Bi = h (t/2)/k = {bi:.3e}"
+    ));
+
+    let mut levels = Vec::new();
+    let mut rels: Vec<Scalar> = Vec::new();
+    let mut detail = Vec::new();
+    for nx in [20usize, 40, 80] {
+        let low = parse_cht_case(&gate_98a_fin(nx), "SPEC-LIT 98.6 Gate 98-A")?.lower()?;
+        let sol = run_case(gpu, &low)?;
+        let q = sol.patch_heat_flow(0, "base")?;
+        let rel = (q / q_exact - 1.0).abs();
+        levels.push(vv::Level { h: l / nx as Scalar, value: q });
+        rels.push(rel);
+        let line = format!(
+            "nx={nx:>3} cells={:>4} q_b={q:.8} W rel={rel:.3e}",
+            sol.mesh.host.n_cells
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+
+    // The study reads the FINEST level first.
+    levels.reverse();
+    let study = vv::grid_study(&levels)?;
+    c.note(&format!("  base heat flow: {}", study.one_line()));
+    let val = vv::validation(levels[0].value, q_exact, study.u_fine, 0.0, 0.0);
+    c.note(&format!("  {}", val.one_line("base heat flow, finest mesh")));
+    c.note(&format!(
+        "  the band holds the discretisation error AND the 1-D model's offset, of relative \
+         order Bi = {bi:.1e} (SPEC-LIT 98.6)"
+    ));
+    c.check(
+        "SPEC-LIT 98.6 Gate 98-A: fin base heat flow on the finest mesh (nx = 80), rel to (S98.7)",
+        rels[2],
+        5.0e-3,
+    );
+    if !(rels[2] <= 5.0e-3) {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 98.6 Gate 98-A straight fin",
+            against: "the straight fin with an adiabatic tip, (S98.7), SPEC-LIT 98.6",
+            headline: format!(
+                "base heat flow {:.3} % off (S98.7) on the finest mesh, against 0.5 %",
+                f64::from(rels[2]) * 100.0
+            ),
+            detail,
+            uncertainty: Some(Uncertainty::Study(study)),
+        });
+    }
+    Ok(())
+}
+
+/// Gate 98-B's slab as a case document (SPEC-LIT 98.6): 20 mm of `k = 1` in
+/// twenty cells, `hot` held at 500 K, `face` radiating at 0.8 to 300 K, the
+/// four side faces adiabatic, started at 500 K.
+fn gate_98b_slab() -> String {
+    r#"{
+  "name": "gate98bSlab",
+  "regions": [
+    {
+      "name": "slab",
+      "mesh": {
+        "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.02, 0.01, 0.01] },
+        "cells": [20, 1, 1],
+        "boundaries": {
+          "xmin": "hot", "xmax": "face",
+          "ymin": "s1", "ymax": "s2", "zmin": "s3", "zmax": "s4"
+        }
+      },
+      "material": { "rho": 2000.0, "c": 800.0, "kappa": 1.0 },
+      "patches": [
+        { "match": "hot",  "T": { "type": "fixedValue", "value": 500.0 } },
+        { "match": "face", "T": { "type": "externalRadiation", "emissivity": 0.8, "TEnv": 300.0 } },
+        { "match": "s1", "T": { "type": "zeroGradient" } },
+        { "match": "s2", "T": { "type": "zeroGradient" } },
+        { "match": "s3", "T": { "type": "zeroGradient" } },
+        { "match": "s4", "T": { "type": "zeroGradient" } }
+      ]
+    }
+  ],
+  "initial": { "T": 500.0 },
+  "run": { "steady": true },
+  "numerics": {
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 1000
+  }
+}"#
+    .to_string()
+}
+
+/// Gate 98-B (SPEC-LIT 98.6): the radiating face's temperature against the
+/// root of (S98.8) to 1e-10, the linearisation residual (S98.5) to 1e-10,
+/// and the Newton passes quadratic - every ratio delta_(k+1)/delta_k^2
+/// whose delta_(k+1) is above the solver's floor 1e-12 T_r at most 2C, and
+/// at least two of them. One mesh, for the reason SPEC-LIT 94.3 accepts.
+fn check_radiating_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::ambient::radiating_slab_root;
+    use ofgpu::cht::run_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let root = radiating_slab_root(1.0 / 0.02, 500.0, 0.8, 300.0);
+    c.note(&format!(
+        "  (S98.8): host Newton from 500 K, T_r = {:.10} K, C = {:.4e} /K, corrections {:?} K",
+        root.root, root.newton_constant, root.corrections
+    ));
+    let low = parse_cht_case(&gate_98b_slab(), "SPEC-LIT 98.6 Gate 98-B")?.lower()?;
+    let sol = run_case(gpu, &low)?;
+    let bf = sol.mesh.patch_range(0, "face")?.start;
+    let tb = sol.bt[bf];
+    let rel = ((tb - root.root) / root.root).abs();
+    let d = &sol.external_passes;
+    let mut ratios: Vec<Scalar> = Vec::new();
+    for k in 0..d.len().saturating_sub(1) {
+        if d[k + 1] > 1.0e-12 * root.root {
+            ratios.push(d[k + 1] / (d[k] * d[k]));
+        }
+    }
+    let worst = ratios.iter().copied().fold(0.0 as Scalar, Scalar::max);
+    let bound = 2.0 * root.newton_constant;
+    c.note(&format!(
+        "  T_b = {tb:.10} K after {} Newton passes; corrections {d:?} K",
+        d.len()
+    ));
+    c.note(&format!(
+        "  ratios delta_(k+1)/delta_k^2 above the floor: {ratios:?} against 2C = {bound:.4e}"
+    ));
+    c.note(
+        "  one mesh: the steady solid is exactly linear, so each pass is Newton's step on \
+         (S98.8) and T_b is its root to round-off - no discretisation error to extrapolate \
+         (SPEC-LIT 94.3)",
+    );
+    c.check("SPEC-LIT 98.6 Gate 98-B: T_b against the root of (S98.8), rel", rel, 1.0e-10);
+    c.check(
+        "SPEC-LIT 98.6 Gate 98-B: the linearisation residual (S98.5)",
+        sol.external_residual,
+        1.0e-10,
+    );
+    c.check(
+        "SPEC-LIT 98.6 Gate 98-B: worst Newton ratio over 2C (quadratic)",
+        worst / bound,
+        1.0,
+    );
+    c.require(
+        "SPEC-LIT 98.6 Gate 98-B: at least two Newton ratios above the solver's floor",
+        ratios.len() >= 2,
+    );
+
+    let ok = rel <= 1.0e-10
+        && sol.external_residual <= 1.0e-10
+        && worst <= bound
+        && ratios.len() >= 2;
+    if !ok {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 98.6 Gate 98-B radiating slab",
+            against: "the steady balance of a slab radiating to a large surround, (S98.8), SPEC-LIT 98.6",
+            headline: format!(
+                "T_b rel {rel:.2e}, residual {:.2e}, worst Newton ratio {worst:.3e} against 2C = \
+                 {bound:.3e}, {} ratios",
+                sol.external_residual,
+                ratios.len()
+            ),
+            detail: vec![format!("  corrections {d:?} K")],
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one mesh: the steady solid is exactly linear, so T_b is the root of (S98.8) to \
+                 round-off and there is no discretisation error to extrapolate",
+            )),
+        });
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §98.9 - Gate 98-C, an enclosure with a running flow
+// ==========================================================================
+
+/// Gate 98-C's conjugate box as a case document (SPEC-LIT 98.9): a solid
+/// wall 0.2 thick against a fluid box, 1 x 1 across in 10 x 10 cells, 2 cells
+/// through the wall and 8 through the fluid; the wall's outer face at
+/// 300.05 K, the fluid's far face at 299.95 K, Ra = 1e4. `side` is the `T` of
+/// the fluid's four side walls; the interface radiates at 0.9; the enclosure
+/// is read from `enclosure/`.
+fn gate_98c_box(side: &str) -> String {
+    format!(
+        r#"{{
+  "name": "gate98cBox", "radiation": "enclosure",
+  "regions": [
+    {{ "name": "air", "kind": "fluid",
+      "mesh": {{ "bounds": {{ "min": [0.2, 0.0, 0.0], "max": [1.0, 1.0, 1.0] }}, "cells": [8, 10, 10],
+        "boundaries": {{ "xmin": "airToWall", "xmax": "cold", "ymin": "airBottom", "ymax": "airTop",
+                         "zmin": "airFront", "zmax": "airBack" }} }},
+      "fluid": {{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }},
+      "patches": [
+        {{ "match": "cold", "T": {{ "type": "fixedValue", "value": 299.95 }} }},
+        {{ "match": "airBottom", "T": {side} }},
+        {{ "match": "airTop", "T": {side} }},
+        {{ "match": "airFront", "T": {side} }},
+        {{ "match": "airBack", "T": {side} }}
+      ] }},
+    {{ "name": "wall", "kind": "solid",
+      "mesh": {{ "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [0.2, 1.0, 1.0] }}, "cells": [2, 10, 10],
+        "boundaries": {{ "xmin": "hot", "xmax": "wallToAir", "ymin": "wallBottom", "ymax": "wallTop",
+                         "zmin": "wallFront", "zmax": "wallBack" }} }},
+      "material": {{ "rho": 1.0, "c": 1.0, "kappa": 1.0 }},
+      "patches": [
+        {{ "match": "hot", "T": {{ "type": "fixedValue", "value": 300.05 }} }},
+        {{ "match": "wallBottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallTop", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallFront", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "wallBack", "T": {{ "type": "zeroGradient" }} }}
+      ] }}
+  ],
+  "interfaces": [ {{ "regionA": "air", "patchA": "airToWall", "regionB": "wall", "patchB": "wallToAir",
+                     "emissivity": 0.9 }} ],
+  "buoyancy": {{ "g": [0.0, -2.13e7, 0.0], "TRef": 300.0 }},
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": 4000 }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-16, "maxIter": 400,
+    "flow": {{ "relaxU": 0.7, "relaxP": 0.3, "relaxT": 0.7,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear", "residual": 1e-7,
+      "uTolerance": 1e-14, "pTolerance": 1e-14, "uMaxIter": 150, "pMaxIter": 500 }}
+  }}
+}}"#
+    )
+}
+
+/// One Gate 98-C run at the relaxation `w` (SPEC-LIT 98.9): its dictionary
+/// written to `<scratch>/enclosure/constant/radiationProperties`, the box
+/// lowered against that directory and run, the directory removed.
+fn gate_98c_run(gpu: &Gpu, tag: &str, w: f64, side: &str) -> Result<ofgpu::cht::flow::ChtFlowSolution> {
+    use ofgpu::cht::flow::run_flow_case;
+    use ofgpu::error::IoContext;
+    use ofgpu::io::case_cht::parse_cht_case;
+    let dir = scratch_dir(&format!("gate98c_{tag}"));
+    let c = dir.join("enclosure").join("constant");
+    std::fs::create_dir_all(&c).path(&c)?;
+    let f = c.join("radiationProperties");
+    let body = format!(
+        "radiationModel viewFactor;\nemissivity 0.8;\nambientTemperature 299.95;\n\
+         radiositySweeps 60;\nradiationRelaxation {w};\n"
+    );
+    std::fs::write(&f, body).path(&f)?;
+    let out = (|| -> Result<ofgpu::cht::flow::ChtFlowSolution> {
+        let low = parse_cht_case(&gate_98c_box(side), "SPEC-LIT 98.9 Gate 98-C")?.lower_in(Some(&dir))?;
+        let case = low.flow_case().ok_or_else(|| {
+            Error::Config("Gate 98-C: the box did not lower to a conjugate case".to_string())
+        })?;
+        run_flow_case(gpu, &case)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+/// Gate 98-C (SPEC-LIT 98.9): (a) the enclosure's power balance on a live run
+/// to 1e-10; (b) the split - (S98.10) on the four re-radiating walls to 1e-9,
+/// the interface's (S98.9) cell source against the power it radiates to
+/// 1e-12, and the interface alone into the black closure against
+/// `parallel_plate_flux` and `concentric_flux` face by face to 1e-10;
+/// (c) `radiationRelaxation` 1, 0.5 and 0.3, each required to converge, the
+/// iterations each took printed.
+/// A run that fails is recorded as a row, never propagated: one failing leg
+/// must not stop the rest of `ofgpu-validate`.
+#[allow(clippy::too_many_lines)]
+fn check_enclosure_flow(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::flow::ChtFlowSolution;
+    use ofgpu::radiation::SIGMA_SB;
+    use ofgpu::s2s::{concentric_flux, parallel_plate_flux};
+    const S2S: &str = r#"{ "type": "s2sWall" }"#;
+    const ADIABATIC: &str = r#"{ "type": "zeroGradient" }"#;
+    const WALLS: [&str; 4] = ["airBottom", "airTop", "airFront", "airBack"];
+    let t_amb: Scalar = 299.95;
+    let mut detail: Vec<String> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+
+    // (c) - and its w = 1 run is (a)'s and (b)'s.
+    let mut runs: Vec<(f64, Option<ChtFlowSolution>)> = Vec::new();
+    for (tag, w) in [("w10", 1.0_f64), ("w05", 0.5), ("w03", 0.3)] {
+        let line = match gate_98c_run(gpu, tag, w, S2S) {
+            Ok(sol) => {
+                let q_hot = sol.patch_heat_flow(1, "hot")?;
+                let l = format!(
+                    "radiationRelaxation {w}: {} SIMPLE iterations, converged {}, residuals U {:.2e} \
+                     p {:.2e} T {:.2e}, Q_hot {q_hot:.10e} W",
+                    sol.iterations, sol.converged, sol.residuals.0, sol.residuals.1, sol.residuals.2
+                );
+                runs.push((w, Some(sol)));
+                l
+            }
+            Err(e) => {
+                runs.push((w, None));
+                format!("radiationRelaxation {w}: the run failed - {e}")
+            }
+        };
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    if let Some(base) = runs[0].1.as_ref() {
+        let e = base.enclosure.as_ref().ok_or_else(|| {
+            Error::Config("Gate 98-C: the w = 1 run carries no enclosure report".to_string())
+        })?;
+        // (a)
+        let balance = e.net_power.abs() / e.gross_power;
+        c.note(&format!(
+            "  (a) SUM A q_r = {:+.3e} W against SUM A |q_r| = {:.6e} W over {} faces and the \
+             closure; the (S50.3) residual {:.2e} after {} sweeps; view factors: {}",
+            e.net_power, e.gross_power, e.faces.len(), e.radiosity_residual, e.sweeps, e.view_factors
+        ));
+        c.check(
+            "SPEC-LIT 98.9 Gate 98-C (a): the enclosure's power balance on the live run, |SUM A q_r| / SUM A |q_r|",
+            balance,
+            1.0e-10,
+        );
+        if !(balance <= 1.0e-10) {
+            misses.push(format!("(a) power balance {balance:.2e} against 1e-10"));
+        }
+        // (b) 1: (S98.10) on the four walls
+        let mut worst: Scalar = 0.0;
+        let mut radiated_walls: Scalar = 0.0;
+        for p in WALLS {
+            let (q_ext, q_in, q_rad, lin) = base.radiative_split(0, p)?;
+            let rel = (q_in + q_rad - q_ext - lin).abs() / q_in.abs().max(q_rad.abs());
+            worst = if rel.is_nan() || worst.is_nan() { Scalar::NAN } else { worst.max(rel) };
+            radiated_walls += q_rad;
+            c.note(&format!(
+                "  (b) {p}: conducted in {q_in:+.6e} W, radiated out {q_rad:+.6e} W, L {lin:.3e} W, \
+                 (S98.10) rel {rel:.2e}"
+            ));
+        }
+        c.check("SPEC-LIT 98.9 Gate 98-C (b): (S98.10) on the four re-radiating walls, worst rel", worst, 1.0e-9);
+        if !(worst <= 1.0e-9) {
+            misses.push(format!("(b) (S98.10) worst {worst:.2e} against 1e-9"));
+        }
+        // (b) 2: the interface's cell source, delivered once
+        let rad = base.interface_radiated();
+        let src_rel = (e.interface_source + rad).abs() / rad.abs();
+        c.note(&format!(
+            "  (b) the interface radiates {rad:+.6e} W; its (S98.9) cell source sums to {:+.6e} W: \
+             rel {src_rel:.2e}",
+            e.interface_source
+        ));
+        c.check(
+            "SPEC-LIT 98.9 Gate 98-C (b): the interface's (S98.9) cell source against the power it radiates, rel",
+            src_rel,
+            1.0e-12,
+        );
+        if !(src_rel <= 1.0e-12) {
+            misses.push(format!("(b) cell source rel {src_rel:.2e} against 1e-12"));
+        }
+        // printed, not gated: the domain's energy balance
+        let q_hot = base.patch_heat_flow(1, "hot")?;
+        let q_cold = base.patch_heat_flow(0, "cold")?;
+        let q_black = rad + radiated_walls;
+        c.note(&format!(
+            "  energy: in through hot {q_hot:+.6e} W, through cold {q_cold:+.6e} W, radiated into the \
+             black cold wall {q_black:+.6e} W; in - out = {:+.3e} W (the run's convergence)",
+            q_hot + q_cold - q_black
+        ));
+    } else {
+        c.require("SPEC-LIT 98.9 Gate 98-C (a), (b): the radiationRelaxation 1 run completes", false);
+        misses.push("the radiationRelaxation 1 run failed, so (a) and (b) were not measured".to_string());
+    }
+    // (b) 3: the interface alone into the black closure
+    match gate_98c_run(gpu, "surround", 1.0, ADIABATIC) {
+        Ok(sur) => {
+            let faces = sur.enclosure.as_ref().map(|e| e.faces.clone()).unwrap_or_default();
+            let (mut worst, mut scale) = (0.0 as Scalar, 0.0 as Scalar);
+            let (mut lo, mut hi) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
+            for f in &faces {
+                let q = f.emissivity * (SIGMA_SB * f.t0 * f.t0 * f.t0 * f.t0 - f.irradiation);
+                let want = parallel_plate_flux(f.t0, t_amb, f.emissivity, 1.0);
+                let want_c = concentric_flux(f.t0, t_amb, f.emissivity, 1.0, 1.0 / 4.2);
+                worst = worst.max((q - want).abs()).max((q - want_c).abs());
+                scale = scale.max(want.abs());
+                lo = lo.min(f.t0);
+                hi = hi.max(f.t0);
+            }
+            let rel = worst / scale;
+            let line = format!(
+                "the interface alone into the black closure at {t_amb} K: {} faces, T0 in [{lo:.6}, \
+                 {hi:.6}] K, worst |q_r - parallel_plate_flux or concentric_flux| / max |q_r| \
+                 = {rel:.2e}; {} iterations, converged {}",
+                faces.len(), sur.iterations, sur.converged
+            );
+            c.note(&format!("  (b) {line}"));
+            detail.push(line);
+            c.check(
+                "SPEC-LIT 98.9 Gate 98-C (b): the interface into a black closure against parallel_plate_flux and concentric_flux, face by face, rel",
+                rel,
+                1.0e-10,
+            );
+            if !(rel <= 1.0e-10) || faces.is_empty() {
+                misses.push(format!("(b) closed form rel {rel:.2e} against 1e-10 over {} faces", faces.len()));
+            }
+        }
+        Err(err) => {
+            let line = format!("the surround run failed - {err}");
+            c.note(&format!("  (b) {line}"));
+            detail.push(line.clone());
+            c.require("SPEC-LIT 98.9 Gate 98-C (b): the surround run completes", false);
+            misses.push(line);
+        }
+    }
+    // (c)
+    let q1 = runs[0].1.as_ref().map(|s| s.patch_heat_flow(1, "hot")).transpose()?;
+    let mut spread: Scalar = 0.0;
+    for (_, s) in &runs {
+        if let (Some(s), Some(q1)) = (s.as_ref(), q1) {
+            if s.converged {
+                spread = spread.max((s.patch_heat_flow(1, "hot")? - q1).abs() / q1.abs());
+            }
+        }
+    }
+    let all = runs.iter().all(|(_, s)| s.as_ref().is_some_and(|s| s.converged));
+    c.note(&format!(
+        "  (c) the hot face's heat flow over the converged runs: spread {spread:.2e} of its value - \
+         three stopping points of one fixed point (SPEC-LIT 98.9)"
+    ));
+    c.require(
+        "SPEC-LIT 98.9 Gate 98-C (c): radiationRelaxation 1, 0.5 and 0.3 each converge within 4000 iterations",
+        all,
+    );
+    if !all {
+        misses.push("(c) not every radiationRelaxation converged within 4000 iterations".to_string());
+    }
+
+    if !misses.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 98.9 Gate 98-C enclosure with a running flow",
+            against: "the enclosure's own power balance, (S98.9), (S98.10), parallel_plate_flux and \
+                      concentric_flux, SPEC-LIT 98.9",
+            headline: misses.join("; "),
+            detail,
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one mesh: legs (a) and (b) are identities or closed forms in the run's own face \
+                 temperatures, exact at every iterate, and leg (c) counts iterations - there is no \
+                 discretisation error to extrapolate (SPEC-LIT 94.3)",
+            )),
+        });
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §100 - properties that are functions of temperature
+// ==========================================================================
+
+/// Gate 100-B's one verdict line (SPEC-LIT 100.4): every leg reports under
+/// the one gate name.
+fn report_gate_100b(
+    c: &mut Checks,
+    verdict: Verdict,
+    against: &'static str,
+    headline: String,
+    detail: Vec<String>,
+) {
+    c.report(GateReport {
+        verdict,
+        how: How::Live,
+        gate: "SPEC-LIT 100.4 Gate 100-B published property tables",
+        against,
+        headline,
+        detail,
+        uncertainty: Some(Uncertainty::SingleMesh(
+            "no mesh is run: the evaluator is compared with a printed table",
+        )),
+    });
+}
+
+/// The key `id`, its digest line noted - or `None` after the leg has
+/// reported its verdict as not comparable, by name (SPEC-LIT 10).
+fn gate_100b_key(c: &mut Checks, id: &str, against: &'static str) -> Option<key::KeyFile> {
+    match key::load(id) {
+        Ok(k) => {
+            c.note(&k.digest_line());
+            Some(k)
+        }
+        Err(why) => {
+            let why = why.to_string();
+            c.note(&why);
+            report_gate_100b(
+                c,
+                Verdict::Open,
+                against,
+                format!("answer key {id} is absent from reference/ or is not its digest, so the leg was not compared"),
+                vec![why],
+            );
+            None
+        }
+    }
+}
+
+/// A curve written in the case format's own JSON and lowered through it
+/// (SPEC-LIT 100.4): the parse, the validation and the evaluator are all on
+/// the gate's path.
+fn gate_100b_curve(json: &str, what: &str) -> Result<ofgpu::properties::Property> {
+    let curve: ofgpu::io::case_cht::ChtCurve = ofgpu::io::case_json::parse_jsonc_str(json, what)?;
+    curve.lower(what)
+}
+
+/// Gate 100-B leg 1 (SPEC-LIT 100.4): silicon. A table of Ho, Powell and
+/// Liley's five round-temperature values returns each to the bit, and at
+/// their four other printed temperatures in 300-600 K lies within the 5 %
+/// the source states.
+fn check_gate_100b_silicon(c: &mut Checks) -> Result<()> {
+    const AGAINST: &str =
+        "Ho, Powell and Liley (1972), J. Phys. Chem. Ref. Data 1, 279, p. 394: silicon, recommended values";
+    const WHAT: &str = "SPEC-LIT 100.4 Gate 100-B silicon";
+    // answer-key: ho-powell-liley1972-silicon
+    let Some(kf) = gate_100b_key(c, "ho-powell-liley1972-silicon", AGAINST) else {
+        return Ok(());
+    };
+    let (t, k, knot) = (kf.column("t")?, kf.column("k")?, kf.column("knot")?);
+    // W/(cm K) as printed; W/(m K) as a case writes it.
+    let wmk: Vec<f64> = k.iter().map(|x| 100.0 * x).collect();
+    let pairs: Vec<String> = (0..t.len())
+        .filter(|&i| knot[i] == 1.0)
+        .map(|i| format!("[{}, {}]", t[i], wmk[i]))
+        .collect();
+    let json = format!(r#"{{ "table": [{}] }}"#, pairs.join(", "));
+    c.note(&format!("  the curve, as a case writes it: {json}"));
+    let p = gate_100b_curve(&json, WHAT)?;
+    let mut worst: f64 = 0.0;
+    let mut knots_exact = true;
+    let mut detail = Vec::new();
+    for i in 0..t.len() {
+        let got = f64::from(p.value(WHAT, t[i] as Scalar)?);
+        let rel = (got / wmk[i] - 1.0).abs();
+        let at_knot = knot[i] == 1.0;
+        let line = format!(
+            "T = {:>5} K  k = {got:.4} W/(m K)  source {:.4}  rel {rel:.3e}  {}",
+            t[i],
+            wmk[i],
+            if at_knot { "knot" } else { "between knots" }
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+        if at_knot {
+            knots_exact &= got == wmk[i];
+        } else {
+            worst = worst.max(rel);
+        }
+    }
+    c.require("SPEC-LIT 100.4 Gate 100-B silicon: every knot returned to the bit", knots_exact);
+    c.check("SPEC-LIT 100.4 Gate 100-B silicon: worst rel between knots (5 %)", worst as Scalar, 0.05);
+    if !(knots_exact && worst <= 0.05) {
+        report_gate_100b(
+            c,
+            Verdict::Misses,
+            AGAINST,
+            format!("silicon: knots to the bit {knots_exact}, worst {:.2} % between them against 5 %", worst * 100.0),
+            detail,
+        );
+    }
+    Ok(())
+}
+
+/// One of Kadoya et al.'s constants tables (7 or 11), read by its
+/// `kind, index, value` rows: `T*`, `rho*`, the factor (`H` or `Lambda` in
+/// the printed unit), the temperature series `(exponent, coefficient)` and
+/// the density series `(power, coefficient)`.
+struct KadoyaEq {
+    t_star: f64,
+    rho_star: f64,
+    factor: f64,
+    temperature: Vec<(f64, f64)>,
+    density: Vec<(f64, f64)>,
+}
+
+fn kadoya_constants(kf: &key::KeyFile) -> Result<KadoyaEq> {
+    let (kind, index, value) = (kf.column("kind")?, kf.column("index")?, kf.column("value")?);
+    let pick = |i: f64| (0..kind.len()).find(|&r| kind[r] == 0.0 && index[r] == i).map(|r| value[r]);
+    let (Some(t_star), Some(rho_star), Some(factor)) = (pick(1.0), pick(2.0), pick(3.0)) else {
+        return Err(Error::Config(format!(
+            "answer key {}: T*, rho* or the factor is missing",
+            kf.id
+        )));
+    };
+    let series = |k: f64| -> Vec<(f64, f64)> {
+        (0..kind.len()).filter(|&r| kind[r] == k).map(|r| (index[r], value[r])).collect()
+    };
+    Ok(KadoyaEq { t_star, rho_star, factor, temperature: series(1.0), density: series(2.0) })
+}
+
+/// Gate 100-B leg 2 (SPEC-LIT 100.4): air. `eta_0` and `lambda_0` as
+/// (S100.3) curves from Tables 7 and 11, plus the paper's own density series
+/// at 0.1 MPa with the ideal-gas density at Table 3's `M`, against Tables 8
+/// and 12 at 0.10 MPa to half a printed digit plus 1e-3 of the density term.
+fn check_gate_100b_air(c: &mut Checks) -> Result<()> {
+    const AGAINST: &str =
+        "Kadoya, Matsunaga and Nagashima (1985), J. Phys. Chem. Ref. Data 14, 947, Tables 8 and 12 at 0.10 MPa";
+    // answer-key: kadoya1985-table-7
+    let Some(t7) = gate_100b_key(c, "kadoya1985-table-7", AGAINST) else { return Ok(()) };
+    // answer-key: kadoya1985-table-11
+    let Some(t11) = gate_100b_key(c, "kadoya1985-table-11", AGAINST) else { return Ok(()) };
+    // answer-key: kadoya1985-tables-8-12
+    let Some(tab) = gate_100b_key(c, "kadoya1985-tables-8-12", AGAINST) else { return Ok(()) };
+    let (visc, cond) = (kadoya_constants(&t7)?, kadoya_constants(&t11)?);
+    let (t, eta, lambda) = (tab.column("t")?, tab.column("eta")?, tab.column("lambda")?);
+    // 0.1 MPa; Table 3's M = 28.9644 kg/kmol; R = 8.314462618 J/(mol K).
+    let (p0, m_air, r_gas): (f64, f64, f64) = (0.1e6, 28.9644e-3, 8.314462618);
+    let mut detail = Vec::new();
+    let mut worst: f64 = 0.0;
+    for (name, eq, unit, printed) in
+        [("viscosity", &visc, 1.0e-6, &eta), ("thermal conductivity", &cond, 1.0e-3, &lambda)]
+    {
+        let exps: Vec<String> = eq.temperature.iter().map(|(e, _)| format!("{e}")).collect();
+        let coefs: Vec<String> = eq.temperature.iter().map(|(_, a)| format!("{a}")).collect();
+        let json = format!(
+            r#"{{ "polynomial": {{ "exponents": [{}], "pieces": [{{ "range": [85.0, 2000.0], "coefficients": [{}] }}], "scale": {}, "factor": {} }} }}"#,
+            exps.join(", "),
+            coefs.join(", "),
+            eq.t_star,
+            eq.factor * unit
+        );
+        c.note(&format!("  {name}, as a case writes it: {json}"));
+        let what = format!("SPEC-LIT 100.4 Gate 100-B air {name}");
+        let p = gate_100b_curve(&json, &what)?;
+        for i in 0..t.len() {
+            let rho_r = p0 * m_air / (r_gas * t[i]) / eq.rho_star;
+            // The density series, in the printed unit.
+            let excess: f64 =
+                eq.density.iter().map(|(n, b)| b * rho_r.powi(*n as i32)).sum::<f64>() * eq.factor;
+            let calc = f64::from(p.value(&what, t[i] as Scalar)?) / unit + excess;
+            let bound = 0.005 + 1.0e-3 * excess.abs();
+            let ratio = (calc - printed[i]).abs() / bound;
+            worst = worst.max(ratio);
+            let line = format!(
+                "{name}: T = {:>6} K  eq. {calc:.4}  printed {:.2}  |d|/bound {ratio:.3}",
+                t[i], printed[i]
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+        }
+    }
+    c.check(
+        "SPEC-LIT 100.4 Gate 100-B air: worst |eq. - printed| over half a printed digit",
+        worst as Scalar,
+        1.0,
+    );
+    if !(worst <= 1.0) {
+        report_gate_100b(
+            c,
+            Verdict::Misses,
+            AGAINST,
+            format!("air: the worst |eq. - printed| is {worst:.3} of half a printed digit"),
+            detail,
+        );
+    }
+    Ok(())
+}
+
+/// Gate 100-B leg 3 (SPEC-LIT 100.4): cp/R of N2, O2, Ar and Air as
+/// two-piece (S100.3) curves from Appendix D; `R cp/R` at 298.15 K against
+/// Table B1 to half its printed digit, and the two pieces equal at 1000 K to
+/// 1e-8 - the report's fit constraints (1) and (2).
+fn check_gate_100b_nasa(c: &mut Checks) -> Result<()> {
+    const AGAINST: &str =
+        "McBride, Zehe and Gordon, NASA/TP-2002-211556 (2002), eq. (1), Appendix D and Table B1";
+    // answer-key: nasa-glenn2002-coefficients
+    let Some(co) = gate_100b_key(c, "nasa-glenn2002-coefficients", AGAINST) else { return Ok(()) };
+    // answer-key: nasa-glenn2002-table-B1
+    let Some(b1) = gate_100b_key(c, "nasa-glenn2002-table-B1", AGAINST) else { return Ok(()) };
+    // The report's Appendix A.
+    let r_gas: f64 = 8.314510;
+    let names = ["N2", "O2", "Ar", "Air"];
+    let (sp, lo, hi) = (co.column("species")?, co.column("t_lo")?, co.column("t_hi")?);
+    let a: Vec<Vec<f64>> = (1..=7).map(|j| co.column(&format!("a{j}"))).collect::<Result<_>>()?;
+    let (bs, bcp) = (b1.column("species")?, b1.column("cp_298")?);
+    let piece = |r: usize| {
+        let cs: Vec<String> = (0..7).map(|j| format!("{}", a[j][r])).collect();
+        format!(r#"{{ "range": [{}, {}], "coefficients": [{}] }}"#, lo[r], hi[r], cs.join(", "))
+    };
+    let curve = |pieces: String| {
+        format!(r#"{{ "polynomial": {{ "exponents": [-2, -1, 0, 1, 2, 3, 4], "pieces": [{pieces}] }} }}"#)
+    };
+    let (mut worst_298, mut worst_1000): (f64, f64) = (0.0, 0.0);
+    let mut detail = Vec::new();
+    for (s, name) in names.iter().enumerate() {
+        let code = (s + 1) as f64;
+        let rows: Vec<usize> = (0..sp.len()).filter(|&r| sp[r] == code).collect();
+        let (2, Some(rb)) = (rows.len(), (0..bs.len()).find(|&r| bs[r] == code)) else {
+            return Err(Error::Config(format!(
+                "answer key {}: species {name} needs two intervals and a Table B1 row",
+                co.id
+            )));
+        };
+        let what = format!("SPEC-LIT 100.4 Gate 100-B cp/R {name}");
+        let both = gate_100b_curve(&curve(format!("{}, {}", piece(rows[0]), piece(rows[1]))), &what)?;
+        let upper = gate_100b_curve(&curve(piece(rows[1])), &what)?;
+        let cp298 = r_gas * f64::from(both.value(&what, 298.15 as Scalar)?);
+        let d298 = (cp298 - bcp[rb]).abs();
+        let at_lo = f64::from(both.value(&what, 1000.0 as Scalar)?);
+        let at_hi = f64::from(upper.value(&what, 1000.0 as Scalar)?);
+        let d1000 = (at_lo / at_hi - 1.0).abs();
+        worst_298 = worst_298.max(d298);
+        worst_1000 = worst_1000.max(d1000);
+        let line = format!(
+            "{name}: Cp(298.15) = {cp298:.6} J/(K mol), Table B1 {:.3}, |d| {d298:.2e}; \
+             cp/R at 1000 K {at_lo:.10} below, {at_hi:.10} above, rel {d1000:.2e}",
+            bcp[rb]
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    c.check(
+        "SPEC-LIT 100.4 Gate 100-B cp/R: worst |Cp(298.15) - Table B1|, J/(K mol)",
+        worst_298 as Scalar,
+        5.0e-4,
+    );
+    c.check(
+        "SPEC-LIT 100.4 Gate 100-B cp/R: worst rel jump between the pieces at 1000 K",
+        worst_1000 as Scalar,
+        1.0e-8,
+    );
+    if !(worst_298 <= 5.0e-4 && worst_1000 <= 1.0e-8) {
+        report_gate_100b(
+            c,
+            Verdict::Misses,
+            AGAINST,
+            format!(
+                "cp/R: worst |Cp(298.15) - Table B1| {worst_298:.2e} J/(K mol) against 5e-4, \
+                 worst jump at 1000 K {worst_1000:.2e} against 1e-8"
+            ),
+            detail,
+        );
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT §100.8 - Gate 100-A, the Kirchhoff slab
+// ==========================================================================
+
+/// Gate 100-A's `kappa(T)` (SPEC-LIT 100.8): the two knots of its table,
+/// `(T, kappa)`, K and W/(m K).
+const K100A: [(f64, f64); 2] = [(250.0, 1.2), (550.0, 0.6)];
+/// Gate 100-A's slab thickness, m, and its two wall temperatures, K.
+const L100A: f64 = 0.02;
+const T1_100A: f64 = 500.0;
+const T2_100A: f64 = 300.0;
+
+/// The table's slope `s`, W/(m K^2).
+fn s100a() -> f64 {
+    let ((ta, ka), (tb, kb)) = (K100A[0], K100A[1]);
+    (kb - ka) / (tb - ta)
+}
+
+/// `kappa(T)` of the gate's table - linear, so (S100.8)-(S100.10) are exact.
+fn k100a(t: f64) -> f64 {
+    K100A[0].1 + (t - K100A[0].0) * s100a()
+}
+
+/// (S100.8): Kirchhoff's potential `psi(T) = int_T2^T kappa`, W/m.
+fn psi100a(t: f64) -> f64 {
+    let w = t - T2_100A;
+    k100a(T2_100A) * w + 0.5 * s100a() * w * w
+}
+
+/// (S100.8) inverted, in the form with no cancellation.
+fn t_of_psi100a(psi: f64) -> f64 {
+    let (k2, s) = (k100a(T2_100A), s100a());
+    T2_100A + 2.0 * psi / (k2 + (k2 * k2 + 2.0 * s * psi).sqrt())
+}
+
+/// (S100.9): the exact temperature at `x`, m from the hot wall.
+fn t_exact100a(x: f64) -> f64 {
+    t_of_psi100a(psi100a(T1_100A) * (1.0 - x / L100A))
+}
+
+/// (S100.10): the exact volume-mean temperature, K.
+fn t_mean100a() -> f64 {
+    let (k2, s, t2) = (k100a(T2_100A), s100a(), T2_100A);
+    let f = |t: f64| k2 * t * t / 2.0 + s * (t * t * t / 3.0 - t2 * t * t / 2.0);
+    (f(T1_100A) - f(T2_100A)) / psi100a(T1_100A)
+}
+
+/// Gate 100-A's slab as a case document (SPEC-LIT 100.8): `nx` cells across
+/// 20 mm, `hot` held at 500 K and `face` at 300 K, the four side faces
+/// adiabatic, `kappa` the table of `K100A`, started at 500 K; the outer loop
+/// states `tolerance 1e-13` so leg 1 is taken at the discrete fixed point.
+fn gate_100a_slab(nx: usize) -> String {
+    let ((ta, ka), (tb, kb)) = (K100A[0], K100A[1]);
+    format!(
+        r#"{{
+  "name": "gate100aSlab",
+  "regions": [
+    {{
+      "name": "slab",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [{L100A}, 0.01, 0.01] }},
+        "cells": [{nx}, 1, 1],
+        "boundaries": {{
+          "xmin": "hot", "xmax": "face",
+          "ymin": "s1", "ymax": "s2", "zmin": "s3", "zmax": "s4"
+        }}
+      }},
+      "material": {{ "rho": 2000.0, "c": 800.0,
+                    "kappa": {{ "table": [[{ta:?}, {ka:?}], [{tb:?}, {kb:?}]] }} }},
+      "patches": [
+        {{ "match": "hot",  "T": {{ "type": "fixedValue", "value": {T1_100A:?} }} }},
+        {{ "match": "face", "T": {{ "type": "fixedValue", "value": {T2_100A:?} }} }},
+        {{ "match": "s1", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s2", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s3", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "s4", "T": {{ "type": "zeroGradient" }} }}
+      ]
+    }}
+  ],
+  "initial": {{ "T": {T1_100A:?} }},
+  "run": {{ "steady": true }},
+  "numerics": {{
+    "solver": "PCG", "preconditioner": "DIC",
+    "tolerance": 1e-30, "maxIter": 4000,
+    "outer": {{ "tolerance": 1e-13, "maxOuter": 60 }}
+  }}
+}}"#
+    )
+}
+
+/// Gate 100-A (SPEC-LIT 100.8): the Kirchhoff slab on three meshes. Leg 1,
+/// transformed: `psi` of every face temperature against (S100.9), and the
+/// heat flow against `psi_1 / L`, to 1e-12. Leg 2, untransformed: the mean
+/// temperature against (S100.10) inside §94's band on the finest mesh, at
+/// an observed order within 0.2 of 2.
+fn check_kirchhoff_slab(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::run_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let psi1 = psi100a(T1_100A);
+    let t_mean = t_mean100a();
+    c.note(&format!(
+        "  (S100.8)-(S100.10): psi_1 = {psi1:.12} W/m, q = psi_1/L = {:.9} W/m^2, \
+         T_mean = {t_mean:.12} K",
+        psi1 / L100A
+    ));
+    let mut levels = Vec::new();
+    let (mut worst_psi, mut worst_q) = (0.0f64, 0.0f64);
+    let mut nodal: Vec<f64> = Vec::new();
+    let mut detail = Vec::new();
+
+    for nx in [20usize, 40, 80] {
+        let low = parse_cht_case(&gate_100a_slab(nx), "SPEC-LIT 100.8 Gate 100-A")?.lower()?;
+        let sol = run_case(gpu, &low)?;
+        let h = &sol.mesh.host;
+        // Leg 1: every face temperature, transformed (SPEC-LIT 100.8).
+        let mut w_psi = 0.0f64;
+        for f in 0..h.n_internal_faces {
+            let (o, n) = (h.owner[f] as usize, h.neighbour[f] as usize);
+            let (tp, tn) = (f64::from(sol.t[o]), f64::from(sol.t[n]));
+            let (kp, kn) = (k100a(tp), k100a(tn));
+            let tf = (kp * tp + kn * tn) / (kp + kn);
+            let x = f64::from(h.cf[f].x);
+            w_psi = w_psi.max((psi100a(tf) - psi1 * (1.0 - x / L100A)).abs() / psi1);
+        }
+        for patch in ["hot", "face"] {
+            for bf in sol.mesh.patch_range(0, patch)? {
+                let x = f64::from(h.b_cf[bf].x);
+                let tb = f64::from(sol.bt[bf]);
+                w_psi = w_psi.max((psi100a(tb) - psi1 * (1.0 - x / L100A)).abs() / psi1);
+            }
+        }
+
+        let area: f64 = sol.mesh.patch_range(0, "hot")?.map(|bf| f64::from(h.b_mag_sf[bf])).sum();
+        let q = f64::from(sol.patch_heat_flow(0, "hot")?) / area;
+        let rel_q = (q * L100A / psi1 - 1.0).abs();
+        // Leg 2: the mean temperature, untransformed.
+        let mean = f64::from(sol.region_mean(0));
+        let e_nodal = (0..h.n_cells)
+            .map(|k| (f64::from(sol.t[k]) - t_exact100a(f64::from(h.c[k].x))).abs())
+            .fold(0.0f64, f64::max);
+        levels.push(vv::Level { h: (L100A / nx as f64) as Scalar, value: mean as Scalar });
+        let line = format!(
+            "nx={nx:>3} passes={:>2} last change={:.3e} psi(T_f) rel={w_psi:.3e} \
+             |qL/psi_1 - 1|={rel_q:.3e} T_mean={mean:.12} K max|T_c - T(x_c)|={e_nodal:.3e} K",
+            sol.outer_changes.len(),
+            sol.outer_changes.last().map_or(0.0, |d| f64::from(*d))
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+        worst_psi = worst_psi.max(w_psi);
+        worst_q = worst_q.max(rel_q);
+        nodal.push(e_nodal);
+    }
+
+    // The study reads the FINEST level first.
+    levels.reverse();
+    let study = vv::grid_study(&levels)?;
+    c.note(&format!("  mean temperature: {}", study.one_line()));
+    let val = vv::validation(levels[0].value, t_mean as Scalar, study.u_fine, 0.0, 0.0);
+    c.note(&format!("  {}", val.one_line("mean temperature, finest mesh")));
+    c.note(&format!(
+        "  max nodal error ratios per halving: {:.3} {:.3} (second order is 4)",
+        nodal[0] / nodal[1],
+        nodal[1] / nodal[2]
+    ));
+    let e_over_u = if study.u_fine > 0.0 {
+        f64::from(val.e).abs() / f64::from(study.u_fine)
+    } else {
+        f64::INFINITY
+    };
+    let p = study.p.map_or(f64::NAN, f64::from);
+
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: psi(T_f) against (S100.9), worst rel over every face of three meshes",
+        worst_psi as Scalar,
+        1.0e-12,
+    );
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: the heat flow q L against psi_1, worst rel over three meshes",
+        worst_q as Scalar,
+        1.0e-12,
+    );
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: |E| / U_fine of the mean temperature, finest mesh (SPEC-LIT 94)",
+        e_over_u as Scalar,
+        1.0,
+    );
+    c.check(
+        "SPEC-LIT 100.8 Gate 100-A: |p - 2| of the mean temperature",
+        (p - 2.0).abs() as Scalar,
+        0.2,
+    );
+    let ok = worst_psi <= 1.0e-12 && worst_q <= 1.0e-12 && e_over_u <= 1.0 && (p - 2.0).abs() <= 0.2;
+    if !ok {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 100.8 Gate 100-A Kirchhoff slab",
+            against: "Kirchhoff's transform of a slab with kappa linear in T, (S100.8)-(S100.10), SPEC-LIT 100.8",
+            headline: format!(
+                "psi(T_f) rel {worst_psi:.2e}, |qL/psi_1 - 1| {worst_q:.2e} (1e-12 each); mean T \
+                 |E|/U_fine {e_over_u:.3}, p = {p:.3}"
+            ),
+            detail,
+            uncertainty: Some(Uncertainty::Study(study)),
+        });
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 100.8: Gate 100-A's closed forms, held against themselves and
+/// against a quadrature - no GPU.
+#[cfg(test)]
+mod kirchhoff_100a {
+    use super::*;
+
+    #[test]
+    fn the_kirchhoff_closed_forms_invert_meet_their_walls_and_integrate_to_the_mean() {
+        assert!((k100a(300.0) - 1.1).abs() <= 1e-15, "kappa(300 K) = {}", k100a(300.0));
+        assert!((k100a(500.0) - 0.7).abs() <= 1e-15, "kappa(500 K) = {}", k100a(500.0));
+        assert!((psi100a(T1_100A) - 180.0).abs() <= 1e-12, "psi_1 = {}", psi100a(T1_100A));
+        for i in 0..=16 {
+            let t = T2_100A + (T1_100A - T2_100A) * i as f64 / 16.0;
+            let back = t_of_psi100a(psi100a(t));
+            assert!((back - t).abs() <= 1e-12 * t, "T = {t}: the inverse returns {back}");
+        }
+        assert!((t_exact100a(0.0) - T1_100A).abs() <= 1e-12, "T(0) = {}", t_exact100a(0.0));
+        assert!((t_exact100a(L100A) - T2_100A).abs() <= 1e-12, "T(L) = {}", t_exact100a(L100A));
+        let n = 20_000usize;
+        let mid: f64 = (0..n)
+            .map(|i| t_exact100a(L100A * (i as f64 + 0.5) / n as f64))
+            .sum::<f64>()
+            / n as f64;
+        println!("T_mean = {:.12}, midpoint quadrature {mid:.12}", t_mean100a());
+        assert!((t_mean100a() - 10600.0 / 27.0).abs() <= 1e-10, "T_mean = {}", t_mean100a());
+        assert!((mid - t_mean100a()).abs() <= 1e-6, "quadrature {mid} against {}", t_mean100a());
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT §100.15 - Gates 100-C and 100-D: viscous dissipation, and mu(T)
+// ==========================================================================
+
+/// (S100.15): the rise across a plane Poiseuille channel with both walls
+/// held, at `Br = 1`, K, at `s = y/H`.
+fn brinkman_held(s: f64) -> f64 {
+    0.75 * (1.0 - (1.0 - 2.0 * s).powi(4))
+}
+
+/// (S100.16): the same channel with its top wall adiabatic.
+fn brinkman_adiabatic(s: f64) -> f64 {
+    6.0 * s + 0.75 * (1.0 - (1.0 - 2.0 * s).powi(4))
+}
+
+/// Gate 100-C's channel as a case document (SPEC-LIT 100.15): `H = 1`
+/// across in `ny` cells, `L = 20` along in `5 ny + 1`, one cell deep; unit
+/// properties at `U_m = 1`, so `Br = 1`; `bottom` held at 300 K and `top`
+/// the case's `T`; viscous dissipation on.
+fn gate_100c_channel(ny: usize, top: &str) -> String {
+    let nx = 5 * ny + 1;
+    format!(
+        r#"{{
+  "name": "brinkmanChannel",
+  "regions": [
+    {{ "name": "fluid", "kind": "fluid",
+      "mesh": {{ "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [20.0, 1.0, 0.1] }}, "cells": [{nx}, {ny}, 1],
+        "boundaries": {{ "xmin": "inlet", "xmax": "outlet", "ymin": "bottom", "ymax": "top",
+                         "zmin": "front", "zmax": "back" }} }},
+      "fluid": {{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 1.0, "viscousDissipation": true }},
+      "patches": [
+        {{ "match": "inlet", "kind": "inlet", "U": [1.0, 0.0, 0.0], "T": {{ "type": "fixedValue", "value": 300.0 }} }},
+        {{ "match": "outlet", "kind": "outlet", "T": {{ "type": "inletOutlet", "inletValue": 300.0 }} }},
+        {{ "match": "bottom", "T": {{ "type": "fixedValue", "value": 300.0 }} }},
+        {{ "match": "top", "T": {top} }},
+        {{ "match": "front", "T": {{ "type": "empty" }} }},
+        {{ "match": "back", "T": {{ "type": "empty" }} }}
+      ] }}
+  ],
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": 4000 }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-16, "maxIter": 500,
+    "flow": {{ "relaxU": 0.7, "relaxP": 0.3, "relaxT": 1.0,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear", "residual": 1e-9,
+      "uTolerance": 1e-14, "pTolerance": 1e-14, "uMaxIter": 200, "pMaxIter": 800 }}
+  }}
+}}"#
+    )
+}
+
+/// What one Gate 100-C level measured (SPEC-LIT 100.15).
+struct BrinkmanRun {
+    /// The volume mean of `T - 300` over the middle third, K.
+    rise: Scalar,
+    /// The largest deviation from the closed form in the column centred on
+    /// `x = L/2`, over the closed form's largest rise.
+    profile: Scalar,
+    phi: Scalar,
+    /// `|(enthalpy out - heat conducted in) / SUM Phi V - 1|`.
+    balance: Scalar,
+    iterations: usize,
+    converged: bool,
+}
+
+fn gate_100c_run(gpu: &Gpu, ny: usize, top: &str, exact: fn(f64) -> f64) -> Result<BrinkmanRun> {
+    use ofgpu::cht::flow::run_flow_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+    let low = parse_cht_case(&gate_100c_channel(ny, top), "SPEC-LIT 100.15 Gate 100-C")?.lower()?;
+    let case = low
+        .flow_case()
+        .ok_or_else(|| Error::Config("Gate 100-C: the channel did not lower to a conjugate case".to_string()))?;
+    let sol = run_flow_case(gpu, &case)?;
+    let hm = &sol.mesh.host;
+    let (mut num, mut den) = (0.0 as Scalar, 0.0 as Scalar);
+    let (mut worst, mut top_rise) = (0.0 as Scalar, 0.0 as Scalar);
+    let dx = 20.0 / (5 * ny + 1) as Scalar;
+    for c in 0..hm.n_cells {
+        let p = hm.c[c];
+        if p.x >= 20.0 / 3.0 && p.x <= 40.0 / 3.0 {
+            num += (sol.t[c] - 300.0) * hm.v[c];
+            den += hm.v[c];
+        }
+        if (p.x - 10.0).abs() < 0.5 * dx {
+            let want = exact(f64::from(p.y)) as Scalar;
+            worst = worst.max((sol.t[c] - 300.0 - want).abs());
+            top_rise = top_rise.max(want);
+        }
+    }
+    let o = sol
+        .openings
+        .as_ref()
+        .ok_or_else(|| Error::Config("Gate 100-C: the channel has no openings".to_string()))?;
+    let mut conducted = 0.0 as Scalar;
+    for p in ["inlet", "outlet", "bottom", "top"] {
+        conducted += sol.patch_heat_flow(0, p)?;
+    }
+    Ok(BrinkmanRun {
+        rise: num / den,
+        profile: worst / top_rise,
+        phi: sol.dissipation_power,
+        balance: ((o.enthalpy_rise - conducted) / sol.dissipation_power - 1.0).abs(),
+        iterations: sol.iterations,
+        converged: sol.converged,
+    })
+}
+
+/// Gate 100-C (SPEC-LIT 100.15): Brinkman's plane Poiseuille with viscous
+/// heating, both walls held and then the top adiabatic, three meshes each -
+/// the middle third's mean rise and the centre column's profile against
+/// (S100.15) and (S100.16) to 1 % on the finest, SPEC-LIT 94's study beside
+/// them, and every watt of Phi out through the walls and the openings to
+/// 1e-6 on every mesh.
+fn check_brinkman_channel(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    const HELD: &str = r#"{ "type": "fixedValue", "value": 300.0 }"#;
+    const ADIABATIC: &str = r#"{ "type": "zeroGradient" }"#;
+    let variants: [(&str, &str, f64, fn(f64) -> f64); 2] =
+        [("both walls held", HELD, 0.6, brinkman_held), ("top adiabatic", ADIABATIC, 3.6, brinkman_adiabatic)];
+    let mut detail: Vec<String> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+    let mut studies = Vec::new();
+    for (name, top, mean, exact) in variants {
+        let mean = mean as Scalar;
+        let mut levels = Vec::new();
+        let mut last: Option<BrinkmanRun> = None;
+        for ny in [8usize, 16, 32] {
+            let r = gate_100c_run(gpu, ny, top, exact)?;
+            let rel = (r.rise / mean - 1.0).abs();
+            let line = format!(
+                "{name}, ny = {ny}: mean rise {:.8} K against {mean} K, rel {rel:.3e}; profile {:.3e}; \
+                 Phi {:.6e} W, balance {:.2e}; {} iterations, converged {}",
+                r.rise, r.profile, r.phi, r.balance, r.iterations, r.converged
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+            c.require(&format!("SPEC-LIT 100.15 Gate 100-C ({name}, ny = {ny}): the channel converges"), r.converged);
+            c.check(
+                &format!("SPEC-LIT 100.15 Gate 100-C ({name}, ny = {ny}): SUM Phi V out through the walls and openings, rel"),
+                r.balance,
+                1.0e-6,
+            );
+            if !r.converged || !(r.balance <= 1.0e-6) {
+                misses.push(format!("{name}, ny = {ny}: converged {}, balance {:.2e}", r.converged, r.balance));
+            }
+            levels.push(vv::Level { h: 1.0 / ny as Scalar, value: r.rise });
+            last = Some(r);
+        }
+        let fine = last.expect("three levels");
+        let rel = (fine.rise / mean - 1.0).abs();
+        levels.reverse();
+        let study = vv::grid_study(&levels)?;
+        c.note(&format!("  {name}, the mean rise: {}", study.one_line()));
+        c.check(
+            &format!("SPEC-LIT 100.15 Gate 100-C ({name}): the mean rise on the finest mesh, rel to the closed form"),
+            rel,
+            1.0e-2,
+        );
+        c.check(
+            &format!("SPEC-LIT 100.15 Gate 100-C ({name}): the centre column's profile on the finest mesh, rel"),
+            fine.profile,
+            1.0e-2,
+        );
+        if !(rel <= 1.0e-2) || !(fine.profile <= 1.0e-2) {
+            misses.push(format!("{name}: mean rise {:.3} %, profile {:.3} % against 1 %", rel * 100.0, fine.profile * 100.0));
+        }
+        studies.push(study);
+    }
+    if !misses.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 100.15 Gate 100-C Brinkman plane Poiseuille",
+            against: "Brinkman's fully developed plane Poiseuille with viscous heating, (S100.15) and (S100.16), SPEC-LIT 100.15",
+            headline: misses.join("; "),
+            detail,
+            uncertainty: Some(Uncertainty::Study(studies.remove(0))),
+        });
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 100.15: Gate 100-C's closed forms meet their walls, carry
+/// `k theta'' = -Phi`, and integrate to their means - no GPU, in f64.
+#[cfg(test)]
+mod brinkman_100c {
+    use super::*;
+
+    #[test]
+    fn the_brinkman_closed_forms_meet_their_walls_and_integrate_to_their_means() {
+        let phi = |s: f64| 36.0 * (1.0 - 2.0 * s).powi(2);
+        assert_eq!(brinkman_held(0.0), 0.0);
+        assert!(brinkman_held(1.0).abs() <= 1e-15, "held at the top: {}", brinkman_held(1.0));
+        assert_eq!(brinkman_adiabatic(0.0), 0.0);
+        let h = 1.0e-4;
+        let slope = (brinkman_adiabatic(1.0 + h) - brinkman_adiabatic(1.0 - h)) / (2.0 * h);
+        assert!(slope.abs() <= 1e-6, "the adiabatic wall's slope is {slope}");
+        for f in [brinkman_held as fn(f64) -> f64, brinkman_adiabatic] {
+            for s in [0.1, 0.37, 0.5, 0.81] {
+                let h = 1.0e-3;
+                let second = (f(s + h) - 2.0 * f(s) + f(s - h)) / (h * h);
+                assert!((second + phi(s)).abs() <= 1e-4 * phi(0.0), "k theta'' + Phi = {} at s = {s}", second + phi(s));
+            }
+        }
+        let n = 1000usize;
+        let simpson = |f: fn(f64) -> f64| -> f64 {
+            let h = 1.0 / n as f64;
+            (0..=n)
+                .map(|i| {
+                    let w = if i == 0 || i == n { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
+                    w * f(i as f64 * h)
+                })
+                .sum::<f64>()
+                * h
+                / 3.0
+        };
+        assert!((simpson(brinkman_held) - 0.6).abs() <= 1e-10, "held mean {}", simpson(brinkman_held));
+        assert!((simpson(brinkman_adiabatic) - 3.6).abs() <= 1e-10, "adiabatic mean {}", simpson(brinkman_adiabatic));
+    }
+}
+
+/// SPEC-LIT 100.15 Disclosure 3: liquid water's dynamic viscosity at
+/// 0.1 MPa, Pa s, from 10 to 80 C - standard tabulated values, as the CRC
+/// Handbook tabulates them from the IAPWS 2008 formulation. Transcribed and
+/// not keyed: Gate 100-D compares no viscosity against anything.
+const QM_MU_WATER: &str = r#"{ "table": [[283.15, 1.3059e-3], [293.15, 1.0016e-3], [303.15, 0.7972e-3],
+  [313.15, 0.6527e-3], [323.15, 0.5465e-3], [333.15, 0.4660e-3], [343.15, 0.4035e-3], [353.15, 0.3544e-3]] }"#;
+
+/// Gate 6's document with the water's `mu` the table of Disclosure 3.
+fn qm_document_mu_t(nx: usize, ny: [usize; 3], nz: [usize; 3]) -> Result<String> {
+    let text = qm_document(nx, ny, nz);
+    let from = format!(r#""mu": {QM_MU}"#);
+    if text.matches(&from).count() != 1 {
+        return Err(Error::Config(format!("Gate 100-D: '{from}' is not in Gate 6's document exactly once")));
+    }
+    Ok(text.replace(&from, &format!(r#""mu": {QM_MU_WATER}"#)))
+}
+
+/// Gate 100-D (SPEC-LIT 100.15): Gate 6 with the water's `mu(T)` live - its
+/// two live levels again, each converged and closing §79.7's identities with
+/// Gate 6's bars; the coarse level with the number too, the curve required to
+/// move `R_t,out`; the finer level's resistances inside Kawano et al.'s bars.
+/// The movement against SPEC-LIT 79.12's constant-mu rows is printed.
+fn check_qm_viscosity(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    let levels: [(usize, [usize; 3], [usize; 3]); 2] =
+        [(40, [2, 6, 2], [8, 14, 14]), (60, [3, 9, 3], [12, 21, 21])];
+    let mut detail: Vec<String> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+    let mut fine: Option<QmRun> = None;
+    for (k, (nx, ny, nz)) in levels.into_iter().enumerate() {
+        let r = run_qm_document(gpu, &qm_document_mu_t(nx, ny, nz)?)?;
+        let (d_in, d_out) = QM_LEVELS
+            .iter()
+            .find(|(cells, _, _)| *cells == r.cells)
+            .map_or((Scalar::NAN, Scalar::NAN), |&(_, a, b)| (100.0 * (r.r_in / a - 1.0), 100.0 * (r.r_out / b - 1.0)));
+        let line = format!(
+            "{} cells, mu(T) live: R_t,in = {:.5}, R_t,out = {:.5} C cm^2/W ({d_in:+.3} %, {d_out:+.3} % against \
+             SPEC-LIT 79.12's constant-mu row); T_w,in = {:.2} C, T_w,out = {:.2} C; {} iterations, converged {}",
+            r.cells,
+            f64::from(r.r_in),
+            f64::from(r.r_out),
+            f64::from(r.t_w_in) - 273.15,
+            f64::from(r.t_w_out) - 273.15,
+            r.iterations,
+            r.converged
+        );
+        c.note(&format!("  {line}"));
+        detail.push(line);
+        c.require(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): converged on its own residual", r.cells), r.converged);
+        c.check(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): §79.7 the two opening fluxes cancel", r.cells), r.mass_imbalance, 1e-10);
+        c.check(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): §79.7 the flow carries out the 0.9 W", r.cells), r.enthalpy_gap, 1e-3);
+        c.check(&format!("SPEC-LIT 100.15 Gate 100-D ({} cells): §79.7 identity (79.10)", r.cells), r.bulk_gap, 1e-2);
+        if !r.converged || !(r.mass_imbalance <= 1e-10) || !(r.enthalpy_gap <= 1e-3) || !(r.bulk_gap <= 1e-2) {
+            misses.push(format!("{} cells: converged {}, or a §79.7 identity open", r.cells, r.converged));
+        }
+        if k == 0 {
+            // SPEC-LIT 13.4.1: the same level with the number - the curve must move the answer.
+            let r0 = run_qm_document(gpu, &qm_document(nx, ny, nz))?;
+            let moved = (r.r_out - r0.r_out) / r0.r_out;
+            let line = format!(
+                "{} cells, the number against the curve: R_t,out {:.6} -> {:.6}, {:+.3e} of it",
+                r.cells,
+                f64::from(r0.r_out),
+                f64::from(r.r_out),
+                f64::from(moved)
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+            c.require("SPEC-LIT 100.15 Gate 100-D: the mu(T) curve moves R_t,out (SPEC-LIT 13.4.1)", moved.abs() > 1e-9);
+            if !(moved.abs() > 1e-9) {
+                misses.push("the curve did not move R_t,out".to_string());
+            }
+        }
+        fine = Some(r);
+    }
+    let fine = fine.expect("two levels");
+    let names = ["R_t,in (Fig. 4b)", "R_t,out (Fig. 4c)"];
+    let mine = [fine.r_in, fine.r_out];
+    for (k, (meas, lo, hi, _)) in QM_FIG4.iter().copied().enumerate() {
+        let ok = mine[k] >= lo as Scalar && mine[k] <= hi as Scalar;
+        c.require(&format!("SPEC-LIT 100.15 Gate 100-D: {} with mu(T) inside Kawano et al.'s error bar", names[k]), ok);
+        c.note(&format!("    {}: {:.4} against Kawano {meas} [{lo}, {hi}]", names[k], f64::from(mine[k])));
+        if !ok {
+            misses.push(format!("{} = {:.4} outside [{lo}, {hi}]", names[k], f64::from(mine[k])));
+        }
+    }
+    c.note(
+        "  Gate 100-D's inlet speed is Gate 6's (Re = 140 with the inlet mu), so the mass flow is Gate 6's and \
+         what moved is the viscosity's distribution. SPEC-LIT 79.12's Disclosure 2 - R_t,out 0.235 -> about \
+         0.27 - is a different change, mu at the mean fluid temperature inside Re at a fixed Re, which cuts the \
+         mass flow by a fifth; this gate does not make it. The direction of the movement is measured; its size \
+         is held against no published viscosity (Disclosure 3, SPEC-LIT 100.15).",
+    );
+    if !misses.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "SPEC-LIT 100.15 Gate 100-D Qu & Mudawar with mu(T)",
+            against: "Kawano et al.'s R_t,in and R_t,out as Qu & Mudawar Fig. 4 renders them (the qu-mudawar2002 rows, unchanged), SPEC-LIT 100.15",
+            headline: misses.join("; "),
+            detail,
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "two live levels; the mesh study of this micro-channel is Gate 6's, SPEC-LIT 79.12, whose four \
+                 levels were run with the number (SPEC-LIT 94.3)",
+            )),
+        });
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  SPEC-LIT §97 - the imported region
 // ==========================================================================
 
@@ -18658,9 +21670,9 @@ fn check_imported_region(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 
     let mut case_b = case.clone();
     for r in &mut case_b.regions {
-        r.mesh = ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
+        r.mesh = Some(ChtRegionMesh::PolyMesh(ChtPolyMeshRef {
             poly_mesh: format!("{}/polyMesh", r.name),
-        });
+        }));
     }
     let low_b = case_b.lower_in(Some(&dir))?;
     for (i, name) in low_a.region_names.iter().enumerate() {
@@ -18828,7 +21840,8 @@ mod gate_parent {
 
     /// The map, at the source level: every gate literal this file reports a
     /// verdict with has an `enter_gate` call spelling the very
-    /// same string. 13 occurrences, 12 distinct - one gate reports twice.
+    /// same string. 34 occurrences, 30 distinct - two gates report twice,
+    /// and SPEC-LIT 110's three gates each report through one helper.
     /// The Y set also picks up one junk entry from this test's own scanner
     /// line; that is harmless, because only the subset direction is asserted.
     #[test]
@@ -18853,9 +21866,9 @@ mod gate_parent {
                 from = start;
             }
         }
-        assert_eq!(reported.len(), 13, "13 gate literals, found {reported:?}");
+        assert_eq!(reported.len(), 34, "34 gate literals, found {reported:?}");
         let distinct: std::collections::HashSet<&str> = reported.iter().copied().collect();
-        assert_eq!(distinct.len(), 12, "12 distinct names, got {distinct:?}");
+        assert_eq!(distinct.len(), 30, "30 distinct names, got {distinct:?}");
         let scope_set: std::collections::HashSet<&str> = scopes.iter().copied().collect();
         for name in &distinct {
             assert!(
@@ -18863,5 +21876,1231 @@ mod gate_parent {
                 "no enter_gate scope spells the reported gate {name:?}"
             );
         }
+    }
+}
+
+/// Gate 97-B document A: both regions carry the block mesh, and the one
+/// interface is explicit (SPEC-LIT 97.10).
+const GATE_97B_DOC_A: &str = r#"{
+  "name": "gate97b",
+  "regions": [
+    {
+      "name": "lower",
+      "mesh": { "bounds": { "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0] }, "cells": [4, 4, 4],
+                "boundaries": { "xmin":"xmin","xmax":"xmax","ymin":"ymin","ymax":"ymax","zmin":"zmin","zmax":"lower_to_upper" } },
+      "material": { "rho": 2330.0, "c": 700.0, "kappa": 148.0 },
+      "patches": [
+        { "match": "zmin", "T": { "type": "fixedValue", "value": 380.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    },
+    {
+      "name": "upper",
+      "mesh": { "bounds": { "min": [0.0, 0.0, 1.0], "max": [1.0, 1.0, 2.0] }, "cells": [4, 4, 4],
+                "boundaries": { "xmin":"xmin","xmax":"xmax","ymin":"ymin","ymax":"ymax","zmin":"upper_to_lower","zmax":"zmax" } },
+      "material": { "rho": 8960.0, "c": 385.0, "kappa": 400.0 },
+      "patches": [
+        { "match": "zmax", "T": { "type": "fixedValue", "value": 300.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    }
+  ],
+  "interfaces": [ { "regionA": "lower", "patchA": "lower_to_upper", "regionB": "upper", "patchB": "upper_to_lower" } ],
+  "initial": { "T": 340.0 },
+  "run": { "steady": true },
+  "numerics": { "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-30, "maxIter": 4000 }
+}"#;
+
+/// Gate 97-B document B: the case NAMES the manifest and carries no
+/// per-region mesh and no `interfaces` - the manifest supplies both.
+const GATE_97B_DOC_B: &str = r#"{
+  "mesh": { "regions": "mesh/regions.json" },
+  "name": "gate97b",
+  "regions": [
+    {
+      "name": "lower",
+      "material": { "rho": 2330.0, "c": 700.0, "kappa": 148.0 },
+      "patches": [
+        { "match": "zmin", "T": { "type": "fixedValue", "value": 380.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    },
+    {
+      "name": "upper",
+      "material": { "rho": 8960.0, "c": 385.0, "kappa": 400.0 },
+      "patches": [
+        { "match": "zmax", "T": { "type": "fixedValue", "value": 300.0 } },
+        { "match": "xmin", "T": { "type": "zeroGradient" } }, { "match": "xmax", "T": { "type": "zeroGradient" } },
+        { "match": "ymin", "T": { "type": "zeroGradient" } }, { "match": "ymax", "T": { "type": "zeroGradient" } }
+      ]
+    }
+  ],
+  "initial": { "T": 340.0 },
+  "run": { "steady": true },
+  "numerics": { "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-30, "maxIter": 4000 }
+}"#;
+
+/// Gate 97-B: the split two-zone block, run through the manifest, IS the
+/// block run - `t`, `bt` (per patch, by name), `steps` and the pair fluxes
+/// bit for bit (SPEC-LIT §97.10). The fixture is rebuilt from the public
+/// API because a `[[bin]]` links `ofgpu` without `cfg(test)`. One fixture,
+/// so a verdict here is single-mesh by name (§94.3).
+fn check_region_layout(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::cht::{run_case, ChtSolution, RegionKind};
+    use ofgpu::error::IoContext;
+    use ofgpu::io::case_cht::read_cht_case;
+    use ofgpu::io::regions::{split_by_zones, write_layout};
+
+    fn same_point(a: Vec3, b: Vec3) -> bool {
+        a.x.to_bits() == b.x.to_bits()
+            && a.y.to_bits() == b.y.to_bits()
+            && a.z.to_bits() == b.z.to_bits()
+    }
+
+    println!("\n=== the region layout (SPEC-LIT 97) ===");
+    println!("  -- S97 Gate 97-B: the split two-zone block, run through the manifest, bit for bit --");
+
+    let dir = scratch_dir("s97_layout");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).path(&dir)?;
+    let spec = BlockSpec {
+        x: GradedAxis { lo: 0.0, hi: 1.0, n: 4, expansion: 1.0, two_sided: false },
+        y: GradedAxis { lo: 0.0, hi: 1.0, n: 4, expansion: 1.0, two_sided: false },
+        z: GradedAxis { lo: 0.0, hi: 2.0, n: 8, expansion: 1.0, two_sided: false },
+        patch_name: ["xmin", "xmax", "ymin", "ymax", "zmin", "zmax"].map(String::from),
+        patch_type: ["patch"; 6].map(String::from),
+        windows: Vec::new(),
+        cyclic: Vec::new(),
+    };
+    let raw = blockgen::raw_mesh(&spec)?;
+    let host = build_host_mesh(&raw)?;
+    let (mut lower, mut upper) = (Vec::new(), Vec::new());
+    for (i, x) in host.c.iter().enumerate() {
+        if x.z < 1.0 {
+            lower.push(i as Label);
+        } else {
+            upper.push(i as Label);
+        }
+    }
+    let zones = vec![("lower".to_string(), lower), ("upper".to_string(), upper)];
+    let (regions, ifaces) = split_by_zones(&raw, &zones)?;
+    write_layout(&dir.join("mesh"), &regions, &[RegionKind::Solid, RegionKind::Solid], &ifaces, None)?;
+    let (pa, pb) = (dir.join("a.jsonc"), dir.join("b.jsonc"));
+    std::fs::write(&pa, GATE_97B_DOC_A).path(&pa)?;
+    std::fs::write(&pb, GATE_97B_DOC_B).path(&pb)?;
+    let la = match read_cht_case(&pa).and_then(|k| k.lower_in(Some(&dir))) {
+        Ok(v) => v,
+        Err(e) => {
+            c.skip("S97 Gate 97-B: the two-zone layout case", &e.to_string());
+            let _ = std::fs::remove_dir_all(&dir);
+            return Ok(());
+        }
+    };
+    let lb = match read_cht_case(&pb).and_then(|k| k.lower_in(Some(&dir))) {
+        Ok(v) => v,
+        Err(e) => {
+            c.skip("S97 Gate 97-B: the two-zone layout case", &e.to_string());
+            let _ = std::fs::remove_dir_all(&dir);
+            return Ok(());
+        }
+    };
+
+    let row1 = la.region_names == ["lower", "upper"]
+        && lb.region_names == ["lower", "upper"]
+        && la.meshes.len() == 2
+        && lb.meshes.len() == 2
+        && la.meshes[0].n_cells == 64
+        && la.meshes[1].n_cells == 64
+        && lb.meshes[0].n_cells == 64
+        && lb.meshes[1].n_cells == 64
+        && la.interfaces.len() == 1
+        && lb.interfaces.len() == 1
+        && lb.notes.is_empty();
+    c.require(
+        "S97 Gate 97-B: the two-zone layout loads and both documents lower to 'lower' and 'upper' of 64 cells",
+        row1,
+    );
+
+    let mut geo_equal = la.meshes.len() == lb.meshes.len() && la.raw.len() == lb.raw.len();
+    let mut geo_why = if geo_equal { None } else { Some("region count differs".to_string()) };
+    for r in 0..la.meshes.len().min(lb.meshes.len()) {
+        let (ma, mb) = (&la.meshes[r], &lb.meshes[r]);
+        let (ra, rb) = (&la.raw[r], &lb.raw[r]);
+        let mut first: Option<String> = None;
+        {
+            let mut diff = |ok: bool, msg: String| {
+                if !ok && first.is_none() {
+                    first = Some(msg);
+                }
+            };
+            diff(ma.n_cells == mb.n_cells, format!("region {r}: n_cells {} against {}", ma.n_cells, mb.n_cells));
+            diff(
+                ra.neighbour == rb.neighbour,
+                format!("region {r}: neighbour lists differ ({} against {} faces)", ra.neighbour.len(), rb.neighbour.len()),
+            );
+            diff(
+                ra.owner[..ra.neighbour.len()] == rb.owner[..rb.neighbour.len()],
+                format!("region {r}: internal-face owners differ"),
+            );
+            diff(
+                ma.v.len() == mb.v.len() && ma.v.iter().zip(&mb.v).all(|(a, b)| a.to_bits() == b.to_bits()),
+                format!("region {r}: cell volumes differ"),
+            );
+            diff(
+                ma.c.len() == mb.c.len() && ma.c.iter().zip(&mb.c).all(|(a, b)| same_point(*a, *b)),
+                format!("region {r}: cell centres differ"),
+            );
+            let mut na: Vec<&str> = ma.patches.iter().map(|p| p.name.as_str()).collect();
+            let mut nb: Vec<&str> = mb.patches.iter().map(|p| p.name.as_str()).collect();
+            na.sort_unstable();
+            nb.sort_unstable();
+            diff(na == nb, format!("region {r}: patch names differ"));
+            let faces_eq = |x: &[Vec3], xs: usize, y: &[Vec3], ys: usize, n: usize| {
+                xs + n <= x.len() && ys + n <= y.len() && (0..n).all(|k| same_point(x[xs + k], y[ys + k]))
+            };
+            for pname in na {
+                let Some(qb) = mb.patches.iter().find(|p| p.name == pname) else {
+                    diff(false, format!("region {r}: patch {pname} absent from the manifest side"));
+                    continue;
+                };
+                let Some(qa) = ma.patches.iter().find(|p| p.name == pname) else {
+                    continue;
+                };
+                diff(qa.size == qb.size, format!("region {r}: patch {pname} size {} against {}", qa.size, qb.size));
+                diff(
+                    faces_eq(&ma.b_sf, qa.start, &mb.b_sf, qb.start, qa.size),
+                    format!("region {r}: patch {pname} b_sf differs"),
+                );
+                diff(
+                    faces_eq(&ma.b_cf, qa.start, &mb.b_cf, qb.start, qa.size),
+                    format!("region {r}: patch {pname} b_cf differs"),
+                );
+            }
+        }
+        geo_equal &= first.is_none();
+        if geo_why.is_none() {
+            geo_why = first;
+        }
+    }
+    if let Some(m) = &geo_why {
+        c.note(&format!("  first difference: {m}"));
+    }
+    c.require(
+        "S97 Gate 97-B: the lowered geometry agrees per patch by name, bit for bit",
+        geo_equal,
+    );
+
+    let sa = run_case(gpu, &la)?;
+    let sb = run_case(gpu, &lb)?;
+    let cat_start = |sol: &ChtSolution, r: usize, p: &str| {
+        let want = format!("{}:{p}", sol.mesh.regions[r].name);
+        sol.mesh.host.patches.iter().find(|q| q.name == want).unwrap_or_else(|| panic!("no patch {want}")).start
+    };
+    let mut diffs: Vec<String> = Vec::new();
+    if sa.t.len() != sb.t.len() {
+        diffs.push(format!("cell temperature t: length {} against {}", sa.t.len(), sb.t.len()));
+    } else if let Some((i, (a, b))) =
+        sa.t.iter().zip(&sb.t).enumerate().find(|(_, (a, b))| a.to_bits() != b.to_bits())
+    {
+        diffs.push(format!("cell temperature t: first difference at [{i}]: {a} against {b}"));
+    }
+    let mut bt_diff: Option<String> = None;
+    for (r, name) in la.region_names.iter().enumerate() {
+        for p in &la.meshes[r].patches {
+            let (ia, ib) = (cat_start(&sa, r, &p.name), cat_start(&sb, r, &p.name));
+            for k in 0..p.size {
+                if sa.bt[ia + k].to_bits() != sb.bt[ib + k].to_bits() {
+                    if bt_diff.is_none() {
+                        bt_diff = Some(format!(
+                            "boundary temperature bt {}:{}: first difference at [{k}]: {} against {}",
+                            name, p.name, sa.bt[ia + k], sb.bt[ib + k]
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(m) = bt_diff {
+        diffs.push(m);
+    }
+    if sa.steps != sb.steps {
+        diffs.push(format!("steps: {} against {}", sa.steps, sb.steps));
+    }
+    if sa.pair_flux.0.len() != sb.pair_flux.0.len() {
+        diffs.push(format!("pair flux A: length {} against {}", sa.pair_flux.0.len(), sb.pair_flux.0.len()));
+    } else if let Some((i, (x, y))) =
+        sa.pair_flux.0.iter().zip(&sb.pair_flux.0).enumerate().find(|(_, (x, y))| x.to_bits() != y.to_bits())
+    {
+        diffs.push(format!("pair flux A: first difference at [{i}]: {x} against {y}"));
+    }
+    if sa.pair_flux.1.len() != sb.pair_flux.1.len() {
+        diffs.push(format!("pair flux B: length {} against {}", sa.pair_flux.1.len(), sb.pair_flux.1.len()));
+    } else if let Some((i, (x, y))) =
+        sa.pair_flux.1.iter().zip(&sb.pair_flux.1).enumerate().find(|(_, (x, y))| x.to_bits() != y.to_bits())
+    {
+        diffs.push(format!("pair flux B: first difference at [{i}]: {x} against {y}"));
+    }
+    let equal = diffs.is_empty();
+    for d in &diffs {
+        c.note(&format!("  {d}"));
+    }
+    c.require(
+        "S97 Gate 97-B: the split block run through the manifest reproduces the block run bit for bit",
+        equal,
+    );
+    let max_rel = sa.t.iter().zip(&sb.t).map(|(a, b)| (a - b).abs() / a.abs().max(1.0)).fold(0.0 as Scalar, Scalar::max);
+    c.note(&format!(
+        "  {} cells, {} boundary faces, {} flux pairs, steps {}; max relative difference {:e}; \
+         residual {:.6e} against {:.6e}",
+        sa.t.len(), sa.bt.len(), sa.pair_flux.0.len(), sa.steps, max_rel, sa.residual, sb.residual
+    ));
+    if !equal {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "S97 Gate 97-B region layout",
+            against: "the split two-zone block against itself, explicit form vs manifest form",
+            headline: "the manifest case did not reproduce the block run bit for bit".to_string(),
+            detail: vec![
+                "  a mismatch here is a layout defect (a split face wound differently, a patch start \
+                 read from the wrong region, an interface paired out of order), and the first \
+                 differing index is printed above - not a tolerance to loosen"
+                    .to_string(),
+            ],
+            uncertainty: Some(Uncertainty::SingleMesh(
+                "one fixture, bit-for-bit identity; no discretisation error to extrapolate",
+            )),
+        });
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[cfg(test)]
+mod region_layout {
+    use super::*;
+
+    /// The gate the run calls, driven directly: on a machine with the card
+    /// it takes the three rows green; without one it passes vacuously, as
+    /// the lib test does.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn gate_97b_runs_green_on_this_machine() {
+        let Ok(gpu) = Gpu::new(0) else { return };
+        let mut c = Checks::new();
+        c.enter_gate("S97 Gate 97-B region layout");
+        check_region_layout(&mut c, &gpu).expect("gate runs");
+        c.leave_gate();
+        assert_eq!(c.failures, 0, "gate 97-B must hold on this machine");
+        assert!(c.total >= 3, "three rows required, took {}", c.total);
+        assert_eq!(c.skipped, 0, "nothing may be skipped");
+    }
+}
+
+// ==========================================================================
+//  SPEC-LIT 110's own tests: the key parsers, the pure verdict helpers, and
+//  the not-yet-run paths the three sections take ON THIS TREE (S7, S1).
+// ==========================================================================
+
+#[cfg(test)]
+mod published_fluid_gates {
+    use super::*;
+
+    /// C-DS's bytes, as the test fixture (never a file: the key is NOT
+    /// distributed, S1).
+    const DS_KEY_TEXT: &str = "\
+# Driver, D. M. and Seegmiller, H. L., \"Features of a Reattaching Turbulent Shear Layer in Divergent
+# Channel Flow\", AIAA Journal 23 (2) (1985) 163-171. DOI 10.2514/3.8890.
+# Datum quoted from the NASA Turbulence Modeling Resource, 2D Backward Facing Step validation page
+# (https://tmbwg.github.io/turbmodels/backstep_val.html, read 2026-09-18), a US Government work:
+# \"x/Hreattach = 6.26 +- 0.10\"; Re_H approximately 36,000; M = 0.128; inflow boundary layer ~1.5H.
+# key value uncertainty
+x_r_over_H 6.26 0.10
+";
+
+    /// C-MC's bytes, as the test fixture (never a file, S1).
+    const MC_KEY_TEXT: &str = "\
+# McCaffrey, B. J., \"Purely Buoyant Diffusion Flames: Some Experimental Results\", NBSIR 79-1910,
+# National Bureau of Standards, 1979. US Government work, public domain. Table 1, weighted averages.
+# z = vertical height above burner [m]; Q = nominal heat release rate [kW]; V centreline velocity [m/s];
+# dT centreline temperature rise above ambient [C]. Regime boundaries in z/Q^(2/5) [m kW^(-2/5)].
+# key value
+boundary_flame_intermittent 0.0796
+boundary_intermittent_plume 0.195
+flame_V_over_sqrt_z 6.84
+flame_dT 797
+intermittent_V_over_Q15 1.93
+intermittent_dT_z_over_Q25 62.9
+plume_V_z13_over_Q13 1.12
+plume_dT_z53_over_Q23 21.6
+buoyancy_constant 0.935
+";
+
+    /// (a) The `.means` parser on a synthetic file: header numbers out of
+    /// `%` lines, three data rows out of whitespace-separated lines.
+    #[test]
+    fn parse_mkm_means_reads_header_and_rows() {
+        let text = "\
+% Moser, Kim & Mansour (1999), Re_tau = 178.12, ny = 3 (chan180.means)
+% y y+ Umean
+% (the host's own header rows; this fixture is three rows, not 129)
+ 0.000000 0.000000 0.000000
+ 0.500000 89.060000 11.440000
+ 1.000000 178.120000 16.900000
+";
+        let p = parse_mkm_means(text).expect("the synthetic .means parses");
+        assert_eq!(p.re_tau, 178.12, "Re_tau from the header");
+        assert_eq!(p.ny, 3, "ny from the header");
+        assert_eq!(p.rows.len(), 3, "three rows");
+        assert_eq!(p.rows[1], (0.5, 89.06, 11.44), "middle row verbatim");
+    }
+
+    /// (b) The Driver & Seegmiller parser on C-DS's own bytes.
+    #[test]
+    fn parse_ds_key_reads_the_datum_row() {
+        let (d, u) = parse_ds_key(DS_KEY_TEXT).expect("C-DS parses");
+        assert_eq!((d, u), (6.26, 0.10));
+    }
+
+    /// (c) The McCaffrey parser on C-MC's own bytes: six constants, two
+    /// boundaries, and the buoyancy constant - all nine, by name.
+    #[test]
+    fn parse_mc_key_reads_all_nine_constants() {
+        let k = parse_mc_key(MC_KEY_TEXT).expect("C-MC parses");
+        assert_eq!(k.b_flame_int, 0.0796);
+        assert_eq!(k.b_int_plume, 0.195);
+        assert_eq!(k.flame_v, 6.84);
+        assert_eq!(k.flame_dt, 797.0);
+        assert_eq!(k.int_v, 1.93);
+        assert_eq!(k.int_dt, 62.9);
+        assert_eq!(k.plume_v, 1.12);
+        assert_eq!(k.plume_dt, 21.6);
+        assert_eq!(k.buoyancy, 0.935);
+    }
+
+    /// (d) The band helper at its three edges: inside; undecided because
+    /// the uncertainty reaches the edge; outside (S32.4's discipline).
+    #[test]
+    fn band_of_places_the_error_in_its_band() {
+        assert_eq!(band_of(0.04, 0.05, 0.01), Band::Inside);
+        assert_eq!(band_of(0.055, 0.05, 0.01), Band::Undecided);
+        assert_eq!(band_of(0.07, 0.05, 0.01), Band::Outside);
+    }
+
+    /// The synthetic DNS profile: `u+ = y+` to y+ 11, the log law above it.
+    fn synthetic_up(yp: Scalar) -> Scalar {
+        if yp <= 11.0 { yp } else { yp.ln() / 0.41 + 5.2 }
+    }
+
+    /// (e) `channel_functionals` on that profile sampled onto 32 cell
+    /// centres of the whole wall-to-centre span `[0, Re_tau]` in wall units,
+    /// so the log region B2 is evaluated over IS in the sample: the
+    /// midpoint cell-height mean and the trapezoid over the same points
+    /// agree to 1e-3; the key rows ARE the cell centres, so the sup-norm is
+    /// node for node and lands below 1e-6 - over the rows with
+    /// `30 <= y+ <= Re_tau`, of which there are some; and the same key
+    /// shifted up by half a wall unit is seen by B2 as exactly that.
+    #[test]
+    fn channel_functionals_reproduce_the_synthetic_profile() {
+        let n = 32usize;
+        let span = 178.12;
+        let h = span / n as Scalar;
+        let profile: Vec<(Scalar, Scalar)> = (0..n)
+            .map(|j| {
+                let yp = (j as Scalar + 0.5) * h;
+                // u_tau = 1 m/s: y+ = y/nu, so y = yp*nu, and u_x = u+.
+                (yp * NU_CHANNEL, synthetic_up(yp))
+            })
+            .collect();
+        let u_tau = 1.0;
+        let rows: Vec<(Scalar, Scalar, Scalar)> = profile
+            .iter()
+            .map(|(y, ux)| (*y, y * u_tau / NU_CHANNEL, ux / u_tau))
+            .collect();
+        let in_b2 = rows.iter().filter(|r| r.1 >= 30.0 && r.1 <= 178.12).count();
+        assert!(in_b2 >= 20, "B2's y+ window holds {in_b2} of the 32 rows");
+        let shifted: Vec<(Scalar, Scalar, Scalar)> =
+            rows.iter().map(|&(y, yp, up)| (y, yp, up + 0.5)).collect();
+        let dns = MkmProfile { re_tau: 178.12, ny: rows.len(), rows };
+        let (ub_sim, ub_dns, sup, _) =
+            channel_functionals(&profile, u_tau, NU_CHANNEL, &dns).expect("functionals run");
+        assert!(
+            (ub_sim - ub_dns).abs() < 1e-3,
+            "midpoint {ub_sim} against trapezoid {ub_dns}"
+        );
+        assert!(sup < 1e-6, "node-for-node sup-norm {sup}");
+        let off = MkmProfile { re_tau: 178.12, ny: shifted.len(), rows: shifted };
+        let (_, _, sup_off, _) =
+            channel_functionals(&profile, u_tau, NU_CHANNEL, &off).expect("functionals run");
+        assert!((sup_off - 0.5).abs() < 1e-9, "a half-wall-unit shift reads as {sup_off}");
+    }
+
+    /// (f) `plume_exponent` on an exact power law: the least-squares slope
+    /// of ln dT against ln z IS the exponent, to machine precision.
+    #[test]
+    fn plume_exponent_recovers_a_power_law() {
+        let z: [Scalar; 6] = [1.25, 1.50, 1.75, 2.00, 2.25, 2.50];
+        let dt: [Scalar; 6] = z.map(|zi| 100.0 * zi.powf(-5.0 / 3.0));
+        let p = plume_exponent(&z, &dt);
+        assert!((p + 5.0 / 3.0).abs() < 1e-9, "slope {p} against -5/3");
+    }
+
+    /// (g) THIS TREE's own truth: no key is distributed, no record exists,
+    /// so the three top-level checks each print the missing-key line(s) and
+    /// register exactly one open, live verdict, BY NAME, in C-GATES order.
+    #[test]
+    fn the_three_sections_report_not_closed_by_name_on_this_tree() {
+        let mut c = Checks::new();
+        check_channel_dns(&mut c).expect("110-A runs");
+        check_backstep_reattachment(&mut c).expect("110-B runs");
+        check_mccaffrey_plume(&mut c).expect("110-C runs");
+        assert_eq!(c.failures, 0, "nothing has run, so nothing has failed");
+        assert_eq!(c.gates.len(), 3, "one report per gate");
+        let gates: Vec<&str> = c.gates.iter().map(|g| g.gate).collect();
+        assert_eq!(
+            gates,
+            [
+                "SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)",
+                "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+                "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
+            ],
+            "the three gate names, in order"
+        );
+        for g in &c.gates {
+            assert_eq!(g.verdict, Verdict::Open, "{}", g.headline);
+            assert_eq!(g.how, How::Live, "{}", g.headline);
+        }
+    }
+
+    /// A recorded step run whose finest-mesh reattachment lands inside the
+    /// datum's own +-0.10: one absolute-prediction check row, and no
+    /// verdict - a pass is not a report (SPEC-LIT 69).
+    #[test]
+    fn a_step_record_inside_the_band_passes_and_reports_nothing() {
+        static INSIDE: StepRecord = StepRecord {
+            n_cells: [700, 90, 1],
+            dx_over_h: [0.2, 0.1, 0.05],
+            x_r_over_h: [6.40, 6.30, 6.27],
+            delta99_over_h_at_minus_4h: [1.42, 1.48, 1.50],
+            u_ref: [10.0, 10.0, 10.0],
+            iterations: 6000,
+            residual_u: 1.0e-6,
+        };
+        let mut c = Checks::new();
+        check_backstep_reattachment_on(&mut c, Some((6.26, 0.10)), Some(&INSIDE))
+            .expect("the verdict runs");
+        assert_eq!(c.failures, 0);
+        assert!(c.total >= 1, "the inside-band row ran");
+        assert!(c.gates.is_empty(), "no verdict");
+    }
+
+    /// ...and one far outside it: the verdict is the measurement word, with
+    /// the three-mesh study as the declared uncertainty.
+    #[test]
+    fn a_step_record_far_outside_the_band_reports_the_measurement_word() {
+        static OUTSIDE: StepRecord = StepRecord {
+            n_cells: [700, 90, 1],
+            dx_over_h: [0.2, 0.1, 0.05],
+            x_r_over_h: [7.2, 7.0, 6.9],
+            delta99_over_h_at_minus_4h: [1.42, 1.48, 1.50],
+            u_ref: [10.0, 10.0, 10.0],
+            iterations: 6000,
+            residual_u: 1.0e-6,
+        };
+        let mut c = Checks::new();
+        check_backstep_reattachment_on(&mut c, Some((6.26, 0.10)), Some(&OUTSIDE))
+            .expect("the verdict runs");
+        assert_eq!(c.gates.len(), 1, "exactly one report");
+        assert_eq!(c.gates[0].verdict, Verdict::Misses);
+        assert!(matches!(c.gates[0].uncertainty, Some(Uncertainty::Study(_))));
+    }
+
+    /// A recorded plume run that sits LOW, 30 % under the correlation at
+    /// every station on the finest mesh: the exponent closes (P3 is a check
+    /// row), P1/P2 fall outside the +-15 % band, the verdict is the
+    /// correlation word - and the headline quotes the SIGNED worst deviation,
+    /// -30.0 %, not a clamp at zero that would read as "on the correlation".
+    #[test]
+    fn a_plume_record_sitting_low_quotes_its_signed_worst_deviation() {
+        let key = parse_mc_key(MC_KEY_TEXT).expect("C-MC parses");
+        let q: Scalar = 57.5;
+        let z: [Scalar; 6] = [1.25, 1.50, 1.75, 2.00, 2.25, 2.50];
+        let dt = |f: Scalar| z.map(|zi| f * 21.6 * q.powf(2.0 / 3.0) * zi.powf(-5.0 / 3.0));
+        let w = |f: Scalar| z.map(|zi| f * 1.12 * q.powf(1.0 / 3.0) * zi.powf(-1.0 / 3.0));
+        let rec = PlumeRecord {
+            q_kw: q,
+            n_cells: [43_560, 348_480, 2_787_840],
+            cell_size: [0.10, 0.05, 0.025],
+            stations_m: z,
+            dt_c: [dt(0.60), dt(0.67), dt(0.70)],
+            w_c: [w(0.60), w(0.67), w(0.70)],
+            iterations: 4000,
+            residual_u: 1.0e-5,
+        };
+        let mut c = Checks::new();
+        check_mccaffrey_plume_on(&mut c, Some(&key), Some(&rec)).expect("the verdict runs");
+        assert_eq!(c.failures, 0, "the key rows and P3 hold");
+        assert_eq!(c.gates.len(), 1, "exactly one report");
+        assert_eq!(c.gates[0].verdict, Verdict::Open, "a correlation leaves the gate open");
+        let h = &c.gates[0].headline;
+        assert!(h.contains("P1 worst -30.0%"), "{h}");
+        assert!(h.contains("P2 worst -30.0%"), "{h}");
+    }
+}
+
+// ==========================================================================
+//  Gate 95-A (SPEC-LIT 109.6) - the end-loaded cantilever, block-coupled
+// ==========================================================================
+
+/// The block-coupled outer loop of `src/solid/coupled.rs` on the
+/// end-loaded cantilever of Timoshenko & Goodier ch. 3 (§109.6), at three
+/// slendernesses, three meshes each: the loop converges on every mesh, the
+/// displacement error's observed order is at least 1.9, the stress error's
+/// at least 0.9, and the finest mesh's tip deflection is within 5 % of the
+/// closed form; §94's study of the tip deflection is a miss's uncertainty.
+/// A ratio whose rows all pass registers nothing.
+fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::coupled;
+    use ofgpu::solid::fixtures;
+    use ofgpu::solid::outer::{ANDERSON_DEPTH, OuterControls, Relaxation};
+    use ofgpu::solid::stress::StressFields;
+    use ofgpu::solid::displacement::Displacement;
+
+    let solve_controls = || SolverControls {
+        solver: LinearSolverKind::PBiCGStab,
+        precon: Preconditioner::Dilu,
+        tolerance: 1e-12,
+        rel_tol: 0.0,
+        max_iter: 20000,
+        min_iter: 0,
+        check_interval: 1,
+        fixed_iters: false,
+        report_residuals: true,
+    };
+    let outer_controls = || OuterControls {
+        relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+        decades: 8.0,
+        max_outer: 1000,
+        boundary_passes: 3,
+    };
+
+    for (l, label) in [(0.5 as Scalar, "2.5:1"), (1.0 as Scalar, "5:1"), (2.0 as Scalar, "10:1")] {
+        let exact = fixtures::CantileverExact::new(
+            fixtures::CANTILEVER_E,
+            fixtures::CANTILEVER_NU,
+            l,
+            fixtures::CANTILEVER_C,
+            fixtures::CANTILEVER_P,
+        );
+        let tip = exact.tip();
+        let mut e_us = [0.0 as Scalar; 3];
+        let mut e_xxs = [0.0 as Scalar; 3];
+        let mut e_xys = [0.0 as Scalar; 3];
+        let mut e_tips = [0.0 as Scalar; 3];
+        let mut v_hs = [0.0 as Scalar; 3];
+        let mut converged = [false; 3];
+        let mut outer_its = [0usize; 3];
+        let mut obs = [0.0 as Scalar; 3];
+        let mut lins = [0usize; 3];
+        let mut levels: Vec<vv::Level> = Vec::new();
+        let mut detail: Vec<String> = Vec::new();
+
+        for (idx, n_y) in [4usize, 8, 16].into_iter().enumerate() {
+            let n_x = (l * n_y as Scalar / 0.2).round() as usize;
+            let hm = fixtures::cantilever_mesh(n_x, n_y, l, fixtures::CANTILEVER_C)?;
+            let (tr, fv) = fixtures::cantilever_face_values(&hm, &exact);
+            let gm = GpuMesh::upload(gpu, &hm)?;
+            let n = hm.n_cells;
+            let nbf = hm.n_boundary_faces;
+            let mut d = Displacement::new(
+                gpu,
+                &gm,
+                &hm,
+                fixtures::cantilever_material(),
+                &fixtures::cantilever_bcs(),
+                solve_controls(),
+            )?;
+            d.set_temperature(gpu, &vec![300.0 as Scalar; n], &vec![300.0 as Scalar; nbf], 300.0)?;
+            d.bcs.set_traction_values(gpu, &tr)?;
+            d.bcs.set_fixed_values(gpu, &fv)?;
+            match coupled::solve(gpu, &mut d, &outer_controls()) {
+                Ok(rep) => {
+                    converged[idx] = rep.converged;
+                    outer_its[idx] = rep.iterations;
+                    obs[idx] = rep.observed_contraction;
+                    lins[idx] = rep.linear_iterations;
+                }
+                Err(e) => {
+                    converged[idx] = false;
+                    c.note(&format!("  {label} n_y={n_y}: {e}"));
+                }
+            }
+            c.require(
+                &format!("Gate 95-A {label}: block-coupled loop converged, n_y = {n_y}"),
+                converged[idx],
+            );
+
+            // coupled::solve ends in the boundary correction, so the
+            // gradient it left belongs to the accepted u; the readout
+            // derives nothing anew.
+            let ub = gpu.download(&d.u.bf)?;
+            let u = gpu.download(&d.u.f)?;
+            let mut sf = StressFields::new(gpu, n)?;
+            sf.compute(gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref)?;
+            let h = sf.download(gpu)?;
+            let errs = fixtures::cantilever_errors(&hm, &u, &h.sigma, &exact);
+            e_us[idx] = errs.e_u;
+            e_xxs[idx] = errs.e_xx;
+            e_xys[idx] = errs.e_xy;
+            v_hs[idx] = fixtures::cantilever_tip_deflection(&hm, &ub);
+            e_tips[idx] = (v_hs[idx] - tip).abs() / tip.abs();
+            levels.push(vv::Level { h: 2.0 * 0.1 / n_y as Scalar, value: v_hs[idx] });
+            let line = format!(
+                "{label} n_y={n_y} cells={n} outer={} converged={} observed={:.4} linear={} \
+                 e_tip={:.3e} e_u={:.3e} e_xx={:.3e} e_xy={:.3e} v_h={:.6e}",
+                outer_its[idx], converged[idx], obs[idx], lins[idx],
+                e_tips[idx], e_us[idx], e_xxs[idx], e_xys[idx], v_hs[idx]
+            );
+            c.note(&format!("  {line}"));
+            detail.push(line);
+        }
+
+        let ln2 = (2.0 as Scalar).ln();
+        let p_u = (e_us[1] / e_us[2]).ln() / ln2;
+        let p_sigma = ((e_xxs[1] / e_xxs[2]).ln().min((e_xys[1] / e_xys[2]).ln())) / ln2;
+        c.check(&format!("Gate 95-A {label}: displacement order, 1.9 - p_u"), 1.9 - p_u, 0.0);
+        c.check(&format!("Gate 95-A {label}: stress order, 0.9 - p_sigma"), 0.9 - p_sigma, 0.0);
+        c.check(
+            &format!("Gate 95-A {label}: tip deflection on the finest mesh, rel"),
+            e_tips[2],
+            0.05,
+        );
+        c.note(&format!("  displacement error order p_u = {p_u:.3}, stress error order p_sigma = {p_sigma:.3}"));
+        // The study reads the FINEST level first.
+        levels.reverse();
+        let study = vv::grid_study(&levels)?;
+        c.note(&format!("  tip deflection: {}", study.one_line()));
+        let val = vv::validation(v_hs[2], tip, study.u_fine, 0.0, 0.0);
+        c.note(&format!("  {}", val.one_line("tip deflection, finest mesh")));
+
+        let ok = converged.iter().all(|&cv| cv)
+            && (1.9 - p_u) <= 0.0
+            && (1.9 - p_u).is_finite()
+            && (0.9 - p_sigma) <= 0.0
+            && (0.9 - p_sigma).is_finite()
+            && e_tips[2] <= 0.05
+            && e_tips[2].is_finite();
+        if !ok {
+            c.report(GateReport {
+                verdict: Verdict::Misses,
+                how: How::Live,
+                gate: "Gate 95-A cantilever",
+                against: "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), three meshes r = 2",
+                headline: format!(
+                    "{label}: converged {}/3, p_u {p_u:.2}, p_sigma {p_sigma:.2}, finest tip {:.2e}",
+                    converged.iter().filter(|&&cv| cv).count(),
+                    e_tips[2]
+                ),
+                detail,
+                uncertainty: Some(Uncertainty::Study(study)),
+            });
+        }
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT 95.11 - Gate 95-G: NAFEMS LE1, LE10 and LE11 from a
+//  restatement, and the boundary-point fit gated on the Lame ring
+// ==========================================================================
+
+// answer-key: nafems-le1
+const NAFEMS_LE1_SYY_D: Scalar = 92.7e6;
+// answer-key: nafems-le10
+const NAFEMS_LE10_SYY_D: Scalar = -5.38e6;
+// answer-key: nafems-le11
+const NAFEMS_LE11_SZZ_A: Scalar = -105.0e6;
+
+/// Printed at the head of every NAFEMS scope: the reference is a
+/// restatement, and the output says so (SPEC-LIT 95.11).
+const RESTATED_95G: &str = "95-G reference: ESRD (2018)'s RESTATEMENT of NAFEMS P18 - the primary was not \
+                            read; geometry from openly published text (SPEC-LIT 95.11)";
+
+/// SPEC-LIT 94.3's declaration when three point values cannot form a study.
+const NO_STUDY_95G: &str =
+    "three meshes were run and their point values could not form a study; the reason is printed above";
+
+/// SPEC-LIT 94.3's declaration for LE10, whose study takes its finest three.
+const NO_STUDY_95G_LE10: &str = "four meshes were run and the point values of the finest three could not \
+                                 form a study; the reason is printed above";
+
+/// Gate 95-G LE10's meshes `(n_t, n_phi, n_z)`, coarsest first, each the
+/// one before it halved in every direction (SPEC-LIT 95.11). The fourth
+/// is the user's decision of 2026-09-25; the bar is read on the finest.
+const LE10_MESHES: [(usize, usize, usize); 4] = [(6, 12, 4), (12, 24, 8), (24, 48, 16), (48, 96, 32)];
+
+/// How many of `LE10_MESHES`' finest meshes SPEC-LIT 94's study takes.
+const LE10_STUDY_LEVELS: usize = 3;
+
+/// Which outer loop a Gate 95-G mesh runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Loop95g {
+    Segregated,
+    BlockCoupled,
+}
+
+impl Loop95g {
+    fn name(self) -> &'static str {
+        match self {
+            Loop95g::Segregated => "segregated",
+            Loop95g::BlockCoupled => "block-coupled",
+        }
+    }
+}
+
+/// One mesh of a Gate 95-G body: the loop's report and the point value.
+struct Point95g {
+    cells: usize,
+    converged: bool,
+    outer: usize,
+    linear: usize,
+    observed: Scalar,
+    fit: Scalar,
+    nearest: Scalar,
+    why: String,
+}
+
+fn rel95g(v: Scalar, target: Scalar) -> Scalar {
+    (v - target).abs() / target.abs()
+}
+
+impl Point95g {
+    fn failed(cells: usize, why: String) -> Self {
+        Point95g {
+            cells,
+            converged: false,
+            outer: 0,
+            linear: 0,
+            observed: Scalar::NAN,
+            fit: Scalar::NAN,
+            nearest: Scalar::NAN,
+            why,
+        }
+    }
+
+    fn line(&self, label: &str, target: Scalar) -> String {
+        format!(
+            "{label} cells={:>6} outer={:>4} converged={} observed={:.4} linear={} \
+             point={:.6e} rel={:.3e} nearest={:.6e} rel={:.3e}{}",
+            self.cells, self.outer, self.converged, self.observed, self.linear,
+            self.fit, rel95g(self.fit, target), self.nearest, rel95g(self.nearest, target),
+            if self.why.is_empty() { String::new() } else { format!(" ({})", self.why) }
+        )
+    }
+}
+
+/// SPEC-LIT 94's study of a Gate 95-G point value over its three meshes
+/// (`levels` coarse first), or 94.3's `declaration` when they cannot form one.
+fn study_95g(c: &mut Checks, what: &str, mut levels: Vec<vv::Level>, declaration: &'static str) -> Uncertainty {
+    // The study reads the FINEST level first.
+    levels.reverse();
+    match vv::grid_study(&levels) {
+        Ok(study) => {
+            c.note(&format!("  {what}: {}", study.one_line()));
+            Uncertainty::Study(study)
+        }
+        Err(e) => {
+            c.note(&format!("  {what}: no study - {e}"));
+            Uncertainty::SingleMesh(declaration)
+        }
+    }
+}
+
+/// Solve one Gate 95-G mesh with the controls SPEC-LIT 95.11 names, read
+/// the stress and fit it at the body's point (S95.27). A failure comes
+/// back as a record naming it, never as an error that would end the run.
+#[allow(clippy::too_many_arguments)]
+fn point_95g(
+    gpu: &Gpu,
+    b: &ofgpu::solid::restated::RestatedBody,
+    mat: ofgpu::solid::Material,
+    per_patch: &[[ofgpu::solid::bc::CompBc; 3]],
+    traction: Option<&[Vec3]>,
+    temps: Option<(&[Scalar], &[Scalar])>,
+    pick: fn(&Tensor) -> Scalar,
+    mode: Loop95g,
+) -> Point95g {
+    match point_95g_inner(gpu, b, mat, per_patch, traction, temps, pick, mode) {
+        Ok(p) => p,
+        Err(e) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn point_95g_inner(
+    gpu: &Gpu,
+    b: &ofgpu::solid::restated::RestatedBody,
+    mat: ofgpu::solid::Material,
+    per_patch: &[[ofgpu::solid::bc::CompBc; 3]],
+    traction: Option<&[Vec3]>,
+    temps: Option<(&[Scalar], &[Scalar])>,
+    pick: fn(&Tensor) -> Scalar,
+    mode: Loop95g,
+) -> Result<Point95g> {
+    use ofgpu::solid::displacement::Displacement;
+    use ofgpu::solid::outer::{self, OuterControls, Relaxation, ANDERSON_DEPTH};
+    use ofgpu::solid::stress::StressFields;
+    use ofgpu::solid::{coupled, restated};
+    let n = b.mesh.n_cells;
+    let nbf = b.mesh.n_boundary_faces;
+    let gm = GpuMesh::upload(gpu, &b.mesh)?;
+    let ctrl = SolverControls {
+        solver: LinearSolverKind::PBiCGStab,
+        precon: Preconditioner::Dilu,
+        tolerance: 1e-12,
+        rel_tol: 0.0,
+        max_iter: 20000,
+        min_iter: 0,
+        check_interval: 1,
+        fixed_iters: false,
+        report_residuals: true,
+    };
+    let mut d = Displacement::new(gpu, &gm, &b.mesh, mat, per_patch, ctrl)?;
+    match temps {
+        Some((t, bt)) => d.set_temperature(gpu, t, bt, 0.0)?,
+        None => d.set_temperature(gpu, &vec![0.0 as Scalar; n], &vec![0.0 as Scalar; nbf], 0.0)?,
+    }
+    if let Some(tr) = traction {
+        d.bcs.set_traction_values(gpu, tr)?;
+    }
+    let oc = OuterControls {
+        relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+        decades: 8.0,
+        max_outer: 2000,
+        boundary_passes: 3,
+    };
+    let solved = match mode {
+        Loop95g::Segregated => outer::solve(gpu, &mut d, &oc),
+        Loop95g::BlockCoupled => coupled::solve(gpu, &mut d, &oc),
+    };
+    let (converged, outer_its, linear, observed, why) = match solved {
+        Ok(rep) => (rep.converged, rep.iterations, rep.linear_iterations, rep.observed_contraction, String::new()),
+        Err(e) => (false, 0, 0, Scalar::NAN, e.to_string()),
+    };
+    // Both loops end in the boundary correction, so the gradient they left
+    // belongs to the accepted u; the readout derives nothing anew.
+    let mut sf = StressFields::new(gpu, n)?;
+    sf.compute(gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref)?;
+    let h = sf.download(gpu)?;
+    let vals: Vec<Scalar> = h.sigma.iter().map(pick).collect();
+    let fit = restated::extrapolate_linear(&b.mesh, &vals, &b.stencil, b.target, b.fit_dims)?;
+    let dist = |c: usize| (b.mesh.c[c] - b.target).mag();
+    let mut near = b.stencil[0];
+    for &c in &b.stencil {
+        if dist(c) < dist(near) {
+            near = c;
+        }
+    }
+    Ok(Point95g { cells: n, converged, outer: outer_its, linear, observed, fit, nearest: vals[near], why })
+}
+
+/// Gate 95-G's own read-out gate (SPEC-LIT 95.11): the Lame ring's bore
+/// hoop stress (S95.28), read at a boundary point by the fit (S95.27).
+fn check_boundary_point_fit(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::{fixtures, restated, Material};
+    let target = restated::lame_hoop_at_bore(restated::LAME_P, restated::LAME_R_IN, restated::LAME_R_OUT);
+    let mat = Material { e: 200.0e9, nu: 0.3, alpha: 0.0 };
+    let mut levels: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    let mut errs = [Scalar::NAN; 3];
+    let mut conv = [false; 3];
+    for (idx, nr) in [12usize, 24, 48].into_iter().enumerate() {
+        let p = match restated::lame_ring(nr) {
+            Ok(b) => match restated::patch_pressure(&b.mesh, "inner", restated::LAME_P) {
+                Ok(tr) => point_95g(
+                    gpu, &b, mat, &fixtures::quarter_annulus_plane_strain_bcs(), Some(&tr[..]), None,
+                    |s| s.yy, Loop95g::Segregated,
+                ),
+                Err(e) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+            },
+            Err(e) => Point95g::failed(0, e.to_string()),
+        };
+        conv[idx] = p.converged;
+        errs[idx] = rel95g(p.fit, target);
+        c.require(&format!("Gate 95-G ring: outer loop converged, nr = {nr}"), p.converged);
+        let h = (restated::LAME_R_OUT - restated::LAME_R_IN) / nr as Scalar;
+        levels.push(vv::Level { h, value: p.fit });
+        let line = p.line(&format!("ring nr={nr:>2}"), target);
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    let order = (errs[1] / errs[2]).ln() / (2.0 as Scalar).ln();
+    c.check("Gate 95-G ring: sigma_tt at the bore point, finest mesh (nr = 48), rel", errs[2], 0.01);
+    c.check("Gate 95-G ring: order of the bore-point error, 0.9 - p", 0.9 - order, 0.0);
+    c.note(&format!("  closed form (S95.28) {target:.6e} Pa; observed order of the point error p = {order:.3}"));
+    let unc = study_95g(c, "bore-point sigma_tt", levels, NO_STUDY_95G);
+    let ok = conv.iter().all(|&v| v) && errs[2] <= 0.01 && 0.9 - order <= 0.0;
+    if !ok {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G boundary-point fit (Lame ring)",
+            against: "Timoshenko & Goodier ch. 4, the thick-walled cylinder's bore hoop stress (S95.28), \
+                      read by the fit (S95.27), three meshes r = 2",
+            headline: format!(
+                "converged {}/3, finest point error {:.2e}, order p = {order:.2}",
+                conv.iter().filter(|&&v| v).count(),
+                errs[2]
+            ),
+            detail,
+            uncertainty: Some(unc),
+        });
+    }
+    Ok(())
+}
+
+/// Gate 95-G, NAFEMS LE1 as restated (SPEC-LIT 95.11): the membrane in its
+/// plane-strain equivalent (S95.24), sigma_yy at D.
+fn check_nafems_le1(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::restated;
+    c.note(RESTATED_95G);
+    let target = NAFEMS_LE1_SYY_D;
+    let mut levels: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    let mut errs = [Scalar::NAN; 3];
+    let mut fits = [Scalar::NAN; 3];
+    let mut conv = [false; 3];
+    for (idx, (n_t, n_phi)) in [(16usize, 32usize), (32, 64), (64, 128)].into_iter().enumerate() {
+        let p = match restated::le1_membrane(n_t, n_phi) {
+            Ok(b) => {
+                if idx == 0 {
+                    c.note(&format!("  LE1 slenderness (95.9): {:.3}", ofgpu::solid::slenderness(&b.mesh)));
+                }
+                match restated::patch_pressure(&b.mesh, "outer", -restated::LE1_P) {
+                    Ok(tr) => point_95g(
+                        gpu, &b, restated::le1_plane_strain_material(), &restated::le1_bcs(), Some(&tr[..]),
+                        None, |s| s.yy, Loop95g::Segregated,
+                    ),
+                    Err(e) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+                }
+            }
+            Err(e) => Point95g::failed(0, e.to_string()),
+        };
+        conv[idx] = p.converged;
+        fits[idx] = p.fit;
+        errs[idx] = rel95g(p.fit, target);
+        c.require(&format!("Gate 95-G LE1: outer loop converged, n_t = {n_t}"), p.converged);
+        levels.push(vv::Level { h: 1.0 / n_t as Scalar, value: p.fit });
+        let line = p.line(&format!("LE1 n_t={n_t:>2}"), target);
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    c.check(
+        "Gate 95-G LE1: sigma_yy(D) on the finest mesh (n_t = 64), rel to the restated 92.7 MPa",
+        errs[2],
+        0.03,
+    );
+    let unc = study_95g(c, "LE1 sigma_yy(D)", levels, NO_STUDY_95G);
+    if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G LE1 elliptic membrane (restated)",
+            against: "NAFEMS LE1 sigma_yy(D) = 92.7 MPa as RESTATED by ESRD (2018) - the NAFEMS P18 \
+                      primary was not read; geometry from openly published text (SPEC-LIT 95.11)",
+            headline: format!(
+                "converged {}/3, finest sigma_yy(D) {:.4e} Pa, {:+.2} % of the restated target",
+                conv.iter().filter(|&&v| v).count(),
+                fits[2],
+                100.0 * (fits[2] - target) / target.abs()
+            ),
+            detail,
+            uncertainty: Some(unc),
+        });
+    }
+    Ok(())
+}
+
+/// Gate 95-G, NAFEMS LE10 as restated (SPEC-LIT 95.11): the thick plate,
+/// its line constraint a mid-plane band, sigma_yy at D on the four
+/// `LE10_MESHES` - the bar on the finest, SPEC-LIT 94's study on the
+/// `LE10_STUDY_LEVELS` finest - run by the segregated loop and by the
+/// block-coupled one, each held to the bar.
+fn check_nafems_le10(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::restated;
+    c.note(RESTATED_95G);
+    let target = NAFEMS_LE10_SYY_D;
+    let fine = LE10_MESHES.len() - 1;
+    let nz_fine = LE10_MESHES[fine].2;
+    let mut detail: Vec<String> = Vec::new();
+    let mut short: Vec<String> = Vec::new();
+    let mut first_unc: Option<Uncertainty> = None;
+    for mode in [Loop95g::Segregated, Loop95g::BlockCoupled] {
+        let name = mode.name();
+        let mut levels: Vec<vv::Level> = Vec::new();
+        let mut errs = [Scalar::NAN; LE10_MESHES.len()];
+        let mut fits = [Scalar::NAN; LE10_MESHES.len()];
+        let mut conv = [false; LE10_MESHES.len()];
+        for (idx, (n_t, n_phi, n_z)) in LE10_MESHES.into_iter().enumerate() {
+            let p = match restated::le10_plate(n_t, n_phi, n_z) {
+                Ok(b) => {
+                    if idx == 0 && mode == Loop95g::Segregated {
+                        c.note(&format!("  LE10 slenderness (95.9): {:.3}", ofgpu::solid::slenderness(&b.mesh)));
+                    }
+                    match (restated::le10_bcs(&b.mesh), restated::patch_pressure(&b.mesh, "zmax", restated::LE10_P)) {
+                        (Ok(bcs), Ok(tr)) => point_95g(
+                            gpu, &b, restated::nafems_material(), &bcs, Some(&tr[..]), None, |s| s.yy, mode,
+                        ),
+                        (Err(e), _) | (_, Err(e)) => Point95g::failed(b.mesh.n_cells, e.to_string()),
+                    }
+                }
+                Err(e) => Point95g::failed(0, e.to_string()),
+            };
+            conv[idx] = p.converged;
+            fits[idx] = p.fit;
+            errs[idx] = rel95g(p.fit, target);
+            c.require(&format!("Gate 95-G LE10 {name}: outer loop converged, n_z = {n_z}"), p.converged);
+            levels.push(vv::Level { h: 1.0 / n_t as Scalar, value: p.fit });
+            let line = p.line(&format!("LE10 {name} n_z={n_z:>2}"), target);
+            c.note(&format!("  {line}"));
+            detail.push(line);
+        }
+        c.check(
+            &format!(
+                "Gate 95-G LE10 {name}: sigma_yy(D) on the finest mesh (n_z = {nz_fine}), rel to the restated -5.38 MPa"
+            ),
+            errs[fine],
+            0.03,
+        );
+        let studied = &LE10_MESHES[LE10_MESHES.len() - LE10_STUDY_LEVELS..];
+        let names: Vec<String> = studied.iter().map(|m| format!("n_z = {}", m.2)).collect();
+        c.note(&format!(
+            "  LE10 {name}: the study takes {}; n_z = {} is run and printed",
+            names.join(", "),
+            LE10_MESHES[0].2
+        ));
+        let tail = levels.split_off(levels.len() - LE10_STUDY_LEVELS);
+        let unc = study_95g(c, &format!("LE10 {name} sigma_yy(D), finest three"), tail, NO_STUDY_95G_LE10);
+        if !(conv.iter().all(|&v| v) && errs[fine] <= 0.03) {
+            short.push(format!(
+                "{name}: converged {}/{}, finest sigma_yy(D) {:.4e} Pa, {:+.2} %",
+                conv.iter().filter(|&&v| v).count(),
+                LE10_MESHES.len(),
+                fits[fine],
+                100.0 * (fits[fine] - target) / target.abs()
+            ));
+            if first_unc.is_none() {
+                first_unc = Some(unc);
+            }
+        }
+    }
+    if !short.is_empty() {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G LE10 thick plate (restated)",
+            against: "NAFEMS LE10 sigma_yy(D) = -5.38 MPa as RESTATED by ESRD (2018) - the NAFEMS P18 \
+                      primary was not read; geometry from openly published text; the line u_z = 0 is a \
+                      mid-plane band (SPEC-LIT 95.11)",
+            headline: short.join("; "),
+            detail,
+            uncertainty: first_unc,
+        });
+    }
+    Ok(())
+}
+
+/// Gate 95-G, NAFEMS LE11 as restated (SPEC-LIT 95.11): the solid
+/// cylinder/taper/sphere under T = r + z (S95.26), sigma_zz at A.
+fn check_nafems_le11(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::solid::restated;
+    c.note(RESTATED_95G);
+    let target = NAFEMS_LE11_SZZ_A;
+    let mut levels: Vec<vv::Level> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+    let mut errs = [Scalar::NAN; 3];
+    let mut fits = [Scalar::NAN; 3];
+    let mut conv = [false; 3];
+    let meshes = [(4usize, 8usize, 16usize), (8, 16, 32), (16, 32, 64)];
+    for (idx, (n_t, n_theta, n_s)) in meshes.into_iter().enumerate() {
+        let p = match restated::le11_body(n_t, n_theta, n_s) {
+            Ok(b) => {
+                if idx == 0 {
+                    c.note(&format!("  LE11 slenderness (95.9): {:.3}", ofgpu::solid::slenderness(&b.mesh)));
+                }
+                let (t, bt) = restated::le11_temperatures(&b.mesh);
+                point_95g(
+                    gpu, &b, restated::le11_material(), &restated::le11_bcs(), None, Some((&t[..], &bt[..])),
+                    |s| s.zz, Loop95g::Segregated,
+                )
+            }
+            Err(e) => Point95g::failed(0, e.to_string()),
+        };
+        conv[idx] = p.converged;
+        fits[idx] = p.fit;
+        errs[idx] = rel95g(p.fit, target);
+        c.require(&format!("Gate 95-G LE11: outer loop converged, n_s = {n_s}"), p.converged);
+        levels.push(vv::Level { h: 1.0 / n_t as Scalar, value: p.fit });
+        let line = p.line(&format!("LE11 n_s={n_s:>2}"), target);
+        c.note(&format!("  {line}"));
+        detail.push(line);
+    }
+    c.check(
+        "Gate 95-G LE11: sigma_zz(A) on the finest mesh (n_s = 64), rel to the restated -105 MPa",
+        errs[2],
+        0.03,
+    );
+    let unc = study_95g(c, "LE11 sigma_zz(A)", levels, NO_STUDY_95G);
+    if !(conv.iter().all(|&v| v) && errs[2] <= 0.03) {
+        c.report(GateReport {
+            verdict: Verdict::Misses,
+            how: How::Live,
+            gate: "Gate 95-G LE11 cylinder/taper/sphere (restated)",
+            against: "NAFEMS LE11 sigma_zz(A) = -105 MPa as RESTATED by ESRD (2018) - the NAFEMS P18 \
+                      primary was not read; geometry from openly published text (SPEC-LIT 95.11)",
+            headline: format!(
+                "converged {}/3, finest sigma_zz(A) {:.4e} Pa, {:+.2} % of the restated target",
+                conv.iter().filter(|&&v| v).count(),
+                fits[2],
+                100.0 * (fits[2] - target) / target.abs()
+            ),
+            detail,
+            uncertainty: Some(unc),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod le10_refine {
+    use super::*;
+
+    /// SPEC-LIT 95.11: LE10's four meshes are one refinement by two in every
+    /// direction apart, the first three are N1's, every n_z is even (the band
+    /// is the two layers either side of the mid-plane), the study takes the
+    /// finest three, and the finest builds with the band where it should be.
+    #[test]
+    fn le10_runs_four_meshes_each_halved_and_studies_the_finest_three() {
+        assert_eq!(LE10_MESHES.len(), 4, "four LE10 meshes");
+        assert_eq!(LE10_STUDY_LEVELS, 3, "the study takes three");
+        assert_eq!(&LE10_MESHES[..3], &[(6, 12, 4), (12, 24, 8), (24, 48, 16)], "the first three are N1's");
+        for w in LE10_MESHES.windows(2) {
+            assert_eq!((w[1].0, w[1].1, w[1].2), (2 * w[0].0, 2 * w[0].1, 2 * w[0].2), "halved: {w:?}");
+        }
+        assert!(LE10_MESHES.iter().all(|m| m.2 % 2 == 0), "every n_z even");
+        let (n_t, n_phi, n_z) = LE10_MESHES[LE10_MESHES.len() - 1];
+        let b = ofgpu::solid::restated::le10_plate(n_t, n_phi, n_z).expect("the finest LE10 mesh builds");
+        let r = b.mesh.check();
+        println!("finest LE10: {} cells, min volume {:e}", b.mesh.n_cells, r.min_volume);
+        assert_eq!(b.mesh.n_cells, n_t * n_phi * n_z);
+        assert_eq!(b.mesh.n_cells, 147_456);
+        assert!(r.min_volume > 0.0, "positive volumes");
+        let band = b.mesh.patches.iter().find(|p| p.name == "outer_mid").expect("the band patch");
+        assert_eq!(band.size, 2 * n_phi, "the band is two layers of outer faces");
+        assert_eq!(b.stencil.len(), 8, "the 2 x 2 x 2 corner stencil");
     }
 }

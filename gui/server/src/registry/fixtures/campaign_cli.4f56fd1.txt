@@ -1,0 +1,42 @@
+# The CLI surface of tools/autonomy/campaign.py at mesh-tree commit 4f56fd1, copied verbatim (lines 86-98 and 2758-2784)
+# so the registry's autonomy-campaign pipeline can be checked against it in a tree that does not carry the script.
+MODES = ("b0-template", "b0-lhs", "rules", "rules+prior", "rules+opt", "full",
+         "evaluate")
+SYSTEMS = MODES[:-1]
+BASELINES = ("b0-template", "b0-lhs")
+LAYERS = {"b0-template": (), "b0-lhs": (),
+          "rules": ("preflight", "rules", "remedies"),
+          "rules+prior": ("preflight", "rules", "remedies", "prior"),
+          "rules+opt": ("preflight", "rules", "remedies", "optimiser"),
+          "full": ("preflight", "rules", "remedies", "prior", "optimiser")}
+ABLATABLE = ("preflight", "remedies")
+HOOKS = {"prior": ("prior", "attempt1", "AM-13"),
+         "optimiser": ("optimise", "propose", "AM-14")}
+MAX_STREAMS = 6        # the house cap while the solver workflow runs (docs/15 §C says 12)
+def main(argv=None):
+    ap = _ArgParser(prog="campaign.py", description="the campaign runner (AM-11)")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--run", action="store_true")
+    ap.add_argument("--manifest")
+    ap.add_argument("--mode")
+    ap.add_argument("--out")
+    ap.add_argument("--system")
+    ap.add_argument("--ablate")
+    ap.add_argument("--run-id")
+    ap.add_argument("--tag")
+    ap.add_argument("--streams", type=int)
+    ap.add_argument("--timeout", type=float)
+    ap.add_argument("--probe-timeout", type=float)
+    ap.add_argument("--audit-mod", type=int)
+    ap.add_argument("--ids")
+    ap.add_argument("--limit", type=int)
+    ap.add_argument("--binary")
+    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--summary", action="store_true")
+    ap.add_argument("--replay", action="store_true")
+    ap.add_argument("--compare", nargs=2, metavar=("DIR_A", "DIR_B"))
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--gate", action="store_true")
+    ap.add_argument("--parts", default="smoke,1,2")
+    ap.add_argument("--json", action="store_true")

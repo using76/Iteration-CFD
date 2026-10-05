@@ -3,8 +3,9 @@
 // text of the others, and the model names.
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { BINARIES, BINARY_NAMES, getBinary, MODELS, PIPELINES } from '@cfd/shared'
+import { BINARIES, BINARY_NAMES, checkArgValue, getBinary, MODELS, PIPELINES, toolPolicy } from '@cfd/shared'
 import { REPO_ROOT } from '../runs/test-helpers.js'
 
 const RUST = path.join(REPO_ROOT, 'rust')
@@ -17,14 +18,27 @@ function cargoBins(): Array<{ name: string; path: string }> {
   return out
 }
 
-/** The concatenated string literal of `fn usage()` with Rust's `\`-newline continuations and `{}` expanded. */
+/** The concatenated string literal of `fn usage()` with Rust's `\`-newline continuations and `{}` expanded.
+ *  Three shapes, tried in order: `eprintln!("<literal>")`; `eprintln!("{}", usage_text())`, whose
+ *  literal is the first one in `fn usage_text()`'s `format!`; and `fn usage() -> String { "<literal>" }`. */
 function usageText(source: string): string {
-  const m = source.match(/fn usage\(\)\s*\{\s*eprintln!\(\s*"((?:[^"\\]|\\[\s\S])*)"/)
-  if (!m) throw new Error('no fn usage() literal')
-  return m[1]
-    .replace(/\\\r?\n\s*/g, '')
-    .replace(/\\n/g, '\n')
-    .replace(/\{\}/g, '\n  -permissive     downgrade unsupported-setting errors to warnings')
+  const expand = (lit: string): string =>
+    lit
+      .replace(/\\\r?\n\s*/g, '')
+      .replace(/\\n/g, '\n')
+      .replace(/\{\}/g, '\n  -permissive     downgrade unsupported-setting errors to warnings')
+  const LIT = '"((?:[^"\\\\]|\\\\[\\s\\S])*)"'
+  const direct = source.match(new RegExp(`fn usage\\(\\)\\s*\\{\\s*eprintln!\\(\\s*${LIT}`))
+  if (direct && direct[1] !== '{}') return expand(direct[1])
+  const text = source.match(/fn usage\(\)\s*\{\s*eprintln!\(\s*"\{\}",\s*usage_text\(\)\)/)
+  if (text) {
+    const t = source.match(new RegExp(`fn usage_text\\(\\)\\s*->\\s*String\\s*\\{[\\s\\S]*?format!\\(\\s*${LIT}`))
+    if (!t) throw new Error('no fn usage() literal')
+    return expand(t[1])
+  }
+  const ret = source.match(new RegExp(`fn usage\\(\\)\\s*->\\s*String\\s*\\{\\s*${LIT}`))
+  if (ret) return expand(ret[1])
+  throw new Error('no fn usage() literal')
 }
 
 function constUsage(source: string): string {
@@ -101,7 +115,7 @@ describe('registry <-> rust sources', () => {
   })
 
   it('geometry_pipelines_shape: geom-tool and regions-from-msh are .py pipelines beside the binaries', () => {
-    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh'])
+    expect(PIPELINES.map((p) => p.name)).toEqual(['mesh-step', 'geom-tool', 'regions-from-msh', 'autonomy-campaign', 'autonomy-preflight', 'cad-loop'])
     for (const [name, positionals] of [['geom-tool', ['command', 'file']], ['regions-from-msh', ['msh', 'outDir']]] as const) {
       const pipeline = PIPELINES.find((p) => p.name === name)!
       expect(pipeline.pipeline).toBe(true)
@@ -132,10 +146,107 @@ describe('registry <-> rust sources', () => {
     }
   })
 
+  it('cad_loop_pipeline: loop.py beside the binaries, its verbs and flags from the script itself', () => {
+    const p = PIPELINES.find((x) => x.name === 'cad-loop')!
+    expect(p).toBeTruthy()
+    expect(p.pipeline).toBe(true)
+    expect(BINARY_NAMES).not.toContain('cad-loop')
+    expect(getBinary('cad-loop')).toBe(p)
+    expect(p.source).toBe('tools/cad/loop.py')
+    expect([p.kind, p.gpu, p.longRunning, p.usageKind, p.positionals.map((x) => x.name)]).toEqual(['analysis', false, true, 'none', ['verb', 'study']])
+    expect(p.flags.map((f) => f.name)).toEqual(['--registry', '--unattended'])
+    // The verbs are main()'s own `want` keys minus the ones cad_evaluate owns, and the flags are
+    // the two the USAGE text documents; read the real script at REPO_ROOT, not a fixture.
+    const py = read(path.join(REPO_ROOT, p.source))
+    const want = py.match(/want = \{([^}]*)\}/)![1]
+    const keys = [...want.matchAll(/"([a-z]+)":/g)].map((m) => m[1])
+    const verbs = p.positionals[0].values!
+    for (const v of verbs) expect(keys, `verb ${v} is a main() verb`).toContain(v)
+    for (const v of ['init', 'intake', 'launch']) expect(verbs, `${v} stays with cad_evaluate`).not.toContain(v)
+    const usage = py.match(/^USAGE = \(([\s\S]*?)\)\s*\n\s*\n/m)![1]
+    for (const f of p.flags) expect(usage, `USAGE documents ${f.name}`).toContain(f.name)
+    const verb = p.positionals[0]
+    expect(checkArgValue(verb, 'run')).toBeNull()
+    expect(checkArgValue(verb, 'init')).toMatch(/must be one of/)
+  })
+
   it('agrees with driver_for on which driver builds the k-epsilon family', () => {
     const common = read(path.join(RUST, 'src', 'bin', 'common', 'mod.rs'))
     expect(common).toMatch(/RasModel::KEpsilon \| RasModel::RealizableKE \| RasModel::RNGkEpsilon => "ofgpu-k-epsilon"/)
     const ke = BINARIES.find((b) => b.name === 'ofgpu-k-epsilon')!
     expect(ke.builds).toEqual(expect.arrayContaining(['kEpsilon', 'realizableKE', 'RNGkEpsilon']))
+  })
+
+  it('autonomy_campaign_pipeline: campaign.py beside the binaries, its run flags from the script\'s own argparse', () => {
+    const p = PIPELINES.find((x) => x.name === 'autonomy-campaign')!
+    expect(p).toBeTruthy()
+    expect(p.pipeline).toBe(true)
+    expect(BINARY_NAMES).not.toContain('autonomy-campaign')
+    expect(getBinary('autonomy-campaign')).toBe(p)
+    expect(p.source).toBe('tools/autonomy/campaign.py')
+    expect([p.kind, p.gpu, p.longRunning, p.positionals]).toEqual(['mesh', false, true, []])
+    const flag = (n: string) => p.flags.find((f) => f.name === n)!
+    for (const n of ['--run', '--manifest', '--mode', '--out', '--tag', '--run-id', '--streams']) expect(p.flags.map((f) => f.name)).toContain(n)
+    const texts = [fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'campaign_cli.4f56fd1.txt'), 'utf8')]
+    const real = path.join(REPO_ROOT, 'tools', 'autonomy', 'campaign.py')
+    if (fs.existsSync(real)) texts.push(read(real))
+    for (const text of texts) {
+      const decl = new Map([...text.matchAll(/ap\.add_argument\("(--[a-z-]+)"([^\n]*)/g)].map((m) => [m[1], m[2]] as const))
+      for (const f of p.flags) {
+        expect(decl.has(f.name), `${f.name} is declared by campaign.py`).toBe(true)
+        const rest = decl.get(f.name) ?? ''
+        const want = rest.includes('action="store_true"') ? 'flag' : rest.includes('type=int') ? 'int' : rest.includes('type=float') ? 'float' : null
+        if (want) expect(f.type, f.name).toBe(want)
+        else expect(['string', 'path', 'enum', 'list'], f.name).toContain(f.type)
+      }
+      expect([...decl.keys()].filter((n) => !p.flags.some((f) => f.name === n)).sort()).toEqual(['--compare', '--gate', '--json', '--parts', '--replay', '--selftest', '--status', '--summary'])
+      const tuple = (name: string) => [...text.match(new RegExp(`^${name} = \\(([^)]*)\\)`, 'm'))![1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
+      expect(flag('--mode').values).toEqual(tuple('MODES'))
+      expect(text).toMatch(/^SYSTEMS = MODES\[:-1\]/m)
+      expect(flag('--system').values).toEqual(tuple('MODES').slice(0, -1))
+      expect(flag('--ablate').values).toEqual(tuple('ABLATABLE'))
+      expect(flag('--streams').description).toContain(`1..${Number(text.match(/^MAX_STREAMS = (\d+)/m)![1])}`)
+    }
+    expect(checkArgValue(flag('--streams'), '4')).toBeNull()
+    expect(checkArgValue(flag('--mode'), 'rules')).toBeNull()
+    expect(checkArgValue(flag('--mode'), 'bogus')).toMatch(/--mode must be one of/)
+    expect(checkArgValue(flag('--ablate'), 'preflight,remedies')).toBeNull()
+    expect(checkArgValue(flag('--ablate'), 'quality')).toMatch(/unknown quality/)
+    expect(checkArgValue(flag('--run'), true)).toBeNull()
+    expect(toolPolicy('run_start')).toBe('ask')
+  })
+
+  it('autonomy_preflight_pipeline: preflight.py beside the binaries, its config flags from the script\'s own parser', () => {
+    const p = PIPELINES.find((x) => x.name === 'autonomy-preflight')!
+    expect(p).toBeTruthy()
+    expect(p.pipeline).toBe(true)
+    expect(BINARY_NAMES).not.toContain('autonomy-preflight')
+    expect(getBinary('autonomy-preflight')).toBe(p)
+    expect(p.source).toBe('tools/autonomy/preflight.py')
+    expect([p.kind, p.gpu, p.longRunning, p.positionals.map((x) => x.name)]).toEqual(['mesh', false, false, ['config']])
+    const texts = [fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'preflight_cli.209852c.txt'), 'utf8')]
+    const real = path.join(REPO_ROOT, 'tools', 'autonomy', 'preflight.py')
+    if (fs.existsSync(real)) texts.push(read(real))
+    for (const text of texts) {
+      const body = (name: string) => {
+        const at = text.indexOf(`def ${name}(`)
+        expect(at, name).toBeGreaterThanOrEqual(0)
+        const end = text.indexOf('\ndef ', at + 1)
+        return text.slice(at, end < 0 ? undefined : end)
+      }
+      const cfg = body('_main_config')
+      const valued = new Set([...cfg.matchAll(/a == "(--[a-z-]+)" or a\.startswith\("--[a-z-]+="\)/g)].map((m) => m[1]))
+      const bare = new Set([...cfg.matchAll(/elif a == "(--[a-z-]+)":/g)].map((m) => m[1]))
+      for (const f of p.flags) {
+        expect(valued.has(f.name) || bare.has(f.name), `${f.name} is parsed by preflight.py`).toBe(true)
+        expect(f.type === 'flag', f.name).toBe(bare.has(f.name))
+      }
+      expect([...valued, ...bare].filter((n) => !p.flags.some((f) => f.name === n)).sort()).toEqual(['--records'])
+      expect([...body('main').matchAll(/"(--[a-z-]+)" in args/g)].map((m) => m[1])).toEqual(['--selftest', '--gate'])
+      expect(cfg).toContain('print("PREFLIGHT PASS")')
+      expect(cfg).toContain('return 3')
+    }
+    expect(p.flags.find((f) => f.name === '--arg')!.repeatable).toBe(true)
+    expect(toolPolicy('run_start')).toBe('ask')
   })
 })

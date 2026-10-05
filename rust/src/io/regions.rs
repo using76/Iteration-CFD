@@ -331,8 +331,8 @@ pub fn check_layout(
                 pa.size, pb.size, e.faces
             )));
         }
-        let tol = e.tolerance;
-        let (mut wc, mut wa, mut wn) = (0.0f64, 0.0f64, 0.0f64);
+        let tol = e.tolerance as Scalar;
+        let (mut wc, mut wa, mut wn) = (0.0 as Scalar, 0.0 as Scalar, 0.0 as Scalar);
         for k in 0..pa.size {
             let bfa = pa.start + k;
             let bfb = pb.start + k;

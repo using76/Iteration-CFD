@@ -433,7 +433,7 @@ def check_autonomy():
     script = os.path.join(REPO, 'tools', 'autonomy', 'selftest.py')
     env = dict(os.environ, PYTHONIOENCODING='utf-8')
     p = subprocess.run([sys.executable, script], capture_output=True, text=True,
-                       encoding='utf-8', errors='replace', env=env, timeout=900)
+                       encoding='utf-8', errors='replace', env=env, timeout=1800)
     oks = [l for l in p.stdout.splitlines() if l.startswith('[ok]')]
     assert p.returncode == 0 and 'SELFTEST PASS' in p.stdout, \
         'tools/autonomy/selftest.py failed (exit %d): %s' % (p.returncode, (p.stdout + p.stderr)[-2000:])

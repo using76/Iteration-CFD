@@ -20,8 +20,9 @@
       THREE arrays by one number
     F. N. Fritsch, R. E. Carlson, SIAM J. Numer. Anal. 17 (1980) 238-246 -
       the monotone slope limiter of fanCurveEval
-    FDS (NIST, US Government public domain; reference/fds/LICENSE.md read
-      verbatim) - the DISCIPLINE that a fan curve is scaled by rho/rho_curve
+    FDS (NIST, US Government public domain; its LICENSE.md read verbatim in
+      a local reference/fds clone that this repository does not carry) -
+      the DISCIPLINE that a fan curve is scaled by rho/rho_curve
       at every evaluation, and the WARNING that its tabulated branch resolves
       the operating point by a bisection with a data-dependent trip count,
       which is uncapturable here. Its source was read for those two points
@@ -193,6 +194,14 @@ extern "C" __global__ void fanStoreScalar3
 //  what CUDA Graph capture needs (S52.7).
 #define OFGPU_FAN_MAX_POINTS 64
 
+//  SPEC-LIT 112.1: one floor per precision, the same distance above each
+//  precision's smallest normal.
+#ifdef OFGPU_SINGLE
+#define OFGPU_FAN_TINY ((ofscalar)1e-30f)
+#else
+#define OFGPU_FAN_TINY ((ofscalar)1e-300)
+#endif
+
 
 //- (S52.13)'s corrections, and the value/slope of the curve at one flow.
 //
@@ -287,7 +296,7 @@ OFGPU_DEV void fanCurveAt
             const ofscalar qref = ofmax_(fanAbs_(qN - q0), (ofscalar)1e-30);
             const ofscalar kA = fanAbs_(mE)/qref;
             const ofscalar kB = fanAbs_(tdp[0])/(qref*qref);
-            const ofscalar k  = ofmax_(ofmax_(kA, kB), (ofscalar)1e-300);
+            const ofscalar k  = ofmax_(ofmax_(kA, kB), OFGPU_FAN_TINY);
             v = tdp[e] + mE*d - k*d*fanAbs_(d);
             s = mE - 2*k*fanAbs_(d);
         }
