@@ -41,7 +41,7 @@ use crate::surface::{Surface, TriIndex};
 use crate::{Scalar, Vec3};
 
 use super::quality::{self, Gate, QualityThresholds};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::snap::{face_area_vector, find_hanging};
 use crate::adapt::rebuild::ldu_permutation;
@@ -614,8 +614,10 @@ pub fn local_step(
 }
 
 /// (92.73): steps one ladder may take on one patch set in face mode before
-/// (92.47)'s patch rule. This project's own number, like `BETA_RUNG_LIMIT`.
-pub const TERMINATE_STEP_LIMIT: usize = 12;
+/// (92.47)'s patch rule. This project's own number, like `BETA_RUNG_LIMIT`;
+/// 12 was not enough for the full-size F1 tunnel's body, whose ladder spent
+/// its steps on the same squeezed cells the freeze now holds.
+pub const TERMINATE_STEP_LIMIT: usize = 24;
 
 /// (92.73): the OUTER ladder's per-patch-set state - every counter the
 /// ladder runs on one patch set, and the M and X face marks it carries into
@@ -823,8 +825,9 @@ pub struct LadderEntry {
     /// On a `Beta` entry, how many re-seated points it lowered; 0 on every
     /// other entry.
     pub beta_points: usize,
-    /// (92.73): on a `Terminate` entry, how many layer points the step
-    /// anchored; 0 on every other entry.
+    /// (92.73): on a `Terminate` entry, how many points the step anchored or
+    /// froze - a freeze's points, layer or interior, included; 0 on every
+    /// other entry.
     pub terminate_points: usize,
 }
 
@@ -1147,6 +1150,42 @@ fn close_under_hanging(
     fset.dedup();
 }
 
+/// (92.73) amended: the frozen point set - the cells' points, closed under
+/// "a hanging node in the set adds BOTH its parents", recursively, layer or
+/// not: a frozen cell is held whole, interior points included, so (92.46)'s
+/// relaxation cannot move it from its neighbours' wall points. Sorted, once.
+fn frozen_point_set(
+    cells: &[usize],
+    cell_points: &[Vec<u32>],
+    hanging: &[(u32, [u32; 2])],
+) -> Vec<usize> {
+    let mut parents: HashMap<usize, [u32; 2]> = HashMap::with_capacity(hanging.len());
+    for &(h, ab) in hanging {
+        parents.insert(h as usize, ab);
+    }
+    let mut in_set: HashSet<usize> = HashSet::new();
+    let mut queue: Vec<usize> = Vec::new();
+    for &c in cells {
+        for &p in &cell_points[c] {
+            if in_set.insert(p as usize) {
+                queue.push(p as usize);
+            }
+        }
+    }
+    while let Some(i) = queue.pop() {
+        if let Some(ab) = parents.get(&i) {
+            for &p in ab {
+                if in_set.insert(p as usize) {
+                    queue.push(p as usize);
+                }
+            }
+        }
+    }
+    let mut out: Vec<usize> = in_set.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
 /// (92.70)'s side faces carry a vertex ring that can close a triangle into
 /// a line when one endpoint is anchored: consecutive repeats go first,
 /// then the ring's own wrap-around repeat.
@@ -1363,6 +1402,11 @@ fn shrink_on(
         let mut hcount = vec![0usize; n_points];
         let mut anchored: Vec<bool> = caps.iter().map(|c| *c == 0.0).collect();
         let mut steps = 0usize;
+        // (92.73) amended: the freeze's two books, face mode's own - per
+        // input cell, the consecutive measurements that named it, and per
+        // point, whether a freeze already holds it. Untouched in patch mode.
+        let mut cell_fails = vec![0usize; cell_points.len()];
+        let mut frozen = vec![false; n_points];
         let limit = spec.min_thickness * st.total;
         loop {
             let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points, &beta, &anchored);
@@ -1373,6 +1417,11 @@ fn shrink_on(
             let rep = quality::measure_capped(&work, t, usize::MAX)?;
             let gates = failing_gates(&rep);
             if rep.passed() && face_mode {
+                // (92.73) amended: a passed measurement is no cell failing -
+                // the consecutive-failure counts start over.
+                for n in cell_fails.iter_mut() {
+                    *n = 0;
+                }
                 // (92.73), at a pass: a point the relaxation left at zero is
                 // ANCHORED, never a give-up - the faces around it taper in
                 // the extrusion. A point under the floor is anchored too,
@@ -1505,6 +1554,19 @@ fn shrink_on(
                 }
                 break;
             }
+            // (92.73) amended: the consecutive-failure counts update at every
+            // failed measurement, the beta rungs included - the freeze below
+            // reads them. A cell not named this measurement starts over.
+            let flags = failing_cell_flags(&rep, mesh, n_internal, cell_points.len());
+            if face_mode {
+                for (c, &bad) in flags.iter().enumerate() {
+                    if bad {
+                        cell_fails[c] += 1;
+                    } else {
+                        cell_fails[c] = 0;
+                    }
+                }
+            }
             // (92.66): before any give-up check or halving, a failure whose
             // failing cells carry a live re-seat point takes the pull back
             // there - never a halving of `D`, never a retreat.
@@ -1528,16 +1590,41 @@ fn shrink_on(
             }
             let fail_pts = failing_points(&rep, mesh, n_internal, &f.is_layer, &cell_points);
             if face_mode {
-                // (92.73), at a failure: F - the failing cells' MOVING layer
-                // points, closed under hanging parents - takes its local
-                // step point by point, and (92.47)'s patch drop waits for an
-                // empty F, a step that changed nothing, or the step limit.
+                // (92.73) amended, at a failure: the cells the freeze takes
+                // are held whole at d = 0, the other failing cells' MOVING
+                // layer points take their local step as before, and (92.47)'s
+                // patch drop waits for a step that freezes, halves or anchors
+                // nothing, or the step limit.
+                let mut freeze_cells: Vec<usize> = Vec::new();
+                for (c, &bad) in flags.iter().enumerate() {
+                    if !bad {
+                        continue;
+                    }
+                    // A cell whose layer points all stand at D = 0 is frozen
+                    // at its first failure: no step on ITS points can mend
+                    // it, (92.46) moves it from its neighbours' wall points.
+                    // Otherwise two consecutive failures do.
+                    let all_still = cell_points[c].iter().all(|&p| {
+                        let i = p as usize;
+                        !f.is_layer[i] || f.disp[i].mag_sqr() == 0.0
+                    });
+                    if all_still || cell_fails[c] >= 2 {
+                        freeze_cells.push(c);
+                    }
+                }
+                // The frozen points, closed under hanging parents - ALL
+                // parents, layer or not - minus the points an earlier freeze
+                // already holds: a cell is frozen at most once.
+                let mut frozen_new =
+                    frozen_point_set(&freeze_cells, &cell_points, &hanging);
+                frozen_new.retain(|&i| !frozen[i]);
                 let mut fset: Vec<usize> = fail_pts
                     .iter()
                     .copied()
-                    .filter(|&i| f.disp[i].mag_sqr() > 0.0)
+                    .filter(|&i| f.disp[i].mag_sqr() > 0.0 && !frozen[i])
                     .collect();
                 close_under_hanging(&mut fset, &hanging, &f.is_layer);
+                fset.retain(|&i| !frozen[i]);
                 // `in_g5`: the point is a point of a cell G5 names - halving
                 // `t` halves `V`, so no halving can mend a G5 failure.
                 let mut g5_pt = vec![false; n_points];
@@ -1569,22 +1656,12 @@ fn shrink_on(
                         ladder.push(e);
                         continue;
                     }
-                    // With no such point, F is the moving layer points of
-                    // every cell sharing a point with a failing cell - one
-                    // ring - closed the same way. Only when that is empty
-                    // too does (92.47)'s patch rule answer.
-                    let flags =
-                        failing_cell_flags(&rep, mesh, n_internal, cell_points.len());
-                    let fail_cells: Vec<usize> =
-                        (0..flags.len()).filter(|&c| flags[c]).collect();
-                    let moving: Vec<bool> = (0..n_points)
-                        .map(|i| f.disp[i].mag_sqr() > 0.0)
-                        .collect();
-                    let mut ring = one_ring_moving_points(
-                        &fail_cells, &cell_points, &f.is_layer, &moving,
-                    );
-                    close_under_hanging(&mut ring, &hanging, &f.is_layer);
-                    if ring.is_empty() {
+                    // With no such point the freeze answers in run 5's place:
+                    // F's cells all stand at D = 0, so the freeze above takes
+                    // them whole - run 2 widened F to one ring, and that is
+                    // gone. When the freeze holds nothing new either,
+                    // (92.47)'s patch rule answers.
+                    if frozen_new.is_empty() {
                         cause = Some(DropCause::InnerGate);
                         let mut e = LadderEntry::new(
                             Ladder::Inner, halvings, &names, &gates, Outcome::GiveUp, cause,
@@ -1597,7 +1674,6 @@ fn shrink_on(
                         ));
                         break;
                     }
-                    fset = ring;
                 }
                 if steps >= TERMINATE_STEP_LIMIT {
                     cause = Some(DropCause::InnerGate);
@@ -1613,7 +1689,29 @@ fn shrink_on(
                 }
                 let mut any_halved = false;
                 let mut changed = false;
+                // The freeze first: every point of a frozen cell, layer and
+                // interior, held at d = 0 from now on - relax holds it as it
+                // holds an anchored point, and (92.70) reads a frozen layer
+                // point as anchored because its D_i is 0. Freezing a point is
+                // the step's progress whatever it stood at.
+                let mut held = 0usize;
+                for &i in &frozen_new {
+                    changed = true;
+                    held += 1;
+                    if f.is_layer[i] {
+                        f.disp[i] = Vec3::ZERO;
+                        f.thickness[i] = 0.0;
+                    }
+                    anchored[i] = true;
+                    frozen[i] = true;
+                }
                 for &i in &fset {
+                    // A point the freeze took this very step - a shared point
+                    // of a frozen cell and a stepped one - is held, not
+                    // stepped.
+                    if frozen[i] {
+                        continue;
+                    }
                     match local_step(
                         g5_pt[i],
                         hcount[i],
@@ -1638,6 +1736,7 @@ fn shrink_on(
                             f.disp[i] = Vec3::ZERO;
                             f.thickness[i] = 0.0;
                             anchored[i] = true;
+                            held += 1;
                         }
                     }
                 }
@@ -1666,7 +1765,7 @@ fn shrink_on(
                         Ladder::Inner, halvings, &names, &gates, Outcome::Terminate, None,
                     );
                     e.beta_rung = beta_rungs;
-                    e.terminate_points = fset.len();
+                    e.terminate_points = held;
                     ladder.push(e);
                 }
                 steps += 1;
@@ -1816,8 +1915,8 @@ pub fn shrink(
 }
 
 /// The cells §92.3's failures blame - the failing-cell flags
-/// [`failing_points`] reads its points off, kept as a vector the one-ring
-/// of (92.73)' walks.
+/// [`failing_points`] reads its points off, kept as a vector the freeze of
+/// (92.73)' walks.
 fn failing_cell_flags(
     rep: &quality::QualityReport,
     mesh: &PolyMeshRaw,
@@ -1849,40 +1948,6 @@ fn failing_cell_flags(
         }
     }
     is_fail
-}
-
-/// (92.73)'s one ring: the MOVING layer points of every cell sharing a
-/// point with a failing cell - the set an empty `F` widens to, before
-/// (92.47)'s patch rule. `moving` and `is_layer` index the same points
-/// `cell_points` names.
-fn one_ring_moving_points(
-    fail_cells: &[usize],
-    cell_points: &[Vec<u32>],
-    is_layer: &[bool],
-    moving: &[bool],
-) -> Vec<usize> {
-    let mut touching = vec![false; is_layer.len()];
-    for &c in fail_cells {
-        for &p in &cell_points[c] {
-            touching[p as usize] = true;
-        }
-    }
-    let mut seen = vec![false; is_layer.len()];
-    let mut out = Vec::new();
-    for pts in cell_points.iter() {
-        if !pts.iter().any(|p| touching[*p as usize]) {
-            continue;
-        }
-        for &p in pts {
-            let i = p as usize;
-            if is_layer[i] && moving[i] && !seen[i] {
-                seen[i] = true;
-                out.push(i);
-            }
-        }
-    }
-    out.sort_unstable();
-    out
 }
 
 /// The layer points the gate's failure blames: the subject cell for the
@@ -2267,10 +2332,30 @@ pub fn add_layers(
     // (92.64)'s per-patch re-seat counts, the max over every attempt the
     // run made, by patch name.
     let mut reseated: HashMap<String, usize> = HashMap::new();
+    // (92.73)'s shrink reuse: the last attempt's patch set, caps and pull
+    // with the Shrunk they produced. The shrink is a deterministic function
+    // of those three, so a round whose three equal the last attempt's
+    // reuses the answer - every mesh, report and trace entry bit for bit
+    // what a fresh shrink returned - instead of running the shrink's ladder
+    // again; the reused inner entries are pushed into the trace again with
+    // the new round number, as always. Patch mode's caps change every
+    // round, so only the face-mode rounds ever reuse.
+    let mut shrink_cache: Option<(Vec<usize>, Vec<Scalar>, Vec<Scalar>, Shrunk)> = None;
     loop {
-        let mut a = attempt(
-            mesh, surf, spec, t, &patches, &fl.caps, &fl.betas, &fl.merged, &fl.cut,
+        let reuse = shrink_cache.as_ref().and_then(|(pp, pc, pb, s)| {
+            if pp.as_slice() == patches.as_slice()
+                && pc.as_slice() == fl.caps.as_slice()
+                && pb.as_slice() == fl.betas.as_slice()
+            {
+                Some(s)
+            } else {
+                None
+            }
+        });
+        let (mut a, shrunk) = attempt_on(
+            mesh, surf, spec, t, &patches, &fl.caps, &fl.betas, &fl.merged, &fl.cut, reuse,
         )?;
+        shrink_cache = Some((patches.clone(), fl.caps.clone(), fl.betas.clone(), shrunk));
         for row in &a.report.patches {
             let e = reseated.entry(row.name.clone()).or_insert(0);
             *e = (*e).max(row.n_reseated_points);
@@ -2636,10 +2721,12 @@ pub fn add_layers(
     }
 }
 
-/// One run of the extrusion, at a FIXED patch set and per-point retreat cap:
-/// [`add_layers`]' ladder calls this once per round and reads
-/// `quality.passed()` - an attempt does not refuse on the gate, because a
-/// gate failure on the layer cells is what the ladder retreats on.
+/// One run of the extrusion, at a FIXED patch set and per-point retreat cap,
+/// with a fresh shrink: the tests' entry, reading `quality.passed()` - an
+/// attempt does not refuse on the gate, because a gate failure on the layer
+/// cells is what the ladder retreats on. [`add_layers`] itself calls
+/// [`attempt_on`] with the shrink reuse.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn attempt(
     mesh: &PolyMeshRaw,
@@ -2652,6 +2739,29 @@ fn attempt(
     merged: &[bool],
     cut: &[bool],
 ) -> Result<Layered> {
+    attempt_on(mesh, surf, spec, t, patches0, caps, betas, merged, cut, None)
+        .map(|(a, _)| a)
+}
+
+/// [`attempt`] with the previous shrink handed in: `Some(s)` makes `s` the
+/// attempt's shrink without running the shrink's ladder again - the shrink
+/// is a deterministic function of the patch set, the caps and the pull, so
+/// the reused answer is bit for bit the fresh one - and the attempt returns
+/// the shrink it used, so [`add_layers`] can hand it back on the next round
+/// whose inputs match.
+#[allow(clippy::too_many_arguments)]
+fn attempt_on(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    spec: &LayerSpec,
+    t: &QualityThresholds,
+    patches0: &[usize],
+    caps: &[Scalar],
+    betas: &[Scalar],
+    merged: &[bool],
+    cut: &[bool],
+    shrunk: Option<&Shrunk>,
+) -> Result<(Layered, Shrunk)> {
     let st = stack(spec)?;
     let n = st.n;
     let named = patches0.to_vec();
@@ -2665,7 +2775,10 @@ fn attempt(
         .copied()
         .max()
         .map_or(0, |m| m as usize + 1);
-    let shrunk = shrink_on(mesh, surf, spec, t, patches0, caps, betas)?;
+    let shrunk = match shrunk {
+        Some(s) => s.clone(),
+        None => shrink_on(mesh, surf, spec, t, patches0, caps, betas)?,
+    };
     let field = &shrunk.field;
     // Nothing to do: no layers were asked for, or every named patch gave
     // its layers up in the shrink. The input mesh comes back bit for bit.
@@ -2729,24 +2842,27 @@ fn attempt(
         // §92.3's gate, run on the mesh that came back - which is the
         // input's, so this is a formality that costs nothing.
         let quality = quality::check(mesh, t)?;
-        return Ok(Layered {
-            mesh: shrunk.mesh,
-            report,
-            extrusion: Extrusion {
-                slot_of_point: vec![-1; n_points],
-                level_point: vec![Vec::new(); n + 1],
-                layer_faces: Vec::new(),
-                cell_start: Vec::new(),
-                cell_count: Vec::new(),
-                moving_slots: Vec::new(),
-                first_cell,
-                n,
+        return Ok((
+            Layered {
+                mesh: shrunk.mesh.clone(),
+                report,
+                extrusion: Extrusion {
+                    slot_of_point: vec![-1; n_points],
+                    level_point: vec![Vec::new(); n + 1],
+                    layer_faces: Vec::new(),
+                    cell_start: Vec::new(),
+                    cell_count: Vec::new(),
+                    moving_slots: Vec::new(),
+                    first_cell,
+                    n,
+                },
+                quality,
+                beta: shrunk.beta.clone(),
+                reseat_points: shrunk.reseat_points.clone(),
+                classes: Vec::new(),
             },
-            quality,
-            beta: shrunk.beta,
-            reseat_points: shrunk.reseat_points,
-            classes: Vec::new(),
-        });
+            shrunk,
+        ));
     }
 
     // (92.51)'s early refusal, BEFORE any cell is inserted: G5 would refuse
@@ -3553,24 +3669,27 @@ fn attempt(
         .filter(|&s| copies_slot[s])
         .map(|s| slots[s])
         .collect();
-    Ok(Layered {
-        mesh: out,
-        report,
-        extrusion: Extrusion {
-            slot_of_point,
-            level_point,
-            layer_faces: field.faces.clone(),
-            cell_start,
-            cell_count,
-            moving_slots,
-            first_cell,
-            n,
+    Ok((
+        Layered {
+            mesh: out,
+            report,
+            extrusion: Extrusion {
+                slot_of_point,
+                level_point,
+                layer_faces: field.faces.clone(),
+                cell_start,
+                cell_count,
+                moving_slots,
+                first_cell,
+                n,
+            },
+            quality,
+            beta: shrunk.beta.clone(),
+            reseat_points: shrunk.reseat_points.clone(),
+            classes,
         },
-        quality,
-        beta: shrunk.beta,
-        reseat_points: shrunk.reseat_points,
-        classes,
-    })
+        shrunk,
+    ))
 }
 
 /// The extrusion's own check on its own output, run BEFORE §92.3's gate:
@@ -4026,6 +4145,32 @@ pub(crate) mod tests {
         let mut fset = vec![6usize];
         close_under_hanging(&mut fset, &hanging, &is_layer);
         assert_eq!(fset, vec![1, 2, 5, 6]);
+    }
+
+    /// (92.73) amended: the freeze's point set - a frozen cell's points, all
+    /// of them, layer or not, closed under hanging parents recursively, so
+    /// the whole cell and everything hanging off it is held.
+    #[test]
+    fn a_frozen_cell_holds_every_point_and_its_hanging_parents() {
+        let cell_points: Vec<Vec<u32>> = vec![vec![0, 1, 2, 3], vec![2, 3, 4, 5]];
+        let hanging: Vec<(u32, [u32; 2])> = vec![(4, [6, 7]), (7, [8, 9])];
+        // Cell 1 freezes: its four points, then 4's parents 6 and 7, then
+        // 7's parents 8 and 9 - all of them, layer or not.
+        assert_eq!(
+            frozen_point_set(&[1], &cell_points, &hanging),
+            vec![2, 3, 4, 5, 6, 7, 8, 9]
+        );
+        // Cell 0 freezes: no hanging node among its points, so just the four.
+        assert_eq!(
+            frozen_point_set(&[0], &cell_points, &hanging),
+            vec![0, 1, 2, 3]
+        );
+        // Both at once: the shared 2 and 3 once, 0's set untouched by 4's
+        // parents.
+        assert_eq!(
+            frozen_point_set(&[0, 1], &cell_points, &hanging),
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
     }
 
     #[test]

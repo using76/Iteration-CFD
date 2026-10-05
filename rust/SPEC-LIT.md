@@ -26735,8 +26735,21 @@ face mode, OUTER ladder (the extruded mesh), after (92.66)'s beta rungs:
     no point moves, no cap changes; the next attempt re-extrudes with M and X
     a round that adds nothing to M or X, or a failure on a cell that is neither a layer cell nor at a
     level-n face, ends the ladder by (92.47)'s patch rule; so does TERMINATE_STEP_LIMIT rounds
-face mode, INNER ladder (the shrunk mesh): (92.73) of run 2 unchanged - F, the empty-F rule, the local
-    step, the hanging closure, the pass branch's thin anchoring
+face mode, INNER ladder (the shrunk mesh): (92.73) of run 2 amended - F, the local step, the hanging
+    closure and the pass branch's thin anchoring stay; run 2's one-ring widening is gone, and the
+    freeze below replaces it behind the empty-F rule:
+face mode, INNER ladder, at a failure (after (92.66)):
+    c_c = how many consecutive measurements of this ladder cell c has failed
+    a failing cell with c_c >= 2, or whose layer points all have D_i = 0, is FROZEN: every point of it,
+        layer and interior, is held at d = 0 from then on (relax holds it as it holds an anchored point),
+        closed under hanging parents (all parents, layer or not)
+    the points of the other failing cells take the local step as before
+    a frozen cell is the input cell, which passed the gate on arrival, so a cell is frozen at most once
+    and the ladder ends: every step freezes, halves or anchors at least one point, or (92.47) answers
+add_layers reuses an attempt's shrink when the next attempt's patch set, caps and pull equal the last
+    attempt's exactly - the shrink is a deterministic function of those three, so the mesh, the report
+    and the trace are bit for bit what a fresh shrink returned; patch mode's caps change every round,
+    so only the face-mode rounds ever reuse
 every per-patch-set counter, M and X reset when a patch drops
 a patch whose faces are all OFF reports n_layers 0, drop_cause terminated                (92.73)
 ```
@@ -26748,11 +26761,16 @@ built on that midpoint. Closed, its parents are anchored (or non-layer
 boundary points, which never move), and the forced zero IS the mean.
 
 The step limit and `theta_U` are this project's choices, not readings of the
-specification: 12 bounds a monotone ladder — every step moves at least one
-face into M or X, or one cap down or to zero, and the inner pass path zeroes
-its own thin points — and
+specification: 24 bounds a monotone ladder — every step moves at least one
+face into M or X, or one cap down or to zero, or freezes, halves or anchors
+at least one point, and the inner pass path zeroes its own thin points — and
 15 degrees is the angle the reduced F1 tunnel reads its 29 wheel ground
-junctions through without anchoring them.
+junctions through without anchoring them. 12 was not enough for the
+full-size F1 tunnel, whose body patch spent twelve steps halving and
+anchoring the wall points of two or three squeezed cells while the interior
+relaxation kept moving those cells from their neighbours, and then dropped
+the whole patch for them; the freeze spends a step on holding such a cell
+whole instead, and the limit only has to outlast the steps it needs.
 
 The report says what the mode did: a layer patch's row carries
 
