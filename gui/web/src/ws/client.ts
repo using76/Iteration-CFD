@@ -133,7 +133,8 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
       send({ t: 'session.open', sessionId: latest.id })
       return
     }
-    send({ t: 'session.new' })
+    // The server creates the session in the locale the screen is showing.
+    send({ t: 'session.new', locale: ui.getState().locale })
   }
 
   async function reconcileRuns() {
@@ -251,6 +252,23 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     }, delay)
   }
 
+  // Selecting a finished run in the UI is what subscribes to it, and moving off
+  // it is what unsubscribes. The watcher lives exactly while this client is
+  // connected or reconnecting: StrictMode's mount -> cleanup -> mount runs
+  // connect(); close(); connect() on this one client, so a watcher registered
+  // once at creation would die with the first close() and never come back.
+  let stopWatchingUi: (() => void) | null = null
+
+  function watchUi(): void {
+    if (stopWatchingUi) return
+    stopWatchingUi = ui.subscribe(syncRunSubscriptions)
+  }
+
+  function unwatchUi(): void {
+    stopWatchingUi?.()
+    stopWatchingUi = null
+  }
+
   function open() {
     if (closedByUser) return
     session.getState().setConnection(attempt === 0 ? 'connecting' : 'offline')
@@ -291,20 +309,17 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
     }
   }
 
-  // Selecting a finished run in the UI is what subscribes to it, and moving off
-  // it is what unsubscribes.
-  const stopWatchingUi = ui.subscribe(syncRunSubscriptions)
-
   return {
     viewer,
     connect() {
       closedByUser = false
+      watchUi()
       if (ws) return
       open()
     },
     close() {
       closedByUser = true
-      stopWatchingUi()
+      unwatchUi()
       subscribed.clear()
       stopTimers()
       viewer.detach()

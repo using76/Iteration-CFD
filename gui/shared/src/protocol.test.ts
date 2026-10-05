@@ -61,6 +61,16 @@ describe('ui bridge frames', () => {
     expect(roundTripServer(host)).toEqual(host)
   })
 
+  it('session.new and session.open carry an optional locale', () => {
+    const open: ClientMsg = { t: 'session.open', sessionId: null, locale: 'ko' }
+    expect(roundTripClient(open)).toEqual(open)
+    const fresh: ClientMsg = { t: 'session.new', locale: 'ko' }
+    expect(roundTripClient(fresh)).toEqual(fresh)
+    expect(ClientMsgSchema.safeParse({ t: 'session.new' }).success).toBe(true)
+    expect(ClientMsgSchema.safeParse({ t: 'session.open', sessionId: 's_1' }).success).toBe(true)
+    expect(ClientMsgSchema.safeParse({ t: 'session.new', locale: 'fr' }).success).toBe(false)
+  })
+
   it('round-trips the six geometry commands', () => {
     const cmds: ServerMsg[] = [
       { t: 'ui.command', requestId: 'g_1', cmd: { type: 'geometry_open', path: 'cases/x.stl' } },
