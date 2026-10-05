@@ -59,10 +59,13 @@ USAGE = ("usage: python wedge_mesh.py --selftest" + chr(10)
          + "       python wedge_mesh.py run-turb GEOM_DIR OUT_DIR [U_E]" + chr(10)
          + "       python wedge_mesh.py gmsh-build-turb GEOM_DIR LEVEL H1_0 MSH_PATH")
 
-RECIPE = {"version": "cad-wedge/1", "theta_deg": 5.0, "k_stations": 10, "tau_design": 0.06,
-          "cells_l0": 10000, "ratio": 2, "levels": [0, 1, 2], "nr_min": 4,
-          "grading": "geometric to the wall, first cell h1_fine * 2 ** (2 - level)",
-          "axial": "uniform per block, n from the tau budget at level 2"}
+RECIPE = {"version": "cad-wedge/2", "theta_deg": 5.0, "k_stations": 10, "tau_design": 0.06,
+          "cells_l0": 10000, "ratio": 2, "levels": [0, 1, 2], "nr_min": 4, "samples": 257,
+          "grading": "geometric to the wall; the first spacing on station line k is h1_fine * 2 ** (2 - level) * phi_k, "
+                     "phi_k = min over the blocks b adjacent to k of 1 / (cos(beta_k) * c_b), so the wall-normal "
+                     "first cell is at most the target",
+          "axial": "uniform per block, nb0 = max(1, ceil(ceil(span / dx_b) / 4)), dx_b = 9 h1_fine^2 / "
+                   "(tau_design^2 max_i(2 r_i sin(theta/2) / cos(beta_i))) over the block's wall segments"}
 H1_FINE_NOMINAL = 5.9e-6      # m: docs/16 §C (Thwaites planning numbers) and §L: the L2 first cell at Re_De 3e4
 TOL_GEOM = 1e-6               # m: OCC bounding boxes are padded by about 1e-7 m
 TOL_ANGLE = 1e-6              # rad: a wedge side's centre of mass sits at -theta/2 or +theta/2
@@ -99,6 +102,50 @@ class Refused(Exception):
         Exception.__init__(self, "%s: %s" % (rule, detail))
         self.rule = rule
         self.detail = detail
+
+
+def wall_segments(xs, rs):
+    """The 256 wall segments of one sampled wall: (x_mid, r_mid, beta) per sample pair, beta the
+    fold-to-[0, pi/2] slope angle in sample order."""
+    out = []
+    for i in range(len(xs) - 1):
+        beta = abs(math.atan2(rs[i + 1] - rs[i], xs[i + 1] - xs[i]))
+        out.append(((xs[i] + xs[i + 1]) / 2.0, (rs[i] + rs[i + 1]) / 2.0,
+                    min(beta, math.pi - beta)))
+    return out
+
+
+def block_scale(x0, x1, beta0, beta1, segs):
+    """The block factor c_b of the cad-wedge/2 budget: max over the block's wall segments of the
+    x-interpolated station multiplier ((1 - s) / cos(beta0) + s / cos(beta1)) * cos(beta_i)."""
+    best = None
+    for x_mid, _r_mid, beta_i in segs:
+        s = (x_mid - x0) / (x1 - x0)
+        c = ((1.0 - s) / math.cos(beta0) + s / math.cos(beta1)) * math.cos(beta_i)
+        best = c if best is None else max(best, c)
+    return best
+
+
+def station_factors(betas, scales):
+    """phi_k per station line: min over the adjacent blocks of 1 / (cos(beta_k) * c_b), so the
+    wall-normal first cell laid along the line is at most the target."""
+    out = []
+    for k, beta_k in enumerate(betas):
+        best = None
+        for b in (k - 1, k):
+            if 0 <= b < len(scales):
+                phi = 1.0 / (math.cos(beta_k) * scales[b])
+                best = phi if best is None else min(best, phi)
+        out.append(best)
+    return out
+
+
+def axial_dx(h1_fine, segs, tau=RECIPE["tau_design"], theta_deg=RECIPE["theta_deg"]):
+    """The cad-wedge/2 axial budget per block: 9 h1^2 / (tau^2 max(2 r sin(theta/2) / cos(beta)))
+    over the block's wall segments (the tau = 3 dx / sqrt(hr w) rule solved for dx)."""
+    th = math.radians(theta_deg)
+    worst = max(2.0 * r_mid * math.sin(th / 2.0) / math.cos(beta) for _x, r_mid, beta in segs)
+    return 9.0 * h1_fine ** 2 / (tau ** 2 * worst)
 
 
 def solve_q(h1, length, n):
@@ -173,10 +220,9 @@ def _split_meridian(gmsh, geom_dir, edges):
 
 
 def _blocks(gmsh, surfs, edges, h1_fine):
-    """Each block's two radial curves, axis curve and wall curve, and its level-0 axial count from the tau
-    budget at level 2: dx <= 9 h1^2 cos^3(beta) / (tau^2 2 r sin(theta/2)), at the block's r_max and beta_max."""
-    th = math.radians(RECIPE["theta_deg"])
-    tau = RECIPE["tau_design"]
+    """Each block's two radial curves, axis curve and wall curve, its 256 sampled wall segments and
+    its level-0 axial count from the cad-wedge/2 pointwise budget: dx_b = 9 h1^2 / (tau^2 max(2 r
+    sin(theta/2) / cos(beta))) over the block's wall segments, nb0 = max(1, ceil(ceil(span/dx_b)/4))."""
     out = []
     for i, s in enumerate(surfs):
         cs = [abs(c[1]) for c in gmsh.model.getBoundary([(2, s)], oriented=False)]
@@ -187,17 +233,44 @@ def _blocks(gmsh, surfs, edges, h1_fine):
             raise Refused("WEDGE-TOPO", "block %d has %d radial, %d axis, %d wall curves, want 2, 1, 1"
                           % (i, len(rad), len(axis), len(wall)))
         r_max, beta = _wall_shape(gmsh, wall[0])
-        dx = 9.0 * h1_fine ** 2 * math.cos(beta) ** 3 / (tau ** 2 * 2.0 * r_max * math.sin(th / 2.0))
-        nb2 = math.ceil((edges[i + 1] - edges[i]) / dx)
+        pb = gmsh.model.getParametrizationBounds(1, wall[0])
+        t0, t1 = float(pb[0][0]), float(pb[1][0])
+        pts = [gmsh.model.getValue(1, wall[0], [t0 + (t1 - t0) * j / 256]) for j in range(RECIPE["samples"])]
+        segs = wall_segments([p[0] for p in pts], [math.hypot(p[1], p[2]) for p in pts])
+        nb2 = math.ceil((edges[i + 1] - edges[i]) / axial_dx(h1_fine, segs))
         out.append({"surface": s, "radial": sorted(rad), "axis": axis[0], "wall": wall[0],
                     "x0": edges[i], "x1": edges[i + 1], "r_max_m": r_max,
-                    "beta_max_deg": math.degrees(beta), "nb0": max(1, math.ceil(nb2 / 4))})
+                    "beta_max_deg": math.degrees(beta), "segs": segs,
+                    "nb0": max(1, math.ceil(nb2 / 4))})
     return out
 
 
-def _set_transfinite(gmsh, blocks, level, h1):
+def _station_betas(gmsh, blocks, edges):
+    """The folded slope angle of every station line: at each wall-curve end sitting on the line,
+    the meridian slope beta = |atan2(dr, dx)| with dr = (y dy + z dz) / hypot(y, z); betas[k] is
+    the max over the ends contributing to station k (one at the inlet and outlet, two elsewhere)."""
+    ends = []
+    for b in blocks:
+        pb = gmsh.model.getParametrizationBounds(1, b["wall"])
+        for t in (float(pb[0][0]), float(pb[1][0])):
+            p = gmsh.model.getValue(1, b["wall"], [t])
+            d = gmsh.model.getDerivative(1, b["wall"], [t])
+            dr = (p[1] * d[1] + p[2] * d[2]) / math.hypot(p[1], p[2])
+            beta = abs(math.atan2(dr, d[0]))
+            ends.append((p[0], min(beta, math.pi - beta)))
+    out = []
+    for x in edges:
+        cands = [beta for xe, beta in ends if abs(xe - x) <= TOL_GEOM]
+        if not cands:
+            raise Refused("WEDGE-TOPO", "no wall-curve end sits on the station at x %r" % (x,))
+        out.append(max(cands))
+    return out
+
+
+def _set_transfinite(gmsh, blocks, level, h1, phi, edges):
     """Axial curves uniform with nb0 * 2^level cells; each radial curve nr cells, geometric to the wall end
-    (its end with the larger radius) with first cell h1; every block a recombined transfinite surface."""
+    (its end with the larger radius) with first cell h1 * phi[k] (k the curve's station line); every block a
+    recombined transfinite surface."""
     f = 2 ** level
     nr = max(RECIPE["nr_min"], round(RECIPE["cells_l0"] / sum(b["nb0"] for b in blocks))) * f
     done = set()
@@ -209,8 +282,12 @@ def _set_transfinite(gmsh, blocks, level, h1):
                 continue
             done.add(c)
             e = _curve_ends(gmsh, c)
+            ks = [k for k in range(len(edges)) if abs(e[0][0] - edges[k]) <= TOL_GEOM]
+            if len(ks) != 1:
+                raise Refused("WEDGE-TOPO", "a radial curve at x %r sits on %d station lines, want 1"
+                              % (e[0][0], len(ks)))
             r0, r1 = math.hypot(e[0][1], e[0][2]), math.hypot(e[1][1], e[1][2])
-            q = solve_q(h1, abs(r1 - r0), nr)
+            q = solve_q(h1 * phi[ks[0]], abs(r1 - r0), nr)
             # a Progression coefficient c makes each cell c times the previous one in parameter order
             gmsh.model.mesh.setTransfiniteCurve(c, nr + 1, "Progression", q if r0 > r1 else 1.0 / q)
         gmsh.model.mesh.setTransfiniteSurface(b["surface"])
@@ -274,7 +351,11 @@ def gmsh_build(geom_dir, level, h1_fine, msh_path):
         gmsh.model.occ.revolve(src, 0, 0, 0, 1, 0, 0, th, numElements=[1], recombine=True)
         gmsh.model.occ.synchronize()
         blocks = _blocks(gmsh, surfs, edges, h1_fine)
-        nr = _set_transfinite(gmsh, blocks, level, h1)
+        betas = _station_betas(gmsh, blocks, edges)
+        scales = [block_scale(b["x0"], b["x1"], betas[i], betas[i + 1], b["segs"])
+                  for i, b in enumerate(blocks)]
+        phi = station_factors(betas, scales)
+        nr = _set_transfinite(gmsh, blocks, level, h1, phi, edges)
         groups = _classify(gmsh, planes)
         for name in GROUPS:
             gmsh.model.addPhysicalGroup(2, sorted(groups[name]), name=name)
@@ -292,7 +373,7 @@ def gmsh_build(geom_dir, level, h1_fine, msh_path):
         gmsh.finalize()
     f = 2 ** level
     return {"level": level, "h1_target_m": h1, "nr": nr, "nb": [b["nb0"] * f for b in blocks],
-            "elements": elements, "n_cells": sum(elements.values()),
+            "elements": elements, "n_cells": sum(elements.values()), "phi": phi,
             "blocks": [dict((k, b[k]) for k in ("x0", "x1", "r_max_m", "beta_max_deg")) for b in blocks],
             "meridian": {"area_m2": area, "ybar_m": ybar}, "gmsh": version}
 
@@ -315,7 +396,7 @@ def load_bins(path=BIN_JSON):
     return out
 
 
-def check_geom(geom_dir, recipe="cad-wedge/1"):
+def check_geom(geom_dir, recipe=RECIPE["version"]):
     """The geom dict, refused unless it declares metres at scale 1 on +x with a METRE STEP and an
     upstream_role its recipe meshes."""
     for name in ("geom.json", "tags.json", "meridian.step"):
@@ -329,7 +410,7 @@ def check_geom(geom_dir, recipe="cad-wedge/1"):
     role = (geom.get("params") or {}).get("upstream_role")
     if role not in ("slip", "wall"):
         raise Refused("WEDGE-GEOM", "upstream_role %r is not one of slip, wall" % (role,))
-    if recipe == "cad-wedge/1" and role != "slip":
+    if recipe == RECIPE["version"] and role != "slip":
         raise Refused("WEDGE-GEOM", "the laminar recipe meshes the slip case of docs/16 §H.2; upstream_role is %r" % (role,))
     return geom
 
@@ -828,7 +909,8 @@ def selftest():
         print("[ok] nominal export ok")
 
         # T3: GC-6 at the three levels, with the pinned counts
-        PIN = {0: (15, 676, 9464, 676), 1: (30, 1352, 39208, 1352), 2: (60, 2704, 159536, 2704)}
+        PIN = {0: (17, 595, 9520, 595), 1: (34, 1190, 39270, 1190), 2: (68, 2380, 159460, 2380)}
+        TAU = {0: 0.117993, 1: 0.083426, 2: 0.058988}
         res = run(geom_dir, os.path.join(td, "out"))
         assert res["status"] == "ok", (res["status"], res["rule"], res["message"])
         rep = res["report"]
@@ -839,11 +921,14 @@ def selftest():
             got = (lv["nr"], sum(lv["nb"]), lv["elements"]["hex"], lv["elements"]["prism"])
             assert got == PIN[n], (n, got, PIN[n], common.canonical_json(lv))
             assert lv["cells"] == lv["elements"]["hex"] + lv["elements"]["prism"], common.canonical_json(lv)
+            assert abs(lv["check"]["tau_min"] - TAU[n]) <= 2e-6, (n, lv["check"]["tau_min"], TAU[n])
+            assert abs(lv["h1_rel"] - 0.0035) <= 5e-4, (n, lv["h1_rel"])
             worst = max(abs(p["rel"]) for p in lv["patches"].values())
             print("[ok] L%d: %d cells (hex %d, prism %d), tau %.6f >= 0.05, first cell %+.4f, volume %+.5f, "
                   "worst area %.5f, GC-6 pass"
                   % (n, lv["cells"], lv["elements"]["hex"], lv["elements"]["prism"], lv["check"]["tau_min"],
                      lv["h1_rel"], lv["volume_rel"], worst))
+        assert rep["levels"][0]["nb"] == [226, 46, 45, 45, 44, 42, 36, 29, 22, 18, 16, 26], rep["levels"][0]["nb"]
 
         # T4: Pappus against the BREP volume
         assert abs(rep["pappus"]["rel"]) <= PAPPUS_TOL, rep["pappus"]["rel"]
@@ -887,6 +972,48 @@ def selftest():
                         for nm in ("boundary", "faces", "neighbour", "owner", "points"))
             assert lv["polymesh_sha256"] == want, n
         print("[ok] polymesh_sha256 of L0, L1, L2 equals the five written polyMesh files")
+
+        # T-START: the G4 start (poly7, L/D 0.5, t_wall 4 mm) meshes and passes GC-6 at all three levels
+        sgeom = os.path.join(td, "sgeom")
+        res_s = export.run_pipeline(export.TEMPLATE, dict(export.NOMINAL, L_over_Di=0.5, law="poly7",
+                                                          t_wall=0.004), sgeom)
+        assert res_s["status"] == "ok", (res_s["status"], res_s["rule"], res_s["message"])
+        PIN_S = {0: (22, 464, 9744, 464), 1: (44, 928, 39904, 928), 2: (88, 1856, 161472, 1856)}
+        TAU_S = {0: 0.116531, 1: 0.082382, 2: 0.058247}
+        res = run(sgeom, os.path.join(td, "sout"))
+        assert res["status"] == "ok", (res["status"], res["rule"], res["message"])
+        rows = []
+        for lv in res["report"]["levels"]:
+            n = lv["level"]
+            bad_pred = [k for k, v in lv["gc6"].items() if not v and k != "pass"]
+            assert lv["gc6"]["pass"], (n, bad_pred, common.canonical_json(lv))
+            got = (lv["nr"], sum(lv["nb"]), lv["elements"]["hex"], lv["elements"]["prism"])
+            assert got == PIN_S[n], (n, got, PIN_S[n], common.canonical_json(lv))
+            assert abs(lv["check"]["tau_min"] - TAU_S[n]) <= 2e-6, (n, lv["check"]["tau_min"], TAU_S[n])
+            assert abs(lv["h1_rel"] - 0.0018) <= 5e-4, (n, lv["h1_rel"])
+            rows.append("L%d %d cells tau %.6f" % (n, lv["cells"], lv["check"]["tau_min"]))
+        assert res["report"]["levels"][0]["nb"] == [226, 23, 24, 28, 30, 30, 27, 20, 13, 9, 8, 26], \
+            res["report"]["levels"][0]["nb"]
+        print("[ok] T-START the G4 start (poly7, L/D 0.5, t_wall 4 mm) meshes under cad-wedge/2: %s,"
+              " GC-6 pass at all three levels" % ", ".join(rows))
+
+        # T-STATION: the pure helpers against the oracle probe (same rules, no gmsh)
+        xs = [0.01 * i / 256 for i in range(257)]
+        flat = wall_segments(xs, [0.03] * 257)
+        cone = wall_segments(xs, [0.03 - x for x in xs])
+        assert all(b == 0.0 for _x, _r, b in flat)
+        assert all(abs(b - math.pi / 4) <= 1e-9 for _x, _r, b in cone)
+        assert abs(block_scale(0.0, 0.01, 0.0, 0.0, flat) - 1.0) <= 1e-12
+        assert abs(block_scale(0.0, 0.01, math.pi / 4, math.pi / 4, cone) - 1.0) <= 1e-9
+        assert abs(axial_dx(5.9e-6, flat) - 3.3251651485121544e-05) <= 1e-12 * 3.3251651485121544e-05
+        assert abs(axial_dx(5.9e-6, cone) - 2.35277858196742e-05) <= 1e-9 * 2.35277858196742e-05
+        want = [1.0, 1.1785113019775793, 0.8333333333333334]
+        got = station_factors([0.0, math.pi / 4, 0.0], [1.0, 1.2])
+        assert all(abs(g - w) <= 1e-12 for g, w in zip(got, want)), got
+        assert wall_segments([0.0, -0.001], [0.03, 0.03])[0][2] == 0.0, "the folded beta is pi"
+        print("[ok] T-STATION the pure helpers match the oracle: flat axial_dx 3.3252e-05, cone"
+              " 2.3528e-05 (max at r_mid 0.02998046875), phi [1.0, 1.1785113, 0.8333333], folded"
+              " beta 0.0, block scales 1.0")
 
         # T7: each GC-6 predicate fails on its own planted miss, alone
         base = rep["levels"][0]

@@ -4,8 +4,9 @@
 # No GPL-licensed source was consulted.
 """g4.py - the G4 nozzle study (docs/16 §E.2, §E.4, §E.7, §H.4 G4, §I CAD-21): the locked brief's
 contraction through the real "cfd" evaluator on the REDUCED path - an evaluation outside the walk
-that lands in the same cache a later walk reuses with zero work - plus the judge, the report and
-the cad-g4/1 record. The full run (the walk's own prefilter of 4 x 256 candidates, at most 24 L1
+that lands in the same cache a later walk reuses with zero work - plus the judge, the report,
+the cad-g4/1 record and the REDUCED prefilter (the walk's own CAD prefilter on the first N Sobol
+points of each law). The full run (the walk's own prefilter of 4 x 256 candidates, at most 24 L1
 evaluations, the L2 confirmation at 6000 iterations and the deep replay) is the supervisor's and
 stays deferred until it has run.
 
@@ -13,6 +14,7 @@ Usage:
   python g4.py --selftest
   python g4.py init STUDY_DIR [--registry R]
   python g4.py evaluate STUDY_DIR NAME LEVEL [PARAMS_JSON] [--registry R]
+  python g4.py prefilter STUDY_DIR N_PER_LAW [--registry R]
   python g4.py record STUDY_DIR OUT_JSON [--registry R]
   python g4.py report STUDY_DIR OUT_MD
 """
@@ -25,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CAD = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, CAD)
 import common  # noqa: E402
+import evaluate_cfd  # noqa: E402
 import gate  # noqa: E402
 import loop  # noqa: E402
 import optimise_cad  # noqa: E402
@@ -36,11 +39,13 @@ STUDY = "g4_nozzle"
 G4_IDS = ("G4-START", "G4-NOT-RUN", "G4-EVALS", "G4-CONFIRM", "G4-REGRESS", "G4-REPLAY", "G4-CFDU")
 MAX_EVALS = 24                       # docs/16 §E.7, = gates.json max_evals (assert it)
 REDUCED_JSONL = "reduced.jsonl"
+PF_SUBSET_JSONL = "prefilter_subset.jsonl"
 REFUSAL_IDS = ("G4-NAME", "G4-PARAMS")
 NAME_RE = re.compile("^[a-z0-9_]{1,40}$")
 USAGE = ("usage: python g4.py --selftest" + chr(10)
          + "       python g4.py init STUDY_DIR [--registry R]" + chr(10)
          + "       python g4.py evaluate STUDY_DIR NAME LEVEL [PARAMS_JSON] [--registry R]" + chr(10)
+         + "       python g4.py prefilter STUDY_DIR N_PER_LAW [--registry R]" + chr(10)
          + "       python g4.py record STUDY_DIR OUT_JSON [--registry R]" + chr(10)
          + "       python g4.py report STUDY_DIR OUT_MD")
 REDUCED_KEYS = ("schema", "name", "level", "eval_key", "params_sha", "params")
@@ -86,6 +91,53 @@ def evaluate(study_dir, name, level, params=None, registry_path=gate.REGISTRY,
                          "params_sha": optimise_cad.params_sha(params), "params": params})
     return {"name": name, "eval_key": ek, "design_verdict": verdict["design_verdict"],
             "stage_reached": ev["stage_reached"], "solve_class": ev["solve_class"]}
+
+
+def prefilter(study_dir, n_per_law, registry_path=gate.REGISTRY, pf_fn=None) -> dict:
+    """The walk's own CAD prefilter on the first N Sobol points of each law (docs/16 §E.7's
+    REDUCED subset): the pool candidates with sobol_index < n_per_law, each appended to
+    prefilter_subset.jsonl in pool order as a CAND_KEYS + prefilter row (loop's PF row shape).
+    Rows are keyed (law, sobol_index): an existing row whose CAND_KEYS differ from that pool
+    candidate, or that is no pool candidate, refuses G4-PREFILTER; a subset candidate already
+    in the file is reused with no call."""
+    (_doc, decl, _ts, _ds, checks, study, gates, _gl) = loop._pre_walk(study_dir, registry_path)
+    if not isinstance(n_per_law, int) or isinstance(n_per_law, bool) \
+            or not 1 <= n_per_law <= gates["sobol_pool"]:
+        raise ValueError("G4-PREFILTER: n_per_law %r is not an int in 1..%d"
+                         % (n_per_law, gates["sobol_pool"]))
+    fixed = dict((name, study["start"]["params"][name])
+                 for name in optimise_cad.design_space(decl)["fixed"])
+    cands = optimise_cad.pool(study["study_id"], decl, fixed, gates["sobol_pool"])
+    subset = [c for c in cands if c["sobol_index"] < n_per_law]
+    keyed = dict(((c["law"], c["sobol_index"]), c) for c in cands)
+    pf_path = os.path.join(study_dir, PF_SUBSET_JSONL)
+    n_new, seen = 0, set()
+    for row in common.read_jsonl(pf_path):
+        if not isinstance(row, dict) or tuple(sorted(row.keys())) != \
+                tuple(sorted(optimise_cad.CAND_KEYS + ("prefilter",))) \
+                or (row.get("law"), row.get("sobol_index")) not in keyed:
+            raise ValueError("G4-PREFILTER: %s holds a row that is no pool candidate"
+                             % (PF_SUBSET_JSONL,))
+        cand = keyed[(row["law"], row["sobol_index"])]
+        if any(row[k] != cand[k] for k in optimise_cad.CAND_KEYS):
+            raise ValueError("G4-PREFILTER: %s's %s/%d row is not its pool candidate"
+                             % (PF_SUBSET_JSONL, row["law"], row["sobol_index"]))
+        seen.add((row["law"], row["sobol_index"]))
+    for cand in subset:
+        if (cand["law"], cand["sobol_index"]) in seen:
+            continue
+        rec = (pf_fn or evaluate_cfd.prefilter)(cand["params"], checks)
+        common.jsonl_append(pf_path, dict([(k, cand[k]) for k in optimise_cad.CAND_KEYS]
+                                          + [("prefilter", rec)]))
+        n_new += 1
+    by_key = dict(((r["law"], r["sobol_index"]), r) for r in common.read_jsonl(pf_path))
+    sub_rows = [by_key[(c["law"], c["sobol_index"])] for c in subset]
+    passing = [r for r in sub_rows if r["prefilter"].get("status") == "pass"]
+    passing.sort(key=lambda r: (r["prefilter"]["objective"], r["law_index"], r["sobol_index"]))
+    best = [{"law": r["law"], "sobol_index": r["sobol_index"], "params_sha": r["params_sha"],
+             "objective": r["prefilter"]["objective"]} for r in passing[:8]]
+    return {"n_per_law": n_per_law, "n": len(subset), "n_new": n_new,
+            "n_pass": len(passing), "best": best}
 
 
 def judge_g4(start, it_rows, dec_rows, replay_ok, cfd_u_status) -> dict:
@@ -179,7 +231,8 @@ def report(iterations_path) -> str:
 
 CFD_U_SOURCE = "tools/cad/cases/nozzle_nominal/nominal_record.json"
 G4_DOC_KEYS = ("version", "reduced", "study_id", "lock_sha", "binary", "cfd_u", "start",
-               "precondition", "reduced_evals", "loop", "replay", "g4", "deferred")
+               "precondition", "reduced_evals", "loop", "replay", "g4", "deferred",
+               "prefilter_subset")
 ENTRY_FIELDS = ("stage_reached", "solve_class", "reason_id", "message", "cells", "mesh", "solve",
                 "wall_s", "gpu_shared")
 VERDICT_FIELDS = ("req_id", "verdict", "reason_id", "m", "u")
@@ -229,6 +282,16 @@ def record(study_dir, registry_path=gate.REGISTRY) -> dict:
              "fields_bit_identical": nominal["g_repeat"]["fields_bit_identical"],
              "gci_fine_known": gci_known}
     reduced_evals = [_reduced_entry(r, study_dir) for r in reduced_rows]
+    pf_disk = common.read_jsonl(os.path.join(study_dir, PF_SUBSET_JSONL))
+    if not pf_disk:
+        pf_subset = None
+    else:
+        pf_subset = {"n": len(pf_disk),
+                     "n_pass": sum(1 for r in pf_disk if r["prefilter"]["status"] == "pass"),
+                     "rows": [{"law": r["law"], "sobol_index": r["sobol_index"],
+                               "params_sha": r["params_sha"], "status": r["prefilter"]["status"],
+                               "rule_id": r["prefilter"]["rule_id"],
+                               "objective": r["prefilter"]["objective"]} for r in pf_disk]}
     walk_start = [r for r in it_rows if isinstance(r, dict) and r.get("origin") == "start"]
     red_start = [e for e in reduced_evals if e["name"] == "start"]
     if walk_start:
@@ -244,7 +307,7 @@ def record(study_dir, registry_path=gate.REGISTRY) -> dict:
     doc_out = {"version": VERSION, "reduced": True, "study_id": doc["study_id"],
                "lock_sha": doc["lock_sha"], "binary": binary, "cfd_u": cfd_u, "start": start,
                "precondition": {"start_n_hard_fail": nhf, "met": bool(nhf)},
-               "reduced_evals": reduced_evals, "loop": st,
+               "reduced_evals": reduced_evals, "loop": st, "prefilter_subset": pf_subset,
                "replay": {"status": "NOT_RUN", "ok": None},
                "g4": judge_g4(start, it_rows, dec_rows, None, cfd_u["status"]),
                "deferred": list(DEFERRED)}
@@ -255,11 +318,7 @@ def record(study_dir, registry_path=gate.REGISTRY) -> dict:
     return doc_out
 
 
-# ---- the CAD-21 selftest: G1..G5, one [ok] line each; fakes only, the GPU is never launched ----
-
-def _fake_solve(case_dir, geom_dir, run_dir, iters):
-    raise AssertionError("the fake solve must never be called")
-
+# ---- the CAD-21 selftest: G1..G6, one [ok] line each; fakes only, the GPU is never launched ----
 
 def _expect_checks(checks) -> None:
     """The compiled checks of the committed requirements, exactly as docs/16 §H.4 fixed them."""
@@ -411,32 +470,109 @@ def selftest():
               " [G4-CFDU], a regressed promote [G4-REGRESS], 25 evals [G4-EVALS], confirm_fail last"
               " [G4-CONFIRM]")
 
-        # (G5) the record of one reduced "start" evaluation on the E4 path (the fake never solves)
+        # (G5) the record of one reduced "start" evaluation on the E5 fakes: the judge stage reads,
+        # the planted Cd 0.95 fails REQ-005, so the G4 precondition is met and G4-START stays off
         s5 = os.path.join(td, "study5")
         reg5 = os.path.join(td, "studies5.jsonl")
         init(s5, reg5)
-        res = evaluate(s5, "start", "L1", None, reg5, eval_kwargs={"solve_fn": _fake_solve})
-        assert res["name"] == "start" and res["stage_reached"] == "mesh", res
+
+        def solve5(case_dir, geom_dir, run_dir, iters):
+            return evaluate_cfd._steady_doc()
+
+        def post5(case_dir, time_name, geom_dir):
+            d = evaluate_cfd._post_doc()
+            d["metrics"]["Cd"]["value"] = 0.95
+            return d
+
+        def snap5():
+            return {"status": "unavailable", "gpu": None, "compute_apps": [], "detail": "fake"}
+        res = evaluate(s5, "start", "L1", None, reg5,
+                       eval_kwargs={"solve_fn": solve5, "post_fn": post5, "snapshot_fn": snap5})
+        assert res["name"] == "start" and res["stage_reached"] == "judge", res
         rec = record(s5, reg5)
         assert tuple(sorted(rec.keys())) == tuple(sorted(G4_DOC_KEYS)), sorted(rec)
         assert rec["version"] == VERSION and rec["reduced"] is True and rec["study_id"] == STUDY
         assert rec["start"]["source"] == "reduced" and rec["start"]["name"] == "start"
-        assert rec["precondition"] == {"start_n_hard_fail": 0, "met": False}, rec["precondition"]
+        nhf = rec["start"]["n_hard_fail"]
+        assert nhf >= 1, nhf
+        req5 = [v for v in rec["start"]["verdicts"] if v["req_id"] == "REQ-005"]
+        assert len(req5) == 1 and req5[0]["verdict"] == "fail", req5
+        assert rec["precondition"] == {"start_n_hard_fail": nhf, "met": True}, rec["precondition"]
         assert rec["g4"]["verdict"] == "OPEN"
         rs = rec["g4"]["reasons"]
-        assert rs[:2] == ["G4-START", "G4-NOT-RUN"] and rs[-1] == "G4-CFDU", rs
+        assert rs[0] == "G4-NOT-RUN" and "G4-START" not in rs and rs[-1] == "G4-CFDU", rs
         assert rec["replay"] == {"status": "NOT_RUN", "ok": None}
         assert rec["cfd_u"]["status"] == "OPEN" and rec["cfd_u"]["gci_fine_known"] is False
+        assert rec["prefilter_subset"] is None
         assert len(rec["reduced_evals"]) == 1 and rec["reduced_evals"][0]["name"] == "start"
         e0 = rec["reduced_evals"][0]
-        assert e0["stage_reached"] == "mesh" and e0["solve_class"] == "not_run"
+        assert e0["stage_reached"] == "judge" and e0["solve_class"] == "steady"
         assert rec["binary"]["sha256"] == "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
         text = common.canonical_json(rec)
         assert "C:" not in text and td not in text, "an absolute path in the record"
         reds = common.read_jsonl(os.path.join(s5, REDUCED_JSONL))
         assert len(reds) == 1 and tuple(sorted(reds[0].keys())) == tuple(sorted(REDUCED_KEYS))
-        print("[ok] record: cad-g4/1 keys exact, start.source reduced, precondition not met, g4 OPEN"
-              " from G4-START/G4-NOT-RUN to G4-CFDU, replay NOT_RUN, and no absolute path anywhere")
+        print("[ok] record: cad-g4/1 keys exact, the start reaches judge with REQ-005 failing"
+              " (n_hard_fail %d), the precondition is met, g4 OPEN from G4-NOT-RUN to G4-CFDU with"
+              " no G4-START, prefilter_subset None, replay NOT_RUN, and no absolute path anywhere"
+              % (nhf,))
+
+        # (G6) the REDUCED prefilter: the walk's own pool subset, file reuse and refusals (fake pf)
+        s6 = os.path.join(td, "study6")
+        reg6 = os.path.join(td, "studies6.jsonl")
+        init(s6, reg6)
+        _d6, decl6, _ts6, _ds6, _ck6, st6, g6, _gl6 = loop._pre_walk(s6, reg6)
+        fixed6 = dict((name, st6["start"]["params"][name])
+                      for name in optimise_cad.design_space(decl6)["fixed"])
+        pool6 = optimise_cad.pool(st6["study_id"], decl6, fixed6, g6["sobol_pool"])
+        sha2idx = dict((c["params_sha"], c["sobol_index"]) for c in pool6)
+        calls = []
+
+        def fake_pf(p, _checks):
+            idx = sha2idx[optimise_cad.params_sha(p)]
+            calls.append(idx)
+            return {"params_sha": optimise_cad.params_sha(p),
+                    "status": "pass" if idx % 2 == 0 else "refused",
+                    "rule_id": None if idx % 2 == 0 else "REQ-006",
+                    "objective": 0.05 + 0.001 * idx, "rows": {}, "reason": "fake"}
+        out6 = prefilter(s6, 2, reg6, fake_pf)
+        assert out6["n_per_law"] == 2 and out6["n"] == 8 and out6["n_new"] == 8, out6
+        assert out6["n_pass"] == 4 and len(out6["best"]) == 4, out6
+        pf_path6 = os.path.join(s6, PF_SUBSET_JSONL)
+        assert len(common.read_jsonl(pf_path6)) == 8
+        before = open(pf_path6, "rb").read()
+        calls.clear()
+        out6b = prefilter(s6, 2, reg6, fake_pf)
+        assert out6b["n_new"] == 0 and out6b["n_pass"] == 4 and calls == [], (out6b, calls)
+        assert open(pf_path6, "rb").read() == before, "a reused row rewrote the file"
+        out6c = prefilter(s6, 3, reg6, fake_pf)
+        assert out6c["n"] == 12 and out6c["n_new"] == 4 and out6c["n_pass"] == 8, (out6c,)
+        assert len(common.read_jsonl(pf_path6)) == 12
+        for bad in (0, True):
+            try:
+                prefilter(s6, bad, reg6, fake_pf)
+                raise AssertionError("n_per_law %r was accepted" % (bad,))
+            except ValueError as e:
+                assert str(e).startswith("G4-PREFILTER"), e
+        rows = common.read_jsonl(pf_path6)
+        rows[0]["params_sha"] = "0" * 64
+        with open(pf_path6, "wb") as f:
+            f.write(chr(10).join(common.canonical_json(r) for r in rows).encode("utf-8") + chr(10).encode("utf-8"))
+        try:
+            prefilter(s6, 2, reg6, fake_pf)
+            raise AssertionError("a tampered row was accepted")
+        except ValueError as e:
+            assert str(e).startswith("G4-PREFILTER"), e
+        rec6 = record(s6, reg6)
+        ps = rec6["prefilter_subset"]
+        assert ps["n"] == 12 and ps["n_pass"] == 8 and len(ps["rows"]) == 12, ps
+        assert all("reason" not in r for r in ps["rows"]), ps["rows"][0]
+        assert tuple(sorted(rec6.keys())) == tuple(sorted(G4_DOC_KEYS)), sorted(rec6)
+        print("[ok] prefilter: the first 2 Sobol points of each law make 8 rows (8 calls, 4 pass),"
+              " a second call reuses with 0 calls and identical bytes, 3 extends by 4 rows (8 pass"
+              " at even indices), 0 and True refuse G4-PREFILTER, a tampered params_sha refuses"
+              " G4-PREFILTER, and the record's prefilter_subset reads n 12 / n_pass 8 with no"
+              " reason key")
 
     shutil.rmtree(td, ignore_errors=True)
     print("selftest wall %.1f s" % (time.time() - t0))
@@ -457,7 +593,7 @@ def main(argv) -> int:
     if argv in (["--help"], ["-h"]):
         print(USAGE)
         return 0
-    want = {"init": (1, 1), "evaluate": (3, 4), "record": (2, 2), "report": (2, 2)}
+    want = {"init": (1, 1), "evaluate": (3, 4), "prefilter": (2, 2), "record": (2, 2), "report": (2, 2)}
     if not argv or argv[0] not in want:
         print(USAGE, file=sys.stderr)
         return 2
@@ -481,6 +617,8 @@ def main(argv) -> int:
         elif verb == "evaluate":
             params = None if len(pos) < 4 else common.read_json(pos[3])
             res = evaluate(pos[0], pos[1], pos[2], params, registry)
+        elif verb == "prefilter":
+            res = prefilter(pos[0], int(pos[1]), registry)
         elif verb == "record":
             res = record(pos[0], registry)
             common.write_json(pos[1], res)

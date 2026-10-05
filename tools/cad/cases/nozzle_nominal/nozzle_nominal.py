@@ -823,14 +823,14 @@ def _case_snapshot(root):
 def _t6(out, build_doc):
     assert build_doc["names"] == list(RUN_SET_REDUCED), build_doc["names"]
     rows = dict((lv["level"], lv) for lv in build_doc["levels"]["wedge"])
-    assert rows[0]["cells"] == 10140 and rows[1]["cells"] == 40560, rows
+    assert rows[0]["cells"] == 10115 and rows[1]["cells"] == 40460, rows
     xrows = dict((lv["level"], lv) for lv in build_doc["levels"]["wedge_x"])
     # The brief expected L0x denser than L0; the tree wins: the laminar recipe re-targets
     # cells_l0, so the longer exit tube shrinks nr and L0x comes out with FEWER cells.
     span_a = common.read_json(os.path.join(out, "geom", "geom.json"))["x_span_m"]
     span_x = common.read_json(os.path.join(out, "geom_x", "geom.json"))["x_span_m"]
     assert span_x > span_a and xrows[0]["cells"] != rows[0]["cells"], (span_a, span_x, xrows[0])
-    assert build_doc["cases"]["L0_re3e4"]["cells"] == 10140
+    assert build_doc["cases"]["L0_re3e4"]["cells"] == 10115
     sa, sb = (_case_snapshot(os.path.join(out, "cases", n)) for n in ("L0_re3e4", "L0r_re3e4"))
     assert sa and sa == sb, sorted(set(sa) ^ set(sb))
     cj3 = common.read_json(os.path.join(out, "cases", "L0_re3e4", "case.json"))

@@ -1770,7 +1770,7 @@ def _t1(cdir, gdir):
     assert d_c <= 1e-15 and d_v <= 1e-12, (d_c, d_v)
     lays = layers(mesh)
     assert len(lays) == 515, len(lays)
-    assert set(len(lay["faces"]) for lay in lays) == {30}, sorted(set(len(lay["faces"]) for lay in lays))
+    assert set(len(lay["faces"]) for lay in lays) == {34}, sorted(set(len(lay["faces"]) for lay in lays))
     tags = common.read_json(os.path.join(gdir, "tags.json"))
     planes = dict((q["name"], q["x"]) for q in tags["planes"])
     xs = [lay["x"] for lay in lays]
@@ -1984,7 +1984,7 @@ def _t6(mesh, doc, gdir, cdir, case):
     oc = mesh["owner"][wf]
     order = np.lexsort((wf, mesh["C"][oc, 0]))
     cells = oc[order]
-    assert len(np.unique(cells)) == len(cells) == 900, len(cells)
+    assert len(np.unique(cells)) == len(cells) == 738, len(cells)
 
     def run(ranks):
         u = u_field

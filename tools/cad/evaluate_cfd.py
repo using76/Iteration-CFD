@@ -659,7 +659,7 @@ def selftest():
         # (E1) the eval key: exactly EVAL_KEY_PARTS, the level inside mesh_recipe_version
         parts = _parts(params, "L1", tsha, dsha, lock, gl)
         assert tuple(sorted(parts.keys())) == tuple(sorted(reqs.EVAL_KEY_PARTS)), sorted(parts)
-        assert parts["mesh_recipe_version"] == "cad-wedge/1@L1", parts["mesh_recipe_version"]
+        assert parts["mesh_recipe_version"] == "cad-wedge/2@L1", parts["mesh_recipe_version"]
         assert parts["case_writer_version"] == "cad-case/1/1", parts["case_writer_version"]
         k1 = reqs.eval_key(parts)
         k2 = reqs.eval_key(_parts(params, "L2", tsha, dsha, lock, gl))
@@ -675,7 +675,7 @@ def selftest():
             raise AssertionError("level_index accepted L3")
         except ValueError as e:
             assert str(e).startswith("EVAL-LEVEL"), e
-        print("[ok] eval parts: exactly reqs.EVAL_KEY_PARTS, cad-wedge/1@L1, L1 != L2 key,"
+        print("[ok] eval parts: exactly reqs.EVAL_KEY_PARTS, cad-wedge/2@L1, L1 != L2 key,"
               " bin_sha = bin_gpu's 50471caa, a changed cfd_u_source moves the key, L3 raises EVAL-LEVEL")
 
         # (E2) cfd_u from the real nominal record: bit-identical repeat fields give band 0.0 everywhere
@@ -693,7 +693,8 @@ def selftest():
         print("[ok] cfd_u: the nominal record gives gci_fine None and band 0.0 for every cfd check;"
               " planted band Cd 0.002 hits REQ-005 only, REQ-004 stays None")
 
-        # (E3) cfd_records: a planted post doc, a refused post, a None metric
+        # (E3) cfd_records: a planted post doc, a refused post, a None metric; the recipe is cad-wedge/2
+        assert parts["mesh_recipe_version"] == "cad-wedge/2@L1", parts["mesh_recipe_version"]
         pdoc = _post_doc()
         recs = cfd_records(checks, pdoc)
         assert recs["REQ-005"]["value"] == 0.97 and recs["REQ-004"]["value"] == 0.005
@@ -709,13 +710,15 @@ def selftest():
         assert erecs["REQ-005"]["status"] == "error"
         v = verify.judge([c for c in checks["checks"] if c["req_id"] == "REQ-005"][0], erecs["REQ-005"])
         assert v["reason_id"] == "NE-ERROR" and v["verdict"] == "not_evaluable", v
-        print("[ok] cfd records: planted post values exact with unit 1 and cad-measure/1 valid;"
-              " a refused post refuses all EVAL-POST naming POST-BIND; a None Cd is NE-ERROR")
+        print("[ok] cfd records: cad-wedge/2@L1; planted post values exact with unit 1 and"
+              " cad-measure/1 valid; a refused post refuses all EVAL-POST naming POST-BIND;"
+              " a None Cd is NE-ERROR")
 
-        # (E4) the REAL start (poly7, L/D 0.5, t_wall 0.004) at L1: the mesh gate refuses EVAL-MESH
+        # (E4) the design this recipe cannot mesh (cubic_matched x_m 0.2) at L2: the mesh gate refuses
+        p4 = dict(params, law="cubic_matched", x_m=0.2)
         out4 = os.path.join(td, "e4")
         os.makedirs(out4)
-        stage = evaluate(params, "L1", checks, out4, os.path.join(HERE, "studies", "g4_nozzle"),
+        stage = evaluate(p4, "L2", checks, out4, os.path.join(HERE, "studies", "g4_nozzle"),
                          solve_fn=_no_solve)
         assert stage == {"stage_reached": "mesh", "solve_class": "not_run"}, stage
         st = common.read_json(os.path.join(out4, "stage.json"))
@@ -723,7 +726,7 @@ def selftest():
         assert 0.0 < st["mesh"]["tau_min"] < 0.05, st["mesh"]["tau_min"]
         assert sorted(n for n in os.listdir(out4) if os.path.isfile(os.path.join(out4, n))) \
             == sorted(TOP_FILES), sorted(os.listdir(out4))
-        ek = reqs.eval_key(_parts(params, "L1", tsha, dsha, lock, gl))
+        ek = reqs.eval_key(_parts(p4, "L2", tsha, dsha, lock, gl))
         ms = common.read_json(os.path.join(out4, "measurements.json"))
         cu = common.read_json(os.path.join(out4, "cfd_u.json"))
         verdict = verify.evaluate(checks, doc, ms, ek, cu)
@@ -734,9 +737,10 @@ def selftest():
             assert rows[rid]["verdict"] == "not_evaluable" and rows[rid]["reason_id"] == "NE-MISSING", \
                 (rid, rows[rid])
         assert verdict["design_verdict"] == "not_evaluable", verdict["design_verdict"]
-        print("[ok] mesh gate: the real start at L1 stops at stage mesh with EVAL-MESH (tau_min %.6f),"
-              " the entry holds exactly the five top files, REQ-001/002/006 pass and every cfd row"
-              " is NE-MISSING (design not_evaluable)" % (st["mesh"]["tau_min"],))
+        print("[ok] mesh gate: the cubic_matched x_m 0.2 design at L2 stops at stage mesh with"
+              " EVAL-MESH (tau_min %.6f < 0.05), the entry holds exactly the five top files,"
+              " REQ-001/002/006 pass and every cfd row is NE-MISSING (design not_evaluable)"
+              % (st["mesh"]["tau_min"],))
 
         # (E5) the meshable design (poly7, L/D 0.75, t_wall 0.004) at L1 with fakes reaches judge
         p5 = dict(params, L_over_Di=0.75)
@@ -811,7 +815,7 @@ def selftest():
         study_dir = os.path.join(td, "study")
         g4.init(study_dir, reg)
         calls0 = loop_mod.EVALUATOR_CALLS[0]
-        verdict, ev, ek7 = loop_mod.evaluate_one(study_dir, params, "L1", checks, doc, tsha, dsha,
+        verdict, ev, ek7 = loop_mod.evaluate_one(study_dir, p4, "L2", checks, doc, tsha, dsha,
                                                  gl, True, evaluator="cfd",
                                                  eval_kwargs={"solve_fn": _no_solve})
         assert loop_mod.EVALUATOR_CALLS[0] - calls0 == 1, "evaluate_one did not count one call"
@@ -820,7 +824,7 @@ def selftest():
         again = loop_mod.validate_cache(study_dir, ek7, checks, doc)
         assert common.canonical_json(again) == common.canonical_json(verdict)
         n0 = loop_mod.EVALUATOR_CALLS[0]
-        verdict2, ev2, ek7b = loop_mod.evaluate_one(study_dir, params, "L1", checks, doc, tsha,
+        verdict2, ev2, ek7b = loop_mod.evaluate_one(study_dir, p4, "L2", checks, doc, tsha,
                                                     dsha, gl, True, evaluator="cfd",
                                                     eval_kwargs={"solve_fn": _no_solve})
         assert ek7b == ek7 and loop_mod.EVALUATOR_CALLS[0] == n0, "the cache hit did work"
