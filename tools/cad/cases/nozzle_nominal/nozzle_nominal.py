@@ -373,8 +373,8 @@ def build(out_dir, full=False):
 
 
 def values(run_dir):
-    """N4: the m dict of the nine metric values plus x_exit, nu and edge, from runs/<name>/
-    post.json; None when the file is missing or its status is not ok."""
+    """N4: the m dict of the nine metric values plus x_exit, nu, edge and boundary_other_rel, from
+    runs/<name>/post.json; None when the file is missing or its status is not ok."""
     p = os.path.join(run_dir, "post.json")
     if not os.path.isfile(p):
         return None
@@ -389,6 +389,8 @@ def values(run_dir):
     m["x_exit"] = ep.get("x_m")
     m["nu_m2_s"] = (doc.get("operating_point") or {}).get("nu_m2_s")
     m["edge"] = doc.get("edge")
+    bf = doc.get("boundary_flux")
+    m["boundary_other_rel"] = bf.get("other_rel") if isinstance(bf, dict) else None
     return m
 
 

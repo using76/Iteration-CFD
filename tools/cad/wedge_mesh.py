@@ -38,6 +38,9 @@ BIN_JSON = os.path.join(HERE, "bin.json")
 GC6 = {"volume_rel": 3e-3, "area_rel": 5e-3, "tau_min": 0.05, "first_cell_rel": 0.05, "cells_rel": 0.15}
 PAPPUS_TOL = 1e-9             # rel: 2 pi A ybar of the meridian against geom.json's BREP volume
 TYPE_ARGS = ["-type", "wedge_front=wedge", "-type", "wedge_back=wedge"]
+# The slip section carries no mass: typed symmetry, the solver prescribes its boundary flux to zero
+# (momentum.cu momFluxIsPrescribed, the mesh.rs:84 kind map), which is what docs/16 §H.2's case wants.
+TYPE_ARGS_SLIP = TYPE_ARGS + ["-type", "slip_upstream=symmetry"]
 CHECK_CONFIG = {"input": {"surfaces": [{"path": "unused.stl"}]},
                 "domain": {"extent": [0.0, 1.0, 0.0, 1.0, 0.0, 1.0], "base_size": 0.1},
                 "quality": {"min_thickness_ratio": 0.05},
@@ -364,10 +367,14 @@ def patch_types(case_dir):
 
 
 def require_wedge_types(types, groups=GROUPS):
-    """Refused unless the six patches are there and both wedge sides came out type wedge."""
+    """Refused unless the six patches are there, both wedge sides came out type wedge and, when the
+    groups carry the slip section, it came out type symmetry (the zero-flux typing of docs/16 §H.2)."""
     if sorted(types) != sorted(groups) or types["wedge_front"] != "wedge" or types["wedge_back"] != "wedge":
         raise Refused("WEDGE-TYPE", "boundary is %r, want %r with both wedge sides typed wedge"
                       % (types, sorted(groups)))
+    if "slip_upstream" in groups and types["slip_upstream"] != "symmetry":
+        raise Refused("WEDGE-TYPE", "boundary is %r, slip_upstream is %r, want symmetry"
+                      % (types, types["slip_upstream"]))
 
 
 def run_check(bins, case_dir, cfg_path, min_tau=GC6["tau_min"]):
@@ -452,7 +459,9 @@ def judge(rep):
            "first_cell": abs(rep["h1_rel"]) <= GC6["first_cell_rel"],
            "cells": abs(rep["cells_rel"]) <= GC6["cells_rel"],
            "types": rep["patches"]["wedge_front"]["type"] == "wedge"
-                    and rep["patches"]["wedge_back"]["type"] == "wedge"}
+                    and rep["patches"]["wedge_back"]["type"] == "wedge"
+                    and ("slip_upstream" not in rep["patches"]
+                         or rep["patches"]["slip_upstream"]["type"] == "symmetry")}
     out["pass"] = all(out[k] for k in GC6_KEYS[:-1])
     return out
 
@@ -500,7 +509,7 @@ def _run(geom_dir, out_dir, h1_fine, levels):
         os.makedirs(ld)
         build = build_level(geom_dir, level, h1_fine, os.path.join(ld, "wedge.msh"))
         msh_sha = common.sha256_file(os.path.join(ld, "wedge.msh"))
-        convert(bins, os.path.join(ld, "wedge.msh"), os.path.join(ld, "case"))
+        convert(bins, os.path.join(ld, "wedge.msh"), os.path.join(ld, "case"), type_args=TYPE_ARGS_SLIP)
         require_wedge_types(patch_types(os.path.join(ld, "case")))
         polymesh_sha = {}
         for pm_name in ("boundary", "faces", "neighbour", "owner", "points"):
@@ -653,7 +662,8 @@ def judge_turb(rep, groups):
            "types": rep["patches"]["wedge_front"]["type"] == "wedge"
                     and rep["patches"]["wedge_back"]["type"] == "wedge"
                     and rep["patches"]["wall_nozzle"]["type"] == "wall"
-                    and (groups[3] != "wall_upstream" or rep["patches"]["wall_upstream"]["type"] == "wall")}
+                    and (groups[3] != "wall_upstream" or rep["patches"]["wall_upstream"]["type"] == "wall")
+                    and (groups[3] != "slip_upstream" or rep["patches"]["slip_upstream"]["type"] == "symmetry")}
     out["pass"] = all(out[k] for k in GC7_TURB_KEYS[:-1])
     return out
 
@@ -683,7 +693,8 @@ def _run_turb(geom_dir, out_dir, U_e, nu, levels):
         os.makedirs(ld)
         build = build_level_turb(geom_dir, level, h1_0, os.path.join(ld, "wedge.msh"))
         msh_sha = common.sha256_file(os.path.join(ld, "wedge.msh"))
-        convert(bins, os.path.join(ld, "wedge.msh"), os.path.join(ld, "case"))
+        convert(bins, os.path.join(ld, "wedge.msh"), os.path.join(ld, "case"),
+                type_args=TYPE_ARGS_SLIP if "slip_upstream" in groups else TYPE_ARGS)
         require_wedge_types(patch_types(os.path.join(ld, "case")), groups)
         polymesh_sha = {}
         for pm_name in ("boundary", "faces", "neighbour", "owner", "points"):
@@ -916,6 +927,18 @@ def selftest():
         except Refused as r:
             assert r.rule == "WEDGE-TYPE", r.rule
         print("[ok] the plan's -type wedge_*=wedge leaves wedge_front a patch: refused WEDGE-TYPE")
+
+        # T-SLIPSYM: the slip section converts as symmetry (the solver then prescribes its flux to zero)
+        tsym = patch_types(os.path.join(td, "out", "L1", "case"))
+        assert tsym["slip_upstream"] == "symmetry" and tsym["wedge_front"] == "wedge" \
+            and tsym["wedge_back"] == "wedge" and tsym["wall_nozzle"] == "wall", tsym
+        try:
+            require_wedge_types(dict(tsym, slip_upstream="patch"))
+            raise AssertionError("a patch-typed slip section did not refuse")
+        except Refused as r:
+            assert r.rule == "WEDGE-TYPE", r.rule
+        print("[ok] T-SLIPSYM the converted laminar level reads slip_upstream symmetry, both wedge sides"
+              " wedge, wall_nozzle wall; slip_upstream patch refuses WEDGE-TYPE")
 
         # T10: five refusals, each by its exact id
         def refused_by(fn, rule):

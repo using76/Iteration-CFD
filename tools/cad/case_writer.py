@@ -57,7 +57,9 @@ SWIRL_TOL = 1e-12                  # a normalised inlet direction's y or z compo
 POLYMESH_FILES = ("boundary", "faces", "neighbour", "owner", "points")
 FIELDS = ("U", "p", "T")
 ROLES = ("velocity_inlet", "pressure_outlet", "wall", "slip", "wedge")
-ROLE_TYPES = {"velocity_inlet": "patch", "pressure_outlet": "patch", "wall": "wall", "slip": "patch",
+# slip is typed symmetry: the solver then prescribes the patch's boundary flux to zero
+# (momentum.cu momFluxIsPrescribed), so the slip section of docs/16 §H.2 carries no mass.
+ROLE_TYPES = {"velocity_inlet": "patch", "pressure_outlet": "patch", "wall": "wall", "slip": "symmetry",
               "wedge": "wedge"}
 NOZZLE_ROLES = {"version": "cad-roles/1",
                 "patches": {"inlet": {"role": "velocity_inlet", "direction": [1.0, 0.0, 0.0]},
@@ -179,7 +181,7 @@ def bc_table(role, u_in, t_k) -> dict:
     if role == "wall":
         return {"U": {"type": "noSlip"}, "p": {"type": "zeroGradient"}, "T": {"type": "zeroGradient"}}
     if role == "slip":
-        return {"U": {"type": "slip"}, "p": {"type": "slip"}, "T": {"type": "slip"}}
+        return {"U": {"type": "symmetry"}, "p": {"type": "symmetry"}, "T": {"type": "symmetry"}}
     if role == "wedge":
         return {"U": {"type": "wedge"}, "p": {"type": "wedge"}, "T": {"type": "wedge"}}
     raise ValueError("bc_table: unknown role %r" % (role,))
@@ -1371,6 +1373,26 @@ def selftest() -> None:
 
         assert sha_map(c0) == gold["sha256"], sorted(set(sha_map(c0).items()) ^ set(gold["sha256"].items()))
         print("[ok] nominal case byte-identical to golden (14 files)")
+
+        # T3b: the slip section is written type symmetry (the solver prescribes its flux to zero, docs/16
+        # §H.2), and a boundary still carrying patch there refuses CASE-NOBC
+        for rel in ("0/U", "0/p", "0/T"):
+            with open(os.path.join(c0, rel.replace("/", os.sep)), "r", encoding="utf-8") as f:
+                blk = re.search(r"slip_upstream\s*\{[^}]*\}", f.read()).group(0)
+            assert "type            symmetry;" in blk, rel
+        wp = wedge_copy("w_slip_patch")
+        bpath = os.path.join(wp, "L0", "case", "constant", "polyMesh", "boundary")
+        with open(bpath, "r", encoding="utf-8") as f:
+            btxt = f.read()
+        assert btxt.count("symmetry;") == 1, "slip_upstream is not the only symmetry in the boundary"
+        common.atomic_write(bpath, btxt.replace("symmetry;", "patch;"))
+        rebind(wp)
+        res = write_case(wp, 0, gdir, sdir, os.path.join(td, "case_slip_patch"))
+        refused(res, "CASE-NOBC", os.path.join(td, "case_slip_patch"))
+        assert res["message"] == "patch slip_upstream (role slip) has boundary type patch, want symmetry", \
+            res["message"]
+        print("[ok] slip_upstream carries type symmetry in 0/U, 0/p and 0/T; the patch-typed boundary"
+              " refuses CASE-NOBC")
 
         # T4: the inputs map holds the nine snapshot shas; the copied polyMesh equals the wedge record's shas
         for key, path in _input_paths(wdir, 0, gdir, sdir).items():

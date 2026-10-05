@@ -183,8 +183,9 @@ SOURCE = {"title": "Bell & Mehta 1988, Contraction Design for Small Low-Speed Wi
           "pdf_sha256": "f6093cebe6265814cc6606f03a54f8237947206b5765801b58710124104a130a",
           "table4_note": "Table 4 is their panel-method-plus-Thwaites prediction at CR 7.7, L/H 0.89, 15 m/s, not a measurement"}
 PATCHES = ("inlet", "outlet", "wall_nozzle", "slip_upstream", "symmetry", "front", "back")
-TYPE_ARGS = ["-type", "front=empty", "-type", "back=empty", "-type", "symmetry=symmetryPlane"]
-WANT_TYPES = {"inlet": "patch", "outlet": "patch", "slip_upstream": "patch", "wall_nozzle": "wall",
+TYPE_ARGS = ["-type", "front=empty", "-type", "back=empty", "-type", "symmetry=symmetryPlane",
+             "-type", "slip_upstream=symmetry"]
+WANT_TYPES = {"inlet": "patch", "outlet": "patch", "slip_upstream": "symmetry", "wall_nozzle": "wall",
               "symmetry": "symmetryPlane", "front": "empty", "back": "empty"}
 ROLES = {"inlet": "velocity_inlet", "outlet": "pressure_outlet", "wall_nozzle": "wall", "slip_upstream": "slip",
          "symmetry": "symmetry", "front": "empty", "back": "empty"}
