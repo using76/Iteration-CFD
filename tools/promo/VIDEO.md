@@ -15,8 +15,9 @@ flow field, set up by AI and solved on one GPU, fast and automatic."
 1920x1080, 90 s, English narration (12 lines, local Kokoro-82M) with Korean
 captions only, over a licensed music bed and timed SFX, for engineers and
 engineering managers evaluating a CFD toolchain. The film opens on the
-company ((주)Iterations / Iterations Co., Ltd., subtitle "F1 레이싱카
-공력해석 테스트") and closes on "AI-driven CFD Solver".
+Iterations mark E "damped residual" lockup ((주)이터레이션즈 ·
+Iterations Co., Ltd., subtitle "F1 레이싱카 공력해석 테스트") and closes on
+"AI-driven CFD Solver".
 
 ## Sources
 
@@ -102,7 +103,7 @@ the mix specification and the master gates.
 
 | slot | start | dur | content |
 |---|---|---|---|
-| title | 0 | 6.0 | company opening: (주)Iterations / Iterations Co., Ltd., hairline, "F1 레이싱카 공력해석 테스트" / "F1 race-car aerodynamics test" at 2.4-2.55 s, fade out 5.6-6.0 s |
+| title | 0 | 6.0 | company opening: the mark-E lockup (damped wave draws on 0.3-1.1 s, dot lands 1.05-1.45 s) with (주)이터레이션즈 · Iterations Co., Ltd. under it, hairline, "F1 레이싱카 공력해석 테스트" / "F1 race-car aerodynamics test" at 2.4-2.55 s, fade out 5.6-6.0 s |
 | cad | 6.0 | 7.5 | the clean red-car turntable, 1.00 -> 1.03 drift, CC BY attribution bottom-right |
 | chat | 13.5 | 15.0 | the studio driven at 9x, prompt card 0.6-6.0 s, badge out at 12.7 s, push into the answer (target 1387,650, scale 1.8) at 9.0-11.5 s |
 | mesh | 28.5 | 9.0 | the castellated mesh with edges, count-up to 3,235,813 cells at 0.6-3.6 s, 1.00 -> 1.04 drift |
@@ -261,3 +262,59 @@ frame: `C:/Users/sdd32/Videos/iteration-cfd-f1-promo-v3.mp4` - H.264
 integrated, -1.9 dBTP, LRA 2.6, 78.7 MB,
 sha256 `ea57a9f8edaf00bc99c3a6e7eb3817fa9e8a173c0af3f82ab51f8a42dbda67f3`.
 v1 and v2 are kept beside it.
+
+## v4 (mark)
+
+The user found the (주)Iterations title type mismatched and asked for a company
+mark (PROMO-LOGO-V4, 2026-10-05). They chose mark E "damped residual" with the
+capital-I wordmark. `tools/promo/brand/` holds the mark SVG, its README
+(geometry, colours, the lockup rule) and the wordmark font: Bricolage
+Grotesque VF (SIL OFL 1.1, from the google/fonts repo,
+sha256 `413e7357809ddd12fd80a96a8a396de0e401638d4acd3cb3e37532f0472ac682`,
+`OFL.txt` beside it).
+
+- **Title card** — the text-only company block became the horizontal lockup:
+  the mark at 204.8 x 153.6 px, gap 51.2 px (0.25 x mark width), then
+  `Iterations` in Bricolage Grotesque 800 at 145 px (96 px cap height). Under
+  it `(주)이터레이션즈 · Iterations Co., Ltd.` at 36 px (cap ~26 px = 0.28 x
+  the wordmark cap), letter-spaced, muted, left-aligned to the wordmark (mark
+  width + gap = 256 px); the subtitle stays below at 55/30 px (cap 40/22 px).
+  All sizes derive from one cap-height scale using the measured cap ratios
+  (Bricolage 0.66, Noto Sans KR 0.733 - read from the OS/2 tables). The mark's
+  viewBox is cropped to `0 30 240 180`, the drawn band, so the lockup rule
+  "mark height = 1.6 x cap height" measures the drawn mark, not the empty
+  240x240 canvas. Animation: the lockup rises at 0.3 s, the wave draws on left
+  to right 0.3-1.1 s (stroke-dashoffset on getTotalLength), the teal dot lands
+  1.05-1.45 s (back.out); the airy cue window 0.25-0.45 s and the subtitle at
+  2.4 s are kept, as are the fades.
+- **Close card** — the company block became the same lockup, smaller: wordmark
+  82 px (54 px cap), mark 115.2 x 86.4 px, gap 28.8 px, company line 20 px,
+  left-aligned to the wordmark (144 px). The column is now laid out for each
+  state: `#close-inner` sits pushed down 200 px until the company block
+  appears, so the headline `AI-driven CFD Solver` is centred while it leads
+  the card (film 74-82 s) and the block moves up over 0.7 s as the company
+  block lands at 10.0 s (film 82.0 s). Headline, value line, collaboration
+  line, credits and disclaimer are verbatim with their timings (76.75, 78.05,
+  79.9 and 82.0 s). 200 px keeps the invisible tail inside the canvas before
+  it exists visually.
+- **Assets** — `video_assets.py` bumped to `promo-video/2`: stage now also
+  copies the brand font to `assets/fonts/BricolageGrotesque-VF.ttf` beside
+  Noto and `check` verifies it. `STAGE OK 6 videos 5 stills 12 sources
+  25.3 s`, `CHECK PASS 27/27`, selftest `SELFTEST PASS 6/6`. The stager keeps
+  its pin probe honest: `upgrade --check` offered 0.8.122 -> 0.8.130 and the
+  pin was kept on purpose (v2/v3 were rendered on 0.8.122).
+- **Check** — `hyperframes check` (0.8.122): 0 lint / layout / motion
+  findings, 38/38 WCAG AA. The `snapshot --at` stills for the title lagged
+  ~1 s behind (the snapshot run rides the 25 MB master WAV's load; the close
+  frames, later in the film, were exact) - the frame-seeked render is the
+  ground truth, and a draft render confirmed the subtitle lands at 2.4 s
+  exactly (frames 45/75/90 extracted and inspected).
+- **Render (v4)** — the same delivery render in a visible console through the
+  shared machine lock: 2700 frames in 3 m 42.8 s (screenshot capture, hardware
+  GPU). The v3 audio master was remuxed unchanged (`-c:v copy`, AAC-LC 320k,
+  48 kHz): `C:/Users/sdd32/Videos/iteration-cfd-f1-promo-v4.mp4` - H.264
+  1920x1080 30 fps, 2700 video frames, 90.000 s, full `-xerror` decode OK,
+  -14.0 LUFS integrated, -1.9 dBTP, LRA 2.6, 75.7 MB,
+  sha256 `acbefae957dcdd61520ce915fb2cbaf4eac0c208d9328ee3fcc5d324e1ab6b45`.
+  `python tools/promo/video_audio.py check` -> `CHECK PASS 61/61` with
+  `honesty` clean. v1, v2 and v3 are kept beside it.

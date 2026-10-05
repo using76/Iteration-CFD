@@ -8,8 +8,9 @@
 `stage` copies tools/promo/video/index.html and every tools/promo/video/
 compositions/*.html into a HyperFrames project (--project, which must carry a
 hyperframes.json and lie outside the repository), then encodes the six film
-videos, copies the five stills, the UI font and the CC BY 4.0 model's credits,
-and writes <project>/assets/assets.json recording every output. `check`
+videos, copies the five stills, the UI font, the brand wordmark font and the
+CC BY 4.0 model's credits, and writes <project>/assets/assets.json recording
+every output. `check`
 re-judges a staged project from that assets.json: each video's file present,
 sha256 equal, and a fresh ffprobe giving the recorded frames, width and
 height; each copy present and sha256-equal; each composition source present.
@@ -30,8 +31,10 @@ expected_frames: seq = file count + round(hold * FPS); clip =
 round(t / speed * FPS) + round(hold * FPS). Seconds = frames / FPS.
 
 Outputs under --project: the six videos, assets/stills/{hero,side,top_rear,
-streamlines,slice}.png, assets/fonts/NotoSansKR-VF.ttf, assets/CREDITS.txt,
-assets/LICENSE.txt and assets/assets.json.
+streamlines,slice}.png, assets/fonts/NotoSansKR-VF.ttf,
+assets/fonts/BricolageGrotesque-VF.ttf (the wordmark font, OFL, from
+tools/promo/brand/fonts/), assets/CREDITS.txt, assets/LICENSE.txt and
+assets/assets.json.
 
 Refusals (exit 2, before anything is written): VA-ARGS (bad CLI), VA-OUT
 (--project inside the repository), VA-PROJECT (--project has no
@@ -59,13 +62,15 @@ import tempfile
 import time
 
 TOOL = "tools/promo/video_assets.py"
-VERSION = "promo-video/1"
+VERSION = "promo-video/2"
 FPS = 30
 CRF = 14
 SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STILLS = ("hero.png", "side.png", "top_rear.png", "streamlines.png", "slice.png")
 FONT_NAME = "NotoSansKR-VF.ttf"
+BRAND_FONT_NAME = "BricolageGrotesque-VF.ttf"
+BRAND_FONT_SRC = os.path.join(REPO_ROOT, "tools", "promo", "brand", "fonts", BRAND_FONT_NAME)
 
 JOBS = [
     {"out": "assets/cad_turntable.mp4", "source": "{render}/turntable_clean/frame_%04d.png",
@@ -312,6 +317,7 @@ def run_stage(project, job_sources, stills, font, credits, sources):
         copies.append(_copy_one(src, os.path.join(assets, "stills", os.path.basename(src)), project))
     if font:
         copies.append(_copy_one(font, os.path.join(assets, "fonts", FONT_NAME), project))
+    copies.append(_copy_one(BRAND_FONT_SRC, os.path.join(assets, "fonts", BRAND_FONT_NAME), project))
     for src in credits:
         copies.append(_copy_one(src, os.path.join(assets, os.path.basename(src)), project))
     man = {"tool": TOOL, "version": VERSION, "fps": FPS, "crf": CRF,
@@ -341,7 +347,7 @@ def cmd_stage(opts):
     stills = [os.path.join(opts["render"], n) for n in STILLS]
     credits = [os.path.join(opts["render"], "CREDITS.txt"),
                os.path.join(opts["render"], "LICENSE.txt")]
-    for p in stills + credits + [opts["font"]]:
+    for p in stills + credits + [opts["font"], BRAND_FONT_SRC]:
         if not os.path.isfile(p):
             refuse("VA-INPUT", "missing input file: " + p)
     sources = copy_html(project, htmls)
