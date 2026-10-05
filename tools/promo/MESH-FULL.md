@@ -122,8 +122,11 @@ What it means for the solve: the cells are orthogonal, which is good for the pre
 solve (cf. docs/2026-09-18-f1-aero-issues.md cut-cell non-orthogonality lesson), but
 the car surface is stair-stepped at 7.8 mm and there is no boundary layer; the first
 wall cell centre is ~3.9 mm from the wall, about y+ 566 at 250 km/h (u_tau 2.175 m/s,
-nu 1.5e-5). Why snap abandons every iteration at this size is NOT diagnosed here; that
-is a mesher question for a later unit.
+nu 1.5e-5). The abandonment was diagnosed 2026-10-05 (SPEC-LIT §92.11, "Measured on a
+large surface"): the whole-iterate abandonment was held by hanging nodes whose parents
+the undo did not reach, and the attraction radius was 16-32 finest cells. The local undo
+(92.68) and `tunnel_mesh.py`'s half-cell `snap.feature_tolerance` address both; the
+full-size run has not been repeated.
 
 ## Outputs and reproduce
 

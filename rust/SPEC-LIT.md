@@ -25801,11 +25801,21 @@ repeat at most snap.undo_limit times:
     F = { c : c fails G1, G2, G4, G5 or G6 on the moved mesh }
     if F is empty: accept the iterate
     alpha_i <- alpha_i / 2  for every i with star(i) meeting F
-    re-apply from x^(k)
+    re-apply from x^(k)                                                       (92.31)
 
-a point still blamed after snap.undo_limit halvings takes alpha_i = 0, is
-PINNED for the rest of the run, and the iterate is ABANDONED whole:
-x^(k+1) = x^(k), which passes the gate because x^(k) did              (92.31)
+after snap.undo_limit halvings, while F is not empty:
+    O = the points of every cell of F, closed under: if a point of O is a
+        hanging node of (92.33), both its parents belong to O
+    if no point of O has alpha_i > 0, or no point j outside O would still
+       take a non-zero step alpha_j d_j:
+        every point of O is PINNED and the iterate is ABANDONED whole,
+        x^(k+1) = x^(k), as before
+    else:
+        alpha_i <- 0 and i is PINNED, for every i in O
+        re-apply from x^(k), re-seat by (92.33), and measure F again       (92.68)
+
+an iterate whose F empties after at least one freeze is accepted, and is
+counted as locally undone
 ```
 
 §92.3 caps the subjects a refusal RECORDS at two hundred, because a refusal
@@ -25815,9 +25825,36 @@ five thousand cells are inverted would loop until the iteration count ran out
 and then refuse anyway. So the gate's measurement takes the cap as a parameter
 and the guard passes no cap; only the message that reaches a human is capped.
 
-Abandoning the whole iterate rather than accepting a partly-moved mesh is
-what makes the loop finite: every pass either accepts a step or pins at least
-one point, and the points are finite, so no sequence of undos can run forever.
+The loop stays finite without the whole-iterate abandonment: every halving
+round is bounded by `snap.undo_limit`, and every freeze round of (92.68)
+zeroes at least one still-non-zero alpha or abandons the iterate whole, and
+the points are finite, so no sequence of undos can run forever. The parents
+join O with the node because (92.33) re-seats a hanging node from its parents
+at every trial - freezing or halving the node alone cannot move it, and on a
+refined mesh that is exactly how one G4 face kept 27 iterates abandoned. A
+point (92.68) freezes is PINNED for the rest of the run, like a point an
+abandoned iterate pins.
+
+**Measured on a large surface.** On the F1 promo's reduced tunnel - the
+200k-triangle car, base 1.0 m, max level 5, 157429 cells, |B| = 45669,
+27175 hanging nodes; measured 2026-10-05 - the old loop abandoned 29 of 30
+iterates. Iterate 0's first trial failed 22800 cells (G1 7744, G2 59, G4
+32557 faces, G5 1166, G6 284); four halvings left 12, and 8 of them held a
+hanging node whose parent was not a point of the failing cell, which the
+halving cannot reach, so from iterate 3 to 29 the SAME two cells - one G4
+face - failed every iterate for that reason: 8198 of 45669 B points (17.95 %)
+within the tolerance, max residual 0.1370 m, p99 0.0539 m. The second cause
+was the attraction radius: tau = `feature_tolerance` x base_size = 0.5 m = 16
+finest cells (§92.12's erratum below), so the last iterate sent 32399 points
+to a feature edge and 8332 to a corner. With (92.68) at the default radius 0
+iterates are abandoned and 21192 points (46.40 %) sit within the tolerance,
+but the far attraction drags points the undo now lets through: max residual
+0.1405 m, p99 0.0607 m, mean non-orthogonality 11.33 deg. At
+`feature_tolerance = 0.5 * 2^-5` (half a finest cell, §92.12's erratum) with
+(92.68): 0 abandoned, 45542 points (99.72 %), max 0.01589 m, p99 9.715e-4 m,
+mean non-orthogonality 4.816 deg; at that radius without (92.68): 2
+abandoned, 45521 (99.68 %), max 0.01638 m. The radius is the configuration's
+to ask for, and (92.38) is unchanged.
 
 The loop of (92.7) runs `snap.iterations` times, or stops early when
 `max_i |alpha_i d_i| <= eps`. Both the iterations run and the largest remaining
@@ -25897,8 +25934,9 @@ The refusal names the patch, both areas and their ratio.
 | a point on a domain patch | stays on that patch's plane exactly, by (92.30); a point on a box edge keeps two coordinates and one on a box corner all three |
 | the mesh stage 4 returns | passes G1–G7 of §92.3, or the run refused with §92.3's own message |
 | a mesh that arrives failing G3 or G7 | refused at once, not halved — no motion of the points can mend either |
-| a displacement that breaks a cell | halved up to `snap.undo_limit` times and then abandoned, never accepted with the cell broken (§92.2 stage 4) |
+| a displacement that breaks a cell | halved up to `snap.undo_limit` times, then its offending points and their hanging parents frozen by (92.68) while the rest moves - abandoned only when a freeze would change nothing; never accepted with a cell broken (§92.2 stage 4) |
 | every pinned or scaled-back point | counted in the report; a run that pinned points is not a silent run |
+| every frozen point and every locally undone iterate | counted in the report, with the points of B within the tolerance of (92.28) |
 | a hanging node at a 2:1 transition | on its parents' midpoint at every trial position, by (92.33) — otherwise G2 fails at every transition, at any `alpha`, and stage 4 moves nothing on any refined mesh |
 | a patch whose wall area exceeds `snap.max_area_ratio` times its own | refused by (92.32), naming the patch and both areas, with no mesh written |
 
@@ -25909,7 +25947,9 @@ The refusal names the patch, both areas and their ratio.
 | a box with an axis-aligned cube STL on the cell planes | snapping is the identity, asserted bit for bit on the points array |
 | a box with a sphere STL, refined to level 2 at the surface | the 99th-percentile point-to-surface distance is under 2 % of the radius, the gate passes, and the fluid volume is within 1 % of the box less the STL's own enclosed volume |
 | a sphere STL much smaller than one cell | (92.32) refuses, naming the patch; nothing is written |
-| a gate no displacement can satisfy (a hundredth of a degree of non-orthogonality on an exactly orthogonal mesh) | the step is halved `undo_limit` times, the blamed points are pinned, the iterate is abandoned, and the mesh comes back bit for bit the one that went in, still through the gate |
+| a gate no displacement can satisfy (a hundredth of a degree of non-orthogonality on an exactly orthogonal mesh) | the step is halved `undo_limit` times, the blamed points and their hanging parents are frozen by (92.68), the iterate is accepted as locally undone, every point is within 1e-4 of its castellated position, and the gate passes |
+| a 3.4 m box refined to level 2 at its surface, snapped with `feature_tolerance = 2` (tau eight finest cells) | before (92.68) 17 iterates are abandoned and 527 of 1178 points are within the tolerance; after, 0 and 756, max residual 0.1993 -> 0.0626 m |
+| the freeze set of (92.68) | the failing cells' points plus every hanging parent they close onto - transitively, terminating on a cycle - and nothing else |
 | a refined tree's mesh, snapped | G2 holds through every iterate — the test that fails without (92.33) fails on hundreds of cells at once, not on one |
 | a point already on a triangle | `closest_point` returns it to within rounding, and (92.28) then makes the displacement exactly zero |
 | `closest_point` against `nearest_triangle` | the same triangle and the same distance, to the last bits, at points inside a face, beyond an edge and beyond a vertex |
@@ -27083,8 +27123,13 @@ thing a second run has to match. The patch list is the FINAL one, after
 Two stage rows carry numbers read off a stage's output that change nothing in it. The snap row adds
 `h_f_m`, the finest cell size `base_size / 2^max_level`; `p99_over_h` and `max_over_h`, §92.11's p99 and
 largest residual over B divided by it; `n_pinned_boundary`, the pinned points that lie in B of (92.27) —
-`n_pinned` also counts the non-wall points of every cell an abandoned iterate of (92.31) pins, and the
-domain points (92.30) pins, so it can exceed `n_boundary_points` and this count cannot; and `area_ratio`,
+`n_pinned` also counts the non-wall points of every cell an abandoned iterate of (92.31) pins or
+(92.68) freezes, and the domain points (92.30) pins, so it can exceed `n_boundary_points` and this
+count cannot; `n_within_tolerance`, the points of B whose residual after the last iterate sits
+within (92.28)'s eps, and `within_tolerance_frac`, that count over `n_boundary_points`, null when
+there are no boundary points; `n_frozen`, the DISTINCT points (92.68) froze over the run - the
+points an abandoned iterate pins do not count again; and `n_local_undo`, the iterates accepted
+after at least one freeze round. The row also carries `area_ratio`,
 one row per surface patch, `{ "name", "stl_area_m2", "castellated_area_m2", "snapped_area_m2",
 "castellated_ratio", "ratio" }`: the area (92.32) measures — the patch's wall faces plus the region
 interfaces it assigns to the patch — before the first move and again on the points the stage returns,
