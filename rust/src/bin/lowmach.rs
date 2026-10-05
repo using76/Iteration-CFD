@@ -6112,4 +6112,217 @@ mod lowmach_tests {
             "the fixed closed end stops the flow: {worst_static}"
         );
     }
+
+    /// Copy `src` into `dst` recursively - subdirectories included, so a
+    /// case's `constant/polyMesh` comes along.
+    fn copy_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("create the copy target");
+        for entry in std::fs::read_dir(src).expect("read the source dir") {
+            let entry = entry.expect("a readable dir entry");
+            let to = dst.join(entry.file_name());
+            if entry.file_type().expect("a file type").is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).expect("copy the file");
+            }
+        }
+    }
+
+    /// Rewrite the `tolerance` entry inside the `omega` sub-dictionary of
+    /// `solvers` to `1e-12` in an fvSolution text; nothing else changes and
+    /// the file's own newline style is kept.
+    fn tighten_omega_tolerance(text: &str) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut depth: i32 = 0;
+        let (mut solvers, mut omega, mut hit) = (None, None, usize::MAX);
+        let mut pending: Option<&str> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            let opens = line.matches('{').count() as i32;
+            let closes = line.matches('}').count() as i32;
+            if let Some(name) = pending {
+                if opens > 0 {
+                    if name == "solvers" {
+                        solvers = Some(depth + opens);
+                    } else {
+                        omega = Some(depth + opens);
+                    }
+                    pending = None;
+                }
+            } else if t.starts_with("solvers") {
+                if opens > 0 {
+                    solvers = Some(depth + opens);
+                } else {
+                    pending = Some("solvers");
+                }
+            } else if solvers.is_some()
+                && omega.is_none()
+                && depth == solvers.unwrap()
+                && t.starts_with("omega")
+            {
+                if opens > 0 {
+                    omega = Some(depth + opens);
+                } else {
+                    pending = Some("omega");
+                }
+            }
+            if hit == usize::MAX
+                && omega.is_some()
+                && depth == omega.unwrap()
+                && t.starts_with("tolerance")
+            {
+                hit = i;
+            }
+            depth += opens - closes;
+        }
+        assert!(
+            hit != usize::MAX,
+            "tg0 probe: no tolerance line under the omega block of fvSolution"
+        );
+        let old = lines[hit];
+        assert!(
+            old.contains("1e-08"),
+            "tg0 probe: the omega tolerance must read 1e-08 before the rewrite: {old}"
+        );
+        let mut out: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
+        out[hit] = old.replace("1e-08", "1e-12");
+        let mut s = out.join(nl);
+        if text.ends_with('\n') {
+            s.push_str(nl);
+        }
+        s
+    }
+
+    /// Max over cells of the relative change of b against a, in f64 - the
+    /// probe's field-change measure.
+    fn relative_change(a: &[Scalar], b: &[Scalar]) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| ((*y as f64) / (*x as f64) - 1.0).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// The TG0 probe of SPEC-LIT 114.2: on the L1_lo pipe the written omega
+    /// stops changing at the omega solver's `tolerance 1e-08` while k and U
+    /// keep moving, and tightening only that tolerance to 1e-12 moves the
+    /// bulk velocity to the converged answer. Prints before it asserts.
+    #[test]
+    #[ignore = "two 8000-iteration GPU solves of the TG0 L1_lo pipe case named by OFGPU_TG0_CASE; the supervisor runs it with --ignored --nocapture"]
+    fn tg0_probe_an_omega_tolerance_of_1e_8_leaves_the_l1_pipe_omega_frozen() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let case = match std::env::var("OFGPU_TG0_CASE") {
+            Ok(v) => PathBuf::from(v),
+            Err(_) => {
+                println!("tg0 probe: OFGPU_TG0_CASE is not set; nothing run");
+                return;
+            }
+        };
+        // The L1_lo mesh: 320 internal cells.
+        const TG0_L1_CELLS: usize = 320;
+        let run_one = |tag: &str, tighten: bool| -> (RunEnd, f64, f64) {
+            let dir = scratch_dir(tag);
+            for sub in ["0", "constant", "system"] {
+                copy_tree(&case.join(sub), &dir.join(sub));
+            }
+            if tighten {
+                let fv = dir.join("system").join("fvSolution");
+                let text = std::fs::read_to_string(&fv).expect("read system/fvSolution");
+                let before: Vec<&str> = text.lines().collect();
+                let after_text = tighten_omega_tolerance(&text);
+                let after: Vec<&str> = after_text.lines().collect();
+                let diff: Vec<usize> = before
+                    .iter()
+                    .zip(after.iter())
+                    .enumerate()
+                    .filter(|(_, (x, y))| x != y)
+                    .map(|(i, _)| i)
+                    .collect();
+                assert!(
+                    diff.len() == 1 && before[diff[0]].contains("1e-08"),
+                    "tg0 probe: the fvSolution rewrite must change exactly one line, the omega tolerance: changed {:?} of {}",
+                    diff.len(),
+                    before.len()
+                );
+                std::fs::write(&fv, after_text).expect("rewrite system/fvSolution");
+            }
+            let ds: String = dir.to_string_lossy().into_owned();
+            let args: Vec<String> = [
+                "ofgpu-lowmach",
+                ds.as_str(),
+                "-iters",
+                "8000",
+                "-check",
+                "1000",
+                "-writeEvery",
+                "4000",
+                "-p0",
+                "101325",
+            ]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+            let o = parse(&args).expect("the command line must parse");
+            let end = run(&o).expect("the tg0 case must run");
+            let w4 = read_scalar_field(&dir.join("4000").join("omega"), TG0_L1_CELLS)
+                .expect("read 4000/omega");
+            let w8 = read_scalar_field(&dir.join("8000").join("omega"), TG0_L1_CELLS)
+                .expect("read 8000/omega");
+            let k4 =
+                read_scalar_field(&dir.join("4000").join("k"), TG0_L1_CELLS).expect("read 4000/k");
+            let k8 =
+                read_scalar_field(&dir.join("8000").join("k"), TG0_L1_CELLS).expect("read 8000/k");
+            (
+                end,
+                relative_change(&w4.internal, &w8.internal),
+                relative_change(&k4.internal, &k8.internal),
+            )
+        };
+        let (a, w_change_a, k_change_a) = run_one("tg0_a", false);
+        let (b, w_change_b, k_change_b) = run_one("tg0_b", true);
+        println!(
+            "tg0 probe: tg0_a omega tolerance 1e-08: steps {} Ux mean {:.9e} omega change {w_change_a:.3e} k change {k_change_a:.3e}",
+            a.steps, a.ux_mean
+        );
+        println!(
+            "tg0 probe: tg0_b omega tolerance 1e-12: steps {} Ux mean {:.9e} omega change {w_change_b:.3e} k change {k_change_b:.3e}",
+            b.steps, b.ux_mean
+        );
+        let ratio = b.ux_mean / a.ux_mean;
+        println!("tg0 probe: Ux mean ratio b/a {ratio:.6e}");
+        assert!(
+            a.steps == 8000 && b.steps == 8000,
+            "tg0 probe: both runs must take 8000 steps: a {} b {}",
+            a.steps,
+            b.steps
+        );
+        assert!(
+            w_change_a == 0.0,
+            "tg0 probe: run a's omega must be frozen at tolerance 1e-08: change {w_change_a:.3e}"
+        );
+        assert!(
+            k_change_a >= 1e-3,
+            "tg0 probe: run a's k must keep moving while its omega is frozen: change {k_change_a:.3e}"
+        );
+        assert!(
+            w_change_b >= 1e-5,
+            "tg0 probe: run b's omega must move at tolerance 1e-12: change {w_change_b:.3e}"
+        );
+        assert!(
+            ratio - 1.0 >= 0.015 && ratio - 1.0 <= 0.025,
+            "tg0 probe: the Ux mean ratio b/a is out of the band: {ratio:.6e}"
+        );
+        assert!(
+            (a.ux_mean - 3.944257).abs() <= 1e-4,
+            "tg0 probe: run a's Ux mean is off the recorded 3.944257: {:.9e}",
+            a.ux_mean
+        );
+        assert!(
+            (b.ux_mean - 4.023841).abs() <= 1e-4,
+            "tg0 probe: run b's Ux mean is off the recorded 4.023841: {:.9e}",
+            b.ux_mean
+        );
+    }
 }

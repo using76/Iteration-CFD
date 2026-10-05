@@ -33606,3 +33606,184 @@ incompressibility. The `not built` refusal of a block-coupled solve is gone
 with the feature built.
 
 ---
+
+## 114. The turbulent pipe against kOmegaSST - the core defect is the model's, the L1 friction factor was an omega solve that stopped
+
+`No GPL-licensed source was consulted.`
+
+### 114.1 What TG0 recorded, and how this section measured it
+
+TG0 is the fully developed turbulent pipe of the CAD chain, docs/16 of that
+chain: a periodic 5-degree wedge, R 0.025 m, periodic length 0.1 m, 4 axial
+cells, 40 radial cells on L0 and 80 on L1 graded to the wall, first cell y+
+0.122 on L0 and 0.061 on L1 at Re_tau 576.69. The model is kOmegaSST with a
+resolved wall, `nut` fixedValue 0, `k` fixedValue 0, `omega`
+omegaWallFunction; steadyState SIMPLE with relaxation 0.7 on U, k and omega
+and 0.3 on p; the k and omega solvers PBiCGStab with a diagonal
+preconditioner at `tolerance 1e-08` and `relTol 0.01`; driven by a uniform
+body force; run by the `ofgpu-lowmach` binary of this tree at 90510fc,
+sha256 `50471caa...`, for 4000 iterations on L0 and 8000 on L1.
+
+Its bands: f within 5 % of Prandtl's law at the input Re_tau, f within 5 % of
+Blasius at the measured Re_D, u+ within 1.0 of `2.5 ln y+ + 5.5` for
+30 <= y+ <= 0.2 Re_tau, and the core defect `(U_axis - U_b)/u_tau` within
+10 % of Schlichting's 4.07.
+
+Table 1, as recorded, `f` against Prandtl at the run's input Re_tau:
+
+| run | Re_tau in | cells | f | f vs Prandtl | defect | log-law dev |
+|-----|-----------|-------|---|--------------|--------|-------------|
+| L0_lo | 576.69 | 160 | 0.026609 | +3.18 % | 3.5975 | 1.012 |
+| L1_lo | 576.69 | 320 | 0.028301 | +9.74 % | 3.4642 | 1.277 |
+| L0_hi | 2358.0 | 160 | 0.017232 | -4.35 % | 3.3230 | 0.633 |
+| L1_hi | 2358.0 | 320 | 0.017871 | -0.80 % | 3.3173 | 1.055 |
+| L0_dns | 550.0 | 160 | 0.027056 | +3.53 % | 3.6113 | 0.909 |
+
+The method: the written fields of those runs, short re-runs of the same
+binary on copies of the same case files, each under 4 minutes, and an
+independent one-dimensional finite-volume discretisation of the same fully
+developed SST equations - Menter 2003 coefficients, the same radial cell
+centres and faces, the same pinned wall-cell omega, Tucker's Poisson distance
+of §6.6, a zero-flux axis - written outside this tree for this measurement
+only. No code of this tree was changed to measure anything.
+
+### 114.2 L1's friction factor - an omega solve that stopped changing omega
+
+On L1_lo the written `omega` at iteration 4000 and at 8000 is identical in
+every cell, while `k` changed by up to 2.154e-3 and `U` by up to 7.05e-4
+relative, cell by cell, over the same 4000 iterations.
+
+Against the converged answer on the same mesh, the frozen field's omega is
+0.9443 of it at y+ 69 and its nut 1.0602 of it. The frozen fields leave an
+imbalance in the omega equation of +4.3 % of `beta omega^2` at y+ 51 on L1
+and +0.3 % at y+ 49 on L0. The momentum balance holds on the frozen fields to
+7.4e-4 at the face next to the axis and 1e-4 at every other face, and the
+written nut equals `a1 k / max(a1 omega, F2 S)` from the written k and omega
+to 1.1e-4.
+
+Table 2, the same binary and case, only the omega solver's `tolerance`
+changed:
+
+| mesh | omega tolerance | U_b m/s | U_axis m/s | f | f vs Prandtl | defect |
+|------|-----------------|---------|------------|---|--------------|--------|
+| L1_lo | 1e-08 (as recorded) | 5.87682 | 7.08768 | 0.028301 | +9.74 % | 3.4642 |
+| L1_lo | 1e-12 | 6.02289 | 7.28629 | 0.026944 | +4.48 % | 3.6145 |
+| L1_lo | 1e-30 | 6.02291 | 7.28631 | 0.026944 | +4.48 % | 3.6145 |
+| L1_lo | independent 1-D | 6.02290 | 7.28630 | 0.026944 | +4.48 % | 3.6145 |
+| L0_lo | 1e-08 (as recorded) | 6.06072 | 7.31819 | 0.026609 | +3.18 % | 3.5975 |
+| L0_lo | 1e-30 | 6.07522 | 7.33926 | 0.026482 | +2.69 % | 3.6163 |
+| L0_lo | independent 1-D | 6.07522 | 7.33925 | 0.026482 | +2.69 % | 3.6163 |
+
+With the tolerance tightened L1_lo's log-law deviation is 1.073, recorded
+1.277, and L0_lo's 0.995 against 1.012. At Re_tau 2358 the freeze costs
+little: L1_hi's U_b is 30.23717 against the independent 30.26666.
+
+The reading, stated as a reading: omega spans 1.35e2 at the axis to 1.73e8 in
+the wall cell on L1, 4.32e7 on L0, and the §8.4 normalisation sums over every
+cell, so the wall-adjacent rows set its scale; the omega update stops once
+the normalised initial residual falls under the absolute `tolerance 1e-08`,
+which the finer mesh, with four times the wall-cell omega, reaches at a
+larger imbalance in the log region. The driver prints no omega solver
+performance, so the iteration count itself was not seen; what was measured
+is the unchanged field, and that the tolerance alone moves it to the
+independent answer.
+
+### 114.3 The core defect is the model's - kOmegaSST's centreline eddy viscosity
+
+The twelve coefficients of `KOmegaSstCoeffs::default` are Menter, Kuntz &
+Langtry 2003's, those of §6.3: sigma_k1 0.85, sigma_w1 0.5, beta_1 0.075,
+gamma_1 5/9, sigma_k2 1.0, sigma_w2 0.856, beta_2 0.0828, gamma_2 0.44,
+beta* 0.09, a1 0.31, b1 1, c1 10. The `nu_t` uses the strain rate S and the
+k production is `min(G, c1 beta* k omega)`.
+
+F1 rounds to 1.000 in every cell of the pipe at all three Re_tau. On L1_lo
+the first branch of arg1, `max(sqrt(k)/(beta* omega y), 500 nu/(y^2 omega))`,
+is 1.67 or more in every cell, so the whole radius runs SST's inner k-omega
+set. Replacing Tucker's Poisson y of §6.6 by the exact `R - r` changes U_b by
+less than 1e-5.
+
+Table 3, the grid-converged SST answer, the independent 1-D on 80, 160, 320
+and 640 radial cells, each halving the last, Richardson through the finest
+three, observed order 1.06 to 1.24:
+
+| Re_tau in | f, 640 cells | f extrapolated | f vs Prandtl | f vs Blasius, 640 | defect extrapolated | defect vs 4.07 | log-law dev, 640 | nu_t axis / (u_tau R) |
+|-----------|--------------|----------------|--------------|-------------------|---------------------|----------------|------------------|-----------------------|
+| 576.69 | 0.027258 | 0.027287 | +5.81 % | +2.11 % | 3.6129 | -11.2 % | 1.239 | 0.124 |
+| 2358.0 | 0.018428 | 0.018502 | +2.70 % | +3.08 % | 3.3201 | -18.4 % | 1.358 | 0.131 |
+| 550.0 | 0.027671 | 0.027699 | +5.99 % | +2.24 % | 3.6289 | -10.8 % | 1.229 | 0.124 |
+
+Menter's 1994 wall value for omega on the wall face instead of the pinned
+wall-cell value converges to the same limit, f 0.027278 and defect 3.6131 on
+640 cells at Re_tau 576.69: the limit is the model's, not the wall row's.
+
+Why the defect is short: Reichardt's outer eddy viscosity for the pipe
+(Reichardt, ZAMM 31 (1951) 208-219),
+`nu_t = (kappa u_tau R / 6)(1 - eta^2)(1 + 2 eta^2)` with `eta = r/R`, put
+into the outer-layer balance `nu_t dU/dr = -u_tau^2 r/R`, gives
+`U_c+ - U+ = ln((1 + 2 eta^2)/(1 - eta^2)) / kappa`, whose area mean is the
+defect `3 ln 3 / (2 kappa)` = 4.12 at kappa 0.4 - Schlichting's 4.07 within
+1.3 %. Its axis value is `kappa/6` = 0.0667 of `u_tau R`; kOmegaSST's is
+0.124 to 0.131, table 3, 1.9 to 2.0 times as large, which flattens the core
+and shortens the defect. No mesh and no solver setting reaches 4.07 within
+10 % with this model, and the f and log-law bands at Re_tau 576.69 are short
+by the model too, +5.81 % and 1.239.
+
+### 114.4 Why all five runs were classed unsteady
+
+The printed `|U| res` is the largest of the three components' initial
+residuals, `u_residual` in `src/bin/lowmach.rs`. In the periodic pipe two of
+the three are round-off fields: on L1_lo at 8000, max |Uy| 5.87e-14 m/s,
+max |Uz| 8.94e-19 m/s, and p within 1.05e-12 of zero. Their normalised
+residuals stay of order 0.03 to 0.43 for the whole run, so a four-decade
+drop of `|U| res` or `|p| res` cannot happen.
+
+The flow itself is steady: the written fields are identical from iteration
+7900 to 8000, the printed mean Mach number is constant to six digits from
+iteration 5550 on L1_lo and 2000 on L0_lo, and the CAD chain's own window
+changes of U_b and f are 0.0 for four of the five runs, L1_hi 1.6e-5 and
+1.3e-5.
+
+### 114.5 What this rules out, the options, and what is not claimed
+
+Ruled out by measurement: the SST coefficients and limiter, Menter 2003's,
+§114.3; the wall distance, since the exact y changes nothing; the axis and
+wedge treatment, the periodic set-up and the body force, since the 1-D with
+a plain zero-flux axis and no wedge agrees with the solver to 1e-5 in U_b on
+both meshes once omega converges, with x-invariance 8.7e-7 or less and force
+balance within 1.5e-6 and 1.0e-4 on L1_hi; and convergence of the mean flow,
+§114.4.
+
+The omega wall treatment at y+ below 1 is consistent but first order: f
+rises from 0.026943 to 0.027258 from 80 to 640 radial cells at Re_tau
+576.69.
+
+The options, none taken here. O1: the case writer of the pipe sets the omega
+and k `tolerance` to 1e-12 and keeps `relTol 0.01` - L1_lo moves to table
+2's 1e-12 row, a case-side change. O2: the omega convergence test is made
+insensitive to the pinned wall rows - a solver change that moves the
+iteration count of every SST and k-omega case, and a user decision. O3: the
+CAD classifier judges the periodic pipe by the Ux residual or by its own
+window changes. None of them brings the defect to 4.07 within 10 %: that
+needs a model with a smaller core eddy viscosity, which this section does
+not propose.
+
+House items: no numerics change, no new file, no kernel, no capture row, no
+gate. `ofgpu-lowmach` gains one ignored probe test,
+`tg0_probe_an_omega_tolerance_of_1e_8_leaves_the_l1_pipe_omega_frozen`,
+which runs a copy of the L1_lo case named by the environment variable
+`OFGPU_TG0_CASE` twice, with omega `tolerance` 1e-08 and 1e-12, for 8000
+iterations each.
+
+Measured on the card, RTX 5070 Ti, at 90510fc, `--ignored --nocapture`, 353 s:
+
+```text
+tg0 probe: tg0_a omega tolerance 1e-08: steps 8000 Ux mean 3.944257543e0 omega change 0.000e0 k change 2.154e-3
+tg0 probe: tg0_b omega tolerance 1e-12: steps 8000 Ux mean 4.023841007e0 omega change 2.778e-4 k change 2.000e-3
+tg0 probe: Ux mean ratio b/a 1.020177e0
+```
+
+Run a's omega does not change in any cell between iterations 4000 and 8000 while its k moves by 2.154e-3;
+run b's omega is still settling at 2.778e-4. The cell mean of `Ux`, arithmetic over the 320 cells, is
+2.02 % higher in run b; table 2's volume-weighted U_b moves by 2.49 %.
+
+---
