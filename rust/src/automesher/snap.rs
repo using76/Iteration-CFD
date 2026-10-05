@@ -107,6 +107,14 @@ pub struct SnapReport {
     pub n_pinned_boundary: usize,
     /// Iterates abandoned whole by (92.31).
     pub n_abandoned: usize,
+    /// Points of B whose residual after the last iterate is within eps of
+    /// (92.28) - `snap.tolerance * base_size`.
+    pub n_within_tolerance: usize,
+    /// DISTINCT points (92.68) froze over the run - not the points an
+    /// abandoned iterate pins as it gives up.
+    pub n_frozen: usize,
+    /// Iterates accepted after at least one (92.68) freeze round.
+    pub n_local_undo: usize,
     /// Feature edges (92.34) the surface carried, and corners (92.35).
     pub n_feature_edges: usize,
     pub n_feature_corners: usize,
@@ -148,6 +156,14 @@ impl SnapReport {
             self.n_snapped_to_edge,
             self.n_snapped_to_corner
         ));
+        s.push_str(&format!(
+            "snap: {} of {} point(s) within the tolerance, {} frozen in {} \
+             locally undone iterate(s)\n",
+            self.n_within_tolerance,
+            self.n_boundary_points,
+            self.n_frozen,
+            self.n_local_undo
+        ));
         s
     }
 }
@@ -158,6 +174,39 @@ pub struct Snapped {
     pub mesh: PolyMeshRaw,
     pub report: SnapReport,
     pub quality: QualityReport,
+}
+
+/// (92.68)'s O for the failing cells `fail`: every point of every cell,
+/// closed under the hanging-node parents - a point of O that is a hanging
+/// node of (92.33) brings both its parents in, and a parent that is itself
+/// a hanging node brings its own. Sorted ascending, without duplicates,
+/// and terminating on a parent cycle.
+fn freeze_set(
+    fail: &[u32],
+    cell_points: &[Vec<u32>],
+    parent_of: &HashMap<u32, [u32; 2]>,
+) -> Vec<u32> {
+    let mut o: HashSet<u32> = HashSet::new();
+    let mut stack: Vec<u32> = Vec::new();
+    for &c in fail {
+        for &p in &cell_points[c as usize] {
+            if o.insert(p) {
+                stack.push(p);
+            }
+        }
+    }
+    while let Some(p) = stack.pop() {
+        if let Some(&ab) = parent_of.get(&p) {
+            for parent in ab {
+                if o.insert(parent) {
+                    stack.push(parent);
+                }
+            }
+        }
+    }
+    let mut out: Vec<u32> = o.into_iter().collect();
+    out.sort_unstable();
+    out
 }
 
 // ==========================================================================
@@ -449,6 +498,9 @@ pub fn snap_regions(
     // edge, each mapped to its parent edge, longest first so a hanging node
     // of a hanging node is re-seated after its parents.
     let hanging = find_hanging(&mesh.points, &mesh.faces);
+    // (92.68)'s closure map: each hanging node to its two parents, built
+    // once from `hanging`.
+    let parent_of: HashMap<u32, [u32; 2]> = hanging.iter().cloned().collect();
     // (92.38)'s attraction, prepared once: the surface's sharp edges
     // (92.34) chained into polylines and indexed for (92.36) queries. A
     // `feature_tolerance` of zero turns the stage off entirely - no
@@ -477,6 +529,9 @@ pub fn snap_regions(
     let mut pts = mesh.points.clone();
     let mut work = mesh.clone();
     let mut scaled_back = vec![false; n_points];
+    // (92.68)'s freezes, distinct over the run - the fallback's pins do not
+    // count here.
+    let mut frozen = vec![false; n_points];
     let mut report = SnapReport {
         n_boundary_points: is_b.iter().filter(|&&b| b).count(),
         n_feature_edges: fset.as_ref().map_or(0, |fs| fs.edges.len()),
@@ -600,6 +655,7 @@ pub fn snap_regions(
             }
         }
         let mut halvings = 0usize;
+        let mut freezes = 0usize;
         let mut accepted = false;
         loop {
             let mut pts_try: Vec<Vec3> = (0..n_points)
@@ -660,14 +716,47 @@ pub fn snap_regions(
                 }
                 halvings += 1;
             } else {
-                for &c in &fail {
-                    for &i in &cell_points[c as usize] {
-                        pinned[i as usize] = true;
+                // (92.68): the local undo. Freeze O - the blamed points and
+                // the hanging parents they close onto - and let the rest
+                // keep its step; abandon whole only when a freeze would
+                // move nothing at all.
+                let o = freeze_set(&fail, &cell_points, &parent_of);
+                let mut frozen_can_move = false;
+                for &i in &o {
+                    if alpha[i as usize] > 0.0 {
+                        frozen_can_move = true;
+                        break;
                     }
                 }
-                report.n_abandoned += 1;
-                break;
+                let mut rest_can_move = false;
+                if frozen_can_move {
+                    for (j, d) in d_field.iter().enumerate() {
+                        if alpha[j] > 0.0
+                            && *d != Vec3::ZERO
+                            && o.binary_search(&(j as u32)).is_err()
+                        {
+                            rest_can_move = true;
+                            break;
+                        }
+                    }
+                }
+                if !frozen_can_move || !rest_can_move {
+                    for &i in &o {
+                        pinned[i as usize] = true;
+                    }
+                    report.n_abandoned += 1;
+                    break;
+                }
+                for &i in &o {
+                    alpha[i as usize] = 0.0;
+                    pinned[i as usize] = true;
+                    frozen[i as usize] = true;
+                }
+                freezes += 1;
             }
+        }
+        if accepted && freezes > 0 {
+            report.n_local_undo += 1;
         }
         let max_step = if accepted {
             let mut m: Scalar = 0.0;
@@ -695,6 +784,9 @@ pub fn snap_regions(
         if is_b[i] {
             let (_, _, d) = idx.closest_point(pts[i]);
             residuals.push(d);
+            if d <= eps {
+                report.n_within_tolerance += 1;
+            }
         }
     }
     residuals.sort_by(Scalar::total_cmp);
@@ -704,6 +796,7 @@ pub fn snap_regions(
             residuals[(((residuals.len() - 1) as f64) * 0.99).round() as usize];
     }
     report.n_scaled_back = scaled_back.iter().filter(|&&s| s).count();
+    report.n_frozen = frozen.iter().filter(|&&f| f).count();
     report.n_pinned = pinned.iter().filter(|&&p| p).count();
     report.n_pinned_boundary = (0..n_points).filter(|&i| pinned[i] && is_b[i]).count();
     // The gate: a mesh that still fails leaves as §92.3's own refusal text.
@@ -1408,6 +1501,36 @@ mod tests {
         v.abs() / 6.0
     }
 
+    /// (92.68)'s O takes the failing cells' points AND every hanging parent
+    /// they close onto - transitively, so 9 brings 2 back (already in), and
+    /// a parent cycle (11 <-> 12) terminates.
+    #[test]
+    fn the_freeze_set_takes_every_hanging_parent_with_it() {
+        let cell_points: Vec<Vec<u32>> =
+            vec![vec![0, 1, 2], vec![3, 4], vec![2, 9], vec![11]];
+        let mut parent_of: HashMap<u32, [u32; 2]> = HashMap::new();
+        parent_of.insert(2, [5, 6]);
+        parent_of.insert(6, [7, 8]);
+        parent_of.insert(9, [2, 10]);
+        parent_of.insert(11, [12, 13]);
+        parent_of.insert(12, [11, 14]);
+        let cases: Vec<(&[u32], &[u32])> = vec![
+            (&[0][..], &[0, 1, 2, 5, 6, 7, 8][..]),
+            (&[1][..], &[3, 4][..]),
+            (&[2][..], &[2, 5, 6, 7, 8, 9, 10][..]),
+            (&[3][..], &[11, 12, 13, 14][..]),
+            (&[][..], &[][..]),
+            (&[0, 1][..], &[0, 1, 2, 3, 4, 5, 6, 7, 8][..]),
+        ];
+        for (fail, want) in cases {
+            assert_eq!(
+                freeze_set(fail, &cell_points, &parent_of),
+                want,
+                "freeze_set({fail:?})"
+            );
+        }
+    }
+
     #[test]
     fn a_cube_on_the_cell_planes_is_snapped_bit_for_bit() {
         let (tree, bg) = setup([0.0, 4.0, 0.0, 4.0, 0.0, 4.0], 1.0, 0);
@@ -1547,18 +1670,22 @@ mod tests {
         );
     }
 
-    /// (92.31)'s undo, on a gate no displacement can satisfy. A UNIFORM
-    /// tree's castellated mesh is exactly orthogonal - every internal face
-    /// separates two cells whose centres differ along one axis - so a limit
-    /// of a thousandth of a degree passes on arrival and fails on the first
-    /// move. The step is halved `undo_limit` times, the blamed points are
-    /// pinned, the iterate is abandoned whole, and what comes back is the
-    /// mesh that went in, bit for bit, still through §92.3's gate. This is
-    /// the path the other four tests never reach: they all snap cleanly.
+    /// (92.31)'s undo and (92.68)'s freeze, on a gate no displacement can
+    /// satisfy. A UNIFORM tree's castellated mesh is exactly orthogonal -
+    /// every internal face separates two cells whose centres differ along
+    /// one axis - so a limit of a thousandth of a degree passes on arrival
+    /// and fails on the first move. The step is halved `undo_limit` times,
+    /// then (92.68) freezes the blamed points and their hanging parents
+    /// while the rest keeps its step; the iterate is accepted as locally
+    /// undone, nothing that was pinned can have moved, and what comes back
+    /// is within rounding of the mesh that went in, still through §92.3's
+    /// gate. The old loop abandoned the iterate whole and returned the
+    /// castellated points bit for bit.
     ///
-    /// Written by the supervising session, not by the coding agent.
+    /// Written by the supervising session, not by the coding agent; its
+    /// assertions re-stated for (92.68) by the coding agent.
     #[test]
-    fn a_gate_no_step_can_satisfy_leaves_the_mesh_where_it_started() {
+    fn a_near_impossible_gate_freezes_the_blamed_points_and_moves_only_the_rest() {
         let (tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 0);
         let surf = Surface::from_soup(
             sphere_soup(3.0, [4.0; 3]),
@@ -1584,15 +1711,27 @@ mod tests {
             snapped.report.n_scaled_back > 0,
             "the guard must have halved something"
         );
-        assert!(snapped.report.n_pinned > 0, "and then pinned it");
         assert!(
-            snapped.report.n_abandoned > 0,
-            "and abandoned the iterate whole"
+            snapped.report.n_pinned > 0,
+            "and the freeze pinned the blamed points"
         );
+        assert!(
+            snapped.report.n_abandoned == 0,
+            "(92.68) frees the iterate from whole-iterate abandonment"
+        );
+        assert!(
+            snapped.report.n_local_undo >= 1,
+            "the iterate was accepted after a freeze"
+        );
+        assert!(snapped.report.n_frozen > 0, "the freeze fired");
         for (a, b) in snapped.mesh.points.iter().zip(cast.mesh.points.iter()) {
-            assert_eq!(a.x.to_bits(), b.x.to_bits());
-            assert_eq!(a.y.to_bits(), b.y.to_bits());
-            assert_eq!(a.z.to_bits(), b.z.to_bits());
+            assert!(
+                (*a - *b).mag() <= 1e-4,
+                "a frozen point cannot have moved, and the rest was within \
+                 rounding: {} -> {}",
+                b,
+                a
+            );
         }
         assert!(snapped.quality.passed());
     }
@@ -2233,12 +2372,14 @@ mod tests {
         assert_eq!(snapped.report.n_pinned_boundary, 0);
     }
 
-    /// An abandoned iterate pins more than the boundary: the pinned points
+    /// The frozen points pin more than the boundary: the pinned points
     /// that lie in B of (92.27) stay inside the boundary count and under
-    /// the pinned total, and with the mesh returned unmoved each patch's
-    /// re-measured area is bit for bit the castellated one.
+    /// the pinned total, and (92.68)'s freeze moves a handful of B points
+    /// at most - each patch's re-measured area is the castellated one to
+    /// within 1e-9 relative. The old loop abandoned the iterate and came
+    /// back bit for bit.
     #[test]
-    fn an_abandoned_iterate_pins_more_than_the_boundary() {
+    fn the_frozen_points_pin_more_than_the_boundary() {
         let (tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 0);
         let surf = Surface::from_soup(
             sphere_soup(3.0, [4.0; 3]),
@@ -2275,10 +2416,12 @@ mod tests {
             "the pinned total also counts points outside B"
         );
         for row in &snapped.report.patch_areas {
-            assert_eq!(
-                row.snapped_area.to_bits(),
-                row.castellated_area.to_bits(),
-                "the mesh came back unmoved, so the two walks agree exactly"
+            assert!(
+                (row.snapped_area - row.castellated_area).abs()
+                    <= 1e-9 * row.castellated_area,
+                "the freeze moved a handful of points only: {} vs {}",
+                row.snapped_area,
+                row.castellated_area
             );
         }
     }
@@ -2854,5 +2997,93 @@ mod tests {
         eprintln!("subdivided pulled point capture {c:?}");
         assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
         assert!((c.captured_length - 22.0).abs() <= 1e-12 * 24.0, "{c:?}");
+    }
+
+    /// A 3.4 m box refined to level 2 at its surface, pulled onto its edges
+    /// from afar (`feature_tolerance = 2`, tau eight finest cells): with
+    /// (92.68) the iterate freezes the blamed points and their hanging
+    /// parents and moves the rest instead of abandoning the iterate whole -
+    /// the mesh still through the gate, over half of B within the
+    /// tolerance. The old loop abandoned 17 iterates and held 527 of 1178.
+    #[test]
+    fn a_box_pulled_onto_its_edges_from_afar_moves_what_passes_and_holds_the_rest() {
+        let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
+        let surf = Surface::from_soup(
+            box_soup([2.3; 3], [5.7; 3]),
+            vec!["cube".to_string()],
+        )
+        .expect("surface");
+        let spec = RefinementSpec {
+            levels: vec![RefinementBand {
+                patch: "cube".to_string(),
+                bands: vec![DistanceBand { distance: 0.0, level: 2 }],
+                feature_level: 0,
+            }],
+            feature_angle_deg: 30.0,
+            max_level: 2,
+            boxes: Vec::new(),
+        };
+        refine_to_surface(&mut tree, &bg, &surf, &spec).expect("refine");
+        let cast = castellate(
+            &tree,
+            &bg,
+            &surf,
+            &patch_names(),
+            &CastellationSpec::default(),
+            &thresholds(),
+        )
+        .expect("castellate");
+        let snapped = snap(
+            &cast.mesh,
+            &surf,
+            1.0,
+            30.0,
+            &SnapSpec {
+                feature_tolerance: 2.0,
+                ..SnapSpec::default()
+            },
+            &thresholds(),
+        )
+        .expect("snap");
+        eprintln!("{}", snapped.report.summary());
+        eprintln!(
+            "n_within_tolerance {} n_frozen {} n_local_undo {} n_abandoned {} \
+             max_residual {:.4e} p99_residual {:.4e} n_pinned {}",
+            snapped.report.n_within_tolerance,
+            snapped.report.n_frozen,
+            snapped.report.n_local_undo,
+            snapped.report.n_abandoned,
+            snapped.report.max_residual,
+            snapped.report.p99_residual,
+            snapped.report.n_pinned,
+        );
+        assert_eq!(
+            snapped.report.n_abandoned, 0,
+            "(92.68) frees the iterate from whole-iterate abandonment"
+        );
+        assert!(
+            snapped.report.n_local_undo >= 1,
+            "at least one iterate came back from a freeze"
+        );
+        assert!(snapped.report.n_frozen > 0, "the freeze fired");
+        assert!(
+            100 * snapped.report.n_within_tolerance
+                >= 55 * snapped.report.n_boundary_points,
+            "55% of B within the tolerance, got {}/{}",
+            snapped.report.n_within_tolerance,
+            snapped.report.n_boundary_points
+        );
+        assert!(
+            snapped.report.max_residual < 0.13,
+            "max residual {:.4e}",
+            snapped.report.max_residual
+        );
+        assert!(snapped.quality.passed());
+        assert_eq!(snapped.mesh.faces, cast.mesh.faces, "faces untouched");
+        assert_eq!(snapped.mesh.owner, cast.mesh.owner, "owner untouched");
+        assert_eq!(
+            snapped.mesh.neighbour, cast.mesh.neighbour,
+            "neighbour untouched"
+        );
     }
 }

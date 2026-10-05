@@ -4,7 +4,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=1920, height=1080" />
-    <title>Iterations-CFD - meteor-cfd F1 promo</title>
+    <title>Iterations-CFD - meteor-cfd F1 promo v2</title>
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
     <style>
       @font-face {
@@ -46,14 +46,14 @@
       data-start="0"
       data-width="1920"
       data-height="1080"
-      data-duration="82"
+      data-duration="90"
     >
       <div
         id="el-title"
         data-composition-id="title"
         data-composition-src="compositions/title.html"
         data-start="0"
-        data-duration="5"
+        data-duration="6"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -62,8 +62,8 @@
         id="el-cad"
         data-composition-id="cad"
         data-composition-src="compositions/cad.html"
-        data-start="5"
-        data-duration="8"
+        data-start="6"
+        data-duration="7.5"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -72,8 +72,8 @@
         id="el-chat"
         data-composition-id="chat"
         data-composition-src="compositions/chat.html"
-        data-start="13"
-        data-duration="16"
+        data-start="13.5"
+        data-duration="15"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -82,7 +82,7 @@
         id="el-mesh"
         data-composition-id="mesh"
         data-composition-src="compositions/mesh.html"
-        data-start="29"
+        data-start="28.5"
         data-duration="9"
         data-track-index="1"
         data-width="1920"
@@ -92,8 +92,8 @@
         id="el-solve"
         data-composition-id="solve"
         data-composition-src="compositions/solve.html"
-        data-start="38"
-        data-duration="9"
+        data-start="37.5"
+        data-duration="10"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -102,8 +102,8 @@
         id="el-cpturn"
         data-composition-id="cpturn"
         data-composition-src="compositions/cpturn.html"
-        data-start="47"
-        data-duration="7"
+        data-start="47.5"
+        data-duration="6"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -112,8 +112,8 @@
         id="el-cpstills"
         data-composition-id="cpstills"
         data-composition-src="compositions/cpstills.html"
-        data-start="54"
-        data-duration="7.5"
+        data-start="53.5"
+        data-duration="6"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -122,7 +122,7 @@
         id="el-reveal"
         data-composition-id="reveal"
         data-composition-src="compositions/reveal.html"
-        data-start="61.5"
+        data-start="59.5"
         data-duration="6.5"
         data-track-index="1"
         data-width="1920"
@@ -132,8 +132,8 @@
         id="el-slice"
         data-composition-id="slice"
         data-composition-src="compositions/slice.html"
-        data-start="68"
-        data-duration="5"
+        data-start="66"
+        data-duration="6"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -142,8 +142,8 @@
         id="el-close"
         data-composition-id="close"
         data-composition-src="compositions/close.html"
-        data-start="73"
-        data-duration="9"
+        data-start="72"
+        data-duration="18"
         data-track-index="1"
         data-width="1920"
         data-height="1080"
@@ -153,12 +153,13 @@
         data-composition-id="captions"
         data-composition-src="compositions/captions.html"
         data-start="0"
-        data-duration="82"
+        data-duration="90"
         data-track-index="3"
         data-track-kind="captions"
         data-width="1920"
         data-height="1080"
       ></div>
+      <audio id="el-master" src="assets/audio/master.wav" data-start="0" data-duration="90" data-track-index="5" data-volume="1"></audio>
     </div>
     <script>
       window.__timelines["main"] = gsap.timeline({ paused: true });

@@ -695,6 +695,15 @@ pub fn run(
         "p99_over_h": snapped.report.p99_residual as f64 / h_f,
         "max_over_h": snapped.report.max_residual as f64 / h_f,
         "n_pinned_boundary": snapped.report.n_pinned_boundary,
+        "n_within_tolerance": snapped.report.n_within_tolerance,
+        "within_tolerance_frac": if snapped.report.n_boundary_points > 0 {
+            Some(snapped.report.n_within_tolerance as f64
+                / snapped.report.n_boundary_points as f64)
+        } else {
+            None
+        },
+        "n_frozen": snapped.report.n_frozen,
+        "n_local_undo": snapped.report.n_local_undo,
         "area_ratio": area_ratio,
         "feature_capture": feature_capture,
     });
@@ -1741,6 +1750,24 @@ mod tests {
         assert!(
             npb <= st[2]["n_boundary_points"].as_u64().unwrap(),
             "boundary-only pinned {npb} over the boundary points"
+        );
+        let nwt = st[2]["n_within_tolerance"].as_u64().unwrap();
+        let frac = st[2]["within_tolerance_frac"].as_f64().unwrap();
+        assert!(
+            nwt <= st[2]["n_boundary_points"].as_u64().unwrap(),
+            "within-tolerance {nwt} over the boundary points"
+        );
+        assert!(
+            (0.0..=1.0).contains(&frac),
+            "within_tolerance_frac {frac} outside [0, 1]"
+        );
+        assert!(
+            st[2]["n_frozen"].as_u64().is_some(),
+            "n_frozen missing from the snap row"
+        );
+        assert!(
+            st[2]["n_local_undo"].as_u64().is_some(),
+            "n_local_undo missing from the snap row"
         );
         let rows = st[2]["area_ratio"].as_array().unwrap();
         assert_eq!(rows.len(), 1);

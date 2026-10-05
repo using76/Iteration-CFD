@@ -62,78 +62,98 @@
           padding: 72px 96px 88px 96px;
         }
         #close-inner {
-          max-width: 1500px;
+          max-width: 1560px;
           display: flex;
           flex-direction: column;
           align-items: center;
         }
-        #close-name {
-          font-size: 104px;
-          font-weight: 800;
-          color: #f1f3f5;
-          line-height: 1.1;
-          text-align: center;
-        }
-        #close-product {
+        #close-kicker {
           font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
           font-variant-numeric: tabular-nums;
-          font-size: 40px;
+          font-size: 36px;
           font-weight: 700;
           color: #ff5a36;
-          margin-top: 10px;
+          line-height: 1.2;
         }
-        #close-ko {
-          font-size: 34px;
+        #close-head {
+          font-size: 136px;
+          font-weight: 800;
+          color: #f1f3f5;
+          line-height: 1.05;
+          text-align: center;
+          margin-top: 8px;
+        }
+        #close-head .close-ai {
+          color: #ff5a36;
+        }
+        #close-value {
+          font-size: 46px;
           font-weight: 600;
           color: #f1f3f5;
-          margin-top: 22px;
+          line-height: 1.3;
+          margin-top: 18px;
           text-align: center;
         }
-        #close-en {
-          font-size: 26px;
-          font-weight: 400;
-          color: #a7afb8;
-          margin-top: 6px;
-          text-align: center;
-        }
-        #close-company {
-          font-size: 22px;
-          font-weight: 400;
-          color: #f1f3f5;
-          margin-top: 20px;
-          text-align: center;
+        #close-v3 {
+          color: #ff5a36;
         }
         #close-rule {
           width: 120px;
           height: 2px;
           background: rgba(255, 255, 255, 0.14);
-          margin-top: 24px;
+          margin: 30px auto 26px;
         }
-        #close-credits {
-          align-self: flex-start;
-          margin-top: 24px;
-          opacity: 0;
+        #close-company {
+          font-size: 60px;
+          font-weight: 800;
+          color: #f1f3f5;
+          line-height: 1.15;
+          text-align: center;
         }
-        #close-credits div {
+        #close-legal {
+          font-size: 26px;
+          font-weight: 500;
+          color: #a7afb8;
+          line-height: 1.3;
+          margin-top: 4px;
+          text-align: center;
+        }
+        #close-collab {
           font-size: 20px;
           font-weight: 400;
           color: #a7afb8;
-          line-height: 1.55;
+          line-height: 1.4;
+          margin-top: 8px;
+          text-align: center;
+        }
+        #close-credits {
+          align-self: center;
+          margin-top: 22px;
+          opacity: 0;
+          text-align: left;
+        }
+        #close-credits div {
+          font-size: 18px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.5;
         }
         #close-disclaimer {
-          margin-top: 22px;
+          margin-top: 18px;
           text-align: center;
           opacity: 0;
         }
         #close-disclaimer-ko {
-          font-size: 22px;
+          font-size: 20px;
           font-weight: 400;
           color: #f1f3f5;
+          line-height: 1.4;
         }
         #close-disclaimer-en {
-          font-size: 22px;
+          font-size: 20px;
           font-weight: 400;
           color: #f1f3f5;
+          line-height: 1.4;
           margin-top: 4px;
         }
       </style>
@@ -145,12 +165,13 @@
           <div id="close-glow"></div>
           <div id="close-col">
             <div id="close-inner">
-              <div id="close-name">Iterations-CFD</div>
-              <div id="close-product">meteor-cfd</div>
-              <div id="close-ko">GPU 상주 유한체적 전산유체역학 솔버</div>
-              <div id="close-en">A GPU-resident finite volume CFD solver</div>
-              <div id="close-company">주식회사 이터레이션즈 · 협력 및 기여 주식회사 메테오시뮬레이션 · Iterations Co., Ltd. · in collaboration with Meteo Simulation Co., Ltd.</div>
+              <div id="close-kicker">meteor-cfd</div>
+              <h1 id="close-head"><span class="close-ai">AI</span>-driven CFD Solver</h1>
+              <div id="close-value"><span id="close-v1">Set up by AI.</span> <span id="close-v2">Solved on the GPU.</span> <span id="close-v3">Fast and automatic.</span></div>
               <div id="close-rule"></div>
+              <div id="close-company">(주)Iterations</div>
+              <div id="close-legal">Iterations Co., Ltd.</div>
+              <div id="close-collab">협력 및 기여 주식회사 메테오시뮬레이션 · in collaboration with Meteo Simulation Co., Ltd.</div>
               <div id="close-credits">
                 <div>Car model: "F1 2026 concept" by Qvist_Designs, CC BY 4.0, via Sketchfab.</div>
                 <div>Licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)</div>
@@ -168,16 +189,21 @@
       <script>
         var tl = gsap.timeline({ paused: true });
         tl.fromTo("#close-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
-        tl.fromTo("#close-glow", { opacity: 0, scale: 0.85 }, { opacity: 0.25, scale: 1, duration: 0.9, ease: "power2.out" }, 0.3);
-        tl.fromTo("#close-name", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.3);
-        tl.fromTo("#close-product", { opacity: 0, y: 50 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.42);
-        tl.fromTo("#close-ko", { opacity: 0, y: 46 }, { opacity: 1, y: 0, duration: 0.15, ease: "power4.out" }, 0.52);
-        tl.fromTo("#close-en", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.14, ease: "power4.out" }, 0.62);
-        tl.fromTo("#close-company", { opacity: 0, y: 36 }, { opacity: 1, y: 0, duration: 0.14, ease: "power4.out" }, 0.72);
-        tl.fromTo("#close-rule", { opacity: 0 }, { opacity: 1, duration: 0.12, ease: "power1.out" }, 0.8);
-        tl.fromTo("#close-credits", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 2.0);
-        tl.fromTo("#close-disclaimer", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 2.2);
-        tl.to("#close-wrap", { opacity: 0, duration: 0.8, ease: "none" }, 8.2);
+        tl.fromTo("#close-glow", { opacity: 0 }, { opacity: 0.25, duration: 0.9, ease: "power2.out" }, 0.3);
+        tl.fromTo("#close-kicker", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 0.5);
+        tl.fromTo("#close-head", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.22, ease: "power4.out" }, 2.0);
+        tl.fromTo("#close-v1", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 4.75);
+        tl.fromTo("#close-v2", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 6.05);
+        tl.fromTo("#close-v3", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 7.9);
+        tl.to("#close-glow", { opacity: 0.45, scale: 1.08, duration: 0.25, ease: "power2.out" }, 7.9);
+        tl.to("#close-glow", { opacity: 0.25, scale: 1.0, duration: 1.2, ease: "power2.out" }, 8.15);
+        tl.fromTo("#close-rule", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 10.0);
+        tl.fromTo("#close-company", { opacity: 0, y: 36 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 10.0);
+        tl.fromTo("#close-legal", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 10.12);
+        tl.fromTo("#close-collab", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 10.24);
+        tl.fromTo("#close-credits", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 11.0);
+        tl.fromTo("#close-disclaimer", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 11.2);
+        tl.to("#close-wrap", { opacity: 0, duration: 0.8, ease: "none" }, 17.2);
         window.__timelines["close"] = tl;
       </script>
     </template>

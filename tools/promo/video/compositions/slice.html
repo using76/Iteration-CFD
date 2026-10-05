@@ -43,8 +43,8 @@
       <script>
         var tl = gsap.timeline({ paused: true });
         tl.fromTo("#slice-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
-        tl.fromTo("#slice-drift", { scale: 1.0 }, { scale: 1.04, duration: 5, ease: "none" }, 0);
-        tl.to("#slice-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 4.6);
+        tl.fromTo("#slice-drift", { scale: 1.0 }, { scale: 1.04, duration: 6, ease: "none" }, 0);
+        tl.to("#slice-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 5.6);
         window.__timelines["slice"] = tl;
       </script>
     </template>

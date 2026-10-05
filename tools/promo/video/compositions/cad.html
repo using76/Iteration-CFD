@@ -58,7 +58,7 @@
               muted
               playsinline
               data-start="0"
-              data-duration="8"
+              data-duration="7.5"
               data-track-index="0"
             ></video>
           </div>
@@ -68,9 +68,9 @@
       <script>
         var tl = gsap.timeline({ paused: true });
         tl.fromTo("#cad-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
-        tl.fromTo("#cad-zoom", { scale: 1.0 }, { scale: 1.03, duration: 8, ease: "none" }, 0);
+        tl.fromTo("#cad-zoom", { scale: 1.0 }, { scale: 1.03, duration: 7.5, ease: "none" }, 0);
         tl.fromTo("#cad-credit", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power1.out" }, 0.8);
-        tl.to("#cad-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 7.6);
+        tl.to("#cad-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 7.1);
         window.__timelines["cad"] = tl;
       </script>
     </template>

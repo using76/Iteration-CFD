@@ -32,6 +32,10 @@ and the two wings are refinement boxes (`box_table`, SPEC-LIT §92.16, the
 mesher's `refinement.boxes`); the distance bands are near-wall only
 (`band_table`).
 
+Snap's feature attraction asks for half a FINEST cell
+(`snap.feature_tolerance = 0.5 * 2**-max_level`, SPEC-LIT §92.12's erratum:
+the default 0.5 is half a BASE cell, 2^(max_level-1) finest cells wide).
+
 CC BY 4.0 rule: the source is the "F1 2026 concept" render model by
 Qvist_Designs (CC BY 4.0, via Sketchfab). The geometry and every file made
 from it are NEVER written inside the repository - all outputs go to --out -
@@ -216,7 +220,11 @@ def box_table(lo, hi, wings):
 
 
 def build_config(geom_dir, out_dir, lo, hi, args, wings):
-    """The AutomeshConfig; `snap` is omitted so the mesher's defaults apply."""
+    """The AutomeshConfig. `snap.feature_tolerance` asks for half a FINEST
+    cell (SPEC-LIT §92.12's erratum: the default 0.5 is half a base cell,
+    2^(max_level-1) finest cells wide at the wall's level - the far
+    attraction drags whole bands of points onto one feature line); the rest
+    of snap uses the mesher's defaults."""
     L = hi[0] - lo[0]
     extent = tunnel_extent(lo, hi, args.base)
     surfaces = [{"path": _posix(os.path.join(geom_dir, name + ".stl")), "name": name}
@@ -229,6 +237,7 @@ def build_config(geom_dir, out_dir, lo, hi, args, wings):
                        "boxes": box_table(lo, hi, wings)},
         "castellation": {"keep_region": "seed",
                          "seed_point": [lo[0] - 1.5 * L, 0.0, 0.5 * extent[5]]},
+        "snap": {"feature_tolerance": 0.5 * 2.0 ** -args.max_level},
         "layers": {"patches": list(LAYER_PATCHES), "n": args.layers,
                    "first_thickness": first_layer(L, args.speed_kmh, args.nu, args.yplus)["t1"],
                    "growth": args.growth},
@@ -520,9 +529,11 @@ def _t5():
     wings = {"front_wing": ([0.0002, -0.9, 0.0879], [0.9151, 0.9, 0.5538]),
              "rear_wing": ([4.7974, -0.575, 0.3956], [5.3938, 0.575, 0.9072])}
     cfg = build_config("C:/g", "C:/o", _LO, _HI, args, wings)
-    if set(cfg) != {"input", "domain", "refinement", "castellation", "layers",
-                    "quality", "output"}:
+    if set(cfg) != {"input", "domain", "refinement", "castellation", "snap",
+                    "layers", "quality", "output"}:
         raise AssertionError("top-level keys " + repr(sorted(cfg)))
+    if cfg["snap"] != {"feature_tolerance": 0.0078125}:
+        raise AssertionError("snap " + repr(cfg["snap"]))
     sur = cfg["input"]["surfaces"]
     if [s["name"] for s in sur] != ["body", "front_wing", "rear_wing", "wheels",
                                     "floor", "ground"]:

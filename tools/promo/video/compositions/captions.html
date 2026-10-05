@@ -42,13 +42,6 @@
           color: #f1f3f5;
           line-height: 1.3;
         }
-        #captions-wrap .cap-en {
-          font-size: 26px;
-          font-weight: 400;
-          color: #a7afb8;
-          line-height: 1.35;
-          margin-top: 6px;
-        }
         #captions-chip {
           position: absolute;
           top: 72px;
@@ -66,37 +59,38 @@
       </style>
       <div id="root" data-composition-id="captions" data-width="1920" data-height="1080">
         <div id="captions-wrap">
-          <div class="cap" id="captions-cad">
-            <div class="cap-ko" id="captions-cad-k">실제 F1 2026 컨셉 CAD 모델</div>
-            <div class="cap-en" id="captions-cad-e">A real F1 2026 concept CAD model</div>
+          <div class="cap" id="captions-V02">
+            <div class="cap-ko" id="captions-V02-k">정교한 F1 2026 컨셉카, CAD 모델에서 바로 시작합니다.</div>
           </div>
-          <div class="cap" id="captions-chat1">
-            <div class="cap-ko" id="captions-chat1-k">한국어로 요청하면, AI 어시스턴트가 스튜디오를 직접 조작합니다</div>
-            <div class="cap-en" id="captions-chat1-e">Ask in plain Korean - the AI assistant drives the studio itself</div>
+          <div class="cap" id="captions-V03">
+            <div class="cap-ko" id="captions-V03-k">평범한 말로 요청하면, AI 어시스턴트가<br />해석을 설정하고 스튜디오를 조작할 수 있습니다.</div>
           </div>
-          <div class="cap" id="captions-chat2">
-            <div class="cap-ko" id="captions-chat2-k">형상을 열고, 해석 결과를 불러와 화면에 띄웁니다</div>
-            <div class="cap-en" id="captions-chat2-e">It opens the geometry, loads the solve and puts it on screen</div>
+          <div class="cap" id="captions-V04">
+            <div class="cap-ko" id="captions-V04-k">형상을 열고, 격자와 해석 결과를 불러와 화면에 띄웁니다.</div>
           </div>
-          <div class="cap" id="captions-mesh">
-            <div class="cap-ko" id="captions-mesh-k">자체 격자 생성기 · 계단형 육면체 격자</div>
-            <div class="cap-en" id="captions-mesh-e">In-house mesher - castellated hex mesh</div>
+          <div class="cap" id="captions-V05">
+            <div class="cap-ko" id="captions-V05-k">자체 격자 생성기가 약 32분 만에 320만 셀을 만듭니다.</div>
           </div>
-          <div class="cap" id="captions-solve">
-            <div class="cap-ko" id="captions-solve-k">GPU 한 장으로 1,000 스텝 의사-과도 해석</div>
-            <div class="cap-en" id="captions-solve-e">1,000 pseudo-transient steps on a single GPU</div>
+          <div class="cap" id="captions-V06">
+            <div class="cap-ko" id="captions-V06-k">이어서 GPU 한 장, RTX 5070 Ti가<br />시속 250 km의 유동을 풉니다.</div>
           </div>
-          <div class="cap" id="captions-cp">
-            <div class="cap-ko" id="captions-cp-k">차체 표면 압력 분포 (Cp)</div>
-            <div class="cap-en" id="captions-cp-e">Surface pressure on the car (Cp)</div>
+          <div class="cap" id="captions-V07">
+            <div class="cap-ko" id="captions-V07-k">차체 모든 표면의 압력 분포.</div>
           </div>
-          <div class="cap" id="captions-reveal">
-            <div class="cap-ko" id="captions-reveal-k">유선 - 앞날개, 바퀴, 뒷날개 주위의 흐름</div>
-            <div class="cap-en" id="captions-reveal-e">Streamlines around the front wing, wheels and rear wing</div>
+          <div class="cap" id="captions-V08">
+            <div class="cap-ko" id="captions-V08-k">유선이 앞날개, 바퀴, 뒷날개 위로 흐르는 공기를 따라갑니다.</div>
           </div>
-          <div class="cap" id="captions-slice">
-            <div class="cap-ko" id="captions-slice-k">차량 중앙 단면의 유속 · 자유류 250 km/h</div>
-            <div class="cap-en" id="captions-slice-e">Flow speed on the car's centre plane - free stream 250 km/h</div>
+          <div class="cap" id="captions-V09">
+            <div class="cap-ko" id="captions-V09-k">중앙 단면이 후류를 보여줍니다.<br />CAD에서 유동장까지, 처음부터 끝까지.</div>
+          </div>
+          <div class="cap" id="captions-V10">
+            <div class="cap-ko" id="captions-V10-k">meteor-cfd. AI 기반 CFD 솔버.</div>
+          </div>
+          <div class="cap" id="captions-V11">
+            <div class="cap-ko" id="captions-V11-k">AI가 설정하고, GPU가 풉니다.</div>
+          </div>
+          <div class="cap" id="captions-V12">
+            <div class="cap-ko" id="captions-V12-k">빠르고, 자동으로.</div>
           </div>
           <div id="captions-chip">시연용 계산 · 검증된 공력 결과 아님 | Demonstration run - not a validated aerodynamic result</div>
         </div>
@@ -104,24 +98,26 @@
       <script>
         var tl = gsap.timeline({ paused: true });
         var CAPS = [
-          ["cad", 5.6, 12.5],
-          ["chat1", 13.6, 21.0],
-          ["chat2", 21.3, 28.5],
-          ["mesh", 29.6, 37.5],
-          ["solve", 38.6, 46.5],
-          ["cp", 47.6, 61.0],
-          ["reveal", 62.0, 67.5],
-          ["slice", 68.6, 72.5],
+          ["V02", 6.55, 13.0],
+          ["V03", 14.05, 20.59],
+          ["V04", 21.15, 27.26],
+          ["V05", 28.95, 35.04],
+          ["V06", 37.85, 47.24],
+          ["V07", 48.05, 51.32],
+          ["V08", 59.95, 65.1],
+          ["V09", 66.35, 71.59],
+          ["V10", 72.45, 76.6],
+          ["V11", 76.65, 79.8],
+          ["V12", 79.85, 81.78]
         ];
         CAPS.forEach(function (c) {
           var id = c[0], tin = c[1], tout = c[2];
           tl.fromTo("#captions-" + id, { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "none" }, tin);
           tl.fromTo("#captions-" + id + "-k", { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.35, ease: "power4.out" }, tin);
-          tl.fromTo("#captions-" + id + "-e", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.35, ease: "power4.out" }, tin + 0.12);
           tl.to("#captions-" + id, { opacity: 0, duration: 0.3, ease: "none" }, tout - 0.3);
         });
-        tl.fromTo("#captions-chip", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "power1.out" }, 47.2);
-        tl.to("#captions-chip", { opacity: 0, duration: 0.4, ease: "none" }, 72.4);
+        tl.fromTo("#captions-chip", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "power1.out" }, 47.7);
+        tl.to("#captions-chip", { opacity: 0, duration: 0.4, ease: "none" }, 71.4);
         window.__timelines["captions"] = tl;
       </script>
     </template>

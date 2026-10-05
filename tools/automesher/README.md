@@ -139,7 +139,7 @@ Both carry comments on every block. Every key of
 | `snap.tolerance` | number | `1e-3` | The dead band and the convergence test of eq. (92.28), as a FRACTION of `domain.base_size`: a point within `tolerance * base_size` of the surface is on it, and the loop stops when no point moves further. |
 | `snap.smoothing_passes` | integer | `3` | Laplacian passes over the displacement field, eq. (92.6). |
 | `snap.smoothing` | number | `0.5` | The smoothing relaxation weight, in `[0, 1]`. |
-| `snap.undo_limit` | integer | `4` | Halvings of a gate-breaking displacement before it is zeroed and the point pinned - eq. (92.7)'s undo. |
+| `snap.undo_limit` | integer | `4` | Halvings of a gate-breaking displacement before the local undo of eq. (92.68): the offending points and their hanging parents are frozen while the rest moves, and the iterate is abandoned whole only when a freeze would change nothing. |
 | `snap.max_area_ratio` | number | `4.0` | Eq. (92.32): a wall patch carrying more than this many times its own surface area is geometry the cells never resolved, and the run refuses rather than collapsing the cell that reached it. Must be >= 1. |
 | `snap.feature_tolerance` | number | `0.5` | Eq. (92.38): a boundary point whose surface target lies within this fraction of `domain.base_size` of a feature edge is snapped onto the edge instead, and onto the corner it claims (92.39). Zero turns the attraction off. Must be >= 0. |
 | `layers.patches` | string[] | `[]` | The patches layers are added to; empty means none. |
@@ -190,8 +190,10 @@ runs between snap and layers.
    that silently deletes 900 cells under a building has told you nothing.
 4. **Snapping** (`snap::snap`, §92.11) - boundary points to the closest surface
    point (92.5), the displacement field smoothed (92.6), and any displacement
-   that breaks the §92.3 gate halved up to `snap.undo_limit` times and then
-   abandoned (92.7). This is the stage that buys back the geometry
+   that breaks the §92.3 gate halved up to `snap.undo_limit` times, then the
+   offending points and their hanging parents frozen while the rest moves
+   (92.7, 92.68) - the iterate is abandoned whole only when a freeze would
+   change nothing. This is the stage that buys back the geometry
    castellation's staircase lost.
 5. **Feature snapping** (§92.12) - **inside stage 4's loop**, not after it:
    (92.38) pulls a point whose surface target is near a feature edge onto the
