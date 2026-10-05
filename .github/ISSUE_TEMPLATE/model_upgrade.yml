@@ -1,0 +1,79 @@
+name: Model upgrade / 물리 모델 업그레이드
+description: Upgrade or add a turbulence, viscosity/rheology, heat-transfer or vibration/structural-dynamics model. Qualifies for the perpetual commercial grant.
+title: "[model] "
+labels: ["model-upgrade"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A merged model upgrade labelled `grant:model-upgrade` earns an **unlimited, perpetual commercial licence** (CONTRIBUTOR-GRANTS.md §2). It must come with a validation gate against an open, cited reference, and must not worsen any existing validation row. A maintainer must accept this issue before coding starts.
+        병합되고 `grant:model-upgrade`가 붙은 모델 업그레이드는 **무제한·무기한 상업 이용 권한**을 받습니다. 공개 출처 기준의 검증 게이트가 필요하고, 기존 검증 항목은 하나도 나빠지면 안 됩니다. 코딩 전에 관리자가 이 이슈를 수락해야 합니다.
+  - type: dropdown
+    id: family
+    attributes:
+      label: Model family / 모델 분야
+      options:
+        - Turbulence (RANS, transition, LES, hybrid, wall treatment) / 난류
+        - Viscosity / rheology / 점성·유변학
+        - Heat transfer (energy, CHT, radiation, thermal wall) / 열전달
+        - Vibration / structural dynamics / 진동·구조 동역학
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model name and variant / 모델 이름과 변형
+      placeholder: "k-omega SST (Menter 2003) with the SST-2003 production limiter"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of change / 변경 종류
+      options:
+        - New model
+        - Correction of an existing model (bug in the equations or constants)
+        - Accuracy improvement of an existing model
+        - Performance improvement with identical results
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current state in meteor-cfd / 현재 상태
+      description: Where the model lives (file:line, SPEC-LIT section) and what it gets wrong or lacks today, with measured numbers.
+    validations:
+      required: true
+  - type: textarea
+    id: equations
+    attributes:
+      label: Equations and source / 수식과 출처
+      description: The equations and constants to implement, each with its open reference (DOI or URL). They go into rust/SPEC-LIT.md verbatim.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan / 검증 계획
+      description: |
+        The reference case and data (open source only), the quantities compared, the meshes (a grid study where it applies), and the pass bands, fixed BEFORE the run.
+        Name the ofgpu-validate section the gate goes into.
+      placeholder: |
+        Case: fully developed channel, Re_tau 550, DNS of Lee & Moser 2015 (DOI ...)
+        Compare: U+ (y+), k+, mean friction coefficient; bands 2 % / 5 % / 1 %
+        Meshes: 3 levels, refinement ratio 2; GCI reported
+        Gate: new Gate 110-D in SPEC-LIT §110
+    validations:
+      required: true
+  - type: textarea
+    id: regressions
+    attributes:
+      label: Rows that may move / 바뀔 수 있는 기존 결과
+      description: Existing validation rows or published numbers this change can move, and why. "None" is a valid answer if you have checked.
+    validations:
+      required: true
+  - type: input
+    id: grantee
+    attributes:
+      label: Grantee / 권한 수령자
+      description: Your name, or the employer or legal entity that should hold the grant.

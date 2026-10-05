@@ -1,0 +1,79 @@
+name: Bug report / 버그 신고
+description: A wrong number, a crash, a refused valid input, or a broken studio action.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. Fill in every field: a person or an AI agent should be able to reproduce this from the issue alone.
+        필드를 모두 채워 주세요. 이 이슈만 보고 사람이나 AI 에이전트가 재현할 수 있어야 합니다.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 영역
+      options:
+        - Solver (rust/src, ofgpu-* binaries)
+        - Automesher (ofgpu-automesher)
+        - Other meshing (generate-mesh, convert-mesh, tools/mesh)
+        - Geometry / CAD (tools/geom, tools/cad)
+        - Autonomous setup (tools/autonomy)
+        - Studio / AI assistant (gui/)
+        - Validation suite (ofgpu-validate)
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version / 커밋 또는 버전
+      description: Output of `git rev-parse --short HEAD`, or the release tag.
+      placeholder: "800ebb5"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 환경
+      description: OS, GPU and driver, CUDA version, Rust and Python versions, f64 or `single` build.
+      placeholder: |
+        Windows 11, RTX 5070 Ti (driver 5xx), CUDA 13.3, rustc 1.xx, Python 3.13, f64
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Exact commands to reproduce / 재현 명령
+      description: Copy-pasteable commands from a clean checkout. Attach or link the smallest case or config that shows it.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected / 기대 결과
+      description: What should happen, with the reference (a SPEC-LIT section, a paper, an analytic value) if it is a number.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual / 실제 결과
+      description: What happened. Paste the relevant log lines, panic text or numbers; do not paraphrase.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Related SPEC-LIT section or gate / 관련 SPEC-LIT 절 또는 게이트
+      placeholder: "§92.11, Gate 105-C"
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks / 확인
+      options:
+        - label: I searched existing issues. / 기존 이슈를 검색했습니다.
+          required: true
+        - label: The case is the smallest I could make that still shows the problem. / 문제를 보여주는 가장 작은 사례입니다.
+        - label: I would like to fix it myself (see CONTRIBUTING.md). / 직접 고치고 싶습니다.

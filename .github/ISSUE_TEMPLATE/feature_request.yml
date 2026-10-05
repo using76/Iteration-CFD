@@ -1,0 +1,67 @@
+name: Feature request / 기능 제안
+description: A new capability in the solver, mesher, CAD tools, autonomy or studio.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the outcome, not only the implementation. A feature that is merged and labelled `grant:significant` earns a 12-month commercial licence (CONTRIBUTOR-GRANTS.md).
+        구현 방법뿐 아니라 무엇이 가능해지는지 적어 주세요. 병합되고 `grant:significant`가 붙은 기능은 1년 상업 이용 권한을 받습니다.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 영역
+      options:
+        - Solver
+        - Automesher / meshing
+        - Geometry / CAD
+        - Autonomous setup
+        - Studio / AI assistant
+        - Validation / benchmarks
+        - Documentation / tooling
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case / 해결하려는 문제
+      description: Who needs this, and what they cannot do today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour / 제안하는 동작
+      description: What the user, the config or the CLI looks like when it is done. Include config keys, CLI flags or tool names.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance tests / 완료 판정 기준
+      description: Concrete, checkable conditions with expected values. These become the PR's tests.
+      placeholder: |
+        - `ofgpu-automesher cfg.json` with `refinement.boxes` refines every leaf the box overlaps to its level
+        - a config without boxes meshes byte for byte as before (goldens unchanged)
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References / 참고 문헌
+      description: Papers (DOI), open datasets or standards the feature relies on. Open sources only.
+  - type: dropdown
+    id: numerics
+    attributes:
+      label: Does it change existing numerical results? / 기존 수치 결과가 바뀝니까?
+      options:
+        - "No: new, opt-in behaviour; existing outputs stay byte-identical"
+        - "Yes: explain below; needs maintainer acceptance before coding"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: numerics_detail
+    attributes:
+      label: If yes, which results move and why / 바뀐다면 무엇이 왜 바뀌는지

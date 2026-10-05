@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Commercial licence and security reports / 상업 라이선스·보안 신고
+    url: https://github.com/using76/Iteration-CFD/blob/main/CONTRIBUTING.md#8-reporting-security-problems
+    about: For licences or security problems write to simul@msimul.com instead of opening an issue.
+  - name: Contributor commercial grants / 기여자 상업 이용 권한
+    url: https://github.com/using76/Iteration-CFD/blob/main/CONTRIBUTOR-GRANTS.md
+    about: How bug fixes, features and model upgrades earn commercial-use rights.
