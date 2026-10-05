@@ -25,6 +25,10 @@ const fake = {
   tools: [] as string[],
   pixels: [] as [number, number][],
   noImage: false,
+  // Opt-in doubles for the camera-move budget tests: a setCamera that models
+  // the real controller's requireMount wait, and one that never resolves.
+  busyUntilMounted: false,
+  neverResolve: false,
   state: null as unknown as FakeViewerState,
   listeners: new Set<(s: FakeViewerState) => void>(),
   pixelOutcome: null as unknown as ProbeOutcome,
@@ -35,6 +39,20 @@ const fakeApi = {
   execute: async (cmd: unknown) => {
     fake.calls.push(cmd)
     const c = cmd as { type: string; projection?: 'perspective' | 'orthographic' }
+    if (c.type === 'setCamera') {
+      // The real controller is built with requireMount: a camera move issued
+      // before the canvas mounts does not resolve until the canvas does.
+      if (fake.busyUntilMounted && !fake.mounted) {
+        await new Promise<void>((resolve) => {
+          const timer = setInterval(() => {
+            if (!fake.mounted) return
+            clearInterval(timer)
+            resolve()
+          }, 10)
+        })
+      }
+      if (fake.neverResolve) return new Promise<never>(() => {})
+    }
     if (c.type === 'setCamera' && c.projection) fake.state.camera.projection = c.projection
     return {
       ok: true,
@@ -149,7 +167,7 @@ const STEP_INFO: GeometryInfo = {
 }
 
 type GeoTab = { id: string; kind: 'geometry'; path: string }
-type ResTab = { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null }
+type ResTab = { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null; chart?: 'residuals' | 'metrics' }
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
 type RunResult = ResultFrame & { state: UiState }
 
@@ -169,6 +187,8 @@ function resetFake(): void {
   fake.tools = []
   fake.pixels = []
   fake.noImage = false
+  fake.busyUntilMounted = false
+  fake.neverResolve = false
   fake.state = {
     camera: { position: [10, 10, 10], target: [0, 0, 0], projection: 'perspective' },
     datasetId: 'ds1', datasetName: 'channel (demo)', field: 'U', time: null,
@@ -190,7 +210,7 @@ function resetFake(): void {
   fakeB.listeners = new Set()
 }
 
-function harness(tabs: (GeoTab | ResTab)[] = []) {
+function harness(tabs: (GeoTab | ResTab)[] = [], cameraBudgetMs?: number) {
   const sent: ClientMsg[] = []
   const saveImage = vi.fn()
   const subscribeRun = vi.fn()
@@ -213,15 +233,15 @@ function harness(tabs: (GeoTab | ResTab)[] = []) {
     setActiveRun(runId: string | null) {
       ui.activeRunId = runId
     },
-    openResidualsTab(runId: string | null) {
+    openResidualsTab(runId: string | null, chart?: 'residuals' | 'metrics') {
       const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
-      putResTab({ id: 'residuals', kind: 'residuals', runId: runId ?? (prev ? prev.runId : null) })
+      putResTab({ id: 'residuals', kind: 'residuals', runId: runId ?? (prev ? prev.runId : null), chart: chart ?? prev?.chart ?? 'residuals' })
       ui.activeTabId = 'residuals'
       ui.activeRunId = runId ?? ui.activeRunId
     },
     setCompareRun(runId: string | null) {
       const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
-      putResTab({ id: 'residuals', kind: 'residuals', runId: prev ? prev.runId : ui.activeRunId, compareRunId: runId })
+      putResTab({ id: 'residuals', kind: 'residuals', runId: prev ? prev.runId : ui.activeRunId, compareRunId: runId, chart: prev?.chart ?? 'residuals' })
       ui.activeTabId = 'residuals'
     },
     setViewSplit(on: boolean) {
@@ -249,6 +269,7 @@ function harness(tabs: (GeoTab | ResTab)[] = []) {
     session: { getState: () => session as never },
     subscribeRun,
     saveImage,
+    cameraBudgetMs,
   })
   return {
     sent,
@@ -535,7 +556,7 @@ describe('the viewer commands the bridge drives', () => {
 })
 
 describe('compare_run', () => {
-  const resTab = (runId: string | null, compareRunId?: string | null): ResTab => ({ id: 'residuals', kind: 'residuals', runId, compareRunId })
+  const resTab = (runId: string | null, compareRunId?: string | null): ResTab => ({ id: 'residuals', kind: 'residuals', runId, compareRunId, chart: 'residuals' })
 
   it('compare_run r_2 overlays and subscribes', async () => {
     const h = harness()
@@ -578,6 +599,41 @@ describe('compare_run', () => {
     const r = await h.run({ type: 'compare_run', runId: 'r_1' })
     expect(r.ok).toBe(false)
     expect(r.error).toBe('UNSUPPORTED (compare_run): run "r_1" is the run the chart already follows; pick another or follow_run first')
+  })
+})
+
+describe('show_chart', () => {
+  it('show_chart opens the metrics chart and still refuses surface', async () => {
+    const h = harness([])
+    const r = await h.run({ type: 'show_chart', chart: 'metrics', runId: 'r_1' })
+    expect(r.ok).toBe(true)
+    expect(h.subscribeRun).toHaveBeenCalledWith('r_1')
+    const tab = h.ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
+    expect(tab?.chart).toBe('metrics')
+    expect(tab?.runId).toBe('r_1')
+    expect(r.state.tabs).toEqual([{ id: 'residuals', kind: 'residuals', label: 'metrics' }])
+    // The residuals chart still opens, keeping the tab's run.
+    expect((await h.run({ type: 'show_chart', chart: 'residuals' })).ok).toBe(true)
+    expect(h.ui.tabs.find((t): t is ResTab => t.kind === 'residuals')?.runId).toBe('r_1')
+    const bad = await h.run({ type: 'show_chart', chart: 'surface' })
+    expect(bad.ok).toBe(false)
+    expect(bad.error).toBe('UNSUPPORTED (show_chart): chart "surface" has no tab here (residuals, metrics)')
+  })
+
+  it('run commands forwarded to the window say the server applies them', async () => {
+    const h = harness([])
+    const cmds: UiCommand[] = [
+      { type: 'start_run' },
+      { type: 'stop_run', runId: null },
+      { type: 'set_run_setting', binary: null, flag: null, value: null },
+      { type: 'run', action: 'stop' },
+    ]
+    for (const cmd of cmds) {
+      const r = await h.run(cmd)
+      expect(r.ok).toBe(false)
+      expect(r.error).toBe(`UNSUPPORTED (${cmd.type}): gui_control applies this on the server through run_start / run_stop; this window should not receive it`)
+    }
+    expect(h.ui.tabs).toEqual([])
   })
 })
 
@@ -652,5 +708,74 @@ describe('the split viewport', () => {
     const before = fakeB.calls.length
     fakeApi.emit({ ...fake.state, camera: { position: [9, 9, 9], target: [0, 0, 0], projection: 'perspective' } })
     expect(fakeB.calls).toHaveLength(before)
+  })
+})
+
+describe('gui_control camera moves answer before the hub times out', () => {
+  it('set_camera with the viewer unmounted opens the viewer tab first and answers ok once it mounts', async () => {
+    fake.mounted = false
+    fake.busyUntilMounted = true
+    const h = harness([], 300)
+    h.ui.openViewerTab.mockImplementation(() => {
+      setTimeout(() => {
+        fake.mounted = true
+      }, 50)
+    })
+    const exec = vi.spyOn(fakeApi, 'execute')
+    const t0 = Date.now()
+    const r = await h.run({ type: 'set_camera', preset: 'iso' })
+    expect(r.ok).toBe(true)
+    expect(fake.calls).toEqual([{ type: 'setCamera', preset: 'iso' }])
+    expect(h.ui.openViewerTab).toHaveBeenCalledTimes(1)
+    expect(h.ui.openViewerTab.mock.invocationCallOrder[0]).toBeLessThan(exec.mock.invocationCallOrder[0])
+    expect(Date.now() - t0).toBeLessThan(1500)
+  })
+
+  it('fit_view with the viewer unmounted opens the viewer tab first and answers ok once it mounts', async () => {
+    fake.mounted = false
+    fake.busyUntilMounted = true
+    const h = harness([], 300)
+    h.ui.openViewerTab.mockImplementation(() => {
+      setTimeout(() => {
+        fake.mounted = true
+      }, 50)
+    })
+    const exec = vi.spyOn(fakeApi, 'execute')
+    const t0 = Date.now()
+    const r = await h.run({ type: 'fit_view' })
+    expect(r.ok).toBe(true)
+    expect(fake.calls).toEqual([{ type: 'setCamera', preset: 'fit' }])
+    expect(h.ui.openViewerTab.mock.invocationCallOrder[0]).toBeLessThan(exec.mock.invocationCallOrder[0])
+    expect(Date.now() - t0).toBeLessThan(1500)
+  })
+
+  it('set_camera answers NO_VIEWER within the budget when no canvas ever mounts', async () => {
+    fake.mounted = false
+    const h = harness([], 300)
+    const t0 = Date.now()
+    const r = await h.run({ type: 'set_camera', preset: 'iso' })
+    expect(r.ok).toBe(false)
+    expect(r.error).toBe('NO_VIEWER (set_camera): no viewer canvas is mounted; the viewer tab has been opened - retry once it shows')
+    expect(fake.calls).toEqual([])
+    expect(Date.now() - t0).toBeLessThan(1500)
+  })
+
+  it('set_camera answers BUSY within the budget when the viewer is still busy', async () => {
+    fake.neverResolve = true
+    const h = harness([], 300)
+    const t0 = Date.now()
+    const r = await h.run({ type: 'set_camera', preset: 'iso' })
+    expect(r.ok).toBe(false)
+    expect(r.error).toBe('BUSY (set_camera): the viewer is still working on an earlier command; the camera move is queued and applies when it finishes')
+    expect(fake.calls).toHaveLength(1)
+    expect(Date.now() - t0).toBeLessThan(1500)
+  })
+
+  it('set_camera on a mounted viewer moves the camera and answers ok', async () => {
+    const h = harness()
+    const r = await h.run({ type: 'set_camera', preset: 'iso' })
+    expect(r.ok).toBe(true)
+    expect(fake.calls).toEqual([{ type: 'setCamera', preset: 'iso' }])
+    expect(h.ui.openViewerTab).toHaveBeenCalled()
   })
 })

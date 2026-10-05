@@ -63,7 +63,8 @@ export const actions = {
     return sid ? getWsClient().send({ t: 'quick', sessionId: sid, action, casePath, runId }) : false
   },
   newSession(): boolean {
-    return getWsClient().send({ t: 'session.new' })
+    // The server creates the session in the locale the screen is showing.
+    return getWsClient().send({ t: 'session.new', locale: useUiStore.getState().locale })
   },
   openSession(id: string): boolean {
     useSessionStore.getState().setCurrentSessionId(id)

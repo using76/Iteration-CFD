@@ -25,7 +25,12 @@ export interface UiBridgeDeps {
   subscribeRun(runId: string): void
   /** Where a post_screenshot PNG goes; the default downloads it like Viewer3D's Snapshot button. Tests inject a recorder. */
   saveImage?(name: string, base64: string): void
+  /** How long set_camera / fit_view may wait for the canvas to mount and the camera move to finish before answering; default CAMERA_ANSWER_MS. Tests inject a short one. */
+  cameraBudgetMs?: number
 }
+
+/** set_camera / fit_view always answer within this, below the hub's 5 s UI_TIMEOUT_MS. */
+export const CAMERA_ANSWER_MS = 4_000
 
 /** show_field / post_field name the three display fields; the solver names them U/p/T. */
 const FIELD_MAP: Record<string, { name: string; component: 'magnitude' | null }> = {
@@ -123,7 +128,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
       runId: u.activeRunId,
       sim: null,
       case: casePath ? { path: casePath, name: null, dirty: null } : null,
-      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind })),
+      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind === 'residuals' ? (t.chart ?? 'residuals') : t.kind })),
       run: null,
       viewer: {
         datasetId: vs.datasetId,
@@ -329,17 +334,37 @@ export function createUiBridge(deps: UiBridgeDeps) {
         deps.subscribeRun(cmd.runId)
         return { ok: true }
       case 'show_chart':
-        if (cmd.chart === 'residuals') {
-          ui.getState().openResidualsTab(ui.getState().activeRunId)
+        if (cmd.chart === 'residuals' || cmd.chart === 'metrics') {
+          if (cmd.runId) deps.subscribeRun(cmd.runId)
+          u.openResidualsTab(cmd.runId ?? u.activeRunId, cmd.chart)
           return { ok: true }
         }
-        return unsupported('show_chart', `chart "${cmd.chart}" has no tab here (residuals only)`)
+        return unsupported('show_chart', `chart "${cmd.chart}" has no tab here (residuals, metrics)`)
       case 'set_camera':
       case 'fit_view': {
+        // A camera move must be answered inside the hub's 5 s: open the tab
+        // first so the canvas can mount, wait out the mount, then race the
+        // move against what is left of the budget.
+        const budget = deps.cameraBudgetMs ?? CAMERA_ANSWER_MS
         const preset = cmd.type === 'fit_view' ? 'fit' : cmd.preset
-        const r = await getViewerApi().execute({ type: 'setCamera', preset })
         ui.getState().openViewerTab()
-        return r.ok ? { ok: true } : { ok: false, error: r.error?.message ?? 'the viewer refused the camera move' }
+        const v = getViewerApi()
+        const deadline = Date.now() + budget
+        while (!v.isMounted() && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, Math.min(50, Math.max(1, deadline - Date.now()))))
+        }
+        if (!v.isMounted()) return noViewer(cmd.type)
+        let raceTimer: ReturnType<typeof setTimeout> | null = null
+        const moved = await Promise.race([
+          v.execute({ type: 'setCamera', preset }),
+          new Promise<null>((resolve) => {
+            raceTimer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()))
+          }),
+        ])
+        if (raceTimer) clearTimeout(raceTimer)
+        if (moved === null)
+          return { ok: false, error: `BUSY (${cmd.type}): the viewer is still working on an earlier command; the camera move is queued and applies when it finishes` }
+        return moved.ok ? { ok: true } : { ok: false, error: moved.error?.message ?? 'the viewer refused the camera move' }
       }
       case 'show_field': {
         const mapped = FIELD_MAP[cmd.field]
@@ -394,7 +419,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'start_run':
       case 'stop_run':
       case 'set_run_setting':
-        return unsupported(cmd.type, 'runs are driven by the run_start/run_stop tools on this screen, not by gui_control')
+        return unsupported(cmd.type, 'gui_control applies this on the server through run_start / run_stop; this window should not receive it')
       case 'set_tool':
         // The controller replays a tool set before the canvas mounts (attachView), so no mount
         // gate here; it does NOT create the section clip box - Viewer3D's toolbar onTool does

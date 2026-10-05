@@ -5,6 +5,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { TOOL_META, ToolPolicySchema, type SessionSettings, type ToolPolicy } from '@cfd/shared'
+import { guiRunDelegate } from '../tools/guiRun.js'
 
 export const POLICY_FILE = 'policy.json'
 
@@ -51,6 +52,13 @@ function baseKind(name: string): 'read' | 'mutate' | 'long' | 'ui' | null {
 export const ALWAYS_ASK: ReadonlySet<string> = new Set(['autonomy_propose_edit', 'cad_propose_edit', 'cad_requirements_propose', 'cad_template_freeze'])
 
 export function classifyTool(name: string, input: unknown, ctx: PolicyInput): ToolPolicy {
+  // A gui_control command that stands in for run_start / run_stop is approved
+  // exactly as that tool: policy.json overrides, TOOL_META, ALWAYS_ASK, the
+  // per-session allowlist and autoApprove all apply to the delegate's name.
+  if (name === 'gui_control') {
+    const delegate = guiRunDelegate(input)
+    if (delegate !== null) return classifyTool(delegate, input, ctx)
+  }
   const base: ToolPolicy = ctx.overrides[name] ?? (TOOL_META as Record<string, { policy: ToolPolicy } | undefined>)[name]?.policy ?? 'ask'
   if (base === 'never') return 'never'
   if (ALWAYS_ASK.has(name)) return 'ask'

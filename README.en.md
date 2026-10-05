@@ -8,7 +8,7 @@ Iterations Co., Ltd. · in collaboration with Meteo Simulation Co., Ltd. · Rust
 
 ## Overview
 
-meteor-cfd is an unstructured finite volume CFD solver designed so that the entire time-integration loop stays on the GPU. Once the mesh and fields are uploaded, no device allocation and no field transfer to the host occur inside the loop. It is **single-GPU only**, and what it is for is incompressible and low-Mach flow — RANS/LES/hybrid turbulence, buoyant plumes, variable-density low-Mach flow, two-phase VOF, conjugate heat transfer, surface-to-surface radiation, Lagrangian sprays, and ventilation and data-centre airflow with fan curves and porous jumps. The numerical core is implemented directly from published literature, and every formulation is specified in [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) with a citation to its original paper. Validation uses the method of manufactured solutions, analytical solutions and published benchmarks. **The comparison is not yet sufficient, and help with it is very welcome.** A Rust 1.85 host with CUDA C++ kernels; double precision by default, single via the `single` feature; NVIDIA GPUs; cudarc and thiserror are the only dependencies, with AMGX optional.
+meteor-cfd is an unstructured finite volume CFD solver designed so that the entire time-integration loop stays on the GPU. Once the mesh and fields are uploaded, no device allocation and no field transfer to the host occur inside the loop. It is **single-GPU only**, and what it is for is incompressible and low-Mach flow — RANS/LES/hybrid turbulence, buoyant plumes, variable-density low-Mach flow, two-phase VOF, conjugate heat transfer, surface-to-surface radiation, Lagrangian sprays, and ventilation and data-centre airflow with fan curves and porous jumps. The numerical core is implemented directly from published literature, and every formulation is specified in [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) with a citation to its original paper. Validation uses the method of manufactured solutions, analytical solutions and published benchmarks. **The comparison is not yet sufficient, and help with it is very welcome.** A Rust 1.85 host with CUDA C++ kernels; double precision by default, single via the `single` feature; NVIDIA GPUs. The direct dependencies are seven crates — `cudarc`, `jsonc-parser`, `schemars`, `serde`, `serde_json`, `serde_path_to_error`, `thiserror` (`rust/Cargo.toml`, `[dependencies]`; `anyhow` joins for the build script) — and the resolved graph is 27 packages (this crate plus 26), each named in [`NOTICE`](NOTICE) with the terms it ships under; AMGX stays optional.
 
 ---
 
@@ -67,18 +67,19 @@ text is in [`LICENSE`](LICENSE), what a commercial licence covers is in
 
 ## Status
 
-**This is the output of actually running it on this working tree on 2026-09-08**, on an NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, double precision.
+**Each line below is a dated measurement taken on the machine of record** — an NVIDIA GeForce RTX 5070 Ti (sm_120), CUDA 13.3, double precision — and names the date it was measured and where it is recorded.
 
 ```
-cargo test --release   1,774 passed, 0 failed, 6 ignored   (all targets, 18 suites)
-                       1,645 passed, 0 failed, 4 ignored   (the lib crate alone)
+cargo test --release   1,774 passed, 0 failed, 6 ignored   (all targets, 18 suites; 2026-09-08)
+                       1,645 passed, 0 failed, 4 ignored   (the lib crate alone; 2026-09-08)
 
-ofgpu-validate         833 / 833 checks passed
-                       788 computed live, 45 replayed from recorded measurements
-                       then a list naming the 2 gates whose verdict is MISSES and the 6 OPEN
+ofgpu-validate         1021 / 1026 checks passed           (2026-09-27, SPEC-LIT §95.11)
+                       the five failing rows: Gate 95-A's four, the cantilever at
+                       5:1 and 10:1 (§109.7), and Gate 95-G's LE10 ring order row (§95.11)
+                       then the list of every gate whose registered verdict is MISSES or OPEN
 ```
 
-That list is not maintained by hand: it is **generated** from the registry each gate enters at the point it reports its own verdict (SPEC-LIT §69). Printing a verdict and registering one are the same call, so all eight are named on every run and a ninth could not fail to appear. **Everything `ofgpu-validate` runs passes. That is a different statement from "this project reproduces every published benchmark it compares against", and the two must not be confused.**
+That list is not maintained by hand: it is **generated** from the registry each gate enters at the point it reports its own verdict (SPEC-LIT §69). Printing a verdict and registering one are the same call, so every registered verdict is named on every run and one more could not fail to appear. **Five of the 1026 rows `ofgpu-validate` runs fail — the block above names them — and every other row passes. That is a different statement from "this project reproduces every published benchmark it compares against", and the two must not be confused.**
 
 ---
 
@@ -106,7 +107,7 @@ cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 12
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 ```
 
-The whole validation suite is `cargo run --release --bin ofgpu-validate`. The other fifteen executables (`ofgpu-lowmach`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, the benchmarks), the case file format and the command-line options are in the **user guide**. Cases are read and written either as a single JSONC file or as an OpenFOAM ASCII case directory — the latter for interoperability with existing tools such as ParaView and `foamToVTK`; meteor-cfd links against no part of OpenFOAM and contains none of its source.
+The whole validation suite is `cargo run --release --bin ofgpu-validate`. The other nineteen executables (`ofgpu-lowmach`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, the benchmarks), the case file format and the command-line options are in the **user guide**. Cases are read and written either as a single JSONC file or as an OpenFOAM ASCII case directory — the latter for interoperability with existing tools such as ParaView and `foamToVTK`; meteor-cfd links against no part of OpenFOAM and contains none of its source.
 
 ---
 
@@ -187,7 +188,7 @@ What kind of verification each section is, **what it was compared against** (a p
 |---|---|
 | **User guide** (separate page) | Building, the case file, the settings contract, running, output, what it cannot do |
 | **Technical guidebook** (separate page) | Discretisation, boundary conditions, pressure–velocity, turbulence, low-Mach, surface-to-surface radiation, validation, GPU residency, mesh adaptation and performance |
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | The numerical specification, 81 sections, with a citation for every formulation — both guides are drawn *from* it and neither replaces it |
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | The numerical specification, 95 sections (numbered §0 to §113, with gaps), with a citation for every formulation — both guides are drawn *from* it and neither replaces it |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | Per-file provenance and design decisions, the licence audit, third-party notices |
 | [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | Test case geometries, and the index to `docs/` — the model catalogue, GPU portability, the I/O redesign and the JSONC schema, and `ofgpu-lowmach`'s low-Mach formulation and wall-heat gate record |
 

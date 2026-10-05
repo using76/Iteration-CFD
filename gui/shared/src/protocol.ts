@@ -747,8 +747,8 @@ export type HostState = z.infer<typeof HostStateSchema>
 
 export const ClientMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('ping'), ts: z.number() }),
-  z.object({ t: z.literal('session.open'), sessionId: z.string().nullable() }),
-  z.object({ t: z.literal('session.new') }),
+  z.object({ t: z.literal('session.open'), sessionId: z.string().nullable(), locale: SessionSettingsSchema.shape.locale.nullish() }),
+  z.object({ t: z.literal('session.new'), locale: SessionSettingsSchema.shape.locale.nullish() }),
   z.object({ t: z.literal('session.list') }),
   z.object({ t: z.literal('session.delete'), sessionId: z.string() }),
   z.object({ t: z.literal('session.rename'), sessionId: z.string(), title: z.string() }),

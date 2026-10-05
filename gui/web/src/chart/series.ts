@@ -1,7 +1,7 @@
 // Turns residual records into uPlot aligned data: a fixed series superset in
 // display order plus any dynamic field, log-safe nulls and stride
 // downsampling. Pure, so the chart component stays thin.
-import { RESIDUAL_SERIES_COLORS, RESIDUAL_SERIES_ORDER, type ResidualRecord } from '@cfd/shared'
+import { RESIDUAL_SERIES_COLORS, RESIDUAL_SERIES_ORDER, type MetricRecord, type ResidualRecord } from '@cfd/shared'
 
 export type XAxis = 'iter' | 'time'
 
@@ -45,6 +45,13 @@ export function hasTimeAxis(records: ResidualRecord[]): boolean {
   return records.some((r) => r.time !== null)
 }
 
+/** The y scale a chart starts on: metrics go negative so linear, residuals are log.
+ *  The chart component reads this on mount; the tab host keys the chart by kind so
+ *  a chart switch remounts and re-runs it. */
+export function initialYScale(chart: 'residuals' | 'metrics'): 'log' | 'linear' {
+  return chart === 'metrics' ? 'linear' : 'log'
+}
+
 /** Indices to keep so that at most `maxPoints` survive; the last index is always kept. */
 export function decimateIndices(length: number, maxPoints: number): number[] {
   if (maxPoints <= 0 || length <= maxPoints) return Array.from({ length }, (_, i) => i)
@@ -73,6 +80,13 @@ export function shapeResiduals(records: ResidualRecord[], keys: string[], opts: 
     })
   })
   return { keys, x, ys, count: records.length }
+}
+
+/** The metrics chart reads the same uPlot path: a metric line becomes a
+ *  residual record (fields = metrics, wall/solverIters empty); a metric line
+ *  with no iteration is placed at its sequence number. */
+export function metricsAsResidualRecords(recs: MetricRecord[]): ResidualRecord[] {
+  return recs.map((rec) => ({ seq: rec.seq, iter: rec.iter ?? rec.seq, time: rec.time, wall: null, fields: rec.metrics, solverIters: null, raw: rec.raw }))
 }
 
 /** The residual field to headline on cards: the largest of U, p, continuity, k... in the latest record. */

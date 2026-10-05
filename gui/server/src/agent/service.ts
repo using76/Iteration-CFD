@@ -336,7 +336,11 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
       case 'session.open': {
         let rec = msg.sessionId ? store.get(msg.sessionId) : undefined
         if (!rec) {
-          rec = store.create()
+          // A session the server creates opens in the frame's locale, else in
+          // the locale the window reported; an existing session keeps its
+          // stored settings untouched.
+          const locale = msg.locale ?? client.uiState?.locale ?? null
+          rec = store.create(locale ? { locale } : undefined)
           await store.save(rec)
           broadcastList()
         }
@@ -345,7 +349,8 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
         return true
       }
       case 'session.new': {
-        const rec = store.create()
+        const locale = msg.locale ?? client.uiState?.locale ?? null
+        const rec = store.create(locale ? { locale } : undefined)
         await store.save(rec)
         client.sessionId = rec.id
         client.send({ t: 'session.state', session: state(rec) })

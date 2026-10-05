@@ -9,7 +9,7 @@ import { api } from '../api/rest'
 import { Icon } from '../components/common/Icon'
 import { pickActiveRun, selectRunData, sortRuns, useSessionStore } from '../state/sessionStore'
 import { useUiStore } from '../state/uiStore'
-import { hasTimeAxis, pairKeys, seriesColor, shapeResidualsPair, type XAxis } from './series'
+import { hasTimeAxis, initialYScale, metricsAsResidualRecords, pairKeys, seriesColor, shapeResidualsPair, type XAxis } from './series'
 
 const SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹'
 const BATCH_MS = 100
@@ -41,10 +41,15 @@ export interface ResidualsChartProps {
   compareRunId?: string | null
   active?: boolean
   compact?: boolean
+  /** residuals (default) or the run's metric lines through the same plot. */
+  chart?: 'residuals' | 'metrics'
 }
 
-export function ResidualsChart({ runId: runIdProp, compareRunId = null, active = true, compact = false }: ResidualsChartProps) {
+export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdProp = null, active = true, compact = false, chart = 'residuals' }: ResidualsChartProps) {
   const t = useT()
+  // The metrics chart has no compare overlay; everything else is the same uPlot path.
+  const metrics = chart === 'metrics'
+  const compareRunId = metrics ? null : compareRunIdProp
   const runs = useSessionStore((s) => s.runs)
   const uiActiveRunId = useUiStore((s) => s.activeRunId)
   const setActiveRun = useUiStore((s) => s.setActiveRun)
@@ -53,10 +58,12 @@ export function ResidualsChart({ runId: runIdProp, compareRunId = null, active =
   const runList = useMemo(() => sortRuns(runs), [runs])
   const run = useMemo(() => (runIdProp ? (runs[runIdProp] ?? null) : pickActiveRun(runList, uiActiveRunId)), [runIdProp, runs, runList, uiActiveRunId])
   const runId = run?.id ?? null
-  const residuals = useSessionStore((s) => selectRunData(runId)(s).residuals)
+  const residualRecs = useSessionStore((s) => selectRunData(runId)(s).residuals)
+  const metricRecs = useSessionStore((s) => selectRunData(runId)(s).metrics)
+  const residuals = useMemo(() => (metrics ? metricsAsResidualRecords(metricRecs) : residualRecs), [metrics, metricRecs, residualRecs])
   const compareResiduals = useSessionStore((s) => selectRunData(compareRunId)(s).residuals)
 
-  const [yScale, setYScale] = useState<'log' | 'linear'>('log')
+  const [yScale, setYScale] = useState<'log' | 'linear'>(initialYScale(chart))
   const [xAxis, setXAxis] = useState<XAxis>('iter')
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const [follow, setFollow] = useState(true)
@@ -186,7 +193,7 @@ export function ResidualsChart({ runId: runIdProp, compareRunId = null, active =
     <div className={`residuals${compact ? ' compact' : ''}`} data-testid="residuals-chart" data-run-id={runId ?? ''}>
       <div className="residuals-head">
         <span className="title">
-          <Icon name="chart" size={14} className="muted" /> {t('residuals.title')}
+          <Icon name="chart" size={14} className="muted" /> {t(metrics ? 'residuals.metricsTitle' : 'residuals.title')}
         </span>
         {run ? (
           <span className="faint truncate mono" style={{ fontSize: 'var(--fs-xs)' }}>
@@ -271,7 +278,7 @@ export function ResidualsChart({ runId: runIdProp, compareRunId = null, active =
             </select>
           </label>
         ) : null}
-        {!compact ? (
+        {!compact && !metrics ? (
           <label>
             {t('residuals.compare')}
             <select
@@ -293,7 +300,7 @@ export function ResidualsChart({ runId: runIdProp, compareRunId = null, active =
           </label>
         ) : null}
         <span className="grow" />
-        {runId ? (
+        {runId && !metrics ? (
           <a className="btn btn-sm" href={api.residualsCsvUrl(runId)} download={`${runId}-residuals.csv`} data-testid="residuals-export" title={t('residuals.export')}>
             <Icon name="download" size={12} /> {compact ? 'CSV' : t('residuals.export')}
           </a>

@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import type { ResidualRecord } from '@cfd/shared'
+import type { MetricRecord, ResidualRecord } from '@cfd/shared'
 import {
   compareKey,
   decimateIndices,
   formatResidual,
   hasTimeAxis,
+  initialYScale,
   isCompareKey,
   leadingField,
   logSafe,
+  metricsAsResidualRecords,
   pairKeys,
   seriesColor,
   seriesKeys,
@@ -72,6 +74,28 @@ describe('shapeResiduals', () => {
     expect(decimateIndices(5, 10)).toEqual([0, 1, 2, 3, 4])
     expect(decimateIndices(10, 4)).toEqual([0, 3, 6, 9])
     expect(decimateIndices(11, 4)).toEqual([0, 3, 6, 9, 10])
+  })
+})
+
+describe('initialYScale', () => {
+  it('starts linear for metrics (negatives exist) and log for residuals', () => {
+    expect(initialYScale('metrics')).toBe('linear')
+    expect(initialYScale('residuals')).toBe('log')
+  })
+})
+
+describe('metricsAsResidualRecords', () => {
+  it('metricsAsResidualRecords maps metrics to chart records', () => {
+    const m: MetricRecord[] = [
+      { seq: 1, iter: 100, time: 0.5, metrics: { alphaCo: 0.12, dt: 1e-4 }, raw: 'r1' },
+      { seq: 2, iter: null, time: null, metrics: { Q: 3.4 }, raw: 'r2' },
+    ]
+    expect(metricsAsResidualRecords(m)).toEqual([
+      { seq: 1, iter: 100, time: 0.5, wall: null, fields: { alphaCo: 0.12, dt: 1e-4 }, solverIters: null, raw: 'r1' },
+      { seq: 2, iter: 2, time: null, wall: null, fields: { Q: 3.4 }, solverIters: null, raw: 'r2' },
+    ])
+    expect(seriesKeys(metricsAsResidualRecords(m))).toEqual(['alphaCo', 'dt', 'Q'])
+    expect(metricsAsResidualRecords([])).toEqual([])
   })
 })
 
