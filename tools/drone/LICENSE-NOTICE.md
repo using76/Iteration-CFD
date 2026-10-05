@@ -15,6 +15,8 @@
 | `isaac_bpy.py` | yes (bpy) | GPL-2.0-or-later |
 | `isaac_vdb.py` | no (openvdb at run time) | Prosperity Public License 3.0.0 |
 | `isaac_probe.py` | no (isaacsim, omni, carb at run time) | Prosperity Public License 3.0.0 |
+| `post.py` | no | Prosperity Public License 3.0.0 |
+| `render.py` | yes (bpy, mathutils) | GPL-2.0-or-later |
 | `LICENSE-NOTICE.md` | - | Prosperity Public License 3.0.0 |
 
 ## Why `sim_geom.py` is GPL-2.0-or-later
