@@ -499,10 +499,17 @@ def selftest():
         assert len(req5) == 1 and req5[0]["verdict"] == "fail", req5
         assert rec["precondition"] == {"start_n_hard_fail": nhf, "met": True}, rec["precondition"]
         assert rec["g4"]["verdict"] == "OPEN"
+        nominal = common.read_json(os.path.join(CAD, "cases", "nozzle_nominal",
+                                                "nominal_record.json"))
+        closed = nominal["cfd_u"]["status"] == "CLOSED"
+        known = any(isinstance(v, dict) and v.get("gci_fine") is not None
+                    for v in nominal["cfd_u"].values())
         rs = rec["g4"]["reasons"]
-        assert rs[0] == "G4-NOT-RUN" and "G4-START" not in rs and rs[-1] == "G4-CFDU", rs
+        assert rs[0] == "G4-NOT-RUN" and "G4-START" not in rs \
+            and ("G4-CFDU" in rs) == (not closed), rs
         assert rec["replay"] == {"status": "NOT_RUN", "ok": None}
-        assert rec["cfd_u"]["status"] == "OPEN" and rec["cfd_u"]["gci_fine_known"] is False
+        assert rec["cfd_u"]["status"] == nominal["cfd_u"]["status"]
+        assert rec["cfd_u"]["gci_fine_known"] is known
         assert rec["prefilter_subset"] is None
         assert len(rec["reduced_evals"]) == 1 and rec["reduced_evals"][0]["name"] == "start"
         e0 = rec["reduced_evals"][0]
@@ -513,9 +520,10 @@ def selftest():
         reds = common.read_jsonl(os.path.join(s5, REDUCED_JSONL))
         assert len(reds) == 1 and tuple(sorted(reds[0].keys())) == tuple(sorted(REDUCED_KEYS))
         print("[ok] record: cad-g4/1 keys exact, the start reaches judge with REQ-005 failing"
-              " (n_hard_fail %d), the precondition is met, g4 OPEN from G4-NOT-RUN to G4-CFDU with"
-              " no G4-START, prefilter_subset None, replay NOT_RUN, and no absolute path anywhere"
-              % (nhf,))
+              " (n_hard_fail %d), the precondition is met, g4 OPEN from G4-NOT-RUN ending %s with"
+              " no G4-START, prefilter_subset None, replay NOT_RUN, cfd_u %s gci_fine_known %s"
+              " read from the real record, and no absolute path anywhere"
+              % (nhf, rs[-1], rec["cfd_u"]["status"], known))
 
         # (G6) the REDUCED prefilter: the walk's own pool subset, file reuse and refusals (fake pf)
         s6 = os.path.join(td, "study6")

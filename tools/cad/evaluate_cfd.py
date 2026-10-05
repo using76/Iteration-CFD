@@ -678,20 +678,30 @@ def selftest():
         print("[ok] eval parts: exactly reqs.EVAL_KEY_PARTS, cad-wedge/2@L1, L1 != L2 key,"
               " bin_sha = bin_gpu's 50471caa, a changed cfd_u_source moves the key, L3 raises EVAL-LEVEL")
 
-        # (E2) cfd_u from the real nominal record: bit-identical repeat fields give band 0.0 everywhere
+        # (E2) cfd_u from the real nominal record: the expectations are derived from the record
+        # itself, so a regenerated record (a real G3, a real band) never re-pins this test
         nominal = common.read_json(NOMINAL_RECORD)
         u = cfd_u_of(checks, nominal)
         cfd_ids = [c["req_id"] for c in checks["checks"] if c["repr"] == "cfd"]
         assert cfd_ids == ["REQ-003", "REQ-004", "REQ-005", "SYS-MACH"], cfd_ids
-        assert all(u[i] == {"gci_fine": None, "repeat_band": 0.0} for i in cfd_ids), u
+        ident = nominal["g_repeat"]["fields_bit_identical"] is True
+        for c in checks["checks"]:
+            if c["repr"] != "cfd":
+                continue
+            cu = nominal["cfd_u"].get(c["primitive"])
+            exp = {"gci_fine": cu.get("gci_fine") if isinstance(cu, dict) else None,
+                   "repeat_band": 0.0 if ident
+                   else nominal["g_repeat"]["band"].get(c["primitive"])}
+            assert u[c["req_id"]] == exp, (c["req_id"], u[c["req_id"]], exp)
         planted = dict(nominal, g_repeat=dict(nominal["g_repeat"], fields_bit_identical=False,
                                               band={"Cd": 0.002}))
         u2 = cfd_u_of(checks, planted)
         assert u2["REQ-005"]["repeat_band"] == 0.002, u2["REQ-005"]
         assert u2["REQ-004"]["repeat_band"] is None, u2["REQ-004"]
-        assert u2["REQ-005"]["gci_fine"] is None
-        print("[ok] cfd_u: the nominal record gives gci_fine None and band 0.0 for every cfd check;"
-              " planted band Cd 0.002 hits REQ-005 only, REQ-004 stays None")
+        assert u2["REQ-005"]["gci_fine"] == nominal["cfd_u"]["Cd"]["gci_fine"]
+        print("[ok] cfd_u: expectations read from the real record's cfd_u and g_repeat"
+              " (bit-identical fields give band 0.0 for every cfd check); planted band Cd 0.002"
+              " hits REQ-005 only, REQ-004 stays None, REQ-005 gci_fine equals the record's")
 
         # (E3) cfd_records: a planted post doc, a refused post, a None metric; the recipe is cad-wedge/2
         assert parts["mesh_recipe_version"] == "cad-wedge/2@L1", parts["mesh_recipe_version"]

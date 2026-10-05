@@ -60,8 +60,12 @@ Definitions (fixed before any run):
   N10 record(out_dir). gate_level = 2 when both L2 nominal names have solve.json, else 1 when
      both L1 do, else 0; reduced = gate_level < 2; binary is the first solve.json's binary with
      the basename of its path; one runs row per name of the build's set in set order; cfd_u is
-     the E.4 u of Re 3e4 (the G3 gci_fine_abs and the G-REPEAT band), status OPEN, with the note
-     that the loop must not lock on it while gci_fine is None. No absolute path anywhere.
+     cfd_u_doc(gate_level, g3, g_repeat) (N11). No absolute path anywhere.
+  N11 cfd_u_doc(gate_level, g3, rep). Per q in ("Cd", "theta_exit"): gci_fine = the Re 3e4
+     gci3 doc's gci_fine_abs of q (None when g3's per_re re3e4 is None or lacks it),
+     repeat_band = rep["band"][q], u = max(gci_fine, repeat_band) when both are numbers else
+     None (docs/16 E.4). status "CLOSED" iff gate_level == 2, g3 verdict "PASS", rep status
+     "recorded", rep reduced False and both u are numbers; otherwise "OPEN". note CFD_U_NOTE.
 
 Usage:
   python nozzle_nominal.py --selftest
@@ -127,8 +131,9 @@ RECORD_KEYS = ("version", "bands", "iters", "gate_level", "reduced", "binary", "
                "g_repeat", "sensitivity", "cfd_u")
 RUN_ROW_KEYS = ("name", "level", "kind", "re", "cells", "solve", "wall_s", "gpu", "values", "theta_thw")
 SOLVE_ROW_KEYS = ("class", "reason_id", "failed", "criteria", "n_iter_lines", "log_sha256", "binary_sha256")
-CFD_U_NOTE = ("The loop must not lock on this u while gci_fine is None; u = max(GCI_fine at the nominal, "
-              "the G-REPEAT band) only once the L2 confirmation holds (docs/16 E.4).")
+CFD_U_NOTE = ("u = max(GCI_fine at the nominal, the G-REPEAT band) per docs/16 E.4; status CLOSED only "
+              "at gate level 2 with G3 PASS and the L1/L1r repeat recorded, and while it is OPEN the "
+              "loop must not lock on this u.")
 USAGE = ("usage: python nozzle_nominal.py --selftest" + chr(10)
          + "       python nozzle_nominal.py build OUT_DIR [--full]" + chr(10)
          + "       python nozzle_nominal.py run OUT_DIR NAME" + chr(10)
@@ -303,7 +308,7 @@ def judge_g3(levels_by_re):
              "G3-GCI-THETA": any(q == "theta_exit" and d["values"] is not None
                                  and (d["gci_fine"] is None or d["gci_fine"] > BANDS["gci_theta"])
                                  for _r, q, d in docs)}
-    reasons = [g for g in G3_IDS if g in flags and g != "G3-LEVELS"]
+    reasons = [g for g in G3_IDS if g != "G3-LEVELS" and flags[g]]
     return {"verdict": "PASS" if not reasons else "OPEN", "reasons": reasons, "per_re": per_re,
             "two_level": two_level}
 
@@ -517,6 +522,33 @@ def sensitivity_doc(solves, vals_of):
             "status": "reported"}
 
 
+def cfd_u_doc(gate_level, g3, rep):
+    """N11: the E.4 u per quantity - max of the Re 3e4 G3 gci_fine and the G-REPEAT band -
+    CLOSED only at gate level 2 with G3 PASS and the L1/L1r repeat recorded."""
+    pr = g3.get("per_re") if isinstance(g3, dict) else None
+    pr = pr.get("re3e4") if isinstance(pr, dict) else None
+    pr = pr if isinstance(pr, dict) else {}
+    band = rep.get("band") if isinstance(rep, dict) and isinstance(rep.get("band"), dict) else {}
+
+    def _num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    doc = {}
+    for q in ("Cd", "theta_exit"):
+        d = pr.get(q)
+        gci = d.get("gci_fine_abs") if isinstance(d, dict) else None
+        rb = band.get(q)
+        doc[q] = {"gci_fine": gci, "repeat_band": rb,
+                  "u": max(gci, rb) if _num(gci) and _num(rb) else None}
+    closed = (gate_level == 2 and isinstance(g3, dict) and g3.get("verdict") == "PASS"
+              and isinstance(rep, dict) and rep.get("status") == "recorded"
+              and rep.get("reduced") is False
+              and all(doc[q]["u"] is not None for q in ("Cd", "theta_exit")))
+    doc["status"] = "CLOSED" if closed else "OPEN"
+    doc["note"] = CFD_U_NOTE
+    return doc
+
+
 def record(out_dir):
     """N10: the cad-g123/1 record over the build's run set - the runs rows, G1 on both Re at
     the gate level, G2, G3, G-REPEAT, the exit-tube sensitivity and the cfd_u of E.4. No
@@ -572,15 +604,7 @@ def record(out_dir):
                        for re in RE_POINTS))
     rep = repeat_doc(out_dir, solves, vals_of)
     sens = sensitivity_doc(solves, vals_of)
-
-    def gci_abs(q):
-        pr = g3["per_re"].get("re3e4")
-        d = pr.get(q) if isinstance(pr, dict) else None
-        return d.get("gci_fine_abs") if isinstance(d, dict) else None
-
-    cfd_u = {"Cd": {"gci_fine": gci_abs("Cd"), "repeat_band": rep["band"]["Cd"]},
-             "theta_exit": {"gci_fine": gci_abs("theta_exit"), "repeat_band": rep["band"]["theta_exit"]},
-             "status": "OPEN", "note": CFD_U_NOTE}
+    cfd_u = cfd_u_doc(gate, g3, rep)
     return {"version": VERSION, "bands": BANDS, "iters": dict((str(k), v) for k, v in ITERS.items()),
             "gate_level": gate,
             "reduced": bool(gate < 2), "binary": binary, "runs": runs, "g1": g1, "g2": g2,
@@ -730,10 +754,48 @@ def _t4():
                                  for n in (0, 1, 2))) for re in RE_POINTS)
     j = judge_g3(solved_none)
     assert j["verdict"] == "OPEN" and j["reasons"][0] == "G3-MISSING", j
+    S = {"class": "steady"}
+    fa = dict((re, dict((n, {"solve": S,
+                             "values": {"Cd": (0.9718, 0.9717, 0.97165)[n],
+                                        "theta_exit": (6.6e-5, 6.52e-5, 6.5e-5)[n]}})
+                        for n in (0, 1, 2))) for re in RE_POINTS)
+    ja = judge_g3(fa)
+    assert ja["verdict"] == "PASS" and ja["reasons"] == [], ja
+    assert abs(ja["per_re"]["re3e4"]["Cd"]["p"] - 1.0) <= 1e-9, ja["per_re"]["re3e4"]["Cd"]
+    assert rel(ja["per_re"]["re3e4"]["Cd"]["gci_fine"], 6.432357330313705e-05) <= 1e-9, \
+        ja["per_re"]["re3e4"]["Cd"]
+    assert abs(ja["per_re"]["re3e4"]["theta_exit"]["p"] - 2.0) <= 1e-9, \
+        ja["per_re"]["re3e4"]["theta_exit"]
+    assert rel(ja["per_re"]["re3e4"]["theta_exit"]["gci_fine"], 0.0012820512820513421) <= 1e-9, \
+        ja["per_re"]["re3e4"]["theta_exit"]
+    fb = {"re3e4": dict((n, {"solve": {"class": "steady" if n else "unsteady"},
+                             "values": {"Cd": (0.9718177289391907, 0.9716729102911278,
+                                               0.9716427964219404)[n],
+                                        "theta_exit": (6.540424278157314e-05,
+                                                       6.507895850566833e-05,
+                                                       6.51315945848557e-05)[n]}})
+                        for n in (0, 1, 2)),
+          "re1e4": dict((n, {"solve": {"class": "steady" if n else "unsteady"},
+                             "values": {"Cd": (0.9497864696267168, 0.9495630905645047,
+                                               0.9495128580711755)[n],
+                                        "theta_exit": (0.00010887380490325924,
+                                                       0.00010910727873666854,
+                                                       0.000109235254542458)[n]}})
+                        for n in (0, 1, 2))}
+    jb = judge_g3(fb)
+    assert jb["verdict"] == "OPEN" and jb["reasons"] == ["G3-UNSTEADY", "G3-MONO", "G3-GCI-THETA"], \
+        jb
+    assert rel(jb["per_re"]["re3e4"]["Cd"]["gci_fine"], 1.0170796965346655e-05) <= 1e-9, \
+        jb["per_re"]["re3e4"]["Cd"]
+    assert rel(jb["per_re"]["re1e4"]["Cd"]["gci_fine"], 1.918512986888076e-05) <= 1e-9, \
+        jb["per_re"]["re1e4"]["Cd"]
+    assert jb["per_re"]["re3e4"]["theta_exit"]["monotone"] is False, \
+        jb["per_re"]["re3e4"]["theta_exit"]
     print("[ok] T4 gci3/gci2/judge_g3: the oracle GCI numbers exact to rel 1e-9, the non-monotone"
           " and negative-order cases None, the two-grid values bit-exact, a set without L2 is"
-          " NOT_RUN G3-LEVELS, and all-solved levels with None values are OPEN G3-MISSING without"
-          " a crash")
+          " NOT_RUN G3-LEVELS, all-solved levels with None values are OPEN G3-MISSING without"
+          " a crash, an all-steady monotone in-band set PASSes with no reasons, and the real"
+          " record's numbers are OPEN G3-UNSTEADY, G3-MONO, G3-GCI-THETA and nothing else")
 
 
 def _plant_run(out, name, theta, cd, cls="steady"):
@@ -894,6 +956,7 @@ def _t7(td, out):
     assert rec["gate_level"] == 0 and rec["reduced"] is True
     assert rec["g3"]["verdict"] == "NOT_RUN" and rec["g3"]["reasons"] == ["G3-LEVELS"]
     assert rec["cfd_u"]["status"] == "OPEN" and rec["cfd_u"]["Cd"]["gci_fine"] is None
+    assert rec["cfd_u"]["Cd"]["u"] is None
     text = common.canonical_json(rec)
     assert ":/" not in text and (":" + chr(92)) not in text, "an absolute path leaked into the record"
     try:
@@ -903,17 +966,54 @@ def _t7(td, out):
     except Refused as r:
         assert r.rule == "NOZ-OUT", r.rule
     print("[ok] T7 the fake-exe run of L0_re3e4 leaves solve.json, wall.json, gpu.json and"
-          " post.json, the record is gate_level 0 reduced with g3 NOT_RUN, holds no absolute"
-          " path, and a second run is NOZ-OUT")
+          " post.json, the record is gate_level 0 reduced with g3 NOT_RUN and cfd_u OPEN with"
+          " Cd gci_fine and u None, holds no absolute path, and a second run is NOZ-OUT")
+
+
+def _t8():
+    g3_pass = {"verdict": "PASS", "reasons": [],
+               "per_re": {"re3e4": {"Cd": {"gci_fine_abs": 5.0e-4},
+                                    "theta_exit": {"gci_fine_abs": 2.0e-7}}, "re1e4": None}}
+    rep_l1 = {"status": "recorded", "reduced": False,
+              "band": {"Cd": 0.0, "theta_exit": 0.0, "dp": 0.0}}
+    d = cfd_u_doc(2, g3_pass, rep_l1)                                    # F1
+    assert d["Cd"] == {"gci_fine": 5.0e-4, "repeat_band": 0.0, "u": 5.0e-4}, d["Cd"]
+    assert d["theta_exit"] == {"gci_fine": 2.0e-7, "repeat_band": 0.0, "u": 2.0e-7}, d["theta_exit"]
+    assert d["status"] == "CLOSED" and d["note"] == CFD_U_NOTE, d["status"]
+    d = cfd_u_doc(2, dict(g3_pass, verdict="OPEN"), rep_l1)              # F2
+    assert d["Cd"] == {"gci_fine": 5.0e-4, "repeat_band": 0.0, "u": 5.0e-4}, d["Cd"]
+    assert d["theta_exit"] == {"gci_fine": 2.0e-7, "repeat_band": 0.0, "u": 2.0e-7}
+    assert d["status"] == "OPEN", d["status"]
+    d = cfd_u_doc(2, g3_pass, dict(rep_l1, reduced=True))                # F3
+    assert d["status"] == "OPEN", d["status"]
+    d = cfd_u_doc(1, {"verdict": "NOT_RUN", "reasons": ["G3-LEVELS"],
+                      "per_re": {"re3e4": None, "re1e4": None}}, rep_l1)  # F4
+    assert d["Cd"] == {"gci_fine": None, "repeat_band": 0.0, "u": None}, d["Cd"]
+    assert d["theta_exit"]["gci_fine"] is None and d["theta_exit"]["u"] is None
+    assert d["status"] == "OPEN", d["status"]
+    d = cfd_u_doc(2, g3_pass, dict(rep_l1, band=dict(rep_l1["band"], Cd=1.0e-3)))   # F5
+    assert d["Cd"] == {"gci_fine": 5.0e-4, "repeat_band": 1.0e-3, "u": 1.0e-3}, d["Cd"]
+    assert d["status"] == "CLOSED", d["status"]
+    d = cfd_u_doc(2, g3_pass, dict(rep_l1, band=dict(rep_l1["band"], theta_exit=None)))  # F6
+    assert d["theta_exit"] == {"gci_fine": 2.0e-7, "repeat_band": None, "u": None}, d["theta_exit"]
+    assert d["status"] == "OPEN", d["status"]
+    d = cfd_u_doc(1, g3_pass, rep_l1)                                    # F7
+    assert d["status"] == "OPEN" and d["note"] == CFD_U_NOTE, d["status"]
+    print("[ok] T8 cfd_u_doc: F1 the CLOSED L2 doc (Cd u 5.0e-4, theta u 2.0e-7, note"
+          " CFD_U_NOTE), F2 OPEN on a G3 verdict OPEN with the same u, F3 OPEN on a reduced"
+          " repeat, F4 gci_fine and u None with NOT_RUN per_re, F5 the band 1.0e-3 wins the"
+          " u CLOSED, F6 a None band leaves theta u None OPEN, F7 gate level 1 stays OPEN")
 
 
 def selftest():
-    """T1-T7 in one TemporaryDirectory: T1-T4 pure, T5 on a planted out_dir, T6 the real
-    reduced build, T7 the fake-exe run and record on T6's build; SELFTEST PASS at the end."""
+    """T1-T8 in one TemporaryDirectory: T1-T4 and T8 pure, T5 on a planted out_dir, T6 the
+    real reduced build, T7 the fake-exe run and record on T6's build; SELFTEST PASS at the
+    end."""
     _t1()
     _t2()
     _t3()
     _t4()
+    _t8()
     with tempfile.TemporaryDirectory() as td:
         _t5(td)
         out = os.path.join(td, "out")
