@@ -12296,6 +12296,13 @@ ratio `|E| > u_val` - the disagreement is NOT the mesh, which is the
 arithmetic beneath the diagnosis above, and it is why the verdict carries
 the Kr = 0.1 study with it into the registry.
 
+**§115, added when the Kr = 0.1 point was diagnosed.** It measured the candidates
+(mesh, Rayleigh-number definition, geometry reading, property temperature and
+buoyancy form, the face mean), ruled each out, and found the reference's
+resistance lower than the stated configuration's by about `0.019/Kr` at every published
+point from `Ra = 500` to `10^5`; with the conductivity ratio scaled by `1.0992489`,
+fitted at the one conduction-dominated point, every 80x80 point agrees to `0.29 %`.
+
 ### 60.6 Gate 6 - Qu & Mudawar (2002)
 
 *Int. J. Heat Mass Transfer* **45** 3973-3985, DOI
@@ -34270,5 +34277,337 @@ region's slenderness with its verdict and the method that will run. `nu`
 above 0.45 stays refused in both modes: Gate 95-A measures bending, not
 incompressibility. The `not built` refusal of a block-coupled solve is gone
 with the feature built.
+
+---
+
+## 114. The turbulent pipe against kOmegaSST - the core defect is the model's, the L1 friction factor was an omega solve that stopped
+
+`No GPL-licensed source was consulted.`
+
+### 114.1 What TG0 recorded, and how this section measured it
+
+TG0 is the fully developed turbulent pipe of the CAD chain, docs/16 of that
+chain: a periodic 5-degree wedge, R 0.025 m, periodic length 0.1 m, 4 axial
+cells, 40 radial cells on L0 and 80 on L1 graded to the wall, first cell y+
+0.122 on L0 and 0.061 on L1 at Re_tau 576.69. The model is kOmegaSST with a
+resolved wall, `nut` fixedValue 0, `k` fixedValue 0, `omega`
+omegaWallFunction; steadyState SIMPLE with relaxation 0.7 on U, k and omega
+and 0.3 on p; the k and omega solvers PBiCGStab with a diagonal
+preconditioner at `tolerance 1e-08` and `relTol 0.01`; driven by a uniform
+body force; run by the `ofgpu-lowmach` binary of this tree at 90510fc,
+sha256 `50471caa...`, for 4000 iterations on L0 and 8000 on L1.
+
+Its bands: f within 5 % of Prandtl's law at the input Re_tau, f within 5 % of
+Blasius at the measured Re_D, u+ within 1.0 of `2.5 ln y+ + 5.5` for
+30 <= y+ <= 0.2 Re_tau, and the core defect `(U_axis - U_b)/u_tau` within
+10 % of Schlichting's 4.07.
+
+Table 1, as recorded, `f` against Prandtl at the run's input Re_tau:
+
+| run | Re_tau in | cells | f | f vs Prandtl | defect | log-law dev |
+|-----|-----------|-------|---|--------------|--------|-------------|
+| L0_lo | 576.69 | 160 | 0.026609 | +3.18 % | 3.5975 | 1.012 |
+| L1_lo | 576.69 | 320 | 0.028301 | +9.74 % | 3.4642 | 1.277 |
+| L0_hi | 2358.0 | 160 | 0.017232 | -4.35 % | 3.3230 | 0.633 |
+| L1_hi | 2358.0 | 320 | 0.017871 | -0.80 % | 3.3173 | 1.055 |
+| L0_dns | 550.0 | 160 | 0.027056 | +3.53 % | 3.6113 | 0.909 |
+
+The method: the written fields of those runs, short re-runs of the same
+binary on copies of the same case files, each under 4 minutes, and an
+independent one-dimensional finite-volume discretisation of the same fully
+developed SST equations - Menter 2003 coefficients, the same radial cell
+centres and faces, the same pinned wall-cell omega, Tucker's Poisson distance
+of §6.6, a zero-flux axis - written outside this tree for this measurement
+only. No code of this tree was changed to measure anything.
+
+### 114.2 L1's friction factor - an omega solve that stopped changing omega
+
+On L1_lo the written `omega` at iteration 4000 and at 8000 is identical in
+every cell, while `k` changed by up to 2.154e-3 and `U` by up to 7.05e-4
+relative, cell by cell, over the same 4000 iterations.
+
+Against the converged answer on the same mesh, the frozen field's omega is
+0.9443 of it at y+ 69 and its nut 1.0602 of it. The frozen fields leave an
+imbalance in the omega equation of +4.3 % of `beta omega^2` at y+ 51 on L1
+and +0.3 % at y+ 49 on L0. The momentum balance holds on the frozen fields to
+7.4e-4 at the face next to the axis and 1e-4 at every other face, and the
+written nut equals `a1 k / max(a1 omega, F2 S)` from the written k and omega
+to 1.1e-4.
+
+Table 2, the same binary and case, only the omega solver's `tolerance`
+changed:
+
+| mesh | omega tolerance | U_b m/s | U_axis m/s | f | f vs Prandtl | defect |
+|------|-----------------|---------|------------|---|--------------|--------|
+| L1_lo | 1e-08 (as recorded) | 5.87682 | 7.08768 | 0.028301 | +9.74 % | 3.4642 |
+| L1_lo | 1e-12 | 6.02289 | 7.28629 | 0.026944 | +4.48 % | 3.6145 |
+| L1_lo | 1e-30 | 6.02291 | 7.28631 | 0.026944 | +4.48 % | 3.6145 |
+| L1_lo | independent 1-D | 6.02290 | 7.28630 | 0.026944 | +4.48 % | 3.6145 |
+| L0_lo | 1e-08 (as recorded) | 6.06072 | 7.31819 | 0.026609 | +3.18 % | 3.5975 |
+| L0_lo | 1e-30 | 6.07522 | 7.33926 | 0.026482 | +2.69 % | 3.6163 |
+| L0_lo | independent 1-D | 6.07522 | 7.33925 | 0.026482 | +2.69 % | 3.6163 |
+
+With the tolerance tightened L1_lo's log-law deviation is 1.073, recorded
+1.277, and L0_lo's 0.995 against 1.012. At Re_tau 2358 the freeze costs
+little: L1_hi's U_b is 30.23717 against the independent 30.26666.
+
+The reading, stated as a reading: omega spans 1.35e2 at the axis to 1.73e8 in
+the wall cell on L1, 4.32e7 on L0, and the §8.4 normalisation sums over every
+cell, so the wall-adjacent rows set its scale; the omega update stops once
+the normalised initial residual falls under the absolute `tolerance 1e-08`,
+which the finer mesh, with four times the wall-cell omega, reaches at a
+larger imbalance in the log region. The driver prints no omega solver
+performance, so the iteration count itself was not seen; what was measured
+is the unchanged field, and that the tolerance alone moves it to the
+independent answer.
+
+### 114.3 The core defect is the model's - kOmegaSST's centreline eddy viscosity
+
+The twelve coefficients of `KOmegaSstCoeffs::default` are Menter, Kuntz &
+Langtry 2003's, those of §6.3: sigma_k1 0.85, sigma_w1 0.5, beta_1 0.075,
+gamma_1 5/9, sigma_k2 1.0, sigma_w2 0.856, beta_2 0.0828, gamma_2 0.44,
+beta* 0.09, a1 0.31, b1 1, c1 10. The `nu_t` uses the strain rate S and the
+k production is `min(G, c1 beta* k omega)`.
+
+F1 rounds to 1.000 in every cell of the pipe at all three Re_tau. On L1_lo
+the first branch of arg1, `max(sqrt(k)/(beta* omega y), 500 nu/(y^2 omega))`,
+is 1.67 or more in every cell, so the whole radius runs SST's inner k-omega
+set. Replacing Tucker's Poisson y of §6.6 by the exact `R - r` changes U_b by
+less than 1e-5.
+
+Table 3, the grid-converged SST answer, the independent 1-D on 80, 160, 320
+and 640 radial cells, each halving the last, Richardson through the finest
+three, observed order 1.06 to 1.24:
+
+| Re_tau in | f, 640 cells | f extrapolated | f vs Prandtl | f vs Blasius, 640 | defect extrapolated | defect vs 4.07 | log-law dev, 640 | nu_t axis / (u_tau R) |
+|-----------|--------------|----------------|--------------|-------------------|---------------------|----------------|------------------|-----------------------|
+| 576.69 | 0.027258 | 0.027287 | +5.81 % | +2.11 % | 3.6129 | -11.2 % | 1.239 | 0.124 |
+| 2358.0 | 0.018428 | 0.018502 | +2.70 % | +3.08 % | 3.3201 | -18.4 % | 1.358 | 0.131 |
+| 550.0 | 0.027671 | 0.027699 | +5.99 % | +2.24 % | 3.6289 | -10.8 % | 1.229 | 0.124 |
+
+Menter's 1994 wall value for omega on the wall face instead of the pinned
+wall-cell value converges to the same limit, f 0.027278 and defect 3.6131 on
+640 cells at Re_tau 576.69: the limit is the model's, not the wall row's.
+
+Why the defect is short: Reichardt's outer eddy viscosity for the pipe
+(Reichardt, ZAMM 31 (1951) 208-219),
+`nu_t = (kappa u_tau R / 6)(1 - eta^2)(1 + 2 eta^2)` with `eta = r/R`, put
+into the outer-layer balance `nu_t dU/dr = -u_tau^2 r/R`, gives
+`U_c+ - U+ = ln((1 + 2 eta^2)/(1 - eta^2)) / kappa`, whose area mean is the
+defect `3 ln 3 / (2 kappa)` = 4.12 at kappa 0.4 - Schlichting's 4.07 within
+1.3 %. Its axis value is `kappa/6` = 0.0667 of `u_tau R`; kOmegaSST's is
+0.124 to 0.131, table 3, 1.9 to 2.0 times as large, which flattens the core
+and shortens the defect. No mesh and no solver setting reaches 4.07 within
+10 % with this model, and the f and log-law bands at Re_tau 576.69 are short
+by the model too, +5.81 % and 1.239.
+
+### 114.4 Why all five runs were classed unsteady
+
+The printed `|U| res` is the largest of the three components' initial
+residuals, `u_residual` in `src/bin/lowmach.rs`. In the periodic pipe two of
+the three are round-off fields: on L1_lo at 8000, max |Uy| 5.87e-14 m/s,
+max |Uz| 8.94e-19 m/s, and p within 1.05e-12 of zero. Their normalised
+residuals stay of order 0.03 to 0.43 for the whole run, so a four-decade
+drop of `|U| res` or `|p| res` cannot happen.
+
+The flow itself is steady: the written fields are identical from iteration
+7900 to 8000, the printed mean Mach number is constant to six digits from
+iteration 5550 on L1_lo and 2000 on L0_lo, and the CAD chain's own window
+changes of U_b and f are 0.0 for four of the five runs, L1_hi 1.6e-5 and
+1.3e-5.
+
+### 114.5 What this rules out, the options, and what is not claimed
+
+Ruled out by measurement: the SST coefficients and limiter, Menter 2003's,
+§114.3; the wall distance, since the exact y changes nothing; the axis and
+wedge treatment, the periodic set-up and the body force, since the 1-D with
+a plain zero-flux axis and no wedge agrees with the solver to 1e-5 in U_b on
+both meshes once omega converges, with x-invariance 8.7e-7 or less and force
+balance within 1.5e-6 and 1.0e-4 on L1_hi; and convergence of the mean flow,
+§114.4.
+
+The omega wall treatment at y+ below 1 is consistent but first order: f
+rises from 0.026943 to 0.027258 from 80 to 640 radial cells at Re_tau
+576.69.
+
+The options, none taken here. O1: the case writer of the pipe sets the omega
+and k `tolerance` to 1e-12 and keeps `relTol 0.01` - L1_lo moves to table
+2's 1e-12 row, a case-side change. O2: the omega convergence test is made
+insensitive to the pinned wall rows - a solver change that moves the
+iteration count of every SST and k-omega case, and a user decision. O3: the
+CAD classifier judges the periodic pipe by the Ux residual or by its own
+window changes. None of them brings the defect to 4.07 within 10 %: that
+needs a model with a smaller core eddy viscosity, which this section does
+not propose.
+
+House items: no numerics change, no new file, no kernel, no capture row, no
+gate. `ofgpu-lowmach` gains one ignored probe test,
+`tg0_probe_an_omega_tolerance_of_1e_8_leaves_the_l1_pipe_omega_frozen`,
+which runs a copy of the L1_lo case named by the environment variable
+`OFGPU_TG0_CASE` twice, with omega `tolerance` 1e-08 and 1e-12, for 8000
+iterations each.
+
+Measured on the card, RTX 5070 Ti, at 90510fc, `--ignored --nocapture`, 353 s:
+
+```text
+tg0 probe: tg0_a omega tolerance 1e-08: steps 8000 Ux mean 3.944257543e0 omega change 0.000e0 k change 2.154e-3
+tg0 probe: tg0_b omega tolerance 1e-12: steps 8000 Ux mean 4.023841007e0 omega change 2.778e-4 k change 2.000e-3
+tg0 probe: Ux mean ratio b/a 1.020177e0
+```
+
+Run a's omega does not change in any cell between iterations 4000 and 8000 while its k moves by 2.154e-3;
+run b's omega is still settling at 2.778e-4. The cell mean of `Ux`, arithmetic over the 320 cells, is
+2.02 % higher in run b; table 2's volume-weighted U_b moves by 2.49 %.
+
+---
+
+## 115. Gate 5 at Kr = 0.1 - the secondary reference's wall conducts about 10 % more than the stated one; a diagnosis
+
+`No GPL-licensed source was consulted.`
+
+### 115.1 What Gate 5 records
+
+§60.5 compares the Kaminski & Prakash configuration (wall `0 <= X <= 0.2`,
+fluid `0.2 <= X <= 1`, Pr 0.71, `Nu` by (S60.1) from the cold-wall heat flow)
+against Belazizia *et al.* (2012), a SECONDARY source (§60.5's disclosure:
+the primary table was never read). `ofgpu-validate` reports `-7.11 %` at
+`Ra = 10^4`, `Kr = 0.1`, 40x40. On 80x80 (§60.5's table), `Ra = 10^4`:
+`-7.12 %` / `-3.00 %` / `-0.48 %` at `Kr = 0.1 / 1 / 10`; `Ra = 10^5`:
+`-7.79 %` / `-4.32 %` / `-0.81 %`. This section measures why.
+
+### 115.2 How it was measured
+
+The `ofgpu-cht` binary of this tree at `f3f145c` on case documents generated
+outside the tree, each with the numerics of `cases/kaminskiPrakash.cht.jsonc`
+(relaxation 0.7 / 0.3 / 0.7, Gauss linear, residual `1e-7`, at most 15000
+iterations), 40x40 unless a row says otherwise; `Nu` from the cold-wall heat
+flow by (S60.1); in every run the cold-wall, hot-wall and interface heat
+flows agree to `1.2e-4` or better and the run stopped on its residual. The
+base point reproduces §60.5's 40x40 row exactly (`0.38086`, 4096 iterations).
+Plus a one-dimensional conduction oracle for the face-mean question. No code
+was changed to measure it.
+
+### 115.3 Table 1 - the candidates, and what each measured
+
+(Belazizia *et al.* `0.41 / 1.57 / 2.28` at `Ra = 10^4`, `Kr = 0.1 / 1 / 10`):
+
+| candidate | variant run | Kr = 0.1 | Kr = 1 | Kr = 10 | verdict |
+|---|---|---|---|---|---|
+| mesh | §60.5's 40/60/80 study | change `0.02 %` then `0.00 %`; §94 `U_fine = 9.943e-5` | | | not the mesh |
+| Rayleigh number on the fluid width `0.8` | `Ra = 10^4/0.512 = 19531.25` | `0.39521` (`-3.61 %`) | `1.73877` (`+10.75 %`) | `2.76041` (`+21.07 %`) | not uniform in Kr; ruled out |
+| the same, conduction end | `Ra = 976.5625` | `0.35783` against `0.382` (`-6.33 %`) | | | cannot move conduction; ruled out |
+| geometry: the fluid cavity square, wall outside it (total width 1.2), `Nu` on the fluid width | | `0.37343` (`-8.92 %`) | `1.45871` (`-7.09 %`) | `2.13983` (`-6.15 %`) | ruled out |
+| the same, `Nu` on the total width (x 1.2) | | `0.44812` (`+9.30 %`) | `1.75045` (`+11.49 %`) | `2.56780` (`+12.62 %`) | ruled out |
+| property temperature and the density-ratio buoyancy form | `dT/TRef` `3.3e-5` and `3.3e-3` (`dT` 0.01 and 1.0 K, `g` rescaled to hold `Ra = 10^4`) against `3.3e-4` | `0.38085` and `0.38093` against `0.38086` | | | `2e-4` at most; ruled out |
+| Prandtl number | Pr `0.70` instead of `0.71` | `0.38086` | | | ruled out |
+
+The solver's interface is the exact series resistance (Gate 59-B, `2.5e-9`
+at `Kr = 0.1`). A reference that took the ARITHMETIC mean at the interface
+face of its 90-cell uniform mesh would, in pure conduction (the oracle),
+give `0.36244` (`+1.48 %`), `1.00000` and `1.22563` (`+0.50 %`) against the
+exact `0.35714 / 1.00000 / 1.21951`: a fifth of the `+6.96 %` the reference
+shows at `Kr = 0.1`, and nothing at `Kr = 1`. And at `Kr = 1` the two
+materials are the same, so no face mean of any kind can change anything -
+yet the reference is `+2.07 %` above this solver there at `Ra = 500`
+(`1.03` against `1.00906`). Ruled out.
+
+### 115.4 The cause
+
+At `Ra = 500`, `Kr = 0.1` the flow carries almost nothing: this solver gives
+`0.35735` against the exact conduction limit `0.357143` (`+5.8e-4`), while
+the reference reads `0.382`, `6.96 %` above the exact limit of the STATED
+configuration. Writing the reference's total resistance as this solver's
+minus a deficit, `1/Nu_ref = 1/Nu - c/Kr`, table 2 gives `c` at all nine
+published points (Ra 500 on 40x40, the others on 80x80; the bracket is the
+uncertainty from the reference's last printed digit):
+
+| Ra | Kr = 0.1 | Kr = 1 | Kr = 10 |
+|---|---|---|---|
+| 500 | `0.0181 +/- 0.0003` | `0.0201 +/- 0.0047` | `0.0175 +/- 0.0325` |
+| `10^4` | `0.0187 +/- 0.0003` | `0.0197 +/- 0.0020` | `0.0210 +/- 0.0096` |
+| `10^5` | `0.0183 +/- 0.0002` | `0.0192 +/- 0.0009` | `0.0192 +/- 0.0028` |
+
+`c` runs from `0.0175` to `0.0210` and does not move with `Ra` (500 to
+`10^5`) or with `Kr` (0.1 to 10). A deficit that scales as `1/Kr` is a
+deficit in the solid's resistance `D/Kr`: the reference behaves as a wall
+about `0.181` thick instead of `0.2`, or, equivalently in conduction, as a
+conductivity ratio about `1.099` times the stated one. The data cannot tell
+those two apart; the primary paper could, and it was not read (§60.5).
+
+### 115.5 The confirmation - one parameter, fitted at one point, predicting eight
+
+From the conduction point alone,
+`f = 2.0/(2.0 - (1/0.35735 - 1/0.382)) = 1.0992489`. Table 3, this solver
+run at `Kr x 1.0992489` against Belazizia *et al.*:
+
+| Ra | Kr | mesh | Nu | reference | difference |
+|---|---|---|---|---|---|
+| 500 | 1 | 40x40 | `1.02801` | `1.03` | `-0.19 %` |
+| 500 | 10 | 40x40 | `1.24014` | `1.24` | `+0.01 %` |
+| `10^4` | 0.1 | 40x40 | `0.41067` | `0.41` | `+0.16 %` |
+| `10^4` | 1 | 40x40 | `1.57812` | `1.57` | `+0.52 %` |
+| `10^4` | 10 | 40x40 | `2.28981` | `2.28` | `+0.43 %` |
+| `10^4` | 10 | 80x80 | `2.28046` | `2.28` | `+0.02 %` |
+| `10^5` | 0.1 | 40x40 | `0.46209` | `0.461` | `+0.24 %` |
+| `10^5` | 1 | 40x40 | `2.37336` | `2.35` | `+0.99 %` |
+| `10^5` | 1 | 80x80 | `2.35674` | `2.35` | `+0.29 %` |
+| `10^5` | 10 | 40x40 | `4.31574` | `4.25` | `+1.55 %` |
+| `10^5` | 10 | 80x80 | `4.25331` | `4.25` | `+0.08 %` |
+
+Every 80x80 row is within `0.29 %`; the two 40x40 rows above `0.5 %` are
+the mesh's own (§60.5: `Ra = 10^5`, `Kr = 10` moves `-1.43 %` from 40x40 to
+80x80). Against the stated wall the same nine points disagree by up to
+`-7.79 %`; with one factor fitted at the one point where the flow does
+nothing, they agree to the reference's own printed precision. The miss is
+the reference's conduction, not this solver's convection, interface or mesh.
+
+### 115.6 Options
+
+They are the user's; this unit changes nothing.
+
+* O1 (recommended): Gate 5 keeps its definition, its 3 % bar and every
+  number; its verdict at `Kr <= 1` is read as reference-limited and cites
+  §115. The convection-dominated end (`Kr = 10`) and Gate 59-B carry the
+  claim.
+* O2: obtain Kaminski & Prakash (1986) itself (paywalled) and compare
+  against its own table; that also settles wall thickness against
+  conductivity ratio.
+* O3: replace the secondary reference with another open solution of the
+  same configuration that reproduces the conduction limit at low `Ra`, and
+  keep Belazizia *et al.* only at `Kr = 10`.
+* O4 (not recommended): compare against Belazizia *et al.* at
+  `Kr x 1.0992489` - a factor fitted to the reference is a calibration, not
+  a validation.
+* Not options: changing the interface treatment or loosening the 3 % bar.
+
+### 115.7 The probe and the house items
+
+`gate_5_probe_the_kr_miss_is_a_solid_resistance_offset_in_the_reference`
+runs the six runs of the diagnosis on the card: the fluid-width Rayleigh
+reading at `Kr = 10` (`ra = 19531.25`); the fluid-square geometry reading at
+`Kr = 10` with `width = 1.2` and its total-width `Nu`; `dT/TRef` of
+`3.3e-5` and `3.3e-3` at `Kr = 0.1` against `0.38086`; the `Ra = 500`,
+`Kr = 0.1` conduction point against the exact `0.357143` and the reference's
+`0.382`; and `Kr x 1.0992489` at `Ra = 10^4` against `0.41`. What it holds:
+the fluid-width Rayleigh reading overshoots the reference by more than
+`15 %` at `Kr = 10`, the fluid-square reading fails on both widths, the property temperature is
+innocent to `5e-4`, the `Ra = 500` point is the conduction limit to `1e-3`
+while the reference sits more than `6 %` above it, and the one fitted factor
+lands the reference's number to `1 %`.
+
+Measured on the card (RTX 5070 Ti, f64, 226 s), every run stopped on its
+residual and every number equal to the `ofgpu-cht` run of the same point:
+
+```text
+gate5 probe: fluid-width Ra, Kr 10: Nu 2.76041 hot 2.76047 iface 2.76046 its 1342 conv true
+gate5 probe: fluid-square geometry, Kr 10: Nu 2.13983 hot 2.13991 iface 2.13990 its 1780 conv true total-width Nu 2.56780
+gate5 probe: dT/TRef 3.3e-5: Nu 0.38085 hot 0.38082 iface 0.38082 its 4096 conv true
+gate5 probe: dT/TRef 3.3e-3: Nu 0.38093 hot 0.38090 iface 0.38090 its 4094 conv true
+gate5 probe: conduction, Ra 500, Kr 0.1: Nu 0.35735 hot 0.35731 iface 0.35731 its 5531 conv true exact 0.357143 reference 0.382 is +6.96% above exact
+gate5 probe: Kr x 1.0992489, Ra 1e4, Kr 0.1: Nu 0.41067 hot 0.41064 iface 0.41064 its 4000 conv true against 0.41 +0.16%
+```
+
+House items: no numerics change, no new file, no kernel, no capture row, no
+gate; the library gains one ignored test (2150 listed).
 
 ---

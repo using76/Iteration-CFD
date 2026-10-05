@@ -459,6 +459,243 @@ fn gate_5_kaminski_prakash_sweep() -> Result<()> {
     Ok(())
 }
 
+/// The Kaminski & Prakash configuration of SPEC-LIT 115, parameterised for
+/// the Gate 5 diagnosis: the wall stays `0..0.2` and the fluid runs to
+/// `width` (1.0 for the reading of SPEC-LIT 60.5, 1.2 for the fluid-square
+/// reading of 115.3), and `d_t` is the hot-cold difference in K, so the
+/// buoyancy and the Nu scale both follow it.
+pub(crate) struct KpVariant {
+    pub ra: Scalar,
+    pub kr: Scalar,
+    pub n: usize,
+    pub d_t: Scalar,
+    pub width: Scalar,
+}
+
+/// The parameterised Kaminski & Prakash build of SPEC-LIT 115: the same case
+/// as [`kaminski_prakash`] with the wall `0..0.2`, the fluid `0.2..width`,
+/// square cells of side `1/n`, and the boundary values, the buoyancy and the
+/// Nu scale all following `d_t`. The controls are the sweep's - 15000
+/// iterations, residual `1e-7`, relaxation 0.7 / 0.3 (SPEC-LIT 115.2).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn kaminski_prakash_variant(
+    gpu: &Gpu,
+    v: &KpVariant,
+) -> Result<(Scalar, Scalar, Scalar, usize, bool)> {
+    assert!(v.n % 5 == 0, "the wall is 0.2 of the width; n must be a multiple of 5");
+    let dz: Scalar = 1.0 / v.n as Scalar;
+    let f = air(1.0);
+
+    // Square cells of side 1/n on both sides (SPEC-LIT 115.2).
+    let n_solid = (0.2 * v.n as Scalar).round() as usize;
+    let n_fluid = ((v.width - 0.2) * v.n as Scalar).round() as usize;
+    let fluid_mesh = block(
+        [n_fluid, v.n, 1],
+        Vec3::new(0.2, 0.0, 0.0),
+        Vec3::new(v.width, 1.0, dz),
+        ["airToWall", "cold", "airBottom", "airTop", "airFront", "airBack"],
+        ["wall", "wall", "wall", "wall", "empty", "empty"],
+    );
+    let solid_mesh = block(
+        [n_solid, v.n, 1],
+        Vec3::ZERO,
+        Vec3::new(0.2, 1.0, dz),
+        ["hot", "wallToAir", "wallBottom", "wallTop", "wallFront", "wallBack"],
+        ["patch", "patch", "patch", "patch", "empty", "empty"],
+    );
+    let meshes = [fluid_mesh, solid_mesh];
+
+    let case = FlowCase {
+        name: "kaminskiPrakash".to_string(),
+        regions: vec![
+            FlowRegion {
+                name: "air".to_string(),
+                kind: RegionKind::Fluid,
+                solid: None,
+                fluid: Some(f.clone()),
+                source: 0.0,
+            },
+            FlowRegion {
+                name: "wall".to_string(),
+                kind: RegionKind::Solid,
+                solid: Some(SolidMaterial::isotropic("wall", 1.0, 1.0, v.kr * f.kappa)),
+                fluid: None,
+                source: 0.0,
+            },
+        ],
+        meshes: &meshes,
+        interfaces: vec![InterfaceRequest::new(0, "airToWall", 1, "wallToAir", 0.0)],
+        patch_bcs: vec![
+            (0, "cold".to_string(), LoweredBc::FixedValue(T_REF - 0.5 * v.d_t)),
+            (0, "airBottom".to_string(), LoweredBc::ZeroGradient),
+            (0, "airTop".to_string(), LoweredBc::ZeroGradient),
+            (1, "hot".to_string(), LoweredBc::FixedValue(T_REF + 0.5 * v.d_t)),
+            (1, "wallBottom".to_string(), LoweredBc::ZeroGradient),
+            (1, "wallTop".to_string(), LoweredBc::ZeroGradient),
+        ],
+        buoyancy: Some(Buoyancy {
+            // The length is 1 in both readings, and `d_t` replaces D_T
+            // (SPEC-LIT 115.2).
+            g: Vec3::new(0.0, -(v.ra * f.nu() * f.alpha() * T_REF / v.d_t), 0.0),
+            t_ref: T_REF,
+        }),
+        openings: None,
+        initial_t: T_REF,
+        flow: flow_controls(15_000, 1e-7, 0.7, 0.3),
+        t_solver: t_solver(),
+        n_non_orthogonal_correctors: 0,
+        tolerances: PairingTolerances::default(),
+        conduction_curves: Vec::new(),
+        volumetric: Vec::new(),
+        viscosity: None,
+        viscous_dissipation: false,
+        radiation: None,
+        p0: 101_325.0,
+    };
+
+    let sol = run_flow_case(gpu, &case)?;
+
+    // SPEC-LIT (S60.1) with `d_t` in place of D_T: Nu = Q/(k_f dT d_z).
+    let scale = f.kappa * v.d_t * dz;
+    let nu_cold = -sol.patch_heat_flow(0, "cold")? / scale;
+    let nu_hot = sol.patch_heat_flow(1, "hot")? / scale;
+    let nu_iface = sol
+        .interface_flows()
+        .first()
+        .map(|(_, into_a, _)| *into_a / scale)
+        .unwrap_or(0.0);
+
+    // Gate 4 is always on, as in kaminski_prakash: a mis-paired face or a
+    // sign error shows here before it shows in any Nusselt number.
+    assert!(
+        sol.interface.imbalance() < 1e-12,
+        "SPEC-LIT 47.12 Gate 4: interface imbalance {:.3e}",
+        sol.interface.imbalance()
+    );
+    Ok((nu_cold, nu_hot, nu_iface, sol.iterations, sol.converged))
+}
+
+/// **The Gate 5 Kr = 0.1 probe - SPEC-LIT 115.** Six runs holding the
+/// diagnosis of 115.3-115.5: the fluid-width Rayleigh reading and the
+/// fluid-square geometry reading fail at `Kr = 10`; `dT/TRef` `3.3e-5` and
+/// `3.3e-3` leave `0.38086` alone; and `Kr x 1.0992489`, fitted at the one
+/// conduction point, lands the reference's `0.41` to `1 %`.
+#[test]
+#[ignore = "six steady conjugate solves, about 4 minutes on the card; the supervisor runs it with --ignored --nocapture (SPEC-LIT 115)"]
+fn gate_5_probe_the_kr_miss_is_a_solid_resistance_offset_in_the_reference() -> Result<()> {
+    let Some(gpu) = gpu() else { return Ok(()) };
+
+    // 1. The Rayleigh number taken on the fluid width 0.8 (SPEC-LIT 115.3):
+    //    at Kr = 10 it overshoots the reference by more than 15 %, so it is
+    //    not the reference's reading.
+    let (nu_c, nu_h, nu_i, its, conv) = kaminski_prakash_variant(
+        &gpu,
+        &KpVariant { ra: 19_531.25, kr: 10.0, n: 40, d_t: D_T, width: 1.0 },
+    )?;
+    println!(
+        "gate5 probe: fluid-width Ra, Kr 10: Nu {nu_c:.5} hot {nu_h:.5} iface {nu_i:.5} \
+         its {its} conv {conv}"
+    );
+    let bound: Scalar = 1.15 * 2.28;
+    assert!(
+        nu_c > bound,
+        "fluid-width Ra, Kr 10: Nu {nu_c:.5} is not above 1.15 x 2.28 = {bound:.5}"
+    );
+
+    // 2. The fluid cavity square, wall outside it (SPEC-LIT 115.3): on the
+    //    fluid width it reads low, on the total width 1.2 it reads high.
+    let (nu_c, nu_h, nu_i, its, conv) = kaminski_prakash_variant(
+        &gpu,
+        &KpVariant { ra: 1.0e4, kr: 10.0, n: 40, d_t: D_T, width: 1.2 },
+    )?;
+    let total_width = 1.2 * nu_c;
+    println!(
+        "gate5 probe: fluid-square geometry, Kr 10: Nu {nu_c:.5} hot {nu_h:.5} iface {nu_i:.5} \
+         its {its} conv {conv} total-width Nu {total_width:.5}"
+    );
+    let lo: Scalar = 0.95 * 2.28;
+    let hi: Scalar = 1.05 * 2.28;
+    assert!(
+        nu_c < lo,
+        "fluid-square geometry, Kr 10: Nu {nu_c:.5} is not below 0.95 x 2.28 = {lo:.5}"
+    );
+    assert!(
+        total_width > hi,
+        "fluid-square geometry, Kr 10: total-width Nu {total_width:.5} (from {nu_c:.5}) \
+         is not above 1.05 x 2.28 = {hi:.5}"
+    );
+
+    // 3-4. Property temperature and the buoyancy form (SPEC-LIT 115.3):
+    //      dT/TRef of 3.3e-5 and 3.3e-3 against 3.3e-4 leave 0.38086 alone.
+    let base: Scalar = 0.38086;
+    let tol: Scalar = 5e-4;
+    let (nu_c, nu_h, nu_i, its, conv) = kaminski_prakash_variant(
+        &gpu,
+        &KpVariant { ra: 1.0e4, kr: 0.1, n: 40, d_t: 0.01, width: 1.0 },
+    )?;
+    println!(
+        "gate5 probe: dT/TRef 3.3e-5: Nu {nu_c:.5} hot {nu_h:.5} iface {nu_i:.5} \
+         its {its} conv {conv}"
+    );
+    assert!(
+        (nu_c / base - 1.0).abs() < tol,
+        "dT/TRef 3.3e-5: Nu {nu_c:.5} is not within 5e-4 of 0.38086"
+    );
+    let (nu_c, nu_h, nu_i, its, conv) = kaminski_prakash_variant(
+        &gpu,
+        &KpVariant { ra: 1.0e4, kr: 0.1, n: 40, d_t: 1.0, width: 1.0 },
+    )?;
+    println!(
+        "gate5 probe: dT/TRef 3.3e-3: Nu {nu_c:.5} hot {nu_h:.5} iface {nu_i:.5} \
+         its {its} conv {conv}"
+    );
+    assert!(
+        (nu_c / base - 1.0).abs() < tol,
+        "dT/TRef 3.3e-3: Nu {nu_c:.5} is not within 5e-4 of 0.38086"
+    );
+
+    // 5. The conduction point (SPEC-LIT 115.4): this solver sits on the
+    //    exact series resistance and the reference 6.96 % above it.
+    let (nu_c, nu_h, nu_i, its, conv) = kaminski_prakash_variant(
+        &gpu,
+        &KpVariant { ra: 500.0, kr: 0.1, n: 40, d_t: D_T, width: 1.0 },
+    )?;
+    let exact: Scalar = 1.0 / (0.2 / 0.1 + 0.8);
+    let lim: Scalar = 1e-3;
+    println!(
+        "gate5 probe: conduction, Ra 500, Kr 0.1: Nu {nu_c:.5} hot {nu_h:.5} iface {nu_i:.5} \
+         its {its} conv {conv} exact {exact:.6} reference 0.382 is {:+.2}% above exact",
+        100.0 * (0.382 / exact - 1.0)
+    );
+    assert!(
+        (nu_c / exact - 1.0).abs() < lim,
+        "conduction, Ra 500, Kr 0.1: Nu {nu_c:.5} is not the exact limit {exact:.6}"
+    );
+    assert!(
+        0.382 / nu_c - 1.0 > 0.06,
+        "conduction, Ra 500, Kr 0.1: reference 0.382 is not more than 6 % above {nu_c:.5}"
+    );
+
+    // 6. The one fitted factor (SPEC-LIT 115.5): Kr x 1.0992489, fitted at
+    //    run 5 alone, predicts the reference's 0.41 to 1 %.
+    let (nu_c, nu_h, nu_i, its, conv) = kaminski_prakash_variant(
+        &gpu,
+        &KpVariant { ra: 1.0e4, kr: 0.1 * 1.0992489, n: 40, d_t: D_T, width: 1.0 },
+    )?;
+    println!(
+        "gate5 probe: Kr x 1.0992489, Ra 1e4, Kr 0.1: Nu {nu_c:.5} hot {nu_h:.5} iface {nu_i:.5} \
+         its {its} conv {conv} against 0.41 {:+.2}%",
+        100.0 * (nu_c / 0.41 - 1.0)
+    );
+    let fit_ref: Scalar = 0.41;
+    let one_pct: Scalar = 0.01;
+    assert!(
+        (nu_c / fit_ref - 1.0).abs() < one_pct,
+        "Kr x 1.0992489, Ra 1e4, Kr 0.1: Nu {nu_c:.5} is not within 1 % of 0.41"
+    );
+    Ok(())
+}
+
 // ==========================================================================
 //  SPEC-LIT §59 - the retarget itself
 //
