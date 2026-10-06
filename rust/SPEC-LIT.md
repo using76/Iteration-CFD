@@ -36104,8 +36104,9 @@ term, §50.8); the planned names refused by their own arm today keep theirs
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §128-§133 to
 the chemistry core of tranche 17. This section and the five after it were written by
-CHR-00a as contracts. No code cites them yet. CHR-01 to CHR-12b implement them,
-and each of those units amends its own section in place when it lands.
+CHR-00a as contracts. CHR-01 to CHR-12b implement them,
+and each of those units amends its own section in place when it lands. §128 has
+landed (CHR-01, `src/chem/thermo.rs`; what it measured is at the end of §128.7).
 
 **A note on what "read" means in §128-§133.** Each section lists its sources
 and says which ones this unit actually read, and where. A DOI listed and marked
@@ -36271,6 +36272,39 @@ below runs unchanged in both builds and carries one tolerance (docs/17
 | `thermo_out_of_range_is_refused` | `T` outside `[T_low, T_high]` | error naming species, `T` and range | D |
 | `thermo_molar_mass_from_elements` | `W_k` of the eight species against TM-4513's printed weights | printed digits | D |
 
+**Landed (CHR-01, 2026-10-06).** `src/chem/thermo.rs` implements (128.1)-(128.7),
+(128.9) and (128.10). (128.8) is left to §131's equilibrium unit, its first
+user. The rows ran over all ten TM-4513 records of
+`reference/mcbride-gordon-reno1993/table_II.csv` (the table above names eight;
+O and H are the two more), with `R` of §128.5, and measured:
+
+* `cp(298.15)` meets Table B1 to `2.52e-5` relative at worst (O);
+* `H(298.15)` meets Table B1's `Δf H` to `5.63` J/mol at worst (CO) for nine
+  species;
+* the two sets meet at `T_mid` to `2.54e-8` relative at worst (CH4, `H/RT`);
+* every weight built from §128.2's table reproduces the printed one to
+  `3.6e-15` g/mol (CO), and `Ar`'s `39.948` matches Table B1.
+
+**OH, decided by recommendation.** TM-4513's OH record (TPIS78) carries
+`Δf H = 39.347` kJ/mol and TP-2002's Table B1 carries `37.278`. No 10 J/mol row
+can hold that record against Table B1, and the record is the source's, so it is
+not changed. OH is held instead to its own record's printed `H(298.15)/R`
+(record 4) within the same 10 J/mol (measured `4.6e-5` J/mol), and its gap to
+Table B1 is pinned at `2068.882 ± 0.01` J/mol, as `validate_key` already pins
+it. The tolerance of the other nine species is not changed.
+
+**The mixture skips `Y = 0`.** In (128.7) a species with `Y_k = 0` contributes
+exactly nothing and is not evaluated, so a species absent from a cell does not
+make that cell's temperature refused against the species' range.
+
+Every row runs on `f64` types in both builds, with one tolerance. The f32
+build's lib test crate does not compile today, for reasons outside this module
+(tests in `src/automesher/`). The supervisor therefore ran the eleven tests of
+`src/chem/tests_thermo.rs` against the `single` library through an external
+harness: all eleven pass. A digest of every `cp/R`, `H/RT`, `S/R` and `G/RT`
+of the 53 GRI records, together with a mixture `W`, `cp` and `h`, is the same
+bit pattern in both builds.
+
 Labels: (128.1)-(128.10).
 
 ---
@@ -36360,6 +36394,23 @@ line 2 is `300.000 1000.000 5000.000`. **Table III is followed.**
 whitespace, because two adjacent E15 fields may touch (`0.10139743E-02-0.0...`
 in Figure 6). A record whose card numbers 1-4 do not appear in column 80 is
 refused, naming the species and the line.
+
+**Three layouts real files use, accepted (CHR-01, DESIGN).** First, GRI-Mech
+3.0's `thermo30.dat` writes `T_mid` as F10 in columns 66-75, not Table III's
+E8.0 in columns 66-73 (its card 1 ends `   200.000  3500.000  1000.000    1`).
+A digit or a point in column 74 cannot begin an element symbol, so it selects
+the wide field; the record then has no fifth element slot, and columns 76-78
+must be blank. Read as Table III says, every GRI record would be refused for an
+element `00` with no count. Second, a plain `THERMO` may be followed by line 2,
+as GRI's is: line 2 is the first line after the keyword that is neither a card
+1 nor a block end, so `THERMO` and `THERMO ALL`, with or without line 2, and an
+empty block all read. Third, a line ends the block (`END`, or a `REAC`, `SPEC`
+or `ELEM` keyword) only if it is not a card 1, so a species name cannot end the
+block. A species given twice keeps its first record, and the reader records a
+note. A card 1 with no element in any slot is refused by name, because §128.2
+builds `W_k` from the element counts and such a species has none. The supervisor ran the reader on the user-supplied `thermo30.dat` of
+§129.6 (the digest listed there): it reads all 53 records, with `T_mid` 1382,
+1368 and 1478 K for HCNO, HOCN and HNCO.
 
 The phase must be `G`. A condensed species (`S`, `L`) is refused by name: §131
 is gas-phase only.
