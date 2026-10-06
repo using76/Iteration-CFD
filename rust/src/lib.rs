@@ -36,6 +36,8 @@
 //! * [`cht`] - conjugate heat transfer: solid regions, anisotropic
 //!   conduction, contact resistance, and the concatenated thermal mesh whose
 //!   fluid/solid interface is a cyclic couple with a zero transform
+//! * [`chem`] - NASA seven-coefficient species thermochemistry read from
+//!   CHEMKIN THERMO records, and the ideal-gas mixture (SPEC-LIT §128)
 //! * [`blockgen`] - a structured mesh generator, so test cases need no OpenFOAM
 //! * [`reference`] - an independent CPU transcription used only to validate
 //!
@@ -72,6 +74,7 @@ pub mod potential_flow;
 pub mod restart;
 pub mod rheology;
 pub mod cht;
+pub mod chem;
 pub mod dcmetrics;
 pub mod fan;
 pub mod psychro;
