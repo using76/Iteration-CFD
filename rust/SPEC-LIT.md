@@ -1504,7 +1504,7 @@ that no reader asks for are listed as owed rather than hidden.
 | `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
 | `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
 | `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
-| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane`, `wedge` → symmetry; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `uniformFixedValue` (its `uniformValue` Function1 is not read — **was silent**), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else | calculated (a fixed value at the file's `value`); for the three named: calculated, fixedValue at `value`, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_three_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two` |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane`, `wedge` → symmetry; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `uniformFixedValue` (its `uniformValue` Function1 is not read — **was silent**), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the three named: calculated, fixedValue at `value`, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_three_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
 | polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane`, `wedge` → symmetry; `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
@@ -34912,5 +34912,228 @@ gate5 probe: Kr x 1.0992489, Ra 1e4, Kr 0.1: Nu 0.41067 hot 0.41064 iface 0.4106
 
 House items: no numerics change, no new file, no kernel, no capture row, no
 gate; the library gains one ignored test (2150 listed).
+
+---
+
+## 120. The boundary-condition catalogue - every public type name and its status
+
+Every type NAME in the table below is taken by name only from the two public
+user guides - <https://www.openfoam.com/documentation/guides/latest/doc/guide-bcs.html>
+and <https://doc.cfd.direct/openfoam/user-guide-v12/boundaries> - and from
+`docs/01-model-catalog.md`, which is read for its type names only and never
+for its formula column; no description, formula or source code was taken from
+either guide, and every equation a later boundary-condition unit adds is taken
+from the open literature it cites.
+
+A name is in exactly one of five states. **implemented** - `BcKind::from_name`
+accepts it on the field the row is asked on, and it is one of the 49 names of
+`IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
+mapping onto an implemented name, though it is not itself in
+`IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
+completion plan will implement it. **owned** - refused today; another
+stream's unit (`CMP-NN` or `CHR-NN`) will implement it. **refused** - refused
+permanently by name, with the reason printed in the refusal's note. Every new
+boundary condition from any stream is a §4 triple rewrite with no new
+evaluation branch, and registers its name here with a status when it lands
+(docs/17 §5.2).
+
+The catalogue is held to the code in both directions:
+`field::tests::every_catalogue_name_has_a_status` holds every entry to what
+`from_name` does with its name, `field::tests::the_permanent_refusals_name_their_reason`
+holds every refused entry's reason to the note its refusal prints, and
+`field::tests::the_spec_lit_120_table_is_the_catalogue` holds the table below
+to `src/field/catalogue.rs`, which is this table as data - one `Entry` per
+row, row for row.
+
+| family | name | status | unit or target | extended by | note |
+|---|---|---|---|---|---|
+| basic | `fixedValue` | implemented | — | — | — |
+| basic | `noSlip` | implemented | — | — | — |
+| basic | `zeroGradient` | implemented | — | — | — |
+| basic | `fixedGradient` | implemented | — | — | — |
+| basic | `uniformFixedGradient` | implemented | — | BC-06 | BC-06 adds the Function1-of-time gradient profile |
+| basic | `mixed` | implemented | — | — | — |
+| freestream | `freestream` | implemented | — | — | — |
+| freestream | `freestreamVelocity` | implemented | — | — | — |
+| freestream | `freestreamPressure` | implemented | — | BC-20 | BC-20 adds the compressible free-stream switch |
+| basic | `calculated` | implemented | — | — | — |
+| basic | `empty` | implemented | — | — | — |
+| basic | `symmetry` | implemented | — | — | — |
+| basic | `symmetryPlane` | implemented | — | — | — |
+| basic | `slip` | implemented | — | — | — |
+| basic | `wedge` | implemented | — | BC-03, BC-04 | BC-03 and BC-04 replace the symmetry stand-in with the true wedge |
+| coupled | `cyclic` | implemented | — | — | — |
+| coupled | `cyclicSlip` | implemented | — | — | — |
+| coupled | `processor` | implemented | — | — | — |
+| inlet-outlet | `inletOutlet` | implemented | — | — | — |
+| inlet-outlet | `turbulentIntensityKineticEnergyInlet` | implemented | — | — | — |
+| inlet-outlet | `turbulentMixingLengthDissipationRateInlet` | implemented | — | — | — |
+| inlet-outlet | `turbulentMixingLengthFrequencyInlet` | implemented | — | — | — |
+| inlet-outlet | `pressureInletOutletVelocity` | implemented | — | — | — |
+| inlet-outlet | `fixedFluxPressure` | implemented | — | — | — |
+| inlet-outlet | `totalPressure` | implemented | — | CMP-16 | CMP-16 adds the compressible form |
+| inlet-outlet | `flowRateInletVelocity` | implemented | — | BC-06, CMP-16 | BC-06 makes the rate a Function1 of time; CMP-16 the compressible mass-flux form |
+| wall | `movingWallVelocity` | implemented | — | — | — |
+| wall function | `nutkWallFunction` | implemented | — | — | — |
+| wall function | `nutUWallFunction` | implemented | — | — | — |
+| wall function | `nutLowReWallFunction` | implemented | — | — | — |
+| wall function | `epsilonWallFunction` | implemented | — | — | — |
+| wall function | `omegaWallFunction` | implemented | — | — | — |
+| wall function | `kqRWallFunction` | implemented | — | — | — |
+| wall function | `kLowReWallFunction` | implemented | — | — | — |
+| wall function | `thermalWallFunction` | implemented | — | — | — |
+| wall function | `nutkRoughWallFunction` | implemented | — | — | — |
+| wall function | `nutURoughWallFunction` | implemented | — | — | — |
+| wall function | `wernerWengleWallFunction` | implemented | — | — | — |
+| thermal | `fixedFluxTemperature` | implemented | — | — | — |
+| VOF | `constantAlphaContactAngle` | implemented | — | — | — |
+| VOF | `dynamicAlphaContactAngle` | implemented | — | — | — |
+| thermal | `coupledTemperature` | implemented | — | — | — |
+| thermal | `thermalContactResistance` | implemented | — | — | — |
+| radiation | `greyDiffusiveRadiationViewFactor` | implemented | — | — | — |
+| radiation | `s2sWall` | implemented | — | — | — |
+| jump | `fanPressure` | implemented | — | — | — |
+| jump | `fan` | implemented | — | BC-17 | BC-17 pairs the patch with the coupled jump conditions |
+| jump | `porousJumpPressure` | implemented | — | — | — |
+| jump | `porousBafflePressure` | implemented | — | BC-17 | BC-17 pairs the patch with the coupled jump conditions |
+| thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
+| thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
+| time-varying | `uniformFixedValue` | planned | BC-06 | — | the value is a Function1 of time, not a `value` entry |
+| time-varying | `uniformInletOutlet` | planned | BC-06 | — | — |
+| time-varying | `uniformTotalPressure` | planned | BC-06 | — | — |
+| time-varying | `fixedProfile` | planned | BC-06 | — | — |
+| basic | `extrapolatedCalculated` | planned | BC-07 | — | — |
+| basic | `directionMixed` | planned | BC-07 | — | — |
+| wall | `rotatingWallVelocity` | planned | BC-07 | — | — |
+| wall | `translatingWallVelocity` | planned | BC-07 | — | — |
+| wall | `partialSlip` | planned | BC-07 | — | — |
+| wall | `fixedNormalSlip` | planned | BC-07 | — | — |
+| wall | `fixedShearStress` | planned | BC-07 | — | — |
+| wall function | `nutUSpaldingWallFunction` | planned | BC-07 | — | — |
+| velocity inlet | `surfaceNormalFixedValue` | planned | BC-08 | — | — |
+| velocity inlet | `cylindricalInletVelocity` | planned | BC-08 | — | — |
+| velocity inlet | `swirlFlowRateInletVelocity` | planned | BC-08 | — | — |
+| velocity inlet | `pressureInletVelocity` | planned | BC-08 | — | — |
+| velocity inlet | `pressureInletUniformVelocity` | planned | BC-08 | — | — |
+| velocity inlet | `pressureDirectedInletVelocity` | planned | BC-08 | — | — |
+| velocity inlet | `pressureDirectedInletOutletVelocity` | planned | BC-08 | — | — |
+| velocity inlet | `pressureInletOutletParSlipVelocity` | planned | BC-08 | — | — |
+| outlet | `outletInlet` | planned | BC-09 | — | the reverse switch of `inletOutlet` - fixed on outflow |
+| outlet | `advective` | planned | BC-09 | — | — |
+| outlet | `fixedMean` | planned | BC-10 | — | — |
+| outlet | `fixedMeanOutletInlet` | planned | BC-10 | — | — |
+| outlet | `fixedFluxExtrapolatedPressure` | planned | BC-10 | — | — |
+| outlet | `outletMappedUniformInlet` | planned | BC-10 | — | — |
+| outlet | `matchedFlowRateOutletVelocity` | planned | BC-10 | — | — |
+| buoyant pressure | `prghPressure` | planned | BC-11 | — | — |
+| buoyant pressure | `prghTotalPressure` | planned | BC-11 | — | — |
+| buoyant pressure | `prghTotalHydrostaticPressure` | planned | BC-11 | — | — |
+| buoyant pressure | `uniformDensityHydrostaticPressure` | planned | BC-11 | — | — |
+| thermal | `externalWallHeatFluxTemperature` | planned | BC-12 | — | — |
+| thermal | `turbulentHeatFluxTemperature` | planned | BC-12 | — | — |
+| thermal | `lumpedMassTemperature` | planned | BC-12 | — | — |
+| thermal | `totalFlowRateAdvectiveDiffusive` | planned | BC-12 | — | — |
+| thermal | `alphatWallFunction` | planned | BC-12 | — | — |
+| thermal | `compressible::alphatWallFunction` | planned | BC-12 | — | — |
+| atmospheric | `atmBoundaryLayerInletVelocity` | planned | BC-13 | — | — |
+| atmospheric | `atmBoundaryLayerInletK` | planned | BC-13 | — | — |
+| atmospheric | `atmBoundaryLayerInletEpsilon` | planned | BC-13 | — | — |
+| atmospheric | `atmBoundaryLayerInletOmega` | planned | BC-13 | — | — |
+| atmospheric | `nutkAtmRoughWallFunction` | planned | BC-13 | — | the Monin-Obukhov rough profile; refused today naming the two non-atmospheric rough functions |
+| atmospheric | `nutUBlendedWallFunction` | planned | BC-13 | — | — |
+| mapped inflow | `mapped` | planned | BC-14 | — | — |
+| mapped inflow | `mappedFixedValue` | planned | BC-14 | — | — |
+| mapped inflow | `turbulentInlet` | planned | BC-14 | — | — |
+| mapped inflow | `timeVaryingMappedFixedValue` | planned | BC-15 | — | — |
+| synthetic inflow | `turbulentDFSEMInlet` | planned | BC-16 | — | — |
+| synthetic inflow | `turbulentDigitalFilterInlet` | planned | BC-16 | — | — |
+| jump | `fixedJump` | planned | BC-17 | — | — |
+| jump | `uniformJump` | planned | BC-17 | — | — |
+| coupled | `cyclicAMI` | planned | BC-19 | — | refused until its two sides are imprinted conformal |
+| compressible | `inletOutletTotalTemperature` | planned | BC-20 | — | — |
+| compressible | `supersonicFreestream` | planned | BC-20 | — | — |
+| compressible | `fixedPressureCompressibleDensity` | planned | BC-20 | — | — |
+| VOF | `variableHeightFlowRate` | planned | BC-21 | — | — |
+| VOF | `variableHeightFlowRateInletVelocity` | planned | BC-21 | — | — |
+| VOF | `outletPhaseMeanVelocity` | planned | BC-21 | — | — |
+| VOF | `phaseHydrostaticPressure` | planned | BC-21 | — | — |
+| compressible | `totalTemperature` | owned | CMP-16 | — | — |
+| compressible | `waveTransmissive` | owned | CMP-17 | — | an absorbing outlet, OUTSIDE the `wave*` refusal |
+| compressible | `characteristicFarfield` | owned | CMP-18 | — | — |
+| compressible | `farfield` | owned | CMP-18 | — | — |
+| radiation | `MarshakRadiation` | owned | CHR-23 | — | — |
+| radiation | `MarshakRadiationFixedTemperature` | owned | CHR-23 | — | — |
+| radiation | `greyDiffusiveRadiation` | owned | CHR-23 | — | — |
+| radiation | `wideBandDiffusiveRadiation` | owned | CHR-23 | — | — |
+| species | `semiPermeableBaffleMassFraction` | owned | CHR-29 | — | — |
+| species | `specieTransfer` | owned | CHR-29 | — | — |
+| refused | `coded*` | refused | — | — | compiles C++ written into the case, at run time |
+| refused | `#codeStream` | refused | — | — | runs code at parse time; the directive form is skipped by the reader |
+| refused | `cyclicACMI` | refused | — | — | couples partly overlapping patches through AMI weights |
+| refused | `cyclicRepeatAMI` | refused | — | — | repeats a patch around a sector; needs a repeat transform |
+| refused | `nonConformal*` | refused | — | — | couples non-matching sides while the case runs, moving meshes included |
+| refused | `v2WallFunction` | refused | — | — | belongs to the v2-f model, which the registry refuses by name |
+| refused | `fWallFunction` | refused | — | — | belongs to the v2-f model, which the registry refuses by name |
+| refused | `wave*` | refused | — | — | generates or absorbs free-surface waves through a wave model |
+| refused | `activeBaffleVelocity` | refused | — | — | opens a baffle mid-run - mesh topology changing under the solver |
+| refused | `compressible::turbulentTemperatureRadCoupledMixed` | refused | — | — | asks conjugate AND radiative coupling on one face; never both (§50.8) |
+
+`codedFixedValue`/`codedMixed` and `#codeStream` compile C++ written INTO
+the case dictionary and load it at run time; this solver loads no user code, so no condition such code computes can
+be meaningful here. Write the condition the code computes directly:
+`fixedValue`, `fixedGradient` or `mixed`. `#codeStream` written as a
+dictionary DIRECTIVE in key position is not reached by this reader at all:
+`src/io/dict.rs` skips such a directive with one printed line, which is
+existing behaviour, recorded here and not changed by this unit.
+
+`cyclicACMI` couples two patches that only partly overlap, turning the
+uncovered part into wall faces face by face; this solver couples conformal
+faces only, so a partly overlapping interface cannot be answered truthfully.
+Mesh the two sides so they match and write `cyclic`. A static interface whose
+two sides overlap FULLY is `cyclicAMI`, which is planned (BC-19, by imprint)
+rather than refused; the partial overlap stays refused.
+
+`cyclicRepeatAMI` maps a patch onto copies of another one repeated around a
+sector; it needs interpolation weights and a repeat transform this solver
+does not have. A conformal cyclic pair written as `cyclic` is what stands.
+
+The `nonConformal*` family (`nonConformalCyclic`, `nonConformalError`,
+`nonConformalMappedWall`) intersects its two coupled sides while the case
+runs, moving meshes included - the mesh topology changing under the solver,
+which this solver never does. A static non-conformal interface is `cyclicAMI`
+and is refused until its faces are imprinted; a conformal one is `cyclic`.
+
+`v2WallFunction` and `fWallFunction` are the wall functions of the v2-f
+turbulence model, which this solver does not have - the model registry
+refuses the model by name (§13.4.4) - so no field this solver solves can ask
+for them. Pick a model this solver has, and its wall function comes with it.
+
+The `wave*` conditions (`waveAlpha`, `waveVelocity`, and their kin) generate
+or absorb free-surface waves through a wave model, and this solver has no
+wave model.
+`waveTransmissive` is OUTSIDE this refusal: it is an outgoing-wave pressure
+condition with no wave model behind it, and it is CMP-17's to implement.
+
+`activeBaffleVelocity` opens a baffle during the run by turning its wall
+faces into coupled ones when a field crosses a threshold - a change of mesh
+topology this solver never makes while a case runs. Mesh the baffle open or
+mesh it closed; do not ask the solver to change its mind.
+
+`compressible::turbulentTemperatureRadCoupledMixed` asks one face to carry
+the conjugate interface of §47 AND the radiating wall of §50 at once; the two
+conditions rewrite the same Robin triple, and a face carries one or the
+other, never both (§50.8). Write `coupledTemperature` (or
+`thermalContactResistance`) or `greyDiffusiveRadiationViewFactor` -
+whichever the face is.
+
+`-permissive` downgrades every refusal in this table to a warning and runs
+the fallback that refusal names (§13.4): `calculated` for the generic refusal
+of a name outside the catalogue and for every permanent refusal except
+`compressible::turbulentTemperatureRadCoupledMixed`, which keeps its own arm's
+fallback `coupledTemperature` (the conjugate coupling without the radiative
+term, §50.8); the planned names refused by their own arm today keep theirs
+(`uniformFixedValue` runs `fixedValue`, `cyclicAMI` a position-paired
+`cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`,
+`externalWallHeatFluxTemperature` `fixedFluxTemperature`).
 
 ---
