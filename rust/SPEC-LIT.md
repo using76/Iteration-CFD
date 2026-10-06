@@ -35200,6 +35200,57 @@ Here `P = (a, b, c, d, e)` and position `j` is 0 for `a`, through 4 for `e`.
 - It is antisymmetric under any swap of two arguments, because it is the sign of one
   perturbed determinant.
 - Lifting `e` upward moves it outside the sphere, which is the `j = 4` term's `-1`.
+- More generally, `(116.4)` is 0 only when all five points are coplanar. Then every term is
+  0. A finite tetrahedron never asks such a query, because its `orient3d(a, b, c, d)` is not 0.
+  The predicate returns 0 for it and does not panic.
+
+**Where the sign comes from.** The lifted determinant is linear in its lifted column, so
+
+```
+det [ p_j , |p_j|^2 + eps_j , 1 ]  =  insphere(P) + sum_j eps_j C_j,
+C_j = (-1)^(j+1) orient3d(P without p_j, in argument order)                                  (116.4a)
+```
+
+`C_j` is the cofactor of the lifted entry in row `j`. The removed minor `det [p_k, 1]` over
+the other four points is their `orient3d`, by the same row reduction that turns the 5x5 form
+into (116.3). The largest `eps_j` belongs to the largest vertex index, so the first non-zero
+`C_j` in that order decides the sign. That is (116.4).
+
+**The depth.** The depth of a query is the number of `orient3d` terms (116.4) evaluated: 0
+when `insphere(P) != 0`, otherwise the position in the decreasing-index scan of the first
+non-zero term, and 5 when the answer is 0. For five points that are not all coplanar,
+
+```
+depth <= 2                                                                                   (116.4b)
+```
+
+Proof. Suppose that `insphere(P) = 0` and that two terms vanish, `C_j = C_k = 0` with `j != k`.
+The three points `S = P \ {p_j, p_k}` lie in both coplanar quadruples. If `S` is not
+collinear, the plane through `S` holds `p_j` and `p_k`, so all five points are coplanar. If
+`S` is collinear, on a line `L`, its three lifted points `(p, |p|^2)` lie on a parabola in a
+2-plane of R^4. That 2-plane contains the vertical direction `(0, 0, 0, 1)`. `insphere(P) = 0`
+puts the five lifted points in one affine hyperplane of R^4. That hyperplane contains the
+2-plane, so it is vertical, and it projects to a plane of R^3 that holds `L`, `p_j` and `p_k`.
+The five points are coplanar again. So for a non-coplanar query, at most one term vanishes
+before a non-zero one: the perturbed `insphere` costs one `insphere` and at most two
+`orient3d` calls. Depth 2 needs four coplanar and cocircular points, such as one face of a
+cube.
+
+**The explicit perturbation (the test oracle).** For integer points, with `r_j` the rank of
+vertex `j`'s index among the five (0 for the smallest, 4 for the largest), `N = 2^14`, and the
+lifted column scaled by `N^5`,
+
+```
+sign (116.4)  =  sign det [ p_j , N^5 |p_j|^2 + N^(r_j) , 1 ]   (j = 0..4)                   (116.4c)
+```
+
+The determinant equals `N^5 insphere(P) + sum_j N^(r_j) C_j`. Each term dominates the sum of all
+the lower ones whenever every `|C_j| < N - 1`. Hadamard's bound gives `|C_j| <= (w sqrt 3)^3`
+for points in a box of side `w`: at most 3 787 for the `10^3` lattice (`w = 9`) and 14 258 for
+the radius-7 points of TET-01's `cospherical_is_zero` (`w = 14`). Both are below
+`N - 1 = 16 383`. With the coordinates of those two sets, every term of the 5x5 Leibniz
+expansion is below `2^88` and the sum is below `2^95`, so `i128` evaluates (116.4c) exactly.
+It uses no `orient3d`, no `insphere` and no sign rule, which makes it independent of (116.4).
 
 The supervisor's exact-arithmetic probe checked all three on 3000 random 5-point queries from
 the 3x3x3 lattice: no zero results, no mismatch against an explicit `eps_i = eps^(2^rank)`
@@ -35605,7 +35656,7 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 |---|---|---|
 | TET-00 | `tetmesh::tests::spec_round_trips_json`; the §80 xref audit; both builds | D |
 | TET-01 | for 10^5 near-degenerate integer configurations, at scales 1, 2^-40 and 2^40, the signs equal `i128` evaluation 100 %; cospherical and coplanar lattice points give exactly 0; for 2*10^4 near-degenerate general f64 configurations the signs equal a big-integer evaluation 100 %, and every transposition negates the sign; a decided stage A returns `det~`; the same results under `single` | D |
-| TET-02 | 0 zero results on a 10^3 lattice (10^6 sampled 5-point queries); `sign(swap) = -sign` for 10^5 random swaps | D |
+| TET-02 | 0 zero results on a 10^3 lattice (10^6 sampled 5-point queries), counting every query whose five points are not all coplanar; a coplanar query, which no finite tetrahedron asks, is 0 by §116.5's contract and is counted apart; `sign(swap) = -sign` for 10^5 random swaps; the depth stays at 2 or less (116.4b); the signs equal the explicit perturbation (116.4c) | D |
 | TET-03a | locally Delaunay everywhere; symmetric adjacency; (116.5); (116.6) at relative 1e-12 on the lattice; no `orient3d = 0` | D, A |
 | TET-03b | 10^6 points in 15 s or less; 20 or fewer walk steps per insertion on average (supervisor run) | measured |
 | TET-04a | (116.7) for a point source within one leaf size, max relative error 2 % or less; boxes exact | A |
@@ -35636,6 +35687,11 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-01 | 2*10^4 general f64 configurations (G1 orient3d, G2 insphere): signs equal the big-integer evaluation | 100 %; stage A undecided 4 886 and 5 037; the naive `det~` sign wrong 1 001 and 1 834 times | the TET-01 commit |
 | TET-01 | the f32 arm (`--features single`, `Scalar` 4 bytes), from outside the tree | the unit's 9 tests verbatim pass; an independent O1, I3 and lattice oracle (70 000 queries, 21 157 exact zeros) passes | the TET-01 commit |
 | TET-01 | the whole `tetmesh::` test filter, release | 15 tests in 0.59 s | the TET-01 commit |
+| TET-02 | 10^6 lattice queries: U, 5*10^5 uniform 5-point draws, and C, 5*10^5 draws of five corners of a lattice cube (all cospherical) | 0 zero results on the non-coplanar queries; 351 coplanar U queries answer 0 at depth 5 by contract; depths 0/1/2 are 497 975 / 1 515 / 159 (U) and 0 / 401 380 / 98 620 (C); no depth above 2 | the TET-02 commit |
+| TET-02 | 10^5 random swaps (S), plus all 10 swaps on the first 1000 | the sign negates and the depth is unchanged, 100 %; 35 coplanar queries skipped | the TET-02 commit |
+| TET-02 | (116.4c) in `i128` against (116.4) | equal on every ordering of every 5-subset of the cube corners and of the radius-7 points, under two id maps (26 880 queries, 240 coplanar zeros), and on 4*10^4 lattice queries | the TET-02 commit |
+| TET-02 | the f32 arm (`--features single`), from outside the tree | the unit's 6 tests verbatim pass; an independent Leibniz (116.4c) oracle with every swap and a shift of about 10^6 passes on 6*10^4 queries (30 111 that needed the perturbation) | the TET-02 commit |
+| TET-02 | the whole `tetmesh::` test filter, release | 21 tests in 3.33 s | the TET-02 commit |
 
 ### 116.19 References
 
