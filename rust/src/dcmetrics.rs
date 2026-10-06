@@ -67,7 +67,7 @@ use crate::fan::FlowDevices;
 use crate::field::{GpuScalarField, GpuSurfaceScalarField};
 use crate::mesh::HostMesh;
 use crate::solver::{self, SolverKernels};
-use crate::{Label, Scalar};
+use crate::{Acc, Label, Scalar};
 
 #[cfg(test)]
 mod tests;
@@ -440,7 +440,7 @@ pub struct Metrics<'d> {
     solk: SolverKernels,
     ga: DevBuf<Scalar>,
     gb: DevBuf<Scalar>,
-    partials: DevBuf<Scalar>,
+    partials: DevBuf<Acc>,
     red: DevBuf<Scalar>,
     cap: usize,
 }

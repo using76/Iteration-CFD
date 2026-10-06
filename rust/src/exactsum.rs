@@ -66,7 +66,7 @@ use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use crate::device::{DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::solver::{self, one_block, reduce_geometry, to_label, SolverKernels};
-use crate::Scalar;
+use crate::{Acc, Scalar};
 
 // ==========================================================================
 //  The limb layout
@@ -168,8 +168,10 @@ pub struct ExactReduction {
     /// `[n_parts]` terms each part contributes.
     n: Vec<usize>,
     /// `[n_parts]` per-part stage-one scalar partials — the maxima, and the
-    /// plain sums of the gathered-partial construction.
-    scalar_partials: Vec<DevBuf<Scalar>>,
+    /// plain sums of the gathered-partial construction. `Acc` in BOTH builds
+    /// (SPEC-LIT §118.1): the stage-one kernels write `ofacc` partials even
+    /// when the terms are float.
+    scalar_partials: Vec<DevBuf<Acc>>,
     /// `[n_parts]` per-part stage-one limb partials, `EXACT_K` per block.
     limb_partials: Vec<DevBuf<i64>>,
 
@@ -180,8 +182,9 @@ pub struct ExactReduction {
     /// `[EXACT_WORDS]` the same, for a part's limb total.
     limb_slot: DevBuf<i64>,
 
-    /// `[n_parts]` the gathered per-part scalars.
-    part_scalar: DevBuf<Scalar>,
+    /// `[n_parts]` the gathered per-part scalars, `Acc` in BOTH builds
+    /// (SPEC-LIT §118.1) — the stage two that combines them adds in `ofacc`.
+    part_scalar: DevBuf<Acc>,
     /// `[n_parts * EXACT_WORDS]` the gathered per-part limb totals.
     part_limbs: DevBuf<i64>,
 
@@ -354,7 +357,7 @@ impl ExactReduction {
         // ---- the anchor: max|a b| over every part, then the gather --------
         for p in 0..self.n.len() {
             let Some((cfg, nparts, nl)) = self.geometry(p) else {
-                self.zero_part_scalar(gpu, p)?;
+                self.zero_part_scalar(gpu, sol, p)?;
                 continue;
             };
             {
@@ -418,7 +421,7 @@ impl ExactReduction {
 
         for p in 0..self.n.len() {
             let Some((cfg, nparts, nl)) = self.geometry(p) else {
-                self.zero_part_scalar(gpu, p)?;
+                self.zero_part_scalar(gpu, sol, p)?;
                 continue;
             };
             {
@@ -506,7 +509,7 @@ impl ExactReduction {
                 let Self { scalar_slot, scalar_partials, n, .. } = self;
                 solver::device_sum(gpu, sol, scalar_slot, &xs[p], &mut scalar_partials[p], n[p])?;
             }
-            self.gather_scalar_slot(gpu, p)?;
+            self.gather_scalar_slot(gpu, sol, p)?;
         }
         self.finish_gathered(gpu, sol, 0.0)
     }
@@ -534,7 +537,7 @@ impl ExactReduction {
                     n[p],
                 )?;
             }
-            self.gather_scalar_slot(gpu, p)?;
+            self.gather_scalar_slot(gpu, sol, p)?;
         }
         self.finish_gathered(gpu, sol, 0.0)
     }
@@ -560,7 +563,7 @@ impl ExactReduction {
                     n[p],
                 )?;
             }
-            self.gather_scalar_slot(gpu, p)?;
+            self.gather_scalar_slot(gpu, sol, p)?;
         }
         self.finish_gathered(gpu, sol, 0.0)
     }
@@ -586,7 +589,7 @@ impl ExactReduction {
         self.check(ax_ref, "gathered_norm_factor", "AxRef")?;
         for p in 0..self.n.len() {
             let Some((cfg, nparts, nl)) = self.geometry(p) else {
-                self.zero_part_scalar(gpu, p)?;
+                self.zero_part_scalar(gpu, sol, p)?;
                 continue;
             };
             {
@@ -603,7 +606,7 @@ impl ExactReduction {
                 }
                 solver::finish_sum(gpu, sol, scalar_slot, &scalar_partials[p], nparts, 0.0)?;
             }
-            self.gather_scalar_slot(gpu, p)?;
+            self.gather_scalar_slot(gpu, sol, p)?;
         }
         self.finish_gathered(gpu, sol, eps)
     }
@@ -667,7 +670,7 @@ impl ExactReduction {
                     n[p],
                 )?;
             }
-            self.gather_scalar_slot(gpu, p)?;
+            self.gather_scalar_slot(gpu, sol, p)?;
         }
         self.finish_anchor(gpu, sol)
     }
@@ -693,22 +696,43 @@ impl ExactReduction {
                     .launch(one_block())?;
             }
         }
-        self.gather_scalar_slot(gpu, p)
+        self.gather_scalar_slot(gpu, sol, p)
     }
 
-    /// The collective, for one scalar: a copy, and therefore exact.
-    fn gather_scalar_slot(&mut self, gpu: &Gpu, p: usize) -> Result<()> {
+    /// The collective, for one scalar: a move of bytes, and therefore exact.
+    ///
+    /// In the f64 build that move is the `memcpy_dtod`, because `Acc` IS
+    /// `Scalar`. In the f32 build a byte copy cannot widen a float to a
+    /// double, so `solWidenToAcc` widens instead — exact, because every float
+    /// is a double — and the gathered stage two still adds in `ofacc`
+    /// (SPEC-LIT §118.1).
+    fn gather_scalar_slot(&mut self, gpu: &Gpu, sol: &SolverKernels, p: usize) -> Result<()> {
         let Self { scalar_slot, part_scalar, .. } = self;
-        gpu.stream()
-            .memcpy_dtod(&scalar_slot.slice(0..1), &mut part_scalar.slice_mut(p..p + 1))?;
+        #[cfg(feature = "single")]
+        {
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&sol.widen_to_acc)
+                    .arg(&mut *part_scalar)
+                    .arg(&*scalar_slot)
+                    .arg(&(p as crate::Label))
+                    .launch(one_thread())?;
+            }
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = sol;
+            gpu.stream()
+                .memcpy_dtod(&scalar_slot.slice(0..1), &mut part_scalar.slice_mut(p..p + 1))?;
+        }
         Ok(())
     }
 
     /// A part that owns nothing contributes a zero to the gathered maxima.
-    fn zero_part_scalar(&mut self, gpu: &Gpu, p: usize) -> Result<()> {
+    fn zero_part_scalar(&mut self, gpu: &Gpu, sol: &SolverKernels, p: usize) -> Result<()> {
         let Self { scalar_slot, .. } = self;
         gpu.fill_zero(scalar_slot)?;
-        self.gather_scalar_slot(gpu, p)
+        self.gather_scalar_slot(gpu, sol, p)
     }
 
     /// Stage two of a part's own limb sum, and the move into the gathered
@@ -792,7 +816,10 @@ impl ExactReduction {
         Ok(())
     }
 
-    /// The gathered-partial combine: `solSumStage2` over `P` doubles.
+    /// The gathered-partial combine: `solSumStage2` over `P` doubles. The
+    /// gathered buffer is `Acc` in BOTH builds (SPEC-LIT §118.1) and the
+    /// combine adds in `ofacc` and rounds once when it stores, so in the f32
+    /// build the cross-part sum does not re-round through float.
     fn finish_gathered(&mut self, gpu: &Gpu, sol: &SolverKernels, offset: Scalar) -> Result<()> {
         let np = to_label(self.n.len())?;
         let Self { out, part_scalar, .. } = self;

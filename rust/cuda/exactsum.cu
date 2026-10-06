@@ -253,13 +253,19 @@ OFGPU_DEV void exBlockSum_(long long* m)
 }
 
 
+//- `ofmax_`'s body on `ofacc` operands. NOT an overload of `ofmax_`: in the
+//  f64 build `ofacc` IS `ofscalar`, so an overload would be a redefinition
+//  (SPEC-LIT 118.1). The twin of solver.cu's accMax_, which cannot be reached
+//  from here because that helper has internal linkage in its own unit.
+OFGPU_DEV ofacc exAccMax_(ofacc a, ofacc b) { return a > b ? a : b; }
+
 //- Maximum over the whole block. Valid in thread 0 only; identity 0 because
 //  every caller reduces a magnitude. The twin of blockMax_ in solver.cu, which
 //  cannot be reached from here because that helper has internal linkage in its
-//  own translation unit.
-OFGPU_DEV ofscalar exBlockMax_(ofscalar v)
+//  own translation unit. Takes and returns `ofacc` (SPEC-LIT 118.1).
+OFGPU_DEV ofacc exBlockMax_(ofacc v)
 {
-    __shared__ ofscalar warpAcc[32];
+    __shared__ ofacc warpAcc[32];
 
     const unsigned lane = threadIdx.x & 31u;
     const unsigned wid  = threadIdx.x >> 5;
@@ -267,17 +273,17 @@ OFGPU_DEV ofscalar exBlockMax_(ofscalar v)
 
     for (int off = 16; off > 0; off >>= 1)
     {
-        v = ofmax_(v, __shfl_down_sync(OFGPU_FULL_MASK, v, off));
+        v = exAccMax_(v, __shfl_down_sync(OFGPU_FULL_MASK, v, off));
     }
     if (lane == 0) warpAcc[wid] = v;
     __syncthreads();
 
-    v = (threadIdx.x < nw) ? warpAcc[threadIdx.x] : (ofscalar)0;
+    v = (threadIdx.x < nw) ? warpAcc[threadIdx.x] : (ofacc)0;
     if (wid == 0)
     {
         for (int off = 16; off > 0; off >>= 1)
         {
-            v = ofmax_(v, __shfl_down_sync(OFGPU_FULL_MASK, v, off));
+            v = exAccMax_(v, __shfl_down_sync(OFGPU_FULL_MASK, v, off));
         }
     }
     return v;
@@ -291,22 +297,25 @@ OFGPU_DEV ofscalar exBlockMax_(ofscalar v)
 //  calls it unchanged, so `sum` and `sumMag` need nothing here. Only the term
 //  expressions that do NOT already have a magnitude kernel are written out.
 //  Stage two is solver.cu's solMaxStage2, also unchanged: a maximum needs no
-//  new machinery, only a fixed shape, and that one already has it.
+//  new machinery, only a fixed shape, and that one already has it. The anchor
+//  partials are ofacc, as every stage-one partials buffer is (SPEC-LIT
+//  118.1): each term is formed exactly as today in ofscalar and widened into
+//  the maximum, and solMaxStage2 reads them back as ofacc.
 // ==========================================================================
 
 extern "C" __global__ void exDotMaxStage1
 (
-    ofscalar* __restrict__ partials,
+    ofacc* __restrict__ partials,
     const ofscalar* __restrict__ a,
     const ofscalar* __restrict__ b,
     oflabel n
 )
 {
     const oflabel stride = (oflabel)(blockDim.x*gridDim.x);
-    ofscalar acc = 0;
+    ofacc acc = 0;
     for (oflabel i = (oflabel)OFGPU_TID; i < n; i += stride)
     {
-        acc = ofmax_(acc, ofabs_(a[i]*b[i]));
+        acc = exAccMax_(acc, (ofacc)ofabs_(a[i]*b[i]));
     }
 
     acc = exBlockMax_(acc);
@@ -319,7 +328,7 @@ extern "C" __global__ void exDotMaxStage1
 //  never negative.
 extern "C" __global__ void exNormFactorMaxStage1
 (
-    ofscalar* __restrict__ partials,
+    ofacc* __restrict__ partials,
     const ofscalar* __restrict__ Apsi,
     const ofscalar* __restrict__ b,
     const ofscalar* __restrict__ AxRef,
@@ -327,11 +336,11 @@ extern "C" __global__ void exNormFactorMaxStage1
 )
 {
     const oflabel stride = (oflabel)(blockDim.x*gridDim.x);
-    ofscalar acc = 0;
+    ofacc acc = 0;
     for (oflabel i = (oflabel)OFGPU_TID; i < n; i += stride)
     {
         const ofscalar ax = AxRef[i];
-        acc = ofmax_(acc, ofabs_(Apsi[i] - ax) + ofabs_(b[i] - ax));
+        acc = exAccMax_(acc, (ofacc)(ofabs_(Apsi[i] - ax) + ofabs_(b[i] - ax)));
     }
 
     acc = exBlockMax_(acc);

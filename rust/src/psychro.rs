@@ -67,7 +67,7 @@ use crate::field::GpuScalarField;
 use crate::io::contract::unsupported_note;
 use crate::mesh::GpuMesh;
 use crate::solver::{self, SolverKernels};
-use crate::{Label, Scalar};
+use crate::{Acc, Label, Scalar};
 
 #[cfg(test)]
 mod tests;
@@ -385,7 +385,7 @@ pub struct Psychrometrics {
     pub h: DevBuf<Scalar>,
     pub v: DevBuf<Scalar>,
     excess: DevBuf<Scalar>,
-    partials: DevBuf<Scalar>,
+    partials: DevBuf<Acc>,
     red: DevBuf<Scalar>,
 
     /// The virtual temperature, as a full field so it can be passed straight

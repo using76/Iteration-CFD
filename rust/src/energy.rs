@@ -153,7 +153,7 @@ use crate::mesh::GpuMesh;
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::timescheme::{Ddt, DdtScheme, TimeKernels};
 use crate::wallfunctions::{ThermalWallData, WallFunctionCoeffs};
-use crate::{Label, Scalar, Vec3};
+use crate::{Acc, Label, Scalar, Vec3};
 
 // ==========================================================================
 //  §37  The turbulent Prandtl number: constant, or Kays-Crawford
@@ -947,7 +947,7 @@ pub struct EnergySources {
     /// value in `src/solver.rs`, duplicated here because that constant is
     /// private to its module and this is the only other reduction in the
     /// crate that does not already own a [`crate::solver::SolverWorkspace`].
-    partials: DevBuf<Scalar>,
+    partials: DevBuf<Acc>,
 
     n: usize,
 }

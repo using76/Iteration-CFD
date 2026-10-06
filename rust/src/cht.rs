@@ -93,7 +93,7 @@ use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::timescheme::{self, DdtCoeffs, TimeKernels};
-use crate::{Label, Scalar, Tensor, Vec3};
+use crate::{Acc, Label, Scalar, Tensor, Vec3};
 
 // ==========================================================================
 //  §46.1, §46.3, §46.5  Materials
@@ -1570,7 +1570,7 @@ pub struct ConjugateInterfaces {
     q_a: DevBuf<Scalar>,
     q_b: DevBuf<Scalar>,
     mag_a: DevBuf<Scalar>,
-    partials: DevBuf<Scalar>,
+    partials: DevBuf<Acc>,
     out: DevBuf<Scalar>,
 }
 

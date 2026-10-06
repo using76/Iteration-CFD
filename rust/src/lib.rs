@@ -136,6 +136,13 @@ pub type Scalar = f32;
 #[cfg(not(feature = "single"))]
 pub type Scalar = f64;
 
+/// The accumulator type of every device reduction and its per-block partials:
+/// `f64` in BOTH builds, mirroring `ofacc` in `cuda/ofgpu_device.cuh`
+/// (SPEC-LIT §118.1). In the f64 build it is [`Scalar`], so every reduction
+/// there is unchanged.
+pub type Acc = f64;
+const _: () = assert!(std::mem::size_of::<Acc>() == 8);
+
 /// A positive floor far below any physical quantity and far above the bottom
 /// of [`Scalar`]'s range: `1e-300` in f64, `1e-30` in f32, each about 10^8
 /// above its type's smallest normal (SPEC-LIT 112.1). A `Scalar`-typed

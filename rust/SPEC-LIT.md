@@ -33994,7 +33994,7 @@ not get there. Gates 94-A to 94-D, 95-D, 95-E, 105-A to 105-C and 110-C are amon
 * **It does not make f32 a supported configuration.** It makes it build, keeps its floors
   alive, and states what holds. The f64 build remains the one every gate is taken in.
 * **No speed or memory figure** is taken for f32 (§111's model is an f64 measurement), and
-  mixed precision is not attempted.
+  mixed precision is not attempted. §118 records the mixed precision added since.
 * **The decision.** `ANISOTROPY_RESIDUAL_LIMIT` and the conjugate interface's tolerances
   are guards whose right value depends on the precision, like the floors of §112.1: in
   f64 each sits far above round-off, in f32 below it. Giving each an f32 value (a limit
@@ -34912,6 +34912,134 @@ gate5 probe: Kr x 1.0992489, Ra 1e4, Kr 0.1: Nu 0.41067 hot 0.41064 iface 0.4106
 
 House items: no numerics change, no new file, no kernel, no capture row, no
 gate; the library gains one ignored test (2150 listed).
+
+---
+
+## 118. Mixed precision — what is f64 in the f32 build, and why
+
+The f32 build of §112 stores every field and does its bulk arithmetic in
+float. This section records each place where that build computes in double
+instead, why, and why the f64 build stays bitwise identical through every one
+of the edits: each addition is either an `ofacc == ofscalar` identity or an
+`OFGPU_SINGLE` / `feature = "single"` arm, so in f64 nothing moves. The
+subsections, by unit:
+
+- 118.2 — host geometry in f64 (F32-03)
+- 118.3 — setup guards and sub-round-off constants (F32-04, F32-05)
+- 118.4 — mixed-precision iterative refinement (F32-06)
+- 118.5 — delta-form transients (F32-08)
+
+and, later, the local origin, moving geometry, parcels and chemistry in
+double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
+
+No GPL-licensed source was consulted.
+
+### 118.1 Accumulation — every device reduction adds in double
+
+**What changed.** `cuda/ofgpu_device.cuh` gains `typedef double ofacc` and
+`src/lib.rs` gains `pub type Acc = f64`, both unconditional: the accumulator
+of every reduction and its per-block partials buffer are double/f64 in BOTH
+builds, and in the f64 build `ofacc` IS `ofscalar` and `Acc` IS `Scalar`, so
+every edit there is an identity and the SASS of all 43 f64 cubins hashes
+identically (checked by `tools/f64_identity.py sass-diff`). The inputs stay
+`ofscalar`, and each term is widened to `ofacc` **before it is added**: sum
+adds `(ofacc)x[i]`, sum|x| adds `(ofacc)ofabs_(x[i])`, dot adds
+`(ofacc)a[i]*(ofacc)b[i]` (in f32 the product of two floats is exact in
+double), the fused `(a,b)`/`(a,a)` pair widens `a[i]` once and forms both
+products from it, max|x| takes `accMax_(acc, (ofacc)ofabs_(x[i]))`, the §8.4
+factor adds `(ofacc)ofabs_(Apsi[i] - ax) + (ofacc)ofabs_(b[i] - ax)` (the two
+differences stay float), and the two symmetry-defect kernels keep their
+maxima of widened magnitudes. The kernels are all of stage one —
+`solSumStage1`, `solSumMagStage1`, `solDotStage1`, `solDot2Stage1`,
+`solMaxMagStage1`, `solNormFactorStage1`, `solSymDefectStage1`,
+`solCoupledSymDefectStage1` — all of stage two — `solSumStage2`,
+`solSum2Stage2`, `solMaxStage2`, `solMax2Stage2` — and all the fused stage
+twos of §113.1 — `solSumStage2Divide`, `solSumStage2Beta`,
+`solSumStage2Ratio`, `solSum2Stage2Divide`, `solSumStage2Converged` — plus
+the shared block primitives `warpSum_`/`warpMax_`/`blockSum_`/`blockMax_`,
+whose shuffle slots are `ofacc` too. Stage two sums the `ofacc` partials in
+`ofacc` and rounds **once**, in thread 0, when it stores its output:
+`out[0] = (ofscalar)(acc + (ofacc)offset)` and its twins. Every device
+control scalar — `rho`, `alpha`, `omega`, `beta`, `num`, `den`,
+`norm_factor`, the residuals, and the by-value `offset`/`tolerance`/`relTol`
+— stays `ofscalar`/`Scalar`, and every §113.1 fused kernel forms its stored
+value once and runs the §6 arithmetic on that ROUNDED `ofscalar`, so §113.1's
+claim that the fused loops are the unfused ones bit for bit holds in both
+builds. The shared-memory warp slots hold `ofacc`, and the block primitives
+take and return `ofacc`; a new `accMax_` carries `ofmax_`'s body onto `ofacc`
+operands rather than overloading `ofmax_`, which in the f64 build would be a
+redefinition. One kernel is f32-only, under `#ifdef OFGPU_SINGLE`:
+`solWidenToAcc(dst, src, at)`, one thread, `dst[at] = (ofacc)src[0]`. It is
+the f32 build's half of `src/exactsum.rs`'s gather (`gather_scalar_slot`),
+whose collective must stay a move and whose destination is now an `ofacc`
+array: a `memcpy_dtod` cannot widen a float to a double, and the copy is
+exact because every float is a double. In the f64 build the byte copy is
+kept and the kernel does not exist in the cubin at all. Two stage-one
+kernels outside this file write the same partials: `exDotMaxStage1` and
+`exNormFactorMaxStage1` in `cuda/exactsum.cu` write the §72 anchor's per-block
+maxima into `ExactReduction::scalar_partials`, which `solMaxStage2` then
+reads. They write `ofacc` too, through `exBlockMax_` on `ofacc` and an
+`exAccMax_` twin of `accMax_`; their terms are formed in `ofscalar` exactly as
+the limb kernels form them. `cudarc` does not check a buffer's element type
+against a kernel's parameter, so a float written where a double is read would
+not fail to compile; it would corrupt the anchor in the f32 build silently.
+
+**The error model.** Computed naively, the sum `Σ x_j` equals
+`Σ x_j (1 + δ_j)` with `|δ_j| < (n − j) ε` (Goldberg 1991, "Errors in
+summation"); in Higham's form (2002, ch. 4), recursive summation of `n` terms
+answers `|ŝ − s| ≤ γ_{n−1} Σ |x_i|`, where `γ_k = k u / (1 − k u)`. The
+reduction here is not one long chain: each thread sums `⌈n/S⌉` sequential
+terms with `S = 256 × blocks` and `blocks ≤ 1024`, then a 256-wide tree (8
+levels) collapses the block, and stage two repeats the shape — `⌈blocks/256⌉`
+sequential terms per thread and another 8-level tree — so its depth is at
+most about 30 for `n ≤ 2^31`, and the bound is `γ_depth` evaluated at
+**`u = 2^-53`** for the accumulation in BOTH builds, plus one rounding of the
+stored result at the build's own unit round-off (`2^-24` in f32, `2^-53` in
+f64). Before this section the accumulation ran at the build's own `u` too, so
+the f32 build's error carried a `γ_depth` at `2^-24`, which is `2^29` (about
+`5 × 10^8`) times larger.
+
+**The measurement.** `tests/f32_accumulation.rs`, an integration test because
+the library's own test target does not compile under `single` yet, runs five
+tests over one generator: `r_k = ((k · 2654435761) mod 2^32) >> 9 < 2^23` for
+`k < N−1` at `N = 2^20`, with `r_{N-1}` closing `R = Σ r_k = 4398031831040`
+to a multiple of `2^20`, so that `x_k = 1 + r_k·2^-23` is exact as a float
+and `T = N + R·2^-23 = 1572862.25` is exactly representable. Under `single`,
+BEFORE this section, the float reduction order answered `device_sum(x) =
+1572862.375` and `device_sum(y) = 1048571.0` — `y` being `2^20 − 2` unit terms
+beside one `±2^24` pair, three of which the float tree lost to spacing — and
+AFTER it answers both exactly, with `sum|x|` of the alternating `z` and the
+dot pair landing on their exact values too. All five fail at `521dc0d` under
+`single` and pass after it, and all five pass in the f64 build before and
+after. `ofgpu-validate -sections 1-7` under `single` (measured 2026-10-06):
+101 of 229 check rows pass before and 101 after, with no row changing its
+verdict. The error of only two rows moved, both in section 6:
+`device residual reaches the tolerance` went from 2.87e-7 to 2.44e-7 and
+`cuFFT == iterative, mixed sides` from 4.02e-7 to 4.92e-7, both against
+1e-10. The misses of sections 1-7 come from float storage, float geometry and
+float solves (§118.2-§118.4), not from accumulation. The worst miss is still
+9.4e-6. In the f64 build, `-sections 1-40` prints all 875 rows identical to
+`521dc0d` (`tools/f64_identity.py rows`), and the SASS of all 43 cubins is
+identical. In the f32 build exactly two cubins changed, `solver` and
+`exactsum`.
+
+**What it does not do.** It does not make the linear solves converge below
+f32 round-off — the residual that the converged test reads is itself a float
+stored once, and fixing that is iterative refinement (§118.4, F32-06). It
+does not change any tolerance, scheme, iteration count or stopping rule. And
+it does not touch the reductions outside `cuda/solver.cu`, apart from the two
+`cuda/exactsum.cu` anchor kernels above, which share its partials. The
+parcels' reductions (F32-12) still accumulate in the field type. The
+integer-limb accumulator of §72 itself was already exact and is unchanged.
+
+Sources: **Goldberg, D. (1991), "What every computer scientist should know
+about floating-point arithmetic", ACM Computing Surveys 23(1) 5-48,
+doi:10.1145/103162.103163**, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html> (section
+"Errors In Summation" and Theorem 8's remark); **Higham, N. J. (2002),
+Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM,
+doi:10.1137/1.9780898718027**, ch. 4. Both DOIs were checked against Crossref
+on 2026-10-06 by fetching `api.crossref.org/works/<doi>`.
 
 ---
 
