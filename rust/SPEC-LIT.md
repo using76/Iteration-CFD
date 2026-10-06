@@ -35099,6 +35099,79 @@ PROVENANCE row if it is. Lévy's (2016) PCK is the second cross-check. Integer c
 `|x| < 2^20` make the determinant exactly representable in `i128`, so TET-01's gate compares
 against `i128` arithmetic.
 
+**Two stages, not four.** Shewchuk's adaptive routines run stages A, B, C and D. Here only stage A
+(the filter) is kept, followed by an exact evaluation of the whole determinant. Stages B and C
+make the exact path cheaper, but they do not change its result. They are not built. A Delaunay
+kernel on random points almost never leaves stage A, and TET-03b measures the cost on
+lattices. `eps` is half an ulp of 1.0, and every operation below is an IEEE-754 binary64
+operation, rounded to nearest-even. No fused multiply-add is used.
+
+```
+eps = 2^-53                                                                                 (116.3a)
+
+stage A, orient3d. The nine differences are rounded:  adx = a_x - d_x, ..., cdz = c_z - d_z
+  det~ = adz*(bdx*cdy - cdx*bdy) + bdz*(cdx*ady - adx*cdy) + cdz*(adx*bdy - bdx*ady)
+  perm = (|bdx*cdy| + |cdx*bdy|)*|adz| + (|cdx*ady| + |adx*cdy|)*|bdz|
+       + (|adx*bdy| + |bdx*ady|)*|cdz|
+  decided  iff  |det~| > (7 + 56 eps) eps perm,  and then sign (116.1) = sign det~              (116.3b)
+
+stage A, insphere. The twelve differences are rounded:  aex = a_x - e_x, ..., dez = d_z - e_z
+  ab = aex*bey - bex*aey    bc = bex*cey - cex*bey    cd = cex*dey - dex*cey
+  da = dex*aey - aex*dey    ac = aex*cey - cex*aey    bd = bex*dey - dex*bey
+  abc = aez*bc - bez*ac + cez*ab        bcd = bez*cd - cez*bd + dez*bc
+  cda = cez*da + dez*ac + aez*cd        dab = dez*ab + aez*bd + bez*da
+  plift = pex*pex + pey*pey + pez*pez   for p = a, b, c, d
+  det~ = (dlift*abc - clift*dab) + (blift*cda - alift*bcd)
+  perm = ((|cex*dey|+|dex*cey|)|bez| + (|dex*bey|+|bex*dey|)|cez| + (|bex*cey|+|cex*bey|)|dez|) alift
+       + ((|dex*aey|+|aex*dey|)|cez| + (|aex*cey|+|cex*aey|)|dez| + (|cex*dey|+|dex*cey|)|aez|) blift
+       + ((|aex*bey|+|bex*aey|)|dez| + (|bex*dey|+|dex*bey|)|aez| + (|dex*aey|+|aex*dey|)|bez|) clift
+       + ((|bex*cey|+|cex*bey|)|aez| + (|cex*aey|+|aex*cey|)|bez| + (|aex*bey|+|bex*aey|)|cez|) dlift
+  decided  iff  |det~| > (16 + 224 eps) eps perm,  and then sign (116.3) = sign det~            (116.3c)
+```
+
+The bound is valid only for this order of operations. The cofactor form in (116.3c) equals
+(116.3) identically. The supervisor's probe checked that on 3000 integer 5-point sets with
+rational arithmetic. It also checked both filters on 10^5 integer and 2*10^4 general f64
+near-degenerate configurations, and no decided case had the wrong sign.
+
+**The exact stage** evaluates the same cofactor formula in expansion arithmetic (Shewchuk 1997,
+section 2). An expansion is a sequence of f64 components. The components are nonoverlapping,
+in increasing magnitude, and none is zero. Its value is the exact sum of its components, and
+its sign is the sign of its last component. The empty expansion is 0. The building blocks:
+
+```
+Two-Sum(a, b):   x = a + b;  bv = x - a;  av = x - bv;  y = (a - av) + (b - bv);   a + b = x + y  exactly
+Two-Diff(a, b):  x = a - b;  bv = a - x;  av = x + bv;  y = (a - av) + (bv - b);   a - b = x + y  exactly
+Split(a):        c = (2^27 + 1)*a;  ahi = c - (c - a);  alo = a - ahi
+Two-Product(a, b):  x = a*b;  (ahi, alo) = Split(a);  (bhi, blo) = Split(b)
+                 y = alo*blo - (((x - ahi*bhi) - alo*bhi) - ahi*blo);              a*b = x + y  exactly   (116.3d)
+
+Grow(e, b):      q = b;  for each e_i in increasing order: (q, h_i) = Two-Sum(q, e_i), keep h_i if non-zero;
+                 finally keep q if non-zero.                                       The result sums exactly to e + b.
+Sum(e, f):       h = e;  for each f_j: h = Grow(h, f_j)
+Product(e, f):   h = 0;  for each f_j, for each e_i: (x, y) = Two-Product(e_i, f_j);  h = Grow(Grow(h, y), x)
+Difference:      a difference of two inputs is the expansion of Two-Diff (y first, then x, zeros dropped)  (116.3e)
+```
+
+`Grow` is Shewchuk's Grow-Expansion (his Theorem 10), and `Sum` is his Expansion-Sum built
+from it. A nonoverlapping input gives a nonoverlapping output, so the sign rule holds at every
+step. `Product` uses only `Grow`, so it needs no nonadjacency property. The returned value is
+the expansion's last component. Its sign is exact, and it is `0.0` exactly when the
+determinant is 0. When stage A decides, the returned value is `det~` itself.
+
+**The domain.** Shewchuk's guarantee assumes that nothing overflows or underflows. A
+sufficient condition for both predicates is that every coordinate is 0 or has a magnitude in
+`[2^-120, 2^120]`. Then every exact product is a multiple of `2^-860` and stays below
+`2^640`. Every coordinate of a mesh in metres lies in this domain.
+
+```
+in_exact_domain(x)  <=>  x == 0  or  2^-120 <= |x| <= 2^120                                  (116.3f)
+```
+
+`tetmesh::predicates::in_exact_domain` tests (116.3f). The predicates do not check it
+themselves, because they are the kernel's inner loop. The kernel's callers check their input
+once.
+
 ### 116.5 Symbolic perturbation: an `insphere` that is never zero
 
 **Implemented by TET-02** (`tetmesh/perturb.rs`).
@@ -35531,7 +35604,7 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | unit | gate | class |
 |---|---|---|
 | TET-00 | `tetmesh::tests::spec_round_trips_json`; the §80 xref audit; both builds | D |
-| TET-01 | for 10^5 near-degenerate integer configurations, the signs equal `i128` evaluation 100 %; cospherical lattice points give exactly 0; the same results under `single` | D |
+| TET-01 | for 10^5 near-degenerate integer configurations, at scales 1, 2^-40 and 2^40, the signs equal `i128` evaluation 100 %; cospherical and coplanar lattice points give exactly 0; for 2*10^4 near-degenerate general f64 configurations the signs equal a big-integer evaluation 100 %, and every transposition negates the sign; a decided stage A returns `det~`; the same results under `single` | D |
 | TET-02 | 0 zero results on a 10^3 lattice (10^6 sampled 5-point queries); `sign(swap) = -sign` for 10^5 random swaps | D |
 | TET-03a | locally Delaunay everywhere; symmetric adjacency; (116.5); (116.6) at relative 1e-12 on the lattice; no `orient3d = 0` | D, A |
 | TET-03b | 10^6 points in 15 s or less; 20 or fewer walk steps per insertion on average (supervisor run) | measured |
@@ -35555,11 +35628,14 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-15 | a 1 M-tet sphere in a box end to end in 120 s or less; bit-identical across 1, 4 and 8 threads | measured, D |
 | TET-18 | the drone surface passes §92.3; dihedral bounds and wall time recorded | measured |
 
-**Measured** (each unit appends its own rows; nothing is measured yet):
+**Measured** (each unit appends its own rows):
 
 | unit | quantity | value | commit |
 |---|---|---|---|
-| | | | |
+| TET-01 | 10^5 integer configurations (O1, O2, I1, I2, I3), at scales 1, 2^-40, 2^40: signs equal `i128` | 100 %; exact zeros 49 999, stage A undecided 53 415, of which 3 416 non-zero | the TET-01 commit |
+| TET-01 | 2*10^4 general f64 configurations (G1 orient3d, G2 insphere): signs equal the big-integer evaluation | 100 %; stage A undecided 4 886 and 5 037; the naive `det~` sign wrong 1 001 and 1 834 times | the TET-01 commit |
+| TET-01 | the f32 arm (`--features single`, `Scalar` 4 bytes), from outside the tree | the unit's 9 tests verbatim pass; an independent O1, I3 and lattice oracle (70 000 queries, 21 157 exact zeros) passes | the TET-01 commit |
+| TET-01 | the whole `tetmesh::` test filter, release | 15 tests in 0.59 s | the TET-01 commit |
 
 ### 116.19 References
 

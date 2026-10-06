@@ -39,6 +39,8 @@ use crate::error::Error;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod predicates;
+
 /// A vertex coordinate: `[f64; 3]` in both builds, whatever `Scalar` is
 /// (§116.2). Sizes and lengths are `f64` too; no `tetmesh` function takes
 /// or returns `Scalar`, except the emitter of §116.16.
