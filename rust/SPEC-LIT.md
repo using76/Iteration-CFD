@@ -35458,29 +35458,142 @@ h_min = size.min_size  if given,  else  H / 64                                  
 
 **Implemented by TET-05** (`tetmesh/surfprep.rs`).
 
-Each defect is refused **by name** before any meshing:
+The input is a `TetSurface`: `[f64; 3]` points, triangles as point indices, and a patch per
+triangle. `TetSurface::from_surface` widens a reader's `Surface` (§23.1) exactly, because every
+f32 and f64 value is an f64. Every test below is decided in f64 by the exact `orient3d` of
+§116.4, so it gives the same answer in both builds (class D, §116.2). The checks run in the
+order below, and the first one that fails refuses the run. Each refusal is `Error::Refused`,
+its message starts with the name in the first column, and it names the offending item by its
+index and its patch:
 
-1. **Not closed.** Every edge must be shared by exactly two triangles. This is
-   `Surface::require_closed` (§23.2), called, not re-implemented.
+| order | name | refuses |
+|---|---|---|
+| 0 | `surface/feature_angle_deg` | an angle that is not finite or not inside `(0, 180)` |
+| 1 | `surface/input` | no triangles, no patches, a point index or patch id out of range, a triangle that repeats a point index, a coordinate outside the exact domain (116.3f) |
+| 2 | `surface/degenerate` | a triangle whose f64 cross product `(x_1 - x_0) x (x_2 - x_0)` is exactly zero, or whose apex (116.13e) lies on its own plane |
+| 3 | `surface/closed` | an edge with one triangle (open) or three or more (non-manifold) |
+| 4 | `surface/orientation` | a manifold edge traversed in the same direction by both its triangles, or a shell with no consistent orientation |
+| 5 | `surface/inward` | a shell whose enclosed volume (116.13a) is not positive |
+| 6 | `surface/self-intersection` | two triangles that share no point and meet, or a fold at a shared edge |
+
+1. **Not closed.** Every undirected edge must be shared by exactly two triangles. This is the
+   test `Surface::require_closed` makes (§23.2), and the refusal says so by name. It is
+   re-derived here rather than called for two reasons. First, `Surface::edge_defects` counts a
+   flipped triangle's edges as non-manifold, and the orientation refusal below must name the
+   triangle instead. Second, `require_closed` passes under `-permissive`, whose fallback is
+   §23.3's parity voting. The tetrahedral path has no such fallback, so `-permissive` does
+   not apply to it. On the input of a `Surface`, the open count equals `edge_defects`'s, and
+   this unit's non-manifold count plus its same-direction count equals `edge_defects`'s
+   non-manifold count. A test holds that.
 2. **Not consistently oriented.** Each manifold edge `(u, v)` must be traversed as `u -> v` by
-   one of its triangles and `v -> u` by the other. The refusal names the triangle. The
-   enclosed volume must also be positive (outward normals), by the divergence theorem:
+   one of its triangles and as `v -> u` by the other. A **shell** is a connected component of
+   triangles joined across edges. Give each shell's lowest-numbered triangle parity 0, and
+   propagate parity across each edge: equal across an opposite-direction edge, different
+   across a same-direction edge. If two paths give a triangle different parities, the shell
+   is non-orientable, and the refusal names it. Otherwise the smaller parity class is the
+   flipped set; on a tie, it is the class without the lowest triangle. The refusal names the
+   flipped set's lowest triangle and gives the set's size. Shells are numbered in the order of
+   their lowest triangle. The enclosed volume of each shell must also be positive (outward
+   normals), by the divergence theorem:
 
 ```
 V_enclosed = (1/6) sum_t x_0(t) . ( x_1(t) x x_2(t) )  > 0                                 (116.13)
+
+V_s = (1/6) sum_{t in s} (x_0(t) - o_s) . ( (x_1(t) - o_s) x (x_2(t) - o_s) ),
+      o_s = the first point of shell s's lowest triangle                                   (116.13a)
 ```
 
-3. **Self-intersecting.** No two non-adjacent triangles may intersect. This uses Möller's
-   (1997) interval test, run over the existing `surface` bounding-volume hierarchy. The refusal names the pair.
+   (116.13a) is (116.13) for one shell, taken about a point of that shell. On a closed shell
+   the sum does not depend on the origin, and the shifted form keeps the terms small far from
+   the coordinate origin, which is the local-origin rule of docs/17 §5.1.7. A cavity shell,
+   whose normals point into the cavity, has `V_s < 0` and is refused in this unit.
 
-Features are extracted the same way as on the hex path:
+3. **Self-intersecting.** Two triangles that share no point must not meet. The sets are
+   closed, so touching counts as meeting. For `T_1 = (a_1, b_1, c_1)` and `T_2`, the test
+   starts with Möller's (1997) plane rejection, with each signed distance replaced by the
+   exact sign of `orient3d` (116.1):
+
+```
+d_1(v) = sign orient3d(a_2, b_2, c_2, v),  v in T_1;     d_2(v) = sign orient3d(a_1, b_1, c_1, v),  v in T_2
+T_1 and T_2 are disjoint if all three d_1 are +1, or all three are -1, or the same holds for d_2   (116.13b)
+```
+
+   If every `d_1` is 0, the triangles are coplanar, and (116.13e) decides. Otherwise,
+   Möller's interval comparison on the line `L` where the two planes meet is replaced by an
+   exact equivalent. `T_1 ∩ L` and `T_2 ∩ L` are segments. An endpoint of their overlap is an
+   endpoint of one of them, and that is a point of an edge of `T_1` lying in `T_2`, or of an
+   edge of `T_2` lying in `T_1`. So:
+
+```
+T_1 ∩ T_2 != {}  <=>  some edge of T_1 meets T_2, or some edge of T_2 meets T_1            (116.13c)
+```
+
+   An edge whose two end points both lie on the other triangle's plane is skipped. Such an
+   edge lies on `L`, and the endpoint argument above finds the overlap through the other edges,
+   each of which crosses the plane. The segment `[p, q]` meets the triangle `(a, b, c)`
+   (closed, not coplanar with it) when:
+
+```
+s_p = sign orient3d(a, b, c, p),  s_q = sign orient3d(a, b, c, q);   s_p = s_q = 0 -> skipped
+s_p = s_q != 0 -> no;  otherwise yes iff the three signs of
+   orient3d(p, q, a, b),  orient3d(p, q, b, c),  orient3d(p, q, c, a)
+are all >= 0 or all <= 0                                                                   (116.13d)
+```
+
+   **Coplanar triangles.** Lift a point `w` off the common plane, and use `orient3d` against
+   it as the exact in-plane orientation. Every in-plane test of one pair uses the same `w`, so
+   the signs agree with each other:
+
+```
+n = (b - a) x (c - a)  (in f64),    L_e = the longest edge of (a, b, c),    w = a + (L_e / |n|) n
+o_w(x, y, z) = sign orient3d(x, y, z, w)
+coplanar T_1, T_2 meet iff some edge of T_1 meets some edge of T_2, or a vertex of one lies
+in the other, with w = the apex of T_2                                                     (116.13e)
+```
+
+   Two coplanar segments `[p, q]` and `[r, s]` meet if neither pair of signs
+   `o_w(p, q, r), o_w(p, q, s)` and `o_w(r, s, p), o_w(r, s, q)` is the same non-zero sign.
+   If all four are 0, the segments are collinear, and they meet iff their coordinate intervals
+   overlap on the axis where `|q - p|` has its largest component. A point `x` lies in `(a, b, c)`
+   iff `o_w(a, b, x), o_w(b, c, x), o_w(c, a, x)` are all `>= 0` or all `<= 0`. The apex is a
+   point, not a construction: any `w` off the plane gives the same signs, so its rounding
+   costs nothing. If `orient3d(a, b, c, w) = 0`, the triangle is refused as degenerate (order 2).
+
+   **Triangles that share an edge** `(u, v)`, with opposite points `a` and `b`, meet beyond it
+   only when they fold onto each other:
+
+```
+fold(u, v, a, b)  <=>  orient3d(u, v, a, b) = 0  and  o_w(u, v, a) o_w(u, v, b) > 0,  w = the apex of (u, v, a)   (116.13f)
+```
+
+   **Triangles that share exactly one point** are not tested in this unit. They are counted
+   and reported. A test that is exact at a shared point needs its own case analysis, and it is
+   left to a later unit, which docs/17 TET-05's report lists.
+
+   **The broad phase** is a sweep over the f64 bounding boxes of the triangles. It sorts on
+   the axis of the surface's largest extent (ties to the lowest axis), and a pair of boxes is a
+   candidate when the boxes overlap as closed boxes on all three axes. The candidate set is the
+   brute-force set exactly, so the result does not depend on the sweep. §116.9 first named the
+   `surface` bounding-volume hierarchy for this. The tree's `Bvh` answers only point-radius
+   queries and is `Scalar`-typed, which §116.2 rules out here, so the sweep replaces it. The
+   refusal counts every meeting pair, folds included, and names the lowest pair `(i, j)`,
+   `i < j`.
+
+Features are extracted the same way as on the hex path, in f64:
 
 - feature edges by (92.34), with the angle `refinement.feature_angle_deg`;
-- corners by (92.35);
-- patch seams, an edge whose two triangles carry different patches.
+- patch seams, an edge whose two triangles carry different patches, which join the set `F` of
+  (92.34) before the corners are found;
+- corners by (92.35), on that joined set;
+- polylines chained as §92.12 states (from each corner in increasing order; a corner-free cycle
+  is closed and cut at its lowest point; sorted by their first two points).
 
-These become the polylines and fixed points that §116.10 and §116.11 hold. On a cube there
-are 12 polylines and 8 corners.
+On a surface with a single patch, the edges, corners and polylines equal those of
+`automesher::features::extract`, and a test holds that. These become the polylines and fixed
+points that §116.10 and §116.11 hold. On a cube there are 12 polylines and 8 corners. On a
+16-sided capped cylinder with one patch there are 32 feature edges, 2 closed polylines and no
+corners. If its side is split at mid-height into two patches, there are 48 feature edges, of
+which 16 are seam edges, 3 closed polylines and no corners.
 
 ### 116.10 Surface remeshing
 
@@ -35791,6 +35904,14 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-04a | 10^4 pairs, `t` from 1e-4 to 0.2: the largest `abs(h(a) - h(b)) / ((g-1) abs(a-b))` | 0.99990 (TET-04b's gate measures it properly) | the TET-04a commit |
 | TET-04a | the f32 arm (`--features single`), from outside the tree | the unit's 11 tests compiled in a crate whose `Scalar` is 4 bytes pass with identical printed numbers; an independent oracle (200 point sources and a box at a 1.2*10^4 m offset, 5*10^4 probes) gives relative error 0 and bit equality with `h_brute` | the TET-04a commit |
 | TET-04a | the whole `tetmesh::` test filter, release | 32 tests in 3.53 s | the TET-04a commit |
+| TET-05 | the refusals, each by name (§116.9's table) | open box: `surface/closed`, 4 open and 0 non-manifold edges, first edge (4, 5) of triangle 5; a cube with a 13th triangle: 1 open, 2 non-manifold; a cube with triangle 5 flipped and a level-3 icosphere with triangle 37 flipped: `surface/orientation` naming that triangle, 1 flipped; an inverted cube: `surface/inward`, shell 0; the 6-point projective plane: non-orientable; two crossing boxes: `surface/self-intersection`, 12 pairs, first (2, 16); two boxes touching face to face: 18 pairs, first (2, 12) | the TET-05 commit |
+| TET-05 | features (the plan's bar: cube 12 polylines, 8 corners) | cube: 12 feature edges, 12 polylines, 8 corners; with six patches the same, every edge a seam; 16-sided capped cylinder: 32 edges, 2 closed polylines, 0 corners; split at mid-height into two patches: 48 edges, 16 seams, 3 closed polylines, 0 corners; edges, polylines and corners equal `features::extract` on the cube, the cylinder and the level-3 icosphere | the TET-05 commit |
+| TET-05 | `tri_tri_intersect` against the supervisor's separating-axis oracle (exact integers; outside the tree) | integer streams A, B and C (the last all coplanar), 10^5 pairs each: 29 874, 38 875 and 60 197 meeting pairs, equal to the oracle; the same counts after the map `c 2^-30 + 1024`; symmetric and unchanged by a rotation of one triangle and a reversal of the other on every pair of A. Supervisor's stream E, 4*10^4 near-coplanar f64 pairs (exact Fractions): 9 966 and 10 423, equal | the TET-05 commit |
+| TET-05 | the broad phase | the swept candidate set equals the brute-force set on every fixture; a level-5 icosphere (20 480 triangles, 1 368 tested pairs, 92 130 vertex-sharing pairs not tested) is prepared in 45 ms release | the TET-05 commit |
+| TET-05 | the first run's one failure | the sweep recorded pairs in sweep order, so the refusal named `(16, 2)`; the exact expected `(2, 16)` caught it, and pairs are now stored as `(min, max)` | the TET-05 commit |
+| TET-05 | the TET-00 follow-up: `TetSpec::validate` and §116.3's "or non-finite" | `+inf` was accepted for `size.gradation`, `refine.radius_edge` and `layers.max_neighbour_ratio` (a supervisor probe failed on all three); each is now refused by name, `tetmesh::tests::spec_refuses_non_finite_bounds` | the TET-05 commit |
+| TET-05 | the f32 arm (`--features single`), from outside the tree | the unit's 11 tests compiled in a crate whose `Scalar` is 4 bytes pass with identical printed numbers, stream E included; the f64 build's SASS is identical on all 43 cubins | the TET-05 commit |
+| TET-05 | the whole `tetmesh::` test filter, release | 44 tests in 4.80 s | the TET-05 commit |
 
 ### 116.19 References
 

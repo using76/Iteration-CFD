@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 pub mod predicates;
 pub mod perturb;
 pub mod sizefield;
+pub mod surfprep;
 
 /// A vertex coordinate: `[f64; 3]` in both builds, whatever `Scalar` is
 /// (§116.2). Sizes and lengths are `f64` too; no `tetmesh` function takes
@@ -308,7 +309,7 @@ impl TetSpec {
     /// the field and the value. Every comparison is written so a NaN fails
     /// each check it can reach.
     pub fn validate(&self) -> crate::error::Result<()> {
-        if !(self.size.gradation >= 1.0) {
+        if !(self.size.gradation >= 1.0 && self.size.gradation.is_finite()) {
             return Err(Error::Mesh(format!(
                 "tet.size.gradation: must be >= 1, got {}",
                 self.size.gradation
@@ -336,7 +337,7 @@ impl TetSpec {
             ));
         }
 
-        if !(self.refine.radius_edge >= 2.0) {
+        if !(self.refine.radius_edge >= 2.0 && self.refine.radius_edge.is_finite()) {
             return Err(Error::Mesh(format!(
                 "tet.refine.radius_edge: must be >= 2 (Shewchuk 1998's termination bound, SPEC-LIT §116.13), got {}",
                 self.refine.radius_edge
@@ -367,7 +368,8 @@ impl TetSpec {
             )));
         }
 
-        if !(self.layers.max_neighbour_ratio >= 1.0) {
+        if !(self.layers.max_neighbour_ratio >= 1.0 && self.layers.max_neighbour_ratio.is_finite())
+        {
             return Err(Error::Mesh(format!(
                 "tet.layers.max_neighbour_ratio: must be >= 1, got {}",
                 self.layers.max_neighbour_ratio
@@ -673,5 +675,37 @@ mod tests {
             let quoted = format!("{}{}{}", '"', name, '"');
             assert!(schema.contains(&quoted), "schema lacks {}", name);
         }
+    }
+
+    #[test]
+    fn spec_refuses_non_finite_bounds() {
+        {
+            let mut s = TetSpec::default();
+            s.size.gradation = f64::INFINITY;
+            let err = s.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("tet.size.gradation"),
+                "not refused by name: {err}"
+            );
+        }
+        {
+            let mut s = TetSpec::default();
+            s.refine.radius_edge = f64::INFINITY;
+            let err = s.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("tet.refine.radius_edge"),
+                "not refused by name: {err}"
+            );
+        }
+        {
+            let mut s = TetSpec::default();
+            s.layers.max_neighbour_ratio = f64::INFINITY;
+            let err = s.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("tet.layers.max_neighbour_ratio"),
+                "not refused by name: {err}"
+            );
+        }
+        assert!(TetSpec::default().validate().is_ok());
     }
 }
