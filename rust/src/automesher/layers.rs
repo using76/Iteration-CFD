@@ -762,9 +762,9 @@ pub fn local_step(
 
 /// (92.73): steps one ladder may take on one patch set in face mode before
 /// (92.47)'s patch rule. This project's own number, like `BETA_RUNG_LIMIT`;
-/// 12 was not enough for the full-size F1 tunnel's body, whose ladder spent
+/// 12 and then 24 were not enough for the full-size F1 tunnel's body, whose ladder spent
 /// its steps on the same squeezed cells the freeze now holds.
-pub const TERMINATE_STEP_LIMIT: usize = 24;
+pub const TERMINATE_STEP_LIMIT: usize = 48;
 
 /// (92.73): the OUTER ladder's per-patch-set state - every counter the
 /// ladder runs on one patch set, and the M and X face marks it carries into

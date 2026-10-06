@@ -26784,7 +26784,7 @@ built on that midpoint. Closed, its parents are anchored (or non-layer
 boundary points, which never move), and the forced zero IS the mean.
 
 The step limit and `theta_U` are this project's choices, not readings of the
-specification: 24 bounds a monotone ladder — every step moves at least one
+specification: 48 bounds a monotone ladder — every step moves at least one
 face into M or X, or one cap down or to zero, or freezes, halves or anchors
 at least one point, and the inner pass path zeroes its own thin points — and
 15 degrees is the angle the reduced F1 tunnel reads its 29 wheel ground
@@ -26793,7 +26793,10 @@ full-size F1 tunnel, whose body patch spent twelve steps halving and
 anchoring the wall points of two or three squeezed cells while the interior
 relaxation kept moving those cells from their neighbours, and then dropped
 the whole patch for them; the freeze spends a step on holding such a cell
-whole instead, and the limit only has to outlast the steps it needs.
+whole instead, and the limit only has to outlast the steps it needs. 24
+was not enough either: with the owner-height limiter of (92.45') the full-size body's
+inner ladder still raised G2 from 3 to 91 failing cells over its first twelve steps and
+brought it back to 41-46 by step 24, where the patch was dropped; the limit is 48.
 
 The report says what the mode did: a layer patch's row carries
 
