@@ -34914,3 +34914,1132 @@ House items: no numerics change, no new file, no kernel, no capture row, no
 gate; the library gains one ignored test (2150 listed).
 
 ---
+
+## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §128-§133 to
+the chemistry core of tranche 17. This section and the five after it were written by
+CHR-00a as contracts. No code cites them yet. CHR-01 to CHR-12b implement them,
+and each of those units amends its own section in place when it lands.
+
+**A note on what "read" means in §128-§133.** Each section lists its sources
+and says which ones this unit actually read, and where. A DOI listed and marked
+*not read* was checked on Crossref (title, authors, journal, volume and pages
+agree with the citation). Its text was not available here: OpenAlex lists it as
+closed, and no open copy was found. Every equation below is stated from a
+source marked **read**. An equation whose only primary is closed carries the
+DOI and says so, and the unit that implements it is told what it must obtain.
+Recalled numbers are not written down: no coefficient, constant or table entry
+below comes from memory (the precedent is `PROVENANCE.md`'s Martin & Moyce
+note).
+
+**Sources.**
+
+* **McBride, Gordon & Reno**, *Coefficients for Calculating Thermodynamic and
+  Transport Properties of Individual Species*, NASA TM-4513 (October 1993),
+  NTRS 19940013151 (`ntrs.nasa.gov/citations/19940013151`). A US-Government
+  work, and NTRS records it as cleared for public use. **Read**: eqs. (1)-(3),
+  the symbol list, the fitting notes and the transport section. Table II holds
+  the seven-coefficient records for every species §130's mechanisms need, on
+  200-1000-6000 K. The PDF's text layer is OCR and is corrupt in places
+  (`Z.66693956E-11`, `B.97226656E+03` and `O.G` where the page image shows
+  2, 8 and 0). A record is therefore transcribed from the page image, never
+  from the text layer (§128.6).
+* **Kee, Rupley & Miller**, *Chemkin-II*, Sandia report SAND89-8009
+  (September 1989), OSTI 5681118, DOI 10.2172/5681118. US-Government work.
+  **Read**: Chapter II eqs. (1)-(47) and Chapter IV's thermodynamic data rules,
+  Table III.
+* **McBride, Zehe & Gordon**, NASA/TP-2002-211556, NTRS 20020085330. Already
+  §100's source and the answer key of `reference/nasa-glenn2002`. It is the
+  nine-coefficient form, used here only as the independent check of §128.6.
+
+### 128.1 One species
+
+The seven-coefficient form is TM-4513 eq. (1) with `r = 5` exponents
+`q = 0, 1, 2, 3, 4`. It is SAND89-8009 eq. (19), with the two integration
+constants of TM-4513 eqs. (2) and (3), which SAND89-8009 writes as eqs. (20)
+and (21):
+
+```
+cp_k / R = a1 + a2 T + a3 T^2 + a4 T^3 + a5 T^4                                  (128.1)
+H_k / (R T) = a1 + a2 T/2 + a3 T^2/3 + a4 T^3/4 + a5 T^4/5 + a6/T                (128.2)
+S_k / R = a1 ln T + a2 T + a3 T^2/2 + a4 T^3/3 + a5 T^4/4 + a7                   (128.3)
+G_k / (R T) = H_k/(R T) - S_k/R                                                  (128.4)
+```
+
+The quantities are molar and at the standard state. `a6 = b1` and `a7 = b2`
+are TM-4513's integration constants. `H` contains the heat of formation:
+TM-4513 eq. (4) assigns `H(298.15) = 0` to the reference elements and eq. (5)
+gives `H(298.15) = Δf H(298.15)` for every species. That is the "assigned
+enthalpy" convention, so `Σ ν H` over a reaction is its heat of reaction
+directly ((130.6)).
+
+**Two coefficient sets.** Each set is valid on its own interval:
+`[T_low, T_mid]` for the lower set and `[T_mid, T_high]` for the upper.
+This is how the evaluation picks a set, the same rule as §100's series:
+
+```
+set(T) = lower   if T_low <= T <= T_mid
+         upper   if T_mid <  T <= T_high
+         refused (by name: species, T, [T_low, T_high])  otherwise               (128.5)
+```
+
+**A thermochemistry curve is not extrapolated** (§100's rule). TM-4513 notes
+that CET89 allows 20 % extrapolation. This crate does not, because an
+extrapolated `cp` inside a stiff integration can blow up without anyone
+noticing (§132.4 counts each refusal). At `T_mid` the two sets agree to the
+fit constraint (TM-4513 "Least-Squares Fit", item (3)). CHR-01's
+`thermo_ranges_meet_at_tmid` holds them to `1e-6` relative in `cp`, `H` and
+`S`, class P (§128.7).
+
+Also needed: `cv_k = cp_k - R`, `U_k = H_k - R T`, and the per-mass forms
+divided by `W_k` (SAND89-8009 eqs. (22)-(32)).
+
+### 128.2 Molar mass from the elements, not from input
+
+`W_k = Σ_e a_ek W_e`. Here `a_ek` is the integer count of element `e` in
+species `k`, from the record's formula columns (§129.3), and `W_e` is the
+element's atomic weight. **`W_k` is never read as an input number.**
+(130.7)'s mass identity `Σ_k W_k omega_k = 0` holds to round-off only if every
+`W_k` is built from the same `W_e` that the element balance uses.
+
+SAND89-8009 keeps its atomic weights inside the Interpreter and never prints
+them. The table used here is the one TM-4513 used (IUPAC 1991, De Laeter &
+Heumann, cited in TM-4513), in g/mol:
+
+| element | H | C | N | O | Ar | He |
+|---|---|---|---|---|---|---|
+| `W_e` | 1.00794 | 12.011 | 14.00674 | 15.9994 | 39.948 | 4.002602 |
+
+**How the table was checked.** It reproduces TM-4513 Table II's printed
+molecular weights of `H2` (`2.01588`), `CO` (`28.01040`), `N2` (`28.01348`)
+and `CH4` (`16.04276`) to every printed digit. Those four records were read
+from the text layer and agree with their page images. `Ar` and `He` are the
+IUPAC 1991 values TM-4513 states it used, and CHR-01's test confirms them
+against the `Ar` record. An isotope or a non-listed element must be given its
+weight in the ELEMENTS block (§129.2). Otherwise it is refused by name.
+
+### 128.3 The mixture
+
+These are SAND89-8009 eqs. (3), (6), (9), (34), (38) and (41), with
+`p_ref` as §128.4 sets it:
+
+```
+W = ( Σ_k Y_k / W_k )^-1                 X_k = Y_k W / W_k                       (128.6)
+cp = Σ_k Y_k cp_k / W_k                  h = Σ_k Y_k H_k / W_k                   (128.7)
+s_k = S_k - R ln X_k - R ln(p / p_ref)   (X_k > 0; a species with X_k = 0 adds 0) (128.8)
+[X_k] = rho Y_k / W_k = p X_k / (R T)                                            (128.9)
+```
+
+In (128.7) `cp` and `h` are per unit mass. `[X_k]` is the molar
+concentration that §130 uses.
+
+### 128.4 The standard pressure is a property of the data, not of the code
+
+TM-4513 tabulates at `p0 = 10^5 Pa` (its "Standard States" section).
+SAND89-8009 tabulates at 1 atm ("the standard-state 1 atmosphere", its eq.
+(14)) and evaluates `K_c` against `P_atm` ((130.6)). For an ideal gas only `S`
+and `G` depend on that choice:
+
+```
+S_k(1 atm) = S_k(1 bar) - R ln(101325 / 100000)        cp_k, H_k unchanged       (128.10)
+```
+
+**The rule.** A thermo set carries its `p_ref`. A CHEMKIN-format file is
+1 atm by format. A set transcribed from TM-4513 or TP-2002 is 1 bar and is
+converted by (128.10) to the set's declared `p_ref` when it is read. The
+kinetics of §130 and the equilibrium of §131 use the one `p_ref` of the set
+they were given. A mechanism with no `p_ref` mismatch inside it moves no
+number by this rule. The rule exists because a silent 1-bar/1-atm mix moves
+every `K_c` by `(1.01325)^(Δν)`, which no conservation test would catch.
+
+### 128.5 Gas constant
+
+`R = 8.314462618 J/(mol K)`, the CODATA 2018 value, which is exact since the
+2019 SI redefinition fixed both `N_A` and `k`. TM-4513's coefficients were
+generated with `8.314510` (its constants table). The two differ by
+`5.8e-6` relative, below every tolerance in §128.7. They are not reconciled,
+and the difference is stated here so that nobody tries to.
+
+### 128.6 Where the coefficients come from (answer keys and data)
+
+* **The data a test uses** comes from TM-4513 Table II. A record is
+  transcribed from the page image, with its page number as provenance, and
+  checked three ways: the continuity of `cp`, `H` and `S` at 1000 K to the
+  printed precision (the fit constraint); `cp(298.15)` against
+  TP-2002-211556 Table B1; and `W_k` against the record's printed molecular
+  weight (§128.2). CHR-00c owns this transcription.
+* **GRI-Mech 3.0's `thermo30.dat`** is not vendored (§129.6). A case points
+  at a file the user supplies.
+
+### 128.7 What CHR-01 must make true (gate rows, with precision class)
+
+The thermo host twin is written in `f64` types (not `Scalar`), so every row
+below runs unchanged in both builds and carries one tolerance (docs/17
+§5.1.4).
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `thermo_cp_matches_nasa_table_b1` | `cp(298.15)` of N2, O2, CH4, CO2, H2O, CO, H2, OH (TM-4513 records) against TP-2002 Table B1 | 0.1 % (the fit difference between the seven- and nine-coefficient forms, plan row) | P |
+| `thermo_h_is_heat_of_formation` | `H(298.15)` against Table B1's `Δf H` | 10 J/mol | P |
+| `thermo_ranges_meet_at_tmid` | `cp`, `H`, `S` from both sets at `T_mid` | 1e-6 relative | P |
+| `thermo_out_of_range_is_refused` | `T` outside `[T_low, T_high]` | error naming species, `T` and range | D |
+| `thermo_molar_mass_from_elements` | `W_k` of the eight species against TM-4513's printed weights | printed digits | D |
+
+Labels: (128.1)-(128.10).
+
+---
+
+## 129. Reading a CHEMKIN mechanism — the format, what it means, and what is refused by name
+
+`No GPL-licensed source was consulted.`
+
+**Sources.**
+
+* **Kee, Rupley & Miller**, *Chemkin-II*, SAND89-8009 (1989), OSTI 5681118,
+  DOI 10.2172/5681118. **Read**: Chapter IV, Tables I-V, Figures 4-8.
+* **Kee, Rupley, Meeks & Miller**, *CHEMKIN-III: A FORTRAN Chemical Kinetics
+  Package for the Analysis of Gas-Phase Chemical and Plasma Kinetics*, Sandia
+  report SAND96-8216 (May 1996), OSTI 481621, DOI 10.2172/481621.
+  US-Government work. **Read**, from page images (the PDF has no text layer):
+  pp. 46-54, "Reaction Mechanism Description" through Figure 12. **The plan
+  cited CHEMKIN-II alone, which is not enough.** Three things the authored
+  mechanisms need exist only in CHEMKIN-III: non-integer stoichiometric
+  coefficients (p. 47: "non-integer coefficients are allowed in CHEMKIN-III,
+  but the element balance in the reaction must still be maintained"), FORD and
+  RORD (p. 52), and the per-reaction UNITS keyword with its KJOU descriptor
+  (p. 52). CHEMKIN-II says "a non-integer coefficient is not allowed" (its
+  Reaction Data rules) and has none of the three.
+
+PROVENANCE category: **format**. A file format is not a work of authorship,
+and the reader is written from the two manuals' rules, never from any reader's
+code.
+
+### 129.1 The file
+
+A mechanism is plain text in four blocks, in this order: `ELEMENTS` (`ELEM`),
+`SPECIES` (`SPEC`), an optional `THERMO` (`THER`, or `THERMO ALL`), and
+`REACTIONS` (`REAC`). Each block ends at `END` or at the next block keyword.
+Keywords are case-insensitive. A `!` begins a comment that runs to the end of
+the line, and blank lines are ignored (SAND89-8009 Tables I, II and IV).
+Thermo may also come from a separate file in the THERMO format (SAND89-8009
+Case 1/2/3; GRI ships its thermo separately). A species in a reaction must
+be declared in `SPECIES` and have a thermo record. Missing either one is
+refused, naming the species and the line.
+
+### 129.2 Elements and species
+
+The ELEMENTS and SPECIES rules are SAND89-8009 Tables I and II:
+
+* An element is a one- or two-character symbol. An isotope or an overridden
+  weight is written `D /2.014/`.
+* A species name is up to 16 characters. It may not begin with a digit, `+`
+  or `=`, and may end in any number of `+` or `-` (ions).
+* A duplicated element or species declaration is ignored, as the manual says.
+  The reader still reports it as a note.
+
+**Refused by name:** the electron `E`, and any ion. A charged species needs
+the plasma machinery of SAND96-8216 Chapter II, which this crate does not
+have.
+
+### 129.3 THERMO records
+
+The record layout is SAND89-8009 Table III:
+
+| line | content | format | columns |
+|---|---|---|---|
+| 2 (`THERMO ALL` only) | lowest T, common T, highest T | 3F10.0 | 1-30 |
+| 3 | species name | 18A1 | 1-18 |
+|   | date (unused) | 6A1 | 19-24 |
+|   | formula: 4 x (element symbol, count) | 4(2A1,I3) | 25-44 |
+|   | phase S/L/G | A1 | 45 |
+|   | T_low / T_high | E10.0 / E10.0 | 46-55 / 56-65 |
+|   | T_mid (blank: line 2's) | E8.0 | 66-73 |
+|   | a fifth (element, count) | 2A1,I3 | 74-78 |
+|   | the integer 1 | I1 | 80 |
+| 4 | a1-a5, upper interval | 5E15.0 | 1-75; `2` in 80 |
+| 5 | a6, a7 upper; a1, a2, a3 lower | 5E15.0 | 1-75; `3` in 80 |
+| 6 | a4-a7, lower interval | 4E15.0 | 1-60; `4` in 80 |
+
+**The upper interval comes first.** TM-4513 says the same of its own Table II
+("the first seven coefficients are for the higher temperature range"), so one
+reader serves both.
+
+**A discrepancy in the source, stated.** SAND89-8009's prose says the default
+common temperature is "given in columns 21-30 of line 2". Its own Table III
+puts line 2 in the order lowest, common, highest, which makes columns 11-20 the
+common temperature. Every file read here follows Table III: GRI's `thermo30.dat`
+line 2 is `300.000 1000.000 5000.000`. **Table III is followed.**
+
+**Fixed columns are read as fixed columns.** Tokens are not split on
+whitespace, because two adjacent E15 fields may touch (`0.10139743E-02-0.0...`
+in Figure 6). A record whose card numbers 1-4 do not appear in column 80 is
+refused, naming the species and the line.
+
+The phase must be `G`. A condensed species (`S`, `L`) is refused by name: §131
+is gas-phase only.
+
+### 129.4 Reaction lines
+
+The rules are SAND89-8009 Table IV and SAND96-8216 pp. 47-49.
+
+* **Two fields.** The reaction text comes first, then exactly three numbers
+  `A`, `β`, `E` in that order (§130.2).
+* **Delimiters.** `=` and `<=>` mean reversible; `=>` means irreversible.
+* **Coefficients.** A species may carry a leading coefficient. It is an
+  integer in CHEMKIN-II and an integer or real in CHEMKIN-III.
+* **Third bodies.** `+M` is a third body. `(+M)` marks pressure dependence,
+  and `(+SPECIES)` marks a specific collider.
+* **Exact element balance.** A coefficient is a decimal string, so it is
+  parsed into an **exact rational**: `0.5` is `1/2` and `1.5` is `3/2`.
+  Element balance `Σ_k a_ek (ν''_ki - ν'_ki) = 0` must then hold **exactly**
+  for every element of every reaction. It is a rational identity, not a
+  floating-point one. A reaction that misses is refused, naming the line, the
+  element and the residual as a fraction. This is how the plan's "element
+  balance exact (integer)" stays exact once CHEMKIN-III allows `0.5 O2`.
+* **Real-valued stoichiometry.** The floating-point `ν` used by §130 is the
+  rational rounded once.
+
+**The REACTIONS line's unit keywords.** They set the defaults for every
+reaction that follows.
+
+* **For `E`.** CHEMKIN-II lists `CAL/MOLE` (the default), `KCAL/MOLE`,
+  `JOULES/MOLE` and `KELVINS`. CHEMKIN-III adds `EVOLTS`.
+* **For `A`.** `MOLES` (the default) or `MOLECULES`.
+* **`KJOULES/MOLE`** is in neither manual. It appears in later commercial
+  files. It is accepted as a stated **DESIGN extension** meaning
+  `1000 J/mol`, consistent with SAND96-8216's per-reaction `KJOU` descriptor
+  (p. 52), and the reader's report names it as an extension. This keeps the
+  plan's `ck_units_keywords` test, which names it.
+* **Precedence.** A per-reaction `UNITS /.../` with `MOLE(CULE)`, `CAL`,
+  `KCAL`, `JOUL`, `KJOU`, `KELV(IN)` or `EVOL(TS)` overrides the block default
+  for its reaction (SAND96-8216 p. 52).
+
+### 129.5 Auxiliary keywords — what is read and what is refused
+
+| keyword | meaning | source | status |
+|---|---|---|---|
+| `SPECIES / alpha /` | enhanced third-body efficiency, (130.3) | CK-II p. 40 | read |
+| `LOW / A0 β0 E0 /` | low-pressure limit, (130.8) | CK-II p. 40 | read |
+| `TROE / a T*** T* [T**] /` | Troe blending, (130.9)-(130.11) | CK-II p. 40 | read |
+| `SRI / a b c [d e] /` | SRI blending, (130.12); `d = 1`, `e = 0` if omitted | CK-II p. 40 | read |
+| `REV / A β E /` | explicit reverse rate, overrides (130.5) | CK-II pp. 40-41 | read |
+| `DUP` / `DUPLICATE` | permitted duplicate; required on EVERY copy | CK-II p. 41, CK-III p. 53 | read |
+| `FORD / SPECIES order /`, `RORD / ... /` | override `ν'` / `ν''` in the rate law, (130.13) | CK-III p. 52 | read |
+| `UNITS / ... /` | per-reaction units | CK-III p. 52 | read |
+| `HIGH` | chemically activated bimolecular (`(+M)` with the high limit given) | CK-III p. 50 | **refused by name** (v1; no mechanism in this tranche needs it) |
+| `LT`, `RLT` | Landau-Teller | CK-II p. 41 | **refused by name** |
+| `JAN`, `FIT1` | alternative rate fits | CK-III p. 51 | **refused by name** |
+| `HV` | photon | CK-II p. 38 | **refused by name** |
+| `TDEP`, `EXCI`, `MOME`, `XSMI` | plasma options | CK-III pp. 51-52 | **refused by name** |
+| `PLOG`, `CHEB` | pressure-dependent rate tables | in neither manual (commercial-era extensions) | **refused by name** |
+| any other keyword | — | — | **refused**, naming the line and the recognised set |
+
+**Duplicates.** Two reactions with the same reactants and products, both
+directions considered, are an error unless both carry `DUP`. A `DUP` with no
+twin is also an error. This follows the manuals' rule that "duplicate
+reactions are normally considered errors".
+
+**A reaction with `FORD` or `RORD` that is reversible and has no `REV`** is
+accepted with CHEMKIN-III's meaning: the orders override `ν'` and `ν''` in
+(130.2), and `k_r` still comes from (130.5). The reader's report flags it,
+because the resulting reverse rate is not consistent with equilibrium
+(§130.5). A NIST note on the same Jones-Lindstedt reaction states the problem
+in its own words. It is in FDS's public-domain verification input
+`Verification/Species/reactionrate_arrhenius_jones_lindstedt.fds` (firemodels/fds
+`e14ec3f`): the paper "suggests that Reaction R3 is reversible with custom
+reaction orders ... However, it does not specify how to calculate the reverse
+reaction rate." The authored JL4 file (§129.6) writes what the paper writes,
+and the flag is how a reader knows.
+
+### 129.6 Mechanisms: what is authored, what is user-supplied, and the licence decision
+
+**Authored here as data, from the papers.** These are WD1 (Westbrook &
+Dryer, *Combust. Sci. Technol.* 27 (1981) 31-43, DOI
+10.1080/00102208108946970), JL4 (Jones & Lindstedt, *Combust. Flame* 73 (1988)
+233-249, DOI 10.1016/0010-2180(88)90021-1) and BFER2 (Franzelli, Riber,
+Gicquel & Poinsot, *Combust. Flame* 159 (2012) 621-637, DOI
+10.1016/j.combustflame.2011.08.004). All three DOIs were checked on Crossref.
+**All three papers are closed (OpenAlex), and none was read by this unit.**
+
+A mechanism file's rate parameters are numbers from a paper. They are
+transcribed only from a read copy, with its table and page as provenance, and
+never recalled. CHR-02a's tests that do not need the numbers can run before
+that copy exists: parsing, element balance, units, refusals. A test that needs
+a rate number waits for the copy. The reader is told, not given an invented
+parameter. This is a request to the supervisor (CHR-00a's report).
+
+**GRI-Mech 3.0 and DRM19: the licence decision, with the text quoted.** Both
+were fetched on 2026-10-06 over plain HTTP, because the host's TLS certificate
+does not cover `combustion.berkeley.edu`, and read whole.
+
+* **`readme30.dat`** (sha256 `c13ee9c2ce3ab7651e841876a1637c54e9a69413096af1bad722079ed236acb8`)
+  contains **no licence, no copyright statement and no grant of permission to
+  redistribute**. What it contains is a disclaimer:
+
+  > LEGAL NOTICE These files, both the ones intended for use as computer input
+  > as well as those comprising documentation, were prepared by Stanford
+  > University, SRI International, The University of California, Berkeley, and
+  > The University of Texas at Austin as a result of research sponsored by the
+  > Gas Research Institute (GRI). Neither GRI, members of GRI, nor any person
+  > acting on behalf of either: a. Makes any warranty or representation,
+  > express or implied, with respect to the accuracy, completeness, or
+  > usefulness of the information contained in these files, or that the use
+  > of any data, method, or process disclosed in these files may not infringe
+  > privately owned rights; or b. Assumes any liability with respect to the
+  > use of, or for damages resulting from the use of, any information, data,
+  > method or process disclosed in these files.
+
+  It adds a usage request, "PLEASE DO NOT MAKE ANY SUBSTITUTIONS!", and a
+  citation instruction, "To cite GRI-Mech, please refer to our World Wide Web
+  location". The page `version30/text30.html`
+  (sha256 `75b204d0b916b514f444395ac3aed4b299869540bd5571b3102b615abff214b2`)
+  says only "To cite GRI-Mech 3.0, please refer this web page", followed by the
+  twelve authors (Smith, Golden, Frenklach, Moriarty, Eiteneer, Goldenberg,
+  Bowman, Hanson, Song, Gardiner, Lissianski, Qin).
+* **The DRM page** (`combustion.berkeley.edu/drm/`, sha256
+  `d53bdf0c83177780575a9dac4fce74cd8250bba315bc4a9fcc25e81bad3b2cc0`) carries
+  the same GRI LEGAL NOTICE and "To reference this reduced mechanisms, please
+  use: A. Kazakov and M. Frenklach, http://www.me.berkeley.edu/drm/". It has no
+  licence either.
+
+**The decision (taken by recommendation, docs/17 §11 item 4: "GRI/DRM19
+user-supplied by path if ambiguous").** A file published with a disclaimer and
+no grant is **ambiguous** for redistribution. Neither mechanism, nor GRI's
+thermo or transport file, is vendored into this repository. A case names the
+file the user supplied by path. A test that needs it reads the path from an
+environment variable (CHR-02b names it). Without that variable the test is
+skipped **by name, printing this reason**, and is never passed silently and
+never replaced by a weaker check. The files read here are recorded by digest,
+so a user-supplied copy can be confirmed to be the same file:
+
+| file | sha256 | species / reactions (counted here) |
+|---|---|---|
+| `grimech30.dat` | `a7726208619d27b50e43b9fb6b27dc0a737003c049cc79e0a849bc75301cd763` | 53 / 325 |
+| `thermo30.dat` | `8d918b771aa965fe05e8c8f1f7e926a5326ebc90e7fc923ce129dc118b634dcc` | — |
+| `transport.dat` (GRI 3.0) | `e2ef4437568311ad0ba6c2311a564966c9accb2b43ea3157b764c1e8febc5825` | — |
+| `drm19.dat` | `1ed93a223186b890ce8b4ec0e3f3918edba56656c276b41fa6c093a05da621ed` | 21 / 84 |
+
+**The counts, and a discrepancy inside the readme.**
+
+* **GRI-Mech 3.0.** The readme's section 1 says "a compilation of 325
+  elementary chemical reactions ... for the 53 species". Its file list,
+  carried over from an earlier release, says GRIMECH30.DAT describes "276
+  reactions of 49 species". The file itself has 53 species and 325 reactions,
+  counted here. **CHR-02b's `ck_gri30_counts` holds 53 / 325**, with the
+  readme's section 1 and this count as its sources, and names the stale line.
+  The file uses `(+M)` 58 times, `LOW` 29, `TROE` 26, `SRI` once and
+  `DUPLICATE` 6 times. Every one of those is a read keyword in §129.5.
+* **DRM19.** The file's own header reads "Reduced version of GRI-MECH 1.2.
+  19 species ( + N2, AR); 84 reactions", which is 21 species and 84
+  reactions, matching the plan's 21/84. It uses `(+M)` 16 times, `LOW` 8 and
+  `TROE` 8.
+* **DRM19's thermo.** The DRM page says "you must use thermo12.dat, the
+  thermodynamics data of GRI-Mech", meaning GRI-Mech **1.2**'s, not 3.0's.
+  CHR-02b's user-path variable therefore carries a thermo path of its own.
+
+### 129.7 What CHR-02a and CHR-02b must make true
+
+| row | measure | class |
+|---|---|---|
+| `ck_parses_westbrook_dryer` | WD1 as authored parses; stoichiometry and FORD orders as written | D |
+| `ck_refuses_unbalanced` | a reaction off by one atom is refused naming line, element, rational residual | D |
+| `ck_units_keywords` | `CAL/MOLE`, `KCAL/MOLE`, `JOULES/MOLE`, `KJOULES/MOLE` (extension), `KELVINS`, `EVOLTS`, `MOLECULES` convert to the same SI `A` and `E/R` as the default form of one reaction | D (exact up to the conversion's one rounding, stated per keyword) |
+| `ck_refuses_plog` and every refused keyword | refused by name, with the recognised set | D |
+| `ck_gri30_counts`, `ck_drm19_counts` | 53/325 and 21/84; skipped by name without the user path | D |
+| `ck_rational_balance_is_exact` | `0.5 O2` balances exactly, and `0.49 O2` fails | D |
+
+Labels: none. §129 is a format and defines no equation.
+
+---
+
+## 130. Finite-rate kinetics — the rate of progress, third bodies, fall-off, and the reverse rate from equilibrium
+
+`No GPL-licensed source was consulted.`
+
+**Sources.**
+
+* **SAND89-8009**, Chapter II eqs. (48)-(70). **Read.** This is the open
+  statement of every form below.
+* **SAND96-8216** p. 52, for FORD/RORD. **Read**, from the page image.
+* **Gilbert, Luther & Troe**, *Ber. Bunsenges. Phys. Chem.* 87 (1983) 169-177,
+  DOI 10.1002/bbpc.19830870218. Crossref agrees ("Theory of Thermal
+  Unimolecular Reactions in the Fall-off Range. II. Weak Collision Rate
+  Constants"). **Closed, not read.** The Troe form is taken from SAND89-8009
+  eqs. (64)-(68), which cites it.
+* **Stewart, Larson & Golden**, *Combust. Flame* 75 (1989) 25-31, DOI
+  **10.1016/0010-2180(89)90084-9**. The SRI form. The DOI was found on
+  Crossref here, because the plan gave none. **Closed, not read.** The form is
+  taken from SAND89-8009 eqs. (69)-(70).
+* **Lindemann et al.**, "Discussion on 'the radiation theory of chemical
+  action'", *Trans. Faraday Soc.* 17 (1922) 598-606, DOI
+  10.1039/TF9221700598. **Closed, not read.** Its form is SAND89-8009 eqs.
+  (62)-(63).
+* **NIST SP 811** (2008), Appendix B.8, for the thermochemical calorie
+  `1 cal = 4.184 J` exactly. Public domain.
+
+### 130.1 Production rates and the rate of progress
+
+`I` reactions `Σ_k ν'_ki X_k ⇌ Σ_k ν''_ki X_k` (SAND89-8009 eq. (48)), with
+`ν_ki = ν''_ki - ν'_ki`:
+
+```
+omega_k = Σ_i ν_ki q_i                    (molar production rate, mol/(m^3 s))   (130.1)
+q_i = C_i [ k_fi Π_k [X_k]^(o'_ki) - k_ri Π_k [X_k]^(o''_ki) ]                   (130.2)
+C_i = [M]_i = Σ_k alpha_ki [X_k]   for a +M reaction,  1 otherwise (alpha_ki = 1 unless listed)   (130.3)
+```
+
+This is SAND89-8009 eqs. (49)-(51) and (58)-(59). The reaction orders are
+`o' = ν'` and `o'' = ν''` unless FORD or RORD overrides them (130.13). An
+irreversible reaction has `k_r = 0`. **The sign convention is CHEMKIN's:
+`omega` is production.** Day & Bell's `ω̇_m` (§133) is a destruction rate.
+§133.1 converts it explicitly, and a code comment that says "omega" means
+(130.1).
+
+### 130.2 Rate constants
+
+```
+k(T) = A T^β exp( -E / (R_c T) )                                                 (130.4)
+```
+
+This is SAND89-8009 eq. (52). It is stored internally in SI as `A_SI`, `β`
+and `θ = E/R_c` in kelvin, so that no `R_c` survives the reader. Every unit
+keyword of §129.4 is one conversion into `θ`:
+
+* `CAL/MOLE`: `θ = 4.184 E / R`.
+* `KCAL/MOLE`: `θ = 4184 E / R`.
+* `JOULES/MOLE`: `θ = E / R`.
+* `KJOULES/MOLE`: `θ = 1000 E / R`.
+* `KELVINS`: `θ = E`.
+* `EVOLTS`: `θ = E e / k_B`, with `e` and `k_B` the exact SI values.
+
+**`A` to SI.** Let `m` be the molecularity the rate constant multiplies: the
+sum of forward orders, plus 1 when `C_i = [M]` multiplies it, and `k_0` of
+(130.8) counts the third body. Then
+
+* from cm-mole-s to m-mol-s, `A_SI = A × (10^-6)^(m-1)`;
+* from `MOLECULES`, additionally `× N_A^(m-1)`.
+
+### 130.3 Reverse rates from equilibrium, in log form
+
+These are SAND89-8009 eqs. (53)-(57), written in logarithms. In f64,
+`exp(-ΔG/RT)` overflows at low `T` on a mechanism such as GRI, but its log
+does not:
+
+```
+k_ri = k_fi / K_ci                                                               (130.5)
+ln K_ci = - Σ_k ν_ki G_k(T) / (R T)  +  ( Σ_k ν_ki ) ln( p_ref / (R T) )         (130.6)
+```
+
+`G_k/(RT)` comes from (128.4) at the set's `p_ref` (§128.4); `p_ref = P_atm`
+in SAND89-8009. The product `k_r Π[X]^ν''` is formed as one exponential of
+the sum of logs. It is never formed as `exp(ln k_f) / exp(ln K_c)`, and the
+host twin and the device kernel make the same choice (CHR-07a). `REV`
+replaces (130.5) with its own Arrhenius set.
+
+**The mass identity.** It holds when `W_k` is built from the elements
+(§128.2), because every reaction is element-balanced (§129.4):
+
+```
+Σ_k W_k omega_k = Σ_i q_i Σ_e W_e Σ_k a_ek ν_ki = 0                              (130.7)
+```
+
+CHR-03's `kin_mass_is_conserved` holds it to `1e-13` relative over 1000
+random states, class A: it is evaluated in f64 in both builds.
+
+### 130.4 Pressure dependence: Lindemann, Troe, SRI
+
+These are SAND89-8009 eqs. (60)-(70), stated here as the manual states them.
+`k_0` and `k_inf` are two forms of (130.4), from `LOW` and from the reaction
+line:
+
+```
+k = k_inf ( Pr / (1 + Pr) ) F,     Pr = k_0 [M] / k_inf                          (130.8)
+log10 F = log10 F_cent / ( 1 + [ (log10 Pr + c) / (n - d (log10 Pr + c)) ]^2 )   (130.9)
+c = -0.4 - 0.67 log10 F_cent,   n = 0.75 - 1.27 log10 F_cent,   d = 0.14          (130.10)
+F_cent = (1 - a) exp(-T/T***) + a exp(-T/T*) + exp(-T**/T)                       (130.11)
+F_SRI = d [ a exp(-b/T) + exp(-T/c) ]^X T^e,    X = 1 / (1 + (log10 Pr)^2)       (130.12)
+```
+
+* **Lindemann** is `F = 1`.
+* **Troe.** The fourth parameter `T**` is optional, and without it the last
+  term of (130.11) is absent (SAND89-8009 p. 23).
+* **SRI.** The defaults are `d = 1`, `e = 0`.
+* **The collider.** `[M]` in `Pr` carries the reaction's efficiencies
+  (130.3). For `(+SPECIES)` it is that species' concentration alone
+  (SAND89-8009 eq. (63) and footnote). A fall-off reaction has `C_i = 1` in
+  (130.2), because `[M]` already sits in `Pr`.
+* **`Pr = 0`** (no collider present) gives `k = 0` exactly. `log10 Pr` is not
+  evaluated there; CHR-03 tests the limit.
+
+CHR-03's `kin_troe_matches_hand_value` evaluates (130.9)-(130.11) by hand at
+one stated `(T, Pr, a, T***, T*, T**)`. The value is computed in the test from
+these equations as written, not taken from a table.
+
+### 130.5 Global (non-elementary) orders, and what equilibrium can then promise
+
+```
+o'_ki = FORD value if given, else ν'_ki;   o''_ki = RORD value if given, else ν''_ki   (130.13)
+```
+
+This is SAND96-8216 p. 52. The two global methane mechanisms authored here
+use FORD (WD1's fractional fuel and oxidiser orders; JL4's). **Detailed
+balance holds only for a reversible reaction whose orders equal its
+stoichiometry.** At equilibrium `Σ_k ν_ki μ_k = 0` (§131.1), which makes
+`K_c = Π[X]^ν` and hence `q_i = 0` for exactly those reactions. CHR-04's
+`eq_detailed_balance_holds` is therefore stated over reversible reactions
+without FORD or RORD. A reaction §129.5 flagged is reported and excluded **by
+name**. It is not counted as a pass.
+
+### 130.6 What CHR-03 must make true
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `kin_mass_is_conserved` | (130.7) over 1000 random `(T, p, Y)` | 1e-13 relative to `Σ_k W_k abs(omega_k)` | A |
+| `kin_elements_conserved` | `Σ_k a_ek omega_k = 0` for every element | same | A |
+| `kin_single_reaction_closed_form` | one Arrhenius reaction against (130.2)/(130.4) evaluated by hand | 1e-14 relative | P |
+| `kin_troe_matches_hand_value` | (130.9)-(130.11) at one stated point | 1e-14 relative | P |
+| `kin_reverse_from_log_kc` | (130.6) against the direct `exp` form where neither overflows | 1e-13 relative | P |
+
+The host twin is f64 in both builds, so every row is unchanged by the f32
+build.
+
+Labels: (130.1)-(130.13).
+
+---
+
+## 131. Chemical equilibrium by Gibbs minimisation — the gas-phase element-potential iteration
+
+`No GPL-licensed source was consulted.`
+
+**Source.** **Gordon & McBride**, *Computer Program for Calculation of Complex
+Chemical Equilibrium Compositions and Applications. I. Analysis*, NASA RP-1311
+(October 1994), NTRS 19950013764. US-Government work, cleared for public use.
+**Read**: eqs. (2.7)-(2.29) and Chapter 3 §§3.1-3.3, from page images. The
+equations below are RP-1311's own, specialised to a gas-only system
+(`NG = NS`, no condensed species), which is all this crate needs.
+
+**Used for:** the reference state of CHR-04's gates, CHR-06's end state, and
+the adiabatic flame temperature. **It is never the answer key of a flow
+gate.** The equilibrium solver is a second implementation of the same
+thermodynamics, and agreeing with it is evidence of consistency, not of
+truth (§10's rule).
+
+### 131.1 The conditions
+
+All quantities are per unit mass of mixture. `n_j` is moles of species `j`
+per kg, `n = Σ_j n_j`, and `b_i = Σ_j a_ij n_j` is moles of element `i`
+per kg, which must equal the assigned `b_i°` (RP-1311 eqs. (2.7b), (2.7c)).
+Minimising `G = Σ_j μ_j n_j` under those constraints with Lagrange
+multipliers `λ_i` gives (RP-1311 eqs. (2.8)-(2.11)):
+
+```
+μ_j + Σ_i λ_i a_ij = 0                       (j = 1..NS)                         (131.1)
+μ_j / (R T) = G_j(T)/(R T) + ln(n_j / n) + ln(p / p_ref)                         (131.2)
+```
+
+`p_ref` is §128.4's. RP-1311 discusses exactly this point: "The unit of
+pressure in equation (2.11) should be consistent with the unit of pressure in
+the thermodynamic data being used". (131.1) for every species is the
+statement `Σ_k ν_ki μ_k = 0` for every element-balanced reaction, which is
+§130.5's detailed balance.
+
+### 131.2 The Newton iteration (reduced Gibbs equations)
+
+The correction variables are `π_i = -λ_i/(RT)`, `Δln n` and, for an
+assigned enthalpy, `Δln T`. The equations are RP-1311 eqs. (2.24), (2.26) and
+(2.27) with `NG = NS`. The sums run over `j = 1..NS` and `i = 1..l`
+elements:
+
+```
+Σ_i Σ_j a_kj a_ij n_j π_i + (Σ_j a_kj n_j) Δln n + (Σ_j a_kj n_j H_j/(RT)) Δln T
+      = b_k° - b_k + Σ_j a_kj n_j μ_j/(RT)                  (k = 1..l)           (131.3)
+Σ_i Σ_j a_ij n_j π_i + (Σ_j n_j - n) Δln n + (Σ_j n_j H_j/(RT)) Δln T
+      = n - Σ_j n_j + Σ_j n_j μ_j/(RT)                                           (131.4)
+Σ_i (Σ_j a_ij n_j H_j/(RT)) π_i + (Σ_j n_j H_j/(RT)) Δln n
+      + [ Σ_j n_j cp_j/R + Σ_j n_j (H_j/(RT))^2 ] Δln T
+      = (h_0 - h)/(R T) + Σ_j n_j H_j μ_j/(R T)^2                                (131.5)
+Δln n_j = Σ_i a_ij π_i + Δln n + (H_j/(RT)) Δln T - μ_j/(RT)                     (131.6)
+```
+
+* **Assigned `(T, p)`** solves (131.3) and (131.4) with `Δln T = 0`
+  (RP-1311's table: "tp", equations (2.24), (2.26)).
+* **Assigned `(h, p)`** adds (131.5) (equations (2.24), (2.26), (2.27)), with
+  `h_0` the reactants' specific enthalpy (RP-1311 eq. (2.13a)).
+* **The species update.** (131.6) is RP-1311 eq. (2.18) solved for
+  `Δln n_j`.
+* **The variable `n`.** It is iterated as an independent unknown, as RP-1311
+  does. That is why (131.4) is there.
+
+### 131.3 Starting point, trace species, damping
+
+All three are from RP-1311 §§3.1-3.3, as printed.
+
+* **Start.** `n = 0.1` and `n_j = 0.1/NS` for every species. For the
+  assigned-enthalpy problem the starting temperature is `T = 3800 K` unless
+  the caller gives one (§3.1).
+* **Trace species.** A species whose `ln(n_j/n) < -SIZE`, with
+  `SIZE = -ln 1e-8 = 18.420681`, is held at `n_j = 0` in the linear updates.
+  Its `ln n_j` is still iterated (§3.2).
+* **Damping.** The correction is scaled by `λ = min(1, λ1, λ2)`, with
+
+  ```
+  λ1 = 2 / max( 5 abs(Δln T), 5 abs(Δln n), abs(Δln n_j) )   (j with ln(n_j/n) > -SIZE)   (131.7)
+  λ2 = min over j with ln(n_j/n) <= -SIZE and Δln n_j >= 0 of
+       abs( (-ln(n_j/n) - 9.2103404) / (Δln n_j - Δln n) )                       (131.8)
+  ```
+
+  This is RP-1311 eqs. (3.1)-(3.3). λ1 limits `T` and `n` to a factor of
+  `e^0.4` per iteration and a major species to `e^2`. λ2 keeps a trace
+  species from jumping above `10^-4`.
+* **Convergence (DESIGN, because RP-1311's own criteria were not read).** The
+  iteration stops when the element residual is at most `1e-14 max_i b_i°`,
+  and `abs(Δln n_j) <= 1e-12` for every non-trace species, and
+  `abs(Δln T) <= 1e-12`. A run that has not converged in 200 iterations is
+  refused by name. It is never returned as an answer.
+* **Elements.** Gas-only, neutral species only (§129.2). No ions, and no
+  charge-balance row.
+
+### 131.4 What CHR-04 must make true
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `eq_elements_conserved` | `abs(b_i - b_i°) / max b°` at the converged state | 1e-12 | A |
+| `eq_detailed_balance_holds` | `abs(q_f - q_r)/q_f` for every reversible reaction without FORD/RORD (§130.5) at the CH4-air `phi = 1` equilibrium, `(T, p)` = (2000 K, 1 atm) and at the `(h, p)` state | 1e-8 | A |
+| `eq_tad_methane_air` | `T` of the `(h, p)` problem, stoichiometric CH4-air from 298.15 K, 1 atm | see below | P, or NAMED |
+
+**`T_ad`.** RP-1311 Part I, the part read here, contains no worked example.
+CHR-04 looks for a published `T_ad` in RP-1311 Part II (McBride & Gordon,
+NASA RP-1311-P2, 1996), the user's manual, which has the program's examples.
+If one matches the mixture and the species set, the row compares against it
+within 5 K. Otherwise the row prints a NAMED textbook value and **runs no gate
+through it** (plan row CHR-04).
+
+Labels: (131.1)-(131.8).
+
+---
+
+## 132. Stiff integration — Rosenbrock methods with embedded error control, the constant-pressure reactor, and splitting
+
+`No GPL-licensed source was consulted.`
+
+**Sources.**
+
+* **Sandu, Verwer, Blom, Spee, Carmichael & Potra**, "Benchmarking stiff ODE
+  solvers for atmospheric chemistry problems II: Rosenbrock solvers", *Atmos.
+  Environ.* 31 (1997) 3459-3472, DOI 10.1016/S1352-2310(97)83212-8. Crossref
+  agrees. **Read** from the open copy at CWI (`ir.cwi.nl/pub/125/0125D.pdf`,
+  sha256 `8752d9b66590c112db36675f828817a2460dd5a285917bb63d6d013d8099f7bd`),
+  pp. 3461-3464: formula (4), §3.3's step-size control, and the RODAS3 and
+  ROS3 coefficients, read from the page images.
+* **Hairer & Wanner**, *Solving Ordinary Differential Equations II*, 2nd rev.
+  ed., Springer (1996), DOI 10.1007/978-3-642-05221-7, §IV.7. This is the
+  textbook statement Sandu et al. follow. A book, not read here.
+* **Shampine**, "Implementation of Rosenbrock methods", *ACM TOMS* 8 (1982)
+  93-113, DOI 10.1145/355993.355994, and **Kaps & Rentrop**, *Numer. Math.* 33
+  (1979) 55-68, DOI 10.1007/BF01396495. These are the primaries of the ROS4
+  coefficient sets. Both DOIs were checked. Kaps & Rentrop is closed. ACM
+  lists Shampine 1982 as free to read, but the publisher's site served a bot
+  challenge here. **Neither was read.**
+* **Mazzia & Magherini**, *Test Set for IVP Solvers*, release 2.4, University
+  of Bari (`archimede.uniba.it/~testset/`, reachable on 2026-10-06). It holds
+  the Robertson and HIRES reference solutions, and CHR-00c transcribes them.
+* **Strang**, *SIAM J. Numer. Anal.* 5 (1968) 506-517, DOI 10.1137/0705041,
+  for symmetric splitting. Closed, not read. The splitting is stated in
+  §132.5 in its elementary form.
+* GPU evidence that motivates one thread per cell: **Niemeyer & Sung**, *J.
+  Comput. Phys.* 256 (2014) 854-871, DOI 10.1016/j.jcp.2013.09.025, and
+  **Curtis, Niemeyer & Sung**, *Combust. Flame* 179 (2017) 312-324, DOI
+  10.1016/j.combustflame.2017.02.005. Both DOIs were checked and neither was
+  read. The analytic-Jacobian route (pyJac, Niemeyer, Curtis & Sung, *Comput.
+  Phys. Commun.* 215 (2017) 188-203, DOI 10.1016/j.cpc.2017.02.004) is named
+  for later and not used.
+
+### 132.1 The method
+
+For the autonomous system `y' = f(y)`, `J = f'(y_n)`, an `s`-stage Rosenbrock
+step is Sandu et al.'s formula (4) (Hairer & Wanner's notation), with
+`γ_ii = γ` for every stage:
+
+```
+(I - γ h J) k_i = h f( y_n + Σ_{j<i} α_ij k_j ) + h J Σ_{j<i} γ_ij k_j     (i = 1..s)   (132.1)
+y_{n+1} = y_n + Σ_i b_i k_i,     ŷ_{n+1} = y_n + Σ_i b̂_i k_i                    (132.2)
+```
+
+There is one LU of `I - γhJ` per step and `s` back-substitutions, and no
+Newton iteration. The step is linearly implicit. This is why every thread
+follows the same control path (the plan's §2.3 argument).
+
+### 132.2 The coefficient sets — read, and checked
+
+**RODAS3** (Sandu et al. p. 3463: "a stiffly accurate, embedded pair of order
+3(2)", `s = 4`, both formulas L-stable). The lower-triangular `α` and `γ`
+below the diagonal, the diagonal `γ`, and the two weight vectors:
+
+```
+γ = 1/2
+α21 = 0;     α31 = 1,     α32 = 0;     α41 = 3/4,  α42 = -1/4,  α43 = 1/2
+γ21 = 1;     γ31 = -1/4,  γ32 = -1/4;  γ41 = 1/12, γ42 = 1/12,  γ43 = -2/3
+b = (5/6, -1/6, -1/6, 1/2)          b̂ = (3/4, -1/4, 1/2, 0)                     (132.3)
+```
+
+**ROS3** (p. 3464: "an embedded pair of order 3(2)", `s = 3`, the third-order
+formula L-stable). The coefficients are as printed, to every digit:
+
+```
+γ    =  0.43586652150845899941601945119356
+γ21  = -0.19294655696029095575009695436041
+γ32  =  1.74927148125794685173529749738960
+b1   = -0.75457412385404315829818998646589
+b2   =  1.94100407061964420292840123379419
+b3   = -0.18642994676560104463021124732829
+b̂1   = -1.53358745784149585370766523913002
+b̂2   =  2.81745131148625772213931745457622
+b̂3   = -0.28386385364476186843165221544619
+α21 = α31 = γ,   α32 = γ31 = 0                                                   (132.4)
+```
+
+**The transcription was checked.** In a scratch oracle (Fraction arithmetic
+for RODAS3, f64 for ROS3), both `b` vectors satisfy the four Rosenbrock
+conditions of order 3:
+
+* `Σ b = 1`;
+* `Σ b_i β'_i = 1/2 - γ`;
+* `Σ b_i α_i^2 = 1/3`;
+* `Σ b_i β_ij β'_j = 1/6 - γ + γ^2`.
+
+Here `β_ij = α_ij + γ_ij` and `β'_i = Σ_{j<i} β_ij`. Every residual is at most
+`5.6e-17`. Both `b̂` vectors satisfy the two conditions of order 2. A
+transposed or mistyped coefficient fails at least one condition by `O(0.1)`.
+CHR-05 builds this check into a test (§132.6), so the tree proves its own
+coefficients.
+
+**ROS4 is named and not built, and RODAS3 with ROS3 replaces the plan's
+"ROS4, RODAS3".** Sandu et al. tested ROS4 but did not print its
+coefficients: "We therefore decided to omit presenting results for ROS4",
+p. 3463. They refer to Hairer & Wanner's Table 7.2. ROS4's primaries
+(Shampine 1982; Kaps & Rentrop 1979) were not read (see Sources). **Recalled
+numbers are not written down, so ROS4 waits for a read copy.** When one is
+read, ROS4 enters here as a new labelled set beside (132.4), and CHR-05's
+order test holds it at order 4. Until then the integrator offers `rodas3` (the default: stiffly accurate,
+L-stable at both orders) and `ros3`. A case naming `ros4` is refused, and the
+refusal says why. This was decided by recommendation. It changes no existing
+numerics and no gate tolerance: CHR-05's gates (attained accuracy, observed
+order equal to the method order ±0.1) apply to whichever method runs.
+
+### 132.3 Error control and step size
+
+This is Sandu et al. §3.3, with componentwise tolerances (they take them
+equal "for simplicity of testing"):
+
+```
+Est = y_{n+1} - ŷ_{n+1};    Tol_k = atol_k + rtol_k abs(y_{n+1,k})
+Err = sqrt( (1/m) Σ_k (Est_k / Tol_k)^2 )                                        (132.5)
+accept if Err < 1;   h_new = h min( 10, max( 0.1, 0.9 / Err^(1/(p̂+1)) ) )         (132.6)
+```
+
+`p̂` is the order of the embedded formula (2 for both sets). After a rejection
+the maximal growth factor 10 is set to 1 for the next step, and a rejection of
+the very first step divides `h` by 10 (p. 3463). `h` is bounded by
+`[h_min, h_max]`, which the caller sets. A step that would go below `h_min` is
+a refusal naming the cell. It is never forced.
+
+**The Jacobian (v1).** One-sided finite differences, column `j` perturbed by
+`δ_j = sqrt(eps_64) max(abs(y_j), atol_j)`. Rosenbrock methods assume the
+exact Jacobian, and Sandu et al. say so ("only exact Jacobians are
+considered"). An approximate `J` can therefore lower the attained order on
+very stiff cells. **That is the plan's stated risk, and CHR-05's observed-order
+gate is what measures it**, on `y' = λy` (where the FD Jacobian is exact up to
+round-off) and on Robertson and HIRES, against the test-set solutions.
+
+### 132.4 The constant-pressure reactor (one cell, one split step)
+
+The state is `y = (Y_1..Y_K, T)`, at constant `p` and constant `h`. Write
+`Ẇ_k = W_k omega_k`, the mass production in kg/(m^3 s), from (130.1). The
+equations are SAND89-8009 Chapter I's example ("DTDT = -SUM/(RHO*CPB)"),
+written out:
+
+```
+dY_k/dt = W_k omega_k / rho                                                      (132.7)
+dT/dt  = - Σ_k (H_k / W_k) W_k omega_k / (rho cp) = - Σ_k H_k omega_k / (rho cp) (132.8)
+rho = p W / (R T)                                                                (132.9)
+```
+
+`cp` is (128.7) and `H_k` is molar (128.2). It is adiabatic and isobaric, so
+`h` is conserved exactly by the ODE. That makes it the reactor the plan's
+CHR-06 lands on the `(h, p)` equilibrium of §131.
+
+**Refusals inside the integration** are counted per call and reported, never
+clipped silently: a `T` outside the thermo range (128.5), and a negative `Y_k`
+below `-atol_k` after an accepted step. A `Y_k` in `[-atol_k, 0)` is set to 0
+and the count records it.
+
+### 132.5 Splitting
+
+For one flow step `Δt` the chemistry substep advances (132.7)-(132.8) from the
+transported state `(Y°, T°)` to `(Y*, T*)`, and the transport equations then
+see the sources
+
+```
+S_Y,k = rho (Y*_k - Y°_k) / Δt          Q_chem = rho cp (T* - T°) / Δt          (132.10)
+```
+
+This is the plan's §2.1 order. **Lie** splitting (chemistry then transport)
+is the default. **Strang** splitting (half chemistry, transport, half
+chemistry) is selected by name, and is second order when each part is.
+
+### 132.6 Precision, and what CHR-05 to CHR-07b must make true
+
+**Precision.** Chemistry computes in `double` in both builds (docs/17 §5.1.6).
+The host twin uses f64 types, and the device kernels use `typedef double
+ofchem` in `cuda/chem.cu`, never in `ofgpu_device.cuh`. Inputs and outputs
+cross as `ofscalar`. §118, which F32-02 creates, carries the mixed-precision
+scope, and CHR-07b writes that subsection. **A floor inside `chem.cu` is a
+named `ofchem` constant and is not spelled `1e-300`**: §112.1's scan refuses
+that literal outside an `OFGPU_SINGLE` pair, and in `chem.cu` the type is
+double in both arms.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `ros_coefficients_satisfy_order_conditions` | the conditions of §132.2 for RODAS3 and ROS3 | 1e-15 absolute | D |
+| `ros_robertson_testset` | Robertson at `t = 1e11`, rtol 1e-8, against the test-set reference (CHR-00c's key) | 10 x rtol | P |
+| `ros_hires_testset` | HIRES at `t = 321.8122`, same | 10 x rtol | P |
+| `ros_observed_order` | `y' = λ y`, two step sizes | method order ± 0.1 | P |
+| `reactor_lands_on_equilibrium` (CHR-06) | final state against §131's `(h, p)` solution | 0.5 K; 1e-6 in Y | P |
+| `chem_device_*` (CHR-07a/b) | device against host | the plan rows, with the class rule (docs/17 §5.1.4) for the f32 build | R in f32, P in f64 |
+
+Labels: (132.1)-(132.10).
+
+---
+
+## 133. Mixture-averaged transport, and the reacting low-Mach constraint
+
+`No GPL-licensed source was consulted.`
+
+**Sources.**
+
+* **Day & Bell**, "Numerical simulation of laminar reacting flows with complex
+  chemistry", *Combust. Theory Model.* 4 (2000) 535-556, DOI
+  10.1088/1364-7830/4/4/309. Crossref agrees. **Read** from the open copy at
+  the University of North Texas Digital Library (`digital.library.unt.edu/ark:/67531/metadc740043/`,
+  sha256 `70a948e048d324ef2c4f1422013d67f3787795897ef3668898f0db20813664d5`).
+  Read: eqs. (1)-(8) and the paragraphs on the species-flux correction (§3,
+  around eq. (14)).
+* **Gordon & McBride**, NASA RP-1311 (1994), Chapter 5, eqs. (5.1)-(5.7).
+  **Read.** Mixture viscosity and frozen conductivity. Their eq. (5.5) is
+  Wilke's interaction coefficient.
+* **Wilke**, *J. Chem. Phys.* 18 (1950) 517-519, DOI 10.1063/1.1747673.
+  Crossref agrees. Closed, not read. Its formula is stated here from RP-1311
+  (5.3)/(5.5).
+* **McBride, Gordon & Reno**, NASA TM-4513, eq. (10) and Table IV. **Read.**
+  Pure-species viscosity and conductivity fits for 155 species, in μP and
+  μW/(cm K), on 300-1000-5000 K.
+* **The FDS Technical Reference Guide** (McGrattan et al., NIST SP 1018,
+  public domain), `Manuals/FDS_Technical_Reference_Guide/Momentum_Chapter.tex`
+  at firemodels/fds `e14ec3f`. **Read**: the kinetic-theory `mu_alpha` and
+  `D_alpha,beta`. This repository does not carry it; the copy read was fetched.
+* **Neufeld, Janzen & Aziz**, *J. Chem. Phys.* 57 (1972) 1100-1102, DOI
+  10.1063/1.1678363, and **Mathur, Tondon & Saxena**, *Mol. Phys.* 12 (1967)
+  569-579, DOI 10.1080/00268976700100731. Both checked on Crossref, both
+  **closed and not read**.
+* **Kee, Dixon-Lewis, Warnatz, Coltrin & Miller**, *A Fortran Computer Code
+  Package for the Evaluation of Gas-Phase, Multicomponent Transport
+  Properties*, Sandia SAND86-8246 (December 1986), OSTI **7157265** (the plan
+  had no id). The OSTI record exists, but the report's full text is not on
+  OSTI, so it was **not read**. It is the source of the TRAN data format,
+  which CHR-08 therefore cannot treat as read (§133.4).
+* The low-Mach formulation this extends is §25's: Rehm & Baum, *J. Res. Natl.
+  Bur. Stand.* 83 (1978) 297, DOI 10.6028/jres.083.019; Majda & Sethian,
+  *Combust. Sci. Technol.* 42 (1985) 185-205, DOI 10.1080/00102208508960376.
+  Both DOIs were checked here.
+
+### 133.1 The reacting low-Mach equations
+
+These are Day & Bell eqs. (1)-(6) in this document's notation, with **`omega`
+the production rate** of (130.1). Day & Bell's `ω̇_m` is a destruction rate
+(their eq. (2) carries `-ω̇_m`), so `W_m omega_m = -ω̇_m`:
+
+```
+d(rho Y_m)/dt + div(rho u Y_m) = - div(Γ_m) + W_m omega_m,   Γ_m = - rho D_m grad Y_m   (133.1)
+d(rho h)/dt + div(rho u h) = div(λ grad T) - Σ_m div(h_m Γ_m) + dp0/dt         (133.2)
+p0 = rho R T Σ_m Y_m / W_m                                                       (133.3)
+```
+
+`h = Σ_m Y_m h_m(T)` per unit mass, from (128.7) with `h_m = H_m/W_m`, so heat
+release is implicit in `h`. The `dp0/dt` term is §25.2's, which Day & Bell's
+open domain does not need. Their (3) has no `dp0/dt`, so it is added here as
+§25 has it. Summed over `m`, (133.1) is continuity **only if
+`Σ_m Γ_m = 0`** and `Σ_m W_m omega_m = 0`. The second is (130.7). The first
+is §133.3.
+
+### 133.2 The divergence constraint, derived
+
+Differentiate (133.3) along a particle path: `-D(ln rho)/Dt = div u`. Expand
+`ln rho = ln p0 + ln W - ln R - ln T`. Then replace `DT/Dt` from (133.2)
+(written with `cp = Σ Y_m dh_m/dT`) and `DY_m/Dt` from (133.1):
+
+```
+div u = (1/(rho cp T)) [ div(λ grad T) - Σ_m Γ_m . grad h_m ]
+      + (1/rho) Σ_m (W/W_m) ( - div Γ_m )
+      + (1/rho) Σ_m ( W/W_m - h_m/(cp T) ) W_m omega_m
+      - (1/(γ p0)) dp0/dt,           γ = cp / (cp - R/W)                         (133.4)
+```
+
+**The `dp0/dt` coefficient.** The `ln p0` term gives `-(1/p0) dp0/dt`. The
+energy equation's `+dp0/dt` gives `+(1/(rho cp T)) dp0/dt`. Their sum is
+`-(1/p0)(1 - R/(W cp)) dp0/dt = -(1/(γ p0)) dp0/dt`, because
+`p0/(rho T) = R/W` and `cp - R/W = cv` for an ideal-gas mixture. That is
+§25.1's term with the mixture's own `γ`.
+
+**The check against the paper.** With `dp0/dt = 0`, `Γ_m = -rho D_m grad Y_m`
+and `W_m omega_m = -ω̇_m`, (133.4) is Day & Bell's eq. (7) term by term.
+
+**The checks against this document.** With one species, `W` constant and no
+reactions, (133.4) is §25.1's constraint, and §26.1 says what `Q` must
+include. With `Q` from (133.4)'s first line, the sealed-box `p0` evolution of
+§25.2 follows by integrating (133.4) over the domain. CHR-11's sealed-box gate
+uses a mole-changing, heat-neutral reaction: the `h_m/(cp T)` part of the
+third line sums to zero, and `W/W_m` alone drives `dp0/dt`. That gives an analytic `p0(t)`,
+"no tolerance excuses" (§25.2).
+
+**Day & Bell's eq. (8)** adds a damping term, proportional to `(p - p0)/Δt`
+with a factor `f < 1`, that pulls a fractional-step solution back onto (133.3).
+Its exact coefficient is not restated here, because the open copy's text layer
+is garbled at that line. It is **named and not
+adopted in v1**. §25's loop holds the equation of state by recomputing `rho`
+from (133.3), and CHR-11 measures the drift that remains. If that drift needs
+the term, it is a numerics change and goes to the user (docs/17 §5.3.4).
+
+**§25 is amended in place by CHR-11**, not here. §25.1's "v1: constant W = air,
+stated" becomes a pointer to (133.4). This section is the derivation that
+amendment cites.
+
+### 133.3 The species fluxes must sum to zero
+
+Mixture-averaged `D_m` does not conserve mass: Day & Bell say "numerically,
+`Σ_m Γ_m ≠ 0`", and they consider two corrections. The first adjusts the
+locally dominant species. It is "not free-stream preserving": a species with
+uniform `Y` that takes part in no reaction acquires spurious variation. The
+second redistributes the excess "in a mass-weighted" way, and it is free-stream
+preserving. **The second is adopted:**
+
+```
+Γ_m = - rho D_m grad Y_m  +  Y_m Σ_k rho D_k grad Y_k                            (133.5)
+```
+
+`Σ_m Γ_m = 0` holds exactly, because `Σ_m Y_m = 1`. A uniform `Y_m` gets
+`Γ_m = Y_m Σ_k(...)`. The divergence of that over the mesh is what the
+transport of a passive uniform scalar must reproduce, and §86's mass-weighted
+form already does.
+
+**On the mesh**, (133.5) is evaluated per face with face-interpolated `Y_m`,
+and its sum over `m` is zero per face up to round-off. §86's species budget
+then closes with the correction metered, not hidden. CHR-09 proves it.
+
+### 133.4 Mixture-averaged coefficients
+
+**Pure species.** Each species has `mu_k(T)` and `λ_k(T)`.
+
+* **(a), read.** TM-4513 eq. (10) fits: `ln mu = A ln T + B/T + C/T^2 + D`,
+  and the same form for `ln λ`, converted from μP and μW/(cm K) to SI.
+* **(b), the plan's route.** Chapman-Enskog with Lennard-Jones parameters, in
+  FDS TRG's form:
+
+  ```
+  mu_k = 26.69e-7 (W_k T)^(1/2) / (sigma_k^2 Ω_v(T*_k))        [kg/(m s)], W in g/mol, sigma in Å   (133.6)
+  D_kj = 2.66e-7 T^(3/2) / ( W_kj^(1/2) sigma_kj^2 Ω_D(T*_kj) ) / (p / 1 atm)   [m^2/s]
+  W_kj = 2 (1/W_k + 1/W_j)^-1,   sigma_kj = (sigma_k + sigma_j)/2,   T* = T / (eps/k_B)       (133.7)
+  ```
+
+  FDS TRG writes `D` at 1 atm. The `1/p` scaling is kinetic theory's, stated.
+  FDS TRG calls `Ω_v` and `Ω_D` "an empirical function of the temperature" and
+  does not print one. **The Neufeld, Janzen & Aziz fit is the plan's choice
+  and was not read**, so its coefficients are not written here. Route (b)
+  needs them transcribed from a read copy, and until then **`D_kj` from (133.7)
+  is NAMED and NOT BUILT.**
+
+**The Lennard-Jones and `eps/k_B` data** for route (b) are not GRI's
+`transport.dat`, which is not vendored (§129.6). A candidate open source is the
+species data in FDS's own public-domain source. CHR-08 checks it. It is not
+adopted here, because it was not read.
+
+**Mixture viscosity and frozen conductivity, read (RP-1311 (5.3)-(5.6)):**
+
+```
+mu_mix = Σ_i X_i mu_i / ( X_i + Σ_{j≠i} X_j φ_ij )                               (133.8)
+λ_mix  = Σ_i X_i λ_i / ( X_i + Σ_{j≠i} X_j ψ_ij )                                (133.9)
+φ_ij = (1/4) [ 1 + (mu_i/mu_j)^(1/2) (W_j/W_i)^(1/4) ]^2 ( 2 W_j / (W_i + W_j) )^(1/2)     (133.10)
+ψ_ij = φ_ij [ 1 + 2.41 (W_i - W_j)(W_i - 0.142 W_j) / (W_i + W_j)^2 ]              (133.11)
+```
+
+RP-1311 writes the sums over all `j` with `φ_ii` implied. (133.10) gives
+`φ_ii = 1`, which is why the `j ≠ i` form with the explicit `X_i` is the same
+thing. **Mathur, Tondon & Saxena's** average (the plan's choice) was not read.
+It is named and not built until it is. (133.9) and (133.11) are the v1
+conductivity (decided by recommendation): both are public domain and read, and
+CHR-08's air gate (Kadoya 1985, within 5 %) measures them either way.
+
+**Mixture-averaged diffusion coefficient (the plan's §2.2, stated as the
+plan states it):**
+
+```
+D_m = (1 - Y_m) / Σ_{j≠m} ( X_j / D_mj )                                         (133.12)
+```
+
+This is the form Day & Bell use, citing SAND86-8246 (their reference [14]).
+Its derivation is in SAND86-8246 and Hirschfelder, Curtiss & Bird, and neither
+was read. It is the plan's design and is stated as a model, not derived. It
+waits on `D_mj` (route (b)) like everything else in that route.
+
+**The Lewis-number route (read in full, and the one available in v1 without
+route (b)):** `λ = mu cp / Pr` and `D_m = λ / (rho cp Le_m)`, with `mu(T)`
+from (133.8) on route (a) or from §100's Sutherland curve, and `Pr` and `Le_m`
+stated by the case (plan §2.2's "cheaper alternative"). It has no hidden
+constant.
+
+### 133.5 What CHR-08 to CHR-11 must make true
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `transport_air_viscosity_vs_kadoya` | (133.8) on N2/O2 0.79/0.21 with route (a), 300-1500 K, against `reference/kadoya1985` | 2 % | P |
+| `transport_air_conductivity_vs_kadoya` | (133.9) and (133.11), same | 5 % | P |
+| `transport_route_b_named` | `D_kj` refused by name until Neufeld is read | — | D |
+| `species_fluxes_sum_to_zero` (CHR-09) | `abs(Σ_m Γ_m)` per face from (133.5) | 1e-14 relative to `Σ abs(Γ_m)` | A |
+| `gas_wmix_sealed_box_p0_closed_form` (CHR-11) | `dp0/dt` from (133.4) against the analytic sealed box | 1e-12 relative | A |
+| `gas_constant_w_default_bitwise` (CHR-11) | one species, constant W: (133.4) reduces to §25.1 bitwise | bitwise | D |
+
+Labels: (133.1)-(133.12).
+
+### 133.6 Every reference in §128-§133, its status, and what changed against the plan
+
+| reference | identifier, checked 2026-10-06 | access | read here | change against docs/17 / CHEMRAD |
+|---|---|---|---|---|
+| NASA TM-4513 | NTRS 19940013151 | public domain | yes | — (the plan's NASA-7 source) |
+| NASA/TP-2002-211556 | NTRS 20020085330 | public domain | yes (§100) | — |
+| NASA RP-1311 Part I | NTRS 19950013764 | public domain | yes | — (the plan said 19950013764; confirmed) |
+| CHEMKIN-II, SAND89-8009 | OSTI 5681118, DOI 10.2172/5681118 | public | yes | the plan's "OSTI id to be confirmed": confirmed |
+| CHEMKIN-III, SAND96-8216 | OSTI 481621, DOI 10.2172/481621 | public | yes (pp. 46-54) | **added**: FORD/RORD, real coefficients and UNITS are CHEMKIN-III only |
+| TRANSPORT, SAND86-8246 | OSTI 7157265 | record only, no full text on OSTI | no | the plan's "OSTI id to be confirmed": confirmed; not readable |
+| Gilbert, Luther & Troe 1983 | 10.1002/bbpc.19830870218 | closed | no | DOI confirmed; form from SAND89-8009 |
+| Stewart, Larson & Golden 1989 (SRI) | 10.1016/0010-2180(89)90084-9 | closed | no | **added** (the plan cited none) |
+| Lindemann 1922 | 10.1039/TF9221700598 | closed | no | added |
+| Westbrook & Dryer 1981 | 10.1080/00102208108946970 | closed | no | DOI confirmed; parameters need a read copy |
+| Jones & Lindstedt 1988 | 10.1016/0010-2180(88)90021-1 | closed | no | DOI confirmed; parameters need a read copy |
+| Franzelli et al. 2012 (BFER) | 10.1016/j.combustflame.2011.08.004 | closed | no | DOI confirmed; parameters need a read copy |
+| GRI-Mech 3.0, DRM19 | combustion.berkeley.edu (HTTP) | disclaimer, **no licence** | yes | **decision: user path, not vendored** (§129.6) |
+| Sandu et al. 1997 | 10.1016/S1352-2310(97)83212-8 | green OA (CWI) | yes | **ROS4 not printed there**: ROS4 named, ROS3 added |
+| Hairer & Wanner 1996 | 10.1007/978-3-642-05221-7 | book | no | — |
+| Shampine 1982 | 10.1145/355993.355994 | free on ACM, bot-walled here | no | added (ROS4 primary) |
+| Kaps & Rentrop 1979 | 10.1007/BF01396495 | closed | no | added (ROS4 primary) |
+| Mazzia & Magherini test set 2.4 | archimede.uniba.it/~testset/ | open | site reached | — |
+| Strang 1968 | 10.1137/0705041 | closed | no | DOI confirmed |
+| Niemeyer & Sung 2014; Curtis et al. 2017; pyJac 2017 | the three DOIs above | closed | no | DOIs confirmed |
+| Day & Bell 2000 | 10.1088/1364-7830/4/4/309 | green OA (UNT) | yes | DOI confirmed; **(133.5) adopted from it** |
+| Wilke 1950 | 10.1063/1.1747673 | closed | via RP-1311 (5.3)/(5.5) | DOI confirmed |
+| Neufeld et al. 1972 | 10.1063/1.1678363 | closed | no | DOI confirmed; **route (b) waits for a read copy** |
+| Mathur et al. 1967 | 10.1080/00268976700100731 | closed | no | DOI confirmed; **RP-1311 (5.4)/(5.6) is the v1 conductivity** |
+| Konnov et al. 2018 | 10.1016/j.pecs.2018.05.003 | **closed** (OpenAlex; Lund holds a metadata record and no file) | no | the plan's "open access, to be confirmed": **it is not open**; CHR-00c/CHR-13 need a read copy or name G-FLAME NOT RUN |
+| FDS TRG | firemodels/fds `e14ec3f` | public domain | yes (kinetic theory) | — |
+| Rehm & Baum 1978; Majda & Sethian 1985 | 10.6028/jres.083.019; 10.1080/00102208508960376 | — | §25's sources | DOIs confirmed |
+
+---

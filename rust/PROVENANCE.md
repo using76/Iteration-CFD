@@ -618,6 +618,27 @@ links against no part of OpenFOAM and contains no OpenFOAM source.
 The `FoamFile` banner these write is ofgpu's own, and states plainly that the
 file is written by ofgpu in that format. It is not the upstream banner.
 
+## Finite-rate chemistry — literature and format (DRAFT rows, tranche 17)
+
+These rows were written by CHR-00a before any of the files exist. They are
+**DRAFT** rows. Each unit that creates a file replaces its row's DRAFT mark
+with what the file's own header says, and adds anything else it read. No file
+here may consult GRI-Mech's, Cantera's, pyJac's or SUNDIALS' code, or any
+GPL/LGPL/AGPL combustion code; their documentation is cited by name only. The
+references and their read/not-read status are SPEC-LIT §133.6.
+
+| File (to be created) | SPEC-LIT | Primary sources | Unit |
+|---|---|---|---|
+| `src/chem.rs`, `src/chem/thermo.rs`, `src/chem/tests_thermo.rs` | §128 | **DRAFT.** McBride, Gordon & Reno, NASA TM-4513 (1993), NTRS 19940013151, eqs. (1)-(5), public domain; Kee, Rupley & Miller, *Chemkin-II*, SAND89-8009 (1989), OSTI 5681118, eqs. (1)-(47). The atomic weights are IUPAC 1991 as TM-4513 uses them (§128.2) | CHR-01 |
+| `src/chem/ck_lexer.rs`, `src/chem/mechanism.rs` | §129 | **DRAFT. format.** SAND89-8009 Chapter IV, Tables I-V; Kee, Rupley, Meeks & Miller, *CHEMKIN-III*, SAND96-8216 (1996), OSTI 481621, pp. 46-54. Written from the manuals' rules, never from a reader's code | CHR-02a, CHR-02b |
+| `cases/mech/wd1.ck`, `cases/mech/jl4.ck`, `cases/mech/bfer2.ck`, `cases/mech/README.md` | §129.6 | **DRAFT. Data**, transcribed from a read copy of Westbrook & Dryer (1981), Jones & Lindstedt (1988) and Franzelli et al. (2012), with table and page; the files do not exist until such a copy is read. GRI-Mech 3.0 and DRM19 are **not vendored** (no licence, §129.6) | CHR-02a, CHR-02b |
+| `src/chem/kinetics.rs` | §130 | **DRAFT.** SAND89-8009 eqs. (48)-(70); SAND96-8216 p. 52 (FORD/RORD). The Troe, SRI and Lindemann forms are as SAND89-8009 states them, citing Gilbert, Luther & Troe (1983), Stewart, Larson & Golden (1989) and Lindemann (1922) | CHR-03 |
+| `src/chem/equilibrium.rs` | §131 | **DRAFT.** Gordon & McBride, NASA RP-1311 (1994), NTRS 19950013764, eqs. (2.7)-(2.29), §§3.1-3.3, public domain | CHR-04 |
+| `src/chem/rosenbrock.rs`, `src/chem/reactor.rs` | §132 | **DRAFT.** Sandu et al., *Atmos. Environ.* 31 (1997) 3459, DOI 10.1016/S1352-2310(97)83212-8 (formula (4), §3.3, the RODAS3 and ROS3 coefficients), read from the CWI open copy; Hairer & Wanner (1996) §IV.7 as the textbook statement | CHR-05, CHR-06 |
+| `src/chem/device.rs`, `cuda/chem.cu` | §132.6, §118 | **DRAFT.** The device twin of the files above. Chemistry is `double` in both builds (`typedef double ofchem`); the scope is §118's | CHR-07a, CHR-07b |
+| `src/chem/transport.rs` | §133.4 | **DRAFT.** NASA TM-4513 eq. (10); NASA RP-1311 eqs. (5.3)-(5.6); the FDS Technical Reference Guide (NIST, public domain), kinetic-theory forms. This repository does not carry the FDS tree. Chapman-Enskog diffusion waits for a read copy of Neufeld, Janzen & Aziz (1972) | CHR-08 |
+| `src/chem/source.rs` | §132.5, §133.1-§133.3 | **DRAFT.** Day & Bell, *Combust. Theory Model.* 4 (2000) 535, DOI 10.1088/1364-7830/4/4/309, eqs. (1)-(8) and its species-flux redistribution, read from the UNT open copy | CHR-09, CHR-10b |
+
 ## Permissive references
 
 | Source | Licence | Used for |
