@@ -1,0 +1,10 @@
+# F. Mazzia and C. Magherini, "Test Set for Initial Value Problem Solvers", release 2.4,
+# Department of Mathematics, University of Bari and INdAM, Research Unit of Bari (February 2008),
+# problem ROBER (H. H. Robertson, 1966), report rober.pdf pp. II-10-1 to II-10-3: y' = f(y) of
+# eq. (II.10.1) with k1 = 0.04, k2 = 3e7 and k3 = 1e4, y(0) = (1, 0, 0), integrated over
+# t in [0, 1e11]; Table II.10.3, the reference solution at t = 1e11 (RADAU, uround = 1.01e-19,
+# rtol = atol = h0 = 1.1e-18). Printed as 0.d * 10^-e; written here in E notation, digit for digit.
+component,t_end,y0,y_ref
+1,1.0E+11,1.0,0.2083340149701255E-07
+2,1.0E+11,0.0,0.8333360770334713E-13
+3,1.0E+11,0.0,0.9999999791665050

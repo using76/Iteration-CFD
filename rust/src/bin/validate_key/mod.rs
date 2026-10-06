@@ -796,7 +796,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 20, "twenty markers, found {markers:?}");
+        assert_eq!(markers.len(), 23, "twenty-three markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -818,6 +818,9 @@ mod tests {
                 "kadoya1985-tables-8-12",
                 "nasa-glenn2002-coefficients",
                 "nasa-glenn2002-table-B1",
+                "mcbride-gordon-reno1993-table-II",
+                "ivptestset2008-rober",
+                "ivptestset2008-hires",
             ]
         );
         for row in &m.rows {
@@ -836,5 +839,336 @@ mod tests {
             };
             println!("  [answer-key] {}  {kind}  {}  {}", row.id, row.file, row.sha256);
         }
+    }
+
+    // ------------------------------------------------- chemistry answer keys --
+
+    /// The gas constant the TM-4513 coefficients were generated with,
+    /// J/(mol K) (SPEC-LIT section 128.5; Gate 100-B uses the same value).
+    const TM4513_R: f64 = 8.314510;
+
+    /// cp/R, TM-4513 eq. (1) = SPEC-LIT eq. (128.1), `a = [a1..a7]` of one row.
+    fn tm4513_cp_r(a: &[f64; 7], t: f64) -> f64 {
+        let t2 = t * t;
+        a[0] + a[1] * t + a[2] * t2 + a[3] * t2 * t + a[4] * t2 * t2
+    }
+
+    /// H/(R T), TM-4513 eq. (2) = SPEC-LIT eq. (128.2).
+    fn tm4513_h_rt(a: &[f64; 7], t: f64) -> f64 {
+        let t2 = t * t;
+        a[0] + a[1] * t / 2.0 + a[2] * t2 / 3.0 + a[3] * t2 * t / 4.0 + a[4] * t2 * t2 / 5.0
+            + a[5] / t
+    }
+
+    /// S/R, TM-4513 eq. (3) = SPEC-LIT eq. (128.3).
+    fn tm4513_s_r(a: &[f64; 7], t: f64) -> f64 {
+        let t2 = t * t;
+        a[0] * t.ln() + a[1] * t + a[2] * t2 / 2.0 + a[3] * t2 * t / 3.0 + a[4] * t2 * t2 / 4.0
+            + a[6]
+    }
+
+    /// The element counts of a TM-4513 species code, as (count, weight) pairs
+    /// over SPEC-LIT section 128.2's weights, g/mol.
+    fn tm4513_elements(code: i64) -> &'static [(f64, f64)] {
+        const H: f64 = 1.00794;
+        const C: f64 = 12.011;
+        const N: f64 = 14.00674;
+        const O: f64 = 15.9994;
+        match code {
+            1 => &[(2.0, N)],
+            2 => &[(2.0, O)],
+            5 => &[(1.0, C), (4.0, H)],
+            6 => &[(1.0, C), (2.0, O)],
+            7 => &[(2.0, H), (1.0, O)],
+            8 => &[(1.0, C), (1.0, O)],
+            9 => &[(2.0, H)],
+            10 => &[(1.0, O), (1.0, H)],
+            11 => &[(1.0, O)],
+            12 => &[(1.0, H)],
+            _ => unreachable!("no TM-4513 species code {code}"),
+        }
+    }
+
+    #[test]
+    fn tm4513_records_meet_at_1000_k_and_reproduce_their_printed_weight_and_h298() {
+        // answer-key: mcbride-gordon-reno1993-table-II
+        const ID: &str = "mcbride-gordon-reno1993-table-II";
+        let key = load(ID).expect("the TM-4513 Table II key loads");
+        // The row indices below follow this header.
+        assert_eq!(
+            key.columns,
+            [
+                "species", "t_lo", "t_hi", "mol_weight", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+                "h298_r",
+            ],
+            "{ID}: the header row"
+        );
+        assert_eq!(key.rows.len(), 20, "{ID}: ten species, two rows each");
+        let col = |name: &str| {
+            key.column(name)
+                .unwrap_or_else(|e| panic!("{ID}: the column {name}: {e}"))
+        };
+        let species = col("species");
+        let t_lo = col("t_lo");
+        let t_hi = col("t_hi");
+        let mol_weight = col("mol_weight");
+        let h298_r = col("h298_r");
+        // [a1..a7] of each row, columns 4..=10 of the asserted header.
+        let coeffs: Vec<[f64; 7]> = key
+            .rows
+            .iter()
+            .map(|r| [r[4], r[5], r[6], r[7], r[8], r[9], r[10]])
+            .collect();
+        assert_eq!(
+            species,
+            [
+                1.0, 1.0, 2.0, 2.0, 5.0, 5.0, 6.0, 6.0, 7.0, 7.0, 8.0, 8.0, 9.0, 9.0, 10.0, 10.0,
+                11.0, 11.0, 12.0, 12.0,
+            ],
+            "{ID}: the species column, two rows per code"
+        );
+        for (k, code) in species.iter().step_by(2).enumerate() {
+            let (u, l) = (2 * k, 2 * k + 1);
+            assert_eq!(
+                (t_lo[u], t_hi[u]),
+                (1000.0, 6000.0),
+                "{ID}: row {u} (species {code}) is the 1000-6000 K row"
+            );
+            assert_eq!(
+                (t_lo[l], t_hi[l]),
+                (200.0, 1000.0),
+                "{ID}: row {l} (species {code}) is the 200-1000 K row"
+            );
+            assert_eq!(
+                mol_weight[u], mol_weight[l],
+                "{ID}: species {code}: mol_weight agrees on rows {u} and {l}"
+            );
+            assert_eq!(
+                h298_r[u], h298_r[l],
+                "{ID}: species {code}: h298_r agrees on rows {u} and {l}"
+            );
+            // The fit at T_mid = 1000 K: the two rows' eqs. (1)-(3) agree
+            // there to 1e-7 relative (worst measured 2.54e-8, CH4 H/RT).
+            let at_mid = [
+                (
+                    tm4513_cp_r(&coeffs[u], 1000.0),
+                    tm4513_cp_r(&coeffs[l], 1000.0),
+                ),
+                (
+                    tm4513_h_rt(&coeffs[u], 1000.0),
+                    tm4513_h_rt(&coeffs[l], 1000.0),
+                ),
+                (
+                    tm4513_s_r(&coeffs[u], 1000.0),
+                    tm4513_s_r(&coeffs[l], 1000.0),
+                ),
+            ];
+            let mut jump = [0.0; 3];
+            for (j, &(fu, fl)) in at_mid.iter().enumerate() {
+                jump[j] = (fu - fl).abs() / fu.abs().max(fl.abs()).max(1.0);
+                assert!(
+                    jump[j] <= 1.0e-7,
+                    "{ID}: species {code} rows {u}/{l}: eq. ({}) is {:e} apart at 1000 K, over 1e-7",
+                    j + 1,
+                    jump[j]
+                );
+            }
+            // The printed H(298.15)/R, from the LOWER row's coefficients
+            // (worst measured 6.40e-5, O).
+            let h298 = 298.15 * tm4513_h_rt(&coeffs[l], 298.15);
+            let dh = (h298 - h298_r[l]).abs();
+            assert!(
+                dh <= 1.0e-4,
+                "{ID}: species {code} rows {u}/{l}: H(298.15)/R evaluates to {h298}, printed {}",
+                h298_r[l]
+            );
+            // The printed molecular weight, from section 128.2's weights
+            // (half the printed fifth decimal; worst measured 3.6e-15).
+            let weight: f64 = tm4513_elements(*code as i64)
+                .iter()
+                .map(|(n, w)| n * w)
+                .sum();
+            let dw = (weight - mol_weight[l]).abs();
+            assert!(
+                dw <= 5.0e-6,
+                "{ID}: species {code} rows {u}/{l}: the weights sum to {weight}, printed {}",
+                mol_weight[l]
+            );
+            println!(
+                "  [answer-key] tm4513  species {}  fit 1000 K {:e}  H(298.15)/R {:e}  weight {:e}",
+                code,
+                jump[0].max(jump[1]).max(jump[2]),
+                dh,
+                dw
+            );
+        }
+        // Exact transcriptions, the spot rows a retyping would bend first.
+        assert_eq!(coeffs[4][0], 1.63552643, "{ID}: row 4 (CH4, 1000-6000 K) a1");
+        assert_eq!(coeffs[15][5], 3615.08056, "{ID}: row 15 (OH, 200-1000 K) a6");
+        assert_eq!(coeffs[19][0], 2.5, "{ID}: row 19 (H, 200-1000 K) a1");
+        for (j, a) in coeffs[19].iter().enumerate().skip(1).take(4) {
+            assert_eq!(*a, 0.0, "{ID}: row 19 (H, 200-1000 K) a{}", j + 1);
+        }
+        assert_eq!(h298_r[0], 0.0, "{ID}: row 0 (N2) h298_r");
+        assert_eq!(h298_r[17], 29968.7009, "{ID}: row 17 (O, 200-1000 K) h298_r");
+    }
+
+    #[test]
+    fn table_b1_holds_twelve_species_and_meets_the_tm4513_records() {
+        const ID: &str = "nasa-glenn2002-table-B1";
+        const TM: &str = "mcbride-gordon-reno1993-table-II";
+        let b1 = load(ID).expect("the Table B1 key loads");
+        let tm = load(TM).expect("the TM-4513 Table II key loads");
+        assert_eq!(
+            b1.columns,
+            ["species", "mol_weight", "cp_298", "dfh_298"],
+            "{ID}: the header row"
+        );
+        assert_eq!(b1.rows.len(), 12, "{ID}: twelve species");
+        let col = |k: &KeyFile, name: &str| {
+            k.column(name)
+                .unwrap_or_else(|e| panic!("{}: the column {name}: {e}", k.id))
+        };
+        let species = col(&b1, "species");
+        let cp_298 = col(&b1, "cp_298");
+        let dfh_298 = col(&b1, "dfh_298");
+        assert_eq!(
+            species,
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            "{ID}: the species column, in code order"
+        );
+        assert_eq!(cp_298[0], 29.124, "{ID}: row 0 (N2) cp_298, as Gate 100-B reads it");
+        assert_eq!(cp_298[2], 20.786, "{ID}: row 2 (Ar) cp_298");
+        assert_eq!(dfh_298[3], -0.126, "{ID}: row 3 (Air) dfh_298");
+        assert_eq!(b1.rows[4][1], 16.04246, "{ID}: row 4 (CH4) mol_weight");
+        assert_eq!(dfh_298[9], 37.278, "{ID}: row 9 (OH) dfh_298");
+        assert_eq!(dfh_298[11], 217.999, "{ID}: row 11 (H) dfh_298");
+
+        let tm_species = col(&tm, "species");
+        let tm_h298_r = col(&tm, "h298_r");
+        // [a1..a7] of each TM-4513 row, columns 4..=10 of its header.
+        let coeffs: Vec<[f64; 7]> = tm
+            .rows
+            .iter()
+            .map(|r| [r[4], r[5], r[6], r[7], r[8], r[9], r[10]])
+            .collect();
+        for (k, code) in tm_species.iter().step_by(2).enumerate() {
+            let l = 2 * k + 1;
+            let at = species
+                .iter()
+                .position(|s| s == code)
+                .unwrap_or_else(|| panic!("{ID}: no row names species {code}"));
+            // Cp(298.15) from the 200-1000 K row against the B1 column: the
+            // 0.1 % is the fit difference between the seven- and
+            // nine-coefficient forms (SPEC-LIT section 128.7; worst measured
+            // 1.95e-5, O).
+            let cp = TM4513_R * tm4513_cp_r(&coeffs[l], 298.15);
+            let dcp = (cp - cp_298[at]).abs() / cp_298[at];
+            assert!(
+                dcp <= 1.0e-3,
+                "{TM}: species {code} against {ID} row {at}: cp(298.15) is {cp} against {} (rel {dcp:e})",
+                cp_298[at]
+            );
+            // Delta_f H(298.15): the row's H(298.15)/R in K, times R, in
+            // kJ/mol, against the B1 column.
+            let d = TM4513_R * tm_h298_r[l] / 1000.0 - dfh_298[at];
+            if *code as i64 == 10 {
+                // TM-4513's OH record (TPIS78) and TP-2002's Table B1 adopt
+                // different heats of formation of OH, 39.347106 against
+                // 37.278 kJ/mol. The difference is a fact of the two printed
+                // tables, pinned here so nobody meets it unannounced.
+                assert!(
+                    (d - 2.069106).abs() <= 1.0e-5,
+                    "{TM}: species 10 (OH) against {ID} row {at}: the heat-of-formation gap is {d} kJ/mol, pinned 2.069106"
+                );
+            } else {
+                assert!(
+                    d.abs() <= 0.010,
+                    "{TM}: species {code} against {ID} row {at}: the heat of formation differs by {d} kJ/mol"
+                );
+            }
+            println!(
+                "  [answer-key] b1  species {}  cp {:.6}  cp_298 {}  rel {:e}  d {:+.6}",
+                code, cp, cp_298[at], dcp, d
+            );
+        }
+    }
+
+    #[test]
+    fn ivp_testset_references_hold_their_invariants() {
+        // answer-key: ivptestset2008-rober
+        // answer-key: ivptestset2008-hires
+        const ROBER: &str = "ivptestset2008-rober";
+        const HIRES: &str = "ivptestset2008-hires";
+        let rober = load(ROBER).expect("the ROBER reference loads");
+        let hires = load(HIRES).expect("the HIRES reference loads");
+        for (k, id) in [(&rober, ROBER), (&hires, HIRES)] {
+            assert_eq!(
+                k.columns,
+                ["component", "t_end", "y0", "y_ref"],
+                "{id}: the header row"
+            );
+        }
+
+        // ROBER, Table II.10.3 at t = 1e11.
+        assert_eq!(rober.rows.len(), 3, "{ROBER}: three components");
+        let rcol = |name: &str| {
+            rober.column(name)
+                .unwrap_or_else(|e| panic!("{ROBER}: the column {name}: {e}"))
+        };
+        let component = rcol("component");
+        let t_end = rcol("t_end");
+        let y0 = rcol("y0");
+        let y_ref = rcol("y_ref");
+        assert_eq!(component, [1.0, 2.0, 3.0], "{ROBER}: the component column");
+        for (i, t) in t_end.iter().enumerate() {
+            assert_eq!(*t, 1.0e11, "{ROBER}: row {i}: t_end");
+        }
+        assert_eq!(y0, [1.0, 0.0, 0.0], "{ROBER}: the y0 column, y(0) = (1, 0, 0)");
+        assert_eq!(y_ref[0], 2.083340149701255e-8, "{ROBER}: row 0: y_ref");
+        assert_eq!(y_ref[1], 8.333360770334713e-14, "{ROBER}: row 1: y_ref");
+        assert_eq!(y_ref[2], 0.999999979166505, "{ROBER}: row 2: y_ref");
+        // ROBER conserves mass, y1 + y2 + y3 = 1. The reference's own defect
+        // is -1.02e-14; the guard catches a mistyped digit of y3.
+        let mass = y_ref[0] + y_ref[1] + y_ref[2] - 1.0;
+        assert!(
+            mass.abs() <= 2.0e-14,
+            "{ROBER}: y1 + y2 + y3 - 1 is {mass:e}, beyond 2e-14"
+        );
+        println!("  [answer-key] rober sum - 1 = {mass:e}");
+
+        // HIRES, Table II.1.1 at t = 321.8122.
+        assert_eq!(hires.rows.len(), 8, "{HIRES}: eight components");
+        let hcol = |name: &str| {
+            hires.column(name)
+                .unwrap_or_else(|e| panic!("{HIRES}: the column {name}: {e}"))
+        };
+        let component = hcol("component");
+        let t_end = hcol("t_end");
+        let y0 = hcol("y0");
+        let y_ref = hcol("y_ref");
+        assert_eq!(
+            component,
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "{HIRES}: the component column"
+        );
+        for (i, t) in t_end.iter().enumerate() {
+            assert_eq!(*t, 321.8122, "{HIRES}: row {i}: t_end");
+        }
+        assert_eq!(
+            y0,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0057],
+            "{HIRES}: the y0 column"
+        );
+        assert_eq!(y_ref[0], 7.371312573325668e-4, "{HIRES}: row 0: y_ref");
+        assert_eq!(y_ref[7], 2.850001604814231e-3, "{HIRES}: row 7: y_ref");
+        // HIRES conserves y7 + y8, the enzyme E free and bound (f7 = -f8 in
+        // the report's section 1.2); the reference holds it to 0.0 in f64.
+        let enzyme = y_ref[6] + y_ref[7] - 0.0057;
+        assert!(
+            enzyme.abs() <= 1.0e-17,
+            "{HIRES}: y7 + y8 - 0.0057 is {enzyme:e}, beyond 1e-17"
+        );
+        println!("  [answer-key] hires y7 + y8 - 0.0057 = {enzyme:e}");
     }
 }
