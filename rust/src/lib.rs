@@ -100,6 +100,7 @@ pub mod blockgen;
 pub mod io;
 pub mod reference;
 pub mod surface;
+pub mod tetmesh;
 
 /// The CUDA-graph capture gate of SPEC-LIT §81: every module that puts work
 /// on the device is gated, excused by name, or fails the registry check.

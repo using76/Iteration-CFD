@@ -25585,11 +25585,15 @@ Not implemented in tranche 1. Specified here because §92.3's gate is the
 same gate, and because the ammonia case is the proof that the interesting
 work in a tetrahedral path is not the generation but the **repair**.
 
-**Generation is external.** Gmsh (Geuzaine & Remacle, *Int. J. Numer. Meth.
+**Generation is native: §116.** Tranche 17 builds the generator inside the
+crate (`rust/src/tetmesh/`, `kind: "tet"` in the automesher config), from the
+papers §116.19 lists, with no GPL, LGPL or AGPL source read or linked. Until
+then generation was external: Gmsh (Geuzaine & Remacle, *Int. J. Numer. Meth.
 Engng* **79** (2009) 1309-1331, DOI `10.1002/nme.2579`) is **GPL-2.0-or-later**
-and is therefore run as a separate process over its own file formats, exactly
-as `tools/mesh/step_mesh.py` already runs it: **no Gmsh source is read and no
-Gmsh code is linked**. fTetWild (Hu, Schneider, Wang, Zorin & Panozzo, *ACM
+and was run as a separate process over its own file formats by
+`tools/mesh/step_mesh.py`, which remains as the optional external STEP route
+outside the product path (§116.1): **no Gmsh source is read and no Gmsh code
+is linked**. fTetWild (Hu, Schneider, Wang, Zorin & Panozzo, *ACM
 Trans. Graph.* **39**(4) (2020) 117, DOI `10.1145/3386569.3392385`) is
 **MPL-2.0** and therefore readable; its envelope-based approach is the
 alternative generator, and its licence would have to be recorded in
@@ -25626,7 +25630,9 @@ R1 and R2 are Freitag & Ollivier-Gooch's own pairing, and their result — that
 swapping and smoothing alternated beat either alone — is why they are ordered
 this way rather than run to convergence separately. R3 is named here because
 a sliver is the one defect R1 and R2 provably cannot always remove, and
-because it is the defect the ammonia run actually had.
+because it is the defect the ammonia run actually had. In the native
+generator R1 is §116.14's smoothing, R2 its flips, R4 §116.12's component
+rule, and R3 the budgeted fix if §116.14's dihedral gate misses.
 
 ### 92.5 The polyhedral path — tranche 3
 
@@ -34912,5 +34918,707 @@ gate5 probe: Kr x 1.0992489, Ra 1e4, Kr 0.1: Nu 0.41067 hot 0.41064 iface 0.4106
 
 House items: no numerics change, no new file, no kernel, no capture row, no
 gate; the library gains one ignored test (2150 listed).
+
+---
+
+## 116. The native tetrahedral mesher - conforming Delaunay, Delaunay refinement, then prisms by post-inflation
+
+`No GPL-licensed source was consulted.`
+
+Tranche 17 builds the tetrahedral path that §92.4 specified and left external. The
+user's order was "격자: gmsh는 라이센스문제로 안되는 문제없는 사면체로 구축필요": gmsh's
+licence rules it out, so we build a tetrahedral mesher with no licence problem. This section
+is the contract of `rust/src/tetmesh/` and of every TET unit of docs/17 §12.5. Each
+subsection names the unit that implements it. A unit adds its measured numbers to §116.18 and
+changes nothing else here without saying so in that section.
+
+### 116.1 What this replaces, and the licence position
+
+Before tranche 17 the only tetrahedral generator was gmsh, run as a separate process by
+`tools/mesh/step_mesh.py` (STEP -> OCC -> gmsh Delaunay, §92.4). Gmsh is GPL-2.0-or-later
+(Geuzaine & Remacle 2009). The STEP route needs OCC, which is LGPL-2.1, and CAD is outside
+tranche 17. That route therefore stays an optional external program outside the product path
+(TET-16 documents it). The native path takes **closed STL/OBJ surfaces** through the existing
+readers (§23.1, §23.2) and writes a tetrahedral, or tetrahedral plus prism, `polyMesh`.
+
+| status | sources |
+|---|---|
+| never read or linked | Gmsh (GPL), TetGen (AGPL-3.0), CGAL Mesh_3 (GPL), Netgen (LGPL), OCC (LGPL), OpenFOAM (GPL), and Triangle (Shewchuk's non-free licence: the papers are read, the code is not) |
+| readable as a cross-check, with a PROVENANCE row if a unit opens it | Shewchuk's `predicates.c` (public domain), Geogram (BSD-3, Lévy 2016's PCK) |
+| read | the papers of §116.19, and nothing else |
+
+No crate is added. Threads come from `std::thread::scope` (TET-15).
+
+### 116.2 Precision: the geometry is f64 in both builds
+
+`Vec3` and `PolyMeshRaw.points` are `Scalar`-typed (§112), so a mesher written in them would
+run its predicates in f32 under `--features single`. Exact predicates cannot work in f32 that
+way: the error bounds of §116.4 are f64 bounds. So:
+
+1. Every coordinate inside `tetmesh` is `tetmesh::Point = [f64; 3]`. Sizes and lengths are
+   `f64`, whatever `Scalar` is. No `tetmesh` function takes or returns `Scalar`, except the
+   emitter of §116.16.
+2. The emitter is the only place a point becomes `Scalar`. Under `single` it checks every
+   cell after rounding, by (116.26), and refuses the run if a cell flips, naming the cells.
+   That check is a new refusal. It loosens nothing.
+3. Precision classes (docs/17 §5.1.4): every `tetmesh` gate below is evaluated in f64 in both
+   builds. Each gate therefore has the same tolerance in both builds, and its class is D
+   (discrete) or A (an accumulated identity evaluated in f64). The only P-class (physics) gate
+   is §116.17's Poiseuille solve, which runs in the solver.
+
+### 116.3 The pipeline and its configuration
+
+```
+surfaces (STL/OBJ, one patch per solid name)          the existing readers, §23
+  -> validate: closed, oriented, no self-intersection; features, corners, seams    §116.9
+  -> size field h(x) on a background octree                                       §116.8
+  -> isotropic surface remesh to h(x), features and seams held                    §116.10
+  -> Delaunay tetrahedralisation of the remeshed vertices (and the domain box)    §116.6
+  -> conforming boundary recovery: Steiner points ON the surface only             §116.11
+  -> carve: flood fill across non-surface faces                                   §116.12
+  -> Delaunay refinement: radius-edge B and size c h(x)                           §116.13
+  -> optimisation: flips, smoothing, sliver perturbation                          §116.14
+  -> prism layers by post-inflation                                               §116.15
+  -> emit PolyMeshRaw, §92.3's gate, the summary JSON                             §116.16
+```
+
+**Why conforming, not constrained.** A constrained Delaunay tetrahedralisation with no new
+boundary points needs flip-and-Steiner recovery machinery. That is the hardest, longest-tail
+part of a tetrahedral mesher, and it does not divide into units of 30 to 90 minutes. We remesh
+the surface anyway, so new points on the piecewise-linear surface cost nothing geometrically.
+Conforming recovery then needs three things: point insertion, which we must have anyway; an
+encroachment rule (116.15); and a protection rule for small angles (§116.11). All three come
+from published algorithms that provably terminate (Shewchuk 1998; Murphy, Mount & Gable
+2001; Cohen-Steiner, Colin de Verdière & Yvinec 2004).
+
+**Why prisms come after the tetrahedra.** When prisms are grown first, any Steiner point that
+recovery puts on the layer top has to be propagated down its prism column. Post-inflation
+avoids that. It displaces the finished volume mesh off the wall and fills the gap with prisms
+(§116.15), so the interface is conformal by construction.
+
+**Plan B.** If recovery proves unreliable on real geometry (TET-18), the fallback is isosurface
+stuffing on the existing octree plus feature snapping (Labelle & Shewchuk 2007), about four
+extra units. Stuffing has excellent dihedral bounds, but it approximates the surface, and it
+does not hold sharp features or patch seams by itself. That is why it is the fallback and not
+the design.
+
+**Configuration.** The automesher gains `kind: "hexDominant" | "tet"` (TET-12). The default is
+`hexDominant`, so no existing config or golden changes. It also gains a `tet` block, which
+deserialises into `tetmesh::TetSpec`. The tet path reuses `input`, `domain`, `refinement`
+(bands, boxes, `feature_angle_deg`, `max_level`), `castellation`'s `keep_region`, `seed_point`
+and `bodies` (the carve of §116.12), `layers` (`patches`, `n`, `first_thickness`, `growth`),
+`quality` and `output`. `TetSpec` holds only what the tet path adds. Every struct carries
+`deny_unknown_fields`, so a mistyped key is refused by name as everywhere else in the automesher config, and every field has a
+default, so `"tet": {}` is a complete block.
+
+| key | default | meaning | used by |
+|---|---|---|---|
+| `size.gradation` | `1.2` | `g` of (116.7): the size grows by at most `g - 1` per metre of distance | §116.8 |
+| `size.curvature_cells` | `16` | `n_curv` of (116.9). `0` turns the curvature source off | §116.8 |
+| `size.gap_cells` | `3` | `n_gap` of (116.10). `0` turns the proximity source off | §116.8 |
+| `size.min_size` | none | `h_min` of (116.12), metres. Absent means `H / 64` | §116.8 |
+| `recover.protect_angle_deg` | `90` | input angles below this get a protecting ball | §116.11 |
+| `recover.max_passes` | `64` | the cap on recovery passes. It is reported, never silently passed | §116.11 |
+| `refine.radius_edge` | `2` | `B` of (116.17) | §116.13 |
+| `refine.size_factor` | `sqrt(6)/4` | `c` of (116.18): the circumradius of the regular tetrahedron with edge `h` is `c h` | §116.13 |
+| `refine.max_inserted_points` | `50000000` | the cap on refinement insertions. It is reported, never silently passed | §116.13 |
+| `optimise.passes` | `8` | the number of flip/smooth alternations (§92.4's R1 and R2) | §116.14 |
+| `optimise.target_min_dihedral_deg` | `10` | the optimiser's goal for the smallest dihedral angle | §116.14 |
+| `optimise.target_max_dihedral_deg` | `165` | the optimiser's goal for the largest dihedral angle | §116.14 |
+| `optimise.perturb_slivers` | `true` | run the sliver perturbation of §116.14 | §116.14 |
+| `optimise.perturb_seed` | `1` | the seed of that perturbation's deterministic generator | §116.14 |
+| `layers.max_neighbour_ratio` | `1.5` | (116.24c) | §116.15 |
+| `layers.gap_fraction` | `0.5` | (116.24a) | §116.15 |
+| `layers.concave_fraction` | `0.5` | (116.24b) | §116.15 |
+
+The two dihedral **targets** are where the optimiser stops trying. They are not gates. The
+gates are §116.18's fixture bars, which are fixed here and never read from a config. The
+defaults are the published benchmark bounds that docs/17 §10.1 A17 adopted before
+measurement.
+
+`TetSpec::validate` refuses each of the following by naming the field and the value:
+
+- `size.gradation < 1`, or non-finite. With `g = 1` the size is the same everywhere, which is
+  legal.
+- `size.min_size` present and not finite and `> 0`.
+- `recover.protect_angle_deg` outside `(0, 180)`.
+- `recover.max_passes = 0`.
+- `refine.radius_edge < 2`, or non-finite. Shewchuk 1998's termination guarantee is for a
+  bound of two or more.
+- `refine.size_factor` not finite and `> 0`.
+- `refine.max_inserted_points = 0`.
+- `optimise.passes = 0`.
+- dihedral targets that are not `0 < min < max < 180`.
+- `layers.max_neighbour_ratio < 1`, or non-finite.
+- `layers.gap_fraction` or `layers.concave_fraction` outside `(0, 1]`.
+
+### 116.4 Orientation and the exact predicates
+
+**Implemented by TET-01** (`tetmesh/predicates.rs`).
+
+```
+orient3d(a, b, c, d) = det [ a - d ; b - d ; c - d ]          (rows are 3-vectors)        (116.1)
+
+insphere(a, b, c, d, e) = det [ a - e , |a - e|^2 ;
+                                b - e , |b - e|^2 ;
+                                c - e , |c - e|^2 ;
+                                d - e , |d - e|^2 ]                                          (116.3)
+```
+
+These are Shewchuk's (1997) definitions, with his signs. `orient3d > 0` when `d` lies below
+the plane through `a, b, c`, where "below" means the side opposite the right-hand normal
+`(b - a) x (c - a)`. `insphere > 0` when `e` lies inside the sphere through `a, b, c, d`,
+provided `orient3d(a, b, c, d) > 0`. Its sign reverses otherwise.
+
+**The tetrahedron convention.** A stored tetrahedron `(v0, v1, v2, v3)` has
+`orient3d(v0, v1, v2, v3) > 0`, and its volume is
+
+```
+V(T) = orient3d(v0, v1, v2, v3) / 6  > 0                                                    (116.2)
+```
+
+Its four faces, each wound so that its right-hand normal points OUT of the tetrahedron, are:
+
+| face opposite | vertices, outward-wound |
+|---|---|
+| `v3` | `(v0, v1, v2)` |
+| `v2` | `(v0, v3, v1)` |
+| `v1` | `(v0, v2, v3)` |
+| `v0` | `(v1, v3, v2)` |
+
+For each row, `orient3d(face, opposite vertex) > 0`. The supervisor's probe checked all four
+rows and (116.2)'s sign exactly on the unit tetrahedron `(0,0,0), (1,0,0), (0,0,1), (0,1,0)`,
+where `orient3d = 1`. That ordering is the right-hand volume's negative: its right-hand
+`(1/6)(v1 - v0).((v2 - v0) x (v3 - v0))` is `-1/6`. Use (116.2), never the right-hand form.
+
+**Exactness.** Both predicates return the exact sign of the determinant of the f64 inputs.
+They use Shewchuk's (1997) adaptive stages: a floating-point filter with his error bound, then
+exact expansion arithmetic only when the filter cannot decide. The implementation is written
+from the paper. The public-domain `predicates.c` may be opened as a cross-check, and it gets a
+PROVENANCE row if it is. Lévy's (2016) PCK is the second cross-check. Integer coordinates with
+`|x| < 2^20` make the determinant exactly representable in `i128`, so TET-01's gate compares
+against `i128` arithmetic.
+
+### 116.5 Symbolic perturbation: an `insphere` that is never zero
+
+**Implemented by TET-02** (`tetmesh/perturb.rs`).
+
+Cospherical points, such as every lattice, make (116.3) zero, and a Delaunay kernel that
+branches on zero is a kernel with special cases. We perturb the lifting map symbolically
+(Edelsbrunner & Mücke 1990, simulation of simplicity; specialised to Delaunay by Devillers &
+Teillaud 2011). Each point `p_i` with global vertex index `i` is lifted to
+`(p_i, |p_i|^2 + eps_i)`, with `eps_i >> eps_k > 0` whenever `i > k`. (116.3) is the 5x5 lifted
+determinant `det [p_j, |p_j|^2, 1]`, which is linear in the lifted column. The perturbed sign
+therefore expands to:
+
+```
+if insphere(P) != 0:   sign(P) = sign(insphere(P))
+else:  for the argument positions j = 0..4 taken in DECREASING order of global vertex index,
+       the first j whose other four points are not coplanar gives
+           sign(P) = (-1)^(j+1) * sign( orient3d(P without p_j, in argument order) )      (116.4)
+```
+
+Here `P = (a, b, c, d, e)` and position `j` is 0 for `a`, through 4 for `e`.
+
+**Properties.**
+
+- `(116.4)` is never 0 for a query with `orient3d(a, b, c, d) != 0`. The `j = 4` term is then
+  `-sign(orient3d(a, b, c, d))`, so at least one term exists.
+- It is antisymmetric under any swap of two arguments, because it is the sign of one
+  perturbed determinant.
+- Lifting `e` upward moves it outside the sphere, which is the `j = 4` term's `-1`.
+
+The supervisor's exact-arithmetic probe checked all three on 3000 random 5-point queries from
+the 3x3x3 lattice: no zero results, no mismatch against an explicit `eps_i = eps^(2^rank)`
+perturbation, and no failed swap. The same order is used for `orient3d` ties wherever the
+kernel needs one. TET-03a records any such use here.
+
+### 116.6 The Delaunay kernel
+
+**Implemented by TET-03a** (`tetmesh/delaunay.rs`).
+
+Bowyer (1981) and Watson (1981) incremental insertion:
+
+1. Locate the tetrahedron that contains the new point.
+2. Grow the cavity of every tetrahedron whose circumsphere contains the point, using (116.4).
+3. Star the cavity's boundary from the point.
+
+The kernel stores full face adjacency. One infinite vertex closes the hull, so every face has
+two tetrahedra (Shewchuk, delnotes). Point location is the visibility walk of Devillers, Pion
+& Teillaud (2002), which crosses the face whose plane separates the current tetrahedron from
+the point. A hull tetrahedron `(a, b, c, inf)` conflicts with `p` when `p` lies strictly on the
+outer side of the hull face `abc`. When `p` is coplanar with `abc`, the conflict is decided by
+a perturbed rule. TET-03a writes that rule and its test into this subsection when it builds
+it. Duplicate points are refused by name, not perturbed.
+
+**Gates (TET-03a).**
+
+- Every interior face is locally Delaunay under (116.4). This is the Delaunay lemma (Shewchuk,
+  delnotes): local Delaunay everywhere implies global.
+- Adjacency is symmetric.
+- No finite tetrahedron has `orient3d = 0`.
+- The finite tetrahedra triangulate a ball, so Euler's relation holds:
+
+```
+V - E + F - T = 1          (finite vertices, edges, faces and tetrahedra)                   (116.5)
+```
+
+- The signed volumes close on the hull. On a lattice the hull is the box, exactly, to a
+  relative `1e-12`:
+
+```
+sum_T V(T) = V(convex hull)                                                                  (116.6)
+```
+
+### 116.7 Insertion order
+
+**Implemented by TET-03b** (`tetmesh/order.rs`).
+
+Points are inserted in BRIO order (Amenta, Choi & Rote 2003): random rounds of doubling size,
+with each round sorted along a Hilbert curve. The rounds are randomised by a fixed seed, so
+the order is deterministic. The walk then starts from the last inserted tetrahedron. TET-03b
+records in §116.18 the measured time to triangulate `10^6` uniform points in a release
+single-thread build on this machine (the gate is 15 s or less), and the mean number of walk
+steps per insertion (the gate is 20 or less).
+
+### 116.8 The size field
+
+**Implemented by TET-04a** (base, surface size, bands, boxes) **and TET-04b** (curvature,
+proximity, gradation). The file is `tetmesh/sizefield.rs`.
+
+The size field `h(x)`, in metres, is the minimum of cones. Each source `s` has a size `h_s` on
+its own support, at distance `d_s(x)` (zero inside a box source), and grows away from it at
+slope `g - 1`:
+
+```
+h(x) = max( h_min , min( H , min_s [ h_s + (g - 1) d_s(x) ] ) )                           (116.7)
+```
+
+`H` is `domain.base_size`. `g` is `size.gradation`. A point source `h_0` at the origin gives
+`h(x) = min(H, h_0 + (g - 1)|x|)`, which is TET-04a's gate.
+
+The sources:
+
+- **Bands and boxes.** These are the automesher's `refinement` meaning, translated from levels
+  to sizes. A level `l` means the size
+
+```
+h_l = H 2^(-l)                                                                               (116.8)
+```
+
+  A band `(patch, distance, level)` is a source with `h_s = h_l` held flat out to `distance`
+  from the patch, with `d_s = max(0, d_patch(x) - distance)`. A box at `level` is a source with
+  `h_s = h_l` and `d_s = 0` inside it. Inside a box, h is exact.
+- **Curvature.** On the surface, where `kappa` is the largest absolute principal curvature, so
+  that a sphere of radius `R` has `h <= 2 pi R / n_curv`:
+
+```
+h_curv = 2 pi / ( n_curv kappa )                                                           (116.9)
+```
+
+- **Proximity.** `gap(x)` is the distance across the thinnest part of the domain at `x`,
+  between two surface sheets facing each other:
+
+```
+h_gap = gap(x) / n_gap                                                                     (116.10)
+```
+
+The field is stored on a background octree and answered by query. A minimum of cones of slope
+`g - 1` is Lipschitz with that constant, so the gradation limit of Persson (2006) holds by
+construction, up to the octree's interpolation. TET-04b's gate measures it:
+
+```
+| grad h | <= g - 1                                                                         (116.11)
+```
+
+The floor stops a curvature or proximity source from driving the size to zero at a sharp
+feature. It is DESIGN (`H / 64` is §74.2's six-level octree cap):
+
+```
+h_min = size.min_size  if given,  else  H / 64                                             (116.12)
+```
+
+### 116.9 Surface preparation
+
+**Implemented by TET-05** (`tetmesh/surfprep.rs`).
+
+Each defect is refused **by name** before any meshing:
+
+1. **Not closed.** Every edge must be shared by exactly two triangles. This is
+   `Surface::require_closed` (§23.2), called, not re-implemented.
+2. **Not consistently oriented.** Each manifold edge `(u, v)` must be traversed as `u -> v` by
+   one of its triangles and `v -> u` by the other. The refusal names the triangle. The
+   enclosed volume must also be positive (outward normals), by the divergence theorem:
+
+```
+V_enclosed = (1/6) sum_t x_0(t) . ( x_1(t) x x_2(t) )  > 0                                 (116.13)
+```
+
+3. **Self-intersecting.** No two non-adjacent triangles may intersect. This uses Möller's
+   (1997) interval test, run over the existing `surface` bounding-volume hierarchy. The refusal names the pair.
+
+Features are extracted the same way as on the hex path:
+
+- feature edges by (92.34), with the angle `refinement.feature_angle_deg`;
+- corners by (92.35);
+- patch seams, an edge whose two triangles carry different patches.
+
+These become the polylines and fixed points that §116.10 and §116.11 hold. On a cube there
+are 12 polylines and 8 corners.
+
+### 116.10 Surface remeshing
+
+**Implemented by TET-06a** (isotropic remesh) **and TET-06b** (features and seams). The file is
+`tetmesh/remesh.rs`.
+
+The remesh follows Botsch & Kobbelt (2004). Each iteration does five things:
+
+1. It splits every edge longer than `(4/3) h` at its midpoint.
+2. It collapses every edge shorter than `(4/5) h`, unless the collapse would create an edge
+   longer than `(4/3) h`.
+3. It flips edges to bring valences toward 6 (4 on a polyline end).
+4. It relaxes tangentially, using (116.14).
+5. It projects back onto the input surface with `TriIndex::closest_point` (§92.11).
+
+In each test, `h` is `h(x)` at the edge midpoint.
+
+```
+x <- x + ( I - n n^T ) ( c - x )         c = area-weighted centroid of the one-ring        (116.14)
+```
+
+Constraints:
+
+- A vertex on a feature polyline moves only along that polyline.
+- A corner never moves. It stays bit-identical.
+- A feature or seam edge is never flipped and never collapsed across.
+- Each triangle keeps its input patch.
+
+### 116.11 Conforming boundary recovery
+
+**Implemented by TET-07a** (edges) **and TET-07b** (faces). The file is `tetmesh/recover.rs`.
+
+The Delaunay tetrahedralisation of the remeshed vertices need not contain every surface edge
+and triangle. Recovery inserts Steiner points **on the piecewise-linear surface only**, until
+every surface edge is a union of tetrahedron edges and every surface triangle is a union of
+tetrahedron faces. It uses the encroachment rule of Shewchuk's refinement (Shewchuk 1998;
+delnotes):
+
+```
+p encroaches segment [a, b]   iff   (p - a) . (p - b) < 0     (strictly inside its diametral sphere)
+p encroaches triangle t       iff   | p - c_t | < r_t           (c_t, r_t: circumcentre and circumradius of t)   (116.15)
+```
+
+An encroached or missing segment is split. An encroached or missing triangle is split at its
+circumcentre, unless that point would encroach a segment, in which case the segment is split
+instead.
+
+**Small angles.** Where two input segments, or a segment and a facet, meet at an angle below
+`recover.protect_angle_deg`, the shared vertex `v` gets a protecting ball (Cohen-Steiner,
+Colin de Verdière & Yvinec 2004; Murphy, Mount & Gable 2001). Its radius is a third of the
+shortest incident input edge, or of the distance from `v` to the nearest non-incident feature
+if that is smaller. That radius is DESIGN and is confirmed by TET-07a. A segment that crosses
+the ball is split first at the ball's surface. Splits inside the ball then fall on concentric
+shells, so they never cascade toward `v`.
+
+**The cap.** Recovery is capped at `recover.max_passes`. Hitting the cap is a refusal that
+reports the remaining missing edges and faces. It is never a silent pass. TET-07a's
+termination test asserts that the cap is never reached on its fixtures.
+
+**Schönhardt's twisted prism** (Schönhardt 1928) cannot be tetrahedralised without a new
+point. TET-07b's gate is that it recovers with at least one Steiner point. Every Steiner point
+lies on its facet within `1e-12 h`.
+
+### 116.12 Carving
+
+**Implemented by TET-08** (fluid and solid) **and TET-19** (declared bodies). The file is
+`tetmesh/carve.rs`.
+
+The tetrahedra are flood-filled across faces that are NOT recovered surface faces, starting
+from:
+
+- the domain box's hull tetrahedra (`castellation.keep_region = "largest"`, the external
+  flow);
+- the tetrahedron containing `castellation.seed_point` (`"seed"`).
+
+A seed on the wrong side is refused by name. Each `castellation.bodies` entry keeps its own
+region, with conformal shared interfaces, and §92.15's region writer is reused. The kept
+volume closes on the surface by (116.13) and (116.2). For a sphere in a box, the kept volume is
+the box minus the sphere:
+
+```
+sum_{T kept} V(T) = V_box - V_enclosed          relative 1e-12                              (116.16)
+```
+
+This is §92.4's R4 (pocket removal) on tetrahedra. A dropped component is reported by its
+bounding box.
+
+### 116.13 Delaunay refinement
+
+**Implemented by TET-09** (`tetmesh/refine.rs`).
+
+A tetrahedron `T` is split at its circumcentre when it is too elongated, measured by the
+radius-edge ratio, or too large. This is Shewchuk's (1998) refinement:
+
+```
+rho(T) = R(T) / l_min(T)  >  B            B = refine.radius_edge = 2                       (116.17)
+R(T)   > c h(x_T)                          c = refine.size_factor,  x_T = circumcentre      (116.18)
+```
+
+The circumradius comes from the three edges `a, b, c` from one vertex:
+
+```
+R = | |a|^2 (b x c) + |b|^2 (c x a) + |c|^2 (a x b) | / ( 2 | a . (b x c) | )              (116.19)
+```
+
+If the new circumcentre would encroach a surface triangle or segment by (116.15), that
+triangle or segment is split instead, first. Shewchuk (1998) proves termination with
+`B >= 2` when no input angle is below 90 degrees, and §116.11's protected vertices are the
+exception. Tetrahedra next to them are counted and reported, never hidden.
+`refine.max_inserted_points` caps the loop. Hitting it is a refusal.
+
+The default `c = sqrt(6)/4` is DESIGN. It is the circumradius of the regular tetrahedron of
+edge `h`. TET-09 measures the mean `edge / h(x)` against its band and records any changed
+default here with that measurement.
+
+The predicted count uses the regular tetrahedron's volume, `h^3 / (6 sqrt 2)`:
+
+```
+N_pred = 1.1 * integral over Omega of  dV / ( h(x)^3 / (6 sqrt 2) )                         (116.20)
+```
+
+### 116.14 Optimisation
+
+**Implemented by TET-10a** (flips) **and TET-10b** (smoothing and sliver perturbation). The file
+is `tetmesh/optimise.rs`.
+
+The quality measure is the dihedral angle. At edge `e` of `T`, with the outward unit normals
+`n_1` and `n_2` of the two faces of `T` that meet at `e`:
+
+```
+theta_e = pi - arccos( n_1 . n_2 )                                                          (116.21)
+```
+
+There are three moves. Each is kept only if the worst (smallest) dihedral angle in the changed
+star strictly improves, so every pass is monotone:
+
+1. **2-3 and 3-2 flips, and edge removal.** Edge removal replaces the `m` tetrahedra around an
+   edge by `2(m - 2)`. The sources are Shewchuk 2002 (edge.pdf) and Freitag & Ollivier-Gooch
+   1997. No flip touches a surface face.
+2. **Smoothing.** An interior vertex moves freely. A surface vertex moves tangentially and is
+   projected back. A feature vertex moves along its edge. A corner never moves. This follows
+   Freitag & Ollivier-Gooch 1997. Every new position keeps `orient3d > 0` on its whole star.
+3. **Sliver perturbation.** A vertex of a sliver gets small random moves from the
+   `optimise.perturb_seed` generator, kept by the same rule. This is DESIGN, a heuristic.
+
+The flip and smoothing passes alternate `optimise.passes` times. Freitag & Ollivier-Gooch's
+result is that swapping and smoothing alternated beat either alone.
+
+These are §92.4's repair moves, now inside the generator:
+
+- R1 is the smoothing;
+- R2 is the flips;
+- R4 is §116.12's component rule;
+- R3 (sliver exudation, Cheng, Dey, Edelsbrunner, Facello & Teng 2000) is the provable fix if
+  TET-10b's gate misses. It is budgeted as TET-10c, and the gate is not lowered.
+
+The targets `10` and `165` degrees are the bounds of Labelle & Shewchuk (2007),
+`10.7` and `164.8` degrees.
+
+### 116.15 Prism layers by post-inflation
+
+**Implemented by TET-13a** (normals and thicknesses), **TET-13b** (deformation and insertion)
+**and TET-13c** (sharp edges). The files are `tetmesh/inflate.rs` and `tetmesh/emit.rs`.
+
+**The wall normal.** At each wall point it is the "most normal" normal of Aubry & Löhner
+(2008): the unit vector that maximises the smallest cosine with the incident face normals
+`n_i`:
+
+```
+n* = argmax_{|n| = 1}  min_i  n . n_i                                                      (116.22)
+```
+
+On a sphere this is the radial direction. At a cube corner it is `(1,1,1)/sqrt 3`, which makes
+equal angles with the three faces.
+
+**The layer stack.** `N = layers.n` layers, first thickness `t_1 = layers.first_thickness`,
+ratio `r = layers.growth`:
+
+```
+t_k = t_1 r^(k-1),        T = t_1 ( r^N - 1 ) / ( r - 1 )      (T = N t_1 when r = 1)       (116.23)
+```
+
+**Limiters.** The total thickness `T(p)` at a wall point is limited before the mesh moves.
+`rho_c(p)` is the radius of curvature of a concave wall at `p`:
+
+```
+T(p) <= gap_fraction * gap(p)                                                              (116.24a)
+T(p) <= concave_fraction * rho_c(p)                                                        (116.24b)
+T(p) / T(q) <= max_neighbour_ratio      for wall-adjacent wall points p, q                (116.24c)
+```
+
+**Deformation.** The volume mesh is displaced by the explicit inverse-distance interpolation of
+Luke, Collins & Blades (2012). The wall points move by `s_i = T(p_i) n*_i`, and every other
+point moves by
+
+```
+s(x) = sum_i w_i(x) s_i / sum_i w_i(x),        w_i = A_i phi( |x - x_i| )                   (116.25)
+```
+
+`A_i` is the area associated with wall point `i`. TET-13b transcribes the paper's two-term
+`phi` and its constants into this subsection, from the paper, when it builds it.
+
+After the move, every tetrahedron must keep `orient3d > 0`. Where one does not, the thickness
+is cut locally and the move is redone. The gap is then filled with `N` prisms per wall
+triangle, `(a, b, c)` to `(a', b', c')`, so the prism-tet interface is the displaced wall
+triangulation itself, conformal by construction (Kallinderis, Khawaja & McMorris 1996).
+
+**Sharp edges and corners** (TET-13c). Layers at sharp convex and concave edges and corners
+collapse or taper instead of inverting, and the report names each tapered point. Coverage is
+the fraction of wall points carrying the full `N` layers. It is reported, and its bar is in
+§116.18.
+
+### 116.16 Emission, the gate and the f32 rounding check
+
+**Implemented by TET-11** (`tetmesh/emit.rs`) **and TET-12** (`automesher/driver.rs`).
+
+The emitter writes the tetrahedra and prisms as a `PolyMeshRaw`, with:
+
+- one face per shared triangle or quad, owned by the lower cell index;
+- `owner < neighbour`;
+- faces in upper-triangular order, so that §92.3's G7 holds;
+- boundary faces grouped by patch.
+
+Faces are wound by §116.4's outward table. `build_host_mesh` must accept the result, and
+`automesher::quality::check` (§92.3) must pass. Otherwise the run is refused with §92.3's
+message.
+
+**The f32 check.** Under `--features single`, each cell is re-measured with its points rounded
+to f32 and the measure evaluated in f64. Here `fl32` is round-to-nearest to f32:
+
+```
+refuse if  V( fl32(v0), fl32(v1), fl32(v2), fl32(v3) ) <= 0   for any tetrahedron, or any of the
+           three tetrahedra of a prism's split, evaluated by (116.2) in f64                  (116.26)
+```
+
+The refusal names the cells and advises translating the geometry to a local origin (docs/17
+§5.1.7). Under the f64 build the check is skipped,
+because rounding is the identity.
+
+TET-12 runs this path end to end as `ofgpu-automesher` with `kind: "tet"` (`-check` included)
+and writes a summary JSON: tetrahedron and prism counts, the smallest and largest dihedral,
+Steiner counts and timings. The hex configs and their golden hashes (L1a) must not change.
+
+### 116.17 Acceptance: Hagen-Poiseuille on tetrahedra and prisms
+
+**Implemented by TET-14.** A laminar pipe of radius `R` and length `L` is meshed with
+tetrahedra plus prisms and solved at `Re = 100`. The pressure drop must match:
+
+```
+Delta p = 8 mu L Q / ( pi R^4 )                                                             (116.27)
+```
+
+This is Hagen-Poiseuille (the history is in Sutera & Skalak 1993). The gate is 2 % in f64. The
+f32 run must sit within §112.1's floor. This is the one P-class gate of §116. The driver is the
+incompressible steady binary the §110 gates use, which the supervisor names in TET-14's brief.
+TET-18 then runs the real drone surface (x500, about 251k triangles, BSD-3) through the whole
+pipeline. Its output stays outside the repository.
+
+### 116.18 Gates, their precision classes, and what has been measured
+
+The bars below are fixed before measurement (docs/17 §10.1 A17). A missed bar is a finding,
+never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
+
+| unit | gate | class |
+|---|---|---|
+| TET-00 | `tetmesh::tests::spec_round_trips_json`; the §80 xref audit; both builds | D |
+| TET-01 | for 10^5 near-degenerate integer configurations, the signs equal `i128` evaluation 100 %; cospherical lattice points give exactly 0; the same results under `single` | D |
+| TET-02 | 0 zero results on a 10^3 lattice (10^6 sampled 5-point queries); `sign(swap) = -sign` for 10^5 random swaps | D |
+| TET-03a | locally Delaunay everywhere; symmetric adjacency; (116.5); (116.6) at relative 1e-12 on the lattice; no `orient3d = 0` | D, A |
+| TET-03b | 10^6 points in 15 s or less; 20 or fewer walk steps per insertion on average (supervisor run) | measured |
+| TET-04a | (116.7) for a point source within one leaf size, max relative error 2 % or less; boxes exact | A |
+| TET-04b | (116.11) at most `(g-1)(1+1e-9)` on 10^5 pairs; sphere `h <= 2 pi R/16` (+2 %); 1 mm gap `h <= gap/3` | A |
+| TET-05 | the open, flipped and self-intersecting refusals, each by name; cube 12 polylines and 8 corners | D |
+| TET-06a | unit sphere at `h = 0.05`: 95 % or more of edges with `l/h` in `[4/5, 4/3]`; 99 % or more of triangles with min angle 25 degrees or more; Hausdorff `0.01 h` or less; closed and 2-manifold | A |
+| TET-06b | cube edges and corners exact (corners bit-identical); patch areas within 1e-12; a two-patch cylinder seam and a 30 degree wedge edge kept | D, A |
+| TET-07a | 100 % edge recovery on a cube, a 30 degree wedge and a 10 degree spike; Steiner count reported; cap not reached | D |
+| TET-07b | Schönhardt recovers with 1 or more Steiner points; boundary faces equal the split surface; Steiner on its facet within `1e-12 h` | D, A |
+| TET-08 | (116.16) at relative 1e-12; the wrong-side seed refusal; patch face counts | A, D |
+| TET-09 | no `rho > 2` or `R > c h` outside the reported set; mean `edge/h` in `[0.85, 1.15]`; count within 20 % of (116.20) | D, A |
+| TET-10a | the worst dihedral never decreases in a pass; boundary faces unchanged bit for bit; all `orient3d > 0` | D |
+| TET-10b | min dihedral 10 degrees or more and max 165 degrees or less on every fixture; surface vertices on the surface within 1e-12 | A |
+| TET-11 | `build_host_mesh` accepts; §92.3 passes; the 1e4 m offset sliver is refused under `single` and accepted under f64 | D |
+| TET-12 | `box_sphere_tet.json` in 30 s or less; the L1a hex golden hashes unchanged; unknown-key and kind-mismatch refusals | D |
+| TET-13a | sphere normal radial within 1e-6 rad; cube-corner equal angles within 1e-9; a gap of `3T` limited to `gap/2` or less | A |
+| TET-13b | `t_1` within 1 % at 95 % or more of wall points; 0 negative volumes; §92.3 G2; wall non-orthogonality 5 degrees or less | A, D |
+| TET-13c | 0 inverted cells; §92.3 passes; coverage 90 % or more, reported | D |
+| TET-14 | (116.27) within 2 % (f64); f32 within §112.1's floor; the solve takes 3 min or less | P |
+| TET-15 | a 1 M-tet sphere in a box end to end in 120 s or less; bit-identical across 1, 4 and 8 threads | measured, D |
+| TET-18 | the drone surface passes §92.3; dihedral bounds and wall time recorded | measured |
+
+**Measured** (each unit appends its own rows; nothing is measured yet):
+
+| unit | quantity | value | commit |
+|---|---|---|---|
+| | | | |
+
+### 116.19 References
+
+Every DOI below was resolved through doi.org by the supervisor of TET-00 (2026-10-06), and its
+Crossref metadata was checked against the title, authors, year and pages given here.
+
+- Amenta, N., Choi, S. & Rote, G. (2003). Incremental constructions con BRIO. *Proc. 19th
+  Symposium on Computational Geometry*, 211-219. DOI `10.1145/777792.777824`.
+- Aubry, R. & Löhner, R. (2008). On the "most normal" normal. *Commun. Numer. Meth. Engng*
+  24(12), 1641-1652. DOI `10.1002/cnm.1056`.
+- Botsch, M. & Kobbelt, L. (2004). A remeshing approach to multiresolution modeling. *Proc.
+  Symposium on Geometry Processing*, 185-192. DOI `10.1145/1057432.1057457`.
+- Bowyer, A. (1981). Computing Dirichlet tessellations. *Comput. J.* 24(2), 162-166. DOI
+  `10.1093/comjnl/24.2.162`.
+- Cheng, S.-W., Dey, T. K., Edelsbrunner, H., Facello, M. A. & Teng, S.-H. (2000). Sliver
+  exudation. *J. ACM* 47(5), 883-904. DOI `10.1145/355483.355487`.
+- Cohen-Steiner, D., Colin de Verdière, É. & Yvinec, M. (2004). Conforming Delaunay
+  triangulations in 3D. *Comput. Geom.* 28(2-3), 217-233. DOI `10.1016/j.comgeo.2004.03.001`.
+- Devillers, O., Pion, S. & Teillaud, M. (2002). Walking in a triangulation. *Int. J. Found.
+  Comput. Sci.* 13(2), 181-199. DOI `10.1142/S0129054102001047`.
+- Devillers, O. & Teillaud, M. (2011). Perturbations for Delaunay and weighted Delaunay 3D
+  triangulations. *Comput. Geom.* 44(3), 160-168. DOI `10.1016/j.comgeo.2010.09.010`.
+- Edelsbrunner, H. & Mücke, E. P. (1990). Simulation of simplicity. *ACM Trans. Graph.* 9(1),
+  66-104. DOI `10.1145/77635.77639`.
+- Freitag, L. A. & Ollivier-Gooch, C. (1997). Tetrahedral mesh improvement using swapping and
+  smoothing. *Int. J. Numer. Meth. Engng* 40(21), 3979-4002. DOI
+  `10.1002/(SICI)1097-0207(19971115)40:21<3979::AID-NME251>3.0.CO;2-9`.
+- Geuzaine, C. & Remacle, J.-F. (2009). Gmsh. *Int. J. Numer. Meth. Engng* 79(11), 1309-1331.
+  DOI `10.1002/nme.2579`. Cited for its licence. Not read.
+- Kallinderis, Y., Khawaja, A. & McMorris, H. (1996). Hybrid prismatic/tetrahedral grid
+  generation for viscous flows around complex geometries. *AIAA J.* 34(2), 291-298. DOI
+  `10.2514/3.13063`.
+- Labelle, F. & Shewchuk, J. R. (2007). Isosurface stuffing. *ACM Trans. Graph.* 26(3), 57.
+  DOI `10.1145/1276377.1276448`.
+- Lévy, B. (2016). Robustness and efficiency of geometric programs: the Predicate Construction
+  Kit (PCK). *Comput.-Aided Des.* 72, 3-12. DOI `10.1016/j.cad.2015.10.004`.
+- Luke, E., Collins, E. & Blades, E. (2012). A fast mesh deformation method using explicit
+  interpolation. *J. Comput. Phys.* 231(2), 586-601. DOI `10.1016/j.jcp.2011.09.021`.
+- Möller, T. (1997). A fast triangle-triangle intersection test. *J. Graphics Tools* 2(2),
+  25-30. DOI `10.1080/10867651.1997.10487472`.
+- Murphy, M., Mount, D. M. & Gable, C. W. (2001). A point-placement strategy for conforming
+  Delaunay tetrahedralization. *Int. J. Comput. Geom. Appl.* 11(6), 669-682. DOI
+  `10.1142/S0218195901000699`.
+- Persson, P.-O. (2006). Mesh size functions for implicit geometries and PDE-based gradient
+  limiting. *Eng. Comput.* 22(2), 95-109. DOI `10.1007/s00366-006-0014-1`.
+- Schönhardt, E. (1928). Über die Zerlegung von Dreieckspolyedern in Tetraeder. *Math. Ann.*
+  98, 309-312. DOI `10.1007/BF01451597`.
+- Shewchuk, J. R. (1997). Adaptive precision floating-point arithmetic and fast robust geometric
+  predicates. *Discrete Comput. Geom.* 18(3), 305-363. DOI `10.1007/PL00009321`. The
+  public-domain `predicates.c` is at <https://www.cs.cmu.edu/~quake/robust.html>.
+- Shewchuk, J. R. (1998). Tetrahedral mesh generation by Delaunay refinement. *Proc. 14th
+  Symposium on Computational Geometry*, 86-95. DOI `10.1145/276884.276894`.
+- Shewchuk, J. R. (2002). Two discrete optimization algorithms for the topological improvement
+  of tetrahedral meshes. <https://people.eecs.berkeley.edu/~jrs/papers/edge.pdf>.
+- Shewchuk, J. R. *Lecture notes on Delaunay mesh generation* ("delnotes").
+  <https://people.eecs.berkeley.edu/~jrs/meshpapers/delnotes.pdf>.
+- Sutera, S. P. & Skalak, R. (1993). The history of Poiseuille's law. *Annu. Rev. Fluid Mech.*
+  25, 1-20. DOI `10.1146/annurev.fl.25.010193.000245`.
+- Watson, D. F. (1981). Computing the n-dimensional Delaunay tessellation with application to
+  Voronoi polytopes. *Comput. J.* 24(2), 167-172. DOI `10.1093/comjnl/24.2.167`.
 
 ---
