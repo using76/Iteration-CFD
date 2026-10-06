@@ -10,6 +10,7 @@
 // No GPL-licensed source was consulted.
 
 use super::*;
+use crate::Vec3;
 
 use crate::blockgen::{raw_mesh, BlockSpec, GradedAxis};
 

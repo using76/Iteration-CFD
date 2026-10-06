@@ -38,6 +38,7 @@
 use crate::error::{Error, Result};
 use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
 use crate::surface::{Surface, TriIndex};
+use crate::types::{to_dvec3, to_vec3, DVec3};
 use crate::{Scalar, Vec3};
 
 use super::quality::{self, Gate, QualityThresholds};
@@ -402,7 +403,7 @@ pub fn field(
         for k in 0..face.len() {
             let a = face[k] as usize;
             let b = face[(k + 1) % face.len()] as usize;
-            let d = (mesh.points[a] - mesh.points[b]).mag();
+            let d = (to_vec3(mesh.points[a]) - to_vec3(mesh.points[b])).mag();
             if d < h[a] {
                 h[a] = d;
             }
@@ -426,7 +427,7 @@ pub fn field(
         if !is_layer[i] || pinned[i] {
             continue;
         }
-        let m_i = medial_distance(idx, mesh.points[i], normal[i], s_max);
+        let m_i = medial_distance(idx, to_vec3(mesh.points[i]), normal[i], s_max);
         let t_medial = if m_i.is_finite() {
             spec.medial_frac as Scalar * m_i
         } else {
@@ -458,7 +459,7 @@ pub fn field(
 /// average when the face is too small to weight by. That fn is private to
 /// the mesh module, and §92.3's volume is its reading, so this copy is its
 /// formula character for character.
-fn face_geometry_of(face: &[crate::Label], points: &[Vec3]) -> (Vec3, Vec3) {
+fn face_geometry_of(face: &[crate::Label], points: &[DVec3]) -> (Vec3, Vec3) {
     const SMALL: Scalar = 1.0e-19;
     let n = face.len();
     if n == 0 {
@@ -466,7 +467,7 @@ fn face_geometry_of(face: &[crate::Label], points: &[Vec3]) -> (Vec3, Vec3) {
     }
     let mut x_avg = Vec3::ZERO;
     for &v in face {
-        x_avg += points[v as usize];
+        x_avg += to_vec3(points[v as usize]);
     }
     x_avg = x_avg / n as Scalar;
     if n < 3 {
@@ -476,8 +477,8 @@ fn face_geometry_of(face: &[crate::Label], points: &[Vec3]) -> (Vec3, Vec3) {
     let mut cf = Vec3::ZERO;
     let mut area: Scalar = 0.0;
     for i in 0..n {
-        let a = points[face[i] as usize];
-        let b = points[face[(i + 1) % n] as usize];
+        let a = to_vec3(points[face[i] as usize]);
+        let b = to_vec3(points[face[(i + 1) % n] as usize]);
         let t_n = (a - x_avg).cross(b - x_avg);
         let t_c = (x_avg + a + b) / 3.0;
         let t_a = t_n.mag() * 0.5;
@@ -1428,7 +1429,7 @@ fn shrink_on(
         for k in 0..face.len() {
             let a = mesh.points[face[k] as usize];
             let b = mesh.points[face[(k + 1) % face.len()] as usize];
-            sum += (a - b).mag();
+            sum += (to_vec3(a) - to_vec3(b)).mag();
             cnt += 1;
         }
     }
@@ -1482,7 +1483,8 @@ fn shrink_on(
         list.sort_unstable();
         list.dedup();
     }
-    let hanging = find_hanging(&mesh.points, &mesh.faces);
+    let pts_scalar: Vec<Vec3> = mesh.points.iter().map(|&p| to_vec3(p)).collect();
+    let hanging = find_hanging(&pts_scalar, &mesh.faces);
     // The re-seat plan's inputs, built ONCE: the predicted level-n angle of
     // every face, and each cell's faces ascending by id - `owner` runs in
     // face order, the internal faces add their neighbours in the same
@@ -1581,10 +1583,10 @@ fn shrink_on(
         let mut post_step = false;
         let limit = spec.min_thickness as Scalar * st.total;
         loop {
-            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points, &beta, &anchored);
+            let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &pts_scalar, &beta, &anchored);
             let mut work = mesh.clone();
             for i in 0..work.points.len() {
-                work.points[i] = work.points[i] + d[i];
+                work.points[i] = to_dvec3(to_vec3(work.points[i]) + d[i]);
             }
             let rep = quality::measure_capped(&work, t, usize::MAX)?;
             let gates = failing_gates(&rep);
@@ -3053,8 +3055,8 @@ fn attempt_on(
     for &f in &field.faces {
         let face = &mesh.faces[f];
         for k in 0..face.len() {
-            let d = (mesh.points[face[k] as usize]
-                - mesh.points[face[(k + 1) % face.len()] as usize])
+            let d = (to_vec3(mesh.points[face[k] as usize])
+                - to_vec3(mesh.points[face[(k + 1) % face.len()] as usize]))
                 .mag();
             if d < h_min {
                 h_min = d;
@@ -3078,7 +3080,7 @@ fn attempt_on(
         if !field.is_layer[i] {
             continue;
         }
-        let want = mesh.points[i] + field.disp[i];
+        let want = to_dvec3(to_vec3(mesh.points[i]) + field.disp[i]);
         let e = (shrunk.mesh.points[i] - want).mag();
         if e > 1e-12 {
             return Err(Error::Mesh(format!(
@@ -3180,7 +3182,7 @@ fn attempt_on(
         for k in 0..n {
             level_point[k][s] = (base + k) as u32;
             // (92.48): x_i^(k) = x_i^orig + f_k D_i, from the INPUT point.
-            points.push(mesh.points[i] + field.disp[i] * st.f[k]);
+            points.push(to_dvec3(to_vec3(mesh.points[i]) + field.disp[i] * st.f[k]));
         }
     }
     // (92.72): the cell blocks, in field-face order - n cells on KEEP, one
@@ -3211,11 +3213,11 @@ fn attempt_on(
     for (j, &f) in field.faces.iter().enumerate() {
         layer_j[f] = j as i32;
     }
-    let mut b_lo = mesh.points[0];
-    let mut b_hi = mesh.points[0];
+    let mut b_lo = to_vec3(mesh.points[0]);
+    let mut b_hi = to_vec3(mesh.points[0]);
     for q in &mesh.points {
-        b_lo = b_lo.cmpt_min(*q);
-        b_hi = b_hi.cmpt_max(*q);
+        b_lo = b_lo.cmpt_min(to_vec3(*q));
+        b_hi = b_hi.cmpt_max(to_vec3(*q));
     }
     let diag2 = (b_hi - b_lo).mag_sqr();
     // (92.13): in face mode a side face of NONZERO area under the
@@ -3238,7 +3240,8 @@ fn attempt_on(
             used_by_boundary[p as usize] = true;
         }
     }
-    let mp = Midpoints::new(&shrunk.mesh.points, &used_by_boundary);
+    let mp_pts: Vec<Vec3> = shrunk.mesh.points.iter().map(|&p| to_vec3(p)).collect();
+    let mp = Midpoints::new(&mp_pts, &used_by_boundary);
     let mut face_segs: Vec<Vec<Vec<(u32, u32)>>> = vec![Vec::new(); n_faces];
     let mut seg_faces: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
     for f in n_internal..n_faces {
@@ -3903,7 +3906,7 @@ fn check_extrusion_closes(out: &PolyMeshRaw, first_cell: usize) -> Result<()> {
         s[o] = s[o] + sf;
         a[o] += sf.mag();
         for &p in &out.faces[f] {
-            centroid[o] = centroid[o] + out.points[p as usize];
+            centroid[o] = centroid[o] + to_vec3(out.points[p as usize]);
             n_pts[o] += 1;
         }
         if f < n_internal {
@@ -3911,7 +3914,7 @@ fn check_extrusion_closes(out: &PolyMeshRaw, first_cell: usize) -> Result<()> {
             s[nb] = s[nb] - sf;
             a[nb] += sf.mag();
             for &p in &out.faces[f] {
-                centroid[nb] = centroid[nb] + out.points[p as usize];
+                centroid[nb] = centroid[nb] + to_vec3(out.points[p as usize]);
                 n_pts[nb] += 1;
             }
         }
@@ -4634,7 +4637,8 @@ pub(crate) mod tests {
         let spec = sphere_layers(0.02);
         let shrunk = shrink(&mesh, &surf, &spec, &thresholds()).expect("shrink");
         assert!(shrunk.dropped.is_empty(), "dropped {:?}", shrunk.dropped);
-        let hanging = find_hanging(&mesh.points, &mesh.faces);
+        let hanging_pts: Vec<Vec3> = mesh.points.iter().map(|&p| to_vec3(p)).collect();
+        let hanging = find_hanging(&hanging_pts, &mesh.faces);
         assert!(!hanging.is_empty(), "the case has no hanging nodes to test");
         let size = 8.0;
         for (h, ab) in hanging {
@@ -4696,7 +4700,7 @@ pub(crate) mod tests {
             for k in 0..face.len() {
                 let a = face[k] as usize;
                 let b = face[(k + 1) % face.len()] as usize;
-                let d = (mesh.points[a] - mesh.points[b]).mag();
+                let d = (to_vec3(mesh.points[a]) - to_vec3(mesh.points[b])).mag();
                 h[a] = h[a].min(d);
                 h[b] = h[b].min(d);
             }

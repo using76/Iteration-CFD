@@ -28,6 +28,7 @@ use std::ops::{Add, Mul};
 use crate::error::{Error, Result};
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::HostMesh;
+use crate::types::to_vec3;
 use crate::{Label, Scalar, Tensor, Vec3};
 
 /// The point/cell adjacency of a raw polyMesh, with the inverse-distance
@@ -138,7 +139,7 @@ impl PointInterpolator {
             let mut cs = cell[offset[p] as usize..offset[p + 1] as usize].to_vec();
             cs.sort_unstable();
             cs.dedup();
-            let xp = raw.points[p];
+            let xp = to_vec3(raw.points[p]);
             let ws: Vec<Scalar> = cs
                 .iter()
                 .map(|&c| 1.0 / (xp - m.c[c as usize]).mag().max(Scalar::MIN_POSITIVE))

@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{parse_err, Error, IoContext, Result};
 use crate::io::tokenizer::{self, Tok, Tokenizer};
 use crate::mesh::{HostMesh, PatchInfo, PatchKind};
+use crate::types::DVec3;
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -48,7 +49,10 @@ use crate::{Label, Scalar, Vec3};
 /// `constant/polyMesh` as it is stored on disk, before any geometry.
 #[derive(Debug, Default, Clone)]
 pub struct PolyMeshRaw {
-    pub points: Vec<Vec3>,
+    /// The points as read, in f64 in BOTH builds (SPEC-LIT §118.2): the
+    /// reader stores the parsed coordinates without rounding, and the writer
+    /// writes those values back.
+    pub points: Vec<DVec3>,
     /// ALL faces, internal first.
     pub faces: Vec<Vec<Label>>,
     /// `[n_faces]`
@@ -559,7 +563,7 @@ fn open(path: &Path) -> Result<Tokenizer> {
 }
 
 /// `N ( (x y z) ... )`, or a bare `( ... )` when the writer omitted the count.
-fn read_points_file(path: &Path) -> Result<Vec<Vec3>> {
+fn read_points_file(path: &Path) -> Result<Vec<DVec3>> {
     let mut ts = open(path)?;
     let mut pts = Vec::new();
 
@@ -812,13 +816,16 @@ pub fn read_cell_zones(dir: &Path) -> Result<Vec<(String, Vec<Label>)>> {
 //  Token-level helpers
 // ==========================================================================
 
-fn parse_vec3(ts: &mut Tokenizer) -> Result<Vec3> {
+/// A point of the `points` file. Parsed straight into f64 (SPEC-LIT §118.2) -
+/// `expect_num` already returns an f64, and the reader rounds nothing: the
+/// host geometry is what rounds, once, when it stores.
+fn parse_vec3(ts: &mut Tokenizer) -> Result<DVec3> {
     ts.expect_punct('(')?;
-    let x = ts.expect_num()? as Scalar;
-    let y = ts.expect_num()? as Scalar;
-    let z = ts.expect_num()? as Scalar;
+    let x = ts.expect_num()?;
+    let y = ts.expect_num()?;
+    let z = ts.expect_num()?;
     ts.expect_punct(')')?;
-    Ok(Vec3::new(x, y, z))
+    Ok(DVec3::new(x, y, z))
 }
 
 /// Capture an entry's tokens verbatim, consuming the `;`.
@@ -1096,9 +1103,12 @@ fn write_boundary_file(path: &Path, raw: &PolyMeshRaw) -> Result<()> {
 
 /// C's `%.*g` with `sig` significant digits - the same formatter
 /// `blockgen::fmt_g_prec` is, repeated here because the io layer cannot see
-/// blockgen's private copy.
-fn fmt_g_prec(v: Scalar, sig: usize) -> String {
-    let x = v as f64;
+/// blockgen's private copy. Takes f64 (SPEC-LIT §118.2): in the f64 build
+/// `Scalar` IS f64 and the written text is byte-identical to before; under
+/// `single` a point stored as an f32 value widens exactly and is written as
+/// the same text the old code widened it to.
+fn fmt_g_prec(v: f64, sig: usize) -> String {
+    let x = v;
     if x == 0.0 {
         // printf keeps the sign of a negative zero; so does this.
         return if x.is_sign_negative() { "-0".to_string() } else { "0".to_string() };

@@ -57,6 +57,7 @@ use crate::mesh::HostMesh;
 use crate::solid::bc::{CompBc, PatchBcs};
 use crate::solid::fixtures::{annulus, Annulus};
 use crate::solid::Material;
+use crate::types::{to_dvec3, to_vec3};
 use crate::{Scalar, Vec3};
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, FRAC_PI_6};
 
@@ -255,16 +256,18 @@ fn elliptic_annulus(
     );
     let mut raw = blockgen::raw_mesh(&spec)?;
     for p in raw.points.iter_mut() {
-        let cut90 = (p.y - FRAC_PI_2 as Scalar).abs() < 1e-12;
-        let cut0 = p.y.abs() < 1e-12;
-        let (x, y) = ellipse_family(p.x, p.y);
-        *p = Vec3::new(x, y, p.z);
+        let q = to_vec3(*p);
+        let cut90 = (q.y - FRAC_PI_2 as Scalar).abs() < 1e-12;
+        let cut0 = q.y.abs() < 1e-12;
+        let (x, y) = ellipse_family(q.x, q.y);
+        let mut q = Vec3::new(x, y, q.z);
         if cut90 {
-            p.x = 0.0;
+            q.x = 0.0;
         }
         if cut0 {
-            p.y = 0.0;
+            q.y = 0.0;
         }
+        *p = to_dvec3(q);
     }
     let mesh = build_host_mesh(&raw)?;
     Ok((mesh, raw))
@@ -418,27 +421,29 @@ pub fn le11_body(n_t: usize, n_theta: usize, n_s: usize) -> Result<RestatedBody>
     );
     let mut raw = blockgen::raw_mesh(&spec)?;
     for p in raw.points.iter_mut() {
-        let cut90 = (p.y - FRAC_PI_2 as Scalar).abs() < 1e-12;
-        let cut0 = p.y.abs() < 1e-12;
-        let bottom = p.z.abs() < 1e-12;
-        let top = (p.z - 1.0).abs() < 1e-12;
-        let (ri, zi) = le11_inner(p.z);
-        let (ro, zo) = le11_outer(p.z);
-        let r = (1.0 - p.x) * ri + p.x * ro;
-        let z = (1.0 - p.x) * zi + p.x * zo;
-        *p = Vec3::new(r * p.y.cos(), r * p.y.sin(), z);
+        let q = to_vec3(*p);
+        let cut90 = (q.y - FRAC_PI_2 as Scalar).abs() < 1e-12;
+        let cut0 = q.y.abs() < 1e-12;
+        let bottom = q.z.abs() < 1e-12;
+        let top = (q.z - 1.0).abs() < 1e-12;
+        let (ri, zi) = le11_inner(q.z);
+        let (ro, zo) = le11_outer(q.z);
+        let r = (1.0 - q.x) * ri + q.x * ro;
+        let z = (1.0 - q.x) * zi + q.x * zo;
+        let mut q = Vec3::new(r * q.y.cos(), r * q.y.sin(), z);
         if cut90 {
-            p.x = 0.0;
+            q.x = 0.0;
         }
         if cut0 {
-            p.y = 0.0;
+            q.y = 0.0;
         }
         if bottom {
-            p.z = 0.0;
+            q.z = 0.0;
         }
         if top {
-            p.z = LE11_HEIGHT;
+            q.z = LE11_HEIGHT;
         }
+        *p = to_dvec3(q);
     }
     let mesh = build_host_mesh(&raw)?;
     Ok(RestatedBody {

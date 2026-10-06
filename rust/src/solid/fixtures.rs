@@ -49,6 +49,7 @@ use crate::solid::bc::PatchBcs;
 use crate::solid::bc::CompBc;
 use crate::solid::Material;
 use crate::solid::materials::Bonds;
+use crate::types::{to_dvec3, to_vec3};
 use crate::{Label, Scalar, Tensor, Vec3};
 use std::f64::consts::FRAC_PI_2;
 
@@ -95,15 +96,17 @@ pub fn annulus(nr: usize, n_theta: usize, nz: usize, r_in: Scalar, r_out: Scalar
     };
     let mut raw = blockgen::raw_mesh(&spec)?;
     for p in raw.points.iter_mut() {
-        let cut90 = (p.y - FRAC_PI_2 as Scalar).abs() < 1e-12;
-        let cut0 = p.y.abs() < 1e-12;
-        *p = Vec3::new(p.x * p.y.cos(), p.x * p.y.sin(), p.z);
+        let q = to_vec3(*p);
+        let cut90 = (q.y - FRAC_PI_2 as Scalar).abs() < 1e-12;
+        let cut0 = q.y.abs() < 1e-12;
+        let mut q = Vec3::new(q.x * q.y.cos(), q.x * q.y.sin(), q.z);
         if cut90 {
-            p.x = 0.0;
+            q.x = 0.0;
         }
         if cut0 {
-            p.y = 0.0;
+            q.y = 0.0;
         }
+        *p = to_dvec3(q);
     }
     let mesh = build_host_mesh(&raw)?;
     Ok(Annulus { mesh, raw, r_in, r_out, length: r_out - r_in })

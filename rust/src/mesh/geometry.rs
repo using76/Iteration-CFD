@@ -44,7 +44,13 @@
 //! host, at setup; every device kernel gathers instead.
 
 use crate::error::{Error, Result};
+#[cfg(feature = "single")]
+use crate::mesh::HostGeom64;
 use crate::mesh::{HostMesh, MeshReport, PatchKind};
+use crate::types::{DVec3, GeomPoint};
+#[cfg(feature = "single")]
+#[cfg(feature = "single")]
+use crate::types::to_vec3;
 use crate::{Label, Scalar, Vec3};
 
 /// Lower bound on `nf . d`, as a fraction of `|d|`, before it is inverted.
@@ -54,10 +60,20 @@ use crate::{Label, Scalar, Vec3};
 /// approaches (or exceeds) 90 degrees. `0.05` corresponds to about 87 degrees,
 /// well past the point where the answer is trustworthy; it only keeps the
 /// coefficient finite.
+///
+/// Kept for the `Scalar` callers in `decompose.rs`; the f64 sweep uses
+/// [`NON_ORTH_FLOOR_64`], which in the f64 build IS this value.
 const NON_ORTH_FLOOR: Scalar = 0.05;
 
+/// The f64 path's [`NON_ORTH_FLOOR`], as an f64 literal (SPEC-LIT §118.2).
+/// Under `single` the `Scalar` `0.05f32` widened is NOT `0.05f64` - the f64
+/// path has to carry its own literal, not a widening of the float one.
+const NON_ORTH_FLOOR_64: f64 = 0.05;
+
+/// The f64 path's skewness floor, `1e-9` as an f64 literal (SPEC-LIT §118.2).
+///
 /// SPEC-LIT 2.5. A face whose skewness vector is shorter than this fraction of
-/// `|d|` is treated as UNSKEWED and gets exactly `Vec3::ZERO`.
+/// `|d|` is treated as UNSKEWED and gets exactly `DVec3::ZERO`.
 ///
 /// This is not cosmetic. `s_f = Cf - C_P - (1-w) d` is a difference of two
 /// nearly equal computed positions, and `Cf`, `C_P` and `w` all come out of the
@@ -73,20 +89,25 @@ const NON_ORTH_FLOOR: Scalar = 0.05;
 /// that noise is about `2e-13`, four orders below this, while a 2:1 refinement
 /// interface sits at `0.1421` - eight orders ABOVE it. Nothing real lies
 /// between, which is what makes a floor here safe and a floor on `Delta`
-/// (`NON_ORTH_FLOOR`, above) a trade-off.
-const SKEW_FLOOR: Scalar = 1.0e-9;
+/// (`NON_ORTH_FLOOR_64`, above) a trade-off.
+const SKEW_FLOOR_64: f64 = 1.0e-9;
 
-/// Smallest magnitude this module will divide by.
+/// Smallest magnitude the `Scalar` helpers of this module will divide by.
 ///
 /// Roughly the square root of the smallest normal `Scalar`, so that `x/SMALL`
 /// cannot overflow for any `x` a mesh coordinate can hold. Only genuinely
 /// degenerate geometry - a zero-area face, a collapsed cell, two coincident
 /// cell centres - ever reaches it, and every site that does says what it falls
-/// back to.
+/// back to. Kept for the `Scalar` callers in `decompose.rs`; the f64 sweep
+/// uses [`SMALL_64`].
 #[cfg(feature = "single")]
 const SMALL: Scalar = 1.0e-19;
 #[cfg(not(feature = "single"))]
 const SMALL: Scalar = 1.0e-150;
+
+/// The f64 path's divide guard: `1.0e-150` in BOTH builds, an f64 literal
+/// (SPEC-LIT §118.2) - in the f64 build it is `SMALL` itself.
+const SMALL_64: f64 = 1.0e-150;
 
 // ==========================================================================
 //  2.1  Face centroid and area
@@ -107,32 +128,38 @@ const SMALL: Scalar = 1.0e-150;
 /// area even when the face is warped. The scalar area accumulated alongside is
 /// unsigned and used only to weight the centroid.
 ///
+/// The f64 path's twin of the `Scalar` helpers below it: every difference,
+/// product and sum is computed in f64/[`DVec3`] (SPEC-LIT §118.2), reading
+/// each point as `to_dvec3()` - a widening that is exact - and rounding only
+/// where the sweep stores its results. Generic over the point type, so no
+/// copy of the point array is made.
+///
 /// Returns `(Sf, Cf)`. The caller has already checked every vertex index.
-fn face_geometry(verts: &[Label], points: &[Vec3]) -> (Vec3, Vec3) {
+fn face_geometry_64<P: GeomPoint>(verts: &[Label], points: &[P]) -> (DVec3, DVec3) {
     let n = verts.len();
     if n == 0 {
-        return (Vec3::ZERO, Vec3::ZERO);
+        return (DVec3::ZERO, DVec3::ZERO);
     }
 
-    let mut x_avg = Vec3::ZERO;
+    let mut x_avg = DVec3::ZERO;
     for &v in verts {
-        x_avg += points[v as usize];
+        x_avg += points[v as usize].to_dvec3();
     }
-    x_avg = x_avg / n as Scalar;
+    x_avg = x_avg / n as f64;
 
     // Fewer than three vertices spans no area at all: there is nothing to
     // triangulate, and the centroid is the vertex average by definition.
     if n < 3 {
-        return (Vec3::ZERO, x_avg);
+        return (DVec3::ZERO, x_avg);
     }
 
-    let mut sf = Vec3::ZERO;
-    let mut cf = Vec3::ZERO;
-    let mut area: Scalar = 0.0;
+    let mut sf = DVec3::ZERO;
+    let mut cf = DVec3::ZERO;
+    let mut area: f64 = 0.0;
 
     for i in 0..n {
-        let a = points[verts[i] as usize];
-        let b = points[verts[(i + 1) % n] as usize];
+        let a = points[verts[i] as usize].to_dvec3();
+        let b = points[verts[(i + 1) % n] as usize].to_dvec3();
 
         // Twice the sub-triangle's area vector, and its centroid.
         let t_n = (a - x_avg).cross(b - x_avg);
@@ -144,7 +171,7 @@ fn face_geometry(verts: &[Label], points: &[Vec3]) -> (Vec3, Vec3) {
         area += t_a;
     }
 
-    if area > SMALL {
+    if area > SMALL_64 {
         (sf, cf / area)
     } else {
         // Degenerate face: the area weighting is meaningless, so fall back to
@@ -160,7 +187,10 @@ fn face_geometry(verts: &[Label], points: &[Vec3]) -> (Vec3, Vec3) {
 /// Everything indexed by the sweep is checked here, once, so that a corrupt
 /// mesh becomes an `Error::Mesh` naming the offending entity rather than a
 /// panic somewhere in the middle of a pass.
-pub(crate) fn validate(m: &HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Result<()> {
+///
+/// Generic over the point type (SPEC-LIT §118.2): only `points.len()` is
+/// asked, so both `Vec3` and `DVec3` point arrays validate through here.
+pub(crate) fn validate<P>(m: &HostMesh, points: &[P], faces: &[Vec<Label>]) -> Result<()> {
     let (n_if, n_bf) = (m.n_internal_faces, m.n_boundary_faces);
     let n_faces = n_if + n_bf;
     validate_topology(m)?;
@@ -365,7 +395,20 @@ pub(crate) fn cyclic_pairing(m: &HostMesh) -> Result<Vec<Label>> {
 /// `b_weights`) are derived from `patches` only when they are not already
 /// sized, so a caller that has built them itself - the polyMesh reader does -
 /// keeps its own. The cyclic *weights* are geometry, and are always written.
-pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Result<()> {
+///
+/// SPEC-LIT §118.2: the whole sweep computes in f64/[`DVec3`], reading each
+/// point as `to_dvec3()` - an exact widening, no copy of the point array -
+/// and stores by ONE rounding per value: straight into the `Scalar` arrays in
+/// the f64 build, where the arithmetic was already f64, and through one
+/// rounding each under `single`, which keeps the f64 values in the shadow
+/// [`HostGeom64`]. In the f64 build the five passes below perform exactly the
+/// operations they performed before, in the same order - the f64 hash test
+/// `f64_geometry_is_bitwise_in_f64_build` pins that.
+pub fn compute<P: GeomPoint>(
+    m: &mut HostMesh,
+    points: &[P],
+    faces: &[Vec<Label>],
+) -> Result<()> {
     validate(m, points, faces)?;
 
     let (n_cells, n_if, n_bf) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
@@ -374,10 +417,10 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     m.n_points = points.len();
 
     // ---- 1. every face's area vector and centroid -------------------------
-    let mut f_sf = vec![Vec3::ZERO; n_faces];
-    let mut f_cf = vec![Vec3::ZERO; n_faces];
+    let mut f_sf = vec![DVec3::ZERO; n_faces];
+    let mut f_cf = vec![DVec3::ZERO; n_faces];
     for f in 0..n_faces {
-        let (sf, cf) = face_geometry(&faces[f], points);
+        let (sf, cf) = face_geometry_64(&faces[f], points);
         f_sf[f] = sf;
         f_cf[f] = cf;
     }
@@ -385,7 +428,7 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     // ---- 2. pyramid apex: the average of each cell's face centroids -------
     // Only an estimate of the cell centre. It has to lie inside the cell, and
     // for a convex polyhedron the mean of the face centroids does.
-    let mut apex = vec![Vec3::ZERO; n_cells];
+    let mut apex = vec![DVec3::ZERO; n_cells];
     let mut n_cell_faces = vec![0u32; n_cells];
 
     for f in 0..n_if {
@@ -406,7 +449,7 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
                 "compute_geometry: cell {c} has no faces, so it is not a cell"
             )));
         }
-        apex[c] = apex[c] / n_cell_faces[c] as Scalar;
+        apex[c] = apex[c] / n_cell_faces[c] as f64;
     }
 
     // ---- 3. volumes and centroids by pyramid decomposition ----------------
@@ -414,11 +457,11 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     // face by face: exact for planar faces, and independent of the apex for a
     // closed cell. The pyramid centroid sits three quarters of the way from
     // the apex to the base centroid.
-    let mut v = vec![0.0 as Scalar; n_cells];
-    let mut c_acc = vec![Vec3::ZERO; n_cells];
+    let mut v = vec![0.0f64; n_cells];
+    let mut c_acc = vec![DVec3::ZERO; n_cells];
 
     {
-        let mut add_pyramid = |cell: usize, s: Scalar, sf: Vec3, cf: Vec3| {
+        let mut add_pyramid = |cell: usize, s: f64, sf: DVec3, cf: DVec3| {
             let a = apex[cell];
             let v_pyr = (sf * s).dot(cf - a) / 3.0;
             v[cell] += v_pyr;
@@ -439,37 +482,34 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
         }
     }
 
-    let mut c = vec![Vec3::ZERO; n_cells];
+    let mut c = vec![DVec3::ZERO; n_cells];
     for cell in 0..n_cells {
         // A non-positive volume is a broken mesh, not an error to return here:
         // `check`/`print_report` exist to say so, and they cannot run if the
         // sweep refuses to finish. The apex is the best centre available.
-        c[cell] = if v[cell] > SMALL {
+        c[cell] = if v[cell] > SMALL_64 {
             c_acc[cell] / v[cell]
         } else {
             apex[cell]
         };
     }
 
-    m.v = v;
-    m.c = c;
-
     // ---- 4. internal face weights and delta coefficients ------------------
-    let mut mag_sf = vec![0.0 as Scalar; n_if];
-    let mut weights = vec![0.0 as Scalar; n_if];
-    let mut delta_coeffs = vec![0.0 as Scalar; n_if];
-    let mut non_orth_corr = vec![Vec3::ZERO; n_if];
-    let mut skew_corr = vec![Vec3::ZERO; n_if];
+    let mut mag_sf = vec![0.0f64; n_if];
+    let mut weights = vec![0.0f64; n_if];
+    let mut delta_coeffs = vec![0.0f64; n_if];
+    let mut non_orth_corr = vec![DVec3::ZERO; n_if];
+    let mut skew_corr = vec![DVec3::ZERO; n_if];
 
     for f in 0..n_if {
         let p = m.owner[f] as usize;
         let nb = m.neighbour[f] as usize;
         let sf = f_sf[f];
         let cf = f_cf[f];
-        let d = m.c[nb] - m.c[p];
+        let d = c[nb] - c[p];
 
         mag_sf[f] = sf.mag();
-        weights[f] = interp_weight(sf, cf, m.c[p], m.c[nb]);
+        weights[f] = interp_weight_64(sf, cf, c[p], c[nb]);
 
         // SPEC-LIT 2.5. The weight above places psi_f where the face PLANE
         // cuts the line P-N; every consumer of psi_f - Green-Gauss above all -
@@ -477,28 +517,20 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
         // those two points, and it is written from the weight rather than
         // from a second projection so that the two cannot disagree: the point
         // the weight implies is exactly `C_P + (1 - w) d`, and this is
-        // exactly the vector from there to `Cf`. Below `SKEW_FLOOR |d|` that
-        // vector is round-off in the two centroids rather than geometry and is
-        // zeroed - see the constant for the measurement that forced it.
-        let sk = cf - m.c[p] - d * (1.0 - weights[f]);
-        skew_corr[f] = if sk.mag() > SKEW_FLOOR * d.mag() {
+        // exactly the vector from there to `Cf`. Below `SKEW_FLOOR_64 |d|`
+        // that vector is round-off in the two centroids rather than geometry
+        // and is zeroed - see the constant for the measurement that forced it.
+        let sk = cf - c[p] - d * (1.0 - weights[f]);
+        skew_corr[f] = if sk.mag() > SKEW_FLOOR_64 * d.mag() {
             sk
         } else {
-            Vec3::ZERO
+            DVec3::ZERO
         };
 
-        let (delta, k) = non_orth_split(sf, d);
+        let (delta, k) = non_orth_split_64(sf, d);
         delta_coeffs[f] = delta;
         non_orth_corr[f] = k;
     }
-
-    m.sf = f_sf[..n_if].to_vec();
-    m.cf = f_cf[..n_if].to_vec();
-    m.mag_sf = mag_sf;
-    m.weights = weights;
-    m.delta_coeffs = delta_coeffs;
-    m.non_orth_corr = non_orth_corr;
-    m.skew_corr = skew_corr;
 
     // ---- 5. boundary metrics, cyclic couples last -------------------------
     let pair = cyclic_pairing(m)?;
@@ -537,17 +569,21 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
     m.b_nbr_face = pair.clone();
     // An uncoupled boundary face interpolates to the boundary value itself, so
     // the owner's weight is 1 (SPEC-LIT section 2). Cyclic faces overwrite
-    // theirs from the geometry below.
-    if m.b_weights.len() != n_bf {
-        m.b_weights = vec![1.0; n_bf];
-    }
+    // theirs from the geometry below. The f64 sweep seeds from the mesh's
+    // existing weights, widened (§118.2) - in the f64 build a copy of them,
+    // which is what the sweep has always worked on.
+    let mut b_weights: Vec<f64> = if m.b_weights.len() == n_bf {
+        m.b_weights.iter().map(|&x| f64::from(x)).collect()
+    } else {
+        vec![1.0; n_bf]
+    };
 
-    let mut b_sf = vec![Vec3::ZERO; n_bf];
-    let mut b_mag_sf = vec![0.0 as Scalar; n_bf];
-    let mut b_cf = vec![Vec3::ZERO; n_bf];
-    let mut b_delta_coeffs = vec![0.0 as Scalar; n_bf];
-    let mut b_non_orth_corr = vec![Vec3::ZERO; n_bf];
-    let mut b_y = vec![0.0 as Scalar; n_bf];
+    let mut b_sf = vec![DVec3::ZERO; n_bf];
+    let mut b_mag_sf = vec![0.0f64; n_bf];
+    let mut b_cf = vec![DVec3::ZERO; n_bf];
+    let mut b_delta_coeffs = vec![0.0f64; n_bf];
+    let mut b_non_orth_corr = vec![DVec3::ZERO; n_bf];
+    let mut b_y = vec![0.0f64; n_bf];
 
     for bf in 0..n_bf {
         let sf = f_sf[n_if + bf];
@@ -567,9 +603,9 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
         // `Delta`, so that a wall function dividing by `y` cannot produce an
         // infinity. On any usable mesh the floor is inactive, and on an
         // uncoupled patch `b_y == 1/b_delta_coeffs` exactly.
-        let d_own = cf - m.c[p];
+        let d_own = cf - c[p];
         let nf = sf.normalised();
-        b_y[bf] = floor_along(nf.dot(d_own), d_own);
+        b_y[bf] = floor_along_64(nf.dot(d_own), d_own);
 
         if pair[bf] >= 0 {
             // Cyclic. The couple is one internal face folded in half, so the
@@ -581,7 +617,7 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
             // neighbour patch onto this one, without ever having to know `s`.
             let nbr = pair[bf] as usize;
             let n_cell = m.b_face_cells[nbr] as usize;
-            let d_nbr = m.c[n_cell] - f_cf[n_if + nbr];
+            let d_nbr = c[n_cell] - f_cf[n_if + nbr];
             let d = d_own + d_nbr;
 
             // SPEC-LIT 2.4's over-relaxed split, applied to the SAME `d` that
@@ -592,14 +628,14 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
             // was silently dropped, so a cyclic face on a sheared mesh lost
             // its non-orthogonal correction even though the internal faces
             // right next to it kept theirs.
-            let (delta, k) = non_orth_split(sf, d);
+            let (delta, k) = non_orth_split_64(sf, d);
             b_delta_coeffs[bf] = delta;
             b_non_orth_corr[bf] = k;
             // Both offsets are projected on the OWNER-side `Sf`, which is the
             // face the weight is used on.
-            m.b_weights[bf] = weight_from_offsets(sf.dot(d_own).abs(), sf.dot(d_nbr).abs());
+            b_weights[bf] = weight_from_offsets_64(sf.dot(d_own).abs(), sf.dot(d_nbr).abs());
         } else {
-            b_delta_coeffs[bf] = non_orth_split(sf, d_own).0;
+            b_delta_coeffs[bf] = non_orth_split_64(sf, d_own).0;
             // Left at zero: an uncoupled boundary face has no neighbour cell
             // to interpolate `psi` from, so `snGrad` there is not the
             // internal-face formula this correction belongs to - SPEC-LIT
@@ -608,12 +644,72 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
         }
     }
 
-    m.b_sf = b_sf;
-    m.b_mag_sf = b_mag_sf;
-    m.b_cf = b_cf;
-    m.b_delta_coeffs = b_delta_coeffs;
-    m.b_non_orth_corr = b_non_orth_corr;
-    m.b_y = b_y;
+    // ---- store: one rounding per value (SPEC-LIT §118.2) ------------------
+    // In the f64 build the vectors ARE the results of f64 arithmetic, so they
+    // move straight in and nothing is rounded. Under `single` every `Scalar`
+    // field is rounded once from its f64 vector, and the f64 values move into
+    // the shadow `HostGeom64`.
+    #[cfg(not(feature = "single"))]
+    {
+        f_sf.truncate(n_if);
+        f_cf.truncate(n_if);
+        m.v = v;
+        m.c = c;
+        m.sf = f_sf;
+        m.cf = f_cf;
+        m.mag_sf = mag_sf;
+        m.weights = weights;
+        m.delta_coeffs = delta_coeffs;
+        m.non_orth_corr = non_orth_corr;
+        m.skew_corr = skew_corr;
+        m.b_sf = b_sf;
+        m.b_mag_sf = b_mag_sf;
+        m.b_cf = b_cf;
+        m.b_delta_coeffs = b_delta_coeffs;
+        m.b_non_orth_corr = b_non_orth_corr;
+        m.b_y = b_y;
+        m.b_weights = b_weights;
+    }
+    #[cfg(feature = "single")]
+    {
+        f_sf.truncate(n_if);
+        f_cf.truncate(n_if);
+        m.geom64 = Some(Box::new(HostGeom64 {
+            v,
+            c,
+            sf: f_sf,
+            cf: f_cf,
+            mag_sf,
+            weights,
+            delta_coeffs,
+            non_orth_corr,
+            skew_corr,
+            b_sf,
+            b_mag_sf,
+            b_cf,
+            b_delta_coeffs,
+            b_non_orth_corr,
+            b_y,
+            b_weights,
+        }));
+        let g = m.geom64.as_ref().expect("just set");
+        m.v = g.v.iter().map(|&x| x as Scalar).collect();
+        m.c = g.c.iter().copied().map(to_vec3).collect();
+        m.sf = g.sf.iter().copied().map(to_vec3).collect();
+        m.cf = g.cf.iter().copied().map(to_vec3).collect();
+        m.mag_sf = g.mag_sf.iter().map(|&x| x as Scalar).collect();
+        m.weights = g.weights.iter().map(|&x| x as Scalar).collect();
+        m.delta_coeffs = g.delta_coeffs.iter().map(|&x| x as Scalar).collect();
+        m.non_orth_corr = g.non_orth_corr.iter().copied().map(to_vec3).collect();
+        m.skew_corr = g.skew_corr.iter().copied().map(to_vec3).collect();
+        m.b_sf = g.b_sf.iter().copied().map(to_vec3).collect();
+        m.b_mag_sf = g.b_mag_sf.iter().map(|&x| x as Scalar).collect();
+        m.b_cf = g.b_cf.iter().copied().map(to_vec3).collect();
+        m.b_delta_coeffs = g.b_delta_coeffs.iter().map(|&x| x as Scalar).collect();
+        m.b_non_orth_corr = g.b_non_orth_corr.iter().copied().map(to_vec3).collect();
+        m.b_y = g.b_y.iter().map(|&x| x as Scalar).collect();
+        m.b_weights = g.b_weights.iter().map(|&x| x as Scalar).collect();
+    }
 
     Ok(())
 }
@@ -623,17 +719,19 @@ pub fn compute(m: &mut HostMesh, points: &[Vec3], faces: &[Vec<Label>]) -> Resul
 // ==========================================================================
 
 /// SPEC-LIT 2.3: the weight that places the interpolated value where the face
-/// plane cuts the line `P-N` (Jasak 1996 section 3.3.1).
+/// plane cuts the line `P-N` (Jasak 1996 section 3.3.1) - the f64 path's twin
+/// (SPEC-LIT §118.2).
 ///
 /// The absolute values are the stabilisation the specification calls for on a
 /// mesh whose non-orthogonality exceeds 90 degrees, where the signed products
 /// change sign and the weight would leave `[0, 1]`.
 #[inline]
-fn interp_weight(sf: Vec3, cf: Vec3, c_p: Vec3, c_n: Vec3) -> Scalar {
-    weight_from_offsets(sf.dot(cf - c_p).abs(), sf.dot(c_n - cf).abs())
+fn interp_weight_64(sf: DVec3, cf: DVec3, c_p: DVec3, c_n: DVec3) -> f64 {
+    weight_from_offsets_64(sf.dot(cf - c_p).abs(), sf.dot(c_n - cf).abs())
 }
 
-/// `w = d_N / (d_P + d_N)`, the owner's share.
+/// `w = d_N / (d_P + d_N)`, the owner's share - the `Scalar` twin kept for the
+/// `Scalar` callers in `decompose.rs`.
 ///
 /// Two coincident centres leave nothing to weight; a half-and-half split is
 /// the only unbiased answer and keeps the interpolation a convex combination.
@@ -647,10 +745,31 @@ pub(crate) fn weight_from_offsets(d_p: Scalar, d_n: Scalar) -> Scalar {
     }
 }
 
-/// Apply the SPEC-LIT 2.4 floor to a projection along `d`.
+/// The f64 path's [`weight_from_offsets`]: the same body on `f64`
+/// (SPEC-LIT §118.2). In the f64 build it performs exactly the operations the
+/// `Scalar` twin performs.
+#[inline]
+fn weight_from_offsets_64(d_p: f64, d_n: f64) -> f64 {
+    let sum = d_p + d_n;
+    if sum > SMALL_64 {
+        d_n / sum
+    } else {
+        0.5
+    }
+}
+
+/// Apply the SPEC-LIT 2.4 floor to a projection along `d` - the `Scalar` twin
+/// kept for the `Scalar` callers in `decompose.rs`.
 #[inline]
 pub(crate) fn floor_along(proj: Scalar, d: Vec3) -> Scalar {
     proj.max(NON_ORTH_FLOOR * d.mag())
+}
+
+/// The f64 path's [`floor_along`]: the same body on `f64`/[`DVec3`]
+/// (SPEC-LIT §118.2).
+#[inline]
+fn floor_along_64(proj: f64, d: DVec3) -> f64 {
+    proj.max(NON_ORTH_FLOOR_64 * d.mag())
 }
 
 /// SPEC-LIT 2.4: the over-relaxed non-orthogonal split, returning
@@ -677,16 +796,16 @@ pub(crate) fn floor_along(proj: Scalar, d: Vec3) -> Scalar {
 /// grows the implicit coefficient as non-orthogonality rises, which is what
 /// keeps the deferred correction of SPEC-LIT 3.2 convergent.)
 #[inline]
-fn non_orth_split(sf: Vec3, d: Vec3) -> (Scalar, Vec3) {
+fn non_orth_split_64(sf: DVec3, d: DVec3) -> (f64, DVec3) {
     let nf = sf.normalised();
-    let denom = floor_along(nf.dot(d), d);
+    let denom = floor_along_64(nf.dot(d), d);
 
     // Coincident cell centres, or a zero-area face: there is no direction to
     // difference along. A zero coefficient drops the face from the operator,
     // which is the only finite thing to do, and the underlying breakage shows
     // up in `check` as a collapsed cell or a closure failure.
-    if denom <= SMALL {
-        return (0.0, Vec3::ZERO);
+    if denom <= SMALL_64 {
+        return (0.0, DVec3::ZERO);
     }
 
     let delta = 1.0 / denom;
@@ -794,17 +913,24 @@ pub fn region_sizes_text(sizes: &[usize]) -> String {
 /// Measure the mesh. Infallible by contract - this is what reports a broken
 /// mesh, so it has to survive one, including one whose arrays were never
 /// filled at all.
+///
+/// SPEC-LIT §118.2: every real quantity is computed in f64 from
+/// [`HostMesh::geom64`]'s view - in the f64 build the mesh's own arrays, under
+/// `single` the shadow or the widened `Scalar` arrays - so the report is the
+/// same number in both builds at the same tolerance, and its real-valued
+/// fields are f64.
 pub fn check(m: &HostMesh) -> MeshReport {
-    let n_cells = m.n_cells.min(m.v.len());
+    let g = m.geom64();
+    let n_cells = m.n_cells.min(g.v.len());
 
     // ---- volumes ----------------------------------------------------------
-    let mut total_volume: Scalar = 0.0;
-    let mut min_volume = Scalar::INFINITY;
-    let mut max_volume = Scalar::NEG_INFINITY;
+    let mut total_volume: f64 = 0.0;
+    let mut min_volume = f64::INFINITY;
+    let mut max_volume = f64::NEG_INFINITY;
     let mut min_volume_cell = 0usize;
 
     for cell in 0..n_cells {
-        let v = m.v[cell];
+        let v = g.v[cell];
         total_volume += v;
         if v < min_volume {
             min_volume = v;
@@ -826,32 +952,32 @@ pub fn check(m: &HostMesh) -> MeshReport {
         .n_internal_faces
         .min(m.owner.len())
         .min(m.neighbour.len())
-        .min(m.sf.len());
+        .min(g.sf.len());
 
-    let mut max_non_orth_deg: Scalar = 0.0;
+    let mut max_non_orth_deg: f64 = 0.0;
     let mut sum_non_orth = 0.0f64;
     let mut n_non_orth = 0usize;
 
     for f in 0..n_if {
         let (p, nb) = (m.owner[f] as usize, m.neighbour[f] as usize);
-        let (Some(&c_p), Some(&c_n)) = (m.c.get(p), m.c.get(nb)) else {
+        let (Some(&c_p), Some(&c_n)) = (g.c.get(p), g.c.get(nb)) else {
             continue;
         };
         let d = c_n - c_p;
         let mag_d = d.mag();
-        let nf = m.sf[f].normalised();
-        if mag_d <= SMALL || nf.mag_sqr() <= 0.0 {
+        let nf = g.sf[f].normalised();
+        if mag_d <= SMALL_64 || nf.mag_sqr() <= 0.0 {
             continue;
         }
 
         let deg = (nf.dot(d) / mag_d).clamp(-1.0, 1.0).acos().to_degrees();
         max_non_orth_deg = max_non_orth_deg.max(deg);
-        sum_non_orth += deg as f64;
+        sum_non_orth += deg;
         n_non_orth += 1;
     }
 
     let mean_non_orth_deg = if n_non_orth > 0 {
-        (sum_non_orth / n_non_orth as f64) as Scalar
+        sum_non_orth / n_non_orth as f64
     } else {
         0.0
     };
@@ -860,36 +986,37 @@ pub fn check(m: &HostMesh) -> MeshReport {
     // `sum_f s Sf = 0` for a closed cell, exactly, in exact arithmetic. It is
     // the single best indicator that the face winding is right: one face wound
     // backwards flips one term and the residual jumps to O(|Sf|).
-    let mut closure = vec![Vec3::ZERO; n_cells];
+    let mut closure = vec![DVec3::ZERO; n_cells];
 
     for f in 0..n_if {
         let (p, nb) = (m.owner[f] as usize, m.neighbour[f] as usize);
         if let Some(s) = closure.get_mut(p) {
-            *s += m.sf[f];
+            *s += g.sf[f];
         }
         if let Some(s) = closure.get_mut(nb) {
-            *s -= m.sf[f];
+            *s -= g.sf[f];
         }
     }
     let n_bf = m
         .n_boundary_faces
         .min(m.b_face_cells.len())
-        .min(m.b_sf.len());
+        .min(g.b_sf.len());
     for bf in 0..n_bf {
         if let Some(s) = closure.get_mut(m.b_face_cells[bf] as usize) {
-            *s += m.b_sf[bf];
+            *s += g.b_sf[bf];
         }
     }
 
-    let mut max_closure_error: Scalar = 0.0;
+    let mut max_closure_error: f64 = 0.0;
     let mut max_closure_cell = 0usize;
     for (cell, cl) in closure.iter().enumerate() {
         // V^(2/3) is the cell's natural area scale, which makes the ratio
         // dimensionless and comparable between a coarse mesh and a fine one.
-        let scale = (m.v[cell].abs() as f64)
+        let scale = g.v[cell]
+            .abs()
             .max(f64::MIN_POSITIVE)
             .powf(2.0 / 3.0);
-        let e = ((cl.mag() as f64) / scale) as Scalar;
+        let e = cl.mag() / scale;
         if e > max_closure_error {
             max_closure_error = e;
             max_closure_cell = cell;
@@ -940,10 +1067,11 @@ pub fn check(m: &HostMesh) -> MeshReport {
 }
 
 /// Above this the mesh does not close and the run should not have started.
-const CLOSURE_LIMIT: Scalar = 1.0e-10;
+/// An f64 literal: the report is f64 in both builds (SPEC-LIT §118.2).
+const CLOSURE_LIMIT: f64 = 1.0e-10;
 /// Above this the non-orthogonal correction dominates the implicit part, and
 /// the deferred iteration of SPEC-LIT 3.2 converges slowly if at all.
-const NON_ORTH_WARN_DEG: Scalar = 70.0;
+const NON_ORTH_WARN_DEG: f64 = 70.0;
 
 /// Print the mesh summary, then anything wrong with it.
 ///
@@ -1767,5 +1895,187 @@ mod tests {
         m.patches[0].nbr_patch = Some(2);
         m.patches[2].size -= 1;
         assert!(m.compute_geometry(&points, &faces).is_err());
+    }
+
+    // ---- SPEC-LIT §118.2 ---------------------------------------------------
+    //
+    // The f64 build's own bits, pinned BEFORE the host geometry becomes f64
+    // and re-checked after: the rewrite may not move one bit of the f64
+    // build, because there `DVec3` is `Vec3`, `Scalar` is `f64` and every
+    // conversion is the identity. Its subject is the f64 build's own bits, so
+    // the test is f64-only (docs/17 §5.1 rule 3); §112.3 names it. It carries
+    // no ignore attribute.
+
+    // The helpers live INSIDE the test function, so the one `cfg` above
+    // covers them all and the test's path is what §112.3 names.
+
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn f64_geometry_is_bitwise_in_f64_build() {
+        use super::*;
+        use crate::blockgen::{BlockSpec, GradedAxis};
+        use crate::io::polymesh::{build_host_mesh, read_poly_mesh, write_poly_mesh_raw};
+
+        const OFFSET: u64 = 0xcbf29ce484222325;
+        const PRIME: u64 = 0x100000001b3;
+
+        fn u64(h: &mut u64, x: u64) {
+            for b in x.to_le_bytes() {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(PRIME);
+            }
+        }
+
+        fn s(h: &mut u64, x: f64) {
+            u64(h, x.to_bits());
+        }
+
+        fn v3(h: &mut u64, v: Vec3) {
+            s(h, v.x);
+            s(h, v.y);
+            s(h, v.z);
+        }
+
+        fn arr<T: Copy>(h: &mut u64, a: &[T], feed: fn(&mut u64, T)) {
+            u64(h, a.len() as u64);
+            for &x in a {
+                feed(h, x);
+            }
+        }
+
+        /// The 16 geometry arrays, in the order the unit fixes.
+        fn geometry_hash(m: &HostMesh) -> u64 {
+            let mut h = OFFSET;
+            arr(&mut h, &m.v, s);
+            arr(&mut h, &m.c, v3);
+            arr(&mut h, &m.sf, v3);
+            arr(&mut h, &m.mag_sf, s);
+            arr(&mut h, &m.cf, v3);
+            arr(&mut h, &m.weights, s);
+            arr(&mut h, &m.delta_coeffs, s);
+            arr(&mut h, &m.non_orth_corr, v3);
+            arr(&mut h, &m.skew_corr, v3);
+            arr(&mut h, &m.b_sf, v3);
+            arr(&mut h, &m.b_mag_sf, s);
+            arr(&mut h, &m.b_cf, v3);
+            arr(&mut h, &m.b_delta_coeffs, s);
+            arr(&mut h, &m.b_non_orth_corr, v3);
+            arr(&mut h, &m.b_y, s);
+            arr(&mut h, &m.b_weights, s);
+            h
+        }
+
+        fn report_hash(m: &HostMesh) -> u64 {
+            let mut h = OFFSET;
+            let r = m.check();
+            for x in [
+                r.total_volume,
+                r.min_volume,
+                r.max_volume,
+                r.max_non_orth_deg,
+                r.mean_non_orth_deg,
+                r.max_closure_error,
+            ] {
+                s(&mut h, x);
+            }
+            u64(&mut h, r.min_volume_cell as u64);
+            u64(&mut h, r.max_closure_cell as u64);
+            u64(&mut h, r.n_regions as u64);
+            h
+        }
+
+        /// `ofgpu-validate`'s `make_mesh`, minus the shear.
+        fn spec(n: [usize; 3], l: [f64; 3], e: [f64; 3], two_d: bool) -> BlockSpec {
+            let axis = |i: usize| GradedAxis {
+                lo: 0.0,
+                hi: l[i],
+                n: n[i],
+                expansion: e[i],
+                two_sided: e[i] != 1.0,
+            };
+            let w = if two_d { "empty" } else { "wall" };
+            BlockSpec {
+                x: axis(0),
+                y: axis(1),
+                z: axis(2),
+                windows: Vec::new(),
+                patch_name: BlockSpec::default().patch_name,
+                patch_type: ["patch", "patch", "wall", "wall", w, w].map(String::from),
+                cyclic: Vec::new(),
+            }
+        }
+
+        let graded = crate::blockgen::build_mesh(&spec(
+            [14, 11, 9],
+            [1.0, 0.7, 0.4],
+            [1.0, 8.0, 1.0],
+            false,
+        ))
+        .expect("graded");
+
+        let mut raw = crate::blockgen::raw_mesh(&spec(
+            [9, 8, 7],
+            [1.0, 0.7, 0.4],
+            [1.0, 1.0, 1.0],
+            false,
+        ))
+        .expect("raw");
+        for p in raw.points.iter_mut() {
+            p.x += 0.45 * p.z;
+            p.y += 0.5 * 0.45 * p.z;
+        }
+        let sheared = build_host_mesh(&raw).expect("sheared");
+
+        let refined = crate::mesh::refined::refined_core(
+            [8, 8, 8],
+            Vec3::new(0.125, 0.125, 0.125),
+            0.25,
+            1,
+        )
+        .expect("refined")
+        .mesh;
+
+        let two_d = crate::blockgen::build_mesh(&spec(
+            [20, 16, 1],
+            [1.0, 0.7, 0.05],
+            [1.0, 5.0, 1.0],
+            true,
+        ))
+        .expect("two_d");
+
+        // The graded mesh, round-tripped through a temp directory: the
+        // reader must hand the sweep the same bits it wrote.
+        let dir = std::env::temp_dir().join("ofgpuF64GeomHash");
+        let _ = std::fs::remove_dir_all(&dir);
+        write_poly_mesh_raw(
+            &dir,
+            &crate::blockgen::raw_mesh(&spec(
+                [14, 11, 9],
+                [1.0, 0.7, 0.4],
+                [1.0, 8.0, 1.0],
+                false,
+            ))
+            .expect("raw"),
+        )
+        .expect("write");
+        let from_disk = build_host_mesh(&read_poly_mesh(&dir).expect("read")).expect("built");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let cases: [(&str, &HostMesh, u64, u64); 5] = [
+            ("graded", &graded, 0x30cd71c5fdd9a2c6, 0x8c725d21ac958a68),
+            ("sheared", &sheared, 0xf441b7f408cbb567, 0x4df74d425488b72e),
+            ("refined", &refined, 0xe0194746d0455167, 0xcb35b78eb0df64b9),
+            ("two_d", &two_d, 0x6f1c74b5896ef237, 0x77c25665461f9eb3),
+            (
+                "graded via disk",
+                &from_disk,
+                0x30cd71c5fdd9a2c6,
+                0x8c725d21ac958a68,
+            ),
+        ];
+        for (name, m, geom, rep) in cases {
+            assert_eq!(geometry_hash(m), geom, "{name}: geometry hash");
+            assert_eq!(report_hash(m), rep, "{name}: report hash");
+        }
     }
 }

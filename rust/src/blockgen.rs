@@ -51,6 +51,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, IoContext, Result};
 use crate::io::case::{Roughness, WallTreatment};
+use crate::types::{to_dvec3, DVec3};
 use crate::io::fields::{
     write_scalar_field, write_vector_field, PatchFieldSpec, RawScalarField, RawVectorField,
 };
@@ -1429,7 +1430,7 @@ fn poly_mesh_raw(block: &Block) -> Result<PolyMeshRaw> {
     for k in 0..=g.nz {
         for j in 0..=g.ny {
             for i in 0..=g.nx {
-                points.push(g.point_coord(g.point(i, j, k)));
+                points.push(to_dvec3(g.point_coord(g.point(i, j, k))));
             }
         }
     }
@@ -2067,7 +2068,7 @@ fn poly_mesh_raw_carved(block: &Block, cv: &Carved) -> Result<PolyMeshRaw> {
     for (p, &u) in used.iter().enumerate() {
         if u {
             pmap[p] = points.len() as i64;
-            points.push(g.point_coord(p));
+            points.push(to_dvec3(g.point_coord(p)));
         }
     }
 
@@ -2224,9 +2225,9 @@ fn synthetic_quad(sf: Vec3, cf: Vec3) -> [Vec3; 4] {
 /// a reduced or cut face's points are synthetic in the first place, so there
 /// is nothing real to share, and giving every face its own four points keeps
 /// this assembly a single uniform code path instead of two.
-fn push_cc_quad(points: &mut Vec<Vec3>, q: [Vec3; 4]) -> Vec<Label> {
+fn push_cc_quad(points: &mut Vec<DVec3>, q: [Vec3; 4]) -> Vec<Label> {
     let base = points.len() as Label;
-    points.extend_from_slice(&q);
+    points.extend(q.iter().map(|&p| to_dvec3(p)));
     vec![base, base + 1, base + 2, base + 3]
 }
 
@@ -2364,7 +2365,7 @@ fn cutcell_mesh_raw(
     }
     let mut closure_sum = vec![Vec3::ZERO; n_cells_out];
 
-    let mut points: Vec<Vec3> = Vec::new();
+    let mut points: Vec<DVec3> = Vec::new();
     let mut faces: Vec<Vec<Label>> = Vec::new();
     let mut owner: Vec<Label> = Vec::new();
     let mut neighbour: Vec<Label> = Vec::new();
@@ -2895,11 +2896,11 @@ fn write_raw_poly_mesh_ascii(case_dir: &Path, raw: &PolyMeshRaw, n_cells: usize)
         os.s("\n(\n")?;
         for p in &raw.points {
             os.c('(')?;
-            os.real(p.x)?;
+            os.real(p.x as Scalar)?;
             os.c(' ')?;
-            os.real(p.y)?;
+            os.real(p.y as Scalar)?;
             os.c(' ')?;
-            os.real(p.z)?;
+            os.real(p.z as Scalar)?;
             os.s(")\n")?;
         }
         os.s(")")?;

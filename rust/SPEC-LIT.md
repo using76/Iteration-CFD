@@ -33867,6 +33867,9 @@ One of the 14 binary failures is not an f32 failure: `ofgpu-datacentre`'s
 was rewriting it at that moment, the race between the two schema tests that fails the
 same way in f64 and passes when re-run; re-run under the feature it passes, and the
 schema it generates is byte-identical to the shipped one. It is not marked.
+§118.2 adds one more f64-only library test, mesh::geometry::tests::f64_geometry_is_bitwise_in_f64_build,
+which is #[cfg(not(feature = "single"))] because its subject is the f64 build's own bits; it carries no
+ignore attribute and moves neither bold count.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
@@ -35877,6 +35880,133 @@ doi:10.1145/103162.103163**, open copy
 Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM,
 doi:10.1137/1.9780898718027**, ch. 4. Both DOIs were checked against Crossref
 on 2026-10-06 by fetching `api.crossref.org/works/<doi>`.
+
+### 118.2 Host geometry in f64 — points read in double, the sweep in double, one rounding
+
+The host geometry sweep of SPEC-LIT §2 — the five passes that fill `HostMesh`'s
+sixteen arrays from `PolyMeshRaw`'s points — ran in the build's own `Scalar`.
+It now runs in f64 in both builds and stores once, at the end, in the build's
+own `Scalar` (the unit this records is F32-03).
+
+**What changed.** `DVec3` joins `Vec3` in `types`: the plain alias in the f64
+build, its own f64 struct under `single` (it never goes to the device).
+`PolyMeshRaw::points` is `Vec<DVec3>`: the `.points` reader parses each
+coordinate straight into f64 and rounds nowhere, and the writer prints f64.
+`geometry::compute` is generic over a `GeomPoint` read as `to_dvec3()`, and all
+five passes - face geometry, apex and weights, volumes, the skew and
+non-orthogonal corrections, boundary - do their arithmetic in f64 against f64
+literals of their own (`NON_ORTH_FLOOR_64 = 0.05`, `SKEW_FLOOR_64 = 1.0e-9`,
+`SMALL_64 = 1.0e-150`; the f32 literal `0.05` widened to f64 is
+`0.05000000074505806`, not `0.05`, so the floors are re-stated, not re-used).
+Every stored value is rounded once, from f64 to `Scalar` per component (the
+round-to-nearest of the f64 result). Under `single` the unrounded sweep is
+ALSO kept, in a `HostGeom64` shadow on the mesh, so a reader can have the f64
+arrays without the f64 build paying for them.
+
+Both builds read the f64 arrays through `HostMesh::geom64()`, a borrowed-or-
+owned view of the sixteen arrays (one view type `Geom64`, `Cow` fields); under
+`single` it hands back the shadow while it is fresh and widens the stored
+`Scalar` arrays the moment any stored element no longer rounds from its
+shadow element bit for bit - the staleness is all-or-nothing, one store
+invalidating all sixteen, because the sweep computed them together. `MeshReport`'s real fields are f64 in both builds.
+`ofgpu-validate`'s mesh rows are computed from the view - precision class A
+of docs/17 §5.1 rule 4, an accumulated identity evaluated in f64 - at the SAME
+`1e-12` tolerance in both builds. `MeshSpec::volume_f64` is the
+analytic volume of the box the generator actually built, whose extents are the
+`Scalar` lengths.
+
+The f64 build is bitwise what it was: there `DVec3` IS `Vec3`,
+`to_dvec3`/`to_vec3` are the identity, and the sweep's vectors move, not copy.
+The 43 cubins are hash-identical, and
+`mesh::geometry::tests::f64_geometry_is_bitwise_in_f64_build` pins, as FNV-1a
+hashes recorded at `d269cc8` before the change, the sixteen arrays and the
+report of the four meshes `ofgpu-validate` sections 1-5 build (graded,
+sheared, 2:1 refined, two-dimensional) and of the graded block written to
+disk and read back.
+
+**The error model.**
+
+- The rounding of one value, `fl(x) = x (1 + δ)`, `|δ| ≤ u`, with `u = 2^-24`
+  in f32 and `2^-53` in f64 (Higham 2002, §2.2, the standard model);
+- a difference of two rounded coordinates, `|(â − b̂) − (a − b)| ≤ u (|a| + |b|)`,
+  so its relative error is at most `u (|a| + |b|) / |a − b|` - Goldberg 1991,
+  section "Cancellation" (catastrophic cancellation of rounded operands);
+  Higham 2002, §1.7;
+- the face area vector of SPEC-LIT §2.1, `S_f = ½ Σ_i (x_i − x̄) × (x_{i+1} − x̄)`,
+  is built from exactly such differences, so at f32 its relative error grows
+  like `u |x| / h` with `|x|` the coordinate magnitude and `h` the cell size;
+- closure `Σ_f s_f S_f = 0` holds identically for ANY vertex positions (the
+  vector area of a closed triangulated surface vanishes), so in the f64 sweep
+  closure measures only f64 arithmetic, even where the points themselves were
+  generated in f32.
+
+**The measurement.** `tests/f32_geometry.rs` builds five meshes with the
+tree's own generators - the graded 14×11×9 block of validate section 1, the
+9×8×7 block sheared by 0.45, the 20×16×1 two-dimensional block, the 2:1
+refined core, and the graded block translated by (2000, 2000, 0) - and prints each mesh's closure and volume error under
+`--nocapture`. Under `single` at HEAD the sweep computed in f32, and its
+numbers were closure 2.934e-7 (graded), 2.756e-7 (sheared), 1.963e-7 (two_d),
+1.515e-7 (translated) and volume 2.442e-6, 4.321e-7, 2.135e-6, 0 (refined),
+1.313e-4 (translated). In the f64 build, where the sweep was already f64, the
+same numbers were and are closure 5.465e-16, 6.320e-16, 3.297e-16, 0 (refined),
+2.817e-16 and volume 5.353e-15, 3.965e-16, 1.190e-15, 1.110e-16, 6.741e-15.
+After the change the single build's f64 sweep measures closure 0 (graded),
+7.700752e-16 (sheared), 0 (two_d), 0 (refined), 0 (translated) and volume
+1.982541e-16, 2.973812e-15, 3.172066e-15, 1.110223e-16, 2.577303e-15 - the
+f64 sweep's own arithmetic, rounded once per stored value.
+Measured by the supervisor on 2026-10-06: in the f64 build `ofgpu-validate
+-sections 1-40` prints all 875 rows identical to `d269cc8`
+(`tools/f64_identity.py rows`) and the SASS of all 43 cubins is identical; no
+`.cu` file changed. Under `single`, `-sections 1-5,12`, the six mesh rows of
+sections 1, 2 and 5 now pass at `1e-12`: "sum(V) == analytic block volume"
+2.448e-6, 4.257e-7, 2.129e-6 before and 1.983e-16, 3.172e-15, 3.172e-15
+after, and "cell closure" 2.934e-7, 2.756e-7, 1.963e-7 before and 0, 2.888e-16,
+0 after; the mesh report's false "cell 309 does not close" diagnosis is gone.
+Section 4's "device Barth-Jespersen limiter == host reference" and "device
+scalar transfer == host reference" pass too (1.192e-7 before, 0 after). Two
+rows that passed now fail, and the next paragraph says why. Of the 227 check
+rows the two runs share, 103 passed before and 109 after; the after run also
+prints 10 per-size failure rows of the same §82.3-§84 checks, so it lists 237.
+The worst numeric miss went from 9.4e-6 to 8.1e-6, both `fvc::grad(linear
+field) == analytic` against `1e-11`: a round-off twin (precision class R of
+docs/17 §5.1), whose fields are still stored in float.
+
+**What it does not do.** The device geometry and kernels still store and
+difference f32 (`C[n] − C[P]` from absolute centres - the local origin is
+F32-10). A point generated in `Scalar` (blockgen, the automesher,
+`mesh/refined.rs`, `adapt`) is still rounded to f32 when it is generated and
+only widened exactly afterwards. The §24 cut-cell closure row of
+`ofgpu-validate` section 12 is the cut-cell classifier's own `Scalar`
+arithmetic and is unchanged. A mesh whose geometry did not come from
+`compute_geometry` (the device sweep `mesh/gpugeom.rs`, a decomposed
+sub-mesh, a hand-built `HostMesh`) has no shadow, so its view is the widened
+`Scalar` arrays. The guards themselves move to the view in §118.3 (F32-04).
+**Under `single` the device geometry sweep is no longer the host sweep bit for
+bit.** §82.3, §83 and §84 compare `mesh/gpugeom.rs`'s device sweep with the host
+one, and the device sweep (`cuda/meshgeom.cu`) still computes in `ofscalar`,
+which is float in that build, while the host now computes in f64 and rounds
+once. So under `single` the rows "the device geometry sweep rebuilds an ADAPTED
+mesh bit for bit (S82.3)" and "a mesh an adapt built ON THE DEVICE reaches the
+device as the same mesh", with their per-size twins, fail by construction; the
+device-emitted topology row still passes. They are left failing, not
+re-toleranced: F32-11 puts the device sweep in f64 under `single`, and
+restoring these rows bit for bit is its acceptance. In the f64 build all of
+them pass, unchanged.
+The host cost: under `single` the shadow holds 4 doubles per cell, 15 per
+internal face and 13 per boundary face (32 B, 120 B and 104 B), about 392 B
+per cell on a hex mesh with three internal faces per cell;
+`HostMesh::release_geom64` drops it.
+
+Sources: **Goldberg, D. (1991), "What every computer scientist should know
+about floating-point arithmetic", ACM Computing Surveys 23(1) 5-48,
+doi:10.1145/103162.103163**, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html> (section
+"Cancellation"); **Higham, N. J. (2002), Accuracy and Stability of Numerical
+Algorithms, 2nd ed., SIAM, doi:10.1137/1.9780898718027**, §1.7 and §2.2. (Both
+DOIs were checked against Crossref on 2026-10-06 for §118.1.) And SPEC-LIT §2
+for every geometric formula, unchanged.
+
+No GPL-licensed source was consulted.
 
 ---
 
