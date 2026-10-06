@@ -1,0 +1,200 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>setup</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #070b10;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #setup-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #setup-req {
+          position: absolute;
+          left: 96px;
+          top: 170px;
+          width: 760px;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.10);
+          border-radius: 16px;
+          padding: 32px;
+        }
+        .setup-tag {
+          font-size: 22px;
+          font-weight: 600;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #14B8A6;
+          line-height: 1.3;
+          opacity: 0;
+        }
+        #setup-req .req-line {
+          font-size: 30px;
+          font-weight: 500;
+          color: #f1f3f5;
+          line-height: 1.45;
+          margin-top: 14px;
+          opacity: 0;
+        }
+        #setup-auto {
+          position: absolute;
+          left: 96px;
+          top: 560px;
+        }
+        #setup-auto .auto-line {
+          font-size: 26px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.5;
+          margin-top: 8px;
+          opacity: 0;
+        }
+        #setup-panel {
+          position: absolute;
+          left: 900px;
+          top: 140px;
+          width: 924px;
+          height: 520px;
+          overflow: hidden;
+          border-radius: 4px;
+        }
+        #setup-panel video, #setup-panel img {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        #setup-mesh {
+          opacity: 0;
+        }
+        #setup-panel-label {
+          position: absolute;
+          left: 916px;
+          top: 156px;
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          background: rgba(7, 11, 16, 0.78);
+          border-radius: 10px;
+          padding: 8px 14px;
+          opacity: 0;
+        }
+        #setup-count-row {
+          position: absolute;
+          left: 900px;
+          top: 690px;
+          display: flex;
+          align-items: baseline;
+          gap: 18px;
+        }
+        #setup-cells {
+          font-size: 88px;
+          font-weight: 800;
+          color: #14B8A6;
+          line-height: 1.1;
+          font-variant-numeric: tabular-nums;
+          opacity: 0;
+        }
+        #setup-cells-unit {
+          font-size: 30px;
+          font-weight: 600;
+          color: #f1f3f5;
+          line-height: 1.3;
+          opacity: 0;
+        }
+        #setup-cells-sub {
+          position: absolute;
+          left: 900px;
+          top: 806px;
+          font-size: 26px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          opacity: 0;
+        }
+      </style>
+      <div id="root" data-composition-id="setup" data-width="1920" data-height="1080">
+        <div id="setup-wrap">
+          <div id="setup-req">
+            <div class="setup-tag" id="setup-tag-req">CASE REQUEST</div>
+            <div class="req-line" id="setup-req1">Vehicle: PX4 x500 quadrotor, 2.06 kg</div>
+            <div class="req-line" id="setup-req2">Flight: forward, 15 m/s, level attitude</div>
+            <div class="req-line" id="setup-req3">Rotors: 4 × 5.06 N hover thrust (set value)</div>
+          </div>
+          <div id="setup-auto">
+            <div class="setup-tag" id="setup-tag-auto">SET UP AUTOMATICALLY</div>
+            <div class="auto-line" id="setup-auto1">Free-flight tunnel 24.4 × 10.4 × 9.8 m</div>
+            <div class="auto-line" id="setup-auto2">Cells down to 3.1 mm at the walls</div>
+            <div class="auto-line" id="setup-auto3">Rotors as actuator disks, R 147 mm</div>
+          </div>
+          <div id="setup-panel">
+            <video
+              id="setup-tt"
+              src="assets/turntable_clean.mp4"
+              muted
+              playsinline
+              data-start="0"
+              data-duration="8"
+              data-track-index="0"
+            ></video>
+            <img id="setup-mesh" src="assets/stills/after.png" alt="" />
+          </div>
+          <div id="setup-panel-label">Production mesh · wall faces</div>
+          <div id="setup-count-row">
+            <div id="setup-cells">0</div>
+            <div id="setup-cells-unit">cells</div>
+          </div>
+          <div id="setup-cells-sub">built in 7 min · our automesher, CPU</div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        var counter = document.getElementById("setup-cells");
+        var state = { value: 0 };
+        tl.fromTo("#setup-wrap", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "none" }, 0);
+        tl.fromTo("#setup-tag-req", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.3);
+        tl.fromTo("#setup-req1", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, 0.6);
+        tl.fromTo("#setup-req2", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, 1.2);
+        tl.fromTo("#setup-req3", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, 1.8);
+        tl.fromTo("#setup-tag-auto", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 3.0);
+        tl.fromTo("#setup-auto1", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, 3.3);
+        tl.fromTo("#setup-auto2", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, 3.7);
+        tl.fromTo("#setup-auto3", { opacity: 0, x: -12 }, { opacity: 1, x: 0, duration: 0.3, ease: "power2.out" }, 4.1);
+        tl.fromTo("#setup-mesh", { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "none" }, 5.6);
+        tl.to(state, {
+          value: 1286601,
+          duration: 1.5,
+          ease: "power2.out",
+          onUpdate: function () {
+            counter.textContent = Math.round(state.value).toLocaleString("en-US");
+          },
+        }, 5.8);
+        tl.fromTo("#setup-cells", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 5.7);
+        tl.fromTo("#setup-cells-unit", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 5.7);
+        tl.fromTo("#setup-cells-sub", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power1.out" }, 7.3);
+        tl.fromTo("#setup-panel-label", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power1.out" }, 6.4);
+        tl.to("#setup-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 11.1);
+        window.__timelines["setup"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

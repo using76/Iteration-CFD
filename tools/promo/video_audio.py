@@ -9,8 +9,9 @@
 through `npx --yes hyperframes@0.8.122 tts` into <project>/assets/voice/<ID>.wav
 and writes voice.json (engine, voice, per-line clip seconds, speed and sha256).
 `build` mixes the film soundtrack: the licensed music bed (gained, VO-carved
-and ducked), the placed VO clips, and 36 timed SFX cues (the "sub" kind is
-synthesised here), then masters to -14 LUFS / <= -2.0 dBTP with its own
+and ducked), the placed VO clips, and 34 timed SFX cues (audio v5; the
+synthesised "sub" kind has no cue since then), then masters to -14 LUFS /
+<= -2.0 dBTP with its own
 BS.1770-4 integrated-loudness meter and a 4x-oversampled true-peak limiter,
 verifies the result with ffmpeg ebur128 against the gates and writes
 <project>/assets/audio/master.wav (48 kHz, 24-bit, stereo, exactly 4320000
@@ -1019,8 +1020,8 @@ def selftest():
     data, ids = load_data()
     sc = data["scenes"]
     ok("T1 soundtrack validates", len(sc) == 10 and len(data["vo"]["lines"]) == 12
-       and len(data["sfx"]["cues"]) == 36
-       and sum(len(l["asr_keys"]) for l in data["vo"]["lines"]) == 41
+       and len(data["sfx"]["cues"]) == 34
+       and sum(len(l["asr_keys"]) for l in data["vo"]["lines"]) == 40
        and abs(sum(s["dur"] for s in sc) - 90.0) < 1e-9
        and abs(sc[0]["start"]) < 1e-12
        and all(abs(sc[i]["start"] - (sc[i - 1]["start"] + sc[i - 1]["dur"])) < 1e-9
@@ -1144,7 +1145,7 @@ def selftest():
                                 "master": synth_words(l["asr_keys"])}
                       for l in data["vo"]["lines"]}}
     s1, m1, f1, k1, _ = judge_asr(data, full)
-    ok("T9 judge all keys", (s1, m1, f1, k1) == (12, 12, 41, 41),
+    ok("T9 judge all keys", (s1, m1, f1, k1) == (12, 12, 40, 40),
        f"stem {s1} master {m1} keys {f1}/{k1}")
     drop = json.loads(json.dumps(full))
     drop["lines"]["V07"]["stem"]["words"] = [w for w in drop["lines"]["V07"]["stem"]["words"]
@@ -1152,7 +1153,7 @@ def selftest():
     s2, m2, _, _, _ = judge_asr(data, drop)
     ok("T9 judge one missing", (s2, m2) == (11, 12), f"stem {s2} master {m2} (2/3 remain -> master ok)")
     sub = json.loads(json.dumps(full))
-    sub["lines"]["V10"]["stem"]["words"] = [{"text": "meteor"}, {"text": "aidriven"},
+    sub["lines"]["V10"]["stem"]["words"] = [{"text": "aidriven"},
                                             {"text": "solver"}]
     s3, _, _, _, r3 = judge_asr(data, sub)
     ok("T9 judge substring", s3 == 12 and "[ok] stem V10" in r3, f"stem {s3}")

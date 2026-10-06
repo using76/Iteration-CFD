@@ -60,7 +60,7 @@
    {"id": "V07", "scene": "cpturn", "start": 48.1, "text": "Pressure, mapped across every surface of the car.", "tts": "Pressure, mapped across every surface of the car.", "ko": "차체 모든 표면의 압력 분포.", "asr_keys": ["pressure", "surface", "car"]},
    {"id": "V08", "scene": "reveal", "start": 60.0, "text": "Streamlines trace the air over the front wing, the wheels and the rear wing.", "tts": "Streamlines trace the air over the front wing, the wheels and the rear wing.", "ko": "유선이 앞날개, 바퀴, 뒷날개 위로 흐르는 공기를 따라갑니다.", "asr_keys": ["streamlines", "front", "wheels", "rear"]},
    {"id": "V09", "scene": "slice", "start": 66.4, "text": "The centre plane shows the wake. From CAD to flow field, end to end.", "tts": "The centre plane shows the wake. From CAD to flow field, end to end.", "ko": "중앙 단면이 후류를 보여줍니다.\nCAD에서 유동장까지, 처음부터 끝까지.", "asr_keys": ["plane", "wake", "flow", "field"]},
-   {"id": "V10", "scene": "close", "start": 72.5, "speed": 1.05, "text": "meteor-cfd. The AI-driven CFD solver.", "tts": "meteor C F D. The A.I.-driven C.F.D. solver.", "ko": "meteor-cfd. AI 기반 CFD 솔버.", "asr_keys": ["meteor", "driven", "solver"]},
+   {"id": "V10", "scene": "close", "start": 72.5, "speed": 1.05, "text": "The AI-driven CFD solver.", "tts": "The A.I.-driven C.F.D. solver.", "ko": "AI 기반 CFD 솔버.", "asr_keys": ["driven", "solver"]},
    {"id": "V11", "scene": "close", "start": 76.7, "text": "Set up by AI. Solved on the GPU.", "tts": "Set up by A.I. Solved on the G.P.U.", "ko": "AI가 설정하고, GPU가 풉니다.", "asr_keys": ["set", "solved", "gpu"]},
    {"id": "V12", "scene": "close", "start": 79.9, "text": "Fast, and automatic.", "tts": "Fast, and automatic.", "ko": "빠르고, 자동으로.", "asr_keys": ["fast", "automatic"]}
   ]
@@ -80,10 +80,10 @@
    "sub": "synth: sine sweep 78 -> 40 Hz over 0.9 s, exponential decay, plus a 60 Hz thump of 0.12 s"
   },
   "cues": [
-   [0.25, "sub", -3.0, "title: (주)Iterations lands"],
-   [0.25, "impact", -4.0, "title lockup"],
-   [0.45, "airy", -8.0, "light over the title"],
-   [2.4, "pop", -10.0, "subtitle F1 레이싱카 공력해석 테스트"],
+   [0.05, "airy", -15.0, "the graded solver mesh sweeps across the frame toward the wall"],
+   [1.15, "scan", -16.0, "the damped residual line sweeps through the stagnation-flow field"],
+   [2.76, "ping", -16.0, "the teal dot lands at the stagnation point and the mark is formed"],
+   [3.6, "tick", -14.0, "subtitle F1 레이싱카 공력해석 테스트"],
    [5.85, "whoosh", -9.0, "dip into cad"],
    [13.35, "whoosh", -9.0, "dip into chat"],
    [14.15, "typing", -14.0, "prompt card"],
@@ -105,15 +105,13 @@
    [59.6, "scan", -11.0, "streamlines grow"],
    [65.85, "whoosh", -9.0, "dip into the slice"],
    [69.2, "riser", -10.0, "riser into the close"],
-   [72.0, "sub", -4.0, "close card"],
-   [72.0, "impact", -6.0, "close card"],
-   [74.0, "impact", -6.0, "headline AI-driven CFD Solver"],
+   [72.0, "airy", -13.0, "the close card arrives, light"],
+   [74.0, "ping", -17.0, "a soft ding under the AI-driven CFD Solver headline"],
    [74.0, "airy", -10.0, "headline light"],
-   [76.75, "pop", -10.0, "Set up by AI."],
-   [78.05, "pop", -10.0, "Solved on the GPU."],
-   [79.9, "sub", -2.0, "Fast and automatic. - on the music's final hit"],
-   [79.9, "impact", -4.0, "Fast and automatic."],
-   [82.0, "impact", -8.0, "company lockup"],
+   [76.75, "pop", -13.0, "Set up by AI."],
+   [78.05, "pop", -13.0, "Solved on the GPU."],
+   [79.9, "ping", -16.0, "Fast and automatic. - the music's own final hit carries this moment"],
+   [82.0, "tick", -15.0, "the company lockup, light"],
    [82.0, "airy", -11.0, "company lockup light"],
    [83.0, "tick", -14.0, "credits"]
   ]

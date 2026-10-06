@@ -13,6 +13,11 @@
           src: url("assets/fonts/NotoSansKR-VF.ttf");
           font-weight: 100 900;
         }
+        @font-face {
+          font-family: "Bricolage Grotesque";
+          src: url("assets/fonts/BricolageGrotesque-VF.ttf");
+          font-weight: 200 800;
+        }
         #root {
           position: absolute;
           inset: 0;
@@ -67,21 +72,12 @@
           flex-direction: column;
           align-items: center;
         }
-        #close-kicker {
-          font-family: "IBM Plex Mono", "Noto Sans KR", monospace;
-          font-variant-numeric: tabular-nums;
-          font-size: 36px;
-          font-weight: 700;
-          color: #ff5a36;
-          line-height: 1.2;
-        }
         #close-head {
           font-size: 136px;
           font-weight: 800;
           color: #f1f3f5;
           line-height: 1.05;
           text-align: center;
-          margin-top: 8px;
         }
         #close-head .close-ai {
           color: #ff5a36;
@@ -103,20 +99,39 @@
           background: rgba(255, 255, 255, 0.14);
           margin: 30px auto 26px;
         }
-        #close-company {
-          font-size: 60px;
+        /* The same brand lockup as the title card, smaller: wordmark cap height
+           54 px (82 px Bricolage Grotesque 800), mark 115.2 x 86.4 px, gap
+           28.8 px, company line 20 px (cap ~14.6 px, the title's 26/96 ratio),
+           left-aligned to the wordmark (mark width + gap = 144 px). */
+        #close-lockup {
+          display: flex;
+          align-items: center;
+          gap: 28.8px;
+        }
+        #close-mark {
+          display: block;
+          width: 115.2px;
+          height: 86.4px;
+        }
+        #close-word {
+          font-family: "Bricolage Grotesque", "Noto Sans KR", sans-serif;
+          font-size: 82px;
           font-weight: 800;
+          letter-spacing: -0.025em;
           color: #f1f3f5;
-          line-height: 1.15;
-          text-align: center;
+          line-height: 1;
+          white-space: nowrap;
         }
         #close-legal {
-          font-size: 26px;
+          font-size: 20px;
           font-weight: 500;
           color: #a7afb8;
+          letter-spacing: 0.04em;
           line-height: 1.3;
-          margin-top: 4px;
-          text-align: center;
+          margin-top: 8px;
+          margin-left: 144px;
+          text-align: left;
+          white-space: nowrap;
         }
         #close-collab {
           font-size: 20px;
@@ -165,17 +180,37 @@
           <div id="close-glow"></div>
           <div id="close-col">
             <div id="close-inner">
-              <div id="close-kicker">meteor-cfd</div>
               <h1 id="close-head"><span class="close-ai">AI</span>-driven CFD Solver</h1>
               <div id="close-value"><span id="close-v1">Set up by AI.</span> <span id="close-v2">Solved on the GPU.</span> <span id="close-v3">Fast and automatic.</span></div>
               <div id="close-rule"></div>
-              <div id="close-company">(주)Iterations</div>
-              <div id="close-legal">Iterations Co., Ltd.</div>
+              <div id="close-brand">
+                <!-- The Iterations mark E "damped residual"
+                     (tools/promo/brand/iterations_mark_light_on_dark.svg, same geometry),
+                     viewBox cropped to the drawn band y 30..210 as in the title card. -->
+                <div id="close-lockup">
+                  <svg id="close-mark" viewBox="0 30 240 180" aria-hidden="true">
+                    <g id="close-mark-lines">
+                      <line x1="40" y1="40" x2="40" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.12"/>
+                      <line x1="80" y1="40" x2="80" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.15"/>
+                      <line x1="112" y1="40" x2="112" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.18"/>
+                      <line x1="138" y1="40" x2="138" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.21"/>
+                      <line x1="158" y1="40" x2="158" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.24"/>
+                      <line x1="174" y1="40" x2="174" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.27"/>
+                      <line x1="186" y1="40" x2="186" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.30"/>
+                      <line x1="196" y1="40" x2="196" y2="200" stroke="#e6f2f0" stroke-width="2" opacity="0.33"/>
+                    </g>
+                    <polyline id="close-mark-wave" points="20.0,58.0 21.0,59.8 22.0,62.3 23.0,65.4 24.0,69.1 25.0,73.2 26.0,77.8 27.0,82.6 28.0,87.8 29.0,93.1 30.0,98.5 31.0,103.9 32.0,109.3 33.0,114.6 34.0,119.7 35.0,124.6 36.0,129.2 37.0,133.4 38.0,137.3 39.0,140.9 40.0,143.9 41.0,146.6 42.0,148.8 43.0,150.5 44.0,151.7 45.0,152.5 46.0,152.9 47.0,152.8 48.0,152.3 49.0,151.4 50.0,150.1 51.0,148.5 52.0,146.7 53.0,144.6 54.0,142.2 55.0,139.7 56.0,137.1 57.0,134.3 58.0,131.5 59.0,128.7 60.0,125.9 61.0,123.2 62.0,120.5 63.0,117.9 64.0,115.5 65.0,113.3 66.0,111.2 67.0,109.4 68.0,107.8 69.0,106.4 70.0,105.2 71.0,104.3 72.0,103.6 73.0,103.2 74.0,103.0 75.0,103.0 76.0,103.2 77.0,103.7 78.0,104.3 79.0,105.1 80.0,106.0 81.0,107.1 82.0,108.3 83.0,109.6 84.0,111.0 85.0,112.4 86.0,113.8 87.0,115.3 88.0,116.8 89.0,118.2 90.0,119.6 91.0,120.9 92.0,122.2 93.0,123.3 94.0,124.4 95.0,125.4 96.0,126.2 97.0,127.0 98.0,127.6 99.0,128.1 100.0,128.5 101.0,128.7 102.0,128.8 103.0,128.8 104.0,128.7 105.0,128.5 106.0,128.2 107.0,127.8 108.0,127.3 109.0,126.8 110.0,126.1 111.0,125.5 112.0,124.8 113.0,124.0 114.0,123.3 115.0,122.5 116.0,121.8 117.0,121.0 118.0,120.3 119.0,119.6 120.0,119.0 121.0,118.3 122.0,117.8 123.0,117.3 124.0,116.8 125.0,116.4 126.0,116.1 127.0,115.8 128.0,115.6 129.0,115.5 130.0,115.4 131.0,115.4 132.0,115.5 133.0,115.6 134.0,115.7 135.0,115.9 136.0,116.2 137.0,116.5 138.0,116.8 139.0,117.1 140.0,117.5 141.0,117.9 142.0,118.2 143.0,118.6 144.0,119.0 145.0,119.4 146.0,119.8 147.0,120.2 148.0,120.5 149.0,120.8 150.0,121.1 151.0,121.4 152.0,121.6 153.0,121.8 154.0,122.0 155.0,122.1 156.0,122.3 157.0,122.3 158.0,122.4 159.0,122.4 160.0,122.4 161.0,122.3 162.0,122.2 163.0,122.1 164.0,122.0 165.0,121.9 166.0,121.7 167.0,121.5 168.0,121.3 169.0,121.1 170.0,120.9 171.0,120.7 172.0,120.5 173.0,120.3 174.0,120.1 175.0,119.9 176.0,119.8 177.0,119.6 178.0,119.4 179.0,119.3 180.0,119.2 181.0,119.1 182.0,119.0 183.0,118.9 184.0,118.8 185.0,118.8 186.0,118.8 187.0,118.8 188.0,118.8 189.0,118.8 190.0,118.8 191.0,118.9 192.0,119.0 193.0,119.0 194.0,119.1 195.0,119.2 196.0,119.3 197.0,119.4 198.0,119.5 199.0,119.6 200.0,119.7" fill="none" stroke="#e6f2f0" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+                    <circle id="close-mark-dot" cx="212" cy="120" r="14" fill="#14B8A6"/>
+                  </svg>
+                  <div id="close-word">Iterations</div>
+                </div>
+                <div id="close-legal">(주)이터레이션즈 · Iterations Co., Ltd.</div>
+              </div>
               <div id="close-collab">협력 및 기여 주식회사 메테오시뮬레이션 · in collaboration with Meteo Simulation Co., Ltd.</div>
               <div id="close-credits">
                 <div>Car model: "F1 2026 concept" by Qvist_Designs, CC BY 4.0, via Sketchfab.</div>
                 <div>Licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)</div>
-                <div>Changes: scaled to metres, closed into a watertight simulation surface, meshed and solved with meteor-cfd; the colours on the car, the streamlines and the slice are CFD results and are not part of the original model.</div>
+                <div>Changes: scaled to metres, closed into a watertight simulation surface, meshed and solved with Iterations; the colours on the car, the streamlines and the slice are CFD results and are not part of the original model.</div>
                 <div>Rendered with Blender 5.1.2 (Cycles).</div>
               </div>
               <div id="close-disclaimer">
@@ -188,9 +223,16 @@
       </div>
       <script>
         var tl = gsap.timeline({ paused: true });
+        // The column is laid out for each state, not just the final one: the
+        // block sits pushed down 225.6 px so the headline is centred while it
+        // leads the card (film 74-82 s), and moves up as the company block
+        // appears at 10.0 s (film 82.0 s). The push is v4's 200 px plus the
+        // v5-removed kicker's 51.2 px column height minus the 25.6 px the
+        // centred column itself gains, and keeps the invisible tail inside
+        // the canvas before it exists visually.
+        tl.fromTo("#close-inner", { y: 225.6 }, { y: 0, duration: 0.7, ease: "power2.inOut" }, 10.0);
         tl.fromTo("#close-wrap", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 0);
         tl.fromTo("#close-glow", { opacity: 0 }, { opacity: 0.25, duration: 0.9, ease: "power2.out" }, 0.3);
-        tl.fromTo("#close-kicker", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 0.5);
         tl.fromTo("#close-head", { opacity: 0, y: 72 }, { opacity: 1, y: 0, duration: 0.22, ease: "power4.out" }, 2.0);
         tl.fromTo("#close-v1", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 4.75);
         tl.fromTo("#close-v2", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 6.05);
@@ -198,7 +240,7 @@
         tl.to("#close-glow", { opacity: 0.45, scale: 1.08, duration: 0.25, ease: "power2.out" }, 7.9);
         tl.to("#close-glow", { opacity: 0.25, scale: 1.0, duration: 1.2, ease: "power2.out" }, 8.15);
         tl.fromTo("#close-rule", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 10.0);
-        tl.fromTo("#close-company", { opacity: 0, y: 36 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 10.0);
+        tl.fromTo("#close-brand", { opacity: 0, y: 36 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 10.0);
         tl.fromTo("#close-legal", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 10.12);
         tl.fromTo("#close-collab", { opacity: 0 }, { opacity: 1, duration: 0.15, ease: "power1.out" }, 10.24);
         tl.fromTo("#close-credits", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "power1.out" }, 11.0);

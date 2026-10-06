@@ -2243,14 +2243,14 @@ impl<'s> BandIndex<'s> {
         for part in &self.parts {
             let mut r = half_diag;
             for band in &part.bands {
-                r = r.max(band.distance);
+                r = r.max(band.distance as Scalar);
             }
             let mut l = 0u32;
             if let Some(d) = part.tri.nearest_distance_within(centre, r) {
                 // (92.1): the deepest band whose distance the cell centre
                 // falls inside.
                 for band in &part.bands {
-                    if d <= band.distance {
+                    if d <= band.distance as Scalar {
                         l = l.max(band.level);
                     }
                 }

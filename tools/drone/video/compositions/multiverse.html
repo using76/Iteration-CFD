@@ -1,0 +1,143 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>multiverse</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #000;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #multiverse-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #multiverse-wrap img.mv {
+          position: absolute;
+          left: 768px;
+          top: 348px;
+          width: 384px;
+          height: 384px;
+          opacity: 0;
+        }
+        #multiverse-grid {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          opacity: 0;
+        }
+        #multiverse-base {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 213px;
+          height: 270px;
+          border: 3px solid #14B8A6;
+          opacity: 0;
+        }
+        #multiverse-baselabel {
+          position: absolute;
+          left: 10px;
+          top: 238px;
+          font-size: 18px;
+          font-weight: 600;
+          color: #14B8A6;
+          line-height: 1.3;
+          opacity: 0;
+        }
+        #multiverse-tag {
+          position: absolute;
+          left: 96px;
+          top: 72px;
+          font-size: 22px;
+          font-weight: 600;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #14B8A6;
+          line-height: 1.3;
+          opacity: 0;
+        }
+        #multiverse-note {
+          position: absolute;
+          right: 72px;
+          top: 72px;
+          text-align: right;
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.45;
+          background: rgba(7, 11, 16, 0.78);
+          border-radius: 10px;
+          padding: 8px 14px;
+          opacity: 0;
+        }
+      </style>
+      <div id="root" data-composition-id="multiverse" data-width="1920" data-height="1080">
+        <div id="multiverse-wrap">
+          <div id="multiverse-field"></div>
+          <img id="multiverse-grid" src="assets/multiverse/grid_clean.png" alt="" />
+          <div id="multiverse-base"></div>
+          <div id="multiverse-baselabel">solved: baseline</div>
+          <div id="multiverse-tag">DESIGN VARIANTS</div>
+          <div id="multiverse-note">
+            Concept visualisation · variants not solved<br />
+            개념 시각화 · 변형 형상은 해석하지 않음
+          </div>
+        </div>
+      </div>
+      <script>
+        var field = document.getElementById("multiverse-field");
+        var imgs = [];
+        for (var i = 0; i < 36; i++) {
+          var im = document.createElement("img");
+          im.className = "mv";
+          im.src = "assets/multiverse/variant_"
+            + (i < 10 ? "0" + i : "" + i) + "_clean.png";
+          im.alt = "";
+          field.appendChild(im);
+          imgs.push(im);
+        }
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#multiverse-wrap", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "none" }, 0);
+        var GA = 137.508 * Math.PI / 180;
+        for (var i = 0; i < imgs.length; i++) {
+          var a = i * GA;
+          var r = 120 + 26 * (i % 12);
+          var x0 = Math.cos(a) * r * 0.25, y0 = Math.sin(a) * r * 0.25;
+          var x1 = Math.cos(a) * r * 3.2, y1 = Math.sin(a) * r * 3.2;
+          var t_i = 0.2 + 0.16 * i;
+          tl.fromTo(imgs[i],
+            { x: x0, y: y0, scale: 0.15, opacity: 0 },
+            { x: x1, y: y1, scale: 1.6, duration: 2.4, ease: "power1.in" }, t_i);
+          tl.to(imgs[i], { opacity: 1, duration: 2.4 * 0.35, ease: "none" }, t_i);
+          tl.to(imgs[i], { opacity: 0, duration: 2.4 * 0.30, ease: "none" }, t_i + 2.4 * 0.70);
+        }
+        tl.fromTo("#multiverse-grid", { opacity: 0 }, { opacity: 1, duration: 0.6, ease: "none" }, 7.3);
+        tl.fromTo("#multiverse-grid", { scale: 1.12 }, { scale: 1.0, duration: 0.6, ease: "power3.out", immediateRender: false }, 7.3);
+        tl.fromTo("#multiverse-base", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "none" }, 7.6);
+        tl.fromTo("#multiverse-baselabel", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "none" }, 7.6);
+        tl.fromTo("#multiverse-tag", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.3);
+        tl.to("#multiverse-tag", { opacity: 0, duration: 0.3, ease: "none" }, 7.0);
+        tl.fromTo("#multiverse-note", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power1.out" }, 0.5);
+        tl.to("#multiverse-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 9.6);
+        window.__timelines["multiverse"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

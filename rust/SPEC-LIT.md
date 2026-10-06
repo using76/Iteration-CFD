@@ -26885,6 +26885,23 @@ D_i    = T_i n_i          the displacement vector, and the array the
                           retreat scales and the hanging nodes average (92.45)
 ```
 
+Face mode adds the height of the cell BEHIND the wall, because (92.45)'s
+`h_i` reads the wall face's EDGES and a sliver cut cell slips under every
+one of them - the shrink then pushes the wall point through a cell whose
+volume is going to zero, and the gate's G2 names it:
+
+```
+face mode:  H_i = min over the layer faces f carrying i of  V_own(f) / |Sf|
+            (V_own(f) the volume of f's owner cell on the INPUT mesh, §92.3's own volume)
+            T_i = min( T, medial_frac * m(i), cell_frac * h_i, cell_frac * H_i )               (92.45')
+```
+
+A point whose `T_i` then falls under `min_thickness * T` is anchored by the
+inner pass branch, as any thin point. On a flat wall of cubes `H_i` equals
+`h_i` - the owner height is the edge length - so (92.45') does not move a
+run that (92.45) already bounded; it binds only where the cell behind the
+wall is thinner than the wall face is wide.
+
 **The shrink.** The boundary moves inward by `D_i` and the interior takes the
 displacement as (92.29)'s extension takes the snap's, so the one cell behind
 the wall does not absorb all of it. The boundary values are FIXED — they are
@@ -27039,6 +27056,243 @@ A patch that loses its layers keeps its snapped boundary, is reported by name
 with the reason, and the run continues — §92.2 stage 6's own sentence. When
 every named patch has lost its layers the returned mesh is the input mesh, bit
 for bit.
+
+**Terminating the stack per face (`layers.terminate: "face"`).** Everything
+above ends a stack where a POINT cannot carry it by dropping that point's
+whole patch. `"face"` ends it where the point stands: the point is ANCHORED —
+it takes no level copies at all, its position at every level is the input
+point — the faces around it taper to zero in ONE wedge cell, and only the
+faces every point of which is anchored go without layers. The default is
+`"patch"`, and a config that does not name `layers.terminate` produces today's
+meshes bit for bit, golden included.
+
+The anchored point's own normal still has to leave the wall plane — a wall's
+stack runs straight out — but the constraints (92.42) collects no longer have
+to agree to 1e-6: a snapped plane is not flat to 1e-6, and the exact dedupe
+pins points a wall reads as one direction. Within the junction angle
+`layers.junction_angle_deg` (the default 15 degrees) two of them are ONE
+direction, so a juncture reads as a wall and not as a refusal. The merge is:
+
+```
+theta_U = layers.junction_angle_deg   (default 15 deg; face mode only)
+
+C(i): walk U(i) in face order; u joins the first cluster whose representative r has
+      u . r >= cos theta_U, else opens a new cluster with representative r = u.
+      r_1 .. r_k are the representatives in the order they opened.
+
+k = 0:   n_i unchanged
+k = 1:   n_i <- normalise( n_i - (n_i . r_1) r_1 ),   |...| < 0.1 before normalising anchors i
+k = 2:   n_i <- normalise( +- r_1 x r_2 ), the sign that agrees with n_i;  |r_1 x r_2| < 1e-9 anchors i
+k >= 3:  (a, b) = the pair with the largest |r_a x r_b| (ties: lowest a, then lowest b),
+         e = normalise( r_a x r_b );
+         max_c |r_c . e| <= sin theta_U:  n_i <- +- e, the sign that agrees with n_i   (rank 2)
+         otherwise i is anchored                                                    (rank 3)
+                                                                                    (92.69)
+```
+
+At
+`theta_U` approaching 0 the merge degenerates to (92.42)'s 1e-6 dedupe and
+the face mode's anchors are the patch mode's pins. The merge is what the
+reduced F1 tunnel needs: its 29 wheel points at the ground contact, where the
+snapped ground faces carry normals a few degrees apart, are all pinned by the
+1e-6 dedupe and none of them is pinned at 15 degrees — one pinned point used
+to drop the whole wheels patch.
+
+A point is ANCHORED when its applied displacement is the zero vector — the
+ladder below puts it there, or the shrink proposed nothing. With `A` the
+anchored points and `L_m` the moving ones, the faces of the layer patch
+classify, and the merged faces of (92.73) below classify with them:
+
+```
+A    = { i in L : D_i = 0 after (92.46) }      (the zero vector exactly)       the anchored points
+L_m  = L \ A                                                                   the moving points
+
+M = the merged faces:  a KEEP face one of whose layer cells G5 names on the EXTRUDED mesh
+X = the cut faces:     a face one of whose layer cells any gate names on the EXTRUDED mesh, when that
+                       cell is not answered by M (a RING cell, or a KEEP cell named by a gate other
+                       than G5), and the layer face of every level-n face G4 names
+M and X are carried into every later attempt as the caps are, and emptied with them when a patch drops
+
+f in Lf:  OFF   if every point of f is in A, or f is in X
+          RING  if some point of f is in A, or f is in M        (and f not OFF)
+          KEEP  otherwise                                                      (92.70)
+```
+
+A stack never stands on nothing: where a KEEP face's neighbour went OFF the
+shared points are the KEEP face's own level copies, standing on the cut
+face's step — the shrunk wall — so the kept region always ends in a ring or
+in a step the wall carries. A RING face touches both. A face of `M` is RING
+with NO anchored point: no point of it moves for the merge, and instead of a
+prism stack it carries ONE cell of the whole stack `T`, whose G5 measure is
+about `3 T / sqrt(A)` — 3.64 times the first layer's at growth 1.2. The
+extrusion per class:
+
+```
+x_i^(k) = x_i^orig + f_k D_i   i in L_m   (levels 0..n-1 new points, level n the point itself)
+x_i^(k) = the point i itself   i in A, every k
+
+cells, in field-face order, each face's block after the previous one's, from C:
+    KEEP f -> n cells c(f,k), k = 0..n-1, as (92.48)
+    RING f -> ONE cell c(f) spanning level 0 to level n
+    OFF  f -> no cell
+faces:
+    KEEP f -> (92.48) unchanged
+    RING f -> level 0: a boundary face on f's patch, f's point list at level 0, winding unchanged;
+              level n: the input face, internal, owner its input cell, neighbour c(f)
+    OFF  f -> the input face unchanged, a boundary face of its patch, owner its input cell        (92.71)
+```
+
+and the sides and counts follow:
+
+```
+L_c = the points of the KEEP and RING faces;  only L_c ∩ L_m takes level copies (an OFF face's moving
+      point sits at its shrunk position, the mesh's own point, and needs none)
+
+an OFF face: the input face, its point list and owner unchanged, a boundary face of its patch
+for a segment (u, v) of a KEEP or RING face f, its partner g:
+    u, v both in A                  -> no side face
+    g KEEP or RING                  -> as before (n pieces if f or g is KEEP, else the one merged face), internal
+    g OFF, or g on a non-layer patch -> f KEEP: the n pieces;  f RING: the one merged face;
+                                       BOUNDARY, on g's patch, owned by f's cell
+    winding by (92.53), unchanged
+
+cells   C + n |KEEP| + |RING|          points   P + n |L_c ∩ L_m|                               (92.72)
+```
+
+Face mode emits a side face whose area is NONZERO but under the
+`1e-14 * diag2` guard, instead of refusing the run: the guard's threshold is
+the mesh bounding box's squared diagonal - on the full-size F1 tunnel (about
+60 x 24 x 13 m) that is 4.3e-11 m^2 and the run stopped on a side face of
+4.287e-11 m^2, a snapped wall's sliver edge of ~1e-7 m carrying a ~4e-4 m
+stack, not a stack that went to zero - so §92.3's gate judges the
+face's cells and (92.73)'s ladder cuts their faces if they fail; patch mode
+refuses it as before, and an area that is exactly zero, or a polygon of
+fewer than three points, keeps its own behaviour (skipped at a RING taper,
+refused on a KEEP side).
+
+One wedge cell and not a ramp of two or three: a ramp thins every layer of
+the ramp's cells, and on the reduced F1 body `3 t_1 / sqrt(A)` is 0.066
+against G5's 0.05 floor, so no ramp survives — while the merged cell carries
+the whole `T`, so its `tau` is about `3 T (1 - a/m) / sqrt(A)` for `a`
+anchored of `m` points. Halving is the wrong tool there the same way: halving
+`t` quarters nothing and halves `V`, so `tau = 3 V / A_max^{3/2}` of (92.51)
+FALLS — a G5 failure is mended by removing the cell (the merge) or anchoring
+its points, never by thinning it. The face-mode OUTER ladder therefore
+removes: it merges and it cuts, and moves no point at all, where the patch
+mode halved the whole patch's `D`; the INNER ladder, on the shrunk mesh,
+still takes its LOCAL step, point by point:
+
+```
+face mode, OUTER ladder (the extruded mesh), after (92.66)'s beta rungs:
+    every G5-named layer cell of a KEEP face puts that face in M
+    every other named layer cell, and the layer cell of every G4-named level-n face, puts its face in X
+    no point moves, no cap changes; the next attempt re-extrudes with M and X
+    a round that adds nothing to M or X, or a failure on a cell that is neither a layer cell nor at a
+    level-n face, ends the ladder by (92.47)'s patch rule; so does TERMINATE_STEP_LIMIT rounds
+face mode, INNER ladder (the shrunk mesh): (92.73) of run 2 amended - F, the local step, the hanging
+    closure and the pass branch's thin anchoring stay; run 2's one-ring widening is gone, and the
+    freeze below replaces it behind the empty-F rule:
+face mode, INNER ladder, at a failure (after (92.66)):
+    c_c = how many consecutive measurements of this ladder cell c has failed
+        - a measurement counts toward c_c only when it FOLLOWS a local step
+          of this ladder (a retreat or a terminate step); a measurement
+          after a (92.66) beta rung, and the round's first measurement
+          before any step, neither increments nor resets any c_c - a rung
+          moves the pull, not the points, so the cells it fails are the
+          cells the step after it will have to answer for
+    a failing cell with c_c >= 2, or whose layer points all have D_i = 0, is FROZEN: every point of it,
+        layer and interior, is held at d = 0 from then on (relax holds it as it holds an anchored point),
+        closed under hanging parents (all parents, layer or not)
+    the points of the other failing cells take the local step as before
+    a frozen cell is the input cell, which passed the gate on arrival, so a cell is frozen at most once
+    and the ladder ends: every step freezes, halves or anchors at least one point, or (92.47) answers
+add_layers reuses an attempt's shrink when the next attempt's patch set, caps and pull equal the last
+    attempt's exactly - the shrink is a deterministic function of those three, so the mesh, the report
+    and the trace are bit for bit what a fresh shrink returned; patch mode's caps change every round,
+    so only the face-mode rounds ever reuse
+every per-patch-set counter, M and X reset when a patch drops
+a patch whose faces are all OFF reports n_layers 0, drop_cause terminated                (92.73)
+```
+
+The closure under hanging parents is what keeps (92.46)'s hanging line true
+under the anchoring: an anchored HANGING node whose parents still moved would
+not be the midpoint of its parents any more, and (92.49)'s split sides are
+built on that midpoint. Closed, its parents are anchored (or non-layer
+boundary points, which never move), and the forced zero IS the mean.
+
+The step limit and `theta_U` are this project's choices, not readings of the
+specification: 48 bounds a monotone ladder — every step moves at least one
+face into M or X, or one cap down or to zero, or freezes, halves or anchors
+at least one point, and the inner pass path zeroes its own thin points — and
+15 degrees is the angle the reduced F1 tunnel reads its 29 wheel ground
+junctions through without anchoring them. 12 was not enough for the
+full-size F1 tunnel, whose body patch spent twelve steps halving and
+anchoring the wall points of two or three squeezed cells while the interior
+relaxation kept moving those cells from their neighbours, and then dropped
+the whole patch for them; the freeze spends a step on holding such a cell
+whole instead, and the limit only has to outlast the steps it needs. 24
+was not enough either: with the owner-height limiter of (92.45') the full-size body's
+inner ladder still raised G2 from 3 to 91 failing cells over its first twelve steps and
+brought it back to 41-46 by step 24, where the patch was dropped; the limit is 48.
+
+The report says what the mode did: a layer patch's row carries
+
+```
+kept_area_frac = sum { A_f : f KEEP } / sum A_f
+ring_area_frac = sum { A_f : f RING } / sum A_f        A_f the level-0 area of (92.50), over the patch's layer faces
+n_merged_faces = how many RING faces have no anchored point (the faces of M);
+                 merged_area_frac = their share of the same area
+n_cut_faces    = how many of the patch's faces are in X (OFF faces of X)
+stack_area_frac = (sum A_f over KEEP faces + over the faces of M that are RING
+                   with no anchored point) / sum A_f - the share of the wall
+                   that carries the WHOLE stack thickness, as n cells (KEEP)
+                   or as one merged cell                              (92.74)
+```
+
+together with `n_keep_faces`, `n_ring_faces`, `n_off_faces` and
+`n_anchored_points`, and every trace row carries `terminate_points`.
+`ring_area_frac` keeps counting every RING face, merged ones included;
+`kept_area_frac` stays KEEP only. `attempt` gains a `merged: &[bool]`
+argument (indexed by INPUT face id) after `betas`, and a `cut: &[bool]` in
+the same indexing after `merged`; `add_layers` owns both vectors. In patch
+mode `M` and `X` are always empty and every array is today's. The report
+line for a kept row reads `..., kept {:.1}% of the area, stack {:.1}% (ring
+{:.1}% of which merged {:.1}%, {} cut face(s), {} anchored point(s))`. An
+anchored point is counted once per patch; `stack_area_frac` is the fraction
+of the patch the WHOLE stack still stands on, and a patch whose every face
+is OFF is the face mode's drop with `drop_cause: "terminated"` and the mesh
+the input's.
+
+On the castellated cube with one anchored interior point the four faces
+around it go RING - one wedge cell each, the four segments from the anchored
+point each carrying ONE merged side face between two wedge cells - the other
+twenty KEEP, no face goes OFF, and the counts of (92.72) hold exactly; with
+the top side's centre face MERGED and nothing anchored, that one face
+carries a single cell of the whole stack between 3-cell KEEP stacks and no
+point moves; with the same face CUT and nothing anchored (`n_cut_faces 1`),
+the face stays a boundary face of the patch on its input point list, its
+stack vanishes into a step the wall carries, its four edges grow exactly 12
+boundary side faces (4 segments x 3 levels) on the patch, and the gate
+passes with the counts of (92.72) - `C + 3 (F - 1)` cells, `P + 3 |L|`
+points, `stack_area_frac` the KEEP share. On the snapped cube in face mode —
+the patch mode drops the patch whole — the OUTER ladder merges and cuts its
+way through in one step and the run keeps `kept_area_frac` 0.817,
+`ring_area_frac` 0.141, `stack_area_frac` 0.957 (18 KEEP, 2 RING - both
+merged, 4 OFF - all cut, 0 anchored points), where run 2's anchoring outer
+ladder kept 0.167 with 17 anchored points; and on the snapped floor box,
+whose pull the ladder takes back before the thickness, kept 0.978, ring 0.0,
+stack 0.978, 40 KEEP, 0 RING, 17 OFF (all cut), 0 anchored, after 3 beta
+rungs and 2 terminate steps. On the reduced F1 tunnel (base 1.0, level 5,
+band scale 0.3) run 3's OUTER ladder took 3 beta rungs, then TWO steps -
+round 3 put the first faces in M and X against G1 558, G4 3031, G5 9872,
+G6 45; round 4 saw G5 121 alone - and round 5 passed: every patch kept its
+layers, stack 0.966 body, 0.933 front_wing, 0.945 rear_wing, 0.965 wheels,
+0.994 floor (770 + 322 + 108 + 332 + 71 cut faces, 1684 merged on the body
+alone), and the stage took 154.1 s where run 2's halving-and-anchoring
+ladder took 1278.5 s and dropped all five patches. `"patch"` stays the
+default because the snapped cube of `cube_config()` drops by patch and its
+golden must not move.
+
 
 **The extrusion.** Levels are counted from the wall: level 0 is the wall where
 it was, level `n` is where the shrink put it. Level `n` is the mesh's own
@@ -27297,14 +27551,14 @@ written, moved from stage 4 into this stage so that stage 4's output and every
 mesh without layers stay what they were: (92.63)-(92.65). The second loosens a
 gate and is not written.
 
-**What this stage does NOT do.** The layer count is uniform over a patch: a
-point that cannot carry the stack costs its whole patch, not just its own
-faces. Terminating a layer stack part-way across a patch needs a face topology
-that closes the stack where it stops — a step the boundary has to carry — and
-that is tranche 2's, together with the tetrahedral path. The consequence is
-stated rather than hidden: on a patch with one pinned point the report says
-`dropped`, and the mesh that comes back is the snapped one, which is a mesh the
-solver can run.
+**What this stage does NOT do.** The DEFAULT still ends a stack per patch:
+without `layers.terminate: "face"` a point that cannot carry the stack costs
+its whole patch, and the report says `dropped` with the snapped mesh back.
+The face mode terminates a stack part-way across a patch but still only over
+PRISM stacks: the tetrahedral path has no face-mode ladder of its own, a
+RING face is never merged across a hanging 2:1 transition into its coarse
+neighbour's cells, and `kept_area_frac` is measured on the wall, so a stack
+that survives on a sliver reports a small fraction even where it holds.
 
 **What must hold**
 
@@ -27325,9 +27579,13 @@ solver can run.
 | a first layer thinner than `h/60` | refused before any cell is inserted, naming `3 t_1 / h` and `quality.min_thickness_ratio` (92.51) — not discovered as a G5 failure on an inserted cell |
 | every cell of every emitted mesh | closes to `1e-12` RELATIVE (92.54), checked BEFORE §92.3's gate; a cell that does not is a MESHER fault and is refused as one, naming the cell |
 | a side face's winding | fixed by the topology (92.53), never by the sign of a dot product against a cell centre |
+| face mode, a side face of non-zero area under the guard | emitted, judged by the gate; patch mode refuses it as before |
 | a snapped wall | closes exactly all the same — (92.54) holds on it even where the gate does not |
 | a wall the layers cannot survive | the patch loses them BY NAME (92.47) and the returned mesh is the snapped one — not a refusal listing faces the user cannot act on |
 | a patch that lost its layers | its row names `drop_cause`, the class of the last give-up in `ladder` that names it; the trace ends on the outer pass the run returned on; the mesh, the reason and the log are bit for bit what they are without it |
+| `layers.terminate: "face"` on a patch with one anchored interior point | the four faces around it are RING - one wedge cell each - the rest KEEP, none OFF, and the counts of (92.72) hold exactly; `quality` passes |
+| the same patch in `"patch"` mode | loses its layers by name; the face mode keeps `kept_area_frac` 0.167 and `ring_area_frac` 0.582 of it (4 KEEP, 8 RING, 12 OFF, 17 anchored) on the snapped cube at `t_1 = 0.06 m` |
+| a face whose every point is anchored | OFF: no cell, the input face stays the boundary face, and the counts of (92.72) reflect it exactly |
 | the report of a patch that kept its layers | says the achieved first layer in METRES (`t1_mean`, `t1_min`), not only as a fraction |
 | a failure whose failing cells carry a re-seated point with `beta_j > 0` | that ladder lowers `beta` there (92.66) before it halves any `D_i`, at most 3 times per patch set; the rung adds nothing to `retreats` and the trace names it `beta` |
 | a patch that kept its layers | reports `level_n_non_orth_max_deg`, never above the returned mesh's worst non-orthogonality; a patch without layers reports null |

@@ -1,0 +1,229 @@
+<!doctype html>
+<!-- meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.) - Source-available, not Open Source. See LICENSE at the repository root. No GPL-licensed source was consulted. -->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>review</title>
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: "Noto Sans KR";
+          src: url("assets/fonts/NotoSansKR-VF.ttf");
+          font-weight: 100 900;
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          background: #070b10;
+          font-family: "Noto Sans KR", sans-serif;
+        }
+        #review-wrap {
+          position: absolute;
+          inset: 0;
+        }
+        #review-tag {
+          position: absolute;
+          left: 96px;
+          top: 132px;
+          font-size: 22px;
+          font-weight: 600;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #14B8A6;
+          line-height: 1.3;
+          opacity: 0;
+        }
+        #review-sub {
+          position: absolute;
+          left: 96px;
+          top: 170px;
+          font-size: 22px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          opacity: 0;
+        }
+        #review-table {
+          position: absolute;
+          left: 96px;
+          top: 208px;
+          width: 820px;
+        }
+        #review-table .rrow {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          height: 64px;
+          font-size: 26px;
+          font-weight: 500;
+          color: #f1f3f5;
+          line-height: 1.2;
+          opacity: 0;
+        }
+        #review-table .rchip {
+          font-size: 20px;
+          font-weight: 700;
+          text-transform: uppercase;
+          line-height: 1.2;
+          border-radius: 6px;
+          padding: 4px 14px;
+        }
+        #review-table .ok {
+          color: #14B8A6;
+          background: rgba(20, 184, 166, 0.14);
+        }
+        #review-table .warn {
+          color: #f5a524;
+          background: rgba(245, 165, 36, 0.14);
+        }
+        #review-highlight {
+          position: absolute;
+          left: 96px;
+          top: 400px;
+          width: 820px;
+          height: 64px;
+          border-radius: 8px;
+          box-shadow: 0 0 0 2px rgba(245, 165, 36, 0.75), 0 0 26px rgba(245, 165, 36, 0.45);
+          opacity: 0;
+        }
+        #review-remedy {
+          position: absolute;
+          left: 96px;
+          top: 730px;
+          width: 820px;
+          border-left: 4px solid #14B8A6;
+          background: rgba(20, 184, 166, 0.08);
+          padding: 14px 24px;
+          opacity: 0;
+        }
+        #review-remedy .rlabel {
+          font-size: 20px;
+          font-weight: 700;
+          color: #14B8A6;
+          line-height: 1.2;
+        }
+        #review-remedy .rtext {
+          font-size: 24px;
+          font-weight: 400;
+          color: #f1f3f5;
+          line-height: 1.35;
+          margin-top: 4px;
+        }
+        #review-panel {
+          position: absolute;
+          left: 980px;
+          top: 190px;
+          width: 844px;
+          height: 475px;
+          overflow: hidden;
+          border-radius: 4px;
+        }
+        #review-panel img {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        #review-after {
+          opacity: 0;
+        }
+        #review-lbefore, #review-lafter {
+          position: absolute;
+          left: 996px;
+          font-size: 20px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.4;
+          background: rgba(7, 11, 16, 0.78);
+          border-radius: 10px;
+          padding: 8px 14px;
+          opacity: 0;
+        }
+        #review-lbefore { top: 206px; }
+        #review-lafter { top: 206px; }
+        #review-metric {
+          position: absolute;
+          left: 980px;
+          top: 700px;
+        }
+        #review-metric .mname {
+          font-size: 26px;
+          font-weight: 400;
+          color: #a7afb8;
+          line-height: 1.3;
+          margin-bottom: 14px;
+        }
+        #review-metric .mval {
+          font-size: 72px;
+          font-weight: 800;
+          line-height: 1.15;
+          font-variant-numeric: tabular-nums;
+        }
+        #review-metric .m-before { color: #f5a524; }
+        #review-metric .m-arrow { color: #a7afb8; font-size: 56px; }
+        #review-metric .m-after { color: #14B8A6; }
+      </style>
+      <div id="root" data-composition-id="review" data-width="1920" data-height="1080">
+        <div id="review-wrap">
+          <div id="review-tag">AUTOMATIC REVIEW</div>
+          <div id="review-sub">Before card · REDUCED test pair (max level 5, 250 steps)</div>
+          <div id="review-highlight"></div>
+          <div id="review-table">
+            <div class="rrow" id="review-row1"><span>Mesh check</span><span class="rchip ok">ok</span></div>
+            <div class="rrow" id="review-row2"><span>Non-orthogonality 65°</span><span class="rchip warn">warn</span></div>
+            <div class="rrow" id="review-row3"><span>Surface snap 99.5 %</span><span class="rchip ok">ok</span></div>
+            <div class="rrow" id="review-row4"><span>Arm surface capture 20 %</span><span class="rchip warn">warn</span></div>
+            <div class="rrow" id="review-row5"><span>Prism layers: none</span><span class="rchip warn">warn</span></div>
+            <div class="rrow" id="review-row6"><span>Wall y+ in range</span><span class="rchip ok">ok</span></div>
+            <div class="rrow" id="review-row7"><span>Unsteady run</span><span class="rchip warn">warn</span></div>
+            <div class="rrow" id="review-row8"><span>Mass balance</span><span class="rchip ok">ok</span></div>
+          </div>
+          <div id="review-remedy">
+            <div class="rlabel">REMEDY · REM-WALL-LEVEL</div>
+            <div class="rtext">Refine every surface under 80 % capture one level: arms 6.25 → 3.125 mm cells, re-mesh, re-solve.</div>
+          </div>
+          <div id="review-panel">
+            <img id="review-before" src="assets/stills/before.png" alt="" />
+            <img id="review-after" src="assets/stills/after.png" alt="" />
+          </div>
+          <div id="review-lbefore">Before · arms 20 %</div>
+          <div id="review-lafter">After · arms 59 % · = the production mesh</div>
+          <div id="review-metric">
+            <div class="mname">Arm surface capture</div>
+            <div class="mval"><span class="m-before">0.20</span> <span class="m-arrow">→</span> <span class="m-after">0.59</span></div>
+          </div>
+        </div>
+      </div>
+      <script>
+        var tl = gsap.timeline({ paused: true });
+        tl.fromTo("#review-wrap", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "none" }, 0);
+        tl.fromTo("#review-tag", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.3);
+        tl.fromTo("#review-sub", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.4);
+        tl.fromTo("#review-row1", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.6);
+        tl.fromTo("#review-row2", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.72);
+        tl.fromTo("#review-row3", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.84);
+        tl.fromTo("#review-row4", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 0.96);
+        tl.fromTo("#review-row5", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 1.08);
+        tl.fromTo("#review-row6", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 1.2);
+        tl.fromTo("#review-row7", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 1.32);
+        tl.fromTo("#review-row8", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 1.44);
+        tl.fromTo("#review-highlight", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, 2.6);
+        tl.fromTo("#review-remedy", { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }, 5.9);
+        tl.fromTo("#review-before", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "none" }, 1.0);
+        tl.fromTo("#review-lbefore", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power1.out" }, 1.3);
+        tl.to("#review-lbefore", { opacity: 0, duration: 0.4, ease: "none" }, 10.2);
+        tl.fromTo("#review-after", { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "none" }, 10.2);
+        tl.fromTo("#review-lafter", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power1.out" }, 10.6);
+        tl.fromTo("#review-metric", { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.4, ease: "power2.out" }, 10.4);
+        tl.to("#review-wrap", { opacity: 0, duration: 0.4, ease: "none" }, 13.6);
+        window.__timelines["review"] = tl;
+      </script>
+    </template>
+  </body>
+</html>
