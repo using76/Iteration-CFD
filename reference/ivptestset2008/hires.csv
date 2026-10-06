@@ -1,0 +1,16 @@
+# F. Mazzia and C. Magherini, "Test Set for Initial Value Problem Solvers", release 2.4,
+# Department of Mathematics, University of Bari and INdAM, Research Unit of Bari (February 2008),
+# problem HIRES (E. Schaefer, 1975), report hires.pdf pp. II-1-1 and II-1-2: y' = f(y) of
+# section 1.2, eight components, y(0) = (1, 0, 0, 0, 0, 0, 0, 0.0057), integrated over
+# t in [0, 321.8122]; Table II.1.1, the reference solution at t = 321.8122 (RADAU5,
+# uround = 1.01e-19, rtol = atol = h0 = 1.1e-18). Printed as 0.d * 10^-e; written here in
+# E notation, digit for digit.
+component,t_end,y0,y_ref
+1,321.8122,1.0,0.7371312573325668E-03
+2,321.8122,0.0,0.1442485726316185E-03
+3,321.8122,0.0,0.5888729740967575E-04
+4,321.8122,0.0,0.1175651343283149E-02
+5,321.8122,0.0,0.2386356198831331E-02
+6,321.8122,0.0,0.6238968252742796E-02
+7,321.8122,0.0,0.2849998395185769E-02
+8,321.8122,0.0057,0.2850001604814231E-02
