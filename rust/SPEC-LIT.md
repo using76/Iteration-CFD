@@ -5891,6 +5891,14 @@ has always produced a scene pointing at files that do not exist.
 The command-line route gets the same early refusal, with `cartesian::detect`'s
 reason in the message (`drop_volume_formats_on_a_non_cartesian_mesh`).
 
+**§117 replaces the premise of both refusals.** `vdb` and `nvdb` are a lattice,
+and before tranche 17 the only lattice was the mesh itself: a mesh that is not
+a recognised uniform Cartesian box had no voxels to write. §117 builds a
+lattice from any polyMesh, once, at setup (the VoxelMap of §117.3-§117.4). From
+VIO-04 on, a volume format on such a mesh is refused only when no lattice can
+be built, by the table of §117.12. Until VIO-04 lands, the two refusals above
+are what runs.
+
 ### 44.2 `visualisation.fields` — write only these, in this order
 
 ```
@@ -35350,9 +35358,101 @@ h_curv = 2 pi / ( n_curv kappa )                                                
 h_gap = gap(x) / n_gap                                                                     (116.10)
 ```
 
-The field is stored on a background octree and answered by query. A minimum of cones of slope
-`g - 1` is Lipschitz with that constant, so the gradation limit of Persson (2006) holds by
-construction, up to the octree's interpolation. TET-04b's gate measures it:
+**Primitives (TET-04a).** The sources are flattened into primitives before anything is stored.
+A primitive `k` has a size `h_k > 0`, a flat distance `D_k >= 0` and a support: one point, one
+axis-aligned box, or one triangle. `d_k(x)` is the Euclidean distance from `x` to the support,
+zero inside or on a box. Its cone is
+
+```
+c_k(x) = h_k + (g - 1) max( 0 , d_k(x) - D_k )                                             (116.7a)
+```
+
+A point source and a box source are one primitive each, with `D_k = 0`. A patch source `(patch,
+D, h)` is one primitive per triangle of the patch, each with `D_k = D` and `h_k = h`. Because
+`max(0, d - D)` does not decrease in `d`, the minimum of (116.7a) over the patch's triangles is
+the patch's cone with `d_s = d_patch = min_t d_t`, so (116.7) becomes
+
+```
+h(x) = max( h_min , min( H , min_k c_k(x) ) )                                              (116.7b)
+```
+
+A patch source with `D = 0` is that patch's **surface size**: `h = h_s` on the patch, growing at
+slope `g - 1` away from it. One with `D > 0` is a **band**. The automesher's `refinement` block
+translates as follows (TET-04a's `sources_from_refinement`), in the config's order:
+
+- each `levels[]` entry: one patch source per `bands[]` element, with `D = distance` and
+  `h = H 2^(-min(level, max_level))`, which is (116.8) under the automesher's own level cap
+  (eq. 92.1);
+- each `boxes[]` entry: one box source with `h = H 2^(-min(level, max_level))`.
+
+A patch the surface lacks, a patch with no triangle, and a band distance that is negative or
+not finite are refused by name, as `band_surfaces` refuses them for the hex path. A
+`feature_level` above zero is refused by name too. The hex path's (92.37) refines next to
+feature edges, and the tet path has no feature-edge size source yet, so ignoring the key would
+give a mesh the user did not ask for.
+
+**The background octree.** The field is answered by query on an octree over the domain box. The
+octree does not interpolate: it only decides which primitives can matter where. Each leaf `C`
+holds a candidate list, and a query evaluates (116.7b) over the candidates of the leaf that
+contains `x`. `x_C` is the leaf's centre and `r_C` its half-diagonal. `d_k` is 1-Lipschitz, so for
+every `x` in `C`:
+
+```
+l_k(C) = h_k + (g-1) max(0, d_k(x_C) - r_C - D_k)  <=  c_k(x)  <=  h_k + (g-1) max(0, d_k(x_C) + r_C - D_k) = u_k(C)    (116.7c)
+```
+
+The root holds every primitive. A child keeps the primitive `k` of its parent's list unless
+
+```
+l_k(C) > min( H , min_j u_j(C) ) + eta ,      eta = 1e-9 ( H + (g - 1) ( A + D_max ) )      (116.7d)
+```
+
+where `j` runs over the parent's whole list, `D_max` is the largest `D_k`, and `A` is the largest
+absolute coordinate among the root box's corners and every support vertex, plus (added to it) the
+root box's diagonal. A dropped primitive has `c_k(x) > min_j c_j(x)` (or `> H`) everywhere in `C` by a
+margin `eta` far above the rounding of `d_k`, so dropping it changes no answer, and the query
+returns the evaluation of (116.7b) over every primitive **bit for bit**: `min` is exact, and each
+`c_k` is the same arithmetic.
+
+Inside a band every triangle of the patch ties at `h_s`, so (116.7d) can drop none of them, and an
+octree that only used (116.7d) split the band's whole volume down to its smallest leaves (TET-04a's
+first run built 3.2 million leaves for a 516-primitive fixture). So, after (116.7d), each patch
+source `sigma` whose candidates include a triangle `j` with
+
+```
+d_j(x_C) + r_C + eta_d <= D_sigma ,      eta_d = 1e-9 ( A + D_max )                         (116.7e)
+```
+
+keeps only the first such triangle, in candidate order, and drops its other triangles. Every
+`x` in `C` is then within `D_sigma` of triangle `j` with a margin far above the rounding of `d_j`,
+so the computed `c_j(x)` is exactly `h_sigma`, while every other triangle of `sigma` computes
+`h_sigma + (g-1) max(0, ...) >= h_sigma`. The source's minimum is unchanged bit for bit.
+
+A node `C` is split into eight equal children while all three of these hold: it holds more than
+`leaf_cap` candidates (default 16); its depth is below `max_depth` (default 12); and its longest
+edge `e(C)` exceeds the lower bound of `h` on it,
+
+```
+lambda(C) = max( h_min , min( H , min_k l_k(C) ) )      over C's candidates                 (116.7f)
+```
+
+`leaf_cap` and `max_depth` are DESIGN: they change the cost of a query, never its answer. The
+third rule stops the tree at the scale of the mesh it serves. For a leaf `L` with parent `P`,
+`lambda(P) < e(P) = 2 e(L)`, and `u_k - l_k <= 2 (g-1) r_P` with `r_P` at most `sqrt(3) e(L)`. So
+`h < (2 + 2 sqrt(3) (g-1)) e(L)` on `L`, and summing over the leaves gives
+
+```
+leaves <= alpha ( 2 + 2 sqrt(3) (g - 1) )^3  integral_root dV / h^3                         (116.7g)
+```
+
+where `alpha = e^3 / V` is the root box's longest edge cubed over its volume, the same for every
+leaf. The integral is of the order of the number of mesh vertices, so the tree never outgrows
+the mesh. A query outside the root box evaluates every primitive.
+
+So the gradation limit of Persson (2006) holds by construction, to rounding. An interpolating
+octree would not give it: a trilinear interpolant of a `(g-1)`-Lipschitz function can have a
+gradient up to `sqrt(3) (g-1)` long, and it is discontinuous across a hanging face. TET-04b's
+gate measures it:
 
 ```
 | grad h | <= g - 1                                                                         (116.11)
@@ -35369,29 +35469,142 @@ h_min = size.min_size  if given,  else  H / 64                                  
 
 **Implemented by TET-05** (`tetmesh/surfprep.rs`).
 
-Each defect is refused **by name** before any meshing:
+The input is a `TetSurface`: `[f64; 3]` points, triangles as point indices, and a patch per
+triangle. `TetSurface::from_surface` widens a reader's `Surface` (§23.1) exactly, because every
+f32 and f64 value is an f64. Every test below is decided in f64 by the exact `orient3d` of
+§116.4, so it gives the same answer in both builds (class D, §116.2). The checks run in the
+order below, and the first one that fails refuses the run. Each refusal is `Error::Refused`,
+its message starts with the name in the first column, and it names the offending item by its
+index and its patch:
 
-1. **Not closed.** Every edge must be shared by exactly two triangles. This is
-   `Surface::require_closed` (§23.2), called, not re-implemented.
+| order | name | refuses |
+|---|---|---|
+| 0 | `surface/feature_angle_deg` | an angle that is not finite or not inside `(0, 180)` |
+| 1 | `surface/input` | no triangles, no patches, a point index or patch id out of range, a triangle that repeats a point index, a coordinate outside the exact domain (116.3f) |
+| 2 | `surface/degenerate` | a triangle whose f64 cross product `(x_1 - x_0) x (x_2 - x_0)` is exactly zero, or whose apex (116.13e) lies on its own plane |
+| 3 | `surface/closed` | an edge with one triangle (open) or three or more (non-manifold) |
+| 4 | `surface/orientation` | a manifold edge traversed in the same direction by both its triangles, or a shell with no consistent orientation |
+| 5 | `surface/inward` | a shell whose enclosed volume (116.13a) is not positive |
+| 6 | `surface/self-intersection` | two triangles that share no point and meet, or a fold at a shared edge |
+
+1. **Not closed.** Every undirected edge must be shared by exactly two triangles. This is the
+   test `Surface::require_closed` makes (§23.2), and the refusal says so by name. It is
+   re-derived here rather than called for two reasons. First, `Surface::edge_defects` counts a
+   flipped triangle's edges as non-manifold, and the orientation refusal below must name the
+   triangle instead. Second, `require_closed` passes under `-permissive`, whose fallback is
+   §23.3's parity voting. The tetrahedral path has no such fallback, so `-permissive` does
+   not apply to it. On the input of a `Surface`, the open count equals `edge_defects`'s, and
+   this unit's non-manifold count plus its same-direction count equals `edge_defects`'s
+   non-manifold count. A test holds that.
 2. **Not consistently oriented.** Each manifold edge `(u, v)` must be traversed as `u -> v` by
-   one of its triangles and `v -> u` by the other. The refusal names the triangle. The
-   enclosed volume must also be positive (outward normals), by the divergence theorem:
+   one of its triangles and as `v -> u` by the other. A **shell** is a connected component of
+   triangles joined across edges. Give each shell's lowest-numbered triangle parity 0, and
+   propagate parity across each edge: equal across an opposite-direction edge, different
+   across a same-direction edge. If two paths give a triangle different parities, the shell
+   is non-orientable, and the refusal names it. Otherwise the smaller parity class is the
+   flipped set; on a tie, it is the class without the lowest triangle. The refusal names the
+   flipped set's lowest triangle and gives the set's size. Shells are numbered in the order of
+   their lowest triangle. The enclosed volume of each shell must also be positive (outward
+   normals), by the divergence theorem:
 
 ```
 V_enclosed = (1/6) sum_t x_0(t) . ( x_1(t) x x_2(t) )  > 0                                 (116.13)
+
+V_s = (1/6) sum_{t in s} (x_0(t) - o_s) . ( (x_1(t) - o_s) x (x_2(t) - o_s) ),
+      o_s = the first point of shell s's lowest triangle                                   (116.13a)
 ```
 
-3. **Self-intersecting.** No two non-adjacent triangles may intersect. This uses Möller's
-   (1997) interval test, run over the existing `surface` bounding-volume hierarchy. The refusal names the pair.
+   (116.13a) is (116.13) for one shell, taken about a point of that shell. On a closed shell
+   the sum does not depend on the origin, and the shifted form keeps the terms small far from
+   the coordinate origin, which is the local-origin rule of docs/17 §5.1.7. A cavity shell,
+   whose normals point into the cavity, has `V_s < 0` and is refused in this unit.
 
-Features are extracted the same way as on the hex path:
+3. **Self-intersecting.** Two triangles that share no point must not meet. The sets are
+   closed, so touching counts as meeting. For `T_1 = (a_1, b_1, c_1)` and `T_2`, the test
+   starts with Möller's (1997) plane rejection, with each signed distance replaced by the
+   exact sign of `orient3d` (116.1):
+
+```
+d_1(v) = sign orient3d(a_2, b_2, c_2, v),  v in T_1;     d_2(v) = sign orient3d(a_1, b_1, c_1, v),  v in T_2
+T_1 and T_2 are disjoint if all three d_1 are +1, or all three are -1, or the same holds for d_2   (116.13b)
+```
+
+   If every `d_1` is 0, the triangles are coplanar, and (116.13e) decides. Otherwise,
+   Möller's interval comparison on the line `L` where the two planes meet is replaced by an
+   exact equivalent. `T_1 ∩ L` and `T_2 ∩ L` are segments. An endpoint of their overlap is an
+   endpoint of one of them, and that is a point of an edge of `T_1` lying in `T_2`, or of an
+   edge of `T_2` lying in `T_1`. So:
+
+```
+T_1 ∩ T_2 != {}  <=>  some edge of T_1 meets T_2, or some edge of T_2 meets T_1            (116.13c)
+```
+
+   An edge whose two end points both lie on the other triangle's plane is skipped. Such an
+   edge lies on `L`, and the endpoint argument above finds the overlap through the other edges,
+   each of which crosses the plane. The segment `[p, q]` meets the triangle `(a, b, c)`
+   (closed, not coplanar with it) when:
+
+```
+s_p = sign orient3d(a, b, c, p),  s_q = sign orient3d(a, b, c, q);   s_p = s_q = 0 -> skipped
+s_p = s_q != 0 -> no;  otherwise yes iff the three signs of
+   orient3d(p, q, a, b),  orient3d(p, q, b, c),  orient3d(p, q, c, a)
+are all >= 0 or all <= 0                                                                   (116.13d)
+```
+
+   **Coplanar triangles.** Lift a point `w` off the common plane, and use `orient3d` against
+   it as the exact in-plane orientation. Every in-plane test of one pair uses the same `w`, so
+   the signs agree with each other:
+
+```
+n = (b - a) x (c - a)  (in f64),    L_e = the longest edge of (a, b, c),    w = a + (L_e / |n|) n
+o_w(x, y, z) = sign orient3d(x, y, z, w)
+coplanar T_1, T_2 meet iff some edge of T_1 meets some edge of T_2, or a vertex of one lies
+in the other, with w = the apex of T_2                                                     (116.13e)
+```
+
+   Two coplanar segments `[p, q]` and `[r, s]` meet if neither pair of signs
+   `o_w(p, q, r), o_w(p, q, s)` and `o_w(r, s, p), o_w(r, s, q)` is the same non-zero sign.
+   If all four are 0, the segments are collinear, and they meet iff their coordinate intervals
+   overlap on the axis where `|q - p|` has its largest component. A point `x` lies in `(a, b, c)`
+   iff `o_w(a, b, x), o_w(b, c, x), o_w(c, a, x)` are all `>= 0` or all `<= 0`. The apex is a
+   point, not a construction: any `w` off the plane gives the same signs, so its rounding
+   costs nothing. If `orient3d(a, b, c, w) = 0`, the triangle is refused as degenerate (order 2).
+
+   **Triangles that share an edge** `(u, v)`, with opposite points `a` and `b`, meet beyond it
+   only when they fold onto each other:
+
+```
+fold(u, v, a, b)  <=>  orient3d(u, v, a, b) = 0  and  o_w(u, v, a) o_w(u, v, b) > 0,  w = the apex of (u, v, a)   (116.13f)
+```
+
+   **Triangles that share exactly one point** are not tested in this unit. They are counted
+   and reported. A test that is exact at a shared point needs its own case analysis, and it is
+   left to a later unit, which docs/17 TET-05's report lists.
+
+   **The broad phase** is a sweep over the f64 bounding boxes of the triangles. It sorts on
+   the axis of the surface's largest extent (ties to the lowest axis), and a pair of boxes is a
+   candidate when the boxes overlap as closed boxes on all three axes. The candidate set is the
+   brute-force set exactly, so the result does not depend on the sweep. §116.9 first named the
+   `surface` bounding-volume hierarchy for this. The tree's `Bvh` answers only point-radius
+   queries and is `Scalar`-typed, which §116.2 rules out here, so the sweep replaces it. The
+   refusal counts every meeting pair, folds included, and names the lowest pair `(i, j)`,
+   `i < j`.
+
+Features are extracted the same way as on the hex path, in f64:
 
 - feature edges by (92.34), with the angle `refinement.feature_angle_deg`;
-- corners by (92.35);
-- patch seams, an edge whose two triangles carry different patches.
+- patch seams, an edge whose two triangles carry different patches, which join the set `F` of
+  (92.34) before the corners are found;
+- corners by (92.35), on that joined set;
+- polylines chained as §92.12 states (from each corner in increasing order; a corner-free cycle
+  is closed and cut at its lowest point; sorted by their first two points).
 
-These become the polylines and fixed points that §116.10 and §116.11 hold. On a cube there
-are 12 polylines and 8 corners.
+On a surface with a single patch, the edges, corners and polylines equal those of
+`automesher::features::extract`, and a test holds that. These become the polylines and fixed
+points that §116.10 and §116.11 hold. On a cube there are 12 polylines and 8 corners. On a
+16-sided capped cylinder with one patch there are 32 feature edges, 2 closed polylines and no
+corners. If its side is split at mid-height into two patches, there are 48 feature edges, of
+which 16 are seam edges, 3 closed polylines and no corners.
 
 ### 116.10 Surface remeshing
 
@@ -35695,6 +35908,21 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-02 | (116.4c) in `i128` against (116.4) | equal on every ordering of every 5-subset of the cube corners and of the radius-7 points, under two id maps (26 880 queries, 240 coplanar zeros), and on 4*10^4 lattice queries | the TET-02 commit |
 | TET-02 | the f32 arm (`--features single`), from outside the tree | the unit's 6 tests verbatim pass; an independent Leibniz (116.4c) oracle with every swap and a shift of about 10^6 passes on 6*10^4 queries (30 111 that needed the perturbation) | the TET-02 commit |
 | TET-02 | the whole `tetmesh::` test filter, release | 21 tests in 3.33 s | the TET-02 commit |
+| TET-04a | (116.7) for one point source (`h_0 = 0.05`, `H = 1`, `g = 1.2`): 1.1*10^5 probes at the origin, at a 2*10^3 m offset, and against 64 graded point sources | max relative error 0 in all three (the plan's bar is 2 %); every probe lies in the leaf `leaf_box` returns; 1 156 leaves for the 64 sources | the TET-04a commit |
+| TET-04a | box sources: 10^5 interior points, corners and face centres | `h` equals the box size bit for bit at every one | the TET-04a commit |
+| TET-04a | the 516-primitive fixture (a 256-triangle sphere as surface and band, a floor patch, a box, a point): the octree query against the evaluation over every primitive, 1.1*10^5 probes, `leaf_cap` 1, 4, 16 and unbounded | bit-identical everywhere; 142 444 leaves, depth 8, 19.6 candidates per leaf on average (247 at most); 10^5 queries in 48 ms against 515 ms by brute force | the TET-04a commit |
+| TET-04a | the first run, before (116.7e) and (116.7f) | 3 185 267 leaves for the same fixture, and 262 144 for 40 identical point sources; after the fix 5 552, under the (116.7g) bound of 27 444 (Monte Carlo `N_h` = 936 with the 1.5 margin); the fixture's bound is 2 725 934 | the TET-04a commit |
+| TET-04a | 10^4 pairs, `t` from 1e-4 to 0.2: the largest `abs(h(a) - h(b)) / ((g-1) abs(a-b))` | 0.99990 (TET-04b's gate measures it properly) | the TET-04a commit |
+| TET-04a | the f32 arm (`--features single`), from outside the tree | the unit's 11 tests compiled in a crate whose `Scalar` is 4 bytes pass with identical printed numbers; an independent oracle (200 point sources and a box at a 1.2*10^4 m offset, 5*10^4 probes) gives relative error 0 and bit equality with `h_brute` | the TET-04a commit |
+| TET-04a | the whole `tetmesh::` test filter, release | 32 tests in 3.53 s | the TET-04a commit |
+| TET-05 | the refusals, each by name (§116.9's table) | open box: `surface/closed`, 4 open and 0 non-manifold edges, first edge (4, 5) of triangle 5; a cube with a 13th triangle: 1 open, 2 non-manifold; a cube with triangle 5 flipped and a level-3 icosphere with triangle 37 flipped: `surface/orientation` naming that triangle, 1 flipped; an inverted cube: `surface/inward`, shell 0; the 6-point projective plane: non-orientable; two crossing boxes: `surface/self-intersection`, 12 pairs, first (2, 16); two boxes touching face to face: 18 pairs, first (2, 12) | the TET-05 commit |
+| TET-05 | features (the plan's bar: cube 12 polylines, 8 corners) | cube: 12 feature edges, 12 polylines, 8 corners; with six patches the same, every edge a seam; 16-sided capped cylinder: 32 edges, 2 closed polylines, 0 corners; split at mid-height into two patches: 48 edges, 16 seams, 3 closed polylines, 0 corners; edges, polylines and corners equal `features::extract` on the cube, the cylinder and the level-3 icosphere | the TET-05 commit |
+| TET-05 | `tri_tri_intersect` against the supervisor's separating-axis oracle (exact integers; outside the tree) | integer streams A, B and C (the last all coplanar), 10^5 pairs each: 29 874, 38 875 and 60 197 meeting pairs, equal to the oracle; the same counts after the map `c 2^-30 + 1024`; symmetric and unchanged by a rotation of one triangle and a reversal of the other on every pair of A. Supervisor's stream E, 4*10^4 near-coplanar f64 pairs (exact Fractions): 9 966 and 10 423, equal | the TET-05 commit |
+| TET-05 | the broad phase | the swept candidate set equals the brute-force set on every fixture; a level-5 icosphere (20 480 triangles, 1 368 tested pairs, 92 130 vertex-sharing pairs not tested) is prepared in 45 ms release | the TET-05 commit |
+| TET-05 | the first run's one failure | the sweep recorded pairs in sweep order, so the refusal named `(16, 2)`; the exact expected `(2, 16)` caught it, and pairs are now stored as `(min, max)` | the TET-05 commit |
+| TET-05 | the TET-00 follow-up: `TetSpec::validate` and §116.3's "or non-finite" | `+inf` was accepted for `size.gradation`, `refine.radius_edge` and `layers.max_neighbour_ratio` (a supervisor probe failed on all three); each is now refused by name, `tetmesh::tests::spec_refuses_non_finite_bounds` | the TET-05 commit |
+| TET-05 | the f32 arm (`--features single`), from outside the tree | the unit's 11 tests compiled in a crate whose `Scalar` is 4 bytes pass with identical printed numbers, stream E included; the f64 build's SASS is identical on all 43 cubins | the TET-05 commit |
+| TET-05 | the whole `tetmesh::` test filter, release | 44 tests in 4.80 s | the TET-05 commit |
 
 ### 116.19 References
 
@@ -35755,6 +35983,488 @@ Crossref metadata was checked against the title, authors, year and pages given h
   25, 1-20. DOI `10.1146/annurev.fl.25.010193.000245`.
 - Watson, D. F. (1981). Computing the n-dimensional Delaunay tessellation with application to
   Voronoi polytopes. *Comput. J.* 24(2), 167-172. DOI `10.1093/comjnl/24.2.167`.
+
+## 117. Volume output from any mesh, and the Isaac Sim profile
+
+`No GPL-licensed source was consulted.`
+
+Tranche 17 removes the last "Cartesian only" restriction on the volume writers. The user's
+order was "2번 미완성부분 옥트리격자 VBD USD출력 해결해줘" (finish the unfinished part: VDB/USD
+output from octree meshes) and "Isaacsim 볼륨도 구현해주고" (implement the Isaac Sim volume as
+well). This section is the contract of `rust/src/io/voxelmap.rs`, of the lattice and Isaac
+paths of `io/vdb.rs`, `io/nvdb.rs`, `io/usda.rs` and `io/output_plan.rs`, of `ofgpu-sample
+volume`, and of `tools/isaac/probe.py`. Each subsection names the unit of docs/17 §12.5 that
+implements it. A unit adds its measured numbers to §117.13 and changes nothing else here
+without saying so in that section.
+
+### 117.1 What this replaces, and the licence position
+
+Before tranche 17 a `.vdb`/`.nvdb` file could be written only from a mesh that
+`pressure::cartesian::detect` recognises as a uniform Cartesian box (§44.1). Every other mesh
+was refused before the time loop by `OutputPlan::refuse_visualisation_on_a_non_cartesian_mesh`
+(`io/output_plan.rs`), whose doc comment says that such a mesh "has no voxels to write". The
+octree, snapped and layered meshes of §92 and the tetrahedral meshes of §116 were all refused.
+
+The drone tranche worked around the refusal outside the solver. `tools/drone/isaac_export.py`
+resamples the finished octree solve in Python, by inverse-distance-squared weighting, onto a
+181 x 121 x 121 lattice of 0.01 m (2 650 021 voxels). `tools/drone/isaac_vdb.py` then writes
+the `.vdb` through Isaac Sim's own OpenVDB module. Commit `1f12c44` records what that produced:
+
+| measured (2026-10-06, Isaac Sim 6.0.0-rc.59, RTX 5070 Ti) | value |
+|---|---|
+| fluid fraction of the lattice | 0.999906 |
+| free-stream `U.x` relative error on the `xMax` lattice plane | 0.0047 |
+| `.vdb` file version Isaac Sim 6.0 reads | 224 or lower; at 225 it warns "expected 224 or earlier" and then hangs inside a blocking call |
+| the probe's verdict on the `wake` volume | **not visible**: 31 997 px changed against 18 753 px of re-render noise, and the rule of §117.10 needs more than 37 506 |
+
+The handoff `isaacsim_cuFFT/ISAAC_SIM_HANDOFF.md` names the causes. The `wake` value, of order
+1, was handed to the renderer unscaled; a volume becomes visible once its density is scaled to
+a physical extinction (§117.9). The IndeX renderer hangs on large dense grids and is stable on
+sparse ones. The path-traced volume needs a dense grid, because a sparse one is read as a "1D"
+texture and renders transparent. `.nvdb` files are never rendered by Isaac Sim. Hence two
+activations (§117.6) and two scene profiles (§117.9).
+
+| status | sources |
+|---|---|
+| read, Apache-2.0, with a PROVENANCE row | the OpenVDB and NanoVDB sources `vdb.rs` and `nvdb.rs` were written from (v13.0.0); VIO-08 reads `version.h.in` and `io/Archive.cc` again for §117.8 |
+| read, Apache-2.0 | the OpenUSD schema documentation (`UsdVol`, `UsdGeom`, `UsdShade`); `usd-core` (`pxr`) runs only in a tools selftest |
+| named, not copied | NVIDIA's `OmniVolumeDensity` MDL material: a scene names it the way any USD file names a shader |
+| external programs, run by the supervisor only | Isaac Sim 6.0 and Blender 5.1. Their outputs stay outside the repository |
+| outputs outside the repository | everything made from the PX4 x500 drone model (BSD-3-Clause), as `isaac_export.py` already rules |
+
+No crate is added.
+
+### 117.2 Precision
+
+1. **The map is built in f64 in both builds.** The cell boxes come from the polyMesh points,
+   which are f64 from F32-03 on (docs/17 §5.1.8). The half-space tests of (117.5) use the f64
+   geometry view `HostMesh::geom64()` (§118). The map is therefore the same, bit for bit, in
+   the f64 and the `single` builds, and every gate on the map is class D (docs/17 §5.1.4).
+2. **Values are the solver's own.** A field reaches the writer as `Scalar` cell values (f32
+   under `single`). `cell` sampling copies them. `linear` sampling and the Isaac scaling
+   compute in f64 and round once to the voxel precision of §44.3 (`fp32` or `fp16`).
+3. **The transform is f64.** The world position of voxel `(0,0,0)` and the voxel size are
+   carried in f64 to the file's transform. Both formats store the transform in f64.
+4. **World coordinates.** The lattice box is in world coordinates. If the local origin of
+   F32-10 shifts the solver's coordinates, the map adds the shift back before it is built, so
+   the written transform is the world transform.
+
+### 117.3 The lattice
+
+**Implemented by VIO-01.** The case block is `output.visualisation.lattice` (VIO-04):
+
+| key | meaning | default |
+|---|---|---|
+| `voxel` | the voxel edge `h`, in metres; voxels are cubes | `(min_c V_c)^(1/3)`, the cube root of the smallest cell volume |
+| `box` | `[xlo, ylo, zlo, xhi, yhi, zhi]`, metres | the bounding box of the mesh points (per region in a CHT case) |
+| `maxVoxels` | the voxel budget | 8 000 000, the value of `isaac_export.py`'s `MAX_VOXELS` |
+| `sample` | `cell` or `linear` (§117.5) | `cell` |
+| `activation` | `dense` or `fluid` (§117.6) | `dense` |
+| `background` | the value of a voxel that no cell claims | `0.0` |
+
+With `lo` and `hi` the box corners and `L_a = hi_a - lo_a`, the lattice has `n_a` voxels on
+axis `a`, and voxel `(i, j, k)` has its centre at `x_ijk`:
+
+```
+n_a   = max( 1 , ceil( L_a / h - 1e-9 ) )                                                  (117.1)
+x_ijk = lo + h ( i + 1/2 , j + 1/2 , k + 1/2 )                                             (117.2)
+```
+
+The lattice covers `[lo, lo + n h]`, which contains the box. Any excess lies on the `hi` side.
+The voxel flat index is `i + n_x (j + n_y k)`, the crate's Cartesian order. The file's index-
+to-world transform is `nvdb::UniformGrid { origin: lo + h/2, spacing: h }`, which is the
+convention both writers already use: `origin` is the centre of voxel `(0,0,0)`. On a uniform
+Cartesian box with `h` equal to the cell size and the default box, (117.2) puts every voxel
+centre on a cell centre. That is VIO-01's identity gate.
+
+**The budget.** With `N(h) = n_x n_y n_z`, the lattice is coarsened when `N(h) > maxVoxels`.
+`N` is a non-increasing step function of `h` whose steps lie at `h = L_a / m` for a positive
+integer `m`. The coarsened voxel is the smallest such step at or above `h` that fits:
+
+```
+h' = min { L_a / m  :  a in {x, y, z},  m >= 1,  L_a / m >= h,  N(L_a / m) <= maxVoxels }  (117.3)
+s  = h' / h                                                                                (117.4)
+```
+
+`h'` is found by testing the candidates in increasing order. There are at most
+`n_x + n_y + n_z` of them. The run prints a note naming `h`, `h'` and `s`, and `s` goes into the
+summary (§117.7).
+
+- **An explicit `voxel`** is refused by name when `s > 16`. A lattice 16 times coarser than the
+  one asked for is no longer the one asked for.
+- **The default voxel** is coarsened without that limit, with the same note. The default
+  exists to fit the budget, and on a layered mesh `(min_c V_c)^(1/3)` is a first-layer
+  thickness that no budget could meet. *DESIGN, taken by recommendation in VIO-00.*
+
+### 117.4 Rasterisation and the tie rule
+
+**Implemented by VIO-01.** `VoxelMap::build(raw, hm, spec)` runs once, at setup, before the
+time loop. It stores one `u32` per voxel: the cell that owns the voxel, or `NONE`. At 8 M
+voxels that is 32 MB. Each write is then a gather with no geometry.
+
+A cell `c` contains a point `x` when `x` lies on the inner side of, or on, the plane of every
+face of `c`. Here `C_f` is the face centroid and `S_f^c` is the face area vector oriented out of
+`c` (`+S_f` where `c` owns `f`, `-S_f` where it is the neighbour, and `b_sf` on a boundary
+face, which is already outward):
+
+```
+inside_c(x)  <=>  for every face f of c:  ( x - C_f ) . S_f^c <= 0                         (117.5)
+```
+
+This is `parcels::locate_cell`'s test (§66.6), evaluated in f64 (§117.2).
+
+**Pass 1, rasterisation.** For each cell `c` in ascending index order:
+
+1. `B_c` is the closed bounding box of the points of `c`'s faces.
+2. The voxels whose centres lie in `B_c` are the index ranges
+   `ceil((B_lo,a - lo_a)/h - 1/2) <= i_a <= floor((B_hi,a - lo_a)/h - 1/2)`, clipped to
+   `[0, n_a - 1]`.
+3. Each voxel in that range that is still `NONE` and passes `inside_c` (117.5) is given to `c`.
+   A voxel that has been given to a cell is never reassigned.
+
+Cells are visited in ascending order and the first claim wins, so a voxel centre that lies on
+a shared face, edge or corner goes to the **lowest cell index** that contains it. That is the
+tie rule of `locate_cell`, which walks the cells in the same order. On a mesh whose faces are
+planar and whose cells are convex, the intersection of the half-spaces (117.5) is the cell
+itself, so it lies inside `B_c` and no cell is missed:
+
+```
+M[v] = min { c : inside_c( x_v ) }     (NONE if the set is empty)                          (117.6)
+```
+
+(117.6) is VIO-01's gate against a brute-force f64 `locate_cell` on a `mesh/refined.rs` 2:1
+mesh. In the f64 build that brute force is `parcels::locate_cell` itself. Under `single` the
+oracle is the same loop over `geom64()`.
+
+**Pass 2, gaps.** A warped face or a non-convex snapped cell can leave a voxel inside the
+domain that no cell claims. Such a voxel `v` is still `NONE` after pass 1, and the set
+`K_v = { c : x_v in B_c }` is not empty. Let `c*` be the cell of `K_v` whose centre is nearest
+`x_v`, with ties going to the lowest index. Then `v` is given to `c*` if `x_v` lies on the inner
+side of, or on, every **boundary** face of `c*` by (117.5); otherwise it stays `NONE`. The plan
+said "the nearest candidate". The boundary-face condition is added in VIO-00 so that a voxel
+inside a solid body, which also lies in the boxes of the wall cells around it, stays solid.
+The voxels given out in pass 2 are counted as `n_filled`. On a mesh with planar faces and
+convex cells, `n_filled = 0`. A large `n_filled` on a real mesh is a signal, not an error.
+
+**Cost.** The work is `O( sum_c |B_c ∩ lattice| x faces(c) )`. A voxel that is already
+assigned is skipped without a test.
+
+### 117.5 Sampling
+
+**Implemented by VIO-02.** `s_v` is the value written at voxel `v`. For a voxel with
+`M[v] = NONE` it is `background`. Otherwise `c = M[v]`, and:
+
+- **`cell`** (the default) writes `s_v = phi_c`. This is exactly the solver's value, piecewise
+  constant.
+- **`linear`** writes the cell value plus a least-squares gradient, clipped to the range of
+  the cells around `c`. The gradient `g_c` minimises the misfit over the face neighbours
+  `N_f(c)`, with `d_n = C_n - C_c`. The bounds are taken over the point neighbours `N_p(c)`,
+  the cells that share at least one point with `c`:
+
+```
+g_c = argmin_g  sum_{n in N_f(c)} ( phi_n - phi_c - g . d_n )^2                            (117.7)
+s_v = clamp( phi_c + g_c . ( x_v - C_c ) ,  m_c ,  M_c )                                   (117.8)
+m_c = min( phi_c , min_{n in N_p(c)} phi_n ) ,   M_c = max( phi_c , max_{n in N_p(c)} phi_n )
+```
+
+  (117.7) is solved by its 3 x 3 normal equations `G g = b`, with `G = sum d_n d_n^T` and
+  `b = sum d_n (phi_n - phi_c)`. If `det G <= 1e-12 (tr G / 3)^3`, the offsets do not span three
+  dimensions: `g_c = 0`, and the cell is counted as `n_linear_fallback`. A mesh one cell thick
+  with `empty` sides therefore samples as `cell`. The clip (117.8) is the Barth & Jespersen
+  (1989) bound, applied at the sample point. It is why `linear` never creates a new extremum:
+  `m_c` and `M_c` are values of real cells.
+
+**Why not the Gauss gradient** (the plan's wording). On a 2:1 interface a face centroid is not
+on the line between the two cell centres, so the linear-interpolated Gauss gradient is not
+exact for a linear field. Then VIO-02's exactness gate could not hold. The unweighted least
+squares (117.7) is exact for any linear field whenever `G` is invertible, on any mesh
+(Mavriplis 2003; Moukalled, Mangani & Darwish 2016, §9.3). **Why point neighbours for the
+bounds.** With face neighbours only, a uniform hex mesh with a diagonal gradient already clips
+near the cell corners, because a corner is `sum_a |g_a| h/2` above the centre, while the
+highest face neighbour is only `max_a |g_a| h` above it. The point neighbours surround the cell.
+Both choices are output post-processing. Neither touches solver numerics. *DESIGN, taken by
+recommendation in VIO-00.*
+
+**Exactness.** If `phi = a . x + b`, every residual in (117.7) vanishes at `g = a`, so
+`g_c = a` to rounding. The clip is then inactive at every voxel of a cell none of whose points
+lies on a boundary face, and `s_v = phi(x_v)`. Those voxels are VIO-02's "interior voxels".
+
+**Conservation of `cell`.** With `n_c` the number of voxels owned by `c`, this holds exactly,
+cell by cell:
+
+```
+h^3 sum_v s_v  -  sum_c phi_c V_c  =  sum_c phi_c ( n_c h^3 - V_c )                       (117.9)
+```
+
+The sum on the left runs over the voxels with `M[v] != NONE`. VIO-02 checks (117.9) as an
+identity in f64, and checks the right-hand side against the coverage error of §117.7.
+
+### 117.6 Activation
+
+**Implemented by VIO-03.**
+
+- **`dense`** (the default): every voxel of the lattice is active, and `NONE` voxels hold
+  `background`. This is what the Cartesian path has always written, and what
+  `isaac_export.py`'s gate `G-DENSE` checks.
+- **`fluid`**: a voxel is active if and only if `M[v] != NONE`. An 8^3 leaf with no active voxel
+  is not written, and neither is an internal node with no child, so the file grows with the
+  fluid voxels, not the lattice.
+
+In both modes the tree's background value is `background`, so a reader that samples an
+inactive voxel gets the same number a `dense` file stores there. On a uniform Cartesian mesh
+every voxel is fluid, and the two activations give the same file. The Cartesian path
+(`WriteCtx.cart` is `Some`) is byte-identical to the file written before tranche 17. A test pins
+its SHA-256 (VIO-03).
+
+### 117.7 The report
+
+Built once, printed before the time loop, and copied into the run summary under `lattice`:
+
+| key | meaning |
+|---|---|
+| `n` | `[n_x, n_y, n_z]` |
+| `voxel`, `voxel_requested`, `coarsen` | `h'`, `h` and `s` of (117.3)-(117.4); `coarsen = 1` when the budget held |
+| `n_voxels`, `n_fluid`, `n_filled` | the lattice size, the voxels with an owner, and those of them given out by pass 2 |
+| `fluid_fraction` | `n_fluid / n_voxels` |
+| `volume_error` | `(n_fluid h^3 - sum_c V_c) / sum_c V_c`, reported only for the default box |
+| `n_linear_fallback` | (117.7)'s count, `linear` only |
+| `build_s` | wall time of `VoxelMap::build` |
+
+VIO-01's sphere gate states that `fluid_fraction` equals `1 - V_s / V_b` within
+`A_s h / V_b`.
+
+### 117.8 The `.vdb` file version
+
+**Implemented by VIO-08.** `vdb.rs` writes `OPENVDB_FILE_VERSION = 225`, the value at the
+OpenVDB `v13.0.0` tag it was transcribed from. Isaac Sim 6.0 reads 224 or lower (§117.1).
+`isaac_export.py`'s gate `G-VDBVER` already holds the exported file to `<= 224`.
+
+The rule:
+
+1. VIO-08 establishes from the Apache-2.0 OpenVDB sources (`version.h.in`, the
+   `OPENVDB_FILE_VERSION_*` enumeration, and the reads in `io/Archive.cc` that branch on it)
+   what file version 225 introduced.
+2. If the byte stream `vdb.rs` writes uses nothing introduced at 225, every `.vdb` is written
+   as 224. Otherwise only the Isaac profile writes 224, under a named `fileVersion: 224`.
+3. In either case bytes 8 to 11 of the file are the version, as a little-endian `u32`, and the
+   crate's own reader reads both 224 and 225.
+
+VIO-08 records its finding here, in place of this sentence.
+
+### 117.9 The Isaac Sim profile
+
+**Implemented by VIO-09.** The case block is `output.visualisation.isaac`. It adds one grid
+named `density`, an extinction coefficient `sigma` in 1/m, to the `.vdb`. It also writes the
+`.usda` scene in one of two profiles. The `fields` selection of §44.2 is not changed by it.
+
+| key | meaning | default |
+|---|---|---|
+| `profile` | `index` or `pathtrace` | `index` |
+| `field` | the cell field the density is made from | required |
+| `scaling` | `opticalDepth` or `physical` | `opticalDepth` |
+| `tau` | the target optical depth (`opticalDepth`) | `2.0` |
+| `range` | `[f_lo, f_hi]` (`opticalDepth`) | the min and max of `field` over the fluid voxels |
+| `Km` | specific extinction, m^2/kg (`physical`) | `8700` |
+| `kind` | `density` (kg/m^3) or `massFraction` of the named field (`physical`) | `density` |
+| `upAxis`, `metersPerUnit` | the stage metadata | `"Z"`, `1.0`, as `usda.rs` writes today |
+
+**`opticalDepth` scaling.** The field is normalised and then scaled, so that the densest
+lattice column has optical depth exactly `tau`. A column is a line of voxels parallel to an
+axis:
+
+```
+f^_v  = clamp( ( f_v - f_lo ) / ( f_hi - f_lo ) , 0 , 1 )      (f^_v = 0 where M[v] = NONE)  (117.10)
+D     = max over the three axes a, and every lattice line l parallel to a, of  h sum_{v in l} f^_v   (117.11)
+sigma_v = tau f^_v / D                                                                       (117.12)
+```
+
+Then `h sum_{v in l} sigma_v <= tau` on every column, with equality on the densest one. By the
+Beer-Lambert law of the absorption-only optical model (Max 1995), the transmittance along a
+path is
+
+```
+T = exp( - integral sigma ds )                                                              (117.13)
+```
+
+`tau = 2` therefore lets 13.5 % of the light through the densest column. The value is a visual
+default, changeable per case (docs/17 §10.1 A18).
+
+- `D` and the default `range` are taken at the first write at which `D > 0` and held for the rest
+  of the run. Every frame of a series is then the same affine map of `f`, so a plume that grows
+  looks as if it grows. Both values go into the summary. *DESIGN, taken by recommendation in
+  VIO-00.*
+- A write at which `D = 0` (`f_hi = f_lo`, or no voxel above `f_lo`) writes an all-zero
+  `density` grid and prints a note naming the time. It is not a refusal: an all-zero first frame
+  is ordinary in a transient run.
+- VIO-09's gate "the max column optical depth equals `tau` within 1 %" holds by construction
+  in (117.12), up to the rounding of `sigma` to the voxel precision.
+
+**`physical` scaling.** This is the extinction of a smoke whose soot mass density is
+`rho_s` (kg/m^3):
+
+```
+sigma_v = K_m rho_s,v ,   K_m = 8.7 m^2/g = 8700 m^2/kg                                     (117.14)
+rho_s   = f_v                (kind: density)
+rho_s   = rho_v f_v          (kind: massFraction, rho = the run's density field)
+```
+
+`K_m = 8.7 m^2/g` is the specific extinction coefficient of flame-generated smoke from
+Mulholland & Croarkin (2000). It is the handoff's `K = 8700 . smoke_density`, which made targets
+behind the smoke disappear in Isaac Sim. A negative `rho_s` (an undershoot of a transported
+mass fraction) is written as 0 and counted. `kind: massFraction` on a run with no density field
+is refused by name.
+
+**The scenes.** Both scenes reference the `.vdb` only. `.nvdb` is never referenced by an Isaac
+scene, and an Isaac block whose visualisation `format` does not include `vdb` is refused by
+name.
+
+| | `index` | `pathtrace` |
+|---|---|---|
+| renderer | NVIDIA IndeX (the RTX volume path) | the RTX path tracer |
+| activation | `fluid` (sparse); IndeX hangs on large dense grids | `dense`; a sparse grid renders transparent |
+| volume prim | `def Volume` with `rel field:density` to a child `def OpenVDBAsset "density"`, `token fieldName = "density"`, `asset filePath` = the `.vdb`; the shape `usda.rs` already writes | `def Mesh`, the box of the lattice extent, with the primvar `primvars:isVolume` true, bound to a `Material` whose `Shader` names `OmniVolumeDensity.mdl` (`info:mdl:sourceAsset`, sub-identifier `OmniVolumeDensity`) with input `volume_density_texture` = the `.vdb` |
+| renderer settings (the probe's job, not the scene's) | the default RaytracedLighting mode | IndeX off, PathTracing, `/rtx/pathtracing/ptvol/enabled` true |
+| the boundary surface | the `Mesh "boundary"` of §117.12, both profiles | the same |
+
+A `lattice.activation` that contradicts the profile is refused by name rather than overridden.
+The handoff's working path-traced scene (2026-06-15) is VIO-09's reference for the
+`pathtrace` topology. VIO-09 checks the `.usda` text with its own tests, and with
+`pxr.Usd.Stage.Open` plus `UsdVol` validation in a tools selftest.
+
+### 117.10 The visibility probe
+
+**Implemented by VIO-10, and used by VIO-11.** `tools/isaac/probe.py` generalises
+`tools/drone/isaac_probe.py`. The rule is unchanged, with the constants of `isaac_probe.py`:
+
+- `a` is a frame with the volume shown.
+- `b` and `c` are two frames with it hidden, grabbed back to back.
+- `d(p)` is the largest absolute RGB difference at pixel `p`, out of 255.
+
+```
+changed(a, b) = #{ p : d(p) > 4 }
+shows(a, b)   <=>  changed(a, b) / N_px > 0.0005   and   max_p d(p) > 4                   (117.15)
+visible       <=>  shows(a, b)   and   changed(a, b) > 2 changed(b, c)                     (117.16)
+```
+
+`changed(b, c)` is the re-render noise. `a` and `b` are separate accumulations, and their
+speckle on the scene's own surfaces is noise, not the volume. In run 3 of the drone tranche,
+32 284 pixels changed between `a` and `b`, all of them on the drone's surfaces, with the empty
+background untouched.
+
+The generalisation:
+
+- **Any scene.** The cameras are framed from the lattice box. With `r` the box's
+  half-diagonal and `theta_v` the camera's vertical field of view, each eye looks at the box
+  centre from the distance
+
+```
+R = 1.1 r / sin( theta_v / 2 )                                                             (117.17)
+```
+
+  This keeps the bounding sphere in view. The clipping range is `[0.01 R, 10 (R + r)]`.
+- **Either renderer.** The renderer settings come from the scene's profile (§117.9).
+- **A watchdog.** The watchdog of `isaac_probe.py` is kept: past `--max-seconds` it records
+  `timed_out`, writes `probe.json` and exits 3.
+
+The probe runs only on the supervisor's GPU box, with Isaac Sim's own Python. It takes about
+5 minutes per run (309 s measured). It is never run by GLM. VIO-11's verdict is
+`visible = true` for both profiles on the drone solve, each run taking 6 minutes or less. The
+31 997 vs 18 753 of §117.1 is the recorded failing "before".
+
+### 117.11 The offline path
+
+**Implemented by VIO-06.** `ofgpu-sample volume <case> <time> [-vdb] [-nvdb] [-usda]
+[-lattice ...] [-isaac ...]` reads the polyMesh and one finished time directory. It builds the
+same VoxelMap as §117.4 and writes the files a run would have written at that time, without
+solving. Given the same fields and the same keys, its files equal, byte for byte, the in-run
+writer's. It is how the pinned drone solve is exported without re-solving. VIO-06 measures the
+fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream `U.x` against
+0.005. The bound 0.005 is the plan's. It is ten times tighter than `isaac_export.py`'s
+`FREESTREAM_TOL` of 0.05, and it is not loosened to 0.05.
+
+### 117.12 The boundary surface, and what is refused
+
+**The true face polygons (VIO-07).** When the raw mesh is available, `usda::boundary_surface`
+fans each boundary face's point loop `p_0 ... p_{m-1}` from its first vertex, into the
+triangles `(p_0, p_k, p_{k+1})` for `k = 1 ... m-2`. This replaces the synthesised quadrilateral
+of `usda.rs`'s "Known approximation". The polyMesh order makes each face's right-handed normal
+point out of the fluid, and the fan keeps that order. For a planar convex face the fan's area
+equals `|b_sf|`. Planar faces are VIO-07's gate (relative 1e-10). A non-convex face can fold
+under a fan. The surface is a display surface, so that is accepted and not repaired. The
+`UsdGeomSubset` partition (one subset per patch, every triangle in exactly one subset) stays
+exact.
+
+**Refusals.** Each of these is refused by name before the time loop, in the words of §13.4
+(VIO-04, VIO-09). The old refusal of every non-Cartesian mesh, and its test
+`nvdb_writer_refuses_a_non_cartesian_mesh_by_default`, are rewritten to this table. No refusal
+disappears silently, and `-permissive` keeps its §44.1 behaviour.
+
+| case | refused because |
+|---|---|
+| `box` with `lo_a >= hi_a` on some axis | the lattice would be empty |
+| `voxel <= 0`, or a non-finite `voxel`, `box` entry or `background` | there is no lattice |
+| `maxVoxels = 0` | there is no lattice |
+| an explicit `voxel` that needs `s > 16` by (117.4) | the budget cannot hold the lattice asked for (§117.3) |
+| an unknown `sample`, `activation`, `profile`, `scaling` or `kind` | the menu is listed |
+| `isaac.field` that the run does not have | the run's fields are listed (§44.2's rule) |
+| an `isaac` block without `vdb` in `format` | an Isaac scene never references `.nvdb` |
+| `lattice.activation` contradicting `isaac.profile` | §117.9's table |
+| `kind: massFraction` on a run with no density field | (117.14) has no `rho` |
+| a mesh whose points move, or whose cells change, during the run | the map would be stale; it is built once (§117.4) |
+
+### 117.13 Gates, their precision classes, and what has been measured
+
+The bars below are fixed before measurement. A missed bar is a finding, never a widened band.
+Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
+`tol32 = max(tol64, min(tol64 2^29, 1e-5))`.
+
+| unit | gate | class |
+|---|---|---|
+| VIO-00 | the §80 xref audit; every DOI of §117.14 resolves | D |
+| VIO-01 | Cartesian box, `h` = cell size: `M[v] = v` for every voxel; a 2:1 `refined.rs` mesh: 100 % agreement with (117.6)'s f64 brute force on 10^4 voxels; sphere in a box: `fluid_fraction` = `1 - V_s/V_b` within `A_s h / V_b`; the `maxVoxels` cap coarsens by (117.3) with the note; the map is identical under `single` | D, A |
+| VIO-02 | `phi = a . x + b` reproduced at interior voxels to 1e-12 (f64) and 1e-5 (`single`, R class); `max_v s_v <= max_c phi_c` and `min_v s_v >= min_c phi_c`; (117.9) as an identity in f64 | R, D, A |
+| VIO-03 | active count = `n_fluid` (`fluid`) or `n_voxels` (`dense`); values round-trip bit for bit (`fp32`); the Cartesian SHA-256 unchanged from `8ab1c4a` | D |
+| VIO-04 | the keys parse and are schema-exported; every refusal of §117.12 by name; `-permissive` kept | D |
+| VIO-05a/b | a box-sphere automesher mesh writes `.vdb` from `ofgpu-lowmach` and `ofgpu-k-omega` (a 20-step run, 2 min or less), then from every other driver | D, measured |
+| VIO-06 | the drone at `t = 0.5 s`: fluid fraction within 1e-3 of 0.999906; free-stream `U.x` relative error 0.005 or less; 2 min or less | A, P |
+| VIO-07 | the patch partition exact; per-patch fan area = `sum b_mag_sf` within 1e-10 relative on planar-face meshes; extent = the points' box exactly | D, A |
+| VIO-08 | bytes 8..11 = 224; the crate's reader reads 224 and 225; Isaac's `openvdb.readAll` and Blender 5.1's read the file (supervisor) | D |
+| VIO-09 | (117.12): max column optical depth = `tau` within 1 %; (117.14): `K = 8.7 m^2/g . rho_s` exactly; the `.usda` texts of both profiles; `pxr` `Usd.Stage.Open` + `UsdVol` in 1 min or less | A, D |
+| VIO-10 | the probe's plain-Python selftest P1-P10 (framing (117.17), the verdict (117.15)-(117.16), the watchdog); the drone probe's selftest still 8/8 | D |
+| VIO-11 | (117.16) `visible` for `index` and for `pathtrace` on the drone solve, each 6 min or less; a box-sphere case visible too | measured |
+
+**Measured** (each unit appends its own rows):
+
+| unit | quantity | value | commit |
+|---|---|---|---|
+| — | — | — | — |
+
+### 117.14 References
+
+Every DOI below was resolved through doi.org by the supervisor of VIO-00 (2026-10-07), and its
+Crossref metadata was checked against the title, authors, year and pages given here.
+
+- Barth, T. J. & Jespersen, D. C. (1989). The design and application of upwind schemes on
+  unstructured meshes. *27th AIAA Aerospace Sciences Meeting*, AIAA 89-0366. DOI
+  `10.2514/6.1989-366`. The bound of (117.8).
+- Mavriplis, D. J. (2003). Revisiting the least-squares procedure for gradient reconstruction
+  on unstructured meshes. *16th AIAA Computational Fluid Dynamics Conference*, AIAA 2003-3986.
+  DOI `10.2514/6.2003-3986`. (117.7) is exact for linear fields.
+- Max, N. (1995). Optical models for direct volume rendering. *IEEE Trans. Vis. Comput.
+  Graph.* 1(2), 99-108. DOI `10.1109/2945.468400`. The absorption-only model and (117.13).
+- Moukalled, F., Mangani, L. & Darwish, M. (2016). *The Finite Volume Method in Computational
+  Fluid Dynamics*. Springer, §9.3. DOI `10.1007/978-3-319-16874-6`. Least-squares gradients.
+- Mulholland, G. W. & Croarkin, C. (2000). Specific extinction coefficient of flame generated
+  smoke. *Fire Mater.* 24(5), 227-230. DOI
+  `10.1002/1099-1018(200009/10)24:5<227::AID-FAM742>3.0.CO;2-9`. `K_m` of (117.14).
+- Museth, K. (2013). VDB: high-resolution sparse volumes with dynamic topology. *ACM Trans.
+  Graph.* 32(3), 27:1-27:22. DOI `10.1145/2487228.2487235`. The tree `vdb.rs` writes.
+- Museth, K. (2021). NanoVDB: a GPU-friendly and portable VDB data structure for real-time
+  rendering and simulation. *ACM SIGGRAPH 2021 Talks*, 1-2. DOI `10.1145/3450623.3464653`.
+  The format `nvdb.rs` writes.
+- OpenUSD documentation, the `UsdVol`, `UsdGeom` and `UsdShade` schemas (Apache-2.0).
+  <https://openusd.org/release/api/usd_vol_page_front.html>.
+
 ## 118. Mixed precision — what is f64 in the f32 build, and why
 
 The f32 build of §112 stores every field and does its bulk arithmetic in
