@@ -35347,9 +35347,101 @@ h_curv = 2 pi / ( n_curv kappa )                                                
 h_gap = gap(x) / n_gap                                                                     (116.10)
 ```
 
-The field is stored on a background octree and answered by query. A minimum of cones of slope
-`g - 1` is Lipschitz with that constant, so the gradation limit of Persson (2006) holds by
-construction, up to the octree's interpolation. TET-04b's gate measures it:
+**Primitives (TET-04a).** The sources are flattened into primitives before anything is stored.
+A primitive `k` has a size `h_k > 0`, a flat distance `D_k >= 0` and a support: one point, one
+axis-aligned box, or one triangle. `d_k(x)` is the Euclidean distance from `x` to the support,
+zero inside or on a box. Its cone is
+
+```
+c_k(x) = h_k + (g - 1) max( 0 , d_k(x) - D_k )                                             (116.7a)
+```
+
+A point source and a box source are one primitive each, with `D_k = 0`. A patch source `(patch,
+D, h)` is one primitive per triangle of the patch, each with `D_k = D` and `h_k = h`. Because
+`max(0, d - D)` does not decrease in `d`, the minimum of (116.7a) over the patch's triangles is
+the patch's cone with `d_s = d_patch = min_t d_t`, so (116.7) becomes
+
+```
+h(x) = max( h_min , min( H , min_k c_k(x) ) )                                              (116.7b)
+```
+
+A patch source with `D = 0` is that patch's **surface size**: `h = h_s` on the patch, growing at
+slope `g - 1` away from it. One with `D > 0` is a **band**. The automesher's `refinement` block
+translates as follows (TET-04a's `sources_from_refinement`), in the config's order:
+
+- each `levels[]` entry: one patch source per `bands[]` element, with `D = distance` and
+  `h = H 2^(-min(level, max_level))`, which is (116.8) under the automesher's own level cap
+  (eq. 92.1);
+- each `boxes[]` entry: one box source with `h = H 2^(-min(level, max_level))`.
+
+A patch the surface lacks, a patch with no triangle, and a band distance that is negative or
+not finite are refused by name, as `band_surfaces` refuses them for the hex path. A
+`feature_level` above zero is refused by name too. The hex path's (92.37) refines next to
+feature edges, and the tet path has no feature-edge size source yet, so ignoring the key would
+give a mesh the user did not ask for.
+
+**The background octree.** The field is answered by query on an octree over the domain box. The
+octree does not interpolate: it only decides which primitives can matter where. Each leaf `C`
+holds a candidate list, and a query evaluates (116.7b) over the candidates of the leaf that
+contains `x`. `x_C` is the leaf's centre and `r_C` its half-diagonal. `d_k` is 1-Lipschitz, so for
+every `x` in `C`:
+
+```
+l_k(C) = h_k + (g-1) max(0, d_k(x_C) - r_C - D_k)  <=  c_k(x)  <=  h_k + (g-1) max(0, d_k(x_C) + r_C - D_k) = u_k(C)    (116.7c)
+```
+
+The root holds every primitive. A child keeps the primitive `k` of its parent's list unless
+
+```
+l_k(C) > min( H , min_j u_j(C) ) + eta ,      eta = 1e-9 ( H + (g - 1) ( A + D_max ) )      (116.7d)
+```
+
+where `j` runs over the parent's whole list, `D_max` is the largest `D_k`, and `A` is the largest
+absolute coordinate among the root box's corners and every support vertex, plus (added to it) the
+root box's diagonal. A dropped primitive has `c_k(x) > min_j c_j(x)` (or `> H`) everywhere in `C` by a
+margin `eta` far above the rounding of `d_k`, so dropping it changes no answer, and the query
+returns the evaluation of (116.7b) over every primitive **bit for bit**: `min` is exact, and each
+`c_k` is the same arithmetic.
+
+Inside a band every triangle of the patch ties at `h_s`, so (116.7d) can drop none of them, and an
+octree that only used (116.7d) split the band's whole volume down to its smallest leaves (TET-04a's
+first run built 3.2 million leaves for a 516-primitive fixture). So, after (116.7d), each patch
+source `sigma` whose candidates include a triangle `j` with
+
+```
+d_j(x_C) + r_C + eta_d <= D_sigma ,      eta_d = 1e-9 ( A + D_max )                         (116.7e)
+```
+
+keeps only the first such triangle, in candidate order, and drops its other triangles. Every
+`x` in `C` is then within `D_sigma` of triangle `j` with a margin far above the rounding of `d_j`,
+so the computed `c_j(x)` is exactly `h_sigma`, while every other triangle of `sigma` computes
+`h_sigma + (g-1) max(0, ...) >= h_sigma`. The source's minimum is unchanged bit for bit.
+
+A node `C` is split into eight equal children while all three of these hold: it holds more than
+`leaf_cap` candidates (default 16); its depth is below `max_depth` (default 12); and its longest
+edge `e(C)` exceeds the lower bound of `h` on it,
+
+```
+lambda(C) = max( h_min , min( H , min_k l_k(C) ) )      over C's candidates                 (116.7f)
+```
+
+`leaf_cap` and `max_depth` are DESIGN: they change the cost of a query, never its answer. The
+third rule stops the tree at the scale of the mesh it serves. For a leaf `L` with parent `P`,
+`lambda(P) < e(P) = 2 e(L)`, and `u_k - l_k <= 2 (g-1) r_P` with `r_P` at most `sqrt(3) e(L)`. So
+`h < (2 + 2 sqrt(3) (g-1)) e(L)` on `L`, and summing over the leaves gives
+
+```
+leaves <= alpha ( 2 + 2 sqrt(3) (g - 1) )^3  integral_root dV / h^3                         (116.7g)
+```
+
+where `alpha = e^3 / V` is the root box's longest edge cubed over its volume, the same for every
+leaf. The integral is of the order of the number of mesh vertices, so the tree never outgrows
+the mesh. A query outside the root box evaluates every primitive.
+
+So the gradation limit of Persson (2006) holds by construction, to rounding. An interpolating
+octree would not give it: a trilinear interpolant of a `(g-1)`-Lipschitz function can have a
+gradient up to `sqrt(3) (g-1)` long, and it is discontinuous across a hanging face. TET-04b's
+gate measures it:
 
 ```
 | grad h | <= g - 1                                                                         (116.11)
@@ -35692,6 +35784,13 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-02 | (116.4c) in `i128` against (116.4) | equal on every ordering of every 5-subset of the cube corners and of the radius-7 points, under two id maps (26 880 queries, 240 coplanar zeros), and on 4*10^4 lattice queries | the TET-02 commit |
 | TET-02 | the f32 arm (`--features single`), from outside the tree | the unit's 6 tests verbatim pass; an independent Leibniz (116.4c) oracle with every swap and a shift of about 10^6 passes on 6*10^4 queries (30 111 that needed the perturbation) | the TET-02 commit |
 | TET-02 | the whole `tetmesh::` test filter, release | 21 tests in 3.33 s | the TET-02 commit |
+| TET-04a | (116.7) for one point source (`h_0 = 0.05`, `H = 1`, `g = 1.2`): 1.1*10^5 probes at the origin, at a 2*10^3 m offset, and against 64 graded point sources | max relative error 0 in all three (the plan's bar is 2 %); every probe lies in the leaf `leaf_box` returns; 1 156 leaves for the 64 sources | the TET-04a commit |
+| TET-04a | box sources: 10^5 interior points, corners and face centres | `h` equals the box size bit for bit at every one | the TET-04a commit |
+| TET-04a | the 516-primitive fixture (a 256-triangle sphere as surface and band, a floor patch, a box, a point): the octree query against the evaluation over every primitive, 1.1*10^5 probes, `leaf_cap` 1, 4, 16 and unbounded | bit-identical everywhere; 142 444 leaves, depth 8, 19.6 candidates per leaf on average (247 at most); 10^5 queries in 48 ms against 515 ms by brute force | the TET-04a commit |
+| TET-04a | the first run, before (116.7e) and (116.7f) | 3 185 267 leaves for the same fixture, and 262 144 for 40 identical point sources; after the fix 5 552, under the (116.7g) bound of 27 444 (Monte Carlo `N_h` = 936 with the 1.5 margin); the fixture's bound is 2 725 934 | the TET-04a commit |
+| TET-04a | 10^4 pairs, `t` from 1e-4 to 0.2: the largest `abs(h(a) - h(b)) / ((g-1) abs(a-b))` | 0.99990 (TET-04b's gate measures it properly) | the TET-04a commit |
+| TET-04a | the f32 arm (`--features single`), from outside the tree | the unit's 11 tests compiled in a crate whose `Scalar` is 4 bytes pass with identical printed numbers; an independent oracle (200 point sources and a box at a 1.2*10^4 m offset, 5*10^4 probes) gives relative error 0 and bit equality with `h_brute` | the TET-04a commit |
+| TET-04a | the whole `tetmesh::` test filter, release | 32 tests in 3.53 s | the TET-04a commit |
 
 ### 116.19 References
 
