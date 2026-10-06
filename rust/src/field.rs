@@ -47,6 +47,9 @@
 //! which evaluates as a hard Dirichlet at whatever the file's `value` held -
 //! so `turbulentIntensityKineticEnergyInlet`, `totalPressure` and the literal
 //! string `garbageBC` all ran to completion and all gave the same answer.
+//! Every public type name's status - implemented, alias, planned, owned by
+//! another stream, or refused permanently - is the catalogue of SPEC-LIT
+//! §120, held to the code by `field::tests::every_catalogue_name_has_a_status`.
 //!
 //! Extended from:
 //!   ofgpu `SPEC-LIT.md` §4 (the triple), §13.4 (the rule above), §15.2 and
@@ -742,6 +745,94 @@ impl BcKind {
                 );
             }
 
+            // SPEC-LIT §120: the permanent refusals. Each of these names is
+            // catalogue row `refused`: it cannot be made meaningful by any
+            // unit of the completion plan, so instead of the generic menu it
+            // gets a note saying WHY, and what to write instead. The arms sit
+            // after every named arm and before the generic one;
+            // `waveTransmissive` is deliberately NOT caught by the `wave`
+            // prefix - it is an absorbing outlet, CMP-17's to implement, and
+            // falls through to the generic refusal.
+            name if name.starts_with("coded") || name == "#codeStream" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &["fixedValue", "fixedGradient", "mixed"],
+                    "a coded condition compiles C++ written into the case and loads it at run time, and this solver loads no user code; write the condition the code computes as fixedValue, fixedGradient or mixed (SPEC-LIT §120)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            "cyclicACMI" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &["cyclic"],
+                    "cyclicACMI couples two patches that only partly overlap and turns the uncovered part into a wall face by face; this solver couples conformal faces only, and a static, fully overlapping interface is cyclicAMI, which stays refused until its faces are imprinted (SPEC-LIT §120)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            "cyclicRepeatAMI" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &["cyclic"],
+                    "cyclicRepeatAMI maps a patch onto copies of another one repeated around a sector, which needs interpolation weights and a repeat transform this solver does not have; it couples conformal faces only (SPEC-LIT §120)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            name if name.starts_with("nonConformal") => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &["cyclic"],
+                    "the non-conformal coupled patch family intersects its two sides while the case runs, moving meshes included; this solver couples conformal faces only, and a static non-conformal interface is cyclicAMI, which stays refused until its faces are imprinted (SPEC-LIT §120)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            // The v2-f model's wall functions: the model registry refuses the
+            // model itself (SPEC-LIT §13.4.4), so no field this solver solves
+            // can ask for them.
+            "v2WallFunction" | "fWallFunction" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &[],
+                    "this wall function belongs to the v2-f turbulence model, which this solver does not have (the model registry refuses v2f by name, SPEC-LIT §13.4.4), so no field it solves needs it (SPEC-LIT §120)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            name if name.starts_with("wave") && name != "waveTransmissive" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &[],
+                    "the wave conditions generate or absorb free-surface waves through a wave model, and this solver has no wave model (SPEC-LIT §120)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            "activeBaffleVelocity" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &[],
+                    "activeBaffleVelocity opens a baffle during the run by turning its wall faces into coupled ones, a change of mesh topology this solver never makes while a case runs (SPEC-LIT §120)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
             other => {
                 return unsupported(
                     &format!("{field}: boundaryField/{patch}/type"),
@@ -1088,6 +1179,12 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
     kinds
 }
 
+/// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
+/// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
+/// [`mod@tests`].
+#[cfg(test)]
+mod catalogue;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,5 +1312,342 @@ mod tests {
             "the substitution must be announced"
         );
         crate::io::contract::set_permissive(false);
+    }
+
+    // ==================================================================
+    // SPEC-LIT §120 - the boundary-condition catalogue
+    // ==================================================================
+
+    /// The concrete names a refused entry is probed with: its `probes` when
+    /// it names a prefix family, the name itself otherwise.
+    fn refusal_probes(e: &catalogue::Entry) -> Vec<&'static str> {
+        if e.probes.is_empty() {
+            vec![e.name]
+        } else {
+            e.probes.to_vec()
+        }
+    }
+
+    /// SPEC-LIT §120: every catalogue entry must behave exactly as its status
+    /// says, and every unit the catalogue points at must exist in the
+    /// completion plan.
+    #[test]
+    fn every_catalogue_name_has_a_status() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let mut names: Vec<&str> = catalogue::CATALOGUE.iter().map(|e| e.name).collect();
+        let n = names.len();
+        assert_eq!(n, 130, "the catalogue holds every public name");
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "catalogue names must be unique");
+
+        let mut counts = [0usize; 5];
+        for e in catalogue::CATALOGUE {
+            counts[match e.status {
+                catalogue::Status::Implemented => 0,
+                catalogue::Status::Alias { .. } => 1,
+                catalogue::Status::Planned { .. } => 2,
+                catalogue::Status::Owned { .. } => 3,
+                catalogue::Status::Refused { .. } => 4,
+            }] += 1;
+        }
+        assert_eq!(counts, [49, 2, 59, 10, 10], "the per-status counts");
+        println!(
+            "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
+            n, counts[0], counts[1], counts[2], counts[3], counts[4]
+        );
+
+        // The Implemented set IS IMPLEMENTED_BC_NAMES, in both directions.
+        let mut implemented: Vec<&str> = catalogue::CATALOGUE
+            .iter()
+            .filter(|e| matches!(e.status, catalogue::Status::Implemented))
+            .map(|e| e.name)
+            .collect();
+        implemented.sort_unstable();
+        let mut menu: Vec<&str> = IMPLEMENTED_BC_NAMES.to_vec();
+        menu.sort_unstable();
+        let catalogue_only: Vec<&str> =
+            implemented.iter().filter(|x| !menu.contains(x)).copied().collect();
+        let menu_only: Vec<&str> =
+            menu.iter().filter(|x| !implemented.contains(x)).copied().collect();
+        assert!(
+            catalogue_only.is_empty() && menu_only.is_empty(),
+            "the Implemented set and IMPLEMENTED_BC_NAMES differ - \
+             catalogue-only {catalogue_only:?}, menu-only {menu_only:?}"
+        );
+
+        // Strict mode: each status behaves as its row says.
+        for e in catalogue::CATALOGUE {
+            match e.status {
+                catalogue::Status::Implemented => {
+                    let k = BcKind::from_name(e.name, e.field, "p0")
+                        .unwrap_or_else(|err| panic!("`{}` must be accepted on {}: {err}", e.name, e.field));
+                    assert!(
+                        e.name == "calculated" || k != BcKind::Calculated,
+                        "`{}` must not degrade to Calculated",
+                        e.name
+                    );
+                }
+                catalogue::Status::Alias { to } => {
+                    assert!(
+                        IMPLEMENTED_BC_NAMES.contains(&to),
+                        "the alias target `{to}` must be an implemented name"
+                    );
+                    assert!(
+                        !IMPLEMENTED_BC_NAMES.contains(&e.name),
+                        "an alias is accepted with a mapping and is not itself in the menu: `{}`",
+                        e.name
+                    );
+                    let a = BcKind::from_name(e.name, e.field, "p0")
+                        .unwrap_or_else(|err| panic!("the alias `{}` must be accepted: {err}", e.name));
+                    let b = BcKind::from_name(to, e.field, "p0")
+                        .unwrap_or_else(|err| panic!("the target `{to}` must be accepted: {err}"));
+                    assert_eq!(a, b, "the alias must land on its target's kind");
+                }
+                catalogue::Status::Planned { unit } | catalogue::Status::Owned { unit } => {
+                    let err = BcKind::from_name(e.name, e.field, "p0").err().unwrap_or_else(|| {
+                        panic!("`{}` is `{unit}`'s to implement and must be refused today", e.name)
+                    });
+                    assert!(
+                        err.to_string().contains(e.name),
+                        "the refusal must name `{}`: {err}",
+                        e.name
+                    );
+                }
+                // Held by `the_permanent_refusals_name_their_reason`.
+                catalogue::Status::Refused { .. } => {}
+            }
+        }
+
+        // Unit-id shapes, and every id a row for in the completion plan.
+        fn unit_is(unit: &str, prefix: &str) -> bool {
+            let Some(rest) = unit.strip_prefix(prefix) else { return false };
+            let b = rest.as_bytes();
+            (b.len() == 2 && b.iter().all(u8::is_ascii_digit))
+                || (b.len() == 3
+                    && b[..2].iter().all(u8::is_ascii_digit)
+                    && b[2].is_ascii_lowercase())
+        }
+        let plan_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/17-completion-plan.md");
+        let plan = std::fs::read_to_string(&plan_path)
+            .unwrap_or_else(|err| panic!("docs/17-completion-plan.md must be readable: {err}"));
+        let mut ids: Vec<&str> = Vec::new();
+        for e in catalogue::CATALOGUE {
+            match e.status {
+                catalogue::Status::Planned { unit } => {
+                    assert!(unit_is(unit, "BC-"), "`{unit}` must be a BC-NN unit id");
+                    ids.push(unit);
+                }
+                catalogue::Status::Owned { unit } => {
+                    assert!(
+                        unit_is(unit, "CMP-") || unit_is(unit, "CHR-"),
+                        "`{unit}` must be a CMP-NN or CHR-NN unit id"
+                    );
+                    ids.push(unit);
+                }
+                _ => {}
+            }
+            ids.extend(e.extended_by.iter().copied());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            let row = format!("| **{id}** |");
+            assert!(
+                plan.contains(&row),
+                "docs/17-completion-plan.md must hold the `{row}` row"
+            );
+        }
+
+        // Structural rules: `extended_by` only on an implemented name,
+        // `probes` only on a refused prefix family.
+        for e in catalogue::CATALOGUE {
+            if !matches!(e.status, catalogue::Status::Implemented) {
+                assert!(
+                    e.extended_by.is_empty(),
+                    "`{}`: only an implemented name is extended later",
+                    e.name
+                );
+            }
+            let prefix_refused =
+                matches!(e.status, catalogue::Status::Refused { .. }) && e.name.ends_with('*');
+            if !prefix_refused {
+                assert!(
+                    e.probes.is_empty(),
+                    "`{}`: only a refused prefix family carries probes",
+                    e.name
+                );
+            }
+        }
+
+        // `waveTransmissive` is OUTSIDE the `wave*` refusal - it is CMP-17's
+        // absorbing outlet, and today it reaches the generic refusal.
+        let wt = catalogue::CATALOGUE
+            .iter()
+            .find(|e| e.name == "waveTransmissive")
+            .expect("waveTransmissive is in the catalogue");
+        assert!(
+            matches!(wt.status, catalogue::Status::Owned { unit: "CMP-17" }),
+            "waveTransmissive is CMP-17's to implement"
+        );
+        let err = BcKind::from_name("waveTransmissive", wt.field, "p0")
+            .expect_err("waveTransmissive must be refused today");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("no wave model"),
+            "waveTransmissive must not be caught by the wave* refusal: {msg}"
+        );
+        assert!(
+            msg.contains(IMPLEMENTED_BC_NAMES.join(", ").as_str()),
+            "waveTransmissive must reach the generic refusal and its menu: {msg}"
+        );
+
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT §120: every permanent refusal is refused BY NAME WITH ITS
+    /// REASON - strict mode prints the note carrying the entry's key and
+    /// never the whole menu, and `-permissive` downgrades it to a warning
+    /// plus the documented fallback.
+    #[test]
+    fn the_permanent_refusals_name_their_reason() {
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        crate::io::contract::reset_warnings();
+
+        let menu = IMPLEMENTED_BC_NAMES.join(", ");
+        let refused: Vec<&catalogue::Entry> = catalogue::CATALOGUE
+            .iter()
+            .filter(|e| matches!(e.status, catalogue::Status::Refused { .. }))
+            .collect();
+        assert_eq!(refused.len(), 10);
+
+        let mut probes = 0usize;
+        for e in &refused {
+            let catalogue::Status::Refused { key } = e.status else {
+                unreachable!("filtered above")
+            };
+            for probe in refusal_probes(e) {
+                probes += 1;
+                let err = BcKind::from_name(probe, e.field, "p0")
+                    .expect_err(&format!("`{probe}` must be refused"));
+                let msg = err.to_string();
+                assert!(msg.contains(probe), "{msg}");
+                assert!(
+                    msg.contains(key),
+                    "`{probe}`: the note must say why ({key}): {msg}"
+                );
+                assert!(msg.contains("note:"), "the refusal carries a note: {msg}");
+                assert!(msg.contains("p0"), "the refusal must name the patch: {msg}");
+                assert!(
+                    !msg.contains(menu.as_str()),
+                    "a permanent refusal names its reason, not the whole menu: {msg}"
+                );
+            }
+        }
+        assert_eq!(probes, 14);
+
+        crate::io::contract::set_permissive(true);
+        for e in &refused {
+            // Every new arm documents `calculated` as its fallback. The one
+            // refusal the catalogue did not add - the rad-coupled name,
+            // refused by its own arm since SPEC-LIT §50.8 - keeps that arm's
+            // own documented fallback: the conjugate coupling WITHOUT the
+            // radiative exchange.
+            let expected = if e.name == "compressible::turbulentTemperatureRadCoupledMixed" {
+                BcKind::CoupledTemperature
+            } else {
+                BcKind::Calculated
+            };
+            for probe in refusal_probes(e) {
+                assert_eq!(
+                    BcKind::from_name(probe, e.field, "p0").expect("permissive"),
+                    expected,
+                    "`{probe}` under -permissive"
+                );
+            }
+            assert!(
+                crate::io::contract::warned(&format!("{}: boundaryField/p0/type", e.field)),
+                "`{}` must be announced under -permissive",
+                e.name
+            );
+        }
+        crate::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT §120: the table in the document is the catalogue, row for
+    /// row, in the catalogue's order.
+    #[test]
+    fn the_spec_lit_120_table_is_the_catalogue() {
+        let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("SPEC-LIT.md");
+        let spec = std::fs::read_to_string(&spec_path)
+            .unwrap_or_else(|err| panic!("SPEC-LIT.md must be readable: {err}"));
+
+        let mut section: Vec<&str> = Vec::new();
+        let mut in_section = false;
+        for line in spec.lines() {
+            if !in_section {
+                in_section = line.starts_with("## 120.");
+                continue;
+            }
+            if line.starts_with("## ") {
+                break;
+            }
+            section.push(line);
+        }
+        assert!(in_section, "SPEC-LIT.md must hold the §120 heading");
+
+        const HEADER: &str = "| family | name | status | unit or target | extended by | note |";
+        let header = section
+            .iter()
+            .position(|l| *l == HEADER)
+            .expect("the §120 table header line");
+
+        let mut rows: Vec<Vec<&str>> = Vec::new();
+        for line in &section[header + 1..] {
+            if !line.starts_with('|') {
+                break;
+            }
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            if cells.len() > 2 && cells[2].starts_with('`') {
+                rows.push(cells);
+            }
+        }
+        assert_eq!(rows.len(), 130, "the §120 table must hold every catalogue row");
+
+        for (i, cells) in rows.iter().enumerate() {
+            let e = &catalogue::CATALOGUE[i];
+            let row = format!("§120 table row {} (`{}`)", i + 1, e.name);
+            assert_eq!(cells[1], e.family, "{row}: family");
+            assert_eq!(cells[2].trim_matches('`'), e.name, "{row}: name");
+            let word = match e.status {
+                catalogue::Status::Implemented => "implemented",
+                catalogue::Status::Alias { .. } => "alias",
+                catalogue::Status::Planned { .. } => "planned",
+                catalogue::Status::Owned { .. } => "owned",
+                catalogue::Status::Refused { .. } => "refused",
+            };
+            assert_eq!(cells[3], word, "{row}: status");
+            let target = match e.status {
+                catalogue::Status::Alias { to } => format!("`{to}`"),
+                catalogue::Status::Planned { unit } | catalogue::Status::Owned { unit } => {
+                    unit.to_string()
+                }
+                catalogue::Status::Implemented | catalogue::Status::Refused { .. } => {
+                    "\u{2014}".to_string()
+                }
+            };
+            assert_eq!(cells[4], target, "{row}: unit or target");
+            let extended = if e.extended_by.is_empty() {
+                "\u{2014}".to_string()
+            } else {
+                e.extended_by.join(", ")
+            };
+            assert_eq!(cells[5], extended, "{row}: extended by");
+        }
     }
 }

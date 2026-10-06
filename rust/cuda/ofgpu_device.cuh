@@ -28,6 +28,11 @@ typedef float  ofscalar;
 typedef double ofscalar;
 #endif
 
+//- The accumulator of every reduction: `double` in BOTH builds, so in the f64
+//  build it IS `ofscalar` and nothing changes (SPEC-LIT 118.1). Mirrored by
+//  `Acc` in src/lib.rs.
+typedef double ofacc;
+
 typedef int oflabel;
 
 #define OFGPU_DEV static __device__ __forceinline__

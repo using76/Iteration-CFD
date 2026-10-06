@@ -76,7 +76,7 @@ use crate::field_ops::{self, FieldKernels};
 use crate::ldu::GpuLduMatrix;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solver::{self, SolverKernels};
-use crate::{Label, Scalar, Vec3};
+use crate::{Acc, Label, Scalar, Vec3};
 
 // ==========================================================================
 //  Selecting the cells
@@ -1061,7 +1061,7 @@ pub struct Thermostat {
     w: DevBuf<Scalar>,
     w_abs: DevBuf<Scalar>,
     dot_out: DevBuf<Scalar>,
-    partials: DevBuf<Scalar>,
+    partials: DevBuf<Acc>,
     fldk: FieldKernels,
     solk: SolverKernels,
     /// Only `MassFlux` needs the weight kernel; a uniform thermostat never

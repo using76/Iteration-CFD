@@ -78,7 +78,7 @@ use crate::error::{Error, Result};
 use crate::io::contract::unsupported_note;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solver::{self, SolverKernels};
-use crate::{Label, Scalar};
+use crate::{Acc, Label, Scalar};
 use crate::SCALAR_FLOOR;
 
 #[cfg(test)]
@@ -787,7 +787,7 @@ pub struct FlowDevices {
     gq: DevBuf<Scalar>,
     gph: DevBuf<Scalar>,
     gsd: DevBuf<Scalar>,
-    partials: DevBuf<Scalar>,
+    partials: DevBuf<Acc>,
     sum_q: DevBuf<Scalar>,
     sum_ph: DevBuf<Scalar>,
     sum_sd: DevBuf<Scalar>,

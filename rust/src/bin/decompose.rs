@@ -71,7 +71,7 @@ use ofgpu::mesh::GpuMesh;
 use ofgpu::solver::{
     self, LinearSolverKind, Preconditioner, SolverControls, SolverKernels,
 };
-use ofgpu::{DevBuf, Error, Gpu, HostMesh, Label, Result, Scalar};
+use ofgpu::{Acc, DevBuf, Error, Gpu, HostMesh, Label, Result, Scalar};
 
 use cudarc::driver::PushKernelArg;
 
@@ -1014,7 +1014,7 @@ fn main() -> Result<()> {
         let dx = gpu.upload(&hard)?;
         let dy = gpu.upload(&vol)?;
         let mut out: DevBuf<Scalar> = gpu.zeros(1)?;
-        let mut partials: DevBuf<Scalar> = gpu.zeros(solver::reduce_partitions(m.n_cells))?;
+        let mut partials: DevBuf<Acc> = gpu.zeros(solver::reduce_partitions(m.n_cells))?;
         let mut red = ExactReduction::new(&gpu, &[m.n_cells])?;
         let xs = vec![dx.clone()];
         let ys = vec![dy.clone()];

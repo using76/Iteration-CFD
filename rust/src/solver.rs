@@ -77,7 +77,7 @@ use crate::error::{Error, Result};
 use crate::ldu::GpuLduMatrix;
 use crate::mesh::GpuMesh;
 use crate::precon::MultiColour;
-use crate::{Label, Scalar};
+use crate::{Acc, Label, Scalar};
 
 /// Read from `system/fvSolution`; defined in [`crate::io::case`] because that
 /// is where they are parsed, re-exported here because this is where they are
@@ -183,6 +183,12 @@ pub struct SolverKernels {
     pub sum2_ratio: CudaFunction,
     pub sum2_pair_divide: CudaFunction,
     pub sum2_converged: CudaFunction,
+    /// The f32 build's widening copy of one stage-two result into a gathered
+    /// `Acc` array (`exactsum`'s gather, SPEC-LIT §118.1). Absent in the f64
+    /// build, where the gather stays a byte copy.
+    #[cfg(feature = "single")]
+    pub widen_to_acc: CudaFunction,
+
     // vectors
     pub amul: CudaFunction,
     pub copy: CudaFunction,
@@ -231,6 +237,8 @@ impl SolverKernels {
             sum2_ratio: k.func("solSumStage2Ratio")?,
             sum2_pair_divide: k.func("solSum2Stage2Divide")?,
             sum2_converged: k.func("solSumStage2Converged")?,
+            #[cfg(feature = "single")]
+            widen_to_acc: k.func("solWidenToAcc")?,
 
             amul: k.func("solAmul")?,
             copy: k.func("solCopy")?,
@@ -306,9 +314,13 @@ pub struct SolverWorkspace {
     pub multicolour: Option<MultiColour>,
 
     // ---- reduction scratch -----------------------------------------------
-    pub partials: DevBuf<Scalar>,
+    /// The per-block partials every stage-one reduction writes and every
+    /// stage-two combine reads: `Acc` in BOTH builds - f64, so the f32
+    /// build's reductions accumulate in double and round once at the store
+    /// (SPEC-LIT §118.1). Sized `MAX_REDUCE_BLOCKS`.
+    pub partials: DevBuf<Acc>,
     /// Second partial array, for the fused `(t,s)`/`(t,t)` reduction.
-    pub partials_b: DevBuf<Scalar>,
+    pub partials_b: DevBuf<Acc>,
 
     // ---- device control scalars -----------------------------------------
     pub rho: DevBuf<Scalar>,
@@ -451,7 +463,10 @@ pub struct SolverPerformance {
 //  Reductions
 //
 //  Each is two launches: n values -> at most MAX_REDUCE_BLOCKS partials ->
-//  one DEVICE scalar. The result never touches the host.
+//  one DEVICE scalar. The result never touches the host. The partials are
+//  `Acc` - f64 in BOTH builds (SPEC-LIT §118.1) - so the f32 build's
+//  accumulation happens in double and rounds once, when stage two stores;
+//  the inputs and the stored outputs stay `Scalar`.
 // ==========================================================================
 
 /// `out = sum(x)`.
@@ -460,7 +475,7 @@ pub fn device_sum(
     k: &SolverKernels,
     out: &mut DevBuf<Scalar>,
     x: &DevBuf<Scalar>,
-    partials: &mut DevBuf<Scalar>,
+    partials: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     // A zero-block grid is an illegal launch configuration, so an empty
@@ -488,7 +503,7 @@ pub fn device_sum_mag(
     k: &SolverKernels,
     out: &mut DevBuf<Scalar>,
     x: &DevBuf<Scalar>,
-    partials: &mut DevBuf<Scalar>,
+    partials: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     if n == 0 {
@@ -515,7 +530,7 @@ pub fn device_dot(
     out: &mut DevBuf<Scalar>,
     a: &DevBuf<Scalar>,
     b: &DevBuf<Scalar>,
-    partials: &mut DevBuf<Scalar>,
+    partials: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     if n == 0 {
@@ -548,8 +563,8 @@ pub fn device_dot2(
     aa: &mut DevBuf<Scalar>,
     a: &DevBuf<Scalar>,
     b: &DevBuf<Scalar>,
-    partials_ab: &mut DevBuf<Scalar>,
-    partials_aa: &mut DevBuf<Scalar>,
+    partials_ab: &mut DevBuf<Acc>,
+    partials_aa: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     if n == 0 {
@@ -592,7 +607,7 @@ pub fn device_max_mag(
     k: &SolverKernels,
     out: &mut DevBuf<Scalar>,
     x: &DevBuf<Scalar>,
-    partials: &mut DevBuf<Scalar>,
+    partials: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     if n == 0 {
@@ -624,7 +639,7 @@ pub(crate) fn finish_sum(
     gpu: &Gpu,
     k: &SolverKernels,
     out: &mut DevBuf<Scalar>,
-    partials: &DevBuf<Scalar>,
+    partials: &DevBuf<Acc>,
     nparts: usize,
     offset: Scalar,
 ) -> Result<()> {
@@ -866,7 +881,7 @@ pub(crate) fn dot_then_divide(
     num: &DevBuf<Scalar>,
     a: &DevBuf<Scalar>,
     b: &DevBuf<Scalar>,
-    partials: &mut DevBuf<Scalar>,
+    partials: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     refuse_empty(n, "dot_then_divide")?;
@@ -907,7 +922,7 @@ fn dot_then_ratio(
     prev: &mut DevBuf<Scalar>,
     a: &DevBuf<Scalar>,
     b: &DevBuf<Scalar>,
-    partials: &mut DevBuf<Scalar>,
+    partials: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     refuse_empty(n, "dot_then_ratio")?;
@@ -947,8 +962,8 @@ pub(crate) fn dot2_then_divide(
     q: &mut DevBuf<Scalar>,
     a: &DevBuf<Scalar>,
     b: &DevBuf<Scalar>,
-    partials_ab: &mut DevBuf<Scalar>,
-    partials_aa: &mut DevBuf<Scalar>,
+    partials_ab: &mut DevBuf<Acc>,
+    partials_aa: &mut DevBuf<Acc>,
     n: usize,
 ) -> Result<()> {
     refuse_empty(n, "dot2_then_divide")?;
@@ -989,7 +1004,7 @@ pub(crate) fn sum_mag_then_test(
     x: &DevBuf<Scalar>,
     res0: &DevBuf<Scalar>,
     norm_factor: &DevBuf<Scalar>,
-    partials: &mut DevBuf<Scalar>,
+    partials: &mut DevBuf<Acc>,
     ctrl: &SolverControls,
     iter: Label,
     n: usize,
@@ -2613,8 +2628,8 @@ mod tests {
         let k = SolverKernels::new(&gpu).expect("solver kernels");
 
         let x: DevBuf<Scalar> = gpu.zeros(4).expect("x");
-        let mut partials: DevBuf<Scalar> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("partials");
-        let mut partials_b: DevBuf<Scalar> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("partials");
+        let mut partials: DevBuf<Acc> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("partials");
+        let mut partials_b: DevBuf<Acc> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("partials");
 
         // Seed the outputs with something non-zero so "wrote zero" is a real
         // observation rather than the allocation showing through.
@@ -2657,8 +2672,8 @@ mod tests {
 
         let x = gpu.upload(&hx).expect("x");
         let y = gpu.upload(&hy).expect("y");
-        let mut partials: DevBuf<Scalar> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("p");
-        let mut partials_b: DevBuf<Scalar> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("p");
+        let mut partials: DevBuf<Acc> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("p");
+        let mut partials_b: DevBuf<Acc> = gpu.zeros(MAX_REDUCE_BLOCKS).expect("p");
         let mut out: DevBuf<Scalar> = gpu.zeros(1).expect("out");
         let mut out_b: DevBuf<Scalar> = gpu.zeros(1).expect("out");
 

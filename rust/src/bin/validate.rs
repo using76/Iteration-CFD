@@ -52,6 +52,17 @@
 //!
 //! Exit code 0 means every check passed, 1 that one did not, 2 that the run
 //! could not be completed at all.
+//!
+//! # Usage
+//!
+//! `ofgpu-validate [-json <path>] [-run-id <id>] [-sections <spec>]`
+//!
+//! `-sections <spec>` - `7`, `1-5`, `1-5,12` - runs only the sections named
+//! and reports every other section as ONE `skip` row, so a filtered run is a
+//! partial run and never a validation of the build; with no flag every
+//! section runs, exactly as the run has always printed. Sections are
+//! numbered from 1 in run order - the order of the `=== ... ===` banners -
+//! and a spec naming a section past the end aborts the run.
 
 use std::cell::RefCell;
 use std::f64::consts::PI;
@@ -199,6 +210,78 @@ struct GateReport {
     uncertainty: Option<Uncertainty>,
 }
 
+/// The parsed `-sections` value: the text as it was given, and the ranges it
+/// names. `selects` answers for a 1-based run-order number; nothing here
+/// knows how many sections a run actually has - [`Checks::sections_in_range`]
+/// is what refuses a filter that names a section past the end.
+#[derive(Clone, Debug)]
+struct SectionFilter {
+    spec: String,
+    ranges: Vec<(usize, usize)>,
+}
+
+impl SectionFilter {
+    /// `spec = item ("," item)* ; item = N | N "-" M ; N, M >= 1, N <= M`,
+    /// with no whitespace and decimal digits only. One of three refusals: the
+    /// syntax one (empty spec, empty item, non-digit, sign, space, a trailing
+    /// or leading `-`), a zero anywhere, or a range that runs backwards.
+    fn parse(spec: &str) -> std::result::Result<SectionFilter, String> {
+        let syntax = || {
+            format!(
+                "-sections: '{spec}' is not a list of section numbers and ranges \
+                 (for example 7, 1-5 or 1-5,12)"
+            )
+        };
+        if spec.is_empty() {
+            return Err(syntax());
+        }
+        let number = |text: &str| -> Option<usize> {
+            if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            text.parse::<usize>().ok()
+        };
+        let mut ranges = Vec::new();
+        for item in spec.split(',') {
+            let (lo_text, hi_text) = match item.split_once('-') {
+                Some((lo, hi)) => (lo, Some(hi)),
+                None => (item, None),
+            };
+            let lo = number(lo_text).ok_or_else(syntax)?;
+            let hi = match hi_text {
+                Some(text) => number(text).ok_or_else(syntax)?,
+                None => lo,
+            };
+            if lo == 0 || hi == 0 {
+                return Err("-sections: section numbers start at 1".to_string());
+            }
+            if hi < lo {
+                return Err(format!("-sections: range {lo}-{hi} runs backwards"));
+            }
+            ranges.push((lo, hi));
+        }
+        Ok(SectionFilter {
+            spec: spec.to_string(),
+            ranges,
+        })
+    }
+
+    /// Whether the 1-based run-order section `n` is selected.
+    fn selects(&self, n: usize) -> bool {
+        self.ranges.iter().any(|&(lo, hi)| n >= lo && n <= hi)
+    }
+
+    /// The largest section number named anywhere in the spec.
+    fn max(&self) -> usize {
+        self.ranges.iter().map(|&(_, hi)| hi).max().unwrap_or(0)
+    }
+
+    /// The text as it was given, for the run summary and the skip rows.
+    fn spec(&self) -> &str {
+        &self.spec
+    }
+}
+
 /// The running tally, and the one line each check prints.
 struct Checks {
     total: usize,
@@ -254,6 +337,14 @@ struct Checks {
     /// that would never reach the summary, and it FAILS the run (SPEC-LIT
     /// §69.2). `note` takes `&self`, so the transcript needs the cell.
     transcript: RefCell<Vec<(String, bool)>>,
+    /// The parsed `-sections` filter, or `None` - which is every section,
+    /// and what a run without the flag is.
+    sections: Option<SectionFilter>,
+    /// How many `Checks::section` calls this run has made so far - the
+    /// run-order numbering, 1-based.
+    section_count: usize,
+    /// How many of them were selected. The rest are one skip row each.
+    sections_run: usize,
 }
 
 impl Checks {
@@ -271,6 +362,9 @@ impl Checks {
             gate: None,
             orphan_verdicts: Vec::new(),
             transcript: RefCell::new(Vec::new()),
+            sections: None,
+            section_count: 0,
+            sections_run: 0,
         }
     }
 
@@ -296,6 +390,59 @@ impl Checks {
     /// End the open gate's scope. Rows taken after it name no gate.
     fn leave_gate(&mut self) {
         self.gate = None;
+    }
+
+    /// Start section `self.section_count + 1` titled `title`, and say whether
+    /// it is to run. True: the banner prints - through a plain `println!`,
+    /// NOT through `emit`, exactly as the banners it replaces did, so the
+    /// transcript and the S69.2 audit see the same bytes they always saw.
+    /// False (an active `-sections` filter did not select it): one skip row,
+    /// which is never a pass, and no banner, as if the section were not
+    /// there. Code with no banner of its own belongs to the section before
+    /// it, which is why this is called in run order, once per banner.
+    fn section(&mut self, title: &str) -> bool {
+        self.section_count += 1;
+        let n = self.section_count;
+        let selected = match &self.sections {
+            None => true,
+            Some(f) => f.selects(n),
+        };
+        if selected {
+            self.sections_run += 1;
+            println!("\n=== {title} ===");
+            true
+        } else {
+            let spec = self
+                .sections
+                .as_ref()
+                .map(|f| f.spec().to_string())
+                .unwrap_or_default();
+            self.skip(
+                &format!("section {n}: {title}"),
+                &format!("not selected by -sections {spec}"),
+            );
+            false
+        }
+    }
+
+    /// Err when the `-sections` filter names a section number above the
+    /// `section_count` this run actually reached - a spec written for a
+    /// different run order must abort, not silently run less than it names.
+    fn sections_in_range(&self) -> std::result::Result<(), String> {
+        match &self.sections {
+            None => Ok(()),
+            Some(f) => {
+                let max = f.max();
+                if max > self.section_count {
+                    Err(format!(
+                        "-sections names section {max} but this run has {} sections",
+                        self.section_count
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 
     fn check(&mut self, what: &str, err: Scalar, tol: Scalar) {
@@ -2851,7 +2998,7 @@ fn run(c: &mut Checks) -> Result<()> {
     let k = Kernels::new(&gpu)?;
 
     // ---- a graded, three-dimensional, orthogonal block -------------------
-    println!("\n=== 3-D graded block ===");
+    if c.section("3-D graded block") {
     let spec3 = MeshSpec {
         n: [14, 11, 9],
         l: [1.0, 0.7, 0.4],
@@ -2868,10 +3015,11 @@ fn run(c: &mut Checks) -> Result<()> {
     check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Central)?;
     check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Limited(Limiter::VanLeer))?;
     drop(gm3);
+    }
 
     // ---- a sheared block: non-orthogonal, so the correction of section 2.4
     //      is no longer a no-op ---------------------------------------------
-    println!("\n=== 3-D sheared block (non-orthogonal) ===");
+    if c.section("3-D sheared block (non-orthogonal)") {
     let spec_sh = MeshSpec {
         n: [9, 8, 7],
         l: [1.0, 0.7, 0.4],
@@ -2892,13 +3040,14 @@ fn run(c: &mut Checks) -> Result<()> {
     check_explicit_operators(c, &gpu, &k, &msh, &gmsh)?;
     check_assembly(c, &gpu, &k, &msh, &gmsh, DivScheme::Limited(Limiter::MinMod))?;
     drop(gmsh);
+    }
 
     // ---- a block with 2:1 refinement interfaces --------------------------
     //
     //      SPEC-LIT section 74. This mesh is not adapted into that state - it
     //      is BORN with it - so what is under test here is the discretisation
     //      at a coarse-fine interface and nothing else.
-    println!("\n=== 3-D block with 2:1 refinement interfaces ===");
+    if c.section("3-D block with 2:1 refinement interfaces") {
     let rb = ofgpu::mesh::refined::refined_core([8, 8, 8], Vec3::new(0.125, 0.125, 0.125), 0.25, 1)?;
     let mref = rb.mesh.clone();
     let rep_ref = mref.check();
@@ -2928,17 +3077,18 @@ fn run(c: &mut Checks) -> Result<()> {
     check_assembly(c, &gpu, &k, &mref, &gmref, DivScheme::Upwind)?;
     check_skew_correction(c, &gpu, &k, &mref, &gmref)?;
     drop(gmref);
+    }
 
     // ---- and one that is ADAPTED into that state -------------------------
     //
     //      SPEC-LIT S75. Everything above this line is measured on a mesh
     //      that was BORN with 2:1 interfaces. Below it the mesh changes.
-    println!("
-=== the adapt: refine, coarsen, and what a rebuild costs ===");
+    if c.section("the adapt: refine, coarsen, and what a rebuild costs") {
     check_adapt(c, &gpu, &k)?;
+    }
 
     // ---- a 2-D block with empty front and back ---------------------------
-    println!("\n=== 2-D block with empty front and back ===");
+    if c.section("2-D block with empty front and back") {
     let spec2 = MeshSpec {
         n: [20, 16, 1],
         l: [1.0, 0.7, 0.05],
@@ -2953,14 +3103,16 @@ fn run(c: &mut Checks) -> Result<()> {
     check_explicit_operators(c, &gpu, &k, &m2, &gm2)?;
     check_assembly(c, &gpu, &k, &m2, &gm2, DivScheme::Upwind)?;
     drop(gm2);
+    }
 
     // ---- linear algebra --------------------------------------------------
-    println!("\n=== linear solvers ===");
+    if c.section("linear solvers") {
     check_solver_against_dense(c, &gpu, &k)?;
     check_fft_poisson(c, &gpu, &k)?;
+    }
 
     // ---- manufactured solutions ------------------------------------------
-    println!("\n=== method of manufactured solutions, -lap(psi) = f ===");
+    if c.section("method of manufactured solutions, -lap(psi) = f") {
     check_mms(
         c,
         &gpu,
@@ -3001,64 +3153,72 @@ fn run(c: &mut Checks) -> Result<()> {
         },
         0,
     )?;
+    }
 
     // ---- observed order and reported uncertainty -------------------------
-    println!("\n=== observed order and reported uncertainty (SPEC-LIT 94) ===");
+    if c.section("observed order and reported uncertainty (SPEC-LIT 94)") {
     check_observed_order_anisotropic(c, &gpu, &k)?;
     check_observed_order_interface(c, &gpu)?;
+    }
 
     // ---- buoyancy --------------------------------------------------------
-    println!("\n=== buoyancy ===");
+    if c.section("buoyancy") {
     check_buoyancy(c, &gpu, &k)?;
+    }
 
     // ---- SPEC-LIT 17, 18, 19 and the flux round trip ---------------------
-    println!("\n=== buoyancy production, sources, species, phi I/O ===");
+    if c.section("buoyancy production, sources, species, phi I/O") {
     check_buoyancy_production(c, &gpu)?;
     check_volumetric_source(c, &gpu)?;
     check_species(c, &gpu)?;
     check_phi_round_trip(c, &gpu)?;
+    }
 
     // ---- volume of fluid -------------------------------------------------
-    println!("
-=== volume of fluid (SPEC-LIT 20, the 22 rows) ===");
+    if c.section("volume of fluid (SPEC-LIT 20, the 22 rows)") {
     check_vof(c, &gpu)?;
+    }
 
     // ---- surface intake and embedded boundaries (SPEC-LIT 23, 24) --------
-    println!("\n=== msh hex closure, cut-cell closure (SPEC-LIT 23, 24) ===");
+    if c.section("msh hex closure, cut-cell closure (SPEC-LIT 23, 24)") {
     check_msh_hex_closure(c)?;
     check_cutcell_closure(c)?;
+    }
 
     // ---- the low-Mach reference pressure (SPEC-LIT 25) -------------------
-    println!("\n=== the low-Mach reference pressure (SPEC-LIT 25) ===");
+    if c.section("the low-Mach reference pressure (SPEC-LIT 25)") {
     check_low_mach_p0(c, &gpu)?;
+    }
 
     // ---- wall treatment: rough-wall Ks -> 0, the thermal wall function
     //      (SPEC-LIT 29) --------------------------------------------------
-    println!("\n=== wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29) ===");
+    if c.section("wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29)") {
     check_rough_wall_ks_zero(c);
     check_thermal_wall_function(c);
+    }
 
     // ---- the LES wall model, and coupled-solver turbulence selection
     //      (SPEC-LIT 30) --------------------------------------------------
-    println!(
-        "\n=== Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30) ==="
-    );
+    if c.section("Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30)") {
     check_werner_wengle(c);
     check_werner_wengle_inversion(c);
     check_coupled_selection(c, &gpu, &k)?;
+    }
 
     // ---- periodic domains: the cyclic-pair invariants (SPEC-LIT 31.1) ----
-    println!("\n=== periodic domains: cyclic-pair invariants (SPEC-LIT 31.1) ===");
+    if c.section("periodic domains: cyclic-pair invariants (SPEC-LIT 31.1)") {
     check_cyclic_pair(c)?;
+    }
 
     // ---- the thermal wall-function gate, redesigned (SPEC-LIT 32) --------
-    println!("\n=== the thermal wall-function gate, redesigned (SPEC-LIT 32) ===");
+    if c.section("the thermal wall-function gate, redesigned (SPEC-LIT 32)") {
     check_fixed_flux_identity(c);
     check_nu_correlations(c);
     check_realised_friction_factor(c)?;
     c.enter_gate("SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg");
     c.replaying(check_thermal_wall_function_gate_verdict_replay);
     c.leave_gate();
+    }
 
     // ---- Launder-Sharma low-Re k-epsilon: the damping functions
     //      (SPEC-LIT 33.3) -------------------------------------------------
@@ -3077,13 +3237,15 @@ fn run(c: &mut Checks) -> Result<()> {
     // run belongs in a driver invocation a human chooses to make, not in
     // `cargo test`. What IS cheap - and unconditionally true regardless of
     // any live run - is the damping functions' own analytic table.
-    println!("\n=== Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3) ===");
+    if c.section("Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3)") {
     check_launder_sharma_damping_functions(c);
+    }
 
     // ---- the plane-channel resolved leg's mesh resolution (SPEC-LIT
     //      §33.2/§34) --------------------------------------------------
-    println!("\n=== resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) ===");
+    if c.section("resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34)") {
     c.replaying(check_resolved_leg_mesh_resolution_replay);
+    }
 
     // ---- SPEC-LIT §35: the bulk-temperature thermostat -------------------
     //
@@ -3096,132 +3258,132 @@ fn run(c: &mut Checks) -> Result<()> {
     // milliseconds (which is what makes the initial-condition independence
     // true in the first place), and the resolved leg's own Nu verdict now
     // that it has an actual steady state to measure.
-    println!("\n=== the bulk-temperature thermostat (SPEC-LIT 35) ===");
+    if c.section("the bulk-temperature thermostat (SPEC-LIT 35)") {
     check_thermostat_sign_and_steady_offset(c, &gpu)?;
     c.enter_gate("SPEC-LIT S32.4 verdict 1 (absolute prediction), resolved leg");
     c.replaying(check_resolved_leg_gate_verdict_replay);
     c.leave_gate();
+    }
 
     // SPEC-LIT §35.3.2's uniform-vs-massFlux experiment, on both meshes -
     // the measurement that decided whether the uniform sink's distribution
     // defect was real and how big it is.
-    println!("\n=== thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2) ===");
+    if c.section("thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2)") {
     c.replaying(check_thermostat_weighting_experiment_replay);
+    }
 
     // SPEC-LIT §32.5.5's isolation: what the `bounded` prefix on `div(phi,U)`
     // was worth once §13.4.1's fix made the cases' own entry reach the
     // momentum equation, and what the scheme's ORDER was worth beside it.
-    println!("\n=== bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5) ===");
+    if c.section("bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5)") {
     c.replaying(check_bounded_convection_experiment_replay);
+    }
 
     // SPEC-LIT §37: the variable turbulent Prandtl number. The correlation
     // itself is arithmetic and is checked LIVE; the experiment that put it on
     // the two channel legs is a 40 000-iteration pair per leg and is replayed.
-    println!("\n=== Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2) ===");
+    if c.section("Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2)") {
     check_kays_crawford_prt(c);
+    }
 
     // SPEC-LIT S40 and S41 - the two k-epsilon variants.
-    println!("
-=== realizable and RNG k-epsilon (SPEC-LIT 40, 41) ===");
+    if c.section("realizable and RNG k-epsilon (SPEC-LIT 40, 41)") {
     check_ke_variant_closed_forms(c);
     check_realizability(c, &gpu)?;
     check_homogeneous_shear_live(c, &gpu)?;
     check_strained_realizability_live(c, &gpu)?;
+    }
 
     // SPEC-LIT S44 and S45 - the case file driving the output pipeline.
-    println!("
-=== the output block, and fp16 voxels (SPEC-LIT 44, 45) ===");
+    if c.section("the output block, and fp16 voxels (SPEC-LIT 44, 45)") {
     check_output_pipeline(c)?;
+    }
 
     // SPEC-LIT S46/S47/S48 - conjugate heat transfer.
-    println!("\n=== conjugate heat transfer (SPEC-LIT 46, 47, 48) ===");
+    if c.section("conjugate heat transfer (SPEC-LIT 46, 47, 48)") {
     check_conjugate_heat_transfer(c, &gpu)?;
+    }
 
     // The per-region residual - planned as the section after 92; a later
     // unit writes the heading, this gate runs the numbers.
-    println!("\n=== the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows) ===");
+    if c.section("the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows)") {
     check_per_region_residual(c, &gpu)?;
+    }
 
     // SPEC-LIT 93 - Gate 93-A: a region's rows of the concatenated assembly
     // are the region alone, bit for bit.
-    println!("\n=== an equation that lives on a region - Gate 93-A (SPEC-LIT 93) ===");
+    if c.section("an equation that lives on a region - Gate 93-A (SPEC-LIT 93)") {
     c.enter_gate("SPEC-LIT S93 Gate 93-A");
     check_region_restriction(c, &gpu)?;
     c.leave_gate();
+    }
 
     // SPEC-LIT S59/S60 - the FLUID side of that interface, and S47.12's Gate
     // 5, which S47.14 recorded as not run.
-    println!("
-=== the conjugate fluid/solid interface (SPEC-LIT 59, 60) ===");
+    if c.section("the conjugate fluid/solid interface (SPEC-LIT 59, 60)") {
     c.enter_gate("SPEC-LIT S60.5 Gate 5");
     check_conjugate_fluid(c, &gpu)?;
     c.leave_gate();
     check_forced_convection(c, &gpu)?;
+    }
 
     // SPEC-LIT S49/S50/S51 - surface-to-surface radiation.
-    println!("
-=== surface-to-surface radiation (SPEC-LIT 49, 50, 51) ===");
+    if c.section("surface-to-surface radiation (SPEC-LIT 49, 50, 51)") {
     check_surface_to_surface_radiation(c, &gpu)?;
+    }
 
     // SPEC-LIT S52/S53/S54/S55 - fan curves, porous jumps, psychrometrics and
     // the data-centre metrics.
-    println!("
-=== fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55) ===");
+    if c.section("fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55)") {
     check_data_centre(c, &gpu)?;
+    }
 
     // SPEC-LIT S56/S57/S58 - Spalart-Allmaras and the hybrid RANS-LES family.
-    println!(
-        "
-=== Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58) ==="
-    );
+    if c.section("Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58)") {
     check_spalart_allmaras_and_des(c, &gpu)?;
+    }
 
     // SPEC-LIT S88/S89 - the gamma-Re_theta transition model.
-    println!(
-        "
-=== gamma-Re_theta transition (SPEC-LIT 88, 89) ==="
-    );
+    if c.section("gamma-Re_theta transition (SPEC-LIT 88, 89)") {
     c.enter_gate("SPEC-LIT S88 Gate 88-T");
     check_transition(c)?;
     c.leave_gate();
+    }
 
     // SPEC-LIT S90 - the Menter et al. (2015) one-equation gamma model on SST.
-    println!(
-        "
-=== the 2015 gamma transition model (SPEC-LIT 90) ==="
-    );
+    if c.section("the 2015 gamma transition model (SPEC-LIT 90)") {
     c.enter_gate("SPEC-LIT S90 Gate 90-T");
     check_gamma_transition(c, &gpu)?;
     c.leave_gate();
+    }
 
     // SPEC-LIT S66 - the Lagrangian parcel pool, the drag update and the walk.
-    println!("
-=== Lagrangian parcels (SPEC-LIT 66) ===");
+    if c.section("Lagrangian parcels (SPEC-LIT 66)") {
     check_parcels(c, &gpu)?;
+    }
 
     // SPEC-LIT S67 - the sort, the per-cell CSR, and the deposition gather.
-    println!("
-=== the parcel sort and gather-shaped deposition (SPEC-LIT 67) ===");
+    if c.section("the parcel sort and gather-shaped deposition (SPEC-LIT 67)") {
     check_parcel_deposition(c, &gpu)?;
+    }
 
     // SPEC-LIT S68 - two-way coupling, and the Theobald hose streams.
-    println!("
-=== two-way coupling of the dispersed phase (SPEC-LIT 68) ===");
+    if c.section("two-way coupling of the dispersed phase (SPEC-LIT 68)") {
     check_parcel_coupling(c, &gpu)?;
+    }
 
     // SPEC-LIT S76 - droplet heating and evaporation, the parcel side.
-    println!("
-=== droplet heating and evaporation (SPEC-LIT 76) ===");
+    if c.section("droplet heating and evaporation (SPEC-LIT 76)") {
     check_droplet_evaporation(c, &gpu)?;
+    }
 
     // SPEC-LIT S77 - the vapour, the latent heat and the volume, into the gas.
-    println!("
-=== the vapour into the gas (SPEC-LIT 77) ===");
+    if c.section("the vapour into the gas (SPEC-LIT 77)") {
     check_parcel_vapour_coupling(c, &gpu)?;
+    }
 
     // SPEC-LIT S78 - the droplet-wall impact map, and the mass it leaves there.
-    println!("
-=== droplet-wall impact (SPEC-LIT 78) ===");
+    if c.section("droplet-wall impact (SPEC-LIT 78)") {
     c.enter_gate("78-D");
     check_droplet_wall_impact(c, &gpu)?;
     c.leave_gate();
@@ -3230,21 +3392,25 @@ fn run(c: &mut Checks) -> Result<()> {
     check_buckingham_reiner(c);
     check_contact_angle_jurin(c);
     check_non_newtonian_channel(c, &gpu, &k)?;
-    println!("\n=== Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10) ===");
+    }
+    if c.section("Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10)") {
     c.enter_gate("Gate 95-D thick cylinder");
     check_thick_cylinder(c, &gpu)?;
     c.leave_gate();
-    println!("\n=== Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) ===");
+    }
+    if c.section("Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments)") {
     c.enter_gate("Gate 95-E bimetal strip");
     check_solid_bimetal(c, &gpu)?;
     c.leave_gate();
+    }
 
-    println!("\n=== Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (three meshes each, SPEC-LIT 109.6) ===");
+    if c.section("Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (three meshes each, SPEC-LIT 109.6)") {
     c.enter_gate("Gate 95-A cantilever");
     check_cantilever(c, &gpu)?;
     c.leave_gate();
+    }
 
-    println!("\n=== Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (three meshes each, LE10 four with its study on the finest three, SPEC-LIT 95.11) ===");
+    if c.section("Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (three meshes each, LE10 four with its study on the finest three, SPEC-LIT 95.11)") {
     c.enter_gate("Gate 95-G boundary-point fit (Lame ring)");
     check_boundary_point_fit(c, &gpu)?;
     c.leave_gate();
@@ -3257,85 +3423,104 @@ fn run(c: &mut Checks) -> Result<()> {
     c.enter_gate("Gate 95-G LE11 cylinder/taper/sphere (restated)");
     check_nafems_le11(c, &gpu)?;
     c.leave_gate();
+    }
 
     // SPEC-LIT S97 - the imported region, and Gate 97-A.
-    c.enter_gate("S97 Gate 97-A imported region");
-    check_imported_region(c, &gpu)?;
-    c.leave_gate();
+    if c.section("the imported region (SPEC-LIT 97)") {
+        c.enter_gate("S97 Gate 97-A imported region");
+        check_imported_region(c, &gpu)?;
+        c.leave_gate();
+    }
     // SPEC-LIT S97 - the region layout, and Gate 97-B.
-    c.enter_gate("S97 Gate 97-B region layout");
-    check_region_layout(c, &gpu)?;
-    c.leave_gate();
+    if c.section("the region layout (SPEC-LIT 97)") {
+        c.enter_gate("S97 Gate 97-B region layout");
+        check_region_layout(c, &gpu)?;
+        c.leave_gate();
+    }
     // SPEC-LIT 98.6 - the face that exchanges heat with something not meshed.
-    println!("\n=== Gate 98-A: the straight fin, three meshes, against (S98.7) (SPEC-LIT 98.6) ===");
+    if c.section("Gate 98-A: the straight fin, three meshes, against (S98.7) (SPEC-LIT 98.6)") {
     c.enter_gate("SPEC-LIT 98.6 Gate 98-A straight fin");
     check_straight_fin(c, &gpu)?;
     c.leave_gate();
-    println!("\n=== Gate 98-B: the slab radiating to a surround, its Newton passes (SPEC-LIT 98.6) ===");
+    }
+    if c.section("Gate 98-B: the slab radiating to a surround, its Newton passes (SPEC-LIT 98.6)") {
     c.enter_gate("SPEC-LIT 98.6 Gate 98-B radiating slab");
     check_radiating_slab(c, &gpu)?;
     c.leave_gate();
+    }
     // SPEC-LIT 98.9 - the enclosure with a running flow.
-    println!("\n=== Gate 98-C: an enclosure on a live conjugate flow, its balance, split and relaxation (SPEC-LIT 98.9) ===");
+    if c.section("Gate 98-C: an enclosure on a live conjugate flow, its balance, split and relaxation (SPEC-LIT 98.9)") {
     c.enter_gate("SPEC-LIT 98.9 Gate 98-C enclosure with a running flow");
     check_enclosure_flow(c, &gpu)?;
     c.leave_gate();
+    }
     // SPEC-LIT 100.4 - the evaluator against three published tables.
-    println!("\n=== Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4) ===");
+    if c.section("Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4)") {
     c.enter_gate("SPEC-LIT 100.4 Gate 100-B published property tables");
     check_gate_100b_silicon(c)?;
     check_gate_100b_air(c)?;
     check_gate_100b_nasa(c)?;
     c.leave_gate();
+    }
     // SPEC-LIT 100.8 - the Kirchhoff slab, and Gate 100-A.
-    println!("\n=== Gate 100-A: the Kirchhoff slab, kappa linear in T, three meshes (SPEC-LIT 100.8) ===");
+    if c.section("Gate 100-A: the Kirchhoff slab, kappa linear in T, three meshes (SPEC-LIT 100.8)") {
     c.enter_gate("SPEC-LIT 100.8 Gate 100-A Kirchhoff slab");
     check_kirchhoff_slab(c, &gpu)?;
     c.leave_gate();
+    }
     // SPEC-LIT 100.15 - Brinkman's channel, Gate 100-C.
-    println!("\n=== Gate 100-C: Brinkman's plane Poiseuille with viscous heating, two walls, three meshes each (SPEC-LIT 100.15) ===");
+    if c.section("Gate 100-C: Brinkman's plane Poiseuille with viscous heating, two walls, three meshes each (SPEC-LIT 100.15)") {
     c.enter_gate("SPEC-LIT 100.15 Gate 100-C Brinkman plane Poiseuille");
     check_brinkman_channel(c, &gpu)?;
     c.leave_gate();
+    }
     // SPEC-LIT 100.15 - Gate 6 with the water's mu(T) live, Gate 100-D.
-    println!("\n=== Gate 100-D: Qu & Mudawar's micro-channel with water's mu(T) live (SPEC-LIT 100.15) ===");
+    if c.section("Gate 100-D: Qu & Mudawar's micro-channel with water's mu(T) live (SPEC-LIT 100.15)") {
     c.enter_gate("SPEC-LIT 100.15 Gate 100-D Qu & Mudawar with mu(T)");
     check_qm_viscosity(c, &gpu)?;
     c.leave_gate();
+    }
     // SPEC-LIT 105 - the moving mesh, and Gate 105-A.
-    println!("\n=== Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) ===");
+    if c.section("Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5)") {
     c.enter_gate("SPEC-LIT 105.5 Gate 105-A space conservation");
     check_ale_space_conservation(c, &gpu)?;
     c.leave_gate();
+    }
     // SPEC-LIT 105.10 - the SIMPLE loop on a moving mesh, and Gate 105-B.
-    println!("\n=== Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10) ===");
+    if c.section("Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10)") {
     c.enter_gate("SPEC-LIT 105.10 Gate 105-B the flow on a moving mesh");
     check_ale_flow(c, &gpu)?;
     c.leave_gate();
+    }
     // SPEC-LIT 105.14 - Turek-Hron CFD1/CFD2 on four meshes, studied through the finest three, CFD3 on a wobbling mesh, Gate 105-C.
-    println!("\n=== Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over four meshes (the study on the finest three), CFD3 on a wobbling mesh (SPEC-LIT 105.14) ===");
+    if c.section("Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over four meshes (the study on the finest three), CFD3 on a wobbling mesh (SPEC-LIT 105.14)") {
     c.enter_gate("SPEC-LIT 105.14 Gate 105-C Turek-Hron");
     check_turek_hron(c, &gpu)?;
     c.leave_gate();
-    println!("\n=== lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) ===");
+    }
+    if c.section("lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D)") {
     c.enter_gate("SPEC-LIT 94.4 Gate 94-D lid-driven cavity");
     published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
     c.leave_gate();
+    }
     // SPEC-LIT 110 - the published fluid gates: on this tree every one of
     // the three takes the missing-key path (SPEC-LIT §110.1), and says so by name.
-    println!("\n=== Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2) ===");
+    if c.section("Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2)") {
     c.enter_gate("SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)");
     check_channel_dns(c)?;
     c.leave_gate();
-    println!("\n=== Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3) ===");
+    }
+    if c.section("Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3)") {
     c.enter_gate("SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)");
     check_backstep_reattachment(c)?;
     c.leave_gate();
-    println!("\n=== Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4) ===");
+    }
+    if c.section("Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4)") {
     c.enter_gate("SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)");
     check_mccaffrey_plume(c)?;
     c.leave_gate();
     c.replaying(check_kays_crawford_experiment_replay);
+    }
 
     Ok(())
 }
@@ -9826,12 +10011,33 @@ fn main() -> ExitCode {
         }
     };
 
+    // The `-sections` spec, parsed BEFORE the GPU is touched: a bad spec is
+    // a usage error, and it must not cost a device initialisation to say so.
+    let filter = match json::sections_arg(&argv) {
+        Err(e) => {
+            eprintln!("\n{e}");
+            return ExitCode::from(2);
+        }
+        Ok(None) => None,
+        Ok(Some(spec)) => match SectionFilter::parse(&spec) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("\n{e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
     let mut c = Checks::new();
+    c.sections = filter;
     let mut aborted: Option<String> = None;
 
     if let Err(e) = run(&mut c) {
         eprintln!("\nvalidation aborted: {e}");
         aborted = Some(e.to_string());
+    } else if let Err(msg) = c.sections_in_range() {
+        eprintln!("\nvalidation aborted: {msg}");
+        aborted = Some(msg);
     } else {
         // SPEC-LIT S69. The last two rows of the run are the run auditing what
         // it is about to say about itself, and they hand back the gate list the
@@ -9856,6 +10062,16 @@ fn main() -> ExitCode {
         print!("{gates}");
         if c.skipped > 0 {
             println!("{} checks skipped", c.skipped);
+        }
+        if let Some(f) = &c.sections {
+            println!(
+                "-sections {}: {} of {} sections run; the other {} are skip rows, \
+                 so this is a partial run and not a validation of the build",
+                f.spec(),
+                c.sections_run,
+                c.section_count,
+                c.section_count - c.sections_run
+            );
         }
     }
 
@@ -21648,7 +21864,6 @@ fn check_imported_region(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::cht::run_case;
     use ofgpu::io::case_cht::{read_cht_case, ChtPolyMeshRef, ChtRegionMesh};
 
-    println!("\n=== the imported region (SPEC-LIT 97) ===");
     println!("  -- S97 Gate 97-A: cases/dieStack.cht.jsonc through write_poly_mesh_raw, bit for bit --");
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/dieStack.cht.jsonc");
@@ -21960,7 +22175,6 @@ fn check_region_layout(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             && a.z.to_bits() == b.z.to_bits()
     }
 
-    println!("\n=== the region layout (SPEC-LIT 97) ===");
     println!("  -- S97 Gate 97-B: the split two-zone block, run through the manifest, bit for bit --");
 
     let dir = scratch_dir("s97_layout");
@@ -23102,5 +23316,148 @@ mod le10_refine {
         let band = b.mesh.patches.iter().find(|p| p.name == "outer_mid").expect("the band patch");
         assert_eq!(band.size, 2 * n_phi, "the band is two layers of outer faces");
         assert_eq!(b.stencil.len(), 8, "the 2 x 2 x 2 corner stencil");
+    }
+}
+
+// ==========================================================================
+//  The -sections filter: its grammar, its bookkeeping, and the source
+//  invariants that keep run()'s banners sections (and only sections).
+// ==========================================================================
+
+#[cfg(test)]
+mod sections_flag {
+    use super::*;
+
+    #[test]
+    fn validate_section_filter_counts() {
+        let mut c = Checks::new();
+        c.sections = Some(SectionFilter::parse("2-3").unwrap());
+        let mut ran = Vec::new();
+        for title in ["a", "b", "c", "d"] {
+            let run = c.section(title);
+            if run {
+                c.check("x", 0.0, 1.0);
+            }
+            ran.push(run);
+        }
+        assert_eq!(ran, [false, true, true, false]);
+        assert_eq!((c.total, c.failures, c.skipped), (2, 0, 2));
+        assert_eq!(c.rows.len(), 4);
+        assert_eq!(c.section_count, 4);
+        assert_eq!(c.sections_run, 2);
+        assert_eq!(c.sections_in_range(), Ok(()));
+    }
+
+    #[test]
+    fn validate_no_flag_is_identity() {
+        let mut c = Checks::new();
+        for i in 1..=60 {
+            assert!(c.section(&format!("s{i}")));
+        }
+        assert!(c.rows.is_empty());
+        assert_eq!(c.skipped, 0);
+        assert_eq!(c.total, 0);
+        assert!(c.transcript.borrow().is_empty());
+        assert_eq!(c.sections_in_range(), Ok(()));
+        assert_eq!(
+            json::sections_arg(&["ofgpu-validate".to_string()]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn sections_flag_parses() {
+        let f = SectionFilter::parse("7").unwrap();
+        assert!(f.selects(7));
+        assert!(!f.selects(6));
+        assert!(!f.selects(8));
+        assert_eq!(f.max(), 7);
+        let f = SectionFilter::parse("1-5,12").unwrap();
+        assert!(f.selects(1));
+        assert!(f.selects(3));
+        assert!(f.selects(5));
+        assert!(f.selects(12));
+        assert!(!f.selects(6));
+        assert!(!f.selects(11));
+        assert!(!f.selects(13));
+        assert_eq!(f.max(), 12);
+        let f = SectionFilter::parse("3-3").unwrap();
+        assert!(f.selects(3));
+        assert!(!f.selects(2));
+        assert!(!f.selects(4));
+        assert_eq!(SectionFilter::parse("1-5,12").unwrap().spec(), "1-5,12");
+    }
+
+    #[test]
+    fn sections_flag_refuses() {
+        let syntax = |spec: &str| {
+            format!(
+                "-sections: '{spec}' is not a list of section numbers and ranges \
+                 (for example 7, 1-5 or 1-5,12)"
+            )
+        };
+        for spec in ["", "a", "1-", "-2", "1,,2", "1 - 2", "+3", "1-2-3", ","] {
+            assert_eq!(SectionFilter::parse(spec).unwrap_err(), syntax(spec), "{spec:?}");
+        }
+        assert_eq!(
+            SectionFilter::parse("0").unwrap_err(),
+            "-sections: section numbers start at 1"
+        );
+        assert_eq!(
+            SectionFilter::parse("0-3").unwrap_err(),
+            "-sections: section numbers start at 1"
+        );
+        assert_eq!(
+            SectionFilter::parse("5-3").unwrap_err(),
+            "-sections: range 5-3 runs backwards"
+        );
+    }
+
+    #[test]
+    fn sections_flag_out_of_range_is_refused() {
+        let mut c = Checks::new();
+        c.sections = Some(SectionFilter::parse("61").unwrap());
+        for i in 1..=60 {
+            c.section(&format!("s{i}"));
+        }
+        assert_eq!(
+            c.sections_in_range(),
+            Err("-sections names section 61 but this run has 60 sections".to_string())
+        );
+        let mut c = Checks::new();
+        c.sections = Some(SectionFilter::parse("60").unwrap());
+        for i in 1..=60 {
+            c.section(&format!("s{i}"));
+        }
+        assert_eq!(c.sections_in_range(), Ok(()));
+    }
+
+    /// The two source invariants: the one escaped banner opener left in the
+    /// file is the one `Checks::section` prints, and no banner is spelled
+    /// with a literal newline any more - so every banner is a `c.section`
+    /// call by construction, and a banner cannot dodge the filter.
+    #[test]
+    fn sections_flag_every_banner_is_a_section() {
+        let source = include_str!("validate.rs");
+        // Backslash, n, =, =, =, space - built from parts so this test's own
+        // literals do not count towards the count it asserts.
+        let opener: String = concat!("\\", "n=== ").to_string();
+        assert_eq!(
+            source.matches(&opener).count(),
+            1,
+            "exactly one escaped banner opener - the one in Checks::section"
+        );
+        for (n, line) in source.lines().enumerate() {
+            assert!(
+                !line.starts_with(concat!("==", "= ")),
+                "line {} spells a banner with a literal newline: {line}",
+                n + 1
+            );
+        }
+        let call: String = concat!("c.sec", "tion(").to_string();
+        assert!(
+            source.matches(&call).count() >= 60,
+            "all 60 sections open with a c.section call"
+        );
     }
 }

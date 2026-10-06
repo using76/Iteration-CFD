@@ -296,6 +296,24 @@ pub(crate) fn json_path(argv: &[String]) -> ofgpu::Result<Option<std::path::Path
     Ok(out)
 }
 
+/// The `-sections <spec>` flag: `None` when absent - the spec text exactly as
+/// given, parsed later by `SectionFilter::parse` once the usage error can be
+/// refused without touching the GPU. Given twice, the last wins; given
+/// without a value, the error is `next_arg`'s ("missing value after
+/// -sections").
+pub(crate) fn sections_arg(argv: &[String]) -> ofgpu::Result<Option<String>> {
+    let mut out = None;
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "-sections" {
+            out = Some(super::common::next_arg(argv, &mut i)?);
+        } else {
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
 /// The `-run-id <id>` flag, else `v_<compact startedAt>`: the ontology makes
 /// `gate + runId` a verdict's key, so the document always carries one.
 pub(crate) fn run_id(argv: &[String], started_ms: i64) -> ofgpu::Result<String> {
@@ -877,5 +895,51 @@ mod tests {
         assert_eq!(v["rows"][1]["gate"], "S99.1 Gate A");
         assert_eq!(v["rows"][2]["gate"], serde_json::Value::Null);
         assert_eq!(v["rows"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn sections_flag_arg_reads_the_flag() {
+        let v = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(sections_arg(&v(&["prog", "-sections", "7"])).unwrap(), Some("7".to_string()));
+        assert_eq!(
+            sections_arg(&v(&["prog", "-sections", "1", "-sections", "2-4"])).unwrap(),
+            Some("2-4".to_string())
+        );
+        assert_eq!(sections_arg(&v(&["prog", "-json", "x.json"])).unwrap(), None);
+        let err = sections_arg(&v(&["prog", "-sections"])).unwrap_err().to_string();
+        assert!(err.contains("missing value after -sections"), "{err}");
+    }
+
+    /// An unselected section serialises as any other skip row - same ten
+    /// keys, same nulls - so a downstream reader cannot tell a `-sections`
+    /// skip from a device skip by shape, only by `why`.
+    #[test]
+    fn sections_flag_skip_rows_serialise_as_skips() {
+        let mut c = Checks::new();
+        c.sections = Some(crate::SectionFilter::parse("2-3").unwrap());
+        for title in ["a", "b", "c", "d"] {
+            if c.section(title) {
+                c.check("x", 0.0, 1.0);
+            }
+        }
+        assert_eq!(c.rows.len(), 4);
+        let v = serde_json::to_value(&c.rows[0]).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "seq": 1,
+                "kind": "skip",
+                "what": "section 1: a",
+                "err": null,
+                "tol": null,
+                "ok": null,
+                "replayed": null,
+                "why": "not selected by -sections 2-3",
+                "nonFinite": null,
+                "gate": null
+            })
+        );
+        assert_eq!(c.rows[3].what, "section 4: d");
+        assert_eq!(c.rows[3].seq, 4);
     }
 }
