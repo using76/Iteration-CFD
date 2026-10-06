@@ -35768,6 +35768,7 @@ subsections, by unit:
 - 118.3 — setup guards and sub-round-off constants (F32-04, F32-05)
 - 118.4 — mixed-precision iterative refinement (F32-06)
 - 118.5 — delta-form transients (F32-08)
+- 118.6 — field, phi and restart I/O (F32-09)
 
 and, later, the local origin, moving geometry, parcels and chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
@@ -36005,6 +36006,96 @@ doi:10.1145/103162.103163**, open copy
 Algorithms, 2nd ed., SIAM, doi:10.1137/1.9780898718027**, §1.7 and §2.2. (Both
 DOIs were checked against Crossref on 2026-10-06 for §118.1.) And SPEC-LIT §2
 for every geometric formula, unchanged.
+
+No GPL-licensed source was consulted.
+
+### 118.6 Field, phi and restart I/O at f32 — nine digits, one rounding, a bitwise restart
+
+The text writer printed `phi` at seventeen significant digits in every
+build. Seventeen is the f64 round-trip count, so under `single` the file
+carried the seventeen-digit decimal of a value WIDENED from f32: the last
+eight of those digits are the tail of the binary expansion and carry no
+information an f32 can hold — they round-trip, but they say nothing about
+the value the f32 build holds. The unit this records is F32-09.
+
+**What changed.** `io::fields` gains a public `ROUND_TRIP_DIGITS` — 17 in
+the f64 build, 9 under `single`, the number of significant decimal digits
+that round-trips every finite value of the build's own `Scalar` — and
+`PHI_PRECISION` becomes it, so the f64 build's `PHI_PRECISION` is 17 exactly
+as before and its `fmt_g` has no clamp: **no byte of f64 output moves**.
+Under `single` ONLY, the `%g` formatter clamps its effective precision to
+`ROUND_TRIP_DIGITS`, whatever precision the caller asked for, so no field
+writer there prints more than nine significant digits — the writers at
+`writePrecision` 6 were already below the clamp, and
+`write_scalar_field_prec(.., 17, ..)` now answers with the nine digits that
+mean the float instead of seventeen. The reader is untouched: the tokenizer
+parses every number as `f64` and the field reader rounds ONCE to `Scalar`.
+The `.mcr` restart stays f64 on disk, and the `Scalar` <-> f64 seam the
+drivers used (`src/bin/common/mod.rs`'s five thin wrappers, whose names and
+signatures stay) moved into the library as `ofgpu::restart`'s
+`widen_scalars`/`widen_vectors`/`narrow_scalars`/`narrow_vectors`, so an
+integration test exercises the production seam: under `single` the widening
+is exact (every f32 is an f64) and the narrowing of such an f64 recovers the
+very f32, so a checkpoint restarts the f32 run bit for bit.
+
+**The error model.** Matula's in-and-out condition: a `p`-bit binary
+significand survives conversion to `m` significant decimal digits and back
+(to nearest) iff `10^(m−1) > 2^p`; `p = 24` gives `m = 9` and `p = 53` gives
+`m = 17` (Goldberg 1991, Theorem 15, states the f32 case: eight digits are
+not always enough, nine always are). The reader takes TWO roundings, decimal
+→ f64 → f32, so the theorem alone does not cover it. For a normal f32 `x`
+with `2^E ≤ |x| < 2^(E+1)`, the 9-digit decimal `d` satisfies
+`|d − x| ≤ 5·10⁻⁹|x| < 10⁻⁸·2^E`; the f64 parse moves it by at most
+`2⁻⁵³|d| < 2.3·10⁻¹⁶·2^E`; the nearest OTHER f32 is at least `2^(E−24)` away,
+so half that gap is `2^(E−25) ≈ 2.98·10⁻⁸·2^E`. Hence
+`|fl64(d) − x| < 1.0000003·10⁻⁸·2^E < 2^(E−25)` and the final
+round-to-nearest returns `x`. For a subnormal the spacing is the constant
+`2⁻¹⁴⁹` and `|d − x| < 5·10⁻⁹·2⁻¹²⁶ ≈ 0.042·2⁻¹⁴⁹`. At `Scalar::MAX` the
+decimal `3.40282347e+38` exceeds `MAX` by about `3.4·10²⁹`, far below the
+`2^103 ≈ 1.0·10³¹` that would round it to infinity. The restart is binary:
+`f64::from` is exact for every f32 and `as f32` of such an f64 is that f32.
+
+**The measurement.** `tests/f32_io.rs` — an integration test, because the
+library's own test target does not compile under `single`, and precision
+class D of docs/17 §5.1 rule 4 (discrete / bitwise: the SAME assertion in
+both builds) — runs four tests over one generator (SplitMix64's finaliser,
+already cited at §66.14, used only as a test-data generator) and one edge
+set (zeros of both signs, 0.1, one third, ±MAX, the smallest normal, the
+smallest subnormal, ε, and for every `k` in −30..=30 the power `2^k`, its
+predecessor and its successor). Test 1 writes a `phi` of 65 730 internal
+values plus 4 096 `inlet`, 194 `walls` and an `empty` patch, reads it back
+bit for bit, and checks every numeric token in the file: 70 020 values
+checked over 70 028 numeric tokens in both builds. Under `single` BEFORE
+this unit the longest token carried 17 significant digits (test 1 failed
+naming 17 vs 9, and test 2 failed on `PHI_PRECISION` 17 vs
+`ROUND_TRIP_DIGITS` 9); after it the file is 1 034 934 bytes, where the f64
+build's same file is 1 675 102 bytes — 38 % smaller for holding the same
+70 020 floats exactly. The f64 build passes before and after unchanged.
+Measured by the supervisor on 2026-10-07: in the f64 build `ofgpu-validate
+-sections 1-40` prints all 875 rows identical to `acffec7`
+(`tools/f64_identity.py rows`), and no `.cu` file changed. Under `single`,
+`-sections 10` prints its 77 rows identical to `acffec7`, "phi survives
+write/read bit for bit" at err 0 now from a nine-digit file; that
+section's "the reference flux is conservative to begin with" (4.657e-10
+against 1e-14) is the f32 face sum of the flux, not the file, and stays a
+round-off-class row for F32-13.
+
+**What it does not do.** The mesh hash is per build — it hashes the build's
+own `Scalar` bytes — so a checkpoint written by the f64 build is refused by
+a `single` run with the ordinary hash-mismatch error, and vice versa:
+cross-build restart is not offered. Drivers that hold time or `p0` in
+`Scalar` (e.g. `ofgpu-vof`'s `t += dt`) are restored to exactly what they
+held, not made more accurate — that is F32-08/F32-10 territory. Fields
+written at `writePrecision` 6 lose digits in both builds by design, and the
+cell-field writers keep their precision argument.
+
+Sources: **Matula, D. W. (1968), "In-and-out conversions", Communications of
+the ACM 11(1) 47-50, doi:10.1145/362851.362887** (checked against Crossref on
+2026-10-07); **Goldberg 1991** (as cited in §118.2, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html>, Theorem 15
+in the section "Binary to Decimal Conversion"); **IEEE Std 754-2008 §5.12.2**
+names 9 and 17 as the binary32 / binary64 round-trip digit counts (named,
+not quoted).
 
 No GPL-licensed source was consulted.
 

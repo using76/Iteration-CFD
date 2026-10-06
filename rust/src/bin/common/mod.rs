@@ -725,11 +725,16 @@ pub fn output_plan(json: Option<&LoweredCase>) -> Result<Option<OutputPlan>> {
 //
 // `ofgpu::restart` gives the format; every driver still has to say WHICH of
 // its fields go in, which is genuinely driver-specific (a buoyant run has
-// `k`/`epsilon`/`T`, a VOF run has `alpha`/`p_rgh`). What is NOT driver-
-// specific is the `Scalar`/`Vec3` <-> `f64` conversion at the seam, which is
-// only here so it is written once.
+// `k`/`epsilon`/`T`, a VOF run has `alpha`/`p_rgh`). The `Scalar`/`Vec3` <->
+// `f64` conversion at the seam now lives in `ofgpu::restart`
+// (`widen_scalars`/`widen_vectors`/`narrow_scalars`/`narrow_vectors`,
+// SPEC-LIT §118.6) so the integration test exercises the production seam;
+// these thin wrappers keep the drivers' call sites unchanged.
 
-use ofgpu::restart::{FieldKind, RestartData, RestartField};
+use ofgpu::restart::{
+    narrow_scalars, narrow_vectors, widen_scalars, widen_vectors, FieldKind, RestartData,
+    RestartField,
+};
 use ofgpu::Vec3;
 
 /// A `CellScalar` [`RestartField`] from a field's own `Scalar` buffers.
@@ -737,21 +742,18 @@ pub fn restart_scalar(name: &str, internal: &[Scalar], boundary: &[Scalar]) -> R
     RestartField {
         name: name.to_string(),
         kind: FieldKind::CellScalar,
-        internal: internal.iter().map(|&v| f64::from(v)).collect(),
-        boundary: boundary.iter().map(|&v| f64::from(v)).collect(),
+        internal: widen_scalars(internal),
+        boundary: widen_scalars(boundary),
     }
 }
 
 /// A `CellVector` [`RestartField`], xyz-interleaved.
 pub fn restart_vector(name: &str, internal: &[Vec3], boundary: &[Vec3]) -> RestartField {
-    let flat = |v: &[Vec3]| -> Vec<f64> {
-        v.iter().flat_map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)]).collect()
-    };
     RestartField {
         name: name.to_string(),
         kind: FieldKind::CellVector,
-        internal: flat(internal),
-        boundary: flat(boundary),
+        internal: widen_vectors(internal),
+        boundary: widen_vectors(boundary),
     }
 }
 
@@ -761,8 +763,8 @@ pub fn restart_surface(name: &str, internal: &[Scalar], boundary: &[Scalar]) -> 
     RestartField {
         name: name.to_string(),
         kind: FieldKind::SurfaceScalar,
-        internal: internal.iter().map(|&v| f64::from(v)).collect(),
-        boundary: boundary.iter().map(|&v| f64::from(v)).collect(),
+        internal: widen_scalars(internal),
+        boundary: widen_scalars(boundary),
     }
 }
 
@@ -770,15 +772,13 @@ pub fn restart_surface(name: &str, internal: &[Scalar], boundary: &[Scalar]) -> 
 /// this build's `Scalar` (identity under `f64`, a narrowing cast under
 /// `single`).
 pub fn from_restart_scalars(v: &[f64]) -> Vec<Scalar> {
-    v.iter().map(|&x| x as Scalar).collect()
+    narrow_scalars(v)
 }
 
 /// The inverse of [`restart_vector`] - de-interleave `f64` triples back into
 /// `Vec3`.
 pub fn from_restart_vectors(v: &[f64]) -> Vec<Vec3> {
-    v.chunks_exact(3)
-        .map(|c| Vec3::new(c[0] as Scalar, c[1] as Scalar, c[2] as Scalar))
-        .collect()
+    narrow_vectors(v)
 }
 
 /// The named field, or a named error - a restart file missing a field this

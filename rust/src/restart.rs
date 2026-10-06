@@ -81,6 +81,18 @@
 //! and is refused by the version check below rather than silently read with
 //! a wrong offset - the same reasoning [`mesh_hash`] mismatches are refused
 //! by.
+//!
+//! # The f32 build
+//!
+//! The file is f64 in both builds - `Scalar` never reaches the disk here.
+//! Under `single` each f32 widens to its f64 EXACTLY (every f32 is an f64),
+//! and narrowing such an f64 back with `as f32` returns the very f32, so a
+//! checkpoint restarts the f32 run bit for bit; the seam lives in
+//! [`widen_scalars`]/[`widen_vectors`]/[`narrow_scalars`]/[`narrow_vectors`]
+//! (SPEC-LIT 118.6). One thing this format deliberately does NOT offer is a
+//! cross-build restart: [`mesh_hash`] hashes the build's own `Scalar` bytes,
+//! so a checkpoint written by the f64 build is refused by a `single` run
+//! with the ordinary hash-mismatch error, and vice versa.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -88,6 +100,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result, IoContext};
 use crate::mesh::HostMesh;
+use crate::types::Vec3;
+use crate::Scalar;
 
 const MAGIC: &[u8; 8] = b"MCFDRSTR";
 const VERSION: u32 = 2;
@@ -436,6 +450,40 @@ pub fn read_restart(path: impl AsRef<Path>, expected_hash: u64) -> Result<Restar
         n_boundary,
         fields,
     })
+}
+
+// ==========================================================================
+//  The `Scalar` <-> f64 seam - SPEC-LIT 118.6
+// ==========================================================================
+
+/// `Scalar` values to the on-disk `f64` - exact in both builds (every f32 is
+/// an f64).
+pub fn widen_scalars(v: &[Scalar]) -> Vec<f64> {
+    v.iter().map(|&x| f64::from(x)).collect()
+}
+
+/// `Vec3` values to the on-disk xyz-interleaved `f64` triples - exact in
+/// both builds.
+pub fn widen_vectors(v: &[Vec3]) -> Vec<f64> {
+    v.iter()
+        .flat_map(|p| [f64::from(p.x), f64::from(p.y), f64::from(p.z)])
+        .collect()
+}
+
+/// The on-disk `f64` back to this build's `Scalar`: the identity in f64, ONE
+/// round-to-nearest under `single`. Narrowing the f64 that
+/// [`widen_scalars`] produced from an f32 returns that f32 bit for bit, so a
+/// single-build restart is bitwise (see the module doc's "The f32 build").
+pub fn narrow_scalars(v: &[f64]) -> Vec<Scalar> {
+    v.iter().map(|&x| x as Scalar).collect()
+}
+
+/// De-interleave `f64` triples into `Vec3`, each component rounded once
+/// (`chunks_exact(3)` semantics, as the drivers' helpers this replaces).
+pub fn narrow_vectors(v: &[f64]) -> Vec<Vec3> {
+    v.chunks_exact(3)
+        .map(|c| Vec3::new(c[0] as Scalar, c[1] as Scalar, c[2] as Scalar))
+        .collect()
 }
 
 // ==========================================================================
