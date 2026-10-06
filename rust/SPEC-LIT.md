@@ -26448,6 +26448,23 @@ D_i    = T_i n_i          the displacement vector, and the array the
                           retreat scales and the hanging nodes average (92.45)
 ```
 
+Face mode adds the height of the cell BEHIND the wall, because (92.45)'s
+`h_i` reads the wall face's EDGES and a sliver cut cell slips under every
+one of them - the shrink then pushes the wall point through a cell whose
+volume is going to zero, and the gate's G2 names it:
+
+```
+face mode:  H_i = min over the layer faces f carrying i of  V_own(f) / |Sf|
+            (V_own(f) the volume of f's owner cell on the INPUT mesh, §92.3's own volume)
+            T_i = min( T, medial_frac * m(i), cell_frac * h_i, cell_frac * H_i )               (92.45')
+```
+
+A point whose `T_i` then falls under `min_thickness * T` is anchored by the
+inner pass branch, as any thin point. On a flat wall of cubes `H_i` equals
+`h_i` - the owner height is the edge length - so (92.45') does not move a
+run that (92.45) already bounded; it binds only where the cell behind the
+wall is thinner than the wall face is wide.
+
 **The shrink.** The boundary moves inward by `D_i` and the interior takes the
 displacement as (92.29)'s extension takes the snap's, so the one cell behind
 the wall does not absorb all of it. The boundary values are FIXED — they are
@@ -26740,6 +26757,12 @@ face mode, INNER ladder (the shrunk mesh): (92.73) of run 2 amended - F, the loc
     freeze below replaces it behind the empty-F rule:
 face mode, INNER ladder, at a failure (after (92.66)):
     c_c = how many consecutive measurements of this ladder cell c has failed
+        - a measurement counts toward c_c only when it FOLLOWS a local step
+          of this ladder (a retreat or a terminate step); a measurement
+          after a (92.66) beta rung, and the round's first measurement
+          before any step, neither increments nor resets any c_c - a rung
+          moves the pull, not the points, so the cells it fails are the
+          cells the step after it will have to answer for
     a failing cell with c_c >= 2, or whose layer points all have D_i = 0, is FROZEN: every point of it,
         layer and interior, is held at d = 0 from then on (relax holds it as it holds an anchored point),
         closed under hanging parents (all parents, layer or not)

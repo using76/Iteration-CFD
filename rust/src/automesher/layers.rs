@@ -411,6 +411,14 @@ pub fn field(
             }
         }
     }
+    // (92.45') in face mode: the height of the cell BEHIND the wall - the
+    // owner cell's volume over the layer face's area, the smallest over the
+    // layer faces carrying the point. Patch mode's array stays at INFINITY
+    // and the limiter below stays bit for bit (92.45) as it was.
+    let hh = match spec.terminate {
+        LayerTerminate::Face => owner_heights(mesh, &faces)?,
+        LayerTerminate::Patch => vec![Scalar::INFINITY; n_points],
+    };
     let s_max = st.total / spec.medial_frac;
     let mut thickness = vec![0.0; n_points];
     let mut disp = vec![Vec3::ZERO; n_points];
@@ -424,7 +432,11 @@ pub fn field(
         } else {
             st.total
         };
-        let t_i = st.total.min(t_medial).min(spec.cell_frac * h[i]);
+        let t_i = st
+            .total
+            .min(t_medial)
+            .min(spec.cell_frac * h[i])
+            .min(spec.cell_frac * hh[i]);
         thickness[i] = t_i;
         disp[i] = normal[i] * t_i;
     }
@@ -438,6 +450,141 @@ pub fn field(
         disp,
         pinned,
     })
+}
+
+/// (92.45)'s face geometry, read the way `crate::mesh::geometry`'s own
+/// sweep reads it: `Sf` the vector sum of the fan triangles' normals about
+/// the vertex average, `Cf` their area-weighted centroid, the vertex
+/// average when the face is too small to weight by. That fn is private to
+/// the mesh module, and §92.3's volume is its reading, so this copy is its
+/// formula character for character.
+fn face_geometry_of(face: &[crate::Label], points: &[Vec3]) -> (Vec3, Vec3) {
+    const SMALL: Scalar = 1.0e-19;
+    let n = face.len();
+    if n == 0 {
+        return (Vec3::ZERO, Vec3::ZERO);
+    }
+    let mut x_avg = Vec3::ZERO;
+    for &v in face {
+        x_avg += points[v as usize];
+    }
+    x_avg = x_avg / n as Scalar;
+    if n < 3 {
+        return (Vec3::ZERO, x_avg);
+    }
+    let mut sf = Vec3::ZERO;
+    let mut cf = Vec3::ZERO;
+    let mut area: Scalar = 0.0;
+    for i in 0..n {
+        let a = points[face[i] as usize];
+        let b = points[face[(i + 1) % n] as usize];
+        let t_n = (a - x_avg).cross(b - x_avg);
+        let t_c = (x_avg + a + b) / 3.0;
+        let t_a = t_n.mag() * 0.5;
+        sf += t_n * 0.5;
+        cf += t_c * t_a;
+        area += t_a;
+    }
+    if area > SMALL {
+        (sf, cf / area)
+    } else {
+        (sf, x_avg)
+    }
+}
+
+/// (92.45')'s face-mode heights: per point, the smallest owner-cell height
+/// `V_own(f) / |Sf|` over the layer faces `faces` carrying it, INFINITY off
+/// them. `V_own` is §92.3's own volume - the pyramid decomposition whose
+/// apex is the mean of the cell's face centroids - of the owner cell on the
+/// INPUT mesh, because (92.45)'s `h_i` reads the wall face's EDGES and a
+/// sliver cut cell slips under every one of them: it is the height of the
+/// cell BEHIND the wall that bounds how far the wall may move.
+fn owner_heights(mesh: &PolyMeshRaw, faces: &[usize]) -> Result<Vec<Scalar>> {
+    let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+    let mut n_cells = 0usize;
+    for &o in &mesh.owner {
+        n_cells = n_cells.max(o as usize + 1);
+    }
+    for &nb in &mesh.neighbour {
+        n_cells = n_cells.max(nb as usize + 1);
+    }
+    // Only the owners of layer faces are wanted, so the sweep below
+    // measures a face only when one of its cells is theirs - the near-wall
+    // faces, not the mesh.
+    let mut wanted = vec![false; n_cells];
+    for &f in faces {
+        wanted[mesh.owner[f] as usize] = true;
+    }
+    // The apex pass: the mean of the cell's face centroids.
+    let mut apex = vec![Vec3::ZERO; n_cells];
+    let mut n_cell_faces = vec![0u32; n_cells];
+    for f in 0..mesh.faces.len() {
+        let internal = f < n_internal;
+        let own = mesh.owner[f] as usize;
+        let nbr = if internal {
+            mesh.neighbour[f] as usize
+        } else {
+            own
+        };
+        if !wanted[own] && !(internal && wanted[nbr]) {
+            continue;
+        }
+        let (_, cf) = face_geometry_of(&mesh.faces[f], &mesh.points);
+        if wanted[own] {
+            apex[own] += cf;
+            n_cell_faces[own] += 1;
+        }
+        if internal && wanted[nbr] {
+            apex[nbr] += cf;
+            n_cell_faces[nbr] += 1;
+        }
+    }
+    for c in 0..n_cells {
+        if n_cell_faces[c] > 0 {
+            apex[c] = apex[c] / n_cell_faces[c] as Scalar;
+        }
+    }
+    // The volume pass: V = (1/3) sum_f (s Sf) . (Cf - apex), the owner at
+    // +Sf and the neighbour at -Sf, exactly the mesh module's decomposition.
+    let mut vol = vec![0.0; n_cells];
+    for f in 0..mesh.faces.len() {
+        let internal = f < n_internal;
+        let own = mesh.owner[f] as usize;
+        let nbr = if internal {
+            mesh.neighbour[f] as usize
+        } else {
+            own
+        };
+        if !wanted[own] && !(internal && wanted[nbr]) {
+            continue;
+        }
+        let (sf, cf) = face_geometry_of(&mesh.faces[f], &mesh.points);
+        if wanted[own] {
+            vol[own] += sf.dot(cf - apex[own]) / 3.0;
+        }
+        if internal && wanted[nbr] {
+            vol[nbr] -= sf.dot(cf - apex[nbr]) / 3.0;
+        }
+    }
+    // The heights, and the smallest over each point's layer faces. A face
+    // with no area sets no bound - its height is not a length, and the
+    // faces around its points still are.
+    let mut hh = vec![Scalar::INFINITY; mesh.points.len()];
+    for &f in faces {
+        let (sf, _) = face_geometry_of(&mesh.faces[f], &mesh.points);
+        let a = sf.mag();
+        if !(a > 0.0) {
+            continue;
+        }
+        let height = vol[mesh.owner[f] as usize] / a;
+        for &p in &mesh.faces[f] {
+            let p = p as usize;
+            if height < hh[p] {
+                hh[p] = height;
+            }
+        }
+    }
+    Ok(hh)
 }
 
 /// The no-layers field: per-point arrays of the right length, nothing on L.
@@ -1150,6 +1297,26 @@ fn close_under_hanging(
     fset.dedup();
 }
 
+/// (92.73) amended: the freeze's consecutive-failure counts move only at a
+/// failed measurement that FOLLOWS a local step - a retreat or terminate
+/// step of this ladder. A measurement after a (92.66) beta rung, and the
+/// round's first measurement before any step, neither increments nor resets
+/// a count: a rung moves the pull, not the points, so the cells it fails
+/// are the cells the step after it will have to answer for, not failures a
+/// freeze may hold them for.
+fn count_cell_failures(counts: &mut [usize], flags: &[bool], post_step: bool) {
+    if !post_step {
+        return;
+    }
+    for (c, &bad) in flags.iter().enumerate() {
+        if bad {
+            counts[c] += 1;
+        } else {
+            counts[c] = 0;
+        }
+    }
+}
+
 /// (92.73) amended: the frozen point set - the cells' points, closed under
 /// "a hanging node in the set adds BOTH its parents", recursively, layer or
 /// not: a frozen cell is held whole, interior points included, so (92.46)'s
@@ -1407,6 +1574,11 @@ fn shrink_on(
         // point, whether a freeze already holds it. Untouched in patch mode.
         let mut cell_fails = vec![0usize; cell_points.len()];
         let mut frozen = vec![false; n_points];
+        // (92.73) amended: did the measurement in front of the ladder FOLLOW
+        // a local step of this ladder - a retreat or terminate step? A beta
+        // rung's measurement, and the round's first, follow nothing, and
+        // they leave the freeze's counts as they found them.
+        let mut post_step = false;
         let limit = spec.min_thickness * st.total;
         loop {
             let d = relax(&f, &all_nbrs, &is_b, &hanging, spec, &rs, &mesh.points, &beta, &anchored);
@@ -1418,9 +1590,13 @@ fn shrink_on(
             let gates = failing_gates(&rep);
             if rep.passed() && face_mode {
                 // (92.73) amended: a passed measurement is no cell failing -
-                // the consecutive-failure counts start over.
-                for n in cell_fails.iter_mut() {
-                    *n = 0;
+                // the consecutive-failure counts start over - but like the
+                // failure counts, only a measurement that follows a local
+                // step touches them.
+                if post_step {
+                    for n in cell_fails.iter_mut() {
+                        *n = 0;
+                    }
                 }
                 // (92.73), at a pass: a point the relaxation left at zero is
                 // ANCHORED, never a give-up - the faces around it taper in
@@ -1482,6 +1658,7 @@ fn shrink_on(
                     e.terminate_points = fset.len();
                     ladder.push(e);
                     steps += 1;
+                    post_step = true;
                     continue;
                 }
                 let mut e = LadderEntry::new(
@@ -1554,18 +1731,16 @@ fn shrink_on(
                 }
                 break;
             }
-            // (92.73) amended: the consecutive-failure counts update at every
-            // failed measurement, the beta rungs included - the freeze below
-            // reads them. A cell not named this measurement starts over.
+            // (92.73) amended: the consecutive-failure counts update at a
+            // failed measurement that FOLLOWS a local step of this ladder -
+            // a retreat or terminate step - and a cell not named by it
+            // starts over. A measurement after a (92.66) beta rung, and the
+            // round's first measurement, touch nothing: the freeze would
+            // otherwise take every cell the rungs had named before the
+            // first step could answer them.
             let flags = failing_cell_flags(&rep, mesh, n_internal, cell_points.len());
             if face_mode {
-                for (c, &bad) in flags.iter().enumerate() {
-                    if bad {
-                        cell_fails[c] += 1;
-                    } else {
-                        cell_fails[c] = 0;
-                    }
-                }
+                count_cell_failures(&mut cell_fails, &flags, post_step);
             }
             // (92.66): before any give-up check or halving, a failure whose
             // failing cells carry a live re-seat point takes the pull back
@@ -1586,6 +1761,9 @@ fn shrink_on(
                 e.beta_points = jf.len();
                 ladder.push(e);
                 beta_rungs += 1;
+                // A rung is no step: the measurement after it follows
+                // nothing, and the freeze's counts hold still for it.
+                post_step = false;
                 continue;
             }
             let fail_pts = failing_points(&rep, mesh, n_internal, &f.is_layer, &cell_points);
@@ -1654,6 +1832,8 @@ fn shrink_on(
                         e.beta_rung = beta_rungs;
                         e.beta_points = jf.len();
                         ladder.push(e);
+                        // A rung is no step, the pull-to-zero either.
+                        post_step = false;
                         continue;
                     }
                     // With no such point the freeze answers in run 5's place:
@@ -1769,6 +1949,7 @@ fn shrink_on(
                     ladder.push(e);
                 }
                 steps += 1;
+                post_step = true;
                 continue;
             }
             if halvings >= spec.retreat_limit {
@@ -4173,6 +4354,28 @@ pub(crate) mod tests {
         );
     }
 
+    /// (92.73) amended: the freeze's consecutive-failure counts move only at
+    /// a measurement that FOLLOWS a local step. Three (92.66) beta-rung
+    /// measurements that name cell 0 leave it at zero - a rung moves the
+    /// pull, not the points, so the cells it fails are not a step's
+    /// failure - and the first post-step measurement that names it puts it
+    /// at ONE: under the freeze's two, so the cell is not frozen.
+    #[test]
+    fn beta_rungs_do_not_count_toward_a_freeze() {
+        let mut counts = vec![0usize; 2];
+        let cell0_fails = [true, false];
+        for _ in 0..3 {
+            count_cell_failures(&mut counts, &cell0_fails, false);
+        }
+        assert_eq!(counts[0], 0, "a beta rung neither counts nor resets");
+        count_cell_failures(&mut counts, &cell0_fails, true);
+        assert_eq!(counts[0], 1, "one post-step failure");
+        assert!(counts[0] < 2, "cell 0 froze at its first counted failure");
+        // A post-step measurement the cell passes still starts it over.
+        count_cell_failures(&mut counts, &[false, true], true);
+        assert_eq!(counts[0], 0);
+    }
+
     #[test]
     fn the_module_doc_ends_with_the_provenance_line() {
         let src = include_str!("layers.rs");
@@ -4645,6 +4848,47 @@ pub(crate) mod tests {
             .copied()
             .max()
             .map_or(0, |x| x as usize + 1)
+    }
+
+    /// (92.45')'s owner heights: per point the smallest owner-cell height
+    /// `V_own / |Sf|` over the layer faces carrying it, INFINITY off them.
+    /// On the castellated cube every owner cell of the cube patch is an
+    /// exact 0.5 m cube, so every cube layer point reads `V/A` =
+    /// 0.125 / 0.25 = 0.5 to 1e-12 - and there the owner height EQUALS
+    /// (92.45)'s shortest edge, which is why the face-mode run of
+    /// `face_mode_with_nothing_anchored_is_patch_mode` stays bit for bit.
+    #[test]
+    fn the_owner_height_limits_a_point_over_a_flat_cell() {
+        let (_surf, mesh) = castellated_cube_case();
+        let spec = cube_layers(0.02);
+        let patches = resolve_patches(&mesh, &spec).expect("patches");
+        let n_internal = mesh.neighbour.len().min(mesh.faces.len());
+        let mut faces = Vec::new();
+        for &p in &patches {
+            let patch = &mesh.patches[p];
+            for j in 0..patch.size {
+                let f = n_internal + patch.start + j;
+                if f < mesh.faces.len() {
+                    faces.push(f);
+                }
+            }
+        }
+        assert_eq!(faces.len(), 54, "the 3x3 faces of the cube's six walls");
+        let hh = owner_heights(&mesh, &faces).expect("heights");
+        assert_eq!(hh.len(), mesh.points.len());
+        let mut n_pts = 0usize;
+        for (i, &hh_i) in hh.iter().enumerate() {
+            if hh_i.is_finite() {
+                n_pts += 1;
+                assert!(
+                    (hh_i - 0.5).abs() <= 1e-12,
+                    "H[{i}] = {hh_i}, want 0.5"
+                );
+            }
+        }
+        assert!(n_pts > 0, "no layer point carried an owner height");
+        // Off the layer faces the helper sets no bound at all.
+        assert!(hh.iter().filter(|h| h.is_infinite()).count() > 0);
     }
 
     /// (92.70)-(92.72) on the castellated cube: one anchored point rings its
