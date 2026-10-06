@@ -33,6 +33,7 @@ use crate::error::{Error, Result};
 use crate::io::polymesh::{check_patch_name, PolyMeshRaw};
 use crate::surface::classify::classify_points;
 use crate::surface::{SoupTri, Surface, TriIndex};
+use crate::types::{to_vec3, DVec3};
 use crate::{Scalar, Vec3};
 
 use super::octree::{Background, Octree};
@@ -400,7 +401,7 @@ fn pinch_sites(
             }
             let comps = star_components(&star, cell_faces, &full.owner, &full.neighbour, n_int);
             if comps.len() >= 2 {
-                let (pa, pb) = (full.points[a], full.points[b]);
+                let (pa, pb) = (to_vec3(full.points[a]), to_vec3(full.points[b]));
                 sites.push(PinchSite {
                     mid: Vec3::new(
                         0.5 * (pa.x + pb.x),
@@ -1092,11 +1093,13 @@ pub fn castellate(
     })
 }
 
-/// A face's point average - (92.26)'s `x_f`.
-fn face_centre(points: &[Vec3], ps: &[crate::Label]) -> Vec3 {
+/// A face's point average - (92.26)'s `x_f`. The points are the
+/// `PolyMeshRaw`'s f64 ones (SPEC-LIT §118.2); each is read through
+/// `to_vec3`, so the average is the `Scalar` average it always was.
+fn face_centre(points: &[DVec3], ps: &[crate::Label]) -> Vec3 {
     let mut x = [0.0 as Scalar; 3];
     for p in ps {
-        let q = points[*p as usize];
+        let q = to_vec3(points[*p as usize]);
         x[0] += q.x;
         x[1] += q.y;
         x[2] += q.z;

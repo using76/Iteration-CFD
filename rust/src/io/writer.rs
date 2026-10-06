@@ -185,9 +185,10 @@ impl ResultWriter for FoamWriter {
                     crate::io::fields::write_vector_field(&path, raw, ctx.name)?;
                 }
                 FoamPayload::Surface(raw) => {
-                    // `phi` is written at round-trip precision - see
-                    // `fields::PHI_PRECISION` - which `write_surface_scalar_field`
-                    // already selects; nothing here overrides it.
+                    // `phi` is written at this build's round-trip precision -
+                    // see `fields::PHI_PRECISION` (=`ROUND_TRIP_DIGITS`) -
+                    // which `write_surface_scalar_field` already selects;
+                    // nothing here overrides it.
                     crate::io::fields::write_surface_scalar_field(&path, raw, ctx.name)?;
                 }
             }

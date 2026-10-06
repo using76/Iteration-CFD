@@ -311,12 +311,18 @@ fn size_mismatch(what: &str, n: usize, got: usize) -> Error {
 /// expands a `uniform` entry to that length and rejects a list of the wrong
 /// size. `phi` is read through here too, with `n_cells` set to the internal
 /// face count.
+///
+/// Every number in the file is parsed as `f64` and rounded ONCE to `Scalar`,
+/// so a value this writer wrote at `ROUND_TRIP_DIGITS` comes back bit for
+/// bit (SPEC-LIT 118.6).
 pub fn read_scalar_field(path: &Path, n_cells: usize) -> Result<RawScalarField> {
     let text = slurp(path)?;
     parse_scalar_field(&text, &path.display().to_string(), base_name(path), n_cells)
 }
 
-/// Read a `volVectorField`. See [`read_scalar_field`] for `n_cells`.
+/// Read a `volVectorField`. See [`read_scalar_field`] for `n_cells` and for
+/// the one-rounding parse: every number is taken as `f64` and rounded once
+/// to `Scalar` (SPEC-LIT 118.6).
 pub fn read_vector_field(path: &Path, n_cells: usize) -> Result<RawVectorField> {
     let text = slurp(path)?;
     parse_vector_field(&text, &path.display().to_string(), base_name(path), n_cells)
@@ -824,6 +830,21 @@ pub fn write_surface_scalar_field(path: &Path, f: &RawScalarField, time: &str) -
     write_surface_scalar_field_prec(path, f, time, PHI_PRECISION, true)
 }
 
+/// Significant decimal digits that round-trip every finite `Scalar` of this
+/// build: 17 here (f64), 9 under `single` (f32).
+///
+/// Matula's in-and-out condition: a `p`-bit binary significand survives
+/// conversion to `m` significant decimal digits and back (to nearest) iff
+/// `10^(m-1) > 2^p`, so `p = 53` gives `m = 17` and `p = 24` gives `m = 9`
+/// (SPEC-LIT 118.6). Seventeen is what [`PHI_PRECISION`] already is in the
+/// f64 build, so this build's bytes do not move; under `single`, eight of
+/// the seventeen digits a widened f32 prints are the tail of its binary
+/// expansion and carry no information an f32 can hold.
+#[cfg(not(feature = "single"))]
+pub const ROUND_TRIP_DIGITS: usize = 17;
+#[cfg(feature = "single")]
+pub const ROUND_TRIP_DIGITS: usize = 9;
+
 /// *DESIGN.* `phi` is written at ROUND-TRIP precision, not at `controlDict`'s
 /// `writePrecision`, and it is the only field in this solver that is.
 ///
@@ -834,10 +855,11 @@ pub fn write_surface_scalar_field(path: &Path, f: &RawScalarField, time: &str) -
 /// to six significant digits it stops holding at the seventh, so a run
 /// restarted from a six-digit `phi` begins with a continuity error of about
 /// `1e-6 |phi|` per cell that the first pressure solve then has to remove.
-/// Seventeen digits is what `f64` round-trips through decimal exactly, so the
-/// flux read back is the flux written, bit for bit, and the restart's first
-/// pressure residual is the one the run that wrote it would have seen.
-pub const PHI_PRECISION: usize = 17;
+/// `ROUND_TRIP_DIGITS` digits (17 for f64, 9 for f32 - SPEC-LIT 118.6)
+/// round-trip through decimal exactly, so the flux read back is the flux
+/// written, bit for bit, and the restart's first pressure residual is the
+/// one the run that wrote it would have seen.
+pub const PHI_PRECISION: usize = ROUND_TRIP_DIGITS;
 
 /// As [`write_surface_scalar_field`], with `controlDict`'s `writePrecision`.
 pub fn write_surface_scalar_field_prec(
@@ -1263,6 +1285,11 @@ fn write_all(path: &Path, text: &str) -> Result<()> {
 /// `0.00001` (and a denormal in full), while `{:.6}` is six *decimals*, not
 /// six significant digits - the first bloats the file, the second silently
 /// flattens small values to zero.
+///
+/// Under `single` the effective precision never exceeds
+/// [`ROUND_TRIP_DIGITS`], whatever the caller asked for: digits past nine
+/// are the binary expansion's tail of a widened f32, not information
+/// (SPEC-LIT 118.6). In the f64 build there is no clamp at all.
 fn fmt_g(v: Scalar, precision: usize) -> String {
     let x = v as f64;
     if x.is_nan() {
@@ -1272,7 +1299,10 @@ fn fmt_g(v: Scalar, precision: usize) -> String {
         return if x < 0.0 { "-inf" } else { "inf" }.to_string();
     }
 
+    #[cfg(not(feature = "single"))]
     let p = precision.max(1);
+    #[cfg(feature = "single")]
+    let p = precision.max(1).min(ROUND_TRIP_DIGITS);
 
     // The exponent AFTER rounding to p significant digits is what picks the
     // style, and that is exactly what `{:e}` reports.

@@ -119,8 +119,8 @@ pub use device::{cfg_for, DevBuf, Gpu, Graph, KernelSet, BLOCK};
 pub use error::{Error, Result};
 pub use field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 pub use ldu::{CsrPattern, GpuCsrMatrix, GpuLduMatrix};
-pub use mesh::{GpuMesh, HostMesh, MeshReport, PatchInfo, PatchKind};
-pub use types::{Tensor, Vec3};
+pub use mesh::{GpuMesh, Geom64, HostMesh, MeshReport, PatchInfo, PatchKind};
+pub use types::{DVec3, Tensor, Vec3};
 
 /// Compiled device code for every kernel unit, embedded at build time.
 ///

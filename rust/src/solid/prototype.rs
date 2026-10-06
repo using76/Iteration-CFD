@@ -146,6 +146,7 @@ use crate::reference::{
     add_boundary_contributions, amul, fvc_grad_vector, fvm_laplacian,
     fvm_laplacian_non_orth_correction, is_empty_face, CpuLdu, CpuScalarBc,
 };
+use crate::types::{to_dvec3, to_vec3};
 use crate::{Result, Scalar, Tensor, Vec3};
 use crate::fv::SnGradScheme;
 
@@ -281,16 +282,17 @@ pub fn jittered_block(n: usize, amplitude: Scalar) -> Result<HostMesh> {
     let h = 1.0 / (n as Scalar);
     let interior = |v: Scalar| v > 1e-12 && v < 1.0 - 1e-12;
     for p in raw.points.iter_mut() {
-        if !(interior(p.x) && interior(p.y) && interior(p.z)) {
+        let q = to_vec3(*p);
+        if !(interior(q.x) && interior(q.y) && interior(q.z)) {
             continue;
         }
-        let (a, b, c) = (7.0 * p.x, 5.0 * p.y, 3.0 * p.z);
+        let (a, b, c) = (7.0 * q.x, 5.0 * q.y, 3.0 * q.z);
         let d = Vec3::new(
             (a + 2.0 * b).sin() * c.cos(),
             (b + 2.0 * c).sin() * a.cos(),
             (c + 2.0 * a).sin() * b.cos(),
         );
-        *p += d * (amplitude * h);
+        *p = to_dvec3(q + d * (amplitude * h));
     }
     build_host_mesh(&raw)
 }

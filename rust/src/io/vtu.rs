@@ -61,6 +61,7 @@ use crate::error::{Error, IoContext, Result};
 use crate::io::output_types::{FieldValues, OutputField};
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::HostMesh;
+use crate::types::to_vec3;
 use crate::{Label, Scalar, Vec3};
 
 const VTK_POLYHEDRON: u8 = 42;
@@ -586,7 +587,7 @@ fn build_geometry_from_raw(raw: &PolyMeshRaw) -> Result<Geometry> {
     let cell_faces = raw_cell_faces(raw, n_cells)?;
 
     let mut geo = Geometry {
-        points: raw.points.clone(),
+        points: raw.points.iter().map(|&p| to_vec3(p)).collect(),
         connectivity: Vec::new(),
         offsets: Vec::with_capacity(n_cells),
         types: vec![VTK_POLYHEDRON; n_cells],

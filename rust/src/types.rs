@@ -17,6 +17,12 @@
 //! This is not arbitrary - it falls out of the Gauss gradient accumulating
 //! `Sf (x) Uf`, where the area vector supplies the first index.
 //!
+//! [`DVec3`] is the HOST-ONLY f64 point (SPEC-LIT §118): in the f64 build it
+//! is an alias of `Vec3`, so nothing there changes; under `single` it is its
+//! own struct of `f64` components, the precision the host mesh geometry sweep
+//! computes in before it rounds once into the `Scalar` arrays. It never goes
+//! to the device, so it is not `#[repr(C)]` and not `DeviceRepr`.
+//!
 //! Provenance: ORIGINAL - `Vec3`/`Tensor` and their `#[repr(C)]` mirrors of the
 //! device structs, with the layout test below. No external source.
 //! `PROVENANCE.md`, *GPU plumbing and tooling - original*. No GPL-licensed
@@ -179,6 +185,221 @@ impl SubAssign for Vec3 {
 impl std::fmt::Display for Vec3 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "({} {} {})", self.x, self.y, self.z)
+    }
+}
+
+// ==========================================================================
+//  DVec3 - the host-only f64 point (SPEC-LIT §118)
+// ==========================================================================
+
+/// A point the host geometry reads at full precision (SPEC-LIT §118.2): in
+/// the f64 build it IS [`Vec3`], so nothing there moves; under `single` it is
+/// its own `f64` struct, and `mesh::geometry::compute` does ALL its
+/// arithmetic in it before rounding once into the `Scalar` arrays. It never
+/// goes to the device, so it is not `#[repr(C)]` and not `DeviceRepr`.
+#[cfg(not(feature = "single"))]
+pub type DVec3 = Vec3;
+
+#[cfg(feature = "single")]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct DVec3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+#[cfg(feature = "single")]
+impl DVec3 {
+    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
+
+    #[inline]
+    pub const fn new(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
+
+    #[inline]
+    pub fn dot(self, o: Self) -> f64 {
+        self.x * o.x + self.y * o.y + self.z * o.z
+    }
+
+    #[inline]
+    pub fn cross(self, o: Self) -> Self {
+        Self::new(
+            self.y * o.z - self.z * o.y,
+            self.z * o.x - self.x * o.z,
+            self.x * o.y - self.y * o.x,
+        )
+    }
+
+    #[inline]
+    pub fn mag_sqr(self) -> f64 {
+        self.dot(self)
+    }
+
+    #[inline]
+    pub fn mag(self) -> f64 {
+        self.mag_sqr().sqrt()
+    }
+
+    /// Unit vector, or zero when the magnitude underflows - `Vec3`'s
+    /// stabilisation (SPEC-LIT.md section 2.3), at f64.
+    #[inline]
+    pub fn normalised(self) -> Self {
+        let m = self.mag();
+        if m > f64::MIN_POSITIVE {
+            self / m
+        } else {
+            Self::ZERO
+        }
+    }
+
+    #[inline]
+    pub fn cmpt_min(self, o: Self) -> Self {
+        Self::new(self.x.min(o.x), self.y.min(o.y), self.z.min(o.z))
+    }
+
+    #[inline]
+    pub fn cmpt_max(self, o: Self) -> Self {
+        Self::new(self.x.max(o.x), self.y.max(o.y), self.z.max(o.z))
+    }
+
+    #[inline]
+    pub fn component(self, i: usize) -> f64 {
+        match i {
+            0 => self.x,
+            1 => self.y,
+            _ => self.z,
+        }
+    }
+}
+
+#[cfg(feature = "single")]
+impl Add for DVec3 {
+    type Output = Self;
+    #[inline]
+    fn add(self, o: Self) -> Self {
+        Self::new(self.x + o.x, self.y + o.y, self.z + o.z)
+    }
+}
+
+#[cfg(feature = "single")]
+impl Sub for DVec3 {
+    type Output = Self;
+    #[inline]
+    fn sub(self, o: Self) -> Self {
+        Self::new(self.x - o.x, self.y - o.y, self.z - o.z)
+    }
+}
+
+#[cfg(feature = "single")]
+impl Neg for DVec3 {
+    type Output = Self;
+    #[inline]
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y, -self.z)
+    }
+}
+
+#[cfg(feature = "single")]
+impl Mul<f64> for DVec3 {
+    type Output = Self;
+    #[inline]
+    fn mul(self, s: f64) -> Self {
+        Self::new(self.x * s, self.y * s, self.z * s)
+    }
+}
+
+#[cfg(feature = "single")]
+impl Mul<DVec3> for f64 {
+    type Output = DVec3;
+    #[inline]
+    fn mul(self, v: DVec3) -> DVec3 {
+        v * self
+    }
+}
+
+#[cfg(feature = "single")]
+impl Div<f64> for DVec3 {
+    type Output = Self;
+    #[inline]
+    fn div(self, s: f64) -> Self {
+        Self::new(self.x / s, self.y / s, self.z / s)
+    }
+}
+
+#[cfg(feature = "single")]
+impl AddAssign for DVec3 {
+    #[inline]
+    fn add_assign(&mut self, o: Self) {
+        *self = *self + o;
+    }
+}
+
+#[cfg(feature = "single")]
+impl SubAssign for DVec3 {
+    #[inline]
+    fn sub_assign(&mut self, o: Self) {
+        *self = *self - o;
+    }
+}
+
+#[cfg(feature = "single")]
+impl std::fmt::Display for DVec3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({} {} {})", self.x, self.y, self.z)
+    }
+}
+
+/// A point the host geometry can read: widened to f64 on read (SPEC-LIT
+/// §118.2). `geometry::compute` is generic over it, so a caller that holds
+/// `Vec3` and one that holds `DVec3` share the same sweep.
+pub trait GeomPoint: Copy {
+    /// The point at f64, exactly: the identity in the f64 build, a widening
+    /// under `single`.
+    fn to_dvec3(self) -> DVec3;
+}
+
+impl GeomPoint for Vec3 {
+    #[inline]
+    fn to_dvec3(self) -> DVec3 {
+        to_dvec3(self)
+    }
+}
+
+#[cfg(feature = "single")]
+impl GeomPoint for DVec3 {
+    #[inline]
+    fn to_dvec3(self) -> DVec3 {
+        self
+    }
+}
+
+/// Round a host-geometry value into `Scalar` ONCE (SPEC-LIT §118.2): the
+/// identity in the f64 build, each component `as f32` (round to nearest)
+/// under `single`.
+#[inline]
+pub fn to_vec3(p: DVec3) -> Vec3 {
+    #[cfg(feature = "single")]
+    {
+        Vec3::new(p.x as f32, p.y as f32, p.z as f32)
+    }
+    #[cfg(not(feature = "single"))]
+    {
+        p
+    }
+}
+
+/// Widen a `Scalar` point to f64 EXACTLY (SPEC-LIT §118.2): the identity in
+/// the f64 build, `f64::from` per component under `single`.
+#[inline]
+pub fn to_dvec3(v: Vec3) -> DVec3 {
+    #[cfg(feature = "single")]
+    {
+        DVec3::new(f64::from(v.x), f64::from(v.y), f64::from(v.z))
+    }
+    #[cfg(not(feature = "single"))]
+    {
+        v
     }
 }
 
@@ -359,6 +580,31 @@ mod tests {
         let x = Vec3::new(1.0, 0.0, 0.0);
         let y = Vec3::new(0.0, 1.0, 0.0);
         assert_eq!(x.cross(y), Vec3::new(0.0, 0.0, 1.0));
+    }
+
+    /// SPEC-LIT §118.2: a `Scalar` point widens exactly, and the f64 host
+    /// geometry rounds back into `Scalar` ONCE - the round trip through the
+    /// two conversions is one rounding, and it is lossless on a `Scalar`
+    /// value.
+    #[test]
+    fn dvec3_conversions_round_once() {
+        let p = DVec3::new(0.1, -2000.000000123, 1.0e-30);
+        let want = DVec3::new(
+            f64::from(0.1 as Scalar),
+            f64::from(-2000.000000123 as Scalar),
+            f64::from(1.0e-30 as Scalar),
+        );
+        let got = to_dvec3(to_vec3(p));
+        assert_eq!(got.x.to_bits(), want.x.to_bits());
+        assert_eq!(got.y.to_bits(), want.y.to_bits());
+        assert_eq!(got.z.to_bits(), want.z.to_bits());
+
+        // A value that IS a Scalar comes back unchanged, bitwise.
+        let v = Vec3::new(0.1, 0.7, -3.5);
+        let back = to_vec3(to_dvec3(v));
+        assert_eq!(back.x.to_bits(), v.x.to_bits());
+        assert_eq!(back.y.to_bits(), v.y.to_bits());
+        assert_eq!(back.z.to_bits(), v.z.to_bits());
     }
 
     /// SPEC-LIT 112.1: the floor and its large twin mean something in the

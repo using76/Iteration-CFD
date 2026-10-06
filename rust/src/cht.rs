@@ -93,6 +93,7 @@ use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::timescheme::{self, DdtCoeffs, TimeKernels};
+use crate::types::DVec3;
 use crate::{Acc, Label, Scalar, Tensor, Vec3};
 
 // ==========================================================================
@@ -554,8 +555,9 @@ pub struct ThermalMesh {
     /// The concatenated point set, region by region - empty until
     /// [`Self::attach_points`] fills it. `HostMesh` keeps no points
     /// (SPEC-LIT §49.3), so the raw geometry is attached by the caller
-    /// instead of being grown onto the mesh.
-    pub points: Vec<Vec3>,
+    /// instead of being grown onto the mesh. The raws' own points, in f64
+    /// (SPEC-LIT §118.2).
+    pub points: Vec<DVec3>,
     /// The concatenated face polygons, in §47.4's layout - every region's
     /// internal faces first, then every region's boundary faces - empty
     /// until [`Self::attach_points`] fills it.

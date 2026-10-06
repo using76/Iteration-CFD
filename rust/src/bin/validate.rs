@@ -100,6 +100,7 @@ use ofgpu::ldu_ops::{
     add_boundary_contributions, amul, csr_fill, relax, set_fixed_cells, set_values, LduKernels,
 };
 use ofgpu::mesh::{HostMesh, PatchKind};
+use ofgpu::DVec3;
 use ofgpu::pressure::fft::cufft_available;
 use ofgpu::pressure::{FftBackend, PbicgstabBackend, PressureBackend, SystemProbe};
 use ofgpu::rheology::{herschel_bulkley_channel_u, KinematicCoeffs};
@@ -853,6 +854,15 @@ impl MeshSpec {
     fn volume(&self) -> Scalar {
         self.l[0] * self.l[1] * self.l[2]
     }
+
+    /// The same volume, at f64 (SPEC-LIT §118.2): the analytic volume of the
+    /// box the generator actually built, whose extents are the `Scalar`
+    /// lengths, widened exactly. In f64 this is `volume()` bit for bit; the
+    /// mesh-identity rows are judged against it in both builds, at the same
+    /// `1e-12`.
+    fn volume_f64(&self) -> f64 {
+        f64::from(self.l[0]) * f64::from(self.l[1]) * f64::from(self.l[2])
+    }
 }
 
 /// Build a block straight into a [`HostMesh`], no file on disk anywhere.
@@ -908,8 +918,8 @@ fn make_mesh(dir: &Path, s: &MeshSpec) -> Result<HostMesh> {
     write_block_mesh(dir, &b)?;
     let mut raw = read_poly_mesh(dir)?;
     for p in raw.points.iter_mut() {
-        p.x += s.shear * p.z;
-        p.y += 0.5 * s.shear * p.z;
+        p.x += f64::from(s.shear) * p.z;
+        p.y += 0.5 * f64::from(s.shear) * p.z;
     }
     let m = build_host_mesh(&raw)?;
     let _ = std::fs::remove_dir_all(dir);
@@ -1006,34 +1016,39 @@ fn boundary_gamma(m: &HostMesh, gamma: Scalar) -> Vec<Scalar> {
 //  1. Mesh identities - SPEC-LIT section 10, rows "Mesh closure" and "Volume"
 // ==========================================================================
 
-fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: Scalar) {
-    let sum_v: Scalar = m.v.iter().copied().sum();
+/// The mesh-identity rows, computed on the f64 view (SPEC-LIT §118.2,
+/// precision class A of docs/17 §5.1 rule 4: an accumulated identity evaluated
+/// in f64, SAME tolerance). In the f64 build the view borrows the mesh's own
+/// arrays, so every operation below is the one this row always performed.
+fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: f64) {
+    let g = m.geom64();
+    let sum_v: f64 = g.v.iter().copied().sum();
     c.check(
         "sum(V) == analytic block volume",
-        (sum_v - analytic_volume).abs() / analytic_volume,
+        ((sum_v - analytic_volume).abs() / analytic_volume) as Scalar,
         1e-12,
     );
 
-    let min_v = m.v.iter().fold(Scalar::INFINITY, |a, b| a.min(*b));
+    let min_v = g.v.iter().fold(f64::INFINITY, |a, b| a.min(*b));
     c.require("min(V) > 0", min_v > 0.0);
 
     // Gauss's theorem applied to the constant field 1: every closed cell has
     // sum_f (+-Sf) = 0. Non-dimensionalised by V^(2/3), which is the area
     // scale of the cell, so the number is comparable across refinements.
-    let mut closure = vec![Vec3::ZERO; m.n_cells];
+    let mut closure = vec![DVec3::ZERO; m.n_cells];
     for f in 0..m.n_internal_faces {
-        closure[m.owner[f] as usize] += m.sf[f];
-        closure[m.neighbour[f] as usize] -= m.sf[f];
+        closure[m.owner[f] as usize] += g.sf[f];
+        closure[m.neighbour[f] as usize] -= g.sf[f];
     }
     for bf in 0..m.n_boundary_faces {
-        closure[m.b_face_cells[bf] as usize] += m.b_sf[bf];
+        closure[m.b_face_cells[bf] as usize] += g.b_sf[bf];
     }
 
-    let worst = (0..m.n_cells).fold(0.0 as Scalar, |w, cell| {
-        let scale = (f64::from(m.v[cell])).powf(2.0 / 3.0) as Scalar;
+    let worst = (0..m.n_cells).fold(0.0f64, |w, cell| {
+        let scale = g.v[cell].powf(2.0 / 3.0);
         w.max(closure[cell].mag() / scale)
     });
-    c.check("cell closure |sum Sf| / V^(2/3)", worst, 1e-12);
+    c.check("cell closure |sum Sf| / V^(2/3)", worst as Scalar, 1e-12);
 
     // Cell centroids must lie inside their own cells; the pyramid
     // decomposition of SPEC-LIT section 2.2 guarantees it for a convex cell,
@@ -1043,7 +1058,7 @@ fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: Scalar) {
     for f in 0..m.n_internal_faces {
         let p = m.owner[f] as usize;
         let n = m.neighbour[f] as usize;
-        if m.sf[f].dot(m.cf[f] - m.c[p]) <= 0.0 || m.sf[f].dot(m.c[n] - m.cf[f]) <= 0.0 {
+        if g.sf[f].dot(g.cf[f] - g.c[p]) <= 0.0 || g.sf[f].dot(g.c[n] - g.cf[f]) <= 0.0 {
             inverted += 1;
         }
     }
@@ -1070,7 +1085,7 @@ fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: Scalar) {
     // The interpolation weight of SPEC-LIT section 2.3 must land in [0,1] on
     // a convex mesh; outside it the "interpolated" value is an extrapolation.
     let bad_w = (0..m.n_internal_faces)
-        .filter(|&f| !(0.0..=1.0).contains(&m.weights[f]))
+        .filter(|&f| !(0.0..=1.0).contains(&g.weights[f]))
         .count();
     c.check("interpolation weights in [0,1]", bad_w as Scalar, 0.0);
 }
@@ -2393,7 +2408,8 @@ fn sheared_block(n: [usize; 3], lo: Vec3, hi: Vec3, s: Scalar) -> Result<HostMes
     };
     let mut raw = blockgen::raw_mesh(&b)?;
     for p in raw.points.iter_mut() {
-        p.x += s * p.z;
+        let q = ofgpu::types::to_vec3(*p);
+        *p = ofgpu::types::to_dvec3(ofgpu::Vec3::new(q.x + s * q.z, q.y, q.z));
     }
     build_host_mesh(&raw)
 }
@@ -3009,7 +3025,7 @@ fn run(c: &mut Checks) -> Result<()> {
     m3.print_report();
     let gm3 = GpuMesh::upload(&gpu, &m3)?;
 
-    check_mesh(c, &m3, spec3.volume());
+    check_mesh(c, &m3, spec3.volume_f64());
     check_explicit_operators(c, &gpu, &k, &m3, &gm3)?;
     check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Upwind)?;
     check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Central)?;
@@ -3036,7 +3052,7 @@ fn run(c: &mut Checks) -> Result<()> {
     c.require("the shear really made the mesh non-orthogonal", report.max_non_orth_deg > 10.0);
     let gmsh = GpuMesh::upload(&gpu, &msh)?;
 
-    check_mesh(c, &msh, spec_sh.volume());
+    check_mesh(c, &msh, spec_sh.volume_f64());
     check_explicit_operators(c, &gpu, &k, &msh, &gmsh)?;
     check_assembly(c, &gpu, &k, &msh, &gmsh, DivScheme::Limited(Limiter::MinMod))?;
     drop(gmsh);
@@ -3099,7 +3115,7 @@ fn run(c: &mut Checks) -> Result<()> {
     let m2 = make_mesh(&scratch_dir("main2d"), &spec2)?;
     let gm2 = GpuMesh::upload(&gpu, &m2)?;
 
-    check_mesh(c, &m2, spec2.volume());
+    check_mesh(c, &m2, spec2.volume_f64());
     check_explicit_operators(c, &gpu, &k, &m2, &gm2)?;
     check_assembly(c, &gpu, &k, &m2, &gm2, DivScheme::Upwind)?;
     drop(gm2);

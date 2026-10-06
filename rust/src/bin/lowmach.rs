@@ -1133,10 +1133,11 @@ fn attach_case_motion(
     lm: &LoweredMotion,
 ) -> Result<MeshMotion> {
     let raw = ofgpu::blockgen::raw_mesh(&l.block)?;
-    let motion = MeshMotion::new(hm, &raw.points, &raw.faces, &lm.rule_table())?;
+    let rest: Vec<ofgpu::Vec3> = raw.points.iter().map(|&p| ofgpu::types::to_vec3(p)).collect();
+    let motion = MeshMotion::new(hm, &rest, &raw.faces, &lm.rule_table())?;
     let wall_faces = motion.wall_faces(hm, &lm.wall_names())?;
     let csr = flatten_faces(&raw.faces);
-    let ale = AleMesh::new(gpu, hm, mesh, &raw.points, &csr)?;
+    let ale = AleMesh::new(gpu, hm, mesh, &rest, &csr)?;
     s.attach_motion(gpu, ale, &wall_faces)?;
     println!(
         "motion (SPEC-LIT 105.12): {} patch rules, {} control points, {} free points, {} moving-wall faces; \

@@ -29,11 +29,12 @@ use serde::{Deserialize, Serialize};
 use crate::cht::{InterfaceRequest, RegionKind};
 use crate::error::{Error, IoContext, Result};
 use crate::io::case_json::parse_jsonc_file;
+use crate::types::DVec3;
 use crate::io::polymesh::{
     build_host_mesh, check_patch_name, read_poly_mesh, write_poly_mesh_raw, PolyMeshRaw,
 };
 use crate::mesh::{HostMesh, PatchInfo, PatchKind};
-use crate::{Label, Scalar, Vec3};
+use crate::{Label, Scalar};
 
 // ==========================================================================
 //  The manifest (SPEC-LIT §97: the layout as the contract)
@@ -688,7 +689,7 @@ pub fn split_by_zones(
             patches.push(mk_patch(name, "patch", PatchKind::Generic, start, fs.len()));
         }
         let mut pmap = vec![-1 as Label; raw.points.len()];
-        let mut points: Vec<Vec3> = Vec::new();
+        let mut points: Vec<DVec3> = Vec::new();
         for face in faces.iter_mut() {
             for v in face.iter_mut() {
                 let old = *v as usize;

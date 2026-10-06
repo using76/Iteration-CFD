@@ -47,6 +47,7 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{Error, Result};
 use crate::io::polymesh::PolyMeshRaw;
 use crate::surface::{Surface, TriIndex};
+use crate::types::{to_dvec3, to_vec3, DVec3};
 use crate::{Label, Scalar, Vec3};
 
 use super::features::{self, FeatureIndex};
@@ -353,7 +354,7 @@ pub fn snap_regions(
         let ps = &mesh.faces[f];
         let mut c = [0.0; 3];
         for &p in ps {
-            let q = mesh.points[p as usize];
+            let q = to_vec3(mesh.points[p as usize]);
             c[0] += q.x;
             c[1] += q.y;
             c[2] += q.z;
@@ -497,7 +498,8 @@ pub fn snap_regions(
     // The hanging nodes: points that are the midpoint of another face's
     // edge, each mapped to its parent edge, longest first so a hanging node
     // of a hanging node is re-seated after its parents.
-    let hanging = find_hanging(&mesh.points, &mesh.faces);
+    let pts_scalar: Vec<Vec3> = mesh.points.iter().map(|&p| to_vec3(p)).collect();
+    let hanging = find_hanging(&pts_scalar, &mesh.faces);
     // (92.68)'s closure map: each hanging node to its two parents, built
     // once from `hanging`.
     let parent_of: HashMap<u32, [u32; 2]> = hanging.iter().cloned().collect();
@@ -526,7 +528,9 @@ pub fn snap_regions(
     let mut corner_of_point: Vec<i32> = vec![-1; n_points];
     let eps = spec.tolerance as Scalar * base_size;
     let w = spec.smoothing as Scalar;
-    let mut pts = mesh.points.clone();
+    // The stage moves points in the build's own `Scalar` (SPEC-LIT §118.2):
+    // read the f64 raw points in, write them back out widened.
+    let mut pts: Vec<Vec3> = mesh.points.iter().map(|&p| to_vec3(p)).collect();
     let mut work = mesh.clone();
     let mut scaled_back = vec![false; n_points];
     // (92.68)'s freezes, distinct over the run - the fallback's pins do not
@@ -670,7 +674,7 @@ pub fn snap_regions(
                 pts_try[h as usize] =
                     (pts_try[ab[0] as usize] + pts_try[ab[1] as usize]) * 0.5;
             }
-            work.points = pts_try.clone();
+            work.points = pts_try.iter().map(|&p| to_dvec3(p)).collect();
             let rep = quality::measure_capped(&work, t, usize::MAX)?;
             // The failing CELLS: the subject itself for a cell-named gate,
             // both cells of the face for G4. G3 and G7 are skipped - step 3
@@ -801,7 +805,7 @@ pub fn snap_regions(
     report.n_pinned_boundary = (0..n_points).filter(|&i| pinned[i] && is_b[i]).count();
     // The gate: a mesh that still fails leaves as §92.3's own refusal text.
     let mut out = mesh.clone();
-    out.points = pts;
+    out.points = pts.iter().map(|&p| to_dvec3(p)).collect();
     // Each patch's area once more, on the points the stage returns: the
     // (92.32) walk unchanged, measured twice.
     patch_areas_on(&out.points, &out, n_internal, &iface_patch, &mut patch_areas);
@@ -823,7 +827,7 @@ pub fn snap_regions(
 /// then the boundary faces of the mesh patch carrying its name - with
 /// `face_area_vector` measured on `points` rather than the mesh's own.
 fn patch_areas_on(
-    points: &[Vec3],
+    points: &[DVec3],
     mesh: &PolyMeshRaw,
     n_internal: usize,
     iface_patch: &[(usize, usize)],
@@ -912,17 +916,20 @@ fn claim_corners(
 }
 
 /// The polygon's area vector, fanned about the mean of its own points -
-/// the construction `mesh::geometry` runs, on the raw arrays.
-pub(crate) fn face_area_vector(points: &[Vec3], face: &[Label]) -> Vec3 {
+/// the construction `mesh::geometry` runs, on the raw arrays. The points are
+/// the `PolyMeshRaw`'s f64 ones (SPEC-LIT §118.2); each is read through
+/// `to_vec3`, so the arithmetic below is the `Scalar` arithmetic it always
+/// was.
+pub(crate) fn face_area_vector(points: &[DVec3], face: &[Label]) -> Vec3 {
     let mut c = Vec3::ZERO;
     for &p in face {
-        c = c + points[p as usize];
+        c = c + to_vec3(points[p as usize]);
     }
     c = c / (face.len() as Scalar);
     let mut sf = Vec3::ZERO;
     for k in 0..face.len() {
-        let a = points[face[k] as usize] - c;
-        let b = points[face[(k + 1) % face.len()] as usize] - c;
+        let a = to_vec3(points[face[k] as usize]) - c;
+        let b = to_vec3(points[face[(k + 1) % face.len()] as usize]) - c;
         sf = sf + a.cross(b);
     }
     sf * 0.5
@@ -1409,7 +1416,10 @@ pub fn feature_capture(
         out.dedup();
     };
     for &(i, j) in &edges {
-        let (p, q) = (mesh.points[i as usize], mesh.points[j as usize]);
+        let (p, q) = (
+            to_vec3(mesh.points[i as usize]),
+            to_vec3(mesh.points[j as usize]),
+        );
         cand_p.clear();
         around(key(p), &mut cand_p);
         cand_q.clear();
@@ -2961,7 +2971,10 @@ mod tests {
         wedges.dedup();
         let mut per_seg: Vec<Vec<(Scalar, Scalar)>> = vec![Vec::new(); fs.edges.len()];
         for &(i, j) in &wedges {
-            let (p, q) = (mesh.points[i as usize], mesh.points[j as usize]);
+            let (p, q) = (
+            to_vec3(mesh.points[i as usize]),
+            to_vec3(mesh.points[j as usize]),
+        );
             for e in 0..fs.edges.len() {
                 let (a, b) =
                     (fs.points[fs.edges[e][0] as usize], fs.points[fs.edges[e][1] as usize]);

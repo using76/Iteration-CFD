@@ -74,6 +74,7 @@ use crate::radiation::SIGMA_SB;
 use crate::s2s::{RadiantFaces, S2s};
 use crate::simple::{Simple, SimpleControls};
 use crate::timescheme::DdtScheme;
+use crate::types::to_vec3;
 use crate::{Label, Scalar, Tensor, Vec3};
 
 // ==========================================================================
@@ -724,7 +725,8 @@ impl<'m> Enclosure<'m> {
                 pairs.push((bf_f, h.b_face_cells[bf_s] as usize));
             }
         }
-        let s2s = S2s::new(gpu, thermal_mesh, h, &tm.points, &tm.faces, &sel, r.config)?;
+        let s2s_pts: Vec<Vec3> = tm.points.iter().map(|&p| to_vec3(p)).collect();
+        let s2s = S2s::new(gpu, thermal_mesh, h, &s2s_pts, &tm.faces, &sel, r.config)?;
         let n = s2s.n_fine();
         let mut slot_of = vec![usize::MAX; nbf];
         for s in 0..n {

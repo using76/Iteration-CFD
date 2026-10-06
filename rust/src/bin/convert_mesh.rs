@@ -129,7 +129,7 @@ use ofgpu::io::msh::read_msh;
 use ofgpu::io::polymesh::{PolyMeshRaw, build_host_mesh, write_poly_mesh_raw};
 use ofgpu::mesh::PatchKind;
 use ofgpu::mesh::geometry::{cell_regions, region_sizes_text};
-use ofgpu::{Error, Label, Result, Scalar};
+use ofgpu::{Error, Label, Result};
 
 /// Every `-type` value that means something - the strings
 /// `PatchKind::from_type` maps to anything but `Generic`, plus `patch`
@@ -925,8 +925,8 @@ fn check_fluent_mesh(raw: &PolyMeshRaw) -> Result<()> {
 /// C's `%.*g` with `sig` significant digits - the same formatter
 /// `io/polymesh.rs`'s private `fmt_g_prec` is, repeated here because a
 /// binary cannot see it.
-fn fmt_g_prec(v: Scalar, sig: usize) -> String {
-    let x = v as f64;
+fn fmt_g_prec(v: f64, sig: usize) -> String {
+    let x = v;
     if x == 0.0 {
         // printf keeps the sign of a negative zero; so does this.
         return if x.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
@@ -968,6 +968,7 @@ fn trim_trailing_zeros(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ofgpu::Scalar;
     use ofgpu::Vec3;
     use ofgpu::io::polymesh::read_poly_mesh;
     use ofgpu::mesh::PatchInfo;

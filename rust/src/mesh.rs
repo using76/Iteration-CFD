@@ -31,9 +31,67 @@
 //! designed here. `PROVENANCE.md`, *GPU plumbing and tooling - original*. No
 //! GPL-licensed source was consulted.
 
+use std::borrow::Cow;
+
 use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
+use crate::types::{DVec3, GeomPoint};
+#[cfg(feature = "single")]
+use crate::types::to_dvec3;
 use crate::{Label, Scalar, Vec3};
+
+/// SPEC-LIT §118.2: the f64 geometry that the `Scalar` arrays were rounded
+/// from. Single build only - in the f64 build the `Scalar` arrays ARE f64 and
+/// there is nothing to shadow. Set by `compute_geometry`; `None` for a mesh
+/// whose geometry came from anywhere else (the device sweep, a decomposed
+/// sub-mesh, a hand-built `HostMesh`).
+#[cfg(feature = "single")]
+#[derive(Debug, Default, Clone)]
+pub struct HostGeom64 {
+    pub v: Vec<f64>,
+    pub c: Vec<DVec3>,
+    pub sf: Vec<DVec3>,
+    pub mag_sf: Vec<f64>,
+    pub cf: Vec<DVec3>,
+    pub weights: Vec<f64>,
+    pub delta_coeffs: Vec<f64>,
+    pub non_orth_corr: Vec<DVec3>,
+    pub skew_corr: Vec<DVec3>,
+    pub b_sf: Vec<DVec3>,
+    pub b_mag_sf: Vec<f64>,
+    pub b_cf: Vec<DVec3>,
+    pub b_delta_coeffs: Vec<f64>,
+    pub b_non_orth_corr: Vec<DVec3>,
+    pub b_y: Vec<f64>,
+    pub b_weights: Vec<f64>,
+}
+
+/// A read-only f64 view of the 16 geometry arrays, in both builds
+/// (SPEC-LIT §118.2).
+///
+/// In the f64 build every field borrows the mesh's own array, which IS f64.
+/// Under `single` [`HostMesh::geom64`] borrows the f64 shadow
+/// [`HostGeom64`] when one is present and every array still matches the
+/// stored `Scalar` array bit for bit, and widens the stored arrays otherwise
+/// - all or nothing, so a view never mixes the two precisions.
+pub struct Geom64<'a> {
+    pub v: Cow<'a, [f64]>,
+    pub c: Cow<'a, [DVec3]>,
+    pub sf: Cow<'a, [DVec3]>,
+    pub mag_sf: Cow<'a, [f64]>,
+    pub cf: Cow<'a, [DVec3]>,
+    pub weights: Cow<'a, [f64]>,
+    pub delta_coeffs: Cow<'a, [f64]>,
+    pub non_orth_corr: Cow<'a, [DVec3]>,
+    pub skew_corr: Cow<'a, [DVec3]>,
+    pub b_sf: Cow<'a, [DVec3]>,
+    pub b_mag_sf: Cow<'a, [f64]>,
+    pub b_cf: Cow<'a, [DVec3]>,
+    pub b_delta_coeffs: Cow<'a, [f64]>,
+    pub b_non_orth_corr: Cow<'a, [DVec3]>,
+    pub b_y: Cow<'a, [f64]>,
+    pub b_weights: Cow<'a, [f64]>,
+}
 
 /// What a patch *is*, topologically. The physical boundary condition applied
 /// to a given field is stored per face in `field.rs`; this only describes the
@@ -234,22 +292,37 @@ pub struct HostMesh {
     /// `[2 * n_internal_faces + n_boundary_faces]`
     /// [`topology::RF_OWNS`] | [`topology::RF_BOUNDARY`].
     pub rf_flags: Vec<Label>,
+
+    /// SPEC-LIT §118.2: the f64 geometry the `Scalar` arrays were rounded
+    /// from, set by `compute_geometry`; `None` for a mesh whose geometry came
+    /// from anywhere else. Single build only; a driver that no longer needs
+    /// the f64 view calls [`Self::release_geom64`].
+    #[cfg(feature = "single")]
+    pub geom64: Option<Box<HostGeom64>>,
 }
 
 /// What `HostMesh::check` found. Printing it is the first thing every binary
 /// does, because a mesh that does not close is not worth solving on.
+///
+/// Every real-valued field is f64 (SPEC-LIT §118.2), computed from the
+/// `geom64` view - the identity in the f64 build.
 #[derive(Debug, Clone)]
 pub struct MeshReport {
-    pub total_volume: Scalar,
-    pub min_volume: Scalar,
-    pub max_volume: Scalar,
+    /// Computed in f64 (§118).
+    pub total_volume: f64,
+    /// Computed in f64 (§118).
+    pub min_volume: f64,
+    /// Computed in f64 (§118).
+    pub max_volume: f64,
     pub min_volume_cell: usize,
-    /// Maximum face non-orthogonality, degrees.
-    pub max_non_orth_deg: Scalar,
-    pub mean_non_orth_deg: Scalar,
+    /// Maximum face non-orthogonality, degrees. Computed in f64 (§118).
+    pub max_non_orth_deg: f64,
+    /// Computed in f64 (§118).
+    pub mean_non_orth_deg: f64,
     /// `max |sum_f s*Sf| / V^(2/3)` over cells. A correct mesh closes to
     /// round-off; anything above ~1e-10 means the face winding is wrong.
-    pub max_closure_error: Scalar,
+    /// Computed in f64 (§118).
+    pub max_closure_error: f64,
     pub max_closure_cell: usize,
     /// `true` when owner < neighbour everywhere and faces are sorted by
     /// (owner, neighbour) - the upper-triangular order the LDU addressing and
@@ -282,9 +355,13 @@ impl HostMesh {
     /// `non_orth_corr`, `b_non_orth_corr` and the boundary metrics from raw
     /// points and faces.
     /// Mirrors `primitiveMesh` + `surfaceInterpolation`.
-    pub fn compute_geometry(
+    ///
+    /// Generic over the point type (SPEC-LIT §118.2): `Vec3` or, under
+    /// `single`, `DVec3`. The sweep itself computes in f64 and rounds once
+    /// into the `Scalar` arrays (§118).
+    pub fn compute_geometry<P: GeomPoint>(
         &mut self,
-        points: &[Vec3],
+        points: &[P],
         faces: &[Vec<Label>],
     ) -> Result<()> {
         crate::mesh::geometry::compute(self, points, faces)
@@ -292,6 +369,155 @@ impl HostMesh {
 
     pub fn check(&self) -> MeshReport {
         crate::mesh::geometry::check(self)
+    }
+
+    /// The f64 view of the 16 geometry arrays (SPEC-LIT §118.2). In the f64
+    /// build this borrows the mesh's own arrays. Under `single` it borrows
+    /// the shadow `HostGeom64` when every one of the 16 arrays still matches
+    /// the stored `Scalar` array bit for bit, and widens the stored arrays
+    /// otherwise - all or nothing.
+    pub fn geom64(&self) -> Geom64<'_> {
+        #[cfg(not(feature = "single"))]
+        {
+            Geom64 {
+                v: Cow::Borrowed(&self.v),
+                c: Cow::Borrowed(&self.c),
+                sf: Cow::Borrowed(&self.sf),
+                mag_sf: Cow::Borrowed(&self.mag_sf),
+                cf: Cow::Borrowed(&self.cf),
+                weights: Cow::Borrowed(&self.weights),
+                delta_coeffs: Cow::Borrowed(&self.delta_coeffs),
+                non_orth_corr: Cow::Borrowed(&self.non_orth_corr),
+                skew_corr: Cow::Borrowed(&self.skew_corr),
+                b_sf: Cow::Borrowed(&self.b_sf),
+                b_mag_sf: Cow::Borrowed(&self.b_mag_sf),
+                b_cf: Cow::Borrowed(&self.b_cf),
+                b_delta_coeffs: Cow::Borrowed(&self.b_delta_coeffs),
+                b_non_orth_corr: Cow::Borrowed(&self.b_non_orth_corr),
+                b_y: Cow::Borrowed(&self.b_y),
+                b_weights: Cow::Borrowed(&self.b_weights),
+            }
+        }
+        #[cfg(feature = "single")]
+        {
+            if self.geom64_shadow_is_fresh() {
+                // Unwrap is safe: `fresh` is exactly `self.geom64.is_some()`
+                // AND every array matching.
+                let g = self.geom64.as_ref().unwrap();
+                Geom64 {
+                    v: Cow::Borrowed(&g.v),
+                    c: Cow::Borrowed(&g.c),
+                    sf: Cow::Borrowed(&g.sf),
+                    mag_sf: Cow::Borrowed(&g.mag_sf),
+                    cf: Cow::Borrowed(&g.cf),
+                    weights: Cow::Borrowed(&g.weights),
+                    delta_coeffs: Cow::Borrowed(&g.delta_coeffs),
+                    non_orth_corr: Cow::Borrowed(&g.non_orth_corr),
+                    skew_corr: Cow::Borrowed(&g.skew_corr),
+                    b_sf: Cow::Borrowed(&g.b_sf),
+                    b_mag_sf: Cow::Borrowed(&g.b_mag_sf),
+                    b_cf: Cow::Borrowed(&g.b_cf),
+                    b_delta_coeffs: Cow::Borrowed(&g.b_delta_coeffs),
+                    b_non_orth_corr: Cow::Borrowed(&g.b_non_orth_corr),
+                    b_y: Cow::Borrowed(&g.b_y),
+                    b_weights: Cow::Borrowed(&g.b_weights),
+                }
+            } else {
+                Geom64 {
+                    v: Cow::Owned(self.v.iter().map(|&x| f64::from(x)).collect()),
+                    c: Cow::Owned(self.c.iter().map(|&p| to_dvec3(p)).collect()),
+                    sf: Cow::Owned(self.sf.iter().map(|&p| to_dvec3(p)).collect()),
+                    mag_sf: Cow::Owned(self.mag_sf.iter().map(|&x| f64::from(x)).collect()),
+                    cf: Cow::Owned(self.cf.iter().map(|&p| to_dvec3(p)).collect()),
+                    weights: Cow::Owned(self.weights.iter().map(|&x| f64::from(x)).collect()),
+                    delta_coeffs: Cow::Owned(self.delta_coeffs.iter().map(|&x| f64::from(x)).collect()),
+                    non_orth_corr: Cow::Owned(self.non_orth_corr.iter().map(|&p| to_dvec3(p)).collect()),
+                    skew_corr: Cow::Owned(self.skew_corr.iter().map(|&p| to_dvec3(p)).collect()),
+                    b_sf: Cow::Owned(self.b_sf.iter().map(|&p| to_dvec3(p)).collect()),
+                    b_mag_sf: Cow::Owned(self.b_mag_sf.iter().map(|&x| f64::from(x)).collect()),
+                    b_cf: Cow::Owned(self.b_cf.iter().map(|&p| to_dvec3(p)).collect()),
+                    b_delta_coeffs: Cow::Owned(self.b_delta_coeffs.iter().map(|&x| f64::from(x)).collect()),
+                    b_non_orth_corr: Cow::Owned(self.b_non_orth_corr.iter().map(|&p| to_dvec3(p)).collect()),
+                    b_y: Cow::Owned(self.b_y.iter().map(|&x| f64::from(x)).collect()),
+                    b_weights: Cow::Owned(self.b_weights.iter().map(|&x| f64::from(x)).collect()),
+                }
+            }
+        }
+    }
+
+    /// `true` exactly when [`Self::geom64`] borrows an f64 array that is not
+    /// merely a widening of the stored `Scalar` array: always in the f64
+    /// build (the arrays ARE f64), and under `single` exactly when a fresh
+    /// shadow is present.
+    pub fn geom64_is_shadow(&self) -> bool {
+        #[cfg(feature = "single")]
+        {
+            self.geom64_shadow_is_fresh()
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            true
+        }
+    }
+
+    /// The all-or-nothing freshness test of [`Self::geom64`], under `single`:
+    /// the shadow exists, all 16 arrays have the stored lengths, and every
+    /// element rounds to the stored `Scalar` bit for bit.
+    #[cfg(feature = "single")]
+    fn geom64_shadow_is_fresh(&self) -> bool {
+        let same_bits = |a: &DVec3, b: &Vec3| {
+            (a.x as f32).to_bits() == b.x.to_bits()
+                && (a.y as f32).to_bits() == b.y.to_bits()
+                && (a.z as f32).to_bits() == b.z.to_bits()
+        };
+        let same_scalar = |a: &f64, b: &Scalar| (*a as f32).to_bits() == b.to_bits();
+        let Some(g) = &self.geom64 else { return false };
+        g.v.len() == self.v.len()
+            && g.c.len() == self.c.len()
+            && g.sf.len() == self.sf.len()
+            && g.mag_sf.len() == self.mag_sf.len()
+            && g.cf.len() == self.cf.len()
+            && g.weights.len() == self.weights.len()
+            && g.delta_coeffs.len() == self.delta_coeffs.len()
+            && g.non_orth_corr.len() == self.non_orth_corr.len()
+            && g.skew_corr.len() == self.skew_corr.len()
+            && g.b_sf.len() == self.b_sf.len()
+            && g.b_mag_sf.len() == self.b_mag_sf.len()
+            && g.b_cf.len() == self.b_cf.len()
+            && g.b_delta_coeffs.len() == self.b_delta_coeffs.len()
+            && g.b_non_orth_corr.len() == self.b_non_orth_corr.len()
+            && g.b_y.len() == self.b_y.len()
+            && g.b_weights.len() == self.b_weights.len()
+            && g.v.iter().zip(&self.v).all(|(a, b)| same_scalar(a, b))
+            && g.c.iter().zip(&self.c).all(|(a, b)| same_bits(a, b))
+            && g.sf.iter().zip(&self.sf).all(|(a, b)| same_bits(a, b))
+            && g.mag_sf.iter().zip(&self.mag_sf).all(|(a, b)| same_scalar(a, b))
+            && g.cf.iter().zip(&self.cf).all(|(a, b)| same_bits(a, b))
+            && g.weights.iter().zip(&self.weights).all(|(a, b)| same_scalar(a, b))
+            && g.delta_coeffs.iter().zip(&self.delta_coeffs).all(|(a, b)| same_scalar(a, b))
+            && g.non_orth_corr.iter().zip(&self.non_orth_corr).all(|(a, b)| same_bits(a, b))
+            && g.skew_corr.iter().zip(&self.skew_corr).all(|(a, b)| same_bits(a, b))
+            && g.b_sf.iter().zip(&self.b_sf).all(|(a, b)| same_bits(a, b))
+            && g.b_mag_sf.iter().zip(&self.b_mag_sf).all(|(a, b)| same_scalar(a, b))
+            && g.b_cf.iter().zip(&self.b_cf).all(|(a, b)| same_bits(a, b))
+            && g.b_delta_coeffs.iter().zip(&self.b_delta_coeffs).all(|(a, b)| same_scalar(a, b))
+            && g.b_non_orth_corr.iter().zip(&self.b_non_orth_corr).all(|(a, b)| same_bits(a, b))
+            && g.b_y.iter().zip(&self.b_y).all(|(a, b)| same_scalar(a, b))
+            && g.b_weights.iter().zip(&self.b_weights).all(|(a, b)| same_scalar(a, b))
+    }
+
+    /// A driver that no longer needs the f64 geometry may drop it (the view
+    /// then widens the `Scalar` arrays). Does nothing in the f64 build.
+    pub fn release_geom64(&mut self) {
+        #[cfg(feature = "single")]
+        {
+            self.geom64 = None;
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+        }
     }
 
     /// Human-readable summary, in the same shape the C++ version printed so

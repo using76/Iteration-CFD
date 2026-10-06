@@ -39,6 +39,7 @@ use crate::simple::{Simple, SimpleControls};
 use crate::timescheme::DdtScheme;
 use crate::vv::{self, GridStudy, Level};
 use crate::wallfunctions::{pressure_force, wall_shear};
+use crate::types::to_vec3;
 use crate::{Label, Scalar, Vec3};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -234,8 +235,8 @@ pub fn load_rig_from(dir: &Path, level: usize) -> Result<Rig> {
     }
     hm.compute_geometry(&raw.points, &raw.faces)?;
 
-    let z_min = raw.points.iter().map(|p| p.z).fold(Scalar::INFINITY, Scalar::min);
-    let z_max = raw.points.iter().map(|p| p.z).fold(Scalar::NEG_INFINITY, Scalar::max);
+    let z_min = raw.points.iter().map(|p| p.z as Scalar).fold(Scalar::INFINITY, Scalar::min);
+    let z_max = raw.points.iter().map(|p| p.z as Scalar).fold(Scalar::NEG_INFINITY, Scalar::max);
     let dz = z_max - z_min;
     if !dz.is_finite() || dz <= 0.0 {
         return Err(Error::Mesh(format!(
@@ -1112,7 +1113,8 @@ fn run_continuation(
     let mut backend = PbicgstabBackend::new(ctrl.p_solver);
     backend.setup(gpu, &rig.hm, &gm, &SystemProbe::default())?;
     if moving {
-        let ale = AleMesh::new(gpu, &rig.hm, &gm, &rig.raw.points, &rig.csr)?;
+        let rest: Vec<Vec3> = rig.raw.points.iter().map(|&p| to_vec3(p)).collect();
+        let ale = AleMesh::new(gpu, &rig.hm, &gm, &rest, &rig.csr)?;
         s.attach_motion(gpu, ale, &[])?;
     }
 
@@ -1191,7 +1193,8 @@ pub fn cfd3_traces(
     window_steps: usize,
     law: WobbleLaw,
 ) -> Result<Cfd3Traces> {
-    let wobble = Wobble::new(&rig.hm, &rig.raw.points, &rig.raw.faces, law)?;
+    let rest: Vec<Vec3> = rig.raw.points.iter().map(|&p| to_vec3(p)).collect();
+    let wobble = Wobble::new(&rig.hm, &rest, &rig.raw.faces, law)?;
 
     // ---- the spin-up, static, through the paper's ramp --------------------
     let started = Instant::now();

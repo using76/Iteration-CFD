@@ -67,7 +67,8 @@ use crate::error::{Error, IoContext, Result};
 use crate::io::contract;
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::{PatchInfo, PatchKind};
-use crate::{Label, Scalar, Vec3};
+use crate::types::DVec3;
+use crate::Label;
 
 // ==========================================================================
 //  Reference-element face tables
@@ -318,7 +319,7 @@ fn read_bbox_entity(lx: &mut Lex) -> Result<(i64, Vec<i64>)> {
 //  $Nodes
 // ==========================================================================
 
-fn read_nodes(lx: &mut Lex) -> Result<(Vec<Vec3>, HashMap<i64, u32>)> {
+fn read_nodes(lx: &mut Lex) -> Result<(Vec<DVec3>, HashMap<i64, u32>)> {
     let n_blocks = lx.int()?;
     let n_nodes = lx.int()?;
     let _min_tag = lx.int()?;
@@ -345,9 +346,9 @@ fn read_nodes(lx: &mut Lex) -> Result<(Vec<Vec3>, HashMap<i64, u32>)> {
         // read y,z,u as x,y,z on any `-save_parametric` mesh.)
         let extra = if parametric != 0 { entity_dim.max(0) as usize } else { 0 };
         for tag in tags {
-            let x = lx.num()? as Scalar;
-            let y = lx.num()? as Scalar;
-            let z = lx.num()? as Scalar;
+            let x = lx.num()?;
+            let y = lx.num()?;
+            let z = lx.num()?;
             for _ in 0..extra {
                 lx.num()?;
             }
@@ -355,7 +356,7 @@ fn read_nodes(lx: &mut Lex) -> Result<(Vec<Vec3>, HashMap<i64, u32>)> {
             if tag_to_idx.insert(tag, idx).is_some() {
                 return lx.err(format!("node tag {tag} appears more than once"));
             }
-            points.push(Vec3::new(x, y, z));
+            points.push(DVec3::new(x, y, z));
         }
     }
 
@@ -486,7 +487,7 @@ struct FaceRec {
 }
 
 fn build_raw_mesh(
-    points: Vec<Vec3>,
+    points: Vec<DVec3>,
     cells: Vec<Cell>,
     surf_patch_of_face: HashMap<Vec<u32>, String>,
 ) -> Result<PolyMeshRaw> {
@@ -714,6 +715,7 @@ fn tokenize(text: &str) -> Vec<&str> {
 mod tests {
     use super::*;
     use crate::io::polymesh::build_host_mesh;
+    use crate::Scalar;
 
     /// Every test in this module goes through here, and every one of them
     /// needs strict mode - so the crate-wide permissive guard is taken here

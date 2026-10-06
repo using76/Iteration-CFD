@@ -862,7 +862,10 @@ pub fn emit(
         .collect();
 
     Ok(crate::io::polymesh::PolyMeshRaw {
-        points,
+        points: points
+            .iter()
+            .map(|&p| crate::types::to_dvec3(p))
+            .collect(),
         faces,
         owner,
         neighbour,
