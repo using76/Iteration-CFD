@@ -688,6 +688,33 @@ impl ThermoSet {
         Ok(ThermoSet { species, p_ref, source: source.to_string(), notes })
     }
 
+    /// A set made from records already read, in the given order, with `notes` empty.
+    /// Err (Error::Config): `p_ref` not finite and > 0, or two records with the same name
+    /// (the message names it).
+    pub fn from_species(
+        species: Vec<SpeciesThermo>,
+        p_ref: f64,
+        source: &str,
+    ) -> crate::Result<ThermoSet> {
+        if !p_ref.is_finite() || p_ref <= 0.0 {
+            return Err(Error::Config(format!(
+                "the thermo set is made with the standard pressure p_ref = {p_ref} Pa, \
+                 which is not a finite pressure above zero (SPEC-LIT §128.4)"
+            )));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for s in &species {
+            if !seen.insert(s.name.as_str()) {
+                return Err(Error::Config(format!(
+                    "the thermo set made for {source} holds two records named {}; a species \
+                     has one record (SPEC-LIT §128)",
+                    s.name
+                )));
+            }
+        }
+        Ok(ThermoSet { species, p_ref, source: source.to_string(), notes: Vec::new() })
+    }
+
     /// The species records, in file order.
     pub fn species(&self) -> &[SpeciesThermo] {
         &self.species

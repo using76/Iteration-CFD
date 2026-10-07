@@ -37405,7 +37405,11 @@ reaction that follows.
 **Duplicates.** Two reactions with the same reactants and products, both
 directions considered, are an error unless both carry `DUP`. A `DUP` with no
 twin is also an error. This follows the manuals' rule that "duplicate
-reactions are normally considered errors".
+reactions are normally considered errors". Reversed sides make two reactions
+the same only when at least one of the two is reversible: two irreversible
+reactions written in opposite directions are a forward and a reverse step, as
+a two-step global mechanism writes them, and are read as two reactions
+(DESIGN, CHR-02a).
 
 **A reaction with `FORD` or `RORD` that is reversible and has no `REV`** is
 accepted with CHEMKIN-III's meaning: the orders override `ν'` and `ν''` in
