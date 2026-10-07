@@ -36719,6 +36719,163 @@ for every geometric formula, unchanged.
 
 No GPL-licensed source was consulted.
 
+### 118.3 Setup guards in f64 — the conduction and conjugate-interface refusals at their own limits
+
+Two setup guards compare a measured number with a constant written for the
+f64 build: §46.4's anisotropy residual against `1e-10`, and §47.4's four
+pairing checks (centroid `1e-6 sqrt|Sf|`, area `1e-9`, normal `1e-9`,
+non-orthogonality `3.8e-3`). Under `single` they measured f32 quantities in
+f32 arithmetic, so a measurement could not sit below a limit that is below its
+own round-off, and every conduction case was refused at setup (the abort §112.4
+records). This unit (F32-04) moves the **measurement** into f64 and leaves the
+**limits** where they were.
+
+**What changed.**
+
+1. `Conduction`'s face loop (`Conduction::faces`, `one_sided_conductance`,
+   `k_dot`) evaluates the coefficients of (S46.2)/(S46.5) AND the two §46.4
+   metrics, alignment and (S46.7)'s residual, in f64 in both builds, on the
+   `HostMesh::geom64()` view of §118.2. `ThermalMesh::couple` measures the
+   pairing (the nearest-face search and its centroid buckets, the areas, the
+   normals, the cell-to-face lean) in f64 on the same view. The equations are
+   those of §46.4/§46.5 and §47.4 unchanged and in the same operation order.
+   Every value stored into a `Scalar` array (`gamma_mag_sf`, `b_gamma_mag_sf`,
+   `b_conductance`, `Conduction::worst_alignment`/`worst_residual`, and the
+   `InterfaceReport` fields) is rounded ONCE, at the store. `couple` is now two
+   passes because the view borrows the mesh: the first measures every face and
+   returns at the first refusal with nothing written, the second writes the
+   report, the pairing arrays and `b_weights = 0.5`, in the order the faces
+   were matched.
+2. The limits do not change. `ANISOTROPY_RESIDUAL_LIMIT` is `1.0e-10` and
+   `PairingTolerances::default()` is `centroid 1e-6, area 1e-9, normal 1e-9,
+   non_orth 3.8e-3`; they are now `f64`, so they are exactly those numbers in
+   both builds and are compared against f64 measurements. No scheme, kernel,
+   file format or other tolerance moved, and no test was loosened.
+3. Under `single`, `ThermalMesh::build` gives the concatenated `host` an f64
+   shadow (`HostGeom64`): when EVERY region mesh's view is its own fresh
+   shadow, the concatenated shadow is the concatenation, in region order, of
+   the regions' `geom64()` arrays (`skew_corr` stays empty, as it is on the
+   concatenated `host`); otherwise the concatenated mesh has no shadow and its
+   view widens the stored arrays - all or nothing, never a mix of precisions.
+   `couple`'s one write into a geometry array, `b_weights[bfa] = b_weights[bfb]
+   = 0.5`, is mirrored into the shadow; without that mirror the shadow would no
+   longer round to the stored array and the view would fall back to widening.
+4. The f64 build is bitwise what it was. There `DVec3` IS `Vec3`,
+   `f64::from(x)` and `x as Scalar` are the identity and `geom64()` borrows the
+   mesh's own arrays, so the same operations run on the same values in the
+   same order; every coefficient, every report number and every message text is
+   byte-identical (the f64 numbers printed below are the same to every digit
+   before and after).
+
+**The error model.**
+
+- (S46.7), `r = |E − D̂ n (n·d)| / (D̂ |d|)`, vanishes identically when `n` is
+  an eigenvector of `K` (§46.4). Evaluated in floating point with unit
+  round-off `u`, its computed value is `O(u)`, not 0. The measured floor is
+  `2^-23 = 1.19e-7` in f32 arithmetic - one unit in the last place at 1, the
+  value §112.4's abort prints - and `2.2e-16` in f64 (§94's Gate 94-A row "the
+  SPEC-LIT 46.4 anisotropy residual is zero on the axis-aligned block", error
+  `2.220e-16` against its `1e-14`). The limit `1e-10` sits nearly six decades
+  above the f64 floor and far below what a misaligned conductivity produces:
+  the `K` of test 6 below, `diag(1500, 8, 1500)` rotated `0.001°` about `z`, reads
+  `|K_yx|/K_xx ≈ 1.7e-5` on an x face and `3.3e-3` on a y face. In f32
+  arithmetic the floor is ABOVE the limit, so every case is refused;
+  evaluating in f64 restores the margin without moving the limit.
+- Why f64 GEOMETRY matters, and not only f64 arithmetic: the pairing compares
+  two regions' face areas, normals and centroids that were computed
+  separately. Rounded to f32 they can differ by one ulp (`2^-24` relative,
+  `5.96e-8`) even when the f64 values agree to `1e-16`, which is above
+  `area 1e-9` and `normal 1e-9`; and the centroid limit `1e-6 sqrt|Sf|` is
+  `1e-8 m` for a `1 cm` face, below the f32 spacing of a coordinate near `2 m`
+  (`2.4e-7 m`). On the f64 view each of them is f64 round-off.
+- Rounding once: each stored coefficient is `fl32(c64)`, with
+  `|fl32(c64) − c64| ≤ 2^-24 |c64|` (Goldberg 1991; Higham 2002 §2.2 for the
+  model `fl(x) = x (1 + δ)`, `|δ| ≤ u`): a stored coefficient is within half
+  an ulp of the f64 value, and no coefficient is rounded twice.
+
+**The measurement.** `tests/f32_cht.rs` runs in both builds with the same
+assertions (precision class A of docs/17 §5.1 rule 4: a guard evaluated in
+f64, the SAME limit in both builds). Its meshes are the tree's own generators;
+the rotated ones are a uniform block turned `θ` about `z` and translated by
+`(1, 2, 0.5)`, every point computed in f64.
+
+Failing first, under `single` at HEAD `d633533`: the dyadic unit slab (8×8×8
+on `[0,1]^3`, `K = diag(1, 10, 100)`) is NOT refused - its coordinates are
+multiples of `2^-3`, so even f32 arithmetic is exact there, residual 0 - and
+fails only on the missing concatenated f64 shadow; the same slab with
+non-dyadic extents (7×5×6 on `[0.3, 0.7, 1.1]`) is refused, "the anisotropy
+residual … is 0.000000099341094 at internal face 11, limit 0.0000000001"; the
+isotropic 6×5×4 block turned 15° is refused at 3.1092705e-7 (internal face
+51); the conformal interface of two 4×4×4 blocks turned 15° is refused,
+"n_A . n_B = -0.99999994, not -1" (face 0), the f32 dot product of the
+two unit normals reading one ulp short of -1; and the concatenated mesh has no
+f64 view. The
+two refusal tests (a `K` rotated `0.001°`, an interface shifted half a cell)
+pass in both builds before and after, as they must.
+
+After the change, every one of those is accepted in both builds. The worst
+(S46.7) residual, `uniform_per_region`, per case (f64 build / single build):
+
+| case | f64 build | single build |
+|---|---|---|
+| unit slab, `K = diag(1, 10, 100)` | 1.776357e-16 | 1.776357e-16 |
+| non-dyadic slab, same `K` | 2.703465e-16 | 2.703465e-16 |
+| isotropic block turned 15° | 5.663362e-16 | 5.791468e-16 |
+| isotropic block turned 25° | 4.095185e-16 | 7.823841e-16 |
+| isotropic block turned 40° | 7.770068e-16 | 5.863415e-16 |
+| isotropic block turned 45° | 7.770068e-16 | 5.863415e-16 |
+| isotropic block turned 50° | 7.770068e-16 | 5.863412e-16 |
+
+and the interface report of the two turned 4×4×4 blocks (16 pairs each;
+worst centroid / worst area / worst normal / worst non-orthogonality; then the
+worst residual of the two-region `uniform_per_region`):
+
+| θ | f64 build | single build |
+|---|---|---|
+| 15° | 4.577567e-16 / 0 / 0 / 0; 4.135459e-16 | 2.482534e-16 / 2.710505e-16 / 1.110223e-16 / 2.220446e-16; 4.135459e-16 |
+| 25° | 4.577567e-16 / 0 / 2.220446e-16 / 0; 5.241837e-16 | 5.438960e-16 / 0 / 1.110223e-16 / 2.220446e-16; 4.135459e-16 |
+| 40° | 5.087681e-16 / 0 / 0 / 2.220446e-16; 4.972844e-16 | 5.087681e-16 / 0 / 2.220446e-16 / 2.220446e-16; 6.980619e-16 |
+| 45° | 4.965068e-16 / 0 / 0 / 0; 3.490309e-16 | 4.440892e-16 / 0 / 2.220446e-16 / 2.220446e-16; 5.476048e-16 |
+| 50° | 2.482534e-16 / 0 / 2.220446e-16 / 2.220446e-16; 4.972844e-16 | 5.087681e-16 / 0 / 2.220446e-16 / 2.220446e-16; 4.972845e-16 |
+
+Every number is f64 round-off, at least five decades inside the limit it is
+compared with, and the f64 column is identical, digit for digit, to what the
+same test printed at HEAD. The rotated-`K` refusal reads `3.2550216e-3` (f64 build, internal face
+60) and `3.2550217e-3` (single build, internal face 1) against `1e-10`: the
+guard still refuses what it refused. The stored coefficients agree with
+`k_a |Sf|` of the f64 view to `2e-14 + 2^-24` relative (one rounding), on every
+internal and boundary face of both slabs. Test 4 pins the concatenated
+shadow bit for bit against each region's own `geom64()` on every one of the
+fifteen arrays, with `b_weights == 0.5` exactly on the paired faces, and pins
+the all-or-nothing rule (a region after `release_geom64()` leaves the
+concatenated view unshadowed under `single` and shadowed in the f64 build).
+
+Measured by the supervisor on 2026-10-07: TO BE FILLED.
+
+**What it does not do.** A region mesh without a shadow (decomposed,
+device-swept, hand-built, or after `release_geom64`) makes the concatenated
+view the widened f32 arrays, and the guards then read f32 geometry in f64
+arithmetic: the arithmetic is no longer the floor, the geometry is, exactly as
+§118.2 says of every such mesh. `wiener_pair`'s fraction closure
+(`|sum_f − 1| > 1e-9`) and the other sub-round-off constants of the `cht`
+module are the second half of this section's list (F32-05). The library tests
+that are ignored under `single` for this refusal (`"fails at f32: SPEC-LIT
+112.3"`) are not un-ignored here, because the single library test target does
+not compile (F32-16): this unit's evidence is the integration test and the
+validate rows, not a count of library tests. No kernel and no `.cu` file
+changed, and no tolerance moved.
+
+Sources: **Goldberg, D. (1991), "What every computer scientist should know
+about floating-point arithmetic", ACM Computing Surveys 23(1) 5-48,
+doi:10.1145/103162.103163**, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html>;
+**Higham, N. J. (2002), Accuracy and Stability of Numerical Algorithms, 2nd
+ed., SIAM, doi:10.1137/1.9780898718027**, §2.2. And SPEC-LIT §46.4 (the
+residual and its refusal), §47.4 (the pairing refusals), §112.4 (the abort)
+and §118.2 (the view) for everything else, unchanged.
+
+No GPL-licensed source was consulted.
+
 ### 118.6 Field, phi and restart I/O at f32 — nine digits, one rounding, a bitwise restart
 
 The text writer printed `phi` at seventeen significant digits in every
