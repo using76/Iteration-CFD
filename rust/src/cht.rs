@@ -90,6 +90,8 @@ use crate::io::case::SolverControls;
 use crate::io::polymesh::PolyMeshRaw;
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
+#[cfg(feature = "single")]
+use crate::mesh::HostGeom64;
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::timescheme::{self, DdtCoeffs, TimeKernels};
@@ -481,19 +483,23 @@ impl InterfaceRequest {
 /// These are refusals, not warnings. A pair that fails any of them is not a
 /// conformal interface, and the only honest alternatives are a conformal mesh
 /// or the non-conformal (AMI) treatment that is tier D and not implemented.
+///
+/// The limits are `f64` in both builds and are compared against
+/// measurements made in f64 on the [`HostMesh::geom64`] view, so the f32
+/// build's floor is f64 round-off and not `2^-24` (SPEC-LIT §118.3).
 #[derive(Debug, Clone, Copy)]
 pub struct PairingTolerances {
     /// `|Cf_A - Cf_B| <= centroid * sqrt(|Sf|)`
-    pub centroid: Scalar,
+    pub centroid: f64,
     /// `| |Sf|_A - |Sf|_B | <= area * |Sf|_A`
-    pub area: Scalar,
+    pub area: f64,
     /// `n_A . n_B <= -1 + normal`
-    pub normal: Scalar,
+    pub normal: f64,
     /// `1 - (n_A . d_A)/|d_A| <= non_orth`, i.e. how far the cell-to-face
     /// offset may lean away from the face normal. The non-orthogonal
     /// correction is SUPPRESSED on an interface face (§47.3), so this is the
     /// gate that keeps the suppression harmless rather than silent.
-    pub non_orth: Scalar,
+    pub non_orth: f64,
 }
 
 impl Default for PairingTolerances {
@@ -578,6 +584,17 @@ impl ThermalMesh {
     /// `b_delta_coeffs` is the one-sided `1/(nf . (Cf - C_P))` that
     /// `C = kappa Delta` wants and `b_non_orth_corr` is zero. Both are
     /// properties of the construction rather than of a later correction.
+    ///
+    /// Under `single` the concatenated `host` carries an f64 shadow
+    /// (`HostGeom64`, which exists only in that build) built by
+    /// concatenating the regions' [`HostMesh::geom64`] views, so the guards
+    /// that run on the concatenated mesh - the pairing in `couple` and
+    /// [`Conduction::build`]'s anisotropy residual - see f64 geometry. The
+    /// rule is all or nothing: when EVERY region mesh carries a fresh shadow
+    /// the concatenated mesh does, and otherwise it has none and the view
+    /// widens the stored `Scalar` arrays. `couple`'s `b_weights = 0.5` write
+    /// is mirrored into the shadow. In the f64 build the view is the mesh's
+    /// own arrays and there is nothing to shadow (SPEC-LIT §118.3).
     pub fn build(
         regions: &[RegionInput<'_>],
         interfaces: &[InterfaceRequest],
@@ -710,6 +727,36 @@ impl ThermalMesh {
                     f - 1
                 )));
             }
+        }
+
+        // SPEC-LIT §118.3: the f64 shadow of the concatenated host. Each
+        // region's view is borrowed from its own shadow (the test below is
+        // exactly "every region's view IS its shadow"), so the concatenation
+        // of the views is the f64 geometry the concatenated `Scalar` arrays
+        // were rounded from, in the same order. `skew_corr` is empty on the
+        // concatenated host, so its shadow is empty too.
+        #[cfg(feature = "single")]
+        if regions.iter().all(|r| r.mesh.geom64_is_shadow()) {
+            let mut g = HostGeom64::default();
+            for r in regions {
+                let s = r.mesh.geom64();
+                g.v.extend_from_slice(&s.v);
+                g.c.extend_from_slice(&s.c);
+                g.sf.extend_from_slice(&s.sf);
+                g.mag_sf.extend_from_slice(&s.mag_sf);
+                g.cf.extend_from_slice(&s.cf);
+                g.weights.extend_from_slice(&s.weights);
+                g.delta_coeffs.extend_from_slice(&s.delta_coeffs);
+                g.non_orth_corr.extend_from_slice(&s.non_orth_corr);
+                g.b_sf.extend_from_slice(&s.b_sf);
+                g.b_mag_sf.extend_from_slice(&s.b_mag_sf);
+                g.b_cf.extend_from_slice(&s.b_cf);
+                g.b_delta_coeffs.extend_from_slice(&s.b_delta_coeffs);
+                g.b_non_orth_corr.extend_from_slice(&s.b_non_orth_corr);
+                g.b_y.extend_from_slice(&s.b_y);
+                g.b_weights.extend_from_slice(&s.b_weights);
+            }
+            host.geom64 = Some(Box::new(g));
         }
 
         let mut m = Self {
@@ -896,122 +943,148 @@ impl ThermalMesh {
         // key is the rounded centroid so that two faces which ARE the same
         // face land next to each other whatever order the two meshes wrote
         // them in.
-        let mut key_b: Vec<(usize, [i64; 3])> = (0..nb)
-            .map(|k| (sb + k, centroid_key(self.host.b_cf[sb + k], tol.centroid)))
-            .collect();
-        key_b.sort_by_key(|&(_, k)| k);
+        //
+        // SPEC-LIT §118.3: two passes. The first MEASURES on the f64 view
+        // (`geom64` borrows `self.host`, so nothing is written while it is
+        // alive) and refuses at the first face that fails; the second WRITES
+        // what the first collected, in the same order. Every measurement is
+        // f64 in both builds and meets the f64 limits of `tol`.
+        struct Matched {
+            bfa: usize,
+            bfb: usize,
+            dist: f64,
+            area_err: f64,
+            opp: f64,
+            worst_orth: f64,
+            aa: f64,
+        }
+        let matched: Vec<Matched> = {
+            let g = self.host.geom64();
+            let mut key_b: Vec<(usize, [i64; 3])> = (0..nb)
+                .map(|k| (sb + k, centroid_key(g.b_cf[sb + k], tol.centroid)))
+                .collect();
+            key_b.sort_by_key(|&(_, k)| k);
 
-        let mut used = vec![false; nb];
-        let mut report = std::mem::take(&mut self.report);
+            let mut used = vec![false; nb];
+            let mut out = Vec::with_capacity(na);
 
-        for k in 0..na {
-            let bfa = sa + k;
-            let key = centroid_key(self.host.b_cf[bfa], tol.centroid);
+            for k in 0..na {
+                let bfa = sa + k;
+                let key = centroid_key(g.b_cf[bfa], tol.centroid);
 
-            // Any of the (up to 27) neighbouring keys can hold the match, so
-            // search the quantised cell and its neighbours rather than only
-            // the exact key.
-            let mut best: Option<(usize, Scalar)> = None;
-            for dx in -1..=1i64 {
-                for dy in -1..=1i64 {
-                    for dz in -1..=1i64 {
-                        let probe = [key[0] + dx, key[1] + dy, key[2] + dz];
-                        let lo = key_b.partition_point(|&(_, kk)| kk < probe);
-                        for &(bfb, kk) in key_b[lo..].iter() {
-                            if kk != probe {
-                                break;
-                            }
-                            if used[bfb - sb] {
-                                continue;
-                            }
-                            let d = (self.host.b_cf[bfa] - self.host.b_cf[bfb]).mag();
-                            if best.is_none_or(|(_, bd)| d < bd) {
-                                best = Some((bfb, d));
+                // Any of the (up to 27) neighbouring keys can hold the match, so
+                // search the quantised cell and its neighbours rather than only
+                // the exact key.
+                let mut best: Option<(usize, f64)> = None;
+                for dx in -1..=1i64 {
+                    for dy in -1..=1i64 {
+                        for dz in -1..=1i64 {
+                            let probe = [key[0] + dx, key[1] + dy, key[2] + dz];
+                            let lo = key_b.partition_point(|&(_, kk)| kk < probe);
+                            for &(bfb, kk) in key_b[lo..].iter() {
+                                if kk != probe {
+                                    break;
+                                }
+                                if used[bfb - sb] {
+                                    continue;
+                                }
+                                let d = (g.b_cf[bfa] - g.b_cf[bfb]).mag();
+                                if best.is_none_or(|(_, bd)| d < bd) {
+                                    best = Some((bfb, d));
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            let scale = self.host.b_mag_sf[bfa].sqrt();
-            let (bfb, dist) = best.ok_or_else(|| {
-                Error::Mesh(format!(
-                    "interface '{}' face {k}: no face of '{}' lies within {} of its \
-                     centre. A conjugate interface must be CONFORMAL and matched \
-                     (SPEC-LIT 47.4); non-conformal (AMI) interfaces are not \
-                     implemented",
-                    self.host.patches[pa].name,
-                    self.host.patches[pb].name,
-                    tol.centroid * scale
-                ))
-            })?;
+                let scale = g.b_mag_sf[bfa].sqrt();
+                let (bfb, dist) = best.ok_or_else(|| {
+                    Error::Mesh(format!(
+                        "interface '{}' face {k}: no face of '{}' lies within {} of its \
+                         centre. A conjugate interface must be CONFORMAL and matched \
+                         (SPEC-LIT 47.4); non-conformal (AMI) interfaces are not \
+                         implemented",
+                        self.host.patches[pa].name,
+                        self.host.patches[pb].name,
+                        tol.centroid * scale
+                    ))
+                })?;
 
-            if dist > tol.centroid * scale {
-                return Err(Error::Mesh(format!(
-                    "interface '{}' face {k}: nearest face of '{}' is {dist} away, \
-                     tolerance {} - the two patches are not conformal",
-                    self.host.patches[pa].name,
-                    self.host.patches[pb].name,
-                    tol.centroid * scale
-                )));
-            }
-            used[bfb - sb] = true;
-
-            let (aa, ab) = (self.host.b_mag_sf[bfa], self.host.b_mag_sf[bfb]);
-            let area_err = (aa - ab).abs() / aa;
-            if area_err > tol.area {
-                return Err(Error::Mesh(format!(
-                    "interface '{}' face {k}: areas {aa} and {ab} differ by {area_err} \
-                     relative, tolerance {}. SPEC-LIT 47.2 uses side A's area on BOTH \
-                     sides so the two coupled matrix entries are bitwise equal, which \
-                     is only defensible while the two areas agree",
-                    self.host.patches[pa].name, tol.area
-                )));
-            }
-
-            let nfa = self.host.b_sf[bfa].normalised();
-            let nfb = self.host.b_sf[bfb].normalised();
-            let opp = nfa.dot(nfb);
-            if opp > -1.0 + tol.normal {
-                return Err(Error::Mesh(format!(
-                    "interface '{}' face {k}: the two face normals have n_A . n_B = \
-                     {opp}, not -1. The faces are the same face seen from opposite \
-                     sides, so their outward normals must be opposed",
-                    self.host.patches[pa].name
-                )));
-            }
-
-            let mut worst_orth: Scalar = 0.0;
-            for (bf, nf) in [(bfa, nfa), (bfb, nfb)] {
-                let d = self.host.b_cf[bf] - self.host.c[self.host.b_face_cells[bf] as usize];
-                let dm = d.mag();
-                if !(dm > 0.0) {
+                if dist > tol.centroid * scale {
                     return Err(Error::Mesh(format!(
-                        "interface face {bf}: the cell centre lies on the face"
+                        "interface '{}' face {k}: nearest face of '{}' is {dist} away, \
+                         tolerance {} - the two patches are not conformal",
+                        self.host.patches[pa].name,
+                        self.host.patches[pb].name,
+                        tol.centroid * scale
                     )));
                 }
-                worst_orth = worst_orth.max(1.0 - nf.dot(d) / dm);
-            }
-            if worst_orth > tol.non_orth {
-                return Err(Error::Mesh(format!(
-                    "interface '{}' face {k}: the cell-to-face offset leans {:.3} deg \
-                     off the face normal, limit {:.3} deg. SPEC-LIT 47.3 SUPPRESSES \
-                     the non-orthogonal correction on an interface face - across it \
-                     kappa and grad T are both discontinuous, so neither the coupled \
-                     interpolation nor the one-sided gradient is defensible - and \
-                     this is the gate that keeps the suppression harmless. Use a \
-                     conformal, near-orthogonal interface mesh",
-                    self.host.patches[pa].name,
-                    f64::from((1.0 - worst_orth).clamp(-1.0, 1.0).acos().to_degrees()),
-                    f64::from((1.0 - tol.non_orth).clamp(-1.0, 1.0).acos().to_degrees()),
-                )));
-            }
+                used[bfb - sb] = true;
 
-            report.worst_centroid = report.worst_centroid.max(dist);
-            report.worst_area = report.worst_area.max(area_err);
-            report.worst_normal = report.worst_normal.max(opp + 1.0);
-            report.worst_non_orth = report.worst_non_orth.max(worst_orth);
-            report.total_area += aa;
+                let (aa, ab) = (g.b_mag_sf[bfa], g.b_mag_sf[bfb]);
+                let area_err = (aa - ab).abs() / aa;
+                if area_err > tol.area {
+                    return Err(Error::Mesh(format!(
+                        "interface '{}' face {k}: areas {aa} and {ab} differ by {area_err} \
+                         relative, tolerance {}. SPEC-LIT 47.2 uses side A's area on BOTH \
+                         sides so the two coupled matrix entries are bitwise equal, which \
+                         is only defensible while the two areas agree",
+                        self.host.patches[pa].name, tol.area
+                    )));
+                }
+
+                let nfa = g.b_sf[bfa].normalised();
+                let nfb = g.b_sf[bfb].normalised();
+                let opp = nfa.dot(nfb);
+                if opp > -1.0 + tol.normal {
+                    return Err(Error::Mesh(format!(
+                        "interface '{}' face {k}: the two face normals have n_A . n_B = \
+                         {opp}, not -1. The faces are the same face seen from opposite \
+                         sides, so their outward normals must be opposed",
+                        self.host.patches[pa].name
+                    )));
+                }
+
+                let mut worst_orth: f64 = 0.0;
+                for (bf, nf) in [(bfa, nfa), (bfb, nfb)] {
+                    let d = g.b_cf[bf] - g.c[self.host.b_face_cells[bf] as usize];
+                    let dm = d.mag();
+                    if !(dm > 0.0) {
+                        return Err(Error::Mesh(format!(
+                            "interface face {bf}: the cell centre lies on the face"
+                        )));
+                    }
+                    worst_orth = worst_orth.max(1.0 - nf.dot(d) / dm);
+                }
+                if worst_orth > tol.non_orth {
+                    return Err(Error::Mesh(format!(
+                        "interface '{}' face {k}: the cell-to-face offset leans {:.3} deg \
+                         off the face normal, limit {:.3} deg. SPEC-LIT 47.3 SUPPRESSES \
+                         the non-orthogonal correction on an interface face - across it \
+                         kappa and grad T are both discontinuous, so neither the coupled \
+                         interpolation nor the one-sided gradient is defensible - and \
+                         this is the gate that keeps the suppression harmless. Use a \
+                         conformal, near-orthogonal interface mesh",
+                        self.host.patches[pa].name,
+                        (1.0 - worst_orth).clamp(-1.0, 1.0).acos().to_degrees(),
+                        (1.0 - tol.non_orth).clamp(-1.0, 1.0).acos().to_degrees(),
+                    )));
+                }
+
+                out.push(Matched { bfa, bfb, dist, area_err, opp, worst_orth, aa });
+            }
+            out
+        };
+
+        let mut report = std::mem::take(&mut self.report);
+
+        for p in &matched {
+            let (bfa, bfb) = (p.bfa, p.bfb);
+            report.worst_centroid = report.worst_centroid.max(p.dist as Scalar);
+            report.worst_area = report.worst_area.max(p.area_err as Scalar);
+            report.worst_normal = report.worst_normal.max((p.opp + 1.0) as Scalar);
+            report.worst_non_orth = report.worst_non_orth.max(p.worst_orth as Scalar);
+            report.total_area = (wide(report.total_area) + p.aa) as Scalar;
             report.n_pairs += 1;
 
             let ca = self.host.b_face_cells[bfa];
@@ -1030,6 +1103,14 @@ impl ThermalMesh {
             // geometric value is still the honest thing to leave there.
             self.host.b_weights[bfa] = 0.5;
             self.host.b_weights[bfb] = 0.5;
+            // SPEC-LIT §118.3: the same write into the f64 shadow, or the
+            // shadow would no longer round to the stored array and the whole
+            // view would fall back to widening it.
+            #[cfg(feature = "single")]
+            if let Some(g) = self.host.geom64.as_mut() {
+                g.b_weights[bfa] = 0.5;
+                g.b_weights[bfb] = 0.5;
+            }
 
             self.pairs.push(InterfacePair {
                 bf_a: bfa as Label,
@@ -1196,8 +1277,9 @@ pub fn non_interface_entries(
 /// Quantise a face centre so that two faces which are the same face hash
 /// together. The bucket is the pairing tolerance itself, and the search
 /// probes the 27 neighbouring buckets, so a match that straddles a bucket
-/// boundary is still found.
-fn centroid_key(c: Vec3, tol: Scalar) -> [i64; 3] {
+/// boundary is still found. Evaluated in f64 on the `geom64` view, in both
+/// builds (SPEC-LIT §118.3).
+fn centroid_key(c: DVec3, tol: f64) -> [i64; 3] {
     let h = if tol > 0.0 { tol } else { 1e-9 };
     [
         (c.x / h).floor() as i64,
@@ -1210,13 +1292,25 @@ fn centroid_key(c: Vec3, tol: Scalar) -> [i64; 3] {
 //  §46.2, §46.3  The conduction coefficients
 // ==========================================================================
 
-/// `K . v` for a symmetric conductivity tensor.
+/// A `Scalar` widened to the f64 the setup guards compute in: exact, and the
+/// identity in the f64 build. Spelled once, behind an `allow`, because the
+/// f64 lint set calls an identity conversion useless at every call site
+/// (the house clippy gate counts diagnostics).
+#[allow(clippy::useless_conversion)]
 #[inline]
-fn k_dot(k: Tensor, v: Vec3) -> Vec3 {
-    Vec3::new(
-        k.xx * v.x + k.xy * v.y + k.xz * v.z,
-        k.yx * v.x + k.yy * v.y + k.yz * v.z,
-        k.zx * v.x + k.zy * v.y + k.zz * v.z,
+fn wide(x: Scalar) -> f64 {
+    f64::from(x)
+}
+
+/// `K . v` for a symmetric conductivity tensor, in f64 (SPEC-LIT §118.3):
+/// each component of `K` is widened exactly, then the product is formed in
+/// the order it always was.
+#[inline]
+fn k_dot(k: Tensor, v: DVec3) -> DVec3 {
+    DVec3::new(
+        wide(k.xx) * v.x + wide(k.xy) * v.y + wide(k.xz) * v.z,
+        wide(k.yx) * v.x + wide(k.yy) * v.y + wide(k.yz) * v.z,
+        wide(k.zx) * v.x + wide(k.zy) * v.y + wide(k.zz) * v.z,
     )
 }
 
@@ -1241,13 +1335,17 @@ fn k_dot(k: Tensor, v: Vec3) -> Vec3 {
 /// normal - which covers every isotropic `K` on any mesh, and every diagonal
 /// `K` on an axis-aligned hexahedral one. That is exactly the supported
 /// configuration of §46.4, and the number is what the refusal quotes.
-fn one_sided_conductance(k: Tensor, sf: Vec3, d: Vec3) -> (Scalar, Scalar, Scalar) {
+///
+/// All three numbers are f64 in both builds (SPEC-LIT §118.3): the caller
+/// hands in the `geom64` view's `Sf` and `d`, so what the f32 build measures
+/// here is f64 round-off and not one ulp at 1 in f32.
+fn one_sided_conductance(k: Tensor, sf: DVec3, d: DVec3) -> (f64, f64, f64) {
     let e = k_dot(k, sf);
     let ee = e.dot(e);
     let ed = e.dot(d);
     let (me, md) = (ee.sqrt(), d.mag());
     if !(ed > 0.0) || !(me > 0.0) || !(md > 0.0) {
-        return (0.0, if me > 0.0 && md > 0.0 { ed / (me * md) } else { 0.0 }, Scalar::INFINITY);
+        return (0.0, if me > 0.0 && md > 0.0 { ed / (me * md) } else { 0.0 }, f64::INFINITY);
     }
     let dhat = ee / ed;
     let nf = sf.normalised();
@@ -1288,7 +1386,11 @@ pub struct Conduction {
 /// threshold is loose enough that a mesh generator's last-bit noise on `Sf`
 /// and `C` cannot trip it and tight enough that a one-degree rotation of `K`
 /// (residual ~ 1.7e-2) cannot pass.
-pub const ANISOTROPY_RESIDUAL_LIMIT: Scalar = 1.0e-10;
+///
+/// The residual is measured in f64 on the [`HostMesh::geom64`] view in both
+/// builds and compared with this f64 number, so the f32 build's floor is f64
+/// round-off (about `2e-16`), not f32's `2^-23` (SPEC-LIT §118.3).
+pub const ANISOTROPY_RESIDUAL_LIMIT: f64 = 1.0e-10;
 
 /// The face half of [`Conduction::build`] and [`Conduction::rebuild`]:
 /// both face loops, the two §46.4 metrics, and the faces they peak on.
@@ -1296,8 +1398,9 @@ struct Faces {
     gamma_mag_sf: Vec<Scalar>,
     b_gamma_mag_sf: Vec<Scalar>,
     b_conductance: Vec<Scalar>,
-    worst_alignment: Scalar,
-    worst_residual: Scalar,
+    /// The two §46.4 metrics are f64 in both builds (SPEC-LIT §118.3).
+    worst_alignment: f64,
+    worst_residual: f64,
     align_face: (usize, bool),
     resid_face: (usize, bool),
 }
@@ -1305,13 +1408,18 @@ struct Faces {
 impl Conduction {
     /// The face half of [`Conduction::build`] and [`Conduction::rebuild`]:
     /// both face loops, the two §46.4 metrics, and the faces they peak on.
+    ///
+    /// SPEC-LIT §118.3: every number is computed in f64 on the
+    /// [`HostMesh::geom64`] view, and each coefficient stored in a `Scalar`
+    /// array is rounded ONCE, at the store.
     fn faces(m: &ThermalMesh, k: &[Tensor]) -> Faces {
         let h = &m.host;
+        let g = h.geom64();
         let mut gamma_mag_sf = vec![0.0 as Scalar; h.n_internal_faces];
         let mut b_gamma_mag_sf = vec![0.0 as Scalar; h.n_boundary_faces];
         let mut b_conductance = vec![0.0 as Scalar; h.n_boundary_faces];
-        let mut worst_alignment = Scalar::INFINITY;
-        let mut worst_residual: Scalar = 0.0;
+        let mut worst_alignment = f64::INFINITY;
+        let mut worst_residual: f64 = 0.0;
         // The two metrics can peak on different faces, and a message that
         // names the wrong one sends the reader to the wrong place.
         let mut align_face = (0usize, false);
@@ -1319,11 +1427,11 @@ impl Conduction {
 
         for f in 0..h.n_internal_faces {
             let (o, n) = (h.owner[f] as usize, h.neighbour[f] as usize);
-            let sf = h.sf[f];
-            let cf = h.cf[f];
+            let sf = g.sf[f];
+            let cf = g.cf[f];
 
-            let (dp, ap, rp) = one_sided_conductance(k[o], sf, cf - h.c[o]);
-            let (dn, an, rn) = one_sided_conductance(k[n], sf, h.c[n] - cf);
+            let (dp, ap, rp) = one_sided_conductance(k[o], sf, cf - g.c[o]);
+            let (dn, an, rn) = one_sided_conductance(k[n], sf, g.c[n] - cf);
 
             if ap.min(an) < worst_alignment {
                 worst_alignment = ap.min(an);
@@ -1339,14 +1447,14 @@ impl Conduction {
             } else {
                 0.0
             };
-            let delta = h.delta_coeffs[f];
-            gamma_mag_sf[f] = if delta > 0.0 { dhat / delta } else { 0.0 };
+            let delta = g.delta_coeffs[f];
+            gamma_mag_sf[f] = (if delta > 0.0 { dhat / delta } else { 0.0 }) as Scalar;
         }
 
         for bf in 0..h.n_boundary_faces {
             let c = h.b_face_cells[bf] as usize;
-            let sf = h.b_sf[bf];
-            let (dhat, a, r) = one_sided_conductance(k[c], sf, h.b_cf[bf] - h.c[c]);
+            let sf = g.b_sf[bf];
+            let (dhat, a, r) = one_sided_conductance(k[c], sf, g.b_cf[bf] - g.c[c]);
 
             if a < worst_alignment {
                 worst_alignment = a;
@@ -1357,10 +1465,10 @@ impl Conduction {
                 resid_face = (bf, true);
             }
 
-            let delta = h.b_delta_coeffs[bf];
-            b_gamma_mag_sf[bf] = if delta > 0.0 { dhat / delta } else { 0.0 };
-            let mag = h.b_mag_sf[bf];
-            b_conductance[bf] = if mag > 0.0 { dhat / mag } else { 0.0 };
+            let delta = g.b_delta_coeffs[bf];
+            b_gamma_mag_sf[bf] = (if delta > 0.0 { dhat / delta } else { 0.0 }) as Scalar;
+            let mag = g.b_mag_sf[bf];
+            b_conductance[bf] = (if mag > 0.0 { dhat / mag } else { 0.0 }) as Scalar;
         }
         Faces {
             gamma_mag_sf,
@@ -1458,8 +1566,8 @@ impl Conduction {
             b_gamma_mag_sf: f.b_gamma_mag_sf,
             b_conductance: f.b_conductance,
             rho_c,
-            worst_alignment: f.worst_alignment,
-            worst_residual: f.worst_residual,
+            worst_alignment: f.worst_alignment as Scalar,
+            worst_residual: f.worst_residual as Scalar,
         })
     }
 
@@ -1486,8 +1594,8 @@ impl Conduction {
         self.b_conductance = f.b_conductance;
         self.rho_c.clear();
         self.rho_c.extend_from_slice(rho_c);
-        self.worst_alignment = f.worst_alignment;
-        self.worst_residual = f.worst_residual;
+        self.worst_alignment = f.worst_alignment as Scalar;
+        self.worst_residual = f.worst_residual as Scalar;
         Ok(())
     }
 
