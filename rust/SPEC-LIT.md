@@ -37703,6 +37703,29 @@ angle `39.31393184481887` degrees, `p_2/p_1 = 1.706578604000033`,
 `p_t2/p_t1 = 0.7883594291`) recovers `A_s/A_* = 1.5` to `2.2e-16`. CMP-06's round trip is
 held to `1e-10` (class R).
 
+**Landed (CMP-06).** `rust/src/compressible/exact.rs` holds (127.2)-(127.4) and the shocked
+nozzle above as host functions, in `f64` in both builds: an answer key is a constant of a gate,
+never a `Scalar`. Every root is found by bisection on a bracket over which its function is
+monotone: the subsonic area-Mach root in `[0, 1]` and the supersonic one in `[1, 50]`
+(`MACH_MAX`; a root beyond it is refused by name), the supersonic root of NACA (99) in
+`[1, 50]`, the weak root of (139b) between the Mach angle and `theta_max`, which maximises
+(139b) by golden-section search, and the nozzle's exit Mach in `[0, 1]`, where
+`(p/p_t)(A/A_*)` decreases monotonically. The round trip inverts the forward map, which is the
+same relations in the other order (derived): `M_1` is the supersonic root of
+`(A/A_*)(M_1) = A_s/A_*1`, `p_t2/p_t1` is (99) at `M_1`, `M_e` is the subsonic root of
+`(A/A_*)(M_e) = (A_e/A_*1)(p_t2/p_t1)`, and `p_b/p_t1 = (p/p_t)(M_e) (p_t2/p_t1)`. **The
+regimes of a nozzle `A_e/A_*1`** (derived from (127.2)-(127.3)): with `M_sub` and `M_sup` the
+two roots of `(A/A_*)(M) = A_e/A_*1`, a normal shock stands inside the nozzle exactly when
+`p_b/p_t1` lies in `[(p/p_t)(M_sup) (p_2/p_1)(M_sup), (p/p_t)(M_sub)]`. The upper end puts
+the shock at the throat and the lower end at the exit; above the interval the flow downstream
+of the throat is subsonic, below it the shock stands outside the exit, and
+`(p/p_t)(M_sup)` is the shock-free design exit. For `A_e/A_* = 2` the three values are
+`0.9371625024322055`, `0.5134007279957163` and `0.09393264573284488`, and outside the interval
+`shocked_nozzle` refuses by name. An independent 50-digit evaluation (the CMP-06 oracle,
+outside the tree) reproduces every oracle value printed above to `3e-16` relative.
+`compressible::exact::tests` holds the closed forms to `4e-15` relative and the round trip
+to `1e-10` (13 tests).
+
 **The exact Riemann problem** (CMP-07; derived). Across a shock moving into state
 `K = L, R` at rest relative to its own frame, NACA (84)-(85) (mass and momentum) and
 (91) (the Hugoniot `rho_2/rho_1`) give the velocity jump; across a rarefaction the
