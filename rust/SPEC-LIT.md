@@ -39292,6 +39292,7 @@ Labels: (137.1)-(137.3).
 | Smith, Shen & Friedman 1982 | 10.1115/1.3245174 | closed | no | DOI confirmed; NAMED |
 | Barlow & Frank 1998 (Flame D) | 10.1016/S0082-0784(98)80510-9 | closed | no | DOI confirmed (CHR-00d / CHR-16) |
 | Bösenhofer, Wartha, Jordan & Harasek 2018 (EDC fine-structure treatments) | 10.3390/en11071902 | CC BY (MDPI), bot-walled here | no | candidate for the Flame D band below |
+| TNF archive, Sandia/TUD piloted CH4/air flames C-F (Data Release 2.0, documentation Release 2.1) | tnfworkshop.org/data-archives/pilotedjet/ch4-air/ | open; "No special permission is needed to include these data in further publications" | yes (CHR-00d) | **added**: the Flame D answer key of §137.5, in place of reading Barlow & Frank 1998 |
 
 **The Flame D band (CHR-16, DEFERRED).** The plan asks for the band to be set
 here "from published RANS-EDC studies, not tuned to our result". No such
@@ -39302,5 +39303,82 @@ recommendation as a **DESIGN band, not a literature band**: centreline
 fixed now, before any run of ours exists, so it cannot have been tuned to one.
 CHR-16's DEFERRED comparison reports it under that label until a read study
 replaces it.
+
+### 137.5 The Flame D answer key — the TNF archive's Favre profiles and its mixture fraction
+
+**Read:** the TNF Workshop's archive of the Sandia/TUD piloted CH4/air flames
+(`tnfworkshop.org/data-archives/pilotedjet/ch4-air/`, read 2026-10-07):
+`pmCDEF.zip`, Data Release 2.0 (sha256
+`83089b2f0bb59101c15b275e2e3d073feea2900646a46f3cf957c963a1258dc4`), and its
+documentation `SandiaPilotDoc21.pdf`, Release 2.1 of 15 June 2007 (sha256
+`4e748acd113f3d72fe814be6e5b1e27154577b5040951d59a015e9d287209f72`). The
+documentation's "Use of the data" says: "No special permission is needed to
+include these data in further publications." The release was sponsored by
+the US Government (its NOTICE). Barlow & Frank 1998 itself was not read.
+
+**The key (CHR-00d).** `reference/tnf-flameD/` holds four files:
+`centreline_Yfav.csv`, `x15_Yfav.csv`, `x30_Yfav.csv` and `x45_Yfav.csv`.
+They are the archive's `DCL`, `D15`, `D30` and `D45` `.Yfav` files: Favre
+averages and rms of F, T and eleven measured species. Every column is kept,
+digit for digit, and nothing is digitised. The archive labels the centreline
+file's first column `r/d`, but it is `x/d`, and the key names it `x_d`. The
+x/d = 15 profile prints the station r/d = 0.28 twice, and both rows are kept.
+
+The plan names only the centreline and x/d = 15, 30 and 45. The key therefore
+does **not** transcribe:
+
+- the other radial stations (x/d = 1, 2, 3, 7.5, 60 and 75);
+- the Reynolds averages (`.Yave`) and the conditional statistics (`.Ycnd`);
+- the single-shot scatter (`.Yall`);
+- TU Darmstadt's LDV velocities (`TUD_LDV_DEF.zip`).
+
+**The mixture fraction.** The documentation's "Mixture fraction definition"
+is Bilger's with only the H and C element mass fractions:
+
+```
+F = [0.5 (Y_H - Y_H2)/W_H + 2 (Y_C - Y_C2)/W_C] / [0.5 (Y_H1 - Y_H2)/W_H + 2 (Y_C1 - Y_C2)/W_C]   (137.4)
+Y_H = Σ_k n_H,k W_H Y_k / W_k,        Y_C = Σ_k n_C,k W_C Y_k / W_k                                  (137.5)
+```
+
+The values in these formulas are:
+
+- `W_H = 1.008` and `W_C = 12.011` are the documentation's atomic weights.
+- The jet stream is `Y_H1 = 0.0393`, `Y_C1 = 0.1170`.
+- The coflow is `Y_H2 = 0.0007`, `Y_C2 = 0.0000`.
+- The stoichiometric value is `F_stoic = 0.351`.
+
+(137.5) is the definition of an element mass fraction, summed over the
+measured carriers: H in H2, H2O, CH4 and OH, and C in CH4, CO and CO2. Each
+`W_k` is formed from `W_H`, `W_C` and `W_O = 15.999`. That O weight is a
+DESIGN choice, because the documentation gives none; it moves F by less than
+1e-4.
+
+**The key's own checks.** (137.4)-(137.5) are affine in `Y`. So each row's
+Favre-mean species, with CO from LIF, rebuild the row's printed `f`. Over all
+60 rows the worst difference is 2.95e-3, at x/d = 15, r/d = -0.56. The nine
+measured mass fractions sum to 1 within 9.8e-4. With CO from Raman, the same
+two figures are 6.3e-3 and 3.7e-3. The documentation says to compare models
+with the LIF CO. The tests' tolerances, 5e-3 and 2e-3, are transcription
+guards, not physics.
+
+**CHR-16's anchors.** The centreline `T_max` is 1945 K at x/d = 45, the
+archive's largest centreline value. The stations are 5 apart, so §137.4's
+band of ±5 x/d is one station. Linear interpolation of `f = 0.351` between
+x/d = 45 and 50 gives `L_stoic/d = 47.545`. The documentation prints 47.0 for
+flame D, "based upon interpolation", without naming its interpolant. The key
+holds `|L_stoic/d - 47.0| <= 1` and does not claim more. Each radial profile's
+r/d = 0 row repeats the centreline station at its x/d within the archive's
+own repeatability:
+
+- `|Δf|` is at most 0.0098 (x/d = 45).
+- `|ΔT|/T` is at most 1.7 % (x/d = 15).
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `tnf_flame_d_keys_hold_their_columns_and_stations` | headers, row counts, stations, pinned cells, signs | exact | D |
+| `tnf_flame_d_rows_close_their_mass_and_mixture_fraction` | (137.4)-(137.5) with CO-LIF against `f`; `Σ Y - 1` | 5e-3; 2e-3 | A |
+| `tnf_flame_d_centreline_anchors_the_chr16_band` | `T_max` and its x/d; `L_stoic/d` against 47.0; r/d = 0 rows against the centreline; the coflow edge | exact; 1; 0.015 and 3 %; `f <= 0.005`, `T <= 330 K` | D |
+
+Labels: (137.4)-(137.5).
 
 ---

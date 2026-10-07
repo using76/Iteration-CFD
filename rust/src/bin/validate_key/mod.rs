@@ -796,7 +796,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 23, "twenty-three markers, found {markers:?}");
+        assert_eq!(markers.len(), 27, "twenty-seven markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -821,6 +821,10 @@ mod tests {
                 "mcbride-gordon-reno1993-table-II",
                 "ivptestset2008-rober",
                 "ivptestset2008-hires",
+                "tnf-flameD-centreline",
+                "tnf-flameD-x15",
+                "tnf-flameD-x30",
+                "tnf-flameD-x45",
             ]
         );
         for row in &m.rows {
@@ -1170,5 +1174,413 @@ mod tests {
             "{HIRES}: y7 + y8 - 0.0057 is {enzyme:e}, beyond 1e-17"
         );
         println!("  [answer-key] hires y7 + y8 - 0.0057 = {enzyme:e}");
+    }
+
+    // ------------------------------------------- the TNF Flame D answer keys --
+
+    /// The four Flame D keys, centreline first (SPEC-LIT section 137.5).
+    const TNF_IDS: [&str; 4] = [
+        "tnf-flameD-centreline",
+        "tnf-flameD-x15",
+        "tnf-flameD-x30",
+        "tnf-flameD-x45",
+    ];
+
+    /// The 24 columns after the station column, in the archive's order, that
+    /// all four keys share.
+    const TNF_COLUMNS: [&str; 24] = [
+        "f",
+        "f_rms",
+        "t",
+        "t_rms",
+        "y_o2",
+        "y_o2_rms",
+        "y_n2",
+        "y_n2_rms",
+        "y_h2",
+        "y_h2_rms",
+        "y_h2o",
+        "y_h2o_rms",
+        "y_ch4",
+        "y_ch4_rms",
+        "y_co_raman",
+        "y_co_raman_rms",
+        "y_co2",
+        "y_co2_rms",
+        "y_oh",
+        "y_oh_rms",
+        "y_no",
+        "y_no_rms",
+        "y_co_lif",
+        "y_co_lif_rms",
+    ];
+
+    /// The atomic weights of SPEC-LIT section 137.5, g/mol. The O weight is
+    /// that section's DESIGN choice, because the documentation gives none.
+    const TNF_W_H: f64 = 1.008;
+    const TNF_W_C: f64 = 12.011;
+    const TNF_W_O: f64 = 15.999;
+    /// The jet stream (1) and the coflow (2) element mass fractions that
+    /// close (137.4), from SPEC-LIT section 137.5.
+    const TNF_Y_H1: f64 = 0.0393;
+    const TNF_Y_C1: f64 = 0.1170;
+    const TNF_Y_H2: f64 = 0.0007;
+    const TNF_Y_C2: f64 = 0.0;
+    /// The stoichiometric mixture fraction of SPEC-LIT section 137.5.
+    const TNF_F_STOIC: f64 = 0.351;
+
+    /// All four Flame D keys, loaded and verified, in [`TNF_IDS`]'s order.
+    fn tnf_keys() -> Vec<KeyFile> {
+        TNF_IDS
+            .iter()
+            .map(|id| load(id).unwrap_or_else(|e| panic!("{id}: the key loads: {e}")))
+            .collect()
+    }
+
+    /// One cell of a Flame D key, by data-row index and column name.
+    fn tnf_cell(key: &KeyFile, row: usize, name: &str) -> f64 {
+        let at = key
+            .columns
+            .iter()
+            .position(|c| c == name)
+            .unwrap_or_else(|| panic!("{}: no column named {name}", key.id));
+        key.rows[row][at]
+    }
+
+    /// The denominator of (137.4): the jet stream's `0.5 (Y_H1 - Y_H2)/W_H +
+    /// 2 (Y_C1 - Y_C2)/W_C`, SPEC-LIT section 137.5.
+    fn tnf_denominator() -> f64 {
+        0.5 * (TNF_Y_H1 - TNF_Y_H2) / TNF_W_H + 2.0 * (TNF_Y_C1 - TNF_Y_C2) / TNF_W_C
+    }
+
+    /// The mixture fraction of one row by (137.4)-(137.5), SPEC-LIT section
+    /// 137.5, from the row's Favre-mean species. `co` names the CO column,
+    /// `"y_co_lif"` or `"y_co_raman"`. The H carriers are H2, H2O, CH4 and
+    /// OH, the C carriers CH4, CO and CO2.
+    fn tnf_mixture_fraction(key: &KeyFile, row: usize, co: &str) -> f64 {
+        let y = |name: &str| tnf_cell(key, row, name);
+        let w_h2 = 2.0 * TNF_W_H;
+        let w_h2o = 2.0 * TNF_W_H + TNF_W_O;
+        let w_ch4 = TNF_W_C + 4.0 * TNF_W_H;
+        let w_oh = TNF_W_O + TNF_W_H;
+        let w_co = TNF_W_C + TNF_W_O;
+        let w_co2 = TNF_W_C + 2.0 * TNF_W_O;
+        // (137.5): Y_H = sum_k n_H,k W_H Y_k / W_k, H2's term being y_h2 itself.
+        let y_h = 2.0 * TNF_W_H * y("y_h2") / w_h2
+            + 2.0 * TNF_W_H * y("y_h2o") / w_h2o
+            + 4.0 * TNF_W_H * y("y_ch4") / w_ch4
+            + TNF_W_H * y("y_oh") / w_oh;
+        // (137.5): Y_C = sum_k n_C,k W_C Y_k / W_k.
+        let y_c = TNF_W_C * y("y_ch4") / w_ch4
+            + TNF_W_C * y(co) / w_co
+            + TNF_W_C * y("y_co2") / w_co2;
+        // (137.4): Bilger's F with the H and C element mass fractions only.
+        (0.5 * (y_h - TNF_Y_H2) / TNF_W_H + 2.0 * (y_c - TNF_Y_C2) / TNF_W_C) / tnf_denominator()
+    }
+
+    /// The nine measured mass fractions of one row, summed: O2, N2, H2, H2O,
+    /// CH4, CO (`co` names the column), CO2, OH and NO.
+    fn tnf_mass_sum(key: &KeyFile, row: usize, co: &str) -> f64 {
+        let y = |name: &str| tnf_cell(key, row, name);
+        y("y_o2")
+            + y("y_n2")
+            + y("y_h2")
+            + y("y_h2o")
+            + y("y_ch4")
+            + y(co)
+            + y("y_co2")
+            + y("y_oh")
+            + y("y_no")
+    }
+
+    #[test]
+    fn tnf_flame_d_keys_hold_their_columns_and_stations() {
+        // answer-key: tnf-flameD-centreline
+        // answer-key: tnf-flameD-x15
+        // answer-key: tnf-flameD-x30
+        // answer-key: tnf-flameD-x45
+        let keys = tnf_keys();
+        let [cl, x15, x30, x45] = &keys[..] else {
+            panic!("four Flame D keys, found {}", keys.len());
+        };
+
+        // 1. The headers: the station column, then the 24 shared names.
+        let header = |first: &str| -> Vec<String> {
+            std::iter::once(first)
+                .chain(TNF_COLUMNS)
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(cl.columns.len(), 25, "{}: 25 header names", cl.id);
+        assert_eq!(cl.columns, header("x_d"), "{}: the header row", cl.id);
+        for key in [x15, x30, x45] {
+            assert_eq!(key.columns.len(), 25, "{}: 25 header names", key.id);
+            assert_eq!(key.columns, header("r_d"), "{}: the header row", key.id);
+        }
+
+        // 2. The row counts.
+        for (key, want) in [(cl, 16), (x15, 15), (x30, 15), (x45, 14)] {
+            assert_eq!(key.rows.len(), want, "{}: the row count", key.id);
+        }
+
+        // 3. The centreline stations, x/d = 5 to 80 in steps of 5.
+        let x_d: Vec<f64> = (1..=16).map(|i| 5.0 * f64::from(i)).collect();
+        let got = cl.column("x_d").expect("the x_d column");
+        assert_eq!(got, x_d, "{}: the x_d column", cl.id);
+
+        // 4. The radial stations; x/d = 15 prints r/d = 0.28 twice.
+        let r_x15 = [
+            -0.56, -0.28, 0.0, 0.28, 0.28, 0.56, 0.83, 1.11, 1.39, 1.67, 1.94, 2.22, 2.5, 2.78,
+            3.06,
+        ];
+        let r_x30 = [
+            -0.83, -0.42, 0.0, 0.42, 0.83, 1.25, 1.67, 2.08, 2.5, 2.92, 3.33, 3.75, 4.17, 5.0,
+            5.83,
+        ];
+        let r_x45 = [
+            -1.11, -0.56, 0.0, 0.56, 1.11, 1.67, 2.22, 2.78, 3.33, 3.89, 4.44, 5.56, 6.67, 7.78,
+        ];
+        let r_d = |key: &KeyFile| key.column("r_d").expect("the r_d column");
+        assert_eq!(r_d(x15), r_x15, "{}: the r_d column", x15.id);
+        assert_eq!(r_d(x30), r_x30, "{}: the r_d column", x30.id);
+        assert_eq!(r_d(x45), r_x45, "{}: the r_d column", x45.id);
+
+        // 5. The pinned cells, the ones a retyping would bend first.
+        let pin = |key: &KeyFile, row: usize, name: &str, want: f64| {
+            assert_eq!(
+                tnf_cell(key, row, name),
+                want,
+                "{}: row {row}: the {name} cell",
+                key.id
+            );
+        };
+        pin(cl, 0, "f", 0.9853);
+        pin(cl, 0, "t", 298.0);
+        pin(cl, 8, "x_d", 45.0);
+        pin(cl, 8, "t", 1945.0);
+        pin(cl, 8, "f", 0.3904);
+        pin(cl, 15, "f", 0.1176);
+        pin(cl, 15, "y_co_lif_rms", 2.45e-4);
+        pin(x15, 3, "f", 0.9011);
+        pin(x15, 4, "f", 0.9018);
+        pin(x30, 2, "f", 0.6817);
+        pin(x30, 2, "t", 1262.0);
+        pin(x30, 14, "f", 0.0);
+        pin(x45, 0, "t", 1852.0);
+        pin(x45, 13, "y_co_lif_rms", 4.32e-5);
+
+        // 6. Signs and ranges, over every row of the four keys.
+        for key in &keys {
+            for (row, cells) in key.rows.iter().enumerate() {
+                let station = cells[0];
+                for (name, &v) in key.columns.iter().zip(cells) {
+                    let at = format!("{}: row {row} (station {station}): {name} = {v}", key.id);
+                    match name.as_str() {
+                        "f" => assert!((0.0..=1.0).contains(&v), "{at}: f lies in [0, 1]"),
+                        "t" => assert!(
+                            (290.0..=2100.0).contains(&v),
+                            "{at}: t lies in [290, 2100] K"
+                        ),
+                        _ => {}
+                    }
+                    if name.ends_with("_rms") {
+                        assert!(v >= 0.0, "{at}: an rms is not negative");
+                    } else if name.starts_with("y_") {
+                        assert!(v >= 0.0, "{at}: a mass fraction is not negative");
+                    }
+                }
+            }
+        }
+
+        // 7. One line per key.
+        for key in &keys {
+            let first = key.rows.first().map_or(f64::NAN, |r| r[0]);
+            let last = key.rows.last().map_or(f64::NAN, |r| r[0]);
+            println!(
+                "  [answer-key] tnf {}  {} rows  stations {first} to {last}",
+                key.id,
+                key.rows.len()
+            );
+        }
+    }
+
+    #[test]
+    fn tnf_flame_d_rows_close_their_mass_and_mixture_fraction() {
+        let keys = tnf_keys();
+        // The oracle's denominator of (137.4), a guard on the typed constants
+        // of SPEC-LIT section 137.5 before any row is read.
+        let den = tnf_denominator();
+        assert!(
+            (den - 0.03862896676723586).abs() <= 1.0e-15,
+            "the denominator of (137.4) is {den}, the oracle's is 0.03862896676723586"
+        );
+        for key in &keys {
+            // (value, row) of the worst difference, for each CO column.
+            let (mut lif_f, mut lif_s) = ((0.0_f64, 0_usize), (0.0_f64, 0_usize));
+            let (mut raman_f, mut raman_s) = ((0.0_f64, 0_usize), (0.0_f64, 0_usize));
+            for (row, cells) in key.rows.iter().enumerate() {
+                let station = cells[0];
+                let f = tnf_cell(key, row, "f");
+                let df = (tnf_mixture_fraction(key, row, "y_co_lif") - f).abs();
+                let ds = (tnf_mass_sum(key, row, "y_co_lif") - 1.0).abs();
+                // The documentation says models are compared with the LIF CO,
+                // and the Raman CO carries hydrocarbon interference. So the
+                // Raman figures are printed and never asserted.
+                let rf = (tnf_mixture_fraction(key, row, "y_co_raman") - f).abs();
+                let rs = (tnf_mass_sum(key, row, "y_co_raman") - 1.0).abs();
+                // 1. (137.4)-(137.5) rebuild the printed f (SPEC-LIT section 137.5).
+                assert!(
+                    df <= 5.0e-3,
+                    "{}: row {row} (station {station}): (137.4)-(137.5) with CO from LIF give \
+                     f = {}, printed {f}, differing by {df:e}, beyond 5e-3",
+                    key.id,
+                    tnf_mixture_fraction(key, row, "y_co_lif")
+                );
+                // 2. The nine measured mass fractions sum to one.
+                assert!(
+                    ds <= 2.0e-3,
+                    "{}: row {row} (station {station}): the nine mass fractions with CO from \
+                     LIF sum to {}, which is {ds:e} from 1, beyond 2e-3",
+                    key.id,
+                    tnf_mass_sum(key, row, "y_co_lif")
+                );
+                if df > lif_f.0 {
+                    lif_f = (df, row);
+                }
+                if ds > lif_s.0 {
+                    lif_s = (ds, row);
+                }
+                if rf > raman_f.0 {
+                    raman_f = (rf, row);
+                }
+                if rs > raman_s.0 {
+                    raman_s = (rs, row);
+                }
+            }
+            println!(
+                "  [answer-key] tnf mix {}  lif |F - f| {:.6e} (row {})  lif |sum - 1| {:.6e} \
+                 (row {})  raman |F - f| {:.6e} (row {})  raman |sum - 1| {:.6e} (row {})",
+                key.id, lif_f.0, lif_f.1, lif_s.0, lif_s.1, raman_f.0, raman_f.1, raman_s.0,
+                raman_s.1
+            );
+        }
+    }
+
+    #[test]
+    fn tnf_flame_d_centreline_anchors_the_chr16_band() {
+        let keys = tnf_keys();
+        let [cl, x15, x30, x45] = &keys[..] else {
+            panic!("four Flame D keys, found {}", keys.len());
+        };
+        let col = |key: &KeyFile, name: &str| {
+            key.column(name)
+                .unwrap_or_else(|e| panic!("{}: the column {name}: {e}", key.id))
+        };
+        let x_d = col(cl, "x_d");
+        let f = col(cl, "f");
+        let t = col(cl, "t");
+
+        // 1. T_max: the largest centreline temperature, once, at x/d = 45
+        // (SPEC-LIT section 137.5's anchor for CHR-16's band).
+        let t_max = t.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(t_max, 1945.0, "{}: the largest centreline t", cl.id);
+        let at_max: Vec<usize> = t
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v == t_max)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            at_max.len(),
+            1,
+            "{}: T_max occurs at rows {at_max:?}, not at exactly one row",
+            cl.id
+        );
+        assert_eq!(
+            x_d[at_max[0]], 45.0,
+            "{}: row {}: T_max sits at x/d {}",
+            cl.id, at_max[0], x_d[at_max[0]]
+        );
+
+        // 2. The stoichiometric length: f = 0.351 crossed between two
+        // stations, interpolated linearly.
+        let i = (0..f.len() - 1)
+            .find(|&i| f[i] >= TNF_F_STOIC && TNF_F_STOIC > f[i + 1])
+            .unwrap_or_else(|| panic!("{}: f never crosses {TNF_F_STOIC}", cl.id));
+        assert_eq!(i, 8, "{}: f crosses {TNF_F_STOIC} after row {i}", cl.id);
+        let l_stoic = x_d[i] + (x_d[i + 1] - x_d[i]) * (f[i] - TNF_F_STOIC) / (f[i] - f[i + 1]);
+        assert!(
+            (l_stoic - 47.5452196382429).abs() <= 1.0e-12,
+            "{}: rows {i} and {}: L_stoic/d interpolates to {l_stoic}, the supervisor's f64 \
+             value is 47.5452196382429",
+            cl.id,
+            i + 1
+        );
+        // 47.0 is the documentation's printed L_stoic/d for flame D; its
+        // interpolant is not stated, and the measured difference is 0.545.
+        assert!(
+            (l_stoic - 47.0).abs() <= 1.0,
+            "{}: rows {i} and {}: L_stoic/d is {l_stoic}, more than 1 from the printed 47.0",
+            cl.id,
+            i + 1
+        );
+
+        // 3. Each radial profile's r/d = 0 row repeats the centreline station
+        // at its x/d, within the archive's own repeatability.
+        let mut repeats = Vec::new();
+        for (key, station) in [(x15, 15.0), (x30, 30.0), (x45, 45.0)] {
+            let r_d = col(key, "r_d");
+            let r0 = r_d
+                .iter()
+                .position(|&r| r == 0.0)
+                .unwrap_or_else(|| panic!("{}: no row has r/d = 0", key.id));
+            assert_eq!(r0, 2, "{}: the r/d = 0 row is row {r0}", key.id);
+            let c = x_d
+                .iter()
+                .position(|&x| x == station)
+                .unwrap_or_else(|| panic!("{}: no row has x/d = {station}", cl.id));
+            let df = tnf_cell(key, r0, "f") - f[c];
+            let dt = tnf_cell(key, r0, "t") - t[c];
+            let rel = dt.abs() / t[c];
+            assert!(
+                df.abs() <= 0.015,
+                "{}: row {r0} against {} row {c}: f differs by {df:+}, beyond 0.015",
+                key.id,
+                cl.id
+            );
+            assert!(
+                rel <= 0.03,
+                "{}: row {r0} against {} row {c}: t differs by {dt:+} K ({rel:e} relative), \
+                 beyond 3 %",
+                key.id,
+                cl.id
+            );
+            repeats.push((key.id.clone(), df, dt, rel));
+        }
+
+        // 4. The coflow edge: the last station of each radial profile is air.
+        for key in [x15, x30, x45] {
+            let last = key.rows.len() - 1;
+            let (f_edge, t_edge) = (tnf_cell(key, last, "f"), tnf_cell(key, last, "t"));
+            assert!(
+                f_edge <= 0.005,
+                "{}: row {last}: f = {f_edge} at the coflow edge, beyond 0.005",
+                key.id
+            );
+            assert!(
+                t_edge <= 330.0,
+                "{}: row {last}: t = {t_edge} K at the coflow edge, beyond 330 K",
+                key.id
+            );
+        }
+
+        // 5. The printed lines.
+        println!(
+            "  [answer-key] tnf T_max {t_max:.0} K at x/d {:.0}, L_stoic/d {l_stoic:.3} (printed 47.0)",
+            x_d[at_max[0]]
+        );
+        for (id, df, dt, rel) in &repeats {
+            println!("  [answer-key] tnf {id}  r/d = 0 against the centreline  df {df:+.4}  dT {dt:+} K  rel {rel:.4e}");
+        }
     }
 }
