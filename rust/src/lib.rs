@@ -38,6 +38,8 @@
 //!   fluid/solid interface is a cyclic couple with a zero transform
 //! * [`chem`] - NASA seven-coefficient species thermochemistry read from
 //!   CHEMKIN THERMO records, and the ideal-gas mixture (SPEC-LIT §128)
+//! * [`compressible`] - the pressure-based all-speed compressible solver of
+//!   SPEC-LIT §122-§127; so far its host answer keys (`exact`, §127.2)
 //! * [`blockgen`] - a structured mesh generator, so test cases need no OpenFOAM
 //! * [`reference`] - an independent CPU transcription used only to validate
 //!
@@ -75,6 +77,7 @@ pub mod restart;
 pub mod rheology;
 pub mod cht;
 pub mod chem;
+pub mod compressible;
 pub mod dcmetrics;
 pub mod fan;
 pub mod psychro;

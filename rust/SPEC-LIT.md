@@ -37188,6 +37188,821 @@ term, §50.8); the planned names refused by their own arm today keep theirs
 (`uniformFixedValue` runs `fixedValue`, `cyclicAMI` a position-paired
 `cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`,
 `externalWallHeatFluxTemperature` `fixedFluxTemperature`).
+
+## 122. The compressible gas — the perfect-gas state, the gauge pressure about `p_op`, Sutherland, and the f32 design
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §122-§127 to the
+compressible formulation of tranche 17. CMP-05 wrote all six sections as contracts.
+CMP-06 to CMP-29 implement them, and each of those units amends its own section in
+place when it lands (a "Landed" paragraph with what it measured). No code was read
+for these sections. In particular no OpenFOAM solver or boundary-condition source
+(`rhoCentralFoam`, `rhoPimpleFoam`, `rhoSimpleFoam`, `sonicFoam`, `waveTransmissive`,
+`totalTemperature`) and no SU2 file (LGPL) was read. Boundary-condition and dictionary
+NAMES follow the public user guides by name only (§120). In these six sections an
+equation label and a subsection can share a number (`(122.1)` and §122.1), so code
+cites a subsection as `§12N.M` and an equation as `(12N.M)`, never the bare `S12N.M`
+form that §80.4's ratchet counts as ambiguous.
+
+**What the solver is.** `ofgpu-compressible` is one pressure-based, all-speed,
+segregated `(U, p, T)` solver in a self-contained module `rust/src/compressible/`
+(`mod.rs`, `thermo.rs`, `momentum.rs`, `pressure.rs`, `energy.rs`, `bc.rs`, `lts.rs`,
+`exact.rs` with `exact/riemann.rs`, `gatemesh.rs`, `tests.rs`), with its kernels in a
+new `rust/cuda/compressible.cu`, on the `vof.rs` precedent. It reuses the `fv`
+operators, the ρ-weighted ddt kernels (`fvDdtEulerRho`, `fvDdtBdf2Rho` in
+`cuda/fv.cu`), the §4 triple, the §7 limiters and the §8 Krylov solvers, and it edits
+none of `crate::momentum`, `crate::simple` or `crate::energy`, so §25, §26 and §59
+stay bitwise. *DESIGN* (docs/17 COMP decision 1): pressure-based rather than
+density-based, because every boundary condition, scheme, solver, writer, reader,
+turbulence model and the studio is keyed to a segregated `(U, p, T)` solver, and the
+pressure-based route has an exact incompressible limit ((124.6)). A density-based
+HLLC module is a contingency that needs the user (docs/17 §2, COMP §5 risk 2).
+
+**A note on what "read" means in §122-§127.** As in §128: each source is marked
+**read** (and where) or *not read*. A DOI marked *not read* was checked on Crossref
+(title, authors, journal, volume and pages agree). Every equation below is either
+stated from a source marked **read**, or derived in the text from such equations and
+marked as derived. Numbers are not recalled: every numeric value below was read from
+a source or computed by the CMP-05 oracle (an independent f64 Python evaluation of the
+equations as written here, kept outside the tree), and says which.
+
+**Sources.**
+
+* **Ames Research Staff**, *Equations, Tables, and Charts for Compressible Flow*,
+  NACA Report 1135 (1953), NTRS 19930091059 (`ntrs.nasa.gov/citations/19930091059`).
+  US-Government work, cleared for public use. **Read** from the page images of the
+  NTRS PDF (its text layer is OCR and is corrupt): eqs. (34)-(46) (p. 5 of the PDF),
+  (79)-(80) (p. 7), (89)-(99) (p. 8) and (125)-(141) (p. 10).
+* **Carlson, J.-R.**, *Inflow/Outflow Boundary Conditions with Application to
+  FUN3D*, NASA/TM-2011-217181 (2011), NTRS 20110022658
+  (`ntrs.nasa.gov/citations/20110022658`). US-Government work. **Read**: §1 and
+  Table 1; §2.2 eqs. (8)-(18) (the Riemann-invariant boundary); §2.4 eqs. (25)-(26)
+  (back pressure with the supersonic switch); §2.7 eqs. (35)-(47) (subsonic total
+  inflow); §2.8 eqs. (48)-(55) (mass-flow inflow); §2.9 eq. (57) (supersonic inflow).
+* **NOAA/NASA/USAF**, *U.S. Standard Atmosphere, 1976*, NASA-TM-X-74335, NTRS
+  19770009539 (`ntrs.nasa.gov/citations/19770009539`). **Read**: §1.3.11 eq. (51)
+  on p. 19 of the report (Sutherland's law with its two constants), and the NTRS
+  errata sheet, which confirms S = 110.4 K against a misprint in Table 2.
+* **Sutherland, W.** (1893), "The viscosity of gases and molecular force", *Phil.
+  Mag.* (5) 36:507-531, DOI 10.1080/14786449308620508. *Not read* (the law's form
+  and constants are taken from the Standard Atmosphere above).
+* **NASA Turbulence Modeling Resource**, the Spalart-Allmaras page,
+  `tmbwg.github.io/turbmodels/spalart.html` (the page `src/models/spalart_allmaras.rs`
+  already cites). **Read**: the conservative compressible form of SA and
+  `mu_t = rho nu~ f_v1`.
+* **Karki, K.C. & Patankar, S.V.** (1989), "Pressure based calculation procedure for
+  viscous flows at all speeds in arbitrary configurations", *AIAA J.* 27:1167-1174,
+  DOI 10.2514/3.10242. *Not read.*
+* **Demirdžić, I., Lilek, Ž. & Perić, M.** (1993), "A collocated finite volume method
+  for predicting flows at all speeds", *IJNMF* 16:1029-1050, DOI
+  10.1002/fld.1650161202. *Not read.*
+* **Issa, R.I., Gosman, A.D. & Watkins, A.P.** (1986), "The computation of
+  compressible and incompressible recirculating flows by a non-iterative implicit
+  scheme", *JCP* 62:66-82, DOI 10.1016/0021-9991(86)90100-2. *Not read.*
+* **Hafez, M., South, J. & Murman, E.** (1979), "Artificial compressibility methods
+  for numerical solutions of transonic full potential equation", *AIAA J.*
+  17:838-844, DOI 10.2514/3.61235. *Not read.*
+* **Poinsot, T.J. & Lele, S.K.** (1992), "Boundary conditions for direct simulations
+  of compressible viscous flows", *JCP* 101:104-129, DOI 10.1016/0021-9991(92)90046-2.
+  *Not read.*
+* **Rudy, D.H. & Strikwerda, J.C.** (1980), "A nonreflecting outflow boundary
+  condition for subsonic Navier-Stokes calculations", *JCP* 36:55-70, DOI
+  10.1016/0021-9991(80)90174-6. *Not read.*
+* **Selle, L., Nicoud, F. & Poinsot, T.** (2004), "Actual impedance of nonreflecting
+  boundary conditions: implications for computation of resonators", *AIAA J.*
+  42:958-964, DOI 10.2514/1.1883. *Not read.*
+* **Orlanski, I.** (1976), "A simple boundary condition for unbounded hyperbolic
+  flows", *JCP* 21:251-269, DOI 10.1016/0021-9991(76)90023-1 (BC-09's `advective`).
+  *Not read.*
+* **Courant, R., Friedrichs, K. & Lewy, H.** (1928), "Über die partiellen
+  Differenzengleichungen der mathematischen Physik", *Math. Ann.* 100:32-74, DOI
+  10.1007/BF01448839. *Not read.*
+* **Sod, G.A.** (1978), "A survey of several finite difference methods for systems of
+  nonlinear hyperbolic conservation laws", *JCP* 27:1-31, DOI
+  10.1016/0021-9991(78)90023-2. *Not read* (the gate's initial data is the one CMP-19
+  states; the answer key is (127.6)).
+* **Toro, E.F.** (2009), *Riemann Solvers and Numerical Methods for Fluid Dynamics*,
+  3rd ed., Springer, DOI 10.1007/b79761. *Not read.* (127.5)-(127.7) are derived here
+  from NACA 1135 instead, and the oracle reproduces the star states the plan quotes
+  from Toro.
+* **Ringleb, F.** (1940), "Exakte Lösungen der Differentialgleichungen einer
+  adiabatischen Gasströmung", *ZAMM* 20:185-198, DOI 10.1002/zamm.19400200402. *Not
+  read.* The case page of the International Workshop on High-Order CFD Methods,
+  `cfd.ku.edu/hiocfd/case_c1.2.html`, **read** for its text (its equations are
+  images that did not render); it cites Chiocchia, *Exact solutions to transonic and
+  supersonic flows*, AGARD-AR-211 (1985), *not read*. (127.8)-(127.11) are therefore
+  held to the Euler equations by the oracle, not to a printed source (§127.3).
+* **Moukalled, F., Mangani, L. & Darwish, M.** (2016), *The Finite Volume Method in
+  Computational Fluid Dynamics*, Springer, DOI 10.1007/978-3-319-16874-6, ch. 15-16.
+  *Not read here.*
+* **Ferziger, J.H., Perić, M. & Street, R.L.** (2020), *Computational Methods for
+  Fluid Dynamics*, 4th ed., Springer, DOI 10.1007/978-3-319-99693-6, ch. 11. *Not
+  read here.*
+* **Blazek, J.** (2015), *Computational Fluid Dynamics: Principles and Applications*,
+  3rd ed., Elsevier, DOI 10.1016/C2013-0-19038-1. *Not read here.*
+* **Ghia, U., Ghia, K.N. & Shin, C.T.** (1982), *JCP* 48:387-411, DOI
+  10.1016/0021-9991(82)90058-4: the existing `reference/ghia1982` key.
+* **Gordon, W.J. & Hall, C.A.** (1973), "Construction of curvilinear co-ordinate
+  systems and applications to mesh generation", *IJNME* 7:461-477, DOI
+  10.1002/nme.1620070405 (transfinite interpolation, for CMP-26). *Not read.*
+* **Cook, P.H., McDonald, M.A. & Firmin, M.C.P.** (1979), "Aerofoil RAE 2822 -
+  pressure distributions, and boundary layer and wake measurements", AGARD-AR-138,
+  through the NPARC Alliance validation archive
+  `www.grc.nasa.gov/WWW/wind/valid/raetaf/raetaf.html` (**read** 2026-10-07 for its
+  case and file list, §127.5).
+
+### 122.1 The state
+
+The gas is thermally and calorically perfect. The pressure unknown `p` is a GAUGE
+pressure about a host constant `p_op` (§122.2):
+
+```
+p_abs = p + p_op                                                   [Pa]          (122.1)
+R_s   = R / W ,   R = 8.314462618 J/(mol K)                         [J/(kg K)]    (122.2)
+psi   = 1 / (R_s T) ,   rho = psi p_abs                                           (122.3)
+c     = sqrt(gamma R_s T) ,   M = |u| / c                                         (122.4)
+c_p   = gamma R_s / (gamma - 1) ,   c_v = c_p - R_s ,   h = c_p T                 (122.5)
+```
+
+(122.3) is the perfect-gas law. (122.4) is derived: `c^2 = (d p/d rho)` at constant
+entropy, which with NACA 1135 (34), `p/rho^gamma = constant`, is `gamma p/rho`, and
+`gamma R_s T` by (122.3). `psi = d rho/d p` at constant `T` exactly, which §124 uses.
+`T` is absolute, in kelvin, never an offset. (122.5) fixes the enthalpy datum at
+`h(0 K) = 0`, the datum under which NACA 1135 (43) is equivalent to
+`c_p T_0 = c_p T + |u|^2/2`.
+
+*DESIGN* - **the gas is `(gamma, W)`, and `c_p` follows from them.** A case states
+`gamma` and `W`. A stated `c_p` must equal (122.5) within `1e-6` relative, or the case
+is refused by name (`physics.compressible.cp`, with the stated and the derived value;
+§13.4: `-permissive` warns and uses the derived one). An inconsistent `c_p` would make
+the energy equation's `h_0 = c_p T + K` and the isentropic boundary relations of §126,
+which use `gamma`, disagree about the same total state. The compressible module
+therefore does NOT take `crate::energy::GasProperties::default()`'s `cp = 1006`,
+which differs from (122.5) at `gamma = 1.4`, `W = 0.0289647` by 0.13 %. Its own
+default is air: `gamma = 1.4`, `W = 0.0289647`, so `R_s = 287.0550227690948` and
+`c_p = 1004.692579691832` J/(kg K) (oracle, from (122.2) and (122.5)).
+
+**Viscosity and conduction.** Either a constant `mu`, or Sutherland's law as the U.S.
+Standard Atmosphere 1976 writes it (eq. (51)), with its constants for air:
+
+```
+mu(T)  = A_s T^(3/2) / (T + T_s) ,   A_s = 1.458e-6 kg/(m s K^(1/2)) ,  T_s = 110.4 K   (122.6)
+kappa  = mu c_p / Pr                                                                  (122.7)
+mu_eff = mu + mu_t ,   kappa_eff = kappa + c_p mu_t / Pr_t                             (122.8)
+```
+
+`Pr` defaults to 0.71 and `Pr_t` to 0.85, the crate's existing `GasProperties`
+defaults. (122.8) is §26's `k_eff = k + rho c_p nu_t/Pr_t` with `mu_t = rho nu_t`.
+The oracle gives `mu(273.15) = 1.716079266245527e-05` and
+`mu(300) = 1.8460015185931457e-05` Pa s. `c_p(T)` from §100 is a coefficient change
+and is out of scope: v1 has constant `c_p`, as §26 does.
+
+### 122.2 The gauge pressure, and why it is the f32 design
+
+*DESIGN* (docs/17 COMP decision 3, and docs/17 §5.1.5: "pressure-like unknowns are
+deviations"). Every equation the Krylov solver sees, and the momentum gradient, uses
+`p` alone. `p_op` is a host `f64` constant in both builds. It reaches a kernel only
+inside `p + p_op` in (122.3) and in the boundary formulas of §126. In f32 the spacing
+of floats at 1e5 is `7.8125e-3` Pa, and at 300 K it is `3.0518e-5` K (oracle). A
+transonic pressure difference of about 1e4 Pa and the 7e2 Pa of `M = 0.1` are
+resolved with five or more significant digits as gauge values, and so is the 1 Pa
+perturbation CMP-08 tests. Formed as an absolute pressure, the same 1 Pa would carry
+fewer than three significant digits. The oracle, in f32 with `T = 300 K`, `p_op = 1e5` and the
+operation order `psi * (p + p_op)`, gives
+`rho(p = 1) - rho(p = 0) = 1.156330e-05` against `psi * 1 = 1.161218e-05`: a 0.421 %
+error, inside CMP-08's 1 % bar (0.410 % at 288.15 K and 0.014 % at 273.15 K).
+
+`p_op` is stated by the case (`pOperating` / `physics.compressible.pOperating`,
+CMP-14), with no default: a compressible case that omits it is refused by name. A
+written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as well.
+
+### 122.3 Floors, bounds and what is never clipped
+
+* Device floors in `cuda/compressible.cu` use `OFGPU_CMP_TINY`, `1e-30f` under
+  `OFGPU_SINGLE` and `1e-300` otherwise; host floors use `SCALAR_FLOOR`. That is
+  §112.1's rule, and CMP-28 extends §112.1's table with this row.
+* **Bounds are counted, never clipped.** After each solve of an outer iteration the
+  driver counts the cells with `T <= 0`, `p_abs <= 0` or `rho <= 0`, and records the
+  first such cell and its value. A nonzero count is printed on the iteration line. The
+  run then stops at the end of that outer iteration with `Error::Refused` naming the
+  field, the cell and the value; `-permissive` does not lift it, because the gas law
+  has no state there (CMP-12's `bounds_counter_fires_and_names_the_cell`).
+* The Mach number is (122.4) per cell; `M_max` and `M_mean` are reduced as (93.7) and
+  printed on every iteration line, as §93.5 does for `ofgpu-lowmach`. The low-Mach
+  solver's `M > 0.3` refusal (§93.6) now names `ofgpu-compressible` (CMP-15, message
+  only).
+
+### 122.4 Scope
+
+v1 is single-GPU (decomposition refused by name; docs/17 COMP decision 14), laminar or
+Spalart-Allmaras (§127.1), with constant `c_p`, no sources, no mesh motion and no
+radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15).
+
+---
+
+## 123. Momentum in conservative form — the mass flux, the full Newtonian stress, and Rhie-Chow with a density
+
+`No GPL-licensed source was consulted.` CMP-09 implements this section in
+`src/compressible/momentum.rs` and `cuda/compressible.cu`.
+
+### 123.1 The equation
+
+```
+d(rho u)/dt + div(mdot u) = -grad p + div(tau) + rho g                                    (123.1)
+tau = mu_eff ( grad u + (grad u)^T - (2/3)(div u) I )                                     (123.2)
+```
+
+This is the Navier-Stokes momentum equation for a Newtonian fluid with Stokes's
+hypothesis; `mdot` is `rho u` as a face mass flux. `g` is on only when the case states
+gravity; `rho g` then enters on faces, as §5.1 requires of every body force.
+
+### 123.2 The discretisation
+
+`mdot_f` is a face MASS flux, in kg/s, distinct from §1's volumetric `phi_f`. With §1's
+index convention, `(grad u)_ij = d u_j/d x_i`, the face stress flux of component `i` is
+`(tau . Sf)_i = mu_eff,f ( Sf . grad u_i  +  ((grad u) . Sf)_i  -  (2/3) tr(grad u) Sf_i )`
+(derived from (123.2)). The first term is implicit, the other two are explicit
+(deferred) from the latest `u`:
+
+```
+implicit:  ddt_rho(u)  +  sum_f mdot_f u_f  -  sum_f mu_eff,f |Sf| snGrad(u)                (123.3)
+explicit:  b_P += sum_f mu_eff,f [ (grad u)_f . Sf  -  (2/3) tr(grad u)_f Sf ]               (123.4)
+ddt_rho(u) = (rho_P u_P - rho_P^o u_P^o) V_P / dt                                  (Euler)
+           = (3 rho_P u_P - 4 rho_P^o u_P^o + rho_P^oo u_P^oo) V_P / (2 dt)          (backward)
+```
+
+`u_f` uses §7's limited weights on `mdot_f`; `snGrad` is §12's, with its
+non-orthogonal correction. The ρ-weighted ddt is `fvDdtEulerRho` / `fvDdtBdf2Rho`
+unchanged. `rho_P` is the density of the current outer iterate, `rho_P^o` the density
+of the last step (refreshed once per step, §125.3). LTS (§125.4) uses Euler with the
+per-cell `dt_P`.
+
+**Rhie-Chow with a density** (§5.1, written for the ρ-weighted matrix):
+
+```
+A_P u_P = H_P - V_P (grad p)_P + V_P rho_P g ,   rAU_P = 1/A_P   [m^3 s/kg] ,   HbyA = rAU H   (123.5)
+phi_HbyA,f  = HbyA_f . Sf                                                [m^3/s]              (123.6)
+mdot_f      = rho~_f phi_HbyA,f  -  rho_f rAU_f ( |Sf| snGrad(p) - rho_f g . Sf )   [kg/s]    (123.7)
+u_P         = HbyA_P - rAU_P ( (grad p)_P - rho_P g )                                         (123.8)
+```
+
+`rho_f` (in the pressure part and in the body force) is the linear interpolate
+`w rho_P + (1 - w) rho_N`. `rho~_f` (in the convective part) is the retarded density
+of (124.3). (123.6)-(123.8) are §5.1's structure with `rho` written where the
+incompressible solver has a constant; the split of `rho_f` from `rho~_f` is the all-speed
+coupling of §124 (derived there). *DESIGN*: the body force sits beside the pressure
+gradient with the same weight `rho_f rAU_f`, so a hydrostatic state
+(`snGrad(p) = rho_f g . n`) carries zero mass flux on every face, the property §5.1's face
+treatment of body forces exists for. Every `rAU`, `HbyA` and `phi_HbyA` is formed exactly
+once per corrector, on the §14 schedule.
+
+**What CMP-09 must make true.** `uniform_flow_is_a_fixed_point_to_round_off` (uniform
+`rho, u, p, T`: the momentum residual is zero to round-off; class R, docs/17 §5.1.4);
+`rho_one_matrix_equals_incompressible_matrix_times_rho` (with `rho = 1` everywhere,
+`mu = nu` and `mdot = phi`, the matrix and source equal the kinematic assembly's
+BITWISE in f64; class D); `explicit_transpose_stress_vanishes_for_solenoidal_linear_u`
+((123.4) is zero for `u = (a y, b x, 0)`; class R); `couette_shear_stress_exact`
+(linear `u(y)`: the wall shear stress `mu U/h` to round-off; class R).
+
+---
+
+## 124. The all-speed pressure equation — continuity with the gas law, the retarded density, and the incompressible limit
+
+`No GPL-licensed source was consulted.` CMP-10 implements this section in
+`src/compressible/pressure.rs` and `cuda/compressible.cu`.
+
+### 124.1 The derivation
+
+The equation is derived here from continuity, (122.3) and §123.2. That pressure-based
+all-speed methods take this form is the literature's: Karki & Patankar (1989),
+Demirdžić, Lilek & Perić (1993), Issa, Gosman & Watkins (1986), Moukalled et al. ch. 16
+(*not read*). Discrete continuity in cell P, with the same time scheme as momentum (the
+ρ-ddt of the continuity equation and of (123.3) must be the same, or mass is not
+conserved in the momentum's ddt):
+
+```
+ddt(rho)_P + sum_f mdot_f = 0 ,   ddt(rho)_P = (rho_P - rho_P^o) V_P / dt                   (124.1)
+```
+
+(backward: `(3 rho_P - 4 rho_P^o + rho_P^oo) V_P / (2 dt)`). Linearise the density
+about the current iterate `*` at frozen `T` (so frozen `psi`):
+
+```
+rho_P  = rho_P*  + psi_P  (p_P - p_P*)                                                       (124.2)
+rho~_f = rho~_f* + psi~_f (p~_f - p~_f*)                                                     (124.3)
+```
+
+For the perfect gas (124.2) is exact, not a linearisation: with
+`rho* = psi (p* + p_op)` it is `rho_P = psi_P (p_P + p_op)`, (122.3) itself. `~` marks
+the **retarded** (upwind-biased) face value: `psi~_f`, `p~_f` and `rho~_f*` are those of
+the cell upwind of `phi_HbyA,f` (default), or a §7-limited face value of them (option
+`limitedRetarded`, the limiter named as §7 names it). The retarded density is the
+shock-capturing mechanism of the pressure-based route: Hafez, South & Murman (1979)
+introduced the upwinded ("artificially compressible") density for transonic flow
+(*not read*). Substituting (124.2), (124.3) and (123.7) in (124.1):
+
+```
+psi_P V_P/dt p_P  +  sum_f psi~_f phi_HbyA,f p~_f  -  sum_f rho_f rAU_f |Sf| snGrad(p)
+     =  -(rho_P* - psi_P p_P*) V_P/dt  +  rho_P^o V_P/dt  -  sum_f (rho~_f* - psi~_f p~_f*) phi_HbyA,f   (124.4)
+```
+
+(Euler shown, without gravity. Backward scales the `psi_P` term and the
+`(rho_P* - psi_P p_P*)` term by 3/2, and `rho_P^o V_P/dt` on the right becomes
+`(4 rho_P^o - rho_P^oo) V_P/(2 dt)`. With gravity the right-hand side gains
+`- sum_f rho_f rAU_f rho_f (g . Sf)`, from (123.7).) For the perfect gas
+`rho* - psi p* = psi p_op`, so the right-hand side is
+`-psi_P p_op V_P/dt + rho_P^o V_P/dt - sum_f psi~_f p_op phi_HbyA,f`: plan docs/17 COMP
+§2.2 item 3, recovered. The unknown is `p`, gauge, alone.
+
+**The matrix.** The first term is a diagonal; the second is a convection operator on
+`p` with face "velocity" `psi~_f phi_HbyA,f` (upwind: owner/neighbour coefficient by the
+sign of `phi_HbyA,f`); the third is §5.1's Laplacian with `rho_f rAU_f`. It is
+asymmetric, so it is solved by PBiCGStab with DILU (§8.1, §8.3). Non-orthogonal
+correctors follow §5.2. Boundary faces carry `p`'s §4 triple in both the convective and
+the Laplacian part.
+
+### 124.2 After the solve
+
+```
+mdot_f = (123.7) with the new p and rho~_f from (124.3) at the new p                          (124.5)
+u_P    = (123.8) ,     rho_P = psi_P (p_P + p_op)
+```
+
+`mdot_f` is formed from the matrix's own face coefficients and the new `p`, as §5.1
+forms `phi`, so (124.1) holds to the linear solver's tolerance with `rho_P` from the
+gas law; CMP-10's `mass_imbalance_after_correction_below_solver_tol` checks it (class A).
+`p` is relaxed by `alpha_p` in steady SIMPLE only (§5.2), never on a final transient
+corrector (§14).
+
+### 124.3 The incompressible limit
+
+With `psi = 0`, `rho* = rho^o = rho` held and no gravity, (124.4) becomes
+
+```
+sum_f rho_f rAU_f |Sf| snGrad(p) = sum_f rho~_f phi_HbyA,f                                    (124.6)
+```
+
+For uniform `rho` this is §5.1's `laplacian(rAU_f, p) = div(phi_HbyA)` for the kinematic
+pressure `p/rho`, multiplied by `rho`: the ρ-weighted `A_P` is `rho` times the kinematic
+one, so `rho_f rAU_f` is the kinematic `rAU_f` and `HbyA` is the kinematic `HbyA`
+(derived). CMP-10's `psi_zero_reduces_to_incompressible_to_round_off` holds the
+assembled system to that, to round-off (class R). Gate CMP-AC/LM (§127.6)
+holds the whole solver to Ghia at `M = 0.05`.
+
+---
+
+## 125. Energy, the outer loop, and the local time step
+
+`No GPL-licensed source was consulted.` CMP-11 implements §125.1-§125.2 in
+`src/compressible/energy.rs`, CMP-12 §125.3 in `src/compressible/mod.rs`, and CMP-13
+§125.4 in `src/compressible/lts.rs`.
+
+### 125.1 The energy equation, solved for `T`
+
+The total-energy conservation law, with `E = h - p/rho + K`, `K = |u|^2/2` and the
+total enthalpy `H = h + K` (Carlson's eq. (36) writes `H_t` this way for the perfect
+gas, **read**; NASA Glenn's *Navier-Stokes Equations* page,
+`www.grc.nasa.gov/www/k-12/airplane/nseqs.html`, states the conservative total-energy
+equation, **read**, as an image):
+
+```
+d(rho E)/dt + div(rho u H) = div(kappa_eff grad T) + div(tau . u) + rho g . u
+```
+
+Expanding `d(rho E)/dt = d(rho h)/dt - dp/dt + d(rho K)/dt` and putting `h = c_p T`
+(122.5) gives the form solved (derived):
+
+```
+d(rho c_p T)/dt + div(mdot c_p T) - div(kappa_eff grad T)
+      =  dp/dt  -  [ d(rho K)/dt + div(mdot K) ]  +  div(tau . u)  +  rho g . u            (125.1)
+```
+
+`dp/dt` is the gauge `p`'s, because `p_op` is constant. Discretely: the left side is
+implicit in `T` (`fvDdtEulerRho`/`fvDdtBdf2Rho` with weight `rho c_p`, `fvm_div_gauss`
+on `mdot c_p`, `fvm_laplacian(kappa_eff)`). The right side is explicit from the latest
+`p`, `u` and `mdot`: `dp/dt = (p_P - p_P^o)/dt` (backward: its BDF2 form); the `K` terms
+are `(rho_P K_P - rho_P^o K_P^o) V_P/dt + sum_f mdot_f K_f`; the viscous work is
+`sum_f (tau_f . u_f) . Sf` with `tau_f` from (123.2) and `u_f` linear; the gravity work
+is on only with gravity. A steady SIMPLE run has no ddt terms at all, so `dp/dt` and
+`d(rho K)/dt` are absent there; an LTS run (§125.4) keeps them with its `dt_P`.
+
+*DESIGN* - **`K_f` uses the face weights of `T_f`.** Then `sum_f mdot_f (c_p T_f + K_f)`
+is a sum of face fluxes of `h_0 = c_p T + K`, so in steady, inviscid, adiabatic flow the
+discrete energy equation conserves `h_0` along a stream tube to the solver's tolerance.
+That is what places a captured shock's jump where (127.2) puts it (Moukalled ch. 16 and
+Ferziger & Perić ch. 11 make this argument; *not read*). CMP-11's
+`h0_conserved_along_inviscid_duct_to_1e-6` holds it (class A).
+
+The viscous work is a switch (`viscousWork`, default on when `mu > 0`). CMP-11's
+tests: `uniform_flow_preserves_t` (class R), `slab_conduction_linear_exact` (class R),
+`viscous_work_matches_couette_exact` ((127.12); class P),
+`h0_conserved_along_inviscid_duct_to_1e-6` (class A).
+
+### 125.2 What is NOT in (125.1)
+
+There is no `p0(t)` and no low-Mach divergence constraint (§25.1); this is the fully
+compressible equation. There is no radiation and no source (§122.4).
+
+### 125.3 The outer loop
+
+One loop with two switches, as §14 asks (PIMPLE transient; SIMPLE steady; LTS steady,
+§125.4):
+
+```
+per time step (or pseudo step):
+    refresh old levels ONCE:  rho^o <- rho, u^o <- u, T^o <- T, p^o <- p, K^o <- K
+                              (backward also rotates ^oo)
+    for outer in 1..nOuterCorrectors:
+        final = (outer == nOuterCorrectors)
+        1. psi, mu, kappa from T                   (122.3), (122.6)-(122.8)
+        2. momentum predictor                      (123.3)-(123.4), relaxed by alpha_U unless final
+        3. energy                                  (125.1), relaxed by alpha_T unless final
+        4. psi from the new T
+        5. for corr in 1..nCorrectors:             (§14: H RE-EVALUATED each corrector)
+               rAU, HbyA, phi_HbyA                 (123.5)-(123.6)
+               for nc in 0..nNonOrthCorr:  solve (124.4)
+               correct mdot, u, rho                (124.5)
+        6. relax p by alpha_p (steady SIMPLE only, never on a final transient corrector)
+        7. turbulence (SA, §127.1) on the new mdot
+        8. bounds count (§122.3); residuals; stop on residualControl (§14, initial residuals)
+```
+
+*DESIGN* - the old levels are refreshed once per step, at its start, never inside the
+outer loop (the split `ofgpu-lowmach`'s `Energy` lacks, `lowmach.rs`'s note on its own
+loop). CMP-12's `one_step_twice_equals_two_steps_state` holds it (two calls of one step
+equal one call of two steps, bitwise in f64; class D). Each outer iteration reports the
+mass imbalance `sum_P |ddt(rho)_P + sum_f mdot_f| / sum_P rho_P V_P/dt` and the `h_0`
+residual (the initial residual of (125.1)). `quiescent_box_stays_at_rest` (class R)
+completes CMP-12's tests.
+
+### 125.4 The local time step for steady runs
+
+```
+dt_P = CFL * V_P^(1/3) / ( |u_P| + c_P )                                                  (125.2)
+```
+
+*DESIGN*: (125.2) is the acoustic Courant condition (Courant, Friedrichs & Lewy 1928,
+*not read*) with the cell's length scale `V^(1/3)`. Blazek (2015) ch. 6 gives a
+multi-dimensional spectral-radius form (*not read*); (125.2) is the simple one. Each
+cell's ddt terms in (123.3), (124.1) and (125.1) use its own `dt_P` with the Euler
+scheme; old levels are refreshed once per pseudo step. At a converged fixed point
+every ddt difference is zero, so the fixed point does not depend on `CFL`. CMP-13's
+`steady_fixed_point_independent_of_cfl` holds two CFLs to the same field within `1e-8`
+in f64 (class P; the same bar in f32 is reported as its own row if missed, §5.1.4) and
+`dt_field_matches_host_formula` holds (125.2) to its host twin (class R).
+
+---
+
+## 126. The compressible boundary conditions — each a §4 triple rewrite
+
+`No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3, CMP-17
+§126.4-§126.5 and CMP-18 §126.6, in `src/compressible/bc.rs` and `cuda/compressible.cu`.
+docs/17 §5.2.3 gives COMP these kinds. Each registers its name in §120's catalogue when
+it lands. Every one is a kernel that rewrites the §4 triple
+`psi_b = fr psi_ref + (1 - fr)(psi_P + g_ref/Delta_b)` on its faces once per outer
+iteration, from the latest interior state: the assembly gains no branch.
+
+`n` is the unit OUTWARD normal (`Sf/|Sf|` on a boundary face). A face is an inflow face
+when `u_b . n < 0`, the convention of Carlson's Table 1. `u_n,P = u_P . n` and
+`c_P = sqrt(gamma R_s T_P)` are the owner cell's.
+
+### 126.1 Total pressure and total temperature (`totalPressure` with `gamma`, `totalTemperature`)
+
+On an inflow face, from the boundary velocity `u_b` (which `U`'s own condition supplies,
+normally extrapolated):
+
+```
+T_b = T_0 - |u_b|^2 / (2 c_p)                                                              (126.1)
+p_b = (p_0 + p_op) (T_b / T_0)^(gamma/(gamma-1)) - p_op                                   (126.2)
+    = p_0 + (p_0 + p_op) expm1( gamma/(gamma-1) * log1p( -|u_b|^2 / (2 c_p T_0) ) )        (126.3)
+```
+
+(126.1) is Carlson's eq. (48) and NACA 1135 (43) (`c_p T_0 = c_p T + |u|^2/2` with
+(122.5)); (126.2) is NACA 1135 (35) and (44) with `T_b/T_0` in place of
+`(1 + (gamma-1)/2 M^2)^-1`; the oracle holds (126.1)-(126.2) to NACA (43)-(44) to
+`5.6e-16`. (126.3) is (126.2) rewritten (derived) so that the gauge `p_b` is formed
+without the cancellation of `(...) - p_op`: it is the form the kernel evaluates in both
+builds. `p_0` is the case's total pressure in the gauge of the `p` field (so the
+absolute total pressure is `p_0 + p_op`), and `T_0` its total temperature. The triples
+are `fr = 1` with `psi_ref = p_b` (on `p`) and `psi_ref = T_b` (on `T`). On an outflow
+face both are zero-gradient (`fr = 0, g = 0`). `totalPressure` WITHOUT `gamma` stays
+the incompressible condition of `field_setup.rs`, bitwise unchanged.
+
+*DESIGN* - the explicit form (126.1)-(126.2) rather than Carlson §2.7's characteristic
+form ((36)-(47), which extrapolates `R+` and solves a quadratic for `c_b`): the
+pressure-based solver takes its inflow velocity from the momentum equation, and the
+explicit form is exact for any `u_b`. CMP-16's
+`total_conditions_satisfy_isentropic_relation_to_round_off` (class R) and
+`outflow_face_is_zero_gradient` (class D) test it.
+
+### 126.2 Supersonic inflow (the JSONC preset `supersonicInlet`)
+
+`p`, `U` and `T` are all `fixedValue` (`fr = 1`) at the stated state: Carlson §2.9,
+eq. (57), "all" specified for supersonic inflow (Table 1, case 3).
+
+### 126.3 Compressible mass-flow inlet
+
+```
+u_b = - ( mdot_set / sum_{f in patch} rho_f |Sf| ) n_f ,   rho_f = psi_f (p_b,f + p_op)      (126.4)
+```
+
+`fr = 1` on `U` with `psi_ref = u_b`. Then `sum_f rho_f u_b . Sf = -mdot_set` exactly up
+to round-off (derived; the inflow sign is the outward normal's). `T` comes from its own
+condition: `fixedValue`, or `totalTemperature` through (126.1), Carlson's eq. (48)
+adiabatic statement. `p` is zero-gradient. CMP-16's `mass_flow_inlet_delivers_mdot_to_1e-10`
+(class A) tests it.
+
+### 126.4 Static-pressure outlet with the supersonic switch
+
+```
+p_b = p_set                      if  u_n,P / c_P < 1        (fr = 1)
+    = extrapolated  (fr = 0, g = 0)   otherwise                                          (126.5)
+```
+
+Carlson §2.4 eq. (25), applied per face with the owner's normal Mach number. `U` and `T`
+are zero-gradient (Carlson §2.4 "extrapolate U, T"). The switch is evaluated per face
+each outer iteration.
+
+### 126.5 The non-reflecting outlet (`waveTransmissive`, with `lInf` and `fieldInf`)
+
+The outgoing-wave condition on a field `phi` is advective with a linear relaxation
+toward a far value `phi_inf` over a length `L` (`lInf`):
+
+```
+d phi/dt + w d phi/dn = K (phi_inf - phi)                                                  (126.6)
+w = u_n,P + c_P   (on p) ,     w = u_n,P   (on any other field)
+K = sigma c_P (1 - M_n^2) / L ,   M_n = u_n,P / c_P ;    K = 0 when lInf is not stated
+```
+
+Discretised implicitly in time on the face, with `d phi/dn = (phi_b - phi_P)/Delta_b`
+and `alpha = w dt / Delta_b`:
+
+```
+(phi_b - phi_b^o)/dt + w (phi_b - phi_P)/Delta_b = K (phi_inf - phi_b)
+  =>  phi_b = fr ref + (1 - fr) phi_P ,
+      fr  = (1 + K dt) / (1 + alpha + K dt) ,   ref = (phi_b^o + K dt phi_inf) / (1 + K dt)    (126.7)
+```
+
+(126.7) is (126.6)'s update exactly (derived), and it is the §4 triple with
+`psi_ref = ref`, `g_ref = 0`: the oracle holds the two to `4.4e-16` on 1000 random
+states. `phi_b^o` is the face value of the last step (refreshed once per step, §125.3);
+under LTS `dt` is the owner's `dt_P`. (126.6) needs a time step, so a steady SIMPLE run
+without LTS refuses `waveTransmissive` by name. The form is Orlanski's (1976) advective outlet
+with the acoustic speed added for `p`, and the relaxation term is the partially
+reflecting treatment of Rudy & Strikwerda (1980) and Poinsot & Lele (1992) (all *not
+read*). docs/17 §5.2.3 gives BC-09 the generic `advective` kernel with the wave speed
+as a face-field input; CMP-17 calls it with (126.6)'s `w`, and if BC-09 has not landed
+when CMP-17 runs, CMP-17 writes the kernel to BC-09's contract.
+
+**`sigma` has no recalled default.** The plan quotes about 0.27 from Rudy & Strikwerda
+(1980); that paper is not read here. CMP-17 reads it and records the value with its
+page in this subsection, or, failing that, `sigma` is a required entry when `lInf` is
+stated. The reflection coefficient Selle et al. (2004) derive for this condition is not
+used by any gate: Gate CMP-NR measures the reflection directly (§127.6).
+
+### 126.6 The characteristic far-field (`characteristicFarfield`; JSONC `farfield`)
+
+Carlson §2.2, eqs. (8)-(17), with `i` the interior (owner) state and `o` the stated
+free stream, in absolute pressure, with `U_i = u_i . n`, `U_o = u_o . n`,
+`c^2 = gamma p_abs/rho`:
+
+```
+R+ = U_i + 2 c_i/(gamma - 1) ,          R- = U_o - 2 c_o/(gamma - 1)                         (126.8)
+if U_i > 0 and |U_i|/c_i >= 1:  R- = U_i - 2 c_i/(gamma - 1)      (supersonic outflow)       (126.9)
+if U_i < 0 and |U_i|/c_i >= 1:  R+ = U_o + 2 c_o/(gamma - 1)      (supersonic inflow)
+U_b = (R+ + R-)/2 ,        c_b = (gamma - 1)(R+ - R-)/4                                       (126.10)
+u_b = u_i + (U_b - U_i) n ,   s_b = p_abs,i / rho_i^gamma        if U_b > 0  (outflow)
+u_b = u_o + (U_b - U_o) n ,   s_b = p_abs,o / rho_o^gamma        if U_b <= 0 (inflow)         (126.11)
+rho_b = ( c_b^2 / (gamma s_b) )^(1/(gamma-1)) ,  p_abs,b = rho_b c_b^2 / gamma ,  T_b = p_abs,b / (rho_b R_s)   (126.12)
+```
+
+(126.8)-(126.12) are Carlson's (8), (12), (13), (14), (15), (16) and (17), with his
+entropy `c^2/(gamma rho^(gamma-1))` written as `p/rho^gamma` (the same quantity, by
+(122.4)). Supersonic branches follow Carlson's text: in supersonic outflow no incoming
+characteristic exists and every quantity comes from the interior; in supersonic inflow
+every quantity comes from the free stream. The triples are `fr = 1` on `p`
+(`psi_ref = p_abs,b - p_op`), `U` (`u_b`) and `T` (`T_b`), refreshed each outer
+iteration. CMP-18's tests: `freestream_preserved_m0_5_and_m1_5` (interior state equal
+to the free stream at normal Mach `+-0.5` and `+-1.5`: the face state equals it to
+`1e-10` relative in f64 and `1e-5` in f32; class R), `branch_selection_by_un_and_c`
+(class D), `invariants_exact_on_host_twin` (class R). The oracle reproduces the free
+stream to the last digit printed (15) on all four branches.
+
+### 126.7 Walls and symmetry
+
+Unchanged: `noSlip` (with adiabatic `zeroGradient` or isothermal `fixedValue` on `T`),
+`slip`/`symmetryPlane` (§120's aliases) and `empty` carry no compressible algebra. A
+slip wall makes the quasi-1-D duct and the Ringleb walls of §127.3.
+
+---
+
+## 127. Turbulence, the answer keys, the gate meshes and the gates
+
+`No GPL-licensed source was consulted.`
+
+### 127.1 Spalart-Allmaras in conservative form (CMP-25)
+
+The TMR SA page (**read**) gives the compressible conservation form "constructed by
+combining SA with the mass conservation equation":
+
+```
+d(rho nu~)/dt + d(rho u_j nu~)/dx_j
+   = rho c_b1 (1 - f_t2) S~ nu~  -  rho [ c_w1 f_w - (c_b1/kappa^2) f_t2 ] (nu~/d)^2
+     + (1/sigma) [ d/dx_j ( rho (nu + nu~) d nu~/dx_j ) + rho c_b2 (d nu~/dx_i)(d nu~/dx_i) ]
+     - (1/sigma) (nu + nu~) (d rho/dx_i)(d nu~/dx_i)                                          (127.1)
+mu_t = rho nu~ f_v1
+```
+
+The terms, constants and the negative continuation are §56's. CMP-25 adds (127.1) as an
+OPTION on the existing model: `fvDdtEulerRho`/`fvDdtBdf2Rho` with `rho`, convection on
+`mdot`, the diffusion coefficient `rho (nu + nu~)/sigma`, and the last term explicit.
+With `rho = 1` the matrix must be the kinematic one bitwise
+(`rho_one_is_bitwise_kinematic`, class D); `conservative_form_conserves_rho_nutilda_in_closed_box`
+(class A). Every other turbulence model is refused by name in `ofgpu-compressible`
+(docs/17 COMP decision 9). ρ-weighted k-ω SST and the k-ε family are backlog.
+
+### 127.2 The analytic answer keys (CMP-06, CMP-07), host-side in `compressible/exact.rs`
+
+NACA 1135 writes the shock angle as `theta` and the deflection as `delta`. The plan and
+the gates write `beta` (shock angle) and `theta` (deflection). Below, NACA's own symbols
+are kept inside its equations, and the gate values are labelled in words.
+
+```
+T/T_t   = (1 + (gamma-1)/2 M^2)^-1                          NACA (43)                      (127.2)
+p/p_t   = (1 + (gamma-1)/2 M^2)^(-gamma/(gamma-1))          NACA (44)
+rho/rho_t = (1 + (gamma-1)/2 M^2)^(-1/(gamma-1))            NACA (45)
+A_*/A   = ((gamma+1)/2)^((gamma+1)/(2(gamma-1))) M (1 + (gamma-1)/2 M^2)^(-(gamma+1)/(2(gamma-1)))   NACA (80)
+normal shock:  p_2/p_1 = (2 gamma M_1^2 - (gamma-1))/(gamma+1)                          NACA (93)   (127.3)
+               M_2^2   = ((gamma-1) M_1^2 + 2)/(2 gamma M_1^2 - (gamma-1))               NACA (96)
+               p_t2/p_t1 = [ (gamma+1) M_1^2/((gamma-1) M_1^2 + 2) ]^(gamma/(gamma-1))
+                           [ (gamma+1)/(2 gamma M_1^2 - (gamma-1)) ]^(1/(gamma-1))        NACA (99)
+oblique shock (theta = shock angle, delta = deflection):                                       (127.4)
+               tan delta = (M_1^2 sin 2theta - 2 cot theta)/(2 + M_1^2 (gamma + cos 2theta))   NACA (139b)
+               p_2/p_1 = (2 gamma M_1^2 sin^2 theta - (gamma-1))/(gamma+1)                  NACA (128)
+               M_2^2 = [ (gamma+1)^2 M_1^4 sin^2 theta - 4 (M_1^2 sin^2 theta - 1)(gamma M_1^2 sin^2 theta + 1) ]
+                       / ( [2 gamma M_1^2 sin^2 theta - (gamma-1)] [(gamma-1) M_1^2 sin^2 theta + 2] )   NACA (132)
+```
+
+The weak branch is the root of (139b) between the Mach angle `asin(1/M_1)` and the
+angle of maximum deflection. **The shocked nozzle** (derived from (127.2)-(127.3) and
+NACA (79), `rho V A = rho_* a_* A_*`): with `A_*1` the throat, a normal shock at area
+`A_s` and exit `A_e` at back pressure `p_b`, the total pressure falls by (99) and
+`p_t A_*` is constant across the shock, so `A_*2 = A_*1 (p_t1/p_t2)`. Given `p_b/p_t1`
+and `A_e/A_*1`: the exit Mach `M_e` is the subsonic root of
+`(p/p_t)(M_e) (A/A_*)(M_e) = (p_b/p_t1)(A_e/A_*1)`; then `p_t2/p_t1 = (p_b/p_t1)/(p/p_t)(M_e)`;
+`M_1` is the supersonic root of (99) at that ratio; and `A_s/A_*1 = (A/A_*)(M_1)`.
+
+**Oracle values** (`gamma = 1.4`), the bars of CMP-06: `A/A_* (M = 2) = 1.6875000000000002`;
+normal shock at `M_1 = 2`: `p_2/p_1 = 4.5`, `M_2 = 0.5773502691896257`,
+`p_t2/p_t1 = 0.7208738614847455`; `M_1 = 2`, deflection 10 degrees, weak branch: shock
+angle `39.31393184481887` degrees, `p_2/p_1 = 1.706578604000033`,
+`M_2 = 1.6405222290010815`; a nozzle `A_e/A_* = 2` with the shock placed at
+`A_s/A_* = 1.5` (`M_1 = 1.8541235267`, `p_b/p_t1 = 0.704451977922`, `M_e = 0.4041969520`,
+`p_t2/p_t1 = 0.7883594291`) recovers `A_s/A_* = 1.5` to `2.2e-16`. CMP-06's round trip is
+held to `1e-10` (class R).
+
+**Landed (CMP-06).** `rust/src/compressible/exact.rs` holds (127.2)-(127.4) and the shocked
+nozzle above as host functions, in `f64` in both builds: an answer key is a constant of a gate,
+never a `Scalar`. Every root is found by bisection on a bracket over which its function is
+monotone: the subsonic area-Mach root in `[0, 1]` and the supersonic one in `[1, 50]`
+(`MACH_MAX`; a root beyond it is refused by name), the supersonic root of NACA (99) in
+`[1, 50]`, the weak root of (139b) between the Mach angle and `theta_max`, which maximises
+(139b) by golden-section search, and the nozzle's exit Mach in `[0, 1]`, where
+`(p/p_t)(A/A_*)` decreases monotonically. The round trip inverts the forward map, which is the
+same relations in the other order (derived): `M_1` is the supersonic root of
+`(A/A_*)(M_1) = A_s/A_*1`, `p_t2/p_t1` is (99) at `M_1`, `M_e` is the subsonic root of
+`(A/A_*)(M_e) = (A_e/A_*1)(p_t2/p_t1)`, and `p_b/p_t1 = (p/p_t)(M_e) (p_t2/p_t1)`. **The
+regimes of a nozzle `A_e/A_*1`** (derived from (127.2)-(127.3)): with `M_sub` and `M_sup` the
+two roots of `(A/A_*)(M) = A_e/A_*1`, a normal shock stands inside the nozzle exactly when
+`p_b/p_t1` lies in `[(p/p_t)(M_sup) (p_2/p_1)(M_sup), (p/p_t)(M_sub)]`. The upper end puts
+the shock at the throat and the lower end at the exit; above the interval the flow downstream
+of the throat is subsonic, below it the shock stands outside the exit, and
+`(p/p_t)(M_sup)` is the shock-free design exit. For `A_e/A_* = 2` the three values are
+`0.9371625024322055`, `0.5134007279957163` and `0.09393264573284488`, and outside the interval
+`shocked_nozzle` refuses by name. An independent 50-digit evaluation (the CMP-06 oracle,
+outside the tree) reproduces every oracle value printed above to `3e-16` relative.
+`compressible::exact::tests` holds the closed forms to `4e-15` relative and the round trip
+to `1e-10` (13 tests).
+
+**The exact Riemann problem** (CMP-07; derived). Across a shock moving into state
+`K = L, R` at rest relative to its own frame, NACA (84)-(85) (mass and momentum) and
+(91) (the Hugoniot `rho_2/rho_1`) give the velocity jump; across a rarefaction the
+Riemann invariant `u +- 2c/(gamma-1)` is constant and the flow is isentropic, NACA (35).
+Together:
+
+```
+f_K(p) = (p - p_K) sqrt( A_K / (p + B_K) ) ,  A_K = 2/((gamma+1) rho_K) ,  B_K = (gamma-1) p_K/(gamma+1)   p > p_K   (127.5)
+f_K(p) = 2 c_K/(gamma-1) [ (p/p_K)^((gamma-1)/(2 gamma)) - 1 ]                                               p <= p_K
+f_L(p*) + f_R(p*) + (u_R - u_L) = 0 ,   u* = (u_L + u_R)/2 + (f_R(p*) - f_L(p*))/2                    (127.6)
+rho*_K = rho_K ( p*/p_K + q ) / ( q p*/p_K + 1 ),  q = (gamma-1)/(gamma+1)   (shock)  ;  rho*_K = rho_K (p*/p_K)^(1/gamma)  (rarefaction)   (127.7)
+vacuum is generated iff  2 (c_L + c_R)/(gamma - 1) <= u_R - u_L
+```
+
+This is the standard statement of Toro (2009) ch. 4 (*not read*); here it is derived as
+above and the oracle evaluates it. Oracle star states (`gamma = 1.4`; left | right as
+`(rho, u, p)`): Sod `(1, 0, 1 | 0.125, 0, 0.1)`: `p* = 0.30313`, `u* = 0.927453`,
+`rho*_L = 0.426319`, `rho*_R = 0.265574`, shock speed `1.752156`, so at `t = 0.2` from
+`x_0 = 0.5` the shock is at `x = 0.850431` and the contact at `0.685491`; the 123
+problem `(1, -2, 0.4 | 1, 2, 0.4)`: `p* = 0.00189387`, `u* = 0`; the left half of the
+blast wave `(1, 0, 1000 | 1, 0, 0.01)`: `p* = 460.894`, `u* = 19.5975`,
+`rho*_L = 0.575062`, `rho*_R = 5.99924`; the right half `(1, 0, 0.01 | 1, 0, 100)`:
+`p* = 46.095`, `u* = -6.19633`; and `(1, -4, 0.4 | 1, 4, 0.4)` generates vacuum. CMP-07
+holds Sod's `p*` and `u*` to the plan's five digits (`0.30313`, `0.92745`) and the rest to
+these values to six digits (class R).
+
+### 127.3 Ringleb flow (CMP-07, CMP-24)
+
+The hodograph solution, with stagnation sound speed and density 1, speed `q` and
+streamline constant `k` (Ringleb 1940 via the HiOCFD page and AGARD-AR-211, *not read*;
+the form below is HELD BY THE ORACLE to the Euler equations, which is what makes it an
+answer key here):
+
+```
+c(q) = sqrt(1 - (gamma-1)/2 q^2) ,   rho(q) = c^(2/(gamma-1)) ,   p = c^(2 gamma/(gamma-1)) / gamma      (127.8)
+J(q) = 1/c + 1/(3 c^3) + 1/(5 c^5) - (1/2) ln( (1 + c)/(1 - c) )        (gamma = 1.4)                 (127.9)
+x = (1/(2 rho)) (1/q^2 - 2/k^2) + J/2 ,    y = +- (1/(k rho q)) sqrt(1 - q^2/k^2)                        (127.10)
+u = +- q sqrt(1 - q^2/k^2)  (the sign of y) ,    v = q^2 / k                                            (127.11)
+```
+
+The oracle inverts (127.10) by Newton for `(q, k)` and finds, at `(q, k) = (0.6, 0.8)`,
+`div(rho u) = -2.8e-12` and `curl u = 1.1e-11` by central differences with `h = 1e-5`
+(the reversed flow, both signs flipped, satisfies them too; the two mixed sign choices
+fail at `0.23`). Over 300 random points of the domain below the largest `|div(rho u)|`
+is `5.4e-11`. The entropy `p/rho^gamma = 1/gamma`
+is constant, so the gate's error measure is `p/rho^gamma * gamma - 1`.
+
+*DESIGN* - **the CMP-24 domain**: walls on the streamlines `k = 0.6` and `k = 1.0`, and
+the two iso-speed boundaries `q = 0.5` (`y < 0` inflow, `y > 0` outflow, by (127.11)).
+It is transonic: on `k = 1.0` the speed reaches `q = k = 1` at `y = 0`, where
+`M = 1.118034` (the sonic speed is `q* = sqrt(2/(gamma+1)) = 0.9128709292`). The oracle
+finds `d(x, y)/d(q, theta)` (`sin theta = q/k`) one-signed over the domain, in
+`[-37.9, -3.05]`, so it contains no limiting line. The inversion in `(q, k)` is singular
+at `y = 0`, where `d y/d q` is unbounded; CMP-07 inverts in `(q, theta)` there.
+
+### 127.4 Compressible Couette with viscous heating (CMP-07, CMP-22)
+
+Steady flow between a stationary adiabatic wall at `y = 0` and a wall at `y = h` moving
+at `U` and held at `T_top`, constant `mu` and `kappa`, no pressure gradient (derived from
+(123.1) and (125.1)): `d/dy(mu du/dy) = 0` gives `u = U y/h` for any `rho(y)`; then
+`kappa T'' + mu (u')^2 = 0` with `T'(0) = 0` and `T(h) = T_top` gives
+
+```
+T(y) = T_top + (mu U^2 / (2 kappa)) (1 - y^2/h^2) ,    T_w - T_top = Pr U^2 / (2 c_p)          (127.12)
+```
+
+by (122.7). At `U = 200` m/s, `Pr = 0.71` and the default `c_p` of §122.1 the oracle gives
+`T_w - T_top = 14.133676596233594` K. The plan cites White, *Viscous Fluid Flow* §3-3,
+for the same result (*not read*). The gate's 0.5 % bar is the discretisation's
+allowance on the quadratic profile, including the half-cell closure at the
+isothermal wall.
+
+### 127.5 The gate meshes (CMP-21, CMP-23, CMP-24, CMP-26)
+
+In-memory Rust generators in `src/compressible/gatemesh.rs`, so `ofgpu-validate` stays
+one executable (docs/17 COMP decision 11): the 1-D tube (the JSONC Cartesian `N x 1 x 1`
+case with `empty` sides); the quasi-1-D duct, one cell across with slip walls following
+`A(x)` (with one cell across the finite-volume form IS the quasi-1-D scheme: the inclined
+slip walls carry the `p dA/dx` force); the 2-D compression ramp; the Ringleb domain of
+§127.3, bounded by two streamlines and two iso-`q` lines; and the airfoil C-mesh (CMP-26),
+transfinite interpolation (Gordon & Hall 1973, *not read*) with Laplace smoothing, one
+cell thick with `empty` sides. **A finding for CMP-26**: the plan says Thompson, Warsi &
+Mastin (1985) is open online at Mississippi State; the old URL
+`www.hpc.msstate.edu/publications/gridbook/` returns 404 (2026-10-07), so CMP-26 cites
+what it actually reads. **A finding for CMP-27**: the NPARC RAE 2822 page (read
+2026-10-07) states Case 6 (`M = 0.725`, `alpha = 2.92` degrees, `Re = 6.5e6`) and offers
+`geom.txt`, `yl.pts` and `yu.pts`; it does not state the plan's "Case 9, `M 0.729`,
+`alpha 2.31` degrees". CMP-27 confirms the case and its wind-tunnel corrections from
+AGARD-AR-138 before it writes the key file, and the gate's bars do not move.
+
+### 127.6 The gates
+
+The bars are docs/17 §12.1's, fixed before measurement. A missed bar is a finding,
+never a widened band. Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
+`tol32 = max(tol64, min(tol64 2^29, 1e-5))`; a P-class row has the same bar in both
+builds, and an f32 row that misses it is reported as its own row with both values
+(§112.3's rule). Gate code lives in `src/bin/validate_gates/<gate>.rs` (docs/17 §5.3.2).
+
+| gate | unit | case and measure | bar | class |
+|---|---|---|---|---|
+| CMP-NR | CMP-17 | Gaussian pulse, amplitude `1e-3 p`, about 20 cells, leaving a 1-D tube | reflection `<= 0.05` (`waveTransmissive`); `>= 0.9` with fixed `p` (control); long-time outlet mean to `p_inf` within `1e-3` | P |
+| CMP-SOD | CMP-19 | Sod, 200/400/800 cells, `t = 0.2`, PISO, acoustic CFL 0.5, against (127.5)-(127.7) | 800 cells: plateau `rho`, `u`, `p` within 1 %; shock position within 0.5 % of the length; observed L1(`rho`) order `>= 0.6` (§94) | P |
+| CMP-AC | CMP-20 | small acoustic pulse, 400 cells | speed within 1 % of (122.4)'s `c` | P |
+| CMP-LM | CMP-20 | Ghia cavity, Re 100, lid `M = 0.05` | the existing incompressible Ghia tolerance, row for row | P |
+| CMP-NOZ | CMP-21 | quasi-1-D duct, 200 cells: subsonic isentropic, supersonic started, shocked | `M(x)` within 0.5 % (subsonic, supersonic); shock position within 1 % of the length; `p_t2/p_t1` within 1 %; exit `p` within 0.5 % (§127.2) | P |
+| CMP-COU | CMP-22 | Couette, `U = 200` m/s, constant `mu` | adiabatic-wall `T_w - T_top` within 0.5 % of (127.12); `T` profile L-infinity within 0.5 % | P |
+| CMP-OBL | CMP-23 | ramp, `M = 2`, deflection 10 degrees | `p_2/p_1` within 1 % of `1.7066`; shock angle within 0.5 degrees of `39.31` (fit of the pressure-jump locus); `M_2` within 1 % of `1.6405` | P |
+| CMP-RING | CMP-24 | Ringleb, §127.3's domain, meshes `h`, `h/2`, `h/4`, `linearUpwind`, no limiter | observed order of the L2 entropy error `>= 1.5` with §94 uncertainty (f64); the f32 row reports its error floor | P (f64), measured (f32) |
+| CMP-RAE | CMP-27 | RAE 2822, SA, the AR-138 case CMP-27 confirms (§127.5) | upper-surface shock `x/c` within `+-0.04`; lower-surface Cp RMS `<= 0.05`; `Cl` within 6 %; two meshes with §94 uncertainty. Beyond 10 min: DEFERRED, with a 10-minute-or-less coarse smoke (finite, converging residual, shock present) | P, deferred |
+
+Gate CMP-B (Boussinesq) is §121's (CMP-04). No row compares against another code
+(§10): the keys are NACA 1135, the derived Riemann solution, Ringleb, Couette, linear
+acoustics, Ghia and the AR-138 experiment.
+
+**Measured** (each unit appends its own rows):
+
+| unit | quantity | value | commit |
+|---|---|---|---|
+| — | — | — | — |
+
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §128-§133 to
