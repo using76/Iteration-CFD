@@ -2889,7 +2889,7 @@ mod tests {
     use crate::field::BcKind;
     use crate::wallfunctions::thermal_wall_ref_grad;
     use crate::mesh::{HostMesh, PatchKind};
-    use crate::momentum::BuoyancyCoeffs;
+    use crate::momentum::{BuoyancyCoeffs, BuoyancyForm};
 
     fn gpu() -> Option<crate::Gpu> {
         crate::Gpu::new(0).ok()
@@ -3162,6 +3162,7 @@ mod tests {
             g: crate::Vec3::new(0.0, 0.0, -9.81),
             t_ref,
             t_min: 1.0,
+            form: BuoyancyForm::DensityRatio,
         };
 
         // Small, moderate and large delta-T/T, including the large ratio

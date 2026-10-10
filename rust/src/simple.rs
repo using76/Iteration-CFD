@@ -1312,6 +1312,8 @@ fn launch_sub_scalar(
 mod tests {
     use super::*;
     use crate::mesh::PatchKind;
+    // §121's form names only the tests below construct.
+    use crate::momentum::BuoyancyForm;
     use crate::pressure::{PbicgstabBackend, SystemProbe};
     use crate::scalar_transport::weighted_stats;
     use crate::Vec3;
@@ -1524,6 +1526,7 @@ mod tests {
             g: Vec3::new(0.0, 0.0, -9.81),
             t_ref,
             t_min: 1.0,
+            form: BuoyancyForm::DensityRatio,
         };
 
         let ctrl = SimpleControls {
@@ -1594,7 +1597,8 @@ mod tests {
         let t_ref: Scalar = 293.15;
         let t_box: Scalar = 500.0;
         let gz: Scalar = -9.81;
-        let buoy = BuoyancyCoeffs { g: Vec3::new(0.0, 0.0, gz), t_ref, t_min: 1.0 };
+        let buoy =
+            BuoyancyCoeffs { g: Vec3::new(0.0, 0.0, gz), t_ref, t_min: 1.0, form: BuoyancyForm::DensityRatio };
 
         let ctrl = at_rest_controls();
 
@@ -1693,7 +1697,8 @@ mod tests {
 
         let t_ref: Scalar = 293.15;
         let gz: Scalar = -9.81;
-        let buoy = BuoyancyCoeffs { g: Vec3::new(0.0, 0.0, gz), t_ref, t_min: 1.0 };
+        let buoy =
+            BuoyancyCoeffs { g: Vec3::new(0.0, 0.0, gz), t_ref, t_min: 1.0, form: BuoyancyForm::DensityRatio };
 
         // Stably stratified - hot on top - so buoyancy cannot drive convection
         // and "at rest" is the true answer rather than a slow transient.
@@ -1827,6 +1832,108 @@ mod tests {
         let stats = weighted_stats(&tcells, &hm.v)?;
         assert!(stats.min < stats.max);
         assert!(stats.mean > stats.min && stats.mean < stats.max);
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT §121 - the Boussinesq hydrostatic column
+    // ----------------------------------------------------------------------
+
+    /// The §121.4 hydrostatic column under the Boussinesq force: across every
+    /// z face the kinematic pressure must jump by exactly
+    ///
+    /// ```text
+    /// p_{k+1} - p_k = -h·g_z·β·(T_f - T_ref),   T_f = (T_k + T_{k+1})/2
+    /// ```
+    ///
+    /// and the fluid must stay at rest. The set-up is the §9 checkerboard
+    /// test's, with the force law switched: the same face-by-face balance,
+    /// carried by (121.3) instead of the density ratio. The checkerboard
+    /// itself needs no re-checking here - it is a property of the face flux
+    /// machinery, not of which kernel wrote the flux.
+    #[test]
+    fn boussinesq_hydrostatic_column_jump_is_h_gz_beta_dt() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+
+        let (nx, ny, nz) = (3usize, 3usize, 32usize);
+        let h: Scalar = 0.05;
+        let d = Vec3::new(h, h, h);
+        let hm = boxed([nx, ny, nz], d, [PatchKind::Wall; 6]);
+        let m = GpuMesh::upload(&g, &hm)?;
+
+        let t_ref: Scalar = 293.15;
+        let gz: Scalar = -9.81;
+        let beta: Scalar = 3.0e-3;
+        let buoy = BuoyancyCoeffs {
+            g: Vec3::new(0.0, 0.0, gz),
+            t_ref,
+            t_min: 1.0,
+            form: BuoyancyForm::Boussinesq { beta },
+        };
+
+        // beta·max dT = 0.09 <= 0.1, §121.2's guard - this is a case the
+        // Boussinesq form is entitled to.
+        let t_of = |k: usize| -> Scalar {
+            let z = (k as Scalar + 0.5) * h;
+            t_ref + 30.0 * z / (nz as Scalar * h)
+        };
+
+        let ctrl = at_rest_controls();
+
+        let mut s = Simple::new(&g, &hm, &m, ctrl, buoy)?;
+        set_velocity_bcs(&g, s.u_mut(), &hm, &[Some(Vec3::ZERO); 6])?;
+        set_scalar_bcs(&g, s.p_mut(), &hm, &[None; 6])?;
+        s.initialise(&g)?;
+
+        let nut = laminar_nut(&g, &m, &hm)?;
+        let layer = nx * ny;
+        let tcells: Vec<Scalar> = (0..hm.n_cells).map(|c| t_of(c / layer)).collect();
+        // zeroGradient on every wall, so the boundary temperature is the
+        // adjacent cell's and the column is not driven from its ends.
+        let t = temperature(&g, &m, &hm, &tcells, &[None; 6])?;
+
+        let mut backend = PbicgstabBackend::new(ctrl.p_solver);
+        backend.setup(&g, &hm, &m, &SystemProbe::default())?;
+
+        for _ in 0..80 {
+            s.correct(&g, &mut backend, &nut, &t)?;
+        }
+
+        let u = g.download(&s.u().f)?;
+        let p = g.download(&s.p().f)?;
+
+        let speed = max_mag(&u);
+        assert!(
+            speed < 1e-9,
+            "a Boussinesq stratified column started moving at {speed} m/s"
+        );
+
+        // ---- one column of cells, bottom to top --------------------------
+        let col: Vec<Scalar> = (0..nz).map(|k| p[k * layer]).collect();
+
+        // (121.5), face by face.
+        let mut worst = 0.0 as Scalar;
+        let mut scale = 0.0 as Scalar;
+        for k in 0..nz - 1 {
+            let tf = 0.5 * (t_of(k) + t_of(k + 1));
+            let want = -h * gz * beta * (tf - t_ref);
+            let got = col[k + 1] - col[k];
+            worst = worst.max((got - want).abs());
+            scale = scale.max(want.abs());
+        }
+        assert!(scale > 0.0, "the column is not stratified: max |jump| = 0");
+        let err = worst / scale;
+        assert!(
+            err <= 1e-12,
+            "the Boussinesq hydrostatic balance is off by {err:.3e} of the \
+             largest jump, and (121.5) is exact at machine precision"
+        );
+
+        println!(
+            "boussinesq hydrostatic column: err = {err:.3e} of max |jump|, \
+             max |U| = {speed:.3e} m/s"
+        );
 
         Ok(())
     }
@@ -2155,7 +2262,12 @@ mod tests {
             report_continuity: false, // THE line: one eight-byte copy per iteration, and the only host
             ..SimpleControls::default() // traffic the loop has left once the solvers are fixed-iteration
         };
-        let buoy = BuoyancyCoeffs { g: Vec3::ZERO, t_ref: 293.15, t_min: 1.0 };
+        let buoy = BuoyancyCoeffs {
+            g: Vec3::ZERO,
+            t_ref: 293.15,
+            t_min: 1.0,
+            form: BuoyancyForm::DensityRatio,
+        };
         let nut = laminar_nut(&g, &m, &hm).expect("nut");
         let t = temperature(&g, &m, &hm, &vec![293.15; n], &[None; 6]).expect("T");
 

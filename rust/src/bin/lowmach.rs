@@ -3449,7 +3449,7 @@ mod lowmach_tests {
     // ----------------------------------------------------------------------
 
     use ofgpu::field::BcKind;
-    use ofgpu::momentum::BuoyancyCoeffs;
+    use ofgpu::momentum::{BuoyancyCoeffs, BuoyancyForm};
     use ofgpu::{GpuMesh, Label, Vec3};
 
     fn gpu() -> Option<Gpu> {
@@ -3487,6 +3487,7 @@ mod lowmach_tests {
             g: Vec3::new(0.0, 0.0, -9.81),
             t_ref: t_ambient,
             t_min: 1.0,
+            form: BuoyancyForm::DensityRatio,
         };
 
         let momentum_ctrl = MomentumControls {
@@ -3740,6 +3741,7 @@ mod lowmach_tests {
             g: Vec3::new(0.0, 0.0, -9.81),
             t_ref: t_ambient,
             t_min: 1.0,
+            form: ofgpu::momentum::BuoyancyForm::DensityRatio,
         };
         let simple_ctrl = SimpleControls {
             momentum: momentum_ctrl,

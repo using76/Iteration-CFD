@@ -68,7 +68,7 @@ use crate::io::fields::PatchFieldSpec;
 use crate::io::regex::Regex;
 use crate::io::schemes::{parse_div, parse_grad, parse_sn_grad, DivEntry};
 use crate::fv::{GradScheme, SnGradScheme};
-use crate::momentum::BuoyancyCoeffs;
+use crate::momentum::{BuoyancyCoeffs, BuoyancyForm};
 use crate::scalar_transport::ScalarTransportCoeffs;
 use crate::timescheme::DdtScheme;
 use crate::energy::PrtModel;
@@ -2287,6 +2287,7 @@ impl JsonCase {
                 g: to_vec3(self.physics.gravity),
                 t_ref: self.physics.fluid.t_ref as Scalar,
                 t_min: BuoyancyCoeffs::default().t_min,
+                form: BuoyancyForm::DensityRatio,
             },
             BuoyancyModel::Boussinesq => unsupported(
                 "physics.buoyancy",
@@ -2297,6 +2298,7 @@ impl JsonCase {
                     g: to_vec3(self.physics.gravity),
                     t_ref: self.physics.fluid.t_ref as Scalar,
                     t_min: BuoyancyCoeffs::default().t_min,
+                    form: BuoyancyForm::DensityRatio,
                 },
             )?,
         };

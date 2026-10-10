@@ -52,7 +52,7 @@ use crate::mesh::gpugeom::{FacePointCsr, flatten_faces};
 use crate::mesh::motion::{Displacement, MeshMotion, PatchMotion};
 use crate::mesh::refined::{self, RefinedBox};
 use crate::mesh::{GpuMesh, HostMesh, PatchKind};
-use crate::momentum::{BuoyancyCoeffs, MomentumControls};
+use crate::momentum::{BuoyancyCoeffs, BuoyancyForm, MomentumControls};
 use crate::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
 use crate::simple::{PimplePerformance, Simple, SimpleControls};
 use crate::timescheme::DdtScheme;
@@ -295,6 +295,7 @@ pub(crate) fn buoyancy_off() -> BuoyancyCoeffs {
         g: Vec3::ZERO,
         t_ref: 293.15,
         t_min: 1.0,
+        form: BuoyancyForm::DensityRatio,
     }
 }
 

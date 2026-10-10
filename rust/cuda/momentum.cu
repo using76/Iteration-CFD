@@ -645,6 +645,80 @@ extern "C" __global__ void momBuoyancyFluxBoundary
 
 
 // ==========================================================================
+//  Boussinesq buoyancy  -  SPEC-LIT S121
+//
+//      rho/rho_ref = 1 - beta (T - Tref)                    (121.1)
+//      b           = -beta (T - Tref) g                     (121.2)
+//      phib_f      = -(beta (T_f - Tref)) (g . Sf)          (121.3)
+//
+//  The opt-in SECOND form of the body force, beside S9's density ratio,
+//  for cases whose temperature differences are small enough to linearise:
+//  dT/T << 1 (Spiegel & Veronis 1960 give the condition; Gray & Giorgini
+//  1976 tabulate when liquids and gases actually meet it). With
+//  beta = 1/Tref it is S9's force multiplied by exactly T/Tref, so it
+//  overstates a hot plume by that factor - which is why S9 stays the
+//  default.
+//
+//  A separate kernel pair, so S9's kernels above are untouched and their
+//  SASS does not move.
+//
+//  (121.3) has no divide, so there is NO floor and no tMin here: a NaN
+//  temperature propagates instead of being replaced, and Momentum::new
+//  refuses a non-finite beta by name.
+// ==========================================================================
+
+extern "C" __global__ void momBoussinesqFlux
+(
+    ofscalar* __restrict__ phib,
+    const ofscalar* __restrict__ tf,
+    const ofvec3* __restrict__ sf,
+    ofscalar gx, ofscalar gy, ofscalar gz,
+    ofscalar tRef,
+    ofscalar beta,
+    oflabel n
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= n) return;
+
+    const ofscalar t = tf[f];
+    const ofvec3 s = sf[f];
+    phib[f] = -(beta*(t - tRef))*(gx*s.x + gy*s.y + gz*s.z);
+}
+
+
+//- The same on the boundary, with the prescribed-flux faces zeroed, exactly
+//  as S9's boundary kernel does: a wall takes whatever force the fluid puts
+//  on it, and a sealed box must not drift.
+extern "C" __global__ void momBoussinesqFluxBoundary
+(
+    ofscalar* __restrict__ phib,
+    const ofscalar* __restrict__ tf,
+    const ofvec3* __restrict__ sf,
+    const oflabel* __restrict__ bKind,
+    const ofscalar* __restrict__ fr,
+    ofscalar gx, ofscalar gy, ofscalar gz,
+    ofscalar tRef,
+    ofscalar beta,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    if (momFluxIsPrescribed(bKind[i], fr[i]))
+    {
+        phib[i] = 0;
+        return;
+    }
+
+    const ofscalar t = tf[i];
+    const ofvec3 s = sf[i];
+    phib[i] = -(beta*(t - tRef))*(gx*s.x + gy*s.y + gz*s.z);
+}
+
+
+// ==========================================================================
 //  phi_HbyA  -  SPEC-LIT S5.1
 //
 //      phi_HbyA = interpolate(HbyA) . Sf  +  rAU_f (b_f . Sf)

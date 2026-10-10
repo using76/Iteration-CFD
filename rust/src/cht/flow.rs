@@ -68,7 +68,7 @@ use crate::fv::{DivScheme, FvKernels, GradScheme, SnGradScheme};
 use crate::io::case::SolverControls;
 use crate::io::schemes::DivEntry;
 use crate::mesh::{GpuMesh, HostMesh};
-use crate::momentum::{BuoyancyCoeffs, MomentumControls};
+use crate::momentum::{BuoyancyCoeffs, BuoyancyForm, MomentumControls};
 use crate::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
 use crate::radiation::SIGMA_SB;
 use crate::s2s::{RadiantFaces, S2s};
@@ -216,6 +216,7 @@ impl Buoyancy {
             // against a corrupted zero, not a physical constant a case has any
             // business overriding.
             t_min: BuoyancyCoeffs::default().t_min,
+            form: BuoyancyForm::DensityRatio,
         }
     }
 }

@@ -37374,6 +37374,108 @@ term, §50.8); the planned names refused by their own arm today keep theirs
 `cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`,
 `externalWallHeatFluxTemperature` `fixedFluxTemperature`).
 
+## 121. Boussinesq buoyancy — `-β(T - T_ref)g` on faces, beside the density-ratio form
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §121 to CMP-01. The
+§9 density-ratio force stays the default and is unchanged; the Boussinesq form is a
+second, opt-in form of the same face body force, for cases whose temperature
+differences are small (a liquid, a data hall, a natural-convection cavity).
+
+Sources: **Spiegel, E. A. & Veronis, G. (1960), "On the Boussinesq approximation for
+a compressible fluid", *ApJ* 131, 442, doi:10.1086/146849** (open full text at
+<https://adsabs.harvard.edu/full/1960ApJ...131..442S>); **Gray, D. D. & Giorgini, A.
+(1976), "The validity of the Boussinesq approximation for liquids and gases",
+*Int. J. Heat Mass Transfer* 19(5) 545-551, doi:10.1016/0017-9310(76)90168-X** (both
+DOIs checked against Crossref on 2026-10-11). No code was read for this section.
+
+### 121.1 The force
+
+The density is linearised about the reference state, and only the body force sees
+the variation:
+
+```
+rho/rho_ref = 1 - beta (T - T_ref)                                    (121.1)
+b = (rho/rho_ref - 1) g = -beta (T - T_ref) g                         (121.2)
+```
+
+`beta` is the volumetric thermal expansion coefficient `-(1/rho)(∂rho/∂T)_p` in 1/K.
+For an ideal gas `beta = 1/T_ref`. As in §9 and §5.1 the force enters as a FACE flux
+built from the interpolated face temperature, never from a cell value:
+
+```
+phib_f = -(beta (T_f - T_ref)) (g · S_f)                              (121.3)
+```
+
+evaluated in exactly that order (the bracketed product first, then the dot product),
+on the host twin `BuoyancyCoeffs::at` and in the kernels alike. A boundary face whose
+flux is prescribed (`momFluxIsPrescribed`: empty, symmetry, or `fr >= 1`) carries
+`phib = 0`, as in §9.
+
+### 121.2 Relation to §9
+
+With `beta = 1/T_ref` the two forms differ by exactly the factor `T/T_ref`:
+
+```
+b_Boussinesq / b_ratio = [(T_ref - T)/T_ref] / [(T_ref - T)/T] = T/T_ref        (121.4)
+```
+
+so (121.2) is the first-order expansion of §9's `T_ref/T - 1` about `T_ref`, and it
+overstates a hot plume's force by `T/T_ref` (about 4 at 1173 K against 293 K, the
+reason §9 exists). Spiegel & Veronis and Gray & Giorgini state when the linearisation
+holds; *DESIGN*: this tree's guard is `beta · max|T - T_ref| ≤ 0.1`, applied when a
+case is lowered (CMP-03), not by the force itself.
+
+### 121.3 Design
+
+- `momentum::BuoyancyCoeffs` gains `form: BuoyancyForm` with `DensityRatio` (the
+  default) and `Boussinesq { beta }`. Every existing literal names `DensityRatio`, so
+  every existing case runs §9's kernels `momBuoyancyFlux` / `momBuoyancyFluxBoundary`
+  bit for bit.
+- (121.3) runs in its own kernels `momBoussinesqFlux` / `momBoussinesqFluxBoundary` in
+  `cuda/momentum.cu`; §9's kernels are not edited, so their SASS does not move.
+- No temperature floor: (121.3) has no divide. A NaN temperature propagates instead of
+  being replaced by `t_min`. `Momentum::new` refuses a non-finite `beta` by name.
+- Case input is CMP-03's: until it lands, JSONC `physics.buoyancy: "boussinesq"` stays
+  refused by name (§13.4).
+
+### 121.4 The hydrostatic column
+
+On a uniform mesh of spacing `h` in a sealed, stably stratified column, the discrete
+balance `|S_f| snGrad(p) = phib_f` (§9, §5.1) holds face by face, so across every
+z-face the kinematic pressure jumps by
+
+```
+p_{k+1} - p_k = -h g_z beta (T_f - T_ref),    T_f = (T_k + T_{k+1})/2          (121.5)
+```
+
+and by zero across every x- and y-face; the fluid stays at rest.
+
+### 121.5 Tests and their precision classes (docs/17 §5.1.4)
+
+| test | assertion | class |
+|---|---|---|
+| `momentum::tests::boussinesq_over_density_ratio_is_t_over_tref_when_beta_is_one_over_tref` and its twin in `tests/f32_boussinesq.rs` | (121.4) to 4 ulp of the build, at temperatures where `T_ref/T` is exact | D |
+| `…boussinesq_is_exactly_zero_at_tref` (and twin) | `b(T_ref) == 0` exactly | D |
+| `…boussinesq_hot_cell_accelerates_up` | `b_z > 0` for `T > T_ref` under `g_z < 0`, `b_z < 0` for `T < T_ref` | P |
+| `tests/f32_boussinesq.rs::boussinesq_device_flux_is_the_host_formula` | device (121.3) against the host formula, internal and non-prescribed boundary faces, to 16 ulp of the build; prescribed faces exactly 0 | D |
+| `simple::tests::boussinesq_hydrostatic_column_jump_is_h_gz_beta_dt` (sealed, f64 lib test) and its twin in `tests/f32_boussinesq.rs` (open top, both builds) | (121.5) to `1e-12` (f64) / `1e-5` (f32) of `max|jump|`; `max|U|` below `1e-9` / `1e-5` m/s | R, `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1) |
+
+**Measured (CMP-01, 2026-10-11, RTX 5070 Ti).** Sealed column, f64: err `3.355e-13`, `max|U|` `4.4e-16` m/s.
+Twin, open top: f64 err `8.178e-14`, `max|U|` `1.138e-16` m/s; f32 err `2.646e-6`, `max|U|` `2.951e-9` m/s.
+The device flux matches the host formula with the interpolation evaluated as the kernel's fused multiply-add.
+
+*Why the twin's top is open.* The sealed column's pressure is pinned: its matrix is singular, and
+`assemble_pressure` removes the source mean in the build's own precision. Under `single` the
+float-rounded mean that is left is a component no solver can remove, so the §118.4 refinement works on an
+inconsistent system. The run then diverges with NaN residuals at the fifth corrector, with either force form;
+§9's own sealed-column tests carry §112.3's ignore for the same reason. That is a finding for the precision
+stream, not a property of (121.3). The twin therefore opens the top patch, with U zeroGradient and p fixedValue 0,
+so the pressure system is nonsingular in both builds, and (121.5) still holds face by face. Its linear solvers stop
+at `1e-14` rather than `1e-12`. With a Dirichlet anchor the stopping residual passes straight into the jumps: at
+`1e-12` the f64 twin measured `9.8e-12` of `max|jump|`, falling in proportion to the tolerance.
+
+Gate CMP-B (de Vahl Davis with Boussinesq, CMP-04) adds its rows here when it lands.
+
 ## 122. The compressible gas — the perfect-gas state, the gauge pressure about `p_op`, Sutherland, and the f32 design
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §122-§127 to the
