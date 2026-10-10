@@ -36923,6 +36923,144 @@ and §118.2 (the view) for everything else, unchanged.
 
 No GPL-licensed source was consulted.
 
+### 118.4 Mixed-precision iterative refinement — PCG and PBiCGStab under single reach an f64 residual
+
+Under `single` a float Krylov solve stops at the float floor: its recurrence
+and its §8.4 residual are float vectors, so a tolerance below about
+`κ·u32` (`u32 = 2^-24`) is never met and the solve runs to `maxIter`
+(section 6 of `ofgpu-validate` measured `2.4e-7` against `1e-10` before this
+section). This section wraps the two Krylov methods of §8.1/§8.2, under
+`single` only, in mixed-precision iterative refinement: the solution and the
+residual are carried in double, and the unchanged float solver computes only
+a correction. The unit is F32-06.
+
+**The algorithm.** `A` and `b` are the stored float coefficients
+(`diag`, `upper`, `lower`, the coupled `boundaryCoeffs`, `source`), each
+widened exactly to double; `fl64`/`fl32` are the conversions; every sum is an
+`ofacc` sum (§118.1) whose result is STORED in double, never rounded to float.
+
+```
+x^0     = fl64(psi)                                                (118.4.1)
+x_ref   = (1/n) sum_i x^0_i
+N       = sum_i |(A x^0)_i - (A x_ref 1)_i| + sum_i |b_i - (A x_ref 1)_i| + eps64
+                                                                   (118.4.2)
+r^k     = b - A x^k        (double rows; A x is one gather per row)  (118.4.3)
+R_k     = sum_i |r^k_i|
+T       = max(tol·N, relTol·R_0)      (the second term only if relTol > 0)
+                                                                   (118.4.4)
+btilde  = fl32(r^k · (1/R_k))                                      (118.4.5)
+A d = btilde  by the unchanged float method, d = 0 to start,
+        tolerance tau_k = max(1e-4, T/R_k), relTol 0,
+        maxIter = maxIter - (inner sweeps so far)                  (118.4.6)
+x^{k+1} = x^k + R_k · fl64(d)                                      (118.4.7)
+stop    : R_k = 0, or R_k <= T with sweeps >= minIter (the rules below)
+                                                                   (118.4.8)
+psi     = fl32(x^final)                                            (118.4.9)
+```
+
+(118.4.2) is §8.4 evaluated once, in double, at the starting field;
+`eps64 = f64::MIN_POSITIVE`, §8.4's `eps` in the precision it is formed in.
+(118.4.5) scales the correction's right-hand side to unit 1-norm, so a
+residual far below float's normal range (`2^-126`) neither underflows nor
+reaches `OFGPU_TINY` in the inner products. At `d = 0` the inner §8.4 factor
+is `sum|btilde| + eps32 = 1 + O(n·u32)`, so the inner tolerance `tau_k` is a
+relative reduction of the residual, and `T/R_k` is exactly the reduction the
+outer test still needs: an inner solve never works harder than its step
+requires, so a case `relTol` of `0.05` costs one float solve to `0.05`.
+
+**The stop rules** (118.4.8), checked after (118.4.3) at every step, in this
+order: CONVERGED when `R_k = 0`, or when `R_k <= T` and the inner sweeps so
+far are at least `minIter`; NOT CONVERGED when the inner sweeps have spent
+`maxIter`, when `R_{k+1} > 0.5·R_k` (the float correction no longer
+contracts: `κ·u32` is near 1, and refinement cannot help), or after 12 outer
+steps. The constants are `IR_INNER_REL = 1e-4`, `IR_STAGNATION = 0.5` and
+`IR_MAX_OUTER = 12` in `src/precision.rs`.
+
+**What is reported.** `initial_residual = R_0/N` and
+`final_residual = R_last/N` — the residual of the double solution `x`, the
+§8.4 measure computed in double — and `n_iterations` the sum of the inner
+sweeps. The stored field is `fl32(x)`: one rounding of each entry, which no
+float field can avoid; its own residual is at the float floor again. A caller
+that wants the solve's answer itself reads `SolverWorkspace::refined_solution`
+(double, single build only).
+
+**Why it converges.** This is classical iterative refinement with the
+residual in a higher precision than the correction solve (Moler 1967; Higham
+2002 ch. 12). Carson & Higham (2018) analyse exactly this split — a working
+precision for the solution, a higher one for the residual and a lower one for
+the correction solve — and show that while the low-precision solver reduces
+the residual of each correction system by a factor `phi < 1`, the error
+contracts by about `phi` per step down to the limiting accuracy of the
+working precision, here double. With `phi = max(1e-4, κ·u32)` a 1e-14 target
+takes four steps on a well-conditioned system. Buttari et al. (2008) run the
+same inner-outer scheme with a float Krylov solver inside a double loop on
+sparse systems.
+
+**Device residency (§113).** Every vector operation is a device kernel of
+`cuda/solver.cu` compiled only under `OFGPU_SINGLE` (`solWiden`,
+`solNarrow`, `solSum64Stage1`, `solNormFactor64Stage1`,
+`solResidual64Stage1`, `solResidual64Scaled`, `solAxpyWiden`,
+`solSumStage2To64`), so the f64 build's `solver.cubin` does not change by a
+byte. The outer step makes one host read — the double `R_k`, in the place of
+the flag read a checking solve already makes — and the inner solves keep
+their own `checkInterval`. A `fixedIters` solve, the only kind a CUDA graph
+may capture (§113.2), is NOT refined: it runs the float method as before.
+
+**The f64 build.** Unchanged and bitwise: `solve_pbicgstab` and `solve_pcg`
+call the same float bodies with `b = source`, the precision constants are
+unused there, and the new kernels do not exist in its cubin.
+
+**What it does not do.** The FFT direct solve, the distributed Krylov of
+§73, the pressure selector's probe and the region-ranged conjugate solves are
+F32-07's. The two section-6 rows that compare the solve against the HOST
+reference's own float assembly and Gaussian elimination
+(`PCG == dense direct solve`, `dense solve leaves no residual`) keep their
+meaning and their tolerance: their floor under `single` is that float
+reference, whose matrix differs from the device's by up to `1e-7` relative
+(sections 1-5's assembly rows), and they are F32-13's to class.
+
+**Measured** (RTX 5070 Ti, 2026-10-10, `ofgpu-validate -sections 6`). Under
+`single`, on the 60-cell systems of section 6: PCG takes **4** outer steps and
+**46** inner sweeps (the f64 build: 33), and its refined solution matches a
+dense f64 solve of the device's own matrix to **7.7e-15** with a double
+residual of **7.1e-15**; PBiCGStab takes **3** outer steps and **25** sweeps
+(f64: 21), **3.0e-14** and **8.5e-15**. Both inside the plan's bound (at
+most 6 outer steps, at most twice the f64 sweeps). The row "device residual
+reaches the tolerance" moves from **2.4e-7** to **9.1e-15** against its
+unchanged `1e-10`. The host-reference rows keep their float floor:
+`PCG == dense direct solve` 3.76e-7 (unchanged), `PBiCGStab == dense direct
+solve` 4.79e-7 -> 2.88e-7, `dense solve leaves no residual` 2.72e-7 (the
+host's own float elimination, untouched), and the cuFFT mixed-sides row
+4.47e-7 -> 4.25e-7 (F32-07). Sections 1-5 and 7-8 under `single` report the
+same rows and the same errors as before. The f64 build: `-sections 1-8` is
+row-identical (291 rows, `tools/f64_identity.py rows`), and every cubin's
+SASS hashes as before except `solidblock.cubin`, whose source did not change
+and which flips between its two known hashes on any recompile (the F32-04
+records hold both). `tests/f32_refinement.rs` passes 8/8 in both builds with
+the same assertions (`SLACK = 1e-10`, `SOLVE_TOL = 1e-14`, the f64 values),
+including a system scaled by 2^-100: there the unscaled float inner
+products are of order 2^-200, below the smallest float, so they would round
+to zero at the stage-two store; the unit-norm right-hand side of (118.4.5)
+keeps every inner solve at order one (an argument, not a measured run of the
+unrefined solve).
+
+Sources: **Moler, C. B. (1967), "Iterative refinement in floating point",
+J. ACM 14(2) 316-321, doi:10.1145/321386.321394**; **Carson, E. & Higham, N.
+J. (2018), "Accelerating the solution of linear systems by iterative
+refinement in three precisions", SIAM J. Sci. Comput. 40(2) A817-A847,
+doi:10.1137/17M1140819**, open copy MIMS EPrint
+<https://eprints.maths.manchester.ac.uk/2562/1/paper.pdf>; **Buttari, A.,
+Dongarra, J., Kurzak, J., Luszczek, P. & Tomov, S. (2008), "Using mixed
+precision for sparse matrix computations to enhance the performance while
+achieving 64-bit accuracy", ACM TOMS 34(4) 17:1-22,
+doi:10.1145/1377596.1377597**, open copy (LAPACK Working Note 180)
+<https://eprints.maths.manchester.ac.uk/820/1/Using_Mixed_Precision.pdf>;
+**Higham, N. J. (2002), Accuracy and Stability of Numerical Algorithms, 2nd
+ed., SIAM, doi:10.1137/1.9780898718027**, ch. 12. And §8.1, §8.2, §8.4,
+§113 and §118.1 for everything else, unchanged.
+
+No GPL-licensed source was consulted.
+
 ### 118.6 Field, phi and restart I/O at f32 — nine digits, one rounding, a bitwise restart
 
 The text writer printed `phi` at seventeen significant digits in every

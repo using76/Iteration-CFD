@@ -1897,6 +1897,8 @@ fn check_solver_against_dense(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<
             1e-8,
         );
         c.check("dense solve leaves no residual", cpu::residual(&exact, &r, &m), 1e-13);
+        #[cfg(feature = "single")]
+        check_refined(c, gpu, "PCG", &a, &gm, &m, &ws)?;
     }
 
     // ---- asymmetric: convection makes upper != lower ----------------------
@@ -1976,8 +1978,72 @@ fn check_solver_against_dense(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<
             1e-8,
         );
         c.check("device residual reaches the tolerance", perf.final_residual, 1e-10);
+        #[cfg(feature = "single")]
+        check_refined(c, gpu, "PBiCGStab", &a, &gm, &m, &ws)?;
     }
 
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT 118.4, single build only: the refined solve against a dense f64
+//  solve of the DEVICE's own matrix
+// ==========================================================================
+
+/// The refinement rows of SPEC-LIT 118.4. The two dense rows above compare
+/// the solve against the HOST reference's own float assembly, whose matrix
+/// differs from the device's by up to 1e-7 relative; these rows close that
+/// gap by downloading the device's coefficients and solving THOSE in f64.
+/// Everything here is double: the widening is exact, the direct solve is
+/// [`cpu::solve_dense64`], and the residual is [`cpu::residual64`].
+#[cfg(feature = "single")]
+fn check_refined(
+    c: &mut Checks,
+    gpu: &Gpu,
+    label: &str,
+    a: &GpuLduMatrix,
+    _gm: &GpuMesh,
+    m: &HostMesh,
+    ws: &SolverWorkspace,
+) -> Result<()> {
+    let mut dev = cpu::CpuLdu::new(m);
+    dev.diag.copy_from_slice(&gpu.download(&a.diag)?);
+    dev.upper.copy_from_slice(&gpu.download(&a.upper)?);
+    dev.lower.copy_from_slice(&gpu.download(&a.lower)?);
+    dev.source.copy_from_slice(&gpu.download(&a.source)?);
+    dev.boundary_coeffs.copy_from_slice(&gpu.download(&a.boundary_coeffs)?);
+
+    let b64: Vec<f64> = dev.source.iter().map(|v| *v as f64).collect();
+    let Some(exact) = cpu::solve_dense64(cpu::dense_from_ldu64(&dev, m), &b64) else {
+        c.require(&format!("{label} dense f64 solve of the device's own matrix"), false);
+        return Ok(());
+    };
+
+    let Some(x_hi) = ws.refined_solution() else {
+        c.require(&format!("{label} refinement ran (SPEC-LIT 118.4)"), false);
+        return Ok(());
+    };
+    let x = gpu.download(x_hi)?;
+    c.note(&format!(
+        "{label} refinement: {} outer steps",
+        ws.ir_outer_steps()
+    ));
+
+    let scale = exact.iter().fold(0.0f64, |s, v| s.max(v.abs())).max(1e-30);
+    let worst = x
+        .iter()
+        .zip(exact.iter())
+        .fold(0.0f64, |s, (v, e)| s.max((v - e).abs()));
+    c.check(
+        &format!("{label} refined == dense f64 solve of the device's own matrix (SPEC-LIT 118.4)"),
+        (worst / scale) as Scalar,
+        1e-8,
+    );
+    c.check(
+        &format!("{label} refined residual in f64 on the device's own matrix (SPEC-LIT 118.4)"),
+        cpu::residual64(&x, &dev, m) as Scalar,
+        1e-13,
+    );
     Ok(())
 }
 

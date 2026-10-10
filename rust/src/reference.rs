@@ -1548,6 +1548,165 @@ pub fn residual(psi: &[Scalar], a: &CpuLdu, m: &HostMesh) -> Scalar {
     s / norm_factor(psi, a, m)
 }
 
+// ==========================================================================
+//  The f64 twins - SPEC-LIT section 118.4
+//
+//  The mixed-precision refinement is measured in f64 on the SAME stored
+//  coefficients, widened exactly: a direct solve of the device's own matrix
+//  and a section 8.4 residual formed entirely in double. They compile in
+//  both builds; in the f64 build they are the same arithmetic spelled in
+//  f64, which is what `Scalar` already is there.
+// ==========================================================================
+
+/// [`dense_from_ldu`] with every coefficient widened `as f64` before it is
+/// added.
+pub fn dense_from_ldu64(a: &CpuLdu, m: &HostMesh) -> Vec<f64> {
+    let n = m.n_cells;
+    let mut d = vec![0.0f64; n * n];
+
+    for c in 0..n {
+        d[c * n + c] = a.diag[c] as f64;
+    }
+    for f in 0..m.n_internal_faces {
+        let p = m.owner[f] as usize;
+        let nb = m.neighbour[f] as usize;
+        d[p * n + nb] += a.upper[f] as f64;
+        d[nb * n + p] += a.lower[f] as f64;
+    }
+    for bf in 0..m.n_boundary_faces {
+        if !is_coupled_face(m, bf) {
+            continue;
+        }
+        let c = m.b_face_cells[bf] as usize;
+        let nb = m.b_nbr_cell[bf] as usize;
+        d[c * n + nb] -= a.boundary_coeffs[bf] as f64;
+    }
+    d
+}
+
+/// [`solve_dense`] in f64: the same Gaussian elimination with scaled partial
+/// pivoting, on an `f64` row-major matrix with an `f64` right-hand side.
+pub fn solve_dense64(mut a: Vec<f64>, b: &[f64]) -> Option<Vec<f64>> {
+    let n = b.len();
+    if a.len() != n * n {
+        return None;
+    }
+    let mut x = b.to_vec();
+
+    let mut scale = vec![0.0f64; n];
+    for r in 0..n {
+        let mut biggest = 0.0f64;
+        for c in 0..n {
+            biggest = biggest.max(a[r * n + c].abs());
+        }
+        if !(biggest > 0.0) {
+            return None;
+        }
+        scale[r] = 1.0 / biggest;
+    }
+
+    for k in 0..n {
+        let mut piv = k;
+        let mut best = a[k * n + k].abs() * scale[k];
+        for r in (k + 1)..n {
+            let v = a[r * n + k].abs() * scale[r];
+            if v > best {
+                best = v;
+                piv = r;
+            }
+        }
+        if !(best > 0.0) || !best.is_finite() {
+            return None;
+        }
+        if piv != k {
+            for c in 0..n {
+                a.swap(k * n + c, piv * n + c);
+            }
+            x.swap(k, piv);
+            scale.swap(k, piv);
+        }
+
+        let akk = a[k * n + k];
+        for r in (k + 1)..n {
+            let f = a[r * n + k] / akk;
+            if f == 0.0 {
+                continue;
+            }
+            a[r * n + k] = 0.0;
+            for c in (k + 1)..n {
+                a[r * n + c] -= f * a[k * n + c];
+            }
+            x[r] -= f * x[k];
+        }
+    }
+
+    for k in (0..n).rev() {
+        let mut s = x[k];
+        for c in (k + 1)..n {
+            s -= a[k * n + c] * x[c];
+        }
+        x[k] = s / a[k * n + k];
+    }
+
+    if x.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    Some(x)
+}
+
+/// The gather row product [`amul`] spells in `Scalar`, in f64: every
+/// coefficient widened exactly, the same scatter loop and the same order.
+fn amul64(out: &mut Vec<f64>, psi: &[f64], a: &CpuLdu, m: &HostMesh) {
+    out.clear();
+    out.resize(m.n_cells, 0.0);
+
+    for c in 0..m.n_cells {
+        out[c] = a.diag[c] as f64 * psi[c];
+    }
+    for f in 0..m.n_internal_faces {
+        let p = m.owner[f] as usize;
+        let n = m.neighbour[f] as usize;
+        out[p] += a.upper[f] as f64 * psi[n];
+        out[n] += a.lower[f] as f64 * psi[p];
+    }
+    for bf in 0..m.n_boundary_faces {
+        if !is_coupled_face(m, bf) {
+            continue;
+        }
+        let c = m.b_face_cells[bf] as usize;
+        out[c] -= a.boundary_coeffs[bf] as f64 * psi[m.b_nbr_cell[bf] as usize];
+    }
+}
+
+/// [`residual`] and [`norm_factor`] in f64 - the SPEC-LIT section 8.4
+/// measure of the DOUBLE solution `psi` on the stored coefficients widened
+/// exactly, with the eps of that precision (`f64::EPSILON`).
+pub fn residual64(psi: &[f64], a: &CpuLdu, m: &HostMesh) -> f64 {
+    let n = m.n_cells;
+    if n == 0 {
+        return 0.0;
+    }
+
+    let x_ref: f64 = psi.iter().sum::<f64>() / (n as f64);
+    let uniform = vec![x_ref; n];
+
+    let mut a_psi = Vec::new();
+    amul64(&mut a_psi, psi, a, m);
+    let mut a_ref = Vec::new();
+    amul64(&mut a_ref, &uniform, a, m);
+
+    let mut norm = 0.0f64;
+    for c in 0..n {
+        norm += (a_psi[c] - a_ref[c]).abs() + (a.source[c] as f64 - a_ref[c]).abs();
+    }
+
+    let mut res = 0.0f64;
+    for c in 0..n {
+        res += (a.source[c] as f64 - a_psi[c]).abs();
+    }
+    res / (norm + f64::EPSILON)
+}
+
 /// SPEC-LIT section 8.4 on the rows `rows` of `a`, as the region's own
 /// system: `x_ref` is the mean over `rows`, the reference vector is `psi`
 /// outside `rows` and `x_ref` inside, and both sums run over `rows` only.

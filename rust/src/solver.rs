@@ -69,14 +69,33 @@
 //! `A`-orthogonality, and on an asymmetric matrix that is not an inner
 //! product, so the method does not converge slowly, it converges to the wrong
 //! thing or not at all.
+//!
+//! # Mixed-precision refinement under `single`
+//!
+//! Under `--features single` a float Krylov solve stops at the float floor: a
+//! tolerance below about `kappa·u32` is never met. So under `single` only,
+//! [`solve_pcg`] and [`solve_pbicgstab`] wrap the UNCHANGED float method in
+//! mixed-precision iterative refinement: the solution and the residual are
+//! carried in double, and the float method computes only a scaled correction.
+//! `SPEC-LIT` §118.4 holds the algorithm, its equations (118.4.1)-(118.4.9)
+//! and its stop rules; the precision constants live in [`crate::precision`]
+//! and the kernels in the `OFGPU_SINGLE` block at the end of
+//! `cuda/solver.cu`. The f64 build is untouched and bitwise: it calls the
+//! same float bodies with `b = source`, and none of the refinement exists in
+//! it - not in the Rust, not in the cubin.
 
 use cudarc::driver::{CudaEvent, CudaFunction, LaunchConfig, PinnedHostSlice, PushKernelArg};
+
+#[cfg(feature = "single")]
+use cudarc::driver::CudaViewMut;
 
 use crate::device::{cfg_for, DevBuf, Gpu, BLOCK};
 use crate::error::{Error, Result};
 use crate::ldu::GpuLduMatrix;
 use crate::mesh::GpuMesh;
 use crate::precon::MultiColour;
+#[cfg(feature = "single")]
+use crate::precision::{ir_inner_tolerance, ir_target, ir_verdict, IrVerdict};
 use crate::{Acc, Label, Scalar};
 
 /// Read from `system/fvSolution`; defined in [`crate::io::case`] because that
@@ -189,6 +208,32 @@ pub struct SolverKernels {
     #[cfg(feature = "single")]
     pub widen_to_acc: CudaFunction,
 
+    /// SPEC-LIT §118.4: the mixed-precision refinement kernels. Absent in the
+    /// f64 build, whose `solver.cubin` does not change by a byte.
+    #[cfg(feature = "single")]
+    pub widen: CudaFunction,
+    /// (118.4.9) `psi = fl32(x)`.
+    #[cfg(feature = "single")]
+    pub narrow: CudaFunction,
+    /// (118.4.2) stage one of the sum of a double vector.
+    #[cfg(feature = "single")]
+    pub sum64_1: CudaFunction,
+    /// (118.4.2) stage one of the §8.4 factor in double.
+    #[cfg(feature = "single")]
+    pub norm_factor64_1: CudaFunction,
+    /// (118.4.3) stage one of `R_k = sum|r|`.
+    #[cfg(feature = "single")]
+    pub residual64_1: CudaFunction,
+    /// (118.4.5) `btilde = fl32(r/R_k)`.
+    #[cfg(feature = "single")]
+    pub residual64_scaled: CudaFunction,
+    /// (118.4.7) `x += R_k·fl64(d)`.
+    #[cfg(feature = "single")]
+    pub axpy_widen: CudaFunction,
+    /// Stage two storing its result in DOUBLE.
+    #[cfg(feature = "single")]
+    pub sum2_to64: CudaFunction,
+
     // vectors
     pub amul: CudaFunction,
     pub copy: CudaFunction,
@@ -239,6 +284,22 @@ impl SolverKernels {
             sum2_converged: k.func("solSumStage2Converged")?,
             #[cfg(feature = "single")]
             widen_to_acc: k.func("solWidenToAcc")?,
+            #[cfg(feature = "single")]
+            widen: k.func("solWiden")?,
+            #[cfg(feature = "single")]
+            narrow: k.func("solNarrow")?,
+            #[cfg(feature = "single")]
+            sum64_1: k.func("solSum64Stage1")?,
+            #[cfg(feature = "single")]
+            norm_factor64_1: k.func("solNormFactor64Stage1")?,
+            #[cfg(feature = "single")]
+            residual64_1: k.func("solResidual64Stage1")?,
+            #[cfg(feature = "single")]
+            residual64_scaled: k.func("solResidual64Scaled")?,
+            #[cfg(feature = "single")]
+            axpy_widen: k.func("solAxpyWiden")?,
+            #[cfg(feature = "single")]
+            sum2_to64: k.func("solSumStage2To64")?,
 
             amul: k.func("solAmul")?,
             copy: k.func("solCopy")?,
@@ -343,6 +404,12 @@ pub struct SolverWorkspace {
     /// `sum|b - A·psi|` at the end. Unscaled.
     pub final_res: DevBuf<Scalar>,
 
+    /// SPEC-LIT §118.4: the double state of the mixed-precision refinement.
+    /// `single` only; [`Self::refined_solution`] and [`Self::ir_outer_steps`]
+    /// read it after a solve.
+    #[cfg(feature = "single")]
+    pub ir: Option<IrWorkspace>,
+
     /// Sticky convergence flag, written by the device, sampled by the host.
     pub flag: DevBuf<Label>,
     /// `[initial_res, final_res, norm_factor]`, so reporting costs one copy.
@@ -364,6 +431,26 @@ pub struct SolverWorkspace {
     /// block, because this wait is on the critical path of the iteration and
     /// `check_interval` already exists to make it rare.
     pub(crate) flag_event: CudaEvent,
+}
+
+/// The double state of a SPEC-LIT §118.4 refinement, allocated with the
+/// workspace and reused so a time loop never allocates mid-run. `single`
+/// only: the f64 build has no field, no allocation and no cost.
+#[cfg(feature = "single")]
+pub struct IrWorkspace {
+    /// `x^k`, the solution carried in double (118.4.1).
+    pub x_hi: DevBuf<f64>,
+    /// The correction `d` the inner float solve computes (118.4.6).
+    pub d: DevBuf<Scalar>,
+    /// `btilde`, the unit-norm right-hand side of the correction system
+    /// (118.4.5).
+    pub b_in: DevBuf<Scalar>,
+    /// Four double slots, so one download serves the host's outer step:
+    /// `[0]` = `sum x` (the `x_ref` of 118.4.2), `[1]` = the §8.4 factor
+    /// `N`, `[2]` = `R_k`.
+    pub scal: DevBuf<f64>,
+    /// Outer steps of the LAST solve; 0 when it was not refined.
+    pub outer_steps: usize,
 }
 
 impl SolverWorkspace {
@@ -434,12 +521,36 @@ impl SolverWorkspace {
             initial_res: gpu.zeros(1)?,
             final_res: gpu.zeros(1)?,
 
+            #[cfg(feature = "single")]
+            ir: Some(IrWorkspace {
+                x_hi: gpu.zeros::<f64>(n)?,
+                d: gpu.zeros(n)?,
+                b_in: gpu.zeros(n)?,
+                scal: gpu.zeros::<f64>(4)?,
+                outer_steps: 0,
+            }),
+
             flag: gpu.zeros(1)?,
             report: gpu.zeros(3)?,
 
             flag_host,
             flag_event: gpu.ctx().new_event(None)?,
         })
+    }
+
+    /// The double solution `x_hi` of the last SPEC-LIT §118.4 refined solve,
+    /// or `None` when no refined solve has run on this workspace. `single`
+    /// only.
+    #[cfg(feature = "single")]
+    pub fn refined_solution(&self) -> Option<&DevBuf<f64>> {
+        self.ir.as_ref().map(|i| &i.x_hi)
+    }
+
+    /// Outer refinement steps of the LAST solve on this workspace; 0 for a
+    /// solve that was not refined (SPEC-LIT §118.4). `single` only.
+    #[cfg(feature = "single")]
+    pub fn ir_outer_steps(&self) -> usize {
+        self.ir.as_ref().map(|i| i.outer_steps).unwrap_or(0)
     }
 }
 
@@ -1443,6 +1554,22 @@ pub fn device_norm_factor(
     a: &GpuLduMatrix,
     m: &GpuMesh,
 ) -> Result<()> {
+    device_norm_factor_rhs(gpu, k, w, psi, &a.source, a, m)
+}
+
+/// [`device_norm_factor`] against an explicit right-hand side `b`: the body
+/// is today's with `b` in the place of `&a.source`, so the SPEC-LIT §118.4
+/// refinement can normalise the scaled correction system (whose `b` is
+/// `btilde`, not `source`) without a second copy of the arithmetic.
+fn device_norm_factor_rhs(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    psi: &DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+) -> Result<()> {
     let n = a.n_cells;
     if n == 0 {
         return gpu.fill_zero(&mut w.norm_factor);
@@ -1473,7 +1600,7 @@ pub fn device_norm_factor(
             .launch_builder(&k.norm_factor1)
             .arg(&mut w.partials)
             .arg(&w.apsi)
-            .arg(&a.source)
+            .arg(b)
             .arg(&w.y)
             .arg(&nl)
             .launch(cfg)?;
@@ -1772,10 +1899,51 @@ pub(crate) fn collect_report(
 /// The in-loop test uses the *recurrence* residual, which is what the
 /// algorithm carries anyway; the residual finally reported is recomputed as
 /// the true `b - A·x` so that a solve which stagnated cannot claim otherwise.
+#[cfg(not(feature = "single"))]
 pub fn solve_pbicgstab(
     gpu: &Gpu,
     k: &SolverKernels,
     psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    pbicgstab_float(gpu, k, psi, &a.source, a, m, w, ctrl)
+}
+
+/// Preconditioned BiCGStab, SPEC-LIT §118.4 refined under `single`: the
+/// unchanged float method of [`pbicgstab_float`] inside the mixed-precision
+/// outer loop of [`solve_refined`]. A `fixed_iters` solve - the only kind a
+/// CUDA graph may capture (§113.2) - and an empty system are NOT refined.
+#[cfg(feature = "single")]
+pub fn solve_pbicgstab(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    if let Some(i) = w.ir.as_mut() {
+        i.outer_steps = 0;
+    }
+    if ctrl.fixed_iters || a.n_cells == 0 {
+        return pbicgstab_float(gpu, k, psi, &a.source, a, m, w, ctrl);
+    }
+    solve_refined(gpu, k, psi, a, m, w, ctrl, pbicgstab_float, "solve_pbicgstab")
+}
+
+/// The unchanged float method against an explicit right-hand side `b`: the
+/// body is today's with `b` in the place of `&a.source` - the initial
+/// residual, the §8.4 factor and the epilogue - which is what lets the
+/// §118.4 refinement drive it on the scaled correction system.
+fn pbicgstab_float(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
     a: &GpuLduMatrix,
     m: &GpuMesh,
     w: &mut SolverWorkspace,
@@ -1806,8 +1974,8 @@ pub fn solve_pbicgstab(
     // ---- r = b - A·psi, and the normalisation the residual is measured in.
     // device_norm_factor leaves A·psi in w.apsi, so the residual is one
     // subtraction rather than a second matrix product.
-    device_norm_factor(gpu, k, w, &*psi, a, m)?;
-    vec_sub(gpu, k, &mut w.r, &a.source, &w.apsi, n)?;
+    device_norm_factor_rhs(gpu, k, w, &*psi, b, a, m)?;
+    vec_sub(gpu, k, &mut w.r, b, &w.apsi, n)?;
     vec_copy(gpu, k, &mut w.r0, &w.r, n)?;
 
     device_sum_mag(gpu, k, &mut w.initial_res, &w.r, &mut w.partials, n)?;
@@ -1895,7 +2063,7 @@ pub fn solve_pbicgstab(
         }
     }
 
-    finish_solve(gpu, k, psi, a, m, w, ctrl, &mut perf)?;
+    finish_solve(gpu, k, psi, b, a, m, w, ctrl, &mut perf)?;
     Ok(perf)
 }
 
@@ -2011,10 +2179,52 @@ pub(crate) fn bicg_r_update(
 /// (`SPEC-LIT` §8.2); anything carrying convection must use
 /// [`solve_pbicgstab`]. Nothing here checks the symmetry - it costs a pass
 /// over the faces and the caller knows the answer already.
+#[cfg(not(feature = "single"))]
 pub fn solve_pcg(
     gpu: &Gpu,
     k: &SolverKernels,
     psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    pcg_float(gpu, k, psi, &a.source, a, m, w, ctrl)
+}
+
+/// Preconditioned conjugate gradient, SPEC-LIT §118.4 refined under
+/// `single`: the unchanged float method of [`pcg_float`] inside the
+/// mixed-precision outer loop of [`solve_refined`]. A `fixed_iters` solve -
+/// the only kind a CUDA graph may capture (§113.2) - and an empty system are
+/// NOT refined.
+#[cfg(feature = "single")]
+pub fn solve_pcg(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    if let Some(i) = w.ir.as_mut() {
+        i.outer_steps = 0;
+    }
+    if ctrl.fixed_iters || a.n_cells == 0 {
+        return pcg_float(gpu, k, psi, &a.source, a, m, w, ctrl);
+    }
+    solve_refined(gpu, k, psi, a, m, w, ctrl, pcg_float, "solve_pcg")
+}
+
+/// The unchanged float method against an explicit right-hand side `b`: the
+/// body is today's with `b` in the place of `&a.source` - the initial
+/// residual, the §8.4 factor and the epilogue - which is what lets the
+/// §118.4 refinement drive it on the scaled correction system.
+fn pcg_float(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
     a: &GpuLduMatrix,
     m: &GpuMesh,
     w: &mut SolverWorkspace,
@@ -2042,8 +2252,8 @@ pub fn solve_pcg(
     let precon = effective_preconditioner(ctrl.precon, w)?;
     build_preconditioner(gpu, k, w, a, m, precon)?;
 
-    device_norm_factor(gpu, k, w, &*psi, a, m)?;
-    vec_sub(gpu, k, &mut w.r, &a.source, &w.apsi, n)?;
+    device_norm_factor_rhs(gpu, k, w, &*psi, b, a, m)?;
+    vec_sub(gpu, k, &mut w.r, b, &w.apsi, n)?;
 
     device_sum_mag(gpu, k, &mut w.initial_res, &w.r, &mut w.partials, n)?;
     copy_scalar(gpu, k, &mut w.final_res, &w.initial_res)?;
@@ -2107,7 +2317,7 @@ pub fn solve_pcg(
         }
     }
 
-    finish_solve(gpu, k, psi, a, m, w, ctrl, &mut perf)?;
+    finish_solve(gpu, k, psi, b, a, m, w, ctrl, &mut perf)?;
     Ok(perf)
 }
 
@@ -2163,6 +2373,327 @@ fn cg_p_update(gpu: &Gpu, k: &SolverKernels, w: &mut SolverWorkspace, n: usize) 
 }
 
 // ==========================================================================
+//  Mixed-precision iterative refinement - SPEC-LIT §118.4, `single` only
+// ==========================================================================
+
+/// The unchanged float method a refinement step drives: the common shape of
+/// [`pbicgstab_float`] and [`pcg_float`].
+#[cfg(feature = "single")]
+type FloatSolve = fn(
+    &Gpu,
+    &SolverKernels,
+    &mut DevBuf<Scalar>,
+    &DevBuf<Scalar>,
+    &GpuLduMatrix,
+    &GpuMesh,
+    &mut SolverWorkspace,
+    &SolverControls,
+) -> Result<SolverPerformance>;
+
+/// (118.4.1) `dst = fl64(src)`.
+#[cfg(feature = "single")]
+fn widen(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    dst: &mut DevBuf<f64>,
+    src: &DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.widen)
+            .arg(&mut *dst)
+            .arg(src)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// (118.4.9) `dst = fl32(src)`.
+#[cfg(feature = "single")]
+fn narrow(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    dst: &mut DevBuf<Scalar>,
+    src: &DevBuf<f64>,
+    n: usize,
+) -> Result<()> {
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.narrow)
+            .arg(&mut *dst)
+            .arg(src)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// Stage two of a refinement reduction: `out[0] = sum(partials) + offset`,
+/// STORED in double - [`finish_sum`]'s launch with the float rounding of
+/// `solSumStage2` removed. `offset` carries `eps64` for the §8.4 factor and
+/// is zero everywhere else.
+#[cfg(feature = "single")]
+fn sum2_to64(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    out: &mut CudaViewMut<f64>,
+    partials: &DevBuf<Acc>,
+    nparts: usize,
+    offset: f64,
+) -> Result<()> {
+    let np = to_label(nparts)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.sum2_to64)
+            .arg(&mut *out)
+            .arg(partials)
+            .arg(&np)
+            .arg(&offset)
+            .launch(one_block())?;
+    }
+    Ok(())
+}
+
+/// (118.4.3) `R_k = sum|b - A·x|` into `ir.scal[2]`, stage one plus the
+/// double stage two.
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+fn residual64_stage1(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    ir: &mut IrWorkspace,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    n: usize,
+) -> Result<()> {
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.residual64_1)
+            .arg(&mut w.partials)
+            .arg(&a.source)
+            .arg(&ir.x_hi)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    let mut slot = ir.scal.slice_mut(2..3);
+    sum2_to64(gpu, k, &mut slot, &w.partials, nparts, 0.0)
+}
+
+/// The §118.4 outer loop around `inner`, shared by both methods. The
+/// workspace's [`IrWorkspace`] is taken out for the duration - the inner
+/// float solve needs `w` - and put back on EVERY return path, error paths
+/// included.
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+fn solve_refined(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+    inner: FloatSolve,
+    who: &'static str,
+) -> Result<SolverPerformance> {
+    let mut ir = w.ir.take().ok_or_else(|| {
+        Error::Config("solver: no iterative-refinement state on this workspace".to_string())
+    })?;
+    let out = refine_loop(gpu, k, psi, a, m, w, ctrl, inner, who, &mut ir);
+    w.ir = Some(ir);
+    out
+}
+
+/// The refinement itself, SPEC-LIT §118.4 equations (118.4.1)-(118.4.9).
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+fn refine_loop(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+    inner: FloatSolve,
+    who: &'static str,
+    ir: &mut IrWorkspace,
+) -> Result<SolverPerformance> {
+    let n = a.n_cells;
+
+    // The same refusals, in the same words, as the float body.
+    refuse_round_trip_in_capture(gpu, ctrl, who)?;
+    check_workspace(w, n)?;
+    if psi.len() < n {
+        return Err(Error::Config(format!(
+            "{who}: psi holds {} values, the system has {n} cells",
+            psi.len()
+        )));
+    }
+
+    // (118.4.1) x^0 = fl64(psi). (118.4.2) sum x into scal[0], the §8.4
+    // factor N into scal[1] with eps64 as its offset; (118.4.3) R_0 into
+    // scal[2]. One download then serves the host's outer step.
+    widen(gpu, k, &mut ir.x_hi, psi, n)?;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.sum64_1)
+            .arg(&mut w.partials)
+            .arg(&ir.x_hi)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    {
+        let mut slot = ir.scal.slice_mut(0..1);
+        sum2_to64(gpu, k, &mut slot, &w.partials, nparts, 0.0)?;
+    }
+
+    let inv_n = 1.0 / (n as f64);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.norm_factor64_1)
+            .arg(&mut w.partials)
+            .arg(&ir.x_hi)
+            .arg(&ir.scal)
+            .arg(&inv_n)
+            .arg(&a.source)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    {
+        let mut slot = ir.scal.slice_mut(1..2);
+        sum2_to64(gpu, k, &mut slot, &w.partials, nparts, f64::MIN_POSITIVE)?;
+    }
+    residual64_stage1(gpu, k, ir, a, m, w, n)?;
+    let host = gpu.download(&ir.scal)?;
+    let norm = host[1];
+    let r_0 = host[2];
+    let mut r_k = r_0;
+
+    // (118.4.4) T = max(tol·N, relTol·R_0).
+    let target = ir_target(ctrl.tolerance as f64, ctrl.rel_tol as f64, norm, r_0);
+    let max_iter = ctrl.max_iter.max(0) as usize;
+    let min_iter = ctrl.min_iter.max(0) as usize;
+
+    let mut perf = SolverPerformance {
+        converged: false,
+        ..Default::default()
+    };
+    let mut r_prev: Option<f64> = None;
+    let mut sweeps: usize = 0;
+    let mut outer: usize = 0;
+
+    // (118.4.8) the stop rules, checked on the freshly computed R_k before
+    // every step.
+    let verdict = loop {
+        match ir_verdict(r_k, r_prev, target, sweeps, min_iter, max_iter, outer) {
+            IrVerdict::Continue => {}
+            v => break v,
+        }
+
+        // (118.4.5) btilde = fl32(r^k / R_k).
+        let inv_sigma = 1.0 / r_k;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.residual64_scaled)
+                .arg(&mut ir.b_in)
+                .arg(&a.source)
+                .arg(&ir.x_hi)
+                .arg(&a.diag)
+                .arg(&a.upper)
+                .arg(&a.lower)
+                .arg(&m.owner)
+                .arg(&m.neighbour)
+                .arg(&m.rf_offset)
+                .arg(&m.rf_face)
+                .arg(&m.rf_flags)
+                .arg(&a.boundary_coeffs)
+                .arg(&m.b_nbr_cell)
+                .arg(&inv_sigma)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        gpu.fill_zero(&mut ir.d)?;
+
+        // (118.4.6) the unchanged float method on the scaled system: d = 0
+        // to start, tau_k = max(IR_INNER_REL, T/R_k), relTol 0, and the
+        // budget the outer loop has left.
+        let inner_ctrl = SolverControls {
+            tolerance: ir_inner_tolerance(target, r_k) as Scalar,
+            rel_tol: 0.0,
+            max_iter: (max_iter - sweeps) as Label,
+            min_iter: 0,
+            fixed_iters: false,
+            report_residuals: false,
+            ..*ctrl
+        };
+        let done = inner(gpu, k, &mut ir.d, &ir.b_in, a, m, w, &inner_ctrl)?;
+        sweeps += done.n_iterations;
+
+        // (118.4.7) x^{k+1} = x^k + R_k·fl64(d).
+        let sigma = r_k;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.axpy_widen)
+                .arg(&mut ir.x_hi)
+                .arg(&ir.d)
+                .arg(&sigma)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        outer += 1;
+
+        // (118.4.3) again - the one host read the outer step makes.
+        residual64_stage1(gpu, k, ir, a, m, w, n)?;
+        let host = gpu.download(&ir.scal)?;
+        r_prev = Some(r_k);
+        r_k = host[2];
+    };
+
+    // (118.4.9) psi = fl32(x^final): the stored field. A caller that wants
+    // the solve's answer itself reads `SolverWorkspace::refined_solution`.
+    narrow(gpu, k, psi, &ir.x_hi, n)?;
+
+    perf.n_iterations = sweeps;
+    perf.converged = verdict == IrVerdict::Converged;
+    if ctrl.report_residuals {
+        perf.initial_residual = (r_0 / norm) as Scalar;
+        perf.final_residual = (r_k / norm) as Scalar;
+    }
+    ir.outer_steps = outer;
+    Ok(perf)
+}
+
+// ==========================================================================
 //  Shared epilogue
 // ==========================================================================
 
@@ -2179,6 +2710,7 @@ fn finish_solve(
     gpu: &Gpu,
     k: &SolverKernels,
     psi: &mut DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
     a: &GpuLduMatrix,
     m: &GpuMesh,
     w: &mut SolverWorkspace,
@@ -2191,7 +2723,7 @@ fn finish_solve(
     let n = a.n_cells;
 
     amul(gpu, k, &mut w.apsi, &*psi, a, m)?;
-    vec_sub(gpu, k, &mut w.tmp, &a.source, &w.apsi, n)?;
+    vec_sub(gpu, k, &mut w.tmp, b, &w.apsi, n)?;
     device_sum_mag(gpu, k, &mut w.final_res, &w.tmp, &mut w.partials, n)?;
 
     collect_report(gpu, k, w, perf)?;
@@ -3962,7 +4494,7 @@ mod tests {
             }
         }
 
-        finish_solve(gpu, k, psi, a, m, w, ctrl, &mut perf)?;
+        finish_solve(gpu, k, psi, &a.source, a, m, w, ctrl, &mut perf)?;
         Ok(perf)
     }
 
@@ -4061,7 +4593,7 @@ mod tests {
             }
         }
 
-        finish_solve(gpu, k, psi, a, m, w, ctrl, &mut perf)?;
+        finish_solve(gpu, k, psi, &a.source, a, m, w, ctrl, &mut perf)?;
         Ok(perf)
     }
 

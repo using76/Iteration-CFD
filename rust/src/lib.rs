@@ -86,6 +86,7 @@ pub mod energy;
 pub mod radiation;
 pub mod s2s;
 pub mod precon;
+pub mod precision;
 pub mod pressure;
 pub mod properties;
 pub mod scalar_transport;

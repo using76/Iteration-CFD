@@ -1108,3 +1108,312 @@ extern "C" __global__ void solWidenToAcc(ofacc* __restrict__ dst, const ofscalar
     dst[at] = (ofacc)src[0];
 }
 #endif
+
+
+// ==========================================================================
+//  9. Mixed-precision iterative refinement - SPEC-LIT 118.4 (F32-06)
+//
+//  A float Krylov solve stops at the float floor: its recurrence and its
+//  section 8.4 residual are float vectors, so a tolerance below about
+//  kappa*u32 is never met. These kernels wrap the UNCHANGED float method:
+//  the solution and the residual are carried in double and the float solver
+//  computes only a scaled correction. f32 only - in the f64 build nothing
+//  below exists and the cubin does not change by a byte.
+// ==========================================================================
+
+#ifdef OFGPU_SINGLE
+
+//- |a| for double, written out the way ofabs_ is for ofscalar, so this file
+//  still needs no host header.
+OFGPU_DEV double fabs64_(double a) { return a < 0.0 ? -a : a; }
+
+//- solAmul's row loop (section 4) with every coefficient widened to double
+//  and the product accumulated in double: this is (A.x)_c of SPEC-LIT
+//  118.4.3 for the DOUBLE solution x^k. The same gather over the same merged
+//  row map in the same order, so it is solAmul's row sum in double exactly.
+OFGPU_DEV double amul64Row_
+(
+    oflabel c,
+    const double* __restrict__ x,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell
+)
+{
+    double acc = (double)diag[c] * x[c];
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;                 // dropped by a corrupt mesh
+
+        const oflabel fl = rfFlags[j];
+
+        if (fl & OFGPU_RF_BOUNDARY)
+        {
+            const oflabel nc = bNbrCell[f];
+            if (nc >= 0) acc -= (double)boundaryCoeffs[f] * x[nc];
+        }
+        else
+        {
+            acc += (fl & OFGPU_RF_OWNS) ? (double)upper[f] * x[neighbour[f]]
+                                        : (double)lower[f] * x[owner[f]];
+        }
+    }
+
+    return acc;
+}
+
+//- The same row applied to the CONSTANT field `xr`: (A.(x_ref*1))_c of
+//  118.4.2. Written out rather than reusing amul64Row_ with a materialised
+//  constant vector, so the launch needs no extra buffer; every term is the
+//  same (double)coef * xr the row loop would form.
+OFGPU_DEV double amul64ConstRow_
+(
+    oflabel c,
+    double xr,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell
+)
+{
+    double acc = (double)diag[c] * xr;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (fl & OFGPU_RF_BOUNDARY)
+        {
+            const oflabel nc = bNbrCell[f];
+            if (nc >= 0) acc -= (double)boundaryCoeffs[f] * xr;
+        }
+        else
+        {
+            acc += (fl & OFGPU_RF_OWNS) ? (double)upper[f] * xr
+                                        : (double)lower[f] * xr;
+        }
+    }
+
+    return acc;
+}
+
+
+//- (118.4.1) x^0 = fl64(psi). Exact: every float is a double.
+extern "C" __global__ void solWiden
+(
+    double* __restrict__ dst,
+    const ofscalar* __restrict__ src,
+    oflabel n
+)
+{
+    const oflabel i = (oflabel)OFGPU_TID;
+    if (i >= n) return;
+    dst[i] = (double)src[i];
+}
+
+
+//- (118.4.9) psi = fl32(x^final): one rounding of each entry, which no
+//  float field can avoid.
+extern "C" __global__ void solNarrow
+(
+    ofscalar* __restrict__ dst,
+    const double* __restrict__ src,
+    oflabel n
+)
+{
+    const oflabel i = (oflabel)OFGPU_TID;
+    if (i >= n) return;
+    dst[i] = (ofscalar)src[i];
+}
+
+
+//- (118.4.2) x_ref, and every R_k through its stage-two: the grid-strided
+//  sum of a DOUBLE vector, the shape of solSumStage1. Every thread reaches
+//  blockSum_ - there is no early return before it.
+extern "C" __global__ void solSum64Stage1
+(
+    ofacc* __restrict__ partials,
+    const double* __restrict__ x,
+    oflabel n
+)
+{
+    const oflabel stride = (oflabel)(blockDim.x*gridDim.x);
+    ofacc acc = 0;
+    for (oflabel i = (oflabel)OFGPU_TID; i < n; i += stride) acc += x[i];
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0) partials[blockIdx.x] = acc;
+}
+
+
+//- (118.4.2) the section 8.4 normalisation formed ONCE, in double, at the
+//  starting field: N = sum|A.x - A.(x_ref*1)| + sum|b - A.(x_ref*1)|. x_ref
+//  arrives as its device sum and 1/n; eps64 (f64::MIN_POSITIVE) is the
+//  stage-two offset, the same place section 8.4's eps takes in the float
+//  factor. Stage one; solSumStage2To64 finishes it. Every thread reaches
+//  blockSum_.
+extern "C" __global__ void solNormFactor64Stage1
+(
+    ofacc* __restrict__ partials,
+    const double* __restrict__ x,
+    const double* __restrict__ sumX,
+    double invN,
+    const ofscalar* __restrict__ b,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nCells
+)
+{
+    const double xr = sumX[0] * invN;
+    const oflabel stride = (oflabel)(blockDim.x*gridDim.x);
+    ofacc acc = 0;
+    for (oflabel c = (oflabel)OFGPU_TID; c < nCells; c += stride)
+    {
+        const double ax = amul64Row_(c, x, diag, upper, lower, owner,
+                                     neighbour, rfOffset, rfFace, rfFlags,
+                                     boundaryCoeffs, bNbrCell);
+        const double axr = amul64ConstRow_(c, xr, diag, upper, lower, owner,
+                                           neighbour, rfOffset, rfFace,
+                                           rfFlags, boundaryCoeffs, bNbrCell);
+        acc += fabs64_(ax - axr) + fabs64_((double)b[c] - axr);
+    }
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0) partials[blockIdx.x] = acc;
+}
+
+
+//- (118.4.3) stage one of R_k = sum_i |r_i|, r = b - A.x: the double rows of
+//  the residual, one gather per row, summed in ofacc. Stage one;
+//  solSumStage2To64 finishes it. Every thread reaches blockSum_.
+extern "C" __global__ void solResidual64Stage1
+(
+    ofacc* __restrict__ partials,
+    const ofscalar* __restrict__ b,
+    const double* __restrict__ x,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nCells
+)
+{
+    const oflabel stride = (oflabel)(blockDim.x*gridDim.x);
+    ofacc acc = 0;
+    for (oflabel c = (oflabel)OFGPU_TID; c < nCells; c += stride)
+    {
+        const double ax = amul64Row_(c, x, diag, upper, lower, owner,
+                                     neighbour, rfOffset, rfFace, rfFlags,
+                                     boundaryCoeffs, bNbrCell);
+        acc += fabs64_((double)b[c] - ax);
+    }
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0) partials[blockIdx.x] = acc;
+}
+
+
+//- (118.4.5) btilde = fl32(r . (1/R_k)): the correction's right-hand side,
+//  scaled to unit 1-norm IN DOUBLE before the single rounding, so a residual
+//  far below float's normal range neither underflows nor meets OFGPU_TINY.
+//  One thread per cell, like the elementwise kernels.
+extern "C" __global__ void solResidual64Scaled
+(
+    ofscalar* __restrict__ out,
+    const ofscalar* __restrict__ b,
+    const double* __restrict__ x,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell,
+    double invSigma,
+    oflabel nCells
+)
+{
+    const oflabel c = (oflabel)OFGPU_TID;
+    if (c >= nCells) return;
+
+    const double ax = amul64Row_(c, x, diag, upper, lower, owner,
+                                 neighbour, rfOffset, rfFace, rfFlags,
+                                 boundaryCoeffs, bNbrCell);
+    out[c] = (ofscalar)(((double)b[c] - ax) * invSigma);
+}
+
+
+//- (118.4.7) x^{k+1} = x^k + R_k . fl64(d). Exact widening of the float
+//  correction, then the scaled accumulate in double.
+extern "C" __global__ void solAxpyWiden
+(
+    double* __restrict__ x,
+    const ofscalar* __restrict__ d,
+    double sigma,
+    oflabel n
+)
+{
+    const oflabel i = (oflabel)OFGPU_TID;
+    if (i >= n) return;
+    x[i] += sigma * (double)d[i];
+}
+
+
+//- Stage two of every refinement reduction, in DOUBLE: solSumStage2's body
+//  with the stored value kept in double instead of rounded to ofscalar.
+//  offset carries eps64 for the normalisation factor and is zero everywhere
+//  else, exactly as in solSumStage2.
+extern "C" __global__ void solSumStage2To64
+(
+    double* __restrict__ out,
+    const ofacc* __restrict__ partials,
+    oflabel nParts,
+    double offset
+)
+{
+    ofacc acc = 0;
+    for (oflabel i = (oflabel)threadIdx.x; i < nParts; i += (oflabel)blockDim.x)
+    {
+        acc += partials[i];
+    }
+
+    acc = blockSum_(acc);
+    if (threadIdx.x == 0) out[0] = acc + offset;
+}
+
+#endif  // OFGPU_SINGLE
