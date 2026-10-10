@@ -20,8 +20,8 @@
 //! - `bc` (§126), the compressible boundary conditions, CMP-16 to CMP-18;
 //! - `lts` (§125), the local time step of a steady run, CMP-13;
 //! - `exact` (§127.2), the analytic answer keys, CMP-06, with
-//!   `exact/riemann.rs`, Ringleb flow (§127.3) and compressible Couette
-//!   flow (§127.4) to come with CMP-07;
+//!   `exact/riemann.rs`, the exact Riemann solver, Ringleb flow (§127.3)
+//!   and compressible Couette flow (§127.4), landed with CMP-07;
 //! - `gatemesh` (§127.5), the gate meshes;
 //! - `tests`, the module's integration tests.
 //!

@@ -8,15 +8,21 @@
 //! The analytic answer keys of the compressible gates: the isentropic
 //! ratios, the area-Mach relation with both roots, the normal shock and its
 //! inverse from the total-pressure ratio, the oblique shock (weak branch and
-//! maximum deflection), and the shocked quasi-1-D nozzle with its regime
-//! limits. SPEC-LIT §127.2 is the contract: its equations (127.2) to
-//! (127.4) are evaluated here, and its derived nozzle relations are
-//! inverted here.
+//! maximum deflection), the shocked quasi-1-D nozzle with its regime
+//! limits, the Ringleb field, and compressible Couette flow with its
+//! viscous heating - with the exact Riemann solver in the child module
+//! [`riemann`]. SPEC-LIT §127.2 to §127.4 are the contract: equations
+//! (127.2) to (127.4) are evaluated here and the derived nozzle relations
+//! are inverted here, (127.8) to (127.11a) are the Ringleb field and its
+//! inverse, and (127.12) is the Couette profile.
 //!
 //! Written from:
 //!   SPEC-LIT §127.2 - the equations, the weak-branch rule, the shocked
 //!     nozzle and its forward map, the regime limits, and the oracle values
 //!     the tests quote
+//!   SPEC-LIT §127.3 - the Ringleb field, its inversion and the pointwise
+//!     check, with the oracle values the tests quote
+//!   SPEC-LIT §127.4 - the Couette profile and the wall-temperature rise
 //!   Ames Research Staff, *Equations, Tables, and Charts for Compressible
 //!     Flow*, NACA Report 1135 (1953), NTRS 19930091059, a US-Government
 //!     work - eqs. 43 to 45 (the isentropic ratios), 80 (the area ratio),
@@ -39,6 +45,8 @@
 //! message starts `compressible::exact::<function name>: `.
 
 use crate::error::Error;
+
+pub mod riemann;
 
 /// The top of every supersonic bracket. A supersonic root that lies above it
 /// is refused by name rather than returned.
@@ -642,6 +650,214 @@ pub fn shocked_nozzle_back_pressure(
     back_pressure_inner(WHO, gamma, as_astar, ae_astar)
 }
 
+// ==========================================================================
+//  Ringleb flow (SPEC-LIT §127.3)
+// ==========================================================================
+
+/// The gamma the Ringleb field is built with: (127.9) is the gamma = 1.4
+/// form of the hodograph integral.
+pub const RINGLEB_GAMMA: f64 = 1.4;
+
+/// The Ringleb field at a point: [`ringleb_state`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RinglebState {
+    /// The speed `q`.
+    pub q: f64,
+    /// The streamline constant `k`.
+    pub k: f64,
+    /// The density, (127.8).
+    pub rho: f64,
+    /// The pressure, (127.8).
+    pub p: f64,
+    /// The x velocity, (127.11a).
+    pub u: f64,
+    /// The y velocity, (127.11a).
+    pub v: f64,
+}
+
+/// `c`, `rho` and `J` of (127.8), (127.9) at the speed `q`. The caller has
+/// checked `0 < q < sqrt(2/(gamma-1))`, so `c` is finite and positive.
+fn ringleb_crj(q: f64) -> (f64, f64, f64) {
+    let c = (1.0 - (RINGLEB_GAMMA - 1.0) / 2.0 * q * q).sqrt();
+    let rho = c.powf(2.0 / (RINGLEB_GAMMA - 1.0));
+    let j = 1.0 / c + 1.0 / (3.0 * c * c * c) + 1.0 / (5.0 * c * c * c * c * c)
+        - 0.5 * ((1.0 + c) / (1.0 - c)).ln();
+    (c, rho, j)
+}
+
+/// The point `(x, y)` of the Ringleb field at the speed `q` on the
+/// streamline `k`, (127.8) to (127.10): `y >= 0` when `upper`, `y <= 0`
+/// otherwise. A smooth answer key of the steady Euler equations (SPEC-LIT
+/// §127.3), so the gates invert it with [`ringleb_state`].
+///
+/// Refuses (`Error::Refused`): an input not finite; `q <= 0`; `k <= 0`;
+/// `q > k`; `q >= sqrt(2/(gamma-1))`, where the sound speed would be `<= 0`.
+pub fn ringleb_point(q: f64, k: f64, upper: bool) -> Result<(f64, f64), Error> {
+    const WHO: &str = "ringleb_point";
+    check_finite(WHO, &[("q", q), ("k", k)])?;
+    if q <= 0.0 {
+        return Err(refuse(WHO, format!("q must be above 0, got {q}")));
+    }
+    if k <= 0.0 {
+        return Err(refuse(WHO, format!("k must be above 0, got {k}")));
+    }
+    if q > k {
+        return Err(refuse(
+            WHO,
+            format!("q = {q} is above k = {k}, and the speed never exceeds its streamline constant"),
+        ));
+    }
+    let q_max = (2.0 / (RINGLEB_GAMMA - 1.0)).sqrt();
+    if q >= q_max {
+        return Err(refuse(
+            WHO,
+            format!("q = {q} is at or above sqrt(2/(gamma-1)) = {q_max}, where c would be <= 0"),
+        ));
+    }
+    let (_c, rho, j) = ringleb_crj(q);
+    let one_minus = (1.0 - q * q / (k * k)).max(0.0);
+    let x = (1.0 / (2.0 * rho)) * (1.0 / (q * q) - 2.0 / (k * k)) + j / 2.0;
+    let y = (one_minus.sqrt() / (k * rho * q)).copysign(if upper { 1.0 } else { -1.0 });
+    Ok((x, y))
+}
+
+/// The Ringleb field at `(x, y)`, the inverse of [`ringleb_point`]: `q` is
+/// the root of (127.10a), `(x - J/2)^2 + y^2 = (1/(2 rho q^2))^2`, a
+/// function of `q` alone, by bisection on `[0.2, 1.5]`, where the
+/// supervisor's scan finds exactly one sign change. Then `psi = atan2(y,
+/// x - J/2)`, `theta = |psi|/2`, `k = q/sin theta`, `u = sign(psi) q cos
+/// theta`, `v = q sin theta`, (127.10a), (127.11a); `rho` and `p` by
+/// (127.8). Both branches meet at `y = 0`, so no Newton step is involved.
+///
+/// Refuses (`Error::Refused`): an input not finite; `(x, y)` outside the
+/// domain, that is `G(0.2)` and `G(1.5)` without a sign change between
+/// them.
+pub fn ringleb_state(x: f64, y: f64) -> Result<RinglebState, Error> {
+    const WHO: &str = "ringleb_state";
+    check_finite(WHO, &[("x", x), ("y", y)])?;
+    let g_of = |q: f64| {
+        let (_c, rho, j) = ringleb_crj(q);
+        let dx = x - j / 2.0;
+        let r = 1.0 / (2.0 * rho * q * q);
+        dx * dx + y * y - r * r
+    };
+    let g_lo = g_of(0.2);
+    let g_hi = g_of(1.5);
+    if !(g_lo < 0.0 && g_hi > 0.0) {
+        return Err(refuse(
+            WHO,
+            format!(
+                "(x, y) = ({x}, {y}) is outside the Ringleb domain: G(0.2) = {g_lo:e} and \
+                 G(1.5) = {g_hi:e} do not bracket a speed"
+            ),
+        ));
+    }
+    let q = bisect(0.2, 1.5, |q| g_of(q) < 0.0);
+    let (c, rho, j) = ringleb_crj(q);
+    let psi = y.atan2(x - j / 2.0);
+    let theta = psi.abs() / 2.0;
+    let sign = if psi >= 0.0 { 1.0 } else { -1.0 };
+    let p = c.powf(2.0 * RINGLEB_GAMMA / (RINGLEB_GAMMA - 1.0)) / RINGLEB_GAMMA;
+    Ok(RinglebState {
+        q,
+        k: q / theta.sin(),
+        rho,
+        p,
+        u: sign * q * theta.cos(),
+        v: q * theta.sin(),
+    })
+}
+
+// ==========================================================================
+//  Compressible Couette with viscous heating (SPEC-LIT §127.4)
+// ==========================================================================
+
+/// Steady compressible Couette flow between a stationary adiabatic wall at
+/// `y = 0` and a wall at `y = h` moving at `u_top` and held at `t_top`,
+/// with constant `mu` and `kappa` and no pressure gradient (127.12):
+/// [`Couette::velocity`] is linear for any `rho(y)`, and
+/// [`Couette::temperature`] is the quadratic that `kappa T'' + mu (u')^2
+/// = 0` with `T'(0) = 0` and `T(h) = t_top` gives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Couette {
+    /// The channel height.
+    pub h: f64,
+    /// The speed of the top wall.
+    pub u_top: f64,
+    /// The temperature of the top wall.
+    pub t_top: f64,
+    /// The dynamic viscosity.
+    pub mu: f64,
+    /// The thermal conductivity.
+    pub kappa: f64,
+}
+
+impl Couette {
+    /// Builds the profile. `u_top` may be zero or negative; the rest may
+    /// not.
+    ///
+    /// Refuses (`Error::Refused`): an input not finite; `h`, `mu`,
+    /// `kappa` or `t_top` `<= 0`.
+    pub fn new(h: f64, u_top: f64, t_top: f64, mu: f64, kappa: f64) -> Result<Couette, Error> {
+        const WHO: &str = "Couette::new";
+        check_finite(
+            WHO,
+            &[
+                ("h", h),
+                ("u_top", u_top),
+                ("t_top", t_top),
+                ("mu", mu),
+                ("kappa", kappa),
+            ],
+        )?;
+        for (name, v) in [("h", h), ("mu", mu), ("kappa", kappa), ("t_top", t_top)] {
+            if v <= 0.0 {
+                return Err(refuse(WHO, format!("{name} must be above 0, got {v}")));
+            }
+        }
+        Ok(Couette {
+            h,
+            u_top,
+            t_top,
+            mu,
+            kappa,
+        })
+    }
+
+    /// `u = U y/h`, (127.12).
+    pub fn velocity(&self, y: f64) -> f64 {
+        self.u_top * y / self.h
+    }
+
+    /// `T(y)` of (127.12): `T_top + (mu U^2/(2 kappa)) (1 - y^2/h^2)`.
+    pub fn temperature(&self, y: f64) -> f64 {
+        let rise = self.mu * self.u_top * self.u_top / (2.0 * self.kappa);
+        self.t_top + rise * (1.0 - y * y / (self.h * self.h))
+    }
+
+    /// The adiabatic wall temperature `T(0)`, the rise of
+    /// [`couette_adiabatic_wall_rise`] on top of `t_top`.
+    pub fn wall_temperature(&self) -> f64 {
+        self.temperature(0.0)
+    }
+}
+
+/// The wall temperature rise `T_w - T_top = Pr U^2/(2 c_p)` of (127.12),
+/// by (122.7).
+///
+/// Refuses (`Error::Refused`): an input not finite; `pr` or `cp` `<= 0`.
+pub fn couette_adiabatic_wall_rise(pr: f64, u_top: f64, cp: f64) -> Result<f64, Error> {
+    const WHO: &str = "couette_adiabatic_wall_rise";
+    check_finite(WHO, &[("pr", pr), ("u_top", u_top), ("cp", cp)])?;
+    if pr <= 0.0 {
+        return Err(refuse(WHO, format!("pr must be above 0, got {pr}")));
+    }
+    if cp <= 0.0 {
+        return Err(refuse(WHO, format!("cp must be above 0, got {cp}")));
+    }
+    Ok(pr * u_top * u_top / (2.0 * cp))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,5 +1204,156 @@ mod tests {
             refused(shocked_nozzle(g, 0.7, 2.0), &["gamma"]);
             refused(shocked_nozzle_back_pressure(g, 1.5, 2.0), &["gamma"]);
         }
+    }
+
+    #[test]
+    fn ringleb_points_match_the_oracle() {
+        let (x, y) = ringleb_point(0.6, 0.8, true).unwrap();
+        close_rel("x(0.6, 0.8)", x, -0.37835431374774448, 1e-14);
+        close_rel("y(0.6, 0.8)", y, 1.6610314319761835, 1e-14);
+        let s = ringleb_state(x, y).unwrap();
+        close_abs("q(0.6, 0.8)", s.q, 0.6, 1e-13);
+        close_abs("k(0.6, 0.8)", s.k, 0.8, 1e-13);
+        close_rel("rho(0.6, 0.8)", s.rho, 0.82960228685941314, 1e-13);
+        close_rel("p(0.6, 0.8)", s.p, 0.54990780157538242, 1e-13);
+        close_rel("u(0.6, 0.8)", s.u, 0.39686269665968859, 1e-13);
+        close_rel("v(0.6, 0.8)", s.v, 0.45, 1e-13);
+        let (x, y) = ringleb_point(1.0, 1.0, true).unwrap();
+        close_rel("x(1, 1)", x, -0.62864823852691393, 1e-14);
+        assert_eq!(y, 0.0);
+        let s = ringleb_state(x, y).unwrap();
+        close_rel("rho(1, 1)", s.rho, 0.57243340223994616, 1e-13);
+        close_rel("p(1, 1)", s.p, 0.32710480127996924, 1e-13);
+        close_abs("u(1, 1)", s.u, 0.0, 1e-12);
+        close_rel("v(1, 1)", s.v, 1.0, 1e-13);
+        let c = (1.0 - (RINGLEB_GAMMA - 1.0) / 2.0 * s.q * s.q).sqrt();
+        close_rel("q/c(1, 1)", s.q / c, 1.1180339887498948, 1e-13);
+    }
+
+    #[test]
+    fn ringleb_round_trips_and_has_constant_entropy() {
+        for k in [0.6, 0.7, 0.8, 0.9, 1.0] {
+            for j in 0..=4 {
+                let q = 0.5 + (k - 0.5) * j as f64 / 4.0;
+                for upper in [true, false] {
+                    let (x, y) = ringleb_point(q, k, upper).unwrap();
+                    let s = ringleb_state(x, y).unwrap();
+                    close_abs("round trip q", s.q, q, 1e-12);
+                    close_abs("round trip k", s.k, k, 1e-12);
+                    close_abs(
+                        "entropy p/rho^gamma",
+                        s.p / s.rho.powf(RINGLEB_GAMMA) * RINGLEB_GAMMA - 1.0,
+                        0.0,
+                        1e-14,
+                    );
+                    if y == 0.0 {
+                        close_abs("u at y 0", s.u, 0.0, 1e-12);
+                    } else {
+                        assert_eq!(
+                            s.u > 0.0,
+                            y > 0.0,
+                            "u = {} has the wrong sign for y = {y} at k = {k}, q = {q}",
+                            s.u
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ringleb_satisfies_the_euler_equations_pointwise() {
+        // The fourth-order central difference of SPEC-LIT 127.3.
+        let d4 = |f_p2: f64, f_p1: f64, f_m1: f64, f_m2: f64, h: f64| {
+            (-f_p2 + 8.0 * f_p1 - 8.0 * f_m1 + f_m2) / (12.0 * h)
+        };
+        let h = 1e-3;
+        let g = RINGLEB_GAMMA;
+        let enthalpy =
+            |s: RinglebState| g / (g - 1.0) * s.p / s.rho + (s.u * s.u + s.v * s.v) / 2.0;
+        let flux_x = |s: RinglebState, comp: usize| match comp {
+            0 => s.rho * s.u,
+            1 => s.rho * s.u * s.u + s.p,
+            2 => s.rho * s.u * s.v,
+            _ => s.rho * s.u * enthalpy(s),
+        };
+        let flux_y = |s: RinglebState, comp: usize| match comp {
+            0 => s.rho * s.v,
+            1 => s.rho * s.u * s.v,
+            2 => s.rho * s.v * s.v + s.p,
+            _ => s.rho * s.v * enthalpy(s),
+        };
+        let state = |x: f64, y: f64| ringleb_state(x, y).unwrap();
+        let mut worst: f64 = 0.0;
+        for k in [0.6, 0.7, 0.8, 0.9, 1.0] {
+            for j in 0..=4 {
+                let q = 0.5 + (k - 0.5) * j as f64 / 4.0;
+                for upper in [true, false] {
+                    let (x, y) = ringleb_point(q, k, upper).unwrap();
+                    for comp in 0..4 {
+                        let dx = d4(
+                            flux_x(state(x + 2.0 * h, y), comp),
+                            flux_x(state(x + h, y), comp),
+                            flux_x(state(x - h, y), comp),
+                            flux_x(state(x - 2.0 * h, y), comp),
+                            h,
+                        );
+                        let dy = d4(
+                            flux_y(state(x, y + 2.0 * h), comp),
+                            flux_y(state(x, y + h), comp),
+                            flux_y(state(x, y - h), comp),
+                            flux_y(state(x, y - 2.0 * h), comp),
+                            h,
+                        );
+                        worst = worst.max((dx + dy).abs());
+                    }
+                }
+            }
+        }
+        assert!(worst <= 1e-10, "largest steady Euler residual {worst:e} > 1e-10");
+    }
+
+    #[test]
+    fn ringleb_refuses_outside_its_domain() {
+        refused(ringleb_point(0.7, 0.6, true), &["q"]);
+        refused(ringleb_point(0.0, 0.8, true), &["q"]);
+        refused(ringleb_point(2.3, 3.0, true), &["q"]);
+        refused(ringleb_point(f64::NAN, 0.8, true), &["not finite"]);
+        refused(ringleb_state(50.0, 50.0), &["Ringleb"]);
+    }
+
+    #[test]
+    fn couette_wall_temperature_is_exact() {
+        let cp = 1004.692579691832;
+        let mu = 1.8460015185931457e-05;
+        let kappa = mu * cp / 0.71;
+        let c = Couette::new(1e-3, 200.0, 300.0, mu, kappa).unwrap();
+        let rise = couette_adiabatic_wall_rise(0.71, 200.0, cp).unwrap();
+        close_rel("wall rise", rise, 14.133676596233594, 1e-14);
+        close_rel("wall temperature", c.wall_temperature() - c.t_top, rise, 1e-12);
+        assert_eq!(c.temperature(c.h), c.t_top);
+        close_rel("half channel rise", c.temperature(c.h / 2.0) - c.t_top, 0.75 * rise, 1e-12);
+        assert_eq!(c.velocity(0.0), 0.0);
+        assert_eq!(c.velocity(c.h), 200.0);
+        assert_eq!(c.velocity(c.h / 2.0), 100.0);
+        let y = c.h / 2.0;
+        let d = 1e-4;
+        let shear = c.mu * (c.u_top / c.h) * (c.u_top / c.h);
+        let residual = c.kappa
+            * (c.temperature(y + d) - 2.0 * c.temperature(y) + c.temperature(y - d)) / (d * d)
+            + shear;
+        assert!(
+            residual.abs() <= 1e-9 * shear,
+            "energy residual {residual:e} > 1e-9 * {shear:e}"
+        );
+    }
+
+    #[test]
+    fn couette_refuses_bad_inputs() {
+        refused(Couette::new(0.0, 200.0, 300.0, 1.8e-5, 2.6e-2), &["h"]);
+        refused(Couette::new(1e-3, 200.0, 300.0, -1.0, 2.6e-2), &["mu"]);
+        refused(Couette::new(1e-3, 200.0, 300.0, 1.8e-5, 0.0), &["kappa"]);
+        refused(Couette::new(f64::NAN, 200.0, 300.0, 1.8e-5, 2.6e-2), &["not finite"]);
+        refused(couette_adiabatic_wall_rise(0.71, 200.0, 0.0), &["cp"]);
     }
 }

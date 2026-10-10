@@ -38094,6 +38094,37 @@ blast wave `(1, 0, 1000 | 1, 0, 0.01)`: `p* = 460.894`, `u* = 19.5975`,
 holds Sod's `p*` and `u*` to the plan's five digits (`0.30313`, `0.92745`) and the rest to
 these values to six digits (class R).
 
+**Sampling the solution at `xi = (x - x_0)/t`** (CMP-07; derived from the same relations).
+A shock into state `K` moves at the speed whose relative Mach number `Q_K` inverts NACA (93)
+at `p_2/p_1 = p*/p_K`; a rarefaction is bounded by the `C-` (left) or `C+` (right)
+characteristic of the undisturbed state (the head) and of the star state (the tail), with
+`c*_K` from the isentropic relation NACA (35); inside a fan the characteristic through the
+origin, `xi = u - c` (left) or `xi = u + c` (right), meets the constant Riemann invariant
+`u + 2c/(gamma-1) = u_L + 2c_L/(gamma-1)` (left) or `u - 2c/(gamma-1) = u_R - 2c_R/(gamma-1)`
+(right), and the flow is isentropic from `K`:
+
+```
+Q_K = sqrt( (gamma+1)/(2 gamma) p*/p_K + (gamma-1)/(2 gamma) ) ,  S_L = u_L - c_L Q_L ,  S_R = u_R + c_R Q_R     shock   (127.7a)
+c*_K = c_K (p*/p_K)^((gamma-1)/(2 gamma)) ;  left fan  from u_L - c_L (head) to u* - c*_L (tail) ;
+                                             right fan from u* + c*_R (tail) to u_R + c_R (head)          rarefaction
+left fan:   u = 2/(gamma+1) [  c_L + (gamma-1)/2 u_L + xi ] ,  c = 2/(gamma+1) [ c_L + (gamma-1)/2 (u_L - xi) ]   (127.7b)
+right fan:  u = 2/(gamma+1) [ -c_R + (gamma-1)/2 u_R + xi ] ,  c = 2/(gamma+1) [ c_R - (gamma-1)/2 (u_R - xi) ]
+in a fan:   rho = rho_K (c/c_K)^(2/(gamma-1)) ,   p = p_K (c/c_K)^(2 gamma/(gamma-1))
+```
+
+`xi <= u*` reads the left side: left of `S_L` (or of the head) the left state, between it and
+the contact the star state `(rho*_L, u*, p*)`, and inside a fan (127.7b); `xi > u*` mirrors
+it with `R`. A vacuum-generating pair is refused by name rather than sampled. Oracle samples
+(`x_0 = 0.5`, `(rho, u, p)`): Sod at `t = 0.2`, `x = 0.3` (in the fan, whose head and tail
+speeds are `-1.1832159566199232` and `-0.07027281256118327`):
+`(0.87745253275527745, 0.15267996384993601, 0.8327470150499224)`; the 123 problem at
+`t = 0.15`, `x = 0.4`: `(0.04439645533153016, -0.26527932442656532, 0.0051091376899693629)`;
+the left blast at `t = 0.012`, `x = 0.3`:
+`(0.61575337496781448, 17.291589334227289, 507.18864420297776)`, whose right shock moves at
+`23.517536966903236`; the right blast at `t = 0.035`, `x = 0.9`:
+`(0.97189682997458182, -0.33632344802316959, 96.08779597816483)`, whose left shock moves at
+`-7.4374762586943133`.
+
 ### 127.3 Ringleb flow (CMP-07, CMP-24)
 
 The hodograph solution, with stagnation sound speed and density 1, speed `q` and
@@ -38123,6 +38154,34 @@ finds `d(x, y)/d(q, theta)` (`sin theta = q/k`) one-signed over the domain, in
 `[-37.9, -3.05]`, so it contains no limiting line. The inversion in `(q, k)` is singular
 at `y = 0`, where `d y/d q` is unbounded; CMP-07 inverts in `(q, theta)` there.
 
+**The inversion CMP-07 uses** (derived from (127.10) with `sin theta = q/k`,
+`0 < theta <= pi/2`): `x - J/2 = cos(2 theta)/(2 rho q^2)` and
+`y = +- sin(2 theta)/(2 rho q^2)`, so with `psi = +- 2 theta` (the sign of `y`)
+
+```
+(x - J(q)/2)^2 + y^2 = 1/(2 rho(q) q^2)^2 ,   psi = atan2(y, x - J(q)/2) ,   theta = |psi|/2 ,   k = q/sin theta    (127.10a)
+u = sign(psi) q cos theta ,   v = q sin theta                                                                       (127.11a)
+```
+
+`q` is the one root of the first relation, which is a function of `q` alone, by bisection
+on `[0.2, 1.5]`: the supervisor's scan (4000 samples per point, 305 points of the domain)
+finds exactly one sign change there, negative at `0.2` and positive at `1.5`, and a point
+with no sign change is refused. Both branches meet at `y = 0` (`psi = +- pi`,
+`theta = pi/2`, `u = 0`), so no Newton step and no `(q, k)` Jacobian is involved. **The
+pointwise check**: the steady 2-D Euler equations in conservative form,
+`d/dx (rho u, rho u^2 + p, rho u v, rho u H) + d/dy (rho v, rho u v, rho v^2 + p, rho v H) = 0`
+with `H = gamma/(gamma-1) p/rho + (u^2 + v^2)/2`, evaluated with the fourth-order central
+difference `(-f(+2h) + 8 f(+h) - 8 f(-h) + f(-2h))/(12 h)` at `h = 1e-3` on the inverted
+field. In `f64` the supervisor's mirror of this algorithm finds the largest residual
+component `4.8e-12` over the 50 points `k in {0.6, 0.7, 0.8, 0.9, 1.0}`,
+`q = 0.5 + (k - 0.5) j/4` (`j = 0..4`), both signs of `y`, and `3.6e-12` over 305 random
+points; second order at `h = 1e-5` reaches `1.0e-10` in the energy component, which is
+why the fourth-order stencil is used. The plan's bar is `1e-10`. Oracle points (40 digits):
+`(q, k) = (0.6, 0.8)`, `y > 0`: `x = -0.37835431374774448`, `y = 1.6610314319761835`,
+`rho = 0.82960228685941314`, `p = 0.54990780157538242`, `u = 0.39686269665968859`,
+`v = 0.45`; `(1, 1)`: `x = -0.62864823852691393`, `y = 0`, `rho = 0.57243340223994616`,
+`p = 0.32710480127996924`, `M = 1.1180339887498948`.
+
 ### 127.4 Compressible Couette with viscous heating (CMP-07, CMP-22)
 
 Steady flow between a stationary adiabatic wall at `y = 0` and a wall at `y = h` moving
@@ -38139,6 +38198,19 @@ by (122.7). At `U = 200` m/s, `Pr = 0.71` and the default `c_p` of §122.1 the o
 for the same result (*not read*). The gate's 0.5 % bar is the discretisation's
 allowance on the quadratic profile, including the half-cell closure at the
 isothermal wall.
+
+**Landed (CMP-07).** `rust/src/compressible/exact/riemann.rs` holds the exact Riemann problem
+of §127.2 (`solve`, which refuses a vacuum-generating pair by name, the waves and the star
+state, and `RiemannSolution::sample` / `sample_at` by (127.7a)-(127.7b)); `exact.rs` holds
+the Ringleb field of §127.3 (`ringleb_point` by (127.10), `ringleb_state` by (127.10a)-(127.11a))
+and the Couette profile of (127.12) (`Couette`, `couette_adiabatic_wall_rise`), all `f64` in
+both builds. `p*` is bisected to the `f64` floor on a bracket from 0 to `max(p_L, p_R)`
+doubled until (127.6) turns non-negative. `compressible::exact` now runs 25 tests (13 of
+CMP-06, 6 in `riemann::tests`, 6 more in `exact::tests`): the four Riemann pairs above hold
+their star states, wave speeds and samples to `1e-12` relative and Sod's `p*`, `u*` to the
+plan's five digits; the Ringleb grid round-trips `(q, k)` to `1e-12`, keeps
+`p/rho^gamma * gamma - 1` within `1e-14`, and meets the steady Euler equations pointwise
+within the plan's `1e-10`; the Couette rise is `14.133676596233594` K to `1e-14`.
 
 ### 127.5 The gate meshes (CMP-21, CMP-23, CMP-24, CMP-26)
 
