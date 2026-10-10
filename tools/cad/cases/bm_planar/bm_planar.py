@@ -4,7 +4,7 @@
 # No GPL-licensed source was consulted.
 """bm_planar.py - CAD-22 (docs/16 §I CAD-22, §H.4 G5 the report-only gate): Bell & Mehta's planar
 CR 7.7, L/H_i 0.89 contraction built with the four wall laws, one GPU solve per law per call, and
-the cad-g5/1 comparison with their Table 4, REPORTED, never gated.
+the cad-g5/2 record's comparison with their Table 4, REPORTED, never gated.
 
 The convention (settled by the supervisor from the report; put in the doc string and the record
 verbatim): Bell & Mehta's Table 1 lists tunnel B (the 5th-order 2-D contraction this replication
@@ -110,7 +110,9 @@ Definitions (fixed before any run):
      "[0 2 -2 0 0 0 0]" else BM-UNITS. Returns {"status", "reason_id", "detail", "time",
      "nu_std", "nu_range", "nu_cl", "n_core_faces", "theta_exit", "dstar_exit", "H_exit",
      "Re_theta_exit", "U_c", "reversal": {B9}, "separated_cfd", "thwaites": {B10 keys plus
-     "status"}, "dp", "Cd"}; dp = area-mean p over inlet - area-mean p over outlet (face values,
+     "status"}, "dp", "Cd", "boundary_flux", "mass_rel"}; boundary_flux is the solver-rule flux
+     of every boundary patch, post.boundary_flux(mesh, U, 1.0) (planar: no wedge factor) with
+     mass_rel its net_rel; dp = area-mean p over inlet - area-mean p over outlet (face values,
      a = |Sf|); Cd = Q_in / (A_out sqrt(2 dp)) with Q_in = -post.patch_flux(mesh, U, "inlet"),
      A_out = sum |Sf_x| over the outlet; None when dp <= 0. history(case_dir, geom_dir,
      iters_list) = poiseuille.history's shape with the dp and Cd slots from metrics (solve's
@@ -128,15 +130,21 @@ Definitions (fixed before any run):
      binary with the basename of its path only), "runs": [per LAWS law {"law", "cells", "mesh"
      (build row), "solve": poiseuille's SOLVE_ROW_KEYS row or None, "wall_s", "gpu", "metrics"}],
      "all_steady", "o1", "o1_range", "o2_cfd", "o2_thw", "re_theta", "reduced": true,
-     "reduced_note", "deferred"}. G5 is reported only: NO pass/fail verdict anywhere. No
-     absolute path anywhere.
+     "reduced_note", "deferred", "supersedes"}. record refuses BM-TYPES when any law's build row
+     carries types != WANT_TYPES (the cad-g5/1 record was solved with slip_upstream typed patch,
+     which leaks mass through the slip wall, 9a13744). supersedes is None, or - when
+     record(out_dir, supersedes=<an earlier record JSON>) names one - the earlier file's sha256
+     and version, SUPERSEDE_WHY, every law's old/new slip_type, class, Cd, Re_theta_exit,
+     nu_std and separated_cfd pairs, and the o1 / o2_cfd / o2_thw statuses; the earlier file is
+     read before anything is written, so it may be the RECORD_JSON path itself. G5 is reported
+     only: NO pass/fail verdict anywhere. No absolute path anywhere.
 
 Usage:
   python bm_planar.py --selftest
   python bm_planar.py build OUT_DIR [LAW ...]
   python bm_planar.py run OUT_DIR LAW              (the GPU solve, supervisor only)
   python bm_planar.py metrics OUT_DIR LAW          (rewrite runs/<law>/metrics.json)
-  python bm_planar.py record OUT_DIR RECORD_JSON
+  python bm_planar.py record OUT_DIR RECORD_JSON [--supersedes OLD_JSON]
   python bm_planar.py gmsh-build GEOM_DIR MSH_PATH   (the fresh child of mesh_law)
 """
 import json
@@ -164,7 +172,7 @@ import export
 import thwaites
 import poiseuille
 
-VERSION = "cad-g5/1"
+VERSION = "cad-g5/2"
 CASE_KIND = "bm_planar"
 LAWS = ("poly3", "poly5", "poly7", "cubic_matched")
 RECIPE = {"version": "cad-bm-planar/1", "H_i_m": 2.74, "CR": 7.7, "L_over_Hi": 0.89, "Lu_over_Hi": 0.5,
@@ -190,7 +198,8 @@ WANT_TYPES = {"inlet": "patch", "outlet": "patch", "slip_upstream": "symmetry", 
 ROLES = {"inlet": "velocity_inlet", "outlet": "pressure_outlet", "wall_nozzle": "wall", "slip_upstream": "slip",
          "symmetry": "symmetry", "front": "empty", "back": "empty"}
 BIN_GPU = os.path.join(CAD, "bin_gpu.json")
-REFUSAL_IDS = ("BM-OUT", "BM-NAME", "BM-GEOM", "BM-MESH", "BM-CASE", "BM-FIELD", "BM-UNITS", "BM-STATION")
+REFUSAL_IDS = ("BM-OUT", "BM-NAME", "BM-GEOM", "BM-MESH", "BM-CASE", "BM-FIELD", "BM-UNITS", "BM-STATION",
+               "BM-TYPES")
 EDGE_REL = 1e-12
 FLAT_TOL_M = 1e-12
 # derived numbers of B1 (h_i = H_i/2, h_e = h_i/7.7, L = 0.89 H_i, U_inlet = U_exit/7.7)
@@ -200,21 +209,23 @@ U_INLET = RECIPE["U_exit_m_s"] / RECIPE["CR"]
 L_M = RECIPE["L_over_Hi"] * RECIPE["H_i_m"]
 METRIC_KEYS = ("status", "reason_id", "detail", "time", "nu_std", "nu_range", "nu_cl", "n_core_faces",
                "theta_exit", "dstar_exit", "H_exit", "Re_theta_exit", "U_c", "reversal", "separated_cfd",
-               "thwaites", "dp", "Cd")
+               "thwaites", "dp", "Cd", "boundary_flux", "mass_rel")
 THW_OK_KEYS = ("status", "theta_thw_exit", "Re_theta_thw_exit", "separated_thw", "x_sep_thw")
 RECORD_KEYS = ("version", "status", "convention", "recipe", "recipe_sha", "iters", "table4", "source",
                "binary", "runs", "all_steady", "o1", "o1_range", "o2_cfd", "o2_thw", "re_theta", "reduced",
-               "reduced_note", "deferred")
+               "reduced_note", "deferred", "supersedes")
 RUN_KEYS = ("law", "cells", "mesh", "solve", "wall_s", "gpu", "metrics")
 SOLVE_ROW_KEYS = ("class", "reason_id", "failed", "criteria", "n_iter_lines", "log_sha256", "binary_sha256")
 REDUCED_NOTE = "one mesh level and one 2000-iteration solve per law; no grid study"
 DEFERRED = ["a second mesh level (nr 160, n_axial doubled) to bound nu_std's discretisation"]
+SUPERSEDE_WHY = ("cad-g5/1 was solved with slip_upstream typed patch, which leaks mass through the slip wall "
+                 "(9a13744); this record re-solves every law with slip_upstream typed symmetry")
 P_DIMS = "[0 2 -2 0 0 0 0]"
 USAGE = ("usage: python bm_planar.py --selftest" + chr(10)
          + "       python bm_planar.py build OUT_DIR [LAW ...]" + chr(10)
          + "       python bm_planar.py run OUT_DIR LAW" + chr(10)
          + "       python bm_planar.py metrics OUT_DIR LAW" + chr(10)
-         + "       python bm_planar.py record OUT_DIR RECORD_JSON" + chr(10)
+         + "       python bm_planar.py record OUT_DIR RECORD_JSON [--supersedes OLD_JSON]" + chr(10)
          + "       python bm_planar.py gmsh-build GEOM_DIR MSH_PATH")
 
 
@@ -725,11 +736,13 @@ def _metrics_ok(mesh, u_field, p_field, planes, time_name):
     st_o, nf_o, _t2 = mesh["patch_range"]["outlet"]
     a_out = float(np.sum(np.abs(mesh["Sf"][st_o:st_o + nf_o, 0])))
     cd = None if not dp > 0.0 else q_in / (a_out * math.sqrt(2.0 * dp))
+    bflux = post.boundary_flux(mesh, u_field, 1.0)          # planar: no wedge factor
     return {"status": "ok", "reason_id": None, "detail": "", "time": time_name, "nu_std": nu_std,
             "nu_range": nu_range, "nu_cl": nu_cl, "n_core_faces": int(np.count_nonzero(core)),
             "theta_exit": theta_exit, "dstar_exit": dstar_exit, "H_exit": h_exit,
             "Re_theta_exit": re_theta_exit, "U_c": u_c, "reversal": reversal,
-            "separated_cfd": n_rev > 0, "thwaites": thw, "dp": dp, "Cd": cd}
+            "separated_cfd": n_rev > 0, "thwaites": thw, "dp": dp, "Cd": cd,
+            "boundary_flux": bflux, "mass_rel": bflux["net_rel"]}
 
 
 def _thwaites_block(mesh, u_field, p_field, planes, cells, wall_f):
@@ -875,10 +888,65 @@ def metrics_rewrite(out_dir, law):
     return m
 
 
-def record(out_dir):
-    """B12: the cad-g5/1 record over the four laws, REPORTED, no verdict, no absolute path."""
+def _law_cells(runs, law):
+    """One law's supersedes cells from a runs list, matched by the run's law value: slip_type from
+    mesh.types (None when mesh is None), class from solve (None when solve is None), and Cd,
+    Re_theta_exit, nu_std, separated_cfd from the metrics (None when it is not a dict); None where
+    absent."""
+    for r in runs or []:
+        if r.get("law") != law:
+            continue
+        mesh, solve_row = r.get("mesh"), r.get("solve")
+        m = r.get("metrics")
+        m = m if isinstance(m, dict) else {}
+        return ((mesh.get("types") or {}).get("slip_upstream") if mesh is not None else None,
+                None if solve_row is None else solve_row.get("class"),
+                m.get("Cd"), m.get("Re_theta_exit"), m.get("nu_std"), m.get("separated_cfd"))
+    return None, None, None, None, None, None
+
+
+def _supersedes_doc(old, old_sha, cmp_rows, runs):
+    """The cad-g5/2 record's supersedes value: the earlier record's sha256 and version,
+    SUPERSEDE_WHY, every law's old/new slip_type, class, Cd, Re_theta_exit, nu_std and
+    separated_cfd pairs (the old read with .get, None where absent), and the o1 / o2_cfd / o2_thw
+    statuses; None when there is no earlier record."""
+    if old is None:
+        return None
+
+    def status(key):
+        v = old.get(key)
+        return v.get("status") if isinstance(v, dict) else None
+
+    laws = {}
+    for law in LAWS:
+        o = _law_cells(old.get("runs"), law)
+        n = _law_cells(runs, law)
+        laws[law] = {"slip_type": [o[0], n[0]], "class": [o[1], n[1]], "Cd": [o[2], n[2]],
+                     "Re_theta_exit": [o[3], n[3]], "nu_std": [o[4], n[4]],
+                     "separated_cfd": [o[5], n[5]]}
+    return {"sha256": old_sha, "version": old.get("version"), "why": SUPERSEDE_WHY, "laws": laws,
+            "o1": [status("o1"), cmp_rows["o1"]["status"]],
+            "o2_cfd": [status("o2_cfd"), cmp_rows["o2_cfd"]["status"]],
+            "o2_thw": [status("o2_thw"), cmp_rows["o2_thw"]["status"]]}
+
+
+def record(out_dir, supersedes=None):
+    """B12: the cad-g5/2 record over the four laws, REPORTED, no verdict, no absolute path; a
+    build row whose types differ from WANT_TYPES is refused BM-TYPES; supersedes names an earlier
+    record JSON by path - read here before anything is written, only its sha256 enters the
+    record - and the old/new pairs land under "supersedes"."""
     build_doc = common.read_json(os.path.join(out_dir, "build.json"))
     meshes = build_doc.get("meshes") or {}
+    for law in LAWS:
+        row = meshes.get(law)
+        if row is not None and row.get("types") != WANT_TYPES:
+            raise Refused("BM-TYPES", "%s build types %r differ from WANT_TYPES" % (law, row["types"]))
+    old, old_sha = None, None
+    if supersedes is not None:
+        if not os.path.isfile(supersedes):
+            raise Refused("BM-OUT", "%s is missing" % supersedes)
+        old = common.read_json(supersedes)
+        old_sha = common.sha256_file(supersedes)
     solves, rows, runs = {}, {}, []
     for law in LAWS:
         sj = os.path.join(out_dir, "runs", law, "solve.json")
@@ -911,17 +979,20 @@ def record(out_dir):
                      "metrics": rows[law]})
     classes = [s.get("class") for s in solves.values() if s is not None]
     cmp_rows = compare(rows)
-    return {"version": VERSION, "status": "REPORTED", "convention": convention(), "recipe": RECIPE,
-            "recipe_sha": common.sha256_of(RECIPE), "iters": ITERS, "table4": TABLE4, "source": SOURCE,
-            "binary": binary, "runs": runs, "all_steady": all(c == "steady" for c in classes),
-            "o1": cmp_rows["o1"], "o1_range": cmp_rows["o1_range"], "o2_cfd": cmp_rows["o2_cfd"],
-            "o2_thw": cmp_rows["o2_thw"], "re_theta": cmp_rows["re_theta"], "reduced": True,
-            "reduced_note": REDUCED_NOTE, "deferred": list(DEFERRED)}
+    rec = {"version": VERSION, "status": "REPORTED", "convention": convention(), "recipe": RECIPE,
+           "recipe_sha": common.sha256_of(RECIPE), "iters": ITERS, "table4": TABLE4, "source": SOURCE,
+           "binary": binary, "runs": runs, "all_steady": all(c == "steady" for c in classes),
+           "o1": cmp_rows["o1"], "o1_range": cmp_rows["o1_range"], "o2_cfd": cmp_rows["o2_cfd"],
+           "o2_thw": cmp_rows["o2_thw"], "re_theta": cmp_rows["re_theta"], "reduced": True,
+           "reduced_note": REDUCED_NOTE, "deferred": list(DEFERRED)}
+    rec["supersedes"] = _supersedes_doc(old, old_sha, cmp_rows, runs)
+    return rec
 
 
 def main(argv):
     """--selftest | build OUT_DIR [LAW ...] | run OUT_DIR LAW | metrics OUT_DIR LAW | record
-    OUT_DIR RECORD_JSON | gmsh-build GEOM_DIR MSH_PATH (nozzle_nominal.main's style)."""
+    OUT_DIR RECORD_JSON [--supersedes OLD_JSON] | gmsh-build GEOM_DIR MSH_PATH
+    (nozzle_nominal.main's style)."""
     if argv == ["--selftest"]:
         try:
             selftest()
@@ -959,9 +1030,15 @@ def main(argv):
             sys.stderr.write("refused %s: %s%s" % (r.rule, r.detail, chr(10)))
             return 2
         return 0
-    if len(argv) == 3 and argv[0] == "record":
+    if len(argv) in (3, 5) and argv[0] == "record":
+        sup = None
+        if len(argv) == 5:
+            if argv[3] != "--supersedes":
+                sys.stderr.write(USAGE + chr(10))
+                return 2
+            sup = os.path.abspath(argv[4])
         try:
-            rec = record(os.path.abspath(argv[1]))
+            rec = record(os.path.abspath(argv[1]), supersedes=sup)   # reads --supersedes first
         except wedge_mesh.Refused as r:
             sys.stderr.write("refused %s: %s%s" % (r.rule, r.detail, chr(10)))
             return 2
@@ -976,6 +1053,12 @@ def main(argv):
             print("%s nu_std %s Re_theta cfd %s thw %s table4 %s sep cfd %s thw %s"
                   % (r["law"], m.get("nu_std"), m.get("Re_theta_exit"), thw.get("Re_theta_thw_exit"),
                      (TABLE4[r["law"]]["Re_theta"]), m.get("separated_cfd"), thw.get("separated_thw")))
+        for r in rec["runs"]:
+            m = r["metrics"] if isinstance(r["metrics"], dict) else {}
+            mesh_row = r.get("mesh") or {}
+            print("%s mass_rel %s Cd %s slip_upstream %s"
+                  % (r["law"], m.get("mass_rel"), m.get("Cd"),
+                     (mesh_row.get("types") or {}).get("slip_upstream")))
         return 0
     sys.stderr.write(USAGE + chr(10))
     return 2
@@ -1266,9 +1349,121 @@ def _t6(td, out):
           " byte-identical and poly3 (BM-OUT) / poly9 (BM-NAME) are refused")
 
 
+def _t7(td, out):
+    """T7: (a) the recomputed poly5 metrics row carries boundary_flux (the solver rule, slip
+    prescribed at the symmetry typing) and mass_rel with no existing metric moved; (b) a build
+    row whose types differ from WANT_TYPES is refused BM-TYPES; (c) the supersedes contract;
+    (d) the record CLI with --supersedes, including the same-path read-before-write."""
+    m = metrics(os.path.join(out, "cases", "poly5"), str(ITERS), os.path.join(out, "geom_poly5"))
+    assert list(m.keys()) == list(METRIC_KEYS), "the metrics keys are not METRIC_KEYS"
+    bf = m["boundary_flux"]
+    assert list(bf.keys()) == list(post.BFLUX_KEYS), "boundary_flux is not on post.BFLUX_KEYS"
+    slip = bf["patches"]["slip_upstream"]
+    assert slip["mesh_type"] == "symmetry" and slip["rule"] == "prescribed", (slip,)
+    assert bf["patches"]["front"]["rule"] == "prescribed", "front is not prescribed"
+    assert m["mass_rel"] == bf["net_rel"], "mass_rel is not boundary_flux's net_rel"
+    old_cd = common.read_json(os.path.join(out, "runs", "poly5", "metrics.json"))["Cd"]
+    assert rel(m["Cd"], old_cd) <= 1e-15, "Cd moved across the rewrite"
+    bdir = os.path.join(td, "t7b")
+    os.makedirs(bdir)
+    bd = common.read_json(os.path.join(out, "build.json"))
+    row = dict(bd["meshes"]["poly5"])
+    row["types"] = dict(row["types"])
+    row["types"]["slip_upstream"] = "patch"
+    bd["meshes"] = dict(bd["meshes"])
+    bd["meshes"]["poly3"] = row
+    with open(os.path.join(bdir, "build.json"), "wb") as f:
+        f.write((common.canonical_json(bd) + chr(10)).encode("utf-8"))
+    try:
+        record(bdir)
+        raise AssertionError("record on a patch-typed build was accepted")
+    except Refused as r:
+        assert r.rule == "BM-TYPES" and "poly3" in r.detail, (r.rule, r.detail)
+    old = record(out)
+    old["version"] = "cad-g5/1"
+    for r in old["runs"]:
+        if r.get("mesh") is not None:
+            r["mesh"]["types"]["slip_upstream"] = "patch"
+    for r in old["runs"]:
+        if r["law"] == "poly5" and isinstance(r.get("metrics"), dict):
+            r["metrics"]["Cd"] = 0.5
+    old_path = os.path.join(td, "old.json")
+    with open(old_path, "wb") as f:
+        f.write((common.canonical_json(old) + chr(10)).encode("utf-8"))
+    rec = record(out, supersedes=old_path)
+    assert rec["version"] == "cad-g5/2", rec["version"]
+    assert sorted(rec) == sorted(RECORD_KEYS), "the record keys are not RECORD_KEYS"
+    sup = rec["supersedes"]
+    assert sup["sha256"] == common.sha256_file(old_path), "the supersedes sha256 differs"
+    assert sup["version"] == "cad-g5/1", sup["version"]
+    assert sup["laws"]["poly5"]["slip_type"] == ["patch", "symmetry"], sup["laws"]["poly5"]
+    assert sup["laws"]["poly5"]["Cd"] == [0.5, rec["runs"][1]["metrics"]["Cd"]], sup["laws"]["poly5"]
+    assert sup["laws"]["poly3"]["class"] == [None, None], sup["laws"]["poly3"]
+    assert record(out)["supersedes"] is None, "supersedes is not None without --supersedes"
+    text = common.canonical_json(rec)
+    stripped = text.replace(SOURCE["url"], "")
+    assert ":/" not in stripped and (":" + chr(92)) not in stripped, "an absolute path leaked"
+    new_path = os.path.join(td, "new.json")
+    assert main(["record", out, new_path, "--supersedes", old_path]) == 0, "the record CLI failed"
+    assert common.read_json(new_path)["supersedes"]["sha256"] == common.sha256_file(old_path)
+    none_path = os.path.join(td, "none.json")
+    assert main(["record", out, os.path.join(td, "x.json"), "--supersedes", none_path]) == 2, \
+        "a missing --supersedes file was not refused with exit 2"
+    same_sha = common.sha256_file(old_path)
+    assert main(["record", out, old_path, "--supersedes", old_path]) == 0, "same-path supersedes failed"
+    assert common.read_json(old_path)["supersedes"]["sha256"] == same_sha, \
+        "the supersedes file was not read before the record was written"
+    print("[ok] T7 the poly5 metrics row carries boundary_flux (slip_upstream symmetry prescribed,"
+          " front prescribed, mass_rel its net_rel, Cd unmoved); a poly3 patch typing is refused"
+          " BM-TYPES; supersedes carries the old sha256 and version, poly5 slip_type patch ->"
+          " symmetry and Cd 0.5 -> %r, poly3 class [None, None], None without --supersedes, no"
+          " absolute path; the CLI writes --supersedes first, refuses a missing file with 2 and"
+          " accepts the same path for both" % (rec["runs"][1]["metrics"]["Cd"],))
+
+
+def _t8():
+    """T8: the committed g5_record.json (path from this module's own directory) is a cad-g5/2
+    record of the symmetry re-solve: every mesh typed WANT_TYPES, every ok metrics row's
+    slip_upstream flux prescribed at |Q| <= 1e-12 |Q_inlet|, and a supersedes naming cad-g5/1.
+    It fails on the stale cad-g5/1 record - that is the point - until the supervisor regenerates
+    it; g5_record.json itself is never edited to pass."""
+    rec = common.read_json(os.path.join(HERE, "g5_record.json"))
+    assert rec.get("version") == "cad-g5/2", \
+        "version check: the committed g5_record.json is %r, want cad-g5/2 (a stale cad-g5/1" \
+        " record solved with slip_upstream typed patch)" % (rec.get("version"),)
+    for r in rec.get("runs") or []:
+        mesh = r.get("mesh")
+        if mesh is not None:
+            assert mesh.get("types") == WANT_TYPES, \
+                "types check: %s mesh types %r differ from WANT_TYPES" % (r.get("law"), mesh.get("types"))
+        m = r.get("metrics")
+        if isinstance(m, dict) and m.get("status") == "ok":
+            bf = m.get("boundary_flux")
+            assert isinstance(bf, dict) and isinstance(bf.get("patches"), dict), \
+                "boundary_flux check: %s's ok metrics row carries no boundary_flux" % (r.get("law"),)
+            slip = bf["patches"].get("slip_upstream") or {}
+            assert slip.get("rule") == "prescribed", \
+                "prescribed check: %s slip_upstream rule %r, want prescribed" % (r.get("law"), slip.get("rule"))
+            q_in = bf["patches"]["inlet"]["Q_m3_s"]
+            assert abs(slip.get("Q_m3_s")) <= 1e-12 * abs(q_in), \
+                "leak check: %s slip_upstream Q %r against inlet Q %r" % (r.get("law"), slip.get("Q_m3_s"), q_in)
+    sup = rec.get("supersedes")
+    assert isinstance(sup, dict) and sup.get("version") == "cad-g5/1", \
+        "supersedes check: supersedes is %r, want a dict naming cad-g5/1" % (sup,)
+    for law in LAWS:
+        st = (sup.get("laws") or {}).get(law, {}).get("slip_type")
+        assert st is None or st[0] in ("patch", None), \
+            "supersedes laws check: %s slip_type %r, want [patch|None, ...]" % (law, st)
+    print("[ok] T8 the committed g5_record.json is cad-g5/2: every mesh typed WANT_TYPES, every"
+          " ok metrics row's slip_upstream prescribed at |Q| <= 1e-12 |Q_inlet|, supersedes naming"
+          " cad-g5/1 with each law's old slip_type patch or None")
+
+
 def selftest():
     """T1-T2 pure, T3 the real poly5 build, T4-T5 planted post on T3's mesh, T6 the fake-exe run,
-    record and metrics rewrite on T3's build; SELFTEST PASS at the end."""
+    record and metrics rewrite on T3's build, T7 the boundary_flux keys, the BM-TYPES refusal and
+    the supersedes contract on T6's out, T8 the committed g5_record.json after the temp dir
+    closes; SELFTEST PASS at the end."""
     _t1()
     _t2()
     with tempfile.TemporaryDirectory() as td:
@@ -1277,6 +1472,8 @@ def selftest():
         _t4(td, out, geom_dir)
         _t5(td, out, geom_dir)
         _t6(td, out)
+        _t7(td, out)
+    _t8()
     print("SELFTEST PASS")
 
 

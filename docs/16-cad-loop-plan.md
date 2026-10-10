@@ -518,6 +518,8 @@ TG0 passes when TB0-TB5 hold at both Re_τ. McKeon, Swanson, Zagarola, Donnelly 
 Re; no band rests on it. A miss leaves TG0 OPEN and **no turbulent nozzle number counts**, as a G0 miss does for the
 laminar nozzle. TG0 also requires G0 to have passed, since both ride on the wedge = symmetry alias.
 
+**TG0-REDO (2026-10-05, from SPEC-LIT 114, solver f3f145c).** Two input-side changes, the solver untouched: (O1) the pipe case writes the k and omega solvers at `tolerance 1e-12` with `relTol 0.01` (at 1e-08 the L1 omega solve stops changing omega, f +9.74 % against Prandtl where the converged answer is +4.48 %, SPEC-LIT 114.2); (O3) `solve.py` classifies a case of kind `pipe` by contErr and the window changes of U_b and f alone, CAD-15's residual decades still computed and reported but not gating, because two of the three velocity components and p are round-off fields in the periodic pipe and their normalised residuals cannot fall four decades (SPEC-LIT 114.4); the binary prints only the largest component's residual, so a Ux residual is not available to judge by. TB1, TB3 and TB4 stay hard bands; SPEC-LIT 114.3 measures their misses as kOmegaSST's model form (a centreline eddy viscosity 1.9 to 2.0 times Reichardt's), and the TG0 record quotes it.
+
 **The turbulent nozzle requirement set `nozzle_turb_nominal`.** Air, 293.15 K; **D_i 0.30 m, CR 2 (D_e 0.21213 m),
 poly5, L/D_i 1.5**, Lx/De 0.5, t_wall 3 mm, `upstream_role` wall with Lu/D_i 2.0 (a 0.60 m no-slip pipe); a uniform
 velocity inlet U_i = U_e/2 with I = 1 %, ℓ = 3 mm; outlet as §H.2. Two operating points: **U_e 30 m/s** (Re_De 4.20e5,

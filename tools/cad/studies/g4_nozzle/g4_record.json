@@ -10,10 +10,10 @@
   },
   "cfd_u": {
     "source": "tools/cad/cases/nozzle_nominal/nominal_record.json",
-    "sha256": "462f80e6b4c53e91040edce58d9139f6a7377b09267e31c6d1620b9ff6f6a560",
+    "sha256": "2f017a23e07e5502d9c723314ac212438945479a104472bc6e5d1ca56952ed36",
     "status": "OPEN",
     "fields_bit_identical": true,
-    "gci_fine_known": false
+    "gci_fine_known": true
   },
   "start": {
     "name": "start",
@@ -1559,6 +1559,151 @@
           "reason_id": null,
           "m": 0.06865903370361313,
           "u": 0.0
+        }
+      ]
+    },
+    {
+      "name": "probe_poly7_ld075",
+      "level": "L1",
+      "eval_key": "6254cf835ebf12f564da677df85839acd8de04f9e6e060f6c37fa3dda077162a",
+      "params": {
+        "CR": 9.0,
+        "D_i": 0.06,
+        "L_over_Di": 0.75,
+        "Lu_over_Di": 0.5,
+        "Lx_over_De": 0.5,
+        "law": "poly7",
+        "t_wall": 0.004,
+        "upstream_role": "slip",
+        "x_m": null
+      },
+      "stage_reached": "solve",
+      "solve_class": "unsteady",
+      "reason_id": "SOLVE-UNSTEADY",
+      "message": "the solve class is unsteady: ",
+      "cells": 40204,
+      "mesh": {
+        "gc6": {
+          "volume": true,
+          "areas": true,
+          "check": true,
+          "tau": true,
+          "first_cell": true,
+          "cells": true,
+          "types": true,
+          "pass": true
+        },
+        "tau_min": 0.082347,
+        "non_orth_max_deg": 44.186
+      },
+      "solve": {
+        "class": "unsteady",
+        "reason_id": "SOLVE-UNSTEADY",
+        "failed": [
+          "U_decades"
+        ],
+        "n_iter_lines": 25,
+        "log_sha256": "b28d5944b17072d77ab3af51855e65c366f6b19b1889665b34c09ada35a7cb5a",
+        "binary_sha256": "50471caaa54125e0c2eee4fb34eebdfc2da44727d2b818a2b96bb4234c02103c"
+      },
+      "wall_s": 134.81832820014097,
+      "gpu_shared": false,
+      "design_verdict": "not_evaluable",
+      "n_hard_pass": 8,
+      "n_hard_fail": 0,
+      "n_hard_ne": 4,
+      "objective": 0.05499999999999994,
+      "verdicts": [
+        {
+          "req_id": "REQ-001",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.06,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-002",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.02,
+          "u": 1e-09
+        },
+        {
+          "req_id": "REQ-003",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-004",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-005",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
+        },
+        {
+          "req_id": "REQ-006",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.003999999995499257,
+          "u": 1e-08
+        },
+        {
+          "req_id": "REQ-007",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 0.05499999999999994,
+          "u": 1e-09
+        },
+        {
+          "req_id": "SYS-SOLID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-VALID",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-WATERTIGHT",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-AXIS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-UNITS",
+          "verdict": "pass",
+          "reason_id": null,
+          "m": 1.0,
+          "u": 0.0
+        },
+        {
+          "req_id": "SYS-MACH",
+          "verdict": "not_evaluable",
+          "reason_id": "NE-MISSING",
+          "m": null,
+          "u": null
         }
       ]
     }

@@ -53,3 +53,20 @@ not lock on this u (docs/16 §E.4).
 전체 실행(워크의 4 x 256 CAD 프리필터, 최대 24회 L1 평가, 6000 반복 L2 확인, 깊은 리플레이)은
 감독자에게 남겨 두었으므로 G4는 OPEN이다. `cfd_u`도 OPEN이다. 명목 기록이 아직 gci_fine을
 모르므로 루프는 이 u에 못을 박아서는 안 된다(docs/16 §E.4).
+
+## Cd basis / Cd 근거 (G5-RERUN, 2026-10-05)
+Every Cd in `g4_record.json` was solved after 9a13744 with `slip_upstream` typed `symmetry` (each
+cached case's boundary reads so). The only Cd values from the leaking `patch` typing were in the
+1c06cec record: nominal poly5 L/D 1 at 0.9593 and poly7 L/D 0.75 at 0.9561, both failing REQ-005.
+The nominal row now reads 0.9717 and passes REQ-005 (infeasible on REQ-004 alone); poly7 L/D 0.75,
+re-evaluated as `probe_poly7_ld075`, is SOLVE-UNSTEADY and not evaluable. The one feasible design
+(poly5 L/D 1.429, Cd 0.9678) was never measured with the leak. `cfd_u` now cites the 3000a60
+nominal record: gci_fine is known for Cd, not for theta_e, and the status stays OPEN.
+
+`g4_record.json`의 모든 Cd는 9a13744 이후 `slip_upstream`을 `symmetry`로 지정해 푼 값이다(캐시된
+각 케이스의 boundary가 그렇다). 새는 `patch` 지정으로 얻은 Cd는 1c06cec 기록에만 있었다: 명목
+poly5 L/D 1의 0.9593과 poly7 L/D 0.75의 0.9561, 둘 다 REQ-005 실패. 명목 행은 이제 0.9717로
+REQ-005를 통과한다(REQ-004만으로 불가능). poly7 L/D 0.75는 `probe_poly7_ld075`로 다시 평가해
+SOLVE-UNSTEADY, 판정 불가다. 유일한 실현가능 설계(poly5 L/D 1.429, Cd 0.9678)는 누설 상태로 측정된
+적이 없다. `cfd_u`는 이제 3000a60 명목 기록을 인용한다: Cd의 gci_fine은 알려졌고 theta_e는 아니며,
+상태는 OPEN 그대로다.

@@ -478,8 +478,8 @@ def selftest():
         assert rs == ["TG4-TG0", "TG4-NOT-RUN", "TG4-EVALS", "TG4-CONFIRM", "TG4-REPLAY",
                       "TG4-CFDU", "TG4-KCFD"], rs
         assert rec["replay"] == {"status": "NOT_RUN", "ok": None}
-        assert rec["tg0"]["verdict"] == "OPEN" and rec["tg0"]["reasons"] == \
-            ["TG0-MISSING", "TG0-TB5"], rec["tg0"]
+        assert rec["tg0"]["verdict"] == "OPEN" and rec["tg0"]["reasons"] == common.read_json(
+            os.path.join(CAD, "cases", "pipe_turb", "tg0_record.json"))["tg0"]["reasons"], rec["tg0"]
         assert rec["cfd_u"]["status"] == "OPEN" and rec["cfd_u"]["gci_fine_known"] is False
         assert rec["cfd_u"]["fields_bit_identical"] is True
         assert len(rec["reduced_evals"]) == 1 and rec["reduced_evals"][0]["name"] == "start"
