@@ -37546,8 +37546,8 @@ case is lowered (CMP-03), not by the force itself.
   `cuda/momentum.cu`; §9's kernels are not edited, so their SASS does not move.
 - No temperature floor: (121.3) has no divide. A NaN temperature propagates instead of
   being replaced by `t_min`. `Momentum::new` refuses a non-finite `beta` by name.
-- Case input is CMP-03's: until it lands, JSONC `physics.buoyancy: "boussinesq"` stays
-  refused by name (§13.4).
+- Case input is CMP-03's, and §121.7 states it: every case format that carries a buoyancy
+  block can select the form, with `beta`, under one lowering rule and one validity guard.
 
 ### 121.4 The hydrostatic column
 
@@ -37639,8 +37639,100 @@ down) has `G_b < 0` and destroys turbulence; the layer above a heat source has `
 **Landed (CMP-02, 2026-10-11, RTX 5070 Ti).** All four tests and their twins pass in both builds, the
 bitwise rows included under `single`. f64 identity: `turbulence.cubin` gains the one new kernel and the SASS of
 its 32 existing kernels is unchanged (every other cubin is identical); `ofgpu-validate -sections 10,15`, which
-holds §17's `G_b` rows and the coupled-selection run on a buoyant case, is row-identical (85 rows). No case can
-select the form yet: `physics.buoyancy: "boussinesq"` stays refused by name until CMP-03 lowers it.
+holds §17's `G_b` rows and the coupled-selection run on a buoyant case, is row-identical (85 rows). No case could
+select the form then; §121.7 (CMP-03) is where a case selects it.
+
+### 121.7 Case input, the lowering rule and the validity guard (CMP-03)
+
+`No GPL-licensed source was consulted.` The force (121.3) and the production (121.6) are
+unchanged; this subsection says how a case reaches them, which drivers run them, and the
+guard §121.2 promised.
+
+**Spellings.** The tree reads four case formats that carry a buoyancy block. Each gains the
+same two settings, spelled in that format's own idiom:
+
+| format | the form | `beta` [1/K] | read by |
+|---|---|---|---|
+| JSONC `case-1` | `physics.buoyancy`: `"densityRatio"` or `"boussinesq"` (required, as before) | `physics.fluid.beta` (optional) | `io::case_json::JsonCase::lower` |
+| OpenFOAM dictionary | `buoyancy densityRatio;` or `buoyancy boussinesq;` in `constant/physicalProperties` (or `transportProperties`), absent = `densityRatio` | `beta [0 0 0 -1 0 0 0] 3.4e-3;` in the same file | `momentum::BuoyancyCoeffs::from_case` |
+| `*.cht.jsonc` | `buoyancy.model` (optional, absent = `densityRatio`) | `buoyancy.beta` (optional) | `io::case_cht` |
+| `*.dc.jsonc` | `air.buoyancy` (optional, absent = `densityRatio`) | `air.beta` (optional) | `io::case_dc` |
+
+**The lowering rule** (`momentum::BuoyancyForm::lower`, one function for all four formats, so
+there is one §13.4 contract and not four):
+
+| form | `beta` | result |
+|---|---|---|
+| `densityRatio` | absent | §9's force, unchanged |
+| `densityRatio` | present | refused, naming the `beta` key: nothing reads it (§13.4.1) |
+| `boussinesq` | absent | refused, naming the `beta` key. There is no default: `1/T_ref` is the ideal-gas value, a liquid's is an order of magnitude smaller, and the reader is not entitled to pick one |
+| `boussinesq` | finite and `> 0` | `BuoyancyForm::Boussinesq { beta }` |
+| `boussinesq` | `<= 0`, NaN or infinite | refused, naming the `beta` key |
+| any other spelling (dictionary route) | — | refused, naming the key and both spellings |
+
+*DESIGN:* a negative `beta` (water below 4 °C) is refused rather than run, because §121.6's
+sign argument for `G_b` assumes `beta > 0`.
+
+**Who runs it.**
+
+- `ofgpu-buoyant` (OpenFOAM dictionary), `ofgpu-cht` (`*.cht.jsonc`) and
+  `ofgpu-datacentre` (`*.dc.jsonc`) run the form they are given. Their momentum body force is
+  (121.3), and the `G_b` of their turbulence model is (121.6) through `ThermalCtx.form`
+  (§121.6).
+- `ofgpu-plume` solves no momentum. Its `G_b` takes the case's form, so a Boussinesq case is
+  not silently given §17's density-ratio production.
+- `ofgpu-lowmach` refuses `boussinesq` by name. §25's formulation carries the full
+  variable density `rho = p0/(R_s T)` in its mass and energy balances, and a linearised body
+  force would be a second density law that contradicts the first. Under `-permissive` it
+  warns and substitutes `densityRatio`, the §13.4 escape hatch.
+- *CHT density (DESIGN).* Under Boussinesq the density varies only in the body force
+  (§121.1). A conjugate fluid region is therefore run with its density held at `fluid.rho`,
+  exactly as §79.6 holds it without a body force: the gas state is pinned at the initial
+  temperature and `update_density` is not called. `TRef` and `beta` reach the body force
+  only. The density-ratio branch is unchanged in every bit.
+
+**The validity guard.** With `beta` and `T_ref` from the case,
+
+```
+delta_B = beta * max_i |T_i - T_ref|                                   (121.8)
+```
+
+is taken over the fluid's cell temperatures and boundary-face temperatures (for a conjugate
+case, the fluid region's cells and boundary faces only; a solid's temperature is no business
+of a body force). It is evaluated in f64 on the host from the field the run starts from: after
+the initial values, the boundary conditions and any restart, and before the first iteration.
+
+- `delta_B <= 0.1`: the run proceeds.
+- `delta_B > 0.1`, or not a number: the run is refused (`Error::Refused`). The message names
+  the `beta` key, `beta`, `max|T - T_ref|`, `delta_B` and the limit `0.1`, and offers
+  `densityRatio`. Under `-permissive` the guard warns once and the run continues.
+- At the end of the run, the same number on the final field is printed, with a warning line
+  when it exceeds `0.1`. It does not refuse, because the result already exists by then.
+
+*Why the start is enough in the common case.* Steady or transient advection-diffusion of `T`
+with a bounded convection scheme and no source satisfies a discrete maximum principle, so
+`T` stays inside the range of its initial and boundary values, and the initial `delta_B`
+bounds every later one. A heat source (a rack, a `fvSources` entry, a CHT solid's power) or
+an unbounded scheme can break the bound. The end-of-run line is there for that case.
+
+*The limit (DESIGN).* `0.1` is this tree's single number. Gray & Giorgini (1976) state the
+validity of the approximation as bounds on the relative variation of each fluid property.
+They do not give one number, so the `0.1` is not theirs. Under the data-centre's humidity
+(§54.4) the force reads the virtual temperature `T_v`, but the guard reads `T`. They differ by
+about `0.61 q T`, under 2 K at `q = 0.01`.
+
+| test | assertion | class |
+|---|---|---|
+| `io::case_json::tests::boussinesq_lowers_with_beta` and its twin in `tests/f32_boussinesq.rs` | `physics.buoyancy "boussinesq"` with `physics.fluid.beta 3.4e-3` lowers to `Boussinesq { beta: 3.4e-3 }`, with `g` and `TRef` as stated | D |
+| `io::case_json::tests::boussinesq_without_beta_is_refused_by_name` (and twin) | the error names `physics.fluid.beta` and `boussinesq` | D |
+| `io::case_json::tests::beta_under_density_ratio_is_refused` (and twin) | the error names `physics.fluid.beta` and `densityRatio` | D |
+| `momentum::tests::boussinesq_validity_guard_fires_above_0_1` (and twin) | `delta_B` of 0.099 passes; 0.101 on the hot side and on the cold side is refused, naming the key and `0.1`; a NaN temperature is refused; `densityRatio` is never refused; `-permissive` warns and passes | D |
+| `momentum::tests::the_dictionary_route_reads_buoyancy_and_beta` | `from_case` lowers `buoyancy boussinesq; beta ...;`, refuses the three bad rows above and an unknown spelling, and reads a case without either key as `densityRatio` | D |
+| `io::case_cht` and `io::case_dc` lowering tests | the same table through `buoyancy.model`/`buoyancy.beta` and `air.buoyancy`/`air.beta` | D |
+| `cht::flow::tests::a_boussinesq_cavity_differs_from_and_agrees_with_the_density_ratio_one` | de Vahl Davis at `beta = 1/T_ref`, `Delta T = 0.1 K`: the two runs' fields differ, and their cold-wall Nusselt numbers agree to `1e-3` relative, the `O(beta Delta T)` the two forms differ by | P |
+| `ofgpu-buoyant` knob `buoyancy boussinesq` in `every_wired_setting_changes_what_the_run_writes`, and `a_boussinesq_case_past_the_validity_limit_is_refused` | the setting changes what the run writes; the plume at `beta = 1/T_ref` (`delta_B ≈ 3`) is refused before its first iteration | D |
+| `ofgpu-datacentre` `the_buoyancy_form_reaches_the_room_run` | the cold-aisle room, 20 iterations, under each form: the rack inlet temperatures differ | D |
+| `ofgpu-lowmach` `a_boussinesq_case_is_refused_by_name` | refused naming `boussinesq`, `ofgpu-lowmach` and `densityRatio`; `-permissive` substitutes `densityRatio` | D |
 
 ## 122. The compressible gas — the perfect-gas state, the gauge pressure about `p_op`, Sutherland, and the f32 design
 

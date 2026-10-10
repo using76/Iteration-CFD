@@ -202,13 +202,23 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
         }
     }
     if let Some(b) = &low.buoyancy {
+        // SPEC-LIT 121.7: the banner names the form the case asked for.
+        let law = match b.form {
+            ofgpu::momentum::BuoyancyForm::DensityRatio => {
+                "SPEC-LIT 9's b = g(TRef/T - 1)".to_string()
+            }
+            ofgpu::momentum::BuoyancyForm::Boussinesq { beta } => format!(
+                "b = -beta (T - TRef) g, beta = {:.4e} 1/K",
+                f64::from(beta)
+            ),
+        };
         println!(
-            "  buoyancy: g = ({:.4e}, {:.4e}, {:.4e}) m/s^2, TRef = {:.4} K \
-             (SPEC-LIT 9's b = g(TRef/T - 1))",
+            "  buoyancy: g = ({:.4e}, {:.4e}, {:.4e}) m/s^2, TRef = {:.4} K ({})",
             f64::from(b.g.x),
             f64::from(b.g.y),
             f64::from(b.g.z),
-            f64::from(b.t_ref)
+            f64::from(b.t_ref),
+            law
         );
     }
 

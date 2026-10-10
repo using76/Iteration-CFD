@@ -95,10 +95,37 @@
     "run"
   ],
   "$defs": {
+    "BuoyancyModel": {
+      "description": "The two body-force forms a case can name - SPEC-LIT §9's density ratio\nand §121's Boussinesq, lowered through\n[`crate::momentum::BuoyancyForm::lower`]. `boussinesq` runs when the case\ncarries a `beta` for it (§121.7); see [`Self::name`] for the spelling the\nlowering contract hands on.",
+      "type": "string",
+      "enum": [
+        "densityRatio",
+        "boussinesq"
+      ]
+    },
     "DcAir": {
       "description": "The air's properties. Every one of them reaches a kernel; none is\ndecoration.",
       "type": "object",
       "properties": {
+        "beta": {
+          "description": "Thermal expansion coefficient [1/K] - read only under\n`\"buoyancy\": \"boussinesq\"`, SPEC-LIT 121.7. There is no default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "buoyancy": {
+          "description": "SPEC-LIT 121.7: `\"densityRatio\"` - the default when absent - or\n`\"boussinesq\"`, lowered through\n[`crate::momentum::BuoyancyForm::lower`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuoyancyModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cp": {
           "description": "Specific heat, J/kg/K - (S55.4)'s `c_p`.",
           "type": "number",

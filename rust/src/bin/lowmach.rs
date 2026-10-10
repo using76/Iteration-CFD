@@ -188,7 +188,7 @@ use ofgpu::mesh::PatchKind;
 use ofgpu::models::{
     build_coupled, select_turbulence_model, CoupledTurbulence, RasModel, ThermalCtx,
 };
-use ofgpu::momentum::MomentumControls;
+use ofgpu::momentum::{BuoyancyForm, MomentumControls};
 use ofgpu::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
 use ofgpu::simple::{Simple, SimpleControls};
 use ofgpu::turbulence::FlowState;
@@ -1598,6 +1598,29 @@ impl MemWatch {
     }
 }
 
+/// SPEC-LIT 121.7: `ofgpu-lowmach` refuses `boussinesq` BY NAME. §25's
+/// formulation carries the full variable density `rho = p0/(R_s T)` in its
+/// mass and energy balances, and a linearised body force would be a second
+/// density law that contradicts the first. Under `-permissive` the §13.4
+/// escape hatch warns once and substitutes the density ratio.
+fn lowmach_buoyancy_form(f: BuoyancyForm) -> Result<BuoyancyForm> {
+    match f {
+        BuoyancyForm::DensityRatio => Ok(f),
+        BuoyancyForm::Boussinesq { .. } => ofgpu::io::contract::unsupported_note(
+            "buoyancy",
+            "boussinesq",
+            &["densityRatio"],
+            "ofgpu-lowmach solves SPEC-LIT 25's low-Mach equations, whose \
+             density is the FULL ideal gas rho = p0/(R_s T); a linearised \
+             body force would be a second density law contradicting the \
+             first. ofgpu-buoyant, ofgpu-cht and ofgpu-datacentre run the \
+             boussinesq form (SPEC-LIT 121.7)",
+            "densityRatio",
+            BuoyancyForm::DensityRatio,
+        ),
+    }
+}
+
 fn run(o: &Options) -> Result<RunEnd> {
     let t_total = Instant::now();
 
@@ -1608,6 +1631,12 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     let (hm, mut cc, _lowered_for_controls): (HostMesh, CaseControls, _) =
         load_case(&o.case_path)?;
+    // SPEC-LIT 121.7: this formulation carries the full variable density
+    // `rho = p0/(R_s T)` (SPEC-LIT 25) in its mass and energy balances, so a
+    // linearised body force would be a second density law contradicting the
+    // first - `boussinesq` is refused by name, and the drivers that DO run it
+    // are named.
+    cc.buoyancy.form = lowmach_buoyancy_form(cc.buoyancy.form)?;
     hm.print_report();
     let mesh = GpuMesh::upload(&gpu, &hm)?;
     gpu.sync()?;
@@ -3459,6 +3488,39 @@ mod lowmach_tests {
 
     fn gpu() -> Option<Gpu> {
         Gpu::new(0).ok()
+    }
+
+    /// SPEC-LIT 121.7: this driver refuses `boussinesq` by name - its mass
+    /// and energy balances carry the full `rho = p0/(R_s T)`, and that is the
+    /// one density law it will carry. `-permissive` substitutes the density ratio, as §13.4
+    /// says the escape hatch must.
+    #[test]
+    fn a_boussinesq_case_is_refused_by_name() {
+        // Strict: refused, naming the setting, this driver and the fallback.
+        let e = lowmach_buoyancy_form(BuoyancyForm::Boussinesq { beta: 1e-3 })
+            .err()
+            .expect("boussinesq is refused by name");
+        let m = format!("{e}");
+        assert!(m.contains("boussinesq"), "{m}");
+        assert!(m.contains("ofgpu-lowmach"), "{m}");
+        assert!(m.contains("densityRatio"), "{m}");
+
+        // The density ratio passes through untouched.
+        assert_eq!(
+            lowmach_buoyancy_form(BuoyancyForm::DensityRatio).expect("densityRatio is fine"),
+            BuoyancyForm::DensityRatio
+        );
+
+        // -permissive: warned and substituted.
+        let guard = ofgpu::io::contract::permissive_test_guard();
+        ofgpu::io::contract::set_permissive(true);
+        assert_eq!(
+            lowmach_buoyancy_form(BuoyancyForm::Boussinesq { beta: 1e-3 })
+                .expect("permissive substitutes the density ratio"),
+            BuoyancyForm::DensityRatio
+        );
+        ofgpu::io::contract::set_permissive(false);
+        drop(guard);
     }
 
     fn plume_mesh(n: usize, h: Scalar) -> HostMesh {

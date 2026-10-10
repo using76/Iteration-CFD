@@ -182,6 +182,9 @@ impl FluidMaterial {
 pub struct Buoyancy {
     pub g: Vec3,
     pub t_ref: Scalar,
+    /// Which force law the run evaluates - §9's density ratio or §121's
+    /// (121.2) - SPEC-LIT 121.7's lowering, already resolved by the reader.
+    pub form: BuoyancyForm,
 }
 
 impl Buoyancy {
@@ -205,6 +208,14 @@ impl Buoyancy {
                     .to_string(),
             ));
         }
+        if let BuoyancyForm::Boussinesq { beta } = self.form {
+            if !beta.is_finite() || !(beta > 0.0) {
+                return Err(Error::Config(format!(
+                    "buoyancy/beta = {beta} 1/K - the boussinesq form needs a \
+                     finite beta > 0 (SPEC-LIT 121.7)"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -216,7 +227,7 @@ impl Buoyancy {
             // against a corrupted zero, not a physical constant a case has any
             // business overriding.
             t_min: BuoyancyCoeffs::default().t_min,
-            form: BuoyancyForm::DensityRatio,
+            form: self.form,
         }
     }
 }
@@ -835,8 +846,22 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     // `rho = p0/(R_s T)` is not. With a body force nothing changes: `TRef` is
     // the reference and `update_density` runs every outer iteration exactly as
     // it did before §79.
-    let t_ref = case.buoyancy.map_or(case.initial_t, |b| b.t_ref);
-    let variable_density = case.buoyancy.is_some();
+    //
+    // SPEC-LIT 121.7 ("CHT density"): under the Boussinesq form the density
+    // varies only in the body force, so the gas state is pinned at the
+    // INITIAL temperature exactly as §79.6's no-body-force branch holds it -
+    // `TRef` and `beta` reach the body force only. The density-ratio branch
+    // is unchanged in every bit.
+    let boussinesq = case
+        .buoyancy
+        .as_ref()
+        .is_some_and(|b| matches!(b.form, BuoyancyForm::Boussinesq { .. }));
+    let t_ref = case
+        .buoyancy
+        .as_ref()
+        .filter(|b| !matches!(b.form, BuoyancyForm::Boussinesq { .. }))
+        .map_or(case.initial_t, |b| b.t_ref);
+    let variable_density = case.buoyancy.is_some() && !boussinesq;
 
     // ---- the thermal mesh ------------------------------------------------
     let regions: Vec<RegionInput<'_>> = case
@@ -1152,6 +1177,22 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
     energy.initialise(gpu)?;
     gas.update_density(gpu, energy.field())?;
     gas.seed_time_levels();
+
+    // SPEC-LIT 121.7's validity guard, on the field the run starts from -
+    // the fluid region's cells and boundary faces only, a solid's temperature
+    // being no business of a body force.
+    if boussinesq {
+        let coeffs = case.buoyancy.as_ref().expect("checked by boussinesq").coeffs();
+        let t0 = gpu.download(&energy.field().f)?;
+        let bt0 = gpu.download(&energy.field().bf)?;
+        coeffs.check_boussinesq_validity(
+            "buoyancy.beta",
+            t0[..n_fluid]
+                .iter()
+                .copied()
+                .chain(bt0[..n_fluid_bf].iter().copied()),
+        )?;
+    }
 
     // ---- the flow --------------------------------------------------------
     let sctrl = SimpleControls {
@@ -1638,6 +1679,27 @@ pub fn run_flow_case(gpu: &Gpu, case: &FlowCase<'_>) -> Result<ChtFlowSolution> 
 
     // SPEC-LIT §100.12: the power the last energy solve's sources delivered.
     let t_final = gpu.download(&energy.field().f)?;
+    // SPEC-LIT 121.7: the same number on the FINAL field, printed - never
+    // refused, the answer already exists by then.
+    if boussinesq {
+        let coeffs = case.buoyancy.as_ref().expect("checked by boussinesq").coeffs();
+        let d = coeffs
+            .boussinesq_departure(
+                t_final[..n_fluid]
+                    .iter()
+                    .copied()
+                    .chain(bt[..n_fluid_bf].iter().copied()),
+            )
+            .unwrap_or(f64::NAN);
+        println!("boussinesq validity: final beta*max|T - TRef| = {d} (limit 0.1)");
+        if !(d <= crate::momentum::BOUSSINESQ_VALIDITY_LIMIT) {
+            eprintln!(
+                "[ofgpu] WARNING boussinesq validity: the final field is past the \
+                 0.1 limit - the linearisation's own error is no longer small \
+                 (SPEC-LIT 121.7)"
+            );
+        }
+    }
     let source_power = uniform_total
         + crate::cht::volumetric::delivered_power(&curve_su, &curve_sp, &t_final, &tm.host.v);
 

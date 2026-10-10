@@ -723,3 +723,137 @@ fn boussinesq_production_refuses_a_non_finite_beta() {
         );
     }
 }
+
+// ==========================================================================
+//  SPEC-LIT 121.7 - the case input, the lowering table, the validity guard
+//
+//  The integration twins of the library's own lowering and guard tests: the
+//  SAME assertions through the normal (non-test) library, so both builds
+//  pin them. No card needed - everything here is host-side.
+// ==========================================================================
+
+/// The minimal parseable case, with the two SPEC-LIT 121.7 buoyancy settings
+/// as parameters - `case_json::tests::minimal_case_with_buoyancy`'s twin.
+/// Parsed from the string, so no temp file is involved.
+fn minimal_case_with_buoyancy(
+    word: &str,
+    beta: Option<f64>,
+) -> ofgpu::io::case_json::JsonCase {
+    let beta_json = beta.map_or(String::new(), |b| format!(r#", "beta": {b}"#));
+    let text = format!(
+        r#"{{
+            "name": "bousTest",
+            "mesh": {{
+                "kind": "cartesian",
+                "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                "cells": [4, 4, 4],
+                "boundaries": {{
+                    "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                    "ymax": "yb", "zmin": "za", "zmax": "zb"
+                }}
+            }},
+            "physics": {{
+                "gravity": [0, 0, -9.81],
+                "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15{beta_json} }},
+                "buoyancy": "{word}"
+            }},
+            "patches": [ {{ "match": ".*", "kind": "wall" }} ],
+            "initial": {{ "U": [0,0,0], "p": 0.0 }},
+            "numerics": {{
+                "algorithm": {{ "kind": "SIMPLE" }},
+                "ddt": "steadyState",
+                "div": {{ "default": "Gauss upwind" }},
+                "grad": "Gauss linear",
+                "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                "solvers": []
+            }},
+            "run": {{ "endTime": 1.0, "deltaT": 1.0 }}
+        }}"#
+    );
+    ofgpu::io::case_json::read_case_jsonc_str(&text, "fixture")
+        .expect("minimal buoyancy case should parse")
+}
+
+/// The happy row of the lowering table: `boussinesq` with a beta lowers to
+/// `Boussinesq { beta }`, with `g` and `TRef` the case's own.
+#[test]
+fn boussinesq_lowers_with_beta() {
+    let low = minimal_case_with_buoyancy("boussinesq", Some(3.4e-3))
+        .lower()
+        .expect("a boussinesq case with a beta lowers");
+    assert_eq!(
+        low.buoyancy.form,
+        BuoyancyForm::Boussinesq { beta: 3.4e-3 as Scalar }
+    );
+    assert_eq!(low.buoyancy.g, Vec3::new(0.0, 0.0, -9.81));
+    assert_eq!(low.buoyancy.t_ref, 293.15);
+}
+
+/// The `boussinesq` row without a beta is refused, naming the beta key.
+#[test]
+fn boussinesq_without_beta_is_refused_by_name() {
+    let e = minimal_case_with_buoyancy("boussinesq", None)
+        .lower()
+        .err()
+        .expect("boussinesq without beta is refused");
+    let m = format!("{e}");
+    assert!(m.contains("physics.fluid.beta"), "{m}");
+    assert!(m.contains("boussinesq"), "{m}");
+}
+
+/// The `densityRatio` row with a beta is refused - nothing reads it.
+#[test]
+fn beta_under_density_ratio_is_refused() {
+    let e = minimal_case_with_buoyancy("densityRatio", Some(3.4e-3))
+        .lower()
+        .err()
+        .expect("beta under the density ratio is refused");
+    let m = format!("{e}");
+    assert!(m.contains("physics.fluid.beta"), "{m}");
+    assert!(m.contains("densityRatio"), "{m}");
+}
+
+/// The validity guard's twin: `delta_B` of 0.099 passes, 0.101 is refused
+/// from either side of `T_ref`, a NaN temperature is refused, the density
+/// ratio is never refused, and `-permissive` passes. (The library twin also
+/// checks `warned`; a process-wide flag is not an integration test's
+/// business, so this twin stops at the `Ok`.)
+#[test]
+fn boussinesq_validity_guard_fires_above_0_1() {
+    let setting = "constant/physicalProperties: beta";
+    let b = BuoyancyCoeffs {
+        g: Vec3::new(0.0, 0.0, -9.81),
+        t_ref: 300.0,
+        t_min: 1.0,
+        form: BuoyancyForm::Boussinesq { beta: 1e-3 },
+    };
+
+    assert!(b.check_boussinesq_validity(setting, [300.0, 399.0]).is_ok());
+    let d = b
+        .boussinesq_departure([300.0, 399.0])
+        .expect("boussinesq has a departure");
+    assert!(d > 0.0989 && d < 0.0991, "the departure is {d}, (121.8) says 0.099");
+
+    let e = b
+        .check_boussinesq_validity(setting, [300.0, 401.0])
+        .err()
+        .expect("0.101 is past the limit");
+    let m = format!("{e}");
+    assert!(m.contains(setting), "{m}");
+    assert!(m.contains("0.1"), "{m}");
+    assert!(m.contains("beta"), "{m}");
+
+    assert!(b.check_boussinesq_validity(setting, [199.0, 300.0]).is_err());
+    assert!(b.check_boussinesq_validity(setting, [300.0, Scalar::NAN]).is_err());
+    assert!(b.boussinesq_departure([300.0, Scalar::NAN]).unwrap().is_nan());
+
+    let r = BuoyancyCoeffs { form: BuoyancyForm::DensityRatio, ..b };
+    assert!(r.check_boussinesq_validity(setting, [1000.0]).is_ok());
+    assert!(r.boussinesq_departure([1000.0]).is_none());
+
+    let guard = ofgpu::io::contract::permissive_test_guard();
+    ofgpu::io::contract::set_permissive(true);
+    assert!(b.check_boussinesq_validity(setting, [300.0, 401.0]).is_ok());
+    ofgpu::io::contract::set_permissive(false);
+    drop(guard);
+}

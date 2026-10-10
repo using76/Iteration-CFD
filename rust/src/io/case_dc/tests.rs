@@ -11,6 +11,7 @@
 // No GPL-licensed source was consulted.
 
 use super::*;
+use crate::momentum::BuoyancyForm;
 
 /// The smallest complete case this format accepts, as a template. Every pair
 /// test below is this document with one entry replaced.
@@ -79,6 +80,50 @@ fn variant(from: &str, to: &str) -> DcCase {
 fn rel(a: Scalar, b: Scalar) -> Scalar {
     let s = a.abs().max(b.abs()).max(1e-300);
     (a - b).abs() / s
+}
+
+/// SPEC-LIT 121.7's table through `air.buoyancy`/`air.beta`: the boussinesq
+/// row lowers to the form, and the two bad rows are refused naming the beta
+/// key. The same three rows the JSONC and `*.cht.jsonc` tests run, because
+/// the ONE lowering rule is the point.
+#[test]
+fn the_dc_air_block_lowers_the_boussinesq_form() {
+    // (a) model boussinesq + beta: the form comes out of the air block.
+    let a = variant(
+        "\"gravity\": [0,0,-9.81] }",
+        "\"gravity\": [0,0,-9.81], \"buoyancy\": \"boussinesq\", \
+         \"beta\": 3.4e-3 }",
+    )
+    .lower()
+    .expect("a boussinesq air block with a beta lowers");
+    assert_eq!(
+        a.air.buoyancy_form().expect("checked at lowering"),
+        BuoyancyForm::Boussinesq { beta: 3.4e-3 as Scalar }
+    );
+
+    // (b) boussinesq without beta: refused, naming the beta key.
+    let err = variant(
+        "\"gravity\": [0,0,-9.81] }",
+        "\"gravity\": [0,0,-9.81], \"buoyancy\": \"boussinesq\" }",
+    )
+    .lower()
+    .err()
+    .expect("boussinesq without beta is refused")
+    .to_string();
+    assert!(err.contains("air.beta"), "{err}");
+
+    // (c) beta under the density ratio: refused - nothing reads it.
+    let err = variant(
+        "\"gravity\": [0,0,-9.81] }",
+        "\"gravity\": [0,0,-9.81], \"buoyancy\": \"densityRatio\", \
+         \"beta\": 3.4e-3 }",
+    )
+    .lower()
+    .err()
+    .expect("beta under the density ratio is refused")
+    .to_string();
+    assert!(err.contains("air.beta"), "{err}");
+    assert!(err.contains("densityRatio"), "{err}");
 }
 
 #[test]

@@ -136,6 +136,7 @@ use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
 use ofgpu::io::schemes::DivEntry;
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::models::{KEpsilon, KEpsilonCoeffs};
+use ofgpu::momentum::BuoyancyForm;
 use ofgpu::turbulence::{BuoyancyProduction, C3Mode};
 use ofgpu::potential_flow::{
     mean_inflow_speed, solve_potential_flow, PotentialFlowResult, PotentialFlowSpec,
@@ -1364,10 +1365,20 @@ fn run(o: &Options) -> Result<()> {
                 v if v.is_nan() => C3Mode::Henkes,
                 v => C3Mode::Constant(v),
             },
+            // SPEC-LIT 121.6: the case's own form, so a boussinesq case is
+            // not silently given §17's density-ratio production.
+            form: cc.buoyancy.form,
             ..BuoyancyProduction::default()
         })?;
         println!(
-            "turbulence buoyancy: G_b = (nut/Prt) g.grad(T)/T, Prt {}, {}",
+            "turbulence buoyancy: {}, Prt {}, {}",
+            match cc.buoyancy.form {
+                BuoyancyForm::DensityRatio => "G_b = (nut/Prt) g.grad(T)/T".to_string(),
+                BuoyancyForm::Boussinesq { beta } => format!(
+                    "G_b = beta (nut/Prt) g.grad(T), beta = {} 1/K",
+                    g(f64::from(beta))
+                ),
+            },
             g(f64::from(t_coeffs.prt)),
             model
                 .buoyancy()

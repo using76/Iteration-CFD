@@ -1531,6 +1531,65 @@ fn buoyancy_is_required_by_a_closed_cavity_and_optional_once_there_is_an_inlet()
     assert!(err.contains("inlet"), "the refusal names the alternative: {err}");
 }
 
+/// SPEC-LIT 121.7's table through `buoyancy.model`/`buoyancy.beta`: the
+/// boussinesq row lowers to the form, and the two bad rows are refused
+/// naming the beta key.
+#[test]
+fn the_cht_buoyancy_block_lowers_the_boussinesq_form() {
+    // (a) model boussinesq + beta: the form reaches the lowered flow case.
+    let low = read(&duct_case(
+        "inlet",
+        DUCT_U,
+        DUCT_TIN,
+        "outlet",
+        DUCT_TOUT,
+        "\n  \"buoyancy\": { \"g\": [0.0, -9.81, 0.0], \"TRef\": 300.0, \
+         \"model\": \"boussinesq\", \"beta\": 3.4e-3 },",
+    ))
+    .expect("parse")
+    .lower()
+    .expect("a boussinesq block with a beta lowers");
+    let flow = low.flow_case().expect("a fluid case lowers to a FlowCase");
+    let b = flow.buoyancy.expect("the case carries a buoyancy block");
+    assert_eq!(b.form, BuoyancyForm::Boussinesq { beta: 3.4e-3 as Scalar });
+    assert_eq!(b.t_ref, 300.0);
+
+    // (b) boussinesq without beta: refused, naming the beta key.
+    let err = read(&duct_case(
+        "inlet",
+        DUCT_U,
+        DUCT_TIN,
+        "outlet",
+        DUCT_TOUT,
+        "\n  \"buoyancy\": { \"g\": [0.0, -9.81, 0.0], \"TRef\": 300.0, \
+         \"model\": \"boussinesq\" },",
+    ))
+    .expect("parse")
+    .lower()
+    .err()
+    .expect("boussinesq without beta is refused")
+    .to_string();
+    assert!(err.contains("buoyancy.beta"), "{err}");
+
+    // (c) beta under the density ratio: refused - nothing reads it.
+    let err = read(&duct_case(
+        "inlet",
+        DUCT_U,
+        DUCT_TIN,
+        "outlet",
+        DUCT_TOUT,
+        "\n  \"buoyancy\": { \"g\": [0.0, -9.81, 0.0], \"TRef\": 300.0, \
+         \"model\": \"densityRatio\", \"beta\": 3.4e-3 },",
+    ))
+    .expect("parse")
+    .lower()
+    .err()
+    .expect("beta under the density ratio is refused")
+    .to_string();
+    assert!(err.contains("buoyancy.beta"), "{err}");
+    assert!(err.contains("densityRatio"), "{err}");
+}
+
 /// SPEC-LIT §79.11 pair 1. The inlet velocity is this case's whole forcing.
 #[test]
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]

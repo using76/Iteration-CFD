@@ -426,6 +426,12 @@ pub struct JsonFluid {
     pub rheology: Option<JsonRheology>,
     #[serde(rename = "TRef")]
     pub t_ref: f64,
+    /// Thermal expansion coefficient [1/K] - read only under
+    /// `physics.buoyancy "boussinesq"`, SPEC-LIT 121.7. There is no default:
+    /// `1/T_ref` is the ideal-gas value, a liquid's is an order of magnitude
+    /// smaller, and the reader is not entitled to pick one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beta: Option<f64>,
 }
 
 /// `physics.fluid.rheology` - SPEC-LIT §38.
@@ -555,16 +561,28 @@ impl JsonRheology {
     }
 }
 
-/// `b = g·(TRef/T - 1)` (density-ratio, `SPEC-LIT` §9) is the only model this
-/// solver implements - see [`crate::momentum::BuoyancyCoeffs`]. `boussinesq`
-/// is accepted here, so the schema documents that OpenFOAM cases spell it
-/// that way too, and [`JsonCase::lower`] rejects it under the §13.4 contract
-/// rather than silently linearising a hot plume's `ΔT/T ≈ 3`.
+/// The two body-force forms a case can name - SPEC-LIT §9's density ratio
+/// and §121's Boussinesq, lowered through
+/// [`crate::momentum::BuoyancyForm::lower`]. `boussinesq` runs when the case
+/// carries a `beta` for it (§121.7); see [`Self::name`] for the spelling the
+/// lowering contract hands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum BuoyancyModel {
     DensityRatio,
     Boussinesq,
+}
+
+impl BuoyancyModel {
+    /// The serde spelling, as the case wrote it. Every lowering route hands
+    /// this to [`crate::momentum::BuoyancyForm::lower`], so the four case
+    /// formats share one §13.4 contract instead of four.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DensityRatio => "densityRatio",
+            Self::Boussinesq => "boussinesq",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2282,24 +2300,19 @@ impl JsonCase {
             Some(r) => r.lower()?,
             None => crate::rheology::RheologyCoeffs::default(),
         };
-        let buoyancy = match self.physics.buoyancy {
-            BuoyancyModel::DensityRatio => BuoyancyCoeffs {
-                g: to_vec3(self.physics.gravity),
-                t_ref: self.physics.fluid.t_ref as Scalar,
-                t_min: BuoyancyCoeffs::default().t_min,
-                form: BuoyancyForm::DensityRatio,
-            },
-            BuoyancyModel::Boussinesq => unsupported(
+        // SPEC-LIT 121.7: both forms lower through the ONE table in
+        // `BuoyancyForm::lower`, which owns every refusal (a beta under the
+        // density ratio, a boussinesq without one, a beta it cannot run) so
+        // this format and the dictionary route cannot drift apart.
+        let buoyancy = BuoyancyCoeffs {
+            g: to_vec3(self.physics.gravity),
+            t_ref: self.physics.fluid.t_ref as Scalar,
+            t_min: BuoyancyCoeffs::default().t_min,
+            form: BuoyancyForm::lower(
                 "physics.buoyancy",
-                "boussinesq",
-                &["densityRatio"],
-                "densityRatio",
-                BuoyancyCoeffs {
-                    g: to_vec3(self.physics.gravity),
-                    t_ref: self.physics.fluid.t_ref as Scalar,
-                    t_min: BuoyancyCoeffs::default().t_min,
-                    form: BuoyancyForm::DensityRatio,
-                },
+                self.physics.buoyancy.name(),
+                "physics.fluid.beta",
+                self.physics.fluid.beta,
             )?,
         };
 
@@ -2863,6 +2876,88 @@ mod tests {
         let case = read_case_jsonc(&path).expect("minimal grading test case should parse");
         let _ = std::fs::remove_file(&path);
         case
+    }
+
+    /// [`minimal_case_with_mesh`]'s text with the two SPEC-LIT 121.7 buoyancy
+    /// settings as parameters - the lowering table's fixture. `g` is earth
+    /// gravity, non-zero, so the tests can assert the force coefficients
+    /// reach the lowered case; parsed from the string through
+    /// [`read_case_jsonc_str`], so no temp file is involved.
+    fn minimal_case_with_buoyancy(word: &str, beta: Option<f64>) -> JsonCase {
+        let beta_json = beta.map_or(String::new(), |b| format!(r#", "beta": {b}"#));
+        let text = format!(
+            r#"{{
+                "name": "bousTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                    "cells": [4, 4, 4],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0, 0, -9.81],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15{beta_json} }},
+                    "buoyancy": "{word}"
+                }},
+                "patches": [ {{ "match": ".*", "kind": "wall" }} ],
+                "initial": {{ "U": [0,0,0], "p": 0.0 }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }}
+            }}"#
+        );
+        read_case_jsonc_str(&text, "fixture").expect("minimal buoyancy case should parse")
+    }
+
+    /// SPEC-LIT 121.7, the happy row: `physics.buoyancy "boussinesq"` with
+    /// `physics.fluid.beta` lowers to `Boussinesq { beta }`, with `g` and
+    /// `TRef` the case's own.
+    #[test]
+    fn boussinesq_lowers_with_beta() {
+        let low = minimal_case_with_buoyancy("boussinesq", Some(3.4e-3))
+            .lower()
+            .expect("a boussinesq case with a beta lowers");
+        assert_eq!(
+            low.buoyancy.form,
+            BuoyancyForm::Boussinesq { beta: 3.4e-3 as Scalar }
+        );
+        assert_eq!(low.buoyancy.g, crate::Vec3::new(0.0, 0.0, -9.81));
+        assert_eq!(low.buoyancy.t_ref, 293.15);
+    }
+
+    /// The `boussinesq` row without a beta: refused, naming the beta key.
+    /// There is no default - SPEC-LIT 121.7 says why.
+    #[test]
+    fn boussinesq_without_beta_is_refused_by_name() {
+        let e = minimal_case_with_buoyancy("boussinesq", None)
+            .lower()
+            .err()
+            .expect("boussinesq without beta is refused");
+        let m = format!("{e}");
+        assert!(m.contains("physics.fluid.beta"), "{m}");
+        assert!(m.contains("boussinesq"), "{m}");
+    }
+
+    /// The `densityRatio` row with a beta: refused - nothing reads it
+    /// (SPEC-LIT 13.4.1), and the error names the form that would.
+    #[test]
+    fn beta_under_density_ratio_is_refused() {
+        let e = minimal_case_with_buoyancy("densityRatio", Some(3.4e-3))
+            .lower()
+            .err()
+            .expect("beta under the density ratio is refused");
+        let m = format!("{e}");
+        assert!(m.contains("physics.fluid.beta"), "{m}");
+        assert!(m.contains("densityRatio"), "{m}");
     }
 
     /// The bit-identity requirement Task G.1 names explicitly: a case with NO

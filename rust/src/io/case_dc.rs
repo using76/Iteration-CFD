@@ -45,7 +45,7 @@ use crate::fan::{
     CurveKind, FanCurve, FanDirection, FanPatch, PorousJump, PorousJumpCoeffs,
 };
 use crate::io::case::{LinearSolverKind, Preconditioner, SolverControls};
-use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis};
+use crate::io::case_json::{BuoyancyModel, JsonBounds, JsonGrading, JsonGradingAxis};
 use crate::mesh::HostMesh;
 use crate::psychro;
 use crate::{Label, Scalar, Vec3};
@@ -143,6 +143,15 @@ pub struct DcAir {
     pub t_ref: f64,
     /// Gravity, m/s^2.
     pub gravity: [f64; 3],
+    /// SPEC-LIT 121.7: `"densityRatio"` - the default when absent - or
+    /// `"boussinesq"`, lowered through
+    /// [`crate::momentum::BuoyancyForm::lower`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buoyancy: Option<BuoyancyModel>,
+    /// Thermal expansion coefficient [1/K] - read only under
+    /// `"buoyancy": "boussinesq"`, SPEC-LIT 121.7. There is no default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beta: Option<f64>,
 }
 
 impl Default for DcAir {
@@ -155,6 +164,8 @@ impl Default for DcAir {
             prt: 0.85,
             t_ref: 295.15,
             gravity: [0.0, 0.0, -9.81],
+            buoyancy: None,
+            beta: None,
         }
     }
 }
@@ -1069,7 +1080,25 @@ impl DcAir {
                 )));
             }
         }
+        // SPEC-LIT 121.7's two buoyancy settings, through the ONE lowering
+        // table - a beta under the density ratio, or a boussinesq without
+        // one, is refused here at lowering, not at the first iteration.
+        self.buoyancy_form()?;
         Ok(())
+    }
+
+    /// The air block's buoyancy form, SPEC-LIT 121.7's lowering. `datacentre`
+    /// builds its `BuoyancyCoeffs` from this, so the room run and the reader's
+    /// refusal cannot disagree about which force law was asked for.
+    pub fn buoyancy_form(&self) -> Result<crate::momentum::BuoyancyForm> {
+        crate::momentum::BuoyancyForm::lower(
+            "air.buoyancy",
+            self.buoyancy
+                .map(BuoyancyModel::name)
+                .unwrap_or("densityRatio"),
+            "air.beta",
+            self.beta,
+        )
     }
 }
 

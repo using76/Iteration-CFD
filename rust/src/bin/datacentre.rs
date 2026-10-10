@@ -483,6 +483,9 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
             lc.air.gravity[2] as Scalar,
         ),
         t_ref: lc.air.t_ref as Scalar,
+        // SPEC-LIT 121.7: the form the case's air block named, already
+        // lowered (and refused there if it contradicted itself).
+        form: lc.air.buoyancy_form()?,
         ..BuoyancyCoeffs::default()
     };
 
@@ -763,6 +766,18 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
     let mut probe_out: Option<ProbeSummary> = None;
 
     // ---- the outer loop ----------------------------------------------------
+    // SPEC-LIT 121.7's validity guard, on the field the run starts from -
+    // after the initial values and the boundary conditions, before the first
+    // iteration. The force may read the virtual temperature under humidity,
+    // but the guard reads `T` (SPEC-LIT 121.7).
+    if buoy.is_boussinesq() {
+        let temps = gpu.download(&heat.field().f)?;
+        let btemps = gpu.download(&heat.field().bf)?;
+        buoy.check_boussinesq_validity(
+            "air.beta",
+            temps.iter().copied().chain(btemps.iter().copied()),
+        )?;
+    }
     for it in 0..lc.run.iterations {
         // §54.4: the buoyancy field. With humidity ON it is the virtual
         // temperature; with humidity off it is `T` itself, and
@@ -1043,6 +1058,23 @@ fn solve(gpu: &Gpu, lc: &LoweredDcCase) -> Result<RoomSolution> {
             gr_over_re2: gr,
             regime: gr.map_or("notApplicable", regime_word),
         });
+    }
+
+    // SPEC-LIT 121.7: the same number on the FINAL field, printed - never
+    // refused, the answer already exists by then.
+    if buoy.is_boussinesq() {
+        let bt = gpu.download(&heat.field().bf)?;
+        let d = buoy
+            .boussinesq_departure(t_host.iter().copied().chain(bt.iter().copied()))
+            .unwrap_or(f64::NAN);
+        println!("boussinesq validity: final beta*max|T - TRef| = {d} (limit 0.1)");
+        if !(d <= ofgpu::momentum::BOUSSINESQ_VALIDITY_LIMIT) {
+            eprintln!(
+                "[ofgpu] WARNING boussinesq validity: the final field is past the \
+                 0.1 limit - the linearisation's own error is no longer small \
+                 (SPEC-LIT 121.7)"
+            );
+        }
     }
 
     Ok(RoomSolution {
@@ -2456,6 +2488,50 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["schema"], "ofgpu-datacentre/1");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// SPEC-LIT 121.7: the form the air block names reaches the room run.
+    /// The shipped cold-aisle case under both forms, 20 iterations each: the
+    /// rack inlets come out finite and NOT bit-identical, and neither run is
+    /// refused - the case's `beta·max|T - TRef|` is a few hundredths, inside
+    /// the 0.1 limit.
+    #[test]
+    fn the_buoyancy_form_reaches_the_room_run() {
+        let Some(gpu) = Gpu::new(0).ok() else { return };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cases/coldAisle.dc.jsonc");
+        let case = DcCase::read(&path).expect("the shipped cold-aisle case parses");
+
+        let density_ratio = case.lower().expect("the case as written lowers");
+        let mut bous_case = case.clone();
+        bous_case.air.buoyancy = Some(ofgpu::io::case_json::BuoyancyModel::Boussinesq);
+        // The ideal-gas value at the case's own reference temperature - the
+        // number a case is expected to write, never a reader's default.
+        bous_case.air.beta = Some(1.0 / case.air.t_ref);
+        let boussinesq = bous_case.lower().expect("the boussinesq twin lowers");
+
+        let mut density_ratio = density_ratio;
+        density_ratio.run.iterations = 20;
+        let mut boussinesq = boussinesq;
+        boussinesq.run.iterations = 20;
+
+        let a = solve(&gpu, &density_ratio).expect("the density-ratio run");
+        let b = solve(&gpu, &boussinesq).expect("the boussinesq run");
+
+        assert!(!a.rack_inlets.is_empty(), "the case has racks");
+        for ((_, x), (_, y)) in a.rack_inlets.iter().zip(&b.rack_inlets) {
+            assert!(x.is_finite() && y.is_finite(), "rack inlets must be finite");
+        }
+        let all_same = a
+            .rack_inlets
+            .iter()
+            .zip(&b.rack_inlets)
+            .all(|((_, x), (_, y))| x.to_bits() == y.to_bits());
+        assert!(
+            !all_same,
+            "the two forms' rack inlets are bit-identical: the buoyancy form \
+             did not reach the room run (SPEC-LIT 121.7)"
+        );
     }
 
     /// The test that GENERATES the shipped schema: written once here, then

@@ -153,6 +153,19 @@ pub(crate) fn de_vahl_davis(
     iterations: usize,
     residual: Scalar,
 ) -> Result<(Scalar, Scalar, usize, bool)> {
+    de_vahl_davis_with_form(gpu, ra, n, iterations, residual, BuoyancyForm::DensityRatio)
+}
+
+/// [`de_vahl_davis`] with the buoyancy form as a parameter - SPEC-LIT 121.7's
+/// cavity pair test runs the SAME case under both forms.
+pub(crate) fn de_vahl_davis_with_form(
+    gpu: &Gpu,
+    ra: Scalar,
+    n: usize,
+    iterations: usize,
+    residual: Scalar,
+    form: BuoyancyForm,
+) -> Result<(Scalar, Scalar, usize, bool)> {
     let dz: Scalar = 1.0 / n as Scalar;
     let m = cavity_block(n, 0.0, 1.0, dz);
     let f = air(1.0);
@@ -178,6 +191,7 @@ pub(crate) fn de_vahl_davis(
         buoyancy: Some(Buoyancy {
             g: Vec3::new(0.0, -g_for_ra(ra, &f), 0.0),
             t_ref: T_REF,
+            form,
         }),
         openings: None,
         initial_t: T_REF,
@@ -236,6 +250,51 @@ fn gate_59a_de_vahl_davis_square_cavity() -> Result<()> {
             100.0 * tol
         );
     }
+    Ok(())
+}
+
+/// SPEC-LIT 121.7's cavity pair: the SAME de Vahl Davis case at
+/// `Ra = 1e3` run under BOTH forms, `beta = 1/T_ref` so the Boussinesq force
+/// is §9's first-order expansion. `Delta T = 0.1 K` puts
+/// `beta·max|T - T_ref| = 5e-4` well inside the 0.1 validity limit, so the
+/// two runs' cold-wall Nusselt numbers must DIFFER - a bit-identical pair
+/// would mean the form never reached the force - and agree to `1e-3`
+/// relative, the `O(beta·DeltaT)` the two forms differ by.
+#[test]
+fn a_boussinesq_cavity_differs_from_and_agrees_with_the_density_ratio_one() -> Result<()> {
+    let Some(gpu) = gpu() else { return Ok(()) };
+
+    let ratio = de_vahl_davis_with_form(
+        &gpu,
+        1.0e3,
+        10,
+        400,
+        1e-7,
+        BuoyancyForm::DensityRatio,
+    )?;
+    let bous = de_vahl_davis_with_form(
+        &gpu,
+        1.0e3,
+        10,
+        400,
+        1e-7,
+        BuoyancyForm::Boussinesq { beta: 1.0 / T_REF },
+    )?;
+
+    assert_ne!(
+        ratio.0.to_bits(),
+        bous.0.to_bits(),
+        "the two forms' cold-wall Nu are bit-identical: the form did not reach \
+         the body force (SPEC-LIT 121.7)"
+    );
+    let rel = (ratio.0 - bous.0).abs() / ratio.0.abs().max(1e-30);
+    assert!(
+        rel < 1e-3,
+        "Nu_cold: density ratio {} against boussinesq {} differs by {rel:.3e}, \
+         the O(beta·DeltaT) agreement SPEC-LIT 121.7 asks for is 1e-3",
+        ratio.0,
+        bous.0
+    );
     Ok(())
 }
 
@@ -321,6 +380,7 @@ pub(crate) fn kaminski_prakash(
         buoyancy: Some(Buoyancy {
             g: Vec3::new(0.0, -g_for_ra(ra, &f), 0.0),
             t_ref: T_REF,
+            form: BuoyancyForm::DensityRatio,
         }),
         openings: None,
         initial_t: T_REF,
@@ -538,6 +598,7 @@ pub(crate) fn kaminski_prakash_variant(
             // (SPEC-LIT 115.2).
             g: Vec3::new(0.0, -(v.ra * f.nu() * f.alpha() * T_REF / v.d_t), 0.0),
             t_ref: T_REF,
+            form: BuoyancyForm::DensityRatio,
         }),
         openings: None,
         initial_t: T_REF,
@@ -1372,7 +1433,11 @@ fn open_cavity_case<'a>(
             (0, "bottom".to_string(), LoweredBc::ZeroGradient),
             (0, "top".to_string(), LoweredBc::ZeroGradient),
         ],
-        buoyancy: Some(Buoyancy { g: Vec3::new(0.0, -2.13e7, 0.0), t_ref: T_REF }),
+        buoyancy: Some(Buoyancy {
+            g: Vec3::new(0.0, -2.13e7, 0.0),
+            t_ref: T_REF,
+            form: BuoyancyForm::DensityRatio,
+        }),
         openings,
         initial_t: T_REF,
         flow: flow_controls(120, 0.0, 0.7, 0.3),

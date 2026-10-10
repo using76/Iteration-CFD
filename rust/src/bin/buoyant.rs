@@ -1931,14 +1931,26 @@ fn run(o: &Options) -> Result<()> {
 
     // The line that decides whether the plume rises or sinks, printed with the
     // one number that settles it rather than left for a picture to reveal.
+    // SPEC-LIT 121.7: the line names the form the case ASKED for - the
+    // density ratio as always before, the linearised form when it says so.
     let hot = buoy.at(1173.15);
-    println!(
-        "buoyancy: g = ({}, {}, {}) m/s2, TRef = {} K -> b = g*(TRef/T - 1), NOT Boussinesq",
-        g(f64::from(buoy.g.x)),
-        g(f64::from(buoy.g.y)),
-        g(f64::from(buoy.g.z)),
-        g(f64::from(buoy.t_ref))
-    );
+    match buoy.form {
+        BuoyancyForm::DensityRatio => println!(
+            "buoyancy: g = ({}, {}, {}) m/s2, TRef = {} K -> b = g*(TRef/T - 1), NOT Boussinesq",
+            g(f64::from(buoy.g.x)),
+            g(f64::from(buoy.g.y)),
+            g(f64::from(buoy.g.z)),
+            g(f64::from(buoy.t_ref))
+        ),
+        BuoyancyForm::Boussinesq { beta } => println!(
+            "buoyancy: g = ({}, {}, {}) m/s2, TRef = {} K -> b = -beta (T - TRef) g, beta = {} 1/K",
+            g(f64::from(buoy.g.x)),
+            g(f64::from(buoy.g.y)),
+            g(f64::from(buoy.g.z)),
+            g(f64::from(buoy.t_ref)),
+            g(f64::from(beta))
+        ),
+    }
     println!(
         "  at 1173.15 K: b = ({}, {}, {}) m/s2   |   at TRef: b = 0 exactly",
         g(f64::from(hot.x)),
@@ -2311,6 +2323,20 @@ fn run(o: &Options) -> Result<()> {
         gpu.write(&mut heat.field_mut().bf, &from_restart_scalars(&t_field.boundary))?;
     }
 
+    // SPEC-LIT 121.7's validity guard, on the field the run starts from -
+    // after the initial values, the boundary conditions and any restart,
+    // before the first iteration. A hot plume's `beta*max|T - TRef|` is about
+    // 3, which is why this driver runs the density ratio by default and
+    // refuses a boussinesq case that strays past the limit.
+    if buoy.is_boussinesq() {
+        let temps = gpu.download(&heat.field().f)?;
+        let btemps = gpu.download(&heat.field().bf)?;
+        buoy.check_boussinesq_validity(
+            "constant/physicalProperties: beta",
+            temps.iter().copied().chain(btemps.iter().copied()),
+        )?;
+    }
+
     // ---- volumetric sources (SPEC-LIT 18) ---------------------------------
     //
     // A heat source is a HEAT RELEASE, not only a hot inlet. Until
@@ -2541,6 +2567,26 @@ fn run(o: &Options) -> Result<()> {
         g(f64::from(stats.max)),
         g(f64::from(stats.mean))
     );
+
+    // SPEC-LIT 121.7: the same number on the FINAL field, printed - never
+    // refused, the answer already exists by then.
+    if buoy.is_boussinesq() {
+        let btemps = gpu.download(&heat.field().bf)?;
+        let d = buoy
+            .boussinesq_departure(temps.iter().copied().chain(btemps.iter().copied()))
+            .unwrap_or(f64::NAN);
+        println!(
+            "boussinesq validity: final beta*max|T - TRef| = {} (limit 0.1)",
+            g(d)
+        );
+        if !(d <= ofgpu::momentum::BOUSSINESQ_VALIDITY_LIMIT) {
+            eprintln!(
+                "[ofgpu] WARNING boussinesq validity: the final field is past the \
+                 0.1 limit - the linearisation's own error is no longer small \
+                 (SPEC-LIT 121.7)"
+            );
+        }
+    }
 
     // The physics check, printed whether or not `-probe` was asked for: a run
     // that produced no stratification has produced no plume, and that is worth
@@ -3059,6 +3105,16 @@ mod buoyant_tests {
                 to: "nu              [0 2 -1 0 0 0 0] 1.5e-04;",
                 pre: NO_PRE,
             },
+            // SPEC-LIT 121.7. `beta = 1e-4` against the plume's 1173 - 293 K
+            // span is `delta_B = 0.088`, JUST inside the 0.1 limit - so the
+            // knob changes what the run writes and the guard lets it run.
+            Knob {
+                label: "constant/physicalProperties buoyancy boussinesq",
+                file: "constant/physicalProperties",
+                from: "TRef            293.15;",
+                to: "TRef            293.15;\nbuoyancy        boussinesq;\nbeta            1e-4;",
+                pre: NO_PRE,
+            },
         ];
 
         let mut inert: Vec<&str> = Vec::new();
@@ -3112,6 +3168,39 @@ mod buoyant_tests {
         // The same case under RNGkEpsilon is not refused - which is what makes
         // the refusal about §40 and not about buoyancy in general.
         assert!(ofgpu::models::rng_ke_coeffs(&cc).is_ok());
+    }
+
+    /// SPEC-LIT 121.7's validity guard on THIS driver: the plume case at
+    /// `beta = 1/T_ref` (`delta_B = 880 K / 293.15 K`, about 3)
+    /// is refused BEFORE its first iteration, naming the beta key and the
+    /// limit.
+    #[test]
+    fn a_boussinesq_case_past_the_validity_limit_is_refused() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let dir = scratch_dir("bousRefused");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 4, 4, 4).expect("generate the plume case");
+        apply(
+            &case,
+            &Knob {
+                label: "constant/physicalProperties buoyancy boussinesq past the limit",
+                file: "constant/physicalProperties",
+                from: "TRef            293.15;",
+                to: "TRef            293.15;\nbuoyancy        boussinesq;\nbeta            3.4112e-3;",
+                pre: NO_PRE,
+            },
+            true,
+        );
+
+        let args = argv(&[case.to_string_lossy().as_ref(), "-iters", "2", "-check", "100"]);
+        let o = parse(&args).expect("the command line must parse");
+        let e = run(&o)
+            .expect_err("beta*max|T - TRef| is about 3, past the 0.1 limit");
+        let m = format!("{e}");
+        assert!(m.contains("beta"), "the refusal names the beta key: {m}");
+        assert!(m.contains("0.1"), "the refusal names the limit: {m}");
     }
 
     /// Rule (a) of 13.4.1 on the controls: `gradSchemes/grad(T)` reaches the

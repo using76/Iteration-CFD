@@ -75,10 +75,11 @@ use crate::fv::DivScheme;
 use crate::error::{Error, Result};
 use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner, SolverControls};
-use crate::io::case_json::{JsonBounds, JsonGrading, JsonGradingAxis, JsonOutput};
+use crate::io::case_json::{BuoyancyModel, JsonBounds, JsonGrading, JsonGradingAxis, JsonOutput};
 use crate::io::output_plan::{OutputFormat, OutputPlan};
 use crate::io::polymesh::{build_host_mesh, read_poly_mesh, PolyMeshRaw};
 use crate::mesh::{HostMesh, PatchKind};
+use crate::momentum::BuoyancyForm;
 use crate::properties::{Piece, Property};
 use crate::cht::volumetric::{LoweredSource, SourceLaw, TimeTable};
 use crate::sources::CellSelector;
@@ -141,6 +142,15 @@ pub struct ChtBuoyancy {
     /// The reference temperature of `b = g(TRef/T - 1)`, K.
     #[serde(rename = "TRef")]
     pub t_ref: f64,
+    /// SPEC-LIT 121.7: `"densityRatio"` - the default when absent - or
+    /// `"boussinesq"`, lowered through
+    /// [`crate::momentum::BuoyancyForm::lower`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<BuoyancyModel>,
+    /// Thermal expansion coefficient [1/K] - read only under
+    /// `"model": "boussinesq"`, SPEC-LIT 121.7. There is no default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beta: Option<f64>,
 }
 
 /// One region: a block of cells, one material, its own boundary conditions.
@@ -2209,6 +2219,15 @@ impl ChtCase {
                 let b = Buoyancy {
                     g: crate::Vec3::new(b.g[0] as Scalar, b.g[1] as Scalar, b.g[2] as Scalar),
                     t_ref: b.t_ref as Scalar,
+                    // SPEC-LIT 121.7: the same lowering table every other
+                    // format goes through; an absent model is the density
+                    // ratio, as every case written before it was.
+                    form: BuoyancyForm::lower(
+                        "buoyancy.model",
+                        b.model.map(BuoyancyModel::name).unwrap_or("densityRatio"),
+                        "buoyancy.beta",
+                        b.beta,
+                    )?,
                 };
                 b.validate()?;
                 Some(b)

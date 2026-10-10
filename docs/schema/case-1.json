@@ -94,7 +94,7 @@
       ]
     },
     "BuoyancyModel": {
-      "description": "`b = g·(TRef/T - 1)` (density-ratio, `SPEC-LIT` §9) is the only model this\nsolver implements - see [`crate::momentum::BuoyancyCoeffs`]. `boussinesq`\nis accepted here, so the schema documents that OpenFOAM cases spell it\nthat way too, and [`JsonCase::lower`] rejects it under the §13.4 contract\nrather than silently linearising a hot plume's `ΔT/T ≈ 3`.",
+      "description": "The two body-force forms a case can name - SPEC-LIT §9's density ratio\nand §121's Boussinesq, lowered through\n[`crate::momentum::BuoyancyForm::lower`]. `boussinesq` runs when the case\ncarries a `beta` for it (§121.7); see [`Self::name`] for the spelling the\nlowering contract hands on.",
       "type": "string",
       "enum": [
         "densityRatio",
@@ -316,6 +316,14 @@
         },
         "TRef": {
           "type": "number",
+          "format": "double"
+        },
+        "beta": {
+          "description": "Thermal expansion coefficient [1/K] - read only under\n`physics.buoyancy \"boussinesq\"`, SPEC-LIT 121.7. There is no default:\n`1/T_ref` is the ideal-gas value, a liquid's is an order of magnitude\nsmaller, and the reader is not entitled to pick one.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
         "nu": {

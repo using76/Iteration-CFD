@@ -91,6 +91,14 @@
     "run"
   ],
   "$defs": {
+    "BuoyancyModel": {
+      "description": "The two body-force forms a case can name - SPEC-LIT §9's density ratio\nand §121's Boussinesq, lowered through\n[`crate::momentum::BuoyancyForm::lower`]. `boussinesq` runs when the case\ncarries a `beta` for it (§121.7); see [`Self::name`] for the spelling the\nlowering contract hands on.",
+      "type": "string",
+      "enum": [
+        "densityRatio",
+        "boussinesq"
+      ]
+    },
     "ChtBlockMesh": {
       "description": "The block form - what [`ChtRegionMesh`] alone was before §97, field for\nfield unchanged. An axis-aligned block; patch names are the case's, one\nper face.",
       "type": "object",
@@ -171,6 +179,14 @@
           "type": "number",
           "format": "double"
         },
+        "beta": {
+          "description": "Thermal expansion coefficient [1/K] - read only under\n`\"model\": \"boussinesq\"`, SPEC-LIT 121.7. There is no default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "g": {
           "description": "Gravitational acceleration, m/s^2.",
           "type": "array",
@@ -180,6 +196,17 @@
           },
           "maxItems": 3,
           "minItems": 3
+        },
+        "model": {
+          "description": "SPEC-LIT 121.7: `\"densityRatio\"` - the default when absent - or\n`\"boussinesq\"`, lowered through\n[`crate::momentum::BuoyancyForm::lower`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BuoyancyModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,

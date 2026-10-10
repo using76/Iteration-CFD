@@ -120,6 +120,67 @@ pub enum BuoyancyForm {
     Boussinesq { beta: Scalar },
 }
 
+impl BuoyancyForm {
+    /// The two spellings every case format shares, in the order a refusal
+    /// prints them - SPEC-LIT §121.7's lowering table has no third row.
+    pub const NAMES: [&'static str; 2] = ["densityRatio", "boussinesq"];
+
+    /// SPEC-LIT §121.7's lowering table, the ONE rule for all four case
+    /// formats (JSONC `physics.buoyancy`/`physics.fluid.beta`, the OpenFOAM
+    /// dictionary's `buoyancy`/`beta`, `buoyancy.model`/`buoyancy.beta`,
+    /// `air.buoyancy`/`air.beta`), so there is one §13.4 contract and not
+    /// four.
+    ///
+    /// `form_key`/`beta_key` are the keys AS THE CASE SPELLS THEM (e.g.
+    /// `"physics.buoyancy"`, `"physics.fluid.beta"`); every refusal names the
+    /// offending one. `beta` must be finite and `> 0` - a negative β (water
+    /// below 4 °C) is refused rather than run, because §121.6's sign argument
+    /// for `G_b` assumes `beta > 0`.
+    pub fn lower(form_key: &str, form: &str, beta_key: &str, beta: Option<f64>) -> Result<Self> {
+        match form {
+            "densityRatio" => {
+                if beta.is_some() {
+                    return Err(Error::Config(format!(
+                        "{beta_key}: the densityRatio form (b = g(TRef/T - 1)) reads \
+                         no beta, so a case that writes both is contradicting itself \
+                         (SPEC-LIT 13.4.1) - delete the beta entry, or write \
+                         `boussinesq` if the linearised form is what was meant"
+                    )));
+                }
+                Ok(Self::DensityRatio)
+            }
+            "boussinesq" => {
+                let Some(b) = beta else {
+                    return Err(Error::Config(format!(
+                        "{beta_key}: the boussinesq form needs a beta, and there is no \
+                         default - 1/T_ref is the ideal-gas value and a liquid's is an \
+                         order of magnitude smaller, so the reader is not entitled to \
+                         pick one (SPEC-LIT 121.7)"
+                    )));
+                };
+                if !b.is_finite() || !(b > 0.0) {
+                    return Err(Error::Config(format!(
+                        "{beta_key}: beta = {b} 1/K - the boussinesq form needs a \
+                         finite beta > 0, and the sign argument for G_b (SPEC-LIT \
+                         121.6) assumes it"
+                    )));
+                }
+                Ok(Self::Boussinesq { beta: b as Scalar })
+            }
+            other => Err(Error::Config(format!(
+                "{form_key}: \"{other}\" is not a buoyancy form this solver has; \
+                 available: {}",
+                Self::NAMES.join(", ")
+            ))),
+        }
+    }
+}
+
+/// The single number of SPEC-LIT §121.7's validity guard: the Boussinesq
+/// linearisation is this tree's business only while
+/// `beta * max|T - T_ref|` stays at or below it.
+pub const BOUSSINESQ_VALIDITY_LIMIT: f64 = 0.1;
+
 /// The body force per unit mass, `b = g·(T_ref/T - 1)`.
 ///
 /// **Not Boussinesq.** Boussinesq linearises the density about `T_ref` and is
@@ -198,6 +259,86 @@ impl BuoyancyCoeffs {
         self.g.mag_sqr() > 0.0
     }
 
+    /// True when the case named the Boussinesq form - SPEC-LIT §121.7. The
+    /// validity guard and the drivers' END lines read this rather than
+    /// pattern-matching [`Self::form`], so the spelling of the test stays in
+    /// one place.
+    pub fn is_boussinesq(&self) -> bool {
+        matches!(self.form, BuoyancyForm::Boussinesq { .. })
+    }
+
+    /// (121.8) `delta_B = beta * max_i |T_i - T_ref|`, in f64 on the host.
+    /// `None` for [`BuoyancyForm::DensityRatio`], which has no beta to
+    /// measure with; empty input is `Some(0.0)` - an isothermal field is
+    /// inside the linearisation's reach by construction.
+    ///
+    /// A NaN temperature makes the result NaN. It must NOT be skipped by
+    /// `max()`, whose contract silently returns the other operand - a NaN
+    /// temperature is outside the guard's remit, not inside it.
+    pub fn boussinesq_departure<I: IntoIterator<Item = Scalar>>(&self, temps: I) -> Option<f64> {
+        let beta = match self.form {
+            BuoyancyForm::Boussinesq { beta } => beta,
+            BuoyancyForm::DensityRatio => return None,
+        };
+        let mut m = f64::NEG_INFINITY;
+        for t in temps {
+            let d = (f64::from(t) - f64::from(self.t_ref)).abs();
+            if d.is_nan() {
+                m = f64::NAN;
+            } else if d > m {
+                m = d;
+            }
+        }
+        if m == f64::NEG_INFINITY {
+            return Some(0.0);
+        }
+        Some(f64::from(beta) * m)
+    }
+
+    /// SPEC-LIT §121.7's validity guard, evaluated on the field the run
+    /// starts from. [`BuoyancyForm::DensityRatio`] is never refused - §9's
+    /// ratio is exact at any `ΔT`.
+    ///
+    /// * `delta_B <= 0.1`: the run proceeds.
+    /// * otherwise, NaN included: strict mode is `Error::Refused`; under
+    ///   `crate::io::contract::permissive()` the guard warns once and the
+    ///   run continues.
+    pub fn check_boussinesq_validity<I: IntoIterator<Item = Scalar>>(
+        &self,
+        setting: &str,
+        temps: I,
+    ) -> Result<()> {
+        if !self.is_boussinesq() {
+            return Ok(());
+        }
+        let Some(d) = self.boussinesq_departure(temps) else {
+            return Ok(());
+        };
+        if d <= BOUSSINESQ_VALIDITY_LIMIT {
+            return Ok(());
+        }
+        let beta = match self.form {
+            BuoyancyForm::Boussinesq { beta } => beta,
+            BuoyancyForm::DensityRatio => unreachable!("checked by is_boussinesq above"),
+        };
+        let msg = format!(
+            "{setting}: boussinesq is outside its validity - beta = {:e} 1/K and \
+             max|T - TRef| = {} K give beta*max|T - TRef| = {:.4}, past the 0.1 \
+             limit (SPEC-LIT 121.7). The linearisation does not hold over this \
+             temperature range: run the densityRatio form",
+            f64::from(beta),
+            d / f64::from(beta),
+            d
+        );
+        if crate::io::contract::permissive() {
+            crate::io::contract::warn_once(setting, &format!("-permissive: {msg}"));
+            return Ok(());
+        }
+        Err(Error::Refused(format!(
+            "{msg}\n  (run with -permissive to substitute a warning and continue)"
+        )))
+    }
+
     /// Read `constant/g` and `TRef`.
     ///
     /// `g` is accepted under either the `g` or the `value` key, because
@@ -239,6 +380,30 @@ impl BuoyancyCoeffs {
             if p.exists() {
                 let d = FoamDict::read(&p)?;
                 c.t_ref = d.scalar("TRef", c.t_ref);
+                // SPEC-LIT §121.7: the SAME file names the form and, under
+                // `boussinesq`, its beta. Absent `buoyancy` is the
+                // density ratio, as every case written before §121.7 was.
+                let word = d.get_or("buoyancy", "densityRatio").trim().trim_matches('"');
+                let beta = match d.get("beta") {
+                    None => None,
+                    Some(raw) => match crate::io::dict::last_number(raw) {
+                        Some(v) => Some(v),
+                        None => {
+                            return Err(Error::Parse {
+                                path: p.display().to_string(),
+                                msg: "beta: cannot read a number out of this entry - it is an \
+                                      OpenFOAM dimensioned scalar, `beta [0 0 0 -1 0 0 0] 3.4e-3`"
+                                    .to_string(),
+                            })
+                        }
+                    },
+                };
+                c.form = BuoyancyForm::lower(
+                    &format!("constant/{name}: buoyancy"),
+                    word,
+                    &format!("constant/{name}: beta"),
+                    beta,
+                )?;
                 break;
             }
         }
@@ -2297,6 +2462,129 @@ mod tests {
 
         let cold = b.at(283.15);
         assert!(cold.z < 0.0, "cold fluid must sink, got {cold}");
+    }
+
+    /// SPEC-LIT §121.7's validity guard: `delta_B` of 0.099 passes; the same
+    /// past the limit is refused from EITHER side of `T_ref`, a NaN
+    /// temperature is refused, the density ratio is never refused, and
+    /// `-permissive` turns the refusal into a warning.
+    #[test]
+    fn boussinesq_validity_guard_fires_above_0_1() {
+        let guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::reset_warnings();
+        let setting = "constant/physicalProperties: beta";
+        let b = BuoyancyCoeffs {
+            g: Vec3::new(0.0, 0.0, -9.81),
+            t_ref: 300.0,
+            t_min: 1.0,
+            form: BuoyancyForm::Boussinesq { beta: 1e-3 },
+        };
+
+        // delta_B = 1e-3 * 99 = 0.099: inside.
+        let ok = b.check_boussinesq_validity(setting, [300.0, 399.0]).is_ok();
+        assert!(ok, "delta_B = 0.099 is inside the 0.1 limit");
+        let d = b.boussinesq_departure([300.0, 399.0]).expect("boussinesq has a departure");
+        assert!(
+            (d - 0.099).abs() < 1e-12 && d > 0.0989 && d < 0.0991,
+            "the departure is {d}, (121.8) says 0.099"
+        );
+
+        // Hot side: 1e-3 * 101 = 0.101, refused, naming the key and the limit.
+        let e = b
+            .check_boussinesq_validity(setting, [300.0, 401.0])
+            .expect_err("0.101 is past the limit");
+        let m = format!("{e}");
+        assert!(m.contains(setting), "{m}");
+        assert!(m.contains("0.1"), "{m}");
+        assert!(m.contains("beta"), "{m}");
+
+        // Cold side: |199 - 300| = 101 is the same refusal.
+        assert!(b.check_boussinesq_validity(setting, [199.0, 300.0]).is_err());
+
+        // A NaN temperature is refused, not skipped by max().
+        assert!(b.check_boussinesq_validity(setting, [300.0, Scalar::NAN]).is_err());
+        assert!(b.boussinesq_departure([300.0, Scalar::NAN]).unwrap().is_nan());
+
+        // The density ratio is never refused, and has no departure at all.
+        let r = BuoyancyCoeffs { form: BuoyancyForm::DensityRatio, ..b };
+        assert!(r.check_boussinesq_validity(setting, [1000.0]).is_ok());
+        assert!(r.boussinesq_departure([1000.0]).is_none());
+
+        // -permissive: the same case warns once and runs.
+        crate::io::contract::set_permissive(true);
+        assert!(b.check_boussinesq_validity(setting, [300.0, 401.0]).is_ok());
+        crate::io::contract::set_permissive(false);
+        assert!(
+            crate::io::contract::warned(setting),
+            "-permissive must have warned about {setting}"
+        );
+        drop(guard);
+    }
+
+    /// SPEC-LIT §121.7's lowering table through the OpenFOAM dictionary
+    /// route: `from_case` reads `buoyancy` and `beta` out of the SAME file
+    /// it reads `TRef` from, and refuses the three bad rows by name.
+    #[test]
+    fn the_dictionary_route_reads_buoyancy_and_beta() {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let from_props = |body: &str| -> crate::error::Result<BuoyancyCoeffs> {
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "momentum_bous_dict_{}_{n}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(dir.join("constant")).expect("mkdir");
+            std::fs::write(dir.join("constant").join("physicalProperties"), body)
+                .expect("write physicalProperties");
+            let c = BuoyancyCoeffs::from_case(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+            c
+        };
+
+        // (a) the full boussinesq row: the dimensioned scalar is read by its
+        // LAST token, exactly as `FoamDict::scalar` reads every other one.
+        let c = from_props(
+            "nu              [0 2 -1 0 0 0 0] 1.5e-05;\n\
+             TRef            300;\n\
+             buoyancy        boussinesq;\n\
+             beta            [0 0 0 -1 0 0 0] 3.4e-3;\n",
+        )
+        .expect("the full boussinesq row reads");
+        assert_eq!(c.form, BuoyancyForm::Boussinesq { beta: 3.4e-3 as Scalar });
+
+        // (b) boussinesq without beta: refused, naming the beta key.
+        let e = from_props(
+            "TRef            300;\n\
+             buoyancy        boussinesq;\n",
+        )
+        .expect_err("boussinesq without beta is refused");
+        let m = format!("{e}");
+        assert!(m.contains("beta"), "{m}");
+
+        // (c) beta under the default density ratio: refused, nothing reads it.
+        let e = from_props(
+            "TRef            300;\n\
+             beta            [0 0 0 -1 0 0 0] 3.4e-3;\n",
+        )
+        .expect_err("beta under densityRatio is refused");
+        let m = format!("{e}");
+        assert!(m.contains("beta"), "{m}");
+        assert!(m.contains("densityRatio"), "{m}");
+
+        // (d) an unknown spelling names the key and BOTH spellings.
+        let e = from_props(
+            "TRef            300;\n\
+             buoyancy        banana;\n",
+        )
+        .expect_err("an unknown form is refused");
+        let m = format!("{e}");
+        assert!(m.contains("buoyancy"), "{m}");
+        assert!(m.contains("densityRatio"), "{m}");
+        assert!(m.contains("boussinesq"), "{m}");
+
+        // (e) neither key: the density ratio, unchanged.
+        let c = from_props("TRef            300;\n").expect("no keys reads");
+        assert_eq!(c.form, BuoyancyForm::DensityRatio);
     }
 
     /// A corrupted zero must not produce an infinite force.
