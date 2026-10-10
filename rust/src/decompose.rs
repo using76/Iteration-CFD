@@ -185,12 +185,73 @@ pub fn hilbert_index(coord: [u32; 3], bits: u32) -> u64 {
     idx
 }
 
+/// The 2-D Hilbert index: [`hilbert_index`]'s construction one axis short.
+///
+/// Skilling, *Programming the Hilbert Curve*, AIP Conf. Proc. **707**,
+/// 381-387 (2004), written out as [`hilbert_index`] was: undo the
+/// reflections, Gray-encode with the parity fold read off the LAST axis
+/// `x[1]`, interleave most-significant-bit first with `coord[0]` ahead of
+/// `coord[1]` - the same three steps looped over two axes instead of three.
+/// 31 bits a side still fits a `u64`. [`curve_axes`] picks the live axes
+/// [`partition`] keys through this.
+pub fn hilbert_index_2d(coord: [u32; 2], bits: u32) -> u64 {
+    debug_assert!((1..=31).contains(&bits));
+    let mut x = coord;
+    let m = 1u32 << (bits - 1);
+
+    // 1. inverse undo
+    let mut q = m;
+    while q > 1 {
+        let p = q - 1;
+        for i in 0..2 {
+            if x[i] & q != 0 {
+                x[0] ^= p;
+            } else {
+                let t = (x[0] ^ x[i]) & p;
+                x[0] ^= t;
+                x[i] ^= t;
+            }
+        }
+        q >>= 1;
+    }
+
+    // 2. Gray encode
+    for i in 1..2 {
+        x[i] ^= x[i - 1];
+    }
+    let mut t = 0u32;
+    let mut q = m;
+    while q > 1 {
+        if x[1] & q != 0 {
+            t ^= q - 1;
+        }
+        q >>= 1;
+    }
+    for xi in x.iter_mut() {
+        *xi ^= t;
+    }
+
+    // 3. interleave, most significant level first
+    let mut idx = 0u64;
+    for b in (0..bits).rev() {
+        for xi in x.iter() {
+            idx = (idx << 1) | ((xi >> b) & 1) as u64;
+        }
+    }
+    idx
+}
+
 /// Map a cell centre onto the Hilbert lattice.
 ///
-/// The bounding box is taken over the cell centres, and a degenerate axis - a
-/// 2-D case's empty direction, where every centre has the same coordinate -
-/// collapses to lattice coordinate 0 rather than dividing by zero. A 2-D mesh
-/// therefore gets a 2-D Hilbert cut, which is the right answer.
+/// The bounding box is taken over the cell centres, and a degenerate axis -
+/// where every centre has the same coordinate - collapses to lattice
+/// coordinate 0 rather than dividing by zero. That collapse alone is NOT a
+/// 2-D cut, whatever this comment used to claim: blockgen's 2-D cases carry
+/// round-off in their thin axis, so its span is tiny but not zero, and
+/// normalising it to its own extent handed the noise the full lattice. The
+/// 2-D cut is [`curve_axes`]'s doing - it drops the thin axis and
+/// [`partition`] keys the live axes through [`hilbert_index_2d`] - so a
+/// collapsed axis's coordinate is simply never among the live ones.
 fn lattice(c: Vec3, lo: Vec3, span: Vec3, scale: Scalar) -> [u32; 3] {
     let one = |v: Scalar, l: Scalar, s: Scalar| -> u32 {
         // A degenerate axis - a 2-D case's empty direction - collapses to 0
@@ -214,6 +275,86 @@ fn lattice(c: Vec3, lo: Vec3, span: Vec3, scale: Scalar) -> [u32; 3] {
         one(c.y, lo.y, span.y),
         one(c.z, lo.z, span.z),
     ]
+}
+
+/// How many cells short an axis may stand of the longest and still be live
+/// for the curve. Eight keeps every axis of a real 3-D mesh (`plume` is 20
+/// deep against 98 long: 8 x 20 = 160 >= 98) and drops the thin ones
+/// (`big` is 4 deep against 500: 32 < 500; `channel`'s z has one row).
+pub const THIN_AXIS_RATIO: u64 = 8;
+
+/// The cells along each axis, estimated from the mesh.
+///
+/// A face whose owner-neighbour offset is largest along axis `a` crosses one
+/// cell of `a`, so the mean |offset| over the faces dominated by `a` is that
+/// axis's cell size, and the span of the centres divided by it is the count
+/// (the +1 turns a count of spans into a count of cells). All f64, so a
+/// `single` build's f32 centres lose nothing to the estimate itself. An axis
+/// no internal face measures - one row deep, so nothing joins across it - or
+/// with no span at all estimates 1: dead, and [`curve_axes`] drops it.
+///
+/// The `as f64` casts are the identity in the f64 build and widen in `single`.
+#[allow(clippy::unnecessary_cast)]
+pub fn axis_cell_counts(m: &HostMesh) -> [u64; 3] {
+    let mut sum = [0.0f64; 3];
+    let mut k = [0u64; 3];
+    for f in 0..m.n_internal_faces {
+        let (p, q) = (m.c[m.owner[f] as usize], m.c[m.neighbour[f] as usize]);
+        let d = [
+            q.x as f64 - p.x as f64,
+            q.y as f64 - p.y as f64,
+            q.z as f64 - p.z as f64,
+        ];
+        let mut a = 0usize;
+        for i in 1..3 {
+            if d[i].abs() > d[a].abs() {
+                a = i; // a tie keeps the lowest axis
+            }
+        }
+        sum[a] += d[a].abs();
+        k[a] += 1;
+    }
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for c in &m.c[..m.n_cells] {
+        let c = [c.x as f64, c.y as f64, c.z as f64];
+        for a in 0..3 {
+            lo[a] = lo[a].min(c[a]);
+            hi[a] = hi[a].max(c[a]);
+        }
+    }
+    let mut n = [1u64; 3];
+    for a in 0..3 {
+        if k[a] == 0 {
+            continue;
+        }
+        let span = hi[a] - lo[a];
+        let r = span / (sum[a] / k[a] as f64);
+        if span > 0.0 && r.is_finite() {
+            // A span over a near-zero cell size would overflow u64 here;
+            // clamp, and let an absurd count read as the live axis it is.
+            n[a] = r.round().clamp(0.0, 1.0e18) as u64 + 1;
+        }
+    }
+    n
+}
+
+/// The axes the curve should walk: every axis with at least two cells along
+/// it that is not thin by [`THIN_AXIS_RATIO`] against the longest.
+///
+/// A real 3-D mesh keeps all three; `blockgen`'s `channel` (one row of z,
+/// whose centres carry round-off) and `big` cube (4 rows of z against 500 of
+/// x) keep two; a slab keeps one. Dropping an axis cannot cost the cut
+/// anything - there is nothing worth sorting along it - and keeping an axis
+/// never folds the mesh onto a line, because an axis with two or more cells
+/// is geometry, not round-off.
+pub fn curve_axes(m: &HostMesh) -> Vec<usize> {
+    let n_ax = axis_cell_counts(m);
+    let n_max = *n_ax.iter().max().unwrap();
+    // Saturating: an absurd count can only overflow towards live, never away.
+    (0..3)
+        .filter(|&a| n_ax[a] >= 2 && THIN_AXIS_RATIO.saturating_mul(n_ax[a]) >= n_max)
+        .collect()
 }
 
 /// Compute the partition map `pi : cell -> part`.
@@ -289,12 +430,24 @@ pub fn partition(m: &HostMesh, n_parts: usize, method: &PartitionMethod) -> Resu
             // share a lattice point - a mesh with a wildly non-uniform spacing
             // - and without the tie-break the partition would depend on the
             // sort's implementation.
+            // The curve walks the LIVE axes only (`curve_axes`): on a mesh
+            // thin along one axis - blockgen's 2-D cases, a cube a few cells
+            // deep - handing the dead axis its own 21-bit lattice hands its
+            // round-off the whole curve, and the cut scatters. Three live
+            // axes keep exactly the key below; two key the live pair through
+            // `hilbert_index_2d` on the same per-axis lattice; one needs no
+            // curve; none leaves the cell id itself as the order.
+            let live = curve_axes(m);
             let mut order: Vec<(u64, u32)> = (0..n)
                 .map(|c| {
-                    (
-                        hilbert_index(lattice(m.c[c], lo, span, scale), HILBERT_BITS),
-                        c as u32,
-                    )
+                    let u = lattice(m.c[c], lo, span, scale);
+                    let key = match live.as_slice() {
+                        [_, _, _] => hilbert_index(u, HILBERT_BITS),
+                        [a, b] => hilbert_index_2d([u[*a], u[*b]], HILBERT_BITS),
+                        [a] => u[*a] as u64,
+                        _ => 0,
+                    };
+                    (key, c as u32)
                 })
                 .collect();
             order.sort_unstable();
@@ -1804,6 +1957,134 @@ pub(crate) mod tests {
             }
             let back = d.gather_field(&parts).expect("gather");
             assert_eq!(back, global);
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    //  PAR-08: the Hilbert cut on 2-D and thin meshes
+    // ----------------------------------------------------------------------
+
+    /// The 2-D curve, same two properties as the 3-D one above: a bijection
+    /// on its lattice, and unit lattice steps between consecutive indices.
+    /// Skilling's construction is dimension-generic, but the claim is checked
+    /// rather than assumed - the parity fold on the LAST axis is exactly
+    /// where an error keeps the bijection and destroys the steps.
+    #[test]
+    fn the_2d_hilbert_curve_visits_every_point_and_never_jumps() {
+        for bits in 1..=5u32 {
+            let side = 1u32 << bits;
+            let n = (side as usize).pow(2);
+            let mut point_of = vec![None; n];
+            for y in 0..side {
+                for x in 0..side {
+                    let h = hilbert_index_2d([x, y], bits) as usize;
+                    assert!(h < n, "index {h} out of range at bits={bits}");
+                    assert!(
+                        point_of[h].is_none(),
+                        "bits={bits}: index {h} is claimed by two points"
+                    );
+                    point_of[h] = Some([x, y]);
+                }
+            }
+            for h in 1..n {
+                let a = point_of[h - 1].expect("bijection");
+                let b = point_of[h].expect("bijection");
+                let step: u32 = (0..2).map(|i| a[i].abs_diff(b[i])).sum();
+                assert_eq!(
+                    step, 1,
+                    "bits={bits}: steps {h}-1 -> {h} from {a:?} to {b:?}, which \
+                     is not an edge of the lattice"
+                );
+            }
+        }
+        // Skilling's order-1 curve starts with the U: (0,0) (0,1) (1,1) (1,0).
+        let mut first: Vec<Option<[u32; 2]>> = vec![None; 4];
+        for y in 0..2u32 {
+            for x in 0..2u32 {
+                first[hilbert_index_2d([x, y], 1) as usize] = Some([x, y]);
+            }
+        }
+        assert_eq!(
+            first,
+            vec![Some([0, 0]), Some([0, 1]), Some([1, 1]), Some([1, 0])]
+        );
+    }
+
+    /// The live-axis choice on uniform boxes: every axis of a real 3-D box;
+    /// x and y of a one-row mesh; ALL THREE of a mesh two rows deep, where
+    /// 8 x 2 = 16 is exactly not thin against 16; x and y again the moment
+    /// the long axis outgrows the thin pair (8 x 2 = 16 < 17); and a slab's
+    /// long axis alone. The 16/17 pair is the ratio's own boundary, pinned
+    /// from both sides.
+    #[test]
+    fn curve_axes_walks_the_axes_a_thin_mesh_actually_has() {
+        let cases: [([usize; 3], [u64; 3], &[usize]); 5] = [
+            ([4, 3, 2], [4, 3, 2], &[0, 1, 2]),
+            ([16, 16, 1], [16, 16, 1], &[0, 1]),
+            ([16, 16, 2], [16, 16, 2], &[0, 1, 2]),
+            ([17, 16, 2], [17, 16, 2], &[0, 1]),
+            ([200, 4, 4], [200, 4, 4], &[0]),
+        ];
+        for (n, counts, axes) in cases {
+            let m = boxes(n, false);
+            assert_eq!(axis_cell_counts(&m), counts, "counts at {n:?}");
+            assert_eq!(curve_axes(&m), axes, "axes at {n:?}");
+        }
+    }
+
+    /// `blockgen`'s `channel` at 200 x 120 x 1 is a 2-D mesh whose z centres
+    /// carry round-off: the z span is tiny but not zero, and normalising each
+    /// axis to its OWN extent hands that noise the full 21-bit lattice -
+    /// 19,326 cut faces at P = 8 against the linear cut's 1,400. The oracles
+    /// are the 2-D curve's own; the gate is the linear number.
+    #[test]
+    fn the_channel_case_cuts_on_its_live_axes() {
+        use crate::blockgen::{build_case, CaseKind};
+        let (m, _) = build_case(CaseKind::Channel, 200, 120, 1).expect("channel");
+        assert_eq!(curve_axes(&m), vec![0usize, 1], "only x and y are live");
+        for (p, oracle) in [(4usize, 320usize), (8usize, 740usize)] {
+            let part = partition(&m, p, &PartitionMethod::Hilbert).expect("partition");
+            let cut = (0..m.n_internal_faces)
+                .filter(|&f| part[m.owner[f] as usize] != part[m.neighbour[f] as usize])
+                .count();
+            assert_eq!(cut, oracle, "channel P={p}: gate is 1,400");
+        }
+    }
+
+    /// `blockgen`'s `big` at 500 x 400 x 4 is a unit cube 4 cells deep: the z
+    /// axis used to get the same 21 lattice bits as the 500-cell axis, and
+    /// 200,000 of the 203,600 cut faces at P = 8 were its mid-plane. With z
+    /// out of the curve every cut plane costs 1,600 or 2,000 faces, not
+    /// 200,000. The gate is 200,000 / 20.
+    #[test]
+    fn the_gb_case_cuts_on_its_live_axes() {
+        use crate::blockgen::{build_case, CaseKind};
+        let (m, _) = build_case(CaseKind::Big, 500, 400, 4).expect("gb");
+        assert_eq!(axis_cell_counts(&m), [500, 400, 4], "the cube's counts");
+        assert_eq!(curve_axes(&m), vec![0usize, 1], "4 rows of z are thin");
+        for (p, oracle) in [(4usize, 3_600usize), (8usize, 7_200usize)] {
+            let part = partition(&m, p, &PartitionMethod::Hilbert).expect("partition");
+            let cut = (0..m.n_internal_faces)
+                .filter(|&f| part[m.owner[f] as usize] != part[m.neighbour[f] as usize])
+                .count();
+            assert_eq!(cut, oracle, "gb P={p}: gate is 10,200");
+        }
+    }
+
+    /// `plume` (98 x 42 x 20) has no thin axis and must not move: all three
+    /// axes stay live, the curve keeps today's exact key, and the cut and the
+    /// halo fraction are what they were.
+    #[test]
+    fn the_plume_case_is_unchanged() {
+        use crate::blockgen::{build_case, CaseKind};
+        let (m, _) = build_case(CaseKind::Plume, 98, 42, 20).expect("plume");
+        assert_eq!(curve_axes(&m), vec![0usize, 1, 2], "no thin axis here");
+        for (p, oracle, halo_gate) in [(4usize, 2_800usize, 0.068), (8usize, 6_916, 0.168)] {
+            let d = Decomposition::build(&m, p, &PartitionMethod::Hilbert).expect("decompose");
+            let r = d.report();
+            assert_eq!(r.n_cut_faces, oracle, "plume P={p}: the cut must not move");
+            let h = (r.halo_fraction * 1000.0).round() / 1000.0;
+            assert!(h <= halo_gate, "plume P={p}: halo fraction {h} > {halo_gate}");
         }
     }
 }
