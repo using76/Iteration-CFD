@@ -41076,3 +41076,203 @@ The values were computed by an independent Python oracle before the Rust ran.
   consulted.
 
 ---
+
+## 141. Native GAMG and AMGX — aggregation, the Galerkin hierarchy, and the AMGX library
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §141 to the GAMG units
+(AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
+aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
+the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
+AMG-04a). Nothing in the crate calls the aggregation yet, so no existing solve, case
+or SASS moves.
+
+Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
+*Electron. Trans. Numer. Anal.* 37, 123-146** (open full text at
+<https://etna.ricam.oeaw.ac.at/vol.37.2010/pp123-146.dir/pp123-146.pdf>, read on
+2026-10-11): §2, Algorithm 2.1 (pairwise aggregation) and Algorithm 2.2 (double
+pairwise aggregation), and the statement after Algorithm 2.2 that "the coarsening
+ratio n/nc is slightly less than 4". **Napov, A. & Notay, Y. (2012), "An algebraic
+multigrid method with guaranteed convergence rate", *SIAM J. Sci. Comput.* 34(2)
+A1079-A1109, doi:10.1137/100818509** (title, volume and pages checked against Crossref
+on 2026-10-11), named by docs/17 for the AMG-01 row; it was not opened, and no
+formula below is taken from it. No multigrid code of any licence was read for this
+section. In particular OpenFOAM's GAMG and the AGMG code that Notay's paper offers
+for download were not opened.
+
+### 141.1 Pairwise aggregation of an LDU matrix
+
+`src/amg.rs` is the module root and `src/amg/aggregate.rs` holds the algorithm. Both
+are host code. The tests are `tests/amg_aggregate.rs`, an integration test, so they
+run in both builds (§118). The input is one level: a cell count `n`, the LDU arrays
+of §1 (`owner`, `neighbour`, `diag`, `upper`, `lower`) and, on the finest level, the
+boundary faces (`b_face_cells`, `b_nbr_cell`, `boundary_coeffs`). A coarse level has
+no boundary faces.
+
+**The entries.** The off-diagonal entry `a_ij` of the operator that `amul` applies is
+the sum of every contribution to row `i`, column `j`:
+
+```
+internal face f, o = owner[f], n = neighbour[f]:
+    a_on += upper[f],    a_no += lower[f]                                (141.1)
+coupled boundary face bf (b_nbr_cell[bf] >= 0), c = b_face_cells[bf], d = b_nbr_cell[bf]:
+    a_cd += -boundary_coeffs[bf]                                         (141.2)
+```
+
+The sign of (141.2) is the one `ldu_ops::amul` and the CSR export apply (§48.2). Each
+side of a cyclic or conjugate couple is its own boundary face, so (141.2) gives `a_cd`
+from one side and `a_dc` from the other, and no couple is counted twice.
+
+**The sign.** The tree holds matrices of both signs: §2's laplacian (and OpenFOAM's)
+has a negative diagonal and positive off-diagonals, while the `distsolve` test matrices
+have a positive diagonal. *DESIGN*: the aggregation works on `σA`, with
+
+```
+σ = +1 if Σ_c diag[c] > 0,    σ = -1 if Σ_c diag[c] < 0                 (141.3)
+```
+
+summed in f64 in cell order. A zero or non-finite sum is refused by name, because the
+sign of the operator is then undefined. So `A` and `-A` give the same aggregation,
+bit for bit.
+
+**The strength.** Notay's algorithm reads the strongest negative couplings of a row.
+*DESIGN* (docs/17 AMG-01): it is applied to the symmetric part of `σA`, so the
+strength is one number per unordered pair and the coarse graph is undirected:
+
+```
+s_ij = s_ji = -σ (a_ij + a_ji) / 2                                      (141.4)
+```
+
+All strengths are f64 in both builds (§118, rule 5.1.5 of docs/17). Each `a_ij` is
+summed in f64 in a fixed order: internal faces in ascending face index, then boundary
+faces in ascending index. A pair `{i, j}` is an edge of the graph if any internal face
+or coupled boundary face joins it, whatever its value. Edges with `s_ij <= 0` exist but
+are never strong. Self-pairs do not occur at the finest level: `owner[f] == neighbour[f]`
+and `b_nbr_cell[bf] == b_face_cells[bf]` are refused.
+
+**The strong set and the count** (Notay 2010, Algorithm 2.1, in terms of (141.4)):
+
+```
+S_i = { j != i : s_ij > β max_{k : s_ik > 0} s_ik },   β = 0.25         (141.5)
+m_i = |{ j : i ∈ S_j }|                                                 (141.6)
+```
+
+`S_i` is empty when no `s_ik` is positive. `s_ij > β max s_ik` is Notay's
+`a_ij < -β max_{a_ik<0} |a_ik|` for the matrix of (141.4). `S_i` and the initial `m_i`
+are computed once, before any node is marked.
+
+**One pass** (Notay 2010, Algorithm 2.1 with `CheckDD = false`; *DESIGN*: every tie is
+broken by the smaller id):
+
+1. Among the unmarked nodes, take `i` with the smallest `m_i`, and among those the
+   smallest id.
+2. Among the unmarked neighbours `k` of `i`, take `j` with the largest `s_ik`, and among
+   those the smallest id. Only `s_ik > 0` is a candidate. This is Notay's step 2,
+   "select `j` with `a_ij = min a_ik`".
+3. If such a `j` exists and `j ∈ S_i`, the new aggregate is `{i, j}`; otherwise it is
+   `{i}`.
+4. Mark the aggregate's members.
+5. For every member `k` and every `l ∈ S_k`: `m_l = m_l - 1`.
+
+Repeat until every node is marked. `CheckDD = false` means no node is left out (Notay's
+diagonal-dominance check is optional). Every cell is in exactly one aggregate, which
+is a gate.
+
+**Two passes** (Notay 2010, Algorithm 2.2). Pass 1 runs on the fine graph. Its
+aggregates are numbered by (141.8) and form the nodes of pass 2. The pass-2 strength
+between pass-1 aggregates `I != J` is the symmetric strength of Notay's auxiliary
+matrix `A_1 = P_1^T A P_1` (his eq. 2.3):
+
+```
+s1_IJ = Σ_{i ∈ I, j ∈ J, {i,j} an edge} s_ij                            (141.7)
+```
+
+summed in f64 in ascending `(min(i,j), max(i,j))` order of the fine edges. Pass 2 runs
+the same five steps on that graph, with the same `β` and the same `σ`. The final
+aggregate of a cell is its pass-2 aggregate. An aggregate therefore has 1 to 4
+members.
+
+**Numbering.** After each pass the aggregates are numbered `0..n_c` in ascending order
+of their smallest member: the smallest fine cell id after the final pass, and the
+smallest pass-1 id inside pass 2.
+
+```
+G_0 ∋ 0,   min G_I < min G_J  for I < J                                 (141.8)
+```
+
+The numbering is canonical. It does not depend on the order in which the passes formed
+the aggregates, and nothing in the algorithm iterates a hash map. The same input gives
+the same bytes on every run.
+
+**The coarse addressing.** The coarse faces are the unordered aggregate pairs `{I, J}`,
+`I != J`, joined by at least one fine internal face or coupled boundary face. They are
+stored as `coarse_owner = min(I, J)` and `coarse_neighbour = max(I, J)`, sorted
+ascending by `(owner, neighbour)`. A coarse level has no boundary faces: every coupled
+face of the finest level is FOLDED into the coarse LDU.
+
+| fine entry | lands in |
+|---|---|
+| internal face `f` with `agg[o] == agg[n]` | the coarse diagonal of that aggregate; `face_coarse[f] = INTERIOR (-1)` |
+| internal face `f` with `I = agg[o] < J = agg[n]` | coarse face `(I, J)`: `upper[f]` adds to its upper, `lower[f]` to its lower; `face_flip[f] = false` |
+| internal face `f` with `I = agg[o] > J = agg[n]` | coarse face `(J, I)`: `upper[f]` adds to its LOWER, `lower[f]` to its upper; `face_flip[f] = true` |
+| coupled `bf` with `agg[c] == agg[d]` | the coarse diagonal; `bface_coarse[bf] = INTERIOR (-1)` |
+| coupled `bf` with `agg[c] != agg[d]` | coarse face `(min, max)`: `-boundary_coeffs[bf]` adds to its upper when `agg[c] < agg[d]` (`bface_flip = false`) and to its lower otherwise (`bface_flip = true`) |
+| uncoupled `bf` | nothing in the coarse off-diagonals; `bface_coarse[bf] = UNCOUPLED (-2)`, `bface_flip = false` |
+
+The members of each aggregate are also stored as a CSR (`agg_offset[n_c + 1]` and
+`agg_cells[n]`, ascending inside each aggregate), the aggregate-sorted order that
+AMG-02's gather-form restriction reads. Folding the fine diagonals, the fine
+`internal_coeffs` and the INTERIOR entries into the coarse diagonal is AMG-02's
+Galerkin product. This subsection only says where each entry goes.
+
+**Refused by name** (§13.4 style, an `Err` and no partial result):
+
+- array lengths that disagree with `n`, the face count or the boundary-face count, and
+  `owner`/`neighbour`/`b_face_cells` entries out of `0..n`;
+- a non-finite `diag`, `upper`, `lower` or coupled `boundary_coeffs` entry, naming the
+  array and the index;
+- the zero or non-finite diagonal sum of (141.3);
+- a coupled face whose `b_nbr_cell` is `>= n`. That is the halo cell of one part of a
+  decomposed mesh, and block-local aggregation across a cut is AMG-07a's;
+- a self-coupled boundary face or internal face.
+
+**Precision class.** The aggregation is discrete (class D of docs/17 §5.1.4): the tests
+compare ids and counts exactly in both builds. Their coefficients are multiples of 1/8
+below 16, exact in f32 and f64, so both builds see the same strengths and produce the
+same aggregation. A general f32 matrix can aggregate differently from its f64 parent,
+because its coefficients are rounded before (141.4). That is a different input, not a
+defect.
+
+#### 141.1.1 The gates
+
+The expected values were computed by an independent Python oracle in the supervisor's
+scratchpad, before any Rust ran. The weighted meshes use, for an edge `a < b`,
+`a_ab = -wu(a, b)` and `a_ba = -wl(a, b)` with
+
+```
+wu(a, b) = 1/8 + ((11 a + 3 b) mod 7),    wl(a, b) = 1/8 + ((5 a + b) mod 3)   (141.9)
+```
+
+and a diagonal of `+100` (`σ = +1`). `fnv` is FNV-1a 64 over the final cell-to-aggregate
+map, each entry as 4 little-endian bytes.
+
+| mesh (blockgen, cells `i + nx(j + ny k)`) | pass 1 | `n_c` | sizes | coarse faces | INTERIOR internal faces | folded coupled faces | `fnv` |
+|---|---|---|---|---|---|---|---|
+| 7×5×3 weighted, no couples | 53 | 27 | 25×4, 1×3, 1×2 | 84 | 91 | 0 | `0x5a8dbae8292ab9fa` |
+| 7×5×3 unit weights (`wu = wl = 1`) | 53 | 27 | 25×4, 1×3, 1×2 | 88 | 95 | 0 | `0x3d79f46bb14637ec` |
+| 6×5×4 weighted, cyclic on x, y and z | 60 | 30 | 30×4 | 60 | 90 | 60 (of 148) | `0x015f5cd94ef38125` |
+| 6×5×4 unit, cyclic on x, y and z | 60 | 30 | 30×4 | 93 | 120 | 0 (of 148) | `0xeef6efe900a90185` |
+| 32^3 weighted | 16384 | 8192 | 8192×4 | — | — | 0 | `0x40290cb573e1b725` |
+| 32^3 unit | 16384 | 8192 | 8192×4 | 23296 | 32768 | 0 | — |
+
+On the weighted cyclic box the first aggregate is `{0, 30, 60, 90}`: a z-column whose
+last link `90 → 0` is a cyclic couple, so it folds into the diagonal. Further gates:
+the mean aggregate size on the 32^3 Poisson matrix of §2 (`|S_f| δ_f` from the mesh, in
+the negative-diagonal sign) lies in `[3, 5]` (Notay: slightly less than 4); every
+aggregate has 1 to 4 members; the coarse graph is connected on every gate mesh; 100
+runs on the weighted 32^3 matrix give identical bytes; `A` and `-A` give identical
+results; an x-strong anisotropic block (16×4×4, x coefficients 1, y and z coefficients
+`2^-7`) gives 64 aggregates of 4 cells, each inside one x-line; and the coarse entries
+placed by the table above sum to the dense `P^T A P` exactly on the two 7×5×3 and two
+6×5×4 meshes.
+
+---

@@ -81,6 +81,7 @@ pub mod cht;
 pub mod chem;
 pub mod compressible;
 pub mod comm;
+pub mod amg;
 pub mod dcmetrics;
 pub mod fan;
 pub mod psychro;
