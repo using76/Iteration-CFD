@@ -40615,3 +40615,196 @@ own repeatability:
 Labels: (137.4)-(137.5).
 
 ---
+
+## 138. SPMD transports — the `Comm` trait, ThreadComm, and MPI
+
+`No GPL-licensed source was consulted.` This section is this project's own
+contract (ORIGINAL). Its one external input is the MPI Forum's MPI-4.1 report,
+read as a specification for what a message envelope, a buffered send, a
+collective call and a tag bound mean. No MPI implementation's source was opened.
+
+In an SPMD run every rank owns one part of the mesh and talks to the other
+ranks only through a `Comm`. Every operation of a `Comm` moves bytes and does
+no arithmetic on them, so a ghost cell still holds its owner's value bit for
+bit whatever the transport, and §71-§73's bitwise gates stay valid for SPMD
+runs. The collectives stay gathers and never become reductions, per §72.4.
+
+This section defines no equation, so it carries no equation label.
+
+### 138.1 The `Comm` contract and `ThreadComm`
+
+`src/comm.rs` holds the object-safe trait `Comm` and its two constants.
+`src/comm/thread.rs` holds `ThreadComm`. Both are host code on `std` alone: no
+`Gpu`, no `Scalar`, no `unsafe`, no feature gate, so the default build and
+`--features single` compile the same lines and every test of §138.1.5 holds in
+both with the same expectations. Under `--features single` the same tests run
+through `tests/comm_thread.rs`, which includes `src/comm/tests.rs`, because the
+library's own test target does not compile in that build.
+
+| name | value | meaning |
+|---|---|---|
+| `MAX_TAG` | 32767 | the largest tag a caller may use; MPI-4.1 section 10.1.2.1 guarantees that `MPI_TAG_UB` is at least 32767, so a tag this transport accepts is valid on every MPI |
+| `DEFAULT_TIMEOUT` | 120 s | how long a `ThreadComm` call waits for a message before it fails by name |
+
+The trait has `rank`, `size`, `transport` (a name), `barrier`, `exchange`,
+`allgather`, `allgatherv` and `bcast`. Nothing else is in it, and nothing in
+the crate calls it yet: the parallel stream's later units build on it.
+
+#### 138.1.1 One code path, two transports
+
+`ThreadComm` is the transport `cargo test` runs on a one-GPU machine with no
+MPI: N ranks as N threads of one process, each holding its own handle. MPI is a
+later transport behind the same trait (PAR-06, which adds its own subsection
+here), so a program written against `Comm` is one code path and the transport
+is a choice made where the world is built.
+
+The in-process sequential path of §71-§73 stays as it is. It is the reference
+that SPMD runs are compared with bitwise: a program that runs P ranks over a
+`Comm` must produce the bytes the one-process, P-part run produces.
+
+#### 138.1.2 Matching, order and progress — the ten rules
+
+| rule | statement | rests on |
+|---|---|---|
+| R1 World | `rank()` is in `0..size()` and `size() >= 1`. Rank numbers are fixed for the life of the world. `size() == 1` is not a special case: every operation works with the one rank alone | MPI-4.1 section 7.1 |
+| R2 Exchange: what each list means | `exchange(tag, sends, recvs)` sends `sends[i].1` to rank `sends[i].0` under `tag`, and fills each `recvs[j].1` with the message from rank `recvs[j].0` under `tag`. A peer may be the calling rank itself, and a message to self is delivered like any other. The order of entries in either list does not change any result | MPI-4.1 section 4.2.3 |
+| R3 Exchange: matching | Messages are matched by the envelope `(src, dst, tag)`, and FIFO within one envelope: the k-th message rank a sends to rank b under tag t fills the k-th receive that b posts from a under t. Arrival order across different envelopes is never consulted | MPI-4.1 sections 4.2.3 and 4.5 |
+| R4 Exchange: progress | Sends are buffered: the bytes are copied out before the call waits on anything. So `exchange` returns once every entry in `recvs` is filled and never waits for a receiver. With consistent lists there is no deadlock, whatever the peer counts and whatever order the ranks call in | MPI-4.1 section 4.5 |
+| R5 Exchange: exact lengths | A received message's length must equal its buffer's length exactly. If it does not, the call fails, naming both lengths | stricter than MPI-4.1 section 4.5 |
+| R6 Collectives | Every rank calls the collectives (`barrier`, `allgather`, `allgatherv`, `bcast`) in the same order. `ThreadComm` checks this: each call carries a per-rank collective sequence number, its kind and its parameters (the root for `bcast`, the block length for `allgather` and `bcast`). If any rank's call differs at the same sequence number, every rank fails, naming the sequence number and both differing values | MPI-4.1 section 7.14, checked here |
+| R7 Collectives never match point-to-point messages | Collective traffic and `exchange` traffic are separate channels. No tag value, including `MAX_TAG`, can cross them | MPI-4.1 section 7.1 |
+| R8 The four collectives | `barrier` returns on any rank only after every rank has entered it. `allgather`: every rank passes `mine` of the same length n and `all` of length `n * size()`; afterwards `all[q*n .. (q+1)*n]` is rank q's `mine`, on every rank. `allgatherv` returns `size()` vectors in rank order, entry q being rank q's `mine`; the lengths may differ, zero is allowed, and every rank receives identical vectors. `bcast`: every rank passes `buf` of the same length and the same `root`; afterwards every `buf` holds root's bytes, and root's own `buf` is unchanged | MPI-4.1 sections 7.3, 7.7 and 7.4 |
+| R9 Local argument errors fail before anything is sent | a tag above `MAX_TAG`; a peer `>= size()`; a peer listed twice in `sends`, or twice in `recvs`; `all.len() != mine.len() * size()`; `root >= size()`. The other ranks are not told: if only one rank makes the mistake, the others may wait until their timeout | this contract |
+| R10 After any `Err`, the world is spent | No later call on it is specified | this contract |
+
+The contract is stricter than MPI in two places, both on purpose. **Exact
+receive lengths (R5):** MPI accepts a message shorter than its receive buffer,
+but a halo's length is known on both sides, so a short message is a bug, and it
+is refused with both numbers. **Checked collective order (R6):** MPI makes a
+mismatched collective sequence the program's error and leaves the outcome
+undefined; `ThreadComm` is the test transport, so it turns the mistake into an
+`Err` on every rank instead of mixed bytes or a hang.
+
+#### 138.1.3 ThreadComm — buffered mailboxes, collective headers, timeout and abort
+
+One `Mutex` and one `Condvar` guard a shared state of two mailbox maps and an
+abort slot. Nothing in `ThreadComm` runs caller code while holding the lock.
+
+* **Buffered sends, envelope-keyed FIFO mailboxes.** `exchange` copies every
+  outgoing message into the map `(src, dst, tag) -> FIFO of messages` under the
+  lock, wakes the waiters, and only then waits for its own receives, in list
+  order. A receive pops the front of its envelope's queue, so a message is
+  matched by what it says and never by when it arrived, and a rank that runs
+  ahead cannot overtake itself (R3). A message to self goes through the same
+  map.
+* **A separate collective channel and its per-call header.** Every collective
+  call takes the next per-rank sequence number and sends every other rank a
+  header (its kind, its root and its block length) together with its bytes, in
+  a second map keyed `(src, dst, sequence)`. A rank then reads every other
+  rank's message in rank order and checks that header against its own, which
+  is the R6 check on every rank: whichever rank looks, it sees the difference.
+  Only a `bcast` root sends bytes; its peers send the header alone.
+* **The timeout.** A wait for one message ends after the world's timeout,
+  `DEFAULT_TIMEOUT` = 120 s unless `world_with_timeout` chose another, with an
+  `Err` naming the waiting rank, what it waited for (the peer and the tag, or
+  the collective's sequence number) and the timeout in milliseconds. A message
+  that arrives as the timeout expires is still delivered. A failed collective
+  or a bad length does not abort the world: each rank that sees the problem
+  fails on its own, and a rank whose call was fine returns `Ok`.
+* **The abort.** `ThreadComm::run` catches each rank's panic, marks the world
+  aborted naming that rank, and wakes every waiter. From then on every blocked
+  or later call on any rank returns `Err` naming the aborted rank, without
+  waiting for the timeout, and `run` returns `Err` naming the lowest panicking
+  rank with the panic message when the payload is a string. A test that goes
+  wrong therefore ends in a named failure, never a hang.
+* **`MAX_TAG` = 32767.** MPI-4.1 section 10.1.2.1 requires the tag upper bound
+  to be at least 32767 and lets an implementation offer more. Capping tags at
+  the guaranteed minimum means a halo plan that works on `ThreadComm` cannot
+  hold a tag some MPI refuses.
+
+`world(n)` returns n handles, entry r being rank r; each handle is `Send` and
+need not be `Sync`. It refuses `n == 0`, and `world_with_timeout` also refuses
+a zero timeout. `run(n, f)` runs `f(&handle_r)` on n scoped threads and returns
+the n results in rank order.
+
+#### 138.1.4 Refused by name
+
+Every failure is `Error::Config` and its message starts `comm: `.
+
+| case | the message names |
+|---|---|
+| `world(0)` | `at least one rank` |
+| zero timeout | `timeout` |
+| tag above `MAX_TAG` | the tag (`32768`) and `32767` |
+| peer out of range | the peer and the size, e.g. `peer 4` and `size 4` |
+| peer twice in one list | `peer 1` and `twice` |
+| received length differs | the rank, the tag, the received length and the buffer length, e.g. `rank 0`, `tag 2`, `10` and `12` |
+| `allgather` wrong `all` length | both numbers (`97` and `96`) |
+| `allgather` block lengths differ across ranks | the other rank, and both lengths (`23` and `24`) |
+| `bcast` root out of range | `root 3` and `size 3` |
+| `bcast` length differs | both lengths (`999` and `1000`) |
+| different collective kinds | both kinds, e.g. `bcast` and `allgather`, and `collective #0` |
+| different roots | `root` |
+| a missing message | the waited-for peer (`rank 0`), the tag (`tag 4`) and the timeout (`200 ms`) |
+| an aborted world | the panicking rank and `panicked`, e.g. `rank 2` |
+
+#### 138.1.5 What must hold
+
+Every row is class D: exact bytes and exact counts, nothing is a tolerance. The
+payloads are SplitMix64 streams and the digests FNV-1a 64, so each rank can
+compute what it should have received.
+
+| test | what it asserts | class |
+|---|---|---|
+| T0 `the_test_generators_are_the_published_ones` | SplitMix64 from seed 0 gives the published first three outputs, FNV-1a 64 the published digests of `""`, `"a"`, `"foobar"`, and `payload(1,2,0,16)` its pinned bytes | D |
+| T1 `allgather_returns_rank_order` | N = 1..8: every rank's `all` is the rank-order concatenation (N = 8: 192 bytes, pinned digest); exact bytes at N = 4; a wrong `all` length and mismatched block lengths are refused on every rank | D |
+| T2 `allgatherv_ragged_lengths` | N = 1..8: entry q is rank q's block, every rank's result equals rank 0's; N = 8 lengths `[0,5,3,1,6,4,2,0]`, 21 bytes, pinned digest; N = 1 gives one empty entry | D |
+| T3 `exchange_asymmetric_neighbour_lists_never_deadlock` | an uneven graph (rank 0 with no peer, rank 1 with five) under three tags and opposite list orders completes, every buffer is its payload, the N = 6 and N = 8 digests are pinned, under 10 s | D |
+| T4 `exchange_is_byte_identity` | N = 1..8 all-to-all of 100000 bytes including to self, byte for byte; pinned digests for tag 7, tag 0 and `MAX_TAG` | D |
+| T5 `bcast_from_every_root` | N = 1..8, every root: all buffers equal the root's, the root's own is unchanged, pinned digests; an out-of-range root and a length mismatch are refused on every rank | D |
+| T6 `a_thousand_runs_produce_identical_bytes` | 1000 repetitions at N = 1..8 (8000 worlds, 36000 rank threads) of a six-operation program under scheduler jitter give the pinned `D(N)` and byte count every time, under 60 s in the release build | D |
+| T7 `refusals_are_named` | the world, tag, peer and received-length refusals of §138.1.4 are each an `Error::Config` starting `comm: ` and naming what that table lists; the sending rank of a length mismatch returns `Ok` | D |
+| T8 `collectives_and_point_to_point_never_cross` | ring exchanges (including tag `MAX_TAG` and a repeated tag) interleaved with every collective: no byte crosses between the channels | D |
+| T9 `repeated_exchanges_never_overtake` | 200 consecutive exchanges under one tag with the sender running ahead arrive in order | D |
+| T10 `mismatched_collectives_are_refused_by_name` | different kinds and different roots fail on every rank, naming both kinds and `collective #0`, or the root | D |
+| T11 `a_panicking_rank_aborts_the_world_instead_of_hanging` | a panic before an `allgather` makes `run` return `Err` naming the rank and the panic message in under 5 s with the 120 s timeout | D |
+| T12 `a_missing_message_times_out_by_name` | a receive nobody sends fails after at least 200 ms and under 5 s, naming the peer, the tag and `200 ms` | D |
+| T13 `barrier_holds_every_rank` | N = 1..8, 50 rounds: no rank passes a barrier before all have entered | D |
+| T14 `a_world_knows_its_ranks` | `rank`, `size` and `transport` of every handle, `run` returning results in rank order, and the trait used as `&dyn Comm` | D |
+
+The program of T6 is: three exchange rounds (tags 0, 1, 2) over the uneven
+graph, an `allgather` of 24-byte blocks, an `allgatherv` of `5r mod 7`-byte
+blocks, and a `bcast` of 64 bytes from root `N-1`. Rank r yields the scheduler
+`(rep*7 + r*3 + op) mod 5` times before operation `op`. `D(N)` is the digest of
+every rank's received bytes concatenated in rank order.
+
+| N | bytes | `D(N)` |
+|---|---|---|
+| 1 | 88 | `0x410f8f0a4284d037` |
+| 2 | 234 | `0xb991fe33bbce0ec7` |
+| 3 | 618 | `0x54c750f57eb6de7f` |
+| 4 | 1270 | `0x1394b8a5e5356558` |
+| 5 | 2117 | `0xca7aee5aa3e1b481` |
+| 6 | 3132 | `0xf228d3ea2871ed1a` |
+| 7 | 4018 | `0xa6096b18ace7f85e` |
+| 8 | 4574 | `0xcaa0cded0010ae47` |
+
+The values were computed by an independent Python oracle before the Rust ran.
+
+**Sources.**
+
+* MPI Forum, *MPI: A Message-Passing Interface Standard, Version 4.1* (2023),
+  `https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report.pdf`, read as a
+  specification, sections 4.2.3, 4.5, 7.1, 7.3, 7.4, 7.7, 7.14 and 10.1.2.1.
+  The plan row for PAR-01 cites "sections 3-6" for point-to-point and
+  collective communication; those are MPI-4.0's chapter numbers. In the 4.1
+  report point-to-point is Chapter 4 and collective communication is Chapter 7,
+  checked against the HTML report on 2026-10-07, and the numbers above are the
+  4.1 ones.
+* Steele, Lea & Flood, "Fast splittable pseudorandom number generators",
+  *OOPSLA 2014*, DOI 10.1145/2660193.2660195, for the test generator.
+* FNV-1a (Fowler, Noll, Vo; public domain) for the test digests.
+* No MPI implementation's source was consulted. No GPL-licensed source was
+  consulted.
+
+---
