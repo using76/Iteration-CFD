@@ -50,7 +50,7 @@ use crate::surface::{Surface, TriIndex};
 use crate::types::{to_dvec3, to_vec3, DVec3};
 use crate::{Label, Scalar, Vec3};
 
-use super::features::{self, FeatureIndex};
+use super::features::{self, FeatureIndex, FeatureSet};
 use super::quality::{self, Gate, QualityReport, QualityThresholds};
 use super::SnapSpec;
 
@@ -1158,6 +1158,144 @@ fn wall_face_mask(
         }
     }
     wall
+}
+
+// ==========================================================================
+//  The worst boundary points - (92.75) and (92.76), §92.14.3
+// ==========================================================================
+
+/// How many worst-residual boundary points the snap row names: the row is
+/// §92.14.3's read of the points the stage returned, and moves nothing.
+pub const WORST_K: usize = 16;
+
+/// The class of the feature nearest a boundary point - (92.76).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureClass {
+    Edge,
+    Corner,
+    Smooth,
+    OpenTip,
+}
+
+impl FeatureClass {
+    /// The name the summary row carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FeatureClass::Edge => "edge",
+            FeatureClass::Corner => "corner",
+            FeatureClass::Smooth => "smooth",
+            FeatureClass::OpenTip => "open-tip",
+        }
+    }
+}
+
+/// One row of (92.75): a boundary point the snap stage returned, its
+/// residual over it, and the class (92.76) of the feature nearest it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorstPoint {
+    pub point: u32,
+    pub position: [f64; 3],
+    pub residual: Scalar,
+    pub class: FeatureClass,
+}
+
+/// (92.76): the class of the feature nearest `x` within radius `r`, over
+/// the extraction of §92.12 at the run's `feature_angle_deg`. A corner
+/// within `r` wins over the edges it lies on; a corner that ends exactly
+/// one feature edge is the free end of an open feature curve.
+pub fn feature_class(
+    fs: &FeatureSet,
+    fidx: Option<&FeatureIndex>,
+    x: Vec3,
+    r: Scalar,
+) -> FeatureClass {
+    let Some(idx) = fidx else {
+        return FeatureClass::Smooth;
+    };
+    if let Some((_, d, c)) = idx.closest_corner(x) {
+        if d <= r {
+            let ends = fs.edges.iter().filter(|e| e[0] == c || e[1] == c).count();
+            return if ends == 1 {
+                FeatureClass::OpenTip
+            } else {
+                FeatureClass::Corner
+            };
+        }
+    }
+    if let Some((_, d, _)) = idx.closest_edge_point(x) {
+        if d <= r {
+            return FeatureClass::Edge;
+        }
+    }
+    FeatureClass::Smooth
+}
+
+/// (92.75): the first min(k, |B|) points of B - the points of the faces
+/// [`wall_face_mask`] marks, the same set the snap loop moves - by residual
+/// `r_i = | closest_point(x_i) - x_i |` descending, ties to the lower point
+/// id, each row carrying its (92.76) class at radius `h_f`. Reading only:
+/// `r_i` comes from the query `max_residual` is the maximum of, so row 0's
+/// residual is `max_residual` bit for bit.
+pub fn worst_points(
+    mesh: &PolyMeshRaw,
+    surf: &Surface,
+    region_of_cell: Option<&[i32]>,
+    base_size: Scalar,
+    feature_angle_deg: Scalar,
+    h_f: Scalar,
+    k: usize,
+) -> Result<Vec<WorstPoint>> {
+    if !(base_size > 0.0) || !base_size.is_finite() {
+        return Err(Error::Mesh(format!(
+            "worst_points: base_size must be positive and finite, got \
+             {base_size} - the closest-point index is built at it"
+        )));
+    }
+    if !(h_f > 0.0) || !h_f.is_finite() {
+        return Err(Error::Mesh(format!(
+            "worst_points: h_f must be positive and finite, got {h_f} - \
+             it is the radius the feature classes are judged at"
+        )));
+    }
+    let wall = wall_face_mask(mesh, surf, region_of_cell);
+    let mut b_ids: Vec<u32> = mesh
+        .faces
+        .iter()
+        .zip(wall.iter())
+        .filter(|&(_, &w)| w)
+        .flat_map(|(face, _)| face.iter().copied().map(|p| p as u32))
+        .collect();
+    b_ids.sort_unstable();
+    b_ids.dedup();
+    if b_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let idx = TriIndex::with_bvh(surf, base_size)?;
+    let mut rows: Vec<(Scalar, u32)> = b_ids
+        .iter()
+        .map(|&i| {
+            let (_, _, d) = idx.closest_point(to_vec3(mesh.points[i as usize]));
+            (d, i)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let fs = features::extract(surf, feature_angle_deg)?;
+    let fidx = (!fs.is_empty())
+        .then(|| FeatureIndex::new(&fs, base_size))
+        .transpose()?;
+    Ok(rows
+        .into_iter()
+        .take(k)
+        .map(|(r, i)| {
+            let p = mesh.points[i as usize];
+            WorstPoint {
+                point: i,
+                position: [p.x, p.y, p.z],
+                residual: r,
+                class: feature_class(&fs, fidx.as_ref(), to_vec3(p), h_f),
+            }
+        })
+        .collect())
 }
 
 /// One capture chain of (92.62): feature points in order, closed iff the
@@ -3098,5 +3236,51 @@ mod tests {
             snapped.mesh.neighbour, cast.mesh.neighbour,
             "neighbour untouched"
         );
+    }
+
+    /// (92.76) on a hand feature graph: the free end of an open feature
+    /// curve names "open-tip", a three-edge corner "corner", a point h_f
+    /// from an edge "edge" and one further off "smooth" - and the corner
+    /// wins over the edges it lies on. Every value is binary-exact, so the
+    /// two builds agree bit for bit.
+    #[test]
+    fn the_feature_class_of_a_point_is_its_nearest_feature_within_r() {
+        let fs = features::FeatureSet {
+            points: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [1, 3]],
+            edge_patches: vec![vec![0], vec![0], vec![0]],
+            polylines: vec![vec![0, 1], vec![1, 2], vec![1, 3]],
+            corners: vec![0, 1, 2, 3],
+            feature_angle_deg: 30.0,
+        };
+        let fidx = FeatureIndex::new(&fs, 1.0).expect("index");
+        let r: Scalar = 0.125;
+        let cases: &[([f64; 3], FeatureClass)] = &[
+            ([0.0, 0.0, 0.0625], FeatureClass::OpenTip),
+            ([2.0, 0.0, 0.0625], FeatureClass::OpenTip),
+            ([1.0, 1.0, 0.0625], FeatureClass::OpenTip),
+            ([1.0, 0.0, 0.0625], FeatureClass::Corner),
+            ([0.03125, 0.0, 0.0], FeatureClass::OpenTip),
+            ([0.5, 0.0, 0.125], FeatureClass::Edge),
+            ([0.5, 0.0, 0.25], FeatureClass::Smooth),
+        ];
+        for &(x, want) in cases {
+            let p = Vec3::new(x[0] as Scalar, x[1] as Scalar, x[2] as Scalar);
+            assert_eq!(feature_class(&fs, Some(&fidx), p, r), want, "{x:?}");
+        }
+        assert_eq!(
+            feature_class(&fs, None, Vec3::ZERO, r),
+            FeatureClass::Smooth,
+            "no index, no feature"
+        );
+        assert_eq!(FeatureClass::Edge.as_str(), "edge");
+        assert_eq!(FeatureClass::Corner.as_str(), "corner");
+        assert_eq!(FeatureClass::Smooth.as_str(), "smooth");
+        assert_eq!(FeatureClass::OpenTip.as_str(), "open-tip");
     }
 }

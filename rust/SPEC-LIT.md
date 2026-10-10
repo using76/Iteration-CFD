@@ -27930,6 +27930,34 @@ mesh; a full run records them and does not refuse on them. The snap row also car
 `{ "sharp_length_m", "captured_length_m", "tol_m" }`: (92.62) of §92.12 at `tol_m = 0.1 h_f`, measured on
 the points the stage returns, and null only when §92.12's extraction refuses the run's `feature_angle_deg`.
 
+The snap row also carries `worst_points`, read off the points the stage returns and moving nothing:
+where in B the largest residuals sit, so a remedy can be aimed at a place and not only at p99. With
+x_i a point's returned position and r_i its residual,
+
+```
+  r_i = | closest_point(x_i) - x_i |,   i in B of (92.27)  -- the query max_residual is the maximum of
+  W   = the first min(16, |B|) points of B, by r_i descending, ties to the lower point id         (92.75)
+```
+
+each row of W is `{ "point", "position", "residual_m", "residual_over_h", "feature_class" }`: the point
+id, x_i in metres, r_i, r_i / h_f, and the class of the feature nearest x_i within h_f,
+
+```
+  class(x) = "open-tip"  when the nearest corner c of (92.35) has |x - c| <= h_f and c ends
+                         exactly one feature edge - the free end of an open feature curve;
+             "corner"    when that corner is within h_f and ends any other number of them;
+             "edge"      otherwise, when a feature edge of (92.34) lies within h_f of x (92.36);
+             "smooth"    otherwise                                                              (92.76)
+```
+
+A corner within h_f wins over the edges it lies on. The features are §92.12's extraction at the run's
+`feature_angle_deg`, taken whether or not `snap.feature_tolerance` is zero, and the radius is h_f, not
+the attraction radius `feature_tolerance * base_size`: a remedy that moves the attraction does not move
+the class it is judged by. Row 0's `residual_m` is `max_residual` bit for bit, and its
+`residual_over_h` is `max_over_h`, because both come from the same query on the same points. The list
+is empty when B is, and `worst_points` is null only when §92.12's extraction refuses the run's
+`feature_angle_deg`, as `feature_capture` is.
+
 The layers row of each layer patch — on the single-mesh path and in each region's `patches` — carries
 `area`, (92.50)'s `sum A_f` in m² (on a dropped patch, the input mesh's own area of the patch), and
 `area_frac_tau_ge`, three rows `{ "beta", "area_frac" }` at beta = 0.5, 0.8 and 0.95, each
@@ -27996,6 +28024,7 @@ anywhere else.
 | two `patch_names` values that collide | refused naming both source patches |
 | a config whose gate cannot be met | exit 1, §92.3's refusal on stderr, and no `constant/polyMesh` and no `<name>_summary.json` written |
 | the summary's `mesh.patches` | equals the boundary file's patches, name for name and size for size |
+| the snap row's `worst_points` | min(16, n_boundary_points) rows by residual descending, row 0's `residual_m` and `residual_over_h` equal to `max_residual` and `max_over_h` bit for bit; on a hand feature graph (92.76) names a free curve end "open-tip", a three-edge corner "corner", a point h_f from an edge "edge" and one further off "smooth"; the mesh goldens unchanged |
 
 ---
 

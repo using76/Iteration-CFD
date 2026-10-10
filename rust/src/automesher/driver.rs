@@ -688,6 +688,35 @@ pub fn run(
         }),
         Err(_) => serde_json::Value::Null,
     };
+    // (92.75) and (92.76), read off the points the stage returns and moving
+    // nothing: the k = 16 worst boundary residuals and the class of the
+    // feature nearest each, so a remedy can be aimed at a place and not
+    // only at p99. Null only when the feature extraction refuses the run's
+    // feature angle, as feature_capture is.
+    let worst_points = match super::snap::worst_points(
+        &snapped.mesh,
+        surf,
+        Some(&cast_region),
+        cfg.domain.base_size as Scalar,
+        cfg.refinement.feature_angle_deg as Scalar,
+        h_f as Scalar,
+        super::snap::WORST_K,
+    ) {
+        Ok(rows) => serde_json::Value::Array(
+            rows.iter()
+                .map(|w| {
+                    json!({
+                        "point": w.point,
+                        "position": w.position,
+                        "residual_m": w.residual,
+                        "residual_over_h": w.residual as f64 / h_f,
+                        "feature_class": w.class.as_str(),
+                    })
+                })
+                .collect(),
+        ),
+        Err(_) => serde_json::Value::Null,
+    };
     let counts = json!({
         "n_boundary_points": snapped.report.n_boundary_points,
         "iterations": snapped.report.iterations,
@@ -717,6 +746,7 @@ pub fn run(
         "n_local_undo": snapped.report.n_local_undo,
         "area_ratio": area_ratio,
         "feature_capture": feature_capture,
+        "worst_points": worst_points,
     });
     let log = report_lines(progress, &snapped.report.summary());
     elapsed(progress, Stage::Snap, seconds);
@@ -2043,5 +2073,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The snap row names its k = 16 worst boundary points (AUT-03): row 0
+    /// IS `max_residual` and `max_over_h` bit for bit, the rows run
+    /// residual-descending with rising point ids among equals, every point
+    /// is one of the mesh's and every position finite, and every class is a
+    /// cube class - the cube's 8 corners each end three edges, so no
+    /// "open-tip".
+    #[test]
+    fn the_snap_row_reports_the_worst_points() {
+        let cfg = cube_config();
+        let surf = cube_surface();
+        let (out, _) = run_recording(&cfg, &surf, None);
+        let ident = crate::automesher::identity::MeshIdentity::new(
+            "ofgpu-automesher",
+            std::path::Path::new(&cfg.output.case_dir),
+            &cfg.output.name,
+            None,
+        );
+        let s = summary_json(&cfg, "cube.automesher.json", &surf, &out, &ident);
+        let row = &s["stages"][2];
+        let wps = row["worst_points"].as_array().expect("worst_points");
+        eprintln!("cube_config worst_points {}", row["worst_points"]);
+        let n_b = row["n_boundary_points"].as_u64().unwrap() as usize;
+        assert_eq!(wps.len(), n_b.min(16), "min(16, n_boundary_points)");
+        let max_r = row["max_residual"].as_f64().unwrap();
+        let max_h = row["max_over_h"].as_f64().unwrap();
+        assert_eq!(
+            wps[0]["residual_m"].as_f64().unwrap().to_bits(),
+            max_r.to_bits(),
+            "row 0's residual is max_residual"
+        );
+        assert_eq!(
+            wps[0]["residual_over_h"].as_f64().unwrap().to_bits(),
+            max_h.to_bits(),
+            "row 0's residual_over_h is max_over_h"
+        );
+        let mut prev_r = f64::INFINITY;
+        let mut prev_p = 0u64;
+        for (i, w) in wps.iter().enumerate() {
+            let r = w["residual_m"].as_f64().unwrap();
+            let oh = w["residual_over_h"].as_f64().unwrap();
+            assert_eq!(oh.to_bits(), (r / 0.5).to_bits(), "row {i} over_h");
+            assert!(
+                r.total_cmp(&prev_r).is_le(),
+                "row {i}: residual {r} rises over {prev_r}"
+            );
+            let p = w["point"].as_u64().unwrap();
+            if r.total_cmp(&prev_r).is_eq() {
+                assert!(p > prev_p, "row {i}: tie at {r} but point {p} <= {prev_p}");
+            }
+            assert!(p < out.mesh.points.len() as u64, "row {i}: point {p}");
+            for v in w["position"].as_array().expect("position") {
+                assert!(v.as_f64().unwrap().is_finite(), "row {i} position {v}");
+            }
+            let class = w["feature_class"].as_str().expect("class");
+            assert!(
+                ["edge", "corner", "smooth"].contains(&class),
+                "row {i}: class {class}"
+            );
+            prev_r = r;
+            prev_p = p;
+        }
+        let base = cfg.domain.base_size as Scalar;
+        let hf = cfg.domain.base_size / 2f64.powi(cfg.refinement.max_level as i32);
+        let hf = hf as Scalar;
+        assert!(
+            crate::automesher::snap::worst_points(
+                &out.mesh, &surf, None, base, 30.0, hf, 0
+            )
+            .expect("k = 0")
+            .is_empty(),
+            "k = 0 keeps nothing"
+        );
+        let all = crate::automesher::snap::worst_points(
+            &out.mesh, &surf, None, base, 30.0, hf, 100_000,
+        )
+        .expect("k past |B|");
+        assert_eq!(all.len(), n_b, "k past |B| keeps |B|");
+        assert!(
+            crate::automesher::snap::worst_points(
+                &out.mesh, &surf, None, base, 30.0, 0.0, 16
+            )
+            .is_err(),
+            "h_f = 0 is refused"
+        );
     }
 }
