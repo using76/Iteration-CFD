@@ -1207,6 +1207,101 @@ extern "C" __global__ void turbBuoyancyProduction
 
 
 // ==========================================================================
+//  G_b under Boussinesq - SPEC-LIT section 121.6
+//
+//      G_b = beta (nu_t / Pr_t) g . grad(T)
+//
+//  Rodi (1987) writes G_b = -(nu_t/Pr_t) g.grad(rho)/rho for any density
+//  law; under the Boussinesq approximation the density that divides is
+//  rho_ref and grad(rho)/rho_ref = -beta grad(T) exactly, which leaves the
+//  line above, evaluated left to right. Against the density-ratio kernel
+//  above the two differ by exactly the factor beta*T (121.7) - the same
+//  T/T_ref the force law of (121.4) carries. Rodi, W. (1987), "Examples of
+//  calculation methods for flow and mixing in stratified fluids",
+//  J. Geophys. Res. 92(C5) 5305-5328.
+//
+//  No temperature is read: (121.6) has no divide, so it needs no floor and
+//  a NaN or zero temperature field cannot reach it. C_3 is computed exactly
+//  as the density-ratio kernel computes it, through turbHenkesC3 below.
+//
+//  The density-ratio kernel `turbBuoyancyProduction` above is left
+//  untouched, byte for byte: every existing case launches it and its f64
+//  results must stay bit-identical, so the Boussinesq form runs in its own
+//  kernel instead.
+// ==========================================================================
+
+// The Henkes (1991) C_3, exactly the mode-1 tail of turbBuoyancyProduction:
+// C_3 = tanh |u_parallel_to_g / u_normal_to_g|, 0 where |g| == 0 leaves no
+// axis to split along, and the limit 1 where the velocity is purely
+// vertical. turbBuoyancyProductionBoussinesq must hand back the SAME bits
+// as the density-ratio kernel for the same g and u, so the two C_3 buffers
+// can be compared bit for bit.
+__device__ __forceinline__ ofscalar turbHenkesC3(ofvec3 g, ofvec3 uc)
+{
+    const ofscalar gmag = ofsqrt_(dot3(g, g));
+    if (!(gmag > (ofscalar)0))
+    {
+        return (ofscalar)0;
+    }
+
+    const ofvec3 e = mkvec(g.x/gmag, g.y/gmag, g.z/gmag);
+    const ofscalar upar = dot3(uc, e);
+    const ofscalar u2 = dot3(uc, uc);
+    // |u_normal|^2 = |u|^2 - u_parallel^2, clamped: round-off can make it
+    // very slightly negative when the velocity is exactly along g.
+    const ofscalar un2 = ofmax_(u2 - upar*upar, (ofscalar)0);
+    const ofscalar un = ofsqrt_(un2);
+
+    // u_normal == 0 is a purely vertical velocity: the ratio is infinite
+    // and tanh of it is 1, which is the limit and not a special case.
+    if (!(un > (ofscalar)0))
+    {
+        return (upar != (ofscalar)0) ? (ofscalar)1 : (ofscalar)0;
+    }
+
+    ofscalar r = upar/un;
+    if (r < (ofscalar)0) r = -r;
+    return oftanh_(r);
+}
+
+
+extern "C" __global__ void turbBuoyancyProductionBoussinesq
+(
+    ofscalar* __restrict__ gb,
+    ofscalar* __restrict__ c3,
+    const ofscalar* __restrict__ nut,
+    const ofvec3*  __restrict__ gradT,
+    const ofvec3*  __restrict__ u,
+    ofscalar gx,
+    ofscalar gy,
+    ofscalar gz,
+    ofscalar rPrt,
+    ofscalar beta,
+    oflabel c3Mode,
+    ofscalar c3Const,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofvec3 g  = mkvec(gx, gy, gz);
+    const ofvec3 gt = gradT[c];
+
+    // SPEC-LIT section 121.6, evaluated left to right: no t, no floor.
+    gb[c] = nut[c]*rPrt*dot3(g, gt)*beta;
+
+    if (c3Mode == 0)
+    {
+        c3[c] = c3Const;
+        return;
+    }
+
+    c3[c] = turbHenkesC3(g, u[c]);
+}
+
+
+// ==========================================================================
 //  G_b into the k equation - SPEC-LIT section 17
 //
 //  k gets + G_b, of either sign. Patankar section 4.2 wants a source that is

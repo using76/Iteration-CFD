@@ -2412,7 +2412,12 @@ fn run(o: &Options) -> Result<RunEnd> {
         // inside `correct` regardless of what is passed here - so passing
         // `Some` unconditionally is exactly the old unconditional
         // `Some(energy.field())` this replaces, for every model.
-        let thermal = ThermalCtx { t: energy.field(), g: cc.buoyancy.g, prt: gas_props.pr_t };
+        let thermal = ThermalCtx {
+            t: energy.field(),
+            g: cc.buoyancy.g,
+            prt: gas_props.pr_t,
+            form: cc.buoyancy.form,
+        };
         turb.correct(&gpu, &flow, Some(&thermal))?;
 
         // `k` for SPEC-LIT §29.3's thermal wall function - present for

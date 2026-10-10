@@ -77,6 +77,7 @@ use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{add_boundary_contributions, relax, LduKernels};
 use crate::timescheme::Ddt;
 use crate::mesh::{GpuMesh, HostMesh};
+use crate::momentum::BuoyancyForm;
 use crate::solver::{
     device_max_mag, SolverControls, SolverKernels, SolverPerformance,
     SolverWorkspace,
@@ -163,6 +164,8 @@ pub struct TurbKernels {
     wall_distance: CudaFunction,
 
     buoyancy_production: CudaFunction,
+    /// SPEC-LIT §121.6 - the Boussinesq twin of `buoyancy_production`.
+    buoyancy_production_boussinesq: CudaFunction,
     add_buoyancy_k: CudaFunction,
     add_buoyancy_epsilon: CudaFunction,
     add_buoyancy_omega: CudaFunction,
@@ -208,6 +211,7 @@ impl TurbKernels {
             wall_distance: k.func("turbWallDistance")?,
 
             buoyancy_production: k.func("turbBuoyancyProduction")?,
+            buoyancy_production_boussinesq: k.func("turbBuoyancyProductionBoussinesq")?,
             add_buoyancy_k: k.func("turbAddBuoyancyToK")?,
             add_buoyancy_epsilon: k.func("turbAddBuoyancyToEpsilon")?,
             add_buoyancy_omega: k.func("turbAddBuoyancyToOmega")?,
@@ -710,7 +714,16 @@ pub struct BuoyancyProduction {
     /// Absolute-temperature floor for the `1/T` in the term. Not a physical
     /// constant - a guard, so a zero in the temperature field announces itself
     /// as a wrong answer rather than as a NaN.
+    ///
+    /// Only the density-ratio form reads it: (121.6) has no divide and no
+    /// floor, so a Boussinesq [`Self::form`] ignores it entirely.
     pub t_min: Scalar,
+    /// Which density law the term follows - SPEC-LIT §17 or §121.6. The
+    /// default `DensityRatio` divides by the local `T` behind the floor
+    /// `t_min`; `Boussinesq { beta }` evaluates
+    /// `G_b = beta (nu_t/Pr_t) g·grad(T)`, which reads no temperature at
+    /// all, so `t_min` is unused under it.
+    pub form: BuoyancyForm,
 }
 
 impl Default for BuoyancyProduction {
@@ -721,6 +734,7 @@ impl Default for BuoyancyProduction {
             c3: C3Mode::default(),
             epsilon_stable_branch: false,
             t_min: 1.0,
+            form: BuoyancyForm::DensityRatio,
         }
     }
 }
@@ -745,6 +759,16 @@ impl BuoyancyProduction {
                 return Err(Error::Config(format!("C3 is {v}")));
             }
         }
+        // SPEC-LIT §121.6: `Momentum::new` refuses a non-finite beta by name
+        // for the same reason - there is no floor downstream to catch it.
+        if let BuoyancyForm::Boussinesq { beta } = self.form {
+            if !beta.is_finite() {
+                return Err(Error::Config(format!(
+                    "beta is {beta}; the Boussinesq thermal expansion \
+                     coefficient must be finite (SPEC-LIT §121.6)"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -758,6 +782,14 @@ impl BuoyancyProduction {
 /// The sign is the whole point: with `g` pointing down and `grad(T)` up -
 /// stable stratification - `g·grad(T) < 0` and `G_b < 0`, so buoyancy
 /// destroys turbulence. `tests::buoyancy_production_sign` pins it.
+///
+/// SPEC-LIT §121.6 offers the Boussinesq form
+/// `G_b = beta (nu_t/Pr_t) g·grad(T)` beside it, selected by `b.form`:
+/// `DensityRatio` launches §17's kernel with its argument list unchanged -
+/// `t` and the floor `t_min` included - so every existing run is bit for bit
+/// what it always was; `Boussinesq { beta }` launches
+/// `turbBuoyancyProductionBoussinesq`, which takes `beta` instead and does
+/// not read `t` at all. Both compute `C_3` the same way, bit for bit.
 #[allow(clippy::too_many_arguments)]
 pub fn buoyancy_production(
     gpu: &Gpu,
@@ -778,27 +810,54 @@ pub fn buoyancy_production(
     let (mode, c3c) = b.c3.as_args();
     let r_prt = 1.0 / b.prt;
     let (gx, gy, gz) = (b.g.x, b.g.y, b.g.z);
-    let t_min = b.t_min;
 
-    let f = kern.buoyancy_production.clone();
-    unsafe {
-        gpu.stream()
-            .launch_builder(&f)
-            .arg(gb)
-            .arg(c3)
-            .arg(nut)
-            .arg(grad_t)
-            .arg(t)
-            .arg(u)
-            .arg(&gx)
-            .arg(&gy)
-            .arg(&gz)
-            .arg(&r_prt)
-            .arg(&mode)
-            .arg(&c3c)
-            .arg(&t_min)
-            .arg(&nl)
-            .launch(cfg_for(n))?;
+    match b.form {
+        BuoyancyForm::DensityRatio => {
+            // SPEC-LIT §17, the launch exactly as it has always been.
+            let t_min = b.t_min;
+            let f = kern.buoyancy_production.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(gb)
+                    .arg(c3)
+                    .arg(nut)
+                    .arg(grad_t)
+                    .arg(t)
+                    .arg(u)
+                    .arg(&gx)
+                    .arg(&gy)
+                    .arg(&gz)
+                    .arg(&r_prt)
+                    .arg(&mode)
+                    .arg(&c3c)
+                    .arg(&t_min)
+                    .arg(&nl)
+                    .launch(cfg_for(n))?;
+            }
+        }
+        BuoyancyForm::Boussinesq { beta } => {
+            // SPEC-LIT §121.6 - same G_b buffer, same C_3, no `t`.
+            let f = kern.buoyancy_production_boussinesq.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(gb)
+                    .arg(c3)
+                    .arg(nut)
+                    .arg(grad_t)
+                    .arg(u)
+                    .arg(&gx)
+                    .arg(&gy)
+                    .arg(&gz)
+                    .arg(&r_prt)
+                    .arg(&beta)
+                    .arg(&mode)
+                    .arg(&c3c)
+                    .arg(&nl)
+                    .launch(cfg_for(n))?;
+            }
+        }
     }
     Ok(())
 }
@@ -2607,5 +2666,263 @@ mod tests {
         assert!((got[0] - 3.0).abs() < 1e-12);
 
         Ok(())
+    }
+
+    // ----------------------------------------------------------------------
+    //  The Boussinesq production - SPEC-LIT §121.6
+    // ----------------------------------------------------------------------
+
+    use crate::momentum::BuoyancyForm;
+
+    /// The build's `Scalar` widened to the f64 the answer keys are computed
+    /// in: a no-op in this build, the exact widening under `single`.
+    #[allow(clippy::useless_conversion)]
+    fn w64(x: Scalar) -> f64 {
+        x as f64
+    }
+
+    /// The 8-ulp-of-the-build rule the §121.6 tests are written against.
+    fn within_8_ulp(got: Scalar, want: f64) -> bool {
+        let eps = Scalar::EPSILON as f64;
+        (w64(got) - want).abs() <= 8.0 * eps * w64(got).abs()
+    }
+
+    /// Fixture F - six awkward cells for the §121.6 term: a `nut` spanning
+    /// two decades, a `grad(T)` that turns the dot with `g` through both
+    /// signs, `T` from 256 K to 1173.15 K (256 and 512 are the dyadic T the
+    /// bitwise `beta = 1/T` checks hang off) and a velocity field that
+    /// exercises the Henkes split.
+    fn fixture_f() -> (Vec3, Scalar, Vec<Scalar>, Vec<Vec3>, Vec<Scalar>, Vec<Vec3>) {
+        (
+            Vec3::new(0.3, -0.2, -9.81),
+            0.85,
+            vec![0.02, 0.035, 0.011, 0.5, 0.0042, 1.3],
+            vec![
+                Vec3::new(0.0, 0.0, 50.0),
+                Vec3::new(0.0, 0.0, -50.0),
+                Vec3::new(2.0, -1.0, 30.0),
+                Vec3::new(-1.0, 0.5, -80.0),
+                Vec3::new(0.1, 0.2, 5.0),
+                Vec3::new(-3.0, 2.0, -12.0),
+            ],
+            vec![256.0, 512.0, 293.15, 1173.15, 300.0, 350.5],
+            vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 2.0),
+                Vec3::new(0.3, -0.4, 1.2),
+                Vec3::new(0.0, 0.7, 0.0),
+                Vec3::new(-2.0, 1.0, -0.5),
+            ],
+        )
+    }
+
+    /// Launch [`buoyancy_production`] on plain buffers - the term needs no
+    /// mesh - and read both results back.
+    fn run_buoy(
+        gpu: &Gpu,
+        kern: &TurbKernels,
+        nut: &[Scalar],
+        grad_t: &[Vec3],
+        t: &[Scalar],
+        u: &[Vec3],
+        b: &BuoyancyProduction,
+    ) -> Result<(Vec<Scalar>, Vec<Scalar>)> {
+        let n = nut.len();
+        let nut_b = gpu.upload(nut)?;
+        let grad_b = gpu.upload(grad_t)?;
+        let t_b = gpu.upload(t)?;
+        let u_b = gpu.upload(u)?;
+        let mut gb: DevBuf<Scalar> = gpu.zeros(n)?;
+        let mut c3: DevBuf<Scalar> = gpu.zeros(n)?;
+        buoyancy_production(gpu, kern, &mut gb, &mut c3, &nut_b, &grad_b, &t_b, &u_b, b, n)?;
+        gpu.sync()?;
+        Ok((gpu.download(&gb)?, gpu.download(&c3)?))
+    }
+
+    /// SPEC-LIT §121.6 and (121.7): the Boussinesq `G_b` is the density-ratio
+    /// `G_b` times exactly `beta*T`, whatever `C_3` convention runs beside
+    /// it - and with `beta = 1/T` the two forms agree bit for bit, both
+    /// kernels then scaling the same product by a dyadic.
+    #[test]
+    fn boussinesq_gb_equals_ratio_gb_times_t_beta() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+        let kern = TurbKernels::new(&gpu)?;
+        let (g, prt, nut, grad_t, t, u) = fixture_f();
+        let beta: Scalar = 3.4e-3;
+
+        for c3 in [C3Mode::Henkes, C3Mode::Constant(0.7)] {
+            let ratio = BuoyancyProduction {
+                g,
+                prt,
+                c3,
+                form: BuoyancyForm::DensityRatio,
+                ..Default::default()
+            };
+            let bous = BuoyancyProduction {
+                g,
+                prt,
+                c3,
+                form: BuoyancyForm::Boussinesq { beta },
+                ..Default::default()
+            };
+            let (gb_r, c3_r) = run_buoy(&gpu, &kern, &nut, &grad_t, &t, &u, &ratio)?;
+            let (gb_b, c3_b) = run_buoy(&gpu, &kern, &nut, &grad_t, &t, &u, &bous)?;
+
+            for c in 0..nut.len() {
+                assert_eq!(
+                    c3_b[c].to_bits(),
+                    c3_r[c].to_bits(),
+                    "cell {c}: C_3 moved between the forms"
+                );
+                // (121.7): G_b,B = G_b,R * T * beta, cell by cell.
+                let want = w64(gb_r[c]) * w64(t[c]) * w64(beta);
+                assert!(
+                    within_8_ulp(gb_b[c], want),
+                    "cell {c}: device {} against (121.7) {want}",
+                    gb_b[c]
+                );
+            }
+
+            // beta = 1/T: both forms are then the same product scaled by a
+            // dyadic, so the agreement is exact, bit for bit.
+            for (cell, one_over_t) in [(0usize, 1.0 / 256.0), (1usize, 1.0 / 512.0)] {
+                let exact = BuoyancyProduction {
+                    g,
+                    prt,
+                    c3,
+                    form: BuoyancyForm::Boussinesq { beta: one_over_t },
+                    ..Default::default()
+                };
+                let (gb_e, _) = run_buoy(&gpu, &kern, &nut, &grad_t, &t, &u, &exact)?;
+                assert_eq!(
+                    gb_e[cell].to_bits(),
+                    gb_r[cell].to_bits(),
+                    "cell {cell}: beta = 1/T must give the ratio form bit for bit"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// SPEC-LIT §121.6 carrying §17's sign argument over unchanged: `grad(T)`
+    /// up against `g` down is a stable layer and `G_b < 0`; above a heat
+    /// source the dot turns round and `G_b > 0`. Cell 0 is about
+    /// -0.02308235.
+    #[test]
+    fn boussinesq_gb_sign_follows_the_stratification() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+        let kern = TurbKernels::new(&gpu)?;
+        let g = Vec3::new(0.0, 0.0, -9.81);
+        let prt: Scalar = 0.85;
+        let beta: Scalar = 2.0e-3;
+        let nut = vec![0.02, 0.02];
+        let grad_t = vec![Vec3::new(0.0, 0.0, 50.0), Vec3::new(0.0, 0.0, -50.0)];
+        let t = vec![300.0, 300.0];
+        let u = vec![Vec3::ZERO; 2];
+        let b = BuoyancyProduction {
+            g,
+            prt,
+            c3: C3Mode::Constant(0.0),
+            form: BuoyancyForm::Boussinesq { beta },
+            ..Default::default()
+        };
+        let (gb, _) = run_buoy(&gpu, &kern, &nut, &grad_t, &t, &u, &b)?;
+
+        // The host formula in f64, with `rPrt` formed in `Scalar` first -
+        // the kernel forms its rPrt the same way, and the answer key has to
+        // round where the kernel rounds.
+        let r_prt = 1.0 / prt;
+        let dtdz = [50.0, -50.0];
+        for c in 0..2 {
+            let want = w64(beta) * w64(nut[c]) * w64(r_prt) * w64(g.z) * w64(dtdz[c]);
+            assert!(
+                within_8_ulp(gb[c], want),
+                "cell {c}: device {} against (121.6) {want}",
+                gb[c]
+            );
+        }
+        assert!(gb[0] < 0.0, "a stable layer must destroy k, gave {}", gb[0]);
+        assert!(gb[1] > 0.0, "above a heat source G_b must make k, gave {}", gb[1]);
+        assert!(
+            (w64(gb[0]) + 0.02308235).abs() < 1e-6,
+            "cell 0 is about -0.02308235, gave {}",
+            gb[0]
+        );
+        Ok(())
+    }
+
+    /// SPEC-LIT §121.6: the Boussinesq kernel reads no temperature, so a NaN
+    /// or zero `t` cannot reach `G_b` - three launches identical but for the
+    /// `t` buffer, and every bit of `G_b` must agree across them.
+    #[test]
+    fn boussinesq_gb_does_not_read_the_temperature() -> Result<()> {
+        let Some(gpu) = gpu() else {
+            return Ok(());
+        };
+        let kern = TurbKernels::new(&gpu)?;
+        let (g, prt, nut, grad_t, t, u) = fixture_f();
+        let b = BuoyancyProduction {
+            g,
+            prt,
+            c3: C3Mode::Henkes,
+            form: BuoyancyForm::Boussinesq { beta: 3.4e-3 },
+            ..Default::default()
+        };
+
+        let (gb_finite, _) = run_buoy(&gpu, &kern, &nut, &grad_t, &t, &u, &b)?;
+        let nans = vec![Scalar::NAN; nut.len()];
+        let (gb_nan, _) = run_buoy(&gpu, &kern, &nut, &grad_t, &nans, &u, &b)?;
+        let zeros = vec![0.0; nut.len()];
+        let (gb_zero, _) = run_buoy(&gpu, &kern, &nut, &grad_t, &zeros, &u, &b)?;
+
+        for c in 0..nut.len() {
+            assert_eq!(
+                gb_nan[c].to_bits(),
+                gb_finite[c].to_bits(),
+                "cell {c}: a NaN temperature leaked into G_b"
+            );
+            assert_eq!(
+                gb_zero[c].to_bits(),
+                gb_finite[c].to_bits(),
+                "cell {c}: a zero temperature leaked into G_b"
+            );
+            assert!(
+                gb_finite[c].is_finite(),
+                "cell {}: {} is not finite",
+                c,
+                gb_finite[c]
+            );
+        }
+        Ok(())
+    }
+
+    /// SPEC-LIT §121.6: a non-finite `beta` is refused BY NAME, as
+    /// `Momentum::new` refuses it for the force. Host-side - no launch, so
+    /// no card needed.
+    #[test]
+    fn boussinesq_production_refuses_a_non_finite_beta() {
+        let mut b = BuoyancyProduction::default();
+        assert_eq!(b.form, BuoyancyForm::DensityRatio);
+        assert!(b.validate().is_ok());
+
+        b.form = BuoyancyForm::Boussinesq { beta: 3.4e-3 };
+        assert!(b.validate().is_ok());
+
+        for beta in [Scalar::NAN, Scalar::INFINITY] {
+            b.form = BuoyancyForm::Boussinesq { beta };
+            let err = b
+                .validate()
+                .err()
+                .expect("a non-finite beta must be refused");
+            assert!(
+                err.to_string().contains("beta"),
+                "the refusal must name beta: {err}"
+            );
+        }
     }
 }

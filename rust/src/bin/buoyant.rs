@@ -133,7 +133,7 @@ use ofgpu::io::fields::{
 };
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::models::{build_coupled, select_turbulence_model, CoupledTurbulence, RasModel, ThermalCtx};
-use ofgpu::momentum::{BuoyancyCoeffs, MomentumControls};
+use ofgpu::momentum::{BuoyancyCoeffs, BuoyancyForm, MomentumControls};
 use ofgpu::potential_flow::{
     mean_inflow_speed, solve_potential_flow, PotentialFlowResult, PotentialFlowSpec,
 };
@@ -1222,7 +1222,7 @@ fn one_pass(
     heat: &mut ScalarTransport<'_>,
     backend: &mut dyn PressureBackend,
     n_correctors: Label,
-    thermal: Option<(Vec3, Scalar)>,
+    thermal: Option<(Vec3, Scalar, BuoyancyForm)>,
     diss_name: &'static str,
 ) -> Result<Residuals> {
     let mut r = Residuals::default();
@@ -1260,7 +1260,12 @@ fn one_pass(
     // buoyancy production of SPEC-LIT 17 possible at all. `heat.field()` has
     // had its boundary conditions evaluated by the previous `heat.correct`,
     // which grad(T) reads directly.
-    let ctx = thermal.map(|(g, prt)| ThermalCtx { t: heat.field(), g, prt });
+    let ctx = thermal.map(|(g, prt, form)| ThermalCtx {
+        t: heat.field(),
+        g,
+        prt,
+        form,
+    });
     let (eps, k) = turb.correct(gpu, &flow, ctx.as_ref())?;
     let t = heat.correct(gpu, &flow, turb.nut())?;
 
@@ -1288,7 +1293,7 @@ fn one_step(
     outer: Label,
     n_correctors: Label,
     dt: Scalar,
-    thermal: Option<(Vec3, Scalar)>,
+    thermal: Option<(Vec3, Scalar, BuoyancyForm)>,
     diss_name: &'static str,
     open_step: bool,
 ) -> Result<Residuals> {
@@ -1416,11 +1421,12 @@ struct Fields<'a, 'm> {
     turb: &'a mut dyn CoupledTurbulence,
     heat: &'a mut ScalarTransport<'m>,
     backend: &'a mut dyn PressureBackend,
-    /// `(g, Prt)` when the case has gravity - SPEC-LIT §17's buoyancy
-    /// production, rebuilt into a [`ThermalCtx`] once per pass because the
-    /// temperature field it borrows changes every pass and a `ThermalCtx`
-    /// cannot outlive the borrow that made it.
-    thermal: Option<(Vec3, Scalar)>,
+    /// `(g, Prt, form)` when the case has gravity - SPEC-LIT §17's buoyancy
+    /// production, §121.6's Boussinesq form carried on `form`, rebuilt into
+    /// a [`ThermalCtx`] once per pass because the temperature field it
+    /// borrows changes every pass and a `ThermalCtx` cannot outlive the
+    /// borrow that made it.
+    thermal: Option<(Vec3, Scalar, BuoyancyForm)>,
     /// "epsilon" or "omega" - which dissipation equation this run's model
     /// actually carries, for [`Residuals::by_field`] and the printed report.
     diss_name: &'static str,
@@ -2219,23 +2225,39 @@ fn run(o: &Options) -> Result<()> {
     //
     //     G_b = (nu_t/Pr_t) g . grad(T) / T
     //
+    // or, when the case opted into SPEC-LIT 121.6's Boussinesq form (the
+    // `form` that travels with `g` and `Pr_t` below),
+    //
+    //     G_b = beta (nu_t/Pr_t) g . grad(T)
+    //
     // Pr_t is the SAME turbulent Prandtl number the temperature equation
     // diffuses with, read from the case once: two different values of one
     // constant in one run is exactly the kind of quiet inconsistency
     // SPEC-LIT 15.6 is about.
-    let thermal_cfg: Option<(Vec3, Scalar)> = if buoy.is_active() {
-        println!(
-            "turbulence buoyancy: G_b = (nut/Prt) g.grad(T)/T, Prt {}, {}",
-            g(f64::from(t_coeffs.prt)),
-            ofgpu::models::buoyancy_settings(&cc)
-                .map(|b| b.c3.describe())
-                .unwrap_or_default()
-        );
+    let thermal_cfg: Option<(Vec3, Scalar, BuoyancyForm)> = if buoy.is_active() {
+        match buoy.form {
+            BuoyancyForm::Boussinesq { beta } => println!(
+                "turbulence buoyancy: G_b = beta (nut/Prt) g.grad(T), beta {}, \
+                 Prt {}, {}",
+                g(f64::from(beta)),
+                g(f64::from(t_coeffs.prt)),
+                ofgpu::models::buoyancy_settings(&cc)
+                    .map(|b| b.c3.describe())
+                    .unwrap_or_default()
+            ),
+            BuoyancyForm::DensityRatio => println!(
+                "turbulence buoyancy: G_b = (nut/Prt) g.grad(T)/T, Prt {}, {}",
+                g(f64::from(t_coeffs.prt)),
+                ofgpu::models::buoyancy_settings(&cc)
+                    .map(|b| b.c3.describe())
+                    .unwrap_or_default()
+            ),
+        }
         println!(
             "  stable stratification gives G_b < 0 (destroys k); above a heat \
              source G_b > 0 (makes it)"
         );
-        Some((buoy.g, t_coeffs.prt))
+        Some((buoy.g, t_coeffs.prt, buoy.form))
     } else {
         println!("turbulence buoyancy: no gravity in the case, so G_b is identically zero");
         None

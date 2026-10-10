@@ -7929,7 +7929,12 @@ fn check_coupled_selection(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()>
     correct_boundary_conditions(gpu, &k.field, &mut t, &mesh)?;
 
     let g = ofgpu::Vec3::new(0.0, 0.0, -9.81);
-    let thermal = ThermalCtx { t: &t, g, prt: 0.85 };
+    let thermal = ThermalCtx {
+        t: &t,
+        g,
+        prt: 0.85,
+        form: ofgpu::momentum::BuoyancyForm::DensityRatio,
+    };
 
     let run_one = |src: &str| -> Result<(String, Vec<Scalar>)> {
         let cc = case(src);

@@ -37558,6 +37558,61 @@ at `1e-14` rather than `1e-12`. With a Dirichlet anchor the stopping residual pa
 
 Gate CMP-B (de Vahl Davis with Boussinesq, CMP-04) adds its rows here when it lands.
 
+### 121.6 Buoyancy production of k, ε and ω under Boussinesq (CMP-02)
+
+§17 writes the buoyancy production for any density law, after **Rodi, W. (1987), "Examples of
+calculation methods for flow and mixing in stratified fluids", *J. Geophys. Res.* 92(C5)
+5305-5328, doi:10.1029/JC092iC05p05305** (DOI checked against Crossref on 2026-10-11):
+
+```
+G_b = -(nu_t / Pr_t) g . grad(rho) / rho
+```
+
+Under the Boussinesq approximation the density varies only in the body force, so the `rho` that
+divides is `rho_ref`, and (121.1) gives `grad(rho)/rho_ref = -beta grad(T)` exactly. Hence
+
+```
+G_b = beta (nu_t / Pr_t) g . grad(T)                                  (121.6)
+```
+
+evaluated in the order `nu_t · (1/Pr_t) · (g · grad T) · beta`. Against §17's density-ratio form
+`(nu_t/Pr_t) g . grad(T) / T` the two differ by exactly
+
+```
+G_b,Boussinesq / G_b,ratio = beta T                                   (121.7)
+```
+
+which with `beta = 1/T_ref` is the same factor `T/T_ref` that (121.4) gives for the force. The sign
+argument of §17 carries over unchanged for `beta > 0`: a stably stratified layer (`grad T` up, `g`
+down) has `G_b < 0` and destroys turbulence; the layer above a heat source has `G_b > 0`.
+
+*DESIGN* (CMP-02):
+
+- `turbulence::BuoyancyProduction` gains `form: momentum::BuoyancyForm`, the same enum §121.3 gave
+  `BuoyancyCoeffs`, default `DensityRatio`. `models::coupled::ThermalCtx` carries the form from the
+  case's `BuoyancyCoeffs` to every model wrapper, beside `g` and `Pr_t`. `T_ref` is still not on it:
+  neither (121.6) nor §17's form reads it.
+- `DensityRatio` runs §17's kernel `turbBuoyancyProduction` with its launch unchanged, so its SASS and
+  every f64 result stay as they were. (121.6) runs in its own kernel
+  `turbBuoyancyProductionBoussinesq` in `cuda/turbulence.cu`. It does not read `T`, so it has no
+  temperature floor, and `C_3` (constant or Henkes) is computed exactly as §17's kernel computes it.
+- How `G_b` enters `k`, `ε` and `ω` (§17's table, the stable-branch switch, SST's per-cell `gamma`) is
+  unchanged: the consumers read the `G_b` buffer whichever form wrote it.
+- `BuoyancyProduction::validate` refuses a non-finite `beta` by name, as `Momentum::new` does (§121.3).
+
+| test | assertion | class |
+|---|---|---|
+| `turbulence::tests::boussinesq_gb_equals_ratio_gb_times_t_beta` and its twin in `tests/f32_boussinesq.rs` | (121.7) per cell to 8 ulp of the build; bitwise at `T = 256, beta = 1/256` and `T = 512, beta = 1/512`; `C_3` bitwise equal between the two forms (Henkes and a constant) | D |
+| `turbulence::tests::boussinesq_gb_sign_follows_the_stratification` (and twin) | `G_b < 0` for a stable layer, `> 0` above a heat source, each equal to (121.6) evaluated in f64 to 8 ulp of the build | P |
+| `turbulence::tests::boussinesq_gb_does_not_read_the_temperature` (and twin) | a NaN or zero temperature field gives the same `G_b` bit for bit as a finite one | D |
+| `turbulence::tests::boussinesq_production_refuses_a_non_finite_beta` (and twin) | `validate` refuses NaN and infinite `beta`, naming `beta` | D |
+
+**Landed (CMP-02, 2026-10-11, RTX 5070 Ti).** All four tests and their twins pass in both builds, the
+bitwise rows included under `single`. f64 identity: `turbulence.cubin` gains the one new kernel and the SASS of
+its 32 existing kernels is unchanged (every other cubin is identical); `ofgpu-validate -sections 10,15`, which
+holds §17's `G_b` rows and the coupled-selection run on a buoyant case, is row-identical (85 rows). No case can
+select the form yet: `physics.buoyancy: "boussinesq"` stays refused by name until CMP-03 lowers it.
+
 ## 122. The compressible gas — the perfect-gas state, the gauge pressure about `p_op`, Sutherland, and the f32 design
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §122-§127 to the

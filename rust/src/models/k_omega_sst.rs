@@ -1599,6 +1599,7 @@ mod tests {
             c3: crate::turbulence::C3Mode::Constant(0.0),
             epsilon_stable_branch: true,
             t_min: 1.0,
+            form: crate::momentum::BuoyancyForm::DensityRatio,
         };
 
         let (k0, w0): (Scalar, Scalar) = (1.0, 2.0);
