@@ -36850,7 +36850,54 @@ fifteen arrays, with `b_weights == 0.5` exactly on the paired faces, and pins
 the all-or-nothing rule (a region after `release_geom64()` leaves the
 concatenated view unshadowed under `single` and shadowed in the f64 build).
 
-Measured by the supervisor on 2026-10-07: TO BE FILLED.
+Measured by the supervisor on 2026-10-10, on the RTX 5070 Ti (sm_120), with
+`ofgpu-validate` built at `d633533` (before this unit) and at `a705189` (after
+it; `src/cht.rs` and `src/bin/validate.rs` are this unit's version there). The
+section numbers are the run-order numbers of that tree: 8 is "observed order
+and reported uncertainty (SPEC-LIT 94)", 26-29 the conduction and conjugate
+sections (SPEC-LIT 46-48, Gate 93-B, Gate 93-A, SPEC-LIT 59-60), 41-44 Gates
+95-D, 95-E, 95-A and 95-G.
+
+- **f64 build, before = after.** `-sections 8,26-29 -json` gives 92/92 checks
+  passed at both commits, and `tools/f64_identity.py rows` reports ROWS
+  IDENTICAL 147 (the 92 checks and the 55 skip rows). `-sections 41-44` gives
+  49/54 at both commits, ROWS IDENTICAL 110; its five FAIL rows (Gate 95-A
+  5:1 and 10:1 "block-coupled loop converged, n_y = 4" and "displacement
+  order", Gate 95-G "order of the bore-point error") are the same rows with the
+  same numbers before this unit and are not conduction rows. SASS: 42 of the 43
+  cubins hash identically; `solidblock.cubin` differs, and no `.cu` file and no
+  `build.rs` changed between the two commits, so it is that cubin's known
+  nvcc flip-flop between plain recompiles, not this unit.
+- **Section 8 under `single`.** Before: "validation aborted: conduction: the
+  anisotropy residual ... is 0.00000011920926 at internal face 422, limit
+  0.0000000001", the §112.4 abort, no row. After: 14/14 checks passed, the
+  section's 10 rows and the 4 registry rows. Its rows read as in the f64 build
+  except for the measured errors: the axis-aligned anisotropy residual is
+  `2.030e-16` (f64 build `2.220e-16`, tol `1e-14`), Gate 94-B's interface
+  angle is 20.0 deg at err `1.011e-4` (f64 `1.201e-12`, tol `1e-2`), and the
+  Gate 94-B leg 2 jump is `2.304e-2` in both builds (tol `5e-2`).
+- **Sections 26-29 and 41 under `single`.** Before: each aborts at setup on the
+  same refusal (section 26 and 28 at `1.16935034e-7`, boundary face 36; 27 at
+  `7.681547e-8`; 29 at `1.3411037e-7`; 41 at `2.7156437e-7`). After: none of
+  them is refused at setup, and no row they print is an F32-05 refusal.
+  Section 26 reports 16 rows, 9 ok; 27 reports 6, 2 ok; 28 reports 8, 8 ok. The 11 FAIL rows are
+  not setup refusals. Seven are round-off rows with tolerances of `1e-10` to
+  `1e-14` (Gate 1's q, jump and first-iterate flux continuity at `1.103e-5`,
+  `2.384e-6`, `3.221e-8`; Gate 4's interface conservation `9.148e-8`;
+  S46.3's tensor path `9.832e-8`; S48.2's exported CSR `1.936e-7`; Gate 93-B
+  leg A's partition `3.043e-8`; f64 build `0` to `3.4e-14` on each), which are
+  the R rows of F32-13/F32-14. Four are solves that do not reach their f64
+  tolerance in f32 (Gate 2's `k_solid -> infinity` at `3.662e-4` against
+  `8e-5`, and Gate 93-B leg B's three rows: no global tolerance in `[1e-8,
+  1e-14]` gives every region `1e-8`, so q and the interface temperature miss by
+  `1.0` and `4.748`), which is F32-06's iterative refinement. Section 29 runs
+  without a refusal but needs more than ten minutes under `single` (Gate 59-B
+  misses its series-resistance limit by `1.172e-2` at `Kr = 0.1` and by
+  `2.075e-3` at `Kr = 1`, against `1e-5`), and section
+  41 prints no row in ten minutes, so neither has a full count yet. Sections
+  42-44 are not conduction refusals: before this unit 42 already ran past the
+  limit and 43-44 failed their solid outer loops, and after it 43's first
+  eight rows are the same as before.
 
 **What it does not do.** A region mesh without a shadow (decomposed,
 device-swept, hand-built, or after `release_geom64`) makes the concatenated
