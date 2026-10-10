@@ -896,7 +896,58 @@ def test_repair_zero_area_fill(top):
     assert int(np.count_nonzero(np.all(zc == 0.0, axis=1))) == 1, zc
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill)
+def test_repair_g_defects_red(top):
+    """AUT-01 (docs/17 §12.6): the RED G fixtures fail with today's counts."""
+    base = os.path.dirname(GEOM_TOOL)
+    for rel in ('../autonomy', '../autonomy/corpus'):
+        p = os.path.abspath(os.path.join(base, rel))
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import inject, split
+    with open(os.path.join(base, 'fixtures', 'g_defects', 'g_defects.json'),
+              encoding='utf-8') as f:
+        doc = json.load(f)
+    assert doc['schema'] == 'g-defect-fixtures/1', doc['schema']
+    assert len(doc['fixtures']) == 4, len(doc['fixtures'])
+    assert all(fx['status'] == 'red' for fx in doc['fixtures'])
+    assert {fx['class'] for fx in doc['fixtures']} == \
+        {'duplicate', 'flip', 'hole', 't_junction'}
+    rows = {r['geometry_id']: r for r in split.load('tuning', 'fixture')}
+    try:
+        split.refuse_test('G-2-074', 'fixture')
+    except split.SplitSealed:
+        pass
+    else:
+        raise AssertionError('seed-2 test id G-2-074 was not refused')
+    d = work(top, 'g_defects')
+    for fx in doc['fixtures']:
+        gid = fx['geometry_id']
+        assert split.refuse_test(gid, 'fixture') == 'tuning', gid
+        row = rows[gid]
+        assert row['family'] == 'G' and row['split'] == 'tuning', gid
+        assert (row['params']['defect'], row['params']['count']) == \
+            (fx['class'], fx['count']), gid
+        assert row['stl_sha256'] == fx['stl_sha256'], gid
+        if fx['class'] == 'hole':
+            assert 33 <= fx['count'] <= 64, fx['count']
+        stl = inject.write_row(row, d)
+        jp = os.path.join(d, gid + '.json')
+        repair(stl, '--json', jp)
+        rep = load(jp)
+        b, a, t = rep['before'], rep['after'], fx['today']
+        assert (b['open_edges'], b['non_manifold_edges'],
+                a['open_edges'], a['non_manifold_edges']) == \
+            (t['open_before'], t['non_manifold_before'],
+             t['open_after'], t['non_manifold_after']), (gid, b, a)
+        assert b['closed'] is False and a['closed'] is False, gid
+        assert ((not b['closed']) and a['closed']) == t['repaired'], gid
+        print('  RED %s %s: open %d -> %d, non-manifold %d -> %d, repaired %s'
+              % (gid, fx['class'], t['open_before'], t['open_after'],
+                 t['non_manifold_before'], t['non_manifold_after'],
+                 'true' if t['repaired'] else 'false'), flush=True)
+
+
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill, test_repair_g_defects_red)
 
 
 def main(argv=None):
