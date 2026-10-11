@@ -247,7 +247,8 @@ fn topology_override(kind: PatchKind) -> Option<BcKind> {
     match kind {
         PatchKind::Empty => Some(BcKind::Empty),
         PatchKind::Cyclic | PatchKind::Processor => Some(BcKind::Cyclic),
-        PatchKind::Symmetry => Some(BcKind::Symmetry),
+        // SPEC-LIT 119.1: a wedge side rides with symmetry until BC-04.
+        PatchKind::Symmetry | PatchKind::Wedge => Some(BcKind::Symmetry),
         // SPEC-LIT S47.4: a conjugate interface is topologically coupled, but
         // WHICH condition it carries is the field's business - `T` gets
         // `CoupledTemperature` from `crate::cht`, and any other field on the

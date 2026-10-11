@@ -154,6 +154,8 @@ OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
 #define OFP_PATCH_WALL     1
 #define OFP_PATCH_EMPTY    2
 #define OFP_PATCH_SYMMETRY 3
+//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+#define OFP_PATCH_WEDGE    7
 
 // Counter slots. Integer counters only: integer addition is associative, so
 // an atomic on one is order-independent and therefore reproducible. There is
@@ -432,7 +434,7 @@ OFGPU_DEV oflabel parcelWalkTo
         // governed by `wallAction`. `empty` is the 2-D front/back: a parcel
         // that left through one would be leaving the plane the case is
         // solved on.
-        int reflect = (kind == OFP_PATCH_SYMMETRY) || (kind == OFP_PATCH_EMPTY);
+        int reflect = (kind == OFP_PATCH_SYMMETRY) || (kind == OFP_PATCH_WEDGE) || (kind == OFP_PATCH_EMPTY);
         // SPEC-LIT (78.6): does this impact leave the droplet's mass on the
         // wall? Zero on every path S66 had, so the block below it is dead
         // code for `remove` and `rebound` and the two are bitwise what they

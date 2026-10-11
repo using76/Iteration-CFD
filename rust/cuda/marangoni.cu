@@ -70,6 +70,8 @@
 // --------------------------------------------------------------------------
 #define OFPATCH_EMPTY     2
 #define OFPATCH_SYMMETRY  3
+//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+#define OFPATCH_WEDGE     7
 
 //- The component view of a vector, as cuda/momentum.cu defines it: `cmpt` is
 //  0, 1 or 2, and anything else selects z, which is what `Vec3::component`
@@ -279,7 +281,7 @@ extern "C" __global__ void marBodyForceFluxBoundary
     if (i >= nbf) return;
 
     const oflabel k = bKind[i];
-    if (k == OFPATCH_EMPTY || k == OFPATCH_SYMMETRY || fr[i] >= (ofscalar)1)
+    if (k == OFPATCH_EMPTY || k == OFPATCH_SYMMETRY || k == OFPATCH_WEDGE || fr[i] >= (ofscalar)1)
     {
         bphib[i] = 0;
         return;

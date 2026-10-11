@@ -37453,6 +37453,127 @@ ed., SIAM, doi:10.1137/1.9780898718027**, ch. 12. And §8.1, §8.2, §8.4,
 
 No GPL-licensed source was consulted.
 
+### 118.5 The delta form of a transient step — f64 time levels, the increment solved in float
+
+Under `single` a time step whose increment is below `u32·|psi|`
+(`u32 = 2^-24`) is lost twice, and §118.4's refinement cannot bring it back.
+First, `tsDdtGeneral` (§13.3) forms `source -= V·(a_0·psi0 + a_00·psi00)` in
+float, so the increment rounds away inside the right-hand side before any
+solve runs; refinement then solves the float system to double accuracy and
+finds the old level again. Second, the stored field is float, so an
+increment that did survive the solve rounds away on the store. A
+semi-infinite slab heated by `1.0013e-8·T0` per step (the gate below) does
+not move at all under `single` in the plain form: `max|theta - erfc|` is
+**0.70** after 2000 steps, against **1.98e-4** in the f64 build. The unit is
+F32-08.
+
+**The delta form.** The time levels are carried in DOUBLE
+(`timescheme::DeltaLevels`: `x`, `x0`, `x00`), and the step solves for the
+increment `delta = psi^n - x0` instead of `psi^n`. With `M`, `b` the
+assembled SPATIAL system (after the boundary fold and any relaxation), `s`
+the ddt sign, `a_n`, `a_00` the §13.3 coefficients, and `theta = 1` for
+Euler and backward, the `CrankNicolson` coefficient for the theta method
+(§13.1):
+
+```
+R_P      = b_P - (M x0)_P - s·V_P·a_00·(x00_P - x0_P)        (118.5.1)
+source_P = fl32(R_P)                                          (118.5.2)
+diag_P   = fl32(theta·diag_P + s·V_P·a_n)                     (118.5.3)
+upper, lower, boundaryCoeffs *= theta      (theta < 1 only)   (118.5.4)
+delta^0  = fl32(x - x0)                                       (118.5.5)
+A delta  = source       by `solver::solve`, refined (118.4)    (118.5.6)
+x        = x0 + delta64,   psi = fl32(x)                      (118.5.7)
+```
+
+(118.5.1) substitutes `psi = x0 + delta` into the ddt term and uses the
+consistency of the coefficients, `a_n + a_0 + a_00 = 0` (§13.3): the old
+levels cancel analytically, `a_0` never appears, and what is left is the
+residual of the old level — a quantity of the size of the increment, so its
+float rounding is a relative `u32` of the increment rather than of `psi`.
+`(M x0)` is `solver.cu`'s double row product `amul64Row_` against the float
+coefficients widened exactly; (118.5.2) rounds `b - M x0` once and the
+`a_00` term once more (`solver::residual64_round`, then `tsDeltaDdt`), both
+relative to increment-sized quantities. For Crank-Nicolson `a_00 = 0` and
+(118.5.1) reads the FULL, unscaled `M`, so the increment system is exactly
+`(V a_n + theta M)·delta = b - M x0`, the theta method of §13.1 rearranged;
+(118.5.4) therefore scales the operator only after (118.5.1) has read it.
+The matrix the float solver sees is the full operator, so §118.4 refines
+`delta` to double; `delta64` is `SolverWorkspace::refined_solution`, or the
+float `delta` widened when the solve is a `fixedIters` one (§113.2), which
+is not refined. The level advances in double; only the stored field is
+rounded, once. This is the "delta form" of implicit schemes (Beam & Warming
+1978): the left-hand side may be approximate — here, float — because the
+right-hand side is the exact residual of the current level, and the
+correction solve is iterative refinement with the residual in the higher
+precision (Carson & Higham 2018, §118.4).
+
+**The API, and its call contract.** `DeltaLevels::new(gpu, psi, n)` seeds
+`x = x0 = x00 = fl64(psi)` (setup only); `store_old_time` rotates
+`x00 <- x0 <- x` once per step, the same event as
+`field_ops::store_old_time`; `Ddt::add_delta` replaces the
+`apply_theta` + `Ddt::add` pair and is the LAST change to the diagonal and
+off-diagonals before `solver::solve_delta`, which writes `psi` and never
+reads it under `single`. A source term added after `add_delta` is still
+correct (it enters `R` linearly); an implicit (diagonal) term is not.
+`steadyState` and `localEuler` are refused by name: neither has a time level
+to carry. In the f64 build `DevBuf<f64>` is `DevBuf<Scalar>`, `add_delta` is
+today's `apply_theta` + `add` on `x0`/`x00` and `solve_delta` is `solve`
+followed by `x <- psi`: no new arithmetic. The four kernels (`tsDeltaDdt`,
+`tsDeltaStart`, `tsDeltaAccept`, `tsDeltaAcceptWiden`) are compiled only
+under `OFGPU_SINGLE`, so the f64 `timescheme.cubin` does not change by a
+byte.
+
+**Gate — the slab** (`tests/f32_delta_form.rs`, both builds, the same
+assertions). A 256-cell slab, `dx = V = alpha = 2^-6`, `dt = 2^-9`, 2000
+steps, `T0 = 256`, the wall held at `T0 + 168·2^-15` from `t = 0`, the far
+end adiabatic at `x = 4` (`x/(2 sqrt(alpha t)) = 8.1` there); every number
+is exact in float, so both builds hold the same matrix. `theta =
+(x - T0)/(168·2^-15)` is read from the DOUBLE level. Rows: (P) `max|theta -
+erfc(x/(2 sqrt(alpha t)))| <= 1e-3`, the semi-infinite-solid solution
+(Carslaw & Jaeger 1959 ch. II; open: <https://en.wikipedia.org/wiki/Heat_equation>),
+erfc by Abramowitz & Stegun 7.1.26 (`|error| <= 1.5e-7`); (R) `max|theta -
+theta_host| <= 1e-5` against a host f64 Thomas march of the same discrete
+scheme, sharing no code with the device — the "f32 against f64" row of the
+plan, read as `1e-5` of the surface rise, because `1e-5` of `T` would hold
+with no increment at all; (D) the stored field is `fl32(level)` in every
+cell. And the defect itself: the plain form (`Ddt::add` + `solve`, Euler)
+meets (P) in the f64 build and misses it by more than 0.1 under `single`.
+
+**Measured** (RTX 5070 Ti, 2026-10-11). `single`: Euler (P) **1.984e-4**,
+(R) **4.6e-9**; backward **1.297e-4**, **4.1e-9**; Crank-Nicolson (theta
+1/2) **1.297e-4**, **2.8e-9**; the plain form **0.7016**. The f64 build:
+(P) **1.984e-4**, **1.297e-4**, **1.297e-4**; (R) **3.9e-8**, **5.7e-8**,
+**3.7e-8** (the device solve's `1e-10` tolerance on a system whose rows are
+of order `10·T0`); the plain form **1.984e-4**. The (P) floor is the mesh,
+not the scheme: backward and Crank-Nicolson agree to four digits. All five
+tests run in 9.4 s under `single`. The f64 build: every cubin's SASS hashes
+as before except `solidblock.cubin` (untouched source, the known two-hash
+flip-flop of §118.4), and `ofgpu-validate -sections 55` (Gate 105-B) is
+row-identical, 77 rows, in both builds.
+
+**What it does not do.** No driver calls the delta form yet: `ale_flow`,
+the momentum predictor (whose `rAU`/`H` read `diag` and `source` after the
+ddt), turbulence, the scalar and energy equations and the solid still call
+`Ddt::add` / `fvm_ddt_rho`, so their rows under `single` are unchanged by
+this section — in particular Gate 105-B's piston rows (validate section 55
+under `single`: the uniform state at `1.6e-2` and `6.0e-2` against `1e-10`,
+backward's observed order `nan`), which F32-15 owns with the driver files.
+The `rho`-weighted form `d(rho psi)/dt` (§86.3) has no delta arm yet; its
+(118.5.1) carries the extra term `x0·(a_n rho + a_0 rho0 + a_00 rho00)`.
+
+Sources: **Beam, R. M. & Warming, R. F. (1978), "An implicit factored scheme
+for the compressible Navier-Stokes equations", AIAA J. 16(4) 393-402,
+doi:10.2514/3.60901** (the delta form); **Carson & Higham (2018)**, open
+copy <https://eprints.maths.manchester.ac.uk/2562/1/paper.pdf>, as in
+§118.4; **Carslaw, H. S. & Jaeger, J. C. (1959), Conduction of Heat in
+Solids, 2nd ed., Oxford, ch. II**, open statement
+<https://en.wikipedia.org/wiki/Heat_equation>; **Abramowitz, M. & Stegun,
+I. A. (1964), Handbook of Mathematical Functions, NBS AMS 55, 7.1.26**, open
+scan <https://personal.math.ubc.ca/~cbm/aands/>. And §13.1, §13.3, §113.2
+and §118.4 for everything else, unchanged.
+
+No GPL-licensed source was consulted.
+
 ### 118.6 Field, phi and restart I/O at f32 — nine digits, one rounding, a bitwise restart
 
 The text writer printed `phi` at seventeen significant digits in every
@@ -37548,12 +37669,12 @@ No GPL-licensed source was consulted.
 ## 119. The true wedge: a rotational self-couple
 
 An axisymmetric case is solved on a wedge one cell thick in the
-circumferential direction. This section holds the mesh (119.0, BC-02); the
-patch kind with its derived pair, axis and angle checks (BC-03) and the
-boundary condition that couples the two wedge faces by a rotation (BC-04) add
-their subsections when they land. Until BC-03 lands, `PatchKind::from_type`
-still reads a `wedge` patch as `symmetry`, which is the stand-in §120's
-catalogue row names.
+circumferential direction. This section holds the mesh (119.0, BC-02) and
+the patch kind with its derived pair, axis and angle checks (119.1, BC-03);
+the boundary condition that couples the two wedge faces by a rotation
+(BC-04) adds its subsection when it lands. Until then a `wedge` patch is its
+own kind but every solver path still treats it as `symmetry`, which is the
+stand-in §120's catalogue row names.
 
 ### 119.0 The wedge mesh `blockgen` builds (BC-02)
 
@@ -37644,6 +37765,105 @@ Sources: ORIGINAL - elementary geometry (the area of a trapezoid, the volume
 of a right prism, the Taylor series of the tangent). The patch type name
 `wedge` is taken by name only from the two public user guides §120 links; no
 description, formula or source code was taken from either.
+
+No GPL-licensed source was consulted.
+
+### 119.1 The wedge patch kind, and the wedge derived from the mesh (BC-03)
+
+A patch typed `wedge` in `constant/polyMesh/boundary` is `PatchKind::Wedge`
+(discriminant 7), its own kind; `PatchKind::from_type` no longer reads it as
+`symmetry`. The device mirrors the number as `OFPATCH_WEDGE` (`fv.cu`,
+`momentum.cu`, `solid.cu`, `vof.cu`, `marangoni.cu`) and `OFP_PATCH_WEDGE`
+(`parcels.cu`), and `mesh::tests::device_patch_kinds_match_the_host` reads
+the six files to hold them equal. **Until BC-04 (119.2) a wedge side is
+treated exactly as a symmetry plane on every path:** the field seed and the
+topology override give it `BcKind::Symmetry`, `momFluxIsPrescribed`,
+`vofFluxIsPrescribed` and the restated Marangoni predicate count it as a
+prescribed-flux face, and a parcel that reaches it is reflected. No shipped
+mesh carries a wedge, so no f64 result moves.
+
+**The derivation.** `mesh::wedge::derive_wedge`, called by
+`io::polymesh::build_host_mesh` after the cyclic checks, stores the result
+in `HostMesh::wedge`. All of it is f64 in both builds, from the `geom64`
+view (§118.2). For each wedge patch `p`, over its faces `f`,
+
+```
+n_p = (sum_f Sf) / |sum_f Sf|            the outward unit normal
+c_p = (sum_f |Sf| Cf) / (sum_f |Sf|)     the area-weighted centroid
+d_p = n_p . c_p                          the plane n_p . x = d_p
+L_p = sqrt(sum_f |Sf|)                   the patch length scale
+```
+
+With `b` the wedge patch listed first ("back") and `f` the second
+("front"):
+
+```
+axis           a  = (n_f x n_b) / |n_f x n_b|
+mid-plane      m  = (n_f - n_b) / |n_f - n_b|
+angle          theta = 2 atan2(|n_b + n_f|, |n_f - n_b|)
+line point     p  = [ (d_b - d_f (n_b.n_f)) n_b + (d_f - d_b (n_b.n_f)) n_f ] / |n_b x n_f|^2
+axis point     x0 = p + a (a . ((c_b + c_f)/2 - p))
+mirror         M(x) = x - 2 ((x - x0) . m) m
+```
+
+`p` is the point of the line where the two planes meet that lies nearest
+the origin (the unit-normal form of the two-plane intersection); `x0`
+slides it along the axis to the mesh. For outward unit normals of two planes
+at `-theta/2` and `+theta/2` about a mid-plane, `n_b . n_f = -cos(theta)`,
+`|n_b + n_f| = 2 sin(theta/2)` and `|n_f - n_b| = 2 cos(theta/2)`, so the
+`atan2` form returns `theta` with no cancellation at small angles, where
+`acos(-n_b . n_f)` would lose half its digits. On `blockgen`'s wedge (119.0)
+`a = (0, 0, 1)`, `m = (0, 1, 0)` and `x0 = (0, 0, z_mid)`.
+
+**The refusals, in the order they are checked.** Each is an
+`Error::Mesh` that starts `wedge: ` and names the patch. `WEDGE_TOL` is
+`1e-8`, relative.
+
+1. *Unpaired:* one wedge patch with faces ("has no partner"), or more than
+   two. A wedge patch with no faces is ignored, which is what a decomposed
+   piece of a wedge mesh can carry.
+2. *Non-planar:* a face whose unit normal differs from `n_p` by more than
+   `WEDGE_TOL`, or whose centroid lies more than `WEDGE_TOL L_p` off the
+   plane ("is not planar").
+3. *Unpaired faces:* the two sides differ in size, or face `k` of one side
+   and face `k` of the other belong to different cells ("are not paired"): a
+   wedge is one cell thick, and BC-04's self-couple rotates the cell's own
+   velocity, so each cell must own exactly one face on each side, written in
+   the same order.
+4. *Parallel:* `|n_b x n_f| < 1e-6` ("are parallel planes, not a wedge").
+5. *Asymmetric:* for some `k`, `|M(Cf_b[k]) - Cf_f[k]| > WEDGE_TOL L_b` or
+   the two faces' areas differ by more than `WEDGE_TOL |Sf_b[k]|` ("are not
+   symmetric about the mid-plane").
+
+The mesh report (`mesh::geometry::print_report`) prints one line after the
+patch table: the pair, `theta` in degrees, the axis and its point, and the
+mid-plane normal.
+
+**The gates.** `mesh::wedge::tests` and `tests/f32_wedge_patch.rs` (both
+builds): on the pipe and the annulus of 119.0 at `theta` = 1, 5 and 10 deg,
+the axis direction, the mid-plane normal and the angle within `1e-12` of
+`(0, 0, 1)`, `(0, 1, 0)` and `theta`, and the axis point within
+`1e-12 r_out` of the z axis and `1e-12 L` of `z_mid`; a mesh with both sides
+retyped `symmetry` has no wedge; and the three refusals, each built by
+editing the generator's own points: the front side retyped `symmetry`
+(unpaired), one interior front point moved `1e-4` off its plane
+(non-planar), and every front point rotated to `+3 deg` while the back stays
+at `-2.5 deg` (asymmetric: both planes are flat, but the bisector's mirror
+of a back face misses its front face by about `4e-4 r`). Precision class A
+of docs/17 §5.1 for the derived quantities, D for the refusals: the same
+tolerances in both builds.
+
+Measured 2026-10-11, both builds: the axis, mid-plane and angle errors
+are exactly 0 at 1, 5 and 10 deg on both meshes. That is expected, not
+luck: the generator writes every front point as the bitwise mirror of a
+back point (119.0), so `n_f - n_b` and `n_f x n_b` carry exactly zero
+off-axis components.
+
+Sources: ORIGINAL - elementary vector geometry (a plane from its area
+vectors, the line where two planes meet, a reflection in a plane, the
+half-angle identities). The patch type name `wedge` is taken by name only
+from the public user guides §120 links; no description, formula or source
+code was taken from them.
 
 No GPL-licensed source was consulted.
 

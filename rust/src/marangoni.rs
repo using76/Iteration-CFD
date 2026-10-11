@@ -757,11 +757,11 @@ mod tests {
         let Some(g) = gpu() else { return Ok(()) };
         let sigma: Scalar = 0.0728;
 
-        // Every patch kind 0..5, crossed with fr below, at, and above 1.
+        // Every patch kind 0..7, crossed with fr below, at, and above 1.
         let frs: [Scalar; 4] = [0.0, 0.5, 1.0, 1.5];
         let mut kinds: Vec<Label> = Vec::new();
         let mut fr: Vec<Scalar> = Vec::new();
-        for k in 0..6 {
+        for k in 0..8 {
             for f in frs {
                 kinds.push(k);
                 fr.push(f);
@@ -846,15 +846,16 @@ mod tests {
                 zeroed += 1;
             }
         }
-        // 2 (empty) and 3 (symmetry) are prescribed at every fr; every other
-        // kind is prescribed only at fr >= 1, which is two of the four.
-        let expect_zero = 2 * frs.len() + 4 * 2;
+        // 2 (empty), 3 (symmetry) and 7 (wedge, SPEC-LIT 119.1) are
+        // prescribed at every fr; every other kind is prescribed only at
+        // fr >= 1, which is two of the four.
+        let expect_zero = 3 * frs.len() + 5 * 2;
         assert_eq!(
             zeroed, expect_zero,
-            "the predicate zeroed {zeroed} of {n} faces; empty and symmetry at \
-             every fr, plus fr >= 1 elsewhere, is {expect_zero}"
+            "the predicate zeroed {zeroed} of {n} faces; empty, symmetry and \
+             wedge at every fr, plus fr >= 1 elsewhere, is {expect_zero}"
         );
-        println!("  §87.5: {n} boundary faces across 6 patch kinds, 0 differing bits");
+        println!("  §87.5: {n} boundary faces across 8 patch kinds, 0 differing bits");
         Ok(())
     }
 

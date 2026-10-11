@@ -363,6 +363,156 @@ impl TimeState {
 }
 
 // ==========================================================================
+//  §118.5  The double time levels of the delta form
+// ==========================================================================
+
+/// The time levels a [`Ddt::add_delta`]/`solve_delta` step runs on: the level
+/// `x` carried in DOUBLE, with its two old levels, so that a step whose
+/// increment is below `u32·|psi|` survives both roundings that kill it in the
+/// plain form (SPEC-LIT §118.5).
+///
+/// In the f64 build `DevBuf<f64>` IS `DevBuf<Scalar>`, the increment buffer
+/// and its kernels do not exist, and the struct is nothing but the three
+/// levels - [`Ddt::add_delta`]'s f64 arm passes `x0`/`x00` straight to the
+/// ordinary [`Ddt::add`].
+pub struct DeltaLevels {
+    /// The level, in double. `solve_delta` advances it; [`Self::current`]
+    /// reads it.
+    pub x: DevBuf<f64>,
+    /// `psi^{n-1}`, the level this step started from.
+    pub x0: DevBuf<f64>,
+    /// `psi^{n-2}`. Read only when the scheme's `a_00` is nonzero.
+    pub x00: DevBuf<f64>,
+    /// (118.5.5) the f32 increment the solve runs on. `single` only; the
+    /// crate-private hand [`crate::solver::solve_delta`] solves into.
+    #[cfg(feature = "single")]
+    d: DevBuf<Scalar>,
+    /// The §118.5 kernels, loaded once with the levels. `single` only.
+    #[cfg(feature = "single")]
+    kernels: TimeKernels,
+}
+
+impl DeltaLevels {
+    /// Levels seeded with `psi`: `x = x0 = x00 = fl64(psi)`, a host round
+    /// trip that runs once at setup, never inside a step. The widening cast
+    /// is the whole point under `single` and an identity in the f64 build,
+    /// where the increment buffer does not exist and `n` goes unread.
+    #[allow(clippy::unnecessary_cast)]
+    #[cfg_attr(not(feature = "single"), allow(unused_variables))]
+    pub fn new(gpu: &Gpu, psi: &DevBuf<Scalar>, n: usize) -> Result<Self> {
+        let host: Vec<Scalar> = gpu.download(psi)?;
+        let x: Vec<f64> = host.iter().map(|v| *v as f64).collect();
+        Ok(Self {
+            x: gpu.upload(&x)?,
+            x0: gpu.upload(&x)?,
+            x00: gpu.upload(&x)?,
+            #[cfg(feature = "single")]
+            d: gpu.zeros(n.max(1))?,
+            #[cfg(feature = "single")]
+            kernels: TimeKernels::new(gpu)?,
+        })
+    }
+
+    /// Rotate the levels one step back: `x00 <- x0`, then `x0 <- x`, both
+    /// device copies. Call ONCE per time step, right before
+    /// [`Ddt::add_delta`] - the same event as
+    /// [`crate::field_ops::store_old_time`], and separating the two is how
+    /// BDF2 quietly loses `psi^{n-2}`.
+    pub fn store_old_time(&mut self, gpu: &Gpu) -> Result<()> {
+        gpu.stream().memcpy_dtod(&self.x0, &mut self.x00)?;
+        gpu.stream().memcpy_dtod(&self.x, &mut self.x0)?;
+        Ok(())
+    }
+
+    /// The current level, in double.
+    pub fn current(&self) -> &DevBuf<f64> {
+        &self.x
+    }
+}
+
+/// The f32 build's half of the delta form: the increment buffer and the
+/// launches that move the increment in and the level forward (SPEC-LIT
+/// §118.5). Crate-private - [`crate::solver::solve_delta`] is the only
+/// caller.
+#[cfg(feature = "single")]
+impl DeltaLevels {
+    /// (118.5.5) `d = fl32(x - x0)`: the increment's initial guess.
+    pub(crate) fn start(&mut self, gpu: &Gpu, n: usize) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        expect_len(&self.d, n, "d")?;
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.kernels.delta_start)
+                .arg(&mut self.d)
+                .arg(&self.x)
+                .arg(&self.x0)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// The increment buffer, for the caller to solve into.
+    pub(crate) fn increment(&mut self) -> &mut DevBuf<Scalar> {
+        &mut self.d
+    }
+
+    /// (118.5.7) the refined accept: `x = x0 + delta64`, `psi = fl32(x)`.
+    /// `d64` is the workspace's double solution, read after a refined solve.
+    pub(crate) fn accept(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut DevBuf<Scalar>,
+        d64: &DevBuf<f64>,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.kernels.delta_accept)
+                .arg(&mut self.x)
+                .arg(psi)
+                .arg(&self.x0)
+                .arg(d64)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// (118.5.7) the unrefined accept, for a fixed-iteration solve: the
+    /// increment is the float answer itself, `x = x0 + fl64(d)`.
+    pub(crate) fn accept_widen(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut DevBuf<Scalar>,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.kernels.delta_accept_widen)
+                .arg(&mut self.x)
+                .arg(psi)
+                .arg(&self.x0)
+                .arg(&self.d)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+}
+
+// ==========================================================================
 //  Kernels
 // ==========================================================================
 
@@ -376,6 +526,19 @@ pub struct TimeKernels {
     lts_r_delta_t: CudaFunction,
     lts_smooth: CudaFunction,
     lts_damp: CudaFunction,
+    /// SPEC-LIT §118.5: the delta form's kernels, f32 build only. Absent in
+    /// the f64 build, whose `timescheme.cubin` does not change by a byte.
+    #[cfg(feature = "single")]
+    delta_ddt: CudaFunction,
+    /// (118.5.5) `d = fl32(x - x0)`.
+    #[cfg(feature = "single")]
+    delta_start: CudaFunction,
+    /// (118.5.7) `x = x0 + delta64; psi = fl32(x)`, refined.
+    #[cfg(feature = "single")]
+    delta_accept: CudaFunction,
+    /// (118.5.7) the unrefined accept, `x = x0 + fl64(d)`.
+    #[cfg(feature = "single")]
+    delta_accept_widen: CudaFunction,
 }
 
 impl TimeKernels {
@@ -391,6 +554,14 @@ impl TimeKernels {
             lts_r_delta_t: k.func("tsLtsRDeltaT")?,
             lts_smooth: k.func("tsLtsSmooth")?,
             lts_damp: k.func("tsLtsDamp")?,
+            #[cfg(feature = "single")]
+            delta_ddt: k.func("tsDeltaDdt")?,
+            #[cfg(feature = "single")]
+            delta_start: k.func("tsDeltaStart")?,
+            #[cfg(feature = "single")]
+            delta_accept: k.func("tsDeltaAccept")?,
+            #[cfg(feature = "single")]
+            delta_accept_widen: k.func("tsDeltaAcceptWiden")?,
         })
     }
 }
@@ -1051,6 +1222,158 @@ impl Ddt {
                 fvm_ddt_rho(gpu, &self.kernels, a, m, rho, rho0, rho00, psi0, psi00, c, sign)
             }
         }
+    }
+
+    /// Add `sign · d(psi)/dt` to `a` in the DELTA form of SPEC-LIT §118.5:
+    /// the matrix of the increment system `(M' + sign·V·a_n) delta = R`,
+    /// whose right-hand side `R = b - M x0 - sign·V·a00·(x00 - x0)` is
+    /// formed by [`crate::solver::residual64_round`] against the f64 level
+    /// `x0`, so a step whose increment is below `u32·|psi|` survives. With
+    /// `a_n + a_0 + a_00 = 0` the old levels cancel analytically and `a_0`
+    /// never appears.
+    ///
+    /// **Call contract.** After the spatial operators, the boundary fold and
+    /// any relaxation; the LAST change to `diag` and the off-diagonals
+    /// before [`crate::solver::solve_delta`]. This replaces the
+    /// [`apply_theta`] + [`Self::add`] pair, which under `single` would lose
+    /// the increment inside the source before the solve ever ran.
+    ///
+    /// `steadyState` and `localEuler` are refused by name: the delta form
+    /// exists to carry a transient level in double, and a steady equation
+    /// has no level to carry (SPEC-LIT §118.5). Use [`Self::add`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_delta(
+        &self,
+        gpu: &Gpu,
+        lk: &LduKernels,
+        sk: &crate::solver::SolverKernels,
+        a: &mut GpuLduMatrix,
+        m: &GpuMesh,
+        lv: &DeltaLevels,
+        scratch: &mut DevBuf<Scalar>,
+        sign: Scalar,
+    ) -> Result<()> {
+        match self.scheme {
+            DdtScheme::SteadyState => Err(Error::Config(
+                "add_delta: `steadyState` writes no time derivative, so it \
+                 has no delta form (SPEC-LIT 118.5). Use `add` for a steady \
+                 equation."
+                    .to_string(),
+            )),
+            DdtScheme::LocalEuler => Err(Error::Config(
+                "add_delta: `localEuler`'s step is a per-cell preconditioner, \
+                 not a time derivative, so it has no delta form (SPEC-LIT \
+                 118.5). Use `add` for a steady equation."
+                    .to_string(),
+            )),
+            other => self.add_delta_transient(gpu, lk, sk, a, m, lv, scratch, sign, other),
+        }
+    }
+
+    /// The f64 arm: the levels are already the solve's own type, so the step
+    /// is today's `apply_theta` + `add` on them, unchanged. Nothing here is
+    /// new arithmetic; the f64 build must stay bitwise as it was.
+    #[cfg(not(feature = "single"))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_delta_transient(
+        &self,
+        gpu: &Gpu,
+        lk: &LduKernels,
+        _sk: &crate::solver::SolverKernels,
+        a: &mut GpuLduMatrix,
+        m: &GpuMesh,
+        lv: &DeltaLevels,
+        scratch: &mut DevBuf<Scalar>,
+        sign: Scalar,
+        scheme: DdtScheme,
+    ) -> Result<()> {
+        match scheme {
+            DdtScheme::CrankNicolson(theta) => {
+                apply_theta(gpu, &self.kernels, lk, a, m, &lv.x0, scratch, theta)?;
+                self.add(gpu, a, m, &lv.x0, &lv.x00, sign)
+            }
+            _ => self.add(gpu, a, m, &lv.x0, &lv.x00, sign),
+        }
+    }
+
+    /// The f32 arm (SPEC-LIT §118.5): build the increment system's row. The
+    /// right-hand side reads the matrix BEFORE any theta scaling, because
+    /// (118.5.1) is `b - M x0` with the full `M` - for Crank-Nicolson that is
+    /// already the whole equation, `a_00` being zero.
+    #[cfg(feature = "single")]
+    #[allow(clippy::too_many_arguments)]
+    fn add_delta_transient(
+        &self,
+        gpu: &Gpu,
+        _lk: &LduKernels,
+        sk: &crate::solver::SolverKernels,
+        a: &mut GpuLduMatrix,
+        m: &GpuMesh,
+        lv: &DeltaLevels,
+        scratch: &mut DevBuf<Scalar>,
+        sign: Scalar,
+        scheme: DdtScheme,
+    ) -> Result<()> {
+        check_matrix(a, m, "add_delta")?;
+        let n = m.n_cells;
+        if n == 0 {
+            return Ok(());
+        }
+        expect_len(scratch, n, "scratch")?;
+
+        // The coefficients, refused when they do not annihilate a constant
+        // field: (118.5.1) is derived from `a_n + a_0 + a_00 = 0`, so an
+        // inconsistent set would leave an `a_0` term standing in `R`.
+        let c = self.state.coeffs(scheme)?;
+        if !c.is_consistent() {
+            return Err(Error::Config(format!(
+                "add_delta: the coefficients {c:?} do not sum to zero, so \
+                 the delta form's right-hand side (SPEC-LIT 118.5) is not \
+                 the one the scheme defines"
+            )));
+        }
+
+        // (118.5.1)-(118.5.2): `r = fl32(b - M x0)` against the matrix as it
+        // stands - the FULL, unscaled M, read before (118.5.4) scales it.
+        crate::solver::residual64_round(gpu, sk, scratch, a, m, &lv.x0)?;
+
+        // (118.5.2)-(118.5.3) in one launch: source = r - sign·V·a00·(x00 -
+        // x0), diag = fl32(theta·diag + sign·V·aN), in double, one rounding.
+        let (a_n, a_00, sign64) = (c.a_n as f64, c.a_00 as f64, sign as f64);
+        let theta = scheme.theta() as f64;
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.kernels.delta_ddt)
+                .arg(&mut a.diag)
+                .arg(&mut a.source)
+                .arg(&*scratch)
+                .arg(&m.v)
+                .arg(&lv.x0)
+                .arg(&lv.x00)
+                .arg(&a_n)
+                .arg(&a_00)
+                .arg(&sign64)
+                .arg(&theta)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+
+        // (118.5.4) the off-diagonals and the coupled-interface coefficients
+        // are part of M and are scaled with it - only for a theta below one,
+        // and only now that (118.5.1) has read the full matrix.
+        if theta != 1.0 {
+            scale_in_place(gpu, &self.kernels, &mut a.upper, scheme.theta(), m.n_internal_faces)?;
+            scale_in_place(gpu, &self.kernels, &mut a.lower, scheme.theta(), m.n_internal_faces)?;
+            scale_in_place(
+                gpu,
+                &self.kernels,
+                &mut a.boundary_coeffs,
+                scheme.theta(),
+                m.n_boundary_faces,
+            )?;
+        }
+        Ok(())
     }
 
     /// `a_N rho + a_0 rho^{n-1} + a_00 rho^{n-2}` per cell - the ddt half of

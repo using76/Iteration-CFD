@@ -1165,7 +1165,8 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
         let k = match p.kind {
             PatchKind::Empty => BcKind::Empty,
             PatchKind::Cyclic | PatchKind::Processor => BcKind::Cyclic,
-            PatchKind::Symmetry => BcKind::Symmetry,
+            // SPEC-LIT 119.1: a wedge side rides with symmetry until BC-04.
+            PatchKind::Symmetry | PatchKind::Wedge => BcKind::Symmetry,
             // SPEC-LIT S47.4: an `Interface` patch is topologically coupled
             // but is NOT seeded `Cyclic` - see `topology_override` in
             // `field_setup.rs` for the reasoning. It stays zero-gradient

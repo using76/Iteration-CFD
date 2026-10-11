@@ -1100,6 +1100,11 @@ pub fn print_report(m: &HostMesh) {
         );
     }
 
+    // SPEC-LIT section 119.1: a mesh that solves on a wedge says so.
+    if let Some(w) = &m.wedge {
+        println!("{}", w.report_line(m));
+    }
+
     println!(
         "  volume: total {:.6e}, min {:.6e} (cell {}), max {:.6e}",
         r.total_volume, r.min_volume, r.min_volume_cell, r.max_volume
