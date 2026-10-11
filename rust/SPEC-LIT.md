@@ -40161,6 +40161,100 @@ stands, and the gate is not widened for it.
 
 Labels: (132.11)-(132.12).
 
+### 132.8 The reactor as built (CHR-06, `src/chem/reactor.rs`), and its gates
+
+`ConstPressureReactor` advances (132.7)-(132.9) through `integrate_observed`.
+That is §132.7's `integrate` with one hook added: after every accepted step it
+calls an observer with `(t, y)`. The observer may change `y` or end the call
+with an error. `integrate` is that function with an observer that does
+nothing, so its arithmetic is unchanged and CHR-05's tests hold as before.
+
+**Design choices of this unit (ORIGINAL; SAND89-8009 gives only the
+equations).**
+
+* **R7, the pressure.** A `p` that is not finite or not above 0 is refused,
+  naming it.
+* **R8, the right-hand side.** The state is `y = (Y_1..Y_K, T)`. Every
+  evaluation uses `Y⁺_k = max(Y_k, 0)`; this is §130.7's "a stiff integrator
+  that undershoots clips before it calls", and the stored `y` is not changed.
+  The quantities are `S = Σ Y⁺_k / W_k`, `rho = p / (R T S)` (132.9),
+  `c_k = rho Y⁺_k / W_k`, `omega` from (130.1), and `cp` from (128.7) over `Y⁺`.
+  A species whose `omega_k` is exactly 0 is not evaluated in (132.8)'s sum.
+  The following are refused: a state of the wrong length, a `T` that is not
+  finite or not above 0, and `S = 0`. The thermo and kinetics errors pass
+  through unchanged, so a `T` outside a species' range is refused by the
+  thermo record's own message.
+* **R9, the input.** The following are refused, each by name: `y0` of the
+  wrong length, a negative or non-finite `Y_k`, a `T0` that is not finite or
+  not above 0, a negative or non-finite duration, and an `ignition_rise` that
+  is not above 0. A zero duration returns the input unchanged.
+* **R10, after each accepted step.** This is §132.4's refusals paragraph. A
+  `Y_k < -atol_y` is refused, naming the species, the value and `t`. A
+  `Y_k` in `[-atol_y, 0)` is set to 0, and the count is reported as
+  `clipped`. Each clip adds at most `atol_y` to `Σ Y`. `T` is never clipped.
+* **R11, the ignition delay.** `T* = T0 + ignition_rise` (400 K by default).
+  The delay is the first crossing of `T*`, interpolated linearly between the
+  two accepted points that bracket it. It is `None` if `T` never reaches
+  `T*`.
+* **Defaults.** RODAS3, `rtol = 1e-8`, `atol_y = 1e-14`, `atol_t = 1e-8` K,
+  `h0 = 1e-10` s, `h_max` unbounded.
+
+**The gate mechanism.** Neither JL4 nor any open H2 mechanism is in the tree
+(§129.6), so the plan's "H2-air and CH4-air (JL)" runs on a fifteen-reaction
+**reactor fixture** over the ten TM-4513 species of §130.7. It keeps §130.7's
+reversible reactions without `REV`:
+
+* elementary reactions and the `+M` reactions;
+* Lindemann, both Troe forms, `(+N2)` and SRI fall-off;
+* the DUP pair.
+
+It drops §130.7's `REV` reaction and its two irreversible global reactions.
+It adds `CO + OH <=> CO2 + H` without `REV`, and three reversible reactions:
+`H2 + O2 <=> OH + OH`, `CH4 + O2 <=> CO + H2O + H2` and `CH4 + O <=> CO + 2 H2`.
+**The rate numbers are placeholders, not any paper's.** Every reverse rate
+comes from `K_c` (130.16), so the rest point of the ODE is the Gibbs
+equilibrium of §131. A `REV` rate or an irreversible reaction would move the
+rest point away from it. The end state therefore depends on the
+thermochemistry and not on the rate numbers, and this is what makes a
+placeholder-rate fixture a valid subject for the equilibrium gate. The
+mixtures are stoichiometric H2-air (2 : 1 : 3.76) from `T0 = 1000` K and
+stoichiometric CH4-air (1 : 2 : 7.52) from `T0 = 1400` K, both at
+`p = P_ATM`. When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set
+(§129.6), the same gates also run on GRI-Mech 3.0. GRI keeps its own
+irreversible reactions; their reactants are traces at equilibrium. That run
+is 10 s long, so that the NO chemistry settles.
+
+**The supervisor's oracle.** The supervisor wrote an independent float64
+evaluation of (132.7)-(132.9) and the fixture's (130.2), outside the tree
+and before the Rust, and integrated it with scipy's Radau. Radau is an
+implicit Runge-Kutta method, a different family from the tree's, run at
+`rtol = 1e-12`. Its event finder located the delay. The detailed balance
+`max |ln Q - ln K_c|` at its end state is `6.9e-15` (H2-air) and `1.1e-14`
+(CH4-air), which confirms that the rest point is the equilibrium. It printed:
+
+* the right-hand side at one stated state;
+* the end states: `T = 2693.827535802` K (H2-air) and `2711.799962396` K
+  (CH4-air);
+* the delays: `2.6552096919e-3` s and `2.6042862928e-3` s.
+
+| row | measure | tolerance | class | measured (f64 build) |
+|---|---|---|---|---|
+| `reactor_rhs_matches_oracle` | (132.7)-(132.8) at the stated state against the oracle | 1e-9 relative; `N2` exactly 0 | P | worst `3.95e-15` |
+| `reactor_lands_on_equilibrium` | the state after 1 s against §131's `(h, p)` solution and against the oracle | 0.5 K; 1e-6 in Y | P | H2-air `dT 1.6e-7` K, `dY 1.8e-11`; CH4-air `4.8e-8` K, `6.2e-12`. Also `Σ Y` within `1e-12 + clipped·atol_y`, and `h` within 1e-6 relative (measured `6.6e-10` and `1.6e-10`) |
+| `reactor_delay_converges` | the delay at `rtol` 1e-6 against `rtol` 1e-9 | < 0.5 % | P | H2-air `3.1e-7`, CH4-air `1.3e-7` relative |
+| `reactor_delay_matches_oracle` | the delay at `rtol` 1e-9 against the oracle | 1e-3 relative | P | `8.1e-9`, `8.6e-10` |
+| `reactor_refuses_bad_input` | R7-R9, and `T0 = 100` K refused by the thermo record | exact text parts | D | — |
+| `ros_observer_sees_every_accepted_step` | one observer call per accepted step, the last at `t1` exactly; `integrate` is bitwise `integrate_observed` with a no-op | exact | D | 183 calls, 183 accepted |
+| `reactor_gri30_lands_on_equilibrium` | as `reactor_lands_on_equilibrium` on GRI-Mech 3.0, 10 s, against `equilibrate_hp` only | 0.5 K; 1e-6 in Y | P | H2-air `dT 3.3e-5` K, `dY 3.7e-9`; CH4-air `1.6e-8` K, `4.2e-12` |
+| `reactor_gri30_delay_converges` | as `reactor_delay_converges` on GRI-Mech 3.0 | < 0.5 % | P | H2-air delay `3.111e-4` s, change `9.9e-7`; CH4-air `3.425e-3` s, `1.0e-8`. Reported, not compared with any experiment |
+
+The GRI delays are numbers this integrator measured on GRI's rates. They are
+not validated against shock-tube data, and no gate runs through them.
+
+The f32 build (`--features single`) passes the same rows; the module is f64 in both builds.
+
+No new equation labels.
+
 ---
 
 ## 133. Mixture-averaged transport, and the reacting low-Mach constraint

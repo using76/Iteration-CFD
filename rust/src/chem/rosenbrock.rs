@@ -440,6 +440,26 @@ pub fn integrate<F>(
 where
     F: FnMut(&[f64], &mut [f64]) -> crate::Result<()>,
 {
+    integrate_observed(f, y, t0, t1, opts, &mut |_, _| Ok(()))
+}
+
+/// As [`integrate`], and after every ACCEPTED step (t already advanced, y
+/// already = y_{n+1}) calls `observe(t, y)`. The observer may change y (the
+/// next step starts from the changed y; the Jacobian is rebuilt there
+/// anyway by R2) or return `Err`, which ends the call with that `Err`
+/// unchanged.
+pub fn integrate_observed<F, O>(
+    f: &mut F,
+    y: &mut [f64],
+    t0: f64,
+    t1: f64,
+    opts: &RosOptions,
+    observe: &mut O,
+) -> crate::Result<RosStats>
+where
+    F: FnMut(&[f64], &mut [f64]) -> crate::Result<()>,
+    O: FnMut(f64, &mut [f64]) -> crate::Result<()>,
+{
     const TAG: &str = "(SPEC-LIT §132.7)";
     let n = y.len();
     // R5's validation, each refusal naming the value.
@@ -559,6 +579,7 @@ where
             h = (h * fac).min(opts.h_max);
             stats.h_next = h;
             have_jac = false;
+            observe(t, y)?;
         } else {
             // Reject. R4: a non-finite step also counts in `nonfinite` and
             // always divides h by 10.
