@@ -157,8 +157,6 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  add_layer: 'STU-04',
-  remove_layer: 'STU-04',
   new_case: 'STU-05',
   validate_case: 'STU-05',
   save_case: 'STU-05',

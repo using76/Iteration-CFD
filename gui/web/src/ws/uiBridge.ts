@@ -5,7 +5,8 @@
 // same void. Commands this web app can genuinely apply are applied here;
 // everything else is refused immediately with UNSUPPORTED so the model can
 // tell the operator the truth instead of waiting.
-import type { ClientMsg, MetricRecord, UiCommand, UiSelection, UiState, ViewId } from '@cfd/shared'
+import type { ClientMsg, MetricRecord, UiCommand, UiSelection, UiState, ViewId, ViewerCommand } from '@cfd/shared'
+import { ViewerCommandSchema } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
 import type { ProbeOutcome, ViewerTool, ViewportRect } from '../viewer'
 import { linkCameras } from '../viewer/api/cameraLink'
@@ -52,6 +53,105 @@ const FIELD_MAP: Record<string, { name: string; component: 'magnitude' | null }>
 /** The four geometry edit ui.commands this screen applies through the
  *  geometry studio store (E1). */
 type GeometryUiCommand = Extract<UiCommand, { type: 'geometry_part' | 'geometry_transform' | 'geometry_boolean' | 'geometry_save' }>
+
+// ---- add_layer / remove_layer (STU-04) -------------------------------------
+// A weaker model names layers loosely ("iso-surface", "ARROWS") and packs its
+// options into JSON strings; these helpers normalise all of that into the
+// viewer's own add* commands before the schema sees them.
+
+/** The five layer kinds add_layer maps onto the viewer's add* commands. */
+export const LAYER_KINDS = ['slice', 'plane', 'isoSurface', 'streamlines', 'glyphs'] as const
+export type LayerKind = (typeof LAYER_KINDS)[number]
+
+/** The args keys each kind takes; anything else is refused naming the key. */
+const LAYER_ARGS: Record<LayerKind, readonly string[]> = {
+  slice: ['id', 'axis', 'position', 'fraction'],
+  plane: ['id', 'origin', 'point', 'normal'],
+  isoSurface: ['id', 'field', 'values', 'value'],
+  streamlines: ['id', 'field', 'seed', 'style', 'maxLength', 'direction'],
+  glyphs: ['id', 'field', 'stride', 'scale', 'onSlice'],
+}
+
+/** "Iso-Surface" -> isoSurface: lower-case, drop everything outside a-z, then match the synonyms. */
+export function layerKind(kind: string): LayerKind | null {
+  const k = kind.toLowerCase().replace(/[^a-z]/g, '')
+  if (k === 'slice' || k === 'slices') return 'slice'
+  if (k === 'plane' || k === 'planes' || k === 'cutplane' || k === 'cuttingplane') return 'plane'
+  if (k === 'iso' || k === 'isosurface' || k === 'isosurfaces' || k === 'isocontour' || k === 'contour' || k === 'contours') return 'isoSurface'
+  if (k === 'streamline' || k === 'streamlines' || k === 'stream' || k === 'streamtrace' || k === 'streamtraces') return 'streamlines'
+  if (k === 'glyph' || k === 'glyphs' || k === 'arrow' || k === 'arrows' || k === 'vector' || k === 'vectors' || k === 'quiver') return 'glyphs'
+  return null
+}
+
+/** A string holding one JSON value ("{...}" / "[...]") becomes that value; anything else passes through. */
+const jsonUnwrap = (v: unknown): unknown => {
+  if (typeof v !== 'string') return v
+  const t = v.trim()
+  if (!t.startsWith('{') && !t.startsWith('[')) return v
+  try {
+    return JSON.parse(t)
+  } catch {
+    return v
+  }
+}
+
+/** x / y / z (any case) -> the unit vector a plane normal wants. */
+const AXIS_UNIT: Record<string, [number, number, number]> = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }
+
+/** Loose add_layer args -> one schema-valid viewer command, or the refusal
+ *  that names what was wrong. Pure: no store, no viewer access. */
+export function layerCommand(
+  kind: LayerKind,
+  args: Record<string, unknown>,
+  ctx: { field: string | null; bounds: { min: [number, number, number]; max: [number, number, number] } | null },
+): { ok: true; cmd: ViewerCommand } | { ok: false; error: string } {
+  for (const key of Object.keys(args))
+    if (!LAYER_ARGS[kind].includes(key))
+      return { ok: false, error: `INVALID (add_layer): args.${key} is not an option of ${kind}; options: ${LAYER_ARGS[kind].join(', ')}` }
+  // One level of JSON unwrapping on every value, and one more inside a plain-object seed.
+  const a: Record<string, unknown> = {}
+  for (const [key, v] of Object.entries(args)) a[key] = jsonUnwrap(v)
+  if (a.seed != null && typeof a.seed === 'object' && !Array.isArray(a.seed)) {
+    const seed: Record<string, unknown> = {}
+    for (const [key, v] of Object.entries(a.seed as Record<string, unknown>)) seed[key] = jsonUnwrap(v)
+    a.seed = seed
+  }
+  const id = typeof a.id === 'string' && a.id !== '' ? a.id : typeof a.id === 'number' && Number.isFinite(a.id) ? String(a.id) : null
+  const lower = (v: unknown): string | null => (typeof v === 'string' ? v.toLowerCase() : null)
+  let cmd: Record<string, unknown>
+  if (kind === 'slice') {
+    cmd = {
+      type: 'addSlice',
+      id,
+      axis: lower(a.axis),
+      position: a.position ?? (a.fraction !== undefined ? { fraction: a.fraction } : { fraction: 0.5 }),
+    }
+  } else if (kind === 'plane') {
+    const b = ctx.bounds
+    cmd = {
+      type: 'addPlane',
+      id,
+      origin: a.origin ?? a.point ?? (b ? ([0, 1, 2].map((i) => (b.min[i] + b.max[i]) / 2) as [number, number, number]) : undefined),
+      normal: typeof a.normal === 'string' ? (AXIS_UNIT[a.normal.trim().toLowerCase()] ?? a.normal) : a.normal,
+    }
+  } else if (kind === 'isoSurface') {
+    let values = a.values ?? a.value
+    if (typeof values === 'number' || typeof values === 'string') values = [values]
+    cmd = { type: 'addIsoSurface', id, field: a.field ?? ctx.field ?? undefined, values }
+  } else if (kind === 'streamlines') {
+    cmd = { type: 'addStreamlines', id, field: a.field ?? null, seed: a.seed, style: lower(a.style), maxLength: a.maxLength ?? null, direction: lower(a.direction) }
+  } else {
+    cmd = { type: 'addGlyphs', id, field: a.field ?? null, stride: a.stride ?? null, scale: a.scale ?? null, onSlice: a.onSlice ?? null }
+  }
+  const parsed = ViewerCommandSchema.safeParse(cmd)
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .slice(0, 4)
+      .map((i) => `args.${i.path.join('.')}: ${i.message}`)
+    return { ok: false, error: `INVALID (add_layer): ${issues.join('; ')}` }
+  }
+  return { ok: true, cmd: parsed.data }
+}
 
 const asVec3 = (v: unknown): v is [number, number, number] => Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number')
 
@@ -153,7 +253,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
         colormap: vs.colormap,
         range: vs.range,
         representation: vs.representation,
-        layers: null,
+        layers: Array.isArray(vs.layers) ? vs.layers.map((l) => ({ id: l.id, type: l.type, summary: l.summary })) : null,
         viewport: (() => {
           const r = v.viewport()
           return r ? { width: r.width, height: r.height } : null
@@ -496,6 +596,48 @@ export function createUiBridge(deps: UiBridgeDeps) {
           u.openResidualsTab(run, 'surface')
           return { ok: true }
         }
+      case 'add_layer': {
+        // Loose kind + args -> one schema-valid viewer command, then the same
+        // race set_camera runs: the answer must beat the hub's 5 s.
+        const k = layerKind(cmd.kind)
+        if (k == null)
+          return { ok: false, error: `INVALID (add_layer): unknown kind "${cmd.kind}"; kinds: ${LAYER_KINDS.join(', ')}` }
+        const vs = getViewerApi().getState()
+        const built = layerCommand(k, cmd.args ?? {}, { field: vs.field ?? null, bounds: vs.bounds ?? null })
+        if (!built.ok) return built
+        ui.getState().openViewerTab()
+        const v = getViewerApi()
+        const budget = deps.cameraBudgetMs ?? CAMERA_ANSWER_MS
+        let raceTimer: ReturnType<typeof setTimeout> | null = null
+        const done = await Promise.race([
+          v.execute(built.cmd),
+          new Promise<null>((resolve) => {
+            raceTimer = setTimeout(() => resolve(null), budget)
+          }),
+        ])
+        if (raceTimer) clearTimeout(raceTimer)
+        if (done === null)
+          return { ok: false, error: `BUSY (add_layer): the viewer did not answer within ${budget} ms; the layer is queued and applies when the viewer is ready` }
+        return done.ok ? { ok: true } : { ok: false, error: done.error ? `${done.error.code} (add_layer): ${done.error.message}` : 'the viewer refused add_layer' }
+      }
+      case 'remove_layer': {
+        const v = getViewerApi()
+        const ids = (v.getState().layers ?? []).map((l) => l.id)
+        if (!ids.includes(cmd.id))
+          return { ok: false, error: `NO_SUCH_LAYER (remove_layer): no layer "${cmd.id}"; layers: ${ids.join(', ') || 'none'}` }
+        const budget = deps.cameraBudgetMs ?? CAMERA_ANSWER_MS
+        let raceTimer: ReturnType<typeof setTimeout> | null = null
+        const done = await Promise.race([
+          v.execute({ type: 'remove', id: cmd.id }),
+          new Promise<null>((resolve) => {
+            raceTimer = setTimeout(() => resolve(null), budget)
+          }),
+        ])
+        if (raceTimer) clearTimeout(raceTimer)
+        if (done === null)
+          return { ok: false, error: `BUSY (remove_layer): the viewer did not answer within ${budget} ms; the removal is queued` }
+        return done.ok ? { ok: true } : { ok: false, error: done.error ? `${done.error.code} (remove_layer): ${done.error.message}` : 'the viewer refused remove_layer' }
+      }
       case 'set_camera':
       case 'fit_view': {
         // A camera move must be answered inside the hub's 5 s: open the tab
