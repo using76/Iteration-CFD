@@ -2,6 +2,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { Locale, ViewId } from '@cfd/shared'
+import { tx } from '../i18n/extra'
 
 export type Theme = 'light' | 'dark'
 export type ActivityView = 'explorer' | 'search' | 'scm' | 'run' | 'extensions' | 'cfd'
@@ -42,6 +43,8 @@ export interface UiState {
   viewSplit: boolean
   focusedView: ViewId
   camerasLinked: boolean
+  showAxes: boolean
+  showColorBars: boolean
 }
 
 export interface UiActions {
@@ -53,6 +56,8 @@ export interface UiActions {
   toggleBottom(): void
   toggleAssistant(): void
   setBottomVisible(v: boolean): void
+  /** Toggles the viewer's axes triad or colour bars (show_overlay's target). */
+  setOverlay(what: 'axes' | 'colorbars', on: boolean): void
   setLayout(which: 'mainLayout' | 'centerLayout' | 'bottomLayout', layout: PanelLayout): void
   setActivity(view: ActivityView): void
   openTab(tab: Tab): void
@@ -114,10 +119,50 @@ const INITIAL: UiState = {
   viewSplit: false,
   focusedView: 'A',
   camerasLinked: false,
+  showAxes: true,
+  showColorBars: true,
 }
 
 export function fileTabId(path: string): string {
   return `file:${path}`
+}
+
+/** Same as app/hooks.ts's basename, local so this module stays free of React hooks. */
+function basename(path: string): string {
+  const i = path.lastIndexOf('/')
+  return i >= 0 ? path.slice(i + 1) : path
+}
+
+/** The text TabBar shows for a tab (moved verbatim from TabBar's label). */
+export function tabScreenLabel(tab: Tab, locale: Locale): string {
+  return tab.kind === 'file'
+    ? basename(tab.path)
+    : tab.kind === 'viewer'
+      ? tx(locale, 'tab.viewer')
+      : tab.kind === 'residuals'
+        ? tab.chart === 'metrics'
+          ? tx(locale, 'residuals.metricsTitle')
+          : tx(locale, 'tab.residuals')
+        : tab.kind === 'geometry'
+          ? `${tx(locale, 'tab.geometry')}: ${basename(tab.path)}`
+          : tab.kind === 'campaign'
+            ? `${tx(locale, 'autonomy.tab')}: ${basename(tab.path) || '.'}`
+            : `${tx(locale, 'tab.diff')}: ${basename(tab.path)}`
+}
+
+/** The label ui.state reports for a tab: its path, its chart, or 'viewer'. */
+export function tabStateLabel(tab: Tab): string {
+  switch (tab.kind) {
+    case 'file':
+    case 'geometry':
+    case 'campaign':
+    case 'diff':
+      return tab.path
+    case 'residuals':
+      return tab.chart ?? 'residuals'
+    case 'viewer':
+      return 'viewer'
+  }
 }
 
 function upsertTab(tabs: Tab[], tab: Tab): Tab[] {
@@ -128,7 +173,7 @@ function upsertTab(tabs: Tab[], tab: Tab): Tab[] {
   return out
 }
 
-type PersistedUi = Pick<UiState, 'theme' | 'locale' | 'sideVisible' | 'bottomVisible' | 'assistantVisible' | 'mainLayout' | 'centerLayout' | 'bottomLayout' | 'activity' | 'tabs' | 'activeTabId' | 'bottomTab' | 'explorerExpanded' | 'activeRunId' | 'terminalRunId' | 'composerDraft'>
+type PersistedUi = Pick<UiState, 'theme' | 'locale' | 'sideVisible' | 'bottomVisible' | 'assistantVisible' | 'mainLayout' | 'centerLayout' | 'bottomLayout' | 'activity' | 'tabs' | 'activeTabId' | 'bottomTab' | 'explorerExpanded' | 'activeRunId' | 'terminalRunId' | 'composerDraft' | 'showAxes' | 'showColorBars'>
 
 function partialize(s: UiState): PersistedUi {
   return {
@@ -149,6 +194,8 @@ function partialize(s: UiState): PersistedUi {
     activeRunId: s.activeRunId,
     terminalRunId: s.terminalRunId,
     composerDraft: s.composerDraft,
+    showAxes: s.showAxes,
+    showColorBars: s.showColorBars,
   }
 }
 
@@ -179,6 +226,10 @@ export const useUiStore = create<UiStore>()(
       },
       setBottomVisible(bottomVisible) {
         set({ bottomVisible })
+      },
+      setOverlay(what, on) {
+        if (what === 'axes') set({ showAxes: on })
+        else set({ showColorBars: on })
       },
       setLayout(which, layout) {
         set({ [which]: layout } as Partial<UiState>)

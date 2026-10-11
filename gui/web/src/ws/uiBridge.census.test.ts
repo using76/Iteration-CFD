@@ -66,6 +66,8 @@ function makeUi() {
     viewSplit: false,
     focusedView: 'A' as 'A' | 'B',
     camerasLinked: false,
+    showAxes: true,
+    showColorBars: true,
     openViewerTab: vi.fn(),
     openResidualsTab: vi.fn(),
     setBottomVisible: vi.fn(),
@@ -79,6 +81,10 @@ function makeUi() {
     setFocusedView: vi.fn(),
     setCamerasLinked: vi.fn(),
     openGeometryTab: vi.fn(),
+    openCampaignTab: vi.fn(),
+    setOverlay: vi.fn(),
+    closeTab: vi.fn(),
+    activateTab: vi.fn(),
   }
 }
 
@@ -145,8 +151,6 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  show_overlay: 'STU-02',
-  close_tab: 'STU-02',
   set_post: 'STU-03',
   show_metric: 'STU-03',
   set_log_filter: 'STU-03',

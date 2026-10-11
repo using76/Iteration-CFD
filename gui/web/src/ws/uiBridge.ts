@@ -12,7 +12,10 @@ import { linkCameras } from '../viewer/api/cameraLink'
 import { actions, activeCasePath } from './actions'
 import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
 import type { useSessionStore } from '../state/sessionStore'
-import type { useUiStore } from '../state/uiStore'
+// tabStateLabel / tabScreenLabel are value imports; uiStore has no DOM imports,
+// so this stays node-test safe. useUiStore itself must NOT be imported here
+// (the bridge takes its store through deps so tests can inject fakes).
+import { tabScreenLabel, tabStateLabel, type useUiStore } from '../state/uiStore'
 
 type SessionStore = ReturnType<typeof useSessionStore.getState>
 type UiStoreState = ReturnType<typeof useUiStore.getState>
@@ -27,6 +30,10 @@ export interface UiBridgeDeps {
   saveImage?(name: string, base64: string): void
   /** How long set_camera / fit_view may wait for the canvas to mount and the camera move to finish before answering; default CAMERA_ANSWER_MS. Tests inject a short one. */
   cameraBudgetMs?: number
+  /** close_tab's bookkeeping on the editor store. Injected by client.ts; kept
+   *  optional and behind this interface because importing editorStore here
+   *  would pull monaco into the node tests. */
+  editor?: { isDirty(path: string): boolean; closeBuffer(path: string): void; removeDiff(id: string): void }
 }
 
 /** set_camera / fit_view always answer within this, below the hub's 5 s UI_TIMEOUT_MS. */
@@ -122,13 +129,15 @@ export function createUiBridge(deps: UiBridgeDeps) {
       tool: TOOL_TO_UI[v.getTool()],
       frame: null,
       projection: vs.camera.projection === 'orthographic' ? 'Orthographic' : 'Perspective',
-      showAxes: null,
-      showColorBars: null,
+      showAxes: typeof u.showAxes === 'boolean' ? u.showAxes : null,
+      showColorBars: typeof u.showColorBars === 'boolean' ? u.showColorBars : null,
+      overlays: typeof u.showAxes === 'boolean' && typeof u.showColorBars === 'boolean' ? { axes: u.showAxes, colorBars: u.showColorBars } : null,
+      bottomTab: u.bottomVisible ? (u.bottomTab ?? null) : null,
       selection: lastSelection,
       runId: u.activeRunId,
       sim: null,
       case: casePath ? { path: casePath, name: null, dirty: null } : null,
-      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind === 'residuals' ? (t.chart ?? 'residuals') : t.kind })),
+      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: tabStateLabel(t) })),
       run: null,
       viewer: {
         datasetId: vs.datasetId,
@@ -236,6 +245,18 @@ export function createUiBridge(deps: UiBridgeDeps) {
     }
   }
 
+  /** The first open tab addressed by `x`: an exact id wins, then any tab whose
+   *  ui.state label or on-screen label (either locale, case-insensitive)
+   *  equals it. select_tab and close_tab both resolve this way. */
+  function findTab(u: UiStoreState, x: string) {
+    const n = x.toLowerCase()
+    return (
+      u.tabs.find((t) => t.id === x) ??
+      u.tabs.find((t) => tabStateLabel(t).toLowerCase() === n || tabScreenLabel(t, 'en').toLowerCase() === n || tabScreenLabel(t, 'ko').toLowerCase() === n) ??
+      null
+    )
+  }
+
   /** The tab label a tree step or chart name matches against, best effort. */
   function openNamedTab(name: string): { ok: true } | { ok: false; error: string } {
     const n = name.toLowerCase()
@@ -258,8 +279,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
       u.setBottomTab('problems')
       return { ok: true }
     }
-    const known = ['viewer/뷰어', 'residuals/잔차', 'logs/로그', 'problems/문제']
-    return unsupported('select_tab', `no tab matching "${name}"; this screen has: ${known.join(', ')}`)
+    const ids = u.tabs.map((t) => t.id).join(', ') || 'none'
+    return { ok: false, error: `NO_TAB (select_tab): no tab "${name}"; open tabs: ${ids}; kinds that open on select: viewer, residuals, logs, problems` }
   }
 
   /** Window pixel for a probe command: at:"center" and fx,fy need the canvas rect; x,y are window pixels already. */
@@ -296,17 +317,59 @@ export function createUiBridge(deps: UiBridgeDeps) {
         session.getState().addNote(cmd.level, cmd.text)
         return { ok: true }
       case 'open_tab': {
-        const k = cmd.kind.toLowerCase()
-        if (k.includes('view')) u.openViewerTab()
-        else if (k.includes('residual') || k.includes('chart')) u.openResidualsTab(u.activeRunId)
+        // First test that matches wins; every tab on this screen is reachable.
+        const k = cmd.kind.trim().toLowerCase()
+        if (k.includes('view') || k.includes('3d')) u.openViewerTab()
+        else if (k.includes('metric')) u.openResidualsTab(u.activeRunId, 'metrics')
+        else if (k.includes('residual')) u.openResidualsTab(u.activeRunId, 'residuals')
+        else if (k.includes('chart')) u.openResidualsTab(u.activeRunId)
         else if (k.includes('log') || k.includes('terminal')) {
           u.setBottomVisible(true)
           u.setBottomTab('logs')
-        } else return unsupported('open_tab', `tab kind "${cmd.kind}" does not exist on this screen (viewer, residuals, logs)`)
+        } else if (k.includes('problem')) {
+          u.setBottomVisible(true)
+          u.setBottomTab('problems')
+        } else if (k.includes('geometry')) {
+          const p = cmd.path ?? cmd.label
+          const open = u.tabs.find((t) => t.kind === 'geometry')
+          if (p) u.openGeometryTab(p)
+          else if (open) u.activateTab(open.id)
+          else return { ok: false, error: 'INVALID (open_tab): kind "geometry" needs path (a workspace .stl, .obj or .step file)' }
+        } else if (k.includes('campaign')) {
+          const p = cmd.path ?? cmd.label
+          const open = u.tabs.find((t) => t.kind === 'campaign')
+          if (p) u.openCampaignTab(p)
+          else if (open) u.activateTab(open.id)
+          else return { ok: false, error: 'INVALID (open_tab): kind "campaign" needs path (a campaign directory)' }
+        } else
+          return {
+            ok: false,
+            error: `INVALID (open_tab): tab kind "${cmd.kind}" does not exist on this screen; kinds: viewer, residuals, metrics, logs, problems, geometry, campaign`,
+          }
         return { ok: true }
       }
-      case 'select_tab':
-        return openNamedTab(cmd.tab)
+      case 'select_tab': {
+        const found = findTab(u, cmd.tab.trim())
+        if (found) {
+          u.activateTab(found.id)
+          return { ok: true }
+        }
+        // Not open: the heuristics still open the named tab they always opened.
+        return openNamedTab(cmd.tab.trim())
+      }
+      case 'close_tab': {
+        const found = findTab(u, cmd.id.trim())
+        if (!found) {
+          const ids = u.tabs.map((t) => t.id).join(', ') || 'none'
+          return { ok: false, error: `NO_TAB (close_tab): no tab "${cmd.id}"; open tabs: ${ids}` }
+        }
+        if (found.kind === 'file' && deps.editor?.isDirty(found.path))
+          return { ok: false, error: `DIRTY (close_tab): "${found.path}" has unsaved edits; save it first or close it on screen` }
+        u.closeTab(found.id)
+        if (found.kind === 'file') deps.editor?.closeBuffer(found.path)
+        else if (found.kind === 'diff') deps.editor?.removeDiff(found.id)
+        return { ok: true }
+      }
       case 'open_case':
         u.openFile(cmd.path)
         return { ok: true }
@@ -461,7 +524,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
           ui.getState().openViewerTab()
           return noViewer(cmd.type)
         }
-        const r = await v.execute({ type: 'screenshot', width: null, height: null, includeLegend: true })
+        const r = await v.execute({ type: 'screenshot', width: null, height: null, includeLegend: u.showColorBars !== false })
         ui.getState().openViewerTab()
         if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused the screenshot' }
         if (!r.image) return { ok: false, error: 'NO_IMAGE (post_screenshot): the viewer returned no image' }
@@ -512,6 +575,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
         }
         return { ok: true }
       case 'show_overlay':
+        u.setOverlay(cmd.what, cmd.on)
+        return { ok: true }
       case 'set_centerline':
       case 'select_step':
         return unsupported(cmd.type, 'this screen does not implement it')

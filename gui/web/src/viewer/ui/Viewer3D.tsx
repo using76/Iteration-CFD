@@ -5,6 +5,7 @@ import { demoDatasetPath, getViewerController, type ViewerOverlayInfo } from '..
 import { fieldTitle, type ViewerController } from '../controller/ViewerController'
 import type { LayerEntry, ViewerTool } from '../controller/model'
 import { assertLittleEndian } from '../data/DatasetLoader'
+import { useUiStore } from '../../state/uiStore'
 import { ThreeSceneView } from '../engine/ThreeSceneView'
 import { DomainCard } from './DomainCard'
 import { LayerPanel, type ClipUi } from './LayerPanel'
@@ -38,6 +39,12 @@ function isErrorMessage(m: string | null): boolean {
 export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps) {
   const controller = useMemo(() => getViewerController(viewId), [viewId])
   const state = useViewerState(controller)
+  const showAxes = useUiStore((s) => s.showAxes)
+  const showColorBars = useUiStore((s) => s.showColorBars)
+  // The mount effect reads this instead of showAxes so attaching a view does
+  // not re-run (and re-create the renderer) when only the triad toggles.
+  const showAxesRef = useRef(showAxes)
+  showAxesRef.current = showAxes
   const hostRef = useRef<HTMLDivElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [clipUi, setClipUi] = useState<ClipUi | null>(null)
@@ -69,6 +76,7 @@ export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps)
         observer = new ResizeObserver(resize)
         observer.observe(host)
         controller.attachView(v)
+        v.setTriadVisible(showAxesRef.current)
         // Dev only: the controller that actually owns a canvas, published so a
         // script can drive the viewer the way the assistant does. Importing the
         // module from outside is not enough -- an HMR pass gives the module a
@@ -100,6 +108,11 @@ export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps)
   useEffect(() => {
     controller.setOverlayTextProvider(() => lines.map(([k, v]) => `${k}: ${v}`))
   }, [controller, lines])
+
+  // The axes triad follows show_overlay / the store (a detached view is a no-op).
+  useEffect(() => {
+    controller.getView()?.setTriadVisible?.(showAxes)
+  }, [controller, showAxes])
 
   const layers = useMemo(() => [...controller.layers.values()], [controller, state.layers])
   const representation = useMemo<RepresentationPreset>(() => {
@@ -178,7 +191,7 @@ export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps)
   }
 
   const screenshot = async () => {
-    const r = await run({ type: 'screenshot', width: null, height: null, includeLegend: true })
+    const r = await run({ type: 'screenshot', width: null, height: null, includeLegend: showColorBars })
     if (!r.image) return
     const a = document.createElement('a')
     a.href = `data:image/png;base64,${r.image.base64}`
@@ -192,7 +205,7 @@ export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps)
   const backendLabel = state.backend === 'webgpu' ? 'WebGPU' : state.backend === 'webgl2' ? 'WebGL2' : null
 
   return (
-    <div className="v3d" data-testid="viewer3d" data-backend={state.backend}>
+    <div className="v3d" data-testid="viewer3d" data-backend={state.backend} data-axes={showAxes ? 'on' : 'off'} data-colorbars={showColorBars ? 'on' : 'off'}>
       <Toolbar
         locale={locale}
         fields={manifest?.fields ?? []}
@@ -223,7 +236,7 @@ export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps)
           </span>
         )}
         <OverlayInfo lines={lines} />
-        {legend && <Legend legend={legend} />}
+        {legend && showColorBars && <Legend legend={legend} />}
         {manifest && <DomainCard locale={locale} manifest={manifest} projection={state.camera.projection} hiddenPatches={state.patches?.hidden ?? []} onToggleProjection={() => void run({ type: 'setCamera', preset: null, position: null, target: null, projection: state.camera.projection === 'perspective' ? 'orthographic' : 'perspective' })} />}
         {manifest && manifest.times.length > 1 && state.time && <TimeScrubber times={manifest.times} index={state.time.index} onChange={(i) => void run({ type: 'setTime', index: i })} />}
         <LayerPanel layers={layers} onToggle={(id, v) => controller.setLayerVisible(id, v)} onRemove={(id) => void run({ type: 'remove', id })} clip={clipUi} onClipChange={applyClip} />

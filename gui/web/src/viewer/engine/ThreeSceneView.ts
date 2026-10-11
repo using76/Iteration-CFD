@@ -184,6 +184,10 @@ export class ThreeSceneView implements SceneView {
     this.engine.setQuality(level)
   }
 
+  setTriadVisible(on: boolean): void {
+    this.engine.setTriadVisible(on)
+  }
+
   setTool(tool: ViewerTool): void {
     this.engine.setTool(tool)
   }

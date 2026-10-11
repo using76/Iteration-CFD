@@ -88,6 +88,7 @@ export class Engine {
   private height = 1
   private dpr = 1
   private quality: QualityLevel = 'medium'
+  private triadVisible = true
   private envTexture: Texture | null = null
   private readonly cameraListeners = new Set<(pose: CameraPose) => void>()
   private cameraDirty = false
@@ -215,7 +216,7 @@ export class Engine {
 
   private renderFrame(): void {
     this.renderer.render(this.scene, this.camera)
-    this.triad.render(this.renderer, this.camera, this.width, this.height)
+    if (this.triadVisible) this.triad.render(this.renderer, this.camera, this.width, this.height)
   }
 
   invalidate(): void {
@@ -246,6 +247,12 @@ export class Engine {
     o.left = -halfH * aspect
     o.right = halfH * aspect
     o.updateProjectionMatrix()
+  }
+
+  setTriadVisible(on: boolean): void {
+    if (this.triadVisible === on) return
+    this.triadVisible = on
+    this.invalidate()
   }
 
   setQuality(level: QualityLevel): void {

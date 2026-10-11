@@ -50,6 +50,8 @@ export interface SceneView {
   getCamera(): CameraPose
   onCameraChange(listener: (pose: CameraPose) => void): () => void
   setQuality(level: QualityLevel): void
+  /** The corner axes triad; optional so existing fakes keep compiling. */
+  setTriadVisible?(on: boolean): void
   setTool(tool: ViewerTool): void
   screenshot(req: ScreenshotRequest): Promise<ScreenshotResult>
   /** Cell index under a canvas point (select tool), or -1. */
