@@ -41839,3 +41839,161 @@ converged), so both rows pass; the dFFI row passes with a margin of 1.16x.
 
 
 ---
+
+## 143. The 1-D RANS oracle and Wilcox 2006
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §143 to VAL-20 (§143.1, the oracle), VAL-21
+(§143.2, Wilcox 2006 and the measured TG0 bands) and VAL-22a. The oracle is `src/vv/rans1d.rs`: host only, `f64`
+whatever the crate's `Scalar` is, no `Gpu`, no kernel, no capture row, and no solver numerics change. It replaces
+the independent one-dimensional discretisation that §114 measured with and that was written outside the tree.
+
+### 143.1 The fully developed pipe on TG0's radial cell set
+
+**Sources.** Menter, Kuntz & Langtry 2003 and Menter 1994 for kOmegaSST, as §6.3 tabulates them; the wall-cell
+treatment of §6.4 as `wallfunctions.rs` implements it; Wilcox's 1988 k-omega as the NASA Turbulence Modeling
+Resource states it, <https://tmbwg.github.io/turbmodels/wilcox.html> (read 2026-10-11; US-government
+documentation, not source), citing Wilcox, *AIAA J.* 26(11) (1988) 1299-1310, DOI `10.2514/3.10041` (cited, not
+read); Launder & Sharma 1974 as §33.1 states it; Spalart-Allmaras SA-noft2 as §56.1-§56.3 state it, from the TMR
+page <https://tmbwg.github.io/turbmodels/spalart.html> and ICCFD7-1902; Tucker 1998 for the wall distance (§6.6);
+Celik et al. 2008 for the extrapolation (§94, `vv::observed_order`). The pipe metrics are `tools/cad/post.py`'s
+`pipe_block` definitions, this tree's own.
+
+**Geometry (143.1).** TG0's mesh (§114.1, `tools/cad/pipe_mesh.py`) is a wedge of angle `theta = 5 deg` cut from a
+pipe of radius `R = 0.025 m`. The vertices lie at radii `r_i` in the two planes at `+-theta/2`, so a cell's
+section normal to `x` is the trapezoid with corners `(r cos(theta/2), +-r sin(theta/2))`, and its wall face is the
+flat chord at distance `rho_w = R cos(theta/2)` from the axis. In the bisector coordinate `rho = r cos(theta/2)`,
+with `t = tan(theta/2)` and periodic length `L`, a cell between faces `rho_a < rho_b` has
+
+```
+A_f = 2 L t rho_f                 radial face area
+V   = L t (rho_b^2 - rho_a^2)     volume
+c   = (2/3)(rho_b^3 - rho_a^3)/(rho_b^2 - rho_a^2)     centroid                            (143.1)
+```
+
+which is exactly a polar finite-volume cell of a pipe of radius `rho_w`. The common factor `2 L t` cancels from
+every balance below, so the oracle carries `A_f = rho_f` and `V = (rho_b^2 - rho_a^2)/2`.
+
+**The cell set (143.2).** `n` cells graded geometrically to the wall: `q` solves `h1 (q^n - 1)/(q - 1) = R` by 200
+bisection steps on `(1, 4)` (`wedge_mesh.solve_q`), and the vertex radii counted from the wall are
+`r_i = R (1 - (q^i - 1)/(q^n - 1))`, `i = 0..n` (`r_0 = R`, `r_n = 0` exactly). TG0's level `l` has
+`n = 40 * 2^l` and `h1 = (R / 2358) 2^-l`: L0 is 40 cells, L1 80, and §114.3's 160/320/640 are levels 2/3/4.
+
+**The discrete operators (143.3).** Internal face `f` between the inner cell `P` and the outer cell `N`:
+weight `w_f = (c_N - rho_f)/(c_N - c_P)`, face value `phi_f = w_f phi_P + (1 - w_f) phi_N`, distance
+`delta_f = c_N - c_P`. The wall face: `delta_w = rho_w - c_P` (this is `b_y`). The axis face has zero area. Gauss
+gradient of a cell field with wall-face value `phi_w`:
+
+```
+grad(phi)_P = 2 [phi_b rho_b - phi_a rho_a - phi_P (rho_b - rho_a)] / (rho_b^2 - rho_a^2)                       (143.4)
+```
+
+(the wedge faces contribute the `-phi_P (rho_b - rho_a)` term). Diffusion of `phi` through face `f`:
+`Gamma_f A_f (phi_N - phi_P)/delta_f`, with `Gamma_f = w_f Gamma_P + (1 - w_f) Gamma_N` for a cell diffusivity
+`Gamma = nu + sigma nu_t` (`turbGammaInternalCell`), and `nu` alone on the wall face, where `nu_t` is
+`fixedValue 0`.
+
+**Momentum (143.5).** With the body force `g = 2 u_tau,in^2 / R`, `u_tau,in = Re_tau nu / R`, `nu = 1.516e-5 m^2/s`
+(`turb_integral.pipe_drive`), each cell satisfies `sum_f (nu + nu_t)_f A_f (U_N - U_P)/delta_f + g V_P = 0`,
+`U = 0` on the wall face. Summed over the cells inside face `f` it telescopes to the exact statement
+
+```
+-(nu + nu_t)_f (U_N - U_P)/delta_f = g rho_f / 2     at every face, the wall face included                       (143.6)
+```
+
+so the measured `u_tau^2 = nu U_P/delta_w` equals `g rho_w / 2` to round-off for every model. This is why
+`u_tau = 0.349538` in every row of §114 although the case was driven at `u_tau,in = 0.349705`:
+`sqrt(cos(2.5 deg)) = 0.999524`.
+
+**kOmegaSST (143.7).** §6.3's equations with this tree's choices: `S = |dU/drho|`, `P = G/nu_t = (dU/drho)^2`,
+`nu_t = a1 k / max(a1 omega, b1 F2 S)`, `G = nu_t P`, k production `min(G, c1 beta* k omega)`, omega production
+`blend(gamma) P`, the cross-diffusion `2 (1 - F1) sigma_w2 grad k . grad omega / omega`, blended `sigma` per cell
+and interpolated as `Gamma` above; `F1`, `F2` and `CD_kw+ = max(CD_kw, 1e-10)` exactly as `sstBlending`, with `y`
+Tucker's distance from the same operators (`laplacian(phi) = -1`, `phi_w = 0`, then
+`y = -|grad phi| + sqrt(|grad phi|^2 + 2 phi)`). The wall-adjacent cell is pinned, as `wfOmegaWallCell` pins it:
+
+```
+omega_P = sqrt(omega_log^2 + omega_vis^2),  omega_log = sqrt(k_P)/(C_mu^1/4 kappa delta_w),
+omega_vis = 6 nu/(beta_1 delta_w^2),  kappa = 0.41, C_mu = 0.09, beta_1 = 0.075                                  (143.8)
+```
+
+and its `G` is §6.4's blended wall production `e^{1/Gamma} nu |U_P/delta_w| C_mu^1/4 sqrt(k_P)/(kappa delta_w)`,
+`Gamma = -0.01 y+^4/(1 + 5 y+)`, `y+ = C_mu^1/4 delta_w sqrt(k_P)/nu`, which is zero to round-off at TG0's
+`y+ < 0.1`. `k = 0` on the wall face; omega's wall face is zero-gradient (its only reader is the pinned cell).
+
+**k-omega 1988 (143.9).** `nu_t = k/omega`, `Dk/Dt = div((nu + sigma_k nu_t) grad k) + G - beta* k omega`,
+`Domega/Dt = div((nu + sigma_w nu_t) grad omega) + gamma P - beta omega^2`, with the TMR page's constants
+`sigma_k = sigma_w = 0.5`, `beta* = 0.09`, `beta = 3/40`, `gamma = 5/9`, and the wall cell of (143.8). §6.2's
+`beta = 0.072` (the later editions', which `KOmegaCoeffs` carries) is a named alternative constructor, not the
+default: the oracle's model is the one its name says.
+
+**Launder-Sharma (143.10).** §33.1 as written, `k = epsilon~ = 0` on the wall face, `D = 2 nu |grad sqrt(k)|^2`
+with (143.4) and `sqrt(k)_w = 0`, and `E = 2 nu nu_t |grad grad U|^2` with
+`|grad grad U|^2 = (dg/drho)^2 + (g/rho)^2`, `g = dU/drho` from (143.4), `dg/drho` from (143.4) with the
+zero-gradient wall value `g_w = g_P`, and `g/rho` the hoop curvature of the axisymmetric field.
+
+**SA-noft2 (143.11).** (56.1)-(56.6) with `c_t3 = 0`, (56.9) for `Stil`, `Omega = |dU/drho|`, `r = 10` where
+`Stil <= 0`, `nu~ = 0` on the wall face, face diffusivity `(nu + nu~_f)/sigma`, `d` Tucker's distance by default
+(the solver's choice); the exact `rho_w - c` is selectable for every model.
+
+**The iteration (143.12).** One Picard sweep solves each equation's tridiagonal system exactly (Thomas): the
+transported turbulence fields first, under-relaxed `phi <- phi + alpha (phi* - phi)`, then `nu_t`, then `U` from
+(143.5) unrelaxed. Sinks are implicit with the previous iterate, productions explicit, a source of either sign is
+split by sign. The sweep stops when the largest relative change of `U` and of each transported field is under
+`1e-11`; `alpha` is 0.7 for both k-omega models, 0.5 for Launder-Sharma and 0.1 for SA, which oscillates at 0.3.
+Under-relaxation does not move the converged answer.
+
+**Metrics (143.13)**, `post.py`'s: `U_b = sum U V / sum V`; `u_tau = sqrt(nu U_P/delta_w)` in the wall cell;
+`f = 8 (u_tau/U_b)^2`; `U_axis = U_0 - (U_1 - U_0) c_0^2/(c_1^2 - c_0^2)`, the even fit through the two innermost
+centroids; defect `(U_axis - U_b)/u_tau`; and `nu_t,axis/(u_tau R)` with `R = 0.025 m`.
+
+**The gates (143.14)** - the integration test `tests/rans1d.rs`, run in both builds with the same assertions,
+because the oracle is `f64` in both:
+
+| test | quantity | §114's value | oracle | class |
+|------|----------|-------------|--------|-------|
+| `rans1d_sst_pipe_reproduces_spec_lit_114_table_3` | f at 640 cells, Re_tau 576.69 | 0.027258 | 0.0272576 | P, 1e-4 rel |
+| | f extrapolated through 160/320/640 | 0.027287 | 0.0272882 | P, 1e-4 rel |
+| | observed order of f | 1.06 to 1.24 | 1.149 | P |
+| | `nu_t,axis/(u_tau R)` at 640 | 0.124 | 0.12399 | P, rounds to 3 decimals |
+| `rans1d_sst_pipe_reproduces_spec_lit_114_table_2` | U_b on L1_lo | 6.02290 | 6.0228965 | P, 1e-5 rel |
+| | U_axis on L1_lo | 7.28630 | 7.2862990 | P, 1e-5 rel |
+| | f, defect on L1_lo | 0.026944, 3.6145 | 0.0269444, 3.614489 | P, 1e-4 rel |
+| | U_b, defect on L0_lo | 6.07522, 3.6163 | 6.0752158, 3.616298 | P, 1e-5 / 1e-4 rel |
+| | U_b on L1_hi, Re_tau 2358 | 30.26666 (§114.2) | 30.266670 | P, 1e-5 rel |
+| | exact `R - r` for Tucker's y, L1_lo | U_b changes < 1e-5 (§114.3) | 6.6e-7 | P |
+| `rans1d_laminar_pipe_is_poiseuille` | (143.6) at every face and `u_tau^2 = g rho_w/2` | identity | holds at every face | A, 1e-12 rel |
+| | U_b against `g rho_w^2/(8 nu)`, L1 then L2 | second order | 4.5107e-4 / 1.1289e-4 = 3.9957 | P, ratio in [3.9, 4.1] |
+| `rans1d_sa_log_layer_identity` | §56.4's balance at `chi = 1e14`, and its `O(1/chi)` rate | 0, rate 1 | residual 2.0e-15, rate 0.9985 | A |
+| `rans1d_every_model_converges_and_balances_the_body_force` | five models on L1_lo converge; (143.6)'s `u_tau` | identity | below 1e-10 | A, 1e-10 rel |
+
+**Measured, both builds identical to the last printed digit** (`f64` in both; the five tests take 0.01 s). The
+five models on L1_lo at Re_tau 576.69, Tucker's distance, iterations to the 1e-11 change:
+
+| model | U_b m/s | f | defect | sweeps |
+|-------|---------|---|--------|--------|
+| kOmegaSST | 6.022897 | 0.026944 | 3.6145 | 85 |
+| k-omega 1988, `beta = 3/40` | 5.971289 | 0.027412 | 3.7392 | 93 |
+| k-omega 1988, §6.2's `beta = 0.072` | - | 0.025150 | - | 101 |
+| Launder-Sharma | 6.375155 | 0.024049 | 3.8426 | 367 |
+| SA-noft2 | 6.303381 | 0.024600 | 4.1982 | 216 |
+
+SA-noft2 with the exact distance gives f 0.026501: Tucker's `y` is `0.707 rho_w` on the axis, not `rho_w`, and SA's
+destruction reads `d` in the core, where the two k-omega models are insensitive to it (SST's U_b moves 6.6e-7).
+The four non-SST rows are not compared with any published value here. SA's f is pinned at 1e-4 against the
+supervisor's independent scratchpad implementation of the same contract: that pins the oracle, it is not
+validation, and it was added because the first coding of (143.11) multiplied the destruction by `nu~` twice and
+still converged, to f 229.8.
+
+**What §114.3's "defect extrapolated" is, measured.** The plan row for this unit asks for "defect 3.6129 at 640
+cells". §114.3's table puts 3.6129 in the column "defect extrapolated"; the 640-cell defect is 3.613276. The
+three finest defects are not in the asymptotic range: Celik's procedure on the defect itself gives an observed
+order 0.319 and an extrapolate 3.611997, the defect rebuilt from the extrapolated `U_axis` and `U_b`
+gives 3.612808, and f's own order applied to the defect gives 3.613016. None of the three reproduces
+3.6129 to 1e-4, and §114.3 does not state which it used, so 3.6129 is not a gate here; the table-2 defects, which
+are unextrapolated, are.
+
+**Not claimed.** The oracle is a one-dimensional discretisation of the solver's equations on the solver's cell
+set; agreeing with `ofgpu-lowmach` is agreement with the same discrete model, not validation. The open references
+the TG0 bands compare against (Prandtl, Blasius, the log law, Schlichting's 4.07) are §143.2's.
+
+---

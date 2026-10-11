@@ -43,6 +43,8 @@
 
 use crate::{Error, Result, Scalar};
 
+pub mod rans1d;
+
 /// One mesh level: its typical cell size (94.1) and the gate's value on it.
 /// Level 1 of a sequence is the FINEST mesh; `h` must grow along a sequence.
 #[derive(Debug, Clone, Copy, PartialEq)]
