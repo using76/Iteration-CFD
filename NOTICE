@@ -139,6 +139,21 @@ AMGX
   reproduced here. The DLL itself is built from the 2.5.0 sources by
   `tools/amgx/build.cmd`; see AMGX's own LICENSE.
 
+Manifold (npm `manifold-3d` 3.2.1)
+  Copyright (c) The Manifold Authors (https://github.com/elalish/manifold).
+  Apache License 2.0.
+  A dependency of the studio server (`gui/server/package.json`), used as a
+  library for the STL booleans fuse, cut and common
+  (`gui/server/src/tools/geometryBoolean.ts`). It is installed by npm and not
+  vendored: no Manifold source is copied into this repository. See Manifold's
+  own LICENSE.
+
+Clipper2
+  Copyright (c) Angus Johnson.
+  Boost Software License 1.0.
+  Compiled into Manifold's `manifold.wasm` for its 2-D cross-sections, and
+  installed with it by npm. Not vendored here.
+
 NVIDIA CUDA Toolkit, cuFFT, cuBLAS
   Used under the NVIDIA CUDA Toolkit End User License Agreement, which permits
   linking and redistribution of applications built against it. Not redistributed
