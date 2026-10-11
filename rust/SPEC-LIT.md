@@ -41996,4 +41996,109 @@ are unextrapolated, are.
 set; agreeing with `ofgpu-lowmach` is agreement with the same discrete model, not validation. The open references
 the TG0 bands compare against (Prandtl, Blasius, the log law, Schlichting's 4.07) are §143.2's.
 
+### 143.2 Wilcox 2006 k-omega in the oracle, and the five models' TG0 bands measured
+
+**Sources.** Wilcox's 2006 k-omega as the NASA Turbulence Modeling Resource states it,
+<https://tmbwg.github.io/turbmodels/wilcox.html>, section "Wilcox (2006) k-omega" (read 2026-10-11, equations and
+constants read from the rendered equation images; US-government documentation, not source), citing Wilcox,
+"Formulation of the k-omega Turbulence Model Revisited", *AIAA J.* 46(11) (2008) 2823-2838, DOI `10.2514/1.36541`
+(cited, not read: paywalled), and Wilcox, *Turbulence Modeling for CFD*, 3rd ed., DCW Industries (2006) (cited, not
+read). The band references are those of `tools/cad/turb_integral.py`, from Schlichting's lecture series, NACA TM 1218
+(1949): Prandtl's smooth-pipe law (its eq 16.26), Blasius (16.4), the log law `u+ = 2.5 ln y+ + 5.5` (16.14) and
+Nikuradse's core defect 4.07 (16.22). The page's HTML alt text writes `chi_omega` with `Omega_ij Omega_ij`; the
+rendered image, used here, has `Omega_ij Omega_jk`.
+
+**The model (143.15)**, incompressible, `nu_t = k / omega_hat`:
+
+```
+Dk/Dt = P - beta* omega k + div[(nu + sigma_k k/omega) grad k]
+Dw/Dt = gamma (omega/k) P - beta omega^2 + div[(nu + sigma_w k/omega) grad omega] + (sigma_d/omega) grad k . grad omega
+omega_hat = max(omega, C_lim sqrt(2 Sbar_ij Sbar_ij / beta*)),   P = nu_t 2 S_ij S_ij
+beta = beta_0 f_beta,  f_beta = (1 + 85 chi)/(1 + 100 chi),  chi = |Omega_ij Omega_jk Shat_ki| / (beta* omega)^3
+Shat_ki = S_ki - (1/2)(du_m/dx_m) delta_ki,   sigma_d = 0 if grad k . grad omega <= 0, else 1/8
+sigma_k 0.6, sigma_w 0.5, beta* 0.09, gamma 13/25, C_lim 7/8, beta_0 0.0708                                     (143.15)
+```
+
+with the page's identity `gamma = beta_0/beta* - sigma_w kappa^2/sqrt(beta*)` at `kappa = 0.40`. The diffusivities
+carry `k/omega`, not `nu_t`. No production limiter (the page's "Wilcox2006", not "-klim"); in incompressible flow
+the "m", "s" and "e" variants coincide.
+
+**In the pipe (143.16).** `2 S_ij S_ij = (dU/drho)^2`, so `omega_hat = max(omega, C_lim |dU/drho| / sqrt(beta*))` and
+`gamma (omega/k) P = gamma (omega/omega_hat)(dU/drho)^2`, the form the oracle evaluates (no division by `k`). A
+unidirectional shear has `Omega Omega` diagonal and `S` off-diagonal in the same axes, so every product in `chi`
+holds an exact zero and `f_beta = 1` bitwise. The cross-diffusion is a non-negative source, explicit; it is non-zero
+in 33 of L1_lo's 80 cells at Re_tau 576.69 and 44 at 2358, and the stress limiter is inactive in every cell of the
+converged L1 pipe at both. The sweep is (143.12)'s, `alpha = 0.7`, `nu_t` rebuilt from the new `k`, `omega` and the
+sweep's `dU/drho`. The wall-adjacent cell is (143.8) unchanged: its `omega_vis = 6 nu/(beta_1 delta_w^2)` keeps
+`beta_1 = 0.075`, the wall function's own constant (`WallFunctionCoeffs::beta1`, `wallfunctions.rs`), not the
+model's `beta_0`, as for the other two k-omega models, because that is what a device run of this model would use.
+
+**The band metrics (143.17)**, `post.py`'s `pipe_block` on the oracle's pipe of radius `rho_w`:
+`Re_D = U_b 2 rho_w / nu`; the measured `Re_tau = u_tau rho_w / nu`; f against Prandtl,
+`(2.0 log10(2 sqrt(8) Re_tau,in) - 0.8)^-2`, at the case's INPUT Re_tau; f against Blasius `0.3164 Re_D^-1/4` at
+the measured Re_D; the log-law deviation `max |U/u_tau - (2.5 ln y+ + 5.5)|` over the cells with
+`30 <= y+ <= 0.2 Re_tau`, `y+ = (rho_w - c) u_tau / nu`; the defect against 4.07. TG0's bands (§114.1): Prandtl and
+Blasius within 5 %, log law within 1.0, defect within 10 %. `D = 2 rho_w` (not `2R`, not `post.py`'s
+area-equivalent diameter) is the one that reproduces §114.3's Blasius column at both Re_tau.
+
+**The gates (143.18)**, added to `tests/rans1d.rs`, both builds, the same assertions:
+
+| test | what | class |
+|------|------|-------|
+| `wilcox2006_coefficients_are_the_tmr_page` | the nine constants `==` the page's; the gamma identity within 1e-15 | D, A |
+| `wilcox2006_cross_diffusion_is_zero_unless_grad_k_dot_grad_omega_is_positive` | `+0.0` bits for a negative, an orthogonal and a cancelling dot; 0.1875 and 2.0 exactly; on the solved L1_lo pipe `+0.0` in every cell with `gk gw <= 0`, positive elsewhere, both sets non-empty | D |
+| `wilcox2006_f_beta_is_one_for_simple_shear` | `f_beta` bits `== 1.0` for three shears (one tilted); `[[1,2,0],[1,0,3],[0,1,0]]` at omega 10 gives 85729/100729 within 1e-15 | D, A |
+| `wilcox2006_pipe_matches_the_supervisor_oracle` | L1, Re_tau 576.69: U_b 6.089861407, f 0.0263551108, defect 3.857669312, `nu_t,axis/(u_tau R)` 0.09696406419; Re_tau 2358: U_b 30.73986073, f 0.01729333019, defect 3.590450099; 1e-6 rel | P |
+| `tg0_bands_reproduce_spec_lit_114` | (143.17) on SST against §114's own band numbers, below | P |
+| `tg0_bands_measured_table` (ignored) | prints the table below | measurement |
+
+The 1e-6 pins are against the supervisor's independent scratchpad implementation of (143.15)-(143.16) in the same
+discretisation (not in the tree); they pin the oracle and are not validation. That implementation also reproduces
+the in-tree 1988 row (U_b 5.971289, 93 sweeps).
+
+**§114 through (143.17), SST.** Reproduced and gated: L1_lo f against Prandtl 0.044796 (§114.3 +4.48 %) and the
+log-law deviation 1.073283 (§114.2's 1.073 after the omega tolerance was tightened), within 1e-4 and 1e-3; at 640
+cells, Re_tau 576.69, f against Blasius 0.021032 (+2.11 %), the defect against 4.07 -0.112217 (-11.2 %), and the
+extrapolated f against Prandtl 0.058127 (+5.81 %); at 2358, f against Blasius 0.030718 (+3.08 %). Not reproduced at
+§114.3's printed digit, so recorded and not gated: the 640-cell log-law deviation, 1.240260 against 1.239 at Re_tau
+576.69 and 1.355564 against 1.358 at 2358; and the 2358 row's f, 0.0184260 against 0.018428 (1.1e-4 rel) and its
+extrapolate 0.0185047 against 0.018502 (1.5e-4 rel). §114.3's numbers came from the out-of-tree 1-D that is lost, and
+at 576.69 its f and extrapolate are reproduced to 1.5e-5 and 4e-5 (§143.1), so the remaining differences are
+below the bands' resolution and are not traced further.
+
+**Measured** (`cargo test --release --test rans1d tg0_bands_measured_table -- --ignored --nocapture`, both builds
+identical to the last printed digit; Tucker's distance; levels 2, 3, 4 = 160, 320, 640 cells; `f_ext` and `p` are
+Celik's through the three; Prandtl against `f_ext`, the other three bands at 640 cells; **bold** is outside its band):
+
+| model | Re_tau | f 640 | f_ext (p) | f vs Prandtl | f vs Blasius | log-law dev | defect vs 4.07 | sweeps 640 |
+|-------|--------|-------|-----------|--------------|--------------|-------------|----------------|------------|
+| kOmegaSST | 576.69 | 0.0272576 | 0.0272882 (1.15) | **+5.81 %** | +2.10 % | **1.240** | **-11.2 %** | 123 |
+| kOmegaSST | 2358 | 0.0184260 | 0.0185047 (1.03) | +2.71 % | +3.07 % | **1.356** | **-18.4 %** | 111 |
+| k-omega 1988 | 576.69 | 0.0277308 | 0.0277623 (1.15) | **+7.65 %** | +3.65 % | **1.328** | -8.1 % | 111 |
+| k-omega 1988 | 2358 | 0.0185892 | 0.0186694 (1.03) | +3.63 % | +3.87 % | **1.367** | **-14.5 %** | 94 |
+| Wilcox 2006 | 576.69 | 0.0266491 | 0.0266776 (1.16) | +3.44 % | +0.11 % | **1.134** | -5.2 % | 119 |
+| Wilcox 2006 | 2358 | 0.0178352 | 0.0179078 (1.03) | -0.60 % | +0.17 % | **1.179** | **-11.8 %** | 111 |
+| Launder-Sharma | 576.69 | 0.0236130 | 0.0236080 (2.21) | **-8.46 %** | **-9.95 %** | 0.908 | -5.2 % | 392 |
+| Launder-Sharma | 2358 | 0.0169178 | 0.0169137 (2.46) | **-6.12 %** | -4.35 % | 0.572 | **-12.4 %** | 378 |
+| SA-noft2 | 576.69 | 0.0245797 | 0.0245794 (1.92) | -4.69 % | **-6.73 %** | 0.359 | +3.4 % | 223 |
+| SA-noft2 | 2358 | 0.0175401 | 0.0175395 (1.98) | -2.65 % | -1.28 % | 0.538 | +0.4 % | 207 |
+
+At 640 cells and Re_tau 576.69, f against Prandtl without the extrapolation is +5.69 % (SST), +7.53 % (1988),
++3.33 % (2006), -8.44 % (Launder-Sharma) and -4.69 % (SA). Re_D at Re_tau 2358 is 0.98e5 to 1.02e5, at the
+upper end of Blasius's stated range (1e5). The k-omega models converge in f at first order (p 1.03 to 1.16, the
+wall row of (143.8)), Launder-Sharma and SA at second.
+
+**What the table says for D-VAL-5** (docs/17 §11 item 3: Wilcox 2006 on the device only if the oracle closes the
+TG0 bands). Wilcox 2006 closes Prandtl and Blasius at both Re_tau, and the defect at 576.69, but not the log-law
+band at either (1.134 and 1.179 against 1.0) and not the defect at 2358 (-11.8 %). So the oracle does not close
+TG0 with Wilcox 2006, and the trigger the plan states does not fire. No model closes all four bands at both Re_tau:
+SA-noft2 closes all four at 2358 and misses only Blasius at 576.69. The log-law band's reference is Nikuradse's
+`kappa 0.40, B 5.5`, while the three k-omega models produce a log layer of `kappa` about 0.41 (SST, 1988) or 0.40 (2006,
+by its gamma); a band missed by 0.13 to 0.37 in u+ is partly the reference line's intercept. That is a reading, not
+a measurement of the intercept.
+
+**Not claimed.** The oracle discretises each model's equations on TG0's cells; its table is the models' answer on
+that cell set with a pinned wall-cell omega, not a device run and not validation of the solver. Wilcox 2006 exists
+only in the oracle: there is no device kernel, case keyword or registry row (VAL-22a-c, conditional on D-VAL-5).
+
 ---

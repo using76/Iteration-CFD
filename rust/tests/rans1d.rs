@@ -153,6 +153,7 @@ fn rans1d_every_model_converges_and_balances_the_body_force() {
         Model::Laminar,
         Model::KOmegaSst,
         Model::KOmega1988,
+        Model::Wilcox2006,
         Model::LaunderSharma,
         Model::SpalartAllmaras,
     ] {
@@ -189,4 +190,214 @@ fn rans1d_every_model_converges_and_balances_the_body_force() {
     let sol = solve_k_omega_1988(&mesh, &case, &c62, &ctl).unwrap();
     let m = metrics(&mesh, &case, &sol);
     println!("kOmega1988 spec_lit_6_2: f = {:.9e}, iters = {}", m.f, sol.iterations);
+}
+
+#[test]
+fn wilcox2006_coefficients_are_the_tmr_page() {
+    let c = Wilcox2006Coeffs::default();
+    assert_eq!(c.beta_star, 0.09);
+    assert_eq!(c.beta_0, 0.0708);
+    assert_eq!(c.gamma, 13.0 / 25.0);
+    assert_eq!(c.sigma_k, 0.6);
+    assert_eq!(c.sigma_w, 0.5);
+    assert_eq!(c.sigma_d, 1.0 / 8.0);
+    assert_eq!(c.c_lim, 7.0 / 8.0);
+    assert_eq!(c.f_beta_num, 85.0);
+    assert_eq!(c.f_beta_den, 100.0);
+    let ident = c.beta_0 / c.beta_star - c.sigma_w * 0.40f64 * 0.40 / c.beta_star.sqrt();
+    println!(
+        "gamma = {:.17e}, TMR identity = {:.17e}, diff = {:.3e}",
+        c.gamma, ident, (c.gamma - ident).abs()
+    );
+    assert!(
+        (c.gamma - ident).abs() <= 1e-15,
+        "gamma identity diff = {}",
+        (c.gamma - ident).abs()
+    );
+}
+
+#[test]
+fn wilcox2006_cross_diffusion_is_zero_unless_grad_k_dot_grad_omega_is_positive() {
+    let c = Wilcox2006Coeffs::default();
+    let r = wilcox2006_cross_diffusion(&c, &[1.0, 2.0, 3.0], &[-1.0, 0.0, 0.0], 5.0);
+    assert_eq!(r.to_bits(), 0, "negative dot: {r}");
+    let r = wilcox2006_cross_diffusion(&c, &[1.0, 0.0, 0.0], &[0.0, 1.0, 0.0], 5.0);
+    assert_eq!(r.to_bits(), 0, "orthogonal: {r}");
+    let r = wilcox2006_cross_diffusion(&c, &[1.0, 1.0, 0.0], &[-1.0, 1.0, 0.0], 5.0);
+    assert_eq!(r.to_bits(), 0, "cancelling: {r}");
+    let r = wilcox2006_cross_diffusion(&c, &[2.0, 0.0, 0.0], &[3.0, 0.0, 0.0], 4.0);
+    assert_eq!(r, 0.1875, "positive dot: {r}");
+    let r = wilcox2006_cross_diffusion(&c, &[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0], 2.0);
+    assert_eq!(r, 2.0, "positive dot: {r}");
+    // The same rule on the solved TG0 pipe fields, gk/gw as in the sweep.
+    let mesh = PipeMesh::tg0(1).unwrap();
+    let case = PipeCase::tg0(576.69);
+    let ctl = Controls::for_model(Model::Wilcox2006);
+    let sol = solve_wilcox_2006(&mesh, &case, &c, &ctl).unwrap();
+    let n = mesh.n();
+    let gk = gauss_grad(&mesh, &sol.k, 0.0);
+    let gw = gauss_grad(&mesh, &sol.omega, sol.omega[n - 1]);
+    let (mut neg, mut pos) = (0usize, 0usize);
+    for j in 0..n {
+        let r =
+            wilcox2006_cross_diffusion(&c, &[gk[j], 0.0, 0.0], &[gw[j], 0.0, 0.0], sol.omega[j]);
+        if gk[j] * gw[j] <= 0.0 {
+            assert_eq!(r.to_bits(), 0, "cell {j}: gk*gw = {}, r = {r}", gk[j] * gw[j]);
+            neg += 1;
+        } else {
+            assert!(r > 0.0, "cell {j}: gk*gw = {}, r = {r}", gk[j] * gw[j]);
+            pos += 1;
+        }
+    }
+    println!("cross-diffusion on tg0(1): {neg} cells with gk.gw <= 0, {pos} with gk.gw > 0");
+    assert!(neg > 0 && pos > 0, "both sets must be non-empty: {neg} / {pos}");
+}
+
+#[test]
+fn wilcox2006_f_beta_is_one_for_simple_shear() {
+    let c = Wilcox2006Coeffs::default();
+    let mut g = [[0.0f64; 3]; 3];
+    g[0][1] = 1234.5;
+    assert_eq!(wilcox2006_f_beta(&c, &g, 7.0).to_bits(), 1.0f64.to_bits(), "planar shear");
+    let mut g = [[0.0f64; 3]; 3];
+    g[0][1] = 987.6 * 0.3f64.cos();
+    g[0][2] = 987.6 * 0.3f64.sin();
+    assert_eq!(wilcox2006_f_beta(&c, &g, 7.0).to_bits(), 1.0f64.to_bits(), "tilted shear");
+    let mut g = [[0.0f64; 3]; 3];
+    g[2][0] = -3.25;
+    assert_eq!(wilcox2006_f_beta(&c, &g, 7.0).to_bits(), 1.0f64.to_bits(), "2->0 shear");
+    let g = [[1.0, 2.0, 0.0], [1.0, 0.0, 3.0], [0.0, 1.0, 0.0]];
+    let fb = wilcox2006_f_beta(&c, &g, 10.0);
+    println!("f_beta(non-shear) = {:.17e}, expected {:.17e}", fb, 85729.0 / 100729.0);
+    assert!(rel(fb, 85729.0 / 100729.0) <= 1e-15, "f_beta = {fb}");
+}
+
+#[test]
+fn wilcox2006_pipe_matches_the_supervisor_oracle() {
+    let c = Wilcox2006Coeffs::default();
+    let check = |re_tau: f64, level: u32, u_b: f64, f: f64, defect: f64, nut: Option<f64>| {
+        let mesh = PipeMesh::tg0(level).unwrap();
+        let case = PipeCase::tg0(re_tau);
+        let ctl = Controls::for_model(Model::Wilcox2006);
+        let sol = solve_wilcox_2006(&mesh, &case, &c, &ctl).unwrap();
+        let m = metrics(&mesh, &case, &sol);
+        println!(
+            "Wilcox2006 re_tau {re_tau} level {level}: u_b {:.9e} f {:.9e} defect {:.9e} nut/utau/R {:.9e} iters {}",
+            m.u_b, m.f, m.defect, m.nut_axis_over_utau_r, sol.iterations
+        );
+        assert!(rel(m.u_b, u_b) < 1e-6, "u_b = {} vs {u_b}", m.u_b);
+        assert!(rel(m.f, f) < 1e-6, "f = {} vs {f}", m.f);
+        assert!(rel(m.defect, defect) < 1e-6, "defect = {} vs {defect}", m.defect);
+        if let Some(nr) = nut {
+            assert!(
+                rel(m.nut_axis_over_utau_r, nr) < 1e-6,
+                "nut ratio = {} vs {nr}",
+                m.nut_axis_over_utau_r
+            );
+        }
+    };
+    check(576.69, 1, 6.089861407, 0.0263551108, 3.857669312, Some(0.09696406419));
+    check(2358.0, 1, 30.73986073, 0.01729333019, 3.590450099, None);
+}
+
+#[test]
+fn tg0_bands_reproduce_spec_lit_114() {
+    println!("f_prandtl(576.69) = {:.17e}", f_prandtl(576.69));
+    println!("f_prandtl(2358.0) = {:.17e}", f_prandtl(2358.0));
+    assert!(rel(f_prandtl(576.69), 0.025789172770595198) < 1e-12);
+    assert!(rel(f_prandtl(2358.0), 0.01801605735288456) < 1e-12);
+    let ctl = Controls::for_model(Model::KOmegaSst);
+    let band = |re_tau: f64, level: u32| -> (PipeMetrics, Tg0Bands) {
+        let mesh = PipeMesh::tg0(level).unwrap();
+        let case = PipeCase::tg0(re_tau);
+        let sol = solve(&mesh, &case, Model::KOmegaSst, &ctl).unwrap();
+        let m = metrics(&mesh, &case, &sol);
+        let b = tg0_bands(&mesh, &case, &sol, &m);
+        println!(
+            "SST re_tau {re_tau} level {level}: u_b {:.9e} f {:.9e} re_d {:.6e} re_tau {:.6e} f_vs_prandtl {:.6e} f_vs_blasius {:.6e} loglaw_dev {:.6e}/{} defect_vs_4_07 {:.6e}",
+            m.u_b, m.f, b.re_d, b.re_tau, b.f_vs_prandtl, b.f_vs_blasius, b.loglaw_dev,
+            b.loglaw_cells, b.defect_vs_4_07
+        );
+        (m, b)
+    };
+    let (_, b1) = band(576.69, 1);
+    assert!((b1.f_vs_prandtl - 0.0448).abs() <= 1e-4, "L1 f_vs_prandtl = {}", b1.f_vs_prandtl);
+    assert!((b1.loglaw_dev - 1.073).abs() <= 1e-3, "L1 loglaw_dev = {}", b1.loglaw_dev);
+    let (m2, _) = band(576.69, 2);
+    let (m3, _) = band(576.69, 3);
+    let (m4, b4) = band(576.69, 4);
+    assert!((b4.f_vs_blasius - 0.0211).abs() <= 1e-4, "L4 f_vs_blasius = {}", b4.f_vs_blasius);
+    // SPEC-LIT 143.2: 114.3's log-law 1.239 at 640 cells is not reproduced at its printed
+    // digit (this oracle: 1.24026); it is recorded there, not gated.
+    assert!(
+        (b4.defect_vs_4_07 + 0.112).abs() <= 1e-3,
+        "L4 defect_vs_4_07 = {}",
+        b4.defect_vs_4_07
+    );
+    let (_, ext) = richardson_constant_ratio(m4.f, m3.f, m2.f, 2.0);
+    let ext_vs_pr = ext / f_prandtl(576.69) - 1.0;
+    println!("richardson f at re_tau 576.69: ext = {ext:.9e}, ext/f_prandtl - 1 = {ext_vs_pr:.6e}");
+    assert!((ext_vs_pr - 0.0581).abs() <= 1e-4, "ext/f_prandtl - 1 = {ext_vs_pr}");
+    let (m2h, _) = band(2358.0, 2);
+    let (m3h, _) = band(2358.0, 3);
+    let (m4h, b4h) = band(2358.0, 4);
+    // SPEC-LIT 143.2: 114.3's 2358 row (f 0.018428, log-law 1.358, f extrapolated 0.018502)
+    // is reproduced only to 1.1e-4, 2.4e-3 and 1.5e-4; recorded there, not gated.
+    assert!(
+        (b4h.f_vs_blasius - 0.0308).abs() <= 1e-4,
+        "2358 L4 f_vs_blasius = {}",
+        b4h.f_vs_blasius
+    );
+    let (_, exth) = richardson_constant_ratio(m4h.f, m3h.f, m2h.f, 2.0);
+    println!("richardson f at re_tau 2358: ext = {exth:.9e}");
+}
+
+#[test]
+#[ignore = "measurement: prints SPEC-LIT 143.2's table"]
+fn tg0_bands_measured_table() {
+    for model in [
+        Model::KOmegaSst,
+        Model::KOmega1988,
+        Model::Wilcox2006,
+        Model::LaunderSharma,
+        Model::SpalartAllmaras,
+    ] {
+        for re_tau in [576.69f64, 2358.0] {
+            let case = PipeCase::tg0(re_tau);
+            let ctl = Controls::for_model(model);
+            let mut fs = [0.0f64; 3];
+            let mut b4 = None;
+            let mut ok = true;
+            for (i, level) in [2u32, 3u32, 4u32].into_iter().enumerate() {
+                let mesh = PipeMesh::tg0(level).unwrap();
+                let sol = match solve(&mesh, &case, model, &ctl) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("{model:?} re_tau {re_tau} level {level}: Err {e}");
+                        ok = false;
+                        continue;
+                    }
+                };
+                let m = metrics(&mesh, &case, &sol);
+                let b = tg0_bands(&mesh, &case, &sol, &m);
+                fs[i] = m.f;
+                b4 = Some(b);
+                println!(
+                    "{model:?} re_tau {re_tau} n {} iters {} u_b {:.6e} f {:.6e} defect {:.6e} loglaw_dev {:.6e} loglaw_cells {} nut/utau/R {:.6e} re_d {:.6e}",
+                    mesh.n(), sol.iterations, m.u_b, m.f, m.defect, b.loglaw_dev,
+                    b.loglaw_cells, m.nut_axis_over_utau_r, b.re_d
+                );
+            }
+            if ok {
+                let b4 = b4.expect("ok implies level 4 bands");
+                let (p, ext) = richardson_constant_ratio(fs[2], fs[1], fs[0], 2.0);
+                let fp = f_prandtl(case.re_tau);
+                println!(
+                    "{model:?} re_tau {re_tau} summary: f(640) {:.6e} p {:.6e} f_ext {:.6e} f_vs_prandtl(640) {:.6e} f_vs_prandtl(ext) {:.6e} f_vs_blasius(640) {:.6e} loglaw_dev(640) {:.6e} defect_vs_4_07(640) {:.6e}",
+                    fs[2], p, ext, b4.f_vs_prandtl, ext / fp - 1.0, b4.f_vs_blasius,
+                    b4.loglaw_dev, b4.defect_vs_4_07
+                );
+            }
+        }
+    }
 }

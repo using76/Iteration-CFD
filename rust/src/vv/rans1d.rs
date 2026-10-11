@@ -11,7 +11,9 @@
 //! wedge case, solved on the host in `f64` only. Written from: Menter 1994
 //! and Menter, Kuntz & Langtry 2003 (SPEC-LIT §6.3); Wilcox 1988 via the
 //! NASA TMR page https://tmbwg.github.io/turbmodels/wilcox.html,
-//! DOI 10.2514/3.10041 (SPEC-LIT §6.2); Launder & Sharma 1974 (SPEC-LIT
+//! DOI 10.2514/3.10041 (SPEC-LIT §6.2); Wilcox 2006 from the same page's
+//! "Wilcox (2006) k-omega" section, DOI 10.2514/1.36541 (cited, not read);
+//! Launder & Sharma 1974 (SPEC-LIT
 //! §33); Spalart-Allmaras via https://tmbwg.github.io/turbmodels/spalart.html
 //! (SPEC-LIT §56); Tucker 1998 (SPEC-LIT §6.6); wall-cell treatment
 //! SPEC-LIT §6.4; pipe metrics from tools/cad/post.py `pipe_block`; the
@@ -75,12 +77,13 @@ pub enum WallDistance {
     Exact,
 }
 
-/// The five oracle models.
+/// The six oracle models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Model {
     Laminar,
     KOmegaSst,
     KOmega1988,
+    Wilcox2006,
     LaunderSharma,
     SpalartAllmaras,
 }
@@ -98,7 +101,7 @@ impl Controls {
     pub fn for_model(m: Model) -> Controls {
         let relax = match m {
             Model::Laminar => 1.0,
-            Model::KOmegaSst | Model::KOmega1988 => 0.7,
+            Model::KOmegaSst | Model::KOmega1988 | Model::Wilcox2006 => 0.7,
             Model::LaunderSharma => 0.5,
             Model::SpalartAllmaras => 0.1,
         };
@@ -675,6 +678,204 @@ pub fn solve_k_omega_1988(
     })
 }
 
+/// Wilcox 2006 k-omega constants (TMR "Wilcox (2006) k-omega"; DOI
+/// 10.2514/1.36541, cited, not read). `f_beta = (1 + f_beta_num chi)/
+/// (1 + f_beta_den chi)`, the stress-limiter coefficient `c_lim` and the
+/// cross-diffusion coefficient `sigma_d` (used where grad k . grad omega > 0).
+#[derive(Debug, Clone, Copy)]
+pub struct Wilcox2006Coeffs {
+    pub beta_star: f64,
+    pub beta_0: f64,
+    pub gamma: f64,
+    pub sigma_k: f64,
+    pub sigma_w: f64,
+    pub sigma_d: f64,
+    pub c_lim: f64,
+    pub f_beta_num: f64,
+    pub f_beta_den: f64,
+}
+
+impl Default for Wilcox2006Coeffs {
+    fn default() -> Self {
+        Wilcox2006Coeffs {
+            beta_star: 0.09,
+            beta_0: 0.0708,
+            gamma: 13.0 / 25.0,
+            sigma_k: 0.6,
+            sigma_w: 0.5,
+            sigma_d: 1.0 / 8.0,
+            c_lim: 7.0 / 8.0,
+            f_beta_num: 85.0,
+            f_beta_den: 100.0,
+        }
+    }
+}
+
+/// Wilcox 2006 `f_beta = (1 + 85 chi)/(1 + 100 chi)` with
+/// `chi = |Omega_ij Omega_jk Shat_ki|/(beta* omega)^3` (sum over i, j, k):
+/// `S_ij = (du_i/dx_j + du_j/dx_i)/2`, `Omega_ij = (du_i/dx_j -
+/// du_j/dx_i)/2`, `Shat_ki = S_ki - (1/2)(du_m/dx_m) delta_ki`, with
+/// `grad_u[i][j] = du_i/dx_j`. The plain triple loop; no FMA, no shortcuts.
+pub fn wilcox2006_f_beta(c: &Wilcox2006Coeffs, grad_u: &[[f64; 3]; 3], omega: f64) -> f64 {
+    let mut s = [[0.0f64; 3]; 3];
+    let mut o = [[0.0f64; 3]; 3];
+    let mut shat = [[0.0f64; 3]; 3];
+    let mut div = 0.0f64;
+    for (m, row) in grad_u.iter().enumerate() {
+        div += row[m];
+    }
+    for i in 0..3 {
+        for j in 0..3 {
+            s[i][j] = (grad_u[i][j] + grad_u[j][i]) / 2.0;
+            o[i][j] = (grad_u[i][j] - grad_u[j][i]) / 2.0;
+            shat[i][j] = s[i][j];
+        }
+        shat[i][i] -= div / 2.0;
+    }
+    let mut sum = 0.0f64;
+    for i in 0..3 {
+        for (j, oij) in o[i].iter().enumerate() {
+            for k in 0..3 {
+                sum += oij * o[j][k] * shat[k][i];
+            }
+        }
+    }
+    let chi = sum.abs() / (c.beta_star * omega).powi(3);
+    (1.0 + c.f_beta_num * chi) / (1.0 + c.f_beta_den * chi)
+}
+
+/// The Wilcox 2006 cross-diffusion term `(sigma_d/omega) grad k . grad
+/// omega`: exactly positive zero unless the dot product is strictly
+/// positive.
+pub fn wilcox2006_cross_diffusion(
+    c: &Wilcox2006Coeffs,
+    grad_k: &[f64; 3],
+    grad_w: &[f64; 3],
+    omega: f64,
+) -> f64 {
+    let dot = grad_k[0] * grad_w[0] + grad_k[1] * grad_w[1] + grad_k[2] * grad_w[2];
+    if dot > 0.0 {
+        c.sigma_d / omega * dot
+    } else {
+        0.0
+    }
+}
+
+/// The stress limiter's `omega_hat = max(omega, C_lim sqrt(2 Sbar_ij
+/// Sbar_ij / beta*))`: in the pipe `2 S_ij S_ij = (dU/drho)^2`, so the
+/// second argument is `|dU/drho|`.
+pub fn wilcox2006_omega_hat(c: &Wilcox2006Coeffs, omega: f64, du_drho: f64) -> f64 {
+    omega.max(c.c_lim * du_drho.abs() / c.beta_star.sqrt())
+}
+
+/// Wilcox 2006 k-omega, the TMR page's "Wilcox (2006) k-omega" equations in
+/// the same discretisation as `solve_k_omega_1988`: the `k/omega`
+/// diffusivities, `beta = beta_0 f_beta`, the `omega_hat` stress limiter and
+/// the `sigma_d/omega` cross-diffusion source (positive zero when
+/// `grad k . grad omega <= 0`).
+pub fn solve_wilcox_2006(
+    mesh: &PipeMesh,
+    case: &PipeCase,
+    c: &Wilcox2006Coeffs,
+    ctl: &Controls,
+) -> Result<Solution> {
+    let n = mesh.n();
+    let nu = case.nu;
+    let vol = &mesh.volumes;
+    let mut u = start_u(mesh, case);
+    let mut k = vec![0.01f64; n];
+    let mut om = vec![100.0f64; n];
+    let mut nut = vec![0.0f64; n];
+    let mut it = 0usize;
+    let mut change = f64::INFINITY;
+    loop {
+        if it >= ctl.max_iter {
+            return Err(Error::Config(format!(
+                "rans1d Wilcox2006 did not converge: {} sweeps, last change {:+.3e}",
+                it, change
+            )));
+        }
+        it += 1;
+        let gu = gauss_grad(mesh, &u, 0.0);
+        let gk = gauss_grad(mesh, &k, 0.0);
+        let gw = gauss_grad(mesh, &om, om[n - 1]);
+        let pr: Vec<f64> = gu.iter().map(|g| g * g).collect();
+        // nut = kc/omega_hat, G = nut P, with the wall-cell G override.
+        let ohat: Vec<f64> = (0..n).map(|j| wilcox2006_omega_hat(c, om[j], gu[j])).collect();
+        let mut gpr = vec![0.0f64; n];
+        for j in 0..n {
+            nut[j] = k[j].max(0.0) / ohat[j];
+            gpr[j] = nut[j] * pr[j];
+        }
+        let d = mesh.delta_wall();
+        let (om_wall, lw) = wall_omega(k[n - 1].max(0.0), d, nu, c.beta_star);
+        gpr[n - 1] = wall_production(lw, nu, u[n - 1], d, k[n - 1].max(0.0), c.beta_star);
+        // omega: beta = beta_0 f_beta, the sigma_d cross-diffusion source,
+        // no wall-face term, wall row pinned to omega_wall.
+        let gamma: Vec<f64> = (0..n).map(|j| nu + c.sigma_w * k[j].max(0.0) / om[j]).collect();
+        let (mut lo, mut di, up) = diff_matrix(mesh, &gamma);
+        let mut rhs = vec![0.0f64; n];
+        for j in 0..n {
+            let beta_j = c.beta_0
+                * wilcox2006_f_beta(c, &[[0.0, gu[j], 0.0], [0.0; 3], [0.0; 3]], om[j]);
+            di[j] += beta_j * om[j] * vol[j];
+            rhs[j] = c.gamma * (om[j] / ohat[j]) * pr[j] * vol[j]
+                + wilcox2006_cross_diffusion(c, &[gk[j], 0.0, 0.0], &[gw[j], 0.0, 0.0], om[j])
+                    * vol[j];
+        }
+        lo[n - 1] = 0.0;
+        di[n - 1] = 1.0;
+        rhs[n - 1] = om_wall;
+        let os = thomas(&lo, &di, &up, &rhs);
+        let om_new: Vec<f64> =
+            (0..n).map(|j| om[j] + ctl.relax * (os[j].max(1e-12) - om[j])).collect();
+        // k: wall value 0, sink beta* omega, source G.
+        let gamma: Vec<f64> = (0..n).map(|j| nu + c.sigma_k * k[j].max(0.0) / om[j]).collect();
+        let (lo, mut di, up) = diff_matrix(mesh, &gamma);
+        let mut rhs = vec![0.0f64; n];
+        for j in 0..n {
+            di[j] += c.beta_star * om[j] * vol[j];
+            rhs[j] = gpr[j] * vol[j];
+        }
+        add_wall(mesh, nu, 0.0, &mut di, &mut rhs);
+        let ks = thomas(&lo, &di, &up, &rhs);
+        let k_new: Vec<f64> =
+            (0..n).map(|j| k[j] + ctl.relax * (ks[j].max(0.0) - k[j])).collect();
+        let nut_new: Vec<f64> = (0..n)
+            .map(|j| k_new[j].max(0.0) / wilcox2006_omega_hat(c, om_new[j], gu[j]))
+            .collect();
+        let u_new = momentum(mesh, case, &nut_new);
+        change = (max_diff(&u_new, &u) / max_abs(&u_new))
+            .max(max_diff(&k_new, &k) / max_abs(&k_new))
+            .max((0..n).map(|j| (om_new[j] - om[j]).abs() / om_new[j]).fold(0.0f64, f64::max));
+        u = u_new;
+        k = k_new;
+        om = om_new;
+        nut = nut_new;
+        let finite = u.iter().chain(&nut).chain(&k).chain(&om).all(|v| v.is_finite());
+        if !finite {
+            return Err(Error::Diverged {
+                iteration: it,
+                what: format!("rans1d Wilcox2006 went non-finite, last change {:+.3e}", change),
+            });
+        }
+        if change < ctl.tol {
+            break;
+        }
+    }
+    Ok(Solution {
+        model: Model::Wilcox2006,
+        u,
+        nut,
+        k,
+        omega: om,
+        eps_tilde: Vec::new(),
+        nu_tilde: Vec::new(),
+        iterations: it,
+        last_change: change,
+    })
+}
+
 /// Launder-Sharma low-Re k-epsilon, eq 143.10 (SPEC-LIT §33.1).
 fn solve_launder_sharma(mesh: &PipeMesh, case: &PipeCase, ctl: &Controls) -> Result<Solution> {
     const CMU: f64 = 0.09;
@@ -905,6 +1106,7 @@ pub fn solve(mesh: &PipeMesh, case: &PipeCase, model: Model, ctl: &Controls) -> 
         Model::Laminar => Ok(solve_laminar(mesh, case)),
         Model::KOmegaSst => solve_sst(mesh, case, ctl),
         Model::KOmega1988 => solve_k_omega_1988(mesh, case, &KOmega1988Coeffs::default(), ctl),
+        Model::Wilcox2006 => solve_wilcox_2006(mesh, case, &Wilcox2006Coeffs::default(), ctl),
         Model::LaunderSharma => solve_launder_sharma(mesh, case, ctl),
         Model::SpalartAllmaras => solve_sa(mesh, case, ctl),
     }
@@ -950,4 +1152,60 @@ pub fn richardson_constant_ratio(fine: f64, medium: f64, coarse: f64, ratio: f64
     let p = ((coarse - medium) / (medium - fine)).ln() / ratio.ln();
     let ext = fine + (fine - medium) / (ratio.powf(p) - 1.0);
     (p, ext)
+}
+
+/// The Prandtl smooth-pipe friction line `1/sqrt(f) = 2 log10(2 sqrt(8)
+/// re_tau) - 0.8` (tools/cad/turb_integral.py `f_prandtl`, TM 1218 eq 16.26
+/// in closed form from `re_tau`).
+pub fn f_prandtl(re_tau: f64) -> f64 {
+    (2.0 * (2.0 * 8.0f64.sqrt() * re_tau).log10() - 0.8).powi(-2)
+}
+
+/// Blasius `f = 0.3164 re_d^-0.25` (tools/cad/turb_integral.py
+/// `f_blasius`, TM 1218 eq 16.4).
+pub fn f_blasius(re_d: f64) -> f64 {
+    0.3164 * re_d.powf(-0.25)
+}
+
+/// The four TG0 band metrics of SPEC-LIT §143.2 for one solved pipe case.
+#[derive(Debug, Clone, Copy)]
+pub struct Tg0Bands {
+    pub re_d: f64,
+    pub re_tau: f64,
+    pub f_vs_prandtl: f64,
+    pub f_vs_blasius: f64,
+    pub loglaw_dev: f64,
+    pub loglaw_cells: usize,
+    pub defect_vs_4_07: f64,
+}
+
+/// The band metrics, as tools/cad/post.py `pipe_block`: `re_d` and the
+/// MEASURED `re_tau`; `f` against the Prandtl line at the INPUT `re_tau`
+/// and against Blasius; the worst log-law deviation `|u+ - (2.5 ln y+ +
+/// 5.5)|` over cells with `30 <= y+ <= 0.2 re_tau` (NaN, with 0 cells, if
+/// there is no such cell); and the wake defect against 4.07.
+pub fn tg0_bands(mesh: &PipeMesh, case: &PipeCase, sol: &Solution, m: &PipeMetrics) -> Tg0Bands {
+    let rho_w = mesh.rho_wall();
+    let re_d = m.u_b * 2.0 * rho_w / case.nu;
+    let re_tau = m.u_tau * rho_w / case.nu;
+    let f_vs_prandtl = m.f / f_prandtl(case.re_tau) - 1.0;
+    let f_vs_blasius = m.f / f_blasius(re_d) - 1.0;
+    let (mut dev, mut cells) = (f64::NAN, 0usize);
+    for j in 0..mesh.n() {
+        let yplus = (rho_w - mesh.centres[j]) * m.u_tau / case.nu;
+        if 30.0 <= yplus && yplus <= 0.2 * re_tau {
+            let d = (sol.u[j] / m.u_tau - (2.5 * yplus.ln() + 5.5)).abs();
+            dev = dev.max(d);
+            cells += 1;
+        }
+    }
+    Tg0Bands {
+        re_d,
+        re_tau,
+        f_vs_prandtl,
+        f_vs_blasius,
+        loglaw_dev: dev,
+        loglaw_cells: cells,
+        defect_vs_4_07: m.defect / 4.07 - 1.0,
+    }
 }
