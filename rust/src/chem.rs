@@ -14,12 +14,14 @@
 //! in rational arithmetic (SPEC-LIT §129). The finite-rate kinetics built on
 //! it - the rate of progress, fall-off and the reverse rate from equilibrium
 //! (SPEC-LIT §130) - lives in [`kinetics`]. Chemical equilibrium by Gibbs
-//! minimisation (SPEC-LIT §131) lives in [`equilibrium`].
+//! minimisation (SPEC-LIT §131) lives in [`equilibrium`]. The stiff
+//! Rosenbrock integrator (SPEC-LIT §132) lives in [`rosenbrock`].
 
 mod ck_lexer;
 pub mod equilibrium;
 pub mod kinetics;
 pub mod mechanism;
+pub mod rosenbrock;
 pub mod thermo;
 #[cfg(test)]
 mod tests_mechanism;
@@ -29,3 +31,4 @@ pub use kinetics::{production_rates, production_rates_tpy, rates_of_progress, Pr
 pub use equilibrium::{equilibrate_hp, equilibrate_tp, EqOptions, Equilibrium};
 pub use mechanism::{Arrhenius, Blending, Collider, Falloff, Mechanism, Rational, Reaction, ThirdBody};
 pub use thermo::{ElementTable, Interval, SpeciesThermo, ThermoSet, P_ATM, P_BAR, R_GAS};
+pub use rosenbrock::{integrate, Method, RosOptions, RosStats};

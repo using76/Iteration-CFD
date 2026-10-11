@@ -40076,6 +40076,91 @@ double in both arms.
 
 Labels: (132.1)-(132.10).
 
+### 132.7 The integrator as built (CHR-05, `src/chem/rosenbrock.rs`), and its two test problems
+
+**The test problems**, read from the test set's problem descriptions
+(Mazzia & Magherini, release 2.4; the two reports' sha256 are the
+`ivptestset2008-*` rows of `reference/PROVENANCE.md`). ROBER is report
+`rober.pdf` p. II-10-1, eq. (II.10.1), with `y(0) = (1, 0, 0)` on `[0, 1e11]`.
+HIRES is report `hires.pdf` p. II-1-1, §1.2, with
+`y(0) = (1, 0, 0, 0, 0, 0, 0, 0.0057)` on `[0, 321.8122]`:
+
+```
+y1' = -0.04 y1 + 1e4 y2 y3
+y2' =  0.04 y1 - 1e4 y2 y3 - 3e7 y2^2
+y3' =  3e7 y2^2                                                                 (132.11)
+```
+
+```
+y1' = -1.71 y1 + 0.43 y2 + 8.32 y3 + 0.0007
+y2' =  1.71 y1 - 8.75 y2
+y3' = -10.03 y3 + 0.43 y4 + 0.035 y5
+y4' =  8.32 y2 + 1.71 y3 - 1.12 y4
+y5' = -1.745 y5 + 0.43 y6 + 0.43 y7
+y6' = -280 y6 y8 + 0.69 y4 + 1.71 y5 - 0.43 y6 + 0.69 y7
+y7' =  280 y6 y8 - 1.81 y7
+y8' = -280 y6 y8 + 1.81 y7                                                      (132.12)
+```
+
+The reference values at the end points are CHR-00c's
+`reference/ivptestset2008/{rober,hires}.csv`.
+
+**How the gates are measured.** `ros_robertson_testset` and
+`ros_hires_testset` integrate at `rtol = 1e-8` with `atol = 1e-20` in every
+component and `h0 = 1e-10`, and require `max_k abs(y_k - y_ref,k) /
+abs(y_ref,k) <= 10 rtol = 1e-7`. The tiny `atol` makes the measure relative
+in every component, including ROBER's `y2 ≈ 8.3e-14`. With the test set's own
+mixed tolerance (`atol = 1e-4 rtol`) the integrator would not be asked to
+resolve `y2` at all, so the gate would be weaker. Both sets run, RODAS3 and
+ROS3. `ros_observed_order` takes fixed steps on `y' = -y` over `[0, 1]` with
+40 and 80 steps, `p_obs = log2(e_40 / e_80)`, and requires
+`abs(p_obs - 3) <= 0.1` for both sets. The supervisor's independent float64
+evaluation, made outside the tree before the Rust, gave the following:
+
+* ROBER: RODAS3 `2.74e-8` and ROS3 `8.79e-8`, after 4519 and 24883 accepted
+  steps;
+* HIRES: RODAS3 `3.09e-9` and ROS3 `3.08e-9`;
+* observed order: RODAS3 `2.9928` and ROS3 `2.9894`.
+
+The tree, run after it, measures ROBER `1.22e-8` (RODAS3, 4519 accepted) and
+`8.80e-8` (ROS3, 24883 accepted), HIRES `3.16e-9` and `3.07e-9`, and the same
+orders to four digits. ROS3's Robertson margin is thin (`0.88` of the gate). It is reported as it
+stands, and the gate is not widened for it.
+
+**Design choices of this unit (ORIGINAL; Sandu et al. do not dictate them).**
+
+* **R1, the linear solve.** `I - γhJ` is factored by Gaussian elimination
+  with partial pivoting (the largest `abs` in the column, the first one on a
+  tie), once per step attempt. A pivot that is exactly 0 or not finite is
+  refused as a singular matrix, naming `h`; the caller knows `t`.
+* **R2, the Jacobian.** §132.3's one-sided difference is evaluated at `y_n`,
+  once per accepted point. A retry after a rejection starts from the same
+  `y_n`, so it reuses that `J`, which is the same matrix a fresh evaluation
+  would give.
+* **R3, the end point.** When `t + h >= t1`, the step is shortened to
+  `h = t1 - t`, and on acceptance `t` is set to `t1` exactly. This shortened
+  last step is exempt from `h_min`. `h0` is clamped into `[h_min, h_max]`
+  and then to `t1 - t0`.
+* **R4, a non-finite step.** If `Err` or any component of `y_{n+1}` is not
+  finite, the step is rejected, `h` is divided by 10, and the rejection is
+  counted twice: in `rejected` and in `nonfinite`. It is never accepted.
+* **R5, what is refused** (each with `Error::Config`, naming the value and
+  ending "(SPEC-LIT §132.7)"): a non-finite or non-positive `h0`, a NaN or
+  non-positive `h_max` (`+inf`, the default, means unbounded),
+  a negative or non-finite `h_min`, `h_min > h_max`, a negative or non-finite
+  `rtol`, an `atol` whose length is not `y`'s or that has a component that is
+  not finite and above 0, `t1 < t0`, `max_steps = 0`, more step attempts than
+  `max_steps`, and a proposed `h` below `h_min` after a rejection. The
+  caller's right-hand side may fail, and its error passes through unchanged.
+  This is how CHR-06's reactor refuses a `T` outside the thermo range.
+  `t1 = t0` returns at once, with zero steps.
+* **R6, method names.** `rodas3` (the default) and `ros3` are recognised. As
+  §132.2 records, `ros4` is refused as `Error::Refused`, and the refusal says
+  its coefficients wait for a read copy of Hairer & Wanner Table 7.2 or of
+  its primaries. Any other name is refused with the recognised set.
+
+Labels: (132.11)-(132.12).
+
 ---
 
 ## 133. Mixture-averaged transport, and the reacting low-Mach constraint
