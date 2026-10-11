@@ -65,6 +65,8 @@ use crate::surface::cutcell::{
 use crate::surface::{Surface, TriIndex};
 use crate::{Label, Scalar, Vec3};
 use std::collections::HashMap;
+pub mod wedge;
+pub use wedge::{build_wedge_mesh, raw_wedge_mesh, wedge_half_tan, wedge_nodes, write_wedge_mesh, WedgeSpec, WEDGE_PATCH_NAMES};
 
 /// One `0/` directory's worth of fields, entirely in memory - the same
 /// [`RawScalarField`]/[`RawVectorField`] data a case's field writers would

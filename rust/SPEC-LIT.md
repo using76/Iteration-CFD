@@ -37418,6 +37418,110 @@ No GPL-licensed source was consulted.
 
 ---
 
+## 119. The true wedge: a rotational self-couple
+
+An axisymmetric case is solved on a wedge one cell thick in the
+circumferential direction. This section holds the mesh (119.0, BC-02); the
+patch kind with its derived pair, axis and angle checks (BC-03) and the
+boundary condition that couples the two wedge faces by a rotation (BC-04) add
+their subsections when they land. Until BC-03 lands, `PatchKind::from_type`
+still reads a `wedge` patch as `symmetry`, which is the stand-in §120's
+catalogue row names.
+
+### 119.0 The wedge mesh `blockgen` builds (BC-02)
+
+`blockgen::wedge` (`src/blockgen/wedge.rs`) builds the mesh from an (r, z)
+block: radial nodes `r_0 < r_1 < ... < r_nr` with `r_0 = r_in >= 0`, axial
+nodes `z_0 < ... < z_nz`, and a full wedge angle `theta` with
+`0 deg < theta < 180 deg`. The axis is the z axis through the origin, the
+mid-plane is `y = 0`, and `r` is measured along `x` in the mid-plane. With
+`t = tan(theta/2)` the points are
+
+```
+P_s(i, k) = ( r_i ,  s * r_i * t ,  z_k ),   s = -1 (back side), s = +1 (front side)
+```
+
+so the back and front wedge planes are `y = -x t` and `y = +x t`, at
+`-theta/2` and `+theta/2` about the mid-plane, and every front point is the
+mirror `y -> -y` of a back point, bit for bit.
+
+**Why the tangent and not the chord.** A point at mid-plane coordinate `r`
+lies at distance `r / cos(theta/2)` from the axis. In exchange, every radial
+face is the plane `x = r_i`, and every finite-volume metric of the mesh is the
+curved sector's metric times one constant:
+
+```
+radial face   A_r(i, k) = 2 t r_i (z_k+1 - z_k)            sector: theta r_i dz
+axial face    A_z(i)    = t (r_i+1^2 - r_i^2)               sector: (theta/2) d(r^2)
+cell volume   V(i, k)   = t (r_i+1^2 - r_i^2) (z_k+1 - z_k) sector: (theta/2) d(r^2) dz
+```
+
+Each polyhedral value is the sector's times `2t/theta`, so every ratio a
+finite-volume operator forms (face area over volume) is the sector's exactly,
+and the face centroid of a radial face lies at true radius `r_i`. The chord
+convention (points on the circle of radius `r`) gives `A_r = 2 r sin(theta/2) dz`
+and `V = (1/2) sin(theta) d(r^2) dz`, whose ratio is off the sector's by the
+factor `cos(theta/2)`, a metric error of about `theta^2/8` (9.5e-4 at 5 deg)
+that radial refinement does not remove. That is the reason for the choice.
+
+**The volume gate.** Summed over the mesh, `V = t (R2^2 - R1^2) L` with
+`R1 = r_in`, `R2 = r_out`, `L = z_nz - z_0`, held to 1e-12 relative, and each
+cell's volume to its closed form above at the same tolerance. docs/17's BC-02
+row writes the gate as `theta/2 (R2^2 - R1^2) L`; that is the curved sector's
+volume, which no straight-faced mesh of this angle holds. The tolerance is
+unchanged; the closed form is the one the polyhedron has. The ratio
+`tan(theta/2) / (theta/2) = 1 + theta^2/12 + O(theta^4)` is printed by the
+test: 1.0000254 at 1 deg, 1.000635 at 5 deg, 1.002546 at 10 deg.
+
+**The wedge faces.** Cell (i, k)'s back and front faces lie in the two wedge
+planes, with outward unit normals and area
+
+```
+n_front = ( -sin(theta/2),  cos(theta/2), 0 )
+n_back  = ( -sin(theta/2), -cos(theta/2), 0 )
+A_w(i, k) = (r_i+1 - r_i) (z_k+1 - z_k) / cos(theta/2)
+```
+
+**The axis.** With `r_in = 0` the two points `P_-(0, k)` and `P_+(0, k)` are
+the one point `(0, 0, z_k)`. The axis-side face of every `i = 0` cell would
+have zero area, so it is not written and there is no axis patch; the cell's
+two axial faces are the triangles (axis point, `P_+(1, k)`, `P_-(1, k)`) and
+the cell is a 5-face prism: two triangles, the two wedge quadrilaterals and
+the outer radial face. No face of either mesh has `|S_f| < 1e-14`: the
+smallest axis triangle has area `t r_1^2`.
+
+**Numbering.** Cell `c(i, k) = i + nr k`. Per axial layer `k` the points are
+the back side `i = 0..nr`, then the front side `i = i0..nr`, with `i0 = 1` on
+a pipe (`r_in = 0`, the axis point is shared) and `i0 = 0` on an annulus.
+Internal faces are emitted per cell in cell order, the `+r` face (neighbour
+`c + 1`) before the `+z` face (neighbour `c + nr`), which is the
+upper-triangular order (owner < neighbour, sorted by owner) of every
+`blockgen` mesh. The patches, in order: `inner` (`r = r_in`,
+absent on a pipe), `outer`, `zmin`, `zmax`, `back`, `front`. The first four
+take the types the spec gives (default `wall`, `wall`, `patch`, `patch`;
+`wedge` is refused on them), and `zmin`/`zmax` may be a `cyclic` pair, both
+or neither, translated by `L` along z. `back` and `front` are typed `wedge`.
+Faces run in ascending `k` on `inner`/`outer`, ascending `i` on
+`zmin`/`zmax`, and ascending cell on `back`/`front`. Every face's points wind
+so that its area vector points from owner to neighbour, or out of the domain
+on a boundary.
+
+**Precision.** The points are f64 in both builds (§118.2). The nodes come
+from `graded_nodes` in `Scalar` and are widened once; `t`, the point map and
+every gate are f64. The gates are precision class A of docs/17 §5.1 (an
+identity evaluated in f64, the same tolerance in both builds), run by the lib
+tests `blockgen::wedge::tests` in f64 and by `tests/f32_wedge_mesh.rs` in
+both builds; the mirror symmetry and the counts are class D.
+
+Sources: ORIGINAL - elementary geometry (the area of a trapezoid, the volume
+of a right prism, the Taylor series of the tangent). The patch type name
+`wedge` is taken by name only from the two public user guides §120 links; no
+description, formula or source code was taken from either.
+
+No GPL-licensed source was consulted.
+
+---
+
 ## 120. The boundary-condition catalogue - every public type name and its status
 
 Every type NAME in the table below is taken by name only from the two public
