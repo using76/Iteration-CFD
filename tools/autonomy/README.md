@@ -1225,6 +1225,76 @@ For later units — L6 (done, 2026-10-02): `prior.py --gate --rules DIR` took th
 
 Measured (L5, 2026-10-02, tuning only, release binary `3d90ce91` at tree `3969bf8`, 6 streams): the subset campaign (120 geometries, 120 rows, 3,637 s) and the full campaign (420 geometries, 413 rows, 11,008 s) each had 0 harness errors, 0 orphans, at most 6 live meshers, peaks of 28.7 % and 22.9 % of RAM and a clean replay (227 and 785 decisions); the subset's 120 geometries are identical in the full campaign. MFR 0.810 (re-scored before, 340/420) -> 0.421 (177/420), no family rising (A 84 -> 81, B 55 -> 0, D 64 -> 11, E 29 -> 12, F 29 -> 16, G 79 -> 57); strict 0.862 -> 0.795; BLC_8 0.140 -> 0.205 (tier 1 0.075 -> 0.143); CAPABILITY-LIMITED wall 0.681 -> 0.636, of which `inner_gate` 0.233, `thin_proposed` 0.271 and `thin_after_caps` 0.131. R-CURV on against off (`baseline.py --rcurv`, 133 pairs): failure 33 against 55, CAPABILITY-LIMITED 0.812 against 0.962, cells median 762,285 against 50,048. Proposed G-BLC-1 targets (the user's D-L9): tier-1 BLC_8 0.09, BLC_full 0.05. The numbers are in `aml/L5.json` and `aml/L5.md` (`--check` passes), the campaign rows in `aml/tuning_rules_L5.json.gz`, R-CURV in `aml/R-CURV.json`, and the docs/15 §K entry was written by `--ledger --write`.
 
+## costbound.py — the G-COST lower bound (AUT-06)
+
+`costbound.py` computes, per geometry, a LOWER BOUND on the cells of ANY octree mesh that holds the R-WIN wall
+level on the whole wall, keeps 2:1 shells out to the base grid and carries 8 wall layers, and reports whether
+G-COST's 1.5x (docs/15 §F: median cells of the full system <= 1.5 x the B0 template on the geometries both pass,
+`evaluate.CELLS_RATIO_MAX`) is attainable at all. It changes no rule, no gate and no constant; where 1.5x is not
+attainable the report says so and the decision (D-8) is the user's.
+
+CB-1 lattice: `n_a = round((hi_a - lo_a)/b)`, `s_a = (hi_a - lo_a)/n_a`, `n_base = n_x n_y n_z`; a level-l cell
+`i_a in [0, n_a 2^l)` spans `[lo_a + i_a h_a, lo_a + (i_a+1) h_a]` with `h_a = s_a / 2**l`, computed in that order
+(a product, never a sum). CB-2 the touched set `S_L`: the level-L cells whose CLOSED box meets a CLOSED triangle —
+Akenine-Möller 2001's separating-axis test (3 box normals, the triangle normal, 9 edge cross products) where an
+axis separates ONLY on a strict gap (`max_tri < min_box` or `min_tri > max_box`; touching is not separated), a
+zero-length cross axis is skipped and a zero-area triangle is skipped; the candidates per triangle are the cells
+of its bbox, touching included. CB-3 the least balanced tree: `R_{L-1} = { parent(c) : c in S_L }`, then for
+l = L-1 down to 1, `R_{l-1} = { parent(c) : c in R_l } ∪ { parent(m) : c in R_l, m one of c's 6 face neighbours
+at level l inside the domain }` — the least octree refinement in which every `S_L` cell is a level-L leaf and
+every face-adjacent leaf pair differs by at most one level (SPEC-LIT (92.21); Sundar et al. 2008); a cell is one
+Python int per level, `splits = Σ_l |R_l|` and `leaves = n_base + 7 splits`. CB-4 the leaves: the base cells not
+in R_0, and the children of R_{l-1} cells not in R_l. CB-5 solid: a leaf is solid iff its CENTRE is inside the
+surface, the parity of +z ray crossings — triangle t is crossed when its xy projection has non-zero signed area,
+contains the centre under Pineda's top-left rule (the projected triangle oriented counter-clockwise; a point on
+an edge counts only on a top edge, `a.y == b.y and b.x < a.x`, or a left edge, `b.y < a.y`, so a centre on a
+shared projected edge or vertex is counted once per surface sheet) and the triangle's plane at (x, y) has z
+STRICTLY greater than the centre's z (SPEC-LIT (92.23)). CB-6 the wall faces: the face-adjacent leaf pairs with
+one fluid and one solid leaf, each pair counted once; across a 2:1 interface the coarse face is four faces, one
+per finer leaf (92.19); domain-boundary faces never count. CB-7 `layer_cells = n_layers x wall_faces` with
+`n_layers = 8`, and `bound = fluid + layer_cells`. CB-8 a campaign row bounds when
+`bound_row = fluid + blc8 x layer_cells <= n_cells`, blc8 being that geometry end's `blc8_a_priori` (None -> 0),
+because a row that delivered no layers is compared without them. CB-9 attainable on a set's both-pass rows:
+`ratio = median(bound) / median(B0 cells)`, `attainable = ratio <= evaluate.CELLS_RATIO_MAX` (imported, never a
+literal), beside `ratio_octree = median(fluid) / median(B0 cells)`; the medians are `statistics.median`.
+
+The two sets: the TREE has no 420-row full-system tuning campaign, so `tuning` is the L5 rules campaign
+(`aml/tuning_rules_L5.json.gz` against `baseline/tuning_b0-template.json.gz`, manifest
+`split.load("tuning", "costbound")`, 36 expected rows) — the tuning re-measure; `seed1-posthoc` is
+`evaluate/eval_full.json.gz` against `evaluate/eval_b0-template.json.gz`, manifest
+`split.load("test", split.EVALUATE)`, 15 expected rows, labelled post-hoc on the spent seed-1 test split
+(evaluated 2026-09-26); not a claim. Both-pass is exactly `evaluate.g_cost`'s filter: in both bundles'
+`geometries`, `failure is False` on both and `n_cells is not None` on both. Rows are sorted by geometry_id and
+`--jobs` runs a process pool; with `--ids` the default out dir is refused (`--out-dir` is required). The report is
+`costbound/COSTBOUND.json` (schema `autonomy-costbound/1`, indent 1, sorted, no times and no absolute paths) and
+`COSTBOUND.md`; `--report` exits 1 when any tuning row does not bound, and a row that does not bound is reported
+as is — the definition is never changed to make it bound.
+
+Cited (all DOIs checked on Crossref 2026-10-11): Akenine-Möller, T. (2001), "Fast 3D Triangle-Box Overlap
+Testing", Journal of Graphics Tools 6(1), 29-33, DOI 10.1080/10867651.2001.10487535 (CB-2); Sundar, H., Sampath,
+R. S. & Biros, G. (2008), "Bottom-Up Construction and 2:1 Balance Refinement of Linear Octrees in Parallel",
+SIAM J. Sci. Comput. 30(5), 2675-2708, DOI 10.1137/070681727 (CB-3); Pineda, J. (1988), "A parallel algorithm for
+polygon rasterization", ACM SIGGRAPH Computer Graphics 22(4), 17-20, DOI 10.1145/378456.378457 (CB-5); SPEC-LIT
+§92.2 (92.3), §92.9 (92.17)-(92.21), §92.10 (92.23); docs/15 §D.3, §F G-COST.
+
+Measured (2026-10-11, `--report --jobs 6`, 42.6 s wall): every row of both sets bounds (36/36 tuning, 15/15
+seed-1), so the bound is sound against the delivered systems; 1.5x is not attainable on either set.
+
+    tuning: bound <= actual on 36/36 rows
+    G-COST 1.5x attainable on tuning: no (median bound 61055.5 / median B0 8688 = 7.0)
+    D-8: the gate goes to the user; the constant is not touched.
+
+    seed1-posthoc: bound <= actual on 15/15 rows
+    G-COST 1.5x attainable on seed1-posthoc: no (median bound 58124 / median B0 10808 = 5.4)
+    D-8: the gate goes to the user; the constant is not touched.
+
+The full tables are in `costbound/COSTBOUND.md`; the medians behind the ratios (tuning / seed-1): median bound
+61055.5 / 58124, median fluid 13176 / 12812, median B0 8688 / 10808, median cells 717000 / 469898,
+ratio_octree 1.51657 / 1.18542. The tuning ratio_octree 1.517 is just ABOVE 1.5: the octree alone, with no
+layers, already misses 1.5x on tuning, while seed-1's 1.185 is below. With the 8 layers the bound sits at
+5.4-7.0 x B0, so G-COST as written cannot be met by any mesh of these geometries that holds the R-WIN wall
+level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D-8's, the user's.
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -1237,6 +1307,9 @@ Measured (L5, 2026-10-02, tuning only, release binary `3d90ce91` at tree `3969bf
     python tools/autonomy/aml.py --report --subset DIR --full DIR [--rcurv FILE] [--bundle]          # aml/L5.json and L5.md
     python tools/autonomy/aml.py --check                                                             # the report against its inputs
     python tools/autonomy/aml.py --ledger [--write]                                                  # the docs/15 §K entry
+    python tools/autonomy/costbound.py --selftest                         # the AUT-06 lower bound: the 7 groups
+    python tools/autonomy/costbound.py --report --jobs 6                  # costbound/COSTBOUND.json and .md
+    python tools/autonomy/costbound.py --id GID --set tuning              # one geometry's row JSON
     python tools/autonomy/schema.py --print-lock          # the lock lines, no comments
     python tools/autonomy/schema.py --validate KIND FILE  # valid / one error per line
     python tools/deps_licences.py --python                # the Python-side licences above

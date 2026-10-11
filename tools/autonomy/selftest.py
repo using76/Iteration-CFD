@@ -39,7 +39,10 @@ tuning rows: the sample, the config rebuild, the seal, the verdicts, a
 scripted run and one live R-PLANE row), then aml.py --selftest (the AM-L tuning
 re-measure report: the subset, the before table against baseline's groups,
 the drop causes, F3e, integrity, the target and R-CURV, the report, check,
-ledger and CLI), then
+ledger and CLI), then costbound.py --selftest (the AUT-06 lower bound: the
+hand-counted boxes F0-F5, the ancestor-only balance control, the
+192-triangle box, the 4096-centre ray test, the refusals, the recorded
+E-1-004 inputs and the byte-identical two-row report), then
 sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
@@ -89,7 +92,7 @@ def main():
               ("remedies.py", 13), ("explain.py", 14),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 12),
               ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6),
-              ("lreplay.py", 6), ("aml.py", 7))
+              ("lreplay.py", 6), ("aml.py", 7), ("costbound.py", 7))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:
