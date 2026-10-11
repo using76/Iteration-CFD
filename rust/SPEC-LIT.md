@@ -39603,7 +39603,65 @@ name**. It is not counted as a pass.
 The host twin is f64 in both builds, so every row is unchanged by the f32
 build.
 
-Labels: (130.1)-(130.13).
+### 130.7 The host twin as built (CHR-03, `src/chem/kinetics.rs`)
+
+`omega` is evaluated from concentrations `c_k = [X_k]` in mol/m^3, or from
+`(T, p, Y)` through (128.9). Every number is f64 in both builds. The choices
+below are DESIGN choices of this unit, stated so that CHR-07a's device kernel
+makes the same ones:
+
+```
+q_f,i = C_i k_fi Π_k c_k^(o'_ki)                                                   (130.14)
+ln k_fi = ln|A_i| + β_i ln T - θ_i / T   [+ ln( Pr/(1+Pr) ) + ln F   for fall-off]  (130.15)
+q_r,i = C_i sgn(A_i) exp( ln k_fi - ln K_ci + Σ_k o''_ki ln c_k )                   (130.16)
+q_r,i = C_i sgn(A_ri) exp( ln|A_ri| + β_ri ln T - θ_ri / T + Σ_k o''_ki ln c_k )   with REV  (130.17)
+```
+
+* **The forward term** (130.14) is formed directly, `k_f` from (130.4) (times
+  `Pr/(1+Pr) F` for fall-off) and each factor with `powf`. **The reverse term**
+  is one exponential of a sum of logs, (130.16) or (130.17), as §130.3 requires.
+  `ln c_k = -inf` at `c_k = 0` makes the term exactly 0. A factor whose order is
+  0 is skipped on both sides, so `0 · ln 0` is never formed.
+* **Fall-off with `Pr = 0`** (no collider present, or a `(+SPECIES)` collider at
+  zero concentration): `q_f = q_r = 0` exactly, and `log10 Pr` is not evaluated.
+  An infinite `Pr` (`k_inf = 0`) takes the high-pressure limit `Pr/(1+Pr) = 1`.
+* **Inputs refused by name** (`Error::Config`): `T` not finite or not above 0;
+  a concentration vector whose length is not the species count (both lengths
+  named); a negative or non-finite `c_k` (the species and the value named). A
+  stiff integrator that undershoots clips before it calls; the host twin does
+  not clip. `T` outside a species' thermo range is refused by the thermo
+  record's own message (§128.1) when that species' `G/RT` is needed, which is
+  when the mechanism has a reversible reaction without `REV`.
+* **The production rate** (130.1) is accumulated reaction by reaction, in
+  mechanism order, `-ν' q` to each reactant and `+ν'' q` to each product, with
+  `q = q_f - q_r` and `ν` the exact rational of §129.4 converted once to f64.
+
+**The gate mechanism.** Neither JL4 nor GRI-Mech 3.0 is in the tree (§129.6),
+so (130.7) and the element identity are held over 1000 random states on a
+fixture mechanism of the ten TM-4513 species of
+`reference/mcbride-gordon-reno1993/table_II.csv` (§128.6). Its fourteen
+reactions exercise every form above: elementary, `+M` with and without
+efficiencies, Lindemann, Troe with three and four parameters, `(+SPECIES)`,
+SRI, `REV`, an irreversible global reaction with FORD, an irreversible
+elementary one, and a DUP pair. **Its rate numbers are placeholders, not any
+paper's.** When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set (§129.6),
+the same two identities are held over 1000 random states of GRI-Mech 3.0;
+unset, that test is skipped by name. `kin_fixture_matches_oracle` holds every
+`q_f` and `q_r` of the fixture at two stated states against an independent
+40-digit evaluation of (130.2)-(130.12) made by the supervisor, to 1e-12
+relative (class P); the oracle is not in the tree, and its printed values are.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `kin_fixture_matches_oracle` | every `q_f`, `q_r` of the fixture at states A and B | 1e-12 relative; a zero is exactly 0 | P |
+| `kin_falloff_limits` | Lindemann `k = k_inf Pr/(1+Pr)`; `Pr = 0` gives exactly 0 | 1e-14 relative; exact | P |
+| `kin_sri_matches_hand_value` | (130.12) at one stated point | 1e-14 relative | P |
+| `kin_reverse_survives_low_t` | (130.16) at 250 K where `exp(ln K_c)` overflows f64 to `inf` | 1e-11 relative to the 40-digit value: `ln K_c` is about 828, and f64 holds a sum of NASA-7 terms that large to about 1e-13 absolute, which `exp` turns into a relative error | P |
+| `kin_refuses_bad_input` | the refusals above, each by name | exact text parts | D |
+| `kin_gri30_mass_and_elements` | (130.7) and the element identity on GRI-Mech 3.0 when its paths are set | as `kin_mass_is_conserved` | A |
+| `kin_tpy_matches_concentrations` | `production_rates_tpy` against `production_rates` on (128.9)'s concentrations | bitwise | D |
+
+Labels: (130.1)-(130.17).
 
 ---
 
