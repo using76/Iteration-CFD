@@ -327,3 +327,108 @@ extern "C" __global__ void tsLtsDamp
     const ofscalar o = rDeltaTOld[c];
     rDeltaT[c] = o + damping*(rDeltaT[c] - o);
 }
+
+
+// ==========================================================================
+//  S118.5  The delta form of a transient step - f32 build only (F32-08)
+//
+//  In the f32 build a step whose increment is below u32*|psi| is lost twice:
+//  tsDdtGeneral forms V*(a0*psi0 + a00*psi00) in float, where the increment
+//  rounds away inside the source, and the stored field is float, so the
+//  increment rounds away again on the store. Carrying the LEVELS in double
+//  and solving for the INCREMENT keeps it: with x = x0 + delta and the
+//  coefficients summing to zero (aN + a0 + a00 = 0), the old levels cancel
+//  analytically and the increment system is
+//
+//      R_P      = b_P - (M x0)_P - sign*V_P*a00*(x00_P - x0_P)   (118.5.1)
+//      (M' + sign*V*aN) delta = R,   M' = theta*M               (118.5.3-.4)
+//
+//  which needs no a0 at all. For Crank-Nicolson a00 = 0 and R = b - M x0
+//  with the FULL (unscaled) M, exactly (V*aN + theta*M) delta = b - M x0.
+//  Beam & Warming 1978, doi:10.2514/3.60901; Carson & Higham 2018.
+//  In the f64 build none of this exists and the cubin does not change.
+// ==========================================================================
+
+#ifdef OFGPU_SINGLE
+
+//- (118.5.2)-(118.5.3). `r` arrives as fl32(b - M x0) - the first of the two
+//  roundings (118.5.2) allows; the a00 correction is formed in double and
+//  rounded once more, and the diagonal is formed in double and rounded ONCE,
+//  because theta*M and sign*V*aN land in the same statement.
+extern "C" __global__ void tsDeltaDdt
+(
+    ofscalar* __restrict__ diag,
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ r,
+    const ofscalar* __restrict__ V,
+    const double* __restrict__ x0,
+    const double* __restrict__ x00,
+    double aN,
+    double a00,
+    double sign,
+    double theta,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    source[c] = r[c] - (ofscalar)(sign*(double)V[c]*a00*(x00[c] - x0[c]));
+    diag[c] = (ofscalar)(theta*(double)diag[c] + sign*(double)V[c]*aN);
+}
+
+
+//- (118.5.5) delta^0 = fl32(x - x0): the increment's initial guess. On the
+//  first step x = x0 and this is zero, which is the honest guess there.
+extern "C" __global__ void tsDeltaStart
+(
+    ofscalar* __restrict__ d,
+    const double* __restrict__ x,
+    const double* __restrict__ x0,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    d[i] = (ofscalar)(x[i] - x0[i]);
+}
+
+
+//- (118.5.7) the refined accept: x = x0 + delta64, psi = fl32(x). `d64` is
+//  the refinement's double solution, x0 the f64 level this step started
+//  from; the level never passes through float on the way forward.
+extern "C" __global__ void tsDeltaAccept
+(
+    double* __restrict__ x,
+    ofscalar* __restrict__ psi,
+    const double* __restrict__ x0,
+    const double* __restrict__ d64,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    x[i] = x0[i] + d64[i];
+    psi[i] = (ofscalar)x[i];
+}
+
+
+//- (118.5.7) the UNrefined accept, for a fixed-iteration solve - the only
+//  kind a CUDA graph may capture - and an empty system: the increment is the
+//  float answer itself, widened exactly (every float is a double).
+extern "C" __global__ void tsDeltaAcceptWiden
+(
+    double* __restrict__ x,
+    ofscalar* __restrict__ psi,
+    const double* __restrict__ x0,
+    const ofscalar* __restrict__ d32,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    x[i] = x0[i] + (double)d32[i];
+    psi[i] = (ofscalar)x[i];
+}
+
+#endif  // OFGPU_SINGLE
