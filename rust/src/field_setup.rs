@@ -95,8 +95,10 @@ use std::collections::BTreeMap;
 use crate::device::Gpu;
 use crate::error::{Error, Result};
 use crate::field::{BcKind, GpuScalarField, GpuVectorField};
+use crate::function1::{DeviceTimedPatch, F1, F1Clock, F1Kernels, F1Target, TimedPatch};
 use crate::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
 use crate::mesh::{GpuMesh, HostMesh, PatchKind};
+use crate::types::DVec3;
 use crate::{Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -174,6 +176,10 @@ struct PatchAux<'a> {
     normal: Vec<Vec3>,
     /// Total patch area, for `flowRateInletVelocity`.
     total_area: Scalar,
+    /// The patch's face centres in f64 (SPEC-LIT §118.2's `geom64` view), for
+    /// the condition evaluated at a coordinate - `fixedProfile` (SPEC-LIT
+    /// 120.1).
+    bc_f: Vec<DVec3>,
     /// Where this patch starts in the flattened boundary arrays.
     at: usize,
     inputs: BcInputs<'a>,
@@ -194,9 +200,18 @@ impl<'a> PatchAux<'a> {
             normal.push(if a > 0.0 { sf * (1.0 / a) } else { Vec3::ZERO });
         }
 
+        let cf = m.geom64();
+        // `.get`, not indexing, for the same reason `b_sf` above is: a
+        // synthetic mesh in a test may carry no face centres, and every
+        // condition but `fixedProfile` must still build without them.
+        let bc_f = (0..p.size)
+            .map(|i| cf.b_cf.get(p.start + i).copied().unwrap_or_default())
+            .collect();
+
         Self {
             normal,
             total_area,
+            bc_f,
             at: p.start,
             inputs,
         }
@@ -280,14 +295,352 @@ fn spread<T: Copy>(src: &[T], n: usize, fill: T, what: &str, patch: &str) -> Res
 }
 
 // ==========================================================================
+//  Function1 boundary conditions (SPEC-LIT 120.1)
+// ==========================================================================
+
+/// The run a time-varying Function1 condition is set up for (SPEC-LIT 120.1).
+#[derive(Debug, Clone, Copy)]
+pub struct F1Setup<'a> {
+    pub t_start: f64,
+    pub t_end: f64,
+    pub case_dir: Option<&'a std::path::Path>,
+}
+
+/// The time-varying patches of one field on the device; a driver calls
+/// `apply_*` after each `F1Clock::advance` (SPEC-LIT 120.1).
+pub struct TimedBcs {
+    patches: Vec<DeviceTimedPatch>,
+}
+
+impl TimedBcs {
+    pub fn upload(gpu: &Gpu, patches: &[TimedPatch]) -> Result<Self> {
+        Ok(Self {
+            patches: patches
+                .iter()
+                .map(|p| DeviceTimedPatch::upload(gpu, p))
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.patches.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patches.is_empty()
+    }
+
+    /// Each patch writes `f.ref_value` or `f.ref_grad` by its `F1Target`.
+    pub fn apply_scalar(
+        &self,
+        gpu: &Gpu,
+        k: &F1Kernels,
+        clock: &F1Clock,
+        f: &mut GpuScalarField,
+    ) -> Result<()> {
+        for p in &self.patches {
+            match p.target() {
+                F1Target::RefValue => p.apply_scalar(gpu, k, clock, &mut f.ref_value)?,
+                F1Target::RefGrad => p.apply_scalar(gpu, k, clock, &mut f.ref_grad)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Each patch writes `f.ref_value` or `f.ref_grad` by its `F1Target`.
+    pub fn apply_vector(
+        &self,
+        gpu: &Gpu,
+        k: &F1Kernels,
+        clock: &F1Clock,
+        f: &mut GpuVectorField,
+    ) -> Result<()> {
+        for p in &self.patches {
+            match p.target() {
+                F1Target::RefValue => p.apply_vector(gpu, k, clock, &mut f.ref_value)?,
+                F1Target::RefGrad => p.apply_vector(gpu, k, clock, &mut f.ref_grad)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+// ==========================================================================
 //  Scalar fields
 // ==========================================================================
+
+/// What one Function1 condition fixes for a patch's faces: the kind it rides
+/// as and the per-face entries of the triple (SPEC-LIT 120.1).
+struct F1Seed<T> {
+    kind: BcKind,
+    fr: Vec<Scalar>,
+    ref_value: Vec<T>,
+    ref_grad: Vec<T>,
+}
+
+/// The refusal a time-varying Function1 gets from a setup path that does not
+/// advance the clock (SPEC-LIT 120.1): running it at its first value would be
+/// the silent substitution SPEC-LIT 13.4 forbids.
+fn f1_needs_timed(setting: &str, field: &str, timed_entry: &str) -> Error {
+    Error::Field {
+        field: field.to_string(),
+        msg: format!(
+            "{setting}: the Function1 is time-varying, and this setup path does not \
+             advance Function1 boundary conditions each time step, so the patch would \
+             silently run at its first value forever - a constant runs anywhere; for a \
+             time-varying one call {timed_entry}, which evaluates the patch at t_start \
+             and returns the TimedBcs to apply after each F1Clock::advance \
+             (SPEC-LIT 120.1)"
+        ),
+    }
+}
+
+/// A rank-3 value out of a patch entry's raw text, the same reading
+/// `function1`'s own parameters take: any leading dimension set and
+/// `uniform`/`constant` word skipped, then `(a b c)` (SPEC-LIT 120.1).
+fn f1_vec3(raw: &str, setting: &str, what: &str) -> Result<Vec3> {
+    let mut tz = crate::io::tokenizer::Tokenizer::new(raw, setting);
+    while tz.is_punct('[') || tz.is_word("uniform") || tz.is_word("constant") {
+        if tz.is_punct('[') {
+            while !tz.done() && !tz.is_punct(']') {
+                tz.next()?;
+            }
+            tz.expect_punct(']')?;
+        } else {
+            tz.next()?;
+        }
+    }
+    if tz.done() {
+        return Err(Error::Config(format!("{setting}: {what} carries no value")));
+    }
+    tz.expect_punct('(')?;
+    let v = Vec3::new(
+        tz.expect_num()? as Scalar,
+        tz.expect_num()? as Scalar,
+        tz.expect_num()? as Scalar,
+    );
+    tz.expect_punct(')')?;
+    Ok(v)
+}
+
+/// The last whitespace-separated token that parses as a number - the reading
+/// `PatchFieldSpec::number` gives a scalar entry (SPEC-LIT 120.1).
+fn f1_num(raw: &str) -> Option<f64> {
+    raw.split_whitespace()
+        .filter_map(|t| t.parse::<f64>().ok())
+        .next_back()
+}
+
+/// `fixedProfile`'s argument, per face: `s_f = (d/|d|) . x_f - origin` with
+/// `d` the entry's `direction` (required, not zero), `origin` defaulting to
+/// 0 and `x_f` the face centre in f64 (SPEC-LIT 120.1).
+fn f1_profile_argument(
+    entries: &BTreeMap<String, String>,
+    n: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+) -> Result<Vec<f64>> {
+    let setting = format!("{field}: boundaryField/{patch}/direction");
+    let raw_d = entries.get("direction").ok_or_else(|| Error::Field {
+        field: field.to_string(),
+        msg: format!("{setting}: fixedProfile needs a `direction` entry and the patch has none"),
+    })?;
+    let d = f1_vec3(raw_d, &setting, "direction")?;
+    let d = DVec3::new(d.x as f64, d.y as f64, d.z as f64);
+    let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
+    if !(len > 0.0) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!("{setting}: fixedProfile's `direction` must not be zero"),
+        });
+    }
+    let d = d * (1.0 / len);
+    let origin = match entries.get("origin") {
+        None => 0.0,
+        Some(raw) => f1_num(raw).ok_or_else(|| {
+            Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{field}: boundaryField/{patch}/origin: origin: \"{raw}\" is not a number"
+                ),
+            }
+        })?,
+    };
+    Ok((0..n)
+        .map(|i| d.dot(aux.bc_f[i]) - origin)
+        .collect())
+}
 
 /// Reduce one patch's named condition to the Robin triple.
 ///
 /// `internal` is the wall-adjacent cell value for each face of this patch,
 /// used only as the fallback for `Calculated` when the file carried no
 /// `value` entry.
+/// The six Function1 conditions of SPEC-LIT 120.1 on a scalar field,
+/// resolved before the static arms: a constant IS its static twin with the
+/// value `F(0)` fed into the same arm, so it is bitwise today's condition; a
+/// time-varying one is refused where the clock does not advance, and seeded
+/// at `t_start` where it does. `Ok(None)` when the name is not one of the
+/// six, or for `uniformFixedGradient` with no `uniformGradient` entry - the
+/// static arm's `gradient` path, unchanged.
+#[allow(clippy::too_many_arguments)]
+fn f1_seed_scalar(
+    spec: &PatchFieldSpec,
+    n: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+    f1: Option<&F1Setup>,
+    timed: &mut Vec<TimedPatch>,
+) -> Result<Option<F1Seed<Scalar>>> {
+    let name = spec.type_name.as_str();
+    let (key, kind) = match name {
+        "uniformFixedValue" => ("uniformValue", BcKind::FixedValue),
+        "uniformFixedGradient" => ("uniformGradient", BcKind::FixedGradient),
+        "uniformInletOutlet" => ("uniformInletValue", BcKind::InletOutlet),
+        "uniformTotalPressure" => ("p0", BcKind::TotalPressure),
+        "fixedProfile" => ("profile", BcKind::FixedValue),
+        _ => return Ok(None),
+    };
+    let setting = format!("{field}: boundaryField/{patch}/{key}");
+    let entries = crate::function1::patch_entries(spec, &setting)?;
+    let Some(f) = F1::parse(&entries, key, 1, &setting, f1.and_then(|s| s.case_dir))? else {
+        // No entry under this key: `uniformGradient` is optional and falls
+        // through to the static arm; the other five keys are required.
+        if kind == BcKind::FixedGradient {
+            return Ok(None);
+        }
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!("{setting}: {name} needs a `{key}` entry and the patch has none"),
+        });
+    };
+
+    // `fixedProfile` is never timed: it is a Function1 of a face coordinate,
+    // evaluated once here by the host twin (SPEC-LIT 120.1).
+    if name == "fixedProfile" {
+        let s = f1_profile_argument(&entries, n, patch, field, aux)?;
+        let lo = s.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        f.check_range(lo, hi)?;
+        let ref_value = s.iter().map(|&si| f.eval(si)[0] as Scalar).collect();
+        return Ok(Some(F1Seed {
+            kind,
+            fr: vec![1.0; n],
+            ref_value,
+            ref_grad: vec![0.0; n],
+        }));
+    }
+
+    if f.is_constant() {
+        // The condition is exactly its static twin with the value F(0)
+        // (SPEC-LIT 120.1): the value feeds the arm the static twin runs, so
+        // the arithmetic - and the result - is today's, bit for bit.
+        let v = f.eval(0.0)[0] as Scalar;
+        let seed = match kind {
+            BcKind::FixedGradient => F1Seed {
+                kind,
+                fr: vec![0.0; n],
+                ref_value: vec![0.0; n],
+                ref_grad: vec![v; n],
+            },
+            BcKind::TotalPressure => {
+                let mut ref_value = vec![v; n];
+                for (i, rv) in ref_value.iter_mut().enumerate() {
+                    if aux.is_inflow(i) {
+                        let mag = aux.u(i, patch, "uniformTotalPressure")?.mag();
+                        *rv = v - 0.5 * mag * mag;
+                    }
+                }
+                F1Seed {
+                    kind,
+                    fr: vec![1.0; n],
+                    ref_value,
+                    ref_grad: vec![0.0; n],
+                }
+            }
+            // fixedValue and inletOutlet both seed fr = 1 at the value.
+            _ => F1Seed {
+                kind,
+                fr: vec![1.0; n],
+                ref_value: vec![v; n],
+                ref_grad: vec![0.0; n],
+            },
+        };
+        return Ok(Some(seed));
+    }
+
+    // Time-varying from here (SPEC-LIT 120.1).
+    let Some(fs) = f1 else {
+        return Err(f1_needs_timed(&setting, field, "setup_scalar_field_timed"));
+    };
+    f.check_range(fs.t_start, fs.t_end)?;
+    Ok(Some(scalar_timed_seed(
+        &f, kind, n, patch, aux, fs, timed,
+    )?))
+}
+
+/// The `TimedPatch` a time-varying scalar condition seeds its triple with:
+/// `target_{f} = base_f + w_f*F(t)` rounded once, the triple at `t_start`
+/// being what the device writes at `t_start` (SPEC-LIT 120.1).
+#[allow(clippy::too_many_arguments)]
+fn scalar_timed_seed(
+    f: &F1,
+    kind: BcKind,
+    n: usize,
+    patch: &str,
+    aux: &PatchAux,
+    fs: &F1Setup,
+    timed: &mut Vec<TimedPatch>,
+) -> Result<F1Seed<Scalar>> {
+    // base and w per SPEC-LIT 120.1's table. `uniformTotalPressure`'s base
+    // is the existing arm's ref value at p_total = 0, which is bitwise the
+    // arm's value because p0 + (-q) = p0 - q exactly in IEEE; every other
+    // condition here has base 0 and w 1.
+    let (target, base, w) = match kind {
+        BcKind::TotalPressure => {
+            let mut base = vec![0.0; n];
+            for (i, b) in base.iter_mut().enumerate() {
+                if aux.is_inflow(i) {
+                    let mag = aux.u(i, patch, "uniformTotalPressure")?.mag();
+                    *b = (0.0 - 0.5 * mag * mag) as f64;
+                }
+            }
+            (F1Target::RefValue, base, vec![1.0; n])
+        }
+        BcKind::FixedGradient => (F1Target::RefGrad, vec![0.0; n], vec![1.0; n]),
+        _ => (F1Target::RefValue, vec![0.0; n], vec![1.0; n]),
+    };
+    let tp = TimedPatch {
+        patch: patch.to_string(),
+        start: aux.at,
+        n,
+        n_t: 1,
+        target,
+        f: f.clone(),
+        base,
+        w,
+    };
+    let values = tp.host_values(fs.t_start);
+    timed.push(tp);
+    Ok(if target == F1Target::RefGrad {
+        F1Seed {
+            kind,
+            fr: vec![0.0; n],
+            ref_value: vec![0.0; n],
+            ref_grad: values,
+        }
+    } else {
+        F1Seed {
+            kind,
+            fr: vec![1.0; n],
+            ref_value: values,
+            ref_grad: vec![0.0; n],
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scalar_patch(
     spec: Option<&PatchFieldSpec>,
@@ -299,6 +652,8 @@ fn scalar_patch(
     aux: &PatchAux,
     out: &mut BoundaryTriple<Scalar>,
     at: usize,
+    f1: Option<&F1Setup>,
+    timed: &mut Vec<TimedPatch>,
 ) -> Result<()> {
     // Topology first: a field file cannot argue with an empty patch.
     if let Some(forced) = topology_override(mesh_kind) {
@@ -323,6 +678,22 @@ fn scalar_patch(
         }
         return Ok(());
     };
+
+    // SPEC-LIT 120.1: the six Function1 conditions resolve here, before the
+    // static arms - a constant IS its static twin (its value feeds the same
+    // arm, bitwise), and a time-varying one is refused where the clock does
+    // not advance and seeded at t_start where it does.
+    if let Some(seed) = f1_seed_scalar(spec, n, patch, field, aux, f1, timed)? {
+        for i in 0..n {
+            out.kind[at + i] = seed.kind as Label;
+            out.fr[at + i] = seed.fr[i];
+            out.ref_value[at + i] = seed.ref_value[i];
+            out.ref_grad[at + i] = seed.ref_grad[i];
+            out.value[at + i] =
+                seed.fr[i] * seed.ref_value[i] + (1.0 - seed.fr[i]) * internal[i];
+        }
+        return Ok(());
+    }
 
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;
 
@@ -635,6 +1006,9 @@ pub fn scalar_boundary_with(
     inputs: BcInputs,
 ) -> Result<BoundaryTriple<Scalar>> {
     let mut out = BoundaryTriple::new(m.n_boundary_faces);
+    // No `F1Setup`: a time-varying Function1 is refused here, by name
+    // (SPEC-LIT 120.1 - the pre-existing entry points run constants only).
+    let mut timed = Vec::new();
 
     for p in &m.patches {
         // The wall-adjacent cell value for each face of this patch.
@@ -657,10 +1031,54 @@ pub fn scalar_boundary_with(
             &aux,
             &mut out,
             p.start,
+            None,
+            &mut timed,
         )?;
     }
 
     Ok(out)
+}
+
+/// [`scalar_boundary_with`], for a run whose Function1 conditions advance
+/// with the clock (SPEC-LIT 120.1): every time-varying patch is evaluated at
+/// `t_start` for the initial triple, and its `TimedPatch` comes back for the
+/// driver to upload and apply after each `F1Clock::advance`.
+pub fn scalar_boundary_timed(
+    raw: &RawScalarField,
+    m: &HostMesh,
+    internal: &[Scalar],
+    inputs: BcInputs,
+    f1: &F1Setup,
+) -> Result<(BoundaryTriple<Scalar>, Vec<TimedPatch>)> {
+    let mut out = BoundaryTriple::new(m.n_boundary_faces);
+    let mut timed = Vec::new();
+
+    for p in &m.patches {
+        let cells: Vec<Scalar> = (0..p.size)
+            .map(|i| {
+                let c = m.b_face_cells[p.start + i] as usize;
+                internal.get(c).copied().unwrap_or(0.0)
+            })
+            .collect();
+
+        let aux = PatchAux::build(m, p, inputs);
+
+        scalar_patch(
+            raw.spec(&p.name)?,
+            p.size,
+            &p.name,
+            &raw.name,
+            p.kind,
+            &cells,
+            &aux,
+            &mut out,
+            p.start,
+            Some(f1),
+            &mut timed,
+        )?;
+    }
+
+    Ok((out, timed))
 }
 
 /// Read a parsed scalar field onto the device.
@@ -736,6 +1154,227 @@ pub fn download_scalar(
 //  Vector fields
 // ==========================================================================
 
+/// `n` face values out of a flattened `n * 3` host array (SPEC-LIT 120.1).
+fn to_vec3s(flat: &[Scalar]) -> Vec<Vec3> {
+    flat.chunks_exact(3)
+        .map(|c| Vec3::new(c[0], c[1], c[2]))
+        .collect()
+}
+
+/// `flowRateInletVelocity`'s rate, a scalar Function1 (n_c 1) naming itself
+/// `volumetricFlowRate`, else `massFlowRate` (SPEC-LIT 120.1): a constant
+/// feeds the existing arm, bitwise today's condition, and a time-varying one
+/// scales the per-face weights `w = -n_f/A`.
+#[allow(clippy::too_many_arguments)]
+fn f1_flow_rate_seed(
+    spec: &PatchFieldSpec,
+    n: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+    f1: Option<&F1Setup>,
+    timed: &mut Vec<TimedPatch>,
+) -> Result<Option<F1Seed<Vec3>>> {
+    let base = format!("{field}: boundaryField/{patch}");
+    let entries = crate::function1::patch_entries(spec, &base)?;
+    let key = if entries.keys().any(|k| k.starts_with("volumetricFlowRate")) {
+        "volumetricFlowRate"
+    } else {
+        "massFlowRate"
+    };
+    let setting = format!("{base}/{key}");
+    let f = F1::parse(&entries, key, 1, &setting, f1.and_then(|s| s.case_dir))?.ok_or_else(
+        || {
+            Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{setting}: flowRateInletVelocity needs a `volumetricFlowRate` or \
+                     `massFlowRate` entry and the patch has none"
+                ),
+            }
+        },
+    )?;
+    if !(aux.total_area > 0.0) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!("flowRateInletVelocity on {patch}: the patch has zero area"),
+        });
+    }
+
+    if f.is_constant() {
+        // The existing arm's expression, bitwise (SPEC-LIT 120.1).
+        let q = f.eval(0.0)[0] as Scalar;
+        let ref_value = (0..n)
+            .map(|i| aux.normal[i] * (-q / aux.total_area))
+            .collect();
+        return Ok(Some(F1Seed {
+            kind: BcKind::FlowRateInletVelocity,
+            fr: vec![1.0; n],
+            ref_value,
+            ref_grad: vec![Vec3::ZERO; n],
+        }));
+    }
+
+    // Time-varying from here (SPEC-LIT 120.1): the device writes
+    // (0 + w_f*F(t)) with w the per-face, per-component -n_f/A.
+    let Some(fs) = f1 else {
+        return Err(f1_needs_timed(&setting, field, "setup_vector_field_timed"));
+    };
+    f.check_range(fs.t_start, fs.t_end)?;
+    let w: Vec<f64> = (0..n)
+        .flat_map(|i| {
+            let nrm = aux.normal[i];
+            [
+                -(nrm.x as f64) / (aux.total_area as f64),
+                -(nrm.y as f64) / (aux.total_area as f64),
+                -(nrm.z as f64) / (aux.total_area as f64),
+            ]
+        })
+        .collect();
+    let tp = TimedPatch {
+        patch: patch.to_string(),
+        start: aux.at,
+        n,
+        n_t: 3,
+        target: F1Target::RefValue,
+        f,
+        base: vec![0.0; 3 * n],
+        w,
+    };
+    let values = tp.host_values(fs.t_start);
+    timed.push(tp);
+    Ok(Some(F1Seed {
+        kind: BcKind::FlowRateInletVelocity,
+        fr: vec![1.0; n],
+        ref_value: to_vec3s(&values),
+        ref_grad: vec![Vec3::ZERO; n],
+    }))
+}
+
+/// The Function1 conditions of SPEC-LIT 120.1 on a vector field: the same
+/// resolution as [`f1_seed_scalar`], at the entry's rank 3 - except the flow
+/// rate, whose rate is a scalar Function1 (n_c 1) scaling the face normals
+/// (see [`f1_flow_rate_seed`]), and except `uniformTotalPressure`, a
+/// condition on the PRESSURE that falls through to the scalar-only refusal.
+#[allow(clippy::too_many_arguments)]
+fn f1_seed_vector(
+    spec: &PatchFieldSpec,
+    n: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+    f1: Option<&F1Setup>,
+    timed: &mut Vec<TimedPatch>,
+) -> Result<Option<F1Seed<Vec3>>> {
+    if spec.type_name == "flowRateInletVelocity" {
+        return f1_flow_rate_seed(spec, n, patch, field, aux, f1, timed);
+    }
+    let (key, kind) = match spec.type_name.as_str() {
+        "uniformFixedValue" => ("uniformValue", BcKind::FixedValue),
+        "uniformFixedGradient" => ("uniformGradient", BcKind::FixedGradient),
+        "uniformInletOutlet" => ("uniformInletValue", BcKind::InletOutlet),
+        "fixedProfile" => ("profile", BcKind::FixedValue),
+        _ => return Ok(None),
+    };
+    let setting = format!("{field}: boundaryField/{patch}/{key}");
+    let entries = crate::function1::patch_entries(spec, &setting)?;
+    let Some(f) = F1::parse(&entries, key, 3, &setting, f1.and_then(|s| s.case_dir))? else {
+        // No entry under this key: `uniformGradient` is optional and falls
+        // through to the static arm; the other three keys are required.
+        if kind == BcKind::FixedGradient {
+            return Ok(None);
+        }
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!("{setting}: {name} needs a `{key}` entry and the patch has none", name = spec.type_name),
+        });
+    };
+
+    // `fixedProfile` is never timed: it is a Function1 of a face coordinate,
+    // evaluated once here by the host twin (SPEC-LIT 120.1).
+    if spec.type_name == "fixedProfile" {
+        let s = f1_profile_argument(&entries, n, patch, field, aux)?;
+        let lo = s.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        f.check_range(lo, hi)?;
+        let ref_value = s
+            .iter()
+            .map(|&si| {
+                let v = f.eval(si);
+                Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar)
+            })
+            .collect();
+        return Ok(Some(F1Seed {
+            kind,
+            fr: vec![1.0; n],
+            ref_value,
+            ref_grad: vec![Vec3::ZERO; n],
+        }));
+    }
+
+    if f.is_constant() {
+        // The condition is exactly its static twin with the value F(0)
+        // (SPEC-LIT 120.1), bitwise, as in [`f1_seed_scalar`].
+        let v = f.eval(0.0);
+        let v3 = Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar);
+        let seed = if kind == BcKind::FixedGradient {
+            F1Seed {
+                kind,
+                fr: vec![0.0; n],
+                ref_value: vec![Vec3::ZERO; n],
+                ref_grad: vec![v3; n],
+            }
+        } else {
+            F1Seed {
+                kind,
+                fr: vec![1.0; n],
+                ref_value: vec![v3; n],
+                ref_grad: vec![Vec3::ZERO; n],
+            }
+        };
+        return Ok(Some(seed));
+    }
+
+    // Time-varying from here (SPEC-LIT 120.1): base 0, w 1, at the target
+    // the condition fixes.
+    let Some(fs) = f1 else {
+        return Err(f1_needs_timed(&setting, field, "setup_vector_field_timed"));
+    };
+    f.check_range(fs.t_start, fs.t_end)?;
+    let target = if kind == BcKind::FixedGradient {
+        F1Target::RefGrad
+    } else {
+        F1Target::RefValue
+    };
+    let tp = TimedPatch {
+        patch: patch.to_string(),
+        start: aux.at,
+        n,
+        n_t: 3,
+        target,
+        f: f.clone(),
+        base: vec![0.0; 3 * n],
+        w: vec![1.0; 3 * n],
+    };
+    let values = tp.host_values(fs.t_start);
+    timed.push(tp);
+    Ok(Some(if target == F1Target::RefGrad {
+        F1Seed {
+            kind,
+            fr: vec![0.0; n],
+            ref_value: vec![Vec3::ZERO; n],
+            ref_grad: to_vec3s(&values),
+        }
+    } else {
+        F1Seed {
+            kind,
+            fr: vec![1.0; n],
+            ref_value: to_vec3s(&values),
+            ref_grad: vec![Vec3::ZERO; n],
+        }
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn vector_patch(
     spec: Option<&PatchFieldSpec>,
@@ -747,6 +1386,8 @@ fn vector_patch(
     aux: &PatchAux,
     out: &mut BoundaryTriple<Vec3>,
     at: usize,
+    f1: Option<&F1Setup>,
+    timed: &mut Vec<TimedPatch>,
 ) -> Result<()> {
     let zero = Vec3::default();
 
@@ -774,6 +1415,21 @@ fn vector_patch(
         }
         return Ok(());
     };
+
+    // SPEC-LIT 120.1: the Function1 conditions resolve here, before the
+    // static arms - the same rule the scalar side runs (a constant IS its
+    // static twin, bitwise; a time-varying one needs the timed path).
+    if let Some(seed) = f1_seed_vector(spec, n, patch, field, aux, f1, timed)? {
+        for i in 0..n {
+            out.kind[at + i] = seed.kind as Label;
+            out.fr[at + i] = seed.fr[i];
+            out.ref_value[at + i] = seed.ref_value[i];
+            out.ref_grad[at + i] = seed.ref_grad[i];
+            out.value[at + i] =
+                seed.ref_value[i] * seed.fr[i] + internal[i] * (1.0 - seed.fr[i]);
+        }
+        return Ok(());
+    }
 
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;
 
@@ -965,6 +1621,9 @@ pub fn vector_boundary_with(
     inputs: BcInputs,
 ) -> Result<BoundaryTriple<Vec3>> {
     let mut out = BoundaryTriple::new(m.n_boundary_faces);
+    // No `F1Setup`: a time-varying Function1 is refused here, by name
+    // (SPEC-LIT 120.1 - the pre-existing entry points run constants only).
+    let mut timed = Vec::new();
 
     for p in &m.patches {
         let cells: Vec<Vec3> = (0..p.size)
@@ -986,10 +1645,54 @@ pub fn vector_boundary_with(
             &aux,
             &mut out,
             p.start,
+            None,
+            &mut timed,
         )?;
     }
 
     Ok(out)
+}
+
+/// [`vector_boundary_with`], for a run whose Function1 conditions advance
+/// with the clock (SPEC-LIT 120.1): every time-varying patch is evaluated at
+/// `t_start` for the initial triple, and its `TimedPatch` comes back for the
+/// driver to upload and apply after each `F1Clock::advance`.
+pub fn vector_boundary_timed(
+    raw: &RawVectorField,
+    m: &HostMesh,
+    internal: &[Vec3],
+    inputs: BcInputs,
+    f1: &F1Setup,
+) -> Result<(BoundaryTriple<Vec3>, Vec<TimedPatch>)> {
+    let mut out = BoundaryTriple::new(m.n_boundary_faces);
+    let mut timed = Vec::new();
+
+    for p in &m.patches {
+        let cells: Vec<Vec3> = (0..p.size)
+            .map(|i| {
+                let c = m.b_face_cells[p.start + i] as usize;
+                internal.get(c).copied().unwrap_or_default()
+            })
+            .collect();
+
+        let aux = PatchAux::build(m, p, inputs);
+
+        vector_patch(
+            raw.spec(&p.name)?,
+            p.size,
+            &p.name,
+            &raw.name,
+            p.kind,
+            &cells,
+            &aux,
+            &mut out,
+            p.start,
+            Some(f1),
+            &mut timed,
+        )?;
+    }
+
+    Ok((out, timed))
 }
 
 pub fn upload_vector(
@@ -1146,6 +1849,56 @@ pub fn setup_vector_field(
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
     Ok(())
+}
+
+/// As [`setup_scalar_field_with`], plus the timed patches uploaded (SPEC-LIT
+/// 120.1): the driver applies the returned `TimedBcs` after each
+/// `F1Clock::advance`, and the triple already holds the patch at `t_start`.
+pub fn setup_scalar_field_timed(
+    gpu: &Gpu,
+    f: &mut GpuScalarField,
+    raw: &RawScalarField,
+    m: &HostMesh,
+    inputs: BcInputs,
+    f1: &F1Setup,
+) -> Result<TimedBcs> {
+    let internal = crate::io::fields::expand_scalars(&raw.internal, m.n_cells, &raw.name)?;
+    let (b, timed) = scalar_boundary_timed(raw, m, &internal, inputs, f1)?;
+
+    gpu.write(&mut f.f, &internal)?;
+    gpu.write(&mut f.f0, &internal)?;
+    gpu.write(&mut f.f00, &internal)?;
+    gpu.write(&mut f.bf, &b.value)?;
+    gpu.write(&mut f.fr, &b.fr)?;
+    gpu.write(&mut f.ref_value, &b.ref_value)?;
+    gpu.write(&mut f.ref_grad, &b.ref_grad)?;
+    gpu.write(&mut f.bc_kind, &b.kind)?;
+    TimedBcs::upload(gpu, &timed)
+}
+
+/// As [`setup_vector_field_with`], plus the timed patches uploaded (SPEC-LIT
+/// 120.1): the driver applies the returned `TimedBcs` after each
+/// `F1Clock::advance`, and the triple already holds the patch at `t_start`.
+pub fn setup_vector_field_timed(
+    gpu: &Gpu,
+    f: &mut GpuVectorField,
+    raw: &RawVectorField,
+    m: &HostMesh,
+    inputs: BcInputs,
+    f1: &F1Setup,
+) -> Result<TimedBcs> {
+    let internal = crate::io::fields::expand_vectors(&raw.internal, m.n_cells, &raw.name)?;
+    let (b, timed) = vector_boundary_timed(raw, m, &internal, inputs, f1)?;
+
+    gpu.write(&mut f.f, &internal)?;
+    gpu.write(&mut f.f0, &internal)?;
+    gpu.write(&mut f.f00, &internal)?;
+    gpu.write(&mut f.bf, &b.value)?;
+    gpu.write(&mut f.fr, &b.fr)?;
+    gpu.write(&mut f.ref_value, &b.ref_value)?;
+    gpu.write(&mut f.ref_grad, &b.ref_grad)?;
+    gpu.write(&mut f.bc_kind, &b.kind)?;
+    TimedBcs::upload(gpu, &timed)
 }
 
 /// Copy a device scalar field's numbers back into a case field for writing.
@@ -3115,6 +3868,395 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("ceiling"), "{msg}");
         assert!(msg.contains("nutLowReWallFunction"), "{msg}");
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT 120.1 - the Function1 boundary conditions
+    // ------------------------------------------------------------------
+
+    /// A 2x2x1 box with real geometry; patches xmin..zmax, xmin first with
+    /// two faces whose centres sit at y = 1/8 and y = 3/8.
+    fn box_host() -> HostMesh {
+        let (mut m, points, faces) =
+            crate::mesh::topology::tests::box_mesh([2, 2, 1], Vec3::new(0.5, 0.25, 1.0));
+        m.compute_geometry(&points, &faces).expect("geometry");
+        m
+    }
+
+    /// A raw scalar field of any name, one patch entry.
+    fn named_scalar_field(name: &str, patch: &str, s: PatchFieldSpec) -> RawScalarField {
+        let mut raw = RawScalarField {
+            name: name.into(),
+            ..Default::default()
+        };
+        raw.boundary.insert(patch.into(), s);
+        raw
+    }
+
+    /// A raw vector field named U, one patch entry.
+    fn named_vector_field(patch: &str, s: PatchFieldSpec) -> RawVectorField {
+        let mut raw = RawVectorField {
+            name: "U".into(),
+            ..Default::default()
+        };
+        raw.boundary.insert(patch.into(), s);
+        raw
+    }
+
+    /// `uniformFixedValue` / `uniformTotalPressure` / ... with one plain
+    /// entry (SPEC-LIT 120.1's forms 1-3).
+    fn f1_spec(type_name: &str, key: &str, text: &str) -> PatchFieldSpec {
+        let mut sp = PatchFieldSpec {
+            type_name: type_name.into(),
+            ..Default::default()
+        };
+        sp.extra.insert(key.into(), text.into());
+        sp
+    }
+
+    /// `uniformFixedValue` on xmin must be bitwise `fixedValue` with the same
+    /// constant, on a scalar field and on a vector field (SPEC-LIT 120.1:
+    /// the condition is exactly its static twin).
+    #[test]
+    fn uniform_fixed_value_with_a_constant_is_fixed_value_bitwise() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+
+        let uf = f1_spec("uniformFixedValue", "uniformValue", "2.5");
+        let mut fv = PatchFieldSpec {
+            type_name: "fixedValue".into(),
+            ..Default::default()
+        };
+        fv.value = vec![2.5];
+        let a = scalar_boundary(
+            &named_scalar_field("T", &xmin, uf),
+            &m,
+            &vec![0.0; m.n_cells],
+        )
+        .unwrap();
+        let b = scalar_boundary(
+            &named_scalar_field("T", &xmin, fv),
+            &m,
+            &vec![0.0; m.n_cells],
+        )
+        .unwrap();
+        for i in 0..m.patches[0].size {
+            assert_eq!(a.kind[i], b.kind[i]);
+            assert_eq!(a.fr[i].to_bits(), b.fr[i].to_bits());
+            assert_eq!(a.ref_value[i].to_bits(), b.ref_value[i].to_bits());
+            assert_eq!(a.ref_grad[i].to_bits(), b.ref_grad[i].to_bits());
+            assert_eq!(a.value[i].to_bits(), b.value[i].to_bits());
+        }
+
+        let uf = f1_spec("uniformFixedValue", "uniformValue", "(1 2 3)");
+        let mut fv = PatchFieldSpec {
+            type_name: "fixedValue".into(),
+            ..Default::default()
+        };
+        fv.value_v = vec![Vec3::new(1.0, 2.0, 3.0)];
+        let a = vector_boundary(
+            &named_vector_field(&xmin, uf),
+            &m,
+            &vec![Vec3::ZERO; m.n_cells],
+        )
+        .unwrap();
+        let b = vector_boundary(
+            &named_vector_field(&xmin, fv),
+            &m,
+            &vec![Vec3::ZERO; m.n_cells],
+        )
+        .unwrap();
+        for i in 0..m.patches[0].size {
+            assert_eq!(a.kind[i], b.kind[i]);
+            assert_eq!(a.fr[i].to_bits(), b.fr[i].to_bits());
+            assert_eq!(a.ref_value[i], b.ref_value[i]);
+            assert_eq!(a.ref_grad[i], b.ref_grad[i]);
+            assert_eq!(a.value[i], b.value[i]);
+        }
+    }
+
+    /// A time-varying Function1 through the pre-existing entry point is
+    /// refused, naming the setting, that it is time-varying, the section, and
+    /// the timed entry to call instead (SPEC-LIT 120.1).
+    #[test]
+    fn a_time_varying_function1_is_refused_where_the_clock_does_not_advance() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let raw = named_scalar_field(
+            "T",
+            &xmin,
+            f1_spec("uniformFixedValue", "uniformValue", "table ((0 0) (1 2))"),
+        );
+
+        let e = scalar_boundary(&raw, &m, &vec![0.0; m.n_cells])
+            .expect_err("a time-varying Function1 must be refused here");
+        let msg = e.to_string();
+        assert!(
+            msg.contains(&format!("T: boundaryField/{xmin}/uniformValue")),
+            "{msg}"
+        );
+        assert!(msg.contains("time-varying"), "{msg}");
+        assert!(msg.contains("SPEC-LIT 120.1"), "{msg}");
+        assert!(msg.contains("setup_scalar_field_timed"), "{msg}");
+    }
+
+    /// The timed path seeds the triple at t_start - the entries are bitwise
+    /// `host_values(t_start)`, what the device writes at t_start - and a
+    /// table whose outOfBounds `error` fires over the run is refused there
+    /// (SPEC-LIT 120.1).
+    #[test]
+    fn the_timed_path_seeds_t_start() {
+        let m = box_host();
+        let xmin = &m.patches[0].name.clone();
+        let raw = named_scalar_field(
+            "T",
+            xmin,
+            f1_spec("uniformFixedValue", "uniformValue", "table ((0 0) (1 2))"),
+        );
+        let internal = vec![0.0; m.n_cells];
+        let f1 = F1Setup {
+            t_start: 0.5,
+            t_end: 1.0,
+            case_dir: None,
+        };
+
+        let (b, timed) = scalar_boundary_timed(&raw, &m, &internal, BcInputs::default(), &f1)
+            .expect("the timed path builds");
+        assert_eq!(timed.len(), 1, "one time-varying patch");
+        let tp = &timed[0];
+        assert_eq!(tp.patch, *xmin);
+        assert_eq!(tp.start, m.patches[0].start);
+        assert_eq!(tp.n, m.patches[0].size);
+        assert_eq!(tp.target, crate::function1::F1Target::RefValue);
+
+        let want = tp.host_values(0.5);
+        for i in 0..m.patches[0].size {
+            assert_eq!(b.ref_value[m.patches[0].start + i].to_bits(), 1.0f64.to_bits());
+            assert_eq!(
+                b.ref_value[m.patches[0].start + i].to_bits(),
+                want[i].to_bits(),
+                "the triple at t_start is host_values(t_start), bitwise"
+            );
+        }
+
+        // form 5 with `outOfBounds error`, and a run that leaves the table:
+        // refused at setup (SPEC-LIT 120.1, out of bounds settled there).
+        let mut sp = PatchFieldSpec {
+            type_name: "uniformFixedValue".into(),
+            ..Default::default()
+        };
+        sp.dicts.insert(
+            "uniformValue".into(),
+            "type table; values ((0 0) (1 2)); outOfBounds error;".into(),
+        );
+        let raw5 = named_scalar_field("T", xmin, sp);
+        let f15 = F1Setup {
+            t_start: 0.0,
+            t_end: 5.0,
+            case_dir: None,
+        };
+        let e = scalar_boundary_timed(&raw5, &m, &internal, BcInputs::default(), &f15)
+            .expect_err("the run leaves the table");
+        assert!(e.to_string().contains("outOfBounds error"), "{e}");
+    }
+
+    /// `uniformTotalPressure` with a constant `p0` is bitwise `totalPressure`
+    /// with the same `p0` (SPEC-LIT 120.1: the value feeds the same arm).
+    #[test]
+    fn uniform_total_pressure_with_a_constant_is_total_pressure_bitwise() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        // Any non-zero INFLOW velocity: xmin's outward normal is -x, so a
+        // velocity along +x crosses INTO the domain (16 boundary faces on
+        // the 2x2x1 box).
+        let u_b = vec![Vec3::new(3.0, 0.0, 0.0); m.n_boundary_faces];
+        let inputs = BcInputs {
+            u_b: Some(&u_b),
+            ..Default::default()
+        };
+
+        let a = scalar_boundary_with(
+            &named_scalar_field("p", &xmin, f1_spec("uniformTotalPressure", "p0", "3")),
+            &m,
+            &vec![0.0; m.n_cells],
+            inputs,
+        )
+        .unwrap();
+        let b = scalar_boundary_with(
+            &named_scalar_field("p", &xmin, f1_spec("totalPressure", "p0", "3")),
+            &m,
+            &vec![0.0; m.n_cells],
+            inputs,
+        )
+        .unwrap();
+        for i in 0..m.patches[0].size {
+            assert_eq!(a.kind[i], b.kind[i]);
+            assert_eq!(a.fr[i].to_bits(), b.fr[i].to_bits());
+            assert_eq!(a.ref_value[i].to_bits(), b.ref_value[i].to_bits());
+            assert_eq!(a.ref_grad[i].to_bits(), b.ref_grad[i].to_bits());
+            assert_eq!(a.value[i].to_bits(), b.value[i].to_bits());
+        }
+    }
+
+    /// `uniformInletOutlet` reads its `uniformInletValue`; a
+    /// `uniformFixedGradient` with `uniformGradient` is the Function1 path
+    /// and with only `gradient` is today's static path, unchanged (SPEC-LIT
+    /// 120.1's table).
+    #[test]
+    fn uniform_inlet_outlet_and_uniform_gradient() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let internal = vec![0.0; m.n_cells];
+
+        let b = scalar_boundary(
+            &named_scalar_field(
+                "psi",
+                &xmin,
+                f1_spec("uniformInletOutlet", "uniformInletValue", "4"),
+            ),
+            &m,
+            &internal,
+        )
+        .unwrap();
+        for i in 0..m.patches[0].size {
+            assert_eq!(b.kind[i], BcKind::InletOutlet as Label);
+            assert_eq!(b.fr[i].to_bits(), 1.0f64.to_bits());
+            assert_eq!(b.ref_value[i].to_bits(), 4.0f64.to_bits());
+        }
+
+        let b = scalar_boundary(
+            &named_scalar_field(
+                "psi",
+                &xmin,
+                f1_spec("uniformFixedGradient", "uniformGradient", "0.5"),
+            ),
+            &m,
+            &internal,
+        )
+        .unwrap();
+        for i in 0..m.patches[0].size {
+            assert_eq!(b.kind[i], BcKind::FixedGradient as Label);
+            assert_eq!(b.ref_grad[i].to_bits(), 0.5f64.to_bits());
+        }
+
+        // No `uniformGradient` entry: the static `gradient` path, unchanged.
+        let mut sp = PatchFieldSpec {
+            type_name: "uniformFixedGradient".into(),
+            ..Default::default()
+        };
+        sp.gradient = vec![0.25];
+        let b = scalar_boundary(
+            &named_scalar_field("psi", &xmin, sp),
+            &m,
+            &internal,
+        )
+        .unwrap();
+        for i in 0..m.patches[0].size {
+            assert_eq!(b.kind[i], BcKind::FixedGradient as Label);
+            assert_eq!(b.ref_grad[i].to_bits(), 0.25f64.to_bits());
+        }
+    }
+
+    /// `fixedProfile` is a Function1 of the face coordinate: with
+    /// `direction (0 1 0)` every xmin face sits at the table value of its
+    /// centre's y, bitwise; a zero direction is refused (SPEC-LIT 120.1).
+    #[test]
+    fn fixed_profile_is_a_function1_of_the_face_coordinate() {
+        let m = box_host();
+        let xmin = &m.patches[0].name.clone();
+        let mut sp = f1_spec("fixedProfile", "profile", "table ((0 0) (8 8))");
+        sp.extra.insert("direction".into(), "(0 1 0)".into());
+        let raw = named_scalar_field("T", xmin, sp);
+        let b = scalar_boundary(&raw, &m, &vec![0.0; m.n_cells]).unwrap();
+
+        let bc = m.geom64();
+        for i in 0..m.patches[0].size {
+            let y = bc.b_cf[m.patches[0].start + i].y;
+            let got = b.ref_value[m.patches[0].start + i];
+            assert_eq!(
+                got.to_bits(),
+                (y as Scalar).to_bits(),
+                "ref_value {} vs the face centre's y {y}",
+                got
+            );
+        }
+
+        let mut bad = f1_spec("fixedProfile", "profile", "table ((0 0) (8 8))");
+        bad.extra.insert("direction".into(), "(0 0 0)".into());
+        let e = scalar_boundary(
+            &named_scalar_field("T", xmin, bad),
+            &m,
+            &vec![0.0; m.n_cells],
+        )
+        .expect_err("a zero direction is refused");
+        assert!(e.to_string().contains("direction"), "{e}");
+    }
+
+    /// `flowRateInletVelocity`'s rate is a Function1 (SPEC-LIT 120.1): a
+    /// constant is bitwise today's condition, a time-varying one is refused
+    /// through the static entry point and becomes one TimedPatch - three
+    /// components per face - through the timed one.
+    #[test]
+    fn a_flow_rate_function1() {
+        let m = box_host();
+        let xmin = &m.patches[0].name.clone();
+        let internal = vec![Vec3::ZERO; m.n_cells];
+
+        let a = vector_boundary(
+            &named_vector_field(
+                xmin,
+                f1_spec("flowRateInletVelocity", "volumetricFlowRate", "constant 0.2"),
+            ),
+            &m,
+            &internal,
+        )
+        .unwrap();
+        let b = vector_boundary(
+            &named_vector_field(
+                xmin,
+                f1_spec("flowRateInletVelocity", "volumetricFlowRate", "0.2"),
+            ),
+            &m,
+            &internal,
+        )
+        .unwrap();
+        for i in 0..m.patches[0].size {
+            assert_eq!(a.kind[i], b.kind[i]);
+            assert_eq!(a.fr[i].to_bits(), b.fr[i].to_bits());
+            assert_eq!(a.ref_value[i], b.ref_value[i]);
+            assert_eq!(a.ref_grad[i], b.ref_grad[i]);
+            assert_eq!(a.value[i], b.value[i]);
+        }
+
+        // A linearRamp-scaled rate, form 5 (SPEC-LIT 120.1's five forms).
+        let ramp_dict = "type scale; scale { type linearRamp; start 0.25; duration 0.5; } \
+                         value constant 0.2;";
+        let mut sp = PatchFieldSpec {
+            type_name: "flowRateInletVelocity".into(),
+            ..Default::default()
+        };
+        sp.dicts.insert("volumetricFlowRate".into(), ramp_dict.into());
+
+        let e = vector_boundary(&named_vector_field(xmin, sp.clone()), &m, &internal)
+            .expect_err("a time-varying rate is refused here");
+        let msg = e.to_string();
+        assert!(msg.contains("time-varying"), "{msg}");
+        assert!(msg.contains("setup_vector_field_timed"), "{msg}");
+
+        let (_, timed) = vector_boundary_timed(
+            &named_vector_field(xmin, sp),
+            &m,
+            &internal,
+            BcInputs::default(),
+            &F1Setup {
+                t_start: 0.0,
+                t_end: 1.0,
+                case_dir: None,
+            },
+        )
+        .expect("the timed path builds");
+        assert_eq!(timed.len(), 1);
+        assert_eq!(timed[0].n_t, 3, "three components per face");
     }
 
 }

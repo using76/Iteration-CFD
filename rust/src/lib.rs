@@ -93,6 +93,7 @@ pub mod precon;
 pub mod precision;
 pub mod pressure;
 pub mod properties;
+pub mod function1;
 pub mod scalar_transport;
 pub mod simple;
 pub mod solid;

@@ -408,6 +408,11 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "fan",
     "porousJumpPressure",
     "porousBafflePressure",
+    // SPEC-LIT 120.1: the Function1 conditions of the time-varying family.
+    "uniformFixedValue",
+    "uniformInletOutlet",
+    "uniformTotalPressure",
+    "fixedProfile",
 ];
 
 impl BcKind {
@@ -424,6 +429,10 @@ impl BcKind {
     pub fn from_name(name: &str, field: &str, patch: &str) -> Result<Self> {
         let k = match name {
             "fixedValue" | "noSlip" => Self::FixedValue,
+            // SPEC-LIT 120.1: the Function1 conditions ride as the condition
+            // they degenerate to; `field_setup` reads their entry and refuses
+            // a time-varying one where the clock does not advance.
+            "uniformFixedValue" | "fixedProfile" => Self::FixedValue,
             "zeroGradient" => Self::ZeroGradient,
             "fixedGradient" | "uniformFixedGradient" => Self::FixedGradient,
             "mixed" | "freestream" | "freestreamVelocity" => Self::Mixed,
@@ -433,7 +442,7 @@ impl BcKind {
             "empty" => Self::Empty,
             "symmetry" | "symmetryPlane" | "slip" | "wedge" => Self::Symmetry,
             "cyclic" | "cyclicSlip" | "processor" => Self::Cyclic,
-            "inletOutlet" | "freestreamPressure" => Self::InletOutlet,
+            "inletOutlet" | "freestreamPressure" | "uniformInletOutlet" => Self::InletOutlet,
 
             "turbulentIntensityKineticEnergyInlet" => {
                 Self::TurbulentIntensityKineticEnergyInlet
@@ -444,7 +453,7 @@ impl BcKind {
             "turbulentMixingLengthFrequencyInlet" => Self::TurbulentMixingLengthFrequencyInlet,
             "pressureInletOutletVelocity" => Self::PressureInletOutletVelocity,
             "fixedFluxPressure" => Self::FixedFluxPressure,
-            "totalPressure" => Self::TotalPressure,
+            "totalPressure" | "uniformTotalPressure" => Self::TotalPressure,
             "movingWallVelocity" => Self::MovingWallVelocity,
             "flowRateInletVelocity" => Self::FlowRateInletVelocity,
 
@@ -720,17 +729,6 @@ impl BcKind {
                     "outletInlet is the REVERSE switch of inletOutlet: a fixed value on OUTflow and zero-gradient on inflow (docs/01-model-catalog.md: valueFraction = pos0(phi_b)), while every flux-switched condition this solver implements is Dirichlet on inflow; it used to be mapped to inletOutlet, which is the opposite condition",
                     "calculated (a fixed value at whatever the file's `value` entry held)",
                     Self::Calculated,
-                );
-            }
-
-            "uniformFixedValue" => {
-                return unsupported_note(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    IMPLEMENTED_BC_NAMES,
-                    "uniformFixedValue carries its value as a `uniformValue` Function1 of time, which this reader does not read - only `value` is - so a table or a ramp would silently run as its first `value`; write fixedValue with a `value` entry",
-                    "fixedValue at the file's `value` entry",
-                    Self::FixedValue,
                 );
             }
 
@@ -1268,22 +1266,21 @@ mod tests {
         assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
     }
 
-    /// SPEC-LIT §13.4 and §13.4.4's audit. The three names used to be aliases
+    /// SPEC-LIT §13.4 and §13.4.4's audit. The two names used to be aliases
     /// to conditions that are NOT what they name: `outletInlet` is the reverse
-    /// switch of `inletOutlet`, `uniformFixedValue`'s value lives in a
-    /// `uniformValue` entry this reader never reads, and `cyclicAMI` needs
-    /// interpolation weights the solver does not have. Each is refused by
-    /// name; `-permissive` substitutes the documented fallback and warns once
-    /// per setting.
+    /// switch of `inletOutlet`, and `cyclicAMI` needs interpolation weights
+    /// the solver does not have. (`uniformFixedValue` was the third until
+    /// SPEC-LIT 120.1 made it read its `uniformValue` Function1.) Each is
+    /// refused by name; `-permissive` substitutes the documented fallback and
+    /// warns once per setting.
     #[test]
-    fn the_three_conditions_that_are_not_their_alias_are_refused_by_name() {
+    fn the_two_conditions_that_are_not_their_alias_are_refused_by_name() {
         let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         crate::io::contract::reset_warnings();
 
         for (name, word) in [
             ("outletInlet", "inletOutlet"),
-            ("uniformFixedValue", "uniformValue"),
             ("cyclicAMI", "cyclic"),
         ] {
             let e = BcKind::from_name(name, "U", "inlet")
@@ -1299,10 +1296,6 @@ mod tests {
         assert!(matches!(
             BcKind::from_name("outletInlet", "U", "inlet").expect("permissive"),
             BcKind::Calculated
-        ));
-        assert!(matches!(
-            BcKind::from_name("uniformFixedValue", "U", "inlet").expect("permissive"),
-            BcKind::FixedValue
         ));
         assert!(matches!(
             BcKind::from_name("cyclicAMI", "U", "inlet").expect("permissive"),
@@ -1355,7 +1348,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [49, 2, 59, 10, 10], "the per-status counts");
+        assert_eq!(counts, [53, 2, 55, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

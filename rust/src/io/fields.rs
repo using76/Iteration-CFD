@@ -108,8 +108,13 @@ pub struct PatchFieldSpec {
     /// value that cannot be read is reported by the condition that wanted it,
     /// naming the key, rather than silently defaulting here.
     ///
-    /// Sub-dictionaries are not captured; nothing needs one yet.
+    /// Sub-dictionaries are kept in [`Self::dicts`], not here.
     pub extra: BTreeMap<String, String>,
+
+    /// Every sub-dictionary entry `key { ... }`, keyed by `key`, holding the
+    /// text BETWEEN the braces, re-joinable by `FoamDict::parse`
+    /// (SPEC-LIT 120.1's forms 4 and 5).
+    pub dicts: BTreeMap<String, String>,
 }
 
 impl PatchFieldSpec {
@@ -479,6 +484,26 @@ fn gather_raw(tz: &mut Tokenizer) -> Result<String> {
     Ok(v)
 }
 
+/// [`append_raw`] for a captured sub-dictionary body: a `Tok::Str` is
+/// RE-QUOTED (`"a b.dat"` stays `"a b.dat"`) and the `;`, `{`, `}` tokens are
+/// kept, so `FoamDict::parse` on the captured text reads the same entries
+/// back. Re-reading a written file therefore yields an equal `PatchFieldSpec`.
+fn append_dict_raw(v: &mut String, t: &Tok) {
+    let opens_group = matches!(v.chars().last(), Some('(') | Some('[') | Some('{'));
+    let closes_group = t.is_punct(')') || t.is_punct(']') || t.is_punct('}') || t.is_punct(';');
+    if !v.is_empty() && !opens_group && !closes_group {
+        v.push(' ');
+    }
+    match t {
+        Tok::Str(s) => {
+            v.push('"');
+            v.push_str(s);
+            v.push('"');
+        }
+        _ => v.push_str(&t.to_string()),
+    }
+}
+
 /// Consume a preprocessor directive this reader cannot evaluate.
 ///
 /// `#include`-style directives carry a bare file name and NO `;`, so blindly
@@ -747,7 +772,28 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
             // silent substitution SPEC-LIT §13.4 forbids.
             _ => {
                 if tz.is_punct('{') {
-                    tz.skip_entry()?;
+                    // A sub-dictionary is kept as its body text, between the
+                    // braces, so `FoamDict::parse` can read the same entries
+                    // back out of it (SPEC-LIT 120.1's forms 4 and 5).
+                    tz.next()?;
+                    let mut body = String::new();
+                    let mut depth = 1usize;
+                    loop {
+                        let Some(t) = tz.peek_at(0).cloned() else {
+                            return tz.err("unterminated '{'");
+                        };
+                        tz.next()?;
+                        if t.is_punct('{') {
+                            depth += 1;
+                        } else if t.is_punct('}') {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        append_dict_raw(&mut body, &t);
+                    }
+                    s.dicts.insert(k, body);
                 } else {
                     let v = gather_raw(tz)?;
                     s.extra.insert(k, v);
@@ -1248,6 +1294,16 @@ fn write_boundary_field(
             write_keyword(out, "        ", k, 16);
             out.push_str(v);
             out.push_str(";\n");
+        }
+
+        // The captured sub-dictionaries (SPEC-LIT 120.1's forms 4 and 5) go
+        // back as `key { body }`, the body re-tokenising to the same tokens
+        // it was captured from, so a read-write-read cycle is the identity.
+        for (k, body) in &s.dicts {
+            write_keyword(out, "        ", k, 16);
+            out.push_str("{ ");
+            out.push_str(body);
+            out.push_str(" }\n");
         }
 
         out.push_str("    }\n");
@@ -1770,6 +1826,50 @@ boundaryField {}
         assert!(text.contains("object      epsilon;"));
         assert!(text.contains("dimensions      [0 2 -3 0 0 0 0];"));
         assert!(text.ends_with("//\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sub-dictionary inside a patch entry (SPEC-LIT 120.1's form 5) must
+    /// survive both directions: kept out of `extra`, captured in `dicts`,
+    /// readable by `function1::patch_entries`, and written back so a
+    /// read-write-read cycle is the identity.
+    #[test]
+    fn sub_dictionaries_are_kept_and_round_trip() {
+        let src = "\
+FoamFile { version 2.0; format ascii; class volScalarField; object p; }
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+boundaryField
+{
+    inlet
+    {
+        type            uniformFixedValue;
+        uniformValue
+        {
+            type            table;
+            values          ((0 0) (1 2));
+            file            \"a b.dat\";
+        }
+        value           uniform 0;
+    }
+}
+";
+        let f = read_scalar_str(src, 1).unwrap();
+        let inlet = &f.boundary["inlet"];
+        assert!(inlet.dicts.contains_key("uniformValue"), "{:?}", inlet.dicts);
+        assert!(!inlet.extra.contains_key("uniformValue"));
+
+        let entries =
+            crate::function1::patch_entries(inlet, "p: boundaryField/inlet").unwrap();
+        assert_eq!(entries.get("uniformValue/type"), Some(&"table".to_string()));
+        assert_eq!(entries.get("uniformValue/file"), Some(&"a b.dat".to_string()));
+
+        let dir = scratch("subdict_rt");
+        let path = dir.join("0").join("p");
+        write_scalar_field(&path, &f, "0").unwrap();
+        let back = read_scalar_field(&path, 0).unwrap();
+        assert_eq!(back, f);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
