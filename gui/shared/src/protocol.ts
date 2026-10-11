@@ -621,6 +621,10 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
 ])
 export type UiCommand = z.infer<typeof UiCommandSchema>
 export type UiCommandType = UiCommand['type']
+/** Every gui_control ui.command type, in schema order (the STU census enumerates these). */
+export const UI_COMMAND_TYPES: readonly UiCommandType[] = UiCommandSchema.options.map(
+  (o) => (o.shape.type as { value: UiCommandType }).value,
+)
 
 export const UiSelectionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('none') }),
