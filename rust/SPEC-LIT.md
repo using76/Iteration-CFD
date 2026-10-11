@@ -33555,12 +33555,44 @@ public domain. (§10's and §22's plume rows carried a wrong report identifier �
 technical-note number, not this report — until this section landed; both now read
 NBSIR 79-1910.) Table 1's weighted
 averages, in the three regimes of `z/Q^(2/5)`, are the correlation the gate holds
-against. **The constants below are a transcription of the 2026-09-18 reading of the
-report (archive.org item `purelybuoyantdif7919mcca`) and have NOT been re-confirmed
-against the report's Table 1 by the section that now gates on them.** What stands
-between that transcription and a silently wrong gate is the key's own four continuity
-checks: the report's regime boundaries ARE the intersections of its fits, so a
-mistyped constant fails them at the 1–3 % level.
+against. **The nine constants below were confirmed against the report's Table 1 on
+2026-10-11, and none of them changed.** The 2026-09-18 transcription came from the
+archive.org item `purelybuoyantdif7919mcca`. The confirmation read the page image of
+NIST's scan, `https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nbsir79-1910.pdf` (56 PDF
+pages, SHA-256 `0c40db59b0c35485643db3ca7176b2cee380ea447961f93908e54134bcac1e2d` as
+downloaded), and checked it against the archive.org OCR text. Table 1, "Summary of
+center line data", is on the report's page 27, which is PDF page 35. Each value is in
+its "Weighted Average" column or its "Intersections" rows:
+
+```text
+key                          where on Table 1 (report page 27)                         value
+boundary_flame_intermittent  Intersections, Flame-Intermittent, V column (1.93/6.84)^2  .0796
+boundary_intermittent_plume  Intersections, Intermittent-Plume, V column (1.12/1.93)^3  .195
+flame_dT                     Flame, dT (C), weighted average                            797
+flame_V_over_sqrt_z          Flame, V/z^(1/2) (m^(1/2) s^-1), weighted average           6.84
+intermittent_dT_z_over_Q25   Intermittent, dTz/Q^(2/5) (C m kW^(-2/5)), weighted avg.   62.9
+intermittent_V_over_Q15      Intermittent, V/Q^(1/5) (m s^-1 kW^(-1/5)), weighted avg.  1.93
+plume_dT_z53_over_Q23        Plume, dTz^(5/3)/Q^(2/3) (C m^(5/3) kW^(-2/3)), w. avg.    21.6
+plume_V_z13_over_Q13         Plume, Vz^(1/3)/Q^(1/3) (m^(4/3) s^-1 kW^(-1/3)), w. avg.  1.12
+buoyancy_constant            V / sqrt(2 g dT z / T0), "All Q All z", 176 data points    .935
+```
+
+Three of these are the key's choices among values the table prints: the two
+boundaries and the buoyancy constant. The table prints each intersection twice, once
+from the temperature fits and once from the velocity fits. The VELOCITY intersections
+are .0796 and .195, and the key uses them. The temperature intersections are
+62.9/797 = .0789 and (21.6/62.9)^(3/2) = .201, and the table's last column prints
+their means, .0793 and .198. The text on page 8 rounds them to 0.08 and 0.20. That is
+why the key's velocity continuity rows close to 0.01 % and 0.07 % (tolerance 1 %),
+while its temperature rows close only to 0.85 % and 2.1 % (tolerances 2 % and 3 %).
+The temperature residuals are the table's own gap between its two intersections, not
+slack for transcription error. A mistyped constant still fails one of the four
+rows. The buoyancy constant is the all-data value .935. The regime averages beside it
+are 0.936 (flame, 61 points), 0.940 (intermittent, 69) and 0.928 (plume, 46). Page 8
+also prints the rounded set the correlation block's "~ 0.9" comes from: 6.8, 1.9 and
+1.1, exponents 1/2, 0 and -1/3, and C = 0.9. On precision, page 8 says: "Use of a
+third significant figure in the numbers is probably optimistic here". The five fire
+sizes, 14.4, 21.7, 33.0, 44.9 and 57.5 kW, are Table 1's column heads.
 
 **The case, and the declared heat release rate.** The inlet is a HOT-GAS INLET, NOT A
 FLAME — the case header says so and so does the recipe. All of `Q` enters as enthalpy,
@@ -33569,8 +33601,8 @@ nothing radiates, and `Q` itself is declared, not measured:
 ```text
 Q = rho_in U_in A_in cp (T_in - T_inf),   rho_in = p0 / (R_s T_in)
 p0 = 101325 Pa, R_s = 287.05 J/(kg K), cp = 1006 J/(kg K), T_in = 1173.15 K,
-T_inf = 293.15 K, A_in = 0.30 m x 0.30 m = 0.09 m2 (the report's burner:
-"a 0.30 m square porous refractory burner")
+T_inf = 293.15 K, A_in = 0.30 m x 0.30 m = 0.09 m2 (the report's burner, page 3:
+"constructed of a porous refractory material 0.30 m square")
 -> rho_in = 0.30089 kg/m3 ; Q per (m/s) of U_in = 23 973 W ; Q = 57.5 kW <=> U_in = 2.3985 m/s
 ```
 
