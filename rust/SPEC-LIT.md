@@ -41715,3 +41715,112 @@ converged), so both rows pass; the dFFI row passes with a margin of 1.16x.
 
 
 ---
+
+## 145. Martin & Moyce's collapsing column — the surge-front key
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the
+answer key) and VAL-60 (§145.2, the live gate, not yet written). §22's table has named this
+benchmark since the first release ("Dam break — surge front position vs time") without a
+number to hold it against: `ofgpu-vof -surge` and `vof::tests` say why at `bin/vof.rs` and
+`vof.rs` ("nobody here has the paper"). This section is the key that closes that gap. No
+solver, gate or test that existed before it changes.
+
+Source: **J. C. Martin and W. J. Moyce, "Part IV. An experimental study of the collapse of
+liquid columns on a rigid horizontal plane", *Phil. Trans. R. Soc. Lond. A* 244 (1952)
+312-324, doi:10.1098/rsta.1952.0006.** The copy read on 2026-10-11 is the publisher's PDF as
+the Internet Archive captured it on 2023-01-01
+(<https://web.archive.org/web/20230101071442/https://royalsocietypublishing.org/doi/pdf/10.1098/rsta.1952.0006>,
+13 pages, sha256 `2b6bdf92c75724b6ede159e8bd603e0378be0685de948c8d2f34caa130ee7d2a`). The
+article is not open access; the publisher shows it to an anonymous reader, and
+`reference/PROVENANCE.md` row `martin-moyce-1952` records the terms. No other dam-break
+data set, digitisation or code was read for this section.
+
+### 145.1 The key: which series, tabulated not digitised, and u_D
+
+**The variables, as the paper defines them (its §2).** A column of height `n^2 a` on a base
+of semi-length `a` (plane symmetry) collapses; `z` is the distance of the surge front from
+the plane of symmetry and `t` the time:
+
+```
+  Z = z/a,        T = n t (g/a)^(1/2)                                              (145.1)
+```
+
+`T` carries the factor `n`. `ofgpu-vof -surge` prints `t (g/a)^(1/2)` without it
+(`bin/vof.rs`, "What `-surge` reports"), so for this table, `n^2 = 2`,
+
+```
+  T_key = 2^(1/2) * T_surge                                                        (145.2)
+```
+
+The paper's rectangular columns are corners emptying against a wall, which by plane symmetry
+is the half-column of base `2a`. A wall-backed column of width `a`, the geometry of
+`vof::tests::a_dam_break_surge_front_stays_under_the_ritter_bound`, is that half.
+
+**Which series.** `reference/martin_moyce_1952/surge_front.csv` is the paper's **Table 2**
+(p. 317), "Rectangular section plane symmetry, `n^2 = 2`": both series, `a = 1 1/8 in.` (three
+records) and `a = 2 1/4 in.` (nine records), every record and each series' printed `mean`
+column, 205 numbers. One CSV row per printed number: `a_in, record, Z, T`, with `record` the
+record's column in the page's order (1 to 9) and `record = 0` the printed mean. A dash on the
+page is no row. Tables 1 (`n^2 = 1`) and 3 (`n^2 = 4`), the semicircle, the cylinders and the
+residual-height tables 6 and 7 are not transcribed.
+
+**Tabulated, not digitised.** The page prints numbers. Each one is copied as printed: `T` to
+two decimals, `Z` as the page writes its stations. The page's columns are records at fixed
+stations, so `T` is the measured quantity and `Z` the station (the lines scored in the
+channel floor, the paper's §4). The transcription's own uncertainty is the rounding of the
+print, `0.005` in `T`.
+
+**The time origin.** The paper could not record the instant motion began (its §4) and
+normalised every record to the same `T` at one station. Every record and both means read
+`T = 1.19` at `Z = 1.44` (the page's asterisk). `T` is therefore known only relative to that
+station, and a comparison must either place its own `T = 1.19` at `Z = 1.44` or carry the
+offset as an unknown.
+
+**The printed mean is kept as printed.** In the `1 1/8 in.` series the mean is the
+arithmetic mean of the printed records to half a unit in the last place at every station. In
+the `2 1/4 in.` series it is not, at six stations: `Z = 1.67, 2.56, 3.00, 3.44, 3.67, 12.0`.
+The largest gaps are at `Z = 2.56` (printed `2.20`, arithmetic `2.181` over nine records) and
+`Z = 3.00` (printed `2.51`, arithmetic `2.529`). Both rows were re-read from the page at
+300 dpi. The key records the page, never a corrected mean.
+
+**u_D.** The paper states no uncertainty in words, but it prints every record, so `u_D` is
+read from the printed records and is not invented. Per series and station with at least two
+records, the half-range is
+
+```
+  u_T(a, Z) = ( max_r T(a, r, Z) - min_r T(a, r, Z) ) / 2,   r over the records (r >= 1)   (145.3)
+```
+
+and its largest value is `0.080` (`a = 1 1/8 in.`, at `Z = 6.33`) and `0.165`
+(`a = 2 1/4 in.`, at `Z = 4.11`). The two series' means at a common station differ by up to
+`0.17` (`Z = 5.89`: `4.61` against `4.44`). That gap is a scale effect: the paper's §2 says
+its variables hold only while viscosity and surface tension do not matter at the scale used.
+The key's single datum uncertainty, in the variable it measures, is the larger of the two,
+
+```
+  u_D,T = 0.17                                                                     (145.4)
+```
+
+A gate that compares `Z` at the key's `T`, as docs/17's VAL-60 row is written, converts with
+the local slope of the series it compares against, `u_D,Z = u_D,T |dZ/dT|`. Between adjacent
+printed means of the `2 1/4 in.` series `dZ/dT` runs from `0.26` (at `Z = 1.11` to `1.22`) to
+`2.12` (at `Z = 5.00` to `5.89`). A gate that compares `T` at the key's stations needs no
+conversion. §145.2 fixes the band.
+
+**The transcription guard.** `martin_moyce_key_is_monotone_per_series`, in
+`bin/validate_key/mod.rs`'s tests, loads the key through the manifest, so the file's SHA-256
+must be the manifest's, and asserts:
+
+1. the header is `a_in, record, Z, T`, and there are 205 rows: 53 at `a_in = 1.125`
+   (records 1, 2, 3 and the mean: 12, 13, 14 and 14 rows) and 152 at `a_in = 2.25`
+   (records 1 to 9: 12, 15, 15, 13, 14, 14, 14, 15, 15 rows; the mean 25 rows);
+2. within every series `(a_in, record)`, in file order, `Z` and `T` both strictly increase;
+3. every series has the row `Z = 1.44, T = 1.19`;
+4. a station has a mean row exactly when it has at least one record row in that series, and
+   the printed mean lies within the closed range of those records.
+
+A misread digit that breaks a series' order, a dropped or doubled row, or a mean copied into
+the wrong series fails the test. A misread digit that keeps every order is not caught; the
+re-reading above is the only guard against it.
+
+---

@@ -796,7 +796,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 27, "twenty-seven markers, found {markers:?}");
+        assert_eq!(markers.len(), 28, "twenty-eight markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -825,6 +825,7 @@ mod tests {
                 "tnf-flameD-x15",
                 "tnf-flameD-x30",
                 "tnf-flameD-x45",
+                "martin-moyce-1952",
             ]
         );
         for row in &m.rows {
@@ -1582,5 +1583,161 @@ mod tests {
         for (id, df, dt, rel) in &repeats {
             println!("  [answer-key] tnf {id}  r/d = 0 against the centreline  df {df:+.4}  dT {dt:+} K  rel {rel:.4e}");
         }
+    }
+
+    /// The Martin & Moyce (1952) Table 2 transcription guard (SPEC-LIT
+    /// §145.1): the key holds all 205 printed numbers as the 14 series
+    /// `(a_in, record)`; within every series, in file order, Z and T
+    /// strictly increase; every series carries the normalisation row
+    /// `Z = 1.44, T = 1.19`; and a station carries the printed mean exactly
+    /// when it carries records, the mean inside their closed T range. A
+    /// misread digit that breaks a series' order, a dropped or doubled row,
+    /// or a mean copied into the wrong series fails here. Loading through
+    /// the manifest also pins the file's SHA-256.
+    #[test]
+    fn martin_moyce_key_is_monotone_per_series() {
+        // answer-key: martin-moyce-1952
+        let key = load("martin-moyce-1952").expect("load the answer key \"martin-moyce-1952\"");
+
+        // 1. The header and the row count.
+        assert_eq!(
+            key.columns, ["a_in", "record", "Z", "T"],
+            "martin-moyce-1952: the header row"
+        );
+        assert_eq!(key.rows.len(), 205, "martin-moyce-1952: the row count");
+        let a_in = key.column("a_in").expect("martin-moyce-1952: the a_in column");
+        let record = key.column("record").expect("martin-moyce-1952: the record column");
+        let z = key.column("Z").expect("martin-moyce-1952: the Z column");
+        let t = key.column("T").expect("martin-moyce-1952: the T column");
+
+        // 2. a_in is exactly one of the two widths; record is an integer
+        //    in 0..=9.
+        for i in 0..key.rows.len() {
+            assert!(
+                record[i] >= 0.0 && record[i] <= 9.0 && record[i] == record[i].trunc(),
+                "martin-moyce-1952: row {i}: record {} is not an integer in 0..=9",
+                record[i]
+            );
+            assert!(
+                a_in[i] == 1.125 || a_in[i] == 2.25,
+                "martin-moyce-1952: row {i}: a_in {} is neither 1.125 nor 2.25",
+                a_in[i]
+            );
+        }
+        // 3. The rows of each `(a_in, record)` series, in file order, and
+        //    the exact row counts: 53 rows at a_in = 1.125 (records 1, 2, 3
+        //    and the mean) and 152 at a_in = 2.25 (records 1 to 9 and the
+        //    mean). Fourteen known series and fourteen found leave no room
+        //    for a stray `(a_in, record)` pair.
+        let mut series: Vec<((f64, f64), Vec<usize>)> = Vec::new();
+        for i in 0..key.rows.len() {
+            match series
+                .iter_mut()
+                .find(|(s, _)| *s == (a_in[i], record[i]))
+            {
+                Some((_, rows)) => rows.push(i),
+                None => series.push(((a_in[i], record[i]), vec![i])),
+            }
+        }
+        assert_eq!(series.len(), 14, "martin-moyce-1952: the series count");
+        let want: [((f64, f64), usize); 14] = [
+            ((1.125, 1.0), 12),
+            ((1.125, 2.0), 13),
+            ((1.125, 3.0), 14),
+            ((1.125, 0.0), 14),
+            ((2.25, 1.0), 12),
+            ((2.25, 2.0), 15),
+            ((2.25, 3.0), 15),
+            ((2.25, 4.0), 13),
+            ((2.25, 5.0), 14),
+            ((2.25, 6.0), 14),
+            ((2.25, 7.0), 14),
+            ((2.25, 8.0), 15),
+            ((2.25, 9.0), 15),
+            ((2.25, 0.0), 25),
+        ];
+        for (pair, count) in want {
+            let got = series
+                .iter()
+                .find(|(s, _)| *s == pair)
+                .unwrap_or_else(|| panic!("martin-moyce-1952: no rows for series {pair:?}"));
+            assert_eq!(
+                got.1.len(),
+                count,
+                "martin-moyce-1952: series {pair:?}: the row count"
+            );
+        }
+        // 4. Within every series, in file order, Z and T both strictly
+        //    increase.
+        for ((a, r), rows) in &series {
+            for w in rows.windows(2) {
+                let (i, j) = (w[0], w[1]);
+                assert!(
+                    z[j] > z[i],
+                    "martin-moyce-1952: series ({a}, {r}): rows {i} to {j}: Z {} to {} \
+                     does not strictly increase",
+                    z[i], z[j]
+                );
+                assert!(
+                    t[j] > t[i],
+                    "martin-moyce-1952: series ({a}, {r}): rows {i} to {j}: T {} to {} \
+                     does not strictly increase",
+                    t[i], t[j]
+                );
+            }
+        }
+        // 5. Every series carries the paper's normalisation row: T = 1.19 at
+        //    Z = 1.44 (the page's asterisk), exactly as printed.
+        for ((a, r), rows) in &series {
+            assert!(
+                rows.iter().any(|&i| z[i] == 1.44 && t[i] == 1.19),
+                "martin-moyce-1952: series ({a}, {r}): no row reads T = 1.19 at Z = 1.44"
+            );
+        }
+
+        // 6. A station carries the printed mean exactly when it carries
+        //    records, and the mean lies in the closed range of their T.
+        for a in [1.125, 2.25] {
+            let block: Vec<usize> = (0..key.rows.len()).filter(|&i| a_in[i] == a).collect();
+            let mut zs: Vec<f64> = Vec::new();
+            for &i in &block {
+                if !zs.contains(&z[i]) {
+                    zs.push(z[i]);
+                }
+            }
+            for zz in &zs {
+                let records: Vec<usize> = block
+                    .iter()
+                    .copied()
+                    .filter(|&i| record[i] >= 1.0 && z[i] == *zz)
+                    .collect();
+                let mean = block
+                    .iter()
+                    .copied()
+                    .find(|&i| record[i] == 0.0 && z[i] == *zz);
+                match (records.is_empty(), mean) {
+                    (true, Some(i)) => panic!(
+                        "martin-moyce-1952: a_in {a}: Z = {zz}: row {i} is a mean with no records"
+                    ),
+                    (false, None) => panic!(
+                        "martin-moyce-1952: a_in {a}: Z = {zz}: {} records but no mean row",
+                        records.len()
+                    ),
+                    (false, Some(m)) => {
+                        let lo = records.iter().map(|&i| t[i]).fold(f64::INFINITY, f64::min);
+                        let hi = records.iter().map(|&i| t[i]).fold(f64::NEG_INFINITY, f64::max);
+                        assert!(
+                            lo <= t[m] && t[m] <= hi,
+                            "martin-moyce-1952: a_in {a}: Z = {zz}: mean T {} is outside the \
+                             records' closed range [{lo}, {hi}]",
+                            t[m]
+                        );
+                    }
+                    (true, None) => {}
+                }
+            }
+        }
+
+        println!("  [answer-key] martin-moyce-1952  205 rows, 14 series, monotone in Z and T");
     }
 }
