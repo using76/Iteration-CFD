@@ -842,6 +842,15 @@ pre-run rule; before EXPL-FIX (2026-09-26) it was reported as "a decision record
 audit clean. campaign.py and every committed bundle are unchanged, and AM-16's committed
 EVAL.json keeps its recorded G-EXPL FAIL (it is the held-out result as run).
 
+Post-hoc on seed 1 (AUT-08, 2026-10-11; labelled post-hoc, not a claim: EXPL-FIX was written after
+seed 1 was opened, AM-16's EVAL.json keeps its FAIL, and the held-out G-EXPL is decided on seed 3
+by AUT-14): `explain.py --audit --bundle` on all nine `evaluate/eval_*.json.gz` is ok, 9/9, with
+0 bad and record_order checked b0-template 0, full 3712, gdet-1 346, gdet-2 346, no-optimiser
+3562, no-preflight 3023, no-prior 4932, no-remedies 2812, rules 4804; under the pre-EXPL-FIX rule
+63 bad (full 33, gdet-1 1, gdet-2 1, no-preflight 14, no-prior 14; OPT-NOFEAS 52, OPT-PICK 11).
+Those 63 geometries are the fixture `fixtures/explain/seed1_opt_end.json.gz`, and explain.py's
+selftest group 15 fails if the rule is reverted.
+
 `--summary` takes the FINAL row (highest attempt) of each geometry and reports, per family and
 stratum and per family overall: MFR and strict-failure rate with Clopper-Pearson 95 % intervals,
 BLC_8/BLC_full means, median cells, mean attempts, capability-limited count.

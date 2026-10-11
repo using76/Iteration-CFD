@@ -18,5 +18,9 @@ at `57a2b4d`, not by explain.py.
   references computed with scipy's beta quantile.
 - `golden/`: written by `explain.py --write-golden` and reviewed by the supervisor; the selftest compares them
   byte for byte.
+- `seed1_opt_end.json.gz`: written by the supervisor on 2026-10-11 (AUT-08) from the nine committed seed-1
+  bundles, not by explain.py; POST-HOC, not a held-out claim. The 63 geometries (one ending optimiser record
+  each) of 5 of the 9 campaigns, with those campaigns' attempts and record lines copied unchanged in bundle
+  order; gzip with mtime 0. explain.py's selftest group 15 reads it.
 
 JSON Lines rows carry no header line, because each line must validate as an AttemptRow.
