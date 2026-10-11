@@ -55,6 +55,8 @@
 #define OFPATCH_SYMMETRY  3
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
+//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+#define OFPATCH_WEDGE     7
 
 OFGPU_DEV ofscalar vofAbs(ofscalar a) { return a < 0 ? -a : a; }
 
@@ -69,6 +71,7 @@ OFGPU_DEV bool vofFluxIsPrescribed(oflabel kind, ofscalar fr)
 {
     return kind == OFPATCH_EMPTY
         || kind == OFPATCH_SYMMETRY
+        || kind == OFPATCH_WEDGE
         || fr >= (ofscalar)1;
 }
 

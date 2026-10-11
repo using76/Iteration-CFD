@@ -73,7 +73,7 @@
 //  topology - what the patch IS - and the two enums number their shared names
 //  differently:
 //
-//      PatchKind   Generic 0  Wall 1  Empty 2  Symmetry 3  Cyclic 4  Processor 5
+//      PatchKind   Generic 0  Wall 1  Empty 2  Symmetry 3  Cyclic 4  Processor 5  Interface 6  Wedge 7
 //      BcKind      ... Calculated 4  Empty 5  Symmetry 6  Cyclic 7  InletOutlet 8
 //
 //  Comparing a `PatchKind` value against a `BcKind` discriminant compiles,
@@ -94,6 +94,8 @@
 #define OFPATCH_SYMMETRY  3
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
+//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+#define OFPATCH_WEDGE     7
 
 //- True when the volumetric flux through this boundary face is fixed by the
 //  velocity boundary condition rather than by the pressure equation.
@@ -108,6 +110,7 @@ OFGPU_DEV bool momFluxIsPrescribed(oflabel kind, ofscalar fr)
 {
     return kind == OFPATCH_EMPTY
         || kind == OFPATCH_SYMMETRY
+        || kind == OFPATCH_WEDGE
         || fr >= (ofscalar)1;
 }
 

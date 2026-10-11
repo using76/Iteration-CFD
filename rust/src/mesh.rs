@@ -131,6 +131,9 @@ pub enum PatchKind {
     /// No mesh this crate read before SPEC-LIT S47 carries it, so every
     /// existing case is unmoved by construction.
     Interface = 6,
+    /// An axisymmetric wedge side, SPEC-LIT section 119. Until BC-04 every
+    /// solver path treats it as `Symmetry`.
+    Wedge = 7,
 }
 
 impl PatchKind {
@@ -139,7 +142,8 @@ impl PatchKind {
         match t {
             "wall" | "mappedWall" => Self::Wall,
             "empty" => Self::Empty,
-            "symmetry" | "symmetryPlane" | "wedge" => Self::Symmetry,
+            "symmetry" | "symmetryPlane" => Self::Symmetry,
+            "wedge" => Self::Wedge,
             "cyclic" | "cyclicAMI" | "cyclicSlip" => Self::Cyclic,
             "processor" | "processorCyclic" => Self::Processor,
             _ => Self::Generic,
@@ -155,6 +159,7 @@ impl PatchKind {
             Self::Cyclic => "cyclic",
             Self::Processor => "processor",
             Self::Interface => "interface",
+            Self::Wedge => "wedge",
         }
     }
 }
@@ -250,6 +255,10 @@ pub struct HostMesh {
     pub b_patch: Vec<Label>,
 
     pub patches: Vec<PatchInfo>,
+
+    /// The derived wedge of SPEC-LIT section 119.1; `None` when the mesh has
+    /// no wedge patch. Set by `io::polymesh::build_host_mesh`.
+    pub wedge: Option<wedge::WedgeInfo>,
 
     // ---- cell -> face CSR (built, not read) ------------------------------
     /// `[n_cells + 1]`
@@ -874,3 +883,44 @@ pub mod gpugeom;
 pub mod motion;
 pub mod refined;
 pub mod topology;
+pub mod wedge;
+
+#[cfg(test)]
+mod tests {
+    use super::PatchKind;
+
+    /// SPEC-LIT section 119: `wedge` is its own kind, distinct from
+    /// `symmetry`/`symmetryPlane`, and numbered 7 behind `Interface` 6.
+    #[test]
+    fn wedge_is_not_symmetry() {
+        assert_eq!(PatchKind::from_type("wedge"), PatchKind::Wedge);
+        assert_ne!(PatchKind::from_type("wedge"), PatchKind::Symmetry);
+        assert_eq!(PatchKind::Wedge as i32, 7);
+        assert_eq!(PatchKind::Wedge.as_str(), "wedge");
+        assert_eq!(PatchKind::from_type("symmetry"), PatchKind::Symmetry);
+        assert_eq!(PatchKind::from_type("symmetryPlane"), PatchKind::Symmetry);
+        assert_eq!(PatchKind::Interface as i32, 6);
+    }
+
+    /// The device mirrors the host enum: every `.cu` that tests a patch kind
+    /// carries the wedge define at 7 beside the symmetry define at 3
+    /// (SPEC-LIT section 119.1).
+    #[test]
+    fn device_patch_kinds_match_the_host() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let kind_of = |file: &str, prefix: &str| -> i32 {
+            let src = std::fs::read_to_string(format!("{root}/{file}")).unwrap();
+            let line = src
+                .lines()
+                .find(|l| l.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{file}: no line starts with {prefix:?}"));
+            line.split_whitespace().nth(2).unwrap().parse::<i32>().unwrap()
+        };
+        for file in ["cuda/fv.cu", "cuda/momentum.cu", "cuda/solid.cu", "cuda/vof.cu", "cuda/marangoni.cu"] {
+            assert_eq!(kind_of(file, "#define OFPATCH_WEDGE "), 7, "{file}");
+            assert_eq!(kind_of(file, "#define OFPATCH_SYMMETRY "), 3, "{file}");
+        }
+        assert_eq!(kind_of("cuda/parcels.cu", "#define OFP_PATCH_WEDGE "), 7);
+        assert_eq!(kind_of("cuda/parcels.cu", "#define OFP_PATCH_SYMMETRY "), 3);
+    }
+}

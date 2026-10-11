@@ -401,6 +401,8 @@ pub fn build_host_mesh(raw: &PolyMeshRaw) -> Result<HostMesh> {
 
     check_cyclic_invariants(&m)?;
 
+    m.wedge = crate::mesh::wedge::derive_wedge(&m)?;
+
     Ok(m)
 }
 

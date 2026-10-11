@@ -37421,12 +37421,12 @@ No GPL-licensed source was consulted.
 ## 119. The true wedge: a rotational self-couple
 
 An axisymmetric case is solved on a wedge one cell thick in the
-circumferential direction. This section holds the mesh (119.0, BC-02); the
-patch kind with its derived pair, axis and angle checks (BC-03) and the
-boundary condition that couples the two wedge faces by a rotation (BC-04) add
-their subsections when they land. Until BC-03 lands, `PatchKind::from_type`
-still reads a `wedge` patch as `symmetry`, which is the stand-in §120's
-catalogue row names.
+circumferential direction. This section holds the mesh (119.0, BC-02) and
+the patch kind with its derived pair, axis and angle checks (119.1, BC-03);
+the boundary condition that couples the two wedge faces by a rotation
+(BC-04) adds its subsection when it lands. Until then a `wedge` patch is its
+own kind but every solver path still treats it as `symmetry`, which is the
+stand-in §120's catalogue row names.
 
 ### 119.0 The wedge mesh `blockgen` builds (BC-02)
 
@@ -37517,6 +37517,105 @@ Sources: ORIGINAL - elementary geometry (the area of a trapezoid, the volume
 of a right prism, the Taylor series of the tangent). The patch type name
 `wedge` is taken by name only from the two public user guides §120 links; no
 description, formula or source code was taken from either.
+
+No GPL-licensed source was consulted.
+
+### 119.1 The wedge patch kind, and the wedge derived from the mesh (BC-03)
+
+A patch typed `wedge` in `constant/polyMesh/boundary` is `PatchKind::Wedge`
+(discriminant 7), its own kind; `PatchKind::from_type` no longer reads it as
+`symmetry`. The device mirrors the number as `OFPATCH_WEDGE` (`fv.cu`,
+`momentum.cu`, `solid.cu`, `vof.cu`, `marangoni.cu`) and `OFP_PATCH_WEDGE`
+(`parcels.cu`), and `mesh::tests::device_patch_kinds_match_the_host` reads
+the six files to hold them equal. **Until BC-04 (119.2) a wedge side is
+treated exactly as a symmetry plane on every path:** the field seed and the
+topology override give it `BcKind::Symmetry`, `momFluxIsPrescribed`,
+`vofFluxIsPrescribed` and the restated Marangoni predicate count it as a
+prescribed-flux face, and a parcel that reaches it is reflected. No shipped
+mesh carries a wedge, so no f64 result moves.
+
+**The derivation.** `mesh::wedge::derive_wedge`, called by
+`io::polymesh::build_host_mesh` after the cyclic checks, stores the result
+in `HostMesh::wedge`. All of it is f64 in both builds, from the `geom64`
+view (§118.2). For each wedge patch `p`, over its faces `f`,
+
+```
+n_p = (sum_f Sf) / |sum_f Sf|            the outward unit normal
+c_p = (sum_f |Sf| Cf) / (sum_f |Sf|)     the area-weighted centroid
+d_p = n_p . c_p                          the plane n_p . x = d_p
+L_p = sqrt(sum_f |Sf|)                   the patch length scale
+```
+
+With `b` the wedge patch listed first ("back") and `f` the second
+("front"):
+
+```
+axis           a  = (n_f x n_b) / |n_f x n_b|
+mid-plane      m  = (n_f - n_b) / |n_f - n_b|
+angle          theta = 2 atan2(|n_b + n_f|, |n_f - n_b|)
+line point     p  = [ (d_b - d_f (n_b.n_f)) n_b + (d_f - d_b (n_b.n_f)) n_f ] / |n_b x n_f|^2
+axis point     x0 = p + a (a . ((c_b + c_f)/2 - p))
+mirror         M(x) = x - 2 ((x - x0) . m) m
+```
+
+`p` is the point of the line where the two planes meet that lies nearest
+the origin (the unit-normal form of the two-plane intersection); `x0`
+slides it along the axis to the mesh. For outward unit normals of two planes
+at `-theta/2` and `+theta/2` about a mid-plane, `n_b . n_f = -cos(theta)`,
+`|n_b + n_f| = 2 sin(theta/2)` and `|n_f - n_b| = 2 cos(theta/2)`, so the
+`atan2` form returns `theta` with no cancellation at small angles, where
+`acos(-n_b . n_f)` would lose half its digits. On `blockgen`'s wedge (119.0)
+`a = (0, 0, 1)`, `m = (0, 1, 0)` and `x0 = (0, 0, z_mid)`.
+
+**The refusals, in the order they are checked.** Each is an
+`Error::Mesh` that starts `wedge: ` and names the patch. `WEDGE_TOL` is
+`1e-8`, relative.
+
+1. *Unpaired:* one wedge patch with faces ("has no partner"), or more than
+   two. A wedge patch with no faces is ignored, which is what a decomposed
+   piece of a wedge mesh can carry.
+2. *Non-planar:* a face whose unit normal differs from `n_p` by more than
+   `WEDGE_TOL`, or whose centroid lies more than `WEDGE_TOL L_p` off the
+   plane ("is not planar").
+3. *Unpaired faces:* the two sides differ in size, or face `k` of one side
+   and face `k` of the other belong to different cells ("are not paired"): a
+   wedge is one cell thick, and BC-04's self-couple rotates the cell's own
+   velocity, so each cell must own exactly one face on each side, written in
+   the same order.
+4. *Parallel:* `|n_b x n_f| < 1e-6` ("are parallel planes, not a wedge").
+5. *Asymmetric:* for some `k`, `|M(Cf_b[k]) - Cf_f[k]| > WEDGE_TOL L_b` or
+   the two faces' areas differ by more than `WEDGE_TOL |Sf_b[k]|` ("are not
+   symmetric about the mid-plane").
+
+The mesh report (`mesh::geometry::print_report`) prints one line after the
+patch table: the pair, `theta` in degrees, the axis and its point, and the
+mid-plane normal.
+
+**The gates.** `mesh::wedge::tests` and `tests/f32_wedge_patch.rs` (both
+builds): on the pipe and the annulus of 119.0 at `theta` = 1, 5 and 10 deg,
+the axis direction, the mid-plane normal and the angle within `1e-12` of
+`(0, 0, 1)`, `(0, 1, 0)` and `theta`, and the axis point within
+`1e-12 r_out` of the z axis and `1e-12 L` of `z_mid`; a mesh with both sides
+retyped `symmetry` has no wedge; and the three refusals, each built by
+editing the generator's own points: the front side retyped `symmetry`
+(unpaired), one interior front point moved `1e-4` off its plane
+(non-planar), and every front point rotated to `+3 deg` while the back stays
+at `-2.5 deg` (asymmetric: both planes are flat, but the bisector's mirror
+of a back face misses its front face by about `4e-4 r`). Precision class A
+of docs/17 §5.1 for the derived quantities, D for the refusals: the same
+tolerances in both builds.
+
+Measured 2026-10-11, both builds: the axis, mid-plane and angle errors
+are exactly 0 at 1, 5 and 10 deg on both meshes. That is expected, not
+luck: the generator writes every front point as the bitwise mirror of a
+back point (119.0), so `n_f - n_b` and `n_f x n_b` carry exactly zero
+off-axis components.
+
+Sources: ORIGINAL - elementary vector geometry (a plane from its area
+vectors, the line where two planes meet, a reflection in a plane, the
+half-angle identities). The patch type name `wedge` is taken by name only
+from the public user guides §120 links; no description, formula or source
+code was taken from them.
 
 No GPL-licensed source was consulted.
 
