@@ -35043,6 +35043,98 @@ They are the user's; this unit changes nothing.
   a validation.
 * Not options: changing the interface treatment or loosening the 3 % bar.
 
+**Amended 2026-10-11 (docs/17 VAL-06): the O3 search, and what it found
+instead.** The rule the search applied (docs/17 §12, VAL-06): a source is
+accepted as a key only if it gives `Nu` within `1 %` of the exact conduction
+value `0.357143` at `Kr = 0.1`, low `Ra`, because that is the test of 115.4.
+
+*The named candidate fails it.* M. A. Sheremet, "Laminar and turbulent
+conjugate regimes of natural convection in a square enclosure",
+*Computational Continuum Mechanics* **5**(3) (2012) 327-338, DOI
+`10.7242/1999-6691/2012.5.3.39`, open access at `journal.permsc.ru` (PDF
+SHA-256 `90d1b9d9...3304`). Its own study is another configuration: walls of
+finite thickness on all four sides (its Fig. 1), `lambda_{1,2} = 23.08` and
+`1769.23`, `k-epsilon` at high `Ra`. It prints no `Kr = 0.1` value. A web
+search for an open solution of the stated configuration with a low-`Ra`,
+`Kr = 0.1` number found none: Belazizia, Abboudi and Benissaad, *J. Eng. Sci.
+Technol.* **11**(10) (2016) heat the wall from the top, which is a different
+problem. **No source passes the rule, so O1 stands.**
+
+*What the search found instead: the primary's own table, transcribed twice.*
+Sheremet's validation Table 1 (column `[18]`, which is Kaminski & Prakash)
+and Belazizia, Abboudi, Benissaad, "Conjugate natural convection in a square
+enclosure under horizontal magnetic field effect", *Mechanics & Industry*
+**16**, 409 (2015), DOI `10.1051/meca/2015011`, Table 1 ("Comparison of Nu
+with Kaminski solution [1], D = 0.2"; copy at `pdfs.semanticscholar.org/607b/
+4003971f4cec8657e6a2e3baace1210f20f0.pdf`, SHA-256 `b9fcbe95...ce58`) quote
+the same numbers. Sheremet labels them by `Gr`, Belazizia by
+`Ra = 0.7 Gr`. Where the two overlap, they agree to the last printed digit:
+
+| `Ra` (`Gr`) | Kr = 1 | Kr = 5 | Kr = 10 | Kr = inf | quoted by |
+|---|---|---|---|---|---|
+| `7x10^2` (`10^3`) | `0.87` | `1.02` | `1.04` | `1.06` | both (inf: 2015 only) |
+| `7x10^4` (`10^5`) | `2.08` | `3.42` | `3.72` | `4.08` | both (inf: 2015 only) |
+| `7x10^5` (`10^6`) | `2.87` | `5.89` | `6.81` | - | 2012 only |
+
+Neither paper quotes a `Kr` below 1. These are secondary transcriptions of
+the primary's numbers, and they are labelled that way wherever they are used.
+
+*They settle the reading that §60.5 left open.* In the reading Gate 5 runs
+(total width 1, Belazizia *et al.* 2012), `Kr = 1` makes wall and air one
+material, so conduction alone gives exactly `1` by (S59.7) and convection
+adds to it; the 2012 paper's own `Ra = 500` entry is `1.03`, and this solver
+gives `1.00906` there (115.3). The primary's `0.87` at `Ra = 700` is below
+that floor.
+Its `Kr = inf` entries, `1.06` and `4.08`, are a plain square cavity at
+`Ra = 700` and `7x10^4`. They sit inside §59.8's de Vahl Davis brackets
+`1 .. 1.118` and `2.243 .. 4.519`. Belazizia *et al.* 2015 also draw their
+domain as `0 <= X <= 1.2` (their Fig. 2c). **Kaminski & Prakash's
+configuration is 115.3's second geometry row:** a square fluid cavity of
+side `H` (the unit length, and `Ra` taken on it), the wall `0.2 H` thick
+outside it, and `Nu` on `H`. Its conduction limit is `1/(1 + 0.2/Kr)`:
+`0.33333 / 0.83333 / 0.96154 / 0.98039` at `Kr = 0.1 / 1 / 5 / 10`. So
+`0.357143` is not the primary's conduction limit, and no faithful source of
+the primary can pass the rule above.
+
+*Measured.* The run used `ofgpu-cht` of this tree at `f656370`. The case
+documents were generated outside the tree with the numerics of
+`cases/kaminskiPrakash.cht.jsonc`, and that reading's geometry:
+air `0.2 <= x <= 1.2` meshed `n x n`, wall `0 <= x <= 0.2` meshed
+`n/5 x n`, `Pr = 0.7` (`= Ra/Gr`), `dT/TRef = 3.3e-4`.
+`Nu = Q_cold/(k_f dT d_z)`. Every run stopped on its residual. `spread` is
+the relative disagreement of the cold-wall, hot-wall and interface heat flows:
+
+| `Ra` | `Kr` | mesh | `Nu` cold | `Nu` hot | `Nu` interface | spread | primary (transcribed) | difference | iterations |
+|---|---|---|---|---|---|---|---|---|---|
+| `700` | 1 | `40x40` | `0.86731` | `0.86725` | `0.86726` | `6.8e-05` | `0.87` | `-0.31 %` | 2747 |
+| `700` | 5 | `40x40` | `1.01779` | `1.01785` | `1.01785` | `6.6e-05` | `1.02` | `-0.22 %` | 2541 |
+| `700` | 10 | `40x40` | `1.04047` | `1.04054` | `1.04053` | `6.5e-05` | `1.04` | `+0.05 %` | 2475 |
+| `7x10^4` | 1 | `40x40` | `2.09622` | `2.09617` | `2.09617` | `2.6e-05` | `2.08` | `+0.78 %` | 2237 |
+| `7x10^4` | 5 | `40x40` | `3.45452` | `3.45444` | `3.45445` | `2.2e-05` | `3.42` | `+1.01 %` | 1213 |
+| `7x10^4` | 10 | `40x40` | `3.76351` | `3.76359` | `3.76358` | `2.1e-05` | `3.72` | `+1.17 %` | 1325 |
+| `7x10^4` | 1 | `80x80` | `2.08398` | `2.08376` | `2.08378` | `1.0e-04` | `2.08` | `+0.19 %` | 7867 |
+| `7x10^4` | 5 | `80x80` | `3.41719` | `3.41688` | `3.41693` | `9.1e-05` | `3.42` | `-0.08 %` | 3891 |
+| `7x10^4` | 10 | `80x80` | `3.71848` | `3.71881` | `3.71875` | `8.8e-05` | `3.72` | `-0.04 %` | 4605 |
+
+In its own reading the primary is reproduced: within `0.31 %` at `Ra = 700`,
+and within `0.19 %` at `7x10^4` on `80x80`. The `40x40` excess at `7x10^4`
+comes from the mesh, as §60.5 found. The `Gr = 10^6` row was not run. So
+the `7 %` miss of §60.5 sits between Belazizia *et al.* 2012 and the reading
+the gate borrowed from them; it is not between this solver and Kaminski &
+Prakash. 115.4's diagnosis of that 2012 reference stands, and nothing here
+explains its numbers.
+
+* O5 (new; it is the user's under docs/17 §11 item 4, D-VAL-4,
+  because it changes what Gate 5 measures; recommended): Gate 5 gains a
+  row in the primary's own reading. It runs against the transcribed table
+  above (`Kr = 1, 5, 10` at `Ra = 7x10^2` and `7x10^4`, and at `7x10^5`
+  once measured), with the same 3 % bar. It is labelled "primary table as
+  transcribed by two open papers". The Belazizia 2012 row stays, read as
+  reference-limited per O1. O5 does not test `Kr = 0.1`, because no
+  transcription carries it, and Gate 59-B keeps carrying the conduction
+  limit. Until the user decides, O1 stands. This amendment changes no gate,
+  number, key, case or code.
+
 ### 115.7 The probe and the house items
 
 `gate_5_probe_the_kr_miss_is_a_solid_resistance_offset_in_the_reference`
