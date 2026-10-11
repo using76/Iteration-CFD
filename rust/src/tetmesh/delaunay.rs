@@ -21,6 +21,7 @@
 //!
 //! Provenance: ORIGINAL. Written from Bowyer (1981), Comput. J. 24(2):162-166, Watson (1981), Comput. J. 24(2):167-172, and Devillers, Pion & Teillaud (2002), Int. J. Found. Comput. Sci. 13(2):181-199. No GPL-licensed source was consulted.
 
+use super::order::{brio_order, BRIO_SEED};
 use super::perturb::insphere_perturbed;
 use super::predicates::{in_exact_domain, orient3d};
 use super::Point;
@@ -77,10 +78,18 @@ pub struct Delaunay {
     verts: Vec<[u32; 4]>,
     neigh: Vec<[u32; 4]>,
     live: Vec<bool>,
+    /// Per-slot epoch stamps for the cavity BFS (§116.7): a stamp equal
+    /// to `epoch` means "in the current insertion's cavity", so no
+    /// insertion allocates or clears a `slots()`-long array.
+    cav_mark: Vec<u64>,
+    /// Per-slot epoch stamps for "conflict-tested this insertion".
+    chk_mark: Vec<u64>,
     free: Vec<u32>,
     rng: u64,
     last: u32,
     live_count: usize,
+    /// The current insertion's epoch; `insert` advances it by one.
+    epoch: u64,
     stats: DelaunayStats,
 }
 
@@ -166,6 +175,15 @@ impl Delaunay {
     /// Triangulates `points` in their given order (SPEC-LIT §116.6).
     pub fn build(points: &[Point]) -> Result<Delaunay> {
         let order: Vec<u32> = (0..points.len() as u32).collect();
+        Self::build_ordered(points, &order)
+    }
+
+    /// Triangulates `points` in BRIO order (SPEC-LIT §116.7) - the
+    /// mesher's entry point. The order is a function of the seed alone;
+    /// the tetrahedron set does not depend on it (§116.6, Uniqueness),
+    /// so BRIO changes the cost and nothing else.
+    pub fn build_brio(points: &[Point]) -> Result<Delaunay> {
+        let order = brio_order(points, BRIO_SEED);
         Self::build_ordered(points, &order)
     }
 
@@ -321,10 +339,13 @@ impl Delaunay {
             verts: Vec::with_capacity(2 * n + 8),
             neigh: Vec::with_capacity(2 * n + 8),
             live: Vec::with_capacity(2 * n + 8),
+            cav_mark: Vec::with_capacity(2 * n + 8),
+            chk_mark: Vec::with_capacity(2 * n + 8),
             free: Vec::new(),
             rng: 0x5EED,
             last: 0,
             live_count: 0,
+            epoch: 0,
             stats: DelaunayStats::default(),
         };
         // Slot 0 is the first tet; slots 1..5 are its four hull tets, each
@@ -333,11 +354,15 @@ impl Delaunay {
         d.verts.push(t0);
         d.neigh.push([NONE; 4]);
         d.live.push(true);
+        d.cav_mark.push(0);
+        d.chk_mark.push(0);
         for i in 0..4 {
             let f = face_out(t0, i);
             d.verts.push([f[2], f[1], f[0], INF]);
             d.neigh.push([NONE; 4]);
             d.live.push(true);
+            d.cav_mark.push(0);
+            d.chk_mark.push(0);
         }
         d.live_count = 5;
         d.stats.inserted = 4;
@@ -593,14 +618,31 @@ impl Delaunay {
             self.verts.push([NONE; 4]);
             self.neigh.push([NONE; 4]);
             self.live.push(false);
+            self.cav_mark.push(0);
+            self.chk_mark.push(0);
             (self.verts.len() - 1) as u32
         }
     }
 
     /// One Bowyer-Watson insertion (SPEC-LIT §116.6): walk from the last
     /// created tet, grow the cavity, star its boundary from `p`, link all
-    /// adjacency. Dead slots go on the LIFO free list for reuse.
+    /// adjacency. Dead slots go on the LIFO free list for reuse. The
+    /// cavity marks are per-slot epoch stamps, so nothing here allocates
+    /// or clears anything proportional to `slots()` (§116.7).
     fn insert(&mut self, pid: u32) -> Result<()> {
+        // Advance this insertion's epoch. On (unreachable) wrap-around,
+        // clear every stamp so an old mark can never alias the new epoch.
+        if self.epoch == u64::MAX {
+            for s in self.cav_mark.iter_mut() {
+                *s = 0;
+            }
+            for s in self.chk_mark.iter_mut() {
+                *s = 0;
+            }
+            self.epoch = 0;
+        }
+        self.epoch += 1;
+        let epoch = self.epoch;
         let p = self.points[pid as usize];
         let start = {
             let mut t = self.last;
@@ -617,11 +659,9 @@ impl Delaunay {
         self.stats.walk_steps += u64::from(steps);
         // Grow the cavity: BFS over the neighbours, rule (116.5a) on each
         // candidate once. The located tet always conflicts.
-        let mut in_cav = vec![false; self.slots()];
-        let mut checked = vec![false; self.slots()];
         let mut cav: Vec<u32> = vec![t0];
-        in_cav[t0 as usize] = true;
-        checked[t0 as usize] = true;
+        self.cav_mark[t0 as usize] = epoch;
+        self.chk_mark[t0 as usize] = epoch;
         debug_assert!(self.conflicts(t0, &p, pid as usize));
         let mut qi = 0;
         while qi < cav.len() {
@@ -629,12 +669,12 @@ impl Delaunay {
             qi += 1;
             for i in 0..4 {
                 let u = self.neigh[t as usize][i];
-                if !self.live[u as usize] || checked[u as usize] {
+                if !self.live[u as usize] || self.chk_mark[u as usize] == epoch {
                     continue;
                 }
-                checked[u as usize] = true;
+                self.chk_mark[u as usize] = epoch;
                 if self.conflicts(u, &p, pid as usize) {
-                    in_cav[u as usize] = true;
+                    self.cav_mark[u as usize] = epoch;
                     cav.push(u);
                 }
             }
@@ -647,7 +687,7 @@ impl Delaunay {
             let v = self.verts[t as usize];
             for i in 0..4 {
                 let u = self.neigh[t as usize][i];
-                if !in_cav[u as usize] {
+                if self.cav_mark[u as usize] != epoch {
                     bnd.push((face_out(v, i), u));
                 }
             }
@@ -957,12 +997,12 @@ mod tests {
         (0..n).map(|_| [draw_u(&mut r), draw_u(&mut r), draw_u(&mut r)]).collect()
     }
 
-    /// `S(2000, 2027)`: 2000 points uniform on the unit sphere, rejecting
-    /// the ball of radius 0.25.
-    fn s_points() -> Vec<Point> {
-        let mut r = SplitMix64::new(2027);
+    /// `S(n, seed)`: n points uniform on the unit sphere, rejecting the
+    /// ball of radius 0.25.
+    fn s_points_n(n: usize, seed: u64) -> Vec<Point> {
+        let mut r = SplitMix64::new(seed);
         let mut out: Vec<Point> = Vec::new();
-        while out.len() < 2000 {
+        while out.len() < n {
             let vx = 2.0 * draw_u(&mut r) - 1.0;
             let vy = 2.0 * draw_u(&mut r) - 1.0;
             let vz = 2.0 * draw_u(&mut r) - 1.0;
@@ -973,6 +1013,11 @@ mod tests {
             }
         }
         out
+    }
+
+    /// `S(2000, 2027)`.
+    fn s_points() -> Vec<Point> {
+        s_points_n(2000, 2027)
     }
 
     /// `L(m)`: the m x m x m lattice, index `i = x + m*(y + m*z)`.
@@ -1293,5 +1338,212 @@ mod tests {
         let outside = [2.0, 0.5, 0.5];
         let loc = d.locate(&outside, start).unwrap();
         assert!(d.is_hull(loc.tet), "query beyond the box must be hull");
+    }
+
+    /// FNV-1a 64 over the whole slot layout: per slot, the live flag as
+    /// 4 LE bytes; then, when live, the 4 ids of `tet(t)` and the 4 of
+    /// `neighbours(t)`, each u32 as 4 LE bytes.
+    fn layout_digest(d: &Delaunay) -> u64 {
+        let mut h = 0xcbf29ce484222325_u64;
+        let mut byte = |b: u8| {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        };
+        for t in 0..d.slots() as u32 {
+            let live = d.is_live(t);
+            for b in (live as u32).to_le_bytes() {
+                byte(b);
+            }
+            if live {
+                for v in d.tet(t) {
+                    for b in v.to_le_bytes() {
+                        byte(b);
+                    }
+                }
+                for v in d.neighbours(t) {
+                    for b in v.to_le_bytes() {
+                        byte(b);
+                    }
+                }
+            }
+        }
+        h
+    }
+
+    /// The kernel with the input order makes the same decisions as
+    /// TET-03a's, in the same order: slots, statistics and slot layout
+    /// are bit-identical (§116.7, The kernel's cost).
+    #[test]
+    fn input_order_layout_unchanged() {
+        let d = Delaunay::build(&r_points(10000, 2026)).unwrap();
+        assert_eq!(d.slots(), 66507);
+        assert_eq!(
+            d.stats(),
+            DelaunayStats {
+                inserted: 10000,
+                walk_steps: 485991,
+                cavity_tets: 194564,
+                coplanar_hull: 0,
+            }
+        );
+        assert_eq!(layout_digest(&d), 0xb0a266f6cb294888);
+
+        let d = Delaunay::build(&lattice(20)).unwrap();
+        assert_eq!(d.slots(), 45486);
+        assert_eq!(
+            d.stats(),
+            DelaunayStats {
+                inserted: 8000,
+                walk_steps: 174917,
+                cavity_tets: 931265,
+                coplanar_hull: 237724,
+            }
+        );
+        assert_eq!(layout_digest(&d), 0x36a122b209b2c959);
+
+        let d = Delaunay::build(&r_points(2000, 2026)).unwrap();
+        assert_eq!(d.slots(), 13123);
+        assert_eq!(
+            d.stats(),
+            DelaunayStats {
+                inserted: 2000,
+                walk_steps: 55907,
+                cavity_tets: 37510,
+                coplanar_hull: 0,
+            }
+        );
+        assert_eq!(layout_digest(&d), 0xc5129e51ec302dc8);
+    }
+
+    /// The §116.7 gate on 10^5 uniform points: the kernel's cost, the
+    /// tetrahedron set and the volume, with BRIO order.
+    #[test]
+    fn brio_random_1e5() {
+        let pts = r_points(100000, 2026);
+        let d = Delaunay::build_brio(&pts).unwrap();
+        let rep = d.check().unwrap();
+        assert_eq!(rep.vertices, 100000);
+        assert_eq!(rep.edges, 772540);
+        assert_eq!(rep.faces, 1344865);
+        assert_eq!(rep.tets, 672324);
+        assert_eq!(rep.hull_faces, 434);
+        assert_eq!(tet_digest(&d.finite_tets()), 0x789107d99e34d6cd);
+        let e = rep.vertices as i64 - rep.edges as i64 + rep.faces as i64
+            - rep.tets as i64;
+        assert_eq!(e, 1, "Euler's relation fails");
+        let vol = d.finite_volume();
+        assert!(
+            (vol - 0.9976647305767516).abs() <= 1e-12 * 0.9976647305767516,
+            "vol {}",
+            vol
+        );
+        let st = d.stats();
+        assert_eq!(st.inserted, 100000);
+        let mean_walk = st.walk_steps as f64 / (st.inserted - 4) as f64;
+        let mean_cav = st.cavity_tets as f64 / (st.inserted - 4) as f64;
+        eprintln!("brio_random_1e5: mean walk {:.2}, mean cavity {:.2}", mean_walk, mean_cav);
+        assert!(mean_walk <= 20.0, "mean walk {:.2}", mean_walk);
+    }
+
+    /// The tetrahedron set does not depend on the insertion order:
+    /// input order, BRIO order and a second seed's BRIO order all give
+    /// the same triangulation of 10^5 uniform points.
+    #[test]
+    fn brio_order_independent_1e5() {
+        let pts = r_points(100000, 2026);
+        let a = Delaunay::build(&pts).unwrap();
+        assert_eq!(tet_digest(&a.finite_tets()), 0x789107d99e34d6cd);
+        let b = Delaunay::build_brio(&pts).unwrap();
+        assert_eq!(tet_digest(&b.finite_tets()), 0x789107d99e34d6cd);
+        let c = Delaunay::build_ordered(&pts, &brio_order(&pts, 7)).unwrap();
+        assert_eq!(tet_digest(&c.finite_tets()), 0x789107d99e34d6cd);
+    }
+
+    /// 46^3 lattice points (97336) in BRIO order: gates, volume, and the
+    /// same tetrahedron set as a second seed's BRIO order.
+    #[test]
+    fn brio_lattice_46() {
+        let pts = lattice(46);
+        let d = Delaunay::build_brio(&pts).unwrap();
+        let rep = d.check().unwrap();
+        assert_eq!(rep.vertices, 97336);
+        assert_eq!(rep.hull_faces, 24300);
+        let e = rep.vertices as i64 - rep.edges as i64 + rep.faces as i64
+            - rep.tets as i64;
+        assert_eq!(e, 1, "Euler's relation fails");
+        let vol = d.finite_volume();
+        assert!((vol - 91125.0).abs() <= 1e-12 * 91125.0, "vol {}", vol);
+        let r = Delaunay::build_ordered(&pts, &brio_order(&pts, 7)).unwrap();
+        assert_eq!(tet_digest(&d.finite_tets()), tet_digest(&r.finite_tets()));
+    }
+
+    /// 10^5 points on the unit sphere: the hull carries every point, and
+    /// the ball's volume closes on 4 pi / 3.
+    #[test]
+    fn brio_sphere_1e5() {
+        let pts = s_points_n(100000, 2027);
+        assert_eq!(
+            pts[99999],
+            [0.9853909926425763, 0.1663419063113154, -0.0365371293836266]
+        );
+        let d = Delaunay::build_brio(&pts).unwrap();
+        let rep = d.check().unwrap();
+        assert_eq!(rep.hull_faces, 199996);
+        let mut seen = vec![false; 100000];
+        for f in d.hull_faces() {
+            for &x in &f {
+                seen[x as usize] = true;
+            }
+        }
+        assert!(seen.iter().all(|&s| s), "a point is off the hull");
+        let e = rep.vertices as i64 - rep.edges as i64 + rep.faces as i64
+            - rep.tets as i64;
+        assert_eq!(e, 1, "Euler's relation fails");
+        let vol = d.finite_volume();
+        assert!(
+            (vol - 4.188285937318097).abs() <= 1e-12 * 4.188285937318097,
+            "vol {}",
+            vol
+        );
+    }
+
+    /// TET-03b's supervisor run (SPEC-LIT §116.18): 10^6 uniform points,
+    /// release. The gate is 15 s or less for `build_brio` and a mean walk
+    /// of 20 or less; the rest is the usual check.
+    #[test]
+    #[ignore = "TET-03b supervisor run (R): 10^6 points, release"]
+    fn million_points_timed() {
+        let pts = r_points(1000000, 2026);
+        let t0 = std::time::Instant::now();
+        let d = Delaunay::build_brio(&pts).unwrap();
+        let secs = t0.elapsed().as_secs_f64();
+        let st = d.stats();
+        let mean_walk = st.walk_steps as f64 / (st.inserted - 4) as f64;
+        let mean_cav = st.cavity_tets as f64 / (st.inserted - 4) as f64;
+        let finite = (0..d.slots() as u32)
+            .filter(|&t| d.is_live(t) && !d.is_hull(t))
+            .count();
+        eprintln!(
+            "million_points_timed: {:.3} s, mean walk {:.2}, mean cavity {:.2}, slots {}, finite tets {}",
+            secs, mean_walk, mean_cav, d.slots(), finite
+        );
+        assert!(secs <= 15.0, "build_brio took {:.3} s", secs);
+        assert!(mean_walk <= 20.0, "mean walk {:.2}", mean_walk);
+        let rep = d.check().unwrap();
+        assert_eq!(rep.vertices, 1000000);
+        assert_eq!(rep.edges, 7749181);
+        assert_eq!(rep.faces, 13498055);
+        assert_eq!(rep.tets, 6748873);
+        assert_eq!(rep.hull_faces, 618);
+        assert_eq!(tet_digest(&d.finite_tets()), 0x7fe01dd487275a08);
+        let e = rep.vertices as i64 - rep.edges as i64 + rep.faces as i64
+            - rep.tets as i64;
+        assert_eq!(e, 1, "Euler's relation fails");
+        let vol = d.finite_volume();
+        assert!(
+            (vol - 0.9996391098418097).abs() <= 1e-12 * 0.9996391098418097,
+            "vol {}",
+            vol
+        );
     }
 }

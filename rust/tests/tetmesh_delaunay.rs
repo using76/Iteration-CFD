@@ -13,6 +13,7 @@
 //! Provenance: ORIGINAL. Written from Bowyer (1981), Comput. J. 24(2):162-166, Watson (1981), Comput. J. 24(2):167-172, and Devillers, Pion & Teillaud (2002), Int. J. Found. Comput. Sci. 13(2):181-199. No GPL-licensed source was consulted.
 
 use ofgpu::tetmesh::delaunay::*;
+use ofgpu::tetmesh::order::*;
 use ofgpu::Scalar;
 
 /// SplitMix64 (Steele, Lea & Flood 2014), all operations wrapping - the
@@ -196,4 +197,43 @@ fn delaunay_both_builds_locate_from_hull_start() {
         }
     }
     assert_eq!(hull_starts, 156);
+}
+
+/// FNV-1a 64 over the order, each index as 4 little-endian bytes.
+fn order_digest(order: &[u32]) -> u64 {
+    let mut h = 0xcbf29ce484222325_u64;
+    for &i in order {
+        for b in i.to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// The insertion order of §116.7, pinned in BOTH builds.
+#[test]
+fn order_both_builds_pins() {
+    let pts = r_points(1000, 2026);
+    assert_eq!(
+        order_digest(&brio_order(&pts, BRIO_SEED)),
+        0xed3e42d856fec369
+    );
+    let l3 = lattice(3);
+    assert_eq!(
+        order_digest(&brio_order(&l3, BRIO_SEED)),
+        0x4a2afd7c88e3665e
+    );
+    assert_eq!(brio_rounds(1000), vec![0, 64, 128, 256, 512, 1000]);
+}
+
+/// The BRIO entry point on 2000 uniform points: the same triangulation
+/// the input-order build gives, in BOTH builds.
+#[test]
+fn delaunay_both_builds_brio_random2000() {
+    let pts = r_points(2000, 2026);
+    let d = Delaunay::build_brio(&pts).unwrap();
+    d.check().unwrap();
+    assert_eq!(d.finite_tets().len(), 12967);
+    assert_eq!(tet_digest(&d.finite_tets()), 0xb88702ffa69aeb56);
 }

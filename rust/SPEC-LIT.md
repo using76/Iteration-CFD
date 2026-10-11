@@ -35596,14 +35596,78 @@ sum_T V(T) = V(convex hull)                                                     
 
 ### 116.7 Insertion order
 
-**Implemented by TET-03b** (`tetmesh/order.rs`).
+**Implemented by TET-03b** (`tetmesh/order.rs`, and `Delaunay::build_brio` in `tetmesh/delaunay.rs`).
 
 Points are inserted in BRIO order (Amenta, Choi & Rote 2003): random rounds of doubling size,
 with each round sorted along a Hilbert curve. The rounds are randomised by a fixed seed, so
-the order is deterministic. The walk then starts from the last inserted tetrahedron. TET-03b
-records in §116.18 the measured time to triangulate `10^6` uniform points in a release
+the order is deterministic. The walk then starts from the last inserted tetrahedron. A point
+that follows its Hilbert predecessor lands near it, so the walk crosses few faces; the random
+rounds keep the expected cavity sizes of a randomised incremental construction. The tetrahedron
+set does not depend on the order (§116.6, Uniqueness), so BRIO changes the cost and nothing else.
+
+**The Hilbert index.** A cell `c = (c_0, c_1, c_2)` of the `2^b`-per-axis grid, `1 <= b <= 21`,
+gets the index `H_b(c)` in `[0, 8^b)` from Skilling's transform (Skilling 2004, `AxestoTranspose`,
+`n = 3`). The transform works on the copy `X = c`, with `M = 2^(b-1)`:
+
+```
+for Q = M, M/2, ..., 2:                      (descending powers of two, Q > 1)
+    P = Q - 1
+    for i = 0, 1, 2:
+        if X_i AND Q:  X_0 = X_0 XOR P                                   (invert)
+        else:          t = (X_0 XOR X_i) AND P;  X_0 = X_0 XOR t;  X_i = X_i XOR t   (exchange)
+X_1 = X_1 XOR X_0;   X_2 = X_2 XOR X_1                                    (Gray encode)
+t = 0;   for Q = M, ..., 2:  if X_2 AND Q:  t = t XOR (Q - 1)
+X_i = X_i XOR t      for i = 0, 1, 2
+H_b(c) = sum over j = b-1 .. 0 and i = 0, 1, 2 of  bit_j(X_i) * 2^(3j + 2 - i)                    (116.6b)
+```
+
+The last line reads the transposed bits most significant first: bit `b-1` of `X_0`, of `X_1`,
+of `X_2`, then bit `b-2` of each, and so on. This is the transform §71.2's partitioner already
+writes out as `decompose::hilbert_index`, and the tet path calls that function rather than
+keeping a second copy. `H_b` is a bijection from the `8^b` cells onto
+`[0, 8^b)`, `H_b(0, 0, 0) = 0`, the last cell is `(2^b - 1, 0, 0)`, and cells with consecutive
+indices share a face (L1 distance 1). The supervisor checked these three properties for every
+`b <= 5` against an independent transcription of the paper's routine (outside the tree), and
+`order::hilbert_is_bijective` checks them in the tree.
+
+**Keys.** The point set's bounding box `[lo_k, hi_k]` is taken per axis. With `B = 16` bits
+(`BRIO_BITS`), coordinate `x_k` maps to the cell
+
+```
+q_k = min( 2^B - 1 , floor( ((x_k - lo_k) / (hi_k - lo_k)) * 2^B ) )   if hi_k > lo_k,   else 0      (116.6c)
+```
+
+evaluated in f64 in exactly this order, and the point's key is `H_B(q)`. The key is a sort key
+only; no geometric decision reads it, so its rounding cannot change the triangulation.
+
+**Rounds.** A Fisher-Yates shuffle of `pi = (0, 1, ..., n-1)`: for `i = n-1` down to `1`,
+`j = s mod (i + 1)` with `s` the next SplitMix64 value of a stream seeded `BRIO_SEED = 2003`,
+then swap `pi_i` and `pi_j`. The rounds are the prefix blocks of `pi` with the boundaries
+
+```
+c_0 = 0,   c_1 = min(n, 64),   c_(k+1) = min(n, 2 c_k)   until c_k = n                          (116.6d)
+```
+
+(`BRIO_FIRST = 64`), so the round sizes are 64, 64, 128, 256, ..., and the last round holds the
+rest, about half the points. Each round `pi[c_k .. c_(k+1))` is sorted by the pair
+`(key, point index)`, ascending, and the rounds are concatenated. DESIGN: Amenta, Choi & Rote
+put each point into the last round with probability 1/2, then each remaining point into the
+round before with probability 1/2, and so on. The prefix blocks of one uniform random
+permutation are uniform random samples of the same doubling sizes, and they make the order a
+function of the seed alone. `n = 0` gives no rounds and an empty order. A non-finite
+coordinate gives some permutation without failing; `build_brio` then refuses it exactly as
+`build` does, because the refusals of §116.6 do not depend on the order.
+
+**The kernel's cost.** One insertion touches only the tetrahedra it visits: the walk, the
+cavity and its boundary. The marks that keep a tetrahedron from being tested twice are per-slot
+epoch stamps, compared with the insertion's own epoch, so no insertion clears or allocates an
+array of every slot. With the input order the kernel makes the same decisions as before in the
+same order, so the slot layout, the statistics and the tetrahedron set are bit-identical to
+TET-03a's (`delaunay::input_order_layout_unchanged` pins them).
+
+TET-03b records in §116.18 the measured time to triangulate `10^6` uniform points in a release
 single-thread build on this machine (the gate is 15 s or less), and the mean number of walk
-steps per insertion (the gate is 20 or less).
+steps per insertion, `walk_steps / (inserted - 4)` (the gate is 20 or less).
 
 ### 116.8 The size field
 
@@ -36222,6 +36286,15 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-03a | the f32 arm | `rust/tests/tetmesh_delaunay.rs`, 6 tests (cube, lattice, coplanar hull, 2000 random points against Qhull's digest `0xb88702ffa69aeb56`, the 8^3 lattice, `locate` from every hull slot) pass with the same assertions under `--features single` | the TET-03a commit |
 | TET-03a | the first run's two failures | the insertion loop skipped the points the start scan had passed over (a collinear lattice point was never inserted; the coder's own test caught it); the public `locate` returned a hull start slot without walking (the supervisor's test `delaunay_both_builds_locate_from_hull_start` caught it: 156 hull starts, 200 queries each) | the TET-03a commit |
 | TET-03a | the whole `tetmesh::` test filter, release | 56 tests in 4.56 s | the TET-03a commit |
+| TET-03b | 10^6 uniform points (SplitMix64 seed 2026), `build_brio`, release, one thread, this machine (4 CPUs; the other lanes idle during the run), `delaunay::million_points_timed` | 5.94 s and 5.83 s in two runs (the gate is 15 s); 6.69 walk steps per insertion (the gate is 20); 20.33 cavity tets per insertion; 6 749 491 slots | the TET-03b commit |
+| TET-03b | the same 10^6 set against Qhull (scipy, run outside the tree) | equal: 6 748 873 tets, 7 749 181 edges, 13 498 055 faces, 618 hull faces, digest `0x7fe01dd487275a08`; Euler 1; `check` passes; volume equals the exact rational hull volume 0.9996391098418097 within 1e-12 relative | the TET-03b commit |
+| TET-03b | TET-03a's gates rerun at 10^5 with BRIO: 10^5 uniform points (seed 2026) | Qhull's set: 672 324 tets, 772 540 edges, 1 344 865 faces, 434 hull faces, digest `0x789107d99e34d6cd`, in input order, BRIO order and BRIO with seed 7; Euler 1; volume equals the exact rational hull volume 0.9976647305767516 within 1e-12 relative; 6.95 walk steps per insertion with BRIO against 104.7 in input order | the TET-03b commit |
+| TET-03b | the 46^3 lattice (97 336 points) and 10^5 points on the unit sphere (seed 2027), BRIO | lattice: locally Delaunay, 24 300 hull faces (2 V_hull - 4 with V_hull = 12 152), volume 91 125, Euler 1, the same digest under seeds 2003 and 7; sphere: locally Delaunay, 199 996 hull faces with every point on the hull, Euler 1, volume equals Qhull's exact rational hull volume 4.188285937318097 within 1e-12 relative | the TET-03b commit |
+| TET-03b | the epoch stamps, input order (`delaunay::input_order_layout_unchanged`, and the supervisor's probe outside the tree at 10^5) | slot count, statistics and the slot-layout digest bit-identical to TET-03a on 10^4 and 2000 uniform points and the 20^3 lattice, and at 10^5 (layout `0xecf24f2106be5819`); 10^5 points in input order now take 1.30 s, against 4.47 s with the per-insertion arrays | the TET-03b commit |
+| TET-03b | (116.6b) and the BRIO order | bijection, `H(0,0,0) = 0`, the last cell `(2^b - 1, 0, 0)` and unit steps for 1 to 5 bits; six index values up to 21 bits and the BRIO orders of 10^3 and 10^4 uniform points (seeds 2003 and 7) and of the 3^3 lattice equal the supervisor's independent transcription of Skilling (2004) and of §116.7, outside the tree | the TET-03b commit |
+| TET-03b | the f32 arm | `rust/tests/tetmesh_delaunay.rs`, 8 tests (TET-03a's 6, the order pins, and the BRIO-built 2000-point set against Qhull's digest `0xb88702ffa69aeb56`) pass with the same assertions under `--features single` | the TET-03b commit |
+| TET-03b | the first run's one failure | `brio_rounds(0)` returned `[0, 0]`; the pinned `[0]` caught it | the TET-03b commit |
+| TET-03b | the whole `tetmesh::` test filter, release | 66 tests in 21.8 s, and the 10^6 run ignored | the TET-03b commit |
 
 ### 116.19 References
 
@@ -36269,6 +36342,8 @@ Crossref metadata was checked against the title, authors, year and pages given h
   limiting. *Eng. Comput.* 22(2), 95-109. DOI `10.1007/s00366-006-0014-1`.
 - Schönhardt, E. (1928). Über die Zerlegung von Dreieckspolyedern in Tetraeder. *Math. Ann.*
   98, 309-312. DOI `10.1007/BF01451597`.
+- Skilling, J. (2004). Programming the Hilbert curve. *AIP Conf. Proc.* 707, 381-387. DOI
+  `10.1063/1.1751381`.
 - Shewchuk, J. R. (1997). Adaptive precision floating-point arithmetic and fast robust geometric
   predicates. *Discrete Comput. Geom.* 18(3), 305-363. DOI `10.1007/PL00009321`. The
   public-domain `predicates.c` is at <https://www.cs.cmu.edu/~quake/robust.html>.
