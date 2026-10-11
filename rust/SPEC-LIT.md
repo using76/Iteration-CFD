@@ -39190,6 +39190,26 @@ builds `W_k` from the element counts and such a species has none. The supervisor
 §129.6 (the digest listed there): it reads all 53 records, with `T_mid` 1382,
 1368 and 1478 K for HCNO, HOCN and HNCO.
 
+**A fourth layout, accepted (CHR-02b, DESIGN).** GRI-Mech 1.2's
+`thermo12.dat`, the thermo file DRM19 names (§129.6), fills an unused element
+slot with a blank symbol and the count `00` (`O   1   00   00   00G`).
+Read strictly, every such record is refused for a count with no element. A
+slot whose symbol is blank and whose count is blank or reads as the integer 0
+(`0`, `00`, `000`) is an empty slot: it can name no element, so dropping it
+changes no species' formula. A blank symbol with a nonzero count is still
+refused by name.
+
+The same file's HCCOH record writes its phase letter a second time in column
+74, after a narrow `T_mid` (`   1000.G`), so the fifth slot reads as the
+symbol `G` with a blank count. Table III gives the count as Fortran `I3`, and
+on Fortran input a numeric field of all blanks is zero (ANSI X3.9-1978,
+*Fortran 77*, §13.5.9, numeric editing). **A named slot whose count field is
+all blanks therefore has the count 0**, and a zero count is dropped as
+before, before the symbol is looked up. The reader records a note naming the
+species, the columns and the symbol, so the drop is visible. HCCOH's formula
+stays C2 H2 O1. A count that is not blank and does not parse as a
+non-negative integer is still refused.
+
 The phase must be `G`. A condensed species (`S`, `L`) is refused by name: §131
 is gas-phase only.
 
@@ -39270,6 +39290,41 @@ reaction orders ... However, it does not specify how to calculate the reverse
 reaction rate." The authored JL4 file (§129.6) writes what the paper writes,
 and the flag is how a reader knows.
 
+**Fall-off, `REV` and `DUP` as read (CHR-02b, DESIGN where marked).** The
+manuals give the keywords; these are the reader's rules for them.
+
+* **The marker.** After whitespace is removed, a side may end with `(+X)`,
+  found as the last `(+` of the side when the side ends in `)`. A species
+  name may hold parentheses (`CH2(S)`), never `(+`. `X` is `M` (either case)
+  or a declared species. Both sides carry the same `X`. A marker on one side
+  only, two different markers, a `(+` anywhere else, or `(+M)` together with
+  a `+M` term is refused, naming the line and the equation.
+* **The collider.** `(+M)` takes the efficiency items of §129.4 (130.3);
+  `(+SPECIES)` takes none, and an efficiency item there is refused
+  (SAND89-8009 eq. (63)). A fall-off reaction has no plain third body: the
+  reaction-line rate is `k_inf`, with `m` the forward orders alone, and
+  `LOW`'s `k_0` is converted with `m + 1` (§130.2).
+* **What a fall-off reaction needs.** `LOW` with exactly three numbers.
+  Without it the reaction is refused when it closes; `HIGH` stays refused by
+  name. `TROE` takes 3 or 4 numbers and `SRI` 3 or 5 (`d = 1`, `e = 0`). One
+  of them at most, each given once, and none of `LOW`, `TROE` and `SRI` on a
+  reaction without a marker. `T***` and `T*` of `TROE` and `c` of `SRI` are
+  divisors in (130.11)-(130.12) and must be nonzero. The auxiliary lines may
+  come in any order.
+* **`REV`.** Exactly three numbers, converted in the reaction's units with
+  `m_r` = the sum of the reverse orders (130.13), plus 1 with a plain `+M`.
+  It is refused on an irreversible reaction and, as a DESIGN choice of this
+  reader, on a fall-off reaction: a reverse fall-off would need its own
+  blending, and no mechanism of this tranche writes one. A reversible
+  reaction with `FORD` or `RORD` and a `REV` is not flagged (the flag above
+  is for the reaction with no `REV`).
+* **`DUP`.** No `/.../` field, once per reaction. Two reactions that §129.5
+  calls the same are read when both carry `DUP`; when one does not, the
+  reaction without it is refused, naming both lines; a `DUP` reaction with no
+  twin is refused, naming its line. Reactions of different kinds (no third
+  body, `+M`, `(+M)`, `(+SPECIES)` with different species) are never the
+  same (DESIGN, extending CHR-02a's third-body rule).
+
 ### 129.6 Mechanisms: what is authored, what is user-supplied, and the licence decision
 
 **Authored here as data, from the papers.** These are WD1 (Westbrook &
@@ -39337,6 +39392,7 @@ so a user-supplied copy can be confirmed to be the same file:
 | `thermo30.dat` | `8d918b771aa965fe05e8c8f1f7e926a5326ebc90e7fc923ce129dc118b634dcc` | — |
 | `transport.dat` (GRI 3.0) | `e2ef4437568311ad0ba6c2311a564966c9accb2b43ea3157b764c1e8febc5825` | — |
 | `drm19.dat` | `1ed93a223186b890ce8b4ec0e3f3918edba56656c276b41fa6c093a05da621ed` | 21 / 84 |
+| `thermo12.dat` (GRI 1.2, for DRM19) | `949cfbf6fa6d3c93dd3dee383095187f9aa9eb2e7f9c5f88aeefef37d7b68607` | — |
 
 **The counts, and a discrepancy inside the readme.**
 
@@ -39346,8 +39402,13 @@ so a user-supplied copy can be confirmed to be the same file:
   reactions of 49 species". The file itself has 53 species and 325 reactions,
   counted here. **CHR-02b's `ck_gri30_counts` holds 53 / 325**, with the
   readme's section 1 and this count as its sources, and names the stale line.
-  The file uses `(+M)` 58 times, `LOW` 29, `TROE` 26, `SRI` once and
-  `DUPLICATE` 6 times. Every one of those is a read keyword in §129.5.
+  The file uses `(+M)` 58 times (29 fall-off reactions, the marker on both
+  sides), `LOW` 29, `TROE` 26 and `DUPLICATE` 6 times. Every one of those is
+  a read keyword in §129.5. **Corrected by CHR-02b:** CHR-00a's count of
+  "`SRI` once" was a text match on `unix.sri.com` in the file's comment
+  header; the file has no SRI reaction, so its 29 fall-off reactions are 26
+  Troe and 3 Lindemann. It also has 12 plain `+M` reactions and 16
+  irreversible (`=>`) ones, and no `REV`, `FORD`, `RORD` or `(+SPECIES)`.
 * **DRM19.** The file's own header reads "Reduced version of GRI-MECH 1.2.
   19 species ( + N2, AR); 84 reactions", which is 21 species and 84
   reactions, matching the plan's 21/84. It uses `(+M)` 16 times, `LOW` 8 and
@@ -39355,6 +39416,23 @@ so a user-supplied copy can be confirmed to be the same file:
 * **DRM19's thermo.** The DRM page says "you must use thermo12.dat, the
   thermodynamics data of GRI-Mech", meaning GRI-Mech **1.2**'s, not 3.0's.
   CHR-02b's user-path variable therefore carries a thermo path of its own.
+  `thermo12.dat` was fetched by CHR-02b on 2026-10-11 from the GRI-Mech 1.2
+  page (`combustion.berkeley.edu/gri-mech/new21/version12/files12/`, plain
+  HTTP), 32 records in the `THERMO ALL` layout, sha256
+  `949cfbf6fa6d3c93dd3dee383095187f9aa9eb2e7f9c5f88aeefef37d7b68607`, and is
+  not vendored either. DRM19 has 8 fall-off reactions, all Troe, 6 plain
+  `+M` reactions, and no `DUPLICATE`, `REV`, `FORD`, `RORD` or `=>`.
+
+**The user path (CHR-02b).** Four environment variables name the four files:
+`OFGPU_GRI30_MECH` (`grimech30.dat`), `OFGPU_GRI30_THERMO` (`thermo30.dat`),
+`OFGPU_DRM19_MECH` (`drm19.dat`) and `OFGPU_DRM19_THERMO` (`thermo12.dat`).
+The thermo file is read as a separate set at `P_ATM` (§128.4) and passed to
+the mechanism reader. When a pair is not set, `ck_gri30_counts` or
+`ck_drm19_counts` prints `SKIPPED <test>: <variable> is not set; GRI-Mech 3.0
+and DRM19 are user-supplied by path (SPEC-LIT §129.6)` and returns. That is
+a skip by name, not a pass. `OFGPU_REQUIRE_MECH=1` turns a missing variable
+into a failure, as `OFGPU_REQUIRE_AMGX` does for AMGX. `cases/mech/README.md`
+repeats the variables and the digests for a user.
 
 ### 129.7 What CHR-02a and CHR-02b must make true
 
@@ -39366,6 +39444,9 @@ so a user-supplied copy can be confirmed to be the same file:
 | `ck_refuses_plog` and every refused keyword | refused by name, with the recognised set | D |
 | `ck_gri30_counts`, `ck_drm19_counts` | 53/325 and 21/84; skipped by name without the user path | D |
 | `ck_rational_balance_is_exact` | `0.5 O2` balances exactly, and `0.49 O2` fails | D |
+| `ck_reads_falloff` | `(+M)` and `(+SPECIES)` with `LOW`, `TROE` (3 and 4 numbers), `SRI` (3 and 5) and none (Lindemann): every number, `k_inf` with `m`, `k_0` with `m + 1` | D (one rounding, as `ck_units_keywords`) |
+| `ck_reads_rev_and_dup` | `REV` in SI with `m_r`; a `DUP` pair reads; one `DUP` missing, or a lone `DUP`, is refused naming the lines | D |
+| `ck_falloff_refusals` | every refusal of the fall-off, `REV` and `DUP` rules above, each naming its line | D |
 
 Labels: none. §129 is a format and defines no equation.
 

@@ -478,7 +478,11 @@ impl ThermoSet {
                 let sym = columns(l1, sa, sb).trim();
                 let cnt = columns(l1, ca, cb).trim();
                 if sym.is_empty() {
-                    if cnt.is_empty() || cnt == "0" {
+                    // SPEC-LIT §129.3, the fourth layout (CHR-02b): thermo12.dat
+                    // pads an unused slot with a blank symbol and the count "00";
+                    // a blank or zero count can name no element, so the slot is
+                    // skipped, while a nonzero count is still refused below.
+                    if cnt.is_empty() || cnt.parse::<u32>().is_ok_and(|n| n == 0) {
                         continue; // an empty slot
                     }
                     return Err(parse_err(
@@ -490,15 +494,31 @@ impl ThermoSet {
                         ),
                     ));
                 }
-                let Ok(n) = cnt.parse::<u32>() else {
-                    return Err(parse_err(
-                        source,
-                        no1,
-                        format!(
-                            "species {name}: the count of {sym} in columns {ca}-{cb} \
-                             reads \"{cnt}\", which is not a non-negative integer"
-                        ),
-                    ));
+                // SPEC-LIT §129.3, the fourth layout (CHR-02b): the count is
+                // Fortran I3 and on Fortran input a numeric field of all
+                // blanks is zero (ANSI X3.9-1978, Fortran 77, section 13.5.9),
+                // so a named slot with a blank count reads 0, the note makes
+                // the drop visible, and the zero-count drop below applies.
+                let n = match cnt.parse::<u32>() {
+                    Ok(n) => n,
+                    Err(_) if cnt.is_empty() => {
+                        notes.push(format!(
+                            "line {no1}: species {name}: columns {ca}-{cb} name {sym} \
+                             with a blank count, read as 0 (Fortran I3) and dropped \
+                             (SPEC-LIT §129.3)"
+                        ));
+                        0
+                    }
+                    Err(_) => {
+                        return Err(parse_err(
+                            source,
+                            no1,
+                            format!(
+                                "species {name}: the count of {sym} in columns {ca}-{cb} \
+                                 reads \"{cnt}\", which is not a non-negative integer"
+                            ),
+                        ));
+                    }
                 };
                 if n == 0 {
                     continue; // a zero count is dropped
