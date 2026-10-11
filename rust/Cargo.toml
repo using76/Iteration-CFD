@@ -30,6 +30,10 @@ cudarc = { version = "0.19", default-features = false, features = [
     "dynamic-loading",
 ] }
 jsonc-parser = "0.33.1"
+# Opens the AMGX library at RUN time (SPEC-LIT §141.20), so no AMGX import
+# library is needed at build time. Already in the tree through cudarc's
+# `dynamic-loading`.
+libloading = { version = "0.9", optional = true }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -50,9 +54,10 @@ single = []
 # AMGX as unavailable rather than pretending it was never a candidate - see
 # `src/pressure/amgx.rs`.
 #
-# Turning it on needs libamgxsh (or libamgx) reachable by the linker; point
-# AMGX_DIR or AMGX_LIB_DIR at the directory holding it.
-amgx = []
+# Turning it on needs nothing at build time: the library is opened at RUN
+# time with libloading (SPEC-LIT §141.20). Point AMGX_DLL at the library
+# file, AMGX_DIR at its directory, or put it on PATH.
+amgx = ["dep:libloading"]
 
 [build-dependencies]
 # build.rs needs the same detection logic cudarc uses

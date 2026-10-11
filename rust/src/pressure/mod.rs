@@ -1134,6 +1134,11 @@ mod tests {
     #[cfg(feature = "amgx")]
     #[test]
     fn amgx_agrees_with_pbicgstab() {
+        // `OFGPU_REQUIRE_AMGX=1` turns a missing DLL into the failure it is;
+        // without it a machine without the DLL passes vacuously.
+        if !amgx::require_loaded().expect("AMGX required") {
+            return;
+        }
         // Above `amgx::MIN_CELLS`, or the backend declines before it starts.
         let d = Vec3::new(0.1, 0.1, 0.1);
         let Some(sys) = build([40, 30, 20], d, &[1], 31337) else {

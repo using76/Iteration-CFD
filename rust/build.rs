@@ -192,58 +192,6 @@ fn msvc_env() -> Vec<(String, String)> {
     Vec::new()
 }
 
-/// Tell the linker where AMGX is, but only when the `amgx` feature asked for
-/// it.
-///
-/// AMGX is not part of the CUDA toolkit and is not installed by anything; it
-/// is built from source, and where it lands is the user's business. So the
-/// search path comes from the environment (`AMGX_LIB_DIR`, or `AMGX_DIR` with
-/// the usual `build`/`lib` subdirectories tried) and a missing library is a
-/// link error naming the variable to set - not a mysterious "unresolved
-/// external symbol AMGX_initialize".
-///
-/// Nothing here runs unless the feature is on, which is why the default build
-/// cannot be broken by an AMGX build that failed.
-fn emit_amgx_link() {
-    println!("cargo:rerun-if-env-changed=AMGX_DIR");
-    println!("cargo:rerun-if-env-changed=AMGX_LIB_DIR");
-
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(d) = env::var("AMGX_LIB_DIR") {
-        dirs.push(PathBuf::from(d));
-    }
-    if let Ok(d) = env::var("AMGX_DIR") {
-        let d = PathBuf::from(d);
-        dirs.push(d.join("build"));
-        dirs.push(d.join("lib"));
-        dirs.push(d.join("build").join("Release"));
-        dirs.push(d);
-    }
-
-    let mut found = false;
-    for d in &dirs {
-        if d.is_dir() {
-            println!("cargo:rustc-link-search=native={}", d.display());
-            found = true;
-        }
-    }
-    if !found {
-        println!(
-            "cargo:warning=feature 'amgx' is on but neither AMGX_LIB_DIR nor "
-        );
-        println!(
-            "cargo:warning=AMGX_DIR names a directory; the link will fail unless "
-        );
-        println!(
-            "cargo:warning=amgxsh is already on the linker's search path."
-        );
-    }
-
-    // `amgxsh` is the shared build, which is the one AMGX's own CMake produces
-    // by default and the only one whose C API is exported.
-    println!("cargo:rustc-link-lib=dylib=amgxsh");
-}
-
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -274,10 +222,6 @@ fn main() {
     println!("cargo:rerun-if-changed=cuda");
     println!("cargo:rerun-if-env-changed=OFGPU_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
-
-    if env::var("CARGO_FEATURE_AMGX").is_ok() {
-        emit_amgx_link();
-    }
 
     let mut generated = String::new();
     generated.push_str(&format!(

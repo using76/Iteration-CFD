@@ -32,7 +32,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 258 source files under
+line "No GPL-licensed source was consulted." All 259 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -132,9 +132,12 @@ Not on crates.io
 AMGX
   Copyright (c) 2011-2024, NVIDIA CORPORATION
   BSD 3-Clause License.
-  Optional; built only with the `amgx` Cargo feature, which is OFF by default,
+  Optional; used only with the `amgx` Cargo feature, which is OFF by default,
   so it is absent from the generated table above (which reports the default
-  feature set). Bundled under `third_party/AMGX` when present; see its LICENSE.
+  feature set). Loaded at RUN time from `AMGX_DLL` / `AMGX_DIR` / `PATH`
+  (SPEC-LIT §141.20), not linked: nothing is vendored and no source is
+  reproduced here. The DLL itself is built from the 2.5.0 sources by
+  `tools/amgx/build.cmd`; see AMGX's own LICENSE.
 
 NVIDIA CUDA Toolkit, cuFFT, cuBLAS
   Used under the NVIDIA CUDA Toolkit End User License Agreement, which permits

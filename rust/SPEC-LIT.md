@@ -41367,4 +41367,93 @@ results; an x-strong anisotropic block (16×4×4, x coefficients 1, y and z coef
 placed by the table above sum to the dense `P^T A P` exactly on the two 7×5×3 and two
 6×5×4 meshes.
 
+### 141.20 AMGX by dynamic load (AMX-01)
+
+`No GPL-licensed source was consulted.` §141.2 to §141.19 are left for the GAMG units
+(AMG-02 onward) and AMX-02. This subsection says how the AMGX pressure backend of
+`src/pressure/amgx.rs` reaches the library. Before AMX-01 the `amgx` Cargo feature
+linked `amgxsh` at build time (`build.rs` emitted `cargo:rustc-link-lib=dylib=amgxsh`), so
+`--features amgx` did not even build on a machine without an AMGX import library. Now
+the library is opened at run time and the feature builds anywhere. No solve changes:
+the configuration string, the CSR export of §48.2, the mode constants and the calls
+in the solve are the same, so the f64 build is untouched and the feature-off build is
+bit-for-bit what it was.
+
+Sources: **NVIDIA AMGX** (BSD-3-Clause, <https://github.com/NVIDIA/AMGX>), release 2.5.0,
+its public C API `include/amgx_c.h` (the functions already bound in
+`src/pressure/amgx.rs`; this unit changes only how they are reached), and **Naumov, M.
+et al. (2015), "AmgX: a library for GPU accelerated algebraic multigrid and
+preconditioned iterative methods", *SIAM J. Sci. Comput.* 37(5) S602-S626,
+doi:10.1137/140980260**, the paper docs/17 names for AMGX. **libloading** (ISC, already a
+dependency through cudarc's `dynamic-loading`, NOTICE) opens the library. No AMGX source
+is vendored or reproduced.
+
+**The file.** `amgxsh.dll` on Windows and `libamgxsh.so` elsewhere: the shared build,
+which is the only AMGX build that exports the C API.
+
+**The search** (*DESIGN*). An explicit setting is used alone, so a typo never loads a
+different copy of the library from somewhere else:
+
+```
+AMGX_DLL set and non-empty:  [ AMGX_DLL ]                                (141.20)
+else AMGX_DIR set and non-empty, D = AMGX_DIR:
+    [ D/<file>, D/bin/<file>, D/lib/<file>, D/build/<file>, D/build/Release/<file> ]
+else:  [ <file> ]   (the bare name, so the system loader searches PATH)
+```
+
+The candidates are tried in order, and the first that opens is used. The library is
+opened once per process, on the first query, and stays open. A library that opens but
+lacks one of the bound entry points is refused, naming the entry point and the file.
+
+**Availability.** With the feature off, the backend is listed and unavailable with the
+reason "feature 'amgx' not enabled" (unchanged). With the feature on and no library,
+it is listed and unavailable with the reason "AMGX library not loaded: tried <every
+candidate>; set AMGX_DLL to the library file or AMGX_DIR to its directory", followed by
+the loader's last error. `setup` returns the same reason as an error. The selector of
+§8.3 therefore prints why AMGX was not a candidate, which is the file's original rule.
+
+**`OFGPU_REQUIRE_AMGX`** (*DESIGN*). The value `1`, and only `1`, makes absence a
+failure. A device test that needs AMGX then fails with "OFGPU_REQUIRE_AMGX=1 but
+<reason>" instead of passing vacuously. Without it, such a test prints "AMGX not
+loaded, skipped: <reason>" and passes, the convention of a machine without a card.
+
+**The copy back** (a bug found by this unit's gate). `AMGX_vector_download` into a device pointer is a
+device-to-device `cudaMemcpy`, which the CUDA runtime documents as not synchronising with the host, and AMGX
+issues it on the runtime's legacy default stream. The crate's `Gpu` runs on a non-blocking stream, which does not
+wait for the legacy one. The backend returned as soon as the call did, so the caller's next read of `p` raced the
+copy: on the plume matrix AMGX converged in 22 iterations (residual 1.653e2 to 7.746e-11) and the field read back
+was all zeros, `rel = 1.000`. `solve` now synchronises the whole context after the AMGX calls and returns only
+then. Before AMX-01 the feature could not be linked on this machine (there is no import library), so the gate
+had not been run against the crate's non-blocking stream.
+
+**The modes** (`amgx_config.h`'s mode encoding, unchanged): `dDDI = 0x2001 = 8193` in the
+f64 build and `dFFI = 0x2111 = 8465` under `single` (device memory, double or float
+vectors and matrix, 32-bit indices).
+
+**The recipe.** `tools/amgx/build.cmd` records how the DLL is built from the 2.5.0
+sources with CUDA 13.3 for `sm_120`: CMake with Ninja, `CMAKE_NO_MPI`, C++17, and the
+`--pre-include thrust/tuple.h` that CUDA 13's CCCL 3.x needs, because without it about 30
+translation units of AMGX 2.5.0 do not compile. The DLL must contain SASS for the card
+it runs on: an `sm_89`-only build fails on `sm_120` at `AMGX_matrix_create` with
+`rc = 6` (THRUST_FAILURE). The recipe is written and not re-run in this unit (docs/17
+A18). The gate below used the existing 2.5.0 build, `amgxsh.dll` of 135,625,728 bytes,
+MD5 `67ba838e20c3ed60fd738632b3e8ef68`.
+
+#### 141.20.1 The gates
+
+| test | gate | class (docs/17 §5.1.4) |
+|---|---|---|
+| `pressure::amgx::tests::the_search_order_is_amgx_dll_then_amgx_dir_then_path` | (141.20) on fixed inputs, no environment read | D |
+| `pressure::amgx::tests::only_the_value_1_requires_amgx` | `1` requires; `0`, `true`, the empty string and unset do not | D |
+| `pressure::amgx::tests::require_turns_absence_into_an_error` | absent and required is an error naming `OFGPU_REQUIRE_AMGX=1` and the reason; absent and not required is a skip | D |
+| `pressure::amgx::tests::a_missing_library_is_unavailable_with_the_paths_it_tried` (feature on) | a candidate that does not exist gives the "AMGX library not loaded" reason and names that path | D |
+| `cargo build --release --features amgx`, and `--features "amgx single"`, with no AMGX on the machine | both compile | D |
+| `pressure::tests::amgx_agrees_with_pbicgstab` (feature on, `OFGPU_REQUIRE_AMGX=1`, the 2.5.0 DLL) | AMGX and the PBiCGStab reference agree to `1e-8` relative on the 40×30×20 box | R |
+| `tests/amgx.rs` `amgx_agrees_with_pbicgstab_on_the_plume_matrix` (both builds, feature on) | the plume-sized Poisson matrix (98×42×20 cells over 14.64 × 6.24 × 3 m, `Γ = 0.37`, `fixedValue` on `+x`): `‖x_AMGX − x_ref‖∞ / ‖x_ref‖∞ <= 1e-8` with dDDI, and `<= 1e-5` with dFFI | R, `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1). This replaces the planner's `1e-4`. A dFFI miss is an AMGX f32 finding and is recorded here; the band is not widened |
+
+Measured on 2026-10-11 (RTX 5070 Ti, the DLL above, deterministic over five runs): the plume gate gives
+`rel = 1.643e-14` with dDDI (22 iterations, converged) and `rel = 8.640e-6` with dFFI (13 iterations, AMGX reports
+converged), so both rows pass; the dFFI row passes with a margin of 1.16x.
+
+
 ---

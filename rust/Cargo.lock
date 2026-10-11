@@ -64,6 +64,7 @@ dependencies = [
  "anyhow",
  "cudarc",
  "jsonc-parser",
+ "libloading",
  "schemars",
  "serde",
  "serde_json",
