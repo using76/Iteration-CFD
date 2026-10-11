@@ -5,7 +5,7 @@
 // same void. Commands this web app can genuinely apply are applied here;
 // everything else is refused immediately with UNSUPPORTED so the model can
 // tell the operator the truth instead of waiting.
-import type { ClientMsg, UiCommand, UiSelection, UiState, ViewId } from '@cfd/shared'
+import type { ClientMsg, MetricRecord, UiCommand, UiSelection, UiState, ViewId } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
 import type { ProbeOutcome, ViewerTool, ViewportRect } from '../viewer'
 import { linkCameras } from '../viewer/api/cameraLink'
@@ -15,7 +15,10 @@ import type { useSessionStore } from '../state/sessionStore'
 // tabStateLabel / tabScreenLabel are value imports; uiStore has no DOM imports,
 // so this stays node-test safe. useUiStore itself must NOT be imported here
 // (the bridge takes its store through deps so tests can inject fakes).
-import { tabScreenLabel, tabStateLabel, type useUiStore } from '../state/uiStore'
+import { tabScreenLabel, tabStateLabel, type LogStream, type useUiStore } from '../state/uiStore'
+// Pure series helpers (metric matching, surface keys); series.ts only type-imports
+// the store, so this value import stays node-test safe too.
+import { findMetric, metricNames, surfaceSeriesKeys } from '../chart/series'
 
 type SessionStore = ReturnType<typeof useSessionStore.getState>
 type UiStoreState = ReturnType<typeof useUiStore.getState>
@@ -133,6 +136,10 @@ export function createUiBridge(deps: UiBridgeDeps) {
       showColorBars: typeof u.showColorBars === 'boolean' ? u.showColorBars : null,
       overlays: typeof u.showAxes === 'boolean' && typeof u.showColorBars === 'boolean' ? { axes: u.showAxes, colorBars: u.showColorBars } : null,
       bottomTab: u.bottomVisible ? (u.bottomTab ?? null) : null,
+      logs: u.logFilter ? { text: u.logFilter.text, streams: [...u.logFilter.streams], follow: u.logFilter.follow } : null,
+      metricPick: Array.isArray(u.metricSlots)
+        ? { left: u.metricSlots[0] ?? null, right: u.metricSlots[1] ?? null, mode: u.metricMode ?? 'metrics' }
+        : null,
       selection: lastSelection,
       runId: u.activeRunId,
       sim: null,
@@ -255,6 +262,19 @@ export function createUiBridge(deps: UiBridgeDeps) {
       u.tabs.find((t) => tabStateLabel(t).toLowerCase() === n || tabScreenLabel(t, 'en').toLowerCase() === n || tabScreenLabel(t, 'ko').toLowerCase() === n) ??
       null
     )
+  }
+
+  /** The run the chart commands act on: the residuals tab's run when that tab
+   *  holds one, else the followed run. */
+  function chartRunId(): string | null {
+    const u = ui.getState()
+    const tab = u.tabs.find((t) => t.kind === 'residuals')
+    return tab?.kind === 'residuals' && tab.runId ? tab.runId : u.activeRunId
+  }
+
+  /** The metric records a run reported; the injected session may not carry runData at all. */
+  function runMetrics(runId: string): MetricRecord[] {
+    return session.getState().runData?.[runId]?.metrics ?? []
   }
 
   /** The tab label a tree step or chart name matches against, best effort. */
@@ -396,13 +416,86 @@ export function createUiBridge(deps: UiBridgeDeps) {
         ui.getState().openResidualsTab(cmd.runId)
         deps.subscribeRun(cmd.runId)
         return { ok: true }
+      case 'set_post': {
+        const v = getViewerApi()
+        const vs = v.getState()
+        const fieldish = cmd.colormap != null || cmd.range != null || cmd.component != null || cmd.log != null
+        const repish = cmd.representation != null || cmd.opacity != null || cmd.patches != null
+        if (!fieldish && !repish)
+          return { ok: false, error: 'INVALID (set_post): nothing to change; give colormap, range, component, representation, opacity, patches or log' }
+        if (fieldish) {
+          if (vs.field == null) return { ok: false, error: 'NO_FIELD (set_post): no field is coloured; open_result or post_field first' }
+          const r = await v.execute({ type: 'setField', field: vs.field, component: cmd.component ?? null, range: cmd.range ?? null, colormap: cmd.colormap ?? null, log: cmd.log ?? null })
+          if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused set_post' }
+        }
+        if (repish) {
+          const r = await v.execute({ type: 'setRepresentation', mode: cmd.representation ?? vs.representation, opacity: cmd.opacity ?? null, patches: cmd.patches ?? null })
+          if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused set_post' }
+        }
+        ui.getState().openViewerTab()
+        return { ok: true }
+      }
+      case 'show_metric': {
+        const slot = cmd.slot ?? 1
+        const metric = cmd.metric ?? null
+        const trimmed = metric?.trim() ?? ''
+        if (!trimmed && cmd.mode == null) return { ok: false, error: 'INVALID (show_metric): needs a metric or a mode' }
+        if (slot !== 1 && slot !== 2) return { ok: false, error: `INVALID (show_metric): slot must be 1 (left) or 2 (right), got ${slot}` }
+        if (trimmed && cmd.mode === 'sweeps')
+          return { ok: false, error: 'INVALID (show_metric): a metric pick applies to mode "metrics"; drop the metric or send mode "metrics"' }
+        const run = chartRunId()
+        let found: string | null = null
+        if (trimmed) {
+          if (run == null) return { ok: false, error: 'NO_RUN (show_metric): no run is followed; follow_run first' }
+          const names = metricNames(runMetrics(run))
+          found = findMetric(names, metric!)
+          if (found == null)
+            return { ok: false, error: `NO_METRIC (show_metric): run "${run}" reports no metric "${metric}"; reported: ${names.join(', ') || 'none'}` }
+        }
+        if (cmd.mode != null) u.setMetricMode(cmd.mode)
+        if (found != null) {
+          if (cmd.mode == null) u.setMetricMode('metrics')
+          u.setMetricSlot(slot as 1 | 2, found)
+        }
+        u.openResidualsTab(run, 'metrics')
+        return { ok: true }
+      }
+      case 'set_log_filter': {
+        if (cmd.text === undefined && cmd.streams == null && cmd.follow == null)
+          return { ok: false, error: 'INVALID (set_log_filter): nothing to change; give text, streams or follow' }
+        if (cmd.streams != null && cmd.streams.length === 0)
+          return { ok: false, error: 'INVALID (set_log_filter): streams must name at least one of stdout, stderr, system' }
+        const patch: { text?: string; streams?: LogStream[]; follow?: boolean } = {}
+        if (cmd.text !== undefined) patch.text = cmd.text ?? ''
+        if (cmd.streams != null) patch.streams = cmd.streams
+        if (cmd.follow != null) patch.follow = cmd.follow
+        u.setLogFilter(patch)
+        u.setBottomVisible(true)
+        u.setBottomTab('logs')
+        return { ok: true }
+      }
       case 'show_chart':
         if (cmd.chart === 'residuals' || cmd.chart === 'metrics') {
           if (cmd.runId) deps.subscribeRun(cmd.runId)
           u.openResidualsTab(cmd.runId ?? u.activeRunId, cmd.chart)
           return { ok: true }
         }
-        return unsupported('show_chart', `chart "${cmd.chart}" has no tab here (residuals, metrics)`)
+        // surface: the run's per-patch surface-integral series (<patch>.<quantity> metrics).
+        {
+          const run = cmd.runId ?? chartRunId()
+          if (run == null) return { ok: false, error: 'NO_SURFACE_METRICS (show_chart): no run is followed; follow_run or pass runId' }
+          if (cmd.runId) deps.subscribeRun(cmd.runId)
+          const recs = runMetrics(run)
+          if (!surfaceSeriesKeys(recs).length) {
+            const names = metricNames(recs)
+            return {
+              ok: false,
+              error: `NO_SURFACE_METRICS (show_chart): run "${run}" reports no per-patch surface-integral series (<patch>.<quantity>, e.g. fan.Q); its metrics: ${names.join(', ') || 'none'}`,
+            }
+          }
+          u.openResidualsTab(run, 'surface')
+          return { ok: true }
+        }
       case 'set_camera':
       case 'fit_view': {
         // A camera move must be answered inside the hub's 5 s: open the tab

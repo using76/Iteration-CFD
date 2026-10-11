@@ -68,10 +68,16 @@ function makeUi() {
     camerasLinked: false,
     showAxes: true,
     showColorBars: true,
+    logFilter: { text: '', streams: ['stdout', 'stderr', 'system'], follow: true },
+    metricSlots: [null, null] as [string | null, string | null],
+    metricMode: 'metrics' as 'metrics' | 'sweeps',
     openViewerTab: vi.fn(),
     openResidualsTab: vi.fn(),
     setBottomVisible: vi.fn(),
     setBottomTab: vi.fn(),
+    setLogFilter: vi.fn(),
+    setMetricSlot: vi.fn(),
+    setMetricMode: vi.fn(),
     openFile: vi.fn(),
     setLocale: vi.fn(),
     setActiveRun: vi.fn(),
@@ -151,9 +157,6 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  set_post: 'STU-03',
-  show_metric: 'STU-03',
-  set_log_filter: 'STU-03',
   add_layer: 'STU-04',
   remove_layer: 'STU-04',
   new_case: 'STU-05',
@@ -175,7 +178,7 @@ type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
 function freshBridge() {
   const sent: ClientMsg[] = []
   const ui = makeUi()
-  const session = { problems: {}, connection: 'online', addNote: vi.fn(), runs: {} as Record<string, unknown> }
+  const session = { problems: {}, connection: 'online', addNote: vi.fn(), runs: {} as Record<string, unknown>, runData: {} as Record<string, unknown> }
   const bridge = createUiBridge({
     send: (m) => {
       sent.push(m)

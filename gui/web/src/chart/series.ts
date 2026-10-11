@@ -2,6 +2,7 @@
 // display order plus any dynamic field, log-safe nulls and stride
 // downsampling. Pure, so the chart component stays thin.
 import { RESIDUAL_SERIES_COLORS, RESIDUAL_SERIES_ORDER, type MetricRecord, type ResidualRecord } from '@cfd/shared'
+import type { ChartKind } from '../state/uiStore'
 
 export type XAxis = 'iter' | 'time'
 
@@ -45,11 +46,71 @@ export function hasTimeAxis(records: ResidualRecord[]): boolean {
   return records.some((r) => r.time !== null)
 }
 
-/** The y scale a chart starts on: metrics go negative so linear, residuals are log.
- *  The chart component reads this on mount; the tab host keys the chart by kind so
- *  a chart switch remounts and re-runs it. */
-export function initialYScale(chart: 'residuals' | 'metrics'): 'log' | 'linear' {
-  return chart === 'metrics' ? 'linear' : 'log'
+/** The y scale a chart starts on: metrics and surface integrals go negative so
+ *  linear, residuals are log. The chart component reads this on mount; the tab
+ *  host keys the chart by kind so a chart switch remounts and re-runs it. */
+export function initialYScale(chart: ChartKind): 'log' | 'linear' {
+  return chart === 'residuals' ? 'log' : 'linear'
+}
+
+/** Metric names match case- and punctuation-blind: "Tmax" finds "T[max]". */
+export function normaliseMetricName(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+/** Every metric key the run reported, unique, in first-seen order. */
+export function metricNames(recs: MetricRecord[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const r of recs) {
+    for (const k of Object.keys(r.metrics)) {
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(k)
+    }
+  }
+  return out
+}
+
+/** The exact (case-sensitive) name when present, else the first name whose
+ *  normalised form equals the query's; null when the query is empty or nothing matches. */
+export function findMetric(names: string[], query: string): string | null {
+  const q = normaliseMetricName(query)
+  if (!q) return null
+  if (names.includes(query)) return query
+  return names.find((n) => normaliseMetricName(n) === q) ?? null
+}
+
+/** A per-patch surface-integral series is a metric named `<patch>.<quantity>`
+ *  (the fan line produces fan_a.Q / fan_a.dp): split at the LAST dot, the patch
+ *  part non-empty and the quantity a plain identifier. */
+export function isSurfaceKey(key: string): boolean {
+  const i = key.lastIndexOf('.')
+  if (i <= 0) return false
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key.slice(i + 1))
+}
+
+/** The `<patch>.<quantity>` series a run reports, in metricNames order. */
+export function surfaceSeriesKeys(recs: MetricRecord[]): string[] {
+  return metricNames(recs).filter(isSurfaceKey)
+}
+
+/** The sweeps view of the residuals chart: every field line's linear-solver
+ *  iteration counts become its plotted series; lines without them plot nothing. */
+export function sweepsAsResidualRecords(recs: ResidualRecord[]): ResidualRecord[] {
+  return recs.map((r) => ({ ...r, fields: r.solverIters ?? {} }))
+}
+
+/** Applies the show_metric slot picks: both slots empty keeps every key;
+ *  otherwise slot 1's name then slot 2's, and `right` names the series that
+ *  moves to the second (right) axis. */
+export function slotKeys(keys: string[], slots: [string | null, string | null]): { keys: string[]; right: string | null } {
+  const [l, r] = slots
+  if (l == null && r == null) return { keys, right: null }
+  const out: string[] = []
+  if (l != null && keys.includes(l)) out.push(l)
+  if (r != null && r !== l && keys.includes(r)) out.push(r)
+  return { keys: out, right: r != null && r !== l && out.includes(r) ? r : null }
 }
 
 /** Indices to keep so that at most `maxPoints` survive; the last index is always kept. */

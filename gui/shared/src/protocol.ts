@@ -736,6 +736,10 @@ export const UiStateSchema = z.object({
   overlays: z.object({ axes: z.boolean(), colorBars: z.boolean() }).nullish(),
   /** The bottom pane tab on screen (terminal, logs, problems, output); null when the bottom pane is hidden. */
   bottomTab: z.string().nullish(),
+  /** The Log tab's filter as set_log_filter or the screen left it; null or absent = unknown. */
+  logs: z.object({ text: z.string(), streams: z.array(z.enum(['stdout', 'stderr', 'system'])), follow: z.boolean() }).nullish(),
+  /** What the metrics chart draws: slot 1 (left axis), slot 2 (right axis), metrics or sweeps; null or absent = unknown. */
+  metricPick: z.object({ left: z.string().nullable(), right: z.string().nullable(), mode: z.enum(['metrics', 'sweeps']) }).nullish(),
 })
 export type UiState = z.infer<typeof UiStateSchema>
 

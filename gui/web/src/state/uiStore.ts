@@ -7,11 +7,22 @@ import { tx } from '../i18n/extra'
 export type Theme = 'light' | 'dark'
 export type ActivityView = 'explorer' | 'search' | 'scm' | 'run' | 'extensions' | 'cfd'
 export type BottomTab = 'terminal' | 'logs' | 'problems' | 'output'
+/** What the one residuals tab draws (show_chart's chart; STU-03 adds surface). */
+export type ChartKind = 'residuals' | 'metrics' | 'surface'
+export type LogStream = 'stdout' | 'stderr' | 'system'
+/** The Log tab's filter (set_log_filter's target), kept in the store so the pane and ui.state agree. */
+export interface LogFilter {
+  text: string
+  streams: LogStream[]
+  follow: boolean
+}
+/** The metrics chart's mode: the metric picker or the linear-solver sweep counts (show_metric). */
+export type MetricMode = 'metrics' | 'sweeps'
 
 export type Tab =
   | { id: string; kind: 'file'; path: string }
   | { id: 'viewer'; kind: 'viewer' }
-  | { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null; chart?: 'residuals' | 'metrics' }
+  | { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null; chart?: ChartKind }
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
   | { id: string; kind: 'geometry'; path: string }
   | { id: string; kind: 'campaign'; path: string }
@@ -45,6 +56,12 @@ export interface UiState {
   camerasLinked: boolean
   showAxes: boolean
   showColorBars: boolean
+  /** The Log tab's filter (text, stream chips, follow-tail); set_log_filter writes it. */
+  logFilter: LogFilter
+  /** What the metrics chart draws: slot 1 (left axis) and slot 2 (right axis) metric picks. */
+  metricSlots: [string | null, string | null]
+  /** metrics or the sweeps view of the same chart. */
+  metricMode: MetricMode
 }
 
 export interface UiActions {
@@ -65,7 +82,12 @@ export interface UiActions {
   openViewerTab(): void
   openGeometryTab(path: string): void
   openCampaignTab(path: string): void
-  openResidualsTab(runId: string | null, chart?: 'residuals' | 'metrics'): void
+  openResidualsTab(runId: string | null, chart?: ChartKind): void
+  /** Merges a set_log_filter patch; streams land de-duplicated in canonical order. */
+  setLogFilter(patch: Partial<LogFilter>): void
+  /** Puts a metric on slot 1 (left axis) or slot 2 (right axis); null clears the slot. */
+  setMetricSlot(slot: 1 | 2, metric: string | null): void
+  setMetricMode(mode: MetricMode): void
   setCompareRun(runId: string | null): void
   setViewSplit(on: boolean): void
   setFocusedView(view: ViewId): void
@@ -121,6 +143,9 @@ const INITIAL: UiState = {
   camerasLinked: false,
   showAxes: true,
   showColorBars: true,
+  logFilter: { text: '', streams: ['stdout', 'stderr', 'system'], follow: true },
+  metricSlots: [null, null],
+  metricMode: 'metrics',
 }
 
 export function fileTabId(path: string): string {
@@ -142,7 +167,9 @@ export function tabScreenLabel(tab: Tab, locale: Locale): string {
       : tab.kind === 'residuals'
         ? tab.chart === 'metrics'
           ? tx(locale, 'residuals.metricsTitle')
-          : tx(locale, 'tab.residuals')
+          : tab.chart === 'surface'
+            ? tx(locale, 'residuals.surfaceTitle')
+            : tx(locale, 'tab.residuals')
         : tab.kind === 'geometry'
           ? `${tx(locale, 'tab.geometry')}: ${basename(tab.path)}`
           : tab.kind === 'campaign'
@@ -285,6 +312,27 @@ export const useUiStore = create<UiStore>()(
           const tab: Tab = { id: 'residuals', kind: 'residuals', runId: primary, compareRunId: runId, chart: existing?.kind === 'residuals' ? (existing.chart ?? 'residuals') : 'residuals' }
           return { tabs: upsertTab(s.tabs, tab), activeTabId: 'residuals' }
         })
+      },
+      setLogFilter(patch) {
+        set((s) => {
+          const next = { ...s.logFilter, ...patch }
+          if (patch.streams) {
+            // Canonical order stdout, stderr, system, duplicates dropped.
+            const canon: LogStream[] = ['stdout', 'stderr', 'system']
+            next.streams = canon.filter((c) => patch.streams!.includes(c))
+          }
+          return { logFilter: next }
+        })
+      },
+      setMetricSlot(slot, metric) {
+        set((s) => {
+          const metricSlots: [string | null, string | null] = [s.metricSlots[0], s.metricSlots[1]]
+          metricSlots[slot - 1] = metric
+          return { metricSlots }
+        })
+      },
+      setMetricMode(metricMode) {
+        set({ metricMode })
       },
       setViewSplit(on) {
         set(on ? { viewSplit: true } : { viewSplit: false, focusedView: 'A', camerasLinked: false })
