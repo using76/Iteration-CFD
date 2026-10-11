@@ -35711,6 +35711,76 @@ h_curv = 2 pi / ( n_curv kappa )                                                
 h_gap = gap(x) / n_gap                                                                     (116.10)
 ```
 
+**Curvature and proximity on a triangulation (TET-04b).** Both sources are read off a
+`TetSurface` (§116.9) and become one patch primitive per triangle, with the cone (116.7a), so the
+octree rules (116.7c)-(116.7g) and the gradation (116.11) hold for them unchanged. Persson (2006)
+sets the size from the curvature and the local feature size as (116.9) and (116.10); the
+estimates of `kappa` and `gap` on a triangulation below are this section's own, derived here.
+
+*Curvature.* An edge `e` shared by exactly two triangles `t_1`, `t_2` with areas `A_1, A_2 > 0`
+and unit normals `n_1`, `n_2` turns by the dihedral angle
+
+```
+phi_e = atan2( |n_1 x n_2| , n_1 . n_2 )      in [0, pi]                                   (116.9a)
+```
+
+The edge is a **crease** when `phi_e >= theta_c`, the crease angle (the feature angle of §116.9).
+A crease, an edge with one or with three or more triangles, and an edge next to a zero-area
+triangle carry no estimate. Otherwise the osculating circle across `e` turns by `phi_e` over the
+distance between the two centroids measured across `e`, which is `(h_1 + h_2)/3` with
+`h_i = 2 A_i / |e|` the heights over `e`:
+
+```
+kappa_e = phi_e / ( (h_1 + h_2) / 3 ) = 3 phi_e |e| / ( 2 (A_1 + A_2) )                    (116.9b)
+```
+
+A triangle takes the largest estimate over its **edge star** `E(t)`: its own edges, and every
+edge of each triangle that shares a non-crease edge with it.
+
+```
+kappa_t = max over the non-crease e in E(t) of kappa_e ,      0 if there is none           (116.9c)
+```
+
+For two equilateral triangles of side `a` inscribed in a sphere of radius `R`, `phi_e = a /
+(sqrt(3) R)` to leading order and the centroid distance is `a / sqrt(3)`, so `kappa_e = 1/R`.
+Across a rim-to-rim edge of an `N`-sided cylinder of radius `R`, (116.9b) is
+`(3/2) (2 pi / N) / (2 R sin(pi/N))`, which tends to `1.5 / R`: the estimate errs towards a
+smaller size there. A crease is not a curvature: it is kept by boundary recovery (§116.11) and
+the floor (116.12) stops the size there, so a cube has no curvature primitive. Triangle `t`'s
+primitive has `D_k = 0` and `h_k = 2 pi / (n_curv kappa_t)`, (116.9). A triangle with
+`kappa_t = 0`, and one with `h_k >= H`, has none: a cone whose height is at least `H` never goes
+below the cap of (116.7b), so dropping it changes no value, bit for bit.
+
+*Proximity.* From triangle `t`'s centroid `c_t`, along each direction `v` the side allows
+(`Outward`: `+n_t`; `Inward`: `-n_t`; `Both`: the two), take the closed segment from `c_t` to
+`c_t + L v`, with `L` twice the diagonal of the surface's bounding box. Its first hit is the
+triangle `s != t` that the exact segment test (116.13d) meets with the smallest finite
+
+```
+tau_s = n_s . ( x_0(s) - c_t ) / ( n_s . v )                                               (116.10a)
+```
+
+ties going to the lowest triangle index. It counts when the two sheets face each other,
+`|n_s . n_t| >= cos 45 deg` (DESIGN), and then `tau_s` is the gap along `v`. A first hit that
+does not face `t`, or no hit, gives no gap along `v`; `gap_t` is the smallest gap over the
+allowed directions. Triangle `t`'s primitive has `h_k = gap_t / n_gap`, (116.10), and the flat
+distance `D_k = gap_t / 2`:
+
+```
+c_t(x) = gap_t / n_gap + (g - 1) max( 0 , d_t(x) - gap_t / 2 )                             (116.10b)
+```
+
+Every point between two parallel facing sheets a distance `gap` apart is within `gap/2` of one
+of them, so `h <= gap / n_gap` everywhere in the gap, which is TET-04b's gate. With `D_k = 0`
+the mid-plane would get `gap / n_gap + (g - 1) gap / 2`. A triangle with no gap, with
+`gap_t <= 0` (a hit at the centroid is a self-intersection, which §116.9 refuses), or with
+`h_k >= H` has none, by the same cap argument. The side is DESIGN: `Outward` measures a fluid
+gap between closed bodies whose normals point into the fluid, `Inward` a channel inside a shell,
+and `Both`, for when the fluid side is not yet known (§116.12), also measures a solid's own
+thickness. The first hit is found through a bounding-volume hierarchy over the triangles'
+boxes; it changes the cost, never the answer, which equals the scan over every triangle bit for
+bit.
+
 **Primitives (TET-04a).** The sources are flattened into primitives before anything is stored.
 A primitive `k` has a size `h_k > 0`, a flat distance `D_k >= 0` and a support: one point, one
 axis-aligned box, or one triangle. `d_k(x)` is the Euclidean distance from `x` to the support,
@@ -36295,6 +36365,14 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-03b | the f32 arm | `rust/tests/tetmesh_delaunay.rs`, 8 tests (TET-03a's 6, the order pins, and the BRIO-built 2000-point set against Qhull's digest `0xb88702ffa69aeb56`) pass with the same assertions under `--features single` | the TET-03b commit |
 | TET-03b | the first run's one failure | `brio_rounds(0)` returned `[0, 0]`; the pinned `[0]` caught it | the TET-03b commit |
 | TET-03b | the whole `tetmesh::` test filter, release | 66 tests in 21.8 s, and the 10^6 run ignored | the TET-03b commit |
+| TET-04b | (116.9a)-(116.9c) on the level-3 icosphere (`R = 0.5`, 1 280 triangles, crease 60 degrees) | `min kappa_t R` and `max kappa_t R` inside the windows `[0.9965, 0.9975]` and `[1.1455, 1.1470]` around the supervisor's independent transcription of §116.8 outside the tree (0.99703 and 1.14620); 1 280 curvature primitives; `h / (2 pi R / 16)` at most 0.94801 at 10^4 facet points and 0.94756 at 10^4 points of the true sphere (the bar is 1.02); `h == h_brute` bit for bit at every probe | the TET-04b commit |
+| TET-04b | the crease rule | the 32-sided capped cylinder: every side triangle's `kappa_t` equals `(3/2)(2 pi/32)/(2 R sin(pi/32))` within 1e-12 relative (`kappa R = 1.50241`, the conservative strip value of §116.8), every cap triangle exactly 0; the unit cube has no curvature primitive | the TET-04b commit |
+| TET-04b | (116.10a)-(116.10b) on the 1 mm box pair | `Outward`: exactly the four facing triangles have a gap, `1e-3` within 1e-12 relative; `Inward`: all 24 (0.005 on the z faces, 0.01 on the x and y faces); `Both`: the minimum of the two; at 10^4 points in the gap `h` equals `gap/3` within 1e-12 relative (the bar is `h <= gap/3`; 1e-12 is the rounding of `d` at the mid-plane) and `h == h_brute`; with `Inward` alone the gap point gets 0.005/3, and with no source the base 0.02 | the TET-04b commit |
+| TET-04b | (116.11): two icospheres 0.05 apart with curvature, proximity (`Both`), a point, a box and a band source; 10^5 pairs per `g`, `t` log-uniform in `[1e-4, 0.5]` | the largest `abs(h(a) - h(b)) / ((g-1) abs(a-b))` is 0.99997 at `g = 1.2` (17 809 leaves) and 0.99999 at `g = 1.5` (8 429 leaves), against the bar `1 + 1e-9`; `h == h_brute` bit for bit at every `a`; the outward gaps number inside `[70, 90]` (oracle 80) with the smallest inside `[0.0530, 0.0540]` (oracle 0.053497) | the TET-04b commit |
+| TET-04b | the bounding-volume hierarchy | its first hit equals the scan over every triangle, index and `tau` bit for bit, on 6 168 queries (3 176 hits): every triangle in both directions on the two-sphere and box-pair surfaces, and 10^3 random segments | the TET-04b commit |
+| TET-04b | the first run's one failure | `GapSide::Inward` scanned along `+n_t`; `proximity_gap`'s `Inward` expectations caught it before the coder's report | the TET-04b commit |
+| TET-04b | the f32 arm | `rust/tests/tetmesh_sizefield.rs`, 4 tests (the sphere, the gap and `g = 1.2`'s gradation, and the `Scalar` width), pass under `--features single` with every printed number identical to the f64 build | the TET-04b commit |
+| TET-04b | the whole `tetmesh::` test filter, release | 72 tests in 20.9 s, and the 10^6 run ignored | the TET-04b commit |
 
 ### 116.19 References
 
