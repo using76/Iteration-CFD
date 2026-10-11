@@ -796,7 +796,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 28, "twenty-eight markers, found {markers:?}");
+        assert_eq!(markers.len(), 29, "twenty-nine markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -826,6 +826,7 @@ mod tests {
                 "tnf-flameD-x30",
                 "tnf-flameD-x45",
                 "martin-moyce-1952",
+                "riboux-gordillo-2014",
             ]
         );
         for row in &m.rows {
@@ -1739,5 +1740,207 @@ mod tests {
         }
 
         println!("  [answer-key] martin-moyce-1952  205 rows, 14 series, monotone in Z and T");
+    }
+
+    /// Half the last printed digit's place, `0.5 * 10^(-k)` with `k` the
+    /// cell's decimals (0 without a `.`): SPEC-LIT section 146.1's `h(x)`
+    /// for the transcription interval.
+    fn printed_half_unit(cell: &str) -> f64 {
+        let k = match cell.find('.') {
+            Some(dot) => cell.len() - dot - 1,
+            None => 0,
+        };
+        0.5 * 10f64.powi(-(k as i32))
+    }
+
+    /// SPEC-LIT section 146.1: the Riboux & Gordillo (2014) splash key's
+    /// printed Table I reproduces its printed `1000 Oh` through eq. (146.3)
+    /// and its printed capillary length through eq. (146.4), every digitised
+    /// `Oh_e3_fig` names its own table row, and FIG. 1's one printed
+    /// threshold is the key's ethanol row at R = 1.04 mm.
+    #[test]
+    fn riboux_gordillo_key_reproduces_its_printed_ohnesorge_numbers() {
+        // answer-key: riboux-gordillo-2014
+        let key = load("riboux-gordillo-2014")
+            .expect("load the answer key \"riboux-gordillo-2014\"");
+        let (_, text) = load_text("riboux-gordillo-2014")
+            .expect("load the verified text of \"riboux-gordillo-2014\"");
+        // The same grammar as `load_from`, kept as text: each data cell's
+        // printed precision is read off its digits.
+        let mut printed: Vec<Vec<&str>> = Vec::new();
+        let mut header = true;
+        for line in text.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if header {
+                header = false;
+                continue;
+            }
+            printed.push(t.split(',').map(str::trim).collect());
+        }
+        assert_eq!(
+            printed.len(),
+            key.rows.len(),
+            "riboux-gordillo-2014: the text's data rows vs the parsed key's"
+        );
+        let h = |i: usize, c: usize| printed_half_unit(printed[i][c]);
+        let liquid = key.column("liquid").expect("the liquid column");
+        let rho = key.column("rho").expect("the rho column");
+        let sigma = key.column("sigma").expect("the sigma column");
+        let mu = key.column("mu").expect("the mu column");
+        let radius = key.column("R").expect("the R column");
+        let l_sigma = key.column("l_sigma").expect("the l_sigma column");
+        let oh = key.column("Oh_e3").expect("the Oh_e3 column");
+        let v_star = key.column("V_star").expect("the V_star column");
+        let oh_fig = key.column("Oh_e3_fig").expect("the Oh_e3_fig column");
+
+        // 1. The header and the row count, and the table's shape: liquids
+        //    1..=8 holding 1, 4, 2, 2, 2, 2, 2 and 2 rows in file order,
+        //    R strictly decreasing and Oh_e3 strictly increasing within
+        //    each liquid.
+        assert_eq!(
+            key.columns,
+            ["liquid", "rho", "sigma", "mu", "R", "l_sigma", "Oh_e3", "V_star", "Oh_e3_fig"],
+            "riboux-gordillo-2014: the header row"
+        );
+        assert_eq!(key.rows.len(), 17, "riboux-gordillo-2014: the row count");
+        let mut per_liquid = [0usize; 8];
+        for i in 0..17 {
+            assert!(
+                liquid[i] >= 1.0 && liquid[i] <= 8.0 && liquid[i] == liquid[i].trunc(),
+                "riboux-gordillo-2014: row {i}: liquid {} is not an integer in 1..=8",
+                liquid[i]
+            );
+            per_liquid[liquid[i] as usize - 1] += 1;
+            if i > 0 {
+                assert!(
+                    liquid[i] >= liquid[i - 1],
+                    "riboux-gordillo-2014: row {i}: liquid {} follows liquid {} \
+                     and decreases",
+                    liquid[i], liquid[i - 1]
+                );
+                if liquid[i] == liquid[i - 1] {
+                    assert!(
+                        radius[i] < radius[i - 1],
+                        "riboux-gordillo-2014: row {i} (liquid {}): R {} does not \
+                         strictly decrease from row {}'s {}",
+                        liquid[i], radius[i], i - 1, radius[i - 1]
+                    );
+                    assert!(
+                        oh[i] > oh[i - 1],
+                        "riboux-gordillo-2014: row {i} (liquid {}): Oh_e3 {} does not \
+                         strictly increase from row {}'s {}",
+                        liquid[i], oh[i], i - 1, oh[i - 1]
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            per_liquid,
+            [1, 4, 2, 2, 2, 2, 2, 2],
+            "riboux-gordillo-2014: the rows per liquid 1..8"
+        );
+
+        // 2.-6. Per row: eq. (146.3) holds the printed Oh_e3 inside the
+        //    interval its printed cells span, eq. (146.4) the printed
+        //    l_sigma; the digitised Oh_e3_fig names its own row; V* lies on
+        //    the figure's axis; We and Re are printed for the record only
+        //    (the paper prints neither).
+        for i in 0..17 {
+            let (h_rho, h_sig) = (h(i, 1), h(i, 2));
+            let (h_mu, h_r) = (h(i, 3), h(i, 4));
+            let (h_l, h_oh) = (h(i, 5), h(i, 6));
+            let h_fig = h(i, 8);
+            let oh_lo = 1000.0 * (mu[i] - h_mu) * 1.0e-3
+                / ((rho[i] + h_rho) * (sigma[i] + h_sig) * 1.0e-3 * (radius[i] + h_r) * 1.0e-3)
+                    .sqrt();
+            let oh_hi = 1000.0 * (mu[i] + h_mu) * 1.0e-3
+                / ((rho[i] - h_rho) * (sigma[i] - h_sig) * 1.0e-3 * (radius[i] - h_r) * 1.0e-3)
+                    .sqrt();
+            assert!(
+                oh_lo <= oh[i] + h_oh && oh_hi >= oh[i] - h_oh,
+                "riboux-gordillo-2014: row {i} (liquid {}): Oh_e3 {} +- {h_oh} is outside \
+                 [Oh_lo {oh_lo}, Oh_hi {oh_hi}] of eq. (146.3) at rho {}, sigma {}, mu {}, R {}",
+                liquid[i], oh[i], rho[i], sigma[i], mu[i], radius[i]
+            );
+
+            // 3. Eq. (146.4) at standard gravity.
+            let g = 9.80665_f64;
+            let l_lo = 1000.0
+                * ((sigma[i] - h_sig) * 1.0e-3 / ((rho[i] + h_rho) * g)).sqrt();
+            let l_hi = 1000.0
+                * ((sigma[i] + h_sig) * 1.0e-3 / ((rho[i] - h_rho) * g)).sqrt();
+            assert!(
+                l_lo <= l_sigma[i] + h_l && l_hi >= l_sigma[i] - h_l,
+                "riboux-gordillo-2014: row {i} (liquid {}): l_sigma {} +- {h_l} is outside \
+                 [l_lo {l_lo}, l_hi {l_hi}] of eq. (146.4) at rho {}, sigma {}",
+                liquid[i], l_sigma[i], rho[i], sigma[i]
+            );
+
+            // 4. The digitised marker sits on its own row's printed Oh_e3,
+            //    and no other row's is nearer in log ratio.
+            assert!(
+                (oh_fig[i] - oh[i]).abs() <= h_oh + h_fig,
+                "riboux-gordillo-2014: row {i} (liquid {}): Oh_e3_fig {} is further than \
+                 {} from its own Oh_e3 {}",
+                liquid[i], oh_fig[i], h_oh + h_fig, oh[i]
+            );
+            let (mut best_j, mut best_d) = (0, f64::INFINITY);
+            for j in 0..17 {
+                let d = (oh_fig[i] / oh[j]).ln().abs();
+                if d < best_d {
+                    (best_j, best_d) = (j, d);
+                }
+            }
+            assert_eq!(
+                best_j, i,
+                "riboux-gordillo-2014: row {i} (liquid {}, Oh_e3_fig {}): its nearest printed \
+                 Oh_e3 is row {best_j}'s {}, not its own",
+                liquid[i], oh_fig[i], oh[best_j]
+            );
+
+            // 5. V* lies on FIG. 4(c)'s axis.
+            assert!(
+                v_star[i] > 0.0 && v_star[i] < 6.0,
+                "riboux-gordillo-2014: row {i} (liquid {}): V* {} is not on the figure's \
+                 0..6 m/s axis",
+                liquid[i], v_star[i]
+            );
+
+            // 6. The record line: We and Re at V* from the row's own
+            //    properties, radius-based, eq. (146.1) - asserted against
+            //    nothing, the paper prints neither.
+            let v = v_star[i];
+            let we = rho[i] * v * v * radius[i] * 1.0e-3 / (sigma[i] * 1.0e-3);
+            let re = rho[i] * v * radius[i] * 1.0e-3 / (mu[i] * 1.0e-3);
+            println!(
+                "  row {i:>2}  liquid {}  R {:.2} mm  V* {:.3} m/s  We {:.2}  Re {:.1}",
+                liquid[i], radius[i], v, we, re
+            );
+        }
+
+        // 5. FIG. 1's one printed threshold: ethanol, R = 1.04 mm,
+        //    V* = 2.19 m/s.
+        let fig1: Vec<usize> = (0..17)
+            .filter(|&i| liquid[i] == 4.0 && radius[i] == 1.04)
+            .collect();
+        assert_eq!(
+            fig1.len(),
+            1,
+            "riboux-gordillo-2014: exactly one row is liquid 4 at R = 1.04 mm, found {fig1:?}"
+        );
+        let i1 = fig1[0];
+        assert!(
+            (v_star[i1] - 2.19).abs() <= 0.005,
+            "riboux-gordillo-2014: row {i1}: V* {} is not within 0.005 m/s of FIG. 1's 2.19",
+            v_star[i1]
+        );
+
+        println!(
+            "  [answer-key] riboux-gordillo-2014  17 rows, 8 liquids, Oh and l_sigma \
+             reproduce their print"
+        );
     }
 }

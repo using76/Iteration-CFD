@@ -41824,3 +41824,144 @@ the wrong series fails the test. A misread digit that keeps every order is not c
 re-reading above is the only guard against it.
 
 ---
+
+## 146. Riboux & Gordillo's splash threshold — the measured key for Gate 78-D
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §146 to VAL-05 (§146.1, the
+answer key) and VAL-70 (§146.2, the measured leg of Gate 78-D, not yet written). §78.10 says
+that neither splash criterion of §78.4 is measured against an experiment here, because Mundo's
+boundary is a figure and nothing in this repository transcribes it. This section is the key
+that closes that gap with a different experiment. No solver, gate or test that existed before
+it changes.
+
+Source: **G. Riboux and J. M. Gordillo, "Experiments of drops impacting a smooth solid
+surface: a model of the critical impact speed for drop splashing", *Phys. Rev. Lett.* 113
+(2014) 024507, doi:10.1103/PhysRevLett.113.024507.** The published letter is paywalled and
+was not read. The copy read on 2026-10-11 is the authors' arXiv version,
+**arXiv:1401.6943v3** (28 March 2014, "The critical impact speed for the splash of a drop",
+13 pages with the supplementary material, sha256
+`058cf841e94a51d9814181742abae3d4d48c43395a61ad228bcd06c6e94c3182`), distributed under arXiv's
+non-exclusive licence. Whether the letter's table and figure match v3 digit for digit is not
+known. `reference/PROVENANCE.md` row `riboux-gordillo-2014` records the terms. No other splash
+data set, digitisation or code was read for this section.
+
+### 146.1 The key: Table I as printed, the thresholds as digitised, and the radius
+
+**The experiment.** Millimetric drops of eight liquids, formed quasi-statically at a needle,
+fall onto a smooth, dry glass slide in air at normal atmospheric conditions. The liquids
+partially wet the glass (static contact angle about 20°). The impact speed is set by the drop
+height, and the splash threshold speed `V*` is the speed above which the lamella breaks into
+ejected droplets. The paper's Table II gives the air it used as `λ0 = 65 nm`,
+`μg = 1.85·10⁻⁵ Pa·s`, `ρg = 1.18 kg/m³` at 298.15 K and `10⁵ Pa`. Only the paper's own
+theory needs these; §78.4's two criteria contain no gas property.
+
+**The groups use the RADIUS.** The paper's main text defines
+
+```
+  We = ρ V² R / σ,     Re = ρ V R / μ,     Oh = μ / (ρ σ R)^(1/2) = We^(1/2) / Re          (146.1)
+```
+
+with `R` the drop radius. §78.3 writes the same groups with the diameter `d = 2R`, so
+
+```
+  We_d = 2 We,     Re_d = 2 Re,     Oh_d = Oh / 2^(1/2)                                    (146.2)
+```
+
+A gate that puts the key's `V*` into §78.4's criteria uses `d = 2R` and §78.3's forms. The
+key's `Oh_e3` column is the paper's radius-based `Oh`, as printed.
+
+**What is printed, and what is not.** The supplementary material's **Table I** prints, for 17
+rows (eight liquids, two to four drop radii for some), `ρ`, `σ`, `μ`, `R`, the capillary
+length `ℓσ` and `1000 Oh`. **It prints no critical speed, and no `We` or `Re`.** Docs/17's
+VAL-05 row asks that each row's `We`, `Re` and `Oh` recomputed from its stated properties
+match the paper's printed values. The paper wins over the plan: only `Oh` (and `ℓσ`) can be
+checked against print. The key's test prints each row's `We` and `Re` at `V*` for the record
+and compares neither. The only printed threshold speed is in the caption of Fig. 1: ethanol,
+`R = 1.04 mm`, `V* = 2.19 m/s`, between a non-splashing impact at `2.01 m/s` and a splash at
+`2.28 m/s`.
+
+**The thresholds are DIGITISED, from vector paths.** `V*` is read from **Fig. 4(c)**, which
+plots `V` against `log10 Oh`. The filled markers are the measurements; the open ones are the
+paper's predictions and are not read. Each Table I row names its marker in the table's second
+column (the orange up-triangle for acetone, the two blue circles, the yellow diamond and the
+right-pointing triangle for water, and so on). The figure is vector art, so each marker is a
+path with exact coordinates. Nothing was read off a raster image. The axes are calibrated from
+the figure's own major tick lines: `V = 0` to `6` at 16.8307 pt per m/s, and
+`log10 Oh = −2.5` to `−1` at 89.0440 pt per decade. Circles, squares, diamonds and stars are
+point-symmetric, and their centre is their bounding-box centre. A triangle's centre is
+ambiguous: its bounding-box centre and the mean of its three vertices differ by a sixth of
+its height. The figure settles which one is meant. The two left-pointing triangles of
+decamethyltetrasiloxane sit at `1000 Oh = 8.93` and `11.21` by bounding box, and at `9.11` and
+`11.39` by vertex mean. The table prints `9.1` and `11.4`. The key therefore takes the vertex
+mean. For the three up- or down-pointing triangles (acetone, and both dodecamethylpentasiloxane
+rows) the other convention would raise acetone's `V*` by `0.037 m/s` and lower the two
+dodecamethylpentasiloxane rows by `0.046` and `0.037 m/s`. `V*` is kept to three decimals, `0.0005 m/s` in rounding, which is
+finer than the figure's line widths. The key also carries each marker's abscissa as
+`Oh_e3_fig`. That column ties every digitised marker to its table row.
+
+**Two checks that are not in the test.** (a) Fig. 1's printed `2.19 m/s` for ethanol at
+`R = 1.04 mm` reads `2.1912` from Fig. 4(c). (b) Fig. 11(a) plots the same 17 measurements in
+the `log10 Re`–`log10 Oh` plane with the same markers. Read the same way (93.4365 pt per unit of
+`log10 Re` from its ticks at 2 and 4), its `Re` agrees with `ρ V* R / μ` from the key. Here
+`μ` is the viscosity that reproduces the printed `Oh`, `μ_Oh = Oh (ρ σ R)^(1/2)`. Fifteen of
+the 17 rows agree within 1.6 %. The water row at `R = 1.45 mm` reads 3.2 % low and the PDMS
+row at `R = 0.89 mm` 3.9 % high. That is the two figures disagreeing with each other, and it
+bounds the paper's own plotting at about 4 % in `V*`.
+
+**The printed digits, propagated.** The table prints `μ` to one or two significant figures
+(`0.3`, `0.6`, `1.3`, `1.7`, `4.6` cP), and its `Oh` was evidently computed from more
+precise values. Recomputed from the printed point values, `Oh` misses the printed one at its
+last digit in 11 of 17 rows. Acetone is the largest case: `2.148` against `2.4`, because its
+`0.3 cP` stands for anything from `0.25` to `0.35`. The comparison that tests the
+transcription and not the authors' rounding is therefore an interval. For each printed cell
+`x` with `k` decimals, `h(x) = 0.5·10^(−k)`, so `789` gives `0.5`, `24.0` gives `0.05`,
+`0.95` gives `0.005` and `10.0` gives `0.05`. Then
+
+```
+  Oh_lo = (μ − h_μ) / ((ρ + h_ρ)(σ + h_σ)(R + h_R))^(1/2)
+  Oh_hi = (μ + h_μ) / ((ρ − h_ρ)(σ − h_σ)(R − h_R))^(1/2)
+  the row passes when  Oh_lo <= Oh_pr + h_Oh  and  Oh_hi >= Oh_pr − h_Oh                  (146.3)
+```
+
+in SI units (`μ·10⁻³`, `σ·10⁻³`, `R·10⁻³`), with `Oh_pr = Oh_e3/1000` and
+`h_Oh = h(Oh_e3)/1000`. All 17 rows pass. The capillary length is held to its print the same
+way, with standard gravity `g = 9.80665 m/s²`:
+
+```
+  ℓσ = (σ / (ρ g))^(1/2),   ℓ_lo from (σ − h_σ, ρ + h_ρ),  ℓ_hi from (σ + h_σ, ρ − h_ρ)       (146.4)
+```
+
+and all 17 rows pass that too.
+
+**u_D.** The paper prints no error bar on `V*`. Its one bracket is Fig. 1's: `2.01 < 2.19 <
+2.28 m/s`, which is −8.2 % and +4.1 % about the printed threshold. The digitising adds
+`0.0005 m/s` in rounding. A wrong triangle convention would move three rows by at most
+`0.046 m/s`, about 3 %. The disagreement between the paper's two figures is at most about 4 %.
+VAL-70's band of ±20 % per row (docs/17) is stated against `V*` as the key holds it, and it is
+wider than all of these. §146.2 fixes it. The key has 17 rows for eight liquids. Docs/17's
+VAL-70 row counts "at least 6 of 8 rows", which is per liquid, so §146.2 must say how a liquid
+with two to four radii counts.
+
+**The transcription guard.** `riboux_gordillo_key_reproduces_its_printed_ohnesorge_numbers`,
+in `bin/validate_key/mod.rs`'s tests, loads the key through the manifest, which pins the
+file's SHA-256. It also reads the verified text once more to recover each cell's printed
+precision, and asserts:
+
+1. the header is `liquid, rho, sigma, mu, R, l_sigma, Oh_e3, V_star, Oh_e3_fig`, and there are
+   17 rows, with liquids 1 to 8 holding 1, 4, 2, 2, 2, 2, 2 and 2 rows, in non-decreasing
+   order. Within a liquid, `R` strictly decreases and `Oh_e3` strictly increases;
+2. every row passes (146.3) and (146.4);
+3. every row's `Oh_e3_fig` is within `h(Oh_e3) + h(Oh_e3_fig)` of its own `Oh_e3`, and among
+   all 17 printed `Oh_e3` its own is the nearest in `|ln(Oh_e3_fig/Oh_e3)|`;
+4. every `V_star` lies on the figure's axis, `0 < V* < 6 m/s`, and the ethanol row at
+   `R = 1.04 mm` is within `0.005 m/s` of Fig. 1's printed `2.19`.
+
+A misread digit in `μ`, `R`, `σ` or `Oh` that moves a row outside (146.3), a misread `ρ` or
+`σ` that breaks (146.4), a dropped or doubled row, a marker assigned to the wrong row, and a
+`V*` misread at Fig. 1's row all fail the test. Each was tried as a mutation. A misread digit
+that stays inside the print's own precision is not caught. `R = 1.34` read as `1.43` with
+`μ = 1.3 cP`, or water's `0.95 cP` read as `0.9`, both pass. The re-reading of the page is the
+only guard against them. A misread `V*` away from Fig. 1's row is caught only by check (b)
+above, which is not a test.
+
+---
