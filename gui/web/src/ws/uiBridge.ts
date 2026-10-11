@@ -5,14 +5,21 @@
 // same void. Commands this web app can genuinely apply are applied here;
 // everything else is refused immediately with UNSUPPORTED so the model can
 // tell the operator the truth instead of waiting.
-import type { ClientMsg, UiCommand, UiSelection, UiState, ViewId } from '@cfd/shared'
+import type { ClientMsg, MetricRecord, UiCommand, UiSelection, UiState, ViewId, ViewerCommand } from '@cfd/shared'
+import { ViewerCommandSchema } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
 import type { ProbeOutcome, ViewerTool, ViewportRect } from '../viewer'
 import { linkCameras } from '../viewer/api/cameraLink'
 import { actions, activeCasePath } from './actions'
 import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
 import type { useSessionStore } from '../state/sessionStore'
-import type { useUiStore } from '../state/uiStore'
+// tabStateLabel / tabScreenLabel are value imports; uiStore has no DOM imports,
+// so this stays node-test safe. useUiStore itself must NOT be imported here
+// (the bridge takes its store through deps so tests can inject fakes).
+import { tabScreenLabel, tabStateLabel, type LogStream, type useUiStore } from '../state/uiStore'
+// Pure series helpers (metric matching, surface keys); series.ts only type-imports
+// the store, so this value import stays node-test safe too.
+import { findMetric, metricNames, surfaceSeriesKeys } from '../chart/series'
 
 type SessionStore = ReturnType<typeof useSessionStore.getState>
 type UiStoreState = ReturnType<typeof useUiStore.getState>
@@ -27,6 +34,10 @@ export interface UiBridgeDeps {
   saveImage?(name: string, base64: string): void
   /** How long set_camera / fit_view may wait for the canvas to mount and the camera move to finish before answering; default CAMERA_ANSWER_MS. Tests inject a short one. */
   cameraBudgetMs?: number
+  /** close_tab's bookkeeping on the editor store. Injected by client.ts; kept
+   *  optional and behind this interface because importing editorStore here
+   *  would pull monaco into the node tests. */
+  editor?: { isDirty(path: string): boolean; closeBuffer(path: string): void; removeDiff(id: string): void }
 }
 
 /** set_camera / fit_view always answer within this, below the hub's 5 s UI_TIMEOUT_MS. */
@@ -42,6 +53,105 @@ const FIELD_MAP: Record<string, { name: string; component: 'magnitude' | null }>
 /** The four geometry edit ui.commands this screen applies through the
  *  geometry studio store (E1). */
 type GeometryUiCommand = Extract<UiCommand, { type: 'geometry_part' | 'geometry_transform' | 'geometry_boolean' | 'geometry_save' }>
+
+// ---- add_layer / remove_layer (STU-04) -------------------------------------
+// A weaker model names layers loosely ("iso-surface", "ARROWS") and packs its
+// options into JSON strings; these helpers normalise all of that into the
+// viewer's own add* commands before the schema sees them.
+
+/** The five layer kinds add_layer maps onto the viewer's add* commands. */
+export const LAYER_KINDS = ['slice', 'plane', 'isoSurface', 'streamlines', 'glyphs'] as const
+export type LayerKind = (typeof LAYER_KINDS)[number]
+
+/** The args keys each kind takes; anything else is refused naming the key. */
+const LAYER_ARGS: Record<LayerKind, readonly string[]> = {
+  slice: ['id', 'axis', 'position', 'fraction'],
+  plane: ['id', 'origin', 'point', 'normal'],
+  isoSurface: ['id', 'field', 'values', 'value'],
+  streamlines: ['id', 'field', 'seed', 'style', 'maxLength', 'direction'],
+  glyphs: ['id', 'field', 'stride', 'scale', 'onSlice'],
+}
+
+/** "Iso-Surface" -> isoSurface: lower-case, drop everything outside a-z, then match the synonyms. */
+export function layerKind(kind: string): LayerKind | null {
+  const k = kind.toLowerCase().replace(/[^a-z]/g, '')
+  if (k === 'slice' || k === 'slices') return 'slice'
+  if (k === 'plane' || k === 'planes' || k === 'cutplane' || k === 'cuttingplane') return 'plane'
+  if (k === 'iso' || k === 'isosurface' || k === 'isosurfaces' || k === 'isocontour' || k === 'contour' || k === 'contours') return 'isoSurface'
+  if (k === 'streamline' || k === 'streamlines' || k === 'stream' || k === 'streamtrace' || k === 'streamtraces') return 'streamlines'
+  if (k === 'glyph' || k === 'glyphs' || k === 'arrow' || k === 'arrows' || k === 'vector' || k === 'vectors' || k === 'quiver') return 'glyphs'
+  return null
+}
+
+/** A string holding one JSON value ("{...}" / "[...]") becomes that value; anything else passes through. */
+const jsonUnwrap = (v: unknown): unknown => {
+  if (typeof v !== 'string') return v
+  const t = v.trim()
+  if (!t.startsWith('{') && !t.startsWith('[')) return v
+  try {
+    return JSON.parse(t)
+  } catch {
+    return v
+  }
+}
+
+/** x / y / z (any case) -> the unit vector a plane normal wants. */
+const AXIS_UNIT: Record<string, [number, number, number]> = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }
+
+/** Loose add_layer args -> one schema-valid viewer command, or the refusal
+ *  that names what was wrong. Pure: no store, no viewer access. */
+export function layerCommand(
+  kind: LayerKind,
+  args: Record<string, unknown>,
+  ctx: { field: string | null; bounds: { min: [number, number, number]; max: [number, number, number] } | null },
+): { ok: true; cmd: ViewerCommand } | { ok: false; error: string } {
+  for (const key of Object.keys(args))
+    if (!LAYER_ARGS[kind].includes(key))
+      return { ok: false, error: `INVALID (add_layer): args.${key} is not an option of ${kind}; options: ${LAYER_ARGS[kind].join(', ')}` }
+  // One level of JSON unwrapping on every value, and one more inside a plain-object seed.
+  const a: Record<string, unknown> = {}
+  for (const [key, v] of Object.entries(args)) a[key] = jsonUnwrap(v)
+  if (a.seed != null && typeof a.seed === 'object' && !Array.isArray(a.seed)) {
+    const seed: Record<string, unknown> = {}
+    for (const [key, v] of Object.entries(a.seed as Record<string, unknown>)) seed[key] = jsonUnwrap(v)
+    a.seed = seed
+  }
+  const id = typeof a.id === 'string' && a.id !== '' ? a.id : typeof a.id === 'number' && Number.isFinite(a.id) ? String(a.id) : null
+  const lower = (v: unknown): string | null => (typeof v === 'string' ? v.toLowerCase() : null)
+  let cmd: Record<string, unknown>
+  if (kind === 'slice') {
+    cmd = {
+      type: 'addSlice',
+      id,
+      axis: lower(a.axis),
+      position: a.position ?? (a.fraction !== undefined ? { fraction: a.fraction } : { fraction: 0.5 }),
+    }
+  } else if (kind === 'plane') {
+    const b = ctx.bounds
+    cmd = {
+      type: 'addPlane',
+      id,
+      origin: a.origin ?? a.point ?? (b ? ([0, 1, 2].map((i) => (b.min[i] + b.max[i]) / 2) as [number, number, number]) : undefined),
+      normal: typeof a.normal === 'string' ? (AXIS_UNIT[a.normal.trim().toLowerCase()] ?? a.normal) : a.normal,
+    }
+  } else if (kind === 'isoSurface') {
+    let values = a.values ?? a.value
+    if (typeof values === 'number' || typeof values === 'string') values = [values]
+    cmd = { type: 'addIsoSurface', id, field: a.field ?? ctx.field ?? undefined, values }
+  } else if (kind === 'streamlines') {
+    cmd = { type: 'addStreamlines', id, field: a.field ?? null, seed: a.seed, style: lower(a.style), maxLength: a.maxLength ?? null, direction: lower(a.direction) }
+  } else {
+    cmd = { type: 'addGlyphs', id, field: a.field ?? null, stride: a.stride ?? null, scale: a.scale ?? null, onSlice: a.onSlice ?? null }
+  }
+  const parsed = ViewerCommandSchema.safeParse(cmd)
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .slice(0, 4)
+      .map((i) => `args.${i.path.join('.')}: ${i.message}`)
+    return { ok: false, error: `INVALID (add_layer): ${issues.join('; ')}` }
+  }
+  return { ok: true, cmd: parsed.data }
+}
 
 const asVec3 = (v: unknown): v is [number, number, number] => Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number')
 
@@ -122,13 +232,19 @@ export function createUiBridge(deps: UiBridgeDeps) {
       tool: TOOL_TO_UI[v.getTool()],
       frame: null,
       projection: vs.camera.projection === 'orthographic' ? 'Orthographic' : 'Perspective',
-      showAxes: null,
-      showColorBars: null,
+      showAxes: typeof u.showAxes === 'boolean' ? u.showAxes : null,
+      showColorBars: typeof u.showColorBars === 'boolean' ? u.showColorBars : null,
+      overlays: typeof u.showAxes === 'boolean' && typeof u.showColorBars === 'boolean' ? { axes: u.showAxes, colorBars: u.showColorBars } : null,
+      bottomTab: u.bottomVisible ? (u.bottomTab ?? null) : null,
+      logs: u.logFilter ? { text: u.logFilter.text, streams: [...u.logFilter.streams], follow: u.logFilter.follow } : null,
+      metricPick: Array.isArray(u.metricSlots)
+        ? { left: u.metricSlots[0] ?? null, right: u.metricSlots[1] ?? null, mode: u.metricMode ?? 'metrics' }
+        : null,
       selection: lastSelection,
       runId: u.activeRunId,
       sim: null,
       case: casePath ? { path: casePath, name: null, dirty: null } : null,
-      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: t.kind === 'file' ? t.path : t.kind === 'residuals' ? (t.chart ?? 'residuals') : t.kind })),
+      tabs: u.tabs.map((t) => ({ id: t.id, kind: t.kind, label: tabStateLabel(t) })),
       run: null,
       viewer: {
         datasetId: vs.datasetId,
@@ -137,7 +253,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
         colormap: vs.colormap,
         range: vs.range,
         representation: vs.representation,
-        layers: null,
+        layers: Array.isArray(vs.layers) ? vs.layers.map((l) => ({ id: l.id, type: l.type, summary: l.summary })) : null,
         viewport: (() => {
           const r = v.viewport()
           return r ? { width: r.width, height: r.height } : null
@@ -236,6 +352,31 @@ export function createUiBridge(deps: UiBridgeDeps) {
     }
   }
 
+  /** The first open tab addressed by `x`: an exact id wins, then any tab whose
+   *  ui.state label or on-screen label (either locale, case-insensitive)
+   *  equals it. select_tab and close_tab both resolve this way. */
+  function findTab(u: UiStoreState, x: string) {
+    const n = x.toLowerCase()
+    return (
+      u.tabs.find((t) => t.id === x) ??
+      u.tabs.find((t) => tabStateLabel(t).toLowerCase() === n || tabScreenLabel(t, 'en').toLowerCase() === n || tabScreenLabel(t, 'ko').toLowerCase() === n) ??
+      null
+    )
+  }
+
+  /** The run the chart commands act on: the residuals tab's run when that tab
+   *  holds one, else the followed run. */
+  function chartRunId(): string | null {
+    const u = ui.getState()
+    const tab = u.tabs.find((t) => t.kind === 'residuals')
+    return tab?.kind === 'residuals' && tab.runId ? tab.runId : u.activeRunId
+  }
+
+  /** The metric records a run reported; the injected session may not carry runData at all. */
+  function runMetrics(runId: string): MetricRecord[] {
+    return session.getState().runData?.[runId]?.metrics ?? []
+  }
+
   /** The tab label a tree step or chart name matches against, best effort. */
   function openNamedTab(name: string): { ok: true } | { ok: false; error: string } {
     const n = name.toLowerCase()
@@ -258,8 +399,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
       u.setBottomTab('problems')
       return { ok: true }
     }
-    const known = ['viewer/뷰어', 'residuals/잔차', 'logs/로그', 'problems/문제']
-    return unsupported('select_tab', `no tab matching "${name}"; this screen has: ${known.join(', ')}`)
+    const ids = u.tabs.map((t) => t.id).join(', ') || 'none'
+    return { ok: false, error: `NO_TAB (select_tab): no tab "${name}"; open tabs: ${ids}; kinds that open on select: viewer, residuals, logs, problems` }
   }
 
   /** Window pixel for a probe command: at:"center" and fx,fy need the canvas rect; x,y are window pixels already. */
@@ -296,17 +437,59 @@ export function createUiBridge(deps: UiBridgeDeps) {
         session.getState().addNote(cmd.level, cmd.text)
         return { ok: true }
       case 'open_tab': {
-        const k = cmd.kind.toLowerCase()
-        if (k.includes('view')) u.openViewerTab()
-        else if (k.includes('residual') || k.includes('chart')) u.openResidualsTab(u.activeRunId)
+        // First test that matches wins; every tab on this screen is reachable.
+        const k = cmd.kind.trim().toLowerCase()
+        if (k.includes('view') || k.includes('3d')) u.openViewerTab()
+        else if (k.includes('metric')) u.openResidualsTab(u.activeRunId, 'metrics')
+        else if (k.includes('residual')) u.openResidualsTab(u.activeRunId, 'residuals')
+        else if (k.includes('chart')) u.openResidualsTab(u.activeRunId)
         else if (k.includes('log') || k.includes('terminal')) {
           u.setBottomVisible(true)
           u.setBottomTab('logs')
-        } else return unsupported('open_tab', `tab kind "${cmd.kind}" does not exist on this screen (viewer, residuals, logs)`)
+        } else if (k.includes('problem')) {
+          u.setBottomVisible(true)
+          u.setBottomTab('problems')
+        } else if (k.includes('geometry')) {
+          const p = cmd.path ?? cmd.label
+          const open = u.tabs.find((t) => t.kind === 'geometry')
+          if (p) u.openGeometryTab(p)
+          else if (open) u.activateTab(open.id)
+          else return { ok: false, error: 'INVALID (open_tab): kind "geometry" needs path (a workspace .stl, .obj or .step file)' }
+        } else if (k.includes('campaign')) {
+          const p = cmd.path ?? cmd.label
+          const open = u.tabs.find((t) => t.kind === 'campaign')
+          if (p) u.openCampaignTab(p)
+          else if (open) u.activateTab(open.id)
+          else return { ok: false, error: 'INVALID (open_tab): kind "campaign" needs path (a campaign directory)' }
+        } else
+          return {
+            ok: false,
+            error: `INVALID (open_tab): tab kind "${cmd.kind}" does not exist on this screen; kinds: viewer, residuals, metrics, logs, problems, geometry, campaign`,
+          }
         return { ok: true }
       }
-      case 'select_tab':
-        return openNamedTab(cmd.tab)
+      case 'select_tab': {
+        const found = findTab(u, cmd.tab.trim())
+        if (found) {
+          u.activateTab(found.id)
+          return { ok: true }
+        }
+        // Not open: the heuristics still open the named tab they always opened.
+        return openNamedTab(cmd.tab.trim())
+      }
+      case 'close_tab': {
+        const found = findTab(u, cmd.id.trim())
+        if (!found) {
+          const ids = u.tabs.map((t) => t.id).join(', ') || 'none'
+          return { ok: false, error: `NO_TAB (close_tab): no tab "${cmd.id}"; open tabs: ${ids}` }
+        }
+        if (found.kind === 'file' && deps.editor?.isDirty(found.path))
+          return { ok: false, error: `DIRTY (close_tab): "${found.path}" has unsaved edits; save it first or close it on screen` }
+        u.closeTab(found.id)
+        if (found.kind === 'file') deps.editor?.closeBuffer(found.path)
+        else if (found.kind === 'diff') deps.editor?.removeDiff(found.id)
+        return { ok: true }
+      }
       case 'open_case':
         u.openFile(cmd.path)
         return { ok: true }
@@ -333,13 +516,128 @@ export function createUiBridge(deps: UiBridgeDeps) {
         ui.getState().openResidualsTab(cmd.runId)
         deps.subscribeRun(cmd.runId)
         return { ok: true }
+      case 'set_post': {
+        const v = getViewerApi()
+        const vs = v.getState()
+        const fieldish = cmd.colormap != null || cmd.range != null || cmd.component != null || cmd.log != null
+        const repish = cmd.representation != null || cmd.opacity != null || cmd.patches != null
+        if (!fieldish && !repish)
+          return { ok: false, error: 'INVALID (set_post): nothing to change; give colormap, range, component, representation, opacity, patches or log' }
+        if (fieldish) {
+          if (vs.field == null) return { ok: false, error: 'NO_FIELD (set_post): no field is coloured; open_result or post_field first' }
+          const r = await v.execute({ type: 'setField', field: vs.field, component: cmd.component ?? null, range: cmd.range ?? null, colormap: cmd.colormap ?? null, log: cmd.log ?? null })
+          if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused set_post' }
+        }
+        if (repish) {
+          const r = await v.execute({ type: 'setRepresentation', mode: cmd.representation ?? vs.representation, opacity: cmd.opacity ?? null, patches: cmd.patches ?? null })
+          if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused set_post' }
+        }
+        ui.getState().openViewerTab()
+        return { ok: true }
+      }
+      case 'show_metric': {
+        const slot = cmd.slot ?? 1
+        const metric = cmd.metric ?? null
+        const trimmed = metric?.trim() ?? ''
+        if (!trimmed && cmd.mode == null) return { ok: false, error: 'INVALID (show_metric): needs a metric or a mode' }
+        if (slot !== 1 && slot !== 2) return { ok: false, error: `INVALID (show_metric): slot must be 1 (left) or 2 (right), got ${slot}` }
+        if (trimmed && cmd.mode === 'sweeps')
+          return { ok: false, error: 'INVALID (show_metric): a metric pick applies to mode "metrics"; drop the metric or send mode "metrics"' }
+        const run = chartRunId()
+        let found: string | null = null
+        if (trimmed) {
+          if (run == null) return { ok: false, error: 'NO_RUN (show_metric): no run is followed; follow_run first' }
+          const names = metricNames(runMetrics(run))
+          found = findMetric(names, metric!)
+          if (found == null)
+            return { ok: false, error: `NO_METRIC (show_metric): run "${run}" reports no metric "${metric}"; reported: ${names.join(', ') || 'none'}` }
+        }
+        if (cmd.mode != null) u.setMetricMode(cmd.mode)
+        if (found != null) {
+          if (cmd.mode == null) u.setMetricMode('metrics')
+          u.setMetricSlot(slot as 1 | 2, found)
+        }
+        u.openResidualsTab(run, 'metrics')
+        return { ok: true }
+      }
+      case 'set_log_filter': {
+        if (cmd.text === undefined && cmd.streams == null && cmd.follow == null)
+          return { ok: false, error: 'INVALID (set_log_filter): nothing to change; give text, streams or follow' }
+        if (cmd.streams != null && cmd.streams.length === 0)
+          return { ok: false, error: 'INVALID (set_log_filter): streams must name at least one of stdout, stderr, system' }
+        const patch: { text?: string; streams?: LogStream[]; follow?: boolean } = {}
+        if (cmd.text !== undefined) patch.text = cmd.text ?? ''
+        if (cmd.streams != null) patch.streams = cmd.streams
+        if (cmd.follow != null) patch.follow = cmd.follow
+        u.setLogFilter(patch)
+        u.setBottomVisible(true)
+        u.setBottomTab('logs')
+        return { ok: true }
+      }
       case 'show_chart':
         if (cmd.chart === 'residuals' || cmd.chart === 'metrics') {
           if (cmd.runId) deps.subscribeRun(cmd.runId)
           u.openResidualsTab(cmd.runId ?? u.activeRunId, cmd.chart)
           return { ok: true }
         }
-        return unsupported('show_chart', `chart "${cmd.chart}" has no tab here (residuals, metrics)`)
+        // surface: the run's per-patch surface-integral series (<patch>.<quantity> metrics).
+        {
+          const run = cmd.runId ?? chartRunId()
+          if (run == null) return { ok: false, error: 'NO_SURFACE_METRICS (show_chart): no run is followed; follow_run or pass runId' }
+          if (cmd.runId) deps.subscribeRun(cmd.runId)
+          const recs = runMetrics(run)
+          if (!surfaceSeriesKeys(recs).length) {
+            const names = metricNames(recs)
+            return {
+              ok: false,
+              error: `NO_SURFACE_METRICS (show_chart): run "${run}" reports no per-patch surface-integral series (<patch>.<quantity>, e.g. fan.Q); its metrics: ${names.join(', ') || 'none'}`,
+            }
+          }
+          u.openResidualsTab(run, 'surface')
+          return { ok: true }
+        }
+      case 'add_layer': {
+        // Loose kind + args -> one schema-valid viewer command, then the same
+        // race set_camera runs: the answer must beat the hub's 5 s.
+        const k = layerKind(cmd.kind)
+        if (k == null)
+          return { ok: false, error: `INVALID (add_layer): unknown kind "${cmd.kind}"; kinds: ${LAYER_KINDS.join(', ')}` }
+        const vs = getViewerApi().getState()
+        const built = layerCommand(k, cmd.args ?? {}, { field: vs.field ?? null, bounds: vs.bounds ?? null })
+        if (!built.ok) return built
+        ui.getState().openViewerTab()
+        const v = getViewerApi()
+        const budget = deps.cameraBudgetMs ?? CAMERA_ANSWER_MS
+        let raceTimer: ReturnType<typeof setTimeout> | null = null
+        const done = await Promise.race([
+          v.execute(built.cmd),
+          new Promise<null>((resolve) => {
+            raceTimer = setTimeout(() => resolve(null), budget)
+          }),
+        ])
+        if (raceTimer) clearTimeout(raceTimer)
+        if (done === null)
+          return { ok: false, error: `BUSY (add_layer): the viewer did not answer within ${budget} ms; the layer is queued and applies when the viewer is ready` }
+        return done.ok ? { ok: true } : { ok: false, error: done.error ? `${done.error.code} (add_layer): ${done.error.message}` : 'the viewer refused add_layer' }
+      }
+      case 'remove_layer': {
+        const v = getViewerApi()
+        const ids = (v.getState().layers ?? []).map((l) => l.id)
+        if (!ids.includes(cmd.id))
+          return { ok: false, error: `NO_SUCH_LAYER (remove_layer): no layer "${cmd.id}"; layers: ${ids.join(', ') || 'none'}` }
+        const budget = deps.cameraBudgetMs ?? CAMERA_ANSWER_MS
+        let raceTimer: ReturnType<typeof setTimeout> | null = null
+        const done = await Promise.race([
+          v.execute({ type: 'remove', id: cmd.id }),
+          new Promise<null>((resolve) => {
+            raceTimer = setTimeout(() => resolve(null), budget)
+          }),
+        ])
+        if (raceTimer) clearTimeout(raceTimer)
+        if (done === null)
+          return { ok: false, error: `BUSY (remove_layer): the viewer did not answer within ${budget} ms; the removal is queued` }
+        return done.ok ? { ok: true } : { ok: false, error: done.error ? `${done.error.code} (remove_layer): ${done.error.message}` : 'the viewer refused remove_layer' }
+      }
       case 'set_camera':
       case 'fit_view': {
         // A camera move must be answered inside the hub's 5 s: open the tab
@@ -461,7 +759,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
           ui.getState().openViewerTab()
           return noViewer(cmd.type)
         }
-        const r = await v.execute({ type: 'screenshot', width: null, height: null, includeLegend: true })
+        const r = await v.execute({ type: 'screenshot', width: null, height: null, includeLegend: u.showColorBars !== false })
         ui.getState().openViewerTab()
         if (!r.ok) return { ok: false, error: r.error?.message ?? 'the viewer refused the screenshot' }
         if (!r.image) return { ok: false, error: 'NO_IMAGE (post_screenshot): the viewer returned no image' }
@@ -512,6 +810,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
         }
         return { ok: true }
       case 'show_overlay':
+        u.setOverlay(cmd.what, cmd.on)
+        return { ok: true }
       case 'set_centerline':
       case 'select_step':
         return unsupported(cmd.type, 'this screen does not implement it')

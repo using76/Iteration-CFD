@@ -9,8 +9,8 @@
 //! optional REACTIONS block) read into a validated [`Mechanism`]: every
 //! coefficient is an exact [`Rational`], every reaction's element balance is
 //! checked exactly, and every rate is stored in SI as `A`, `beta` and
-//! `theta = E/R`. SPEC-LIT §129 is the contract, with §130.2 for the units
-//! and §130.5 for FORD and RORD.
+//! `theta = E/R`. SPEC-LIT §129 is the contract, with §130.2 for the units,
+//! §130.4 for the fall-off forms and §130.5 for FORD and RORD.
 //!
 //! Written from:
 //!   SPEC-LIT §129, §130.2 and §130.5
@@ -25,8 +25,11 @@
 //! No CHEMKIN, Cantera or other reader's source was opened. No GPL-licensed
 //! source was consulted.
 //!
-//! The fall-off family (`(+M)`, `LOW`, `TROE`, `SRI`), `REV` and `DUP` are
-//! refused here with the words `not read yet`: the next unit reads them.
+//! The fall-off family (`(+M)`, `(+SPECIES)`, `LOW`, `TROE`, `SRI`), `REV`
+//! and `DUP` are read: into the [`Collider`], [`Blending`] and [`Falloff`]
+//! of a reaction, and into `Reaction::reverse` and `Reaction::duplicate`
+//! (SPEC-LIT §129.5, with §130.4 for the forms they mean). `PLOG`, `CHEB`
+//! and the rest of §129.5's refused set stay refused by name.
 //!
 //! Host only, and f64 everywhere: no `Scalar`, no device types, so the module
 //! and its tests behave identically in the default build and in
@@ -195,6 +198,53 @@ pub struct ThirdBody {
     pub efficiencies: Vec<(usize, f64)>,
 }
 
+/// The collider `X` of a fall-off reaction's `(+X)` marker (SPEC-LIT §129.5,
+/// §130.4): `(+M)` with its efficiency items, or one named species, whose
+/// concentration alone is `[M]` of (130.8) (SAND89-8009 eq. (63)).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Collider {
+    /// `(+M)`, with the reaction's enhanced efficiencies (130.3).
+    Mixture(ThirdBody),
+    /// `(+SPECIES)`: the species' index in [`Mechanism::species`] order, which
+    /// takes no efficiency item.
+    Species(usize),
+}
+
+/// The blending factor `F` of (130.8) (SPEC-LIT §130.4): Lindemann's `F = 1`,
+/// or Troe's (130.9)-(130.11), or SRI's (130.12).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Blending {
+    /// `F = 1` (SAND89-8009 eqs. (62)-(63)): no `TROE` or `SRI` was given.
+    Lindemann,
+    /// `TROE / a T*** T* [T**] /` in written order (130.9)-(130.11); without
+    /// `T**` the last term of (130.11) is absent (SAND89-8009 p. 23).
+    Troe {
+        a: f64,
+        /// T***, in kelvin.
+        t3: f64,
+        /// T*, in kelvin.
+        t1: f64,
+        /// T**, in kelvin, when the fourth number was given.
+        t2: Option<f64>,
+    },
+    /// `SRI / a b c [d e] /` in written order (130.12), with `d = 1.0` and
+    /// `e = 0.0` when the fourth and fifth numbers are omitted.
+    Sri { a: f64, b: f64, c: f64, d: f64, e: f64 },
+}
+
+/// A fall-off reaction: `(+X)` on both sides, its `LOW` low-pressure limit
+/// and its blending (SPEC-LIT §129.5, §130.4). The reaction line's own rate
+/// is `k_inf` of (130.8) and `low` is its `k_0`, both in SI (§130.2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Falloff {
+    pub collider: Collider,
+    /// `LOW / A0 beta0 E0 /` converted with the reaction's units and
+    /// `molecularity() + 1.0` (§130.2).
+    pub low: Arrhenius,
+    /// `TROE` or `SRI` when given, else [`Blending::Lindemann`].
+    pub blending: Blending,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reaction {
     /// The 1-based line of the reaction line in the mechanism text.
@@ -208,11 +258,19 @@ pub struct Reaction {
     /// (species index, nu'') merged per species, in order of first appearance.
     pub products: Vec<(usize, Rational)>,
     pub third_body: Option<ThirdBody>,
+    /// The `(+X)` fall-off data when the equation carries the marker on both
+    /// sides; then `third_body` is None (SPEC-LIT §129.5, §130.4).
+    pub falloff: Option<Falloff>,
     pub rate: Arrhenius,
+    /// The explicit reverse rate of `REV / A beta E /`, in SI, converted with
+    /// `m_r` = the reverse orders' sum plus 1 with a plain `+M` (§130.2).
+    pub reverse: Option<Arrhenius>,
     /// FORD overrides in written order: (species index, order).
     pub ford: Vec<(usize, f64)>,
     /// RORD overrides in written order: (species index, order).
     pub rord: Vec<(usize, f64)>,
+    /// `DUP` or `DUPLICATE` was given for this reaction (SPEC-LIT §129.5).
+    pub duplicate: bool,
 }
 
 /// (130.13) for one side: each species of `side` with its override if given, else its
@@ -357,6 +415,17 @@ struct Pending {
     energy: Option<EnergyUnit>,
     a_unit: Option<AUnit>,
     units_seen: bool,
+    /// `LOW`'s three numbers as written; converted at close, because UNITS
+    /// may come after the LOW line (SPEC-LIT §129.5).
+    low: Option<[f64; 3]>,
+    /// `TROE`'s blending when given.
+    troe: Option<Blending>,
+    /// `SRI`'s blending when given.
+    sri: Option<Blending>,
+    /// `REV`'s three numbers as written; converted at close like `low`.
+    rev: Option<[f64; 3]>,
+    /// `DUP` or `DUPLICATE` was given.
+    dup: bool,
 }
 
 /// One side of an equation.
@@ -391,8 +460,6 @@ fn a_si_of(a: f64, unit: AUnit, m: f64) -> f64 {
     }
 }
 
-/// The auxiliary keywords the next unit reads (docs/17 CHR-02b).
-const NEXT_UNIT: [&str; 6] = ["LOW", "TROE", "SRI", "REV", "DUP", "DUPLICATE"];
 /// The auxiliary keywords SPEC-LIT §129.5 refuses by name.
 const BY_NAME: [&str; 12] = [
     "HIGH", "LT", "RLT", "JAN", "FIT1", "HV", "TDEP", "EXCI", "MOME", "XSMI", "PLOG", "CHEB",
@@ -945,9 +1012,71 @@ impl<'a> Reader<'a> {
         }
 
         let (reversible, left, right) = self.split_equation(lno, equation)?;
+        let (left, left_x) = self.split_marker(lno, &left, equation)?;
+        let (right, right_x) = self.split_marker(lno, &right, equation)?;
+        let collider_x = match (left_x, right_x) {
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return Err(self.err(
+                        lno,
+                        format!(
+                            "reaction {equation}: the two sides name different colliders, \
+                             (+{x}) and (+{y}); both sides carry the same one (SPEC-LIT §129.5)"
+                        ),
+                    ));
+                }
+                Some(x)
+            }
+            (Some(x), None) | (None, Some(x)) => {
+                return Err(self.err(
+                    lno,
+                    format!(
+                        "reaction {equation}: only one side carries the (+{x}) marker; both \
+                         sides carry it, or neither does (SPEC-LIT §129.5)"
+                    ),
+                ));
+            }
+            (None, None) => None,
+        };
         let (reactants, third_left) = self.read_side(lno, &left, equation)?;
         let (products, third_right) = self.read_side(lno, &right, equation)?;
-        let third_body = (third_left || third_right).then(|| ThirdBody { efficiencies: Vec::new() });
+        let plain_third = third_left || third_right;
+        let falloff = match collider_x {
+            Some(x) => {
+                let collider = if x.eq_ignore_ascii_case("M") {
+                    Collider::Mixture(ThirdBody { efficiencies: Vec::new() })
+                } else {
+                    match self.species_ix.get(x.as_str()) {
+                        Some(&k) => Collider::Species(k),
+                        None => {
+                            return Err(self.err(
+                                lno,
+                                format!(
+                                    "reaction {equation}: the marker (+{x}) names neither M \
+                                     nor a declared species (SPEC-LIT §129.5)"
+                                ),
+                            ));
+                        }
+                    }
+                };
+                if plain_third {
+                    return Err(self.err(
+                        lno,
+                        format!(
+                            "reaction {equation}: a (+...) fall-off reaction has no plain \
+                             third body M, and the equation writes both (SPEC-LIT §129.5)"
+                        ),
+                    ));
+                }
+                Some(Falloff {
+                    collider,
+                    low: Arrhenius { a: 0.0, beta: 0.0, theta: 0.0 },
+                    blending: Blending::Lindemann,
+                })
+            }
+            None => None,
+        };
+        let third_body = plain_third.then(|| ThirdBody { efficiencies: Vec::new() });
         let rx = Reaction {
             line: lno,
             equation: equation.to_string(),
@@ -955,9 +1084,12 @@ impl<'a> Reader<'a> {
             reactants,
             products,
             third_body,
+            falloff,
             rate: Arrhenius { a: 0.0, beta: 0.0, theta: 0.0 },
+            reverse: None,
             ford: Vec::new(),
             rord: Vec::new(),
+            duplicate: false,
         };
         Ok(Pending {
             rx,
@@ -967,22 +1099,19 @@ impl<'a> Reader<'a> {
             energy: None,
             a_unit: None,
             units_seen: false,
+            low: None,
+            troe: None,
+            sri: None,
+            rev: None,
+            dup: false,
         })
     }
 
     /// The delimiter: exactly one `=`, as `=`, `<=>` or `=>`. Returns (reversible, left, right)
-    /// with the whitespace removed from both sides.
+    /// with the whitespace removed from both sides. The `(+X)` markers stay on their sides,
+    /// for [`Reader::split_marker`].
     fn split_equation(&self, lno: usize, equation: &str) -> crate::Result<(bool, String, String)> {
         let compact: String = equation.chars().filter(|c| !c.is_whitespace()).collect();
-        if compact.contains("(+") {
-            return Err(self.err(
-                lno,
-                format!(
-                    "reaction {equation}: a fall-off or collider term (+...) is not read yet; \
-                     the next unit, docs/17 CHR-02b, reads it"
-                ),
-            ));
-        }
         let eq_count = compact.matches('=').count();
         if eq_count != 1 {
             return Err(self.err(
@@ -1008,6 +1137,45 @@ impl<'a> Reader<'a> {
             Some(r) => (false, l.to_string(), r.to_string()),
             None => (true, l.to_string(), r.to_string()),
         })
+    }
+
+    /// The `(+X)` marker at the end of one compacted side (SPEC-LIT §129.5):
+    /// the terms before it and the marker's `X`. The marker is the last `(+`
+    /// of the side, found when the side ends in `)`; a species name may hold
+    /// parentheses (`CH2(S)`), never `(+`, so any other `(+` on the side is
+    /// refused.
+    fn split_marker(
+        &self,
+        lno: usize,
+        side: &str,
+        equation: &str,
+    ) -> crate::Result<(String, Option<String>)> {
+        let elsewhere = |why: &str| {
+            self.err(
+                lno,
+                format!(
+                    "reaction {equation}: the side \"{side}\" holds a (+ that is {why}; a \
+                     species name may hold parentheses, never (+ (SPEC-LIT §129.5)"
+                ),
+            )
+        };
+        let Some(p) = side.rfind("(+") else {
+            return Ok((side.to_string(), None));
+        };
+        if !side.ends_with(')') {
+            return Err(elsewhere("not the side's closing (+X) marker"));
+        }
+        if side[..p].contains("(+") {
+            return Err(elsewhere("not the side's single closing (+X) marker"));
+        }
+        let x = side[p + 2..side.len() - 1].to_string();
+        if x.is_empty() {
+            return Err(self.err(
+                lno,
+                format!("reaction {equation}: the side \"{side}\" ends in a (+) that names no collider"),
+            ));
+        }
+        Ok((side[..p].to_string(), Some(x)))
     }
 
     /// One side of an equation with its whitespace removed: the species with their exact
@@ -1146,16 +1314,18 @@ impl<'a> Reader<'a> {
         match key.as_str() {
             "FORD" | "RORD" => self.apply_order(lno, &key, it, &params, p),
             "UNITS" => self.apply_units(lno, it, &params, p),
-            k if NEXT_UNIT.contains(&k) => Err(self.err(
-                lno,
-                format!(
-                    "the keyword {key} is not read yet; the next unit, docs/17 CHR-02b, reads \
-                     LOW, TROE, SRI, REV, DUP and DUPLICATE"
-                ),
-            )),
+            "LOW" => self.apply_low(lno, &key, &params, p),
+            "TROE" => self.apply_troe(lno, &key, &params, p),
+            "SRI" => self.apply_sri(lno, &key, &params, p),
+            "REV" => self.apply_rev(lno, &key, &params, p),
+            "DUP" | "DUPLICATE" => self.apply_dup(lno, &key, it, p),
             k if BY_NAME.contains(&k) => Err(self.err(
                 lno,
-                format!("the keyword {key} is refused by name (SPEC-LIT §129.5)"),
+                format!(
+                    "the keyword {key} is refused by name (SPEC-LIT §129.5); the recognised \
+                     auxiliary keywords are FORD, RORD, UNITS, LOW, TROE, SRI, REV, DUP and \
+                     DUPLICATE"
+                ),
             )),
             _ => match self.species_ix.get(it.name.as_str()) {
                 Some(&k) => self.apply_efficiency(lno, it, &params, k, p),
@@ -1170,6 +1340,189 @@ impl<'a> Reader<'a> {
                 )),
             },
         }
+    }
+
+    /// The field of `LOW`, `TROE`, `SRI` or `REV` as numbers: one of the
+    /// allowed counts, each a finite number, with the keyword naming every
+    /// refusal (SPEC-LIT §129.5).
+    fn aux_numbers(
+        &self,
+        lno: usize,
+        key: &str,
+        params: &[&str],
+        counts: &[usize],
+    ) -> crate::Result<Vec<f64>> {
+        if !counts.contains(&params.len()) {
+            let want = counts
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" or ");
+            return Err(self.err(
+                lno,
+                format!("{key} takes {want} numbers, and the field holds {}", params.len()),
+            ));
+        }
+        let mut out = Vec::with_capacity(params.len());
+        for tok in params {
+            match parse_f64(tok) {
+                Some(v) => out.push(v),
+                None => {
+                    return Err(
+                        self.err(lno, format!("{key}: \"{tok}\" is not a finite number"))
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `LOW / A0 beta0 E0 /`: the low-pressure limit `k_0` of (130.8), read as
+    /// written and converted when the reaction closes (SPEC-LIT §129.5).
+    fn apply_low(&self, lno: usize, key: &str, params: &[&str], p: &mut Pending) -> crate::Result<()> {
+        if p.rx.falloff.is_none() {
+            return Err(self.err(
+                lno,
+                format!(
+                    "{key} is a fall-off keyword, and reaction {} has no (+...) marker \
+                     (SPEC-LIT §129.5)",
+                    p.rx.equation
+                ),
+            ));
+        }
+        if p.low.is_some() {
+            return Err(self.err(lno, format!("{key} is given twice for one reaction")));
+        }
+        let v = self.aux_numbers(lno, key, params, &[3])?;
+        p.low = Some([v[0], v[1], v[2]]);
+        Ok(())
+    }
+
+    /// `TROE / a T*** T* [T**] /` (130.9)-(130.11). `T***` and `T*` divide in
+    /// (130.11) and must be nonzero (SPEC-LIT §129.5).
+    fn apply_troe(&self, lno: usize, key: &str, params: &[&str], p: &mut Pending) -> crate::Result<()> {
+        if p.rx.falloff.is_none() {
+            return Err(self.err(
+                lno,
+                format!(
+                    "{key} is a fall-off keyword, and reaction {} has no (+...) marker \
+                     (SPEC-LIT §129.5)",
+                    p.rx.equation
+                ),
+            ));
+        }
+        if p.troe.is_some() {
+            return Err(self.err(lno, format!("{key} is given twice for one reaction")));
+        }
+        let v = self.aux_numbers(lno, key, params, &[3, 4])?;
+        if v[1] == 0.0 || v[2] == 0.0 {
+            return Err(self.err(
+                lno,
+                format!(
+                    "{key}: T*** and T* divide in (130.11) and must be nonzero; the field \
+                     holds {}", params.join(" ")
+                ),
+            ));
+        }
+        if p.sri.is_some() {
+            return Err(self.err(
+                lno,
+                format!(
+                    "{key} and SRI are both given for reaction {}, and a fall-off reaction \
+                     takes one blending at most (SPEC-LIT §129.5)",
+                    p.rx.equation
+                ),
+            ));
+        }
+        p.troe = Some(Blending::Troe { a: v[0], t3: v[1], t1: v[2], t2: v.get(3).copied() });
+        Ok(())
+    }
+
+    /// `SRI / a b c [d e] /` (130.12), with `d = 1` and `e = 0` when omitted.
+    /// `c` divides in (130.12) and must be nonzero (SPEC-LIT §129.5).
+    fn apply_sri(&self, lno: usize, key: &str, params: &[&str], p: &mut Pending) -> crate::Result<()> {
+        if p.rx.falloff.is_none() {
+            return Err(self.err(
+                lno,
+                format!(
+                    "{key} is a fall-off keyword, and reaction {} has no (+...) marker \
+                     (SPEC-LIT §129.5)",
+                    p.rx.equation
+                ),
+            ));
+        }
+        if p.sri.is_some() {
+            return Err(self.err(lno, format!("{key} is given twice for one reaction")));
+        }
+        let v = self.aux_numbers(lno, key, params, &[3, 5])?;
+        if v[2] == 0.0 {
+            return Err(self.err(
+                lno,
+                format!("{key}: c divides in (130.12) and must be nonzero; the field holds {}", params.join(" ")),
+            ));
+        }
+        if p.troe.is_some() {
+            return Err(self.err(
+                lno,
+                format!(
+                    "TROE and {key} are both given for reaction {}, and a fall-off reaction \
+                     takes one blending at most (SPEC-LIT §129.5)",
+                    p.rx.equation
+                ),
+            ));
+        }
+        p.sri = Some(Blending::Sri {
+            a: v[0],
+            b: v[1],
+            c: v[2],
+            d: v.get(3).copied().unwrap_or(1.0),
+            e: v.get(4).copied().unwrap_or(0.0),
+        });
+        Ok(())
+    }
+
+    /// `REV / A beta E /`, read as written and converted when the reaction
+    /// closes (SPEC-LIT §129.5).
+    fn apply_rev(&self, lno: usize, key: &str, params: &[&str], p: &mut Pending) -> crate::Result<()> {
+        if !p.rx.reversible {
+            return Err(self.err(
+                lno,
+                format!(
+                    "{key} on the irreversible reaction {}: an irreversible reaction has no \
+                     reverse rate (SPEC-LIT §129.5)",
+                    p.rx.equation
+                ),
+            ));
+        }
+        if p.rx.falloff.is_some() {
+            return Err(self.err(
+                lno,
+                format!(
+                    "{key} on the fall-off reaction {}: a reverse fall-off needs its own \
+                     blending, and this reader reads none (SPEC-LIT §129.5)",
+                    p.rx.equation
+                ),
+            ));
+        }
+        if p.rev.is_some() {
+            return Err(self.err(lno, format!("{key} is given twice for one reaction")));
+        }
+        let v = self.aux_numbers(lno, key, params, &[3])?;
+        p.rev = Some([v[0], v[1], v[2]]);
+        Ok(())
+    }
+
+    /// `DUP` or `DUPLICATE`: no `/.../` field, once per reaction (SPEC-LIT
+    /// §129.5).
+    fn apply_dup(&self, lno: usize, key: &str, it: &SlashItem, p: &mut Pending) -> crate::Result<()> {
+        if it.content.is_some() {
+            return Err(self.err(lno, format!("{key} takes no /.../ field (SPEC-LIT §129.5)")));
+        }
+        if p.dup {
+            return Err(self.err(lno, format!("{key} is given twice for one reaction")));
+        }
+        p.dup = true;
+        Ok(())
     }
 
     /// `FORD /species order/` or `RORD /species order/` (SPEC-LIT §130.5).
@@ -1303,15 +1656,34 @@ impl<'a> Reader<'a> {
         p: &mut Pending,
     ) -> crate::Result<()> {
         let name = &it.name;
-        let Some(tb) = p.rx.third_body.as_mut() else {
-            return Err(self.err(
-                lno,
-                format!(
-                    "the efficiency of {name} is given for reaction {}, which has no third \
-                     body M",
-                    p.rx.equation
-                ),
-            ));
+        let tb = match p.rx.falloff.as_mut() {
+            Some(f) => match &mut f.collider {
+                Collider::Mixture(tb) => tb,
+                Collider::Species(_) => {
+                    return Err(self.err(
+                        lno,
+                        format!(
+                            "the efficiency of {name} is given for reaction {}, whose (+...) \
+                             collider is one species; a (+SPECIES) fall-off takes no \
+                             efficiency item (SAND89-8009 eq. (63), SPEC-LIT §129.5)",
+                            p.rx.equation
+                        ),
+                    ));
+                }
+            },
+            None => match p.rx.third_body.as_mut() {
+                Some(tb) => tb,
+                None => {
+                    return Err(self.err(
+                        lno,
+                        format!(
+                            "the efficiency of {name} is given for reaction {}, which has no \
+                             third body M",
+                            p.rx.equation
+                        ),
+                    ));
+                }
+            },
         };
         if it.content.is_none() {
             return Err(self.err(lno, format!("the efficiency of {name} needs a /number/ field")));
@@ -1340,25 +1712,81 @@ impl<'a> Reader<'a> {
 
     // ---- a finished reaction ---------------------------------------------
 
-    /// The rate in SI, the exact element balance, and the reversible-with-orders note.
+    /// The rates in SI (the reaction line's `k_inf`, and `LOW`'s `k_0` and
+    /// `REV`'s reverse, converted here because FORD, RORD and UNITS may come
+    /// after their lines: SPEC-LIT §129.5, §130.2), the exact element balance,
+    /// and the reversible-with-orders note.
     fn complete(&mut self, p: Pending) -> crate::Result<()> {
-        let Pending { mut rx, a, beta, e, energy, a_unit, .. } = p;
-        let m = rx.molecularity();
-        let theta = theta_of(e, energy.unwrap_or(self.block_energy));
-        let a_si = a_si_of(a, a_unit.unwrap_or(self.block_a), m);
-        if !a_si.is_finite() || !theta.is_finite() {
+        let Pending {
+            mut rx,
+            a,
+            beta,
+            e,
+            energy,
+            a_unit,
+            low,
+            troe,
+            sri,
+            rev,
+            dup,
+            ..
+        } = p;
+        rx.duplicate = dup;
+        if rx.falloff.is_some() && low.is_none() {
             return Err(self.err(
                 rx.line,
                 format!(
-                    "reaction {}: the rate converts to a non-finite SI value (A = {a_si}, \
-                     theta = {theta} K)",
+                    "the fall-off reaction {} has no LOW: its low-pressure limit k_0 is \
+                     missing (SPEC-LIT §129.5)",
                     rx.equation
                 ),
             ));
         }
-        rx.rate = Arrhenius { a: a_si, beta, theta };
+        let units = energy.unwrap_or(self.block_energy);
+        let a_u = a_unit.unwrap_or(self.block_a);
+        let m = rx.molecularity();
+        rx.rate = Arrhenius { a: a_si_of(a, a_u, m), beta, theta: theta_of(e, units) };
+        if let Some(f) = rx.falloff.as_mut() {
+            let [a0, b0, e0] = low.unwrap();
+            f.low = Arrhenius { a: a_si_of(a0, a_u, m + 1.0), beta: b0, theta: theta_of(e0, units) };
+            f.blending = troe.or(sri).unwrap_or(Blending::Lindemann);
+        }
+        if let Some([ar, br, er]) = rev {
+            let m_r = rx.reverse_orders().iter().fold(0.0f64, |acc, (_, o)| acc + o)
+                + if rx.third_body.is_some() { 1.0 } else { 0.0 };
+            rx.reverse =
+                Some(Arrhenius { a: a_si_of(ar, a_u, m_r), beta: br, theta: theta_of(er, units) });
+        }
+        let mut bad = Vec::new();
+        if !rx.rate.a.is_finite() || !rx.rate.theta.is_finite() {
+            bad.push("the reaction-line rate");
+        }
+        if let Some(f) = &rx.falloff {
+            if !f.low.a.is_finite() || !f.low.theta.is_finite() {
+                bad.push("LOW");
+            }
+        }
+        if let Some(r) = &rx.reverse {
+            if !r.a.is_finite() || !r.theta.is_finite() {
+                bad.push("REV");
+            }
+        }
+        if !bad.is_empty() {
+            let what = bad.join(" and ");
+            return Err(self.err(
+                rx.line,
+                format!(
+                    "reaction {}: the {what} converts to a non-finite SI value (A = {}, \
+                     theta = {} K)",
+                    rx.equation, rx.rate.a, rx.rate.theta
+                ),
+            ));
+        }
         self.check_balance(&rx)?;
-        if rx.reversible && (!rx.ford.is_empty() || !rx.rord.is_empty()) {
+        if rx.reversible
+            && rx.reverse.is_none()
+            && (!rx.ford.is_empty() || !rx.rord.is_empty())
+        {
             self.notes.push(format!(
                 "line {}: reaction {} is reversible and has FORD or RORD with no REV; its \
                  reverse rate from (130.5) is not consistent with equilibrium (SPEC-LIT §130.5)",
@@ -1417,9 +1845,26 @@ impl<'a> Reader<'a> {
     }
 
     /// Two reactions are the same when their sides agree, or agree reversed with at least one
-    /// of them reversible, and both or neither have a third body (SPEC-LIT §129.5). DUP is
-    /// not read yet, so none is permitted.
+    /// of them reversible, and they are of the same kind (SPEC-LIT §129.5): no third body, a
+    /// plain `+M`, a `(+M)`, or a `(+SPECIES)` with its species. A pair is read when both
+    /// copies carry DUP; a pair with one copy missing it is refused at the later line, and a
+    /// DUP reaction with no twin is refused at its own line.
     fn check_duplicates(&self) -> crate::Result<()> {
+        #[derive(PartialEq, Eq)]
+        enum Kind {
+            Plain,
+            ThirdBody,
+            Mixture,
+            Species(usize),
+        }
+        let kind = |r: &Reaction| match &r.falloff {
+            Some(f) => match &f.collider {
+                Collider::Mixture(_) => Kind::Mixture,
+                Collider::Species(k) => Kind::Species(*k),
+            },
+            None if r.third_body.is_some() => Kind::ThirdBody,
+            None => Kind::Plain,
+        };
         let sorted = |v: &[(usize, Rational)]| {
             let mut s = v.to_vec();
             s.sort_by_key(|(k, _)| *k);
@@ -1430,9 +1875,11 @@ impl<'a> Reader<'a> {
             .iter()
             .map(|r| (sorted(&r.reactants), sorted(&r.products)))
             .collect();
+        let kinds: Vec<Kind> = self.reactions.iter().map(&kind).collect();
+        let mut twinned = vec![false; self.reactions.len()];
         for (j, later) in self.reactions.iter().enumerate() {
             for (i, earlier) in self.reactions.iter().enumerate().take(j) {
-                if later.third_body.is_some() != earlier.third_body.is_some() {
+                if kinds[i] != kinds[j] {
                     continue;
                 }
                 let same = keys[i] == keys[j];
@@ -1440,15 +1887,33 @@ impl<'a> Reader<'a> {
                     && keys[i].1 == keys[j].0
                     && (later.reversible || earlier.reversible);
                 if same || swapped {
+                    twinned[i] = true;
+                    twinned[j] = true;
+                    if later.duplicate && earlier.duplicate {
+                        continue;
+                    }
                     return Err(self.err(
                         later.line,
                         format!(
-                            "reaction {} repeats the reaction of line {} ({}); DUP is not read \
-                             yet, so no duplicate is permitted (SPEC-LIT §129.5)",
-                            later.equation, earlier.line, earlier.equation
+                            "the reaction of line {} repeats the reaction of line {} ({}); a \
+                             repeated reaction is read only when every copy carries DUP \
+                             (SPEC-LIT §129.5)",
+                            later.line, earlier.line, earlier.equation
                         ),
                     ));
                 }
+            }
+        }
+        for (r, twin) in self.reactions.iter().zip(&twinned) {
+            if r.duplicate && !twin {
+                return Err(self.err(
+                    r.line,
+                    format!(
+                        "the reaction {} carries DUP and has no twin to be its duplicate \
+                         (SPEC-LIT §129.5)",
+                        r.equation
+                    ),
+                ));
             }
         }
         Ok(())

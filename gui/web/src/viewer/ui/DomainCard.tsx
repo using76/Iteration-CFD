@@ -5,9 +5,10 @@ function dim(v: number): string {
   return v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : Number(v.toPrecision(3)).toString()
 }
 
-export function DomainCard({ locale, manifest, projection, onToggleProjection }: { locale: Locale; manifest: ViewerDataset; projection: 'perspective' | 'orthographic'; onToggleProjection: () => void }) {
+export function DomainCard({ locale, manifest, projection, onToggleProjection, hiddenPatches = [] }: { locale: Locale; manifest: ViewerDataset; projection: 'perspective' | 'orthographic'; onToggleProjection: () => void; hiddenPatches?: string[] }) {
   const b = manifest.bounds
   const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]]
+  const VISIBLE_CAP = 8
   return (
     <div className="v3d-card v3d-domain" data-testid="viewer-domain">
       <div>
@@ -17,6 +18,12 @@ export function DomainCard({ locale, manifest, projection, onToggleProjection }:
         <b>{t(locale, 'viewer.cells')}:</b> {manifest.cellCount.toLocaleString()} ({manifest.grid ? 'Structured' : 'Unstructured'}
         {manifest.geometryFidelity === 'proxy' ? ', proxy' : ''})
       </div>
+      {hiddenPatches.length > 0 && (
+        <div data-testid="viewer-domain-hidden" title={hiddenPatches.join(', ')}>
+          <b>{t(locale, 'viewer.hiddenPatches')}:</b> {hiddenPatches.slice(0, VISIBLE_CAP).join(', ')}
+          {hiddenPatches.length > VISIBLE_CAP ? ` ${t(locale, 'viewer.hiddenMore', { n: hiddenPatches.length - VISIBLE_CAP })}` : ''}
+        </div>
+      )}
       <div>
         <b>{t(locale, 'viewer.view')}:</b>{' '}
         <span className="toggle" onClick={onToggleProjection} role="button" title="Toggle projection">

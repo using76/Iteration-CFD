@@ -76,7 +76,7 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
   // The agent's gui_control drives this screen through ui.command; the bridge
   // applies what it can and answers every command, so the model never waits
   // out the hub's 5 s timeout on a frame nothing would ever answer.
-  const uiBridge = createUiBridge({ send, ui, session, subscribeRun })
+  const uiBridge = createUiBridge({ send, ui, session, subscribeRun, editor: { isDirty: (path) => !!useEditorStore.getState().buffers[path]?.dirty, closeBuffer: (path) => useEditorStore.getState().closeBuffer(path), removeDiff: (id) => useEditorStore.getState().removeDiff(id) } })
 
   function subscribeRun(runId: string) {
     const data = session.getState().runData[runId]

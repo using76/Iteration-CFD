@@ -39317,6 +39317,26 @@ builds `W_k` from the element counts and such a species has none. The supervisor
 §129.6 (the digest listed there): it reads all 53 records, with `T_mid` 1382,
 1368 and 1478 K for HCNO, HOCN and HNCO.
 
+**A fourth layout, accepted (CHR-02b, DESIGN).** GRI-Mech 1.2's
+`thermo12.dat`, the thermo file DRM19 names (§129.6), fills an unused element
+slot with a blank symbol and the count `00` (`O   1   00   00   00G`).
+Read strictly, every such record is refused for a count with no element. A
+slot whose symbol is blank and whose count is blank or reads as the integer 0
+(`0`, `00`, `000`) is an empty slot: it can name no element, so dropping it
+changes no species' formula. A blank symbol with a nonzero count is still
+refused by name.
+
+The same file's HCCOH record writes its phase letter a second time in column
+74, after a narrow `T_mid` (`   1000.G`), so the fifth slot reads as the
+symbol `G` with a blank count. Table III gives the count as Fortran `I3`, and
+on Fortran input a numeric field of all blanks is zero (ANSI X3.9-1978,
+*Fortran 77*, §13.5.9, numeric editing). **A named slot whose count field is
+all blanks therefore has the count 0**, and a zero count is dropped as
+before, before the symbol is looked up. The reader records a note naming the
+species, the columns and the symbol, so the drop is visible. HCCOH's formula
+stays C2 H2 O1. A count that is not blank and does not parse as a
+non-negative integer is still refused.
+
 The phase must be `G`. A condensed species (`S`, `L`) is refused by name: §131
 is gas-phase only.
 
@@ -39397,6 +39417,41 @@ reaction orders ... However, it does not specify how to calculate the reverse
 reaction rate." The authored JL4 file (§129.6) writes what the paper writes,
 and the flag is how a reader knows.
 
+**Fall-off, `REV` and `DUP` as read (CHR-02b, DESIGN where marked).** The
+manuals give the keywords; these are the reader's rules for them.
+
+* **The marker.** After whitespace is removed, a side may end with `(+X)`,
+  found as the last `(+` of the side when the side ends in `)`. A species
+  name may hold parentheses (`CH2(S)`), never `(+`. `X` is `M` (either case)
+  or a declared species. Both sides carry the same `X`. A marker on one side
+  only, two different markers, a `(+` anywhere else, or `(+M)` together with
+  a `+M` term is refused, naming the line and the equation.
+* **The collider.** `(+M)` takes the efficiency items of §129.4 (130.3);
+  `(+SPECIES)` takes none, and an efficiency item there is refused
+  (SAND89-8009 eq. (63)). A fall-off reaction has no plain third body: the
+  reaction-line rate is `k_inf`, with `m` the forward orders alone, and
+  `LOW`'s `k_0` is converted with `m + 1` (§130.2).
+* **What a fall-off reaction needs.** `LOW` with exactly three numbers.
+  Without it the reaction is refused when it closes; `HIGH` stays refused by
+  name. `TROE` takes 3 or 4 numbers and `SRI` 3 or 5 (`d = 1`, `e = 0`). One
+  of them at most, each given once, and none of `LOW`, `TROE` and `SRI` on a
+  reaction without a marker. `T***` and `T*` of `TROE` and `c` of `SRI` are
+  divisors in (130.11)-(130.12) and must be nonzero. The auxiliary lines may
+  come in any order.
+* **`REV`.** Exactly three numbers, converted in the reaction's units with
+  `m_r` = the sum of the reverse orders (130.13), plus 1 with a plain `+M`.
+  It is refused on an irreversible reaction and, as a DESIGN choice of this
+  reader, on a fall-off reaction: a reverse fall-off would need its own
+  blending, and no mechanism of this tranche writes one. A reversible
+  reaction with `FORD` or `RORD` and a `REV` is not flagged (the flag above
+  is for the reaction with no `REV`).
+* **`DUP`.** No `/.../` field, once per reaction. Two reactions that §129.5
+  calls the same are read when both carry `DUP`; when one does not, the
+  reaction without it is refused, naming both lines; a `DUP` reaction with no
+  twin is refused, naming its line. Reactions of different kinds (no third
+  body, `+M`, `(+M)`, `(+SPECIES)` with different species) are never the
+  same (DESIGN, extending CHR-02a's third-body rule).
+
 ### 129.6 Mechanisms: what is authored, what is user-supplied, and the licence decision
 
 **Authored here as data, from the papers.** These are WD1 (Westbrook &
@@ -39464,6 +39519,7 @@ so a user-supplied copy can be confirmed to be the same file:
 | `thermo30.dat` | `8d918b771aa965fe05e8c8f1f7e926a5326ebc90e7fc923ce129dc118b634dcc` | — |
 | `transport.dat` (GRI 3.0) | `e2ef4437568311ad0ba6c2311a564966c9accb2b43ea3157b764c1e8febc5825` | — |
 | `drm19.dat` | `1ed93a223186b890ce8b4ec0e3f3918edba56656c276b41fa6c093a05da621ed` | 21 / 84 |
+| `thermo12.dat` (GRI 1.2, for DRM19) | `949cfbf6fa6d3c93dd3dee383095187f9aa9eb2e7f9c5f88aeefef37d7b68607` | — |
 
 **The counts, and a discrepancy inside the readme.**
 
@@ -39473,8 +39529,13 @@ so a user-supplied copy can be confirmed to be the same file:
   reactions of 49 species". The file itself has 53 species and 325 reactions,
   counted here. **CHR-02b's `ck_gri30_counts` holds 53 / 325**, with the
   readme's section 1 and this count as its sources, and names the stale line.
-  The file uses `(+M)` 58 times, `LOW` 29, `TROE` 26, `SRI` once and
-  `DUPLICATE` 6 times. Every one of those is a read keyword in §129.5.
+  The file uses `(+M)` 58 times (29 fall-off reactions, the marker on both
+  sides), `LOW` 29, `TROE` 26 and `DUPLICATE` 6 times. Every one of those is
+  a read keyword in §129.5. **Corrected by CHR-02b:** CHR-00a's count of
+  "`SRI` once" was a text match on `unix.sri.com` in the file's comment
+  header; the file has no SRI reaction, so its 29 fall-off reactions are 26
+  Troe and 3 Lindemann. It also has 12 plain `+M` reactions and 16
+  irreversible (`=>`) ones, and no `REV`, `FORD`, `RORD` or `(+SPECIES)`.
 * **DRM19.** The file's own header reads "Reduced version of GRI-MECH 1.2.
   19 species ( + N2, AR); 84 reactions", which is 21 species and 84
   reactions, matching the plan's 21/84. It uses `(+M)` 16 times, `LOW` 8 and
@@ -39482,6 +39543,23 @@ so a user-supplied copy can be confirmed to be the same file:
 * **DRM19's thermo.** The DRM page says "you must use thermo12.dat, the
   thermodynamics data of GRI-Mech", meaning GRI-Mech **1.2**'s, not 3.0's.
   CHR-02b's user-path variable therefore carries a thermo path of its own.
+  `thermo12.dat` was fetched by CHR-02b on 2026-10-11 from the GRI-Mech 1.2
+  page (`combustion.berkeley.edu/gri-mech/new21/version12/files12/`, plain
+  HTTP), 32 records in the `THERMO ALL` layout, sha256
+  `949cfbf6fa6d3c93dd3dee383095187f9aa9eb2e7f9c5f88aeefef37d7b68607`, and is
+  not vendored either. DRM19 has 8 fall-off reactions, all Troe, 6 plain
+  `+M` reactions, and no `DUPLICATE`, `REV`, `FORD`, `RORD` or `=>`.
+
+**The user path (CHR-02b).** Four environment variables name the four files:
+`OFGPU_GRI30_MECH` (`grimech30.dat`), `OFGPU_GRI30_THERMO` (`thermo30.dat`),
+`OFGPU_DRM19_MECH` (`drm19.dat`) and `OFGPU_DRM19_THERMO` (`thermo12.dat`).
+The thermo file is read as a separate set at `P_ATM` (§128.4) and passed to
+the mechanism reader. When a pair is not set, `ck_gri30_counts` or
+`ck_drm19_counts` prints `SKIPPED <test>: <variable> is not set; GRI-Mech 3.0
+and DRM19 are user-supplied by path (SPEC-LIT §129.6)` and returns. That is
+a skip by name, not a pass. `OFGPU_REQUIRE_MECH=1` turns a missing variable
+into a failure, as `OFGPU_REQUIRE_AMGX` does for AMGX. `cases/mech/README.md`
+repeats the variables and the digests for a user.
 
 ### 129.7 What CHR-02a and CHR-02b must make true
 
@@ -39493,6 +39571,9 @@ so a user-supplied copy can be confirmed to be the same file:
 | `ck_refuses_plog` and every refused keyword | refused by name, with the recognised set | D |
 | `ck_gri30_counts`, `ck_drm19_counts` | 53/325 and 21/84; skipped by name without the user path | D |
 | `ck_rational_balance_is_exact` | `0.5 O2` balances exactly, and `0.49 O2` fails | D |
+| `ck_reads_falloff` | `(+M)` and `(+SPECIES)` with `LOW`, `TROE` (3 and 4 numbers), `SRI` (3 and 5) and none (Lindemann): every number, `k_inf` with `m`, `k_0` with `m + 1` | D (one rounding, as `ck_units_keywords`) |
+| `ck_reads_rev_and_dup` | `REV` in SI with `m_r`; a `DUP` pair reads; one `DUP` missing, or a lone `DUP`, is refused naming the lines | D |
+| `ck_falloff_refusals` | every refusal of the fall-off, `REV` and `DUP` rules above, each naming its line | D |
 
 Labels: none. §129 is a format and defines no equation.
 
@@ -42208,5 +42289,253 @@ a measurement of the intercept.
 **Not claimed.** The oracle discretises each model's equations on TG0's cells; its table is the models' answer on
 that cell set with a pinned wall-cell omega, not a device run and not validation of the solver. Wilcox 2006 exists
 only in the oracle: there is no device kernel, case keyword or registry row (VAL-22a-c, conditional on D-VAL-5).
+
+## 145. Martin & Moyce's collapsing column — the surge-front key
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the
+answer key) and VAL-60 (§145.2, the live gate, not yet written). §22's table has named this
+benchmark since the first release ("Dam break — surge front position vs time") without a
+number to hold it against: `ofgpu-vof -surge` and `vof::tests` say why at `bin/vof.rs` and
+`vof.rs` ("nobody here has the paper"). This section is the key that closes that gap. No
+solver, gate or test that existed before it changes.
+
+Source: **J. C. Martin and W. J. Moyce, "Part IV. An experimental study of the collapse of
+liquid columns on a rigid horizontal plane", *Phil. Trans. R. Soc. Lond. A* 244 (1952)
+312-324, doi:10.1098/rsta.1952.0006.** The copy read on 2026-10-11 is the publisher's PDF as
+the Internet Archive captured it on 2023-01-01
+(<https://web.archive.org/web/20230101071442/https://royalsocietypublishing.org/doi/pdf/10.1098/rsta.1952.0006>,
+13 pages, sha256 `2b6bdf92c75724b6ede159e8bd603e0378be0685de948c8d2f34caa130ee7d2a`). The
+article is not open access; the publisher shows it to an anonymous reader, and
+`reference/PROVENANCE.md` row `martin-moyce-1952` records the terms. No other dam-break
+data set, digitisation or code was read for this section.
+
+### 145.1 The key: which series, tabulated not digitised, and u_D
+
+**The variables, as the paper defines them (its §2).** A column of height `n^2 a` on a base
+of semi-length `a` (plane symmetry) collapses; `z` is the distance of the surge front from
+the plane of symmetry and `t` the time:
+
+```
+  Z = z/a,        T = n t (g/a)^(1/2)                                              (145.1)
+```
+
+`T` carries the factor `n`. `ofgpu-vof -surge` prints `t (g/a)^(1/2)` without it
+(`bin/vof.rs`, "What `-surge` reports"), so for this table, `n^2 = 2`,
+
+```
+  T_key = 2^(1/2) * T_surge                                                        (145.2)
+```
+
+The paper's rectangular columns are corners emptying against a wall, which by plane symmetry
+is the half-column of base `2a`. A wall-backed column of width `a`, the geometry of
+`vof::tests::a_dam_break_surge_front_stays_under_the_ritter_bound`, is that half.
+
+**Which series.** `reference/martin_moyce_1952/surge_front.csv` is the paper's **Table 2**
+(p. 317), "Rectangular section plane symmetry, `n^2 = 2`": both series, `a = 1 1/8 in.` (three
+records) and `a = 2 1/4 in.` (nine records), every record and each series' printed `mean`
+column, 205 numbers. One CSV row per printed number: `a_in, record, Z, T`, with `record` the
+record's column in the page's order (1 to 9) and `record = 0` the printed mean. A dash on the
+page is no row. Tables 1 (`n^2 = 1`) and 3 (`n^2 = 4`), the semicircle, the cylinders and the
+residual-height tables 6 and 7 are not transcribed.
+
+**Tabulated, not digitised.** The page prints numbers. Each one is copied as printed: `T` to
+two decimals, `Z` as the page writes its stations. The page's columns are records at fixed
+stations, so `T` is the measured quantity and `Z` the station (the lines scored in the
+channel floor, the paper's §4). The transcription's own uncertainty is the rounding of the
+print, `0.005` in `T`.
+
+**The time origin.** The paper could not record the instant motion began (its §4) and
+normalised every record to the same `T` at one station. Every record and both means read
+`T = 1.19` at `Z = 1.44` (the page's asterisk). `T` is therefore known only relative to that
+station, and a comparison must either place its own `T = 1.19` at `Z = 1.44` or carry the
+offset as an unknown.
+
+**The printed mean is kept as printed.** In the `1 1/8 in.` series the mean is the
+arithmetic mean of the printed records to half a unit in the last place at every station. In
+the `2 1/4 in.` series it is not, at six stations: `Z = 1.67, 2.56, 3.00, 3.44, 3.67, 12.0`.
+The largest gaps are at `Z = 2.56` (printed `2.20`, arithmetic `2.181` over nine records) and
+`Z = 3.00` (printed `2.51`, arithmetic `2.529`). Both rows were re-read from the page at
+300 dpi. The key records the page, never a corrected mean.
+
+**u_D.** The paper states no uncertainty in words, but it prints every record, so `u_D` is
+read from the printed records and is not invented. Per series and station with at least two
+records, the half-range is
+
+```
+  u_T(a, Z) = ( max_r T(a, r, Z) - min_r T(a, r, Z) ) / 2,   r over the records (r >= 1)   (145.3)
+```
+
+and its largest value is `0.080` (`a = 1 1/8 in.`, at `Z = 6.33`) and `0.165`
+(`a = 2 1/4 in.`, at `Z = 4.11`). The two series' means at a common station differ by up to
+`0.17` (`Z = 5.89`: `4.61` against `4.44`). That gap is a scale effect: the paper's §2 says
+its variables hold only while viscosity and surface tension do not matter at the scale used.
+The key's single datum uncertainty, in the variable it measures, is the larger of the two,
+
+```
+  u_D,T = 0.17                                                                     (145.4)
+```
+
+A gate that compares `Z` at the key's `T`, as docs/17's VAL-60 row is written, converts with
+the local slope of the series it compares against, `u_D,Z = u_D,T |dZ/dT|`. Between adjacent
+printed means of the `2 1/4 in.` series `dZ/dT` runs from `0.26` (at `Z = 1.11` to `1.22`) to
+`2.12` (at `Z = 5.00` to `5.89`). A gate that compares `T` at the key's stations needs no
+conversion. §145.2 fixes the band.
+
+**The transcription guard.** `martin_moyce_key_is_monotone_per_series`, in
+`bin/validate_key/mod.rs`'s tests, loads the key through the manifest, so the file's SHA-256
+must be the manifest's, and asserts:
+
+1. the header is `a_in, record, Z, T`, and there are 205 rows: 53 at `a_in = 1.125`
+   (records 1, 2, 3 and the mean: 12, 13, 14 and 14 rows) and 152 at `a_in = 2.25`
+   (records 1 to 9: 12, 15, 15, 13, 14, 14, 14, 15, 15 rows; the mean 25 rows);
+2. within every series `(a_in, record)`, in file order, `Z` and `T` both strictly increase;
+3. every series has the row `Z = 1.44, T = 1.19`;
+4. a station has a mean row exactly when it has at least one record row in that series, and
+   the printed mean lies within the closed range of those records.
+
+A misread digit that breaks a series' order, a dropped or doubled row, or a mean copied into
+the wrong series fails the test. A misread digit that keeps every order is not caught; the
+re-reading above is the only guard against it.
+
+---
+
+## 146. Riboux & Gordillo's splash threshold — the measured key for Gate 78-D
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §146 to VAL-05 (§146.1, the
+answer key) and VAL-70 (§146.2, the measured leg of Gate 78-D, not yet written). §78.10 says
+that neither splash criterion of §78.4 is measured against an experiment here, because Mundo's
+boundary is a figure and nothing in this repository transcribes it. This section is the key
+that closes that gap with a different experiment. No solver, gate or test that existed before
+it changes.
+
+Source: **G. Riboux and J. M. Gordillo, "Experiments of drops impacting a smooth solid
+surface: a model of the critical impact speed for drop splashing", *Phys. Rev. Lett.* 113
+(2014) 024507, doi:10.1103/PhysRevLett.113.024507.** The published letter is paywalled and
+was not read. The copy read on 2026-10-11 is the authors' arXiv version,
+**arXiv:1401.6943v3** (28 March 2014, "The critical impact speed for the splash of a drop",
+13 pages with the supplementary material, sha256
+`058cf841e94a51d9814181742abae3d4d48c43395a61ad228bcd06c6e94c3182`), distributed under arXiv's
+non-exclusive licence. Whether the letter's table and figure match v3 digit for digit is not
+known. `reference/PROVENANCE.md` row `riboux-gordillo-2014` records the terms. No other splash
+data set, digitisation or code was read for this section.
+
+### 146.1 The key: Table I as printed, the thresholds as digitised, and the radius
+
+**The experiment.** Millimetric drops of eight liquids, formed quasi-statically at a needle,
+fall onto a smooth, dry glass slide in air at normal atmospheric conditions. The liquids
+partially wet the glass (static contact angle about 20°). The impact speed is set by the drop
+height, and the splash threshold speed `V*` is the speed above which the lamella breaks into
+ejected droplets. The paper's Table II gives the air it used as `λ0 = 65 nm`,
+`μg = 1.85·10⁻⁵ Pa·s`, `ρg = 1.18 kg/m³` at 298.15 K and `10⁵ Pa`. Only the paper's own
+theory needs these; §78.4's two criteria contain no gas property.
+
+**The groups use the RADIUS.** The paper's main text defines
+
+```
+  We = ρ V² R / σ,     Re = ρ V R / μ,     Oh = μ / (ρ σ R)^(1/2) = We^(1/2) / Re          (146.1)
+```
+
+with `R` the drop radius. §78.3 writes the same groups with the diameter `d = 2R`, so
+
+```
+  We_d = 2 We,     Re_d = 2 Re,     Oh_d = Oh / 2^(1/2)                                    (146.2)
+```
+
+A gate that puts the key's `V*` into §78.4's criteria uses `d = 2R` and §78.3's forms. The
+key's `Oh_e3` column is the paper's radius-based `Oh`, as printed.
+
+**What is printed, and what is not.** The supplementary material's **Table I** prints, for 17
+rows (eight liquids, two to four drop radii for some), `ρ`, `σ`, `μ`, `R`, the capillary
+length `ℓσ` and `1000 Oh`. **It prints no critical speed, and no `We` or `Re`.** Docs/17's
+VAL-05 row asks that each row's `We`, `Re` and `Oh` recomputed from its stated properties
+match the paper's printed values. The paper wins over the plan: only `Oh` (and `ℓσ`) can be
+checked against print. The key's test prints each row's `We` and `Re` at `V*` for the record
+and compares neither. The only printed threshold speed is in the caption of Fig. 1: ethanol,
+`R = 1.04 mm`, `V* = 2.19 m/s`, between a non-splashing impact at `2.01 m/s` and a splash at
+`2.28 m/s`.
+
+**The thresholds are DIGITISED, from vector paths.** `V*` is read from **Fig. 4(c)**, which
+plots `V` against `log10 Oh`. The filled markers are the measurements; the open ones are the
+paper's predictions and are not read. Each Table I row names its marker in the table's second
+column (the orange up-triangle for acetone, the two blue circles, the yellow diamond and the
+right-pointing triangle for water, and so on). The figure is vector art, so each marker is a
+path with exact coordinates. Nothing was read off a raster image. The axes are calibrated from
+the figure's own major tick lines: `V = 0` to `6` at 16.8307 pt per m/s, and
+`log10 Oh = −2.5` to `−1` at 89.0440 pt per decade. Circles, squares, diamonds and stars are
+point-symmetric, and their centre is their bounding-box centre. A triangle's centre is
+ambiguous: its bounding-box centre and the mean of its three vertices differ by a sixth of
+its height. The figure settles which one is meant. The two left-pointing triangles of
+decamethyltetrasiloxane sit at `1000 Oh = 8.93` and `11.21` by bounding box, and at `9.11` and
+`11.39` by vertex mean. The table prints `9.1` and `11.4`. The key therefore takes the vertex
+mean. For the three up- or down-pointing triangles (acetone, and both dodecamethylpentasiloxane
+rows) the other convention would raise acetone's `V*` by `0.037 m/s` and lower the two
+dodecamethylpentasiloxane rows by `0.046` and `0.037 m/s`. `V*` is kept to three decimals, `0.0005 m/s` in rounding, which is
+finer than the figure's line widths. The key also carries each marker's abscissa as
+`Oh_e3_fig`. That column ties every digitised marker to its table row.
+
+**Two checks that are not in the test.** (a) Fig. 1's printed `2.19 m/s` for ethanol at
+`R = 1.04 mm` reads `2.1912` from Fig. 4(c). (b) Fig. 11(a) plots the same 17 measurements in
+the `log10 Re`–`log10 Oh` plane with the same markers. Read the same way (93.4365 pt per unit of
+`log10 Re` from its ticks at 2 and 4), its `Re` agrees with `ρ V* R / μ` from the key. Here
+`μ` is the viscosity that reproduces the printed `Oh`, `μ_Oh = Oh (ρ σ R)^(1/2)`. Fifteen of
+the 17 rows agree within 1.6 %. The water row at `R = 1.45 mm` reads 3.2 % low and the PDMS
+row at `R = 0.89 mm` 3.9 % high. That is the two figures disagreeing with each other, and it
+bounds the paper's own plotting at about 4 % in `V*`.
+
+**The printed digits, propagated.** The table prints `μ` to one or two significant figures
+(`0.3`, `0.6`, `1.3`, `1.7`, `4.6` cP), and its `Oh` was evidently computed from more
+precise values. Recomputed from the printed point values, `Oh` misses the printed one at its
+last digit in 11 of 17 rows. Acetone is the largest case: `2.148` against `2.4`, because its
+`0.3 cP` stands for anything from `0.25` to `0.35`. The comparison that tests the
+transcription and not the authors' rounding is therefore an interval. For each printed cell
+`x` with `k` decimals, `h(x) = 0.5·10^(−k)`, so `789` gives `0.5`, `24.0` gives `0.05`,
+`0.95` gives `0.005` and `10.0` gives `0.05`. Then
+
+```
+  Oh_lo = (μ − h_μ) / ((ρ + h_ρ)(σ + h_σ)(R + h_R))^(1/2)
+  Oh_hi = (μ + h_μ) / ((ρ − h_ρ)(σ − h_σ)(R − h_R))^(1/2)
+  the row passes when  Oh_lo <= Oh_pr + h_Oh  and  Oh_hi >= Oh_pr − h_Oh                  (146.3)
+```
+
+in SI units (`μ·10⁻³`, `σ·10⁻³`, `R·10⁻³`), with `Oh_pr = Oh_e3/1000` and
+`h_Oh = h(Oh_e3)/1000`. All 17 rows pass. The capillary length is held to its print the same
+way, with standard gravity `g = 9.80665 m/s²`:
+
+```
+  ℓσ = (σ / (ρ g))^(1/2),   ℓ_lo from (σ − h_σ, ρ + h_ρ),  ℓ_hi from (σ + h_σ, ρ − h_ρ)       (146.4)
+```
+
+and all 17 rows pass that too.
+
+**u_D.** The paper prints no error bar on `V*`. Its one bracket is Fig. 1's: `2.01 < 2.19 <
+2.28 m/s`, which is −8.2 % and +4.1 % about the printed threshold. The digitising adds
+`0.0005 m/s` in rounding. A wrong triangle convention would move three rows by at most
+`0.046 m/s`, about 3 %. The disagreement between the paper's two figures is at most about 4 %.
+VAL-70's band of ±20 % per row (docs/17) is stated against `V*` as the key holds it, and it is
+wider than all of these. §146.2 fixes it. The key has 17 rows for eight liquids. Docs/17's
+VAL-70 row counts "at least 6 of 8 rows", which is per liquid, so §146.2 must say how a liquid
+with two to four radii counts.
+
+**The transcription guard.** `riboux_gordillo_key_reproduces_its_printed_ohnesorge_numbers`,
+in `bin/validate_key/mod.rs`'s tests, loads the key through the manifest, which pins the
+file's SHA-256. It also reads the verified text once more to recover each cell's printed
+precision, and asserts:
+
+1. the header is `liquid, rho, sigma, mu, R, l_sigma, Oh_e3, V_star, Oh_e3_fig`, and there are
+   17 rows, with liquids 1 to 8 holding 1, 4, 2, 2, 2, 2, 2 and 2 rows, in non-decreasing
+   order. Within a liquid, `R` strictly decreases and `Oh_e3` strictly increases;
+2. every row passes (146.3) and (146.4);
+3. every row's `Oh_e3_fig` is within `h(Oh_e3) + h(Oh_e3_fig)` of its own `Oh_e3`, and among
+   all 17 printed `Oh_e3` its own is the nearest in `|ln(Oh_e3_fig/Oh_e3)|`;
+4. every `V_star` lies on the figure's axis, `0 < V* < 6 m/s`, and the ethanol row at
+   `R = 1.04 mm` is within `0.005 m/s` of Fig. 1's printed `2.19`.
+
+A misread digit in `μ`, `R`, `σ` or `Oh` that moves a row outside (146.3), a misread `ρ` or
+`σ` that breaks (146.4), a dropped or doubled row, a marker assigned to the wrong row, and a
+`V*` misread at Fig. 1's row all fail the test. Each was tried as a mutation. A misread digit
+that stays inside the print's own precision is not caught. `R = 1.34` read as `1.43` with
+`μ = 1.3 cP`, or water's `0.95 cP` read as `0.9`, both pass. The re-reading of the page is the
+only guard against them. A misread `V*` away from Fig. 1's row is caught only by check (b)
+above, which is not a test.
 
 ---

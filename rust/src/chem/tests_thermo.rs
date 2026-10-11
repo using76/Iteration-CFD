@@ -911,3 +911,81 @@ fn thermo_reader_block_edges() {
         "{e}"
     );
 }
+
+#[test]
+fn thermo_reads_a_zero_count_blank_slot() {
+    let rows = ii_rows();
+    let n2 = chemkin_record(1, &rows);
+
+    // 1. the fourth layout (SPEC-LIT §129.3): thermo12.dat pads unused
+    //    slots with a blank symbol and the count 00
+    let mut rec = n2.clone();
+    rec[0].replace_range(24..44, "O   1   00   00   00");
+    let s = ThermoSet::read_chemkin(
+        &one_record(&rec),
+        "zero blank slots",
+        P_BAR,
+        &ElementTable::standard(),
+    )
+    .unwrap();
+    let n = s.get("N2").unwrap();
+    assert_eq!(
+        n.elements,
+        vec![("O".to_string(), 1u32)],
+        "the three 00 slots are empty, O 1 is the whole formula"
+    );
+
+    // 2. a blank symbol with a nonzero count is still refused
+    let mut rec = n2.clone();
+    rec[0].replace_range(29..34, "   01");
+    let e = read_err(&one_record(&rec), "blank 01");
+    println!("2. {e}");
+    assert!(
+        e.contains("N2") && e.contains("the count 01 with no element symbol"),
+        "{e}"
+    );
+
+    // 3. a single-digit nonzero count is refused too
+    let mut rec = n2.clone();
+    rec[0].replace_range(29..34, "    1");
+    let e = read_err(&one_record(&rec), "blank 1");
+    println!("3. {e}");
+    assert!(
+        e.contains("N2") && e.contains("the count 1 with no element symbol"),
+        "{e}"
+    );
+
+    // 4. a named slot with a blank count (the HCCOH layout, SPEC-LIT
+    //    §129.3): the count is Fortran I3, an all-blank field reads 0, so
+    //    the fifth slot's G is dropped with a note and N 2 stands alone
+    let mut rec = n2.clone();
+    rec[0].replace_range(73..74, "G");
+    let s = ThermoSet::read_chemkin(
+        &one_record(&rec),
+        "named blank count",
+        P_BAR,
+        &ElementTable::standard(),
+    )
+    .unwrap();
+    let n = s.get("N2").unwrap();
+    assert_eq!(
+        n.elements,
+        vec![("N".to_string(), 2u32)],
+        "the blank count reads G as 0, so N 2 is the whole formula"
+    );
+    assert_eq!(s.notes().len(), 1, "one note for the one dropped slot");
+    let note = &s.notes()[0];
+    assert!(
+        note.contains("N2") && note.contains("G") && note.contains("blank count"),
+        "{note}"
+    );
+
+    // 5. a named slot whose count is not blank and does not parse is
+    //    still refused (only a blank count is new)
+    let mut rec = n2.clone();
+    rec[0].replace_range(73..74, "G");
+    rec[0].replace_range(75..78, "  x");
+    let e = read_err(&one_record(&rec), "named x count");
+    println!("5. {e}");
+    assert!(e.contains("N2") && e.contains("not a non-negative integer"), "{e}");
+}

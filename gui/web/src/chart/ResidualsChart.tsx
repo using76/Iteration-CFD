@@ -8,8 +8,8 @@ import { formatDuration, useDismiss, useNow, useT } from '../app/hooks'
 import { api } from '../api/rest'
 import { Icon } from '../components/common/Icon'
 import { pickActiveRun, selectRunData, sortRuns, useSessionStore } from '../state/sessionStore'
-import { useUiStore } from '../state/uiStore'
-import { hasTimeAxis, initialYScale, metricsAsResidualRecords, pairKeys, seriesColor, shapeResidualsPair, type XAxis } from './series'
+import { useUiStore, type ChartKind } from '../state/uiStore'
+import { hasTimeAxis, initialYScale, isSurfaceKey, metricsAsResidualRecords, pairKeys, seriesColor, seriesKeys, shapeResidualsPair, slotKeys, sweepsAsResidualRecords, type XAxis } from './series'
 
 const SUP = '⁰¹²³⁴⁵⁶⁷⁸⁹'
 const BATCH_MS = 100
@@ -41,26 +41,32 @@ export interface ResidualsChartProps {
   compareRunId?: string | null
   active?: boolean
   compact?: boolean
-  /** residuals (default) or the run's metric lines through the same plot. */
-  chart?: 'residuals' | 'metrics'
+  /** What the tab draws: residuals, the run's metric lines, or its per-patch surface integrals. */
+  chart?: ChartKind
 }
 
 export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdProp = null, active = true, compact = false, chart = 'residuals' }: ResidualsChartProps) {
   const t = useT()
-  // The metrics chart has no compare overlay; everything else is the same uPlot path.
-  const metrics = chart === 'metrics'
+  // Compare overlay and CSV export stay residuals-only; everything else is the same uPlot path.
+  const metrics = chart !== 'residuals'
   const compareRunId = metrics ? null : compareRunIdProp
   const runs = useSessionStore((s) => s.runs)
   const uiActiveRunId = useUiStore((s) => s.activeRunId)
   const setActiveRun = useUiStore((s) => s.setActiveRun)
   const setCompareRun = useUiStore((s) => s.setCompareRun)
   const theme = useUiStore((s) => s.theme)
+  const metricSlots = useUiStore((s) => s.metricSlots)
+  const metricMode = useUiStore((s) => s.metricMode)
   const runList = useMemo(() => sortRuns(runs), [runs])
   const run = useMemo(() => (runIdProp ? (runs[runIdProp] ?? null) : pickActiveRun(runList, uiActiveRunId)), [runIdProp, runs, runList, uiActiveRunId])
   const runId = run?.id ?? null
   const residualRecs = useSessionStore((s) => selectRunData(runId)(s).residuals)
   const metricRecs = useSessionStore((s) => selectRunData(runId)(s).metrics)
-  const residuals = useMemo(() => (metrics ? metricsAsResidualRecords(metricRecs) : residualRecs), [metrics, metricRecs, residualRecs])
+  const residuals = useMemo(() => {
+    if (chart === 'residuals') return residualRecs
+    if (chart === 'metrics' && metricMode === 'sweeps') return sweepsAsResidualRecords(residualRecs)
+    return metricsAsResidualRecords(metricRecs)
+  }, [chart, metricMode, metricRecs, residualRecs])
   const compareResiduals = useSessionStore((s) => selectRunData(compareRunId)(s).residuals)
 
   const [yScale, setYScale] = useState<'log' | 'linear'>(initialYScale(chart))
@@ -71,7 +77,16 @@ export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdPro
   const closeFields = useCallback(() => setFieldsOpen(false), [])
   const fieldsRef = useDismiss(fieldsOpen, closeFields)
 
-  const keys = useMemo(() => pairKeys(residuals, compareResiduals, compareRunId), [residuals, compareResiduals, compareRunId])
+  // Keys per chart: residuals keep the pair logic; metrics apply the slot picks
+  // (sweeps mode has nothing to pick); surface narrows to <patch>.<quantity>.
+  const keyed = useMemo(() => {
+    if (chart === 'residuals') return { keys: pairKeys(residuals, compareResiduals, compareRunId), right: null as string | null }
+    if (chart === 'surface') return { keys: seriesKeys(residuals).filter(isSurfaceKey), right: null }
+    if (metricMode === 'sweeps') return { keys: seriesKeys(residuals), right: null }
+    return slotKeys(seriesKeys(residuals), metricSlots)
+  }, [chart, residuals, compareResiduals, compareRunId, metricMode, metricSlots])
+  const keys = keyed.keys
+  const rightKey = keyed.right
   const keysSig = keys.join('|')
   const timeAvailable = useMemo(() => hasTimeAxis(residuals), [residuals])
   const effectiveX: XAxis = xAxis === 'time' && timeAvailable ? 'time' : 'iter'
@@ -95,10 +110,14 @@ export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdPro
       height: Math.max(80, host.clientHeight),
       cursor: { drag: { x: true, y: false } },
       legend: { show: false },
-      scales: { x: { time: false }, y: yScale === 'log' ? { distr: 3, log: 10 } : { distr: 1 } },
+      scales: { x: { time: false }, y: yScale === 'log' ? { distr: 3, log: 10 } : { distr: 1 }, ...(rightKey ? { y2: { distr: 1 } } : {}) },
       axes: [
         { stroke: fg, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid, width: 1 }, values: (_u, vals) => vals.map(fmtX), label: compact ? undefined : effectiveX === 'time' ? t('residuals.xTime') : t('residuals.iterations'), labelFont: '12px ' + cssVar('--font-ui', 'sans-serif'), font: '11px ' + cssVar('--font-ui', 'sans-serif'), size: compact ? 28 : 44 },
         { stroke: fg, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid, width: 1 }, values: (_u, vals) => vals.map((v) => (yScale === 'log' ? fmtLogTick(v) : v.toPrecision(2))), font: '11px ' + cssVar('--font-ui', 'sans-serif'), size: compact ? 40 : 52 },
+        // The right axis slot 2's pick draws on (show_metric slot 2); linear, no grid.
+        ...(rightKey
+          ? [{ scale: 'y2', side: 1 as const, stroke: fg, grid: { show: false }, ticks: { stroke: grid, width: 1 }, font: '11px ' + cssVar('--font-ui', 'sans-serif'), size: compact ? 40 : 52 }]
+          : []),
       ],
       series: [
         { label: effectiveX },
@@ -114,6 +133,8 @@ export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdPro
             spanGaps: true,
             show: !hidden.has(k),
             ...(base !== null ? { dash: [6, 4] } : {}),
+            // Slot 2's pick moves to the second axis.
+            ...(k === rightKey ? { scale: 'y2' } : {}),
           }
         }),
       ],
@@ -139,7 +160,7 @@ export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdPro
       plotRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keysSig, yScale, effectiveX, theme, compact, runId, compareRunId])
+  }, [keysSig, yScale, effectiveX, theme, compact, runId, compareRunId, rightKey])
 
   useEffect(() => {
     dirtyRef.current = true
@@ -189,11 +210,13 @@ export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdPro
   const running = run?.status === 'running' || run?.status === 'queued'
   const now = useNow(running ? 1000 : null)
 
+  const titleKey = chart === 'residuals' ? 'residuals.title' : chart === 'surface' ? 'residuals.surfaceTitle' : metricMode === 'sweeps' ? 'residuals.sweepsTitle' : 'residuals.metricsTitle'
+
   return (
-    <div className={`residuals${compact ? ' compact' : ''}`} data-testid="residuals-chart" data-run-id={runId ?? ''}>
+    <div className={`residuals${compact ? ' compact' : ''}`} data-testid="residuals-chart" data-chart={chart} data-run-id={runId ?? ''}>
       <div className="residuals-head">
         <span className="title">
-          <Icon name="chart" size={14} className="muted" /> {t(metrics ? 'residuals.metricsTitle' : 'residuals.title')}
+          <Icon name="chart" size={14} className="muted" /> {t(titleKey)}
         </span>
         {run ? (
           <span className="faint truncate mono" style={{ fontSize: 'var(--fs-xs)' }}>

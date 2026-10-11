@@ -1,34 +1,39 @@
-// Plain virtualised log list with a text filter and stream chips.
+// Plain virtualised log list with a text filter, stream chips and a follow
+// chip; the filter lives in the ui store so set_log_filter drives the same
+// state the screen shows.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LogLine } from '@cfd/shared'
 import { useT } from '../app/hooks'
 import { pickActiveRun, selectRunData, sortRuns, useSessionStore } from '../state/sessionStore'
-import { useUiStore } from '../state/uiStore'
+import { useUiStore, type LogFilter, type LogStream } from '../state/uiStore'
 import { useLogsReveal } from './logsReveal'
 
 const ROW = 20
 const OVERSCAN = 12
+
+/** Keeps a line when its stream is shown and (the trimmed, lower-cased text
+ *  filter is empty or the line's lower-cased text contains it). Order kept. */
+export function filterLogLines(logs: LogLine[], f: LogFilter): LogLine[] {
+  const q = f.text.trim().toLowerCase()
+  return logs.filter((l) => f.streams.includes(l.stream) && (!q || l.text.toLowerCase().includes(q)))
+}
 
 export function LogsPane() {
   const t = useT()
   const runs = useSessionStore((s) => s.runs)
   const terminalRunId = useUiStore((s) => s.terminalRunId)
   const setTerminalRun = useUiStore((s) => s.setTerminalRun)
+  const logFilter = useUiStore((s) => s.logFilter)
+  const setLogFilter = useUiStore((s) => s.setLogFilter)
   const list = useMemo(() => sortRuns(runs), [runs])
   const current = useMemo(() => pickActiveRun(list, terminalRunId), [list, terminalRunId])
   const logs = useSessionStore((s) => selectRunData(current?.id ?? null)(s).logs)
-  const [filter, setFilter] = useState('')
-  const [streams, setStreams] = useState<Set<LogLine['stream']>>(new Set(['stdout', 'stderr', 'system']))
   const [scrollTop, setScrollTop] = useState(0)
   const [height, setHeight] = useState(300)
   const listRef = useRef<HTMLDivElement | null>(null)
-  const stickRef = useRef(true)
   const reveal = useLogsReveal((s) => s.request)
 
-  const rows = useMemo(() => {
-    const f = filter.trim().toLowerCase()
-    return logs.filter((l) => streams.has(l.stream) && (!f || l.text.toLowerCase().includes(f)))
-  }, [logs, filter, streams])
+  const rows = useMemo(() => filterLogLines(logs, logFilter), [logs, logFilter])
 
   useEffect(() => {
     const el = listRef.current
@@ -39,18 +44,20 @@ export function LogsPane() {
     return () => ro.disconnect()
   }, [])
 
+  // Follow the tail: scroll to the bottom when rows are added and when follow turns on.
   useEffect(() => {
     const el = listRef.current
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight
-  }, [rows.length])
+    if (el && logFilter.follow) el.scrollTop = el.scrollHeight
+  }, [rows.length, logFilter.follow])
 
+  // A Problems reveal stops the tail and centres the revealed line.
   useEffect(() => {
     if (!reveal) return
     if (current?.id !== reveal.runId) setTerminalRun(reveal.runId)
     const idx = rows.findIndex((l) => l.seq >= reveal.seq)
     const el = listRef.current
     if (idx >= 0 && el) {
-      stickRef.current = false
+      if (logFilter.follow) setLogFilter({ follow: false })
       el.scrollTop = Math.max(0, idx * ROW - height / 2)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -60,13 +67,10 @@ export function LogsPane() {
   const last = Math.min(rows.length, Math.ceil((scrollTop + height) / ROW) + OVERSCAN)
   const highlightSeq = reveal?.runId === current?.id ? reveal?.seq : null
 
-  const toggleStream = (s: LogLine['stream']) =>
-    setStreams((set) => {
-      const n = new Set(set)
-      if (n.has(s)) n.delete(s)
-      else n.add(s)
-      return n
-    })
+  const toggleStream = (s: LogStream) => {
+    const streams = logFilter.streams.includes(s) ? logFilter.streams.filter((x) => x !== s) : [...logFilter.streams, s]
+    setLogFilter({ streams })
+  }
 
   return (
     <div className="logs-pane" data-testid="logs-pane">
@@ -79,12 +83,15 @@ export function LogsPane() {
             </option>
           ))}
         </select>
-        <input className="input" placeholder={t('logs.filter')} value={filter} onChange={(e) => setFilter(e.target.value)} data-testid="logs-filter" />
+        <input className="input" placeholder={t('logs.filter')} value={logFilter.text} onChange={(e) => setLogFilter({ text: e.target.value })} data-testid="logs-filter" />
         {(['stdout', 'stderr', 'system'] as const).map((s) => (
-          <button key={s} className={`chip${streams.has(s) ? ' on' : ''}`} onClick={() => toggleStream(s)}>
+          <button key={s} className={'chip' + (logFilter.streams.includes(s) ? ' on' : '')} data-testid={'logs-stream-' + s} onClick={() => toggleStream(s)}>
             {s}
           </button>
         ))}
+        <button className={'chip' + (logFilter.follow ? ' on' : '')} data-testid="logs-follow" onClick={() => setLogFilter({ follow: !logFilter.follow })}>
+          {t('logs.follow')}
+        </button>
         <span className="faint" style={{ fontSize: 'var(--fs-xs)' }}>
           {rows.length.toLocaleString()}
         </span>
@@ -95,7 +102,8 @@ export function LogsPane() {
         onScroll={(e) => {
           const el = e.currentTarget
           setScrollTop(el.scrollTop)
-          stickRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - ROW * 2
+          const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - ROW * 2
+          if (atBottom !== logFilter.follow) setLogFilter({ follow: atBottom })
         }}
       >
         {!rows.length ? <div className="empty-note">{t('logs.empty')}</div> : null}

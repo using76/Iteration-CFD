@@ -1,0 +1,45 @@
+# G. Riboux and J. M. Gordillo, "Experiments of drops impacting a smooth solid surface: a model
+# of the critical impact speed for drop splashing", Phys. Rev. Lett. 113 (2014) 024507,
+# DOI 10.1103/PhysRevLett.113.024507; the copy read is arXiv:1401.6943v3 (28 Mar 2014), "The
+# critical impact speed for the splash of a drop", 13 pages, sha256
+# 058cf841e94a51d9814181742abae3d4d48c43395a61ad228bcd06c6e94c3182. The published PRL was not read.
+# Millimetric drops of eight liquids falling onto a smooth, dry glass slide in air at normal
+# atmospheric conditions (static contact angle about 20 degrees).
+# Columns 1-7 are the supplementary material's TABLE I, every row, copied AS PRINTED (tabulated):
+#   liquid   the row's liquid, 1 to 8 = the table's (a) to (h): (a) acetone, (b) water,
+#            (c) methanol, (d) ethanol, (e) decamethyltetrasiloxane,
+#            (f) dodecamethylpentasiloxane, (g) poly(dimethylsiloxane), (h) 10 cP silicone oil
+#   rho      liquid density, kg/m3        sigma    surface tension, mN/m
+#   mu       liquid viscosity, cP         R        drop RADIUS, mm (not the diameter)
+#   l_sigma  capillary length (sigma/(rho g))^(1/2), mm
+#   Oh_e3    1000 x Oh, Oh = mu/(rho sigma R)^(1/2) with the RADIUS (the paper's definition)
+# Every cell keeps the digits the page prints, trailing zeros included (0.3, 0.95, 10.0, 12.0):
+# the transcription test reads each cell's printed precision from this text.
+# Columns 8-9 are DIGITISED, not printed: the table prints no critical speed. They are read from
+# the vector paths of FIG. 4(c) (page 4, splash threshold speed V against log10(Oh)), where each
+# table row is the filled marker the table's second column draws (open markers are the paper's
+# predictions and are not read):
+#   V_star     the measured splash threshold speed, m/s: the marker centre's ordinate
+#   Oh_e3_fig  1000 x 10^(the marker centre's abscissa): the Oh the figure plots for the row
+# Axis calibration: the figure's own major tick lines (V = 0..6, log10 Oh = -2.5..-1); marker
+# centre = the bounding-box centre of a circle, square, diamond or star path and the mean of the
+# three vertices of a triangle path (SPEC-LIT section 146.1 says why). Read 2026-10-11.
+# The figure's only printed threshold: FIG. 1 gives V = 2.19 m/s for ethanol, R = 1.04 mm.
+liquid,rho,sigma,mu,R,l_sigma,Oh_e3,V_star,Oh_e3_fig
+1,789,24.0,0.3,1.03,1.76,2.4,3.121,2.36
+2,1000,71.8,0.95,1.96,2.71,2.5,3.683,2.54
+2,1000,71.8,0.95,1.74,2.71,2.7,3.698,2.69
+2,1000,71.8,0.95,1.63,2.71,2.8,3.980,2.77
+2,1000,67.5,0.9,1.45,2.62,2.9,4.130,2.88
+3,791,23.5,0.6,1.53,1.74,3.5,2.202,3.50
+3,791,23.5,0.6,1.05,1.74,4.2,2.743,4.21
+4,789,22.6,1.0,1.53,1.71,6.1,1.765,6.05
+4,789,22.6,1.0,1.04,1.71,7.3,2.191,7.33
+5,854,17.2,1.3,1.34,1.43,9.1,1.562,9.11
+5,854,17.2,1.3,0.86,1.43,11.4,1.710,11.39
+6,875,17.8,1.7,1.37,1.44,12.0,1.549,11.99
+6,875,17.8,1.7,0.92,1.44,14.7,1.813,14.67
+7,913,18.6,4.6,1.32,1.44,30.5,1.773,30.49
+7,913,18.6,4.6,0.89,1.44,37.1,1.688,37.12
+8,1000,19.5,10.0,1.32,1.41,62.2,1.947,62.22
+8,1000,19.5,10.0,0.90,1.41,75.3,2.019,75.25

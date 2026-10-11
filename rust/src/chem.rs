@@ -20,5 +20,5 @@ pub mod thermo;
 mod tests_mechanism;
 #[cfg(test)]
 mod tests_thermo;
-pub use mechanism::{Arrhenius, Mechanism, Rational, Reaction, ThirdBody};
+pub use mechanism::{Arrhenius, Blending, Collider, Falloff, Mechanism, Rational, Reaction, ThirdBody};
 pub use thermo::{ElementTable, Interval, SpeciesThermo, ThermoSet, P_ATM, P_BAR, R_GAS};

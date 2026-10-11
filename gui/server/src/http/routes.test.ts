@@ -244,6 +244,33 @@ describe('api routes', () => {
     expect((await postJson(`${base}/api/geometry/edit`, { ...editBody, ops: '[]', out: 'cases/z.step' })).status).toBe(400)
     expect((await postJson(`${base}/api/geometry/import-step`, { path: 'cases/none.step', tags: null, stlSize: null })).status).toBe(404)
   })
+
+  it('geometry_boolean_route', async () => {
+    const CUBE = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]
+    const TRI = [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]]
+    const stl = (name: string, dx: number, skipLast = false): string => {
+      const lines = [`solid ${name}`]
+      for (const t of skipLast ? TRI.slice(0, -1) : TRI) {
+        lines.push('facet normal 0 0 0', 'outer loop')
+        for (const i of t) lines.push(`vertex ${CUBE[i][0] + dx} ${CUBE[i][1]} ${CUBE[i][2]}`)
+        lines.push('endloop', 'endfacet')
+      }
+      return `${lines.join('\n')}\nendsolid ${name}\n`
+    }
+    fs.mkdirSync(path.join(ws.root, 'cases'), { recursive: true })
+    fs.writeFileSync(path.join(ws.root, 'cases', 'two.stl'), stl('a', 0) + stl('b', 0.5), 'utf8')
+    fs.writeFileSync(path.join(ws.root, 'cases', 'open.stl'), stl('a', 0, true) + stl('b', 0.5), 'utf8')
+    const body = { path: 'cases/two.stl', op: 'cut', a: 'a', b: 'b', out: null, overwrite: null }
+    const cut = (await (await postJson(`${base}/api/geometry/boolean`, body)).json()) as Loose
+    expect(cut.path).toBe('cases/two-cut.stl')
+    expect(Math.abs(cut.volume - 0.5) / 0.5).toBeLessThanOrEqual(1e-12)
+    expect(broadcasts.at(-1)).toEqual({ t: 'fs.changed', paths: ['cases/two-cut.stl'] })
+    expect((await postJson(`${base}/api/geometry/boolean`, body)).status).toBe(409)
+    const open = await postJson(`${base}/api/geometry/boolean`, { path: 'cases/open.stl', op: 'fuse', a: 'a', b: 'b', out: null, overwrite: null })
+    expect(open.status).toBe(400)
+    expect(((await open.json()) as Loose).code).toBe('STL-OPEN')
+    expect((await postJson(`${base}/api/geometry/boolean`, { ...body, path: '../x.stl' })).status).toBe(403)
+  })
 })
 
 describe('auth token', () => {
