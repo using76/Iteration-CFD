@@ -34021,6 +34021,9 @@ schema it generates is byte-identical to the shipped one. It is not marked.
 §118.2 adds one more f64-only library test, mesh::geometry::tests::f64_geometry_is_bitwise_in_f64_build,
 which is #[cfg(not(feature = "single"))] because its subject is the f64 build's own bits; it carries no
 ignore attribute and moves neither bold count.
+§142.1 adds another f64-only library test, `solid::coupled::tests::gate_95a_probe_the_exact_fixed_point_of_the_block_map`.
+It is `#[cfg(not(feature = "single"))]` because its subject is the f64 discrete fixed point, and it is a plain
+`#[ignore]` measurement in the f64 build. It moves neither bold count.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
@@ -41836,6 +41839,111 @@ MD5 `67ba838e20c3ed60fd738632b3e8ef68`.
 Measured on 2026-10-11 (RTX 5070 Ti, the DLL above, deterministic over five runs): the plume gate gives
 `rel = 1.643e-14` with dDDI (22 iterations, converged) and `rel = 8.640e-6` with dFFI (13 iterations, AMGX reports
 converged), so both rows pass; the dFFI row passes with a margin of 1.16x.
+
+
+---
+
+## 142. Gate 95-A diagnosis and the GMRES outer loop
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §142 to VAL-10 (§142.1, the diagnosis) and VAL-11
+(§142.2, the GMRES outer loop). §109.7 measured Gate 95-A and found it holding at 2.5:1 and missing at 5:1 and
+10:1, without saying whether the miss is the outer loop's or the discretisation's. §142.1 answers that by solving
+for the discrete fixed point of §109.6's block map directly, so that the loop's answer and the discretisation's
+answer can be read apart. No solver numerics change.
+
+### 142.1 The exact discrete fixed point of the block map
+
+**What is solved.** In linear elasticity the block matrix `A` of (109.1)-(109.2) depends on the mesh and the
+material only, and once the boundary values are closed the source of (109.3)-(109.5) is affine in the cell
+displacement. So the residual of (109.6) at the closed state is affine,
+
+```text
+  ub*(u) = the boundary values at which one more boundary pass of §95.2 changes nothing
+  R(u)   = A u - source(u, ub*(u)) = B u + R(0),     B e_k = R(e_k) - R(0)                  (142.1)
+  u*     = the solution of  B u* = -R(0)                                                     (142.2)
+```
+
+with `e_k` the unit vector of flat unknown `k = 3c + i` (109.8). The loop of §109.6 carries `ub` from one
+application to the next, with three boundary passes each. At its fixed point `ub` is a fixed point of three passes,
+and therefore of one, so `u*` of (142.2) is the loop's own fixed point and not that of some other map. `ub*` is
+found by repeating single passes until the boundary values move by no more than `1e-14` of the field's magnitude.
+From a zero start this took 93 passes on every mesh below; a cap of 2000 refuses by name. The columns of `B` come
+from the device's own `correct_boundary`, `BlockOperator::assemble` and `residual`, so `B` is the operator the
+loop iterates, kernel for kernel. The factorisation is dense, in `f64`, with partial pivoting (`P B = L U`). The
+1-norm condition number is estimated by Hager's method (W. W. Hager, *SIAM J. Sci. Stat. Comput.* 5 (1984)
+311-316, DOI `10.1137/0905023`; in the LAPACK xLACON form of N. J. Higham, *ACM TOMS* 14 (1988) 381-396, DOI
+`10.1145/50063.214386`), with at most five steps:
+
+```text
+  x = (1/N, ..., 1/N);  repeat:  y = B^-1 x,  xi = sign(y),  z = B^-T xi,  j = argmax |z_j|;
+  stop when |z_j| <= z.x (after the first step), else x = e_j;   cond1 ~ ||B||_1 ||y||_1      (142.3)
+```
+
+A fixed point **exists** when the factorisation finds no zero pivot, `cond1 < 1e15`, and the device's residual of
+(109.6), evaluated at `u*` with its boundary closed, satisfies
+
+```text
+  max_c |R_c(u*)| <= 1e-12 scale,     scale = max_c ||diag[c]||_F max_c |u*_c|                  (142.4)
+```
+
+The probe is `solid::coupled::tests::gate_95a_probe_the_exact_fixed_point_of_the_block_map`. It is `#[ignore]`
+and `#[cfg(not(feature = "single"))]`, because its subject is the f64 discrete fixed point. It runs Gate 95-A's
+beams (§109.6: plane strain, `E = 200` GPa, `nu = 0.3`, `P = 1e5`, `2c = 0.2`, cubic cells, one cell through the
+thickness) at 2.5:1 on `n_y = 4, 8, 16`, at 5:1 on `n_y = 4, 8, 16` (N = 3840 at most), and at 10:1 on
+`n_y = 4, 8`. It asserts (142.4) on every mesh. On every 2.5:1 mesh it also asserts that §109.6's own loop
+(Anderson of depth five, three boundary passes) converges and that its answer equals `u*` to `1e-9` relative
+(`max |u_loop - u*| / max |u*|`). For that comparison the loop runs to 12 decades with the block solve at
+(109.11) `1e-14`. The coder's first probe run, with the block solve at Gate 95-A's `1e-12`, put the loop's answer
+`3.6e-9` from `u*` on `n_y = 8`. That gap is the inner solve's floor, not a property of the loop, and it is six
+decades below the discretisation error. The whole probe takes 32 s. Its two dense-algebra tests
+(`dense_lu_solves_both_ways_and_hager_estimates_the_inverse_norm`,
+`dense_lu_refuses_a_singular_matrix_by_its_pivot_column`) are plain `f64` and need no GPU.
+
+**Measured** (2026-10-11, RTX 5070 Ti, f64, two runs, the same digits both times). The columns are those of
+§109.7's table, read at `u*`: `e_tip` from `ub*(u*)`, `e_u` and the two stress errors at cell centres. The last
+column is the loop's result on the same mesh in §109.7.
+
+| ratio | `n_y` | N | `cond1` | (142.4) `max|R|/scale` | `e_tip` | `e_u` | `e_xx` | `e_xy` | the loop (§109.7) |
+|---|---|---|---|---|---|---|---|---|---|
+| 2.5:1 | 4 | 120 | 9.455e3 | 1.3e-15 | 2.708e-2 | 2.750e-2 | 1.435e-2 | 1.337e-2 | converged; `u*` to 5.3e-12 |
+| 2.5:1 | 8 | 480 | 4.019e4 | 6.2e-15 | 4.019e-3 | 4.052e-3 | 3.905e-3 | 4.879e-3 | converged; `u*` to 2.9e-11 |
+| 2.5:1 | 16 | 1920 | 1.626e5 | 2.6e-14 | 6.734e-4 | 6.974e-4 | 1.350e-3 | 1.743e-3 | converged; `u*` to 4.7e-11 |
+| 5:1 | 4 | 240 | 1.234e5 | 2.7e-15 | 8.190e-3 | 8.323e-3 | 1.274e-2 | 9.526e-3 | **diverged at 673** |
+| 5:1 | 8 | 960 | 5.297e5 | 1.2e-14 | 1.962e-5 | 5.784e-4 | 3.755e-3 | 3.442e-3 | converged, `e_u` 5.78e-4 |
+| 5:1 | 16 | 3840 | 2.142e6 | 5.1e-14 | 2.596e-4 | 2.633e-4 | 1.334e-3 | 1.226e-3 | converged, `e_u` 2.63e-4 |
+| 10:1 | 4 | 480 | 1.818e6 | 5.6e-15 | 1.161e-3 | 1.432e-3 | 1.169e-2 | 6.760e-3 | **1000, not converged** |
+| 10:1 | 8 | 1920 | 7.815e6 | 2.5e-14 | 1.402e-3 | 1.401e-3 | 3.656e-3 | 2.431e-3 | converged, `e_u` 1.40e-3 |
+
+The observed orders of `u*` (`p = ln(e_coarse / e_fine) / ln 2`; `p_sigma` the smaller of the two stress orders):
+
+| ratio | `p_u` 4→8 | `p_u` 8→16 | `p_sigma` 4→8 | `p_sigma` 8→16 | Gate 95-A bar |
+|---|---|---|---|---|---|
+| 2.5:1 | 2.763 | 2.539 | 1.454 | 1.485 | `p_u >= 1.9`, `p_sigma >= 0.9` |
+| 5:1 | 3.847 | **1.135** | 1.468 | 1.490 | same |
+| 10:1 | **0.032** | (1.31 from §109.7's converged `n_y = 16`) | 1.475 | - | same |
+
+**The attribution.** The fixed point exists on all eight meshes, including the two coarse ones the loop does not
+reach. The condition estimate grows with slenderness and refinement, from 9.5e3 to 7.8e6, which is still about
+nine decades short of `1/eps`. Gate 95-A's shortfall therefore has two separate causes:
+
+1. **The loop.** "Converges on every mesh" fails at 5:1 and 10:1 on `n_y = 4` only. The discrete solution exists
+   there (`e_u` 8.3e-3 and 1.4e-3), and the Anderson loop around the block map diverges from it (5:1) or stalls at
+   `q_obs = 0.992` (10:1). This half belongs to the loop, and it is what VAL-11's GMRES outer iteration is for.
+   Where the loop does converge, it lands on `u*`: to 1e-11 on 2.5:1, and to §109.7's printed digits on the 5:1 and
+   10:1 meshes it converged on.
+2. **The discretisation.** The displacement order is short of 1.9 at the exact fixed point itself: 1.135 at 5:1
+   between `n_y = 8` and 16, and 0.032 at 10:1 between 4 and 8. No outer iteration can change either number. The
+   orders are not monotone (5:1 gives 3.85 and then 1.14; the 5:1 tip error passes near zero at `n_y = 8`), and
+   the same scheme gives 2.5-2.8 on the 2.5:1 beam. So the slender beams are read before their asymptotic range,
+   and the stress order (1.45-1.49 everywhere, against a bar of 0.9) is not the problem. This half is VAL-12's
+   fourth mesh (`n_y = 32`, D-VAL-6). Whether the order then settles near 2, or near 1 (the D-VAL-7 trigger for
+   VAL-13's implicit tangential stencil, §109.4), is VAL-12's measurement. Two levels cannot settle it.
+
+What this subsection does not do: it changes no gate, no tolerance and no default. Gate 95-A's rows in
+`ofgpu-validate` are unchanged. It does not run 10:1 at `n_y = 16`, because N = 7680 is over the probe's dense
+budget; that row is §109.7's converged loop. It is not an f32 measurement. In the single build the probe does not
+exist. The two dense-algebra tests sit in the library test crate, which does not compile in the single build at
+present (pre-existing f32 errors in other modules' tests); they use no `Scalar` and would hold there unchanged.
 
 
 ---
