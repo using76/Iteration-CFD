@@ -4,9 +4,13 @@
 import {
   DEFAULT_VIEWER_STATE,
   ViewerCommandSchema,
+  defaultVisiblePatches,
+  hiddenPatches,
+  visibleBounds,
   type CameraPreset,
   type FieldComponent,
   type FieldInfo,
+  type GeometryBounds,
   type ViewerCommand,
   type ViewerErrorCode,
   type ViewerResult,
@@ -209,7 +213,7 @@ export class ViewerController {
       view.setSurfaceColoring(this.coloring)
       for (const entry of this.layers.values()) view.upsertLayer(entry, this.layerContext(entry.spec))
       view.setClipBox(this.clip)
-      view.setCamera(this.pendingCamera ?? { preset: 'fit', position: null, target: null, projection: this.camera.projection })
+      view.setCamera(this.pendingCamera ?? { preset: 'fit', position: null, target: null, projection: this.camera.projection, fitBounds: this.fitBounds() })
       this.pendingCamera = null
     }
     this.camera = view.getCamera()
@@ -354,10 +358,16 @@ export class ViewerController {
   }
 
   private defaultPatches(): string[] | 'all' {
-    const m = this.dataset?.manifest
-    if (!m?.grid?.emptyAxis) return 'all'
-    const empties = m.surface.patches.filter((p) => p.type === 'empty').map((p) => p.name)
-    return empties.length ? empties : 'all'
+    const ds = this.dataset
+    if (!ds) return 'all'
+    return defaultVisiblePatches(ds.manifest, ds.surface.positions, ds.surface.indices)
+  }
+
+  /** Bounds of the patches currently shown, for camera fits (null without a dataset). */
+  fitBounds(): GeometryBounds | null {
+    const ds = this.dataset
+    if (!ds) return null
+    return visibleBounds(ds.manifest, ds.surface.positions, ds.surface.indices, this.display.patches)
   }
 
   // ---- field / colouring --------------------------------------------------
@@ -648,14 +658,16 @@ export class ViewerController {
   }
 
   private applyCamera(opts: Parameters<SceneView['setCamera']>[0]): void {
+    // A preset frames the visible patches (explicit position/target still win in the view).
+    const full = opts.preset ? { ...opts, fitBounds: this.fitBounds() } : opts
     if (this.view) {
-      this.view.setCamera(opts)
+      this.view.setCamera(full)
       this.camera = this.view.getCamera()
     } else {
-      this.pendingCamera = opts
-      if (opts.projection) this.camera.projection = opts.projection
-      if (opts.position) this.camera.position = opts.position
-      if (opts.target) this.camera.target = opts.target
+      this.pendingCamera = full
+      if (full.projection) this.camera.projection = full.projection
+      if (full.position) this.camera.position = full.position
+      if (full.target) this.camera.target = full.target
     }
   }
 
@@ -832,6 +844,7 @@ export class ViewerController {
       time: times.length ? { index: this.timeIndex, value: times[this.timeIndex]?.value ?? 0, count: times.length } : null,
       layers: [...this.layers.values()].map((l) => ({ id: l.spec.id, type: l.spec.type, summary: l.summary })),
       camera: { position: [...this.camera.position], target: [...this.camera.target], projection: this.camera.projection },
+      patches: m ? { visible: Array.isArray(this.display.patches) ? [...this.display.patches] : this.display.patches, hidden: hiddenPatches(m, this.display.patches) } : null,
       loading: this.loading,
       message: this.message,
     }

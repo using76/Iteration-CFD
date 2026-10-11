@@ -2,7 +2,7 @@
 // "realistic" scene setup (PMREM room environment, ACES, soft shadows,
 // ground, fading grid, axes triad), cameras, controls, presets and
 // screenshot capture. Data layers are added under `dataRoot`.
-import type { CameraPreset, UpAxis } from '@cfd/shared'
+import type { CameraPreset, GeometryBounds, UpAxis } from '@cfd/shared'
 import {
   ACESFilmicToneMapping,
   DirectionalLight,
@@ -373,16 +373,16 @@ export class Engine {
     o.updateProjectionMatrix()
   }
 
-  private fitDistance(): number {
-    if (!this.bounds) return 10
-    const b = this.bounds
+  private fitDistance(fit: GeometryBounds | null = this.bounds): number {
+    if (!fit) return 10
+    const b = fit
     const radius = 0.5 * Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2])
     return (radius * 1.08) / Math.sin((this.cameras.perspective.fov * Math.PI) / 360)
   }
 
-  private boundsCentre(): Vector3 {
-    if (!this.bounds) return new Vector3()
-    const b = this.bounds
+  private boundsCentre(fit: GeometryBounds | null = this.bounds): Vector3 {
+    if (!fit) return new Vector3()
+    const b = fit
     return new Vector3((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2)
   }
 
@@ -408,16 +408,19 @@ export class Engine {
     }
   }
 
-  setCamera(opts: { preset: CameraPreset | null; position: [number, number, number] | null; target: [number, number, number] | null; projection: 'perspective' | 'orthographic' | null }): void {
+  setCamera(opts: { preset: CameraPreset | null; position: [number, number, number] | null; target: [number, number, number] | null; projection: 'perspective' | 'orthographic' | null; fitBounds?: GeometryBounds | null }): void {
     if (opts.projection) this.setProjection(opts.projection)
     if (opts.preset) {
-      const centre = this.boundsCentre()
+      // A preset frames the visible patches when the controller says what they span; the ground, grid and
+      // setBounds environment stay on the full domain.
+      const fit = opts.fitBounds ?? this.bounds
+      const centre = this.boundsCentre(fit)
       let dir = this.presetDirection(opts.preset)
       if (dir.lengthSq() === 0) dir = new Vector3(1, 1, 1)
       // Looking exactly along the up axis makes the orbit degenerate: tilt very slightly.
       const upVec = this.camera.up
       if (Math.abs(dir.clone().normalize().dot(upVec)) > 0.999) dir.addScaledVector(upVec.clone().cross(new Vector3(1, 0.3, 0.2)).normalize(), 0.02)
-      const dist = this.fitDistance()
+      const dist = this.fitDistance(fit)
       this.controls.target.copy(centre)
       this.camera.position.copy(centre).addScaledVector(dir.normalize(), dist)
       if (this.camera === this.cameras.orthographic) {

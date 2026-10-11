@@ -224,7 +224,7 @@ export function Viewer3D({ overlay, locale, view: viewId = 'A' }: Viewer3DProps)
         )}
         <OverlayInfo lines={lines} />
         {legend && <Legend legend={legend} />}
-        {manifest && <DomainCard locale={locale} manifest={manifest} projection={state.camera.projection} onToggleProjection={() => void run({ type: 'setCamera', preset: null, position: null, target: null, projection: state.camera.projection === 'perspective' ? 'orthographic' : 'perspective' })} />}
+        {manifest && <DomainCard locale={locale} manifest={manifest} projection={state.camera.projection} hiddenPatches={state.patches?.hidden ?? []} onToggleProjection={() => void run({ type: 'setCamera', preset: null, position: null, target: null, projection: state.camera.projection === 'perspective' ? 'orthographic' : 'perspective' })} />}
         {manifest && manifest.times.length > 1 && state.time && <TimeScrubber times={manifest.times} index={state.time.index} onChange={(i) => void run({ type: 'setTime', index: i })} />}
         <LayerPanel layers={layers} onToggle={(id, v) => controller.setLayerVisible(id, v)} onRemove={(id) => void run({ type: 'remove', id })} clip={clipUi} onClipChange={applyClip} />
         {tip && (

@@ -1,5 +1,5 @@
 // SceneView implementation on top of Engine + the layer objects.
-import type { CameraPreset, ViewerDataset } from '@cfd/shared'
+import type { CameraPreset, GeometryBounds, ViewerDataset } from '@cfd/shared'
 import { Color, Plane, Vector3, type Object3D } from 'three/webgpu'
 import type { CameraPose, ClipBox, DisplaySettings, LayerEntry, QualityLevel, ViewerTool } from '../controller/model'
 import type { SceneView, ScreenshotRequest, ScreenshotResult, SurfaceColoring } from '../controller/SceneView'
@@ -168,7 +168,7 @@ export class ThreeSceneView implements SceneView {
     this.engine.invalidate()
   }
 
-  setCamera(opts: { preset: CameraPreset | null; position: [number, number, number] | null; target: [number, number, number] | null; projection: 'perspective' | 'orthographic' | null }): void {
+  setCamera(opts: { preset: CameraPreset | null; position: [number, number, number] | null; target: [number, number, number] | null; projection: 'perspective' | 'orthographic' | null; fitBounds?: GeometryBounds | null }): void {
     this.engine.setCamera(opts)
   }
 

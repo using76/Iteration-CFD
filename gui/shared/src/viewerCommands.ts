@@ -233,6 +233,8 @@ export const ViewerStateSchema = z.object({
   time: z.object({ index: z.number(), value: z.number(), count: z.number() }).nullable(),
   layers: z.array(ViewerLayerSummarySchema),
   camera: z.object({ position: Vec3Schema, target: Vec3Schema, projection: z.enum(['perspective', 'orthographic']) }),
+  /** What the surface shows vs the manifest patches: null while no dataset is loaded. */
+  patches: z.object({ visible: z.union([z.array(z.string()), z.literal('all')]), hidden: z.array(z.string()) }).nullish(),
   loading: z.boolean(),
   message: z.string().nullable(),
 })
@@ -280,6 +282,7 @@ export const DEFAULT_VIEWER_STATE: ViewerState = {
   time: null,
   layers: [],
   camera: { position: [10, 10, 10], target: [0, 0, 0], projection: 'perspective' },
+  patches: null,
   loading: false,
   message: null,
 }
