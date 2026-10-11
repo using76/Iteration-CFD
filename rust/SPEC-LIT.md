@@ -40255,6 +40255,90 @@ The f32 build (`--features single`) passes the same rows; the module is f64 in b
 
 No new equation labels.
 
+### 132.9 The device kernels as built (CHR-07a, `cuda/chem.cu`, `src/chem/device.rs`)
+
+Two kernels, one thread per cell, compute in `typedef double ofchem` in both
+builds (§132.6):
+
+* **`chemProductionRates`** evaluates (130.1) from `(T, p, Y)` through
+  (128.9)'s concentrations, which is `production_rates_tpy` of §130.7. `T`,
+  `p`, `Y` and `omega` cross as `ofscalar`; the sums run in `ofchem` and
+  `omega` is rounded once on the way out.
+* **`chemReactorJacobian`** evaluates the reactor right-hand side
+  (132.7)-(132.9) with R8's clip `Y⁺_k = max(Y_k, 0)`, which is
+  `ConstPressureReactor::rhs` of §132.8, and then §132.3's one-sided
+  difference column by column, `δ_j = 2^-26 max(abs(y_j), atol_j)`, which is
+  `fd_jacobian` of §132.7 (`2^-26` is `sqrt(eps_64)` exactly). The state
+  `y = (Y_1..Y_K, T)`, `p`, `atol`, `f0` and `J` are `ofchem` in both builds:
+  they are internal to the chemistry step that CHR-07b integrates in double.
+
+**Design choices of this unit (ORIGINAL; SAND89-8009 gives only the
+equations).**
+
+* **D1, one for one.** Every choice of §130.7 is made as the host twin makes
+  it, in the host twin's order: the forward term directly with `pow`, the
+  reverse term as one `exp` of the log sum (130.16)/(130.17) with `sgn(A)` as
+  `copysign(1, A)`, the order-0 skip on both sides, `q_f = q_r = 0` exactly at
+  `Pr = 0`, `Pr/(1+Pr) = 1` at an infinite `Pr`, `ln K_c` summed over the
+  products and then the reactants (130.6), and (130.1) accumulated reaction
+  by reaction, reactants then products. The third-body sum (130.3) runs over
+  every species in index order with `alpha = 1` where none is listed, as
+  `third_body_concentration` does. `G/RT` is evaluated only for the species
+  of reversible reactions without `REV`.
+* **D2, the flat mechanism.** The mechanism is uploaded once as two arrays,
+  one of `double` and one of `int`, whose layout is stated in
+  `src/chem/device.rs` and in the header of `cuda/chem.cu` with the same field
+  list: the species records (molar mass, range, both NASA-7 sets), `R` and
+  `p_ref` taken from the host so that no constant is spelled twice, one record
+  per reaction (kind, reverse kind, Arrhenius sets, fall-off parameters), the
+  order and stoichiometry lists, and one dense efficiency row per third-body
+  reaction.
+* **D3, refusals per cell.** A kernel cannot return §130.7's `Error::Config`,
+  so each cell writes a status, in the host twin's order of checks:
+  `1` a pressure not finite or not above 0, `2` a temperature not finite or
+  not above 0, `3` a mass fraction negative or not finite (production rates
+  only; the reactor clips), `4` no species present (`Σ Y/W` not above 0),
+  `5` a `T` outside the thermo range of a species whose record is needed.
+  A refused cell writes NaN to all its outputs, so it cannot be used
+  silently. The Jacobian's status is the first refusal met at `y` or at any
+  perturbed column.
+* **D4, contraction.** `chem.cu` is compiled with nvcc's default
+  `-fmad=true`. The gate is 1e-12 against the host, not bitwise, so it is not
+  a `FMAD_OFF_UNITS` member (§82.4's exception is for bitwise gates).
+
+**The measure.** `omega_k` is a sum of terms of both signs, so the error is
+taken against the gross rate of the species,
+
+```
+G_k = Σ_i Σ_(entries of k in reaction i) ν (|q_f,i| + |q_r,i|),    e_k = |omega_dev,k - omega_host,k| / G_k
+```
+
+with the reactant and product entries both counted. A species with `G_k = 0`
+must come back exactly 0. This is the denominator §130.6's mass identity
+uses. For the Jacobian, each of the two evaluations in a column is within the
+right-hand-side bound at the state it ran on, so the derived bound is
+
+```
+abs(J_dev,ij - J_host,ij) δ_j <= 1e-12 ( F_i(y) + F_i(y + δ_j e_j) ),
+F_i = W_i G_i / rho (i <= K),     F_T = Σ_k abs(H_k) G_k / (rho cp)
+```
+
+and `f0` is held to `1e-12 F_i(y)`; a zero bound means exact equality. The
+perturbed state's scale is needed, not only `F_i(y)`: at a state where a
+species is exactly 0, a reaction with a FORD order on it has `G = 0` at `y`
+and a genuine nonzero quotient after the perturbation (`J ≈ -0.93` in the
+fixture's CH4 row at the zeroed-O2 states, on the host and the device alike).
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `chem_device_omega_matches_host` | 4096 random states of §130.7's generator on the 14-reaction fixture, `max e_k` | 1e-12 (f64 build); f32 build: inputs rounded to f32 and the host evaluated at the rounded inputs, 1e-6 (the plan's band, inside the class rule's 1e-5) | P; R in f32 | f64 build `1.68e-14` (cell 737, O2); f32 build `5.89e-8` |
+| `chem_device_omega_matches_host_gri30` | the same on GRI-Mech 3.0 when its paths are set (§129.6) | the same | P; R in f32 | with the user's GRI-Mech 3.0 copy: f64 build `5.67e-14`; f32 build `5.92e-8` |
+| `chem_device_jacobian_matches_host` | 4096 random states, `f0` and `J` against `rhs` and `fd_jacobian` | the bounds above, both builds (inputs are double in both) | P | worst `f0` at `1.70e-2` of its bound, worst `J` at `1.42e-2` of its bound, both builds |
+| `chem_device_refuses_by_status` | statuses 1-5 and the NaN outputs; a clipped negative `Y` is not refused by the reactor | exact | D | — |
+| `chem_device_replays_under_capture` | both kernels inside §81.5's protocol, the rates feeding the next iteration's `T` | bitwise | D | 4 kernel nodes, 3 replays bitwise over 6 buffers / 9280 values |
+
+No new equation labels.
+
 ---
 
 ## 133. Mixture-averaged transport, and the reacting low-Mach constraint

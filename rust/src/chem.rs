@@ -16,9 +16,11 @@
 //! (SPEC-LIT §130) - lives in [`kinetics`]. Chemical equilibrium by Gibbs
 //! minimisation (SPEC-LIT §131) lives in [`equilibrium`]. The stiff
 //! Rosenbrock integrator (SPEC-LIT §132) lives in [`rosenbrock`]. The
-//! constant-pressure reactor (SPEC-LIT §132.4) lives in [`reactor`].
+//! constant-pressure reactor (SPEC-LIT §132.4) lives in [`reactor`]. The
+//! device kernels (SPEC-LIT §132.9) live in [`device`].
 
 mod ck_lexer;
+pub mod device;
 pub mod equilibrium;
 pub mod kinetics;
 pub mod mechanism;
