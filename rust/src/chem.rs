@@ -13,9 +13,11 @@
 //! read into a validated [`Mechanism`] whose every reaction balances exactly
 //! in rational arithmetic (SPEC-LIT §129). The finite-rate kinetics built on
 //! it - the rate of progress, fall-off and the reverse rate from equilibrium
-//! (SPEC-LIT §130) - lives in [`kinetics`].
+//! (SPEC-LIT §130) - lives in [`kinetics`]. Chemical equilibrium by Gibbs
+//! minimisation (SPEC-LIT §131) lives in [`equilibrium`].
 
 mod ck_lexer;
+pub mod equilibrium;
 pub mod kinetics;
 pub mod mechanism;
 pub mod thermo;
@@ -24,5 +26,6 @@ mod tests_mechanism;
 #[cfg(test)]
 mod tests_thermo;
 pub use kinetics::{production_rates, production_rates_tpy, rates_of_progress, Progress};
+pub use equilibrium::{equilibrate_hp, equilibrate_tp, EqOptions, Equilibrium};
 pub use mechanism::{Arrhenius, Blending, Collider, Falloff, Mechanism, Rational, Reaction, ThirdBody};
 pub use thermo::{ElementTable, Interval, SpeciesThermo, ThermoSet, P_ATM, P_BAR, R_GAS};

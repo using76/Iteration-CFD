@@ -20355,6 +20355,7 @@ work       Perić
 work       Incropera
 work       Modest
 work       Numerical Recipes
+work       RP-1311
 document   docs/05-io-redesign.md
 document   docs/07-lowmach-solver.md
 reserved   99   the invented gate addresses §69's registry tests cite
@@ -39770,9 +39771,117 @@ CHR-04 looks for a published `T_ad` in RP-1311 Part II (McBride & Gordon,
 NASA RP-1311-P2, 1996), the user's manual, which has the program's examples.
 If one matches the mixture and the species set, the row compares against it
 within 5 K. Otherwise the row prints a NAMED textbook value and **runs no gate
-through it** (plan row CHR-04).
+through it** (plan row CHR-04). §131.5 records what was found: no example
+matches.
 
-Labels: (131.1)-(131.8).
+### 131.5 The solver as built (CHR-04, `src/chem/equilibrium.rs`)
+
+`equilibrate_tp` and `equilibrate_hp` take a `ThermoSet`, the reactant mass
+fractions `y0` (which fix the elements) and `p`, plus `T` or `h0` in J/kg.
+Every number is f64 in both builds. The assigned element moles are
+
+```
+b_i° = Σ_j a_ij y0_j / W_j  /  Σ_j y0_j          (mol/kg)                        (131.9)
+```
+
+and the result gives `n_j` in mol/kg, `X_j = n_j / Σ n_j`, `Y_j = n_j W_j` and
+`c_j = p X_j / (R T)`, the concentrations §130's kinetics takes. The choices
+below are DESIGN choices of this unit. RP-1311 does not dictate them:
+
+* **D1, absent elements.** An element with `b_i° = 0` is inactive. Every
+  species that contains it is held at exactly `n_j = 0` and enters no sum, the
+  element's row (131.3) is dropped, and its `π_i` is reported as 0. Without
+  this, H2-air on a set that carries carbon species would give a singular
+  matrix.
+* **D2, units of the start.** RP-1311 counts kilogram-moles per kilogram, so
+  its start `n = 0.1` is `n = 100 mol/kg` here, with `n_j = 100/NS`.
+* **D3, the temperature window.** For `(h, p)` the start is
+  `T = min(t_start, min_j t_high)` over the active species, with
+  `t_start = 3800 K` by default. GRI-Mech 3.0's records end at 3500 K, and
+  RP-1311's 3800 K lies outside them. After each step `T` is clamped into
+  `[max_j t_low, min_j t_high]`. A solution that would lie outside the window
+  cannot converge, and it is refused by the iteration limit. It is never
+  returned at the bound.
+* **D4, the trace polish.** §131.3's trace rule (SIZE) runs until the
+  convergence test passes. Then SIZE is dropped. Every active species enters
+  every sum, including `b_k` and `Σ n_j`, and `λ = min(1, λ1)` is taken over
+  all of them. The Newton iteration runs again to the same test. Two things
+  depend on this. Trace species then satisfy (131.1) as well, so detailed
+  balance holds for reactions that involve them. And the element balance
+  counts them: a trace species held at `X ≈ 1e-8` would otherwise break
+  `eq_elements_conserved` by four orders of magnitude.
+* **Refusals** (`Error::Config`, each naming the value and ending
+  "(SPEC-LIT §131.5)"):
+  - `T` or `p` not finite or not above 0;
+  - `h0` not finite;
+  - `max_iterations = 0`;
+  - `t_start` not finite or not above 0;
+  - more iterations than `max_iterations` (200 by default) over both phases,
+    reported with the last element residual and the largest `|Δln n_j|`;
+  - a singular Newton matrix.
+
+  `y0`'s own errors and a thermo record's range error pass through
+  unchanged.
+
+**The gate mechanism and the answer key.** JL4 is not in the tree (§129.6).
+The detailed-balance row therefore runs on §130.7's fourteen-reaction
+TM-4513 fixture. Its rate numbers are placeholders, and detailed balance
+does not depend on rate numbers: `k_r` comes from `K_c` (130.5). Eleven of
+the fourteen reactions are checked. Three are excluded by name:
+
+* R10 carries `REV`, so its reverse rate is an independent Arrhenius set and
+  owes nothing to `K_c`;
+* R11 and R12 are irreversible.
+
+When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set, the same row runs on
+GRI-Mech 3.0, with argon as an absent element (D1). A GRI reaction whose
+`q_f = 0`, because it has argon as an explicit reactant, is excluded by name.
+`thermo30.dat`'s records start at 300 K, and §128.1 does not extrapolate. The
+GRI `(h, p)` row therefore forms `h0` at 300 K, the set's common `t_low`,
+instead of 298.15 K, and says so in its output.
+The composition is held against an independent 40-digit evaluation made by the
+supervisor outside the tree. That evaluation solves (131.1)-(131.2) and the
+element, `n` and enthalpy conditions directly with `mpmath`. It does not use
+the reduced Newton system, and it uses the TM-4513 records at their own
+1 bar, so the 1 atm move of §128.4 is checked as well. Its printed values for
+stoichiometric CH4-air (`CH4 + 2 (O2 + 3.76 N2)`) over the ten TM-4513 species
+at 1 atm are:
+
+| state | T (K) | n (mol/kg) | X_H2O | X_CO2 | X_CO | X_OH |
+|---|---|---|---|---|---|---|
+| `(T, p)` | 2000 | 36.272218301275178 | 0.18795875089814110 | 0.092010911965114985 | 0.0028261885591149366 | 0.00085447068058103910 |
+| `(h, p)` from 298.15 K | **2231.1042475877235** | 36.452609749342998 | 0.18356089463982553 | 0.085669864128601297 | 0.0086979201515583774 | 0.0030348505825709251 |
+
+The test file carries every species, the `π_i` values, and an H2-air
+`(T, p)` row with carbon absent.
+
+**`T_ad`, the finding.** RP-1311 Part II (McBride & Gordon, NASA RP-1311-P2
+(1996), NTRS 19960044559) was read at its Chapter 7, pp. 67-71, from the
+page images. Of its fourteen examples, the only `hp` combustion of a fuel
+with air is Example 3. Its air is preheated to
+700 K, and it is solved at 1, 10 and 100 bar. No example matches
+stoichiometric CH4-air from 298.15 K at 1 atm. The `eq_tad_methane_air` row
+is therefore gated against the oracle only (1e-10 relative, class P). It
+prints a NAMED textbook value and runs no gate through it. That value is
+S. R. Turns, *An Introduction to Combustion*, 2nd ed. (McGraw-Hill, 2000),
+which quotes 2226 K. The page was not read in this unit. The ten-species set
+gives 2231.10 K. It lacks NO, N and the other minor species that a full
+product list carries, so the 5 K difference is not a finding about the
+solver.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `eq_matches_oracle` | every `X_j`, `n`, `π_i` and the `(h,p)` `T` against the oracle, CH4-air | 1e-10 relative | P |
+| `eq_tad_methane_air` | `T` against the oracle; `h(T, Y) - h0` against `Σ_j abs(Y_j h_j/W_j)` | 1e-10 relative; 1e-10 | P; A |
+| `eq_tp_at_tad_reproduces_hp` | `(T, p)` at the `(h, p)` result's `T` gives the same `X_j`, `π_i` | 1e-10 relative | A |
+| `eq_absent_element_is_exact_zero` | H2-air: the carbon species and `π_C` exactly 0; the rest against the oracle | exact; 1e-10 relative | D; P |
+| `eq_refuses_bad_input` | the refusals above, each by name | exact text parts | D |
+| `eq_gri30_detailed_balance` | elements and detailed balance on GRI-Mech 3.0 when its paths are set | as the rows of §131.4 | A |
+
+Every row is unchanged by the f32 build, because the solver is f64 in both
+builds and its tests are integration tests that run under both.
+
+Labels: (131.1)-(131.9).
 
 ---
 
@@ -40174,6 +40283,8 @@ Labels: (133.1)-(133.12).
 | NASA TM-4513 | NTRS 19940013151 | public domain | yes | — (the plan's NASA-7 source) |
 | NASA/TP-2002-211556 | NTRS 20020085330 | public domain | yes (§100) | — |
 | NASA RP-1311 Part I | NTRS 19950013764 | public domain | yes | — (the plan said 19950013764; confirmed) |
+| NASA RP-1311 Part II (McBride & Gordon 1996) | NTRS 19960044559 | public domain | Chapter 7 pp. 67-71 (CHR-04) | **added**: no example is stoichiometric CH4-air from 298.15 K, 1 atm (§131.5) |
+| Turns, *An Introduction to Combustion*, 2nd ed. (2000) | McGraw-Hill textbook | closed | no | **added**: the NAMED `T_ad` = 2226 K of §131.5, which gates nothing |
 | CHEMKIN-II, SAND89-8009 | OSTI 5681118, DOI 10.2172/5681118 | public | yes | the plan's "OSTI id to be confirmed": confirmed |
 | CHEMKIN-III, SAND96-8216 | OSTI 481621, DOI 10.2172/481621 | public | yes (pp. 46-54) | **added**: FORD/RORD, real coefficients and UNITS are CHEMKIN-III only |
 | TRANSPORT, SAND86-8246 | OSTI 7157265 | record only, no full text on OSTI | no | the plan's "OSTI id to be confirmed": confirmed; not readable |
