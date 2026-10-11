@@ -35504,7 +35504,9 @@ It uses no `orient3d`, no `insphere` and no sign rule, which makes it independen
 The supervisor's exact-arithmetic probe checked all three on 3000 random 5-point queries from
 the 3x3x3 lattice: no zero results, no mismatch against an explicit `eps_i = eps^(2^rank)`
 perturbation, and no failed swap. The same order is used for `orient3d` ties wherever the
-kernel needs one. TET-03a records any such use here.
+kernel needs one. TET-03a records any such use here: the kernel of §116.6 needs none. Its only
+zero `orient3d` case, a point coplanar with a hull face, is decided by (116.5a) through the
+perturbed `insphere` of the finite neighbour.
 
 ### 116.6 The Delaunay kernel
 
@@ -35521,8 +35523,57 @@ two tetrahedra (Shewchuk, delnotes). Point location is the visibility walk of De
 & Teillaud (2002), which crosses the face whose plane separates the current tetrahedron from
 the point. A hull tetrahedron `(a, b, c, inf)` conflicts with `p` when `p` lies strictly on the
 outer side of the hull face `abc`. When `p` is coplanar with `abc`, the conflict is decided by
-a perturbed rule. TET-03a writes that rule and its test into this subsection when it builds
-it. Duplicate points are refused by name, not perturbed.
+a perturbed rule, (116.5a) below. Duplicate points are refused by name, not perturbed.
+
+**Storage.** A finite tetrahedron obeys (116.2). A hull tetrahedron is stored as
+`(a, b, c, inf)`, with `inf` always in slot 3, wound so that a point `q` strictly beyond the
+hull face `abc` gives `orient3d(a, b, c, q) > 0`. Equivalently, the apex `d` of the finite
+neighbour across `abc` gives `orient3d(a, b, c, d) < 0`. Treating `inf` as a point far beyond
+`abc`, this is (116.2) for the hull tetrahedron. A tetrahedron that gains `inf` is brought to
+slot 3 by an even permutation of its slots, which keeps its orientation. Neighbour `i` of a
+tetrahedron is the one across the face opposite slot `i`.
+
+**The conflict rule** for a point `p` with global index `i_p`. Ids are the input indices of
+the points, and the perturbed `insphere` is (116.4):
+
+```
+finite T = (v0, v1, v2, v3):   conflict(T, p)  <=>  insphere_perturbed(v0, v1, v2, v3, p) > 0
+hull   H = (a, b, c, inf):     o = orient3d(a, b, c, p)
+                               o > 0  ->  conflict
+                               o < 0  ->  no conflict
+                               o = 0  ->  conflict(H, p) = conflict(N, p),
+                                          N = the finite neighbour of H across abc          (116.5a)
+```
+
+DERIVED. When `p` lies in the plane of `abc`, the circumsphere of `N` cuts that plane in the
+circumcircle of `abc`, so (116.5a) asks whether `p` lies inside that circle. A zero there is
+broken by (116.4) like any other zero, and the answer depends only on the plane configuration,
+because `N`'s apex lies on the inner side of the plane. The rule keeps `H` in the cavity exactly
+when `N` is in it. A cavity boundary face `abc` would otherwise star into the flat tetrahedron
+`(a, b, c, p)`.
+
+**Uniqueness.** DERIVED. With the lifting perturbation of §116.5 every non-vertical lower facet
+of the lifted point set is a simplex with a non-flat projection. A triangulation whose interior
+faces are all locally Delaunay under (116.4) is therefore the projected lower hull (the Delaunay
+lemma), and it is unique. The result does not depend on the insertion order. TET-03a's tests
+build the same sets in two orders and compare the tetrahedron sets.
+
+**Start, walk and refusals.** The input is refused, in this order, as `delaunay/domain` (a
+coordinate outside (116.3f), NaN and infinities included, naming the point and the axis),
+`delaunay/duplicate` (two points with equal coordinates, naming the smallest such pair
+`(i, j)`, `i < j`), and `delaunay/flat` (fewer than four points, or all coplanar). The first
+tetrahedron takes, in insertion order, the first point, the first point that differs from
+it, the first point not collinear with those two, and the first point not coplanar with
+those three. Collinearity is the exact zero of all three coordinate-plane orientations, each
+computed as `orient3d` with that coordinate set to 0 and a fourth point `(0, 0, 1)`,
+`(0, 1, 0)` or `(1, 0, 0)`. The walk starts from the last tetrahedron created, or from its
+finite neighbour if that one is a hull tetrahedron. At each step it tests the faces in an
+order rotated by a fixed-seed stream. Faces are outward-wound by §116.4's table. It crosses
+the first face with `orient3d(face, p) < 0`. It stops in a finite tetrahedron with no such
+face, or on entering a hull tetrahedron, which then conflicts strictly. A walk longer than the
+number of live tetrahedra is refused as `delaunay/walk`. Devillers, Pion & Teillaud (2002)
+note that the visibility walk terminates on a Delaunay triangulation, whatever face order it
+uses, so this refusal is a guard that no test reaches.
 
 **Gates (TET-03a).**
 
@@ -36161,6 +36212,16 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-05 | the TET-00 follow-up: `TetSpec::validate` and §116.3's "or non-finite" | `+inf` was accepted for `size.gradation`, `refine.radius_edge` and `layers.max_neighbour_ratio` (a supervisor probe failed on all three); each is now refused by name, `tetmesh::tests::spec_refuses_non_finite_bounds` | the TET-05 commit |
 | TET-05 | the f32 arm (`--features single`), from outside the tree | the unit's 11 tests compiled in a crate whose `Scalar` is 4 bytes pass with identical printed numbers, stream E included; the f64 build's SASS is identical on all 43 cubins | the TET-05 commit |
 | TET-05 | the whole `tetmesh::` test filter, release | 44 tests in 4.80 s | the TET-05 commit |
+| TET-03a | 10^4 uniform points (SplitMix64 seed 2026): the tetrahedron set against Qhull (scipy, run outside the tree; its result checked locally Delaunay in exact rationals, 0 failures over every interior face) | equal: 66 273 tets, 76 389 edges, 132 663 faces, 234 hull faces, digest `0x62df92f27011a4d5`, in input order and, in the supervisor's probe outside the tree, in reversed and shuffled order; Euler 1; volume equals the exact rational hull volume 0.9875476112201466 within 1e-12 relative | the TET-03a commit |
+| TET-03a | the cube corners and the 3x3x3 lattice against a brute-force exact Delaunay of the explicitly perturbed lifting (outside the tree) | equal: 6 tets (digest `0x8ecc7ce0071e1d85`) and 48 tets (`0x1ab2235318ee986d`), in input and reversed order; volumes 1 and 8 exactly | the TET-03a commit |
+| TET-03a | (116.5a), the coplanar hull rule: a point coplanar with a hull face, inside its circumcircle (case A) and on it (cases B and B2, cospherical, so (116.4) decides) | the brute-force tetrahedron sets in both insertion orders; the `o = 0` branch runs in both cases | the TET-03a commit |
+| TET-03a | the 20^3 lattice (8000 points, every 5-point subset of a lattice cube cospherical) | locally Delaunay under (116.4); 41 154 tets, 4 332 hull faces (2 V_hull - 4 with V_hull = 2 168); volume 6859 exactly; Euler 1; the same digest `0xf71fcb283e1f04f5` in input and reversed order (and shuffled, in the supervisor's probe); (116.5a)'s `o = 0` branch ran 237 724 times in input order | the TET-03a commit |
+| TET-03a | 2000 points on the unit sphere (seed 2027, normalised rejection samples, no transcendental functions) | locally Delaunay; 6 023 tets; 3 996 hull faces with all 2000 points on the hull; volume equals Qhull's exact rational hull volume 4.163454815148943 within 1e-12 relative; in the supervisor's probe, the same digest `0xeec7001fe35f95d0` in input, reversed and shuffled order | the TET-03a commit |
+| TET-03a | the supervisor's degenerate probes (outside the tree): two parallel 15x15 grids, and a 20x20 planar grid with one apex | the same digest in input and shuffled order; `check` passes; Euler 1 | the TET-03a commit |
+| TET-03a | the cost, release, input order (no BRIO yet; TET-03b's subject) | 10^4 uniform points in 0.08-0.17 s, 48.5 walk steps and 19.5 cavity tets per insertion; 10^5 in 4.6 s, 104.7 walk steps per insertion | the TET-03a commit |
+| TET-03a | the f32 arm | `rust/tests/tetmesh_delaunay.rs`, 6 tests (cube, lattice, coplanar hull, 2000 random points against Qhull's digest `0xb88702ffa69aeb56`, the 8^3 lattice, `locate` from every hull slot) pass with the same assertions under `--features single` | the TET-03a commit |
+| TET-03a | the first run's two failures | the insertion loop skipped the points the start scan had passed over (a collinear lattice point was never inserted; the coder's own test caught it); the public `locate` returned a hull start slot without walking (the supervisor's test `delaunay_both_builds_locate_from_hull_start` caught it: 156 hull starts, 200 queries each) | the TET-03a commit |
+| TET-03a | the whole `tetmesh::` test filter, release | 56 tests in 4.56 s | the TET-03a commit |
 
 ### 116.19 References
 

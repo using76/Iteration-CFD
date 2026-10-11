@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod predicates;
 pub mod perturb;
+pub mod delaunay;
 pub mod sizefield;
 pub mod surfprep;
 
