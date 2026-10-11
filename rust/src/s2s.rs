@@ -396,19 +396,22 @@ pub fn radiosity_sweeps(eps_min: Scalar, tol: Scalar) -> usize {
 pub fn gauss_legendre_01(n: usize) -> (Vec<Scalar>, Vec<Scalar>) {
     let mut x = vec![0.0 as Scalar; n];
     let mut w = vec![0.0 as Scalar; n];
-    let nn = n as Scalar;
+    // §118.3: the `1e-16` stop is below f32 round-off, so under `single`
+    // this Newton could never meet its own tolerance in `Scalar`. It runs in
+    // f64 and rounds ONCE into `Scalar` at the store; in the f64 build the
+    // rounding is the identity and the table is bit for bit what it was.
+    let nn = n as f64;
     for i in 0..n {
         // Chebyshev-like initial guess for the i-th root of P_n on [-1,1].
-        let mut z: Scalar =
-            (std::f64::consts::PI as Scalar * (i as Scalar + 0.75) / (nn + 0.5)).cos();
-        let mut pp: Scalar = 0.0;
+        let mut z: f64 = (std::f64::consts::PI * (i as f64 + 0.75) / (nn + 0.5)).cos();
+        let mut pp: f64 = 0.0;
         for _ in 0..100 {
             // Bonnet's recurrence for P_n(z) and its derivative.
-            let (mut p0, mut p1) = (1.0 as Scalar, 0.0 as Scalar);
+            let (mut p0, mut p1) = (1.0_f64, 0.0_f64);
             for j in 0..n {
                 let p2 = p1;
                 p1 = p0;
-                let jj = j as Scalar;
+                let jj = j as f64;
                 p0 = ((2.0 * jj + 1.0) * z * p1 - jj * p2) / (jj + 1.0);
             }
             pp = nn * (z * p0 - p1) / (z * z - 1.0);
@@ -419,8 +422,8 @@ pub fn gauss_legendre_01(n: usize) -> (Vec<Scalar>, Vec<Scalar>) {
             }
         }
         // Map [-1,1] -> [0,1]: x = (1+z)/2, weight halved.
-        x[i] = 0.5 * (1.0 + z);
-        w[i] = 1.0 / ((1.0 - z * z) * pp * pp);
+        x[i] = narrow(0.5 * (1.0 + z));
+        w[i] = narrow(1.0 / ((1.0 - z * z) * pp * pp));
     }
     // The initial guesses run from z = +1 down, so the roots come out
     // DESCENDING. Reverse them: the rule is a set and its accuracy does not
@@ -1192,10 +1195,17 @@ pub fn tri_hit(org: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3, t_min: Scalar
 
 struct S2sKernels {
     view_factors: CudaFunction,
+    // §118.3: the enforcement kernels are dead under `single`, where the
+    // stage runs on the host - kept, never deleted.
+    #[cfg_attr(feature = "single", allow(dead_code))]
     symmetrise: CudaFunction,
+    #[cfg_attr(feature = "single", allow(dead_code))]
     row_sum: CudaFunction,
+    #[cfg_attr(feature = "single", allow(dead_code))]
     sinkhorn_factor: CudaFunction,
+    #[cfg_attr(feature = "single", allow(dead_code))]
     scale_rows_cols: CudaFunction,
+    #[cfg_attr(feature = "single", allow(dead_code))]
     row_defects: CudaFunction,
     irradiation: CudaFunction,
     radiosity_sweep: CudaFunction,
@@ -1467,9 +1477,17 @@ impl ViewFactors {
             gpu.write(&mut gmat, &host)?;
         }
 
-        // ---- areas -------------------------------------------------------
-        let mut area_host = vec![0.0 as Scalar; n];
-        area_host[..n_coarse].copy_from_slice(&g.area);
+        // ---- enforcement (§49.6, §49.7, §49.8) ---------------------------
+        //
+        // §118.3: under `single` the whole stage runs on the host in f64
+        // (`enforce_exchange_areas_f64`) and is rounded once into `Scalar`;
+        // none of the device scratch below is allocated there. In the f64
+        // build this is the device path, unchanged.
+        #[cfg(not(feature = "single"))]
+        let enforced = {
+            // ---- areas ---------------------------------------------------
+            let mut area_host = vec![0.0 as Scalar; n];
+            area_host[..n_coarse].copy_from_slice(&g.area);
 
         // ---- diagnostics BEFORE enforcement ------------------------------
         let mut rowsum: DevBuf<Scalar> = gpu.zeros(one(n))?;
@@ -1499,26 +1517,11 @@ impl ViewFactors {
 
         // ---- S49.6: an enclosure claimed closed had better be -----------
         if !has_ambient && rowsum_error > CLOSURE_REFUSAL {
-            return Err(Error::Config(format!(
-                "s2s: the radiating surface does not close - the worst row sum \
-                 misses 1 by {rowsum_error:.4e} (coarse face {worst_row}, \
-                 SUM_j F_ij = {:.6}), and no `ambientTemperature` was given.\n  \
-                 SPEC-LIT S49.6: either list the openings as radiating surfaces \
-                 with `emissivity 1` and their own temperature, or set \
-                 `ambientTemperature <T>` to close the enclosure with a black \
-                 pseudo-surface. Sinkhorn scaling would otherwise smear a \
-                 GEOMETRIC deficit uniformly over every pair and produce a \
-                 closed, reciprocal, entirely fictitious F.\n  \
-                 If the enclosure IS closed, this is an OCCLUSION error rather \
-                 than a geometric one, and the two settings fail in OPPOSITE \
-                 directions: `occlusion pairwise` settles a partly-shadowed \
-                 pair with five rays and gets it all-or-nothing, while \
-                 `occlusion perPoint` puts every blockable pair on the area \
-                 form, which is far less accurate in the near field (SPEC-LIT 49.2b) \
-                 - measured 8.8e-3 against 0.16 on the same enclosure. Try \
-                 the OTHER one, or a finer `agglomerate`.",
-                f64::from(rs[worst_row] / area_host[worst_row].max(SCALAR_FLOOR))
-            )));
+            return Err(closure_refused(
+                wide(rowsum_error),
+                worst_row,
+                wide(rs[worst_row] / area_host[worst_row].max(SCALAR_FLOOR)),
+            ));
         }
 
         // ---- S49.7: reciprocity, exactly ---------------------------------
@@ -1586,26 +1589,54 @@ impl ViewFactors {
         let enforcement_moved = max_of(&gpu.download(&moved)?, n_coarse, &area_host);
         let min_after = gpu.download(&least)?[..n.max(1)].iter().fold(0.0 as Scalar, |m, &v| m.min(v));
 
-        let area = gpu.upload(&area_host)?;
+            Enforced {
+                area_host,
+                rowsum_error,
+                reciprocity_error,
+                reciprocity_after,
+                min_after: min_exchange.min(min_after),
+                enforcement_moved,
+                rowsum_after,
+            }
+        };
+        #[cfg(feature = "single")]
+        let enforced = {
+            let e = enforce_exchange_areas_f64(&host, &g.area, n_coarse, has_ambient)?;
+            if n > 0 {
+                let rounded: Vec<Scalar> = e.g.iter().map(|&v| narrow(v)).collect();
+                gpu.write(&mut gmat, &rounded)?;
+            }
+            Enforced {
+                area_host: e.area.iter().map(|&v| narrow(v)).collect(),
+                rowsum_error: narrow(e.rowsum_error),
+                reciprocity_error: narrow(e.reciprocity_error),
+                reciprocity_after: narrow(e.reciprocity_after),
+                min_after: narrow(e.min_exchange),
+                enforcement_moved: narrow(e.enforcement_moved),
+                rowsum_after: narrow(e.rowsum_after),
+            }
+        };
+
+        let area = gpu.upload(&enforced.area_host)?;
         Ok(Self {
             n_surf: n,
             n_coarse,
             has_ambient,
             g: gmat,
             area,
-            area_host,
+            area_host: enforced.area_host,
             report: ViewFactorReport {
                 n_coarse,
                 n_blockers: blockers.len(),
                 n_blocker_triangles: grid.v0.len(),
                 n_line,
                 n_area,
-                rowsum_error,
-                reciprocity_error,
-                reciprocity_after,
-                min_exchange: min_exchange.min(min_after),
-                enforcement_moved,
-                rowsum_after,
+                rowsum_error: enforced.rowsum_error,
+                reciprocity_error: enforced.reciprocity_error,
+                reciprocity_after: enforced.reciprocity_after,
+                min_exchange: enforced.min_after,
+                enforcement_moved: enforced.enforcement_moved,
+                rowsum_after: enforced.rowsum_after,
                 build_seconds,
             },
         })
@@ -1677,6 +1708,9 @@ impl ViewFactors {
         })
     }
 
+    /// The device defects kernel - dead under `single`, where the
+    /// enforcement runs on the host. Kept, never deleted (§118.3).
+    #[cfg_attr(feature = "single", allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     fn defects(
         gpu: &Gpu,
@@ -1772,6 +1806,60 @@ impl ViewFactors {
     }
 }
 
+// ==========================================================================
+//  §118.3  The enforcement on the host, in f64
+// ==========================================================================
+
+/// A `Scalar` widened to the f64 the host enforcement computes in: exact,
+/// and the identity in the f64 build. Spelled once, behind an `allow`,
+/// because the f64 lint set calls an identity conversion useless at every
+/// call site (the house clippy gate counts diagnostics).
+#[allow(clippy::useless_conversion)]
+#[inline]
+fn wide(x: Scalar) -> f64 {
+    f64::from(x)
+}
+
+/// One rounding, at the store: f64 narrowed back into `Scalar`. The identity
+/// in the f64 build.
+#[allow(clippy::unnecessary_cast)]
+#[inline]
+fn narrow(x: f64) -> Scalar {
+    x as Scalar
+}
+
+/// SPEC-LIT §118.3: (S49.6)-(S49.8) evaluated on the host in f64.
+///
+/// The device kernels stay what they are; under `single` the limits this
+/// stage is judged against (`1e-12` on the row sums, exact reciprocity) sit
+/// below f32 round-off, so the whole enforcement stage - the diagnostics,
+/// the symmetrise, the closure, the diagnostics again - runs HERE, in f64,
+/// and is rounded once into `Scalar` at the store. In the f64 build the
+/// same function would be the identity on every widen, so it is not called
+/// there: the device path is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostEnforcement {
+    /// `n*n` row-major exchange areas AFTER enforcement.
+    pub g: Vec<f64>,
+    /// `n` areas; with ambient the last is the closure surface's.
+    pub area: Vec<f64>,
+    /// (S49.9) BEFORE enforcement, over the coarse rows.
+    pub rowsum_error: f64,
+    /// `max |g_ij - g_ji| / A_i` BEFORE symmetrisation.
+    pub reciprocity_error: f64,
+    /// After symmetrisation: exactly zero, (S49.7) being an average.
+    pub reciprocity_after: f64,
+    /// `min(0, min_ij g_ij)`, over before and after.
+    pub min_exchange: f64,
+    /// What enforcement moved, relative to the coarse areas.
+    pub enforcement_moved: f64,
+    /// (S49.9) AFTER enforcement, over every row.
+    pub rowsum_after: f64,
+}
+
+/// The one-block-per-row launch wrapper - dead under `single`, where the
+/// enforcement runs on the host. Kept, never deleted (§118.3).
+#[cfg_attr(feature = "single", allow(dead_code))]
 fn launch_row(
     gpu: &Gpu,
     f: &CudaFunction,
@@ -1794,6 +1882,10 @@ fn launch_row(
     Ok(())
 }
 
+/// The device diagnostics' divisor: `max_i v_i / A_i` over rows with a
+/// positive area. Dead under `single`, where the enforcement runs on the
+/// host - kept, never deleted (§118.3).
+#[cfg_attr(feature = "single", allow(dead_code))]
 fn max_of(v: &[Scalar], n: usize, area: &[Scalar]) -> Scalar {
     let mut m: Scalar = 0.0;
     for i in 0..n.min(v.len()) {
@@ -1802,6 +1894,207 @@ fn max_of(v: &[Scalar], n: usize, area: &[Scalar]) -> Scalar {
         }
     }
     m
+}
+
+/// What either enforcement path hands the shared tail of
+/// [`ViewFactors::build_with_options`]: the stored `Scalar` forms of the
+/// areas and the report fields.
+struct Enforced {
+    area_host: Vec<Scalar>,
+    rowsum_error: Scalar,
+    reciprocity_error: Scalar,
+    reciprocity_after: Scalar,
+    min_after: Scalar,
+    enforcement_moved: Scalar,
+    rowsum_after: Scalar,
+}
+
+/// SPEC-LIT §118.3: (S49.6)-(S49.8) on the host, in f64.
+///
+/// `g_quad` holds the exchange areas row-major - `n_coarse*n_coarse` from
+/// the quadrature, or the `n*n` block with the ambient row and column
+/// already scattered in. `area_coarse` holds the `n_coarse` coarse areas;
+/// the ambient closure surface's area starts at zero and is written by the
+/// closure. Widens once, enforces, reports in f64; the caller rounds once
+/// into `Scalar`.
+#[allow(clippy::too_many_lines)]
+pub fn enforce_exchange_areas_f64(
+    g_quad: &[Scalar],
+    area_coarse: &[Scalar],
+    n_coarse: usize,
+    has_ambient: bool,
+) -> Result<HostEnforcement> {
+    let n = n_coarse + usize::from(has_ambient);
+    if g_quad.len() != n * n {
+        return Err(Error::Config(format!(
+            "s2s enforcement: the exchange-area matrix holds {} entries, \
+             but n = {n} (n_coarse = {n_coarse}, ambient = {has_ambient}) \
+             needs n*n = {} of them",
+            g_quad.len(),
+            n * n
+        )));
+    }
+    if area_coarse.len() != n_coarse {
+        return Err(Error::Config(format!(
+            "s2s enforcement: {} areas given, but n_coarse = {n_coarse}",
+            area_coarse.len()
+        )));
+    }
+    let mut g: Vec<f64> = g_quad.iter().map(|&v| wide(v)).collect();
+    let mut area: Vec<f64> = area_coarse.iter().map(|&v| wide(v)).collect();
+    if has_ambient {
+        area.push(0.0);
+    }
+
+    // ---- diagnostics BEFORE enforcement ------------------------------
+    let mut rowsum_error: f64 = 0.0;
+    let mut worst_row = 0usize;
+    for i in 0..n_coarse {
+        if area[i] > 0.0 {
+            let s: f64 = (0..n).map(|j| g[i * n + j]).sum();
+            let e = (s / area[i] - 1.0).abs();
+            if e > rowsum_error {
+                rowsum_error = e;
+                worst_row = i;
+            }
+        }
+    }
+    let mut reciprocity_error: f64 = 0.0;
+    for i in 0..n_coarse {
+        if area[i] > 0.0 {
+            let mut m: f64 = 0.0;
+            for j in 0..n {
+                m = m.max((g[i * n + j] - g[j * n + i]).abs());
+            }
+            reciprocity_error = reciprocity_error.max(m / area[i]);
+        }
+    }
+    let min_before = g.iter().fold(0.0_f64, |m, &v| m.min(v));
+
+    // ---- §49.6: an enclosure claimed closed had better be ------------
+    if !has_ambient && rowsum_error > wide(CLOSURE_REFUSAL) {
+        let ratio = (0..n).map(|j| g[worst_row * n + j]).sum::<f64>()
+            / area[worst_row].max(wide(SCALAR_FLOOR));
+        return Err(closure_refused(rowsum_error, worst_row, ratio));
+    }
+
+    // ---- §49.7: reciprocity, exactly ---------------------------------
+    for i in 0..n {
+        for j in i..n {
+            if i == j {
+                g[i * n + j] = 0.0;
+            } else {
+                let m = 0.5 * (g[i * n + j] + g[j * n + i]);
+                g[i * n + j] = m;
+                g[j * n + i] = m;
+            }
+        }
+    }
+
+    // ---- §49.6/§49.8: closure ---------------------------------------
+    if has_ambient {
+        // The deficit goes to the black closure surface. Row sums are
+        // then exact BY CONSTRUCTION and the matrix stays symmetric.
+        let amb = n - 1;
+        let mut a_amb: f64 = 0.0;
+        for i in 0..n_coarse {
+            let s: f64 = (0..n_coarse).map(|j| g[i * n + j]).sum();
+            let d = (area[i] - s).max(0.0);
+            g[i * n + amb] = d;
+            g[amb * n + i] = d;
+            a_amb += d;
+        }
+        g[amb * n + amb] = 0.0;
+        area[amb] = a_amb;
+    } else {
+        // van Leersum's symmetric Sinkhorn scaling (S49.8): all row sums
+        // first, then the factors, then every entry scaled by d_i * d_j
+        // with the product formed first, so `g` stays EXACTLY symmetric.
+        for _ in 0..SINKHORN_SWEEPS {
+            let r: Vec<f64> = (0..n).map(|i| (0..n).map(|j| g[i * n + j]).sum()).collect();
+            let d: Vec<f64> = (0..n)
+                .map(|i| {
+                    if r[i] > 0.0 && area[i] > 0.0 {
+                        (area[i] / r[i]).sqrt()
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            for i in 0..n {
+                for j in 0..n {
+                    let f = d[i] * d[j];
+                    g[i * n + j] *= f;
+                }
+            }
+        }
+    }
+
+    // ---- diagnostics AFTER enforcement -------------------------------
+    let mut rowsum_after: f64 = 0.0;
+    for i in 0..n {
+        if area[i] > 0.0 {
+            let s: f64 = (0..n).map(|j| g[i * n + j]).sum();
+            rowsum_after = rowsum_after.max((s / area[i] - 1.0).abs());
+        }
+    }
+    let mut reciprocity_after: f64 = 0.0;
+    for i in 0..n {
+        if area[i] > 0.0 {
+            let mut m: f64 = 0.0;
+            for j in 0..n {
+                m = m.max((g[i * n + j] - g[j * n + i]).abs());
+            }
+            reciprocity_after = reciprocity_after.max(m / area[i]);
+        }
+    }
+    let mut enforcement_moved: f64 = 0.0;
+    for i in 0..n_coarse {
+        if area[i] > 0.0 {
+            let mut m: f64 = 0.0;
+            for j in 0..n {
+                m = m.max((g[i * n + j] - wide(g_quad[i * n + j])).abs());
+            }
+            enforcement_moved = enforcement_moved.max(m / area[i]);
+        }
+    }
+    let min_exchange = g.iter().fold(min_before, |m, &v| m.min(v));
+
+    Ok(HostEnforcement {
+        g,
+        area,
+        rowsum_error,
+        reciprocity_error,
+        reciprocity_after,
+        min_exchange,
+        enforcement_moved,
+        rowsum_after,
+    })
+}
+
+/// The §49.6 refusal, word for word what the device path has always said,
+/// built here so both paths cannot drift apart (§118.3).
+fn closure_refused(rowsum_error: f64, worst_row: usize, ratio: f64) -> Error {
+    Error::Config(format!(
+        "s2s: the radiating surface does not close - the worst row sum \
+         misses 1 by {rowsum_error:.4e} (coarse face {worst_row}, \
+         SUM_j F_ij = {:.6}), and no `ambientTemperature` was given.\n  \
+         SPEC-LIT S49.6: either list the openings as radiating surfaces \
+         with `emissivity 1` and their own temperature, or set \
+         `ambientTemperature <T>` to close the enclosure with a black \
+         pseudo-surface. Sinkhorn scaling would otherwise smear a \
+         GEOMETRIC deficit uniformly over every pair and produce a \
+         closed, reciprocal, entirely fictitious F.\n  \
+         If the enclosure IS closed, this is an OCCLUSION error rather \
+         than a geometric one, and the two settings fail in OPPOSITE \
+         directions: `occlusion pairwise` settles a partly-shadowed \
+         pair with five rays and gets it all-or-nothing, while \
+         `occlusion perPoint` puts every blockable pair on the area \
+         form, which is far less accurate in the near field (SPEC-LIT 49.2b) \
+         - measured 8.8e-3 against 0.16 on the same enclosure. Try \
+         the OTHER one, or a finer `agglomerate`.",
+        ratio
+    ))
 }
 
 fn pad_vec3(v: &[Vec3]) -> Vec<Vec3> {

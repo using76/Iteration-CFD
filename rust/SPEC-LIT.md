@@ -37034,6 +37034,160 @@ and §118.2 (the view) for everything else, unchanged.
 
 No GPL-licensed source was consulted.
 
+**The second half (F32-05): the remaining sub-round-off constants.** The
+same rule — the measurement moves into f64, the limit stays — applied to the
+host computations outside the conduction guards that compare a number with a
+limit below f32 round-off. Under `single` at HEAD `9bd66cd`, `ofgpu-validate
+-sections 30-31` (surface-to-surface radiation, SPEC-LIT 49-51; fans, porous
+jumps, psychrometrics and metrics, SPEC-LIT 52-55) aborted at "wet-bulb
+temperature did not converge for T = 298.15 K, W = 0.009881002 kg/kg",
+sections 38-39 (SPEC-LIT 76, 77) aborted on the same refusal at
+`W = 0.0019513984`, and Gate 49-D's row "closure after the symmetric
+Sinkhorn scaling" read `1.192e-7` against `1e-12`.
+
+What changed (F32-05):
+
+1. `psychro::t_wb` runs §54.5's Newton on (S54.6) in f64: the inputs are
+   widened once, private f64 twins of `p_ws`, `w_s`, `p_w_from_w_p` and
+   `t_d_from_pw` evaluate the same expression trees in the same order with the
+   coefficient tables widened element by element, the stops `|f0| < 1e-13`
+   and `|step| < 1e-12` and the step `h = 1e-6 (1 + |x|)` are unchanged, and
+   the root is rounded once. The `Scalar` relations themselves are unchanged,
+   because `cuda/fan.cu` mirrors `p_ws` bit for bit.
+2. `s2s::gauss_legendre_01` finds the nodes by the same Newton on Bonnet's
+   recurrence in f64 (its `1e-16` stop is below f32 round-off, so in f32 it
+   ran its 100 steps and stopped where it was) and rounds each node and weight
+   once. The f32 Newton, emulated step for step in f32 (numpy), leaves the
+   nodes and weights up to `8.6e-7` relative from the rule (`n = 9`), against
+   half an ulp, `6.0e-8`. Each one is now within half an ulp of the f64 rule.
+3. Under `single`, (S49.6)-(S49.8) run on the host in f64
+   (`s2s::enforce_exchange_areas_f64`): the quadrature's `G` is widened once,
+   the before-diagnostics, the closure refusal (same `CLOSURE_REFUSAL`, same
+   message), the elementwise symmetrisation (S49.7), the ambient closure or
+   `SINKHORN_SWEEPS = 60` sweeps of
+   `d_i = sqrt(A_i / SUM_j G_ij)`, `G_ij <- G_ij (d_i d_j)` (S49.8), and the
+   after-diagnostics are all f64, with sequential row sums. The device copy is
+   `fl32(G_ij)`, which is exactly symmetric because `G` is and rounding is a
+   function. The report's numbers describe the f64 matrix. In the f64 build
+   the device kernels run as before, byte for byte; the host function exists
+   in both builds and is tested in both. It holds `8 N^2` bytes on the host
+   for the duration of the build, `8.6 GB` at the `32 768`-face limit of
+   S50.6.
+4. `cht::ambient::NEWTON_RTOL` is `1e-10` in both builds. Its `single` arm of
+   `1e-4` (from `e4715a5`, before this tranche) was an f32 tolerance, which
+   docs/17 §5.1 rule 4 forbids. The correction it is compared with is
+   `max_f |T_b − T*|`, a difference of two floats, which is exact by Sterbenz's
+   lemma once the two are within a factor of two. So the question is whether
+   the f32 iterate reaches a fixed point, not whether its arithmetic can see
+   `1e-10`.
+
+The error model. A matrix whose f64 row sums close to `r`, rounded once
+entry by entry with `|fl32(G_ij) − G_ij| ≤ u G_ij`, `G_ij ≥ 0`, `u = 2^-24`
+(Higham 2002 §2.2), closes to
+
+    |SUM_j fl32(G_ij) / A_i − 1| ≤ r + u (1 + r)                    (118.3.1)
+
+when summed in f64. That is the closure of the matrix the radiosity solve
+reads under `single`, and it is the bound `tests/f32_guards.rs` asserts on
+the device copy, with `2 N eps64` added for the f64 resummation.
+
+The measurement. `tests/f32_guards.rs` runs the same five tests in both
+builds (precision class A: an f64 evaluation, the same limit): the wet bulb at
+five states from `-20.7` to `18.9 C` against an f64 reference evaluation
+(f64 build to `1e-9 K`; single to half an ulp plus `1e-9 K` of the same f64
+Newton on the f32-rounded inputs); the Gauss-Legendre rule at `n = 2, 3, 6,
+10` to half an ulp plus `1e-14`; the host enforcement on two dyadic 4-surface
+enclosures, exact in both builds (row-sum error `2^-8` and reciprocity defect
+`2^-8` exactly, closure `5.6e-16`, what enforcement moved
+`0.003297285023234231` to `1e-12`, an ambient column of `[0.25, 0.25,
+0.248046875, 0.248046875]` and closure area `0.99609375` exactly, the S49.6
+refusal); the 96-face box and the 120-face box with its inner cube on the
+GPU; and `NEWTON_RTOL`. Both builds report 5/5. The boxes (f64 build / single
+build):
+
+| enclosure | row sum before | closure after | device copy, (118.3.1) |
+|---|---|---|---|
+| 96-face box | 6.646e-6 / 7.710e-6 | 2.220e-16 / 2.220e-16 | 6.661e-16 (bound 4.297e-14) / 1.764e-8 (bound 5.960e-8) |
+| 120-face box, inner cube, `pairwise` | 8.770e-3 / 9.141e-3 | 3.026e-13 / 1.775e-12 | 3.029e-13 (bound 3.560e-13) / 1.834e-8 (bound 5.961e-8) |
+
+`ofgpu-validate`, measured by the supervisor on 2026-10-11 on the RTX 5070 Ti
+(sm_120) at `9bd66cd` and with this unit. f64 build: `-sections 30-31` is
+134/134 before and after and `tools/f64_identity.py rows` reports ROWS
+IDENTICAL 192. `-sections 38-39,47-49` is 40/40 before and after, ROWS
+IDENTICAL 95. No `.cu` file and no `build.rs` changed, so no cubin can have
+moved. Single build:
+`-sections 30-31` no longer aborts. It reports 134 checks, 105 ok, against
+110 checks and 83 ok before the abort. The 24 rows it had never reached
+include the wet bulb "is right at 25 C / 50 % rh". 22 of them pass, and the two
+that fail are round-off rows: the device psychrometrics mirror at `5.1e-6`
+against `1e-14`, and RTI at `7.6e-7` against `1e-12`. Gate 49-D's closure moves from
+`1.192e-7` to `1.775e-12` against `1e-12`; "S50.10 net radiative power
+vanishes" moves from `5.3e-8` to `1.8e-8` (tol `1e-11`). `-sections 38-39`
+no longer aborts: 30 checks, 21 ok. Gate 98-B (`-sections 48`) now takes
+7 Newton passes, with corrections `[33.953217, 1.0963135, 0.0012207031,
+9.1552734e-5, 9.1552734e-5, 3.0517578e-5, 0.0] K`, and stops at an exact f32
+fixed point instead of after 3. Its linearisation residual (S98.5) goes from
+`1.393e-7` (FAIL) to `0` (ok) against `1e-10`, and `T_b` against the root
+goes from `1.116e-6` to `6.564e-7` (FAIL, `1e-10`). The row "worst Newton ratio
+over 2C" goes from ok to FAIL (`6.3e6`): it now divides one-ulp corrections
+(`3.05e-5 K` at `465 K`) by the square of the one before. Its "above the
+floor" filter keeps them because the filter is set for f64. That row's
+f32 class is F32-14's to decide. Gate 98-C (`-sections 49`) is unchanged.
+
+The finding. Under `single` the 120-face blocked box closes to `1.775e-12`,
+not `1e-12`, so Gate 49-D's closure row still FAILs there, by a factor of
+1.8. The sweep is the f64 one, but the matrix it starts from is not. The
+quadrature and the Level-1 occlusion rays run in f32 geometry on the device,
+and the raw closure is `9.141e-3` against `8.770e-3` in the f64 build. Sixty
+sweeps were measured to clear `1e-12` on the f64 matrices (§49.5). On this
+one they end at `1.775e-12`. The sweep count is a numerics constant shared
+with the f64 path, so it is not changed here: whether the host path under
+`single` may sweep further is the user's decision. The row is NOT loosened,
+and the integration test does not assert the blocked box's closure, which
+only the validate row carries.
+
+The constants. The files the plan names for this unit hold 28 numeric
+literals of `1e-6` or smaller outside their test modules (the plan's "32"
+came from a stream file that is lost; this is the tree's count, by
+`grep` over `src/s2s.rs`, `src/psychro.rs`, `src/fan.rs`,
+`src/pressure/mod.rs`, `src/cht/ambient.rs` and `src/cht.rs`):
+
+| where | constant | role | verdict |
+|---|---|---|---|
+| `s2s.rs` `gauss_legendre_01` | `1e-16` | Newton stop | f64 (item 2) |
+| `s2s.rs` `CoarseGeometry::blockers` | `1e-30`, `-1e-9 * scale` | floor; Level-0 coplanarity tolerance | unchanged. Its input is the f32 polygon, so f64 arithmetic alone would not remove the f32 floor. An f64 `CoarseGeometry` is the remedy, not taken here |
+| `s2s.rs` `BlockerGrid::build` | `1e-30`, `1e-6 * span` | floor; grid padding | unchanged. The padding is 8 f32 ulps, above round-off |
+| `s2s.rs` `any_hit_brute` | `1e-8`, `1 - 1e-8` | host linear-scan ray interval | unchanged. Under `single`, `1 - 1e-8` rounds to `1.0`. It is the host twin of the device's own interval, and "grid-walked and linearly-scanned occlusion agree BITWISE" passes in both builds |
+| `s2s.rs` `radiosity_sweeps` callers | `1e-12` (three sites) | target of (S50.8) | unchanged. It is a design number, not a comparison. Under `single` the count is a step function of the f32 emissivity (`0.9f32` gives 13, not 12), so "S50.2 the Neumann sweep count matches its own published table" is a discrete row for F32-14 |
+| `psychro.rs` `C_ICE`, `C_LIQ` | `6.2215701e-7`, `2.0747825e-9`, `-9.484024e-13`, `-1.4452093e-8` | Hyland & Wexler coefficients | data, not guards. Stored in f32 under `single`, and the f64 twins widen the stored values |
+| `psychro.rs` `t_wb` | `1e-13`, `1e-6`, `1e-12` | Newton stops and step | f64 (item 1) |
+| `fan.rs` `table_at` | `1e-30` | floor | unchanged. It is representable in f32. The fan and porous host algebra has no guard below round-off. `FanCurve::at` is the bit mirror of `cuda/fan.cu` and stays `Scalar`, and its `1e-13`/`1e-14` rows in section 31 are round-off rows (F32-14) |
+| `pressure/mod.rs` `reference_controls` | `1e-14` | yardstick solve tolerance | unchanged. Under `single` the solve is §118.4's refinement |
+| `pressure/mod.rs` | `AGREEMENT_TOL = 1e-8` | backend agreement | unchanged, and NOT moved to f64 here. It compares two answers that are each stored in f32, so the floor is their storage (`2^-24` each), whatever the arithmetic. Under `single` a candidate that disagrees by an ulp is disqualified and PBiCGStab is kept. F32-07, which wraps the FFT and the selector's probe in refinement, owns it |
+| `pressure/mod.rs` | `REFERENCE_RESIDUAL_MAX = 1e-6` | yardstick residual | unchanged. It is above the f32 floor (`8.4 × 2^-23`) |
+| `cht/ambient.rs` | `NEWTON_RTOL = 1e-10` | §98.3 pass criterion | one value in both builds (item 4) |
+| `cht/ambient.rs` `radiating_slab_root` | `1e-14 * |t|` | answer-key Newton stop | unchanged. Under `single` it reaches an exact f32 fixed point (last correction `0.0`). The answer key's class is F32-14's |
+| `cht.rs` `wiener_pair` | `1e-9` | fraction closure | unchanged. Its inputs are f32-stored fractions, so the floor is their storage (`2^-24` each), not the sum. An f64 sum is no remedy: `0.5 + fl32(0.3) + fl32(0.2)` is `1.5e-8` from 1 in f64 and exactly 1 in f32. The remedy is f64 fractions from the case lowering |
+| `cht.rs` `PairingTolerances` | `1e-6`, `1e-9`, `1e-9` | §47.4 pairing | f64 (F32-04, above) |
+| `cht.rs` `centroid_key` | `1e-9` | bucket default | f64 (F32-04) |
+| `cht.rs` | `ANISOTROPY_RESIDUAL_LIMIT = 1e-10` | §46.4 | f64 (F32-04) |
+| `cht.rs` `ConjugateControls` | `1e-14` | solve tolerance | unchanged. It is §118.4's refinement under `single` |
+
+What it does not do. The plan's gate also names "the 33 'other refusal'
+tests un-ignored". They are library tests, and the single library test target
+still does not compile (F32-16), so, as in F32-04, the evidence is the
+integration test and the validate rows, not a count. The view-factor
+quadrature itself (`cuda/s2s.cu`) is unchanged and runs in `ofscalar`. So do
+the radiosity sweeps. No `.cu` file changed, and no limit or tolerance moved.
+
+Sources: Goldberg (1991) and Higham (2002), above. P. H. Sterbenz,
+*Floating-Point Computation*, Prentice-Hall (1974), for the exact difference
+of two floats within a factor of two of each other; Goldberg's open copy
+above restates it with a proof. SPEC-LIT §49.5-49.8, §54.5 and §98.3 for the
+algorithms, unchanged.
+
+No GPL-licensed source was consulted.
+
 ### 118.4 Mixed-precision iterative refinement — PCG and PBiCGStab under single reach an f64 residual
 
 Under `single` a float Krylov solve stops at the float floor: its recurrence

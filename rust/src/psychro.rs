@@ -207,6 +207,93 @@ pub fn t_d_from_pw(p_w: Scalar) -> Scalar {
     }
 }
 
+// ==========================================================================
+//  §118.3  The f64 twins
+//
+//  [`t_wb`] compares a residual against `1e-13` and a step against `1e-12`,
+//  both far below f32 round-off on the quantities it forms, so under
+//  `single` it refused states a psychrometric chart accepts. The Newton is
+//  run in f64 on widened inputs and rounded ONCE into `Scalar` at the
+//  store. In the f64 build both moves are the identity and the arithmetic
+//  is bit for bit what it was. The Scalar originals above are untouched -
+//  the device mirror `cuda/fan.cu` is pinned to [`p_ws`] bit for bit.
+// ==========================================================================
+
+/// A `Scalar` widened to the f64 the wet-bulb Newton computes in: exact, and
+/// the identity in the f64 build. Spelled once, behind an `allow`, because
+/// the f64 lint set calls an identity conversion useless at every call site
+/// (the house clippy gate counts diagnostics).
+#[allow(clippy::useless_conversion)]
+#[inline]
+fn wide(x: Scalar) -> f64 {
+    f64::from(x)
+}
+
+/// One rounding, at the store: f64 narrowed back into `Scalar`. The identity
+/// in the f64 build.
+#[allow(clippy::unnecessary_cast)]
+#[inline]
+fn narrow(x: f64) -> Scalar {
+    x as Scalar
+}
+
+/// [`p_ws`] in f64: the same expression tree, the same branches and the
+/// same operation order as the Scalar original, with the coefficient
+/// tables widened element by element.
+fn p_ws64(t: f64) -> f64 {
+    let l = t.ln();
+    if t < 273.15 {
+        let c = &C_ICE;
+        (wide(c[0]) / t
+            + wide(c[1])
+            + wide(c[2]) * t
+            + wide(c[3]) * t * t
+            + wide(c[4]) * t * t * t
+            + wide(c[5]) * t * t * t * t
+            + wide(c[6]) * l)
+            .exp()
+    } else {
+        let c = &C_LIQ;
+        (wide(c[0]) / t
+            + wide(c[1])
+            + wide(c[2]) * t
+            + wide(c[3]) * t * t
+            + wide(c[4]) * t * t * t
+            + wide(c[5]) * l)
+            .exp()
+    }
+}
+
+/// [`p_w_from_w_p`] in f64 - (S54.2b), widened.
+fn p_w_from_w_p64(w: f64, p_atm: f64) -> f64 {
+    p_atm * w / (wide(EPS) + w)
+}
+
+/// [`w_s`] in f64 - (S54.4), widened.
+fn w_s64(t: f64, p_atm: f64) -> f64 {
+    let pws = p_ws64(t);
+    wide(EPS) * pws / (p_atm - pws)
+}
+
+/// [`t_d_from_pw`] in f64 - (S54.5)'s two-branch correlation, widened.
+fn t_d_from_pw64(p_w: f64) -> f64 {
+    let kpa = p_w / 1000.0;
+    if kpa <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let a = kpa.ln();
+    let hi = 6.54
+        + 14.526 * a
+        + 0.7389 * a * a
+        + 0.09486 * a * a * a
+        + 0.4569 * kpa.powf(0.1984);
+    if hi >= 0.0 {
+        hi
+    } else {
+        6.09 + 12.608 * a + 0.4959 * a * a
+    }
+}
+
 /// (S54.7): the virtual temperature, K.
 ///
 /// Exact, not a linearisation: `M_a/M_mix = 1 + (1/eps - 1) Y_v` identically,
@@ -236,23 +323,27 @@ pub fn molar_mass(yv: Scalar) -> Scalar {
 /// capturable. A host function may have a convergence test and a named error
 /// where a captured kernel may not, and this one does.
 pub fn t_wb(t: Scalar, w: Scalar, p_atm: Scalar) -> Result<Scalar> {
-    let tc = t - 273.15;
-    let pw = p_w_from_w_p(w, p_atm);
+    // §118.3: widen once at the entry, Newton in f64, round once at the
+    // store. In the f64 build both moves are the identity.
+    let (t64, w64, p64) = (wide(t), wide(w), wide(p_atm));
+    let tc = t64 - 273.15;
+    let pw = p_w_from_w_p64(w64, p64);
     // §54.5's own initial guess, within about 0.3 K over the data-centre
     // range - accurate enough to start a Newton from, not accurate enough to
     // BE the answer, which is exactly why the fixed-3-step kernel is refused.
-    let td = t_d_from_pw(pw);
+    let td = t_d_from_pw64(pw);
     let mut x = td + (tc - td) / 3.0;
 
-    let f = |ts: Scalar| -> Scalar {
-        let wss = w_s(ts + 273.15, p_atm);
-        ((2501.0 - 2.326 * ts) * wss - 1.006 * (tc - ts)) / (2501.0 + 1.86 * tc - 4.186 * ts) - w
+    let f = |ts: f64| -> f64 {
+        let wss = w_s64(ts + 273.15, p64);
+        ((2501.0 - 2.326 * ts) * wss - 1.006 * (tc - ts)) / (2501.0 + 1.86 * tc - 4.186 * ts)
+            - w64
     };
 
     for _ in 0..60 {
         let f0 = f(x);
         if f0.abs() < 1e-13 {
-            return Ok(x);
+            return Ok(narrow(x));
         }
         let h = 1e-6 * (1.0 + x.abs());
         let d = (f(x + h) - f(x - h)) / (2.0 * h);
@@ -262,7 +353,7 @@ pub fn t_wb(t: Scalar, w: Scalar, p_atm: Scalar) -> Result<Scalar> {
         let step = f0 / d;
         x -= step;
         if step.abs() < 1e-12 {
-            return Ok(x);
+            return Ok(narrow(x));
         }
         if !x.is_finite() {
             break;

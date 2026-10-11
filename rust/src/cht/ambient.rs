@@ -124,12 +124,9 @@ impl ExternalFace {
 }
 
 /// §98.3's criterion: a pass is the last when `max_f |T_b - T*|` is at most
-/// this times `max_f T_b`.
-#[cfg(not(feature = "single"))]
+/// this times `max_f T_b`. The f32 build's former `1e-4` arm is gone: an f32
+/// iterate settles to an exact fixed point, change 0 (SPEC-LIT 118.3).
 pub const NEWTON_RTOL: Scalar = 1.0e-10;
-/// §98.3's criterion in the f32 build, where `1e-10` is below round-off.
-#[cfg(feature = "single")]
-pub const NEWTON_RTOL: Scalar = 1.0e-4;
 /// §98.3: the most Newton passes one step may take before it is refused.
 pub const NEWTON_MAX_PASSES: usize = 50;
 
