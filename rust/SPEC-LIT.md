@@ -41130,7 +41130,110 @@ and is not a gate row.
 error on both meshes is at least `1e3` times the f32 unit round-off. CHR-18
 chooses its meshes so that this holds, and prints the ratio.
 
-Labels: (135.1)-(135.11).
+### 135.7 The discrete P1 (CHR-18)
+
+**ORIGINAL.** The discretisation is this crate's own finite-volume assembly -
+no external source was consulted and no new operator is introduced. (135.8)
+is `fv::fvm_laplacian`/`fvm_sp`/`fvm_su` on the existing LDU matrix, (135.10)
+is §4's MIXED triple rewritten on the Marshak faces, and (135.7)'s gradient
+is the existing Green-Gauss `fvc_grad`. Write `γ_f = Γ_f/Δ_f` for the
+internal-face conductance per unit area (`Δ_f` the centre-to-centre distance,
+`Γ_f` the weights-weighted interpolation of `Γ`) and `γ_b = Γ_P y_b` on a
+boundary face (`y_b` the boundary delta coefficient, `1/` the centre-to-face
+distance). With `G_w ≡ 4 σ T_w^4` and `a_b = ε_b/(2(2 - ε_b))`, per cell `P`:
+
+```
+( Σ_f γ_f|S_f| + Σ_b fr_b γ_b|S_b| + κ V_P ) G_P
+    - Σ_f γ_f|S_f| G_N - Σ_b fr_b γ_b|S_b| G_w = 4 κ σ T_P^4 V_P            (135.12)
+
+γ_f = (w_f Γ_own + (1 - w_f) Γ_nbr) / Δ_f,          γ_b = Γ_P y_b           (135.13)
+
+fr_b = a_b / (a_b + γ_b),      G_b = fr_b G_w + (1 - fr_b) G_P              (135.14)
+
+(q·n)_b = a_b (G_b - G_w) = γ_b (G_P - G_b)                                 (135.15)
+
+q_r = - Γ ∇G          (the Green-Gauss gradient, scaled in place by -Γ)     (135.16)
+```
+
+The sums run over all faces: `fr_b` is 0 on every face that is not Marshak,
+so a non-Marshak boundary face contributes nothing and carries no triple.
+(135.14) is §4's MIXED triple derived, not imposed: its `G_b` is the exact
+solution of the two-point problem `-γ_b (G_b - G_P) = a_b (G_b - G_w)` -
+(135.10) with the normal derivative discretised one-sided - since
+`G_b = (a_b G_w + γ_b G_P)/(a_b + γ_b)` solves it exactly. The equality in
+(135.15) is that same equation rearranged: the wall flux read off the triple
+and read off the cell gradient are the same number by construction.
+
+The gate is `tests/radiation_p1.rs`. `p1_slab_closed_form` runs (135.11)'s
+seven cases on two meshes each; the comparison is against (135.11), the exact
+solution of the same equation, so the error is pure discretisation. The
+coarse and fine relative errors of the larger wall (`e_c`, `e_f`), the
+observed order `p`, and §135.6's floor ratio, in f64:
+
+| `ε` | `τ` (`ω = 0`) | meshes | f64 `e_c` | f64 `e_f` | f64 `p` | single `e_c` | single `e_f` | single `p` | `|e_f|/2^-24` |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.1 | 2, 4 | -1.134e-3 | -2.837e-4 | 1.9985 | -1.134e-3 | -2.831e-4 | 2.0025 | 4.7e3 |
+| 1 | 1 | 8, 16 | -3.903e-3 | -9.799e-4 | 1.9937 | -3.903e-3 | -9.801e-4 | 1.9934 | 1.6e4 |
+| 1 | 10 | 40, 80 | -1.064e-2 | -2.704e-3 | 1.9761 | -1.064e-2 | -2.705e-3 | 1.9758 | 4.5e4 |
+| 0.5 | 0.1 | 2, 4 | -9.597e-4 | -2.402e-4 | 1.9987 | -9.601e-4 | -2.357e-4 | 2.0264 | 4.0e3 |
+| 0.5 | 1 | 8, 16 | -2.065e-3 | -5.177e-4 | 1.9957 | -2.065e-3 | -5.177e-4 | 1.9958 | 8.7e3 |
+| 0.5 | 10 | 40, 80 | -5.163e-3 | -1.307e-3 | 1.9820 | -5.163e-3 | -1.308e-3 | 1.9815 | 2.2e4 |
+| 1 | 1, `ω = 0.5`, `A_1 = 0.5` | 8, 16 | -2.341e-3 | -5.866e-4 | 1.9966 | -2.341e-3 | -5.864e-4 | 1.9971 | 9.8e3 |
+
+Every error is negative and shrinks by 4: the discrete `Ψ` sits below
+(135.11) and approaches it from that side on every case, in both builds. The
+two thin cases run on N = 2, 4, and for a reason worth recording: under
+`single` the ASSEMBLED operator carries the build's own f32 unit round-off
+(2^-24), amplified by the operator's condition number, and that floor falls as the
+mesh coarsens (the absorption term that fixes `G`'s level gains on the face
+conductances) while the discretisation error grows - the coarse pair keeps
+the error an order of magnitude above it on BOTH meshes, which is what
+§135.6's class-P rule asks. The slab's cross-section is 0.125, not 0.1, and
+the thin meshes are powers of two, so every geometric quantity is a binary
+fraction: exact under `single`, the f32 geometry IS the f64 geometry, and
+the two builds' errors differ in the fourth digit, as the table shows. The
+fine error clears §135.6's `1e3·2^-24` floor in BOTH builds on every case.
+The method's own error is printed beside it and is not a gate: on the black
+cases P1 reads +8.36 %, +14.46 % and +7.18 % over (135.6), §135.5's table
+again.
+
+`p1_observed_order` reports §94's triplet for `ε = 1`, `τ = 1` on
+N = 32, 16, 8, finest first. In f64:
+`Ψ = 0.893303926189 -> 0.892647499 -> 0.890036011` against (135.11)'s
+`0.893523053720`: `r21 = r32 = 2.0000`, `ratio = 0.2514`, `Monotone`,
+`p = 1.9922`, `gci_fine = 3.084e-4`, and (135.11)'s value sits inside the
+GCI band (`|Ψ_fine - Ψ_P1| = 2.19e-4 <= 3.08e-4`). Under `single`:
+`Ψ = 0.893304288387 -> 0.892647325993 -> 0.890036046505`, `ratio 0.2516`,
+`p = 1.9909`, `gci_fine = 3.090e-4` - the same answer to four digits.
+
+The remaining rows: `p1_marshak_sign` (N = 16, τ = 1, ε = 1 and ½) holds
+(135.15)'s sign both ways - every Marshak face takes flux out of a medium
+hotter than its wall and `q_r` points at the wall in each half; with the
+walls at 2000 K both flip. `p1_energy_source_identity` checks (137.2)'s
+split at `T = T*` per cell against (135.4): the residual is `1.5e-16` in f64
+and `8.1e-8` under `single`, against docs/17 §5.1.4's `tol32` of `1e-5`, and
+`Sp <= 0` in every cell. `p1_refusals` executes §137.2's list: a model that
+is not P1, `wsgg`/`wsggGrey` absorption, a negative or non-finite `κ` or
+`σ_s`, `κ = 0`, `|A_1| > 1`, an emissivity outside `(0, 1]`, a negative or
+non-finite `T_w`, an unknown or `empty` patch, a patch named twice, and no
+Marshak patch at all - each refused BY NAME. `P1::solve` refuses, naming
+itself, a mesh whose cell, internal-face or boundary-face count differs from
+the one `P1::new` was built on.
+
+The Marshak data is paired patch-with-wall, and three gates hold it:
+`p1_wall_order_is_irrelevant` lists the same two walls - `xMin` at `ε = 1`,
+2000 K, `xMax` at `ε = ½`, 0 K - in both orders and holds `G`, the wall
+fluxes and `q_r` BITWISE equal across the listings, the hot `xMin` taking
+flux in and the cold `xMax` letting it out in both; `p1_multi_face_patch`
+carries TWO faces per wall patch (two cells in `y` under plain zeroGradient
+patches, a symmetry plane for `G`) and holds all four Marshak fluxes equal
+to the one-cell-in-y N = 8 slab's `xMin` flux - 1e-10 relative in f64,
+`tol32` under `single`, the `y` direction carrying no gradient;
+`p1_from_field_wall_equals_fixed` reads `T_w` `FromField` off `T.bf = 1500`
+and reproduces the `Fixed(1500)` solve BITWISE, every Marshak flux negative
+into the wall hotter than the medium.
+
+Labels: (135.1)-(135.16).
 
 ---
 
