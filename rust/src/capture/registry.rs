@@ -148,6 +148,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ("src/field_ops.rs", Stance::Via("src/momentum.rs")),
     ("src/fv.rs", Stance::Via("src/momentum.rs")),
     ("src/halo.rs", Stance::Via("src/distsolve.rs")),
+    (
+        "src/halo/spmd.rs",
+        Stance::Refused(
+            "the SPMD exchange copies the packed cells to the host, hands \
+             them to a Comm and copies the halo back, synchronising the \
+             stream twice - host round trips by construction; it is refused \
+             by name at run time (an_spmd_halo_refuses_by_name). \
+             Alternative: capture the device work BETWEEN two exchanges, or, \
+             in one process, use HaloExchange, whose pack and copy are \
+             device-only",
+        ),
+    ),
     ("src/ldu_ops.rs", Stance::Via("src/solver.rs")),
     ("src/les.rs", Stance::Via("src/models/les.rs")),
     ("src/marangoni.rs", Stance::Via("src/vof.rs")),

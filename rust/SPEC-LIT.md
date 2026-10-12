@@ -15139,11 +15139,17 @@ which dispatches to `cuMemcpyPeerAsync` when the two buffers belong to
 different contexts — so the same loop is what a one-process, several-device run
 will use. **That peer path is untested here: this machine has one GPU.**
 
-Three payloads are carried: `Scalar`, `Vec3` and `Label`. The last is not a
-field in the physical sense — it carries the integer masks a kernel tests at a
-coupled face's *neighbour*. `lduSetValues`'s `isFixed` is the one this tree has
-today, and the gate uses the exchange for it rather than filling it from the
-host's whole-mesh copy, because a distributed build has no such copy.
+Four payloads are carried: `Scalar`, `Vec3`, `Tensor` and `Label`. `Tensor`
+(nine scalars moved as one struct, kernel `haloPackTensor`) was added by PAR-02
+for the gradient of a vector field, whose halo a distributed flow needs. `Label`
+is not a field in the physical sense — it carries the integer masks a kernel
+tests at a coupled face's *neighbour*. `lduSetValues`'s `isFixed` is the one
+this tree has today, and the gate uses the exchange for it rather than filling
+it from the host's whole-mesh copy, because a distributed build has no such copy.
+
+The exchange above is the in-process form: every part in one process. The SPMD
+form, in which a rank holds one part and reaches its neighbours through a
+`Comm`, is §138.3; it uses the same plan and the same pack kernels.
 
 ---
 
@@ -15304,6 +15310,7 @@ cannot be silently inert), and that the field is bit-identical anyway.
 | `splitting_a_field_and_gathering_it_back_is_the_identity` | round trip exact; the halo starts at zero, so a forgotten exchange cannot pass by luck |
 | `an_exchanged_halo_is_bit_for_bit_the_owner` | every ghost value equals its owner's, bit for bit, at `P = 1..4` on a plain and a cyclic mesh |
 | `a_vector_and_a_label_halo_cross_the_cut_too` | the same plan carries `Vec3` and `Label` |
+| `a_tensor_halo_crosses_the_cut_too` | the same plan carries `Tensor`: all nine components of every local cell equal the owner's, bit for bit, at `P = 1..4` under three partitioners on a cyclic mesh |
 | `a_field_buffer_without_room_for_the_halo_is_refused_by_name` | an `n_cells`-long buffer is named, with the length it should have had |
 | `the_other_amul_survives_the_cut_too` | `ldu_ops::amul` — the second implementation of the row sum — agrees bit for bit as well as `solver::amul` |
 | **`a_decomposed_run_is_bitwise_the_undecomposed_run`** | **the gate.** `relax -> set_values -> fold -> 6 Jacobi sweeps` at `P = 1,2,3,4` under three partitioners on a plain and a cyclic mesh: every `diag`, `source`, `upper`, `lower` and boundary coefficient, and every value of the final field, bit-for-bit the whole mesh's |
@@ -42185,6 +42192,90 @@ The values were computed by an independent Python oracle before the Rust ran.
 * FNV-1a (Fowler, Noll, Vo; public domain) for the test digests.
 * No MPI implementation's source was consulted. No GPL-licensed source was
   consulted.
+
+### 138.3 The SPMD halo exchange
+
+(§138.2 is reserved for the MPI transport, PAR-06.) ORIGINAL: this project's
+own design, with no external source. It defines no equation.
+
+§71.4's exchange has every part in one process and moves the packed cells with
+a device-to-device copy. In an SPMD run a rank holds **one** part and cannot
+read another rank's memory, so the move goes through the host and a `Comm`.
+`src/halo/spmd.rs` holds `SpmdHalo`, built from one `PartMesh` and the number
+of ranks. Rank r holds part r. One exchange of one field is five steps:
+
+```
+1. pack     sendBuf[k] = psi[sendIndex[k]]        the kernel of §71.4, unchanged
+2. D2H      sendBuf -> a page-locked host buffer; then the stream is synchronised
+3. Comm     exchange(HALO_TAG, sends, recvs):
+              to   nbr[i]: the bytes of host send slice [send_offset[i], send_offset[i+1])
+              from nbr[i]: the bytes of host receive slice [recv_offset[i], recv_offset[i+1])
+4. H2D      the whole host receive buffer -> psi[n_cells .. n_cells + n_halo], ONE copy
+5. sync     the stream is synchronised; on return no copy is pending
+```
+
+* **Still no unpack and no arithmetic.** The halo is ordered by (owning part,
+  global cell id), so the neighbours' runs, in `nbr` order, are the halo itself:
+  the receive buffer is the halo and step 4 is one contiguous copy. Steps 2-4
+  are the identity on every byte and step 1 is a gather, so a ghost cell holds
+  its owner's value bit for bit, on any transport that keeps §138.1's contract.
+* **No handshake.** The lengths come from the plan (§71.4): what r sends to s is
+  as long as what s expects from r. Every neighbour is in both lists, an empty
+  slice included, so the two sides always post matching envelopes. R5 turns a
+  plan that disagrees into a named error instead of mixed bytes.
+* **One tag.** `HALO_TAG` = 71. Messages are FIFO within an envelope (R3) and
+  every rank runs the same program, so consecutive exchanges of different
+  fields under one tag cannot overtake each other.
+* **Why two synchronisations.** This crate runs cudarc with event tracking off
+  (`Gpu::new`), so a page-locked buffer does not wait for the copy that fills
+  it. The copy of step 2 is asynchronous and the host must not read the bytes
+  before it ends; the copy of step 4 reads the host buffer asynchronously, and
+  the next exchange must not overwrite that buffer before it ends. Both waits
+  are explicit. The page-locked buffers come from cudarc's `alloc_pinned`,
+  which sets the write-combined flag: cudarc 0.19.9, the version `Cargo.lock`
+  pins, offers no other. Write-combined memory is slow for the host to read,
+  and the host reads the send buffer once, front to back, in step 3. That
+  costs time and changes no byte. `alloc_pinned_with_flags` arrives in cudarc
+  0.19.10; the send buffer moves to it when the lock file does, and PAR-16's
+  measured exchange latency says how much it matters.
+* **Not capturable.** Steps 2-5 are host round trips, so an SPMD exchange
+  inside `Gpu::capture` is refused by name (§81.3). A captured region lies
+  between two exchanges.
+* Four payloads, as §71.4: `Scalar`, `Vec3`, `Tensor` and `Label`. A payload's
+  bytes are its in-memory representation; all four are `#[repr(C)]` without
+  padding (`types::tests::layout_matches_device`). Each payload has its own
+  device send buffer and its own two host buffers, allocated once in `new`; an
+  exchange allocates nothing on the device.
+
+**Refused by name.** Every failure is `Error::Config` and its message starts
+`halo: `.
+
+| case | the message names |
+|---|---|
+| `new`: the part's number is not below the rank count | the part and the rank count, e.g. `part 2` and `2 ranks` |
+| `new`: a neighbour is not below the rank count | the neighbour and the rank count |
+| `new`: the offsets do not fit the neighbour list, or the send list's length is not where its offsets end | the lengths, as §71.4's in-process form does |
+| `new`: the send or the receive offsets do not start at 0, or decrease, or the receive offsets do not end at `n_halo` | which list (`send offsets` or `receive offsets`), and `start at 0`, or `decrease` with the two entries, or where they end and the `halo cells` count |
+| an exchange inside a capture | `capture` |
+| `comm.size()` differs from the rank count given to `new` | both numbers and `ranks` |
+| `comm.rank()` is not the part | `rank r` and `part p` |
+| a field buffer shorter than `n_cells + n_halo` | the buffer's length, `n_cells`, `n_halo` (as `halo cells`) and the length it `must be` |
+
+The checks run in that order and before anything is launched or sent.
+
+**What must hold.** Class D: bytes. `tests/halo_spmd.rs` runs in both builds;
+each rank is a `ThreadComm` thread with its own `Gpu` on device 0.
+
+| test | what it asserts |
+|---|---|
+| **`an_spmd_halo_is_bit_for_bit_the_in_process_halo`** | **the gate.** Two `blockgen` boxes (`Big` 5×4×3 and 12×10×8), `P = 1..4`, three partitioners (Hilbert, linear, round robin), four payloads: every local cell of every rank, owned and ghost, equals bit for bit the in-process `HaloExchange` result and the owner's value. For `P > 1` every part has a halo, and the number of ghost cells compared is counted and positive |
+| `two_spmd_exchanges_back_to_back_do_not_share_bytes` | two different scalar fields exchanged one after the other with no synchronisation in between, `P = 4`, round robin, 12×10×8: each field's ghosts hold that field's owner values |
+| `an_spmd_halo_refuses_by_name` | the eight rows of the table above |
+| `an_spmd_halo_crosses_a_cut_cyclic_couple` (library, f64 build) | a cyclic 5×4×3 box, `P = 2..4`, three partitioners, `Scalar` and `Tensor`: ghosts equal the owner's values and the in-process result; at least one of the cuts splits a cyclic couple |
+
+**What this does not establish.** The ranks are threads of one process sharing
+one device, so nothing here measures an exchange's latency (PAR-16) and nothing
+runs over MPI (PAR-06). No solver calls `SpmdHalo` yet: PAR-04a is the first.
 
 ---
 
