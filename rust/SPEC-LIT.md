@@ -42275,7 +42275,8 @@ each rank is a `ThreadComm` thread with its own `Gpu` on device 0.
 
 **What this does not establish.** The ranks are threads of one process sharing
 one device, so nothing here measures an exchange's latency (PAR-16) and nothing
-runs over MPI (PAR-06). No solver calls `SpmdHalo` yet: PAR-04a is the first.
+runs over MPI (PAR-06). The first solver that calls `SpmdHalo` is §138.5's
+`spmd_pcg`.
 
 ### 138.4 The SPMD exact reduction
 
@@ -42361,8 +42362,127 @@ builds; each rank is a `ThreadComm` thread with its own `Gpu` on device 0.
 | `an_spmd_reduction_refuses_by_name` | the six rows of the table above |
 
 **What this does not establish.** Nothing here measures the latency of an
-allgather (PAR-16) and nothing runs over MPI (PAR-06). No solver calls
-`SpmdReduction` yet: PAR-04a is the first.
+allgather (PAR-16) and nothing runs over MPI (PAR-06). The first solver that
+calls `SpmdReduction` is §138.5's `spmd_pcg`.
+
+### 138.5 The SPMD PCG
+
+ORIGINAL: this project's own design, with no external source. It defines no
+equation: the recurrence is §73.2's (Hestenes & Stiefel 1952, as §8 cites it),
+unchanged.
+
+§73's `dist_pcg` holds every part in one process. In an SPMD run a rank holds
+**one** part, so the solve is the same program on every rank with §73's two
+cross-part steps moved onto the transports of §138.3 and §138.4.
+`src/distsolve/spmd.rs` holds it:
+
+* `DistSystem::split_one(gpu, halo, comm, m, dec, a)` builds the rank's
+  one-part system: part `comm.rank()` of `dec`, its mesh and its split matrix
+  (§71.6), uploaded. As in `DistSystem::split`, the two constraint arrays reach
+  the halo through the exchange, `is_fixed` first and `fixed_value` second, here
+  through `SpmdHalo`. `rank_part()` answers `Some(part)` for such a system and
+  `None` for one from `split`.
+* `SpmdWorkspace::new(gpu, comm, sys, reduce)` allocates the rank's Krylov
+  vectors, each `n_cells + n_halo` long, and its `SpmdReduction`. It is a
+  collective (§138.4's count allgather), so every rank builds it at the same
+  point of the program.
+* `spmd_pcg(gpu, sol, comm, psi, sys, halo, w, ctrl)` runs the solve and
+  returns §73's `DistPerformance`.
+
+```
+the same program on every rank r, on its own part:
+  r = b - A psi ;  z = M^-1 r ;  p = z ;  rho = (r,z)
+  repeat
+      SpmdHalo::scalar(p) ;  q = A p              the one exchange (§73.2, §138.3)
+      alpha  = rho / (p,q)                        SpmdReduction (§138.4)
+      psi   += alpha p ;  r -= alpha q
+      [ sum|r| ; convergence test ; read the flag ; vote ]
+      z      = M^-1 r
+      rho'   = (r,z) ;  beta = rho'/rho ;  p = z + beta p ;  rho = rho'
+```
+
+* **The kernels and their order are `dist_pcg`'s for one part.** Every launch
+  on a rank is the launch `dist_pcg` makes for that part, with the same
+  arguments and the same launch geometry; the exchange is `SpmdHalo::scalar`
+  where `dist_pcg` calls `HaloExchange::scalar`, and each reduction is the
+  `SpmdReduction` method where `dist_pcg` calls the `ExactReduction` one. §138.3
+  and §138.4 make those two bit for bit the in-process forms, so every rank's
+  field is bit for bit `dist_pcg`'s field for its part, and with the exact
+  reduction and `Diagonal` or `None` it is the one-part field, hence the serial
+  solver's (§73.8).
+* **The mean still divides by the whole mesh's cell count** (§73.4), which the
+  system carries from the decomposition.
+* **Every rank decides alone, and every rank decides alike.** The residual sum
+  and the normalisation factor are global values with the same bits on every
+  rank, and the convergence test is one kernel on those values, so every rank's
+  flag is the same and no rank has to be told to stop. The **flag vote** checks
+  this instead of trusting it: after each read of the flag, the ranks allgather
+  one byte each (the rank's flag, 0 or 1), and a rank that sees two different
+  votes refuses by name. The vote is a collective, so every rank must have it
+  switched the same way. It is on by default in a debug build and off in a
+  release build (`SpmdWorkspace::set_flag_vote`); `n_flag_votes()` counts the
+  votes taken. A solve to a tolerance that stops after `k` iterations with
+  `check_interval` 1 takes `k + 1` votes. A `fixed_iters` solve reads no flag
+  and takes none.
+* **The counts are §73.8's.** At `k` fixed iterations a rank makes `k + 3`
+  exchanges and `2k + 5` reductions. With the exact reduction each reduction is
+  two allgathers and with the gathered one it is one (§138.4), so the handle
+  counts `1 + 2 (2k + 5)` or `1 + (2k + 5)` allgathers, `new`'s included. A
+  vote is one more allgather on the `Comm` and is counted by `n_flag_votes()`
+  alone.
+* **Both reductions.** `DistReduce::Exact` is partition-invariant.
+  `DistReduce::Gathered` is `dist_pcg`'s gathered answer when rank q holds part
+  q, and is run-invariant only (§72.5).
+  `SpmdWorkspace::partition_invariant` answers as
+  `DistWorkspace::partition_invariant` does.
+* **Preconditioners.** `Diagonal` and `None`. `Dic` and `Dilu` are refused by
+  name until PAR-04b builds their block-local form on a rank.
+* **Not capturable.** Every exchange and every collective is a host round trip
+  (§138.3, §138.4), so `spmd_pcg` inside `Gpu::capture` is refused by name
+  (§81.3).
+
+**Refused by name.** A failure of `split_one`, of `SpmdWorkspace::new` or of
+`DistWorkspace::new` is `Error::Config` starting `distsolve: `. A failure of
+`spmd_pcg` is `Error::Config` starting `spmd_pcg: `, except the last row,
+which is §13.4's `Error::Refused`.
+
+| case | the message names |
+|---|---|
+| `split_one`: `comm.size()` differs from the decomposition's part count | both numbers and `ranks` |
+| `split_one`: the halo plan is not this rank's part, or was built for another rank count | `rank r` and `part p`, or both rank counts |
+| `SpmdWorkspace::new`: the system is not from `split_one` | `DistSystem::split_one` |
+| `SpmdWorkspace::new`: `comm.rank()` is not the system's part | `rank r` and `part p` |
+| `DistWorkspace::new`: the system is from `split_one` | `SpmdWorkspace` |
+| `spmd_pcg` inside a capture | `capture` |
+| `spmd_pcg`: the system is not from `split_one` | `DistSystem::split_one` |
+| `spmd_pcg`: `comm.size()` differs from the rank count the workspace saw | both numbers and `ranks` |
+| `spmd_pcg`: `comm.rank()` is not the system's part | `rank r` and `part p` |
+| `spmd_pcg`: the workspace was built for another system | the owned and halo cell counts of both |
+| `spmd_pcg`: the halo plan's cell counts are not the system's | the owned and halo cell counts of both |
+| `spmd_pcg`: a solution buffer shorter than `n_cells + n_halo` | the buffer's length, the length it must have, the owned and the halo cell counts, and `lduAmul` |
+| `spmd_pcg`: the flag vote disagrees | `flag` and every rank's vote in rank order, on every rank |
+| `spmd_pcg`: `Dic` or `Dilu` | the setting, the value and `diagonal` |
+
+The `spmd_pcg` rows are checked in that order, the vote excepted, and before
+anything is launched or sent. A refusal that only one rank can see leaves the
+other ranks waiting in a collective: after any `Err` the world is spent (R10).
+
+**What must hold.** Class D: bytes. Each rank is a `ThreadComm` thread with its
+own `Gpu` on device 0.
+
+| test | what it asserts |
+|---|---|
+| **`an_spmd_pcg_is_the_in_process_pcg`** (library, f64 build) | **the gate.** §73.8's 5×4×3 box, plain and with a cyclic couple, `P = 1..4`, three partitioners (Hilbert, linear, round robin; linear alone at `P = 1`), `Diagonal` and `None`, the exact reduction, solved to `1e-12` with the flag vote on: on every rank every owned cell equals bit for bit `dist_pcg`'s field for that part and the one-part field, and the iteration count, the exchange count, the reduction count, the two residuals' bits and `converged` equal `dist_pcg`'s. Every rank took `n_iterations + 1` votes and none disagreed. 112 rank results and 2,400 cells are compared |
+| `an_spmd_pcg_is_the_in_process_pcg_in_both_builds` (`tests/distsolve_spmd.rs`) | the same comparison in both precisions on two `blockgen` boxes (`Big` 5×4×3 and 8×6×5), `Diagonal` and `None`, the exact reduction, and, on the 5×4×3 box with `Diagonal` at `P = 2..4`, the gathered reduction against `dist_pcg`'s gathered answer for the same parts. 139 rank results and 6,540 cells are compared. The solver tolerance is `1e-12` in the f64 build and `1e-5` in the f32 build; it is a solver control and not a gate tolerance, and every comparison is exact |
+| `an_spmd_pcg_counts_its_exchanges_and_collectives` | 5 fixed iterations, `P = 3`: every rank makes 8 exchanges, 15 reductions and no vote; the handle counts 31 allgathers with the exact reduction and 16 with the gathered one |
+| `an_spmd_flag_vote_names_a_disagreement` | `P = 2`, one rank given a tolerance it meets at once: both ranks are refused with `flag` and both votes |
+| `an_spmd_pcg_refuses_by_name` | the other rows of the table above |
+
+**What this does not establish.** The ranks are threads of one process sharing
+one device, so nothing here is a speed-up (PAR-16) and nothing runs over MPI
+(PAR-06). PBiCGStab and the block-local `Dic`/`Dilu` on a rank are PAR-04b.
+`split_one` still cuts a matrix assembled on the whole mesh, on the host; a
+rank that assembles its own part is PAR-10's.
 
 ---
 

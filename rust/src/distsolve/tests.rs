@@ -813,3 +813,181 @@ fn a_distributed_solve_reaches_the_serial_solvers_answer() {
         }
     }
 }
+
+// ==========================================================================
+//  The SPMD form - SPEC-LIT §138.5
+// ==========================================================================
+
+/// **The SPMD gate.** The same solve, run as one rank per part through
+/// [`spmd_pcg`], is bit for bit the in-process `dist_pcg` for that part -
+/// and, the reduction being exact and the preconditioner one a cut cannot
+/// change, bit for bit the one-part answer on every rank's owned cells.
+///
+/// Every rank also stops on the same iteration: the residual sum and the
+/// normalisation factor are global values with the same bits everywhere, so
+/// the flags never disagree, and the flag vote - on for this gate - counts
+/// `n_iterations + 1` reads and finds nothing to report.
+#[test]
+fn an_spmd_pcg_is_the_in_process_pcg() {
+    let Some(gpu0) = gpu() else { return };
+    let sol0 = SolverKernels::new(&gpu0).expect("kernels");
+
+    let mut rank_results = 0usize;
+    let mut cells = 0usize;
+    for cyclic in [false, true] {
+        let m = boxes([5, 4, 3], cyclic);
+        let a = poisson(&m);
+        let whole: Vec<Scalar> = (0..m.n_cells).map(field).collect();
+
+        for precon in [Preconditioner::Diagonal, Preconditioner::None] {
+            let ctrl = controls(LinearSolverKind::PCG, precon, None);
+
+            // Reference ONE: the in-process solve at one part, which the
+            // exact reduction makes every partition's answer.
+            let one = Decomposition::build(&m, 1, &PartitionMethod::Linear).expect("cut");
+            let (want, wp) = {
+                let mut ex = HaloExchange::new(&gpu0, &one).expect("halo");
+                let sys = DistSystem::split(&gpu0, &mut ex, &m, &one, &a).expect("split");
+                let mut w = DistWorkspace::new(&gpu0, &sys, DistReduce::Exact).expect("ws");
+                let mut psi: Vec<DevBuf<Scalar>> = (0..1)
+                    .map(|p| {
+                        gpu0.upload(&one.split_field(p, &whole).expect("field"))
+                    })
+                    .collect::<Result<_>>()
+                    .expect("upload");
+                let perf =
+                    dist_pcg(&gpu0, &sol0, &mut psi, &sys, &mut ex, &mut w, &ctrl).expect("P = 1");
+                gpu0.sync().expect("sync");
+                (gpu0.download(&psi[0]).expect("download"), perf)
+            };
+            assert!(wp.converged, "the reference solve must converge");
+            assert!(wp.n_iterations > 3, "a one-iteration gate proves nothing");
+
+            for np in 1..=4usize {
+                let cuts: Vec<(String, Decomposition)> = if np == 1 {
+                    vec![(
+                        "linear".to_string(),
+                        Decomposition::build(&m, 1, &PartitionMethod::Linear).expect("cut"),
+                    )]
+                } else {
+                    partitions(&m, np)
+                        .into_iter()
+                        .map(|(name, method)| {
+                            let d = Decomposition::build(&m, np, &method).expect("cut");
+                            (name, d)
+                        })
+                        .collect()
+                };
+                for (name, dec) in cuts {
+                    if np > 1 {
+                        assert!(dec.n_cut_faces > 0, "P = {np} {name} cut nothing");
+                        assert!(
+                            dec.parts.iter().all(|p| p.n_halo > 0),
+                            "P = {np} {name} left a part without a halo"
+                        );
+                    }
+
+                    // ---- the in-process reference, part by part ----------
+                    let (ref_fields, ref_perf) = {
+                        let mut ex = HaloExchange::new(&gpu0, &dec).expect("halo");
+                        let sys =
+                            DistSystem::split(&gpu0, &mut ex, &m, &dec, &a).expect("split");
+                        let mut w =
+                            DistWorkspace::new(&gpu0, &sys, DistReduce::Exact).expect("ws");
+                        let mut psi: Vec<DevBuf<Scalar>> = (0..np)
+                            .map(|p| {
+                                gpu0.upload(&dec.split_field(p, &whole).expect("field"))
+                            })
+                            .collect::<Result<_>>()
+                            .expect("upload");
+                        let perf = dist_pcg(&gpu0, &sol0, &mut psi, &sys, &mut ex, &mut w, &ctrl)
+                            .expect("in-process");
+                        gpu0.sync().expect("sync");
+                        let fields: Vec<Vec<Scalar>> = psi
+                            .iter()
+                            .map(|buf| gpu0.download(buf).expect("download"))
+                            .collect();
+                        (fields, perf)
+                    };
+
+                    // ---- the SPMD run: one thread per rank, each with its
+                    // own `Gpu` on device 0 -------------------------------
+                    let got = crate::comm::ThreadComm::run(
+                        np,
+                        |comm| -> Result<(Vec<Scalar>, DistPerformance, u64)> {
+                            let gpu = Gpu::new(0)?;
+                            let sol = SolverKernels::new(&gpu)?;
+                            let rank = comm.rank();
+                            let mut halo =
+                                crate::halo::SpmdHalo::new(&gpu, &dec.parts[rank], np)?;
+                            let sys =
+                                DistSystem::split_one(&gpu, &mut halo, comm, &m, &dec, &a)?;
+                            let mut w =
+                                SpmdWorkspace::new(&gpu, comm, &sys, DistReduce::Exact)?;
+                            w.set_flag_vote(true);
+                            let mut psi = gpu.upload(&dec.split_field(rank, &whole)?)?;
+                            let perf = spmd_pcg(
+                                &gpu, &sol, comm, &mut psi, &sys, &mut halo, &mut w, &ctrl,
+                            )?;
+                            gpu.sync()?;
+                            Ok((gpu.download(&psi)?, perf, w.n_flag_votes()))
+                        },
+                    )
+                    .expect("spmd run");
+
+                    for (r, part) in dec.parts.iter().enumerate() {
+                        let (g, perf, votes) = got[r]
+                            .as_ref()
+                            .unwrap_or_else(|e| panic!("P = {np} {name} rank {r} failed: {e}"));
+                        rank_results += 1;
+                        cells += part.mesh.n_cells;
+                        for i in 0..part.mesh.n_cells {
+                            let gi = part.global_cell[i] as usize;
+                            let at = format!(
+                                "cyclic {cyclic}, {precon:?}, P = {np}, {name}, \
+                                 rank {r}, owned {i} (global {gi})"
+                            );
+                            assert_eq!(
+                                g[i].to_bits(),
+                                ref_fields[r][i].to_bits(),
+                                "vs the in-process part, {at}"
+                            );
+                            assert_eq!(
+                                g[i].to_bits(),
+                                want[gi].to_bits(),
+                                "vs the one-part answer, {at}"
+                            );
+                        }
+                        let at = format!("cyclic {cyclic}, {precon:?}, P = {np}, {name}, rank {r}");
+                        assert_eq!(perf.n_iterations, ref_perf.n_iterations, "iterations, {at}");
+                        assert_eq!(perf.n_exchanges, ref_perf.n_exchanges, "exchanges, {at}");
+                        assert_eq!(perf.n_reductions, ref_perf.n_reductions, "reductions, {at}");
+                        assert_eq!(perf.converged, ref_perf.converged, "converged, {at}");
+                        assert_eq!(
+                            perf.initial_residual.to_bits(),
+                            ref_perf.initial_residual.to_bits(),
+                            "initial residual bits, {at}"
+                        );
+                        assert_eq!(
+                            perf.final_residual.to_bits(),
+                            ref_perf.final_residual.to_bits(),
+                            "final residual bits, {at}"
+                        );
+                        assert_eq!(perf.n_iterations, wp.n_iterations, "vs Reference ONE, {at}");
+                        assert_eq!(
+                            *votes,
+                            perf.n_iterations as u64 + 1,
+                            "votes at check interval 1, {at}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(rank_results, 112, "rank results compared");
+    assert_eq!(
+        cells, 2400,
+        "owned cells compared against the in-process part"
+    );
+}
+
