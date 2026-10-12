@@ -41595,6 +41595,41 @@ implementation detail from that catalogue is used (plan §2.6).
 and replaces `refuse_enclosure`'s redirect with the implementation it pointed
 at. The §50 tolerances are unchanged.
 
+**The `radiation` dictionary route, as CHR-17 reads it (DESIGN).** These are
+the entries of `constant/radiationProperties` that `src/radiation.rs` and
+`src/radiation/props.rs` read for a participating medium. The model names are
+the ones in the table above. The entry spellings below are this project's own
+choice.
+
+| entry | meaning | rule |
+|---|---|---|
+| `radiationModel` | `P1` \| `fvDOM` \| `viewFactor` (alias `s2s`) | required, with no default; any other name is refused with the three names |
+| `absorptionEmissionModel` | `constant` \| `wsgg` \| `wsggGrey` | default `constant`. Under `viewFactor` only `none` is accepted |
+| `absorptionCoefficient` | `κ` in 1/m, for the `constant` model | required with `constant`; a negative or non-finite value is refused; refused if present with `wsgg`/`wsggGrey`. Under `viewFactor`, a non-zero value is refused by `S2sConfig::from_dict` (§50.9, unchanged) |
+| `wsggFile` | path to a Bordbar 2021 `.dat`, relative to the case directory | required with `wsgg`/`wsggGrey`; refused if present with `constant`. `ParticipatingConfig::from_case` refuses a path that does not exist. The digest check is §136.4's, built in CHR-22 |
+| `wsggPressure` | atm | required with `wsgg`/`wsggGrey`; must equal one of §136.4's ten pressures exactly, and any other value is refused naming the ten; refused if present with `constant` |
+| `scatterModel` | `none` \| `isotropic` \| `linearAnisotropic` | default `none`. Under `viewFactor` only `none` is accepted |
+| `scatterCoefficient` | `σ_s` in 1/m | required with `isotropic` and `linearAnisotropic`; a negative or non-finite value is refused; refused if present with `none` |
+| `A1` | `A_1` of (135.1), `Φ = 1 + A_1 Ω'·Ω` | required with `linearAnisotropic`; refused if `\|A_1\| > 1` (the phase function would be negative); refused if present with `none` or `isotropic` |
+
+Four rules apply to the whole table:
+
+* A numeric entry's value is the last whitespace-separated token that parses
+  as a number, read as f64 in both builds. That is why `wsggPressure 0.1`
+  matches the table exactly under `single` too. An entry with no number in it
+  is refused, naming the entry.
+* An entry that belongs to a model the case did not select is refused,
+  because it would be read and then ignored (§13.4.1).
+* Under `P1`, a `constant` medium with `κ + σ_s = 0` is refused, because
+  (135.7)'s `Γ = 1/(3β - A_1 σ_s)` is then infinite. `fvDOM` accepts such a
+  medium: the discrete-ordinates row of a transparent medium is finite.
+* `RadiationConfig::from_case`, the enclosure reader §98.7 calls, resolves
+  only `viewFactor`. Given `P1` or `fvDOM`, it refuses the case and names
+  `ParticipatingConfig` as the reader of a participating medium. No driver
+  solves a participating medium until §137.3's units land.
+
+The tests are §135.6's rows.
+
 **`parcels`** (CHR-25). There is one key per `ParcelControls`,
 `CouplingControls` and `Injector` field (`src/parcels.rs`,
 `src/parcels/couple.rs`), so that every library field is reachable (the plan's
