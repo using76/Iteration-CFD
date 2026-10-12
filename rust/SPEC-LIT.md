@@ -41586,6 +41586,116 @@ class.
 | `wsgg_user_file_digest` | the user file's sha256 against §136.4 | known digests accepted silently; an unknown one warned by name | D |
 | `dom_replays_under_capture` | §81 | bitwise | D |
 
+### 136.6 The quadrature and the rows as CHR-19 builds them
+
+**Table II as printed.** LA-3186 p. 14, transcribed from the page image
+(the PDF whose digest heads this section). Footnote a of the table: "The
+weights given sum to 0.5. The point weights are those of Fig. 3." A level
+weight is therefore half the sum of the point weights `p` of the octant
+points whose first cosine is `μ_i`.
+
+| `n` | `μ_i` | level weights `w_i` | point weights `p_i` |
+|---|---|---|---|
+| 4 | 0.2958759, 0.9082483 | 0.3333333, 0.1666667 | 0.3333333 |
+| 6 | 0.1838670, 0.6950514, 0.9656013 | 0.2178992, 0.2308682, 0.0512325 | 0.1024651, 0.2308682 |
+| 8 | 0.1422555, 0.5773503, 0.8040087, 0.9795543 | 0.1721829, 0.2101402, 0.0631708, 0.0545061 | 0.1090122, 0.0631708, 0.2939388 |
+
+The `n = 12` block (with its two negative level weights, -0.1410287 and
+-0.0388597) is read and not transcribed further: it is the reason S12 is
+refused. `dom_sets_match_la3186` holds the built sets against this table
+at 1.5e-7; the largest deviation measured against a 40-digit solve is
+1.09e-7 (`n = 6`, `μ_1`).
+
+**The f64 values the generator must reach.** The supervisor's 40-digit solve
+(mpmath, a scratchpad probe), rounded to f64:
+
+| set | `μ` | point weights `w = p π/2` |
+|---|---|---|
+| S6 | 0.18386710903370065, 0.6950513960188804, 0.9656012491868362 | 0.16095181814902973, 0.3626469574492691 |
+| S8 | 0.14225553242324357, 0.5773502691896257, 0.8040087251775606, 0.9795543512179195 | 0.17123590548164405, 0.09922844597572607, 0.46171793449560805 |
+
+S8's `μ_2` is `1/√3`: (136.1) gives `μ_2^2 = μ_1^2 + (1 - 3μ_1^2)/3 = 1/3`
+for any `μ_1`. S2 and S4 are built from their closed forms (§136.1 and
+(136.2)), never by iteration. S6 and S8 are solved by Newton's method in f64
+from Table II's printed values. The iteration stops when every moment
+residual is below 1e-14, and a set that does not get there in 50 iterations
+is an error. The step is not the criterion: at `n = 8` a residual of 1e-17
+still produces an ulp-sized step, which never settles (found by the coder,
+CHR-19). So `dom_sets_match_solution` holds the
+result against the table above at 1e-12 relative. The Jacobian's condition
+number is about 2e3 at `n = 8` (measured by the probe), so an f64 Newton
+solution carries up to about 4e-13; the probe's own f64 Newton landed within
+4.3e-15. The moments are met far more tightly than the unknowns, because
+they are the equations the iteration drives to zero.
+
+**Direction order (DESIGN).** With `N_o` points per octant (1, 3, 6, 10 for
+S2-S8), direction `l = o N_o + q`. The octant `o = 0 … 7` gives the signs:
+bit 0 set makes `Ω_x` negative, bit 1 `Ω_y`, bit 2 `Ω_z`. The point
+`q = 0 … N_o - 1` runs over the triples `(i, j, k)` of §136.1's table in
+ascending lexicographic order, with `Ω = (±μ_i, ±μ_j, ±μ_k)`. The mirror of
+`l` in the plane normal to axis `a` is then `(o XOR 2^a) N_o + q`, and its
+components are the same f64 values with one sign flipped. That is the
+bitwise reflection closure of §136.1.
+
+**The row on the crate's operators (DESIGN).** (136.3) is the first-order
+upwind convection of `I^l` by the face flux `φ_f = Ω_l·S_f`, plus the
+implicit sink `β V_P` and the explicit source. The crate's Gauss convection
+with upwind weights writes exactly (136.3)'s coefficients: for a face owned
+by `P`, the neighbour's coefficient in `P`'s row is `min(φ_f, 0)` and `P`'s
+coefficient in the neighbour's row is `-max(φ_f, 0)`. No new discretisation
+is added. A boundary face enters through §4's triple, rewritten for each
+direction:
+
+```
+f = 1, refValue = I_b^l, refGrad = 0      where Ω_l·S_b < 0   (into the medium)
+f = 0,                   refGrad = 0      where Ω_l·S_b >= 0  (out of it: the face value is I_P^l)
+```
+
+`I_b^l` is §136.2's boundary intensity, and it is stored for every
+direction, incoming or not: the wall's `I_w` and the open boundary's
+`σ T_∞^4/π` do not depend on `l`, and the symmetry face stores
+`I_P^(l')` of the mirror direction. An `empty` face stores 0 and
+contributes nothing. The reflection sum of the wall row runs over the
+directions with `Ω_l'·n > 0`, with `n = S_b/|S_b|`, and uses the current
+cell intensities: the boundary values are lagged one sweep behind the rows,
+as the in-scattering sum is.
+
+**Who must be named.** Every boundary patch that is not `empty` and has at
+least one face must carry exactly one of the three conditions of §136.2. An
+unnamed patch has no incoming intensity, so it is refused by name and never
+defaulted. A cyclic, processor or conjugate-interface patch is refused by
+name in v1 (DESIGN): the coupled face would need the neighbour's intensity
+of the same direction, which is named and not built. Until CHR-21 lands the
+in-scattering sum, a medium with `σ_s ≠ 0` is refused by name by the row
+builder: a row with `β = κ + σ_s` and no in-scattering source would be pure
+extinction, which is a different medium.
+
+**The isothermal enclosure (the row's own identity).** Let every cell and
+every wall be at one temperature `T`, every open boundary have `T_∞ = T`,
+and every direction carry `I^l = I_b = σT^4/π`. The wall row of §136.2 then
+gives `I_w = ε I_b + (1 - ε) I_b (1/π) Σ_{Ω·n>0} w |Ω·n|`. That equals `I_b`
+exactly when the half-range moment is π, which holds for S4-S8 on an
+axis-aligned wall (§136.1) and for any set when `ε = 1`. With `I_b` on every
+boundary, (136.3) reduces to `I_b Σ_f Ω·S_f + κ V I_b = κ I_b V`, which holds
+because `Σ_f Ω·S_f = 0` on a closed cell. So the assembled row has zero
+residual at `I = I_b`, in every cell and for every direction. S2 with
+`ε < 1` misses it by `(1 - ε)(2/√3 - 1)`, which is 15.5 % of the reflected
+part. This is the discrete statement of the choice §136.1 made.
+
+**CHR-19's added rows** (same classes as §136.5; R rows use `tol32` under
+`single`):
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `dom_sets_match_solution` | S6 and S8 against the f64 table above | 1e-12 relative | A |
+| `dom_direction_order` | the count per set (8, 24, 48, 80), the order above, and `mirror` as the XOR | exact | D |
+| `dom_row_isothermal_equilibrium` | the residual of every row at `I = I_b`, S4-S8 with `ε = 0.5`, S2 with `ε = 1`, relative to `diag · I_b` | 1e-12 | R |
+| `dom_s2_grey_wall_misses_equilibrium` | S2, `ε = 0.5`: `I_w / I_b - 1` against `(1 - ε)(2/√3 - 1)` | 1e-12 | R |
+| `dom_row_matches_formula` | every coefficient and source of every direction against (136.3) evaluated in f64 in the test, on a 4 x 2 x 1 block with one wall, one open and four symmetry patches and non-uniform intensities | 1e-12: coefficients relative to the row's diagonal; the source and the boundary intensities relative to their own value (the source is an intensity times an area, so the diagonal is not its scale) | R |
+| `dom_row_is_an_m_matrix` | off-diagonals non-positive, and the diagonal at least the sum of their magnitudes plus `κV` | 1e-12 relative | R |
+| `dom_refuses_unnamed_patch`, `dom_refuses_coupled_patch`, `dom_refuses_scattering_until_chr21` | the three refusals above | refused by name | D |
+| `dom_replays_under_capture` | the boundary update and the assembly of every direction, §81 (CHR-20 extends it to the solve) | bitwise | D |
+
 Labels: (136.1)-(136.10).
 
 ---

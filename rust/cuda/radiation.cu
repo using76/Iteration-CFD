@@ -5,20 +5,29 @@
 // See LICENSE at the repository root.
 /*
   ==========================================================================
-  radiation.cu - the P1 device kernels, SPEC-LIT 135.7. One thread per cell
-  or boundary face: the diffusion coefficient Gamma (135.7), its face
-  products (135.13), the Marshak triple (135.14), the emission source of
-  (135.8), the energy-source pair (137.2), the wall flux (135.15) and the
-  scaling of the Green-Gauss gradient to q_r (135.16).
+  radiation.cu - the P1 device kernels, SPEC-LIT 135.7, and the
+  discrete-ordinates (fvDOM) kernels, SPEC-LIT §136.2/§136.6. One thread
+  per cell or boundary face.
+
+  The P1 half: the diffusion coefficient Gamma (135.7), its face products
+  (135.13), the Marshak triple (135.14), the emission source of (135.8),
+  the energy-source pair (137.2), the wall flux (135.15) and the scaling
+  of the Green-Gauss gradient to q_r (135.16).
+
+  The dom* half (CHR-19): the per-direction face flux Omega . Sf, the
+  wall reflection sum, the boundary intensity of every direction
+  (SPEC-LIT §136.2's table), the per-direction boundary triple, and the
+  emission kappa sigma T^4/pi of (136.3).
   ==========================================================================
 
-  Written from: SPEC-LIT.md §135.3-§135.7, §137.1
+  Written from: SPEC-LIT.md §135.3-§135.7, §137.1, §136.2, §136.6
   No GPL-licensed source was consulted. Provenance: see PROVENANCE.md.
 
   Every kernel is ofscalar in, ofscalar out - the crate's solve precision,
   both builds. No atomics, no allocation, no sync: each thread touches only
   its own cell or face, so a launch is pure device work and the whole P1
-  step of src/radiation/p1.rs captures into a CUDA graph (SPEC-LIT 81).
+  step of src/radiation/p1.rs and the fvDOM boundary update and row
+  assembly of src/radiation/dom.rs capture into a CUDA graph (SPEC-LIT 81).
   The Stefan-Boltzmann constant arrives as an argument (sigma) rather than
   being spelled here, so no constant is written twice - the same rule the
   flat mechanism's R_GAS follows in chem.cu.
@@ -191,3 +200,191 @@ extern "C" __global__ void radQrScale
     const ofscalar g = gamma[c];
     qr[c] = mkvec(-g*qr[c].x, -g*qr[c].y, -g*qr[c].z);
 }
+
+// ==========================================================================
+//  CHR-19: the discrete-ordinates kernels, SPEC-LIT §136.2/§136.6
+//
+//  The quadrature (omega, w, the mirror map) is generated on the host in
+//  f64 and cast to ofscalar once, on upload (SPEC-LIT §136.5). One thread
+//  per cell or face, no atomics: every launch here is pure device work, so
+//  the boundary update and the per-direction assembly capture into a CUDA
+//  graph (SPEC-LIT 81).
+// ==========================================================================
+
+//- (136.3)'s face flux for ONE direction: phi_f = Omega_l . Sf on the
+//  internal faces. The step scheme's upwind weights turn this into
+//  max(Omega . Sf, 0) on the diagonal side and min(Omega . Sf, 0) on the
+//  off-diagonals (SPEC-LIT §136.6, "The row on the crate's operators"). -
+extern "C" __global__ void domFluxInternal
+(
+    ofscalar* __restrict__ phi,
+    const ofvec3* __restrict__ sf,
+    ofscalar ox,
+    ofscalar oy,
+    ofscalar oz,
+    oflabel nFaces
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= nFaces) return;
+    const ofvec3 s = sf[f];
+    phi[f] = ox*s.x + oy*s.y + oz*s.z;
+}
+
+//- The same product on the boundary faces: phi_b = Omega_l . Sb. Its sign
+//  splits the boundary triple - incoming (phi_b < 0) carries I_b^l, outgoing
+//  carries the cell's own value (SPEC-LIT §136.6). -
+extern "C" __global__ void domFluxBoundary
+(
+    ofscalar* __restrict__ bphi,
+    const ofvec3* __restrict__ bSf,
+    ofscalar ox,
+    ofscalar oy,
+    ofscalar oz,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    const ofvec3 s = bSf[i];
+    bphi[i] = ox*s.x + oy*s.y + oz*s.z;
+}
+
+//- The diffuse wall's reflection sum, one direction per launch (SPEC-LIT
+//  §136.2's wall row): reflSum[b] += w_l' I_P^l' (Omega_l' . n) over the
+//  directions INTO the wall, where n = Sb/|Sb| - the sign test and the
+//  magnitude read Omega . Sb directly, so the sum accumulates w I (Omega.Sb)
+//  and the consumer divides by |Sb| once. The caller zeroes reflSum before
+//  the sweeps. -
+extern "C" __global__ void domReflAccum
+(
+    ofscalar* __restrict__ reflSum,
+    const ofscalar* __restrict__ inten,
+    const ofvec3* __restrict__ bSf,
+    const oflabel* __restrict__ bFaceCells,
+    ofscalar ox,
+    ofscalar oy,
+    ofscalar oz,
+    ofscalar w,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    const ofvec3 s = bSf[i];
+    const ofscalar dot = ox*s.x + oy*s.y + oz*s.z;
+    if (dot > (ofscalar)0)
+    {
+        reflSum[i] += w*inten[bFaceCells[i]]*dot;
+    }
+}
+
+//- The boundary intensity I_b^l of ONE direction on every boundary face -
+//  SPEC-LIT §136.2's table. Per face, by the condition the host attached:
+//
+//      grey diffuse wall  I_w = eps sigma T_w^4/pi
+//                           + ((1 - eps)/pi) reflSum[b]/|Sb|
+//        (the reflection sum of domReflAccum over the directions into the
+//         wall, with the current cell intensities - lagged one sweep, as
+//         the in-scattering sum is; T_w from twFixed where fixedFlag says
+//         the wall states its own temperature, else the wall's own T patch
+//         value)
+//      open               I_b = sigma t_inf^4/pi   (black at the ambient)
+//      symmetry           I_b^l = I_P^(mirror(l))   (specular; the host
+//                         checked the face's axis against §136.2's 1e-12)
+//      none (empty)       0 - it contributes nothing
+//
+//  ix/iy/iz are the mirror directions' CELL values: mirror(l, 0), mirror(l, 1)
+//  and mirror(l, 2), and symAxis picks which one the face reads. -
+extern "C" __global__ void domBoundaryIntensity
+(
+    ofscalar* __restrict__ ib,
+    const ofscalar* __restrict__ reflSum,
+    const oflabel* __restrict__ condKind,
+    const ofscalar* __restrict__ eps,
+    const ofscalar* __restrict__ twOrTinf,
+    const oflabel* __restrict__ fixedFlag,
+    const ofscalar* __restrict__ tBf,
+    const oflabel* __restrict__ symAxis,
+    const ofscalar* __restrict__ ix,
+    const ofscalar* __restrict__ iy,
+    const ofscalar* __restrict__ iz,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ bMagSf,
+    ofscalar sigma,
+    ofscalar pi,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    // 0 = grey diffuse wall, 1 = open, 2 = symmetry, 3 = none.
+    const oflabel kind = condKind[i];
+
+    if (kind == 0)
+    {
+        const ofscalar tw = fixedFlag[i] ? twOrTinf[i] : tBf[i];
+        const ofscalar t4 = tw*tw*tw*tw;
+        const ofscalar in = reflSum[i]/bMagSf[i];
+        ib[i] = eps[i]*sigma*t4/pi + ((ofscalar)1 - eps[i])*in/pi;
+    }
+    else if (kind == 1)
+    {
+        const ofscalar t4 = twOrTinf[i]*twOrTinf[i]*twOrTinf[i]*twOrTinf[i];
+        ib[i] = sigma*t4/pi;
+    }
+    else if (kind == 2)
+    {
+        const oflabel ax = symAxis[i];
+        const ofscalar* src = ax == (oflabel)0 ? ix : (ax == (oflabel)1 ? iy : iz);
+        ib[i] = src[bFaceCells[i]];
+    }
+    else
+    {
+        ib[i] = (ofscalar)0;
+    }
+}
+
+//- §136.6's boundary triple of ONE direction: `f = 1, refValue = I_b^l,
+//  refGrad = 0` where Omega . Sb < 0 (into the medium), `f = 0` where
+//  Omega . Sb >= 0 (out of it: the face value is the cell's own I_P^l).
+//  refGrad is written once, zero, at construction and never touched; the
+//  empty faces are skipped by fvDivBoundary whatever their triple says. -
+extern "C" __global__ void domSetTriple
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    const ofscalar* __restrict__ ib,
+    const ofscalar* __restrict__ bphi,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    fr[i] = bphi[i] < (ofscalar)0 ? (ofscalar)1 : (ofscalar)0;
+    refValue[i] = ib[i];
+}
+
+//- (136.3)'s emission source per cell, before the volume the operator
+//  multiplies it by: kappa sigma T_P^4/pi. The in-scattering sum is
+//  CHR-21's - this unit solves a non-scattering medium, so the source is
+//  exactly this (SPEC-LIT §136.6, "Who must be named"). -
+extern "C" __global__ void domEmission
+(
+    ofscalar* __restrict__ su,
+    const ofscalar* __restrict__ t,
+    ofscalar kappa,
+    ofscalar sigma,
+    ofscalar pi,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    const ofscalar t4 = t[c]*t[c]*t[c]*t[c];
+    su[c] = kappa*sigma*t4/pi;
+}
+
+
+

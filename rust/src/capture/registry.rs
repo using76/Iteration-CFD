@@ -275,6 +275,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_psychrometric_update_replays_bitwise"),
     ),
     (
+        "src/radiation/dom.rs",
+        Stance::Gate("dom_replays_under_capture"),
+    ),
+    (
         "src/radiation/p1.rs",
         Stance::Gate("p1_solve_replays_under_capture"),
     ),

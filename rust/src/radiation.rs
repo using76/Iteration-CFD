@@ -28,14 +28,15 @@
 //!   substituted for silently, which is what S13.4 asks for.
 //!
 //! What is NOT here is any solver; the models live in their own modules -
-//! the participating medium's P1 solve is [`p1`] (SPEC-LIT §135.7), and the
-//! entries a medium is described by are [`props`]. [`RadiationConfig`]
-//! resolves `viewFactor` and nothing else: given `P1` or `fvDOM` it refuses
-//! the case naming [`props::ParticipatingConfig`], the reader of a
-//! participating medium (SPEC-LIT §137.2). A `viewFactor` case that
-//! describes a medium anyway - a non-zero `absorptionCoefficient`, or an
-//! `absorptionEmissionModel`/`scatterModel` other than `none` - is refused
-//! (§50.9, §137.2) rather than having it read and then ignored.
+//! the participating medium's P1 solve is [`p1`] (SPEC-LIT §135.7), fvDOM's
+//! quadrature and per-direction rows are [`dom_quad`] and [`dom`] (SPEC-LIT
+//! §136), and the entries a medium is described by are [`props`].
+//! [`RadiationConfig`] resolves `viewFactor` and nothing else: given `P1` or
+//! `fvDOM` it refuses the case naming [`props::ParticipatingConfig`], the
+//! reader of a participating medium (SPEC-LIT §137.2). A `viewFactor` case
+//! that describes a medium anyway - a non-zero `absorptionCoefficient`, or
+//! an `absorptionEmissionModel`/`scatterModel` other than `none` - is
+//! refused (§50.9, §137.2) rather than having it read and then ignored.
 //!
 //! Provenance: ORIGINAL. The Stefan-Boltzmann constant is CODATA 2018's
 //! exact value, fixed by the SI redefinition of the kelvin; the selector and
@@ -57,9 +58,21 @@ pub mod props;
 /// The P1 solve (SPEC-LIT §135.3-§135.7, §137.1): the participating medium
 /// is now SOLVED - one scalar field `G`, Marshak walls, `q_r`, and the
 /// linearised source registered on [`crate::energy::EnergySources`]. A
-/// uniform grey medium; fvDOM (SPEC-LIT §136) is still read here and solved
-/// by nothing.
+/// uniform grey medium.
 pub mod p1;
+
+/// The level-symmetric S2-S8 quadrature of the discrete-ordinates model
+/// (SPEC-LIT §136.1, §136.6): LA-3186's sets generated in f64 on the host -
+/// S2 and S4 in closed form, S6 and S8 by Newton - with the per-direction
+/// unit vectors, weights and mirror map. Host only, f64 only; the cast to
+/// [`crate::Scalar`] happens once, on upload (§136.5), in [`dom`].
+pub mod dom_quad;
+
+/// The discrete-ordinates rows (SPEC-LIT §136.2, §136.6): one first-order
+/// upwind row per direction on the crate's own operators, the boundary
+/// intensities of §136.2's table - diffuse grey walls, open boundaries,
+/// specular symmetry - and the M-matrix property the step scheme gives.
+pub mod dom;
 
 /// Stefan-Boltzmann constant, W/(m2 K4) - CODATA 2018 exact value (fixed by
 /// the SI redefinition of the kelvin).
