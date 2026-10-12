@@ -37084,7 +37084,16 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 
 | unit | quantity | value | commit |
 |---|---|---|---|
-| — | — | — | — |
+| VIO-01 | identity: 16^3 box, `h` = 1/16 (explicit, and the default `(min V_c)^(1/3)`); 8 x 4 x 2 slab, `h` = 1/8 | `M[v] = v` at 4096/4096 and 64/64 voxels; `volume_error` below 1e-12 | VIO-01 |
+| VIO-01 | `refined_core([4,4,4], 1/4, 0.3, 1)` (120 cells), `h` = 1/24: agreement with the f64 brute force of (117.6), and with `parcels::locate_cell` in the f64 build | 13 824 / 13 824 voxels; `n_c h^3 = V_c` within 1e-12 for every cell (216 and 27 voxels); `n_filled` = 0 | VIO-01 |
+| VIO-01 | the same mesh, lattice shifted so that every centre is `(i, j, k)/16`, on faces, edges and corners | 4 913 / 4 913 voxels agree with the brute force | VIO-01 |
+| VIO-01 | tie rule on the 16^3 box, `h` = 1/8, box `[-1/2, 3/2]^3`: the 512 centres that are cell corners | each goes to the lowest of its 8 cells; the other 3 584 voxels are `NONE` | VIO-01 |
+| VIO-01 | sphere `R` = 0.3 carved from a 32^3 unit box (3 648 cells removed), `h` = 1/64 | `n_fluid` = 232 960 of 262 144; `fluid_fraction` = 0.888671875 against `1 - V_s/V_b` = 0.886903, a difference of 1.77e-3 under the bar `A_s h / V_b` = 1.767e-2; the map equals the carved cells voxel for voxel; build 0.016 s | VIO-01 |
+| VIO-01 | budget (117.3): 16^3 box, `h` = 1/16, `maxVoxels` 1000; the slab, `maxVoxels` 511 | `h'` = 0.1, `s` = 1.6, 10^3 voxels, with the note; `h'` = 1/15, `n` = [15, 8, 4]; an explicit voxel at `s` = 32 is refused and at `s` = 16 is not | VIO-01 |
+| VIO-01 | pass 2 on a two-cell mesh whose cell 0 is a non-convex L prism, `h` = 1/4; then with cell 1 removed | `n_filled` = 128 of 256, every voxel owned; with cell 1 removed `n_filled` = 0 and the 192 voxels outside pass 1's claim stay `NONE` | VIO-01 |
+| VIO-01 | FNV-1a 64 of the three maps above (2:1, 2:1 on ties, sphere), f64 build against `single` | `70dd4aef220effa5`, `e3a4349cb6b98fb5`, `3a094c789e4b6f85` in both builds | VIO-01 |
+
+**As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
 
 ### 117.14 References
 
