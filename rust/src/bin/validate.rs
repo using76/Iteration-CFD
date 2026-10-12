@@ -3603,6 +3603,13 @@ fn run(c: &mut Checks) -> Result<()> {
     c.leave_gate();
     c.replaying(check_kays_crawford_experiment_replay);
     }
+    // SPEC-LIT 121.8 - Gate CMP-B: the de Vahl Davis cavity under the
+    // Boussinesq force, its centro-symmetry, and the density-ratio control.
+    if c.section("Gate CMP-B: de Vahl Davis with Boussinesq at beta*dT = 0.03, centro-symmetry, and the density-ratio control (SPEC-LIT 121.8)") {
+    c.enter_gate("SPEC-LIT 121.8 Gate CMP-B de Vahl Davis with Boussinesq");
+    check_boussinesq_cavity(c, &gpu)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }
@@ -6132,6 +6139,82 @@ fn dvd_document(n: usize, ra: Scalar, iterations: usize, residual: Scalar) -> St
     )
 }
 
+/// Gate CMP-B's cavity: `dvd_document`'s document with the hot and cold
+/// walls at 304.5 K and 295.5 K (`DeltaT = 9 K` about `TRef = 300 K`, so
+/// `beta DeltaT = 0.03` with `beta = 1/300`) and `g_y = -(0.71 ra / 0.03)`,
+/// the value that makes `Ra = g beta DeltaT L^3 / (nu alpha)` with
+/// `nu = 0.71`, `alpha = 1`, `L = 1` (SPEC-LIT 121.8). `boussinesq = false`
+/// is the control, the density-ratio force, which then carries neither
+/// `model` nor `beta`. `grading = Some(e)` grades the x and y axes
+/// two-sided with expansion `e`; the graded mesh stays centro-symmetric,
+/// which is what lets run 4 use it.
+fn cmp_b_document(
+    n: usize,
+    ra: f64,
+    boussinesq: bool,
+    grading: Option<f64>,
+    iterations: usize,
+) -> String {
+    let dz = 1.0 / n as f64;
+    let g = 0.71 * ra / 0.03;
+    let beta = 1.0 / 300.0;
+    let model = if boussinesq {
+        format!(r#", "model": "boussinesq", "beta": {beta}"#)
+    } else {
+        String::new()
+    };
+    let grade = grading
+        .map(|e| {
+            format!(
+                r#",
+        "grading": {{ "x": {{ "expansion": {e}, "twoSided": true }}, "y": {{ "expansion": {e}, "twoSided": true }} }}"#
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"{{
+  "name": "deVahlDavisCMPB",
+  "regions": [
+    {{
+      "name": "air", "kind": "fluid",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, {dz}] }},
+        "cells": [{n}, {n}, 1]{grade},
+        "boundaries": {{
+          "xmin": "hot",    "xmax": "cold",
+          "ymin": "bottom", "ymax": "top",
+          "zmin": "front",  "zmax": "back"
+        }}
+      }},
+      "fluid": {{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }},
+      "patches": [
+        {{ "match": "hot",    "T": {{ "type": "fixedValue", "value": 304.5 }} }},
+        {{ "match": "cold",   "T": {{ "type": "fixedValue", "value": 295.5 }} }},
+        {{ "match": "bottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "top",    "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "front",  "T": {{ "type": "empty" }} }},
+        {{ "match": "back",   "T": {{ "type": "empty" }} }}
+      ]
+    }}
+  ],
+  "buoyancy": {{ "g": [0.0, -{g}, 0.0], "TRef": 300.0{model} }},
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": {iterations} }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU",
+    "tolerance": 1e-16, "maxIter": 400,
+    "flow": {{
+      "relaxU": 0.7, "relaxP": 0.3, "relaxT": 0.7,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear",
+      "residual": 1e-9,
+      "uTolerance": 1e-14, "pTolerance": 1e-14,
+      "uMaxIter": 150, "pMaxIter": 500
+    }}
+  }}
+}}"#
+    )
+}
+
 /// What one conjugate run measured: the average Nusselt number of (S60.1),
 /// taken three ways.
 struct NuTriple {
@@ -6189,6 +6272,281 @@ fn run_kp_document(gpu: &Gpu, text: &str, n: usize, conjugate: bool) -> Result<N
         iterations: sol.iterations,
         converged: sol.converged,
     })
+}
+
+/// The width at which two cell-centre coordinates count as the same
+/// coordinate when the partner map's ranks are built: an ulp-level cleaning
+/// of the block generator's per-cell arithmetic, not a tolerance any row is
+/// held against. Cells of one column differ by up to a few ulp of the build
+/// (f64: under 1e-9 measured; f32: a few times 1e-7), while the narrowest
+/// graded column spacing here is over 3e-3 - the width sits far below that.
+const CMP_B_SNAP: f64 = 1.0e-5;
+
+/// Gate CMP-B's four Boussinesq runs: `(Ra, n, grading expansion, iteration
+/// cap)` (SPEC-LIT 121.8). Run 4's mesh is graded two-sided, expansion 4, on
+/// x and y - the graded mesh is itself centro-symmetric.
+const CMP_B_RUNS: [(f64, usize, Option<f64>, usize); 4] = [
+    (1.0e3, 40, None, 2500),
+    (1.0e4, 60, None, 3500),
+    (1.0e5, 80, None, 5000),
+    (1.0e6, 120, Some(4.0), 8000),
+];
+
+/// de Vahl Davis (1983)'s mean Nusselt number at the four Rayleigh numbers
+/// above, read from Qi et al., Nanoscale Research Letters 8 (2013) 56,
+/// Table 3 (open access) - the same secondary the Gate 59-A number is read
+/// from. The Ra = 1e4 entry is `devahldavis1983`'s number, marked at Gate
+/// 59-A; a marker may appear once, so it is not repeated here.
+const CMP_B_PUBLISHED: [f64; 4] = [
+    // answer-key: devahldavis1983-ra1e3
+    1.118,
+    2.243,
+    // answer-key: devahldavis1983-ra1e5
+    4.519,
+    // answer-key: devahldavis1983-ra1e6
+    8.800,
+];
+
+/// What one Gate CMP-B run is reduced to, every number of it formed in f64
+/// on the host - under `single` too, which is the point: the measures see
+/// the f32 field through f64 arithmetic (SPEC-LIT 121.8, (121.9)-(121.12)).
+struct CmpBMeasures {
+    nu_cold: f64,
+    nu_hot: f64,
+    w: f64,
+    s_t: f64,
+    s_u: f64,
+    iterations: usize,
+    converged: bool,
+}
+
+impl CmpBMeasures {
+    /// `s` - the worse of the two centro-symmetry defects, (121.11)'s `s_T`
+    /// and (121.12)'s `s_U`.
+    fn s(&self) -> f64 {
+        self.s_t.max(self.s_u)
+    }
+}
+
+/// One axis's rank per cell. The "distinct coordinates" are the groups of
+/// values that sit within `CMP_B_SNAP` of their group's first value: the
+/// block generator forms each cell's centre from that cell's own nodes, so
+/// cells of one column can differ from each other by an ulp or two, and the
+/// ranks must not notice. `n` groups must come out of `n` columns.
+fn cmp_b_axis_ranks(vals: &[(f64, usize)], n: usize, axis: &str) -> Result<Vec<usize>> {
+    let mut sorted = vals.to_vec();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut ranks = vec![0usize; sorted.len()];
+    let mut groups = 0usize;
+    let mut group_start = 0.0f64;
+    let mut min_inside = f64::INFINITY;
+    let mut min_between = f64::INFINITY;
+    let mut firsts = String::new();
+    for (k, &(v, cell)) in sorted.iter().enumerate() {
+        if k == 0 || v - group_start > CMP_B_SNAP {
+            if k > 0 {
+                min_between = min_between.min(v - group_start);
+            }
+            groups += 1;
+            group_start = v;
+            if groups <= 4 {
+                firsts.push_str(&format!(" {v:.17e}"));
+            }
+        } else {
+            min_inside = min_inside.min(v - group_start);
+        }
+        ranks[cell] = groups - 1;
+    }
+    if groups != n {
+        return Err(ofgpu::Error::Config(format!(
+            "Gate CMP-B: the cavity's cells span {groups} distinct {axis} coordinates, not \
+             the {n} its {n}x{n} block has ({} cells; smallest gap inside a group \
+             {min_inside:.3e}, smallest gap between groups {min_between:.3e}; first group \
+             starts{firsts}), so the centro-symmetric partner map cannot be built",
+            vals.len()
+        )));
+    }
+    Ok(ranks)
+}
+
+/// The centro-symmetric partner of every cavity cell: the cell whose centre
+/// is `(1 - x, 1 - y)`. Built from the cell centres alone - each axis's
+/// distinct coordinates are ranked, and the partner of ranks `(i, j)` is
+/// `(n - 1 - i, n - 1 - j)`; no cell index order is assumed. On the graded
+/// mesh the ranks answer the same map, because the grading is two-sided. If
+/// the map is not a bijection of all `n*n` cells, `Err`, saying so.
+fn cmp_b_partner(centres: &[Vec3], n: usize) -> Result<Vec<usize>> {
+    let xs: Vec<(f64, usize)> =
+        centres.iter().enumerate().map(|(i, p)| (f64::from(p.x), i)).collect();
+    let ys: Vec<(f64, usize)> =
+        centres.iter().enumerate().map(|(i, p)| (f64::from(p.y), i)).collect();
+    let xr = cmp_b_axis_ranks(&xs, n, "x")?;
+    let yr = cmp_b_axis_ranks(&ys, n, "y")?;
+    let mut grid = vec![usize::MAX; n * n];
+    for (cell, &i) in xr.iter().enumerate() {
+        let slot = i * n + yr[cell];
+        if grid[slot] != usize::MAX {
+            return Err(ofgpu::Error::Config(
+                "Gate CMP-B: two cells share one (x, y) centre rank; the partner map is not a \
+                 bijection"
+                    .into(),
+            ));
+        }
+        grid[slot] = cell;
+    }
+    let mut partner = vec![usize::MAX; n * n];
+    for (cell, &i) in xr.iter().enumerate() {
+        partner[cell] = grid[(n - 1 - i) * n + (n - 1 - yr[cell])];
+    }
+    if partner.iter().any(|&p| p == usize::MAX) {
+        return Err(ofgpu::Error::Config(
+            "Gate CMP-B: the centro-symmetric partner map is not a bijection of all n*n cells"
+                .into(),
+        ));
+    }
+    Ok(partner)
+}
+
+/// Reduce one solved cavity to (121.9)-(121.12): the two walls' Nusselt
+/// numbers, their disagreement, the temperature and velocity
+/// centro-symmetry defects.
+fn cmp_b_reduce(sol: &ofgpu::cht::flow::ChtFlowSolution, n: usize) -> Result<CmpBMeasures> {
+    const T_REF: f64 = 300.0;
+    const D_T: f64 = 9.0; // K; k = 1 W/(m K) on this case's fluid
+    // (121.9): Nu = |Q| / (k DeltaT d_z), d_z = 1/n on the unit square.
+    let dz = 1.0 / n as f64;
+    let nu_cold = f64::from(sol.patch_heat_flow(0, "cold")?.abs()) / (D_T * dz);
+    let nu_hot = f64::from(sol.patch_heat_flow(0, "hot")?.abs()) / (D_T * dz);
+    let w = (nu_hot - nu_cold).abs() / nu_cold;
+
+    let partner = cmp_b_partner(&sol.mesh.host.c, n)?;
+    let t: Vec<f64> = sol.t.iter().map(|&v| f64::from(v)).collect();
+    let uv: Vec<(f64, f64)> =
+        sol.u.iter().map(|v| (f64::from(v.x), f64::from(v.y))).collect();
+    let mut s_t = 0.0f64;
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (cell, &mate) in partner.iter().enumerate() {
+        // (121.11): the odd part of T about the cavity centre, over DeltaT.
+        s_t = s_t.max(((t[cell] - T_REF) + (t[mate] - T_REF)).abs());
+        let (u1, v1) = uv[cell];
+        let (u2, v2) = uv[mate];
+        // (121.12)'s numerator and denominator as it walks the same cells.
+        num = num.max((u1 + u2).abs()).max((v1 + v2).abs());
+        den = den.max(u1.abs()).max(v1.abs());
+    }
+    if !(den > 0.0) {
+        // Zero or NaN: no denominator, and dividing would either raise 0/0
+        // or let a NaN field pose as symmetric.
+        return Err(ofgpu::Error::Config(format!(
+            "Gate CMP-B: the greatest |u| or |v| over the cavity is {den}, so (121.12)'s s_U \
+             has no denominator"
+        )));
+    }
+    Ok(CmpBMeasures {
+        nu_cold,
+        nu_hot,
+        w,
+        s_t: s_t / D_T,
+        s_u: num / den,
+        iterations: sol.iterations,
+        converged: sol.converged,
+    })
+}
+
+/// Parse, lower and run one Gate CMP-B document, returning the whole
+/// solution - the reduction needs the field, not only the wall heat.
+fn run_cmp_b_document(gpu: &Gpu, text: &str) -> Result<ofgpu::cht::flow::ChtFlowSolution> {
+    use ofgpu::cht::flow::run_flow_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let low = parse_cht_case(text, "SPEC-LIT 121.8 gate")?.lower()?;
+    let case = low
+        .flow_case()
+        .ok_or_else(|| ofgpu::Error::Config("the gate's own document has no fluid".into()))?;
+    run_flow_case(gpu, &case)
+}
+
+/// **SPEC-LIT 121.8's Gate CMP-B (CMP-04).** The de Vahl Davis square cavity
+/// under the Boussinesq force at `beta DeltaT = 0.03`, at four Rayleigh
+/// numbers: each run's cold-wall Nu against the published mean, its two
+/// walls' agreement, and its field's centro-symmetry - then the density-
+/// ratio force at the same `DeltaT` as the control that is measurably NOT
+/// centro-symmetric. No published number is re-marked here that Gate 59-A
+/// already carries, and no row's tolerance moves to let a row through.
+#[allow(clippy::too_many_lines)]
+fn check_boussinesq_cavity(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    // The R-class tolerance (docs/17 5.1.4, rule D-F32-1):
+    // tol32 = max(tol64, min(tol64 * 2^29, 1e-5)) = 1e-5 under single.
+    let tol_r = if cfg!(feature = "single") { 1.0e-5 } else { 1.0e-6 };
+    for (i, &(ra, n, grading, cap)) in CMP_B_RUNS.iter().enumerate() {
+        if cfg!(feature = "single") && i == 3 {
+            c.skip(
+                "Gate CMP-B, Ra = 1e6 on the 120x120 two-sided graded mesh, Boussinesq",
+                "deferred under single by the 10-minute rule (docs/17 5.3 rule 4, the CMP-04 \
+                 row): in f32 the outer loop does not reach the 1e-9 residual, so the run \
+                 takes all 8000 iterations",
+            );
+            continue;
+        }
+        let sol = run_cmp_b_document(gpu, &cmp_b_document(n, ra, true, grading, cap))?;
+        let m = cmp_b_reduce(&sol, n)?;
+        let tag = format!("Gate CMP-B, Ra = {ra:.0e}, the {n}x{n} mesh, Boussinesq");
+        c.note(&format!(
+            "{tag}: Nu_cold {} Nu_hot {} = {:+.2}% of the published {}; w {} s_T {} s_U {}; \
+             {} iterations, converged {}",
+            sci(m.nu_cold, 5),
+            sci(m.nu_hot, 5),
+            100.0 * (m.nu_cold / CMP_B_PUBLISHED[i] - 1.0),
+            CMP_B_PUBLISHED[i],
+            sci(m.w, 3),
+            sci(m.s_t, 3),
+            sci(m.s_u, 3),
+            m.iterations,
+            m.converged,
+        ));
+        // The published means sit in CMP_B_PUBLISHED under their own
+        // answer-key markers; the Ra = 1e4 entry's marker is Gate 59-A's.
+        c.check(
+            &format!("{tag}: Nu_cold within 2 % of de Vahl Davis (1983)'s mean Nu"),
+            (m.nu_cold / CMP_B_PUBLISHED[i] - 1.0).abs() as Scalar,
+            0.02 as Scalar,
+        );
+        c.check(
+            &format!("{tag}: the two walls carry the same heat, w (121.10)"),
+            m.w as Scalar,
+            tol_r as Scalar,
+        );
+        c.check(
+            &format!("{tag}: the field is centro-symmetric, s = max(s_T, s_U) (121.11, 121.12)"),
+            m.s() as Scalar,
+            tol_r as Scalar,
+        );
+    }
+
+    // The control: the density-ratio force at the same DeltaT. Under (121.2)
+    // its force has an even part in (T - T_ref), of relative size
+    // (T - T_ref)/T_ref, so its solution is not centro-symmetric - and this
+    // run says by how much, where the Boussinesq runs above sit at round-off.
+    let sol = run_cmp_b_document(gpu, &cmp_b_document(60, 1.0e4, false, None, 5000))?;
+    let m = cmp_b_reduce(&sol, 60)?;
+    c.note(&format!(
+        "Gate CMP-B control, Ra = 1e4, the 60x60 mesh, density ratio: Nu_cold {} Nu_hot {}; \
+         w {} s_T {} s_U {}; {} iterations, converged {}",
+        sci(m.nu_cold, 5),
+        sci(m.nu_hot, 5),
+        sci(m.w, 3),
+        sci(m.s_t, 3),
+        sci(m.s_u, 3),
+        m.iterations,
+        m.converged,
+    ));
+    c.require(
+        "Gate CMP-B control: the density-ratio force at the same DeltaT is NOT \
+         centro-symmetric (s >= 1e-3)",
+        m.s() >= 1.0e-3,
+    );
+    Ok(())
 }
 
 /// **SPEC-LIT §59 and §60's gates.**

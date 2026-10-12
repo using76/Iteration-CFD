@@ -38954,7 +38954,7 @@ so the pressure system is nonsingular in both builds, and (121.5) still holds fa
 at `1e-14` rather than `1e-12`. With a Dirichlet anchor the stopping residual passes straight into the jumps: at
 `1e-12` the f64 twin measured `9.8e-12` of `max|jump|`, falling in proportion to the tolerance.
 
-Gate CMP-B (de Vahl Davis with Boussinesq, CMP-04) adds its rows here when it lands.
+Gate CMP-B (de Vahl Davis with Boussinesq, CMP-04) is section 121.8.
 
 ### 121.6 Buoyancy production of k, ε and ω under Boussinesq (CMP-02)
 
@@ -39102,6 +39102,125 @@ about `0.61 q T`, under 2 K at `q = 0.01`.
 | `ofgpu-buoyant` knob `buoyancy boussinesq` in `every_wired_setting_changes_what_the_run_writes`, and `a_boussinesq_case_past_the_validity_limit_is_refused` | the setting changes what the run writes; the plume at `beta = 1/T_ref` (`delta_B ≈ 3`) is refused before its first iteration | D |
 | `ofgpu-datacentre` `the_buoyancy_form_reaches_the_room_run` | the cold-aisle room, 20 iterations, under each form: the rack inlet temperatures differ | D |
 | `ofgpu-lowmach` `a_boussinesq_case_is_refused_by_name` | refused naming `boussinesq`, `ofgpu-lowmach` and `densityRatio`; `-permissive` substitutes `densityRatio` | D |
+
+### 121.8 Gate CMP-B de Vahl Davis with Boussinesq (CMP-04)
+
+`No GPL-licensed source was consulted.` The gate is a section of `ofgpu-validate`
+(`rust/src/bin/validate.rs`, `check_boussinesq_cavity`; section 61 in run order when it
+landed, a number that moves as gates are added) and runs de Vahl Davis's differentially heated square
+cavity under the Boussinesq force (121.2) at `beta DeltaT = 0.03` - inside the
+validity the approximation is stated for - and asks three things at each Rayleigh
+number: the cold wall's mean Nusselt number sits within 2 % of the published one, the
+two walls carry the same heat, and the field is centro-symmetric. A control run with
+the §9 density-ratio force at the same `DeltaT` is measurably NOT centro-symmetric:
+the two forms agree on Nu to `O(beta DeltaT)` and differ in symmetry at that same
+order - the ordering the validity guard (121.8) bounds.
+
+**Configuration.** The unit square, `L = H = 1`, `d_z = 1/n`; fluid `rho = cp =
+kappa = 1`, `mu = 0.71` (`Pr = 0.71`); hot wall `304.5 K`, cold wall `295.5 K`, so
+`DeltaT = 9 K` about `T_ref = 300 K`; `beta = 1/300` /K, the ideal-gas value, so
+`beta DeltaT = 0.03`; initial `T = 300 K`; validity `delta_B = beta max|T - T_ref| =
+0.015` against the guard's `0.1`. The gravity magnitude follows from Ra's definition,
+
+```
+Ra = g beta DeltaT L^3 / (nu alpha),   with nu = 0.71 and alpha = 1
+```
+
+so `g = 0.71 Ra / 0.03`, printed into the case document at full f64 precision. The
+steady SIMPLE outer loop stops at residual `1e-9`; every other number of the document
+is Gate 59-A's, unchanged. Run 4's mesh is graded two-sided, expansion 4, on x and y -
+a wall mesh, and still centro-symmetric by construction.
+
+**Measures.** With `Q_wall` the heat flowing INTO the cavity through the wall, and
+`k = 1`, `DeltaT = 9`, `d_z = 1/n` on this case:
+
+```
+Nu_wall = |Q_wall| / (k DeltaT d_z)                                    (121.9)
+w   = |Nu_hot - Nu_cold| / Nu_cold                                     (121.10)
+s_T = max_c |(T_c - T_ref) + (T_c' - T_ref)| / DeltaT                  (121.11)
+s_U = max_c max(|u_c + u_c'|, |v_c + v_c'|) / max_c max(|u_c|, |v_c|)  (121.12)
+s   = max(s_T, s_U)
+```
+
+`c'` is the centro-symmetric partner of cell `c`, the cell whose centre is
+`(1 - x_c, 1 - y_c)`. The map is built from the cell centres alone - the distinct x
+and y coordinates are ranked, the partner of ranks `(i, j)` is `(n - 1 - i, n - 1 - j)`
+- and never from the cell index order. If the map is not a bijection of all `n^2`
+cells the run is refused, saying so. All four measures are formed in f64 on the host,
+under `single` too: the measures see the f32 field through f64 arithmetic.
+
+**Why the Boussinesq cavity is centro-symmetric.** Under (121.2) the map
+`(x, y, u, v, T - T_ref) -> (1 - x, 1 - y, -u, -v, -(T - T_ref))` takes every term of
+the steady equations to another term of the same equations - advection and the
+pressure gradient are odd under it, diffusion is even times odd and stays odd, and
+the body force is odd in `T - T_ref` - and it takes the boundary conditions to
+themselves, hot to cold at the mirrored wall with the same `DeltaT` about `T_ref`.
+The solution therefore comes in centro-symmetric pairs, and a symmetric
+discretisation on a symmetric mesh converges to a centro-symmetric field, which is
+what (121.11) and (121.12) measure at round-off. Section 9's force `g (T_ref/T - 1)`
+has an even part in `T - T_ref`, of relative size `(T - T_ref)/T_ref` - exactly the
+part the linearisation drops - so its solution is not centro-symmetric, and the
+control run measures how far from it. Gray & Giorgini (1976), in §121's sources,
+state the property bounds the linearisation lives inside.
+
+**Runs and rows.** The published mean Nusselt numbers are de Vahl Davis (1983),
+*Int. J. Numer. Meth. Fluids* 3 (1983) 249-264, DOI `10.1002/fld.1650030305`
+(paywalled), read from the open secondary Qi et al., *Nanoscale Research Letters* 8
+(2013) 56, Table 3, DOI `10.1186/1556-276X-8-56` - the same secondary Gate 59-A reads
+its Ra = 1e4 number from. Each row's class is docs/17 §5.1.4's; the R-class tolerance
+is `1e-6` in the f64 build and `1e-5` under `single`
+(`tol32 = max(tol64, min(tol64 * 2^29, 1e-5))`, rule D-F32-1). No row's tolerance,
+mesh, `DeltaT` or measure may move to let the row through.
+
+| run | Ra | mesh | grading | form | cap | rows (class, f64 / single tolerance) |
+|---|---|---|---|---|---|---|
+| 1 | 1e3 | 40x40 | none | Boussinesq | 2500 | Nu within 2 % of 1.118 (P, 0.02 both builds); `w <= TOL_R` (R, 1e-6 / 1e-5); `s <= TOL_R` (R, 1e-6 / 1e-5) |
+| 2 | 1e4 | 60x60 | none | Boussinesq | 3500 | the three rows of run 1 against 2.243 - `devahldavis1983`'s number, marked at Gate 59-A and not re-marked |
+| 3 | 1e5 | 80x80 | none | Boussinesq | 5000 | the three rows of run 1 against 4.519 |
+| 4 | 1e6 | 120x120 | two-sided, expansion 4 | Boussinesq | 8000 | the three rows of run 1 against 8.800; NOT run under `single` |
+| 5 | 1e4 | 60x60 | none | density ratio | 5000 | one require row: `s >= 1e-3` (P, both builds) - the density-ratio form at the same `DeltaT` is NOT centro-symmetric |
+
+Under `single`, run 4 is not run (docs/17 §5.3 rule 4, the 10-minute rule, the
+CMP-04 row): in f32 the outer loop does not reach the `1e-9` stopping residual, so
+the run would take all 8000 iterations. It reports one `skip` row saying so, by name.
+
+**Measured** - this tree, `ofgpu-validate -sections 61`, NVIDIA RTX 5070 Ti, f64
+build, every number the run printed:
+
+| run | Nu_cold | against published | iterations | w | s_T | s_U |
+|---|---|---|---|---|---|---|
+| 1 | 1.11865 | +0.06 % | 1683 | 1.9e-13 | 2.5e-13 | 2.4e-13 |
+| 2 | 2.25053 | +0.34 % | 2406 | 8.8e-12 | 3.6e-12 | 3.6e-12 |
+| 3 | 4.54582 | +0.59 % | 3452 | 6.3e-12 | 3.1e-12 | 3.6e-12 |
+| 4 | 8.83870 | +0.44 % | 6059 | 1.2e-14 | 2.0e-13 | 1.9e-13 |
+| 5 | 2.25064 | - | 3509 | 6.6e-7 | 2.98e-3 | 8.7e-3 |
+
+All thirteen f64 rows hold - four Nu rows, four `w` rows, four `s` rows and the
+control's require row - and the control's `s` sits five orders above the Boussinesq
+runs', which is the gate's second claim measured, not assumed.
+
+**Measured under `single`** - the same source built with `--features single`, same section:
+
+| run | Nu_cold | Nu_hot | against published | iterations | w | s_T | s_U |
+|---|---|---|---|---|---|---|---|
+| 1 | 1.12213 | 1.11645 | +0.37 % | 2500, not converged | 5.07e-3 | 1.64e-3 | 1.48e-3 |
+| 2 | 2.24888 | 2.25151 | +0.26 % | 3500, not converged | 1.17e-3 | 7.53e-4 | 8.61e-4 |
+| 3 | 4.54798 | 4.54167 | +0.64 % | 5000, not converged | 1.39e-3 | 7.46e-4 | 1.06e-3 |
+| 4 | - | - | - | `skip` row, not run | - | - | - |
+| 5 | 2.24889 | 2.25138 | - | 5000, not converged | 1.11e-3 | 3.68e-3 | 7.94e-3 |
+
+The three Nu rows sit inside the 2 % band. The six R-class rows - `w` and `s` of runs
+1, 2 and 3 - FAIL, at about `1e-3` against their `1e-5` tolerance. This is a recorded
+f32 finding for the precision stream (§118), and no tolerance is moved for it. What was
+measured: in f32 the steady SIMPLE outer loop does not reach the `1e-9` stopping
+residual (every run takes its full cap and reports `converged false`; a probe of run 1
+measured the same `w` and `s` at 1000 and at 3000 iterations, so more iterations do not
+help), and the field it stays on carries a wall-to-wall heat imbalance and a
+centro-symmetry defect of order `1e-3`. The cause was not isolated here. The control's
+require row holds under `single`, but there it does not separate the two forms: the
+Boussinesq runs' own `s` is of the same order as the control's. The claim that the
+density-ratio form is the asymmetric one therefore rests on the f64 rows. Run 4 is
+skipped under `single` by the 10-minute rule, as the table above states.
 
 ## 122. The compressible gas — the perfect-gas state, the gauge pressure about `p_op`, Sutherland, and the f32 design
 
