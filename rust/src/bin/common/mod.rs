@@ -88,7 +88,11 @@ pub fn load_case(case_path: &Path) -> Result<(HostMesh, CaseControls, Option<Low
     if is_json_case(case_path) {
         let json = read_case_jsonc(case_path)?;
         let lowered = json.lower()?;
-        let hm = ofgpu::blockgen::build_mesh(&lowered.block)?;
+        // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
+        // every case without `mesh.wedge` (bit for bit what the line below
+        // always built) and the 119.0 wedge mesh - with the case's own
+        // boundary names - for a wedge one.
+        let hm = lowered.build_host_mesh()?;
         let cc = lowered.to_case_controls();
         Ok((hm, cc, Some(lowered)))
     } else {

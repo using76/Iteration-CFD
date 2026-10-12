@@ -4059,6 +4059,9 @@ conditions, and the difference is worth enforcing rather than documenting:
 - the mesh's own topology wins, as §4 already specifies for the field
   reader — this only makes the case file able to SAY it.
 
+`wedge` is a third constraint kind; it needs a mesh that has wedge sides, and
+§119.3 holds its rules.
+
 ### 34.2 More than one cyclic pair
 
 `BlockSpec` carries a single cyclic axis slot, so §31.1's pairing can be
@@ -37944,7 +37947,8 @@ An axisymmetric case is solved on a wedge one cell thick in the
 circumferential direction. This section holds the mesh (119.0, BC-02) and
 the patch kind with its derived pair, axis and angle checks (119.1, BC-03),
 and the boundary condition that couples the two wedge faces by a rotation
-(119.2, BC-04). Before BC-04 a `wedge` patch was its own kind but every
+(119.2, BC-04), and the validation gate with the case-JSON kind
+(119.3, BC-05). Before BC-04 a `wedge` patch was its own kind but every
 solver path treated it as `symmetry`, the stand-in §120's catalogue row
 names; 119.2 replaces that on the field and momentum paths.
 
@@ -38419,6 +38423,124 @@ Taylor, *Phil. Trans. R. Soc. Lond. A* 223 (1923) 289-343, DOI
 `10.1098/rsta.1923.0008`. The patch type name `wedge` is taken by name only
 from the public user guides §120 links; no description, formula or source
 code was taken from them.
+
+No GPL-licensed source was consulted.
+
+---
+
+### 119.3 The wedge in `ofgpu-validate` and in the case JSON (BC-05)
+
+**Gate 119-A** runs two closed forms on the 119.0 mesh at a full angle of
+5 degrees, with the 119.2 condition on `back` and `front`. Both are compared
+in f64 at the cell centroids the mesh reports, `r_i = C_i . e_x` on the
+mid-plane.
+
+*Hagen-Poiseuille through the axis prisms.* A pipe of radius `R = D/2` with
+a no-slip wall, the axis cells the 5-face prisms of 119.0. The flow is
+driven by a kinematic pressure drop `Dp` over the length `L`, so the forcing
+`G = Dp/L` is an input and nothing is tuned. The fully developed solution is
+
+```
+u_z(r) = G (R^2 - r^2)/(4 nu)                                                      (119.3a)
+U_bar  = G R^2/(8 nu),        u_max = u_z(0) = 2 U_bar                             (119.3b)
+f = 2 D G/U_bar^2 (Darcy),    Re = U_bar D/nu,    f Re = 2 D^2 G/(nu U_bar) = 64   (119.3c)
+```
+
+The gate takes `D = 1`, `nu = 0.01`, `L = 1` and `G = 0.32`, for which
+(119.3b) gives `U_bar = 1` and `Re = 100`. `U_bar` is the volume-weighted
+mean of the cell values of `u_z`, `sum(u_i V_i)/sum(V_i)`. No cell centroid
+lies on the axis (the centroid of the axis prism is at `2 dr/3`), so `u_max`
+is the even parabola through the two cells nearest the axis in one axial
+station, evaluated at `r = 0`:
+
+```
+u_max = u_0 + (u_0 - u_1) r_0^2/(r_1^2 - r_0^2)                                    (119.3d)
+```
+
+which returns `u_z(0)` exactly for (119.3a). `f Re` is formed from the
+measured `U_bar` and the input `G` by (119.3c).
+
+*Radial conduction in an annulus.* Between `R_1` and `R_2`, with `T_1` on
+the inner wall and `T_2` on the outer one and no source,
+
+```
+T(r) = T_1 + (T_2 - T_1) ln(r/R_1)/ln(R_2/R_1)                                     (119.3e)
+```
+
+The gate takes `R_1 = 1`, `R_2 = 2`, `T_1 = 0`, `T_2 = 1`.
+
+| row | quantity | bound | class |
+|---|---|---|---|
+| 1 | `abs(u_max/U_bar - 2)/2`, 32 radial cells | 5e-3 | P |
+| 2 | `abs(f Re - 64)/64`, same run | 1e-2 | P |
+| 3 | `max_i abs(T_i - T(r_i))/(T_2 - T_1)`, 32 radial cells | 1e-3 | P |
+| 4 | the pipe mesh carries the derived wedge of 119.1 and one 5-face prism per axial station | yes | D |
+
+Every row has the same bound in both builds (docs/17 §5.1 class P and D). A
+one-dimensional host model of the radial discretisation (centroid-to-centroid
+gradients, the wall gradient over the distance from the last centroid to the
+wall) predicts 9.8e-4, 4.9e-4 and 1.7e-4 for rows 1 to 3; the bounds are the
+plan row's and are not derived from those numbers.
+
+**Measured** (`ofgpu-validate -sections 62`). In f64 the pipe reaches the
+1e-12 fixed point of `U` in 3682 SIMPLE iterations at the default relaxation
+(0.7 and 0.3), with `U_bar = 1.000488`, `u_max = 1.999014`, `Re = 100.05`
+and `f Re = 63.969`: row 1 is 9.80e-4, row 2 is 4.88e-4 and row 3 is
+1.73e-4, the host model's three numbers. Under `single` the loop does not
+reach the 1e-12 fixed point (119.2 and §120.3 record the same of every
+steady f32 SIMPLE run) and stops at its cap of 7400 iterations, twice the
+f64 count; the rows are 9.80e-4, 4.87e-4 and 1.73e-4 against the same
+bounds.
+
+**The `wedge` patch kind in the case JSON.** §34.1 added `empty` and
+`symmetry` as constraint kinds; `wedge` is the third. A JSON case describes
+a wedge with the block it already has: `x` is the radius, `z` is the axis
+through `x = 0, y = 0`, and `y` is the circumferential direction, one cell
+across. The angle is stated once, on the mesh:
+
+```
+"mesh": { "kind": "cartesian",
+          "bounds": { "min": [0, 0, 0], "max": [0.5, 0, 1] }, "cells": [32, 1, 4],
+          "wedge": { "angle": 5 },
+          "boundaries": { "xmin": "axis", "xmax": "wall", "ymin": "back",
+                          "ymax": "front", "zmin": "inlet", "zmax": "outlet" } },
+"patches": [ { "match": "(back|front)", "kind": "wedge" }, ... ]
+```
+
+`mesh.wedge.angle` is the FULL angle in degrees. The reader lowers such a
+case onto 119.0's `WedgeSpec` (`r` from the `x` axis with its grading, `z`
+from the `z` axis, the four remaining patch classes in the order `xmin`,
+`xmax`, `zmin`, `zmax`) and builds 119.0's mesh, with the patches carrying
+the case's own boundary names. With `bounds.min[0] = 0` the mesh is a pipe,
+119.0 writes no patch on the axis, and the `xmin` name stands for no patch.
+
+It is a constraint, and the reader enforces it (each is a §13.4 error that
+names the JSON path and this section):
+
+- a `wedge` rule carrying a per-field condition is refused, naming the
+  field, exactly as for `empty` and `symmetry`;
+- a boundary that resolves to a `wedge` rule on a mesh without `mesh.wedge`
+  is refused: a box has no wedge sides;
+- with `mesh.wedge` present, `ymin` and `ymax` must both resolve to a
+  `wedge` rule, and no other boundary or region may;
+- `cells[1]` must be 1; `bounds.min[1]` and `bounds.max[1]` must both be 0,
+  because the circumferential extent is the angle's and a second statement
+  of it could only disagree; `bounds.min[0]` must be at least 0; the angle
+  must be finite and strictly between 0 and 180 degrees;
+- `mesh.regions`, a `mesh.cyclic` pair on `x` or `y`, and a `motion` block
+  are refused on a wedge mesh. A cyclic pair on `z` is 119.0's own
+  `zmin`/`zmax` pair and is accepted.
+
+A case without `mesh.wedge` lowers exactly as before.
+
+Sources: ORIGINAL arrangement of textbook closed forms. Hagen-Poiseuille
+flow and the Darcy friction factor `f = 64/Re`:
+<https://en.wikipedia.org/wiki/Hagen%E2%80%93Poiseuille_equation> and
+<https://en.wikipedia.org/wiki/Darcy_friction_factor_formulae>; the same
+`f Re = 64` is the circular-duct row of Shah & London, *Laminar Flow Forced
+Convection in Ducts*, Academic Press (1978), which §32 already cites.
+Steady radial conduction through a cylindrical shell:
+<https://en.wikipedia.org/wiki/Thermal_conduction#Cylindrical_shells>.
 
 No GPL-licensed source was consulted.
 

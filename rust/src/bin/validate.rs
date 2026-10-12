@@ -3610,6 +3610,13 @@ fn run(c: &mut Checks) -> Result<()> {
     check_boussinesq_cavity(c, &gpu)?;
     c.leave_gate();
     }
+    // SPEC-LIT 119.3 - Gate 119-A: the wedge, Hagen-Poiseuille through the
+    // axis prisms and radial conduction in an annulus.
+    if c.section("Gate 119-A: the wedge - Hagen-Poiseuille through the axis prisms and radial conduction in an annulus (SPEC-LIT 119.3)") {
+    c.enter_gate("SPEC-LIT 119.3 Gate 119-A the wedge");
+    check_wedge_gate(c, &gpu)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }
@@ -6545,6 +6552,352 @@ fn check_boussinesq_cavity(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         "Gate CMP-B control: the density-ratio force at the same DeltaT is NOT \
          centro-symmetric (s >= 1e-3)",
         m.s() >= 1.0e-3,
+    );
+    Ok(())
+}
+
+// ==========================================================================
+//  Gate 119-A (SPEC-LIT 119.3) - the wedge: Hagen-Poiseuille through the
+//  axis prisms, and radial conduction in an annulus
+// ==========================================================================
+
+/// An f64 answer-key value narrowed to the build's `Scalar`, once, at the
+/// point a check takes it: rows 1-3 are class P and row 4 class D of
+/// docs/17 5.1, so every tolerance below is the same in both builds and no
+/// f32-specific tolerance exists anywhere in this gate.
+#[allow(clippy::useless_conversion)]
+fn wedge_s64(x: f64) -> Scalar {
+    x as Scalar
+}
+
+/// The build's `Scalar` widened to the f64 the answer keys are computed in.
+#[allow(clippy::useless_conversion)]
+fn wedge_w64(x: Scalar) -> f64 {
+    x as f64
+}
+
+/// The pipe of 119.3's gate: r 0..0.5 in 32 cells, z 0..1 in 4, 5 deg,
+/// outer wall, patch end planes; the axis cells are the 5-face prisms of
+/// 119.0 and no inner patch exists.
+fn wedge_pipe_mesh() -> Result<HostMesh> {
+    use ofgpu::blockgen::{build_wedge_mesh, WedgeSpec};
+    build_wedge_mesh(&WedgeSpec {
+        r: GradedAxis { lo: wedge_s64(0.0), hi: wedge_s64(0.5), n: 32, ..GradedAxis::default() },
+        z: GradedAxis { lo: wedge_s64(0.0), hi: wedge_s64(1.0), n: 4, ..GradedAxis::default() },
+        theta_deg: 5.0,
+        patch_type: [
+            "wall".to_string(),
+            "wall".to_string(),
+            "patch".to_string(),
+            "patch".to_string(),
+        ],
+    })
+}
+
+/// The annulus of 119.3's gate: r 1..2 in 32 cells, z 0..0.1 one cell, 5
+/// deg, inner/outer walls, symmetry end planes.
+fn wedge_annulus_mesh() -> Result<HostMesh> {
+    use ofgpu::blockgen::{build_wedge_mesh, WedgeSpec};
+    build_wedge_mesh(&WedgeSpec {
+        r: GradedAxis { lo: wedge_s64(1.0), hi: wedge_s64(2.0), n: 32, ..GradedAxis::default() },
+        z: GradedAxis { lo: wedge_s64(0.0), hi: wedge_s64(0.1), n: 1, ..GradedAxis::default() },
+        theta_deg: 5.0,
+        patch_type: [
+            "wall".to_string(),
+            "wall".to_string(),
+            "symmetry".to_string(),
+            "symmetry".to_string(),
+        ],
+    })
+}
+
+/// **SPEC-LIT 119.3's Gate 119-A.** Two closed forms on the 119.0 mesh at
+/// the full angle of 5 degrees, with the 119.2 condition on `back` and
+/// `front`, compared in f64 at the cell centroids the mesh reports. The
+/// flow is pressure-driven - `G = Dp/L = 0.32` is an INPUT, nothing is
+/// tuned - and the conduction run is a steady Laplace problem through the
+/// library's own scalar-transport path with zero flux.
+fn check_wedge_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::field_setup::{setup_scalar_field, setup_vector_field_with, BcInputs};
+    use ofgpu::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
+    use ofgpu::momentum::{BuoyancyCoeffs, MomentumControls};
+    use ofgpu::pressure::SystemProbe;
+    use ofgpu::simple::{Simple, SimpleControls};
+    use ofgpu::solver::SolverControls;
+    use ofgpu::turbulence::FlowState;
+    use std::collections::BTreeMap;
+
+    // ---- the mesh rows (class D) -------------------------------------
+    let hm = wedge_pipe_mesh()?;
+    c.require(
+        "Gate 119-A: the pipe mesh carries the derived wedge of 119.1",
+        hm.wedge.is_some(),
+    );
+    let mut faces_per_cell = vec![0u32; hm.n_cells];
+    for f in 0..hm.n_internal_faces {
+        faces_per_cell[hm.owner[f] as usize] += 1;
+        faces_per_cell[hm.neighbour[f] as usize] += 1;
+    }
+    for bf in 0..hm.n_boundary_faces {
+        faces_per_cell[hm.b_face_cells[bf] as usize] += 1;
+    }
+    let n_prisms = faces_per_cell.iter().filter(|&&k| k == 5).count();
+    c.require(
+        "Gate 119-A: exactly 4 cells of the pipe have 5 faces (one axis prism per axial station)",
+        n_prisms == 4,
+    );
+
+    // ---- the Hagen-Poiseuille run -------------------------------------
+    let gm = GpuMesh::upload(gpu, &hm)?;
+    let nu = wedge_s64(0.01);
+    let tight = || SolverControls {
+        tolerance: 1e-14,
+        rel_tol: 0.0,
+        max_iter: 500,
+        check_interval: 1,
+        ..SolverControls::default()
+    };
+    // Default SIMPLE relaxation (0.7/0.3; simplec stays off - SPEC-LIT
+    // 119.2 records what it does to a wedge flow). Uncorrected snGrad: the
+    // mesh is orthogonal, so that IS the centroid-to-centroid gradient the
+    // 1-D host model assumes.
+    let ctrl = SimpleControls {
+        momentum: MomentumControls {
+            nu,
+            u_solver: tight(),
+            sn_grad: SnGradScheme::Uncorrected,
+            ..MomentumControls::default()
+        },
+        p_solver: tight(),
+        ..SimpleControls::default()
+    };
+    let mut sim = Simple::new(
+        gpu,
+        &hm,
+        &gm,
+        ctrl,
+        BuoyancyCoeffs { g: Vec3::ZERO, ..BuoyancyCoeffs::default() },
+    )?;
+    let ps = |ty: &str| PatchFieldSpec { type_name: ty.to_string(), ..PatchFieldSpec::default() };
+    let mut p_in = ps("fixedValue");
+    p_in.value = vec![wedge_s64(0.32)];
+    let mut p_out = ps("fixedValue");
+    p_out.value = vec![wedge_s64(0.0)];
+    let boundary: BTreeMap<String, PatchFieldSpec> = [
+        ("outer", ps("noSlip")),
+        ("zmin", ps("zeroGradient")),
+        ("zmax", ps("zeroGradient")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    setup_vector_field_with(
+        gpu,
+        sim.u_mut(),
+        &RawVectorField {
+            name: "U".to_string(),
+            internal: vec![Vec3::ZERO],
+            boundary,
+            ..RawVectorField::default()
+        },
+        &hm,
+        BcInputs::default(),
+    )?;
+    let p_boundary: BTreeMap<String, PatchFieldSpec> = [
+        ("outer", ps("zeroGradient")),
+        ("zmin", p_in),
+        ("zmax", p_out),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    setup_scalar_field(
+        gpu,
+        sim.p_mut(),
+        &RawScalarField {
+            name: "p".to_string(),
+            internal: vec![wedge_s64(0.0)],
+            boundary: p_boundary,
+            ..RawScalarField::default()
+        },
+        &hm,
+    )?;
+    sim.initialise(gpu)?;
+
+    // Laminar: zero eddy viscosity, `calculated` boundary values; a uniform
+    // T nothing reads while the buoyancy vector is zero.
+    let mut nut = GpuScalarField::zeros(gpu, &gm, "nut")?;
+    gpu.write(
+        &mut nut.bc_kind,
+        &vec![BcKind::Calculated as Label; hm.n_boundary_faces],
+    )?;
+    let mut t = GpuScalarField::zeros(gpu, &gm, "T")?;
+    gpu.write(
+        &mut t.bc_kind,
+        &vec![BcKind::ZeroGradient as Label; hm.n_boundary_faces],
+    )?;
+    let mut backend = ofgpu::pressure::PbicgstabBackend::new(ctrl.p_solver);
+    backend.setup(gpu, &hm, &gm, &SystemProbe::default())?;
+
+    // Fixed point: stop when the largest change of any U component between
+    // two iterations is below 1e-12. The f64 run reached it at 3682
+    // iterations (measured 2026-10-13, on this tree); the cap is twice
+    // that. A non-finite U is an Err, never a row that passes.
+    const CAP: usize = 7400;
+    let started = std::time::Instant::now();
+    let mut prev = gpu.download(&sim.u().f)?;
+    let mut iterations = 0usize;
+    let mut converged = false;
+    for it in 0..CAP {
+        sim.correct(gpu, &mut backend, &nut, &t)?;
+        let now = gpu.download(&sim.u().f)?;
+        let bad = now.iter().enumerate().find(|(_, v)| {
+            !wedge_w64(v.x).is_finite()
+                || !wedge_w64(v.y).is_finite()
+                || !wedge_w64(v.z).is_finite()
+        });
+        if let Some((cell, v)) = bad {
+            return Err(Error::Diverged {
+                iteration: it,
+                what: format!("Gate 119-A pipe: U cell {cell} went non-finite: {v:?}"),
+            });
+        }
+        let change = prev
+            .iter()
+            .zip(&now)
+            .fold(0.0f64, |m, (a, b)| {
+                m.max((wedge_w64(a.x) - wedge_w64(b.x)).abs())
+                    .max((wedge_w64(a.y) - wedge_w64(b.y)).abs())
+                    .max((wedge_w64(a.z) - wedge_w64(b.z)).abs())
+            });
+        prev = now;
+        iterations = it + 1;
+        if change < 1e-12 {
+            converged = true;
+            break;
+        }
+    }
+
+    // ---- rows 1 and 2, everything in f64 ------------------------------
+    let g = hm.geom64();
+    let vols: Vec<f64> = g.v.to_vec();
+    let total_v: f64 = vols.iter().sum();
+    let u_bar = prev
+        .iter()
+        .enumerate()
+        .map(|(i, v)| wedge_w64(v.z) * vols[i])
+        .sum::<f64>()
+        / total_v;
+    // (119.3d): the even parabola through the two cells nearest the axis
+    // of the first axial station (cells 0 and 1 of c(i,k) = i + nr*k),
+    // evaluated at r = 0, from the f64 centroid radii.
+    let (r0, r1) = (g.c[0].x, g.c[1].x);
+    let (u0, u1) = (wedge_w64(prev[0].z), wedge_w64(prev[1].z));
+    let u_max = u0 + (u0 - u1) * r0 * r0 / (r1 * r1 - r0 * r0);
+    let row1 = ((u_max / u_bar - 2.0) / 2.0).abs();
+    // (119.3c) from the measured U_bar and the INPUT G = 0.32.
+    let big_g = 0.32f64;
+    let d = 1.0f64;
+    let f_re = 2.0 * d * d * big_g / (0.01 * u_bar);
+    let row2 = ((f_re - 64.0) / 64.0).abs();
+    let re = u_bar * d / 0.01;
+    c.note(&format!(
+        "Gate 119-A pipe: U_bar {:.6} u_max {:.6} Re {:.1} f Re {:.3}; {iterations} \
+         iterations to the 1e-12 fixed point (converged {converged}), {:.1?} wall",
+        u_bar,
+        u_max,
+        re,
+        f_re,
+        started.elapsed()
+    ));
+    c.check(
+        "Gate 119-A: |u_max/U_bar - 2|/2, Hagen-Poiseuille through the axis prisms (119.3a-d)",
+        wedge_s64(row1),
+        wedge_s64(5e-3),
+    );
+    c.check(
+        "Gate 119-A: |f Re - 64|/64, the Darcy friction product (119.3c)",
+        wedge_s64(row2),
+        wedge_s64(1e-2),
+    );
+
+    // ---- the conduction run -------------------------------------------
+    let han = wedge_annulus_mesh()?;
+    let gan = GpuMesh::upload(gpu, &han)?;
+    let mut t_ctrl = ofgpu::turbulence::TurbulenceControls::default();
+    t_ctrl.k_relax = 1.0;
+    t_ctrl.k_solver = tight();
+    t_ctrl.sn_grad = SnGradScheme::Uncorrected;
+    let mut heat = ofgpu::scalar_transport::ScalarTransport::new(
+        gpu,
+        &han,
+        &gan,
+        "T",
+        ofgpu::scalar_transport::ScalarTransportCoeffs { pr: 1.0, prt: 1.0 },
+        t_ctrl,
+    )?;
+    let t_boundary: BTreeMap<String, PatchFieldSpec> =
+        [("inner", ps("fixedValue")), ("outer", ps("fixedValue"))]
+            .into_iter()
+            .map(|(k, v)| {
+                let mut s = v;
+                if k == "inner" {
+                    s.value = vec![wedge_s64(0.0)];
+                } else {
+                    s.value = vec![wedge_s64(1.0)];
+                }
+                (k.to_string(), s)
+            })
+            .collect();
+    setup_scalar_field(
+        gpu,
+        heat.field_mut(),
+        &RawScalarField {
+            name: "T".to_string(),
+            internal: vec![wedge_s64(0.0)],
+            boundary: t_boundary,
+            ..RawScalarField::default()
+        },
+        &han,
+    )?;
+    heat.initialise(gpu)?;
+
+    // No flow, no source: the steady Laplace problem. Iterate until the
+    // field stops changing (the path relaxes by k_relax, 1.0 here, so the
+    // single implicit solve is the answer and the loop confirms it).
+    let u_zero = GpuVectorField::zeros(gpu, &gan, "U")?;
+    let phi_zero = GpuSurfaceScalarField::zeros(gpu, &gan, "phi")?;
+    let nut_zero = GpuScalarField::zeros(gpu, &gan, "nut")?;
+    let flow = FlowState::new(&u_zero, &phi_zero, wedge_s64(1.0));
+    let mut t_prev = gpu.download(&heat.field().f)?;
+    for _ in 0..10 {
+        heat.correct(gpu, &flow, &nut_zero)?;
+        let now = gpu.download(&heat.field().f)?;
+        let change = t_prev
+            .iter()
+            .zip(&now)
+            .fold(0.0f64, |m, (a, b)| m.max((wedge_w64(*a) - wedge_w64(*b)).abs()));
+        t_prev = now;
+        if change < 1e-14 {
+            break;
+        }
+    }
+    // row 3: max |T_i - ln(r_i)/ln 2| over the f64 centroid radii.
+    let ga = han.geom64();
+    let ln2 = 2.0f64.ln();
+    let row3 = (0..han.n_cells)
+        .map(|i| {
+            let r = ga.c[i].x;
+            (wedge_w64(t_prev[i]) - r.ln() / ln2).abs()
+        })
+        .fold(0.0f64, f64::max);
+    c.note(&format!(
+        "Gate 119-A annulus: max |T - ln(r)/ln 2| = {row3:.3e} on 32 radial cells"
+    ));
+    c.check(
+        "Gate 119-A: max |T - ln(r)/ln 2|, radial conduction in the annulus (119.3e)",
+        wedge_s64(row3),
+        wedge_s64(1e-3),
     );
     Ok(())
 }
