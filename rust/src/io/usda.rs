@@ -23,21 +23,19 @@
 //! approach section 4.5 recommends explicitly ("Rust `format!`으로
 //! 충분합니다").
 //!
-//! **Known approximation** - `HostMesh` (`src/mesh.rs`) keeps only the
-//! *aggregate* geometry of a boundary face (its centroid `b_cf`, area
-//! vector `b_sf`, magnitude `b_mag_sf`): the original point loop is
-//! consumed by `compute_geometry` and not retained. [`boundary_surface`]
-//! therefore cannot fan-triangulate the *true* face polygon; instead it
-//! reconstructs, per boundary face, a planar quadrilateral centred at the
-//! face centroid, orthogonal to the face normal, with area equal to
-//! `b_mag_sf`, and fans that quad into two triangles. This keeps the
-//! documented per-patch `UsdGeomSubset` partition invariant exactly (every
-//! generated triangle face belongs to the same patch as the boundary face
-//! it came from) and gives a correct bounding box and a plausible preview
-//! surface; it does not reproduce the exact patch outline. Should
-//! `HostMesh` ever retain the boundary face's point loop, this function is
-//! the only place that needs to change: fan the real loop from vertex 0
-//! instead of a synthesised quad.
+//! **Known approximation** - the synthesised square is now only
+//! [`boundary_surface`]'s fallback, for a caller that holds no raw mesh
+//! (`io/writer.rs`): per boundary face it reconstructs a planar
+//! quadrilateral centred at the face centroid, orthogonal to the face
+//! normal, with area equal to `b_mag_sf`, fanned into two triangles - a
+//! correct bounding box and a plausible preview surface, but not the exact
+//! patch outline. When the raw mesh IS available, [`boundary_surface_loops`]
+//! fans each boundary face's true point loop from its first vertex instead
+//! (SPEC-LIT section 117.12, docs/17 VIO-07): the polyMesh order keeps each
+//! face's right-handed normal out of the fluid, a planar convex face's fan
+//! area equals `|b_sf|`, and a non-convex face may fold under a fan -
+//! accepted, the surface is for display and is not repaired. The per-patch
+//! `UsdGeomSubset` partition stays exact in both paths.
 //!
 //! No GPL-licensed source was consulted.
 
@@ -126,9 +124,11 @@ pub struct SceneSpec {
 //  Boundary surface construction
 // ==========================================================================
 
-/// Build the renderable boundary surface for a mesh: one quad per boundary
-/// face (see the module doc's "Known approximation"), fanned into two
-/// triangles, grouped into one [`PatchSubset`] per patch.
+/// Build the renderable boundary surface from a [`HostMesh`] alone - the
+/// fallback for a caller that holds no raw mesh: one synthesised quad per
+/// boundary face (see the module doc's "Known approximation"), fanned into
+/// two triangles, grouped into one [`PatchSubset`] per patch. Prefer
+/// [`boundary_surface_loops`] when the raw mesh is at hand.
 pub fn boundary_surface(m: &HostMesh) -> SurfaceOut {
     let n_bf = m.n_boundary_faces.min(m.b_cf.len()).min(m.b_sf.len());
     let mut points = Vec::with_capacity(n_bf * 4);
@@ -202,6 +202,145 @@ pub fn boundary_surface(m: &HostMesh) -> SurfaceOut {
         .collect();
 
     SurfaceOut { points, face_vertex_counts, face_vertex_indices, extent, patches }
+}
+
+/// SPEC-LIT section 117.12 (docs/17 VIO-07): the boundary surface from the
+/// TRUE face polygons. Each boundary face's point loop `p_0 ... p_{m-1}` is
+/// fanned from its first vertex into `(p_0, p_k, p_{k+1})` for
+/// `k = 1 ... m-2`; the polyMesh order makes each face's right-handed normal
+/// point out of the fluid and the fan keeps that order, so a planar convex
+/// face's fan area equals `|b_sf|`. A non-convex face can fold under a fan;
+/// the surface is a display surface, so that is accepted and not repaired.
+/// The points are compacted to the ones the boundary faces reference, in
+/// ascending raw point index. A malformed raw mesh is refused by name, not
+/// assembled into a wrong surface; the `UsdGeomSubset` partition stays
+/// exact (one [`PatchSubset`] per patch, every triangle in exactly one).
+pub fn boundary_surface_loops(raw: &crate::io::polymesh::PolyMeshRaw) -> Result<SurfaceOut> {
+    let err =
+        |msg: String| crate::error::Error::Mesh(format!("boundary_surface_loops: {msg}"));
+
+    let n_if = raw.neighbour.len();
+    if n_if > raw.faces.len() {
+        return Err(err(format!(
+            "neighbour has {} entries, more than the {} faces",
+            n_if,
+            raw.faces.len()
+        )));
+    }
+    let n_bf = raw.faces.len() - n_if;
+
+    // The patches must tile the boundary faces: every boundary face in
+    // exactly one patch, no patch range past the last boundary face.
+    let mut patch_of = vec![usize::MAX; n_bf];
+    for (pi, p) in raw.patches.iter().enumerate() {
+        let end = p.start.checked_add(p.size).unwrap_or(usize::MAX);
+        if end > n_bf {
+            return Err(err(format!(
+                "the patches do not tile the boundary: patch '{}' covers boundary faces {}..{}, past the last boundary face {}",
+                p.name,
+                p.start,
+                end,
+                n_bf.saturating_sub(1)
+            )));
+        }
+        for bf in p.start..end {
+            if patch_of[bf] != usize::MAX {
+                return Err(err(format!(
+                    "the patches do not tile the boundary: boundary face {} is in both patch '{}' and patch '{}'",
+                    bf,
+                    raw.patches[patch_of[bf]].name,
+                    p.name
+                )));
+            }
+            patch_of[bf] = pi;
+        }
+    }
+    for bf in 0..n_bf {
+        if patch_of[bf] == usize::MAX {
+            return Err(err(format!(
+                "the patches do not tile the boundary: boundary face {} is in no patch",
+                bf
+            )));
+        }
+    }
+
+    // Pass 1: every boundary face needs at least 3 points, every point
+    // label in range - and mark which raw points the boundary references.
+    let mut used = vec![false; raw.points.len()];
+    for bf in 0..n_bf {
+        let face = &raw.faces[n_if + bf];
+        if face.len() < 3 {
+            return Err(err(format!(
+                "boundary face {} has fewer than 3 points ({})",
+                bf,
+                face.len()
+            )));
+        }
+        for &label in face {
+            if label < 0 || label as usize >= raw.points.len() {
+                return Err(err(format!(
+                    "boundary face {} references point {}, but the mesh has {} points",
+                    bf,
+                    label,
+                    raw.points.len()
+                )));
+            }
+            used[label as usize] = true;
+        }
+    }
+
+    // The compacted points: exactly the referenced raw points, ascending
+    // raw index, each converted to `Vec3` once (SPEC-LIT §118.2).
+    let mut new_of_old = vec![u32::MAX; raw.points.len()];
+    let mut points: Vec<Vec3> = Vec::new();
+    for (i, &u) in used.iter().enumerate() {
+        if u {
+            new_of_old[i] = points.len() as u32;
+            points.push(crate::types::to_vec3(raw.points[i]));
+        }
+    }
+
+    // Pass 2: fan each face from its first vertex, in the face's own point
+    // order - the triangles (p_0, p_k, p_{k+1}) for k = 1 ... m-2.
+    let mut face_vertex_counts: Vec<u32> = Vec::new();
+    let mut face_vertex_indices: Vec<u32> = Vec::new();
+    let mut patch_faces: Vec<Vec<u32>> = vec![Vec::new(); raw.patches.len()];
+    for bf in 0..n_bf {
+        let face = &raw.faces[n_if + bf];
+        let base_tri = face_vertex_counts.len() as u32;
+        let first = new_of_old[face[0] as usize];
+        for k in 1..face.len() - 1 {
+            face_vertex_counts.push(3);
+            face_vertex_indices.extend_from_slice(&[
+                first,
+                new_of_old[face[k] as usize],
+                new_of_old[face[k + 1] as usize],
+            ]);
+        }
+        let n_new = (face.len() - 2) as u32;
+        for t in 0..n_new {
+            patch_faces[patch_of[bf]].push(base_tri + t);
+        }
+    }
+
+    let extent = bbox(&points);
+    let patches = raw
+        .patches
+        .iter()
+        .enumerate()
+        .map(|(i, p)| PatchSubset {
+            name: p.name.clone(),
+            face_indices: patch_faces[i].clone(),
+        })
+        .collect();
+
+    Ok(SurfaceOut {
+        points,
+        face_vertex_counts,
+        face_vertex_indices,
+        extent,
+        patches,
+    })
 }
 
 fn bbox(points: &[Vec3]) -> (Vec3, Vec3) {

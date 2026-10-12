@@ -37031,8 +37031,8 @@ fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream
 
 ### 117.12 The boundary surface, and what is refused
 
-**The true face polygons (VIO-07).** When the raw mesh is available, `usda::boundary_surface`
-fans each boundary face's point loop `p_0 ... p_{m-1}` from its first vertex, into the
+**The true face polygons (VIO-07).** When the raw mesh is available,
+`usda::boundary_surface_loops` fans each boundary face's point loop `p_0 ... p_{m-1}` from its first vertex, into the
 triangles `(p_0, p_k, p_{k+1})` for `k = 1 ... m-2`. This replaces the synthesised quadrilateral
 of `usda.rs`'s "Known approximation". The polyMesh order makes each face's right-handed normal
 point out of the fluid, and the fan keeps that order. For a planar convex face the fan's area
@@ -37040,6 +37040,28 @@ equals `|b_sf|`. Planar faces are VIO-07's gate (relative 1e-10). A non-convex f
 under a fan. The surface is a display surface, so that is accepted and not repaired. The
 `UsdGeomSubset` partition (one subset per patch, every triangle in exactly one subset) stays
 exact.
+
+The fan's area is `A = 1/2 sum_{k=1}^{m-2} |(p_k - p_0) x (p_{k+1} - p_0)|`, the triangle area of
+elementary vector geometry, and its area vector is the same sum without the norm. The points
+written are the raw points that a boundary face references, in ascending raw index, each
+rounded once from f64 to the build's `Scalar` (§118.2), and the extent is their componentwise
+minimum and maximum. On a closed mesh that is the box of all the points, because the extreme
+points of a closed surface lie on it. A patch with no face keeps its empty subset. The function
+refuses by name a boundary face with fewer than 3 points, a point label outside the point list,
+and patches that do not tile the boundary faces (a face in no patch or in two, or a patch that
+runs past the last boundary face); it never assembles a surface from such a mesh.
+
+`usda::boundary_surface`, which takes the `HostMesh` alone, keeps the synthesised quadrilateral
+as the fallback of a caller that holds no raw mesh, and its bytes are unchanged. `UsdaWriter`
+(`io/writer.rs`) is such a caller until `WriteCtx` carries the raw mesh or the prepared surface;
+that wiring belongs to the unit that owns `io/writer.rs` (VIO-03 or VIO-09), not to VIO-07.
+
+Measured by `tests/usda.rs` in both builds, every area evaluated in f64 from the raw points
+against `HostMesh::geom64()`: on a one-cell hexagonal prism (hexagons of area 16, sides
+`12 + 24 sqrt 2`), a 3 x 3 x 3 box (108 triangles on 56 points) and the 2:1 mesh of
+`mesh/refined.rs`, each patch's fan area and each face's fan area vector agree within 1e-10
+relative, every triangle's area vector has a positive product with `b_sf`, the partition is
+exact, and the extent equals the box of all the points bit for bit.
 
 **Refusals.** Each of these is refused by name before the time loop, in the words of §13.4
 (VIO-04, VIO-09). The old refusal of every non-Cartesian mesh, and its test
