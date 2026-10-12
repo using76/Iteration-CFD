@@ -36992,8 +36992,9 @@ subsections, by unit:
 - 118.4 — mixed-precision iterative refinement (F32-06)
 - 118.5 — delta-form transients (F32-08)
 - 118.6 — field, phi and restart I/O (F32-09)
+- 118.7 — the local origin (F32-10)
 
-and, later, the local origin, moving geometry, parcels and chemistry in
+and, later, moving geometry, parcels and chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
 
 No GPL-licensed source was consulted.
@@ -37936,6 +37937,121 @@ the ACM 11(1) 47-50, doi:10.1145/362851.362887** (checked against Crossref on
 in the section "Binary to Decimal Conversion"); **IEEE Std 754-2008 §5.12.2**
 names 9 and 17 as the binary32 / binary64 round-trip digit counts (named,
 not quoted).
+
+No GPL-licensed source was consulted.
+
+### 118.7 The local origin - a mesh stored about a snapped f64 origin
+
+Under `--features single` a mesh far from the coordinate axis loses its
+geometry in the device, because the kernels difference ABSOLUTE f32 cell
+centres (`C[n] - C[P]`, `Cf[f] - C[P]`): at 2000 m one f32 ulp is 1.22e-4 m,
+and the second-order reconstructions - the limited weights, linearUpwind,
+the gradient limiters - are built from those differences. F32-10 makes the
+storage frame a choice:
+`build_host_mesh_local` builds the SAME mesh about a LOCAL ORIGIN `O`, an
+f64 vector, so that every stored position (`c`, `cf`, `b_cf` and their f64
+shadow in `geom64`) is `x_world - O`, the subtraction done in f64 before
+the one rounding of §118.2. The kernels are untouched - they keep
+differencing stored positions, which are now small. The f64 build never
+shifts: there `O = 0` always and every code path is bitwise what it was -
+no added arithmetic, not even `+ 0.0`, which would turn `-0.0` into `+0.0`.
+
+The rule (118.7a). Per axis `k`, from the bounding box `[lo, hi]` of the
+points, with `e = hi - lo` and `m = (lo + hi)/2`, all in f64:
+
+    (118.7a)  O_k = 0                               if lo <= 0 <= hi, or
+                                                    e <= 0, or lo/hi not
+                                                    finite
+              O_k = sgn(m) * q * ceil(|m|/q - 1/2)  otherwise, q the
+                                                    smallest power of two
+                                                    >= e
+
+`q` is found EXACTLY, from the exponent field of the f64 encoding - no
+`log2().ceil()`, which is off by one exactly at a power of two. A snapped
+origin rather than the plain box centre, for two reasons: `O` is a multiple
+of `q`, so a mesh translated by a multiple of `q` gets the SAME local
+points bit for bit; and an axis whose range contains zero is not shifted at
+all, so no existing case moves.
+
+    (118.7b)  |m - O_k| <= q/2 < e  =>  |x - O_k| < 3e/2 for every point x
+                                                    of the axis
+    (118.7c)  x_local = fl32(x_world - O)  (the subtraction in f64),
+              x_world = f64(x_local) + O
+    (118.7d)  the relative error of a stored coordinate difference,
+              u(|a| + |b|)/|a - b| (§118.2, Goldberg 1991 "Cancellation"),
+              has |a|, |b| < 3e/2 instead of |x_world|
+
+API. `HostMesh::origin: DVec3` - the world position of the local origin,
+ZERO in the f64 build and for every mesh built without one; `Default` gives
+ZERO, and `compute` (mesh/geometry.rs) treats it as an INPUT the caller set
+- it never chooses an origin itself. Conversions: `world(p)` / `world64(p)`,
+a local stored position -> world in f64; `local(w)`, world -> local with
+ONE rounding; `local64(w)`, world -> local with none; the f64-build arms do
+no arithmetic. Under `single`, `compute` sweeps a non-zero-origin mesh on
+its points shifted once - `to_dvec3() - m.origin`, monomorphic in `DVec3` -
+and when `origin == ZERO` hands the sweep the caller's points untouched,
+bitwise what every build did before this unit. `build_host_mesh_local` is
+`build_host_mesh` with `origin = geometry::local_origin(&raw.points)` set
+before the geometry - one shared private body, no copy - and
+`snapped_origin_axis` / `local_origin` are pure, compiled in BOTH builds.
+
+Consumers converted (world comparisons in f64): `load_case`'s OpenFOAM
+branch - the JSONC/blockgen branch unchanged - prints ONE line when the
+origin is not zero; `CellSelector::select`'s Box and Sphere, compared
+against `m.world(m.c[c])`; `cartesian_info`'s origin corner; the VTU and
+USDA emitters' centroids; `pointfield`'s point-to-cell weights, the point
+brought to local with `local` before the difference; `field_setup`'s
+`bc_f`, what `fixedProfile` and the rotating wall read, through `world64`;
+`decompose`'s part meshes copy `origin` through.
+
+Refusals. A path not converted yet refuses BY NAME - never runs shifted
+and wrong: when `m.origin != ZERO`, `Error::Config` whose text contains
+`local origin` and the unit - the device geometry sweep
+`gpu_compute_geometry` and `AleMesh::with_cubin` name F32-11,
+`Parcels::new` names F32-12.
+
+**What it does not do.** The JSONC/blockgen path still generates its points
+in `Scalar` and stays unshifted; `build_host_mesh` and every one of its 75
+callers keep building an unshifted mesh; multi-region cases need ONE origin
+for all regions and are not shifted; the device geometry sweep and moving
+geometry wait for F32-11, parcels for F32-12.
+
+**The measurement.** `tests/f32_local_origin.rs`, seven tests, the same
+assertions in both builds, run by the supervisor on 2026-10-13. The gate of
+docs/17 (F32-10) is a lid-driven cavity at Re = 100 (`nu = 0.01`, lid
+`U = (1, 0, 0)`, `p = 0` pinned on the bottom wall, 500 SIMPLE outer
+iterations) on the unit box and on the same box translated by (2000, 2000, 0),
+judged by `max_c |U_B - U_A| / U_lid <= 1e-5`. Two things about the gate are
+the tree's, not the plan's. On 32x32 cells every coordinate is `2000 + k/64`,
+which f32 holds exactly, so the translated mesh loses nothing and the gate
+cannot fail; the tests use 30x30. And with the default upwind convection on
+an orthogonal mesh no device kernel reads a stored position - the weights,
+areas and delta coefficients are already f64 results (§118.2) - so the
+unshifted translated cavity differs from the origin cavity by 1.192e-7, one
+f32 ulp of the lid velocity, and the gate passed BEFORE this unit; the tests
+use `Gauss linearUpwind`, whose kernels difference `C` and `Cf`. On that
+cavity, under `single`: the translated mesh built WITHOUT a local origin
+misses at 2.769e-4 (docs/17 predicted about 1e-3), and the mesh built by
+`build_host_mesh_local` has origin (2000, 2000, 0), its sixteen geometry
+arrays equal the origin mesh's bit for bit, and its velocity differs by
+exactly 0. In the f64 build both translated meshes differ from the origin
+cavity by 6.892e-12. The last-iteration change of `U` is 1.192e-7 under
+`single` and 6.092e-9 in f64, so the comparison is of two 500-iteration
+trajectories, not of two converged states. The other five tests hold the
+axis rule on fifteen boxes, the bitwise mesh identity and the
+`world`/`local` round trip, the box and sphere selectors (256 cells, the
+same indices stated world or local), the USD surface points and the
+Cartesian corner within 4 ulp(2000) = 4.883e-4 of the world position, and
+the device-sweep refusal. No `.cu` file changed, so the cubins of the f64
+build are the ones it had.
+
+Sources: **Goldberg, D. (1991), "What every computer scientist should know
+about floating-point arithmetic", ACM Computing Surveys 23 (1991) 5-48**
+(open copy <https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html>,
+the section "Cancellation"); **Higham, N. J. (2002), *Accuracy and
+Stability of Numerical Algorithms*, 2nd ed., SIAM**, section 2.2;
+**Sterbenz, P. H. (1974), *Floating-Point Computation*, Prentice-Hall**,
+Theorem 4.3.1 (the difference of two nearby floats is exact).
 
 No GPL-licensed source was consulted.
 

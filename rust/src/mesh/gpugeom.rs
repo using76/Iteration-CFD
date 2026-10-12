@@ -62,6 +62,7 @@ use cudarc::driver::{CudaFunction, PushKernelArg};
 use crate::device::{cfg_for, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::mesh::{geometry, HostMesh, PatchKind};
+use crate::types::DVec3;
 use crate::{DevBuf, Label, Scalar, Vec3};
 
 /// The four kernels of `cuda/meshgeom.cu`.
@@ -466,6 +467,16 @@ fn resident_after_validate(
     points: &[Vec3],
     csr: &FacePointCsr,
 ) -> Result<GpuGeometry> {
+    // SPEC-LIT 118.7: the device sweep reads ABSOLUTE positions, so a mesh
+    // stored about a local origin would be rebuilt in the wrong frame. It is
+    // refused by name until the sweep is converted - never run shifted and
+    // wrong. (The f64 build has no local origin, so this never fires there.)
+    if m.origin != DVec3::ZERO {
+        return Err(Error::Config(format!(
+            "gpu_geometry_resident: a mesh with a local origin (SPEC-LIT 118.7) \
+             is not converted yet - the device geometry sweep is F32-11"
+        )));
+    }
     // ---- the host prologue, identical to `geometry::compute` --------------
     refuse_a_mesh_without_a_cell_face_csr(m)?;
     refuse_a_cell_with_no_faces(m)?;

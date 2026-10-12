@@ -309,6 +309,13 @@ pub struct HostMesh {
     /// the f64 view calls [`Self::release_geom64`].
     #[cfg(feature = "single")]
     pub geom64: Option<Box<HostGeom64>>,
+
+    /// The world position of the LOCAL coordinate origin every stored
+    /// position is measured from (SPEC-LIT 118.7): `x_world = x_local + O`,
+    /// the add in f64. ZERO for every mesh built without a local origin -
+    /// `build_host_mesh` and every blockgen path - and always ZERO in the
+    /// f64 build, where nothing shifts.
+    pub origin: DVec3,
 }
 
 /// What `HostMesh::check` found. Printing it is the first thing every binary
@@ -375,6 +382,64 @@ impl HostMesh {
         faces: &[Vec<Label>],
     ) -> Result<()> {
         crate::mesh::geometry::compute(self, points, faces)
+    }
+
+    /// A LOCAL stored position in WORLD coordinates (SPEC-LIT 118.7):
+    /// `x_world = f64(x_local) + O`, the add in f64. The f64 build has no
+    /// local origin, so the value comes back unchanged - no arithmetic is
+    /// added, not even `+ 0.0`, which would turn `-0.0` into `+0.0`.
+    pub fn world(&self, p: Vec3) -> DVec3 {
+        #[cfg(feature = "single")]
+        {
+            to_dvec3(p) + self.origin
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            p
+        }
+    }
+
+    /// The same for a value of the [`Self::geom64`] view, which is local too
+    /// (`world = local + origin`).
+    pub fn world64(&self, p: DVec3) -> DVec3 {
+        #[cfg(feature = "single")]
+        {
+            p + self.origin
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            p
+        }
+    }
+
+    /// A WORLD position as the mesh stores it, ONE rounding (118.7c): the
+    /// subtraction in f64, then the single rounding of SPEC-LIT 118.2 into
+    /// the stored `Scalar`. The f64 build returns the value unchanged.
+    pub fn local(&self, w: DVec3) -> Vec3 {
+        #[cfg(feature = "single")]
+        {
+            to_vec3(w - self.origin)
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            w
+        }
+    }
+
+    /// World -> local in f64, no rounding at all.
+    pub fn local64(&self, w: DVec3) -> DVec3 {
+        #[cfg(feature = "single")]
+        {
+            w - self.origin
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            w
+        }
     }
 
     pub fn check(&self) -> MeshReport {

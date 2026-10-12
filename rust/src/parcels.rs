@@ -87,6 +87,7 @@ use crate::error::{Error, Result};
 use crate::field::GpuVectorField;
 use crate::io::contract;
 use crate::mesh::{GpuMesh, HostMesh, PatchKind};
+use crate::types::DVec3;
 use crate::{Label, Scalar, Vec3};
 
 #[cfg(test)]
@@ -1177,6 +1178,16 @@ impl<'m> Parcels<'m> {
         injectors: &[Injector],
         dt: Scalar,
     ) -> Result<Self> {
+        // SPEC-LIT 118.7: parcels are located and injected in ABSOLUTE
+        // positions, so a mesh stored about a local origin is refused by
+        // name until this module is converted - never run shifted and wrong.
+        // (The f64 build has no local origin, so this never fires there.)
+        if hm.origin != DVec3::ZERO {
+            return Err(Error::Config(format!(
+                "parcels: a mesh with a local origin (SPEC-LIT 118.7) is not \
+                 converted yet - parcels are F32-12"
+            )));
+        }
         ctrl.validate()?;
         if !(dt > 0.0) || !dt.is_finite() {
             return Err(Error::Config(format!(

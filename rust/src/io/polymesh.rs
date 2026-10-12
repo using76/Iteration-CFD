@@ -238,6 +238,25 @@ fn find_poly_mesh_dir(case_dir: &Path) -> Result<PathBuf> {
 /// `n_cells` is derived from the addressing (`max(owner, neighbour) + 1`)
 /// exactly as OpenFOAM derives it - polyMesh never stores a cell count.
 pub fn build_host_mesh(raw: &PolyMeshRaw) -> Result<HostMesh> {
+    build_host_mesh_with(raw, DVec3::ZERO)
+}
+
+/// [`build_host_mesh`], with the mesh stored about a LOCAL origin (SPEC-LIT
+/// 118.7): the origin is the snapped box centre of [`crate::mesh::geometry::
+/// local_origin`] over the raw points, and every stored position - `c`, `cf`,
+/// `b_cf` and their f64 shadow - is `x_world - O`, so the kernels' absolute
+/// f32 differences stay small however far from the coordinate axis the case
+/// sits. The f64 build never shifts: there the origin is ZERO and the mesh is
+/// bitwise [`build_host_mesh`]'s. `derive_wedge` then works in local
+/// coordinates too, and a consumer that states a position in WORLD
+/// coordinates converts through [`HostMesh::world`] / [`HostMesh::world64`].
+pub fn build_host_mesh_local(raw: &PolyMeshRaw) -> Result<HostMesh> {
+    build_host_mesh_with(raw, crate::mesh::geometry::local_origin(&raw.points))
+}
+
+/// The shared body: [`build_host_mesh`] passes a ZERO origin, [`build_host_mesh_local`]
+/// the snapped one - set as an input before the geometry, never chosen here.
+fn build_host_mesh_with(raw: &PolyMeshRaw, origin: DVec3) -> Result<HostMesh> {
     let n_faces = raw.faces.len();
     let n_if = raw.neighbour.len();
 
@@ -380,6 +399,9 @@ pub fn build_host_mesh(raw: &PolyMeshRaw) -> Result<HostMesh> {
     }
 
     // ---- size the geometry arrays, then let mesh::geometry fill them ------
+    // The origin is set BEFORE the geometry: the sweep reads every point as
+    // `to_dvec3() - m.origin` (SPEC-LIT 118.7) and never chooses an origin.
+    m.origin = origin;
     m.v = vec![0.0; n_cells];
     m.c = vec![Vec3::ZERO; n_cells];
 

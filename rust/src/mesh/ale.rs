@@ -55,6 +55,7 @@ use crate::mesh::gpugeom::{FacePointCsr, MeshGeomKernels, flatten_faces};
 use crate::mesh::refined::{self, RefinedBox};
 use crate::mesh::{geometry, GpuMesh, HostMesh};
 use crate::timescheme::{DdtCoeffs, DdtScheme};
+use crate::types::DVec3;
 use crate::{DevBuf, Label, Scalar, Vec3};
 
 /// The six kernels of `cuda/ale.cu`.
@@ -150,6 +151,16 @@ impl AleMesh {
         csr: &FacePointCsr,
         cubin: &[u8],
     ) -> Result<Self> {
+        // SPEC-LIT 118.7: the moving state is uploaded from ABSOLUTE
+        // positions, so a mesh stored about a local origin is refused by
+        // name until this module is converted - never run shifted and wrong.
+        // (The f64 build has no local origin, so this never fires there.)
+        if m.origin != DVec3::ZERO {
+            return Err(Error::Config(format!(
+                "AleMesh::new: a mesh with a local origin (SPEC-LIT 118.7) is \
+                 not converted yet - moving geometry is F32-11"
+            )));
+        }
         if gm.n_cells != m.n_cells
             || gm.n_internal_faces != m.n_internal_faces
             || gm.n_boundary_faces != m.n_boundary_faces

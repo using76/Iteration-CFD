@@ -230,8 +230,13 @@ impl<'a> PatchAux<'a> {
         // `.get`, not indexing, for the same reason `b_sf` above is: a
         // synthetic mesh in a test may carry no face centres, and every
         // condition but `fixedProfile` must still build without them.
+        // `bc_f` holds WORLD positions (SPEC-LIT 118.7): `cf.b_cf` is the
+        // local view, so each face centre is shifted once here, and
+        // `fixedProfile` and the rotating wall below read world coordinates
+        // in both builds. The f64 build's `world64` is the identity, so the
+        // values are HEAD's.
         let bc_f = (0..p.size)
-            .map(|i| cf.b_cf.get(p.start + i).copied().unwrap_or_default())
+            .map(|i| m.world64(cf.b_cf.get(p.start + i).copied().unwrap_or_default()))
             .collect();
         // (120.3a)'s Delta_b and (120.3c)/(120.3f)/(120.3g)'s normals, both
         // from the f64 `geom64` view (SPEC-LIT 120.3), cast once - `.get`

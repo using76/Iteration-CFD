@@ -868,6 +868,9 @@ impl PartBuild<'_> {
             n_internal_faces: n_if,
             n_boundary_faces: n_bf,
             n_points: 0,
+            // The part's geometry arrays are COPIES of the global mesh's
+            // (local, SPEC-LIT 118.7), so the part carries the same origin.
+            origin: m.origin,
             ..Default::default()
         };
 
