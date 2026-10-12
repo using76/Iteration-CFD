@@ -103,6 +103,16 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/cht.rs",
         Stance::Gate("the_solid_side_iteration_replays_bitwise"),
     ),
+    (
+        "src/compressible/exact/riemann.rs",
+        Stance::Outside(
+            "the exact Riemann solution is a host answer key in f64 - a \
+             bisection for the star pressure and a sampler at (x, t) - that a \
+             gate compares a computed field against after the run. It launches \
+             no kernel and no time loop calls it, so there is nothing to \
+             capture or replay. SPEC-LIT 127.2",
+        ),
+    ),
     ("src/contact_angle.rs", Stance::Via("src/vof.rs")),
     (
         "src/dcmetrics.rs",
@@ -132,6 +142,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     (
         "src/fan.rs",
         Stance::Gate("the_fan_source_replays_bitwise"),
+    ),
+    (
+        "src/field/advective.rs",
+        Stance::Via("src/field_ops.rs"),
     ),
     ("src/field_ops.rs", Stance::Via("src/momentum.rs")),
     (

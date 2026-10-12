@@ -365,6 +365,33 @@ pub enum BcKind {
     /// the device evaluation is
     /// [`direction_mixed_value`](crate::field::direction_mixed_value).
     DirectionMixed = 37,
+
+    /// `outletInlet`, the reverse switch of `inletOutlet` - a fixed value
+    /// where the flow LEAVES, zero-gradient where it comes back in:
+    ///
+    /// ```text
+    /// fr = 1 if phi_b > 0 (outflow), fr = 0 otherwise                    (120.4a)
+    /// refValue = outletValue, refGrad = 0
+    /// ```
+    ///
+    /// Its own kind, OUTSIDE the flux-switched block `[8, 12]` (whose kinds
+    /// are all Dirichlet on INflow), so `fldInletOutletFraction` and its host
+    /// twin `field_setup::update_inlet_outlet` test it by its own value with
+    /// the strict `phi_b > 0` of (120.4a). A face with exactly zero flux is
+    /// zero-gradient under both conditions.
+    OutletInlet = 38,
+
+    /// `advective`, Orlanski's (1976) radiation outlet with the phase speed
+    /// GIVEN rather than estimated: the face relaxes toward a far value along
+    /// the outward normal at the wave speed `w` (120.4b), and `field::advective`
+    /// rewrites the §4 triple from (120.4d) - a Robin face like any other, so
+    /// no evaluation branch of its own. The wave speed and the rate are FACE
+    /// -FIELD inputs, not properties of the kind: CMP-17 passes its own
+    /// `w = u_n + c` and `K = sigma c (1 - M_n^2)/L` of (126.6) to the same
+    /// kernels. `field_setup` refuses the name unless the caller sets
+    /// [`crate::field_setup::BcInputs::advective`], the promise that
+    /// `field::advective` refreshes the condition every step.
+    Advective = 39,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -444,6 +471,11 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "partialSlip",
     "fixedNormalSlip",
     "fixedShearStress",
+    // SPEC-LIT 120.4: the two outlets. `outletInlet` is (120.4a)'s reverse
+    // flux switch; `advective` is (120.4b)-(120.4d)'s Robin outlet, reached
+    // only where a caller refreshes it every step (BcInputs::advective).
+    "outletInlet",
+    "advective",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -830,16 +862,16 @@ impl BcKind {
                 Self::ThermalWallFunction
             }
 
-            "outletInlet" => {
-                return unsupported_note(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    IMPLEMENTED_BC_NAMES,
-                    "outletInlet is the REVERSE switch of inletOutlet: a fixed value on OUTflow and zero-gradient on inflow (docs/01-model-catalog.md: valueFraction = pos0(phi_b)), while every flux-switched condition this solver implements is Dirichlet on inflow; it used to be mapped to inletOutlet, which is the opposite condition",
-                    "calculated (a fixed value at whatever the file's `value` entry held)",
-                    Self::Calculated,
-                );
-            }
+            // SPEC-LIT 120.4: its own condition now - (120.4a)'s reverse
+            // switch, fixed on OUTflow, refused until setup by nothing here
+            // (the `outletValue` entry is `field_setup`'s to demand).
+            "outletInlet" => Self::OutletInlet,
+            // SPEC-LIT 120.4: (120.4b)-(120.4d)'s Robin outlet. Accepted as a
+            // kind here; the SETUP paths refuse it unless the caller sets
+            // `BcInputs::advective` - the promise that `field::advective`
+            // refreshes the condition every step - so no driver reaches it
+            // today and the condition is reached through the API.
+            "advective" => Self::Advective,
 
             "cyclicAMI" => {
                 return unsupported_note(
@@ -1295,6 +1327,11 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
     kinds
 }
 
+/// The `advective` outlet of SPEC-LIT 120.4: the host twin of (120.4d), the
+/// per-face wave-speed state, and the Robin rewrite - see
+/// [`advective::advective_triple`] and [`advective::AdvectiveScalar`].
+pub mod advective;
+
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
 /// [`mod@tests`].
@@ -1383,37 +1420,29 @@ mod tests {
         assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
     }
 
-    /// SPEC-LIT §13.4 and §13.4.4's audit. The two names used to be aliases
-    /// to conditions that are NOT what they name: `outletInlet` is the reverse
-    /// switch of `inletOutlet`, and `cyclicAMI` needs interpolation weights
-    /// the solver does not have. (`uniformFixedValue` was the third until
-    /// SPEC-LIT 120.1 made it read its `uniformValue` Function1.) Each is
-    /// refused by name; `-permissive` substitutes the documented fallback and
-    /// warns once per setting.
+    /// SPEC-LIT §13.4 and §13.4.4's audit. `cyclicAMI` used to be an alias
+    /// to a condition that is NOT what it names: it needs interpolation
+    /// weights the solver does not have. (`outletInlet` was the second until
+    /// SPEC-LIT 120.4 made it a condition of its own, and `uniformFixedValue`
+    /// the third until SPEC-LIT 120.1 made it read its `uniformValue`
+    /// Function1.) Refused by name; `-permissive` substitutes the documented
+    /// fallback and warns once per setting.
     #[test]
-    fn the_two_conditions_that_are_not_their_alias_are_refused_by_name() {
+    fn the_condition_that_is_not_its_alias_is_refused_by_name() {
         let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         crate::io::contract::reset_warnings();
 
-        for (name, word) in [
-            ("outletInlet", "inletOutlet"),
-            ("cyclicAMI", "cyclic"),
-        ] {
-            let e = BcKind::from_name(name, "U", "inlet")
-                .expect_err(&format!("{name} must be refused by name"));
-            let msg = e.to_string();
-            assert!(msg.contains(name), "{msg}");
-            assert!(msg.contains("U: boundaryField/inlet/type"), "{msg}");
-            assert!(msg.contains("-permissive"), "{msg}");
-            assert!(msg.contains(word), "{msg}");
-        }
+        let (name, word) = ("cyclicAMI", "cyclic");
+        let e = BcKind::from_name(name, "U", "inlet")
+            .expect_err(&format!("{name} must be refused by name"));
+        let msg = e.to_string();
+        assert!(msg.contains(name), "{msg}");
+        assert!(msg.contains("U: boundaryField/inlet/type"), "{msg}");
+        assert!(msg.contains("-permissive"), "{msg}");
+        assert!(msg.contains(word), "{msg}");
 
         crate::io::contract::set_permissive(true);
-        assert!(matches!(
-            BcKind::from_name("outletInlet", "U", "inlet").expect("permissive"),
-            BcKind::Calculated
-        ));
         assert!(matches!(
             BcKind::from_name("cyclicAMI", "U", "inlet").expect("permissive"),
             BcKind::Cyclic
@@ -1423,6 +1452,30 @@ mod tests {
             "the substitution must be announced"
         );
         crate::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT 120.4: the two outlets are conditions of their OWN, on any
+    /// field - `outletInlet` the reverse flux switch of (120.4a), `advective`
+    /// the Robin outlet of (120.4b)-(120.4d). Neither is in the
+    /// flux-switched block, whose kinds are all Dirichlet on INflow.
+    #[test]
+    fn outlet_inlet_and_advective_are_their_own_kinds() {
+        for field in ["psi", "T", "U", "p", "alpha.water"] {
+            assert_eq!(
+                BcKind::from_name("outletInlet", field, "outlet").expect("outletInlet"),
+                BcKind::OutletInlet
+            );
+            assert_eq!(
+                BcKind::from_name("advective", field, "outlet").expect("advective"),
+                BcKind::Advective
+            );
+        }
+        assert_eq!(BcKind::OutletInlet as Label, 38);
+        assert_eq!(BcKind::Advective as Label, 39);
+        assert!(!(FLUX_SWITCHED_FIRST..=FLUX_SWITCHED_LAST)
+            .contains(&(BcKind::OutletInlet as Label)));
+        assert!(!(FLUX_SWITCHED_FIRST..=FLUX_SWITCHED_LAST)
+            .contains(&(BcKind::Advective as Label)));
     }
 
     // ==================================================================
@@ -1465,7 +1518,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [60, 3, 47, 10, 10], "the per-status counts");
+        assert_eq!(counts, [62, 3, 45, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

@@ -53,6 +53,17 @@
       implicitly, through the one triple of section 4; this branch writes
       bf only, the face value every operator reads.
 
+  SPEC-LIT 120.4 adds two conditions that stay inside the one expression
+  and add no fifth branch. OUTLET_INLET is the reverse flux switch of
+  inletOutlet - (120.4a), fr = 1 where phi_b > 0 - and fldInletOutlet_
+  Fraction below tests it by its own kind, OUTSIDE the flux-switched range
+  whose kinds all switch on inflow. ADVECTIVE is (120.4b)-(120.4d)'s
+  radiation outlet: the fldAdvectiveSpeed kernel fills the face's wave
+  speed and relaxation rate from the flux, and the fldAdvectiveRobin*
+  kernels REWRITE THE TRIPLE ONLY - fr, refValue, refGrad = 0 - from
+  (120.4d); the face value is then the ordinary section 4 evaluation, and
+  nothing here evaluates it differently.
+
   ------------------------------------------------------------------------
   Symmetry, and what the matrix sees
   ------------------------------------------------------------------------
@@ -82,6 +93,14 @@
 //- SPEC-LIT 120.3: the tensorial mixed condition of the wall and slip
 //  family (directionMixed, partialSlip, fixedNormalSlip, fixedShearStress).
 #define OFGPU_BC_DIRECTION_MIXED 37
+
+//- SPEC-LIT 120.4: the two outlets. OUTLET_INLET is (120.4a)'s reverse
+//  flux switch - fixed on OUTflow - and sits OUTSIDE the flux-switched
+//  block below, whose kinds are all Dirichlet on INflow; ADVECTIVE is
+//  (120.4b)-(120.4d)'s Robin outlet, whose triple the fldAdvectiveRobin*
+//  kernels rewrite from the face's wave speed.
+#define OFGPU_BC_OUTLET_INLET 38
+#define OFGPU_BC_ADVECTIVE    39
 
 //- The FLUX-SWITCHED block: every kind in [FIRST, LAST] is Dirichlet where
 //  the face flux is inward and zero-gradient where it is outward, and they
@@ -316,6 +335,12 @@ extern "C" __global__ void fldCorrectBcVector
 //  Every kind in the flux-switched range shares this switch; only the
 //  refValue they switch TO differs, and that is set once at setup by
 //  src/field_setup.rs.
+//
+//  SPEC-LIT 120.4: outletInlet is the REVERSE switch - (120.4a) fixes the
+//  face at outletValue where the flux points OUT, `phi_b > 0` strictly, and
+//  leaves it zero-gradient otherwise. It is tested by its own kind because
+//  it sits outside the flux-switched range on purpose: its Dirichlet half
+//  is the outflow half, not the inflow one.
 extern "C" __global__ void fldInletOutletFraction
 (
     ofscalar* __restrict__ fr,
@@ -333,6 +358,136 @@ extern "C" __global__ void fldInletOutletFraction
     {
         fr[i] = (phiB[i] < (ofscalar)0) ? (ofscalar)1 : (ofscalar)0;
     }
+    else if (kind == OFGPU_BC_OUTLET_INLET)
+    {
+        fr[i] = (phiB[i] > (ofscalar)0) ? (ofscalar)1 : (ofscalar)0;
+    }
+}
+
+
+// ==========================================================================
+//  The advective outlet (SPEC-LIT 120.4)
+//
+//  (120.4b): d phi/dt + w d phi/dn = K (phi_inf - phi), the face carrying
+//  the field out along the outward normal at the wave speed w and relaxing
+//  toward phi_inf at the rate K = w/lInf. Both w and K are FACE-FIELD
+//  inputs: the generic condition fills them from the flux
+//  (fldAdvectiveSpeed, `w = max(phi_b/|S_f|, 0)`), and CMP-17 passes its
+//  own `w = u_n + c` and `K = sigma c (1 - M_n^2)/L` to the same kernels.
+//
+//  With d phi/dn = (phi_b - phi_P) Delta_b and the run's own ddt
+//  coefficients (a_n, a_0, a_00), the discrete condition is (120.4c) and
+//  its solution is the section 4 triple (120.4d):
+//
+//      fr       = (a_n + K)/(a_n + w Delta_b + K)
+//      refValue = (K phi_inf - a_0 phi_b^o - a_00 phi_b^oo)/(a_n + K)
+//      refGrad  = 0
+//
+//  evaluated in the operation order d = a_n + K, fr = d/(d + w Delta_b),
+//  refValue = (K phi_inf - a_0 b_o - a_00 b_oo)/d - the same order the
+//  host twin `field::advective::advective_triple` runs, so the two agree
+//  to round-off, the FMA contraction being the only difference.
+// ==========================================================================
+
+//- The wave speed from the flux, and the relaxation rate from the length.
+//
+//  `w = max(phi_b/|S_f|, 0)`: the outward flux per unit area, never
+//  negative - a back-flowing face has w = 0, holds its own time
+//  extrapolation (fr = 1) and takes nothing from the interior. Zero where
+//  |S_f| is 0, so a degenerate face cannot divide by it. Faces of any
+//  other kind are left alone, which is what lets this run over the whole
+//  boundary once per step.
+extern "C" __global__ void fldAdvectiveSpeed
+(
+    ofscalar* __restrict__ w,
+    ofscalar* __restrict__ kRelax,
+    const oflabel* __restrict__ bcKind,
+    oflabel matchKind,
+    const ofscalar* __restrict__ phiB,
+    const ofscalar* __restrict__ magSf,
+    const ofscalar* __restrict__ invLInf,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    if (bcKind[i] != matchKind) return;
+
+    const ofscalar s = magSf[i];
+    const ofscalar wi = (s != (ofscalar)0)
+        ? ofmax_(phiB[i]/s, (ofscalar)0)
+        : (ofscalar)0;
+    w[i] = wi;
+    kRelax[i] = wi*invLInf[i];
+}
+
+//- Rewrite the triple of every ADVECTIVE face from (120.4d), in the 120.4
+//  operation order; refGrad = 0. The face value is then the ordinary
+//  section 4 evaluation - nothing here writes bf.
+extern "C" __global__ void fldAdvectiveRobinScalar
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const oflabel* __restrict__ bcKind,
+    oflabel matchKind,
+    const ofscalar* __restrict__ w,
+    const ofscalar* __restrict__ kRelax,
+    const ofscalar* __restrict__ phiInf,
+    const ofscalar* __restrict__ bOld,
+    const ofscalar* __restrict__ bOldOld,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    ofscalar aN,
+    ofscalar a0,
+    ofscalar a00,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    if (bcKind[i] != matchKind) return;
+
+    const ofscalar d = aN + kRelax[i];
+    fr[i] = d/(d + w[i]*bDeltaCoeffs[i]);
+    refValue[i] = (kRelax[i]*phiInf[i] - a0*bOld[i] - a00*bOldOld[i])/d;
+    refGrad[i] = (ofscalar)0;
+}
+
+//- The vector twin. One fr per face - a vector field shares the fraction
+//  across its components (SPEC-LIT 120.4) - and refValue/phiInf/bOld/
+//  bOldOld per component.
+extern "C" __global__ void fldAdvectiveRobinVector
+(
+    ofscalar* __restrict__ fr,
+    ofvec3* __restrict__ refValue,
+    ofvec3* __restrict__ refGrad,
+    const oflabel* __restrict__ bcKind,
+    oflabel matchKind,
+    const ofscalar* __restrict__ w,
+    const ofscalar* __restrict__ kRelax,
+    const ofvec3* __restrict__ phiInf,
+    const ofvec3* __restrict__ bOld,
+    const ofvec3* __restrict__ bOldOld,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    ofscalar aN,
+    ofscalar a0,
+    ofscalar a00,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    if (bcKind[i] != matchKind) return;
+
+    const ofscalar d = aN + kRelax[i];
+    fr[i] = d/(d + w[i]*bDeltaCoeffs[i]);
+    refValue[i] = mkvec
+    (
+        (kRelax[i]*phiInf[i].x - a0*bOld[i].x - a00*bOldOld[i].x)/d,
+        (kRelax[i]*phiInf[i].y - a0*bOld[i].y - a00*bOldOld[i].y)/d,
+        (kRelax[i]*phiInf[i].z - a0*bOld[i].z - a00*bOldOld[i].z)/d
+    );
+    refGrad[i] = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
 }
 
 

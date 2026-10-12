@@ -37753,7 +37753,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 60 names of
+accepts it on the field the row is asked on, and it is one of the 62 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -37834,6 +37834,8 @@ row, row for row.
 | wall | `partialSlip` | implemented | — | — | (120.3b), slip length (120.3d) |
 | wall | `fixedNormalSlip` | implemented | — | — | the normal component fixed, the tangential free (§120.3) |
 | wall | `fixedShearStress` | implemented | — | — | laminar `tau/nu` (120.3f); refused naming `nu` where the setup is given none, which is every driver today |
+| outlet | `outletInlet` | implemented | — | — | (120.4a), the reverse switch of `inletOutlet` - fixed on outflow |
+| outlet | `advective` | implemented | — | — | (120.4b)-(120.4d); refused where no time loop refreshes it |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
@@ -37845,8 +37847,6 @@ row, row for row.
 | velocity inlet | `pressureDirectedInletVelocity` | planned | BC-08 | — | — |
 | velocity inlet | `pressureDirectedInletOutletVelocity` | planned | BC-08 | — | — |
 | velocity inlet | `pressureInletOutletParSlipVelocity` | planned | BC-08 | — | — |
-| outlet | `outletInlet` | planned | BC-09 | — | the reverse switch of `inletOutlet` - fixed on outflow |
-| outlet | `advective` | planned | BC-09 | — | — |
 | outlet | `fixedMean` | planned | BC-10 | — | — |
 | outlet | `fixedMeanOutletInlet` | planned | BC-10 | — | — |
 | outlet | `fixedFluxExtrapolatedPressure` | planned | BC-10 | — | — |
@@ -38324,6 +38324,134 @@ cells across (5.4e-7, 2.7e-6 of `tau H/nu`): the profile is linear and the
 f64 answer does not depend on the resolution, the gate's size is reduced and
 its tolerance is not. The pure-Neumann divergence above is the second
 finding; both belong to §118's mixed-precision loop, not to this section.
+
+No GPL-licensed source was consulted.
+
+### 120.4 Outlets I - `outletInlet`, and the advective outlet with its wave speed as an input
+
+Two outlet conditions, both §4 triple rewrites with no new evaluation branch.
+The type NAMES are taken from the §120 user guides by name only; the
+conditions below are written from the equations stated here.
+
+**`outletInlet`** is the reverse switch of `inletOutlet`: a fixed value where
+the flow leaves, zero-gradient where it comes back in.
+
+```
+fr = 1  if phi_b > 0 (outflow),   fr = 0  otherwise
+refValue = outletValue ,   refGrad = 0                                    (120.4a)
+```
+
+It is the mirror of the `inletOutlet` rule (`fr = 1` if `phi_b < 0`), and a
+face with exactly zero flux is zero-gradient under both. *DESIGN*, ours.
+`BcKind::OutletInlet` is 38, OUTSIDE the flux-switched block `[8, 12]` (whose
+kinds are all Dirichlet on INflow), so `fldInletOutletFraction` and its host
+twin `field_setup::update_inlet_outlet` test it by its own value. Its setup
+seed is `fr = 0` (zero-gradient until a flux exists). Every driver that
+refreshes `inletOutlet` refreshes `outletInlet` with the same call, so it
+runs wherever `inletOutlet` runs. `outletValue` is required, `uniform` or
+`nonuniform`, read and written back exactly as `inletValue` is.
+
+**`advective`** carries a field out of the domain along the outward normal
+at a given wave speed, relaxed toward a far value:
+
+```
+d phi/dt + w d phi/dn = K (phi_inf - phi)                                 (120.4b)
+w = max(phi_b/|S_f|, 0) ;   K = w/L_inf if lInf is stated, else K = 0
+```
+
+This is Orlanski's (1976) radiation condition with the phase speed GIVEN
+rather than estimated from the interior. The relaxation rate `K = w/L_inf`
+(a disturbance travelling at `w` relaxes toward `fieldInf` over the length
+`lInf`) is *DESIGN*, ours. **The wave speed and the rate are face-field
+inputs** (docs/17 §5.2.3): the generic condition fills them from the flux,
+and CMP-17 passes its own `w = u_n + c` and `K = sigma c (1 - M_n^2)/L` of
+(126.6) to the same kernel.
+
+With `d phi/dn = (phi_b - phi_P) Delta_b` (§2.4) and the time derivative the
+run's own §13.3 coefficients `(a_n, a_0, a_00)`:
+
+```
+a_n phi_b + a_0 phi_b^o + a_00 phi_b^oo + w Delta_b (phi_b - phi_P)
+    = K (phi_inf - phi_b)                                                 (120.4c)
+```
+
+whose solution is the §4 triple
+
+```
+fr       = (a_n + K) / (a_n + w Delta_b + K)
+refValue = (K phi_inf - a_0 phi_b^o - a_00 phi_b^oo) / (a_n + K)          (120.4d)
+refGrad  = 0
+```
+
+Derivation: §4 gives `phi_b = fr refValue + (1 - fr) phi_P`, so
+`(a_n + w Delta_b + K) phi_b = K phi_inf - a_0 phi_b^o - a_00 phi_b^oo +
+w Delta_b phi_P`, which is (120.4c) rearranged - exact. Under Euler,
+`(a_n, a_0, a_00) = (1, -1, 0)/dt` and (120.4d) times `dt` is
+`fr = (1 + K dt)/(1 + alpha + K dt)`, `refValue = (phi_b^o + K dt
+phi_inf)/(1 + K dt)`, `alpha = w dt Delta_b` - §126.5's (126.7). Under
+`backward` the coefficients are §13.3's variable-step BDF2, Euler on the
+first step, exactly as the cell ddt takes them (`DdtScheme::coeffs`).
+Operation order, the same on the host twin and the device: `d = a_n + K`,
+`fr = d/(d + w*Delta_b)`, `refValue = (K*phi_inf - a_0*b_o - a_00*b_oo)/d`;
+the device contracts FMAs, so the two agree to round-off, not bitwise.
+
+Properties. `a_n > 0`, `w >= 0` and `K >= 0` give `0 < fr <= 1`, a Robin
+face like any other. `w = 0` (back-flow or zero flux) and `Delta_b = 0` give
+`fr = 1`: the face holds its own time extrapolation and does not take the
+interior value - a reversing outlet wants `outletInlet` or `inletOutlet`.
+`phi_b^o` and `phi_b^oo` are the face values of the two previous steps, held
+per face by `field::advective`, set to the face values at setup and rotated
+(`oo <- o`, `o <- bf`) once at the START of every time step, the same event
+as `TimeState::advance`. Within a step the triple is rewritten once per
+outer iteration from the current flux; the face value is then the §4
+evaluation. A vector field shares `fr` across its components.
+
+Refusals, by name. `steadyState` and `localEuler` have no physical time,
+and under `CrankNicolson` the theta weighting acts on the spatial operator
+while (120.4c) is defined for `Euler` and `backward` only: all three are
+refused (`Ddt::face_coeffs`). The setup paths refuse `advective` unless the
+caller sets `BcInputs::advective`, the promise that it refreshes the
+condition every step through `field::advective`; NO driver sets it yet, so
+every driver refuses the name today and the condition is reached through
+the API (the gates below). `lInf` must be positive; `fieldInf` is required
+when `lInf` is stated, and `fieldInf` without `lInf` is refused - an entry
+read by nothing (§13.4).
+
+Answer key of the relaxation: with `w`, `K`, `phi_P`, `Delta_b` and `dt`
+frozen, Euler, (120.4c) is a linear recurrence whose closed form is
+
+```
+phi_b^n = phi* + (phi_b^0 - phi*) r^n ,
+phi* = (K phi_inf + w Delta_b phi_P)/(K + w Delta_b) ,  r = 1/(1 + alpha + K dt)   (120.4e)
+```
+
+and `backward` converges to the same `phi*`, since `a_n + a_0 + a_00 = 0`.
+
+**Gates** (`rust/tests/bc_outlets.rs`, both builds, every measured value
+checked finite first). `outlet_inlet_switches_on_the_flux_sign` - faces
+with `phi_b = +1, -1, 0, +2` and `outletValue 3` evaluate to `3`, `phi_P`,
+`phi_P`, `3` bit for bit, swap after the flux reverses, and the host twin's
+fraction equals the device's (class D). `advective_face_relaxes_by_the_
+closed_form` - `w = 2`, `Delta_b = 4`, `K = 0.5`, `dt = 0.125`, `phi_inf =
+1`, `phi_P = 3`, `phi_b^0 = 10`, 20 Euler steps against (120.4e) to 1e-12
+relative (class R: 1e-5 under `single`). `advective_backward_reaches_the_
+fixed_point` - the same face, `backward`, within 1e-12 of `phi*` after 60
+steps, and the device within 1e-13 of the host twin at every step (class R:
+1e-5). `a_gaussian_pulse_leaves_through_advective` - `x` in [0, 1], 200
+cells, `u = 1`, `phi = exp(-(x - 0.5)^2/(2 0.05^2))`, `dt = 0.25 dx`,
+`linear` convection, no diffusion, the inlet `fixedValue 0`: the incident
+peak is `max phi` at `t = 0.4`, the reflected peak `max |phi|` over cells
+with `x < 0.9` at `t = 1.0`. With `advective` the reflected peak is at most
+1 % of the incident one under Euler and `backward` (class P, the same in
+f32); the `zeroGradient` baseline is measured, printed, and must exceed
+1 % so the gate is not vacuous. A scratchpad model of the same discrete
+scheme expects about 9e-5 and 1.9e-4 for `advective` and 2.3e-2 and 3.2e-2
+for `zeroGradient` - an expected magnitude, not an answer key.
+
+* **Orlanski, I.** (1976), "A simple boundary condition for unbounded
+  hyperbolic flows", *J. Comput. Phys.* 21(3):251-269, DOI
+  10.1016/0021-9991(76)90023-1 (checked on Crossref, 2026-10-12). *Not
+  read*: the condition is written from (120.4b) as stated here.
 
 No GPL-licensed source was consulted.
 

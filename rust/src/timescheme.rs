@@ -1440,6 +1440,44 @@ impl Ddt {
     pub fn advance(&mut self, next_dt: Scalar) {
         self.state.advance(next_dt);
     }
+
+    /// The §13.3 coefficients `(a_n, a_0, a_00)` a FACE time extrapolation
+    /// runs on - `field::advective`'s (120.4c)/(120.4d) - at this step of
+    /// this scheme's own [`TimeState`].
+    ///
+    /// `Euler` and `backward` are exactly [`DdtScheme::coeffs`] on the
+    /// current state, so a face relaxes by the same discretisation the cells
+    /// do. The other three are REFUSED, naming the equation that asked
+    /// (`what`) and SPEC-LIT 120.4: `steadyState` and `localEuler` have no
+    /// physical time to extrapolate along (`localEuler`'s step is a per-cell
+    /// preconditioner, not a time derivative), and under `CrankNicolson` the
+    /// theta weighting acts on the spatial operator while (120.4c) is defined
+    /// for `Euler` and `backward` only - running a face triple whose ddt
+    /// half says Euler inside a theta method would be a condition the case
+    /// did not ask for.
+    pub fn face_coeffs(&self, what: &str) -> Result<DdtCoeffs> {
+        match self.scheme {
+            DdtScheme::SteadyState => Err(Error::Config(format!(
+                "{what}: `steadyState` has no physical time, and the face \
+                 extrapolation of SPEC-LIT 120.4 is defined for a transient \
+                 run only (SPEC-LIT 120.4). Alternative: `Euler` or \
+                 `backward`, which `face_coeffs` hands over."
+            ))),
+            DdtScheme::LocalEuler => Err(Error::Config(format!(
+                "{what}: `localEuler`'s step is a per-cell preconditioner, \
+                 not a time derivative, so a face has no dt to extrapolate \
+                 with (SPEC-LIT 120.4). Alternative: `Euler` or `backward`."
+            ))),
+            DdtScheme::CrankNicolson(_) => Err(Error::Config(format!(
+                "{what}: `CrankNicolson` weights the SPATIAL operator by \
+                 theta (SPEC-LIT 13.1), while the face condition of \
+                 SPEC-LIT 120.4 is defined for `Euler` and `backward` only, \
+                 so its triple has no coefficients under theta. Alternative: \
+                 `Euler` or `backward` for the face condition."
+            ))),
+            other => other.coeffs(self.state.dt, self.state.dt_old, self.state.step),
+        }
+    }
 }
 
 // ==========================================================================
@@ -1562,6 +1600,67 @@ mod tests {
         let c = DdtScheme::Euler.coeffs(dt, dt, 3).unwrap();
         let line = |t: Scalar| 1.0 + 2.0 * t;
         assert!((c.a_n * line(0.0) + c.a_0 * line(-dt) - 2.0).abs() < 1e-14);
+    }
+
+    /// SPEC-LIT 120.4: the face time extrapolation runs `Euler` and
+    /// `backward`'s OWN coefficients from the state the run carries, and
+    /// refuses `steadyState`, `localEuler` and `CrankNicolson`, naming the
+    /// equation that asked - `steadyState` and `localEuler` have no physical
+    /// time to extrapolate along, and under theta the weighting acts on the
+    /// spatial operator while (120.4c) is defined for `Euler` and
+    /// `backward` only.
+    #[test]
+    fn face_coeffs_refuses_steady_local_euler_and_crank_nicolson() {
+        let Some(fx) = fixture([2, 2, 1]) else { return };
+        let what = "the advective outlet on p";
+
+        for scheme in [DdtScheme::Euler, DdtScheme::Backward] {
+            let ddt = Ddt::new_with_relax(
+                &fx.gpu,
+                &fx.m,
+                scheme,
+                0.125,
+                LtsControls::default(),
+                false,
+            )
+            .expect("ddt");
+            let c = ddt.face_coeffs(what).expect("a transient scheme hands them over");
+            assert_eq!(
+                c,
+                ddt.scheme
+                    .coeffs(ddt.state.dt, ddt.state.dt_old, ddt.state.step)
+                    .unwrap(),
+                "face_coeffs is the scheme's own coefficients"
+            );
+        }
+
+        for scheme in [DdtScheme::SteadyState, DdtScheme::LocalEuler] {
+            let ddt =
+                Ddt::new(&fx.gpu, &fx.m, scheme, 0.125, LtsControls::default()).expect("ddt");
+            let e = ddt.face_coeffs(what).expect_err("no physical time");
+            let msg = e.to_string();
+            assert!(msg.contains(what), "{msg}");
+            assert!(msg.contains("SPEC-LIT 120.4"), "{msg}");
+        }
+
+        // `CrankNicolson` needs `relaxed = false` even to construct (SPEC-LIT
+        // 13.1); the face condition refuses it all the same.
+        let ddt = Ddt::new_with_relax(
+            &fx.gpu,
+            &fx.m,
+            DdtScheme::CrankNicolson(0.5),
+            0.125,
+            LtsControls::default(),
+            false,
+        )
+        .expect("ddt");
+        let e = ddt
+            .face_coeffs(what)
+            .expect_err("theta has no face coefficients");
+        let msg = e.to_string();
+        assert!(msg.contains(what), "{msg}");
+        assert!(msg.contains("SPEC-LIT 120.4"), "{msg}");
+        assert!(msg.contains("CrankNicolson"), "{msg}");
     }
 
     // ----------------------------------------------------------------------

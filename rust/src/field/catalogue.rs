@@ -51,7 +51,7 @@ pub(crate) struct Entry {
 /// aliases, then the planned names by their unit, the owned names by their
 /// stream, and the permanent refusals last.
 pub(crate) const CATALOGUE: &[Entry] = &[
-    // ---- implemented (60), in IMPLEMENTED_BC_NAMES' order -----------------
+    // ---- implemented (62), in IMPLEMENTED_BC_NAMES' order -----------------
     Entry { family: "basic", name: "fixedValue", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "noSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "zeroGradient", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
@@ -114,12 +114,17 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "wall", name: "partialSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "wall", name: "fixedNormalSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "wall", name: "fixedShearStress", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    // SPEC-LIT 120.4: the two outlets. `outletInlet` is (120.4a)'s reverse
+    // flux switch; `advective` is (120.4b)-(120.4d)'s Robin outlet, reached
+    // only where the caller refreshes it every step.
+    Entry { family: "outlet", name: "outletInlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "outlet", name: "advective", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     // ---- alias (3) --------------------------------------------------------
     Entry { family: "thermal", name: "compressible::alphatJayatillekeWallFunction", status: Status::Alias { to: "thermalWallFunction" }, field: "T", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::turbulentTemperatureCoupledBaffleMixed", status: Status::Alias { to: "coupledTemperature" }, field: "T", extended_by: &[], probes: &[] },
     // SPEC-LIT 120.3: `nutUWallFunction` already applies Spalding's formula.
     Entry { family: "wall function", name: "nutUSpaldingWallFunction", status: Status::Alias { to: "nutUWallFunction" }, field: "psi", extended_by: &[], probes: &[] },
-    // ---- planned (47), by unit --------------------------------------------
+    // ---- planned (45), by unit --------------------------------------------
     Entry { family: "velocity inlet", name: "surfaceNormalFixedValue", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "velocity inlet", name: "cylindricalInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "velocity inlet", name: "swirlFlowRateInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
@@ -128,8 +133,6 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "velocity inlet", name: "pressureDirectedInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "velocity inlet", name: "pressureDirectedInletOutletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "velocity inlet", name: "pressureInletOutletParSlipVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "outlet", name: "outletInlet", status: Status::Planned { unit: "BC-09" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "outlet", name: "advective", status: Status::Planned { unit: "BC-09" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "outlet", name: "fixedMean", status: Status::Planned { unit: "BC-10" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "outlet", name: "fixedMeanOutletInlet", status: Status::Planned { unit: "BC-10" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "outlet", name: "fixedFluxExtrapolatedPressure", status: Status::Planned { unit: "BC-10" }, field: "psi", extended_by: &[], probes: &[] },

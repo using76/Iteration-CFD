@@ -4534,6 +4534,8 @@ fn patch_spec(type_name: &str) -> PatchFieldSpec {
         ref_gradient_v: Vec::new(),
         inlet_value: Vec::new(),
         inlet_value_v: Vec::new(),
+        outlet_value: Vec::new(),
+        outlet_value_v: Vec::new(),
         value_fraction: Vec::new(),
         extra: std::collections::BTreeMap::new(),
         dicts: std::collections::BTreeMap::new(),

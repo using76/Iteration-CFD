@@ -46,7 +46,7 @@ use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
-use crate::field::{GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
+use crate::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use crate::mesh::GpuMesh;
 use crate::{Label, Scalar, Vec3};
 
@@ -55,6 +55,9 @@ pub struct FieldKernels {
     correct_bc_scalar: CudaFunction,
     correct_bc_vector: CudaFunction,
     inlet_outlet: CudaFunction,
+    advective_speed: CudaFunction,
+    advective_robin_scalar: CudaFunction,
+    advective_robin_vector: CudaFunction,
 
     copy: CudaFunction,
     copy_vector: CudaFunction,
@@ -76,6 +79,11 @@ impl FieldKernels {
             correct_bc_scalar: k.func("fldCorrectBcScalar")?,
             correct_bc_vector: k.func("fldCorrectBcVector")?,
             inlet_outlet: k.func("fldInletOutletFraction")?,
+            // SPEC-LIT 120.4: the advective outlet's speed and its Robin
+            // rewrite, shared with CMP-17's wave-transmissive condition.
+            advective_speed: k.func("fldAdvectiveSpeed")?,
+            advective_robin_scalar: k.func("fldAdvectiveRobinScalar")?,
+            advective_robin_vector: k.func("fldAdvectiveRobinVector")?,
 
             copy: k.func("fldCopy")?,
             copy_vector: k.func("fldCopyVector")?,
@@ -277,6 +285,216 @@ pub fn update_inlet_outlet_vector(
 ) -> Result<()> {
     let n = f.n_boundary_faces;
     update_inlet_outlet(gpu, k, &mut f.fr, &f.bc_kind, &phi.bf, n)
+}
+
+// ==========================================================================
+//  The advective outlet (SPEC-LIT 120.4)
+// ==========================================================================
+
+/// Fill the wave speed and the relaxation rate of every face of `match_kind`
+/// from the flux - (120.4b), `w = max(phi_b/|S_f|, 0)` (0 where `|S_f|` is
+/// 0) and `K = w/lInf`.
+///
+/// `match_kind` is an input, not a constant: the generic condition passes
+/// `BcKind::Advective`, and CMP-17 passes its own kind with its own `w` and
+/// `K` of (126.6) to the same kernels. Every length must cover the whole
+/// boundary, the same contract [`update_inlet_outlet`] checks.
+#[allow(clippy::too_many_arguments)]
+pub fn advective_speed(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    w: &mut DevBuf<Scalar>,
+    k_relax: &mut DevBuf<Scalar>,
+    bc_kind: &DevBuf<Label>,
+    match_kind: BcKind,
+    phi_b: &DevBuf<Scalar>,
+    mag_sf: &DevBuf<Scalar>,
+    inv_l_inf: &DevBuf<Scalar>,
+    n_boundary_faces: usize,
+) -> Result<()> {
+    let n = n_boundary_faces;
+    for (buf, name) in [
+        (w.len(), "w"),
+        (k_relax.len(), "k_relax"),
+        (bc_kind.len(), "bc_kind"),
+        (phi_b.len(), "phi_b"),
+        (mag_sf.len(), "mag_sf"),
+        (inv_l_inf.len(), "inv_l_inf"),
+    ] {
+        if buf < n {
+            return Err(Error::Config(format!(
+                "advective_speed: {n} boundary faces, but {name} has {buf}"
+            )));
+        }
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let kind = match_kind as Label;
+
+    let func = k.advective_speed.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(&mut *w)
+            .arg(&mut *k_relax)
+            .arg(bc_kind)
+            .arg(&kind)
+            .arg(phi_b)
+            .arg(mag_sf)
+            .arg(inv_l_inf)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// Rewrite the triple of every face of `match_kind` from (120.4d), in the
+/// 120.4 operation order (`d = a_n + K`, `fr = d/(d + w·Delta_b)`,
+/// `refValue = (K·phi_inf - a_0·b_o - a_00·b_oo)/d`, `ref_grad = 0`), with
+/// `(a_n, a_0, a_00)` the run's own `DdtCoeffs` - the host twin is
+/// [`crate::field::advective::advective_triple`]. The face value is then the
+/// ordinary §4 evaluation: run
+/// [`correct_boundary_conditions`] after this, never instead of it.
+///
+/// `b_old`/`b_old_old` are the face's two previous STEP values, rotated once
+/// per time step by `field::advective`'s `store_old_time`.
+#[allow(clippy::too_many_arguments)]
+pub fn advective_robin_scalar(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    fr: &mut DevBuf<Scalar>,
+    ref_value: &mut DevBuf<Scalar>,
+    ref_grad: &mut DevBuf<Scalar>,
+    bc_kind: &DevBuf<Label>,
+    match_kind: BcKind,
+    w: &DevBuf<Scalar>,
+    k_relax: &DevBuf<Scalar>,
+    phi_inf: &DevBuf<Scalar>,
+    b_old: &DevBuf<Scalar>,
+    b_old_old: &DevBuf<Scalar>,
+    delta_coeffs: &DevBuf<Scalar>,
+    c: crate::timescheme::DdtCoeffs,
+    n_boundary_faces: usize,
+) -> Result<()> {
+    let n = n_boundary_faces;
+    for (buf, name) in [
+        (fr.len(), "fr"),
+        (ref_value.len(), "ref_value"),
+        (ref_grad.len(), "ref_grad"),
+        (bc_kind.len(), "bc_kind"),
+        (w.len(), "w"),
+        (k_relax.len(), "k_relax"),
+        (phi_inf.len(), "phi_inf"),
+        (b_old.len(), "b_old"),
+        (b_old_old.len(), "b_old_old"),
+        (delta_coeffs.len(), "delta_coeffs"),
+    ] {
+        if buf < n {
+            return Err(Error::Config(format!(
+                "advective_robin_scalar: {n} boundary faces, but {name} has {buf}"
+            )));
+        }
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let kind = match_kind as Label;
+
+    let func = k.advective_robin_scalar.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(&mut *fr)
+            .arg(&mut *ref_value)
+            .arg(&mut *ref_grad)
+            .arg(bc_kind)
+            .arg(&kind)
+            .arg(w)
+            .arg(k_relax)
+            .arg(phi_inf)
+            .arg(b_old)
+            .arg(b_old_old)
+            .arg(delta_coeffs)
+            .arg(&c.a_n)
+            .arg(&c.a_0)
+            .arg(&c.a_00)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// [`advective_robin_scalar`] for a vector field: one `fr` per face - a
+/// vector field shares the fraction across its components (SPEC-LIT 120.4)
+/// - and `ref_value`/`phi_inf`/`b_old`/`b_old_old` per component.
+#[allow(clippy::too_many_arguments)]
+pub fn advective_robin_vector(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    fr: &mut DevBuf<Scalar>,
+    ref_value: &mut DevBuf<Vec3>,
+    ref_grad: &mut DevBuf<Vec3>,
+    bc_kind: &DevBuf<Label>,
+    match_kind: BcKind,
+    w: &DevBuf<Scalar>,
+    k_relax: &DevBuf<Scalar>,
+    phi_inf: &DevBuf<Vec3>,
+    b_old: &DevBuf<Vec3>,
+    b_old_old: &DevBuf<Vec3>,
+    delta_coeffs: &DevBuf<Scalar>,
+    c: crate::timescheme::DdtCoeffs,
+    n_boundary_faces: usize,
+) -> Result<()> {
+    let n = n_boundary_faces;
+    for (buf, name) in [
+        (fr.len(), "fr"),
+        (ref_value.len(), "ref_value"),
+        (ref_grad.len(), "ref_grad"),
+        (bc_kind.len(), "bc_kind"),
+        (w.len(), "w"),
+        (k_relax.len(), "k_relax"),
+        (phi_inf.len(), "phi_inf"),
+        (b_old.len(), "b_old"),
+        (b_old_old.len(), "b_old_old"),
+        (delta_coeffs.len(), "delta_coeffs"),
+    ] {
+        if buf < n {
+            return Err(Error::Config(format!(
+                "advective_robin_vector: {n} boundary faces, but {name} has {buf}"
+            )));
+        }
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let kind = match_kind as Label;
+
+    let func = k.advective_robin_vector.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(&mut *fr)
+            .arg(&mut *ref_value)
+            .arg(&mut *ref_grad)
+            .arg(bc_kind)
+            .arg(&kind)
+            .arg(w)
+            .arg(k_relax)
+            .arg(phi_inf)
+            .arg(b_old)
+            .arg(b_old_old)
+            .arg(delta_coeffs)
+            .arg(&c.a_n)
+            .arg(&c.a_0)
+            .arg(&c.a_00)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
 }
 
 // ==========================================================================
@@ -836,6 +1054,13 @@ mod tests {
         // evaluates (120.3a) into the face value while the matrix sees
         // (120.3h) - the tangential part implicitly.
         assert_eq!(BcKind::DirectionMixed as i32, 37);
+
+        // `OFGPU_BC_OUTLET_INLET` and `OFGPU_BC_ADVECTIVE` in cuda/field.cu
+        // (SPEC-LIT 120.4): the reverse flux switch, OUTSIDE the range above
+        // because its Dirichlet half is the OUTflow half, and the Robin
+        // outlet whose triple `fldAdvectiveRobin*` rewrites from (120.4d).
+        assert_eq!(BcKind::OutletInlet as i32, 38);
+        assert_eq!(BcKind::Advective as i32, 39);
     }
 
     /// Every branch of SPEC-LIT section 4 against the closed form it

@@ -172,6 +172,13 @@ pub struct BcInputs<'a> {
     /// `tau` by - (120.3f) of SPEC-LIT 120.3. `None` refuses the name; no
     /// driver passes it yet (SPEC-LIT 120.3 records that).
     pub nu: Option<Scalar>,
+    /// The caller refreshes the `advective` faces every step through
+    /// `field::advective` (SPEC-LIT 120.4). False - the default, which every
+    /// driver passes today - refuses the name: the condition is a Robin
+    /// triple rewritten from a wave speed every outer iteration, and a setup
+    /// that seeds it and walks away would leave the face frozen at its seed
+    /// triple forever, which is the silent substitution §13.4 forbids.
+    pub advective: bool,
 }
 
 impl<'a> BcInputs<'a> {
@@ -437,7 +444,9 @@ fn f1_needs_timed(setting: &str, field: &str, timed_entry: &str) -> Error {
 /// A rank-3 value out of a patch entry's raw text, the same reading
 /// `function1`'s own parameters take: any leading dimension set and
 /// `uniform`/`constant` word skipped, then `(a b c)` (SPEC-LIT 120.1).
-fn f1_vec3(raw: &str, setting: &str, what: &str) -> Result<Vec3> {
+/// `pub(crate)`: `field::advective` reads `advective`'s vector `fieldInf`
+/// with the same reader (SPEC-LIT 120.4).
+pub(crate) fn f1_vec3(raw: &str, setting: &str, what: &str) -> Result<Vec3> {
     let mut tz = crate::io::tokenizer::Tokenizer::new(raw, setting);
     while tz.is_punct('[') || tz.is_word("uniform") || tz.is_word("constant") {
         if tz.is_punct('[') {
@@ -764,6 +773,26 @@ fn scalar_patch(
     let inlet = spread(&spec.inlet_value, n, 0.0, "inletValue", patch)?;
     let vfrac = spread(&spec.value_fraction, n, 1.0, "valueFraction", patch)?;
 
+    // SPEC-LIT 120.4, (120.4a): the value `outletInlet` fixes the face at where the
+    // flow leaves. Required - read and written back exactly as `inletValue`
+    // is - and a missing one is an error naming the key, not a zero.
+    let outlet = match kind {
+        BcKind::OutletInlet => {
+            if spec.outlet_value.is_empty() {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}/outletValue: \
+                         `outletInlet` needs an `outletValue` entry and the \
+                         patch has none (SPEC-LIT 120.4)"
+                    ),
+                });
+            }
+            spread(&spec.outlet_value, n, 0.0, "outletValue", patch)?
+        }
+        _ => Vec::new(),
+    };
+
     // The entries only one condition each knows about. Read here, once per
     // patch, so that a missing or unreadable one is reported against the
     // condition that wanted it (SPEC-LIT 13.4) rather than defaulted.
@@ -827,6 +856,32 @@ fn scalar_patch(
             // Seeding it as inflow is the safe start: it holds a sensible
             // value on the first assembly, before any flux exists.
             BcKind::InletOutlet => (1.0, inlet[i], 0.0),
+
+            // SPEC-LIT 120.4, (120.4a): the REVERSE switch. Seeded fr = 0 -
+            // zero-gradient until a flux exists - and rewritten every
+            // iteration by `update_inlet_outlet` under (120.4a)'s strict
+            // `phi_b > 0`, exactly where `inletOutlet` is refreshed.
+            BcKind::OutletInlet => (0.0, outlet[i], 0.0),
+
+            // SPEC-LIT 120.4, (120.4b)-(120.4d): the Robin outlet, seeded zero-gradient
+            // like every condition whose triple a kernel rewrites before the
+            // first assembly. Only where the caller promises to run
+            // `field::advective` every step; no driver sets the opt-in yet,
+            // so every driver refuses the name today and the condition is
+            // reached through the API.
+            BcKind::Advective if aux.inputs.advective => (0.0, 0.0, 0.0),
+            BcKind::Advective => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}: `advective` is \
+                         refused - its triple must be rewritten every time \
+                         step through field::advective, and this setup was \
+                         given BcInputs::advective = false, so nothing would \
+                         (SPEC-LIT 120.4)"
+                    ),
+                });
+            }
 
             // k = 3/2 (I |U|)^2 - the definition of the turbulence intensity
             // I as the ratio of the r.m.s. velocity fluctuation to the mean,
@@ -1919,6 +1974,25 @@ fn vector_patch(
     let inlet = spread(&spec.inlet_value_v, n, zero, "inletValue", patch)?;
     let vfrac = spread(&spec.value_fraction, n, 1.0, "valueFraction", patch)?;
 
+    // SPEC-LIT 120.4, (120.4a): `outletValue` on a vector field - required, the same
+    // reading the scalar arm above gives it.
+    let outlet = match kind {
+        BcKind::OutletInlet => {
+            if spec.outlet_value_v.is_empty() {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}/outletValue: \
+                         `outletInlet` needs an `outletValue` entry and the \
+                         patch has none (SPEC-LIT 120.4)"
+                    ),
+                });
+            }
+            spread(&spec.outlet_value_v, n, zero, "outletValue", patch)?
+        }
+        _ => Vec::new(),
+    };
+
     // `flowRateInletVelocity` names its flow rate one of two ways. Both are a
     // volume flux here, because the whole solver is incompressible and its
     // `rho` is 1: `massFlowRate` and `volumetricFlowRate` are then the same
@@ -1969,6 +2043,27 @@ fn vector_patch(
             BcKind::FixedGradient => (0.0, zero, grad[i]),
             BcKind::Mixed => (vfrac[i], rvalue[i], rgrad[i]),
             BcKind::InletOutlet => (1.0, inlet[i], zero),
+
+            // SPEC-LIT 120.4, (120.4a): the REVERSE switch, seeded zero-gradient and
+            // rewritten by `update_inlet_outlet` under the strict
+            // `phi_b > 0` - exactly where `inletOutlet` is refreshed.
+            BcKind::OutletInlet => (0.0, outlet[i], zero),
+
+            // SPEC-LIT 120.4, (120.4b)-(120.4d): the Robin outlet, only where the
+            // caller promises to refresh it through `field::advective`.
+            BcKind::Advective if aux.inputs.advective => (0.0, zero, zero),
+            BcKind::Advective => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}: `advective` is \
+                         refused - its triple must be rewritten every time \
+                         step through field::advective, and this setup was \
+                         given BcInputs::advective = false, so nothing would \
+                         (SPEC-LIT 120.4)"
+                    ),
+                });
+            }
 
             // Velocity at an open boundary whose pressure is prescribed: the
             // flux sets the velocity where the flow comes IN, and the interior
@@ -3235,6 +3330,11 @@ pub fn max_div_phi(
 /// `phi_b < 0`. A face with exactly zero flux is treated as outflow, which
 /// leaves it zero-gradient and lets the interior decide.
 ///
+/// SPEC-LIT 120.4, (120.4a): `outletInlet` rides the same call with the REVERSE
+/// switch, `fr = 1` where `phi_b > 0` strictly - so every driver that
+/// refreshes `inletOutlet` refreshes `outletInlet` with it, and it runs
+/// wherever `inletOutlet` runs.
+///
 /// Host-side, for setup. The in-loop version is
 /// [`crate::field_ops::update_inlet_outlet`], which is a kernel.
 pub fn update_inlet_outlet(
@@ -3255,6 +3355,11 @@ pub fn update_inlet_outlet(
             .contains(&kinds[bf])
         {
             fr[bf] = if phib[bf] < 0.0 { 1.0 } else { 0.0 };
+        } else if kinds[bf] == crate::field::BcKind::OutletInlet as crate::Label {
+            // SPEC-LIT 120.4, (120.4a): the REVERSE switch, outflow fixed at
+            // `outletValue`, `phi_b > 0` strictly - zero flux stays
+            // zero-gradient under both conditions.
+            fr[bf] = if phib[bf] > 0.0 { 1.0 } else { 0.0 };
         }
     }
 
@@ -5267,4 +5372,157 @@ mod tests {
         assert!(msg.contains('2'), "{msg}");
     }
 
+    // ------------------------------------------------------------------
+    //  SPEC-LIT 120.4 - the two outlets
+    // ------------------------------------------------------------------
+
+    /// `advective` is refused unless the caller sets `BcInputs::advective`,
+    /// the promise that `field::advective` refreshes the condition every
+    /// step (SPEC-LIT 120.4). No driver sets it today, so every driver
+    /// refuses the name; with the opt-in the triple seeds zero-gradient.
+    #[test]
+    fn advective_is_refused_without_the_opt_in() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let internal = vec![0.0; m.n_cells];
+        let raw = named_scalar_field("T", &xmin, spec("advective"));
+
+        let e = scalar_boundary(&raw, &m, &internal)
+            .expect_err("the opt-in is false by default");
+        let msg = e.to_string();
+        assert!(msg.contains("advective"), "{msg}");
+        assert!(
+            msg.contains(&format!("T: boundaryField/{xmin}")),
+            "the refusal names field and patch: {msg}"
+        );
+        assert!(msg.contains("BcInputs::advective"), "{msg}");
+        assert!(msg.contains("SPEC-LIT 120.4"), "{msg}");
+
+        let b = scalar_boundary_with(
+            &raw,
+            &m,
+            &internal,
+            BcInputs {
+                advective: true,
+                ..Default::default()
+            },
+        )
+        .expect("the opt-in lets it build");
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert_eq!(b.kind[f], BcKind::Advective as Label);
+            assert_eq!(b.fr[f], 0.0, "seeded zero-gradient");
+            assert_eq!(b.ref_value[f], 0.0);
+            assert_eq!(b.ref_grad[f], 0.0);
+        }
+
+        // And the same refusal on a VECTOR field.
+        let vraw = named_vector_field(&xmin, spec("advective"));
+        let e = vector_boundary(&vraw, &m, &vec![Vec3::ZERO; m.n_cells])
+            .expect_err("the vector setup refuses it too");
+        assert!(e.to_string().contains("advective"), "{}", e);
+    }
+
+    /// `fieldInf` without `lInf` is an entry read by nothing - `K = w/lInf`
+    /// only where the length is stated - and SPEC-LIT 120.4 refuses it,
+    /// naming field, patch and key (SPEC-LIT 13.4). With `lInf` the pair
+    /// lands on the patch's faces, and nothing off them.
+    #[test]
+    fn advective_fieldinf_without_linf_is_refused() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+
+        let mut orphan = spec("advective");
+        orphan.extra.insert("fieldInf".into(), "uniform 0.5".into());
+        let e = crate::field::advective::scalar_inflows(
+            &named_scalar_field("T", &xmin, orphan),
+            &m,
+        )
+        .expect_err("fieldInf without lInf must be refused");
+        let msg = e.to_string();
+        assert!(msg.contains("fieldInf"), "{msg}");
+        assert!(
+            msg.contains(&format!("T: boundaryField/{xmin}")),
+            "the refusal names field and patch: {msg}"
+        );
+        assert!(msg.contains("SPEC-LIT 120.4"), "{msg}");
+
+        // The stated pair: 1/lInf and fieldInf on the patch's faces, 0 off.
+        let mut ok = spec("advective");
+        ok.extra.insert("lInf".into(), "0.25".into());
+        ok.extra.insert("fieldInf".into(), "2.0".into());
+        let (inv, finf) = crate::field::advective::scalar_inflows(
+            &named_scalar_field("T", &xmin, ok),
+            &m,
+        )
+        .expect("builds");
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert!((inv[f] - 4.0).abs() <= 1e-12, "1/lInf on face {f}");
+            assert_eq!(finf[f], 2.0);
+        }
+        let off = m.patches[0].start + m.patches[0].size;
+        assert!(inv[off..].iter().all(|v| *v == 0.0));
+        assert!(finf[off..].iter().all(|v| *v == 0.0));
+
+        // A non-positive `lInf` is refused naming the key.
+        let mut bad = spec("advective");
+        bad.extra.insert("lInf".into(), "-1".into());
+        let e = crate::field::advective::scalar_inflows(
+            &named_scalar_field("T", &xmin, bad),
+            &m,
+        )
+        .expect_err("lInf must be positive");
+        assert!(e.to_string().contains("lInf"), "{}", e);
+    }
+
+    /// `outletInlet` seeds `fr = 0` - zero-gradient until a flux exists -
+    /// at `outletValue`, and the entry is REQUIRED: a patch without one is
+    /// an error naming the key, on a scalar field and on a vector field
+    /// (SPEC-LIT 120.4, (120.4a)).
+    #[test]
+    fn outlet_inlet_needs_outlet_value() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let internal = vec![0.0; m.n_cells];
+
+        let e = scalar_boundary(&named_scalar_field("T", &xmin, spec("outletInlet")), &m, &internal)
+            .expect_err("no outletValue was given");
+        let msg = e.to_string();
+        assert!(msg.contains("outletValue"), "{msg}");
+        assert!(
+            msg.contains(&format!("T: boundaryField/{xmin}")),
+            "the refusal names field and patch: {msg}"
+        );
+        assert!(msg.contains("SPEC-LIT 120.4"), "{msg}");
+
+        let e = vector_boundary(&named_vector_field(&xmin, spec("outletInlet")), &m, &vec![Vec3::ZERO; m.n_cells])
+            .expect_err("no vector outletValue was given");
+        assert!(e.to_string().contains("outletValue"), "{}", e);
+
+        // With the entry: fr = 0 at outletValue, refGrad = 0.
+        let mut sp = spec("outletInlet");
+        sp.outlet_value = vec![3.0];
+        let b = scalar_boundary(&named_scalar_field("T", &xmin, sp), &m, &internal)
+            .expect("builds");
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert_eq!(b.kind[f], BcKind::OutletInlet as Label);
+            assert_eq!(b.fr[f], 0.0);
+            assert_eq!(b.ref_value[f], 3.0);
+            assert_eq!(b.ref_grad[f], 0.0);
+            assert_eq!(b.value[f], internal[m.b_face_cells[f] as usize]);
+        }
+
+        let mut vsp = spec("outletInlet");
+        vsp.outlet_value_v = vec![Vec3::new(1.0, 2.0, 3.0)];
+        let vb = vector_boundary(&named_vector_field(&xmin, vsp), &m, &vec![Vec3::ZERO; m.n_cells])
+            .expect("builds");
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert_eq!(vb.kind[f], BcKind::OutletInlet as Label);
+            assert_eq!(vb.fr[f], 0.0);
+            assert_eq!(vb.ref_value[f], Vec3::new(1.0, 2.0, 3.0));
+        }
+    }
 }
