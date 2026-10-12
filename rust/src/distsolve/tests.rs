@@ -991,3 +991,402 @@ fn an_spmd_pcg_is_the_in_process_pcg() {
     );
 }
 
+// ==========================================================================
+//  The SPMD PBiCGStab, and the block-local factorisation - SPEC-LIT §138.6
+// ==========================================================================
+
+/// The in-process solve for one decomposition, part by part, on the main
+/// card - the reference of both §138.6 gates. Colours first when the
+/// controls ask for the block-local factorisation, and reports each part's
+/// colour count with the fields.
+#[allow(clippy::too_many_arguments)]
+fn in_process_parts<S>(
+    gpu0: &Gpu,
+    sol0: &SolverKernels,
+    m: &HostMesh,
+    dec: &Decomposition,
+    a: &HostLduMatrix,
+    whole: &[Scalar],
+    ctrl: &SolverControls,
+    reduce: DistReduce,
+    solve: S,
+) -> Result<(Vec<Vec<Scalar>>, DistPerformance, Vec<usize>)>
+where
+    S: Fn(
+        &Gpu,
+        &SolverKernels,
+        &mut [DevBuf<Scalar>],
+        &DistSystem,
+        &mut HaloExchange,
+        &mut DistWorkspace,
+        &SolverControls,
+    ) -> Result<DistPerformance>,
+{
+    let np = dec.n_parts;
+    let mut ex = HaloExchange::new(gpu0, dec)?;
+    let sys = DistSystem::split(gpu0, &mut ex, m, dec, a)?;
+    let mut w = DistWorkspace::new(gpu0, &sys, reduce)?;
+    if matches!(ctrl.precon, Preconditioner::Dic | Preconditioner::Dilu) {
+        w.colour(gpu0, &sys)?;
+    }
+    let mut psi: Vec<DevBuf<Scalar>> = (0..np)
+        .map(|p| gpu0.upload(&dec.split_field(p, whole)?))
+        .collect::<Result<_>>()?;
+    let perf = solve(gpu0, sol0, &mut psi, &sys, &mut ex, &mut w, ctrl)?;
+    gpu0.sync()?;
+    let colours = w.colours();
+    let fields: Vec<Vec<Scalar>> = psi
+        .iter()
+        .map(|buf| gpu0.download(buf))
+        .collect::<Result<_>>()?;
+    Ok((fields, perf, colours))
+}
+
+/// The SPMD run of one §138.6 gate: one thread per rank, each with its own
+/// `Gpu` on device 0 and its own `SolverKernels`, the flag vote on, the
+/// colouring run when the controls ask for it. Per rank: the owned field,
+/// the performance, the votes taken, the colour count and
+/// [`SpmdWorkspace::partition_invariant`]'s answer for the controls.
+#[allow(clippy::too_many_arguments)]
+fn run_spmd<S>(
+    np: usize,
+    dec: &Decomposition,
+    m: &HostMesh,
+    a: &HostLduMatrix,
+    whole: &[Scalar],
+    ctrl: &SolverControls,
+    reduce: DistReduce,
+    solve: S,
+) -> Result<Vec<Result<(Vec<Scalar>, DistPerformance, u64, usize, bool)>>>
+where
+    S: Fn(
+            &Gpu,
+            &SolverKernels,
+            &dyn Comm,
+            &mut DevBuf<Scalar>,
+            &DistSystem,
+            &mut crate::halo::SpmdHalo,
+            &mut SpmdWorkspace,
+            &SolverControls,
+        ) -> Result<DistPerformance>
+        + Sync,
+{
+    crate::comm::ThreadComm::run(np, |comm| {
+        let gpu = Gpu::new(0)?;
+        let sol = SolverKernels::new(&gpu)?;
+        let rank = comm.rank();
+        let mut halo = crate::halo::SpmdHalo::new(&gpu, &dec.parts[rank], np)?;
+        let sys = DistSystem::split_one(&gpu, &mut halo, comm, m, dec, a)?;
+        let mut w = SpmdWorkspace::new(&gpu, comm, &sys, reduce)?;
+        w.set_flag_vote(true);
+        if matches!(ctrl.precon, Preconditioner::Dic | Preconditioner::Dilu) {
+            w.colour(&gpu, &sys)?;
+        }
+        let mut psi = gpu.upload(&dec.split_field(rank, whole)?)?;
+        let perf = solve(&gpu, &sol, comm, &mut psi, &sys, &mut halo, &mut w, ctrl)?;
+        gpu.sync()?;
+        let pinv = w.partition_invariant(ctrl.precon);
+        Ok((gpu.download(&psi)?, perf, w.n_flag_votes(), w.colours(), pinv))
+    })
+}
+
+/// THE TEN CUTS at one part count: `P = 1` with the linear cut alone, then
+/// three partitioners at `P = 2, 3, 4` - 1 + 2 + 3 + 4 = 10 cuts over the
+/// sweeps of part counts 1..=4, 28 rank results and `n_cells` owned cells.
+fn ten_cuts(m: &HostMesh, np: usize) -> Vec<(String, Decomposition)> {
+    if np == 1 {
+        return vec![(
+            "linear".to_string(),
+            Decomposition::build(m, 1, &PartitionMethod::Linear).expect("cut"),
+        )];
+    }
+    partitions(m, np)
+        .into_iter()
+        .map(|(name, method)| {
+            let d = Decomposition::build(m, np, &method).expect("cut");
+            (name, d)
+        })
+        .collect()
+}
+
+/// The two things every cut of the sweeps above must do: cut something, and
+/// leave every part with a halo - so the gate cannot pass inertly.
+fn cut_asserts(dec: &Decomposition, np: usize, name: &str) {
+    assert!(
+        dec.n_cut_faces > 0,
+        "P = {np} {name} cut nothing, so the gate would be inert"
+    );
+    assert!(
+        dec.parts.iter().all(|p| p.n_halo > 0),
+        "P = {np} {name} left a part without a halo"
+    );
+}
+
+/// **The §138.6 gate.** The PBiCGStab of §138.5's gate: the same solve, run
+/// as one rank per part through [`spmd_pbicgstab`], is bit for bit the
+/// in-process [`dist_pbicgstab`] for that part - and, the reduction being
+/// exact and the preconditioner one a cut cannot change, bit for bit the
+/// one-part answer on every rank's owned cells.
+///
+/// The 5×4×3 box, plain and cyclic, `P = 1..4`, three partitioners,
+/// `Diagonal` and `None`, the exact reduction, the flag vote on. Every rank
+/// also stops on the one-part iteration and takes `n_iterations + 1` votes.
+#[test]
+fn an_spmd_pbicgstab_is_the_in_process_pbicgstab() {
+    let Some(gpu0) = gpu() else { return };
+    let sol0 = SolverKernels::new(&gpu0).expect("kernels");
+
+    let mut rank_results = 0usize;
+    let mut cells = 0usize;
+    for cyclic in [false, true] {
+        let m = boxes([5, 4, 3], cyclic);
+        let a = poisson(&m);
+        let whole: Vec<Scalar> = (0..m.n_cells).map(field).collect();
+
+        for precon in [Preconditioner::Diagonal, Preconditioner::None] {
+            let ctrl = controls(LinearSolverKind::PBiCGStab, precon, None);
+
+            // Reference ONE: the in-process solve at one part, which the
+            // exact reduction makes every partition's answer.
+            let one = Decomposition::build(&m, 1, &PartitionMethod::Linear).expect("cut");
+            let (want, wp) = {
+                let (fields, perf, _) = in_process_parts(
+                    &gpu0,
+                    &sol0,
+                    &m,
+                    &one,
+                    &a,
+                    &whole,
+                    &ctrl,
+                    DistReduce::Exact,
+                    dist_pbicgstab,
+                )
+                .expect("the one-part reference");
+                (fields.into_iter().next().expect("one part"), perf)
+            };
+            assert!(wp.converged, "the reference solve must converge");
+            assert!(wp.n_iterations > 3, "a one-iteration gate proves nothing");
+
+            for np in 1..=4usize {
+                for (name, dec) in ten_cuts(&m, np) {
+                    if np > 1 {
+                        cut_asserts(&dec, np, &name);
+                    }
+
+                    // ---- the in-process reference, part by part ----------
+                    let (ref_fields, ref_perf, _) = in_process_parts(
+                        &gpu0,
+                        &sol0,
+                        &m,
+                        &dec,
+                        &a,
+                        &whole,
+                        &ctrl,
+                        DistReduce::Exact,
+                        dist_pbicgstab,
+                    )
+                    .unwrap_or_else(|e| panic!("in-process P = {np} {name}: {e}"));
+
+                    // ---- the SPMD run: one rank per part ------------------
+                    let got = run_spmd(np, &dec, &m, &a, &whole, &ctrl, DistReduce::Exact, spmd_pbicgstab)
+                        .unwrap_or_else(|e| panic!("spmd P = {np} {name}: {e}"));
+
+                    for (r, part) in dec.parts.iter().enumerate() {
+                        let (g, perf, votes, _, _) = got[r]
+                            .as_ref()
+                            .unwrap_or_else(|e| panic!("P = {np} {name} rank {r} failed: {e}"));
+                        rank_results += 1;
+                        cells += part.mesh.n_cells;
+                        for i in 0..part.mesh.n_cells {
+                            let gi = part.global_cell[i] as usize;
+                            let at = format!(
+                                "cyclic {cyclic}, {precon:?}, P = {np}, {name}, \
+                                 rank {r}, owned {i} (global {gi})"
+                            );
+                            assert_eq!(
+                                g[i].to_bits(),
+                                ref_fields[r][i].to_bits(),
+                                "vs the in-process part, {at}"
+                            );
+                            assert_eq!(
+                                g[i].to_bits(),
+                                want[gi].to_bits(),
+                                "vs the one-part answer, {at}"
+                            );
+                        }
+                        let at =
+                            format!("cyclic {cyclic}, {precon:?}, P = {np}, {name}, rank {r}");
+                        assert_eq!(perf.n_iterations, ref_perf.n_iterations, "iterations, {at}");
+                        assert_eq!(perf.n_exchanges, ref_perf.n_exchanges, "exchanges, {at}");
+                        assert_eq!(perf.n_reductions, ref_perf.n_reductions, "reductions, {at}");
+                        assert_eq!(perf.converged, ref_perf.converged, "converged, {at}");
+                        assert_eq!(
+                            perf.initial_residual.to_bits(),
+                            ref_perf.initial_residual.to_bits(),
+                            "initial residual bits, {at}"
+                        );
+                        assert_eq!(
+                            perf.final_residual.to_bits(),
+                            ref_perf.final_residual.to_bits(),
+                            "final residual bits, {at}"
+                        );
+                        assert_eq!(perf.n_iterations, wp.n_iterations, "vs Reference ONE, {at}");
+                        assert_eq!(
+                            *votes,
+                            perf.n_iterations as u64 + 1,
+                            "votes at check interval 1, {at}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(rank_results, 112, "rank results compared");
+    assert_eq!(
+        cells, 2400,
+        "owned cells compared against the in-process part"
+    );
+}
+
+
+/// The §138.6 gate for the **block-local factorisation**: with `PCG + Dic`
+/// and `PBiCGStab + Dilu`, both sides coloured, the SPMD solve is bit for
+/// bit the in-process block-local solve for that part - every owned cell,
+/// every counter and both residuals' bits - and each rank's colour count is
+/// the in-process part's.
+///
+/// NOT compared with the one-part answer, and not allowed to equal it: the
+/// factorisation is a different one for every cut (§73.5), so
+/// [`SpmdWorkspace::partition_invariant`] answers `false` on every rank and
+/// the in-process solve's `converged` is asserted so the comparison is not
+/// against a failure. The same boxes and cuts as the PBiCGStab gate above.
+#[test]
+fn an_spmd_block_local_factorisation_is_the_in_process_one() {
+    let Some(gpu0) = gpu() else { return };
+    let sol0 = SolverKernels::new(&gpu0).expect("kernels");
+
+    let mut rank_results = 0usize;
+    let mut cells = 0usize;
+    for cyclic in [false, true] {
+        let m = boxes([5, 4, 3], cyclic);
+        let a = poisson(&m);
+        let whole: Vec<Scalar> = (0..m.n_cells).map(field).collect();
+
+        for (kind, precon) in [
+            (LinearSolverKind::PCG, Preconditioner::Dic),
+            (LinearSolverKind::PBiCGStab, Preconditioner::Dilu),
+        ] {
+            let ctrl = controls(kind, precon, None);
+            // The two solvers as fn pointers, so the `match` arms unify.
+            let dist_by_kind: fn(
+                &Gpu,
+                &SolverKernels,
+                &mut [DevBuf<Scalar>],
+                &DistSystem,
+                &mut HaloExchange,
+                &mut DistWorkspace,
+                &SolverControls,
+            ) -> Result<DistPerformance> = match kind {
+                LinearSolverKind::PCG => dist_pcg,
+                _ => dist_pbicgstab,
+            };
+            let spmd_by_kind: fn(
+                &Gpu,
+                &SolverKernels,
+                &dyn Comm,
+                &mut DevBuf<Scalar>,
+                &DistSystem,
+                &mut crate::halo::SpmdHalo,
+                &mut SpmdWorkspace,
+                &SolverControls,
+            ) -> Result<DistPerformance> = match kind {
+                LinearSolverKind::PCG => spmd_pcg,
+                _ => spmd_pbicgstab,
+            };
+            for np in 1..=4usize {
+                for (name, dec) in ten_cuts(&m, np) {
+                    if np > 1 {
+                        cut_asserts(&dec, np, &name);
+                    }
+                    let (ref_fields, ref_perf, ref_colours) = in_process_parts(
+                        &gpu0,
+                        &sol0,
+                        &m,
+                        &dec,
+                        &a,
+                        &whole,
+                        &ctrl,
+                        DistReduce::Exact,
+                        dist_by_kind,
+                    )
+                    .unwrap_or_else(|e| panic!("in-process P = {np} {name}: {e}"));
+                    assert!(
+                        ref_perf.converged,
+                        "the in-process block-local solve must converge, P = {np} {name}"
+                    );
+                    let got = run_spmd(
+                        np,
+                        &dec,
+                        &m,
+                        &a,
+                        &whole,
+                        &ctrl,
+                        DistReduce::Exact,
+                        spmd_by_kind,
+                    )
+                    .unwrap_or_else(|e| panic!("spmd P = {np} {name}: {e}"));
+
+                    for (r, part) in dec.parts.iter().enumerate() {
+                        let (g, perf, votes, colours, pinv) = got[r]
+                            .as_ref()
+                            .unwrap_or_else(|e| panic!("P = {np} {name} rank {r} failed: {e}"));
+                        rank_results += 1;
+                        cells += part.mesh.n_cells;
+                        for i in 0..part.mesh.n_cells {
+                            let gi = part.global_cell[i] as usize;
+                            let at = format!(
+                                "cyclic {cyclic}, {kind:?}/{precon:?}, P = {np}, {name}, \
+                                 rank {r}, owned {i} (global {gi})"
+                            );
+                            assert_eq!(
+                                g[i].to_bits(),
+                                ref_fields[r][i].to_bits(),
+                                "vs the in-process block-local part, {at}"
+                            );
+                        }
+                        let at = format!(
+                            "cyclic {cyclic}, {kind:?}/{precon:?}, P = {np}, {name}, rank {r}"
+                        );
+                        assert_eq!(perf.n_iterations, ref_perf.n_iterations, "iterations, {at}");
+                        assert_eq!(perf.n_exchanges, ref_perf.n_exchanges, "exchanges, {at}");
+                        assert_eq!(perf.n_reductions, ref_perf.n_reductions, "reductions, {at}");
+                        assert_eq!(perf.converged, ref_perf.converged, "converged, {at}");
+                        assert_eq!(
+                            perf.initial_residual.to_bits(),
+                            ref_perf.initial_residual.to_bits(),
+                            "initial residual bits, {at}"
+                        );
+                        assert_eq!(
+                            perf.final_residual.to_bits(),
+                            ref_perf.final_residual.to_bits(),
+                            "final residual bits, {at}"
+                        );
+                        assert_eq!(
+                            *votes,
+                            perf.n_iterations as u64 + 1,
+                            "votes at check interval 1, {at}"
+                        );
+                        assert_eq!(*colours, ref_colours[r], "colours, {at}");
+                        assert!(*colours >= 1, "a coloured part has colours, {at}");
+                        assert!(!pinv, "the block-local factorisation is not partition-invariant, {at}");
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(rank_results, 112, "rank results compared");
+    assert_eq!(
+        cells, 2400,
+        "owned cells compared against the in-process part"
+    );
+}

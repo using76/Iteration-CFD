@@ -95,7 +95,7 @@ use crate::{Label, Scalar};
 
 pub mod spmd;
 
-pub use spmd::{spmd_pcg, SpmdWorkspace};
+pub use spmd::{spmd_pcg, spmd_pbicgstab, spmd_solve, SpmdWorkspace};
 
 // ==========================================================================
 //  Which cross-part reduction

@@ -139,13 +139,14 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     (
         "src/distsolve/spmd.rs",
         Stance::Refused(
-            "the SPMD PCG fills its halo through SpmdHalo and reduces \
-             through SpmdReduction, and both copy to the host and hand the \
-             bytes to a Comm on every step - host round trips by \
-             construction; it is refused by name at run time \
-             (an_spmd_pcg_refuses_by_name). Alternative: dist_pcg in one \
-             process, whose exchange and gather are device-only, or a \
-             fixed sweep count between exchanges",
+            "the SPMD PCG and PBiCGStab fill their halos through SpmdHalo \
+             and reduce through SpmdReduction, and both copy to the host \
+             and hand the bytes to a Comm on every step - host round trips \
+             by construction; both are refused by name at run time \
+             (an_spmd_pcg_refuses_by_name, an_spmd_pbicgstab_refuses_by_name). \
+             Alternative: dist_pcg or dist_pbicgstab in one process, whose \
+             exchange and gather are device-only, or a fixed sweep count \
+             between exchanges",
         ),
     ),
     (

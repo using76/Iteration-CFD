@@ -42435,8 +42435,9 @@ the same program on every rank r, on its own part:
   q, and is run-invariant only (§72.5).
   `SpmdWorkspace::partition_invariant` answers as
   `DistWorkspace::partition_invariant` does.
-* **Preconditioners.** `Diagonal` and `None`. `Dic` and `Dilu` are refused by
-  name until PAR-04b builds their block-local form on a rank.
+* **Preconditioners.** `Diagonal` and `None`, and, once the workspace is
+  coloured, the block-local `Dic` and `Dilu` of §138.6. On an uncoloured
+  workspace `Dic` and `Dilu` are refused by name.
 * **Not capturable.** Every exchange and every collective is a host round trip
   (§138.3, §138.4), so `spmd_pcg` inside `Gpu::capture` is refused by name
   (§81.3).
@@ -42461,7 +42462,7 @@ which is §13.4's `Error::Refused`.
 | `spmd_pcg`: the halo plan's cell counts are not the system's | the owned and halo cell counts of both |
 | `spmd_pcg`: a solution buffer shorter than `n_cells + n_halo` | the buffer's length, the length it must have, the owned and the halo cell counts, and `lduAmul` |
 | `spmd_pcg`: the flag vote disagrees | `flag` and every rank's vote in rank order, on every rank |
-| `spmd_pcg`: `Dic` or `Dilu` | the setting, the value and `diagonal` |
+| `spmd_pcg`: `Dic` or `Dilu` on an uncoloured workspace | the setting, the value, `diagonal` and `SpmdWorkspace::colour` |
 
 The `spmd_pcg` rows are checked in that order, the vote excepted, and before
 anything is launched or sent. A refusal that only one rank can see leaves the
@@ -42480,9 +42481,123 @@ own `Gpu` on device 0.
 
 **What this does not establish.** The ranks are threads of one process sharing
 one device, so nothing here is a speed-up (PAR-16) and nothing runs over MPI
-(PAR-06). PBiCGStab and the block-local `Dic`/`Dilu` on a rank are PAR-04b.
+(PAR-06). PBiCGStab and the block-local `Dic`/`Dilu` on a rank are §138.6.
 `split_one` still cuts a matrix assembled on the whole mesh, on the host; a
 rank that assembles its own part is PAR-10's.
+
+### 138.6 The SPMD PBiCGStab, and the block-local DIC and DILU on a rank
+
+ORIGINAL: this project's own design, with no external source. It defines no
+equation. The recurrence is §73's `dist_pbicgstab` (van der Vorst 1992, as §8
+cites it), and the factorisation is §21's, applied to one part's own
+submatrix as §73.5 describes. Both are unchanged.
+
+§138.5 put `dist_pcg` on a rank. This section does the same for the two things
+§138.5 left out. `src/distsolve/spmd.rs` holds them:
+
+* `spmd_pbicgstab(gpu, sol, comm, psi, sys, halo, w, ctrl)` runs
+  `dist_pbicgstab` for the rank's one part and returns §73's
+  `DistPerformance`. It takes the system, the halo plan and the workspace
+  `spmd_pcg` takes.
+* `SpmdWorkspace::colour(gpu, sys)` colours the rank's own part, so that `Dic`
+  and `Dilu` become available to both solvers. `colours()` gives the colour
+  count, and 0 before `colour`.
+* `SpmdWorkspace::effective_preconditioner(requested)` answers as
+  `DistWorkspace::effective_preconditioner` does (§13.4).
+* `spmd_solve(gpu, sol, comm, psi, sys, halo, w, ctrl)` dispatches on
+  `ctrl.solver` as `dist_solve` does. `GAMG` is refused by name, with
+  `PBiCGStab` as the alternative.
+
+```
+the same program on every rank r, on its own part:
+  r = b - A psi ;  r0 = r ;  p = 0 ;  v = 0 ;  rho_old = alpha = omega = 1
+  repeat
+      rho   = (r0,r)                              SpmdReduction (§138.4)
+      beta  = (rho/rho_old)(alpha/omega)
+      p     = r + beta (p - omega v)
+      pHat  = M^-1 p
+      SpmdHalo::scalar(pHat) ;  v = A pHat        exchange 1 (§73.2, §138.3)
+      alpha = rho / (r0,v)                        SpmdReduction
+      s     = r - alpha v
+      sHat  = M^-1 s
+      SpmdHalo::scalar(sHat) ;  t = A sHat        exchange 2
+      omega = (t,s) / (t,t)                       two SpmdReductions
+      psi  += alpha pHat + omega sHat ;  r = s - omega t ;  rho_old = rho
+      [ sum|r| ; convergence test ; read the flag ; vote ]
+```
+
+* **The kernels and their order are `dist_pbicgstab`'s for one part.** The
+  rule is §138.5's: every launch on a rank is the launch `dist_pbicgstab`
+  makes for that part, with the same arguments and the same launch geometry.
+  The exchange is `SpmdHalo::scalar` and each reduction is the `SpmdReduction`
+  method of the same name. So every rank's field is bit for bit
+  `dist_pbicgstab`'s field for its part. With the exact reduction and
+  `Diagonal` or `None` it is also the one-part field, and the ranks stop on
+  the one-part iteration (§73.8).
+* **`(t,s)` and `(t,t)` stay two reductions**, as in `dist_pbicgstab`
+  (§73.8's first row is the proof that this equals the serial solver's fused
+  pair).
+* **The mean, the flag and the vote are §138.5's.** The mean divides by the
+  whole mesh's cell count. Every rank reads its own flag, and the flag vote,
+  when it is on, follows each read. A solve that stops after `k` iterations
+  with `check_interval` 1 takes `k + 1` votes.
+* **The counts are §73.8's.** At `k` fixed iterations a rank makes `2k + 3`
+  exchanges and `4k + 4` reductions with PBiCGStab, and `k + 3` and `2k + 5`
+  with PCG. The handle counts `1 + 2 (4k + 4)` allgathers with the exact
+  reduction and `1 + (4k + 4)` with the gathered one, `new`'s included. A
+  preconditioner changes none of these numbers, because no preconditioner
+  here exchanges or reduces.
+* **Block-local `Dic` and `Dilu`.** `SpmdWorkspace::colour` builds
+  `MultiColour::new` on the rank's part mesh, which is what
+  `DistWorkspace::colour` builds for that part. The colouring is greedy in the
+  part's local cell order, so it is the same colouring. The factorisation and
+  the two sweeps then walk the part's own faces only, and a cut face is absent
+  from them (§73.5). So a rank's factorisation is bit for bit the in-process
+  block-local one for its part, and the solve that uses it is bit for bit
+  `dist_pcg`'s or `dist_pbicgstab`'s with the same preconditioner.
+* **It is still not partition-invariant.** The preconditioner is a different
+  one for every cut (§73.5), so `SpmdWorkspace::partition_invariant` answers
+  `false` for `Dic` and `Dilu`, and the answer is not the one-part answer.
+* **Every rank must colour alike.** `colour` is local: it sends nothing. A
+  world in which only some ranks coloured would refuse on the others, and
+  after any `Err` the world is spent (§138.5).
+* **Not capturable**, for §138.5's reason: `spmd_pbicgstab` and `spmd_solve`
+  inside `Gpu::capture` are refused by name (§81.3).
+
+**Refused by name.** `spmd_pbicgstab` checks §138.5's `spmd_pcg` rows, in the
+same order and before anything is launched or sent, and its messages start
+`spmd_pbicgstab: `. The flag vote's refusal starts with the name of the solver
+that took the vote. The rows that are new or changed:
+
+| case | the message names |
+|---|---|
+| `SpmdWorkspace::colour`: the system is not from `split_one` | starts `distsolve: `; `DistSystem::split_one` |
+| `SpmdWorkspace::colour`: the system's part is not the workspace's rank | starts `distsolve: `; `rank r` and `part p` |
+| `SpmdWorkspace::colour`: the system's cell counts are not the workspace's | starts `distsolve: `; the owned and halo cell counts of both |
+| `spmd_pcg` or `spmd_pbicgstab`: `Dic` or `Dilu` on an uncoloured workspace | §13.4's `Error::Refused`: the setting, the value, `diagonal` and `SpmdWorkspace::colour` |
+| `spmd_solve`: `GAMG` | §13.4's `Error::Refused`: the setting, `GAMG` and `PBiCGStab` |
+
+**What must hold.** Class D: bytes and counts. Each rank is a `ThreadComm`
+thread with its own `Gpu` on device 0. The solver tolerance is `1e-12` in the
+f64 build and `1e-5` in the f32 build; it is a solver control and not a gate
+tolerance, and every comparison is exact.
+
+| test | what it asserts |
+|---|---|
+| **`an_spmd_pbicgstab_is_the_in_process_pbicgstab`** (library, f64 build) | **the gate.** §138.5's gate with `spmd_pbicgstab` against `dist_pbicgstab`: the 5×4×3 box, plain and cyclic, `P = 1..4`, three partitioners, `Diagonal` and `None`, the exact reduction, the flag vote on. Every owned cell equals bit for bit the in-process part's and the one-part field's; the iteration, exchange and reduction counts, both residuals' bits and `converged` equal the in-process solve's; every rank took `n_iterations + 1` votes. 112 rank results and 2,400 cells are compared |
+| `an_spmd_block_local_factorisation_is_the_in_process_one` (library, f64 build) | the same boxes and cuts with PCG + `Dic` and PBiCGStab + `Dilu`, both sides coloured: every owned cell, every counter and both residuals' bits equal the in-process block-local solve's, each rank's colour count equals the in-process part's, and `partition_invariant` is `false` on every rank. 112 rank results and 2,400 cells are compared |
+| `an_spmd_pbicgstab_is_the_in_process_pbicgstab_in_both_builds` (`tests/distsolve_spmd.rs`) | §138.5's both-builds comparison with PBiCGStab, the gathered leg included. 139 rank results and 6,540 cells are compared |
+| `an_spmd_block_local_factorisation_is_the_in_process_one_in_both_builds` | the two `blockgen` boxes, PCG + `Dic` and PBiCGStab + `Dilu`, `P = 1..4`, the exact reduction: the comparison of the library test, in both precisions. 112 rank results and 6,000 cells are compared. On the 8×6×5 box at `P >= 2` with `Dic`, at least one rank's field differs from the one-part `Dic` field, so "not partition-invariant" is measured and not assumed |
+| `an_spmd_pbicgstab_counts_its_exchanges_and_collectives` | 5 fixed iterations, `P = 3`. PBiCGStab with `Diagonal` and with `Dilu`: 13 exchanges, 24 reductions, no vote, and 49 allgathers with the exact reduction or 25 with the gathered one. PCG with `Dic`: 8 exchanges, 15 reductions, 31 or 16 allgathers |
+| `an_spmd_flag_vote_names_a_disagreement` | extended to both solvers: each message starts with its solver's name |
+| `an_spmd_pbicgstab_refuses_by_name` | the `spmd_pcg` rows of §138.5 with the `spmd_pbicgstab: ` prefix, and the three `colour` rows |
+| `an_spmd_solve_dispatches_and_refuses_gamg` | 3 fixed iterations in a one-rank world: `spmd_solve` makes 6 exchanges for PCG and 9 for PBiCGStab, and refuses `GAMG` with the setting, the value and `PBiCGStab` |
+
+**What this does not establish.** §138.5's limits hold: threads of one process
+on one device, no speed-up, no MPI. The block-local iteration counts on the
+shipped meshes are §73.5's and are not re-measured here, because a rank's
+solve is the in-process solve bit for bit. No pressure backend runs on a rank
+yet (PAR-10b).
 
 ---
 
