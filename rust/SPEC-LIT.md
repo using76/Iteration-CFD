@@ -42277,6 +42277,93 @@ each rank is a `ThreadComm` thread with its own `Gpu` on device 0.
 one device, so nothing here measures an exchange's latency (PAR-16) and nothing
 runs over MPI (PAR-06). No solver calls `SpmdHalo` yet: PAR-04a is the first.
 
+### 138.4 The SPMD exact reduction
+
+ORIGINAL: this project's own design, with no external source. It defines no
+equation: the limb decomposition is §72.2's, unchanged.
+
+§72's `ExactReduction` holds every part in one process and gathers the per-part
+results with a device-to-device copy (§72.4, step 1). In an SPMD run a rank
+holds **one** part, so the gather goes through the host and `Comm::allgather`.
+`src/exactsum/spmd.rs` holds `SpmdReduction`, built on one rank from a `Comm`
+and the number of terms `n` the rank owns. The kernels are §72's own, and so is
+the order of the gathered values: slot q of a gathered buffer is rank q's
+value, as slot q was part q's.
+
+```
+set-up   new(gpu, comm, n):  allgather of the term counts (8 bytes each)
+
+an exact reduction (sum, sum_mag, dot, norm_factor) on every rank:
+1. the rank's own maximum of |t|          the stage-one and stage-two kernels of §72, unchanged
+2. allgather  8 bytes: that maximum, widened to a double
+3. solMaxStage2 over the P gathered maxima -> the global anchor      (§72.3)
+4. the rank's own limbs against the global anchor; exCombine over its blocks
+5. allgather  40 bytes: the rank's five limb words (i64)
+6. exCombine over the P gathered limb sets, then exToScalar          (§72.4)
+
+max_mag:        steps 1-3, and the anchor is the answer
+gathered_*:     the rank's own two-stage partial, one allgather of 8 bytes,
+                then solSumStage2 over the P gathered partials       (§72.5)
+```
+
+* **The collective is still a gather.** Steps 2 and 5 move bytes and do no
+  arithmetic. Every combine runs on every rank, on the same P values in the
+  same rank order, with the kernel the in-process form uses. So every rank
+  holds the same answer, and it is the in-process answer bit for bit: for the
+  exact reductions whatever part each rank holds, for `gathered_*` when rank q
+  holds what part q held.
+* **Two collectives for an exact reduction, one for a maximum or a gathered
+  partial.** §72.3 shows why the anchor cannot ride with the limbs: the limbs
+  are cut against the anchor, so the anchor must be global first.
+  `n_allgathers()` counts the calls a handle has made, the one in `new`
+  included.
+* **The wire.** A value's bytes are its in-memory representation. The count is
+  a `u64`. The maximum and the gathered partial travel as a double in both
+  builds (§118.1): the rank's stage two stores a `Scalar`, and the host widens
+  it, which is exact because every float is a double. The limbs travel as five
+  `i64`: §72.2's four value limbs and the count of non-finite terms.
+* **A rank that owns nothing** contributes a zero maximum, zero limbs and a
+  zero partial, as an empty part does in §72.
+* **The counts are checked once, by every rank alike.** `new` gathers the
+  counts first and checks them afterwards, so every rank reaches the same
+  refusal and none is left waiting in a collective. `counts()` returns them in
+  rank order.
+* **Host round trips.** Each collective is one device-to-host copy and one
+  host-to-device copy of at most 40 bytes per rank. Both go through pageable
+  memory, which the driver completes before the call returns, so there is no
+  separate wait as in §138.3. A reduction allocates nothing on the device.
+* **Not capturable.** A reduction inside `Gpu::capture` is refused by name
+  (§81.3). In one process `ExactReduction` stays the capturable form.
+
+**Refused by name.** Every failure is `Error::Config` and its message starts
+`exactsum: `.
+
+| case | the message names |
+|---|---|
+| `new`: a rank's count does not fit a `Label` | `rank q` and its count, on every rank |
+| `new`: the counts sum to more than `EXACT_MAX_TERMS` | the sum and the limit (§72.2), on every rank |
+| a reduction inside a capture | `capture` |
+| `comm.size()` differs from the rank count seen by `new` | both numbers and `ranks` |
+| `comm.rank()` is not the rank `new` ran on | both ranks |
+| a buffer shorter than `n` | the buffer's name and length, and `n` |
+
+The last four are checked in that order, before anything is launched or sent.
+A short buffer is one rank's fault and the other ranks cannot see it: after
+any `Err` the world is spent (R10).
+
+**What must hold.** Class D: bytes. `tests/exactsum_spmd.rs` runs in both
+builds; each rank is a `ThreadComm` thread with its own `Gpu` on device 0.
+
+| test | what it asserts |
+|---|---|
+| **`spmd_exact_reduction_is_the_in_process_one`** | **the gate.** 20,011 terms of full mantissa spread over 100 binades, `P = 1..4`, four dealings (contiguous, round robin, shuffled, and one with an empty part), every rotation of the rank labels (rank r holds part (r + k) mod P): on every rank `sum`, `sum_mag`, `dot`, `norm_factor` and `max_mag` equal the in-process `ExactReduction` by bits, by limbs and by anchor, and equal the one-part answer; `gathered_sum`, `gathered_dot`, `gathered_sum_mag` and `gathered_norm_factor` equal the in-process gathered answer for the same part order. 1,071 answers are compared, and each handle has made 14 allgathers |
+| `an_spmd_reduction_counts_a_non_finite_term_on_every_rank` | one NaN and one infinity on different ranks, `P = 3`: `sum` is NaN on every rank and `non_finite_terms` is 2 on every rank |
+| `an_spmd_reduction_refuses_by_name` | the six rows of the table above |
+
+**What this does not establish.** Nothing here measures the latency of an
+allgather (PAR-16) and nothing runs over MPI (PAR-06). No solver calls
+`SpmdReduction` yet: PAR-04a is the first.
+
 ---
 
 ## 141. Native GAMG and AMGX — aggregation, the Galerkin hierarchy, and the AMGX library

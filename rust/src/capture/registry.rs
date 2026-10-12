@@ -142,6 +142,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ),
     ("src/exactsum.rs", Stance::Via("src/distsolve.rs")),
     (
+        "src/exactsum/spmd.rs",
+        Stance::Refused(
+            "the SPMD exact reduction copies the rank's maximum, limbs or \
+             gathered partial to the host and hands the bytes to a \
+             Comm::allgather on EVERY collective - host round trips by \
+             construction; it is refused by name at run time \
+             (an_spmd_reduction_refuses_by_name). Alternative: \
+             ExactReduction, whose gather is a device-to-device copy and \
+             is the one-process form",
+        ),
+    ),
+    (
         "src/fan.rs",
         Stance::Gate("the_fan_source_replays_bitwise"),
     ),
