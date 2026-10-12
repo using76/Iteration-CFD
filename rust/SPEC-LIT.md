@@ -20355,6 +20355,7 @@ work       Perić
 work       Incropera
 work       Modest
 work       Numerical Recipes
+work       RP-1311
 document   docs/05-io-redesign.md
 document   docs/07-lowmach-solver.md
 reserved   99   the invented gate addresses §69's registry tests cite
@@ -40221,7 +40222,65 @@ name**. It is not counted as a pass.
 The host twin is f64 in both builds, so every row is unchanged by the f32
 build.
 
-Labels: (130.1)-(130.13).
+### 130.7 The host twin as built (CHR-03, `src/chem/kinetics.rs`)
+
+`omega` is evaluated from concentrations `c_k = [X_k]` in mol/m^3, or from
+`(T, p, Y)` through (128.9). Every number is f64 in both builds. The choices
+below are DESIGN choices of this unit, stated so that CHR-07a's device kernel
+makes the same ones:
+
+```
+q_f,i = C_i k_fi Π_k c_k^(o'_ki)                                                   (130.14)
+ln k_fi = ln|A_i| + β_i ln T - θ_i / T   [+ ln( Pr/(1+Pr) ) + ln F   for fall-off]  (130.15)
+q_r,i = C_i sgn(A_i) exp( ln k_fi - ln K_ci + Σ_k o''_ki ln c_k )                   (130.16)
+q_r,i = C_i sgn(A_ri) exp( ln|A_ri| + β_ri ln T - θ_ri / T + Σ_k o''_ki ln c_k )   with REV  (130.17)
+```
+
+* **The forward term** (130.14) is formed directly, `k_f` from (130.4) (times
+  `Pr/(1+Pr) F` for fall-off) and each factor with `powf`. **The reverse term**
+  is one exponential of a sum of logs, (130.16) or (130.17), as §130.3 requires.
+  `ln c_k = -inf` at `c_k = 0` makes the term exactly 0. A factor whose order is
+  0 is skipped on both sides, so `0 · ln 0` is never formed.
+* **Fall-off with `Pr = 0`** (no collider present, or a `(+SPECIES)` collider at
+  zero concentration): `q_f = q_r = 0` exactly, and `log10 Pr` is not evaluated.
+  An infinite `Pr` (`k_inf = 0`) takes the high-pressure limit `Pr/(1+Pr) = 1`.
+* **Inputs refused by name** (`Error::Config`): `T` not finite or not above 0;
+  a concentration vector whose length is not the species count (both lengths
+  named); a negative or non-finite `c_k` (the species and the value named). A
+  stiff integrator that undershoots clips before it calls; the host twin does
+  not clip. `T` outside a species' thermo range is refused by the thermo
+  record's own message (§128.1) when that species' `G/RT` is needed, which is
+  when the mechanism has a reversible reaction without `REV`.
+* **The production rate** (130.1) is accumulated reaction by reaction, in
+  mechanism order, `-ν' q` to each reactant and `+ν'' q` to each product, with
+  `q = q_f - q_r` and `ν` the exact rational of §129.4 converted once to f64.
+
+**The gate mechanism.** Neither JL4 nor GRI-Mech 3.0 is in the tree (§129.6),
+so (130.7) and the element identity are held over 1000 random states on a
+fixture mechanism of the ten TM-4513 species of
+`reference/mcbride-gordon-reno1993/table_II.csv` (§128.6). Its fourteen
+reactions exercise every form above: elementary, `+M` with and without
+efficiencies, Lindemann, Troe with three and four parameters, `(+SPECIES)`,
+SRI, `REV`, an irreversible global reaction with FORD, an irreversible
+elementary one, and a DUP pair. **Its rate numbers are placeholders, not any
+paper's.** When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set (§129.6),
+the same two identities are held over 1000 random states of GRI-Mech 3.0;
+unset, that test is skipped by name. `kin_fixture_matches_oracle` holds every
+`q_f` and `q_r` of the fixture at two stated states against an independent
+40-digit evaluation of (130.2)-(130.12) made by the supervisor, to 1e-12
+relative (class P); the oracle is not in the tree, and its printed values are.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `kin_fixture_matches_oracle` | every `q_f`, `q_r` of the fixture at states A and B | 1e-12 relative; a zero is exactly 0 | P |
+| `kin_falloff_limits` | Lindemann `k = k_inf Pr/(1+Pr)`; `Pr = 0` gives exactly 0 | 1e-14 relative; exact | P |
+| `kin_sri_matches_hand_value` | (130.12) at one stated point | 1e-14 relative | P |
+| `kin_reverse_survives_low_t` | (130.16) at 250 K where `exp(ln K_c)` overflows f64 to `inf` | 1e-11 relative to the 40-digit value: `ln K_c` is about 828, and f64 holds a sum of NASA-7 terms that large to about 1e-13 absolute, which `exp` turns into a relative error | P |
+| `kin_refuses_bad_input` | the refusals above, each by name | exact text parts | D |
+| `kin_gri30_mass_and_elements` | (130.7) and the element identity on GRI-Mech 3.0 when its paths are set | as `kin_mass_is_conserved` | A |
+| `kin_tpy_matches_concentrations` | `production_rates_tpy` against `production_rates` on (128.9)'s concentrations | bitwise | D |
+
+Labels: (130.1)-(130.17).
 
 ---
 
@@ -40330,9 +40389,117 @@ CHR-04 looks for a published `T_ad` in RP-1311 Part II (McBride & Gordon,
 NASA RP-1311-P2, 1996), the user's manual, which has the program's examples.
 If one matches the mixture and the species set, the row compares against it
 within 5 K. Otherwise the row prints a NAMED textbook value and **runs no gate
-through it** (plan row CHR-04).
+through it** (plan row CHR-04). §131.5 records what was found: no example
+matches.
 
-Labels: (131.1)-(131.8).
+### 131.5 The solver as built (CHR-04, `src/chem/equilibrium.rs`)
+
+`equilibrate_tp` and `equilibrate_hp` take a `ThermoSet`, the reactant mass
+fractions `y0` (which fix the elements) and `p`, plus `T` or `h0` in J/kg.
+Every number is f64 in both builds. The assigned element moles are
+
+```
+b_i° = Σ_j a_ij y0_j / W_j  /  Σ_j y0_j          (mol/kg)                        (131.9)
+```
+
+and the result gives `n_j` in mol/kg, `X_j = n_j / Σ n_j`, `Y_j = n_j W_j` and
+`c_j = p X_j / (R T)`, the concentrations §130's kinetics takes. The choices
+below are DESIGN choices of this unit. RP-1311 does not dictate them:
+
+* **D1, absent elements.** An element with `b_i° = 0` is inactive. Every
+  species that contains it is held at exactly `n_j = 0` and enters no sum, the
+  element's row (131.3) is dropped, and its `π_i` is reported as 0. Without
+  this, H2-air on a set that carries carbon species would give a singular
+  matrix.
+* **D2, units of the start.** RP-1311 counts kilogram-moles per kilogram, so
+  its start `n = 0.1` is `n = 100 mol/kg` here, with `n_j = 100/NS`.
+* **D3, the temperature window.** For `(h, p)` the start is
+  `T = min(t_start, min_j t_high)` over the active species, with
+  `t_start = 3800 K` by default. GRI-Mech 3.0's records end at 3500 K, and
+  RP-1311's 3800 K lies outside them. After each step `T` is clamped into
+  `[max_j t_low, min_j t_high]`. A solution that would lie outside the window
+  cannot converge, and it is refused by the iteration limit. It is never
+  returned at the bound.
+* **D4, the trace polish.** §131.3's trace rule (SIZE) runs until the
+  convergence test passes. Then SIZE is dropped. Every active species enters
+  every sum, including `b_k` and `Σ n_j`, and `λ = min(1, λ1)` is taken over
+  all of them. The Newton iteration runs again to the same test. Two things
+  depend on this. Trace species then satisfy (131.1) as well, so detailed
+  balance holds for reactions that involve them. And the element balance
+  counts them: a trace species held at `X ≈ 1e-8` would otherwise break
+  `eq_elements_conserved` by four orders of magnitude.
+* **Refusals** (`Error::Config`, each naming the value and ending
+  "(SPEC-LIT §131.5)"):
+  - `T` or `p` not finite or not above 0;
+  - `h0` not finite;
+  - `max_iterations = 0`;
+  - `t_start` not finite or not above 0;
+  - more iterations than `max_iterations` (200 by default) over both phases,
+    reported with the last element residual and the largest `|Δln n_j|`;
+  - a singular Newton matrix.
+
+  `y0`'s own errors and a thermo record's range error pass through
+  unchanged.
+
+**The gate mechanism and the answer key.** JL4 is not in the tree (§129.6).
+The detailed-balance row therefore runs on §130.7's fourteen-reaction
+TM-4513 fixture. Its rate numbers are placeholders, and detailed balance
+does not depend on rate numbers: `k_r` comes from `K_c` (130.5). Eleven of
+the fourteen reactions are checked. Three are excluded by name:
+
+* R10 carries `REV`, so its reverse rate is an independent Arrhenius set and
+  owes nothing to `K_c`;
+* R11 and R12 are irreversible.
+
+When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set, the same row runs on
+GRI-Mech 3.0, with argon as an absent element (D1). A GRI reaction whose
+`q_f = 0`, because it has argon as an explicit reactant, is excluded by name.
+`thermo30.dat`'s records start at 300 K, and §128.1 does not extrapolate. The
+GRI `(h, p)` row therefore forms `h0` at 300 K, the set's common `t_low`,
+instead of 298.15 K, and says so in its output.
+The composition is held against an independent 40-digit evaluation made by the
+supervisor outside the tree. That evaluation solves (131.1)-(131.2) and the
+element, `n` and enthalpy conditions directly with `mpmath`. It does not use
+the reduced Newton system, and it uses the TM-4513 records at their own
+1 bar, so the 1 atm move of §128.4 is checked as well. Its printed values for
+stoichiometric CH4-air (`CH4 + 2 (O2 + 3.76 N2)`) over the ten TM-4513 species
+at 1 atm are:
+
+| state | T (K) | n (mol/kg) | X_H2O | X_CO2 | X_CO | X_OH |
+|---|---|---|---|---|---|---|
+| `(T, p)` | 2000 | 36.272218301275178 | 0.18795875089814110 | 0.092010911965114985 | 0.0028261885591149366 | 0.00085447068058103910 |
+| `(h, p)` from 298.15 K | **2231.1042475877235** | 36.452609749342998 | 0.18356089463982553 | 0.085669864128601297 | 0.0086979201515583774 | 0.0030348505825709251 |
+
+The test file carries every species, the `π_i` values, and an H2-air
+`(T, p)` row with carbon absent.
+
+**`T_ad`, the finding.** RP-1311 Part II (McBride & Gordon, NASA RP-1311-P2
+(1996), NTRS 19960044559) was read at its Chapter 7, pp. 67-71, from the
+page images. Of its fourteen examples, the only `hp` combustion of a fuel
+with air is Example 3. Its air is preheated to
+700 K, and it is solved at 1, 10 and 100 bar. No example matches
+stoichiometric CH4-air from 298.15 K at 1 atm. The `eq_tad_methane_air` row
+is therefore gated against the oracle only (1e-10 relative, class P). It
+prints a NAMED textbook value and runs no gate through it. That value is
+S. R. Turns, *An Introduction to Combustion*, 2nd ed. (McGraw-Hill, 2000),
+which quotes 2226 K. The page was not read in this unit. The ten-species set
+gives 2231.10 K. It lacks NO, N and the other minor species that a full
+product list carries, so the 5 K difference is not a finding about the
+solver.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `eq_matches_oracle` | every `X_j`, `n`, `π_i` and the `(h,p)` `T` against the oracle, CH4-air | 1e-10 relative | P |
+| `eq_tad_methane_air` | `T` against the oracle; `h(T, Y) - h0` against `Σ_j abs(Y_j h_j/W_j)` | 1e-10 relative; 1e-10 | P; A |
+| `eq_tp_at_tad_reproduces_hp` | `(T, p)` at the `(h, p)` result's `T` gives the same `X_j`, `π_i` | 1e-10 relative | A |
+| `eq_absent_element_is_exact_zero` | H2-air: the carbon species and `π_C` exactly 0; the rest against the oracle | exact; 1e-10 relative | D; P |
+| `eq_refuses_bad_input` | the refusals above, each by name | exact text parts | D |
+| `eq_gri30_detailed_balance` | elements and detailed balance on GRI-Mech 3.0 when its paths are set | as the rows of §131.4 | A |
+
+Every row is unchanged by the f32 build, because the solver is f64 in both
+builds and its tests are integration tests that run under both.
+
+Labels: (131.1)-(131.9).
 
 ---
 
@@ -40526,6 +40693,269 @@ double in both arms.
 | `chem_device_*` (CHR-07a/b) | device against host | the plan rows, with the class rule (docs/17 §5.1.4) for the f32 build | R in f32, P in f64 |
 
 Labels: (132.1)-(132.10).
+
+### 132.7 The integrator as built (CHR-05, `src/chem/rosenbrock.rs`), and its two test problems
+
+**The test problems**, read from the test set's problem descriptions
+(Mazzia & Magherini, release 2.4; the two reports' sha256 are the
+`ivptestset2008-*` rows of `reference/PROVENANCE.md`). ROBER is report
+`rober.pdf` p. II-10-1, eq. (II.10.1), with `y(0) = (1, 0, 0)` on `[0, 1e11]`.
+HIRES is report `hires.pdf` p. II-1-1, §1.2, with
+`y(0) = (1, 0, 0, 0, 0, 0, 0, 0.0057)` on `[0, 321.8122]`:
+
+```
+y1' = -0.04 y1 + 1e4 y2 y3
+y2' =  0.04 y1 - 1e4 y2 y3 - 3e7 y2^2
+y3' =  3e7 y2^2                                                                 (132.11)
+```
+
+```
+y1' = -1.71 y1 + 0.43 y2 + 8.32 y3 + 0.0007
+y2' =  1.71 y1 - 8.75 y2
+y3' = -10.03 y3 + 0.43 y4 + 0.035 y5
+y4' =  8.32 y2 + 1.71 y3 - 1.12 y4
+y5' = -1.745 y5 + 0.43 y6 + 0.43 y7
+y6' = -280 y6 y8 + 0.69 y4 + 1.71 y5 - 0.43 y6 + 0.69 y7
+y7' =  280 y6 y8 - 1.81 y7
+y8' = -280 y6 y8 + 1.81 y7                                                      (132.12)
+```
+
+The reference values at the end points are CHR-00c's
+`reference/ivptestset2008/{rober,hires}.csv`.
+
+**How the gates are measured.** `ros_robertson_testset` and
+`ros_hires_testset` integrate at `rtol = 1e-8` with `atol = 1e-20` in every
+component and `h0 = 1e-10`, and require `max_k abs(y_k - y_ref,k) /
+abs(y_ref,k) <= 10 rtol = 1e-7`. The tiny `atol` makes the measure relative
+in every component, including ROBER's `y2 ≈ 8.3e-14`. With the test set's own
+mixed tolerance (`atol = 1e-4 rtol`) the integrator would not be asked to
+resolve `y2` at all, so the gate would be weaker. Both sets run, RODAS3 and
+ROS3. `ros_observed_order` takes fixed steps on `y' = -y` over `[0, 1]` with
+40 and 80 steps, `p_obs = log2(e_40 / e_80)`, and requires
+`abs(p_obs - 3) <= 0.1` for both sets. The supervisor's independent float64
+evaluation, made outside the tree before the Rust, gave the following:
+
+* ROBER: RODAS3 `2.74e-8` and ROS3 `8.79e-8`, after 4519 and 24883 accepted
+  steps;
+* HIRES: RODAS3 `3.09e-9` and ROS3 `3.08e-9`;
+* observed order: RODAS3 `2.9928` and ROS3 `2.9894`.
+
+The tree, run after it, measures ROBER `1.22e-8` (RODAS3, 4519 accepted) and
+`8.80e-8` (ROS3, 24883 accepted), HIRES `3.16e-9` and `3.07e-9`, and the same
+orders to four digits. ROS3's Robertson margin is thin (`0.88` of the gate). It is reported as it
+stands, and the gate is not widened for it.
+
+**Design choices of this unit (ORIGINAL; Sandu et al. do not dictate them).**
+
+* **R1, the linear solve.** `I - γhJ` is factored by Gaussian elimination
+  with partial pivoting (the largest `abs` in the column, the first one on a
+  tie), once per step attempt. A pivot that is exactly 0 or not finite is
+  refused as a singular matrix, naming `h`; the caller knows `t`.
+* **R2, the Jacobian.** §132.3's one-sided difference is evaluated at `y_n`,
+  once per accepted point. A retry after a rejection starts from the same
+  `y_n`, so it reuses that `J`, which is the same matrix a fresh evaluation
+  would give.
+* **R3, the end point.** When `t + h >= t1`, the step is shortened to
+  `h = t1 - t`, and on acceptance `t` is set to `t1` exactly. This shortened
+  last step is exempt from `h_min`. `h0` is clamped into `[h_min, h_max]`
+  and then to `t1 - t0`.
+* **R4, a non-finite step.** If `Err` or any component of `y_{n+1}` is not
+  finite, the step is rejected, `h` is divided by 10, and the rejection is
+  counted twice: in `rejected` and in `nonfinite`. It is never accepted.
+* **R5, what is refused** (each with `Error::Config`, naming the value and
+  ending "(SPEC-LIT §132.7)"): a non-finite or non-positive `h0`, a NaN or
+  non-positive `h_max` (`+inf`, the default, means unbounded),
+  a negative or non-finite `h_min`, `h_min > h_max`, a negative or non-finite
+  `rtol`, an `atol` whose length is not `y`'s or that has a component that is
+  not finite and above 0, `t1 < t0`, `max_steps = 0`, more step attempts than
+  `max_steps`, and a proposed `h` below `h_min` after a rejection. The
+  caller's right-hand side may fail, and its error passes through unchanged.
+  This is how CHR-06's reactor refuses a `T` outside the thermo range.
+  `t1 = t0` returns at once, with zero steps.
+* **R6, method names.** `rodas3` (the default) and `ros3` are recognised. As
+  §132.2 records, `ros4` is refused as `Error::Refused`, and the refusal says
+  its coefficients wait for a read copy of Hairer & Wanner Table 7.2 or of
+  its primaries. Any other name is refused with the recognised set.
+
+Labels: (132.11)-(132.12).
+
+### 132.8 The reactor as built (CHR-06, `src/chem/reactor.rs`), and its gates
+
+`ConstPressureReactor` advances (132.7)-(132.9) through `integrate_observed`.
+That is §132.7's `integrate` with one hook added: after every accepted step it
+calls an observer with `(t, y)`. The observer may change `y` or end the call
+with an error. `integrate` is that function with an observer that does
+nothing, so its arithmetic is unchanged and CHR-05's tests hold as before.
+
+**Design choices of this unit (ORIGINAL; SAND89-8009 gives only the
+equations).**
+
+* **R7, the pressure.** A `p` that is not finite or not above 0 is refused,
+  naming it.
+* **R8, the right-hand side.** The state is `y = (Y_1..Y_K, T)`. Every
+  evaluation uses `Y⁺_k = max(Y_k, 0)`; this is §130.7's "a stiff integrator
+  that undershoots clips before it calls", and the stored `y` is not changed.
+  The quantities are `S = Σ Y⁺_k / W_k`, `rho = p / (R T S)` (132.9),
+  `c_k = rho Y⁺_k / W_k`, `omega` from (130.1), and `cp` from (128.7) over `Y⁺`.
+  A species whose `omega_k` is exactly 0 is not evaluated in (132.8)'s sum.
+  The following are refused: a state of the wrong length, a `T` that is not
+  finite or not above 0, and `S = 0`. The thermo and kinetics errors pass
+  through unchanged, so a `T` outside a species' range is refused by the
+  thermo record's own message.
+* **R9, the input.** The following are refused, each by name: `y0` of the
+  wrong length, a negative or non-finite `Y_k`, a `T0` that is not finite or
+  not above 0, a negative or non-finite duration, and an `ignition_rise` that
+  is not above 0. A zero duration returns the input unchanged.
+* **R10, after each accepted step.** This is §132.4's refusals paragraph. A
+  `Y_k < -atol_y` is refused, naming the species, the value and `t`. A
+  `Y_k` in `[-atol_y, 0)` is set to 0, and the count is reported as
+  `clipped`. Each clip adds at most `atol_y` to `Σ Y`. `T` is never clipped.
+* **R11, the ignition delay.** `T* = T0 + ignition_rise` (400 K by default).
+  The delay is the first crossing of `T*`, interpolated linearly between the
+  two accepted points that bracket it. It is `None` if `T` never reaches
+  `T*`.
+* **Defaults.** RODAS3, `rtol = 1e-8`, `atol_y = 1e-14`, `atol_t = 1e-8` K,
+  `h0 = 1e-10` s, `h_max` unbounded.
+
+**The gate mechanism.** Neither JL4 nor any open H2 mechanism is in the tree
+(§129.6), so the plan's "H2-air and CH4-air (JL)" runs on a fifteen-reaction
+**reactor fixture** over the ten TM-4513 species of §130.7. It keeps §130.7's
+reversible reactions without `REV`:
+
+* elementary reactions and the `+M` reactions;
+* Lindemann, both Troe forms, `(+N2)` and SRI fall-off;
+* the DUP pair.
+
+It drops §130.7's `REV` reaction and its two irreversible global reactions.
+It adds `CO + OH <=> CO2 + H` without `REV`, and three reversible reactions:
+`H2 + O2 <=> OH + OH`, `CH4 + O2 <=> CO + H2O + H2` and `CH4 + O <=> CO + 2 H2`.
+**The rate numbers are placeholders, not any paper's.** Every reverse rate
+comes from `K_c` (130.16), so the rest point of the ODE is the Gibbs
+equilibrium of §131. A `REV` rate or an irreversible reaction would move the
+rest point away from it. The end state therefore depends on the
+thermochemistry and not on the rate numbers, and this is what makes a
+placeholder-rate fixture a valid subject for the equilibrium gate. The
+mixtures are stoichiometric H2-air (2 : 1 : 3.76) from `T0 = 1000` K and
+stoichiometric CH4-air (1 : 2 : 7.52) from `T0 = 1400` K, both at
+`p = P_ATM`. When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set
+(§129.6), the same gates also run on GRI-Mech 3.0. GRI keeps its own
+irreversible reactions; their reactants are traces at equilibrium. That run
+is 10 s long, so that the NO chemistry settles.
+
+**The supervisor's oracle.** The supervisor wrote an independent float64
+evaluation of (132.7)-(132.9) and the fixture's (130.2), outside the tree
+and before the Rust, and integrated it with scipy's Radau. Radau is an
+implicit Runge-Kutta method, a different family from the tree's, run at
+`rtol = 1e-12`. Its event finder located the delay. The detailed balance
+`max |ln Q - ln K_c|` at its end state is `6.9e-15` (H2-air) and `1.1e-14`
+(CH4-air), which confirms that the rest point is the equilibrium. It printed:
+
+* the right-hand side at one stated state;
+* the end states: `T = 2693.827535802` K (H2-air) and `2711.799962396` K
+  (CH4-air);
+* the delays: `2.6552096919e-3` s and `2.6042862928e-3` s.
+
+| row | measure | tolerance | class | measured (f64 build) |
+|---|---|---|---|---|
+| `reactor_rhs_matches_oracle` | (132.7)-(132.8) at the stated state against the oracle | 1e-9 relative; `N2` exactly 0 | P | worst `3.95e-15` |
+| `reactor_lands_on_equilibrium` | the state after 1 s against §131's `(h, p)` solution and against the oracle | 0.5 K; 1e-6 in Y | P | H2-air `dT 1.6e-7` K, `dY 1.8e-11`; CH4-air `4.8e-8` K, `6.2e-12`. Also `Σ Y` within `1e-12 + clipped·atol_y`, and `h` within 1e-6 relative (measured `6.6e-10` and `1.6e-10`) |
+| `reactor_delay_converges` | the delay at `rtol` 1e-6 against `rtol` 1e-9 | < 0.5 % | P | H2-air `3.1e-7`, CH4-air `1.3e-7` relative |
+| `reactor_delay_matches_oracle` | the delay at `rtol` 1e-9 against the oracle | 1e-3 relative | P | `8.1e-9`, `8.6e-10` |
+| `reactor_refuses_bad_input` | R7-R9, and `T0 = 100` K refused by the thermo record | exact text parts | D | — |
+| `ros_observer_sees_every_accepted_step` | one observer call per accepted step, the last at `t1` exactly; `integrate` is bitwise `integrate_observed` with a no-op | exact | D | 183 calls, 183 accepted |
+| `reactor_gri30_lands_on_equilibrium` | as `reactor_lands_on_equilibrium` on GRI-Mech 3.0, 10 s, against `equilibrate_hp` only | 0.5 K; 1e-6 in Y | P | H2-air `dT 3.3e-5` K, `dY 3.7e-9`; CH4-air `1.6e-8` K, `4.2e-12` |
+| `reactor_gri30_delay_converges` | as `reactor_delay_converges` on GRI-Mech 3.0 | < 0.5 % | P | H2-air delay `3.111e-4` s, change `9.9e-7`; CH4-air `3.425e-3` s, `1.0e-8`. Reported, not compared with any experiment |
+
+The GRI delays are numbers this integrator measured on GRI's rates. They are
+not validated against shock-tube data, and no gate runs through them.
+
+The f32 build (`--features single`) passes the same rows; the module is f64 in both builds.
+
+No new equation labels.
+
+### 132.9 The device kernels as built (CHR-07a, `cuda/chem.cu`, `src/chem/device.rs`)
+
+Two kernels, one thread per cell, compute in `typedef double ofchem` in both
+builds (§132.6):
+
+* **`chemProductionRates`** evaluates (130.1) from `(T, p, Y)` through
+  (128.9)'s concentrations, which is `production_rates_tpy` of §130.7. `T`,
+  `p`, `Y` and `omega` cross as `ofscalar`; the sums run in `ofchem` and
+  `omega` is rounded once on the way out.
+* **`chemReactorJacobian`** evaluates the reactor right-hand side
+  (132.7)-(132.9) with R8's clip `Y⁺_k = max(Y_k, 0)`, which is
+  `ConstPressureReactor::rhs` of §132.8, and then §132.3's one-sided
+  difference column by column, `δ_j = 2^-26 max(abs(y_j), atol_j)`, which is
+  `fd_jacobian` of §132.7 (`2^-26` is `sqrt(eps_64)` exactly). The state
+  `y = (Y_1..Y_K, T)`, `p`, `atol`, `f0` and `J` are `ofchem` in both builds:
+  they are internal to the chemistry step that CHR-07b integrates in double.
+
+**Design choices of this unit (ORIGINAL; SAND89-8009 gives only the
+equations).**
+
+* **D1, one for one.** Every choice of §130.7 is made as the host twin makes
+  it, in the host twin's order: the forward term directly with `pow`, the
+  reverse term as one `exp` of the log sum (130.16)/(130.17) with `sgn(A)` as
+  `copysign(1, A)`, the order-0 skip on both sides, `q_f = q_r = 0` exactly at
+  `Pr = 0`, `Pr/(1+Pr) = 1` at an infinite `Pr`, `ln K_c` summed over the
+  products and then the reactants (130.6), and (130.1) accumulated reaction
+  by reaction, reactants then products. The third-body sum (130.3) runs over
+  every species in index order with `alpha = 1` where none is listed, as
+  `third_body_concentration` does. `G/RT` is evaluated only for the species
+  of reversible reactions without `REV`.
+* **D2, the flat mechanism.** The mechanism is uploaded once as two arrays,
+  one of `double` and one of `int`, whose layout is stated in
+  `src/chem/device.rs` and in the header of `cuda/chem.cu` with the same field
+  list: the species records (molar mass, range, both NASA-7 sets), `R` and
+  `p_ref` taken from the host so that no constant is spelled twice, one record
+  per reaction (kind, reverse kind, Arrhenius sets, fall-off parameters), the
+  order and stoichiometry lists, and one dense efficiency row per third-body
+  reaction.
+* **D3, refusals per cell.** A kernel cannot return §130.7's `Error::Config`,
+  so each cell writes a status, in the host twin's order of checks:
+  `1` a pressure not finite or not above 0, `2` a temperature not finite or
+  not above 0, `3` a mass fraction negative or not finite (production rates
+  only; the reactor clips), `4` no species present (`Σ Y/W` not above 0),
+  `5` a `T` outside the thermo range of a species whose record is needed.
+  A refused cell writes NaN to all its outputs, so it cannot be used
+  silently. The Jacobian's status is the first refusal met at `y` or at any
+  perturbed column.
+* **D4, contraction.** `chem.cu` is compiled with nvcc's default
+  `-fmad=true`. The gate is 1e-12 against the host, not bitwise, so it is not
+  a `FMAD_OFF_UNITS` member (§82.4's exception is for bitwise gates).
+
+**The measure.** `omega_k` is a sum of terms of both signs, so the error is
+taken against the gross rate of the species,
+
+```
+G_k = Σ_i Σ_(entries of k in reaction i) ν (|q_f,i| + |q_r,i|),    e_k = |omega_dev,k - omega_host,k| / G_k
+```
+
+with the reactant and product entries both counted. A species with `G_k = 0`
+must come back exactly 0. This is the denominator §130.6's mass identity
+uses. For the Jacobian, each of the two evaluations in a column is within the
+right-hand-side bound at the state it ran on, so the derived bound is
+
+```
+abs(J_dev,ij - J_host,ij) δ_j <= 1e-12 ( F_i(y) + F_i(y + δ_j e_j) ),
+F_i = W_i G_i / rho (i <= K),     F_T = Σ_k abs(H_k) G_k / (rho cp)
+```
+
+and `f0` is held to `1e-12 F_i(y)`; a zero bound means exact equality. The
+perturbed state's scale is needed, not only `F_i(y)`: at a state where a
+species is exactly 0, a reaction with a FORD order on it has `G = 0` at `y`
+and a genuine nonzero quotient after the perturbation (`J ≈ -0.93` in the
+fixture's CH4 row at the zeroed-O2 states, on the host and the device alike).
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `chem_device_omega_matches_host` | 4096 random states of §130.7's generator on the 14-reaction fixture, `max e_k` | 1e-12 (f64 build); f32 build: inputs rounded to f32 and the host evaluated at the rounded inputs, 1e-6 (the plan's band, inside the class rule's 1e-5) | P; R in f32 | f64 build `1.68e-14` (cell 737, O2); f32 build `5.89e-8` |
+| `chem_device_omega_matches_host_gri30` | the same on GRI-Mech 3.0 when its paths are set (§129.6) | the same | P; R in f32 | with the user's GRI-Mech 3.0 copy: f64 build `5.67e-14`; f32 build `5.92e-8` |
+| `chem_device_jacobian_matches_host` | 4096 random states, `f0` and `J` against `rhs` and `fd_jacobian` | the bounds above, both builds (inputs are double in both) | P | worst `f0` at `1.70e-2` of its bound, worst `J` at `1.42e-2` of its bound, both builds |
+| `chem_device_refuses_by_status` | statuses 1-5 and the NaN outputs; a clipped negative `Y` is not refused by the reactor | exact | D | — |
+| `chem_device_replays_under_capture` | both kernels inside §81.5's protocol, the rates feeding the next iteration's `T` | bitwise | D | 4 kernel nodes, 3 replays bitwise over 6 buffers / 9280 values |
+
+No new equation labels.
 
 ---
 
@@ -40734,6 +41164,8 @@ Labels: (133.1)-(133.12).
 | NASA TM-4513 | NTRS 19940013151 | public domain | yes | — (the plan's NASA-7 source) |
 | NASA/TP-2002-211556 | NTRS 20020085330 | public domain | yes (§100) | — |
 | NASA RP-1311 Part I | NTRS 19950013764 | public domain | yes | — (the plan said 19950013764; confirmed) |
+| NASA RP-1311 Part II (McBride & Gordon 1996) | NTRS 19960044559 | public domain | Chapter 7 pp. 67-71 (CHR-04) | **added**: no example is stoichiometric CH4-air from 298.15 K, 1 atm (§131.5) |
+| Turns, *An Introduction to Combustion*, 2nd ed. (2000) | McGraw-Hill textbook | closed | no | **added**: the NAMED `T_ad` = 2226 K of §131.5, which gates nothing |
 | CHEMKIN-II, SAND89-8009 | OSTI 5681118, DOI 10.2172/5681118 | public | yes | the plan's "OSTI id to be confirmed": confirmed |
 | CHEMKIN-III, SAND96-8216 | OSTI 481621, DOI 10.2172/481621 | public | yes (pp. 46-54) | **added**: FORD/RORD, real coefficients and UNITS are CHEMKIN-III only |
 | TRANSPORT, SAND86-8246 | OSTI 7157265 | record only, no full text on OSTI | no | the plan's "OSTI id to be confirmed": confirmed; not readable |
@@ -41780,6 +42212,41 @@ implementation detail from that catalogue is used (plan §2.6).
 `s2s` from `ofgpu-buoyant` and `ofgpu-lowmach` is CHR-24. It mirrors §98.7-§98.8
 and replaces `refuse_enclosure`'s redirect with the implementation it pointed
 at. The §50 tolerances are unchanged.
+
+**The `radiation` dictionary route, as CHR-17 reads it (DESIGN).** These are
+the entries of `constant/radiationProperties` that `src/radiation.rs` and
+`src/radiation/props.rs` read for a participating medium. The model names are
+the ones in the table above. The entry spellings below are this project's own
+choice.
+
+| entry | meaning | rule |
+|---|---|---|
+| `radiationModel` | `P1` \| `fvDOM` \| `viewFactor` (alias `s2s`) | required, with no default; any other name is refused with the three names |
+| `absorptionEmissionModel` | `constant` \| `wsgg` \| `wsggGrey` | default `constant`. Under `viewFactor` only `none` is accepted |
+| `absorptionCoefficient` | `κ` in 1/m, for the `constant` model | required with `constant`; a negative or non-finite value is refused; refused if present with `wsgg`/`wsggGrey`. Under `viewFactor`, a non-zero value is refused by `S2sConfig::from_dict` (§50.9, unchanged) |
+| `wsggFile` | path to a Bordbar 2021 `.dat`, relative to the case directory | required with `wsgg`/`wsggGrey`; refused if present with `constant`. `ParticipatingConfig::from_case` refuses a path that does not exist. The digest check is §136.4's, built in CHR-22 |
+| `wsggPressure` | atm | required with `wsgg`/`wsggGrey`; must equal one of §136.4's ten pressures exactly, and any other value is refused naming the ten; refused if present with `constant` |
+| `scatterModel` | `none` \| `isotropic` \| `linearAnisotropic` | default `none`. Under `viewFactor` only `none` is accepted |
+| `scatterCoefficient` | `σ_s` in 1/m | required with `isotropic` and `linearAnisotropic`; a negative or non-finite value is refused; refused if present with `none` |
+| `A1` | `A_1` of (135.1), `Φ = 1 + A_1 Ω'·Ω` | required with `linearAnisotropic`; refused if `\|A_1\| > 1` (the phase function would be negative); refused if present with `none` or `isotropic` |
+
+Four rules apply to the whole table:
+
+* A numeric entry's value is the last whitespace-separated token that parses
+  as a number, read as f64 in both builds. That is why `wsggPressure 0.1`
+  matches the table exactly under `single` too. An entry with no number in it
+  is refused, naming the entry.
+* An entry that belongs to a model the case did not select is refused,
+  because it would be read and then ignored (§13.4.1).
+* Under `P1`, a `constant` medium with `κ + σ_s = 0` is refused, because
+  (135.7)'s `Γ = 1/(3β - A_1 σ_s)` is then infinite. `fvDOM` accepts such a
+  medium: the discrete-ordinates row of a transparent medium is finite.
+* `RadiationConfig::from_case`, the enclosure reader §98.7 calls, resolves
+  only `viewFactor`. Given `P1` or `fvDOM`, it refuses the case and names
+  `ParticipatingConfig` as the reader of a participating medium. No driver
+  solves a participating medium until §137.3's units land.
+
+The tests are §135.6's rows.
 
 **`parcels`** (CHR-25). There is one key per `ParcelControls`,
 `CouplingControls` and `Injector` field (`src/parcels.rs`,

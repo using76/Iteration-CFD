@@ -98,6 +98,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ),
     ("src/adapt/rebuild.rs", Stance::Via("src/adapt.rs")),
     ("src/adapt/transfer.rs", Stance::Via("src/adapt.rs")),
+    (
+        "src/chem/device.rs",
+        Stance::Gate("chem_device_replays_under_capture"),
+    ),
+    (
+        "src/chem/reactor.rs",
+        Stance::Outside(
+            "the constant-pressure reactor is the f64 host twin of SPEC-LIT \
+             132.8; it launches nothing, and its device counterpart is \
+             src/chem/device.rs",
+        ),
+    ),
     // ---- physics with an iteration of its own -----------------------------
     (
         "src/cht.rs",
