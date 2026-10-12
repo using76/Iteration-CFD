@@ -167,7 +167,7 @@ const STEP_INFO: GeometryInfo = {
 }
 
 type GeoTab = { id: string; kind: 'geometry'; path: string }
-type ResTab = { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null; chart?: 'residuals' | 'metrics' }
+type ResTab = { id: 'residuals'; kind: 'residuals'; runId: string | null; compareRunId?: string | null; chart?: 'residuals' | 'metrics' | 'surface' }
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
 type RunResult = ResultFrame & { state: UiState }
 
@@ -233,7 +233,7 @@ function harness(tabs: (GeoTab | ResTab)[] = [], cameraBudgetMs?: number) {
     setActiveRun(runId: string | null) {
       ui.activeRunId = runId
     },
-    openResidualsTab(runId: string | null, chart?: 'residuals' | 'metrics') {
+    openResidualsTab(runId: string | null, chart?: 'residuals' | 'metrics' | 'surface') {
       const prev = ui.tabs.find((t): t is ResTab => t.kind === 'residuals')
       putResTab({ id: 'residuals', kind: 'residuals', runId: runId ?? (prev ? prev.runId : null), chart: chart ?? prev?.chart ?? 'residuals' })
       ui.activeTabId = 'residuals'
@@ -298,9 +298,11 @@ beforeEach(() => {
 describe('the four geometry edit commands', () => {
   it('an unlisted command is still refused by name', async () => {
     const h = harness([])
-    const r = await h.run({ type: 'show_overlay', what: 'axes', on: true })
+    // set_centerline: still unimplemented on this screen (STU-09); show_overlay
+    // stopped being the sample here when STU-02 implemented it.
+    const r = await h.run({ type: 'set_centerline', quantity: 'p' })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('UNSUPPORTED (show_overlay): this screen does not implement it')
+    expect(r.error).toBe('UNSUPPORTED (set_centerline): this screen does not implement it')
   })
 
   it('without a geometry tab the four commands refuse and the snapshot has no geometry', async () => {
@@ -603,7 +605,7 @@ describe('compare_run', () => {
 })
 
 describe('show_chart', () => {
-  it('show_chart opens the metrics chart and still refuses surface', async () => {
+  it('show_chart opens the metrics chart and refuses surface without surface series', async () => {
     const h = harness([])
     const r = await h.run({ type: 'show_chart', chart: 'metrics', runId: 'r_1' })
     expect(r.ok).toBe(true)
@@ -617,7 +619,7 @@ describe('show_chart', () => {
     expect(h.ui.tabs.find((t): t is ResTab => t.kind === 'residuals')?.runId).toBe('r_1')
     const bad = await h.run({ type: 'show_chart', chart: 'surface' })
     expect(bad.ok).toBe(false)
-    expect(bad.error).toBe('UNSUPPORTED (show_chart): chart "surface" has no tab here (residuals, metrics)')
+    expect(bad.error).toBe('NO_SURFACE_METRICS (show_chart): run "r_1" reports no per-patch surface-integral series (<patch>.<quantity>, e.g. fan.Q); its metrics: none')
   })
 
   it('run commands forwarded to the window say the server applies them', async () => {

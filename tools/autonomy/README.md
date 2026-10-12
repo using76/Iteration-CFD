@@ -1121,6 +1121,41 @@ optimiser therefore ships DISABLED from `optimise/aml/` (`G-OPT.json`, `G-OPT.md
 `train.json.gz`) by the user's decision of 2026-10-03 — disabled until G-OPT passes — and `optimise/`
 keeps the AM-14 gate as the record of that run.
 
+**The hurdle surrogate (AUT-09, 2026-10-11, pre-registered).** The CV half failed on BLC_8 RMSE (0.153714 >
+0.15, the refit above), so `optimise.py --hurdle --extra BUNDLE.json.gz` re-fits the same five-member bootstrap
+ensemble with the BLC_8 regressor replaced by a two-part hurdle model (Cragg 1971, Econometrica 39(5) 829,
+DOI 10.2307/1909582; Mullahy 1986, J. Econometrics 33(3) 341-365, DOI 10.1016/0304-4076(86)90002-3):
+`p(BLC_8 > 0)` times `E[clip(BLC_8, 0, 1) | BLC_8 > 0]`, each member a `(fail, pos, cond, cells)` 4-tuple whose
+predict returns the same p_fail / blc8 / log_cells keys plus `p_pos` and `e_pos`. Three R-WIN margin features
+join the 31 — `win_depth`, `log10_g5_margin`, `log10_stack_margin`, 34 features over all (the config's own
+wall h, not R-WIN's h/ratio; NaN where the config layers nothing). A 20 % in-tuning geometry hold-out —
+`sha256("AUT-09 holdout " + id) mod 5 == 0`, independent of the crc32 folds — is fenced out of the tuning:
+the CV half runs out-of-geometry on the train part only, the same five crc32 folds and the same five-member
+bootstrap; the hold-out is scored once by the full train-part model and reported beside the CV, never a
+condition. The thresholds do NOT change (fail AUC ≥ 0.75, BLC_8 RMSE ≤ 0.15; `beats_rules` is not measured)
+and `enabled` is written False whatever the verdict — enabling is AUT-11's gate-file rule, and the tuning
+ablation half is AUT-12's L-run, not measured here. The run writes the four files to `optimise/aml2/`
+(`G-OPT.json` carrying `kind: hurdle`, the `holdout` metrics and the `prereg` list; `G-OPT.md`;
+`opt_model.json` with `kind` and `holdout`; `train.json.gz` whose rows carry `holdout` and whose features are
+the 34) — `optimise/` and `optimise/aml/` are refused by name — and ships the optimiser off on a FAIL (one
+pre-registered run, the miss is published) and on a PASS (the ablation half and the gate file are later
+units'); `load_model` and `--check` rebuild the hurdle from the train rows whose `holdout` is False;
+`propose` and `_MODEL` stay on the shipped `optimise/aml` refit (AUT-11 moves them). One run on the
+committed data, by the supervisor, then the result is published whatever it is.
+
+Result (the supervisor's one run, 2026-10-11, `optimise.py --hurdle --extra tools/autonomy/aml/tuning_rules_L5.json.gz`,
+26 s): **G-OPT FAIL (hurdle)**. Rows 3,184 (413 new, 1,322 duplicates dropped), of which 2,572 train-part rows of
+299 geometries (1,851 failures, 177 with BLC_8 > 0) and 612 hold-out rows of 73 geometries. CV on the train part:
+fail AUC 0.983331 (threshold ≥ 0.75, holds), BLC_8 RMSE 0.152787 (threshold ≤ 0.15, `rmse_le` false; the zero
+predictor 0.262332, the positive rows 0.488842), log10 cells RMSE 0.057298. The hold-out, scored once and
+reported beside the CV: fail AUC 0.986584, BLC_8 RMSE 0.154058 (zero predictor 0.239143, positive rows
+0.455491, 35 positive rows). The CV half FAILS, so G-OPT fails and the optimiser stays off; the miss is published
+as measured and nothing is re-run. The train-part CV is not the 3,184-row CV of the refit above (0.153714): the
+hold-out geometries are fenced out of it. Importances (permutation AUC drop): feature_tolerance 0.231479,
+log10_1p_sharp_over_lmax 0.052974, feature_offset 0.008871, min_over_lmax 0.004333, log10_predicted_cells
+0.003983. Model sha `c32b43e067ab…`; `--check --report-dir tools/autonomy/optimise/aml2` PASS, and the selftest's
+hurdle group reproduces the committed `optimise/aml2` beyond the date.
+
 For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
 `optimise/aml/opt_model.json` and `optimise/aml/train.json.gz` and refits in seconds; when it is disabled
 it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the shipped model is the 2026-10-03 refit (its training rows include attempts meshed before that rule), and it ships disabled.
@@ -1360,6 +1395,7 @@ level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D
     python tools/autonomy/optimise.py --refine --work DIR                  # optimise/G-OPT.json, .md, opt_model.json, train.json.gz
     python tools/autonomy/optimise.py --cv --extra BUNDLE.json.gz          # G-OPT's CV half on extra rows: optimise/G-OPT-CV.json and .md
     python tools/autonomy/optimise.py --refit --extra BUNDLE.json.gz       # the refit on extra rows: optimise/aml/G-OPT.json, .md, opt_model.json, train.json.gz
+    python tools/autonomy/optimise.py --hurdle --extra BUNDLE.json.gz      # the pre-registered hurdle surrogate (AUT-09): optimise/aml2/G-OPT.json, .md, opt_model.json, train.json.gz
     python tools/autonomy/optimise.py --check                              # the report, the bundles, the train rebuild and the refit
 
     python tools/autonomy/evaluate.py --plan                               # the seal, the campaigns, the G-DET ids; nothing opened

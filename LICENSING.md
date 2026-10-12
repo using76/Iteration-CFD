@@ -152,6 +152,20 @@ local registry:
 transitive.** The whole set is MIT / Apache-2.0 / ISC / Unlicense /
 Unicode-3.0 / BSD-3-Clause. There is no release blocker here.
 
+The studio server (`gui/`, npm) has one geometry dependency that the Cargo
+table above does not cover. Its licence is read from `gui/package-lock.json`, and
+`gui/server/src/tools/geometryBoolean.test.ts` (B10) fails if any package in
+that lock file declares a GPL, LGPL or AGPL licence or declares none:
+
+| Dependency (from `gui/package-lock.json`) | Licence | MIT-compatible |
+|---|---|---|
+| manifold-3d 3.2.1 (Manifold, the STL booleans of `gui/server/src/tools/geometryBoolean.ts`) | Apache-2.0 | yes |
+| Clipper2 (compiled into `manifold.wasm` for Manifold's 2-D cross-sections) | BSL-1.0 | yes |
+
+manifold-3d is pinned at 3.2.1, the last release with no npm dependencies. From 3.3.0
+on, its command-line tools pull in `sharp`, whose `@img/sharp-libvips-*` binaries
+are LGPL-3.0-or-later (measured 2026-10-11 by installing 3.5.4).
+
 The one entry that IS a problem is OpenFOAM, and it was never linked against
 — it was copied from. That is worse, and it was fixed: the derived numerical
 core is gone (§"What phase 0 actually removed"), and every one of the 105

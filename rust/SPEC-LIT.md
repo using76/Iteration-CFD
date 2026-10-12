@@ -20355,6 +20355,7 @@ work       Perić
 work       Incropera
 work       Modest
 work       Numerical Recipes
+work       RP-1311
 document   docs/05-io-redesign.md
 document   docs/07-lowmach-solver.md
 reserved   99   the invented gate addresses §69's registry tests cite
@@ -33555,12 +33556,44 @@ public domain. (§10's and §22's plume rows carried a wrong report identifier �
 technical-note number, not this report — until this section landed; both now read
 NBSIR 79-1910.) Table 1's weighted
 averages, in the three regimes of `z/Q^(2/5)`, are the correlation the gate holds
-against. **The constants below are a transcription of the 2026-09-18 reading of the
-report (archive.org item `purelybuoyantdif7919mcca`) and have NOT been re-confirmed
-against the report's Table 1 by the section that now gates on them.** What stands
-between that transcription and a silently wrong gate is the key's own four continuity
-checks: the report's regime boundaries ARE the intersections of its fits, so a
-mistyped constant fails them at the 1–3 % level.
+against. **The nine constants below were confirmed against the report's Table 1 on
+2026-10-11, and none of them changed.** The 2026-09-18 transcription came from the
+archive.org item `purelybuoyantdif7919mcca`. The confirmation read the page image of
+NIST's scan, `https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nbsir79-1910.pdf` (56 PDF
+pages, SHA-256 `0c40db59b0c35485643db3ca7176b2cee380ea447961f93908e54134bcac1e2d` as
+downloaded), and checked it against the archive.org OCR text. Table 1, "Summary of
+center line data", is on the report's page 27, which is PDF page 35. Each value is in
+its "Weighted Average" column or its "Intersections" rows:
+
+```text
+key                          where on Table 1 (report page 27)                         value
+boundary_flame_intermittent  Intersections, Flame-Intermittent, V column (1.93/6.84)^2  .0796
+boundary_intermittent_plume  Intersections, Intermittent-Plume, V column (1.12/1.93)^3  .195
+flame_dT                     Flame, dT (C), weighted average                            797
+flame_V_over_sqrt_z          Flame, V/z^(1/2) (m^(1/2) s^-1), weighted average           6.84
+intermittent_dT_z_over_Q25   Intermittent, dTz/Q^(2/5) (C m kW^(-2/5)), weighted avg.   62.9
+intermittent_V_over_Q15      Intermittent, V/Q^(1/5) (m s^-1 kW^(-1/5)), weighted avg.  1.93
+plume_dT_z53_over_Q23        Plume, dTz^(5/3)/Q^(2/3) (C m^(5/3) kW^(-2/3)), w. avg.    21.6
+plume_V_z13_over_Q13         Plume, Vz^(1/3)/Q^(1/3) (m^(4/3) s^-1 kW^(-1/3)), w. avg.  1.12
+buoyancy_constant            V / sqrt(2 g dT z / T0), "All Q All z", 176 data points    .935
+```
+
+Three of these are the key's choices among values the table prints: the two
+boundaries and the buoyancy constant. The table prints each intersection twice, once
+from the temperature fits and once from the velocity fits. The VELOCITY intersections
+are .0796 and .195, and the key uses them. The temperature intersections are
+62.9/797 = .0789 and (21.6/62.9)^(3/2) = .201, and the table's last column prints
+their means, .0793 and .198. The text on page 8 rounds them to 0.08 and 0.20. That is
+why the key's velocity continuity rows close to 0.01 % and 0.07 % (tolerance 1 %),
+while its temperature rows close only to 0.85 % and 2.1 % (tolerances 2 % and 3 %).
+The temperature residuals are the table's own gap between its two intersections, not
+slack for transcription error. A mistyped constant still fails one of the four
+rows. The buoyancy constant is the all-data value .935. The regime averages beside it
+are 0.936 (flame, 61 points), 0.940 (intermittent, 69) and 0.928 (plume, 46). Page 8
+also prints the rounded set the correlation block's "~ 0.9" comes from: 6.8, 1.9 and
+1.1, exponents 1/2, 0 and -1/3, and C = 0.9. On precision, page 8 says: "Use of a
+third significant figure in the numbers is probably optimistic here". The five fire
+sizes, 14.4, 21.7, 33.0, 44.9 and 57.5 kW, are Table 1's column heads.
 
 **The case, and the declared heat release rate.** The inlet is a HOT-GAS INLET, NOT A
 FLAME — the case header says so and so does the recipe. All of `Q` enters as enthalpy,
@@ -33569,8 +33602,8 @@ nothing radiates, and `Q` itself is declared, not measured:
 ```text
 Q = rho_in U_in A_in cp (T_in - T_inf),   rho_in = p0 / (R_s T_in)
 p0 = 101325 Pa, R_s = 287.05 J/(kg K), cp = 1006 J/(kg K), T_in = 1173.15 K,
-T_inf = 293.15 K, A_in = 0.30 m x 0.30 m = 0.09 m2 (the report's burner:
-"a 0.30 m square porous refractory burner")
+T_inf = 293.15 K, A_in = 0.30 m x 0.30 m = 0.09 m2 (the report's burner, page 3:
+"constructed of a porous refractory material 0.30 m square")
 -> rho_in = 0.30089 kg/m3 ; Q per (m/s) of U_in = 23 973 W ; Q = 57.5 kW <=> U_in = 2.3985 m/s
 ```
 
@@ -33989,6 +34022,9 @@ schema it generates is byte-identical to the shipped one. It is not marked.
 §118.2 adds one more f64-only library test, mesh::geometry::tests::f64_geometry_is_bitwise_in_f64_build,
 which is #[cfg(not(feature = "single"))] because its subject is the f64 build's own bits; it carries no
 ignore attribute and moves neither bold count.
+§142.1 adds another f64-only library test, `solid::coupled::tests::gate_95a_probe_the_exact_fixed_point_of_the_block_map`.
+It is `#[cfg(not(feature = "single"))]` because its subject is the f64 discrete fixed point, and it is a plain
+`#[ignore]` measurement in the f64 build. It moves neither bold count.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **486** library
@@ -35011,6 +35047,98 @@ They are the user's; this unit changes nothing.
   a validation.
 * Not options: changing the interface treatment or loosening the 3 % bar.
 
+**Amended 2026-10-11 (docs/17 VAL-06): the O3 search, and what it found
+instead.** The rule the search applied (docs/17 §12, VAL-06): a source is
+accepted as a key only if it gives `Nu` within `1 %` of the exact conduction
+value `0.357143` at `Kr = 0.1`, low `Ra`, because that is the test of 115.4.
+
+*The named candidate fails it.* M. A. Sheremet, "Laminar and turbulent
+conjugate regimes of natural convection in a square enclosure",
+*Computational Continuum Mechanics* **5**(3) (2012) 327-338, DOI
+`10.7242/1999-6691/2012.5.3.39`, open access at `journal.permsc.ru` (PDF
+SHA-256 `90d1b9d9...3304`). Its own study is another configuration: walls of
+finite thickness on all four sides (its Fig. 1), `lambda_{1,2} = 23.08` and
+`1769.23`, `k-epsilon` at high `Ra`. It prints no `Kr = 0.1` value. A web
+search for an open solution of the stated configuration with a low-`Ra`,
+`Kr = 0.1` number found none: Belazizia, Abboudi and Benissaad, *J. Eng. Sci.
+Technol.* **11**(10) (2016) heat the wall from the top, which is a different
+problem. **No source passes the rule, so O1 stands.**
+
+*What the search found instead: the primary's own table, transcribed twice.*
+Sheremet's validation Table 1 (column `[18]`, which is Kaminski & Prakash)
+and Belazizia, Abboudi, Benissaad, "Conjugate natural convection in a square
+enclosure under horizontal magnetic field effect", *Mechanics & Industry*
+**16**, 409 (2015), DOI `10.1051/meca/2015011`, Table 1 ("Comparison of Nu
+with Kaminski solution [1], D = 0.2"; copy at `pdfs.semanticscholar.org/607b/
+4003971f4cec8657e6a2e3baace1210f20f0.pdf`, SHA-256 `b9fcbe95...ce58`) quote
+the same numbers. Sheremet labels them by `Gr`, Belazizia by
+`Ra = 0.7 Gr`. Where the two overlap, they agree to the last printed digit:
+
+| `Ra` (`Gr`) | Kr = 1 | Kr = 5 | Kr = 10 | Kr = inf | quoted by |
+|---|---|---|---|---|---|
+| `7x10^2` (`10^3`) | `0.87` | `1.02` | `1.04` | `1.06` | both (inf: 2015 only) |
+| `7x10^4` (`10^5`) | `2.08` | `3.42` | `3.72` | `4.08` | both (inf: 2015 only) |
+| `7x10^5` (`10^6`) | `2.87` | `5.89` | `6.81` | - | 2012 only |
+
+Neither paper quotes a `Kr` below 1. These are secondary transcriptions of
+the primary's numbers, and they are labelled that way wherever they are used.
+
+*They settle the reading that §60.5 left open.* In the reading Gate 5 runs
+(total width 1, Belazizia *et al.* 2012), `Kr = 1` makes wall and air one
+material, so conduction alone gives exactly `1` by (S59.7) and convection
+adds to it; the 2012 paper's own `Ra = 500` entry is `1.03`, and this solver
+gives `1.00906` there (115.3). The primary's `0.87` at `Ra = 700` is below
+that floor.
+Its `Kr = inf` entries, `1.06` and `4.08`, are a plain square cavity at
+`Ra = 700` and `7x10^4`. They sit inside §59.8's de Vahl Davis brackets
+`1 .. 1.118` and `2.243 .. 4.519`. Belazizia *et al.* 2015 also draw their
+domain as `0 <= X <= 1.2` (their Fig. 2c). **Kaminski & Prakash's
+configuration is 115.3's second geometry row:** a square fluid cavity of
+side `H` (the unit length, and `Ra` taken on it), the wall `0.2 H` thick
+outside it, and `Nu` on `H`. Its conduction limit is `1/(1 + 0.2/Kr)`:
+`0.33333 / 0.83333 / 0.96154 / 0.98039` at `Kr = 0.1 / 1 / 5 / 10`. So
+`0.357143` is not the primary's conduction limit, and no faithful source of
+the primary can pass the rule above.
+
+*Measured.* The run used `ofgpu-cht` of this tree at `f656370`. The case
+documents were generated outside the tree with the numerics of
+`cases/kaminskiPrakash.cht.jsonc`, and that reading's geometry:
+air `0.2 <= x <= 1.2` meshed `n x n`, wall `0 <= x <= 0.2` meshed
+`n/5 x n`, `Pr = 0.7` (`= Ra/Gr`), `dT/TRef = 3.3e-4`.
+`Nu = Q_cold/(k_f dT d_z)`. Every run stopped on its residual. `spread` is
+the relative disagreement of the cold-wall, hot-wall and interface heat flows:
+
+| `Ra` | `Kr` | mesh | `Nu` cold | `Nu` hot | `Nu` interface | spread | primary (transcribed) | difference | iterations |
+|---|---|---|---|---|---|---|---|---|---|
+| `700` | 1 | `40x40` | `0.86731` | `0.86725` | `0.86726` | `6.8e-05` | `0.87` | `-0.31 %` | 2747 |
+| `700` | 5 | `40x40` | `1.01779` | `1.01785` | `1.01785` | `6.6e-05` | `1.02` | `-0.22 %` | 2541 |
+| `700` | 10 | `40x40` | `1.04047` | `1.04054` | `1.04053` | `6.5e-05` | `1.04` | `+0.05 %` | 2475 |
+| `7x10^4` | 1 | `40x40` | `2.09622` | `2.09617` | `2.09617` | `2.6e-05` | `2.08` | `+0.78 %` | 2237 |
+| `7x10^4` | 5 | `40x40` | `3.45452` | `3.45444` | `3.45445` | `2.2e-05` | `3.42` | `+1.01 %` | 1213 |
+| `7x10^4` | 10 | `40x40` | `3.76351` | `3.76359` | `3.76358` | `2.1e-05` | `3.72` | `+1.17 %` | 1325 |
+| `7x10^4` | 1 | `80x80` | `2.08398` | `2.08376` | `2.08378` | `1.0e-04` | `2.08` | `+0.19 %` | 7867 |
+| `7x10^4` | 5 | `80x80` | `3.41719` | `3.41688` | `3.41693` | `9.1e-05` | `3.42` | `-0.08 %` | 3891 |
+| `7x10^4` | 10 | `80x80` | `3.71848` | `3.71881` | `3.71875` | `8.8e-05` | `3.72` | `-0.04 %` | 4605 |
+
+In its own reading the primary is reproduced: within `0.31 %` at `Ra = 700`,
+and within `0.19 %` at `7x10^4` on `80x80`. The `40x40` excess at `7x10^4`
+comes from the mesh, as §60.5 found. The `Gr = 10^6` row was not run. So
+the `7 %` miss of §60.5 sits between Belazizia *et al.* 2012 and the reading
+the gate borrowed from them; it is not between this solver and Kaminski &
+Prakash. 115.4's diagnosis of that 2012 reference stands, and nothing here
+explains its numbers.
+
+* O5 (new; it is the user's under docs/17 §11 item 4, D-VAL-4,
+  because it changes what Gate 5 measures; recommended): Gate 5 gains a
+  row in the primary's own reading. It runs against the transcribed table
+  above (`Kr = 1, 5, 10` at `Ra = 7x10^2` and `7x10^4`, and at `7x10^5`
+  once measured), with the same 3 % bar. It is labelled "primary table as
+  transcribed by two open papers". The Belazizia 2012 row stays, read as
+  reference-limited per O1. O5 does not test `Kr = 0.1`, because no
+  transcription carries it, and Gate 59-B keeps carrying the conduction
+  limit. Until the user decides, O1 stands. This amendment changes no gate,
+  number, key, case or code.
+
 ### 115.7 The probe and the house items
 
 `gate_5_probe_the_kr_miss_is_a_solid_resistance_offset_in_the_reference`
@@ -35377,7 +35505,9 @@ It uses no `orient3d`, no `insphere` and no sign rule, which makes it independen
 The supervisor's exact-arithmetic probe checked all three on 3000 random 5-point queries from
 the 3x3x3 lattice: no zero results, no mismatch against an explicit `eps_i = eps^(2^rank)`
 perturbation, and no failed swap. The same order is used for `orient3d` ties wherever the
-kernel needs one. TET-03a records any such use here.
+kernel needs one. TET-03a records any such use here: the kernel of §116.6 needs none. Its only
+zero `orient3d` case, a point coplanar with a hull face, is decided by (116.5a) through the
+perturbed `insphere` of the finite neighbour.
 
 ### 116.6 The Delaunay kernel
 
@@ -35394,8 +35524,57 @@ two tetrahedra (Shewchuk, delnotes). Point location is the visibility walk of De
 & Teillaud (2002), which crosses the face whose plane separates the current tetrahedron from
 the point. A hull tetrahedron `(a, b, c, inf)` conflicts with `p` when `p` lies strictly on the
 outer side of the hull face `abc`. When `p` is coplanar with `abc`, the conflict is decided by
-a perturbed rule. TET-03a writes that rule and its test into this subsection when it builds
-it. Duplicate points are refused by name, not perturbed.
+a perturbed rule, (116.5a) below. Duplicate points are refused by name, not perturbed.
+
+**Storage.** A finite tetrahedron obeys (116.2). A hull tetrahedron is stored as
+`(a, b, c, inf)`, with `inf` always in slot 3, wound so that a point `q` strictly beyond the
+hull face `abc` gives `orient3d(a, b, c, q) > 0`. Equivalently, the apex `d` of the finite
+neighbour across `abc` gives `orient3d(a, b, c, d) < 0`. Treating `inf` as a point far beyond
+`abc`, this is (116.2) for the hull tetrahedron. A tetrahedron that gains `inf` is brought to
+slot 3 by an even permutation of its slots, which keeps its orientation. Neighbour `i` of a
+tetrahedron is the one across the face opposite slot `i`.
+
+**The conflict rule** for a point `p` with global index `i_p`. Ids are the input indices of
+the points, and the perturbed `insphere` is (116.4):
+
+```
+finite T = (v0, v1, v2, v3):   conflict(T, p)  <=>  insphere_perturbed(v0, v1, v2, v3, p) > 0
+hull   H = (a, b, c, inf):     o = orient3d(a, b, c, p)
+                               o > 0  ->  conflict
+                               o < 0  ->  no conflict
+                               o = 0  ->  conflict(H, p) = conflict(N, p),
+                                          N = the finite neighbour of H across abc          (116.5a)
+```
+
+DERIVED. When `p` lies in the plane of `abc`, the circumsphere of `N` cuts that plane in the
+circumcircle of `abc`, so (116.5a) asks whether `p` lies inside that circle. A zero there is
+broken by (116.4) like any other zero, and the answer depends only on the plane configuration,
+because `N`'s apex lies on the inner side of the plane. The rule keeps `H` in the cavity exactly
+when `N` is in it. A cavity boundary face `abc` would otherwise star into the flat tetrahedron
+`(a, b, c, p)`.
+
+**Uniqueness.** DERIVED. With the lifting perturbation of §116.5 every non-vertical lower facet
+of the lifted point set is a simplex with a non-flat projection. A triangulation whose interior
+faces are all locally Delaunay under (116.4) is therefore the projected lower hull (the Delaunay
+lemma), and it is unique. The result does not depend on the insertion order. TET-03a's tests
+build the same sets in two orders and compare the tetrahedron sets.
+
+**Start, walk and refusals.** The input is refused, in this order, as `delaunay/domain` (a
+coordinate outside (116.3f), NaN and infinities included, naming the point and the axis),
+`delaunay/duplicate` (two points with equal coordinates, naming the smallest such pair
+`(i, j)`, `i < j`), and `delaunay/flat` (fewer than four points, or all coplanar). The first
+tetrahedron takes, in insertion order, the first point, the first point that differs from
+it, the first point not collinear with those two, and the first point not coplanar with
+those three. Collinearity is the exact zero of all three coordinate-plane orientations, each
+computed as `orient3d` with that coordinate set to 0 and a fourth point `(0, 0, 1)`,
+`(0, 1, 0)` or `(1, 0, 0)`. The walk starts from the last tetrahedron created, or from its
+finite neighbour if that one is a hull tetrahedron. At each step it tests the faces in an
+order rotated by a fixed-seed stream. Faces are outward-wound by §116.4's table. It crosses
+the first face with `orient3d(face, p) < 0`. It stops in a finite tetrahedron with no such
+face, or on entering a hull tetrahedron, which then conflicts strictly. A walk longer than the
+number of live tetrahedra is refused as `delaunay/walk`. Devillers, Pion & Teillaud (2002)
+note that the visibility walk terminates on a Delaunay triangulation, whatever face order it
+uses, so this refusal is a guard that no test reaches.
 
 **Gates (TET-03a).**
 
@@ -35418,14 +35597,78 @@ sum_T V(T) = V(convex hull)                                                     
 
 ### 116.7 Insertion order
 
-**Implemented by TET-03b** (`tetmesh/order.rs`).
+**Implemented by TET-03b** (`tetmesh/order.rs`, and `Delaunay::build_brio` in `tetmesh/delaunay.rs`).
 
 Points are inserted in BRIO order (Amenta, Choi & Rote 2003): random rounds of doubling size,
 with each round sorted along a Hilbert curve. The rounds are randomised by a fixed seed, so
-the order is deterministic. The walk then starts from the last inserted tetrahedron. TET-03b
-records in §116.18 the measured time to triangulate `10^6` uniform points in a release
+the order is deterministic. The walk then starts from the last inserted tetrahedron. A point
+that follows its Hilbert predecessor lands near it, so the walk crosses few faces; the random
+rounds keep the expected cavity sizes of a randomised incremental construction. The tetrahedron
+set does not depend on the order (§116.6, Uniqueness), so BRIO changes the cost and nothing else.
+
+**The Hilbert index.** A cell `c = (c_0, c_1, c_2)` of the `2^b`-per-axis grid, `1 <= b <= 21`,
+gets the index `H_b(c)` in `[0, 8^b)` from Skilling's transform (Skilling 2004, `AxestoTranspose`,
+`n = 3`). The transform works on the copy `X = c`, with `M = 2^(b-1)`:
+
+```
+for Q = M, M/2, ..., 2:                      (descending powers of two, Q > 1)
+    P = Q - 1
+    for i = 0, 1, 2:
+        if X_i AND Q:  X_0 = X_0 XOR P                                   (invert)
+        else:          t = (X_0 XOR X_i) AND P;  X_0 = X_0 XOR t;  X_i = X_i XOR t   (exchange)
+X_1 = X_1 XOR X_0;   X_2 = X_2 XOR X_1                                    (Gray encode)
+t = 0;   for Q = M, ..., 2:  if X_2 AND Q:  t = t XOR (Q - 1)
+X_i = X_i XOR t      for i = 0, 1, 2
+H_b(c) = sum over j = b-1 .. 0 and i = 0, 1, 2 of  bit_j(X_i) * 2^(3j + 2 - i)                    (116.6b)
+```
+
+The last line reads the transposed bits most significant first: bit `b-1` of `X_0`, of `X_1`,
+of `X_2`, then bit `b-2` of each, and so on. This is the transform §71.2's partitioner already
+writes out as `decompose::hilbert_index`, and the tet path calls that function rather than
+keeping a second copy. `H_b` is a bijection from the `8^b` cells onto
+`[0, 8^b)`, `H_b(0, 0, 0) = 0`, the last cell is `(2^b - 1, 0, 0)`, and cells with consecutive
+indices share a face (L1 distance 1). The supervisor checked these three properties for every
+`b <= 5` against an independent transcription of the paper's routine (outside the tree), and
+`order::hilbert_is_bijective` checks them in the tree.
+
+**Keys.** The point set's bounding box `[lo_k, hi_k]` is taken per axis. With `B = 16` bits
+(`BRIO_BITS`), coordinate `x_k` maps to the cell
+
+```
+q_k = min( 2^B - 1 , floor( ((x_k - lo_k) / (hi_k - lo_k)) * 2^B ) )   if hi_k > lo_k,   else 0      (116.6c)
+```
+
+evaluated in f64 in exactly this order, and the point's key is `H_B(q)`. The key is a sort key
+only; no geometric decision reads it, so its rounding cannot change the triangulation.
+
+**Rounds.** A Fisher-Yates shuffle of `pi = (0, 1, ..., n-1)`: for `i = n-1` down to `1`,
+`j = s mod (i + 1)` with `s` the next SplitMix64 value of a stream seeded `BRIO_SEED = 2003`,
+then swap `pi_i` and `pi_j`. The rounds are the prefix blocks of `pi` with the boundaries
+
+```
+c_0 = 0,   c_1 = min(n, 64),   c_(k+1) = min(n, 2 c_k)   until c_k = n                          (116.6d)
+```
+
+(`BRIO_FIRST = 64`), so the round sizes are 64, 64, 128, 256, ..., and the last round holds the
+rest, about half the points. Each round `pi[c_k .. c_(k+1))` is sorted by the pair
+`(key, point index)`, ascending, and the rounds are concatenated. DESIGN: Amenta, Choi & Rote
+put each point into the last round with probability 1/2, then each remaining point into the
+round before with probability 1/2, and so on. The prefix blocks of one uniform random
+permutation are uniform random samples of the same doubling sizes, and they make the order a
+function of the seed alone. `n = 0` gives no rounds and an empty order. A non-finite
+coordinate gives some permutation without failing; `build_brio` then refuses it exactly as
+`build` does, because the refusals of §116.6 do not depend on the order.
+
+**The kernel's cost.** One insertion touches only the tetrahedra it visits: the walk, the
+cavity and its boundary. The marks that keep a tetrahedron from being tested twice are per-slot
+epoch stamps, compared with the insertion's own epoch, so no insertion clears or allocates an
+array of every slot. With the input order the kernel makes the same decisions as before in the
+same order, so the slot layout, the statistics and the tetrahedron set are bit-identical to
+TET-03a's (`delaunay::input_order_layout_unchanged` pins them).
+
+TET-03b records in §116.18 the measured time to triangulate `10^6` uniform points in a release
 single-thread build on this machine (the gate is 15 s or less), and the mean number of walk
-steps per insertion (the gate is 20 or less).
+steps per insertion, `walk_steps / (inserted - 4)` (the gate is 20 or less).
 
 ### 116.8 The size field
 
@@ -35468,6 +35711,76 @@ h_curv = 2 pi / ( n_curv kappa )                                                
 ```
 h_gap = gap(x) / n_gap                                                                     (116.10)
 ```
+
+**Curvature and proximity on a triangulation (TET-04b).** Both sources are read off a
+`TetSurface` (§116.9) and become one patch primitive per triangle, with the cone (116.7a), so the
+octree rules (116.7c)-(116.7g) and the gradation (116.11) hold for them unchanged. Persson (2006)
+sets the size from the curvature and the local feature size as (116.9) and (116.10); the
+estimates of `kappa` and `gap` on a triangulation below are this section's own, derived here.
+
+*Curvature.* An edge `e` shared by exactly two triangles `t_1`, `t_2` with areas `A_1, A_2 > 0`
+and unit normals `n_1`, `n_2` turns by the dihedral angle
+
+```
+phi_e = atan2( |n_1 x n_2| , n_1 . n_2 )      in [0, pi]                                   (116.9a)
+```
+
+The edge is a **crease** when `phi_e >= theta_c`, the crease angle (the feature angle of §116.9).
+A crease, an edge with one or with three or more triangles, and an edge next to a zero-area
+triangle carry no estimate. Otherwise the osculating circle across `e` turns by `phi_e` over the
+distance between the two centroids measured across `e`, which is `(h_1 + h_2)/3` with
+`h_i = 2 A_i / |e|` the heights over `e`:
+
+```
+kappa_e = phi_e / ( (h_1 + h_2) / 3 ) = 3 phi_e |e| / ( 2 (A_1 + A_2) )                    (116.9b)
+```
+
+A triangle takes the largest estimate over its **edge star** `E(t)`: its own edges, and every
+edge of each triangle that shares a non-crease edge with it.
+
+```
+kappa_t = max over the non-crease e in E(t) of kappa_e ,      0 if there is none           (116.9c)
+```
+
+For two equilateral triangles of side `a` inscribed in a sphere of radius `R`, `phi_e = a /
+(sqrt(3) R)` to leading order and the centroid distance is `a / sqrt(3)`, so `kappa_e = 1/R`.
+Across a rim-to-rim edge of an `N`-sided cylinder of radius `R`, (116.9b) is
+`(3/2) (2 pi / N) / (2 R sin(pi/N))`, which tends to `1.5 / R`: the estimate errs towards a
+smaller size there. A crease is not a curvature: it is kept by boundary recovery (§116.11) and
+the floor (116.12) stops the size there, so a cube has no curvature primitive. Triangle `t`'s
+primitive has `D_k = 0` and `h_k = 2 pi / (n_curv kappa_t)`, (116.9). A triangle with
+`kappa_t = 0`, and one with `h_k >= H`, has none: a cone whose height is at least `H` never goes
+below the cap of (116.7b), so dropping it changes no value, bit for bit.
+
+*Proximity.* From triangle `t`'s centroid `c_t`, along each direction `v` the side allows
+(`Outward`: `+n_t`; `Inward`: `-n_t`; `Both`: the two), take the closed segment from `c_t` to
+`c_t + L v`, with `L` twice the diagonal of the surface's bounding box. Its first hit is the
+triangle `s != t` that the exact segment test (116.13d) meets with the smallest finite
+
+```
+tau_s = n_s . ( x_0(s) - c_t ) / ( n_s . v )                                               (116.10a)
+```
+
+ties going to the lowest triangle index. It counts when the two sheets face each other,
+`|n_s . n_t| >= cos 45 deg` (DESIGN), and then `tau_s` is the gap along `v`. A first hit that
+does not face `t`, or no hit, gives no gap along `v`; `gap_t` is the smallest gap over the
+allowed directions. Triangle `t`'s primitive has `h_k = gap_t / n_gap`, (116.10), and the flat
+distance `D_k = gap_t / 2`:
+
+```
+c_t(x) = gap_t / n_gap + (g - 1) max( 0 , d_t(x) - gap_t / 2 )                             (116.10b)
+```
+
+Every point between two parallel facing sheets a distance `gap` apart is within `gap/2` of one
+of them, so `h <= gap / n_gap` everywhere in the gap, which is TET-04b's gate. With `D_k = 0`
+the mid-plane would get `gap / n_gap + (g - 1) gap / 2`. A triangle with no gap, with
+`gap_t <= 0` (a hit at the centroid is a self-intersection, which §116.9 refuses), or with
+`h_k >= H` has none, by the same cap argument. The side is DESIGN: `Outward` measures a fluid
+gap between closed bodies whose normals point into the fluid, `Inward` a channel inside a shell,
+and `Both`, for when the fluid side is not yet known (§116.12), also measures a solid's own
+thickness. The first hit is found through a bounding-volume hierarchy over the triangles'
+boxes; it changes the cost, never the answer, which equals the scan over every triangle bit for
+bit.
 
 **Primitives (TET-04a).** The sources are flattened into primitives before anything is stored.
 A primitive `k` has a size `h_k > 0`, a flat distance `D_k >= 0` and a support: one point, one
@@ -35729,13 +36042,59 @@ The remesh follows Botsch & Kobbelt (2004). Each iteration does five things:
    longer than `(4/3) h`.
 3. It flips edges to bring valences toward 6 (4 on a polyline end).
 4. It relaxes tangentially, using (116.14).
-5. It projects back onto the input surface with `TriIndex::closest_point` (§92.11).
+5. It projects every vertex back onto the input surface with `remesh::Projector`, the f64
+   closest-point query of (116.14d). (TET-06a changed this item: it named
+   `TriIndex::closest_point` of §92.11, which is `Scalar`-typed and would run in f32 under
+   `single`, against §116.2.)
 
 In each test, `h` is `h(x)` at the edge midpoint.
 
 ```
 x <- x + ( I - n n^T ) ( c - x )         c = area-weighted centroid of the one-ring        (116.14)
 ```
+
+**The operations, as TET-06a builds them** (DERIVED from Botsch & Kobbelt 2004, §3, where
+the paper leaves a choice open). `x_v` is a vertex, `N(v)` its one-ring of neighbours,
+`val(v) = |N(v)|`, `m_ab = (x_a + x_b) / 2` and `l_ab = |x_a - x_b|`.
+
+```
+split    (a,b)  if  l_ab > (4/3) h(m_ab);  new vertex at m_ab, each of the two
+                triangles becomes two, each child keeps its parent's patch             (116.14a)
+collapse (a,b)  if  l_ab < (4/5) h(m_ab),  and for every w in N(a) u N(b) \ {a,b}:
+                |m_ab - x_w| <= (4/3) h((m_ab + x_w)/2);  the survivor moves to m_ab   (116.14b)
+flip     (a,b)  to (c,d), c and d opposite (a,b),  if  E' < E  with
+                E = sum over v in {a,b,c,d} of (val(v) - 6)^2,  E' the same after       (116.14c)
+project  x_v <- P(x_v) = the closest point of the input surface; among equally
+                close triangles, the smallest triangle index                          (116.14d)
+```
+
+A collapse is also refused when it would break the surface: unless `N(a) ∩ N(b)` is exactly
+the two opposite vertices (the link condition; any other common neighbour would leave an edge
+on three triangles), unless the surface keeps more than four vertices, and when any surviving
+triangle of the two one-rings would reach zero area or turn its normal by 90 degrees or more.
+A flip is refused when `(c,d)` is already an edge, when `val(a)` or `val(b)` is 3, and when a
+new triangle's normal makes 90 degrees or more with the sum of the two old ones. In (116.14)
+`n` is the normalised sum of the one-ring's triangle normals `(x_1 - x_0) x (x_2 - x_0)`, and
+`c = sum_t A_t g_t / sum_t A_t` over the triangles `t` around the vertex, with `A_t` the area
+and `g_t` the centroid; every vertex's new position is computed from the old positions before
+any moves (Jacobi order). The splits repeat until no edge passes (116.14a), at most 32 sweeps
+per iteration. Every pass visits edges and vertices in a fixed index order, so the output is
+the same bit for bit on every run. TET-06a treats every vertex as free; the constraints below
+are TET-06b's.
+
+**The TET-06a gates** (§116.18) are measured on the output `S` against the input `S_in`:
+`rho_e = l_e / h(m_e)` per undirected edge, the smallest of the three angles per triangle, and
+the vertex Hausdorff distance
+
+```
+d_H(S, S_in) = max over the vertices v of S of  min over y in S_in  |x_v - y|             (116.14e)
+```
+
+the remesh's own degrees of freedom. The two-sided distance between the surfaces includes the
+chord sag inside each output triangle, about `r_t^2 / (2 R)` on a sphere of radius `R` for a
+triangle of circumradius `r_t`, which is 0.0083 h for an equilateral triangle of edge `h` on the
+unit sphere at `h = 0.05`. It is a property of any piecewise-linear surface at that size, not of
+the remesh, so it is measured and reported in §116.18 and not gated.
 
 Constraints:
 
@@ -36034,6 +36393,44 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-05 | the TET-00 follow-up: `TetSpec::validate` and §116.3's "or non-finite" | `+inf` was accepted for `size.gradation`, `refine.radius_edge` and `layers.max_neighbour_ratio` (a supervisor probe failed on all three); each is now refused by name, `tetmesh::tests::spec_refuses_non_finite_bounds` | the TET-05 commit |
 | TET-05 | the f32 arm (`--features single`), from outside the tree | the unit's 11 tests compiled in a crate whose `Scalar` is 4 bytes pass with identical printed numbers, stream E included; the f64 build's SASS is identical on all 43 cubins | the TET-05 commit |
 | TET-05 | the whole `tetmesh::` test filter, release | 44 tests in 4.80 s | the TET-05 commit |
+| TET-03a | 10^4 uniform points (SplitMix64 seed 2026): the tetrahedron set against Qhull (scipy, run outside the tree; its result checked locally Delaunay in exact rationals, 0 failures over every interior face) | equal: 66 273 tets, 76 389 edges, 132 663 faces, 234 hull faces, digest `0x62df92f27011a4d5`, in input order and, in the supervisor's probe outside the tree, in reversed and shuffled order; Euler 1; volume equals the exact rational hull volume 0.9875476112201466 within 1e-12 relative | the TET-03a commit |
+| TET-03a | the cube corners and the 3x3x3 lattice against a brute-force exact Delaunay of the explicitly perturbed lifting (outside the tree) | equal: 6 tets (digest `0x8ecc7ce0071e1d85`) and 48 tets (`0x1ab2235318ee986d`), in input and reversed order; volumes 1 and 8 exactly | the TET-03a commit |
+| TET-03a | (116.5a), the coplanar hull rule: a point coplanar with a hull face, inside its circumcircle (case A) and on it (cases B and B2, cospherical, so (116.4) decides) | the brute-force tetrahedron sets in both insertion orders; the `o = 0` branch runs in both cases | the TET-03a commit |
+| TET-03a | the 20^3 lattice (8000 points, every 5-point subset of a lattice cube cospherical) | locally Delaunay under (116.4); 41 154 tets, 4 332 hull faces (2 V_hull - 4 with V_hull = 2 168); volume 6859 exactly; Euler 1; the same digest `0xf71fcb283e1f04f5` in input and reversed order (and shuffled, in the supervisor's probe); (116.5a)'s `o = 0` branch ran 237 724 times in input order | the TET-03a commit |
+| TET-03a | 2000 points on the unit sphere (seed 2027, normalised rejection samples, no transcendental functions) | locally Delaunay; 6 023 tets; 3 996 hull faces with all 2000 points on the hull; volume equals Qhull's exact rational hull volume 4.163454815148943 within 1e-12 relative; in the supervisor's probe, the same digest `0xeec7001fe35f95d0` in input, reversed and shuffled order | the TET-03a commit |
+| TET-03a | the supervisor's degenerate probes (outside the tree): two parallel 15x15 grids, and a 20x20 planar grid with one apex | the same digest in input and shuffled order; `check` passes; Euler 1 | the TET-03a commit |
+| TET-03a | the cost, release, input order (no BRIO yet; TET-03b's subject) | 10^4 uniform points in 0.08-0.17 s, 48.5 walk steps and 19.5 cavity tets per insertion; 10^5 in 4.6 s, 104.7 walk steps per insertion | the TET-03a commit |
+| TET-03a | the f32 arm | `rust/tests/tetmesh_delaunay.rs`, 6 tests (cube, lattice, coplanar hull, 2000 random points against Qhull's digest `0xb88702ffa69aeb56`, the 8^3 lattice, `locate` from every hull slot) pass with the same assertions under `--features single` | the TET-03a commit |
+| TET-03a | the first run's two failures | the insertion loop skipped the points the start scan had passed over (a collinear lattice point was never inserted; the coder's own test caught it); the public `locate` returned a hull start slot without walking (the supervisor's test `delaunay_both_builds_locate_from_hull_start` caught it: 156 hull starts, 200 queries each) | the TET-03a commit |
+| TET-03a | the whole `tetmesh::` test filter, release | 56 tests in 4.56 s | the TET-03a commit |
+| TET-03b | 10^6 uniform points (SplitMix64 seed 2026), `build_brio`, release, one thread, this machine (4 CPUs; the other lanes idle during the run), `delaunay::million_points_timed` | 5.94 s and 5.83 s in two runs (the gate is 15 s); 6.69 walk steps per insertion (the gate is 20); 20.33 cavity tets per insertion; 6 749 491 slots | the TET-03b commit |
+| TET-03b | the same 10^6 set against Qhull (scipy, run outside the tree) | equal: 6 748 873 tets, 7 749 181 edges, 13 498 055 faces, 618 hull faces, digest `0x7fe01dd487275a08`; Euler 1; `check` passes; volume equals the exact rational hull volume 0.9996391098418097 within 1e-12 relative | the TET-03b commit |
+| TET-03b | TET-03a's gates rerun at 10^5 with BRIO: 10^5 uniform points (seed 2026) | Qhull's set: 672 324 tets, 772 540 edges, 1 344 865 faces, 434 hull faces, digest `0x789107d99e34d6cd`, in input order, BRIO order and BRIO with seed 7; Euler 1; volume equals the exact rational hull volume 0.9976647305767516 within 1e-12 relative; 6.95 walk steps per insertion with BRIO against 104.7 in input order | the TET-03b commit |
+| TET-03b | the 46^3 lattice (97 336 points) and 10^5 points on the unit sphere (seed 2027), BRIO | lattice: locally Delaunay, 24 300 hull faces (2 V_hull - 4 with V_hull = 12 152), volume 91 125, Euler 1, the same digest under seeds 2003 and 7; sphere: locally Delaunay, 199 996 hull faces with every point on the hull, Euler 1, volume equals Qhull's exact rational hull volume 4.188285937318097 within 1e-12 relative | the TET-03b commit |
+| TET-03b | the epoch stamps, input order (`delaunay::input_order_layout_unchanged`, and the supervisor's probe outside the tree at 10^5) | slot count, statistics and the slot-layout digest bit-identical to TET-03a on 10^4 and 2000 uniform points and the 20^3 lattice, and at 10^5 (layout `0xecf24f2106be5819`); 10^5 points in input order now take 1.30 s, against 4.47 s with the per-insertion arrays | the TET-03b commit |
+| TET-03b | (116.6b) and the BRIO order | bijection, `H(0,0,0) = 0`, the last cell `(2^b - 1, 0, 0)` and unit steps for 1 to 5 bits; six index values up to 21 bits and the BRIO orders of 10^3 and 10^4 uniform points (seeds 2003 and 7) and of the 3^3 lattice equal the supervisor's independent transcription of Skilling (2004) and of §116.7, outside the tree | the TET-03b commit |
+| TET-03b | the f32 arm | `rust/tests/tetmesh_delaunay.rs`, 8 tests (TET-03a's 6, the order pins, and the BRIO-built 2000-point set against Qhull's digest `0xb88702ffa69aeb56`) pass with the same assertions under `--features single` | the TET-03b commit |
+| TET-03b | the first run's one failure | `brio_rounds(0)` returned `[0, 0]`; the pinned `[0]` caught it | the TET-03b commit |
+| TET-03b | the whole `tetmesh::` test filter, release | 66 tests in 21.8 s, and the 10^6 run ignored | the TET-03b commit |
+| TET-04b | (116.9a)-(116.9c) on the level-3 icosphere (`R = 0.5`, 1 280 triangles, crease 60 degrees) | `min kappa_t R` and `max kappa_t R` inside the windows `[0.9965, 0.9975]` and `[1.1455, 1.1470]` around the supervisor's independent transcription of §116.8 outside the tree (0.99703 and 1.14620); 1 280 curvature primitives; `h / (2 pi R / 16)` at most 0.94801 at 10^4 facet points and 0.94756 at 10^4 points of the true sphere (the bar is 1.02); `h == h_brute` bit for bit at every probe | the TET-04b commit |
+| TET-04b | the crease rule | the 32-sided capped cylinder: every side triangle's `kappa_t` equals `(3/2)(2 pi/32)/(2 R sin(pi/32))` within 1e-12 relative (`kappa R = 1.50241`, the conservative strip value of §116.8), every cap triangle exactly 0; the unit cube has no curvature primitive | the TET-04b commit |
+| TET-04b | (116.10a)-(116.10b) on the 1 mm box pair | `Outward`: exactly the four facing triangles have a gap, `1e-3` within 1e-12 relative; `Inward`: all 24 (0.005 on the z faces, 0.01 on the x and y faces); `Both`: the minimum of the two; at 10^4 points in the gap `h` equals `gap/3` within 1e-12 relative (the bar is `h <= gap/3`; 1e-12 is the rounding of `d` at the mid-plane) and `h == h_brute`; with `Inward` alone the gap point gets 0.005/3, and with no source the base 0.02 | the TET-04b commit |
+| TET-04b | (116.11): two icospheres 0.05 apart with curvature, proximity (`Both`), a point, a box and a band source; 10^5 pairs per `g`, `t` log-uniform in `[1e-4, 0.5]` | the largest `abs(h(a) - h(b)) / ((g-1) abs(a-b))` is 0.99997 at `g = 1.2` (17 809 leaves) and 0.99999 at `g = 1.5` (8 429 leaves), against the bar `1 + 1e-9`; `h == h_brute` bit for bit at every `a`; the outward gaps number inside `[70, 90]` (oracle 80) with the smallest inside `[0.0530, 0.0540]` (oracle 0.053497) | the TET-04b commit |
+| TET-04b | the bounding-volume hierarchy | its first hit equals the scan over every triangle, index and `tau` bit for bit, on 6 168 queries (3 176 hits): every triangle in both directions on the two-sphere and box-pair surfaces, and 10^3 random segments | the TET-04b commit |
+| TET-04b | the first run's one failure | `GapSide::Inward` scanned along `+n_t`; `proximity_gap`'s `Inward` expectations caught it before the coder's report | the TET-04b commit |
+| TET-04b | the f32 arm | `rust/tests/tetmesh_sizefield.rs`, 4 tests (the sphere, the gap and `g = 1.2`'s gradation, and the `Scalar` width), pass under `--features single` with every printed number identical to the f64 build | the TET-04b commit |
+| TET-04b | the whole `tetmesh::` test filter, release | 72 tests in 20.9 s, and the 10^6 run ignored | the TET-04b commit |
+| TET-06a | §116.10, changed by this unit | item 5 named `TriIndex::closest_point` (§92.11), which is `Scalar`-typed and runs in f32 under `single`, against §116.2; it now names the f64 `remesh::Projector` (116.14d). The paragraph "The operations, as TET-06a builds them", (116.14a)-(116.14e) and the gate definitions were added; nothing else in §116 changed | the TET-06a commit |
+| TET-06a | the unit sphere: a level-5 icosphere (10 242 points, 20 480 triangles), `h = 0.05`, the default 10 iterations, release | 99.88 % of 16 794 edges with `l/h` in `[4/5, 4/3]` (the bar is 95 %), smallest 0.776, largest 1.414, mean 1.023; 100 % of 11 196 triangles with a smallest angle of 25 degrees or more (the bar is 99 %), the smallest 35.55 degrees; the vertex distance (116.14e) 1.7e-16 (the bar is `0.01 h` = 5e-4); 5 600 points; 298 splits, 4 940 collapses, 1 622 flips; about 0.2 s | the TET-06a commit |
+| TET-06a | the same output, closed and 2-manifold | `check_manifold`: every edge on two triangles in opposite directions, every vertex link one cycle, Euler characteristic 2; `surfprep::prepare` accepts it (closed, oriented, outward, no self-intersection); every triangle keeps patch 0; two runs bit-identical | the TET-06a commit |
+| TET-06a | the two-sided sampled distance (3 vertices, 3 edge midpoints and the centroid of every triangle, both directions), not gated | 0.0151 h. The supervisor's probe outside the tree bounds it geometrically: the largest output chord sag `R - sqrt(R^2 - r_t^2)` is 0.0126 h and the input icosphere's own is 0.0057 h, and 0.0151 h lies below their sum, so the excess over `0.01 h` is the piecewise-linear chord of §116.10, not a projection error | the TET-06a commit |
+| TET-06a | a graded field on the same sphere: a point source of size 0.025 at (1, 0, 0), `H = 0.1`, `g = 1.2` | 99.89 % of 4 395 edges with `l / h(m_e)` in `[4/5, 4/3]`; Euler characteristic 2 | the TET-06a commit |
+| TET-06a | a torus (`R = 1`, `r = 0.4`, a 160 x 64 grid, 20 480 triangles; the inner ring spaced 0.47 h), `h = 0.05`; not a plan gate | Euler characteristic 0, `prepare` accepts it, 100 % of triangles at 25 degrees or more; `l/h` in `[4/5, 4/3]` for 86.2 % of edges after the default 10 iterations, and in the supervisor's probe 90.0 % after 20 and 98.8 % after 40 (3 145, 2 274 and 272 short edges): an input much finer than `h` in one direction drains slowly, because the `(4/3) h` clause of (116.14b) refuses most collapses in each iteration | the TET-06a commit |
+| TET-06a | the projector and the closest point | `Projector::closest` equals the scan over every triangle (point and distance bit for bit, the triangle index) on 10^4 queries each around the sphere and the torus; `norm(x - closest_point_on_triangle(x, t))` equals `sizefield::point_triangle_distance` bit for bit on 10^4 random and 200 degenerate triangles | the TET-06a commit |
+| TET-06a | the manifold refusals, each by name | on a tetrahedron: an open face names edge (1, 2) on 1 triangle; a flipped face names edge (1, 2) used twice in the same direction; two tetrahedra sharing vertex 3 name a link of 2 cycles; a repeated index names triangle 4; an unused point names vertex 4 | the TET-06a commit |
+| TET-06a | the f32 arm | `rust/tests/tetmesh_remesh.rs`, 2 tests (the `Scalar` width, and the sphere's four bars), pass under `--features single` with every printed number identical to the f64 build | the TET-06a commit |
+| TET-06a | the first run's failures | the split inserted edge-map keys with the new vertex, always the largest index, first, so later lookups missed them, and split, collapse and flip skipped any edge whose incidence list held the `b -> a` triangle first; the coder's level-3 coarse-sphere test (`h = 0.25`, 3 iterations), kept as `coarse_sphere_regression`, caught the first | the TET-06a commit |
+| TET-06a | the whole `tetmesh::` test filter, release | 84 tests in 20.3 s, and the 10^6 run ignored | the TET-06a commit |
 
 ### 116.19 References
 
@@ -36081,6 +36478,8 @@ Crossref metadata was checked against the title, authors, year and pages given h
   limiting. *Eng. Comput.* 22(2), 95-109. DOI `10.1007/s00366-006-0014-1`.
 - Schönhardt, E. (1928). Über die Zerlegung von Dreieckspolyedern in Tetraeder. *Math. Ann.*
   98, 309-312. DOI `10.1007/BF01451597`.
+- Skilling, J. (2004). Programming the Hilbert curve. *AIP Conf. Proc.* 707, 381-387. DOI
+  `10.1063/1.1751381`.
 - Shewchuk, J. R. (1997). Adaptive precision floating-point arithmetic and fast robust geometric
   predicates. *Discrete Comput. Geom.* 18(3), 305-363. DOI `10.1007/PL00009321`. The
   public-domain `predicates.c` is at <https://www.cs.cmu.edu/~quake/robust.html>.
@@ -39902,6 +40301,26 @@ builds `W_k` from the element counts and such a species has none. The supervisor
 §129.6 (the digest listed there): it reads all 53 records, with `T_mid` 1382,
 1368 and 1478 K for HCNO, HOCN and HNCO.
 
+**A fourth layout, accepted (CHR-02b, DESIGN).** GRI-Mech 1.2's
+`thermo12.dat`, the thermo file DRM19 names (§129.6), fills an unused element
+slot with a blank symbol and the count `00` (`O   1   00   00   00G`).
+Read strictly, every such record is refused for a count with no element. A
+slot whose symbol is blank and whose count is blank or reads as the integer 0
+(`0`, `00`, `000`) is an empty slot: it can name no element, so dropping it
+changes no species' formula. A blank symbol with a nonzero count is still
+refused by name.
+
+The same file's HCCOH record writes its phase letter a second time in column
+74, after a narrow `T_mid` (`   1000.G`), so the fifth slot reads as the
+symbol `G` with a blank count. Table III gives the count as Fortran `I3`, and
+on Fortran input a numeric field of all blanks is zero (ANSI X3.9-1978,
+*Fortran 77*, §13.5.9, numeric editing). **A named slot whose count field is
+all blanks therefore has the count 0**, and a zero count is dropped as
+before, before the symbol is looked up. The reader records a note naming the
+species, the columns and the symbol, so the drop is visible. HCCOH's formula
+stays C2 H2 O1. A count that is not blank and does not parse as a
+non-negative integer is still refused.
+
 The phase must be `G`. A condensed species (`S`, `L`) is refused by name: §131
 is gas-phase only.
 
@@ -39982,6 +40401,41 @@ reaction orders ... However, it does not specify how to calculate the reverse
 reaction rate." The authored JL4 file (§129.6) writes what the paper writes,
 and the flag is how a reader knows.
 
+**Fall-off, `REV` and `DUP` as read (CHR-02b, DESIGN where marked).** The
+manuals give the keywords; these are the reader's rules for them.
+
+* **The marker.** After whitespace is removed, a side may end with `(+X)`,
+  found as the last `(+` of the side when the side ends in `)`. A species
+  name may hold parentheses (`CH2(S)`), never `(+`. `X` is `M` (either case)
+  or a declared species. Both sides carry the same `X`. A marker on one side
+  only, two different markers, a `(+` anywhere else, or `(+M)` together with
+  a `+M` term is refused, naming the line and the equation.
+* **The collider.** `(+M)` takes the efficiency items of §129.4 (130.3);
+  `(+SPECIES)` takes none, and an efficiency item there is refused
+  (SAND89-8009 eq. (63)). A fall-off reaction has no plain third body: the
+  reaction-line rate is `k_inf`, with `m` the forward orders alone, and
+  `LOW`'s `k_0` is converted with `m + 1` (§130.2).
+* **What a fall-off reaction needs.** `LOW` with exactly three numbers.
+  Without it the reaction is refused when it closes; `HIGH` stays refused by
+  name. `TROE` takes 3 or 4 numbers and `SRI` 3 or 5 (`d = 1`, `e = 0`). One
+  of them at most, each given once, and none of `LOW`, `TROE` and `SRI` on a
+  reaction without a marker. `T***` and `T*` of `TROE` and `c` of `SRI` are
+  divisors in (130.11)-(130.12) and must be nonzero. The auxiliary lines may
+  come in any order.
+* **`REV`.** Exactly three numbers, converted in the reaction's units with
+  `m_r` = the sum of the reverse orders (130.13), plus 1 with a plain `+M`.
+  It is refused on an irreversible reaction and, as a DESIGN choice of this
+  reader, on a fall-off reaction: a reverse fall-off would need its own
+  blending, and no mechanism of this tranche writes one. A reversible
+  reaction with `FORD` or `RORD` and a `REV` is not flagged (the flag above
+  is for the reaction with no `REV`).
+* **`DUP`.** No `/.../` field, once per reaction. Two reactions that §129.5
+  calls the same are read when both carry `DUP`; when one does not, the
+  reaction without it is refused, naming both lines; a `DUP` reaction with no
+  twin is refused, naming its line. Reactions of different kinds (no third
+  body, `+M`, `(+M)`, `(+SPECIES)` with different species) are never the
+  same (DESIGN, extending CHR-02a's third-body rule).
+
 ### 129.6 Mechanisms: what is authored, what is user-supplied, and the licence decision
 
 **Authored here as data, from the papers.** These are WD1 (Westbrook &
@@ -40049,6 +40503,7 @@ so a user-supplied copy can be confirmed to be the same file:
 | `thermo30.dat` | `8d918b771aa965fe05e8c8f1f7e926a5326ebc90e7fc923ce129dc118b634dcc` | — |
 | `transport.dat` (GRI 3.0) | `e2ef4437568311ad0ba6c2311a564966c9accb2b43ea3157b764c1e8febc5825` | — |
 | `drm19.dat` | `1ed93a223186b890ce8b4ec0e3f3918edba56656c276b41fa6c093a05da621ed` | 21 / 84 |
+| `thermo12.dat` (GRI 1.2, for DRM19) | `949cfbf6fa6d3c93dd3dee383095187f9aa9eb2e7f9c5f88aeefef37d7b68607` | — |
 
 **The counts, and a discrepancy inside the readme.**
 
@@ -40058,8 +40513,13 @@ so a user-supplied copy can be confirmed to be the same file:
   reactions of 49 species". The file itself has 53 species and 325 reactions,
   counted here. **CHR-02b's `ck_gri30_counts` holds 53 / 325**, with the
   readme's section 1 and this count as its sources, and names the stale line.
-  The file uses `(+M)` 58 times, `LOW` 29, `TROE` 26, `SRI` once and
-  `DUPLICATE` 6 times. Every one of those is a read keyword in §129.5.
+  The file uses `(+M)` 58 times (29 fall-off reactions, the marker on both
+  sides), `LOW` 29, `TROE` 26 and `DUPLICATE` 6 times. Every one of those is
+  a read keyword in §129.5. **Corrected by CHR-02b:** CHR-00a's count of
+  "`SRI` once" was a text match on `unix.sri.com` in the file's comment
+  header; the file has no SRI reaction, so its 29 fall-off reactions are 26
+  Troe and 3 Lindemann. It also has 12 plain `+M` reactions and 16
+  irreversible (`=>`) ones, and no `REV`, `FORD`, `RORD` or `(+SPECIES)`.
 * **DRM19.** The file's own header reads "Reduced version of GRI-MECH 1.2.
   19 species ( + N2, AR); 84 reactions", which is 21 species and 84
   reactions, matching the plan's 21/84. It uses `(+M)` 16 times, `LOW` 8 and
@@ -40067,6 +40527,23 @@ so a user-supplied copy can be confirmed to be the same file:
 * **DRM19's thermo.** The DRM page says "you must use thermo12.dat, the
   thermodynamics data of GRI-Mech", meaning GRI-Mech **1.2**'s, not 3.0's.
   CHR-02b's user-path variable therefore carries a thermo path of its own.
+  `thermo12.dat` was fetched by CHR-02b on 2026-10-11 from the GRI-Mech 1.2
+  page (`combustion.berkeley.edu/gri-mech/new21/version12/files12/`, plain
+  HTTP), 32 records in the `THERMO ALL` layout, sha256
+  `949cfbf6fa6d3c93dd3dee383095187f9aa9eb2e7f9c5f88aeefef37d7b68607`, and is
+  not vendored either. DRM19 has 8 fall-off reactions, all Troe, 6 plain
+  `+M` reactions, and no `DUPLICATE`, `REV`, `FORD`, `RORD` or `=>`.
+
+**The user path (CHR-02b).** Four environment variables name the four files:
+`OFGPU_GRI30_MECH` (`grimech30.dat`), `OFGPU_GRI30_THERMO` (`thermo30.dat`),
+`OFGPU_DRM19_MECH` (`drm19.dat`) and `OFGPU_DRM19_THERMO` (`thermo12.dat`).
+The thermo file is read as a separate set at `P_ATM` (§128.4) and passed to
+the mechanism reader. When a pair is not set, `ck_gri30_counts` or
+`ck_drm19_counts` prints `SKIPPED <test>: <variable> is not set; GRI-Mech 3.0
+and DRM19 are user-supplied by path (SPEC-LIT §129.6)` and returns. That is
+a skip by name, not a pass. `OFGPU_REQUIRE_MECH=1` turns a missing variable
+into a failure, as `OFGPU_REQUIRE_AMGX` does for AMGX. `cases/mech/README.md`
+repeats the variables and the digests for a user.
 
 ### 129.7 What CHR-02a and CHR-02b must make true
 
@@ -40078,6 +40555,9 @@ so a user-supplied copy can be confirmed to be the same file:
 | `ck_refuses_plog` and every refused keyword | refused by name, with the recognised set | D |
 | `ck_gri30_counts`, `ck_drm19_counts` | 53/325 and 21/84; skipped by name without the user path | D |
 | `ck_rational_balance_is_exact` | `0.5 O2` balances exactly, and `0.49 O2` fails | D |
+| `ck_reads_falloff` | `(+M)` and `(+SPECIES)` with `LOW`, `TROE` (3 and 4 numbers), `SRI` (3 and 5) and none (Lindemann): every number, `k_inf` with `m`, `k_0` with `m + 1` | D (one rounding, as `ck_units_keywords`) |
+| `ck_reads_rev_and_dup` | `REV` in SI with `m_r`; a `DUP` pair reads; one `DUP` missing, or a lone `DUP`, is refused naming the lines | D |
+| `ck_falloff_refusals` | every refusal of the fall-off, `REV` and `DUP` rules above, each naming its line | D |
 
 Labels: none. §129 is a format and defines no equation.
 
@@ -40234,7 +40714,65 @@ name**. It is not counted as a pass.
 The host twin is f64 in both builds, so every row is unchanged by the f32
 build.
 
-Labels: (130.1)-(130.13).
+### 130.7 The host twin as built (CHR-03, `src/chem/kinetics.rs`)
+
+`omega` is evaluated from concentrations `c_k = [X_k]` in mol/m^3, or from
+`(T, p, Y)` through (128.9). Every number is f64 in both builds. The choices
+below are DESIGN choices of this unit, stated so that CHR-07a's device kernel
+makes the same ones:
+
+```
+q_f,i = C_i k_fi Π_k c_k^(o'_ki)                                                   (130.14)
+ln k_fi = ln|A_i| + β_i ln T - θ_i / T   [+ ln( Pr/(1+Pr) ) + ln F   for fall-off]  (130.15)
+q_r,i = C_i sgn(A_i) exp( ln k_fi - ln K_ci + Σ_k o''_ki ln c_k )                   (130.16)
+q_r,i = C_i sgn(A_ri) exp( ln|A_ri| + β_ri ln T - θ_ri / T + Σ_k o''_ki ln c_k )   with REV  (130.17)
+```
+
+* **The forward term** (130.14) is formed directly, `k_f` from (130.4) (times
+  `Pr/(1+Pr) F` for fall-off) and each factor with `powf`. **The reverse term**
+  is one exponential of a sum of logs, (130.16) or (130.17), as §130.3 requires.
+  `ln c_k = -inf` at `c_k = 0` makes the term exactly 0. A factor whose order is
+  0 is skipped on both sides, so `0 · ln 0` is never formed.
+* **Fall-off with `Pr = 0`** (no collider present, or a `(+SPECIES)` collider at
+  zero concentration): `q_f = q_r = 0` exactly, and `log10 Pr` is not evaluated.
+  An infinite `Pr` (`k_inf = 0`) takes the high-pressure limit `Pr/(1+Pr) = 1`.
+* **Inputs refused by name** (`Error::Config`): `T` not finite or not above 0;
+  a concentration vector whose length is not the species count (both lengths
+  named); a negative or non-finite `c_k` (the species and the value named). A
+  stiff integrator that undershoots clips before it calls; the host twin does
+  not clip. `T` outside a species' thermo range is refused by the thermo
+  record's own message (§128.1) when that species' `G/RT` is needed, which is
+  when the mechanism has a reversible reaction without `REV`.
+* **The production rate** (130.1) is accumulated reaction by reaction, in
+  mechanism order, `-ν' q` to each reactant and `+ν'' q` to each product, with
+  `q = q_f - q_r` and `ν` the exact rational of §129.4 converted once to f64.
+
+**The gate mechanism.** Neither JL4 nor GRI-Mech 3.0 is in the tree (§129.6),
+so (130.7) and the element identity are held over 1000 random states on a
+fixture mechanism of the ten TM-4513 species of
+`reference/mcbride-gordon-reno1993/table_II.csv` (§128.6). Its fourteen
+reactions exercise every form above: elementary, `+M` with and without
+efficiencies, Lindemann, Troe with three and four parameters, `(+SPECIES)`,
+SRI, `REV`, an irreversible global reaction with FORD, an irreversible
+elementary one, and a DUP pair. **Its rate numbers are placeholders, not any
+paper's.** When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set (§129.6),
+the same two identities are held over 1000 random states of GRI-Mech 3.0;
+unset, that test is skipped by name. `kin_fixture_matches_oracle` holds every
+`q_f` and `q_r` of the fixture at two stated states against an independent
+40-digit evaluation of (130.2)-(130.12) made by the supervisor, to 1e-12
+relative (class P); the oracle is not in the tree, and its printed values are.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `kin_fixture_matches_oracle` | every `q_f`, `q_r` of the fixture at states A and B | 1e-12 relative; a zero is exactly 0 | P |
+| `kin_falloff_limits` | Lindemann `k = k_inf Pr/(1+Pr)`; `Pr = 0` gives exactly 0 | 1e-14 relative; exact | P |
+| `kin_sri_matches_hand_value` | (130.12) at one stated point | 1e-14 relative | P |
+| `kin_reverse_survives_low_t` | (130.16) at 250 K where `exp(ln K_c)` overflows f64 to `inf` | 1e-11 relative to the 40-digit value: `ln K_c` is about 828, and f64 holds a sum of NASA-7 terms that large to about 1e-13 absolute, which `exp` turns into a relative error | P |
+| `kin_refuses_bad_input` | the refusals above, each by name | exact text parts | D |
+| `kin_gri30_mass_and_elements` | (130.7) and the element identity on GRI-Mech 3.0 when its paths are set | as `kin_mass_is_conserved` | A |
+| `kin_tpy_matches_concentrations` | `production_rates_tpy` against `production_rates` on (128.9)'s concentrations | bitwise | D |
+
+Labels: (130.1)-(130.17).
 
 ---
 
@@ -40343,9 +40881,117 @@ CHR-04 looks for a published `T_ad` in RP-1311 Part II (McBride & Gordon,
 NASA RP-1311-P2, 1996), the user's manual, which has the program's examples.
 If one matches the mixture and the species set, the row compares against it
 within 5 K. Otherwise the row prints a NAMED textbook value and **runs no gate
-through it** (plan row CHR-04).
+through it** (plan row CHR-04). §131.5 records what was found: no example
+matches.
 
-Labels: (131.1)-(131.8).
+### 131.5 The solver as built (CHR-04, `src/chem/equilibrium.rs`)
+
+`equilibrate_tp` and `equilibrate_hp` take a `ThermoSet`, the reactant mass
+fractions `y0` (which fix the elements) and `p`, plus `T` or `h0` in J/kg.
+Every number is f64 in both builds. The assigned element moles are
+
+```
+b_i° = Σ_j a_ij y0_j / W_j  /  Σ_j y0_j          (mol/kg)                        (131.9)
+```
+
+and the result gives `n_j` in mol/kg, `X_j = n_j / Σ n_j`, `Y_j = n_j W_j` and
+`c_j = p X_j / (R T)`, the concentrations §130's kinetics takes. The choices
+below are DESIGN choices of this unit. RP-1311 does not dictate them:
+
+* **D1, absent elements.** An element with `b_i° = 0` is inactive. Every
+  species that contains it is held at exactly `n_j = 0` and enters no sum, the
+  element's row (131.3) is dropped, and its `π_i` is reported as 0. Without
+  this, H2-air on a set that carries carbon species would give a singular
+  matrix.
+* **D2, units of the start.** RP-1311 counts kilogram-moles per kilogram, so
+  its start `n = 0.1` is `n = 100 mol/kg` here, with `n_j = 100/NS`.
+* **D3, the temperature window.** For `(h, p)` the start is
+  `T = min(t_start, min_j t_high)` over the active species, with
+  `t_start = 3800 K` by default. GRI-Mech 3.0's records end at 3500 K, and
+  RP-1311's 3800 K lies outside them. After each step `T` is clamped into
+  `[max_j t_low, min_j t_high]`. A solution that would lie outside the window
+  cannot converge, and it is refused by the iteration limit. It is never
+  returned at the bound.
+* **D4, the trace polish.** §131.3's trace rule (SIZE) runs until the
+  convergence test passes. Then SIZE is dropped. Every active species enters
+  every sum, including `b_k` and `Σ n_j`, and `λ = min(1, λ1)` is taken over
+  all of them. The Newton iteration runs again to the same test. Two things
+  depend on this. Trace species then satisfy (131.1) as well, so detailed
+  balance holds for reactions that involve them. And the element balance
+  counts them: a trace species held at `X ≈ 1e-8` would otherwise break
+  `eq_elements_conserved` by four orders of magnitude.
+* **Refusals** (`Error::Config`, each naming the value and ending
+  "(SPEC-LIT §131.5)"):
+  - `T` or `p` not finite or not above 0;
+  - `h0` not finite;
+  - `max_iterations = 0`;
+  - `t_start` not finite or not above 0;
+  - more iterations than `max_iterations` (200 by default) over both phases,
+    reported with the last element residual and the largest `|Δln n_j|`;
+  - a singular Newton matrix.
+
+  `y0`'s own errors and a thermo record's range error pass through
+  unchanged.
+
+**The gate mechanism and the answer key.** JL4 is not in the tree (§129.6).
+The detailed-balance row therefore runs on §130.7's fourteen-reaction
+TM-4513 fixture. Its rate numbers are placeholders, and detailed balance
+does not depend on rate numbers: `k_r` comes from `K_c` (130.5). Eleven of
+the fourteen reactions are checked. Three are excluded by name:
+
+* R10 carries `REV`, so its reverse rate is an independent Arrhenius set and
+  owes nothing to `K_c`;
+* R11 and R12 are irreversible.
+
+When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set, the same row runs on
+GRI-Mech 3.0, with argon as an absent element (D1). A GRI reaction whose
+`q_f = 0`, because it has argon as an explicit reactant, is excluded by name.
+`thermo30.dat`'s records start at 300 K, and §128.1 does not extrapolate. The
+GRI `(h, p)` row therefore forms `h0` at 300 K, the set's common `t_low`,
+instead of 298.15 K, and says so in its output.
+The composition is held against an independent 40-digit evaluation made by the
+supervisor outside the tree. That evaluation solves (131.1)-(131.2) and the
+element, `n` and enthalpy conditions directly with `mpmath`. It does not use
+the reduced Newton system, and it uses the TM-4513 records at their own
+1 bar, so the 1 atm move of §128.4 is checked as well. Its printed values for
+stoichiometric CH4-air (`CH4 + 2 (O2 + 3.76 N2)`) over the ten TM-4513 species
+at 1 atm are:
+
+| state | T (K) | n (mol/kg) | X_H2O | X_CO2 | X_CO | X_OH |
+|---|---|---|---|---|---|---|
+| `(T, p)` | 2000 | 36.272218301275178 | 0.18795875089814110 | 0.092010911965114985 | 0.0028261885591149366 | 0.00085447068058103910 |
+| `(h, p)` from 298.15 K | **2231.1042475877235** | 36.452609749342998 | 0.18356089463982553 | 0.085669864128601297 | 0.0086979201515583774 | 0.0030348505825709251 |
+
+The test file carries every species, the `π_i` values, and an H2-air
+`(T, p)` row with carbon absent.
+
+**`T_ad`, the finding.** RP-1311 Part II (McBride & Gordon, NASA RP-1311-P2
+(1996), NTRS 19960044559) was read at its Chapter 7, pp. 67-71, from the
+page images. Of its fourteen examples, the only `hp` combustion of a fuel
+with air is Example 3. Its air is preheated to
+700 K, and it is solved at 1, 10 and 100 bar. No example matches
+stoichiometric CH4-air from 298.15 K at 1 atm. The `eq_tad_methane_air` row
+is therefore gated against the oracle only (1e-10 relative, class P). It
+prints a NAMED textbook value and runs no gate through it. That value is
+S. R. Turns, *An Introduction to Combustion*, 2nd ed. (McGraw-Hill, 2000),
+which quotes 2226 K. The page was not read in this unit. The ten-species set
+gives 2231.10 K. It lacks NO, N and the other minor species that a full
+product list carries, so the 5 K difference is not a finding about the
+solver.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `eq_matches_oracle` | every `X_j`, `n`, `π_i` and the `(h,p)` `T` against the oracle, CH4-air | 1e-10 relative | P |
+| `eq_tad_methane_air` | `T` against the oracle; `h(T, Y) - h0` against `Σ_j abs(Y_j h_j/W_j)` | 1e-10 relative; 1e-10 | P; A |
+| `eq_tp_at_tad_reproduces_hp` | `(T, p)` at the `(h, p)` result's `T` gives the same `X_j`, `π_i` | 1e-10 relative | A |
+| `eq_absent_element_is_exact_zero` | H2-air: the carbon species and `π_C` exactly 0; the rest against the oracle | exact; 1e-10 relative | D; P |
+| `eq_refuses_bad_input` | the refusals above, each by name | exact text parts | D |
+| `eq_gri30_detailed_balance` | elements and detailed balance on GRI-Mech 3.0 when its paths are set | as the rows of §131.4 | A |
+
+Every row is unchanged by the f32 build, because the solver is f64 in both
+builds and its tests are integration tests that run under both.
+
+Labels: (131.1)-(131.9).
 
 ---
 
@@ -40539,6 +41185,269 @@ double in both arms.
 | `chem_device_*` (CHR-07a/b) | device against host | the plan rows, with the class rule (docs/17 §5.1.4) for the f32 build | R in f32, P in f64 |
 
 Labels: (132.1)-(132.10).
+
+### 132.7 The integrator as built (CHR-05, `src/chem/rosenbrock.rs`), and its two test problems
+
+**The test problems**, read from the test set's problem descriptions
+(Mazzia & Magherini, release 2.4; the two reports' sha256 are the
+`ivptestset2008-*` rows of `reference/PROVENANCE.md`). ROBER is report
+`rober.pdf` p. II-10-1, eq. (II.10.1), with `y(0) = (1, 0, 0)` on `[0, 1e11]`.
+HIRES is report `hires.pdf` p. II-1-1, §1.2, with
+`y(0) = (1, 0, 0, 0, 0, 0, 0, 0.0057)` on `[0, 321.8122]`:
+
+```
+y1' = -0.04 y1 + 1e4 y2 y3
+y2' =  0.04 y1 - 1e4 y2 y3 - 3e7 y2^2
+y3' =  3e7 y2^2                                                                 (132.11)
+```
+
+```
+y1' = -1.71 y1 + 0.43 y2 + 8.32 y3 + 0.0007
+y2' =  1.71 y1 - 8.75 y2
+y3' = -10.03 y3 + 0.43 y4 + 0.035 y5
+y4' =  8.32 y2 + 1.71 y3 - 1.12 y4
+y5' = -1.745 y5 + 0.43 y6 + 0.43 y7
+y6' = -280 y6 y8 + 0.69 y4 + 1.71 y5 - 0.43 y6 + 0.69 y7
+y7' =  280 y6 y8 - 1.81 y7
+y8' = -280 y6 y8 + 1.81 y7                                                      (132.12)
+```
+
+The reference values at the end points are CHR-00c's
+`reference/ivptestset2008/{rober,hires}.csv`.
+
+**How the gates are measured.** `ros_robertson_testset` and
+`ros_hires_testset` integrate at `rtol = 1e-8` with `atol = 1e-20` in every
+component and `h0 = 1e-10`, and require `max_k abs(y_k - y_ref,k) /
+abs(y_ref,k) <= 10 rtol = 1e-7`. The tiny `atol` makes the measure relative
+in every component, including ROBER's `y2 ≈ 8.3e-14`. With the test set's own
+mixed tolerance (`atol = 1e-4 rtol`) the integrator would not be asked to
+resolve `y2` at all, so the gate would be weaker. Both sets run, RODAS3 and
+ROS3. `ros_observed_order` takes fixed steps on `y' = -y` over `[0, 1]` with
+40 and 80 steps, `p_obs = log2(e_40 / e_80)`, and requires
+`abs(p_obs - 3) <= 0.1` for both sets. The supervisor's independent float64
+evaluation, made outside the tree before the Rust, gave the following:
+
+* ROBER: RODAS3 `2.74e-8` and ROS3 `8.79e-8`, after 4519 and 24883 accepted
+  steps;
+* HIRES: RODAS3 `3.09e-9` and ROS3 `3.08e-9`;
+* observed order: RODAS3 `2.9928` and ROS3 `2.9894`.
+
+The tree, run after it, measures ROBER `1.22e-8` (RODAS3, 4519 accepted) and
+`8.80e-8` (ROS3, 24883 accepted), HIRES `3.16e-9` and `3.07e-9`, and the same
+orders to four digits. ROS3's Robertson margin is thin (`0.88` of the gate). It is reported as it
+stands, and the gate is not widened for it.
+
+**Design choices of this unit (ORIGINAL; Sandu et al. do not dictate them).**
+
+* **R1, the linear solve.** `I - γhJ` is factored by Gaussian elimination
+  with partial pivoting (the largest `abs` in the column, the first one on a
+  tie), once per step attempt. A pivot that is exactly 0 or not finite is
+  refused as a singular matrix, naming `h`; the caller knows `t`.
+* **R2, the Jacobian.** §132.3's one-sided difference is evaluated at `y_n`,
+  once per accepted point. A retry after a rejection starts from the same
+  `y_n`, so it reuses that `J`, which is the same matrix a fresh evaluation
+  would give.
+* **R3, the end point.** When `t + h >= t1`, the step is shortened to
+  `h = t1 - t`, and on acceptance `t` is set to `t1` exactly. This shortened
+  last step is exempt from `h_min`. `h0` is clamped into `[h_min, h_max]`
+  and then to `t1 - t0`.
+* **R4, a non-finite step.** If `Err` or any component of `y_{n+1}` is not
+  finite, the step is rejected, `h` is divided by 10, and the rejection is
+  counted twice: in `rejected` and in `nonfinite`. It is never accepted.
+* **R5, what is refused** (each with `Error::Config`, naming the value and
+  ending "(SPEC-LIT §132.7)"): a non-finite or non-positive `h0`, a NaN or
+  non-positive `h_max` (`+inf`, the default, means unbounded),
+  a negative or non-finite `h_min`, `h_min > h_max`, a negative or non-finite
+  `rtol`, an `atol` whose length is not `y`'s or that has a component that is
+  not finite and above 0, `t1 < t0`, `max_steps = 0`, more step attempts than
+  `max_steps`, and a proposed `h` below `h_min` after a rejection. The
+  caller's right-hand side may fail, and its error passes through unchanged.
+  This is how CHR-06's reactor refuses a `T` outside the thermo range.
+  `t1 = t0` returns at once, with zero steps.
+* **R6, method names.** `rodas3` (the default) and `ros3` are recognised. As
+  §132.2 records, `ros4` is refused as `Error::Refused`, and the refusal says
+  its coefficients wait for a read copy of Hairer & Wanner Table 7.2 or of
+  its primaries. Any other name is refused with the recognised set.
+
+Labels: (132.11)-(132.12).
+
+### 132.8 The reactor as built (CHR-06, `src/chem/reactor.rs`), and its gates
+
+`ConstPressureReactor` advances (132.7)-(132.9) through `integrate_observed`.
+That is §132.7's `integrate` with one hook added: after every accepted step it
+calls an observer with `(t, y)`. The observer may change `y` or end the call
+with an error. `integrate` is that function with an observer that does
+nothing, so its arithmetic is unchanged and CHR-05's tests hold as before.
+
+**Design choices of this unit (ORIGINAL; SAND89-8009 gives only the
+equations).**
+
+* **R7, the pressure.** A `p` that is not finite or not above 0 is refused,
+  naming it.
+* **R8, the right-hand side.** The state is `y = (Y_1..Y_K, T)`. Every
+  evaluation uses `Y⁺_k = max(Y_k, 0)`; this is §130.7's "a stiff integrator
+  that undershoots clips before it calls", and the stored `y` is not changed.
+  The quantities are `S = Σ Y⁺_k / W_k`, `rho = p / (R T S)` (132.9),
+  `c_k = rho Y⁺_k / W_k`, `omega` from (130.1), and `cp` from (128.7) over `Y⁺`.
+  A species whose `omega_k` is exactly 0 is not evaluated in (132.8)'s sum.
+  The following are refused: a state of the wrong length, a `T` that is not
+  finite or not above 0, and `S = 0`. The thermo and kinetics errors pass
+  through unchanged, so a `T` outside a species' range is refused by the
+  thermo record's own message.
+* **R9, the input.** The following are refused, each by name: `y0` of the
+  wrong length, a negative or non-finite `Y_k`, a `T0` that is not finite or
+  not above 0, a negative or non-finite duration, and an `ignition_rise` that
+  is not above 0. A zero duration returns the input unchanged.
+* **R10, after each accepted step.** This is §132.4's refusals paragraph. A
+  `Y_k < -atol_y` is refused, naming the species, the value and `t`. A
+  `Y_k` in `[-atol_y, 0)` is set to 0, and the count is reported as
+  `clipped`. Each clip adds at most `atol_y` to `Σ Y`. `T` is never clipped.
+* **R11, the ignition delay.** `T* = T0 + ignition_rise` (400 K by default).
+  The delay is the first crossing of `T*`, interpolated linearly between the
+  two accepted points that bracket it. It is `None` if `T` never reaches
+  `T*`.
+* **Defaults.** RODAS3, `rtol = 1e-8`, `atol_y = 1e-14`, `atol_t = 1e-8` K,
+  `h0 = 1e-10` s, `h_max` unbounded.
+
+**The gate mechanism.** Neither JL4 nor any open H2 mechanism is in the tree
+(§129.6), so the plan's "H2-air and CH4-air (JL)" runs on a fifteen-reaction
+**reactor fixture** over the ten TM-4513 species of §130.7. It keeps §130.7's
+reversible reactions without `REV`:
+
+* elementary reactions and the `+M` reactions;
+* Lindemann, both Troe forms, `(+N2)` and SRI fall-off;
+* the DUP pair.
+
+It drops §130.7's `REV` reaction and its two irreversible global reactions.
+It adds `CO + OH <=> CO2 + H` without `REV`, and three reversible reactions:
+`H2 + O2 <=> OH + OH`, `CH4 + O2 <=> CO + H2O + H2` and `CH4 + O <=> CO + 2 H2`.
+**The rate numbers are placeholders, not any paper's.** Every reverse rate
+comes from `K_c` (130.16), so the rest point of the ODE is the Gibbs
+equilibrium of §131. A `REV` rate or an irreversible reaction would move the
+rest point away from it. The end state therefore depends on the
+thermochemistry and not on the rate numbers, and this is what makes a
+placeholder-rate fixture a valid subject for the equilibrium gate. The
+mixtures are stoichiometric H2-air (2 : 1 : 3.76) from `T0 = 1000` K and
+stoichiometric CH4-air (1 : 2 : 7.52) from `T0 = 1400` K, both at
+`p = P_ATM`. When `OFGPU_GRI30_MECH` and `OFGPU_GRI30_THERMO` are set
+(§129.6), the same gates also run on GRI-Mech 3.0. GRI keeps its own
+irreversible reactions; their reactants are traces at equilibrium. That run
+is 10 s long, so that the NO chemistry settles.
+
+**The supervisor's oracle.** The supervisor wrote an independent float64
+evaluation of (132.7)-(132.9) and the fixture's (130.2), outside the tree
+and before the Rust, and integrated it with scipy's Radau. Radau is an
+implicit Runge-Kutta method, a different family from the tree's, run at
+`rtol = 1e-12`. Its event finder located the delay. The detailed balance
+`max |ln Q - ln K_c|` at its end state is `6.9e-15` (H2-air) and `1.1e-14`
+(CH4-air), which confirms that the rest point is the equilibrium. It printed:
+
+* the right-hand side at one stated state;
+* the end states: `T = 2693.827535802` K (H2-air) and `2711.799962396` K
+  (CH4-air);
+* the delays: `2.6552096919e-3` s and `2.6042862928e-3` s.
+
+| row | measure | tolerance | class | measured (f64 build) |
+|---|---|---|---|---|
+| `reactor_rhs_matches_oracle` | (132.7)-(132.8) at the stated state against the oracle | 1e-9 relative; `N2` exactly 0 | P | worst `3.95e-15` |
+| `reactor_lands_on_equilibrium` | the state after 1 s against §131's `(h, p)` solution and against the oracle | 0.5 K; 1e-6 in Y | P | H2-air `dT 1.6e-7` K, `dY 1.8e-11`; CH4-air `4.8e-8` K, `6.2e-12`. Also `Σ Y` within `1e-12 + clipped·atol_y`, and `h` within 1e-6 relative (measured `6.6e-10` and `1.6e-10`) |
+| `reactor_delay_converges` | the delay at `rtol` 1e-6 against `rtol` 1e-9 | < 0.5 % | P | H2-air `3.1e-7`, CH4-air `1.3e-7` relative |
+| `reactor_delay_matches_oracle` | the delay at `rtol` 1e-9 against the oracle | 1e-3 relative | P | `8.1e-9`, `8.6e-10` |
+| `reactor_refuses_bad_input` | R7-R9, and `T0 = 100` K refused by the thermo record | exact text parts | D | — |
+| `ros_observer_sees_every_accepted_step` | one observer call per accepted step, the last at `t1` exactly; `integrate` is bitwise `integrate_observed` with a no-op | exact | D | 183 calls, 183 accepted |
+| `reactor_gri30_lands_on_equilibrium` | as `reactor_lands_on_equilibrium` on GRI-Mech 3.0, 10 s, against `equilibrate_hp` only | 0.5 K; 1e-6 in Y | P | H2-air `dT 3.3e-5` K, `dY 3.7e-9`; CH4-air `1.6e-8` K, `4.2e-12` |
+| `reactor_gri30_delay_converges` | as `reactor_delay_converges` on GRI-Mech 3.0 | < 0.5 % | P | H2-air delay `3.111e-4` s, change `9.9e-7`; CH4-air `3.425e-3` s, `1.0e-8`. Reported, not compared with any experiment |
+
+The GRI delays are numbers this integrator measured on GRI's rates. They are
+not validated against shock-tube data, and no gate runs through them.
+
+The f32 build (`--features single`) passes the same rows; the module is f64 in both builds.
+
+No new equation labels.
+
+### 132.9 The device kernels as built (CHR-07a, `cuda/chem.cu`, `src/chem/device.rs`)
+
+Two kernels, one thread per cell, compute in `typedef double ofchem` in both
+builds (§132.6):
+
+* **`chemProductionRates`** evaluates (130.1) from `(T, p, Y)` through
+  (128.9)'s concentrations, which is `production_rates_tpy` of §130.7. `T`,
+  `p`, `Y` and `omega` cross as `ofscalar`; the sums run in `ofchem` and
+  `omega` is rounded once on the way out.
+* **`chemReactorJacobian`** evaluates the reactor right-hand side
+  (132.7)-(132.9) with R8's clip `Y⁺_k = max(Y_k, 0)`, which is
+  `ConstPressureReactor::rhs` of §132.8, and then §132.3's one-sided
+  difference column by column, `δ_j = 2^-26 max(abs(y_j), atol_j)`, which is
+  `fd_jacobian` of §132.7 (`2^-26` is `sqrt(eps_64)` exactly). The state
+  `y = (Y_1..Y_K, T)`, `p`, `atol`, `f0` and `J` are `ofchem` in both builds:
+  they are internal to the chemistry step that CHR-07b integrates in double.
+
+**Design choices of this unit (ORIGINAL; SAND89-8009 gives only the
+equations).**
+
+* **D1, one for one.** Every choice of §130.7 is made as the host twin makes
+  it, in the host twin's order: the forward term directly with `pow`, the
+  reverse term as one `exp` of the log sum (130.16)/(130.17) with `sgn(A)` as
+  `copysign(1, A)`, the order-0 skip on both sides, `q_f = q_r = 0` exactly at
+  `Pr = 0`, `Pr/(1+Pr) = 1` at an infinite `Pr`, `ln K_c` summed over the
+  products and then the reactants (130.6), and (130.1) accumulated reaction
+  by reaction, reactants then products. The third-body sum (130.3) runs over
+  every species in index order with `alpha = 1` where none is listed, as
+  `third_body_concentration` does. `G/RT` is evaluated only for the species
+  of reversible reactions without `REV`.
+* **D2, the flat mechanism.** The mechanism is uploaded once as two arrays,
+  one of `double` and one of `int`, whose layout is stated in
+  `src/chem/device.rs` and in the header of `cuda/chem.cu` with the same field
+  list: the species records (molar mass, range, both NASA-7 sets), `R` and
+  `p_ref` taken from the host so that no constant is spelled twice, one record
+  per reaction (kind, reverse kind, Arrhenius sets, fall-off parameters), the
+  order and stoichiometry lists, and one dense efficiency row per third-body
+  reaction.
+* **D3, refusals per cell.** A kernel cannot return §130.7's `Error::Config`,
+  so each cell writes a status, in the host twin's order of checks:
+  `1` a pressure not finite or not above 0, `2` a temperature not finite or
+  not above 0, `3` a mass fraction negative or not finite (production rates
+  only; the reactor clips), `4` no species present (`Σ Y/W` not above 0),
+  `5` a `T` outside the thermo range of a species whose record is needed.
+  A refused cell writes NaN to all its outputs, so it cannot be used
+  silently. The Jacobian's status is the first refusal met at `y` or at any
+  perturbed column.
+* **D4, contraction.** `chem.cu` is compiled with nvcc's default
+  `-fmad=true`. The gate is 1e-12 against the host, not bitwise, so it is not
+  a `FMAD_OFF_UNITS` member (§82.4's exception is for bitwise gates).
+
+**The measure.** `omega_k` is a sum of terms of both signs, so the error is
+taken against the gross rate of the species,
+
+```
+G_k = Σ_i Σ_(entries of k in reaction i) ν (|q_f,i| + |q_r,i|),    e_k = |omega_dev,k - omega_host,k| / G_k
+```
+
+with the reactant and product entries both counted. A species with `G_k = 0`
+must come back exactly 0. This is the denominator §130.6's mass identity
+uses. For the Jacobian, each of the two evaluations in a column is within the
+right-hand-side bound at the state it ran on, so the derived bound is
+
+```
+abs(J_dev,ij - J_host,ij) δ_j <= 1e-12 ( F_i(y) + F_i(y + δ_j e_j) ),
+F_i = W_i G_i / rho (i <= K),     F_T = Σ_k abs(H_k) G_k / (rho cp)
+```
+
+and `f0` is held to `1e-12 F_i(y)`; a zero bound means exact equality. The
+perturbed state's scale is needed, not only `F_i(y)`: at a state where a
+species is exactly 0, a reaction with a FORD order on it has `G = 0` at `y`
+and a genuine nonzero quotient after the perturbation (`J ≈ -0.93` in the
+fixture's CH4 row at the zeroed-O2 states, on the host and the device alike).
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `chem_device_omega_matches_host` | 4096 random states of §130.7's generator on the 14-reaction fixture, `max e_k` | 1e-12 (f64 build); f32 build: inputs rounded to f32 and the host evaluated at the rounded inputs, 1e-6 (the plan's band, inside the class rule's 1e-5) | P; R in f32 | f64 build `1.68e-14` (cell 737, O2); f32 build `5.89e-8` |
+| `chem_device_omega_matches_host_gri30` | the same on GRI-Mech 3.0 when its paths are set (§129.6) | the same | P; R in f32 | with the user's GRI-Mech 3.0 copy: f64 build `5.67e-14`; f32 build `5.92e-8` |
+| `chem_device_jacobian_matches_host` | 4096 random states, `f0` and `J` against `rhs` and `fd_jacobian` | the bounds above, both builds (inputs are double in both) | P | worst `f0` at `1.70e-2` of its bound, worst `J` at `1.42e-2` of its bound, both builds |
+| `chem_device_refuses_by_status` | statuses 1-5 and the NaN outputs; a clipped negative `Y` is not refused by the reactor | exact | D | — |
+| `chem_device_replays_under_capture` | both kernels inside §81.5's protocol, the rates feeding the next iteration's `T` | bitwise | D | 4 kernel nodes, 3 replays bitwise over 6 buffers / 9280 values |
+
+No new equation labels.
 
 ---
 
@@ -40747,6 +41656,8 @@ Labels: (133.1)-(133.12).
 | NASA TM-4513 | NTRS 19940013151 | public domain | yes | — (the plan's NASA-7 source) |
 | NASA/TP-2002-211556 | NTRS 20020085330 | public domain | yes (§100) | — |
 | NASA RP-1311 Part I | NTRS 19950013764 | public domain | yes | — (the plan said 19950013764; confirmed) |
+| NASA RP-1311 Part II (McBride & Gordon 1996) | NTRS 19960044559 | public domain | Chapter 7 pp. 67-71 (CHR-04) | **added**: no example is stoichiometric CH4-air from 298.15 K, 1 atm (§131.5) |
+| Turns, *An Introduction to Combustion*, 2nd ed. (2000) | McGraw-Hill textbook | closed | no | **added**: the NAMED `T_ad` = 2226 K of §131.5, which gates nothing |
 | CHEMKIN-II, SAND89-8009 | OSTI 5681118, DOI 10.2172/5681118 | public | yes | the plan's "OSTI id to be confirmed": confirmed |
 | CHEMKIN-III, SAND96-8216 | OSTI 481621, DOI 10.2172/481621 | public | yes (pp. 46-54) | **added**: FORD/RORD, real coefficients and UNITS are CHEMKIN-III only |
 | TRANSPORT, SAND86-8246 | OSTI 7157265 | record only, no full text on OSTI | no | the plan's "OSTI id to be confirmed": confirmed; not readable |
@@ -41794,6 +42705,41 @@ implementation detail from that catalogue is used (plan §2.6).
 and replaces `refuse_enclosure`'s redirect with the implementation it pointed
 at. The §50 tolerances are unchanged.
 
+**The `radiation` dictionary route, as CHR-17 reads it (DESIGN).** These are
+the entries of `constant/radiationProperties` that `src/radiation.rs` and
+`src/radiation/props.rs` read for a participating medium. The model names are
+the ones in the table above. The entry spellings below are this project's own
+choice.
+
+| entry | meaning | rule |
+|---|---|---|
+| `radiationModel` | `P1` \| `fvDOM` \| `viewFactor` (alias `s2s`) | required, with no default; any other name is refused with the three names |
+| `absorptionEmissionModel` | `constant` \| `wsgg` \| `wsggGrey` | default `constant`. Under `viewFactor` only `none` is accepted |
+| `absorptionCoefficient` | `κ` in 1/m, for the `constant` model | required with `constant`; a negative or non-finite value is refused; refused if present with `wsgg`/`wsggGrey`. Under `viewFactor`, a non-zero value is refused by `S2sConfig::from_dict` (§50.9, unchanged) |
+| `wsggFile` | path to a Bordbar 2021 `.dat`, relative to the case directory | required with `wsgg`/`wsggGrey`; refused if present with `constant`. `ParticipatingConfig::from_case` refuses a path that does not exist. The digest check is §136.4's, built in CHR-22 |
+| `wsggPressure` | atm | required with `wsgg`/`wsggGrey`; must equal one of §136.4's ten pressures exactly, and any other value is refused naming the ten; refused if present with `constant` |
+| `scatterModel` | `none` \| `isotropic` \| `linearAnisotropic` | default `none`. Under `viewFactor` only `none` is accepted |
+| `scatterCoefficient` | `σ_s` in 1/m | required with `isotropic` and `linearAnisotropic`; a negative or non-finite value is refused; refused if present with `none` |
+| `A1` | `A_1` of (135.1), `Φ = 1 + A_1 Ω'·Ω` | required with `linearAnisotropic`; refused if `\|A_1\| > 1` (the phase function would be negative); refused if present with `none` or `isotropic` |
+
+Four rules apply to the whole table:
+
+* A numeric entry's value is the last whitespace-separated token that parses
+  as a number, read as f64 in both builds. That is why `wsggPressure 0.1`
+  matches the table exactly under `single` too. An entry with no number in it
+  is refused, naming the entry.
+* An entry that belongs to a model the case did not select is refused,
+  because it would be read and then ignored (§13.4.1).
+* Under `P1`, a `constant` medium with `κ + σ_s = 0` is refused, because
+  (135.7)'s `Γ = 1/(3β - A_1 σ_s)` is then infinite. `fvDOM` accepts such a
+  medium: the discrete-ordinates row of a transparent medium is finite.
+* `RadiationConfig::from_case`, the enclosure reader §98.7 calls, resolves
+  only `viewFactor`. Given `P1` or `fvDOM`, it refuses the case and names
+  `ParticipatingConfig` as the reader of a participating medium. No driver
+  solves a participating medium until §137.3's units land.
+
+The tests are §135.6's rows.
+
 **`parcels`** (CHR-25). There is one key per `ParcelControls`,
 `CouplingControls` and `Injector` field (`src/parcels.rs`,
 `src/parcels/couple.rs`), so that every library field is reachable (the plan's
@@ -42425,5 +43371,621 @@ Measured on 2026-10-11 (RTX 5070 Ti, the DLL above, deterministic over five runs
 `rel = 1.643e-14` with dDDI (22 iterations, converged) and `rel = 8.640e-6` with dFFI (13 iterations, AMGX reports
 converged), so both rows pass; the dFFI row passes with a margin of 1.16x.
 
+
+---
+
+## 142. Gate 95-A diagnosis and the GMRES outer loop
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §142 to VAL-10 (§142.1, the diagnosis) and VAL-11
+(§142.2, the GMRES outer loop). §109.7 measured Gate 95-A and found it holding at 2.5:1 and missing at 5:1 and
+10:1, without saying whether the miss is the outer loop's or the discretisation's. §142.1 answers that by solving
+for the discrete fixed point of §109.6's block map directly, so that the loop's answer and the discretisation's
+answer can be read apart. No solver numerics change.
+
+### 142.1 The exact discrete fixed point of the block map
+
+**What is solved.** In linear elasticity the block matrix `A` of (109.1)-(109.2) depends on the mesh and the
+material only, and once the boundary values are closed the source of (109.3)-(109.5) is affine in the cell
+displacement. So the residual of (109.6) at the closed state is affine,
+
+```text
+  ub*(u) = the boundary values at which one more boundary pass of §95.2 changes nothing
+  R(u)   = A u - source(u, ub*(u)) = B u + R(0),     B e_k = R(e_k) - R(0)                  (142.1)
+  u*     = the solution of  B u* = -R(0)                                                     (142.2)
+```
+
+with `e_k` the unit vector of flat unknown `k = 3c + i` (109.8). The loop of §109.6 carries `ub` from one
+application to the next, with three boundary passes each. At its fixed point `ub` is a fixed point of three passes,
+and therefore of one, so `u*` of (142.2) is the loop's own fixed point and not that of some other map. `ub*` is
+found by repeating single passes until the boundary values move by no more than `1e-14` of the field's magnitude.
+From a zero start this took 93 passes on every mesh below; a cap of 2000 refuses by name. The columns of `B` come
+from the device's own `correct_boundary`, `BlockOperator::assemble` and `residual`, so `B` is the operator the
+loop iterates, kernel for kernel. The factorisation is dense, in `f64`, with partial pivoting (`P B = L U`). The
+1-norm condition number is estimated by Hager's method (W. W. Hager, *SIAM J. Sci. Stat. Comput.* 5 (1984)
+311-316, DOI `10.1137/0905023`; in the LAPACK xLACON form of N. J. Higham, *ACM TOMS* 14 (1988) 381-396, DOI
+`10.1145/50063.214386`), with at most five steps:
+
+```text
+  x = (1/N, ..., 1/N);  repeat:  y = B^-1 x,  xi = sign(y),  z = B^-T xi,  j = argmax |z_j|;
+  stop when |z_j| <= z.x (after the first step), else x = e_j;   cond1 ~ ||B||_1 ||y||_1      (142.3)
+```
+
+A fixed point **exists** when the factorisation finds no zero pivot, `cond1 < 1e15`, and the device's residual of
+(109.6), evaluated at `u*` with its boundary closed, satisfies
+
+```text
+  max_c |R_c(u*)| <= 1e-12 scale,     scale = max_c ||diag[c]||_F max_c |u*_c|                  (142.4)
+```
+
+The probe is `solid::coupled::tests::gate_95a_probe_the_exact_fixed_point_of_the_block_map`. It is `#[ignore]`
+and `#[cfg(not(feature = "single"))]`, because its subject is the f64 discrete fixed point. It runs Gate 95-A's
+beams (§109.6: plane strain, `E = 200` GPa, `nu = 0.3`, `P = 1e5`, `2c = 0.2`, cubic cells, one cell through the
+thickness) at 2.5:1 on `n_y = 4, 8, 16`, at 5:1 on `n_y = 4, 8, 16` (N = 3840 at most), and at 10:1 on
+`n_y = 4, 8`. It asserts (142.4) on every mesh. On every 2.5:1 mesh it also asserts that §109.6's own loop
+(Anderson of depth five, three boundary passes) converges and that its answer equals `u*` to `1e-9` relative
+(`max |u_loop - u*| / max |u*|`). For that comparison the loop runs to 12 decades with the block solve at
+(109.11) `1e-14`. The coder's first probe run, with the block solve at Gate 95-A's `1e-12`, put the loop's answer
+`3.6e-9` from `u*` on `n_y = 8`. That gap is the inner solve's floor, not a property of the loop, and it is six
+decades below the discretisation error. The whole probe takes 32 s. Its two dense-algebra tests
+(`dense_lu_solves_both_ways_and_hager_estimates_the_inverse_norm`,
+`dense_lu_refuses_a_singular_matrix_by_its_pivot_column`) are plain `f64` and need no GPU.
+
+**Measured** (2026-10-11, RTX 5070 Ti, f64, two runs, the same digits both times). The columns are those of
+§109.7's table, read at `u*`: `e_tip` from `ub*(u*)`, `e_u` and the two stress errors at cell centres. The last
+column is the loop's result on the same mesh in §109.7.
+
+| ratio | `n_y` | N | `cond1` | (142.4) `max|R|/scale` | `e_tip` | `e_u` | `e_xx` | `e_xy` | the loop (§109.7) |
+|---|---|---|---|---|---|---|---|---|---|
+| 2.5:1 | 4 | 120 | 9.455e3 | 1.3e-15 | 2.708e-2 | 2.750e-2 | 1.435e-2 | 1.337e-2 | converged; `u*` to 5.3e-12 |
+| 2.5:1 | 8 | 480 | 4.019e4 | 6.2e-15 | 4.019e-3 | 4.052e-3 | 3.905e-3 | 4.879e-3 | converged; `u*` to 2.9e-11 |
+| 2.5:1 | 16 | 1920 | 1.626e5 | 2.6e-14 | 6.734e-4 | 6.974e-4 | 1.350e-3 | 1.743e-3 | converged; `u*` to 4.7e-11 |
+| 5:1 | 4 | 240 | 1.234e5 | 2.7e-15 | 8.190e-3 | 8.323e-3 | 1.274e-2 | 9.526e-3 | **diverged at 673** |
+| 5:1 | 8 | 960 | 5.297e5 | 1.2e-14 | 1.962e-5 | 5.784e-4 | 3.755e-3 | 3.442e-3 | converged, `e_u` 5.78e-4 |
+| 5:1 | 16 | 3840 | 2.142e6 | 5.1e-14 | 2.596e-4 | 2.633e-4 | 1.334e-3 | 1.226e-3 | converged, `e_u` 2.63e-4 |
+| 10:1 | 4 | 480 | 1.818e6 | 5.6e-15 | 1.161e-3 | 1.432e-3 | 1.169e-2 | 6.760e-3 | **1000, not converged** |
+| 10:1 | 8 | 1920 | 7.815e6 | 2.5e-14 | 1.402e-3 | 1.401e-3 | 3.656e-3 | 2.431e-3 | converged, `e_u` 1.40e-3 |
+
+The observed orders of `u*` (`p = ln(e_coarse / e_fine) / ln 2`; `p_sigma` the smaller of the two stress orders):
+
+| ratio | `p_u` 4→8 | `p_u` 8→16 | `p_sigma` 4→8 | `p_sigma` 8→16 | Gate 95-A bar |
+|---|---|---|---|---|---|
+| 2.5:1 | 2.763 | 2.539 | 1.454 | 1.485 | `p_u >= 1.9`, `p_sigma >= 0.9` |
+| 5:1 | 3.847 | **1.135** | 1.468 | 1.490 | same |
+| 10:1 | **0.032** | (1.31 from §109.7's converged `n_y = 16`) | 1.475 | - | same |
+
+**The attribution.** The fixed point exists on all eight meshes, including the two coarse ones the loop does not
+reach. The condition estimate grows with slenderness and refinement, from 9.5e3 to 7.8e6, which is still about
+nine decades short of `1/eps`. Gate 95-A's shortfall therefore has two separate causes:
+
+1. **The loop.** "Converges on every mesh" fails at 5:1 and 10:1 on `n_y = 4` only. The discrete solution exists
+   there (`e_u` 8.3e-3 and 1.4e-3), and the Anderson loop around the block map diverges from it (5:1) or stalls at
+   `q_obs = 0.992` (10:1). This half belongs to the loop, and it is what VAL-11's GMRES outer iteration is for.
+   Where the loop does converge, it lands on `u*`: to 1e-11 on 2.5:1, and to §109.7's printed digits on the 5:1 and
+   10:1 meshes it converged on.
+2. **The discretisation.** The displacement order is short of 1.9 at the exact fixed point itself: 1.135 at 5:1
+   between `n_y = 8` and 16, and 0.032 at 10:1 between 4 and 8. No outer iteration can change either number. The
+   orders are not monotone (5:1 gives 3.85 and then 1.14; the 5:1 tip error passes near zero at `n_y = 8`), and
+   the same scheme gives 2.5-2.8 on the 2.5:1 beam. So the slender beams are read before their asymptotic range,
+   and the stress order (1.45-1.49 everywhere, against a bar of 0.9) is not the problem. This half is VAL-12's
+   fourth mesh (`n_y = 32`, D-VAL-6). Whether the order then settles near 2, or near 1 (the D-VAL-7 trigger for
+   VAL-13's implicit tangential stencil, §109.4), is VAL-12's measurement. Two levels cannot settle it.
+
+What this subsection does not do: it changes no gate, no tolerance and no default. Gate 95-A's rows in
+`ofgpu-validate` are unchanged. It does not run 10:1 at `n_y = 16`, because N = 7680 is over the probe's dense
+budget; that row is §109.7's converged loop. It is not an f32 measurement. In the single build the probe does not
+exist. The two dense-algebra tests sit in the library test crate, which does not compile in the single build at
+present (pre-existing f32 errors in other modules' tests); they use no `Scalar` and would hold there unchanged.
+
+
+---
+
+## 143. The 1-D RANS oracle and Wilcox 2006
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §143 to VAL-20 (§143.1, the oracle), VAL-21
+(§143.2, Wilcox 2006 and the measured TG0 bands) and VAL-22a. The oracle is `src/vv/rans1d.rs`: host only, `f64`
+whatever the crate's `Scalar` is, no `Gpu`, no kernel, no capture row, and no solver numerics change. It replaces
+the independent one-dimensional discretisation that §114 measured with and that was written outside the tree.
+
+### 143.1 The fully developed pipe on TG0's radial cell set
+
+**Sources.** Menter, Kuntz & Langtry 2003 and Menter 1994 for kOmegaSST, as §6.3 tabulates them; the wall-cell
+treatment of §6.4 as `wallfunctions.rs` implements it; Wilcox's 1988 k-omega as the NASA Turbulence Modeling
+Resource states it, <https://tmbwg.github.io/turbmodels/wilcox.html> (read 2026-10-11; US-government
+documentation, not source), citing Wilcox, *AIAA J.* 26(11) (1988) 1299-1310, DOI `10.2514/3.10041` (cited, not
+read); Launder & Sharma 1974 as §33.1 states it; Spalart-Allmaras SA-noft2 as §56.1-§56.3 state it, from the TMR
+page <https://tmbwg.github.io/turbmodels/spalart.html> and ICCFD7-1902; Tucker 1998 for the wall distance (§6.6);
+Celik et al. 2008 for the extrapolation (§94, `vv::observed_order`). The pipe metrics are `tools/cad/post.py`'s
+`pipe_block` definitions, this tree's own.
+
+**Geometry (143.1).** TG0's mesh (§114.1, `tools/cad/pipe_mesh.py`) is a wedge of angle `theta = 5 deg` cut from a
+pipe of radius `R = 0.025 m`. The vertices lie at radii `r_i` in the two planes at `+-theta/2`, so a cell's
+section normal to `x` is the trapezoid with corners `(r cos(theta/2), +-r sin(theta/2))`, and its wall face is the
+flat chord at distance `rho_w = R cos(theta/2)` from the axis. In the bisector coordinate `rho = r cos(theta/2)`,
+with `t = tan(theta/2)` and periodic length `L`, a cell between faces `rho_a < rho_b` has
+
+```
+A_f = 2 L t rho_f                 radial face area
+V   = L t (rho_b^2 - rho_a^2)     volume
+c   = (2/3)(rho_b^3 - rho_a^3)/(rho_b^2 - rho_a^2)     centroid                            (143.1)
+```
+
+which is exactly a polar finite-volume cell of a pipe of radius `rho_w`. The common factor `2 L t` cancels from
+every balance below, so the oracle carries `A_f = rho_f` and `V = (rho_b^2 - rho_a^2)/2`.
+
+**The cell set (143.2).** `n` cells graded geometrically to the wall: `q` solves `h1 (q^n - 1)/(q - 1) = R` by 200
+bisection steps on `(1, 4)` (`wedge_mesh.solve_q`), and the vertex radii counted from the wall are
+`r_i = R (1 - (q^i - 1)/(q^n - 1))`, `i = 0..n` (`r_0 = R`, `r_n = 0` exactly). TG0's level `l` has
+`n = 40 * 2^l` and `h1 = (R / 2358) 2^-l`: L0 is 40 cells, L1 80, and §114.3's 160/320/640 are levels 2/3/4.
+
+**The discrete operators (143.3).** Internal face `f` between the inner cell `P` and the outer cell `N`:
+weight `w_f = (c_N - rho_f)/(c_N - c_P)`, face value `phi_f = w_f phi_P + (1 - w_f) phi_N`, distance
+`delta_f = c_N - c_P`. The wall face: `delta_w = rho_w - c_P` (this is `b_y`). The axis face has zero area. Gauss
+gradient of a cell field with wall-face value `phi_w`:
+
+```
+grad(phi)_P = 2 [phi_b rho_b - phi_a rho_a - phi_P (rho_b - rho_a)] / (rho_b^2 - rho_a^2)                       (143.4)
+```
+
+(the wedge faces contribute the `-phi_P (rho_b - rho_a)` term). Diffusion of `phi` through face `f`:
+`Gamma_f A_f (phi_N - phi_P)/delta_f`, with `Gamma_f = w_f Gamma_P + (1 - w_f) Gamma_N` for a cell diffusivity
+`Gamma = nu + sigma nu_t` (`turbGammaInternalCell`), and `nu` alone on the wall face, where `nu_t` is
+`fixedValue 0`.
+
+**Momentum (143.5).** With the body force `g = 2 u_tau,in^2 / R`, `u_tau,in = Re_tau nu / R`, `nu = 1.516e-5 m^2/s`
+(`turb_integral.pipe_drive`), each cell satisfies `sum_f (nu + nu_t)_f A_f (U_N - U_P)/delta_f + g V_P = 0`,
+`U = 0` on the wall face. Summed over the cells inside face `f` it telescopes to the exact statement
+
+```
+-(nu + nu_t)_f (U_N - U_P)/delta_f = g rho_f / 2     at every face, the wall face included                       (143.6)
+```
+
+so the measured `u_tau^2 = nu U_P/delta_w` equals `g rho_w / 2` to round-off for every model. This is why
+`u_tau = 0.349538` in every row of §114 although the case was driven at `u_tau,in = 0.349705`:
+`sqrt(cos(2.5 deg)) = 0.999524`.
+
+**kOmegaSST (143.7).** §6.3's equations with this tree's choices: `S = |dU/drho|`, `P = G/nu_t = (dU/drho)^2`,
+`nu_t = a1 k / max(a1 omega, b1 F2 S)`, `G = nu_t P`, k production `min(G, c1 beta* k omega)`, omega production
+`blend(gamma) P`, the cross-diffusion `2 (1 - F1) sigma_w2 grad k . grad omega / omega`, blended `sigma` per cell
+and interpolated as `Gamma` above; `F1`, `F2` and `CD_kw+ = max(CD_kw, 1e-10)` exactly as `sstBlending`, with `y`
+Tucker's distance from the same operators (`laplacian(phi) = -1`, `phi_w = 0`, then
+`y = -|grad phi| + sqrt(|grad phi|^2 + 2 phi)`). The wall-adjacent cell is pinned, as `wfOmegaWallCell` pins it:
+
+```
+omega_P = sqrt(omega_log^2 + omega_vis^2),  omega_log = sqrt(k_P)/(C_mu^1/4 kappa delta_w),
+omega_vis = 6 nu/(beta_1 delta_w^2),  kappa = 0.41, C_mu = 0.09, beta_1 = 0.075                                  (143.8)
+```
+
+and its `G` is §6.4's blended wall production `e^{1/Gamma} nu |U_P/delta_w| C_mu^1/4 sqrt(k_P)/(kappa delta_w)`,
+`Gamma = -0.01 y+^4/(1 + 5 y+)`, `y+ = C_mu^1/4 delta_w sqrt(k_P)/nu`, which is zero to round-off at TG0's
+`y+ < 0.1`. `k = 0` on the wall face; omega's wall face is zero-gradient (its only reader is the pinned cell).
+
+**k-omega 1988 (143.9).** `nu_t = k/omega`, `Dk/Dt = div((nu + sigma_k nu_t) grad k) + G - beta* k omega`,
+`Domega/Dt = div((nu + sigma_w nu_t) grad omega) + gamma P - beta omega^2`, with the TMR page's constants
+`sigma_k = sigma_w = 0.5`, `beta* = 0.09`, `beta = 3/40`, `gamma = 5/9`, and the wall cell of (143.8). §6.2's
+`beta = 0.072` (the later editions', which `KOmegaCoeffs` carries) is a named alternative constructor, not the
+default: the oracle's model is the one its name says.
+
+**Launder-Sharma (143.10).** §33.1 as written, `k = epsilon~ = 0` on the wall face, `D = 2 nu |grad sqrt(k)|^2`
+with (143.4) and `sqrt(k)_w = 0`, and `E = 2 nu nu_t |grad grad U|^2` with
+`|grad grad U|^2 = (dg/drho)^2 + (g/rho)^2`, `g = dU/drho` from (143.4), `dg/drho` from (143.4) with the
+zero-gradient wall value `g_w = g_P`, and `g/rho` the hoop curvature of the axisymmetric field.
+
+**SA-noft2 (143.11).** (56.1)-(56.6) with `c_t3 = 0`, (56.9) for `Stil`, `Omega = |dU/drho|`, `r = 10` where
+`Stil <= 0`, `nu~ = 0` on the wall face, face diffusivity `(nu + nu~_f)/sigma`, `d` Tucker's distance by default
+(the solver's choice); the exact `rho_w - c` is selectable for every model.
+
+**The iteration (143.12).** One Picard sweep solves each equation's tridiagonal system exactly (Thomas): the
+transported turbulence fields first, under-relaxed `phi <- phi + alpha (phi* - phi)`, then `nu_t`, then `U` from
+(143.5) unrelaxed. Sinks are implicit with the previous iterate, productions explicit, a source of either sign is
+split by sign. The sweep stops when the largest relative change of `U` and of each transported field is under
+`1e-11`; `alpha` is 0.7 for both k-omega models, 0.5 for Launder-Sharma and 0.1 for SA, which oscillates at 0.3.
+Under-relaxation does not move the converged answer.
+
+**Metrics (143.13)**, `post.py`'s: `U_b = sum U V / sum V`; `u_tau = sqrt(nu U_P/delta_w)` in the wall cell;
+`f = 8 (u_tau/U_b)^2`; `U_axis = U_0 - (U_1 - U_0) c_0^2/(c_1^2 - c_0^2)`, the even fit through the two innermost
+centroids; defect `(U_axis - U_b)/u_tau`; and `nu_t,axis/(u_tau R)` with `R = 0.025 m`.
+
+**The gates (143.14)** - the integration test `tests/rans1d.rs`, run in both builds with the same assertions,
+because the oracle is `f64` in both:
+
+| test | quantity | §114's value | oracle | class |
+|------|----------|-------------|--------|-------|
+| `rans1d_sst_pipe_reproduces_spec_lit_114_table_3` | f at 640 cells, Re_tau 576.69 | 0.027258 | 0.0272576 | P, 1e-4 rel |
+| | f extrapolated through 160/320/640 | 0.027287 | 0.0272882 | P, 1e-4 rel |
+| | observed order of f | 1.06 to 1.24 | 1.149 | P |
+| | `nu_t,axis/(u_tau R)` at 640 | 0.124 | 0.12399 | P, rounds to 3 decimals |
+| `rans1d_sst_pipe_reproduces_spec_lit_114_table_2` | U_b on L1_lo | 6.02290 | 6.0228965 | P, 1e-5 rel |
+| | U_axis on L1_lo | 7.28630 | 7.2862990 | P, 1e-5 rel |
+| | f, defect on L1_lo | 0.026944, 3.6145 | 0.0269444, 3.614489 | P, 1e-4 rel |
+| | U_b, defect on L0_lo | 6.07522, 3.6163 | 6.0752158, 3.616298 | P, 1e-5 / 1e-4 rel |
+| | U_b on L1_hi, Re_tau 2358 | 30.26666 (§114.2) | 30.266670 | P, 1e-5 rel |
+| | exact `R - r` for Tucker's y, L1_lo | U_b changes < 1e-5 (§114.3) | 6.6e-7 | P |
+| `rans1d_laminar_pipe_is_poiseuille` | (143.6) at every face and `u_tau^2 = g rho_w/2` | identity | holds at every face | A, 1e-12 rel |
+| | U_b against `g rho_w^2/(8 nu)`, L1 then L2 | second order | 4.5107e-4 / 1.1289e-4 = 3.9957 | P, ratio in [3.9, 4.1] |
+| `rans1d_sa_log_layer_identity` | §56.4's balance at `chi = 1e14`, and its `O(1/chi)` rate | 0, rate 1 | residual 2.0e-15, rate 0.9985 | A |
+| `rans1d_every_model_converges_and_balances_the_body_force` | five models on L1_lo converge; (143.6)'s `u_tau` | identity | below 1e-10 | A, 1e-10 rel |
+
+**Measured, both builds identical to the last printed digit** (`f64` in both; the five tests take 0.01 s). The
+five models on L1_lo at Re_tau 576.69, Tucker's distance, iterations to the 1e-11 change:
+
+| model | U_b m/s | f | defect | sweeps |
+|-------|---------|---|--------|--------|
+| kOmegaSST | 6.022897 | 0.026944 | 3.6145 | 85 |
+| k-omega 1988, `beta = 3/40` | 5.971289 | 0.027412 | 3.7392 | 93 |
+| k-omega 1988, §6.2's `beta = 0.072` | - | 0.025150 | - | 101 |
+| Launder-Sharma | 6.375155 | 0.024049 | 3.8426 | 367 |
+| SA-noft2 | 6.303381 | 0.024600 | 4.1982 | 216 |
+
+SA-noft2 with the exact distance gives f 0.026501: Tucker's `y` is `0.707 rho_w` on the axis, not `rho_w`, and SA's
+destruction reads `d` in the core, where the two k-omega models are insensitive to it (SST's U_b moves 6.6e-7).
+The four non-SST rows are not compared with any published value here. SA's f is pinned at 1e-4 against the
+supervisor's independent scratchpad implementation of the same contract: that pins the oracle, it is not
+validation, and it was added because the first coding of (143.11) multiplied the destruction by `nu~` twice and
+still converged, to f 229.8.
+
+**What §114.3's "defect extrapolated" is, measured.** The plan row for this unit asks for "defect 3.6129 at 640
+cells". §114.3's table puts 3.6129 in the column "defect extrapolated"; the 640-cell defect is 3.613276. The
+three finest defects are not in the asymptotic range: Celik's procedure on the defect itself gives an observed
+order 0.319 and an extrapolate 3.611997, the defect rebuilt from the extrapolated `U_axis` and `U_b`
+gives 3.612808, and f's own order applied to the defect gives 3.613016. None of the three reproduces
+3.6129 to 1e-4, and §114.3 does not state which it used, so 3.6129 is not a gate here; the table-2 defects, which
+are unextrapolated, are.
+
+**Not claimed.** The oracle is a one-dimensional discretisation of the solver's equations on the solver's cell
+set; agreeing with `ofgpu-lowmach` is agreement with the same discrete model, not validation. The open references
+the TG0 bands compare against (Prandtl, Blasius, the log law, Schlichting's 4.07) are §143.2's.
+
+### 143.2 Wilcox 2006 k-omega in the oracle, and the five models' TG0 bands measured
+
+**Sources.** Wilcox's 2006 k-omega as the NASA Turbulence Modeling Resource states it,
+<https://tmbwg.github.io/turbmodels/wilcox.html>, section "Wilcox (2006) k-omega" (read 2026-10-11, equations and
+constants read from the rendered equation images; US-government documentation, not source), citing Wilcox,
+"Formulation of the k-omega Turbulence Model Revisited", *AIAA J.* 46(11) (2008) 2823-2838, DOI `10.2514/1.36541`
+(cited, not read: paywalled), and Wilcox, *Turbulence Modeling for CFD*, 3rd ed., DCW Industries (2006) (cited, not
+read). The band references are those of `tools/cad/turb_integral.py`, from Schlichting's lecture series, NACA TM 1218
+(1949): Prandtl's smooth-pipe law (its eq 16.26), Blasius (16.4), the log law `u+ = 2.5 ln y+ + 5.5` (16.14) and
+Nikuradse's core defect 4.07 (16.22). The page's HTML alt text writes `chi_omega` with `Omega_ij Omega_ij`; the
+rendered image, used here, has `Omega_ij Omega_jk`.
+
+**The model (143.15)**, incompressible, `nu_t = k / omega_hat`:
+
+```
+Dk/Dt = P - beta* omega k + div[(nu + sigma_k k/omega) grad k]
+Dw/Dt = gamma (omega/k) P - beta omega^2 + div[(nu + sigma_w k/omega) grad omega] + (sigma_d/omega) grad k . grad omega
+omega_hat = max(omega, C_lim sqrt(2 Sbar_ij Sbar_ij / beta*)),   P = nu_t 2 S_ij S_ij
+beta = beta_0 f_beta,  f_beta = (1 + 85 chi)/(1 + 100 chi),  chi = |Omega_ij Omega_jk Shat_ki| / (beta* omega)^3
+Shat_ki = S_ki - (1/2)(du_m/dx_m) delta_ki,   sigma_d = 0 if grad k . grad omega <= 0, else 1/8
+sigma_k 0.6, sigma_w 0.5, beta* 0.09, gamma 13/25, C_lim 7/8, beta_0 0.0708                                     (143.15)
+```
+
+with the page's identity `gamma = beta_0/beta* - sigma_w kappa^2/sqrt(beta*)` at `kappa = 0.40`. The diffusivities
+carry `k/omega`, not `nu_t`. No production limiter (the page's "Wilcox2006", not "-klim"); in incompressible flow
+the "m", "s" and "e" variants coincide.
+
+**In the pipe (143.16).** `2 S_ij S_ij = (dU/drho)^2`, so `omega_hat = max(omega, C_lim |dU/drho| / sqrt(beta*))` and
+`gamma (omega/k) P = gamma (omega/omega_hat)(dU/drho)^2`, the form the oracle evaluates (no division by `k`). A
+unidirectional shear has `Omega Omega` diagonal and `S` off-diagonal in the same axes, so every product in `chi`
+holds an exact zero and `f_beta = 1` bitwise. The cross-diffusion is a non-negative source, explicit; it is non-zero
+in 33 of L1_lo's 80 cells at Re_tau 576.69 and 44 at 2358, and the stress limiter is inactive in every cell of the
+converged L1 pipe at both. The sweep is (143.12)'s, `alpha = 0.7`, `nu_t` rebuilt from the new `k`, `omega` and the
+sweep's `dU/drho`. The wall-adjacent cell is (143.8) unchanged: its `omega_vis = 6 nu/(beta_1 delta_w^2)` keeps
+`beta_1 = 0.075`, the wall function's own constant (`WallFunctionCoeffs::beta1`, `wallfunctions.rs`), not the
+model's `beta_0`, as for the other two k-omega models, because that is what a device run of this model would use.
+
+**The band metrics (143.17)**, `post.py`'s `pipe_block` on the oracle's pipe of radius `rho_w`:
+`Re_D = U_b 2 rho_w / nu`; the measured `Re_tau = u_tau rho_w / nu`; f against Prandtl,
+`(2.0 log10(2 sqrt(8) Re_tau,in) - 0.8)^-2`, at the case's INPUT Re_tau; f against Blasius `0.3164 Re_D^-1/4` at
+the measured Re_D; the log-law deviation `max |U/u_tau - (2.5 ln y+ + 5.5)|` over the cells with
+`30 <= y+ <= 0.2 Re_tau`, `y+ = (rho_w - c) u_tau / nu`; the defect against 4.07. TG0's bands (§114.1): Prandtl and
+Blasius within 5 %, log law within 1.0, defect within 10 %. `D = 2 rho_w` (not `2R`, not `post.py`'s
+area-equivalent diameter) is the one that reproduces §114.3's Blasius column at both Re_tau.
+
+**The gates (143.18)**, added to `tests/rans1d.rs`, both builds, the same assertions:
+
+| test | what | class |
+|------|------|-------|
+| `wilcox2006_coefficients_are_the_tmr_page` | the nine constants `==` the page's; the gamma identity within 1e-15 | D, A |
+| `wilcox2006_cross_diffusion_is_zero_unless_grad_k_dot_grad_omega_is_positive` | `+0.0` bits for a negative, an orthogonal and a cancelling dot; 0.1875 and 2.0 exactly; on the solved L1_lo pipe `+0.0` in every cell with `gk gw <= 0`, positive elsewhere, both sets non-empty | D |
+| `wilcox2006_f_beta_is_one_for_simple_shear` | `f_beta` bits `== 1.0` for three shears (one tilted); `[[1,2,0],[1,0,3],[0,1,0]]` at omega 10 gives 85729/100729 within 1e-15 | D, A |
+| `wilcox2006_pipe_matches_the_supervisor_oracle` | L1, Re_tau 576.69: U_b 6.089861407, f 0.0263551108, defect 3.857669312, `nu_t,axis/(u_tau R)` 0.09696406419; Re_tau 2358: U_b 30.73986073, f 0.01729333019, defect 3.590450099; 1e-6 rel | P |
+| `tg0_bands_reproduce_spec_lit_114` | (143.17) on SST against §114's own band numbers, below | P |
+| `tg0_bands_measured_table` (ignored) | prints the table below | measurement |
+
+The 1e-6 pins are against the supervisor's independent scratchpad implementation of (143.15)-(143.16) in the same
+discretisation (not in the tree); they pin the oracle and are not validation. That implementation also reproduces
+the in-tree 1988 row (U_b 5.971289, 93 sweeps).
+
+**§114 through (143.17), SST.** Reproduced and gated: L1_lo f against Prandtl 0.044796 (§114.3 +4.48 %) and the
+log-law deviation 1.073283 (§114.2's 1.073 after the omega tolerance was tightened), within 1e-4 and 1e-3; at 640
+cells, Re_tau 576.69, f against Blasius 0.021032 (+2.11 %), the defect against 4.07 -0.112217 (-11.2 %), and the
+extrapolated f against Prandtl 0.058127 (+5.81 %); at 2358, f against Blasius 0.030718 (+3.08 %). Not reproduced at
+§114.3's printed digit, so recorded and not gated: the 640-cell log-law deviation, 1.240260 against 1.239 at Re_tau
+576.69 and 1.355564 against 1.358 at 2358; and the 2358 row's f, 0.0184260 against 0.018428 (1.1e-4 rel) and its
+extrapolate 0.0185047 against 0.018502 (1.5e-4 rel). §114.3's numbers came from the out-of-tree 1-D that is lost, and
+at 576.69 its f and extrapolate are reproduced to 1.5e-5 and 4e-5 (§143.1), so the remaining differences are
+below the bands' resolution and are not traced further.
+
+**Measured** (`cargo test --release --test rans1d tg0_bands_measured_table -- --ignored --nocapture`, both builds
+identical to the last printed digit; Tucker's distance; levels 2, 3, 4 = 160, 320, 640 cells; `f_ext` and `p` are
+Celik's through the three; Prandtl against `f_ext`, the other three bands at 640 cells; **bold** is outside its band):
+
+| model | Re_tau | f 640 | f_ext (p) | f vs Prandtl | f vs Blasius | log-law dev | defect vs 4.07 | sweeps 640 |
+|-------|--------|-------|-----------|--------------|--------------|-------------|----------------|------------|
+| kOmegaSST | 576.69 | 0.0272576 | 0.0272882 (1.15) | **+5.81 %** | +2.10 % | **1.240** | **-11.2 %** | 123 |
+| kOmegaSST | 2358 | 0.0184260 | 0.0185047 (1.03) | +2.71 % | +3.07 % | **1.356** | **-18.4 %** | 111 |
+| k-omega 1988 | 576.69 | 0.0277308 | 0.0277623 (1.15) | **+7.65 %** | +3.65 % | **1.328** | -8.1 % | 111 |
+| k-omega 1988 | 2358 | 0.0185892 | 0.0186694 (1.03) | +3.63 % | +3.87 % | **1.367** | **-14.5 %** | 94 |
+| Wilcox 2006 | 576.69 | 0.0266491 | 0.0266776 (1.16) | +3.44 % | +0.11 % | **1.134** | -5.2 % | 119 |
+| Wilcox 2006 | 2358 | 0.0178352 | 0.0179078 (1.03) | -0.60 % | +0.17 % | **1.179** | **-11.8 %** | 111 |
+| Launder-Sharma | 576.69 | 0.0236130 | 0.0236080 (2.21) | **-8.46 %** | **-9.95 %** | 0.908 | -5.2 % | 392 |
+| Launder-Sharma | 2358 | 0.0169178 | 0.0169137 (2.46) | **-6.12 %** | -4.35 % | 0.572 | **-12.4 %** | 378 |
+| SA-noft2 | 576.69 | 0.0245797 | 0.0245794 (1.92) | -4.69 % | **-6.73 %** | 0.359 | +3.4 % | 223 |
+| SA-noft2 | 2358 | 0.0175401 | 0.0175395 (1.98) | -2.65 % | -1.28 % | 0.538 | +0.4 % | 207 |
+
+At 640 cells and Re_tau 576.69, f against Prandtl without the extrapolation is +5.69 % (SST), +7.53 % (1988),
++3.33 % (2006), -8.44 % (Launder-Sharma) and -4.69 % (SA). Re_D at Re_tau 2358 is 0.98e5 to 1.02e5, at the
+upper end of Blasius's stated range (1e5). The k-omega models converge in f at first order (p 1.03 to 1.16, the
+wall row of (143.8)), Launder-Sharma and SA at second.
+
+**What the table says for D-VAL-5** (docs/17 §11 item 3: Wilcox 2006 on the device only if the oracle closes the
+TG0 bands). Wilcox 2006 closes Prandtl and Blasius at both Re_tau, and the defect at 576.69, but not the log-law
+band at either (1.134 and 1.179 against 1.0) and not the defect at 2358 (-11.8 %). So the oracle does not close
+TG0 with Wilcox 2006, and the trigger the plan states does not fire. No model closes all four bands at both Re_tau:
+SA-noft2 closes all four at 2358 and misses only Blasius at 576.69. The log-law band's reference is Nikuradse's
+`kappa 0.40, B 5.5`, while the three k-omega models produce a log layer of `kappa` about 0.41 (SST, 1988) or 0.40 (2006,
+by its gamma); a band missed by 0.13 to 0.37 in u+ is partly the reference line's intercept. That is a reading, not
+a measurement of the intercept.
+
+**Not claimed.** The oracle discretises each model's equations on TG0's cells; its table is the models' answer on
+that cell set with a pinned wall-cell omega, not a device run and not validation of the solver. Wilcox 2006 exists
+only in the oracle: there is no device kernel, case keyword or registry row (VAL-22a-c, conditional on D-VAL-5).
+
+## 145. Martin & Moyce's collapsing column — the surge-front key
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the
+answer key) and VAL-60 (§145.2, the live gate, not yet written). §22's table has named this
+benchmark since the first release ("Dam break — surge front position vs time") without a
+number to hold it against: `ofgpu-vof -surge` and `vof::tests` say why at `bin/vof.rs` and
+`vof.rs` ("nobody here has the paper"). This section is the key that closes that gap. No
+solver, gate or test that existed before it changes.
+
+Source: **J. C. Martin and W. J. Moyce, "Part IV. An experimental study of the collapse of
+liquid columns on a rigid horizontal plane", *Phil. Trans. R. Soc. Lond. A* 244 (1952)
+312-324, doi:10.1098/rsta.1952.0006.** The copy read on 2026-10-11 is the publisher's PDF as
+the Internet Archive captured it on 2023-01-01
+(<https://web.archive.org/web/20230101071442/https://royalsocietypublishing.org/doi/pdf/10.1098/rsta.1952.0006>,
+13 pages, sha256 `2b6bdf92c75724b6ede159e8bd603e0378be0685de948c8d2f34caa130ee7d2a`). The
+article is not open access; the publisher shows it to an anonymous reader, and
+`reference/PROVENANCE.md` row `martin-moyce-1952` records the terms. No other dam-break
+data set, digitisation or code was read for this section.
+
+### 145.1 The key: which series, tabulated not digitised, and u_D
+
+**The variables, as the paper defines them (its §2).** A column of height `n^2 a` on a base
+of semi-length `a` (plane symmetry) collapses; `z` is the distance of the surge front from
+the plane of symmetry and `t` the time:
+
+```
+  Z = z/a,        T = n t (g/a)^(1/2)                                              (145.1)
+```
+
+`T` carries the factor `n`. `ofgpu-vof -surge` prints `t (g/a)^(1/2)` without it
+(`bin/vof.rs`, "What `-surge` reports"), so for this table, `n^2 = 2`,
+
+```
+  T_key = 2^(1/2) * T_surge                                                        (145.2)
+```
+
+The paper's rectangular columns are corners emptying against a wall, which by plane symmetry
+is the half-column of base `2a`. A wall-backed column of width `a`, the geometry of
+`vof::tests::a_dam_break_surge_front_stays_under_the_ritter_bound`, is that half.
+
+**Which series.** `reference/martin_moyce_1952/surge_front.csv` is the paper's **Table 2**
+(p. 317), "Rectangular section plane symmetry, `n^2 = 2`": both series, `a = 1 1/8 in.` (three
+records) and `a = 2 1/4 in.` (nine records), every record and each series' printed `mean`
+column, 205 numbers. One CSV row per printed number: `a_in, record, Z, T`, with `record` the
+record's column in the page's order (1 to 9) and `record = 0` the printed mean. A dash on the
+page is no row. Tables 1 (`n^2 = 1`) and 3 (`n^2 = 4`), the semicircle, the cylinders and the
+residual-height tables 6 and 7 are not transcribed.
+
+**Tabulated, not digitised.** The page prints numbers. Each one is copied as printed: `T` to
+two decimals, `Z` as the page writes its stations. The page's columns are records at fixed
+stations, so `T` is the measured quantity and `Z` the station (the lines scored in the
+channel floor, the paper's §4). The transcription's own uncertainty is the rounding of the
+print, `0.005` in `T`.
+
+**The time origin.** The paper could not record the instant motion began (its §4) and
+normalised every record to the same `T` at one station. Every record and both means read
+`T = 1.19` at `Z = 1.44` (the page's asterisk). `T` is therefore known only relative to that
+station, and a comparison must either place its own `T = 1.19` at `Z = 1.44` or carry the
+offset as an unknown.
+
+**The printed mean is kept as printed.** In the `1 1/8 in.` series the mean is the
+arithmetic mean of the printed records to half a unit in the last place at every station. In
+the `2 1/4 in.` series it is not, at six stations: `Z = 1.67, 2.56, 3.00, 3.44, 3.67, 12.0`.
+The largest gaps are at `Z = 2.56` (printed `2.20`, arithmetic `2.181` over nine records) and
+`Z = 3.00` (printed `2.51`, arithmetic `2.529`). Both rows were re-read from the page at
+300 dpi. The key records the page, never a corrected mean.
+
+**u_D.** The paper states no uncertainty in words, but it prints every record, so `u_D` is
+read from the printed records and is not invented. Per series and station with at least two
+records, the half-range is
+
+```
+  u_T(a, Z) = ( max_r T(a, r, Z) - min_r T(a, r, Z) ) / 2,   r over the records (r >= 1)   (145.3)
+```
+
+and its largest value is `0.080` (`a = 1 1/8 in.`, at `Z = 6.33`) and `0.165`
+(`a = 2 1/4 in.`, at `Z = 4.11`). The two series' means at a common station differ by up to
+`0.17` (`Z = 5.89`: `4.61` against `4.44`). That gap is a scale effect: the paper's §2 says
+its variables hold only while viscosity and surface tension do not matter at the scale used.
+The key's single datum uncertainty, in the variable it measures, is the larger of the two,
+
+```
+  u_D,T = 0.17                                                                     (145.4)
+```
+
+A gate that compares `Z` at the key's `T`, as docs/17's VAL-60 row is written, converts with
+the local slope of the series it compares against, `u_D,Z = u_D,T |dZ/dT|`. Between adjacent
+printed means of the `2 1/4 in.` series `dZ/dT` runs from `0.26` (at `Z = 1.11` to `1.22`) to
+`2.12` (at `Z = 5.00` to `5.89`). A gate that compares `T` at the key's stations needs no
+conversion. §145.2 fixes the band.
+
+**The transcription guard.** `martin_moyce_key_is_monotone_per_series`, in
+`bin/validate_key/mod.rs`'s tests, loads the key through the manifest, so the file's SHA-256
+must be the manifest's, and asserts:
+
+1. the header is `a_in, record, Z, T`, and there are 205 rows: 53 at `a_in = 1.125`
+   (records 1, 2, 3 and the mean: 12, 13, 14 and 14 rows) and 152 at `a_in = 2.25`
+   (records 1 to 9: 12, 15, 15, 13, 14, 14, 14, 15, 15 rows; the mean 25 rows);
+2. within every series `(a_in, record)`, in file order, `Z` and `T` both strictly increase;
+3. every series has the row `Z = 1.44, T = 1.19`;
+4. a station has a mean row exactly when it has at least one record row in that series, and
+   the printed mean lies within the closed range of those records.
+
+A misread digit that breaks a series' order, a dropped or doubled row, or a mean copied into
+the wrong series fails the test. A misread digit that keeps every order is not caught; the
+re-reading above is the only guard against it.
+
+---
+
+## 146. Riboux & Gordillo's splash threshold — the measured key for Gate 78-D
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §146 to VAL-05 (§146.1, the
+answer key) and VAL-70 (§146.2, the measured leg of Gate 78-D, not yet written). §78.10 says
+that neither splash criterion of §78.4 is measured against an experiment here, because Mundo's
+boundary is a figure and nothing in this repository transcribes it. This section is the key
+that closes that gap with a different experiment. No solver, gate or test that existed before
+it changes.
+
+Source: **G. Riboux and J. M. Gordillo, "Experiments of drops impacting a smooth solid
+surface: a model of the critical impact speed for drop splashing", *Phys. Rev. Lett.* 113
+(2014) 024507, doi:10.1103/PhysRevLett.113.024507.** The published letter is paywalled and
+was not read. The copy read on 2026-10-11 is the authors' arXiv version,
+**arXiv:1401.6943v3** (28 March 2014, "The critical impact speed for the splash of a drop",
+13 pages with the supplementary material, sha256
+`058cf841e94a51d9814181742abae3d4d48c43395a61ad228bcd06c6e94c3182`), distributed under arXiv's
+non-exclusive licence. Whether the letter's table and figure match v3 digit for digit is not
+known. `reference/PROVENANCE.md` row `riboux-gordillo-2014` records the terms. No other splash
+data set, digitisation or code was read for this section.
+
+### 146.1 The key: Table I as printed, the thresholds as digitised, and the radius
+
+**The experiment.** Millimetric drops of eight liquids, formed quasi-statically at a needle,
+fall onto a smooth, dry glass slide in air at normal atmospheric conditions. The liquids
+partially wet the glass (static contact angle about 20°). The impact speed is set by the drop
+height, and the splash threshold speed `V*` is the speed above which the lamella breaks into
+ejected droplets. The paper's Table II gives the air it used as `λ0 = 65 nm`,
+`μg = 1.85·10⁻⁵ Pa·s`, `ρg = 1.18 kg/m³` at 298.15 K and `10⁵ Pa`. Only the paper's own
+theory needs these; §78.4's two criteria contain no gas property.
+
+**The groups use the RADIUS.** The paper's main text defines
+
+```
+  We = ρ V² R / σ,     Re = ρ V R / μ,     Oh = μ / (ρ σ R)^(1/2) = We^(1/2) / Re          (146.1)
+```
+
+with `R` the drop radius. §78.3 writes the same groups with the diameter `d = 2R`, so
+
+```
+  We_d = 2 We,     Re_d = 2 Re,     Oh_d = Oh / 2^(1/2)                                    (146.2)
+```
+
+A gate that puts the key's `V*` into §78.4's criteria uses `d = 2R` and §78.3's forms. The
+key's `Oh_e3` column is the paper's radius-based `Oh`, as printed.
+
+**What is printed, and what is not.** The supplementary material's **Table I** prints, for 17
+rows (eight liquids, two to four drop radii for some), `ρ`, `σ`, `μ`, `R`, the capillary
+length `ℓσ` and `1000 Oh`. **It prints no critical speed, and no `We` or `Re`.** Docs/17's
+VAL-05 row asks that each row's `We`, `Re` and `Oh` recomputed from its stated properties
+match the paper's printed values. The paper wins over the plan: only `Oh` (and `ℓσ`) can be
+checked against print. The key's test prints each row's `We` and `Re` at `V*` for the record
+and compares neither. The only printed threshold speed is in the caption of Fig. 1: ethanol,
+`R = 1.04 mm`, `V* = 2.19 m/s`, between a non-splashing impact at `2.01 m/s` and a splash at
+`2.28 m/s`.
+
+**The thresholds are DIGITISED, from vector paths.** `V*` is read from **Fig. 4(c)**, which
+plots `V` against `log10 Oh`. The filled markers are the measurements; the open ones are the
+paper's predictions and are not read. Each Table I row names its marker in the table's second
+column (the orange up-triangle for acetone, the two blue circles, the yellow diamond and the
+right-pointing triangle for water, and so on). The figure is vector art, so each marker is a
+path with exact coordinates. Nothing was read off a raster image. The axes are calibrated from
+the figure's own major tick lines: `V = 0` to `6` at 16.8307 pt per m/s, and
+`log10 Oh = −2.5` to `−1` at 89.0440 pt per decade. Circles, squares, diamonds and stars are
+point-symmetric, and their centre is their bounding-box centre. A triangle's centre is
+ambiguous: its bounding-box centre and the mean of its three vertices differ by a sixth of
+its height. The figure settles which one is meant. The two left-pointing triangles of
+decamethyltetrasiloxane sit at `1000 Oh = 8.93` and `11.21` by bounding box, and at `9.11` and
+`11.39` by vertex mean. The table prints `9.1` and `11.4`. The key therefore takes the vertex
+mean. For the three up- or down-pointing triangles (acetone, and both dodecamethylpentasiloxane
+rows) the other convention would raise acetone's `V*` by `0.037 m/s` and lower the two
+dodecamethylpentasiloxane rows by `0.046` and `0.037 m/s`. `V*` is kept to three decimals, `0.0005 m/s` in rounding, which is
+finer than the figure's line widths. The key also carries each marker's abscissa as
+`Oh_e3_fig`. That column ties every digitised marker to its table row.
+
+**Two checks that are not in the test.** (a) Fig. 1's printed `2.19 m/s` for ethanol at
+`R = 1.04 mm` reads `2.1912` from Fig. 4(c). (b) Fig. 11(a) plots the same 17 measurements in
+the `log10 Re`–`log10 Oh` plane with the same markers. Read the same way (93.4365 pt per unit of
+`log10 Re` from its ticks at 2 and 4), its `Re` agrees with `ρ V* R / μ` from the key. Here
+`μ` is the viscosity that reproduces the printed `Oh`, `μ_Oh = Oh (ρ σ R)^(1/2)`. Fifteen of
+the 17 rows agree within 1.6 %. The water row at `R = 1.45 mm` reads 3.2 % low and the PDMS
+row at `R = 0.89 mm` 3.9 % high. That is the two figures disagreeing with each other, and it
+bounds the paper's own plotting at about 4 % in `V*`.
+
+**The printed digits, propagated.** The table prints `μ` to one or two significant figures
+(`0.3`, `0.6`, `1.3`, `1.7`, `4.6` cP), and its `Oh` was evidently computed from more
+precise values. Recomputed from the printed point values, `Oh` misses the printed one at its
+last digit in 11 of 17 rows. Acetone is the largest case: `2.148` against `2.4`, because its
+`0.3 cP` stands for anything from `0.25` to `0.35`. The comparison that tests the
+transcription and not the authors' rounding is therefore an interval. For each printed cell
+`x` with `k` decimals, `h(x) = 0.5·10^(−k)`, so `789` gives `0.5`, `24.0` gives `0.05`,
+`0.95` gives `0.005` and `10.0` gives `0.05`. Then
+
+```
+  Oh_lo = (μ − h_μ) / ((ρ + h_ρ)(σ + h_σ)(R + h_R))^(1/2)
+  Oh_hi = (μ + h_μ) / ((ρ − h_ρ)(σ − h_σ)(R − h_R))^(1/2)
+  the row passes when  Oh_lo <= Oh_pr + h_Oh  and  Oh_hi >= Oh_pr − h_Oh                  (146.3)
+```
+
+in SI units (`μ·10⁻³`, `σ·10⁻³`, `R·10⁻³`), with `Oh_pr = Oh_e3/1000` and
+`h_Oh = h(Oh_e3)/1000`. All 17 rows pass. The capillary length is held to its print the same
+way, with standard gravity `g = 9.80665 m/s²`:
+
+```
+  ℓσ = (σ / (ρ g))^(1/2),   ℓ_lo from (σ − h_σ, ρ + h_ρ),  ℓ_hi from (σ + h_σ, ρ − h_ρ)       (146.4)
+```
+
+and all 17 rows pass that too.
+
+**u_D.** The paper prints no error bar on `V*`. Its one bracket is Fig. 1's: `2.01 < 2.19 <
+2.28 m/s`, which is −8.2 % and +4.1 % about the printed threshold. The digitising adds
+`0.0005 m/s` in rounding. A wrong triangle convention would move three rows by at most
+`0.046 m/s`, about 3 %. The disagreement between the paper's two figures is at most about 4 %.
+VAL-70's band of ±20 % per row (docs/17) is stated against `V*` as the key holds it, and it is
+wider than all of these. §146.2 fixes it. The key has 17 rows for eight liquids. Docs/17's
+VAL-70 row counts "at least 6 of 8 rows", which is per liquid, so §146.2 must say how a liquid
+with two to four radii counts.
+
+**The transcription guard.** `riboux_gordillo_key_reproduces_its_printed_ohnesorge_numbers`,
+in `bin/validate_key/mod.rs`'s tests, loads the key through the manifest, which pins the
+file's SHA-256. It also reads the verified text once more to recover each cell's printed
+precision, and asserts:
+
+1. the header is `liquid, rho, sigma, mu, R, l_sigma, Oh_e3, V_star, Oh_e3_fig`, and there are
+   17 rows, with liquids 1 to 8 holding 1, 4, 2, 2, 2, 2, 2 and 2 rows, in non-decreasing
+   order. Within a liquid, `R` strictly decreases and `Oh_e3` strictly increases;
+2. every row passes (146.3) and (146.4);
+3. every row's `Oh_e3_fig` is within `h(Oh_e3) + h(Oh_e3_fig)` of its own `Oh_e3`, and among
+   all 17 printed `Oh_e3` its own is the nearest in `|ln(Oh_e3_fig/Oh_e3)|`;
+4. every `V_star` lies on the figure's axis, `0 < V* < 6 m/s`, and the ethanol row at
+   `R = 1.04 mm` is within `0.005 m/s` of Fig. 1's printed `2.19`.
+
+A misread digit in `μ`, `R`, `σ` or `Oh` that moves a row outside (146.3), a misread `ρ` or
+`σ` that breaks (146.4), a dropped or doubled row, a marker assigned to the wrong row, and a
+`V*` misread at Fig. 1's row all fail the test. Each was tried as a mutation. A misread digit
+that stays inside the print's own precision is not caught. `R = 1.34` read as `1.43` with
+`μ = 1.3 cP`, or water's `0.95 cP` read as `0.9`, both pass. The re-reading of the page is the
+only guard against them. A misread `V*` away from Fig. 1's row is caught only by check (b)
+above, which is not a test.
 
 ---

@@ -120,11 +120,24 @@ it. Cite top-level section numbers; the audit does not see paragraph labels such
 | 147 | Gate 68-C's coupled leg | VAL-71, VAL-72b | S |
 | 148 | Studio post-processing on unstructured meshes | STU-12a, STU-14, STU-15 | G |
 | 149-150 | reserved for splits and fixes found during the tranche | supervisor | — |
+| 151 | The dust stream: scope, the clean-room rule and the provenance sentence, the equivalent-gas premise, the stated inputs and recorded inconsistencies, the answer keys and the gate table | DST-00 | M |
+| 152 | Equivalent-gas thermochemistry: two pseudo-species, one temperature, the AICC state, S_L(φ) | DST-00, DST-01 | M |
+| 153 | Ψ: the laminar-limit eigenproblem, its integral identity, the ZFK diagnostic | DST-00, DST-02 | M |
+| 154 | The FSC and TFC closures, the extended FSC, the f32-safe rate constant | DST-00, DST-03 | M |
+| 155 | The progress-variable equation, ignition, the flame-Courant limit, ρ_u(p), the exact verification solutions | DST-00, DST-04 | M |
+| 156 | ρ-weighted k-ω SST-2003 and SST-sust | DST-00, DST-05 | M |
+| 157 | Closed vessels: the sealed low-Mach coupling, the thin-flame and cube-root relations, the Leeds and vessel gates | DST-00, DST-06, DST-07, DST-08 | S |
+| 158 | The one-domain vent, the compressible coupling, the REMBE gate | DST-00, DST-09, DST-10, DST-11 | S |
+| 159 | Phase B: reacting parcels, char, the cloud, two-way coupling, particle radiation, its gates | DST-00, DST-12..DST-18 | M (DST-12/13), S (DST-14..18) |
+| 160 | The flame-age option and the studio surface | DST-00, DST-20, DST-19 | S, G |
+| 161-162 | reserved for DUST splits and fixes found during the tranche | supervisor | — |
 
 Amendments to existing sections stay in place (§9 untouched; §23.2 AUT-02c; §25 CHR-11; §29.3 AUT-15; §32.4 VAL-40;
 §44.1 VIO-00; §50.9 unchanged by CHR-17; §56.11 VAL-34; §60.5 VAL-80; §68.12 VAL-72b; §71.2/§73.6 PAR-08; §78.10
 VAL-70; §88.10/§90.10 VAL-33; §92.4 TET-00; §92.14 AUT-03; §95.11 VAL-14; §109.6-7 VAL-12; §110.4-5 VAL-02, VAL-50..54;
 §112.3-5 F32 units; §115.6 VAL-06).
+
+DUST amendments (§12.8): §6.3: a pointer to §156; the ρ-weighted form is opt-in (DST-05); §118: a subsection, the FSC rate constant formed in f64 (DST-03); §120: the catalogue rows `activePressureForceBaffleVelocity` and `activeBaffleVelocity`, refused and pointing to the vent block (DST-09); §112.3: the DUST f32 rows (every DST gate unit, then F32-13/14); §137: a pointer to the dust case blocks (DST-06, DST-14).
 
 ### 4.4 Effort and hours
 
@@ -224,6 +237,28 @@ was consulted." and a PROVENANCE row. Every DOI is checked by the unit that cite
 - Counts (the PROVENANCE/NOTICE file count, §112.3's ignore count, README counts) are recomputed by their audit tests
   after a merge, never merged by hand.
 
+### 5.6 DUST — rules the stream adds (a brief quotes them; a review checks them)
+
+1. **The clean-room rule, verbatim from the user:** "인사이트만 얻고 완전히 새로운 코드로 만들어줘 ... 수식만 논문에서보고
+   같게 구현해줘". Equations come only from the open papers named in SPEC-LIT §151 (H20, H22, TMR, BKM24, ISL22,
+   MZG02), or are derived from them there with the derivation written out.
+2. **Every PROVENANCE row a DUST unit creates says:** *"The specification was informed by a review of FSCDustFoam
+   (Huang & Lipatnikov, GPL) and no code was copied."*
+3. **Briefs carry the contract only.** A GLM brief quotes SPEC-LIT §151-§160 and the unit's row. It never contains
+   FSCDustFoam or OpenFOAM paths, file names, identifiers or code-derived text, and nobody in the stream opens the
+   FSCDustFoam source or its Zenodo files. Every new file carries the house header, including "No GPL-licensed
+   source was consulted."
+4. **DUST numerics are opt-in.** A case without the dust blocks is byte-identical (hash pin), and every DUST driver
+   unit carries a "no dust, no change" row. The ρ-weighted SST changes nothing for an existing case.
+5. **Single precision (§5.1) applies in full.** Every DST gate row has a P, A, D or R class. The references, the Ψ
+   solve and the AICC and thin-flame integrators are host f64 in both builds. The device rate constant follows D.37.
+6. **Inputs are stated once,** in §151, with their source or the reason they are assumed (§K). No input is tuned to
+   pass a gate. Published tuned values (u', L, t_flacc) are used as published, and their rows are labelled.
+7. **The DUST drivers refuse decomposition** and moving meshes by name. `dust/` is outside PAR-09's allocation audit
+   for that reason, and PAR-14's refusal list names the dust model.
+8. **Each unit verifies in ≤ 10 min per build**, with its expected test count stated. A green filter that ran 0
+   tests is a failure. Longer runs are R, launched by the supervisor and deferred.
+
 ---
 
 ## 6. Cross-stream dependencies
@@ -258,6 +293,22 @@ was consulted." and a PROVENANCE row. Every DOI is checked by the unit that cite
 | solver lane `case_json.rs` and schema | CMP-03, CMP-14, CHR-12a, 23, 25, BC-05, AMG-04b, VIO-04 | one file | all in lane S, serialised |
 | solver lane `field.rs`/`field.cu`/`field_setup.rs` | BC-01..21, CMP-16/17/18, CHR-29, PAR-09, PAR-10a | one family of files | all in lane S, serialised |
 | solver lane `energy.rs` | CHR-10a/10b/11, BC-12, PAR-09, PAR-11 (and CMP-15's message) | — | CHEMRAD's energy edits land in W3-W4, before PAR-09 |
+| CHR-01 (W1 G) | DST-01 | NASA-7 species thermo | S1 sync |
+| F32-02 (W1 S) | DST-03 and every DUST reduction | `ofacc`, §118 | W1 |
+| F32-10 (W2 S) | DST-04 (ignition point); DST-07/08/11 gate meshes | the local origin | S2 sync; DST-04 is W3 |
+| F32-12 (W2 S) | DST-12 | f64 parcel positions and walk | S2 sync |
+| DST-05 (W2 M) | DST-06, DST-10 (S W4) | ρ-weighted SST | S2 sync |
+| DST-01..04, 12, 13 (W2-W3 M) | DST-06..18 (S W4-W5) | the `dust/` module | S2, S3 syncs |
+| CHR-25 (W3 S) | DST-14 | the parcels block | S3 sync |
+| CHR-09..11, CHR-12b (W4 S) | DST-06 | species with sources, c_p field, heat release, W_mix, the reacting driver | earlier in lane S, W4 |
+| CMP-07 (W1 M), CMP-15, CMP-16 (W4 S) | DST-09, 10, 11 | Toro's solution, the compressible driver, total-pressure BCs | earlier in lane S, W4 |
+| BC-01 (W1 S) | DST-06, DST-09 | the catalogue and its status test | W1 |
+| PAR-09 (W4 S) | — | `dust/` outside the audit (DST-06 adds the reason) | DST-06 |
+| CHR-23, CHR-26 (W5 S) | DST-18, DST-15 | radiation and parcels in `ofgpu-lowmach` | earlier in lane S, W5 |
+| DST-06, 10, 14 (W4 S), CMP-29 (W5 G), CHR-28 (W6 G) | DST-19 (G W6) | the regenerated schema | S5 sync |
+| solver lane `lowmach.rs` | DST-06, 15, 18, 20 | one file | lane S, serialised |
+| solver lane `compressible.rs`, `compressible/` in W4 | DST-09, 10, 11, 20 | the compressible files S owns in W4 | lane S, W4 only |
+| solver lane `case_json.rs` and schema | DST-06, 14, 20 | one file | lane S, serialised |
 
 ---
 
@@ -341,6 +392,10 @@ A file is edited by one lane per wave. Unlisted new files belong to the unit tha
 | `tools/autonomy/`, `tools/geom/stl_repair.py`, `tools/isaac/`, `tools/drone/` | M | M | M | M | M | M |
 | `gui/**` | G | G | G | G | G | G |
 | `README*`, `docs/GUIDEBOOK*` | — | — | S (VIO-04's GUIDEBOOK lines) | — | — | S (CMP-28, then VAL-82) |
+| `src/dust.rs`, `src/dust/`, `cuda/dust.cu`, `cuda/dustparticle.cu` (new) | — | M | M | S | S | — |
+| `models/k_omega_sst.rs`, `models/k_omega_sst/kernels.rs`, `cuda/sst.cu` | — | **M** (DST-05) | — | — | — | S (F32-16/17 tests) |
+| `io/case_dust.rs` (new) | — | — | — | S | S | — |
+| `compressible/`, `cuda/compressible.cu` (existing row; DST-09/10 add to it) | M | M | M | **S** (CMP-15..18, DST-09/10/11/20) | M | M |
 
 ### 7.5 The waves
 
@@ -397,6 +452,29 @@ What each wave delivers:
   - M: layers at sharp features, the tet pipe solve, the drone tet run, RAE2822, McCaffrey with radiation, seed 3
     (only on a go) and G-YPLUS.
   - G: the gui registry for chemistry and radiation, the `kind: tet` summary, and the Playwright walk.
+
+**DUST placement (§12.8).** The DST units are appended to the lane lists above; no existing unit moves.
+
+Each DST unit is in the earliest wave whose dependencies land before it, either in an earlier wave or earlier in
+the same lane and wave. It is appended at the end of its lane's list for that wave, so no existing unit moves.
+Waves now run serially in one folder, so the lane only orders units within a wave. The hours are §4.4 rates.
+
+| wave | lane · position | DST units (in order) | DST hours | follows |
+|---|---|---|---|---|
+| **W2** | M, after BC-18 | DST-00 → DST-01 → DST-02 → DST-03 → DST-05 | 8.0 h | needs only W1 work: CHR-01, F32-02 |
+| **W3** | M, after VAL-50 | DST-04 → DST-12 → DST-13 | 4.75 h | F32-10, F32-12 (S · W2), DST-02/03 (M · W2) |
+| **W4** | S, after VAL-71 | DST-06 → DST-07 → DST-08 → DST-09 → DST-10 → DST-11 → DST-14 → DST-20 | 14.25 h | CHR-11, CHR-12b, CMP-15, CMP-16 (earlier in S · W4); CHR-25 (S · W3); DST-05 (M · W2) |
+| **W5** | S, after F32-15 | DST-15 → DST-16 → DST-17 → DST-18 | 7.0 h | CHR-23, CHR-26 (earlier in S · W5) |
+| **W6** | G, after CHR-28 and TET-17, before STU-19 | DST-19 | 1.25 h | the S5 schema, CMP-29 (G · W5), CHR-28 (G · W6) |
+
+Effects on the lanes:
+
+- Lane M grows to 20 units and 34.2 h in W2, and to 17 units and 25.55 h in W3.
+- Lane S grows to 24 units and 39.25 h in W4, and to 18 units and 31.0 h in W5.
+- DUST is not on any critical path of §8.
+- Its longest dependency chain is DST-00 → 02 → 03 → 04 (M · W2-W3) → 06 → 14 (S · W4) → 15 → 16 → 17 (S · W5): 9
+  units and 16.25 h. The Phase A chain ends at DST-00 → 02 → 03 → 04 → 06 → 08 → 11 (7 units, 13 h).
+- If W4's lane S runs long, DST-14 and DST-20 may open S · W5 instead (note 7).
 
 ### 7.6 GPU and long runs
 
@@ -468,6 +546,7 @@ The other chains have slack:
 | MESHIO | 40 | 27 TET + 13 VIO |
 | STUDIO | 41 | 23 STU + 18 AUT. The plan said 22 + 17 = 39, but its own table has 41 |
 | VAL | 37 | 38 rows − VAL-72a. That is 30 firm and 8 conditional; the plan said 31 firm. VAL-13 is 3 units if it is taken |
+| DUST | 21 | DST-00..20. DST-00 is Opus-only (contract and keys); the rest are GLM-coded. One unit carries an R-run (DST-11, the full REMBE run, after the geometry). Three comparisons are named and not run (DST-11, DST-16 iii, DST-17 K_st) |
 
 - **Firm core: 244** (261 − 8 VAL conditional − 7 PAR Tier 2 − TET-19 stretch − STU-15 optional).
 - Five units are Opus-only contract or reading units: CMP-05, CHR-00a, CHR-00b, VAL-02 and VAL-06. TET-00 and VIO-00
@@ -481,6 +560,8 @@ The other chains have slack:
 | M | 92 | 138.0 h |
 | G | 80 | 112.5 h |
 | all | 261 | 390.8 h of unit work |
+
+With DUST (§12.8): M +12.75 h (8 units), S +21.25 h (12 units), G +1.25 h (1 unit), **35.25 h in all**. Unit totals become **282** (firm core 265), and lane-hours become 426.05 h before the §9 rework factor.
 
 The wave-gated simulation, with every lane serial and every cross-lane dependency waiting for its sync, ends at
 **156.8 h**. That includes 12 h of syncs.
@@ -590,11 +671,30 @@ The wave-gated simulation, with every lane serial and every cross-lane dependenc
   - `validate_gates/`;
   - no gate loosened.
 
+### 10.3 DUST (taken by the DUST planner, adopted)
+
+| # | decision | reason (INSIGHTS) |
+|---|---|---|
+| DD1 | Closed vessels on `ofgpu-lowmach -sealed`; vents on `ofgpu-compressible` | (c): flames ≪ sound in a closed vessel; the vent jet is near-sonic |
+| DD2 | The equivalent gas is two pseudo-species on the CHEMRAD stack; one temperature | (b) |
+| DD3 | Ψ is solved at setup from its definition; no fit is shipped | (a) |
+| DD4 | ρ-weighted SST-2003 is opt-in; SST-sust is used for the fan-stirred bomb | (j) |
+| DD5 | The REDUCED gates use 1-D spherical sectors; the full 3-D runs are R and deferred | (i) |
+| DD6 | ρ_u in the propagation term is the current unburned density | (g) |
+| DD7 | The §K inputs are fixed as stated (O2:N2 1:3.76, p_0 110 kPa for Leeds, H_f over a5, Pr_t per case, σ_t = t_0, the t_fd origin at t_0, κ = μ/(ρ Pr) with Pr 0.7) | (k) |
+| DD8 | The flame-age clock defaults to OFF | (f) |
+| DD9 | One-domain membrane vent; the active-baffle BC names are refused | (c) |
+| DD10 | TFC's A = 0.52 is a named, non-default input (unverified from an open copy); A = 0.4 is the default | RESEARCH D.21 |
+| DD11 | Phase B volatiles burn with an authored one-step reaction on the finite-rate path; EDC/PaSR coupling is a later option | (l) |
+| DD12 | No partially-premixed or non-uniform φ | (l) |
+
+U1 (tracking key J.1, 16 values read from H20 Fig. 9) is TAKEN by recommendation: tracked as DIGITISED facts with a PROVENANCE row and no image stored.
+
 ---
 
 ## 11. Decisions that need the user
 
-Eight items. None blocks W1 or W2. The column says when the answer is needed.
+Ten items (9-10 from the DUST stream). None blocks W1 or W2. The column says when the answer is needed.
 
 | # | decision | recommendation | needed by |
 |---|---|---|---|
@@ -606,6 +706,8 @@ Eight items. None blocks W1 or W2. The column says when the answer is needed.
 | 6 | **The gmsh exposure in the STEP route:** `tools/geom/geom_tool.py`/`geom_edit.py` `import gmsh` in-process, and PROVENANCE row 455's "run as a separate program" | keep the STEP route as an optional external path outside the product, and let TET-16 correct row 455's wording to the truth. Retiring it is a CAD-scope decision | W5 (TET-16) |
 | 7 | **Runs longer than one night:** the DRM19/GRI flame sweep (CHR-13), the full Flame D comparison (CHR-16), the RAE2822 fine meshes (CMP-27), the 68-C 90-stream batch (VAL-72b) if VAL-50 prices it over a night, and AUT-14's seed-3 evaluation | approve the ones VAL-50 prices under two nights | W5-W6 |
 | 8 | **Pushing and merging to `main`** (and refreshing the stale local `main` ref) | after W6, from the converged commit | after W6 |
+| 9 | **The REMBE vessel geometry**: length, diameter, end shape, vent and sensor positions. | Ask IND EX®/REMBE, or obtain the ISFEH 2022 companion paper (Chalmers record 530715; its USN copy moved to nva.sikt.no). Until then, DST-11's comparison stays NAMED. | W4 (DST-11) |
+| 10 | **GPU time for DST-11's full R-run** (H22 used 2.4 M cells for 0.35 s). | Price it with VAL-50's method once item 9 is answered, and approve it if it fits in two nights. | after W4 |
 
 ---
 
@@ -1057,6 +1159,79 @@ changes a gate, the change is a tightening or a duplicate removed. No band is wi
 6. **VAL-23 depends on BC-04/05 explicitly.** The 3-D quarter pipe is used only if the wedge fails, and that is the
    user's call. VAL-60 depends on F32-10 (local origin).
 7. **VAL-50's pricing (W3) gates every R batch** (§7.6).
+
+### 12.8 DUST — dust explosions: the FSC/TFC equivalent gas and Euler–Lagrange reacting dust (DST-)
+
+Equation ids `D.n`, answer keys `J.n` and inconsistencies `§K n` refer to `docs/17-dust/RESEARCH.md`; the reasoning behind each design choice is in `docs/17-dust/INSIGHTS.md`. Both were written from the open papers only (2026-10-10); no FSCDustFoam or OpenFOAM source was opened.
+
+**Scope.** This stream is a GPU-native, clean-room rebuild of what FSCDustFoam does (Huang & Lipatnikov; Zenodo
+10.5281/zenodo.5795161; built on OpenFOAM, so treated as GPL), plus a Lagrangian phase that FSCDustFoam does not
+have.
+
+- **Phase A** matches FSCDustFoam's scope: an equivalent premixed gas with one progress variable c~, closed by the
+  Flame Speed Closure of Lipatnikov & Chomiak, which contains Zimont's TFC as its developed limit, and turbulence from
+  k-ω SST. It is validated on the papers' published results: the Leeds fan-stirred bomb (H20) and the REMBE 11.5 m³
+  vented vessel (H22). Closed vessels run on `ofgpu-lowmach -sealed`. Vented vessels run on `ofgpu-compressible` with
+  a one-domain opening membrane.
+- **Phase B** is Euler–Lagrange reacting dust on the parcel stack that tranche 17 finishes: heat-up, drying,
+  devolatilisation, char burnout, volatiles burning in the gas, and optional particle radiation.
+
+**Rationale.** Dust explosion venting is designed today from empirical standards (EN 14491, NFPA 68) that do not
+cover complex geometry, large vessels or elevated pressure (H22 §1). The FSC model is the most thoroughly validated
+open premixed closure for this use (H20 §1), and the user asked for it to be rebuilt without copying any code.
+
+**Out of scope, named:**
+- partially-premixed or non-uniform φ (a mixture fraction beside c~);
+- metal dusts, agglomeration, dust lifting and secondary explosions;
+- membrane inertia and partial vent opening;
+- MPI and multi-GPU (deferred by the user).
+
+| id | what becomes TRUE | files | gate (quantitative; reference; tests) | depends | eff | lane · wave |
+|---|---|---|---|---|---|---|
+| **DST-00** | SPEC-LIT §151-§160 exist and carry the DUST contract. Every equation D.1-D.70 is numbered and cited to its open source, and every [derived] one is derived in full. The section also holds the stated inputs and the twelve recorded inconsistencies (§K), the not-open list (§L), the precision class of every planned row, and the gate table. The answer keys J.1-J.3 exist as DIGITISED CSVs with sha256 rows. Draft PROVENANCE rows carry the clean-room sentence. Opus writes it; no code. | `rust/SPEC-LIT.md` (§151-§160 skeletons and text), `reference/huang2020-leeds/st_b_exp.csv`, `reference/huang2022-rembe/{p_closed_exp.csv, p_vented_exp.csv, corn_starch_table1.csv}`, `reference/PROVENANCE.md`, `rust/PROVENANCE.md` (draft rows) | The §80 xref/citation audit passes with §151-§160 present. Every DOI/URL in them is checked by the unit. Every key row passes the existing reference-row hash test and is labelled DIGITISED with its reading uncertainty (J.1 ±0.05 m/s; J.2 ±0.002 bar; J.3 ±0.01 bar, ±0.003 s). Every DUST PROVENANCE row contains the clean-room sentence verbatim: a grep count equals the row count. No FSCDustFoam, OpenFOAM or other GPL path or file name appears in §151-§160, a brief or a row (grep). | — | M-L | M · W2 |
+| **DST-01** | The equivalent premixed gas exists on the host and the device. Unburned U (corn starch + air) and burned B (complete products) are two pseudo-species, each an exact NASA-7 linear combination of CHR-01 species (D.7-D.8). There are two modes: formula (D.1-D.6, H22 Table 1) and prescribed (constant c_p, W_u, W_b, T_b; H20 Table 1). The unit provides W(c~), c_p(T,c~), h(T,c~), the isobaric T_b and σ (D.10), a host AICC calculator (D.11), and S_L(φ) of H22 Eq. (3) with Gülder T/p factors as an option, default α = β = 0 (D.13-D.14). | `src/dust.rs` (new module), `src/dust/thermo.rs`, `src/dust/laminar.rs`, `src/dust/tests_thermo.rs`, `src/lib.rs` (mod line), SPEC-LIT §152 | **AICC P_max/p_0 = 8.57 ± 1 %** for C6H7.88O4.98 at φ = 0.62, T_0 = 273 K, O2:N2 = 1:3.76, dust counted as gas moles. Reference: the first law with MZG02 thermo; the planner's check value is 8.597, and 3.71 or the solid-fuel convention fall outside the band (§K 5). Heat of reaction from formation enthalpies **2521 kJ/mol ± 0.1 %** (D.6; H22 §3.1, H20 15.8 MJ/kg). Pseudo-species polynomials equal the component sums at 50 temperatures to 1e-12 relative. Element balance exact. Prescribed mode gives **σ = 5.06 ± 0.01** (H20 Table 1). **S_L(0.62) = 0.24111 m/s** to 1e-12 (H22 Eq. 3). Tests `dust::thermo::tests::{aicc_corn_starch_phi_0_62, heat_of_reaction_from_formation_enthalpies, pseudo_species_equal_component_sums, prescribed_mode_sigma_5_06}`, `dust::laminar::tests::s_l_huang2022_eq3`. Host f64 in both builds (class A); both builds run them; ≤ 1 min. | DST-00, CHR-01 | M | M · W2 |
+| **DST-02** | Ψ is regenerated from its definition, never read from a fit. A host f64 solver handles the laminar-limit eigenproblem D.26 for the case's own closure: the published form, or the one-temperature curves with κ ∝ T^n. The integral identity D.27 checks it, and the ZFK asymptote D.28 serves as a diagnostic. The unit also writes a documentation table over (σ, Θ/T_u, n) and a diagnostic that reports the speed any user-supplied fit implies. Case setup computes t_r = Ψ² κ_u/S_L² from it. | `src/dust/psi.rs`, `src/dust/tests_psi.rs`, SPEC-LIT §153 | Eigenvalue convergence: N and 2N steps agree to 1e-10 relative. D.27 holds to 1e-10. Λ is insensitive to c_cut ∈ {1e-8, 1e-10, 1e-12} to 1e-9. 0 < Λ/Λ_ZFK < 1, and \|1 − Λ/Λ_ZFK\| decreases monotonically over Ze ∈ {10, 20, 40, 80}, staying < 0.05 at Ze = 80 (D.28). The saddle slope `a² + a − Λ k g(1) = 0` holds to 1e-6 at the hot end. Reference: the definition in H20 p. 3-4 (Eq. 7 and its text). Tests `dust::psi::tests::{eigen_converges, integral_identity_holds, cut_insensitive, zfk_limit_monotone, saddle_slope}`. Host f64 in both builds (class A); ≤ 2 min. | DST-00 | M | M · W2 |
+| **DST-03** | The FSC/TFC closures become device kernels with host twins. They cover D_t (D.19), U_t (D.20), U_t,ISP and Da (D.21), τ_L (D.22), and the k-ω mapping of D_t,∞, u' and L (D.23). The laminar-limit source Q is written in the f32-safe form D.37 with its implicit split D.38. The extended FSC (D.29, t_flacc) and the TFC limit (D.31) are included, selected by `combustion.model: FSC \| TFC`. §118 gains the subsection "the FSC rate constant is formed once in f64". | `cuda/dust.cu` (new), `build.rs` (`KERNEL_UNITS`), `src/dust/fsc.rs`, `src/dust/device.rs`, `src/dust/tests_fsc.rs`, SPEC-LIT §154, §118 subsection | Device vs host twin over 4096 random states: ≤ 4 ulp in f64, R class in f32. Developed limit: at t_fd/τ_L = 1e3, U_t/U_t,ISP and D_t/D_t,∞ equal 1 to 1e-12. Early limit: at t_fd/τ_L = 1e-4, U_t / [U_t,ISP (t_fd/2τ_L)^{1/2}] = 1 to 1e-4 (the D.20 series). The two forms of D.21 agree to 1e-14. TFC: Q ≡ 0 bitwise. Extended FSC: T2 ≡ 1 bitwise for t < t_flacc. f32-safe Arrhenius over T ∈ [150, 3500] K and c~ ∈ [0, 1]: R-class match wherever the f64 value ≥ FLT_MIN·2^24, exactly 0 below, no subnormal written (bit test), and the zero-counter equals the host prediction. References: H20 Eqs. (3)-(7), H22 Eqs. (9), (11). Tests `dust::fsc::tests::{device_matches_host, developed_limits, small_time_series, tfc_has_no_q, acceleration_off_before_t_flacc, arrhenius_f32_safe_no_subnormal}`. The f64 SASS of every existing cubin is unchanged (`tools/f64_identity.py`); ≤ 3 min per build. | DST-00, DST-02, F32-02 | M | M · W2 |
+| **DST-05** | A conservative ρ-weighted SST-2003 exists (D.40-D.47). ρk and ρω are transported with the mass flux. The production P keeps both dilatation terms (D.42). μ_t uses S. The 10β*ρωk limiter acts in both equations, and the CD_kω floor is 1e-10. SST-sust sustaining terms (D.48) are an option. Only a DUST case selects any of this. With ρ ≡ 1 the matrices are bitwise the existing kinematic SST, and every existing SST case is unchanged. | `src/models/k_omega_sst.rs`, `src/models/k_omega_sst/kernels.rs`, `cuda/sst.cu`, SPEC-LIT §156 (pointer from §6.3) | **ρ ≡ 1:** matrices and fields bitwise equal to the kinematic SST on the existing SST tests (D, both builds). **Homogeneous decay** (F1 = 0, uniform ρ ≠ 1): k(t) and ω(t) against D.50, first order in Δt, with the finer of two Δt within 1e-3 relative at t = 5/(β2 ω_0) (P). **SST-sust** with k_amb = k_0 and ω_amb = ω_0: k and ω stay constant to round-off (R). **Closed box with a varying ρ field:** the ∫ρk dV budget closes to round-off (A, `ofacc`). **Uniform dilatation:** P matches the host formula, including −(2/3)ρk∇·u and −(2/3)μ_t(∇·u)², to 1e-12 (R). Reference: TMR (SST, SST-2003, SST-sust). Tests `k_omega_sst::tests::{rho_one_is_bitwise_kinematic, homogeneous_decay_closed_form, sust_holds_ambient, rho_k_budget_closes, dilatation_production_terms}`. All existing SST tests run unmodified; ≤ 5 min per build. | DST-00 | M | M · W2 |
+| **DST-04** | The progress-variable equation D.17 runs on the device as a mass-weighted `ScalarTransport` with the FSC source: \|∇c~\| explicit, Q implicit by D.38. It includes the ignition source D.32, with positions through F32-10's local-origin API, the flame-Courant check D.39, the current unburned density ρ_u(p) of D.52 in the propagation term, and the Reynolds mean D.16. A 1-D flame-tube harness verifies it before any driver exists: discrete continuity with the face mass flux as a host cumulative sum, and the BML density. | `src/dust/progress.rs`, `src/dust/ignition.rs`, `src/dust/courant.rs`, `src/dust/tube1d.rs` (test harness), `src/dust/tests_progress.rs`, SPEC-LIT §155 | **Planar frozen turbulence** (D.33, H20 Eqs. 8-11) at σ = 1 and σ = 5.06, with u' = 1.62 m/s, L = 20 mm, Pr_t = 0.4 (H20 Table 4): x_f (c‾ = 0.5) within 0.5 % of D.33 at t = 20 ms; δ_t (D.34) within 2 %; profile L∞ ≤ 0.02 against ½erfc on 1000 cells; errors non-increasing over 250/500/1000 cells. A σ = 5.06 miss while σ = 1 passes is a recorded finding about H20's exactness claim, never a widened band. **Laminar limit** (D_t = U_t = 0, Leeds and REMBE states): the speed relative to the fresh gas is S_L within 1 % with the regenerated Ψ at 200 cells per δ_L, and (Λ_ZFK/Λ)^{1/2} S_L within 1 % with the ZFK Ψ, so the two methods agree both ways. **Flame Courant:** front speed changes < 0.5 % between Co_f = 0.1 and 0.4; Co_f > 1 is refused by name. **Ignition** (σ_r = 0.25 mm, W_0 = 1e13 s⁻¹, t_0 = 1 ms): c~(0, t > t_0) ≥ 0.99. c~ stays in [0, 1] (bounds counter 0). Every row is P class in f32 at the same tolerance. Tests `dust::progress::tests::{planar_exact_sigma_1, planar_exact_sigma_5_06, laminar_limit_is_s_l, laminar_limit_zfk_speed, flame_courant_independent, flame_courant_refused, ignition_kernel_forms, bounded}`; ≤ 8 min per build. | DST-02, DST-03, F32-10 | M-L | M · W3 |
+| **DST-12** | Reacting parcels exist on the host and the device. A parcel carries moisture, volatile, char and ash masses. It heats by D.61 with Ranz–Marshall (D.62) and Bird's correction (D.63), dries by §76's evaporation, and devolatilises by SFOM (D.64). Per-parcel accumulators record the mass and enthalpy given to the gas. Positions and the walk stay f64, as F32-12 made them. | `src/dust/particle.rs`, `cuda/dustparticle.cu` (new), `build.rs`, `src/dust/tests_particle.rs`, SPEC-LIT §159 | Isothermal devolatilisation: m_p(t) against D.66 to 1e-10 relative in f64, R class in f32. Lumped heat-up (Nu = 2, no reaction, no radiation): T_p(t) against D.66 to 1e-10 (R). Bird factor → 1 as β → 0 to 1e-12, and β/(e^β − 1) at β = 1 to 1e-14 (R). Stage order moisture → volatiles → char is enforced (D). Device vs host twin ≤ 4 ulp in f64. References: ISL22 Eqs. (13)-(17), SPEC-LIT §76. Tests `dust::particle::tests::{devol_isothermal_closed_form, heatup_closed_form, bird_limits, stage_order, device_matches_host}`; ≤ 3 min per build. | DST-00, F32-12 | M | M · W3 |
+| **DST-13** | Char burns at the kinetic–diffusion-limited rate D.65 with the heat-retention factor h_s. The O2 taken and the CO2 given are accumulated per parcel. | `src/dust/char.rs`, `cuda/dustparticle.cu`, `src/dust/tests_char.rs` | Diffusion-limited (R_kin → ∞): d²(t) against the d² law of D.66 to 1e-8 relative over 90 % burnout (R). Kinetic-limited (R_diff → ∞): linear d(t) to 1e-10 (R). The harmonic combination tends to each limit as the other rate → ∞, to 1e-12. Carbon and oxygen balance per parcel exact to round-off (A). h_s = 0.3 splits the heat exactly (D). Reference: ISL22 Eqs. (20)-(23). Tests `dust::char::tests::{d2_law, kinetic_linear, combined_limits, element_balance, retention_split}`; ≤ 2 min per build. | DST-12 | S-M | M · W3 |
+| **DST-06** | `ofgpu-lowmach`, sealed or open, runs the Phase A dust model from the case. A `combustion { model: FSC \| TFC, … }` block and a `dust { thermo: formula \| prescribed, … }` block lower with §13.4 refusals. The equivalent gas is the two pseudo-species on CHR-09/10/11: c~ = Y_B with the FSC source, heat release q̇ = (h_U − h_B) ω̇_c, and W_mix(c~) in ρ and in the sealed constraint. Turbulence is the ρ-weighted SST of DST-05. The flame-Courant refusal and report are active. The driver writes c~, c‾, T, ρ, p0, U_t and Co_f. Decomposition, motion and -heaterPower are refused by name with a dust case. `dust/` joins PAR-09's not-audited list with that reason. | `src/bin/lowmach.rs`, `src/io/case_dust.rs` (new), `src/io/case_json.rs`, `docs/schema/case-1.json` (regenerated), `src/dust/source.rs`, SPEC-LIT §157 | **Sealed adiabatic cube**, ignited uniformly by W_ign everywhere and burned to c~ ≥ 1 − 1e-6: p0_end/p0_init equals the host AICC of the same thermo (DST-01) within 0.5 % in formula mode, with the error falling at first order between Δt and Δt/2 (P). The energy budget (`assembly_budget`) closes with q̇ metered (A). In an open isobaric 1-D flame, T(c~) stays on the adiabatic line to 0.5 K (D.12). **Pair test:** the 1-D tube run through the case equals the DST-04 library path bitwise. A case without the dust blocks is byte-identical to before (hash pin, D). Refusals are named. Tests `lowmach::tests::{dust_sealed_box_ends_at_aicc, dust_energy_budget_closes, dust_case_equals_library, no_dust_no_change, dust_refusals_name_the_setting}`, `io::case_dust::tests::{lowers, refusals}`, and the schema sync test; ≤ 8 min per build. | CHR-11, CHR-12b, BC-01, DST-01, DST-04, DST-05 | L | S · W4 |
+| **DST-07** | **Gate DST-LEEDS** passes (REDUCED): the Leeds fan-stirred cornflour bomb. Inputs: prescribed thermo (H20 Table 1), FSC with A = 0.4, Pr_t = 0.4 and Θ = 20 000 K, SST-sust holding the k_0 and ε_0 of H20 Table 4, central ignition D.32, p_0 = 110 000 Pa (§K 3), on a 1-D spherical-sector mesh to t = 30 ms. The mesh has R = 152.5 mm, 0.125 mm cells out to 50 mm and grading beyond. | `src/bin/validate_gates/dst_leeds.rs`, `src/dust/gatemesh.rs` (the sector generator), `src/bin/validate.rs` (dispatch line), `cases/dust/leedsBomb.jsonc` | S_t,b = dR‾_f/dt of the c‾ = 0.1 surface (D.36), at u' ∈ {0.80, 1.62, 2.45, 3.31} m/s and R_f ∈ {25, 30, 35} mm: each within **±20 %** of the measured value. Reference: Bradley, Chen & Swithenbank 1989 via H20 Fig. 9 (key J.1); the band is H20's own model deviation (≤ 16 %) plus the reading uncertainty. Slope dS_t,b/du' at R_f = 30 mm within **±15 %** of the measured 0.678. R_f = 20 mm is reported but not gated (ignition-affected, H20 §3.3). Pressure rise < 1 % at R_f = 35 mm (H20 §3.2). Sector mesh: closure ≤ 1e-12 and face areas ∝ r² to 1e-12 (D). f64 and f32 rows, P class. Validate section DST-LEEDS (4 runs): ≤ 6 min per build. | DST-06 | M | S · W4 |
+| **DST-08** | **Gate DST-VES** passes: closed vessels against open references. **(i)** Spheres of 20 L and 1 m³ with central ignition, run with the TFC operator at a prescribed U_t = S_u(p) and negligible D_t, in the prescribed constant-c_p, constant-W thermo. S_u(p) is either constant or a test power law in (T_u, p), the latter a test input and not a correlation claim. **(ii)** The REMBE closed stage on an equal-volume sphere (R = 1.40 m), with formula thermo and H22's inputs: FSC, A = 0.4, Pr_t = 0.28, u' = 0.75 m/s, L = 0.1 m, SST without sust, T_0 = 273 K, initial overpressure 0.06 bar. | `src/bin/validate_gates/dst_vessel.rs`, `src/dust/vessel0d.rs` (host thin-flame integrator, D.51-D.55), `src/dust/gatemesh.rs`, `cases/dust/{sphere20L, sphere1m3, rembeClosed}.jsonc`, dispatch line | **(i)** p(t) against D.54, integrated on the host (RK4, f64) with the same S_u(p) and γ_u. Time to (p_0 + p_e)/2 within **1 %**; (dp/dt)_max within **2 %**; p_end within **0.1 %** of the thermo's AICC. D.51 is exact for one γ and one W (INSIGHTS (h)). **Cube-root law:** K_st(20 L)/K_st(1 m³) = **1 ± 0.02** (D.55), valid while δ/R < 1 % (Dahoe et al. 1996); the brush is ≤ 5 cells of R/1000. **Negative control:** a run with a constant ρ_u instead of ρ_u(p) misses (dp/dt)_max by ≥ 10 % (INSIGHTS (g)). **(ii)** Overpressure at t = 0.05, 0.06, …, 0.10 s within **±0.009 bar** of the measured J.2 points (H22 Fig. 10); the band is H22's own model deviation (0.0065 bar) plus the reading uncertainty. Time of reaching 0.1 bar overpressure within ±0.01 s of 0.10 s. Labelled a REPRODUCTION row, because H22 tuned u' and L on this curve. f64 and f32 rows, P class; ≤ 8 min per build. | DST-06, DST-01, DST-02 | M-L | S · W4 |
+| **DST-09** | A one-domain opening vent exists in `ofgpu-compressible`. A `vent { faces: plane + centre + radius \| a face set, pStat }` block selects an internal face set M. M is a wall on both sides until the area-weighted Δp across it reaches p_stat, then becomes interior faces for good (D.57). The opening step, time and Δp are reported. BC-01's catalogue registers `activePressureForceBaffleVelocity` and `activeBaffleVelocity` as refused by name, with a message naming the vent block. | `src/dust/vent.rs`, `src/compressible/bc.rs` (face-mask hook), `cuda/compressible.cu` (masked face flux), `src/bin/compressible.rs`, `src/field/catalogue.rs` (names), SPEC-LIT §158 | **Closed membrane:** mass, normal-momentum and energy flux through M are exactly 0 (bitwise), and each side evolves bitwise as the same run with a wall there (D). **Membrane open at t = 0** in a 1-D Sod tube: fields bitwise equal to the run without a membrane (D), and Sod against Toro's exact solution (CMP-07) at CMP-19's tolerances: plateaus within 1 %, shock position within 0.5 % of the length on 800 cells. **Trigger:** a chamber pressurised at constant dp/dt opens at the first step with Δp ≥ p_stat, within one step of t = p_stat/(dp/dt) (D). Refusals by name. f64 and f32 rows (P/D). Tests `dust::vent::tests::{closed_membrane_is_a_wall, open_membrane_is_interior_bitwise, sod_through_membrane, opens_at_first_step_over_p_stat}`, `field::tests::every_catalogue_name_has_a_status`; ≤ 6 min per build. | CMP-07, CMP-15, CMP-16, BC-01, DST-00 | M | S · W4 |
+| **DST-10** | `ofgpu-compressible` runs the Phase A dust model. The c~ equation carries the FSC source (DST-03/04) on the compressible mass flux, and the heat release enters the c_p T + K energy equation (D.60). Thermo is constant c_p per pseudo-species (CMP-14's `hConst` per component) with R_mix(c~), and ρ_u(p) is local. Turbulence is the ρ-weighted SST, which lifts CMP-15's "non-SA turbulence" refusal for kOmegaSST only. The flame-Courant check is active. | `src/bin/compressible.rs`, `src/compressible/energy.rs`, `src/compressible/thermo.rs`, `src/compressible/mod.rs`, `src/dust/source.rs`, `cuda/compressible.cu`, SPEC-LIT §158 | **Sealed adiabatic box** burned uniformly: p_end/p_init equals the host AICC of the same hConst thermo within 0.5 %, first order in Δt (P). **1-D closed-end tube** with a planar flame (laminar limit, or prescribed U_t): unburned gas velocity = (σ − 1)S_L within 1 %, and p_u − p_b = ρ_u S_L²(σ − 1) within 2 % (D.58, Rankine–Hugoniot). The precursor wave Δp = ρ_u c_u (σ − 1)S_L within 2 % (D.59, linear acoustics as in CMP-20). With no dust block the driver is bitwise unchanged (D). kOmegaSST at ρ ≡ 1 equals DST-05's kinematic path bitwise. f64 and f32 rows. Tests `compressible::tests::{dust_box_ends_at_aicc, deflagration_jump_conditions, acoustic_precursor, no_dust_no_change, sst_rho_one_bitwise}`; ≤ 8 min per build. | CMP-15, CMP-16, DST-01, DST-03, DST-04, DST-05 | L | S · W4 |
+| **DST-11** | **Gate DST-REMBE**: the REMBE 11.5 m³ vented explosion runs as one domain, the vessel plus a 15.5 × 5 × 6.355 m outside box, half by symmetry, in `ofgpu-compressible`. It uses formula thermo, extended FSC with t_flacc = 0.15 s, SST, p_stat = 0.1 bar on the 0.5 m² vent, and P1/P2 probes. A case generator builds the geometry from a stated parameter file and meshes it with `ofgpu-automesher`. | `src/bin/validate_gates/dst_rembe.rs`, `src/dust/gatemesh.rs` (vessel and box STL), `cases/dust/rembeVented.jsonc`, `reference/huang2022-rembe/geometry.json` (once obtained), dispatch line | **NAMED and NOT RUN until the vessel geometry is obtained**: H22 publishes none (§K 9). Then, as an R-run against key J.3 (H22 Fig. 11; H22's own model: +4 %, −0.01 s): peak overpressure within **±10 %** of 0.60 bar, at a time within ±0.015 s of 0.31 s; stage-(iii) rise rate (0.20 → 0.28 s) within ±15 % of 4.55 bar/s; rupture within ±0.01 s of 0.10 s. **REDUCED smoke**, ≤ 10 min in both builds, on a PLACEHOLDER 11.5 m³ cylinder (L/D = 2), labelled and never compared: finite fields, the membrane opens once, a pressure peak exists, and the mass budget closes to 1e-10 relative (A). The full run is DEFERRED (R, supervisor). | DST-08, DST-09, DST-10 | M (R) | S · W4 |
+| **DST-14** | A reacting dust cloud can be stated, in JSONC and in `constant/cloudProperties`. The block `dust.cloud { concentration, diameter \| rosinRammler{d, n}, composition{moisture, volatile, char, ash}, rhoP, cpP, emissivity, devolatilisation{A, Ea, dH}, char{C0, A, Ea, hs} }` lowers to CHR-25's injectors as a uniform seeding of the domain with reacting-parcel properties. Unknown keys and invalid combinations, such as a cloud together with `combustion.model FSC`, are refused by name. | `src/io/case_parcels.rs`, `src/io/case_dust.rs`, `src/io/case_json.rs`, `docs/schema/case-1.json` | The seeded mass per volume equals `concentration` to 1e-12 relative (deterministic quantile seeding, A). The Rosin–Rammler mass-weighted mean diameter of the seeded set equals the closed form d̄ Γ(1 + 1/n) to 1e-10. Every field is reachable from a test case. Refusals are named. Schema round trip. Tests `io::case_dust::tests::{cloud_lowers, cloud_mass_is_exact, rosin_rammler_moments, cloud_refusals}` and the schema sync test; ≤ 2 min per build. | CHR-25, DST-06, DST-12 | S-M | S · W4 |
+| **DST-20** | A local flame-age clock exists as an option, **default OFF**, in both drivers. `combustion.flameAge: local` transports the age concentration α (D.69) with the c~ discretisation and replaces every t_fd in D.19-D.20, and the t of D.29, by the local age α/max(c~, c_a). OFF is the global clock of the papers. | `src/dust/age.rs`, `src/dust/progress.rs`, `src/bin/lowmach.rs`, `src/bin/compressible.rs`, `src/io/case_dust.rs`, schema, SPEC-LIT §160 | OFF: bitwise the global-clock path (D). ON with one ignition: t_fd = t − t_ig wherever c~ > c_a, to the R-class round-off rule (D.70). ON with two kernels ignited 5 ms apart in a 1-D tube: each kernel's t_fd equals its own clock (R) until they merge, and the α budget closes after (A). `flameAge` with TFC is refused by name, because TFC has no clock. Tests `dust::age::tests::{off_is_global_clock_bitwise, one_ignition_is_uniform_clock, two_kernels_two_clocks, age_budget_closes}`; ≤ 5 min per build. | DST-06, DST-10 | M | S · W4 |
+| **DST-15** | `ofgpu-lowmach` runs Phase B. The seeded cloud walks and sorts (CHR-26), heats, dries, devolatilises and burns char. The volatile pseudo-species, with its formula from the dust's volatile matter and its NASA-7 data built as in D.8, enters the species equations. It burns with an authored one-step volatile + O2 reaction on the CHEMRAD finite-rate path (CHR-03/09). Momentum, energy, mass and species are exchanged two-way (D.68). | `src/bin/lowmach.rs`, `src/dust/cloud.rs`, `src/dust/source.rs`, `cases/mech/volatile1.ck` (authored one-step), SPEC-LIT §159 | **Closed adiabatic well-stirred box** (no flow, uniform cloud, forced ignition): mass, energy and each element conserved to 1e-10 relative over the run (A). Complete conversion ends at the host AICC of the dust-air mixture within 0.5 % (P), counting volatile, char as C(s) and inert ash with DST-01 thermo. Momentum given equals momentum gained to 1e-12 relative (A, CHR-26's row). A case without a cloud is bitwise unchanged (D), and the case equals the library path bitwise. Tests `lowmach::tests::{dust_b_box_conserves, dust_b_box_ends_at_aicc, dust_b_momentum_balance, no_cloud_no_change, dust_b_case_equals_library}`; ≤ 8 min per build. | CHR-12b, CHR-26, DST-13, DST-14 | L | S · W5 |
+| **DST-16** | **Gate DST-B-LAM** passes where an open reference exists, for Phase B laminar dust flames. In the fine-particle limit (small d, fast devolatilisation), the 1-D Phase B flame speed must approach the 1-D gas flame of the same volatile mixture in the same driver. S_L must also fall monotonically with particle size. | `src/bin/validate_gates/dst_b_laminar.rs`, `cases/dust/flame1dCloud.jsonc`, dispatch line | **(i)** At d = 1 µm and A_devol × 100: \|S_L,B/S_L,gas − 1\| ≤ 2 %, a limit identity on the precedent of CHR-14's PaSR τ → 0 row. **(ii)** S_L,B non-increasing over d ∈ {5, 10, 20, 40} µm (D). **(iii)** Against Dahoe et al. 2002's measured S_L via H22 Eq. (3) (0.241 m/s at φ = 0.62): **NAMED and NOT RUN** until open corn-starch devolatilisation kinetics are found (§L). f64 and f32 rows (P); ≤ 8 min per build. | DST-15 | M | S · W5 |
+| **DST-17** | **Gate DST-B-VES** passes: the Phase B cloud in a closed 20-L sphere (1-D sector, laminar, central ignition) holds the identities Phase A passed, and meets the thin-flame reference in the fine-particle limit. | `src/bin/validate_gates/dst_b_vessel.rs`, `cases/dust/sphere20LCloud.jsonc`, dispatch line | p_end within 0.5 % of the host AICC of the cloud (complete conversion, P). With f_VM0 = 1, no char and d = 1 µm, the time to (p_0 + p_e)/2 is within 5 % of D.54. The D.54 integration uses S_u(p) from DST-16's 1-D Phase B flame at p/p_0 = 1, 3 and 6, interpolated; the band allows for D.51's approximation under variable c_p and W. K_st is reported. The measured K_st = 200 bar m/s ± 15 % (H22 §2) is **NAMED and NOT RUN**, because it needs the standard test's decaying-turbulence initial state, which is not openly published. ≤ 8 min per build. | DST-08, DST-15, DST-16 | M | S · W5 |
+| **DST-18** | Particles exchange radiation with P1. θ_R comes from G (D.67). The cloud's absorption is added to P1's coefficient, and the particle–radiation exchange is removed from G's equation and added to the parcels' energy. | `src/dust/particle.rs`, `cuda/dustparticle.cu`, `src/bin/lowmach.rs` (wiring under `radiation: P1`), SPEC-LIT §159 | Optically thin isothermal cloud at T_p in a cold black box: emitted power = 4 a_p σ T_p⁴ V within 1 % (D.67; P1 in the thin limit, CHR-18's slab machinery). A particle in a uniform field G = 4σθ_R⁴ with no convection: dT_p/dt equals D.61's radiation term exactly (R). Total energy of particles, gas and radiation closes to round-off (A). With radiation off: bitwise unchanged (D). Tests `dust::particle::tests::{thin_cloud_emission, uniform_field_heating, radiation_energy_closes, radiation_off_bitwise}`; ≤ 6 min per build. | CHR-23, DST-15 | M | S · W5 |
+| **DST-19** | The studio knows the dust model. The `combustion`, `dust`, `vent` and `dust.cloud` blocks and their refusals come from the re-synced schema. The `ofgpu-lowmach` and `ofgpu-compressible` registry entries list the dust options. Templates exist for the Leeds bomb, the 20-L sphere and the REMBE vent. The DST-* validate sections appear in the studio's gate list. | `gui/shared/src/registry.ts`, `gui/server/src/registry/schema.ts` (+ test), `gui/server/src/prompts/system.ts`, the studio template module, the schema copy | Server and shared suites green at today's counts. `schema.test.ts` passes on the regenerated schema. A mock-LLM case with a `combustion` + `vent` block validates. `registry.test.ts` lists the dust options. Tests `schema.test.ts`, `registry.test.ts`, `routes.test.ts`; ≤ 5 min. | DST-06, DST-10, DST-14, CMP-29, CHR-28 | S-M | G · W6 |
+
+**Planner notes (the counterpart of the assembler corrections):**
+
+1. **The ids follow the user's numbering.** DST-00..05 are the foundation, DST-06..08 the closed vessels on
+   `ofgpu-lowmach -sealed` (after CHR-12b), DST-09..11 the vent, DST-12..18 Phase B, DST-19 the studio and DST-20
+   the flame-age option. Rows are listed in wave order, so DST-05 precedes DST-04.
+2. **Every gate has an open reference**, and each band is either a definition (1 %), a conservation identity, or a
+   published model's own deviation plus the reading uncertainty. Three comparisons are NAMED and NOT RUN until an
+   input exists: the REMBE vented run (DST-11, geometry), the Phase B flame against measured S_L (DST-16 iii,
+   kinetics) and K_st against 200 bar m/s (DST-17, the test's turbulence).
+3. **Calibrated rows are labelled.** DST-08 (ii) is a REPRODUCTION row: H22 tuned u' and L on that curve. DST-11 uses
+   H22's tuned t_flacc = 0.15 s as published. Nothing is tuned to pass a gate.
+4. **DST-05 stays in lane M only if `turbulence.rs` needs no edit.** If the ρ-weighted SST needs a field in
+   `FlowState`/`RasCore`, the unit moves to S · W2 after F32-12. The wave, the gate and every dependency are
+   unchanged.
+5. **DST-04 waits for W3** because its ignition point goes through F32-10's local-origin API (rule 5.1.7, S · W2).
+6. **CMP-19 is not a dependency of DST-09.** DST-09 uses CMP-07's exact Riemann solution and quotes CMP-19's
+   tolerances, so it can run in W4 before CMP-19 (G · W5).
+7. **DST-14 and DST-20 can slip** to the head of S · W5 without breaking any dependency, if W4's lane S runs long:
+   DST-15 still follows DST-14 in that lane.
+8. **No unit plans MPI or multi-GPU.** The DUST drivers refuse decomposition by name.
+
+---
 
 ## Appendix A — id renames
 

@@ -1645,7 +1645,8 @@ fn the_s13_4_1_pair_tests() {
             RadiationModel::from_name("viewFactor").expect("viewFactor"),
             RadiationModel::ViewFactor
         );
-        // Both spellings, one model - and nothing else is recognised.
+        // Both spellings, one model. P1 and fvDOM are also recognised now -
+        // the participating models, gated elsewhere (SPEC-LIT 135.6).
         assert_eq!(
             RadiationModel::from_name("s2s").expect("s2s"),
             RadiationModel::ViewFactor

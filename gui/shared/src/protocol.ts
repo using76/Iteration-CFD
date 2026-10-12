@@ -520,7 +520,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     point: Vec3Schema.nullish().describe('World point [x, y, z]: the cell containing it is read'),
     at: z.literal('center').nullish().describe('"center": the middle of the canvas'),
   }),
-  z.object({ type: z.literal('open_tab'), kind: z.string().describe('Tab kind, e.g. "viewer", "chart", "log"'), label: z.string().nullish() }),
+  z.object({ type: z.literal('open_tab'), kind: z.string().describe('Tab kind, e.g. "viewer", "chart", "log"'), label: z.string().nullish(), path: z.string().nullish().describe('Workspace path, for kind geometry (.stl/.obj/.step) or campaign (a campaign directory)') }),
   z.object({ type: z.literal('close_tab'), id: z.string() }),
   z.object({ type: z.literal('set_locale'), locale: z.enum(['ko', 'en']) }),
   // The Post panel's own commands. set_post still sets colour map, range,
@@ -732,6 +732,14 @@ export const UiStateSchema = z.object({
   compareRunId: z.string().nullish(),
   /** The split viewport (split_view / focus_view / link_cameras); null or absent = one viewport. */
   views: z.object({ split: z.boolean(), focused: ViewIdSchema, camerasLinked: z.boolean(), datasetA: z.string().nullable(), datasetB: z.string().nullable() }).nullish(),
+  /** The viewer's axes triad and colour bars as show_overlay set them; null or absent = unknown. */
+  overlays: z.object({ axes: z.boolean(), colorBars: z.boolean() }).nullish(),
+  /** The bottom pane tab on screen (terminal, logs, problems, output); null when the bottom pane is hidden. */
+  bottomTab: z.string().nullish(),
+  /** The Log tab's filter as set_log_filter or the screen left it; null or absent = unknown. */
+  logs: z.object({ text: z.string(), streams: z.array(z.enum(['stdout', 'stderr', 'system'])), follow: z.boolean() }).nullish(),
+  /** What the metrics chart draws: slot 1 (left axis), slot 2 (right axis), metrics or sweeps; null or absent = unknown. */
+  metricPick: z.object({ left: z.string().nullable(), right: z.string().nullable(), mode: z.enum(['metrics', 'sweeps']) }).nullish(),
 })
 export type UiState = z.infer<typeof UiStateSchema>
 

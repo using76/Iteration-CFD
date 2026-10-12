@@ -102,6 +102,25 @@ class RealViewerApi implements ViewerApi {
   }
 }
 
+/** A ViewerApi over an explicit controller: the shell surface (execute,
+ *  getState, subscribe, tools, probes) against any controller — tests drive a
+ *  headless one through the same object the canvas wires up. setBaseUrl is a
+ *  no-op: that controller owns its transport. */
+export function controllerViewerApi(controller: ViewerController): ViewerApi {
+  return {
+    execute: (cmd) => controller.execute(cmd),
+    getState: () => controller.getState(),
+    subscribe: (listener) => controller.subscribe(listener),
+    isMounted: () => controller.isMounted(),
+    setBaseUrl: () => {},
+    setTool: (tool) => controller.setTool(tool),
+    getTool: () => controller.tool,
+    viewport: () => controller.viewport(),
+    probePixel: (clientX, clientY) => controller.probePixel(clientX, clientY),
+    probePoint: (point) => controller.probePoint(point),
+  }
+}
+
 const apis = new Map<ViewId, ViewerApi>()
 export function getViewerApi(view: ViewId = 'A'): ViewerApi {
   let api = apis.get(view)

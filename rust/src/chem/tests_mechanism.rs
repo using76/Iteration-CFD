@@ -645,29 +645,30 @@ fn ck_refuses_unknown_keyword() {
         let msg = refusal(&with_aux(aux));
         has(&msg, &["line 32", key]);
     }
-    for (aux, key) in [
-        ("  LOW / 1.0E+16 0.0 0.0 /", "LOW"),
-        ("  TROE / 0.5 100.0 1000.0 /", "TROE"),
-        ("  SRI / 0.5 100.0 1000.0 /", "SRI"),
-        ("  REV / 1.0E+12 0.0 0.0 /", "REV"),
-        ("  DUP", "DUP"),
-        ("  DUPLICATE", "DUPLICATE"),
-    ] {
+    // The six keywords of CHR-02b now read, so they refuse for their own
+    // reasons: RX_A is irreversible and carries no (+...) marker, and a lone
+    // DUP has no twin (SPEC-LIT §129.5).
+    for (aux, key) in
+        [("  LOW / 1.0E+16 0.0 0.0 /", "LOW"), ("  TROE / 0.5 100.0 1000.0 /", "TROE"), ("  SRI / 0.5 100.0 1000.0 /", "SRI")]
+    {
         let msg = refusal(&with_aux(aux));
-        has(&msg, &["line 32", key, "not read yet"]);
+        has(&msg, &["line 32", key, "fall-off"]);
+    }
+    has(&refusal(&with_aux("  REV / 1.0E+12 0.0 0.0 /")), &["line 32", "REV", "irreversible"]);
+    for aux in ["  DUP", "  DUPLICATE"] {
+        let msg = refusal(&with_aux(aux));
+        has(&msg, &["line 31", "DUP", "twin"]);
     }
     has(&refusal(&with_aux("  FOO / 1.0 /")), &["line 32", "FOO", "FORD", "RORD", "UNITS", "LOW"]);
     has(&refusal(&with_aux("  FORD")), &["line 32", "FORD"]);
     // An auxiliary line before any reaction.
     has(&refusal(&t5_lines("REACTIONS", &["N2/2.0/"])), &["line 31"]);
 
-    // Equation-level refusals, each on the reaction line (line 31).
+    // Equation-level refusals, each on the reaction line (line 31): a
+    // fall-off reaction without LOW is refused when it closes.
     let on_line_31 = |rx: &str| refusal(&t5_lines("REACTIONS", &[rx]));
-    has(&on_line_31("H + O2 (+M) => HO2 (+M)   1.0E+12 0.0 0.0"), &["line 31", "fall-off", "not read yet"]);
-    has(
-        &on_line_31("H + O2 (+N2) => HO2 (+N2)   1.0E+12 0.0 0.0"),
-        &["line 31", "fall-off", "not read yet"],
-    );
+    has(&on_line_31("H + O2 (+M) => HO2 (+M)   1.0E+12 0.0 0.0"), &["line 31", "LOW"]);
+    has(&on_line_31("H + O2 (+N2) => HO2 (+N2)   1.0E+12 0.0 0.0"), &["line 31", "LOW"]);
     has(&on_line_31("O2 + HV => O2   1.0 0.0 0.0"), &["line 31", "HV", "photon"]);
     has(&on_line_31("H2 + O2 => 2 OH   1.7E+13 0.0"), &["line 31", "three numbers"]);
     has(&on_line_31("H2 + O2 => 2 OH   1.7E+13 0.0 abc"), &["line 31", "three numbers"]);
@@ -847,4 +848,237 @@ fn ck_duplicates_are_refused() {
     // The third body differs.
     let m = units("REACTIONS", &[RX_B, "H + O2 => HO2   2.0E+15  0.0  0.0"]);
     assert_eq!(m.reactions().len(), 2);
+}
+
+// ==========================================================================
+//  T10: fall-off, REV and DUP as read (SPEC-LIT §129.5, §130.4)
+// ==========================================================================
+
+/// The `(+M)` fall-off reaction of the T10 fixtures, on line 31.
+const FALLOFF_RX: &str = "H + O2 (+M) = HO2 (+M)   1.0E+12  0.0  0.0";
+
+/// The T5 fixture with the fall-off reaction on line 31 and `rest` after it.
+fn falloff(rest: &[&str]) -> Mechanism {
+    let mut v = vec![FALLOFF_RX];
+    v.extend(rest.iter().copied());
+    units("REACTIONS", &v)
+}
+
+/// Prints one fall-off case and checks its converted rates against truth.
+fn check_falloff(case: &str, r: &Reaction, a_inf: f64, a0: f64, theta0: f64) {
+    let f = r.falloff.as_ref().unwrap();
+    println!(
+        "  [T10] case {case}: k_inf a = {:e} (rel {:.2e}), k_0 a = {:e} (rel {:.2e}), \
+         k_0 theta = {} (rel {:.2e})",
+        r.rate.a,
+        (r.rate.a - a_inf).abs() / a_inf,
+        f.low.a,
+        (f.low.a - a0).abs() / a0,
+        f.low.theta,
+        (f.low.theta - theta0).abs() / theta0
+    );
+    assert!(within(r.rate.a, a_inf), "case {case}: k_inf a = {}", r.rate.a);
+    assert!(within(f.low.a, a0), "case {case}: k_0 a = {}", f.low.a);
+    assert!(within(f.low.theta, theta0), "case {case}: k_0 theta = {}", f.low.theta);
+}
+
+#[test]
+fn ck_reads_falloff() {
+    // (a) The marker, LOW (with the units' theta), TROE and two efficiencies.
+    let m = falloff(&["  LOW / 1.0E+16 0.0 20000.0 /", "  TROE / 0.5 100.0 1000.0 /", "  H2/2.0/ N2/0.5/"]);
+    let r = &m.reactions()[0];
+    assert_eq!(r.line, 31);
+    assert_eq!(r.third_body, None);
+    assert_eq!(r.molecularity(), 2.0);
+    assert!(within(r.rate.a, 1.0e6), "k_inf a = {}", r.rate.a);
+    assert_eq!(r.rate.beta, 0.0);
+    check_falloff("a", r, 1.0e6, 1.0e4, TH_20K);
+    assert_eq!(
+        r.falloff.as_ref().unwrap().collider,
+        Collider::Mixture(ThirdBody { efficiencies: vec![(0, 2.0), (5, 0.5)] })
+    );
+    assert_eq!(
+        r.falloff.as_ref().unwrap().blending,
+        Blending::Troe { a: 0.5, t3: 100.0, t1: 1000.0, t2: None }
+    );
+    // (b) TROE with its fourth number.
+    let m = falloff(&["  LOW / 1.0E+16 0.0 20000.0 /", "  TROE / 0.5 100.0 1000.0 5000.0 /"]);
+    match &m.reactions()[0].falloff.as_ref().unwrap().blending {
+        Blending::Troe { t2: Some(5000.0), .. } => {}
+        other => panic!("TROE's fourth number should read as T** = Some(5000.0): {other:?}"),
+    }
+    // (c) SRI with three numbers, then with five.
+    let m = falloff(&["  LOW / 1.0E+16 0.0 20000.0 /", "  SRI / 0.5 100.0 1000.0 /"]);
+    assert_eq!(
+        m.reactions()[0].falloff.as_ref().unwrap().blending,
+        Blending::Sri { a: 0.5, b: 100.0, c: 1000.0, d: 1.0, e: 0.0 }
+    );
+    let m = falloff(&["  LOW / 1.0E+16 0.0 20000.0 /", "  SRI / 0.5 100.0 1000.0 2.0 0.3 /"]);
+    assert_eq!(
+        m.reactions()[0].falloff.as_ref().unwrap().blending,
+        Blending::Sri { a: 0.5, b: 100.0, c: 1000.0, d: 2.0, e: 0.3 }
+    );
+    // (d) LOW with no TROE and no SRI is Lindemann.
+    let m = falloff(&["  LOW / 1.0E+16 0.0 20000.0 /"]);
+    check_falloff("d", &m.reactions()[0], 1.0e6, 1.0e4, TH_20K);
+    assert_eq!(m.reactions()[0].falloff.as_ref().unwrap().blending, Blending::Lindemann);
+    // (e) A declared species as the collider.
+    let m = units(
+        "REACTIONS",
+        &["H + O2 (+N2) = HO2 (+N2)   1.0E+12  0.0  0.0", "  LOW / 1.0E+16 0.0 20000.0 /"],
+    );
+    assert_eq!(m.reactions()[0].falloff.as_ref().unwrap().collider, Collider::Species(5));
+    // (f) TROE before LOW reads the same reaction as (a)'s order does.
+    let a_order = falloff(&["  LOW / 1.0E+16 0.0 20000.0 /", "  TROE / 0.5 100.0 1000.0 /", "  H2/2.0/ N2/0.5/"]);
+    let f_order = falloff(&["  TROE / 0.5 100.0 1000.0 /", "  LOW / 1.0E+16 0.0 20000.0 /", "  H2/2.0/ N2/0.5/"]);
+    assert_eq!(f_order.reactions()[0], a_order.reactions()[0]);
+    // (g) MOLECULES: A converts with N_A^(m-1), m for k_inf and m + 1 for k_0.
+    let m = units(
+        "REACTIONS MOLECULES",
+        &[FALLOFF_RX, "  LOW / 1.0E+16 0.0 20000.0 /"],
+    );
+    let r = &m.reactions()[0];
+    let g = |x: f64, p: f64| x * f64::powf(6.02214076e23 * 1.0e-6, p);
+    check_falloff("g", r, g(1.0e12, 1.0), g(1.0e16, 2.0), TH_20K);
+}
+
+#[test]
+fn ck_reads_rev_and_dup() {
+    // REV: converted with the reaction's units and m_r = the reverse orders'
+    // sum (2 OH gives 2.0), so 1.0E+11 cm^3 reads as 1.0e5 m^3.
+    let rev_rx = "H2 + O2 = 2 OH   1.7E+13 0.0 47780.0";
+    let m = units("REACTIONS", &[rev_rx, "  REV / 1.0E+11 0.0 30000.0 /"]);
+    let r = &m.reactions()[0];
+    let rev = r.reverse.unwrap();
+    assert!(within(rev.a, 1.0e5), "reverse a = {}", rev.a);
+    assert_eq!(rev.beta, 0.0);
+    assert!(within(rev.theta, TH_30K), "reverse theta = {}", rev.theta);
+    assert!(m.reactions()[0].falloff.is_none() && r.third_body.is_none());
+    assert!(m.notes().iter().all(|n| !n.contains("FORD")), "notes: {:?}", m.notes());
+    // A reversible reaction with FORD and a REV is not flagged either.
+    let m = units("REACTIONS", &[rev_rx, "  FORD /H2 1.0/", "  REV / 1.0E+11 0.0 30000.0 /"]);
+    assert!(m.notes().is_empty(), "notes: {:?}", m.notes());
+    // And with no REV the note stays.
+    let m = units("REACTIONS", &["H2 + O2 = 2 OH   1.7E+13 0.0 47780.0", "  FORD /H2 1.0/"]);
+    assert_eq!(m.notes().len(), 1, "notes: {:?}", m.notes());
+    has(&m.notes()[0], &["REV"]);
+    // A DUP pair reads: both copies carry it.
+    let m = units("REACTIONS", &[RX_A, "  DUP", RX_A, "  DUPLICATE"]);
+    assert_eq!(m.reactions().len(), 2);
+    assert!(m.reactions().iter().all(|r| r.duplicate), "both copies are duplicate");
+    // DUP on one copy only is refused at the later line, naming both.
+    let msg = refusal(&t5_lines("REACTIONS", &[RX_A, "  DUP", RX_A]));
+    has(&msg, &["line 33", "line 31", "DUP"]);
+    // The (+M) and +M forms of the same sides are different kinds, so both read.
+    let m = units(
+        "REACTIONS",
+        &[
+            "H + O2 + M => HO2 + M   2.0E+15 0.0 0.0",
+            "H + O2 (+M) => HO2 (+M)   2.0E+15 0.0 0.0",
+            "  LOW / 1.0E+16 0.0 20000.0 /",
+        ],
+    );
+    assert_eq!(m.reactions().len(), 2);
+    assert!(m.reactions()[0].third_body.is_some() && m.reactions()[0].falloff.is_none());
+    assert!(m.reactions()[1].third_body.is_none() && m.reactions()[1].falloff.is_some());
+}
+
+#[test]
+fn ck_falloff_refusals() {
+    let on_line_31 = |rx: &str| refusal(&t5_lines("REACTIONS", &[rx]));
+
+    // The marker: one side only, two different markers, a (+ elsewhere, and
+    // (+M) together with a plain +M (SPEC-LIT §129.5).
+    has(&on_line_31("H + O2 (+M) => HO2   1.0E+12 0.0 0.0"), &["line 31", "(+"]);
+    has(&on_line_31("H + O2 => HO2 (+M)   1.0E+12 0.0 0.0"), &["line 31", "(+"]);
+    has(
+        &on_line_31("H + O2 (+M) => HO2 (+N2)   1.0E+12 0.0 0.0"),
+        &["line 31", "(+", "M", "N2", "different colliders"],
+    );
+    has(&on_line_31("H (+ O2 => HO2 (+M)   1.0E+12 0.0 0.0"), &["line 31", "(+"]);
+    has(&on_line_31("H + O2 (+M) => HO2 (+)   1.0E+12 0.0 0.0"), &["line 31", "(+"]);
+    has(
+        &on_line_31("H + O2 + M (+M) => HO2 (+M)   1.0E+12 0.0 0.0"),
+        &["line 31", "(+", "no plain third body"],
+    );
+    // The collider: X is neither M nor a declared species.
+    has(&on_line_31("H + O2 (+XX) => HO2 (+XX)   1.0E+12 0.0 0.0"), &["line 31", "XX"]);
+    // An efficiency item on a (+SPECIES) reaction.
+    let m = t5_lines(
+        "REACTIONS",
+        &["H + O2 (+N2) = HO2 (+N2)   1.0E+12 0.0 0.0", "  LOW / 1.0E+16 0.0 20000.0 /", "  N2/2.0/"],
+    );
+    has(&refusal(&m), &["line 33", "N2", "efficiency item"]);
+    // A fall-off reaction without LOW is refused when it closes.
+    has(&on_line_31(FALLOFF_RX), &["line 31", "LOW"]);
+    // LOW, TROE and SRI on a reaction with no marker.
+    for aux in ["  LOW / 1.0E+16 0.0 0.0 /", "  TROE / 0.5 100.0 1000.0 /", "  SRI / 0.5 100.0 1000.0 /"] {
+        let msg = refusal(&with_aux(aux));
+        has(&msg, &["line 32", "fall-off"]);
+    }
+    // TROE and SRI both.
+    let msg = refusal(&t5_lines("REACTIONS", &[FALLOFF_RX, "  LOW / 1.0E+16 0.0 0.0 /", "  TROE / 0.5 100.0 1000.0 /", "  SRI / 0.5 100.0 1000.0 /"]));
+    has(&msg, &["line 34", "TROE", "SRI"]);
+    // Wrong number counts: LOW takes 3, TROE 3 or 4, SRI 3 or 5, REV 3.
+    let fo = |aux: &[&str]| {
+        let mut v = vec![FALLOFF_RX];
+        v.extend(aux.iter().copied());
+        refusal(&t5_lines("REACTIONS", &v))
+    };
+    has(&fo(&["  LOW / 1.0E+16 0.0 /"]), &["line 32", "LOW"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 0.0 0.0 /"]), &["line 32", "LOW"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 0.0 /", "  TROE / 0.5 100.0 1000.0 5000.0 1.0 /"]), &["line 33", "TROE"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 0.0 /", "  SRI / 0.5 100.0 1000.0 2.0 /"]), &["line 33", "SRI"]);
+    has(&refusal(&with_aux("  REV / 1.0E+11 0.0 /")), &["line 32", "REV"]);
+    // The divisors: TROE's T*** and T*, and SRI's c, are nonzero.
+    has(&fo(&["  LOW / 1.0E+16 0.0 20000.0 /", "  TROE / 0.5 0.0 1000.0 /"]), &["line 33", "TROE"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 20000.0 /", "  TROE / 0.5 100.0 0.0 /"]), &["line 33", "TROE"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 20000.0 /", "  SRI / 0.5 100.0 0.0 /"]), &["line 33", "SRI"]);
+    // Given twice.
+    has(&fo(&["  LOW / 1.0E+16 0.0 0.0 /", "  LOW / 1.0E+16 0.0 0.0 /"]), &["line 33", "LOW"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 0.0 /", "  TROE / 0.5 100.0 1000.0 /", "  TROE / 0.5 100.0 1000.0 /"]), &["line 34", "TROE"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 0.0 /", "  SRI / 0.5 100.0 1000.0 /", "  SRI / 0.5 100.0 1000.0 /"]), &["line 34", "SRI"]);
+    let rx2 = |a: &str, b: &str| refusal(&t5_lines("REACTIONS", &[RX_A, a, b]));
+    has(&rx2("  DUP", "  DUPLICATE"), &["line 33", "DUP"]);
+    // REV given twice, on a reversible reaction.
+    let rev2 = |a: &str, b: &str| {
+        refusal(&t5_lines("REACTIONS", &["H2 + O2 = 2 OH   1.7E+13 0.0 47780.0", a, b]))
+    };
+    has(&rev2("  REV / 1.0E+11 0.0 0.0 /", "  REV / 1.0E+11 0.0 0.0 /"), &["line 33", "REV"]);
+    // A non-finite number, named with its keyword.
+    has(&fo(&["  LOW / 1.0E+400 0.0 0.0 /"]), &["line 32", "LOW"]);
+    has(&rev2("  REV / 1.0E+400 0.0 0.0 /", "  REV / 1.0E+11 0.0 0.0 /"), &["line 32", "REV"]);
+    // REV on an irreversible reaction, and on a fall-off reaction.
+    has(&refusal(&with_aux("  REV / 1.0E+11 0.0 30000.0 /")), &["line 32", "REV", "irreversible"]);
+    has(&fo(&["  LOW / 1.0E+16 0.0 0.0 /", "  REV / 1.0E+11 0.0 0.0 /"]), &["line 33", "REV", "fall-off"]);
+    // DUP with a /.../ field; a lone DUP has no twin.
+    has(&refusal(&with_aux("  DUP / 1.0 /")), &["line 32", "DUP"]);
+    has(&refusal(&with_aux("  DUP")), &["line 31", "DUP", "twin"]);
+    // One copy of a pair without DUP is refused at the later line, naming both.
+    has(&refusal(&t5_lines("REACTIONS", &[RX_A, "  DUP", RX_A])), &["line 33", "line 31", "DUP"]);
+}
+
+#[test]
+fn ck_refuses_plog() {
+    // PLOG and CHEB stay refused by name, and the refusal lists the whole
+    // recognised auxiliary set (SPEC-LIT §129.5).
+    for aux in ["  PLOG / 1.0 1.0E+13 0.0 0.0 /", "  CHEB / 1 2 /", "  plog / 1.0 1.0E+13 0.0 0.0 /"] {
+        let msg = refusal(&with_aux(aux));
+        has(
+            &msg,
+            &[
+                "line 32",
+                "refused by name",
+                "FORD",
+                "RORD",
+                "UNITS",
+                "LOW",
+                "TROE",
+                "SRI",
+                "REV",
+                "DUP",
+                "DUPLICATE",
+            ],
+        );
+    }
 }

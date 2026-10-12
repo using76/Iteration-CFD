@@ -3,18 +3,25 @@ import type { MetricRecord, ResidualRecord } from '@cfd/shared'
 import {
   compareKey,
   decimateIndices,
+  findMetric,
   formatResidual,
   hasTimeAxis,
   initialYScale,
   isCompareKey,
+  isSurfaceKey,
   leadingField,
   logSafe,
+  metricNames,
   metricsAsResidualRecords,
+  normaliseMetricName,
   pairKeys,
   seriesColor,
   seriesKeys,
   shapeResiduals,
   shapeResidualsPair,
+  slotKeys,
+  surfaceSeriesKeys,
+  sweepsAsResidualRecords,
 } from './series'
 
 function rec(seq: number, iter: number, fields: Record<string, number>, time: number | null = null): ResidualRecord {
@@ -137,5 +144,66 @@ describe('shapeResidualsPair', () => {
     expect(pairKeys(A, B, null)).toEqual(['U', 'p'])
     const opts = { log: true, xAxis: 'iter' as const }
     expect(shapeResidualsPair(A, B, ['U', 'p'], null, opts)).toEqual(shapeResiduals(A, ['U', 'p'], opts))
+  })
+})
+
+// STU-03: metric-name matching, surface-integral keys, the sweeps view and the
+// slot picks the metrics chart draws through.
+describe('metric matching (STU-03)', () => {
+  it('normalises names case- and punctuation-blind', () => {
+    expect(normaliseMetricName('T[max]')).toBe('tmax')
+    expect(normaliseMetricName('p_rgh Final')).toBe('prghfinal')
+  })
+
+  it('finds the exact name first, then the first normalised match', () => {
+    const names = ['T[max]', 'T[min]', 'dt']
+    expect(findMetric(names, 'Tmax')).toBe('T[max]')
+    expect(findMetric(names, 'DT')).toBe('dt')
+    expect(findMetric(names, 'Umax')).toBeNull()
+    expect(findMetric(names, '[]')).toBeNull()
+    expect(findMetric(['Tmax', 'T[max]'], 'T[max]')).toBe('T[max]')
+    expect(findMetric(['Tmax', 'T[max]'], 'tmax')).toBe('Tmax')
+  })
+
+  it('isSurfaceKey is <patch>.<quantity> with a plain identifier quantity', () => {
+    expect(isSurfaceKey('fan_a.Q')).toBe(true)
+    expect(isSurfaceKey('rack.1.dp')).toBe(true)
+    expect(isSurfaceKey('dt')).toBe(false)
+    expect(isSurfaceKey('.Q')).toBe(false)
+    expect(isSurfaceKey('fan.')).toBe(false)
+    expect(isSurfaceKey('residual[solid]')).toBe(false)
+  })
+
+  it('surfaceSeriesKeys and metricNames read the run metric records in first-seen order', () => {
+    const recs: MetricRecord[] = [
+      { seq: 1, iter: 1, time: null, metrics: { 'fan_a.Q': 0.5, 'fan_a.dp': 20, Tmax: 301 }, raw: '' },
+      { seq: 2, iter: 2, time: null, metrics: { 'fan_b.Q': 0.4 }, raw: '' },
+    ]
+    expect(surfaceSeriesKeys(recs)).toEqual(['fan_a.Q', 'fan_a.dp', 'fan_b.Q'])
+    expect(metricNames(recs)).toEqual(['fan_a.Q', 'fan_a.dp', 'Tmax', 'fan_b.Q'])
+  })
+
+  it('sweepsAsResidualRecords plots the solver iteration counts', () => {
+    const recs: ResidualRecord[] = [
+      { seq: 1, iter: 1, time: null, wall: null, fields: { p: 1e-3 }, solverIters: { p: 30, k: 3 }, raw: '' },
+      { seq: 2, iter: 2, time: null, wall: null, fields: { p: 1e-4 }, solverIters: null, raw: '' },
+    ]
+    const out = sweepsAsResidualRecords(recs)
+    expect(out.map((r) => r.fields)).toEqual([{ p: 30, k: 3 }, {}])
+    expect(out.map((r) => [r.seq, r.iter])).toEqual([[1, 1], [2, 2]])
+  })
+
+  it('slotKeys applies the metric slot picks', () => {
+    expect(slotKeys(['Tmax', 'dt', 'alphaCo'], [null, null])).toEqual({ keys: ['Tmax', 'dt', 'alphaCo'], right: null })
+    expect(slotKeys(['Tmax', 'dt'], ['dt', 'Tmax'])).toEqual({ keys: ['dt', 'Tmax'], right: 'Tmax' })
+    expect(slotKeys(['Tmax'], ['Tmax', 'Tmax'])).toEqual({ keys: ['Tmax'], right: null })
+    expect(slotKeys(['Tmax'], ['nope', 'Tmax'])).toEqual({ keys: ['Tmax'], right: 'Tmax' })
+    expect(slotKeys(['Tmax'], ['nope', null])).toEqual({ keys: [], right: null })
+  })
+
+  it('initialYScale is log only for residuals', () => {
+    expect(initialYScale('surface')).toBe('linear')
+    expect(initialYScale('residuals')).toBe('log')
+    expect(initialYScale('metrics')).toBe('linear')
   })
 })

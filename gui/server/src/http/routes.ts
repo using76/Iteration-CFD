@@ -16,6 +16,7 @@ import { isQueryFailure, runOntologyQuery, type OntologyQuery, type QueryFailure
 import { whereSchema } from '../tools/ontology.js'
 import { geometryService } from '../tools/geometry.js'
 import { geometryEdit, geometryImportStep } from '../tools/geomTool.js'
+import { geometryStlBoolean } from '../tools/geometryBoolean.js'
 import type { ToolContext, ToolResult } from '../tools/context.js'
 import type { CaseSchema } from '../registry/schema.js'
 import { readCaseJsonc } from '../formats/casejsonc.js'
@@ -58,6 +59,14 @@ const GeometryEditSchema = z.object({
   path: z.string(),
   ops: z.string(), // JSON TEXT of the ops array
   out: z.string(),
+  overwrite: z.boolean().nullable().default(null),
+})
+const GeometryBooleanSchema = z.object({
+  path: z.string(),
+  op: z.enum(['fuse', 'cut', 'common']),
+  a: z.string(),
+  b: z.string(),
+  out: z.string().nullable().default(null),
   overwrite: z.boolean().nullable().default(null),
 })
 
@@ -343,6 +352,13 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     const body = await rc.json(GeometryEditSchema)
     const r = await geometryEdit.run(body, httpToolContext(deps, root))
     if (!r.ok) throw toolHttpError(r)
+    return r.data
+  })
+  router.post('/api/geometry/boolean', async (rc) => {
+    const body = await rc.json(GeometryBooleanSchema)
+    const r = await geometryStlBoolean.run(body, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    deps.hub.broadcast({ t: 'fs.changed', paths: [(r.data as { path: string }).path] })
     return r.data
   })
   router.get('/api/results', ({ query }) => {

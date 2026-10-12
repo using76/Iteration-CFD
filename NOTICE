@@ -32,7 +32,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 273 source files under
+line "No GPL-licensed source was consulted." All 295 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -138,6 +138,21 @@ AMGX
   (SPEC-LIT §141.20), not linked: nothing is vendored and no source is
   reproduced here. The DLL itself is built from the 2.5.0 sources by
   `tools/amgx/build.cmd`; see AMGX's own LICENSE.
+
+Manifold (npm `manifold-3d` 3.2.1)
+  Copyright (c) The Manifold Authors (https://github.com/elalish/manifold).
+  Apache License 2.0.
+  A dependency of the studio server (`gui/server/package.json`), used as a
+  library for the STL booleans fuse, cut and common
+  (`gui/server/src/tools/geometryBoolean.ts`). It is installed by npm and not
+  vendored: no Manifold source is copied into this repository. See Manifold's
+  own LICENSE.
+
+Clipper2
+  Copyright (c) Angus Johnson.
+  Boost Software License 1.0.
+  Compiled into Manifold's `manifold.wasm` for its 2-D cross-sections, and
+  installed with it by npm. Not vendored here.
 
 NVIDIA CUDA Toolkit, cuFFT, cuBLAS
   Used under the NVIDIA CUDA Toolkit End User License Agreement, which permits
