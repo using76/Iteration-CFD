@@ -99,6 +99,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ("src/adapt/rebuild.rs", Stance::Via("src/adapt.rs")),
     ("src/adapt/transfer.rs", Stance::Via("src/adapt.rs")),
     (
+        "src/amg/galerkin.rs",
+        Stance::Gate("galerkin_replays_under_capture"),
+    ),
+    (
         "src/chem/device.rs",
         Stance::Gate("chem_device_replays_under_capture"),
     ),

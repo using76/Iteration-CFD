@@ -42744,9 +42744,10 @@ face of the finest level is FOLDED into the coarse LDU.
 
 The members of each aggregate are also stored as a CSR (`agg_offset[n_c + 1]` and
 `agg_cells[n]`, ascending inside each aggregate), the aggregate-sorted order that
-AMG-02's gather-form restriction reads. Folding the fine diagonals, the fine
-`internal_coeffs` and the INTERIOR entries into the coarse diagonal is AMG-02's
-Galerkin product. This subsection only says where each entry goes.
+AMG-02's gather-form restriction reads. Folding the fine diagonals and the INTERIOR
+entries into the coarse diagonal is AMG-02's Galerkin product (§141.2, which reads
+`diag` as `amul` does, with `internal_coeffs` already folded in). This subsection
+only says where each entry goes.
 
 **Refused by name** (§13.4 style, an `Err` and no partial result):
 
@@ -42798,6 +42799,150 @@ results; an x-strong anisotropic block (16×4×4, x coefficients 1, y and z coef
 `2^-7`) gives 64 aggregates of 4 cells, each inside one x-line; and the coarse entries
 placed by the table above sum to the dense `P^T A P` exactly on the two 7×5×3 and two
 6×5×4 meshes.
+
+### 141.2 The Galerkin coarse operator and the transfers (AMG-02)
+
+`No GPL-licensed source was consulted.` `src/amg/galerkin.rs` holds the gather lists,
+their host twin and the device driver; `cuda/amg.cu` holds the four kernels. The
+tests are `tests/amg_galerkin.rs`, an integration test that runs in both builds
+(§118), and one library test, the capture gate of §81. Nothing in the crate calls
+this yet, so no existing solve, case or SASS moves.
+
+Sources: **Notay (2010)**, the paper of §141.1 (open full text, read again on
+2026-10-13): his (2.1), "the coarse grid matrix is computed from the Galerkin formula
+`A_c = P^T A P`", with "the restriction equal to the transpose of the prolongation";
+his (2.2), `P_ij = 1 if i ∈ G_j, 0 otherwise`; and his (2.3), "there is no need to
+explicitly form P, and the coarse grid matrix (2.1) is in practice computed by
+`(A_c)_ij = Σ_{k∈G_i} Σ_{l∈G_j} a_kl`". **Stüben, K. (2001), "A review of algebraic
+multigrid", *J. Comput. Appl. Math.* 128(1-2), 281-309,
+doi:10.1016/S0377-0427(00)00516-1** (title, volume and pages checked against Crossref
+on 2026-10-13, which lists it under Elsevier's open archive since 2013), named by
+docs/17 for the AMG-02 row; it was not opened, and no formula below is taken from
+it. No multigrid code of any licence was read for this subsection.
+
+**The operator.** `A` is the matrix that `ldu_ops::amul` applies: the off-diagonal
+entries of (141.1) and (141.2), and the diagonal
+
+```
+a_cc = diag[c]                                                           (141.10)
+```
+
+`diag` is read as `amul` reads it, that is AFTER `add_boundary_contributions` has
+folded `internal_coeffs` into it, which is the state of every matrix a solve
+receives. *DESIGN*: this subsection never reads `internal_coeffs`. A caller that holds
+an unfolded matrix folds it first, as it must before any `amul`. A coarse level is the
+same with no boundary faces.
+
+**The transfers** (Notay 2010, (2.2), with the aggregates `G_I` of §141.1, which
+partition the cells, so `P` has exactly one 1 per row):
+
+```
+prolong:      (P e_c)_c  = e_c[agg(c)]                                   (141.11)
+prolong-add:  x_c       += e_c[agg(c)]                                   (141.12)
+restrict:     (P^T r)_I  = Σ_{c ∈ G_I} r_c                               (141.13)
+```
+
+(141.13) is a segmented sum over the aggregate-sorted members
+`agg_cells[agg_offset[I] .. agg_offset[I+1]]`, in ascending cell order. One thread
+owns one coarse cell and gathers, so there is no atomic. The sum is accumulated in
+`ofacc` (f64 in both builds, §118.1) and rounded once to `ofscalar`. (141.11) and
+(141.12) are one thread per fine cell and one gather each.
+
+**The coarse operator** (Notay 2010, (2.3)), written on the LDU arrays through the
+fold table of §141.1. The coarse matrix has `n_c + 2 n_cf` slots, in this order: the
+`n_c` diagonals, the `n_cf` uppers, the `n_cf` lowers. `upper_c[F]` is
+`(A_c)_{IJ}` and `lower_c[F]` is `(A_c)_{JI}` for the coarse face `F = (I, J)`,
+`I < J`. Each slot is the sum of a list of fine entries:
+
+```
+diag_c[I]  = Σ_{c ∈ G_I} diag[c]
+           + Σ_{f INTERIOR in I} ( upper[f] + lower[f] )
+           + Σ_{bf INTERIOR in I} ( -boundary_coeffs[bf] )               (141.14)
+upper_c[F] = Σ_{f -> F, not flipped} upper[f] + Σ_{f -> F, flipped} lower[f]
+           + Σ_{bf -> F, not flipped} ( -boundary_coeffs[bf] )           (141.15)
+lower_c[F] = Σ_{f -> F, not flipped} lower[f] + Σ_{f -> F, flipped} upper[f]
+           + Σ_{bf -> F, flipped} ( -boundary_coeffs[bf] )               (141.16)
+```
+
+"`f` INTERIOR in `I`" means `face_coarse[f] = INTERIOR` and `agg(owner[f]) = I`;
+"`bf` INTERIOR in `I`" means `bface_coarse[bf] = INTERIOR` and
+`agg(b_face_cells[bf]) = I`; "`f -> F`" means `face_coarse[f] = F`. Uncoupled boundary
+faces appear nowhere. Every fine entry (each `diag[c]`, each `upper[f]`, each
+`lower[f]`, each coupled `boundary_coeffs[bf]`) is in exactly one list, exactly once,
+which is a gate: the lists hold `n + 2 n_f + n_coupled` sources.
+
+**The order of a list** (*DESIGN*; it is what makes the device sum the host sum, bit
+for bit):
+
+- a diagonal slot: the members' `diag[c]` in ascending `c`; then the INTERIOR internal
+  faces in ascending `f`, each giving `upper[f]` and then `lower[f]`; then the INTERIOR
+  coupled faces in ascending `bf`;
+- an upper or lower slot: the internal faces in ascending `f`, then the coupled faces
+  in ascending `bf`.
+
+**The lists on the device.** One CSR over the slots: `slot_offset[n_c + 2 n_cf + 1]`
+and `slot_src[n + 2 n_f + n_coupled]`. A source is one `Label`,
+
+```
+code = 4 * index + kind,   kind: 0 = diag, 1 = upper, 2 = lower, 3 = boundary   (141.17)
+```
+
+and kind 3 enters with the sign of (141.2), `-boundary_coeffs[index]`. The lists
+depend only on the aggregation and the addressing, so they are built once per
+hierarchy on the host and the coefficients are re-gathered on the device whenever the
+matrix changes (AMG-05). A level with `2^29` or more cells, faces or boundary faces
+does not fit (141.17) and is refused by name.
+
+One thread owns one slot, sums its list in list order in `ofacc` and rounds once to
+`ofscalar`. There is no atomic, no allocation and no synchronisation, so the product
+and the three transfers capture into a CUDA graph (§81). The sums hold no product, so
+`-fmad` has nothing to contract and `amg.cu` is not in `build.rs`'s `-fmad=false`
+list. The host twin runs the same lists in the same order with an f64 accumulator and
+one rounding, so the two agree bit for bit in both builds.
+
+**Precision** (§118, docs/17 §5.1.4). The device-against-host-twin rows and the
+"run twice" row are class D: bitwise in both builds. The row against the dense
+`P^T A P` is class R: the dense product is formed in f64 from the build's own
+coefficients in a different order, the f64 tolerance is `1e-14` of `max |(A_c)_ij|`,
+and under `single` it is `tol32 = max(tol64, min(tol64·2^29, 1e-5)) = 5.36870912e-6`
+(D-F32-1), which is tighter than the `1e-5` docs/17 printed for this row. `P^T` of
+the constant 1 is exact in both builds, because an aggregate has at most 4 members.
+
+**Refused by name** (an `Err`, no partial result; every message starts with
+`amg::galerkin: `): an addressing array whose length disagrees with the aggregation;
+a level too large for (141.17); a coefficient or field buffer shorter than the level
+it is used on; a plan with boundary sources given no `boundary_coeffs`; a coarse
+level whose shape is not the plan's, or whose buffers are shorter than its counts.
+A plan with no boundary source takes the matrix's own `boundary_coeffs` (every face
+uncoupled, never read) or none, on the host and on the device alike.
+
+#### 141.2.1 The gates
+
+The non-dyadic matrix of the tolerance rows is, for an edge `a < b` and a cell `c`,
+
+```
+a_ab = -(1/10 + ((11 a + 3 b) mod 7) / 3),   a_ba = -(1/10 + ((5 a + b) mod 3) / 7),
+diag[c] = 20 + c / 9                                                     (141.18)
+```
+
+each evaluated in f64 and then cast to the build's `Scalar`. On a coupled face
+`boundary_coeffs[bf] = -a_cd`.
+
+| test (`tests/amg_galerkin.rs` unless marked) | what | class |
+|---|---|---|
+| `the_plan_lists_every_fine_entry_exactly_once` | on the four small meshes of §141.1.1 and the two 6^3 meshes: the CSR is well formed and holds each fine entry once. Pinned from §141.1.1's table: 7×5×3 weighted, 593 sources (287 diagonal, 153 upper, 153 lower); 7×5×3 unit, 593 (295, 149, 149); 6×5×4 cyclic weighted, 840 (360 diagonal, 480 upper and lower together); 6×5×4 cyclic unit, 840 (360, 480) | D |
+| `the_list_order_is_the_one_spec_lit_states` | the order rule above, slot by slot, on the weighted cyclic 6×5×4 | D |
+| `the_host_coarse_matrix_is_the_dense_galerkin_product` | (141.14)-(141.16) against a dense `P^T A P` built from `cell_agg` alone, on 6^3 with (141.18), 6^3 cyclic on x, y and z with (141.18), and the §2 laplacian on a graded 6^3: `<= 1e-14` of `max |(A_c)_ij|` (tol32 under `single`), and nothing outside the coarse pattern; exactly equal on the two weighted meshes of §141.1.1 | R, D |
+| `a_second_level_is_the_product_of_both_prolongations` | coarsening the coarse level again gives `(P_1 P_2)^T A (P_1 P_2)` to the same tolerance, 6^3 with (141.18) | R |
+| `restricting_the_constant_gives_the_aggregate_sizes_exactly` | host and device, the six meshes of §141.1.1 | D |
+| `the_transfers_are_adjoint_and_restrict_prolong_scales_by_size` | `P^T P e_c = size · e_c` and `(P e_c)·r = e_c·(P^T r)` exactly, on small-integer fields | D |
+| `the_device_coarse_matrix_is_bitwise_its_host_twin` | the three 6^3 matrices and the §2 laplacian on 32^3, level 1; and level 2 from the device's own level 1 | D |
+| `the_device_transfers_are_bitwise_their_host_twins` | restrict, prolong, prolong-add on a non-trivial field, the same four matrices | D |
+| `running_twice_gives_identical_bytes` | two plans, two device products, the same bytes; a second product into the same level changes nothing | D |
+| `one_aggregate_has_no_coarse_faces` | 2×2×1 unit weights: one aggregate, no coarse face, `diag_c[0] = 4·100 − 8 = 392` exactly, host and device | D |
+| `a_mismatched_input_is_refused_by_name` | every refusal above | D |
+| `the_host_twin_takes_the_matrix_boundary_array_when_no_face_is_coupled` | 7×5×3 weighted: the full uncoupled `boundary_coeffs` and the empty slice give the same level; any other length is refused | D |
+| `amg::galerkin::tests::galerkin_replays_under_capture` (library) | the product and the three transfers capture into a graph and replay bitwise (§81) | D |
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 
