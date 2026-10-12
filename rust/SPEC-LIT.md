@@ -36103,6 +36103,133 @@ Constraints:
 - A feature or seam edge is never flipped and never collapsed across.
 - Each triangle keeps its input patch.
 
+**The constraints, as TET-06b builds them** (DERIVED. Botsch & Kobbelt 2004 is the source of
+the five steps; the rules that restrict each step at a feature are stated here in full, and
+where they choose, the choice is this section's). The input is §116.9's `PreparedSurface`: the
+feature edges `F`, seams included, the corners `K`, and the polylines `L_k`, each a chain of
+input points `y_0 .. y_n`, with `y_n = y_0` on a closed one. Every vertex has one class:
+
+- a **corner** is a point of `K`. It never moves and is never removed;
+- a **feature vertex** is an end of a feature edge and is not a corner. It has exactly two
+  feature edges, both of one polyline `L_k`, and it carries that `k`;
+- every other vertex is **free**.
+
+Every edge is a **feature edge**, which carries its polyline `k` and its seam flag, or it is
+**free**. At the start the feature edges are `F`. `(a, b)` is an edge with the opposite vertices
+`c` and `d`, as in (116.14a)-(116.14c).
+
+```
+split    a feature edge (a,b) of L_k:  the new vertex at m_ab is a feature vertex of L_k,
+         (a,m) and (m,b) are feature edges of L_k with the seam flag of (a,b),
+         (m,c) and (m,d) are free                                                      (116.14f)
+collapse (a,b) onto the survivor s at the position p:
+           (a,b) free,     a and b free:           s = the smaller index,  p = m_ab
+           (a,b) free,     exactly one free:       s = the other vertex,   p = x_s
+           (a,b) free,     neither free:           refused
+           (a,b) feature,  a and b corners:        refused
+           (a,b) feature,  exactly one a corner:   s = the corner,         p = x_s
+           (a,b) feature,  neither a corner:       s = the smaller index,  p = m_ab
+         the test stays l_ab < (4/5) h(m_ab);  p replaces m_ab in the guard of (116.14b)
+         and in the area and normal guards                                             (116.14g)
+flip     a feature edge is never flipped;  in (116.14c) the 6 becomes
+         val*(v) = 4 at a corner,  6 at any other vertex                               (116.14h)
+relax    a corner stays;  a feature vertex v with the feature neighbours p and q goes to
+         (x_p + x_q) / 2, from the old positions;  a free vertex follows (116.14)      (116.14i)
+project  a corner stays;  a feature vertex of L_k goes to the closest point of L_k,
+         the minimum over i of | x - ( y_i + t_i e_i ) |,   e_i = y_{i+1} - y_i,
+         t_i = clamp( (x - y_i) . e_i / (e_i . e_i), 0, 1 ),
+         the first strict minimum in increasing i;  a free vertex follows (116.14d)    (116.14j)
+flat     the triangle (x_0, x_1, x_2) is flat when
+         | (x_1 - x_0) x (x_2 - x_0) |  <=  1e-6 max( |x_1 - x_0|^2, |x_2 - x_1|^2, |x_0 - x_2|^2 )
+         a flip is refused when a new triangle is flat;  a collapse is refused when a
+         surviving triangle of the two one-rings would be flat                         (116.14k)
+cut      a triangle is a cut triangle when two of its edges are feature edges that meet
+         at a feature vertex (not a corner).  A flip is refused when a new triangle
+         would be a cut triangle;  a collapse is refused when a surviving triangle
+         that is not a cut triangle would become one                                   (116.14l)
+```
+
+(116.14k) replaces the zero-area test of the TET-06a guards, which compared the cross product
+with exactly zero. Three vertices of one straight feature line are collinear only to round-off
+once the line is not axis-aligned, so their cross product is noise of either sign, and neither
+the exact-zero test nor the 90 degree test refuses it. The constant 1e-6 is a degeneracy floor
+(a height below one millionth of the longest edge), not a quality bar: the noise is about
+`1e-16 |x| / l` relative to `l^2` for coordinates of size `|x|` and edges of length `l`, which
+stays below 1e-6 down to `l = 1e-10 |x|`. (116.14l) covers what (116.14k) cannot see on a
+curved feature line: the triangle that a flip would lay across the turn at a feature vertex,
+between its two feature neighbours, is thin but not flat, and it would take the vertex's last
+free edge on that side. A cut triangle of the input stays, and a split keeps the property
+without creating it elsewhere, since the edges a split adds lie inside existing triangles. A
+split is never refused.
+
+A collapse merges the edges `(a, c)` and `(b, c)` into `(s, c)`, and `(a, d)` and `(b, d)` into
+`(s, d)`. A merged edge is a feature edge when either of its two parts was, with that part's
+polyline and seam flag. When both parts are feature edges the collapse is refused, because it
+would join two feature lines; this also keeps a closed polyline at three edges or more. The
+dying vertex of a feature collapse is a feature vertex, and its other feature edge passes to
+the survivor, so the polyline stays one chain. A feature vertex that survives at `m_ab` keeps
+its `k`.
+
+These rules give the four constraints. A corner is in no rule that moves or removes it. A
+feature vertex is created only by (116.14f), moves only by (116.14g), (116.14i) and (116.14j),
+and after every iteration's projection it lies on `L_k`. A feature edge is never flipped, and
+the only collapse that removes a feature vertex runs along its own polyline. Each triangle
+keeps its patch: a split child takes its parent's patch, and a flip only exchanges the edge
+between two triangles of one patch, since an edge between two patches is a seam and a seam is
+a feature edge. A collapse only removes triangles.
+
+With `F` empty every rule above is TET-06a's, and the output is the same bit for bit. A test
+holds the TET-06a sphere's output by an FNV-1a hash of its points, triangles and patches.
+
+`Remeshed` carries the features of the output in the output's numbering: `feature_edges`
+(each `[min, max]`, in ascending order), `edge_is_seam` and `edge_polyline` (the input polyline
+`k`) beside them, and `corners` in ascending order. The output numbers its vertices in
+increasing old-index order, so the corners of the input keep their relative order.
+
+**The TET-06b gates** (§116.18). `Q = surfprep::prepare(S, 60 degrees)` is §116.9's own
+extraction run on the output `S`, so the features are measured on the output's geometry and
+patches and not read from the remesh's tables; the tables must then equal it
+(`feature_edges`, `edge_is_seam` and `corners` of `Remeshed` equal `Q`'s).
+
+- **The cube** `[0, 1]^3` (8 points, 12 triangles) at `h = 0.1`, once with one patch and once
+  with a patch per face. `Q` has 8 corners and 12 open polylines. The first 8 output points are
+  the 8 input points bit for bit. Each polyline of `Q` runs from one cube corner to a corner
+  that differs from it on one axis, every point of it has the other two coordinates equal to
+  the corner's bit for bit, and its coordinate on that axis increases strictly. The 12
+  polylines cover the 12 cube edges. Every feature edge has `l / h` in `[4/5, 4/3]`, so each
+  cube edge carries 8 to 12 of them.
+- **Patch areas**, on the cube with a patch per face: the area of each patch, the sum of
+  `|(x_1 - x_0) x (x_2 - x_0)| / 2` over its triangles, equals the input's within 1e-12
+  relative, and every triangle of a face's patch has that face's coordinate bit for bit.
+- **The two-patch cylinder** (§116.9's 16-sided capped cylinder, radius 1, `z` from -1 to 1,
+  the side split at `z = 0`; `h = 0.1`): `Q` has no corner and 3 closed polylines. Every end of
+  a seam edge has `z = 0` bit for bit and lies within 1e-12 of the input's 16-sided ring at
+  `z = 0`. Every triangle of the lower patch has `z <= 0` at its three points, and every
+  triangle of the upper patch has `z >= 0`.
+- **The 30 degree wedge**, the prism over the triangle `(0,0)`, `(1,0)`, `(cos 30, sin 30)`
+  from `z = 0` to `z = 1`, one patch, `h = 0.1`: `Q` has 6 corners and 9 polylines, and the
+  first 6 output points are the input's bit for bit. The polyline on the 30 degree edge runs
+  from `(0,0,0)` to `(0,0,1)` with `x = 0` and `y = 0` bit for bit, `z` increasing strictly,
+  in 8 to 12 edges. Every point of the other 8 polylines lies within 1e-12 of the segment
+  between its two end corners.
+- **A rotated cube** (not a plan gate; the cube above turned by `R_z(0.3) R_y(0.5) R_x(0.7)`,
+  so no face is axis-aligned): the first 8 points bit for bit, 8 corners and 12 polylines in
+  `Q`, every polyline point within 1e-12 of its segment, the total area within 1e-12 relative.
+- **No flat and no cut triangle** (not a plan gate; it holds (116.14k) and (116.14l)). On the
+  cube, the wedge and the cylinder above, each also turned by the same rotation, at
+  `h = 0.07, 0.1, 0.13, 0.2` and after each of 1 to 12 iterations, 288 runs: the output is a
+  2-manifold of Euler characteristic 2, no triangle is flat by (116.14k), no triangle is a cut
+  triangle (none of these inputs has one), and the tables of `Remeshed` equal `Q`'s. Five of
+  these runs are named, because the first build of this unit, which had neither rule, failed
+  them while it passed every gate above: the rotated cube at `h = 0.07` after 3 iterations, the
+  rotated wedge at `h = 0.13` after 3, the cylinder at `h = 0.2` after 2 and at `h = 0.07`
+  after 7, and the rotated cylinder at `h = 0.07` after 11.
+
+The bit-for-bit results on the axis-aligned fixtures follow from the arithmetic: the midpoint
+`(a + b) * 0.5` of two equal coordinates is that coordinate, (116.14j) returns `y_i + t e_i`
+with `e_i = 0` on an axis where the segment's ends agree, and (116.14d) returns
+`a + v (b - a) + w (c - a)`, whose coordinate normal to an axis-aligned triangle is `a`'s.
+
 ### 116.11 Conforming boundary recovery
 
 **Implemented by TET-07a** (edges) **and TET-07b** (faces). The file is `tetmesh/recover.rs`.
@@ -36431,6 +36558,16 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-06a | the f32 arm | `rust/tests/tetmesh_remesh.rs`, 2 tests (the `Scalar` width, and the sphere's four bars), pass under `--features single` with every printed number identical to the f64 build | the TET-06a commit |
 | TET-06a | the first run's failures | the split inserted edge-map keys with the new vertex, always the largest index, first, so later lookups missed them, and split, collapse and flip skipped any edge whose incidence list held the `b -> a` triangle first; the coder's level-3 coarse-sphere test (`h = 0.25`, 3 iterations), kept as `coarse_sphere_regression`, caught the first | the TET-06a commit |
 | TET-06a | the whole `tetmesh::` test filter, release | 84 tests in 20.3 s, and the 10^6 run ignored | the TET-06a commit |
+| TET-06b | §116.10, added by this unit | the paragraph "The constraints, as TET-06b builds them", (116.14f)-(116.14l) and the gate definitions. (116.14k) replaces the exact-zero area test of the TET-06a collapse guard and adds a flat test to the flip; the TET-06a sphere's output is unchanged bit for bit (FNV-1a `0xf76943aa6d947000` over its points, triangles and patches, taken on the TET-06a commit by the supervisor's probe outside the tree and held by a test) | the TET-06b commit |
+| TET-06b | the cube `[0, 1]^3` at `h = 0.1`, the default 10 iterations, with one patch and with a patch per face (the same mesh both times) | `Q`: 8 corners, 12 open polylines; the first 8 output points are the input's bit for bit; each of the 12 cube edges is one polyline of 8 feature edges of length 0.125 (`l/h = 1.25`), its two fixed coordinates bit for bit on every point; the tables of `Remeshed` equal `Q`'s (96 feature edges, none a seam with one patch, all seams with six). 691 points, 1 378 triangles; 99.32 % of all edges with `l/h` in `[4/5, 4/3]`, every triangle at 25 degrees or more (smallest 34.57) | the TET-06b commit |
+| TET-06b | patch areas, the cube with a patch per face | the six areas differ from the input's 1 by +1.1e-15, -1.1e-16, +6.7e-16, -4.4e-16, +2.2e-16 and -1.1e-16 (the bar is 1e-12 relative); every triangle of a patch has its face's coordinate bit for bit; with one patch the total is 5.9999999999999973 | the TET-06b commit |
+| TET-06b | the two-patch cylinder at `h = 0.1` | `Q`: no corner, 3 closed polylines, 192 feature edges, 64 of them the seam; every seam end has `z = 0` bit for bit and lies on the input's 16-sided ring within 1e-12; every lower-patch triangle has `z <= 0` and every upper-patch one `z >= 0`; in the supervisor's probe the centroid of every output triangle is closest to an input triangle of its own patch. 2 122 points, 4 240 triangles, 99.32 % of edges in band, every triangle at 25 degrees or more. Not gated, and a limit to know: each patch's area is 9.2863 against the input's 9.3044 (-0.19 %), because the 16 points of each input ring turn by 22.5 degrees, which is below the 60 degree feature angle, so they are feature vertices and not corners, and the remeshed rims and seam cut across them | the TET-06b commit |
+| TET-06b | the 30 degree wedge at `h = 0.1` | `Q`: 6 corners, 9 polylines, the first 6 points bit for bit; the 30 degree edge is one polyline of 8 edges from `(0,0,0)` to `(0,0,1)` with `x = 0` and `y = 0` bit for bit; the nine polylines have 8, 8, 8, 4, 8, 8, 8, 8 and 4 edges and no point of the other eight is off its segment (largest distance 0); the total area changes by 2.9e-16 relative (not gated). 343 points, 682 triangles | the TET-06b commit |
+| TET-06b | the rotated cube at `h = 0.1`, not a plan gate | the 8 corners bit for bit, 8 corners and 12 polylines in `Q`, the largest distance of a polyline point from its segment 1.6e-16 (the bar is 1e-12), the total area off by 4.4e-15 of 6 (the bar is 1e-12 relative); 691 points and 1 378 triangles, as on the axis-aligned cube | the TET-06b commit |
+| TET-06b | no flat and no cut triangle: 288 runs (cube, wedge and cylinder, each also rotated; `h = 0.07, 0.1, 0.13, 0.2`; 1 to 12 iterations), not a plan gate | 0 flat and 0 cut triangles, Euler characteristic 2 and tables equal to `Q`'s in every run; the smallest `|n| / L^2` of any output triangle is 7.5e-2 against the floor 1e-6. The supervisor's probe adds `h = 0.05` and `0.03` and a two-patch 1 x 1 x 2 box whose vertical edges pass through corners, plain and rotated (324 more runs): the same result, and every triangle centroid closest to an input triangle of its own patch | the TET-06b commit |
+| TET-06b | the first build, which had (116.14f)-(116.14j) only | it passed every gate at `h = 0.1` after 10 iterations and failed the probe's sweep: one triangle with `|n| / L^2` of 1.7e-16 on the rotated cube (`h = 0.07`, 3 iterations), 5.9e-17 on the rotated wedge (`h = 0.13`, 3 iterations) and 1.7e-16 on the cylinder (`h = 0.2`, 2 iterations, with 5 cut triangles); on the cylinder at `h = 0.07` after 7 iterations one cut triangle of 10.1 degrees made `Q` find 2 corners and 300 feature edges against the tables' 299; on the rotated cylinder at `h = 0.07` after 11 iterations `Q` found 291 against 292. Each was three points of one feature line made into a triangle by a flip or a collapse. (116.14k) and (116.14l) were added for it, and the five runs are tests | the TET-06b commit |
+| TET-06b | the f32 arm | `rust/tests/tetmesh_remesh.rs`, 5 tests (the two of TET-06a, the cube with a patch per face, the wedge, the five named runs), pass under `--features single` with the same printed numbers as the f64 build | the TET-06b commit |
+| TET-06b | the whole `tetmesh::` test filter, release | 92 tests, and the 10^6 run ignored | the TET-06b commit |
 
 ### 116.19 References
 
