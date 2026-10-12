@@ -355,6 +355,16 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              implemented",
         ),
     ),
+    (
+        "src/vv/rans1d.rs",
+        Stance::Outside(
+            "the 1-D RANS pipe oracle is a host answer key in f64 - its sweeps \
+             are its own fixed-point iteration on the radial cell set, run \
+             before or after a solve for a gate to compare against. It launches \
+             no kernel and no time loop calls it, so there is nothing to \
+             capture or replay. SPEC-LIT 143.1",
+        ),
+    ),
     ("src/wallfunctions.rs", Stance::Via("src/models/k_epsilon.rs")),
 ];
 
