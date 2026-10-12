@@ -1504,10 +1504,10 @@ that no reader asks for are listed as owed rather than hidden.
 | `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
 | `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
 | `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
-| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane`, `wedge` → symmetry; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the two named: calculated, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_two_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the two named: calculated, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_two_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
-| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane`, `wedge` → symmetry; `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
+| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane` → symmetry; `wedge` is its own kind (§119.1); `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
 | JSONC `motion` block (`src/io/case_json.rs`, `JsonMotion::lower`; §105.12) | `patches[]` rules `fixed`, `slide`, `move` with a `linear` or `sine` law, and `walls`, in `ofgpu-lowmach` on a transient laminar run | none | an unknown key; a law on `fixed`/`slide`; a `move` without one; a sine period that is not positive; a law that moves nothing; in `ofgpu-lowmach` a steady run, `-restartFrom`, `-restartWrite`, `-heaterPower`, `-sealed`, a turbulence model, `sources`, the `output` block, `-output` other than `foam`, a cyclic pair, a wall whose `U` is not a fixed value, a wall whose `U` value is not its law's velocity at `t = 0`, a moving fixed-velocity patch not in `walls`; the whole block in `ofgpu-k-epsilon`, `ofgpu-sample`, `ofgpu-decompose` | NOT downgradable | `io::case_json::tests::{a_motion_block_lowers_to_its_rule_table, a_motion_law_that_moves_nothing_or_has_no_period_is_refused_by_name, the_motion_reader_refuses_a_law_on_a_fixed_patch_and_a_move_without_one}`; `ofgpu-lowmach`'s `the_motion_block_is_refused_by_name_where_it_cannot_be_honoured` and `the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law` |
 
 **Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
@@ -37942,11 +37942,11 @@ No GPL-licensed source was consulted.
 
 An axisymmetric case is solved on a wedge one cell thick in the
 circumferential direction. This section holds the mesh (119.0, BC-02) and
-the patch kind with its derived pair, axis and angle checks (119.1, BC-03);
-the boundary condition that couples the two wedge faces by a rotation
-(BC-04) adds its subsection when it lands. Until then a `wedge` patch is its
-own kind but every solver path still treats it as `symmetry`, which is the
-stand-in §120's catalogue row names.
+the patch kind with its derived pair, axis and angle checks (119.1, BC-03),
+and the boundary condition that couples the two wedge faces by a rotation
+(119.2, BC-04). Before BC-04 a `wedge` patch was its own kind but every
+solver path treated it as `symmetry`, the stand-in §120's catalogue row
+names; 119.2 replaces that on the field and momentum paths.
 
 ### 119.0 The wedge mesh `blockgen` builds (BC-02)
 
@@ -38047,12 +38047,14 @@ A patch typed `wedge` in `constant/polyMesh/boundary` is `PatchKind::Wedge`
 `symmetry`. The device mirrors the number as `OFPATCH_WEDGE` (`fv.cu`,
 `momentum.cu`, `solid.cu`, `vof.cu`, `marangoni.cu`) and `OFP_PATCH_WEDGE`
 (`parcels.cu`), and `mesh::tests::device_patch_kinds_match_the_host` reads
-the six files to hold them equal. **Until BC-04 (119.2) a wedge side is
+the six files to hold them equal. **Until BC-04 (119.2) a wedge side was
 treated exactly as a symmetry plane on every path:** the field seed and the
 topology override give it `BcKind::Symmetry`, `momFluxIsPrescribed`,
 `vofFluxIsPrescribed` and the restated Marangoni predicate count it as a
 prescribed-flux face, and a parcel that reaches it is reflected. No shipped
-mesh carries a wedge, so no f64 result moves.
+mesh carries a wedge, so no f64 result moves. Since BC-04 the field seed
+and the topology override give it `BcKind::Wedge` (119.2); the flux
+predicates and the parcel reflection are as written here.
 
 **The derivation.** `mesh::wedge::derive_wedge`, called by
 `io::polymesh::build_host_mesh` after the cyclic checks, stores the result
@@ -38134,6 +38136,287 @@ off-axis components.
 Sources: ORIGINAL - elementary vector geometry (a plane from its area
 vectors, the line where two planes meet, a reflection in a plane, the
 half-angle identities). The patch type name `wedge` is taken by name only
+from the public user guides §120 links; no description, formula or source
+code was taken from them.
+
+No GPL-licensed source was consulted.
+
+### 119.2 The wedge condition: a rotational self-couple (BC-04)
+
+A wedge side is a coupled face whose other cell is the cell itself, turned
+about the axis. In an axisymmetric field the cylindrical components do not
+depend on the angle, so the cell that lies across the front wedge face is
+cell `P` rotated by `+theta` and the one across the back face is `P` rotated
+by `-theta`. With `a` the unit axis of 119.1 (`a = (n_f x n_b)/|n_f x n_b|`,
+so a right-handed turn by `+theta` about `a` carries the mid-plane toward the
+front side), `sigma = +1` on the front patch and `sigma = -1` on the back:
+
+```
+psi_N = psi_P                          a scalar                                   (119.2a)
+U_N   = R(sigma theta) U_P             a vector
+R(phi) v = v + sin(phi) (a x v) - (1 - cos(phi)) (v - a (a . v))                   (119.2b)
+```
+
+(119.2b) is Rodrigues' rotation formula, written as `v` plus an increment so
+that nothing cancels at a small angle.
+
+**The geometry of the couple.** The image of the centroid `C_P` under the
+rotation lies on the line through `C_P` along the face normal, at distance
+`2 r_P sin(theta/2)`, where `r_P` is the distance of `C_P` from the axis; the
+wedge plane cuts that line at its middle. The couple is therefore orthogonal,
+its interpolation weight is 1/2, and its delta coefficient is
+`1/(2 r_P sin(theta/2))`: exactly half of the boundary delta coefficient
+`Delta_b = 1/(n . (C_f - C_P)) = 1/(r_P sin(theta/2))` that §2.4 already
+stores on the face. Nothing new is stored per face.
+
+**The face value and the triple.** Linear interpolation across the couple
+gives
+
+```
+U_b = (U_P + R(sigma theta) U_P)/2 = U_P + w
+w   = [ sigma sin(theta) (a x U_P) - vers(theta) (U_P - a (a . U_P)) ] / 2         (119.2c)
+vers(theta) = 1 - cos(theta) = 2 sin^2(theta/2)
+```
+
+and the condition is the §4 triple
+
+```
+fr = 0,   refValue = 0,   refGrad = Delta_b w                                      (119.2d)
+```
+
+on a vector, and `fr = 0, refGrad = 0` (zero-gradient) on a scalar. There is
+no new evaluation branch: §4's expression `U_b = U_P + refGrad/Delta_b`
+returns (119.2c), and the surface-normal gradient the operators build from
+the triple, `(1 - fr) refGrad = (R U_P - U_P)/(2 r_P sin(theta/2))`, is the
+couple's own central difference. `BcKind::Wedge` (40) marks the faces; the
+kernel `fldWedgeRefGrad` (`cuda/field.cu`) rewrites `refGrad` on them from
+the current `U_P`, and `field_ops::correct_boundary_conditions_vector`
+launches it before the evaluation whenever the mesh carries a wedge
+(`GpuMesh::wedge`), so every driver that evaluates its boundary gets the
+condition. The operation order is fixed, for the kernel and for its host
+twin `field::wedge_ref_grad` alike: `d = a . U_P` summed x, y, z;
+`c = a x U_P`; `q = U_P - a d`; `w = (sigma sin(theta) c - vers(theta) q)/2`;
+`refGrad = Delta_b w`. `a`, `sin(theta)` and `vers(theta) = 2 sin^2(theta/2)`
+are formed in f64 from 119.1's f64 wedge and cast once (§118.2). The device
+contracts FMA, so the two agree to round-off, not bitwise.
+
+The mesh has the last word, as for `empty` and `cyclic`: a patch the mesh
+types `wedge` carries `BcKind::Wedge` on every field whatever the field file
+says, and a field file that writes `type wedge` on a patch the mesh does not
+type `wedge` is refused by name. Before BC-04 that entry was read as
+`symmetry`.
+
+**The flux.** The flux through a wedge face is prescribed by the velocity
+condition,
+
+```
+phi_b = U_b . S_f                                                                  (119.2e)
+```
+
+and no pressure correction moves it: `momFluxIsPrescribed` holds on
+`PatchKind::Wedge`, the pressure sees a zero-gradient face, and the face
+carries no body-force flux. In the plane normal to `a`,
+`(I + R(phi))/2 = cos(phi/2) R(phi/2)`, and the two outward normals are the
+mid-plane normal `m` of 119.1 turned by half the angle,
+`n_f = R(theta/2) m` and `n_b = -R(-theta/2) m`. Hence
+
+```
+U_b . n_f = +cos(theta/2) (U_P . m),    U_b . n_b = -cos(theta/2) (U_P . m)        (119.2f)
+```
+
+The two fluxes of a cell are the swirl velocity `u_theta = U_P . m` times
+`cos(theta/2) A_w`, out through one side and in through the other, and their
+sum is zero for any `U_P`: swirl adds nothing to the cell's mass balance.
+Under a symmetry plane both were zero and the swirl had nowhere to go.
+
+**What the momentum equation gains.** On the wedge of 119.0,
+`A_w = dr dz / cos(theta/2)` and `V = 2 tan(theta/2) r_m dr dz` with
+`r_m = (r_i + r_i+1)/2`, so `A_w/V = 1/(2 r_m sin(theta/2))`. Summed over the
+two wedge faces of a cell, with `e_r` the radial and `e_theta = m` the
+circumferential unit vector at the cell and `U_perp = U_P - a (a . U_P)`:
+
+```
+diffusion    nu sum_b A_w Delta_b w        = -nu V U_perp / (r_m r_P)              (119.2g)
+convection   sum_b phi_b U_b               =  cos^2(theta/2) V (u_theta/r_m) (a x U_P)   (119.2h)
+pressure     sum_b p_b S_b = p_P A_w (n_f + n_b) = -p_P (A_r,i+1 - A_r,i) e_r      (119.2i)
+```
+
+(119.2g) is the hoop term of the vector Laplacian in cylindrical
+coordinates, `-nu u_r/r^2` and `-nu u_theta/r^2`, with `1/r^2` replaced by
+the **hoop-term factor** `1/(r_m r_P)`. It does not depend on `theta`: the
+tangent mesh of 119.0 makes it exact in the angle. `r_P = r_m + dr^2/(12 r_m)`
+on a uniform radial spacing, so the factor is second order in `dr`, and it
+has one exact property: for rigid rotation `u_theta = Omega r` sampled at
+the centroids, the radial face fluxes `nu A_r Omega` leave the cell a net
+`nu Omega (A_r,i+1 - A_r,i) = nu Omega V/r_m`, which is (119.2g) to the last
+digit. A rigidly rotating pipe is a discrete solution, axis prisms included.
+
+(119.2h), moved to the right-hand side, is the centrifugal force
+`+cos^2(theta/2) u_theta^2/r_m` on the radial component and the Coriolis
+term `-cos^2(theta/2) u_r u_theta/r_m` on the circumferential one. The two
+carry the same factor, so the pair does no work on the flow (the vector
+`a x U_P` is normal to `U_P`), which is the consistency the continuum pair
+has. The factor `cos^2(theta/2) = 1 - theta^2/4 + ...` is the condition's
+one consistency error in the angle: the chord average `(U_P + R U_P)/2` is
+shorter than `U_P` by `cos(theta/2)`, once in the flux and once in the
+convected value. It is 1.9e-3 at 5 deg, 4.8e-4 at 2.5 deg, and it scales
+every swirl-driven pressure difference.
+
+(119.2i) is why a scalar is zero-gradient: the two wedge faces return
+exactly the radial area difference, so the Gauss gradient of a scalar is
+`[A_r,i+1 (p_e - p_P) + A_r,i (p_P - p_w)]/V`, with no metric error.
+
+**The reconstruction.** `fv::fvc_reconstruct` returns the cell vector whose
+own face fluxes best match given ones, `min sum_f (U . S_f - phi_f)^2/|S_f|`,
+and the momentum equation takes its cell force from it. The flux of a cell
+vector through a wedge face is (119.2e) with (119.2c), which is the cell
+vector against a ROTATED area:
+
+```
+U_b . S_f = U_P . S'_f,     S'_f = ( S_f + R(-sigma theta) S_f ) / 2               (119.2j)
+```
+
+On 119.0's wedge `S'_f = +cos(theta/2) A_w m` on the front and
+`-cos(theta/2) A_w m` on the back: the face constrains the swirl component
+and nothing else. The reconstruction therefore reads `S'_f` in place of
+`S_f` on the wedge faces, with the weight `1/|S_f|` unchanged.
+`GpuMesh::b_sf_recon` holds the boundary area vectors with (119.2j) applied,
+formed in f64 from 119.1's wedge and cast once; it exists only on a mesh
+with a wedge, the kernel `fvReconstruct` is unchanged, and a mesh without a
+wedge passes its own `b_sf` as before, bit for bit. With the unrotated
+`S_f` the two faces of a cell would also hold down the radial component, by
+the factor `1/(1 + dr sin(theta/2)/(2 r_m))`: an error of first order in the
+angle. Measured before (119.2j) on the gate's flow, the mid-gap pressure
+difference below was off by -9.84e-3, -4.65e-3 and -3.47e-3 at 10, 5 and
+2.5 deg on 32 radial cells, a ratio of successive differences of 4.41, and
+5.04 on 16 cells, against the 3.99 of (119.2h).
+
+**What is lagged.** The triple has `fr = 0`, so the matrix sees a
+zero-gradient face and (119.2g)-(119.2h) enter as explicit sources from the
+last evaluated `U_P`, the same deferred treatment §4 gives a symmetry
+plane's normal component. For the hoop term alone, with `S` its coefficient
+and `D` the diagonal, an outer iteration multiplies an in-plane error by
+`1 - alpha_U (1 + S/D)`. The ratio is largest on an axis prism with uniform
+`dr`, where `S = 3 nu tan(theta/2) dz` against `D >= (9/4) nu tan(theta/2) dz`
+from the one radial face, so `S/D <= 4/3` and the iteration contracts for
+`alpha_U < 6/7`; the default 0.7 is inside. Without relaxation the same
+argument asks `nu dt / r_1^2 < 4/3` of a time step on the axis prism. These
+are estimates for pure diffusion, recorded and not enforced.
+
+**Recorded, not changed by this unit.**
+
+1. The Courant number a driver forms from `sum_f |phi_f|` now counts the
+   swirl flux through the two wedge faces, `u_theta dt / (2 r tan(theta/2))`.
+   That is the Courant number of the one-cell-thick wedge, not of the
+   axisymmetric flow, and it throttles an adaptive time step under swirl.
+2. `GpuMesh::b_sf_recon` is built when the mesh is uploaded. A moving
+   mesh that recomputes its geometry on the device does not refresh it;
+   no moving-mesh path runs on a wedge.
+3. A wall is a zero-flux face in the reconstruction, so the cell force
+   normal to a wall is under-read in the cell beside it and the cell-centre
+   normal velocity there is not zero, though every face flux is. This is
+   the crate's collocated treatment on every mesh, not the wedge's. Under
+   swirl it shows twice. The centrifugal force reaches the pressure through
+   the momentum matrix and not as a face force, so the pressure steps
+   beside a wall are off (measured: +16 % on the first step from the inner
+   wall, -10 % on the last before the outer wall, the same on 32 and 128
+   cells), which makes a wall-to-wall pressure difference first order in
+   `dr`. And that cell velocity enters the Coriolis term of (119.2h), at a
+   size that goes as `(Omega dr^2/nu)^2` against the viscous term, so a
+   rigidly rotating pipe is the discrete solution of (119.2g) but not, to
+   round-off, of the whole loop.
+4. A parcel that reaches a wedge side is still reflected (119.1).
+5. `vof.cu` and `marangoni.cu` keep the wedge in their prescribed-flux
+   predicates; no VOF or Marangoni gate runs on a wedge.
+
+**The gates.** `tests/bc_wedge.rs`, both builds, through the public API.
+The flow is circular Couette flow between an inner cylinder `R_1 = 1`
+turning at `Omega = 1` and an outer cylinder `R_2 = 2` at rest, `nu = 1`,
+on 119.0's annulus one cell deep with `symmetry` end planes, steady SIMPLE
+to a fixed point (the largest change of a velocity component between two
+iterations below 1e-13, at most `4 nr^2 + 200` iterations); the pressure is
+pinned at 0 on the inner wall (§120.3's finding on a pure-Neumann pressure
+under `single`). The Reynolds number is 1 on purpose: recorded item 3 above
+feeds the Coriolis term at a rate that grows as `(Omega dr^2/nu)^2`, and the
+gate measures the condition, not that. The answer key is
+
+```
+u_theta(r) = A r + B/r,   A = -Omega R_1^2/(R_2^2 - R_1^2),   B = Omega R_1^2 R_2^2/(R_2^2 - R_1^2)
+P(r) = A^2 r^2/2 + 2 A B ln(r) - B^2/(2 r^2)
+```
+
+(`dP/dr = u_theta^2/r`), with `P(R_2) - P(R_1) = 0.21720250616893744` here.
+The mid-gap pressure difference is taken between the cell centres
+`i_a = nr/4` and `i_b = 3 nr/4 - 1` and compared with `P(r_b) - P(r_a)` at
+their own centroid radii; the wall-to-wall difference extrapolates each wall
+value linearly from the two cells nearest the wall.
+
+| row | bound | class | f64 | single |
+|---|---|---|---|---|
+| `fldWedgeRefGrad` against `field::wedge_ref_grad`, over `Delta_b max |U|`, on an annulus and a pipe at 1, 5 and 10 deg | 1e-14 | R | 1.8e-15 | 9.5e-7 |
+| the evaluated face value against `(U_P + R(sigma theta) U_P)/2` formed in f64 from the full rotation, over `max |U|`; a scalar's wedge face equals its cell value bitwise | 1e-14 | R | 2.2e-16 | 5.7e-8 |
+| `fvc_reconstruct` returns a constant vector from its (119.2j) fluxes, on the same six meshes; `recon_area` is `+-cos(theta/2) |S_f| m` on all 80 wedge faces to 1e-12 (class A) | 1e-12 | R | 2.2e-16 | 1.3e-7 |
+| `u_theta` at the centroids, `max |u_h - u_theta(r_P)| / (Omega R_1)`, at 5 deg on `nr` = 32, the finest of 8, 16, 32 | 2e-3 | P | 3.1533e-4 | 3.1558e-4 |
+| the observed order of that error over the three meshes, (94.3) | [1.8, 2.2] | P | 1.882 | 1.882 |
+| the mid-gap pressure difference at 5 deg on `nr` = 32, relative to its key | 1e-2 | P | -5.14e-3 | -5.12e-3 |
+| the angle's order `[d(5) - d(10)] / [d(2.5) - d(5)]` of that difference on `nr` = 32, which (119.2h) puts at `(cos^2 2.5 - cos^2 5)/(cos^2 1.25 - cos^2 2.5) = 3.990` | [3.5, 4.5] | P | 3.990 | 4.095 |
+| `|phi_front + phi_back|` of every cell over `max |phi_front|`, and `phi_front = u_theta dr dz` (119.2f) to 1e-10 | 1e-14 | R | 1.5e-16 | 7.9e-8 |
+| a pipe `r` in [0, 1], `nr` = 8, `nu = 1`, whose wall turns at `Omega = 1`: `max |u_theta - Omega r_P| / (Omega R)`, axis prisms included (the plan's `u_theta` bound, on the flow (119.2g) holds exactly) | 2e-3 | P | 1.54e-5 | 1.54e-5 |
+| a field file's `type wedge` on a patch the mesh does not type `wedge` is refused by name; the mesh's wedge patch carries kind 40 whatever the file says | - | D | holds | holds |
+| RECORDED (ignored by default, 12 minutes): the wall-to-wall `p(R_2) - p(R_1)` at 5 deg on `nr` = 128, relative to the key | 1e-2 | P | +7.92e-3 | not run |
+
+Measured 2026-10-13, RTX 5070 Ti: 8 passed, 1 ignored in both builds
+(125 s in f64, 442 s under `single`, where no run reaches the 1e-13 fixed
+point and each goes to its iteration cap). The swirl errors are 4.5562e-3,
+1.2205e-3 and 3.1533e-4 on 8, 16 and 32 cells; a host model of (119.2g)
+with the radial diffusion alone gives 4.5438e-3, 1.2196e-3 and 3.1527e-4.
+
+`taylor_couette_swirl_survives` is the failing-first test. With the wedge
+treated as a symmetry plane the hoop term is absent and the profile is the
+logarithm `1 - ln(r)/ln(2)`: measured on the tree before this unit,
+2.8925e-2 and 2.9274e-2 on 16 and 32 cells against the 2e-3 bound, the
+values the same host model gives without its hoop term.
+
+**Where the gate departs from the letter of docs/17's BC-04 row, and why.**
+The row asks for `p(R_2) - p(R_1)` within 1 % at 5 deg, and for the ratio of
+that error at 5 and 2.5 deg in [3.5, 4.5]. Neither bound is changed.
+
+1. *The wall-to-wall difference is first order in `dr`* (recorded item 3):
+   measured +4.3e-2, +2.9e-2, +1.7e-2 and +7.92e-3 on 16, 32, 64 and 128
+   cells. It meets the 1 % bound on 128 cells, and SIMPLE needs about
+   `2.1 nr^2` outer iterations on this flow (164, 577, 2144, 8054 and 30272
+   on 8 to 128 cells), so that row is the recorded run
+   `taylor_couette_wall_pressure_rise_on_128_cells`, 12 minutes in f64. The
+   default gate holds the same 1 % on the mid-gap difference, which the
+   wall cells do not reach: -5.14e-3 on 32 cells, of which (119.2h)
+   accounts for -1.90e-3.
+2. *The ratio of the two errors reads the angle's order only where the
+   radial error is far below the angle's 4.8e-4 at 2.5 deg.* On 32 cells it
+   is 1.38 for the mid-gap difference; a host model puts the ratio inside
+   the band from about 256 cells, some 140 000 iterations a run. It is NAMED and NOT
+   RUN. The gate takes the ratio of the differences between three angles
+   on one radial mesh instead: the discrete `u_theta` does not depend on the
+   angle (119.2g), the radial error cancels in each difference, and what is
+   left is the angle's order. It came out at 3.990 against (119.2h)'s 3.990.
+
+**Findings for other owners, measured with this gate's flow and not acted
+on here.** With `simplec` on (and `p_relax = 1`) the same flow converges to
+a pressure 41 % too low at every radius, on 16 and on 32 cells. With
+`u_relax = 0.9`, or with `p_relax = 0.7`, the loop goes non-finite within
+130 iterations; the defaults 0.7 and 0.3 converge. Under `single` the loop
+never reaches the 1e-13 fixed point (§120.3 found the same).
+
+Sources: ORIGINAL - the couple is elementary geometry (a rotation about an
+axis, the chord of a circle) applied to this crate's own §4 triple and §2.4
+delta coefficient. Rodrigues' rotation formula:
+<https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula>. The vector
+Laplacian and the convective derivative in cylindrical coordinates, for the
+hoop, centrifugal and Coriolis terms (119.2g)-(119.2h) are compared with:
+<https://en.wikipedia.org/wiki/Del_in_cylindrical_and_spherical_coordinates>.
+Circular Couette flow, the gate's answer key:
+<https://en.wikipedia.org/wiki/Taylor%E2%80%93Couette_flow>, and G. I.
+Taylor, *Phil. Trans. R. Soc. Lond. A* 223 (1923) 289-343, DOI
+`10.1098/rsta.1923.0008`. The patch type name `wedge` is taken by name only
 from the public user guides §120 links; no description, formula or source
 code was taken from them.
 

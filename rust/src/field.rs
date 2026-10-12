@@ -392,6 +392,27 @@ pub enum BcKind {
     /// [`crate::field_setup::BcInputs::advective`], the promise that
     /// `field::advective` refreshes the condition every step.
     Advective = 39,
+
+    /// A wedge side (SPEC-LIT 119.2), the rotational self-couple BC-04:
+    /// the cell across the face is the cell itself turned about the axis,
+    /// so on a vector the face value is the chord average
+    ///
+    /// ```text
+    /// U_b = (U_P + R(sigma theta) U_P)/2 = U_P + w                       (119.2c)
+    /// ```
+    ///
+    /// reached with NO new evaluation branch - `cuda/field.cu`'s
+    /// `fldWedgeRefGrad` rewrites `refGrad = Delta_b w` (119.2d) from the
+    /// current cell value before the section-4 evaluation, and the face
+    /// value comes out of the one expression. A scalar is zero-gradient,
+    /// which the seeded triple already is. The flux is prescribed by the
+    /// velocity condition, `phi_b = U_b . Sf` (119.2e) - the swirl through
+    /// the side, which is not zero. The mesh has the last word, as for
+    /// `empty` and `cyclic`: a patch it types `wedge` carries this kind on
+    /// every field, and `type wedge` on a patch it does not is refused by
+    /// name. The host twin of the rewrite is
+    /// [`wedge_ref_grad`](crate::field::wedge_ref_grad).
+    Wedge = 40,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -524,6 +545,55 @@ pub fn direction_mixed_value(dm: &[Scalar], u_p: Vec3, delta: Scalar) -> Vec3 {
     Vec3::new(a.x + (qx - b.x), a.y + (qy - b.y), a.z + (qz - b.z))
 }
 
+/// The host twin of `fldWedgeRefGrad` - SPEC-LIT 119.2, (119.2c)-(119.2d).
+///
+/// The wedge condition is a rotational self-couple: the cell across the
+/// face is the cell itself turned about the axis by `sigma theta`
+/// (`sigma = +1` on the front patch, `-1` on the back), so the chord
+/// average is `U_b = (U_P + R(sigma theta) U_P)/2 = U_P + w` and the
+/// condition is the section-4 triple `fr = 0, refValue = 0,
+/// refGrad = Delta_b w` with
+///
+/// ```text
+/// w = ( sigma sin(theta) (a x U_P) - vers(theta) (U_P - a (a . U_P)) ) / 2
+/// ```
+///
+/// `vers_theta` is `vers(theta) = 1 - cos(theta) = 2 sin^2(theta/2)`. The
+/// SAME operation order the kernel runs: `d = a . U_P` summed x, y, z left
+/// to right; `c = a x U_P`; `q = U_P - a d`;
+/// `w = (sigma sin(theta) c - vers(theta) q)/2`; `refGrad = Delta_b w`.
+/// `a`, `sin(theta)` and `vers(theta)` are formed in f64 from 119.1's f64
+/// wedge and cast once (SPEC-LIT 118.2). The device contracts FMA, so host
+/// and device agree to round-off, not bitwise.
+#[inline]
+pub fn wedge_ref_grad(
+    u_p: Vec3,
+    axis: Vec3,
+    sin_theta: Scalar,
+    vers_theta: Scalar,
+    sigma: Scalar,
+    delta: Scalar,
+) -> Vec3 {
+    let d = axis.x * u_p.x + axis.y * u_p.y + axis.z * u_p.z;
+    let c = Vec3::new(
+        axis.y * u_p.z - axis.z * u_p.y,
+        axis.z * u_p.x - axis.x * u_p.z,
+        axis.x * u_p.y - axis.y * u_p.x,
+    );
+    let q = Vec3::new(
+        u_p.x - axis.x * d,
+        u_p.y - axis.y * d,
+        u_p.z - axis.z * d,
+    );
+    let s = sigma * sin_theta;
+    let w = Vec3::new(
+        (s * c.x - vers_theta * q.x) / 2.0,
+        (s * c.y - vers_theta * q.y) / 2.0,
+        (s * c.z - vers_theta * q.z) / 2.0,
+    );
+    Vec3::new(delta * w.x, delta * w.y, delta * w.z)
+}
+
 impl BcKind {
     /// Map an OpenFOAM boundary-condition type string, per SPEC-LIT §13.4.
     ///
@@ -549,7 +619,12 @@ impl BcKind {
             // value written by a model and never solved for.
             "calculated" => Self::Calculated,
             "empty" => Self::Empty,
-            "symmetry" | "symmetryPlane" | "slip" | "wedge" => Self::Symmetry,
+            // SPEC-LIT 119.2: `wedge` is its own condition, the rotational
+            // self-couple BC-04 - accepted on any patch by NAME, but a patch
+            // the mesh does not type `wedge` refuses the entry in
+            // `field_setup` (the mesh has the last word, as for `empty`).
+            "symmetry" | "symmetryPlane" | "slip" => Self::Symmetry,
+            "wedge" => Self::Wedge,
             "cyclic" | "cyclicSlip" | "processor" => Self::Cyclic,
             "inletOutlet" | "freestreamPressure" | "uniformInletOutlet" => Self::InletOutlet,
 
@@ -1312,8 +1387,10 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
         let k = match p.kind {
             PatchKind::Empty => BcKind::Empty,
             PatchKind::Cyclic | PatchKind::Processor => BcKind::Cyclic,
-            // SPEC-LIT 119.1: a wedge side rides with symmetry until BC-04.
-            PatchKind::Symmetry | PatchKind::Wedge => BcKind::Symmetry,
+            // SPEC-LIT 119.2: a wedge patch carries the rotational
+            // self-couple, `BcKind::Wedge`, on every field.
+            PatchKind::Wedge => BcKind::Wedge,
+            PatchKind::Symmetry => BcKind::Symmetry,
             // SPEC-LIT S47.4: an `Interface` patch is topologically coupled
             // but is NOT seeded `Cyclic` - see `topology_override` in
             // `field_setup.rs` for the reasoning. It stays zero-gradient

@@ -154,7 +154,7 @@ OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
 #define OFP_PATCH_WALL     1
 #define OFP_PATCH_EMPTY    2
 #define OFP_PATCH_SYMMETRY 3
-//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+//- SPEC-LIT 119.2: a wedge side; treated as SYMMETRY in this module
 #define OFP_PATCH_WEDGE    7
 
 // Counter slots. Integer counters only: integer addition is associative, so

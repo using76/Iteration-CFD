@@ -2521,6 +2521,13 @@ pub fn sn_grad_flux_correction(
 /// they are the only faces with an area component in the unresolved direction
 /// and without them the 3×3 system is singular; their flux is zero, so what
 /// they contribute is exactly the constraint `U·n = 0` there.
+///
+/// On a mesh with a wedge the boundary faces enter through
+/// [`GpuMesh::b_sf_recon`], the rotated areas `S'_f` of SPEC-LIT 119.2's
+/// equation (119.2j), so the chord-average flux a wedge face carries pins
+/// the swirl component and nothing else; the weight stays `1/|S_f|`
+/// (`b_mag_sf` is unchanged) - only the direction is rotated. A mesh
+/// without a wedge passes its own `b_sf`, bit for bit as before.
 pub fn fvc_reconstruct(
     gpu: &Gpu,
     k: &FvKernels,
@@ -2538,6 +2545,13 @@ pub fn fvc_reconstruct(
     }
     let nl = n as Label;
 
+    // SPEC-LIT 119.2, (119.2j): `S'_f` on the two wedge patches when the mesh
+    // has one, `b_sf` bit for bit otherwise.
+    let b_sf: &DevBuf<Vec3> = match &m.b_sf_recon {
+        Some(r) => r,
+        None => &m.b_sf,
+    };
+
     let f = k.reconstruct.clone();
     unsafe {
         gpu.stream()
@@ -2547,7 +2561,7 @@ pub fn fvc_reconstruct(
             .arg(&phi.bf)
             .arg(&m.sf)
             .arg(&m.mag_sf)
-            .arg(&m.b_sf)
+            .arg(b_sf)
             .arg(&m.b_mag_sf)
             .arg(&m.cf_offset)
             .arg(&m.cf_face)

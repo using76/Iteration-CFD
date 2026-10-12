@@ -70,7 +70,7 @@
 // --------------------------------------------------------------------------
 #define OFPATCH_EMPTY     2
 #define OFPATCH_SYMMETRY  3
-//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+//- SPEC-LIT 119.2: a wedge side; treated as SYMMETRY in this module
 #define OFPATCH_WEDGE     7
 
 //- SPEC-LIT 120.3: the tensorial mixed velocity condition of the wall and

@@ -308,8 +308,10 @@ fn topology_override(kind: PatchKind) -> Option<BcKind> {
     match kind {
         PatchKind::Empty => Some(BcKind::Empty),
         PatchKind::Cyclic | PatchKind::Processor => Some(BcKind::Cyclic),
-        // SPEC-LIT 119.1: a wedge side rides with symmetry until BC-04.
-        PatchKind::Symmetry | PatchKind::Wedge => Some(BcKind::Symmetry),
+        // SPEC-LIT 119.2: a wedge patch carries the rotational self-couple,
+        // `BcKind::Wedge`, on every field whatever the field file says.
+        PatchKind::Wedge => Some(BcKind::Wedge),
+        PatchKind::Symmetry => Some(BcKind::Symmetry),
         // SPEC-LIT S47.4: a conjugate interface is topologically coupled, but
         // WHICH condition it carries is the field's business - `T` gets
         // `CoupledTemperature` from `crate::cht`, and any other field on the
@@ -1083,6 +1085,23 @@ fn scalar_patch(
                     msg: format!(
                         "{patch}: `{}` is a vector condition and {field} is a scalar field",
                         spec.type_name
+                    ),
+                })
+            }
+
+            // SPEC-LIT 119.2: `type wedge` belongs on a patch the MESH
+            // types `wedge`, where topology_override has already forced the
+            // kind before this arm - so reaching it here means a field file
+            // wrote `wedge` on some other patch, and that is refused by
+            // name rather than read as the symmetry it used to be.
+            BcKind::Wedge => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `wedge` is a condition the MESH owns - it \
+                         belongs on a patch that constant/polyMesh/boundary \
+                         types `wedge`, and this one is not one (SPEC-LIT \
+                         119.2)"
                     ),
                 })
             }
@@ -2171,6 +2190,22 @@ fn vector_patch(
                         "{patch}: `{}` reached the static arms without its `dm` block \
                          (SPEC-LIT 120.3)",
                         spec.type_name
+                    ),
+                })
+            }
+
+            // SPEC-LIT 119.2: as on the scalar side - `type wedge` belongs
+            // on a patch the MESH types `wedge`, which topology_override
+            // has already forced before this arm; reaching it here means a
+            // field file wrote `wedge` on some other patch, refused by name.
+            BcKind::Wedge => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `wedge` is a condition the MESH owns - it \
+                         belongs on a patch that constant/polyMesh/boundary \
+                         types `wedge`, and this one is not one (SPEC-LIT \
+                         119.2)"
                     ),
                 })
             }

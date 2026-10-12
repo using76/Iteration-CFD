@@ -58,6 +58,7 @@ pub struct FieldKernels {
     advective_speed: CudaFunction,
     advective_robin_scalar: CudaFunction,
     advective_robin_vector: CudaFunction,
+    wedge_ref_grad: CudaFunction,
 
     copy: CudaFunction,
     copy_vector: CudaFunction,
@@ -84,6 +85,9 @@ impl FieldKernels {
             advective_speed: k.func("fldAdvectiveSpeed")?,
             advective_robin_scalar: k.func("fldAdvectiveRobinScalar")?,
             advective_robin_vector: k.func("fldAdvectiveRobinVector")?,
+            // SPEC-LIT 119.2: the wedge condition's refGrad rewrite, run
+            // before the evaluation on a mesh that carries a wedge.
+            wedge_ref_grad: k.func("fldWedgeRefGrad")?,
 
             copy: k.func("fldCopy")?,
             copy_vector: k.func("fldCopyVector")?,
@@ -179,7 +183,11 @@ pub fn correct_boundary_conditions(
 /// 120.3), where the kernel evaluates (120.3a) from the face's `dm` block
 /// into `bf` ONLY: the matrix sees (120.3h) - `fr = f_t`, `ref_value = r`,
 /// `ref_grad = g` - so the tangential part enters it implicitly, and
-/// `ref_value` is read here, never rewritten.
+/// `ref_value` is read here, never rewritten. On a mesh that carries a
+/// wedge, `fldWedgeRefGrad` (SPEC-LIT 119.2) rewrites `ref_grad` on the
+/// wedge faces from the current cell value BEFORE the evaluation, so the
+/// section-4 expression returns (119.2c); a mesh without a wedge launches
+/// nothing extra.
 pub fn correct_boundary_conditions_vector(
     gpu: &Gpu,
     k: &FieldKernels,
@@ -199,6 +207,43 @@ pub fn correct_boundary_conditions_vector(
         return Ok(());
     }
     let nl = n as Label;
+
+    // SPEC-LIT 119.2: the wedge faces' ref_grad = Delta_b w, from the
+    // CURRENT cell value, before the evaluation reads it. The five
+    // condition scalars are formed in f64 from the f64 wedge of 119.1 and
+    // cast to Scalar once (SPEC-LIT 118.2). Nothing extra on a mesh
+    // without a wedge - it runs bit for bit as before.
+    if let Some(w) = &m.wedge {
+        let back = w.back as Label;
+        let front = w.front as Label;
+        let (ax, ay, az) = (
+            w.axis.x as Scalar,
+            w.axis.y as Scalar,
+            w.axis.z as Scalar,
+        );
+        let sin_theta = w.theta.sin() as Scalar;
+        let vers_theta = (2.0 * (0.5 * w.theta).sin() * (0.5 * w.theta).sin()) as Scalar;
+        let func = k.wedge_ref_grad.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&func)
+                .arg(&mut f.ref_grad)
+                .arg(&f.f)
+                .arg(&f.bc_kind)
+                .arg(&m.b_patch)
+                .arg(&m.b_face_cells)
+                .arg(&m.b_delta_coeffs)
+                .arg(&back)
+                .arg(&front)
+                .arg(&ax)
+                .arg(&ay)
+                .arg(&az)
+                .arg(&sin_theta)
+                .arg(&vers_theta)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+    }
 
     let func = k.correct_bc_vector.clone();
     unsafe {
@@ -1061,6 +1106,12 @@ mod tests {
         // outlet whose triple `fldAdvectiveRobin*` rewrites from (120.4d).
         assert_eq!(BcKind::OutletInlet as i32, 38);
         assert_eq!(BcKind::Advective as i32, 39);
+
+        // `OFGPU_BC_WEDGE` in cuda/field.cu (SPEC-LIT 119.2): the wedge
+        // condition's kind, whose ref_grad the fldWedgeRefGrad kernel
+        // rewrites before the evaluation and which adds no branch to
+        // fldCorrectBcScalar/fldCorrectBcVector.
+        assert_eq!(BcKind::Wedge as i32, 40);
     }
 
     /// Every branch of SPEC-LIT section 4 against the closed form it

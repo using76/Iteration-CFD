@@ -263,6 +263,23 @@ impl WedgeInfo {
     }
 }
 
+/// The rotated area a wedge face's reconstruction reads - SPEC-LIT 119.2,
+/// equation (119.2j): the flux of the chord-average boundary value
+/// `(U_P + R(sigma theta) U_P)/2` through the face's own area `sf` is the
+/// CELL value through `(sf + R(-sigma theta) sf)/2`. `sigma` is `+1` on the
+/// front patch and `-1` on the back; the rotation is the FULL Rodrigues
+/// formula `R(phi) v = v cos(phi) + (a x v) sin(phi)
+/// + a (a . v)(1 - cos(phi))` about the wedge axis. On a 119.1 wedge this
+/// is `+cos(theta/2) |sf| mid_normal` on the front and its negative on the
+/// back, so the face constrains the swirl component and nothing else.
+pub fn recon_area(sf: DVec3, axis: DVec3, theta: f64, sigma: f64) -> DVec3 {
+    let phi = -sigma * theta;
+    let c = phi.cos();
+    let s = phi.sin();
+    let rotated = sf * c + axis.cross(sf) * s + axis * (axis.dot(sf) * (1.0 - c));
+    (sf + rotated) * 0.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -64,6 +64,14 @@
   (120.4d); the face value is then the ordinary section 4 evaluation, and
   nothing here evaluates it differently.
 
+  SPEC-LIT 119.2 is the same shape once more: WEDGE, the rotational
+  self-couple of a wedge side, adds no branch. fldWedgeRefGrad below
+  REWRITES refGrad on the wedge faces from the current cell value -
+  refGrad = Delta_b w, (119.2c)-(119.2d), before the evaluation, and only
+  when the caller says the mesh carries a wedge - so the one expression
+  above returns (119.2c)'s chord average on a vector, and a scalar's
+  wedge face is plain zero-gradient out of the seeded triple.
+
   ------------------------------------------------------------------------
   Symmetry, and what the matrix sees
   ------------------------------------------------------------------------
@@ -101,6 +109,13 @@
 //  kernels rewrite from the face's wave speed.
 #define OFGPU_BC_OUTLET_INLET 38
 #define OFGPU_BC_ADVECTIVE    39
+
+//- SPEC-LIT 119.2: the wedge condition, the rotational self-couple of
+//  BC-04. Like the two outlets above it adds no evaluation branch: the
+//  fldWedgeRefGrad kernel below rewrites refGrad on the wedge faces from
+//  the current cell value, and the face value comes out of the ordinary
+//  section 4 expression.
+#define OFGPU_BC_WEDGE        40
 
 //- The FLUX-SWITCHED block: every kind in [FIRST, LAST] is Dirichlet where
 //  the face flux is inward and zero-gradient where it is outward, and they
@@ -488,6 +503,96 @@ extern "C" __global__ void fldAdvectiveRobinVector
         (kRelax[i]*phiInf[i].z - a0*bOld[i].z - a00*bOldOld[i].z)/d
     );
     refGrad[i] = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+}
+
+
+// ==========================================================================
+//  The wedge condition (SPEC-LIT 119.2)
+//
+//  A wedge side is a coupled face whose other cell is the cell itself,
+//  turned about the axis: across the front face by +theta, across the back
+//  by -theta. Linear interpolation across the couple gives the chord
+//  average
+//
+//      U_b = (U_P + R(sigma theta) U_P)/2 = U_P + w                     (119.2c)
+//      w   = ( sigma sin(theta) (a x U_P) - vers(theta) (U_P - a (a.U_P)) )/2
+//      vers(theta) = 1 - cos(theta) = 2 sin^2(theta/2)
+//
+//  and the condition is the section 4 triple fr = 0, refValue = 0,
+//
+//      refGrad = Delta_b w                                              (119.2d)
+//
+//  on a vector, and zero-gradient on a scalar. This kernel rewrites
+//  refGrad ONLY, on the faces whose bcKind is WEDGE and whose patch is the
+//  back (sigma = -1) or front (sigma = +1) one; bf is NOT written here -
+//  the face value comes out of the ordinary fldCorrectBcVector evaluation,
+//  which the caller launches right after. The operation order is fixed
+//  (119.2): d = a . U_P summed x, y, z left to right; c = a x U_P;
+//  q = U_P - a d; w = (sigma sin(theta) c - vers(theta) q)/2;
+//  refGrad = Delta_b w. The host twin is field::wedge_ref_grad in
+//  src/field.rs, the same order; FMA contraction is on, so the two agree
+//  to round-off, not bitwise.
+// ==========================================================================
+extern "C" __global__ void fldWedgeRefGrad
+(
+    ofvec3* __restrict__ refGrad,
+    const ofvec3* __restrict__ psi,
+    const oflabel* __restrict__ bcKind,
+    const oflabel* __restrict__ bPatch,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    oflabel backPatch,
+    oflabel frontPatch,
+    ofscalar ax, ofscalar ay, ofscalar az,
+    ofscalar sinTheta,
+    ofscalar versTheta,
+    oflabel nBoundaryFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nBoundaryFaces) return;
+    if (bcKind[i] != OFGPU_BC_WEDGE) return;
+
+    //- sigma: +1 on the front patch, -1 on the back, untouched elsewhere -
+    //  a field may carry kind 40 on a patch outside the pair only if the
+    //  caller put it there, and this kernel leaves that face's refGrad as
+    //  the triple has it.
+    const oflabel p = bPatch[i];
+    const ofscalar sigma = (p == frontPatch)
+        ? (ofscalar)1
+        : ((p == backPatch) ? (ofscalar)-1 : (ofscalar)0);
+    if (sigma == (ofscalar)0) return;
+
+    const ofvec3 uP = psi[bFaceCells[i]];
+
+    const ofscalar d = ax*uP.x + ay*uP.y + az*uP.z;
+    const ofvec3 c = mkvec
+    (
+        ay*uP.z - az*uP.y,
+        az*uP.x - ax*uP.z,
+        ax*uP.y - ay*uP.x
+    );
+    const ofvec3 q = mkvec
+    (
+        uP.x - ax*d,
+        uP.y - ay*d,
+        uP.z - az*d
+    );
+
+    const ofscalar s = sigma*sinTheta;
+    const ofvec3 w = mkvec
+    (
+        (s*c.x - versTheta*q.x)/(ofscalar)2,
+        (s*c.y - versTheta*q.y)/(ofscalar)2,
+        (s*c.z - versTheta*q.z)/(ofscalar)2
+    );
+
+    refGrad[i] = mkvec
+    (
+        bDeltaCoeffs[i]*w.x,
+        bDeltaCoeffs[i]*w.y,
+        bDeltaCoeffs[i]*w.z
+    );
 }
 
 

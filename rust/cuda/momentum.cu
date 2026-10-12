@@ -96,7 +96,7 @@
 #define OFPATCH_SYMMETRY  3
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
-//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+//- SPEC-LIT 119.2: a wedge side; its flux is prescribed as U_b . Sf
 #define OFPATCH_WEDGE     7
 
 //- SPEC-LIT 120.3: the tensorial mixed velocity condition of the wall and
@@ -110,6 +110,9 @@
 //
 //  * empty     - a 2-D front or back; it carries no flux by construction
 //  * symmetry  - the mirror condition removes the normal component exactly
+//  * wedge     - SPEC-LIT 119.2, (119.2e): the flux is prescribed as
+//                U_b . Sf, the swirl through the side, which is not zero -
+//                and no pressure correction may move it
 //  * DirectionMixed velocity (SPEC-LIT 120.3) - the face value is (120.3a),
 //                whose normal part n.(I - F).q the wall condition cancels;
 //                the flux is U_b . Sf, so no pressure correction may move it
