@@ -146,6 +146,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_fan_source_replays_bitwise"),
     ),
     ("src/field_ops.rs", Stance::Via("src/momentum.rs")),
+    (
+        "src/function1/device.rs",
+        Stance::Gate("the_ramped_inlet_replays_bitwise"),
+    ),
     ("src/fv.rs", Stance::Via("src/momentum.rs")),
     ("src/halo.rs", Stance::Via("src/distsolve.rs")),
     ("src/ldu_ops.rs", Stance::Via("src/solver.rs")),

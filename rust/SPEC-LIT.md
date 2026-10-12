@@ -1504,7 +1504,7 @@ that no reader asks for are listed as owed rather than hidden.
 | `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
 | `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
 | `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
-| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane`, `wedge` → symmetry; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `uniformFixedValue` (its `uniformValue` Function1 is not read — **was silent**), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the three named: calculated, fixedValue at `value`, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_three_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane`, `wedge` → symmetry; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the two named: calculated, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_two_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
 | polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane`, `wedge` → symmetry; `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
@@ -34027,7 +34027,7 @@ It is `#[cfg(not(feature = "single"))]` because its subject is the f64 discrete 
 `#[ignore]` measurement in the f64 build. It moves neither bold count.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **485** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **486** library
 tests and **16** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -34038,7 +34038,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
 105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's) and §105.18 one (the `backward`
 stroke's regression test).
 
@@ -38152,7 +38152,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 49 names of
+accepts it on the field the row is asked on, and it is one of the 60 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -38177,7 +38177,7 @@ row, row for row.
 | basic | `noSlip` | implemented | — | — | — |
 | basic | `zeroGradient` | implemented | — | — | — |
 | basic | `fixedGradient` | implemented | — | — | — |
-| basic | `uniformFixedGradient` | implemented | — | BC-06 | BC-06 adds the Function1-of-time gradient profile |
+| basic | `uniformFixedGradient` | implemented | — | — | `uniformGradient` is a Function1 of time (§120.1); a `gradient` entry is read as before |
 | basic | `mixed` | implemented | — | — | — |
 | freestream | `freestream` | implemented | — | — | — |
 | freestream | `freestreamVelocity` | implemented | — | — | — |
@@ -38198,7 +38198,7 @@ row, row for row.
 | inlet-outlet | `pressureInletOutletVelocity` | implemented | — | — | — |
 | inlet-outlet | `fixedFluxPressure` | implemented | — | — | — |
 | inlet-outlet | `totalPressure` | implemented | — | CMP-16 | CMP-16 adds the compressible form |
-| inlet-outlet | `flowRateInletVelocity` | implemented | — | BC-06, CMP-16 | BC-06 makes the rate a Function1 of time; CMP-16 the compressible mass-flux form |
+| inlet-outlet | `flowRateInletVelocity` | implemented | — | CMP-16 | the rate is a Function1 of time (§120.1); CMP-16 adds the compressible mass-flux form |
 | wall | `movingWallVelocity` | implemented | — | — | — |
 | wall function | `nutkWallFunction` | implemented | — | — | — |
 | wall function | `nutUWallFunction` | implemented | — | — | — |
@@ -38222,20 +38222,20 @@ row, row for row.
 | jump | `fan` | implemented | — | BC-17 | BC-17 pairs the patch with the coupled jump conditions |
 | jump | `porousJumpPressure` | implemented | — | — | — |
 | jump | `porousBafflePressure` | implemented | — | BC-17 | BC-17 pairs the patch with the coupled jump conditions |
+| time-varying | `uniformFixedValue` | implemented | — | — | `uniformValue` is a Function1 of time (§120.1) |
+| time-varying | `uniformInletOutlet` | implemented | — | — | inletOutlet whose `uniformInletValue` is a Function1 of time (§120.1) |
+| time-varying | `uniformTotalPressure` | implemented | — | — | totalPressure whose `p0` is a Function1 of time (§120.1) |
+| time-varying | `fixedProfile` | implemented | — | — | a fixed value that is a Function1 of a face coordinate, evaluated at setup (§120.1) |
+| basic | `extrapolatedCalculated` | implemented | — | — | zeroGradient on any field (§120.3) |
+| basic | `directionMixed` | implemented | — | — | the tensorial mixed form (120.3a); `valueFraction` a symmTensor, or a scalar read as `f I` |
+| wall | `rotatingWallVelocity` | implemented | — | — | `omega` a Function1 of time; the wall-normal part removed (120.3g) |
+| wall | `translatingWallVelocity` | implemented | — | — | `uniformFixedValue` with the key `U` (§120.3) |
+| wall | `partialSlip` | implemented | — | — | (120.3b), slip length (120.3d) |
+| wall | `fixedNormalSlip` | implemented | — | — | the normal component fixed, the tangential free (§120.3) |
+| wall | `fixedShearStress` | implemented | — | — | laminar `tau/nu` (120.3f); refused naming `nu` where the setup is given none, which is every driver today |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
-| time-varying | `uniformFixedValue` | planned | BC-06 | — | the value is a Function1 of time, not a `value` entry |
-| time-varying | `uniformInletOutlet` | planned | BC-06 | — | — |
-| time-varying | `uniformTotalPressure` | planned | BC-06 | — | — |
-| time-varying | `fixedProfile` | planned | BC-06 | — | — |
-| basic | `extrapolatedCalculated` | planned | BC-07 | — | — |
-| basic | `directionMixed` | planned | BC-07 | — | — |
-| wall | `rotatingWallVelocity` | planned | BC-07 | — | — |
-| wall | `translatingWallVelocity` | planned | BC-07 | — | — |
-| wall | `partialSlip` | planned | BC-07 | — | — |
-| wall | `fixedNormalSlip` | planned | BC-07 | — | — |
-| wall | `fixedShearStress` | planned | BC-07 | — | — |
-| wall function | `nutUSpaldingWallFunction` | planned | BC-07 | — | — |
+| wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | velocity inlet | `surfaceNormalFixedValue` | planned | BC-08 | — | — |
 | velocity inlet | `cylindricalInletVelocity` | planned | BC-08 | — | — |
 | velocity inlet | `swirlFlowRateInletVelocity` | planned | BC-08 | — | — |
@@ -38358,9 +38358,373 @@ of a name outside the catalogue and for every permanent refusal except
 `compressible::turbulentTemperatureRadCoupledMixed`, which keeps its own arm's
 fallback `coupledTemperature` (the conjugate coupling without the radiative
 term, §50.8); the planned names refused by their own arm today keep theirs
-(`uniformFixedValue` runs `fixedValue`, `cyclicAMI` a position-paired
+(`cyclicAMI` a position-paired
 `cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`,
 `externalWallHeatFluxTemperature` `fixedFluxTemperature`).
+
+### 120.1 Function1 - a profile of time or of one coordinate, evaluated on the device
+
+A Function1 is a function `F(x)` of ONE real argument with `n_c` components:
+`x` is the time `t` (seconds) for a time profile and a coordinate `s` (metres)
+for `fixedProfile`; `n_c` is 1 on a scalar field and 3 on a vector field,
+except that a flow rate, a ramp and the `scale` factor of `scale` are scalar.
+The type NAMES and entry KEYWORDS below (`constant`, `table`, `tableFile`,
+`csvFile`, `polynomial`, `sine`, `square`, `linearRamp`, `quadraticRamp`,
+`halfCosineRamp`, `quarterSineRamp`, `quarterCosineRamp`, `scale`; `values`,
+`file`, `outOfBounds`, `interpolationScheme`, `nHeaderLine`, `refColumn`,
+`componentColumns`, `separator`, `mergeSeparators`, `coeffs`, `amplitude`,
+`frequency`, `start`, `level`, `markSpace`, `duration`, `value`) are taken by
+name only from the two public user guides of §120. Every DEFINITION below is
+this section's own, written from elementary mathematics and the open sources
+cited with it; no guide text, formula or source code was taken. A case written
+for another code whose author meant a different definition gets this one, and
+this section is where that is stated.
+
+**Where an entry is read.** For an entry key `K` of a patch (`uniformValue`,
+`uniformGradient`, `uniformInletValue`, `p0`, `volumetricFlowRate`,
+`massFlowRate`, `profile`) the reader accepts five forms:
+
+1. `K 2.5;` or `K (1 0 0);` - a bare value of the entry's rank: `constant`;
+2. `K constant 2.5;` - the same, named;
+3. `K table ((0 0) (1 2.5));` or `K polynomial ((1 0) (2 1));` - an inline
+   list after the type name;
+4. `K sine;` with the parameters in a sub-dictionary `KCoeffs { ... }`;
+5. `K { type sine; ... }` - the type and the parameters in one sub-dictionary.
+
+A sub-dictionary may nest (form 5 inside form 5) only as the two children of
+`scale`. A relative `file` path, or one starting `$FOAM_CASE/` or `<case>/`,
+is resolved against the case directory (the directory above the time
+directory the field file was read from).
+
+**The types.** Every
+expression below is evaluated in exactly the order written, with no fused
+multiply-add, in IEEE-754 double on the host AND on the device (§120.1's
+device paragraph), so the two agree bit for bit.
+
+```
+constant      F(x) = v                                                  (120.1)
+table         x_0 < x_1 < ... < x_{N-1} strictly, y_k of n_c components;
+              x' = OOB(x) below; F(x') = y_0 if x' <= x_0, y_{N-1} if x' >= x_{N-1},
+              otherwise with x_j <= x' < x_{j+1}:
+                linear: F = y_j + ((x' - x_j)/(x_{j+1} - x_j))*(y_{j+1} - y_j)  (120.2)
+                step:   F = y_j                                         (120.3)
+OOB(x)        clamp | warn | error: x' = x (the end rule of (120.2) clamps);
+              repeat (N >= 2, P = x_{N-1} - x_0):
+                r = fmod(x - x_0, P); if r < 0 then r = r + P; x' = x_0 + r   (120.4)
+polynomial    F_c(x) = sum_{k=0}^{K-1} c_{k,c} * pw(x, e_k), summed from 0 in k order,
+              e_k an integer with |e_k| <= 64; pw by repeated squaring, a
+              negative e_k as 1/pw(x, |e_k|)                            (120.5)
+sine          phi = f*(x - x_s);  F_c = L_c + (A*S_c)*S2(phi)            (120.6)
+square        phi = f*(x - x_s);  u = phi - floor(phi);  d = m/(1 + m);
+              q = 1 if u < d else -1;  F_c = L_c + (A*S_c)*q           (120.7)
+ramps         u = (x - x_s)/D, then u = 0 if u < 0, u = 1 if u > 1:
+                linearRamp u;  quadraticRamp u*u;
+                halfCosineRamp 0.5*(1 - C2(0.5*u));
+                quarterSineRamp S2(0.25*u);
+                quarterCosineRamp 1 - C2(0.25*u)                        (120.8)
+scale         F_c(x) = s(x)*v_c(x), s a scalar Function1, v of n_c components,
+              neither of them a scale                                  (120.9)
+```
+
+`A` is `amplitude` (scalar, required), `f` `frequency` (scalar, required,
+> 0), `x_s` `start` (default 0), `L` `level` and `S` `scale` (of the entry's
+rank, defaults 0 and 1 in every component), `m` `markSpace` (default 1,
+> 0; the fraction of a period at +1 is `m/(1 + m)`), `D` `duration`
+(required, > 0). `d` in (120.7) is computed once on the host and carried.
+`tableFile` reads the (120.2) list `( (x y) ... )` from `file`; `csvFile`
+reads it from a delimited text file - `nHeaderLine` lines skipped (default
+0), `refColumn` the column of `x` (default 0), `componentColumns` the `n_c`
+columns of `y` (required), `separator` one character (default `,`),
+`mergeSeparators` treating a run of separators as one (default false). Both
+then ARE a `table`, with its `outOfBounds` (default `clamp`) and
+`interpolationScheme` (default `linear`). The sources: linear interpolation
+<https://en.wikipedia.org/wiki/Linear_interpolation>; the step function
+<https://en.wikipedia.org/wiki/Step_function>; the sine wave
+<https://en.wikipedia.org/wiki/Sine_wave>; the pulse wave and its duty cycle
+<https://en.wikipedia.org/wiki/Pulse_wave>; the ramp function
+<https://en.wikipedia.org/wiki/Ramp_function>; exponentiation by squaring
+<https://en.wikipedia.org/wiki/Exponentiation_by_squaring>.
+
+**`S2` and `C2`: `sin(2 pi c)` and `cos(2 pi c)` in basic operations only.**
+The device's `sin` and the host's are different programs and agree to an
+ulp or two, not bit for bit, so neither is called. The argument is a number
+of TURNS, which makes the range reduction exact:
+
+```
+u = c - floor(c);  w = 4*u;  q = floor(w);  r = w - q;  if q == 4 then q = 0
+if r <= 0.5:  a = r*H;        (s0, c0) = (Ps(a), Pc(a))
+else:         a = (1 - r)*H;  (s0, c0) = (Pc(a), Ps(a))
+(S2, C2) = (s0, c0), (c0, -s0), (-s0, -c0), (-c0, s0)   for q = 0, 1, 2, 3   (120.10)
+Ps(a) = a*(1 + z*(-1/3! + z*(1/5! + ... + z*(-1/19!)...)))   z = a*a
+Pc(a) = 1 + z*(-1/2! + z*(1/4! + ... + z*(-1/18!)...))                        (120.11)
+```
+
+`H` is the double nearest `pi/2` (`std::f64::consts::FRAC_PI_2`) and each
+coefficient `±1/n!` is the double the division `1.0/n!` rounds to (`n!` is
+exact in double up to `22!`). `c - floor(c)`, `4*u`, `w - q` and `1 - r` are
+exact, so the only rounding before the polynomial is the caller's own
+`phi`, and `a <= pi/4` where the truncated Taylor series of A&S 4.3.65-4.3.66
+(next term `< 1e-19`) is far below an ulp. **Abramowitz, M. & Stegun, I. A.
+(1964), Handbook of Mathematical Functions, NBS AMS 55, 4.3.65-4.3.66 and
+4.3.16 (periodicity)**, open scan <https://personal.math.ubc.ca/~cbm/aands/>;
+the Taylor series <https://en.wikipedia.org/wiki/Taylor_series>.
+
+**Out of bounds is settled at setup, not on the device.** A table's argument
+range over the run is known before the first step: `[t_start, t_end]` for a
+time profile, `[min_f s_f, max_f s_f]` for a profile. `error` refuses the
+case naming the setting, the range and the table's ends when that range is
+not inside `[x_0, x_{N-1}]`; `warn` prints that once and clamps; `clamp`
+clamps silently; `repeat` maps by (120.4). So the device sees clamp or repeat
+only, and never has to stop a run.
+
+**Refused by name** (§13.4): an unknown type; a `scale` inside a `scale`; a
+non-integer or `|e| > 64` polynomial exponent; a ramp, or a scalar-only type,
+on a vector entry; `xScale` (an argument scaling this reader does not carry);
+a table with no points, a repeated or decreasing `x`, or `repeat` on one
+point; `frequency`, `duration` or `markSpace` not `> 0`; a `componentColumns`
+whose length is not `n_c`; an unreadable `file`.
+
+**On the device.** `cuda/function1.cu` evaluates (120.1)-(120.11) in double in
+BOTH builds - a time of 1000 s stepped by 1e-4 s is not an f32 number - and
+compiles with `-fmad=false` (`FMAD_OFF_UNITS`), so the host twin in
+`src/function1.rs` is bit for bit the device (`src/function1/device.rs`
+holds the kernels' Rust side). The time is a device-resident
+clock `[t, dt]` in double: `F1Clock::advance` launches `t = t + dt`, so a
+captured time step replays with the time moving (§81.1 defect (b) is a time
+kept on the host). A time-varying patch writes its Robin-triple entry once
+per step, `target_{f,c} = (Scalar)(base_{f,c} + w_{f,c}*F_{c'}(t))` with
+`c' = c` when `F` has the target's rank and `c' = 0` when `F` is scalar,
+rounded ONCE to `Scalar` (§118's rule). `fixedProfile` is a function of a
+face coordinate, not of time: it is evaluated once at setup by the host twin,
+which the bitwise gate below makes the same numbers the device would write.
+
+| condition | kind | target | `base` | `w` | entry |
+|---|---|---|---|---|---|
+| `uniformFixedValue` | fixedValue | `ref_value` | 0 | 1 | `uniformValue` |
+| `uniformFixedGradient` | fixedGradient | `ref_grad` | 0 | 1 | `uniformGradient` (else `gradient`, as before) |
+| `uniformInletOutlet` | inletOutlet | `ref_value` | 0 | 1 | `uniformInletValue` |
+| `uniformTotalPressure` | totalPressure | `ref_value` | totalPressure's value at `p0 = 0` | 1 | `p0` |
+| `flowRateInletVelocity` | flowRateInletVelocity | `ref_value` | 0 | `-n_f/A` | `volumetricFlowRate` or `massFlowRate` |
+| `fixedProfile` | fixedValue | `ref_value`, at setup | — | — | `profile`, `direction`, `origin` |
+
+`fixedProfile`'s argument is `s_f = (d/|d|) . x_f - origin` with `x_f` the
+face centre in f64 (`HostMesh::geom64`), `d` = `direction` (required, not
+zero) and `origin` a scalar (default 0). `uniformTotalPressure`'s base is
+bitwise `totalPressure`'s, because `p0 + (-q) = p0 - q` exactly in IEEE.
+
+**Which runs advance the clock.** The setup entry points that existed before
+this section accept a Function1 entry only when it is a `constant`, and refuse
+a time-varying one by name - the patch, the entry, and that this driver does
+not advance Function1 boundary conditions - because running it at its first
+value would be the silent substitution §13.4 forbids. The `*_timed` entry
+points take the run's `[t_start, t_end]`, evaluate every time-varying patch
+at `t_start` for the initial triple, and return the `TimedBcs` a driver
+applies after each `F1Clock::advance`. Wiring the drivers is a follow-up
+unit; until it lands the time-varying forms run through the library API.
+
+**Gates** (precision class D - bitwise - in both builds; A for the integral):
+`function1::tests::device_equals_host_bitwise_at_1000_points_per_type`
+evaluates every type, both table schemes and both device out-of-bounds modes
+at 1000 arguments spanning and overrunning each function's range, device
+against host, bit for bit. `function1::tests::the_ramped_inlet_replays_bitwise`
+is §81's gate for `src/function1/device.rs`, where the launches are: a `flowRateInletVelocity` patch whose
+rate is `linearRamp`-scaled, one step = `advance` + apply, captured and
+replayed three times bit for bit with the time moving.
+`function1::tests::ramped_inlet_volume_is_the_closed_form` steps the same
+patch through `t in [0, 1]` with `dt = 1/64`, rate `Q0*linearRamp(start 0.25,
+duration 0.5)`, measures the inflow `-sum_f ref_value_f . Sf` at every step
+and integrates it by the trapezoid rule, which is exact for a piecewise-linear
+rate whose kinks fall on steps: `int_0^1 Q dt = Q0*(1 - 0.25 - 0.5/2) =
+0.5*Q0` to 1e-12 relative in the f64 build (under `single` the Robin
+triple it reads is f32, so it carries §112.3's ignore attribute and moves
+its count by one). `S2`/`C2` agree with `sin(2 pi c)`/`cos(2 pi c)` to
+2e-15 absolute on `c in [0, 1)` (`function1::tests::s2_c2_match_std_to_2e_15`).
+
+No GPL-licensed source was consulted.
+
+### 120.3 The wall and slip family - one tensorial mixed condition, a rotating wall, and a shear-stress wall
+
+BC-07 implements eight names of the §120 table. Six are rewrites of the
+§4 triple at setup with no new evaluation branch; ONE new vector branch
+(`BcKind::DirectionMixed`, kind 37) carries the four conditions whose face
+value a scalar `fr` cannot express. The names are taken from the user guides
+of §120 by name only; every equation below is ours or is cited.
+
+**The tensorial mixed form** *(DESIGN - ours, the vector analogue of §4's
+Robin triple)*. A face carries a symmetric value-fraction tensor `F`, a
+reference value `r` and a reference gradient `g`, and is evaluated as
+
+```
+U_b = F·r + (I - F)·(U_P + g/Delta_b)                          (120.3a)
+```
+
+with `Delta_b` the boundary delta coefficient of §2.4 and the same guard as
+§4: `g/Delta_b` is 0 where `Delta_b = 0`. `F = I` is fixedValue, `F = 0` is
+fixedGradient, and `F = n n` (n the unit outward face normal) fixes the
+normal component and leaves the tangential one free - the projection of
+Jasak (1996, PhD thesis, Imperial College, §3.2, as `cuda/field.cu`
+already cites it) that `symmetry` already
+uses. The device evaluates (120.3a) in this operation order, and the host
+twin `field::direction_mixed_value` in the same order:
+`q = U_P + g/Delta_b`, `a = F·r`, `b = F·q`, `U_b = a + (q - b)`, each
+matrix-vector product summed `F_x0 v_0 + F_x1 v_1 + F_x2 v_2` left to right.
+`cuda/field.cu` is compiled with FMA contraction on (§67.11), so the device
+and the host agree to round-off, not bitwise.
+
+**What the matrix sees** *(DESIGN)*. A per-component scalar `fr` cannot
+carry `F`, so the matrix sees the TANGENTIAL part of (120.3a) implicitly,
+through §4's own triple:
+
+```
+fr = f_t = (tr F - n·F·n)/2,   refValue = r,   refGrad = g     (120.3h)
+```
+
+For the value fractions the named conditions build, `F = f_t (I - n n) +
+f_n n n`, the tangential components of §4's expression with this triple are
+exactly the tangential components of (120.3a), so a tangential wall shear,
+slip or stress enters the matrix implicitly and in the precision's own
+arithmetic: `partialSlip` gets `f_t = f`, `fixedNormalSlip` and
+`fixedShearStress` `f_t = 0` (the latter a Neumann `g` exactly as
+`fixedGradient` is). For a general `F` (120.3h) is the matrix's
+approximation, and (120.3a) is still the face value every operator reads.
+The normal component is not the matrix's: `momFluxIsPrescribed`
+(cuda/momentum.cu), `vofFluxIsPrescribed` (cuda/vof.cu) and the Marangoni
+boundary force (cuda/marangoni.cu) also hold on any face whose velocity kind
+is `DirectionMixed`, so the flux through it is `U_b·Sf` with `U_b` from
+(120.3a) - the normal component (120.3a) fixes - and no pressure correction
+moves it. The tensor, `r` and `g` live in a 12-entry per-face block
+(`GpuVectorField::dm`: `F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y r_z g_x g_y
+g_z`) that the boundary kernel reads. A deferred Dirichlet (`fr = 1` at the
+last evaluated value) was the first draft: it put the face value through an
+f32 round trip before the wall stress was formed from it, and the
+`fixedShearStress` channel under `single` came out at 1.7e-5 of `tau H/nu`
+against 7.0e-6 for the same channel written with `fixedGradient`.
+
+**directionMixed** reads `refValue` (vector), `refGradient` (vector) and
+`valueFraction`. `valueFraction` is a symmTensor `(xx xy xz yy yz zz)`,
+`uniform` or `nonuniform List<symmTensor>`; a scalar `valueFraction f` is
+read as `F = f I`.
+
+**partialSlip** reads `valueFraction f` (scalar, required) and `refValue
+U_w` (vector, default 0). Its face value is
+
+```
+U_b = (1 - f)(I - n n)·U_P + f U_w                             (120.3b)
+```
+
+which is (120.3a) with `g = 0`,
+
+```
+F = f I + (1 - f) n n,     r = (I - n n)·U_w + f n (n·U_w)     (120.3c)
+```
+
+since `I - F = (1 - f)(I - n n)` and `F·r = f U_w` (for `f = 0`, `r` is the
+tangential part of `U_w` and `F·r = n(n·r) = 0`). In a plane Couette flow
+between a `partialSlip` wall at `y = 0` (`U_w = 0`) and a wall moving at
+`U` at `y = H`, the face value is `u_b = (1 - f) u_P` with `u_P` at the
+distance `1/Delta_b`, which is the Navier slip condition `u_b = lambda
+du/dy` with the slip length
+
+```
+lambda = (1 - f) / (f Delta_b)                                 (120.3d)
+u(y)   = U (y + lambda) / (H + lambda)                         (120.3e)
+```
+
+(Navier 1823, Mém. Acad. Sci. Inst. France 6:389, public domain; the
+Couette profile with a slip length, Lauga, Brenner & Stone 2005, open:
+<https://arxiv.org/abs/cond-mat/0501557>, the slip length of its section 1; plane Couette flow,
+open: <https://en.wikipedia.org/wiki/Couette_flow>). The profile is linear,
+so the finite-volume solution on a uniform mesh is (120.3e) at every cell
+centre to round-off. `f = 1` is no-slip; `f = 0` is `slip`; `lambda` depends on the wall cell, as (120.3d) says.
+
+**fixedNormalSlip** reads `fixedValue U_n` (vector). It is (120.3a) with
+`F = n n`, `r = U_n`, `g = 0`: `U_b = n (n·U_n) + (I - n n)·U_P`.
+
+**fixedShearStress** reads `tau` (vector, kinematic: Pa per unit density,
+m^2/s^2 - this incompressible solver's `rho` is 1, as `flowRateInletVelocity`
+already assumes, so `tau/mu = tau/nu`). For a Newtonian fluid the wall
+traction is `mu dU/dn` (open: <https://en.wikipedia.org/wiki/Shear_stress>),
+so the face is (120.3a) with
+
+```
+F = n n,   r = 0,   g = (I - n n)·tau / nu                     (120.3f)
+```
+
+no flow through the wall, and the tangential wall-normal gradient
+`dU_t/dn = tau_t/nu`. `nu` is the LAMINAR kinematic viscosity, handed to the
+setup in `BcInputs::nu`; a setup without it is refused naming `nu`. No
+driver passes `nu` yet, so today every driver refuses the name by that
+message (a follow-up wires it); with a turbulence model the wall's `nu_t`
+would also enter the stress, and (120.3f) does not include it.
+
+**rotatingWallVelocity** reads `origin` (vector), `axis` (vector, normalised
+here to `a`) and `omega` (rad/s, a §120.1 Function1 of time). The wall
+velocity is the rigid rotation (open:
+<https://en.wikipedia.org/wiki/Angular_velocity>) with the component normal
+to the face removed, so a faceted wall carries no flux:
+
+```
+w_f = (I - n n)·(a × (x_f - origin)),   U_b = omega(t) w_f     (120.3g)
+```
+
+`w_f` is computed in f64 from the f64 face centres and normals (§118.2) and
+rounded once. It is a fixedValue at `U_b`: a constant `omega` is that
+value; a time-varying one is a §120.1 timed patch with `base = 0`, `w =
+w_f` and the scalar `omega` scaling it, through `setup_vector_field_timed`.
+On a face where `a × (x_f - origin)` is tangential already (a lid rotating
+about its own normal), `U_b = omega a × (x_f - origin)` exactly.
+
+**translatingWallVelocity** reads `U` (vector, a §120.1 Function1 of time)
+and is `uniformFixedValue` with the key `U`: the wall's velocity as written,
+constant anywhere and time-varying through the timed path.
+
+**extrapolatedCalculated** is zeroGradient (`U_b = U_P`, `psi_b = psi_P`) on
+any field. **nutUSpaldingWallFunction** is an alias of `nutUWallFunction`,
+which already applies Spalding's single formula (§15.1), printed once.
+
+`directionMixed`, `partialSlip`, `fixedNormalSlip`, `fixedShearStress`,
+`rotatingWallVelocity` and `translatingWallVelocity` are vector conditions
+and are refused by name on a scalar field.
+
+**Gates** (`rust/tests/bc_wall_slip.rs`, both builds; f64 tolerance first,
+then the `single` class of §118 and D-F32-1; every measured value is checked
+finite first, because `f64::max` drops a NaN and once let a NaN field report
+`0.000e0` and pass):
+`partial_slip_couette_is_the_slip_length_profile` - a cyclic-in-x Couette
+channel, 16 cells across, `f = 0.25` and `0.5`, top wall at `U = 1`: every
+cell centre within 1e-10 of `U` of (120.3e) with `lambda` from (120.3d) and
+the mesh's own `Delta_b`, the evaluated wall value within 1e-10, the
+cross-stream velocity at most 1e-10 (class R: 1e-5 under `single`).
+`fixed_shear_stress_wall_gradient_is_tau_over_nu` - the same channel 8 cells
+across, driven by `tau` at its top: the evaluated wall gradient `(u_b - u_P)
+Delta_b` equals `tau/nu` to 1e-12 relative (class R: 1e-5), and the cell
+profile is `tau y/nu` to 1e-10 of `tau H/nu` (class R: 1e-5).
+`no_flux_through_a_partial_slip_wall` - a lid-driven cavity with
+`partialSlip` side walls: `|phi_b|` and `|U_b·n|` on them at most 1e-12
+(class R: 1e-5). `a_rotating_lid_is_omega_cross_r` - a lid rotating about its
+normal: every face value within 1e-14 of `omega a × r` relative to `|omega|
+R_max` (class R: 5.4e-6), and a tilted axis gives (120.3g) with `|n·U_b|`
+within the same bound. The device evaluation of (120.3a) is held against its
+host twin to 1e-14 relative (class R: 5.4e-6) by
+`direction_mixed_device_is_its_host_twin`. The channels pin `p` at 0 on
+`yMin`: their solution has no pressure gradient, so the Dirichlet face moves
+nothing, and a pure-Neumann `p` (zeroGradient, cyclic and empty only)
+diverges to NaN within a few outer iterations under `single` - with
+`noSlip` and `fixedGradient` velocities too, no BC-07 condition involved.
+
+**Findings under `single`, not hidden by any band.** The f32 SIMPLE outer
+loop does not reach a fixed point on these channels (the iterate change
+stays at the f32 spacing of `U`), so a steady f32 result carries a floor of
+its own: the 16-cell no-slip Couette channel sits at 3.1e-6 (`U = 1`) and
+2.1e-6 (`U = 0.2`) of `U`, the same channel driven by `fixedGradient`
+(0.2 0 0) at 7.0e-6 of `tau H/nu`, and the 16-cell `fixedShearStress`
+channel at 1.17e-5 - over its class-R 1e-5, which is why its gate runs 8
+cells across (5.4e-7, 2.7e-6 of `tau H/nu`): the profile is linear and the
+f64 answer does not depend on the resolution, the gate's size is reduced and
+its tolerance is not. The pure-Neumann divergence above is the second
+finding; both belong to §118's mixed-precision loop, not to this section.
+
+No GPL-licensed source was consulted.
 
 ## 121. Boussinesq buoyancy — `-β(T - T_ref)g` on faces, beside the density-ratio form
 

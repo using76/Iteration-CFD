@@ -344,6 +344,27 @@ pub enum BcKind {
     ///
     /// **No new device branch**, for the same reason as above.
     PorousJumpPressure = 36,
+
+    /// The tensorial mixed condition of SPEC-LIT 120.3 - `directionMixed`,
+    /// `partialSlip`, `fixedNormalSlip` and `fixedShearStress` all ride it:
+    ///
+    /// ```text
+    /// U_b = F.r + (I - F).(U_P + g/Delta_b)                    (120.3a)
+    /// ```
+    ///
+    /// with `F` a symmetric value-fraction tensor, `r` a reference value and
+    /// `g` a reference gradient, held per face in the 12-entry
+    /// [`GpuVectorField::dm`] block `F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y
+    /// r_z g_x g_y g_z`. A per-component scalar `fr` cannot carry `F`, so
+    /// what the matrix sees is (120.3h): `fr = f_t = (tr F - n.F.n)/2`,
+    /// `refValue = r`, `refGrad = g` - the TANGENTIAL part of (120.3a)
+    /// enters the matrix implicitly, through the one triple of §4, and the
+    /// boundary kernel writes the face value (120.3a) into `bf` only.
+    /// `F = I` is fixedValue, `F = 0` is fixedGradient, `F = n n` fixes the
+    /// normal component and leaves the tangential one free. The host twin of
+    /// the device evaluation is
+    /// [`direction_mixed_value`](crate::field::direction_mixed_value).
+    DirectionMixed = 37,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -408,7 +429,68 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "fan",
     "porousJumpPressure",
     "porousBafflePressure",
+    // SPEC-LIT 120.1: the Function1 conditions of the time-varying family.
+    "uniformFixedValue",
+    "uniformInletOutlet",
+    "uniformTotalPressure",
+    "fixedProfile",
+    // SPEC-LIT 120.3: the wall and slip family. `extrapolatedCalculated` is
+    // zeroGradient; the four tensorial names ride `BcKind::DirectionMixed`;
+    // the two moving walls ride `FixedValue`.
+    "extrapolatedCalculated",
+    "directionMixed",
+    "rotatingWallVelocity",
+    "translatingWallVelocity",
+    "partialSlip",
+    "fixedNormalSlip",
+    "fixedShearStress",
 ];
+
+/// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
+///
+/// `dm` is the 12-entry per-face block
+/// `[F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y r_z g_x g_y g_z]`, `u_p` the
+/// wall-adjacent cell value and `delta` the boundary delta coefficient of
+/// SPEC-LIT 2.4. The SAME operation order the kernel in `cuda/field.cu`
+/// runs: `q = U_P + g/Delta_b` (the `g/Delta_b` term 0 where `Delta_b = 0`),
+/// `a = F.r`, `b = F.q`, `U_b = a + (q - b)`, each matrix-vector product
+/// summed `F_x0 v_0 + F_x1 v_1 + F_x2 v_2` left to right. The device is
+/// compiled with FMA contraction on, so host and device agree to round-off,
+/// not bitwise - SPEC-LIT 120.3 records that.
+#[inline]
+pub fn direction_mixed_value(dm: &[Scalar], u_p: Vec3, delta: Scalar) -> Vec3 {
+    debug_assert!(dm.len() >= 12, "a DirectionMixed block has 12 entries");
+
+    let fxx = dm[0];
+    let fxy = dm[1];
+    let fxz = dm[2];
+    let fyy = dm[3];
+    let fyz = dm[4];
+    let fzz = dm[5];
+    let (rx, ry, rz) = (dm[6], dm[7], dm[8]);
+    let (gx, gy, gz) = (dm[9], dm[10], dm[11]);
+
+    // q = U_P + g/Delta_b, the guard of section 4 on a degenerate face.
+    let (qx, qy, qz) = if delta != 0.0 {
+        (u_p.x + gx / delta, u_p.y + gy / delta, u_p.z + gz / delta)
+    } else {
+        (u_p.x, u_p.y, u_p.z)
+    };
+
+    // a = F.r and b = F.q, each row summed left to right.
+    let a = Vec3::new(
+        fxx * rx + fxy * ry + fxz * rz,
+        fxy * rx + fyy * ry + fyz * rz,
+        fxz * rx + fyz * ry + fzz * rz,
+    );
+    let b = Vec3::new(
+        fxx * qx + fxy * qy + fxz * qz,
+        fxy * qx + fyy * qy + fyz * qz,
+        fxz * qx + fyz * qy + fzz * qz,
+    );
+
+    Vec3::new(a.x + (qx - b.x), a.y + (qy - b.y), a.z + (qz - b.z))
+}
 
 impl BcKind {
     /// Map an OpenFOAM boundary-condition type string, per SPEC-LIT §13.4.
@@ -424,6 +506,10 @@ impl BcKind {
     pub fn from_name(name: &str, field: &str, patch: &str) -> Result<Self> {
         let k = match name {
             "fixedValue" | "noSlip" => Self::FixedValue,
+            // SPEC-LIT 120.1: the Function1 conditions ride as the condition
+            // they degenerate to; `field_setup` reads their entry and refuses
+            // a time-varying one where the clock does not advance.
+            "uniformFixedValue" | "fixedProfile" => Self::FixedValue,
             "zeroGradient" => Self::ZeroGradient,
             "fixedGradient" | "uniformFixedGradient" => Self::FixedGradient,
             "mixed" | "freestream" | "freestreamVelocity" => Self::Mixed,
@@ -433,7 +519,7 @@ impl BcKind {
             "empty" => Self::Empty,
             "symmetry" | "symmetryPlane" | "slip" | "wedge" => Self::Symmetry,
             "cyclic" | "cyclicSlip" | "processor" => Self::Cyclic,
-            "inletOutlet" | "freestreamPressure" => Self::InletOutlet,
+            "inletOutlet" | "freestreamPressure" | "uniformInletOutlet" => Self::InletOutlet,
 
             "turbulentIntensityKineticEnergyInlet" => {
                 Self::TurbulentIntensityKineticEnergyInlet
@@ -444,9 +530,41 @@ impl BcKind {
             "turbulentMixingLengthFrequencyInlet" => Self::TurbulentMixingLengthFrequencyInlet,
             "pressureInletOutletVelocity" => Self::PressureInletOutletVelocity,
             "fixedFluxPressure" => Self::FixedFluxPressure,
-            "totalPressure" => Self::TotalPressure,
+            "totalPressure" | "uniformTotalPressure" => Self::TotalPressure,
             "movingWallVelocity" => Self::MovingWallVelocity,
             "flowRateInletVelocity" => Self::FlowRateInletVelocity,
+
+            // SPEC-LIT 120.3: the wall and slip family. `extrapolatedCalculated`
+            // IS zeroGradient on any field. The four tensorial names all carry
+            // (120.3a) - the per-face F, r and g they each imply are read and
+            // packed into `GpuVectorField::dm` by `field_setup`, which also
+            // refuses the names where the entry they are defined by is
+            // missing. The two moving walls are a fixedValue at the wall
+            // velocity; `rotatingWallVelocity`'s wall-normal component is
+            // removed by the setup that builds it, not by the kind.
+            "extrapolatedCalculated" => Self::ZeroGradient,
+            "directionMixed" | "partialSlip" | "fixedNormalSlip" | "fixedShearStress" => {
+                Self::DirectionMixed
+            }
+            "rotatingWallVelocity" | "translatingWallVelocity" => Self::FixedValue,
+
+            // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
+            // function. `nutUWallFunction` already applies Spalding's single
+            // formula (SPEC-LIT 15.1), so the name is an alias, printed once -
+            // the same treatment `compressible::alphatJayatillekeWallFunction`
+            // below gets.
+            "nutUSpaldingWallFunction" => {
+                crate::io::contract::warn_once(
+                    &format!("{field}: nutUSpaldingWallFunction"),
+                    &format!(
+                        "{field}: boundaryField/{patch}/type `nutUSpaldingWallFunction` \
+                         (OpenFOAM's Spalding spelling; `nutUWallFunction` already \
+                         applies Spalding's law, SPEC-LIT 15.1) mapped to \
+                         `nutUWallFunction`"
+                    ),
+                );
+                Self::NutUWallFunction
+            }
 
             "nutkWallFunction" => Self::NutkWallFunction,
             "nutUWallFunction" => Self::NutUWallFunction,
@@ -720,17 +838,6 @@ impl BcKind {
                     "outletInlet is the REVERSE switch of inletOutlet: a fixed value on OUTflow and zero-gradient on inflow (docs/01-model-catalog.md: valueFraction = pos0(phi_b)), while every flux-switched condition this solver implements is Dirichlet on inflow; it used to be mapped to inletOutlet, which is the opposite condition",
                     "calculated (a fixed value at whatever the file's `value` entry held)",
                     Self::Calculated,
-                );
-            }
-
-            "uniformFixedValue" => {
-                return unsupported_note(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    IMPLEMENTED_BC_NAMES,
-                    "uniformFixedValue carries its value as a `uniformValue` Function1 of time, which this reader does not read - only `value` is - so a table or a ramp would silently run as its first `value`; write fixedValue with a `value` entry",
-                    "fixedValue at the file's `value` entry",
-                    Self::FixedValue,
                 );
             }
 
@@ -1111,6 +1218,13 @@ pub struct GpuVectorField {
     pub ref_value: DevBuf<Vec3>,
     pub ref_grad: DevBuf<Vec3>,
     pub bc_kind: DevBuf<Label>,
+    /// `[12 n_bf]` the DirectionMixed block of SPEC-LIT 120.3,
+    /// `F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y r_z g_x g_y g_z` per boundary
+    /// face - `(120.3a)`'s `F`, `r` and `g`, and `(120.3h)`'s triple source:
+    /// the matrix reads `fr = f_t`, `refValue = r`, `refGrad = g`. Zero
+    /// everywhere a face does not carry one of the four tensorial names
+    /// (see [`BcKind::DirectionMixed`]).
+    pub dm: DevBuf<Scalar>,
 }
 
 impl GpuVectorField {
@@ -1128,6 +1242,7 @@ impl GpuVectorField {
             ref_value: gpu.zeros(m.n_boundary_faces)?,
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
+            dm: gpu.zeros(12 * m.n_boundary_faces)?,
         })
     }
 }
@@ -1268,22 +1383,21 @@ mod tests {
         assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
     }
 
-    /// SPEC-LIT §13.4 and §13.4.4's audit. The three names used to be aliases
+    /// SPEC-LIT §13.4 and §13.4.4's audit. The two names used to be aliases
     /// to conditions that are NOT what they name: `outletInlet` is the reverse
-    /// switch of `inletOutlet`, `uniformFixedValue`'s value lives in a
-    /// `uniformValue` entry this reader never reads, and `cyclicAMI` needs
-    /// interpolation weights the solver does not have. Each is refused by
-    /// name; `-permissive` substitutes the documented fallback and warns once
-    /// per setting.
+    /// switch of `inletOutlet`, and `cyclicAMI` needs interpolation weights
+    /// the solver does not have. (`uniformFixedValue` was the third until
+    /// SPEC-LIT 120.1 made it read its `uniformValue` Function1.) Each is
+    /// refused by name; `-permissive` substitutes the documented fallback and
+    /// warns once per setting.
     #[test]
-    fn the_three_conditions_that_are_not_their_alias_are_refused_by_name() {
+    fn the_two_conditions_that_are_not_their_alias_are_refused_by_name() {
         let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         crate::io::contract::reset_warnings();
 
         for (name, word) in [
             ("outletInlet", "inletOutlet"),
-            ("uniformFixedValue", "uniformValue"),
             ("cyclicAMI", "cyclic"),
         ] {
             let e = BcKind::from_name(name, "U", "inlet")
@@ -1299,10 +1413,6 @@ mod tests {
         assert!(matches!(
             BcKind::from_name("outletInlet", "U", "inlet").expect("permissive"),
             BcKind::Calculated
-        ));
-        assert!(matches!(
-            BcKind::from_name("uniformFixedValue", "U", "inlet").expect("permissive"),
-            BcKind::FixedValue
         ));
         assert!(matches!(
             BcKind::from_name("cyclicAMI", "U", "inlet").expect("permissive"),
@@ -1355,7 +1465,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [49, 2, 59, 10, 10], "the per-status counts");
+        assert_eq!(counts, [60, 3, 47, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

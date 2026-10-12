@@ -1421,6 +1421,7 @@ impl<'m> Momentum<'m> {
                             .arg(&m.b_sf)
                             .arg(&m.b_kind)
                             .arg(&u.fr)
+                            .arg(&u.bc_kind)
                             .arg(&g.x)
                             .arg(&g.y)
                             .arg(&g.z)
@@ -1462,6 +1463,7 @@ impl<'m> Momentum<'m> {
                             .arg(&m.b_sf)
                             .arg(&m.b_kind)
                             .arg(&u.fr)
+                            .arg(&u.bc_kind)
                             .arg(&g.x)
                             .arg(&g.y)
                             .arg(&g.z)
@@ -1550,6 +1552,7 @@ impl<'m> Momentum<'m> {
                     .arg(&self.sn_grad_p.bf)
                     .arg(&m.b_kind)
                     .arg(&u.fr)
+                    .arg(&u.bc_kind)
                     .arg(&nl)
                     .launch(cfg_for(nbf))?;
             }
@@ -2091,6 +2094,7 @@ impl<'m> Momentum<'m> {
                     .arg(&m.b_nbr_cell)
                     .arg(&m.b_kind)
                     .arg(&u.fr)
+                    .arg(&u.bc_kind)
                     .arg(&nbl)
                     .launch(cfg_for(nbf))?;
             }
@@ -2154,6 +2158,7 @@ impl<'m> Momentum<'m> {
                     .arg(&self.sn_grad_p.bf)
                     .arg(&m.b_kind)
                     .arg(&u.fr)
+                    .arg(&u.bc_kind)
                     .arg(&nl)
                     .launch(cfg_for(nbf))?;
             }

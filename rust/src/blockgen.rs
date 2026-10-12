@@ -4536,6 +4536,7 @@ fn patch_spec(type_name: &str) -> PatchFieldSpec {
         inlet_value_v: Vec::new(),
         value_fraction: Vec::new(),
         extra: std::collections::BTreeMap::new(),
+        dicts: std::collections::BTreeMap::new(),
     }
 }
 

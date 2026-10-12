@@ -167,7 +167,11 @@ pub fn correct_boundary_conditions(
 ///
 /// Componentwise the same expression, except on a symmetry plane, where the
 /// value is the tangential part `U_P - n (n.U_P)` - the average of the cell
-/// value and its mirror image.
+/// value and its mirror image - and on a `DirectionMixed` face (SPEC-LIT
+/// 120.3), where the kernel evaluates (120.3a) from the face's `dm` block
+/// into `bf` ONLY: the matrix sees (120.3h) - `fr = f_t`, `ref_value = r`,
+/// `ref_grad = g` - so the tangential part enters it implicitly, and
+/// `ref_value` is read here, never rewritten.
 pub fn correct_boundary_conditions_vector(
     gpu: &Gpu,
     k: &FieldKernels,
@@ -197,6 +201,7 @@ pub fn correct_boundary_conditions_vector(
             .arg(&f.fr)
             .arg(&f.ref_value)
             .arg(&f.ref_grad)
+            .arg(&f.dm)
             .arg(&f.bc_kind)
             .arg(&m.b_face_cells)
             .arg(&m.b_delta_coeffs)
@@ -825,6 +830,12 @@ mod tests {
         // `OFGPU_BC_NUT_LOW_RE` in cuda/turbulence.cu, where nu_t is pinned
         // to zero at the wall (SPEC-LIT 15.2).
         assert_eq!(BcKind::NutLowReWallFunction as i32, 22);
+
+        // `OFGPU_BC_DIRECTION_MIXED` in cuda/field.cu: the tensorial mixed
+        // condition of SPEC-LIT 120.3, the branch in fldCorrectBcVector that
+        // evaluates (120.3a) into the face value while the matrix sees
+        // (120.3h) - the tangential part implicitly.
+        assert_eq!(BcKind::DirectionMixed as i32, 37);
     }
 
     /// Every branch of SPEC-LIT section 4 against the closed form it
