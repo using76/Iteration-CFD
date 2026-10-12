@@ -120,6 +120,12 @@ pub struct BoundaryTriple<T> {
     /// The evaluated face value, so a field can be written back out without a
     /// device round trip if nothing has run yet.
     pub value: Vec<T>,
+    /// `[12 n_bf]` the DirectionMixed block of SPEC-LIT 120.3,
+    /// `F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y r_z g_x g_y g_z` per boundary
+    /// face, zero wherever the face does not carry one of the four tensorial
+    /// names - `(120.3a)`'s `F`, `r` and `g`, packed for
+    /// [`GpuVectorField::dm`].
+    pub dm: Vec<Scalar>,
 }
 
 impl<T: Copy + Default> BoundaryTriple<T> {
@@ -130,6 +136,7 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             ref_grad: vec![T::default(); n],
             kind: vec![BcKind::ZeroGradient as Label; n],
             value: vec![T::default(); n],
+            dm: vec![0.0; 12 * n],
         }
     }
 }
@@ -161,6 +168,10 @@ pub struct BcInputs<'a> {
     /// `C_mu` **as the case set it**, not the built-in 0.09 - SPEC-LIT §15.6.
     /// `None` means the case did not override it.
     pub cmu: Option<Scalar>,
+    /// The LAMINAR kinematic viscosity, which `fixedShearStress` divides its
+    /// `tau` by - (120.3f) of SPEC-LIT 120.3. `None` refuses the name; no
+    /// driver passes it yet (SPEC-LIT 120.3 records that).
+    pub nu: Option<Scalar>,
 }
 
 impl<'a> BcInputs<'a> {
@@ -178,8 +189,16 @@ struct PatchAux<'a> {
     total_area: Scalar,
     /// The patch's face centres in f64 (SPEC-LIT §118.2's `geom64` view), for
     /// the condition evaluated at a coordinate - `fixedProfile` (SPEC-LIT
-    /// 120.1).
+    /// 120.1) - and for (120.3g)'s `a x (x_f - origin)`.
     bc_f: Vec<DVec3>,
+    /// `[n]` the boundary delta coefficient of SPEC-LIT 2.4, the f64
+    /// `geom64` value cast ONCE into `Scalar`, for (120.3a)'s `g/Delta_b`.
+    delta_b: Vec<Scalar>,
+    /// `[n]` unit outward normals normalised in f64 from the f64 `geom64`
+    /// `b_sf` - the normals (120.3c), (120.3f) and (120.3g) build from
+    /// (SPEC-LIT 120.3, §118.2); cast into `Scalar` only where a `dm` entry
+    /// or the (120.3g) seed needs one.
+    normal64: Vec<DVec3>,
     /// Where this patch starts in the flattened boundary arrays.
     at: usize,
     inputs: BcInputs<'a>,
@@ -207,11 +226,31 @@ impl<'a> PatchAux<'a> {
         let bc_f = (0..p.size)
             .map(|i| cf.b_cf.get(p.start + i).copied().unwrap_or_default())
             .collect();
+        // (120.3a)'s Delta_b and (120.3c)/(120.3f)/(120.3g)'s normals, both
+        // from the f64 `geom64` view (SPEC-LIT 120.3), cast once - `.get`
+        // again, so a synthetic test mesh with no stored geometry still
+        // builds everything that does not read them.
+        let delta_b = (0..p.size)
+            .map(|i| cf.b_delta_coeffs.get(p.start + i).copied().unwrap_or(0.0) as Scalar)
+            .collect();
+        let normal64 = (0..p.size)
+            .map(|i| {
+                let sf = cf.b_sf.get(p.start + i).copied().unwrap_or_default();
+                let a = (sf.x * sf.x + sf.y * sf.y + sf.z * sf.z).sqrt();
+                if a > 0.0 {
+                    DVec3::new(sf.x / a, sf.y / a, sf.z / a)
+                } else {
+                    DVec3::ZERO
+                }
+            })
+            .collect();
 
         Self {
             normal,
             total_area,
             bc_f,
+            delta_b,
+            normal64,
             at: p.start,
             inputs,
         }
@@ -695,6 +734,27 @@ fn scalar_patch(
         return Ok(());
     }
 
+    // SPEC-LIT 120.3: the wall and slip family is a VECTOR condition -
+    // including the two names `BcKind::from_name` maps to `FixedValue`, so
+    // the check is on the NAME, before any kind is derived from it.
+    if matches!(
+        spec.type_name.as_str(),
+        "directionMixed"
+            | "partialSlip"
+            | "fixedNormalSlip"
+            | "fixedShearStress"
+            | "rotatingWallVelocity"
+            | "translatingWallVelocity"
+    ) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{patch}: `{}` is a vector condition and {field} is a scalar field",
+                spec.type_name
+            ),
+        });
+    }
+
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;
 
     let value = spread(&spec.value, n, 0.0, "value", patch)?;
@@ -955,10 +1015,14 @@ fn scalar_patch(
             BcKind::FanPressure | BcKind::PorousJumpPressure => (1.0, 0.0, 0.0),
 
             // Vector-only conditions on a scalar field. Naming one is a
-            // mistake in the case, not something to guess at.
+            // mistake in the case, not something to guess at. The wall and
+            // slip family of SPEC-LIT 120.3 is refused by NAME above - two
+            // of its names map to `FixedValue` and would slip past this arm -
+            // so this arm only keeps the match total.
             BcKind::PressureInletOutletVelocity
             | BcKind::MovingWallVelocity
-            | BcKind::FlowRateInletVelocity => {
+            | BcKind::FlowRateInletVelocity
+            | BcKind::DirectionMixed => {
                 return Err(Error::Field {
                     field: field.to_string(),
                     msg: format!(
@@ -1274,6 +1338,10 @@ fn f1_seed_vector(
         "uniformFixedGradient" => ("uniformGradient", BcKind::FixedGradient),
         "uniformInletOutlet" => ("uniformInletValue", BcKind::InletOutlet),
         "fixedProfile" => ("profile", BcKind::FixedValue),
+        // SPEC-LIT 120.3: `uniformFixedValue` with the key `U` - the wall's
+        // velocity as written, constant anywhere and time-varying through
+        // the timed path below.
+        "translatingWallVelocity" => ("U", BcKind::FixedValue),
         _ => return Ok(None),
     };
     let setting = format!("{field}: boundaryField/{patch}/{key}");
@@ -1375,6 +1443,397 @@ fn f1_seed_vector(
     }))
 }
 
+/// The seed the wall and slip family of SPEC-LIT 120.3 leaves on a patch:
+/// the matrix triple (120.3h) - `fr = f_t = (tr F - n.F.n)/2`, `ref_value =
+/// r`, `ref_grad = g` - plus the 12-entry `dm` block `F r g` the boundary
+/// kernel evaluates (120.3a) from, and the face value itself as the `value`
+/// seed.
+struct WallSlipSeed {
+    kind: BcKind,
+    fr: Vec<Scalar>,
+    ref_value: Vec<Vec3>,
+    ref_grad: Vec<Vec3>,
+    value: Vec<Vec3>,
+    dm: Vec<Scalar>,
+}
+
+/// One raw `f1_vec3` entry out of a patch's `extra`, or an error naming the
+/// key the condition is defined by (SPEC-LIT 120.3's rule for
+/// `fixedNormalSlip`'s `fixedValue` and `rotatingWallVelocity`'s
+/// `origin`/`axis`).
+fn required_vec3(
+    spec: &PatchFieldSpec,
+    key: &str,
+    patch: &str,
+    field: &str,
+    wanted_by: &str,
+) -> Result<Vec3> {
+    let setting = format!("{field}: boundaryField/{patch}/{key}");
+    let raw = spec.extra.get(key).ok_or_else(|| Error::Field {
+        field: field.to_string(),
+        msg: format!("{setting}: {wanted_by} needs a `{key}` entry and the patch has none"),
+    })?;
+    f1_vec3(raw, &setting, key)
+}
+
+/// `directionMixed`'s `valueFraction` per face, from the raw text the reader
+/// captured (SPEC-LIT 120.3): `uniform (xx xy xz yy yz zz)` or `nonuniform
+/// List<symmTensor> N (...)`, six numbers a face, and a wrong count is an
+/// error naming both counts. A SCALAR `valueFraction` never reaches here -
+/// the reader parks it in `value_fraction`, where the caller reads `F = f I`.
+fn symm_tensor_faces(
+    raw: &str,
+    n: usize,
+    patch: &str,
+    field: &str,
+) -> Result<Vec<[Scalar; 6]>> {
+    let setting = format!("{field}: boundaryField/{patch}/valueFraction");
+    let mut tz = crate::io::tokenizer::Tokenizer::new(raw, &setting);
+
+    let per_face: Vec<[Scalar; 6]> = if tz.is_word("uniform") {
+        tz.next()?;
+        tz.expect_punct('(')?;
+        vec![[
+            tz.expect_num()? as Scalar,
+            tz.expect_num()? as Scalar,
+            tz.expect_num()? as Scalar,
+            tz.expect_num()? as Scalar,
+            tz.expect_num()? as Scalar,
+            tz.expect_num()? as Scalar,
+        ]]
+    } else {
+        if tz.is_word("nonuniform") {
+            tz.next()?;
+        }
+        // The optional `List<symmTensor>`, then the count.
+        if matches!(tz.peek_at(0), Some(crate::io::tokenizer::Tok::Word(_))) {
+            tz.next()?;
+        }
+        let declared = tz.expect_num()?;
+        // Every number between here and the list's closing parenthesis; the
+        // per-face braces carry no meaning the six-per-face grouping does
+        // not, so inner groups are consumed and only the ')' that closes the
+        // list ends the sweep.
+        let mut flat: Vec<Scalar> = Vec::new();
+        let mut depth = 0usize;
+        while !tz.done() {
+            if tz.is_punct('(') {
+                depth += 1;
+                tz.next()?;
+                continue;
+            }
+            if tz.is_punct(')') {
+                if depth <= 1 {
+                    break;
+                }
+                depth -= 1;
+                tz.next()?;
+                continue;
+            }
+            flat.push(tz.expect_num()? as Scalar);
+        }
+        if flat.len() != 6 * declared as usize {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{setting}: the list declares {declared} symmTensors and carries {}",
+                    flat.len() / 6
+                ),
+            });
+        }
+        let mut out = Vec::with_capacity(n);
+        for t in flat.chunks_exact(6) {
+            out.push([t[0], t[1], t[2], t[3], t[4], t[5]]);
+        }
+        tz.expect_punct(')')?;
+        out
+    };
+    spread(&per_face, n, [0.0; 6], "valueFraction", patch)
+}
+
+/// The f64 normal of `(120.3c)`/`(120.3f)`, cast into `Scalar` where the
+/// `dm` block is built (SPEC-LIT 120.3).
+fn n3(d: DVec3) -> Vec3 {
+    Vec3::new(d.x as Scalar, d.y as Scalar, d.z as Scalar)
+}
+
+/// Pack a DirectionMixed seed: the matrix triple (120.3h) - `fr = f_t =
+/// (tr F - n.F.n)/2` with `n` the f64 unit normal cast once, `ref_value` =
+/// `r`, `ref_grad` = `g` straight out of the `dm` block - and the face
+/// value (120.3a) evaluated at the wall-adjacent cell value as the `value`
+/// seed (SPEC-LIT 120.3).
+fn finished_direction_mixed(
+    n: usize,
+    aux: &PatchAux,
+    internal: &[Vec3],
+    dm: Vec<Scalar>,
+) -> WallSlipSeed {
+    let mut fr = vec![0.0; n];
+    let mut ref_value = vec![Vec3::ZERO; n];
+    let mut ref_grad = vec![Vec3::ZERO; n];
+    let mut value = vec![Vec3::ZERO; n];
+    for i in 0..n {
+        let d = &dm[12 * i..12 * i + 12];
+        let nn = n3(aux.normal64[i]);
+        let nfn = nn.x * (d[0] * nn.x + d[1] * nn.y + d[2] * nn.z)
+            + nn.y * (d[1] * nn.x + d[3] * nn.y + d[4] * nn.z)
+            + nn.z * (d[2] * nn.x + d[4] * nn.y + d[5] * nn.z);
+        fr[i] = (d[0] + d[3] + d[5] - nfn) / 2.0;
+        ref_value[i] = Vec3::new(d[6], d[7], d[8]);
+        ref_grad[i] = Vec3::new(d[9], d[10], d[11]);
+        value[i] =
+            crate::field::direction_mixed_value(d, internal[i], aux.delta_b[i]);
+    }
+    WallSlipSeed {
+        kind: BcKind::DirectionMixed,
+        fr,
+        ref_value,
+        ref_grad,
+        value,
+        dm,
+    }
+}
+
+/// SPEC-LIT 120.3: the wall and slip family on a vector field - the four
+/// tensorial names that ride [`BcKind::DirectionMixed`], and
+/// `rotatingWallVelocity`, whose wall velocity (120.3g) is a fixedValue at
+/// `omega(t) w_f` (a time-varying one a timed patch with `base = 0`,
+/// `w = w_f`). `Ok(None)` for every other name. `translatingWallVelocity`
+/// rides [`f1_seed_vector`] with the other Function1 conditions.
+#[allow(clippy::too_many_arguments)]
+fn wall_slip_seed(
+    spec: &PatchFieldSpec,
+    n: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+    internal: &[Vec3],
+    f1: Option<&F1Setup>,
+    timed: &mut Vec<TimedPatch>,
+) -> Result<Option<WallSlipSeed>> {
+    match spec.type_name.as_str() {
+        // (120.3a) with the case's own F, r and g: `valueFraction` a
+        // symmTensor per face (or a scalar read as `F = f I`), `refValue`
+        // and `refGradient` the vectors of the same names.
+        "directionMixed" => {
+            let tensors: Vec<[Scalar; 6]> = match spec.extra.get("valueFraction") {
+                Some(raw) => symm_tensor_faces(raw, n, patch, field)?,
+                None => {
+                    if spec.value_fraction.is_empty() {
+                        return Err(Error::Field {
+                            field: field.to_string(),
+                            msg: format!(
+                                "{field}: boundaryField/{patch}/valueFraction: directionMixed \
+                                 needs a `valueFraction` entry and the patch has none"
+                            ),
+                        });
+                    }
+                    let f = spread(&spec.value_fraction, n, 1.0, "valueFraction", patch)?;
+                    (0..n).map(|i| [f[i], 0.0, 0.0, f[i], 0.0, f[i]]).collect()
+                }
+            };
+            let r = spread(&spec.ref_value_v, n, Vec3::ZERO, "refValue", patch)?;
+            let g = spread(&spec.ref_gradient_v, n, Vec3::ZERO, "refGradient", patch)?;
+            let mut dm = vec![0.0; 12 * n];
+            for i in 0..n {
+                let t = tensors[i];
+                dm[12 * i..12 * i + 12].copy_from_slice(&[
+                    t[0], t[1], t[2], t[3], t[4], t[5], r[i].x, r[i].y, r[i].z, g[i].x, g[i].y,
+                    g[i].z,
+                ]);
+            }
+            Ok(Some(finished_direction_mixed(n, aux, internal, dm)))
+        }
+
+        // (120.3b), as (120.3a) with the F and r of (120.3c): the slip
+        // length lambda = (1 - f)/(f Delta_b) - (120.3d) - falls out of the
+        // same three numbers. `valueFraction` is required, by name.
+        "partialSlip" => {
+            if spec.value_fraction.is_empty() {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}/valueFraction: partialSlip needs a \
+                         `valueFraction` entry and the patch has none"
+                    ),
+                });
+            }
+            let f = spread(&spec.value_fraction, n, 1.0, "valueFraction", patch)?;
+            let u_w = spread(&spec.ref_value_v, n, Vec3::ZERO, "refValue", patch)?;
+            let mut dm = vec![0.0; 12 * n];
+            for i in 0..n {
+                let nn = n3(aux.normal64[i]);
+                let c = 1.0 - f[i];
+                let nuw = nn.dot(u_w[i]);
+                let r = u_w[i] - nn * nuw + nn * (f[i] * nuw);
+                dm[12 * i..12 * i + 12].copy_from_slice(&[
+                    f[i] + c * nn.x * nn.x,
+                    c * nn.x * nn.y,
+                    c * nn.x * nn.z,
+                    f[i] + c * nn.y * nn.y,
+                    c * nn.y * nn.z,
+                    f[i] + c * nn.z * nn.z,
+                    r.x, r.y, r.z,
+                    0.0, 0.0, 0.0,
+                ]);
+            }
+            Ok(Some(finished_direction_mixed(n, aux, internal, dm)))
+        }
+
+        // (120.3a) with `F = n n`, `r = U_n`, `g = 0`: the normal component
+        // fixed at `U_n`, the tangential free. `fixedValue` is required, by
+        // name (SPEC-LIT 120.3).
+        "fixedNormalSlip" => {
+            let u_n = required_vec3(spec, "fixedValue", patch, field, "fixedNormalSlip")?;
+            let mut dm = vec![0.0; 12 * n];
+            for i in 0..n {
+                let nn = n3(aux.normal64[i]);
+                dm[12 * i..12 * i + 12].copy_from_slice(&[
+                    nn.x * nn.x,
+                    nn.x * nn.y,
+                    nn.x * nn.z,
+                    nn.y * nn.y,
+                    nn.y * nn.z,
+                    nn.z * nn.z,
+                    u_n.x, u_n.y, u_n.z,
+                    0.0, 0.0, 0.0,
+                ]);
+            }
+            Ok(Some(finished_direction_mixed(n, aux, internal, dm)))
+        }
+
+        // (120.3a) with `F = n n`, `r = 0`, `g = (I - n n).tau / nu` -
+        // (120.3f): no flow through the wall, and the tangential
+        // wall-normal gradient `dU_t/dn = tau_t/nu`, `nu` the LAMINAR
+        // kinematic viscosity from `BcInputs::nu`. Both `tau` and `nu` are
+        // required, each refusing by name (SPEC-LIT 120.3).
+        "fixedShearStress" => {
+            let setting = format!("{field}: boundaryField/{patch}/tau");
+            let raw_tau = spec.extra.get("tau").ok_or_else(|| Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{setting}: fixedShearStress needs a `tau` entry and the patch has none"
+                ),
+            })?;
+            let tau = f1_vec3(raw_tau, &setting, "tau")?;
+            let Some(nu) = aux.inputs.nu else {
+                return Err(needs(patch, "fixedShearStress", "nu"));
+            };
+            let mut dm = vec![0.0; 12 * n];
+            for i in 0..n {
+                let nn = n3(aux.normal64[i]);
+                let t = tau - nn * nn.dot(tau);
+                dm[12 * i..12 * i + 12].copy_from_slice(&[
+                    nn.x * nn.x,
+                    nn.x * nn.y,
+                    nn.x * nn.z,
+                    nn.y * nn.y,
+                    nn.y * nn.z,
+                    nn.z * nn.z,
+                    0.0, 0.0, 0.0,
+                    t.x / nu,
+                    t.y / nu,
+                    t.z / nu,
+                ]);
+            }
+            Ok(Some(finished_direction_mixed(n, aux, internal, dm)))
+        }
+
+        // (120.3g): the rigid rotation `a x (x_f - origin)` with the
+        // wall-normal part removed, computed in f64 from the f64 face
+        // centres and normals (SPEC-LIT 118.2) and rounded once. A constant
+        // `omega` is a fixedValue at that number; a time-varying one a
+        // timed patch with `base = 0`, `w = w_f`, the scalar `omega`
+        // scaling it (SPEC-LIT 120.3).
+        "rotatingWallVelocity" => {
+            let base = format!("{field}: boundaryField/{patch}");
+            let entries = crate::function1::patch_entries(spec, &base)?;
+            let setting = format!("{base}/omega");
+            let Some(f) = F1::parse(&entries, "omega", 1, &setting, f1.and_then(|s| s.case_dir))?
+            else {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{setting}: rotatingWallVelocity needs an `omega` entry and the \
+                         patch has none"
+                    ),
+                });
+            };
+            let origin = required_vec3(spec, "origin", patch, field, "rotatingWallVelocity")?;
+            let axis = required_vec3(spec, "axis", patch, field, "rotatingWallVelocity")?;
+            let ox = origin.x as f64;
+            let oy = origin.y as f64;
+            let oz = origin.z as f64;
+            let a = DVec3::new(axis.x as f64, axis.y as f64, axis.z as f64);
+            let len = (a.x * a.x + a.y * a.y + a.z * a.z).sqrt();
+            if !(len > 0.0) {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!("{setting}: rotatingWallVelocity's `axis` must not be zero"),
+                });
+            }
+            let a = a * (1.0 / len);
+
+            // w_f, in f64, per face (SPEC-LIT 120.3): the rotation with the
+            // component normal to the face removed, so a faceted wall
+            // carries no flux.
+            let w_f: Vec<f64> = (0..n)
+                .flat_map(|i| {
+                    let c = a.cross(aux.bc_f[i] - DVec3::new(ox, oy, oz));
+                    let nn = aux.normal64[i];
+                    let w = c - nn * nn.dot(c);
+                    [w.x, w.y, w.z]
+                })
+                .collect();
+
+            if f.is_constant() {
+                // The value `TimedPatch::host_values` would write: `(0 +
+                // w_f*omega) as Scalar`, one rounding (SPEC-LIT 120.3).
+                let omega = f.eval(0.0)[0];
+                let ref_value: Vec<Vec3> = w_f
+                    .chunks_exact(3)
+                    .map(|w| Vec3::new((0.0 + w[0] * omega) as Scalar, (0.0 + w[1] * omega) as Scalar, (0.0 + w[2] * omega) as Scalar))
+                    .collect();
+                return Ok(Some(WallSlipSeed {
+                    kind: BcKind::FixedValue,
+                    fr: vec![1.0; n],
+                    value: ref_value.clone(),
+                    ref_value,
+                    ref_grad: vec![Vec3::ZERO; n],
+                    dm: vec![0.0; 12 * n],
+                }));
+            }
+
+            let Some(fs) = f1 else {
+                return Err(f1_needs_timed(&setting, field, "setup_vector_field_timed"));
+            };
+            f.check_range(fs.t_start, fs.t_end)?;
+            let tp = TimedPatch {
+                patch: patch.to_string(),
+                start: aux.at,
+                n,
+                n_t: 3,
+                target: F1Target::RefValue,
+                f,
+                base: vec![0.0; 3 * n],
+                w: w_f,
+            };
+            let values = tp.host_values(fs.t_start);
+            timed.push(tp);
+            Ok(Some(WallSlipSeed {
+                kind: BcKind::FixedValue,
+                fr: vec![1.0; n],
+                value: to_vec3s(&values),
+                ref_value: to_vec3s(&values),
+                ref_grad: vec![Vec3::ZERO; n],
+                dm: vec![0.0; 12 * n],
+            }))
+        }
+
+        _ => Ok(None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn vector_patch(
     spec: Option<&PatchFieldSpec>,
@@ -1427,6 +1886,22 @@ fn vector_patch(
             out.ref_grad[at + i] = seed.ref_grad[i];
             out.value[at + i] =
                 seed.ref_value[i] * seed.fr[i] + internal[i] * (1.0 - seed.fr[i]);
+        }
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.3: the wall and slip family, before the static arms for
+    // the same reason - the four tensorial names seed the matrix triple
+    // (120.3h) whose `dm` block is packed here, and `rotatingWallVelocity`'s
+    // value may be timed.
+    if let Some(seed) = wall_slip_seed(spec, n, patch, field, aux, internal, f1, timed)? {
+        out.dm[at * 12..(at + n) * 12].copy_from_slice(&seed.dm);
+        for i in 0..n {
+            out.kind[at + i] = seed.kind as Label;
+            out.fr[at + i] = seed.fr[i];
+            out.ref_value[at + i] = seed.ref_value[i];
+            out.ref_grad[at + i] = seed.ref_grad[i];
+            out.value[at + i] = seed.value[i];
         }
         return Ok(());
     }
@@ -1590,6 +2065,21 @@ fn vector_patch(
                 })
             }
 
+            // SPEC-LIT 120.3: a DirectionMixed face is seeded by
+            // `wall_slip_seed` above and never reaches the static arms; this
+            // arm is what keeps the match total and the failure loud if that
+            // ever changes.
+            BcKind::DirectionMixed => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `{}` reached the static arms without its `dm` block \
+                         (SPEC-LIT 120.3)",
+                        spec.type_name
+                    ),
+                })
+            }
+
             BcKind::ZeroGradient | BcKind::Empty | BcKind::Symmetry | BcKind::Cyclic => {
                 (0.0, zero, zero)
             }
@@ -1719,6 +2209,7 @@ pub fn upload_vector(
         ref_value: gpu.upload(&b.ref_value)?,
         ref_grad: gpu.upload(&b.ref_grad)?,
         bc_kind: gpu.upload(&b.kind)?,
+        dm: gpu.upload(&b.dm)?,
     })
 }
 
@@ -1827,6 +2318,7 @@ pub fn setup_vector_field_with(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    gpu.write(&mut f.dm, &b.dm)?;
     Ok(())
 }
 
@@ -1848,6 +2340,7 @@ pub fn setup_vector_field(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    gpu.write(&mut f.dm, &b.dm)?;
     Ok(())
 }
 
@@ -1898,6 +2391,7 @@ pub fn setup_vector_field_timed(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    gpu.write(&mut f.dm, &b.dm)?;
     TimedBcs::upload(gpu, &timed)
 }
 
@@ -2379,6 +2873,7 @@ pub fn bc_kind_name(k: BcKind) -> &'static str {
         BcKind::ZeroGradient => "zeroGradient",
         BcKind::FixedValue => "fixedValue",
         BcKind::Calculated => "calculated",
+        BcKind::DirectionMixed => "directionMixed",
         _ => "(other)",
     }
 }
@@ -4257,6 +4752,519 @@ mod tests {
         .expect("the timed path builds");
         assert_eq!(timed.len(), 1);
         assert_eq!(timed[0].n_t, 3, "three components per face");
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT 120.3 - the wall and slip family
+    // ------------------------------------------------------------------
+
+    /// A raw vector field with several patch entries at once.
+    fn vf(patches: &[(&str, PatchFieldSpec)]) -> RawVectorField {
+        let mut raw = RawVectorField {
+            name: "U".into(),
+            ..Default::default()
+        };
+        for (p, s) in patches {
+            raw.boundary.insert((*p).into(), s.clone());
+        }
+        raw
+    }
+
+    /// The matrix triple of (120.3h) for each of the four tensorial names,
+    /// EXACT: `fr = (tr F - n.F.n)/2` recomputed off the packed `dm` block
+    /// and the face's f64 unit normal cast once, `ref_value = r` and
+    /// `ref_grad = g` the case's own vectors verbatim, and the `value` seed
+    /// the face value (120.3a) - bitwise the host twin, the number the
+    /// device evaluation starts from (SPEC-LIT 120.3).
+    #[test]
+    fn the_matrix_triple_is_120_3h_for_each_of_the_four_names() {
+        let m = box_host();
+        let g64 = m.geom64();
+        let internal = vec![Vec3::new(2.0, -1.0, 3.0); m.n_cells];
+
+        let mut dmix = PatchFieldSpec {
+            type_name: "directionMixed".into(),
+            ref_value_v: vec![Vec3::new(1.0, 2.0, 3.0)],
+            ref_gradient_v: vec![Vec3::new(0.5, -1.0, 2.0)],
+            ..Default::default()
+        };
+        dmix.extra.insert(
+            "valueFraction".into(),
+            "uniform (1 0.1 0 0.5 0 0.25)".into(),
+        );
+        let slip = PatchFieldSpec {
+            type_name: "partialSlip".into(),
+            value_fraction: vec![0.3],
+            ..Default::default()
+        };
+        let mut fns = PatchFieldSpec {
+            type_name: "fixedNormalSlip".into(),
+            ..Default::default()
+        };
+        fns.extra
+            .insert("fixedValue".into(), "uniform (0.4 -0.7 1.1)".into());
+        let mut fss = PatchFieldSpec {
+            type_name: "fixedShearStress".into(),
+            ..Default::default()
+        };
+        fss.extra.insert("tau".into(), "uniform (0.02 0.03 0)".into());
+
+        let b = vector_boundary_with(
+            &vf(&[
+                (m.patches[0].name.as_str(), dmix),
+                (m.patches[1].name.as_str(), slip),
+                (m.patches[2].name.as_str(), fns),
+                (m.patches[3].name.as_str(), fss),
+            ]),
+            &m,
+            &internal,
+            BcInputs {
+                nu: Some(0.1),
+                ..Default::default()
+            },
+        )
+        .expect("builds");
+
+        let tau = Vec3::new(0.02, 0.03, 0.0);
+        let rs = [
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::ZERO,
+            Vec3::new(0.4, -0.7, 1.1),
+            Vec3::ZERO,
+        ];
+        for (pi, r) in rs.into_iter().enumerate() {
+            let p = &m.patches[pi];
+            for i in 0..p.size {
+                let f = p.start + i;
+                assert_eq!(b.kind[f], BcKind::DirectionMixed as Label, "patch {pi}");
+                // (120.3h): fr = (tr F - n.F.n)/2, recomputed in the build's
+                // own Scalar from the dm block and the cast f64 normal.
+                let sf = g64.b_sf[f];
+                let a = (sf.x * sf.x + sf.y * sf.y + sf.z * sf.z).sqrt();
+                let n = Vec3::new((sf.x / a) as Scalar, (sf.y / a) as Scalar, (sf.z / a) as Scalar);
+                let d = &b.dm[12 * f..12 * f + 12];
+                let nfn = n.x * (d[0] * n.x + d[1] * n.y + d[2] * n.z)
+                    + n.y * (d[1] * n.x + d[3] * n.y + d[4] * n.z)
+                    + n.z * (d[2] * n.x + d[4] * n.y + d[5] * n.z);
+                let want_fr = (d[0] + d[3] + d[5] - nfn) / 2.0;
+                assert_eq!(
+                    b.fr[f].to_bits(),
+                    want_fr.to_bits(),
+                    "patch {pi} face {i}: fr is not (120.3h)"
+                );
+                assert_eq!(b.ref_value[f], r, "patch {pi} face {i}: refValue = r");
+                // (120.3h): refGrad = g - the case's own vector, except
+                // fixedShearStress's (120.3f), which is (I - n n).tau / nu.
+                let want_g = match pi {
+                    0 => Vec3::new(0.5, -1.0, 2.0),
+                    3 => {
+                        let t = tau - n * n.dot(tau);
+                        Vec3::new(t.x / 0.1, t.y / 0.1, t.z / 0.1)
+                    }
+                    _ => Vec3::ZERO,
+                };
+                assert_eq!(b.ref_grad[f], want_g, "patch {pi} face {i}: refGrad = g");
+                // The value seed is (120.3a) at the wall-adjacent cell.
+                let u_p = internal[m.b_face_cells[f] as usize];
+                let delta = g64.b_delta_coeffs[f] as Scalar;
+                let want = crate::field::direction_mixed_value(d, u_p, delta);
+                assert_eq!(
+                    b.value[f].x.to_bits(),
+                    want.x.to_bits(),
+                    "patch {pi} face {i}: the value seed is not (120.3a)"
+                );
+                assert_eq!(b.value[f].y.to_bits(), want.y.to_bits());
+                assert_eq!(b.value[f].z.to_bits(), want.z.to_bits());
+            }
+        }
+
+        // The closed forms the four F's specialise to: `F = n n` twice gives
+        // f_t = 0 exactly (fixedNormalSlip, fixedShearStress - a Neumann on
+        // the tangential part, the point of the rewrite); partialSlip's
+        // f_t is its f to round-off; and fixedShearStress's g is
+        // (I - n n).tau / nu.
+        let ymax = &m.patches[3];
+        let f = ymax.start;
+        assert_eq!(b.fr[f].to_bits(), (0.0 as Scalar).to_bits(), "F = n n sees f_t = 0");
+        let sf = g64.b_sf[f];
+        let a = (sf.x * sf.x + sf.y * sf.y + sf.z * sf.z).sqrt();
+        let nn = Vec3::new((sf.x / a) as Scalar, (sf.y / a) as Scalar, (sf.z / a) as Scalar);
+        let t = tau - nn * nn.dot(tau);
+        assert_eq!(
+            b.ref_grad[f],
+            Vec3::new(t.x / 0.1, t.y / 0.1, t.z / 0.1),
+            "fixedShearStress's g is (I - n n).tau/nu"
+        );
+        let xmax = &m.patches[1];
+        assert!(
+            (b.fr[xmax.start] - 0.3).abs() <= 1e-7,
+            "partialSlip's f_t is its f: {}",
+            b.fr[xmax.start]
+        );
+
+        // A SCALAR `valueFraction` reads as `F = f I` (SPEC-LIT 120.3): with
+        // f = 1 the tensor is I, the matrix sees f_t = 1 - fixedValue - and
+        // refValue is still r.
+        let sp = PatchFieldSpec {
+            type_name: "directionMixed".into(),
+            ref_value_v: vec![Vec3::new(1.0, 2.0, 3.0)],
+            value_fraction: vec![1.0],
+            ..Default::default()
+        };
+        let b = vector_boundary(
+            &vf(&[(m.patches[0].name.as_str(), sp)]),
+            &m,
+            &internal,
+        )
+        .expect("builds");
+        let f = m.patches[0].start;
+        assert_eq!(b.fr[f].to_bits(), (1.0 as Scalar).to_bits(), "F = I sees f_t = 1");
+        assert_eq!(b.ref_value[f], Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    /// `extrapolatedCalculated` is zeroGradient on any field, vector
+    /// included.
+    #[test]
+    fn extrapolated_calculated_is_zero_gradient() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let internal = vec![Vec3::new(1.0, -2.0, 0.5); m.n_cells];
+        let b = vector_boundary(
+            &vf(&[(&xmin, PatchFieldSpec {
+                type_name: "extrapolatedCalculated".into(),
+                ..Default::default()
+            })]),
+            &m,
+            &internal,
+        )
+        .expect("builds");
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert_eq!(b.kind[f], BcKind::ZeroGradient as Label);
+            assert_eq!(b.fr[f], 0.0);
+            assert_eq!(b.ref_grad[f], Vec3::ZERO);
+        }
+    }
+
+    /// `partialSlip` packs (120.3c) - `F = f I + (1-f) n n`, `r = (I - n
+    /// n).U_w + f n (n.U_w)`, `g = 0` - and its face value is (120.3b): with
+    /// `U_w = 0`, the tangential part of `U_P` scaled by `1 - f`.
+    #[test]
+    fn partial_slip_seeds_the_slip_condition() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+
+        let sp = PatchFieldSpec {
+            type_name: "partialSlip".into(),
+            value_fraction: vec![0.25],
+            ..Default::default()
+        };
+        let internal = vec![Vec3::new(2.0, -1.0, 3.0); m.n_cells];
+        let b = vector_boundary(&vf(&[(&xmin, sp)]), &m, &internal).expect("builds");
+
+        let p = &m.patches[0];
+        let g64 = m.geom64();
+        for i in 0..p.size {
+            let f = p.start + i;
+            assert_eq!(b.kind[f], BcKind::DirectionMixed as Label);
+            // The matrix triple (120.3h): f_t = f, refValue = r = 0 at
+            // U_w = 0, refGrad = 0.
+            assert_eq!(b.fr[f].to_bits(), (0.25 as Scalar).to_bits());
+            assert_eq!(b.ref_value[f], Vec3::ZERO);
+            assert_eq!(b.ref_grad[f], Vec3::ZERO);
+
+            // n, f64-normalised from the f64 b_sf (SPEC-LIT 120.3).
+            let sf = g64.b_sf[f];
+            let a = (sf.x * sf.x + sf.y * sf.y + sf.z * sf.z).sqrt();
+            let (nx, ny, nz) = (sf.x / a, sf.y / a, sf.z / a);
+            let u_p = internal[m.b_face_cells[f] as usize];
+
+            // (120.3b) with U_w = 0: (1-f) times the tangential part. The
+            // seed evaluates (120.3a) from the packed F, so the agreement
+            // with (120.3b) is to round-off, not bitwise.
+            let un = (nx * u_p.x as f64 + ny * u_p.y as f64 + nz * u_p.z as f64) as Scalar;
+            let tang = u_p - Vec3::new(nx as Scalar, ny as Scalar, nz as Scalar) * un;
+            let want = tang * 0.75;
+            let got = b.value[f];
+            assert!(
+                (got.x - want.x).abs() <= 1e-12
+                    && (got.y - want.y).abs() <= 1e-12
+                    && (got.z - want.z).abs() <= 1e-12,
+                "(120.3b) at U_w = 0: {got:?} against {want:?}"
+            );
+
+            // (120.3c): F = f I + (1-f) n n, r = 0, g = 0.
+            let c = 0.75 as Scalar;
+            let nn = Vec3::new(nx as Scalar, ny as Scalar, nz as Scalar);
+            let want_dm = [
+                0.25 + c * nn.x * nn.x,
+                c * nn.x * nn.y,
+                c * nn.x * nn.z,
+                0.25 + c * nn.y * nn.y,
+                c * nn.y * nn.z,
+                0.25 + c * nn.z * nn.z,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ];
+            assert!(
+                b.dm[12 * f..12 * f + 12]
+                    .iter()
+                    .zip(want_dm)
+                    .all(|(x, y)| (x - y).abs() <= 1e-6),
+                "dm {:?} against (120.3c) {want_dm:?}",
+                &b.dm[12 * f..12 * f + 12]
+            );
+        }
+    }
+
+    /// `fixedNormalSlip` is (120.3a) with `F = n n`, `r = U_n`, `g = 0`: the
+    /// normal component fixed at `U_n`'s, the tangential part `U_P`'s own.
+    #[test]
+    fn fixed_normal_slip_fixes_the_normal_component() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+
+        let mut sp = PatchFieldSpec {
+            type_name: "fixedNormalSlip".into(),
+            ..Default::default()
+        };
+        sp.extra
+            .insert("fixedValue".into(), "uniform (0.4 -0.7 1.1)".into());
+        let internal = vec![Vec3::new(2.0, -1.0, 3.0); m.n_cells];
+        let b = vector_boundary(&vf(&[(&xmin, sp)]), &m, &internal).expect("builds");
+
+        let p = &m.patches[0];
+        let g64 = m.geom64();
+        let u_n = Vec3::new(0.4, -0.7, 1.1);
+        for i in 0..p.size {
+            let f = p.start + i;
+            assert_eq!(b.kind[f], BcKind::DirectionMixed as Label);
+            let sf = g64.b_sf[f];
+            let a = (sf.x * sf.x + sf.y * sf.y + sf.z * sf.z).sqrt();
+            let n = Vec3::new((sf.x / a) as Scalar, (sf.y / a) as Scalar, (sf.z / a) as Scalar);
+            let u_p = internal[m.b_face_cells[f] as usize];
+            // The matrix triple (120.3h): F = n n, so f_t = 0, refValue = U_n.
+            assert_eq!(b.fr[f].to_bits(), (0.0 as Scalar).to_bits());
+            assert_eq!(b.ref_value[f], u_n);
+            assert_eq!(b.ref_grad[f], Vec3::ZERO);
+            let u_b = b.value[f];
+            assert!(
+                (n.dot(u_b) - n.dot(u_n)).abs() <= 1e-12,
+                "the normal component is U_n's: {} against {}",
+                n.dot(u_b),
+                n.dot(u_n)
+            );
+            let tang = |v: Vec3| v - n * n.dot(v);
+            let (tb, tp) = (tang(u_b), tang(u_p));
+            assert!(
+                (tb.x - tp.x).abs() <= 1e-12
+                    && (tb.y - tp.y).abs() <= 1e-12
+                    && (tb.z - tp.z).abs() <= 1e-12,
+                "the tangential part is U_P's own: {tb:?} against {tp:?}"
+            );
+        }
+    }
+
+    /// `fixedShearStress` packs (120.3f) - `F = n n`, `r = 0`,
+    /// `g = (I - n n).tau / nu` - and refuses a missing `tau` or a setup
+    /// given no `nu`, each BY NAME (SPEC-LIT 120.3).
+    #[test]
+    fn fixed_shear_stress_packs_tau_over_nu_and_refuses_the_rest_by_name() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let internal = vec![Vec3::new(2.0, -1.0, 3.0); m.n_cells];
+        let mk = || {
+            let mut sp = PatchFieldSpec {
+                type_name: "fixedShearStress".into(),
+                ..Default::default()
+            };
+            sp.extra.insert("tau".into(), "uniform (0.02 0 0)".into());
+            sp
+        };
+
+        // No `nu` in the inputs: refused naming `nu`.
+        let e = vector_boundary(&vf(&[(&xmin, mk())]), &m, &internal)
+            .expect_err("no nu was given");
+        assert!(e.to_string().contains("nu"), "{}", e);
+
+        // No `tau` on the patch: refused naming `tau`.
+        let e = vector_boundary_with(
+            &vf(&[(&xmin, PatchFieldSpec {
+                type_name: "fixedShearStress".into(),
+                ..Default::default()
+            })]),
+            &m,
+            &internal,
+            BcInputs {
+                nu: Some(0.1),
+                ..Default::default()
+            },
+        )
+        .expect_err("no tau was given");
+        assert!(e.to_string().contains("tau"), "{}", e);
+
+        // Both present: (120.3f), with the normal part of tau removed.
+        let b = vector_boundary_with(
+            &vf(&[(&xmin, mk())]),
+            &m,
+            &internal,
+            BcInputs {
+                nu: Some(0.1),
+                ..Default::default()
+            },
+        )
+        .expect("builds");
+        let g64 = m.geom64();
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert_eq!(b.kind[f], BcKind::DirectionMixed as Label);
+            let sf = g64.b_sf[f];
+            let a = (sf.x * sf.x + sf.y * sf.y + sf.z * sf.z).sqrt();
+            let n = Vec3::new((sf.x / a) as Scalar, (sf.y / a) as Scalar, (sf.z / a) as Scalar);
+            let tau = Vec3::new(0.02, 0.0, 0.0);
+            let t = tau - n * n.dot(tau);
+            let want_dm = [
+                n.x * n.x,
+                n.x * n.y,
+                n.x * n.z,
+                n.y * n.y,
+                n.y * n.z,
+                n.z * n.z,
+                0.0, 0.0, 0.0,
+                t.x / 0.1,
+                t.y / 0.1,
+                t.z / 0.1,
+            ];
+            assert!(
+                b.dm[12 * f..12 * f + 12]
+                    .iter()
+                    .zip(want_dm)
+                    .all(|(x, y)| (x - y).abs() <= 1e-12),
+                "dm {:?} against (120.3f) {want_dm:?}",
+                &b.dm[12 * f..12 * f + 12]
+            );
+        }
+    }
+
+    /// A constant-`omega` `rotatingWallVelocity` is a fixedValue at (120.3g):
+    /// `omega (I - n n).(a x (x_f - origin))`, computed in f64 from the f64
+    /// face centres and normals (SPEC-LIT 120.3). A zero axis is refused.
+    #[test]
+    fn a_constant_rotating_wall_is_omega_cross_r() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let internal = vec![Vec3::ZERO; m.n_cells];
+
+        let mut sp = PatchFieldSpec {
+            type_name: "rotatingWallVelocity".into(),
+            ..Default::default()
+        };
+        sp.extra.insert("omega".into(), "3".into());
+        sp.extra.insert("origin".into(), "uniform (0.5 0.5 1)".into());
+        sp.extra.insert("axis".into(), "uniform (0 0 2)".into());
+        let b = vector_boundary(&vf(&[(&xmin, sp.clone())]), &m, &internal).expect("builds");
+
+        let g64 = m.geom64();
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert_eq!(b.kind[f], BcKind::FixedValue as Label);
+            assert_eq!(b.fr[f], 1.0);
+            // (120.3g) again, in f64, from the mesh's own f64 geometry.
+            let sf = g64.b_sf[f];
+            let a = (sf.x * sf.x + sf.y * sf.y + sf.z * sf.z).sqrt();
+            let n = sf * (1.0 / a);
+            let xf = g64.b_cf[f];
+            let c = DVec3::new(0.0, 0.0, 1.0).cross(xf - DVec3::new(0.5, 0.5, 1.0));
+            let w = c - n * n.dot(c);
+            let want = Vec3::new(
+                (3.0 * w.x) as Scalar,
+                (3.0 * w.y) as Scalar,
+                (3.0 * w.z) as Scalar,
+            );
+            assert_eq!(b.ref_value[f], want, "(120.3g) on face {i}");
+            assert_eq!(b.value[f], want);
+        }
+
+        // A zero axis is refused (SPEC-LIT 120.3).
+        let mut bad = sp.clone();
+        bad.extra.insert("axis".into(), "uniform (0 0 0)".into());
+        let e = vector_boundary(&vf(&[(&xmin, bad)]), &m, &internal)
+            .expect_err("a zero axis must be refused");
+        assert!(e.to_string().contains("axis"), "{}", e);
+    }
+
+    /// `translatingWallVelocity` is `uniformFixedValue` with the key `U`
+    /// (SPEC-LIT 120.3): a constant is its fixedValue twin, bitwise.
+    #[test]
+    fn translating_wall_velocity_is_its_value() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let internal = vec![Vec3::new(9.0, 9.0, 9.0); m.n_cells];
+
+        let mut sp = PatchFieldSpec {
+            type_name: "translatingWallVelocity".into(),
+            ..Default::default()
+        };
+        sp.extra.insert("U".into(), "constant (0.1 0.2 0.3)".into());
+        let b = vector_boundary(&vf(&[(&xmin, sp)]), &m, &internal).expect("builds");
+        for i in 0..m.patches[0].size {
+            let f = m.patches[0].start + i;
+            assert_eq!(b.kind[f], BcKind::FixedValue as Label);
+            assert_eq!(b.fr[f], 1.0);
+            assert_eq!(b.ref_value[f], Vec3::new(0.1, 0.2, 0.3));
+        }
+    }
+
+    /// The six names of SPEC-LIT 120.3 are VECTOR conditions and are refused
+    /// by name on a scalar field - including the two that map to
+    /// `FixedValue`, which is why the check is on the name.
+    #[test]
+    fn the_six_wall_names_are_refused_on_a_scalar_field() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        for name in [
+            "directionMixed",
+            "partialSlip",
+            "fixedNormalSlip",
+            "fixedShearStress",
+            "rotatingWallVelocity",
+            "translatingWallVelocity",
+        ] {
+            let raw = named_scalar_field(
+                "p",
+                &xmin,
+                PatchFieldSpec {
+                    type_name: name.into(),
+                    ..Default::default()
+                },
+            );
+            let e = scalar_boundary(&raw, &m, &vec![0.0; m.n_cells])
+                .expect_err("{name} is a vector condition");
+            let msg = e.to_string();
+            assert!(msg.contains("is a vector condition"), "{msg}");
+            assert!(msg.contains(name), "{msg}");
+        }
+    }
+
+    /// A `directionMixed` tensor list with the wrong number of symmTensors
+    /// for the patch is an error naming both counts (SPEC-LIT 120.3).
+    #[test]
+    fn a_direction_mixed_tensor_with_the_wrong_count_is_refused() {
+        let m = box_host();
+        let xmin = m.patches[0].name.clone();
+        let mut sp = PatchFieldSpec {
+            type_name: "directionMixed".into(),
+            ..Default::default()
+        };
+        sp.extra.insert(
+            "valueFraction".into(),
+            "nonuniform List<symmTensor> 3 ((1 0 0 1 0 1) (0.5 0 0 0.25 0 0.75))".into(),
+        );
+        let e = vector_boundary(&vf(&[(&xmin, sp)]), &m, &vec![Vec3::ZERO; m.n_cells])
+            .expect_err("3 symmTensors on a 2-face patch");
+        let msg = e.to_string();
+        assert!(msg.contains("valueFraction"), "{msg}");
+        assert!(msg.contains('3'), "{msg}");
+        assert!(msg.contains('2'), "{msg}");
     }
 
 }

@@ -741,6 +741,24 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
         match k.as_str() {
             "type" => s.type_name = gather_raw(tz)?,
             "neighbourPatch" => s.neighbour_patch = Some(gather_raw(tz)?),
+            // SPEC-LIT 120.3: on a VECTOR field a `valueFraction` may be a
+            // symmTensor - `uniform (xx xy xz yy yz zz)` or `nonuniform
+            // List<symmTensor> N (...)` - which a scalar list cannot hold.
+            // Those two forms are kept VERBATIM in `extra`, the same way
+            // `directionMixed`'s setup re-reads them; every other form is a
+            // scalar entry exactly as before, so existing files parse
+            // identically. On a scalar field every form is a scalar entry.
+            "valueFraction" if is_vector => {
+                let tensor = (tz.is_word("uniform") && tz.is_punct_at('(', 1))
+                    || (tz.is_word("nonuniform")
+                        && matches!(tz.peek_at(1), Some(Tok::Word(w)) if w.contains("symmTensor")));
+                if tensor {
+                    let raw = gather_raw(tz)?;
+                    s.extra.insert("valueFraction".to_string(), raw);
+                } else {
+                    s.value_fraction = parse_scalar_entry(tz)?;
+                }
+            }
             // Always a scalar, even on a vector field.
             "valueFraction" => s.value_fraction = parse_scalar_entry(tz)?,
             // `refGrad` is the spelling some older cases use for refGradient.
@@ -1534,6 +1552,76 @@ mod tests {
         write_vector_field(&path, &f, "0").unwrap();
 
         let back = read_vector_field(&path, 0).unwrap();
+        assert_eq!(back, f);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT 120.3: a VECTOR field's `valueFraction` may be a symmTensor,
+    /// `uniform (xx xy xz yy yz zz)` or `nonuniform List<symmTensor> N (...)`.
+    /// Both forms are captured verbatim into `extra` (the scalar list the
+    /// struct field holds cannot carry six numbers a component), and a
+    /// read-write-read cycle must be the identity on the whole
+    /// [`PatchFieldSpec`] - while a plain scalar `valueFraction` on the same
+    /// field still lands in `value_fraction`, exactly as it always did.
+    #[test]
+    fn a_vector_symm_tensor_value_fraction_round_trips() {
+        let src = "\
+FoamFile { version 2.0; format ascii; class volVectorField; object U; }
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+boundaryField
+{
+    wall
+    {
+        type            directionMixed;
+        valueFraction   uniform (1 0.1 0 0.5 0 0.25);
+        refValue        uniform (1 2 3);
+        value           uniform (0 0 0);
+    }
+    ramp
+    {
+        type            directionMixed;
+        valueFraction   nonuniform List<symmTensor> 2 ((1 0 0 1 0 1) (0.5 0 0 0.25 0 0.75));
+        refValue        uniform (0 0 0);
+    }
+    mixed0
+    {
+        type            mixed;
+        valueFraction   uniform 0.25;
+        refValue        uniform (4 5 6);
+        value           uniform (0 0 0);
+    }
+}
+";
+        let f = read_vector_str(src, 4).unwrap();
+
+        // The tensor forms are verbatim in `extra`, `gather_raw`'s text.
+        assert_eq!(
+            f.boundary["wall"].extra.get("valueFraction").map(String::as_str),
+            Some("uniform (1 0.1 0 0.5 0 0.25)"),
+        );
+        assert_eq!(
+            f.boundary["ramp"].extra.get("valueFraction").map(String::as_str),
+            Some("nonuniform List<symmTensor> 2 ((1 0 0 1 0 1) (0.5 0 0 0.25 0 0.75))"),
+        );
+        // ... and the struct field stays empty for them, so the writer does
+        // not emit the entry twice.
+        assert!(f.boundary["wall"].value_fraction.is_empty());
+        assert!(f.boundary["ramp"].value_fraction.is_empty());
+        // A scalar valueFraction on a VECTOR field is untouched.
+        assert_eq!(f.boundary["mixed0"].value_fraction, vec![0.25]);
+
+        let dir = scratch("symmtensor_vf_rt");
+        let path = dir.join("0").join("U");
+        write_vector_field(&path, &f, "0").unwrap();
+
+        // The same cell count the first read used, so the written
+        // `uniform` internalField expands back to the same four cells.
+        let back = read_vector_field(&path, 4).unwrap();
+        assert_eq!(back.boundary["wall"], f.boundary["wall"]);
+        assert_eq!(back.boundary["ramp"], f.boundary["ramp"]);
+        assert_eq!(back.boundary["mixed0"], f.boundary["mixed0"]);
         assert_eq!(back, f);
 
         let _ = std::fs::remove_dir_all(&dir);

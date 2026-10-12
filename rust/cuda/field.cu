@@ -35,7 +35,7 @@
   kernel that rewrites the triple on the faces it owns; nothing here needs to
   know which one wrote it.
 
-  Consequently bcKind is consulted for exactly three things, and the value of
+  Consequently bcKind is consulted for exactly four things, and the value of
   every other kind comes out of the expression above:
 
     * CALCULATED - the value is written by whichever model owns the field
@@ -44,7 +44,14 @@
       triple can express "the cell on the other side";
     * SYMMETRY on a VECTOR - the condition is tensorial, U_b = (I - n n).U_P,
       and a scalar fr cannot express it either. For a scalar, symmetry IS
-      zero-gradient and needs no branch.
+      zero-gradient and needs no branch;
+    * DIRECTION_MIXED on a VECTOR (SPEC-LIT 120.3) - the tensorial mixed
+      form U_b = F.r + (I - F).(U_P + g/Delta_b), eqn (120.3a) there, whose
+      per-face F, r and g live in the field's dm block. What the matrix
+      sees is (120.3h): fr = f_t = (tr F - n.F.n)/2, refValue = r,
+      refGrad = g - the TANGENTIAL part of (120.3a) enters the matrix
+      implicitly, through the one triple of section 4; this branch writes
+      bf only, the face value every operator reads.
 
   ------------------------------------------------------------------------
   Symmetry, and what the matrix sees
@@ -72,6 +79,9 @@
 #define OFGPU_BC_CALCULATED 4
 #define OFGPU_BC_SYMMETRY   6
 #define OFGPU_BC_CYCLIC     7
+//- SPEC-LIT 120.3: the tensorial mixed condition of the wall and slip
+//  family (directionMixed, partialSlip, fixedNormalSlip, fixedShearStress).
+#define OFGPU_BC_DIRECTION_MIXED 37
 
 //- The FLUX-SWITCHED block: every kind in [FIRST, LAST] is Dirichlet where
 //  the face flux is inward and zero-gradient where it is outward, and they
@@ -163,8 +173,12 @@ extern "C" __global__ void fldCorrectBcScalar
 
 //- Evaluate every boundary face of a vector field.
 //
-//  Componentwise the same expression, with the one tensorial condition -
-//  symmetry - handled separately; see the file header.
+//  Componentwise the same expression, with the two tensorial conditions -
+//  symmetry, and DirectionMixed (SPEC-LIT 120.3) - handled separately; see
+//  the file header. DirectionMixed's face value is (120.3a) and this kernel
+//  writes it into bf ONLY: the matrix sees (120.3h) - fr = f_t, refValue =
+//  r, refGrad = g, the tangential part implicitly - and refValue is read
+//  here as an input, never rewritten.
 extern "C" __global__ void fldCorrectBcVector
 (
     ofvec3* __restrict__ bf,
@@ -172,6 +186,7 @@ extern "C" __global__ void fldCorrectBcVector
     const ofscalar* __restrict__ fr,
     const ofvec3* __restrict__ refValue,
     const ofvec3* __restrict__ refGrad,
+    const ofscalar* __restrict__ dm,
     const oflabel* __restrict__ bcKind,
     const oflabel* __restrict__ bFaceCells,
     const ofscalar* __restrict__ bDeltaCoeffs,
@@ -190,6 +205,44 @@ extern "C" __global__ void fldCorrectBcVector
 
     const oflabel c = bFaceCells[i];
     const ofvec3 uP = psi[c];
+
+    if (kind == OFGPU_BC_DIRECTION_MIXED)
+    {
+        //- SPEC-LIT 120.3, eqn (120.3a):
+        //
+        //    U_b = F.r + (I - F).(U_P + g/Delta_b)
+        //
+        //  in the operation order 120.3 fixes: q = U_P + g/Delta_b (the term
+        //  0 where Delta_b = 0, the guard of SPEC-LIT section 4), a = F.r,
+        //  b = F.q, U_b = a + (q - b), each matrix-vector product summed
+        //  F_x0 v_0 + F_x1 v_1 + F_x2 v_2 left to right. The host twin is
+        //  field::direction_mixed_value in src/field.rs, the same order; FMA
+        //  contraction is on, so the two agree to round-off, not bitwise.
+        const ofscalar dc = bDeltaCoeffs[i];
+        const ofscalar* d = dm + 12*i;   // Fxx Fxy Fxz Fyy Fyz Fzz rx ry rz gx gy gz
+
+        const ofscalar gdx = (dc != (ofscalar)0) ? d[ 9]/dc : (ofscalar)0;
+        const ofscalar gdy = (dc != (ofscalar)0) ? d[10]/dc : (ofscalar)0;
+        const ofscalar gdz = (dc != (ofscalar)0) ? d[11]/dc : (ofscalar)0;
+        const ofvec3 q = mkvec(uP.x + gdx, uP.y + gdy, uP.z + gdz);
+
+        const ofvec3 a = mkvec
+        (
+            d[0]*d[6] + d[1]*d[7] + d[2]*d[8],
+            d[1]*d[6] + d[3]*d[7] + d[4]*d[8],
+            d[2]*d[6] + d[4]*d[7] + d[5]*d[8]
+        );
+        const ofvec3 b = mkvec
+        (
+            d[0]*q.x + d[1]*q.y + d[2]*q.z,
+            d[1]*q.x + d[3]*q.y + d[4]*q.z,
+            d[2]*q.x + d[4]*q.y + d[5]*q.z
+        );
+
+        const ofvec3 ub = mkvec(a.x + (q.x - b.x), a.y + (q.y - b.y), a.z + (q.z - b.z));
+        bf[i] = ub;
+        return;
+    }
 
     if (kind == OFGPU_BC_SYMMETRY)
     {

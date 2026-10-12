@@ -51,7 +51,7 @@ pub(crate) struct Entry {
 /// aliases, then the planned names by their unit, the owned names by their
 /// stream, and the permanent refusals last.
 pub(crate) const CATALOGUE: &[Entry] = &[
-    // ---- implemented (53), in IMPLEMENTED_BC_NAMES' order -----------------
+    // ---- implemented (60), in IMPLEMENTED_BC_NAMES' order -----------------
     Entry { family: "basic", name: "fixedValue", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "noSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "zeroGradient", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
@@ -106,18 +106,20 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "time-varying", name: "uniformInletOutlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "time-varying", name: "uniformTotalPressure", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "time-varying", name: "fixedProfile", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
-    // ---- alias (2) --------------------------------------------------------
+    // SPEC-LIT 120.3: the wall and slip family.
+    Entry { family: "basic", name: "extrapolatedCalculated", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "basic", name: "directionMixed", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "wall", name: "rotatingWallVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "wall", name: "translatingWallVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "wall", name: "partialSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "wall", name: "fixedNormalSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "wall", name: "fixedShearStress", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    // ---- alias (3) --------------------------------------------------------
     Entry { family: "thermal", name: "compressible::alphatJayatillekeWallFunction", status: Status::Alias { to: "thermalWallFunction" }, field: "T", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::turbulentTemperatureCoupledBaffleMixed", status: Status::Alias { to: "coupledTemperature" }, field: "T", extended_by: &[], probes: &[] },
-    // ---- planned (55), by unit --------------------------------------------
-    Entry { family: "basic", name: "extrapolatedCalculated", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "basic", name: "directionMixed", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "wall", name: "rotatingWallVelocity", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "wall", name: "translatingWallVelocity", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "wall", name: "partialSlip", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "wall", name: "fixedNormalSlip", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "wall", name: "fixedShearStress", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "wall function", name: "nutUSpaldingWallFunction", status: Status::Planned { unit: "BC-07" }, field: "psi", extended_by: &[], probes: &[] },
+    // SPEC-LIT 120.3: `nutUWallFunction` already applies Spalding's formula.
+    Entry { family: "wall function", name: "nutUSpaldingWallFunction", status: Status::Alias { to: "nutUWallFunction" }, field: "psi", extended_by: &[], probes: &[] },
+    // ---- planned (47), by unit --------------------------------------------
     Entry { family: "velocity inlet", name: "surfaceNormalFixedValue", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "velocity inlet", name: "cylindricalInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "velocity inlet", name: "swirlFlowRateInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },

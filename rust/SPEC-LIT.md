@@ -37753,7 +37753,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 53 names of
+accepts it on the field the row is asked on, and it is one of the 60 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -37827,16 +37827,16 @@ row, row for row.
 | time-varying | `uniformInletOutlet` | implemented | — | — | inletOutlet whose `uniformInletValue` is a Function1 of time (§120.1) |
 | time-varying | `uniformTotalPressure` | implemented | — | — | totalPressure whose `p0` is a Function1 of time (§120.1) |
 | time-varying | `fixedProfile` | implemented | — | — | a fixed value that is a Function1 of a face coordinate, evaluated at setup (§120.1) |
+| basic | `extrapolatedCalculated` | implemented | — | — | zeroGradient on any field (§120.3) |
+| basic | `directionMixed` | implemented | — | — | the tensorial mixed form (120.3a); `valueFraction` a symmTensor, or a scalar read as `f I` |
+| wall | `rotatingWallVelocity` | implemented | — | — | `omega` a Function1 of time; the wall-normal part removed (120.3g) |
+| wall | `translatingWallVelocity` | implemented | — | — | `uniformFixedValue` with the key `U` (§120.3) |
+| wall | `partialSlip` | implemented | — | — | (120.3b), slip length (120.3d) |
+| wall | `fixedNormalSlip` | implemented | — | — | the normal component fixed, the tangential free (§120.3) |
+| wall | `fixedShearStress` | implemented | — | — | laminar `tau/nu` (120.3f); refused naming `nu` where the setup is given none, which is every driver today |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
-| basic | `extrapolatedCalculated` | planned | BC-07 | — | — |
-| basic | `directionMixed` | planned | BC-07 | — | — |
-| wall | `rotatingWallVelocity` | planned | BC-07 | — | — |
-| wall | `translatingWallVelocity` | planned | BC-07 | — | — |
-| wall | `partialSlip` | planned | BC-07 | — | — |
-| wall | `fixedNormalSlip` | planned | BC-07 | — | — |
-| wall | `fixedShearStress` | planned | BC-07 | — | — |
-| wall function | `nutUSpaldingWallFunction` | planned | BC-07 | — | — |
+| wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | velocity inlet | `surfaceNormalFixedValue` | planned | BC-08 | — | — |
 | velocity inlet | `cylindricalInletVelocity` | planned | BC-08 | — | — |
 | velocity inlet | `swirlFlowRateInletVelocity` | planned | BC-08 | — | — |
@@ -38140,6 +38140,190 @@ rate whose kinks fall on steps: `int_0^1 Q dt = Q0*(1 - 0.25 - 0.5/2) =
 triple it reads is f32, so it carries §112.3's ignore attribute and moves
 its count by one). `S2`/`C2` agree with `sin(2 pi c)`/`cos(2 pi c)` to
 2e-15 absolute on `c in [0, 1)` (`function1::tests::s2_c2_match_std_to_2e_15`).
+
+No GPL-licensed source was consulted.
+
+### 120.3 The wall and slip family - one tensorial mixed condition, a rotating wall, and a shear-stress wall
+
+BC-07 implements eight names of the §120 table. Six are rewrites of the
+§4 triple at setup with no new evaluation branch; ONE new vector branch
+(`BcKind::DirectionMixed`, kind 37) carries the four conditions whose face
+value a scalar `fr` cannot express. The names are taken from the user guides
+of §120 by name only; every equation below is ours or is cited.
+
+**The tensorial mixed form** *(DESIGN - ours, the vector analogue of §4's
+Robin triple)*. A face carries a symmetric value-fraction tensor `F`, a
+reference value `r` and a reference gradient `g`, and is evaluated as
+
+```
+U_b = F·r + (I - F)·(U_P + g/Delta_b)                          (120.3a)
+```
+
+with `Delta_b` the boundary delta coefficient of §2.4 and the same guard as
+§4: `g/Delta_b` is 0 where `Delta_b = 0`. `F = I` is fixedValue, `F = 0` is
+fixedGradient, and `F = n n` (n the unit outward face normal) fixes the
+normal component and leaves the tangential one free - the projection of
+Jasak (1996, PhD thesis, Imperial College, §3.2, as `cuda/field.cu`
+already cites it) that `symmetry` already
+uses. The device evaluates (120.3a) in this operation order, and the host
+twin `field::direction_mixed_value` in the same order:
+`q = U_P + g/Delta_b`, `a = F·r`, `b = F·q`, `U_b = a + (q - b)`, each
+matrix-vector product summed `F_x0 v_0 + F_x1 v_1 + F_x2 v_2` left to right.
+`cuda/field.cu` is compiled with FMA contraction on (§67.11), so the device
+and the host agree to round-off, not bitwise.
+
+**What the matrix sees** *(DESIGN)*. A per-component scalar `fr` cannot
+carry `F`, so the matrix sees the TANGENTIAL part of (120.3a) implicitly,
+through §4's own triple:
+
+```
+fr = f_t = (tr F - n·F·n)/2,   refValue = r,   refGrad = g     (120.3h)
+```
+
+For the value fractions the named conditions build, `F = f_t (I - n n) +
+f_n n n`, the tangential components of §4's expression with this triple are
+exactly the tangential components of (120.3a), so a tangential wall shear,
+slip or stress enters the matrix implicitly and in the precision's own
+arithmetic: `partialSlip` gets `f_t = f`, `fixedNormalSlip` and
+`fixedShearStress` `f_t = 0` (the latter a Neumann `g` exactly as
+`fixedGradient` is). For a general `F` (120.3h) is the matrix's
+approximation, and (120.3a) is still the face value every operator reads.
+The normal component is not the matrix's: `momFluxIsPrescribed`
+(cuda/momentum.cu), `vofFluxIsPrescribed` (cuda/vof.cu) and the Marangoni
+boundary force (cuda/marangoni.cu) also hold on any face whose velocity kind
+is `DirectionMixed`, so the flux through it is `U_b·Sf` with `U_b` from
+(120.3a) - the normal component (120.3a) fixes - and no pressure correction
+moves it. The tensor, `r` and `g` live in a 12-entry per-face block
+(`GpuVectorField::dm`: `F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y r_z g_x g_y
+g_z`) that the boundary kernel reads. A deferred Dirichlet (`fr = 1` at the
+last evaluated value) was the first draft: it put the face value through an
+f32 round trip before the wall stress was formed from it, and the
+`fixedShearStress` channel under `single` came out at 1.7e-5 of `tau H/nu`
+against 7.0e-6 for the same channel written with `fixedGradient`.
+
+**directionMixed** reads `refValue` (vector), `refGradient` (vector) and
+`valueFraction`. `valueFraction` is a symmTensor `(xx xy xz yy yz zz)`,
+`uniform` or `nonuniform List<symmTensor>`; a scalar `valueFraction f` is
+read as `F = f I`.
+
+**partialSlip** reads `valueFraction f` (scalar, required) and `refValue
+U_w` (vector, default 0). Its face value is
+
+```
+U_b = (1 - f)(I - n n)·U_P + f U_w                             (120.3b)
+```
+
+which is (120.3a) with `g = 0`,
+
+```
+F = f I + (1 - f) n n,     r = (I - n n)·U_w + f n (n·U_w)     (120.3c)
+```
+
+since `I - F = (1 - f)(I - n n)` and `F·r = f U_w` (for `f = 0`, `r` is the
+tangential part of `U_w` and `F·r = n(n·r) = 0`). In a plane Couette flow
+between a `partialSlip` wall at `y = 0` (`U_w = 0`) and a wall moving at
+`U` at `y = H`, the face value is `u_b = (1 - f) u_P` with `u_P` at the
+distance `1/Delta_b`, which is the Navier slip condition `u_b = lambda
+du/dy` with the slip length
+
+```
+lambda = (1 - f) / (f Delta_b)                                 (120.3d)
+u(y)   = U (y + lambda) / (H + lambda)                         (120.3e)
+```
+
+(Navier 1823, Mém. Acad. Sci. Inst. France 6:389, public domain; the
+Couette profile with a slip length, Lauga, Brenner & Stone 2005, open:
+<https://arxiv.org/abs/cond-mat/0501557>, the slip length of its section 1; plane Couette flow,
+open: <https://en.wikipedia.org/wiki/Couette_flow>). The profile is linear,
+so the finite-volume solution on a uniform mesh is (120.3e) at every cell
+centre to round-off. `f = 1` is no-slip; `f = 0` is `slip`; `lambda` depends on the wall cell, as (120.3d) says.
+
+**fixedNormalSlip** reads `fixedValue U_n` (vector). It is (120.3a) with
+`F = n n`, `r = U_n`, `g = 0`: `U_b = n (n·U_n) + (I - n n)·U_P`.
+
+**fixedShearStress** reads `tau` (vector, kinematic: Pa per unit density,
+m^2/s^2 - this incompressible solver's `rho` is 1, as `flowRateInletVelocity`
+already assumes, so `tau/mu = tau/nu`). For a Newtonian fluid the wall
+traction is `mu dU/dn` (open: <https://en.wikipedia.org/wiki/Shear_stress>),
+so the face is (120.3a) with
+
+```
+F = n n,   r = 0,   g = (I - n n)·tau / nu                     (120.3f)
+```
+
+no flow through the wall, and the tangential wall-normal gradient
+`dU_t/dn = tau_t/nu`. `nu` is the LAMINAR kinematic viscosity, handed to the
+setup in `BcInputs::nu`; a setup without it is refused naming `nu`. No
+driver passes `nu` yet, so today every driver refuses the name by that
+message (a follow-up wires it); with a turbulence model the wall's `nu_t`
+would also enter the stress, and (120.3f) does not include it.
+
+**rotatingWallVelocity** reads `origin` (vector), `axis` (vector, normalised
+here to `a`) and `omega` (rad/s, a §120.1 Function1 of time). The wall
+velocity is the rigid rotation (open:
+<https://en.wikipedia.org/wiki/Angular_velocity>) with the component normal
+to the face removed, so a faceted wall carries no flux:
+
+```
+w_f = (I - n n)·(a × (x_f - origin)),   U_b = omega(t) w_f     (120.3g)
+```
+
+`w_f` is computed in f64 from the f64 face centres and normals (§118.2) and
+rounded once. It is a fixedValue at `U_b`: a constant `omega` is that
+value; a time-varying one is a §120.1 timed patch with `base = 0`, `w =
+w_f` and the scalar `omega` scaling it, through `setup_vector_field_timed`.
+On a face where `a × (x_f - origin)` is tangential already (a lid rotating
+about its own normal), `U_b = omega a × (x_f - origin)` exactly.
+
+**translatingWallVelocity** reads `U` (vector, a §120.1 Function1 of time)
+and is `uniformFixedValue` with the key `U`: the wall's velocity as written,
+constant anywhere and time-varying through the timed path.
+
+**extrapolatedCalculated** is zeroGradient (`U_b = U_P`, `psi_b = psi_P`) on
+any field. **nutUSpaldingWallFunction** is an alias of `nutUWallFunction`,
+which already applies Spalding's single formula (§15.1), printed once.
+
+`directionMixed`, `partialSlip`, `fixedNormalSlip`, `fixedShearStress`,
+`rotatingWallVelocity` and `translatingWallVelocity` are vector conditions
+and are refused by name on a scalar field.
+
+**Gates** (`rust/tests/bc_wall_slip.rs`, both builds; f64 tolerance first,
+then the `single` class of §118 and D-F32-1; every measured value is checked
+finite first, because `f64::max` drops a NaN and once let a NaN field report
+`0.000e0` and pass):
+`partial_slip_couette_is_the_slip_length_profile` - a cyclic-in-x Couette
+channel, 16 cells across, `f = 0.25` and `0.5`, top wall at `U = 1`: every
+cell centre within 1e-10 of `U` of (120.3e) with `lambda` from (120.3d) and
+the mesh's own `Delta_b`, the evaluated wall value within 1e-10, the
+cross-stream velocity at most 1e-10 (class R: 1e-5 under `single`).
+`fixed_shear_stress_wall_gradient_is_tau_over_nu` - the same channel 8 cells
+across, driven by `tau` at its top: the evaluated wall gradient `(u_b - u_P)
+Delta_b` equals `tau/nu` to 1e-12 relative (class R: 1e-5), and the cell
+profile is `tau y/nu` to 1e-10 of `tau H/nu` (class R: 1e-5).
+`no_flux_through_a_partial_slip_wall` - a lid-driven cavity with
+`partialSlip` side walls: `|phi_b|` and `|U_b·n|` on them at most 1e-12
+(class R: 1e-5). `a_rotating_lid_is_omega_cross_r` - a lid rotating about its
+normal: every face value within 1e-14 of `omega a × r` relative to `|omega|
+R_max` (class R: 5.4e-6), and a tilted axis gives (120.3g) with `|n·U_b|`
+within the same bound. The device evaluation of (120.3a) is held against its
+host twin to 1e-14 relative (class R: 5.4e-6) by
+`direction_mixed_device_is_its_host_twin`. The channels pin `p` at 0 on
+`yMin`: their solution has no pressure gradient, so the Dirichlet face moves
+nothing, and a pure-Neumann `p` (zeroGradient, cyclic and empty only)
+diverges to NaN within a few outer iterations under `single` - with
+`noSlip` and `fixedGradient` velocities too, no BC-07 condition involved.
+
+**Findings under `single`, not hidden by any band.** The f32 SIMPLE outer
+loop does not reach a fixed point on these channels (the iterate change
+stays at the f32 spacing of `U`), so a steady f32 result carries a floor of
+its own: the 16-cell no-slip Couette channel sits at 3.1e-6 (`U = 1`) and
+2.1e-6 (`U = 0.2`) of `U`, the same channel driven by `fixedGradient`
+(0.2 0 0) at 7.0e-6 of `tau H/nu`, and the 16-cell `fixedShearStress`
+channel at 1.17e-5 - over its class-R 1e-5, which is why its gate runs 8
+cells across (5.4e-7, 2.7e-6 of `tau H/nu`): the profile is linear and the
+f64 answer does not depend on the resolution, the gate's size is reduced and
+its tolerance is not. The pure-Neumann divergence above is the second
+finding; both belong to §118's mixed-precision loop, not to this section.
 
 No GPL-licensed source was consulted.
 

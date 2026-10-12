@@ -344,6 +344,27 @@ pub enum BcKind {
     ///
     /// **No new device branch**, for the same reason as above.
     PorousJumpPressure = 36,
+
+    /// The tensorial mixed condition of SPEC-LIT 120.3 - `directionMixed`,
+    /// `partialSlip`, `fixedNormalSlip` and `fixedShearStress` all ride it:
+    ///
+    /// ```text
+    /// U_b = F.r + (I - F).(U_P + g/Delta_b)                    (120.3a)
+    /// ```
+    ///
+    /// with `F` a symmetric value-fraction tensor, `r` a reference value and
+    /// `g` a reference gradient, held per face in the 12-entry
+    /// [`GpuVectorField::dm`] block `F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y
+    /// r_z g_x g_y g_z`. A per-component scalar `fr` cannot carry `F`, so
+    /// what the matrix sees is (120.3h): `fr = f_t = (tr F - n.F.n)/2`,
+    /// `refValue = r`, `refGrad = g` - the TANGENTIAL part of (120.3a)
+    /// enters the matrix implicitly, through the one triple of §4, and the
+    /// boundary kernel writes the face value (120.3a) into `bf` only.
+    /// `F = I` is fixedValue, `F = 0` is fixedGradient, `F = n n` fixes the
+    /// normal component and leaves the tangential one free. The host twin of
+    /// the device evaluation is
+    /// [`direction_mixed_value`](crate::field::direction_mixed_value).
+    DirectionMixed = 37,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -413,7 +434,63 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "uniformInletOutlet",
     "uniformTotalPressure",
     "fixedProfile",
+    // SPEC-LIT 120.3: the wall and slip family. `extrapolatedCalculated` is
+    // zeroGradient; the four tensorial names ride `BcKind::DirectionMixed`;
+    // the two moving walls ride `FixedValue`.
+    "extrapolatedCalculated",
+    "directionMixed",
+    "rotatingWallVelocity",
+    "translatingWallVelocity",
+    "partialSlip",
+    "fixedNormalSlip",
+    "fixedShearStress",
 ];
+
+/// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
+///
+/// `dm` is the 12-entry per-face block
+/// `[F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y r_z g_x g_y g_z]`, `u_p` the
+/// wall-adjacent cell value and `delta` the boundary delta coefficient of
+/// SPEC-LIT 2.4. The SAME operation order the kernel in `cuda/field.cu`
+/// runs: `q = U_P + g/Delta_b` (the `g/Delta_b` term 0 where `Delta_b = 0`),
+/// `a = F.r`, `b = F.q`, `U_b = a + (q - b)`, each matrix-vector product
+/// summed `F_x0 v_0 + F_x1 v_1 + F_x2 v_2` left to right. The device is
+/// compiled with FMA contraction on, so host and device agree to round-off,
+/// not bitwise - SPEC-LIT 120.3 records that.
+#[inline]
+pub fn direction_mixed_value(dm: &[Scalar], u_p: Vec3, delta: Scalar) -> Vec3 {
+    debug_assert!(dm.len() >= 12, "a DirectionMixed block has 12 entries");
+
+    let fxx = dm[0];
+    let fxy = dm[1];
+    let fxz = dm[2];
+    let fyy = dm[3];
+    let fyz = dm[4];
+    let fzz = dm[5];
+    let (rx, ry, rz) = (dm[6], dm[7], dm[8]);
+    let (gx, gy, gz) = (dm[9], dm[10], dm[11]);
+
+    // q = U_P + g/Delta_b, the guard of section 4 on a degenerate face.
+    let (qx, qy, qz) = if delta != 0.0 {
+        (u_p.x + gx / delta, u_p.y + gy / delta, u_p.z + gz / delta)
+    } else {
+        (u_p.x, u_p.y, u_p.z)
+    };
+
+    // a = F.r and b = F.q, each row summed left to right.
+    let a = Vec3::new(
+        fxx * rx + fxy * ry + fxz * rz,
+        fxy * rx + fyy * ry + fyz * rz,
+        fxz * rx + fyz * ry + fzz * rz,
+    );
+    let b = Vec3::new(
+        fxx * qx + fxy * qy + fxz * qz,
+        fxy * qx + fyy * qy + fyz * qz,
+        fxz * qx + fyz * qy + fzz * qz,
+    );
+
+    Vec3::new(a.x + (qx - b.x), a.y + (qy - b.y), a.z + (qz - b.z))
+}
 
 impl BcKind {
     /// Map an OpenFOAM boundary-condition type string, per SPEC-LIT §13.4.
@@ -456,6 +533,38 @@ impl BcKind {
             "totalPressure" | "uniformTotalPressure" => Self::TotalPressure,
             "movingWallVelocity" => Self::MovingWallVelocity,
             "flowRateInletVelocity" => Self::FlowRateInletVelocity,
+
+            // SPEC-LIT 120.3: the wall and slip family. `extrapolatedCalculated`
+            // IS zeroGradient on any field. The four tensorial names all carry
+            // (120.3a) - the per-face F, r and g they each imply are read and
+            // packed into `GpuVectorField::dm` by `field_setup`, which also
+            // refuses the names where the entry they are defined by is
+            // missing. The two moving walls are a fixedValue at the wall
+            // velocity; `rotatingWallVelocity`'s wall-normal component is
+            // removed by the setup that builds it, not by the kind.
+            "extrapolatedCalculated" => Self::ZeroGradient,
+            "directionMixed" | "partialSlip" | "fixedNormalSlip" | "fixedShearStress" => {
+                Self::DirectionMixed
+            }
+            "rotatingWallVelocity" | "translatingWallVelocity" => Self::FixedValue,
+
+            // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
+            // function. `nutUWallFunction` already applies Spalding's single
+            // formula (SPEC-LIT 15.1), so the name is an alias, printed once -
+            // the same treatment `compressible::alphatJayatillekeWallFunction`
+            // below gets.
+            "nutUSpaldingWallFunction" => {
+                crate::io::contract::warn_once(
+                    &format!("{field}: nutUSpaldingWallFunction"),
+                    &format!(
+                        "{field}: boundaryField/{patch}/type `nutUSpaldingWallFunction` \
+                         (OpenFOAM's Spalding spelling; `nutUWallFunction` already \
+                         applies Spalding's law, SPEC-LIT 15.1) mapped to \
+                         `nutUWallFunction`"
+                    ),
+                );
+                Self::NutUWallFunction
+            }
 
             "nutkWallFunction" => Self::NutkWallFunction,
             "nutUWallFunction" => Self::NutUWallFunction,
@@ -1109,6 +1218,13 @@ pub struct GpuVectorField {
     pub ref_value: DevBuf<Vec3>,
     pub ref_grad: DevBuf<Vec3>,
     pub bc_kind: DevBuf<Label>,
+    /// `[12 n_bf]` the DirectionMixed block of SPEC-LIT 120.3,
+    /// `F_xx F_xy F_xz F_yy F_yz F_zz r_x r_y r_z g_x g_y g_z` per boundary
+    /// face - `(120.3a)`'s `F`, `r` and `g`, and `(120.3h)`'s triple source:
+    /// the matrix reads `fr = f_t`, `refValue = r`, `refGrad = g`. Zero
+    /// everywhere a face does not carry one of the four tensorial names
+    /// (see [`BcKind::DirectionMixed`]).
+    pub dm: DevBuf<Scalar>,
 }
 
 impl GpuVectorField {
@@ -1126,6 +1242,7 @@ impl GpuVectorField {
             ref_value: gpu.zeros(m.n_boundary_faces)?,
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
+            dm: gpu.zeros(12 * m.n_boundary_faces)?,
         })
     }
 }
@@ -1348,7 +1465,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [53, 2, 55, 10, 10], "the per-status counts");
+        assert_eq!(counts, [60, 3, 47, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]
