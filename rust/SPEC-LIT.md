@@ -39358,6 +39358,78 @@ v1 is single-GPU (decomposition refused by name; docs/17 COMP decision 14), lami
 Spalart-Allmaras (§127.1), with constant `c_p`, no sources, no mesh motion and no
 radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15).
 
+### 122.5 The device twins of the gas state (CMP-08)
+
+`cuda/compressible.cu` evaluates (122.3), (122.4), (122.6) and (122.7) elementwise, one
+thread per cell. `src/compressible/thermo.rs` holds the gas (`PerfectGas`), the host
+twins and the launchers. This subsection adds no physics. It fixes the ORDER of the
+operations, because the gate between the device and the host is counted in
+representable numbers, and it is the same count in both builds.
+
+**The constants are formed once in f64 and rounded once.** `R_s` and `c_p` are (122.2)
+and (122.5) in f64 in both builds, with `c_p` formed as `gamma R_s / (gamma - 1)` in
+that order. A kernel never sees `gamma`, `W` or `Pr`. It receives the numbers of
+(122.9), each formed in f64 and rounded to the working precision (`fl`), and the host
+twin uses the same rounded numbers:
+
+```
+rs  = fl(R_s) ,  pop = fl(p_op) ,  grs = fl(gamma R_s) ,  cpr = fl(c_p / Pr) ,
+as  = fl(A_s) ,  ts  = fl(T_s) ,   mu0 = fl(mu)  (constant viscosity)             (122.9)
+psi = 1 / (rs T) ,   rho = psi (p + pop)                                           (122.10)
+mu  = (as (T sqrt(T))) / (T + ts)   (Sutherland) ,   mu = mu0   (constant) ,
+kappa = mu cpr                                                                     (122.11)
+c   = sqrt(grs T) ,   M = sqrt(u_x u_x + u_y u_y + u_z u_z) / c                    (122.12)
+p   = rho / psi - pop                                  (host only, the inverse)    (122.13)
+```
+
+Every operation in (122.10)-(122.13) is in the working precision, in the order the
+brackets show, left to right where there are none. (122.10) is (122.3) with (122.1),
+(122.11) is (122.6) and (122.7), and (122.12) is (122.4). `T^(3/2)` is written
+`T sqrt(T)`: one correctly rounded square root and one product, where `pow` would
+differ in its last bit between the host's library and the device's. `p + pop` is one
+sum in the working precision, which is the operation §122.2's oracle measured.
+
+**No floor and no clip.** §122.3 counts a state outside the gas law and never clips
+it, so these kernels have no guard: `T = 0` gives an infinite `psi`, and `T < 0` a NaN
+`c`. CMP-12's counter is what reports them. `cuda/compressible.cu` therefore defines
+no `OFGPU_CMP_TINY` yet. The first kernel that divides by something a floor must
+protect defines it, with §122.3's two values.
+
+**Contraction.** `compressible.cu` is compiled with nvcc's default contraction (it is
+not in `build.rs`'s `FMAD_OFF_UNITS`). The only product that feeds a sum is the sum of
+squares in (122.12), so only `M` can differ from the host through a fused
+multiply-add. That is §67.11's stance: the device is the reference and the host is a
+check, and the gate is four units in the last place rather than bitwise.
+
+**The gates.** `ulp distance` is the number of representable values between two
+finite numbers of one sign, which is the difference of their bit patterns read as
+integers. The answer keys are from the CMP-08 oracle: an independent NumPy evaluation
+of (122.9)-(122.13) in `float64` and in `float32`, kept outside the tree. It
+reproduces §122.1's two viscosities and §122.2's three f32 errors.
+
+| gate (the lib tests are `compressible::thermo::tests::*`, the f64 build; the same four names in `tests/compressible_thermo.rs` run in both builds) | bar | class |
+|---|---|---|
+| `gpu_matches_host_to_4ulp` | 4096 random states (`T` in [200, 2000] K, gauge `p` in [-5e4, 5e5] Pa about `p_op = 101325`, each velocity component in [-800, 800] m/s) and one state at rest, for Sutherland air and for a constant viscosity: `psi`, `rho`, `mu`, `kappa`, `c` and `M` from the device lie within 4 ulp of the host twin, and `M = 0` exactly at rest | D |
+| `sutherland_air_at_273_15_is_1_716e_5` | `|mu(273.15) - 1.716e-5| < 5e-9` Pa s, the four digits White and the Standard Atmosphere print (P). `mu(273.15) = 1.716079266245527e-05`, `mu(300) = 1.8460015185931457e-05` Pa s and `kappa(300) = 0.026122028560991366` W/(m K) to `1e-14` relative (R). A constant viscosity returns its number at every `T` (D) | P, R, D |
+| `ideal_gas_round_trip` | `R_s = 287.0550227690948` and `c_p = 1004.692579691832` J/(kg K) to `1e-15` relative, f64 in both builds (A). `rho(p = 0, 288.15 K, p_op = 101325) = 1.2249908312368587` kg/m3, `c(288.15) = 340.29526405061904` and `c(300) = 347.2219888817812` m/s to `1e-14` relative (R). Over the 4096 states, `p -> rho -> p` through (122.10) and (122.13) returns `p` within 4 ulp of `p_abs` (D). A stated `c_p` off (122.5) by more than `1e-6` relative is refused by name (§122.1) | A, R, D |
+| `f32_gauge_pressure_resolves_1pa` | with `p_op = 1e5` and `T` = 300, 288.15 and 273.15 K, on the device and on the host twin: `rho(p = 1) > rho(p = 0)` and `|(rho(1) - rho(0))/psi - 1| <= 0.01` (P). Control, `single` only: at 300 K the error is above `1e-3` (the oracle gives 4.209e-3), so the row is known to measure f32 arithmetic | P |
+| `the_compressible_thermo_update_replays_bitwise` (lib) | §81.7's row for `src/compressible/thermo.rs`: the three kernels capture into one graph and replay bitwise | D |
+
+R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1), which is `5.4e-6`
+for `1e-14`. No row carries a tolerance of its own for f32.
+
+**Landed (CMP-08).** Measured on the RTX 5070 Ti, in both builds. Over the 4097 states
+and both gases the device's `psi`, `rho`, `mu`, `kappa` and `c` equal the host twin bit
+for bit (0 ulp), and `M` differs by at most 2 ulp, which is the fused sum of squares
+the paragraph on contraction names. The round trip returns `p` within 1.5 ulp of
+`p_abs` (oracle; the test holds it to 4). The 1 Pa row measures, device and host
+alike: in f64 `5.7e-12`, `1.5e-12` and `1.9e-12` at 300, 288.15 and 273.15 K; under
+`single` `4.2089e-3`, `4.1011e-3` and `1.3870e-4`, which are §122.2's oracle values
+(0.421 %, 0.410 %, 0.014 %), so the control (above `1e-3` at 300 K) holds. The replay
+gate captures 5 kernel nodes (the three kernels and the two field operations that
+feed `M` back into `T`) and replays three times bitwise over 7 buffers and 1792
+values. The 46 cubins that existed before are unchanged in SASS in both builds.
+
 ---
 
 ## 123. Momentum in conservative form — the mass flux, the full Newtonian stress, and Rhie-Chow with a density

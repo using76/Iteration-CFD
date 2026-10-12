@@ -10,10 +10,11 @@
 //! self-contained module, on the `vof.rs` precedent, with its kernels in a
 //! `cuda/compressible.cu` of its own.
 //!
-//! This unit ships only [`exact`], the host answer keys of SPEC-LIT §127.2.
-//! Later units add these submodules to the module:
+//! This unit ships [`exact`], the host answer keys of SPEC-LIT §127.2, and
+//! [`thermo`], the perfect-gas state of §122 with its device twins, landed
+//! with CMP-08. Later units add these submodules to the module:
 //!
-//! - `thermo` (§122.1-§122.3), the perfect-gas state, CMP-08;
+//! - `thermo` (§122.1-§122.3), the perfect-gas state, landed with CMP-08;
 //! - `momentum` (§123), momentum in conservative form, CMP-09;
 //! - `pressure` (§124), the all-speed pressure equation, CMP-10;
 //! - `energy` (§125), the energy equation solved for `T`, CMP-11;
@@ -30,3 +31,4 @@
 //! source was consulted.
 
 pub mod exact;
+pub mod thermo;
