@@ -36041,13 +36041,59 @@ The remesh follows Botsch & Kobbelt (2004). Each iteration does five things:
    longer than `(4/3) h`.
 3. It flips edges to bring valences toward 6 (4 on a polyline end).
 4. It relaxes tangentially, using (116.14).
-5. It projects back onto the input surface with `TriIndex::closest_point` (§92.11).
+5. It projects every vertex back onto the input surface with `remesh::Projector`, the f64
+   closest-point query of (116.14d). (TET-06a changed this item: it named
+   `TriIndex::closest_point` of §92.11, which is `Scalar`-typed and would run in f32 under
+   `single`, against §116.2.)
 
 In each test, `h` is `h(x)` at the edge midpoint.
 
 ```
 x <- x + ( I - n n^T ) ( c - x )         c = area-weighted centroid of the one-ring        (116.14)
 ```
+
+**The operations, as TET-06a builds them** (DERIVED from Botsch & Kobbelt 2004, §3, where
+the paper leaves a choice open). `x_v` is a vertex, `N(v)` its one-ring of neighbours,
+`val(v) = |N(v)|`, `m_ab = (x_a + x_b) / 2` and `l_ab = |x_a - x_b|`.
+
+```
+split    (a,b)  if  l_ab > (4/3) h(m_ab);  new vertex at m_ab, each of the two
+                triangles becomes two, each child keeps its parent's patch             (116.14a)
+collapse (a,b)  if  l_ab < (4/5) h(m_ab),  and for every w in N(a) u N(b) \ {a,b}:
+                |m_ab - x_w| <= (4/3) h((m_ab + x_w)/2);  the survivor moves to m_ab   (116.14b)
+flip     (a,b)  to (c,d), c and d opposite (a,b),  if  E' < E  with
+                E = sum over v in {a,b,c,d} of (val(v) - 6)^2,  E' the same after       (116.14c)
+project  x_v <- P(x_v) = the closest point of the input surface; among equally
+                close triangles, the smallest triangle index                          (116.14d)
+```
+
+A collapse is also refused when it would break the surface: unless `N(a) ∩ N(b)` is exactly
+the two opposite vertices (the link condition; any other common neighbour would leave an edge
+on three triangles), unless the surface keeps more than four vertices, and when any surviving
+triangle of the two one-rings would reach zero area or turn its normal by 90 degrees or more.
+A flip is refused when `(c,d)` is already an edge, when `val(a)` or `val(b)` is 3, and when a
+new triangle's normal makes 90 degrees or more with the sum of the two old ones. In (116.14)
+`n` is the normalised sum of the one-ring's triangle normals `(x_1 - x_0) x (x_2 - x_0)`, and
+`c = sum_t A_t g_t / sum_t A_t` over the triangles `t` around the vertex, with `A_t` the area
+and `g_t` the centroid; every vertex's new position is computed from the old positions before
+any moves (Jacobi order). The splits repeat until no edge passes (116.14a), at most 32 sweeps
+per iteration. Every pass visits edges and vertices in a fixed index order, so the output is
+the same bit for bit on every run. TET-06a treats every vertex as free; the constraints below
+are TET-06b's.
+
+**The TET-06a gates** (§116.18) are measured on the output `S` against the input `S_in`:
+`rho_e = l_e / h(m_e)` per undirected edge, the smallest of the three angles per triangle, and
+the vertex Hausdorff distance
+
+```
+d_H(S, S_in) = max over the vertices v of S of  min over y in S_in  |x_v - y|             (116.14e)
+```
+
+the remesh's own degrees of freedom. The two-sided distance between the surfaces includes the
+chord sag inside each output triangle, about `r_t^2 / (2 R)` on a sphere of radius `R` for a
+triangle of circumradius `r_t`, which is 0.0083 h for an equilateral triangle of edge `h` on the
+unit sphere at `h = 0.05`. It is a property of any piecewise-linear surface at that size, not of
+the remesh, so it is measured and reported in §116.18 and not gated.
 
 Constraints:
 
@@ -36373,6 +36419,17 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-04b | the first run's one failure | `GapSide::Inward` scanned along `+n_t`; `proximity_gap`'s `Inward` expectations caught it before the coder's report | the TET-04b commit |
 | TET-04b | the f32 arm | `rust/tests/tetmesh_sizefield.rs`, 4 tests (the sphere, the gap and `g = 1.2`'s gradation, and the `Scalar` width), pass under `--features single` with every printed number identical to the f64 build | the TET-04b commit |
 | TET-04b | the whole `tetmesh::` test filter, release | 72 tests in 20.9 s, and the 10^6 run ignored | the TET-04b commit |
+| TET-06a | §116.10, changed by this unit | item 5 named `TriIndex::closest_point` (§92.11), which is `Scalar`-typed and runs in f32 under `single`, against §116.2; it now names the f64 `remesh::Projector` (116.14d). The paragraph "The operations, as TET-06a builds them", (116.14a)-(116.14e) and the gate definitions were added; nothing else in §116 changed | the TET-06a commit |
+| TET-06a | the unit sphere: a level-5 icosphere (10 242 points, 20 480 triangles), `h = 0.05`, the default 10 iterations, release | 99.88 % of 16 794 edges with `l/h` in `[4/5, 4/3]` (the bar is 95 %), smallest 0.776, largest 1.414, mean 1.023; 100 % of 11 196 triangles with a smallest angle of 25 degrees or more (the bar is 99 %), the smallest 35.55 degrees; the vertex distance (116.14e) 1.7e-16 (the bar is `0.01 h` = 5e-4); 5 600 points; 298 splits, 4 940 collapses, 1 622 flips; about 0.2 s | the TET-06a commit |
+| TET-06a | the same output, closed and 2-manifold | `check_manifold`: every edge on two triangles in opposite directions, every vertex link one cycle, Euler characteristic 2; `surfprep::prepare` accepts it (closed, oriented, outward, no self-intersection); every triangle keeps patch 0; two runs bit-identical | the TET-06a commit |
+| TET-06a | the two-sided sampled distance (3 vertices, 3 edge midpoints and the centroid of every triangle, both directions), not gated | 0.0151 h. The supervisor's probe outside the tree bounds it geometrically: the largest output chord sag `R - sqrt(R^2 - r_t^2)` is 0.0126 h and the input icosphere's own is 0.0057 h, and 0.0151 h lies below their sum, so the excess over `0.01 h` is the piecewise-linear chord of §116.10, not a projection error | the TET-06a commit |
+| TET-06a | a graded field on the same sphere: a point source of size 0.025 at (1, 0, 0), `H = 0.1`, `g = 1.2` | 99.89 % of 4 395 edges with `l / h(m_e)` in `[4/5, 4/3]`; Euler characteristic 2 | the TET-06a commit |
+| TET-06a | a torus (`R = 1`, `r = 0.4`, a 160 x 64 grid, 20 480 triangles; the inner ring spaced 0.47 h), `h = 0.05`; not a plan gate | Euler characteristic 0, `prepare` accepts it, 100 % of triangles at 25 degrees or more; `l/h` in `[4/5, 4/3]` for 86.2 % of edges after the default 10 iterations, and in the supervisor's probe 90.0 % after 20 and 98.8 % after 40 (3 145, 2 274 and 272 short edges): an input much finer than `h` in one direction drains slowly, because the `(4/3) h` clause of (116.14b) refuses most collapses in each iteration | the TET-06a commit |
+| TET-06a | the projector and the closest point | `Projector::closest` equals the scan over every triangle (point and distance bit for bit, the triangle index) on 10^4 queries each around the sphere and the torus; `norm(x - closest_point_on_triangle(x, t))` equals `sizefield::point_triangle_distance` bit for bit on 10^4 random and 200 degenerate triangles | the TET-06a commit |
+| TET-06a | the manifold refusals, each by name | on a tetrahedron: an open face names edge (1, 2) on 1 triangle; a flipped face names edge (1, 2) used twice in the same direction; two tetrahedra sharing vertex 3 name a link of 2 cycles; a repeated index names triangle 4; an unused point names vertex 4 | the TET-06a commit |
+| TET-06a | the f32 arm | `rust/tests/tetmesh_remesh.rs`, 2 tests (the `Scalar` width, and the sphere's four bars), pass under `--features single` with every printed number identical to the f64 build | the TET-06a commit |
+| TET-06a | the first run's failures | the split inserted edge-map keys with the new vertex, always the largest index, first, so later lookups missed them, and split, collapse and flip skipped any edge whose incidence list held the `b -> a` triangle first; the coder's level-3 coarse-sphere test (`h = 0.25`, 3 iterations), kept as `coarse_sphere_regression`, caught the first | the TET-06a commit |
+| TET-06a | the whole `tetmesh::` test filter, release | 84 tests in 20.3 s, and the 10^6 run ignored | the TET-06a commit |
 
 ### 116.19 References
 
