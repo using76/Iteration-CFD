@@ -24,10 +24,12 @@
 //! test, evaluated in f64 through `HostMesh::geom64()` (117.2), so the map
 //! is bit-identical in the f64 and the `single` builds. The refusals are
 //! 117.12's first four rows, by name; [`LatticeReport`] is 117.7, key by
-//! key. The writers gather through this map (VIO-02 samples, VIO-03
-//! writes); neither is implemented here.
+//! key. Sampling (117.5) is implemented here: [`VoxelMap::sample`] writes
+//! `s_v` at every voxel - the cell value, or the least-squares gradient of
+//! (117.7) clipped to the point neighbours' range by (117.8), with
+//! [`LinearStencil`] holding the setup-time data. VIO-03 writes.
 //!
-//! Written from SPEC-LIT section 117 (117.2-117.4, 117.7).
+//! Written from SPEC-LIT section 117 (117.2-117.5, 117.7).
 //! Provenance: ORIGINAL.
 //! No GPL-licensed source was consulted.
 
@@ -37,6 +39,7 @@ use crate::error::{Error, Result};
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::{Geom64, HostMesh};
 use crate::types::DVec3;
+use crate::Scalar;
 
 /// "No cell owns this voxel."
 pub const NONE: u32 = u32::MAX;
@@ -54,8 +57,8 @@ pub const MAX_EXPLICIT_COARSEN: f64 = 16.0;
 //  The spec (117.3)
 // ==========================================================================
 
-/// Which sampler VIO-02 will apply at each owned voxel (117.5). Carried on
-/// the spec; `build` reads it nowhere.
+/// Which sampler [`VoxelMap::sample`] applies at each owned voxel (117.5).
+/// `build` reads it to decide whether to build a [`LinearStencil`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LatticeSample {
     /// `s_v = phi_c`, the solver's own cell value.
@@ -138,14 +141,77 @@ pub struct LatticeReport {
     /// `Some` only when the box is the default (`spec.bbox == None`), since
     /// only then does the lattice volume bound the mesh volume.
     pub volume_error: Option<f64>,
-    /// (117.7)'s fallback count, `linear` sampling only; `0` here. VIO-02
-    /// fills it.
+    /// (117.7)'s fallback count, `linear` sampling only - the stencil's
+    /// [`LinearStencil::n_fallback`], filled by `build`; `0` for `cell`.
     pub n_linear_fallback: usize,
     /// Wall time of `VoxelMap::build`.
     pub build_s: f64,
     /// The coarsening note, naming `h`, `h'` and `s` (117.3); `None` when
     /// `coarsen == 1.0`.
     pub note: Option<String>,
+}
+
+// ==========================================================================
+//  The linear stencil (117.5)
+// ==========================================================================
+
+/// Setup-time data of `linear` sampling (117.7)-(117.8). Built once; holds
+/// no field values: the face and point neighbours of every cell, the cell
+/// centres, and (117.7)'s fallback classification - a property of the
+/// geometry alone, so it is decided here and not per field.
+#[derive(Debug, Clone)]
+pub struct LinearStencil {
+    n_cells: usize,
+    /// `C_c` of (117.7)-(117.8), `hm.geom64().c` - f64 in both builds.
+    centres: Vec<DVec3>,
+    /// `N_f(c)` as a CSR of cell ids, each list ascending, deduped, no `c`.
+    f_off: Vec<usize>,
+    f_nbr: Vec<u32>,
+    /// `N_p(c)` as a CSR of cell ids, each list ascending, deduped, no `c`.
+    p_off: Vec<usize>,
+    p_nbr: Vec<u32>,
+    /// (117.7)'s fallback test per cell: `det G <= 1e-12 (tr G / 3)^3`.
+    fallback: Vec<bool>,
+    n_fallback: usize,
+}
+
+/// `det G` of the 3 x 3 symmetric normal matrix
+/// `[[a, b, c], [b, d, e], [c, e, f]]`.
+fn det3(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> f64 {
+    a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - d * c)
+}
+
+/// A `clamp` that cannot panic: `f64::clamp` asserts when a bound is NaN,
+/// and a non-finite field value must reach the output, never abort (117.5).
+/// A NaN value fails both tests and passes through.
+fn clip(s: f64, lo: f64, hi: f64) -> f64 {
+    if s < lo {
+        lo
+    } else if s > hi {
+        hi
+    } else {
+        s
+    }
+}
+
+/// Sort, dedup and drop `c` from a neighbour list in place; the kept length.
+fn sorted_neighbours(s: &mut [u32], c: u32) -> usize {
+    s.sort_unstable();
+    // Sorted, so dedup compacts in place.
+    let mut w = 0usize;
+    for k in 0..s.len() {
+        if w == 0 || s[k] != s[w - 1] {
+            s[w] = s[k];
+            w += 1;
+        }
+    }
+    let k = s[..w].partition_point(|&x| x < c);
+    if k < w && s[k] == c {
+        s.copy_within(k + 1..w, k);
+        w - 1
+    } else {
+        w
+    }
 }
 
 // ==========================================================================
@@ -166,6 +232,12 @@ pub struct VoxelMap {
     /// `[n_voxels]`, flat index `i + n_x (j + n_y k)`: a cell index or
     /// [`NONE`] (117.6).
     pub cell: Vec<u32>,
+    /// The mesh's cell count, `hm.n_cells`: the field length a `sample`
+    /// call takes (117.5).
+    pub n_cells: usize,
+    /// The linear stencil of (117.7)-(117.8) when `spec.sample` is
+    /// [`LatticeSample::Linear`], else `None` (117.5).
+    pub linear: Option<LinearStencil>,
     /// The spec the map was built from.
     pub spec: LatticeSpec,
     /// 117.7's report.
@@ -205,6 +277,84 @@ impl VoxelMap {
             NONE => None,
             c => Some(c as usize),
         }
+    }
+
+    /// `s_v` for every voxel, `[n_voxels]`, flat index as `self.cell`
+    /// (117.5). Dispatches on `self.spec.sample`: `cell` copies `phi_c`;
+    /// `linear` writes (117.8) - the cell value plus (117.7)'s gradient,
+    /// clipped to the point neighbours' range; a `NONE` voxel holds
+    /// `spec.background`. All f64 in both builds; the writer rounds once
+    /// (117.2 item 2). One call does no geometric search.
+    pub fn sample_f64(&self, phi: &[f64]) -> Result<Vec<f64>> {
+        if phi.len() != self.n_cells {
+            return Err(Error::Mesh(format!(
+                "output.visualisation.lattice.sample: the field has {} values but the map was built on {} cells",
+                phi.len(),
+                self.n_cells
+            )));
+        }
+        let mut out = vec![self.spec.background; self.cell.len()];
+        match self.spec.sample {
+            LatticeSample::Cell => {
+                for (v, &cv) in self.cell.iter().enumerate() {
+                    if cv != NONE {
+                        out[v] = phi[cv as usize];
+                    }
+                }
+            }
+            LatticeSample::Linear => {
+                let st = match &self.linear {
+                    Some(st) => st,
+                    None => {
+                        return Err(Error::Mesh(
+                            "output.visualisation.lattice.sample: sample is linear but this map carries no linear stencil - rebuild the map with spec.sample = LatticeSample::Linear"
+                                .to_string(),
+                        ));
+                    }
+                };
+                // (117.7)'s g_c and (117.8)'s (m_c, M_c) once per CELL, not
+                // once per voxel: neither depends on v, and a coarse cell
+                // can own hundreds of voxels. One call therefore costs
+                // O(n_cells x neighbours + n_voxels), and the voxel loop
+                // only reads the two tables - bit-identical to a per-voxel
+                // evaluation, since both are the same function of (phi, c).
+                let mut grad = Vec::with_capacity(self.n_cells);
+                let mut bnd = Vec::with_capacity(self.n_cells);
+                for c in 0..self.n_cells {
+                    grad.push(st.gradient(phi, c));
+                    bnd.push(st.bounds(phi, c));
+                }
+                let centres = &st.centres;
+                for (v, &cv) in self.cell.iter().enumerate() {
+                    if cv == NONE {
+                        continue;
+                    }
+                    let c = cv as usize;
+                    let x = self.centre(
+                        v % self.n[0],
+                        v / self.n[0] % self.n[1],
+                        v / (self.n[0] * self.n[1]),
+                    );
+                    let (lo, hi) = bnd[c];
+                    out[v] = clip(phi[c] + grad[c].dot(x - centres[c]), lo, hi);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The same for the solver's own `Scalar` cell values, widened exactly
+    /// to f64 first (`as f64`, no value rounded back - 117.2 item 2).
+    pub fn sample(&self, phi: &[Scalar]) -> Result<Vec<f64>> {
+        if phi.len() != self.n_cells {
+            return Err(Error::Mesh(format!(
+                "output.visualisation.lattice.sample: the field has {} values but the map was built on {} cells",
+                phi.len(),
+                self.n_cells
+            )));
+        }
+        let wide: Vec<f64> = phi.iter().map(|&s| s as f64).collect();
+        self.sample_f64(&wide)
     }
 }
 
@@ -443,6 +593,276 @@ fn boundary_faces_hold(x: DVec3, hm: &HostMesh, g: &Geom64<'_>, c: usize) -> boo
     true
 }
 
+/// `N_f(c)` for every cell: the cells across the INTERNAL faces (`f <
+/// n_internal_faces`), a set - a cell that shares two faces with `c` counts
+/// once - ascending, never `c`. Boundary faces add nothing.
+fn face_neighbours(raw: &PolyMeshRaw, hm: &HostMesh) -> (Vec<usize>, Vec<u32>) {
+    let mut off = vec![0usize; hm.n_cells + 1];
+    for f in 0..hm.n_internal_faces {
+        off[raw.owner[f] as usize + 1] += 1;
+        off[raw.neighbour[f] as usize + 1] += 1;
+    }
+    for c in 0..hm.n_cells {
+        off[c + 1] += off[c];
+    }
+    let mut nbrs = vec![0u32; off[hm.n_cells]];
+    let mut fill = off.clone();
+    for f in 0..hm.n_internal_faces {
+        let (o, n) = (raw.owner[f] as usize, raw.neighbour[f] as usize);
+        nbrs[fill[o]] = n as u32;
+        fill[o] += 1;
+        nbrs[fill[n]] = o as u32;
+        fill[n] += 1;
+    }
+    // A set: sort, drop duplicates and any self-entry, compacting in place -
+    // the kept lists only shrink.
+    let mut done = vec![0usize; hm.n_cells + 1];
+    let mut w = 0usize;
+    for c in 0..hm.n_cells {
+        let k = sorted_neighbours(&mut nbrs[off[c]..fill[c]], c as u32);
+        nbrs.copy_within(off[c]..off[c] + k, w);
+        w += k;
+        done[c + 1] = w;
+    }
+    nbrs.truncate(w);
+    (done, nbrs)
+}
+
+/// The points of every cell - all its faces' points, internal and boundary,
+/// straight from `raw.faces` - as a CSR, each list sorted and deduped.
+fn cell_points(raw: &PolyMeshRaw, hm: &HostMesh) -> (Vec<usize>, Vec<u32>) {
+    let mut off = vec![0usize; hm.n_cells + 1];
+    for c in 0..hm.n_cells {
+        let mut n = 0usize;
+        for k in hm.cf_offset[c] as usize..hm.cf_offset[c + 1] as usize {
+            n += raw.faces[hm.cf_face[k] as usize].len();
+        }
+        for k in hm.bcf_offset[c] as usize..hm.bcf_offset[c + 1] as usize {
+            n += raw.faces[hm.n_internal_faces + hm.bcf_face[k] as usize].len();
+        }
+        off[c + 1] = off[c] + n;
+    }
+    let mut pts = vec![0u32; off[hm.n_cells]];
+    for c in 0..hm.n_cells {
+        let mut w = off[c];
+        for k in hm.cf_offset[c] as usize..hm.cf_offset[c + 1] as usize {
+            for &p in &raw.faces[hm.cf_face[k] as usize] {
+                pts[w] = p as u32;
+                w += 1;
+            }
+        }
+        for k in hm.bcf_offset[c] as usize..hm.bcf_offset[c + 1] as usize {
+            for &p in &raw.faces[hm.n_internal_faces + hm.bcf_face[k] as usize] {
+                pts[w] = p as u32;
+                w += 1;
+            }
+        }
+        pts[off[c]..w].sort_unstable();
+        // Duplicates past `dedup`-style compaction are not needed: a point
+        // met twice only re-visits the same point's cells, which the stamp
+        // in `point_neighbours` dedups anyway.
+    }
+    (off, pts)
+}
+
+/// The cells of every point, inverted from [`cell_points`]: a CSR over
+/// `raw.points`, each list ascending (the cells are visited in order).
+fn point_cells(
+    cp_off: &[usize],
+    cp: &[u32],
+    n_points: usize,
+    n_cells: usize,
+) -> (Vec<usize>, Vec<u32>) {
+    let mut off = vec![0usize; n_points + 1];
+    for c in 0..n_cells {
+        for &p in &cp[cp_off[c]..cp_off[c + 1]] {
+            off[p as usize + 1] += 1;
+        }
+    }
+    for i in 0..n_points {
+        off[i + 1] += off[i];
+    }
+    let mut cells = vec![0u32; off[n_points]];
+    let mut fill = off.clone();
+    for c in 0..n_cells {
+        for &p in &cp[cp_off[c]..cp_off[c + 1]] {
+            cells[fill[p as usize]] = c as u32;
+            fill[p as usize] += 1;
+        }
+    }
+    (off, cells)
+}
+
+/// `N_p(c)` for every cell: the cells that share at least one point with
+/// `c` - the union over the cell's own points - ascending, deduped, never
+/// `c`. `N_f(c)` is a subset of it.
+fn point_neighbours(raw: &PolyMeshRaw, hm: &HostMesh) -> (Vec<usize>, Vec<u32>) {
+    let (cp_off, cp) = cell_points(raw, hm);
+    let (pc_off, pc) = point_cells(&cp_off, &cp, raw.points.len(), hm.n_cells);
+    let total: usize = (0..hm.n_cells)
+        .map(|c| {
+            cp[cp_off[c]..cp_off[c + 1]]
+                .iter()
+                .map(|&p| pc_off[p as usize + 1] - pc_off[p as usize])
+                .sum::<usize>()
+        })
+        .sum();
+    let mut nbrs = vec![0u32; total];
+    let mut off = vec![0usize; hm.n_cells + 1];
+    let mut stamp = vec![usize::MAX; hm.n_cells];
+    let mut w = 0usize;
+    for c in 0..hm.n_cells {
+        let s0 = w;
+        for &p in &cp[cp_off[c]..cp_off[c + 1]] {
+            for &n in &pc[pc_off[p as usize]..pc_off[p as usize + 1]] {
+                let n = n as usize;
+                if n != c && stamp[n] != c {
+                    stamp[n] = c;
+                    nbrs[w] = n as u32;
+                    w += 1;
+                }
+            }
+        }
+        nbrs[s0..w].sort_unstable();
+        off[c + 1] = w;
+    }
+    (off, nbrs)
+}
+
+impl LinearStencil {
+    /// The stencils of (117.7)-(117.8) for every cell of `hm`: `N_f(c)` from
+    /// the internal faces, `N_p(c)` from the points the cells share through
+    /// `raw.faces`, the centres of `geom64()`, and (117.7)'s fallback test,
+    /// which reads the geometry only. Everything is f64 in both builds
+    /// (117.2 item 2). Cost `O(cells x neighbours)`.
+    pub fn build(raw: &PolyMeshRaw, hm: &HostMesh) -> Result<LinearStencil> {
+        let n_cells = hm.n_cells;
+        let centres = hm.geom64().c.to_vec();
+        let (f_off, f_nbr) = face_neighbours(raw, hm);
+        let (p_off, p_nbr) = point_neighbours(raw, hm);
+        // (117.7)'s fallback test: the offsets `d_n = C_n - C_c` of the face
+        // neighbours must span three dimensions, `G = sum d_n d_n^T`; a cell
+        // with no face neighbour has `G = 0` and falls back. Geometry only,
+        // so it is decided once, here, and `gradient` inherits it.
+        let mut fallback = vec![false; n_cells];
+        let mut n_fallback = 0usize;
+        for c in 0..n_cells {
+            let (mut g00, mut g01, mut g02, mut g11, mut g12, mut g22) =
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            let cc = centres[c];
+            for &ni in &f_nbr[f_off[c]..f_off[c + 1]] {
+                let d = centres[ni as usize] - cc;
+                g00 += d.x * d.x;
+                g01 += d.x * d.y;
+                g02 += d.x * d.z;
+                g11 += d.y * d.y;
+                g12 += d.y * d.z;
+                g22 += d.z * d.z;
+            }
+            let t = (g00 + g11 + g22) / 3.0;
+            if det3(g00, g01, g02, g11, g12, g22) <= 1e-12 * t * t * t {
+                fallback[c] = true;
+                n_fallback += 1;
+            }
+        }
+        Ok(LinearStencil {
+            n_cells,
+            centres,
+            f_off,
+            f_nbr,
+            p_off,
+            p_nbr,
+            fallback,
+            n_fallback,
+        })
+    }
+}
+
+impl LinearStencil {
+    /// The cells the stencils were built for.
+    pub fn n_cells(&self) -> usize {
+        self.n_cells
+    }
+
+    /// The number of cells with `det G <= 1e-12 (tr G / 3)^3` (117.7).
+    pub fn n_fallback(&self) -> usize {
+        self.n_fallback
+    }
+
+    /// Whether cell `c` has no 3-D stencil, so (117.7) gives it `g_c = 0`.
+    pub fn is_fallback(&self, c: usize) -> bool {
+        self.fallback[c]
+    }
+
+    /// `N_f(c)`: ascending, no duplicate, never `c`.
+    pub fn face_neighbours(&self, c: usize) -> &[u32] {
+        &self.f_nbr[self.f_off[c]..self.f_off[c + 1]]
+    }
+
+    /// `N_p(c)`: ascending, no duplicate, never `c`.
+    pub fn point_neighbours(&self, c: usize) -> &[u32] {
+        &self.p_nbr[self.p_off[c]..self.p_off[c + 1]]
+    }
+}
+
+impl LinearStencil {
+    /// `g_c` of (117.7) for the field `phi` (`[n_cells]`, f64): the normal
+    /// equations `G g = b`, `G = sum d_n d_n^T`, `b = sum d_n (phi_n -
+    /// phi_c)` with `d_n = C_n - C_c`, solved by Cramer's rule. Exact for a
+    /// linear field whenever `G` is invertible (Mavriplis 2003). The zero
+    /// vector on a fallback cell.
+    pub fn gradient(&self, phi: &[f64], c: usize) -> DVec3 {
+        if self.fallback[c] {
+            return DVec3::new(0.0, 0.0, 0.0);
+        }
+        let cc = self.centres[c];
+        let (mut g00, mut g01, mut g02, mut g11, mut g12, mut g22) =
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut b0, mut b1, mut b2) = (0.0, 0.0, 0.0);
+        for &ni in &self.f_nbr[self.f_off[c]..self.f_off[c + 1]] {
+            let n = ni as usize;
+            let d = self.centres[n] - cc;
+            let dp = phi[n] - phi[c];
+            g00 += d.x * d.x;
+            g01 += d.x * d.y;
+            g02 += d.x * d.z;
+            g11 += d.y * d.y;
+            g12 += d.y * d.z;
+            g22 += d.z * d.z;
+            b0 += d.x * dp;
+            b1 += d.y * dp;
+            b2 += d.z * dp;
+        }
+        let det = det3(g00, g01, g02, g11, g12, g22);
+        DVec3::new(
+            (b0 * (g11 * g22 - g12 * g12) - g01 * (b1 * g22 - g12 * b2)
+                + g02 * (b1 * g12 - g11 * b2))
+                / det,
+            (g00 * (b1 * g22 - b2 * g12) - b0 * (g01 * g22 - g12 * g02)
+                + g02 * (g01 * b2 - b1 * g02))
+                / det,
+            (g00 * (g11 * b2 - g12 * b1) - g01 * (g01 * b2 - b1 * g02)
+                + b0 * (g01 * g12 - g11 * g02))
+                / det,
+        )
+    }
+}
+
+impl LinearStencil {
+    /// `(m_c, M_c)` of (117.8): the range of `phi` over `c` and its point
+    /// neighbours - values of real cells, so the clip of (117.8) never
+    /// creates a new extremum (Barth & Jespersen 1989).
+    pub fn bounds(&self, phi: &[f64], c: usize) -> (f64, f64) {
+        let (mut lo, mut hi) = (phi[c], phi[c]);
+        for &ni in &self.p_nbr[self.p_off[c]..self.p_off[c + 1]] {
+            let v = phi[ni as usize];
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        (lo, hi)
+    }
+}
+
 // ==========================================================================
 //  build
 // ==========================================================================
@@ -463,6 +883,12 @@ impl VoxelMap {
         let t0 = Instant::now();
         check_spec(spec)?;
         check_mesh(raw, hm)?;
+        // The linear stencil, when `linear` sampling is asked for (117.5) -
+        // inside the timed section, so `report.build_s` covers it.
+        let linear = match spec.sample {
+            LatticeSample::Linear => Some(LinearStencil::build(raw, hm)?),
+            LatticeSample::Cell => None,
+        };
         let g = hm.geom64();
 
         // ---- the lattice box (117.3) ------------------------------------
@@ -638,7 +1064,7 @@ impl VoxelMap {
             n_filled,
             fluid_fraction: n_fluid as f64 / n_voxels as f64,
             volume_error,
-            n_linear_fallback: 0,
+            n_linear_fallback: linear.as_ref().map_or(0, LinearStencil::n_fallback),
             build_s: t0.elapsed().as_secs_f64(),
             note,
         };
@@ -647,6 +1073,8 @@ impl VoxelMap {
             lo,
             voxel: h,
             cell,
+            n_cells: hm.n_cells,
+            linear,
             spec: spec.clone(),
             report,
         })
