@@ -38,6 +38,17 @@
 //! nothing syncs - which is what makes the step capturable; its gate is
 //! `the_ale_step_replays_bitwise`.
 //!
+//! # The geometry type (SPEC-LIT 118.8, F32-11)
+//!
+//! Under `single` the points live on the device as f64 ([`gpugeom::GeoVec3`],
+//! the world positions shifted to the mesh's local origin), and the swept
+//! volumes, the mesh flux, the volume history `V64` and the cell volumes the
+//! sweep computes are f64 ON THE DEVICE ([`gpugeom::Geo`]); the float copies
+//! the hot kernels read (`v0`, `v00`, `phi_mesh`, and `gm`'s arrays) are one
+//! narrowing of them. In the f64 build [`gpugeom::Geo`] IS `Scalar`, so the
+//! same buffers the build always had are the `*64` ones, and every number
+//! comes out bit for bit as it did.
+//!
 //! NOT here: the routing of the relative flux through the solver, the moving
 //! wall and the smoother are SPEC-LIT 105.7-105.9 (`src/simple.rs`,
 //! `src/mesh/motion.rs`); this module owns the two kernels they launch,
@@ -51,11 +62,11 @@ use crate::error::{Error, Result};
 use crate::field::{BcKind, GpuScalarField, GpuSurfaceScalarField};
 use crate::fv::{self, DivScheme, FvKernels};
 use crate::ldu::GpuLduMatrix;
-use crate::mesh::gpugeom::{FacePointCsr, MeshGeomKernels, flatten_faces};
+use crate::mesh::gpugeom::{FacePointCsr, Geo, GeoVec3, MeshGeomKernels, flatten_faces, geo_points};
 use crate::mesh::refined::{self, RefinedBox};
 use crate::mesh::{geometry, GpuMesh, HostMesh};
 use crate::timescheme::{DdtCoeffs, DdtScheme};
-use crate::types::DVec3;
+use crate::types::{DVec3, GeomPoint};
 use crate::{DevBuf, Label, Scalar, Vec3};
 
 /// The six kernels of `cuda/ale.cu`.
@@ -99,10 +110,11 @@ pub struct AleMesh {
     pub n_boundary_faces: usize,
     pub n_points: usize,
     /// `x^{n+1}` - what the caller moves, with `set_points` or a device
-    /// kernel of its own.
-    pub points: DevBuf<Vec3>,
+    /// kernel of its own. f64 on the device under `single`, the LOCAL frame
+    /// of the mesh's origin (SPEC-LIT (118.8a)).
+    pub points: DevBuf<GeoVec3>,
     /// `x^n` - `advance` copies `points` here as its last act.
-    pub points_old: DevBuf<Vec3>,
+    pub points_old: DevBuf<GeoVec3>,
     /// The face -> point CSR, resident: `[n_faces + 1]` and
     /// `[offset[n_faces]]`.
     pub face_offset: DevBuf<Label>,
@@ -110,20 +122,42 @@ pub struct AleMesh {
     /// `[n_bf]` the cyclic pairing of `geometry::cyclic_pairing`, padded to
     /// one element when empty.
     pub pair: DevBuf<Label>,
-    /// `V^n`, the volume at `psi0`'s level; length `gm.v.len()`.
+    /// `V^n`, the volume at `psi0`'s level; length `gm.v.len()`. The float
+    /// copy `tsDdtGeneralV` reads - the f64 one is `volumes64`'s.
     pub v0: DevBuf<Scalar>,
     /// `V^{n-1}`, the volume at `psi00`'s level; length `gm.v.len()`.
     pub v00: DevBuf<Scalar>,
     /// `[max(n_faces, 1)]` the swept volume of the last `advance`, global
-    /// face order (internal first).
-    pub swept: DevBuf<Scalar>,
+    /// face order (internal first), f64 in BOTH builds (118.8c).
+    pub swept: DevBuf<Geo>,
     /// the one before it.
-    pub swept0: DevBuf<Scalar>,
+    pub swept0: DevBuf<Geo>,
     /// `aN*swept - a00*swept0`, named "phiMesh": positive when the owner
-    /// grows.
+    /// grows. The float copy `aleRelativeFlux` reads.
     pub phi_mesh: GpuSurfaceScalarField,
-    f_sf: DevBuf<Vec3>,
-    f_cf: DevBuf<Vec3>,
+    /// The world position of the mesh's local coordinate origin (SPEC-LIT
+    /// 118.7), copied from `HostMesh::origin`: `set_points` shifts the world
+    /// points it is given by it, in f64 (118.8a). ZERO in the f64 build.
+    pub origin: DVec3,
+    f_sf: DevBuf<GeoVec3>,
+    f_cf: DevBuf<GeoVec3>,
+    /// `V^{n+1}` at f64 - `single` only; the f64 build's volume is `gm.v`
+    /// itself (SPEC-LIT 118.8).
+    #[cfg(feature = "single")]
+    v64: DevBuf<Geo>,
+    /// `V64^n` - the volume at `psi0`'s level at f64.
+    #[cfg(feature = "single")]
+    v64_0: DevBuf<Geo>,
+    /// `V64^{n-1}`.
+    #[cfg(feature = "single")]
+    v64_00: DevBuf<Geo>,
+    /// the f64 cell centroids the sweep computed, the metrics kernels' input.
+    #[cfg(feature = "single")]
+    c64: DevBuf<GeoVec3>,
+    /// `aN*swept - a00*swept0` at f64, `[max(n_faces, 1)]`, global face
+    /// order (118.8d).
+    #[cfg(feature = "single")]
+    phi_mesh64: DevBuf<Geo>,
     geom: MeshGeomKernels,
     k: AleKernels,
 }
@@ -139,28 +173,24 @@ fn upload_padded(gpu: &Gpu, v: &[Label]) -> Result<DevBuf<Label>> {
 
 impl AleMesh {
     /// Build the moving-mesh state for ONE mesh, at its rest points.
-    pub fn new(gpu: &Gpu, m: &HostMesh, gm: &GpuMesh, points: &[Vec3], csr: &FacePointCsr) -> Result<Self> {
-        Self::with_cubin(gpu, m, gm, points, csr, crate::kernels::ALE)
-    }
-
-    pub(crate) fn with_cubin(
+    pub fn new<P: GeomPoint>(
         gpu: &Gpu,
         m: &HostMesh,
         gm: &GpuMesh,
-        points: &[Vec3],
+        points: &[P],
+        csr: &FacePointCsr,
+    ) -> Result<Self> {
+        Self::with_cubin(gpu, m, gm, points, csr, crate::kernels::ALE)
+    }
+
+    pub(crate) fn with_cubin<P: GeomPoint>(
+        gpu: &Gpu,
+        m: &HostMesh,
+        gm: &GpuMesh,
+        points: &[P],
         csr: &FacePointCsr,
         cubin: &[u8],
     ) -> Result<Self> {
-        // SPEC-LIT 118.7: the moving state is uploaded from ABSOLUTE
-        // positions, so a mesh stored about a local origin is refused by
-        // name until this module is converted - never run shifted and wrong.
-        // (The f64 build has no local origin, so this never fires there.)
-        if m.origin != DVec3::ZERO {
-            return Err(Error::Config(format!(
-                "AleMesh::new: a mesh with a local origin (SPEC-LIT 118.7) is \
-                 not converted yet - moving geometry is F32-11"
-            )));
-        }
         if gm.n_cells != m.n_cells
             || gm.n_internal_faces != m.n_internal_faces
             || gm.n_boundary_faces != m.n_boundary_faces
@@ -191,13 +221,16 @@ impl AleMesh {
         gpu.stream().memcpy_dtod(&gm.v, &mut v0)?;
         gpu.stream().memcpy_dtod(&gm.v, &mut v00)?;
 
-        Ok(Self {
+        let geo = geo_points(points, m.origin);
+        // `mut` is the `single` build's: it seeds the f64 history below.
+        #[cfg_attr(not(feature = "single"), allow(unused_mut))]
+        let mut s = Self {
             n_cells: m.n_cells,
             n_internal_faces: n_if,
             n_boundary_faces: n_bf,
             n_points: points.len(),
-            points: gpu.upload(points)?,
-            points_old: gpu.upload(points)?,
+            points: gpu.upload(&geo)?,
+            points_old: gpu.upload(&geo)?,
             face_offset: gpu.upload(&csr.offset)?,
             face_point: upload_padded(gpu, &csr.point)?,
             pair: upload_padded(gpu, &pair)?,
@@ -208,16 +241,77 @@ impl AleMesh {
             f_sf: gpu.zeros(n_faces.max(1))?,
             f_cf: gpu.zeros(n_faces.max(1))?,
             phi_mesh: GpuSurfaceScalarField::zeros(gpu, gm, "phiMesh")?,
+            origin: m.origin,
+            #[cfg(feature = "single")]
+            v64: gpu.zeros(gm.v.len())?,
+            #[cfg(feature = "single")]
+            v64_0: gpu.zeros(gm.v.len())?,
+            #[cfg(feature = "single")]
+            v64_00: gpu.zeros(gm.v.len())?,
+            #[cfg(feature = "single")]
+            c64: gpu.zeros(gm.v.len())?,
+            #[cfg(feature = "single")]
+            phi_mesh64: gpu.zeros(n_faces.max(1))?,
             geom: MeshGeomKernels::new(gpu)?,
             k: AleKernels::from_cubin(gpu, cubin)?,
-        })
+        };
+
+        // Under `single` the f64 volume history starts at the f64 cell
+        // volumes of the uploaded points, swept into THIS struct's own
+        // scratch - no array of `gm` is written (SPEC-LIT 118.8). The f64
+        // build has no scratch: `gm.v` IS the f64 volume.
+        #[cfg(feature = "single")]
+        {
+            let (n_cells, nl_f, nl_c, nl_if) = (
+                m.n_cells,
+                n_faces as Label,
+                m.n_cells as Label,
+                n_if as Label,
+            );
+            unsafe {
+                if n_faces > 0 {
+                    gpu.stream()
+                        .launch_builder(&s.geom.face_geometry)
+                        .arg(&mut s.f_sf)
+                        .arg(&mut s.f_cf)
+                        .arg(&s.face_offset)
+                        .arg(&s.face_point)
+                        .arg(&s.points)
+                        .arg(&nl_f)
+                        .launch(cfg_for(n_faces))?;
+                }
+                if n_cells > 0 {
+                    gpu.stream()
+                        .launch_builder(&s.geom.cell_geometry)
+                        .arg(&mut s.v64)
+                        .arg(&mut s.c64)
+                        .arg(&s.f_sf)
+                        .arg(&s.f_cf)
+                        .arg(&gm.cf_offset)
+                        .arg(&gm.cf_face)
+                        .arg(&gm.cf_own)
+                        .arg(&gm.bcf_offset)
+                        .arg(&gm.bcf_face)
+                        .arg(&nl_if)
+                        .arg(&nl_c)
+                        .launch(cfg_for(n_cells))?;
+                }
+            }
+            gpu.stream().memcpy_dtod(&s.v64, &mut s.v64_0)?;
+            gpu.stream().memcpy_dtod(&s.v64, &mut s.v64_00)?;
+        }
+
+        Ok(s)
     }
 
     /// Move the points from the host. Setup and prescribed-motion only: this
     /// is a host write, and `Gpu::write` is refused by name inside a CUDA
     /// graph capture (SPEC-LIT 81.3) - a captured step moves its points on
     /// the device instead, as the gate's `memcpy_dtod` does.
-    pub fn set_points(&mut self, gpu: &Gpu, points: &[Vec3]) -> Result<()> {
+    ///
+    /// The points given are WORLD positions; they are stored shifted to the
+    /// mesh's local origin, the subtraction in f64 (SPEC-LIT (118.8a)).
+    pub fn set_points<P: GeomPoint>(&mut self, gpu: &Gpu, points: &[P]) -> Result<()> {
         if points.len() != self.n_points {
             return Err(Error::Mesh(format!(
                 "AleMesh::set_points: {} points, and this AleMesh moves {} - the \
@@ -226,7 +320,8 @@ impl AleMesh {
                 self.n_points
             )));
         }
-        gpu.write(&mut self.points, points)
+        let geo = geo_points(points, self.origin);
+        gpu.write(&mut self.points, &geo)
     }
 
     /// The counts this module was built against, asked again at every use.
@@ -275,21 +370,58 @@ impl AleMesh {
                     .launch(cfg_for(n_faces))?;
             }
             if n_cells > 0 {
-                gpu.stream()
-                    .launch_builder(&self.geom.cell_geometry)
-                    .arg(&gm.v) // written in place: SPEC-LIT 105.2
-                    .arg(&gm.c) // written in place: SPEC-LIT 105.2
-                    .arg(&self.f_sf)
-                    .arg(&self.f_cf)
-                    .arg(&gm.cf_offset)
-                    .arg(&gm.cf_face)
-                    .arg(&gm.cf_own)
-                    .arg(&gm.bcf_offset)
-                    .arg(&gm.bcf_face)
-                    .arg(&nl_if)
-                    .arg(&nl_c)
-                    .launch(cfg_for(n_cells))?;
+                // Under `single` the f64 sweep lands in THIS struct's scratch
+                // and `gm`'s float arrays are one narrowing of it; in the f64
+                // build the sweep IS the write into `gm` (SPEC-LIT 118.8).
+                #[cfg(not(feature = "single"))]
+                {
+                    gpu.stream()
+                        .launch_builder(&self.geom.cell_geometry)
+                        .arg(&gm.v) // written in place: SPEC-LIT 105.2
+                        .arg(&gm.c) // written in place: SPEC-LIT 105.2
+                        .arg(&self.f_sf)
+                        .arg(&self.f_cf)
+                        .arg(&gm.cf_offset)
+                        .arg(&gm.cf_face)
+                        .arg(&gm.cf_own)
+                        .arg(&gm.bcf_offset)
+                        .arg(&gm.bcf_face)
+                        .arg(&nl_if)
+                        .arg(&nl_c)
+                        .launch(cfg_for(n_cells))?;
+                }
+                #[cfg(feature = "single")]
+                {
+                    gpu.stream()
+                        .launch_builder(&self.geom.cell_geometry)
+                        .arg(&mut self.v64)
+                        .arg(&mut self.c64)
+                        .arg(&self.f_sf)
+                        .arg(&self.f_cf)
+                        .arg(&gm.cf_offset)
+                        .arg(&gm.cf_face)
+                        .arg(&gm.cf_own)
+                        .arg(&gm.bcf_offset)
+                        .arg(&gm.bcf_face)
+                        .arg(&nl_if)
+                        .arg(&nl_c)
+                        .launch(cfg_for(n_cells))?;
+                    gpu.stream()
+                        .launch_builder(&self.geom.narrow_cells)
+                        .arg(&gm.v) // narrowed in place: SPEC-LIT 118.8
+                        .arg(&gm.c) // narrowed in place: SPEC-LIT 118.8
+                        .arg(&self.v64)
+                        .arg(&self.c64)
+                        .arg(&nl_c)
+                        .launch(cfg_for(n_cells))?;
+                }
             }
+            // The metrics read the f64 centroids under `single` and the
+            // stored ones in the f64 build, where they are the same thing.
+            #[cfg(not(feature = "single"))]
+            let cell_c: &DevBuf<GeoVec3> = &gm.c;
+            #[cfg(feature = "single")]
+            let cell_c: &DevBuf<GeoVec3> = &self.c64;
             if n_if > 0 {
                 gpu.stream()
                     .launch_builder(&self.geom.internal_metrics)
@@ -302,7 +434,7 @@ impl AleMesh {
                     .arg(&gm.skew_corr) // written in place: SPEC-LIT 105.2
                     .arg(&self.f_sf)
                     .arg(&self.f_cf)
-                    .arg(&gm.c)
+                    .arg(cell_c)
                     .arg(&gm.owner)
                     .arg(&gm.neighbour)
                     .arg(&nl_if)
@@ -320,7 +452,7 @@ impl AleMesh {
                     .arg(&gm.b_weights) // written in place: SPEC-LIT 105.2
                     .arg(&self.f_sf)
                     .arg(&self.f_cf)
-                    .arg(&gm.c)
+                    .arg(cell_c)
                     .arg(&gm.b_face_cells)
                     .arg(&self.pair)
                     .arg(&nl_if)
@@ -360,6 +492,14 @@ impl AleMesh {
         gpu.stream().memcpy_dtod(&self.v0, &mut self.v00)?;
         gpu.stream().memcpy_dtod(&gm.v, &mut self.v0)?;
         gpu.stream().memcpy_dtod(&self.swept, &mut self.swept0)?;
+        // The f64 history rotates beside the float one, while `v64` still
+        // holds V^n - the recompute below overwrites it with V^{n+1}
+        // (SPEC-LIT 118.8).
+        #[cfg(feature = "single")]
+        {
+            gpu.stream().memcpy_dtod(&self.v64_0, &mut self.v64_00)?;
+            gpu.stream().memcpy_dtod(&self.v64, &mut self.v64_0)?;
+        }
 
         let (nl_f, nl_if, nl_bf) = (
             n_faces as Label,
@@ -378,6 +518,7 @@ impl AleMesh {
                 .launch(cfg_for(n_faces))?;
         }
         self.recompute_in_place(gpu, gm)?;
+        #[cfg(not(feature = "single"))]
         unsafe {
             gpu.stream()
                 .launch_builder(&self.k.mesh_flux)
@@ -391,8 +532,95 @@ impl AleMesh {
                 .arg(&nl_bf)
                 .launch(cfg_for(n_faces))?;
         }
+        // The f64 flux the scheme's law holds at is one more argument; the
+        // float copies are its narrowing (SPEC-LIT (118.8d)).
+        #[cfg(feature = "single")]
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.k.mesh_flux)
+                .arg(&mut self.phi_mesh.f)
+                .arg(&mut self.phi_mesh.bf)
+                .arg(&mut self.phi_mesh64)
+                .arg(&self.swept)
+                .arg(&self.swept0)
+                .arg(&c.a_n)
+                .arg(&c.a_00)
+                .arg(&nl_if)
+                .arg(&nl_bf)
+                .launch(cfg_for(n_faces))?;
+        }
         gpu.stream().memcpy_dtod(&self.points, &mut self.points_old)?;
         Ok(())
+    }
+
+    /// `V^{n+1}` at f64, `n_cells` long (SPEC-LIT 118.8): the f64 volume the
+    /// sweep computed, never rounded. The f64 build downloads `gm.v`, which
+    /// IS that array.
+    pub fn volumes64(&self, gpu: &Gpu, gm: &GpuMesh) -> Result<Vec<f64>> {
+        #[cfg(not(feature = "single"))]
+        {
+            let mut v = gpu.download(&gm.v)?;
+            v.truncate(self.n_cells);
+            Ok(v)
+        }
+        #[cfg(feature = "single")]
+        {
+            let _ = gm;
+            let mut v = gpu.download(&self.v64)?;
+            v.truncate(self.n_cells);
+            Ok(v)
+        }
+    }
+
+    /// `(V64^n, V64^{n-1})`, `n_cells` long each - the f64 history `advance`
+    /// rotates beside the float one.
+    pub fn volume_history64(&self, gpu: &Gpu) -> Result<(Vec<f64>, Vec<f64>)> {
+        #[cfg(not(feature = "single"))]
+        {
+            let mut v0 = gpu.download(&self.v0)?;
+            let mut v00 = gpu.download(&self.v00)?;
+            v0.truncate(self.n_cells);
+            v00.truncate(self.n_cells);
+            Ok((v0, v00))
+        }
+        #[cfg(feature = "single")]
+        {
+            let mut v0 = gpu.download(&self.v64_0)?;
+            let mut v00 = gpu.download(&self.v64_00)?;
+            v0.truncate(self.n_cells);
+            v00.truncate(self.n_cells);
+            Ok((v0, v00))
+        }
+    }
+
+    /// The swept volumes at f64, `n_faces` long, global face order (118.8c).
+    pub fn swept64(&self, gpu: &Gpu) -> Result<Vec<f64>> {
+        let mut s = gpu.download(&self.swept)?;
+        s.truncate(self.n_internal_faces + self.n_boundary_faces);
+        Ok(s)
+    }
+
+    /// `(internal, boundary)` mesh flux at f64 (118.8d). The f64 build
+    /// downloads the field's own two halves; under `single` the flat f64
+    /// buffer is cut where the boundary faces begin.
+    pub fn mesh_flux64(&self, gpu: &Gpu) -> Result<(Vec<f64>, Vec<f64>)> {
+        #[cfg(not(feature = "single"))]
+        {
+            let mut f = gpu.download(&self.phi_mesh.f)?;
+            let mut bf = gpu.download(&self.phi_mesh.bf)?;
+            f.truncate(self.n_internal_faces);
+            bf.truncate(self.n_boundary_faces);
+            Ok((f, bf))
+        }
+        #[cfg(feature = "single")]
+        {
+            let all = gpu.download(&self.phi_mesh64)?;
+            let all = &all[..(self.n_internal_faces + self.n_boundary_faces).min(all.len())];
+            Ok((
+                all[..self.n_internal_faces].to_vec(),
+                all[self.n_internal_faces..].to_vec(),
+            ))
+        }
     }
 
     /// Add `sign . d(psi)/dt` to the matrix, on the moving mesh: the ddt of
@@ -622,14 +850,16 @@ impl AleMesh {
     }
 }
 
-/// The swept volume of every face, on the HOST, in the kernel's association.
+/// The swept volume of every face, on the HOST, in the kernel's association,
+/// at f64 from the points widened exactly (SPEC-LIT (118.8c)).
 ///
 /// The twin `cuda/ale.cu`'s `aleSweptVolume` is held bitwise against: every
 /// operation below has the association and the order of the kernel - the
 /// accumulation into `x0`/`x1`, the division by `n`, the half-sums, the
 /// cross products, the `(dx + da) + dc` grouping, the `(n0 + 4 nm) + n1`
-/// Simpson weights, and the division by 36. SPEC-LIT 105.3.
-pub fn host_swept_volumes(points_old: &[Vec3], points_new: &[Vec3], csr: &FacePointCsr) -> Vec<Scalar> {
+/// Simpson weights, and the division by 36. SPEC-LIT 105.3. In the f64 build
+/// the widening is the identity, so the bits are the ones it always returned.
+pub fn host_swept_volumes<P: GeomPoint>(points_old: &[P], points_new: &[P], csr: &FacePointCsr) -> Vec<f64> {
     let n_faces = csr.offset.len().saturating_sub(1);
     let mut out = Vec::with_capacity(n_faces);
     for f in 0..n_faces {
@@ -639,25 +869,25 @@ pub fn host_swept_volumes(points_old: &[Vec3], points_new: &[Vec3], csr: &FacePo
             out.push(0.0);
             continue;
         }
-        let mut x0 = Vec3::ZERO;
-        let mut x1 = Vec3::ZERO;
+        let mut x0 = DVec3::ZERO;
+        let mut x1 = DVec3::ZERO;
         for i in 0..n {
-            x0 += points_old[csr.point[b + i] as usize];
-            x1 += points_new[csr.point[b + i] as usize];
+            x0 += points_old[csr.point[b + i] as usize].to_dvec3();
+            x1 += points_new[csr.point[b + i] as usize].to_dvec3();
         }
-        x0 = x0 / n as Scalar;
-        x1 = x1 / n as Scalar;
+        x0 = x0 / n as f64;
+        x1 = x1 / n as f64;
         let xm = (x0 + x1) * 0.5;
         let dx = x1 - x0;
 
-        let mut acc: Scalar = 0.0;
+        let mut acc: f64 = 0.0;
         for i in 0..n {
             let pa = csr.point[b + i] as usize;
             let pc = csr.point[b + ((i + 1) % n)] as usize;
-            let a0 = points_old[pa];
-            let c0 = points_old[pc];
-            let a1 = points_new[pa];
-            let c1 = points_new[pc];
+            let a0 = points_old[pa].to_dvec3();
+            let c0 = points_old[pc].to_dvec3();
+            let a1 = points_new[pa].to_dvec3();
+            let c1 = points_new[pc].to_dvec3();
             let am = (a0 + a1) * 0.5;
             let cm = (c0 + c1) * 0.5;
             let n0 = (a0 - x0).cross(c0 - x0);
@@ -808,15 +1038,19 @@ pub fn run_scl(
     let mut bw: DevBuf<Scalar> = gpu.zeros(nbf)?;
     let u = Vec3::new(0.7, -0.4, 0.25);
 
-    let n_faces = m.n_internal_faces + nbf;
     let owner: Vec<Label> = gpu.download(&gm.owner)?;
     let neighbour: Vec<Label> = gpu.download(&gm.neighbour)?;
     let b_face_cells: Vec<Label> = gpu.download(&gm.b_face_cells)?;
 
     let v_init: Vec<Scalar> = gpu.download(&gm.v)?.into_iter().take(m.n_cells).collect();
-    let init_sum: Scalar = v_init.iter().copied().sum();
     let mut v_prev = v_init.clone();
     let mut v_prev2 = v_init.clone();
+    // The f64 law the gate measures (SPEC-LIT (118.8e)): volumes, swept volumes
+    // and mesh flux at f64, in BOTH builds.
+    let v_init64: Vec<f64> = ale.volumes64(gpu, &gm)?;
+    let init_sum64: f64 = v_init64.iter().copied().sum();
+    let mut v_prev64 = v_init64.clone();
+    let mut v_prev264 = v_init64.clone();
 
     let mut run = SclRun {
         steps,
@@ -832,6 +1066,13 @@ pub fn run_scl(
         worst_cell: 0,
     };
     let mut pts: Vec<Vec3> = rb.points.clone();
+    // The f64 accumulators the `SclRun` scalars are narrowed from: the law is
+    // measured in f64 and stored at `Scalar` (SPEC-LIT 118.8).
+    let mut scl64 = 0.0f64;
+    let mut scheme64 = 0.0f64;
+    let mut drift64 = 0.0f64;
+    let mut bflux64 = 0.0f64;
+    let mut ratio64 = f64::MAX;
 
     for n in 0..steps {
         let t = (n + 1) as Scalar * dt;
@@ -844,42 +1085,47 @@ pub fn run_scl(
         gpu.sync()?;
 
         let v: Vec<Scalar> = gpu.download(&gm.v)?.into_iter().take(m.n_cells).collect();
-        let swept: Vec<Scalar> = gpu.download(&ale.swept)?.into_iter().take(n_faces).collect();
         let pm_f: Vec<Scalar> = gpu.download(&ale.phi_mesh.f)?.into_iter().take(m.n_internal_faces).collect();
         let pm_b: Vec<Scalar> = gpu.download(&ale.phi_mesh.bf)?.into_iter().take(nbf).collect();
         let v0: Vec<Scalar> = gpu.download(&ale.v0)?.into_iter().take(m.n_cells).collect();
         let v00: Vec<Scalar> = gpu.download(&ale.v00)?.into_iter().take(m.n_cells).collect();
+        let v64: Vec<f64> = ale.volumes64(gpu, &gm)?;
+        let sw64: Vec<f64> = ale.swept64(gpu)?;
+        let (pm64_f, pm64_b) = ale.mesh_flux64(gpu)?;
+        let (v0_64, v00_64) = ale.volume_history64(gpu)?;
         run.history_bitwise &= v0 == v_prev && v00 == v_prev2;
+        run.history_bitwise &= v0_64 == v_prev64 && v00_64 == v_prev264;
 
         // The per-cell face sums: internal faces first, ascending id, owner
-        // + and neighbour -, then the boundary faces, owner +.
-        let mut d_v_sum = vec![0.0 as Scalar; m.n_cells];
-        let mut flux_sum = vec![0.0 as Scalar; m.n_cells];
+        // + and neighbour -, then the boundary faces, owner +. In f64 (118.8e).
+        let mut d_v_sum = vec![0.0f64; m.n_cells];
+        let mut flux_sum = vec![0.0f64; m.n_cells];
         for f in 0..m.n_internal_faces {
             let (o, nn) = (owner[f] as usize, neighbour[f] as usize);
-            d_v_sum[o] += swept[f];
-            d_v_sum[nn] -= swept[f];
-            flux_sum[o] += pm_f[f];
-            flux_sum[nn] -= pm_f[f];
+            d_v_sum[o] += sw64[f];
+            d_v_sum[nn] -= sw64[f];
+            flux_sum[o] += pm64_f[f];
+            flux_sum[nn] -= pm64_f[f];
         }
         for bf in 0..nbf {
-            d_v_sum[b_face_cells[bf] as usize] += swept[m.n_internal_faces + bf];
-            flux_sum[b_face_cells[bf] as usize] += pm_b[bf];
-            run.boundary_flux_max = run.boundary_flux_max.max(pm_b[bf].abs());
+            d_v_sum[b_face_cells[bf] as usize] += sw64[m.n_internal_faces + bf];
+            flux_sum[b_face_cells[bf] as usize] += pm64_b[bf];
+            bflux64 = bflux64.max(pm64_b[bf].abs());
         }
+        let (a_n64, a_064, a_0064) = (f64::from(c.a_n), f64::from(c.a_0), f64::from(c.a_00));
         for c_id in 0..m.n_cells {
-            let scl = ((v[c_id] - v_prev[c_id]) - d_v_sum[c_id]).abs() / v[c_id];
-            if scl > run.worst_scl {
-                run.worst_scl = scl;
+            let scl = ((v64[c_id] - v_prev64[c_id]) - d_v_sum[c_id]).abs() / v64[c_id];
+            if scl > scl64 {
+                scl64 = scl;
                 run.worst_step = n;
                 run.worst_cell = c_id;
             }
-            let scheme_scl = (c.a_n * v[c_id] + c.a_0 * v_prev[c_id] + c.a_00 * v_prev2[c_id]
+            let scheme_scl = (a_n64 * v64[c_id] + a_064 * v_prev64[c_id] + a_0064 * v_prev264[c_id]
                 - flux_sum[c_id])
                 .abs()
-                / (c.a_n.abs() * v[c_id]);
-            run.worst_scheme = run.worst_scheme.max(scheme_scl);
-            run.min_volume_ratio = run.min_volume_ratio.min(v[c_id] / v_init[c_id]);
+                / (a_n64.abs() * v64[c_id]);
+            scheme64 = scheme64.max(scheme_scl);
+            ratio64 = ratio64.min(v64[c_id] / v_init64[c_id]);
         }
 
         // The uniform state: phi = U.Sf - phi_mesh, assembled by the ALE ddt
@@ -918,11 +1164,18 @@ pub fn run_scl(
             run.worst_uniform = run.worst_uniform.max(r);
         }
 
-        let v_sum: Scalar = v.iter().copied().sum();
-        run.volume_drift = run.volume_drift.max(((v_sum - init_sum) / init_sum).abs());
+        let v_sum64: f64 = v64.iter().copied().sum();
+        drift64 = drift64.max(((v_sum64 - init_sum64) / init_sum64).abs());
         v_prev2 = v_prev;
         v_prev = v;
+        v_prev264 = v_prev64;
+        v_prev64 = v64;
     }
+    run.worst_scl = scl64 as Scalar;
+    run.worst_scheme = scheme64 as Scalar;
+    run.volume_drift = drift64 as Scalar;
+    run.boundary_flux_max = bflux64 as Scalar;
+    run.min_volume_ratio = ratio64 as Scalar;
     Ok(run)
 }
 

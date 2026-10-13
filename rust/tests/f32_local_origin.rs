@@ -13,7 +13,8 @@
 //! under `single`; it runs in BOTH builds with the same assertions —
 //! docs/17 §5.1 rule 4: class R on the two cavity gates (1e-5 of the lid
 //! velocity in both builds), class D on the bitwise equalities, the counts
-//! and the refusal. The host gates run on any machine; the SIMPLE gates pass
+//! and the device sweep of the local-origin mesh (SPEC-LIT 118.8: F32-11
+//! replaced the refusal). The host gates run on any machine; the SIMPLE gates pass
 //! vacuously without a card, the convention of `tests/f32_boussinesq.rs`.
 //!
 //! Provenance: ORIGINAL — the meshes are this tree's own generators; no
@@ -33,7 +34,7 @@ use ofgpu::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
 use ofgpu::simple::{Simple, SimpleControls};
 use ofgpu::solver::SolverControls;
 use ofgpu::sources::CellSelector;
-use ofgpu::types::{to_vec3, DVec3};
+use ofgpu::types::DVec3;
 use ofgpu::{
     BcKind, Gpu, GpuMesh, GpuScalarField, HostMesh, Label, Result, Scalar, Vec3,
 };
@@ -623,27 +624,22 @@ fn writers_put_world_positions_on_disk() {
     );
 }
 
-/// T7: a path not converted yet REFUSES a local origin by name, and never
-/// runs shifted and wrong. The device geometry sweep is F32-11's; in the f64
-/// build there is no local origin, so the sweep runs. Class D.
+/// T7: the device geometry sweep takes a local origin (SPEC-LIT 118.8) -
+/// rebuilt ON THE DEVICE from the f64 translated points, its sixteen arrays
+/// are `mesh_b()`'s bit for bit, in BOTH builds. Class D.
 #[test]
-fn unconverted_paths_refuse_a_local_origin() -> Result<()> {
+fn the_device_sweep_takes_a_local_origin() -> Result<()> {
     let Some(gpu) = Gpu::new(0).ok() else {
         return Ok(());
     };
     let mut b = mesh_b();
     let raw = translated_raw();
-    let points: Vec<Vec3> = raw.points.iter().map(|&p| to_vec3(p)).collect();
     let k = MeshGeomKernels::new(&gpu)?;
-    let r = gpu_compute_geometry(&gpu, &k, &mut b, &points, &raw.faces);
-    if cfg!(feature = "single") {
-        let msg = r.expect_err("the device sweep refuses a local origin").to_string();
-        assert!(
-            msg.contains("local origin") && msg.contains("F32-11"),
-            "the refusal names the path and the unit: {msg}"
-        );
-    } else {
-        r.expect("the f64 build has no local origin and the sweep runs");
-    }
+    gpu_compute_geometry(&gpu, &k, &mut b, &raw.points, &raw.faces)
+        .expect("the device sweep takes a local origin");
+    assert!(
+        geometry_is_bitwise(&mesh_b(), &b),
+        "the device sweep rebuilt B's arrays bit for bit"
+    );
     Ok(())
 }

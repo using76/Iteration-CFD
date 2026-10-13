@@ -228,9 +228,9 @@ pub(crate) fn validate<P>(m: &HostMesh, points: &[P], faces: &[Vec<Label>]) -> R
 /// exists to remove. Every question below is the same question asked of the
 /// same numbers; what the two entry points share is [`validate_topology`], so
 /// they cannot drift.
-pub(crate) fn validate_csr(
+pub(crate) fn validate_csr<P>(
     m: &HostMesh,
-    points: &[Vec3],
+    points: &[P],
     csr: &crate::mesh::gpugeom::FacePointCsr,
 ) -> Result<()> {
     let n_faces = m.n_internal_faces + m.n_boundary_faces;
@@ -385,7 +385,7 @@ pub(crate) fn cyclic_pairing(m: &HostMesh) -> Result<Vec<Label>> {
 //  The local origin - SPEC-LIT 118.7
 // ==========================================================================
 
-/// One axis of the SNAPPED local origin (SPEC-LIT 118.7a) of a point set,
+/// One axis of the SNAPPED local origin (SPEC-LIT (118.7a)) of a point set,
 /// from the axis's bounding box `[lo, hi]`:
 ///
 /// ```text
@@ -424,7 +424,7 @@ pub fn snapped_origin_axis(lo: f64, hi: f64) -> f64 {
     m.signum() * q * (m.abs() / q - 0.5).ceil()
 }
 
-/// The local origin (SPEC-LIT 118.7a) of a point set: per axis,
+/// The local origin (SPEC-LIT (118.7a)) of a point set: per axis,
 /// [`snapped_origin_axis`] over the axis's bounding box. The f64 build never
 /// shifts - ZERO, always - and an empty point set gives ZERO. The caller
 /// sets [`HostMesh::origin`] from this BEFORE [`compute`], which never

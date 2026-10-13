@@ -56,21 +56,87 @@
 //! figure is a residual of three separate timings, and section 82.1 says what
 //! happened when an earlier draft of this module read one such residual as a
 //! measurement.
+//!
+//! # The geometry type (SPEC-LIT 118.8, F32-11)
+//!
+//! Under `single` the sweep computes in DOUBLE from double points and rounds
+//! ONCE per stored value, exactly as `mesh/geometry.rs::sweep` does on the
+//! host: the points arrive as [`GeoVec3`] (the world positions shifted to the
+//! mesh's local origin, [`geo_points`]), the face and cell kernels compute in
+//! [`Geo`] (f64), and the stored `Scalar`/`Vec3` arrays are one narrowing of
+//! the f64 result. In the f64 build [`Geo`] IS `Scalar` and [`GeoVec3`] IS
+//! [`Vec3`], so nothing there moves by a bit.
 
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::mesh::{geometry, HostMesh, PatchKind};
-use crate::types::DVec3;
+use crate::types::{DVec3, GeomPoint};
 use crate::{DevBuf, Label, Scalar, Vec3};
 
-/// The four kernels of `cuda/meshgeom.cu`.
+/// The type the device sweep computes in: f64 in BOTH builds (SPEC-LIT
+/// 118.8). In the f64 build it IS `Scalar`.
+pub type Geo = f64;
+
+/// The point type the device sweep reads. `Vec3` in the f64 build (where it
+/// IS `DVec3`, so no shift ever happens); the f64 point under `single`,
+/// because `mesh/geometry.rs` computes in f64 and so must the sweep that
+/// replaces it bit for bit.
+#[cfg(not(feature = "single"))]
+pub type GeoVec3 = Vec3;
+
+#[cfg(feature = "single")]
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct GeoVec3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+#[cfg(feature = "single")]
+unsafe impl cudarc::driver::DeviceRepr for GeoVec3 {}
+#[cfg(feature = "single")]
+unsafe impl cudarc::driver::ValidAsZeroBits for GeoVec3 {}
+
+/// A `DVec3` as a [`GeoVec3`] - the identity in the f64 build.
+#[inline]
+fn gvec(d: DVec3) -> GeoVec3 {
+    #[cfg(feature = "single")]
+    {
+        GeoVec3 { x: d.x, y: d.y, z: d.z }
+    }
+    #[cfg(not(feature = "single"))]
+    {
+        d
+    }
+}
+
+/// The points the device sweep reads, from the WORLD positions any caller
+/// holds (SPEC-LIT (118.8a)): each point widened to f64 exactly, then shifted
+/// to the mesh's local origin with the subtraction IN f64 and no rounding -
+/// and no arithmetic at all when `origin` is ZERO, which it always is in the
+/// f64 build.
+pub fn geo_points<P: GeomPoint>(points: &[P], origin: DVec3) -> Vec<GeoVec3> {
+    if origin == DVec3::ZERO {
+        points.iter().map(|p| gvec(p.to_dvec3())).collect()
+    } else {
+        points.iter().map(|p| gvec(p.to_dvec3() - origin)).collect()
+    }
+}
+
+/// The kernels of `cuda/meshgeom.cu` - the four of the sweep, plus, under
+/// `single`, the one narrowing (SPEC-LIT 118.8).
 pub struct MeshGeomKernels {
     pub face_geometry: CudaFunction,
     pub cell_geometry: CudaFunction,
     pub internal_metrics: CudaFunction,
     pub boundary_metrics: CudaFunction,
+    /// `meshNarrowCellGeometry` - the f64 cell V/C narrowed once into the
+    /// float copies every solver kernel reads. `single` only.
+    #[cfg(feature = "single")]
+    pub narrow_cells: CudaFunction,
 }
 
 impl MeshGeomKernels {
@@ -78,7 +144,7 @@ impl MeshGeomKernels {
         Self::from_cubin(gpu, crate::kernels::MESHGEOM)
     }
 
-    /// Load the same four kernels from a named module.
+    /// Load the same kernels from a named module.
     ///
     /// There is exactly one other module: `kernels::MESHGEOM_FMAD`, the same
     /// source compiled with nvcc's default multiply-add contraction, which
@@ -92,6 +158,8 @@ impl MeshGeomKernels {
             cell_geometry: ks.func("meshCellGeometry")?,
             internal_metrics: ks.func("meshInternalFaceMetrics")?,
             boundary_metrics: ks.func("meshBoundaryFaceMetrics")?,
+            #[cfg(feature = "single")]
+            narrow_cells: ks.func("meshNarrowCellGeometry")?,
         })
     }
 }
@@ -178,11 +246,11 @@ impl GpuGeometry {
     /// and hands its buffers straight to `GpuMesh`; the host round trip lives
     /// in [`GpuGeometry::download_into`] and is paid only by a caller that
     /// wants a `HostMesh` back.
-    pub fn compute(
+    pub fn compute<P: GeomPoint>(
         gpu: &Gpu,
         k: &MeshGeomKernels,
         m: &HostMesh,
-        points: &[Vec3],
+        points: &[P],
         csr: &FacePointCsr,
         pair: &[Label],
         b_weights_in: &[Scalar],
@@ -205,7 +273,11 @@ impl GpuGeometry {
             )));
         }
 
-        let d_points = upload_padded(gpu, points)?;
+        // (118.8a): the sweep runs on the world points shifted to the mesh's
+        // local origin, the subtraction in f64 and without rounding - and
+        // with no arithmetic at all when the origin is ZERO.
+        let geo = geo_points(points, m.origin);
+        let d_points = upload_padded(gpu, &geo)?;
         let d_foff = gpu.upload(&csr.offset)?;
         let d_fpt = upload_padded(gpu, &csr.point)?;
         let d_owner = upload_padded(gpu, &m.owner)?;
@@ -218,8 +290,11 @@ impl GpuGeometry {
         let d_bcfo = gpu.upload(&m.bcf_offset)?;
         let d_bcff = upload_padded(gpu, &m.bcf_face)?;
 
-        let mut f_sf: DevBuf<Vec3> = gpu.zeros(n_faces.max(1))?;
-        let mut f_cf: DevBuf<Vec3> = gpu.zeros(n_faces.max(1))?;
+        // The whole-face Sf/Cf. `single` stores them at f64 - they are the
+        // sweep's intermediates, never rounded before they are read
+        // (118.8b) - and the f64 build's `GeoVec3` IS `Vec3`.
+        let mut f_sf: DevBuf<GeoVec3> = gpu.zeros(n_faces.max(1))?;
+        let mut f_cf: DevBuf<GeoVec3> = gpu.zeros(n_faces.max(1))?;
 
         let mut out = Self {
             n_cells,
@@ -245,6 +320,16 @@ impl GpuGeometry {
             b_weights: upload_padded(gpu, b_weights_in)?,
         };
 
+        // The f64 cell intermediates the stored V/C are narrowed from -
+        // private scratch, `single` only (SPEC-LIT (118.8b)); the f64 build
+        // sweeps straight into `out`.
+        #[cfg(feature = "single")]
+        let mut f64_v: DevBuf<Geo> = gpu.zeros(n_cells.max(1))?;
+        #[cfg(feature = "single")]
+        let mut f64_c: DevBuf<GeoVec3> = gpu.zeros(n_cells.max(1))?;
+
+        // The metrics kernels read the f64 cell centroids under `single` and
+        // the stored ones in the f64 build, where they are the same thing.
         let (nl_f, nl_c, nl_if, nl_bf) = (
             n_faces as Label,
             n_cells as Label,
@@ -265,21 +350,59 @@ impl GpuGeometry {
                     .launch(cfg_for(n_faces))?;
             }
             if n_cells > 0 {
-                gpu.stream()
-                    .launch_builder(&k.cell_geometry)
-                    .arg(&mut out.v)
-                    .arg(&mut out.c)
-                    .arg(&f_sf)
-                    .arg(&f_cf)
-                    .arg(&d_cfo)
-                    .arg(&d_cff)
-                    .arg(&d_cfw)
-                    .arg(&d_bcfo)
-                    .arg(&d_bcff)
-                    .arg(&nl_if)
-                    .arg(&nl_c)
-                    .launch(cfg_for(n_cells))?;
+                #[cfg(not(feature = "single"))]
+                {
+                    gpu.stream()
+                        .launch_builder(&k.cell_geometry)
+                        .arg(&mut out.v)
+                        .arg(&mut out.c)
+                        .arg(&f_sf)
+                        .arg(&f_cf)
+                        .arg(&d_cfo)
+                        .arg(&d_cff)
+                        .arg(&d_cfw)
+                        .arg(&d_bcfo)
+                        .arg(&d_bcff)
+                        .arg(&nl_if)
+                        .arg(&nl_c)
+                        .launch(cfg_for(n_cells))?;
+                }
+                // The f64 volumes and centroids land in the scratch, and the
+                // float copies every solver kernel reads are one narrowing of
+                // them - never the sweep itself (SPEC-LIT 118.8).
+                #[cfg(feature = "single")]
+                {
+                    gpu.stream()
+                        .launch_builder(&k.cell_geometry)
+                        .arg(&mut f64_v)
+                        .arg(&mut f64_c)
+                        .arg(&f_sf)
+                        .arg(&f_cf)
+                        .arg(&d_cfo)
+                        .arg(&d_cff)
+                        .arg(&d_cfw)
+                        .arg(&d_bcfo)
+                        .arg(&d_bcff)
+                        .arg(&nl_if)
+                        .arg(&nl_c)
+                        .launch(cfg_for(n_cells))?;
+                    gpu.stream()
+                        .launch_builder(&k.narrow_cells)
+                        .arg(&mut out.v)
+                        .arg(&mut out.c)
+                        .arg(&f64_v)
+                        .arg(&f64_c)
+                        .arg(&nl_c)
+                        .launch(cfg_for(n_cells))?;
+                }
             }
+            // The metrics kernels read the f64 cell centroids under `single`
+            // and the stored ones in the f64 build, where they are the same
+            // thing.
+            #[cfg(not(feature = "single"))]
+            let cell_c: &DevBuf<GeoVec3> = &out.c;
+            #[cfg(feature = "single")]
+            let cell_c: &DevBuf<GeoVec3> = &f64_c;
             if n_if > 0 {
                 gpu.stream()
                     .launch_builder(&k.internal_metrics)
@@ -292,7 +415,7 @@ impl GpuGeometry {
                     .arg(&mut out.skew_corr)
                     .arg(&f_sf)
                     .arg(&f_cf)
-                    .arg(&out.c)
+                    .arg(cell_c)
                     .arg(&d_owner)
                     .arg(&d_nbr)
                     .arg(&nl_if)
@@ -310,7 +433,7 @@ impl GpuGeometry {
                     .arg(&mut out.b_weights)
                     .arg(&f_sf)
                     .arg(&f_cf)
-                    .arg(&out.c)
+                    .arg(cell_c)
                     .arg(&d_bfc)
                     .arg(&d_pair)
                     .arg(&nl_if)
@@ -380,11 +503,11 @@ impl GpuGeometry {
 /// [`GpuGeometry::compute`] directly and never pays the download; this
 /// function exists so that the two sweeps can be compared field for field, and
 /// so that an existing host caller can be switched over one line at a time.
-pub fn gpu_compute_geometry(
+pub fn gpu_compute_geometry<P: GeomPoint>(
     gpu: &Gpu,
     k: &MeshGeomKernels,
     m: &mut HostMesh,
-    points: &[Vec3],
+    points: &[P],
     faces: &[Vec<Label>],
 ) -> Result<()> {
     let csr = flatten_faces(faces);
@@ -394,11 +517,11 @@ pub fn gpu_compute_geometry(
 /// As [`gpu_compute_geometry`], for a caller that already holds the flattened
 /// face list. `faces` is still taken, because the host validation names the
 /// offending face and a CSR alone cannot say which `Vec` it came from.
-pub fn gpu_compute_geometry_csr(
+pub fn gpu_compute_geometry_csr<P: GeomPoint>(
     gpu: &Gpu,
     k: &MeshGeomKernels,
     m: &mut HostMesh,
-    points: &[Vec3],
+    points: &[P],
     faces: &[Vec<Label>],
     csr: &FacePointCsr,
 ) -> Result<()> {
@@ -425,11 +548,11 @@ pub fn gpu_compute_geometry_csr(
 /// the seed was moved to the device and the answer is `GpuGeometry::b_weights`.
 /// A caller that wants the host arrays back calls `download_into`; a caller
 /// that wants a device mesh calls [`crate::mesh::GpuMesh::from_device_geometry`].
-pub fn gpu_geometry_resident(
+pub fn gpu_geometry_resident<P: GeomPoint>(
     gpu: &Gpu,
     k: &MeshGeomKernels,
     m: &mut HostMesh,
-    points: &[Vec3],
+    points: &[P],
     faces: &[Vec<Label>],
     csr: &FacePointCsr,
 ) -> Result<GpuGeometry> {
@@ -444,11 +567,11 @@ pub fn gpu_geometry_resident(
 /// takes: `mesh::gpuemit` produces the CSR and never builds the face-list
 /// form, whose one-allocation-per-face cost is part of what section 84 exists
 /// to remove. Everything after the validation is the same function.
-pub fn gpu_geometry_resident_csr(
+pub fn gpu_geometry_resident_csr<P: GeomPoint>(
     gpu: &Gpu,
     k: &MeshGeomKernels,
     m: &mut HostMesh,
-    points: &[Vec3],
+    points: &[P],
     csr: &FacePointCsr,
 ) -> Result<GpuGeometry> {
     geometry::validate_csr(m, points, csr)?;
@@ -460,23 +583,13 @@ pub fn gpu_geometry_resident_csr(
 /// They differ in one line - which shape the face list was validated in - and
 /// section 83.2 records why that line is the only one allowed to differ: two
 /// prologues would be two places for the boundary bookkeeping to drift.
-fn resident_after_validate(
+fn resident_after_validate<P: GeomPoint>(
     gpu: &Gpu,
     k: &MeshGeomKernels,
     m: &mut HostMesh,
-    points: &[Vec3],
+    points: &[P],
     csr: &FacePointCsr,
 ) -> Result<GpuGeometry> {
-    // SPEC-LIT 118.7: the device sweep reads ABSOLUTE positions, so a mesh
-    // stored about a local origin would be rebuilt in the wrong frame. It is
-    // refused by name until the sweep is converted - never run shifted and
-    // wrong. (The f64 build has no local origin, so this never fires there.)
-    if m.origin != DVec3::ZERO {
-        return Err(Error::Config(format!(
-            "gpu_geometry_resident: a mesh with a local origin (SPEC-LIT 118.7) \
-             is not converted yet - the device geometry sweep is F32-11"
-        )));
-    }
     // ---- the host prologue, identical to `geometry::compute` --------------
     refuse_a_mesh_without_a_cell_face_csr(m)?;
     refuse_a_cell_with_no_faces(m)?;

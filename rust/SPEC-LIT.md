@@ -36993,8 +36993,9 @@ subsections, by unit:
 - 118.5 — delta-form transients (F32-08)
 - 118.6 — field, phi and restart I/O (F32-09)
 - 118.7 — the local origin (F32-10)
+- 118.8 — moving geometry in f64 on the device (F32-11)
 
-and, later, moving geometry, parcels and chemistry in
+and, later, parcels and chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
 
 No GPL-licensed source was consulted.
@@ -37215,7 +37216,8 @@ mesh bit for bit (S82.3)" and "a mesh an adapt built ON THE DEVICE reaches the
 device as the same mesh", with their per-size twins, fail by construction; the
 device-emitted topology row still passes. They are left failing, not
 re-toleranced: F32-11 puts the device sweep in f64 under `single`, and
-restoring these rows bit for bit is its acceptance. In the f64 build all of
+restoring these rows bit for bit is its acceptance. F32-11 landed: see
+§118.8. In the f64 build all of
 them pass, unchanged.
 The host cost: under `single` the shadow holds 4 doubles per cell, 15 per
 internal face and 13 per boundary face (32 B, 120 B and 104 B), about 392 B
@@ -37959,12 +37961,12 @@ no added arithmetic, not even `+ 0.0`, which would turn `-0.0` into `+0.0`.
 The rule (118.7a). Per axis `k`, from the bounding box `[lo, hi]` of the
 points, with `e = hi - lo` and `m = (lo + hi)/2`, all in f64:
 
-    (118.7a)  O_k = 0                               if lo <= 0 <= hi, or
-                                                    e <= 0, or lo/hi not
-                                                    finite
-              O_k = sgn(m) * q * ceil(|m|/q - 1/2)  otherwise, q the
-                                                    smallest power of two
-                                                    >= e
+```
+O_k = 0  if lo <= 0 <= hi, or e <= 0, or lo/hi not finite;
+O_k = sgn(m) * q * ceil(|m|/q - 1/2)  otherwise                          (118.7a)
+```
+
+with `q` the smallest power of two `>= e`.
 
 `q` is found EXACTLY, from the exponent field of the f64 encoding - no
 `log2().ceil()`, which is off by one exactly at a power of two. A snapped
@@ -37973,13 +37975,14 @@ of `q`, so a mesh translated by a multiple of `q` gets the SAME local
 points bit for bit; and an axis whose range contains zero is not shifted at
 all, so no existing case moves.
 
-    (118.7b)  |m - O_k| <= q/2 < e  =>  |x - O_k| < 3e/2 for every point x
-                                                    of the axis
-    (118.7c)  x_local = fl32(x_world - O)  (the subtraction in f64),
-              x_world = f64(x_local) + O
-    (118.7d)  the relative error of a stored coordinate difference,
-              u(|a| + |b|)/|a - b| (§118.2, Goldberg 1991 "Cancellation"),
-              has |a|, |b| < 3e/2 instead of |x_world|
+```
+|m - O_k| <= q/2 < e  =>  |x - O_k| < 3e/2, every point x of the axis   (118.7b)
+x_local = fl32(x_world - O),   x_world = f64(x_local) + O                (118.7c)
+u (|a| + |b|) / |a - b|,  with |a|, |b| < 3e/2 instead of |x_world|     (118.7d)
+```
+
+In (118.7c) the subtraction runs in f64. (118.7d) is the relative error of a
+stored coordinate difference (§118.2, Goldberg 1991 "Cancellation").
 
 API. `HostMesh::origin: DVec3` - the world position of the local origin,
 ZERO in the f64 build and for every mesh built without one; `Default` gives
@@ -38007,14 +38010,17 @@ brought to local with `local` before the difference; `field_setup`'s
 Refusals. A path not converted yet refuses BY NAME - never runs shifted
 and wrong: when `m.origin != ZERO`, `Error::Config` whose text contains
 `local origin` and the unit - the device geometry sweep
-`gpu_compute_geometry` and `AleMesh::with_cubin` name F32-11,
-`Parcels::new` names F32-12.
+`gpu_compute_geometry` and `AleMesh::with_cubin` named F32-11 and are
+converted by §118.8 (F32-11 landed: the sweep and the moving mesh now take
+a local origin, shifted to it in f64), so `Parcels::new` is the one path
+that still refuses, and it names F32-12.
 
 **What it does not do.** The JSONC/blockgen path still generates its points
 in `Scalar` and stays unshifted; `build_host_mesh` and every one of its 75
 callers keep building an unshifted mesh; multi-region cases need ONE origin
 for all regions and are not shifted; the device geometry sweep and moving
-geometry wait for F32-11, parcels for F32-12.
+geometry are converted by §118.8 (the sweep runs on `x_world - O`, the
+subtraction in f64), parcels wait for F32-12.
 
 **The measurement.** `tests/f32_local_origin.rs`, seven tests, the same
 assertions in both builds, run by the supervisor on 2026-10-13. The gate of
@@ -38052,6 +38058,194 @@ the section "Cancellation"); **Higham, N. J. (2002), *Accuracy and
 Stability of Numerical Algorithms*, 2nd ed., SIAM**, section 2.2;
 **Sterbenz, P. H. (1974), *Floating-Point Computation*, Prentice-Hall**,
 Theorem 4.3.1 (the difference of two nearby floats is exact).
+
+No GPL-licensed source was consulted.
+
+### 118.8 Moving geometry in f64 on the device - the sweep, the points, V and the swept volumes
+
+What was float. Under `single`, `cuda/meshgeom.cu`'s sweep computed in
+`ofscalar` (float) while the HOST sweep `mesh/geometry.rs::sweep` computed in
+f64 and rounded once (§118.2), and `cuda/ale.cu`'s moving mesh computed the
+swept volume and the mesh flux in float too. Measured at HEAD under
+`single`: Gate 105-A (§105.5) worst SCL 9.266e-7, scheme SCL 9.290e-7
+(euler) / 1.064e-6 (backward), volume drift 1.126e-6, against 1e-12; and
+every "device sweep == host sweep bit for bit" row of sections 82-84 failed.
+In the f64 build the same rows were 1.535e-15, 1.531e-15 / 1.798e-15,
+2.591e-15.
+
+This unit (F32-11) puts the sweep, the points, V, the volume history and the
+swept volumes in f64 ON THE DEVICE under `single`. The equations:
+
+```
+x_dev = f64(x_world) - O                                                  (118.8a)
+G_stored = fl32(G64),  one rounding per component                         (118.8b)
+dV_f = sum_tri (d_xavg + d_a + d_c).(N^n + 4 N^{n+1/2} + N^{n+1}) / 36    (118.8c)
+phi_mesh64,f = aN dV_f^{n+1} - a00 dV_f^n,  phi_mesh,f = fl32(phi_mesh64,f)   (118.8d)
+V64^{n+1}_c - V64^n_c = sum_f s_f dV_f,   |fl32(V) - V| <= u32 |V|        (118.8e)
+```
+
+- (118.8a): the subtraction in f64, no rounding; `O = HostMesh::origin`, and
+  no arithmetic at all when `O = 0`.
+- (118.8b): every array the sweep stores in `GpuMesh` is fl32 of the f64
+  result `G64`, one rounding per component; the sweep's intermediates (face
+  Sf, Cf; cell V, C) are never rounded before they are read.
+- (118.8c): the sum over the fan's triangles of §105.3, every operand and the
+  sum in f64.
+- (118.8d): §105.4's mesh flux; `aN` and `a00` the scheme's `Scalar`
+  coefficients widened exactly, the products and the difference in f64.
+- (118.8e): the discrete space conservation law holds to f64 round-off; the
+  float copies obey it only to `u32 = 2^-24` relative (Higham 2002, section
+  2.2), so a residual assembled from the float copies (the uniform-flow row of
+  Gate 105-A) is a round-off twin (docs/17 section 5.1 rule 4, class R).
+
+The kernels. Each file defines its own geometry type, after the include:
+
+    ofgeo   - double under OFGPU_SINGLE, ofscalar otherwise (a typedef)
+    ofgeo3  - a struct of three doubles {x, y, z} under OFGPU_SINGLE, ofvec3 otherwise (a typedef)
+
+Under OFGPU_SINGLE the sweep's constants are the HOST's f64 ones
+(`mesh/geometry.rs` lines 71, 93, 110 and `f64::MIN_POSITIVE`):
+NON_ORTH_FLOOR 0.05, SKEW_FLOOR 1.0e-9, SMALL 1.0e-150,
+MIN_POSITIVE 2.2250738585072014e-308 (written as the exact hex literal
+`0x1p-1022` in the OFGPU_SINGLE arm, because §112.1's literal audit admits
+the decimal spelling only in the f64 arm) - the float literal 0.05f widened
+is NOT 0.05. Kernel by kernel (names and parameter ORDER unchanged; only
+pointee types change; every expression keeps the association and order it
+has today, which is the host sweep's, line by line):
+
+    meshgeom.cu
+      meshFaceGeometry        fSf, fCf: ofgeo3* out;  points: const ofgeo3*;  all arithmetic in double
+      meshCellGeometry        v: ofgeo* out, cc: ofgeo3* out;  fSf, fCf: const ofgeo3*;  all in double
+      meshInternalFaceMetrics the seven outputs keep their stored types (ofvec3*/ofscalar*);
+                              fSf, fCf, cc: const ofgeo3*;  all arithmetic in double, each stored
+                              component rounded once by the store
+      meshBoundaryFaceMetrics the seven outputs keep their stored types; fSf, fCf, cc: const ofgeo3*;
+                              arithmetic in double, rounded once by the store; an uncoupled face's
+                              bWeights is still left untouched
+      meshNarrowCellGeometry  NEW, compiled ONLY under OFGPU_SINGLE, one thread per cell:
+                              (ofscalar* v, ofvec3* cc, const ofgeo* v64, const ofgeo3* c64, oflabel nCells)
+                              v[c] = fl32(v64[c]), cc[c] = fl32 per component of c64[c]
+
+    ale.cu
+      aleSweptVolume   swept: ofgeo* out;  pointsOld, pointsNew: const ofgeo3*;  (118.8c) all in double
+      aleMeshFlux      gains ONE parameter, only under OFGPU_SINGLE, placed right after phiMeshB:
+                       `ofgeo* phiMesh64` [nInternalFaces + nBoundaryFaces], global face order;
+                       swept, swept0: const ofgeo*;  (118.8d): phiMesh64[f] = the double value,
+                       phiMesh / phiMeshB = its fl32
+      tsDdtGeneralV, tsDdtGeneralRhoV, aleRelativeFlux, aleMovingWallVelocity: NOT converted - the hot
+                       kernels keep reading the float copies (aleMovingWallVelocity's two float
+                       helper calls are renamed aleScaleF/aleZeroF, because aleScale/aleZero now
+                       take ofgeo3; the arithmetic is the same and its SASS does not move)
+
+The unit stays in `FMAD_OFF_UNITS`, both cubins and their `_FMAD` twins
+included.
+
+The host side. `mesh/gpugeom.rs` carries the geometry types and the point
+shift; `points` are WORLD positions exactly as `geometry::compute` takes
+them, and the sweep runs on `geo_points(points, m.origin)`:
+
+    pub type Geo = f64;                       // both builds (in the f64 build it IS Scalar)
+    pub type GeoVec3 = Vec3;                  // f64 build
+    #[repr(C)] pub struct GeoVec3 { pub x: f64, pub y: f64, pub z: f64 }   // single
+    pub fn geo_points<P: GeomPoint>(points: &[P], origin: DVec3) -> Vec<GeoVec3>   // (118.8a)
+
+    MeshGeomKernels gains  #[cfg(feature = "single")] pub narrow_cells: CudaFunction
+
+    GpuGeometry::compute<P: GeomPoint>(gpu, k, m, points: &[P], csr, pair, b_weights_in)
+    gpu_compute_geometry<P: GeomPoint>(..) / gpu_compute_geometry_csr<P: GeomPoint>(..)
+    gpu_geometry_resident<P: GeomPoint>(..) / gpu_geometry_resident_csr<P: GeomPoint>(..)
+
+`GpuGeometry`'s sixteen public fields keep their names and stored types; the
+f64 intermediates are private scratch of `compute`, and `v`/`c` are written
+by `narrow_cells`. `mesh/geometry.rs::validate_csr` is generic over the point
+type like `validate` - it reads only `points.len()`. `mesh/ale.rs`:
+
+    pub points, pub points_old : DevBuf<GeoVec3>   // (118.8a), local frame, f64
+    pub v0, pub v00            : DevBuf<Scalar>    // UNCHANGED - what tsDdtGeneralV reads
+    pub swept, pub swept0      : DevBuf<Geo>       // (118.8c)
+    pub phi_mesh               : GpuSurfaceScalarField  // UNCHANGED - fl32 of (118.8d)
+    pub origin                 : DVec3             // copied from HostMesh::origin
+    private under single: V64^{n+1}, V64^n, V64^{n-1} [gm.v.len()], C64, phi_mesh64 [max(n_faces, 1)]
+
+    AleMesh::new<P: GeomPoint>(gpu, m, gm, points: &[P], csr)      // WORLD points
+    AleMesh::with_cubin<P: GeomPoint>(..) (pub(crate))
+    AleMesh::set_points<P: GeomPoint>(&mut self, gpu, points: &[P]) // WORLD points
+    pub fn volumes64(&self, gpu, gm) -> Vec<f64>        // V^{n+1}
+    pub fn volume_history64(&self, gpu) -> (Vec<f64>, Vec<f64>)  // (V^n, V^{n-1})
+    pub fn swept64(&self, gpu) -> Vec<f64>              // n_faces, global order
+    pub fn mesh_flux64(&self, gpu) -> (Vec<f64>, Vec<f64>)  // (internal, boundary)
+    pub fn host_swept_volumes<P: GeomPoint>(old: &[P], new: &[P], csr) -> Vec<f64>  // (118.8c)
+
+`advance` keeps its order (§105.4) and rotates the V64 history beside the
+float one; nothing downloads, allocates or syncs inside `advance` or
+`recompute_in_place`, and construction seeds the f64 history without writing
+any array of `gm`. `run_scl` measures `worst_scl`, `worst_scheme`,
+`volume_drift`, `min_volume_ratio` and `boundary_flux_max` IN f64 from the
+`*64` accessors and narrows once into `SclRun`; `worst_uniform` stays
+assembled from the float copies, and `history_bitwise` requires BOTH
+histories.
+
+Why the f64 build is bitwise. Every change there is a typedef that IS the
+old type - `ofgeo` IS `ofscalar`, `ofgeo3` IS `ofvec3`, `Geo` IS `Scalar`,
+`GeoVec3` IS `Vec3`, `DVec3` IS `Vec3` - or sits under an `#ifdef
+OFGPU_SINGLE` / `#[cfg(feature = "single")]` arm; the `#else` arms compile
+to the code the f64 build already had (the `gdot3`/`mkgeo`/`gmax_` wrappers
+are `static __device__ __forceinline__`, so nvcc inlines them away), no
+kernel gains or loses a parameter, and no arithmetic is added in f64. The
+SASS of `meshgeom.cubin`, `ale.cubin` and their `_FMAD` twins does not move,
+and neither do the `ofgpu-validate` rows.
+
+**What it does not do.** The hot kernels read the float copies
+(`tsDdtGeneralV`, `tsDdtGeneralRhoV`, `aleRelativeFlux`,
+`aleMovingWallVelocity` and every solver kernel that reads `GpuMesh`), so
+the uniform-flow row of Gate 105-A is still a residual of `fl32` values -
+class R under `single`, tolerance 1e-5 by D-F32-1, not 1e-12. `mesh/
+motion.rs` still produces `Scalar` points and the drivers still hand `Vec3`
+rest points; the widening happens in `geo_points` and `host_swept_volumes`.
+`GpuGeometry` keeps no f64 V - the cell V64 lives in `AleMesh`'s private
+scratch, and a plain rebuild's f64 intermediates live only as long as
+`compute`. Parcels are F32-12.
+
+Sources: **Demirdzic, M. & Peric, M. (1988), "Space conservation law in
+finite volume calculations of fluid flow", Int. J. Numer. Meth. Fluids 8,
+1037-1050**, DOI 10.1002/fld.1650080906 (the space conservation law);
+**Thomas, P. D. & Lombard, C. K. (1979), "Geometric conservation law and its
+application to flow computations on moving grids", AIAA J. 17(10),
+1030-1037**, DOI 10.2514/3.61273 (the geometric conservation law);
+**Goldberg, D. (1991), "What every computer scientist should know about
+floating-point arithmetic", ACM Computing Surveys 23(1), 5-48**, DOI
+10.1145/103162.103163, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html> (the
+section "Cancellation"); **Higham, N. J. (2002), *Accuracy and Stability of
+Numerical Algorithms*, 2nd ed., SIAM**, DOI 10.1137/1.9780898718027, section
+2.2 (the ulp bound the float copies satisfy).
+
+**The measurement.** Run by the supervisor on 2026-10-13, RTX 5070 Ti
+(sm_120), with two other jobs sharing the card. `tests/f32_moving_geometry.rs`,
+six tests, the same assertions in both builds: 6 passed in each. Gate 105-A
+through the test (and through `ofgpu-validate -sections 4,54`, the same
+numbers): in the f64 build worst SCL 1.535e-15, scheme SCL 1.531e-15 (euler)
+/ 1.798e-15 (backward), uniform 1.770e-15 / 1.997e-15, drift 2.591e-15 -
+HEAD's numbers, unchanged; under `single` worst SCL 1.328e-15, scheme SCL
+1.334e-15 / 1.654e-15, drift 8.635e-16, against 9.266e-7, 9.290e-7 /
+1.064e-6 and 1.126e-6 at HEAD, so the three SCL rows of Gate 105-A pass at
+1e-12 in both builds; history bitwise, boundary phi_mesh 0 and min V/V0
+0.884631 (0.884630 in f64). The uniform-flow row under `single` is 2.593e-7
+(euler) / 3.399e-7 (backward), class R by (118.8e): it passes the test's
+tol32 = 1e-5 and still fails `ofgpu-validate`'s 1e-12, whose tolerance is
+the section 26-51 owner's (F32-14), not changed here. Every "device sweep ==
+host sweep bit for bit" row of sections 82-84 now passes under `single`
+(sections 4 and 54: 44 of 48 checks against 36 of 58 at HEAD; what still
+fails is the adapt's refine-then-coarsen round trip of phi and rho, 2.2e-7
+and 1.3e-7 against 1e-13, which is not geometry). The f64 build: the SASS of
+`meshgeom.cubin`, `ale.cubin` and both `_FMAD` twins is identical to HEAD's
+(`tools/f64_identity.py sass-diff`; the one changed hash, `solidblock.cubin`,
+is the known nvcc flip-flop of an unchanged source), and the 108 rows of
+sections 4 and 54 are identical. The cost, `OFGPU_ALE_COST_N=100` (10^6
+cells): one `AleMesh::advance` 9.845 ms against one steady SIMPLE outer
+iteration of 361.8 ms under `single`, ratio 0.027 (f64 build 9.664 ms /
+309.1 ms, 0.031), inside docs/17's 10 %; at the default 24^3 the ratio is
+0.011 (`single`) and 0.013 (f64).
 
 No GPL-licensed source was consulted.
 
