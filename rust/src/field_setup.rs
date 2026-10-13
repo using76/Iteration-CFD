@@ -179,6 +179,15 @@ pub struct BcInputs<'a> {
     /// that seeds it and walks away would leave the face frozen at its seed
     /// triple forever, which is the silent substitution §13.4 forbids.
     pub advective: bool,
+    /// The caller refreshes the five pressure-driven velocity inlets of
+    /// SPEC-LIT 120.5 every outer iteration through
+    /// `field_ops::update_pressure_inlet_velocity`, and builds its flux with
+    /// `momFluxIsPrescribed` answering FALSE for kinds `[41, 45]` - the two
+    /// things `Simple::correct_outer` does, which is why `ofgpu-lowmach` and
+    /// `ofgpu-buoyant` pass it. False - the default, which every other setup
+    /// passes - refuses the five names: a frozen seed with `fr = 1` would be
+    /// a fixed-velocity inlet under a pressure-inlet name (SPEC-LIT 13.4).
+    pub pressure_inlet: bool,
 }
 
 impl<'a> BcInputs<'a> {
@@ -752,7 +761,9 @@ fn scalar_patch(
 
     // SPEC-LIT 120.3: the wall and slip family is a VECTOR condition -
     // including the two names `BcKind::from_name` maps to `FixedValue`, so
-    // the check is on the NAME, before any kind is derived from it.
+    // the check is on the NAME, before any kind is derived from it. SPEC-LIT
+    // 120.5: so is the velocity-inlet family - all eight names, three of
+    // which map to `FixedValue` and would slip past the kind arm below.
     if matches!(
         spec.type_name.as_str(),
         "directionMixed"
@@ -761,6 +772,14 @@ fn scalar_patch(
             | "fixedShearStress"
             | "rotatingWallVelocity"
             | "translatingWallVelocity"
+            | "surfaceNormalFixedValue"
+            | "cylindricalInletVelocity"
+            | "swirlFlowRateInletVelocity"
+            | "pressureInletVelocity"
+            | "pressureInletUniformVelocity"
+            | "pressureDirectedInletVelocity"
+            | "pressureDirectedInletOutletVelocity"
+            | "pressureInletOutletParSlipVelocity"
     ) {
         return Err(Error::Field {
             field: field.to_string(),
@@ -1082,6 +1101,11 @@ fn scalar_patch(
             // of its names map to `FixedValue` and would slip past this arm -
             // so this arm only keeps the match total.
             BcKind::PressureInletOutletVelocity
+            | BcKind::PressureInletVelocity
+            | BcKind::PressureInletUniformVelocity
+            | BcKind::PressureDirectedInletVelocity
+            | BcKind::PressureDirectedInletOutletVelocity
+            | BcKind::PressureInletOutletParSlipVelocity
             | BcKind::MovingWallVelocity
             | BcKind::FlowRateInletVelocity
             | BcKind::DirectionMixed => {
@@ -1673,6 +1697,151 @@ fn finished_direction_mixed(
     }
 }
 
+/// `surfaceNormalFixedValue`'s SCALAR `refValue` per face, from the raw
+/// text the reader captured (SPEC-LIT 120.5): `uniform <number>` or
+/// `nonuniform List<scalar> N (...)`, one number a face; a `uniform` spreads
+/// over the patch, a list whose count is not the patch's face count is an
+/// error naming both.
+fn scalar_ref_value_faces(raw: &str, n: usize, patch: &str, field: &str) -> Result<Vec<Scalar>> {
+    let setting = format!("{field}: boundaryField/{patch}/refValue");
+    let mut tz = crate::io::tokenizer::Tokenizer::new(raw, &setting);
+    if tz.is_word("uniform") {
+        tz.next()?;
+        let u = tz.expect_num()? as Scalar;
+        return Ok(vec![u; n]);
+    }
+    if tz.is_word("nonuniform") {
+        tz.next()?;
+    }
+    // The optional `List<scalar>`, then the count.
+    if matches!(tz.peek_at(0), Some(crate::io::tokenizer::Tok::Word(_))) {
+        tz.next()?;
+    }
+    let declared = tz.expect_num()?;
+    let mut flat: Vec<Scalar> = Vec::new();
+    while !tz.done() {
+        if tz.is_punct('(') || tz.is_punct(')') {
+            tz.next()?;
+            continue;
+        }
+        flat.push(tz.expect_num()? as Scalar);
+    }
+    if flat.len() != declared as usize || flat.len() != n {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: the list declares {declared} scalars and carries {}, \
+                 the patch has {n} faces",
+                flat.len()
+            ),
+        });
+    }
+    Ok(flat)
+}
+
+/// `pressureDirectedInletVelocity`'s `inletDirection` per face, from the raw
+/// text the reader captured (SPEC-LIT 120.5): `uniform (dx dy dz)` or
+/// `nonuniform List<vector> N ( (dx dy dz) ... )`. Held in f64 - the
+/// normalisation runs on these numbers, and the rounded result is what the
+/// `dm` block carries.
+fn inlet_direction_faces(raw: &str, n: usize, patch: &str, field: &str) -> Result<Vec<DVec3>> {
+    let setting = format!("{field}: boundaryField/{patch}/inletDirection");
+    let mut tz = crate::io::tokenizer::Tokenizer::new(raw, &setting);
+    let mut flat: Vec<DVec3> = Vec::new();
+    if tz.is_word("nonuniform") {
+        tz.next()?;
+    }
+    // The optional `List<vector>`, then the count - absent on `uniform`.
+    if matches!(tz.peek_at(0), Some(crate::io::tokenizer::Tok::Word(_))) {
+        tz.next()?;
+    }
+    let declared: f64 = if tz.done() || tz.is_punct('(') {
+        1.0
+    } else {
+        tz.expect_num()?
+    };
+    while !tz.done() {
+        if tz.is_punct('(') {
+            tz.next()?;
+            flat.push(DVec3::new(
+                tz.expect_num()?,
+                tz.expect_num()?,
+                tz.expect_num()?,
+            ));
+            tz.expect_punct(')')?;
+            continue;
+        }
+        if tz.is_punct(')') {
+            break;
+        }
+        return tz.err("expected a (dx dy dz) direction");
+    }
+    if flat.len() != declared as usize {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: the list declares {declared} directions and carries {}",
+                flat.len()
+            ),
+        });
+    }
+    match flat.len() {
+        1 => Ok(vec![flat[0]; n]),
+        k if k == n => Ok(flat),
+        k => Err(Error::Field {
+            field: field.to_string(),
+            msg: format!("{setting}: {k} directions but the patch has {n} faces"),
+        }),
+    }
+}
+
+/// One CONSTANT scalar input of a velocity-inlet profile, read as
+/// `rotatingWallVelocity` reads `omega` (SPEC-LIT 120.3). A time-varying
+/// Function1 is refused by name (SPEC-LIT 120.5): no driver runs the timed
+/// path for these names, so a seeded one would silently freeze at its first
+/// value.
+fn inlet_scalar(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    base: &str,
+    field: &str,
+    f1: Option<&F1Setup>,
+) -> Result<f64> {
+    let setting = format!("{base}/{key}");
+    let Some(f) = F1::parse(entries, key, 1, &setting, f1.and_then(|s| s.case_dir))? else {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: the condition needs a `{key}` entry and the patch has none"
+            ),
+        });
+    };
+    if !f.is_constant() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: a time-varying `{key}` is refused on the velocity-inlet \
+                 family - no driver runs the timed path for these names \
+                 (SPEC-LIT 120.5)"
+            ),
+        });
+    }
+    Ok(f.eval(0.0)[0])
+}
+
+/// The seed the velocity-inlet family returns: `fr = 1` at the computed face
+/// value, zero gradient, and the `dm` block the caller packed.
+fn inlet_seed(kind: BcKind, n: usize, ref_value: Vec<Vec3>, dm: Vec<Scalar>) -> WallSlipSeed {
+    WallSlipSeed {
+        kind,
+        fr: vec![1.0; n],
+        value: ref_value.clone(),
+        ref_value,
+        ref_grad: vec![Vec3::ZERO; n],
+        dm,
+    }
+}
+
 /// SPEC-LIT 120.3: the wall and slip family on a vector field - the four
 /// tensorial names that ride [`BcKind::DirectionMixed`], and
 /// `rotatingWallVelocity`, whose wall velocity (120.3g) is a fixedValue at
@@ -1913,6 +2082,260 @@ fn wall_slip_seed(
     }
 }
 
+/// SPEC-LIT 120.5: the velocity-inlet family on a vector field - the three
+/// fixed-value profiles as a `FixedValue` whose per-face value the setup
+/// computes once, in f64 from the f64 face centres and unit normals
+/// (SPEC-LIT 118.2/118.7) and rounded once, and the five pressure-driven
+/// kinds, which seed the section-4 triple the in-loop
+/// `update_pressure_inlet_velocity` rewrites from the flux. Every scalar
+/// input is read as `rotatingWallVelocity` reads `omega` (SPEC-LIT 120.3);
+/// a time-varying Function1 is refused by name. `Ok(None)` for every other
+/// name.
+#[allow(clippy::too_many_arguments)]
+fn velocity_inlet_seed(
+    spec: &PatchFieldSpec,
+    n: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+    internal: &[Vec3],
+    f1: Option<&F1Setup>,
+) -> Result<Option<WallSlipSeed>> {
+    match spec.type_name.as_str() {
+        // (120.5a): `U_b = u_n n`, `u_n` the signed SCALAR `refValue` the
+        // reader kept verbatim - > 0 points out of the domain, < 0 is an
+        // inflow. f64 product with the f64 unit normal, rounded once.
+        "surfaceNormalFixedValue" => {
+            let base = format!("{field}: boundaryField/{patch}");
+            let Some(raw) = spec.extra.get("refValue") else {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{base}/refValue: surfaceNormalFixedValue needs a scalar \
+                         `refValue` entry (`uniform <number>` or `nonuniform \
+                         List<scalar>`) and the patch has none (SPEC-LIT 120.5)"
+                    ),
+                });
+            };
+            let u_n = scalar_ref_value_faces(raw, n, patch, field)?;
+            let ref_value: Vec<Vec3> = (0..n)
+                .map(|i| {
+                    let un = u_n[i] as f64;
+                    let nn = aux.normal64[i];
+                    Vec3::new(
+                        (un * nn.x) as Scalar,
+                        (un * nn.y) as Scalar,
+                        (un * nn.z) as Scalar,
+                    )
+                })
+                .collect();
+            Ok(Some(inlet_seed(
+                BcKind::FixedValue,
+                n,
+                ref_value,
+                vec![0.0; 12 * n],
+            )))
+        }
+
+        // (120.5b): the cylindrical profile - `a = axis/|axis|`,
+        // `d = x_f - origin`, `r = d - a (a . d)`, `e_r = r/rho` (0 where
+        // `rho = 0`), `omega = 2 pi rpm/60`, and `U_b = u_ax a + u_r e_r +
+        // omega (a x r)`, everything in f64 about the world face centre,
+        // rounded once.
+        "cylindricalInletVelocity" => {
+            let base = format!("{field}: boundaryField/{patch}");
+            let entries = crate::function1::patch_entries(spec, &base)?;
+            let origin = required_vec3(spec, "origin", patch, field, "cylindricalInletVelocity")?;
+            let axis = required_vec3(spec, "axis", patch, field, "cylindricalInletVelocity")?;
+            let a = DVec3::new(axis.x as f64, axis.y as f64, axis.z as f64);
+            let len = (a.x * a.x + a.y * a.y + a.z * a.z).sqrt();
+            if !(len > 0.0) {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{base}/axis: cylindricalInletVelocity's `axis` must not be zero"
+                    ),
+                });
+            }
+            let a = a * (1.0 / len);
+            let u_ax = inlet_scalar(&entries, "axialVelocity", &base, field, f1)?;
+            let u_r = inlet_scalar(&entries, "radialVelocity", &base, field, f1)?;
+            let rpm = inlet_scalar(&entries, "rpm", &base, field, f1)?;
+            let omega = 2.0 * std::f64::consts::PI * rpm / 60.0;
+            let (ox, oy, oz) = (origin.x as f64, origin.y as f64, origin.z as f64);
+            let ref_value: Vec<Vec3> = (0..n)
+                .map(|i| {
+                    let d = aux.bc_f[i] - DVec3::new(ox, oy, oz);
+                    let r = d - a * a.dot(d);
+                    let rho = (r.x * r.x + r.y * r.y + r.z * r.z).sqrt();
+                    let e_r = if rho > 0.0 { r * (1.0 / rho) } else { DVec3::ZERO };
+                    let w = a.cross(r);
+                    Vec3::new(
+                        (u_ax * a.x + u_r * e_r.x + omega * w.x) as Scalar,
+                        (u_ax * a.y + u_r * e_r.y + omega * w.y) as Scalar,
+                        (u_ax * a.z + u_r * e_r.z + omega * w.z) as Scalar,
+                    )
+                })
+                .collect();
+            Ok(Some(inlet_seed(
+                BcKind::FixedValue,
+                n,
+                ref_value,
+                vec![0.0; 12 * n],
+            )))
+        }
+
+        // (120.5c): `w = omega (a x r)`, `U_b = -n Q/A + w - n (n . w)` -
+        // (120.5b)'s rotation with its face-normal part removed, on top of
+        // the flat `flowRateInletVelocity` profile, so the patch carries
+        // the flux `-Q` on ANY patch, planar or not. `Q` is
+        // `volumetricFlowRate`, else `flowRate`, else `massFlowRate` read
+        // as a volume flux (this solver's `rho` is 1). A zero-area patch
+        // has no `Q/A` and is refused.
+        "swirlFlowRateInletVelocity" => {
+            let base = format!("{field}: boundaryField/{patch}");
+            let entries = crate::function1::patch_entries(spec, &base)?;
+            let origin = required_vec3(spec, "origin", patch, field, "swirlFlowRateInletVelocity")?;
+            let axis = required_vec3(spec, "axis", patch, field, "swirlFlowRateInletVelocity")?;
+            let a = DVec3::new(axis.x as f64, axis.y as f64, axis.z as f64);
+            let len = (a.x * a.x + a.y * a.y + a.z * a.z).sqrt();
+            if !(len > 0.0) {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{base}/axis: swirlFlowRateInletVelocity's `axis` must not be zero"
+                    ),
+                });
+            }
+            let a = a * (1.0 / len);
+            let rpm = inlet_scalar(&entries, "rpm", &base, field, f1)?;
+            let omega = 2.0 * std::f64::consts::PI * rpm / 60.0;
+            let key = if entries.keys().any(|k| k.starts_with("volumetricFlowRate")) {
+                "volumetricFlowRate"
+            } else if entries.keys().any(|k| k.starts_with("flowRate")) {
+                "flowRate"
+            } else {
+                "massFlowRate"
+            };
+            let q = inlet_scalar(&entries, key, &base, field, f1)?;
+            if !(aux.total_area > 0.0) {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{base}: swirlFlowRateInletVelocity needs a patch with a \
+                         positive area, and this one has zero area"
+                    ),
+                });
+            }
+            let (ox, oy, oz) = (origin.x as f64, origin.y as f64, origin.z as f64);
+            let q_a = q / aux.total_area as f64;
+            let ref_value: Vec<Vec3> = (0..n)
+                .map(|i| {
+                    let nn = aux.normal64[i];
+                    let d = aux.bc_f[i] - DVec3::new(ox, oy, oz);
+                    let r = d - a * a.dot(d);
+                    // (120.5c): w = omega (a x r), the rigid rotation.
+                    let w = a.cross(r) * omega;
+                    let nw = nn.dot(w);
+                    Vec3::new(
+                        (-nn.x * q_a + w.x - nn.x * nw) as Scalar,
+                        (-nn.y * q_a + w.y - nn.y * nw) as Scalar,
+                        (-nn.z * q_a + w.z - nn.z * nw) as Scalar,
+                    )
+                })
+                .collect();
+            Ok(Some(inlet_seed(
+                BcKind::FixedValue,
+                n,
+                ref_value,
+                vec![0.0; 12 * n],
+            )))
+        }
+
+        // (120.5e)-(120.5i): the five pressure-driven kinds. The flux owns
+        // the face, so the setup only seeds the triple - `fr = 1` at the
+        // case's `value` entry (the internal value where there is none),
+        // `ref_grad = 0` - and the caller's `BcInputs::pressure_inlet`
+        // promises the in-loop rewrite. A frozen seed with `fr = 1` would be
+        // a fixed-velocity inlet under a pressure-inlet name (SPEC-LIT
+        // 13.4), so without the opt-in the names are refused.
+        "pressureInletVelocity"
+        | "pressureInletUniformVelocity"
+        | "pressureDirectedInletVelocity"
+        | "pressureDirectedInletOutletVelocity"
+        | "pressureInletOutletParSlipVelocity" => {
+            let name = spec.type_name.as_str();
+            if !aux.inputs.pressure_inlet {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}: `{name}` is refused - its \
+                         triple must be rewritten from the flux every outer \
+                         iteration through update_pressure_inlet_velocity, and \
+                         this setup was given BcInputs::pressure_inlet = false, \
+                         so nothing would (SPEC-LIT 120.5)"
+                    ),
+                });
+            }
+            // (120.5g)/(120.5h): the flux enters along `inletDirection`,
+            // normalised in f64 from the raw text the reader captured and
+            // rounded once into the `dm` block's first three slots, the rest
+            // of the block zero. A zero direction, and one that does not
+            // point into the domain - `d . n > -1e-6` - are refused by name.
+            let mut dm = vec![0.0; 12 * n];
+            if matches!(name, "pressureDirectedInletVelocity" | "pressureDirectedInletOutletVelocity") {
+                let base = format!("{field}: boundaryField/{patch}");
+                let Some(raw) = spec.extra.get("inletDirection") else {
+                    return Err(Error::Field {
+                        field: field.to_string(),
+                        msg: format!(
+                            "{base}/inletDirection: {name} needs an `inletDirection` \
+                             entry and the patch has none (SPEC-LIT 120.5)"
+                        ),
+                    });
+                };
+                let d_f = inlet_direction_faces(raw, n, patch, field)?;
+                for i in 0..n {
+                    let d = d_f[i];
+                    let m = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
+                    if !(m > 0.0) {
+                        return Err(Error::Field {
+                            field: field.to_string(),
+                            msg: format!(
+                                "{base}/inletDirection: face {i}'s direction must \
+                                 not be zero"
+                            ),
+                        });
+                    }
+                    let nn = aux.normal64[i];
+                    let dn = d.x * nn.x + d.y * nn.y + d.z * nn.z;
+                    if dn > -1e-6 {
+                        return Err(Error::Field {
+                            field: field.to_string(),
+                            msg: format!(
+                                "{base}/inletDirection: face {i}'s direction does \
+                                 not point into the domain (`d . n` must be \
+                                 < -1e-6, is {dn})"
+                            ),
+                        });
+                    }
+                    let dn = d * (1.0 / m);
+                    dm[12 * i] = dn.x as Scalar;
+                    dm[12 * i + 1] = dn.y as Scalar;
+                    dm[12 * i + 2] = dn.z as Scalar;
+                }
+            }
+            let kind = BcKind::from_name(name, field, patch)?;
+            let value = spread(&spec.value_v, n, Vec3::ZERO, "value", patch)?;
+            let ref_value: Vec<Vec3> = (0..n)
+                .map(|i| if spec.value_v.is_empty() { internal[i] } else { value[i] })
+                .collect();
+            Ok(Some(inlet_seed(kind, n, ref_value, dm)))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn vector_patch(
     spec: Option<&PatchFieldSpec>,
@@ -1974,6 +2397,22 @@ fn vector_patch(
     // (120.3h) whose `dm` block is packed here, and `rotatingWallVelocity`'s
     // value may be timed.
     if let Some(seed) = wall_slip_seed(spec, n, patch, field, aux, internal, f1, timed)? {
+        out.dm[at * 12..(at + n) * 12].copy_from_slice(&seed.dm);
+        for i in 0..n {
+            out.kind[at + i] = seed.kind as Label;
+            out.fr[at + i] = seed.fr[i];
+            out.ref_value[at + i] = seed.ref_value[i];
+            out.ref_grad[at + i] = seed.ref_grad[i];
+            out.value[at + i] = seed.value[i];
+        }
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.5: the velocity-inlet family, before the static arms for
+    // the same reason - the three fixed-value profiles compute a per-face
+    // value the generic arm cannot, and the five pressure-driven kinds carry
+    // the opt-in gate and the `inletDirection` they are defined by.
+    if let Some(seed) = velocity_inlet_seed(spec, n, patch, field, aux, internal, f1)? {
         out.dm[at * 12..(at + n) * 12].copy_from_slice(&seed.dm);
         for i in 0..n {
             out.kind[at + i] = seed.kind as Label;
@@ -2217,6 +2656,26 @@ fn vector_patch(
 
             BcKind::ZeroGradient | BcKind::Empty | BcKind::Symmetry | BcKind::Cyclic => {
                 (0.0, zero, zero)
+            }
+
+            // SPEC-LIT 120.5: the five pressure-driven kinds never reach the
+            // static arms - `velocity_inlet_seed` above intercepts the name
+            // (with its BcInputs::pressure_inlet gate, which refuses where
+            // the caller did not opt in). This arm only keeps the match
+            // total.
+            BcKind::PressureInletVelocity
+            | BcKind::PressureInletUniformVelocity
+            | BcKind::PressureDirectedInletVelocity
+            | BcKind::PressureDirectedInletOutletVelocity
+            | BcKind::PressureInletOutletParSlipVelocity => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `{}` reached the static arms without its seed \
+                         (SPEC-LIT 120.5)",
+                        spec.type_name
+                    ),
+                })
             }
         };
 
@@ -3400,6 +3859,16 @@ pub fn update_inlet_outlet(
             // `outletValue`, `phi_b > 0` strictly - zero flux stays
             // zero-gradient under both conditions.
             fr[bf] = if phib[bf] > 0.0 { 1.0 } else { 0.0 };
+        } else if (crate::field::BcKind::PressureDirectedInletOutletVelocity as crate::Label
+            ..=crate::field::BcKind::PressureInletOutletParSlipVelocity as crate::Label)
+            .contains(&kinds[bf])
+        {
+            // SPEC-LIT 120.5, (120.5h)/(120.5i): `pressureDirectedInletOutletVelocity`
+            // and `pressureInletOutletParSlipVelocity` switch like the
+            // block - Dirichlet where the flux comes IN, `phi_b < 0`
+            // strictly, zero-gradient where it goes out. The in-loop kernel
+            // `fldInletOutletFraction` tests the same two kinds.
+            fr[bf] = if phib[bf] < 0.0 { 1.0 } else { 0.0 };
         }
     }
 

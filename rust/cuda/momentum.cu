@@ -105,6 +105,17 @@
 //  is pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
 #define OFGPU_BC_DIRECTION_MIXED 37
 
+//- SPEC-LIT 120.5: the five pressure-driven velocity inlets
+//  (pressureInletVelocity, pressureInletUniformVelocity,
+//  pressureDirectedInletVelocity, pressureDirectedInletOutletVelocity,
+//  pressureInletOutletParSlipVelocity), whose triple
+//  fldPressureInletValue in cuda/field.cu rewrites from the flux every
+//  outer iteration. Mirrors `BcKind::PressureInletVelocity` ..
+//  `BcKind::PressureInletOutletParSlipVelocity` in src/field.rs and is
+//  pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
+#define OFGPU_BC_PRESSURE_INLET_FIRST 41
+#define OFGPU_BC_PRESSURE_INLET_LAST  45
+
 //- True when the volumetric flux through this boundary face is fixed by the
 //  velocity boundary condition rather than by the pressure equation.
 //
@@ -123,6 +134,15 @@
 //  interior face that happens to be stored in the boundary arrays.
 OFGPU_DEV bool momFluxIsPrescribed(oflabel kind, ofscalar fr, oflabel uKind)
 {
+    //- SPEC-LIT 120.5, the flux rule: a pressure-driven velocity inlet owns
+    //  NOTHING - its face value is whatever the mass flux through the face
+    //  makes it, so the pressure correction must reach it whatever its fr,
+    //  including the fr = 1 seed and the Dirichlet inflow half of the two
+    //  switched kinds. Answered first, ahead of every test below.
+    if (uKind >= OFGPU_BC_PRESSURE_INLET_FIRST && uKind <= OFGPU_BC_PRESSURE_INLET_LAST)
+    {
+        return false;
+    }
     return kind == OFPATCH_EMPTY
         || kind == OFPATCH_SYMMETRY
         || kind == OFPATCH_WEDGE

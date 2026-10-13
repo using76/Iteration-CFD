@@ -51,7 +51,7 @@ pub(crate) struct Entry {
 /// aliases, then the planned names by their unit, the owned names by their
 /// stream, and the permanent refusals last.
 pub(crate) const CATALOGUE: &[Entry] = &[
-    // ---- implemented (62), in IMPLEMENTED_BC_NAMES' order -----------------
+    // ---- implemented (70), in IMPLEMENTED_BC_NAMES' order -----------------
     Entry { family: "basic", name: "fixedValue", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "noSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "zeroGradient", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
@@ -119,20 +119,24 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     // only where the caller refreshes it every step.
     Entry { family: "outlet", name: "outletInlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "outlet", name: "advective", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    // SPEC-LIT 120.5: the velocity-inlet family. The three fixed-value
+    // profiles ride `fixedValue` with a per-face value the setup computes;
+    // the five pressure-driven kinds rewrite their triple from the flux
+    // every outer iteration, where the caller opts in.
+    Entry { family: "velocity inlet", name: "surfaceNormalFixedValue", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "velocity inlet", name: "cylindricalInletVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "velocity inlet", name: "swirlFlowRateInletVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "velocity inlet", name: "pressureInletVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "velocity inlet", name: "pressureInletUniformVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "velocity inlet", name: "pressureDirectedInletVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "velocity inlet", name: "pressureDirectedInletOutletVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "velocity inlet", name: "pressureInletOutletParSlipVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     // ---- alias (3) --------------------------------------------------------
     Entry { family: "thermal", name: "compressible::alphatJayatillekeWallFunction", status: Status::Alias { to: "thermalWallFunction" }, field: "T", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::turbulentTemperatureCoupledBaffleMixed", status: Status::Alias { to: "coupledTemperature" }, field: "T", extended_by: &[], probes: &[] },
     // SPEC-LIT 120.3: `nutUWallFunction` already applies Spalding's formula.
     Entry { family: "wall function", name: "nutUSpaldingWallFunction", status: Status::Alias { to: "nutUWallFunction" }, field: "psi", extended_by: &[], probes: &[] },
-    // ---- planned (45), by unit --------------------------------------------
-    Entry { family: "velocity inlet", name: "surfaceNormalFixedValue", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "velocity inlet", name: "cylindricalInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "velocity inlet", name: "swirlFlowRateInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "velocity inlet", name: "pressureInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "velocity inlet", name: "pressureInletUniformVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "velocity inlet", name: "pressureDirectedInletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "velocity inlet", name: "pressureDirectedInletOutletVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "velocity inlet", name: "pressureInletOutletParSlipVelocity", status: Status::Planned { unit: "BC-08" }, field: "psi", extended_by: &[], probes: &[] },
+    // ---- planned (37), by unit --------------------------------------------
     Entry { family: "outlet", name: "fixedMean", status: Status::Planned { unit: "BC-10" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "outlet", name: "fixedMeanOutletInlet", status: Status::Planned { unit: "BC-10" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "outlet", name: "fixedFluxExtrapolatedPressure", status: Status::Planned { unit: "BC-10" }, field: "psi", extended_by: &[], probes: &[] },

@@ -59,6 +59,7 @@ pub struct FieldKernels {
     advective_robin_scalar: CudaFunction,
     advective_robin_vector: CudaFunction,
     wedge_ref_grad: CudaFunction,
+    pressure_inlet: CudaFunction,
 
     copy: CudaFunction,
     copy_vector: CudaFunction,
@@ -88,6 +89,10 @@ impl FieldKernels {
             // SPEC-LIT 119.2: the wedge condition's refGrad rewrite, run
             // before the evaluation on a mesh that carries a wedge.
             wedge_ref_grad: k.func("fldWedgeRefGrad")?,
+            // SPEC-LIT 120.5: the pressure-driven velocity inlets' refValue
+            // rewrite, run after the flux switch and before the evaluation
+            // wherever a caller opted in.
+            pressure_inlet: k.func("fldPressureInletValue")?,
 
             copy: k.func("fldCopy")?,
             copy_vector: k.func("fldCopyVector")?,
@@ -330,6 +335,86 @@ pub fn update_inlet_outlet_vector(
 ) -> Result<()> {
     let n = f.n_boundary_faces;
     update_inlet_outlet(gpu, k, &mut f.fr, &f.bc_kind, &phi.bf, n)
+}
+
+/// Rewrite `ref_value` on the five pressure-driven velocity inlets of
+/// SPEC-LIT 120.5 from the flux the last corrector left, (120.5e)-(120.5i) -
+/// one launch over the whole boundary, no host sync (it runs inside
+/// CUDA-graph capture, SPEC-LIT 81). Run it after
+/// [`update_inlet_outlet_vector`], which switches the fr of kinds 44 and 45
+/// on the same flux, and before [`correct_boundary_conditions_vector`],
+/// once per outer iteration, wherever the caller set
+/// `BcInputs::pressure_inlet`. The host twin of the kernel is
+/// [`crate::field::pressure_inlet_values`].
+pub fn update_pressure_inlet_velocity(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    u: &mut GpuVectorField,
+    phi: &GpuSurfaceScalarField,
+    m: &GpuMesh,
+) -> Result<()> {
+    check_sizes(
+        &u.name,
+        u.n_cells,
+        u.n_boundary_faces,
+        m,
+        "update_pressure_inlet_velocity",
+    )?;
+    let n = u.n_boundary_faces;
+    let checks = [
+        (u.ref_value.len(), "ref_value"),
+        (u.bc_kind.len(), "bc_kind"),
+        (phi.bf.len(), "phi"),
+        (m.b_patch.len(), "b_patch"),
+        (m.b_sf.len(), "b_sf"),
+        (m.b_mag_sf.len(), "b_mag_sf"),
+        (m.b_face_cells.len(), "b_face_cells"),
+    ];
+    for (len, name) in checks {
+        if len < n {
+            return Err(Error::Config(format!(
+                "update_pressure_inlet_velocity: {n} boundary faces, but \
+                 {name} has {len}"
+            )));
+        }
+    }
+    // The kernel reads the CELL value behind each face out of the internal
+    // field, so `f` covers the cells, not the boundary.
+    if u.f.len() < m.n_cells {
+        return Err(Error::Config(format!(
+            "update_pressure_inlet_velocity: {} cells, but f has {}",
+            m.n_cells,
+            u.f.len()
+        )));
+    }
+    if u.dm.len() < 12 * n {
+        return Err(Error::Config(format!(
+            "update_pressure_inlet_velocity: {n} boundary faces, but dm has {}",
+            u.dm.len()
+        )));
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+
+    let func = k.pressure_inlet.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(&mut u.ref_value)
+            .arg(&u.bc_kind)
+            .arg(&m.b_patch)
+            .arg(&phi.bf)
+            .arg(&m.b_sf)
+            .arg(&m.b_mag_sf)
+            .arg(&u.dm)
+            .arg(&u.f)
+            .arg(&m.b_face_cells)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
 }
 
 // ==========================================================================
@@ -1112,6 +1197,20 @@ mod tests {
         // rewrites before the evaluation and which adds no branch to
         // fldCorrectBcScalar/fldCorrectBcVector.
         assert_eq!(BcKind::Wedge as i32, 40);
+
+        // `OFGPU_BC_PRESSURE_INLET_FIRST`/`_LAST` in cuda/field.cu AND in
+        // cuda/momentum.cu (SPEC-LIT 120.5): the five pressure-driven
+        // velocity inlets, whose ref_value the fldPressureInletValue kernel
+        // rewrites from the flux and whose flux the momFluxIsPrescribed in
+        // momentum.cu leaves to the pressure equation whatever their fr -
+        // both macros must keep naming the same five kinds.
+        assert_eq!(crate::field::PRESSURE_INLET_FIRST, 41);
+        assert_eq!(crate::field::PRESSURE_INLET_LAST, 45);
+        assert_eq!(BcKind::PressureInletVelocity as i32, 41);
+        assert_eq!(BcKind::PressureInletUniformVelocity as i32, 42);
+        assert_eq!(BcKind::PressureDirectedInletVelocity as i32, 43);
+        assert_eq!(BcKind::PressureDirectedInletOutletVelocity as i32, 44);
+        assert_eq!(BcKind::PressureInletOutletParSlipVelocity as i32, 45);
     }
 
     /// Every branch of SPEC-LIT section 4 against the closed form it

@@ -71,7 +71,7 @@ use crate::device::{DevBuf, Gpu};
 use crate::error::Result;
 use crate::io::contract::{unsupported, unsupported_note};
 use crate::mesh::GpuMesh;
-use crate::{Label, Scalar, Vec3};
+use crate::{Acc, Label, Scalar, Vec3};
 
 /// Which rule regenerates `(fr, ref_value, ref_grad)` each outer iteration.
 ///
@@ -413,6 +413,49 @@ pub enum BcKind {
     /// name. The host twin of the rewrite is
     /// [`wedge_ref_grad`](crate::field::wedge_ref_grad).
     Wedge = 40,
+
+    /// `pressureInletVelocity`, the first of the five pressure-driven
+    /// velocity inlets of SPEC-LIT 120.5: on a patch whose PRESSURE is
+    /// given, the velocity is whatever the mass flux through the face makes
+    /// it (Ferziger & Peric 2002). All five are a section-4 triple with
+    /// `refGrad = 0`, rewritten once per outer iteration from the flux the
+    /// last corrector left, by `fldPressureInletValue` (host twin
+    /// [`pressure_inlet_values`]) before the boundary evaluation:
+    ///
+    /// ```text
+    /// U_b = S_f phi_b/(S_f . S_f),  fr = 1                        (120.5e)
+    /// ```
+    ///
+    /// `momFluxIsPrescribed` answers FALSE for kinds `[41, 45]` whatever
+    /// their `fr`, so the pressure correction reaches the face. A caller
+    /// opts in with [`crate::field_setup::BcInputs::pressure_inlet`]; every
+    /// other setup refuses the name (SPEC-LIT 120.5).
+    PressureInletVelocity = 41,
+
+    /// `pressureInletUniformVelocity` (SPEC-LIT 120.5, (120.5f)): the
+    /// patch-uniform form - `U_b = (S_f/|S_f|) PHI_p/A_p`, the patch sums
+    /// `PHI_p = SUM phi_f` and `A_p = SUM |S_f|` run on one device thread
+    /// per patch head, in `ofacc` face order.
+    PressureInletUniformVelocity = 42,
+
+    /// `pressureDirectedInletVelocity` (SPEC-LIT 120.5, (120.5g)): the flux
+    /// enters along `inletDirection`, `U_b = d_f phi_b/(d_f . S_f)`, with
+    /// the normalised `d_f` per face in the field's `dm` block's first
+    /// three slots.
+    PressureDirectedInletVelocity = 43,
+
+    /// `pressureDirectedInletOutletVelocity` (SPEC-LIT 120.5, (120.5h)):
+    /// (120.5g) where `phi_b < 0` (`fr = 1`), zeroGradient where
+    /// `phi_b >= 0` (`fr = 0`) - switched by `fldInletOutletFraction` on
+    /// the same strict `phi_b < 0` as the flux-switched block `[8, 12]`.
+    PressureDirectedInletOutletVelocity = 44,
+
+    /// `pressureInletOutletParSlipVelocity` (SPEC-LIT 120.5, (120.5i)): the
+    /// parallel-slip inflow - the normal part of (120.5e) plus the
+    /// tangential part of the cell value, `U_b = S_f phi_b/(S_f . S_f) +
+    /// U_P - S_f (S_f . U_P)/(S_f . S_f)` where `phi_b < 0`, zeroGradient
+    /// where `phi_b >= 0`.
+    PressureInletOutletParSlipVelocity = 45,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -424,6 +467,15 @@ pub enum BcKind {
 /// `OFGPU_BC_INLET_OUTLET_*` macros there.
 pub const FLUX_SWITCHED_FIRST: Label = BcKind::InletOutlet as Label;
 pub const FLUX_SWITCHED_LAST: Label = BcKind::PressureInletOutletVelocity as Label;
+
+/// The five pressure-driven velocity inlets, `[PRESSURE_INLET_FIRST,
+/// PRESSURE_INLET_LAST]` (SPEC-LIT 120.5). `momFluxIsPrescribed` in
+/// `cuda/momentum.cu` answers FALSE for every kind in the range whatever its
+/// `fr`, and `fldPressureInletValue` in `cuda/field.cu` rewrites their
+/// `ref_value` from the flux; `bc_kind_values_match_the_device` pins both
+/// numbers to the `OFGPU_BC_PRESSURE_INLET_*` macros there.
+pub const PRESSURE_INLET_FIRST: Label = BcKind::PressureInletVelocity as Label;
+pub const PRESSURE_INLET_LAST: Label = BcKind::PressureInletOutletParSlipVelocity as Label;
 
 /// Every condition [`BcKind::from_name`] accepts, for the diagnostic a
 /// rejected name gets. Kept next to the match so the two cannot drift.
@@ -497,6 +549,18 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     // only where a caller refreshes it every step (BcInputs::advective).
     "outletInlet",
     "advective",
+    // SPEC-LIT 120.5: the velocity-inlet family. The three fixed-value
+    // profiles ride `BcKind::FixedValue` with a per-face value the setup
+    // computes; the five pressure-driven kinds rewrite their triple from the
+    // flux every outer iteration, where the caller opts in.
+    "surfaceNormalFixedValue",
+    "cylindricalInletVelocity",
+    "swirlFlowRateInletVelocity",
+    "pressureInletVelocity",
+    "pressureInletUniformVelocity",
+    "pressureDirectedInletVelocity",
+    "pressureDirectedInletOutletVelocity",
+    "pressureInletOutletParSlipVelocity",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -594,6 +658,126 @@ pub fn wedge_ref_grad(
     Vec3::new(delta * w.x, delta * w.y, delta * w.z)
 }
 
+/// The host twin of `fldPressureInletValue` - SPEC-LIT 120.5,
+/// (120.5e)-(120.5i). Indexed by boundary face; `u_p[i]` is the value of
+/// the cell next to face `i`. Writes `ref_value[i]` only where
+/// `kinds[i]` is one of the five pressure-driven kinds `[41, 45]`; every
+/// other face is untouched, so the whole boundary can be swept.
+///
+/// The SAME operation order the kernel runs: `S.S` summed `x*x + y*y +
+/// z*z` left to right, the flux divided in first and the quotient scaled
+/// onto the vector, (120.5f)'s patch sums run face by face in face order
+/// in `Acc` (f64, both builds) and `PHI_p/A_p` rounded once. The device
+/// contracts FMA, so host and device agree to round-off, not bitwise.
+///
+/// # Panics
+/// Only through the slice bounds: `ref_value`, `b_sf`, `b_mag_sf`,
+/// `phi_b`, `u_p` and `kinds` must each cover the boundary, and `dm` the
+/// 12-entry block of every face the kinds 43/44 read.
+#[allow(clippy::too_many_arguments)]
+pub fn pressure_inlet_values(
+    kinds: &[Label],
+    b_patch: &[Label],
+    phi_b: &[Scalar],
+    b_sf: &[Vec3],
+    b_mag_sf: &[Scalar],
+    dm: &[Scalar],
+    u_p: &[Vec3],
+    ref_value: &mut [Vec3],
+) {
+    let n = ref_value.len();
+    for i in 0..n {
+        let kind = kinds[i];
+        if !(PRESSURE_INLET_FIRST..=PRESSURE_INLET_LAST).contains(&kind) {
+            continue;
+        }
+        let sf = b_sf[i];
+        let phi = phi_b[i];
+        // The patch-uniform form (120.5f): one thread per patch head -
+        // a face whose predecessor is not the same patch carrying the
+        // same kind - sums the patch's phi and |S_f| in face order, then
+        // a second loop writes every face of the patch. Other kind-42
+        // faces are written by their head, never by themselves.
+        if kind == BcKind::PressureInletUniformVelocity as Label {
+            let head = i == 0
+                || b_patch[i - 1] != b_patch[i]
+                || kinds[i - 1] != BcKind::PressureInletUniformVelocity as Label;
+            if !head {
+                continue;
+            }
+            let mut acc_phi: Acc = 0.0;
+            let mut acc_a: Acc = 0.0;
+            let mut j = i;
+            while j < n
+                && b_patch[j] == b_patch[i]
+                && kinds[j] == BcKind::PressureInletUniformVelocity as Label
+            {
+                acc_phi += phi_b[j] as Acc;
+                acc_a += b_mag_sf[j] as Acc;
+                j += 1;
+            }
+            let ubar = if acc_a != 0.0 {
+                (acc_phi / acc_a) as Scalar
+            } else {
+                0.0 as Scalar
+            };
+            for f in i..j {
+                let m = b_mag_sf[f];
+                let k = if m != 0.0 { ubar / m } else { 0.0 };
+                ref_value[f] = Vec3::new(b_sf[f].x * k, b_sf[f].y * k, b_sf[f].z * k);
+            }
+            continue;
+        }
+        let rv = match kind {
+            k if k == BcKind::PressureInletVelocity as Label => {
+                let ss = sf.x * sf.x + sf.y * sf.y + sf.z * sf.z;
+                if ss != 0.0 {
+                    let q = phi / ss;
+                    Vec3::new(sf.x * q, sf.y * q, sf.z * q)
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            k if k == BcKind::PressureDirectedInletVelocity as Label
+                || k == BcKind::PressureDirectedInletOutletVelocity as Label =>
+            {
+                let d = Vec3::new(dm[12 * i], dm[12 * i + 1], dm[12 * i + 2]);
+                let ds = d.x * sf.x + d.y * sf.y + d.z * sf.z;
+                if ds != 0.0 {
+                    let q = phi / ds;
+                    Vec3::new(d.x * q, d.y * q, d.z * q)
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            k if k == BcKind::PressureInletOutletParSlipVelocity as Label => {
+                let ss = sf.x * sf.x + sf.y * sf.y + sf.z * sf.z;
+                let d = sf.x * u_p[i].x + sf.y * u_p[i].y + sf.z * u_p[i].z;
+                if ss != 0.0 {
+                    let q = phi / ss;
+                    let t = d / ss;
+                    Vec3::new(
+                        sf.x * q + u_p[i].x - sf.x * t,
+                        sf.y * q + u_p[i].y - sf.y * t,
+                        sf.z * q + u_p[i].z - sf.z * t,
+                    )
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            _ => Vec3::ZERO,
+        };
+        // 44 and 45 hold their Dirichlet form only where the flux comes
+        // IN (`phi_b < 0`, strict); the outflow half is zero-gradient,
+        // whose refValue the section-4 evaluation never reads - the same
+        // strict test `fldInletOutletFraction` switches the fraction by.
+        let inflow = phi < 0.0;
+        let switched = kind == BcKind::PressureDirectedInletOutletVelocity as Label
+            || kind == BcKind::PressureInletOutletParSlipVelocity as Label;
+        ref_value[i] = if switched && !inflow { Vec3::ZERO } else { rv };
+    }
+}
+
 impl BcKind {
     /// Map an OpenFOAM boundary-condition type string, per SPEC-LIT §13.4.
     ///
@@ -654,6 +838,24 @@ impl BcKind {
                 Self::DirectionMixed
             }
             "rotatingWallVelocity" | "translatingWallVelocity" => Self::FixedValue,
+
+            // SPEC-LIT 120.5: the velocity-inlet family. The three
+            // fixed-value profiles ARE a fixedValue - `field_setup` computes
+            // each face's value once from the case's own profile data
+            // ((120.5a)-(120.5c)) and seeds `fr = 1`. The five
+            // pressure-driven kinds keep kinds of their own: their triple is
+            // rewritten from the flux every outer iteration by
+            // `fldPressureInletValue`, and `momFluxIsPrescribed` answers
+            // FALSE for the whole range `[41, 45]` so the pressure
+            // correction reaches the face.
+            "surfaceNormalFixedValue"
+            | "cylindricalInletVelocity"
+            | "swirlFlowRateInletVelocity" => Self::FixedValue,
+            "pressureInletVelocity" => Self::PressureInletVelocity,
+            "pressureInletUniformVelocity" => Self::PressureInletUniformVelocity,
+            "pressureDirectedInletVelocity" => Self::PressureDirectedInletVelocity,
+            "pressureDirectedInletOutletVelocity" => Self::PressureDirectedInletOutletVelocity,
+            "pressureInletOutletParSlipVelocity" => Self::PressureInletOutletParSlipVelocity,
 
             // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
             // function. `nutUWallFunction` already applies Spalding's single
@@ -1595,7 +1797,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [62, 3, 45, 10, 10], "the per-status counts");
+        assert_eq!(counts, [70, 3, 37, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

@@ -230,7 +230,7 @@ extern "C" __global__ void parcelCoupleGather
     const ofscalar rVdt = rV/dt;
 
     // Each stored value is ONE narrowing to `ofscalar` of the f64 expression
-    // (SPEC-LIT 118.9d). The casts are identities in the f64 build.
+    // (SPEC-LIT 118.9, (118.9d)). The casts are identities in the f64 build.
     const ofvec3 f = mkvec((ofscalar)(-ix*rVdt),
                            (ofscalar)(-iy*rVdt),
                            (ofscalar)(-iz*rVdt));

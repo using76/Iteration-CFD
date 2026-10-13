@@ -765,6 +765,26 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
             }
             // Always a scalar, even on a vector field.
             "valueFraction" => s.value_fraction = parse_scalar_entry(tz)?,
+            // SPEC-LIT 120.5: on a VECTOR field a `refValue` may be SCALAR -
+            // `uniform <number>` or `nonuniform List<scalar> ...` - which a
+            // vector list cannot hold. `surfaceNormalFixedValue` defines its
+            // velocity through exactly that entry, so the two scalar forms
+            // are kept VERBATIM in `extra`, the same way the symmTensor
+            // `valueFraction` above is kept; every other form parses as the
+            // vector entry it always was, so existing files are byte-
+            // identical on read and on write. On a scalar field every form
+            // is a scalar entry.
+            "refValue" if is_vector => {
+                let scalar_form = (tz.is_word("uniform") && !tz.is_punct_at('(', 1))
+                    || (tz.is_word("nonuniform")
+                        && matches!(tz.peek_at(1), Some(Tok::Word(w)) if w.contains("scalar")));
+                if scalar_form {
+                    let raw = gather_raw(tz)?;
+                    s.extra.insert("refValue".to_string(), raw);
+                } else {
+                    s.ref_value_v = parse_vector_entry(tz)?;
+                }
+            }
             // `refGrad` is the spelling some older cases use for refGradient.
             // `outletValue` is `outletInlet`'s outflow value (SPEC-LIT 120.4,
             // (120.4a)), read exactly as `inletValue` is.

@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 62 names of
+accepts it on the field the row is asked on, and it is one of the 70 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39090,17 +39090,17 @@ row, row for row.
 | wall | `fixedShearStress` | implemented | — | — | laminar `tau/nu` (120.3f); refused naming `nu` where the setup is given none, which is every driver today |
 | outlet | `outletInlet` | implemented | — | — | (120.4a), the reverse switch of `inletOutlet` - fixed on outflow |
 | outlet | `advective` | implemented | — | — | (120.4b)-(120.4d); refused where no time loop refreshes it |
+| velocity inlet | `surfaceNormalFixedValue` | implemented | — | — | (120.5a), a fixedValue at `refValue` along the outward normal |
+| velocity inlet | `cylindricalInletVelocity` | implemented | — | — | (120.5b), axial, radial and rpm components about an axis |
+| velocity inlet | `swirlFlowRateInletVelocity` | implemented | — | — | (120.5c), `-n Q/A` plus a rigid swirl with its normal part removed |
+| velocity inlet | `pressureInletVelocity` | implemented | — | — | (120.5e), `n phi_b/|S_f|`; the flux is the pressure equation's |
+| velocity inlet | `pressureInletUniformVelocity` | implemented | — | — | (120.5f), the patch-mean normal velocity `PHI_p/A_p` |
+| velocity inlet | `pressureDirectedInletVelocity` | implemented | — | — | (120.5g), along `inletDirection` from the flux |
+| velocity inlet | `pressureDirectedInletOutletVelocity` | implemented | — | — | (120.5h), (120.5g) on inflow, zeroGradient on outflow |
+| velocity inlet | `pressureInletOutletParSlipVelocity` | implemented | — | — | (120.5i), normal from the flux and tangential from the cell on inflow |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
-| velocity inlet | `surfaceNormalFixedValue` | planned | BC-08 | — | — |
-| velocity inlet | `cylindricalInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `swirlFlowRateInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureInletUniformVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureDirectedInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureDirectedInletOutletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureInletOutletParSlipVelocity` | planned | BC-08 | — | — |
 | outlet | `fixedMean` | planned | BC-10 | — | — |
 | outlet | `fixedMeanOutletInlet` | planned | BC-10 | — | — |
 | outlet | `fixedFluxExtrapolatedPressure` | planned | BC-10 | — | — |
@@ -39706,6 +39706,176 @@ for `zeroGradient` - an expected magnitude, not an answer key.
   hyperbolic flows", *J. Comput. Phys.* 21(3):251-269, DOI
   10.1016/0021-9991(76)90023-1 (checked on Crossref, 2026-10-12). *Not
   read*: the condition is written from (120.4b) as stated here.
+
+No GPL-licensed source was consulted.
+
+### 120.5 Velocity inlets - three fixed-value profiles, and five velocities the pressure equation drives
+
+BC-08 implements the eight velocity-inlet names of the §120 table. The names
+are taken from the user guides of §120 by name only; every equation below
+is ours (marked DESIGN) or is cited. They split by WHO owns the flux
+through the face.
+
+**Three fixed-value profiles** *(DESIGN - ours)*. `surfaceNormalFixedValue`,
+`cylindricalInletVelocity` and `swirlFlowRateInletVelocity` are a
+`fixedValue` velocity (`BcKind::FixedValue`, `fr = 1`) whose per-face value
+the setup computes once, in f64 from the f64 face centres (world
+coordinates, §118.7) and the f64 unit outward normals `n` (§118.2), and
+rounds once into `Scalar`. Their flux is prescribed, `phi_b = U_b . S_f`
+(`momFluxIsPrescribed`, `cuda/momentum.cu`), so the patch sum of the flux
+IS the patch sum of `U_b . S_f`.
+
+```
+surfaceNormalFixedValue:   U_b = u_n n,  u_n = refValue (signed: > 0 points out
+                           of the domain, < 0 is an inflow)                 (120.5a)
+
+cylindricalInletVelocity:  a = axis/|axis|, d = x_f - origin,
+                           r = d - a (a . d), rho = |r|, e_r = r/rho (0 where rho = 0),
+                           omega = 2 pi rpm/60,
+                           U_b = u_ax a + u_r e_r + omega (a x r)           (120.5b)
+
+swirlFlowRateInletVelocity: w = omega (a x r),
+                           U_b = -n Q/A + w - n (n . w)                     (120.5c)
+```
+
+`u_ax` is `axialVelocity`, `u_r` is `radialVelocity`, `Q` is
+`volumetricFlowRate` (or `flowRate`, or `massFlowRate` read as a volume
+flux because this solver's `rho` is 1, as `flowRateInletVelocity` reads it),
+`A = SUM_f |S_f|` the patch area, and `omega` turns right-handed about `a`.
+(120.5c) is `flowRateInletVelocity`'s `-n Q/A` plus the rigid rotation with
+its face-normal part removed, so its flux is `-Q` on ANY patch, planar or
+not, and the swirl changes nothing the continuity equation sees. Each scalar
+input is read as `rotatingWallVelocity` reads `omega` (§120.3); a
+time-varying Function1 is refused by name, because no driver runs the timed
+path for these names.
+
+The swirl a patch delivers is measured by the momentum-flux form of the
+swirl number of Syred & Beer (1974) - the flux of angular momentum over `R`
+times the flux of axial momentum, the static-pressure term left out:
+
+```
+S = G_theta/(R G_x),  G_theta = SUM_f (-phi_f) rho_f (U_b . e_theta),
+                      G_x     = SUM_f (-phi_f) (U_b . a),
+                      e_theta = a x e_r,  R = max_f rho_f                   (120.5d)
+```
+
+On a planar patch normal to `a`, (120.5c) gives `U_b . a = Q/A` and
+`U_b . e_theta = omega rho_f` at every face, so (120.5d) is exactly
+`S = omega SUM_f rho_f^2 |S_f| / (R Q)` - the discrete answer key of the
+gate, which on a disc of radius `R` tends to `omega R/(2 Q/A)`, the
+solid-body rotation over a uniform axial velocity.
+
+**Five velocities the pressure equation drives** *(DESIGN - ours)*.
+`pressureInletVelocity` (kind 41), `pressureInletUniformVelocity` (42),
+`pressureDirectedInletVelocity` (43), `pressureDirectedInletOutletVelocity`
+(44) and `pressureInletOutletParSlipVelocity` (45) sit on a patch whose
+PRESSURE is given; the flux through the face is the pressure equation's, and
+the velocity follows from it - the treatment of a pressure boundary in
+Ferziger & Peric (2002), where the boundary velocity is whatever the mass
+flux through the face makes it. Each is a §4 triple with `refGrad = 0`,
+rewritten once per outer iteration, from the flux `phi_b` the last corrector
+left, by `fldPressureInletValue` in `cuda/field.cu` (host twin
+`field::pressure_inlet_values`), before the boundary evaluation:
+
+```
+41  U_b = S_f phi_b/(S_f . S_f)                                fr = 1     (120.5e)
+42  U_b = (S_f/|S_f|) PHI_p/A_p,  PHI_p = SUM_{f in p} phi_f,
+                                  A_p   = SUM_{f in p} |S_f|   fr = 1     (120.5f)
+43  U_b = d_f phi_b/(d_f . S_f)                                fr = 1     (120.5g)
+44  (120.5g) where phi_b < 0                                   fr = 1
+    zeroGradient where phi_b >= 0                              fr = 0     (120.5h)
+45  U_b = S_f phi_b/(S_f . S_f) + U_P - S_f (S_f . U_P)/(S_f . S_f)
+    where phi_b < 0                                            fr = 1
+    zeroGradient where phi_b >= 0                              fr = 0     (120.5i)
+```
+
+`d_f` is `inletDirection` (uniform or one vector per face) normalised in
+f64; the setup refuses a face where `d_f . n > -1e-6`, a direction that does
+not point into the domain. The sums of (120.5f) run over the patch's faces in
+face order, in `Acc` (§118.1), and `PHI_p/A_p` is rounded once; one device
+thread per patch head runs them, so the device sum is the host sum. (120.5i)
+holds the normal part from the flux and the tangential part from the cell,
+lagged one outer iteration; at a fixed point it is the parallel-slip inflow.
+The fractions of 44 and 45 are switched by `fldInletOutletFraction` on the
+same strict `phi_b < 0` as the flux-switched block `[8, 12]`.
+
+Each of (120.5e)-(120.5i) satisfies `U_b . S_f = phi_b` on its Dirichlet
+faces (and (120.5f) `SUM_f U_b . S_f = PHI_p`) to round-off, so the face
+value never contradicts the flux. **The flux rule:** `momFluxIsPrescribed`
+answers FALSE for a velocity kind in `[41, 45]` whatever its `fr`, so the
+pressure correction reaches the face; every other kind is answered as
+before, which keeps the f64 build's results bitwise. A caller opts in with
+`BcInputs::pressure_inlet = true`, the promise that its loop runs
+`field_ops::update_pressure_inlet_velocity` every outer iteration and builds
+its flux with `momFluxIsPrescribed` - `Simple::correct_outer` does both, and
+`ofgpu-lowmach` and `ofgpu-buoyant` pass it. Every other setup refuses the
+five names by name: a frozen seed with `fr = 1` would be a fixed-velocity
+inlet under a pressure-inlet name (§13.4). `cuda/vof.cu` and
+`cuda/marangoni.cu` keep their predicates unchanged for that reason - the
+VOF setup cannot reach these kinds.
+
+**The pressure-driven channel** *(gate)*. A plane channel of height `H`,
+length `L`, kinematic pressure `p_in` at the inlet (`fixedValue`), `0` at
+the outlet, `noSlip` walls, `pressureInletVelocity` at the inlet and
+`zeroGradient` at the outlet. The fully developed Poiseuille flow satisfies
+every one of these conditions exactly - the inlet pressure is uniform, the
+tangential velocity is zero, the normal velocity is whatever the flux makes
+it - so it is the solution, with no entrance length, and its rate per unit
+depth `t` is (Batchelor 1967, §4.2)
+
+```
+Q = p_in H^3 t/(12 nu L)                                                   (120.5j)
+```
+
+On `n_y` uniform cells across, the cell-centred discrete solution with the
+half-cell wall gradient of §2.4 is the parabola shifted by `G Delta^2/(8 nu)`
+(`G = p_in/L`, `Delta = H/n_y`), so the discrete fixed point carries
+*(DESIGN - derived here, checked on a scratchpad 1-D solve)*
+
+```
+Q_h = Q (1 + 2/n_y^2)                                                      (120.5k)
+```
+
+1.005 Q at `n_y = 20`, inside the plan's 1 %.
+
+**Gates** (`tests/bc_inlets.rs`, 6 tests, both builds; class per docs/17
+§5.1, D-F32-1). `fixed_value_inlets_carry_their_patch_flux` - a 6^3 box,
+inlet `xMin`: every face value equals (120.5a)-(120.5c) evaluated in the
+test within 1e-14 of `max|U|`, and after three SIMPLE outer iterations the
+device flux through the inlet sums to the prescribed -2.5, -1.5 and -0.8
+within 1e-12 relative (class R; measured exact to 12 digits in f64, and
+-2.499999977648, -1.499999988824, -0.799999836832 under `single`, inside
+1e-5); the swirl number (120.5d) of `swirlFlowRateInletVelocity` (0.8,
+120 rpm, axis `x`) is 4.319469523210 against the discrete answer key
+4.319469523210 (1e-12 relative; `single` 4.319470450617 against
+4.319469548956, 2.1e-7), and `U_b . a = Q/A` at every face.
+`pressure_inlet_refresh_is_its_host_twin` - kinds 41-45 on five faces of a
+4^3 box under a two-signed prescribed flux: the device refresh equals
+`field::pressure_inlet_values` within 1e-14 of `max|U_b|`, `fr` is exactly 1
+or exactly the `phi_b < 0` switch, `U_b . S_f = phi_b` on every Dirichlet
+face and the 42 patch sum equals `PHI_p` within 1e-12 (class R).
+`a_pressure_driven_channel_reaches_the_poiseuille_rate` - `H = 1`, `L = 2`,
+10 x 20 cells, `nu = 1`, `p_in = 24`: (120.5j) gives `Q = 1` and (120.5k)
+`Q_h = 1.005`. Measured `Q = 1.005000000` after 1089 outer iterations,
+`|Q/Q_h - 1| = 4.7e-13`, outlet minus inlet 2.2e-15 (f64); under `single`
+`Q = 1.004999750` with `|Q/Q_h - 1| = 2.5e-7` (class R, 1e-5) - the plan's
+1 % holds in both builds (class P). The run reaches the 5000-iteration cap
+under `single` without meeting the residual control: the f32 SIMPLE floor
+of §120.3's findings, not this condition. Three refusal tests: the five
+pressure kinds without `BcInputs::pressure_inlet`, all eight names on a
+scalar field, and an outward `inletDirection`, a time-varying `rpm` and a
+zero `axis`.
+
+* **Syred, N. & Beer, J. M.** (1974), "Combustion in swirling flows: a
+  review", *Combust. Flame* 23(2):143-201, DOI 10.1016/0010-2180(74)90057-1
+  (checked on Crossref, 2026-10-13). *Not read*: (120.5d) is the
+  momentum-flux ratio as defined here.
+* **Ferziger, J. H. & Peric, M.** *Computational Methods for Fluid
+  Dynamics*, 3rd ed., Springer (2002) - a pressure boundary, where the
+  boundary velocity follows from the mass flux.
+* **Batchelor, G. K.** (1967), *An Introduction to Fluid Dynamics*,
+  Cambridge University Press, §4.2, DOI 10.1017/CBO9780511800955 (checked
+  on doi.org, 2026-10-13) - the steady unidirectional channel flow (120.5j).
 
 No GPL-licensed source was consulted.
 

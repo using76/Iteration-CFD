@@ -117,6 +117,20 @@
 //  section 4 expression.
 #define OFGPU_BC_WEDGE        40
 
+//- SPEC-LIT 120.5: the five pressure-driven velocity inlets - kinds whose
+//  triple the fldPressureInletValue kernel below rewrites from the flux the
+//  last corrector left, before the boundary evaluation. momFluxIsPrescribed
+//  in cuda/momentum.cu (which carries its own copy of these two numbers)
+//  answers FALSE for the whole range whatever the face's fr, so the
+//  pressure correction reaches the face.
+#define OFGPU_BC_PRESSURE_INLET_FIRST        41
+#define OFGPU_BC_PRESSURE_INLET_LAST         45
+#define OFGPU_BC_PRESSURE_INLET_VELOCITY     41
+#define OFGPU_BC_PRESSURE_INLET_UNIFORM      42
+#define OFGPU_BC_PRESSURE_DIRECTED_INLET     43
+#define OFGPU_BC_PRESSURE_DIRECTED_IO        44
+#define OFGPU_BC_PRESSURE_PAR_SLIP           45
+
 //- The FLUX-SWITCHED block: every kind in [FIRST, LAST] is Dirichlet where
 //  the face flux is inward and zero-gradient where it is outward, and they
 //  differ only in where the inflow value comes from - inletOutlet takes it
@@ -377,6 +391,147 @@ extern "C" __global__ void fldInletOutletFraction
     {
         fr[i] = (phiB[i] > (ofscalar)0) ? (ofscalar)1 : (ofscalar)0;
     }
+    else if (kind >= OFGPU_BC_PRESSURE_DIRECTED_IO && kind <= OFGPU_BC_PRESSURE_PAR_SLIP)
+    {
+        //- SPEC-LIT 120.5, (120.5h)/(120.5i): the two SWITCHED pressure
+        //  inlets - Dirichlet where the flux comes IN, `phi < 0` strictly,
+        //  zero-gradient where it goes out, the same test as the block
+        //  above. Kinds 41/42/43 are always Dirichlet and are not touched.
+        fr[i] = (phiB[i] < (ofscalar)0) ? (ofscalar)1 : (ofscalar)0;
+    }
+}
+
+
+//- Rewrite refValue on the five pressure-driven velocity inlets of
+//  SPEC-LIT 120.5 from the flux the last corrector left, (120.5e)-(120.5i),
+//  before the boundary evaluation. These are the faces whose PRESSURE is
+//  given: the flux through the face is the pressure equation's, and the
+//  velocity follows from it - a pressure boundary in Ferziger & Peric
+//  (2002), where the boundary velocity is whatever the mass flux makes it.
+//
+//  Every kind here is a section-4 triple with refGrad = 0 whose refValue
+//  this kernel rewrites once per outer iteration; momFluxIsPrescribed in
+//  cuda/momentum.cu answers FALSE for the whole range [41, 45] whatever the
+//  face's fr, so the pressure correction keeps reaching the face. Faces of
+//  every other kind are untouched, which is what lets this run over the
+//  whole boundary in one launch. The host twin of this kernel is
+//  `field::pressure_inlet_values` in src/field.rs, in the same operation
+//  order (the FMA contraction apart).
+extern "C" __global__ void fldPressureInletValue
+(
+    ofvec3* __restrict__ refValue,
+    const oflabel* __restrict__ bcKind,
+    const oflabel* __restrict__ bPatch,
+    const ofscalar* __restrict__ phiB,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const ofscalar* __restrict__ dm,
+    const ofvec3* __restrict__ uCell,
+    const oflabel* __restrict__ bFaceCells,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    const oflabel kind = bcKind[i];
+    if (kind < OFGPU_BC_PRESSURE_INLET_FIRST || kind > OFGPU_BC_PRESSURE_INLET_LAST) return;
+
+    if (kind == OFGPU_BC_PRESSURE_INLET_UNIFORM)
+    {
+        // (120.5f): the patch-uniform form, U_b = (S_f/|S_f|) PHI_p/A_p.
+        // One thread per patch HEAD - a face whose predecessor is not the
+        // same patch carrying the same kind - runs the patch's two sums in
+        // face order, in ofacc (SPEC-LIT 118.1), so the device sum is the
+        // host sum; PHI_p/A_p is rounded once, and every other kind-42
+        // thread of the patch returns without writing.
+        const bool head = (i == 0)
+            || bPatch[i-1] != bPatch[i]
+            || bcKind[i-1] != OFGPU_BC_PRESSURE_INLET_UNIFORM;
+        if (!head) return;
+        ofacc accPhi = 0;
+        ofacc accA   = 0;
+        oflabel j = i;
+        while (j < nbf
+               && bPatch[j] == bPatch[i]
+               && bcKind[j] == OFGPU_BC_PRESSURE_INLET_UNIFORM)
+        {
+            accPhi += (ofacc)phiB[j];
+            accA   += (ofacc)bMagSf[j];
+            ++j;
+        }
+        const ofscalar ubar =
+            (accA != (ofacc)0) ? (ofscalar)(accPhi/accA) : (ofscalar)0;
+        for (oflabel f = i; f < j; ++f)
+        {
+            const ofvec3  s = bSf[f];
+            const ofscalar m = bMagSf[f];
+            const ofscalar k = (m != (ofscalar)0) ? ubar/m : (ofscalar)0;
+            refValue[f] = mkvec(s.x*k, s.y*k, s.z*k);
+        }
+        return;
+    }
+
+    const ofvec3 s = bSf[i];
+    const ofscalar phi = phiB[i];
+    ofvec3 rv = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+
+    if (kind == OFGPU_BC_PRESSURE_INLET_VELOCITY)
+    {
+        // (120.5e): U_b = S_f phi_b/(S . S), the flux read back along the
+        // face normal. S . S == 0 writes zero.
+        const ofscalar ss = s.x*s.x + s.y*s.y + s.z*s.z;
+        if (ss != (ofscalar)0)
+        {
+            const ofscalar q = phi/ss;
+            rv = mkvec(s.x*q, s.y*q, s.z*q);
+        }
+    }
+    else if (kind == OFGPU_BC_PRESSURE_DIRECTED_INLET
+             || kind == OFGPU_BC_PRESSURE_DIRECTED_IO)
+    {
+        // (120.5g)/(120.5h): U_b = d_f phi_b/(d_f . S_f), the flux entering
+        // along inletDirection - the normalised per-face direction the setup
+        // packed into the dm block's first three slots. d . S == 0 writes
+        // zero.
+        const ofvec3 d = mkvec(dm[12*i], dm[12*i + 1], dm[12*i + 2]);
+        const ofscalar ds = d.x*s.x + d.y*s.y + d.z*s.z;
+        if (ds != (ofscalar)0)
+        {
+            const ofscalar q = phi/ds;
+            rv = mkvec(d.x*q, d.y*q, d.z*q);
+        }
+    }
+    else
+    {
+        // OFGPU_BC_PRESSURE_PAR_SLIP, (120.5i): the parallel-slip inflow -
+        // the normal part from the flux, the tangential part from the cell,
+        // lagged one outer iteration; at a fixed point it is the
+        // parallel-slip condition.
+        const ofscalar ss = s.x*s.x + s.y*s.y + s.z*s.z;
+        const ofvec3 up = uCell[bFaceCells[i]];
+        const ofscalar dup = s.x*up.x + s.y*up.y + s.z*up.z;
+        if (ss != (ofscalar)0)
+        {
+            const ofscalar q = phi/ss;
+            const ofscalar t = dup/ss;
+            rv = mkvec(s.x*q + up.x - s.x*t,
+                       s.y*q + up.y - s.y*t,
+                       s.z*q + up.z - s.z*t);
+        }
+    }
+
+    // (120.5h)/(120.5i): the two SWITCHED kinds hold their Dirichlet form
+    // only where the flux comes IN, `phi < 0` strictly - the same test
+    // fldInletOutletFraction switches their fr by. On the outflow half the
+    // face is zero-gradient, and the refValue its evaluation never reads is
+    // written zero.
+    if ((kind == OFGPU_BC_PRESSURE_DIRECTED_IO || kind == OFGPU_BC_PRESSURE_PAR_SLIP)
+        && !(phi < (ofscalar)0))
+    {
+        rv = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+    }
+    refValue[i] = rv;
 }
 
 
