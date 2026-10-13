@@ -27,6 +27,7 @@
 
 use crate::chem::mechanism::{Blending, Collider, Mechanism};
 use crate::chem::reactor::ReactorOptions;
+use crate::chem::transport::{Lewis, TransportSet};
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::{Label, Scalar};
@@ -51,6 +52,9 @@ pub mod status {
     pub const BELOW_NEGATIVE_ATOL: i32 = 8;
     /// `h_in` not finite or not above 0 (R5's `h0`).
     pub const BAD_STEP: i32 = 9;
+    /// A present species' T outside its TM-4513 eq. (10) transport range
+    /// (SPEC-LIT 133.4's transport kernels).
+    pub const OUTSIDE_TRANSPORT_RANGE: i32 = 10;
 }
 
 /// The flat mechanism of §132.9 D2: the whole mechanism as two arrays, one
@@ -268,6 +272,9 @@ pub struct ChemKernels {
     integrate: CudaFunction,
     pack: CudaFunction,
     unpack: CudaFunction,
+    transport: CudaFunction,
+    prandtl: CudaFunction,
+    lewis: CudaFunction,
 }
 
 impl ChemKernels {
@@ -279,6 +286,9 @@ impl ChemKernels {
             integrate: k.func("chemIntegrate")?,
             pack: k.func("chemPackState")?,
             unpack: k.func("chemUnpackState")?,
+            transport: k.func("chemMixtureTransport")?,
+            prandtl: k.func("chemPrandtlConductivity")?,
+            lewis: k.func("chemLewisDiffusivity")?,
         })
     }
 }
@@ -780,12 +790,257 @@ pub fn integrate_fields(
     }
     Ok(())
 }
+/// The flat transport layout of SPEC-LIT §133.4's device twins, one f64
+/// array: 40 doubles per species k at `40k` - `[0]` W (kg/mol), `[1]` n_v
+/// (1..3, as a double), `[2..20)` three viscosity fits of 6 doubles
+/// `(t_lo, t_hi, a, b, c, d)` (the unused slots 0.0), `[20]` n_c, `[21..39)`
+/// three conductivity fits of 6 doubles (the unused slots 0.0), `[39]` 0.0.
+/// The twin of this layout is the transport header comment in
+/// `cuda/chem.cu`; the two field lists must stay identical. The species
+/// count is not in the array - the launches carry it as an argument, as
+/// `ChemKernels::new` loaded it.
+pub fn flatten_transport(ts: &TransportSet) -> Vec<f64> {
+    let mut v = Vec::with_capacity(40 * ts.species().len());
+    for (k, sp) in ts.species().iter().enumerate() {
+        v.push(ts.molar_masses()[k]);
+        v.push(sp.viscosity.len() as f64);
+        for i in 0..3 {
+            match sp.viscosity.get(i) {
+                Some(f) => v.extend_from_slice(&[f.t_lo, f.t_hi, f.a, f.b, f.c, f.d]),
+                None => v.extend_from_slice(&[0.0; 6]),
+            }
+        }
+        v.push(sp.conductivity.len() as f64);
+        for i in 0..3 {
+            match sp.conductivity.get(i) {
+                Some(f) => v.extend_from_slice(&[f.t_lo, f.t_hi, f.a, f.b, f.c, f.d]),
+                None => v.extend_from_slice(&[0.0; 6]),
+            }
+        }
+        v.push(0.0);
+    }
+    v
+}
+
+/// [`flatten_transport`]'s array on the device, uploaded once per
+/// [`TransportSet`].
+pub struct DeviceTransport {
+    tf: DevBuf<f64>,
+    n_species: usize,
+}
+
+impl DeviceTransport {
+    pub fn upload(gpu: &Gpu, ts: &TransportSet) -> Result<Self> {
+        let tf = flatten_transport(ts);
+        Ok(Self {
+            tf: gpu.upload(&tf)?,
+            n_species: ts.species().len(),
+        })
+    }
+
+    /// The species count, K.
+    pub fn n_species(&self) -> usize {
+        self.n_species
+    }
+}
+
+/// The f64 scratch of §133.4's mixture kernel, SoA with stride
+/// [`TransportWork::n_cells`]: the mole fractions and the two
+/// pure-species property columns, K values per cell each. Everything
+/// computes in double in both builds, so the scratch is f64 in both.
+pub struct TransportWork {
+    x: DevBuf<f64>,
+    mu: DevBuf<f64>,
+    lam: DevBuf<f64>,
+    n_cells: usize,
+}
+
+impl TransportWork {
+    pub fn new(gpu: &Gpu, dt: &DeviceTransport, n_cells: usize) -> Result<Self> {
+        let k = dt.n_species();
+        Ok(Self {
+            x: gpu.zeros(k * n_cells)?,
+            mu: gpu.zeros(k * n_cells)?,
+            lam: gpu.zeros(k * n_cells)?,
+            n_cells,
+        })
+    }
+
+    /// The cell count the scratch was sized for.
+    pub fn n_cells(&self) -> usize {
+        self.n_cells
+    }
+}
+
+/// The stated constants of the Lewis-number route on the device: the
+/// per-species Lewis numbers and the Prandtl number the launches carry as
+/// an argument.
+pub struct DeviceLewis {
+    le: DevBuf<f64>,
+    pr: f64,
+    n_species: usize,
+}
+
+impl DeviceLewis {
+    pub fn upload(gpu: &Gpu, l: &Lewis) -> Result<Self> {
+        Ok(Self {
+            le: gpu.upload(&l.le)?,
+            pr: l.pr,
+            n_species: l.le.len(),
+        })
+    }
+
+    /// The species count, K.
+    pub fn n_species(&self) -> usize {
+        self.n_species
+    }
+}
+
+/// The device [`crate::chem::transport::TransportSet::mixture_ty`] (SPEC-LIT
+/// §133.4): the Wilke mixture viscosity (133.8) with (133.10) and the
+/// mixture conductivity (133.9) with (133.10) and (133.11), from the
+/// TM-4513 eq. (10) fits, one thread per cell, in the host's operation
+/// order and choice for choice. Layouts: `t[c]`, `y[k*n+c]`, `mu[c]`,
+/// `lambda[c]`, `status[c]`. Per-cell checks in the host's order: T not
+/// finite or not above 0 -> 2 (BAD_TEMPERATURE); any y negative or not
+/// finite -> 3; the sum of Y/W NaN or not above 0 -> 4; a present
+/// species' T outside its viscosity or conductivity range -> 10
+/// (OUTSIDE_TRANSPORT_RANGE). A refused cell writes NaN to its mu and
+/// lambda. `n == 0` launches nothing; no sync, no allocation (capturable).
+#[allow(clippy::too_many_arguments)]
+pub fn transport_mixture(
+    gpu: &Gpu,
+    k: &ChemKernels,
+    dt: &DeviceTransport,
+    work: &mut TransportWork,
+    t: &DevBuf<Scalar>,
+    y: &DevBuf<Scalar>,
+    mu: &mut DevBuf<Scalar>,
+    lambda: &mut DevBuf<Scalar>,
+    status: &mut DevBuf<i32>,
+    n: usize,
+) -> Result<()> {
+    let f = "chemMixtureTransport";
+    let ks = dt.n_species();
+    check_cells(f, n, work.n_cells())?;
+    check_layout(f, "t", t.len(), n)?;
+    check_layout(f, "y", y.len(), ks * n)?;
+    check_layout(f, "mu", mu.len(), n)?;
+    check_layout(f, "lambda", lambda.len(), n)?;
+    check_layout(f, "status", status.len(), n)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let kl = ks as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.transport)
+            .arg(t)
+            .arg(y)
+            .arg(&mut *mu)
+            .arg(&mut *lambda)
+            .arg(&mut *status)
+            .arg(&mut work.x)
+            .arg(&mut work.mu)
+            .arg(&mut work.lam)
+            .arg(&dt.tf)
+            .arg(&kl)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// The Lewis route's conductivity (SPEC-LIT §133.4): `lambda[c] =
+/// (mu cp)/Pr`, the device [`crate::chem::transport::prandtl_conductivity`]
+/// in double in every build, rounded once on the way out. Layouts: `mu[c]`,
+/// `cp[c]`, `lambda[c]`. `n == 0` launches nothing; no sync, no allocation
+/// (capturable).
+pub fn transport_prandtl(
+    gpu: &Gpu,
+    k: &ChemKernels,
+    l: &DeviceLewis,
+    mu: &DevBuf<Scalar>,
+    cp: &DevBuf<Scalar>,
+    lambda: &mut DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    let f = "chemPrandtlConductivity";
+    check_layout(f, "mu", mu.len(), n)?;
+    check_layout(f, "cp", cp.len(), n)?;
+    check_layout(f, "lambda", lambda.len(), n)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.prandtl)
+            .arg(mu)
+            .arg(cp)
+            .arg(&mut *lambda)
+            .arg(&l.pr)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// The Lewis route's mixture diffusivity (SPEC-LIT §133.4):
+/// `d[k*n+c] = lambda/((rho cp) le_k)`, the device
+/// [`crate::chem::transport::lewis_diffusivity`] in double in every build,
+/// rounded once on the way out. Layouts: `lambda[c]`, `rho[c]`, `cp[c]`,
+/// `d[k*n+c]`. `n == 0` launches nothing; no sync, no allocation
+/// (capturable).
+#[allow(clippy::too_many_arguments)]
+pub fn transport_lewis(
+    gpu: &Gpu,
+    k: &ChemKernels,
+    l: &DeviceLewis,
+    lambda: &DevBuf<Scalar>,
+    rho: &DevBuf<Scalar>,
+    cp: &DevBuf<Scalar>,
+    d: &mut DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    let f = "chemLewisDiffusivity";
+    let ks = l.n_species();
+    check_layout(f, "lambda", lambda.len(), n)?;
+    check_layout(f, "rho", rho.len(), n)?;
+    check_layout(f, "cp", cp.len(), n)?;
+    check_layout(f, "d", d.len(), ks * n)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let kl = ks as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.lewis)
+            .arg(lambda)
+            .arg(rho)
+            .arg(cp)
+            .arg(&mut *d)
+            .arg(&l.le)
+            .arg(&kl)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capture::capture_replays_bitwise;
+    use crate::chem::transport::read_table_iv_csv;
     use crate::chem::{P_ATM, ReactorOptions, SpeciesThermo, ThermoSet};
     use crate::field_ops::FieldKernels;
+
+    /// The ten TM-4513 transport records of reference/mcbride-gordon-reno1993/
+    /// table_IV.csv (SPEC-LIT §133.4).
+    const TABLE_IV: &str =
+        include_str!("../../../reference/mcbride-gordon-reno1993/table_IV.csv");
 
     /// The process's device, if the box has one: every GPU test returns
     /// early rather than failing.
@@ -954,6 +1209,24 @@ mod tests {
                 let work = ChemWork::new(&g, &dm, n)?;
                 let iw = IntegrateWork::new(&g, &dm, n)?;
                 let dr = DeviceReactor::new(&g, &ReactorOptions::default())?;
+                // CHR-08's transport on the same ten species: the
+                // table_IV records as a TransportSet, the Lewis route at
+                // Pr 0.7 with Le 1 everywhere, and the constant rho and
+                // cp fields its two extra kernels read.
+                let tset = TransportSet::for_thermo(
+                    &tm_set(),
+                    &read_table_iv_csv(TABLE_IV, "table_IV.csv")?,
+                )?;
+                let dtr = DeviceTransport::upload(&g, &tset)?;
+                let tw = TransportWork::new(&g, &dtr, n)?;
+                let dlewis = DeviceLewis::upload(&g, &Lewis::new(0.7, vec![1.0; ks])?)?;
+                let rho_t = g.upload(&vec![1.0 as Scalar; n])?;
+                let cp_t = g.upload(&vec![1000.0 as Scalar; n])?;
+                let mu_t = g.zeros::<Scalar>(n)?;
+                let lam_t = g.zeros::<Scalar>(n)?;
+                let lam_p = g.zeros::<Scalar>(n)?;
+                let d_t = g.zeros::<Scalar>(ks * n)?;
+                let st_t = g.zeros::<i32>(n)?;
                 Ok((
                     ck, fk, dm, work,
                     g.upload(&t0)?,
@@ -975,20 +1248,38 @@ mod tests {
                     g.upload(&hi0)?,
                     g.zeros::<i32>(n)?,
                     g.zeros::<i32>(3 * n)?,
+                    dtr,
+                    tw,
+                    dlewis,
+                    rho_t,
+                    cp_t,
+                    mu_t,
+                    lam_t,
+                    lam_p,
+                    d_t,
+                    st_t,
                 ))
             },
             |(ck, fk, dm, work, t, p, y, omega, st_p, state, pj, atol, f0, jac, st_j,
-              dr, iw, t2, p2, y2, h2, st2, cnt2)| {
+              dr, iw, t2, p2, y2, h2, st2, cnt2,
+              dtr, tw, dlewis, rho_t, cp_t, mu_t, lam_t, lam_p, d_t, st_t)| {
                 production_rates(&g, ck, dm, work, t, p, y, omega, st_p, n)?;
                 // The rates feed the next iteration's T, so a replay that
                 // skipped the chemistry cannot pass.
                 crate::field_ops::scale_field(&g, fk, omega, 1.0e-12, n)?;
                 crate::field_ops::add_field(&g, fk, t, omega, n)?;
                 reactor_jacobian(&g, ck, dm, work, state, pj, atol, f0, jac, st_j, n)?;
-                integrate_fields(&g, ck, dm, work, iw, dr, t2, p2, y2, h2, 1.0e-6, st2, cnt2, n)
+                integrate_fields(&g, ck, dm, work, iw, dr, t2, p2, y2, h2, 1.0e-6, st2, cnt2, n)?;
+                // CHR-08's transport on the step's ofscalar fields, after
+                // the chemistry: the Wilke mixture, then the Lewis route
+                // from the device mu and lambda.
+                transport_mixture(&g, ck, dtr, tw, t2, y2, mu_t, lam_t, st_t, n)?;
+                transport_prandtl(&g, ck, dlewis, mu_t, cp_t, lam_p, n)?;
+                transport_lewis(&g, ck, dlewis, lam_t, rho_t, cp_t, d_t, n)
             },
             |(_ck, _fk, _dm, _work, t, _p, _y, omega, st_p, _state, _pj, _atol, f0, jac, st_j,
-              _dr, _iw, t2, _p2, y2, h2, st2, cnt2)| {
+              _dr, _iw, t2, _p2, y2, h2, st2, cnt2,
+              _dtr, _tw, _dlewis, _rho_t, _cp_t, mu_t, lam_t, lam_p, d_t, st_t)| {
                 Ok(vec![
                     ("t", g.download(t)?),
                     ("omega", g.download(omega)?),
@@ -1001,6 +1292,11 @@ mod tests {
                     ("integrate h", g.download(h2)?.iter().map(|&v| v as Scalar).collect()),
                     ("integrate status", g.download(st2)?.iter().map(|&v| v as Scalar).collect()),
                     ("integrate counts", g.download(cnt2)?.iter().map(|&v| v as Scalar).collect()),
+                    ("transport mu", g.download(mu_t)?),
+                    ("transport lambda", g.download(lam_t)?),
+                    ("prandtl lambda", g.download(lam_p)?),
+                    ("lewis d", g.download(d_t)?),
+                    ("transport status", g.download(st_t)?.iter().map(|&v| v as Scalar).collect()),
                 ])
             },
         )

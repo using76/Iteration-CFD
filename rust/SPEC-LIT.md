@@ -43730,6 +43730,85 @@ Labels: (133.1)-(133.12).
 | FDS TRG | firemodels/fds `e14ec3f` | public domain | yes (kinetic theory) | — |
 | Rehm & Baum 1978; Majda & Sethian 1985 | 10.6028/jres.083.019; 10.1080/00102208508960376 | — | §25's sources | DOIs confirmed |
 
+### 133.7 The transport as built (CHR-08, `src/chem/transport.rs`, `cuda/chem.cu`, `src/chem/device.rs`)
+
+**The data.** Route (a)'s pure-species fits are TM-4513 Table IV, read from
+the report as NASA serves it (`ntrs.nasa.gov/citations/19940013151`, sha256
+`6b274fb921918f938b01d4525d8a7b7e8dff50b9990a496886db32354e2c4947`, the copy
+§128.6 read). Eq. (10) is printed on p. 5 as
+
+```
+ln eta, ln lambda, ln eta_ij = A ln T + B/T + C/T^2 + D                       (TM-4513 eq. (10))
+```
+
+with `eta` in micropoise and `lambda` in microwatts per centimetre kelvin,
+so `mu = 1e-7 e^(...)` Pa s and `lambda = 1e-4 e^(...)` W/(m K). Table III
+(p. 74) states the record format: up to three intervals each for `V` and
+`C`. The ten species of `table_II.csv` (N2, O2, CH4, CO2, H2O, CO, H2, OH,
+O, H) are transcribed from the page images of pp. 78-86 (the text layer is
+OCR) into `reference/mcbride-gordon-reno1993/table_IV.csv`, four rows per
+species, digit for digit. Every record is "V2C2 GORDON; NASA TM86885, OCT
+1984", on 300-1000-5000 K. Two checks were made on the transcription. Each
+number was matched against the OCR layer where the OCR is legible, and the
+six numbers it garbles were re-read from higher-resolution crops. Each
+species' two intervals also meet at 1000 K: the largest jump is 0.80 %
+(CH4's conductivity). CO's viscosity rows are printed equal to N2's, and
+are kept as printed.
+
+**Design choices (ORIGINAL).**
+
+* **T1, the interval.** The first fit in increasing order with `t_lo <= T
+  <= t_hi` is used, so 1000 K takes the lower fit. A `T` outside every
+  interval is refused by name (species, property, `T`, range). There is no
+  extrapolation, so a cell below **300 K** is refused (TM-4513's range),
+  and a case at 293.15 K is refused with it. Extending the range is a model
+  change and the user's decision.
+* **T2, the sums.** (133.8) and (133.9) run over the species with `Y_k !=
+  0` in index order: `den = X_i`, then `den += X_j φ_ij` (or `ψ_ij`) for
+  each present `j != i`, then `acc += X_i q_i / den`. A species with `Y_k =
+  0` is not evaluated and its range is not checked, as `cp_mass` does.
+  `X` is computed exactly as `ThermoSet::mole_fractions` computes it
+  (`transport_mixture_reduces_to_pure_species` holds the two bitwise).
+  `ψ_ij` multiplies the viscosity `φ_ij` of (133.10), as RP-1311 (5.6)
+  writes it.
+* **T3, the Lewis route** is two expressions, `λ = (mu cp)/Pr` and `D_m =
+  λ/((ρ cp) Le_m)`, with `Pr` and every `Le_m` refused unless finite and
+  above zero. The second also takes route (a)'s `λ`. With route (b) unbuilt,
+  it is the only source of `D_m`.
+* **T4, route (b)** (`binary_diffusion`, `mixture_diffusivities`) returns
+  `Error::Refused`, naming Neufeld, Janzen & Aziz (1972) as not read and
+  this section, and pointing to the Lewis route.
+* **T5, the device.** Three kernels compute in `ofchem` in both builds:
+  `chemMixtureTransport` (the host's `mixture_ty`, choice for choice),
+  `chemPrandtlConductivity` and `chemLewisDiffusivity`. `T`, `Y`, `ρ`,
+  `cp` and the outputs are `ofscalar`, rounded once. The records go up as
+  one flat array of 40 doubles per species: `W`, `n_v`, three viscosity
+  fits `(t_lo, t_hi, a, b, c, d)`, `n_c`, three conductivity fits, and a
+  pad. The field list is stated in both `device.rs` and `chem.cu`. The
+  per-cell statuses keep §132.9 D3's codes 2-4 in the host's order of
+  checks, and add **10**, a present species' `T` outside its transport
+  range; a refused cell writes NaN. `chem.cu` keeps nvcc's default
+  contraction (§132.9 D4). The SASS of every existing chemistry kernel is
+  unchanged, and only `chem.cubin` changed.
+
+**Gates, measured 2026-10-13 (both builds; the host is f64 in both).** The
+reference is Kadoya's eq. (3)/(5) at 0.1 MPa (§100.4's evaluation, constants
+from `table_7.csv` and `table_11.csv`) at 300-1500 K in 50 K steps, plus
+every printed Table 8/12 value from 300 to 1000 K.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `transport_air_viscosity_vs_kadoya` | (133.8) with (133.10), N2/O2 0.79/0.21 | 2 % | P | worst `9.16e-3`, the printed 1000 K value (equation: `9.04e-3` at 1000 K); `mu_mix(300 K) = 1.8505e-5` Pa s |
+| `transport_air_conductivity_vs_kadoya` | (133.9) with (133.11), the same | 5 % | P | worst `2.24e-2`, the printed 400 K value (equation: `2.23e-2` at 1250 K); `lambda_mix(300 K) = 2.5804e-2` W/(m K) |
+| `transport_route_b_named` | both route-(b) entries | refused by name | D | — |
+| `transport_table_iv_reads` | N2 and O2 at 300 and 1500 K against an independent float64 evaluation | 1e-9 relative | A | `2.4e-11` |
+| `transport_device_matches_host` | 4096 random cells (T 300-3000 K, ten species, every 10th with one Y zeroed): mu, lambda, the Prandtl lambda and the ten D_m | 1e-12 (f64 build); f32 build: host on the inputs as rounded, 1e-5 (D-F32-1) | P; R in f32 | f64 build `1.9e-15`; f32 build `5.9e-8` |
+| `transport_device_refuses_by_status` | statuses 2, 3, 4, 10 and the NaN outputs | exact | D | — |
+| `chem_device_replays_under_capture` | the three transport kernels appended to §132.9's capture row | bitwise | D | 10 kernel nodes, 3 replays bitwise over 16 buffers / 11200 values |
+
+No new equation labels. TM-4513 eq. (10) is quoted above under the report's
+own number.
+
 ---
 
 ## 134. Turbulence-chemistry interaction — EDM, EDC and PaSR, selected through `MixingRate`

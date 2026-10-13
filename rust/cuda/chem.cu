@@ -870,3 +870,205 @@ extern "C" __global__ void chemUnpackState
     for (int k = 0; k < K; ++k) y[k * n + c] = (ofscalar)state[k * n + c];
 }
 
+/*
+  ------------------------------------------------------------------------
+  The flat transport array of the three transport kernels (SPEC-LIT
+  133.4), uploaded once per DeviceTransport. The Rust twin of this layout
+  is flatten_transport in src/chem/device.rs; the two field lists must
+  stay identical. 40 doubles per species k at 40k:
+    [0]      W (kg/mol)
+    [1]      n_v (1..3, as a double)
+    [2..20)  three viscosity fits of 6 doubles (t_lo, t_hi, a, b, c, d),
+             the unused slots 0.0
+    [20]     n_c
+    [21..39) three conductivity fits of 6 doubles, the unused slots 0.0
+    [39]     0.0
+  The species count K is not in the array; the launches carry it as an
+  argument, like the array length they already know.
+  ------------------------------------------------------------------------
+*/
+
+//- TM-4513 eq. (10) on one fit f: ln q = a ln T + b/T + c/T^2 + d, in
+//  transport.rs TransportFit::ln_value's order, left to right. -
+OFGPU_DEV ofchem chemFitLn(const ofchem* f, ofchem t)
+{
+    return f[2] * log(t) + f[3] / t + f[4] / (t * t) + f[5];
+}
+
+//- The FIRST fit with t_lo <= T <= t_hi, -1 when T is outside every
+//  interval - transport.rs's interval choice. n is the fit count. -
+OFGPU_DEV int chemFitPick(const ofchem* fits, int n, ofchem t)
+{
+    for (int i = 0; i < n; ++i)
+    {
+        const ofchem* f = fits + 6 * i;
+        if (f[0] <= t && t <= f[1]) return i;
+    }
+    return -1;
+}
+
+//- chemMixtureTransport: the Wilke mixture viscosity (133.8) with (133.10)
+//  and the mixture conductivity (133.9) with (133.10) and (133.11), from
+//  the TM-4513 eq. (10) fits of route (a) - transport.rs's mixture_ty of
+//  SPEC-LIT 133.4, choice for choice and in the host's operation order.
+//  Status, in the host's order of checks: 2 T not finite or not above 0,
+//  3 a mass fraction negative or not finite, 4 no species present, 10 a
+//  present species' T outside its viscosity or conductivity range. A
+//  refused cell writes NaN to its mu and lambda. The sums run over the
+//  present species (y != 0) in index order exactly as the host: den = x_i,
+//  then j != i with y_j != 0, den += x_j phi_ij, then acc += x_i mu_i/den;
+//  the conductivity's psi (133.11) rides on the same viscosity phi
+//  (133.10), as the host calls it. -
+extern "C" __global__ void chemMixtureTransport
+(
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ y,
+    ofscalar* __restrict__ mu,
+    ofscalar* __restrict__ lam,
+    int* __restrict__ status,
+    ofchem* __restrict__ x,
+    ofchem* __restrict__ muv,
+    ofchem* __restrict__ lamv,
+    const ofchem* __restrict__ tf,
+    const int K,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    int st = 0;
+    const ofscalar t_c = t[c];
+    if (!isfinite(t_c) || t_c <= (ofscalar)0) st = 2;
+    if (st == 0)
+    {
+        for (int k = 0; k < K; ++k)
+        {
+            const ofscalar v = y[k * n + c];
+            if (!isfinite(v) || v < (ofscalar)0) { st = 3; break; }
+        }
+    }
+    ofchem s = 0.0;
+    if (st == 0)
+    {
+        for (int k = 0; k < K; ++k) s += (ofchem)y[k * n + c] / tf[40 * k];
+        if (isnan(s) || s <= 0.0) st = 4;
+    }
+    if (st == 0)
+    {
+        //- mole_fractions (x_k = y_k (1/s) / W_k), and the pure-species
+        //  values of every present species, whose eq. (10) range is
+        //  checked on the FIRST fitting interval -
+        const ofchem t_d = (ofchem)t_c;
+        const ofchem w = 1.0 / s;
+        for (int k = 0; k < K; ++k)
+        {
+            const ofchem* rec = tf + 40 * k;
+            x[k * n + c] = (ofchem)y[k * n + c] * w / rec[0];
+            if ((ofchem)y[k * n + c] == 0.0) continue;
+            const int iv = chemFitPick(rec + 2, (int)rec[1], t_d);
+            const int ic = chemFitPick(rec + 21, (int)rec[20], t_d);
+            if (iv < 0 || ic < 0) { st = 10; break; }
+            muv[k * n + c] = exp(chemFitLn(rec + 2 + 6 * iv, t_d)) * 1.0e-7;
+            lamv[k * n + c] = exp(chemFitLn(rec + 21 + 6 * ic, t_d)) * 1.0e-4;
+        }
+    }
+    if (st == 0)
+    {
+        //- (133.8): mu_mix = sum_i x_i mu_i / (x_i + sum_{j!=i} x_j phi_ij) -
+        ofchem acc = 0.0;
+        for (int i = 0; i < K; ++i)
+        {
+            if ((ofchem)y[i * n + c] == 0.0) continue;
+            const ofchem xi = x[i * n + c];
+            const ofchem mui = muv[i * n + c];
+            const ofchem wi = tf[40 * i];
+            ofchem den = xi;
+            for (int j = 0; j < K; ++j)
+            {
+                if (j == i || (ofchem)y[j * n + c] == 0.0) continue;
+                const ofchem wj = tf[40 * j];
+                const ofchem r = sqrt(mui / muv[j * n + c]) * pow(wj / wi, 0.25);
+                const ofchem a = 1.0 + r;
+                const ofchem phi = 0.25 * a * a * sqrt(2.0 * wj / (wi + wj));
+                den += x[j * n + c] * phi;
+            }
+            acc += xi * mui / den;
+        }
+        mu[c] = (ofscalar)acc;
+    }
+    if (st == 0)
+    {
+        //- (133.9) with (133.11): psi_ij = phi_ij [1 + 2.41 (W_i-W_j)
+        //  (W_i-0.142 W_j)/(W_i+W_j)^2] on the same viscosity phi -
+        ofchem acc = 0.0;
+        for (int i = 0; i < K; ++i)
+        {
+            if ((ofchem)y[i * n + c] == 0.0) continue;
+            const ofchem xi = x[i * n + c];
+            const ofchem mui = muv[i * n + c];
+            const ofchem lami = lamv[i * n + c];
+            const ofchem wi = tf[40 * i];
+            ofchem den = xi;
+            for (int j = 0; j < K; ++j)
+            {
+                if (j == i || (ofchem)y[j * n + c] == 0.0) continue;
+                const ofchem wj = tf[40 * j];
+                const ofchem r = sqrt(mui / muv[j * n + c]) * pow(wj / wi, 0.25);
+                const ofchem a = 1.0 + r;
+                const ofchem phi = 0.25 * a * a * sqrt(2.0 * wj / (wi + wj));
+                const ofchem m = (wi - wj) * (wi - 0.142 * wj)
+                    / ((wi + wj) * (wi + wj));
+                den += x[j * n + c] * (phi * (1.0 + 2.41 * m));
+            }
+            acc += xi * lami / den;
+        }
+        lam[c] = (ofscalar)acc;
+    }
+    if (st != 0)
+    {
+        mu[c] = (ofscalar)nan("");
+        lam[c] = (ofscalar)nan("");
+    }
+    status[c] = st;
+}
+
+//- chemPrandtlConductivity: the Lewis route's lambda = mu cp / Pr (SPEC-LIT
+//  133.4), (mu * cp) / pr exactly as the host computes it, in double in
+//  both builds and rounded once on the way out. -
+extern "C" __global__ void chemPrandtlConductivity
+(
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ cp,
+    ofscalar* __restrict__ lam,
+    const ofchem pr,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    lam[c] = (ofscalar)(((ofchem)mu[c] * (ofchem)cp[c]) / pr);
+}
+
+//- chemLewisDiffusivity: the Lewis route's D_m = lambda / (rho cp Le_m)
+//  (SPEC-LIT 133.4), lambda / ((rho * cp) * le_k) exactly as the host
+//  computes it, in double in both builds, rounded once on the way out. -
+extern "C" __global__ void chemLewisDiffusivity
+(
+    const ofscalar* __restrict__ lam,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ cp,
+    ofscalar* __restrict__ d,
+    const ofchem* __restrict__ le,
+    const int K,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    for (int k = 0; k < K; ++k)
+    {
+        d[k * n + c] = (ofscalar)((ofchem)lam[c]
+            / (((ofchem)rho[c] * (ofchem)cp[c]) * le[k]));
+    }
+}
+
