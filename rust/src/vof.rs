@@ -958,6 +958,22 @@ impl<'m> Vof<'m> {
         Ok(())
     }
 
+    /// SPEC-LIT 120.7's `rho_f`: the mixture density of every boundary face,
+    /// from the face's `alpha` - the value the solver's own
+    /// [`Self::update_properties`] writes there. `alpha`'s boundary
+    /// conditions are evaluated first, so a case whose `alpha` file carries
+    /// anything but `zeroGradient` still reads the faces it will be solved
+    /// with. The setup of a `p_rgh` carrying one of the buoyant pressure
+    /// names calls this and hands the slice to
+    /// `field_setup::PrghInputs::rho_b` - call it after `alpha` and `U` are
+    /// set up and before [`Self::initialise`].
+    pub fn boundary_density(&mut self, gpu: &Gpu) -> Result<Vec<Scalar>> {
+        let m = self.m;
+        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.alpha, m)?;
+        self.update_properties(gpu)?;
+        gpu.download(&self.rho.bf)
+    }
+
     /// `rho_phi = rho2 phi + (rho1 - rho2) alpha_phi` (§20.3).
     pub fn update_rho_phi(&mut self, gpu: &Gpu) -> Result<()> {
         let m = self.m;

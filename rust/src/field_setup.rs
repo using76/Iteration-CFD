@@ -55,6 +55,10 @@
 //! | `pressureInletOutletVelocity` | flux-switched | `n (n.U)` | 0 |
 //! | `fixedFluxPressure` | 0 | 0 | the gradient that carries the prescribed flux |
 //! | `totalPressure` | 1 | `p0 - \|U\|^2/2` on inflow, `p0` on outflow | 0 |
+//! | `prghPressure` | 1 | `p - rho_f (g . x_f)` (SPEC-LIT 120.7) | 0 |
+//! | `prghTotalPressure` | 1 | `p0 - (1/2) rho_f \|U_f\|^2 - rho_f gh` on inflow, `p0 - rho_f gh` on outflow | 0 |
+//! | `prghTotalHydrostaticPressure` | 1 | `ph_rgh,f - (1/2) rho_f \|U_f\|^2` on inflow, `ph_rgh,f` on outflow | 0 |
+//! | `uniformDensityHydrostaticPressure` | 1 | `p_ref + rho_ref g . (x_f - x_ref) - rho_f gh` | 0 |
 //! | `movingWallVelocity` | 1 | the wall velocity, normal component removed | 0 |
 //! | `flowRateInletVelocity` | 1 | `-n Q/A` | 0 |
 //!
@@ -71,6 +75,11 @@
 //! paragraph, not a comment in a kernel, is where that is recorded. Making
 //! them dynamic is a per-iteration kernel over the boundary and nothing in the
 //! design here stands in its way.
+//!
+//! SPEC-LIT 120.7's four buoyant pressure names are derived conditions in the
+//! same sense: evaluated once, here, from the case's initial fields - `rho_f`
+//! from the initial `alpha` (or 1, the kinematic form), `U_f` from the initial
+//! velocity - through [`BcInputs::prgh`], and never refreshed.
 //!
 //! `symmetry`, `empty` and `cyclic` are not points on that line at all - they
 //! are topology, and the kernels branch on [`BcKind`] for them. That is why
@@ -152,6 +161,22 @@ impl<T: Copy + Default> BoundaryTriple<T> {
 //  What a derived condition needs from the rest of the case
 // ==========================================================================
 
+/// SPEC-LIT 120.7: what the buoyant pressure family is evaluated from.
+///
+/// All slices by flattened boundary face.
+#[derive(Default, Clone, Copy)]
+pub struct PrghInputs<'a> {
+    /// The solver's own gravity.
+    pub g: Vec3,
+    /// Some: the absolute form (VOF), the face's mixture density. None: the
+    /// kinematic form, `rho_f = 1`.
+    pub rho_b: Option<&'a [Scalar]>,
+    /// The face velocity, for (120.7c)/(120.7d).
+    pub u_b: Option<&'a [Vec3]>,
+    /// The hydrostatic `p_rgh`, for (120.7d).
+    pub ph_rgh_b: Option<&'a [Scalar]>,
+}
+
 /// The other fields a boundary condition may be defined in terms of.
 ///
 /// `turbulentIntensityKineticEnergyInlet` is `3/2 (I |U|)^2` and cannot be
@@ -203,6 +228,15 @@ pub struct BcInputs<'a> {
     /// nothing to refresh it would freeze the face at its first value under
     /// a name that promises a patch integral (SPEC-LIT 13.4).
     pub patch_means: bool,
+    /// SPEC-LIT 120.7: what the four buoyant pressure names are evaluated
+    /// from. `None` - the default, which every setup that solves no `p_rgh`
+    /// passes - refuses the four names: a solver whose pressure is not the
+    /// variable these conditions are written in would read a static `p` as a
+    /// `p_rgh` and shift the level by `rho g . x` (SPEC-LIT 13.4). NOT routed
+    /// through [`Self::u_b`]: a plain `totalPressure` must stay unreadable in
+    /// kinematic units inside a VOF case, and the two families keep their own
+    /// densities.
+    pub prgh: Option<PrghInputs<'a>>,
 }
 
 impl<'a> BcInputs<'a> {
@@ -222,6 +256,11 @@ struct PatchAux<'a> {
     /// the condition evaluated at a coordinate - `fixedProfile` (SPEC-LIT
     /// 120.1) - and for (120.3g)'s `a x (x_f - origin)`.
     bc_f: Vec<DVec3>,
+    /// The same face centres as STORED - LOCAL under `single` (SPEC-LIT
+    /// 118.7) - for (120.7a)'s `gh = g . (x_f - O)`: the solver's own body
+    /// force reads `m.b_cf`, so a `p_rgh` level written with world
+    /// coordinates would differ from it by `rho g . O` (SPEC-LIT 120.7).
+    bc_f_local: Vec<DVec3>,
     /// `[n]` the boundary delta coefficient of SPEC-LIT 2.4, the f64
     /// `geom64` value cast ONCE into `Scalar`, for (120.3a)'s `g/Delta_b`.
     delta_b: Vec<Scalar>,
@@ -262,6 +301,12 @@ impl<'a> PatchAux<'a> {
         let bc_f = (0..p.size)
             .map(|i| m.world64(cf.b_cf.get(p.start + i).copied().unwrap_or_default()))
             .collect();
+        // SPEC-LIT 120.7: the same centres as stored, unshifted - (120.7a)'s
+        // `gh` is taken on the LOCAL coordinate, the one the solver's own
+        // body force reads.
+        let bc_f_local = (0..p.size)
+            .map(|i| cf.b_cf.get(p.start + i).copied().unwrap_or_default())
+            .collect();
         // (120.3a)'s Delta_b and (120.3c)/(120.3f)/(120.3g)'s normals, both
         // from the f64 `geom64` view (SPEC-LIT 120.3), cast once - `.get`
         // again, so a synthetic test mesh with no stored geometry still
@@ -285,6 +330,7 @@ impl<'a> PatchAux<'a> {
             normal,
             total_area,
             bc_f,
+            bc_f_local,
             delta_b,
             normal64,
             at: p.start,
@@ -313,6 +359,22 @@ impl<'a> PatchAux<'a> {
             return phi.get(self.at + i).copied().unwrap_or(0.0) < 0.0;
         }
         if let Some(u) = self.inputs.u_b {
+            let un = u.get(self.at + i).copied().unwrap_or_default();
+            return un.dot(self.normal[i]) < 0.0;
+        }
+        false
+    }
+
+    /// The same test for the prgh total forms (SPEC-LIT 120.7): `phi_b[f] < 0`
+    /// where the flux is given, else [`PrghInputs::u_b`]'s `u_b[f] . n_f < 0`.
+    /// The drivers hand the total forms their velocity HERE - not in
+    /// [`BcInputs::u_b`], which the plain `totalPressure` alone keeps reading,
+    /// so [`Self::is_inflow`] would judge every face outflow in them.
+    fn is_inflow_prgh(&self, i: usize, prgh: &PrghInputs<'_>) -> bool {
+        if let Some(phi) = self.inputs.phi_b {
+            return phi.get(self.at + i).copied().unwrap_or(0.0) < 0.0;
+        }
+        if let Some(u) = prgh.u_b {
             let un = u.get(self.at + i).copied().unwrap_or_default();
             return un.dot(self.normal[i]) < 0.0;
         }
@@ -720,6 +782,197 @@ fn scalar_timed_seed(
     })
 }
 
+// ==========================================================================
+//  The buoyant pressure family (SPEC-LIT 120.7)
+// ==========================================================================
+
+/// The widened entries one buoyant pressure face value is built from, read
+/// once per patch (SPEC-LIT 120.7): `p` for (120.7b), `p0` for (120.7c), and
+/// `rhoRef`/`pRefValue`/`pRefPoint` for (120.7e). The gravity itself rides
+/// [`PrghInputs::g`], the solver's own.
+struct PrghEntry {
+    /// (120.7b)'s `p` or (120.7c)'s `p0`.
+    p: f64,
+    /// (120.7e)'s `pRefValue`.
+    pref: f64,
+    /// (120.7e)'s `rhoRef`.
+    rho_ref: f64,
+    /// (120.7e)'s `pRefPoint`, a WORLD position - only its difference with
+    /// the world face centre enters.
+    x_ref: DVec3,
+}
+
+fn prgh_missing(name: &str, field: &str, patch: &str, key: &str) -> Error {
+    Error::Field {
+        field: field.to_string(),
+        msg: format!(
+            "{field}: boundaryField/{patch}/{key}: `{name}` needs a `{key}` \
+             entry and the patch has none (SPEC-LIT 120.7)"
+        ),
+    }
+}
+
+/// The one refusal every face of the patch would repeat, written once: what
+/// the caller's [`PrghInputs`] must carry for this name, and the `rho` /
+/// `ph_rgh` entries naming the solver's own fields.
+fn prgh_inputs<'a>(
+    spec: &PatchFieldSpec,
+    name: &str,
+    patch: &str,
+    field: &str,
+    aux: &'a PatchAux<'a>,
+) -> Result<&'a PrghInputs<'a>> {
+    let prgh = aux.inputs.prgh.as_ref().ok_or_else(|| Error::Field {
+        field: field.to_string(),
+        msg: format!(
+            "{field}: boundaryField/{patch}: `{name}` is refused - it is \
+             written in the solved `p_rgh`, and this setup was given \
+             BcInputs::prgh = None, so there is no `p_rgh` to write it in \
+             (SPEC-LIT 120.7)"
+        ),
+    })?;
+    let total = matches!(name, "prghTotalPressure" | "prghTotalHydrostaticPressure");
+    if total && prgh.u_b.is_none() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}: `{name}` is defined in \
+                 terms of `U`, and this setup was given no `U` to evaluate \
+                 it from (SPEC-LIT 120.7)"
+            ),
+        });
+    }
+    if name == "prghTotalHydrostaticPressure" && prgh.ph_rgh_b.is_none() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}: `{name}` is defined in \
+                 terms of `ph_rgh`, and this setup was given no `ph_rgh` to \
+                 evaluate it from (SPEC-LIT 120.7)"
+            ),
+        });
+    }
+    // The density and the hydrostatic field are the solver's own: an entry
+    // naming any other field is a substitution SPEC-LIT 13.4 forbids.
+    for (key, wanted) in [("rho", "rho"), ("ph_rgh", "ph_rgh")] {
+        if let Some(raw) = spec.extra.get(key) {
+            let given = raw.split_whitespace().next_back().unwrap_or(raw);
+            if given != wanted {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}/{key}: `{name}` reads \
+                         the solver's own `{wanted}`, and the patch names \
+                         `{given}` (SPEC-LIT 120.7)"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(prgh)
+}
+
+/// The widened entries one buoyant pressure patch reads, per name (SPEC-LIT
+/// 120.7): every `Scalar` entry widened once, so the per-face arithmetic is
+/// f64 end to end.
+fn prgh_entry(spec: &PatchFieldSpec, name: &str, patch: &str, field: &str) -> Result<PrghEntry> {
+    let number = |key: &str| -> Result<f64> {
+        match spec.number(key, patch)? {
+            Some(v) => Ok(v as f64),
+            None => Err(prgh_missing(name, field, patch, key)),
+        }
+    };
+    Ok(match name {
+        "prghPressure" => PrghEntry {
+            p: number("p")?,
+            pref: 0.0,
+            rho_ref: 0.0,
+            x_ref: DVec3::ZERO,
+        },
+        "prghTotalPressure" => PrghEntry {
+            p: number("p0")?,
+            pref: 0.0,
+            rho_ref: 0.0,
+            x_ref: DVec3::ZERO,
+        },
+        // (120.7d) reads no entry of its own: `ph_rgh,f` is the caller's.
+        "prghTotalHydrostaticPressure" => PrghEntry {
+            p: 0.0,
+            pref: 0.0,
+            rho_ref: 0.0,
+            x_ref: DVec3::ZERO,
+        },
+        _ => PrghEntry {
+            p: 0.0,
+            pref: number("pRefValue")?,
+            rho_ref: number("rhoRef")?,
+            x_ref: match spec.extra.get("pRefPoint") {
+                Some(_) => {
+                    let v = required_vec3(spec, "pRefPoint", patch, field, name)?;
+                    DVec3::new(v.x as f64, v.y as f64, v.z as f64)
+                }
+                None => return Err(prgh_missing(name, field, patch, "pRefPoint")),
+            },
+        },
+    })
+}
+
+/// (120.7a)-(120.7e) on face `i`, in the operation order SPEC-LIT 120.7
+/// writes them: f64 end to end, the `Scalar` inputs widened once, the result
+/// rounded once by the caller's cast.
+fn prgh_face_value(name: &str, aux: &PatchAux<'_>, i: usize, e: &PrghEntry, prgh: &PrghInputs<'_>) -> f64 {
+    let at = aux.at + i;
+    // (120.7a) on the STORED (local) centre: the solver's own body force
+    // reads `m.b_cf`, so the level is written against the same origin.
+    let x = aux.bc_f_local[i];
+    let g = prgh.g;
+    let (gx, gy, gz) = (g.x as f64, g.y as f64, g.z as f64);
+    let gh = gx * x.x + gy * x.y + gz * x.z;
+    let r = prgh.rho_b.map_or(1.0, |rho| rho[at] as f64);
+    // The Bernoulli term `(0.5 rho_f) |U_f|^2` of the two total forms.
+    let dynamic = || {
+        let u = prgh.u_b.map_or(Vec3::ZERO, |u| u[at]);
+        let u2 = u.x as f64 * u.x as f64 + u.y as f64 * u.y as f64 + u.z as f64 * u.z as f64;
+        (0.5 * r) * u2
+    };
+    match name {
+        // (120.7b): p_rgh = p - rho_f gh_f.
+        "prghPressure" => e.p - r * gh,
+        // (120.7c): inflow p0 - (1/2) rho_f |U|^2 - rho_f gh; outflow the
+        // same without the dynamic term - the fluid leaving carries its
+        // kinetic energy out with it. The inflow test reads
+        // [`PrghInputs::u_b`], the velocity the caller actually handed the
+        // family.
+        "prghTotalPressure" => {
+            if aux.is_inflow_prgh(i, prgh) {
+                (e.p - dynamic()) - r * gh
+            } else {
+                e.p - r * gh
+            }
+        }
+        // (120.7d): the caller's hydrostatic `ph_rgh`, less the dynamic term
+        // on inflow - the same [`PrghInputs::u_b`] test.
+        "prghTotalHydrostaticPressure" => {
+            let ph = prgh.ph_rgh_b.map_or(0.0, |ph| ph[at] as f64);
+            if aux.is_inflow_prgh(i, prgh) {
+                ph - dynamic()
+            } else {
+                ph
+            }
+        }
+        // (120.7e): both `x_f` and `x_ref` are WORLD positions - only their
+        // difference enters.
+        _ => {
+            let xw = aux.bc_f[i];
+            let dx = xw.x - e.x_ref.x;
+            let dy = xw.y - e.x_ref.y;
+            let dz = xw.z - e.x_ref.z;
+            let gdr = gx * dx + gy * dy + gz * dz;
+            (e.pref + e.rho_ref * gdr) - r * gh
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scalar_patch(
     spec: Option<&PatchFieldSpec>,
@@ -885,6 +1138,34 @@ fn scalar_patch(
             target,
             fraction: fraction as Scalar,
         });
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.7: the buoyant pressure family, before the static arms
+    // for the same reason - `from_name` would silently ride `FixedValue` /
+    // `TotalPressure` with a face value the static arm cannot compute. A
+    // section-4 triple with `fr = 1` and `ref_grad = 0`, evaluated ONCE from
+    // the case's initial fields through `BcInputs::prgh` - see the module
+    // header on when the derived conditions are evaluated.
+    if matches!(
+        spec.type_name.as_str(),
+        "prghPressure"
+            | "prghTotalPressure"
+            | "prghTotalHydrostaticPressure"
+            | "uniformDensityHydrostaticPressure"
+    ) {
+        let name = spec.type_name.as_str();
+        let prgh = prgh_inputs(spec, name, patch, field, aux)?;
+        let e = prgh_entry(spec, name, patch, field)?;
+        let kind = BcKind::from_name(name, field, patch)?;
+        for i in 0..n {
+            let rv = prgh_face_value(name, aux, i, &e, prgh) as Scalar;
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = rv;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = rv;
+        }
         return Ok(());
     }
 
@@ -2804,6 +3085,27 @@ fn vector_patch(
             fraction: fraction as Scalar,
         });
         return Ok(());
+    }
+
+    // SPEC-LIT 120.7: the buoyant pressure family is a SCALAR condition - it
+    // writes the solved `p_rgh`. Two of the four names map to `FixedValue`
+    // and would slip past the kind arms below, so the check is on the NAME,
+    // before any kind is derived from it.
+    if matches!(
+        spec.type_name.as_str(),
+        "prghPressure"
+            | "prghTotalPressure"
+            | "prghTotalHydrostaticPressure"
+            | "uniformDensityHydrostaticPressure"
+    ) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{patch}: `{}` is a scalar condition and {field} is a vector \
+                 field (SPEC-LIT 120.7)",
+                spec.type_name
+            ),
+        });
     }
 
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;

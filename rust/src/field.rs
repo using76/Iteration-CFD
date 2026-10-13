@@ -607,6 +607,12 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "fixedFluxExtrapolatedPressure",
     "outletMappedUniformInlet",
     "matchedFlowRateOutletVelocity",
+    // SPEC-LIT 120.7: the buoyant pressure family - a static pressure at a
+    // patch, written in the solved `p_rgh` from the caller's `PrghInputs`.
+    "prghPressure",
+    "prghTotalPressure",
+    "prghTotalHydrostaticPressure",
+    "uniformDensityHydrostaticPressure",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -915,6 +921,13 @@ impl BcKind {
             "fixedFluxExtrapolatedPressure" => Self::FixedFluxExtrapolatedPressure,
             "outletMappedUniformInlet" => Self::OutletMappedUniformInlet,
             "matchedFlowRateOutletVelocity" => Self::MatchedFlowRateOutletVelocity,
+
+            // SPEC-LIT 120.7: the buoyant pressure family. A static pressure
+            // given at a patch, written in the SOLVED `p_rgh` by the setup's
+            // 120.7 block - the two plain names ARE a fixedValue, and the two
+            // total forms ride `TotalPressure`, as `totalPressure` does.
+            "prghPressure" | "uniformDensityHydrostaticPressure" => Self::FixedValue,
+            "prghTotalPressure" | "prghTotalHydrostaticPressure" => Self::TotalPressure,
 
             // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
             // function. `nutUWallFunction` already applies Spalding's single
@@ -1877,7 +1890,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [75, 3, 32, 10, 10], "the per-status counts");
+        assert_eq!(counts, [79, 3, 28, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

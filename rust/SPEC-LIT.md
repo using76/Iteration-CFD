@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 75 names of
+accepts it on the field the row is asked on, and it is one of the 79 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39103,13 +39103,13 @@ row, row for row.
 | outlet | `fixedFluxExtrapolatedPressure` | implemented | — | — | (120.6f), the cell's pressure gradient carried onto the face |
 | outlet | `outletMappedUniformInlet` | implemented | — | — | (120.6c), `fraction` times the outlet's mixing-cup mean plus `offset` |
 | outlet | `matchedFlowRateOutletVelocity` | implemented | — | — | (120.6e), the cell velocity plus one normal shift carrying the inlet's rate |
+| buoyant pressure | `prghPressure` | implemented | — | — | (120.7b), the static `p` less `rho gh` of the face |
+| buoyant pressure | `prghTotalPressure` | implemented | — | — | (120.7c), `p0` less the inflow dynamic pressure and `rho gh` |
+| buoyant pressure | `prghTotalHydrostaticPressure` | implemented | — | — | (120.7d), the caller's hydrostatic `ph_rgh` less the inflow dynamic pressure; API only |
+| buoyant pressure | `uniformDensityHydrostaticPressure` | implemented | — | — | (120.7e), `pRefValue + rhoRef g.(x - pRefPoint)` less `rho gh` |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
-| buoyant pressure | `prghPressure` | planned | BC-11 | — | — |
-| buoyant pressure | `prghTotalPressure` | planned | BC-11 | — | — |
-| buoyant pressure | `prghTotalHydrostaticPressure` | planned | BC-11 | — | — |
-| buoyant pressure | `uniformDensityHydrostaticPressure` | planned | BC-11 | — | — |
 | thermal | `externalWallHeatFluxTemperature` | planned | BC-12 | — | — |
 | thermal | `turbulentHeatFluxTemperature` | planned | BC-12 | — | — |
 | thermal | `lumpedMassTemperature` | planned | BC-12 | — | — |
@@ -40076,6 +40076,156 @@ two rank mismatches, an unknown and a self-naming patch, a missing
 * **Ferziger, J. H. & Peric, M.** *Computational Methods for Fluid
   Dynamics*, 3rd ed., Springer (2002) - the boundary pressure extrapolated
   from the interior.
+
+No GPL-licensed source was consulted.
+
+### 120.7 The buoyant pressure family - a static pressure given at a patch, carried onto the solved `p_rgh`
+
+BC-11 implements the four buoyant-pressure names of the §120 table. The names
+are taken from the user guides of §120 by name only; every equation below is
+the hydrostatic decomposition of §20.5 and §9 applied at a boundary face, or
+is ours (*DESIGN*). All four are fixed values of the SOLVED pressure - `fr =
+1`, `refGrad = 0`, a §4 triple with no new evaluation branch and no kernel:
+`prghPressure` and `uniformDensityHydrostaticPressure` ride
+`BcKind::FixedValue`, and the two total forms ride `BcKind::TotalPressure`
+(14), as `totalPressure` does.
+
+**The solved pressure.** A case gives a STATIC pressure `p` at the patch; the
+solvers do not solve for `p`. §20.5 solves for `p_rgh = p - rho (g . x)`, and
+the face value has to be written in that variable. There are two forms:
+
+* *absolute* (`ofgpu-vof`, §20): `p` and `p_rgh` in Pa, and `rho_f` is the
+  mixture density of the boundary face, `rho = alpha rho_1 + (1 - alpha)
+  rho_2` of §20.3 evaluated from the face's `alpha` - the value the solver's
+  own `update_properties` writes on that face.
+* *kinematic* (`ofgpu-buoyant`, §9): the momentum equation carries `-grad p
+  + g (rho/rho_ref - 1)` with `rho/rho_ref = T_ref/T`, and equating it with
+  `(-grad p_s + rho g)/rho_ref` gives `grad p = grad p_s/rho_ref - g`, i.e.
+  `p = (p_s - rho_ref (g . x))/rho_ref` up to a constant the boundary fixes.
+  The solved `p` is `p_rgh` with the REFERENCE density, divided by it. Every
+  pressure and density entry of the four conditions is read divided by
+  `rho_ref` (the convention of a kinematic case), and `rho_f = 1` in every
+  equation below - whatever the face temperature, because the local density
+  enters only the buoyancy term.
+
+With `x_f` the face centre, `O` the mesh's local origin (§118.7; `O = 0` in
+the f64 build), `U_f` the face velocity and `|U_f|^2 = U_x^2 + U_y^2 + U_z^2`:
+
+```
+gh_f    = g . (x_f - O)                                                   (120.7a)
+p_rgh,f = p - rho_f gh_f                                    prghPressure  (120.7b)
+p_rgh,f = p0 - (1/2) rho_f |U_f|^2 - rho_f gh_f   inflow    prghTotalPressure      (120.7c)
+p_rgh,f = p0 - rho_f gh_f                         outflow
+p_rgh,f = ph_rgh,f - (1/2) rho_f |U_f|^2          inflow    prghTotalHydrostaticPressure (120.7d)
+p_rgh,f = ph_rgh,f                                outflow
+p_rgh,f = p_ref + rho_ref g . (x_f - x_ref) - rho_f gh_f   uniformDensityHydrostaticPressure (120.7e)
+```
+
+(120.7a) is taken on the STORED coordinate because the solver's own body
+force is: `vofBodyForceFluxBoundary` reads `m.b_cf`, which is local under `single`
+(§118.7), so a `p_rgh` level written with world coordinates would differ
+from the solver's by `rho g . O`. In (120.7e) both `x_f` and `x_ref`
+(`pRefPoint`) are world positions - only their difference enters. The
+entries: `p` for (120.7b) and `p0` for (120.7c), each a uniform number;
+`rhoRef`, `pRefValue` and `pRefPoint` (a vector) for (120.7e). `ph_rgh,f` is
+the hydrostatic `p_rgh` of a reference state at rest, on every face of the
+patch; this crate solves no such field, so it is an input the caller passes
+(below). Inflow is the `totalPressure` test of `field_setup`: `phi_b < 0`
+where a boundary flux is given, else `U_f . n_f < 0` - the dynamic term is
+the Bernoulli pressure of the fluid coming in, and fluid leaving carries its
+kinetic energy out with it.
+
+*Check (the gate's column).* A column at rest with uniform `rho`,
+`prghPressure` at its top `z_t` with `p = p_0` and `g = (0, 0, -|g|)`:
+(120.7b) gives `p_rgh = p_0 + rho |g| z_t` on the top, the interior at rest
+holds it uniform, and `p = p_rgh + rho (g . x) = p_0 + rho |g| (z_t - z)` -
+the hydrostatic column `p = p_0 + rho g (h_ref - z)` with `h_ref = z_t`. On
+a VERTICAL patch, (120.7e) with `rhoRef = rho` is uniform in `p_rgh` and
+leaves the column at rest, where a uniform static `p` through (120.7b) is
+not, and drives a flow - the control row of the gate.
+
+**Evaluation** *(DESIGN - ours)*. All arithmetic is f64 from the
+`Scalar`-cast inputs and the f64 `geom64` face centres, rounded once into
+`Scalar` (§118.2); the operation order is the order the equations are
+written in, left to right, `g . d = g_x d_x + g_y d_y + g_z d_z`. The four
+are DERIVED conditions in the sense of the `field_setup` module header:
+evaluated once, at setup, from the case's initial fields (`rho_f` from the
+initial `alpha`, `U_f` from the initial velocity), as `totalPressure` is.
+That is exact while the face's phase and velocity do not change - the open
+top of a tank in the light phase, a side opening in one fluid. A face whose
+`alpha` changes during the run keeps its initial `rho_f`; the per-step
+refresh belongs to the VOF family unit (BC-21), which depends on this one.
+
+**Inputs and refusals.** `BcInputs::prgh: Option<PrghInputs>` carries
+`g` (the solver's own gravity), `rho_b` (per flattened boundary face, the
+absolute form; `None` is the kinematic form), `u_b` (the face velocity for
+the two total forms) and `ph_rgh_b` (for (120.7d)). Refused by name, each
+message naming the condition and "SPEC-LIT 120.7": any of the four where
+`BcInputs::prgh` is `None` (a solver with no `p_rgh` - its pressure is not
+the variable these conditions are written in); (120.7c)/(120.7d) without
+`u_b`; (120.7d) without `ph_rgh_b`; any of the four on a vector field; a
+missing `p`, `p0`, `rhoRef`, `pRefValue` or `pRefPoint`; a `rho` entry
+naming any field but `rho`, and a `ph_rgh` entry naming any field but
+`ph_rgh` (the density and the hydrostatic field are the solver's own).
+`ofgpu-buoyant` passes the kinematic form, `ofgpu-vof` the absolute form
+with `rho_b` from `Vof::boundary_density`; both pass `ph_rgh_b = None`, so
+(120.7d) is reached through the API only. Every other driver refuses the
+four names.
+
+**Gates** (`tests/bc_buoyant_pressure.rs`, both builds; class per docs/17
+§5.1, D-F32-1).
+
+`prgh_triples_are_the_closed_forms` - a 4 x 3 x 2 box on [0,2] x [0,1]^2,
+`g = (0.5, -1, -9.81)`, a per-face density, velocity, flux sign and `ph_rgh`:
+every face of the four names, in the absolute and the kinematic form, is
+(120.7b)-(120.7e) in the operation order above bit for bit (class D), `fr`
+exactly 1, `refGrad` exactly 0; with no flux the inflow test falls to
+`PrghInputs::u_b . n` (4 of the 6 `xMin` faces inflow, no `xMax` face) for
+both total forms. `prgh_refusals_are_by_name` - every refusal of the list
+above, each message carrying "SPEC-LIT 120.7" (class D). `a_kinematic_
+column_open_at_the_top_and_side_stays_at_rest` - `Simple` on a 16 x 1 x 16
+box, `T = T_ref` so `b = 0` exactly, `prghPressure p 5` on the top and
+(120.7e) with `rhoRef 1` on the side, both of which write 14.81: after 50
+outer iterations `max |U|` is 2.4e-15 and `p + g . x` is `5 + 9.81 (1 - z)`
+within 1.4e-14 (`single` 4.1e-7 and 8.2e-6, class R); the control - a
+uniform static `p 5` on the side - moves at 4.33. `a_stratified_column_open_
+at_the_top_is_hydrostatic` - THE gate: `Vof` on a 24 x 1 x 24 box, water
+(1000) under air (1) with the interface on a face, `prghPressure p 1000` on
+the top: `rho_f` is exactly 1 on the top and 1000 on the floor, `max |U|`
+after 20 steps is 1.2e-13 and `p = p_rgh + rho (g . x)` is the two-layer
+column `p_0 + rho g (h_ref - z)` (`h_ref` = the top) within 1.1e-12 of 5705.53
+(2.0e-16 relative; `single` 5.6e-6 and 2.1e-7 relative, class R); the
+control - `fixedValue 1000` of the `p_rgh` LEVEL - is off by 9.81 Pa.
+`a_column_open_at_the_side_stays_at_rest` - one fluid at 1000, (120.7e) with
+`rhoRef 1000` on a vertical side: `max |U|` 1.4e-16, `p` within 3.0e-11 of
+10605.6 (`single` 1.4e-7 and 9.2e-8 relative); the control (a uniform
+static `p` through (120.7b)) moves at 0.10. Five tests, five pass in each
+build; the two driver knob tests (`ofgpu-vof` on the dam break's
+atmosphere, `ofgpu-buoyant` on the plume's outlet) run and change what the
+run writes.
+
+Two inputs of the VOF columns are stated because they were measured. Both
+start from the hydrostatic `p_rgh` itself (each layer constant formed once
+in f64), the hydrostatic initialisation a column at rest is: started from
+`p_rgh = 0`, the first pressure solve lifts the column by about 5000 Pa and
+leaves the heavy layer's constant 1.4e-8 Pa off (2.3e-12 relative) in f64,
+the linear solver's floor and not the condition's. And they step at
+`dt = 2.5e-4`. *Finding (f32):* at `dt = 1e-3` the stratified column under
+`single` sits at `max |U|` 1.2e-5 to 1.9e-5 from the first step on, above
+the class-R bound 1e-5 - the f32 round-off of the face force split
+`-grad p_rgh - (g . x) grad rho` at a 1000:1 jump, which reaches the
+velocity through `rAU` and therefore scales with `dt`; at 2.5e-4 it is
+5.6e-6. The fix is an f64 evaluation of that split under `single` (a §118
+numerics change of `vof.cu`), which belongs to the §118 owner.
+
+* **Rusche, H.** *Computational Fluid Dynamics of Dispersed Two-Phase Flows
+  at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
+  the modified pressure `p - rho (g . x)` of the two-phase momentum
+  equation, and the boundary value it implies for a given static pressure.
+* **Batchelor, G. K.** *An Introduction to Fluid Dynamics*, Cambridge
+  University Press (1967), §3.5 - Bernoulli's total pressure `p + (1/2) rho
+  |U|^2` along a streamline entering through the boundary, and hydrostatic
+  equilibrium `grad p = rho g`.
 
 No GPL-licensed source was consulted.
 
