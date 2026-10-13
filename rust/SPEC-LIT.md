@@ -33362,8 +33362,9 @@ centreline correlations. This section defines them. Each is one gate of `ofgpu-v
 **Gate 110-A**, **Gate 110-B**, **Gate 110-C** — built on the shape Gate 94-D gave the
 lid-driven cavity: the comparison runs against an answer-key file under `reference/`, the
 band is stated before any run is made against it, and every number a verdict is quoted
-with is a printed output of a named driver run. What none of the three gets that the
-cavity has is a key in the tree; §110.1 says why that is the design and not an omission.
+with is a printed output of a named driver run. Two of the three gates have their key
+in the tree and the channel's three keys are not; §110.1 says why that is the design and
+not an omission.
 
 `No GPL-licensed source was consulted.`
 
@@ -33385,13 +33386,20 @@ key whose file is absent or whose digest is not the manifest's; the gate then pr
 digest line — `answer key <id>: reference/<file> sha256 <hex>` — beside its verdict, so
 the number the verdict stands on is the number the manifest vouches for. A key that is
 not in the tree is not a skip and never a quiet pass: the gate reports not closed, by
-name (§10's fifth kind, held honest through the registry of §69). **None of the three
-keys of this section is distributed with this tree** — the DNS files because their host
-states no redistribution terms, the other two by the same decision of 2026-09-20: they are transcriptions a user
-types from the fenced blocks of §110.3 and §110.4 — so on a clean clone every gate of
-this section reports not closed, with five `answer key <id> missing` lines between them.
-That is the designed behaviour, not a failure; §110.5's *Placing a key* says what a user
-who wants a gate closed writes where.
+name (§10's fifth kind, held honest through the registry of §69). **The three DNS
+files are not distributed with this tree**, because their host states no redistribution
+terms: their manifest rows are of kind `fetched`, which pin the digest of a file that is
+git-ignored, and `tools/keys/fetch_answer_keys.py fetch` downloads each and refuses bytes
+whose digest is not the row's. **The other two keys are tracked** (docs/17 decision
+D-VAL-1, reversing the decision of 2026-09-20 for these two only): they are US
+Government data, and their files are the fenced blocks of §110.3 and §110.4 byte for
+byte, written by the same script's `write` and checked by its `--check`. So a clean
+clone reports Gate 110-A not closed with three `answer key <id> missing` lines, and
+Gates 110-B and 110-C load their keys, print the digest lines and run the keys' own
+rows before they report that no driver run is recorded. With no key file present at
+all, the three gates print five `answer key <id> missing` lines between them. That is
+the designed behaviour, not a failure; §110.5's *Placing a key* says what a user who
+wants the channel gate closed runs.
 
 **Why each gate replays a driver run.** A live multi-minute GPU run belongs in a driver
 invocation a human chooses to make, not in `cargo test` — the rule `ofgpu-validate`
@@ -33424,6 +33432,12 @@ dUmean/dy  Wmean  dWmean/dy  Pmean`; `Umean` normalised by `U_tau`, `y` by `h`; 
 `ny = 129 / 257 / 257`). The page states no licence or terms of use, so the files are
 read as data and are NOT distributed with this tree. Key ids `mkm99-chan180`,
 `mkm99-chan395`, `mkm99-chan590`, expected at `reference/mkm99/chan{180,395,590}.means`.
+The host also answers on `https://`, which is the form `tools/keys/fetch_answer_keys.py`
+uses. As served (read 2026-10-13), each file opens with a header of `#` lines that holds
+`Re_tau = <r>` on one line and `ny = <n>,  Re = <r>` on another, then one row per
+wall-normal point from the wall `y = 0` to the centreline `y = 1` only: `(ny + 1)/2`
+rows, 65 / 129 / 129, not `ny`. The three files are 7 044, 12 932 and 12 932 bytes long,
+and the manifest pins their SHA-256 digests in full.
 
 **The case, and the force balance that fixes `u_tau`.** The periodic channel drives
 itself: in the steady state the body force balances the wall shear exactly, so the
@@ -33708,17 +33722,19 @@ whose delta_99 is the input difference §110.3 reports beside the band.
 the 66 level), and `ofgpu-sample column cases/plumeMcCaffrey.jsonc 4000 z 0 0 -at
 1.25,1.5,1.75,2.0,2.25,2.5` takes the six stations.
 
-**Placing a key.** None of the three keys is distributed — the user decided on
-2026-09-20 that the DNS files are not tracked (their host states no terms), and the
-other two are transcriptions this document prints instead. To close a gate locally, a
-user writes the key file under `reference/` at the path the gate names — the MKM files
-from the URLs of §110.2, the other two exactly as the fenced blocks of §110.3 and
-§110.4 print them — adds its row to `reference/PROVENANCE.md` in that table's shape
-with the `sha256sum` digest, and adds an `// answer-key: <id>` marker at the
-`key::load_text` call in `validate.rs`. The manifest test holds rows and markers
-against each other in both directions and asserts their number (nine today), so a key
-exists to the code exactly when the manifest and a call site both name it — which is
-what keeps a key nobody can vouch for from reaching a verdict. The gate then loads the
+**Placing a key.** All five keys have their manifest rows and their
+`// answer-key: <id>` markers at the `key::load_text` calls in `validate.rs` (docs/17
+VAL-01). The two transcriptions are tracked. The three DNS files are not (the user's
+decision of 2026-09-20 stands for them: their host states no terms), so a user who
+wants Gate 110-A closed runs `python tools/keys/fetch_answer_keys.py fetch`. It
+downloads them from the URLs of §110.2 into `reference/mkm99/` and keeps a file only
+when its SHA-256 is the one the manifest pins; `--from <dir>` takes them from a local
+copy instead. `python tools/keys/fetch_answer_keys.py --check` recomputes every pin:
+the two transcriptions from the fenced blocks of §110.3 and §110.4, and every key file
+present under `reference/`. The manifest test holds rows and markers against each other
+in both directions and asserts their number, so a key exists to the code exactly when
+the manifest and a call site both name it — which is what keeps a key nobody can vouch
+for from reaching a verdict. The gate then loads the
 key, prints its digest line beside the verdict, and runs the key's own consistency
 rows; the recorded runs are still this subsection's to make.
 

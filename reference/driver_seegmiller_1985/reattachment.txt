@@ -1,0 +1,7 @@
+# Driver, D. M. and Seegmiller, H. L., "Features of a Reattaching Turbulent Shear Layer in Divergent
+# Channel Flow", AIAA Journal 23 (2) (1985) 163-171. DOI 10.2514/3.8890.
+# Datum quoted from the NASA Turbulence Modeling Resource, 2D Backward Facing Step validation page
+# (https://tmbwg.github.io/turbmodels/backstep_val.html, read 2026-09-18), a US Government work:
+# "x/Hreattach = 6.26 +- 0.10"; Re_H approximately 36,000; M = 0.128; inflow boundary layer ~1.5H.
+# key value uncertainty
+x_r_over_H 6.26 0.10

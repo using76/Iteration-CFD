@@ -150,11 +150,18 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 // --------------------------------------------------------------- manifest --
 
-/// Whether a key is a file under `reference/` or a literal still typed into a
-/// source file.
+/// Whether a key is a tracked file under `reference/`, a `fetched` file its
+/// host grants no redistribution of, or a literal still typed into a source
+/// file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
+    /// A tracked file under `reference/`.
     File,
+    /// A file under `reference/` that is NOT tracked: its host grants no
+    /// redistribution, the row pins its digest, and
+    /// `tools/keys/fetch_answer_keys.py fetch` fetches it.
+    Fetched,
+    /// A literal still typed into a source file.
     Literal,
 }
 
@@ -194,9 +201,10 @@ impl Manifest {
     /// with `-` (the rule). Everything else is prose and ignored. Refuses by
     /// name (`Error::Parse { path, msg }`, `msg` naming the line number and
     /// the id where there is one): a table line with other than 7 cells; a
-    /// `kind` other than `file` / `literal`; a `file` row whose `sha256` is
-    /// not exactly 64 characters of `[0-9a-f]`; a `literal` row whose
-    /// `sha256` is not `-`; an `id` seen twice; an empty `id` or `file`.
+    /// `kind` other than `file` / `fetched` / `literal`; a `file` or
+    /// `fetched` row whose `sha256` is not exactly 64 characters of
+    /// `[0-9a-f]`; a `literal` row whose `sha256` is not `-`; an `id` seen
+    /// twice; an empty `id` or `file`.
     pub fn parse(path: &Path, text: &str) -> Result<Manifest> {
         let named = display_path(path);
         let mut rows: Vec<Row> = Vec::new();
@@ -225,13 +233,14 @@ impl Manifest {
             }
             let kind = match cells[1] {
                 "file" => Kind::File,
+                "fetched" => Kind::Fetched,
                 "literal" => Kind::Literal,
                 other => {
                     return Err(Error::Parse {
                         path: named.clone(),
                         msg: format!(
                             "line {at}: answer key \"{}\": the kind cell is \"{other}\", \
-                             not file or literal",
+                             not file, fetched or literal",
                             cells[0]
                         ),
                     });
@@ -251,17 +260,21 @@ impl Manifest {
                 });
             }
             match kind {
-                Kind::File => {
+                Kind::File | Kind::Fetched => {
                     let sha = cells[6];
                     let lower_hex = sha.len() == 64
                         && sha
                             .bytes()
                             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
                     if !lower_hex {
+                        let what = match kind {
+                            Kind::Fetched => "a fetched row's sha256",
+                            _ => "a file row's sha256",
+                        };
                         return Err(Error::Parse {
                             path: named.clone(),
                             msg: format!(
-                                "line {at}: answer key \"{id}\": a file row's sha256 must \
+                                "line {at}: answer key \"{id}\": {what} must \
                                  be 64 lower-case hex characters, found \"{sha}\""
                             ),
                         });
@@ -408,7 +421,7 @@ pub fn load_text(id: &str) -> Result<(String, String)> {
 }
 
 /// The key `id`'s digest line and VERIFIED text, for keys that are not the
-/// CSV [`load_from`] parses - an MKM `.means` whitespace table with `%`
+/// CSV [`load_from`] parses - an MKM `.means` whitespace table with `#`
 /// header lines, and the two transcriptions SPEC-LIT §110.3 and §110.4
 /// print. The refusals are exactly [`load_from`]'s (no row names `id`; a
 /// literal row; an unreadable file; a digest that is not the manifest's;
@@ -796,7 +809,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 30, "thirty markers, found {markers:?}");
+        assert_eq!(markers.len(), 35, "thirty-five markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -828,7 +841,19 @@ mod tests {
                 "martin-moyce-1952",
                 "riboux-gordillo-2014",
                 "rae2822-coordinates",
+                "driver-seegmiller1985",
+                "mccaffrey1979-table1",
             ]
+        );
+        let fetched_ids: Vec<&str> = m
+            .rows
+            .iter()
+            .filter(|r| r.kind == Kind::Fetched)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(
+            fetched_ids,
+            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590"]
         );
         for row in &m.rows {
             assert!(!row.source.is_empty(), "{}: an empty source cell", row.id);
@@ -839,6 +864,10 @@ mod tests {
                     assert_eq!(row.sha256.len(), 64, "{}: a file row's sha256", row.id);
                     "file"
                 }
+                Kind::Fetched => {
+                    assert_eq!(row.sha256.len(), 64, "{}: a fetched row's sha256", row.id);
+                    "fetched"
+                }
                 Kind::Literal => {
                     assert_eq!(row.sha256, "-", "{}: a literal row's sha256", row.id);
                     "literal"
@@ -846,6 +875,71 @@ mod tests {
             };
             println!("  [answer-key] {}  {kind}  {}  {}", row.id, row.file, row.sha256);
         }
+    }
+
+    /// The `fetched` rows' files are git-ignored, so their presence is a
+    /// property of the TREE, not of the manifest: one that is present must
+    /// carry exactly the digest its row pins, and one that is absent must be
+    /// plainly absent (NotFound) - on a clean clone all three are.
+    #[test]
+    fn every_fetched_key_that_is_present_matches_its_manifest_digest() {
+        let m = Manifest::load().expect("reference/PROVENANCE.md parses");
+        let fetched: Vec<&Row> = m
+            .rows
+            .iter()
+            .filter(|r| r.kind == Kind::Fetched)
+            .collect();
+        assert_eq!(
+            fetched.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590"],
+            "exactly the three fetched rows, in manifest order"
+        );
+        let mut present = 0usize;
+        for row in &fetched {
+            match std::fs::read(reference_dir().join(&row.file)) {
+                Ok(bytes) => {
+                    present += 1;
+                    assert_eq!(sha256_hex(&bytes), row.sha256, "{} moved", row.file);
+                }
+                Err(e) => assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "{}: {} (an absent fetched key is simply not there)",
+                    row.file,
+                    e
+                ),
+            }
+        }
+        println!("  [answer-key] fetched keys present on this tree: {present}/3");
+    }
+
+    /// A `fetched` row reads exactly as a `file` row through
+    /// [`load_text_from`] - only a literal is refused - and its sha256 rule
+    /// is the file rule, so a `-` in the digest cell is refused by name.
+    #[test]
+    fn a_fetched_row_reads_like_a_file_row() {
+        let dir = std::env::temp_dir().join("ofgpuValidate_key_fetched");
+        let body = "% Re_tau = 1\n 0 0\n";
+        let m = one_row_manifest(
+            &dir,
+            &format!(
+                "| f | fetched | f.means | s | u | l | {} |",
+                sha256_hex(body.as_bytes())
+            ),
+        );
+        std::fs::write(dir.join("f.means"), body).expect("write f.means");
+        let (line, text) = load_text_from(&m, &dir, "f").expect("the fetched key loads");
+        assert_eq!(text, body);
+        assert!(
+            line.starts_with("answer key f: reference/f.means sha256 "),
+            "{line}"
+        );
+        let refused = text_of(Manifest::parse(
+            &dir.join("PROVENANCE.md"),
+            &format!("{}| f | fetched | f.means | s | u | l | - |\n", synthetic_header()),
+        ));
+        assert!(refused.contains("\"f\""), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------------- chemistry answer keys --
