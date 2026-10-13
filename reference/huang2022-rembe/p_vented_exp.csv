@@ -1,0 +1,61 @@
+# C. Huang, M. Bloching and A. N. Lipatnikov, "A vented corn starch dust explosion in an 11.5 m3
+# vessel: Experimental and numerical study", J. Loss Prev. Process Ind. 75 (2022) 104707,
+# DOI 10.1016/j.jlp.2021.104707, open access under CC BY 4.0 (the copy read:
+# research.chalmers.se/publication/527616/file/527616_Fulltext.pdf, read 2026-10-13), FIG. 11
+# (page 10): the measured overpressure inside the vessel through the vented explosion, 750 g/m3
+# corn starch (corrected equivalence ratio 0.62), 0.5 m2 vent, static activation pressure 0.1 bar,
+# central ignition at t = 0. The panel ruptures at t = 0.10 s (the drop after 0.10 s).
+# DIGITISED, not printed: the paper tabulates none of these values. Only the open circles
+# ("experiment") are read; the dashed and dotted lines are the paper's own simulations.
+# The figure is a raster image embedded in the PDF (1024 x 737 px). Axis calibration from the
+# figure's frame and dashed grid lines: t = 0.0 to 0.35 s at 246 px per 0.1 s; overpressure
+# 0.1 to 0.6 bar at 943 px per bar. Circle centre = the centre of the ring's vertical extent
+# (near-black pixels within 14 px of the circle's column); where the red line hides one end of a
+# ring (t = 0.15, 0.26), the centre is the visible end plus or minus the ring's 21 px diameter.
+# The circles sit on the 0.01 s grid to within 2.5 px (0.001 s). The t = 0.00 to 0.10 s rows
+# repeat FIG. 10 at a coarser scale; p_closed_exp.csv is the finer reading of those.
+# Columns:
+#   t_s       time after ignition, s
+#   dp_bar    the ring centre's ordinate, overpressure, bar, kept to four decimals (1 px = 0.0011 bar)
+#   u_dp_bar  the reading uncertainty, bar
+#   u_t_s     the reading uncertainty of t, s
+#   clipped   1 = the ring is cut by the axis frame and its centre is read from the visible part
+# Derived (SPEC-LIT section 151.6): peak 0.603 bar at t = 0.31 s; the rise from t = 0.20 to
+# 0.28 s is (0.5252 - 0.1604)/0.08 = 4.56 bar/s.
+t_s,dp_bar,u_dp_bar,u_t_s,clipped
+0.00,0.0597,0.01,0.003,1
+0.01,0.0602,0.01,0.003,0
+0.02,0.0576,0.01,0.003,0
+0.03,0.0602,0.01,0.003,0
+0.04,0.0602,0.01,0.003,0
+0.05,0.0602,0.01,0.003,0
+0.06,0.0677,0.01,0.003,0
+0.07,0.0724,0.01,0.003,0
+0.08,0.0783,0.01,0.003,0
+0.09,0.0873,0.01,0.003,0
+0.10,0.0979,0.01,0.003,0
+0.11,0.0799,0.01,0.003,0
+0.12,0.0772,0.01,0.003,0
+0.13,0.0852,0.01,0.003,0
+0.14,0.0878,0.01,0.003,0
+0.15,0.0878,0.01,0.003,0
+0.16,0.0931,0.01,0.003,0
+0.17,0.0979,0.01,0.003,0
+0.18,0.1196,0.01,0.003,0
+0.19,0.1297,0.01,0.003,0
+0.20,0.1604,0.01,0.003,0
+0.21,0.1907,0.01,0.003,0
+0.22,0.2326,0.01,0.003,0
+0.23,0.2729,0.01,0.003,0
+0.24,0.3206,0.01,0.003,0
+0.25,0.3752,0.01,0.003,0
+0.26,0.4240,0.01,0.003,0
+0.27,0.4807,0.01,0.003,0
+0.28,0.5252,0.01,0.003,0
+0.29,0.5602,0.01,0.003,0
+0.30,0.5952,0.01,0.003,0
+0.31,0.6027,0.01,0.003,0
+0.32,0.5931,0.01,0.003,0
+0.33,0.5677,0.01,0.003,0
+0.34,0.5252,0.01,0.003,0
+0.35,0.4780,0.01,0.003,1
