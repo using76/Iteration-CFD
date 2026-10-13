@@ -605,6 +605,13 @@ mod tests {
         );
     }
 
+    // The dust stream's four keys (docs/17 DST-00, SPEC-LIT §151.6) are read only by
+    // the digest test below until DST-07, DST-08 and DST-11 read them in their gates
+    // (§157.5, §157.6, §158.7); each of those units moves its markers into its gate.
+    // answer-key: huang2020-leeds-st-b
+    // answer-key: huang2022-rembe-p-closed
+    // answer-key: huang2022-rembe-p-vented
+    // answer-key: huang2022-corn-starch-table1
     #[test]
     fn every_file_key_matches_its_manifest_digest() {
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
@@ -809,7 +816,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 35, "thirty-five markers, found {markers:?}");
+        assert_eq!(markers.len(), 39, "thirty-nine markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -843,6 +850,10 @@ mod tests {
                 "rae2822-coordinates",
                 "driver-seegmiller1985",
                 "mccaffrey1979-table1",
+                "huang2020-leeds-st-b",
+                "huang2022-rembe-p-closed",
+                "huang2022-rembe-p-vented",
+                "huang2022-corn-starch-table1",
             ]
         );
         let fetched_ids: Vec<&str> = m

@@ -44762,3 +44762,1813 @@ only guard against them. A misread `V*` away from Fig. 1's row is caught only by
 above, which is not a test.
 
 ---
+
+## 151. The dust stream — scope, the clean room, the stated inputs, the recorded inconsistencies, the answer keys and the gates
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §151-§160 to the dust stream
+of tranche 17 (docs/17 §12.8, units DST-00 to DST-20). DST-00 wrote all ten sections as
+contracts on 2026-10-13, from `docs/17-dust/RESEARCH.md` (the equations, D.1-D.70) and
+`docs/17-dust/INSIGHTS.md` (the design reasons, (a)-(m)), and re-read the two open papers the
+answer keys come from. Each later DST unit amends its own section in place when it lands (a
+"Landed" paragraph with what it measured). No code was read for these sections.
+
+In §151-§160 an equation label and a subsection can share a number (`(152.3)` and §152.3), as
+in §122-§127. Code cites a subsection as `§15N.M` and an equation as `(15N.M)`, never the bare
+`S15N.M` form that §80.4's ratchet counts as ambiguous. The RESEARCH id of every equation is
+kept beside its label (§151.4), so a brief can quote either.
+
+### 151.1 Scope, the two phases, and what is out of scope
+
+The stream is a GPU-native, clean-room rebuild of what the FSCDustFoam solver does (C. Huang
+and A. N. Lipatnikov, Zenodo record 10.5281/zenodo.5795161; built on OpenFOAM, so treated as
+GPL, §151.2), plus a Lagrangian phase that solver does not have.
+
+* **Phase A** is an equivalent premixed gas with one Favre progress variable `c~`, closed by
+  the Flame Speed Closure (FSC) of Lipatnikov and Chomiak, which contains Zimont's Turbulent
+  Flame Closure (TFC) as its developed limit, with turbulence from k-ω SST. It is validated on
+  the published results of the two open papers: the Leeds fan-stirred bomb (H20) and the REMBE
+  11.5 m³ vented vessel (H22). Closed vessels run on `ofgpu-lowmach -sealed` (§25.2). Vented
+  vessels run on `ofgpu-compressible` (§122-§127) with a one-domain opening membrane (§158).
+* **Phase B** is Euler-Lagrange reacting dust on the parcel stack tranche 17 finishes: heat-up,
+  drying, devolatilisation, char burnout, volatiles burning in the gas through the CHEMRAD
+  finite-rate path (§128-§133), and optional particle radiation through P1 (§135).
+
+**Why.** Dust-explosion venting is designed from empirical standards (EN 14491, NFPA 68) that
+neglect complex geometry, large vessels and elevated pressure (H22 §1). The FSC model is an
+open premixed closure that has been validated for this use (H20 §1), and the user asked for it
+to be rebuilt without copying code.
+
+**Out of scope, named:** partially-premixed or non-uniform φ (a mixture fraction beside `c~`;
+the Zenodo record's title says "premixed/partially-premixed", but the open papers describe only
+uniform φ); metal dusts, agglomeration, dust lifting and secondary explosions; membrane inertia
+and partial vent opening; MPI and multi-GPU (deferred by the user). The DUST drivers refuse
+decomposition and moving meshes by name, so `src/dust/` is outside PAR-09's allocation audit,
+and PAR-14's refusal list names the dust model.
+
+### 151.2 The clean-room rule, the provenance sentence, and the header line
+
+**The user's rule, verbatim:** "인사이트만 얻고 완전히 새로운 코드로 만들어줘 ... 수식만 논문에서보고
+같게 구현해줘" (take only insights, write entirely new code, take the equations only from the
+papers and implement them identically).
+
+1. Equations come only from the open papers of §151.3 (H20, H22, TMR, BKM24, ISL22, MZG02), or
+   are derived from them in §152-§160 with the derivation written out. A paper that is not open
+   is used only through an open paper that restates it, and is listed in §151.8.
+2. Nobody in the stream opens the FSCDustFoam source, the files of its Zenodo archive, or any
+   OpenFOAM source. RESEARCH.md was regenerated on 2026-10-10 from the papers alone, and only
+   the Zenodo record's metadata was read, to cite it. DST-00 read the record's metadata again on
+   2026-10-13 (DataCite: title, creators, year 2021, version "1812", licence "Creative Commons
+   Attribution 4.0 International") and nothing else of it.
+3. A GLM brief carries the contract only: it quotes §151-§160 and the unit's docs/17 row. It
+   never contains a path, file name, identifier or text taken from FSCDustFoam or OpenFOAM.
+4. **Every PROVENANCE row a DUST unit creates carries this sentence verbatim:** *The
+   specification was informed by a review of FSCDustFoam (Huang & Lipatnikov, GPL) and no code
+   was copied.* The sentence refers to the original planning pass. The regenerated
+   specification is papers-only, and a row may add that. DST-00's draft rows are in
+   `rust/PROVENANCE.md`, "Dust explosions — literature (DRAFT rows, tranche 17)".
+5. **Every new source file carries the house header,** including `No GPL-licensed source was
+   consulted.` The line stays true because the coder consults none.
+6. **The licence position:** the Zenodo record lists CC BY 4.0 for an OpenFOAM-based solver.
+   OpenFOAM is GPL v3, so the stream treats the solver as GPL, the stricter reading and the
+   user's (§151.7 item 10).
+7. **The check every DST unit runs:** a grep of the unit's brief, its new files and its SPEC-LIT
+   and PROVENANCE text for OpenFOAM or FSCDustFoam source paths, file names and identifiers
+   finds nothing. The project NAME FSCDustFoam appears only in §151.1-§151.3 (the scope, this
+   rule and the Zenodo citation) and in the provenance sentence.
+
+### 151.3 Sources, read or not read, and every DOI checked
+
+Each source is marked **read** (and where) or *not read*. Every DOI below was checked on
+Crossref on 2026-10-13 (title, authors, journal, volume and pages agree), and the Zenodo DOI on
+DataCite. A URL was checked by fetching it on that day.
+
+* **H20.** C. Huang, A. N. Lipatnikov and K. Nessvi, "Unsteady 3-D RANS simulations of dust
+  explosion in a fan stirred explosion vessel using an open source code", *J. Loss Prev.
+  Process Ind.* 67 (2020) 104237, DOI 10.1016/j.jlp.2020.104237. **Read**, the open copy on
+  the Chalmers research portal, `research.chalmers.se/publication/518494/file/518494_Fulltext.pdf`
+  (11 pages; read 2026-10-10 by the planner and 2026-10-13 by DST-00; the copy states no licence
+  and carries "Published by Elsevier"). Supplies eqs. (1)-(18), Tables 1-4 and Figs. 8-9.
+* **H22.** C. Huang, M. Bloching and A. N. Lipatnikov, "A vented corn starch dust explosion in an
+  11.5 m3 vessel: Experimental and numerical study", *J. Loss Prev. Process Ind.* 75 (2022)
+  104707, DOI 10.1016/j.jlp.2021.104707. **Read**, open access under **CC BY 4.0**,
+  `research.chalmers.se/publication/527616/file/527616_Fulltext.pdf` (11 pages). Supplies
+  eqs. (1)-(11), Tables 1-3 and Figs. 10-11. The portal stamps the PDF on every download, so no
+  digest of the PDF is pinned. The key files' own digests are (§151.6).
+* **TMR.** NASA Turbulence Modeling Resource, "The Menter Shear Stress Transport Turbulence
+  Model", `tmbwg.github.io/turbmodels/sst.html`. US-Government work. **Read** by the planner:
+  SST (1994), SST-2003, SST-sust, the constants, the wall and farfield values.
+* **BKM24.** J. K. Bechtold, G. Krishnan and M. Matalon, "Hydrodynamic theory of premixed flames
+  propagating in closed vessels: flame speed and Markstein lengths", *J. Fluid Mech.* 998 (2024)
+  A59, DOI 10.1017/jfm.2024.919. Open access, CC BY 4.0. **Read** by the planner: §6.2,
+  eqs. (6.9)-(6.10).
+* **ISL22.** A. Islas, A. Rodríguez Fernández, C. Betegón, E. Martínez-Pañeda and A. Pandal,
+  "Computational assessment of biomass dust explosions in the 20L sphere", arXiv:2207.13149
+  (2022), `arxiv.org/abs/2207.13149` (the arXiv non-exclusive distribution licence). **Read** by
+  the planner: eqs. (13)-(23).
+* **MZG02.** B. J. McBride, M. J. Zehe and S. Gordon, NASA/TP-2002-211556 (2002), NTRS
+  20020085330. Public domain. **Read** (already §128 and `reference/nasa-glenn2002/`).
+* **TM-4513.** B. J. McBride, S. Gordon and M. A. Reno, NASA TM-4513 (1993), NTRS 19940013151.
+  Public domain. **Read** (`reference/mcbride-gordon-reno1993/`, §128.6). DST-00's oracle used
+  its N2, O2, CO2 and H2O records for the check values of §152.10.
+* **GRI3.** GRI-Mech 3.0 `thermo30.dat`, `combustion.berkeley.edu/gri-mech/version30/files30/thermo30.dat`.
+  Used by the planner **only** for its own hand check of D.11. It is not a key and not tracked.
+* **CFL.** R. Courant, K. Friedrichs and H. Lewy, *Math. Ann.* 100 (1928) 32-74, DOI
+  10.1007/BF01448839; English translation, *IBM J. Res. Dev.* 11 (1967) 215-234, DOI
+  10.1147/rd.112.0215. *Not read*; the condition behind (155.9) is the textbook one.
+* **Zenodo record.** C. Huang and A. N. Lipatnikov, "FSCDustFoam - a solver for
+  premixed/partially-premixed combustion and explosion of dust and gas based on OpenFOAM",
+  version 1812 (2021), DOI 10.5281/zenodo.5795161. **Cited, not read** beyond its metadata
+  (§151.2 item 2).
+* *Not read*, cited through the open restatement §151.8 names: Zimont 2000, DOI
+  10.1016/S0894-1777(99)00069-2; Lipatnikov & Chomiak 1997, SAE 972993, DOI 10.4271/972993;
+  Lipatnikov & Chomiak 2002, DOI 10.1016/S0360-1285(01)00007-7; Huang, Yasari, Johansen, Hemdal
+  & Lipatnikov 2016 (*Combust. Sci. Technol.* 188:98-131), DOI 10.1080/00102202.2015.1083988;
+  Gülder 1984, SAE 841000, DOI 10.4271/841000; Dahoe, Zevenbergen, Lemkowitz & Scarlett 1996,
+  DOI 10.1016/0950-4230(95)00054-2; Dahoe & de Goey 2003, DOI 10.1016/S0950-4230(03)00073-1;
+  Dahoe, Hanjalić & Scarlett 2002, DOI 10.1016/S0032-5910(01)00419-3; Bradley, Chen &
+  Swithenbank 1989, DOI 10.1016/S0082-0784(89)80190-0; Gostintsev, Istratov & Shulenin 1988,
+  DOI 10.1007/BF00755496; Menter 1994, DOI 10.2514/3.12149; Spalart & Rumsey 2007, DOI
+  10.2514/1.29373; Badzioch & Hawksley 1970, DOI 10.1021/i260036a005; Baum & Street 1971,
+  DOI 10.1080/00102207108952290 (RESEARCH.md had no DOI for it; Crossref gives this one);
+  Deleersnijder, Campin & Delhez 2001, DOI 10.1016/S0924-7963(01)00026-4.
+* **SPEC.** This document's own §6.3 (SST), §25 (low-Mach and the sealed `p0`), §26 (energy),
+  §76 (parcel heating, Ranz-Marshall), §118 (mixed precision), §122-§127 (compressible), §128
+  (NASA-7), §131 (equilibrium), §133 (the reacting low-Mach constraint) and §135 (P1). Reused,
+  not re-derived.
+
+### 151.4 The equation register
+
+| RESEARCH id | label | what |
+|---|---|---|
+| D.1-D.14 | (152.1)-(152.14), one for one | the global reaction, φ, W, the starch polynomial, ΔH_r, NASA-7, the pseudo-species, the state, the isobaric burned state, AICC, the energy equation, S_L(φ), the Gülder option |
+| D.24 | (153.1) | the published temperature closure |
+| D.25-D.28 | (153.2)-(153.5) | t_r, the eigenproblem, the integral identity, the ZFK asymptote |
+| D.18-D.23 | (154.1)-(154.6) | Q, D_t, U_t, U_t,ISP, τ_L, the turbulence inputs |
+| D.29-D.31 | (154.7)-(154.9) | the extended FSC, Gostintsev's kernel growth, the TFC limit |
+| D.37-D.38 | (154.10)-(154.11) | the f32-safe rate constant, the implicit split |
+| D.15-D.17 | (155.1)-(155.3) | BML, the Reynolds mean, the `c~` equation |
+| D.32-D.36 | (155.4)-(155.8) | ignition, the planar exact solution, δ_t, the spherical relation, S_t,b |
+| D.39, D.52 | (155.9), (155.10) | the flame-Courant number, ρ_u(p) and T_u(p) |
+| D.40-D.50 | (156.1)-(156.11), one for one | the ρ-weighted SST-2003, SST-sust, the boundary values, the decay closed form |
+| D.56, D.51, D.53-D.55 | (157.1), (157.2), (157.3)-(157.5) | the sealed `p0`, x_b(p), R_f(p), the thin-flame equation, K_st |
+| D.57-D.60 | (158.1)-(158.4) | the membrane, the jump conditions, the precursor, the compressible heat release |
+| D.61-D.68 | (159.1)-(159.8), one for one | the particle energy, Nu, Bird, SFOM, char, the closed forms, P1 coupling, two-way coupling |
+| D.69-D.70 | (160.1)-(160.2) | the flame-age concentration, the uniform-clock solution |
+
+### 151.5 The stated inputs
+
+Each input is stated once, here, with its source or the reason it is assumed (docs/17 §5.6
+item 6). No input is tuned to pass a gate. Published tuned values (u', L and t_flacc of H22,
+Pr_t of H20) are used as published and their rows are labelled.
+
+| symbol | value | source or reason |
+|---|---|---|
+| Θ | 20 000 K | H20 §2.1, H22 §3.4 |
+| A (FSC) | 0.4, the default | H20 eq. (5), H22 eq. (9) |
+| A (TFC, Zimont) | 0.52, a named non-default input | secondary literature only; not verified from an open copy (§151.8) |
+| C_μ, C_d | 0.09, 1.0 | H20 §3.3 |
+| Pr_t | 0.4 (Leeds), 0.28 (REMBE), each case its own | H20 §4.2 (best fit, tuned), H22 §3.3 (§151.7 item 2) |
+| t_flacc | 0.15 s (REMBE), tuned | H22 §3.5 |
+| σ_r, W_0, t_0 | 0.25 mm, 1e13 s⁻¹, 1 ms | H20 §3.3 |
+| σ_t | t_0 | **assumed**: H20 does not give it (§151.7 item 8) |
+| the t_fd origin | t_0, the end of the ignition source | **stated**: the papers differ (§151.7 item 7) |
+| R0 | 8.314462618 J/(mol K) (CODATA) | H22 prints 8.314; the stream uses the exact SI value, as §128 does |
+| the air | O2 : N2 = 1 : 3.76 | H20 prints 3.71 (§151.7 item 5) |
+| the AICC convention | dust counted as gas moles | the convention H20 Table 1's W_u = 32.8 g/mol needs (§152.6) |
+| W_cs, H_f,cs, ΔH_r | 0.16 kg/mol (printed); −792.6 kJ/mol; 2521 kJ/mol (15.8 MJ/kg) | H22 Table 1 and §3.1, H20 §3.1; the formula's W = 0.159684 kg/mol is used in the pseudo-species (§152.1) |
+| a0, a1 (starch) | −3.2726, 0.10056 K⁻¹ | H22 Table 1 |
+| a5 (starch) | re-derived from H_f,cs: −98 821.7 K | §152.2; the printed −99 808 disagrees with H_f,cs by 1 % (§151.7 item 4) |
+| S_L(φ) | (152.13) with W, η, ξ, σ_φ = 0.2145 m/s, −0.2774, 39.1832, 0.6 | H22 eq. (3) |
+| κ and its law | κ = μ/(ρ Pr), Pr = 0.7, Sutherland μ, unless a case says otherwise | **assumed**: neither paper states κ (§151.7 item 12); Ψ is regenerated for whatever law the case uses (§153) |
+| **Leeds** (H20 Tables 1-4) | T_u = 328 K; p_0 = 110 000 Pa; ρ_u = 1.32 kg/m³, ρ_b = 0.248 kg/m³; μ_u = 1.8e−5, μ_b = 4.6e−5 Pa s; W_u = 32.8, W_b = 29.7 g/mol; T_b = 1500 K (measured); σ = 5.06 (printed); S_L = 0.12 m/s; L = 20 mm; vessel D = 305 mm, 0.023 m³ | H20; p_0 per §151.7 item 3; ρ_b and σ per items 13-14 |
+| Leeds turbulence (H20 Table 4) | u' = 0.80, 1.62, 2.45, 3.31 m/s; k_0 = 0.96, 3.94, 9.00, 16.43 m²/s²; ε_0 = 47.03, 390.53, 1350.84, 3331.12 m²/s³ | H20 Table 4; `L = k_0^{3/2}/ε_0` = 20.00, 20.03, 19.99, 19.99 mm (DST-00 oracle) |
+| κ_u (Leeds) | μ_u/(ρ_u Pr) = 1.948e−5 m²/s | the assumption above |
+| c_p (prescribed mode) | one constant c_p for both pseudo-species, stated by the case | **assumed**: H20 states none; §152.9 shows the Leeds rows do not depend on it |
+| **REMBE** (H22 §2, Tables 2-3) | V = 11.5 m³; vent 0.5 m², circular; p_stat = 0.1 bar ± 15 %; 750 g/m³, φ_corr = 0.62; T_0 = 273 K; ambient 101 325 Pa; k = 0.8438 m²/s², u' = 0.75 m/s, L = 0.1 m (both tuned by H22); central ignition; K_st = 200 bar m/s ± 15 %; outside domain 15.5 × 5 × 6.355 m (half by symmetry) | H22; the vessel's own dimensions are **not published** (§151.7 item 9) |
+
+### 151.6 The answer keys
+
+Four key files are tracked under `reference/` and named by rows of `reference/PROVENANCE.md`.
+The three figure keys are **DIGITISED**: neither paper tabulates them. DST-00 read them on
+2026-10-13 from the raster images embedded in the open PDFs (`fitz` image extraction at the
+images' native resolution), calibrated on each figure's own frame and dashed grid lines.
+Marker centres were found as the centre of the dark marker pixels' vertical extent, column by
+column, with the coloured simulation lines excluded by colour. That is the §79.12 / §146.1
+precedent, applied to raster figures instead of vector paths. Only the measurements are read.
+The papers' own simulation curves are never a key (§10, §22).
+
+| id | file | what | rows | uncertainty | sha256 |
+|---|---|---|---|---|---|
+| `huang2020-leeds-st-b` (J.1) | `huang2020-leeds/st_b_exp.csv` | S_t,b(u', R_f), H20 Fig. 9, the Bradley, Chen & Swithenbank (1989) measurements | 16 (4 u' × 4 R_f) | ±0.05 m/s | `3368d038e71936093fdd0d4cc63c5ad525de3e80946378fcb495178166a07fc3` |
+| `huang2022-rembe-p-closed` (J.2) | `huang2022-rembe/p_closed_exp.csv` | Δp(t) before rupture, H22 Fig. 10 | 11 (t = 0 to 0.10 s) | ±0.002 bar, ±0.003 s | `b08fc953921741b56b019869eebf30e83e1e545b1a846bae399e4660a04a7fe4` |
+| `huang2022-rembe-p-vented` (J.3) | `huang2022-rembe/p_vented_exp.csv` | Δp(t) through the vented explosion, H22 Fig. 11 | 36 (t = 0 to 0.35 s) | ±0.01 bar, ±0.003 s | `65fdc12fe6913d308a02b01fa3bc19a005e36f2b2016e8bc3c4a06820823ea58` |
+| `huang2022-corn-starch-table1` | `huang2022-rembe/corn_starch_table1.csv` | H22 Table 1 AS PRINTED, with the four numbers its §3.1 prints | 1 | as printed | `425778e4c9f2c86ed3afc845ccda6362a3877598fc437419d416cc105de05539` |
+
+**What DST-00's reading gives, against the planner's (RESEARCH.md §J).**
+
+* **J.1.** The sixteen values agree with the planner's to 0.02 m/s or better. The R_f = 30 mm
+  least-squares slope is **dS_t,b/du' = 0.678** (0.6781 from the three-decimal readings; the
+  planner's 0.678). The R_f = 20 mm row is flagged `gated = 0`: H20 §3.3 reports it as
+  ignition-affected, so DST-07 reports it and does not gate it. The u' = 0.80 series is drawn
+  with triangles. The figure is a matplotlib plot, whose triangle is centred on its bounding
+  box; the mean-of-vertices convention of §146.1 would lower that series by 0.025 m/s, which is
+  inside the reading uncertainty. H20 Fig. 8 plots the same measurements against u'; H20's
+  fit eq. (19), S_t,b = 0.6923 u' + 0.4727, is the 2020 code's result and is recorded only as a
+  comparison, never as a key.
+* **J.2.** The eleven values agree with the planner's ten to 0.0001 bar (the planner did not
+  list t = 0). The readings fall on a 0.0025 bar lattice, which suggests the recorder's own
+  resolution. The t = 0 and t = 0.10 s rings are cut by the frame (`clipped = 1`). DST-08 (ii)
+  gates t = 0.05 to 0.10 s (`gated = 1`).
+* **J.3.** The planner listed fifteen of the thirty-six points; DST-00 read all thirty-six. They
+  agree with the planner's fifteen to 0.005 bar. The peak is **0.603 bar at t = 0.31 s**. The
+  stage-(iii) rise from 0.20 s to 0.28 s is (0.5252 − 0.1604)/0.08 = **4.56 bar/s** (the
+  planner's 4.55). The panel ruptures at **t = 0.10 s**: 0.0979 bar there, 0.0799 bar at
+  0.11 s. H22's own extended-FSC run peaks at about 0.625 bar at about 0.30 s (+4 %, −0.01 s);
+  that is the published model's deviation, not a key.
+* **Table 1.** Copied as printed. `a5` is printed "−9 9808" and is read as −99 808 with a thin
+  space as the thousands separator. §152.2 explains why the stream does not use it.
+
+A gate that loads a key goes through `validate_key::load`, so a missing file or a digest that is
+not the manifest's reports the gate open by name (§10, §69). Until DST-07, DST-08 and DST-11
+read the keys in their gates, the four `// answer-key: ` markers sit beside the digest test in
+`rust/src/bin/validate_key/mod.rs`. Each of those units moves its markers into its gate.
+
+### 151.7 Inconsistencies found in the open papers
+
+Items 1-12 are RESEARCH.md §K. DST-00's re-read added items 13-15. Each is resolved as stated
+and never by tuning.
+
+1. H22 says the t_r constraint applies to "the last source term … of Eq. (3)" (it is eq. (4)),
+   and that the extension modifies "the FSC Eq. (7)" and that "Eq. (10) involves two unsteady
+   terms". The modification is of eq. (8) (U_t), and the two-term equation is eq. (11).
+2. Pr_t: H22 uses 0.28 "following our previous study". H20's best fit is 0.4, and H20 Fig. 7
+   shows that 0.28 under-predicts S_t,b by about 30 % at u' = 3.31 m/s. Each case keeps its own
+   paper's value.
+3. H20 Table 2 prints P_0 = "11 000" Pa and Table 3 "fixedValue 11 0000". ρ_u = 1.32 kg/m³ at
+   328 K and W = 32.8 g/mol fix **p_0 = 110 000 Pa** (the gas law gives ρ_u = 1.3230 kg/m³).
+4. H22's printed a5 = −99 808 gives H_a(298.15) = −5.0189 MJ/kg, against the stated H_f,cs =
+   −792.6 kJ/mol (−4.954 MJ/kg with W = 0.16, −4.964 with the formula W; the paper's text
+   prints −4970 kJ/kg). The disagreement is 1 %. H_f,cs wins (§152.2).
+5. H20's global reaction uses O2:N2 = 1:3.71. Air is 1:3.76. The stream uses 3.76; the AICC
+   ratio moves by 0.7 % between the two (§152.10).
+6. With W_u ≠ W_b, (153.1) gives T~(c~ = 1) = σT_u = 1660 K for Leeds, not the stated T_b =
+   1500 K. The one-temperature design does not use (153.1) except in its published-form option.
+7. t_fd counts "from end of ignition" in H20 and "from ignition" in H22. The stream counts from
+   the end of the ignition source, t_0 of (155.4), and states it.
+8. σ_t of (155.4) is not given. The stream uses σ_t = t_0, a stated assumption. The gates are
+   taken at R_f ≥ 25 mm, where H20 reports insensitivity to the ignition parameters.
+9. The REMBE vessel's dimensions (length, diameter, end shape, sensor positions) are **not
+   published** in H22; its Fig. 1 is an unscaled drawing. The 0.06 bar at t = 0 in Figs. 10-11
+   is not explained. This section reads it as the overpressure left by the pressurised dust
+   injection.
+10. The Zenodo record lists CC BY 4.0 for an OpenFOAM-based (GPL v3) solver. The stream treats
+    it as GPL.
+11. H22 Fig. 9 is captioned "k-omega turbulence model", Figs. 10-11 "k-omega-SST".
+12. The molecular heat diffusivity κ, and its temperature law, are stated in neither paper. The
+    law sets Ψ through n (§153.2). The stream states κ = μ/(ρ Pr) with Pr = 0.7 and Sutherland μ
+    unless a case says otherwise, and regenerates Ψ for that law.
+13. *(DST-00)* H20 Table 1's ρ_b = 0.248 kg/m³ is not the burned density at T_b = 1500 K. The
+    gas law at p_0 = 110 000 Pa and W_b = 29.7 g/mol gives 0.2620 kg/m³ at 1500 K, and gives
+    0.248 kg/m³ at 1584 K, close to the calculated 1592 K that H20 says it did NOT use. So
+    ρ_u/ρ_b = 1.32/0.248 = 5.32 ≠ σ. The stream takes σ from T and W (§152.9), never from the
+    printed densities.
+14. *(DST-00)* H20 Table 1 prints σ = (T_b W_u)/(T_u W_b) = 5.06. The formula with the printed
+    inputs gives **5.0505**. H20 §3.3 also says Bradley's σ = 5.49 "corresponds to" 1592 K; the
+    formula gives 5.36 at 1592 K, and 5.49 needs 1631 K. Prescribed mode computes σ = 5.0505
+    (§152.9). The gate band σ = 5.06 ± 0.01 (DST-01) contains it, by 0.0005; a miss is a finding,
+    never a widened band.
+15. *(DST-00)* H22 §3.5 says term T2 "grows from unity at t > tflacc to 1.4 at t = 0.3ms". The
+    time is 0.3 s: (0.3/0.15)^{1/2} = 1.414.
+
+### 151.8 Papers not openly available
+
+| paper | used for | the open restatement used |
+|---|---|---|
+| Zimont 2000, *Exp. Therm. Fluid Sci.* 21:179-186 (the CRS4 1999 report copy was unreachable) | (154.4), the TFC constant | H20 eq. (5), H22 eq. (9); A = 0.52 unverified |
+| Lipatnikov & Chomiak 1997 (SAE 972993), 2002 (*PECS* 28:1-74), 2005a,b, 2007 | (154.2)-(154.3), (155.5), (155.7) | H20, H22 |
+| Huang et al. 2016 (*CST* 188:98-131), the Ψ fit | not used: Ψ is regenerated (§153) | the definition in H20 p. 3-4 |
+| Gülder 1984 (SAE 841000) | the form of (152.14) | H22 eq. (3), the φ part only |
+| Dahoe et al. 1996 (*JLPPI* 9:33-44); Dahoe & de Goey 2003 (*JLPPI* 16:457-478); Dahoe, Hanjalić & Scarlett 2002 (*Powder Technol.* 122:222-238) | (157.2)-(157.5), the S_L data behind (152.13) | BKM24 eqs. (6.9)-(6.10) (CC BY); the derivations of §157; H22 eq. (3) |
+| Bradley, Chen & Swithenbank 1989 (*Proc. Combust. Inst.* 22:1767-1775) | the J.1 data | H20 Figs. 8-9 |
+| Gostintsev, Istratov & Shulenin 1988 (*Combust. Explos. Shock Waves* 24:563-569) | (154.8) | H22 eq. (10) |
+| Zel'dovich & Frank-Kamenetskii 1938 | (153.5) | derived in §153.4 |
+| Menter 1994 (*AIAA J.* 32:1598-1605); Menter, Kuntz & Langtry 2003; Spalart & Rumsey 2007 (*AIAA J.* 45:2544-2553) | (156.1)-(156.9) | TMR |
+| Baum & Street 1971; Badzioch & Hawksley 1970; Ranz & Marshall 1952 | (159.2)-(159.5) | ISL22; §76 |
+| Deleersnijder, Campin & Delhez 2001 (*J. Mar. Syst.* 28:229-267) | the idea of (160.1) | derived in §160.1; the gate is the exact identity (160.2) |
+| corn starch devolatilisation kinetics (A, E_a) | (159.4) for a real starch | **no open source found**: DST-16 (iii) is NAMED and NOT RUN |
+| the REMBE vessel geometry and the ISFEH 2022 companion paper (Chalmers record 530715) | DST-11 | none: NAMED until obtained (docs/17 §11 item 9) |
+
+### 151.9 The precision class of every planned row
+
+Docs/17 §5.1 item 4 applies in full: P (physics, the same tolerance in f32), A (an accumulated
+identity, evaluated in f64, the same tolerance), D (discrete or bitwise), R (a round-off twin,
+`check_roundoff`, tol32 = max(tol64, min(tol64·2^29, 1e-5)) by D-F32-1). No DST unit invents an
+f32 tolerance. The Ψ solve, the AICC and thin-flame integrators and every oracle are host f64 in
+both builds.
+
+| unit | rows and their class |
+|---|---|
+| DST-01 | AICC 8.57 ± 1 % (A); ΔH_r ± 0.1 % (A); pseudo-species sums to 1e-12 (A); element balance exact (D); σ = 5.06 ± 0.01 (A); S_L(0.62) to 1e-12 (A). Host f64 in both builds |
+| DST-02 | N against 2N to 1e-10; (153.4) to 1e-10; c_cut insensitivity to 1e-9; the ZFK monotonicity; the saddle slope to 1e-6. All A (host f64, both builds) |
+| DST-03 | device against host ≤ 4 ulp in f64, R in f32; the developed limit to 1e-12 (A); the early series to 1e-4 (A); the two forms of (154.4) to 1e-14 (A); TFC Q ≡ 0 (D); T2 ≡ 1 before t_flacc (D); f32-safe Arrhenius: R where representable, exact 0 below, no subnormal, the zero counter (D) |
+| DST-04 | planar exact, laminar limit, flame Courant, ignition: P in both builds at one tolerance; the bounds counter 0 and the refusal (D) |
+| DST-05 | ρ ≡ 1 bitwise (D); homogeneous decay (P); SST-sust holds ambient (R); the ∫ρk dV budget (A); the dilatation terms (R) |
+| DST-06 | the sealed box at AICC (P); the energy budget (A); the adiabatic line to 0.5 K (P); the case equals the library (D); no dust, no change (D); the refusals (D) |
+| DST-07 | S_t,b ± 20 %, the slope ± 15 %, the pressure rise < 1 % (P); the sector mesh (D) |
+| DST-08 | the thin-flame rows, the cube-root law and the negative control (P); REMBE closed ± 0.009 bar and the time to 0.1 bar (P, a REPRODUCTION row) |
+| DST-09 | the closed membrane and the open membrane bitwise (D); Sod against the exact solution (P); the trigger (D); the refusals (D) |
+| DST-10 | the box at AICC, the jump conditions, the precursor (P); no dust, no change and SST at ρ ≡ 1 (D) |
+| DST-11 | the full run against J.3 (P, R-run, NAMED until the geometry); the REDUCED smoke: finite fields, one opening, a peak (D), the mass budget to 1e-10 (A) |
+| DST-12 | devolatilisation and heat-up closed forms, the Bird factor, the device twin (R); the stage order (D) |
+| DST-13 | the d² law, the linear law, the combined limits (R); the element balance (A); the retention split (D) |
+| DST-14 | the seeded mass and the Rosin-Rammler moment (A); the refusals and the schema round trip (D) |
+| DST-15 | mass, energy, elements and momentum (A); the AICC end state (P); no cloud, no change and the case equals the library (D) |
+| DST-16 | the fine-particle limit (P); the size monotonicity (D); the measured S_L (NAMED, not run) |
+| DST-17 | p_end and the half-pressure time (P); K_st against 200 bar m/s (NAMED, not run) |
+| DST-18 | thin-cloud emission (P); the uniform-field heating (R); the energy closure (A); radiation off (D) |
+| DST-19 | the studio suites at today's counts (D) |
+| DST-20 | OFF is the global clock bitwise (D); one ignition (R); two kernels (R) and the α budget (A); the refusal (D) |
+
+§112.3 gains the DUST f32 rows when each gate unit lands, and F32-13/14 carry them on.
+
+### 151.10 The gate table
+
+| gate | unit | reference | band | where the band comes from | status |
+|---|---|---|---|---|---|
+| DST-LEEDS | DST-07 | key J.1 (H20 Fig. 9, Bradley et al. 1989) | S_t,b ± 20 % at u' ∈ {0.80, 1.62, 2.45, 3.31} m/s, R_f ∈ {25, 30, 35} mm; dS_t,b/du' at 30 mm ± 15 % of 0.678; Δp < 1 % at R_f = 35 mm | H20's own model deviation (≤ 16 %, R_f = 25-35 mm) plus the reading uncertainty; H20 §3.2 for Δp | REDUCED, 1-D sector, ≤ 6 min per build |
+| DST-VES (i) | DST-08 | (157.4) integrated on the host | half-pressure time 1 %; (dp/dt)_max 2 %; p_end 0.1 % of AICC; K_st(20 L)/K_st(1 m³) = 1 ± 0.02 | definitions and exact identities (§157.2) | REDUCED |
+| DST-VES (ii) | DST-08 | key J.2 (H22 Fig. 10) | ± 0.009 bar at t = 0.05-0.10 s; t(0.1 bar) ± 0.01 s of 0.10 s | H22's own model deviation (0.0065 bar) plus the reading uncertainty | REDUCED; a REPRODUCTION row (u', L tuned by H22) |
+| DST-REMBE | DST-11 | key J.3 (H22 Fig. 11) | peak ± 10 % of 0.60 bar at ± 0.015 s of 0.31 s; rise 0.20-0.28 s ± 15 % of 4.55 bar/s; rupture ± 0.01 s of 0.10 s | H22's own model (+4 %, −0.01 s) plus the reading uncertainty | **NAMED and NOT RUN** until the vessel geometry is obtained; a REDUCED smoke run on a labelled placeholder cylinder |
+| DST-B-LAM | DST-16 | the gas flame of the same volatile mixture; Dahoe et al. 2002 via (152.13) | (i) 2 %; (ii) monotone; (iii) — | a limit identity; (iii) a measurement | (iii) **NAMED and NOT RUN** (no open kinetics) |
+| DST-B-VES | DST-17 | the cloud's AICC; (157.4) | p_end 0.5 %; half-pressure time 5 % | conservation; (157.2)'s approximation under variable c_p and W | K_st = 200 bar m/s ± 15 % **NAMED and NOT RUN** (the standard test's turbulence is not published) |
+
+The unit-test rows of DST-01 to DST-06, DST-09, DST-10, DST-12 to DST-15, DST-18 and DST-20 are
+verification rows, each against a closed form or an exact identity stated in §152-§160. None of
+them compares against another code (§10, §22).
+
+### 151.11 The design decisions
+
+Docs/17 §10.3 records DD1-DD12, each with its INSIGHTS reason: closed vessels on `ofgpu-lowmach
+-sealed` and vents on `ofgpu-compressible` (DD1, INSIGHTS (c)); two pseudo-species and one
+temperature (DD2, (b)); Ψ solved at setup, no fit shipped (DD3, (a)); the ρ-weighted SST-2003
+opt-in, SST-sust for the fan-stirred bomb (DD4, (j)); REDUCED gates on 1-D spherical sectors
+(DD5, (i)); the current unburned density in the propagation term (DD6, (g)); the inputs of
+§151.5 (DD7, (k)); the flame-age clock OFF by default (DD8, (f)); the one-domain membrane vent
+and the active-baffle names refused (DD9, (c)); A = 0.52 a named non-default input (DD10); an
+authored one-step volatile reaction on the finite-rate path (DD11, (l)); no non-uniform φ
+(DD12). U1 (track J.1 as DIGITISED facts) was taken by recommendation. U2 (the REMBE geometry)
+and U3 (GPU time for DST-11's full run) wait for the user (docs/17 §11 items 9-10).
+
+**DUST numerics are opt-in.** A case without the dust blocks is byte-identical (a hash pin), and
+every DUST driver unit carries a "no dust, no change" row. The ρ-weighted SST changes nothing
+for an existing case. The f64 build stays bitwise unless a DUST option is selected.
+
+---
+
+## 152. Equivalent-gas thermochemistry — two pseudo-species, one temperature, the AICC state, S_L(φ)
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-01 (and of the
+thermo DST-06, DST-10 and DST-15 reuse). Notation: `~` a Favre mean, `‾` a Reynolds mean;
+subscripts `u` unburned, `b` burned, `0` initial; SI units. The labels (152.1)-(152.14) are
+RESEARCH D.1-D.14, one for one.
+
+### 152.1 The fuel, the global reaction, φ and the molar mass
+
+H20 §3.1 and H22 §3.1 take corn starch (cornflour) as `C6H7.88O4.98`, burned completely:
+
+```
+  C6H7.88O4.98 + 5.48 (O2 + 3.76 N2)  ->  6 CO2 + 3.94 H2O + 20.6048 N2                (152.1)
+```
+
+H20 prints the nitrogen ratio 3.71 (and 20.331 N2). Air is O2 : N2 = 21 : 79 = 1 : 3.76, which
+the stream uses (§151.7 item 5). The oxygen balance is exact: `4.98 + 2·5.48 = 15.94 = 12 +
+3.94`.
+
+The equivalence ratio [H22 §3.2, §3.6]:
+
+```
+  φ = (n_f / n_O2) / (n_f / n_O2)_st ,      (n_f / n_O2)_st = 1 / 5.48                (152.2)
+```
+
+`n_f` counts only the dust that burns. H22 uses this "corrected" φ, with the burnt-mass fraction
+of Skjold et al.: the REMBE nominal 750 g/m³ is **φ_corr = 0.62**. A charge at φ holds, per mole
+of fuel, `5.48/φ` mol O2 and `3.76·5.48/φ` mol N2.
+
+The molar mass [H22 §3.1, Table 1]:
+
+```
+  W_cs = 0.16 kg/mol (printed) ;   R_spec,cs = R0 / W_cs = 52.11 J/(kg K) (printed, R0 = 8.314)   (152.3)
+```
+
+The formula gives `W = 6·12.011 + 7.88·1.008 + 4.98·15.999 = 159.684 g/mol` with the IUPAC
+conventional weights, and `159.686 g/mol` with the 1991 weights of TM-4513. **The pseudo-species
+use the formula's W** (consistent with the component sums of §152.4). The printed 0.16 is a
+rounding of it, and enters nothing.
+
+### 152.2 The starch polynomial and its a5
+
+H22 eq. (1) and eq. (2), with Table 1's coefficients:
+
+```
+  c_p,cs = R_spec,cs ( a4 T^4 + a3 T^3 + a2 T^2 + a1 T + a0 )                 [J/(kg K)]      (152.4)
+  H_a,cs = R_spec,cs ( a4 T^5/5 + a3 T^4/4 + a2 T^3/3 + a1 T^2/2 + a0 T + a5 )   [J/kg]       (152.5)
+  a0 = −3.2726 ,  a1 = 0.10056 K⁻¹ ,  a2 = a3 = a4 = 0 ,  a5 = −99 808 K (printed "−9 9808")
+```
+
+(a linear fit to Tan et al. 2004's measurements; `c_p,cs(300 K) = 52.11·(0.10056·300 − 3.2726)
+= 1401.5 J/(kg K)`). **The printed a5 is not used.** With it, (152.5) at 298.15 K gives
+−5.0189 MJ/kg, while H_f,cs = −792.6 kJ/mol is −4.954 MJ/kg (W = 0.16) or −4.964 MJ/kg (the
+formula W): a 1 % disagreement (§151.7 item 4). H_f,cs is the datum, because ΔH_r is
+consistent with it (§152.3). Per mole, `R_spec·W = R0`, so W cancels and **[derived]**
+
+```
+  a5 = H_f,cs / R0 − ( a1 T²/2 + a0 T ) |_{T = 298.15 K}
+     = −792 600 / 8.314462618 − ( 4469.63 − 975.73 ) = −98 821.7 K
+```
+
+(−98 827.0 with R0 = 8.314). DST-01 computes it in f64 from the inputs, never as a literal.
+
+### 152.3 The heat of reaction, a consistency identity
+
+**[derived check]** With water as vapour and the MZG02 formation enthalpies at 298.15 K
+(`reference/nasa-glenn2002/table_B1.csv`: CO2 −393.510, H2O −241.826 kJ/mol):
+
+```
+  ΔH_r = 6 H_f(CO2) + 3.94 H_f(H2O, g) − H_f,cs = −2521.25 kJ/mol                       (152.6)
+```
+
+H22 §3.1 (from Bradley et al. 1989) states 2521 kJ/mol, and H20 §3.1 states 15.8 MJ/kg (the
+formula W gives 15.79 MJ/kg). The identity holds to 0.01 %: H_f,cs and ΔH_r are mutually
+consistent, and the starch's H_f is the datum of §152.2. The DST-01 band is 0.1 %.
+
+### 152.4 The NASA-7 form and the two pseudo-species
+
+The gas species use the seven-coefficient polynomials of §128 [MZG02; TM-4513]:
+
+```
+  c_p/R0 = b1 + b2 T + b3 T² + b4 T³ + b5 T⁴
+  h/(R0 T) = b1 + b2 T/2 + b3 T²/3 + b4 T³/4 + b5 T⁴/5 + b6/T                              (152.7)
+  s/R0 = b1 ln T + b2 T + b3 T²/2 + b4 T³/3 + b5 T⁴/4 + b7
+```
+
+two ranges joined at T_mid = 1000 K. The starch, as an equivalent-gas "vapour", is put in the
+same form per mole with `b1 = a0`, `b2 = a1`, `b3 = b4 = b5 = 0`, `b6 = a5` of §152.2 and one
+range for both intervals. Its `b7` is not needed: no equilibrium or entropy uses the starch, and
+DST-01 sets it to 0 and says so.
+
+**[derived; the design of the thermo]** The unburned equivalent gas `U` (air plus the dust
+"vapour" at φ) and the burned gas `B` (the complete products of (152.1) at φ, with the excess O2)
+are two pseudo-species. Their component mass fractions `Y_k^U`, `Y_k^B` are fixed by φ:
+
+```
+  h_U(T) = Σ_k Y_k^U h_k(T)/W_k ,     h_B(T) = Σ_k Y_k^B h_k(T)/W_k        [J/kg, formation included]
+  h(T, c~) = (1 − c~) h_U(T) + c~ h_B(T)
+  1/W(c~)  = (1 − c~)/W_U + c~/W_B                                                         (152.8)
+  c_p(T, c~) = (1 − c~) c_p,U(T) + c~ c_p,B(T)
+```
+
+Because (152.7) is linear in its coefficients, each pseudo-species is itself an exact NASA-7
+polynomial per mole: `b_j^U = W_U Σ_k Y_k^U b_j^k / W_k` (likewise B), provided every component
+shares T_mid (1000 K for MZG02, TM-4513 and the starch). Then `c~` is exactly the mass fraction
+`Y_B`, and the CHEMRAD machinery carries the gas unchanged: §128's thermo (CHR-01), species
+transport with a source (CHR-09), the c_p field and the heat release (CHR-10a/b), and W_mix in
+the density and the molar term of the sealed constraint (CHR-11).
+
+### 152.5 The state and the isobaric burned state
+
+```
+  ρ = p W(c~) / (R0 T)          (low-Mach: p -> p0(t), §25 ;  compressible: p = p_op + p_gauge, §122)   (152.9)
+```
+
+**[derived]** The isobaric adiabatic burned state and the density ratio [the relation of H20
+Table 1]:
+
+```
+  h_B(T_b) = h_U(T_u) ,       σ = ρ_u / ρ_b = (T_b W_U) / (T_u W_B)                      (152.10)
+```
+
+T_b is found by a bracketed f64 root of `h_B(T) − h_U(T_u)` on [T_u, 6000 K].
+
+### 152.6 Adiabatic isochoric complete combustion (AICC)
+
+**[derived from the first law]** In a closed rigid adiabatic vessel the internal energy of the
+charge is conserved:
+
+```
+  U_B(T_v) = U_U(T_0) ,    U = H − n_gas R0 T ,    P_max / p_0 = (n_B T_v) / (n_U T_0) = (T_v W_U)/(T_0 W_B)   (152.11)
+```
+
+`n_U`, `n_B` are the gas moles of the unburned and burned charge per mole of fuel. **Convention:
+the dust is counted as gas moles** (H20 Table 1's W_u = 32.8 g/mol is reproducible only that
+way). The other convention (a solid fuel with no gas volume, `U ≈ H` for it, `n_U` without the
+fuel mole) is a stated alternative that DST-01 does not use; its value is in §152.10.
+
+### 152.7 The one energy equation and its heat release
+
+**[derived from (152.8); §26, §133]** With h of (152.8) the adiabatic enthalpy equation has no
+chemical source. Unit Lewis number and Sc_t = Pr_t make h and `c~` diffuse alike:
+
+```
+  ρ Dh/Dt = ∇·( ρ (κ + D_t) ∇h ) + dp0/dt
+```
+
+Write `Dh/Dt = c_p DT/Dt + (h_B − h_U) Dc~/Dt` and `∇h = c_p ∇T + (h_B − h_U)∇c~`. Then
+`∇·(ρD(h_B − h_U)∇c~) = (h_B − h_U)∇·(ρD∇c~) + ρD(c_p,B − c_p,U)∇T·∇c~`, with D = κ + D_t.
+Subtract `(h_B − h_U)` times the `c~` equation (155.3) with its source ω̇_c:
+
+```
+  ρ c_p DT/Dt = ∇·(λ_eff ∇T) + ρ (κ + D_t)(c_p,B − c_p,U) ∇T·∇c~ + q̇ + dp0/dt ,   λ_eff = ρ (κ + D_t) c_p
+  q̇ = ( h_U(T) − h_B(T) ) ω̇_c                                         [W/m³]                    (152.12)
+  ω̇_c = ρ_u U_t |∇c~| + Q + ρ W_ign        (the whole source of (155.3), with (155.4))
+```
+
+The second term is the species-enthalpy diffusion of two pseudo-species with different c_p
+(CHR-10b carries exactly this term). It is zero in the published constant-c_p form. With it the
+T equation IS the h equation, so in an isobaric adiabatic flame T(c~) stays on the adiabatic
+line `h(T, c~) = h_U(T_u)`, the property §153 relies on.
+
+### 152.8 The laminar burning velocity
+
+H22 eq. (3), a Gülder-form fit by H22 to the Dahoe et al. 2002 data:
+
+```
+  S_L(φ) = W φ^η exp[ −ξ (φ − σ_φ)² ] ,   W = 0.2145 m/s, η = −0.2774, ξ = 39.1832, σ_φ = 0.6   (152.13)
+```
+
+(H22 writes the shift as σ; it is σ_φ here, to keep σ for the density ratio). **[evaluation]**
+`S_L(0.62) = 0.2145 · 1.141801332 · 0.984448907 = 0.241107668 m/s`.
+
+Gülder's temperature and pressure factors are an option, default off [Gülder 1984, not open; the
+form is widely restated]:
+
+```
+  S_L(φ, T_u, p) = S_L(φ) (T_u/T_ref)^α (p/p_ref)^β ,     default α = β = 0 (exactly H22)          (152.14)
+```
+
+Non-zero α, β are a case input, named in the case and refused by every gate.
+
+### 152.9 The two thermo modes
+
+Both are one-temperature (INSIGHTS (b)).
+
+* **formula** (REMBE, the default): U and B are built from (152.1)-(152.8) at the case's φ, with
+  the starch of §152.2 and the TM-4513/MZG02 species of §128.
+* **prescribed** (Leeds): constant c_p per pseudo-species, W_u = 32.8 g/mol, W_b = 29.7 g/mol,
+  T_u = 328 K and the measured T_b = 1500 K, as H20 Table 1 states. The heat of combustion is
+  the value that makes the isobaric burned state T_b exactly: `h_U(T_u) = h_B(T_b)` with
+  `h_X(T) = h_X^f + c_p,X (T − T_ref)` and a common `c_p` (the published constant-c_p form).
+  σ follows from (152.10): **σ = 1500·32.8/(328·29.7) = 5.0505**. The printed 5.06 and the
+  printed densities are not inputs (§151.7 items 13-14). This is also the mode in which (157.2)
+  is exact (INSIGHTS (h)).
+
+A prescribed case states its one c_p; H20 gives none. **[derived]** With one c_p for both
+pseudo-species, the adiabatic line is `T(c~) = T_u + c~ (T_b − T_u)`, which does not contain
+c_p, and `q̇/c_p = (T_b − T_u) ω̇_c` does not either. So c_p enters a prescribed run only through
+γ = c_p/(c_p − R0/W) in the compression of the fresh gas and in the sealed `p0` (§157). The Leeds
+case states the c_p it uses and its γ_u (the Leeds pressure rise is below 1 %, H20 §3.2, so the
+DST-07 rows do not depend on it), and each DST-08 sphere case takes γ_u from the same case
+thermo as its host reference.
+
+### 152.10 What DST-01 must make true, and the check values DST-00 measured
+
+DST-00's oracle (an independent f64 Python evaluation in the scratchpad, never in the tree;
+TM-4513 records for N2, O2, CO2 and H2O; the starch of §152.2; T_0 = 273 K; complete combustion
+to CO2/H2O/O2/N2, no dissociation; R0 = 8.314462618) gives, at φ = 0.62:
+
+| convention | n_U | n_B | W_U [g/mol] | W_B [g/mol] | T_b [K] | σ | T_v [K] | P_max/p_0 |
+|---|---|---|---|---|---|---|---|---|
+| 1:3.76, dust as gas (the stream's) | 43.0723 | 46.5323 | 31.888 | 29.517 | 1779.5 | 7.042 | 2173.4 | **8.601** |
+| 1:3.76, solid fuel | 43.0723 (42.0723 gas) | 46.5323 | 31.888 | 29.517 | 1779.5 | 7.042 | 2174.9 | 8.811 |
+| 1:3.71, dust as gas | 42.6303 | 46.0903 | 31.928 | 29.532 | 1791.2 | 7.094 | 2187.2 | 8.662 |
+
+The stream value is **8.57 ± 1 %** (the band [8.484, 8.656]). The stream's convention gives
+8.601 (+0.36 %); the planner's GRI-Mech hand check gave 8.597. The solid-fuel convention
+(+2.8 %) and the printed 1:3.71 air (+1.07 %) both fall outside the band, as docs/17 says they
+must. The isobaric REMBE state is T_b ≈ 1780 K, σ ≈ 7.04 (H22 states no σ).
+
+DST-01 lands, with tests in both builds (class A unless marked):
+
+* `dust::thermo::tests::aicc_corn_starch_phi_0_62`: (152.11) at φ = 0.62, T_0 = 273 K, 1:3.76,
+  dust as gas: P_max/p_0 within 8.57 ± 1 %.
+* `dust::thermo::tests::heat_of_reaction_from_formation_enthalpies`: (152.6) within 2521 kJ/mol
+  ± 0.1 %.
+* `dust::thermo::tests::pseudo_species_equal_component_sums`: the pseudo-species polynomials
+  (152.8) equal the component sums of c_p, h and s at 50 temperatures on [200, 6000] K to 1e-12
+  relative; the element balance of (152.1) at φ is exact (D).
+* `dust::thermo::tests::prescribed_mode_sigma_5_06`: σ within 5.06 ± 0.01 (it is 5.0505).
+* `dust::laminar::tests::s_l_huang2022_eq3`: S_L(0.62) = 0.241107668 m/s to 1e-12 relative.
+
+---
+
+## 153. Ψ — the laminar-limit eigenproblem, its integral identity, and the ZFK diagnostic
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-02. The labels
+are (153.1) = D.24 and (153.2)-(153.5) = D.25-D.28. **Ψ is regenerated from its definition and
+never read from a fit** (INSIGHTS (a), docs/17 DD3).
+
+### 153.1 The published temperature closure, and the one this stream uses
+
+H20 (text after eq. (6)) and H22 (text after eq. (4)) evaluate T~ in the source Q (154.1) by "the
+simplest form of the ideal gas state equation":
+
+```
+  ρ‾ T~ = ρ_u T_u      =>      T~ = T_u ( 1 + (σ − 1) c~ )                                    (153.1)
+```
+
+It is exact only for one constant W. It is kept as the **published-form option** and as the
+closure the eigenproblem uses when that option is selected. The stream's default is the solved
+T of (152.12), and the eigenproblem then uses the case's own adiabatic line: T(c) from
+`h(T, c) = h_U(T_u)` with (152.8), and ρ(c) from (152.9) at fixed p (§153.2). With W_u ≠ W_b
+the two closures differ (§151.7 item 6).
+
+### 153.2 The reaction time scale and the defining eigenproblem
+
+H20 eq. (7), H22 eq. (5):
+
+```
+  t_r = Ψ²( T_b/T_u , Θ/T_u ) κ_u / S_L²                                                     (153.2)
+```
+
+"Ψ approximates values of S_L (t_r/κ_u)^{1/2}, pre-computed for various ratios T_b/T_u and
+Θ/T_u by numerically integrating 1-D Eqs. (1), (2) and (6) with D_t = U_t = 0" (H20 p. 3-4).
+The published fit is in Huang et al. 2016, which is not open (§151.8), and it is exact for one
+closure only. The stream solves the definition itself, for the case's own closure.
+
+**[derived from (155.3), (154.1) and (153.1) or (152.12), with D_t = U_t = 0]** A stationary
+planar flame in its own frame, fresh gas entering at S_L, mass flux `m = ρ_u S_L`:
+
+```
+  m dc/dx = d/dx( ρκ dc/dx ) + ρ (1 − c) exp(−Θ/T(c)) / t_r
+```
+
+Write `ρκ = ρ_u κ_u g(c)` with `g = (T(c)/T_u)^{n−1}`, where n is the exponent of the case's
+diffusivity law `κ ∝ T^n` at fixed p (n = 1: ρκ constant; Sutherland μ with constant Pr gives
+n ≈ 1.7), and ρ(c), T(c) the case's own state along the adiabatic line (§153.1). Divide by ρ_u
+and set `x* = x S_L/κ_u`, so `dc/dx = (S_L/κ_u) c'` and `d/dx(κ_u g dc/dx) = (S_L²/κ_u)(g c')'`:
+
+```
+  (g c')' − c' + Λ w(c) = 0 ,     c(−∞) = 0 ,  c(+∞) = 1
+  w(c) = (ρ(c)/ρ_u) (1 − c) exp(−Θ/T(c))                                                     (153.3)
+  Λ = κ_u / (S_L² t_r) = 1/Ψ²                  (the eigenvalue)
+```
+
+In the phase plane, with `P = g dc/dx*` and `P(0) = P(1) = 0`: `dP/dx* = c' − Λ w` and
+`c' = P/g`, so
+
+```
+  dP/dc = 1 − Λ w(c) g(c) / P(c)
+```
+
+**The eigenvalue** is the unique Λ for which the trajectory leaving the cold boundary on the
+preheat solution reaches P(1) = 0 without touching P = 0 earlier. The preheat solution has no
+reaction: `(g c')' − c' = 0` integrated from −∞ gives `g c' = c`, so `P = c`. For Λ too large P
+reaches 0 before c = 1; for Λ too small P(1) > 0. Λ is therefore bracketed and bisected; §153.5 says how
+the hot end is pinned.
+
+**The hot end** is a saddle. Near c = 1, `w ≈ k (1 − c)` with `k = (ρ_b/ρ_u) exp(−Θ/T_b)`, and
+`P ≈ a (1 − c)`. Then dP/dc = −a and the right side is `1 − Λ k g(1)/a`, so
+
+```
+  a² + a − Λ k g(1) = 0 ,      a > 0
+```
+
+(the end-slope check of DST-02).
+
+**The cold end** has `w(0) = exp(−Θ/T_u) > 0` (1.9e−32 for REMBE), the classical cold-boundary
+difficulty. The march starts at `c_cut` (default 1e−10) on `P = c_cut`. The eigenvalue must not
+depend on c_cut below 1e−6 (DST-02's `cut_insensitive`).
+
+### 153.3 The integral identity
+
+**[derived: integrate (153.3) over x*]** `g c'` vanishes at both ends and c runs from 0 to 1, so
+`−1 + Λ ∫ w dx* = 0`. With `dx* = dc/c' = g dc/P`:
+
+```
+  Λ ∫_0^1 g(c) w(c) / P(c) dc = 1 ,      Ψ² = 1/Λ = ∫_0^1 g(c) w(c) / P(c) dc                     (153.4)
+```
+
+A converged eigen-solution satisfies (153.4) to round-off of the quadrature on the march's own
+nodes. It is the "defining integral" of INSIGHTS (a), and an independent check of the shooting.
+
+### 153.4 The high-activation-energy (ZFK) asymptote
+
+**[derived from (153.3); Zel'dovich & Frank-Kamenetskii 1938, not open]** In the preheat zone
+`P = c`, so P → 1 entering the thin reaction zone at c → 1⁻. Inside the reaction zone convection
+is negligible, `P dP/dc = −Λ g w`, so `P²(entrance) − P²(1) = 2Λ ∫ g w dc` with P(1) = 0:
+
+```
+  Λ_ZFK = 1 / ( 2 ∫_0^1 g(c) w(c) dc ) ,        Λ/Λ_ZFK -> 1 as Ze -> ∞ ,   Ze = (Θ/T_b)(1 − T_u/T_b)   (153.5)
+```
+
+A t_r built from Λ_ZFK propagates at `(Λ_ZFK/Λ)^{1/2} S_L` (§153.6). (153.5) is a diagnostic and
+the second method of DST-04's laminar-limit rows, never the setup's Ψ.
+
+### 153.5 The numerical method (the contract DST-02 implements)
+
+**Two-sided shooting, not forward shooting.** RESEARCH D.26's prototype marched forward from the
+cold end to c = 1 and bisected on whether P touched zero. That pins Λ (to 1e−11 relative), but
+not the trajectory near the hot end: the saddle repels a forward march, and at the converged Λ
+the forward trajectory leaves the stable manifold, so P(1) ≈ 2e−7 instead of 0 and (153.4)
+holds only to about 2e−7 (DST-00's oracle, both cases, bisection to 1e−14). DST-02's identity
+row (1e−10) needs the hot end pinned. Integrated BACKWARD from c = 1 (c decreasing), the
+saddle's stable manifold attracts: a perturbation decays as `(1 − c)^{(a+1)/a}`. So:
+
+* Host f64 in both builds (class A). It runs at case setup, once per case, in milliseconds.
+* **The cold leg** marches forward by classical RK4 in `u = ln c` from `ln c_cut` (on `P = c_cut`)
+  to `u_m = ln 0.5`, N/2 steps.
+* **The hot leg** marches backward by classical RK4 in `s = −ln(1 − c)` from `s_max = 36`
+  (1 − c = 2.3e−16), starting on the manifold `P = a (1 − c)` with a from the saddle quadratic of
+  §153.2 at the current Λ, down to `s = ln 2`, N/2 steps. Default N = 40 000.
+* **The eigenvalue** is the root of the mismatch `F(Λ) = P_cold(0.5) − P_hot(0.5)`, bracketed
+  and bisected on ln Λ to a relative width of 1e−15, or until F changes sign between adjacent
+  doubles. Λ scales as exp(Θ/T_b), so the bracket is [1e−6, 1e6] · exp(Θ/T_b); a fixed bracket
+  fails at Ze = 80. DST-02 checks the bracket (F must change sign across it).
+* **(153.4)** is evaluated by composite Simpson on each leg's own nodes, with `dc = c du` and
+  `dc = (1 − c) ds`, plus the analytic tail `(k g(1)/a)(1 − c(s_max))` beyond s_max. Because it
+  is a different quadrature from the RK4 march, it checks the march.
+* **(153.5)** by composite Simpson in the same variables, on its own 2 × 20 000 nodes.
+* **The end slope** for `saddle_slope` is measured on the converged hot leg as
+  `a_m = P/(1 − c)` at 1 − c = 1e−8, not taken from the quadratic that seeded it.
+
+DST-00's oracle with this method (published closure, n = 1): Λ at N = 20 000 and 40 000 agree to
+3.5e−12 (Leeds) and 3.3e−12 (REMBE); (153.4) holds to 4.6e−13 and 6.8e−13; c_cut ∈ {1e−8,
+1e−10, 1e−12} agree to 1.2e−11. Every DST-02 row is reachable at its planned tolerance.
+
+The case setup computes `t_r = Ψ² κ_u / S_L²` from it. A documentation table over
+(σ, Θ/T_u, n) is generated for review, never as the solver's input. A diagnostic reports the
+speed `S_prop/S_L = Ψ_true/Ψ_used` that any user-supplied Ψ implies, and refuses nothing.
+
+### 153.6 Review values (not answer keys)
+
+The planner's prototype (RESEARCH D.27) and DST-00's independent oracle (the method of §153.5,
+N = 20 000 and 40 000 agreeing to nine digits), published closure (153.1), n = 1:
+
+| case | σ | Θ/T_u | Ψ (planner) | Ψ (DST-00) | Ψ² (DST-00) | Λ/Λ_ZFK | Ze |
+|---|---|---|---|---|---|---|---|
+| Leeds (H20) | 5.06 | 20000/328 = 60.976 | 1.5445e−4 | 1.544528e−4 | 2.385567e−8 | 0.7819 | 9.669 |
+| REMBE (H22, σ of §152.10) | 7.04 | 20000/273 = 73.260 | 3.1811e−4 | 3.186768e−4 | 1.015549e−7 | 0.7722 | 8.928 |
+
+The Leeds values agree. The REMBE Ψ differs by 0.18 % between the two (the ratio Λ/Λ_ZFK
+agrees). DST-02 settles it by its own convergence and identity rows, and records its value
+in its "Landed" paragraph. The ZFK value is 13-14 % fast in speed at these Zel'dovich numbers
+(`(1/0.782)^{1/2} = 1.131`, `(1/0.772)^{1/2} = 1.138`): an asymptotic shortcut is not good
+enough (INSIGHTS (a)).
+
+DST-00's oracle at σ = 7.04, Θ/T_u = Ze σ²/(σ − 1), N = 20 000 gives Λ/Λ_ZFK = 0.7915, 0.8832,
+0.9376, 0.9677 at Ze = 10, 20, 40, 80: monotone, and 1 − Λ/Λ_ZFK = 0.032 < 0.05 at Ze = 80, so
+the DST-02 row is reachable.
+
+**The sensitivity to the diffusivity law** (planner, REMBE): a Ψ built for n = 1 and run in a
+solver whose law is n = 0.5 propagates the laminar limit at 0.64 S_L; n = 0 at 0.41 S_L; n = 1.5
+at 1.56 S_L. This is the mechanism behind INSIGHTS (a).
+
+### 153.7 What DST-02 must make true
+
+Tests in both builds, host f64, class A, ≤ 2 min:
+
+* `dust::psi::tests::eigen_converges`: Λ at N and 2N steps agree to 1e−10 relative.
+* `dust::psi::tests::integral_identity_holds`: (153.4) holds to 1e−10.
+* `dust::psi::tests::cut_insensitive`: Λ at c_cut ∈ {1e−8, 1e−10, 1e−12} agrees to 1e−9.
+* `dust::psi::tests::zfk_limit_monotone`: 0 < Λ/Λ_ZFK < 1, and |1 − Λ/Λ_ZFK| decreases
+  monotonically over Ze ∈ {10, 20, 40, 80} (Θ/T_u varied at fixed σ), staying below 0.05 at
+  Ze = 80.
+* `dust::psi::tests::saddle_slope`: the end slope a of the converged trajectory satisfies
+  `a² + a − Λ k g(1) = 0` to 1e−6 relative.
+
+---
+
+## 154. The FSC and TFC closures, the extended FSC, and the f32-safe rate constant
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-03. The labels
+are (154.1)-(154.6) = D.18-D.23, (154.7)-(154.9) = D.29-D.31, (154.10) = D.37 and (154.11) =
+D.38. The model is selected by `combustion.model: FSC | TFC`.
+
+### 154.1 The laminar-limit source Q
+
+H20 eq. (6), the last term of H22 eq. (4):
+
+```
+  Q = ρ‾ (1 − c~) exp(−Θ/T~) / [ t_r (1 + D_t/κ_b) ] ,     Θ = 20 000 K                       (154.1)
+```
+
+κ_b is the molecular heat diffusivity of the burned gas, t_r comes from §153, and T~ is the
+solved T of (152.12) (or (153.1) in the published-form option). The device never forms (154.1)
+as written: it evaluates (154.10) and applies (154.11).
+
+### 154.2 The developing turbulent diffusivity and burning velocity
+
+H20 eqs. (3)-(4), H22 eqs. (7)-(8), from Lipatnikov & Chomiak 1997 (not open):
+
+```
+  D_t = D_t,∞ [ 1 − exp(−t_fd/τ_L) ]                                                           (154.2)
+  U_t = U_t,ISP [ 1 − τ_L/t_fd + (τ_L/t_fd) exp(−t_fd/τ_L) ]^{1/2}                              (154.3)
+```
+
+t_fd is the flame development time. The stream counts it from the end of the ignition source,
+`t_fd = max(t − t_0, 0)` with t_0 of (155.4) (§151.7 item 7), on one global clock unless the
+flame-age option is on (§160).
+
+**[derived] The two limits.** With `x = t_fd/τ_L`, the bracket of (154.3) is
+`1 − 1/x + e^{−x}/x`. For x ≫ 1 it tends to 1, so U_t → U_t,ISP and D_t → D_t,∞, but at different
+rates: the bracket as `1 − 1/x` (algebraically), D_t as `1 − e^{−x}`. For x ≪ 1,
+`e^{−x} = 1 − x + x²/2 − x³/6 + …` gives `1 − 1/x + 1/x − 1 + x/2 − x²/6 + … = x/2 − x²/6 + …`,
+so `U_t ≈ U_t,ISP (t_fd/(2τ_L))^{1/2} (1 − x/6 + …)`. DST-03's early-limit row at x = 1e−4 is
+within 1e−4 of the leading term by this series (the relative correction is x/6 ≈ 1.7e−5).
+**Evaluating the bracket at small x** by its definition loses digits to cancellation (the three
+terms are of size 1/x). The host twin and the kernel use the series `x/2 − x²/6 + x³/24 − …`
+(the bracket is `Σ_{j≥1} (−1)^{j+1} x^{j}/(j+1)!`) below x = 0.5, summed until a term is below
+1e−17 of the sum (at most 25 terms), and the closed form from x = 0.5 up. At x = 0.5 the two
+forms agree to 2.2e−16 in f64 (DST-00 oracle); at x = 1e−2 the closed form is already wrong by
+2e−13, which is why the switch is not lower. DST-03 shows the agreement at the switch to 1e−14.
+
+### 154.3 The intermediately steady burning velocity
+
+H20 eq. (5), H22 eq. (9), after Zimont 2000 (not open):
+
+```
+  U_t,ISP = A u' Da^{1/4} ,   Da = τ_t/τ_f ,  τ_t = L/u' ,  τ_f = δ_L/S_L ,  δ_L = κ_u/S_L      (154.4)
+```
+
+`A = 0.4` is "the sole constant of the FSC model" (H20 §2.1, H22 §3.4). TFC's A = 0.52 is a
+named, non-default input (§151.5). **[derived identity]**
+`Da = (L/u')(S_L²/κ_u)`, so
+
+```
+  U_t,ISP = A u'^{3/4} S_L^{1/2} κ_u^{−1/4} L^{1/4}
+```
+
+DST-03 shows the two forms agree to 1e−14 over its random states.
+
+The Lagrangian time scale [H20, H22, text after eqs. (4)/(8)]:
+
+```
+  τ_L = D_t,∞ / u'²                                                                             (154.5)
+```
+
+### 154.4 The turbulence inputs and their k-ω mapping
+
+H20 eqs. (15)-(17):
+
+```
+  D_t,∞ = C_μ k~² / (Pr_t ε~) ,    L = C_d k~^{3/2} / ε~ ,    k~ = (3/2) u'² ,   C_μ = 0.09 , C_d = 1.0   (154.6)
+```
+
+**[derived] The k-ω mapping** used with the SST of §156. With `ε~ = β* k~ ω` (β* = 0.09 = C_μ):
+
+```
+  D_t,∞ = ν_t / Pr_t   (ν_t of (156.4)) ,    u' = (2 k~/3)^{1/2} ,    L = C_d k~^{1/2} / (β* ω)
+```
+
+In a frozen homogeneous state where `a1 ω ≥ S F2`, `ν_t = k~/ω`, so `ν_t/Pr_t = C_μ k~²/(Pr_t ε~)`
+exactly: the mapping reproduces (154.6). Pr_t is the case's (0.4 Leeds, 0.28 REMBE).
+
+### 154.5 The extended FSC
+
+H22 eq. (11), Gostintsev's self-similar acceleration:
+
+```
+  U_t = U_t,ISP [ 1 − τ_L/t_fd + (τ_L/t_fd) exp(−t_fd/τ_L) ]^{1/2} · ( t / t_flacc )^{1/2}   for t ≥ t_flacc   (154.7)
+  U_t = (154.3)                                                                              for t < t_flacc
+```
+
+`T1` is the bracket, `T2 = (t/t_flacc)^{1/2}`, and t is the time since ignition (not t_fd).
+`t_flacc = 0.15 s` for REMBE is H22's tuned value. H22's text says it modifies "the FSC Eq. (7)";
+it means U_t, its eq. (8) (§151.7 item 1). For t < t_flacc, T2 is not evaluated: the factor is
+exactly 1 (DST-03's bitwise row).
+
+**[derived consistency]** H22 eq. (10), Gostintsev et al. 1988 (not open):
+
+```
+  R_f(t) = R_f,0 (t/t_0)^{3/2}                                                                  (154.8)
+```
+
+With T1 ≈ 1 late in the run and `dR_f/dt ∝ U_t ∝ t^{1/2}` by (154.7), `R_f ∝ t^{3/2}`.
+
+### 154.6 The TFC limit
+
+H20 §2.1: "If D_t = D_t,∞, U_t = U_t,ISP and Q = 0 in Eq. (2), the FSC model reduces to the TFC
+model by Zimont and Lipatnikov":
+
+```
+  TFC:   D_t ≡ D_t,∞ ,   U_t ≡ U_t,ISP ,   Q ≡ 0                                                 (154.9)
+```
+
+TFC has no clock, so the flame-age option and t_flacc are refused by name with it (§160).
+
+### 154.7 The f32-safe rate constant
+
+**[derived identity; the design of the device rate]** With `θ_b = Θ/T_b`:
+
+```
+  exp(−Θ/T) / t_r  =  K_b · exp( θ_b (1 − T_b/T) ) ,      K_b = exp(−θ_b) / t_r      [s⁻¹]        (154.10)
+```
+
+because `−Θ/T = −θ_b T_b/T = −θ_b + θ_b(1 − T_b/T)`. **K_b is formed once on the host in f64**
+and passed to the kernel. The kernel evaluates only the bounded exponent
+`E(T) = exp(θ_b (1 − T_b/T))`: at most 0 below T_b, of order one where the reaction lives, at most
+θ_b (≈ 11) under compression. K_b is of the order of the inverse reaction time (REMBE 1e5-1e6
+s⁻¹, depending on the closure).
+
+Without (154.10), the f32 product `(1/t_r)·exp(−Θ/T)` multiplies about 3e10 s⁻¹ (t_r ≈ 3e−11 s
+for REMBE) by 1.9e−32 at T_u, and exp(−Θ/T) alone drops into the subnormal range below about
+227 K, where flush-to-zero differs between builds and flags.
+
+**The zero rule.** The kernel returns exactly 0, and counts the cell, when the exponent
+`θ_b (1 − T_b/T) < ln(FLT_MIN) + 24 ln 2` (= −70.70, so E < FLT_MIN·2^24 = 1.97e−31). Otherwise
+it evaluates E in the build's precision. No subnormal is produced. The same threshold is used in
+the f64 build, so both builds zero the same cells, and the host twin predicts the counter. The
+setup refuses by name a K_b outside [1e−3, 1e12] s⁻¹, so that `K_b·E` stays above FLT_MIN·2^14
+wherever E is not zeroed. The factor `1/(1 + D_t/κ_b)` is at most 1 and is applied in the
+build's precision. §118 records this as the subsection "the FSC rate constant is formed once in
+f64" (DST-03 writes it).
+
+### 154.8 The implicit split of Q
+
+**[derived; Patankar 1980 §7.2, as the suite already linearises sources (§6.3)]** Write
+`Q = ρ‾ K (1 − c~)` with `K = K_b E(T) / (1 + D_t/κ_b) ≥ 0`. Then
+
+```
+  S_U = ρ‾ K ,     S_P = −ρ‾ K          (the source S_U + S_P c~)                              (154.11)
+```
+
+goes into the `c~` matrix: S_P on the diagonal, S_U on the right-hand side. It keeps c~ ≤ 1 for
+any Δt, removes the source-stiffness limit on Δt, and never multiplies (1 − c~) on the device.
+`ρ_u U_t |∇c~|` stays explicit (§155.3).
+
+### 154.9 What DST-03 must make true
+
+`cuda/dust.cu` (a new `KERNEL_UNITS` entry) and host twins in `src/dust/fsc.rs`; tests in
+`src/dust/tests_fsc.rs` (f64) and an f32 integration test in `rust/tests/`, ≤ 3 min per build:
+
+* `dust::fsc::tests::device_matches_host`: 4096 random states (T, c~, k, ω, ρ, t_fd, t): the
+  kernel's D_t, U_t, U_t,ISP, τ_L and K against the host twin, ≤ 4 ulp in f64, R in f32.
+* `dust::fsc::tests::developed_limits`: D_t/D_t,∞ = 1 to 1e−12 at t_fd/τ_L = 1e3, and
+  U_t/U_t,ISP = 1 to 1e−12 at t_fd/τ_L = 1e13 (A). **The plan's row puts both at 1e3; that is not
+  reachable for U_t.** The bracket of (154.3) approaches 1 only algebraically, as `1 − 1/x`, so at
+  x = 1e3 `U_t/U_t,ISP = (1 − 1e−3)^{1/2} = 0.9995` exactly, whatever the code. The tolerance is
+  kept and the U_t point moves to where `1/x` is below it; D_t, which approaches 1 as `e^{−x}`,
+  keeps the plan's point.
+* `dust::fsc::tests::small_time_series`: at t_fd/τ_L = 1e−4,
+  `U_t / [U_t,ISP (t_fd/(2τ_L))^{1/2}] = 1` to 1e−4 (A); the two forms of (154.4) agree to 1e−14.
+* `dust::fsc::tests::tfc_has_no_q`: with TFC, Q ≡ 0 bitwise (D).
+* `dust::fsc::tests::acceleration_off_before_t_flacc`: T2 ≡ 1 bitwise for t < t_flacc (D).
+* `dust::fsc::tests::arrhenius_f32_safe_no_subnormal`: over T ∈ [150, 3500] K and c~ ∈ [0, 1],
+  E matches the f64 host to the R class wherever the f64 value is ≥ FLT_MIN·2^24, is exactly 0
+  below, no output word is subnormal (a bit test), and the zero counter equals the host's
+  prediction (D).
+* The f64 SASS of every existing cubin is unchanged (`tools/f64_identity.py`).
+
+---
+
+## 155. The progress-variable equation, ignition, the flame-Courant limit, ρ_u(p), and the exact verification solutions
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-04 (and of the
+`c~` equation DST-06 and DST-10 put into their drivers). The labels are (155.1)-(155.3) = D.15-
+D.17, (155.4)-(155.8) = D.32-D.36, (155.9) = D.39 and (155.10) = D.52.
+
+### 155.1 The Bray-Moss-Libby relations and the Reynolds mean
+
+H20 eq. (1), H22 eq. (6):
+
+```
+  ρ‾ = ρ_u / ( 1 + (σ − 1) c~ ) ,       ρ‾ c~ = ρ_b c‾                                         (155.1)
+```
+
+In the stream ρ‾ comes from the gas law (152.9) with the solved T. (155.1) is used (i) as the
+density of the published-form option (one W, one c_p) and of DST-04's 1-D harness, and (ii) to
+recover the Reynolds mean that the data are compared in. **[derived from (155.1)]**
+
+```
+  c‾ = ρ‾ c~ / ρ_b(p) ,     ρ_b(p) = p W_B / ( R0 T_b(p) )                                    (155.2)
+```
+
+T_b(p) is the isobaric burned state (152.10) of the fresh gas at the local pressure,
+`h_B(T_b(p)) = h_U(T_u(p))` with T_u(p) of (155.10). The flame radius is the c‾ = 0.5 surface
+for verification (H20 §4.1) and the **c‾ = 0.1** surface for the comparison with Schlieren data
+(H20 §4.2).
+
+### 155.2 The progress-variable equation
+
+H20 eq. (2), H22 eq. (4):
+
+```
+  ∂(ρ‾ c~)/∂t + ∇·(ρ‾ u~ c~) = ∇·[ ρ‾ (κ + D_t) ∇c~ ] + ρ_u U_t |∇c~| + Q + ρ‾ W_ign            (155.3)
+```
+
+κ is the molecular heat diffusivity of the mixture (§151.5), D_t the turbulent diffusivity
+(154.2), U_t the turbulent burning velocity ((154.3) or (154.7)), Q the laminar-limit source
+(154.1) split by (154.11), and `ρ‾ W_ign` the ignition source (155.4). c = 0 is fresh mixture,
+c = 1 equilibrium products.
+
+**The discretisation (the contract DST-04 implements).** (155.3) is a mass-weighted
+`ScalarTransport` on the face mass flux: the ρ-weighted ddt of §3, the §7 limited convection on
+`ṁ_f`, the §3 Laplacian with `Γ = ρ‾(κ + D_t)` interpolated to faces. `|∇c~|` is the cell
+gradient of §12 at the old iterate and the term `ρ_u U_t |∇c~|` is explicit. Q enters by
+(154.11) and the ignition source by the same split (`S_U = ρ‾ W`, `S_P = −ρ‾ W` with W the
+bracket of (155.4)). **ρ_u in the propagation term is the current unburned density** ρ_u(p) of
+(155.10), not the initial value (INSIGHTS (g), DD6). The bounds counter counts every cell with
+c~ < 0 or c~ > 1 after a solve and must stay 0. No clipping hides a violation.
+
+### 155.3 The ignition source
+
+H20 eq. (14):
+
+```
+  ρ‾ W_ign = ρ‾ W_0 exp{ −[ (r/σ_r)² + H(t_0 − t) ((t − t_0)/σ_t)² ] } (1 − c~)                    (155.4)
+```
+
+H is the Heaviside function and r the distance from the ignition point. H20's values: σ_r = 0.25
+mm, W_0 = 1e13 s⁻¹, t_0 = 1 ms. σ_t is not stated; the stream uses σ_t = t_0 (§151.7 item 8).
+For t > t_0 the source does not depend on time (H20 §3.3, so that c~(r = 0, t > t_0) ≈ 1). H20
+reports S_t,b at 20-35 mm "very close" for (W_0, σ_r) = (1e7 s⁻¹, 0.5 mm) and (1e13 s⁻¹, 0.25
+mm). The turbulence model is switched on at t ≥ 2t_0 (H20 §3.3); before that the turbulence
+fields are frozen at their initial values. **r is formed through F32-10's local-origin API**
+(docs/17 §5.1 item 7): in the single build the ignition point and the cell centres are shifted
+by the same origin before the difference, so r has no catastrophic cancellation.
+
+### 155.4 The exact planar solution in frozen turbulence
+
+H20 eqs. (8)-(11), citing Lipatnikov & Chomiak 2005a,b and Lipatnikov 2009 (not open). For the
+1-D planar flame of (155.1), (155.3), (154.2) and (154.3) with Q = 0, uniform frozen u', L and
+D_t,∞, the fresh gas at rest ahead, propagating towards +x:
+
+```
+  c‾ = ½ erfc(ξ √π) = (1/√π) ∫_{ξ√π}^{∞} e^{−ζ²} dζ ,      ξ = (x − x_f(t)) / δ_t(t)
+  x_f(t) = x_f(0) + ∫_0^t U_t(θ) dθ ,      δ_t²(t) = 4π ∫_0^t D_t(θ) dθ                            (155.5)
+```
+
+**[derived]** `∫_0^t D_t dθ = D_t,∞ [ t − τ_L (1 − e^{−t/τ_L}) ]` from (154.2). `∫_0^t U_t dθ` has
+no elementary form; the reference integrates it on the host by adaptive Gauss-Kronrod (or
+composite Simpson to 1e−12 relative), with the small-x series of §154.2 near θ = 0, where the
+integrand behaves as `θ^{1/2}`. For σ = 1 (constant density, u ≡ 0) (155.3) is linear
+advection-diffusion with a time-dependent speed and diffusivity, and (155.5) is exact by
+inspection: `½ erfc((x − x_f)/(2 (∫D_t)^{1/2}))` solves `c_t + U_t c_x = D_t c_xx`, and
+`2 (∫D_t)^{1/2} = δ_t/√π`. For σ ≠ 1 H20 calls it exact; DST-04's σ = 5.06 row tests that
+claim, and a miss there while σ = 1 passes is a recorded finding about H20's claim, never a
+widened band.
+
+The mean flame brush thickness, H20 eq. (18):
+
+```
+  δ_t(t) = 1 / max |∇c‾|                                                                        (155.6)
+```
+
+consistent with (155.5): `max |∂c‾/∂x| = (1/√π) · √π / δ_t = 1/δ_t`, at ξ = 0.
+
+### 155.5 The spherical relation and the observed flame speed
+
+H20 eq. (12), from Lipatnikov & Chomiak 2007 (not open), approximate:
+
+```
+  dR‾_f/dt = σ U_t ( ∫_0^∞ c~ r dr ) ( ∫_0^∞ c‾ r dr )^{−1}                                        (155.7)
+```
+
+H20 Fig. 6 shows the two sides close but not equal ("Eq. (12) is not exact"). It is a reported
+quantity only, never a gate.
+
+H20 eq. (13), the measured quantity of key J.1:
+
+```
+  S_t,b = dR‾_f / dt ,      R‾_f the radius of the c‾ = 0.1 surface                              (155.8)
+```
+
+In a 1-D sector R‾_f is found by linear interpolation of c‾ between the two cell centres that
+bracket 0.1 (from the burned side), and dR‾_f/dt by the central difference of R‾_f(t) sampled
+at a fixed output interval, which the gate states.
+
+### 155.6 The flame-Courant number
+
+**[derived; the CFL condition]** The explicit term `ρ_u U_t |∇c~|` moves the c~ front relative
+to the fluid at `w = ρ_u U_t / ρ‾`, which grows from U_t at c~ = 0 to σU_t at c~ = 1 (7 U_t for
+REMBE). A step can satisfy the flow CFL in the nearly stagnant burned core while the front
+crosses several cells, so every step also satisfies, per cell,
+
+```
+  Co_f = Δt ( |u~| + ρ_u U_t / ρ‾ ) / Δx  ≤  Co_f,max          Δx = V^{1/3} ,  default Co_f,max = 0.5   (155.9)
+```
+
+H20 ran at a maximum Courant number of 0.1. The driver refuses by name a fixed Δt whose
+PREDICTED Co_f exceeds the bound, predicted from `σ U_t,ISP` of the initial field (with t_fd →
+∞, so U_t ≤ U_t,ISP), and reports the measured maximum Co_f at every check interval. Adaptive
+stepping is used only where a driver already has it. The low-Mach driver's CUDA graph (§81)
+keeps its fixed Δt.
+
+### 155.7 The current unburned state
+
+**[ideal gas, isentropic compression of the fresh gas]**
+
+```
+  ρ_u(p) = ρ_u0 (p/p_0)^{1/γ_u} ,      T_u(p) = T_u0 (p/p_0)^{(γ_u − 1)/γ_u}                          (155.10)
+```
+
+with γ_u from the unburned thermo at T_u0 (constant along the compression; DST-06 states the
+γ_u it takes, and the effect of a T-dependent γ is below the gates' bands at the pressures they
+reach). p is p0(t) in the low-Mach driver and the local `p_op + p_gauge` in the compressible
+one. At the AICC ratio 8.6 the fresh gas has been compressed by a factor 4.6 (γ = 1.4). A
+constant ρ_u would under-burn the late stage by that factor (INSIGHTS (g)).
+
+### 155.8 What DST-04 must make true
+
+`src/dust/progress.rs`, `src/dust/ignition.rs`, `src/dust/courant.rs` and the 1-D harness
+`src/dust/tube1d.rs`. The harness solves (155.3) on a 1-D tube with the BML density (155.1) and
+discrete continuity: the face mass flux is the host cumulative sum
+`ṁ_{i+1/2} = ṁ_{1/2} − Σ_{j≤i} V_j (ρ_j^{n+1} − ρ_j^n)/(Δt A)` from the closed end (ṁ_{1/2} = 0)
+or from the fresh end (the fresh gas at rest). Tests in both builds, every row P class at one
+tolerance in f64 and f32, ≤ 8 min per build:
+
+* `dust::progress::tests::planar_exact_sigma_1` and `planar_exact_sigma_5_06`: frozen
+  turbulence with u' = 1.62 m/s, L = 20 mm, Pr_t = 0.4, k~ = 3.94 m²/s², ε~ = 390.53 m²/s³,
+  S_L = 0.12 m/s, κ_u = 1.948e−5 m²/s (H20 Tables 1, 4): at t = 20 ms, x_f (c‾ = 0.5) within
+  0.5 % of (155.5); δ_t of (155.6) within 2 %; the profile's L∞ error against ½erfc ≤ 0.02 on
+  1000 cells; the errors non-increasing over 250, 500 and 1000 cells.
+* `dust::progress::tests::laminar_limit_is_s_l`: D_t = U_t = 0, the Leeds and the REMBE states:
+  the steady front speed relative to the fresh gas is S_L within 1 % with the regenerated Ψ of
+  §153, at 200 cells per δ_L = κ_u/S_L.
+* `dust::progress::tests::laminar_limit_zfk_speed`: the same with t_r from Λ_ZFK (153.5): the
+  speed is `(Λ_ZFK/Λ)^{1/2} S_L` within 1 %, so the two methods agree both ways.
+* `dust::progress::tests::flame_courant_independent`: the front speed changes by less than
+  0.5 % between Co_f = 0.1 and 0.4.
+* `dust::progress::tests::flame_courant_refused`: a fixed Δt with predicted Co_f > 1 is refused,
+  and the message names the setting and the predicted value (D).
+* `dust::progress::tests::ignition_kernel_forms`: σ_r = 0.25 mm, W_0 = 1e13 s⁻¹, t_0 = 1 ms:
+  c~(r = 0, t > t_0) ≥ 0.99.
+* `dust::progress::tests::bounded`: c~ ∈ [0, 1] throughout every test above; the bounds counter
+  is 0 (D).
+
+---
+
+## 156. ρ-weighted k-ω SST-2003 and SST-sust
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-05. The labels
+(156.1)-(156.11) are D.40-D.50, one for one. Source: TMR (the conservation form "applied to
+compressible flow", SST-2003, SST-sust); Menter 1994, Menter, Kuntz & Langtry 2003 and Spalart
+& Rumsey 2007 are cited through it (§151.8). §6.3 gets a pointer to this section. **The
+ρ-weighted form is opt-in: only a DUST case selects it**, and every existing SST case is
+unchanged (docs/17 DD4, INSIGHTS (j)).
+
+### 156.1 The equations in conservation form
+
+```
+  ∂(ρk)/∂t + ∂(ρ u_j k)/∂x_j = P̃ − β* ρ ω k + ∂/∂x_j [ (μ + σ_k μ_t) ∂k/∂x_j ]                         (156.1)
+  ∂(ρω)/∂t + ∂(ρ u_j ω)/∂x_j = (γ/ν_t) P̃ − β ρ ω² + ∂/∂x_j [ (μ + σ_ω μ_t) ∂ω/∂x_j ]
+                               + 2 (1 − F1) (ρ σ_ω2 / ω) (∂k/∂x_j)(∂ω/∂x_j)                          (156.2)
+  P = τ_ij ∂u_i/∂x_j ,  τ_ij = μ_t ( 2 S_ij − (2/3)(∂u_k/∂x_k) δ_ij ) − (2/3) ρ k δ_ij ,  S_ij = ½(∂u_i/∂x_j + ∂u_j/∂x_i)   (156.3)
+  μ_t = ρ a1 k / max( a1 ω , S F2 ) ,   S = (2 S_ij S_ij)^{1/2} ,   a1 = 0.31                         (156.4)
+```
+
+(156.4) is SST-2003's eddy viscosity with the strain rate S, as §6.3 and `cuda/sst.cu` already
+use. **[derived]** (156.3) expands to
+
+```
+  P = μ_t ( 2 S_ij S_ij − (2/3)(∇·u)² ) − (2/3) ρ k ∇·u
+```
+
+The two dilatation terms, `−(2/3) μ_t (∇·u)²` and `−(2/3) ρ k ∇·u`, are why the ρ-weighted form
+matters in a flame: thermal expansion by σ ≈ 5-7 makes ∇·u large in the brush. **The tree
+already carries both in the kinematic form**: `sstProduction` subtracts `(2/3) tr²` from the
+strain term, and `sstKSources` emits the `(2/3)(∇·u) k` Susp (`cuda/sst.cu`). The ρ form
+multiplies the same terms by ρ.
+
+### 156.2 The blending functions
+
+```
+  F1 = tanh(arg1⁴) ,  arg1 = min[ max( √k/(β* ω d) , 500 ν/(d² ω) ) , 4 ρ σ_ω2 k / (CD_kω d²) ]
+  CD_kω = max( 2 ρ σ_ω2 (1/ω) ∂k/∂x_j ∂ω/∂x_j , 1e−10 )             (the SST-2003 floor)             (156.5)
+  F2 = tanh(arg2²) ,  arg2 = max( 2√k/(β* ω d) , 500 ν/(d² ω) )                                     (156.6)
+```
+
+d is the wall distance (§6.6), ν = μ/ρ. The tree clamps arg1 at 10 and arg2 at 100. At the
+clamps arg1⁴ = arg2² = 10⁴, and tanh(10⁴) is 1 exactly in both precisions, so the clamps change
+no value and are kept.
+
+### 156.3 The constants and the limiter
+
+```
+  φ = F1 φ1 + (1 − F1) φ2
+  σ_k1 = 0.85 , σ_k2 = 1.0 , σ_ω1 = 0.5 , σ_ω2 = 0.856 , β1 = 0.075 , β2 = 0.0828 , β* = 0.09
+  κ = 0.41 , a1 = 0.31 ;  SST-2003: γ1 = 5/9 , γ2 = 0.44                                             (156.7)
+  P̃ = min( P , 10 β* ρ ω k )                                                                         (156.8)
+```
+
+TMR states (156.8) for both equations (its erratum note: `(γ/ν_t) P̃` in (156.2)). **The tree
+limits the k equation only**: `sstOmegaSources` takes the unlimited `γ P`. A ρ-weighted path
+that limited both could not be bitwise the kinematic SST at ρ ≡ 1 whenever the limiter is
+active, which is what DST-05's first row requires. So the ρ form takes the limiter as a
+setting, `limitOmegaProduction`, **default false (the tree's kinematic behaviour)**. A DUST
+case sets it true, which is TMR's SST-2003. DST-05's ρ ≡ 1 row runs at the default; DST-05 adds
+a row for the setting itself (§156.6). Nothing changes for an existing case either way.
+
+### 156.4 SST-sust (option)
+
+TMR; Spalart & Rumsey 2007:
+
+```
+  k equation:  + β* ρ ω_amb k_amb ,        ω equation:  + β ρ ω_amb²                                  (156.9)
+```
+
+Used for the Leeds fan-stirred bomb, whose fans keep the turbulence statistically stationary
+(H20 §3.3 added `ρε_0` and `ρε_0²/k_0` to its k-ε equations for the same purpose). **[derived]**
+With `k_amb = k_0` and `ω_amb = ε_0/(β* k_0)`, the homogeneous state (no gradients, P = 0) is a
+fixed point: `−β* ρ ω k + β* ρ ω_amb k_amb = 0` and `−β ρ ω² + β ρ ω_amb² = 0` at (k_0, ω_amb).
+For Leeds, ω_amb = 544.33, 1101.33, 1667.70, 2252.74 s⁻¹ at u' = 0.80, 1.62, 2.45, 3.31 m/s
+(DST-00 oracle from H20 Table 4). The sustaining terms go in as explicit Su.
+
+### 156.5 Boundary values and the decay closed form
+
+TMR:
+
+```
+  wall:  ω = 10 · 6 ν / (β1 Δd1²) ,  k = 0      (Δd1: the first cell centre's wall distance)
+  farfield (sust):  ω_amb = 5 U_∞ / L ,  k_amb = 1e−6 U_∞²                                         (156.10)
+```
+
+The closed-vessel cases use the suite's existing SST wall treatment (§6.3, §6.6). H22 used a wall
+function for k.
+
+**[derived from (156.1)-(156.2); F1 = 0 away from walls, no gradients, P = 0]** In homogeneous
+decay `dω/dt = −β2 ω²` and `dk/dt = −β* k ω`, so
+
+```
+  ω(t) = ω_0 / (1 + β2 ω_0 t) ,      k(t) = k_0 (1 + β2 ω_0 t)^{−β*/β2} ,   β*/β2 = 0.09/0.0828 = 1.08696   (156.11)
+```
+
+`ln k = −β* ∫ω dt = −(β*/β2) ln(1 + β2 ω_0 t)`. For a spatially uniform but ρ ≠ 1 closed box the
+same holds, because ρ cancels from both equations. F1 = 0 follows from d → ∞: arg1 → 0.
+
+### 156.6 What DST-05 must make true
+
+`src/models/k_omega_sst.rs`, `src/models/k_omega_sst/kernels.rs`, `cuda/sst.cu` (new kernels or
+a ρ argument; the existing kernels' f64 SASS unchanged unless the unit says why). DST-05 stays in
+lane M only if `turbulence.rs` needs no edit; if the ρ form needs a field in `FlowState` or
+`RasCore`, the unit moves to lane S after F32-12 (docs/17 §12.8 note 4). Tests, ≤ 5 min per
+build; every existing SST test runs unmodified:
+
+* `k_omega_sst::tests::rho_one_is_bitwise_kinematic`: ρ ≡ 1 with the ρ form selected and
+  `limitOmegaProduction` at its default: matrices and fields bitwise equal to the kinematic SST
+  on the existing SST tests (D, both builds). Multiplying by ρ = 1.0 is exact in IEEE
+  arithmetic, so this holds if the ρ form multiplies the same terms in the same order.
+* `k_omega_sst::tests::homogeneous_decay_closed_form`: F1 = 0, uniform ρ ≠ 1: k(t) and ω(t)
+  against (156.11), first order in Δt, the finer of two Δt within 1e−3 relative at
+  t = 5/(β2 ω_0) (P).
+* `k_omega_sst::tests::sust_holds_ambient`: SST-sust with k_amb = k_0, ω_amb = ω_0: k and ω stay
+  constant to round-off (R).
+* `k_omega_sst::tests::rho_k_budget_closes`: a closed box with zero-gradient k and ω on every
+  wall and a varying ρ field: `d/dt ∫ρk dV = ∫(P̃ − β* ρ ω k) dV` closes to round-off,
+  accumulated in `ofacc` (A).
+* `k_omega_sst::tests::dilatation_production_terms`: a uniform dilatation field: P matches the
+  host formula of §156.1, including `−(2/3)ρk∇·u` and `−(2/3)μ_t(∇·u)²`, to 1e−12 (R).
+* `k_omega_sst::tests::omega_limiter_setting` (added by DST-00, §156.3): with
+  `limitOmegaProduction = true`, at a state where `P > 10 β* ρ ω k`, the ω production equals
+  `γ ρ min(P, 10 β* ρ ω k)/μ_t` to 1e−12 (R), and with false it equals `γ ρ P/μ_t` (D).
+
+---
+
+## 157. Closed vessels — the sealed low-Mach coupling, the thin-flame and cube-root relations, the Leeds and vessel gates
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-06, DST-07 and
+DST-08 (lane S, W4). The labels are (157.1) = D.56, (157.2) = D.51 and (157.3)-(157.5) = D.53-
+D.55. Closed vessels run on `ofgpu-lowmach -sealed` (docs/17 DD1): a flame three orders of
+magnitude slower than sound leaves the pressure uniform to O(M²) (INSIGHTS (c)).
+
+### 157.1 The sealed low-Mach coupling
+
+§25.2's sealed thermodynamic pressure, with CHR-11's molar term (§133, Day & Bell 2000):
+
+```
+  dp0/dt = (γ/V_dom) [ ((γ − 1)/γ) ∫ Q_h dV − p0 Φ_b ] + (the molar-change term of §133) ,  sealed: Φ_b = 0   (157.1)
+```
+
+Q_h is the volumetric heating of §25 (here the heat release q̇ of (152.12) plus conduction); the
+molar term carries W(c~) of (152.8). The `c~` equation (155.3) is CHR-09's species equation for
+Y_B with the FSC source, and the heat release enters CHR-10's energy equation as (152.12). The
+driver writes c~, c‾, T, ρ, p0, U_t and Co_f.
+
+**[derived] The AICC identity.** A sealed adiabatic box that burns completely conserves its
+internal energy, so it ends at the AICC state (152.11) of the same thermo. That is an identity no
+tuning can reach, and DST-06's first row.
+
+### 157.2 The thin-flame relations
+
+The burned mass fraction from the pressure (Lewis-von Elbe; restated in BKM24 §6.2):
+
+```
+  x_b = (p − p_0) / (p_e − p_0)                                                                (157.2)
+```
+
+**[derived: exact for one γ and one W]** For an ideal gas with one constant c_v, the sensible
+internal energy of the whole charge is `pV/(γ − 1)`. Energy conservation in the rigid adiabatic
+vessel is `pV/(γ − 1) − q m_b = p_0 V/(γ − 1)` with q the heat of combustion per unit mass, so
+`p − p_0 = (γ − 1) q m_b / V` is proportional to the burned mass, and (157.2) follows with
+`p_e − p_0 = (γ − 1) q m/V` (INSIGHTS (h)). Under variable c_p and W it is an approximation
+(DST-17's band allows for that).
+
+The flame radius in a central explosion, BKM24 eq. (6.10), dimensional:
+
+```
+  R_f = R [ 1 − ((p_e − p)/(p_e − p_0)) (p_0/p)^{1/γ_u} ]^{1/3}                                  (157.3)
+```
+
+(BKM24 writes `R(t) = (1 − ((P_e − P)/(P_e − 1)) P^{−1/γ})^{1/3} L` with P = p/p_0 and L the
+vessel radius.) **[derived]** The unburned gas, compressed isentropically by (155.10), occupies
+`V_u = (1 − x_b) m / ρ_u = (1 − x_b) V (p_0/p)^{1/γ_u}`, and the burned sphere is `V − V_u`.
+
+**[derived from (157.2), (157.3) and dm_b/dt = 4π R_f² ρ_u S_u]** The thin-flame pressure
+equation:
+
+```
+  dx_b/dt = 3 R_f² ρ_u S_u / (ρ_u0 R³)
+  dp/dt = (3 (p_e − p_0)/R) [ 1 − ((p_e − p)/(p_e − p_0)) (p_0/p)^{1/γ_u} ]^{2/3} (p/p_0)^{1/γ_u} S_u(p, T_u)   (157.4)
+```
+
+from `dp/dt = (p_e − p_0) dx_b/dt`, `ρ_u/ρ_u0 = (p/p_0)^{1/γ_u}` and `(R_f/R)²` from (157.3).
+S_u is the burning velocity at the compressed unburned state. For the FSC laminar limit at a
+fixed t_r, **[derived]** `S_u(p) = Ψ(σ(p), Θ/T_u(p)) (κ_u(p, T_u(p)) / t_r)^{1/2}`, from (153.2)
+and §153 with (155.10). Dahoe et al. 1996 and Dahoe & de Goey 2003 use this form (not open).
+
+**K_st and the cube-root law** [Bartknecht; Dahoe et al. 1996, not open]. **[derived from
+(157.4)]** For S_u increasing with p, dp/dt is largest at the end, where the bracket → 1:
+
+```
+  K_st = (dp/dt)_max V^{1/3}
+  (dp/dt)_max = (3 (p_e − p_0)/R) (p_e/p_0)^{1/γ_u} S_u(p_e)
+  K_st = 3 (4π/3)^{1/3} (p_e − p_0) (p_e/p_0)^{1/γ_u} S_u(p_e)      — independent of V             (157.5)
+```
+
+For any S_u(p), (157.4) makes p a function of t/R only, so K_st(V) is constant: the cube-root law
+is exact for a thin flame. Dahoe et al. 1996 (abstract, open) report that it becomes inaccurate
+once the relative flame thickness δ/R exceeds 1 %. REMBE's measured K_st = 200 bar m/s ± 15 % (H22
+§2) is a turbulent-test value, not the laminar (157.5).
+
+### 157.3 The 1-D spherical sector
+
+The REDUCED gates run on a 1-D spherical sector (docs/17 DD5, INSIGHTS (i)): a thin pyramid with
+its apex at the ignition point and four planar side faces through it, carrying slip conditions.
+The radial faces are planar squares, so face areas grow as r² exactly and the cell volumes are
+the frusta's exact volumes. The apex cell is a pyramid. The generator lives in
+`src/dust/gatemesh.rs`, host f64, positions through F32-10's local-origin API.
+
+* **Closure** of every cell ≤ 1e−12 relative and **radial face areas ∝ r²** to 1e−12 (D).
+* **The Leeds sector's radius is the equal-volume radius,** `R_V = (3V/(4π))^{1/3} = 176.4 mm`
+  for H20's 0.023 m³, as H20 itself simulated an equal-volume domain (§3.3: one eighth of a cube
+  of the vessel's volume). Docs/17's DST-07 row says R = 152.5 mm, the vessel's radius. The
+  pressure rise is set by the volume (157.2): with R = 152.5 mm the sector holds 0.0149 m³, 35 %
+  less, and DST-00's estimate of Δp/p_0 at R_f = 35 mm (burned volume of a 35 mm sphere, σ =
+  5.05, p_e/p_0 ≈ 6.7) is 1.4 % there against 0.9 % at R_V; the gate's row is < 1 %. The volume is
+  a physical input, not a tuning: the stream takes the vessel's volume, says so, and keeps the
+  band. The cells are 0.125 mm out to 50 mm and graded beyond (H20's centre resolution).
+
+### 157.4 What DST-06 must make true
+
+`src/bin/lowmach.rs`, `src/io/case_dust.rs` (new), `src/io/case_json.rs`, the schema (lane S
+regenerates it), `src/dust/source.rs`. A `combustion { model: FSC | TFC, … }` block and a
+`dust { thermo: formula | prescribed, … }` block lower with §13.4 refusals. The equivalent gas is
+the two pseudo-species on CHR-09/10/11: c~ = Y_B with the FSC source, `q̇ = (h_U − h_B) ω̇_c`, and
+W_mix(c~) in ρ and in (157.1). Turbulence is the ρ-weighted SST of §156. The flame-Courant
+refusal and report are active (155.9). Decomposition, motion and `-heaterPower` are refused by
+name with a dust case. Tests, ≤ 8 min per build:
+
+* `lowmach::tests::dust_sealed_box_ends_at_aicc`: a sealed adiabatic cube, ignited uniformly by
+  W_ign everywhere and burned to c~ ≥ 1 − 1e−6: p0_end/p0_init equals the host AICC of the same
+  thermo (DST-01) within 0.5 % in formula mode, the error falling at first order between Δt and
+  Δt/2 (P).
+* `lowmach::tests::dust_energy_budget_closes`: `assembly_budget` closes with q̇ metered (A).
+* An open isobaric 1-D flame: T(c~) stays on the adiabatic line `h(T, c~) = h_U(T_u)` to 0.5 K
+  (P; (152.12)).
+* `lowmach::tests::dust_case_equals_library`: the 1-D tube run through the case equals the
+  DST-04 library path bitwise (D).
+* `lowmach::tests::no_dust_no_change`: a case without the dust blocks is byte-identical to
+  before (a hash pin, D).
+* `lowmach::tests::dust_refusals_name_the_setting`, `io::case_dust::tests::{lowers, refusals}`
+  and the schema sync test (D).
+
+### 157.5 Gate DST-LEEDS (DST-07)
+
+The Leeds fan-stirred cornflour bomb, REDUCED. **Inputs, all from §151.5:** prescribed thermo
+(H20 Table 1, §152.9); FSC with A = 0.4, Pr_t = 0.4, Θ = 20 000 K; SST-sust holding k_0 and
+ω_amb of H20 Table 4 (§156.4); central ignition (155.4); p_0 = 110 000 Pa; the sector of §157.3
+to t = 30 ms. **Reference:** key J.1 (`huang2020-leeds-st-b`).
+
+* S_t,b of (155.8), the c‾ = 0.1 surface, at u' ∈ {0.80, 1.62, 2.45, 3.31} m/s and R_f ∈ {25,
+  30, 35} mm: each within **± 20 %** of the key. The band is H20's own model deviation (≤ 16 %
+  over R_f = 25-35 mm) plus the reading uncertainty. R_f = 20 mm is reported, not gated (H20
+  §3.3; `gated = 0` in the key).
+* The least-squares slope dS_t,b/du' over the four u' at R_f = 30 mm within **± 15 %** of the
+  key's 0.678.
+* The pressure rise below 1 % at R_f = 35 mm (H20 §3.2).
+* The sector mesh rows of §157.3 (D).
+
+f64 and f32 rows, P class. Validate section DST-LEEDS (4 runs), ≤ 6 min per build.
+`src/bin/validate_gates/dst_leeds.rs`, the dispatch line in `validate.rs`, `cases/dust/leedsBomb.jsonc`.
+
+### 157.6 Gate DST-VES (DST-08)
+
+`src/dust/vessel0d.rs` integrates (157.4) on the host (classical RK4, f64, with the same S_u(p)
+and γ_u as the run). `src/bin/validate_gates/dst_vessel.rs`, `cases/dust/{sphere20L, sphere1m3,
+rembeClosed}.jsonc`. f64 and f32 rows, P class, ≤ 8 min per build.
+
+**(i) Spheres of 20 L (R = 0.1684 m) and 1 m³ (R = 0.6204 m)**, central ignition, the TFC operator
+(154.9) at a prescribed `U_t = S_u(p)` and a negligible D_t, in the prescribed constant-c_p,
+constant-W thermo (where (157.2) is exact). S_u(p) is either constant or a test power law in
+(T_u, p), a test input and not a correlation claim.
+
+* the time to `(p_0 + p_e)/2` within **1 %** of (157.4); (dp/dt)_max within **2 %**; p_end within
+  **0.1 %** of the thermo's AICC;
+* the cube-root law: K_st(20 L)/K_st(1 m³) = **1 ± 0.02** (157.5), valid while δ/R < 1 %; the
+  brush is at most 5 cells of R/1000;
+* **the negative control:** a run with a constant ρ_u instead of (155.10) misses (dp/dt)_max by at
+  least 10 % (INSIGHTS (g)). A control that passes is a failed gate.
+
+**(ii) The REMBE closed stage** on an equal-volume sphere (R = 1.400 m for 11.5 m³), formula
+thermo and H22's inputs: FSC, A = 0.4, Pr_t = 0.28, u' = 0.75 m/s, L = 0.1 m (k = 0.8438 m²/s²),
+SST without sust, T_0 = 273 K, ambient 101 325 Pa and the initial overpressure 0.06 bar of key
+J.2 (§151.7 item 9). **Reference:** key J.2 (`huang2022-rembe-p-closed`).
+
+* the overpressure at t = 0.05, 0.06, …, 0.10 s within **± 0.009 bar** of the key's `gated = 1`
+  rows. The band is H22's own model deviation (0.0065 bar at 0.10 s) plus the reading
+  uncertainty;
+* the time of reaching 0.1 bar overpressure within ± 0.01 s of 0.10 s.
+
+Labelled a **REPRODUCTION** row: H22 guessed and adjusted u' and L on this curve (H22 §3.6).
+At 0.1 bar the burned-mass fraction is about 0.5 % and the kernel radius about 0.46 m, clear of
+the walls of any plausible 11.5 m³ cylinder, so the equal-volume sphere carries the same p(t) up
+to rupture (INSIGHTS (i)).
+
+---
+
+## 158. The one-domain vent, the compressible coupling, and the REMBE gate
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-09, DST-10 and
+DST-11 (lane S, W4). The labels (158.1)-(158.4) are D.57-D.60. Vented vessels run on
+`ofgpu-compressible` (§122-§127): a vent at 0.6 bar overpressure drives a near-sonic jet, and
+choking starts near Δp/p ≈ 0.89 (INSIGHTS (c), docs/17 DD1).
+
+### 158.1 The one-domain membrane
+
+**[the design of this section; the physical rule from H22 §2-§3.6: the foil ruptures at the
+static activation pressure p_stat = 0.1 bar ± 15 %]**
+
+```
+  M: an internal face set of the one mesh, selected by geometry; its state s ∈ {closed, open}
+  closed: every face of M is a wall on both sides (zero mass, normal-momentum and energy flux;
+          slip or no-slip as the case states)
+  opens at the first step n with   p‾_in(M) − p‾_out(M) ≥ p_stat ,  p‾ the area-weighted face-neighbour pressure
+  open:   the faces of M are ordinary interior faces from step n + 1 on (irreversible)             (158.1)
+```
+
+The mesh holds the outside domain from t = 0 (docs/17 DD9). H22 instead stopped the closed run at
+0.1 bar and mapped it onto a second mesh; a mesh-to-mesh map does not conserve mass and energy
+exactly, must re-seed the turbulence, the time levels and the flame clock, and needs its own code
+path. One domain has none of these problems. The outside gas is quiescent ambient air during
+the closed stage, and nothing in it changes until the membrane opens. A membrane burst is a
+Riemann problem, so a 1-D tube with an opening membrane must reproduce Sod's shock tube (CMP-07's
+exact solution, §127).
+
+The `vent { faces: plane + centre + radius | a face set, pStat }` block selects M. The opening
+step, its time and its Δp are reported. **Not modelled, named:** membrane inertia and an opening
+time, partial or petal opening, and the boundary-condition names that describe active baffles.
+BC-01's catalogue (§120) registers `activePressureForceBaffleVelocity` and `activeBaffleVelocity`
+as refused by name, with a message naming the vent block.
+
+### 158.2 The planar deflagration jump conditions
+
+**[derived from the 1-D conservation laws at low Mach number (Rankine-Hugoniot)]** A flame
+leaving a closed end, the burned gas at rest, moving at S_L relative to the fresh gas. In the
+lab frame the flame moves at `V_f = u_u + S_L`. Mass through it: `ρ_u (V_f − u_u) = ρ_b V_f`.
+Momentum: `p_u + ρ_u (V_f − u_u)² = p_b + ρ_b V_f²`.
+
+```
+  mass:      ρ_u S_L = ρ_b (u_u + S_L)            =>   u_u = (σ − 1) S_L
+  momentum:  p_u + ρ_u S_L² = p_b + ρ_b (σ S_L)²  =>   p_u − p_b = ρ_u S_L² (σ − 1)                (158.2)
+```
+
+(ρ_b σ² S_L² = ρ_u σ S_L², so `p_u − p_b = ρ_u S_L² (σ − 1)`.)
+
+### 158.3 The acoustic precursor
+
+**[linear acoustics, as CMP-20 uses it, c = (γ R T)^{1/2}]** The fresh gas set moving at u_u by
+the flame is a piston:
+
+```
+  Δp_wave = ρ_u c_u u_u = ρ_u c_u (σ − 1) S_L                                                      (158.3)
+```
+
+### 158.4 The heat release in the compressible energy equation
+
+**[derived as (152.12), on §125's c_p T + K form]**
+
+```
+  ∂(ρ(h_s + K))/∂t + ∇·(ρ u (h_s + K)) − ∂p/∂t = ∇·(α_eff ∇h_s) + q̇ ,     q̇ = Δh_c ω̇_c                (158.4)
+```
+
+with a constant c_p per pseudo-species (CMP-14's `hConst` per component), h_s the sensible
+enthalpy, Δh_c the formation-enthalpy difference of U and B, and R_mix(c~) from (152.8). The
+compressible AICC identity uses the same constant-c_p thermo ((152.11) evaluated with hConst),
+not the NASA-7 value. ρ_u(p) of (155.10) is local.
+
+### 158.5 What DST-09 must make true
+
+`src/dust/vent.rs`, the face-mask hook in `src/compressible/bc.rs`, the masked face flux in
+`cuda/compressible.cu`, `src/bin/compressible.rs`, `src/field/catalogue.rs` (the two names).
+f64 and f32 rows, ≤ 6 min per build:
+
+* `dust::vent::tests::closed_membrane_is_a_wall`: the mass, normal-momentum and energy fluxes
+  through M are exactly 0, and each side evolves bitwise as the same run with a wall there (D).
+* `dust::vent::tests::open_membrane_is_interior_bitwise`: a membrane open at t = 0 in a 1-D Sod
+  tube gives fields bitwise equal to the run without a membrane (D).
+* `dust::vent::tests::sod_through_membrane`: the same run against the exact Riemann solution
+  (CMP-07, §127) at CMP-19's tolerances: plateaus within 1 %, the shock position within 0.5 % of
+  the length on 800 cells (P).
+* `dust::vent::tests::opens_at_first_step_over_p_stat`: a chamber pressurised at a constant
+  dp/dt opens at the first step with Δp ≥ p_stat, within one step of t = p_stat/(dp/dt) (D).
+* `field::tests::every_catalogue_name_has_a_status` and the §120 table test: the two refused
+  names (D).
+
+### 158.6 What DST-10 must make true
+
+`ofgpu-compressible` runs the Phase A model: the `c~` equation (155.3) with the FSC source on the
+compressible mass flux, the heat release (158.4), R_mix(c~), the local ρ_u(p), the ρ-weighted SST
+of §156 (this lifts CMP-15's "non-SA turbulence" refusal for kOmegaSST only), and the flame-Courant
+check (155.9). f64 and f32 rows, ≤ 8 min per build:
+
+* `compressible::tests::dust_box_ends_at_aicc`: a sealed adiabatic box burned uniformly:
+  p_end/p_init equals the host AICC of the same hConst thermo within 0.5 %, first order in Δt (P).
+* `compressible::tests::deflagration_jump_conditions`: a 1-D closed-end tube with a planar flame
+  (the laminar limit, or a prescribed U_t): the fresh gas velocity is (σ − 1)S_L within 1 %, and
+  `p_u − p_b = ρ_u S_L²(σ − 1)` within 2 % (158.2) (P).
+* `compressible::tests::acoustic_precursor`: Δp = ρ_u c_u (σ − 1)S_L within 2 % (158.3) (P).
+* `compressible::tests::no_dust_no_change`: with no dust block the driver is bitwise unchanged
+  (D).
+* `compressible::tests::sst_rho_one_bitwise`: kOmegaSST at ρ ≡ 1 equals DST-05's kinematic path
+  bitwise (D).
+
+### 158.7 Gate DST-REMBE (DST-11)
+
+The REMBE 11.5 m³ vented explosion as one domain: the vessel plus a 15.5 × 5 × 6.355 m outside
+box, half by symmetry, in `ofgpu-compressible`. Formula thermo, extended FSC (154.7) with
+t_flacc = 0.15 s, SST, p_stat = 0.1 bar on the 0.5 m² vent, and pressure probes P1/P2. A case
+generator builds the geometry from a stated parameter file and meshes it with
+`ofgpu-automesher`. **Reference:** key J.3 (`huang2022-rembe-p-vented`).
+
+**NAMED and NOT RUN until the vessel geometry is obtained:** H22 publishes no dimensions
+(§151.7 item 9; docs/17 §11 item 9). Then, as an R-run (docs/17 §11 item 10):
+
+* the peak overpressure within **± 10 %** of 0.60 bar, at a time within ± 0.015 s of 0.31 s;
+* the stage-(iii) rise rate (0.20 → 0.28 s) within ± 15 % of 4.55 bar/s (the key gives 4.56);
+* the rupture within ± 0.01 s of 0.10 s.
+
+The bands are H22's own model deviation (+4 %, −0.01 s) plus the reading uncertainty.
+t_flacc is H22's tuned value, used as published.
+
+**The REDUCED smoke run**, ≤ 10 min in both builds, on a PLACEHOLDER 11.5 m³ cylinder (L/D = 2),
+labelled and never compared: finite fields, the membrane opens exactly once, a pressure peak
+exists (D), and the mass budget closes to 1e−10 relative (A). `src/bin/validate_gates/dst_rembe.rs`,
+`src/dust/gatemesh.rs` (the vessel and box STL), `cases/dust/rembeVented.jsonc`, and
+`reference/huang2022-rembe/geometry.json` once obtained.
+
+---
+
+## 159. Phase B — reacting parcels, char, the cloud, two-way coupling, particle radiation, and its gates
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-12 and DST-13
+(lane M, W3) and DST-14 to DST-18 (lane S, W4-W5). The labels (159.1)-(159.8) are D.61-D.68.
+Equations from ISL22 unless stated. Phase B covers what the equivalent gas cannot: coarse
+particles, low-volatile dusts, non-uniform or settling clouds, near-limit mixtures (INSIGHTS
+(l)). Positions and the walk stay f64, as F32-12 made them.
+
+### 159.1 The parcel and its energy
+
+A parcel carries moisture, volatile, char and ash masses, staged in that order: moisture leaves
+first (§76's evaporation, ISL22 eq. (14)), then volatiles (159.4), then char (159.5); ash is
+inert. ISL22 eq. (13):
+
+```
+  m_p C_p dT_p/dt = π d_p k_g Nu (T_∞ − T_p) + (dm_p/dt) ΔH + π d_p² ε_0 σ_SB (θ_R⁴ − T_p⁴)          (159.1)
+```
+
+m_p, C_p, T_p, d_p: the particle's mass, specific heat, temperature and diameter; k_g the gas
+conductivity; T_∞ the cell gas temperature; ε_0 the emissivity; σ_SB the Stefan-Boltzmann
+constant; θ_R the radiation temperature (159.7); ΔH the latent heat of evaporation, of
+devolatilisation, or the heat of the surface reaction, by stage. ISL22's values: evaporation
+2.25 MJ/kg, devolatilisation 100 kJ/kg (endothermic), C oxidation 32.9 MJ/kg.
+
+The Nusselt and Sherwood numbers (Ranz-Marshall; ISL22 ref. 102; §76.1-§76.2 already cite Ranz &
+Marshall 1952):
+
+```
+  Nu = 2 + 0.6 Re_p^{1/2} Pr^{1/3} ,     Sh = 2 + 0.6 Re_p^{1/2} Sc^{1/3}                              (159.2)
+```
+
+The blowing correction (Bird), ISL22 eq. (15):
+
+```
+  Nu* = Nu β / (e^β − 1) ,      β = − C_p,vap ṁ_p / (π d_p k_g Nu)                                      (159.3)
+```
+
+**[derived] Its limits.** `β/(e^β − 1) = 1 − β/2 + β²/12 − …`, so it tends to 1 as β → 0;
+evaluated by its definition it cancels catastrophically there, and the host and the device use
+the series below |β| = 1e−3 (DST-12's `bird_limits`). At β = 1 it is `1/(e − 1) =
+0.5819767068693265`.
+
+### 159.2 Devolatilisation and char
+
+Single first-order devolatilisation (SFOM), ISL22 eqs. (16)-(17), with the moisture already gone:
+
+```
+  −dm_p/dt = k(T_p) ( m_p − (1 − f_VM0) m_p0 ) ,      k(T) = A exp(−E_a/(R0 T))                      (159.4)
+```
+
+f_VM0 is the initial volatile mass fraction and m_p0 the initial particle mass (after drying).
+**No open source gives corn starch's (A, E_a)** (§151.8); a case states them, and DST-16 (iii) is
+NAMED and NOT RUN until open kinetics are found.
+
+The char surface reaction, kinetic-diffusion limited, ISL22 eqs. (20)-(23) (Baum & Street 1971,
+not open):
+
+```
+  C(s) + O2 -> CO2
+  dm_p/dt = − π d_p² p_O R_diff R_kin / (R_diff + R_kin)
+  R_diff = C_0 [ 0.5 (T_g + T_p) ]^{3/4} / d_p ,      R_kin = A exp(−E_a/(R0 T_g))                     (159.5)
+```
+
+p_O is the oxidiser partial pressure and C_0 the mass-diffusion constant. ISL22 writes T_g in
+R_kin, as printed. **Heat retention:** the ΔH term of (159.1) is multiplied by h_s = 0.3 during
+the surface reaction (ISL22 refs. 59, 127); the rest, `(1 − h_s)`, goes to the gas. The O2
+taken and the CO2 given are accumulated per parcel.
+
+### 159.3 The closed forms of the Phase B gates
+
+**[derived from (159.1)-(159.5)]**
+
+```
+  isothermal devolatilisation:  m_p(t) − (1 − f_VM0) m_p0 = f_VM0 m_p0 exp(−k t)
+  lumped heat-up (Re -> 0, Nu = 2, no reaction, no radiation, m_p constant):
+        T_p(t) = T_∞ + (T_p0 − T_∞) exp(−t/τ_T) ,    τ_T = m_p C_p / (2 π d_p k_g)
+  diffusion-limited char (R_kin -> ∞), constant T, p_O and ρ_p, m_p = ρ_p π d³/6:
+        d(d²)/dt = −4 p_O C_0 T_m^{3/4} / ρ_p    =>   d²(t) = d_0² − (4 p_O C_0 T_m^{3/4}/ρ_p) t
+  kinetic-limited char (R_diff -> ∞):   d(d)/dt = −2 p_O R_kin / ρ_p      (linear shrinking)          (159.6)
+```
+
+with `T_m = 0.5 (T_g + T_p)`. The devolatilisation form integrates (159.4) at constant T. The
+heat-up form integrates (159.1) with Nu = 2 and no other term. For the char, `dm/dt = (ρ_p π d²/2)
+dd/dt` at constant ρ_p (a shrinking particle of constant density, the stated assumption of the
+gate); with R_kin → ∞ the harmonic combination is R_diff, so `(ρ_p π d²/2) dd/dt = −π d p_O C_0
+T_m^{3/4}`, i.e. `d·dd/dt = −2 p_O C_0 T_m^{3/4}/ρ_p`; with R_diff → ∞ it is R_kin, so
+`(ρ_p π d²/2) dd/dt = −π d² p_O R_kin`.
+
+### 159.4 Particle radiation and two-way coupling
+
+**[derived from (159.1)'s radiation term and §135's P1 incident radiation G]**
+
+```
+  θ_R⁴ = G / (4 σ_SB)
+  a_p = Σ_parcels n_p ε_0 π d_p² / 4 / V_cell             (added to P1's absorption coefficient)
+  S_rad = Σ n_p π d_p² ε_0 σ_SB (θ_R⁴ − T_p⁴)           (per cell; removed from G's equation)          (159.7)
+```
+
+**[derived]** An optically thin isothermal cloud at T_p in a cold black enclosure emits
+`Σ n_p π d_p² ε_0 σ_SB T_p⁴ = 4 a_p σ_SB T_p⁴ V`.
+
+Two-way coupling [§68 (momentum, energy), §77 (vapour mass and enthalpy), CHR-26]:
+
+```
+  per step:  the mass, momentum and energy the parcels give = what the gas gains, to round-off;
+             the volatile mass enters a named gas species (the volatile pseudo-species);
+             char oxidation takes O2 from and gives CO2 to the species equations                        (159.8)
+```
+
+The volatile pseudo-species takes its formula from the dust's volatile matter and its NASA-7 data
+as in (152.8). It burns with an authored one-step `volatile + O2` reaction on the CHEMRAD
+finite-rate path (CHR-03/09; docs/17 DD11), `cases/mech/volatile1.ck`.
+
+### 159.5 What DST-12 and DST-13 must make true (lane M, W3)
+
+DST-12: `src/dust/particle.rs`, `cuda/dustparticle.cu` (new), `build.rs`,
+`src/dust/tests_particle.rs`; ≤ 3 min per build.
+
+* `dust::particle::tests::devol_isothermal_closed_form`: m_p(t) against (159.6) to 1e−10
+  relative in f64, R in f32.
+* `dust::particle::tests::heatup_closed_form`: T_p(t) against (159.6) to 1e−10 (R).
+* `dust::particle::tests::bird_limits`: the factor → 1 as β → 0 to 1e−12, and `1/(e − 1)` at
+  β = 1 to 1e−14 (R).
+* `dust::particle::tests::stage_order`: moisture → volatiles → char is enforced (D).
+* `dust::particle::tests::device_matches_host`: ≤ 4 ulp in f64.
+
+DST-13: `src/dust/char.rs`, `cuda/dustparticle.cu`, `src/dust/tests_char.rs`; ≤ 2 min per build.
+
+* `dust::char::tests::d2_law`: diffusion-limited, d²(t) against (159.6) to 1e−8 relative over 90 %
+  burnout (R).
+* `dust::char::tests::kinetic_linear`: kinetic-limited, linear d(t) to 1e−10 (R).
+* `dust::char::tests::combined_limits`: the harmonic combination tends to each limit as the
+  other rate → ∞, to 1e−12 (R).
+* `dust::char::tests::element_balance`: carbon and oxygen per parcel exact to round-off (A).
+* `dust::char::tests::retention_split`: h_s = 0.3 splits the heat exactly (D).
+
+### 159.6 What DST-14 to DST-18 must make true (lane S)
+
+* **DST-14** (the cloud input): `dust.cloud { concentration, diameter | rosinRammler{d, n},
+  composition{moisture, volatile, char, ash}, rhoP, cpP, emissivity, devolatilisation{A, Ea, dH},
+  char{C0, A, Ea, hs} }` in JSONC and through the dictionary route of §137.2, lowered to CHR-25's injectors as
+  a uniform seeding. The seeded mass per volume equals `concentration` to 1e−12 relative
+  (deterministic quantile seeding, A). The Rosin-Rammler mass-weighted mean diameter equals
+  `d̄ Γ(1 + 1/n)` to 1e−10 (A). A cloud together with `combustion.model FSC` and every unknown
+  key are refused by name (D). Tests `io::case_dust::tests::{cloud_lowers, cloud_mass_is_exact,
+  rosin_rammler_moments, cloud_refusals}` and the schema sync test.
+* **DST-15** (`ofgpu-lowmach` runs Phase B): a closed adiabatic well-stirred box with a uniform
+  cloud and forced ignition conserves mass, energy and each element to 1e−10 relative (A), ends at
+  the host AICC of the dust-air mixture within 0.5 % with volatile, char as C(s) and inert ash
+  (P), and balances momentum to 1e−12 (A, CHR-26's row). No cloud, no change; the case equals the
+  library path (D). Tests `lowmach::tests::{dust_b_box_conserves, dust_b_box_ends_at_aicc,
+  dust_b_momentum_balance, no_cloud_no_change, dust_b_case_equals_library}`.
+* **DST-16** (gate DST-B-LAM): (i) at d = 1 µm and A_devol × 100, `|S_L,B/S_L,gas − 1| ≤ 2 %`
+  against the 1-D gas flame of the same volatile mixture in the same driver (P); (ii) S_L,B
+  non-increasing over d ∈ {5, 10, 20, 40} µm (D); (iii) against Dahoe et al. 2002's measured S_L
+  through (152.13) (0.241 m/s at φ = 0.62): **NAMED and NOT RUN** (§151.8).
+* **DST-17** (gate DST-B-VES): a closed 20 L sphere (1-D sector, laminar, central ignition):
+  p_end within 0.5 % of the cloud's AICC (P); with f_VM0 = 1, no char and d = 1 µm, the time to
+  `(p_0 + p_e)/2` within 5 % of (157.4), with S_u(p) from DST-16's 1-D flame at p/p_0 = 1, 3 and 6,
+  interpolated (P). K_st is reported; the measured 200 bar m/s ± 15 % (H22 §2) is **NAMED and
+  NOT RUN** (the standard test's decaying-turbulence initial state is not openly published).
+* **DST-18** (P1): an optically thin isothermal cloud at T_p in a cold black box emits
+  `4 a_p σ_SB T_p⁴ V` within 1 % (159.7; P1 in the thin limit, CHR-18's slab machinery) (P); a
+  particle in a uniform `G = 4σ_SB θ_R⁴` with no convection has dT_p/dt equal to (159.1)'s
+  radiation term exactly (R); particles, gas and radiation close their energy to round-off (A);
+  radiation off is bitwise unchanged (D). Tests `dust::particle::tests::{thin_cloud_emission,
+  uniform_field_heating, radiation_energy_closes, radiation_off_bitwise}`.
+
+---
+
+## 160. The flame-age option and the studio surface
+
+`No GPL-licensed source was consulted.` Written by DST-00 as the contract of DST-20 (lane S, W4)
+and DST-19 (lane G, W6). The labels (160.1)-(160.2) are D.69-D.70.
+
+### 160.1 The local flame-age clock (an option, default OFF)
+
+The papers' t_fd is one global clock counted from ignition. That is right for one kernel and is
+what H20 and H22 validated. It is undefined for two ignition points, a flame passing into a
+connected vessel, a restart, and arguably the fresh mixture outside a vent that the jet ignites
+(INSIGHTS (f)). **[derived; the constituent-oriented age idea of Deleersnijder, Campin & Delhez
+2001, not read]** A transported age concentration α of the burned gas:
+
+```
+  ∂(ρ‾ α)/∂t + ∇·(ρ‾ u~ α) = ∇·[ ρ‾ (κ + D_t) ∇α ] + ρ‾ c~ + a ω̇_c ,      a = α / max(c~, c_a)
+  t_fd(x, t) := a                       (replaces the global clock in (154.2)-(154.3), and t in (154.7))   (160.1)
+```
+
+α is in seconds, ω̇_c is the source of (152.12), c_a = 1e−6 the floor. Each burned element ages
+at rate 1, and newly burned gas inherits the local age. `combustion.flameAge: local` selects it;
+the default is the global clock (docs/17 DD8). Turning it on changes the numerics of a validated
+path, so it is the user's call per case, never a default. With TFC it is refused by name: TFC has
+no clock (154.9).
+
+### 160.2 The uniform-clock solution
+
+**[derived]** Let `a(x, t) = t − t_ig` be spatially uniform and `α = c~ a`. Expand the left side
+of (160.1): `a [∂(ρ‾c~)/∂t + ∇·(ρ‾u~c~)] + ρ‾ c~ da/dt`. Because a is uniform, the diffusion term is
+`a ∇·(ρ‾(κ + D_t)∇c~)`. Subtract a times (155.3), whose source is ω̇_c:
+
+```
+  ρ‾ c~ da/dt = ρ‾ c~       =>   da/dt = 1 :  a = t − t_ig is an exact solution                         (160.2)
+```
+
+Because α and c~ share one linear discretisation (the same ddt, convection, Laplacian and source
+split), the discrete solution has the same property to round-off, cell by cell where
+`c~ ≥ c_a`: one ignition gives `t_fd = t − t_ig` there, the papers' global clock.
+
+**A caveat for DST-20, found by DST-00.** The source `a ω̇_c` uses `a = α/max(c~, c_a)`. In a
+cell where `c~ < c_a` while `ω̇_c > 0` (the leading edge of the front, where `|∇c~|` is not zero),
+the inherited age is `α/c_a = (c~/c_a)(t − t_ig)`, smaller than the uniform clock, so α there
+falls short of `c~ (t − t_ig)` by a defect bounded by the share of ω̇_c in such cells. It then
+diffuses into `c~ ≥ c_a`. Whether that defect is below the R-class bound of DST-20's
+`one_ignition_is_uniform_clock` row is a measurement, and a miss is a finding, never a widened
+band. If it misses, the remedy is a numerics choice for the user (docs/17 §5.3 item 4), not a
+silent change of c_a.
+
+### 160.3 What DST-20 must make true
+
+`src/dust/age.rs`, `src/dust/progress.rs`, `src/bin/lowmach.rs`, `src/bin/compressible.rs`,
+`src/io/case_dust.rs`, the schema. ≤ 5 min per build:
+
+* `dust::age::tests::off_is_global_clock_bitwise`: OFF is bitwise the global-clock path (D).
+* `dust::age::tests::one_ignition_is_uniform_clock`: ON with one ignition, `t_fd = t − t_ig`
+  wherever c~ > c_a, to the R-class rule (160.2).
+* `dust::age::tests::two_kernels_two_clocks`: ON with two kernels ignited 5 ms apart in a 1-D
+  tube: each kernel's t_fd equals its own clock until they merge (R).
+* `dust::age::tests::age_budget_closes`: after the merge the α budget closes (A).
+* `flameAge` with TFC is refused by name (D).
+
+### 160.4 What DST-19 must make true (the studio)
+
+The studio knows the dust model (lane G, W6). The `combustion`, `dust`, `vent` and `dust.cloud`
+blocks and their refusals come from the re-synced schema (lane S regenerates
+`docs/schema/case-1.json`; it is never hand-merged). The `ofgpu-lowmach` and `ofgpu-compressible`
+registry entries list the dust options. Templates exist for the Leeds bomb, the 20 L sphere and
+the REMBE vent. The DST-* validate sections appear in the studio's gate list. Files:
+`gui/shared/src/registry.ts`, `gui/server/src/registry/schema.ts` (and its test),
+`gui/server/src/prompts/system.ts`, the studio template module, the schema copy. Tests:
+`schema.test.ts` passes on the regenerated schema; a mock-LLM case with a `combustion` and a
+`vent` block validates; `registry.test.ts` lists the dust options; `routes.test.ts`; the server
+and shared suites green at today's counts (one known failure allowed by name only, the
+`import.test.ts` 221-runs test). ≤ 5 min.
+
+---

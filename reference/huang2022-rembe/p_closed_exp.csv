@@ -1,0 +1,33 @@
+# C. Huang, M. Bloching and A. N. Lipatnikov, "A vented corn starch dust explosion in an 11.5 m3
+# vessel: Experimental and numerical study", J. Loss Prev. Process Ind. 75 (2022) 104707,
+# DOI 10.1016/j.jlp.2021.104707, open access under CC BY 4.0 (the copy read:
+# research.chalmers.se/publication/527616/file/527616_Fulltext.pdf, read 2026-10-13), FIG. 10
+# (page 10): the measured overpressure inside the vessel before the vent panel ruptured, 750 g/m3
+# corn starch (corrected equivalence ratio 0.62), central ignition at t = 0.
+# DIGITISED, not printed: the paper tabulates none of these values. Only the open circles
+# ("experiment") are read; the dashed line is the paper's own simulation and is not read.
+# The figure is a raster image embedded in the PDF (1032 x 740 px). Axis calibration from the
+# figure's frame and dashed grid lines: t = 0.00 to 0.10 s at 80.05 px per 0.01 s; overpressure
+# 0.05 to 0.11 bar at 101 px per 0.01 bar. Circle centre = the centre of the ring's vertical
+# extent (near-black pixels within 14 px of the circle's column; the red simulation line that
+# crosses some rings is not black). The circles sit on the 0.01 s grid to within 0.5 px.
+# The 0.060 bar at t = 0 is not explained in the paper (SPEC-LIT section 151.7, item 9).
+# Columns:
+#   t_s       time after ignition, s
+#   dp_bar    the ring centre's ordinate, overpressure, bar, kept to four decimals (1 px = 0.0001 bar)
+#   u_dp_bar  the reading uncertainty, bar
+#   u_t_s     the reading uncertainty of t, s
+#   clipped   1 = the ring is cut by the axis frame and its centre is read from the visible part
+#   gated     1 = a gate row of docs/17 DST-08 (ii) (t = 0.05 to 0.10 s); 0 = reported only
+t_s,dp_bar,u_dp_bar,u_t_s,clipped,gated
+0.00,0.0596,0.002,0.003,1,0
+0.01,0.0600,0.002,0.003,0,0
+0.02,0.0574,0.002,0.003,0,0
+0.03,0.0600,0.002,0.003,0,0
+0.04,0.0600,0.002,0.003,0,0
+0.05,0.0600,0.002,0.003,0,1
+0.06,0.0675,0.002,0.003,0,1
+0.07,0.0725,0.002,0.003,0,1
+0.08,0.0775,0.002,0.003,0,1
+0.09,0.0875,0.002,0.003,0,1
+0.10,0.0975,0.002,0.003,1,1
