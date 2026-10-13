@@ -79,6 +79,7 @@ pub mod restart;
 pub mod rheology;
 pub mod cht;
 pub mod chem;
+pub mod dust;
 pub mod compressible;
 pub mod comm;
 pub mod amg;

@@ -45358,6 +45358,58 @@ DST-01 lands, with tests in both builds (class A unless marked):
 * `dust::thermo::tests::prescribed_mode_sigma_5_06`: σ within 5.06 ± 0.01 (it is 5.0505).
 * `dust::laminar::tests::s_l_huang2022_eq3`: S_L(0.62) = 0.241107668 m/s to 1e-12 relative.
 
+### 152.11 What DST-01 landed, and the choices the tree made
+
+`src/dust/thermo.rs` and `src/dust/laminar.rs` (the module `dust`), host f64 in both builds, with
+the tests written once in `tests/shared/dust_thermo_cases.rs` and `tests/shared/dust_laminar_cases.rs`
+and included twice: as the lib tests `dust::thermo::tests` and `dust::laminar::tests`, and by
+`tests/dust_thermo.rs` in the default and the `single` build (the single lib test crate does not
+compile, docs/17 §5.1).
+
+* **Inputs from the tracked keys.** The starch (n_C, n_H, n_O, H_f,cs, a0, a1) is read by header
+  name from `reference/huang2022-rembe/corn_starch_table1.csv`. A non-zero a2, a3 or a4 is
+  refused, and so is an atom count at or below zero. The printed W_cs, a5 and R0 columns are not
+  read. N2, O2, CO2 and H2O are the TM-4513 records of
+  `reference/mcbride-gordon-reno1993/table_II.csv`, each with its record's molar mass. The
+  starch's W is the formula's with the IUPAC conventional weights, 0.15968406 kg/mol (§152.1).
+* **The composition is exact.** The atom counts are held in hundredths and φ as an integer
+  fraction. The mole numbers of (152.1) at φ are formed in exact rational arithmetic and rounded
+  to f64 once. The element balance is therefore a rational identity, and it is zero at φ = 62/100,
+  1, 1/2, 31/50 and 3/10 (class D). Only 0 < φ ≤ 1 is accepted, compared exactly on the
+  integers: a rich charge has no complete-combustion state, and φ = (10¹⁸ + 1)/10¹⁸, which is 1.0
+  in f64, is refused as rich. A fraction whose exact arithmetic would overflow i128 is refused by
+  name, never rounded.
+* **The pseudo-species are `chem::thermo::SpeciesThermo` records** named `DUST_U` and `DUST_B`.
+  Their element list is empty, because the starch formula is fractional. Their molar mass is W_U
+  (W_B), and their range is the intersection of the components' ranges, 200-6000 K, joined at
+  1000 K; a component that joins elsewhere is refused (§152.4). `EquivalentGas::thermo_set` hands
+  the two to the CHEMRAD machinery as a `ThermoSet` at 1 bar. That is the sense in which the gas
+  "exists on the device": this unit adds no kernel, and CHR-09/10/11's device paths read the two
+  records like any species.
+* **The prescribed mode** takes h_U^f = 0 and h_B^f = c_p (T_u − T_b) at T_ref = 298.15 K, so the
+  isobaric root returns the stated T_b. Its records are one-interval NASA-7 sets
+  (b1 = c_p W/R0, b6 = (h^f − c_p T_ref) W/R0, b7 = 0).
+* **(152.14) has no default reference state.** `SlFactors::Off` is the default and returns (152.13)
+  bit for bit. `SlFactors::Gulder` carries α, β, T_ref and p_ref as stated inputs, because the
+  open sources give no T_ref or p_ref. With α = β = 0 it is also (152.13) bit for bit.
+* **Roots.** (152.10) and (152.11) are bisected on [T_u, 6000 K] to full f64 precision.
+
+Measured (both builds, identical; the bands are §152.10's):
+
+| row | value | band | class |
+|---|---|---|---|
+| AICC P_max/p_0, φ = 0.62, T_0 = 273 K | 8.600607635 (T_v = 2173.3805 K) | 8.57 ± 1 % | A |
+| isobaric T_b, σ | 1779.5146 K, 7.041982 | DST-00's table | A |
+| W_U, W_B | 31.888263, 29.517180 g/mol | DST-00's table | A |
+| ΔH_r (152.6) from the records at 298.15 K | −2521.2356 kJ/mol | 2521 ± 0.1 % | A |
+| a5 (§152.2) | −98 821.704 K | −98 821.7 ± 0.05 | A |
+| pseudo-species against the component sums, c_p, h, s, 50 temperatures | worst 7.1e-14 relative | 1e-12 | A |
+| element balance at five φ | exactly 0 | exact | D |
+| prescribed σ (c_p = 1000 and 1250 J/(kg K)) | 5.050505050505 | 5.06 ± 0.01 | A |
+| S_L(0.62) (152.13) | 0.2411076681537468 m/s | 1e-12 relative | A |
+
+The prescribed σ is 5.0505 (§152.9), inside the 5.06 ± 0.01 band by 5e-4.
+
 ---
 
 ## 153. Ψ — the laminar-limit eigenproblem, its integral identity, and the ZFK diagnostic
