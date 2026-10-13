@@ -39496,6 +39496,156 @@ BITWISE in f64; class D); `explicit_transpose_stress_vanishes_for_solenoidal_lin
 ((123.4) is zero for `u = (a y, b x, 0)`; class R); `couette_shear_stress_exact`
 (linear `u(y)`: the wall shear stress `mu U/h` to round-off; class R).
 
+### 123.3 The assembly as built (CMP-09)
+
+`src/compressible/momentum.rs` holds `RhoMomentum`, and `cuda/compressible.cu` gains
+six kernels. This subsection adds no physics: it fixes what each call forms, in which
+order, and from which existing kernel, because one of its gates is bitwise. The
+precedent is `src/vof.rs`, which assembles its own ρ-weighted momentum from the same
+operators. Everything §3, §7, §12 and §5.1 already compute is CALLED, not re-derived:
+the scalar operators of `src/fv.rs`, the time term `timescheme::Ddt::add_rho`
+(§86.3), and the Rhie-Chow kernels of `cuda/momentum.cu`, which take their face force
+as an argument and do not know whose it is.
+
+**The inputs.** `u` (three time levels and its §4 triple), the face mass flux `mdot`
+[kg/s], `rho` as a field with its two old levels and its boundary values, the
+effective viscosity `mu_eff` of (122.8) as a field with boundary values, and the gauge
+`p`. The module never evaluates the gas law.
+
+**The viscous coefficient and the explicit stress** (`set_viscosity`):
+
+```
+mu_f = w mu_P + (1 - w) mu_N    (internal) ,   mu_f = mu_b    (boundary) ,   G_f = mu_f |Sf|     (123.9)
+T_P  = (grad u)_P ,   T_ij = d u_j / d x_i                     (§1's convention, §12's scheme)
+T_f  = w T_P + (1 - w) T_N      (internal and coupled) ,   T_f = T_P      (any other boundary face)
+q_f,i = mu_f ( sum_j T_f,ij Sf_j  -  (2/3) (T_f,xx + T_f,yy + T_f,zz) Sf_i )                     (123.10)
+E_P  = sum_{f owned by P} q_f  -  sum_{f whose neighbour is P} q_f  +  sum_{boundary f of P} q_f   [N]   (123.11)
+```
+
+(123.10) and (123.11) are (123.4), written per face and per cell. An `empty` face
+carries no `q`. `E_P` is an integrated force, so it enters the source as it is, with no
+volume factor. With `full_stress = false` neither the gradient nor `E` is formed and
+nothing is added: that is the laplacian-only operator, and it is what the bitwise gate
+below compares with the kinematic assembly, whose own explicit stress term
+(`momStressCorrection`) is a different expression.
+
+**One component's system** (`assemble_only`, `solve`), in the order
+`momentum::Momentum::assemble_component` uses, so that equal inputs give equal bits:
+the component view of `u`; `Ddt::add_rho` with `rho, rho^o, rho^oo`; `fvm_div_gauss`
+on `mdot` with §7's weights (sensor `|u|`, as `momentum::Momentum` takes it); the deferred half of a
+higher-order scheme (§11.1); `fvm_laplacian` with `-G_f`; §12.3's explicit
+non-orthogonal correction; `source_P += E_P,c` when `full_stress`; `ldu_ops::relax`
+by `u_relax` (always, also at 1, where it only enforces dominance); the boundary fold.
+There is NO bounded-convection correction: in conservative form `sum_f mdot_f` is the
+other half of `d(rho u)/dt` (§86.4), not a spurious source. The pressure gradient and
+the body force are held back as `force` until the solve, as §5.1 requires of `H`.
+`localEuler` and `CrankNicolson` are refused by name here; §125.4's per-cell step is
+CMP-13's.
+
+**The force** (`set_force`), formed on faces and reconstructed, as §5.1 does:
+
+```
+phig_f = rho_f (g . Sf) ,   rho_f = w rho_P + (1 - w) rho_N  (boundary: rho_b)                  (123.12)
+F_f    = phig_f - |Sf| snGrad(p)_f          (0 on a face whose flux the velocity prescribes)
+force_P = reconstruct(F)_P   [N/m^3] ,   source_c = su_c + V_P force_P,c                        (123.13)
+```
+
+`phig` is zero on a prescribed-flux boundary face and is not formed at all when
+`g = 0`. (123.12) is evaluated by §121's kernel pair with `beta = -1` and
+`T_ref = 0`, for which (121.3) is `rho_f (g . Sf)` with no rounding added: the
+subtraction of zero and the two sign changes are exact.
+
+**The residual** (`residual`), per component `c`, with `A` and `su` as assembled:
+
+```
+r_P,c = ( su_P,c + V_P force_P,c ) - (A u_c)_P                                                  (123.14)
+```
+
+**Rhie-Chow** (`rhie_chow`): `rAU = V/diag` (`momRau`, zero where the diagonal is
+zero), `HbyA` (`momHbyA`), `rAU_f` (`momFaceInterp`) and `phi_HbyA` of (123.6)
+(`momPhiHbyA` with a zero body-force flux: the gravity part of (123.7) belongs to the
+pressure equation, §124). Then the convective half of (123.7) with the retarded
+density of the current iterate:
+
+```
+mdot_HbyA,f = rho~_f phi_HbyA,f ,   rho~_f = rho_P if phi_HbyA,f >= 0 else rho_N     (internal, coupled)
+              boundary: rho~_f = rho_P if phi_HbyA,f >= 0 (outflow) else rho_b ;  0 on `empty`   (123.15)
+```
+
+**The viscous traction on a boundary face** (`boundary_traction`), the force the fluid's
+viscous stress exerts through the face, per (123.2):
+
+```
+t_b = mu_b ( |Sf| (u_b - u_P) delta_b  +  T_P . Sf  -  (2/3) tr(T_P) Sf )   [N] ,
+      (T_P . Sf)_i = sum_j T_P,ij Sf_j ;   0 on `empty` and coupled faces                       (123.16)
+```
+
+`delta_b` is the mesh's boundary `deltaCoeff` and `u_b` the evaluated boundary value.
+With `full_stress = false` only the first term is formed.
+
+**Contraction, and what the bitwise gate can claim.** `timescheme.cu` is compiled
+with contraction. `tsDdtGeneral` writes `diag += (sign V) a_N`, one fused operation;
+`tsDdtGeneralRho` writes `diag += ((sign V) a_N) rho`, whose product `(sign V) a_N` is
+rounded before the fused step. With `rho = 1` the two agree bit for bit when
+`(sign V) a_N` is exact, which it is when `a_N` is a power of two (Euler with
+`dt = 2^-k`), and can differ in the last place otherwise. The gate therefore claims
+BITWISE equality for the steady operator on any mesh and for Euler at `dt = 2^-10`,
+and holds the cases where `a_N` is not a power of two (Euler at `dt = 1e-3`, and
+backward at `dt = 2^-10`, whose `a_N` is `1.5·2^10`) to class R. This is a property of
+the two existing kernels, stated here; neither is changed. The backward leg is not at
+`dt = 1e-3`, because the KINEMATIC side cannot run it in the f32 build:
+`timescheme::fvm_ddt` refuses coefficients whose sum exceeds `1e-12` of their scale
+(`DdtCoeffs::is_consistent`), and three rounded f32 coefficients sum to `3.05e-5`
+against a bar of `2.0e-9` at `dt = 1e-3`. `fvm_ddt_rho`, which this module calls, has
+no such guard and runs backward at `dt = 1e-3` in both builds (the fixed-point row
+above does). The guard's f64 constant is a finding for §118's stream, not changed here.
+
+**Answer keys** (derived). For uniform `mu`, (123.4) is
+`div( mu (grad u)^T - (2/3) mu (div u) I ) = (mu/3) grad(div u)`. For
+`u = (a y, b x, 0)` it is zero. For `u = (c x y, 0, 0)`, `div u = c y` and the force
+on a cell is `(0, mu c V_P / 3, 0)`: on a uniform hexahedral mesh the Green-Gauss
+gradient of a bilinear field is exact, so the discrete `E_P` equals it to round-off in
+every cell that owns no boundary face. Reversing the index order in (123.10) gives
+`(0, -2 mu c V_P/3, 0)`, and dropping the `2/3` term gives `(0, mu c V_P, 0)`, so
+the row separates all three. For plane Couette flow `u = (U y/h, 0, 0)`,
+`T_yx = U/h` alone: the traction (123.16) is `(±mu U |Sf|/h, 0, 0)` on the walls
+`y = h` and `y = 0`, and `(0, ±mu U |Sf|/h, 0)` on the faces `x = max` and `x = min`
+(the complementary shear `tau_yx = tau_xy`, carried by the explicit term alone).
+
+| gate (lib: `compressible::momentum::tests::*`, f64 build; the same names in `tests/compressible_momentum.rs` run in both builds from one shared source) | bar | class |
+|---|---|---|
+| `uniform_flow_is_a_fixed_point_to_round_off` | uniform `rho = 1.177`, `u = (37.5, -12.25, 4)`, `p = 250`, `mu = 1.846e-5` on a 6x5x4 box graded 3:1 in y, for steadyState, Euler and backward (`dt = 1e-3`) and for upwind and linear: `|r_P,c| <= 1e-13 |diag_P| max|u_c|` in every cell (the magnitude: with `linear` a cell beside a Dirichlet outflow face has a negative diagonal); `|force_P,c| V_P <= 1e-13 |p| S_P`, with `S_P` the summed face area of the cell (the face difference of a uniform `p` is exactly zero, but §12.3's explicit correction multiplies a Green-Gauss gradient that is zero only to round-off by correction vectors that are zero only to round-off on a graded mesh, so the force is of order `1e-30`, not zero); `HbyA = u`, `phi_HbyA = u . Sf` and `mdot_HbyA = rho u . Sf` to `1e-12` relative; one `solve` moves `u` by at most `1e-10 max|u_c|`. Control: `u_x + 1` in one interior cell gives `|r_P,x|` within `[0.5, 1.5] diag_P` | R |
+| `rho_one_matrix_equals_incompressible_matrix_times_rho` | `rho = 1`, `mu = nu = 1.5e-5`, `mdot = phi`, `full_stress = false` against `momentum::Momentum` with `bounded_convection = false` and `variable_viscosity_stress = false`, on a non-uniform `u` with three distinct time levels: `lower`, `upper`, `diag`, `source`, the boundary coefficients, `rAU`, `HbyA`, `phi_HbyA`, `mdot_HbyA` (against `phi_HbyA`) and `force` are equal BIT FOR BIT, for steadyState with upwind (`u_relax` 0.7) and with linearUpwind (0.9), and for Euler at `dt = 2^-10` (1.0). Every compared array has a nonzero entry | D |
+| the same, `a_N` not a power of two | Euler at `dt = 1e-3` and backward at `dt = 2^-10` (`a_N = 1.5·2^10`): `diag` and `source` agree to `1e-14 diag_P` and `1e-14 diag_P max|u|`; the largest ulp distance is printed | R |
+| `explicit_transpose_stress_vanishes_for_solenoidal_linear_u` | uniform 6x6x6 unit box, `mu = 2e-5`: for `u = (3 y, -1.5 x, 0)`, `|E_P,c| <= 1e-13 mu (|a| + |b|) 6 h^2` in every cell. Control: for `u = (2 x y, 0, 0)`, `|E_P - (0, mu c V_P/3, 0)| <= 1e-13 mu c 6 h^2` in every cell that owns no boundary face | R |
+| `couette_shear_stress_exact` | `U = 30`, `h = 0.02`, `mu = 1.8e-5`, `rho = 1.2`, a 4x8x3 box graded 2:1 in y: the traction on `y = h` is `(+mu U |Sf|/h, 0, 0)`, on `y = 0` `(-mu U |Sf|/h, 0, 0)`, on `x = max` `(0, +mu U |Sf|/h, 0)`, on `x = min` `(0, -mu U |Sf|/h, 0)`, each component to `1e-12 mu U |Sf|/h` (`tau_w = 0.027` Pa); the steady residual of the Couette state is `<= 1e-12 diag_P U`. Control: with `full_stress = false` the traction on `x = max` has `t_y = 0` exactly | R |
+| `hydrostatic_force_is_zero_face_by_face` | `g = (1.5, -2, -9.81)`, uniform `rho = 1.2`, `p = rho g . x` with its exact boundary values, on a 3x4x6 box with no prescribed-flux face: `|F_f| <= 1e-12 rho |g| |Sf|` on every face and `|force_P| <= 1e-12 rho |g|`. Control: with `p = 0`, `force_P = rho g` to `1e-12 rho |g|`; with a Dirichlet velocity on every patch, `phig_b = 0` and `F_b = 0` exactly | R |
+| `the_compressible_momentum_predictor_replays_bitwise` (lib) | §81.7's row for `src/compressible/momentum.rs`: `set_viscosity`, `set_force`, a fixed-sweep `solve` and `rhie_chow` capture into one graph and replay bitwise | D |
+
+R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1): `1e-5` for `1e-10`
+to `1e-13`, `5.4e-6` for `1e-14`. The D rows are bitwise in both builds. Each R bar is
+relative to the size of the terms that cancel (`diag_P |u|`, `mu |T| sum|Sf|`), not to
+the result, which is zero.
+
+**Landed (CMP-09).** Measured on the RTX 5070 Ti, in both builds; each number is the
+worst error over a bar of the table, f64 then `single`. The fixed-point row: residual
+`7.1e-3` and `3.9e-2` of its bar over the six legs, the force `1.2e-19` and `3.0e-19`
+of its bar (at most `1.4e-28` N/m3 in f64 and `3.7e-20` in `single`), and the control `1.0895 |diag_P|` in both. The
+`rho = 1` row is bitwise over every array in legs A, B and C in both builds, and legs D
+and E also came out at 0 ulp in `diag` and in `source` in both builds: this compiler
+does not separate the two time kernels, and the row still claims only class R there.
+The stress row: `1.5e-3` and `5.7e-3` for the rotation, `1.5e-3` and `4.3e-3` for the
+control, whose key `mu c V_P/3 = 6.17e-8` N is `9e10` and `9e2` bars. Couette: the
+traction `1.6e-3` and `5.4e-2`, the residual `8.0e-4` and `1.1e-2`, and without the
+explicit term `t_y = 0` exactly on `x = max` against `4.652e-7` N with it. The
+hydrostatic row: `8.2e-3` and `2.7e-1` on faces, `3.7e-3` and `1.3e-1` for the cell
+force, `2.9e-4` and `1.3e-2` for the control, and the 108 prescribed boundary faces at
+zero exactly. The replay gate captures 354 nodes (321 kernel, 33 memset) and replays
+three times bitwise over 4 buffers and 214 values. CMP-08's three kernels did not move
+(`tests/compressible_thermo.rs` 4 of 4). Every other cubin is unchanged in SASS under
+`single`; in f64 the only other difference is `solidblock.cubin`, back on the first of
+the two hashes it alternates between on a recompile (CMP-08's run saw the second).
+
 ---
 
 ## 124. The all-speed pressure equation — continuity with the gas law, the retarded density, and the incompressible limit
