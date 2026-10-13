@@ -880,6 +880,7 @@ pub mod ale;
 pub mod geometry;
 pub mod gpuemit;
 pub mod gpugeom;
+pub mod imprint;
 pub mod motion;
 pub mod refined;
 pub mod topology;
