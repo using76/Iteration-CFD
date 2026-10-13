@@ -13,14 +13,19 @@ live outside the files the reader is pointed at.
 
 What is repaired, in order: a bit-exact weld is measured first, duplicate
 corners are welded at a tolerance (a coordinate a cluster already had is
-kept), degenerate triangles are dropped, each component is oriented by
-propagation across edges the input uses exactly twice - a flip that would
-make one of the triangle's own edges same-direction is skipped and counted,
-not applied - and flipped outward when closed, a boundary loop of up to
---max-hole-edges edges is filled (three edges with one triangle, four or
-more by ear clipping in the plane of the loop's Newell normal), and the
-result is written with recomputed normals.  The defect counts after every
-stage and everything the tool could not repair are reported, never hidden.
+kept), degenerate triangles are dropped, verbatim duplicate facets are
+removed - exact copies, and coincident opposite pairs unless one of the
+two runs against the surrounding surface - and each component is oriented
+patch by patch: a patch is a maximal set of triangles joined by edges the
+input uses twice in opposite directions, so the windings inside a patch
+already agree, and a reached patch is flipped whole when more of its
+edges to the decided patches run same-direction than opposite.  Then a
+closed component is flipped outward when its volume is negative, a
+boundary loop of up to --max-hole-edges edges is filled (three edges with
+one triangle, four or more by ear clipping in the plane of the loop's
+Newell normal), and the result is written with recomputed normals.  The
+defect counts after every stage and everything the tool could not repair
+are reported, never hidden.
 """
 
 import argparse
@@ -261,89 +266,158 @@ def _edge_map(key):
     return uk, eidx, estart, ucount
 
 
-def _flip_makes_same(T, t2, tri2, uk, eidx, estart, ucount, nP):
-    """True iff flipping triangle t2 would turn one of its own two-triangle
-    edges from an opposite pair into a same-direction pair - the only move
-    that raises non_manifold_edges.  An open edge stays open and an edge
-    shared three ways or more stays non-manifold whatever the winding, so
-    neither ever costs anything."""
-    for k in range(3):
-        a, b = int(tri2[k]), int(tri2[(k + 1) % 3])
-        kk = min(a, b) * nP + max(a, b)
-        i = np.searchsorted(uk, kk)
-        if i >= len(uk) or uk[i] != kk or ucount[i] != 2:
-            continue
-        for e in eidx[estart[i] : estart[i] + ucount[i]]:
-            t3 = int(e) // 3
-            if t3 == t2:
+def _dedup(T, tri_patch, nP):
+    """(T, tri_patch, n_exact, n_opposite): drop coincident triangles.  A
+    group is the set of triangles sharing one sorted vertex triple, and
+    two of them run the SAME way iff one is a cyclic rotation of the
+    other.  Within a group only the first triangle (lowest row index) of
+    each way survives; the rest are exact duplicates (n_exact).  A group
+    that then holds one triangle of each way is a coincident opposite
+    pair.  With o_k the outside triangles on the pair's k-th undirected
+    edge - all o_k counted on one post-exact snapshot, the same for every
+    pair - a pair whose every o_k is even is a zero-thickness sheet and
+    both triangles go; otherwise the triangle running opposite to the
+    outside users on more edges survives (on an edge with a single
+    outside user that is the one traversing the edge the other way round;
+    a tie keeps the lower row index).  The removals of this step are
+    n_opposite and the survivors keep their relative order."""
+    n = len(T)
+    if n == 0:
+        return T, tri_patch, 0, 0
+    srt = np.sort(T, axis=1)
+    _, inv = np.unique(srt, axis=0, return_inverse=True)
+    inv = np.asarray(inv).reshape(-1)
+    v0, v1 = T[:, 0], T[:, 1]
+    even = ((v0 == srt[:, 0]) & (v1 == srt[:, 1])) \
+        | ((v0 == srt[:, 1]) & (v1 == srt[:, 2])) \
+        | ((v0 == srt[:, 2]) & (v1 == srt[:, 0]))
+    cls = (~even).astype(np.int64)          # 0 = cyclic way, 1 = reversed
+    _, first = np.unique(inv * 2 + cls, return_index=True)
+    keep = np.zeros(n, dtype=bool)
+    keep[first] = True
+    n_exact = int(np.count_nonzero(~keep))
+    T2, patch2, inv2, cls2 = T[keep], tri_patch[keep], inv[keep], cls[keep]
+    keep2 = np.ones(len(T2), dtype=bool)
+    if np.any(np.bincount(inv2) == 2):       # coincident opposite pairs
+        a2, _, key2 = _edge_key(T2, nP)
+        uk2, eidx2, estart2, ucnt2 = _edge_map(key2)
+        order = np.argsort(inv2, kind='stable')
+        s_inv = inv2[order]
+        bnd = np.nonzero(np.diff(s_inv))[0] + 1
+        spans = zip(np.concatenate(([0], bnd)).tolist(),
+                    np.concatenate((bnd, [len(s_inv)])).tolist())
+        for s, e in spans:
+            if e - s != 2:
                 continue
-            tri3 = T[t3]
-            if not [j for j in range(3)
-                    if (int(tri3[j]), int(tri3[(j + 1) % 3])) == (a, b)]:
-                return True    # the partner runs b->a today; after the flip both would
-    return False
+            i, j = int(order[s]), int(order[s + 1])
+            if cls2[i] == cls2[j]:
+                continue
+            even_all, si, sj = True, 0, 0
+            for k in range(3):
+                pos = int(np.searchsorted(uk2, key2[3 * i + k]))
+                if ucnt2[pos] % 2:
+                    even_all = False         # o_k = ucnt2 - 2 is odd
+                users = eidx2[estart2[pos]:estart2[pos] + ucnt2[pos]]
+                out = users[(users // 3 != i) & (users // 3 != j)]
+                if len(out) == 0:
+                    continue
+                tails = a2[out]
+                opp_i = int(np.count_nonzero(tails != a2[3 * i + k]))
+                same_i = len(tails) - opp_i
+                if opp_i > same_i:
+                    si += 1
+                elif same_i > opp_i:
+                    sj += 1
+            if even_all:
+                keep2[i] = keep2[j] = False  # a zero-thickness sheet: both go
+            elif sj > si:
+                keep2[i] = False
+            else:
+                keep2[j] = False             # i wins; a tie keeps the lower row
+    n_opposite = int(np.count_nonzero(~keep2))
+    return T2[keep2], patch2[keep2], n_exact, n_opposite
 
 
 def _orient(T, P, nP):
-    """Per component a BFS from its largest-area triangle flips every
-    triangle that traverses a shared two-triangle edge the same way.  The
-    BFS walks only edges the input uses exactly twice, so a flip decision
-    is never taken through a non-manifold edge, and a flip is applied only
-    when it does not raise the non-manifold count: a triangle whose flip
-    would make one of its own edges same-direction is left alone, counted
-    in left_alone.  A component's remainder the walk did not reach from
-    the previous seed is given a fresh seed of its own, counted in
-    reseeded_patches.  The partner across an edge is found through
-    `_edge_map`, not by the edge key's first-occurrence index.  Returns
-    (flips, left_alone, left_alone_reasons, reseeded_patches)."""
+    """Per component the walk now runs over PATCHES, not single triangles:
+    a patch is a maximal set of triangles joined by two-use edges whose
+    two runs oppose in the input (one union-find pass, on the input
+    windings), so the windings inside a patch already agree and every
+    two-use edge between two different patches runs the same way in the
+    input - which is why a decided patch can never raise
+    non_manifold_edges.  Each component is seeded at its not-yet-decided
+    patch with the largest total triangle area (tie: the patch holding the
+    lowest triangle index); the seed is never flipped and every seed after
+    a component's first is counted in reseeded_patches.  A patch first
+    reached counts S same-way and O opposite-way two-use edges to the
+    patches already decided: S > O flips the patch whole (flips grows by
+    its triangle count); S > 0 with S <= O leaves it as it is (left_alone
+    grows by its triangle count).  Returns (flips, left_alone,
+    left_alone_reasons, reseeded_patches)."""
     areas, _ = _area_normals(T, P)
     comp = _components(T, nP)
     ncomp = int(comp.max()) + 1 if len(comp) else 0
-    _, _, key = _edge_key(T, nP)
-    uk, eidx, estart, ucount = _edge_map(key)
-    visited = np.zeros(len(T), dtype=bool)
-    flips = 0
-    refused = 0
+    a, _, key = _edge_key(T, nP)
+    _, eidx, estart, ucount = _edge_map(key)
+    two = np.nonzero(ucount == 2)[0]
+    dsu = _DSU(len(T))
+    for i in two:
+        e1, e2 = int(eidx[estart[i]]), int(eidx[estart[i] + 1])
+        if int(a[e1]) != int(a[e2]):     # the two runs oppose in the input
+            dsu.union(e1 // 3, e2 // 3)
+    roots = np.array([dsu.find(t) for t in range(len(T))], dtype=np.int64)
+    if len(roots) == 0:
+        return 0, 0, [], 0
+    up, first, pinv = np.unique(roots, return_index=True, return_inverse=True)
+    rank = np.empty(len(up), dtype=np.int64)
+    rank[np.argsort(first)] = np.arange(len(up))
+    patch = rank[np.asarray(pinv).reshape(-1)]
+    npatch = int(len(up))
+    members = [np.nonzero(patch == p)[0] for p in range(npatch)]
+    parea = np.array([float(areas[m].sum()) for m in members])
+    adj = [[] for _ in range(npatch)]
+    for i in two:
+        p1 = int(patch[int(eidx[estart[i]]) // 3])
+        p2 = int(patch[int(eidx[estart[i] + 1]) // 3])
+        if p1 != p2:                     # inter-patch: same way in the input
+            adj[p1].append(p2)
+            adj[p2].append(p1)
+    decided = np.zeros(npatch, dtype=bool)
+    state = np.zeros(npatch, dtype=bool) # True = the patch was flipped whole
+    flips = left_alone = reseeded = 0
     refused_reason = 'flip would make an edge same-direction'
-    reseeded = 0
     for c in range(ncomp):
-        members = np.nonzero(comp == c)[0]
-        first = True
-        while True:
-            todo = members[~visited[members]]
-            if len(todo) == 0:
-                break
-            seed = int(todo[np.argmax(areas[todo])])
-            if not first:
+        cpatch = np.unique(patch[comp == c]).tolist()
+        seen = 0
+        first_seed = True
+        while seen < len(cpatch):
+            seed, best = -1, -1.0
+            for p in cpatch:
+                if not decided[p] and parea[p] > best:
+                    seed, best = p, float(parea[p])
+            if not first_seed:
                 reseeded += 1
-            first = False
-            visited[seed] = True
+            first_seed = False
+            decided[seed] = True         # the seed is never flipped
+            seen += 1
             stack = [seed]
             while stack:
-                t = stack.pop()
-                tri = T[t]
-                for k in range(3):
-                    ca, cb = int(tri[k]), int(tri[(k + 1) % 3])
-                    kk = min(ca, cb) * nP + max(ca, cb)
-                    i = np.searchsorted(uk, kk)
-                    if i >= len(uk) or uk[i] != kk or ucount[i] != 2:
+                for q in adj[stack.pop()]:
+                    if decided[q]:
                         continue
-                    for e in eidx[estart[i] : estart[i] + ucount[i]]:
-                        t2 = int(e) // 3
-                        if visited[t2]:
-                            continue
-                        tri2 = T[t2]
-                        pos = [j for j in range(3) if (int(tri2[j]), int(tri2[(j + 1) % 3])) == (ca, cb)]
-                        if pos:
-                            if _flip_makes_same(T, t2, tri2, uk, eidx, estart, ucount, nP):
-                                refused += 1     # the flip would break an opposite edge
-                            else:
-                                T[t2] = tri2[[0, 2, 1]]
-                                flips += 1
-                        visited[t2] = True
-                        stack.append(t2)
-    reasons = [refused_reason] if refused > 0 else []
-    return flips, refused, reasons, reseeded
+                    s = sum(1 for r in adj[q] if decided[r] and not state[r])
+                    o = sum(1 for r in adj[q] if decided[r] and state[r])
+                    if s > o:
+                        T[members[q]] = T[members[q]][:, [0, 2, 1]]
+                        state[q] = True
+                        flips += len(members[q])
+                    elif s > 0:
+                        left_alone += len(members[q])
+                    decided[q] = True
+                    seen += 1
+                    stack.append(q)
+    reasons = [refused_reason] if left_alone > 0 else []
+    return flips, left_alone, reasons, reseeded
 
 
 # --- holes and outward ----------------------------------------------------
@@ -682,6 +756,8 @@ def run_repair(args):
     nP = len(P)
     before = _defects(Tbit, nP_bit)
     weld_stage = _defects(T, nP)
+    T, patch_k, n_exact, n_opposite = _dedup(T, patch_k, nP)
+    dedup_stage = _defects(T, nP)
     flip3, left_alone, alone_reasons, reseeded = _orient(T, P, nP)
     orient_stage = _defects(T, nP)
     T, tri_patch, filled, filled_tris, unfilled, per_hole = _fill_holes(
@@ -693,6 +769,8 @@ def run_repair(args):
          'non_manifold_edges': before[1]},
         {'stage': 'weld', 'open_edges': weld_stage[0],
          'non_manifold_edges': weld_stage[1]},
+        {'stage': 'dedup', 'open_edges': dedup_stage[0],
+         'non_manifold_edges': dedup_stage[1]},
         {'stage': 'orient', 'open_edges': orient_stage[0],
          'non_manifold_edges': orient_stage[1]},
         {'stage': 'fill', 'open_edges': after_open,
@@ -730,6 +808,8 @@ def run_repair(args):
            'bbox': [float(v) for v in (*bbox_lo, *bbox_hi)], 'diagonal': diag,
            'triangles_in': n_in, 'triangles_out': int(len(T)),
            'degenerate_dropped': dropped,
+           'duplicates': {'exact_removed': n_exact,
+                          'opposite_removed': n_opposite},
            'weld': dict({'tol_rel': args.weld, 'tol_abs': tol_abs,
                          'points_raw': 3 * n_in}, **wst),
            'orientation': {'reoriented_triangles': flip3,
@@ -755,6 +835,8 @@ def run_repair(args):
                      % (TOOL, rep['file'], fmt, n_in, ncomp, before[0], before[1]))
     sys.stdout.write('  weld: %d point(s) merged at %.6g (%g x diagonal %.6g), max move %.3g; %d degenerate dropped\n'
                      % (wst['merged'], tol_abs, args.weld, diag, wst['max_move'], dropped))
+    sys.stdout.write('  duplicates: %d exact, %d opposite-coincident removed\n'
+                     % (n_exact, n_opposite))
     sys.stdout.write('  orient: %d triangle(s) reoriented, %d left alone, %d patch(es) re-seeded, %d component(s) flipped outward\n'
                      % (flip3, left_alone, reseeded, len(flipped_set)))
     ear_tris = sum(h['triangles'] for h in per_hole

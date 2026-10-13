@@ -796,7 +796,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 32, "thirty-two markers, found {markers:?}");
+        assert_eq!(markers.len(), 33, "thirty-three markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -827,6 +827,7 @@ mod tests {
                 "tnf-flameD-x45",
                 "martin-moyce-1952",
                 "riboux-gordillo-2014",
+                "rae2822-coordinates",
             ]
         );
         for row in &m.rows {
@@ -1941,6 +1942,58 @@ mod tests {
         println!(
             "  [answer-key] riboux-gordillo-2014  17 rows, 8 liquids, Oh and l_sigma \
              reproduce their print"
+        );
+    }
+
+    /// SPEC-LIT section 127.5.1: the RAE 2822 key holds the NPARC archive's
+    /// 65 stations in ascending `x`, closed at both ends, with the rows
+    /// CMP-26's gate quotes and the lower surface dipping below the chord
+    /// at x = 0.91574.
+    #[test]
+    fn rae2822_key_holds_65_stations_closed_at_both_ends() {
+        // answer-key: rae2822-coordinates
+        let key =
+            load("rae2822-coordinates").expect("load the answer key \"rae2822-coordinates\"");
+        assert_eq!(
+            key.columns,
+            ["x_c", "z_c_lower", "z_c_upper"],
+            "rae2822-coordinates: the header row"
+        );
+        assert_eq!(key.rows.len(), 65, "rae2822-coordinates: the row count");
+        let x = key.column("x_c").expect("the x_c column");
+        let zl = key.column("z_c_lower").expect("the z_c_lower column");
+        let zu = key.column("z_c_upper").expect("the z_c_upper column");
+        for i in 1..65 {
+            assert!(
+                x[i] > x[i - 1],
+                "rae2822-coordinates: row {i}: x {} does not ascend from {}",
+                x[i], x[i - 1]
+            );
+        }
+        assert_eq!((x[0], zl[0], zu[0]), (0.0, 0.0, 0.0), "rae2822-coordinates: row 0");
+        assert_eq!(
+            (x[64], zl[64], zu[64]),
+            (1.0, 0.0, 0.0),
+            "rae2822-coordinates: row 64"
+        );
+        assert_eq!(
+            (x[1], zl[1], zu[1]),
+            (0.0006, 0.00317, 0.00323),
+            "rae2822-coordinates: row 1"
+        );
+        assert_eq!(
+            (x[63], zl[63], zu[63]),
+            (0.9994, 0.00001, 0.0003),
+            "rae2822-coordinates: row 63"
+        );
+        let at = x.iter().position(|&v| v == 0.91574).expect("the x 0.91574 row");
+        assert!(
+            zl[at] < 0.0 && zl[at] == -0.00027,
+            "rae2822-coordinates: row {at}: the lower ordinate {} is not -0.00027",
+            zl[at]
+        );
+        println!(
+            "  [answer-key] rae2822-coordinates  65 stations, closed at both ends"
         );
     }
 }

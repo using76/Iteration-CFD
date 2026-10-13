@@ -126,6 +126,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              src/chem/device.rs",
         ),
     ),
+    (
+        "src/compressible/momentum.rs",
+        Stance::Gate("the_compressible_momentum_predictor_replays_bitwise"),
+    ),
+    (
+        "src/compressible/pressure.rs",
+        Stance::Gate("the_compressible_pressure_corrector_replays_bitwise"),
+    ),
+    (
+        "src/compressible/thermo.rs",
+        Stance::Gate("the_compressible_thermo_update_replays_bitwise"),
+    ),
     // ---- physics with an iteration of its own -----------------------------
     (
         "src/cht.rs",

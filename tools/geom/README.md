@@ -148,8 +148,11 @@ bit-exact weld is measured first (`before` — what
 `Surface::require_closed` would print for the input today), then duplicate
 corners are welded at `--weld` × the bounding-box diagonal (default 1e-6, the
 house convention; `0` = bit-exact only), degenerate triangles are dropped,
-each vertex-connected component is oriented by propagation across manifold
-edges and every closed shell is flipped outward, a boundary loop of up to
+duplicate facets are removed (an exact copy always; a coincident opposite
+pair whole when it is a zero-thickness sheet, otherwise the one of the two
+that runs against the surrounding surface), each vertex-connected component
+is oriented patch by patch across manifold edges and every closed shell is
+flipped outward, a boundary loop of up to
 `--max-hole-edges` edges is filled — three edges with one triangle, four or
 more by ear clipping in the plane of the loop's Newell normal (Meisters
 1975) — and the result is written with normals recomputed from the winding.
@@ -158,16 +161,19 @@ Flags: `--out PATH` (without it the tool only reports), `--json OUT` (the
 report, never stdout), `--weld REL`, `--max-hole-edges N` (default 32),
 `--ascii | --binary` (default: the input's format; binary refuses a
 multi-`solid` file). Report keys: `file, format_in, out, format_out, units,
-bbox, diagonal, triangles_in, triangles_out, degenerate_dropped, weld
+bbox, diagonal, triangles_in, triangles_out, degenerate_dropped, duplicates
+{exact_removed, opposite_removed}, weld
 {tol_rel, tol_abs, points_raw, points_bit_exact, points_welded, merged,
 max_move}, orientation {reoriented_triangles, left_alone, left_alone_reason,
 reseeded_patches, flipped_components}, holes
-{max_hole_edges, filled, filled_triangles, unfilled[], per_hole[]}, before
+{max_hole_edges, filled, filled_triangles, unfilled[], per_hole[]}, stages[]
+(input, weld, dedup, orient, fill: open and non-manifold edges after each), before
 {}, after {open_edges, non_manifold_edges, closed, volume}, n_components,
 components[]
 {index, patch, n_triangles, open_edges, non_manifold_edges, closed, volume,
-flipped}, patches`. Stdout carries six lines (the summary, the weld, the
-orientation, the holes, the after-state, the written file) plus one line per
+flipped}, patches`. Stdout carries seven lines (the summary, the weld, the
+duplicates, the orientation, the holes, the after-state, the written file),
+one line per stage, plus one line per
 open component when the result is not closed. Exit 0 whenever a report was
 produced — an unclosed result is reported, not an error; refusals (missing
 file, a non-`.stl` extension, `--out` equal to the input, `--weld < 0`,
@@ -212,45 +218,67 @@ non-manifold edges than the input refuses the write — exit 3,
 `the fill raised non_manifold_edges from A to B - this is a bug, report
 it` — before anything is written.
 
-The orientation pass counts two things separately.  `left_alone` is the
-number of flips it refused because performing them would have turned a
-two-triangle edge into a same-direction pair, named in `left_alone_reason`;
-a triangle that was merely never reached is not left alone.
+Duplicates (AUT-02a) are found after the weld, so `before` and the
+weld numbers still count them: triangles with the same three welded
+corners form a group, the first of each winding is kept and every later
+copy is an exact duplicate (`duplicates.exact_removed`); a group left with
+one triangle of each winding is a coincident opposite pair, removed whole
+when every one of its edges has an even number of other users (a
+zero-thickness sheet) and otherwise reduced to the one that runs opposite
+to the other users on more edges (`duplicates.opposite_removed`; a tie
+keeps the earlier one).  Duplicates are not counted in
+`degenerate_dropped`.
+
+The orientation pass (AUT-02a) walks PATCHES: a patch is a maximal set of
+triangles joined by two-triangle edges whose two uses run opposite in the
+input, so its winding is already consistent and every two-triangle edge
+between two patches runs the same way in the input.  Each component is
+seeded at its largest-area patch, which is never flipped; a patch reached
+from the walk counts its same-way (S) and opposite (O) edges to the
+patches already decided and is flipped whole when S > O, so a
+corners-reversed disk of any size is re-oriented across its boundary
+edges and the non-manifold count can only fall.  The pass counts two
+things separately.  `left_alone` is the number of triangles in reached
+patches it did not flip although S > 0 (S <= O), named in
+`left_alone_reason`; a triangle that was merely never reached is not left
+alone.
 `reseeded_patches` is the number of extra seeds the orientation walk
 needed because a component's remainder was not reached from the previous
 seed; a re-seeded patch is oriented consistently within itself but not
 necessarily with the patch before it.
 
-Worked example, measured 2026-09-20 on the F1 body that session could not
-close (`c42-f1.stl`, 237,482 triangles): before 13,854 open / 810
-non-manifold edges; 1,874 degenerate triangles dropped, 0 points welded;
-the orientation pass reorients 15 triangles, refuses 55 flips
-(`left_alone`) and takes 274 extra seeds (`reseeded_patches`); the
-stages run input 13,854 open / 810 non-manifold, weld 13,854 / 810,
-orient 13,854 / 787 — the flips lower non-manifold by 23 — and fill
-7,138 / 787; the fill closes 486 loops with 5,744 triangles — 31 of them
-three-edge, 455 ear-clipped — and names 1,388 loops in `holes.unfilled`;
-exit 0.  The file is still not closed, with 7,138 open edges: 87 loops
-longer than `--max-hole-edges` 32 (4,364 edges), 1,230 walks that hit a
-boundary vertex without exactly one unused outgoing open edge (2,048
-edges), 43 loops whose clipped fan would make an edge non-manifold (542
-edges), 10 loops with no ear (130 edges) and 18 loops whose fill would
-add a zero-area triangle (54 edges) — the five families' edges sum to
-7,138 — so `ofgpu-generate-mesh` still refuses it without
-`-permissive`.  Re-reading the file the run wrote reports the same
-7,138 open edges and 0 degenerate triangles dropped, because the fill
-never writes a triangle the reader would drop.
+Worked example, re-measured 2026-10-13 after AUT-02a on the F1 body that
+an earlier session could not close (`c42-f1.stl`, 237,482 triangles):
+before 13,854 open / 810 non-manifold edges; 1,874 degenerate triangles
+dropped, 0 points welded; 9 exact duplicates and 28 opposite-coincident
+triangles removed; the orientation pass reorients 95 triangles, leaves
+none alone and takes 239 extra seeds (`reseeded_patches`); the stages run
+input 13,854 open / 810 non-manifold, weld 13,854 / 810, dedup 13,859 /
+773, orient 13,859 / 677 and fill 7,119 / 677; the fill closes 487 loops
+with 5,766 triangles — 31 of them three-edge, 456 ear-clipped — and names
+1,345 loops in `holes.unfilled`; exit 0.  (Before AUT-02a, measured
+2026-09-20, the same file ended at 7,138 open / 787 non-manifold: 15
+triangles reoriented and 55 flips refused.)  The file is still not
+closed, with 7,119 open edges: 87 loops longer than `--max-hole-edges` 32
+(4,364 edges), 1,187 walks that hit a boundary vertex without exactly one
+unused outgoing open edge (2,029 edges), 43 loops whose clipped fan would
+make an edge non-manifold (542 edges), 10 loops with no ear (130 edges)
+and 18 loops whose fill would add a zero-area triangle (54 edges) — the
+five families' edges sum to 7,119 — so `ofgpu-generate-mesh` still
+refuses it without `-permissive`.  Re-reading the file the run wrote
+reports 0 degenerate triangles dropped, because the fill never writes a
+triangle the reader would drop.
 
 `--max-hole-edges` is a trade, not a bug report: on the same
 `c42-f1.stl`, `python tools/geom/geom_tool.py repair <file>.stl
 --max-hole-edges 256 --out ... --json ...` (the default stays 32) fills
-561 loops with 9,094 triangles and takes the open-edge total from 7,138
-to 3,638 — the 87 loops longer than the default limit go to 0, at the
+562 loops with 9,116 triangles and takes the open-edge total from 7,119
+to 3,619 — the 87 loops longer than the default limit go to 0, at the
 cost of 3,350 more triangles written — while the refusal families grow
 because longer loops are harder to clip without pushing an edge to three
 uses: the non-manifold family rises from 43 loops / 542 edges to 50 / 894
 and the no-ear family from 10 / 130 to 15 / 642, the non-manifold edge
-count itself is unchanged at 787, and the zero-area family is unchanged
+count itself is unchanged at 677, and the zero-area family is unchanged
 at 18 loops / 54 edges.  A bigger limit closes more of the surface at
 the cost of more ear-clipped triangles and more loops that fail the
 manifold and ear tests, and the default stays 32.

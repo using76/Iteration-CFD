@@ -36115,6 +36115,133 @@ Constraints:
 - A feature or seam edge is never flipped and never collapsed across.
 - Each triangle keeps its input patch.
 
+**The constraints, as TET-06b builds them** (DERIVED. Botsch & Kobbelt 2004 is the source of
+the five steps; the rules that restrict each step at a feature are stated here in full, and
+where they choose, the choice is this section's). The input is §116.9's `PreparedSurface`: the
+feature edges `F`, seams included, the corners `K`, and the polylines `L_k`, each a chain of
+input points `y_0 .. y_n`, with `y_n = y_0` on a closed one. Every vertex has one class:
+
+- a **corner** is a point of `K`. It never moves and is never removed;
+- a **feature vertex** is an end of a feature edge and is not a corner. It has exactly two
+  feature edges, both of one polyline `L_k`, and it carries that `k`;
+- every other vertex is **free**.
+
+Every edge is a **feature edge**, which carries its polyline `k` and its seam flag, or it is
+**free**. At the start the feature edges are `F`. `(a, b)` is an edge with the opposite vertices
+`c` and `d`, as in (116.14a)-(116.14c).
+
+```
+split    a feature edge (a,b) of L_k:  the new vertex at m_ab is a feature vertex of L_k,
+         (a,m) and (m,b) are feature edges of L_k with the seam flag of (a,b),
+         (m,c) and (m,d) are free                                                      (116.14f)
+collapse (a,b) onto the survivor s at the position p:
+           (a,b) free,     a and b free:           s = the smaller index,  p = m_ab
+           (a,b) free,     exactly one free:       s = the other vertex,   p = x_s
+           (a,b) free,     neither free:           refused
+           (a,b) feature,  a and b corners:        refused
+           (a,b) feature,  exactly one a corner:   s = the corner,         p = x_s
+           (a,b) feature,  neither a corner:       s = the smaller index,  p = m_ab
+         the test stays l_ab < (4/5) h(m_ab);  p replaces m_ab in the guard of (116.14b)
+         and in the area and normal guards                                             (116.14g)
+flip     a feature edge is never flipped;  in (116.14c) the 6 becomes
+         val*(v) = 4 at a corner,  6 at any other vertex                               (116.14h)
+relax    a corner stays;  a feature vertex v with the feature neighbours p and q goes to
+         (x_p + x_q) / 2, from the old positions;  a free vertex follows (116.14)      (116.14i)
+project  a corner stays;  a feature vertex of L_k goes to the closest point of L_k,
+         the minimum over i of | x - ( y_i + t_i e_i ) |,   e_i = y_{i+1} - y_i,
+         t_i = clamp( (x - y_i) . e_i / (e_i . e_i), 0, 1 ),
+         the first strict minimum in increasing i;  a free vertex follows (116.14d)    (116.14j)
+flat     the triangle (x_0, x_1, x_2) is flat when
+         | (x_1 - x_0) x (x_2 - x_0) |  <=  1e-6 max( |x_1 - x_0|^2, |x_2 - x_1|^2, |x_0 - x_2|^2 )
+         a flip is refused when a new triangle is flat;  a collapse is refused when a
+         surviving triangle of the two one-rings would be flat                         (116.14k)
+cut      a triangle is a cut triangle when two of its edges are feature edges that meet
+         at a feature vertex (not a corner).  A flip is refused when a new triangle
+         would be a cut triangle;  a collapse is refused when a surviving triangle
+         that is not a cut triangle would become one                                   (116.14l)
+```
+
+(116.14k) replaces the zero-area test of the TET-06a guards, which compared the cross product
+with exactly zero. Three vertices of one straight feature line are collinear only to round-off
+once the line is not axis-aligned, so their cross product is noise of either sign, and neither
+the exact-zero test nor the 90 degree test refuses it. The constant 1e-6 is a degeneracy floor
+(a height below one millionth of the longest edge), not a quality bar: the noise is about
+`1e-16 |x| / l` relative to `l^2` for coordinates of size `|x|` and edges of length `l`, which
+stays below 1e-6 down to `l = 1e-10 |x|`. (116.14l) covers what (116.14k) cannot see on a
+curved feature line: the triangle that a flip would lay across the turn at a feature vertex,
+between its two feature neighbours, is thin but not flat, and it would take the vertex's last
+free edge on that side. A cut triangle of the input stays, and a split keeps the property
+without creating it elsewhere, since the edges a split adds lie inside existing triangles. A
+split is never refused.
+
+A collapse merges the edges `(a, c)` and `(b, c)` into `(s, c)`, and `(a, d)` and `(b, d)` into
+`(s, d)`. A merged edge is a feature edge when either of its two parts was, with that part's
+polyline and seam flag. When both parts are feature edges the collapse is refused, because it
+would join two feature lines; this also keeps a closed polyline at three edges or more. The
+dying vertex of a feature collapse is a feature vertex, and its other feature edge passes to
+the survivor, so the polyline stays one chain. A feature vertex that survives at `m_ab` keeps
+its `k`.
+
+These rules give the four constraints. A corner is in no rule that moves or removes it. A
+feature vertex is created only by (116.14f), moves only by (116.14g), (116.14i) and (116.14j),
+and after every iteration's projection it lies on `L_k`. A feature edge is never flipped, and
+the only collapse that removes a feature vertex runs along its own polyline. Each triangle
+keeps its patch: a split child takes its parent's patch, and a flip only exchanges the edge
+between two triangles of one patch, since an edge between two patches is a seam and a seam is
+a feature edge. A collapse only removes triangles.
+
+With `F` empty every rule above is TET-06a's, and the output is the same bit for bit. A test
+holds the TET-06a sphere's output by an FNV-1a hash of its points, triangles and patches.
+
+`Remeshed` carries the features of the output in the output's numbering: `feature_edges`
+(each `[min, max]`, in ascending order), `edge_is_seam` and `edge_polyline` (the input polyline
+`k`) beside them, and `corners` in ascending order. The output numbers its vertices in
+increasing old-index order, so the corners of the input keep their relative order.
+
+**The TET-06b gates** (§116.18). `Q = surfprep::prepare(S, 60 degrees)` is §116.9's own
+extraction run on the output `S`, so the features are measured on the output's geometry and
+patches and not read from the remesh's tables; the tables must then equal it
+(`feature_edges`, `edge_is_seam` and `corners` of `Remeshed` equal `Q`'s).
+
+- **The cube** `[0, 1]^3` (8 points, 12 triangles) at `h = 0.1`, once with one patch and once
+  with a patch per face. `Q` has 8 corners and 12 open polylines. The first 8 output points are
+  the 8 input points bit for bit. Each polyline of `Q` runs from one cube corner to a corner
+  that differs from it on one axis, every point of it has the other two coordinates equal to
+  the corner's bit for bit, and its coordinate on that axis increases strictly. The 12
+  polylines cover the 12 cube edges. Every feature edge has `l / h` in `[4/5, 4/3]`, so each
+  cube edge carries 8 to 12 of them.
+- **Patch areas**, on the cube with a patch per face: the area of each patch, the sum of
+  `|(x_1 - x_0) x (x_2 - x_0)| / 2` over its triangles, equals the input's within 1e-12
+  relative, and every triangle of a face's patch has that face's coordinate bit for bit.
+- **The two-patch cylinder** (§116.9's 16-sided capped cylinder, radius 1, `z` from -1 to 1,
+  the side split at `z = 0`; `h = 0.1`): `Q` has no corner and 3 closed polylines. Every end of
+  a seam edge has `z = 0` bit for bit and lies within 1e-12 of the input's 16-sided ring at
+  `z = 0`. Every triangle of the lower patch has `z <= 0` at its three points, and every
+  triangle of the upper patch has `z >= 0`.
+- **The 30 degree wedge**, the prism over the triangle `(0,0)`, `(1,0)`, `(cos 30, sin 30)`
+  from `z = 0` to `z = 1`, one patch, `h = 0.1`: `Q` has 6 corners and 9 polylines, and the
+  first 6 output points are the input's bit for bit. The polyline on the 30 degree edge runs
+  from `(0,0,0)` to `(0,0,1)` with `x = 0` and `y = 0` bit for bit, `z` increasing strictly,
+  in 8 to 12 edges. Every point of the other 8 polylines lies within 1e-12 of the segment
+  between its two end corners.
+- **A rotated cube** (not a plan gate; the cube above turned by `R_z(0.3) R_y(0.5) R_x(0.7)`,
+  so no face is axis-aligned): the first 8 points bit for bit, 8 corners and 12 polylines in
+  `Q`, every polyline point within 1e-12 of its segment, the total area within 1e-12 relative.
+- **No flat and no cut triangle** (not a plan gate; it holds (116.14k) and (116.14l)). On the
+  cube, the wedge and the cylinder above, each also turned by the same rotation, at
+  `h = 0.07, 0.1, 0.13, 0.2` and after each of 1 to 12 iterations, 288 runs: the output is a
+  2-manifold of Euler characteristic 2, no triangle is flat by (116.14k), no triangle is a cut
+  triangle (none of these inputs has one), and the tables of `Remeshed` equal `Q`'s. Five of
+  these runs are named, because the first build of this unit, which had neither rule, failed
+  them while it passed every gate above: the rotated cube at `h = 0.07` after 3 iterations, the
+  rotated wedge at `h = 0.13` after 3, the cylinder at `h = 0.2` after 2 and at `h = 0.07`
+  after 7, and the rotated cylinder at `h = 0.07` after 11.
+
+The bit-for-bit results on the axis-aligned fixtures follow from the arithmetic: the midpoint
+`(a + b) * 0.5` of two equal coordinates is that coordinate, (116.14j) returns `y_i + t e_i`
+with `e_i = 0` on an axis where the segment's ends agree, and (116.14d) returns
+`a + v (b - a) + w (c - a)`, whose coordinate normal to an axis-aligned triangle is `a`'s.
+
 ### 116.11 Conforming boundary recovery
 
 **Implemented by TET-07a** (edges) **and TET-07b** (faces). The file is `tetmesh/recover.rs`.
@@ -36443,6 +36570,16 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-06a | the f32 arm | `rust/tests/tetmesh_remesh.rs`, 2 tests (the `Scalar` width, and the sphere's four bars), pass under `--features single` with every printed number identical to the f64 build | the TET-06a commit |
 | TET-06a | the first run's failures | the split inserted edge-map keys with the new vertex, always the largest index, first, so later lookups missed them, and split, collapse and flip skipped any edge whose incidence list held the `b -> a` triangle first; the coder's level-3 coarse-sphere test (`h = 0.25`, 3 iterations), kept as `coarse_sphere_regression`, caught the first | the TET-06a commit |
 | TET-06a | the whole `tetmesh::` test filter, release | 84 tests in 20.3 s, and the 10^6 run ignored | the TET-06a commit |
+| TET-06b | §116.10, added by this unit | the paragraph "The constraints, as TET-06b builds them", (116.14f)-(116.14l) and the gate definitions. (116.14k) replaces the exact-zero area test of the TET-06a collapse guard and adds a flat test to the flip; the TET-06a sphere's output is unchanged bit for bit (FNV-1a `0xf76943aa6d947000` over its points, triangles and patches, taken on the TET-06a commit by the supervisor's probe outside the tree and held by a test) | the TET-06b commit |
+| TET-06b | the cube `[0, 1]^3` at `h = 0.1`, the default 10 iterations, with one patch and with a patch per face (the same mesh both times) | `Q`: 8 corners, 12 open polylines; the first 8 output points are the input's bit for bit; each of the 12 cube edges is one polyline of 8 feature edges of length 0.125 (`l/h = 1.25`), its two fixed coordinates bit for bit on every point; the tables of `Remeshed` equal `Q`'s (96 feature edges, none a seam with one patch, all seams with six). 691 points, 1 378 triangles; 99.32 % of all edges with `l/h` in `[4/5, 4/3]`, every triangle at 25 degrees or more (smallest 34.57) | the TET-06b commit |
+| TET-06b | patch areas, the cube with a patch per face | the six areas differ from the input's 1 by +1.1e-15, -1.1e-16, +6.7e-16, -4.4e-16, +2.2e-16 and -1.1e-16 (the bar is 1e-12 relative); every triangle of a patch has its face's coordinate bit for bit; with one patch the total is 5.9999999999999973 | the TET-06b commit |
+| TET-06b | the two-patch cylinder at `h = 0.1` | `Q`: no corner, 3 closed polylines, 192 feature edges, 64 of them the seam; every seam end has `z = 0` bit for bit and lies on the input's 16-sided ring within 1e-12; every lower-patch triangle has `z <= 0` and every upper-patch one `z >= 0`; in the supervisor's probe the centroid of every output triangle is closest to an input triangle of its own patch. 2 122 points, 4 240 triangles, 99.32 % of edges in band, every triangle at 25 degrees or more. Not gated, and a limit to know: each patch's area is 9.2863 against the input's 9.3044 (-0.19 %), because the 16 points of each input ring turn by 22.5 degrees, which is below the 60 degree feature angle, so they are feature vertices and not corners, and the remeshed rims and seam cut across them | the TET-06b commit |
+| TET-06b | the 30 degree wedge at `h = 0.1` | `Q`: 6 corners, 9 polylines, the first 6 points bit for bit; the 30 degree edge is one polyline of 8 edges from `(0,0,0)` to `(0,0,1)` with `x = 0` and `y = 0` bit for bit; the nine polylines have 8, 8, 8, 4, 8, 8, 8, 8 and 4 edges and no point of the other eight is off its segment (largest distance 0); the total area changes by 2.9e-16 relative (not gated). 343 points, 682 triangles | the TET-06b commit |
+| TET-06b | the rotated cube at `h = 0.1`, not a plan gate | the 8 corners bit for bit, 8 corners and 12 polylines in `Q`, the largest distance of a polyline point from its segment 1.6e-16 (the bar is 1e-12), the total area off by 4.4e-15 of 6 (the bar is 1e-12 relative); 691 points and 1 378 triangles, as on the axis-aligned cube | the TET-06b commit |
+| TET-06b | no flat and no cut triangle: 288 runs (cube, wedge and cylinder, each also rotated; `h = 0.07, 0.1, 0.13, 0.2`; 1 to 12 iterations), not a plan gate | 0 flat and 0 cut triangles, Euler characteristic 2 and tables equal to `Q`'s in every run; the smallest `|n| / L^2` of any output triangle is 7.5e-2 against the floor 1e-6. The supervisor's probe adds `h = 0.05` and `0.03` and a two-patch 1 x 1 x 2 box whose vertical edges pass through corners, plain and rotated (324 more runs): the same result, and every triangle centroid closest to an input triangle of its own patch | the TET-06b commit |
+| TET-06b | the first build, which had (116.14f)-(116.14j) only | it passed every gate at `h = 0.1` after 10 iterations and failed the probe's sweep: one triangle with `|n| / L^2` of 1.7e-16 on the rotated cube (`h = 0.07`, 3 iterations), 5.9e-17 on the rotated wedge (`h = 0.13`, 3 iterations) and 1.7e-16 on the cylinder (`h = 0.2`, 2 iterations, with 5 cut triangles); on the cylinder at `h = 0.07` after 7 iterations one cut triangle of 10.1 degrees made `Q` find 2 corners and 300 feature edges against the tables' 299; on the rotated cylinder at `h = 0.07` after 11 iterations `Q` found 291 against 292. Each was three points of one feature line made into a triangle by a flip or a collapse. (116.14k) and (116.14l) were added for it, and the five runs are tests | the TET-06b commit |
+| TET-06b | the f32 arm | `rust/tests/tetmesh_remesh.rs`, 5 tests (the two of TET-06a, the cube with a patch per face, the wedge, the five named runs), pass under `--features single` with the same printed numbers as the f64 build | the TET-06b commit |
+| TET-06b | the whole `tetmesh::` test filter, release | 92 tests, and the 10^6 run ignored | the TET-06b commit |
 
 ### 116.19 References
 
@@ -36906,8 +37043,8 @@ fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream
 
 ### 117.12 The boundary surface, and what is refused
 
-**The true face polygons (VIO-07).** When the raw mesh is available, `usda::boundary_surface`
-fans each boundary face's point loop `p_0 ... p_{m-1}` from its first vertex, into the
+**The true face polygons (VIO-07).** When the raw mesh is available,
+`usda::boundary_surface_loops` fans each boundary face's point loop `p_0 ... p_{m-1}` from its first vertex, into the
 triangles `(p_0, p_k, p_{k+1})` for `k = 1 ... m-2`. This replaces the synthesised quadrilateral
 of `usda.rs`'s "Known approximation". The polyMesh order makes each face's right-handed normal
 point out of the fluid, and the fan keeps that order. For a planar convex face the fan's area
@@ -36915,6 +37052,28 @@ equals `|b_sf|`. Planar faces are VIO-07's gate (relative 1e-10). A non-convex f
 under a fan. The surface is a display surface, so that is accepted and not repaired. The
 `UsdGeomSubset` partition (one subset per patch, every triangle in exactly one subset) stays
 exact.
+
+The fan's area is `A = 1/2 sum_{k=1}^{m-2} |(p_k - p_0) x (p_{k+1} - p_0)|`, the triangle area of
+elementary vector geometry, and its area vector is the same sum without the norm. The points
+written are the raw points that a boundary face references, in ascending raw index, each
+rounded once from f64 to the build's `Scalar` (§118.2), and the extent is their componentwise
+minimum and maximum. On a closed mesh that is the box of all the points, because the extreme
+points of a closed surface lie on it. A patch with no face keeps its empty subset. The function
+refuses by name a boundary face with fewer than 3 points, a point label outside the point list,
+and patches that do not tile the boundary faces (a face in no patch or in two, or a patch that
+runs past the last boundary face); it never assembles a surface from such a mesh.
+
+`usda::boundary_surface`, which takes the `HostMesh` alone, keeps the synthesised quadrilateral
+as the fallback of a caller that holds no raw mesh, and its bytes are unchanged. `UsdaWriter`
+(`io/writer.rs`) is such a caller until `WriteCtx` carries the raw mesh or the prepared surface;
+that wiring belongs to the unit that owns `io/writer.rs` (VIO-03 or VIO-09), not to VIO-07.
+
+Measured by `tests/usda.rs` in both builds, every area evaluated in f64 from the raw points
+against `HostMesh::geom64()`: on a one-cell hexagonal prism (hexagons of area 16, sides
+`12 + 24 sqrt 2`), a 3 x 3 x 3 box (108 triangles on 56 points) and the 2:1 mesh of
+`mesh/refined.rs`, each patch's fan area and each face's fan area vector agree within 1e-10
+relative, every triangle's area vector has a positive product with `b_sf`, the partition is
+exact, and the extent equals the box of all the points bit for bit.
 
 **Refusals.** Each of these is refused by name before the time loop, in the words of §13.4
 (VIO-04, VIO-09). The old refusal of every non-Cartesian mesh, and its test
@@ -36959,7 +37118,23 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 
 | unit | quantity | value | commit |
 |---|---|---|---|
-| — | — | — | — |
+| VIO-01 | identity: 16^3 box, `h` = 1/16 (explicit, and the default `(min V_c)^(1/3)`); 8 x 4 x 2 slab, `h` = 1/8 | `M[v] = v` at 4096/4096 and 64/64 voxels; `volume_error` below 1e-12 | VIO-01 |
+| VIO-01 | `refined_core([4,4,4], 1/4, 0.3, 1)` (120 cells), `h` = 1/24: agreement with the f64 brute force of (117.6), and with `parcels::locate_cell` in the f64 build | 13 824 / 13 824 voxels; `n_c h^3 = V_c` within 1e-12 for every cell (216 and 27 voxels); `n_filled` = 0 | VIO-01 |
+| VIO-01 | the same mesh, lattice shifted so that every centre is `(i, j, k)/16`, on faces, edges and corners | 4 913 / 4 913 voxels agree with the brute force | VIO-01 |
+| VIO-01 | tie rule on the 16^3 box, `h` = 1/8, box `[-1/2, 3/2]^3`: the 512 centres that are cell corners | each goes to the lowest of its 8 cells; the other 3 584 voxels are `NONE` | VIO-01 |
+| VIO-01 | sphere `R` = 0.3 carved from a 32^3 unit box (3 648 cells removed), `h` = 1/64 | `n_fluid` = 232 960 of 262 144; `fluid_fraction` = 0.888671875 against `1 - V_s/V_b` = 0.886903, a difference of 1.77e-3 under the bar `A_s h / V_b` = 1.767e-2; the map equals the carved cells voxel for voxel; build 0.016 s | VIO-01 |
+| VIO-01 | budget (117.3): 16^3 box, `h` = 1/16, `maxVoxels` 1000; the slab, `maxVoxels` 511 | `h'` = 0.1, `s` = 1.6, 10^3 voxels, with the note; `h'` = 1/15, `n` = [15, 8, 4]; an explicit voxel at `s` = 32 is refused and at `s` = 16 is not | VIO-01 |
+| VIO-01 | pass 2 on a two-cell mesh whose cell 0 is a non-convex L prism, `h` = 1/4; then with cell 1 removed | `n_filled` = 128 of 256, every voxel owned; with cell 1 removed `n_filled` = 0 and the 192 voxels outside pass 1's claim stay `NONE` | VIO-01 |
+| VIO-01 | FNV-1a 64 of the three maps above (2:1, 2:1 on ties, sphere), f64 build against `single` | `70dd4aef220effa5`, `e3a4349cb6b98fb5`, `3a094c789e4b6f85` in both builds | VIO-01 |
+| VIO-02 | exactness of `linear` (117.7)-(117.8) at the interior voxels, `phi = x - 2y + z/2 + 1/4` and `phi = 0.3x - 0.7y + 0.11z + 0.2`, relative to the largest `abs(phi_c)`: 8^3 box at `h` = 1/16, and `refined_core([4,4,4], 1/4, 0.3, 1)` at `h` = 1/24 (1728 interior voxels each; on the 2:1 mesh they are the 64 fine cells, whose face neighbours include coarse cells off the centre line) | f64 values: 1.5e-16, 2.3e-16 (box) and 1.7e-16, 2.9e-16 (2:1), bar 1e-12, in both builds. `Scalar` values under `single`: 3.6e-8 (box) and 2.2e-8 (2:1) for the second field, bar 1e-5 (class R); the first field's cell values are exact in f32, so it measures 4.2e-16 and tests no rounding. `n_linear_fallback` = 0 | VIO-02 |
+| VIO-02 | no new extremum: a 0/1 step at `x = 1/2` on the 8^3 box (`h` = 1/16), and a pseudo-random field in `[0, 1)` on the 2:1 mesh (`h` = 1/24) and on VIO-01's carved sphere (`h` = 1/64) | every `s_v` lies in `[m_c, M_c]`, with the bounds from the test's own point-neighbour search, and so in `[min_c phi_c, max_c phi_c]`, with no tolerance. The clip acts on exactly 512 voxels of the step (the values are 0, 1/8, 7/8 and 1 across it), on 2 587 of 13 824 voxels of the 2:1 mesh and on 27 203 of 232 960 of the sphere | VIO-02 |
+| VIO-02 | (117.9) for `cell` on the 2:1 mesh at `h` = 0.1 (not commensurate with 1/4 or 1/8), pseudo-random field, evaluated in f64 | the two sides differ by 6.2e-17, bar `1e-12 sum_c abs(phi_c) V_c` = 5.0e-13; `sum_c abs(n_c h^3 - V_c)` = 0.310469, and the left side is within the largest `abs(phi_c)` times it; with `phi = 1` the left side over `sum_c V_c` equals `volume_error` (3.3e-16) within 1e-12; every owned voxel holds `phi_c` bit for bit | VIO-02 |
+| VIO-02 | background, fallback and refusals: 16^3 box, `h` = 1/8, box `[-1/2, 3/2]^3`, `background` = -7.5; an 8 x 4 x 1 slab; one cell; a 513-value field on 512 cells; a NaN or an infinite cell value | 3 584 `NONE` voxels hold -7.5 exactly and the 512 owned ones lie in `[0, 1)`, under `cell` and under `linear`; the slab has `n_linear_fallback` = 32 of 32 and `linear` equals `cell` bit for bit; the single cell has no neighbour and falls back; the wrong length is refused by name; a non-finite value does not panic and changes no voxel outside the cell and its point neighbours (3 880 voxels bit-identical) | VIO-02 |
+| VIO-02 | FNV-1a 64 of the `linear` samples (the f64 bits, in voxel order) of four fields whose cell values are exact in f32: the pseudo-random field on the 2:1 mesh (`h` = 1/24, and VIO-01's lattice on the ties), on the sphere, and the step on the 8^3 box; f64 build against `single` | `635690dc32b97949`, `32a66f5dc7a7cdcb`, `9e8419bfe07c2c53`, `528f800969e3f325` in both builds | VIO-02 |
+
+**As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
+
+**As built (VIO-02).** `VoxelMap::build` builds a `LinearStencil` when `sample` is `linear`, and `VoxelMap::sample` and `sample_f64` return `s_v` for every voxel as f64; the writer of VIO-03 rounds once (§117.2 item 2). The code makes these choices where §117.5 leaves room. `N_f(c)` is the set of cells across the internal faces of `c`: a cell that shares two faces with `c` counts once, and a boundary face, a coupled one included, adds nothing. `N_p(c)` is taken from the points of all the faces of `c`, so a hanging node on a 2:1 face is a point of the coarse cell too. `C_c` is the f64 centre of `geom64()` and `x_v` is the voxel centre of (117.2). The fallback test of (117.7) reads the geometry only, so it is decided once per cell at setup; a cell with no face neighbour falls back. (117.7) is solved by Cramer's rule on the 3 x 3 normal matrix. `g_c`, `m_c` and `M_c` are evaluated once per cell per call, so one call costs `O(n_cells x neighbours + n_voxels)`. The clip is two comparisons, not `f64::clamp`, so a non-finite cell value passes through instead of aborting the run. A `Scalar` field is widened to f64 exactly and nothing is rounded back, which is why the `linear` samples of an f32-exact field are the same bits in both builds. The exactness gate's `single` arm needs a field whose cell values are not exact in f32; the plan's wording does not say so, and the second field of the first row is that field.
 
 ### 117.14 References
 
@@ -40464,6 +40639,78 @@ v1 is single-GPU (decomposition refused by name; docs/17 COMP decision 14), lami
 Spalart-Allmaras (§127.1), with constant `c_p`, no sources, no mesh motion and no
 radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15).
 
+### 122.5 The device twins of the gas state (CMP-08)
+
+`cuda/compressible.cu` evaluates (122.3), (122.4), (122.6) and (122.7) elementwise, one
+thread per cell. `src/compressible/thermo.rs` holds the gas (`PerfectGas`), the host
+twins and the launchers. This subsection adds no physics. It fixes the ORDER of the
+operations, because the gate between the device and the host is counted in
+representable numbers, and it is the same count in both builds.
+
+**The constants are formed once in f64 and rounded once.** `R_s` and `c_p` are (122.2)
+and (122.5) in f64 in both builds, with `c_p` formed as `gamma R_s / (gamma - 1)` in
+that order. A kernel never sees `gamma`, `W` or `Pr`. It receives the numbers of
+(122.9), each formed in f64 and rounded to the working precision (`fl`), and the host
+twin uses the same rounded numbers:
+
+```
+rs  = fl(R_s) ,  pop = fl(p_op) ,  grs = fl(gamma R_s) ,  cpr = fl(c_p / Pr) ,
+as  = fl(A_s) ,  ts  = fl(T_s) ,   mu0 = fl(mu)  (constant viscosity)             (122.9)
+psi = 1 / (rs T) ,   rho = psi (p + pop)                                           (122.10)
+mu  = (as (T sqrt(T))) / (T + ts)   (Sutherland) ,   mu = mu0   (constant) ,
+kappa = mu cpr                                                                     (122.11)
+c   = sqrt(grs T) ,   M = sqrt(u_x u_x + u_y u_y + u_z u_z) / c                    (122.12)
+p   = rho / psi - pop                                  (host only, the inverse)    (122.13)
+```
+
+Every operation in (122.10)-(122.13) is in the working precision, in the order the
+brackets show, left to right where there are none. (122.10) is (122.3) with (122.1),
+(122.11) is (122.6) and (122.7), and (122.12) is (122.4). `T^(3/2)` is written
+`T sqrt(T)`: one correctly rounded square root and one product, where `pow` would
+differ in its last bit between the host's library and the device's. `p + pop` is one
+sum in the working precision, which is the operation §122.2's oracle measured.
+
+**No floor and no clip.** §122.3 counts a state outside the gas law and never clips
+it, so these kernels have no guard: `T = 0` gives an infinite `psi`, and `T < 0` a NaN
+`c`. CMP-12's counter is what reports them. `cuda/compressible.cu` therefore defines
+no `OFGPU_CMP_TINY` yet. The first kernel that divides by something a floor must
+protect defines it, with §122.3's two values.
+
+**Contraction.** `compressible.cu` is compiled with nvcc's default contraction (it is
+not in `build.rs`'s `FMAD_OFF_UNITS`). The only product that feeds a sum is the sum of
+squares in (122.12), so only `M` can differ from the host through a fused
+multiply-add. That is §67.11's stance: the device is the reference and the host is a
+check, and the gate is four units in the last place rather than bitwise.
+
+**The gates.** `ulp distance` is the number of representable values between two
+finite numbers of one sign, which is the difference of their bit patterns read as
+integers. The answer keys are from the CMP-08 oracle: an independent NumPy evaluation
+of (122.9)-(122.13) in `float64` and in `float32`, kept outside the tree. It
+reproduces §122.1's two viscosities and §122.2's three f32 errors.
+
+| gate (the lib tests are `compressible::thermo::tests::*`, the f64 build; the same four names in `tests/compressible_thermo.rs` run in both builds) | bar | class |
+|---|---|---|
+| `gpu_matches_host_to_4ulp` | 4096 random states (`T` in [200, 2000] K, gauge `p` in [-5e4, 5e5] Pa about `p_op = 101325`, each velocity component in [-800, 800] m/s) and one state at rest, for Sutherland air and for a constant viscosity: `psi`, `rho`, `mu`, `kappa`, `c` and `M` from the device lie within 4 ulp of the host twin, and `M = 0` exactly at rest | D |
+| `sutherland_air_at_273_15_is_1_716e_5` | `|mu(273.15) - 1.716e-5| < 5e-9` Pa s, the four digits White and the Standard Atmosphere print (P). `mu(273.15) = 1.716079266245527e-05`, `mu(300) = 1.8460015185931457e-05` Pa s and `kappa(300) = 0.026122028560991366` W/(m K) to `1e-14` relative (R). A constant viscosity returns its number at every `T` (D) | P, R, D |
+| `ideal_gas_round_trip` | `R_s = 287.0550227690948` and `c_p = 1004.692579691832` J/(kg K) to `1e-15` relative, f64 in both builds (A). `rho(p = 0, 288.15 K, p_op = 101325) = 1.2249908312368587` kg/m3, `c(288.15) = 340.29526405061904` and `c(300) = 347.2219888817812` m/s to `1e-14` relative (R). Over the 4096 states, `p -> rho -> p` through (122.10) and (122.13) returns `p` within 4 ulp of `p_abs` (D). A stated `c_p` off (122.5) by more than `1e-6` relative is refused by name (§122.1) | A, R, D |
+| `f32_gauge_pressure_resolves_1pa` | with `p_op = 1e5` and `T` = 300, 288.15 and 273.15 K, on the device and on the host twin: `rho(p = 1) > rho(p = 0)` and `|(rho(1) - rho(0))/psi - 1| <= 0.01` (P). Control, `single` only: at 300 K the error is above `1e-3` (the oracle gives 4.209e-3), so the row is known to measure f32 arithmetic | P |
+| `the_compressible_thermo_update_replays_bitwise` (lib) | §81.7's row for `src/compressible/thermo.rs`: the three kernels capture into one graph and replay bitwise | D |
+
+R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1), which is `5.4e-6`
+for `1e-14`. No row carries a tolerance of its own for f32.
+
+**Landed (CMP-08).** Measured on the RTX 5070 Ti, in both builds. Over the 4097 states
+and both gases the device's `psi`, `rho`, `mu`, `kappa` and `c` equal the host twin bit
+for bit (0 ulp), and `M` differs by at most 2 ulp, which is the fused sum of squares
+the paragraph on contraction names. The round trip returns `p` within 1.5 ulp of
+`p_abs` (oracle; the test holds it to 4). The 1 Pa row measures, device and host
+alike: in f64 `5.7e-12`, `1.5e-12` and `1.9e-12` at 300, 288.15 and 273.15 K; under
+`single` `4.2089e-3`, `4.1011e-3` and `1.3870e-4`, which are §122.2's oracle values
+(0.421 %, 0.410 %, 0.014 %), so the control (above `1e-3` at 300 K) holds. The replay
+gate captures 5 kernel nodes (the three kernels and the two field operations that
+feed `M` back into `T`) and replays three times bitwise over 7 buffers and 1792
+values. The 46 cubins that existed before are unchanged in SASS in both builds.
+
 ---
 
 ## 123. Momentum in conservative form — the mass flux, the full Newtonian stress, and Rhie-Chow with a density
@@ -40529,6 +40776,156 @@ once per corrector, on the §14 schedule.
 BITWISE in f64; class D); `explicit_transpose_stress_vanishes_for_solenoidal_linear_u`
 ((123.4) is zero for `u = (a y, b x, 0)`; class R); `couette_shear_stress_exact`
 (linear `u(y)`: the wall shear stress `mu U/h` to round-off; class R).
+
+### 123.3 The assembly as built (CMP-09)
+
+`src/compressible/momentum.rs` holds `RhoMomentum`, and `cuda/compressible.cu` gains
+six kernels. This subsection adds no physics: it fixes what each call forms, in which
+order, and from which existing kernel, because one of its gates is bitwise. The
+precedent is `src/vof.rs`, which assembles its own ρ-weighted momentum from the same
+operators. Everything §3, §7, §12 and §5.1 already compute is CALLED, not re-derived:
+the scalar operators of `src/fv.rs`, the time term `timescheme::Ddt::add_rho`
+(§86.3), and the Rhie-Chow kernels of `cuda/momentum.cu`, which take their face force
+as an argument and do not know whose it is.
+
+**The inputs.** `u` (three time levels and its §4 triple), the face mass flux `mdot`
+[kg/s], `rho` as a field with its two old levels and its boundary values, the
+effective viscosity `mu_eff` of (122.8) as a field with boundary values, and the gauge
+`p`. The module never evaluates the gas law.
+
+**The viscous coefficient and the explicit stress** (`set_viscosity`):
+
+```
+mu_f = w mu_P + (1 - w) mu_N    (internal) ,   mu_f = mu_b    (boundary) ,   G_f = mu_f |Sf|     (123.9)
+T_P  = (grad u)_P ,   T_ij = d u_j / d x_i                     (§1's convention, §12's scheme)
+T_f  = w T_P + (1 - w) T_N      (internal and coupled) ,   T_f = T_P      (any other boundary face)
+q_f,i = mu_f ( sum_j T_f,ij Sf_j  -  (2/3) (T_f,xx + T_f,yy + T_f,zz) Sf_i )                     (123.10)
+E_P  = sum_{f owned by P} q_f  -  sum_{f whose neighbour is P} q_f  +  sum_{boundary f of P} q_f   [N]   (123.11)
+```
+
+(123.10) and (123.11) are (123.4), written per face and per cell. An `empty` face
+carries no `q`. `E_P` is an integrated force, so it enters the source as it is, with no
+volume factor. With `full_stress = false` neither the gradient nor `E` is formed and
+nothing is added: that is the laplacian-only operator, and it is what the bitwise gate
+below compares with the kinematic assembly, whose own explicit stress term
+(`momStressCorrection`) is a different expression.
+
+**One component's system** (`assemble_only`, `solve`), in the order
+`momentum::Momentum::assemble_component` uses, so that equal inputs give equal bits:
+the component view of `u`; `Ddt::add_rho` with `rho, rho^o, rho^oo`; `fvm_div_gauss`
+on `mdot` with §7's weights (sensor `|u|`, as `momentum::Momentum` takes it); the deferred half of a
+higher-order scheme (§11.1); `fvm_laplacian` with `-G_f`; §12.3's explicit
+non-orthogonal correction; `source_P += E_P,c` when `full_stress`; `ldu_ops::relax`
+by `u_relax` (always, also at 1, where it only enforces dominance); the boundary fold.
+There is NO bounded-convection correction: in conservative form `sum_f mdot_f` is the
+other half of `d(rho u)/dt` (§86.4), not a spurious source. The pressure gradient and
+the body force are held back as `force` until the solve, as §5.1 requires of `H`.
+`localEuler` and `CrankNicolson` are refused by name here; §125.4's per-cell step is
+CMP-13's.
+
+**The force** (`set_force`), formed on faces and reconstructed, as §5.1 does:
+
+```
+phig_f = rho_f (g . Sf) ,   rho_f = w rho_P + (1 - w) rho_N  (boundary: rho_b)                  (123.12)
+F_f    = phig_f - |Sf| snGrad(p)_f          (0 on a face whose flux the velocity prescribes)
+force_P = reconstruct(F)_P   [N/m^3] ,   source_c = su_c + V_P force_P,c                        (123.13)
+```
+
+`phig` is zero on a prescribed-flux boundary face and is not formed at all when
+`g = 0`. (123.12) is evaluated by §121's kernel pair with `beta = -1` and
+`T_ref = 0`, for which (121.3) is `rho_f (g . Sf)` with no rounding added: the
+subtraction of zero and the two sign changes are exact.
+
+**The residual** (`residual`), per component `c`, with `A` and `su` as assembled:
+
+```
+r_P,c = ( su_P,c + V_P force_P,c ) - (A u_c)_P                                                  (123.14)
+```
+
+**Rhie-Chow** (`rhie_chow`): `rAU = V/diag` (`momRau`, zero where the diagonal is
+zero), `HbyA` (`momHbyA`), `rAU_f` (`momFaceInterp`) and `phi_HbyA` of (123.6)
+(`momPhiHbyA` with a zero body-force flux: the gravity part of (123.7) belongs to the
+pressure equation, §124). Then the convective half of (123.7) with the retarded
+density of the current iterate:
+
+```
+mdot_HbyA,f = rho~_f phi_HbyA,f ,   rho~_f = rho_P if phi_HbyA,f >= 0 else rho_N     (internal, coupled)
+              boundary: rho~_f = rho_P if phi_HbyA,f >= 0 (outflow) else rho_b ;  0 on `empty`   (123.15)
+```
+
+**The viscous traction on a boundary face** (`boundary_traction`), the force the fluid's
+viscous stress exerts through the face, per (123.2):
+
+```
+t_b = mu_b ( |Sf| (u_b - u_P) delta_b  +  T_P . Sf  -  (2/3) tr(T_P) Sf )   [N] ,
+      (T_P . Sf)_i = sum_j T_P,ij Sf_j ;   0 on `empty` and coupled faces                       (123.16)
+```
+
+`delta_b` is the mesh's boundary `deltaCoeff` and `u_b` the evaluated boundary value.
+With `full_stress = false` only the first term is formed.
+
+**Contraction, and what the bitwise gate can claim.** `timescheme.cu` is compiled
+with contraction. `tsDdtGeneral` writes `diag += (sign V) a_N`, one fused operation;
+`tsDdtGeneralRho` writes `diag += ((sign V) a_N) rho`, whose product `(sign V) a_N` is
+rounded before the fused step. With `rho = 1` the two agree bit for bit when
+`(sign V) a_N` is exact, which it is when `a_N` is a power of two (Euler with
+`dt = 2^-k`), and can differ in the last place otherwise. The gate therefore claims
+BITWISE equality for the steady operator on any mesh and for Euler at `dt = 2^-10`,
+and holds the cases where `a_N` is not a power of two (Euler at `dt = 1e-3`, and
+backward at `dt = 2^-10`, whose `a_N` is `1.5·2^10`) to class R. This is a property of
+the two existing kernels, stated here; neither is changed. The backward leg is not at
+`dt = 1e-3`, because the KINEMATIC side cannot run it in the f32 build:
+`timescheme::fvm_ddt` refuses coefficients whose sum exceeds `1e-12` of their scale
+(`DdtCoeffs::is_consistent`), and three rounded f32 coefficients sum to `3.05e-5`
+against a bar of `2.0e-9` at `dt = 1e-3`. `fvm_ddt_rho`, which this module calls, has
+no such guard and runs backward at `dt = 1e-3` in both builds (the fixed-point row
+above does). The guard's f64 constant is a finding for §118's stream, not changed here.
+
+**Answer keys** (derived). For uniform `mu`, (123.4) is
+`div( mu (grad u)^T - (2/3) mu (div u) I ) = (mu/3) grad(div u)`. For
+`u = (a y, b x, 0)` it is zero. For `u = (c x y, 0, 0)`, `div u = c y` and the force
+on a cell is `(0, mu c V_P / 3, 0)`: on a uniform hexahedral mesh the Green-Gauss
+gradient of a bilinear field is exact, so the discrete `E_P` equals it to round-off in
+every cell that owns no boundary face. Reversing the index order in (123.10) gives
+`(0, -2 mu c V_P/3, 0)`, and dropping the `2/3` term gives `(0, mu c V_P, 0)`, so
+the row separates all three. For plane Couette flow `u = (U y/h, 0, 0)`,
+`T_yx = U/h` alone: the traction (123.16) is `(±mu U |Sf|/h, 0, 0)` on the walls
+`y = h` and `y = 0`, and `(0, ±mu U |Sf|/h, 0)` on the faces `x = max` and `x = min`
+(the complementary shear `tau_yx = tau_xy`, carried by the explicit term alone).
+
+| gate (lib: `compressible::momentum::tests::*`, f64 build; the same names in `tests/compressible_momentum.rs` run in both builds from one shared source) | bar | class |
+|---|---|---|
+| `uniform_flow_is_a_fixed_point_to_round_off` | uniform `rho = 1.177`, `u = (37.5, -12.25, 4)`, `p = 250`, `mu = 1.846e-5` on a 6x5x4 box graded 3:1 in y, for steadyState, Euler and backward (`dt = 1e-3`) and for upwind and linear: `|r_P,c| <= 1e-13 |diag_P| max|u_c|` in every cell (the magnitude: with `linear` a cell beside a Dirichlet outflow face has a negative diagonal); `|force_P,c| V_P <= 1e-13 |p| S_P`, with `S_P` the summed face area of the cell (the face difference of a uniform `p` is exactly zero, but §12.3's explicit correction multiplies a Green-Gauss gradient that is zero only to round-off by correction vectors that are zero only to round-off on a graded mesh, so the force is of order `1e-30`, not zero); `HbyA = u`, `phi_HbyA = u . Sf` and `mdot_HbyA = rho u . Sf` to `1e-12` relative; one `solve` moves `u` by at most `1e-10 max|u_c|`. Control: `u_x + 1` in one interior cell gives `|r_P,x|` within `[0.5, 1.5] diag_P` | R |
+| `rho_one_matrix_equals_incompressible_matrix_times_rho` | `rho = 1`, `mu = nu = 1.5e-5`, `mdot = phi`, `full_stress = false` against `momentum::Momentum` with `bounded_convection = false` and `variable_viscosity_stress = false`, on a non-uniform `u` with three distinct time levels: `lower`, `upper`, `diag`, `source`, the boundary coefficients, `rAU`, `HbyA`, `phi_HbyA`, `mdot_HbyA` (against `phi_HbyA`) and `force` are equal BIT FOR BIT, for steadyState with upwind (`u_relax` 0.7) and with linearUpwind (0.9), and for Euler at `dt = 2^-10` (1.0). Every compared array has a nonzero entry | D |
+| the same, `a_N` not a power of two | Euler at `dt = 1e-3` and backward at `dt = 2^-10` (`a_N = 1.5·2^10`): `diag` and `source` agree to `1e-14 diag_P` and `1e-14 diag_P max|u|`; the largest ulp distance is printed | R |
+| `explicit_transpose_stress_vanishes_for_solenoidal_linear_u` | uniform 6x6x6 unit box, `mu = 2e-5`: for `u = (3 y, -1.5 x, 0)`, `|E_P,c| <= 1e-13 mu (|a| + |b|) 6 h^2` in every cell. Control: for `u = (2 x y, 0, 0)`, `|E_P - (0, mu c V_P/3, 0)| <= 1e-13 mu c 6 h^2` in every cell that owns no boundary face | R |
+| `couette_shear_stress_exact` | `U = 30`, `h = 0.02`, `mu = 1.8e-5`, `rho = 1.2`, a 4x8x3 box graded 2:1 in y: the traction on `y = h` is `(+mu U |Sf|/h, 0, 0)`, on `y = 0` `(-mu U |Sf|/h, 0, 0)`, on `x = max` `(0, +mu U |Sf|/h, 0)`, on `x = min` `(0, -mu U |Sf|/h, 0)`, each component to `1e-12 mu U |Sf|/h` (`tau_w = 0.027` Pa); the steady residual of the Couette state is `<= 1e-12 diag_P U`. Control: with `full_stress = false` the traction on `x = max` has `t_y = 0` exactly | R |
+| `hydrostatic_force_is_zero_face_by_face` | `g = (1.5, -2, -9.81)`, uniform `rho = 1.2`, `p = rho g . x` with its exact boundary values, on a 3x4x6 box with no prescribed-flux face: `|F_f| <= 1e-12 rho |g| |Sf|` on every face and `|force_P| <= 1e-12 rho |g|`. Control: with `p = 0`, `force_P = rho g` to `1e-12 rho |g|`; with a Dirichlet velocity on every patch, `phig_b = 0` and `F_b = 0` exactly | R |
+| `the_compressible_momentum_predictor_replays_bitwise` (lib) | §81.7's row for `src/compressible/momentum.rs`: `set_viscosity`, `set_force`, a fixed-sweep `solve` and `rhie_chow` capture into one graph and replay bitwise | D |
+
+R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1): `1e-5` for `1e-10`
+to `1e-13`, `5.4e-6` for `1e-14`. The D rows are bitwise in both builds. Each R bar is
+relative to the size of the terms that cancel (`diag_P |u|`, `mu |T| sum|Sf|`), not to
+the result, which is zero.
+
+**Landed (CMP-09).** Measured on the RTX 5070 Ti, in both builds; each number is the
+worst error over a bar of the table, f64 then `single`. The fixed-point row: residual
+`7.1e-3` and `3.9e-2` of its bar over the six legs, the force `1.2e-19` and `3.0e-19`
+of its bar (at most `1.4e-28` N/m3 in f64 and `3.7e-20` in `single`), and the control `1.0895 |diag_P|` in both. The
+`rho = 1` row is bitwise over every array in legs A, B and C in both builds, and legs D
+and E also came out at 0 ulp in `diag` and in `source` in both builds: this compiler
+does not separate the two time kernels, and the row still claims only class R there.
+The stress row: `1.5e-3` and `5.7e-3` for the rotation, `1.5e-3` and `4.3e-3` for the
+control, whose key `mu c V_P/3 = 6.17e-8` N is `9e10` and `9e2` bars. Couette: the
+traction `1.6e-3` and `5.4e-2`, the residual `8.0e-4` and `1.1e-2`, and without the
+explicit term `t_y = 0` exactly on `x = max` against `4.652e-7` N with it. The
+hydrostatic row: `8.2e-3` and `2.7e-1` on faces, `3.7e-3` and `1.3e-1` for the cell
+force, `2.9e-4` and `1.3e-2` for the control, and the 108 prescribed boundary faces at
+zero exactly. The replay gate captures 354 nodes (321 kernel, 33 memset) and replays
+three times bitwise over 4 buffers and 214 values. CMP-08's three kernels did not move
+(`tests/compressible_thermo.rs` 4 of 4). Every other cubin is unchanged in SASS under
+`single`; in f64 the only other difference is `solidblock.cubin`, back on the first of
+the two hashes it alternates between on a recompile (CMP-08's run saw the second).
 
 ---
 
@@ -40614,6 +41011,160 @@ one, so `rho_f rAU_f` is the kinematic `rAU_f` and `HbyA` is the kinematic `HbyA
 (derived). CMP-10's `psi_zero_reduces_to_incompressible_to_round_off` holds the
 assembled system to that, to round-off (class R). Gate CMP-AC/LM (§127.6)
 holds the whole solver to Ghia at `M = 0.05`.
+
+### 124.4 The assembly as built (CMP-10)
+
+`src/compressible/pressure.rs` holds `RhoPressure`, and `cuda/compressible.cu` gains
+seven kernels. Like §123.3, this subsection adds no physics. It fixes the sign, the
+order and the face values, because two of the gates below compare this system with
+another one. Everything §3, §5.1, §7 and §12 already compute is CALLED: the scalar
+operators of `src/fv.rs`, the face-flux sum of `cuda/simple.cu` (`smpFaceFluxSum`),
+the product and velocity-correction kernels of `cuda/momentum.cu` (`momMul`,
+`momCorrectVelocity`), and the face fields `RhoMomentum` (§123.3) leaves behind
+(`rAU`, `HbyA`, `rAU_f`, `phi_HbyA`, `phig`, `force`).
+
+**The sign.** The system assembled is (124.4) multiplied by `-1`. Its Laplacian then
+enters as `fvm_laplacian(.., +1)`, exactly as in §5.1's incompressible pressure
+equation (`Simple::assemble_pressure`), and the limit (124.6) is that equation's
+matrix with its source scaled by `rho`:
+
+```
+A p = b
+A p = laplacian(rho_f rAU_f, p) - sum_f psiPhi_f p~_f - a_n V_P psi_P p_P                      (124.7)
+b   = sum_f s_f + V_P ( a_n (rho_P* - psi_P p_P*) + a_0 rho_P^o + a_00 rho_P^oo )
+psiPhi_f = psi~_f phi_HbyA,f
+s0_f     = (rho~_f* - psi~_f p~_f*) phi_HbyA,f ,   s_f = s0_f + rho_f rAU_f phig_f               (124.8)
+```
+
+`sum_f` runs over the cell's faces with the outward sign (owner `+`, neighbour `-`,
+boundary `+`). `(a_n, a_0, a_00)` are the coefficients of the momentum equation's own
+time term (`RhoMomentum::ddt`, §13.3), so continuity and momentum share one ddt, as
+(124.1) requires. `steadyState` writes no time term. (124.7)-(124.8) are (124.4) with
+the gravity term of §124.1 and the backward form folded into the three coefficients.
+
+**Face values.** One set of weights serves the convective operator and every
+retarded value: `w_f` on internal faces and `bw_b` on boundary faces. With
+`Retarded::Upwind` (the default) they are §3.1's upwind weights on `phi_HbyA`. With
+`Retarded::Limited(l)` they are the weights of the §7 limiter `l` on `phi_HbyA`, with
+`p` as the sensor and its Gauss gradient forming `r`. This is §124.1's option
+`limitedRetarded`. For each cell quantity `x` in `{psi, rho*, p*}`:
+
+```
+internal face:                      x~_f = w_f x_P + (1 - w_f) x_N
+cyclic face with a cell across it:  x~_b = bw_b x_P + (1 - bw_b) x_nbr
+any other boundary face:            psi~_b  = psi_P  if phi_HbyA,b >= 0, else psi_b
+                                    rho~*_b = rho*_P if phi_HbyA,b >= 0, else rho*_b
+                                    p~*_b   = p*_b
+empty face:                         psiPhi_b = s0_b = s_b = 0                                     (124.9)
+```
+
+On a non-coupled boundary face `p~` is the value of `p`'s §4 triple, which is how
+`fvm_div_gauss` evaluates it (§124.1: "boundary faces carry `p`'s §4 triple in both
+the convective and the Laplacian part"). `psi~_b` and `rho~*_b` follow (123.15). With
+upwind weights, (124.9) is (123.15)'s selection exactly, because `1 x_P + 0 x_N = x_P`.
+`rho_f` in `rho_f rAU_f` is `fv::interpolate_linear` of `rho*`: linear on internal
+faces, `rho*_b` on the boundary. `rAU_f` is `RhoMomentum`'s `rauf`. The Laplacian
+coefficient is the product `(rho_f rAU_f) |Sf|`, formed in that order. `phig_f` is
+(123.12), which is zero when `g = 0` and on a prescribed-flux face.
+
+**The order** (`assemble_only`, and each non-orthogonal corrector of `solve`):
+1. zero the matrix;
+2. add the time term;
+3. add `fvm_div_gauss(psiPhi, w, bw, p, -1)`;
+4. add `fvm_laplacian((rho_f rAU_f) |Sf|, p, +1)`;
+5. when §12.3's scheme applies, add `fvm_laplacian_non_orth_correction` with the Gauss `grad p` of the current `p`;
+6. add `source += sum_f ±s_f` (`smpFaceFluxSum`, accumulating);
+7. fold in the boundary contributions.
+
+`solve` forms `p*` (cell and boundary values), the weights, `psiPhi`, `s0`, `s` and
+`rho_f rAU_f` ONCE, at its start, from the `p`, `rho*` and `psi` it is handed. The
+linearisation point does not move during the non-orthogonal correctors.
+
+No reference level is fixed and nothing is pinned. With `psi > 0` a transient system
+has its time diagonal, and a steady one needs a face where `p` is a Dirichlet value.
+A closed steady box at `psi = 0` is singular, and refusing it is the outer loop's
+job (CMP-12).
+
+The linear solver is PBiCGStab (§8.1). `PCG` and `DIC` are refused by name, because
+the matrix is asymmetric. `GAMG` is refused by name too, because only the
+incompressible pressure equation has the AMGX backend (§8.3).
+
+**After the solve** (`correct`). `p` is evaluated on its boundary first. Then:
+
+```
+lap_f  = (rho_f rAU_f |Sf|) snGrad(p)_f      fv::sn_grad_flux, plus §12.3's correction when it applies
+mdot_f = s0_f + psiPhi_f p~_f - lap_f + rho_f rAU_f phig_f                                       (124.10)
+u_P    = HbyA_P + rAU_P force_P              force: RhoMomentum::set_force at the new p and rho*
+rho_P  = rho_P* + psi_P (p_P - p_P*) ,   rho_b = rho_b* + psi_b (p_b - p_b*)                       (124.11)
+```
+
+(124.10) is (124.5) written with the face values of (124.9). Its diffusive part comes
+from the matrix's own coefficient `rho_f rAU_f |Sf|` through `sn_grad_flux`, which
+multiplies in `fvm_laplacian`'s order. So on an orthogonal mesh
+`ddt(rho)_P V_P + sum_f mdot_f` equals the linear system's residual `b - A p` to
+round-off, and the solver's tolerance bounds it. On a non-orthogonal mesh the last
+corrector's explicit term was formed with the previous `p`, which is the usual lag of
+deferred correction.
+
+(124.11) is (124.2) itself, at frozen `psi`. When the caller hands in
+`rho* = psi (p* + p_op)` (`thermo::gas_state`, §125.3 step 4), it is the gas law
+(122.3) to round-off. At `psi = 0` it holds `rho`, which (124.6) needs. *DESIGN*:
+writing (124.11) instead of re-evaluating `psi (p + p_op)` has two effects. The
+module needs neither `p_op` nor `T`, just as §123.3 kept the momentum equation free
+of the gas law. Continuity also stays at the matrix's balance.
+
+`u` is corrected with the CELL `rAU`, as `momCorrectVelocity` does for §5.1. `p` is
+not relaxed here; that is step 6 of §125.3's loop.
+
+**Classes.** §124.2 named the imbalance row class A. It is class R. `mdot` and `rho`
+are stored in the build's precision, so under `single` the identity holds only to
+f32 round-off. No evaluation in f64 can recover what the store already rounded.
+
+| gate (lib: `compressible::pressure::tests::*`, f64 build; the same names in `tests/compressible_pressure.rs` run in both builds from one shared source) | bar | class |
+|---|---|---|
+| `psi_zero_reduces_to_incompressible_to_round_off` | §123.3's 6x5x4 box graded 3:1 in y, its non-uniform `u` with three time levels and its boundary conditions, `p = 3x + 2yz` fixed on `+x` and zeroGradient elsewhere, `psi = 0`, and `rho = 1` and then `rho = 1.177` held at every level. Run for steadyState (`u_relax = 0.7`) and Euler at `dt = 2^-10` (`u_relax = 1`). The reference is §5.1's system built from `momentum::Momentum` (`nu = 1.5e-5`, `mu = rho nu`, `mdot = rho phi`): `fvm_laplacian` with its `rAU_f |Sf|`, then the boundary fold, then `+ sum_f ±phi_HbyA,f`. Every `lower`, `upper` and `diag` is within `1e-13` of the kinematic value, relative. Each `source_P` is within `1e-13 (rho sum_f abs(phi_HbyA,f) + abs(diag_P) max abs(p))` of the kinematic source with its flux sum scaled by `rho`, `k_P + (rho - 1) sum_f ±phi_HbyA,f`: the kinematic unknown is `p/rho`, so the boundary-folded Laplacian source is the same in both systems and only the flux sum scales. Control: `psi = 1e-5` at Euler moves some `diag_P` by more than `1e3` bars | R |
+| `uniform_state_has_zero_residual` | the same box with uniform `rho = 1.177`, `u = (37.5, -12.25, 4)`, `p = 250` and `psi = rho/(p + 1e5)`. `u` is fixed on every patch except `+x`, where it is zeroGradient; `p` is fixed on `+x` and zeroGradient elsewhere. Run for steadyState, Euler and backward (`dt = 1e-3`) with upwind, and for Euler with `Limited(VanLeer)`. The residual satisfies `abs(r_P) <= 1e-13 S_P`, with `S_P = abs(diag_P) abs(p) + rho sum_f abs(phi_HbyA,f) + V_P abs(a_n) rho`. One solve leaves `p` within `1e-10 S_P/abs(diag_P)`, which is at least `1e-10 abs(p)`. `correct` leaves `mdot` within `1e-10 rho abs(u) abs(Sf)` of `rho u . Sf`, `u` within `1e-10 abs(u)` and `rho` within `1e-14 rho`. Control: adding 1 to `p` in one interior cell puts `abs(r_P)` within `[0.5, 1.5] abs(diag_P)` | R |
+| `mass_imbalance_after_correction_below_solver_tol` | the same box, with air (`PerfectGas::air(1e5)`), `T = 300 + 20x + 10y`, `p* = 50 + 20x - 10yz`, `rho* = psi (p* + p_op)`, `rho^o = 0.999 rho*` and `rho^oo = 0.998 rho*`. The inlet is `-x`, the walls are `±y` and `±z`, and the outlet is `+x`, where `p` is fixed. Run for Euler and backward (`dt = 1e-3`) and steadyState with upwind, and for Euler with `Limited(VanLeer)` and `g = (0, -9.81, 0)`. The solver is PBiCGStab with DILU at tolerance `1e-12`. In every cell the host imbalance `e_P = V_P (a_n rho_P + a_0 rho_P^o + a_00 rho_P^oo) + sum_f ±mdot_f` equals the residual `r_P = b_P - (A p)_P` within `1e-12 S_P`, with `S_P = V_P abs(a_n) rho_P + sum_f abs(mdot_f) + abs(diag_P) max abs(p)`. Over the mesh, `sum_P abs(e_P) <= 1e-9 sum_P S_P`. Each `rho_P` is within `1e-14 rho_P` of `psi_P (p_P + p_op)`. In the f64 build the solve reports convergence. Control: with `mdot_HbyA` in place of `mdot`, `sum_P abs(e_P)` is more than ten times its bar | R |
+| `pcg_dic_and_gamg_are_refused_by_name` | `RhoPressure::new` refuses `PCG`, `DIC` and `GAMG`, each by name | D |
+| `the_compressible_pressure_corrector_replays_bitwise` (lib) | §81.7's row for `src/compressible/pressure.rs`. One corrector captures into one graph and replays bitwise: `set_force`, a fixed-sweep momentum `solve`, `rhie_chow`, a fixed-sweep pressure `solve` (Jacobi, as the gate in `simple.rs` uses) and `correct` | D |
+
+The R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1). That is
+`1e-5` for every bar from `1e-9` to `1e-13`, and `5.4e-6` for `1e-14`. Each R bar is
+relative to the size of the terms that cancel (`S_P`), not to the result, which is
+zero.
+
+**Landed (CMP-10).** Measured on the RTX 5070 Ti in both builds. Each number is the
+worst error over a bar of the table, f64 first and then `single`.
+
+- The `psi = 0` row: `6.6e-3` and `3.2e-2`. At `rho = 1` every diagonal is the
+  kinematic one bit for bit in both builds. At `rho = 1.177` they are 2 to 4 ulp
+  apart. The control moves all 120 diagonals by more than `1e3` bars.
+- The uniform state: the residual is `1.2e-3` and `6.9e-3`, the solve's `p`
+  `7.6e-6` and `3.4e-2`, `mdot` `6.4e-6` and `2.7e-2`, and `u` `7.2e-6` and
+  `1.9e-2`. `rho` comes back exactly.
+- The imbalance row: `e_P - r_P` is `3.4e-4` and `1.6e-2`, and the gas law is
+  `2.1e-2` and `2.3e-2`. The predictor-flux control misses its bar by factors of
+  `1.0e5` to `1.8e6` in f64 and `10.5` to `179` in `single`.
+- The replay gate captures 483 nodes (439 kernel, 44 memset) and replays three
+  times bitwise over 6 buffers and 264 values.
+
+Every cubin but `compressible.cubin` is unchanged in SASS in both builds, and
+CMP-08's and CMP-09's tests are unchanged (`tests/compressible_thermo.rs` 4 of 4,
+`tests/compressible_momentum.rs` 5 of 5, both builds).
+
+The first coding run measured two rows against bars this table no longer states.
+Both bars were mis-stated against the class rule above, and both are recorded here:
+- The solve's `p` row was held to `1e-10 abs(p)`, which is not the scale of the
+  terms that cancel. Under `single` the backward leg missed it by 5 %: `2.62e-3`
+  against `2.5e-3`, while the time term's `S_P/abs(diag_P)` is in the thousands.
+- The predictor-flux control asked for `1e3` bars. Under `single` that is
+  unreachable: the class-R band is `1e-5` of the scale, and the predictor's
+  imbalance is `2.4e-4` of it. The control now asks for ten bars.
+
+The source row compares against the kinematic system's boundary-folded Laplacian
+source plus `rho` times its flux sum, as the row says. The brief's first form
+(`rho` times the whole kinematic source) is wrong at a fixed-`p` face by
+`(rho - 1)` times the Laplacian's boundary source.
 
 ---
 
@@ -41111,6 +41662,183 @@ what it actually reads. **A finding for CMP-27**: the NPARC RAE 2822 page (read
 `geom.txt`, `yl.pts` and `yu.pts`; it does not state the plan's "Case 9, `M 0.729`,
 `alpha 2.31` degrees". CMP-27 confirms the case and its wind-tunnel corrections from
 AGARD-AR-138 before it writes the key file, and the gate's bars do not move.
+
+#### 127.5.1 The airfoil C-mesh (CMP-26)
+
+`src/compressible/gatemesh.rs` builds the RAE 2822 C-mesh of Gate CMP-RAE in memory:
+a structured `N x J` quadrilateral grid in the `(x, y)` plane, extruded one cell in `z`
+with `empty` front and back faces, returned as a `PolyMeshRaw` (f64 points in both builds,
+§118.2) for `build_host_mesh`.
+
+**Sources.**
+
+* **Thompson, Warsi & Mastin**, *Numerical Grid Generation: Foundations and Applications*
+  (Elsevier, 1985; copyright transferred to J. F. Thompson in 1997, whose notice on the
+  download page grants "downloading in entirety"). §127.5's finding stands for the live
+  URL; the book is read from the Internet Archive's captures of the Mississippi State
+  HPC² copy, `www.hpc.msstate.edu/publications/gridbook/PDFS/` (both captured 2010-06-10):
+  `chapt06.pdf` (sha256 `ed1743c76f5363e0d07c8fef0ade808b4a2ab5f3b80760104e7bd5d0fdc71a55`)
+  and `chapt08.pdf` (sha256 `1e6f420400d7c5d32992ca9bfe759238d6fb56f0d6a573a2e695ab7e94240daf`).
+  **Read**, from the page images, because the PDFs carry their equations as images:
+  Chapter VI eqs. (1), (18a)-(18c), (20), (46), (48) and §4.A (point SOR with
+  over-relaxation, transfinite interpolation as the initial guess); Chapter VIII eqs.
+  (10)-(14) (the natural cubic spline), (48), (55)-(56) (the one-sided hyperbolic tangent
+  distribution), (68b) and (73) (transfinite interpolation).
+* **The ordinates**: Cook, McDonald & Firmin, AGARD-AR-138 (1979), Table 6.1, as the NPARC
+  Alliance Validation Archive reproduces them (`geom.txt`, read 2026-10-13); the answer
+  key `rae2822-coordinates`, `reference/rae2822/coordinates.csv`. AGARD-AR-138 itself was
+  *not read*. The plan names its Appendix A; the archive says Table 6.1, and the key
+  follows the archive.
+* **The first cell**: §32.5.6's flat-plate skin friction (`wallfunctions::flat_plate_cf`,
+  Schlichting & Gersten), restated in f64 so that the mesh is the same in both builds.
+
+**Topology.** `xi = i = 0..N` runs along the inner boundary and `eta = j = 0..J` outwards.
+The inner boundary (`j = 0`) starts at the lower outlet point `(x_out, 0)`, runs up the
+wake cut to the trailing edge `(1, 0)`, round the aerofoil (lower surface TE to LE, upper
+surface LE to TE) and back down the cut to `(x_out, 0)`, so `N = 2 n_wake + n_s`. Nodes
+`(i, 0)` and `(N - i, 0)`, `0 <= i <= n_wake`, are ONE node, and the face between cells
+`(i, 0)` and `(N - 1 - i, 0)`, `i < n_wake`, is an internal face: the cut is not a
+boundary. `xi x eta = +z` everywhere. Patches, in order: `airfoil` (`wall`, the `n_s`
+faces `j = 0`, `n_wake <= i < N - n_wake`), `farfield` (`patch`, `j = J`), `outlet`
+(`patch`, `i = 0` then `i = N`) and `frontAndBack` (`empty`).
+
+**The surface.** The 129 stations, lower surface reversed then upper surface, with the
+shared leading edge once and the trailing edge at both ends, carry a chord-length
+parameter:
+
+```
+K_k = (x_(64-k), -z_lower,(64-k))  for k <= 64,   K_k = (x_(k-64), z_upper,(k-64))  for k >= 64
+t_0 = 0,   t_(k+1) = t_k + |K_(k+1) - K_k|                                                   (127.13)
+```
+
+with rows `0..64` of the key in ascending `x`. Each coordinate is a natural cubic spline
+in `t`: Thompson eq. (VIII-14) for the second derivatives `M_k` at `k = 1..127`, solved
+as one tridiagonal system with `M_0 = M_128 = 0`, and eq. (VIII-11) between the knots,
+
+```
+r(t) = (t_(k+1) - t)^3 M_k / (6 h_k) + (t - t_k)^3 M_(k+1) / (6 h_k)
+     + (r_k / h_k - h_k M_k / 6) (t_(k+1) - t) + (r_(k+1) / h_k - h_k M_(k+1) / 6) (t - t_k),
+h_k = t_(k+1) - t_k                                                                          (127.14)
+```
+
+The surface nodes are, for each interval `k` and `m = 0..refine-1`, the knot `K_k` itself
+when `m = 0` (copied, never evaluated: (127.14) at a knot need not round to it) and
+(127.14) at `t_k + (m/refine) h_k` otherwise, then `K_128`; `n_s = 128 refine`.
+
+**The one-sided distribution.** On `n` intervals with the first interval a fraction `f`
+of the length,
+
+```
+s_j = sinh(a j/n) / ( sinh(a) cosh(a (1 - j/n)) ),   j = 0..n,   s_0 = 0,  s_n = 1 exactly  (127.15)
+```
+
+which is eq. (VIII-56), `s = 1 + tanh[(delta/2)(j/n - 1)] / tanh(delta/2)`, with
+`a = delta/2`, rewritten through `1 - tanh(b)/tanh(a) = sinh(a - b)/(sinh(a) cosh(b))`
+(DERIVED) so that a small `s_1` is not the difference of two numbers near 1. **A
+departure, stated:** Thompson fixes `delta` by the slope, eqs. (VIII-48) and (VIII-55)
+(`sinh(delta)/delta = 1/(n Delta s)`); this generator fixes the first INTERVAL, `s_1 = f`,
+because the `y+` target is a cell height. `s_1(a)` falls monotonically from `1/n` as `a`
+grows, so `a` is the bisection root on `[1e-9, 300]`; `f` outside `(0, 1/n)` is refused.
+
+**The boundaries.** With `Delta_te = (|S_1 - S_0| + |S_(n_s) - S_(n_s - 1)|)/2` the mean
+of the two surface intervals at the trailing edge, `L_w` the wake length and `R` the
+far-field radius:
+
+```
+x_w,i = 1 + L_w s_i
+outer, wake part:  (x_w,i, -R) below the cut,  (x_w,i, +R) above it
+outer, semicircle: (1 + R cos(theta_k), R sin(theta_k)),  theta_k = -pi/2 - pi k/n_s,  0 < k < n_s
+junctions:         (1, -R) and (1, +R) exactly                                               (127.16)
+```
+
+where `s` is (127.15) at `n = n_wake` and `f = Delta_te / L_w`. The semicircle is divided
+uniformly in angle. (A division that follows the surface's arc
+length puts 6e-4-wide far-field cells beside the trailing-edge lines and gave 78.6
+degrees there in the supervisor's oracle.)
+
+**The skeleton.** Transfinite interpolation, eq. (VIII-73) with linear blending
+functions, over `j = 0..J` uniform in `eta`. The two outlet edges are straight and
+uniformly divided, so the `xi` terms of (VIII-73) cancel and it is eq. (VIII-68b):
+
+```
+r_ij = (1 - j/J) r_i0 + (j/J) r_iJ                                                           (127.17)
+```
+
+**Laplace smoothing.** Eq. (VI-20) with `P = Q = 0` is the Laplace system (VI-1) in the
+transformed plane,
+
+```
+g_22 r_xixi + g_11 r_etaeta - 2 g_12 r_xieta = 0,
+g_11 = r_xi . r_xi,  g_22 = r_eta . r_eta,  g_12 = r_xi . r_eta
+```
+
+(the metrics are Thompson's eqs. (VI-18a)-(VI-18c))
+
+with central differences `r_xi = (r_E - r_W)/2`, `r_eta = (r_N - r_S)/2`,
+`r_xieta = (r_NE - r_SE - r_NW + r_SW)/4`, solved by point SOR (Thompson §VI.4.A):
+
+```
+r* = [ g_22 (r_E + r_W) + g_11 (r_N + r_S) - 2 g_12 r_xieta ] / ( 2 (g_11 + g_22) )
+r <- r + omega (r* - r)                                                                      (127.18)
+```
+
+in place, `j` ascending outside `i` ascending, the metrics from the current neighbours.
+The sweep stops when no coordinate moves by `tol R` or more, and a run that reaches
+`max_sweeps` is refused. It runs on the AEROFOIL BLOCK only, `n_wake < i < N - n_wake`,
+`0 < j < J`: the aerofoil, the semicircle and the two trailing-edge lines `x = 1` are its
+Dirichlet boundaries, and the two wake blocks keep (127.17), whose `eta` lines are
+vertical. **A finding, measured by the supervisor's oracle (numba, outside the tree):**
+Laplace over the whole C with the cut held fixed leans the wake `eta` lines up to 89.7
+degrees off the cut normal, because the stretched cut distribution is smoothed towards a
+uniform one; the boundary-derived control function of eqs. (VI-46) and (VI-48),
+`P = -(r_xi . r_xixi)/g_11` interpolated linearly in `eta`, removes the lean in principle
+but its point SOR had not converged after 50 000 sweeps. The two-block form converges in
+about 9 000 sweeps at `omega = 1.8`.
+
+**The `y+` control.** Each `eta` line `i` of the smoothed skeleton is a polyline of
+arc lengths `S_0 = 0 .. S_J = L_i`. Its final nodes are at arc length `L_i s_j`, `s` from
+(127.15) with `n = J` and `f = Delta y_1 / L_i`, by linear interpolation along the
+polyline (eq. (VIII-56) applied along a curve, Thompson §VIII.1); nodes `j = 0` and
+`j = J` are the skeleton's, bit for bit. The first interval of every line is therefore
+`Delta y_1`. From a `y+` target at chord Reynolds number `Re_c`, in chord units,
+
+```
+Delta y_1 / c = y+ / ( Re_c sqrt(C_f / 2) ),
+C_f = 0.455 / (log10 Re_c)^2.58  (Re_c >= 5e5),   C_f = 1.328 / sqrt(Re_c)  below            (127.19)
+```
+
+(DERIVED: `u_tau = U sqrt(C_f/2)` is the definition of `C_f`, and `C_f` is §32.5.6's
+plate-averaged estimate; the cell is sized before the flow is known). At `y+ = 1`,
+`Re_c = 6.5e6` the oracle gives `Delta y_1 = 3.833498871772944e-6`.
+
+**The gate** (CMP-26, `gatemesh::tests`, and again in both builds through
+`tests/compressible_gatemesh.rs`): on the default mesh (`refine = 2`, `n_wake = 48`,
+`J = 96`, `R = L_w = 20`, `Delta y_1` from `y+ = 1` at `Re_c = 6.5e6`, span 1) and on the
+coarse one (`refine = 1`, `n_wake = 24`, `J = 32`):
+`no_negative_volume` (every cell volume positive, and their sum the span times the
+outer polygon's area less the aerofoil polygon's within `1e-9` relative, class R);
+`closure_round_off` (each cell's outward face-area vectors sum to `1e-12` of their
+magnitudes, class R); `surface_points_reproduce_coordinates_1e_9` (each of the 129
+stations is an `airfoil` point within `1e-9`); `max_non_orthogonality_below_60deg`
+(class P, the same bar in both builds); and the topology, the first interval and the
+two builds' identical points (an FNV-1a hash of the point bits, the same literal in
+both builds).
+
+**Landed (CMP-26).** `rust/src/compressible/gatemesh.rs` holds the generator
+(`airfoil_cmesh`, `CMeshSpec` with `default()` and `coarse()`, `one_sided_tanh`,
+`first_cell_for_y_plus`, `parse_stations` and `rae2822_stations`), host-only and `f64` in
+both builds; nothing outside the module calls it yet (CMP-27 will). The gate's ten tests
+pass in the lib and, through `tests/compressible_gatemesh.rs`, in both builds. Measured:
+the default mesh is `N = 352`, `J = 96`, 33 792 cells and 68 384 points, the coarse one
+`176 x 32`, 5 632 cells and 11 632 points; the largest internal-face non-orthogonality is
+38.82 degrees (default) and 49.47 degrees (coarse) in the f64 build, 39.11 and 49.47 under
+`single`, against the bar of 60; the smallest cell volume is `1.129e-9` and `2.279e-9`;
+the worst closure ratio is `2.2e-16` and `8.9e-16` in f64, `6.9e-8` and `2.4e-7` under
+`single` against `tol_r(1e-12) = 1e-5`; every wall line's first interval is within
+`7.2e-12` relative of `Delta y_1 = 3.833498871772944e-6`; and the FNV-1a hashes of the
+point bits are `b5ca6cb8433c8b1d` and `3f8d774e11d077a1` in both builds. The wall carries
+256 (default) and 128 (coarse) distinct points, not the brief's 257 and 129: the two
+trailing-edge ends of the surface walk are one node through the cut.
 
 ### 127.6 The gates
 
