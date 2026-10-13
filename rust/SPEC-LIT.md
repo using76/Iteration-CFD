@@ -38573,6 +38573,50 @@ N. & Weller, H. G. (2009)**, *Commun. Numer. Meth. Engng* 25, 263, DOI
 
 No GPL-licensed source was consulted.
 
+
+### 118.10 Chemistry in double - the device step computes in f64 in both builds
+
+**The scope.** This is docs/17 §5.1.6 and CHR-07b. Everything inside
+`cuda/chem.cu` computes in `typedef double ofchem` in both builds:
+
+* the flat mechanism of §132.9 D2;
+* the production rates and the reactor right-hand side;
+* the reactor state `(Y, T)` and the pressure inside the step;
+* the FD Jacobian, the LU factors and the stage vectors;
+* the error norm and the step memory `h` of §132.10 D6.
+
+The typedef lives in `chem.cu` and not in `ofgpu_device.cuh`, so the f32
+build's `ofscalar` is untouched. Only the flow state crosses the boundary as
+`ofscalar`: `T`, `p`, `Y` in, `omega` out (§132.9), and `T`, `Y` out of
+`integrate_fields` (§132.10). Inputs are widened exactly. Each output is
+rounded once.
+
+**Why it is not float.**
+
+* §132.3's Jacobian perturbs column `j` by `δ_j = 2^-26 max(abs(y_j),
+  atol_j)`. That is below float's unit round-off (`2^-24`). In float,
+  `y_j + δ_j` would round back to `y_j`, and the column would be exactly 0.
+  A float δ of `sqrt(eps_32) ≈ 2.4e-4` would make the FD error of an
+  Arrhenius column O(1e-4) relative.
+* The controller works at `rtol = 1e-8` (§132.8's defaults). That is below
+  float's `6e-8` spacing, so `Err` in float would measure the rounding and
+  not the method.
+* The rates are differences of large forward and reverse terms (§132.9's
+  gross-rate measure). In float the net rate near equilibrium is noise.
+
+**The class rule (§5.1.4).** The device-vs-host rows run on the double
+state API, and they are class P in both builds with the same tolerance.
+The f32 build's crossing row is class R. Its inputs are rounded to f32, and
+the host twin is evaluated at the rounded inputs, as for §132.9's omega row.
+The tolerance is `1e-5` relative, the plan's band and the class rule's cap.
+The deviation from the host at the unrounded inputs is reported and not
+gated. It measures how sensitive one flow step is to the input rounding,
+and that is a property of the state, not of the chemistry's precision.
+
+**The cost.** Measured on the RTX 5070 Ti (a GeForce, where double runs at
+a fraction of the float rate), one thread per cell, at 4096 cells: the fixture (10 species, 15 reactions) integrates 498 cells/s over `dt = 1e-6` s, about 4.5 times the host twin on one CPU core, and GRI-Mech 3.0 (53 species, 325 reactions) about 20 cells/s over `dt = 1e-8` s. These are the numbers a reacting run will meet, and a later unit can make them faster. The per-cell `J`, LU factors and stage vectors live in global memory, and with few cells per launch the work is latency-bound. The analytic
+Jacobian and warp-per-cell remain named and not built (docs/17 §2).
+
 ---
 
 ## 119. The true wedge: a rotational self-couple
@@ -43327,6 +43371,128 @@ fixture's CH4 row at the zeroed-O2 states, on the host and the device alike).
 | `chem_device_jacobian_matches_host` | 4096 random states, `f0` and `J` against `rhs` and `fd_jacobian` | the bounds above, both builds (inputs are double in both) | P | worst `f0` at `1.70e-2` of its bound, worst `J` at `1.42e-2` of its bound, both builds |
 | `chem_device_refuses_by_status` | statuses 1-5 and the NaN outputs; a clipped negative `Y` is not refused by the reactor | exact | D | — |
 | `chem_device_replays_under_capture` | both kernels inside §81.5's protocol, the rates feeding the next iteration's `T` | bitwise | D | 4 kernel nodes, 3 replays bitwise over 6 buffers / 9280 values |
+
+No new equation labels.
+
+
+### 132.10 The device integrator as built (CHR-07b, `cuda/chem.cu`, `src/chem/device.rs`)
+
+One kernel, **`chemIntegrate`**, runs one thread per cell over one flow step
+`dt`. Each thread is `ConstPressureReactor::advance` of §132.8, that is
+§132.7's `integrate_observed` with `ros_step`, `lu_factor`, `lu_solve`,
+`fd_jacobian` and `error_norm`, under advance's observer. It computes in
+`typedef double ofchem` in both builds (§132.6, §118.10). The right-hand
+side is §132.9's `chemRhs`, and its arithmetic is unchanged.
+`integrate_fields` is the ofscalar crossing. `chemPackState` widens
+`(T, p, Y)` exactly into a double state, `chemIntegrate` runs on it, and
+`chemUnpackState` rounds the state once on the way out. In the f64 build it
+is bitwise `integrate`.
+
+**Design choices of this unit (ORIGINAL; Sandu et al. and SAND89-8009 give
+only the method and the equations).**
+
+* **D5, one for one.** R1-R4 and R10 are made as the host twin makes them,
+  in its order:
+  * the pivoted LU, first on a tie, with the update skipped when the
+    multiplier is exactly 0;
+  * `lu = (-γ h) J + I`;
+  * the stage sums that skip an exactly-zero `α_ij` or `γ_ij`;
+  * `y_{n+1}` and `Est` in one loop over the stages;
+  * (132.5) over `m = K + 1` components;
+  * the factor `min(fac_max, max(0.1, 0.9 / Err^(1/(p̂+1))))`;
+  * `J` once per accepted point, with `δ_j = 2^-26 max(|y_j|, atol_j)`;
+  * the shortened last step;
+  * the non-finite rejection that divides `h` by 10;
+  * the clip of `Y_k` in `[-atol_y, 0)` to 0 after each accepted step.
+
+  `h_min` is 0, as advance sets it. R11's ignition delay is host-only. The
+  coefficient set and the tolerances reach the kernel as one double control
+  array, which `DeviceReactor::new` builds from `ReactorOptions` and the
+  set's own `Coefficients`, so no constant is spelled twice. Its field list
+  is stated in `src/chem/device.rs` and in `chem.cu`'s header.
+* **D6, the step memory.** `h[c]` goes in as the cell's first trial step
+  (advance's `h0`, clamped as R3 clamps it) and comes out as
+  `RosStats::h_next`, the step the controller proposed after the last
+  accepted step. A caller can carry it to the next flow step. The counts
+  `accepted`, `rejected` and `clipped` come out per cell.
+* **D7, refusals per cell**, extending §132.9 D3. Before the run the checks
+  are, in advance's order:
+  * `1`, the pressure (R7);
+  * `3`, a mass fraction negative or not finite (R9);
+  * `2`, the temperature;
+  * `9`, an `h[c]` that is not finite or not above 0 (R5's `h0`).
+
+  During the run:
+  * any `chemRhs` refusal (2, 4, 5) at `y`, at a perturbed column or at a
+    stage argument ends the cell, as the host's error ends advance;
+  * `6`, a singular `I - γhJ`;
+  * `7`, more step attempts than `max_steps`;
+  * `8`, a `Y_k < -atol_y` after an accepted step (R10).
+
+  A refused cell writes NaN to its whole state column and to `h[c]`. On the
+  host side, `DeviceReactor::new` refuses each of the following, naming it:
+  `rtol`, `atol_y`, `atol_t`, `h_max` (`+inf` allowed) and `max_steps`
+  (1 to `i32::MAX`). `integrate` refuses a `dt` that is not finite or is
+  below 0. `dt = 0` launches nothing.
+* **D8, contraction.** The integrator's own multiplies, adds, subtracts and
+  divides (the LU, the solves, the stage sums, the error norm and the step
+  arithmetic) use the round-to-nearest intrinsics. nvcc therefore does not
+  fuse them, and they are evaluated as the host evaluates them. `chemRhs`
+  keeps D4's default contraction, so the results of §132.9 do not move.
+  This did not change the step-sequence statistics below (622 against 620
+  differing cells), and it is kept because it removes one source of
+  difference at no cost to the gate.
+* **D9, the scratch.** The per-cell vectors live in SoA device scratch with
+  stride `n`, sized at setup (`IntegrateWork`): ten vectors of `m`, `J`, the
+  LU factors and the pivots. The launch allocates nothing and does not sync,
+  so it can be captured.
+
+**The flow step of the gate, and why it is 1e-6 s.** A one-sided FD
+Jacobian with `δ_j = 2^-26 |y_j|` divides a right-hand-side difference by
+`δ_j`. A device-host difference at §132.9's measured level (1.7e-14 of the
+gross rate) therefore moves `J`, and through it `Err`, enough to flip
+accept/reject decisions near `Err = 1`. Once the step sequences differ, the
+two end states differ by an integration error, not by round-off.
+
+The supervisor probed this outside the tree. It ran the host twin against
+itself, with its right-hand side scaled by `1 ± 1e-14` (a fixed hash sign
+per call and component), on the same generator:
+
+| dt | cells | step sequences changed | worst dY | worst dT |
+|---|---|---|---|---|
+| 1e-4 s | 256 | 231 | `1.34e-11` | `1.35e-8` K (33 cells above 1e-9 K) |
+| 1e-6 s | 512 | 414 | `2.47e-12` | `2.98e-10` K |
+
+With a one-ulp scaling at 1e-4 s, the worst dT is `3.9e-10` K. The plan's
+`T 1e-9 K` row is therefore below the problem's own round-off conditioning
+when ignition falls inside the step, and no twin that is not bitwise could
+meet it there. The device itself, measured at 1e-4 s on 4096 cells, gave worst dY `1.75e-11`,
+worst dT `5.95e-8` K, and 620 of 4096 cells with a different step count.
+
+The gate runs at **`dt = 1e-6` s**. That is the flow step at which CHR-09's
+Lie split calls this integrator, and the tolerances are unchanged. This was
+decided by recommendation. A gate across ignition inside one step needs a
+derived bound, and that is the user's decision (docs/17 §11).
+
+**The test population.** SplitMix64 seed 20261013, per cell `c`, with the
+draws in this order: `φ = 0.6 + 0.8u`, `T0 = 1000 + 1000u`,
+`p = 10^(4+2u)` Pa, `r = 10^(-6+3u)`. Even cells are H2-air
+(`2φ : 1 : 3.76`) and odd cells are CH4-air (`φ : 2 : 7.52`), with H, O and
+OH at `r` moles each, except every tenth cell, where they are exactly 0.
+`Y` comes from the TM-4513 molar masses. Every cell starts with
+`h = 1e-10` s and uses the default `ReactorOptions` (RODAS3, `rtol` 1e-8,
+`atol_y` 1e-14, `atol_t` 1e-8 K). The mechanism is §132.8's 15-reaction
+reactor fixture, whose rates are placeholders, and GRI-Mech 3.0 when its
+paths are set (§129.6). JL4 is not in the tree (§129.6).
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `chem_device_integrate_matches_host` | 4096 cells, one `dt = 1e-6` s, f64 state API, device against `advance` | `max abs dY <= 1e-10`, `abs dT <= 1e-9` K; at least 1000 cells with `max abs(Y - Y0) > 1e-6`; no host refusal | P (both builds: the state is double) | both builds alike: dY `6.92e-14` (cell 491, CO), dT `7.64e-10` K (cell 890, 0.76 of the gate: thin, reported as it stands); 3448 cells moved, largest `max abs(Y - Y0)` `1.05e-3`, largest `abs(T - T0)` 3.79 K; 429 cells with a different step count (reported) |
+| `chem_device_integrate_matches_host_gri30` | GRI-Mech 3.0 when its paths are set, 8 cells, `dt = 1e-7` s (the 10-minute rule: one thread per cell is latency-bound, 72 s on the device); a host refusal at the thermo range must be mirrored as status 5 with NaN | Y `<= 1e-10` and the statuses gated; T reported against 1e-9 K, not gated (a supplementary row, not the plan's) | P | dY `4.40e-13`, dT `2.45e-10` K (within); 7 of 8 step counts differ. At `dt = 1e-6` s on 32 cells (measured during this unit): dY `1.35e-11`, dT `3.33e-7` K at a cell that ignites inside the step (`abs(T - T0) = 452` K), 26 of 32 step counts differ: the conditioning limit above, on real rates |
+| `chem_f32_build_matches_f64` | 512 cells through `integrate_fields`: (D) against `integrate` on the widened inputs, rounded once; (R) against the host at the inputs rounded to Scalar | (D) bitwise; (R) `abs dY <= 1e-5`, `abs dT <= 1e-5 T` | D; R in f32 | (D) bitwise in both builds. (R) f64 build: dY `6.92e-14`, relative dT `3.2e-13`; f32 build: dY `7.45e-9`, relative dT `5.37e-8`. Against the host at the UNROUNDED inputs (reported): f32 build dY `2.97e-8`, dT `1.15e-4` K |
+| `chem_device_integrate_refuses_by_status` | statuses 1, 2, 3, 5, 7, 9 with NaN outputs and good neighbours unchanged; the host-side refusals | exact | D | — |
+| `chem_device_replays_under_capture` (§132.9's row, extended) | `integrate_fields` (pack, integrate, unpack) added to the captured iteration, 64 cells at `dt = 1e-6` s | bitwise | D | 7 kernel nodes (§132.9's four, and pack, integrate, unpack), 3 replays bitwise over 11 buffers / 10304 values |
+| throughput (reported, not gated) | cells integrated per second over one `dt`, and accepted substeps per second | — | — | fixture, 4096 cells, `dt = 1e-6` s: 498 cells/s and `1.14e5` substeps/s (f64 build), 357-392 cells/s (f32 build, two runs; the GPU is shared with other work, so runs vary); the host twin on one CPU core: 111 cells/s. GRI-Mech 3.0, 1024 cells, `dt = 1e-8` s: 18.6-21.3 cells/s and 279-319 substeps/s |
 
 No new equation labels.
 
