@@ -892,7 +892,20 @@ impl<'m> Simple<'m> {
         // only meaningful where the setup opted in (BcInputs::pressure_inlet):
         // faces of every other kind are untouched by the kernel.
         field_ops::update_pressure_inlet_velocity(gpu, &self.fldk, &mut self.u, conv, m)?;
+        // SPEC-LIT 120.6: the Outlets II conditions rewrite their triple from
+        // the same flux - `U` from it directly, `p` through (120.6f) from the
+        // momentum predictor's grad p - on the same terms: one launch per
+        // rule the setup built, nothing at all where there is no rule.
+        field_ops::update_patch_means_vector(gpu, &self.fldk, &mut self.u, conv, m)?;
         field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, &mut self.p, conv)?;
+        field_ops::update_patch_means_scalar(
+            gpu,
+            &self.fldk,
+            &mut self.p,
+            conv,
+            Some(self.momentum.grad_p()),
+            m,
+        )?;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
 

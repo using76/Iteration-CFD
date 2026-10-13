@@ -55,6 +55,10 @@
 //! | `pressureInletOutletVelocity` | flux-switched | `n (n.U)` | 0 |
 //! | `fixedFluxPressure` | 0 | 0 | the gradient that carries the prescribed flux |
 //! | `totalPressure` | 1 | `p0 - \|U\|^2/2` on inflow, `p0` on outflow | 0 |
+//! | `prghPressure` | 1 | `p - rho_f (g . x_f)` (SPEC-LIT 120.7) | 0 |
+//! | `prghTotalPressure` | 1 | `p0 - (1/2) rho_f \|U_f\|^2 - rho_f gh` on inflow, `p0 - rho_f gh` on outflow | 0 |
+//! | `prghTotalHydrostaticPressure` | 1 | `ph_rgh,f - (1/2) rho_f \|U_f\|^2` on inflow, `ph_rgh,f` on outflow | 0 |
+//! | `uniformDensityHydrostaticPressure` | 1 | `p_ref + rho_ref g . (x_f - x_ref) - rho_f gh` | 0 |
 //! | `movingWallVelocity` | 1 | the wall velocity, normal component removed | 0 |
 //! | `flowRateInletVelocity` | 1 | `-n Q/A` | 0 |
 //!
@@ -71,6 +75,11 @@
 //! paragraph, not a comment in a kernel, is where that is recorded. Making
 //! them dynamic is a per-iteration kernel over the boundary and nothing in the
 //! design here stands in its way.
+//!
+//! SPEC-LIT 120.7's four buoyant pressure names are derived conditions in the
+//! same sense: evaluated once, here, from the case's initial fields - `rho_f`
+//! from the initial `alpha` (or 1, the kinematic form), `U_f` from the initial
+//! velocity - through [`BcInputs::prgh`], and never refreshed.
 //!
 //! `symmetry`, `empty` and `cyclic` are not points on that line at all - they
 //! are topology, and the kernels branch on [`BcKind`] for them. That is why
@@ -94,6 +103,7 @@ use std::collections::BTreeMap;
 
 use crate::device::Gpu;
 use crate::error::{Error, Result};
+use crate::field::patch_mean::PatchMeanRule;
 use crate::field::{BcKind, GpuScalarField, GpuVectorField};
 use crate::function1::{DeviceTimedPatch, F1, F1Clock, F1Kernels, F1Target, TimedPatch};
 use crate::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
@@ -126,6 +136,11 @@ pub struct BoundaryTriple<T> {
     /// names - `(120.3a)`'s `F`, `r` and `g`, packed for
     /// [`GpuVectorField::dm`].
     pub dm: Vec<Scalar>,
+    /// SPEC-LIT 120.6: the Outlets II rules the setup built, one per patch
+    /// carrying one of the five names. The caller refreshes them every outer
+    /// iteration through `field_ops::update_patch_means_*`; empty for every
+    /// field that carries none of the five.
+    pub mean_rules: Vec<PatchMeanRule>,
 }
 
 impl<T: Copy + Default> BoundaryTriple<T> {
@@ -137,6 +152,7 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             kind: vec![BcKind::ZeroGradient as Label; n],
             value: vec![T::default(); n],
             dm: vec![0.0; 12 * n],
+            mean_rules: Vec::new(),
         }
     }
 }
@@ -144,6 +160,22 @@ impl<T: Copy + Default> BoundaryTriple<T> {
 // ==========================================================================
 //  What a derived condition needs from the rest of the case
 // ==========================================================================
+
+/// SPEC-LIT 120.7: what the buoyant pressure family is evaluated from.
+///
+/// All slices by flattened boundary face.
+#[derive(Default, Clone, Copy)]
+pub struct PrghInputs<'a> {
+    /// The solver's own gravity.
+    pub g: Vec3,
+    /// Some: the absolute form (VOF), the face's mixture density. None: the
+    /// kinematic form, `rho_f = 1`.
+    pub rho_b: Option<&'a [Scalar]>,
+    /// The face velocity, for (120.7c)/(120.7d).
+    pub u_b: Option<&'a [Vec3]>,
+    /// The hydrostatic `p_rgh`, for (120.7d).
+    pub ph_rgh_b: Option<&'a [Scalar]>,
+}
 
 /// The other fields a boundary condition may be defined in terms of.
 ///
@@ -188,6 +220,23 @@ pub struct BcInputs<'a> {
     /// passes - refuses the five names: a frozen seed with `fr = 1` would be
     /// a fixed-velocity inlet under a pressure-inlet name (SPEC-LIT 13.4).
     pub pressure_inlet: bool,
+    /// The caller refreshes the five Outlets II names of SPEC-LIT 120.6
+    /// every outer iteration through `field_ops::update_patch_means_*` -
+    /// `Simple::correct_outer` does, which is why `ofgpu-lowmach` and
+    /// `ofgpu-buoyant` pass it for `U` and `p`. False - the default, which
+    /// every other setup passes - refuses the five names: a seed with
+    /// nothing to refresh it would freeze the face at its first value under
+    /// a name that promises a patch integral (SPEC-LIT 13.4).
+    pub patch_means: bool,
+    /// SPEC-LIT 120.7: what the four buoyant pressure names are evaluated
+    /// from. `None` - the default, which every setup that solves no `p_rgh`
+    /// passes - refuses the four names: a solver whose pressure is not the
+    /// variable these conditions are written in would read a static `p` as a
+    /// `p_rgh` and shift the level by `rho g . x` (SPEC-LIT 13.4). NOT routed
+    /// through [`Self::u_b`]: a plain `totalPressure` must stay unreadable in
+    /// kinematic units inside a VOF case, and the two families keep their own
+    /// densities.
+    pub prgh: Option<PrghInputs<'a>>,
 }
 
 impl<'a> BcInputs<'a> {
@@ -207,6 +256,11 @@ struct PatchAux<'a> {
     /// the condition evaluated at a coordinate - `fixedProfile` (SPEC-LIT
     /// 120.1) - and for (120.3g)'s `a x (x_f - origin)`.
     bc_f: Vec<DVec3>,
+    /// The same face centres as STORED - LOCAL under `single` (SPEC-LIT
+    /// 118.7) - for (120.7a)'s `gh = g . (x_f - O)`: the solver's own body
+    /// force reads `m.b_cf`, so a `p_rgh` level written with world
+    /// coordinates would differ from it by `rho g . O` (SPEC-LIT 120.7).
+    bc_f_local: Vec<DVec3>,
     /// `[n]` the boundary delta coefficient of SPEC-LIT 2.4, the f64
     /// `geom64` value cast ONCE into `Scalar`, for (120.3a)'s `g/Delta_b`.
     delta_b: Vec<Scalar>,
@@ -247,6 +301,12 @@ impl<'a> PatchAux<'a> {
         let bc_f = (0..p.size)
             .map(|i| m.world64(cf.b_cf.get(p.start + i).copied().unwrap_or_default()))
             .collect();
+        // SPEC-LIT 120.7: the same centres as stored, unshifted - (120.7a)'s
+        // `gh` is taken on the LOCAL coordinate, the one the solver's own
+        // body force reads.
+        let bc_f_local = (0..p.size)
+            .map(|i| cf.b_cf.get(p.start + i).copied().unwrap_or_default())
+            .collect();
         // (120.3a)'s Delta_b and (120.3c)/(120.3f)/(120.3g)'s normals, both
         // from the f64 `geom64` view (SPEC-LIT 120.3), cast once - `.get`
         // again, so a synthetic test mesh with no stored geometry still
@@ -270,6 +330,7 @@ impl<'a> PatchAux<'a> {
             normal,
             total_area,
             bc_f,
+            bc_f_local,
             delta_b,
             normal64,
             at: p.start,
@@ -298,6 +359,22 @@ impl<'a> PatchAux<'a> {
             return phi.get(self.at + i).copied().unwrap_or(0.0) < 0.0;
         }
         if let Some(u) = self.inputs.u_b {
+            let un = u.get(self.at + i).copied().unwrap_or_default();
+            return un.dot(self.normal[i]) < 0.0;
+        }
+        false
+    }
+
+    /// The same test for the prgh total forms (SPEC-LIT 120.7): `phi_b[f] < 0`
+    /// where the flux is given, else [`PrghInputs::u_b`]'s `u_b[f] . n_f < 0`.
+    /// The drivers hand the total forms their velocity HERE - not in
+    /// [`BcInputs::u_b`], which the plain `totalPressure` alone keeps reading,
+    /// so [`Self::is_inflow`] would judge every face outflow in them.
+    fn is_inflow_prgh(&self, i: usize, prgh: &PrghInputs<'_>) -> bool {
+        if let Some(phi) = self.inputs.phi_b {
+            return phi.get(self.at + i).copied().unwrap_or(0.0) < 0.0;
+        }
+        if let Some(u) = prgh.u_b {
             let un = u.get(self.at + i).copied().unwrap_or_default();
             return un.dot(self.normal[i]) < 0.0;
         }
@@ -705,6 +782,197 @@ fn scalar_timed_seed(
     })
 }
 
+// ==========================================================================
+//  The buoyant pressure family (SPEC-LIT 120.7)
+// ==========================================================================
+
+/// The widened entries one buoyant pressure face value is built from, read
+/// once per patch (SPEC-LIT 120.7): `p` for (120.7b), `p0` for (120.7c), and
+/// `rhoRef`/`pRefValue`/`pRefPoint` for (120.7e). The gravity itself rides
+/// [`PrghInputs::g`], the solver's own.
+struct PrghEntry {
+    /// (120.7b)'s `p` or (120.7c)'s `p0`.
+    p: f64,
+    /// (120.7e)'s `pRefValue`.
+    pref: f64,
+    /// (120.7e)'s `rhoRef`.
+    rho_ref: f64,
+    /// (120.7e)'s `pRefPoint`, a WORLD position - only its difference with
+    /// the world face centre enters.
+    x_ref: DVec3,
+}
+
+fn prgh_missing(name: &str, field: &str, patch: &str, key: &str) -> Error {
+    Error::Field {
+        field: field.to_string(),
+        msg: format!(
+            "{field}: boundaryField/{patch}/{key}: `{name}` needs a `{key}` \
+             entry and the patch has none (SPEC-LIT 120.7)"
+        ),
+    }
+}
+
+/// The one refusal every face of the patch would repeat, written once: what
+/// the caller's [`PrghInputs`] must carry for this name, and the `rho` /
+/// `ph_rgh` entries naming the solver's own fields.
+fn prgh_inputs<'a>(
+    spec: &PatchFieldSpec,
+    name: &str,
+    patch: &str,
+    field: &str,
+    aux: &'a PatchAux<'a>,
+) -> Result<&'a PrghInputs<'a>> {
+    let prgh = aux.inputs.prgh.as_ref().ok_or_else(|| Error::Field {
+        field: field.to_string(),
+        msg: format!(
+            "{field}: boundaryField/{patch}: `{name}` is refused - it is \
+             written in the solved `p_rgh`, and this setup was given \
+             BcInputs::prgh = None, so there is no `p_rgh` to write it in \
+             (SPEC-LIT 120.7)"
+        ),
+    })?;
+    let total = matches!(name, "prghTotalPressure" | "prghTotalHydrostaticPressure");
+    if total && prgh.u_b.is_none() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}: `{name}` is defined in \
+                 terms of `U`, and this setup was given no `U` to evaluate \
+                 it from (SPEC-LIT 120.7)"
+            ),
+        });
+    }
+    if name == "prghTotalHydrostaticPressure" && prgh.ph_rgh_b.is_none() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}: `{name}` is defined in \
+                 terms of `ph_rgh`, and this setup was given no `ph_rgh` to \
+                 evaluate it from (SPEC-LIT 120.7)"
+            ),
+        });
+    }
+    // The density and the hydrostatic field are the solver's own: an entry
+    // naming any other field is a substitution SPEC-LIT 13.4 forbids.
+    for (key, wanted) in [("rho", "rho"), ("ph_rgh", "ph_rgh")] {
+        if let Some(raw) = spec.extra.get(key) {
+            let given = raw.split_whitespace().next_back().unwrap_or(raw);
+            if given != wanted {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{field}: boundaryField/{patch}/{key}: `{name}` reads \
+                         the solver's own `{wanted}`, and the patch names \
+                         `{given}` (SPEC-LIT 120.7)"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(prgh)
+}
+
+/// The widened entries one buoyant pressure patch reads, per name (SPEC-LIT
+/// 120.7): every `Scalar` entry widened once, so the per-face arithmetic is
+/// f64 end to end.
+fn prgh_entry(spec: &PatchFieldSpec, name: &str, patch: &str, field: &str) -> Result<PrghEntry> {
+    let number = |key: &str| -> Result<f64> {
+        match spec.number(key, patch)? {
+            Some(v) => Ok(v as f64),
+            None => Err(prgh_missing(name, field, patch, key)),
+        }
+    };
+    Ok(match name {
+        "prghPressure" => PrghEntry {
+            p: number("p")?,
+            pref: 0.0,
+            rho_ref: 0.0,
+            x_ref: DVec3::ZERO,
+        },
+        "prghTotalPressure" => PrghEntry {
+            p: number("p0")?,
+            pref: 0.0,
+            rho_ref: 0.0,
+            x_ref: DVec3::ZERO,
+        },
+        // (120.7d) reads no entry of its own: `ph_rgh,f` is the caller's.
+        "prghTotalHydrostaticPressure" => PrghEntry {
+            p: 0.0,
+            pref: 0.0,
+            rho_ref: 0.0,
+            x_ref: DVec3::ZERO,
+        },
+        _ => PrghEntry {
+            p: 0.0,
+            pref: number("pRefValue")?,
+            rho_ref: number("rhoRef")?,
+            x_ref: match spec.extra.get("pRefPoint") {
+                Some(_) => {
+                    let v = required_vec3(spec, "pRefPoint", patch, field, name)?;
+                    DVec3::new(v.x as f64, v.y as f64, v.z as f64)
+                }
+                None => return Err(prgh_missing(name, field, patch, "pRefPoint")),
+            },
+        },
+    })
+}
+
+/// (120.7a)-(120.7e) on face `i`, in the operation order SPEC-LIT 120.7
+/// writes them: f64 end to end, the `Scalar` inputs widened once, the result
+/// rounded once by the caller's cast.
+fn prgh_face_value(name: &str, aux: &PatchAux<'_>, i: usize, e: &PrghEntry, prgh: &PrghInputs<'_>) -> f64 {
+    let at = aux.at + i;
+    // (120.7a) on the STORED (local) centre: the solver's own body force
+    // reads `m.b_cf`, so the level is written against the same origin.
+    let x = aux.bc_f_local[i];
+    let g = prgh.g;
+    let (gx, gy, gz) = (g.x as f64, g.y as f64, g.z as f64);
+    let gh = gx * x.x + gy * x.y + gz * x.z;
+    let r = prgh.rho_b.map_or(1.0, |rho| rho[at] as f64);
+    // The Bernoulli term `(0.5 rho_f) |U_f|^2` of the two total forms.
+    let dynamic = || {
+        let u = prgh.u_b.map_or(Vec3::ZERO, |u| u[at]);
+        let u2 = u.x as f64 * u.x as f64 + u.y as f64 * u.y as f64 + u.z as f64 * u.z as f64;
+        (0.5 * r) * u2
+    };
+    match name {
+        // (120.7b): p_rgh = p - rho_f gh_f.
+        "prghPressure" => e.p - r * gh,
+        // (120.7c): inflow p0 - (1/2) rho_f |U|^2 - rho_f gh; outflow the
+        // same without the dynamic term - the fluid leaving carries its
+        // kinetic energy out with it. The inflow test reads
+        // [`PrghInputs::u_b`], the velocity the caller actually handed the
+        // family.
+        "prghTotalPressure" => {
+            if aux.is_inflow_prgh(i, prgh) {
+                (e.p - dynamic()) - r * gh
+            } else {
+                e.p - r * gh
+            }
+        }
+        // (120.7d): the caller's hydrostatic `ph_rgh`, less the dynamic term
+        // on inflow - the same [`PrghInputs::u_b`] test.
+        "prghTotalHydrostaticPressure" => {
+            let ph = prgh.ph_rgh_b.map_or(0.0, |ph| ph[at] as f64);
+            if aux.is_inflow_prgh(i, prgh) {
+                ph - dynamic()
+            } else {
+                ph
+            }
+        }
+        // (120.7e): both `x_f` and `x_ref` are WORLD positions - only their
+        // difference enters.
+        _ => {
+            let xw = aux.bc_f[i];
+            let dx = xw.x - e.x_ref.x;
+            let dy = xw.y - e.x_ref.y;
+            let dz = xw.z - e.x_ref.z;
+            let gdr = gx * dx + gy * dy + gz * dz;
+            (e.pref + e.rho_ref * gdr) - r * gh
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scalar_patch(
     spec: Option<&PatchFieldSpec>,
@@ -718,6 +986,7 @@ fn scalar_patch(
     at: usize,
     f1: Option<&F1Setup>,
     timed: &mut Vec<TimedPatch>,
+    pending: &mut Vec<PendingMean>,
 ) -> Result<()> {
     // Topology first: a field file cannot argue with an empty patch.
     if let Some(forced) = topology_override(mesh_kind) {
@@ -788,6 +1057,116 @@ fn scalar_patch(
                 spec.type_name
             ),
         });
+    }
+
+    // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
+    // same reason - the triple is rewritten once per outer iteration by
+    // `update_patch_means_scalar`, so the setup only seeds it (the cell
+    // value; `fr = 1` for the plain mean and the mapped inlet, `fr = 0` for
+    // the switched mean and the extrapolated gradient) and parses the one
+    // or two CONSTANT entries the kind is defined by. The caller's
+    // `BcInputs::patch_means` promises the refresh; without it the names
+    // are refused - a frozen seed under a name that promises a patch
+    // integral is the silent substitution SPEC-LIT 13.4 forbids. The
+    // source patch stays a NAME until the boundary builders resolve it
+    // after the patch loop.
+    if matches!(
+        spec.type_name.as_str(),
+        "fixedMean"
+            | "fixedMeanOutletInlet"
+            | "fixedFluxExtrapolatedPressure"
+            | "outletMappedUniformInlet"
+            | "matchedFlowRateOutletVelocity"
+    ) {
+        let name = spec.type_name.as_str();
+        if !aux.inputs.patch_means {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{field}: boundaryField/{patch}: `{name}` is refused - its \
+                     triple must be rewritten from the patch mean every outer \
+                     iteration through update_patch_means_scalar, and this \
+                     setup was given BcInputs::patch_means = false, so nothing \
+                     would (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        if name == "matchedFlowRateOutletVelocity" {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{patch}: `{name}` is a vector condition and {field} is a \
+                     scalar field (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        let base = format!("{field}: boundaryField/{patch}");
+        let entries = crate::function1::patch_entries(spec, &base)?;
+        let (target, fraction, src) = match name {
+            "fixedMean" | "fixedMeanOutletInlet" => {
+                let v = mean_number(&entries, "meanValue", &base, field, true, 0.0)?;
+                (Vec3::new(v as Scalar, 0.0, 0.0), 1.0, None)
+            }
+            "outletMappedUniformInlet" => {
+                let p = mean_patch_name(&entries, "outletPatch", &base, field)?;
+                let fraction = mean_number(&entries, "fraction", &base, field, false, 1.0)?;
+                let c = mean_number(&entries, "offset", &base, field, false, 0.0)?;
+                (Vec3::new(c as Scalar, 0.0, 0.0), fraction, Some(p))
+            }
+            // `fixedFluxExtrapolatedPressure` - (120.6f) reads the cell's
+            // own gradient; no entry of its own.
+            _ => (Vec3::ZERO, 1.0, None),
+        };
+        let kind = BcKind::from_name(name, field, patch)?;
+        let fr0 = match kind {
+            BcKind::FixedMeanOutletInlet | BcKind::FixedFluxExtrapolatedPressure => 0.0,
+            _ => 1.0,
+        };
+        for i in 0..n {
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = fr0;
+            out.ref_value[at + i] = internal[i];
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = internal[i];
+        }
+        pending.push(PendingMean {
+            kind,
+            patch: patch.to_string(),
+            start: at,
+            size: n,
+            src,
+            target,
+            fraction: fraction as Scalar,
+        });
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.7: the buoyant pressure family, before the static arms
+    // for the same reason - `from_name` would silently ride `FixedValue` /
+    // `TotalPressure` with a face value the static arm cannot compute. A
+    // section-4 triple with `fr = 1` and `ref_grad = 0`, evaluated ONCE from
+    // the case's initial fields through `BcInputs::prgh` - see the module
+    // header on when the derived conditions are evaluated.
+    if matches!(
+        spec.type_name.as_str(),
+        "prghPressure"
+            | "prghTotalPressure"
+            | "prghTotalHydrostaticPressure"
+            | "uniformDensityHydrostaticPressure"
+    ) {
+        let name = spec.type_name.as_str();
+        let prgh = prgh_inputs(spec, name, patch, field, aux)?;
+        let e = prgh_entry(spec, name, patch, field)?;
+        let kind = BcKind::from_name(name, field, patch)?;
+        for i in 0..n {
+            let rv = prgh_face_value(name, aux, i, &e, prgh) as Scalar;
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = rv;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = rv;
+        }
+        return Ok(());
     }
 
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;
@@ -1118,6 +1497,25 @@ fn scalar_patch(
                 })
             }
 
+            // SPEC-LIT 120.6: the Outlets II kinds never reach the static
+            // arms - the name check above intercepts them (with its
+            // BcInputs::patch_means gate, which refuses where the caller did
+            // not opt in). This arm only keeps the match total.
+            BcKind::FixedMean
+            | BcKind::FixedMeanOutletInlet
+            | BcKind::FixedFluxExtrapolatedPressure
+            | BcKind::OutletMappedUniformInlet
+            | BcKind::MatchedFlowRateOutletVelocity => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `{}` reached the static arms without its seed \
+                         (SPEC-LIT 120.6)",
+                        spec.type_name
+                    ),
+                })
+            }
+
             // SPEC-LIT 119.2: `type wedge` belongs on a patch the MESH
             // types `wedge`, where topology_override has already forced the
             // kind before this arm - so reaching it here means a field file
@@ -1176,6 +1574,7 @@ pub fn scalar_boundary_with(
     // No `F1Setup`: a time-varying Function1 is refused here, by name
     // (SPEC-LIT 120.1 - the pre-existing entry points run constants only).
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         // The wall-adjacent cell value for each face of this patch.
@@ -1200,7 +1599,15 @@ pub fn scalar_boundary_with(
             p.start,
             None,
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's `outletPatch`/`inletPatch` against
+    // the mesh now that the loop has seeded every patch - a rule may name a
+    // patch either side of its own.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok(out)
@@ -1219,6 +1626,7 @@ pub fn scalar_boundary_timed(
 ) -> Result<(BoundaryTriple<Scalar>, Vec<TimedPatch>)> {
     let mut out = BoundaryTriple::new(m.n_boundary_faces);
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         let cells: Vec<Scalar> = (0..p.size)
@@ -1242,7 +1650,14 @@ pub fn scalar_boundary_timed(
             p.start,
             Some(f1),
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's source patch name after the loop,
+    // as `scalar_boundary_with` does.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok((out, timed))
@@ -1273,6 +1688,7 @@ pub fn upload_scalar(
         ref_value: gpu.upload(&b.ref_value)?,
         ref_grad: gpu.upload(&b.ref_grad)?,
         bc_kind: gpu.upload(&b.kind)?,
+        mean_rules: b.mean_rules,
     })
 }
 
@@ -1831,6 +2247,130 @@ fn inlet_scalar(
 
 /// The seed the velocity-inlet family returns: `fr = 1` at the computed face
 /// value, zero gradient, and the `dm` block the caller packed.
+/// One Outlets II patch whose source patch is still a NAME (SPEC-LIT 120.6):
+/// the per-patch seeds parse the entries and park one of these; the
+/// boundary builders resolve `outletPatch`/`inletPatch` against the mesh
+/// after the patch loop, so a rule may name a patch the loop has not
+/// reached yet. `target` holds the scalar reading in `.x`.
+struct PendingMean {
+    kind: BcKind,
+    patch: String,
+    start: usize,
+    size: usize,
+    src: Option<String>,
+    target: Vec3,
+    fraction: Scalar,
+}
+
+/// One CONSTANT number of an Outlets II condition (SPEC-LIT 120.6), read
+/// through `F1::parse` as `inlet_scalar` reads the velocity-inlet profiles:
+/// a time-varying entry is refused by name, because no driver runs the
+/// timed path for these names. `required` decides whether a missing entry
+/// is an error naming the key or the caller's default.
+fn mean_number(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    base: &str,
+    field: &str,
+    required: bool,
+    default: f64,
+) -> Result<f64> {
+    let setting = format!("{base}/{key}");
+    let Some(f) = F1::parse(entries, key, 1, &setting, None)? else {
+        if required {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{setting}: the condition needs a `{key}` entry and the \
+                     patch has none (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        return Ok(default);
+    };
+    if !f.is_constant() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: a time-varying `{key}` is refused on the Outlets \
+                 II family - no driver runs the timed path for these names \
+                 (SPEC-LIT 120.6)"
+            ),
+        });
+    }
+    Ok(f.eval(0.0)[0])
+}
+
+/// The patch NAME an `outletMappedUniformInlet` or
+/// `matchedFlowRateOutletVelocity` entry points at - required, by name.
+fn mean_patch_name(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    base: &str,
+    field: &str,
+) -> Result<String> {
+    entries.get(key).map(|t| t.trim().to_string()).ok_or_else(
+        || Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/{key}: the condition needs a `{key}` entry and the \
+                 patch has none (SPEC-LIT 120.6)"
+            ),
+        },
+    )
+}
+
+/// SPEC-LIT 120.6: resolve one pending rule's source patch name against the
+/// mesh - its face range in the flattened boundary - refused by name when
+/// there is no such patch and when the patch names itself.
+fn resolve_mean_rule(
+    p: PendingMean,
+    m: &HostMesh,
+    field: &str,
+) -> Result<PatchMeanRule> {
+    let rule = PatchMeanRule {
+        kind: p.kind,
+        start: p.start,
+        size: p.size,
+        src_start: 0,
+        src_size: 0,
+        target: p.target,
+        fraction: p.fraction,
+    };
+    let Some(src) = &p.src else {
+        return Ok(rule);
+    };
+    let key = match p.kind {
+        BcKind::OutletMappedUniformInlet => "outletPatch",
+        _ => "inletPatch",
+    };
+    let patch = p.patch.as_str();
+    if *src == p.patch {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}/{key}: `{src}` is the patch \
+                 itself - the mean it reads would be the mean it writes \
+                 (SPEC-LIT 120.6)"
+            ),
+        });
+    }
+    let Some(q) = m.patches.iter().find(|q| q.name == *src) else {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}/{key}: `{src}` names no \
+                 patch of this mesh (SPEC-LIT 120.6)"
+            ),
+        });
+    };
+    Ok(PatchMeanRule {
+        src_start: q.start,
+        src_size: q.size,
+        ..rule
+    })
+}
+
 fn inlet_seed(kind: BcKind, n: usize, ref_value: Vec<Vec3>, dm: Vec<Scalar>) -> WallSlipSeed {
     WallSlipSeed {
         kind,
@@ -2349,6 +2889,7 @@ fn vector_patch(
     at: usize,
     f1: Option<&F1Setup>,
     timed: &mut Vec<TimedPatch>,
+    pending: &mut Vec<PendingMean>,
 ) -> Result<()> {
     let zero = Vec3::default();
 
@@ -2422,6 +2963,149 @@ fn vector_patch(
             out.value[at + i] = seed.value[i];
         }
         return Ok(());
+    }
+
+    // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
+    // same reason - the triple is rewritten once per outer iteration by
+    // `update_patch_means_vector` (the cell value; `fr = 1` for the plain
+    // mean, the mapped inlet and the flow-rate outlet, `fr = 0` for the
+    // switched mean), where the caller's `BcInputs::patch_means` promises
+    // the refresh. `fixedFluxExtrapolatedPressure` is a scalar condition.
+    // The source patch stays a NAME until the boundary builders resolve it
+    // after the patch loop.
+    if matches!(
+        spec.type_name.as_str(),
+        "fixedMean"
+            | "fixedMeanOutletInlet"
+            | "fixedFluxExtrapolatedPressure"
+            | "outletMappedUniformInlet"
+            | "matchedFlowRateOutletVelocity"
+    ) {
+        let name = spec.type_name.as_str();
+        if !aux.inputs.patch_means {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{field}: boundaryField/{patch}: `{name}` is refused - its \
+                     triple must be rewritten from the patch mean every outer \
+                     iteration through update_patch_means_vector, and this \
+                     setup was given BcInputs::patch_means = false, so nothing \
+                     would (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        if name == "fixedFluxExtrapolatedPressure" {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{patch}: `{name}` is a scalar condition and {field} is a \
+                     vector field (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        let base = format!("{field}: boundaryField/{patch}");
+        let entries = crate::function1::patch_entries(spec, &base)?;
+        let (target, fraction, src) = match name {
+            "fixedMean" | "fixedMeanOutletInlet" => {
+                let key = "meanValue";
+                let setting = format!("{base}/{key}");
+                let Some(f) = F1::parse(&entries, key, 3, &setting, None)? else {
+                    return Err(Error::Field {
+                        field: field.to_string(),
+                        msg: format!(
+                            "{setting}: the condition needs a `{key}` entry \
+                             and the patch has none (SPEC-LIT 120.6)"
+                        ),
+                    });
+                };
+                if !f.is_constant() {
+                    return Err(Error::Field {
+                        field: field.to_string(),
+                        msg: format!(
+                            "{setting}: a time-varying `{key}` is refused on \
+                             the Outlets II family - no driver runs the timed \
+                             path for these names (SPEC-LIT 120.6)"
+                        ),
+                    });
+                }
+                let v = f.eval(0.0);
+                (Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar), 1.0, None)
+            }
+            "outletMappedUniformInlet" => {
+                let p = mean_patch_name(&entries, "outletPatch", &base, field)?;
+                let fraction = mean_number(&entries, "fraction", &base, field, false, 1.0)?;
+                let key = "offset";
+                let setting = format!("{base}/{key}");
+                let v = match F1::parse(&entries, key, 3, &setting, None)? {
+                    None => Vec3::ZERO,
+                    Some(f) if f.is_constant() => {
+                        let c = f.eval(0.0);
+                        Vec3::new(c[0] as Scalar, c[1] as Scalar, c[2] as Scalar)
+                    }
+                    Some(_) => {
+                        return Err(Error::Field {
+                            field: field.to_string(),
+                            msg: format!(
+                                "{setting}: a time-varying `{key}` is refused \
+                                 on the Outlets II family - no driver runs \
+                                 the timed path for these names (SPEC-LIT \
+                                 120.6)"
+                            ),
+                        });
+                    }
+                };
+                (v, fraction, Some(p))
+            }
+            // `matchedFlowRateOutletVelocity` - (120.6e) reads the flux of
+            // `inletPatch`; no entry of its own but the patch name.
+            _ => {
+                let p = mean_patch_name(&entries, "inletPatch", &base, field)?;
+                (Vec3::ZERO, 1.0, Some(p))
+            }
+        };
+        let kind = BcKind::from_name(name, field, patch)?;
+        let fr0 = match kind {
+            BcKind::FixedMeanOutletInlet => 0.0,
+            _ => 1.0,
+        };
+        for i in 0..n {
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = fr0;
+            out.ref_value[at + i] = internal[i];
+            out.ref_grad[at + i] = zero;
+            out.value[at + i] = internal[i];
+        }
+        pending.push(PendingMean {
+            kind,
+            patch: patch.to_string(),
+            start: at,
+            size: n,
+            src,
+            target,
+            fraction: fraction as Scalar,
+        });
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.7: the buoyant pressure family is a SCALAR condition - it
+    // writes the solved `p_rgh`. Two of the four names map to `FixedValue`
+    // and would slip past the kind arms below, so the check is on the NAME,
+    // before any kind is derived from it.
+    if matches!(
+        spec.type_name.as_str(),
+        "prghPressure"
+            | "prghTotalPressure"
+            | "prghTotalHydrostaticPressure"
+            | "uniformDensityHydrostaticPressure"
+    ) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{patch}: `{}` is a scalar condition and {field} is a vector \
+                 field (SPEC-LIT 120.7)",
+                spec.type_name
+            ),
+        });
     }
 
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;
@@ -2677,6 +3361,25 @@ fn vector_patch(
                     ),
                 })
             }
+
+            // SPEC-LIT 120.6: the Outlets II kinds never reach the static
+            // arms - the name check above intercepts them (with its
+            // BcInputs::patch_means gate, which refuses where the caller did
+            // not opt in). This arm only keeps the match total.
+            BcKind::FixedMean
+            | BcKind::FixedMeanOutletInlet
+            | BcKind::FixedFluxExtrapolatedPressure
+            | BcKind::OutletMappedUniformInlet
+            | BcKind::MatchedFlowRateOutletVelocity => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `{}` reached the static arms without its seed \
+                         (SPEC-LIT 120.6)",
+                        spec.type_name
+                    ),
+                })
+            }
         };
 
         out.kind[at + i] = kind as Label;
@@ -2708,6 +3411,7 @@ pub fn vector_boundary_with(
     // No `F1Setup`: a time-varying Function1 is refused here, by name
     // (SPEC-LIT 120.1 - the pre-existing entry points run constants only).
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         let cells: Vec<Vec3> = (0..p.size)
@@ -2731,7 +3435,15 @@ pub fn vector_boundary_with(
             p.start,
             None,
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's `outletPatch`/`inletPatch` against
+    // the mesh now that the loop has seeded every patch - a rule may name a
+    // patch either side of its own.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok(out)
@@ -2750,6 +3462,7 @@ pub fn vector_boundary_timed(
 ) -> Result<(BoundaryTriple<Vec3>, Vec<TimedPatch>)> {
     let mut out = BoundaryTriple::new(m.n_boundary_faces);
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         let cells: Vec<Vec3> = (0..p.size)
@@ -2773,7 +3486,14 @@ pub fn vector_boundary_timed(
             p.start,
             Some(f1),
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's source patch name after the loop,
+    // as `vector_boundary_with` does.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok((out, timed))
@@ -2804,6 +3524,7 @@ pub fn upload_vector(
         ref_grad: gpu.upload(&b.ref_grad)?,
         bc_kind: gpu.upload(&b.kind)?,
         dm: gpu.upload(&b.dm)?,
+        mean_rules: b.mean_rules,
     })
 }
 
@@ -2867,6 +3588,8 @@ pub fn setup_scalar_field(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2890,6 +3613,8 @@ pub fn setup_scalar_field_with(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2913,6 +3638,8 @@ pub fn setup_vector_field_with(
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
     gpu.write(&mut f.dm, &b.dm)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2935,6 +3662,8 @@ pub fn setup_vector_field(
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
     gpu.write(&mut f.dm, &b.dm)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2960,6 +3689,8 @@ pub fn setup_scalar_field_timed(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     TimedBcs::upload(gpu, &timed)
 }
 
@@ -2986,6 +3717,8 @@ pub fn setup_vector_field_timed(
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
     gpu.write(&mut f.dm, &b.dm)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     TimedBcs::upload(gpu, &timed)
 }
 
@@ -3468,6 +4201,12 @@ pub fn bc_kind_name(k: BcKind) -> &'static str {
         BcKind::FixedValue => "fixedValue",
         BcKind::Calculated => "calculated",
         BcKind::DirectionMixed => "directionMixed",
+        // SPEC-LIT 120.6: the Outlets II family.
+        BcKind::FixedMean => "fixedMean",
+        BcKind::FixedMeanOutletInlet => "fixedMeanOutletInlet",
+        BcKind::FixedFluxExtrapolatedPressure => "fixedFluxExtrapolatedPressure",
+        BcKind::OutletMappedUniformInlet => "outletMappedUniformInlet",
+        BcKind::MatchedFlowRateOutletVelocity => "matchedFlowRateOutletVelocity",
         _ => "(other)",
     }
 }
