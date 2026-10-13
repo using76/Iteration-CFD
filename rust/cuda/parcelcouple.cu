@@ -182,12 +182,15 @@ extern "C" __global__ void parcelCoupleGather
     const oflabel k0 = pcOffset[c];
     const oflabel k1 = pcOffset[c + 1];
 
-    ofscalar ix = 0, iy = 0, iz = 0;
-    ofscalar ax = 0;
-    ofscalar qh = 0;
-    ofscalar at = 0;
-    ofscalar sm = 0;
-    ofscalar smt = 0;
+    // SPEC-LIT 118.9 (F32-12): the cell's sums accumulate in `ofacc` - double
+    // in BOTH builds - each term formed from operands cast to `ofacc`, and
+    // each stored value below is ONE narrowing of the f64 expression.
+    ofacc ix = 0, iy = 0, iz = 0;
+    ofacc ax = 0;
+    ofacc qh = 0;
+    ofacc at = 0;
+    ofacc sm = 0;
+    ofacc smt = 0;
 
     const int heat = (nrgMode != OFC_MODE_OFF);
     const int mass = (massMode != OFC_MASS_NONE);
@@ -197,14 +200,14 @@ extern "C" __global__ void parcelCoupleGather
         const int p = pcIndex[k];
         const ofscalar np = pnp[p];
         const ofvec3 im = pimp[p];
-        ix += np*im.x;
-        iy += np*im.y;
-        iz += np*im.z;
-        ax += np*paxr[p];
+        ix += (ofacc)np*im.x;
+        iy += (ofacc)np*im.y;
+        iz += (ofacc)np*im.z;
+        ax += (ofacc)np*paxr[p];
         if (heat)
         {
-            qh += np*pqim[p];
-            at += np*patr[p];
+            qh += (ofacc)np*pqim[p];
+            at += (ofacc)np*patr[p];
         }
         if (mass)
         {
@@ -214,7 +217,7 @@ extern "C" __global__ void parcelCoupleGather
             // not a per-sub-step rate re-integrated at deposition time.
             // `ptmp` is the parcel's END-of-step temperature, which is the
             // temperature the vapour is handed to the gas at.
-            const ofscalar dm = np*pdmv[p];
+            const ofacc dm = (ofacc)np*pdmv[p];
             sm  += dm;
             smt += dm*ptmp[p];
         }
@@ -226,10 +229,14 @@ extern "C" __global__ void parcelCoupleGather
     const ofscalar rV = (v > 0) ? (ofscalar)1/v : (ofscalar)0;
     const ofscalar rVdt = rV/dt;
 
-    const ofvec3 f = mkvec(-ix*rVdt, -iy*rVdt, -iz*rVdt);
-    const ofscalar b = ax*rV;
-    const ofscalar q = -qh*rVdt;
-    const ofscalar a = at*rV;
+    // Each stored value is ONE narrowing to `ofscalar` of the f64 expression
+    // (SPEC-LIT 118.9d). The casts are identities in the f64 build.
+    const ofvec3 f = mkvec((ofscalar)(-ix*rVdt),
+                           (ofscalar)(-iy*rVdt),
+                           (ofscalar)(-iz*rVdt));
+    const ofscalar b = (ofscalar)(ax*rV);
+    const ofscalar q = (ofscalar)(-qh*rVdt);
+    const ofscalar a = (ofscalar)(at*rV);
 
     // ---- SPEC-LIT S77: the vapour, and the enthalpy it carries ---------
     //
@@ -250,8 +257,8 @@ extern "C" __global__ void parcelCoupleGather
     // droplet's own budget is Q_c = C dT_p + dm h_v (76.10), so the
     // convective heat the gas gave up already contains every joule the
     // phase change consumed. Depositing `q_lat` again would count it twice.
-    const ofscalar mv  = mass ? sm*rVdt : (ofscalar)0;
-    const ofscalar qv  = mass ? cpGas*(smt*rVdt - mv*tGas[c]) : (ofscalar)0;
+    const ofscalar mv  = mass ? (ofscalar)(sm*rVdt) : (ofscalar)0;
+    const ofscalar qv  = mass ? (ofscalar)(cpGas*(smt*rVdt - mv*tGas[c])) : (ofscalar)0;
 
     fSrc[c] = f;
     beta[c] = b;

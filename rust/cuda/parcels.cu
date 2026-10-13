@@ -103,6 +103,81 @@ OFGPU_DEV ofvec3 vscl(ofscalar s, const ofvec3& a)
 OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
 
 // --------------------------------------------------------------------------
+//  The position type - SPEC-LIT 118.9 (F32-12).
+//
+//  Under OFGPU_SINGLE a parcel's position computes in DOUBLE (`ofpos`/
+//  `ofpos3`): a displacement below half an ulp of |x| would otherwise be
+//  lost by `x += dx`, and the walk's lambda would be rounded at every one of
+//  its crossings. The displacement itself is STILL formed in float - (118.9a)
+//  is `x (+) fl32(dt_s/2 (u + u'))` - and is widened exactly as it is added.
+//  In the f64 build `ofpos` IS `ofscalar` and `ofpos3` IS `ofvec3`, so every
+//  helper here is the helper it was and the SASS cannot move.
+// --------------------------------------------------------------------------
+#ifdef OFGPU_SINGLE
+typedef double ofpos;
+struct ofpos3 { ofpos x, y, z; };
+#else
+typedef ofscalar ofpos;
+typedef ofvec3 ofpos3;
+#endif
+
+OFGPU_DEV ofpos3 mkpos(ofpos x, ofpos y, ofpos z)
+{
+#ifdef OFGPU_SINGLE
+    ofpos3 v; v.x = x; v.y = y; v.z = z; return v;
+#else
+    return mkvec(x, y, z);
+#endif
+}
+
+OFGPU_DEV ofpos3 padd(const ofpos3& a, const ofpos3& b)
+{
+#ifdef OFGPU_SINGLE
+    ofpos3 v; v.x = a.x + b.x; v.y = a.y + b.y; v.z = a.z + b.z; return v;
+#else
+    return vadd(a, b);
+#endif
+}
+
+OFGPU_DEV ofpos3 psub(const ofpos3& a, const ofpos3& b)
+{
+#ifdef OFGPU_SINGLE
+    ofpos3 v; v.x = a.x - b.x; v.y = a.y - b.y; v.z = a.z - b.z; return v;
+#else
+    return vsub(a, b);
+#endif
+}
+
+OFGPU_DEV ofpos3 pscl(ofpos s, const ofpos3& a)
+{
+#ifdef OFGPU_SINGLE
+    ofpos3 v; v.x = s*a.x; v.y = s*a.y; v.z = s*a.z; return v;
+#else
+    return vscl(s, a);
+#endif
+}
+
+OFGPU_DEV ofpos pdot3(const ofpos3& a, const ofpos3& b)
+{
+#ifdef OFGPU_SINGLE
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+#else
+    return dot3(a, b);
+#endif
+}
+
+//  Widen a float velocity-magnitude vector to the position precision - the
+//  identity in the f64 build.
+OFGPU_DEV ofpos3 pwiden(const ofvec3& a)
+{
+#ifdef OFGPU_SINGLE
+    ofpos3 v; v.x = (ofpos)a.x; v.y = (ofpos)a.y; v.z = (ofpos)a.z; return v;
+#else
+    return a;
+#endif
+}
+
+// --------------------------------------------------------------------------
 //  Enumerations, mirrored by the Rust side (src/parcels.rs). Both sides are
 //  pinned together by `parcels::tests::the_device_enumerations_match_the_host`.
 // --------------------------------------------------------------------------
@@ -336,12 +411,17 @@ OFGPU_DEV int ofpImpactRegime
 //  outcome rather than an assertion: a lost parcel is a measurable defect
 //  with a known fix (barycentric tracking, Macpherson et al. 2009), not a
 //  silent wrong answer.
+//  `px` and `target` are POSITIONS (`ofpos3`, SPEC-LIT 118.9): the whole
+//  walk - `s`, `den`, `lam`, `lamMin`, the crossing point and the specular
+//  reflection of the target - computes in the position precision, with the
+//  face geometry widened from the float arrays exactly as it is read. `pu`
+//  and its reflection stay float: the velocity is not a position.
 OFGPU_DEV oflabel parcelWalkTo
 (
     oflabel cell,
-    ofvec3* px,               // in: start (inside `cell`); out: end
+    ofpos3* px,               // in: start (inside `cell`); out: end
     ofvec3* pu,               // reflected in place at a rebound
-    ofvec3 target,
+    ofpos3 target,
     const oflabel* __restrict__ owner,
     const oflabel* __restrict__ neighbour,
     const ofvec3*  __restrict__ sf,
@@ -370,16 +450,16 @@ OFGPU_DEV oflabel parcelWalkTo
     unsigned int* pflags
 )
 {
-    ofvec3 x = *px;
+    ofpos3 x = *px;
     oflabel lastFace = -1;
     oflabel lastBface = -1;
 
     for (int it = 0; it < maxWalk; ++it)
     {
-        const ofvec3 s = vsub(target, x);
+        const ofpos3 s = psub(target, x);
         if (s.x == 0 && s.y == 0 && s.z == 0) { *px = x; return cell; }
 
-        ofscalar lamMin = 1;
+        ofpos lamMin = 1;
         oflabel fHit = -1;
         oflabel bHit = -1;
 
@@ -390,10 +470,10 @@ OFGPU_DEV oflabel parcelWalkTo
             const oflabel f = cfFace[k];
             if (f == lastFace) continue;
             const ofscalar sgn = cfOwn[k] ? (ofscalar)1 : (ofscalar)(-1);
-            const ofvec3 n = vscl(sgn, sf[f]);
-            const ofscalar den = dot3(s, n);
+            const ofpos3 n = pscl((ofpos)sgn, pwiden(sf[f]));
+            const ofpos den = pdot3(s, n);
             if (!(den > 0)) continue;              // not leaving through it
-            const ofscalar lam = dot3(vsub(cf[f], x), n) / den;
+            const ofpos lam = pdot3(psub(pwiden(cf[f]), x), n) / den;
             if (lam >= 0 && lam < lamMin) { lamMin = lam; fHit = f; bHit = -1; }
         }
 
@@ -404,17 +484,17 @@ OFGPU_DEV oflabel parcelWalkTo
             const oflabel bf = bcfFace[k];
             if (bf == lastBface) continue;
             // A boundary face's Sf already points out of its own cell.
-            const ofvec3 n = bSf[bf];
-            const ofscalar den = dot3(s, n);
+            const ofpos3 n = pwiden(bSf[bf]);
+            const ofpos den = pdot3(s, n);
             if (!(den > 0)) continue;
-            const ofscalar lam = dot3(vsub(bCf[bf], x), n) / den;
+            const ofpos lam = pdot3(psub(pwiden(bCf[bf]), x), n) / den;
             if (lam >= 0 && lam < lamMin) { lamMin = lam; bHit = bf; fHit = -1; }
         }
 
         if (fHit < 0 && bHit < 0) { *px = target; return cell; }
 
         // Advance to the crossing point.
-        x = vadd(x, vscl(lamMin, s));
+        x = padd(x, pscl(lamMin, s));
 
         if (fHit >= 0)
         {
@@ -489,9 +569,14 @@ OFGPU_DEV oflabel parcelWalkTo
 
         if (reflect)
         {
-            const ofvec3 r = vsub(target, x);
-            const ofscalar rn = dot3(r, nh);
-            target = vadd(x, vsub(vscl(1 - ft, r), vscl((1 - ft) + e, vscl(rn, nh))));
+            // The TARGET reflects in the position precision, off the widened
+            // normal; the VELOCITY reflects in float off the float normal it
+            // always had (SPEC-LIT 118.9).
+            const ofpos3 nhp = pwiden(nh);
+            const ofpos3 r = psub(target, x);
+            const ofpos rn = pdot3(r, nhp);
+            target = padd(x, psub(pscl((ofpos)(1 - ft), r),
+                                  pscl((ofpos)((1 - ft) + e), pscl(rn, nhp))));
             const ofscalar un = dot3(*pu, nh);
             *pu = vsub(vscl(1 - ft, *pu), vscl((1 - ft) + e, vscl(un, nh)));
             lastBface = bHit;
@@ -811,7 +896,7 @@ OFGPU_DEV ofpRate ofpEvapRate
 // --------------------------------------------------------------------------
 extern "C" __global__ void parcelIntegrate
 (
-    ofvec3* __restrict__ px,
+    ofpos3* __restrict__ px,
     ofvec3* __restrict__ pu,
     // (76.10): WRITTEN by the evaporating branch and by nothing else. It was
     // `const` through S66-S68 and the constness was the proof; the proof is
@@ -927,7 +1012,7 @@ extern "C" __global__ void parcelIntegrate
         oflabel cell = pcell[p];
         if (cell < 0) continue;                    // free or dead slot
 
-        ofvec3 x = px[p];
+        ofpos3 x = px[p];
         ofvec3 u = pu[p];
         // (76.10): `d` is a LOCAL now, and only the evaporating branch ever
         // assigns it. For inert and heating parcels it holds pd[p] for every
@@ -1190,8 +1275,11 @@ extern "C" __global__ void parcelIntegrate
             }
 
             // Trapezoidal position update, as FDS integrates it: second
-            // order in dts, and dts is CFL-bounded above.
-            const ofvec3 target = vadd(x, vscl(dts/2, vadd(u, uNew)));
+            // order in dts, and dts is CFL-bounded above. The DISPLACEMENT
+            // is formed in float exactly as it always was - (118.9a) is
+            // `x (+) fl32(dt_s/2 (u^n + u^{n+1}))` - and is widened exactly
+            // as it is ADDED, in the position precision.
+            const ofpos3 target = padd(x, pwiden(vscl(dts/2, vadd(u, uNew))));
 
             u = uNew;
             cell = parcelWalkTo(
@@ -1322,7 +1410,7 @@ extern "C" __global__ void parcelBeginStep
 //  randomly, and it is exactly reproducible.
 extern "C" __global__ void parcelInject
 (
-    ofvec3* __restrict__ px,
+    ofpos3* __restrict__ px,
     ofvec3* __restrict__ pu,
     ofscalar* __restrict__ pd,
     ofscalar* __restrict__ pt,
@@ -1336,7 +1424,7 @@ extern "C" __global__ void parcelInject
     const int* __restrict__ injCount,
     const long long* __restrict__ injEvent,
     // per-injector descriptors, all fixed at setup
-    const ofvec3*  __restrict__ injPos,
+    const ofpos3*  __restrict__ injPos,
     const ofvec3*  __restrict__ injAxis,
     const ofvec3*  __restrict__ injT1,
     const ofvec3*  __restrict__ injT2,
@@ -1390,18 +1478,20 @@ extern "C" __global__ void parcelInject
             vscl(cos(th), injAxis[j]),
             vscl(sin(th), vadd(vscl(cos(phi), injT1[j]), vscl(sin(phi), injT2[j]))));
 
-        ofvec3 x = injPos[j];
+        ofpos3 x = injPos[j];
         ofvec3 u = vscl(injSpeed[j], dir);
         unsigned int flags = OFP_FLAG_ACTIVE;
 
         // Birth cell: a SHORT WALK from the injector's own cell, which the
-        // host located once at setup. Never a search.
+        // host located once at setup. Never a search. The stand-off radius
+        // widens into the position precision exactly as it scales the
+        // direction (SPEC-LIT 118.9).
         oflabel cell = injCell[j];
         if (cell >= 0 && injStandoff[j] > 0)
         {
             ofvec3 discard = u;
             cell = parcelWalkTo(
-                cell, &x, &discard, vadd(x, vscl(injStandoff[j], dir)),
+                cell, &x, &discard, padd(x, pscl((ofpos)injStandoff[j], pwiden(dir))),
                 owner, neighbour, sf, cf, cfOffset, cfFace, cfOwn,
                 bcfOffset, bcfFace, bSf, bCf, bKind,
                 // S78: the stand-off walk is `remove` whatever the case

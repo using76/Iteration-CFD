@@ -451,8 +451,10 @@ pub fn write_parcels_vtp(
     let mut app = AppendedWriter::default();
 
     let off_points = app.push(Block::f64(
-        live.iter()
-            .flat_map(|&i| [s.x[i].x as f64, s.x[i].y as f64, s.x[i].z as f64]),
+        // SPEC-LIT 118.9: the WORLD positions at f64, exactly as the snapshot
+        // carries them - the f64 build's `x64` is the `Scalar` position, so
+        // the bytes are the bytes this always wrote.
+        live.iter().flat_map(|&i| [s.x64[i].x, s.x64[i].y, s.x64[i].z]),
     ));
     let off_connectivity = app.push(Block::i64((0..n as i64).collect::<Vec<_>>()));
     let off_offsets = app.push(Block::i64((1..=n as i64).collect::<Vec<_>>()));

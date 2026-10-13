@@ -495,9 +495,12 @@ extern "C" __global__ void parcelDeposit
     const oflabel k0 = pcOffset[c];
     const oflabel k1 = pcOffset[c + 1];
 
+    // SPEC-LIT 118.9 (F32-12): the cell's sums accumulate in `ofacc` - double
+    // in BOTH builds - and each stored value below is ONE narrowing of the
+    // f64 expression. The casts are identities in the f64 build.
     int n = 0;
-    ofscalar w = 0;
-    ofscalar volSum = 0;
+    ofacc w = 0;
+    ofacc volSum = 0;
 
     for (oflabel k = k0; k < k1; ++k)
     {
@@ -505,13 +508,13 @@ extern "C" __global__ void parcelDeposit
         const ofscalar np = pnp[p];
         const ofscalar d = pd[p];
         n += 1;
-        w += np;
-        volSum += np*piOver6*d*d*d;
+        w += (ofacc)np;
+        volSum += (ofacc)np*piOver6*d*d*d;
     }
 
     const ofscalar v = vol[c];
     outCount[c] = n;
-    outWeight[c] = w;
-    outAlpha[c] = (v > 0) ? volSum/v : (ofscalar)0;
-    outMass[c] = rhoL*volSum;
+    outWeight[c] = (ofscalar)w;
+    outAlpha[c] = (v > 0) ? (ofscalar)(volSum/v) : (ofscalar)0;
+    outMass[c] = (ofscalar)(rhoL*volSum);
 }

@@ -36994,8 +36994,9 @@ subsections, by unit:
 - 118.6 — field, phi and restart I/O (F32-09)
 - 118.7 — the local origin (F32-10)
 - 118.8 — moving geometry in f64 on the device (F32-11)
+- 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
 
-and, later, parcels and chemistry in
+and, later, chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
 
 No GPL-licensed source was consulted.
@@ -37095,7 +37096,7 @@ stored once, and fixing that is iterative refinement (§118.4, F32-06). It
 does not change any tolerance, scheme, iteration count or stopping rule. And
 it does not touch the reductions outside `cuda/solver.cu`, apart from the two
 `cuda/exactsum.cu` anchor kernels above, which share its partials. The
-parcels' reductions (F32-12) still accumulate in the field type. The
+parcels' reductions accumulated in the field type until F32-12 (§118.9). The
 integer-limb accumulator of §72 itself was already exact and is unchanged.
 
 Sources: **Goldberg, D. (1991), "What every computer scientist should know
@@ -38012,15 +38013,16 @@ and wrong: when `m.origin != ZERO`, `Error::Config` whose text contains
 `local origin` and the unit - the device geometry sweep
 `gpu_compute_geometry` and `AleMesh::with_cubin` named F32-11 and are
 converted by §118.8 (F32-11 landed: the sweep and the moving mesh now take
-a local origin, shifted to it in f64), so `Parcels::new` is the one path
-that still refuses, and it names F32-12.
+a local origin, shifted to it in f64), and `Parcels::new` no longer refuses
+either (§118.9, F32-12: parcels are stored local and seeded in world
+coordinates), so no path refuses a local origin any more.
 
 **What it does not do.** The JSONC/blockgen path still generates its points
 in `Scalar` and stays unshifted; `build_host_mesh` and every one of its 75
 callers keep building an unshifted mesh; multi-region cases need ONE origin
 for all regions and are not shifted; the device geometry sweep and moving
 geometry are converted by §118.8 (the sweep runs on `x_world - O`, the
-subtraction in f64), parcels wait for F32-12.
+subtraction in f64), parcels by §118.9.
 
 **The measurement.** `tests/f32_local_origin.rs`, seven tests, the same
 assertions in both builds, run by the supervisor on 2026-10-13. The gate of
@@ -38204,7 +38206,7 @@ motion.rs` still produces `Scalar` points and the drivers still hand `Vec3`
 rest points; the widening happens in `geo_points` and `host_swept_volumes`.
 `GpuGeometry` keeps no f64 V - the cell V64 lives in `AleMesh`'s private
 scratch, and a plain rebuild's f64 intermediates live only as long as
-`compute`. Parcels are F32-12.
+`compute`. Parcels are §118.9 (F32-12).
 
 Sources: **Demirdzic, M. & Peric, M. (1988), "Space conservation law in
 finite volume calculations of fluid flow", Int. J. Numer. Meth. Fluids 8,
@@ -38246,6 +38248,144 @@ cells): one `AleMesh::advance` 9.845 ms against one steady SIMPLE outer
 iteration of 361.8 ms under `single`, ratio 0.027 (f64 build 9.664 ms /
 309.1 ms, 0.031), inside docs/17's 10 %; at the default 24^3 the ratio is
 0.011 (`single`) and 0.013 (f64).
+
+No GPL-licensed source was consulted.
+
+---
+
+### 118.9 Parcels in f64 - positions, the face-crossing walk and the exchange sums
+
+What was float. Under `single` a parcel's position was a float on the
+device, so `x += dx` lost every displacement below half an ulp of |x|, the
+walk's crossing parameter was formed from float differences, and the
+per-cell sums of the deposition (§67.6) and of the two-way coupling gather
+(§68.3) added in float, as did the host totals the §66-§78 gates read.
+`Parcels::new` refused a mesh stored about a local origin (§118.7) by name.
+Measured at HEAD under `single` (`tests/f32_parcels.rs`, run against HEAD's
+library by the supervisor): a parcel at x = 0.4 moving 1e-9 m per step for
+1000 steps did not move at all (x = 0.40000000596, error 1.0e-6 m against
+the exact 0.400001); 65536 parcels of n_p = 1 + (i mod 1024)/1024 in one
+cell deposited a weight of 98271.5703 against the exact 98272, and the
+deposited mass and `ParcelSnapshot::liquid_mass` were off by 3.9e-6 and
+3.1e-6 relative. In the f64 build the same numbers were 2.7e-14 m, exact,
+1.0e-14 and 0.
+
+This unit (F32-12) keeps the position and the walk in f64 under `single`
+and accumulates the exchange sums in f64:
+
+```
+x^{n+1} = x^n (+)_64 fl32( dt_s/2 (u^n + u^{n+1}) )                      (118.9a)
+lambda_f = ((C_f - x).n_f) / ((t - x).n_f),  x <- x + lambda_min (t - x)  (118.9b)
+x_dev = x_world - O (f64),  x_world = x_dev + O (f64)                     (118.9c)
+S_P = fl32( sum_{k in P} (f64) a_k b_k ),  one rounding per stored sum    (118.9d)
+```
+
+- (118.9a): §66.5's trapezoidal displacement is still formed in float, as
+  it always was, and is ADDED in f64 (the widening is exact). The velocity,
+  diameter, temperature and weight stay float.
+- (118.9b): §66.6's plane test, every operand in f64: `s = t - x`, the
+  denominator, `lambda`, `lambda_min`, the crossing point and the specular
+  reflection of the target. The face centres `C_f` and area vectors `n_f`
+  are the float arrays of `GpuMesh`, widened exactly as they are read, so the
+  two cells of a face still see one plane.
+- (118.9c): §118.7's shift. Seeds and injectors are given in WORLD
+  coordinates and stored LOCAL, the subtraction in f64
+  (`HostMesh::local64`); `ParcelSnapshot::x64` is the WORLD position in f64
+  and `x` is its one rounding, `x = fl32(x64)` bit for bit; neither has any
+  arithmetic when `O = 0`. The host locator is `locate_cell64`, §66.6's
+  half-space test on the f64 `geom64` view (in the f64 build it IS
+  `locate_cell`). A pool pins the origin it was built against and
+  `Parcels::seed` refuses a mesh whose origin differs, by name.
+- (118.9d): `parcelDeposit` (weight, volume fraction, mass) and
+  `parcelCoupleGather` (impulse, exchange rate, heat, heat exchange, vapour
+  mass and enthalpy) sum their cell's parcels in `ofacc` (§118.1), each term
+  formed from operands widened to `ofacc`, and round once at the store. On the
+  host `DepositSnapshot::total_weight` / `total_mass`,
+  `ParcelCoupling::total_impulse` / `total_vapour_mass` /
+  `linearisation_defect`, the five `live_parcel_*` references and
+  `ParcelSnapshot::liquid_mass` / `total_mass_lost` / `dead_mass_lost` /
+  `deposited_mass` / `escaped_mass` / `pool_mass` accumulate in `Acc` and
+  narrow once on return. A float operand is exact in f64 and so is the
+  product of two of them (24 + 24 bits fit in 53), so a two-factor term is
+  exact and a longer one rounds at u64 = 2^-53; the sum's error is Higham's
+  bound for recursive summation at u64 (Higham 2002, section 4.2), far below
+  the one float rounding of the store.
+
+The kernels. `cuda/parcels.cu` defines its own position type after the
+include, as §118.8's files do:
+
+    ofpos   - double under OFGPU_SINGLE, ofscalar otherwise (a typedef)
+    ofpos3  - a struct of three doubles {x, y, z} under OFGPU_SINGLE, ofvec3 otherwise (a typedef)
+
+with `mkpos`, `padd`, `psub`, `pscl`, `pdot3` and the widening `pwiden`; in
+the f64 build each is the float helper it replaces (`vadd`, `vsub`, `vscl`,
+`dot3`), so the cubin cannot move. The device position buffers are
+`DevBuf<GeoVec3>` (§118.8's type: `Vec3` in the f64 build).
+
+**The f64 build is bitwise.** Every new type is an alias there, every
+widening is the identity and every expression keeps its operand order;
+the host sums that were `.sum()` stay `.sum::<Acc>()`, so an empty sum keeps
+its sign bit.
+
+**The measurement.** `tests/f32_parcels.rs`, four tests, the same
+assertions in both builds, run by the supervisor on 2026-10-13 (RTX 5070 Ti,
+shared with two other jobs): 4 passed in each. T1, the 1e-9 m/step parcel:
+`x64` within 1e-12 m of `0.4 + 1000 dt u` (f64 build 2.7e-14 m) and `x`
+within one float ulp. T2, a 4^3 box at (2000, 2000, 0) built by
+`build_host_mesh_local`: the pool is accepted (HEAD refused it), a seed given
+at the world point (2000.375, 2000.5, 0.5) ends within 1e-10 m of its
+straight line in world coordinates, `x = fl32(x64)` bit for bit, and an
+injector at a world point injects into the cell its world position names.
+T3, docs/17's gate: 4096 parcels bouncing elastically for 300 steps on an
+8^3 box whose middle 2^3 block is refined once (568 cells, 2:1 faces): 0
+lost, 0 at a wall, 0 escaped, in both builds. T4: the deposited weight is
+exactly 98272, and the deposited mass and `liquid_mass` are within 2.4e-7
+relative of the f64 sums (four float ulps; one rounding is the claim).
+
+SASS: in the f64 build all 46 cubins are identical to HEAD's
+(`tools/f64_identity.py sass-diff`); under `single` exactly `parcels`,
+`parcelsort` and `parcelcouple` changed. `ofgpu-validate -sections 35-40`
+(the six parcel sections, §66-§78): the 167 rows of the f64 build are
+identical to HEAD's (`tools/f64_identity.py rows`). Under `single` 92 of 111
+checks pass against 91 at HEAD. Two rows now pass that failed, (67.6) the
+deposited mass against the mass carried (2.9e-7 -> 0) and 78-B's stick pool
+against the injector (3.5e-7 -> 0); the rest of the misses move but stay
+misses, among them 66-B the landing position (2.2e-7 -> 8.4e-8), (66.8) the
+discharged mass (1.3e-6 -> 9.7e-8), 68-A momentum (5.9e-7 -> 3.3e-8) and
+77-B the energy ledger (6.5e-4 -> 1.9e-4). One row that passed now misses:
+78-B weber, `liquid + deposited + escaped = pool`, 0 -> 1.06e-7 against
+1e-15. It adds three Scalar totals in `ofgpu-validate` itself; each is now
+one rounding of an f64 sum, and three such roundings need not add to the
+fourth. HEAD's 0 was the float sums happening to agree. The row is a
+round-off twin (docs/17 section 5.1 rule 4, class R: tol32 = 5.4e-7 by
+D-F32-1), and so are the other remaining misses that compare Scalar ledgers
+(68-A energy, 76-C, 77-A, 77.4, 77-C, 67-B against the Scalar host gather);
+classing them, or evaluating the ledgers in f64 as A rows, is the section
+26-51 owner's (F32-14) and was not done here. The misses of 66-A, 76-A,
+76-B and 78-A are not about positions or sums: the parcel ODEs and the
+float gas state carry them.
+
+**What it does not do.** The walk still assumes that the face of the
+smallest crossing parameter is the face crossed. On a 2:1 face of an
+adapted mesh the four sub-faces of one coarse face lie in one plane, so they
+tie, and the walk can step into a fine neighbour that does not contain the
+crossing point: T3 counts 433 of 4096 parcels whose recorded cell is not the
+cell their position is in (the same 433 in both builds; 0 on the unrefined
+8^3 box in the supervisor's probe). Nobody is lost, but the deposition puts their mass in a
+neighbour. The fix is a point-in-face test or §66.6's named barycentric
+tracking, not precision; it would move f64 results and is not this unit.
+The velocity, the parcel ODEs and the per-parcel accumulators stay float;
+the gas state the parcels read is float; `ofgpu-validate` was not edited.
+
+Sources: **Goldberg, D. (1991), "What every computer scientist should know
+about floating-point arithmetic", ACM Computing Surveys 23(1), 5-48**, DOI
+10.1145/103162.103163, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html> (the
+sections "Errors In Summation" and "Cancellation"); **Higham, N. J. (2002),
+*Accuracy and Stability of Numerical Algorithms*, 2nd ed., SIAM**, DOI
+10.1137/1.9780898718027, sections 2.2 and 4.2; **Macpherson, G. B., Nordin,
+N. & Weller, H. G. (2009)**, *Commun. Numer. Meth. Engng* 25, 263, DOI
+10.1002/cnm.1128 (§66.6's named fix for the walk; cited, the paper only).
 
 No GPL-licensed source was consulted.
 
