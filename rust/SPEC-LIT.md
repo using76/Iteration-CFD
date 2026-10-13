@@ -39731,6 +39731,160 @@ one, so `rho_f rAU_f` is the kinematic `rAU_f` and `HbyA` is the kinematic `HbyA
 assembled system to that, to round-off (class R). Gate CMP-AC/LM (§127.6)
 holds the whole solver to Ghia at `M = 0.05`.
 
+### 124.4 The assembly as built (CMP-10)
+
+`src/compressible/pressure.rs` holds `RhoPressure`, and `cuda/compressible.cu` gains
+seven kernels. Like §123.3, this subsection adds no physics. It fixes the sign, the
+order and the face values, because two of the gates below compare this system with
+another one. Everything §3, §5.1, §7 and §12 already compute is CALLED: the scalar
+operators of `src/fv.rs`, the face-flux sum of `cuda/simple.cu` (`smpFaceFluxSum`),
+the product and velocity-correction kernels of `cuda/momentum.cu` (`momMul`,
+`momCorrectVelocity`), and the face fields `RhoMomentum` (§123.3) leaves behind
+(`rAU`, `HbyA`, `rAU_f`, `phi_HbyA`, `phig`, `force`).
+
+**The sign.** The system assembled is (124.4) multiplied by `-1`. Its Laplacian then
+enters as `fvm_laplacian(.., +1)`, exactly as in §5.1's incompressible pressure
+equation (`Simple::assemble_pressure`), and the limit (124.6) is that equation's
+matrix with its source scaled by `rho`:
+
+```
+A p = b
+A p = laplacian(rho_f rAU_f, p) - sum_f psiPhi_f p~_f - a_n V_P psi_P p_P                      (124.7)
+b   = sum_f s_f + V_P ( a_n (rho_P* - psi_P p_P*) + a_0 rho_P^o + a_00 rho_P^oo )
+psiPhi_f = psi~_f phi_HbyA,f
+s0_f     = (rho~_f* - psi~_f p~_f*) phi_HbyA,f ,   s_f = s0_f + rho_f rAU_f phig_f               (124.8)
+```
+
+`sum_f` runs over the cell's faces with the outward sign (owner `+`, neighbour `-`,
+boundary `+`). `(a_n, a_0, a_00)` are the coefficients of the momentum equation's own
+time term (`RhoMomentum::ddt`, §13.3), so continuity and momentum share one ddt, as
+(124.1) requires. `steadyState` writes no time term. (124.7)-(124.8) are (124.4) with
+the gravity term of §124.1 and the backward form folded into the three coefficients.
+
+**Face values.** One set of weights serves the convective operator and every
+retarded value: `w_f` on internal faces and `bw_b` on boundary faces. With
+`Retarded::Upwind` (the default) they are §3.1's upwind weights on `phi_HbyA`. With
+`Retarded::Limited(l)` they are the weights of the §7 limiter `l` on `phi_HbyA`, with
+`p` as the sensor and its Gauss gradient forming `r`. This is §124.1's option
+`limitedRetarded`. For each cell quantity `x` in `{psi, rho*, p*}`:
+
+```
+internal face:                      x~_f = w_f x_P + (1 - w_f) x_N
+cyclic face with a cell across it:  x~_b = bw_b x_P + (1 - bw_b) x_nbr
+any other boundary face:            psi~_b  = psi_P  if phi_HbyA,b >= 0, else psi_b
+                                    rho~*_b = rho*_P if phi_HbyA,b >= 0, else rho*_b
+                                    p~*_b   = p*_b
+empty face:                         psiPhi_b = s0_b = s_b = 0                                     (124.9)
+```
+
+On a non-coupled boundary face `p~` is the value of `p`'s §4 triple, which is how
+`fvm_div_gauss` evaluates it (§124.1: "boundary faces carry `p`'s §4 triple in both
+the convective and the Laplacian part"). `psi~_b` and `rho~*_b` follow (123.15). With
+upwind weights, (124.9) is (123.15)'s selection exactly, because `1 x_P + 0 x_N = x_P`.
+`rho_f` in `rho_f rAU_f` is `fv::interpolate_linear` of `rho*`: linear on internal
+faces, `rho*_b` on the boundary. `rAU_f` is `RhoMomentum`'s `rauf`. The Laplacian
+coefficient is the product `(rho_f rAU_f) |Sf|`, formed in that order. `phig_f` is
+(123.12), which is zero when `g = 0` and on a prescribed-flux face.
+
+**The order** (`assemble_only`, and each non-orthogonal corrector of `solve`):
+1. zero the matrix;
+2. add the time term;
+3. add `fvm_div_gauss(psiPhi, w, bw, p, -1)`;
+4. add `fvm_laplacian((rho_f rAU_f) |Sf|, p, +1)`;
+5. when §12.3's scheme applies, add `fvm_laplacian_non_orth_correction` with the Gauss `grad p` of the current `p`;
+6. add `source += sum_f ±s_f` (`smpFaceFluxSum`, accumulating);
+7. fold in the boundary contributions.
+
+`solve` forms `p*` (cell and boundary values), the weights, `psiPhi`, `s0`, `s` and
+`rho_f rAU_f` ONCE, at its start, from the `p`, `rho*` and `psi` it is handed. The
+linearisation point does not move during the non-orthogonal correctors.
+
+No reference level is fixed and nothing is pinned. With `psi > 0` a transient system
+has its time diagonal, and a steady one needs a face where `p` is a Dirichlet value.
+A closed steady box at `psi = 0` is singular, and refusing it is the outer loop's
+job (CMP-12).
+
+The linear solver is PBiCGStab (§8.1). `PCG` and `DIC` are refused by name, because
+the matrix is asymmetric. `GAMG` is refused by name too, because only the
+incompressible pressure equation has the AMGX backend (§8.3).
+
+**After the solve** (`correct`). `p` is evaluated on its boundary first. Then:
+
+```
+lap_f  = (rho_f rAU_f |Sf|) snGrad(p)_f      fv::sn_grad_flux, plus §12.3's correction when it applies
+mdot_f = s0_f + psiPhi_f p~_f - lap_f + rho_f rAU_f phig_f                                       (124.10)
+u_P    = HbyA_P + rAU_P force_P              force: RhoMomentum::set_force at the new p and rho*
+rho_P  = rho_P* + psi_P (p_P - p_P*) ,   rho_b = rho_b* + psi_b (p_b - p_b*)                       (124.11)
+```
+
+(124.10) is (124.5) written with the face values of (124.9). Its diffusive part comes
+from the matrix's own coefficient `rho_f rAU_f |Sf|` through `sn_grad_flux`, which
+multiplies in `fvm_laplacian`'s order. So on an orthogonal mesh
+`ddt(rho)_P V_P + sum_f mdot_f` equals the linear system's residual `b - A p` to
+round-off, and the solver's tolerance bounds it. On a non-orthogonal mesh the last
+corrector's explicit term was formed with the previous `p`, which is the usual lag of
+deferred correction.
+
+(124.11) is (124.2) itself, at frozen `psi`. When the caller hands in
+`rho* = psi (p* + p_op)` (`thermo::gas_state`, §125.3 step 4), it is the gas law
+(122.3) to round-off. At `psi = 0` it holds `rho`, which (124.6) needs. *DESIGN*:
+writing (124.11) instead of re-evaluating `psi (p + p_op)` has two effects. The
+module needs neither `p_op` nor `T`, just as §123.3 kept the momentum equation free
+of the gas law. Continuity also stays at the matrix's balance.
+
+`u` is corrected with the CELL `rAU`, as `momCorrectVelocity` does for §5.1. `p` is
+not relaxed here; that is step 6 of §125.3's loop.
+
+**Classes.** §124.2 named the imbalance row class A. It is class R. `mdot` and `rho`
+are stored in the build's precision, so under `single` the identity holds only to
+f32 round-off. No evaluation in f64 can recover what the store already rounded.
+
+| gate (lib: `compressible::pressure::tests::*`, f64 build; the same names in `tests/compressible_pressure.rs` run in both builds from one shared source) | bar | class |
+|---|---|---|
+| `psi_zero_reduces_to_incompressible_to_round_off` | §123.3's 6x5x4 box graded 3:1 in y, its non-uniform `u` with three time levels and its boundary conditions, `p = 3x + 2yz` fixed on `+x` and zeroGradient elsewhere, `psi = 0`, and `rho = 1` and then `rho = 1.177` held at every level. Run for steadyState (`u_relax = 0.7`) and Euler at `dt = 2^-10` (`u_relax = 1`). The reference is §5.1's system built from `momentum::Momentum` (`nu = 1.5e-5`, `mu = rho nu`, `mdot = rho phi`): `fvm_laplacian` with its `rAU_f |Sf|`, then the boundary fold, then `+ sum_f ±phi_HbyA,f`. Every `lower`, `upper` and `diag` is within `1e-13` of the kinematic value, relative. Each `source_P` is within `1e-13 (rho sum_f abs(phi_HbyA,f) + abs(diag_P) max abs(p))` of the kinematic source with its flux sum scaled by `rho`, `k_P + (rho - 1) sum_f ±phi_HbyA,f`: the kinematic unknown is `p/rho`, so the boundary-folded Laplacian source is the same in both systems and only the flux sum scales. Control: `psi = 1e-5` at Euler moves some `diag_P` by more than `1e3` bars | R |
+| `uniform_state_has_zero_residual` | the same box with uniform `rho = 1.177`, `u = (37.5, -12.25, 4)`, `p = 250` and `psi = rho/(p + 1e5)`. `u` is fixed on every patch except `+x`, where it is zeroGradient; `p` is fixed on `+x` and zeroGradient elsewhere. Run for steadyState, Euler and backward (`dt = 1e-3`) with upwind, and for Euler with `Limited(VanLeer)`. The residual satisfies `abs(r_P) <= 1e-13 S_P`, with `S_P = abs(diag_P) abs(p) + rho sum_f abs(phi_HbyA,f) + V_P abs(a_n) rho`. One solve leaves `p` within `1e-10 S_P/abs(diag_P)`, which is at least `1e-10 abs(p)`. `correct` leaves `mdot` within `1e-10 rho abs(u) abs(Sf)` of `rho u . Sf`, `u` within `1e-10 abs(u)` and `rho` within `1e-14 rho`. Control: adding 1 to `p` in one interior cell puts `abs(r_P)` within `[0.5, 1.5] abs(diag_P)` | R |
+| `mass_imbalance_after_correction_below_solver_tol` | the same box, with air (`PerfectGas::air(1e5)`), `T = 300 + 20x + 10y`, `p* = 50 + 20x - 10yz`, `rho* = psi (p* + p_op)`, `rho^o = 0.999 rho*` and `rho^oo = 0.998 rho*`. The inlet is `-x`, the walls are `±y` and `±z`, and the outlet is `+x`, where `p` is fixed. Run for Euler and backward (`dt = 1e-3`) and steadyState with upwind, and for Euler with `Limited(VanLeer)` and `g = (0, -9.81, 0)`. The solver is PBiCGStab with DILU at tolerance `1e-12`. In every cell the host imbalance `e_P = V_P (a_n rho_P + a_0 rho_P^o + a_00 rho_P^oo) + sum_f ±mdot_f` equals the residual `r_P = b_P - (A p)_P` within `1e-12 S_P`, with `S_P = V_P abs(a_n) rho_P + sum_f abs(mdot_f) + abs(diag_P) max abs(p)`. Over the mesh, `sum_P abs(e_P) <= 1e-9 sum_P S_P`. Each `rho_P` is within `1e-14 rho_P` of `psi_P (p_P + p_op)`. In the f64 build the solve reports convergence. Control: with `mdot_HbyA` in place of `mdot`, `sum_P abs(e_P)` is more than ten times its bar | R |
+| `pcg_dic_and_gamg_are_refused_by_name` | `RhoPressure::new` refuses `PCG`, `DIC` and `GAMG`, each by name | D |
+| `the_compressible_pressure_corrector_replays_bitwise` (lib) | §81.7's row for `src/compressible/pressure.rs`. One corrector captures into one graph and replays bitwise: `set_force`, a fixed-sweep momentum `solve`, `rhie_chow`, a fixed-sweep pressure `solve` (Jacobi, as the gate in `simple.rs` uses) and `correct` | D |
+
+The R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1). That is
+`1e-5` for every bar from `1e-9` to `1e-13`, and `5.4e-6` for `1e-14`. Each R bar is
+relative to the size of the terms that cancel (`S_P`), not to the result, which is
+zero.
+
+**Landed (CMP-10).** Measured on the RTX 5070 Ti in both builds. Each number is the
+worst error over a bar of the table, f64 first and then `single`.
+
+- The `psi = 0` row: `6.6e-3` and `3.2e-2`. At `rho = 1` every diagonal is the
+  kinematic one bit for bit in both builds. At `rho = 1.177` they are 2 to 4 ulp
+  apart. The control moves all 120 diagonals by more than `1e3` bars.
+- The uniform state: the residual is `1.2e-3` and `6.9e-3`, the solve's `p`
+  `7.6e-6` and `3.4e-2`, `mdot` `6.4e-6` and `2.7e-2`, and `u` `7.2e-6` and
+  `1.9e-2`. `rho` comes back exactly.
+- The imbalance row: `e_P - r_P` is `3.4e-4` and `1.6e-2`, and the gas law is
+  `2.1e-2` and `2.3e-2`. The predictor-flux control misses its bar by factors of
+  `1.0e5` to `1.8e6` in f64 and `10.5` to `179` in `single`.
+- The replay gate captures 483 nodes (439 kernel, 44 memset) and replays three
+  times bitwise over 6 buffers and 264 values.
+
+Every cubin but `compressible.cubin` is unchanged in SASS in both builds, and
+CMP-08's and CMP-09's tests are unchanged (`tests/compressible_thermo.rs` 4 of 4,
+`tests/compressible_momentum.rs` 5 of 5, both builds).
+
+The first coding run measured two rows against bars this table no longer states.
+Both bars were mis-stated against the class rule above, and both are recorded here:
+- The solve's `p` row was held to `1e-10 abs(p)`, which is not the scale of the
+  terms that cancel. Under `single` the backward leg missed it by 5 %: `2.62e-3`
+  against `2.5e-3`, while the time term's `S_P/abs(diag_P)` is in the thousands.
+- The predictor-flux control asked for `1e3` bars. Under `single` that is
+  unreachable: the class-R band is `1e-5` of the scale, and the predictor's
+  imbalance is `2.4e-4` of it. The control now asks for ten bars.
+
+The source row compares against the kinematic system's boundary-folded Laplacian
+source plus `rho` times its flux sum, as the row says. The brief's first form
+(`rho` times the whole kinematic source) is wrong at a fixed-`p` face by
+`(rho - 1)` times the Laplacian's boundary source.
+
 ---
 
 ## 125. Energy, the outer loop, and the local time step

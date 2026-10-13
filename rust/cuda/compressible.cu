@@ -397,3 +397,241 @@ extern "C" __global__ void cmpBoundaryTraction
     const ofscalar mu = bmuf[i];
     t[i] = mkvec(mu*(gx + cx), mu*(gy + cy), mu*(gz + cz));
 }
+
+
+/*
+  ==========================================================================
+  The all-speed pressure equation. SPEC-LIT 124.4 (CMP-10). Seven kernels,
+  one thread per element, called from src/compressible/pressure.rs beside
+  the scalar operators of cuda/fv.cu, the face-flux sum of cuda/simple.cu
+  and the product and velocity-correction kernels of cuda/momentum.cu,
+  whose Rhie-Chow face fields they consume. No floor and no clip: (124.4)
+  carries no limiter beyond the retarded face values the weights already
+  carry, so no OFGPU_CMP_TINY is defined here and none is taken.
+  ==========================================================================
+*/
+
+//- (124.8), (124.9) on the internal faces: the retarded face values
+//  x~_f = w_f x_P + (1 - w_f) x_N for x in {psi, rho*, p*}, then
+//  psiPhi_f = psi~_f phi_HbyA_f and s0_f = (rho~_f - psi~_f p~_f) phi_HbyA_f.
+extern "C" __global__ void cmpRetardedFlux
+(
+    ofscalar* __restrict__ psiPhi,
+    ofscalar* __restrict__ s0,
+    const ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ w,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ pStar,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    oflabel nFaces
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= nFaces) return;
+    const ofscalar wf = w[f];
+    const ofscalar k = 1 - wf;
+    const oflabel o = owner[f];
+    const oflabel nn = neighbour[f];
+    const ofscalar psil = wf*psi[o] + k*psi[nn];
+    const ofscalar rhol = wf*rho[o] + k*rho[nn];
+    const ofscalar psl = wf*pStar[o] + k*pStar[nn];
+    const ofscalar ph = phi[f];
+    psiPhi[f] = psil*ph;
+    s0[f] = (rhol - psil*psl)*ph;
+}
+//- (124.8), (124.9) on the boundary faces. An empty face carries neither
+//  flux. A coupled face with a cell across the couple interpolates like an
+//  internal face, with the boundary weight. Any other face takes psi~ and
+//  rho~ upwind of the flux - the owner's value on outflow (phi >= 0), the
+//  boundary value on inflow, (124.9) - and p~ from p's own boundary value.
+extern "C" __global__ void cmpRetardedFluxBoundary
+(
+    ofscalar* __restrict__ bpsiPhi,
+    ofscalar* __restrict__ bs0,
+    const ofscalar* __restrict__ bphi,
+    const ofscalar* __restrict__ bw,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ bpsi,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ brho,
+    const ofscalar* __restrict__ pStar,
+    const ofscalar* __restrict__ bpStar,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bKind,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    const oflabel kind = bKind[i];
+    if (kind == OFPATCH_EMPTY)
+    {
+        bpsiPhi[i] = 0;
+        bs0[i] = 0;
+        return;
+    }
+
+    const oflabel o = bFaceCells[i];
+    const ofscalar ph = bphi[i];
+
+    if (kind == OFPATCH_CYCLIC)
+    {
+        const oflabel nb = bNbrCell[i];
+        if (nb >= 0)
+        {
+            const ofscalar wf = bw[i];
+            const ofscalar k = 1 - wf;
+            const ofscalar psil = wf*psi[o] + k*psi[nb];
+            const ofscalar rhol = wf*rho[o] + k*rho[nb];
+            const ofscalar psl = wf*pStar[o] + k*pStar[nb];
+            bpsiPhi[i] = psil*ph;
+            bs0[i] = (rhol - psil*psl)*ph;
+            return;
+        }
+    }
+
+    const ofscalar psil = (ph >= 0) ? psi[o] : bpsi[i];
+    const ofscalar rhol = (ph >= 0) ? rho[o] : brho[i];
+    const ofscalar psl = bpStar[i];
+    bpsiPhi[i] = psil*ph;
+    bs0[i] = (rhol - psil*psl)*ph;
+}
+//- The time term of (124.7)-(124.8), one thread per cell, with the momentum
+//  equation's own time coefficients (a_n, a_0, a_00) so that continuity and
+//  momentum share one ddt, as (124.1) requires. Launched with sign = -1,
+//  the sign (124.4) was multiplied by:
+//    diag   += sign*V*a_n*psi
+//    source -= sign*V*(a_n*(rho - psi*pStar) + a_0*rho0 + a_00*rho00)
+extern "C" __global__ void cmpPressureDdt
+(
+    ofscalar* __restrict__ diag,
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ pStar,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ rho00,
+    ofscalar aN,
+    ofscalar a0,
+    ofscalar a00,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+    diag[i] += sign*V[i]*aN*psi[i];
+    source[i] -= sign*V[i]*(aN*(rho[i] - psi[i]*pStar[i]) + a0*rho0[i] + a00*rho00[i]);
+}
+
+
+//- (124.8)'s second line on one array of faces: out = a + x*y, elementwise.
+//  s_f = s0_f + rho_f rAU_f phig_f is its only caller in this unit.
+extern "C" __global__ void cmpFaceAxpy
+(
+    ofscalar* __restrict__ out,
+    const ofscalar* __restrict__ a,
+    const ofscalar* __restrict__ x,
+    const ofscalar* __restrict__ y,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    out[i] = a[i] + x[i]*y[i];
+}
+//- (124.10) on the internal faces: mdot_f = s0_f + psiPhi_f p~_f - lap_f
+//  + rho_f rAU_f phig_f, with p~_f the weighted face value of the new p.
+//  lap_f is the (rho_f rAU_f |Sf|) snGrad(p) the caller forms with
+//  fvSnGradFlux, in fvm_laplacian's multiplication order.
+extern "C" __global__ void cmpPressureMassFlux
+(
+    ofscalar* __restrict__ mdot,
+    const ofscalar* __restrict__ s0,
+    const ofscalar* __restrict__ psiPhi,
+    const ofscalar* __restrict__ w,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ lap,
+    const ofscalar* __restrict__ rhoRauf,
+    const ofscalar* __restrict__ phig,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    oflabel nFaces
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= nFaces) return;
+    const ofscalar wf = w[f];
+    const ofscalar pl = wf*p[owner[f]] + (1 - wf)*p[neighbour[f]];
+    mdot[f] = s0[f] + psiPhi[f]*pl - lap[f] + rhoRauf[f]*phig[f];
+}
+//- (124.10) on the boundary faces. An empty face carries no mass flux. A
+//  coupled face with a cell across the couple weights the new p like an
+//  internal face; any other face takes p's own boundary value - the value
+//  of p's triple, which is how fvmDivGauss reads it too (124.9). The rest
+//  of the sum is the internal face's, on the boundary arrays.
+extern "C" __global__ void cmpPressureMassFluxBoundary
+(
+    ofscalar* __restrict__ bmdot,
+    const ofscalar* __restrict__ bs0,
+    const ofscalar* __restrict__ bpsiPhi,
+    const ofscalar* __restrict__ bw,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ bp,
+    const ofscalar* __restrict__ blap,
+    const ofscalar* __restrict__ brhoRauf,
+    const ofscalar* __restrict__ bphig,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bKind,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    const oflabel kind = bKind[i];
+    if (kind == OFPATCH_EMPTY)
+    {
+        bmdot[i] = 0;
+        return;
+    }
+
+    const oflabel o = bFaceCells[i];
+    ofscalar pl = bp[i];
+
+    if (kind == OFPATCH_CYCLIC)
+    {
+        const oflabel nb = bNbrCell[i];
+        if (nb >= 0)
+        {
+            pl = bw[i]*p[o] + (1 - bw[i])*p[nb];
+        }
+    }
+
+    bmdot[i] = bs0[i] + bpsiPhi[i]*pl - blap[i] + brhoRauf[i]*bphig[i];
+}
+
+
+//- (124.11), the linearisation (124.2) itself at frozen psi: rho = rho*
+//  + psi (p - pStar). Launched once on the cell arrays and once on the
+//  boundary arrays; with rho* = psi (p* + p_op) it is the gas law (122.3)
+//  to round-off, and at psi = 0 it holds rho.
+extern "C" __global__ void cmpLinearizedRho
+(
+    ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ pStar,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    rho[i] = rho[i] + psi[i]*(p[i] - pStar[i]);
+}
