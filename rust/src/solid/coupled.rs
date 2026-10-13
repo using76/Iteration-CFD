@@ -1634,6 +1634,13 @@ mod tests {
     use crate::solid::fixtures;
     use crate::solid::outer::{ANDERSON_DEPTH, OuterControls, Relaxation};
     use crate::solid::tests::{graded_block, linear_state};
+    // VAL-10's probe: the stress read-out and the residual scale it judges
+    // the device residual against. Only the ignored probe uses them, so
+    // they follow it out of the single build.
+    #[cfg(not(feature = "single"))]
+    use crate::solid::block::residual_scale;
+    #[cfg(not(feature = "single"))]
+    use crate::solid::stress::StressFields;
 
     /// `Vec3` field -> the flat `3 n` layout `rel_max` reads.
     fn flat3(v: &[Vec3]) -> Vec<Scalar> {
@@ -1900,6 +1907,446 @@ mod tests {
                     );
                 }
                 Err(e) => println!("  95-A {label} segregated:    {e}"),
+            }
+        }
+    }
+
+    // ======================================================================
+    //  VAL-10: the exact discrete fixed point of the block map, by a dense
+    //  direct solve in plain f64 (§142.1). In linear elasticity the block
+    //  matrix A is fixed and the source affine in u once the boundary is
+    //  closed, so R(u) = B u + R(0) and the fixed point solves B u = -R(0);
+    //  B is built column by column, B e_k = R(e_k) - R(0). Against this the
+    //  outer loop's miss at 5:1 and 10:1 is attributed: the loop, or the
+    //  discretisation itself.
+    // ======================================================================
+
+    /// Right-looking Gaussian elimination with partial pivoting, row-major
+    /// `a[i*n + j]`: `P B = L U`, L unit lower below the diagonal, U on and
+    /// above it. `ipiv[k]` is the row swapped with row k at step k (LAPACK
+    /// style). `Err(k)` when the largest `|a_ik|`, i >= k, is 0 or not
+    /// finite.
+    fn lu_factor(a: &mut [f64], n: usize) -> std::result::Result<Vec<usize>, usize> {
+        debug_assert_eq!(a.len(), n * n);
+        let mut ipiv = vec![0usize; n];
+        for k in 0..n {
+            let (mut p, mut best) = (k, a[k * n + k].abs());
+            for i in k + 1..n {
+                let v = a[i * n + k].abs();
+                if v > best {
+                    best = v;
+                    p = i;
+                }
+            }
+            if !best.is_finite() || best == 0.0 {
+                return Err(k);
+            }
+            ipiv[k] = p;
+            if p != k {
+                for j in 0..n {
+                    a.swap(k * n + j, p * n + j);
+                }
+            }
+            let piv = a[k * n + k];
+            for i in k + 1..n {
+                a[i * n + k] /= piv;
+            }
+            for i in k + 1..n {
+                let lik = a[i * n + k];
+                if lik != 0.0 {
+                    // The rank-1 update over the two contiguous row tails,
+                    // so the zip vectorises.
+                    let (head, tail) = a.split_at_mut(i * n);
+                    let (row_i, _) = tail.split_at_mut(n);
+                    let row_k = &head[k * n..k * n + n];
+                    for (ri, rk) in row_i[k + 1..].iter_mut().zip(row_k[k + 1..].iter()) {
+                        *ri -= lik * rk;
+                    }
+                }
+            }
+        }
+        Ok(ipiv)
+    }
+
+    /// `B x = b` in place, from [`lu_factor`]'s output: the swaps forward
+    /// in `ipiv` order, the unit-lower forward substitution, the upper back
+    /// substitution.
+    fn lu_solve(lu: &[f64], ipiv: &[usize], b: &mut [f64]) {
+        let n = ipiv.len();
+        for (k, &p) in ipiv.iter().enumerate() {
+            if p != k {
+                b.swap(k, p);
+            }
+        }
+        for i in 1..n {
+            let s: f64 = lu[i * n..i * n + i].iter().zip(&b[..i]).map(|(a, c)| a * c).sum();
+            b[i] -= s;
+        }
+        for i in (0..n).rev() {
+            let s: f64 = lu[i * n + i + 1..(i + 1) * n]
+                .iter()
+                .zip(&b[i + 1..n])
+                .map(|(a, c)| a * c)
+                .sum();
+            b[i] = (b[i] - s) / lu[i * n + i];
+        }
+    }
+
+    /// `B^T x = b` in place: `B^T = U^T L^T P`, so the lower-triangular
+    /// `U^T` forward (the columns of U, strided), the unit-diagonal `L^T`
+    /// backward, then the swaps in REVERSE order.
+    fn lu_solve_transposed(lu: &[f64], ipiv: &[usize], b: &mut [f64]) {
+        let n = ipiv.len();
+        for i in 0..n {
+            let mut s = b[i];
+            for (j, bj) in b[..i].iter().enumerate() {
+                s -= lu[j * n + i] * bj;
+            }
+            b[i] = s / lu[i * n + i];
+        }
+        for i in (0..n).rev() {
+            let mut s = b[i];
+            for j in i + 1..n {
+                s -= lu[j * n + i] * b[j];
+            }
+            b[i] = s;
+        }
+        for k in (0..n).rev() {
+            let p = ipiv[k];
+            if p != k {
+                b.swap(k, p);
+            }
+        }
+    }
+
+    /// The matrix one-norm: the largest absolute column sum.
+    fn norm1(a: &[f64], n: usize) -> f64 {
+        (0..n)
+            .map(|j| (0..n).map(|i| a[i * n + j].abs()).sum::<f64>())
+            .fold(0.0f64, f64::max)
+    }
+
+    /// Hager's estimate of `||B^-1||_1` (SIAM J. Sci. Stat. Comput. 5
+    /// (1984) 311-316), the LAPACK xLACON form (Higham, ACM TOMS 14 (1988)
+    /// 381-396): `x` walks to the column where the inverse's action peaks
+    /// on the sign pattern of the previous solve, at most five steps, and
+    /// the last `||B^-1 x||_1` is returned.
+    fn hager_inv_norm1(lu: &[f64], ipiv: &[usize], n: usize) -> f64 {
+        let mut x = vec![1.0 / n as f64; n];
+        let mut last = 0.0f64;
+        for it in 1..=5 {
+            let mut y = x.clone();
+            lu_solve(lu, ipiv, &mut y);
+            last = y.iter().fold(0.0f64, |a, &v| a + v.abs());
+            let xi: Vec<f64> =
+                y.iter().map(|&v| if v >= 0.0 { 1.0 } else { -1.0 }).collect();
+            let mut z = xi;
+            lu_solve_transposed(lu, ipiv, &mut z);
+            // The FIRST index of the largest |z_j|: strict `>` keeps it.
+            let (j, zmax) = z.iter().enumerate().fold((0usize, 0.0f64), |(bj, bv), (i, &v)| {
+                if v.abs() > bv {
+                    (i, v.abs())
+                } else {
+                    (bj, bv)
+                }
+            });
+            let z_dot_x: f64 = z.iter().zip(&x).map(|(a, c)| a * c).sum();
+            if it > 1 && zmax <= z_dot_x {
+                break;
+            }
+            x = vec![0.0f64; n];
+            x[j] = 1.0;
+        }
+        last
+    }
+
+    /// The boundary values closed at the CURRENT cell field: `d.passes`
+    /// forced to 1 and [`Displacement::correct_boundary`] repeated until the
+    /// boundary values stop moving - a change at or below `1e-14` times the
+    /// larger of the cell and boundary magnitudes, or exactly still -
+    /// `d.passes` restored on every path. The number of calls is returned;
+    /// the cap is refused by name.
+    #[cfg(not(feature = "single"))]
+    fn close_boundary(gpu: &Gpu, d: &mut Displacement<'_>, max_passes: usize) -> Result<usize> {
+        let saved = d.passes;
+        d.passes = 1;
+        let out = (|| -> Result<usize> {
+            let u = gpu.download(&d.u.f)?;
+            let max_c = u.iter().map(|v| v.mag()).fold(0.0 as Scalar, |a, v| a.max(v));
+            let mut ub_old = gpu.download(&d.u.bf)?;
+            let mut last_change = Scalar::INFINITY;
+            for calls in 1..=max_passes {
+                d.correct_boundary(gpu)?;
+                let ub_new = gpu.download(&d.u.bf)?;
+                let change = ub_new
+                    .iter()
+                    .zip(&ub_old)
+                    .map(|(a, b)| (*a - *b).mag())
+                    .fold(0.0 as Scalar, |a, v| a.max(v));
+                let still =
+                    ub_new.iter().map(|v| v.mag()).fold(0.0 as Scalar, |a, v| a.max(v));
+                ub_old = ub_new;
+                last_change = change;
+                if change == 0.0 || change <= 1e-14 * max_c.max(still) {
+                    return Ok(calls);
+                }
+            }
+            Err(Error::Config(format!(
+                "boundary closure did not still in {max_passes} passes; the last change was \
+                 {last_change:e}"
+            )))
+        })();
+        d.passes = saved;
+        out
+    }
+
+    /// SPEC-LIT (109.6)'s `R(u) = A u - source` at the closed state: `u`
+    /// uploaded with zero boundary values, the boundary closed, the operator
+    /// assembled there, the residual downloaded and flattened `3c + i` as
+    /// f64, with the closure's pass count.
+    #[cfg(not(feature = "single"))]
+    fn closed_residual(
+        gpu: &Gpu,
+        d: &mut Displacement<'_>,
+        op: &mut BlockOperator,
+        r: &mut DevBuf<Vec3>,
+        u: &[Vec3],
+    ) -> Result<(Vec<f64>, usize)> {
+        let ub = vec![Vec3::ZERO; d.mesh().n_boundary_faces];
+        d.set_displacement(gpu, u, &ub)?;
+        let passes = close_boundary(gpu, d, 2000)?;
+        op.assemble(gpu, d)?;
+        op.residual(gpu, r, &d.u.f)?;
+        let rv = gpu.download(r)?;
+        Ok((
+            rv.iter().flat_map(|a| [a.x as f64, a.y as f64, a.z as f64]).collect(),
+            passes,
+        ))
+    }
+
+    /// The affine block map's Jacobian, column by column: `r0 = R(0)`, then
+    /// for every flat index `k = 3c + i` the unit vector's residual - column
+    /// `k` of `B`, row-major as `b[row * n3 + k]`. The largest closure pass
+    /// count over all evaluations comes back with them.
+    #[cfg(not(feature = "single"))]
+    fn dense_block_map(
+        gpu: &Gpu,
+        d: &mut Displacement<'_>,
+        op: &mut BlockOperator,
+        r: &mut DevBuf<Vec3>,
+    ) -> Result<(Vec<f64>, Vec<f64>, usize)> {
+        let n = d.mesh().n_cells;
+        let n3 = 3 * n;
+        let zero: Vec<Vec3> = vec![Vec3::ZERO; n];
+        let (r0, mut passes) = closed_residual(gpu, d, op, r, &zero)?;
+        let mut b = vec![0.0f64; n3 * n3];
+        let mut ek = vec![Vec3::ZERO; n];
+        for k in 0..n3 {
+            let (c, i) = (k / 3, k % 3);
+            ek.iter_mut().for_each(|v| *v = Vec3::ZERO);
+            match i {
+                0 => ek[c].x = 1.0,
+                1 => ek[c].y = 1.0,
+                _ => ek[c].z = 1.0,
+            }
+            let (rv, p) = closed_residual(gpu, d, op, r, &ek)?;
+            passes = passes.max(p);
+            for (row, v) in rv.iter().enumerate() {
+                b[row * n3 + k] = v - r0[row];
+            }
+        }
+        Ok((b, r0, passes))
+    }
+
+    /// The probe's linear controls: [`block_tight`] with the iteration cap
+    /// the slender meshes need. The tolerance is two decades tighter than
+    /// [`block_tight`]: the outer loop stops at 12 decades of its residual,
+    /// and the distance its state can sit from the dense fixed point is
+    /// floored by the inner solve's own error - at 1e-12 that floor measured
+    /// 3.6e-9 on 2.5:1 n_y=8, over the probe's 1e-9 bar.
+    #[cfg(not(feature = "single"))]
+    fn probe_linear() -> SolverControls {
+        SolverControls { tolerance: 1e-14, max_iter: 20000, ..block_tight() }
+    }
+
+    /// The probe's outer controls: deeper decades than the sweep, easy to
+    /// change by hand.
+    #[cfg(not(feature = "single"))]
+    fn probe_outer() -> OuterControls {
+        OuterControls {
+            relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+            decades: 12.0,
+            max_outer: 1000,
+            boundary_passes: 3,
+        }
+    }
+
+    #[test]
+    fn dense_lu_solves_both_ways_and_hager_estimates_the_inverse_norm() {
+        let b0 = [0.0, 2.0, 1.0, 3.0, 6.0, -4.0, 2.0, 1.0, 8.0];
+        let mut a = b0;
+        let ipiv = lu_factor(&mut a, 3).expect("factor");
+        let mut b = vec![7.0, 3.0, 28.0];
+        lu_solve(&a, &ipiv, &mut b);
+        for (got, want) in b.iter().zip([1.0, 2.0, 3.0]) {
+            assert!((got - want).abs() <= 1e-14, "lu_solve: {got} vs {want}");
+        }
+        let mut b = vec![12.0, 17.0, 17.0];
+        lu_solve_transposed(&a, &ipiv, &mut b);
+        for (got, want) in b.iter().zip([1.0, 2.0, 3.0]) {
+            assert!((got - want).abs() <= 1e-14, "lu_solve_transposed: {got} vs {want}");
+        }
+        assert_eq!(norm1(&b0, 3), 13.0, "the one-norm of B");
+        let h = hager_inv_norm1(&a, &ipiv, 3);
+        assert!(
+            (h - 93.0 / 73.0).abs() <= 1e-14,
+            "Hager's estimate {h} is not the exact ||B^-1||_1 = 93/73"
+        );
+    }
+
+    #[test]
+    fn dense_lu_refuses_a_singular_matrix_by_its_pivot_column() {
+        let mut a = vec![1.0, 2.0, 2.0, 4.0];
+        assert_eq!(lu_factor(&mut a, 2), Err(1));
+    }
+
+    /// The VAL-10 probe: Gate 95-A's block map taken to its EXACT discrete
+    /// fixed point by a dense f64 direct solve, so the miss at 5:1 and 10:1
+    /// is attributed - the outer loop, or the discretisation. One line per
+    /// mesh, the loop's own state beside the dense one on 2.5:1, and the
+    /// observed orders per ratio.
+    #[test]
+    #[cfg(not(feature = "single"))]
+    #[ignore = "the VAL-10 probe; the supervisor runs it with --ignored --nocapture"]
+    fn gate_95a_probe_the_exact_fixed_point_of_the_block_map() {
+        let Some(gpu) = gpu() else { return };
+        let ln2 = (2.0 as Scalar).ln();
+        for (label, l, levels) in [
+            ("2.5:1", 0.5 as Scalar, vec![4usize, 8, 16]),
+            ("5:1", 1.0, vec![4, 8, 16]),
+            ("10:1", 2.0, vec![4, 8]),
+        ] {
+            let mut e_us = [0.0 as Scalar; 3];
+            let mut e_xxs = [0.0 as Scalar; 3];
+            let mut e_xys = [0.0 as Scalar; 3];
+            for (idx, &n_y) in levels.iter().enumerate() {
+                let t0 = std::time::Instant::now();
+                let n_x = (l * n_y as Scalar / 0.2).round() as usize;
+                let hm = fixtures::cantilever_mesh(n_x, n_y, l, fixtures::CANTILEVER_C)
+                    .expect("mesh");
+                let exact = fixtures::CantileverExact::new(
+                    fixtures::CANTILEVER_E,
+                    fixtures::CANTILEVER_NU,
+                    l,
+                    fixtures::CANTILEVER_C,
+                    fixtures::CANTILEVER_P,
+                );
+                let (tr, fv) = fixtures::cantilever_face_values(&hm, &exact);
+                let gm = upload(&gpu, &hm);
+                let n = hm.n_cells;
+                let n3 = 3 * n;
+                let tip = exact.tip();
+                let mut d = cantilever_state(&gpu, &hm, &gm, &tr, &fv, block_tight())
+                    .expect("displacement");
+                let mut op = BlockOperator::new(&gpu, &d).expect("op");
+                let mut r = gpu.zeros(n).expect("residual buffer");
+                let (b, r0, passes) =
+                    dense_block_map(&gpu, &mut d, &mut op, &mut r).expect("dense block map");
+                let nb = norm1(&b, n3);
+                let mut lu = b.clone();
+                let ipiv = match lu_factor(&mut lu, n3) {
+                    Ok(p) => p,
+                    Err(col) => {
+                        println!("  142.1 {label} n_y={n_y}: exists=no (zero pivot at column {col})");
+                        continue;
+                    }
+                };
+                let mut x: Vec<f64> = r0.iter().map(|v| -v).collect();
+                lu_solve(&lu, &ipiv, &mut x);
+                let u_dense = unflatten3(&x);
+                // The dense algebra's own consistency, then the device's:
+                // host_res speaks for B x + R(0), res for the residual the
+                // operator reports at u_dense (SPEC-LIT (109.6)).
+                let mut bx = vec![0.0f64; n3];
+                for (row, brow) in b.chunks_exact(n3).enumerate() {
+                    bx[row] = brow.iter().zip(&x).map(|(a, c)| a * c).sum::<f64>() + r0[row];
+                }
+                let host_res = bx.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                let cond1 = nb * hager_inv_norm1(&lu, &ipiv, n3);
+                let (rv, _) = closed_residual(&gpu, &mut d, &mut op, &mut r, &u_dense)
+                    .expect("residual at u_dense");
+                let a_host = HostBlockLdu::download(&gpu, op.matrix()).expect("matrix");
+                let scale = residual_scale(&a_host, &u_dense);
+                let res = rv
+                    .chunks_exact(3)
+                    .map(|t| (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt())
+                    .fold(0.0f64, |m, v| m.max(v))
+                    / scale;
+                assert!(
+                    res <= 1e-12,
+                    "SPEC-LIT (109.6): the device residual at the dense fixed point is \
+                     {res:e} on {label} n_y={n_y}"
+                );
+                let exists = cond1.is_finite() && cond1 < 1e15 && res <= 1e-12;
+                // d now sits at u_dense with its boundary closed, so the
+                // gradient is the one the stress read-out asks for.
+                let mut sf = StressFields::new(&gpu, n).expect("stress fields");
+                sf.compute(&gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref)
+                    .expect("stress");
+                let h = sf.download(&gpu).expect("stress download");
+                let errs = fixtures::cantilever_errors(&hm, &u_dense, &h.sigma, &exact);
+                let ub = gpu.download(&d.u.bf).expect("ub");
+                let v_h = fixtures::cantilever_tip_deflection(&hm, &ub);
+                let e_tip = ((v_h - tip) / tip.abs()).abs();
+                e_us[idx] = errs.e_u;
+                e_xxs[idx] = errs.e_xx;
+                e_xys[idx] = errs.e_xy;
+                let mut loop_line = String::new();
+                if label == "2.5:1" {
+                    let mut d2 = cantilever_state(&gpu, &hm, &gm, &tr, &fv, probe_linear())
+                        .expect("loop displacement");
+                    let rep = solve(&gpu, &mut d2, &probe_outer()).expect("outer loop");
+                    let u_loop = gpu.download(&d2.u.f).expect("u_loop");
+                    let rel = rel_max(&flat3(&u_loop), &flat3(&u_dense));
+                    assert!(rep.converged, "the outer loop did not converge on {label} n_y={n_y}");
+                    assert!(
+                        rel <= 1e-9,
+                        "the loop state is not the dense fixed point on {label} n_y={n_y}: \
+                         {rel:e}"
+                    );
+                    loop_line = format!(" outer={} rel={rel:.3e}", rep.iterations);
+                }
+                print!(
+                    "  142.1 {label} n_y={n_y} cells={n} N={n3} passes={passes} \
+                     cond1={cond1:.3e} exists={exists} res/scale={res:.3e} \
+                     host_res={host_res:.3e} e_tip={e_tip:.3e} e_u={:.3e} e_xx={:.3e} \
+                     e_xy={:.3e}{loop_line} ({:.1}s)",
+                    errs.e_u,
+                    errs.e_xx,
+                    errs.e_xy,
+                    t0.elapsed().as_secs_f32()
+                );
+                println!();
+            }
+            let pu = |coarse: Scalar, fine: Scalar| (coarse / fine).ln() / ln2;
+            let psig = |cx: Scalar, cy: Scalar, fx: Scalar, fy: Scalar| {
+                (cx / fx).ln().min((cy / fy).ln()) / ln2
+            };
+            if levels.len() == 3 {
+                println!(
+                    "  142.1 {label}: p_u(4->8)={:.3} p_u(8->16)={:.3} \
+                     p_sigma(4->8)={:.3} p_sigma(8->16)={:.3}",
+                    pu(e_us[0], e_us[1]),
+                    pu(e_us[1], e_us[2]),
+                    psig(e_xxs[0], e_xys[0], e_xxs[1], e_xys[1]),
+                    psig(e_xxs[1], e_xys[1], e_xxs[2], e_xys[2])
+                );
+            } else {
+                println!(
+                    "  142.1 {label}: p_u(4->8)={:.3} p_sigma(4->8)={:.3}",
+                    pu(e_us[0], e_us[1]),
+                    psig(e_xxs[0], e_xys[0], e_xxs[1], e_xys[1])
+                );
             }
         }
     }

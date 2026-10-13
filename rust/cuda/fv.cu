@@ -72,7 +72,7 @@
 //  topology - what the patch IS - and the two enums number their shared names
 //  differently:
 //
-//      PatchKind   Generic 0  Wall 1  Empty 2  Symmetry 3  Cyclic 4  Processor 5
+//      PatchKind   Generic 0  Wall 1  Empty 2  Symmetry 3  Cyclic 4  Processor 5  Interface 6  Wedge 7
 //      BcKind      ... Calculated 4  Empty 5  Symmetry 6  Cyclic 7  InletOutlet 8
 //
 //  Comparing a `PatchKind` value against a `BcKind` discriminant compiles,
@@ -101,6 +101,8 @@
 //  the cyclic branch's geometric interpolation of psi[nbr] cannot. And
 //  fvLapNonOrth skips it outright; see the note there.
 #define OFPATCH_INTERFACE 6
+//- SPEC-LIT 119.2: a wedge side; its flux is prescribed as U_b . Sf
+#define OFPATCH_WEDGE     7
 
 // --------------------------------------------------------------------------
 //  The single mixed boundary form - SPEC-LIT S4, which is our own design.

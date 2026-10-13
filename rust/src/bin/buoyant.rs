@@ -120,8 +120,8 @@ use ofgpu::field::{BcKind, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field,
-    harvest_vector_field, les_nut_wall_faces, max_div_phi,
-    setup_scalar_field, setup_vector_field, update_inlet_outlet, NutRoughness, WallFaces,
+    harvest_vector_field, les_nut_wall_faces, max_div_phi, setup_scalar_field,
+    setup_vector_field_with, update_inlet_outlet, BcInputs, NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{
     find_start_time, format_time_name, model_coeff, read_case_controls, CaseControls,
@@ -2064,7 +2064,20 @@ fn run(o: &Options) -> Result<()> {
     // `solve_potential_flow` wants `phi` and `U` mutably at once and `Simple`
     // owns both. Two host round trips, at setup, once.
     let mut seed_u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
-    setup_vector_field(&gpu, &mut seed_u, &raw_u, &hm)?;
+    // SPEC-LIT 120.5: U carries the pressure-inlet opt-in - the promise that
+    // the loop runs update_pressure_inlet_velocity every outer iteration and
+    // builds its flux with momFluxIsPrescribed. Identical for every other
+    // condition.
+    setup_vector_field_with(
+        &gpu,
+        &mut seed_u,
+        &raw_u,
+        &hm,
+        BcInputs {
+            pressure_inlet: true,
+            ..BcInputs::default()
+        },
+    )?;
     correct_boundary_conditions_vector(&gpu, &fk, &mut seed_u, &mesh)?;
 
     let mut seed_phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
@@ -2118,7 +2131,17 @@ fn run(o: &Options) -> Result<()> {
         s.set_residual_control(cc.residual_control.clone());
     }
 
-    setup_vector_field(&gpu, s.u_mut(), &raw_u, &hm)?;
+    // SPEC-LIT 120.5: the pressure-inlet opt-in, as for the seed above.
+    setup_vector_field_with(
+        &gpu,
+        s.u_mut(),
+        &raw_u,
+        &hm,
+        BcInputs {
+            pressure_inlet: true,
+            ..BcInputs::default()
+        },
+    )?;
     setup_scalar_field(&gpu, s.p_mut(), &raw_p, &hm)?;
 
     {

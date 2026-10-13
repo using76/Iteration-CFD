@@ -76,6 +76,7 @@ use crate::field_ops::{self, FieldKernels};
 use crate::ldu::GpuLduMatrix;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solver::{self, SolverKernels};
+use crate::types::to_dvec3;
 use crate::{Acc, Label, Scalar, Vec3};
 
 // ==========================================================================
@@ -111,24 +112,31 @@ impl CellSelector {
     /// race however benign the arithmetic looks; deduplicating removes the
     /// possibility rather than documenting it away.
     pub fn select(&self, m: &HostMesh) -> Vec<usize> {
+        // Box and Sphere are stated in WORLD coordinates (SPEC-LIT 118.7):
+        // the stored centres are local, so each is widened once and the
+        // comparison runs in f64 against the widened limits. In the f64
+        // build `world` is the identity and the cells are the cells of HEAD.
         let mut out: Vec<usize> = match self {
-            CellSelector::Box { min, max } => (0..m.n_cells)
-                .filter(|&c| {
-                    let p = m.c[c];
-                    p.x >= min.x
-                        && p.x <= max.x
-                        && p.y >= min.y
-                        && p.y <= max.y
-                        && p.z >= min.z
-                        && p.z <= max.z
-                })
-                .collect(),
-            CellSelector::Sphere { centre, radius } => {
-                let r2 = radius * radius;
+            CellSelector::Box { min, max } => {
+                let (lo, hi) = (to_dvec3(*min), to_dvec3(*max));
                 (0..m.n_cells)
                     .filter(|&c| {
-                        let p = m.c[c];
-                        let d = Vec3::new(p.x - centre.x, p.y - centre.y, p.z - centre.z);
+                        let p = m.world(m.c[c]);
+                        p.x >= lo.x
+                            && p.x <= hi.x
+                            && p.y >= lo.y
+                            && p.y <= hi.y
+                            && p.z >= lo.z
+                            && p.z <= hi.z
+                    })
+                    .collect()
+            }
+            CellSelector::Sphere { centre, radius } => {
+                let ctr = to_dvec3(*centre);
+                let r2 = f64::from(*radius) * f64::from(*radius);
+                (0..m.n_cells)
+                    .filter(|&c| {
+                        let d = m.world(m.c[c]) - ctr;
                         d.dot(d) <= r2
                     })
                     .collect()

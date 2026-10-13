@@ -307,7 +307,7 @@ struct FluentZone {
 fn default_fluent_zone(name: &str, kind: PatchKind) -> &'static str {
     match kind {
         PatchKind::Wall => "wall",
-        PatchKind::Symmetry => "symmetry",
+        PatchKind::Symmetry | PatchKind::Wedge => "symmetry",
         _ => {
             let lower = name.to_lowercase();
             if lower == "east" || lower.starts_with("inlet") || lower.ends_with("_source") {

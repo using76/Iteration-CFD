@@ -175,8 +175,8 @@ use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField};
 use ofgpu::field_ops::{update_inlet_outlet_scalar, FieldKernels};
 use ofgpu::field_setup::{
     faces_where, harvest_scalar_field, harvest_vector_field, les_nut_wall_faces,
-    setup_scalar_field, setup_vector_field, validate_wall_rows, wall_coeffs_from_case,
-    NutRoughness, WallFaces,
+    setup_scalar_field, setup_vector_field_with, validate_wall_rows, wall_coeffs_from_case,
+    BcInputs, NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField, RawVectorField};
@@ -1844,7 +1844,21 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     let mut s = Simple::new(&gpu, &hm, &mesh, simple_ctrl, cc.buoyancy)?;
 
-    setup_vector_field(&gpu, s.u_mut(), &fields.u, &hm)?;
+    // SPEC-LIT 120.5: U carries the pressure-inlet opt-in - the promise that
+    // this loop runs update_pressure_inlet_velocity every outer iteration
+    // and builds its flux with momFluxIsPrescribed. Identical for every
+    // other condition (vector_boundary is vector_boundary_with the default
+    // inputs).
+    setup_vector_field_with(
+        &gpu,
+        s.u_mut(),
+        &fields.u,
+        &hm,
+        BcInputs {
+            pressure_inlet: true,
+            ..BcInputs::default()
+        },
+    )?;
     setup_scalar_field(&gpu, s.p_mut(), &fields.p, &hm)?;
     if let Some(rd) = &restart_data {
         // Overwrite the INTERNAL cell values with the restart's exact

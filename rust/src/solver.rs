@@ -2976,6 +2976,50 @@ fn refine_loop(
     Ok(perf)
 }
 
+/// `out = fl32(a.source - A·x)` - the delta form's `r`, the first of the two
+/// roundings (118.5.2) allows (SPEC-LIT §118.5). The
+/// [`k.residual64_scaled`](SolverKernels::residual64_scaled) launch of the
+/// refinement (118.4.5) with `inv_sigma = 1`: the double row product
+/// `amul64Row_` against the matrix AS IT STANDS - the delta form calls this
+/// before any theta scaling - rounded once on the store.
+#[cfg(feature = "single")]
+pub fn residual64_round(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    out: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    x: &DevBuf<f64>,
+) -> Result<()> {
+    let n = a.n_cells;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = to_label(n)?;
+    let inv_sigma = 1.0;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.residual64_scaled)
+            .arg(&mut *out)
+            .arg(&a.source)
+            .arg(x)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&inv_sigma)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
 // ==========================================================================
 //  Shared epilogue
 // ==========================================================================
@@ -3089,6 +3133,82 @@ pub fn solve(
         LinearSolverKind::PCG => solve_pcg(gpu, k, psi, a, m, w, ctrl),
         LinearSolverKind::Gamg => solve_gamg(gpu, k, psi, a, m, w, ctrl),
     }
+}
+
+/// Solve one time step of the DELTA form (SPEC-LIT §118.5): the increment
+/// system `A·delta = source` that [`crate::timescheme::Ddt::add_delta`]
+/// assembled, with the double levels in `lv`.
+///
+/// f64 build: [`solve`] on `psi` exactly as always, then `lv.x <- psi` - the
+/// levels are the solve's own type there, and nothing about the step moves.
+///
+/// `single`: (118.5.5) seeds the increment with `fl32(x - x0)`, [`solve`]
+/// runs on it (refined by §118.4 unless `fixed_iters` or the system is
+/// empty), and (118.5.7) accepts - `x = x0 + delta64; psi = fl32(x)` when
+/// the solve was refined, `x = x0 + fl64(delta)` when it was not. `psi` is
+/// WRITTEN, never read: its ulp grid is the second place a below-`u32`
+/// increment dies, so the level must never pass through it on the way
+/// forward.
+#[cfg(not(feature = "single"))]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_delta(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+    lv: &mut crate::timescheme::DeltaLevels,
+) -> Result<SolverPerformance> {
+    let perf = solve(gpu, k, psi, a, m, w, ctrl)?;
+    gpu.stream().memcpy_dtod(&*psi, &mut lv.x)?;
+    Ok(perf)
+}
+
+/// The delta form's solve, `single`: the increment is seeded from the double
+/// levels, solved by the ordinary (refined) [`solve`], and accepted back
+/// into them, so the level advances in f64 and only the STORED field is
+/// rounded (SPEC-LIT §118.5).
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_delta(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+    lv: &mut crate::timescheme::DeltaLevels,
+) -> Result<SolverPerformance> {
+    let n = a.n_cells;
+
+    // (118.5.5) delta^0 = fl32(x - x0). Zero on the first step, where the
+    // honest guess is that nothing has moved yet.
+    lv.start(gpu, n)?;
+
+    // (118.5.6) A·delta = source, by the ordinary solve.
+    let perf = {
+        let d = lv.increment();
+        solve(gpu, k, d, a, m, w, ctrl)?
+    };
+
+    // (118.5.7) x = x0 + delta64; psi = fl32(x). Refined iff the solve was -
+    // the same condition `solve_pbicgstab`/`solve_pcg` apply.
+    if !ctrl.fixed_iters && n > 0 {
+        let Some(d64) = w.refined_solution() else {
+            return Err(Error::Config(
+                "solve_delta: the solve was refined but left no double \
+                 solution behind"
+                    .to_string(),
+            ));
+        };
+        lv.accept(gpu, psi, d64, n)?;
+    } else {
+        lv.accept_widen(gpu, psi, n)?;
+    }
+    Ok(perf)
 }
 
 // ==========================================================================

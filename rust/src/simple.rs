@@ -886,6 +886,12 @@ impl<'m> Simple<'m> {
             None => &self.phi,
         };
         field_ops::update_inlet_outlet_vector(gpu, &self.fldk, &mut self.u, conv)?;
+        // SPEC-LIT 120.5: the five pressure-driven velocity inlets rewrite
+        // their ref_value from the flux the last corrector left, on the same
+        // flux the switch above read - before the boundary evaluation, and
+        // only meaningful where the setup opted in (BcInputs::pressure_inlet):
+        // faces of every other kind are untouched by the kernel.
+        field_ops::update_pressure_inlet_velocity(gpu, &self.fldk, &mut self.u, conv, m)?;
         field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, &mut self.p, conv)?;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;

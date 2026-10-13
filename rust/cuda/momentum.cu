@@ -73,7 +73,7 @@
 //  topology - what the patch IS - and the two enums number their shared names
 //  differently:
 //
-//      PatchKind   Generic 0  Wall 1  Empty 2  Symmetry 3  Cyclic 4  Processor 5
+//      PatchKind   Generic 0  Wall 1  Empty 2  Symmetry 3  Cyclic 4  Processor 5  Interface 6  Wedge 7
 //      BcKind      ... Calculated 4  Empty 5  Symmetry 6  Cyclic 7  InletOutlet 8
 //
 //  Comparing a `PatchKind` value against a `BcKind` discriminant compiles,
@@ -86,7 +86,9 @@
 //  it.
 //
 //  Kernels that take a FIELD's `bc_kind` use the `OFGPU_BC_*` constants
-//  instead; see cuda/field.cu. No kernel in this file takes one.
+//  instead; see cuda/field.cu. `momFluxIsPrescribed` is the one kernel here
+//  that does: it asks whether the VELOCITY face is a DirectionMixed one
+//  (SPEC-LIT 120.3), whose flux is `U_b . Sf` and no pressure correction's.
 // --------------------------------------------------------------------------
 #define OFPATCH_GENERIC   0
 #define OFPATCH_WALL      1
@@ -94,20 +96,57 @@
 #define OFPATCH_SYMMETRY  3
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
+//- SPEC-LIT 119.2: a wedge side; its flux is prescribed as U_b . Sf
+#define OFPATCH_WEDGE     7
+
+//- SPEC-LIT 120.3: the tensorial mixed velocity condition of the wall and
+//  slip family (directionMixed, partialSlip, fixedNormalSlip,
+//  fixedShearStress). Mirrors `BcKind::DirectionMixed` in src/field.rs and
+//  is pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
+#define OFGPU_BC_DIRECTION_MIXED 37
+
+//- SPEC-LIT 120.5: the five pressure-driven velocity inlets
+//  (pressureInletVelocity, pressureInletUniformVelocity,
+//  pressureDirectedInletVelocity, pressureDirectedInletOutletVelocity,
+//  pressureInletOutletParSlipVelocity), whose triple
+//  fldPressureInletValue in cuda/field.cu rewrites from the flux every
+//  outer iteration. Mirrors `BcKind::PressureInletVelocity` ..
+//  `BcKind::PressureInletOutletParSlipVelocity` in src/field.rs and is
+//  pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
+#define OFGPU_BC_PRESSURE_INLET_FIRST 41
+#define OFGPU_BC_PRESSURE_INLET_LAST  45
 
 //- True when the volumetric flux through this boundary face is fixed by the
 //  velocity boundary condition rather than by the pressure equation.
 //
 //  * empty     - a 2-D front or back; it carries no flux by construction
 //  * symmetry  - the mirror condition removes the normal component exactly
+//  * wedge     - SPEC-LIT 119.2, (119.2e): the flux is prescribed as
+//                U_b . Sf, the swirl through the side, which is not zero -
+//                and no pressure correction may move it
+//  * DirectionMixed velocity (SPEC-LIT 120.3) - the face value is (120.3a),
+//                whose normal part n.(I - F).q the wall condition cancels;
+//                the flux is U_b . Sf, so no pressure correction may move it
 //  * fr >= 1   - a Dirichlet velocity: U_b is given, so U_b . Sf is given
 //
-//  A cyclic face is deliberately NOT prescribed: it is an interior face that
-//  happens to be stored in the boundary arrays.
-OFGPU_DEV bool momFluxIsPrescribed(oflabel kind, ofscalar fr)
+//  `uKind` is the VELOCITY field's bc_kind on the face; `fr` its value
+//  fraction. A cyclic face is deliberately NOT prescribed: it is an
+//  interior face that happens to be stored in the boundary arrays.
+OFGPU_DEV bool momFluxIsPrescribed(oflabel kind, ofscalar fr, oflabel uKind)
 {
+    //- SPEC-LIT 120.5, the flux rule: a pressure-driven velocity inlet owns
+    //  NOTHING - its face value is whatever the mass flux through the face
+    //  makes it, so the pressure correction must reach it whatever its fr,
+    //  including the fr = 1 seed and the Dirichlet inflow half of the two
+    //  switched kinds. Answered first, ahead of every test below.
+    if (uKind >= OFGPU_BC_PRESSURE_INLET_FIRST && uKind <= OFGPU_BC_PRESSURE_INLET_LAST)
+    {
+        return false;
+    }
     return kind == OFPATCH_EMPTY
         || kind == OFPATCH_SYMMETRY
+        || kind == OFPATCH_WEDGE
+        || uKind == OFGPU_BC_DIRECTION_MIXED
         || fr >= (ofscalar)1;
 }
 
@@ -621,6 +660,7 @@ extern "C" __global__ void momBuoyancyFluxBoundary
     const ofvec3* __restrict__ sf,
     const oflabel* __restrict__ bKind,
     const ofscalar* __restrict__ fr,
+    const oflabel* __restrict__ uKind,
     ofscalar gx, ofscalar gy, ofscalar gz,
     ofscalar tRef,
     ofscalar tMin,
@@ -630,7 +670,7 @@ extern "C" __global__ void momBuoyancyFluxBoundary
     const oflabel i = OFGPU_TID;
     if (i >= nbf) return;
 
-    if (momFluxIsPrescribed(bKind[i], fr[i]))
+    if (momFluxIsPrescribed(bKind[i], fr[i], uKind[i]))
     {
         phib[i] = 0;
         return;
@@ -697,6 +737,7 @@ extern "C" __global__ void momBoussinesqFluxBoundary
     const ofvec3* __restrict__ sf,
     const oflabel* __restrict__ bKind,
     const ofscalar* __restrict__ fr,
+    const oflabel* __restrict__ uKind,
     ofscalar gx, ofscalar gy, ofscalar gz,
     ofscalar tRef,
     ofscalar beta,
@@ -706,7 +747,7 @@ extern "C" __global__ void momBoussinesqFluxBoundary
     const oflabel i = OFGPU_TID;
     if (i >= nbf) return;
 
-    if (momFluxIsPrescribed(bKind[i], fr[i]))
+    if (momFluxIsPrescribed(bKind[i], fr[i], uKind[i]))
     {
         phib[i] = 0;
         return;
@@ -779,6 +820,7 @@ extern "C" __global__ void momPhiHbyABoundary
     const oflabel* __restrict__ bNbrCell,
     const oflabel* __restrict__ bKind,
     const ofscalar* __restrict__ fr,
+    const oflabel* __restrict__ uKind,
     oflabel nbf
 )
 {
@@ -794,7 +836,7 @@ extern "C" __global__ void momPhiHbyABoundary
         return;
     }
 
-    if (momFluxIsPrescribed(kind, fr[i]))
+    if (momFluxIsPrescribed(kind, fr[i], uKind[i]))
     {
         bphi[i] = dot3(bu[i], s);
         return;
@@ -863,13 +905,14 @@ extern "C" __global__ void momForceFluxBoundary
     const ofscalar* __restrict__ snGradP,
     const oflabel* __restrict__ bKind,
     const ofscalar* __restrict__ fr,
+    const oflabel* __restrict__ uKind,
     oflabel nbf
 )
 {
     const oflabel i = OFGPU_TID;
     if (i >= nbf) return;
 
-    out[i] = momFluxIsPrescribed(bKind[i], fr[i])
+    out[i] = momFluxIsPrescribed(bKind[i], fr[i], uKind[i])
            ? (ofscalar)0
            : phib[i] - snGradP[i];
 }
@@ -901,13 +944,14 @@ extern "C" __global__ void momCorrectFluxBoundary
     const ofscalar* __restrict__ snGradP,
     const oflabel* __restrict__ bKind,
     const ofscalar* __restrict__ fr,
+    const oflabel* __restrict__ uKind,
     oflabel nbf
 )
 {
     const oflabel i = OFGPU_TID;
     if (i >= nbf) return;
 
-    phi[i] = momFluxIsPrescribed(bKind[i], fr[i])
+    phi[i] = momFluxIsPrescribed(bKind[i], fr[i], uKind[i])
            ? phiHbyA[i]
            : phiHbyA[i] - rauf[i]*snGradP[i];
 }

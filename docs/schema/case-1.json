@@ -531,6 +531,17 @@
           "items": {
             "$ref": "#/$defs/JsonRegion"
           }
+        },
+        "wedge": {
+          "description": "SPEC-LIT 119.3: presence makes the case a WEDGE - the block is the\n(r, z) block of the 119.0 mesh (`x` the radius, `z` the axis through\n`x = 0, y = 0`, `y` the one-cell circumferential direction) and\n`angle` is the FULL wedge angle in degrees, stated once, here. The\nreader lowers the case onto `crate::blockgen::WedgeSpec` and refuses\neverything a wedge mesh cannot say (its refusal list, each a §13.4\nerror naming the JSON path and this section). Absent: the case\nlowers exactly as before, and no boundary may resolve to a `wedge`\nrule - a box has no wedge sides.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonWedge"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -1334,6 +1345,20 @@
         "E"
       ]
     },
+    "JsonWedge": {
+      "description": "[`JsonMesh::wedge`]'s one entry - SPEC-LIT 119.3. `angle` is the FULL\nwedge angle in degrees, finite and strictly between 0 and 180 (checked\nin [`build_block`], naming this path).",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "angle"
+      ]
+    },
     "MeshKind": {
       "type": "string",
       "enum": [
@@ -1359,6 +1384,11 @@
           "description": "SPEC-LIT §34.1: `PatchKind::Symmetry` - the mirror-plane constraint\nthe solver's vector-reflection branch has always understood, newly\nnameable in JSONC. Same CONSTRAINT rules as [`Self::Empty`], minus\nthe single-cell check (a symmetry plane has no such restriction).",
           "type": "string",
           "const": "symmetry"
+        },
+        {
+          "description": "SPEC-LIT 119.3: `PatchKind::Wedge` - the third CONSTRAINT kind. Needs\na mesh that has wedge sides (`mesh.wedge`, the 119.0 block): the\nreader refuses a `wedge` rule on a mesh without one, and on a wedge\nmesh holds `ymin`/`ymax` to a `wedge` rule and every other slot away\nfrom one. Same per-field refusal as [`Self::Empty`] and\n[`Self::Symmetry`] - the constraint decides every field,\nturbulence fields included - and 119.2's `BcKind::Wedge` is what the\nfield seed and `field_setup::topology_override` force on its faces.",
+          "type": "string",
+          "const": "wedge"
         }
       ]
     },

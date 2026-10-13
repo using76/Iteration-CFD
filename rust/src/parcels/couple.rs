@@ -96,13 +96,22 @@ use crate::field::GpuVectorField;
 use crate::io::contract;
 use crate::mesh::GpuMesh;
 use crate::momentum::MomentumSources;
-use crate::{Scalar, Vec3};
+use crate::{Acc, Scalar, Vec3};
 
 use super::deposit::ParcelDeposition;
 use super::{ParcelPhysics, Parcels};
 
 #[cfg(test)]
 mod tests;
+
+/// The build's `Scalar` widened to the f64 accumulator [`Acc`] (SPEC-LIT
+/// 118.9) - the exact widening under `single`, the identity in the f64
+/// build. The host totals accumulate in [`Acc`] and narrow ONCE on return.
+#[allow(clippy::useless_conversion)]
+#[inline]
+fn acc64(x: Scalar) -> Acc {
+    f64::from(x)
+}
 
 // ==========================================================================
 //  The menu
@@ -863,13 +872,14 @@ impl<'m> ParcelCoupling<'m> {
                 .launch(cfg)?;
         }
         let host = gpu.download(&self.integral)?;
-        let mut acc = Vec3::ZERO;
+        // Accumulated in `Acc` and narrowed ONCE on return (SPEC-LIT 118.9).
+        let (mut x, mut y, mut z) = (0.0 as Acc, 0.0 as Acc, 0.0 as Acc);
         for v in host.iter().take(n) {
-            acc.x += v.x;
-            acc.y += v.y;
-            acc.z += v.z;
+            x += acc64(v.x);
+            y += acc64(v.y);
+            z += acc64(v.z);
         }
-        Ok(acc)
+        Ok(Vec3::new(x as Scalar, y as Scalar, z as Scalar))
     }
 
     /// The whole coupled state, on the host.
@@ -904,11 +914,11 @@ impl<'m> ParcelCoupling<'m> {
         }
         let mdot = gpu.download(&self.mdot_v)?;
         let vol = gpu.download(&self.m.v)?;
-        let mut acc = 0.0;
+        let mut acc = 0.0 as Acc;
         for c in 0..n {
-            acc += vol[c] * mdot[c] * self.dt;
+            acc += acc64(vol[c]) * acc64(mdot[c]) * acc64(self.dt);
         }
-        Ok(acc)
+        Ok(acc as Scalar)
     }
 
     /// (68.10)'s cost, measured: `sum_P V_P beta_P (u_P - u_P^n) dt`, the
@@ -937,14 +947,14 @@ impl<'m> ParcelCoupling<'m> {
                 u_lin.len()
             )));
         }
-        let mut acc = Vec3::ZERO;
+        let (mut x, mut y, mut z) = (0.0 as Acc, 0.0 as Acc, 0.0 as Acc);
         for c in 0..n {
-            let w = vol[c] * beta[c] * self.dt;
-            acc.x += w * (u[c].x - u_lin[c].x);
-            acc.y += w * (u[c].y - u_lin[c].y);
-            acc.z += w * (u[c].z - u_lin[c].z);
+            let w = acc64(vol[c]) * acc64(beta[c]) * acc64(self.dt);
+            x += w * (acc64(u[c].x) - acc64(u_lin[c].x));
+            y += w * (acc64(u[c].y) - acc64(u_lin[c].y));
+            z += w * (acc64(u[c].z) - acc64(u_lin[c].z));
         }
-        Ok(acc)
+        Ok(Vec3::new(x as Scalar, y as Scalar, z as Scalar))
     }
 
     fn check(&self, p: &Parcels<'m>) -> Result<()> {
@@ -982,17 +992,17 @@ impl<'m> ParcelCoupling<'m> {
 /// difference rather than defining it away.
 #[must_use]
 pub fn live_parcel_impulse(s: &super::ParcelSnapshot) -> Vec3 {
-    let mut acc = Vec3::ZERO;
+    let (mut x, mut y, mut z) = (0.0 as Acc, 0.0 as Acc, 0.0 as Acc);
     for i in 0..s.n_slots.min(s.cell.len()) {
         if s.cell[i] < 0 {
             continue;
         }
-        let np = s.n_p[i];
-        acc.x += np * s.impulse[i].x;
-        acc.y += np * s.impulse[i].y;
-        acc.z += np * s.impulse[i].z;
+        let np = acc64(s.n_p[i]);
+        x += np * acc64(s.impulse[i].x);
+        y += np * acc64(s.impulse[i].y);
+        z += np * acc64(s.impulse[i].z);
     }
-    acc
+    Vec3::new(x as Scalar, y as Scalar, z as Scalar)
 }
 
 /// `sum_p n_p qim_p` over the live parcels, J - the CONVECTIVE heat the gas
@@ -1004,16 +1014,16 @@ pub fn live_parcel_impulse(s: &super::ParcelSnapshot) -> Vec3 {
 /// energy of an evaporating pool rather than deposit this and call it closed.
 #[must_use]
 pub fn live_parcel_heat(s: &super::ParcelSnapshot) -> Scalar {
-    let mut acc = 0.0;
+    let mut acc = 0.0 as Acc;
     if s.heat.is_empty() {
-        return acc;
+        return acc as Scalar;
     }
     for i in 0..s.n_slots.min(s.cell.len()) {
         if s.cell[i] >= 0 {
-            acc += s.n_p[i] * s.heat[i];
+            acc += acc64(s.n_p[i]) * acc64(s.heat[i]);
         }
     }
-    acc
+    acc as Scalar
 }
 
 /// `cp_g sum_p n_p dm_p (T_p - T_g)` over the live parcels, J - the enthalpy
@@ -1036,13 +1046,15 @@ pub fn live_parcel_vapour_enthalpy(
     if s.mass_lost.is_empty() {
         return 0.0;
     }
-    let mut acc = 0.0;
+    let mut acc = 0.0 as Acc;
     for i in 0..s.n_slots.min(s.cell.len()) {
         if s.cell[i] >= 0 {
-            acc += s.n_p[i] * s.mass_lost[i] * (s.temperature[i] - t_gas);
+            acc += acc64(s.n_p[i])
+                * acc64(s.mass_lost[i])
+                * (acc64(s.temperature[i]) - acc64(t_gas));
         }
     }
-    cp_gas * acc
+    (acc64(cp_gas) * acc) as Scalar
 }
 
 /// The energy the vapour carried out of BOTH sensible pools over one step, J
@@ -1083,14 +1095,16 @@ pub fn live_parcel_vapour_energy(
     if s.mass_lost.is_empty() || s.latent.is_empty() {
         return 0.0;
     }
-    let mut acc = 0.0;
+    let mut acc = 0.0 as Acc;
     for i in 0..s.n_slots.min(s.cell.len()) {
         if s.cell[i] >= 0 {
-            acc += s.n_p[i]
-                * (s.latent[i] + s.mass_lost[i] * (c_liquid - cp_gas) * s.temperature[i]);
+            acc += acc64(s.n_p[i])
+                * (acc64(s.latent[i])
+                    + acc64(s.mass_lost[i]) * (acc64(c_liquid) - acc64(cp_gas))
+                        * acc64(s.temperature[i]));
         }
     }
-    acc
+    acc as Scalar
 }
 
 /// `sum_p n_p m_p c_l T_p` over the live parcels, J - the liquid's own
@@ -1104,13 +1118,17 @@ pub fn live_parcel_liquid_energy(
     rho_liquid: Scalar,
     c_liquid: Scalar,
 ) -> Scalar {
-    let mut acc = 0.0;
+    let mut acc = 0.0 as Acc;
     for i in s.live() {
-        let d = s.d[i];
-        let m = rho_liquid * std::f64::consts::FRAC_PI_6 as Scalar * d * d * d;
-        acc += s.n_p[i] * m * c_liquid * s.temperature[i];
+        let d = acc64(s.d[i]);
+        let m = acc64(rho_liquid)
+            * acc64(std::f64::consts::FRAC_PI_6 as Scalar)
+            * d
+            * d
+            * d;
+        acc += acc64(s.n_p[i]) * m * acc64(c_liquid) * acc64(s.temperature[i]);
     }
-    acc
+    acc as Scalar
 }
 
 /// The drag impulse one droplet takes over one step of the exact update of

@@ -37,8 +37,9 @@ use std::path::{Path, PathBuf};
 
 use ofgpu::io::case::CaseControls;
 use ofgpu::io::case_json::{read_case_jsonc, LoweredCase};
-use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
+use ofgpu::io::polymesh::{build_host_mesh_local, read_poly_mesh};
 use ofgpu::models::RasModel;
+use ofgpu::types::DVec3;
 use ofgpu::{Error, Gpu, HostMesh, Result, Scalar};
 
 // ==========================================================================
@@ -88,12 +89,26 @@ pub fn load_case(case_path: &Path) -> Result<(HostMesh, CaseControls, Option<Low
     if is_json_case(case_path) {
         let json = read_case_jsonc(case_path)?;
         let lowered = json.lower()?;
-        let hm = ofgpu::blockgen::build_mesh(&lowered.block)?;
+        // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
+        // every case without `mesh.wedge` (bit for bit what the line below
+        // always built) and the 119.0 wedge mesh - with the case's own
+        // boundary names - for a wedge one.
+        let hm = lowered.build_host_mesh()?;
         let cc = lowered.to_case_controls();
         Ok((hm, cc, Some(lowered)))
     } else {
         let raw = read_poly_mesh(case_path)?;
-        let hm = build_host_mesh(&raw)?;
+        // SPEC-LIT 118.7 (F32-10): the OpenFOAM path stores the mesh about a
+        // LOCAL origin, so the kernels' absolute f32 differences stay small
+        // however far from the axis the case sits. One line says so when the
+        // case actually moved; an axis through zero is never shifted.
+        let hm = build_host_mesh_local(&raw)?;
+        if hm.origin != DVec3::ZERO {
+            println!(
+                "local origin: ({}, {}, {}) m (SPEC-LIT 118.7)",
+                hm.origin.x, hm.origin.y, hm.origin.z
+            );
+        }
         let cc = ofgpu::io::case::read_case_controls(case_path)?;
         Ok((hm, cc, None))
     }

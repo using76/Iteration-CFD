@@ -35,6 +35,7 @@ use std::borrow::Cow;
 
 use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
+use crate::types::to_vec3;
 use crate::types::{DVec3, GeomPoint};
 #[cfg(feature = "single")]
 use crate::types::to_dvec3;
@@ -131,6 +132,9 @@ pub enum PatchKind {
     /// No mesh this crate read before SPEC-LIT S47 carries it, so every
     /// existing case is unmoved by construction.
     Interface = 6,
+    /// An axisymmetric wedge side, SPEC-LIT section 119. Until BC-04 every
+    /// solver path treats it as `Symmetry`.
+    Wedge = 7,
 }
 
 impl PatchKind {
@@ -139,7 +143,8 @@ impl PatchKind {
         match t {
             "wall" | "mappedWall" => Self::Wall,
             "empty" => Self::Empty,
-            "symmetry" | "symmetryPlane" | "wedge" => Self::Symmetry,
+            "symmetry" | "symmetryPlane" => Self::Symmetry,
+            "wedge" => Self::Wedge,
             "cyclic" | "cyclicAMI" | "cyclicSlip" => Self::Cyclic,
             "processor" | "processorCyclic" => Self::Processor,
             _ => Self::Generic,
@@ -155,6 +160,7 @@ impl PatchKind {
             Self::Cyclic => "cyclic",
             Self::Processor => "processor",
             Self::Interface => "interface",
+            Self::Wedge => "wedge",
         }
     }
 }
@@ -251,6 +257,10 @@ pub struct HostMesh {
 
     pub patches: Vec<PatchInfo>,
 
+    /// The derived wedge of SPEC-LIT section 119.1; `None` when the mesh has
+    /// no wedge patch. Set by `io::polymesh::build_host_mesh`.
+    pub wedge: Option<wedge::WedgeInfo>,
+
     // ---- cell -> face CSR (built, not read) ------------------------------
     /// `[n_cells + 1]`
     pub cf_offset: Vec<Label>,
@@ -299,6 +309,13 @@ pub struct HostMesh {
     /// the f64 view calls [`Self::release_geom64`].
     #[cfg(feature = "single")]
     pub geom64: Option<Box<HostGeom64>>,
+
+    /// The world position of the LOCAL coordinate origin every stored
+    /// position is measured from (SPEC-LIT 118.7): `x_world = x_local + O`,
+    /// the add in f64. ZERO for every mesh built without a local origin -
+    /// `build_host_mesh` and every blockgen path - and always ZERO in the
+    /// f64 build, where nothing shifts.
+    pub origin: DVec3,
 }
 
 /// What `HostMesh::check` found. Printing it is the first thing every binary
@@ -365,6 +382,64 @@ impl HostMesh {
         faces: &[Vec<Label>],
     ) -> Result<()> {
         crate::mesh::geometry::compute(self, points, faces)
+    }
+
+    /// A LOCAL stored position in WORLD coordinates (SPEC-LIT 118.7):
+    /// `x_world = f64(x_local) + O`, the add in f64. The f64 build has no
+    /// local origin, so the value comes back unchanged - no arithmetic is
+    /// added, not even `+ 0.0`, which would turn `-0.0` into `+0.0`.
+    pub fn world(&self, p: Vec3) -> DVec3 {
+        #[cfg(feature = "single")]
+        {
+            to_dvec3(p) + self.origin
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            p
+        }
+    }
+
+    /// The same for a value of the [`Self::geom64`] view, which is local too
+    /// (`world = local + origin`).
+    pub fn world64(&self, p: DVec3) -> DVec3 {
+        #[cfg(feature = "single")]
+        {
+            p + self.origin
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            p
+        }
+    }
+
+    /// A WORLD position as the mesh stores it, ONE rounding (118.7c): the
+    /// subtraction in f64, then the single rounding of SPEC-LIT 118.2 into
+    /// the stored `Scalar`. The f64 build returns the value unchanged.
+    pub fn local(&self, w: DVec3) -> Vec3 {
+        #[cfg(feature = "single")]
+        {
+            to_vec3(w - self.origin)
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            w
+        }
+    }
+
+    /// World -> local in f64, no rounding at all.
+    pub fn local64(&self, w: DVec3) -> DVec3 {
+        #[cfg(feature = "single")]
+        {
+            w - self.origin
+        }
+        #[cfg(not(feature = "single"))]
+        {
+            let _ = self;
+            w
+        }
     }
 
     pub fn check(&self) -> MeshReport {
@@ -571,6 +646,11 @@ pub struct GpuMesh {
 
     pub b_face_cells: DevBuf<Label>,
     pub b_sf: DevBuf<Vec3>,
+    /// SPEC-LIT 119.2, (119.2j): the boundary area vectors the least-squares
+    /// reconstruction reads - `S'_f` on the two wedge patches, the face's own
+    /// `S_f` on every other. `None` when the mesh has no wedge, and then
+    /// `fvc_reconstruct` reads `b_sf` exactly as before.
+    pub b_sf_recon: Option<DevBuf<Vec3>>,
     pub b_mag_sf: DevBuf<Scalar>,
     pub b_cf: DevBuf<Vec3>,
     pub b_delta_coeffs: DevBuf<Scalar>,
@@ -599,6 +679,11 @@ pub struct GpuMesh {
 
     /// Kept on the host for reporting only.
     pub patches: Vec<PatchInfo>,
+    /// SPEC-LIT 119.2: the mesh's derived wedge of SPEC-LIT 119.1, host
+    /// metadata only
+    /// - no device buffer. `correct_boundary_conditions_vector` reads it to
+    /// decide whether `fldWedgeRefGrad` has anything to rewrite.
+    pub wedge: Option<wedge::WedgeInfo>,
     pub total_volume: Scalar,
 }
 
@@ -698,6 +783,37 @@ impl GpuTopology {
     }
 }
 
+/// SPEC-LIT 119.2, (119.2j): the boundary area vectors the reconstruction
+/// reads, on the host - `S'_f` on the front and back wedge patches, the
+/// face's own `S_f` on every other. `None` when the mesh has no wedge.
+///
+/// All arithmetic is f64 through [`HostMesh::geom64`], each vector cast to
+/// `Scalar` once. A mesh whose wedge is `Some` came through
+/// `io::polymesh::build_host_mesh`, which populated the host geometry before
+/// `derive_wedge` read it - so the f64 view here is the mesh's real
+/// geometry, in either constructor.
+fn b_sf_recon_host(m: &HostMesh) -> Option<Vec<Vec3>> {
+    let w = m.wedge.as_ref()?;
+    let g = m.geom64();
+    let (back, front) = (&m.patches[w.back], &m.patches[w.front]);
+    Some(
+        g.b_sf
+            .iter()
+            .enumerate()
+            .map(|(f, &sf)| {
+                let d = if f >= front.start && f < front.start + front.size {
+                    wedge::recon_area(sf, w.axis, w.theta, 1.0)
+                } else if f >= back.start && f < back.start + back.size {
+                    wedge::recon_area(sf, w.axis, w.theta, -1.0)
+                } else {
+                    sf
+                };
+                to_vec3(d)
+            })
+            .collect(),
+    )
+}
+
 impl GpuMesh {
     pub fn upload(gpu: &Gpu, m: &HostMesh) -> Result<Self> {
         let t = GpuTopology::upload(gpu, m)?;
@@ -732,6 +848,7 @@ impl GpuMesh {
 
             b_face_cells: t.b_face_cells,
             b_sf: gpu.upload(&m.b_sf)?,
+            b_sf_recon: b_sf_recon_host(m).map(|v| gpu.upload(&v)).transpose()?,
             b_mag_sf: gpu.upload(&m.b_mag_sf)?,
             b_cf: gpu.upload(&m.b_cf)?,
             b_delta_coeffs: gpu.upload(&m.b_delta_coeffs)?,
@@ -754,6 +871,7 @@ impl GpuMesh {
             rf_flags: t.rf_flags,
 
             patches: m.patches.clone(),
+            wedge: m.wedge.clone(),
             total_volume: m.v.iter().copied().sum(),
         })
     }
@@ -840,6 +958,7 @@ impl GpuMesh {
 
             b_face_cells: t.b_face_cells,
             b_sf: g.b_sf,
+            b_sf_recon: b_sf_recon_host(m).map(|v| gpu.upload(&v)).transpose()?,
             b_mag_sf: g.b_mag_sf,
             b_cf: g.b_cf,
             b_delta_coeffs: g.b_delta_coeffs,
@@ -862,6 +981,7 @@ impl GpuMesh {
             rf_flags: t.rf_flags,
 
             patches: m.patches.clone(),
+            wedge: m.wedge.clone(),
             total_volume: m.v.iter().copied().sum(),
         })
     }
@@ -874,3 +994,44 @@ pub mod gpugeom;
 pub mod motion;
 pub mod refined;
 pub mod topology;
+pub mod wedge;
+
+#[cfg(test)]
+mod tests {
+    use super::PatchKind;
+
+    /// SPEC-LIT section 119: `wedge` is its own kind, distinct from
+    /// `symmetry`/`symmetryPlane`, and numbered 7 behind `Interface` 6.
+    #[test]
+    fn wedge_is_not_symmetry() {
+        assert_eq!(PatchKind::from_type("wedge"), PatchKind::Wedge);
+        assert_ne!(PatchKind::from_type("wedge"), PatchKind::Symmetry);
+        assert_eq!(PatchKind::Wedge as i32, 7);
+        assert_eq!(PatchKind::Wedge.as_str(), "wedge");
+        assert_eq!(PatchKind::from_type("symmetry"), PatchKind::Symmetry);
+        assert_eq!(PatchKind::from_type("symmetryPlane"), PatchKind::Symmetry);
+        assert_eq!(PatchKind::Interface as i32, 6);
+    }
+
+    /// The device mirrors the host enum: every `.cu` that tests a patch kind
+    /// carries the wedge define at 7 beside the symmetry define at 3
+    /// (SPEC-LIT section 119.1).
+    #[test]
+    fn device_patch_kinds_match_the_host() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let kind_of = |file: &str, prefix: &str| -> i32 {
+            let src = std::fs::read_to_string(format!("{root}/{file}")).unwrap();
+            let line = src
+                .lines()
+                .find(|l| l.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{file}: no line starts with {prefix:?}"));
+            line.split_whitespace().nth(2).unwrap().parse::<i32>().unwrap()
+        };
+        for file in ["cuda/fv.cu", "cuda/momentum.cu", "cuda/solid.cu", "cuda/vof.cu", "cuda/marangoni.cu"] {
+            assert_eq!(kind_of(file, "#define OFPATCH_WEDGE "), 7, "{file}");
+            assert_eq!(kind_of(file, "#define OFPATCH_SYMMETRY "), 3, "{file}");
+        }
+        assert_eq!(kind_of("cuda/parcels.cu", "#define OFP_PATCH_WEDGE "), 7);
+        assert_eq!(kind_of("cuda/parcels.cu", "#define OFP_PATCH_SYMMETRY "), 3);
+    }
+}

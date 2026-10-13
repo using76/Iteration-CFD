@@ -339,6 +339,26 @@ pub struct JsonMesh {
     /// reader has always built. See [`JsonCyclicPair`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cyclic: Vec<JsonCyclicPair>,
+    /// SPEC-LIT 119.3: presence makes the case a WEDGE - the block is the
+    /// (r, z) block of the 119.0 mesh (`x` the radius, `z` the axis through
+    /// `x = 0, y = 0`, `y` the one-cell circumferential direction) and
+    /// `angle` is the FULL wedge angle in degrees, stated once, here. The
+    /// reader lowers the case onto `crate::blockgen::WedgeSpec` and refuses
+    /// everything a wedge mesh cannot say (its refusal list, each a §13.4
+    /// error naming the JSON path and this section). Absent: the case
+    /// lowers exactly as before, and no boundary may resolve to a `wedge`
+    /// rule - a box has no wedge sides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wedge: Option<JsonWedge>,
+}
+
+/// [`JsonMesh::wedge`]'s one entry - SPEC-LIT 119.3. `angle` is the FULL
+/// wedge angle in degrees, finite and strictly between 0 and 180 (checked
+/// in [`build_block`], naming this path).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonWedge {
+    pub angle: f64,
 }
 
 /// One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six
@@ -685,6 +705,15 @@ pub enum PatchPresetKind {
     /// nameable in JSONC. Same CONSTRAINT rules as [`Self::Empty`], minus
     /// the single-cell check (a symmetry plane has no such restriction).
     Symmetry,
+    /// SPEC-LIT 119.3: `PatchKind::Wedge` - the third CONSTRAINT kind. Needs
+    /// a mesh that has wedge sides (`mesh.wedge`, the 119.0 block): the
+    /// reader refuses a `wedge` rule on a mesh without one, and on a wedge
+    /// mesh holds `ymin`/`ymax` to a `wedge` rule and every other slot away
+    /// from one. Same per-field refusal as [`Self::Empty`] and
+    /// [`Self::Symmetry`] - the constraint decides every field,
+    /// turbulence fields included - and 119.2's `BcKind::Wedge` is what the
+    /// field seed and `field_setup::topology_override` force on its faces.
+    Wedge,
 }
 
 /// One `{"type": "fixedValue", "value": ...}`-shaped scalar boundary
@@ -1411,9 +1440,48 @@ pub struct LoweredCase {
     /// `motion`, lowered - SPEC-LIT 105.12. `None` for every case that names
     /// no `motion` block.
     pub motion: Option<LoweredMotion>,
+    /// SPEC-LIT 119.3: `mesh.wedge`, lowered onto the 119.0
+    /// [`crate::blockgen::WedgeSpec`]. `None` for every case without
+    /// `mesh.wedge` - [`Self::build_host_mesh`] then builds exactly what
+    /// `crate::blockgen::build_mesh(&self.block)` always built.
+    pub wedge: Option<crate::blockgen::WedgeSpec>,
 }
 
 impl LoweredCase {
+    /// The mesh this case runs on. Without `mesh.wedge`: exactly
+    /// `crate::blockgen::build_mesh(&self.block)`, bit for bit what every
+    /// driver built before SPEC-LIT 119.3. With it: the 119.0 wedge mesh of
+    /// the lowered [`crate::blockgen::WedgeSpec`], with the patches carrying
+    /// the CASE'S OWN boundary names (inner<-xmin, outer<-xmax, zmin, zmax,
+    /// back<-ymin, front<-ymax) and `HostMesh::wedge` set - 119.1's
+    /// derivation ran on it. On a pipe (`bounds.min[0] == 0`) the 119.0 mesh
+    /// writes no patch on the axis, so the `xmin` name stands for no patch
+    /// and no lowered field carries a boundary entry under it.
+    pub fn build_host_mesh(&self) -> Result<crate::mesh::HostMesh> {
+        let Some(w) = &self.wedge else {
+            return crate::blockgen::build_mesh(&self.block);
+        };
+        let mut hm = crate::blockgen::build_wedge_mesh(w)?;
+        // 119.0's patch order: inner (absent on a pipe), outer, zmin, zmax,
+        // back, front. The case's six slot names, in the same order. The
+        // names ride alone - the kinds come from the type strings, which the
+        // lowering already put the case's classes on, so the geometry and
+        // the 119.1 derivation this side of the rename are untouched.
+        let case_names = [
+            &self.block.patch_name[0], // inner <- xmin
+            &self.block.patch_name[1], // outer <- xmax
+            &self.block.patch_name[4], // zmin  <- zmin
+            &self.block.patch_name[5], // zmax  <- zmax
+            &self.block.patch_name[2], // back  <- ymin
+            &self.block.patch_name[3], // front <- ymax
+        ];
+        let skip = case_names.len() - hm.patches.len();
+        for (p, name) in hm.patches.iter_mut().zip(case_names[skip..].iter()) {
+            p.name = (*name).clone();
+        }
+        Ok(hm)
+    }
+
     /// The `divSchemes` entry for `key` (`"div(phi,U)"`, ...), falling back to
     /// the case's own `"default"` and then to [`DivEntry::UPWIND`] if the case
     /// gave no default at all - which cannot happen through [`JsonCase::lower`]
@@ -1597,6 +1665,10 @@ fn patch_class(kind: PatchPresetKind) -> &'static str {
         // "wall"/"patch" class.
         PatchPresetKind::Empty => "empty",
         PatchPresetKind::Symmetry => "symmetry",
+        // SPEC-LIT 119.3: recognised by `PatchKind::from_type` (src/mesh.rs)
+        // directly, like empty/symmetry - the JSON kind name and the OpenFOAM
+        // type string are the same word.
+        PatchPresetKind::Wedge => "wedge",
     }
 }
 
@@ -1640,15 +1712,25 @@ fn apply_axis_grading(name: &str, axis: &mut GradedAxis, grading: Option<&JsonGr
 /// discarding.
 fn validate_constraint_rules(patches: &[JsonPatchRule]) -> Result<()> {
     for rule in patches {
-        if !matches!(rule.kind, PatchPresetKind::Empty | PatchPresetKind::Symmetry) {
+        if !matches!(
+            rule.kind,
+            PatchPresetKind::Empty | PatchPresetKind::Symmetry | PatchPresetKind::Wedge
+        ) {
             continue;
         }
         let kind_name = patch_class(rule.kind);
-        let reject = |field: &str| -> Error {
+        // SPEC-LIT 119.3 names its section on the wedge rule's refusals;
+        // §34.1's two keep the message they always had.
+        let section = if rule.kind == PatchPresetKind::Wedge {
+            " (SPEC-LIT 119.3)"
+        } else {
+            ""
+        };
+        let reject = move |field: &str| -> Error {
             Error::Config(format!(
                 "patches: rule \"{}\" has kind \"{kind_name}\" - a CONSTRAINT, not a \
                  boundary condition - but also sets \"{field}\"; the constraint decides \
-                 every field on this patch, so remove the \"{field}\" entry",
+                 every field on this patch, so remove the \"{field}\" entry{section}",
                 rule.pattern
             ))
         };
@@ -1689,10 +1771,115 @@ fn validate_constraint_rules(patches: &[JsonPatchRule]) -> Result<()> {
     Ok(())
 }
 
+/// SPEC-LIT 119.3's refusal list for the `wedge` constraint kind, checked
+/// BEFORE any mesh is built - every entry a `Error::Config` whose message
+/// names the JSON path and this section. A case without `mesh.wedge` only
+/// meets the first bullet (a `wedge` rule somewhere - a box has no wedge
+/// sides); a wedge case meets the rest.
+fn validate_wedge_rules(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<()> {
+    let names = [
+        mesh.boundaries.xmin.clone(),
+        mesh.boundaries.xmax.clone(),
+        mesh.boundaries.ymin.clone(),
+        mesh.boundaries.ymax.clone(),
+        mesh.boundaries.zmin.clone(),
+        mesh.boundaries.zmax.clone(),
+    ];
+    for (slot, name) in names.iter().enumerate() {
+        let rule = resolve_patch_rule(patches, name)?;
+        let wedge_rule = rule.kind == PatchPresetKind::Wedge;
+        match (&mesh.wedge, wedge_rule, slot) {
+            // A `wedge` rule on a mesh with no `mesh.wedge` block.
+            (None, true, _) => {
+                return Err(Error::Config(format!(
+                    "mesh.boundaries.{}: patch \"{name}\" resolves to a \"wedge\" rule \
+                     but the mesh has no mesh.wedge block - a box has no wedge sides \
+                     (SPEC-LIT 119.3)",
+                    SLOT_NAMES[slot]
+                )));
+            }
+            // On a wedge mesh `ymin` and `ymax` must BOTH resolve to a
+            // `wedge` rule - they ARE the wedge's two sides.
+            (Some(_), false, 2 | 3) => {
+                return Err(Error::Config(format!(
+                    "mesh.boundaries.{}: patch \"{name}\" does not resolve to a \
+                     \"wedge\" rule, but on a wedge mesh both y slots are the wedge's \
+                     two sides and must (SPEC-LIT 119.3)",
+                    SLOT_NAMES[slot]
+                )));
+            }
+            // ... and no OTHER boundary may resolve to one.
+            (Some(_), true, 0 | 1 | 4 | 5) => {
+                return Err(Error::Config(format!(
+                    "mesh.boundaries.{}: patch \"{name}\" resolves to a \"wedge\" rule, \
+                     but on a wedge mesh only the y slots (the wedge's two sides) may \
+                     (SPEC-LIT 119.3)",
+                    SLOT_NAMES[slot]
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    let Some(w) = &mesh.wedge else { return Ok(()) };
+
+    if mesh.cells[1] != 1 {
+        return Err(Error::Config(format!(
+            "mesh.cells[1] is {} - a wedge is one cell across the circumferential \
+             direction, whose extent is mesh.wedge.angle's, not this axis's \
+             (SPEC-LIT 119.3)",
+            mesh.cells[1]
+        )));
+    }
+    if mesh.bounds.min[1] != 0.0 || mesh.bounds.max[1] != 0.0 {
+        return Err(Error::Config(format!(
+            "mesh.bounds: min[1] = {} and max[1] = {} must both be 0 on a wedge mesh - \
+             the circumferential extent is the angle's, and a second statement of it \
+             could only disagree (SPEC-LIT 119.3)",
+            mesh.bounds.min[1], mesh.bounds.max[1]
+        )));
+    }
+    if mesh.bounds.min[0] < 0.0 {
+        return Err(Error::Config(format!(
+            "mesh.bounds: min[0] = {} is below 0 - the radius starts at 0 (a pipe) or \
+             above (an annulus), never below (SPEC-LIT 119.3)",
+            mesh.bounds.min[0]
+        )));
+    }
+    if !(w.angle.is_finite() && w.angle > 0.0 && w.angle < 180.0) {
+        return Err(Error::Config(format!(
+            "mesh.wedge.angle: {} - the FULL wedge angle in degrees must be finite and \
+             strictly between 0 and 180 (SPEC-LIT 119.3)",
+            w.angle
+        )));
+    }
+    if !mesh.regions.is_empty() {
+        return Err(Error::Config(format!(
+            "mesh.regions: {} region(s) on a wedge mesh - a wedge carries no region \
+             windows (SPEC-LIT 119.3)",
+            mesh.regions.len()
+        )));
+    }
+    for pair in &mesh.cyclic {
+        let axis = cyclic_axis_of(&names, pair)?;
+        if axis != 2 {
+            return Err(Error::Config(format!(
+                "mesh.cyclic: the pair '{}/{}' spans the {} axis - on a wedge mesh only \
+                 a zmin/zmax pair exists, the 119.0 one (SPEC-LIT 119.3)",
+                pair.a,
+                pair.b,
+                ["x", "y", "z"][axis]
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec, Vec<WindowRegionSpec>)> {
     let MeshKind::Cartesian = mesh.kind;
 
     validate_constraint_rules(patches)?;
+    validate_wedge_rules(mesh, patches)?;
 
     let axis = |lo: f64, hi: f64, n: u32| GradedAxis {
         lo: lo as Scalar,
@@ -1859,6 +2046,42 @@ fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec,
     Ok((block, windows))
 }
 
+/// SPEC-LIT 119.3's lowering: `mesh.wedge` onto
+/// [`crate::blockgen::WedgeSpec`] - `r` the block's x axis (after grading),
+/// `z` the block's z axis, the angle verbatim, and the four remaining patch
+/// classes in the order `xmin`, `xmax`, `zmin`, `zmax`, where a z cyclic
+/// pair gives `"cyclic"` on both (119.0's own `zmin`/`zmax` pair). `None`
+/// for every case without `mesh.wedge`. [`validate_wedge_rules`] has
+/// already refused everything this cannot express.
+fn wedge_spec_of(
+    mesh: &JsonMesh,
+    block: &BlockSpec,
+    patches: &[JsonPatchRule],
+) -> Result<Option<crate::blockgen::WedgeSpec>> {
+    let Some(w) = &mesh.wedge else { return Ok(None) };
+    let names = [
+        mesh.boundaries.xmin.clone(),
+        mesh.boundaries.xmax.clone(),
+        mesh.boundaries.ymin.clone(),
+        mesh.boundaries.ymax.clone(),
+        mesh.boundaries.zmin.clone(),
+        mesh.boundaries.zmax.clone(),
+    ];
+    let cyclic_slots = cyclic_slot_set(mesh, &names)?;
+    let class = |slot: usize| -> Result<String> {
+        if cyclic_slots.contains(&slot) {
+            return Ok("cyclic".to_string());
+        }
+        Ok(patch_class(resolve_patch_rule(patches, &names[slot])?.kind).to_string())
+    };
+    Ok(Some(crate::blockgen::WedgeSpec {
+        r: block.x.clone(),
+        z: block.z.clone(),
+        theta_deg: w.angle,
+        patch_type: [class(0)?, class(1)?, class(4)?, class(5)?],
+    }))
+}
+
 // ------------------------------------------------------------ cyclic pairs
 
 /// Which axis (0=x, 1=y, 2=z) `pair` names, given the six `mesh.boundaries`
@@ -2013,14 +2236,17 @@ fn u_spec_for(rule: &JsonPatchRule) -> Result<PatchFieldSpec> {
              an inlet needs a velocity",
             rule.pattern
         ))),
-        // SPEC-LIT §34.1: `validate_constraint_rules` has already refused a
-        // `U` entry on a constraint rule, so this arm is only ever reached
-        // with no override - the spec written here is a placeholder in the
-        // exact sense `mesh_patch_names`' cyclic-patch comment describes:
-        // `field_setup::topology_override` forces `BcKind::Empty`/`Symmetry`
-        // on every face of the matching `PatchKind` regardless of what this
-        // spec says, so its `type_name` exists for readability, not effect.
-        PatchPresetKind::Empty | PatchPresetKind::Symmetry => Ok(spec(patch_class(rule.kind))),
+        // SPEC-LIT §34.1 (and 119.3 for the wedge): `validate_constraint_rules`
+        // has already refused a `U` entry on a constraint rule, so this arm is
+        // only ever reached with no override - the spec written here is a
+        // placeholder in the exact sense `mesh_patch_names`' cyclic-patch
+        // comment describes: `field_setup::topology_override` forces
+        // `BcKind::Empty`/`Symmetry`/`Wedge` on every face of the matching
+        // `PatchKind` regardless of what this spec says, so its `type_name`
+        // exists for readability, not effect.
+        PatchPresetKind::Empty | PatchPresetKind::Symmetry | PatchPresetKind::Wedge => {
+            Ok(spec(patch_class(rule.kind)))
+        }
     }
 }
 
@@ -2030,6 +2256,13 @@ fn u_spec_for(rule: &JsonPatchRule) -> Result<PatchFieldSpec> {
 /// names the one Dirichlet face itself (the plume's `outlet`, here `open`
 /// patches carrying an explicit `p`).
 fn p_spec_for(rule: &JsonPatchRule) -> PatchFieldSpec {
+    // SPEC-LIT 119.3: a `wedge` rule's p entry is the same placeholder its
+    // U one is - `validate_constraint_rules` has refused an explicit p, and
+    // `field_setup::topology_override` forces the mesh's own `BcKind::Wedge`
+    // on the patch's faces regardless of what this says.
+    if rule.kind == PatchPresetKind::Wedge {
+        return spec(patch_class(rule.kind));
+    }
     match &rule.p {
         Some(bc) => scalar_bc_spec(bc),
         None => spec("zeroGradient"),
@@ -2070,7 +2303,9 @@ fn t_spec_for(
         ))),
         // See `u_spec_for`'s matching arm: a placeholder, overridden by the
         // mesh's own topology at field-build time regardless.
-        PatchPresetKind::Empty | PatchPresetKind::Symmetry => Ok(spec(patch_class(rule.kind))),
+        PatchPresetKind::Empty | PatchPresetKind::Symmetry | PatchPresetKind::Wedge => {
+            Ok(spec(patch_class(rule.kind)))
+        }
     }
 }
 
@@ -2185,12 +2420,15 @@ fn turb_field_spec(
     if let Some(bc) = opt {
         return Ok(turb_bc_spec(bc));
     }
-    // SPEC-LIT §34.1: an `empty`/`symmetry` constraint patch needs no
+    // SPEC-LIT §34.1 (and 119.3 for the wedge): a constraint patch needs no
     // per-field condition and no wall-treatment expansion - it is not a
     // wall, and `validate_constraint_rules` has already refused an explicit
     // one here, so this is a placeholder overridden by the mesh's own
     // topology at field-build time, same as `u_spec_for`'s matching arm.
-    if matches!(rule.kind, PatchPresetKind::Empty | PatchPresetKind::Symmetry) {
+    if matches!(
+        rule.kind,
+        PatchPresetKind::Empty | PatchPresetKind::Symmetry | PatchPresetKind::Wedge
+    ) {
         return Ok(spec(patch_class(rule.kind)));
     }
     if rule.kind != PatchPresetKind::Wall {
@@ -2277,6 +2515,19 @@ impl JsonCase {
     /// Map the parsed tree onto the solver's own control types.
     pub fn lower(&self) -> Result<LoweredCase> {
         let (block, windows) = build_block(&self.mesh, &self.patches)?;
+
+        // SPEC-LIT 119.3: `mesh.wedge` lowers onto the 119.0 `WedgeSpec`
+        // (`None` for every case without it), and a moving mesh on a wedge
+        // is refused - the refusal list ran in `build_block`, before any
+        // mesh; this is its last bullet.
+        let wedge = wedge_spec_of(&self.mesh, &block, &self.patches)?;
+        if wedge.is_some() && self.motion.is_some() {
+            return Err(Error::Config(
+                "motion: a moving mesh on a wedge is refused - a wedge case has no \
+                 motion path (SPEC-LIT 119.3)"
+                    .to_string(),
+            ));
+        }
 
         // ---- physics --------------------------------------------------
         let nu = self.physics.fluid.nu as Scalar;
@@ -2453,7 +2704,15 @@ impl JsonCase {
         };
 
         // ---- fields ---------------------------------------------------
-        let names = mesh_patch_names(&block);
+        let mut names = mesh_patch_names(&block);
+        // SPEC-LIT 119.3: on a wedge PIPE (`bounds.min[0] == 0`) the 119.0
+        // mesh writes no patch on the axis - the `xmin` name stands for no
+        // patch, so no lowered field may carry a boundary entry under it.
+        // `mesh.regions` is refused on a wedge, so `names` is exactly the
+        // six slot names in order here and `remove(0)` is the `xmin` one.
+        if wedge.is_some() && self.mesh.bounds.min[0] == 0.0 {
+            names.remove(0);
+        }
         let ambient_t = self.initial.t.map(|v| v as Scalar).unwrap_or(0.0);
 
         let mut u_boundary = BTreeMap::new();
@@ -2711,6 +2970,7 @@ impl JsonCase {
             output: self.output.clone(),
             sources,
             motion,
+            wedge,
         })
     }
 }
@@ -3571,8 +3831,462 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    //  SPEC-LIT 119.3: the `wedge` constraint kind, and the 119.0 mesh
+    // ------------------------------------------------------------------
+
+    const WEDGE_CATCH_ALL: &str =
+        r#"[ { "match": "(back|front)", "kind": "wedge" }, { "match": ".*", "kind": "wall" } ]"#;
+
+    /// SPEC-LIT 119.3's JSON example, completed to a full case, with the
+    /// numbers the tests vary as parameters. `angle: None` is no
+    /// `mesh.wedge` block at all. Parsed through
+    /// [`read_case_jsonc_str`], so no temp file is involved.
+    fn wedge_case(
+        x_bounds: (f64, f64),
+        cells: [u32; 3],
+        y_bounds: (f64, f64),
+        angle: Option<f64>,
+        mesh_extra: &str,
+        patches: &str,
+        case_extra: &str,
+        with_t: bool,
+    ) -> Result<JsonCase> {
+        let wedge_block = match angle {
+            Some(a) => format!(r#""wedge": {{ "angle": {a} }},"#),
+            None => String::new(),
+        };
+        let t_entry = if with_t { r#", "T": 300.0"# } else { "" };
+        let text = format!(
+            r#"{{
+                "name": "wedgeTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [{}, {}, 0], "max": [{}, {}, 1] }},
+                    "cells": [{}, {}, {}],
+                    {wedge_block}
+                    "boundaries": {{
+                        "xmin": "axis", "xmax": "wall", "ymin": "back",
+                        "ymax": "front", "zmin": "inlet", "zmax": "outlet"
+                    }}{mesh_extra}
+                }},
+                "physics": {{
+                    "gravity": [0,0,0],
+                    "fluid": {{ "nu": 0.01, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+                    "buoyancy": "densityRatio"
+                }},
+                "patches": {patches},
+                "initial": {{ "U": [0,0,0], "p": 0.0{t_entry} }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }}{case_extra}
+            }}"#,
+            x_bounds.0, y_bounds.0, x_bounds.1, y_bounds.1, cells[0], cells[1], cells[2]
+        );
+        read_case_jsonc_str(&text, "119.3 wedge test case")
+    }
+
+    /// The refusal message of a case 119.3 must refuse.
+    fn wedge_refusal(case: Result<JsonCase>) -> String {
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        match case.and_then(|c| c.lower()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected lower() to refuse"),
+        }
+    }
+
+    /// SPEC-LIT 119.3: the JSON example completed to a full case lowers onto
+    /// the 119.0 mesh - the pipe (bounds x 0..0.5, z 0..1, cells [8,1,4],
+    /// angle 5) with the case's own boundary names, `axis` standing for no
+    /// patch, the derived wedge on it, and geometry bitwise the generator's
+    /// own.
+    #[test]
+    fn a_wedge_case_lowers_to_the_119_0_mesh() {
+        let case =
+            wedge_case((0.0, 0.5), [8, 1, 4], (0.0, 0.0), Some(5.0), "", WEDGE_CATCH_ALL, "", false)
+                .expect("parse");
+        let lowered = case.lower().expect("lowers");
+
+        let w = lowered.wedge.as_ref().expect("mesh.wedge lowers to Some");
+        assert_eq!((w.r.lo, w.r.hi, w.r.n), (0.0, 0.5, 8));
+        assert_eq!((w.z.lo, w.z.hi, w.z.n), (0.0, 1.0, 4));
+        assert_eq!(w.theta_deg, 5.0);
+        // The classes of xmin, xmax, zmin, zmax: the catch-all's wall (and
+        // the generator ignores inner's type on a pipe anyway).
+        assert_eq!(w.patch_type, ["wall", "wall", "wall", "wall"]);
+
+        let hm = lowered.build_host_mesh().expect("the wedge mesh builds");
+        assert_eq!(hm.n_cells, 32);
+        let names: Vec<&str> = hm.patches.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["wall", "inlet", "outlet", "back", "front"]);
+        assert_eq!(hm.patches[3].kind, crate::mesh::PatchKind::Wedge);
+        assert_eq!(hm.patches[4].kind, crate::mesh::PatchKind::Wedge);
+        let theta = hm.wedge.as_ref().expect("119.1's derivation ran").theta;
+        assert!(
+            (theta - 5f64.to_radians()).abs() <= 1e-12,
+            "theta {theta} != {}",
+            5f64.to_radians()
+        );
+
+        // Bitwise the generator's own mesh: centres and volumes.
+        let eq = crate::blockgen::WedgeSpec {
+            r: GradedAxis { lo: 0.0, hi: 0.5, n: 8, ..GradedAxis::default() },
+            z: GradedAxis { lo: 0.0, hi: 1.0, n: 4, ..GradedAxis::default() },
+            theta_deg: 5.0,
+            patch_type: crate::blockgen::WedgeSpec::default().patch_type,
+        };
+        let want = crate::blockgen::build_wedge_mesh(&eq).expect("builds");
+        let (g, gw) = (hm.geom64(), want.geom64());
+        assert_eq!(g.v.len(), gw.v.len());
+        for (i, (a, b)) in g.v.iter().zip(gw.v.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "volume of cell {i}");
+        }
+        for (i, (a, b)) in g.c.iter().zip(gw.c.iter()).enumerate() {
+            assert_eq!(a.x.to_bits(), b.x.to_bits(), "centre x of cell {i}");
+            assert_eq!(a.y.to_bits(), b.y.to_bits(), "centre y of cell {i}");
+            assert_eq!(a.z.to_bits(), b.z.to_bits(), "centre z of cell {i}");
+        }
+
+        // A pipe has no axis patch, so no lowered field carries an entry
+        // under the xmin name.
+        assert!(!lowered.u_field.boundary.contains_key("axis"), "{:?}", lowered.u_field.boundary.keys());
+        assert!(!lowered.p_field.boundary.contains_key("axis"));
+    }
+
+    /// SPEC-LIT 119.3: an annulus (`bounds.min[0] = 1`) has a real inner
+    /// wall - six patches, the first named as `xmin` names it.
+    #[test]
+    fn a_wedge_annulus_keeps_its_inner_patch() {
+        let case =
+            wedge_case((1.0, 2.0), [8, 1, 4], (0.0, 0.0), Some(5.0), "", WEDGE_CATCH_ALL, "", false)
+                .expect("parse");
+        let lowered = case.lower().expect("lowers");
+        let w = lowered.wedge.as_ref().expect("Some");
+        assert_eq!(w.r.lo, 1.0);
+        assert_eq!(w.patch_type[0], "wall", "xmin's class lands on inner");
+
+        let hm = lowered.build_host_mesh().expect("builds");
+        assert_eq!(hm.patches.len(), 6);
+        // The first patch is the inner wall, named as `xmin` names it - and
+        // the wedge pair still closes the list.
+        assert_eq!(hm.patches[0].name, "axis");
+        let names: Vec<&str> = hm.patches.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["axis", "wall", "inlet", "outlet", "back", "front"]);
+    }
+
+    /// SPEC-LIT 119.3, first bullet: a `wedge` rule carrying a per-field
+    /// condition is refused, naming the field - and the lowered fields of a
+    /// clean wedge case carry the constraint's own type name on the two
+    /// sides, turbulence fields included.
+    #[test]
+    fn a_wedge_rule_is_a_constraint() {
+        let with_u = wedge_case(
+            (0.0, 0.5),
+                    [8, 1, 4],
+            (0.0, 0.0),
+            Some(5.0),
+            "",
+            r#"[ { "match": "(back|front)", "kind": "wedge", "U": { "type": "zeroGradient" } },
+                { "match": ".*", "kind": "wall" } ]"#,
+            "",
+            false,
+        )
+        .expect("parse");
+        let err = wedge_refusal(Ok(with_u));
+        assert!(err.contains('U'), "{err}");
+        assert!(err.contains("wedge"), "{err}");
+
+        let case =
+            wedge_case((0.0, 0.5), [8, 1, 4], (0.0, 0.0), Some(5.0), "", WEDGE_CATCH_ALL, "", true)
+                .expect("parse");
+        let lowered = case.lower().expect("lowers");
+        for side in ["back", "front"] {
+            let u = lowered.u_field.boundary.get(side).unwrap_or_else(|| panic!("no U {side}"));
+            assert_eq!(u.type_name, "wedge", "U on {side}");
+            let p = lowered.p_field.boundary.get(side).unwrap_or_else(|| panic!("no p {side}"));
+            assert_eq!(p.type_name, "wedge", "p on {side}");
+            let t = lowered
+                .t_field
+                .as_ref()
+                .expect("the case solves T")
+                .boundary
+                .get(side)
+                .unwrap_or_else(|| panic!("no T {side}"));
+            assert_eq!(t.type_name, "wedge", "T on {side}");
+        }
+    }
+
+    /// SPEC-LIT 119.3's refusal list: every entry names its JSON path and
+    /// this section. One sub-case per bullet - the eight path groups, with
+    /// the angle at 0, 180, -1 and NaN and both y-bounds variants.
+    #[test]
+    fn every_wedge_refusal_names_its_path() {
+        // (label, case, path)
+        let cases: Vec<(&str, Result<JsonCase>, &str)> = vec![
+            // A `wedge` rule on a mesh WITHOUT `mesh.wedge`.
+            (
+                "wedge rule without mesh.wedge",
+                wedge_case((0.0, 0.5), [8, 1, 4], (0.0, 0.0), None, "", WEDGE_CATCH_ALL, "", false),
+                "mesh.boundaries.ymin",
+            ),
+            // With the block, xmin may not resolve to one.
+            (
+                "wedge rule on xmin",
+                wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    "",
+                    r#"[ { "match": "axis", "kind": "wedge" },
+                        { "match": "(back|front)", "kind": "wedge" },
+                        { "match": ".*", "kind": "wall" } ]"#,
+                    "",
+                    false,
+                ),
+                "mesh.boundaries.xmin",
+            ),
+            // ... and ymin/ymax must BOTH resolve to one.
+            (
+                "ymin not a wedge rule",
+                wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    "",
+                    r#"[ { "match": ".*", "kind": "wall" } ]"#,
+                    "",
+                    false,
+                ),
+                "mesh.boundaries.ymin",
+            ),
+            (
+                "ymax not a wedge rule",
+                wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    "",
+                    r#"[ { "match": "back", "kind": "wedge" },
+                        { "match": ".*", "kind": "wall" } ]"#,
+                    "",
+                    false,
+                ),
+                "mesh.boundaries.ymax",
+            ),
+            (
+                "cells[1] = 2",
+                wedge_case((0.0, 0.5), [8, 2, 4], (0.0, 0.0), Some(5.0), "", WEDGE_CATCH_ALL, "", false),
+                "mesh.cells[1]",
+            ),
+            (
+                "bounds min y 0.1",
+                wedge_case((0.0, 0.5), [8, 1, 4], (0.1, 0.0), Some(5.0), "", WEDGE_CATCH_ALL, "", false),
+                "mesh.bounds",
+            ),
+            (
+                "bounds max y -0.1",
+                wedge_case((0.0, 0.5), [8, 1, 4], (0.0, -0.1), Some(5.0), "", WEDGE_CATCH_ALL, "", false),
+                "mesh.bounds",
+            ),
+            (
+                "bounds min x -0.5",
+                wedge_case((-0.5, 0.5), [8, 1, 4], (0.0, 0.0), Some(5.0), "", WEDGE_CATCH_ALL, "", false),
+                "mesh.bounds",
+            ),
+            (
+                "angle 0",
+                wedge_case((0.0, 0.5), [8, 1, 4], (0.0, 0.0), Some(0.0), "", WEDGE_CATCH_ALL, "", false),
+                "mesh.wedge.angle",
+            ),
+            (
+                "angle 180",
+                wedge_case((0.0, 0.5), [8, 1, 4], (0.0, 0.0), Some(180.0), "", WEDGE_CATCH_ALL, "", false),
+                "mesh.wedge.angle",
+            ),
+            (
+                "angle -1",
+                wedge_case((0.0, 0.5), [8, 1, 4], (0.0, 0.0), Some(-1.0), "", WEDGE_CATCH_ALL, "", false),
+                "mesh.wedge.angle",
+            ),
+            // JSON cannot spell NaN or inf, so the two non-finite angles are
+            // written onto the parsed tree - the refusal lives in
+            // `build_block`, which `lower` runs on whatever tree it holds.
+            {
+                let mut c = wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    "",
+                    WEDGE_CATCH_ALL,
+                    "",
+                    false,
+                )
+                .expect("parse");
+                c.mesh.wedge = Some(JsonWedge { angle: f64::NAN });
+                ("angle NaN", Ok(c), "mesh.wedge.angle")
+            },
+            {
+                let mut c = wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    "",
+                    WEDGE_CATCH_ALL,
+                    "",
+                    false,
+                )
+                .expect("parse");
+                c.mesh.wedge = Some(JsonWedge { angle: f64::INFINITY });
+                ("angle inf", Ok(c), "mesh.wedge.angle")
+            },
+            (
+                "a region window",
+                wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    r#", "regions": [ { "on": "zmin", "name": "win",
+                        "shape": { "kind": "box", "min": [0,0,0], "max": [1,1,1] } } ]"#,
+                    WEDGE_CATCH_ALL,
+                    "",
+                    false,
+                ),
+                "mesh.regions",
+            ),
+            (
+                "a cyclic pair on x",
+                wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    r#", "cyclic": [ { "a": "axis", "b": "wall", "transform": "translate" } ]"#,
+                    WEDGE_CATCH_ALL,
+                    "",
+                    false,
+                ),
+                "mesh.cyclic",
+            ),
+            (
+                "a cyclic pair on y",
+                wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    r#", "cyclic": [ { "a": "back", "b": "front", "transform": "translate" } ]"#,
+                    WEDGE_CATCH_ALL,
+                    "",
+                    false,
+                ),
+                "mesh.cyclic",
+            ),
+            (
+                "a motion block",
+                wedge_case(
+                    (0.0, 0.5),
+                    [8, 1, 4],
+                    (0.0, 0.0),
+                    Some(5.0),
+                    "",
+                    WEDGE_CATCH_ALL,
+                    r#", "motion": { "patches": [] }"#,
+                    false,
+                ),
+                "motion",
+            ),
+        ];
+        assert!(cases.len() >= 12);
+        for (label, case, path) in cases {
+            let err = wedge_refusal(case);
+            assert!(err.contains(path), "{label}: no path {path} in {err}");
+            assert!(err.contains("119.3"), "{label}: no section in {err}");
+        }
+    }
+
+    /// SPEC-LIT 119.3: a cyclic pair on `zmin`/`zmax` is 119.0's own
+    /// zmin/zmax pair - it lowers onto the WedgeSpec's `"cyclic"` types and
+    /// the mesh builds with the pair wired both ways.
+    #[test]
+    fn a_z_cyclic_pair_on_a_wedge_is_the_119_0_pair() {
+        let case = wedge_case(
+            (0.0, 0.5),
+                    [8, 1, 4],
+            (0.0, 0.0),
+            Some(5.0),
+            r#", "cyclic": [ { "a": "inlet", "b": "outlet", "transform": "translate" } ]"#,
+            WEDGE_CATCH_ALL,
+            "",
+            false,
+        )
+        .expect("parse");
+        let lowered = case.lower().expect("lowers");
+        let w = lowered.wedge.as_ref().expect("Some");
+        assert_eq!(w.patch_type[2], "cyclic");
+        assert_eq!(w.patch_type[3], "cyclic");
+
+        let hm = lowered.build_host_mesh().expect("builds");
+        let names: Vec<&str> = hm.patches.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["wall", "inlet", "outlet", "back", "front"]);
+        assert_eq!(hm.patches[1].kind, crate::mesh::PatchKind::Cyclic);
+        assert_eq!(hm.patches[2].kind, crate::mesh::PatchKind::Cyclic);
+        assert_eq!(hm.patches[1].nbr_patch, Some(2));
+        assert_eq!(hm.patches[2].nbr_patch, Some(1));
+    }
+
+    /// A case without `mesh.wedge` lowers exactly as before: `wedge` is
+    /// `None`, and `build_host_mesh` is `blockgen::build_mesh(&block)` bit
+    /// for bit in cell count, centres and volumes.
+    #[test]
+    fn a_case_without_mesh_wedge_lowers_as_before() {
+        let case = minimal_case_with_mesh("");
+        let lowered = case.lower().expect("lowers");
+        assert!(lowered.wedge.is_none());
+
+        let hm = lowered.build_host_mesh().expect("builds");
+        let want = crate::blockgen::build_mesh(&lowered.block).expect("builds");
+        assert_eq!(hm.n_cells, want.n_cells);
+        let (g, gw) = (hm.geom64(), want.geom64());
+        assert_eq!(g.v.len(), gw.v.len());
+        for (i, (a, b)) in g.v.iter().zip(gw.v.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "volume of cell {i}");
+        }
+        for (i, (a, b)) in g.c.iter().zip(gw.c.iter()).enumerate() {
+            assert_eq!(a.x.to_bits(), b.x.to_bits(), "centre x of cell {i}");
+            assert_eq!(a.y.to_bits(), b.y.to_bits(), "centre y of cell {i}");
+            assert_eq!(a.z.to_bits(), b.z.to_bits(), "centre z of cell {i}");
+        }
+    }
+
+    /// The emitted schema carries the new kind and the new block: `wedge`
+    /// among the patch kinds, and the `JsonWedge` definition with `angle`.
+    #[test]
+    fn schema_names_the_wedge_kind_and_the_wedge_block() {
+        let text = emit_schema();
+        assert!(text.contains("\"wedge\""), "schema missing the wedge kind: {text}");
+        assert!(text.contains("JsonWedge"), "schema missing JsonWedge: {text}");
+        assert!(
+            text.contains("\"angle\""),
+            "schema missing the angle entry: {text}"
+        );
+    }
+
+    // ------------------------------------------------------------------
     //  SPEC-LIT §29.1: wallTreatment presets (route b, JSONC)
     // ------------------------------------------------------------------
+
 
     fn plume_case() -> JsonCase {
         let jsonc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/plume.jsonc");

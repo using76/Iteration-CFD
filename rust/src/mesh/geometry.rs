@@ -228,9 +228,9 @@ pub(crate) fn validate<P>(m: &HostMesh, points: &[P], faces: &[Vec<Label>]) -> R
 /// exists to remove. Every question below is the same question asked of the
 /// same numbers; what the two entry points share is [`validate_topology`], so
 /// they cannot drift.
-pub(crate) fn validate_csr(
+pub(crate) fn validate_csr<P>(
     m: &HostMesh,
-    points: &[Vec3],
+    points: &[P],
     csr: &crate::mesh::gpugeom::FacePointCsr,
 ) -> Result<()> {
     let n_faces = m.n_internal_faces + m.n_boundary_faces;
@@ -382,6 +382,84 @@ pub(crate) fn cyclic_pairing(m: &HostMesh) -> Result<Vec<Label>> {
 }
 
 // ==========================================================================
+//  The local origin - SPEC-LIT 118.7
+// ==========================================================================
+
+/// One axis of the SNAPPED local origin (SPEC-LIT (118.7a)) of a point set,
+/// from the axis's bounding box `[lo, hi]`:
+///
+/// ```text
+/// O = 0                                if lo <= 0 <= hi, or e <= 0, or
+///                                      lo/hi not finite
+/// O = sgn(m) * q * ceil(|m|/q - 1/2)   otherwise, with e = hi - lo,
+///                                      m = (lo + hi)/2, and q the
+///                                      smallest power of two >= e
+/// ```
+///
+/// `q` is found EXACTLY from the exponent field of the f64 encoding - no
+/// `log2().ceil()`, which is off by one exactly at a power of two. An axis
+/// whose range contains zero is not shifted, so no existing case moves, and
+/// because `O` is a multiple of `q` >= `e` every point of the axis lands
+/// within `3e/2` of `O` (118.7b): a mesh translated by a multiple of `q`
+/// snaps to the SAME local points bit for bit.
+pub fn snapped_origin_axis(lo: f64, hi: f64) -> f64 {
+    if !lo.is_finite() || !hi.is_finite() {
+        return 0.0;
+    }
+    let e = hi - lo;
+    if e <= 0.0 || (lo <= 0.0 && 0.0 <= hi) {
+        return 0.0;
+    }
+    // The smallest power of two >= e, exactly. `e` is positive and normal
+    // here, so its biased exponent names the power of two AT or BELOW it:
+    // an empty significand is exactly the case `e` IS that power of two,
+    // otherwise the next one up is the answer.
+    let bits = e.to_bits();
+    let q = if bits & ((1u64 << 52) - 1) == 0 {
+        e
+    } else {
+        f64::from_bits((((bits >> 52) & 0x7ff) + 1) << 52)
+    };
+    let m = (lo + hi) / 2.0;
+    m.signum() * q * (m.abs() / q - 0.5).ceil()
+}
+
+/// The local origin (SPEC-LIT (118.7a)) of a point set: per axis,
+/// [`snapped_origin_axis`] over the axis's bounding box. The f64 build never
+/// shifts - ZERO, always - and an empty point set gives ZERO. The caller
+/// sets [`HostMesh::origin`] from this BEFORE [`compute`], which never
+/// chooses an origin itself.
+pub fn local_origin<P: GeomPoint>(points: &[P]) -> DVec3 {
+    #[cfg(not(feature = "single"))]
+    {
+        let _ = points;
+        DVec3::ZERO
+    }
+    #[cfg(feature = "single")]
+    {
+        let Some(first) = points.first() else {
+            return DVec3::ZERO;
+        };
+        let w0 = first.to_dvec3();
+        let (mut lo, mut hi) = (w0, w0);
+        for p in points {
+            let d = p.to_dvec3();
+            if d.x < lo.x { lo.x = d.x; }
+            if d.y < lo.y { lo.y = d.y; }
+            if d.z < lo.z { lo.z = d.z; }
+            if d.x > hi.x { hi.x = d.x; }
+            if d.y > hi.y { hi.y = d.y; }
+            if d.z > hi.z { hi.z = d.z; }
+        }
+        DVec3::new(
+            snapped_origin_axis(lo.x, hi.x),
+            snapped_origin_axis(lo.y, hi.y),
+            snapped_origin_axis(lo.z, hi.z),
+        )
+    }
+}
+
+// ==========================================================================
 //  The sweep
 // ==========================================================================
 
@@ -405,6 +483,30 @@ pub(crate) fn cyclic_pairing(m: &HostMesh) -> Result<Vec<Label>> {
 /// operations they performed before, in the same order - the f64 hash test
 /// `f64_geometry_is_bitwise_in_f64_build` pins that.
 pub fn compute<P: GeomPoint>(
+    m: &mut HostMesh,
+    points: &[P],
+    faces: &[Vec<Label>],
+) -> Result<()> {
+    // SPEC-LIT 118.7: `m.origin` is an INPUT the caller set before the call
+    // (`compute` never chooses it). A mesh stored about a local origin is
+    // swept on its points shifted ONCE, here, so every stored position comes
+    // out local: the subtraction runs in f64 (118.7c) and the sweep below is
+    // this same code, monomorphic in DVec3, reading `to_dvec3()` of each
+    // shifted point - exactly `to_dvec3() - m.origin`. The f64 build never
+    // shifts, and `origin == ZERO` hands the sweep the caller's points
+    // untouched, which is bitwise what every build did before this unit.
+    #[cfg(feature = "single")]
+    if m.origin != DVec3::ZERO {
+        let local: Vec<DVec3> = points.iter().map(|p| p.to_dvec3() - m.origin).collect();
+        return sweep(m, &local, faces);
+    }
+    sweep(m, points, faces)
+}
+
+/// The passes of [`compute`], generic over the point type. `compute` is the
+/// entry that decides whether the points arrive in world coordinates or
+/// already local (SPEC-LIT 118.7); this is the sweep they feed.
+fn sweep<P: GeomPoint>(
     m: &mut HostMesh,
     points: &[P],
     faces: &[Vec<Label>],
@@ -1098,6 +1200,11 @@ pub fn print_report(m: &HostMesh) {
             p.start,
             p.start + p.size
         );
+    }
+
+    // SPEC-LIT section 119.1: a mesh that solves on a wedge says so.
+    if let Some(w) = &m.wedge {
+        println!("{}", w.report_line(m));
     }
 
     println!(

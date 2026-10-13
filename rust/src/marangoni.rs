@@ -428,6 +428,7 @@ pub fn body_force_flux(
     sn_grad_alpha: &GpuSurfaceScalarField,
     kappa_f: &GpuSurfaceScalarField,
     fr: &DevBuf<Scalar>,
+    u_kind: &DevBuf<Label>,
     g: Vec3,
     m: &GpuMesh,
 ) -> Result<()> {
@@ -467,6 +468,7 @@ pub fn body_force_flux(
                 .arg(&m.b_cf)
                 .arg(&m.b_kind)
                 .arg(fr)
+                .arg(u_kind)
                 .arg(&g.x)
                 .arg(&g.y)
                 .arg(&g.z)
@@ -751,21 +753,31 @@ mod tests {
     /// `cuda/marangoni.cu` restates the predicate rather than sharing a
     /// header, because §87.5's argument turns on `cuda/vof.cu` not being
     /// edited. A restated predicate can drift, so it is pinned here across
-    /// every patch kind and both sides of the `fr >= 1` test.
+    /// every patch kind, both sides of the `fr >= 1` test, and the
+    /// DirectionMixed-velocity clause of SPEC-LIT 120.3.
     #[test]
     fn marangoni_restates_the_prescribed_flux_predicate() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
         let sigma: Scalar = 0.0728;
 
-        // Every patch kind 0..5, crossed with fr below, at, and above 1.
+        // Every patch kind 0..7, crossed with fr below, at, and above 1 -
+        // then the SPEC-LIT 120.3 clause: kind 0 at fr = 0 with the VELOCITY
+        // a DirectionMixed one (37) is prescribed all the same.
         let frs: [Scalar; 4] = [0.0, 0.5, 1.0, 1.5];
         let mut kinds: Vec<Label> = Vec::new();
         let mut fr: Vec<Scalar> = Vec::new();
-        for k in 0..6 {
+        let mut ukind: Vec<Label> = Vec::new();
+        for k in 0..8 {
             for f in frs {
                 kinds.push(k);
                 fr.push(f);
+                ukind.push(0);
             }
+        }
+        for k in 0..8 {
+            kinds.push(k);
+            fr.push(0.0);
+            ukind.push(37);
         }
         let n = kinds.len();
 
@@ -783,6 +795,7 @@ mod tests {
         let d_sig_f = g.upload(&vec![sigma; n])?;
         let d_kinds = g.upload(&kinds)?;
         let d_fr = g.upload(&fr)?;
+        let d_ukind = g.upload(&ukind)?;
         let mut old: DevBuf<Scalar> = g.zeros(n)?;
         let mut new: DevBuf<Scalar> = g.zeros(n)?;
 
@@ -801,6 +814,7 @@ mod tests {
                 .arg(&d_cf)
                 .arg(&d_kinds)
                 .arg(&d_fr)
+                .arg(&d_ukind)
                 .arg(&gx)
                 .arg(&gy)
                 .arg(&gz)
@@ -822,6 +836,7 @@ mod tests {
                 .arg(&d_cf)
                 .arg(&d_kinds)
                 .arg(&d_fr)
+                .arg(&d_ukind)
                 .arg(&gx)
                 .arg(&gy)
                 .arg(&gz)
@@ -846,15 +861,18 @@ mod tests {
                 zeroed += 1;
             }
         }
-        // 2 (empty) and 3 (symmetry) are prescribed at every fr; every other
-        // kind is prescribed only at fr >= 1, which is two of the four.
-        let expect_zero = 2 * frs.len() + 4 * 2;
+        // 2 (empty), 3 (symmetry) and 7 (wedge, SPEC-LIT 119.1) are
+        // prescribed at every fr; every other kind is prescribed only at
+        // fr >= 1, which is two of the four - and the eight DirectionMixed
+        // velocity faces of the 120.3 clause are prescribed at fr = 0.
+        let expect_zero = 3 * frs.len() + 5 * 2 + 8;
         assert_eq!(
             zeroed, expect_zero,
-            "the predicate zeroed {zeroed} of {n} faces; empty and symmetry at \
-             every fr, plus fr >= 1 elsewhere, is {expect_zero}"
+            "the predicate zeroed {zeroed} of {n} faces; empty, symmetry and \
+             wedge at every fr, fr >= 1 elsewhere, and a DirectionMixed \
+             velocity at fr = 0, is {expect_zero}"
         );
-        println!("  §87.5: {n} boundary faces across 6 patch kinds, 0 differing bits");
+        println!("  §87.5: {n} boundary faces across 8 patch kinds, 0 differing bits");
         Ok(())
     }
 

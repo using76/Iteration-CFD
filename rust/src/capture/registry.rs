@@ -131,6 +131,16 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/cht.rs",
         Stance::Gate("the_solid_side_iteration_replays_bitwise"),
     ),
+    (
+        "src/compressible/exact/riemann.rs",
+        Stance::Outside(
+            "the exact Riemann solution is a host answer key in f64 - a \
+             bisection for the star pressure and a sampler at (x, t) - that a \
+             gate compares a computed field against after the run. It launches \
+             no kernel and no time loop calls it, so there is nothing to \
+             capture or replay. SPEC-LIT 127.2",
+        ),
+    ),
     ("src/contact_angle.rs", Stance::Via("src/vof.rs")),
     (
         "src/dcmetrics.rs",
@@ -186,7 +196,15 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/fan.rs",
         Stance::Gate("the_fan_source_replays_bitwise"),
     ),
+    (
+        "src/field/advective.rs",
+        Stance::Via("src/field_ops.rs"),
+    ),
     ("src/field_ops.rs", Stance::Via("src/momentum.rs")),
+    (
+        "src/function1/device.rs",
+        Stance::Gate("the_ramped_inlet_replays_bitwise"),
+    ),
     ("src/fv.rs", Stance::Via("src/momentum.rs")),
     ("src/halo.rs", Stance::Via("src/distsolve.rs")),
     (
@@ -396,6 +414,16 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              Alternative: a PRESCRIBED nAlphaSubCycles from the case instead \
              of one derived from the flux, which removes the read-back; not \
              implemented",
+        ),
+    ),
+    (
+        "src/vv/rans1d.rs",
+        Stance::Outside(
+            "the 1-D RANS pipe oracle is a host answer key in f64 - its sweeps \
+             are its own fixed-point iteration on the radial cell set, run \
+             before or after a solve for a gate to compare against. It launches \
+             no kernel and no time loop calls it, so there is nothing to \
+             capture or replay. SPEC-LIT 143.1",
         ),
     ),
     ("src/wallfunctions.rs", Stance::Via("src/models/k_epsilon.rs")),

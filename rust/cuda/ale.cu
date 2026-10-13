@@ -28,36 +28,84 @@
   mesh::ale::host_swept_volumes (SPEC-LIT 105.3), and nvcc's multiply-add
   contraction would break that on every non-axis-aligned face.
 
+  Under OFGPU_SINGLE the swept volume and the mesh flux compute in DOUBLE
+  (`ofgeo`/`ofgeo3`) and the float copies are one narrowing of them (SPEC-LIT
+  118.8, F32-11); in the f64 build `ofgeo` IS `ofscalar` and the cubin is the
+  one it always was. The hot kernels (tsDdtGeneralV, tsDdtGeneralRhoV,
+  aleRelativeFlux, aleMovingWallVelocity) keep reading the float copies.
+
   Every kernel here is a per-face or per-cell map. There is no atomic of any
   width in this file, and nothing is downloaded by it.
 \*---------------------------------------------------------------------------*/
 #include "ofgpu_device.cuh"
 
-OFGPU_DEV ofvec3 aleZero() { return mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0); }
+// --------------------------------------------------------------------------
+//  The geometry type - SPEC-LIT 118.8 (F32-11). The swept volume is computed
+//  in DOUBLE from double points (118.8c) and the mesh flux in double with the
+//  scheme's float coefficients widened exactly (118.8d), so the device sweep
+//  is its host twin bit for bit under `single` as well; in the f64 build
+//  `ofgeo` IS `ofscalar`, `ofgeo3` IS `ofvec3`, and nothing here moves.
+// --------------------------------------------------------------------------
+#ifdef OFGPU_SINGLE
+typedef double ofgeo;
+struct ofgeo3 { ofgeo x, y, z; };
+#else
+typedef ofscalar ofgeo;
+typedef ofvec3 ofgeo3;
+#endif
 
-OFGPU_DEV ofvec3 aleAdd(const ofvec3& a, const ofvec3& b)
+OFGPU_DEV ofgeo3 mkgeo(ofgeo x, ofgeo y, ofgeo z)
 {
-    return mkvec(a.x + b.x, a.y + b.y, a.z + b.z);
+#ifdef OFGPU_SINGLE
+    ofgeo3 v; v.x = x; v.y = y; v.z = z; return v;
+#else
+    return mkvec(x, y, z);
+#endif
 }
 
-OFGPU_DEV ofvec3 aleSub(const ofvec3& a, const ofvec3& b)
+OFGPU_DEV ofgeo gdot3(const ofgeo3& a, const ofgeo3& b)
 {
-    return mkvec(a.x - b.x, a.y - b.y, a.z - b.z);
+#ifdef OFGPU_SINGLE
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+#else
+    return dot3(a, b);
+#endif
 }
 
-OFGPU_DEV ofvec3 aleScale(const ofvec3& a, ofscalar s)
+OFGPU_DEV ofgeo3 aleZero() { return mkgeo((ofgeo)0, (ofgeo)0, (ofgeo)0); }
+
+OFGPU_DEV ofgeo3 aleAdd(const ofgeo3& a, const ofgeo3& b)
+{
+    return mkgeo(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+OFGPU_DEV ofgeo3 aleSub(const ofgeo3& a, const ofgeo3& b)
+{
+    return mkgeo(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+OFGPU_DEV ofgeo3 aleScale(const ofgeo3& a, ofgeo s)
+{
+    return mkgeo(a.x*s, a.y*s, a.z*s);
+}
+
+OFGPU_DEV ofgeo3 aleDivs(const ofgeo3& a, ofgeo s)
+{
+    return mkgeo(a.x/s, a.y/s, a.z/s);
+}
+
+OFGPU_DEV ofgeo3 aleCross(const ofgeo3& a, const ofgeo3& b)
+{
+    return mkgeo(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
+}
+
+//- The float-vec3 pair `aleMovingWallVelocity` keeps using: that kernel reads
+//  only the float copies and is NOT converted (SPEC-LIT 118.8).
+OFGPU_DEV ofvec3 aleZeroF() { return mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0); }
+
+OFGPU_DEV ofvec3 aleScaleF(const ofvec3& a, ofscalar s)
 {
     return mkvec(a.x*s, a.y*s, a.z*s);
-}
-
-OFGPU_DEV ofvec3 aleDivs(const ofvec3& a, ofscalar s)
-{
-    return mkvec(a.x/s, a.y/s, a.z/s);
-}
-
-OFGPU_DEV ofvec3 aleCross(const ofvec3& a, const ofvec3& b)
-{
-    return mkvec(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
 }
 
 /*---------------------------------------------------------------------------*\
@@ -72,11 +120,11 @@ OFGPU_DEV ofvec3 aleCross(const ofvec3& a, const ofvec3& b)
 \*---------------------------------------------------------------------------*/
 extern "C" __global__ void aleSweptVolume
 (
-    ofscalar* __restrict__ swept,
+    ofgeo* __restrict__ swept,
     const oflabel* __restrict__ faceOffset,
     const oflabel* __restrict__ facePoint,
-    const ofvec3*  __restrict__ pointsOld,
-    const ofvec3*  __restrict__ pointsNew,
+    const ofgeo3*  __restrict__ pointsOld,
+    const ofgeo3*  __restrict__ pointsNew,
     oflabel nFaces
 )
 {
@@ -84,37 +132,37 @@ extern "C" __global__ void aleSweptVolume
     if (f >= nFaces) return;
     const oflabel b = faceOffset[f];
     const oflabel n = faceOffset[f + 1] - b;
-    if (n < 3) { swept[f] = (ofscalar)0; return; }
+    if (n < 3) { swept[f] = (ofgeo)0; return; }
 
-    ofvec3 x0 = aleZero();
-    ofvec3 x1 = aleZero();
+    ofgeo3 x0 = aleZero();
+    ofgeo3 x1 = aleZero();
     for (oflabel i = 0; i < n; ++i)
     {
         x0 = aleAdd(x0, pointsOld[facePoint[b + i]]);
         x1 = aleAdd(x1, pointsNew[facePoint[b + i]]);
     }
-    x0 = aleDivs(x0, (ofscalar)n);
-    x1 = aleDivs(x1, (ofscalar)n);
-    const ofvec3 xm = aleScale(aleAdd(x0, x1), (ofscalar)0.5);
-    const ofvec3 dx = aleSub(x1, x0);
+    x0 = aleDivs(x0, (ofgeo)n);
+    x1 = aleDivs(x1, (ofgeo)n);
+    const ofgeo3 xm = aleScale(aleAdd(x0, x1), (ofgeo)0.5);
+    const ofgeo3 dx = aleSub(x1, x0);
 
-    ofscalar acc = (ofscalar)0;
+    ofgeo acc = (ofgeo)0;
     for (oflabel i = 0; i < n; ++i)
     {
         const oflabel pa = facePoint[b + i];
         const oflabel pc = facePoint[b + ((i + 1) % n)];
-        const ofvec3 a0 = pointsOld[pa];
-        const ofvec3 c0 = pointsOld[pc];
-        const ofvec3 a1 = pointsNew[pa];
-        const ofvec3 c1 = pointsNew[pc];
-        const ofvec3 am = aleScale(aleAdd(a0, a1), (ofscalar)0.5);
-        const ofvec3 cm = aleScale(aleAdd(c0, c1), (ofscalar)0.5);
-        const ofvec3 n0 = aleCross(aleSub(a0, x0), aleSub(c0, x0));
-        const ofvec3 nm = aleCross(aleSub(am, xm), aleSub(cm, xm));
-        const ofvec3 n1 = aleCross(aleSub(a1, x1), aleSub(c1, x1));
-        const ofvec3 dsum = aleAdd(aleAdd(dx, aleSub(a1, a0)), aleSub(c1, c0));
-        const ofvec3 nsum = aleAdd(aleAdd(n0, aleScale(nm, (ofscalar)4.0)), n1);
-        acc += dot3(dsum, nsum)/(ofscalar)36.0;
+        const ofgeo3 a0 = pointsOld[pa];
+        const ofgeo3 c0 = pointsOld[pc];
+        const ofgeo3 a1 = pointsNew[pa];
+        const ofgeo3 c1 = pointsNew[pc];
+        const ofgeo3 am = aleScale(aleAdd(a0, a1), (ofgeo)0.5);
+        const ofgeo3 cm = aleScale(aleAdd(c0, c1), (ofgeo)0.5);
+        const ofgeo3 n0 = aleCross(aleSub(a0, x0), aleSub(c0, x0));
+        const ofgeo3 nm = aleCross(aleSub(am, xm), aleSub(cm, xm));
+        const ofgeo3 n1 = aleCross(aleSub(a1, x1), aleSub(c1, x1));
+        const ofgeo3 dsum = aleAdd(aleAdd(dx, aleSub(a1, a0)), aleSub(c1, c0));
+        const ofgeo3 nsum = aleAdd(aleAdd(n0, aleScale(nm, (ofgeo)4.0)), n1);
+        acc += gdot3(dsum, nsum)/(ofgeo)36.0;
     }
     swept[f] = acc;
 }
@@ -131,8 +179,11 @@ extern "C" __global__ void aleMeshFlux
 (
     ofscalar* __restrict__ phiMesh,
     ofscalar* __restrict__ phiMeshB,
-    const ofscalar* __restrict__ swept,
-    const ofscalar* __restrict__ swept0,
+#ifdef OFGPU_SINGLE
+    ofgeo*    __restrict__ phiMesh64,
+#endif
+    const ofgeo* __restrict__ swept,
+    const ofgeo* __restrict__ swept0,
     ofscalar aN,
     ofscalar a00,
     oflabel nInternalFaces,
@@ -141,9 +192,18 @@ extern "C" __global__ void aleMeshFlux
 {
     const oflabel f = OFGPU_TID;
     if (f >= nInternalFaces + nBoundaryFaces) return;
+#ifdef OFGPU_SINGLE
+    // (118.8d): the coefficients widened exactly, the products and the
+    // difference in f64; the float copies are one narrowing of the value.
+    const ofgeo v = (ofgeo)aN*swept[f] - (ofgeo)a00*swept0[f];
+    phiMesh64[f] = v;
+    if (f < nInternalFaces) phiMesh[f] = (ofscalar)v;
+    else phiMeshB[f - nInternalFaces] = (ofscalar)v;
+#else
     const ofscalar v = aN*swept[f] - a00*swept0[f];
     if (f < nInternalFaces) phiMesh[f] = v;
     else phiMeshB[f - nInternalFaces] = v;
+#endif
 }
 
 /*---------------------------------------------------------------------------*\
@@ -252,5 +312,5 @@ extern "C" __global__ void aleMovingWallVelocity
     const oflabel i = faces[k];
     const ofvec3 s = bSf[i];
     const ofscalar s2 = dot3(s, s);
-    refValue[i] = s2 > (ofscalar)0 ? aleScale(s, phiMeshB[i]/s2) : aleZero();
+    refValue[i] = s2 > (ofscalar)0 ? aleScaleF(s, phiMeshB[i]/s2) : aleZeroF();
 }

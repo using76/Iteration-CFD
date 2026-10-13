@@ -39,86 +39,148 @@
   EVERY KERNEL HERE IS A GATHER. There is no atomic of any width in this file.
   The host sweep's two scatters into per-cell arrays - the apex average and the
   pyramid decomposition - become one thread per cell reading the CSR twice.
+
+  Under OFGPU_SINGLE the sweep computes in DOUBLE (`ofgeo`/`ofgeo3`) from
+  double points and rounds ONCE per stored value (SPEC-LIT 118.8, F32-11),
+  so it is the host sweep bit for bit again; the f64 build's `ofgeo` IS
+  `ofscalar` and the cubin is the one it always was.
 \*---------------------------------------------------------------------------*/
 #include "ofgpu_device.cuh"
 
-// (SPEC-LIT 2.4), mesh/geometry.rs::NON_ORTH_FLOOR.
-#define OFGEOM_NON_ORTH_FLOOR ((ofscalar)0.05)
-
-// (SPEC-LIT 2.5), mesh/geometry.rs::SKEW_FLOOR.
-#define OFGEOM_SKEW_FLOOR ((ofscalar)1.0e-9)
-
-// mesh/geometry.rs::SMALL, and Scalar::MIN_POSITIVE for `normalised`.
+// --------------------------------------------------------------------------
+//  The geometry type - SPEC-LIT 118.8 (F32-11).
+//
+//  Under OFGPU_SINGLE the sweep computes in DOUBLE from double points and
+//  rounds ONCE per stored value, exactly as mesh/geometry.rs::sweep does on
+//  the host, so the device sweep is the host sweep bit for bit again. In the
+//  f64 build `ofgeo` IS `ofscalar` and `ofgeo3` IS `ofvec3`, so every kernel
+//  here is the kernel it was and the SASS cannot move.
+// --------------------------------------------------------------------------
 #ifdef OFGPU_SINGLE
-#define OFGEOM_SMALL ((ofscalar)1.0e-19)
-#define OFGEOM_MIN_POSITIVE ((ofscalar)1.17549435e-38f)
+typedef double ofgeo;
+struct ofgeo3 { ofgeo x, y, z; };
 #else
-#define OFGEOM_SMALL ((ofscalar)1.0e-150)
-#define OFGEOM_MIN_POSITIVE ((ofscalar)2.2250738585072014e-308)
+typedef ofscalar ofgeo;
+typedef ofvec3 ofgeo3;
 #endif
 
-OFGPU_DEV ofvec3 vzero() { return mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0); }
-
-OFGPU_DEV ofvec3 vadd(const ofvec3& a, const ofvec3& b)
+OFGPU_DEV ofgeo3 mkgeo(ofgeo x, ofgeo y, ofgeo z)
 {
-    return mkvec(a.x + b.x, a.y + b.y, a.z + b.z);
+#ifdef OFGPU_SINGLE
+    ofgeo3 v; v.x = x; v.y = y; v.z = z; return v;
+#else
+    return mkvec(x, y, z);
+#endif
 }
 
-OFGPU_DEV ofvec3 vsub(const ofvec3& a, const ofvec3& b)
+OFGPU_DEV ofgeo gdot3(const ofgeo3& a, const ofgeo3& b)
 {
-    return mkvec(a.x - b.x, a.y - b.y, a.z - b.z);
+#ifdef OFGPU_SINGLE
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+#else
+    return dot3(a, b);
+#endif
 }
 
-OFGPU_DEV ofvec3 vscale(const ofvec3& a, ofscalar s)
+OFGPU_DEV ofgeo gmax_(ofgeo a, ofgeo b)
 {
-    return mkvec(a.x*s, a.y*s, a.z*s);
+#ifdef OFGPU_SINGLE
+    return a > b ? a : b;
+#else
+    return ofmax_(a, b);
+#endif
 }
 
-OFGPU_DEV ofvec3 vdivs(const ofvec3& a, ofscalar s)
+//- The one narrowing: a stored component, rounded once (118.8b). The identity
+//  in the f64 build.
+OFGPU_DEV ofvec3 to_ofvec3(const ofgeo3& a)
 {
-    return mkvec(a.x/s, a.y/s, a.z/s);
+#ifdef OFGPU_SINGLE
+    return mkvec((ofscalar)a.x, (ofscalar)a.y, (ofscalar)a.z);
+#else
+    return a;
+#endif
 }
 
-OFGPU_DEV ofvec3 vcross(const ofvec3& a, const ofvec3& b)
+// The sweep's constants are the HOST's f64 ones (mesh/geometry.rs lines 71,
+// 93, 110 and f64::MIN_POSITIVE): the float literal 0.05f widened is NOT 0.05.
+// Under OFGPU_SINGLE `ofgeo` is double, so f64::MIN_POSITIVE = 2^-1022 is
+// written as the exact hex literal 0x1p-1022: the decimal spelling is kept to
+// the f64 arm, where SPEC-LIT 112.1's literal audit expects it.
+#ifdef OFGPU_SINGLE
+#define OFGEOM_NON_ORTH_FLOOR ((ofgeo)0.05)
+#define OFGEOM_SKEW_FLOOR ((ofgeo)1.0e-9)
+#define OFGEOM_SMALL ((ofgeo)1.0e-150)
+#define OFGEOM_MIN_POSITIVE ((ofgeo)0x1p-1022)
+#else
+#define OFGEOM_NON_ORTH_FLOOR ((ofgeo)0.05)
+#define OFGEOM_SKEW_FLOOR ((ofgeo)1.0e-9)
+#define OFGEOM_SMALL ((ofgeo)1.0e-150)
+#define OFGEOM_MIN_POSITIVE ((ofgeo)2.2250738585072014e-308)
+#endif
+
+OFGPU_DEV ofgeo3 vzero() { return mkgeo((ofgeo)0, (ofgeo)0, (ofgeo)0); }
+
+OFGPU_DEV ofgeo3 vadd(const ofgeo3& a, const ofgeo3& b)
 {
-    return mkvec(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
+    return mkgeo(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-//- `Vec3::mag`. `dot3` associates ((x*x + y*y) + z*z), which is what
+OFGPU_DEV ofgeo3 vsub(const ofgeo3& a, const ofgeo3& b)
+{
+    return mkgeo(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+OFGPU_DEV ofgeo3 vscale(const ofgeo3& a, ofgeo s)
+{
+    return mkgeo(a.x*s, a.y*s, a.z*s);
+}
+
+OFGPU_DEV ofgeo3 vdivs(const ofgeo3& a, ofgeo s)
+{
+    return mkgeo(a.x/s, a.y/s, a.z/s);
+}
+
+OFGPU_DEV ofgeo3 vcross(const ofgeo3& a, const ofgeo3& b)
+{
+    return mkgeo(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
+}
+
+//- `Vec3::mag`. `gdot3` associates ((x*x + y*y) + z*z), which is what
 //  `Vec3::dot` associates, and sqrt is correctly rounded on both sides
 //  (nvcc's default -prec-sqrt=true; Rust's f64::sqrt is IEEE).
-OFGPU_DEV ofscalar vmag(const ofvec3& a) { return sqrt(dot3(a, a)); }
+OFGPU_DEV ofgeo vmag(const ofgeo3& a) { return sqrt(gdot3(a, a)); }
 
 //- `Vec3::normalised`: zero when the magnitude underflows, (SPEC-LIT 2.3).
-OFGPU_DEV ofvec3 vnorm(const ofvec3& a)
+OFGPU_DEV ofgeo3 vnorm(const ofgeo3& a)
 {
-    const ofscalar m = vmag(a);
+    const ofgeo m = vmag(a);
     return (m > OFGEOM_MIN_POSITIVE) ? vdivs(a, m) : vzero();
 }
 
 //- `geometry::weight_from_offsets`. Two coincident centres leave nothing to
 //  weight and a half-and-half split is the only unbiased answer.
-OFGPU_DEV ofscalar weightFromOffsets(ofscalar dP, ofscalar dN)
+OFGPU_DEV ofgeo weightFromOffsets(ofgeo dP, ofgeo dN)
 {
-    const ofscalar sum = dP + dN;
-    return (sum > OFGEOM_SMALL) ? (dN/sum) : (ofscalar)0.5;
+    const ofgeo sum = dP + dN;
+    return (sum > OFGEOM_SMALL) ? (dN/sum) : (ofgeo)0.5;
 }
 
 //- `geometry::floor_along`.
-OFGPU_DEV ofscalar floorAlong(ofscalar proj, const ofvec3& d)
+OFGPU_DEV ofgeo floorAlong(ofgeo proj, const ofgeo3& d)
 {
-    return ofmax_(proj, OFGEOM_NON_ORTH_FLOOR*vmag(d));
+    return gmax_(proj, OFGEOM_NON_ORTH_FLOOR*vmag(d));
 }
 
 //- `geometry::non_orth_split`, (SPEC-LIT 2.4): the over-relaxed split `(Delta, k)`.
 //  A zero-area face or two coincident centres drop the face from the operator,
 //  which is the only finite thing to do.
-OFGPU_DEV void nonOrthSplit(const ofvec3& sf, const ofvec3& d, ofscalar* delta, ofvec3* k)
+OFGPU_DEV void nonOrthSplit(const ofgeo3& sf, const ofgeo3& d, ofgeo* delta, ofgeo3* k)
 {
-    const ofvec3 nf = vnorm(sf);
-    const ofscalar denom = floorAlong(dot3(nf, d), d);
-    if (denom <= OFGEOM_SMALL) { *delta = (ofscalar)0; *k = vzero(); return; }
-    const ofscalar dl = (ofscalar)1.0/denom;
+    const ofgeo3 nf = vnorm(sf);
+    const ofgeo denom = floorAlong(gdot3(nf, d), d);
+    if (denom <= OFGEOM_SMALL) { *delta = (ofgeo)0; *k = vzero(); return; }
+    const ofgeo dl = (ofgeo)1.0/denom;
     *delta = dl;
     *k = vsub(nf, vscale(d, dl));
 }
@@ -144,11 +206,11 @@ OFGPU_DEV void nonOrthSplit(const ofvec3& sf, const ofvec3& d, ofscalar* delta, 
 \*---------------------------------------------------------------------------*/
 extern "C" __global__ void meshFaceGeometry
 (
-    ofvec3* __restrict__ fSf,
-    ofvec3* __restrict__ fCf,
+    ofgeo3* __restrict__ fSf,
+    ofgeo3* __restrict__ fCf,
     const oflabel* __restrict__ faceOffset,
     const oflabel* __restrict__ facePoint,
-    const ofvec3*  __restrict__ points,
+    const ofgeo3*  __restrict__ points,
     oflabel nFaces
 )
 {
@@ -161,24 +223,24 @@ extern "C" __global__ void meshFaceGeometry
 
     if (n == 0) { fSf[f] = vzero(); fCf[f] = vzero(); return; }
 
-    ofvec3 xAvg = vzero();
+    ofgeo3 xAvg = vzero();
     for (oflabel i = 0; i < n; ++i) xAvg = vadd(xAvg, points[facePoint[b + i]]);
-    xAvg = vdivs(xAvg, (ofscalar)n);
+    xAvg = vdivs(xAvg, (ofgeo)n);
 
     if (n < 3) { fSf[f] = vzero(); fCf[f] = xAvg; return; }
 
-    ofvec3 sf = vzero();
-    ofvec3 cf = vzero();
-    ofscalar area = (ofscalar)0;
+    ofgeo3 sf = vzero();
+    ofgeo3 cf = vzero();
+    ofgeo area = (ofgeo)0;
 
     for (oflabel i = 0; i < n; ++i)
     {
-        const ofvec3 a = points[facePoint[b + i]];
-        const ofvec3 c = points[facePoint[b + ((i + 1) % n)]];
+        const ofgeo3 a = points[facePoint[b + i]];
+        const ofgeo3 c = points[facePoint[b + ((i + 1) % n)]];
 
-        const ofvec3 tN = vcross(vsub(a, xAvg), vsub(c, xAvg));
-        const ofvec3 tC = vdivs(vadd(vadd(xAvg, a), c), (ofscalar)3.0);
-        const ofscalar tA = vmag(tN)*(ofscalar)0.5;
+        const ofgeo3 tN = vcross(vsub(a, xAvg), vsub(c, xAvg));
+        const ofgeo3 tC = vdivs(vadd(vadd(xAvg, a), c), (ofgeo)3.0);
+        const ofgeo tA = vmag(tN)*(ofgeo)0.5;
 
         sf = vadd(sf, vscale(tN, (ofscalar)0.5));
         cf = vadd(cf, vscale(tC, tA));
@@ -219,10 +281,10 @@ extern "C" __global__ void meshFaceGeometry
 \*---------------------------------------------------------------------------*/
 extern "C" __global__ void meshCellGeometry
 (
-    ofscalar* __restrict__ v,
-    ofvec3*   __restrict__ cc,
-    const ofvec3*  __restrict__ fSf,
-    const ofvec3*  __restrict__ fCf,
+    ofgeo* __restrict__ v,
+    ofgeo3*   __restrict__ cc,
+    const ofgeo3*  __restrict__ fSf,
+    const ofgeo3*  __restrict__ fCf,
     const oflabel* __restrict__ cfOffset,
     const oflabel* __restrict__ cfFace,
     const oflabel* __restrict__ cfOwn,
@@ -239,7 +301,7 @@ extern "C" __global__ void meshCellGeometry
     const oflabel bb = bcfOffset[c], be = bcfOffset[c + 1];
 
     // ---- 2. the apex -----------------------------------------------------
-    ofvec3 apex = vzero();
+    ofgeo3 apex = vzero();
     unsigned int nCellFaces = 0u;
     for (oflabel i = ib; i < ie; ++i)
     {
@@ -255,29 +317,29 @@ extern "C" __global__ void meshCellGeometry
     // naming it; this kernel cannot, so `gpu_compute_geometry` refuses it by
     // name on the host BEFORE launching, from the same CSR this reads. Guarded
     // anyway, because a division by zero here would poison the mesh silently.
-    if (nCellFaces == 0u) { v[c] = (ofscalar)0; cc[c] = vzero(); return; }
-    apex = vdivs(apex, (ofscalar)nCellFaces);
+    if (nCellFaces == 0u) { v[c] = (ofgeo)0; cc[c] = vzero(); return; }
+    apex = vdivs(apex, (ofgeo)nCellFaces);
 
     // ---- 3. volume and centroid ------------------------------------------
-    ofscalar vol = (ofscalar)0;
-    ofvec3 cAcc = vzero();
+    ofgeo vol = (ofgeo)0;
+    ofgeo3 cAcc = vzero();
 
     for (oflabel i = ib; i < ie; ++i)
     {
         const oflabel f = cfFace[i];
-        const ofscalar s = cfOwn[i] ? (ofscalar)1.0 : (ofscalar)-1.0;
-        const ofvec3 cf = fCf[f];
-        const ofscalar vPyr = dot3(vscale(fSf[f], s), vsub(cf, apex))/(ofscalar)3.0;
+        const ofgeo s = cfOwn[i] ? (ofgeo)1.0 : (ofgeo)-1.0;
+        const ofgeo3 cf = fCf[f];
+        const ofgeo vPyr = gdot3(vscale(fSf[f], s), vsub(cf, apex))/(ofgeo)3.0;
         vol += vPyr;
-        cAcc = vadd(cAcc, vscale(vadd(vscale(cf, (ofscalar)0.75), vscale(apex, (ofscalar)0.25)), vPyr));
+        cAcc = vadd(cAcc, vscale(vadd(vscale(cf, (ofgeo)0.75), vscale(apex, (ofgeo)0.25)), vPyr));
     }
     for (oflabel i = bb; i < be; ++i)
     {
         const oflabel f = nInternalFaces + bcfFace[i];
-        const ofvec3 cf = fCf[f];
-        const ofscalar vPyr = dot3(vscale(fSf[f], (ofscalar)1.0), vsub(cf, apex))/(ofscalar)3.0;
+        const ofgeo3 cf = fCf[f];
+        const ofgeo vPyr = gdot3(vscale(fSf[f], (ofgeo)1.0), vsub(cf, apex))/(ofgeo)3.0;
         vol += vPyr;
-        cAcc = vadd(cAcc, vscale(vadd(vscale(cf, (ofscalar)0.75), vscale(apex, (ofscalar)0.25)), vPyr));
+        cAcc = vadd(cAcc, vscale(vadd(vscale(cf, (ofgeo)0.75), vscale(apex, (ofgeo)0.25)), vPyr));
     }
 
     // A non-positive volume is a broken mesh, not an error to raise here:
@@ -314,9 +376,9 @@ extern "C" __global__ void meshInternalFaceMetrics
     ofscalar* __restrict__ deltaCoeffs,
     ofvec3*   __restrict__ nonOrthCorr,
     ofvec3*   __restrict__ skewCorr,
-    const ofvec3*  __restrict__ fSf,
-    const ofvec3*  __restrict__ fCf,
-    const ofvec3*  __restrict__ cc,
+    const ofgeo3*  __restrict__ fSf,
+    const ofgeo3*  __restrict__ fCf,
+    const ofgeo3*  __restrict__ cc,
     const oflabel* __restrict__ owner,
     const oflabel* __restrict__ neighbour,
     oflabel nInternalFaces
@@ -327,33 +389,33 @@ extern "C" __global__ void meshInternalFaceMetrics
 
     const oflabel p  = owner[f];
     const oflabel nb = neighbour[f];
-    const ofvec3 sf = fSf[f];
-    const ofvec3 cf = fCf[f];
-    const ofvec3 cP = cc[p];
-    const ofvec3 cN = cc[nb];
-    const ofvec3 d = vsub(cN, cP);
+    const ofgeo3 sf = fSf[f];
+    const ofgeo3 cf = fCf[f];
+    const ofgeo3 cP = cc[p];
+    const ofgeo3 cN = cc[nb];
+    const ofgeo3 d = vsub(cN, cP);
 
     // `m.sf`/`m.cf` are the internal-face prefix of the whole-face arrays.
     // Copied here rather than sliced on the host so that a device-resident
     // mesh never has to come back to be cut in half.
-    sfOut[f] = sf;
-    cfOut[f] = cf;
+    sfOut[f] = to_ofvec3(sf);
+    cfOut[f] = to_ofvec3(cf);
 
-    magSf[f] = vmag(sf);
-    const ofscalar w = weightFromOffsets
+    magSf[f] = (ofscalar)vmag(sf);
+    const ofgeo w = weightFromOffsets
     (
-        fabs(dot3(sf, vsub(cf, cP))),
-        fabs(dot3(sf, vsub(cN, cf)))
+        fabs(gdot3(sf, vsub(cf, cP))),
+        fabs(gdot3(sf, vsub(cN, cf)))
     );
-    weights[f] = w;
+    weights[f] = (ofscalar)w;
 
-    const ofvec3 sk = vsub(vsub(cf, cP), vscale(d, (ofscalar)1.0 - w));
-    skewCorr[f] = (vmag(sk) > OFGEOM_SKEW_FLOOR*vmag(d)) ? sk : vzero();
+    const ofgeo3 sk = vsub(vsub(cf, cP), vscale(d, (ofgeo)1.0 - w));
+    skewCorr[f] = (vmag(sk) > OFGEOM_SKEW_FLOOR*vmag(d)) ? to_ofvec3(sk) : to_ofvec3(vzero());
 
-    ofscalar delta; ofvec3 k;
+    ofgeo delta; ofgeo3 k;
     nonOrthSplit(sf, d, &delta, &k);
-    deltaCoeffs[f] = delta;
-    nonOrthCorr[f] = k;
+    deltaCoeffs[f] = (ofscalar)delta;
+    nonOrthCorr[f] = to_ofvec3(k);
 }
 
 
@@ -387,9 +449,9 @@ extern "C" __global__ void meshBoundaryFaceMetrics
     ofvec3*   __restrict__ bNonOrthCorr,
     ofscalar* __restrict__ bY,
     ofscalar* __restrict__ bWeights,
-    const ofvec3*  __restrict__ fSf,
-    const ofvec3*  __restrict__ fCf,
-    const ofvec3*  __restrict__ cc,
+    const ofgeo3*  __restrict__ fSf,
+    const ofgeo3*  __restrict__ fCf,
+    const ofgeo3*  __restrict__ cc,
     const oflabel* __restrict__ bFaceCells,
     const oflabel* __restrict__ pair,
     oflabel nInternalFaces,
@@ -399,40 +461,72 @@ extern "C" __global__ void meshBoundaryFaceMetrics
     const oflabel bf = OFGPU_TID;
     if (bf >= nBoundaryFaces) return;
 
-    const ofvec3 sf = fSf[nInternalFaces + bf];
-    const ofvec3 cf = fCf[nInternalFaces + bf];
+    const ofgeo3 sf = fSf[nInternalFaces + bf];
+    const ofgeo3 cf = fCf[nInternalFaces + bf];
     const oflabel p = bFaceCells[bf];
 
-    bSf[bf] = sf;
-    bMagSf[bf] = vmag(sf);
-    bCf[bf] = cf;
+    bSf[bf] = to_ofvec3(sf);
+    bMagSf[bf] = (ofscalar)vmag(sf);
+    bCf[bf] = to_ofvec3(cf);
 
-    const ofvec3 dOwn = vsub(cf, cc[p]);
-    const ofvec3 nf = vnorm(sf);
-    bY[bf] = floorAlong(dot3(nf, dOwn), dOwn);
+    const ofgeo3 dOwn = vsub(cf, cc[p]);
+    const ofgeo3 nf = vnorm(sf);
+    bY[bf] = (ofscalar)floorAlong(gdot3(nf, dOwn), dOwn);
 
     const oflabel nbr = pair[bf];
     if (nbr >= 0)
     {
         const oflabel nCell = bFaceCells[nbr];
-        const ofvec3 dNbr = vsub(cc[nCell], fCf[nInternalFaces + nbr]);
-        const ofvec3 d = vadd(dOwn, dNbr);
+        const ofgeo3 dNbr = vsub(cc[nCell], fCf[nInternalFaces + nbr]);
+        const ofgeo3 d = vadd(dOwn, dNbr);
 
-        ofscalar delta; ofvec3 k;
+        ofgeo delta; ofgeo3 k;
         nonOrthSplit(sf, d, &delta, &k);
-        bDeltaCoeffs[bf] = delta;
-        bNonOrthCorr[bf] = k;
-        bWeights[bf] = weightFromOffsets(fabs(dot3(sf, dOwn)), fabs(dot3(sf, dNbr)));
+        bDeltaCoeffs[bf] = (ofscalar)delta;
+        bNonOrthCorr[bf] = to_ofvec3(k);
+        bWeights[bf] = (ofscalar)weightFromOffsets(fabs(gdot3(sf, dOwn)), fabs(gdot3(sf, dNbr)));
     }
     else
     {
-        ofscalar delta; ofvec3 k;
+        ofgeo delta; ofgeo3 k;
         nonOrthSplit(sf, dOwn, &delta, &k);
-        bDeltaCoeffs[bf] = delta;
+        bDeltaCoeffs[bf] = (ofscalar)delta;
         // Left at zero: an uncoupled boundary face has no neighbour cell to
         // interpolate psi from, so snGrad there is not the internal-face
         // formula this correction belongs to - S4 evaluates the
         // (fr, psi_ref, g_ref) triple directly on the face instead.
-        bNonOrthCorr[bf] = vzero();
+        bNonOrthCorr[bf] = to_ofvec3(vzero());
     }
 }
+
+
+// ==========================================================================
+//  The one narrowing - SPEC-LIT 118.8 (F32-11)
+// ==========================================================================
+
+/*---------------------------------------------------------------------------*\
+  meshNarrowCellGeometry - one thread per cell, compiled ONLY under
+  OFGPU_SINGLE.
+
+  The f64 sweep's intermediates (cell V, C) are private scratch, and the
+  float copies every solver kernel reads are this one narrowing of them:
+  `v[c] = fl32(v64[c])`, `cc[c] = fl32 per component of c64[c]` - one
+  rounding per stored value (118.8b), the same narrowing the host sweep
+  applies at the end of `mesh/geometry.rs::sweep`.
+\*---------------------------------------------------------------------------*/
+#ifdef OFGPU_SINGLE
+extern "C" __global__ void meshNarrowCellGeometry
+(
+    ofscalar* __restrict__ v,
+    ofvec3*   __restrict__ cc,
+    const ofgeo*   __restrict__ v64,
+    const ofgeo3*  __restrict__ c64,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    v[c] = (ofscalar)v64[c];
+    cc[c] = to_ofvec3(c64[c]);
+}
+#endif

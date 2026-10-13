@@ -40,8 +40,9 @@
      shared names differently and mixing them compiles, runs, and is wrong.
         PatchKind   Generic 0  Wall 1  Empty 2  Symmetry 3  Cyclic 4  Proc 5
         BcKind      ... Calculated 4  Empty 5  Symmetry 6  Cyclic 7  ...
-     Only vofBodyForceFluxBoundary takes anything from a field, and what it
-     takes is `fr`, a number, not a kind.
+     Only vofBodyForceFluxBoundary takes anything from a field: `fr`, a
+     number, and the VELOCITY field's bc_kind, asked only against
+     OFGPU_BC_DIRECTION_MIXED (SPEC-LIT 120.3).
 \*---------------------------------------------------------------------------*/
 
 #include "ofgpu_device.cuh"
@@ -55,6 +56,14 @@
 #define OFPATCH_SYMMETRY  3
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
+//- SPEC-LIT 119.2: a wedge side; treated as SYMMETRY in this module
+#define OFPATCH_WEDGE     7
+
+//- SPEC-LIT 120.3: the tensorial mixed velocity condition of the wall and
+//  slip family (directionMixed, partialSlip, fixedNormalSlip,
+//  fixedShearStress). Mirrors `BcKind::DirectionMixed` in src/field.rs and
+//  is pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
+#define OFGPU_BC_DIRECTION_MIXED 37
 
 OFGPU_DEV ofscalar vofAbs(ofscalar a) { return a < 0 ? -a : a; }
 
@@ -64,11 +73,15 @@ OFGPU_DEV ofscalar vofAbs(ofscalar a) { return a < 0 ? -a : a; }
 //  deliberately so: this module builds the same phi_HbyA those kernels do,
 //  only with gravity and surface tension in place of the plume's buoyancy, so
 //  the two must agree face for face about which boundary faces carry a body
-//  force at all.
-OFGPU_DEV bool vofFluxIsPrescribed(oflabel kind, ofscalar fr)
+//  force at all. `uKind` is the VELOCITY field's bc_kind, asked only against
+//  OFGPU_BC_DIRECTION_MIXED (SPEC-LIT 120.3): the flux through such a face is
+//  U_b . Sf and no pressure correction's.
+OFGPU_DEV bool vofFluxIsPrescribed(oflabel kind, ofscalar fr, oflabel uKind)
 {
     return kind == OFPATCH_EMPTY
         || kind == OFPATCH_SYMMETRY
+        || kind == OFPATCH_WEDGE
+        || uKind == OFGPU_BC_DIRECTION_MIXED
         || fr >= (ofscalar)1;
 }
 
@@ -1042,6 +1055,7 @@ extern "C" __global__ void vofBodyForceFluxBoundary
     const ofvec3* __restrict__ bCf,
     const oflabel* __restrict__ bKind,
     const ofscalar* __restrict__ fr,
+    const oflabel* __restrict__ uKind,
     ofscalar gx,
     ofscalar gy,
     ofscalar gz,
@@ -1052,7 +1066,7 @@ extern "C" __global__ void vofBodyForceFluxBoundary
     const oflabel i = OFGPU_TID;
     if (i >= nbf) return;
 
-    if (vofFluxIsPrescribed(bKind[i], fr[i]))
+    if (vofFluxIsPrescribed(bKind[i], fr[i], uKind[i]))
     {
         bphib[i] = 0;
         return;

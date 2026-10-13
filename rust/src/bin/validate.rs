@@ -3603,6 +3603,20 @@ fn run(c: &mut Checks) -> Result<()> {
     c.leave_gate();
     c.replaying(check_kays_crawford_experiment_replay);
     }
+    // SPEC-LIT 121.8 - Gate CMP-B: the de Vahl Davis cavity under the
+    // Boussinesq force, its centro-symmetry, and the density-ratio control.
+    if c.section("Gate CMP-B: de Vahl Davis with Boussinesq at beta*dT = 0.03, centro-symmetry, and the density-ratio control (SPEC-LIT 121.8)") {
+    c.enter_gate("SPEC-LIT 121.8 Gate CMP-B de Vahl Davis with Boussinesq");
+    check_boussinesq_cavity(c, &gpu)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 119.3 - Gate 119-A: the wedge, Hagen-Poiseuille through the
+    // axis prisms and radial conduction in an annulus.
+    if c.section("Gate 119-A: the wedge - Hagen-Poiseuille through the axis prisms and radial conduction in an annulus (SPEC-LIT 119.3)") {
+    c.enter_gate("SPEC-LIT 119.3 Gate 119-A the wedge");
+    check_wedge_gate(c, &gpu)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }
@@ -6132,6 +6146,82 @@ fn dvd_document(n: usize, ra: Scalar, iterations: usize, residual: Scalar) -> St
     )
 }
 
+/// Gate CMP-B's cavity: `dvd_document`'s document with the hot and cold
+/// walls at 304.5 K and 295.5 K (`DeltaT = 9 K` about `TRef = 300 K`, so
+/// `beta DeltaT = 0.03` with `beta = 1/300`) and `g_y = -(0.71 ra / 0.03)`,
+/// the value that makes `Ra = g beta DeltaT L^3 / (nu alpha)` with
+/// `nu = 0.71`, `alpha = 1`, `L = 1` (SPEC-LIT 121.8). `boussinesq = false`
+/// is the control, the density-ratio force, which then carries neither
+/// `model` nor `beta`. `grading = Some(e)` grades the x and y axes
+/// two-sided with expansion `e`; the graded mesh stays centro-symmetric,
+/// which is what lets run 4 use it.
+fn cmp_b_document(
+    n: usize,
+    ra: f64,
+    boussinesq: bool,
+    grading: Option<f64>,
+    iterations: usize,
+) -> String {
+    let dz = 1.0 / n as f64;
+    let g = 0.71 * ra / 0.03;
+    let beta = 1.0 / 300.0;
+    let model = if boussinesq {
+        format!(r#", "model": "boussinesq", "beta": {beta}"#)
+    } else {
+        String::new()
+    };
+    let grade = grading
+        .map(|e| {
+            format!(
+                r#",
+        "grading": {{ "x": {{ "expansion": {e}, "twoSided": true }}, "y": {{ "expansion": {e}, "twoSided": true }} }}"#
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"{{
+  "name": "deVahlDavisCMPB",
+  "regions": [
+    {{
+      "name": "air", "kind": "fluid",
+      "mesh": {{
+        "bounds": {{ "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, {dz}] }},
+        "cells": [{n}, {n}, 1]{grade},
+        "boundaries": {{
+          "xmin": "hot",    "xmax": "cold",
+          "ymin": "bottom", "ymax": "top",
+          "zmin": "front",  "zmax": "back"
+        }}
+      }},
+      "fluid": {{ "rho": 1.0, "cp": 1.0, "kappa": 1.0, "mu": 0.71 }},
+      "patches": [
+        {{ "match": "hot",    "T": {{ "type": "fixedValue", "value": 304.5 }} }},
+        {{ "match": "cold",   "T": {{ "type": "fixedValue", "value": 295.5 }} }},
+        {{ "match": "bottom", "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "top",    "T": {{ "type": "zeroGradient" }} }},
+        {{ "match": "front",  "T": {{ "type": "empty" }} }},
+        {{ "match": "back",   "T": {{ "type": "empty" }} }}
+      ]
+    }}
+  ],
+  "buoyancy": {{ "g": [0.0, -{g}, 0.0], "TRef": 300.0{model} }},
+  "initial": {{ "T": 300.0 }},
+  "run": {{ "steady": true, "iterations": {iterations} }},
+  "numerics": {{
+    "solver": "PBiCGStab", "preconditioner": "DILU",
+    "tolerance": 1e-16, "maxIter": 400,
+    "flow": {{
+      "relaxU": 0.7, "relaxP": 0.3, "relaxT": 0.7,
+      "divSchemeU": "Gauss linear", "divSchemeT": "Gauss linear",
+      "residual": 1e-9,
+      "uTolerance": 1e-14, "pTolerance": 1e-14,
+      "uMaxIter": 150, "pMaxIter": 500
+    }}
+  }}
+}}"#
+    )
+}
+
 /// What one conjugate run measured: the average Nusselt number of (S60.1),
 /// taken three ways.
 struct NuTriple {
@@ -6189,6 +6279,627 @@ fn run_kp_document(gpu: &Gpu, text: &str, n: usize, conjugate: bool) -> Result<N
         iterations: sol.iterations,
         converged: sol.converged,
     })
+}
+
+/// The width at which two cell-centre coordinates count as the same
+/// coordinate when the partner map's ranks are built: an ulp-level cleaning
+/// of the block generator's per-cell arithmetic, not a tolerance any row is
+/// held against. Cells of one column differ by up to a few ulp of the build
+/// (f64: under 1e-9 measured; f32: a few times 1e-7), while the narrowest
+/// graded column spacing here is over 3e-3 - the width sits far below that.
+const CMP_B_SNAP: f64 = 1.0e-5;
+
+/// Gate CMP-B's four Boussinesq runs: `(Ra, n, grading expansion, iteration
+/// cap)` (SPEC-LIT 121.8). Run 4's mesh is graded two-sided, expansion 4, on
+/// x and y - the graded mesh is itself centro-symmetric.
+const CMP_B_RUNS: [(f64, usize, Option<f64>, usize); 4] = [
+    (1.0e3, 40, None, 2500),
+    (1.0e4, 60, None, 3500),
+    (1.0e5, 80, None, 5000),
+    (1.0e6, 120, Some(4.0), 8000),
+];
+
+/// de Vahl Davis (1983)'s mean Nusselt number at the four Rayleigh numbers
+/// above, read from Qi et al., Nanoscale Research Letters 8 (2013) 56,
+/// Table 3 (open access) - the same secondary the Gate 59-A number is read
+/// from. The Ra = 1e4 entry is `devahldavis1983`'s number, marked at Gate
+/// 59-A; a marker may appear once, so it is not repeated here.
+const CMP_B_PUBLISHED: [f64; 4] = [
+    // answer-key: devahldavis1983-ra1e3
+    1.118,
+    2.243,
+    // answer-key: devahldavis1983-ra1e5
+    4.519,
+    // answer-key: devahldavis1983-ra1e6
+    8.800,
+];
+
+/// What one Gate CMP-B run is reduced to, every number of it formed in f64
+/// on the host - under `single` too, which is the point: the measures see
+/// the f32 field through f64 arithmetic (SPEC-LIT 121.8, (121.9)-(121.12)).
+struct CmpBMeasures {
+    nu_cold: f64,
+    nu_hot: f64,
+    w: f64,
+    s_t: f64,
+    s_u: f64,
+    iterations: usize,
+    converged: bool,
+}
+
+impl CmpBMeasures {
+    /// `s` - the worse of the two centro-symmetry defects, (121.11)'s `s_T`
+    /// and (121.12)'s `s_U`.
+    fn s(&self) -> f64 {
+        self.s_t.max(self.s_u)
+    }
+}
+
+/// One axis's rank per cell. The "distinct coordinates" are the groups of
+/// values that sit within `CMP_B_SNAP` of their group's first value: the
+/// block generator forms each cell's centre from that cell's own nodes, so
+/// cells of one column can differ from each other by an ulp or two, and the
+/// ranks must not notice. `n` groups must come out of `n` columns.
+fn cmp_b_axis_ranks(vals: &[(f64, usize)], n: usize, axis: &str) -> Result<Vec<usize>> {
+    let mut sorted = vals.to_vec();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut ranks = vec![0usize; sorted.len()];
+    let mut groups = 0usize;
+    let mut group_start = 0.0f64;
+    let mut min_inside = f64::INFINITY;
+    let mut min_between = f64::INFINITY;
+    let mut firsts = String::new();
+    for (k, &(v, cell)) in sorted.iter().enumerate() {
+        if k == 0 || v - group_start > CMP_B_SNAP {
+            if k > 0 {
+                min_between = min_between.min(v - group_start);
+            }
+            groups += 1;
+            group_start = v;
+            if groups <= 4 {
+                firsts.push_str(&format!(" {v:.17e}"));
+            }
+        } else {
+            min_inside = min_inside.min(v - group_start);
+        }
+        ranks[cell] = groups - 1;
+    }
+    if groups != n {
+        return Err(ofgpu::Error::Config(format!(
+            "Gate CMP-B: the cavity's cells span {groups} distinct {axis} coordinates, not \
+             the {n} its {n}x{n} block has ({} cells; smallest gap inside a group \
+             {min_inside:.3e}, smallest gap between groups {min_between:.3e}; first group \
+             starts{firsts}), so the centro-symmetric partner map cannot be built",
+            vals.len()
+        )));
+    }
+    Ok(ranks)
+}
+
+/// The centro-symmetric partner of every cavity cell: the cell whose centre
+/// is `(1 - x, 1 - y)`. Built from the cell centres alone - each axis's
+/// distinct coordinates are ranked, and the partner of ranks `(i, j)` is
+/// `(n - 1 - i, n - 1 - j)`; no cell index order is assumed. On the graded
+/// mesh the ranks answer the same map, because the grading is two-sided. If
+/// the map is not a bijection of all `n*n` cells, `Err`, saying so.
+fn cmp_b_partner(centres: &[Vec3], n: usize) -> Result<Vec<usize>> {
+    let xs: Vec<(f64, usize)> =
+        centres.iter().enumerate().map(|(i, p)| (f64::from(p.x), i)).collect();
+    let ys: Vec<(f64, usize)> =
+        centres.iter().enumerate().map(|(i, p)| (f64::from(p.y), i)).collect();
+    let xr = cmp_b_axis_ranks(&xs, n, "x")?;
+    let yr = cmp_b_axis_ranks(&ys, n, "y")?;
+    let mut grid = vec![usize::MAX; n * n];
+    for (cell, &i) in xr.iter().enumerate() {
+        let slot = i * n + yr[cell];
+        if grid[slot] != usize::MAX {
+            return Err(ofgpu::Error::Config(
+                "Gate CMP-B: two cells share one (x, y) centre rank; the partner map is not a \
+                 bijection"
+                    .into(),
+            ));
+        }
+        grid[slot] = cell;
+    }
+    let mut partner = vec![usize::MAX; n * n];
+    for (cell, &i) in xr.iter().enumerate() {
+        partner[cell] = grid[(n - 1 - i) * n + (n - 1 - yr[cell])];
+    }
+    if partner.iter().any(|&p| p == usize::MAX) {
+        return Err(ofgpu::Error::Config(
+            "Gate CMP-B: the centro-symmetric partner map is not a bijection of all n*n cells"
+                .into(),
+        ));
+    }
+    Ok(partner)
+}
+
+/// Reduce one solved cavity to (121.9)-(121.12): the two walls' Nusselt
+/// numbers, their disagreement, the temperature and velocity
+/// centro-symmetry defects.
+fn cmp_b_reduce(sol: &ofgpu::cht::flow::ChtFlowSolution, n: usize) -> Result<CmpBMeasures> {
+    const T_REF: f64 = 300.0;
+    const D_T: f64 = 9.0; // K; k = 1 W/(m K) on this case's fluid
+    // (121.9): Nu = |Q| / (k DeltaT d_z), d_z = 1/n on the unit square.
+    let dz = 1.0 / n as f64;
+    let nu_cold = f64::from(sol.patch_heat_flow(0, "cold")?.abs()) / (D_T * dz);
+    let nu_hot = f64::from(sol.patch_heat_flow(0, "hot")?.abs()) / (D_T * dz);
+    let w = (nu_hot - nu_cold).abs() / nu_cold;
+
+    let partner = cmp_b_partner(&sol.mesh.host.c, n)?;
+    let t: Vec<f64> = sol.t.iter().map(|&v| f64::from(v)).collect();
+    let uv: Vec<(f64, f64)> =
+        sol.u.iter().map(|v| (f64::from(v.x), f64::from(v.y))).collect();
+    let mut s_t = 0.0f64;
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (cell, &mate) in partner.iter().enumerate() {
+        // (121.11): the odd part of T about the cavity centre, over DeltaT.
+        s_t = s_t.max(((t[cell] - T_REF) + (t[mate] - T_REF)).abs());
+        let (u1, v1) = uv[cell];
+        let (u2, v2) = uv[mate];
+        // (121.12)'s numerator and denominator as it walks the same cells.
+        num = num.max((u1 + u2).abs()).max((v1 + v2).abs());
+        den = den.max(u1.abs()).max(v1.abs());
+    }
+    if !(den > 0.0) {
+        // Zero or NaN: no denominator, and dividing would either raise 0/0
+        // or let a NaN field pose as symmetric.
+        return Err(ofgpu::Error::Config(format!(
+            "Gate CMP-B: the greatest |u| or |v| over the cavity is {den}, so (121.12)'s s_U \
+             has no denominator"
+        )));
+    }
+    Ok(CmpBMeasures {
+        nu_cold,
+        nu_hot,
+        w,
+        s_t: s_t / D_T,
+        s_u: num / den,
+        iterations: sol.iterations,
+        converged: sol.converged,
+    })
+}
+
+/// Parse, lower and run one Gate CMP-B document, returning the whole
+/// solution - the reduction needs the field, not only the wall heat.
+fn run_cmp_b_document(gpu: &Gpu, text: &str) -> Result<ofgpu::cht::flow::ChtFlowSolution> {
+    use ofgpu::cht::flow::run_flow_case;
+    use ofgpu::io::case_cht::parse_cht_case;
+
+    let low = parse_cht_case(text, "SPEC-LIT 121.8 gate")?.lower()?;
+    let case = low
+        .flow_case()
+        .ok_or_else(|| ofgpu::Error::Config("the gate's own document has no fluid".into()))?;
+    run_flow_case(gpu, &case)
+}
+
+/// **SPEC-LIT 121.8's Gate CMP-B (CMP-04).** The de Vahl Davis square cavity
+/// under the Boussinesq force at `beta DeltaT = 0.03`, at four Rayleigh
+/// numbers: each run's cold-wall Nu against the published mean, its two
+/// walls' agreement, and its field's centro-symmetry - then the density-
+/// ratio force at the same `DeltaT` as the control that is measurably NOT
+/// centro-symmetric. No published number is re-marked here that Gate 59-A
+/// already carries, and no row's tolerance moves to let a row through.
+#[allow(clippy::too_many_lines)]
+fn check_boussinesq_cavity(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    // The R-class tolerance (docs/17 5.1.4, rule D-F32-1):
+    // tol32 = max(tol64, min(tol64 * 2^29, 1e-5)) = 1e-5 under single.
+    let tol_r = if cfg!(feature = "single") { 1.0e-5 } else { 1.0e-6 };
+    for (i, &(ra, n, grading, cap)) in CMP_B_RUNS.iter().enumerate() {
+        if cfg!(feature = "single") && i == 3 {
+            c.skip(
+                "Gate CMP-B, Ra = 1e6 on the 120x120 two-sided graded mesh, Boussinesq",
+                "deferred under single by the 10-minute rule (docs/17 5.3 rule 4, the CMP-04 \
+                 row): in f32 the outer loop does not reach the 1e-9 residual, so the run \
+                 takes all 8000 iterations",
+            );
+            continue;
+        }
+        let sol = run_cmp_b_document(gpu, &cmp_b_document(n, ra, true, grading, cap))?;
+        let m = cmp_b_reduce(&sol, n)?;
+        let tag = format!("Gate CMP-B, Ra = {ra:.0e}, the {n}x{n} mesh, Boussinesq");
+        c.note(&format!(
+            "{tag}: Nu_cold {} Nu_hot {} = {:+.2}% of the published {}; w {} s_T {} s_U {}; \
+             {} iterations, converged {}",
+            sci(m.nu_cold, 5),
+            sci(m.nu_hot, 5),
+            100.0 * (m.nu_cold / CMP_B_PUBLISHED[i] - 1.0),
+            CMP_B_PUBLISHED[i],
+            sci(m.w, 3),
+            sci(m.s_t, 3),
+            sci(m.s_u, 3),
+            m.iterations,
+            m.converged,
+        ));
+        // The published means sit in CMP_B_PUBLISHED under their own
+        // answer-key markers; the Ra = 1e4 entry's marker is Gate 59-A's.
+        c.check(
+            &format!("{tag}: Nu_cold within 2 % of de Vahl Davis (1983)'s mean Nu"),
+            (m.nu_cold / CMP_B_PUBLISHED[i] - 1.0).abs() as Scalar,
+            0.02 as Scalar,
+        );
+        c.check(
+            &format!("{tag}: the two walls carry the same heat, w (121.10)"),
+            m.w as Scalar,
+            tol_r as Scalar,
+        );
+        c.check(
+            &format!("{tag}: the field is centro-symmetric, s = max(s_T, s_U) (121.11, 121.12)"),
+            m.s() as Scalar,
+            tol_r as Scalar,
+        );
+    }
+
+    // The control: the density-ratio force at the same DeltaT. Under (121.2)
+    // its force has an even part in (T - T_ref), of relative size
+    // (T - T_ref)/T_ref, so its solution is not centro-symmetric - and this
+    // run says by how much, where the Boussinesq runs above sit at round-off.
+    let sol = run_cmp_b_document(gpu, &cmp_b_document(60, 1.0e4, false, None, 5000))?;
+    let m = cmp_b_reduce(&sol, 60)?;
+    c.note(&format!(
+        "Gate CMP-B control, Ra = 1e4, the 60x60 mesh, density ratio: Nu_cold {} Nu_hot {}; \
+         w {} s_T {} s_U {}; {} iterations, converged {}",
+        sci(m.nu_cold, 5),
+        sci(m.nu_hot, 5),
+        sci(m.w, 3),
+        sci(m.s_t, 3),
+        sci(m.s_u, 3),
+        m.iterations,
+        m.converged,
+    ));
+    c.require(
+        "Gate CMP-B control: the density-ratio force at the same DeltaT is NOT \
+         centro-symmetric (s >= 1e-3)",
+        m.s() >= 1.0e-3,
+    );
+    Ok(())
+}
+
+// ==========================================================================
+//  Gate 119-A (SPEC-LIT 119.3) - the wedge: Hagen-Poiseuille through the
+//  axis prisms, and radial conduction in an annulus
+// ==========================================================================
+
+/// An f64 answer-key value narrowed to the build's `Scalar`, once, at the
+/// point a check takes it: rows 1-3 are class P and row 4 class D of
+/// docs/17 5.1, so every tolerance below is the same in both builds and no
+/// f32-specific tolerance exists anywhere in this gate.
+#[allow(clippy::useless_conversion)]
+fn wedge_s64(x: f64) -> Scalar {
+    x as Scalar
+}
+
+/// The build's `Scalar` widened to the f64 the answer keys are computed in.
+#[allow(clippy::useless_conversion)]
+fn wedge_w64(x: Scalar) -> f64 {
+    x as f64
+}
+
+/// The pipe of 119.3's gate: r 0..0.5 in 32 cells, z 0..1 in 4, 5 deg,
+/// outer wall, patch end planes; the axis cells are the 5-face prisms of
+/// 119.0 and no inner patch exists.
+fn wedge_pipe_mesh() -> Result<HostMesh> {
+    use ofgpu::blockgen::{build_wedge_mesh, WedgeSpec};
+    build_wedge_mesh(&WedgeSpec {
+        r: GradedAxis { lo: wedge_s64(0.0), hi: wedge_s64(0.5), n: 32, ..GradedAxis::default() },
+        z: GradedAxis { lo: wedge_s64(0.0), hi: wedge_s64(1.0), n: 4, ..GradedAxis::default() },
+        theta_deg: 5.0,
+        patch_type: [
+            "wall".to_string(),
+            "wall".to_string(),
+            "patch".to_string(),
+            "patch".to_string(),
+        ],
+    })
+}
+
+/// The annulus of 119.3's gate: r 1..2 in 32 cells, z 0..0.1 one cell, 5
+/// deg, inner/outer walls, symmetry end planes.
+fn wedge_annulus_mesh() -> Result<HostMesh> {
+    use ofgpu::blockgen::{build_wedge_mesh, WedgeSpec};
+    build_wedge_mesh(&WedgeSpec {
+        r: GradedAxis { lo: wedge_s64(1.0), hi: wedge_s64(2.0), n: 32, ..GradedAxis::default() },
+        z: GradedAxis { lo: wedge_s64(0.0), hi: wedge_s64(0.1), n: 1, ..GradedAxis::default() },
+        theta_deg: 5.0,
+        patch_type: [
+            "wall".to_string(),
+            "wall".to_string(),
+            "symmetry".to_string(),
+            "symmetry".to_string(),
+        ],
+    })
+}
+
+/// **SPEC-LIT 119.3's Gate 119-A.** Two closed forms on the 119.0 mesh at
+/// the full angle of 5 degrees, with the 119.2 condition on `back` and
+/// `front`, compared in f64 at the cell centroids the mesh reports. The
+/// flow is pressure-driven - `G = Dp/L = 0.32` is an INPUT, nothing is
+/// tuned - and the conduction run is a steady Laplace problem through the
+/// library's own scalar-transport path with zero flux.
+fn check_wedge_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+    use ofgpu::field_setup::{setup_scalar_field, setup_vector_field_with, BcInputs};
+    use ofgpu::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
+    use ofgpu::momentum::{BuoyancyCoeffs, MomentumControls};
+    use ofgpu::pressure::SystemProbe;
+    use ofgpu::simple::{Simple, SimpleControls};
+    use ofgpu::solver::SolverControls;
+    use ofgpu::turbulence::FlowState;
+    use std::collections::BTreeMap;
+
+    // ---- the mesh rows (class D) -------------------------------------
+    let hm = wedge_pipe_mesh()?;
+    c.require(
+        "Gate 119-A: the pipe mesh carries the derived wedge of 119.1",
+        hm.wedge.is_some(),
+    );
+    let mut faces_per_cell = vec![0u32; hm.n_cells];
+    for f in 0..hm.n_internal_faces {
+        faces_per_cell[hm.owner[f] as usize] += 1;
+        faces_per_cell[hm.neighbour[f] as usize] += 1;
+    }
+    for bf in 0..hm.n_boundary_faces {
+        faces_per_cell[hm.b_face_cells[bf] as usize] += 1;
+    }
+    let n_prisms = faces_per_cell.iter().filter(|&&k| k == 5).count();
+    c.require(
+        "Gate 119-A: exactly 4 cells of the pipe have 5 faces (one axis prism per axial station)",
+        n_prisms == 4,
+    );
+
+    // ---- the Hagen-Poiseuille run -------------------------------------
+    let gm = GpuMesh::upload(gpu, &hm)?;
+    let nu = wedge_s64(0.01);
+    let tight = || SolverControls {
+        tolerance: 1e-14,
+        rel_tol: 0.0,
+        max_iter: 500,
+        check_interval: 1,
+        ..SolverControls::default()
+    };
+    // Default SIMPLE relaxation (0.7/0.3; simplec stays off - SPEC-LIT
+    // 119.2 records what it does to a wedge flow). Uncorrected snGrad: the
+    // mesh is orthogonal, so that IS the centroid-to-centroid gradient the
+    // 1-D host model assumes.
+    let ctrl = SimpleControls {
+        momentum: MomentumControls {
+            nu,
+            u_solver: tight(),
+            sn_grad: SnGradScheme::Uncorrected,
+            ..MomentumControls::default()
+        },
+        p_solver: tight(),
+        ..SimpleControls::default()
+    };
+    let mut sim = Simple::new(
+        gpu,
+        &hm,
+        &gm,
+        ctrl,
+        BuoyancyCoeffs { g: Vec3::ZERO, ..BuoyancyCoeffs::default() },
+    )?;
+    let ps = |ty: &str| PatchFieldSpec { type_name: ty.to_string(), ..PatchFieldSpec::default() };
+    let mut p_in = ps("fixedValue");
+    p_in.value = vec![wedge_s64(0.32)];
+    let mut p_out = ps("fixedValue");
+    p_out.value = vec![wedge_s64(0.0)];
+    let boundary: BTreeMap<String, PatchFieldSpec> = [
+        ("outer", ps("noSlip")),
+        ("zmin", ps("zeroGradient")),
+        ("zmax", ps("zeroGradient")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    setup_vector_field_with(
+        gpu,
+        sim.u_mut(),
+        &RawVectorField {
+            name: "U".to_string(),
+            internal: vec![Vec3::ZERO],
+            boundary,
+            ..RawVectorField::default()
+        },
+        &hm,
+        BcInputs::default(),
+    )?;
+    let p_boundary: BTreeMap<String, PatchFieldSpec> = [
+        ("outer", ps("zeroGradient")),
+        ("zmin", p_in),
+        ("zmax", p_out),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    setup_scalar_field(
+        gpu,
+        sim.p_mut(),
+        &RawScalarField {
+            name: "p".to_string(),
+            internal: vec![wedge_s64(0.0)],
+            boundary: p_boundary,
+            ..RawScalarField::default()
+        },
+        &hm,
+    )?;
+    sim.initialise(gpu)?;
+
+    // Laminar: zero eddy viscosity, `calculated` boundary values; a uniform
+    // T nothing reads while the buoyancy vector is zero.
+    let mut nut = GpuScalarField::zeros(gpu, &gm, "nut")?;
+    gpu.write(
+        &mut nut.bc_kind,
+        &vec![BcKind::Calculated as Label; hm.n_boundary_faces],
+    )?;
+    let mut t = GpuScalarField::zeros(gpu, &gm, "T")?;
+    gpu.write(
+        &mut t.bc_kind,
+        &vec![BcKind::ZeroGradient as Label; hm.n_boundary_faces],
+    )?;
+    let mut backend = ofgpu::pressure::PbicgstabBackend::new(ctrl.p_solver);
+    backend.setup(gpu, &hm, &gm, &SystemProbe::default())?;
+
+    // Fixed point: stop when the largest change of any U component between
+    // two iterations is below 1e-12. The f64 run reached it at 3682
+    // iterations (measured 2026-10-13, on this tree); the cap is twice
+    // that. A non-finite U is an Err, never a row that passes.
+    const CAP: usize = 7400;
+    let started = std::time::Instant::now();
+    let mut prev = gpu.download(&sim.u().f)?;
+    let mut iterations = 0usize;
+    let mut converged = false;
+    for it in 0..CAP {
+        sim.correct(gpu, &mut backend, &nut, &t)?;
+        let now = gpu.download(&sim.u().f)?;
+        let bad = now.iter().enumerate().find(|(_, v)| {
+            !wedge_w64(v.x).is_finite()
+                || !wedge_w64(v.y).is_finite()
+                || !wedge_w64(v.z).is_finite()
+        });
+        if let Some((cell, v)) = bad {
+            return Err(Error::Diverged {
+                iteration: it,
+                what: format!("Gate 119-A pipe: U cell {cell} went non-finite: {v:?}"),
+            });
+        }
+        let change = prev
+            .iter()
+            .zip(&now)
+            .fold(0.0f64, |m, (a, b)| {
+                m.max((wedge_w64(a.x) - wedge_w64(b.x)).abs())
+                    .max((wedge_w64(a.y) - wedge_w64(b.y)).abs())
+                    .max((wedge_w64(a.z) - wedge_w64(b.z)).abs())
+            });
+        prev = now;
+        iterations = it + 1;
+        if change < 1e-12 {
+            converged = true;
+            break;
+        }
+    }
+
+    // ---- rows 1 and 2, everything in f64 ------------------------------
+    let g = hm.geom64();
+    let vols: Vec<f64> = g.v.to_vec();
+    let total_v: f64 = vols.iter().sum();
+    let u_bar = prev
+        .iter()
+        .enumerate()
+        .map(|(i, v)| wedge_w64(v.z) * vols[i])
+        .sum::<f64>()
+        / total_v;
+    // (119.3d): the even parabola through the two cells nearest the axis
+    // of the first axial station (cells 0 and 1 of c(i,k) = i + nr*k),
+    // evaluated at r = 0, from the f64 centroid radii.
+    let (r0, r1) = (g.c[0].x, g.c[1].x);
+    let (u0, u1) = (wedge_w64(prev[0].z), wedge_w64(prev[1].z));
+    let u_max = u0 + (u0 - u1) * r0 * r0 / (r1 * r1 - r0 * r0);
+    let row1 = ((u_max / u_bar - 2.0) / 2.0).abs();
+    // (119.3c) from the measured U_bar and the INPUT G = 0.32.
+    let big_g = 0.32f64;
+    let d = 1.0f64;
+    let f_re = 2.0 * d * d * big_g / (0.01 * u_bar);
+    let row2 = ((f_re - 64.0) / 64.0).abs();
+    let re = u_bar * d / 0.01;
+    c.note(&format!(
+        "Gate 119-A pipe: U_bar {:.6} u_max {:.6} Re {:.1} f Re {:.3}; {iterations} \
+         iterations to the 1e-12 fixed point (converged {converged}), {:.1?} wall",
+        u_bar,
+        u_max,
+        re,
+        f_re,
+        started.elapsed()
+    ));
+    c.check(
+        "Gate 119-A: |u_max/U_bar - 2|/2, Hagen-Poiseuille through the axis prisms (119.3a-d)",
+        wedge_s64(row1),
+        wedge_s64(5e-3),
+    );
+    c.check(
+        "Gate 119-A: |f Re - 64|/64, the Darcy friction product (119.3c)",
+        wedge_s64(row2),
+        wedge_s64(1e-2),
+    );
+
+    // ---- the conduction run -------------------------------------------
+    let han = wedge_annulus_mesh()?;
+    let gan = GpuMesh::upload(gpu, &han)?;
+    let mut t_ctrl = ofgpu::turbulence::TurbulenceControls::default();
+    t_ctrl.k_relax = 1.0;
+    t_ctrl.k_solver = tight();
+    t_ctrl.sn_grad = SnGradScheme::Uncorrected;
+    let mut heat = ofgpu::scalar_transport::ScalarTransport::new(
+        gpu,
+        &han,
+        &gan,
+        "T",
+        ofgpu::scalar_transport::ScalarTransportCoeffs { pr: 1.0, prt: 1.0 },
+        t_ctrl,
+    )?;
+    let t_boundary: BTreeMap<String, PatchFieldSpec> =
+        [("inner", ps("fixedValue")), ("outer", ps("fixedValue"))]
+            .into_iter()
+            .map(|(k, v)| {
+                let mut s = v;
+                if k == "inner" {
+                    s.value = vec![wedge_s64(0.0)];
+                } else {
+                    s.value = vec![wedge_s64(1.0)];
+                }
+                (k.to_string(), s)
+            })
+            .collect();
+    setup_scalar_field(
+        gpu,
+        heat.field_mut(),
+        &RawScalarField {
+            name: "T".to_string(),
+            internal: vec![wedge_s64(0.0)],
+            boundary: t_boundary,
+            ..RawScalarField::default()
+        },
+        &han,
+    )?;
+    heat.initialise(gpu)?;
+
+    // No flow, no source: the steady Laplace problem. Iterate until the
+    // field stops changing (the path relaxes by k_relax, 1.0 here, so the
+    // single implicit solve is the answer and the loop confirms it).
+    let u_zero = GpuVectorField::zeros(gpu, &gan, "U")?;
+    let phi_zero = GpuSurfaceScalarField::zeros(gpu, &gan, "phi")?;
+    let nut_zero = GpuScalarField::zeros(gpu, &gan, "nut")?;
+    let flow = FlowState::new(&u_zero, &phi_zero, wedge_s64(1.0));
+    let mut t_prev = gpu.download(&heat.field().f)?;
+    for _ in 0..10 {
+        heat.correct(gpu, &flow, &nut_zero)?;
+        let now = gpu.download(&heat.field().f)?;
+        let change = t_prev
+            .iter()
+            .zip(&now)
+            .fold(0.0f64, |m, (a, b)| m.max((wedge_w64(*a) - wedge_w64(*b)).abs()));
+        t_prev = now;
+        if change < 1e-14 {
+            break;
+        }
+    }
+    // row 3: max |T_i - ln(r_i)/ln 2| over the f64 centroid radii.
+    let ga = han.geom64();
+    let ln2 = 2.0f64.ln();
+    let row3 = (0..han.n_cells)
+        .map(|i| {
+            let r = ga.c[i].x;
+            (wedge_w64(t_prev[i]) - r.ln() / ln2).abs()
+        })
+        .fold(0.0f64, f64::max);
+    c.note(&format!(
+        "Gate 119-A annulus: max |T - ln(r)/ln 2| = {row3:.3e} on 32 radial cells"
+    ));
+    c.check(
+        "Gate 119-A: max |T - ln(r)/ln 2|, radial conduction in the annulus (119.3e)",
+        wedge_s64(row3),
+        wedge_s64(1e-3),
+    );
+    Ok(())
 }
 
 /// **SPEC-LIT §59 and §60's gates.**

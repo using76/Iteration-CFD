@@ -70,6 +70,14 @@
 // --------------------------------------------------------------------------
 #define OFPATCH_EMPTY     2
 #define OFPATCH_SYMMETRY  3
+//- SPEC-LIT 119.2: a wedge side; treated as SYMMETRY in this module
+#define OFPATCH_WEDGE     7
+
+//- SPEC-LIT 120.3: the tensorial mixed velocity condition of the wall and
+//  slip family (directionMixed, partialSlip, fixedNormalSlip,
+//  fixedShearStress). Mirrors `BcKind::DirectionMixed` in src/field.rs and
+//  is pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
+#define OFGPU_BC_DIRECTION_MIXED 37
 
 //- The component view of a vector, as cuda/momentum.cu defines it: `cmpt` is
 //  0, 1 or 2, and anything else selects z, which is what `Vec3::component`
@@ -255,7 +263,9 @@ extern "C" __global__ void marBodyForceFlux
 //  edited, and hoisting a shared helper into a header would have been an
 //  edit. A wall flux is U_b . Sf and the pressure equation may not move it;
 //  giving such a face a body force would put a source into a cell whose flux
-//  cannot answer it, and a sealed box would drift.
+//  cannot answer it, and a sealed box would drift. `uKind` is the VELOCITY
+//  field's bc_kind, asked only against OFGPU_BC_DIRECTION_MIXED (SPEC-LIT
+//  120.3).
 //
 //  `marangoni_restates_the_prescribed_flux_predicate` pins the restatement
 //  against vofFluxIsPrescribed so the copy cannot drift from the original.
@@ -269,6 +279,7 @@ extern "C" __global__ void marBodyForceFluxBoundary
     const ofvec3* __restrict__ bCf,
     const oflabel* __restrict__ bKind,
     const ofscalar* __restrict__ fr,
+    const oflabel* __restrict__ uKind,
     ofscalar gx,
     ofscalar gy,
     ofscalar gz,
@@ -279,7 +290,8 @@ extern "C" __global__ void marBodyForceFluxBoundary
     if (i >= nbf) return;
 
     const oflabel k = bKind[i];
-    if (k == OFPATCH_EMPTY || k == OFPATCH_SYMMETRY || fr[i] >= (ofscalar)1)
+    if (k == OFPATCH_EMPTY || k == OFPATCH_SYMMETRY || k == OFPATCH_WEDGE
+        || uKind[i] == OFGPU_BC_DIRECTION_MIXED || fr[i] >= (ofscalar)1)
     {
         bphib[i] = 0;
         return;

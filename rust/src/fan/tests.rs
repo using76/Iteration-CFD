@@ -2314,7 +2314,7 @@ fn a_prescribed_velocity_face_carries_no_flux_whatever_the_pressure_says() {
          revisiting"
     );
     assert!(
-        src.contains("phi[i] = momFluxIsPrescribed(bKind[i], fr[i])"),
+        src.contains("phi[i] = momFluxIsPrescribed(bKind[i], fr[i], uKind[i])"),
         "and on `momCorrectFluxBoundary` asking it before applying snGrad(p)"
     );
 

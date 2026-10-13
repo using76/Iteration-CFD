@@ -1702,6 +1702,7 @@ impl<'m> Vof<'m> {
                 sn_grad_alpha,
                 kappa_f,
                 &u.fr,
+                &u.bc_kind,
                 g,
                 m,
             )?;
@@ -1741,6 +1742,7 @@ impl<'m> Vof<'m> {
                     .arg(&m.b_cf)
                     .arg(&m.b_kind)
                     .arg(&self.u.fr)
+                    .arg(&self.u.bc_kind)
                     .arg(&g.x)
                     .arg(&g.y)
                     .arg(&g.z)
@@ -1813,6 +1815,7 @@ impl<'m> Vof<'m> {
                     .arg(&self.sn_grad_p.bf)
                     .arg(&m.b_kind)
                     .arg(&self.u.fr)
+                    .arg(&self.u.bc_kind)
                     .arg(&nl)
                     .launch(cfg_for(nbf))?;
             }
@@ -2165,6 +2168,7 @@ impl<'m> Vof<'m> {
                     .arg(&m.b_nbr_cell)
                     .arg(&m.b_kind)
                     .arg(&self.u.fr)
+                    .arg(&self.u.bc_kind)
                     .arg(&nbl)
                     .launch(cfg_for(nbf))?;
             }
@@ -2284,6 +2288,7 @@ impl<'m> Vof<'m> {
                     .arg(&self.sn_grad_p.bf)
                     .arg(&m.b_kind)
                     .arg(&self.u.fr)
+                    .arg(&self.u.bc_kind)
                     .arg(&nl)
                     .launch(cfg_for(nbf))?;
             }

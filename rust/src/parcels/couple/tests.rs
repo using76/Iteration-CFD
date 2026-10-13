@@ -1571,6 +1571,7 @@ fn the_implicit_half_strengthens_the_diagonal() {
 #[test]
 fn the_host_reference_counts_only_live_parcels() {
     let mut s = ParcelSnapshot {
+        x64: vec![crate::DVec3::ZERO; 3],
         x: vec![Vec3::ZERO; 3],
         u: vec![Vec3::ZERO; 3],
         d: vec![1e-4; 3],

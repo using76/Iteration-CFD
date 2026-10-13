@@ -94,6 +94,10 @@ pub struct PatchFieldSpec {
     pub ref_gradient_v: Vec<Vec3>,
     pub inlet_value: Vec<Scalar>,
     pub inlet_value_v: Vec<Vec3>,
+    /// `outletInlet`'s outflow value (SPEC-LIT 120.4, (120.4a)), read and written
+    /// back exactly as `inletValue` is.
+    pub outlet_value: Vec<Scalar>,
+    pub outlet_value_v: Vec<Vec3>,
     /// Scalar even on a vector field: the mixed condition blends every
     /// component with the same fraction, so OpenFOAM stores a `scalarField`
     /// here whatever the field's rank.
@@ -108,8 +112,13 @@ pub struct PatchFieldSpec {
     /// value that cannot be read is reported by the condition that wanted it,
     /// naming the key, rather than silently defaulting here.
     ///
-    /// Sub-dictionaries are not captured; nothing needs one yet.
+    /// Sub-dictionaries are kept in [`Self::dicts`], not here.
     pub extra: BTreeMap<String, String>,
+
+    /// Every sub-dictionary entry `key { ... }`, keyed by `key`, holding the
+    /// text BETWEEN the braces, re-joinable by `FoamDict::parse`
+    /// (SPEC-LIT 120.1's forms 4 and 5).
+    pub dicts: BTreeMap<String, String>,
 }
 
 impl PatchFieldSpec {
@@ -479,6 +488,26 @@ fn gather_raw(tz: &mut Tokenizer) -> Result<String> {
     Ok(v)
 }
 
+/// [`append_raw`] for a captured sub-dictionary body: a `Tok::Str` is
+/// RE-QUOTED (`"a b.dat"` stays `"a b.dat"`) and the `;`, `{`, `}` tokens are
+/// kept, so `FoamDict::parse` on the captured text reads the same entries
+/// back. Re-reading a written file therefore yields an equal `PatchFieldSpec`.
+fn append_dict_raw(v: &mut String, t: &Tok) {
+    let opens_group = matches!(v.chars().last(), Some('(') | Some('[') | Some('{'));
+    let closes_group = t.is_punct(')') || t.is_punct(']') || t.is_punct('}') || t.is_punct(';');
+    if !v.is_empty() && !opens_group && !closes_group {
+        v.push(' ');
+    }
+    match t {
+        Tok::Str(s) => {
+            v.push('"');
+            v.push_str(s);
+            v.push('"');
+        }
+        _ => v.push_str(&t.to_string()),
+    }
+}
+
 /// Consume a preprocessor directive this reader cannot evaluate.
 ///
 /// `#include`-style directives carry a bare file name and NO `;`, so blindly
@@ -716,10 +745,51 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
         match k.as_str() {
             "type" => s.type_name = gather_raw(tz)?,
             "neighbourPatch" => s.neighbour_patch = Some(gather_raw(tz)?),
+            // SPEC-LIT 120.3: on a VECTOR field a `valueFraction` may be a
+            // symmTensor - `uniform (xx xy xz yy yz zz)` or `nonuniform
+            // List<symmTensor> N (...)` - which a scalar list cannot hold.
+            // Those two forms are kept VERBATIM in `extra`, the same way
+            // `directionMixed`'s setup re-reads them; every other form is a
+            // scalar entry exactly as before, so existing files parse
+            // identically. On a scalar field every form is a scalar entry.
+            "valueFraction" if is_vector => {
+                let tensor = (tz.is_word("uniform") && tz.is_punct_at('(', 1))
+                    || (tz.is_word("nonuniform")
+                        && matches!(tz.peek_at(1), Some(Tok::Word(w)) if w.contains("symmTensor")));
+                if tensor {
+                    let raw = gather_raw(tz)?;
+                    s.extra.insert("valueFraction".to_string(), raw);
+                } else {
+                    s.value_fraction = parse_scalar_entry(tz)?;
+                }
+            }
             // Always a scalar, even on a vector field.
             "valueFraction" => s.value_fraction = parse_scalar_entry(tz)?,
+            // SPEC-LIT 120.5: on a VECTOR field a `refValue` may be SCALAR -
+            // `uniform <number>` or `nonuniform List<scalar> ...` - which a
+            // vector list cannot hold. `surfaceNormalFixedValue` defines its
+            // velocity through exactly that entry, so the two scalar forms
+            // are kept VERBATIM in `extra`, the same way the symmTensor
+            // `valueFraction` above is kept; every other form parses as the
+            // vector entry it always was, so existing files are byte-
+            // identical on read and on write. On a scalar field every form
+            // is a scalar entry.
+            "refValue" if is_vector => {
+                let scalar_form = (tz.is_word("uniform") && !tz.is_punct_at('(', 1))
+                    || (tz.is_word("nonuniform")
+                        && matches!(tz.peek_at(1), Some(Tok::Word(w)) if w.contains("scalar")));
+                if scalar_form {
+                    let raw = gather_raw(tz)?;
+                    s.extra.insert("refValue".to_string(), raw);
+                } else {
+                    s.ref_value_v = parse_vector_entry(tz)?;
+                }
+            }
             // `refGrad` is the spelling some older cases use for refGradient.
-            "value" | "gradient" | "refValue" | "refGradient" | "refGrad" | "inletValue" => {
+            // `outletValue` is `outletInlet`'s outflow value (SPEC-LIT 120.4,
+            // (120.4a)), read exactly as `inletValue` is.
+            "value" | "gradient" | "refValue" | "refGradient" | "refGrad" | "inletValue"
+            | "outletValue" => {
                 if is_vector {
                     let v = parse_vector_entry(tz)?;
                     match k.as_str() {
@@ -727,6 +797,7 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
                         "gradient" => s.gradient_v = v,
                         "refValue" => s.ref_value_v = v,
                         "inletValue" => s.inlet_value_v = v,
+                        "outletValue" => s.outlet_value_v = v,
                         _ => s.ref_gradient_v = v,
                     }
                 } else {
@@ -736,6 +807,7 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
                         "gradient" => s.gradient = v,
                         "refValue" => s.ref_value = v,
                         "inletValue" => s.inlet_value = v,
+                        "outletValue" => s.outlet_value = v,
                         _ => s.ref_gradient = v,
                     }
                 }
@@ -747,7 +819,28 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
             // silent substitution SPEC-LIT §13.4 forbids.
             _ => {
                 if tz.is_punct('{') {
-                    tz.skip_entry()?;
+                    // A sub-dictionary is kept as its body text, between the
+                    // braces, so `FoamDict::parse` can read the same entries
+                    // back out of it (SPEC-LIT 120.1's forms 4 and 5).
+                    tz.next()?;
+                    let mut body = String::new();
+                    let mut depth = 1usize;
+                    loop {
+                        let Some(t) = tz.peek_at(0).cloned() else {
+                            return tz.err("unterminated '{'");
+                        };
+                        tz.next()?;
+                        if t.is_punct('{') {
+                            depth += 1;
+                        } else if t.is_punct('}') {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        append_dict_raw(&mut body, &t);
+                    }
+                    s.dicts.insert(k, body);
                 } else {
                     let v = gather_raw(tz)?;
                     s.extra.insert(k, v);
@@ -1203,6 +1296,9 @@ fn write_boundary_field(
             if !s.inlet_value_v.is_empty() {
                 write_vector_entry(out, "        ", "inletValue", &s.inlet_value_v, p, collapse);
             }
+            if !s.outlet_value_v.is_empty() {
+                write_vector_entry(out, "        ", "outletValue", &s.outlet_value_v, p, collapse);
+            }
             if !s.gradient_v.is_empty() {
                 write_vector_entry(out, "        ", "gradient", &s.gradient_v, p, collapse);
             }
@@ -1229,6 +1325,9 @@ fn write_boundary_field(
             if !s.inlet_value.is_empty() {
                 write_scalar_entry(out, "        ", "inletValue", &s.inlet_value, p, collapse);
             }
+            if !s.outlet_value.is_empty() {
+                write_scalar_entry(out, "        ", "outletValue", &s.outlet_value, p, collapse);
+            }
             if !s.gradient.is_empty() {
                 write_scalar_entry(out, "        ", "gradient", &s.gradient, p, collapse);
             }
@@ -1248,6 +1347,16 @@ fn write_boundary_field(
             write_keyword(out, "        ", k, 16);
             out.push_str(v);
             out.push_str(";\n");
+        }
+
+        // The captured sub-dictionaries (SPEC-LIT 120.1's forms 4 and 5) go
+        // back as `key { body }`, the body re-tokenising to the same tokens
+        // it was captured from, so a read-write-read cycle is the identity.
+        for (k, body) in &s.dicts {
+            write_keyword(out, "        ", k, 16);
+            out.push_str("{ ");
+            out.push_str(body);
+            out.push_str(" }\n");
         }
 
         out.push_str("    }\n");
@@ -1480,6 +1589,140 @@ mod tests {
         let back = read_vector_field(&path, 0).unwrap();
         assert_eq!(back, f);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT 120.3: a VECTOR field's `valueFraction` may be a symmTensor,
+    /// `uniform (xx xy xz yy yz zz)` or `nonuniform List<symmTensor> N (...)`.
+    /// Both forms are captured verbatim into `extra` (the scalar list the
+    /// struct field holds cannot carry six numbers a component), and a
+    /// read-write-read cycle must be the identity on the whole
+    /// [`PatchFieldSpec`] - while a plain scalar `valueFraction` on the same
+    /// field still lands in `value_fraction`, exactly as it always did.
+    #[test]
+    fn a_vector_symm_tensor_value_fraction_round_trips() {
+        let src = "\
+FoamFile { version 2.0; format ascii; class volVectorField; object U; }
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+boundaryField
+{
+    wall
+    {
+        type            directionMixed;
+        valueFraction   uniform (1 0.1 0 0.5 0 0.25);
+        refValue        uniform (1 2 3);
+        value           uniform (0 0 0);
+    }
+    ramp
+    {
+        type            directionMixed;
+        valueFraction   nonuniform List<symmTensor> 2 ((1 0 0 1 0 1) (0.5 0 0 0.25 0 0.75));
+        refValue        uniform (0 0 0);
+    }
+    mixed0
+    {
+        type            mixed;
+        valueFraction   uniform 0.25;
+        refValue        uniform (4 5 6);
+        value           uniform (0 0 0);
+    }
+}
+";
+        let f = read_vector_str(src, 4).unwrap();
+
+        // The tensor forms are verbatim in `extra`, `gather_raw`'s text.
+        assert_eq!(
+            f.boundary["wall"].extra.get("valueFraction").map(String::as_str),
+            Some("uniform (1 0.1 0 0.5 0 0.25)"),
+        );
+        assert_eq!(
+            f.boundary["ramp"].extra.get("valueFraction").map(String::as_str),
+            Some("nonuniform List<symmTensor> 2 ((1 0 0 1 0 1) (0.5 0 0 0.25 0 0.75))"),
+        );
+        // ... and the struct field stays empty for them, so the writer does
+        // not emit the entry twice.
+        assert!(f.boundary["wall"].value_fraction.is_empty());
+        assert!(f.boundary["ramp"].value_fraction.is_empty());
+        // A scalar valueFraction on a VECTOR field is untouched.
+        assert_eq!(f.boundary["mixed0"].value_fraction, vec![0.25]);
+
+        let dir = scratch("symmtensor_vf_rt");
+        let path = dir.join("0").join("U");
+        write_vector_field(&path, &f, "0").unwrap();
+
+        // The same cell count the first read used, so the written
+        // `uniform` internalField expands back to the same four cells.
+        let back = read_vector_field(&path, 4).unwrap();
+        assert_eq!(back.boundary["wall"], f.boundary["wall"]);
+        assert_eq!(back.boundary["ramp"], f.boundary["ramp"]);
+        assert_eq!(back.boundary["mixed0"], f.boundary["mixed0"]);
+        assert_eq!(back, f);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT 120.4, (120.4a): `outletInlet`'s `outletValue` - scalar and vector -
+    /// is read and written back exactly as `inletValue` is, so a run that
+    /// rewrites its case carries the condition it was set up with, and a
+    /// read-write-read cycle is the identity.
+    #[test]
+    fn outlet_value_round_trips() {
+        let src = "\
+FoamFile { version 2.0; format ascii; class volScalarField; object p; }
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+boundaryField
+{
+    outlet
+    {
+        type            outletInlet;
+        outletValue     uniform 3;
+        value           uniform 0;
+    }
+    spread
+    {
+        type            outletInlet;
+        outletValue     nonuniform List<scalar> 2 (3 4.5);
+        value           uniform 0;
+    }
+}
+";
+        let f = read_scalar_str(src, 3).unwrap();
+        assert_eq!(f.boundary["outlet"].outlet_value, vec![3.0]);
+        assert_eq!(f.boundary["spread"].outlet_value, vec![3.0, 4.5]);
+
+        let dir = scratch("outlet_value_rt");
+        let path = dir.join("0").join("p");
+        write_scalar_field(&path, &f, "0").unwrap();
+        let back = read_scalar_field(&path, 3).unwrap();
+        assert_eq!(back, f, "the scalar outletValue must survive the writer");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("outletValue"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let vsrc = "\
+FoamFile { version 2.0; format ascii; class volVectorField; object U; }
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+boundaryField
+{
+    outlet
+    {
+        type            outletInlet;
+        outletValue     uniform (1 2 3);
+        value           uniform (0 0 0);
+    }
+}
+";
+        let v = read_vector_str(vsrc, 3).unwrap();
+        assert_eq!(v.boundary["outlet"].outlet_value_v, vec![Vec3::new(1.0, 2.0, 3.0)]);
+
+        let dir = scratch("outlet_value_v_rt");
+        let path = dir.join("0").join("U");
+        write_vector_field(&path, &v, "0").unwrap();
+        let back = read_vector_field(&path, 3).unwrap();
+        assert_eq!(back, v, "the vector outletValue must survive the writer");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1770,6 +2013,50 @@ boundaryField {}
         assert!(text.contains("object      epsilon;"));
         assert!(text.contains("dimensions      [0 2 -3 0 0 0 0];"));
         assert!(text.ends_with("//\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sub-dictionary inside a patch entry (SPEC-LIT 120.1's form 5) must
+    /// survive both directions: kept out of `extra`, captured in `dicts`,
+    /// readable by `function1::patch_entries`, and written back so a
+    /// read-write-read cycle is the identity.
+    #[test]
+    fn sub_dictionaries_are_kept_and_round_trip() {
+        let src = "\
+FoamFile { version 2.0; format ascii; class volScalarField; object p; }
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+boundaryField
+{
+    inlet
+    {
+        type            uniformFixedValue;
+        uniformValue
+        {
+            type            table;
+            values          ((0 0) (1 2));
+            file            \"a b.dat\";
+        }
+        value           uniform 0;
+    }
+}
+";
+        let f = read_scalar_str(src, 1).unwrap();
+        let inlet = &f.boundary["inlet"];
+        assert!(inlet.dicts.contains_key("uniformValue"), "{:?}", inlet.dicts);
+        assert!(!inlet.extra.contains_key("uniformValue"));
+
+        let entries =
+            crate::function1::patch_entries(inlet, "p: boundaryField/inlet").unwrap();
+        assert_eq!(entries.get("uniformValue/type"), Some(&"table".to_string()));
+        assert_eq!(entries.get("uniformValue/file"), Some(&"a b.dat".to_string()));
+
+        let dir = scratch("subdict_rt");
+        let path = dir.join("0").join("p");
+        write_scalar_field(&path, &f, "0").unwrap();
+        let back = read_scalar_field(&path, 0).unwrap();
+        assert_eq!(back, f);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
