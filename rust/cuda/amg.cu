@@ -15,7 +15,10 @@
   (141.11) and (141.12). The slot order is diagonals first, then uppers,
   then lowers; kind 3 enters negated per (141.2). amgAmul applies a
   coarse level through its row map; amgJacobi (141.3.2) and amgChebyshev
-  (141.3.5) are the smoother updates of SPEC-LIT 141.3.
+  (141.3.5) are the smoother updates of SPEC-LIT 141.3. amgCoarseSolve
+  is the coarsest-level solve of SPEC-LIT 141.4: the two triangular
+  substitutions of the packed Cholesky factor, with the projection and
+  pin of a singular level, in one thread block.
   ==========================================================================
 
   Written from: SPEC-LIT.md 141.1, 141.2, 141.3; Notay, ETNA 37 (2010)
@@ -244,4 +247,111 @@ extern "C" __global__ void amgChebyshev
 
     d[c] = dk;
     x[c] = x[c] + dk;
+}
+
+//- The coarsest-level solve, (141.4.6): ONE block runs the forward and
+//  back substitutions of the packed Cholesky factor L (L_ij at
+//  i(i+1)/2 + j, ofacc in both builds) on the work vector w. Thread t
+//  owns the cells t, t + blockDim.x, ...; a singular level is projected
+//  on entry (141.4.3), scaled by sigma, solved with m = n - 1 orders,
+//  pinned at cell n-1 and re-projected (141.4.4). Thread 0 takes the
+//  two sums in ascending c; a block barrier follows every pivot
+//  division and every update step, so the device answer is its host
+//  twin's bit for bit. No atomics, no allocation, no sync: one launch,
+//  so it captures into a CUDA graph (SPEC-LIT 81, 141.4). -
+extern "C" __global__ void amgCoarseSolve
+(
+    ofscalar* __restrict__ x,
+    const ofscalar* __restrict__ b,
+    const ofacc* __restrict__ L,
+    ofacc* __restrict__ w,
+    oflabel n,
+    oflabel m,
+    oflabel pinned,
+    ofacc sigma
+)
+{
+    for (oflabel c = threadIdx.x; c < n; c += blockDim.x)
+    {
+        w[c] = (ofacc)b[c];
+    }
+    __syncthreads();
+
+    if (pinned)
+    {
+        if (threadIdx.x == 0)
+        {
+            ofacc sum = 0.0;
+            for (oflabel c = 0; c < n; ++c)
+            {
+                sum += w[c];
+            }
+            const ofacc mean = sum / (ofacc)n;
+            for (oflabel c = 0; c < n; ++c)
+            {
+                w[c] -= mean;
+            }
+        }
+        __syncthreads();
+    }
+
+    for (oflabel c = threadIdx.x; c < n; c += blockDim.x)
+    {
+        w[c] = sigma * w[c];
+    }
+    __syncthreads();
+
+    for (oflabel j = 0; j < m; ++j)
+    {
+        if (threadIdx.x == 0)
+        {
+            w[j] = w[j] / L[(size_t)j * (j + 1) / 2 + j];
+        }
+        __syncthreads();
+        const ofacc wj = w[j];
+        for (oflabel i = j + 1 + threadIdx.x; i < m; i += blockDim.x)
+        {
+            w[i] -= L[(size_t)i * (i + 1) / 2 + j] * wj;
+        }
+        __syncthreads();
+    }
+
+    for (oflabel j = m - 1; j >= 0; --j)
+    {
+        if (threadIdx.x == 0)
+        {
+            w[j] = w[j] / L[(size_t)j * (j + 1) / 2 + j];
+        }
+        __syncthreads();
+        const ofacc wj = w[j];
+        for (oflabel i = threadIdx.x; i < j; i += blockDim.x)
+        {
+            w[i] -= L[(size_t)j * (j + 1) / 2 + i] * wj;
+        }
+        __syncthreads();
+    }
+
+    if (pinned)
+    {
+        if (threadIdx.x == 0)
+        {
+            w[n - 1] = 0.0;
+            ofacc sum = 0.0;
+            for (oflabel c = 0; c < n; ++c)
+            {
+                sum += w[c];
+            }
+            const ofacc mean = sum / (ofacc)n;
+            for (oflabel c = 0; c < n; ++c)
+            {
+                w[c] -= mean;
+            }
+        }
+        __syncthreads();
+    }
+
+    for (oflabel c = threadIdx.x; c < n; c += blockDim.x)
+    {
+        x[c] = (ofscalar)w[c];
+    }
 }

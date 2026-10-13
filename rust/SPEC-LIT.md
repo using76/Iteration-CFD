@@ -43123,6 +43123,136 @@ The supervisor's oracle (Notay's Algorithms 2.1 and 2.2 on the strength graph, i
 | `a_bad_smoother_input_is_refused_by_name` and `a_bad_hierarchy_config_is_refused_by_name` | every refusal above | D |
 | `amg::smooth::tests::smoothers_replay_under_capture` (library) | every kind on a coarse level and l1-Jacobi on level 0 capture into a graph and replay bitwise (§81) | D |
 
+### 141.4 The coarsest-level solve (AMG-03b)
+
+`No GPL-licensed source was consulted.` `src/amg/coarse.rs` solves the coarsest level of
+the hierarchy of §141.3 exactly: a dense Cholesky factor formed on the host in f64 at setup,
+and one device kernel, `amgCoarseSolve` in `cuda/amg.cu`, that runs the two triangular
+solves in a single thread block. The tests are `tests/amg_coarse.rs`, an integration test
+that runs in both builds (§118), and one library test, the capture gate of §81. Nothing
+in the crate calls this yet (AMG-04a's cycle will), so no existing solve, case or SASS
+outside `amg.cubin` moves.
+
+Sources: **LAPACK** (BSD-3-Clause), the documentation comment of `DPOTRF` (its Purpose and INFO
+paragraphs on the LAPACK 3.9.0 documentation pages, read on 2026-10-13; the routine's code was not read): "the Cholesky
+factorization of a real symmetric positive definite matrix A ... A = L * L**T", and
+"INFO > 0: if INFO = i, the leading minor of order i is not positive definite, and the
+factorization could not be completed". The entrywise recurrence (Cholesky-Banachiewicz)
+and the forward and back substitutions `L y = b`, `L^T x = y` as the open article
+"Cholesky decomposition" of Wikipedia states them (read on 2026-10-13). Bochev &
+Lehoucq, *SIAM Rev.* 47(1) (2005) 50-66, doi:10.1137/S0036144503426074, treat the pure
+Neumann problem; no open copy was found and it was not opened, so the projection and the
+pin below are *DESIGN*, derived here, not taken from it. No multigrid or dense
+linear-algebra code of any licence was read for this subsection.
+
+**The matrix.** The coarsest level arrives as its rows (`HostRows` of §141.3: `a_cc` and the
+off-diagonal entries of row `c` in `amul`'s order, so a coarse level and a level 0 with
+coupled faces are read alike). With `σ` the sign of `Σ_c a_cc` (141.3), the dense matrix
+in f64 is
+
+```
+Â_cc = σ a_cc,   Â_cj = σ Σ (the entries of row c with column j)   (j != c)     (141.4.1)
+```
+
+summed in the row's entry order. It must be symmetric bit for bit, `Â_ij == Â_ji` for
+every `i < j`; a Galerkin product of a symmetric matrix is (§141.2 sums upper and lower
+slots alike).
+
+**Singular levels** (*DESIGN*). The level is singular with the constant null vector when
+every row sums to zero within the precision's rounding:
+
+```
+|a_cc + Σ_{j != c} a_cj|  <=  τ_s (|a_cc| + Σ_{j != c} |a_cj|)   for every c,
+τ_s = 1024 ε,   ε = the machine epsilon of Scalar                               (141.4.2)
+```
+
+(`2.3e-13` in f64, `1.2e-4` under `single`). A pure-Neumann laplacian and every Galerkin
+product of it pass (141.4.2) exactly in exact arithmetic (`P^T A P 1_c = P^T A 1 = 0`);
+`1024 ε` covers the rounding of the sums. For a symmetric singular `Â` with null vector
+`1`, `range(Â) = {v : 1^T v = 0}`, so `Â x = b` is solvable only after the projection
+
+```
+b' = b - mean(b) 1,   mean(b) = (Σ_c b_c) / n                                    (141.4.3)
+```
+
+and its solutions differ by a constant. The level is pinned at its last cell `p = n - 1`:
+the leading `(n-1) × (n-1)` block of `Â` is factored and solved with `b'_0 .. b'_{n-2}`,
+`x_p = 0`; then
+
+```
+x <- x - mean(x) 1                                                              (141.4.4)
+```
+
+so the coarse correction has zero mean. When the graph of `Â` is connected, the leading
+block is the matrix with row and column `p` deleted and is SPD (the null space of a
+connected symmetric semidefinite matrix with zero row sums is the constants only), and
+the pinned `x` satisfies the deleted equation too, since its residual is
+`-(sum of the others)` and `1^T b' = 0`. A disconnected singular level has a singular
+leading block, and the factorisation below refuses it at the pivot.
+
+**The factor** (host, f64, at setup). `m = n` (regular) or `m = n - 1` (pinned). For
+`i = 0 .. m-1`, `j = 0 .. i`, with `k` ascending:
+
+```
+s = Â_ij - Σ_{k<j} L_ik L_jk;   L_ii = sqrt(s)  (j = i),   L_ij = s / L_jj  (j < i)   (141.4.5)
+```
+
+and a pivot `s` that is not finite or not `> τ_p Â_ii`, `τ_p = 1e-13` (*DESIGN*), refuses
+the level as not SPD (LAPACK's "the leading minor of order i is not positive definite").
+`L` is stored packed by rows, `L_ij` at `i(i+1)/2 + j`, in f64 (`ofacc`) in both builds.
+
+**The solve** (device, one block of 256 threads, everything in `ofacc` and rounded once):
+
+```
+w_c = b_c;   if pinned: w_c <- w_c - (Σ_{c ascending} w_c) / n;   w_c <- σ w_c
+forward:  for j = 0 .. m-1:  w_j <- w_j / L_jj;  then  w_i <- w_i - L_ij w_j  (i > j)
+back:     for j = m-1 .. 0:  w_j <- w_j / L_jj;  then  w_i <- w_i - L_ji w_j  (i < j)
+if pinned: w_p <- 0;  w_c <- w_c - (Σ_{c ascending} w_c) / n
+x_c = (Scalar) w_c                                                              (141.4.6)
+```
+
+Each `w_i` is updated by one thread, `j` in the order shown, with a block barrier between
+the steps of `j`, so the device solve is its host twin bit for bit (`amg.cu` is on
+`build.rs`'s `-fmad=false` list since §141.3). The two sums are taken by one thread in
+ascending `c`. A solve only launches (one kernel), so it captures into a graph (§81).
+
+**Size.** The dense factor needs `n(n+1)/2` doubles and `n^3/6` host operations, so a level
+of more than `1024` cells (*DESIGN*, 4 MB) is refused by name; the remedy is a larger
+`max_levels` or a smaller `n_cells_coarsest` (§141.3).
+
+**Not SPD** (refused by name, an `Error::Refused` whose message starts `amg::coarse: ` and
+names `-permissive`): a level that is not symmetric (`symmetric`, naming the first pair
+`i < j`) or whose factorisation meets a bad pivot (`pivot`, naming its index). Under
+`-permissive` (the caller passes the flag) such a level is solved instead by `50` sweeps
+of l1-Jacobi (141.3.3) from `x = 0`, through the smoother of §141.3; the substitution is
+announced once on stderr (`io::contract::warn_once`) and kept on the setup
+(`announcement`), and it is not an exact solve. The other refusals are strict
+(`Error::Config`, `amg::coarse: `): a non-finite coefficient (`finite`), `Σ_c a_cc` zero or
+not finite (`diagonal`), more than 1024 cells (`cells`), a field shorter than the level or an
+operator whose cell count is not the setup's (`length`, `cells`).
+
+**Precision** (§118, docs/17 §5.1.4). The device-against-host-twin rows are class D,
+bitwise in both builds. The residual rows are class R: `‖b - A x‖_2 <= tol ‖b‖_2` with
+`tol64 = 1e-12`, `tol32 = 1e-5` (D-F32-1); the zero-mean row is `|mean(x)| <= 1e-14
+max|x|` in f64 and `1e-5 max|x|` under `single`; the hand-computed solutions are class A,
+`1e-15` relative in f64 and `1e-6` under `single`.
+
+#### 141.4.1 The gates
+
+`K4` and `SYM` are §141.3.1's. `NEU(m)` is the pure-Neumann §2 laplacian on the box `m`:
+`upper = lower = |S_f| δ_f` on the internal faces, the diagonal minus the same sum at both
+cells, no boundary coefficient (every wall zero-gradient), so `σ = -1`.
+
+| test (`tests/amg_coarse.rs` unless marked) | what | class |
+|---|---|---|
+| `the_cholesky_factor_and_solution_of_small_matrices` | `[[4, -1], [-1, 3]]`, `b = (1, 2)`: `L = (2; -0.5, sqrt(2.75))`, `x = (5/11, 9/11)`; `K4`, `b = 1`: `x = 0.2` each; the negated `[[4, -1], [-1, 3]]`: `σ = -1`, the same `L`, `x = -(5/11, 9/11)` | A |
+| `the_coarse_solve_residual_is_below_tol_on_spd` | `SYM`, `-SYM` and the coarsest level of the 32^3 §2 laplacian (Dirichlet walls) of §141.3: relative residual `<= 1e-12` (f64) / `1e-5` (f32) | R |
+| `a_pure_neumann_level_is_projected_and_pinned` | `[[1, -1], [-1, 1]]`, `b = (1, 0)`: `x = (0.25, -0.25)`; the 3-cell path `[[1,-1,0],[-1,2,-1],[0,-1,1]]`, `b = (1, 0, 0)`: `x = (5/9, -1/9, -4/9)`; `NEU` on the uniform 8^3 and the graded 6^3 boxes and the coarsest level of `NEU` on the uniform 16^3: method `PinnedCholesky`, `‖b' - A x‖ <= tol ‖b'‖`, `|mean(x)| <= 1e-14 max|x|` (f64) / `1e-5` (f32) | A, R |
+| `the_v_cycle_on_pure_neumann_stays_bounded_over_100_cycles` | `NEU` on the uniform 8^3 box, `b` of zero mean, 100 host V(1,1) cycles with l1-Jacobi: the energy `J = σ(x^T A x / 2 - x^T b)` never rises by more than `tol |J*|`, every iterate's spread and mean stay within `10 ‖x*‖_∞` (`x*` the pinned dense solve of the 512-cell level), `‖r_100‖ <= ‖r_0‖`, and every coarse correction has zero mean as above | P, R |
+| `the_device_coarse_solve_is_bitwise_its_host_twin` | regular, pinned and the `-permissive` fallback on coarse levels, regular and pinned on level 0, twice; the fallback on level 0 has no bitwise twin, because its product is `ldu_ops::amul` (§70) and `ldu.cu` is not on the `-fmad=false` list | D |
+| `a_non_spd_coarse_level_is_refused_by_name` | an asymmetric level (`symmetric`), the 3-cell `[[1,-2,0],[-2,1,-2],[0,-2,1]]` (`pivot` at 1), two disconnected Neumann blocks (`pivot`); under `-permissive` the same levels give `JacobiFallback`, the announcement, and exactly 50 l1-Jacobi sweeps from zero; every strict refusal above | D |
+| `amg::coarse::tests::coarse_solve_replays_under_capture` (library) | a regular, a pinned and a fallback solve capture into a graph and replay bitwise (§81) | D |
+
 ### 141.20 AMGX by dynamic load (AMX-01)
 
 `No GPL-licensed source was consulted.` §141.2 to §141.19 are left for the GAMG units

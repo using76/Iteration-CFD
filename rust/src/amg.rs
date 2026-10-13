@@ -11,19 +11,26 @@
 //! AMG-02 (§141.2) contributes the Galerkin coarse operator and the
 //! transfers, as gather lists with a host twin and four device kernels.
 //! AMG-03a (§141.3) contributes the hierarchy of coarsenings and the
-//! three smoothers with their host twins and kernels.
+//! three smoothers with their host twins and kernels. AMG-03b (§141.4)
+//! contributes the coarsest-level solve: the dense Cholesky factor, the
+//! projection and pin of a singular level, and the one-block kernel.
 //!
 //! Provenance: ORIGINAL - written from Notay, ETNA 37 (2010) 123-146,
 //! Algorithms 2.1 and 2.2 (SPEC-LIT §141.1). No GPL-licensed source was
 //! consulted.
 
 pub mod aggregate;
+pub mod coarse;
 pub mod galerkin;
 pub mod hierarchy;
 pub mod smooth;
 
 pub use aggregate::{
     aggregate, aggregate_level, Aggregation, LevelView, BETA, INTERIOR, UNCOUPLED,
+};
+pub use coarse::{
+    CoarseMethod, CoarseOperator, CoarseSetup, GpuCoarse, COARSE_BLOCK, FALLBACK_SWEEPS,
+    MAX_DENSE_CELLS, PIVOT_FLOOR, singular_tolerance,
 };
 pub use galerkin::{
     GalerkinPlan, GpuGalerkin, GpuLevel, HostLevel, KIND_BOUNDARY, KIND_DIAG, KIND_LOWER,
