@@ -103,6 +103,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("galerkin_replays_under_capture"),
     ),
     (
+        "src/amg/smooth.rs",
+        Stance::Gate("smoothers_replay_under_capture"),
+    ),
+    (
         "src/chem/device.rs",
         Stance::Gate("chem_device_replays_under_capture"),
     ),

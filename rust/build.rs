@@ -51,6 +51,11 @@ const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "l
 /// (SPEC-LIT §105.3), and the contraction would break that on every
 /// non-axis-aligned face.
 ///
+/// `amg.cu` is the third exception: with AMG-03a it carries the smoother
+/// kernels (`amgAmul`, `amgJacobi`, `amgChebyshev`), which multiply and are
+/// held BITWISE against their host twins in `src/amg/smooth.rs` (SPEC-LIT
+/// §141.3), and the contraction would break that gate.
+///
 /// This costs the listed units their FMA throughput. It buys the only claim
 /// SPEC-LIT §82 makes.
 ///
@@ -59,7 +64,7 @@ const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "l
 /// contraction would break the gate" can be measured on the real compiler
 /// rather than simulated on the host, which is how §67.11's first draft came
 /// to assert an FMA had not happened when it had.
-const FMAD_OFF_UNITS: &[&str] = &["meshgeom.cu", "ale.cu"];
+const FMAD_OFF_UNITS: &[&str] = &["meshgeom.cu", "ale.cu", "amg.cu"];
 
 fn cuda_root() -> PathBuf {
     // CUDA_PATH is set by the Windows installer; CUDA_HOME and /usr/local/cuda

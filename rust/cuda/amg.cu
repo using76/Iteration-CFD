@@ -5,27 +5,37 @@
 // See LICENSE at the repository root.
 /*
   ==========================================================================
-  amg.cu - the Galerkin coarse operator and the transfers of the native
-  aggregation multigrid, SPEC-LIT 141.2. One thread per slot or cell.
+  amg.cu - the Galerkin coarse operator, the transfers and the smoothers
+  of the native aggregation multigrid, SPEC-LIT 141.2 and 141.3. One
+  thread per slot or cell.
 
   amgGalerkin gathers one coarse slot's list of fine entries (141.14)-
   (141.16) through the CSR of source codes (141.17); amgRestrict is the
   segmented sum (141.13); amgProlong and amgProlongAdd are the gathers
   (141.11) and (141.12). The slot order is diagonals first, then uppers,
-  then lowers; kind 3 enters negated per (141.2).
+  then lowers; kind 3 enters negated per (141.2). amgAmul applies a
+  coarse level through its row map; amgJacobi (141.3.2) and amgChebyshev
+  (141.3.5) are the smoother updates of SPEC-LIT 141.3.
   ==========================================================================
 
-  Written from: SPEC-LIT.md 141.1, 141.2; Notay, ETNA 37 (2010) 123-146,
-  eqs. (2.1)-(2.3)
+  Written from: SPEC-LIT.md 141.1, 141.2, 141.3; Notay, ETNA 37 (2010)
+  123-146, eqs. (2.1)-(2.3); Baker, Falgout, Kolev & Yang, LLNL-TR-489114
+  (2011), eqs. 2.2, 4.1-4.3, 6.1-6.2; Saad (2003) Algorithms 6.15
+  and 12.1
   No GPL-licensed source was consulted. Provenance: see PROVENANCE.md.
 
-  Every kernel is ofscalar in, ofscalar out, summed in ofacc (f64 in both
-  builds) and rounded once to ofscalar, so the device sum is the host
-  twin's sum bit for bit. No atomics, no allocation, no sync: each thread
-  touches only its own slot or cell, so the product and the three
-  transfers capture into a CUDA graph (SPEC-LIT 81). The sums hold no
-  product, so -fmad has nothing to contract and this unit is not in
-  build.rs's -fmad=false list.
+  The Galerkin and transfer kernels - amgGalerkin, amgRestrict,
+  amgProlong and amgProlongAdd - are ofscalar in, ofscalar out, summed
+  in ofacc (f64 in both builds) and rounded once to ofscalar, so the
+  device sum is the host twin's sum bit for bit. The smoother kernels -
+  amgAmul, amgJacobi and amgChebyshev - do not sum in ofacc: they
+  compute in ofscalar, each product and add in the order their host
+  twins in src/amg/smooth.rs repeat, and they are held BITWISE against
+  them. No atomics, no allocation, no sync: each thread touches only its
+  own slot or cell, so the Galerkin product and the three transfers
+  capture into a CUDA graph (SPEC-LIT 81). The Galerkin and transfer
+  sums hold no product, but the smoother kernels multiply, so with
+  AMG-03a this unit joined build.rs's -fmad=false list (SPEC-LIT 141.3).
 */
 
 #include "ofgpu_device.cuh"
@@ -139,4 +149,99 @@ extern "C" __global__ void amgProlongAdd
     const oflabel i = OFGPU_TID;
     if (i >= nFine) return;
     xf[i] += ec[cellAgg[i]];
+}
+
+//- A x through a level's row map (SPEC-LIT 141.3): row c is its diagonal,
+//  then its faces in ascending face id, an owned face giving
+//  upper[f]*x[neighbour[f]] and a neighbour-side face giving
+//  lower[f]*x[owner[f]]. One thread per cell, no atomics, no boundary
+//  branch - a coarse level has no boundary faces. -
+extern "C" __global__ void amgAmul
+(
+    ofscalar* __restrict__ y,
+    const ofscalar* __restrict__ x,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rowOffset,
+    const oflabel* __restrict__ rowFace,
+    const oflabel* __restrict__ rowFlags,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar sum = diag[c]*x[c];
+
+    const oflabel begin = rowOffset[c];
+    const oflabel end   = rowOffset[c + 1];
+    for (oflabel j = begin; j < end; ++j)
+    {
+        const oflabel f = rowFace[j];
+        if (rowFlags[j] & OFGPU_RF_OWNS)
+        {
+            sum += upper[f]*x[neighbour[f]];
+        }
+        else
+        {
+            sum += lower[f]*x[owner[f]];
+        }
+    }
+
+    y[c] = sum;
+}
+
+//- One point sweep, (141.3.2): x[c] <- x[c] + (b[c] - (A x)[c])/m[c],
+//  in the smoothing diagonal m uploaded from the host setup. -
+extern "C" __global__ void amgJacobi
+(
+    ofscalar* __restrict__ x,
+    const ofscalar* __restrict__ b,
+    const ofscalar* __restrict__ y,
+    const ofscalar* __restrict__ m,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    x[c] = x[c] + (b[c] - y[c]) / m[c];
+}
+
+//- One Chebyshev step, (141.3.5): z = D^-1 (b - A x), then d = c2*z on
+//  the FIRST step - d is not read - and d = c1*d + c2*z after; x += d.
+//  A sweep of degree nu is nu of these, one product each, the steps
+//  k = 0..nu-1 with their (c1[k], c2[k]) and first = (k == 0). -
+extern "C" __global__ void amgChebyshev
+(
+    ofscalar* __restrict__ x,
+    ofscalar* __restrict__ d,
+    const ofscalar* __restrict__ b,
+    const ofscalar* __restrict__ y,
+    const ofscalar* __restrict__ m,
+    ofscalar c1,
+    ofscalar c2,
+    oflabel first,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar z = (b[c] - y[c]) / m[c];
+
+    ofscalar dk;
+    if (first)
+    {
+        dk = c2*z;
+    }
+    else
+    {
+        dk = c1*d[c] + c2*z;
+    }
+
+    d[c] = dk;
+    x[c] = x[c] + dk;
 }

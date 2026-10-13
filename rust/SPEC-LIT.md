@@ -42896,8 +42896,8 @@ does not fit (141.17) and is refused by name.
 One thread owns one slot, sums its list in list order in `ofacc` and rounds once to
 `ofscalar`. There is no atomic, no allocation and no synchronisation, so the product
 and the three transfers capture into a CUDA graph (§81). The sums hold no product, so
-`-fmad` has nothing to contract and `amg.cu` is not in `build.rs`'s `-fmad=false`
-list. The host twin runs the same lists in the same order with an f64 accumulator and
+`-fmad` has nothing to contract; `amg.cu` was left out of `build.rs`'s `-fmad=false`
+list for them, and joined it with AMG-03a's smoothers (§141.3), which do multiply. The host twin runs the same lists in the same order with an f64 accumulator and
 one rounding, so the two agree bit for bit in both builds.
 
 **Precision** (§118, docs/17 §5.1.4). The device-against-host-twin rows and the
@@ -42943,6 +42943,185 @@ each evaluated in f64 and then cast to the build's `Scalar`. On a coupled face
 | `a_mismatched_input_is_refused_by_name` | every refusal above | D |
 | `the_host_twin_takes_the_matrix_boundary_array_when_no_face_is_coupled` | 7×5×3 weighted: the full uncoupled `boundary_coeffs` and the empty slice give the same level; any other length is refused | D |
 | `amg::galerkin::tests::galerkin_replays_under_capture` (library) | the product and the three transfers capture into a graph and replay bitwise (§81) | D |
+
+### 141.3 The hierarchy and the smoothers (AMG-03a)
+
+`No GPL-licensed source was consulted.` `src/amg/hierarchy.rs` stacks the coarsenings of
+§141.1 and §141.2 into a hierarchy; `src/amg/smooth.rs` holds the three smoothers, their
+setup, their host twins and their device driver; `cuda/amg.cu` gains three kernels. The
+tests are `tests/amg_hierarchy.rs`, an integration test that runs in both builds (§118),
+and one library test, the capture gate of §81. Nothing in the crate calls this yet, so
+no existing solve, case or SASS outside `amg.cubin` moves.
+
+Sources: **Baker, A. H., Falgout, R. D., Kolev, T. V. & Yang, U. M. (2011), "Multigrid
+smoothers for ultraparallel computing", *SIAM J. Sci. Comput.* 33(5) 2864-2887,
+doi:10.1137/100798806** (title, volume, issue and pages checked against Crossref on
+2026-10-13), named by docs/17 for the AMG-03a row; the journal text was not opened.
+Its authors' companion report **"Multigrid Smoothers for Ultra-Parallel Computing:
+Additional Theory and Discussion", LLNL-TR-489114 (2011)** is open at
+<https://www.osti.gov/servlets/purl/1122232> and was read on 2026-10-13; every smoother
+formula below is quoted from the report: its (2.2), the error propagator `I - M^{-1} A`
+and "the smoother is convergent (in energy norm ‖·‖_A), i.e. assume that `M^T + M - A`
+is SPD"; its (4.1)-(4.3), the Chebyshev polynomial `q` on `[α, β]` and "−1 < q(x) < 1
+for x ∈ (0, β]"; its §4.1, "we set α by estimating λ_max with several iterations of CG
+and set α = aβ ... We use a = 0.3", the 1-D value `α/β = 1/2` of its (4.4), and the
+remark that Adams et al. use `a = 1/30`; its (6.1)-(6.2) and §6.1, the ℓ1 point Jacobi
+`M = D + D^{ℓ1}`, "always convergent". **Adams, M., Brezina, M., Hu, J. & Tuminaro, R.
+(2003), "Parallel multigrid smoothing: polynomial versus Gauss-Seidel", *J. Comput.
+Phys.* 188(2) 593-610, doi:10.1016/S0021-9991(03)00194-3** (checked against Crossref on
+2026-10-13; no open copy was found), named by docs/17 for the Chebyshev row; it was not
+opened, and nothing below is taken from it except through the report's citation of it.
+**Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed. (2003)** (§8; the
+author's open copy, read on 2026-10-13): Algorithm 6.15 (Lanczos) and Algorithm 12.1
+(Chebyshev acceleration). **PETSc** (BSD-2-Clause), the manual page of
+`KSPChebyshevEstEigSet` (read on 2026-10-13), for the documented default bound
+`1.1 λ_est` on the largest eigenvalue; no PETSc source was read. No multigrid code of
+any licence was read for this subsection.
+
+**The hierarchy.** Level 0 is the fine matrix as a solve receives it (§141.2: `diag`
+after the boundary fold). Level `l + 1` is the Galerkin product (§141.2) of level `l`
+through the aggregation of §141.1 (`aggregate` on level 0, `aggregate_level` above it).
+With `n_l` the cell count of level `l`, `N_c = n_cells_coarsest` and `L_max = max_levels`
+(the largest number of levels, the finest included):
+
+```
+coarsen level l  while  n_l > N_c  and  l + 1 < L_max                  (141.3.1)
+stop without adding a level  if  n_{l+1} >= n_l   (the aggregation made no progress)
+```
+
+*DESIGN* defaults: `N_c = 64` (docs/17's AMG-03a gate), `L_max = 50`. `N_c = 0` and
+`L_max = 0` are refused by name. "The level count" is the number of coarse levels, so
+docs/17's gate `ceil(log4(n / 64)) ± 1` reads 6 ± 1 on 64^3.
+
+**The smoothers.** For a level, `a_cc` its diagonal, `a_cj` (`j != c`) the off-diagonal
+entries of row `c` as `amul` applies them (the internal faces and, on level 0, the
+coupled boundary faces with the sign of (141.2)), and `σ` the sign of `Σ_c a_cc`
+(141.3). Every smoother needs `σ a_cc > 0` and finite in every row, or it is refused by
+name. One sweep of a point smoother with smoothing diagonal `m` is
+
+```
+x_c  <-  x_c + (b_c - (A x)_c) / m_c                                    (141.3.2)
+```
+
+with (Baker et al., LLNL-TR-489114, (6.1) with blocks of size one, and §6.1)
+
+```
+l1-Jacobi:        m_c = a_cc + σ Σ_{j != c} |a_cj|                       (141.3.3)
+weighted Jacobi:  m_c = a_cc / ω,   0 < ω < 2                            (141.3.4)
+```
+
+(141.3.3) is `D + D^{ℓ1}` for `σ = +1` and the same smoother on `-A` for `σ = -1`. By the
+report's (6.2), `σ <A v, v> <= <σ M v, v>`, so `M^T + M - A` is definite and the error's
+energy `σ e^T A e` strictly decreases in every sweep for every SPD (or, with `σ = -1`,
+negative definite) `A`. That is the gate. `ω >= 2` is refused because the average
+eigenvalue of `D^{-1} A` is 1, so `λ_max >= 1` and (141.3.4) does not converge for any
+such `A`. *DESIGN* default `ω = 2/3`: it is the degree-1 member of (141.3.6) on the 1-D
+interval `[1, 2]` of the report's (4.4), so weighted Jacobi is Chebyshev of degree 1
+there, and the high-frequency half of a 1-D Poisson matrix is damped by `1/3`.
+
+**Chebyshev** (report (4.3), applied to `D^{-1} A` with `D = diag(a_cc)`; Saad
+Algorithm 12.1 with the residual preconditioned by `D`). A sweep of degree `ν` is `ν`
+steps `k = 0 .. ν-1`, each with one product:
+
+```
+z = D^{-1} (b - A x_k);   d = c2_0 z  (k = 0),   d = c1_k d + c2_k z  (k >= 1);
+x_{k+1} = x_k + d                                                        (141.3.5)
+θ = (β + α)/2,  δ = (β - α)/2,  s = θ/δ,  ρ_0 = 1/s,  c2_0 = 1/θ,
+ρ_k = 1/(2 s - ρ_{k-1}),  c1_k = ρ_k ρ_{k-1},  c2_k = 2 ρ_k / δ   (k >= 1)
+```
+
+so that the error after a sweep is `q(D^{-1} A) e_0` with
+
+```
+q(λ) = T_ν((β + α - 2λ)/(β - α)) / T_ν((β + α)/(β - α)),
+|q(λ)| <= 1 / T_ν((β + α)/(β - α))  for λ ∈ [α, β]                       (141.3.6)
+```
+
+The coefficients are formed in f64 and rounded once to `Scalar`. *DESIGN*: `ν = 2`,
+`1 <= ν <= 16`; `α = a β` with `a = 0.3` (the report's §4.1), `0 < a < 1`.
+
+**The interval** (*DESIGN*, ORIGINAL in combination):
+
+```
+β = min(1.1 θ_10, g),   g = max_c (|a_cc| + Σ_{j != c} |a_cj|) / |a_cc|         (141.3.7)
+```
+
+`g` is Gershgorin's bound on the spectrum of `D^{-1} A`, so `β` never exceeds a proven
+upper bound; `1.1` is PETSc's documented default factor. `θ_10` is the largest Ritz
+value of 10 steps of Lanczos (Saad Algorithm 6.15) on `S = σ |D|^{-1/2} A |D|^{-1/2}`,
+which has the spectrum of `D^{-1} A`. Lanczos runs on the host in f64 from the level's
+coefficients, at setup:
+
+- start `v_1 = u / ‖u‖`, `u_c = frac((c + 1) · 0.6180339887498949) - 0.5` (deterministic,
+  not symmetric, so it is not orthogonal to an antisymmetric top eigenvector);
+- `β_1 = 0`, `v_0 = 0`; for `j = 1 .. min(10, n)`: `w = S v_j - β_j v_{j-1}`,
+  `α_j = (w, v_j)`, `w -= α_j v_j`, `β_{j+1} = ‖w‖`; stop after step `j` when `j = min(10, n)`
+  or `β_{j+1} <= 1e-10 t_j`, `t_j = max(|α_1|..|α_j|, β_2..β_j)` (an invariant subspace);
+  else `v_{j+1} = w / β_{j+1}`;
+- `θ_10` = the largest eigenvalue of the tridiagonal `T` (diagonal `α_1..α_j`, off-diagonal
+  `β_2..β_j`), by bisection on the Sturm count inside Gershgorin's interval of `T`, until
+  the bracket is `<= 2^-50 max(|lo|, |hi|, f64::MIN_POSITIVE)` wide.
+
+On the 1-D Poisson matrix `tridiag(-1, 2, -1)` with 64 cells, `θ_10 = 1.980404662538769`
+(the supervisor's oracle), `1.1 θ_10 > g = 2`, so `β = 2` and, with `a = 1/2`, `α = 1`:
+`[α, β]` is exactly the high-frequency half `λ_k = 1 - cos(kπ/65) >= 1`, `k = 33 .. 64`,
+and (141.3.6) gives the bound `1/T_2(3) = 1/17`.
+
+**The device.** A coarse level gets a row map (*DESIGN*, §70.2's convention): for each
+cell, its faces in ascending face id, flagged `RF_OWNS` (1) on the owner side, so one
+thread per cell gathers its row with no atomic. Three kernels, one thread per cell:
+`amgAmul` (`y_c = a_cc x_c`, then `+= upper[f] x[neighbour[f]]` on an owned face and
+`+= lower[f] x[owner[f]]` otherwise, in row-map order, in `ofscalar`), `amgJacobi`
+(141.3.2) and `amgChebyshev` (one step of (141.3.5); step 0 does not read `d`). Level 0
+takes its product from `ldu_ops::amul` (§70) and its smoothing from the same two update
+kernels. The smoothing diagonal `m`, `σ`, `g`, `θ_10` and the coefficients are set up on
+the host from the host level and uploaded; a matrix that changes afterwards needs a new
+setup (AMG-05). The kernels hold products, and they are held bit for bit against host
+twins written in `Scalar` in the same order, so `amg.cu` joins `build.rs`'s `-fmad=false`
+list (§82.4). A sweep only launches kernels, so it captures into a graph (§81).
+
+**Precision** (§118, docs/17 §5.1.4). The device-against-host-twin rows are class D,
+bitwise in both builds; the energy row is class P (strict decrease, both builds); the
+factor rows are class R, `tol64 = 1e-12` of `‖x_0‖`, `tol32 = 1e-5` (D-F32-1); Lanczos,
+`g` and the interval are host f64 and class A, `1e-12` relative in both builds; the level
+sizes are class D.
+
+**Refused by name** (an `Err`, no partial result; messages start `amg::smooth: ` or
+`amg::hierarchy: `): a row whose `σ a_cc` is not positive and finite (`diagonal`); a
+non-finite coefficient (`finite`); `ω` outside `(0, 2)` (`omega`); `ν` outside `1 ..= 16`
+(`degree`); `a` outside `(0, 1)` (`fraction`); an interval that is not positive and finite;
+a level or field whose size is not the setup's (`cells`, `length`); a level-0 coupled
+face whose neighbour is a halo cell (`halo`, as §141.1); `N_c = 0`
+(`n_cells_coarsest`); `L_max = 0` (`max_levels`).
+
+#### 141.3.1 The gates
+
+`K4` is the complete graph on 4 cells (faces `(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)`)
+with `a_cc = 2` and every off-diagonal `+1`: SPD (eigenvalues 1, 1, 1, 5), with
+`D^{-1} A` eigenvalues 0.5, 0.5, 0.5, 2.5, so plain Jacobi diverges on it, while
+l1-Jacobi (`m_c = 5`) has `M^{-1} A` eigenvalues 0.2, 0.2, 0.2, 1. `P1D` is
+`tridiag(-1, 2, -1)` on 64 cells with eigenvectors `v_k[i] = sin(kπ(i+1)/65)`. `SYM` is the
+6^3 box with the symmetric (141.18), `a_ab = a_ba = -(1/10 + ((11a + 3b) mod 7)/3)` for an
+edge `a < b` and `a_cc = 20 + c/9`.
+
+The supervisor's oracle (Notay's Algorithms 2.1 and 2.2 on the strength graph, in Python) used unit strengths, which is what the unit-weight matrix gives exactly on every level in both builds, so its sizes are pinned. The §2 laplacian is not pinned: in f64 its `|S_f| δ_f` on the uniform box differ in the last bits from face to face, which moves the tie-breaks of (141.5)-(141.8) near the walls, and the coarsening measured 262144, 65546, 16412, 4116, 1031, 258, 65, 17 (7 coarse levels); under `single` the rounding restores the ties and it is the unit-weight list (6). Both are inside docs/17's `6 ± 1`. That is §141.1's "a different input, not a defect".
+
+| test (`tests/amg_hierarchy.rs` unless marked) | what | class |
+|---|---|---|
+| `the_level_sizes_on_64_cubed_are_ceil_log4_of_n_over_64` | the unit-weight matrix of §141.1.1 (`a_ab = a_ba = -1`, `a_cc = 100`) on the 64^3 box: sizes 262144, 65536, 16384, 4096, 1024, 256, 64 (the oracle's), 6 coarse levels = `ceil(log4(262144/64))`; the §2 laplacian on the same box: 6 ± 1 coarse levels, each at most 4 times smaller than the one above, the last `<= 64` | D |
+| `the_level_sizes_on_32_cubed_and_the_limits` | the unit-weight 32^3: 32768, 8192, 2048, 512, 128, 32; `L_max` 1 and 3, `N_c` 32768, 8192, 100000 cut it as (141.3.1) says | D |
+| `a_level_that_does_not_coarsen_ends_the_hierarchy` | 4^3 with no off-diagonal and `N_c = 1`: one level | D |
+| `the_device_hierarchy_is_bitwise_the_host_hierarchy` | 32^3 laplacian and 6×5×4 cyclic (141.18): every device level equals its host level bit for bit, twice | D |
+| `the_level_amul_is_bitwise_its_host_twin` | `SYM` and the device level 1 of the 32^3 laplacian; the row map is ascending and complete | D |
+| `l1_jacobi_reduces_the_energy_every_sweep` | `K4`, `P1D`, `SYM`, the graded 6^3 laplacian and a 6×5×4 laplacian cyclic on x (level 0, through `amul`), the 32^3 level 1: 20 sweeps, `σ x^T A x` strictly decreasing; `K4` from `(1,1,1,1)` is exactly 0 after one sweep | P, D |
+| `plain_jacobi_grows_the_energy_where_l1_does_not` | `K4`, `ω = 1`, from `(1,0,0,0)`: the energy grows | P |
+| `weighted_jacobi_two_thirds_damps_the_high_half_by_a_third` | `P1D`, `ω = 2/3`: the factor on `v_k` is `|1 - 2λ_k/3|`, at most `1/3` for `k >= 33` | R |
+| `chebyshev_degree_two_meets_its_bound_on_the_high_half` | `P1D`, `ν = 2`, `a = 1/2`: `g = 2`, `β = 2`, `α = 1` exactly; the factor on `v_k` is `|T_2(3 - 2λ_k)|/17`, at most `1/17` for `k >= 33` | A, R |
+| `chebyshev_degree_one_is_weighted_jacobi_two_thirds` | `P1D`, `ν = 1`, `a = 1/2` against `ω = 2/3` | R |
+| `lanczos_estimates_lambda_max_from_below` | `tridiag(-1, 2, -1)` of order 10: `2 - 2cos(10π/11)`; `P1D`: `θ_10 = 1.980404662538769 <= λ_max`; `K4`: 2 steps, `θ = 2.5` | A |
+| `the_device_smoothers_are_bitwise_their_host_twins` | every kind on `SYM` and on the 32^3 level 1, 3 sweeps with a source, twice | D |
+| `a_bad_smoother_input_is_refused_by_name` and `a_bad_hierarchy_config_is_refused_by_name` | every refusal above | D |
+| `amg::smooth::tests::smoothers_replay_under_capture` (library) | every kind on a coarse level and l1-Jacobi on level 0 capture into a graph and replay bitwise (§81) | D |
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 
