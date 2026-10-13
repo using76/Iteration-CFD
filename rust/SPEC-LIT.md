@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 70 names of
+accepts it on the field the row is asked on, and it is one of the 75 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39098,14 +39098,14 @@ row, row for row.
 | velocity inlet | `pressureDirectedInletVelocity` | implemented | — | — | (120.5g), along `inletDirection` from the flux |
 | velocity inlet | `pressureDirectedInletOutletVelocity` | implemented | — | — | (120.5h), (120.5g) on inflow, zeroGradient on outflow |
 | velocity inlet | `pressureInletOutletParSlipVelocity` | implemented | — | — | (120.5i), normal from the flux and tangential from the cell on inflow |
+| outlet | `fixedMean` | implemented | — | — | (120.6a), the cell values shifted so the area mean is `meanValue` |
+| outlet | `fixedMeanOutletInlet` | implemented | — | — | (120.6b), (120.6a) on outflow faces, zeroGradient on inflow |
+| outlet | `fixedFluxExtrapolatedPressure` | implemented | — | — | (120.6f), the cell's pressure gradient carried onto the face |
+| outlet | `outletMappedUniformInlet` | implemented | — | — | (120.6c), `fraction` times the outlet's mixing-cup mean plus `offset` |
+| outlet | `matchedFlowRateOutletVelocity` | implemented | — | — | (120.6e), the cell velocity plus one normal shift carrying the inlet's rate |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
-| outlet | `fixedMean` | planned | BC-10 | — | — |
-| outlet | `fixedMeanOutletInlet` | planned | BC-10 | — | — |
-| outlet | `fixedFluxExtrapolatedPressure` | planned | BC-10 | — | — |
-| outlet | `outletMappedUniformInlet` | planned | BC-10 | — | — |
-| outlet | `matchedFlowRateOutletVelocity` | planned | BC-10 | — | — |
 | buoyant pressure | `prghPressure` | planned | BC-11 | — | — |
 | buoyant pressure | `prghTotalPressure` | planned | BC-11 | — | — |
 | buoyant pressure | `prghTotalHydrostaticPressure` | planned | BC-11 | — | — |
@@ -39876,6 +39876,206 @@ zero `axis`.
 * **Batchelor, G. K.** (1967), *An Introduction to Fluid Dynamics*,
   Cambridge University Press, §4.2, DOI 10.1017/CBO9780511800955 (checked
   on doi.org, 2026-10-13) - the steady unidirectional channel flow (120.5j).
+
+No GPL-licensed source was consulted.
+
+### 120.6 Outlets II - four patch-mean rewrites and an extrapolated pressure gradient
+
+BC-10 implements the five Outlets II names of the §120 table. The names are
+taken from the user guides of §120 by name only; every equation below is
+ours (*DESIGN*) or is cited. Four of them hold a PATCH INTEGRAL - a mean, a
+mean carried from another patch, or a flow rate - and one extrapolates the
+pressure gradient of the cell onto the face. All five are §4 triple
+rewrites with no new evaluation branch: `BcKind::FixedMean` (46),
+`FixedMeanOutletInlet` (47), `FixedFluxExtrapolatedPressure` (48),
+`OutletMappedUniformInlet` (49) and `MatchedFlowRateOutletVelocity` (50).
+
+`psi_P,f` is the value of the cell behind face `f`, `|S_f|` the face area,
+`phi_f` the face flux (positive OUT of the domain), and every sum runs over
+the faces of the patch named, in face order.
+
+**`fixedMean`** *(DESIGN - ours)*. The face value is the cell value shifted
+by one constant, chosen so that the area-weighted patch mean is the target
+`psi_bar` (`meanValue`):
+
+```
+A = SUM_f |S_f| ,   M = SUM_f |S_f| psi_P,f ,   s = (psi_bar A - M)/A
+fr = 1 ,   refValue_f = psi_P,f + s ,   refGrad = 0                       (120.6a)
+```
+
+so `SUM_f |S_f| psi_b,f / A = (M + s A)/A = psi_bar` - exact, to round-off.
+The profile across the patch is the interior's (zero-gradient) and only its
+level is fixed.
+
+**`fixedMeanOutletInlet`** *(DESIGN - ours)*. The same mean, held where the
+flow leaves; where it comes back in the face is zero-gradient, as for
+`outletInlet` (120.4a):
+
+```
+fr_f = 1 if phi_f > 0 (outflow),   fr_f = 0 otherwise
+A_D = SUM_{phi_f > 0} |S_f| ,   s = (psi_bar A - M)/A_D   (A_D > 0),   s = 0   (A_D = 0)
+refValue_f = psi_P,f + s ,   refGrad = 0                                  (120.6b)
+```
+
+The inflow faces carry `psi_b,f = psi_P,f` exactly (fr = 0, refGrad = 0), so
+`SUM_f |S_f| psi_b,f / A = (M + s A_D)/A = psi_bar` whenever any face is an
+outflow; a patch with no outflow face is zero-gradient throughout and its
+mean is not held. (120.6a) is (120.6b) with every face Dirichlet.
+
+**`outletMappedUniformInlet`** *(DESIGN - ours)*. The inlet takes one
+uniform value: the mean of the patch `outletPatch` times `fraction` (`f`,
+default 1) plus `offset` (`c`, default 0, of the field's rank). The mean is
+the flux-weighted ("mixing-cup") mean over the outflow faces `g` of that
+patch, which is what carries a scalar's flux around a loop; a patch with no
+outflow falls back to the area mean:
+
+```
+w_g = max(phi_g, 0) ,   W = SUM_g w_g
+psi_out = SUM_g w_g psi_b,g / W                         (W > 0)
+psi_out = SUM_g |S_g| psi_b,g / SUM_g |S_g|             (W = 0)
+fr = 1 ,   refValue_f = f psi_out + c   on every face f ,   refGrad = 0  (120.6c)
+```
+
+`psi_b,g` are the outlet's face values the last boundary evaluation left. On
+a duct whose only inflow is this inlet and only outflow `outletPatch`,
+steady plug flow (slip or symmetry walls) has `U_in = f U_out + c` and, by
+continuity through equal areas, `U_out = U_in`, so its fixed point is
+
+```
+U = c/(1 - f)          (f != 1)                                           (120.6d)
+```
+
+the loop-duct answer key of the gate.
+
+**`matchedFlowRateOutletVelocity`** *(DESIGN - ours, after Versteeg &
+Malalasekera)*. The outlet velocity is the cell velocity plus one normal
+velocity, chosen so that the outlet's flux is the flow rate entering through
+`inletPatch`:
+
+```
+Q = - SUM_{g in inletPatch} phi_g ,   A = SUM_f |S_f| ,   F = SUM_f S_f . U_P,f
+c = (Q - F)/A ,   fr = 1 ,   refValue_f = U_P,f + c S_f/|S_f| ,   refGrad = 0   (120.6e)
+```
+
+so `SUM_f U_b,f . S_f = F + c A = Q` - exact, to round-off, and the flux of
+the face, a fixed value, is `U_b . S_f` (`momFluxIsPrescribed`), so the
+outlet carries `Q` out. Versteeg & Malalasekera correct the extrapolated
+outlet velocities for overall mass conservation by SCALING them with the
+ratio of inflow to outflow; (120.6e) SHIFTS them along the normal instead,
+which also holds when the extrapolated outflow `F` is zero (a run starting
+from rest) - the shift is ours. A vector field only.
+
+**`fixedFluxExtrapolatedPressure`** *(DESIGN - ours)*. A fixed-gradient
+pressure whose gradient is the cell's own pressure gradient carried onto the
+face:
+
+```
+fr = 0 ,   refValue = 0 ,   refGrad_f = S_f . (grad p)_P / |S_f|            (120.6f)
+```
+
+so `p_b = p_P + refGrad/Delta_b` is the linear extrapolation of the cell
+along the face normal - exact for a linear `p` on a mesh whose cell-to-face
+vector is normal to the face. It is meant for faces whose flux the velocity
+condition fixes (a wall, a velocity inlet), as `fixedFluxPressure` is; there
+the pressure enters the run only through its face value in the cell
+gradient, which (120.6f) keeps from bending at the boundary (a hydrostatic
+or a fully developed `p` has no kink in its last cell). Ferziger & Peric
+(2002) extrapolate the boundary pressure from the interior in the same way.
+A scalar field only.
+
+**Evaluation.** One rule per patch, built at setup and held by the field
+(`GpuScalarField::mean_rules`, `GpuVectorField::mean_rules`, type
+`field::patch_mean::PatchMeanRule`): the kind, the patch's face range, the
+other patch's face range (49, 50), the target or offset, and the fraction.
+Once per outer iteration, after the flux switch and before the boundary
+evaluation, `field_ops::update_patch_means_scalar` /
+`update_patch_means_vector` launch one kernel per rule: for 46, 47, 49 and
+50 a single thread runs the rule's sums in face order in `Acc` (§118.1),
+rounds `s`, `psi_out` or `c` once into `Scalar`, and writes every face of
+the patch (`fldPatchMeanScalar`, `fldPatchMeanVector` in `cuda/field.cu`);
+for 48 one thread per face writes (120.6f) from `grad p` (`fldExtrapolatedSnGrad`).
+The host twins are `field::patch_mean::patch_mean_values_scalar`,
+`patch_mean_values_vector` and `extrapolated_sn_grad`, in the same operation
+order; the device contracts FMAs, so the two agree to round-off, not
+bitwise. A field with no rule launches nothing, which keeps every existing
+case's results bitwise. The rewrite is lagged one outer iteration: the cell
+values, the other patch's face values and `grad p` are those the previous
+iteration left, and a fixed point satisfies (120.6a)-(120.6f) exactly.
+
+`Simple::correct_outer` runs it for `U` and for `p` (with the momentum
+predictor's `grad p`). A caller opts in with `BcInputs::patch_means = true`,
+the promise that its loop runs the refresh every outer iteration;
+`ofgpu-lowmach` and `ofgpu-buoyant` pass it for `U` and `p`. Every other
+setup, and every other field of those drivers, refuses the five names by
+name: a seed with nothing to refresh it would freeze the face at its first
+value under a name that promises a patch integral (§13.4). The setup seed is
+the cell value (`fr = 1` for 46, 49, 50; `fr = 0` for 47 and 48) until the
+first refresh.
+
+Inputs and refusals, by name. `meanValue` (46, 47) is required, of the
+field's rank; `outletPatch` (49) and `inletPatch` (50) are required and must
+name another patch of the mesh; `fraction` and `offset` (49) are optional.
+Every number is a CONSTANT: a time-varying Function1 is refused by name,
+because no driver runs the timed path for these names.
+`matchedFlowRateOutletVelocity` on a scalar field and
+`fixedFluxExtrapolatedPressure` on a vector field are refused.
+
+**Gates** (`tests/bc_outlets_ii.rs`, both builds; class per docs/17 §5.1,
+D-F32-1).
+
+`fixed_mean_holds_the_patch_mean` - a 4 x 3 x 2 box on [0,2] x [0,1]^2 with
+`T_c = 1 + x + 2y^2 + 0.5z` and `meanValue 5` on `xMax`: the area mean of
+the face values is 5.000000000000 (1e-12 relative, class R; `single`
+5.000000136870), every face is the cell value plus one shift (1e-14), `fr`
+is exactly 1 and the device triple is its host twin (1e-14); the vector form
+with `U_c = (1 + x, y - z, 2z)` and `meanValue (1 2 3)` holds every component
+(`single` 2.000000009934 on the second).
+`fixed_mean_outlet_inlet_holds_the_mean_on_a_two_signed_flux` - the same
+patch under a flux of alternating sign: `fr` is exactly the `phi > 0`
+switch, the inflow faces are the cell value bit for bit (class D), and the
+area mean is 5.000000000000 (`single` 5.000000017661); an all-inflow patch
+is the cell value on every face. `outlet_mapped_uniform_inlet_takes_the_
+outlet_mean` - `fraction 0.5`, `offset 0.25` from `xMax` under the outflow
+`phi_g = 0.1 (1 + g)|S_g|`: every inlet face is 2.164351851852, the value
+(120.6c) gives from the downloaded outlet faces (1e-12 relative; `single`
+2.164351829781), 2.074074074074 by the area mean when the outlet carries no
+flux, and the vector form per component. `a_loop_duct_closes_on_the_offset`
+- 16 x 4 x 1 cells on [0,4] x [0,1] x [0,0.25], symmetry sides, `U` mapped
+from `xMax` with `fraction 0.5` and `offset (0.5 0 0)`, `p`
+`fixedFluxExtrapolatedPressure` at the inlet and `fixedMean 0` at the
+outlet, through `Simple` with the refresh in `correct_outer`: the f64 run
+reaches its fixed point (no cell of `U` moves by 1e-14) in 112 outer
+iterations, the inlet is (120.6d)'s `0.5/(1 - 0.5) = 1` within 1e-10, `Q =
+0.250000000` against 0.25, the outlet carries `Q` back (1e-12), the inlet
+equals 0.5 times the outlet's mixing-cup mean plus 0.5 (1e-12) and the
+outlet's pressure mean is 0 (1e-12). Under `single` the run reaches its
+3000-iteration cap without the 1e-14 stop - the f32 SIMPLE floor of §120.3's
+findings, not this condition - with `Q = 0.249999970` (class R, 1e-5).
+`matched_flow_rate_outlet_carries_the_inlet_flux` - `inletPatch xMin` under
+`phi_g = -(1 + 0.5 g)|S_g|`, so `Q = 2.25`: the outlet flux `SUM U_b . S_f`
+is 2.250000000000 in both builds, the shift is normal to every face, and it
+is 2.25 again from a velocity field at rest. `fixed_flux_extrapolated_
+pressure_is_exact_on_a_linear_field` - `p_c = 3 + 2x - y + 0.5z` with its
+exact gradient on all six patches: every face value is the linear field at
+the face centre, worst 8.9e-16 (`single` 2.4e-7, class R), `fr` exactly 0,
+and a refresh without `grad p` is refused. `extrapolated_gradient_reaches_a_
+patch_past_the_first_block` - a 16 x 16 x 2 box with the condition on `zMax`
+alone, whose 256 faces start at boundary face 384, beyond the first
+256-thread launch block: every face is reached (the first version indexed
+the kernel by the absolute face and wrote none of them, a 0.03125 gap).
+`outlets_ii_refusals_are_by_name` - the five names without the opt-in, the
+two rank mismatches, an unknown and a self-naming patch, a missing
+`outletPatch`, `inletPatch` and `meanValue`, and a time-varying `meanValue`
+(class D). Eight tests, eight pass in each build.
+
+* **Versteeg, H. K. & Malalasekera, W.** *An Introduction to Computational
+  Fluid Dynamics: The Finite Volume Method*, 2nd ed., Pearson (2007),
+  ISBN 978-0-13-127498-3, chapter 11 (outlet boundary conditions) - the
+  overall-mass-conservation correction of extrapolated outlet velocities.
+  *Not read for this section*: (120.6e) is written as stated here.
+* **Ferziger, J. H. & Peric, M.** *Computational Methods for Fluid
+  Dynamics*, 3rd ed., Springer (2002) - the boundary pressure extrapolated
+  from the interior.
 
 No GPL-licensed source was consulted.
 

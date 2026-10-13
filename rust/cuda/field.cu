@@ -131,6 +131,16 @@
 #define OFGPU_BC_PRESSURE_DIRECTED_IO        44
 #define OFGPU_BC_PRESSURE_PAR_SLIP           45
 
+//- SPEC-LIT 120.6: the Outlets II family - four patch-mean rewrites and an
+//  extrapolated pressure gradient, whose triples the fldPatchMean* /
+//  fldExtrapolatedSnGrad kernels below rewrite once per outer iteration,
+//  wherever the caller opted in (BcInputs::patch_means).
+#define OFGPU_BC_FIXED_MEAN                       46
+#define OFGPU_BC_FIXED_MEAN_OUTLET_INLET          47
+#define OFGPU_BC_FIXED_FLUX_EXTRAPOLATED_PRESSURE 48
+#define OFGPU_BC_OUTLET_MAPPED_UNIFORM_INLET      49
+#define OFGPU_BC_MATCHED_FLOW_RATE_OUTLET         50
+
 //- The FLUX-SWITCHED block: every kind in [FIRST, LAST] is Dirichlet where
 //  the face flux is inward and zero-gradient where it is outward, and they
 //  differ only in where the inflow value comes from - inletOutlet takes it
@@ -533,6 +543,306 @@ extern "C" __global__ void fldPressureInletValue
     }
     refValue[i] = rv;
 }
+
+
+// ==========================================================================
+//  The Outlets II conditions (SPEC-LIT 120.6)
+//
+//  Four of the five hold a PATCH INTEGRAL - a mean (FIXED_MEAN, (120.6a)),
+//  the same mean held on outflow only (FIXED_MEAN_OUTLET_INLET, (120.6b)),
+//  a mean carried from another patch (OUTLET_MAPPED_UNIFORM_INLET,
+//  (120.6c)) or a flow rate (MATCHED_FLOW_RATE_OUTLET, (120.6e)) - and one
+//  extrapolates the cell's pressure gradient onto the face
+//  (FIXED_FLUX_EXTRAPOLATED_PRESSURE, (120.6f)). All five are section-4
+//  triples with no new evaluation branch: the two fldPatchMean* kernels
+//  below REWRITE THE TRIPLE ONLY, once per outer iteration, one 1-thread
+//  launch per rule, so the rule's sums run in face order on one thread in
+//  ofacc (SPEC-LIT 118.1) and the scalar they produce is rounded ONCE. The
+//  host twins are `field::patch_mean::patch_mean_values_scalar` and
+//  `patch_mean_values_vector` in src/field/patch_mean.rs, in the same
+//  operation order (the FMA contraction apart).
+// ==========================================================================
+
+extern "C" __global__ void fldPatchMeanScalar
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ bf,
+    const ofscalar* __restrict__ phiB,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ bFaceCells,
+    oflabel kind,
+    oflabel start,
+    oflabel size,
+    oflabel srcStart,
+    oflabel srcSize,
+    ofscalar target,
+    ofscalar fraction
+)
+{
+    if (OFGPU_TID != 0) return;
+
+    if (kind == OFGPU_BC_FIXED_MEAN || kind == OFGPU_BC_FIXED_MEAN_OUTLET_INLET)
+    {
+        //- (120.6a)/(120.6b): A = SUM |S_f|, M = SUM |S_f| psi_P, and for
+        //  the switched mean A_D over the OUTFLOW faces only (phi > 0
+        //  strictly; 46 is 47 with every face Dirichlet, A_D = A).
+        ofacc accA = 0, accM = 0, accAD = 0;
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            const ofacc s = (ofacc)bMagSf[f];
+            const ofacc p = (ofacc)psi[bFaceCells[f]];
+            accA += s;
+            accM += s*p;
+            if (kind == OFGPU_BC_FIXED_MEAN_OUTLET_INLET
+                && (ofacc)phiB[f] > (ofacc)0)
+            {
+                accAD += s;
+            }
+        }
+        const ofacc ad = (kind == OFGPU_BC_FIXED_MEAN) ? accA : accAD;
+        ofscalar s = (ofscalar)0;
+        if (ad > (ofacc)0)
+        {
+            s = (ofscalar)(((ofacc)target*accA - accM)/ad);
+        }
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            refValue[f] = psi[bFaceCells[f]] + s;
+            refGrad[f]  = (ofscalar)0;
+            fr[f] = (kind == OFGPU_BC_FIXED_MEAN
+                     || (ofacc)phiB[f] > (ofacc)0)
+                        ? (ofscalar)1 : (ofscalar)0;
+        }
+        return;
+    }
+
+    if (kind == OFGPU_BC_OUTLET_MAPPED_UNIFORM_INLET)
+    {
+        //- (120.6c): the mixing-cup mean over the source patch's outflow
+        //  faces, w = max(phi, 0), falling back to its area mean where the
+        //  patch has no outflow; one uniform value
+        //  v = fraction*m + target, rounded once.
+        ofacc accW = 0, accN = 0, accAs = 0, accNs = 0;
+        for (oflabel g = srcStart; g < srcStart + srcSize; ++g)
+        {
+            const ofscalar w = (phiB[g] > (ofscalar)0) ? phiB[g] : (ofscalar)0;
+            const ofacc wv = (ofacc)w;
+            const ofacc b  = (ofacc)bf[g];
+            const ofacc s  = (ofacc)bMagSf[g];
+            accW  += wv;
+            accN  += wv*b;
+            accAs += s;
+            accNs += s*b;
+        }
+        ofscalar m;
+        if (accW > (ofacc)0)
+        {
+            m = (ofscalar)(accN/accW);
+        }
+        else if (accAs > (ofacc)0)
+        {
+            m = (ofscalar)(accNs/accAs);
+        }
+        else
+        {
+            m = (ofscalar)0;
+        }
+        const ofscalar v = (ofscalar)((ofacc)fraction*(ofacc)m + (ofacc)target);
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            refValue[f] = v;
+            fr[f]       = (ofscalar)1;
+            refGrad[f]  = (ofscalar)0;
+        }
+    }
+}
+
+
+extern "C" __global__ void fldPatchMeanVector
+(
+    ofscalar* __restrict__ fr,
+    ofvec3* __restrict__ refValue,
+    ofvec3* __restrict__ refGrad,
+    const ofvec3* __restrict__ u,
+    const ofvec3* __restrict__ bf,
+    const ofscalar* __restrict__ phiB,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ bFaceCells,
+    oflabel kind,
+    oflabel start,
+    oflabel size,
+    oflabel srcStart,
+    oflabel srcSize,
+    ofscalar tx, ofscalar ty, ofscalar tz,
+    ofscalar fraction
+)
+{
+    if (OFGPU_TID != 0) return;
+
+    if (kind == OFGPU_BC_FIXED_MEAN || kind == OFGPU_BC_FIXED_MEAN_OUTLET_INLET)
+    {
+        //- (120.6a)/(120.6b) componentwise, the same weights as the scalar
+        //  kernel above: one shift per component, each rounded once.
+        ofacc accA = 0, accAD = 0;
+        ofacc accMx = 0, accMy = 0, accMz = 0;
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            const ofacc s = (ofacc)bMagSf[f];
+            const ofvec3 p = u[bFaceCells[f]];
+            accA  += s;
+            accMx += s*(ofacc)p.x;
+            accMy += s*(ofacc)p.y;
+            accMz += s*(ofacc)p.z;
+            if (kind == OFGPU_BC_FIXED_MEAN_OUTLET_INLET
+                && (ofacc)phiB[f] > (ofacc)0)
+            {
+                accAD += s;
+            }
+        }
+        const ofacc ad = (kind == OFGPU_BC_FIXED_MEAN) ? accA : accAD;
+        ofscalar sx = (ofscalar)0, sy = (ofscalar)0, sz = (ofscalar)0;
+        if (ad > (ofacc)0)
+        {
+            sx = (ofscalar)(((ofacc)tx*accA - accMx)/ad);
+            sy = (ofscalar)(((ofacc)ty*accA - accMy)/ad);
+            sz = (ofscalar)(((ofacc)tz*accA - accMz)/ad);
+        }
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            const ofvec3 p = u[bFaceCells[f]];
+            refValue[f] = mkvec(p.x + sx, p.y + sy, p.z + sz);
+            refGrad[f]  = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+            fr[f] = (kind == OFGPU_BC_FIXED_MEAN
+                     || (ofacc)phiB[f] > (ofacc)0)
+                        ? (ofscalar)1 : (ofscalar)0;
+        }
+        return;
+    }
+
+    if (kind == OFGPU_BC_OUTLET_MAPPED_UNIFORM_INLET)
+    {
+        //- (120.6c) componentwise, the same weights as the scalar kernel.
+        ofacc accW = 0, accAs = 0;
+        ofacc accNx = 0, accNy = 0, accNz = 0;
+        ofacc accNsx = 0, accNsy = 0, accNsz = 0;
+        for (oflabel g = srcStart; g < srcStart + srcSize; ++g)
+        {
+            const ofscalar w = (phiB[g] > (ofscalar)0) ? phiB[g] : (ofscalar)0;
+            const ofacc wv = (ofacc)w;
+            const ofvec3 b = bf[g];
+            const ofacc s  = (ofacc)bMagSf[g];
+            accW  += wv;
+            accNx += wv*(ofacc)b.x;
+            accNy += wv*(ofacc)b.y;
+            accNz += wv*(ofacc)b.z;
+            accAs += s;
+            accNsx += s*(ofacc)b.x;
+            accNsy += s*(ofacc)b.y;
+            accNsz += s*(ofacc)b.z;
+        }
+        ofscalar mx, my, mz;
+        if (accW > (ofacc)0)
+        {
+            mx = (ofscalar)(accNx/accW);
+            my = (ofscalar)(accNy/accW);
+            mz = (ofscalar)(accNz/accW);
+        }
+        else if (accAs > (ofacc)0)
+        {
+            mx = (ofscalar)(accNsx/accAs);
+            my = (ofscalar)(accNsy/accAs);
+            mz = (ofscalar)(accNsz/accAs);
+        }
+        else
+        {
+            mx = my = mz = (ofscalar)0;
+        }
+        const ofvec3 v = mkvec
+        (
+            (ofscalar)((ofacc)fraction*(ofacc)mx + (ofacc)tx),
+            (ofscalar)((ofacc)fraction*(ofacc)my + (ofacc)ty),
+            (ofscalar)((ofacc)fraction*(ofacc)mz + (ofacc)tz)
+        );
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            refValue[f] = v;
+            fr[f]       = (ofscalar)1;
+            refGrad[f]  = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+        }
+    }
+    else if (kind == OFGPU_BC_MATCHED_FLOW_RATE_OUTLET)
+    {
+        //- (120.6e): Q from the inletPatch's flux, F from the outlet's own
+        //  cell values dotted with S_f, and the one normal shift
+        //  c = (Q - F)/A - refValue = U_P + c S_f/|S_f|.
+        ofacc accQ = 0, accA = 0, accF = 0;
+        for (oflabel g = srcStart; g < srcStart + srcSize; ++g)
+        {
+            accQ -= (ofacc)phiB[g];
+        }
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            const ofvec3 s = bSf[f];
+            const ofvec3 p = u[bFaceCells[f]];
+            accA += (ofacc)bMagSf[f];
+            accF += (ofacc)s.x*(ofacc)p.x
+                  + (ofacc)s.y*(ofacc)p.y
+                  + (ofacc)s.z*(ofacc)p.z;
+        }
+        const ofscalar c = (accA != (ofacc)0)
+            ? (ofscalar)((accQ - accF)/accA) : (ofscalar)0;
+        for (oflabel f = start; f < start + size; ++f)
+        {
+            const ofvec3  s = bSf[f];
+            const ofscalar m = bMagSf[f];
+            const ofvec3  p = u[bFaceCells[f]];
+            const ofscalar k = (m != (ofscalar)0) ? c/m : (ofscalar)0;
+            refValue[f] = mkvec(p.x + s.x*k, p.y + s.y*k, p.z + s.z*k);
+            fr[f]       = (ofscalar)1;
+            refGrad[f]  = mkvec((ofscalar)0, (ofscalar)0, (ofscalar)0);
+        }
+    }
+}
+
+
+//- (120.6f) on a scalar field: refGrad = S_f . (grad p)_P/|S_f|, one thread
+//  per face of the patch - no patch sums, so no ofacc and no 1-thread
+//  launch. The thread index is PATCH-LOCAL - thread i writes face
+//  start + i of the `size` faces, the launch being cfg_for(size) - so a
+//  patch that starts past the first launch block is reached; an absolute
+//  index would leave every such patch unwritten, its threads all below
+//  start. refValue is written zero and fr zero; the face value comes out
+//  of the ordinary section-4 evaluation as p_P + refGrad/Delta_b. The host
+//  twin is `field::patch_mean::extrapolated_sn_grad`.
+extern "C" __global__ void fldExtrapolatedSnGrad
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ grad,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ bFaceCells,
+    oflabel start,
+    oflabel size
+)
+{
+    const oflabel i = start + OFGPU_TID;
+    if (i >= start + size) return;
+
+    const ofvec3 g = grad[bFaceCells[i]];
+    const ofvec3 s = bSf[i];
+    const ofscalar d = s.x*g.x + s.y*g.y + s.z*g.z;
+    const ofscalar m = bMagSf[i];
+    refGrad[i]  = (m != (ofscalar)0) ? d/m : (ofscalar)0;
+    fr[i]       = (ofscalar)0;
+    refValue[i] = (ofscalar)0;
+}
+
 
 
 // ==========================================================================

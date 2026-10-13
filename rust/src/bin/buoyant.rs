@@ -121,7 +121,8 @@ use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field,
     harvest_vector_field, les_nut_wall_faces, max_div_phi, setup_scalar_field,
-    setup_vector_field_with, update_inlet_outlet, BcInputs, NutRoughness, WallFaces,
+    setup_scalar_field_with, setup_vector_field_with, update_inlet_outlet, BcInputs,
+    NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{
     find_start_time, format_time_name, model_coeff, read_case_controls, CaseControls,
@@ -2075,6 +2076,9 @@ fn run(o: &Options) -> Result<()> {
         &hm,
         BcInputs {
             pressure_inlet: true,
+            // SPEC-LIT 120.6: the same opt-in the loop's own setup below
+            // carries, so the seed accepts the Outlets II names too.
+            patch_means: true,
             ..BcInputs::default()
         },
     )?;
@@ -2139,10 +2143,25 @@ fn run(o: &Options) -> Result<()> {
         &hm,
         BcInputs {
             pressure_inlet: true,
+            // SPEC-LIT 120.6: this loop runs update_patch_means_* every
+            // outer iteration (Simple::correct_outer), so U may carry the
+            // Outlets II conditions.
+            patch_means: true,
             ..BcInputs::default()
         },
     )?;
-    setup_scalar_field(&gpu, s.p_mut(), &raw_p, &hm)?;
+    // SPEC-LIT 120.6: p carries the opt-in too - its kind-48 patches read
+    // the momentum predictor's grad p in the same refresh.
+    setup_scalar_field_with(
+        &gpu,
+        s.p_mut(),
+        &raw_p,
+        &hm,
+        BcInputs {
+            patch_means: true,
+            ..BcInputs::default()
+        },
+    )?;
 
     {
         // `seed_u` still holds the file's velocity unless potential flow

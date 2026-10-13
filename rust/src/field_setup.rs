@@ -94,6 +94,7 @@ use std::collections::BTreeMap;
 
 use crate::device::Gpu;
 use crate::error::{Error, Result};
+use crate::field::patch_mean::PatchMeanRule;
 use crate::field::{BcKind, GpuScalarField, GpuVectorField};
 use crate::function1::{DeviceTimedPatch, F1, F1Clock, F1Kernels, F1Target, TimedPatch};
 use crate::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
@@ -126,6 +127,11 @@ pub struct BoundaryTriple<T> {
     /// names - `(120.3a)`'s `F`, `r` and `g`, packed for
     /// [`GpuVectorField::dm`].
     pub dm: Vec<Scalar>,
+    /// SPEC-LIT 120.6: the Outlets II rules the setup built, one per patch
+    /// carrying one of the five names. The caller refreshes them every outer
+    /// iteration through `field_ops::update_patch_means_*`; empty for every
+    /// field that carries none of the five.
+    pub mean_rules: Vec<PatchMeanRule>,
 }
 
 impl<T: Copy + Default> BoundaryTriple<T> {
@@ -137,6 +143,7 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             kind: vec![BcKind::ZeroGradient as Label; n],
             value: vec![T::default(); n],
             dm: vec![0.0; 12 * n],
+            mean_rules: Vec::new(),
         }
     }
 }
@@ -188,6 +195,14 @@ pub struct BcInputs<'a> {
     /// passes - refuses the five names: a frozen seed with `fr = 1` would be
     /// a fixed-velocity inlet under a pressure-inlet name (SPEC-LIT 13.4).
     pub pressure_inlet: bool,
+    /// The caller refreshes the five Outlets II names of SPEC-LIT 120.6
+    /// every outer iteration through `field_ops::update_patch_means_*` -
+    /// `Simple::correct_outer` does, which is why `ofgpu-lowmach` and
+    /// `ofgpu-buoyant` pass it for `U` and `p`. False - the default, which
+    /// every other setup passes - refuses the five names: a seed with
+    /// nothing to refresh it would freeze the face at its first value under
+    /// a name that promises a patch integral (SPEC-LIT 13.4).
+    pub patch_means: bool,
 }
 
 impl<'a> BcInputs<'a> {
@@ -718,6 +733,7 @@ fn scalar_patch(
     at: usize,
     f1: Option<&F1Setup>,
     timed: &mut Vec<TimedPatch>,
+    pending: &mut Vec<PendingMean>,
 ) -> Result<()> {
     // Topology first: a field file cannot argue with an empty patch.
     if let Some(forced) = topology_override(mesh_kind) {
@@ -788,6 +804,88 @@ fn scalar_patch(
                 spec.type_name
             ),
         });
+    }
+
+    // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
+    // same reason - the triple is rewritten once per outer iteration by
+    // `update_patch_means_scalar`, so the setup only seeds it (the cell
+    // value; `fr = 1` for the plain mean and the mapped inlet, `fr = 0` for
+    // the switched mean and the extrapolated gradient) and parses the one
+    // or two CONSTANT entries the kind is defined by. The caller's
+    // `BcInputs::patch_means` promises the refresh; without it the names
+    // are refused - a frozen seed under a name that promises a patch
+    // integral is the silent substitution SPEC-LIT 13.4 forbids. The
+    // source patch stays a NAME until the boundary builders resolve it
+    // after the patch loop.
+    if matches!(
+        spec.type_name.as_str(),
+        "fixedMean"
+            | "fixedMeanOutletInlet"
+            | "fixedFluxExtrapolatedPressure"
+            | "outletMappedUniformInlet"
+            | "matchedFlowRateOutletVelocity"
+    ) {
+        let name = spec.type_name.as_str();
+        if !aux.inputs.patch_means {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{field}: boundaryField/{patch}: `{name}` is refused - its \
+                     triple must be rewritten from the patch mean every outer \
+                     iteration through update_patch_means_scalar, and this \
+                     setup was given BcInputs::patch_means = false, so nothing \
+                     would (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        if name == "matchedFlowRateOutletVelocity" {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{patch}: `{name}` is a vector condition and {field} is a \
+                     scalar field (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        let base = format!("{field}: boundaryField/{patch}");
+        let entries = crate::function1::patch_entries(spec, &base)?;
+        let (target, fraction, src) = match name {
+            "fixedMean" | "fixedMeanOutletInlet" => {
+                let v = mean_number(&entries, "meanValue", &base, field, true, 0.0)?;
+                (Vec3::new(v as Scalar, 0.0, 0.0), 1.0, None)
+            }
+            "outletMappedUniformInlet" => {
+                let p = mean_patch_name(&entries, "outletPatch", &base, field)?;
+                let fraction = mean_number(&entries, "fraction", &base, field, false, 1.0)?;
+                let c = mean_number(&entries, "offset", &base, field, false, 0.0)?;
+                (Vec3::new(c as Scalar, 0.0, 0.0), fraction, Some(p))
+            }
+            // `fixedFluxExtrapolatedPressure` - (120.6f) reads the cell's
+            // own gradient; no entry of its own.
+            _ => (Vec3::ZERO, 1.0, None),
+        };
+        let kind = BcKind::from_name(name, field, patch)?;
+        let fr0 = match kind {
+            BcKind::FixedMeanOutletInlet | BcKind::FixedFluxExtrapolatedPressure => 0.0,
+            _ => 1.0,
+        };
+        for i in 0..n {
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = fr0;
+            out.ref_value[at + i] = internal[i];
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = internal[i];
+        }
+        pending.push(PendingMean {
+            kind,
+            patch: patch.to_string(),
+            start: at,
+            size: n,
+            src,
+            target,
+            fraction: fraction as Scalar,
+        });
+        return Ok(());
     }
 
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;
@@ -1118,6 +1216,25 @@ fn scalar_patch(
                 })
             }
 
+            // SPEC-LIT 120.6: the Outlets II kinds never reach the static
+            // arms - the name check above intercepts them (with its
+            // BcInputs::patch_means gate, which refuses where the caller did
+            // not opt in). This arm only keeps the match total.
+            BcKind::FixedMean
+            | BcKind::FixedMeanOutletInlet
+            | BcKind::FixedFluxExtrapolatedPressure
+            | BcKind::OutletMappedUniformInlet
+            | BcKind::MatchedFlowRateOutletVelocity => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `{}` reached the static arms without its seed \
+                         (SPEC-LIT 120.6)",
+                        spec.type_name
+                    ),
+                })
+            }
+
             // SPEC-LIT 119.2: `type wedge` belongs on a patch the MESH
             // types `wedge`, where topology_override has already forced the
             // kind before this arm - so reaching it here means a field file
@@ -1176,6 +1293,7 @@ pub fn scalar_boundary_with(
     // No `F1Setup`: a time-varying Function1 is refused here, by name
     // (SPEC-LIT 120.1 - the pre-existing entry points run constants only).
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         // The wall-adjacent cell value for each face of this patch.
@@ -1200,7 +1318,15 @@ pub fn scalar_boundary_with(
             p.start,
             None,
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's `outletPatch`/`inletPatch` against
+    // the mesh now that the loop has seeded every patch - a rule may name a
+    // patch either side of its own.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok(out)
@@ -1219,6 +1345,7 @@ pub fn scalar_boundary_timed(
 ) -> Result<(BoundaryTriple<Scalar>, Vec<TimedPatch>)> {
     let mut out = BoundaryTriple::new(m.n_boundary_faces);
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         let cells: Vec<Scalar> = (0..p.size)
@@ -1242,7 +1369,14 @@ pub fn scalar_boundary_timed(
             p.start,
             Some(f1),
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's source patch name after the loop,
+    // as `scalar_boundary_with` does.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok((out, timed))
@@ -1273,6 +1407,7 @@ pub fn upload_scalar(
         ref_value: gpu.upload(&b.ref_value)?,
         ref_grad: gpu.upload(&b.ref_grad)?,
         bc_kind: gpu.upload(&b.kind)?,
+        mean_rules: b.mean_rules,
     })
 }
 
@@ -1831,6 +1966,130 @@ fn inlet_scalar(
 
 /// The seed the velocity-inlet family returns: `fr = 1` at the computed face
 /// value, zero gradient, and the `dm` block the caller packed.
+/// One Outlets II patch whose source patch is still a NAME (SPEC-LIT 120.6):
+/// the per-patch seeds parse the entries and park one of these; the
+/// boundary builders resolve `outletPatch`/`inletPatch` against the mesh
+/// after the patch loop, so a rule may name a patch the loop has not
+/// reached yet. `target` holds the scalar reading in `.x`.
+struct PendingMean {
+    kind: BcKind,
+    patch: String,
+    start: usize,
+    size: usize,
+    src: Option<String>,
+    target: Vec3,
+    fraction: Scalar,
+}
+
+/// One CONSTANT number of an Outlets II condition (SPEC-LIT 120.6), read
+/// through `F1::parse` as `inlet_scalar` reads the velocity-inlet profiles:
+/// a time-varying entry is refused by name, because no driver runs the
+/// timed path for these names. `required` decides whether a missing entry
+/// is an error naming the key or the caller's default.
+fn mean_number(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    base: &str,
+    field: &str,
+    required: bool,
+    default: f64,
+) -> Result<f64> {
+    let setting = format!("{base}/{key}");
+    let Some(f) = F1::parse(entries, key, 1, &setting, None)? else {
+        if required {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{setting}: the condition needs a `{key}` entry and the \
+                     patch has none (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        return Ok(default);
+    };
+    if !f.is_constant() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: a time-varying `{key}` is refused on the Outlets \
+                 II family - no driver runs the timed path for these names \
+                 (SPEC-LIT 120.6)"
+            ),
+        });
+    }
+    Ok(f.eval(0.0)[0])
+}
+
+/// The patch NAME an `outletMappedUniformInlet` or
+/// `matchedFlowRateOutletVelocity` entry points at - required, by name.
+fn mean_patch_name(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    base: &str,
+    field: &str,
+) -> Result<String> {
+    entries.get(key).map(|t| t.trim().to_string()).ok_or_else(
+        || Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/{key}: the condition needs a `{key}` entry and the \
+                 patch has none (SPEC-LIT 120.6)"
+            ),
+        },
+    )
+}
+
+/// SPEC-LIT 120.6: resolve one pending rule's source patch name against the
+/// mesh - its face range in the flattened boundary - refused by name when
+/// there is no such patch and when the patch names itself.
+fn resolve_mean_rule(
+    p: PendingMean,
+    m: &HostMesh,
+    field: &str,
+) -> Result<PatchMeanRule> {
+    let rule = PatchMeanRule {
+        kind: p.kind,
+        start: p.start,
+        size: p.size,
+        src_start: 0,
+        src_size: 0,
+        target: p.target,
+        fraction: p.fraction,
+    };
+    let Some(src) = &p.src else {
+        return Ok(rule);
+    };
+    let key = match p.kind {
+        BcKind::OutletMappedUniformInlet => "outletPatch",
+        _ => "inletPatch",
+    };
+    let patch = p.patch.as_str();
+    if *src == p.patch {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}/{key}: `{src}` is the patch \
+                 itself - the mean it reads would be the mean it writes \
+                 (SPEC-LIT 120.6)"
+            ),
+        });
+    }
+    let Some(q) = m.patches.iter().find(|q| q.name == *src) else {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}/{key}: `{src}` names no \
+                 patch of this mesh (SPEC-LIT 120.6)"
+            ),
+        });
+    };
+    Ok(PatchMeanRule {
+        src_start: q.start,
+        src_size: q.size,
+        ..rule
+    })
+}
+
 fn inlet_seed(kind: BcKind, n: usize, ref_value: Vec<Vec3>, dm: Vec<Scalar>) -> WallSlipSeed {
     WallSlipSeed {
         kind,
@@ -2349,6 +2608,7 @@ fn vector_patch(
     at: usize,
     f1: Option<&F1Setup>,
     timed: &mut Vec<TimedPatch>,
+    pending: &mut Vec<PendingMean>,
 ) -> Result<()> {
     let zero = Vec3::default();
 
@@ -2421,6 +2681,128 @@ fn vector_patch(
             out.ref_grad[at + i] = seed.ref_grad[i];
             out.value[at + i] = seed.value[i];
         }
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
+    // same reason - the triple is rewritten once per outer iteration by
+    // `update_patch_means_vector` (the cell value; `fr = 1` for the plain
+    // mean, the mapped inlet and the flow-rate outlet, `fr = 0` for the
+    // switched mean), where the caller's `BcInputs::patch_means` promises
+    // the refresh. `fixedFluxExtrapolatedPressure` is a scalar condition.
+    // The source patch stays a NAME until the boundary builders resolve it
+    // after the patch loop.
+    if matches!(
+        spec.type_name.as_str(),
+        "fixedMean"
+            | "fixedMeanOutletInlet"
+            | "fixedFluxExtrapolatedPressure"
+            | "outletMappedUniformInlet"
+            | "matchedFlowRateOutletVelocity"
+    ) {
+        let name = spec.type_name.as_str();
+        if !aux.inputs.patch_means {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{field}: boundaryField/{patch}: `{name}` is refused - its \
+                     triple must be rewritten from the patch mean every outer \
+                     iteration through update_patch_means_vector, and this \
+                     setup was given BcInputs::patch_means = false, so nothing \
+                     would (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        if name == "fixedFluxExtrapolatedPressure" {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{patch}: `{name}` is a scalar condition and {field} is a \
+                     vector field (SPEC-LIT 120.6)"
+                ),
+            });
+        }
+        let base = format!("{field}: boundaryField/{patch}");
+        let entries = crate::function1::patch_entries(spec, &base)?;
+        let (target, fraction, src) = match name {
+            "fixedMean" | "fixedMeanOutletInlet" => {
+                let key = "meanValue";
+                let setting = format!("{base}/{key}");
+                let Some(f) = F1::parse(&entries, key, 3, &setting, None)? else {
+                    return Err(Error::Field {
+                        field: field.to_string(),
+                        msg: format!(
+                            "{setting}: the condition needs a `{key}` entry \
+                             and the patch has none (SPEC-LIT 120.6)"
+                        ),
+                    });
+                };
+                if !f.is_constant() {
+                    return Err(Error::Field {
+                        field: field.to_string(),
+                        msg: format!(
+                            "{setting}: a time-varying `{key}` is refused on \
+                             the Outlets II family - no driver runs the timed \
+                             path for these names (SPEC-LIT 120.6)"
+                        ),
+                    });
+                }
+                let v = f.eval(0.0);
+                (Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar), 1.0, None)
+            }
+            "outletMappedUniformInlet" => {
+                let p = mean_patch_name(&entries, "outletPatch", &base, field)?;
+                let fraction = mean_number(&entries, "fraction", &base, field, false, 1.0)?;
+                let key = "offset";
+                let setting = format!("{base}/{key}");
+                let v = match F1::parse(&entries, key, 3, &setting, None)? {
+                    None => Vec3::ZERO,
+                    Some(f) if f.is_constant() => {
+                        let c = f.eval(0.0);
+                        Vec3::new(c[0] as Scalar, c[1] as Scalar, c[2] as Scalar)
+                    }
+                    Some(_) => {
+                        return Err(Error::Field {
+                            field: field.to_string(),
+                            msg: format!(
+                                "{setting}: a time-varying `{key}` is refused \
+                                 on the Outlets II family - no driver runs \
+                                 the timed path for these names (SPEC-LIT \
+                                 120.6)"
+                            ),
+                        });
+                    }
+                };
+                (v, fraction, Some(p))
+            }
+            // `matchedFlowRateOutletVelocity` - (120.6e) reads the flux of
+            // `inletPatch`; no entry of its own but the patch name.
+            _ => {
+                let p = mean_patch_name(&entries, "inletPatch", &base, field)?;
+                (Vec3::ZERO, 1.0, Some(p))
+            }
+        };
+        let kind = BcKind::from_name(name, field, patch)?;
+        let fr0 = match kind {
+            BcKind::FixedMeanOutletInlet => 0.0,
+            _ => 1.0,
+        };
+        for i in 0..n {
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = fr0;
+            out.ref_value[at + i] = internal[i];
+            out.ref_grad[at + i] = zero;
+            out.value[at + i] = internal[i];
+        }
+        pending.push(PendingMean {
+            kind,
+            patch: patch.to_string(),
+            start: at,
+            size: n,
+            src,
+            target,
+            fraction: fraction as Scalar,
+        });
         return Ok(());
     }
 
@@ -2677,6 +3059,25 @@ fn vector_patch(
                     ),
                 })
             }
+
+            // SPEC-LIT 120.6: the Outlets II kinds never reach the static
+            // arms - the name check above intercepts them (with its
+            // BcInputs::patch_means gate, which refuses where the caller did
+            // not opt in). This arm only keeps the match total.
+            BcKind::FixedMean
+            | BcKind::FixedMeanOutletInlet
+            | BcKind::FixedFluxExtrapolatedPressure
+            | BcKind::OutletMappedUniformInlet
+            | BcKind::MatchedFlowRateOutletVelocity => {
+                return Err(Error::Field {
+                    field: field.to_string(),
+                    msg: format!(
+                        "{patch}: `{}` reached the static arms without its seed \
+                         (SPEC-LIT 120.6)",
+                        spec.type_name
+                    ),
+                })
+            }
         };
 
         out.kind[at + i] = kind as Label;
@@ -2708,6 +3109,7 @@ pub fn vector_boundary_with(
     // No `F1Setup`: a time-varying Function1 is refused here, by name
     // (SPEC-LIT 120.1 - the pre-existing entry points run constants only).
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         let cells: Vec<Vec3> = (0..p.size)
@@ -2731,7 +3133,15 @@ pub fn vector_boundary_with(
             p.start,
             None,
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's `outletPatch`/`inletPatch` against
+    // the mesh now that the loop has seeded every patch - a rule may name a
+    // patch either side of its own.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok(out)
@@ -2750,6 +3160,7 @@ pub fn vector_boundary_timed(
 ) -> Result<(BoundaryTriple<Vec3>, Vec<TimedPatch>)> {
     let mut out = BoundaryTriple::new(m.n_boundary_faces);
     let mut timed = Vec::new();
+    let mut pending = Vec::new();
 
     for p in &m.patches {
         let cells: Vec<Vec3> = (0..p.size)
@@ -2773,7 +3184,14 @@ pub fn vector_boundary_timed(
             p.start,
             Some(f1),
             &mut timed,
+            &mut pending,
         )?;
+    }
+
+    // SPEC-LIT 120.6: resolve each rule's source patch name after the loop,
+    // as `vector_boundary_with` does.
+    for p in pending {
+        out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
 
     Ok((out, timed))
@@ -2804,6 +3222,7 @@ pub fn upload_vector(
         ref_grad: gpu.upload(&b.ref_grad)?,
         bc_kind: gpu.upload(&b.kind)?,
         dm: gpu.upload(&b.dm)?,
+        mean_rules: b.mean_rules,
     })
 }
 
@@ -2867,6 +3286,8 @@ pub fn setup_scalar_field(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2890,6 +3311,8 @@ pub fn setup_scalar_field_with(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2913,6 +3336,8 @@ pub fn setup_vector_field_with(
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
     gpu.write(&mut f.dm, &b.dm)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2935,6 +3360,8 @@ pub fn setup_vector_field(
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
     gpu.write(&mut f.dm, &b.dm)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     Ok(())
 }
 
@@ -2960,6 +3387,8 @@ pub fn setup_scalar_field_timed(
     gpu.write(&mut f.ref_value, &b.ref_value)?;
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     TimedBcs::upload(gpu, &timed)
 }
 
@@ -2986,6 +3415,8 @@ pub fn setup_vector_field_timed(
     gpu.write(&mut f.ref_grad, &b.ref_grad)?;
     gpu.write(&mut f.bc_kind, &b.kind)?;
     gpu.write(&mut f.dm, &b.dm)?;
+    // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
+    f.mean_rules = b.mean_rules;
     TimedBcs::upload(gpu, &timed)
 }
 
@@ -3468,6 +3899,12 @@ pub fn bc_kind_name(k: BcKind) -> &'static str {
         BcKind::FixedValue => "fixedValue",
         BcKind::Calculated => "calculated",
         BcKind::DirectionMixed => "directionMixed",
+        // SPEC-LIT 120.6: the Outlets II family.
+        BcKind::FixedMean => "fixedMean",
+        BcKind::FixedMeanOutletInlet => "fixedMeanOutletInlet",
+        BcKind::FixedFluxExtrapolatedPressure => "fixedFluxExtrapolatedPressure",
+        BcKind::OutletMappedUniformInlet => "outletMappedUniformInlet",
+        BcKind::MatchedFlowRateOutletVelocity => "matchedFlowRateOutletVelocity",
         _ => "(other)",
     }
 }

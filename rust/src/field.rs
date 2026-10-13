@@ -456,6 +456,44 @@ pub enum BcKind {
     /// U_P - S_f (S_f . U_P)/(S_f . S_f)` where `phi_b < 0`, zeroGradient
     /// where `phi_b >= 0`.
     PressureInletOutletParSlipVelocity = 45,
+
+    /// `fixedMean` (SPEC-LIT 120.6, (120.6a)): the cell profile with one
+    /// constant `s` added, chosen so the area-weighted patch mean is the
+    /// target `meanValue` - `refValue = psi_P + s`, `s = (meanValue A -
+    /// M)/A` from the patch sums `A = SUM |S_f|`, `M = SUM |S_f| psi_P`.
+    /// One rule per patch, rewritten once per outer iteration by
+    /// `fldPatchMeanScalar`/`fldPatchMeanVector` wherever the caller opted
+    /// in with [`crate::field_setup::BcInputs::patch_means`]; host twin
+    /// [`crate::field::patch_mean::patch_mean_values_scalar`].
+    FixedMean = 46,
+
+    /// `fixedMeanOutletInlet` (SPEC-LIT 120.6, (120.6b)): (120.6a)'s mean
+    /// held where the flow LEAVES - `fr = 1` where `phi_f > 0`, zeroGradient
+    /// where it comes back in - so the inflow faces carry `psi_b = psi_P`
+    /// exactly and the patch mean is still `meanValue` whenever any face is
+    /// an outflow.
+    FixedMeanOutletInlet = 47,
+
+    /// `fixedFluxExtrapolatedPressure` (SPEC-LIT 120.6, (120.6f)): a
+    /// fixed-gradient pressure whose gradient is the cell's own `grad p`
+    /// carried onto the face - `refGrad_f = S_f . (grad p)_P/|S_f|`, exact
+    /// for a linear `p`. Scalar only; rewritten once per outer iteration by
+    /// `fldExtrapolatedSnGrad` from the momentum predictor's gradient.
+    FixedFluxExtrapolatedPressure = 48,
+
+    /// `outletMappedUniformInlet` (SPEC-LIT 120.6, (120.6c)): one uniform
+    /// value on every face - `fraction` times the flux-weighted mean over
+    /// the outflow faces of the patch `outletPatch` (its area mean where the
+    /// patch has no outflow), plus `offset`. Fixed point of a loop duct,
+    /// (120.6d): `U = offset/(1 - fraction)`.
+    OutletMappedUniformInlet = 49,
+
+    /// `matchedFlowRateOutletVelocity` (SPEC-LIT 120.6, (120.6e)): the cell
+    /// velocity shifted along the face normal by one constant `c`, chosen so
+    /// the outlet carries out exactly the flow rate entering
+    /// `inletPatch` - `refValue = U_P + c S_f/|S_f|`, `c = (Q - F)/A`.
+    /// Vector only.
+    MatchedFlowRateOutletVelocity = 50,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -561,6 +599,14 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "pressureDirectedInletVelocity",
     "pressureDirectedInletOutletVelocity",
     "pressureInletOutletParSlipVelocity",
+    // SPEC-LIT 120.6: the Outlets II family - four patch-mean rewrites and
+    // an extrapolated pressure gradient, refreshed every outer iteration
+    // where the caller opts in with `BcInputs::patch_means`.
+    "fixedMean",
+    "fixedMeanOutletInlet",
+    "fixedFluxExtrapolatedPressure",
+    "outletMappedUniformInlet",
+    "matchedFlowRateOutletVelocity",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -856,6 +902,19 @@ impl BcKind {
             "pressureDirectedInletVelocity" => Self::PressureDirectedInletVelocity,
             "pressureDirectedInletOutletVelocity" => Self::PressureDirectedInletOutletVelocity,
             "pressureInletOutletParSlipVelocity" => Self::PressureInletOutletParSlipVelocity,
+
+            // SPEC-LIT 120.6: the Outlets II family. Four of them hold a
+            // PATCH INTEGRAL - a mean, a mean carried from another patch, or
+            // a flow rate - and one extrapolates the cell's pressure
+            // gradient onto the face; all five are a section-4 triple with
+            // no new evaluation branch, rewritten once per outer iteration
+            // by the fldPatchMean*/fldExtrapolatedSnGrad kernels wherever
+            // the caller opted in with `BcInputs::patch_means`.
+            "fixedMean" => Self::FixedMean,
+            "fixedMeanOutletInlet" => Self::FixedMeanOutletInlet,
+            "fixedFluxExtrapolatedPressure" => Self::FixedFluxExtrapolatedPressure,
+            "outletMappedUniformInlet" => Self::OutletMappedUniformInlet,
+            "matchedFlowRateOutletVelocity" => Self::MatchedFlowRateOutletVelocity,
 
             // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
             // function. `nutUWallFunction` already applies Spalding's single
@@ -1460,6 +1519,13 @@ pub struct GpuScalarField {
     pub ref_grad: DevBuf<Scalar>,
     /// `[n_bf]` `BcKind` as `i32`
     pub bc_kind: DevBuf<Label>,
+    /// SPEC-LIT 120.6: the Outlets II rules the setup built for this field,
+    /// one per patch carrying one of the five names - the kind, the patch's
+    /// face range, the other patch's face range (kinds 49, 50), the target
+    /// or offset, and the fraction. `update_patch_means_scalar` launches one
+    /// kernel per rule once per outer iteration; a field with no rule
+    /// launches nothing.
+    pub mean_rules: Vec<patch_mean::PatchMeanRule>,
 }
 
 impl GpuScalarField {
@@ -1480,6 +1546,7 @@ impl GpuScalarField {
             ref_value: gpu.zeros(m.n_boundary_faces)?,
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
+            mean_rules: Vec::new(),
         })
     }
 
@@ -1534,6 +1601,10 @@ pub struct GpuVectorField {
     /// everywhere a face does not carry one of the four tensorial names
     /// (see [`BcKind::DirectionMixed`]).
     pub dm: DevBuf<Scalar>,
+    /// SPEC-LIT 120.6: the Outlets II rules the setup built for this field,
+    /// as on [`GpuScalarField::mean_rules`] - `update_patch_means_vector`
+    /// launches one kernel per rule once per outer iteration.
+    pub mean_rules: Vec<patch_mean::PatchMeanRule>,
 }
 
 impl GpuVectorField {
@@ -1552,6 +1623,7 @@ impl GpuVectorField {
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
             dm: gpu.zeros(12 * m.n_boundary_faces)?,
+            mean_rules: Vec::new(),
         })
     }
 }
@@ -1610,6 +1682,14 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
 /// per-face wave-speed state, and the Robin rewrite - see
 /// [`advective::advective_triple`] and [`advective::AdvectiveScalar`].
 pub mod advective;
+
+/// The Outlets II conditions of SPEC-LIT 120.6: the [`PatchMeanRule`] the
+/// setup holds per patch, and the host twins of the `fldPatchMeanScalar`,
+/// `fldPatchMeanVector` and `fldExtrapolatedSnGrad` kernels - see
+/// [`patch_mean::patch_mean_values_scalar`],
+/// [`patch_mean::patch_mean_values_vector`] and
+/// [`patch_mean::extrapolated_sn_grad`].
+pub mod patch_mean;
 
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
@@ -1797,7 +1877,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [70, 3, 37, 10, 10], "the per-status counts");
+        assert_eq!(counts, [75, 3, 32, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]
