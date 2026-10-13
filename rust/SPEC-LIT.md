@@ -45587,6 +45587,60 @@ Tests in both builds, host f64, class A, ≤ 2 min:
 * `dust::psi::tests::saddle_slope`: the end slope a of the converged trajectory satisfies
   `a² + a − Λ k g(1) = 0` to 1e−6 relative.
 
+### 153.8 What DST-02 landed, and the values it settled
+
+`src/dust/psi.rs` (the module `dust::psi`), host f64 in both builds and never `Scalar`, with the
+tests written once in `tests/shared/dust_psi_cases.rs` and included twice: as the lib tests
+`dust::psi::tests`, and by `tests/dust_psi.rs` in the default and the `single` build. It
+implements §153.5 as written: the cold leg in u = ln c and the hot leg backward in s = −ln(1 − c)
+from the saddle manifold, both classical RK4 on nodes `x0 + i h` (never accumulated), the
+mismatch at c = 1/2 bisected on ln Λ inside [1e−6, 1e6] · exp(Θ/T_b), the (153.4) identity by
+Simpson on the march's own nodes plus the analytic tail, (153.5) on its own 2 × 20 000 nodes,
+and the end slope read on the converged hot leg at the node nearest 1 − c = 1e−8. The solver
+method is `PsiProblem::eigen`; the module launches no kernel and drives no iteration, so it
+needs no capture-registry row. Two state curves implement the trait `FlameCurve`:
+`PublishedCurve` (153.1), and `AdiabaticCurve`, which solves `h(T, c) = h_U(T_u)` of (152.8)
+by Newton with a bisection fallback and takes ρ from (152.9) at fixed p. `reaction_time` is
+(153.2); `implied_speed_ratio` is the Ψ_used diagnostic of §153.5; `documentation_table` and
+`format_table` are the review table, never the solver's input.
+
+Measured (published closure, n = 1, default options N = 40 000, c_cut = 1e−10, s_max = 36;
+55 bisections each; all nine tests together run in 1 s):
+
+| case | Ψ | Λ(N=20 000)/Λ(N=40 000) − 1 | (153.4) − 1 | c_cut spread | Λ/Λ_ZFK | Ze | a_m² + a_m − Λkg(1), relative |
+|---|---|---|---|---|---|---|---|
+| Leeds | 1.5445279792249426e−4 | 1.2e−12 | −7.5e−14 | 5.9e−13 | 0.7819266642497 | 9.668990907909674 | 6.1e−8 |
+| REMBE | 3.1867682159564557e−4 | 1.3e−12 | −5.7e−14 | 6.9e−13 | 0.7721669671168 | 8.928098416734780 | 5.5e−8 |
+
+**The REMBE value is settled at Ψ = 3.186768e−4**, DST-00's value of §153.6; the planner's
+3.1811e−4 is 0.18 % low. Both Ψ agree with DST-00's independent oracle to 4e−16 relative.
+
+* **Diffusivity law (REMBE, N = 20 000).** n = 0.5: Ψ = 2.0412803088488662e−4, identity
+  −4.6e−13; n = 1.7: Ψ = 5.959546468606347e−4, identity −1.5e−12. A Ψ built for n = 1 run in a
+  solver whose law is n = 0.5 propagates the laminar limit at Ψ_true/Ψ_used = 0.6405487 S_L,
+  confirming the planner's 0.64 of §153.6.
+* **The ZFK row (σ = 7.04, N = 20 000).** Λ/Λ_ZFK = 0.7915130836917, 0.8831637678454,
+  0.9376024843535, 0.9676609829695 at Ze = 10, 20, 40, 80 (each Ze reproduced to 1e−9 of its
+  value); monotone, and 1 − Λ/Λ_ZFK = 0.032 at Ze = 80. The identity holds to 2.1e−12 or better
+  at every Ze.
+* **The adiabatic line, prescribed Leeds gas** (`PrescribedInputs::huang2020_leeds(1000)`,
+  T_u = 328 K). Its line is the closed form `t = 1 + c (1500/328 − 1)`,
+  `r = (W(c)/W_u)/t` to 1e−12 at c = 0, 1/4, 1/2, 3/4, 1, and `state(0)` is (1, 1) exactly.
+  Ψ = 7.647549203367136e−5, Λ/Λ_ZFK = 0.7921150637777, Ze = 10.41777777777778, identity
+  −1.0e−13. This Ψ is half the published-closure Leeds Ψ: the prescribed gas burns to
+  T_b = 1500 K at σ = 5.05 (§152.9), where (153.1) at σ = 5.06 puts T_b at 1660 K, and the
+  closure's density at a given c differs by W(c)/W_u.
+* **The adiabatic line, formula REMBE gas** (`FormulaInputs::huang2022_rembe`, TM-4513 gas
+  set, T_u = 273 K). T(1) = 1779.5145978895 K equals the isobaric burned state of (152.10) to
+  1e−12, r(1) = 1/σ to 1e−12, and T rises strictly over c = i/20. Ψ = 1.8183403796226836e−4
+  (N = 20 000), identity −1.0e−12. This is 57 % of the published-closure REMBE Ψ, because
+  (153.1) at σ = 7.04 puts T_b at 1922 K, 142 K above the gas's own adiabatic T_b (§151.7
+  item 6): the closure choice is not a detail for t_r.
+
+§153.1 makes the adiabatic line the stream's default, so the case setup takes Ψ from
+`AdiabaticCurve` on the case's own `EquivalentGas`; the published closure stays the option that
+reproduces the form H20 and H22 print.
+
 ---
 
 ## 154. The FSC and TFC closures, the extended FSC, and the f32-safe rate constant

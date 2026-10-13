@@ -20,6 +20,9 @@
 //!     (152.6), the NASA-7 form and the two pseudo-species (152.7)-(152.8),
 //!     the state (152.9), the isobaric and AICC burned states (152.10)-(152.11),
 //!     the heat release (152.12) and S_L (152.13)-(152.14)
+//!   SPEC-LIT §153 - the laminar-limit eigenproblem of `psi`: the published
+//!     closure (153.1), the reaction time (153.2), the eigenproblem (153.3),
+//!     the integral identity (153.4) and the ZFK asymptote (153.5)
 //!   C. Huang, M. Bloching & A. N. Lipatnikov, J. Loss Prev. Process Ind. 75
 //!     (2022) 104707, DOI 10.1016/j.jlp.2021.104707 - eqs. 1-3 and Table 1
 //!   C. Huang, A. N. Lipatnikov & K. Nessvi, J. Loss Prev. Process Ind. 67
@@ -28,9 +31,11 @@
 //! No GPL-licensed source was consulted.
 
 pub mod laminar;
+pub mod psi;
 pub mod thermo;
 
 pub use laminar::{LaminarSpeed, SlFactors};
+pub use psi::{AdiabaticCurve, FlameCurve, PsiOptions, PsiProblem, PsiSolution, PublishedCurve};
 pub use thermo::{
     AiccState, BurnedState, EquivalentGas, FormulaInputs, PrescribedInputs, StarchFuel, ThermoMode,
 };
