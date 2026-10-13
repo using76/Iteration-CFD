@@ -25,7 +25,8 @@
 //! - `exact` (§127.2), the analytic answer keys, CMP-06, with
 //!   `exact/riemann.rs`, the exact Riemann solver, Ringleb flow (§127.3)
 //!   and compressible Couette flow (§127.4), landed with CMP-07;
-//! - `gatemesh` (§127.5), the gate meshes;
+//! - `gatemesh` (§127.5), the gate meshes - with CMP-26, the airfoil
+//!   C-mesh of §127.5.1;
 //! - `tests`, the module's integration tests.
 //!
 //! Provenance: ORIGINAL. The skeleton carries no numerics: it declares
@@ -33,6 +34,7 @@
 //! source was consulted.
 
 pub mod exact;
+pub mod gatemesh;
 pub mod momentum;
 pub mod pressure;
 pub mod thermo;

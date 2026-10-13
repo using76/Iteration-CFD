@@ -40382,6 +40382,183 @@ what it actually reads. **A finding for CMP-27**: the NPARC RAE 2822 page (read
 `alpha 2.31` degrees". CMP-27 confirms the case and its wind-tunnel corrections from
 AGARD-AR-138 before it writes the key file, and the gate's bars do not move.
 
+#### 127.5.1 The airfoil C-mesh (CMP-26)
+
+`src/compressible/gatemesh.rs` builds the RAE 2822 C-mesh of Gate CMP-RAE in memory:
+a structured `N x J` quadrilateral grid in the `(x, y)` plane, extruded one cell in `z`
+with `empty` front and back faces, returned as a `PolyMeshRaw` (f64 points in both builds,
+§118.2) for `build_host_mesh`.
+
+**Sources.**
+
+* **Thompson, Warsi & Mastin**, *Numerical Grid Generation: Foundations and Applications*
+  (Elsevier, 1985; copyright transferred to J. F. Thompson in 1997, whose notice on the
+  download page grants "downloading in entirety"). §127.5's finding stands for the live
+  URL; the book is read from the Internet Archive's captures of the Mississippi State
+  HPC² copy, `www.hpc.msstate.edu/publications/gridbook/PDFS/` (both captured 2010-06-10):
+  `chapt06.pdf` (sha256 `ed1743c76f5363e0d07c8fef0ade808b4a2ab5f3b80760104e7bd5d0fdc71a55`)
+  and `chapt08.pdf` (sha256 `1e6f420400d7c5d32992ca9bfe759238d6fb56f0d6a573a2e695ab7e94240daf`).
+  **Read**, from the page images, because the PDFs carry their equations as images:
+  Chapter VI eqs. (1), (18a)-(18c), (20), (46), (48) and §4.A (point SOR with
+  over-relaxation, transfinite interpolation as the initial guess); Chapter VIII eqs.
+  (10)-(14) (the natural cubic spline), (48), (55)-(56) (the one-sided hyperbolic tangent
+  distribution), (68b) and (73) (transfinite interpolation).
+* **The ordinates**: Cook, McDonald & Firmin, AGARD-AR-138 (1979), Table 6.1, as the NPARC
+  Alliance Validation Archive reproduces them (`geom.txt`, read 2026-10-13); the answer
+  key `rae2822-coordinates`, `reference/rae2822/coordinates.csv`. AGARD-AR-138 itself was
+  *not read*. The plan names its Appendix A; the archive says Table 6.1, and the key
+  follows the archive.
+* **The first cell**: §32.5.6's flat-plate skin friction (`wallfunctions::flat_plate_cf`,
+  Schlichting & Gersten), restated in f64 so that the mesh is the same in both builds.
+
+**Topology.** `xi = i = 0..N` runs along the inner boundary and `eta = j = 0..J` outwards.
+The inner boundary (`j = 0`) starts at the lower outlet point `(x_out, 0)`, runs up the
+wake cut to the trailing edge `(1, 0)`, round the aerofoil (lower surface TE to LE, upper
+surface LE to TE) and back down the cut to `(x_out, 0)`, so `N = 2 n_wake + n_s`. Nodes
+`(i, 0)` and `(N - i, 0)`, `0 <= i <= n_wake`, are ONE node, and the face between cells
+`(i, 0)` and `(N - 1 - i, 0)`, `i < n_wake`, is an internal face: the cut is not a
+boundary. `xi x eta = +z` everywhere. Patches, in order: `airfoil` (`wall`, the `n_s`
+faces `j = 0`, `n_wake <= i < N - n_wake`), `farfield` (`patch`, `j = J`), `outlet`
+(`patch`, `i = 0` then `i = N`) and `frontAndBack` (`empty`).
+
+**The surface.** The 129 stations, lower surface reversed then upper surface, with the
+shared leading edge once and the trailing edge at both ends, carry a chord-length
+parameter:
+
+```
+K_k = (x_(64-k), -z_lower,(64-k))  for k <= 64,   K_k = (x_(k-64), z_upper,(k-64))  for k >= 64
+t_0 = 0,   t_(k+1) = t_k + |K_(k+1) - K_k|                                                   (127.13)
+```
+
+with rows `0..64` of the key in ascending `x`. Each coordinate is a natural cubic spline
+in `t`: Thompson eq. (VIII-14) for the second derivatives `M_k` at `k = 1..127`, solved
+as one tridiagonal system with `M_0 = M_128 = 0`, and eq. (VIII-11) between the knots,
+
+```
+r(t) = (t_(k+1) - t)^3 M_k / (6 h_k) + (t - t_k)^3 M_(k+1) / (6 h_k)
+     + (r_k / h_k - h_k M_k / 6) (t_(k+1) - t) + (r_(k+1) / h_k - h_k M_(k+1) / 6) (t - t_k),
+h_k = t_(k+1) - t_k                                                                          (127.14)
+```
+
+The surface nodes are, for each interval `k` and `m = 0..refine-1`, the knot `K_k` itself
+when `m = 0` (copied, never evaluated: (127.14) at a knot need not round to it) and
+(127.14) at `t_k + (m/refine) h_k` otherwise, then `K_128`; `n_s = 128 refine`.
+
+**The one-sided distribution.** On `n` intervals with the first interval a fraction `f`
+of the length,
+
+```
+s_j = sinh(a j/n) / ( sinh(a) cosh(a (1 - j/n)) ),   j = 0..n,   s_0 = 0,  s_n = 1 exactly  (127.15)
+```
+
+which is eq. (VIII-56), `s = 1 + tanh[(delta/2)(j/n - 1)] / tanh(delta/2)`, with
+`a = delta/2`, rewritten through `1 - tanh(b)/tanh(a) = sinh(a - b)/(sinh(a) cosh(b))`
+(DERIVED) so that a small `s_1` is not the difference of two numbers near 1. **A
+departure, stated:** Thompson fixes `delta` by the slope, eqs. (VIII-48) and (VIII-55)
+(`sinh(delta)/delta = 1/(n Delta s)`); this generator fixes the first INTERVAL, `s_1 = f`,
+because the `y+` target is a cell height. `s_1(a)` falls monotonically from `1/n` as `a`
+grows, so `a` is the bisection root on `[1e-9, 300]`; `f` outside `(0, 1/n)` is refused.
+
+**The boundaries.** With `Delta_te = (|S_1 - S_0| + |S_(n_s) - S_(n_s - 1)|)/2` the mean
+of the two surface intervals at the trailing edge, `L_w` the wake length and `R` the
+far-field radius:
+
+```
+x_w,i = 1 + L_w s_i
+outer, wake part:  (x_w,i, -R) below the cut,  (x_w,i, +R) above it
+outer, semicircle: (1 + R cos(theta_k), R sin(theta_k)),  theta_k = -pi/2 - pi k/n_s,  0 < k < n_s
+junctions:         (1, -R) and (1, +R) exactly                                               (127.16)
+```
+
+where `s` is (127.15) at `n = n_wake` and `f = Delta_te / L_w`. The semicircle is divided
+uniformly in angle. (A division that follows the surface's arc
+length puts 6e-4-wide far-field cells beside the trailing-edge lines and gave 78.6
+degrees there in the supervisor's oracle.)
+
+**The skeleton.** Transfinite interpolation, eq. (VIII-73) with linear blending
+functions, over `j = 0..J` uniform in `eta`. The two outlet edges are straight and
+uniformly divided, so the `xi` terms of (VIII-73) cancel and it is eq. (VIII-68b):
+
+```
+r_ij = (1 - j/J) r_i0 + (j/J) r_iJ                                                           (127.17)
+```
+
+**Laplace smoothing.** Eq. (VI-20) with `P = Q = 0` is the Laplace system (VI-1) in the
+transformed plane,
+
+```
+g_22 r_xixi + g_11 r_etaeta - 2 g_12 r_xieta = 0,
+g_11 = r_xi . r_xi,  g_22 = r_eta . r_eta,  g_12 = r_xi . r_eta
+```
+
+(the metrics are Thompson's eqs. (VI-18a)-(VI-18c))
+
+with central differences `r_xi = (r_E - r_W)/2`, `r_eta = (r_N - r_S)/2`,
+`r_xieta = (r_NE - r_SE - r_NW + r_SW)/4`, solved by point SOR (Thompson §VI.4.A):
+
+```
+r* = [ g_22 (r_E + r_W) + g_11 (r_N + r_S) - 2 g_12 r_xieta ] / ( 2 (g_11 + g_22) )
+r <- r + omega (r* - r)                                                                      (127.18)
+```
+
+in place, `j` ascending outside `i` ascending, the metrics from the current neighbours.
+The sweep stops when no coordinate moves by `tol R` or more, and a run that reaches
+`max_sweeps` is refused. It runs on the AEROFOIL BLOCK only, `n_wake < i < N - n_wake`,
+`0 < j < J`: the aerofoil, the semicircle and the two trailing-edge lines `x = 1` are its
+Dirichlet boundaries, and the two wake blocks keep (127.17), whose `eta` lines are
+vertical. **A finding, measured by the supervisor's oracle (numba, outside the tree):**
+Laplace over the whole C with the cut held fixed leans the wake `eta` lines up to 89.7
+degrees off the cut normal, because the stretched cut distribution is smoothed towards a
+uniform one; the boundary-derived control function of eqs. (VI-46) and (VI-48),
+`P = -(r_xi . r_xixi)/g_11` interpolated linearly in `eta`, removes the lean in principle
+but its point SOR had not converged after 50 000 sweeps. The two-block form converges in
+about 9 000 sweeps at `omega = 1.8`.
+
+**The `y+` control.** Each `eta` line `i` of the smoothed skeleton is a polyline of
+arc lengths `S_0 = 0 .. S_J = L_i`. Its final nodes are at arc length `L_i s_j`, `s` from
+(127.15) with `n = J` and `f = Delta y_1 / L_i`, by linear interpolation along the
+polyline (eq. (VIII-56) applied along a curve, Thompson §VIII.1); nodes `j = 0` and
+`j = J` are the skeleton's, bit for bit. The first interval of every line is therefore
+`Delta y_1`. From a `y+` target at chord Reynolds number `Re_c`, in chord units,
+
+```
+Delta y_1 / c = y+ / ( Re_c sqrt(C_f / 2) ),
+C_f = 0.455 / (log10 Re_c)^2.58  (Re_c >= 5e5),   C_f = 1.328 / sqrt(Re_c)  below            (127.19)
+```
+
+(DERIVED: `u_tau = U sqrt(C_f/2)` is the definition of `C_f`, and `C_f` is §32.5.6's
+plate-averaged estimate; the cell is sized before the flow is known). At `y+ = 1`,
+`Re_c = 6.5e6` the oracle gives `Delta y_1 = 3.833498871772944e-6`.
+
+**The gate** (CMP-26, `gatemesh::tests`, and again in both builds through
+`tests/compressible_gatemesh.rs`): on the default mesh (`refine = 2`, `n_wake = 48`,
+`J = 96`, `R = L_w = 20`, `Delta y_1` from `y+ = 1` at `Re_c = 6.5e6`, span 1) and on the
+coarse one (`refine = 1`, `n_wake = 24`, `J = 32`):
+`no_negative_volume` (every cell volume positive, and their sum the span times the
+outer polygon's area less the aerofoil polygon's within `1e-9` relative, class R);
+`closure_round_off` (each cell's outward face-area vectors sum to `1e-12` of their
+magnitudes, class R); `surface_points_reproduce_coordinates_1e_9` (each of the 129
+stations is an `airfoil` point within `1e-9`); `max_non_orthogonality_below_60deg`
+(class P, the same bar in both builds); and the topology, the first interval and the
+two builds' identical points (an FNV-1a hash of the point bits, the same literal in
+both builds).
+
+**Landed (CMP-26).** `rust/src/compressible/gatemesh.rs` holds the generator
+(`airfoil_cmesh`, `CMeshSpec` with `default()` and `coarse()`, `one_sided_tanh`,
+`first_cell_for_y_plus`, `parse_stations` and `rae2822_stations`), host-only and `f64` in
+both builds; nothing outside the module calls it yet (CMP-27 will). The gate's ten tests
+pass in the lib and, through `tests/compressible_gatemesh.rs`, in both builds. Measured:
+the default mesh is `N = 352`, `J = 96`, 33 792 cells and 68 384 points, the coarse one
+`176 x 32`, 5 632 cells and 11 632 points; the largest internal-face non-orthogonality is
+38.82 degrees (default) and 49.47 degrees (coarse) in the f64 build, 39.11 and 49.47 under
+`single`, against the bar of 60; the smallest cell volume is `1.129e-9` and `2.279e-9`;
+the worst closure ratio is `2.2e-16` and `8.9e-16` in f64, `6.9e-8` and `2.4e-7` under
+`single` against `tol_r(1e-12) = 1e-5`; every wall line's first interval is within
+`7.2e-12` relative of `Delta y_1 = 3.833498871772944e-6`; and the FNV-1a hashes of the
+point bits are `b5ca6cb8433c8b1d` and `3f8d774e11d077a1` in both builds. The wall carries
+256 (default) and 128 (coarse) distinct points, not the brief's 257 and 129: the two
+trailing-edge ends of the surface walk are one node through the cut.
+
 ### 127.6 The gates
 
 The bars are docs/17 §12.1's, fixed before measurement. A missed bar is a finding,
