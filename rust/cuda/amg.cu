@@ -355,3 +355,76 @@ extern "C" __global__ void amgCoarseSolve
         x[c] = (ofscalar)w[c];
     }
 }
+
+//- The residual of a V-cycle step, SPEC-LIT 141.5: r[c] = b[c] - y[c],
+//  one thread per cell, no atomics, no allocation, no sync - only a
+//  launch, so it captures into a CUDA graph (SPEC-LIT 81, 141.5). -
+extern "C" __global__ void amgResidual
+(
+    ofscalar* __restrict__ r,
+    const ofscalar* __restrict__ b,
+    const ofscalar* __restrict__ y,
+    int n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    r[c] = b[c] - y[c];
+}
+
+//- The LU coarsest-level solve of an asymmetric level, (141.5.3): ONE
+//  block runs the forward substitution of the unit lower factor and the
+//  back substitution of U on the work vector w. The dense factor holds
+//  L_ij (i > j) and U_ij (i <= j) at i*n + j, ofacc in both builds;
+//  thread t owns the cells t, t + blockDim.x, ...; the entry is scaled
+//  by sigma and the answer is rounded once to ofscalar. Thread 0 takes
+//  the pivot division of every back step; a block barrier follows every
+//  j step, so the device answer is its host twin's bit for bit
+//  (src/amg/coarse.rs, solve_host). No atomics, no allocation, no sync:
+//  one launch, so it captures into a CUDA graph (SPEC-LIT 81, 141.5). -
+extern "C" __global__ void amgCoarseLu
+(
+    ofscalar* __restrict__ x,
+    const ofscalar* __restrict__ b,
+    const ofacc* __restrict__ l,
+    ofacc* __restrict__ w,
+    int n,
+    ofacc sigma
+)
+{
+    for (oflabel c = threadIdx.x; c < n; c += blockDim.x)
+    {
+        w[c] = sigma * (ofacc)b[c];
+    }
+    __syncthreads();
+
+    for (oflabel j = 0; j + 1 < n; ++j)
+    {
+        const ofacc wj = w[j];
+        for (oflabel i = j + 1 + threadIdx.x; i < n; i += blockDim.x)
+        {
+            w[i] -= l[(size_t)i * n + j] * wj;
+        }
+        __syncthreads();
+    }
+
+    for (oflabel j = n - 1; j >= 0; --j)
+    {
+        if (threadIdx.x == 0)
+        {
+            w[j] = w[j] / l[(size_t)j * n + j];
+        }
+        __syncthreads();
+        const ofacc wj = w[j];
+        for (oflabel i = threadIdx.x; i < j; i += blockDim.x)
+        {
+            w[i] -= l[(size_t)i * n + j] * wj;
+        }
+        __syncthreads();
+    }
+
+    for (oflabel c = threadIdx.x; c < n; c += blockDim.x)
+    {
+        x[c] = (ofscalar)w[c];
+    }
+}

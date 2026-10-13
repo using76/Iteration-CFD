@@ -723,7 +723,9 @@ pressure equation.
 - **Incomplete Cholesky / ILU(0)**: Saad ch. 10. Inherently sequential; the
   multi-colour reordering that parallelises it is Saad §12.4.
 - **Algebraic multigrid**: Stüben, *J. Comput. Appl. Math.* 128 (2001) 281–309;
-  Ruge & Stüben (1987). Provided here by AMGX (BSD-3-Clause), not reimplemented.
+  Ruge & Stüben (1987). Provided by AMGX (BSD-3-Clause, §141.20) and, since AMG-04a,
+  natively: the aggregation GAMG of §141, as a preconditioner of PCG and PBiCGStab and as a
+  solver (§141.5).
 
 ### 8.4 Residual normalisation
 
@@ -42607,8 +42609,8 @@ yet (PAR-10b).
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a). Nothing in the crate calls the aggregation yet, so no existing solve, case
-or SASS moves.
+AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
+before AMG-04b.
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
 *Electron. Trans. Numer. Anal.* 37, 123-146** (open full text at
@@ -43252,6 +43254,179 @@ cells, no boundary coefficient (every wall zero-gradient), so `σ = -1`.
 | `the_device_coarse_solve_is_bitwise_its_host_twin` | regular, pinned and the `-permissive` fallback on coarse levels, regular and pinned on level 0, twice; the fallback on level 0 has no bitwise twin, because its product is `ldu_ops::amul` (§70) and `ldu.cu` is not on the `-fmad=false` list | D |
 | `a_non_spd_coarse_level_is_refused_by_name` | an asymmetric level (`symmetric`), the 3-cell `[[1,-2,0],[-2,1,-2],[0,-2,1]]` (`pivot` at 1), two disconnected Neumann blocks (`pivot`); under `-permissive` the same levels give `JacobiFallback`, the announcement, and exactly 50 l1-Jacobi sweeps from zero; every strict refusal above | D |
 | `amg::coarse::tests::coarse_solve_replays_under_capture` (library) | a regular, a pinned and a fallback solve capture into a graph and replay bitwise (§81) | D |
+
+### 141.5 The V-cycle, GAMG as a preconditioner and as a solver (AMG-04a)
+
+`No GPL-licensed source was consulted.` `src/amg/cycle.rs` runs the hierarchy of §141.3 and
+the coarsest solve of §141.4 as a V-cycle; `src/solver.rs` uses it as the preconditioner
+`Preconditioner::Gamg` of PCG and PBiCGStab and, for `LinearSolverKind::Gamg`, as a solver
+on its own, so `solver::solve` no longer refuses `GAMG` (§8.3 is amended). `src/amg/coarse.rs`
+gains a dense LU factor for an asymmetric coarsest level, because the Galerkin product of an
+asymmetric matrix is asymmetric and §141.4 factors only symmetric levels. `cuda/amg.cu` gains
+two kernels, `amgResidual` and `amgCoarseLu`. The tests are `tests/amg_cycle.rs`, an
+integration test (both builds; the iteration gates are f64 and wait for AMG-06a under
+`single`), and one library test, the capture gate of §81. No existing solve, case or SASS
+outside `amg.cubin` moves: a case cannot ask for GAMG yet (AMG-04b), the pressure backend
+still refuses it (AMG-04b, AMG-05), and every other preconditioner and solver path is unchanged.
+
+Sources: **Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed. (2003)** (the author's
+open copy, read again on 2026-10-13), §13.4.3, Algorithm 13.3 `uh = V-cycle(Ah, uh0, fh)`:
+"1. Pre-smooth ... 2. Get residual: rh = fh - Ah uh ... 3. Coarsen: rH = IhH rh ... 5. Solve:
+AH δH = rH ... 7. Recursion: δH = V-cycle(AH, 0, rH) ... 9. Correct: uh := uh + IHh δH ... 10.
+Post-smooth", with the coarsest level solved "exactly (typically using a direct solver)".
+**Notay (2010)**, the paper of §141.1, eq. (2.1): the restriction is the transpose of the
+prolongation. For the LU factor: the **LAPACK `DGETRF` documentation comment** (BSD-3-Clause, its
+Purpose paragraph, read on 2026-10-13: "The factorization has the form A = P * L * U where P
+is a permutation matrix, L is lower triangular with unit diagonal elements ... and U is upper
+triangular"; here `P = I`, no pivoting; the routine's code was not read) and the open article **"Diagonally dominant matrix", Wikipedia** (read on 2026-10-13):
+"No (partial) pivoting is necessary for a strictly column diagonally dominant matrix" and "A
+strictly diagonally dominant matrix (or an irreducibly diagonally dominant matrix) is
+non-singular"; the Doolittle recurrence below is the textbook one and is written out here. No
+multigrid or dense linear-algebra code of any licence was read for this subsection; OpenFOAM's
+GAMG, AGMG, hypre and ML were not opened.
+
+**The cycle** (Saad Algorithm 13.3 on the levels `0 .. L` of §141.3, `L` the number of coarse
+levels, `A_0` the fine matrix as the solve receives it, `A_l` coarse level `l`, `P_l` the
+aggregation of level `l` to `l + 1` with (141.11)-(141.13), `S_l^ν` `ν` sweeps of the level's
+smoother of §141.3, `C` the coarsest solve of §141.4 or (141.5.4)):
+
+```
+V(x_0, b_0):                                                             (141.5.1)
+  for l = 0 .. L-1:   x_l <- S_l^{ν1}(x_l, b_l);   r_l = b_l - A_l x_l;
+                      b_{l+1} = P_l^T r_l;          x_{l+1} = 0
+  x_L = C(b_L)
+  for l = L-1 .. 0:   x_l <- x_l + P_l x_{l+1};     x_l <- S_l^{ν2}(x_l, b_l)
+```
+
+With `L = 0` (the fine level is already at most `n_cells_coarsest`, or `max_levels = 1`) the
+cycle is the coarsest solve on the fine matrix, `x_0 = C(b_0)`, through
+`CoarseOperator::Fine`. Level 0's products are `ldu_ops::amul` (§70) and its smoothing
+`GpuSmoother::smooth_fine`; a coarse level's are `amgAmul` and `smooth_level`.
+`amgResidual` is `r_c = b_c - y_c`, one thread per cell. *DESIGN* defaults: `ν1 = ν2 = 2`, the
+Chebyshev smoother of (141.3.5) at §141.3's degree `ν = 2` and fraction `a = 0.3`,
+`n_cells_coarsest = 64`, `max_levels = 50` (§141.3); `ν1 + ν2 = 0` is refused by name
+(`sweeps`). The smoother is a measured choice: with l1-Jacobi (§141.3's hierarchy default, which
+is unchanged) V(2,2) took 62 GAMG-PCG iterations on `POI(128)` against DIC-PCG's 155, outside
+the gate's third, and Chebyshev takes 38 (the table below). On an asymmetric level Chebyshev
+keeps the interval of (141.3.7), which Gershgorin caps; on `CD(n)` the spectrum of `D^{-1} A`
+is real, because `A` is diagonally similar to a symmetric matrix (each 1-D factor of the box is
+tridiagonal with off-diagonal products `> 0`) and `D` commutes with that similarity.
+
+**As a preconditioner** `z = M^{-1} r` is `z = 0; V(z, r)`: a fixed linear operator of `r`.
+**Symmetry** (*DESIGN*, derived here). Every smoother of §141.3 is a polynomial in `D^{-1} A`
+or an update `x + M^{-1}(b - A x)` with a diagonal `M`, so its error propagator `E` satisfies
+`A E = E^T A`. Then `V(ν, ν)` from zero is a symmetric operator when `A` is symmetric, and PCG
+may use it; with `ν1 != ν2` it is not, and `PCG` with `Preconditioner::Gamg` and `ν1 != ν2` is
+refused by name (`nPreSweeps`, `nPostSweeps`, "symmetric"), as §8.2 refuses PCG on an asymmetric
+matrix. PBiCGStab takes any `ν1, ν2`. The hierarchy is formed once, on the host, from the
+matrix given to `Gamg::new`, and its device levels are uploaded from the host levels (bitwise
+the device Galerkin chain of §141.3); a matrix whose values change afterwards needs a new
+`Gamg` (AMG-05 caches the aggregation and re-gathers). The preconditioner is attached to the
+workspace (`SolverWorkspace::set_gamg`); a `Gamg` request on a workspace without one is
+refused by name, naming `set_gamg`, as `DIC` without a colouring is (§21).
+
+**As a solver** (`LinearSolverKind::Gamg`): `psi <- V(psi, b)` per iteration, with the §8.4
+residual of `b - A psi` tested every `check_interval` iterations by the same kernels as the
+Krylov solvers, the same `fixed_iters` and `report_residuals` rules (§113), and, under `single`,
+the same §118.4 refinement around the float body. One iteration is one cycle.
+
+**The asymmetric coarsest level** (*DESIGN* in combination). When the dense `Â = σ A` of
+(141.4.1) is not symmetric bit for bit, `CoarseSetup::general` factors it as `Â = L U`, `L` unit
+lower triangular, without pivoting (Doolittle), in f64 at setup, `s` ascending in every sum:
+
+```
+for k = 0 .. n-1:                                                        (141.5.2)
+  U_kj = Â_kj - Σ_{s<k} L_ks U_sj                    (j = k .. n-1)
+  refuse (pivot k) unless U_kk finite and |U_kk| > τ_p |Â_kk|,  τ_p = 1e-13
+  L_ik = (Â_ik - Σ_{s<k} L_is U_sk) / U_kk           (i = k+1 .. n-1)
+```
+
+stored dense by rows in `ofacc`, `L_ij` (`i > j`) and `U_ij` (`i <= j`) at `i n + j`. A level
+that passes (141.4.2) and is asymmetric is refused by name (`singular`): its left null vector
+is not the constant one, so the projection (141.4.3) does not apply. No pivoting is needed for
+the levels this subsection meets: an upwind convection-diffusion matrix is an M-matrix whose
+columns are diagonally dominant, strictly at an outflow or Dirichlet wall, and an aggregation
+Galerkin product of such a matrix keeps every off-diagonal non-positive and every column's
+excess `Â_jj - Σ_{i != j} |Â_ij|` as the sum of its members' excesses, so it is again column
+dominant; the pivot test refuses anything else. A pivot refusal takes §141.4's path (an
+`Error::Refused` naming `-permissive`, or under `-permissive` the announced 50 l1-Jacobi sweeps).
+The solve, one block of 256 threads, everything in `ofacc` and rounded once:
+
+```
+w_c = σ b_c                                                              (141.5.3)
+forward:  for j = 0 .. n-2:   w_i <- w_i - L_ij w_j   (i > j)
+back:     for j = n-1 .. 0:   w_j <- w_j / U_jj;  then  w_i <- w_i - U_ij w_j   (i < j)
+x_c = (Scalar) w_c
+```
+
+each `w_i` by one thread, `j` in the order shown, a block barrier between the steps of `j`, so
+the device solve is its host twin bit for bit (`amg.cu` is on the `-fmad=false` list). A
+symmetric level takes `CoarseSetup::new` unchanged (§141.4). `C` of (141.5.1) is
+
+```
+C = Cholesky, pinned Cholesky (§141.4) or LU (141.5.2)-(141.5.3)          (141.5.4)
+```
+
+**Distributed solves** (`distsolve`, SPMD) refuse `Preconditioner::Gamg` by name until
+AMG-07b, and `partition_invariant(Gamg)` is `false`.
+
+**Precision** (§118, docs/17 §5.1.4). The LU rows are class A (hand values, `1e-15` relative
+in f64, `1e-6` under `single`), R (residual `1e-12` / `1e-5`) and D (device against host twin,
+bitwise in both builds). The device cycle against its host twin is class R, `1e-12` of `‖x‖_2`
+(f64) / `1e-5` (`single`), because level 0's product is `ldu_ops::amul` and `ldu.cu` is not on
+the `-fmad=false` list. The iteration gates are f64 rows; under `single` they wait for AMG-06a.
+
+**The matrices.** `POI(n)`: the uniform `n^3` box of unit cells, every wall Dirichlet, the §2
+laplacian negated so that `σ = +1`: `upper = lower = -|S_f| δ_f` on the internal faces, the
+diagonal the sum of `|S_f| δ_f` over the cell's internal faces plus `|S_b| δ_b` over its wall
+faces (the boundary fold), `b = 1`. `CD(n)`: the same box with the upwind convection of the
+velocity `u = (Pe, 0, 0)`, `Pe = 10` the cell Péclet number (`Γ = 1`, `h = 1`), the face flux
+`F_f = Pe S_f·x̂` from owner to neighbour and `F_b = Pe S_b·x̂` out of the wall:
+
+```
+upper[f] = -(D_f + max(-F_f, 0)),   lower[f] = -(D_f + max(F_f, 0)),     (141.5.5)
+diag[o] += D_f + max(F_f, 0),       diag[n] += D_f + max(-F_f, 0),
+diag[c] += D_b + max(F_b, 0)        (each wall face b of cell c),
+D_f = |S_f| δ_f,  D_b = |S_b| δ_b,  b = 1
+```
+
+an M-matrix, asymmetric, column diagonally dominant.
+
+#### 141.5.1 The gates
+
+`tol = 1e-8` is the §8.4 residual; "iterations" is `SolverPerformance::n_iterations`.
+
+| test (`tests/amg_cycle.rs` unless marked) | what | class |
+|---|---|---|
+| `the_device_v_cycle_matches_its_host_twin` | `POI(16)` with `n_cells_coarsest = 16`, V(2,2) and V(1,3) with l1-Jacobi and V(1,1) with Chebyshev, from `x = 0` and `b = test field`: device against a host twin in `Scalar` written in the test; and `POI(4)` (64 cells, `L = 0`): the cycle is the exact solve, residual `<= 1e-12` | R |
+| `the_lu_factor_and_solution_of_small_asymmetric_matrices` | `[[4, -1], [-2, 3]]`, `b = (1, 2)`: `L_10 = -0.5`, `U = (4, -1; 2.5)`, `x = (0.5, 1)`; its negation: `σ = -1`, the same factor, `x = -(0.5, 1)`; device bitwise the host twin; `general` on `K4` and `SYM` is `new` bit for bit | A, D |
+| `the_lu_coarse_solve_on_the_convection_diffusion_coarsest_level` | the one coarse level of `CD(8)` with `max_levels = 2` (128 cells): its largest `|Â_ij - Â_ji|` is `>= 1` (measured 10, `Pe D` of an x-coupling, in both builds), method `Lu` in both builds, residual `<= 1e-12` (f64) / `1e-5` (f32), device bitwise the host twin, twice | R, D |
+| `an_asymmetric_level_that_cannot_be_factored_is_refused_by_name` | `[[1, 2], [3, 6]]`: `pivot` at 1 (`Error::Refused`, naming `-permissive`), and under `-permissive` `JacobiFallback`; `[[1, -1], [-2, 2]]`: `singular` | D |
+| `gamg_on_dirichlet_poisson_32_64_128` (f64) | `POI(32)`, `POI(64)`, `POI(128)`, tol `1e-8`: DIC-PCG, GAMG-PCG and standalone GAMG all converge; at 128^3 GAMG-PCG takes `<= 1/3` of DIC-PCG's iterations; the iteration growth 32^3 -> 128^3 is measured and printed (table below); at 128^3 GAMG-PCG and Jacobi-PBiCGStab at tol `1e-8` agree to `‖x_g - x_b‖_2 <= 1e-8 ‖x_b‖_2`, and so do the two solved to `1e-12` (a stricter, additional row) | R, P |
+| `gamg_pbicgstab_on_convection_diffusion` (f64) | `CD(64)`, tol `1e-8`: DILU-PBiCGStab and GAMG-PBiCGStab converge, GAMG's iterations `<= 1/2` of DILU's | P |
+| `a_gamg_request_that_cannot_be_served_is_refused_by_name` | `solver GAMG` and `preconditioner GAMG` on a workspace without a hierarchy (`set_gamg`); PCG with V(1,2) (`nPreSweeps`); `set_gamg` with another cell count (`cells`); `ν1 = ν2 = 0` (`sweeps`); `dist_solve` with `Preconditioner::Gamg` (`AMG-07b`) | D |
+| `amg::cycle::tests::vcycle_replays_under_capture` (library) | the preconditioner on `POI(8)` with one coarse level and more, captured into a graph and replayed bitwise (§81) | D |
+
+**Why the full-depth `CD` coarsest level is not the LU gate.** The strength of `CD(n)` is 6 along
+x and 1 across it, so the aggregates grow along x, and by the coarsest level of a full hierarchy
+every x-coupling lies inside an aggregate: only the symmetric y and z couplings are left and the
+level is symmetric to the last bits (bitwise symmetric under `single`, where it takes Cholesky).
+The LU row therefore stops `CD(8)` after one coarsening, where the x-couplings remain.
+
+**Measured** (supervisor's run of `tests/amg_cycle.rs`, f64, 2026-10-13; default config, tol
+`1e-8`; "GAMG" is the standalone solver, one iteration one cycle):
+
+| `n^3` | level sizes | DIC-PCG | GAMG-PCG | GAMG | GAMG-PCG vs Jacobi-PBiCGStab at `1e-8` |
+|---|---|---|---|---|---|
+| 32^3 | 32768, 8195, 2054, 516, 130, 33 | 39 | 16 | 67 | 1.86e-9 |
+| 64^3 | 262144, 65546, 16412, 4116, 1031, 258, 65, 17 | 78 | 24 | 151 | 2.68e-9 |
+| 128^3 | 2097152, 524306, 131244, 32879, 8227, 2059, 516, 129, 33 | 155 | 38 | 343 | 5.33e-9 |
+
+At `1e-12` the two 128^3 answers differ by 2.02e-13. With l1-Jacobi instead of Chebyshev the
+GAMG-PCG counts were 26, 40, 62 and the standalone 154, 357, 810. The iteration growth
+32^3 -> 128^3 is 2.4x for GAMG-PCG and 5.1x for the standalone V-cycle: the h-dependence
+of a V-cycle with unsmoothed aggregation that docs/17 expects, and that AMG-04c's K-cycle is to
+remove. `CD(64)`: DILU-PBiCGStab 47 iterations, GAMG-PBiCGStab 7 (16 with l1-Jacobi).
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 

@@ -58,6 +58,11 @@ pub enum Preconditioner {
     Dic = 2,
     /// Asymmetric, multi-coloured forward/back sweep.
     Dilu = 3,
+    /// The native aggregation multigrid V-cycle (SPEC-LIT 141.5), attached
+    /// to the workspace with `SolverWorkspace::set_gamg`. A workspace
+    /// without one refuses the request by name, as `DIC` without a
+    /// colouring does.
+    Gamg = 4,
 }
 
 impl Preconditioner {
@@ -99,6 +104,7 @@ impl Preconditioner {
             Preconditioner::Diagonal => "diagonal",
             Preconditioner::Dic => "DIC",
             Preconditioner::Dilu => "DILU",
+            Preconditioner::Gamg => "GAMG",
         }
     }
 }
@@ -119,9 +125,11 @@ pub enum LinearSolverKind {
     /// Hestenes & Stiefel (1952); Saad §6.7. **Symmetric positive definite
     /// only** - `SPEC-LIT` §8.2.
     PCG,
-    /// Algebraic multigrid. Not a Krylov method in this crate at all: it is
-    /// served by the AMGX pressure backend (`SPEC-LIT` §8.3), which only the
-    /// pressure equation has.
+    /// Algebraic multigrid, run natively since `SPEC-LIT` 141.5 (AMG-04a):
+    /// one iteration is one V-cycle of [`crate::amg`], with the residual of
+    /// `b - A psi` tested every `check_interval` iterations like any other
+    /// solver. The AMGX pressure backend of `SPEC-LIT` 8.3 is a separate
+    /// route.
     Gamg,
 }
 

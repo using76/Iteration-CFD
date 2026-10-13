@@ -14,6 +14,10 @@
 //! three smoothers with their host twins and kernels. AMG-03b (§141.4)
 //! contributes the coarsest-level solve: the dense Cholesky factor, the
 //! projection and pin of a singular level, and the one-block kernel.
+//! AMG-04a (§141.5) contributes the V-cycle that stacks them, as the
+//! preconditioner `Preconditioner::Gamg` of PCG/PBiCGStab and as the
+//! solver `LinearSolverKind::Gamg`, with the LU factor an asymmetric
+//! coarsest level takes instead of the Cholesky.
 //!
 //! Provenance: ORIGINAL - written from Notay, ETNA 37 (2010) 123-146,
 //! Algorithms 2.1 and 2.2 (SPEC-LIT §141.1). No GPL-licensed source was
@@ -21,6 +25,7 @@
 
 pub mod aggregate;
 pub mod coarse;
+pub mod cycle;
 pub mod galerkin;
 pub mod hierarchy;
 pub mod smooth;
@@ -32,6 +37,7 @@ pub use coarse::{
     CoarseMethod, CoarseOperator, CoarseSetup, GpuCoarse, COARSE_BLOCK, FALLBACK_SWEEPS,
     MAX_DENSE_CELLS, PIVOT_FLOOR, singular_tolerance,
 };
+pub use cycle::{DEFAULT_N_POST, DEFAULT_N_PRE, Gamg, GamgConfig};
 pub use galerkin::{
     GalerkinPlan, GpuGalerkin, GpuLevel, HostLevel, KIND_BOUNDARY, KIND_DIAG, KIND_LOWER,
     KIND_UPPER, MAX_INDEX,

@@ -492,6 +492,9 @@ impl DistWorkspace {
             // Block-local: the factorisation drops the couplings across every
             // cut, and it is coloured in local order.
             Preconditioner::Dic | Preconditioner::Dilu => false,
+            // The V-cycle runs whole-hierarchy; it reaches a distributed
+            // solve with AMG-07b.
+            Preconditioner::Gamg => false,
         };
         reduction_ok && precon_ok
     }
@@ -516,6 +519,14 @@ impl DistWorkspace {
                     )
                 }
             }
+            Preconditioner::Gamg => crate::io::contract::unsupported(
+                "solvers/<var>/preconditioner",
+                requested.name(),
+                &["none", "diagonal"],
+                "diagonal (Jacobi): GAMG preconditioning of a distributed \
+                 solve arrives with AMG-07b",
+                Preconditioner::Diagonal,
+            ),
         }
     }
 

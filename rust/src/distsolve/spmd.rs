@@ -379,6 +379,14 @@ impl SpmdWorkspace {
                     )
                 }
             }
+            Preconditioner::Gamg => crate::io::contract::unsupported(
+                "solvers/<var>/preconditioner",
+                requested.name(),
+                &["none", "diagonal"],
+                "diagonal (Jacobi): GAMG preconditioning of a distributed \
+                 solve arrives with AMG-07b",
+                Preconditioner::Diagonal,
+            ),
         }
     }
 }

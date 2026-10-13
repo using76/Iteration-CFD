@@ -18,6 +18,11 @@
 //! smoother of §141.3. A solve only launches, so it captures into a
 //! CUDA graph (SPEC-LIT §81, §141.4).
 //!
+//! Since AMG-04a (SPEC-LIT §141.5) an ASYMMETRIC level is factored
+//! instead: [`CoarseSetup::general`] takes the Doolittle LU (141.5.2)
+//! of the sigma-signed dense matrix, without pivoting, and
+//! [`GpuCoarse::solve`] runs its substitutions through `amgCoarseLu`.
+//!
 //! Provenance: LITERATURE - written from the LAPACK 3.9.0 `DPOTRF`
 //! documentation and the entrywise recurrence of the open article
 //! "Cholesky decomposition", via SPEC-LIT §141.4. No GPL-licensed
@@ -74,6 +79,10 @@ pub enum CoarseMethod {
     /// The level is not SPD and the caller passed `-permissive`: 50
     /// l1-Jacobi sweeps from `x = 0`, not an exact solve.
     JacobiFallback,
+    /// The level is asymmetric (SPEC-LIT §141.5): the Doolittle LU factor
+    /// (141.5.2) of the sigma-signed dense matrix, unit lower `L` and
+    /// upper `U` stored dense by rows, no pivoting.
+    Lu,
 }
 
 /// The not-SPD refusal (SPEC-LIT §141.4): names the reason word and
@@ -138,6 +147,38 @@ fn factor(n: usize, a: &[f64], m: usize) -> std::result::Result<Vec<f64>, usize>
             } else {
                 l[i * (i + 1) / 2 + j] = s / l[j * (j + 1) / 2 + j];
             }
+        }
+    }
+    Ok(l)
+}
+
+/// The Doolittle LU factor of (141.5.2), without pivoting: `for k = 0
+/// .. n-1`, `U_kj = A_kj - sum_{s<k} L_ks U_sj` (`j = k .. n-1`), the
+/// pivot refused unless finite and `|U_kk| > tau_p |A_kk|`, then
+/// `L_ik = (A_ik - sum_{s<k} L_is U_sk) / U_kk` (`i = k+1 .. n-1`), `s`
+/// ascending in every sum. `L_ij` (`i > j`) and `U_ij` (`i <= j`) share
+/// the dense row-major array at `i n + j`. A failing pivot returns its
+/// index.
+fn factor_lu(n: usize, a: &[f64]) -> std::result::Result<Vec<f64>, usize> {
+    let mut l = vec![0.0f64; n * n];
+    for k in 0..n {
+        for j in k..n {
+            let mut s = a[k * n + j];
+            for p in 0..k {
+                s -= l[k * n + p] * l[p * n + j];
+            }
+            l[k * n + j] = s;
+        }
+        let pivot = l[k * n + k];
+        if !pivot.is_finite() || !(pivot.abs() > PIVOT_FLOOR * a[k * n + k].abs()) {
+            return Err(k);
+        }
+        for i in k + 1..n {
+            let mut s = a[i * n + k];
+            for p in 0..k {
+                s -= l[i * n + p] * l[p * n + k];
+            }
+            l[i * n + k] = s / pivot;
         }
     }
     Ok(l)
@@ -305,6 +346,91 @@ impl CoarseSetup {
         }
     }
 
+    /// The setup of the solve on `rows` when the level need not be
+    /// symmetric (SPEC-LIT §141.5, *DESIGN*): the checks of [`Self::new`]
+    /// in the same order - cells, finite, diagonal - and then, if the
+    /// sigma-signed dense matrix (141.4.1) is symmetric bit for bit,
+    /// exactly [`Self::new`]; otherwise a level that passes the
+    /// singularity test (141.4.2) is refused by name (`singular`, its
+    /// left null vector is not the constant one, so the projection
+    /// (141.4.3) does not apply) and the rest takes the Doolittle factor
+    /// (141.5.2), whose bad pivots take the not-SPD path of §141.4 with
+    /// reason `pivot`.
+    pub fn general(rows: &HostRows, permissive: bool) -> Result<Self> {
+        let n = rows.n_cells;
+        if n > MAX_DENSE_CELLS {
+            return Err(Error::Config(format!(
+                "amg::coarse: the level has {n} cells; a dense factor \
+                 needs n(n+1)/2 doubles, so more than {MAX_DENSE_CELLS} \
+                 cells is refused - use a larger max_levels or a smaller \
+                 n_cells_coarsest"
+            )));
+        }
+        if n == 0 {
+            return Self::new(rows, permissive);
+        }
+        for (c, &d) in rows.diag.iter().enumerate() {
+            if !d.is_finite() {
+                return Err(Error::Config(format!(
+                    "amg::coarse: diag[{c}] is {d}, which is not finite; \
+                     a non-finite coefficient is refused"
+                )));
+            }
+        }
+        for (j, &v) in rows.val.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(Error::Config(format!(
+                    "amg::coarse: val[{j}] is {v}, which is not finite; a \
+                     non-finite coefficient is refused"
+                )));
+            }
+        }
+        let sum: f64 = rows.diag.iter().sum();
+        if !sum.is_finite() || sum == 0.0 {
+            return Err(Error::Config(format!(
+                "amg::coarse: the diagonal sums to {sum}, so the sign \
+                 sigma is undefined; a zero or non-finite diagonal is \
+                 refused"
+            )));
+        }
+        let sigma = if sum > 0.0 { 1.0 } else { -1.0 };
+        let dense = dense_of_rows(n, sigma, rows);
+        let asymmetric = (0..n).any(|i| (0..i).any(|j| dense[i * n + j] != dense[j * n + i]));
+        if !asymmetric {
+            return Self::new(rows, permissive);
+        }
+        if is_singular(n, &dense) {
+            return Err(Error::Config(
+                "amg::coarse: the level is asymmetric and singular with \
+                 the constant vector (141.4.2), so its left null vector is \
+                 not that constant and the projection (141.4.3) does not \
+                 apply; the level is refused"
+                    .to_string(),
+            ));
+        }
+        match factor_lu(n, &dense) {
+            Ok(l) => Ok(Self {
+                method: CoarseMethod::Lu,
+                n_cells: n,
+                order: n,
+                sigma,
+                l,
+                fallback: None,
+                announcement: None,
+            }),
+            Err(i) => Self::not_spd_outcome(
+                rows,
+                permissive,
+                sigma,
+                "pivot",
+                format!(
+                    "U[{i},{i}] is not a usable pivot of the asymmetric \
+                     level, so the LU factorisation could not be completed"
+                ),
+            ),
+        }
+    }
+
     /// Host twin of [`GpuCoarse::solve`], bit for bit: (141.4.6)'s
     /// substitutions in f64 in the kernel's order - a sequential loop,
     /// since per `i` the updates arrive in the same `j` order.
@@ -357,6 +483,27 @@ impl CoarseSetup {
                     let mean = w.iter().sum::<f64>() / n as f64;
                     for wc in w.iter_mut() {
                         *wc -= mean;
+                    }
+                }
+                Ok(w.into_iter().map(|v| v as Scalar).collect())
+            }
+            CoarseMethod::Lu => {
+                // (141.5.3) in f64, the kernel's order exactly: the entry
+                // scaled by sigma, the forward substitution of the unit
+                // lower factor, the back substitution with one pivot
+                // division per step, one cast at the end.
+                let mut w: Vec<f64> = b[..n].iter().map(|&v| self.sigma * v as f64).collect();
+                for j in 0..n - 1 {
+                    let wj = w[j];
+                    for i in j + 1..n {
+                        w[i] -= self.l[i * n + j] * wj;
+                    }
+                }
+                for j in (0..n).rev() {
+                    w[j] /= self.l[j * n + j];
+                    let wj = w[j];
+                    for i in 0..j {
+                        w[i] -= self.l[i * n + j] * wj;
                     }
                 }
                 Ok(w.into_iter().map(|v| v as Scalar).collect())
@@ -424,11 +571,14 @@ impl CoarseOperator<'_> {
 /// the smoother of §141.3. Setup uploads and allocates, so it runs
 /// outside a capture; [`Self::solve`] only launches.
 pub struct GpuCoarse {
-    /// The packed factor, f64 in both builds (`ofacc`).
+    /// The packed factor, f64 in both builds (`ofacc`); dense `n*n` for
+    /// [`CoarseMethod::Lu`], `L_ij`/`U_ij` at `i n + j` (141.5.2).
     l: DevBuf<Acc>,
     /// The one block's work vector, `max(n, 1)` long.
     w: DevBuf<Acc>,
     kernel: CudaFunction,
+    /// The LU solve of (141.5.3), resolved with `kernel`.
+    kernel_lu: CudaFunction,
     fallback: Option<GpuSmoother>,
     n: usize,
     order: usize,
@@ -456,6 +606,7 @@ impl GpuCoarse {
             l: gpu.upload(if s.l.is_empty() { &one } else { &s.l })?,
             w: gpu.zeros(s.n_cells.max(1))?,
             kernel: k.func("amgCoarseSolve")?,
+            kernel_lu: k.func("amgCoarseLu")?,
             fallback: match &s.fallback {
                 Some(fb) => Some(GpuSmoother::new(gpu, fb)?),
                 None => None,
@@ -509,6 +660,26 @@ impl GpuCoarse {
             return Ok(());
         }
         match self.method {
+            CoarseMethod::Lu => {
+                // (141.5.3): ONE launch of `amgCoarseLu`, grid 1, block
+                // [`COARSE_BLOCK`] - capturable. Args mirror
+                // `amgCoarseSolve` (x, b, l, w, n, sigma).
+                let nl = n as Label;
+                let sigma = self.sigma;
+                let f = self.kernel_lu.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&f)
+                        .arg(&mut *x)
+                        .arg(b)
+                        .arg(&self.l)
+                        .arg(&mut self.w)
+                        .arg(&nl)
+                        .arg(&sigma)
+                        .launch(one_block())?;
+                }
+                Ok(())
+            }
             CoarseMethod::Cholesky | CoarseMethod::PinnedCholesky => {
                 let nl = n as Label;
                 let ml = self.order as Label;
