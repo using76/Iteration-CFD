@@ -65,6 +65,9 @@
 //!     wall model selected under `simulationType LES;`; the law itself is
 //!     `crate::wallfunctions`' ([`crate::wallfunctions::WernerWengleData`]),
 //!     this file only names the condition
+//!   ofgpu `SPEC-LIT.md` §120.8 - the thermal family: the three `Mixed`-kind
+//!     names and `turbulentHeatFluxTemperature` below, and the two
+//!     `alphat`-only aliases
 //! No GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
@@ -494,6 +497,20 @@ pub enum BcKind {
     /// `inletPatch` - `refValue = U_P + c S_f/|S_f|`, `c = (Q - F)/A`.
     /// Vector only.
     MatchedFlowRateOutletVelocity = 50,
+
+    /// `nutkAtmRoughWallFunction` (SPEC-LIT 120.9, (120.9g)): the `k`-based
+    /// wall value of a ground whose roughness LENGTH `z0` the Richards &
+    /// Hoxey (1993) profile is written in - `u* = C_mu^{1/4} sqrt(k_P)`,
+    /// `nu_t,w = max(0, u* kappa y / ln(1 + y/z0) - nu)`, so the wall shear
+    /// is `u*^2` wherever the cell sits on the profile. A wall-function kind:
+    /// the triple degenerates to the cell value until `wfNutWall` writes it.
+    NutkAtmRoughWallFunction = 51,
+
+    /// `nutUBlendedWallFunction` (SPEC-LIT 120.9, (120.9h)): the `nutU`
+    /// family with `u_tau` the binomial blend `(u_v^n + u_l^n)^{1/n}` of the
+    /// viscous-sublayer and log-law friction velocities, `n` from the patch
+    /// entry (4 when absent). A wall-function kind, velocity-based.
+    NutUBlendedWallFunction = 52,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -613,6 +630,24 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "prghTotalPressure",
     "prghTotalHydrostaticPressure",
     "uniformDensityHydrostaticPressure",
+    // SPEC-LIT 120.8: the thermal family - three Robin triples `Energy`
+    // rewrites from the face's current conductance every outer iteration,
+    // and `turbulentHeatFluxTemperature`, which rides `fixedFluxTemperature`
+    // as it is.
+    "externalWallHeatFluxTemperature",
+    "turbulentHeatFluxTemperature",
+    "lumpedMassTemperature",
+    "totalFlowRateAdvectiveDiffusive",
+    // SPEC-LIT 120.9: the atmospheric family. The four Richards & Hoxey
+    // inlet profiles ride `BcKind::FixedValue` with a per-face value the
+    // setup computes; the two wall functions are wall-function kinds that
+    // `wfNutWall` writes.
+    "atmBoundaryLayerInletVelocity",
+    "atmBoundaryLayerInletK",
+    "atmBoundaryLayerInletEpsilon",
+    "atmBoundaryLayerInletOmega",
+    "nutkAtmRoughWallFunction",
+    "nutUBlendedWallFunction",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -956,20 +991,19 @@ impl BcKind {
             "nutkRoughWallFunction" => Self::NutkRoughWallFunction,
             "nutURoughWallFunction" => Self::NutURoughWallFunction,
 
-            // The atmospheric (Monin-Obukhov) rough wall function is a
-            // different profile, not a discarded parameter - it is an error
-            // naming the two non-atmospheric rough functions this solver
-            // does implement, not a silent substitution.
-            "nutkAtmRoughWallFunction" => {
-                return unsupported(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    &["nutkRoughWallFunction", "nutURoughWallFunction"],
-                    "the non-atmospheric rough wall function of the same family (the \
-                     Monin-Obukhov atmospheric profile is not implemented)",
-                    Self::NutkRoughWallFunction,
-                );
-            }
+            // SPEC-LIT 120.9: the atmospheric family. The ground's wall
+            // function is written in the roughness LENGTH `z0` of the
+            // Richards & Hoxey profile ((120.9g)), not in a sand-grain
+            // height, so it is a kind of its own; the blended `nutU` reads
+            // its exponent `n` ((120.9h)). The four inlet profiles ARE a
+            // fixedValue - `field_setup` computes each face's value once
+            // from (120.9a)-(120.9e).
+            "nutkAtmRoughWallFunction" => Self::NutkAtmRoughWallFunction,
+            "nutUBlendedWallFunction" => Self::NutUBlendedWallFunction,
+            "atmBoundaryLayerInletVelocity"
+            | "atmBoundaryLayerInletK"
+            | "atmBoundaryLayerInletEpsilon"
+            | "atmBoundaryLayerInletOmega" => Self::FixedValue,
             "nutLowReWallFunction" => Self::NutLowReWallFunction,
             "epsilonWallFunction" => Self::EpsilonWallFunction,
             "omegaWallFunction" => Self::OmegaWallFunction,
@@ -1179,18 +1213,20 @@ impl BcKind {
                 Self::PorousJumpPressure
             }
 
-            // SPEC-LIT 47.9: an external heat-transfer-coefficient/ambient
-            // wall. Not implemented; the two conditions that ARE are named.
-            "externalWallHeatFluxTemperature" => {
-                return unsupported(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    &["fixedFluxTemperature", "coupledTemperature"],
-                    "fixedFluxTemperature (a prescribed wall heat flux) or \
-                     coupledTemperature (a real conjugate solid region)",
-                    Self::FixedFluxTemperature,
-                );
-            }
+            // SPEC-LIT 120.8: the thermal family. Three of the names ride
+            // `Mixed` - their triple is rewritten every outer iteration from
+            // the face's CURRENT conductance by `crate::energy::Energy`'s
+            // thermal-wall kernel, and `field_setup` refuses them unless the
+            // caller's `BcInputs::thermal` promises that wiring.
+            // `turbulentHeatFluxTemperature` rides §32.2's
+            // `FixedFluxTemperature` as it is: its flux goes through the
+            // EFFECTIVE conductivity, which is exactly what that kernel
+            // already writes - only the `refValue = q` seed differs, which
+            // `field_setup`'s 120.8 block computes.
+            "externalWallHeatFluxTemperature"
+            | "lumpedMassTemperature"
+            | "totalFlowRateAdvectiveDiffusive" => Self::Mixed,
+            "turbulentHeatFluxTemperature" => Self::FixedFluxTemperature,
 
             // SPEC-LIT 29.3: OpenFOAM spells the Jayatilleke thermal wall
             // function on `alphat`, a field this solver does not carry (its
@@ -1209,6 +1245,37 @@ impl BcKind {
                     ),
                 );
                 Self::ThermalWallFunction
+            }
+
+            // SPEC-LIT 120.8: the two alphat aliases. This solver carries no
+            // `alphat` field - `k_eff,b` already holds `rho cp nu_t,b/Pr_t`
+            // with `nu_t,b` from `nut`'s own wall function (S26) - so on a
+            // field named `alphat` the names are read as `calculated`, with
+            // the mapping printed once; on any other field they are refused,
+            // naming `alphat`.
+            "alphatWallFunction" | "compressible::alphatWallFunction" => {
+                if field == "alphat" {
+                    crate::io::contract::warn_once(
+                        &format!("{field}: {name}"),
+                        &format!(
+                            "{field}: boundaryField/{patch}/type `{name}` (OpenFOAM's \
+                             alphat wall function; this solver has no alphat field) \
+                             mapped to `calculated`"
+                        ),
+                    );
+                    Self::Calculated
+                } else {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["calculated"],
+                        "calculated - but note that this name belongs on the `alphat` \
+                         field, which this solver does not carry: its energy equation \
+                         applies the turbulent thermal diffusivity to `k_eff` directly \
+                         (SPEC-LIT 120.8)",
+                        Self::Calculated,
+                    );
+                }
             }
 
             // SPEC-LIT 120.4: its own condition now - (120.4a)'s reverse
@@ -1369,6 +1436,8 @@ impl BcKind {
                 | Self::NutUWallFunction
                 | Self::NutkRoughWallFunction
                 | Self::NutURoughWallFunction
+                | Self::NutkAtmRoughWallFunction
+                | Self::NutUBlendedWallFunction
         )
     }
 
@@ -1384,7 +1453,10 @@ impl BcKind {
     /// own patch type.
     #[inline]
     pub fn is_nut_velocity_based(self) -> bool {
-        matches!(self, Self::NutUWallFunction | Self::NutURoughWallFunction)
+        matches!(
+            self,
+            Self::NutUWallFunction | Self::NutURoughWallFunction | Self::NutUBlendedWallFunction
+        )
     }
 
     /// True where the face carries the Cebeci & Bradshaw roughness downshift
@@ -1890,7 +1962,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [79, 3, 28, 10, 10], "the per-status counts");
+        assert_eq!(counts, [89, 5, 16, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

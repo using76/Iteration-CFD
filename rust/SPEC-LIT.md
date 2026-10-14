@@ -6982,7 +6982,7 @@ face — the exact shape the mesh already carries for a cyclic patch.
 | `thermalContactResistance` | the same condition with a non-zero `Rc`; accepted as its own spelling |
 | `compressible::turbulentTemperatureCoupledBaffleMixed` | accepted as an **alias**, printed once by `contract::warn_once`, exactly as `compressible::alphatJayatillekeWallFunction` is |
 | `compressible::turbulentTemperatureRadCoupledMixed` | **§13.4 error** naming `coupledTemperature` AND `greyDiffusiveRadiationViewFactor` — a face carries one or the other, never both, because they rewrite the same triple (§47.10, §50.8) |
-| `externalWallHeatFluxTemperature` | **§13.4 error** naming `fixedFluxTemperature` and `coupledTemperature` |
+| `externalWallHeatFluxTemperature` | implemented by §120.8 on a fluid wall (it was a **§13.4 error** naming `fixedFluxTemperature` and `coupledTemperature` until then); on an interface it is refused, a face carries one condition |
 | `coupledTemperature` on a field that is not a temperature | **§13.4 error** naming `T`, exactly as `constantAlphaContactAngle` on a non-`alpha` field is |
 | interface entries | `Rc` (m^2 K/W), or `thicknessLayers` + `kappaLayers` which are summed by (S47.11); both `>= 0` |
 
@@ -39282,7 +39282,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 79 names of
+accepts it on the field the row is asked on, and it is one of the 89 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39382,21 +39382,21 @@ row, row for row.
 | buoyant pressure | `prghTotalPressure` | implemented | — | — | (120.7c), `p0` less the inflow dynamic pressure and `rho gh` |
 | buoyant pressure | `prghTotalHydrostaticPressure` | implemented | — | — | (120.7d), the caller's hydrostatic `ph_rgh` less the inflow dynamic pressure; API only |
 | buoyant pressure | `uniformDensityHydrostaticPressure` | implemented | — | — | (120.7e), `pRefValue + rhoRef g.(x - pRefPoint)` less `rho gh` |
+| thermal | `externalWallHeatFluxTemperature` | implemented | — | — | (120.8f), `flux`, `power` or `coefficient` with layers (120.8a) and a radiating outer surface (120.8d) |
+| thermal | `turbulentHeatFluxTemperature` | implemented | — | — | §32.2's `fixedFluxTemperature` through `k_eff`, `heatSource` `flux` or `power` |
+| thermal | `lumpedMassTemperature` | implemented | — | — | (120.8g), a lumped mass behind the wall stepped by the energy equation's own ddt row |
+| thermal | `totalFlowRateAdvectiveDiffusive` | implemented | — | — | (120.8h), Danckwerts' inlet: the total heat flow in is the advected `inletValue` |
+| atmospheric | `atmBoundaryLayerInletVelocity` | implemented | — | — | (120.9b), the Richards & Hoxey log profile in `z0` |
+| atmospheric | `atmBoundaryLayerInletK` | implemented | — | — | (120.9c), `u*^2/sqrt(C_mu)` |
+| atmospheric | `atmBoundaryLayerInletEpsilon` | implemented | — | — | (120.9d), `u*^3/(kappa (z + z0))` |
+| atmospheric | `atmBoundaryLayerInletOmega` | implemented | — | — | (120.9e), `epsilon/(C_mu k)` |
+| atmospheric | `nutkAtmRoughWallFunction` | implemented | — | — | (120.9g), the k-based ground in the roughness length `z0`; the wall shear is `u*^2` on the profile |
+| atmospheric | `nutUBlendedWallFunction` | implemented | — | — | (120.9h), the binomial blend of the viscous and log-law friction velocities, exponent `n` |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
-| thermal | `externalWallHeatFluxTemperature` | planned | BC-12 | — | — |
-| thermal | `turbulentHeatFluxTemperature` | planned | BC-12 | — | — |
-| thermal | `lumpedMassTemperature` | planned | BC-12 | — | — |
-| thermal | `totalFlowRateAdvectiveDiffusive` | planned | BC-12 | — | — |
-| thermal | `alphatWallFunction` | planned | BC-12 | — | — |
-| thermal | `compressible::alphatWallFunction` | planned | BC-12 | — | — |
-| atmospheric | `atmBoundaryLayerInletVelocity` | planned | BC-13 | — | — |
-| atmospheric | `atmBoundaryLayerInletK` | planned | BC-13 | — | — |
-| atmospheric | `atmBoundaryLayerInletEpsilon` | planned | BC-13 | — | — |
-| atmospheric | `atmBoundaryLayerInletOmega` | planned | BC-13 | — | — |
-| atmospheric | `nutkAtmRoughWallFunction` | planned | BC-13 | — | the Monin-Obukhov rough profile; refused today naming the two non-atmospheric rough functions |
-| atmospheric | `nutUBlendedWallFunction` | planned | BC-13 | — | — |
+| thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
+| thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
 | mapped inflow | `mapped` | planned | BC-14 | — | — |
 | mapped inflow | `mappedFixedValue` | planned | BC-14 | — | — |
 | mapped inflow | `turbulentInlet` | planned | BC-14 | — | — |
@@ -39487,10 +39487,8 @@ the fallback that refusal names (§13.4): `calculated` for the generic refusal
 of a name outside the catalogue and for every permanent refusal except
 `compressible::turbulentTemperatureRadCoupledMixed`, which keeps its own arm's
 fallback `coupledTemperature` (the conjugate coupling without the radiative
-term, §50.8); the planned names refused by their own arm today keep theirs
-(`cyclicAMI` a position-paired
-`cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`,
-`externalWallHeatFluxTemperature` `fixedFluxTemperature`).
+term, §50.8); the planned name refused by its own arm today keeps its own
+(`cyclicAMI` a position-paired `cyclic`).
 
 ### 120.1 Function1 - a profile of time or of one coordinate, evaluated on the device
 
@@ -40656,6 +40654,361 @@ measurement's round-off, not the imprint's). The 60 x 60 pair imprints in
 0.36 s. The candidate search is all pairs with a box test and the weld and
 edge tables are linear scans, so the cost grows with the square of the face
 count; binning them is left to the unit that needs larger interfaces.
+
+No GPL-licensed source was consulted.
+
+### 120.8 The thermal family - an outer wall, a prescribed heat, a lumped mass and Danckwerts' inlet
+
+BC-12 implements the six thermal names of the §120 table. The names are
+taken from the user guides of §120 by name only; the entry keys and every
+equation below are ours (*DESIGN*) or the textbook law each cites. All of
+them are §4's triple with no new evaluation branch: `turbulentHeatFluxTemperature`
+rides `BcKind::FixedFluxTemperature` (§32.2) as it is, and the other three
+ride `BcKind::Mixed`, whose triple `crate::energy::Energy` rewrites every
+outer iteration from the face's CURRENT conductance - the §98 ambient
+triple (S98.1)-(S98.3) carried from the conjugate path onto any fluid wall
+the energy equation solves.
+
+**The outer side of a face.** Let `C_b = k_eff,b Delta_b` be the face's
+cell-to-face conductance per area (S47.4; `k_eff,b` is `Energy`'s
+boundary `k_eff`, molecular plus `rho cp nu_t/Pr_t`), `T_P` the owner
+cell's and `T_b` the face's current value. A face loses `H (T_b - T_ref)`
+to its outside and receives a prescribed `q_in` (W/m^2, positive INTO the
+domain, the §32.2 sign); with `n` wall layers of thickness `t_i` and
+conductivity `kappa_i` between the face and an outer surface at `T_o` that
+convects at `h` to an ambient `Ta` and radiates grey at `eps` to a surround
+at the same `Ta`:
+
+```
+R_l    = sum_i t_i/kappa_i                                                   (120.8a)
+q_c    = C_b (T_P - T_b)                                                     (120.8b)
+T_o*   = T_b - R_l q_c                                                       (120.8c)
+b = 4 eps sigma T_o*^3,   a = eps sigma (T_o*^4 - Ta^4) - b T_o*,
+H_o = h + b,   T_ref = (h Ta - a)/H_o          (eps = 0: H_o = h, T_ref = Ta)   (120.8d)
+H      = H_o/(1 + R_l H_o)                                                   (120.8e)
+fr = H/(H + C_b),     refValue = T_ref,     refGrad = q_in/k_eff,b           (120.8f)
+```
+
+(120.8a) is the plane wall's series resistance and (120.8e) puts it in
+series with the outer film, `(T_b - T_ref)/(R_l + 1/H_o)`; (120.8d) is
+(S98.2)-(S98.3)'s tangent of the quartic, taken about the OUTER surface's
+temperature. (120.8b) is the heat the last solve conducted from the cell to
+the face, which a converged face also passes through the layers, so
+(120.8c) is the outer temperature that iterate implies; the first pass, from
+a seed with `q_c = 0`, linearises about `T_b`. *Proof of the identity.* §4
+gives `T_b = fr T_ref + (1 - fr)(T_P + refGrad/Delta_b)`, and with
+`C_b fr = H (1 - fr)` this is `C_b (T_P - T_b) = H (T_b - T_ref) - q_in`:
+the heat the cell conducts to the face is the heat the face loses outside
+less the heat it is given, **at every iterate**, not at convergence. With
+`H = 0`: `fr = 0` and `refGrad = q_in/k_eff,b`, §32.2's fixed flux in
+every bit. The face is left untouched while `k_eff,b` or `C_b` is not
+positive (before the first `update_k_eff`) or, on a radiating face, while
+`T_o*` is not, the convention of `energyFixedFluxTemperature`.
+
+**`externalWallHeatFluxTemperature`.** `mode` is required: `flux` reads `q`
+(W/m^2) and is `H = 0`, `q_in = q`; `power` reads `Q` (W) and is `H = 0`,
+`q_in = Q/A` with `A` the patch area summed in f64; `coefficient` reads `h`
+(> 0, W/(m^2 K)), `Ta` (> 0, K), optionally `thicknessLayers` and
+`kappaLayers` (two lists of one length, summed by `cht::layered_resistance`,
+§47.9) and `emissivity` in `[0, 1]` (default 0), with `q_in = 0`.
+**`turbulentHeatFluxTemperature`** reads `heatSource` (`flux` or `power`)
+and `q` (W/m^2, or W spread by area): the flux through the EFFECTIVE
+conductivity, which is what §32.2's kernel already writes, so it is that
+condition with `refValue = q` or `q/A`.
+
+**`lumpedMassTemperature`.** A mass `m` (kg, `mass`) of specific heat `c_p`
+(J/(kg K), `Cp`) behind the patch at one temperature `T_m`, from the
+lumped-capacitance balance `m c_p dT_m/dt = -Q` (`Q` the heat the wall
+conducts into the domain). It is stepped with the energy equation's OWN ddt
+row `a_n T^{n+1} + a_0 T^n + a_00 T^{n-1}` (`timescheme::DdtCoeffs`; Euler,
+or `backward` from its Euler first step, §105.16-§105.17), shared out over
+the patch by area:
+
+```
+H = m c_p a_n / A,   T_ref = -(a_0 T_m^n + a_00 T_m^{n-1})/a_n,   q_in = 0
+T_m^{n+1} = sum_f T_b,f |S_f| / A                                            (120.8g)
+```
+
+Summed over the patch, (120.8f)'s identity is `m c_p (a_n T_m^{n+1} + a_0
+T_m^n + a_00 T_m^{n-1}) = -Q^{n+1}` exactly, with `T_m^{n+1}` the area
+mean: the lump's energy balance holds whole and implicit. What is not
+lumped is the spread WITHIN a step: a face whose cell is warmer holds a
+warmer share, and all faces return to one `T_m` at the next step. On a
+patch whose faces see the same cell temperature the two are the same thing.
+`T_m^0` is the area mean of the patch's `value`, which is required. The
+condition is refused on a steady run (no `a_n`) and by `ofgpu-lowmach` on a
+restart (the lump's levels are not in the checkpoint).
+
+**`totalFlowRateAdvectiveDiffusive`.** Danckwerts' inlet condition: the
+total heat flow entering - advected plus conducted - is the advected heat of
+the incoming stream at `inletValue`. With `phi_conv,b = cp rho_f phi_b`
+(`Energy`'s mass flux times `cp`, positive out):
+
+```
+H = max(-phi_conv,b, 0)/|S_f|,   T_ref = T_in,   q_in = 0                     (120.8h)
+```
+
+so `(-phi_conv,b/|S_f|) T_b + C_b (T_b - T_P) = (-phi_conv,b/|S_f|) T_in` on
+an inflow face, the 1-D `u c_in = u c - D dc/dx` of Danckwerts, and an
+outflow face is zero-gradient (`fr = 0`, `refGrad = 0`).
+
+**The alphat aliases.** `alphatWallFunction` and `compressible::alphatWallFunction`
+set a wall's turbulent thermal diffusivity from its eddy viscosity. This
+solver carries no `alphat` field: `k_eff,b` already holds `rho cp
+nu_t,b/Pr_t` with `nu_t,b` from `nut`'s own wall function (S26). On a field
+named `alphat` the two names are read as `calculated`, with the mapping
+printed once (`contract::warn_once`); on any other field they are refused,
+naming `alphat`.
+
+**Evaluation** *(DESIGN - ours)*. `Energy::set_thermal_walls` takes the
+faces and lumps `field_setup::thermal_walls` reads from `T`'s field, and
+holds the per-face `h`, `Ta`, `eps`, `R_l` and `q_in` in f64 buffers in both
+builds. The kernel `energyThermalWall` (`cuda/energy.cu`) evaluates
+(120.8b)-(120.8f) and (120.8h) in `ofacc` from the widened inputs, in the
+order written, with `sigma` the `Scalar` constant widened, and rounds once
+per stored value (§118.2); `cht::ambient::ThermalFace::triple` is its host
+twin. It runs in `Energy::prepare_coefficients` after the §32.2 rewrite and
+again in `correct` right after the convective flux is built, so (120.8h)
+reads the flux it is assembled with; both launches sit inside `correct`,
+the captured region of `the_energy_correction_replays_bitwise`.
+`Energy::advance_lumped_masses` is the one host round trip: once per time
+step, after the step is opened and before its first `correct`, it records
+`T_m` by (120.8g), rotates the lump's two f64 levels and uploads the step's
+`H` and `T_ref`; `correct` refuses a lump whose coefficients were never set.
+
+**Inputs and refusals.** `BcInputs::thermal` is the caller's promise that
+`Energy::set_thermal_walls` and `Energy::advance_lumped_masses` are wired;
+`ofgpu-lowmach` passes it for `T`. Refused by name, each message naming the
+condition and "SPEC-LIT 120.8": the three `Mixed`-kind names where
+`BcInputs::thermal` is false (every other setup: a seed with nothing to
+rewrite it would freeze the face); a missing or unknown `mode` or
+`heatSource`; a missing `q`, `Q`, `h`, `Ta`, `mass`, `Cp`, `value` (lump)
+or `inletValue`; `h`, `Ta`, `mass` or `Cp` not finite and positive;
+`emissivity` outside `[0, 1]`; layer lists of two lengths or a layer
+refused by (S47.11)'s rule; an entry the mode does not read (`h`, `Ta`,
+`emissivity` or the layers under `flux`/`power`, `q` or `Q` under
+`coefficient`); any of the six on a vector field; and, in `Energy`, a lump
+on a steady scheme, a lump face that is not one of the set's faces (a
+lump names its faces by boundary-face index, mapped once to their places
+in the face list), and a thermal face on an interface (§47.6).
+
+**Gates** (`tests/bc_thermal.rs`, both builds; class per docs/17 §5.1,
+D-F32-1; the tolerance is `t` in f64 and `max(t, min(t 2^29, 1e-5))` under
+`single`; f64 numbers first, `single` in brackets).
+
+`coefficient_mode_slab_is_the_series_resistance_closed_form` - THE gate,
+row 1. A 4 x 1 x 1 slab on [0, 0.1] (`k = 0.05`, xMin `fixedValue 400`),
+xMax `mode coefficient; h 10; Ta 300;` with `thicknessLayers (0.01 0.02);
+kappaLayers (0.5 2.0);`, steady: the measured `q_m = C_b (T_P - T_b)` is
+`q = 100/(0.1/0.05 + 0.03 + 0.1) = 46.948356807511736` within 1.6e-15
+[2.7e-7] on xMax and 6.0e-15 [2.4e-6] on xMin, and `T_b = 306.1032863849765`
+within 0 [5.1e-8], all held to tol(1e-10), after 2 passes; the control
+without the layers is `100/2.1` within 2.9e-15 [3.2e-6]. `a_radiating_outer_
+surface_is_the_root_of_the_quartic` - xMin 600, `emissivity 0.8`: `T_b`
+lands on the quartic's root 309.59128377473974 within 1.1e-15 [1.8e-8], and
+with the two layers on 313.7498487803651 within 1.6e-15 [4.4e-9] (tol(1e-10)),
+in 4 [3] tangent passes each (<= 50 asserted). `the_device_triple_is_its_
+host_twin` - three passes into the layered radiating case, the kernel's
+`fr`, `refValue`, `refGrad` equal `ThermalFace::triple` on the downloaded
+state within tol(1e-14) relative, a zero exactly (class R).
+`flux_and_power_are_the_fixed_flux_condition` - 20 passes with `q -50`:
+`externalWallHeatFluxTemperature mode flux` and `turbulentHeatFluxTemperature
+heatSource flux` give `T` on every cell and face bit for bit the
+`fixedFluxTemperature` run (class D); `mode power` and `heatSource power`
+with `-50 A` deviate by 0 [0] (tol(1e-12)). `a_lumped_mass_decays_
+exponentially_at_second_order` - THE gate, row 2: xMin `fixedValue 300`,
+xMax `lumpedMassTemperature mass 12; Cp 1000; value uniform 400;`,
+`tau = m c_p L/(k A) = 2.4e8 s`, `backward`, one `correct` per step to
+`t = tau`: `|T_m - (300 + 100 e^-1)|/100` is 6.21e-5 [6.67e-5] at N = 50
+(<= 1e-4), 2.52e-4 [2.55e-4] at N = 25, a ratio of 4.06 [3.82] (in [3.5,
+4.5], second order); the Euler control at N = 50 is 3.65e-3 [3.65e-3]
+(> 1e-3). `danckwerts_inlet_carries_the_advected_heat` - a 16 x 1 x 1
+channel on [0, 1], `k = 12`, plug `phi = 0.01 |S_f|`: (a) `inletValue 310`
+with xMax `zeroGradient` fills every cell with 310 within 4.7e-15 [7.9e-7]
+(tol(1e-10)); (b) `inletValue 301` against xMax `fixedValue 300` holds
+`a T_b + C_b (T_b - T_P) = a T_in` at every pass within 6.7e-15 [3.4e-6]
+(tol(1e-12)), the converged inlet face sits at 300.616732045547
+[300.616882324219] below `T_in` while the `fixedValue 301` control pins
+301 exactly, and the heat leaving xMax equals the advected inflow within
+2.0e-14 [2.0e-7] (tol(1e-10)); (c) on an outflow face `fr` and `refGrad`
+are exactly 0. `thermal_refusals_are_by_name` - every refusal of the list
+above (class D), including a lump on a steady `Energy`, a lump face that is
+not one of the set's faces, and `correct` before `advance_lumped_masses`.
+`the_alphat_aliases_read_as_calculated_on_alphat_only` - both names are
+`calculated` on `alphat` and refused naming `alphat` on `T`. 8 of 8 in each
+build.
+
+* **Incropera, F. P., DeWitt, D. P.** *Fundamentals of Heat and Mass
+  Transfer*, Wiley - ch. 3, the plane wall and its thermal resistances in
+  series, `q = (T_1 - T_inf)/(L/k + 1/h)`; ch. 5, the lumped capacitance
+  method, `T - T_inf = (T_0 - T_inf) exp(-t/tau)`, `tau = rho V c/(h A)`.
+* **Danckwerts, P. V.** Continuous flow systems: distribution of residence
+  times. *Chem. Eng. Sci.* 2(1) (1953) 1-13, doi:10.1016/0009-2509(53)80001-1
+  - the inlet condition of a flow with axial dispersion.
+
+No GPL-licensed source was consulted.
+
+### 120.9 The atmospheric family - the Richards & Hoxey surface layer at an inlet, and two wall functions
+
+BC-13 implements the six atmospheric names of the §120 table. The names are
+taken from the user guides of §120 by name only; every equation below is
+cited, or is ours and marked DESIGN.
+
+**Four inlet profiles** (Richards & Hoxey 1993). `atmBoundaryLayerInletVelocity`,
+`atmBoundaryLayerInletK`, `atmBoundaryLayerInletEpsilon` and
+`atmBoundaryLayerInletOmega` are a `fixedValue` (`BcKind::FixedValue`,
+`fr = 1`) whose per-face value the setup computes once, in f64 from the
+world face centre (§118.7), and rounds once into `Scalar` - the treatment
+§120.5 gives its fixed-value profiles. The neutral surface layer of a
+roughness length `z0`, with the height above the ground
+`z = max(zDir . x_f - zGround, 0)`:
+
+```
+u* = kappa Uref / ln((Zref + z0)/z0)                                 (120.9a)
+U  = (u*/kappa) ln((z + z0)/z0) flowDir                              (120.9b)
+k  = u*^2 / sqrt(C_mu)                                               (120.9c)
+epsilon = u*^3 / (kappa (z + z0))                                    (120.9d)
+omega   = epsilon/(C_mu k) = u* / (kappa sqrt(C_mu) (z + z0))        (120.9e)
+```
+
+(120.9a)-(120.9d) are Richards & Hoxey's; (120.9e) is (120.9d) through the
+k-omega relation `omega = epsilon/(beta* k)` with `beta* = C_mu`
+(Wilcox; §6.2). Both logarithms are evaluated as `ln_1p(a/z0)`. The entries:
+`flowDir` and `zDir` (required, normalised in f64, a zero vector refused),
+`Uref` and `Zref` (required, positive; a time-varying Function1 is refused
+by name, as §120.5 refuses one, because no driver runs the timed path for
+these names), `z0` (required, positive at every face; `uniform`, a bare
+number, or one per face), `zGround` (0 when absent; uniform or per face),
+`kappa` (0.41) and `Cmu` (0.09). The entries `d`, `C1` and `C2` are refused
+by name: a displacement height and the extended `k` profile of later work
+are not in (120.9a)-(120.9e), and dropping them silently would be the
+substitution §13.4 forbids. A scalar name on a vector field, and the
+velocity name on a scalar field, are refused naming the mismatch.
+
+Richards & Hoxey show that (120.9b)-(120.9d) solve the standard k-epsilon
+equations exactly - `k` is uniform, its production equals `epsilon`, and
+`nu_t = C_mu k^2/epsilon = kappa u* (z + z0)` - provided
+
+```
+sigma_eps = kappa^2 / ((C_2 - C_1) sqrt(C_mu))                       (120.9f)
+```
+
+which is 1.1674 for `kappa = 0.41` and the §6.1 constants, against the
+standard 1.3. A case that wants the profile kept along a fetch sets it.
+
+**The ground: `nutkAtmRoughWallFunction`** *(DESIGN - ours, after
+Hargreaves & Wright 2007)*. Hargreaves & Wright traced the decay of an
+inlet profile along an empty fetch to a rough-wall function written in a
+sand-grain height rather than in the profile's own `z0`. The wall function
+here is written so that a cell sitting on (120.9b)-(120.9c) carries exactly
+the shear `u*^2` (BcKind 51, family code 2 of `wfNutWall`, host twin
+`wallfunctions::nut_wall_atm_rough`):
+
+```
+u* = C_mu^{1/4} sqrt(k_P),
+nu_t,w = max(0, u* kappa y / ln(1 + y/z0) - nu)                      (120.9g)
+```
+
+With `U_P = (u*/kappa) ln(1 + y/z0)` at the cell's wall distance `y`, the
+face shear `(nu + nu_t,w) U_P/y` is `u*^2` for any `y` - the property the
+gate measures. `k_P` is floored at `k_min` as `nutk` floors it. `z0` is the
+patch's own (required, positive at every face, per face or uniform); it is
+NOT a sand-grain height, and `Ks`/`Cs` are not read. The ground's `epsilon`
+keeps `epsilonWallFunction` (§6.4); `G` in the wall cell is built from the
+`nu_t,w` this writes.
+
+**`nutUBlendedWallFunction`** *(DESIGN - ours)*. The velocity-based family
+(§15.1) with the friction velocity a binomial blend of the two asymptotes
+(BcKind 52, family code 3, host twins `u_tau_log`, `u_tau_blended`,
+`nut_wall_blended`):
+
+```
+u_v = sqrt(nu |U|/y)                              (u+ = y+)
+u_l: the root of u ln(1 + E y u/nu) = kappa |U|   (u+ = ln(1 + E y+)/kappa)
+u_tau = (u_v^n + u_l^n)^{1/n},   nu_t,w = max(0, u_tau^2 y/|U| - nu)  (120.9h)
+```
+
+`|U|` is the wall-parallel speed `wfMagUParallel` gives the `nutU` family,
+and `n` is the patch entry `n` (4 when absent; positive and finite, or
+refused). The log law is written with `ln(1 + E y+)`, not `ln(E y+)`: the two
+differ by `1/(kappa E y+)`, under 4e-3 of `u+` from `y+ = 30` on, but only
+the first has a root that vanishes with `|U|` (`u_l -> sqrt(kappa/E) u_v`),
+so the blend's viscous limit is the sublayer's - `nu_t,w/nu -> (1 +
+(kappa/E)^2)^{1/2} - 1 = 8.7e-4` - and not the floor `y+ = 1/E` of the plain
+log law. `u_l` is found by Newton from `u_v`, at most 40 steps, stopping
+when a step is below `4 eps` of the precision relative: `G(u) = u ln(1 + E y
+u/nu) - kappa |U|` is increasing and convex for `u > 0` with `G(0) < 0`, so
+after at most one step the iterates fall to the root from above. The blend
+is formed as `m (1 + r^n)^{1/n}`, `m = max(u_v, u_l)`, `r = min/max` - the
+same number without the overflow `u^n` would risk in `f32`.
+
+**Precision.** Codes 0 and 1 of `wfNutWall` (`nutk`, `nutU` and their
+rough forms) keep their arithmetic; only `wallfunctions.cubin` changes, and
+no other kernel's SASS moves. The profiles are f64 and rounded once. The
+new kernel arithmetic runs in `ofscalar` with `log1p`, `pow` and the
+precision's own stopping rule; the twins are held at class R.
+
+**Refusals by name.** A missing or non-positive `z0` (on any of the six), a
+missing or non-positive `Uref`/`Zref`/`kappa`/`Cmu`, a zero `flowDir` or
+`zDir`, a time-varying `Uref`, the entries `d`, `C1`, `C2`, a non-positive
+blend exponent, and the scalar/vector mix-ups. `WallData::build` refuses a
+face whose atmospheric family disagrees with its `u_based` flag.
+
+**Gate** (`tests/bc_atmospheric.rs`, both builds; f64 first, `single` in
+brackets). `the_inlet_profiles_are_richards_and_hoxey` - a 12-face inlet
+graded towards the ground, `Uref 8`, `Zref 20`, `z0 0.05`, `zGround -2`,
+`kappa 0.4`, `Cmu 0.085`: the face values of all four names against
+(120.9a)-(120.9e) in f64, worst relative 0 [4.8e-8] (tol(1e-14), class R).
+`nutk_atm_rough_holds_the_profile_shear` - eight ground faces at `y = 0.05`
+with `z0` from 1e-4 to 30 m, `k = u*^2/sqrt(C_mu)` at `u* = 0.5`: the device
+`nu_t,w` against `nut_wall_atm_rough` within 1.5e-16 [0] and the wall shear
+`(nu + nu_t,w) U(y)/y` against `u*^2` within 2.2e-16 [6.8e-8] (tol(1e-12),
+class R). `nutu_blended_meets_its_twin_and_its_limits` - wall-parallel
+speeds 1e-6 to 10 m/s (`Re_y` 3.3e-3 to 3.3e4) at `n = 4` and `n = 3`: device
+against twin within 0 [4.4e-7] (tol(1e-12), relative to `max(nu_t,w, nu)`);
+the viscous limit `nu_t,w/nu = 9.80e-4` (<= 1e-3), the log limit
+`u_tau/u_l - 1 = 6.6e-5` (<= 1e-4) with `|G(u_l)|` 0 [1.0e-7] (tol(1e-12)
+`kappa |U|`). `atmospheric_refusals_are_by_name` - 12 refusals, each naming
+its entry. `a_five_km_fetch_keeps_the_inlet_profile` - THE gate: 50 x 1 x 24
+cells over 5000 x 10 x 500 m, the vertical graded 50:1 (first cell 1.59 m),
+y empty; xMin and the top carry (120.9b)-(120.9d) (the top's fixed values
+hold the shear that drives the layer), xMax `zeroGradient` with `p = 0`,
+the ground `noSlip`, `kqRWallFunction`, `epsilonWallFunction` and
+`nutkAtmRoughWallFunction z0 0.01`; `Uref 10` at `Zref 10` (`u* =
+0.593450`), `nu = 1.5e-5`, k-epsilon with (120.9f), `nut_max_coeff 1e8`
+(the default cap `1e5 nu` would bound `epsilon` off a profile whose `nu_t`
+reaches 122 m^2/s), the pressure by PCG with DIC. Steady SIMPLE from the
+profile stops in 225 iterations at a 25-iteration change of `U.x` below
+1e-9 m/s [the 1000-iteration cap, the f32 SIMPLE floor of §118, change
+5.7e-6 m/s]. The outlet column against the inlet profile: `U` worst
+2.483 % [2.483 %] at `z = 2.53 m` (<= 3 %), `k` worst 8.351 % [8.351 %] at
+`z = 2.53 m` (<= 10 %); the ground's `u* = sqrt((nu + nu_t,w) U_P/y)` worst
+1.197 % [1.197 %] over all 50 ground faces (<= 3 %) - class P, the same
+bands in both builds. 5 of 5 in each build.
+
+Controls, measured once and not kept as tests: the same fetch with the
+ground on `nutkWallFunction` (a smooth wall) is off by 58 % (`U`), 65 %
+(`k`) and 46 % (`u*`), so the gate sees the wall function; with the
+standard `sigma_eps = 1.3` instead of (120.9f), `U` 1.0 % and `u*` 0.7 % but
+`k` 12.5 %, outside the band - (120.9f) is what keeps `k`.
+
+Finding (for the §118 owner, F32-13/14/15): under `single`, PBiCGStab with
+the diagonal preconditioner on this fetch's pressure system (cells 100 m
+x 1.6 m at the ground) does not converge from the first outer iteration
+(final residual 38 against an initial 1 after 500 iterations) and the run
+is NaN by iteration 8; the f64 build converges with the same controls. PCG
+with DIC converges in both builds (171 iterations at the first), which is
+why the gate selects it.
+
+* **Richards, P. J., Hoxey, R. P.** Appropriate boundary conditions for
+  computational wind engineering models using the k-epsilon turbulence
+  model. *J. Wind Eng. Ind. Aerodyn.* 46-47 (1993) 145-153,
+  doi:10.1016/0167-6105(93)90124-7 - (120.9a)-(120.9d) and (120.9f).
+* **Hargreaves, D. M., Wright, N. G.** On the use of the k-epsilon model in
+  commercial CFD software to model the neutral atmospheric boundary layer.
+  *J. Wind Eng. Ind. Aerodyn.* 95 (2007) 355-369,
+  doi:10.1016/j.jweia.2006.08.002 - the empty-fetch test of horizontal
+  homogeneity, and the rough-wall function written in `z0`.
 
 No GPL-licensed source was consulted.
 
