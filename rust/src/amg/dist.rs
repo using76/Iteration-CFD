@@ -24,8 +24,8 @@
 //! which is this unit's gate.
 //!
 //! Host code only. The part-local product is an ordinary [`GalerkinPlan`],
-//! so its device gather is `GpuGalerkin` unchanged; the processor-face sums
-//! and the distributed cycle are AMG-07b's.
+//! so its device gather is `GpuGalerkin` unchanged. The distributed cycle
+//! on these levels is AMG-07b's, in `amg::distcycle` (SPEC-LIT §141.11).
 //!
 //! Provenance: ORIGINAL - the decomposition of Notay's aggregation
 //! (ETNA 37 (2010), SPEC-LIT §141.1) into blocks is this project's own
@@ -711,7 +711,10 @@ impl DistHierarchy {
 
 /// Every rank's `(ok, count)`; the summed count when all are ok, and the
 /// same refusal on every rank otherwise.
-fn vote<E: std::fmt::Display>(comm: &dyn Comm, mine: std::result::Result<usize, E>) -> Result<usize> {
+pub(crate) fn vote<E: std::fmt::Display>(
+    comm: &dyn Comm,
+    mine: std::result::Result<usize, E>,
+) -> Result<usize> {
     let mut b = [0u8; 16];
     if let Ok(n) = &mine {
         b[..8].copy_from_slice(&1u64.to_le_bytes());

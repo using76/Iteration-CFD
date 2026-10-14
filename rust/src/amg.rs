@@ -21,7 +21,9 @@
 //! contributes the K-cycle, `Gamg::set_cycle(CycleKind::K)`, and the
 //! flexible conjugate gradient `solver::solve_fcg` that takes it. AMG-07a
 //! (§141.10) contributes the decomposed levels in `dist`: block-local
-//! aggregation, coarse processor faces and coarse halo plans.
+//! aggregation, coarse processor faces and coarse halo plans. AMG-07b
+//! (§141.11) contributes the distributed V-cycle over SPMD ranks,
+//! `distcycle::DistGamg`, with the coarsest level solved on every rank.
 //!
 //! Provenance: ORIGINAL - written from Notay, ETNA 37 (2010) 123-146,
 //! Algorithms 2.1 and 2.2 (SPEC-LIT §141.1). No GPL-licensed source was
@@ -31,6 +33,7 @@ pub mod aggregate;
 pub mod coarse;
 pub mod cycle;
 pub mod dist;
+pub mod distcycle;
 pub mod galerkin;
 pub mod hierarchy;
 pub mod smooth;
@@ -49,6 +52,7 @@ pub use dist::{
     gather_level, halo_aggregates, spmd_halo_aggregates, BlockAggregation, DistCoarsening,
     DistHierarchy, DistLevel, NO_KEY,
 };
+pub use distcycle::{dist_lanczos, level_rows, DistGamg, LANCZOS_TAG};
 pub use galerkin::{
     GalerkinPlan, GpuGalerkin, GpuLevel, HostLevel, KIND_BOUNDARY, KIND_DIAG, KIND_LOWER,
     KIND_UPPER, MAX_INDEX,

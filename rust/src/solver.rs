@@ -1543,11 +1543,13 @@ pub(crate) fn precondition_parts(
             mc.apply(gpu, y, r_diag, a, m)
         }
 
-        // Only distributed code reaches this function, and it refuses GAMG
-        // first; reaching here means the refusal was bypassed.
+        // Only distributed code reaches this function: the SPMD solvers
+        // apply `amg::DistGamg` before it and the in-process ones refuse
+        // GAMG (SPEC-LIT 141.11); reaching here means that was bypassed.
         Preconditioner::Gamg => Err(Error::Config(
-            "precondition: GAMG reaches this partwise path by no route; a \
-             distributed GAMG preconditioner arrives with AMG-07b"
+            "precondition: GAMG reaches this partwise path by no route; the \
+             SPMD solvers apply the distributed cycle amg::DistGamg before \
+             it (SPEC-LIT 141.11)"
                 .to_string(),
         )),
     }

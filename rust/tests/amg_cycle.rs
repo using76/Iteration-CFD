@@ -967,7 +967,8 @@ fn a_gamg_request_that_cannot_be_served_is_refused_by_name() {
         .to_string();
     assert!(e.contains("cells"), "{e}");
 
-    // The distributed path refuses GAMG by name (AMG-07b).
+    // The in-process distributed path refuses GAMG by name, naming the
+    // SPMD route of AMG-07b (SPEC-LIT 141.11).
     let m = box_mesh(4, 4, 3);
     let a = poi(&m);
     let dec = Decomposition::build(&m, 2, &PartitionMethod::Hilbert).expect("cut");
@@ -976,7 +977,7 @@ fn a_gamg_request_that_cannot_be_served_is_refused_by_name() {
     let dw = DistWorkspace::new(&gpu, &sys, DistReduce::Exact).expect("dws");
     let e = dw
         .effective_preconditioner(Preconditioner::Gamg)
-        .expect_err("the distributed path refuses GAMG until AMG-07b")
+        .expect_err("the in-process distributed path refuses GAMG")
         .to_string();
     assert!(e.contains("AMG-07b"), "{e}");
     assert!(!dw.partition_invariant(Preconditioner::Gamg));

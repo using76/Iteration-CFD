@@ -47876,7 +47876,9 @@ submatrix as §73.5 describes. Both are unchanged.
   `DistWorkspace::effective_preconditioner` does (§13.4).
 * `spmd_solve(gpu, sol, comm, psi, sys, halo, w, ctrl)` dispatches on
   `ctrl.solver` as `dist_solve` does. `GAMG` is refused by name, with
-  `PBiCGStab` as the alternative.
+  `PBiCGStab` as the alternative. (Amended by §141.11: `GAMG` runs `spmd_gamg`, the
+  distributed cycle on its own, when a cycle is attached, and is refused by name, with
+  `PCG` and `PBiCGStab` named, without one.)
 
 ```
 the same program on every rank r, on its own part:
@@ -47945,7 +47947,7 @@ that took the vote. The rows that are new or changed:
 | `SpmdWorkspace::colour`: the system's part is not the workspace's rank | starts `distsolve: `; `rank r` and `part p` |
 | `SpmdWorkspace::colour`: the system's cell counts are not the workspace's | starts `distsolve: `; the owned and halo cell counts of both |
 | `spmd_pcg` or `spmd_pbicgstab`: `Dic` or `Dilu` on an uncoloured workspace | §13.4's `Error::Refused`: the setting, the value, `diagonal` and `SpmdWorkspace::colour` |
-| `spmd_solve`: `GAMG` | §13.4's `Error::Refused`: the setting, `GAMG` and `PBiCGStab` |
+| `spmd_solve`: `GAMG` without a cycle (§141.11) | starts `spmd_gamg: `; `solver`, `GAMG`, `SpmdWorkspace::set_gamg` and `PBiCGStab` |
 
 **What must hold.** Class D: bytes and counts. Each rank is a `ThreadComm`
 thread with its own `Gpu` on device 0. The solver tolerance is `1e-12` in the
@@ -48895,7 +48897,8 @@ C = Cholesky, pinned Cholesky (§141.4) or LU (141.5.2)-(141.5.3)          (141.
 ```
 
 **Distributed solves** (`distsolve`, SPMD) refuse `Preconditioner::Gamg` by name until
-AMG-07b, and `partition_invariant(Gamg)` is `false`.
+AMG-07b, and `partition_invariant(Gamg)` is `false`. Since AMG-07b the SPMD solvers take it
+(§141.11); the in-process ones still refuse it, naming the SPMD route.
 
 **Precision** (§118, docs/17 §5.1.4). The LU rows are class A (hand values, `1e-15` relative
 in f64, `1e-6` under `single`), R (residual `1e-12` / `1e-5`) and D (device against host twin,
@@ -49099,8 +49102,8 @@ exchange (§71.4, §138.3) exactly as `new` builds them from a `PartMesh`, which
 delegate to. `Aggregation::from_map` (§141.1) builds the members CSR and the fold table of a
 given (141.8)-numbered map with the code that ends `aggregate_level`, moved and not changed.
 The tests are `tests/amg_dist.rs`, an integration test that runs in both builds (§118).
-Nothing in the solve path calls this yet; the distributed cycle is AMG-07b's, so no existing
-solve, case or SASS moves. Multi-GPU runs are deferred by the user: every rank is a
+Nothing in the solve path called this when it landed; the distributed cycle is AMG-07b's
+(§141.11), so no existing solve, case or SASS moved. Multi-GPU runs are deferred by the user: every rank is a
 `ThreadComm` thread on device 0 (§138.7). Sources: Notay (2010) of §141.1 for the aggregation
 and the Galerkin product; the decomposition into blocks is this project's own design, and no
 multigrid code of any licence was read for this subsection.
@@ -49172,7 +49175,7 @@ or `max_levels`, dropping a coarsening that does not shrink the whole level. Eve
 therefore has the same number of levels. SPMD, the counts travel in one allgather per step,
 which is also a vote, so a step refused on one rank is refused on every rank before the next
 collective. `gather_level` puts the parts' coarse levels into one `HostLevel`, numbered by
-key; AMG-07b is to use it for the coarsest level.
+key; AMG-07b uses it for the coarsest level (§141.11).
 
 **Refused by name** (`Error::Config`, every message starts with `amg::dist: `): array
 lengths that disagree with the level; a halo plan of another part or cell count; owned keys
@@ -49200,6 +49203,140 @@ linear, and blocks of three cells dealt round robin; `n_cells_coarsest = 4`.
 | `one_part_is_the_serial_hierarchy` | `P = 1` on the three meshes: aggregations, plans and levels equal `HostHierarchy::build`'s | D |
 | `an_spmd_build_is_the_in_process_build_and_its_coarse_halos_carry_the_owners_value` | the first two meshes, Hilbert, `P = 2, 3, 4`: `build_spmd` on `ThreadComm` ranks (device 0) equals the in-process build; at every level `HaloExchange::from_levels` and `SpmdHalo::from_level` bring every ghost its owner's value `1 + key/2` (3588 ghosts in f64, 3632 in `single`) | D |
 | `a_malformed_decomposed_level_is_refused_by_name` | the refusals above | D |
+
+### 141.11 The distributed V-cycle over SPMD ranks, and GAMG on the SPMD path (AMG-07b)
+
+`No GPL-licensed source was consulted.` `src/amg/distcycle.rs` holds `DistGamg`, one rank's
+part of the cycle of §141.5 on the decomposed hierarchy of §141.10. `src/distsolve/spmd.rs`
+takes it, attached by `SpmdWorkspace::set_gamg`, as `Preconditioner::Gamg` of `spmd_pcg` and
+`spmd_pbicgstab` and, through the new `spmd_gamg`, as `LinearSolverKind::Gamg` of
+`spmd_solve`, which no longer refuses `GAMG` (§138.6 is amended). `src/amg/smooth.rs` splits
+`SmootherSetup::new` into `without_interval` and `set_interval`, the same arithmetic in the
+same order, so every serial setup keeps its bits, and gains `GpuSmoother::smooth_with`, a
+sweep whose product the caller forms. No kernel and no `.cu` file changes. The tests are
+`tests/amg_dist_cycle.rs`, an integration test in both builds (§118). Multi-GPU runs are
+deferred by the user: every rank is a `ThreadComm` thread with its own `Gpu` on device 0
+(§138.7). Sources: Saad (2003) §13.4.3 Algorithm 13.3 and Notay (2010) eq. (2.1), as in
+§141.5, and Saad's Algorithm 6.15 (Lanczos), as in §141.3. The decomposition of the cycle
+over the parts, the redundant coarsest solve and the rank-ordered sums are this project's own
+design; no multigrid code of any licence was read for this subsection.
+
+**Tree vs plan.** docs/17's AMG-07b row asks that `dist_solve` stop refusing GAMG. Since
+PAR-04a/b the solve a rank runs is `spmd_solve` (§138.5, §138.6), and `dist_solve` holds
+every part in one process as the bitwise reference of those gates. The cycle is a collective
+over one part per rank, so the SPMD path takes GAMG; the in-process `dist_solve` and
+`DistWorkspace` keep a refusal that names the SPMD route (*DESIGN*, taken by recommendation:
+a second, lockstep copy of the cycle for the in-process form would add no gate of the row).
+
+**The level product.** Level `l` of rank `r` is a `DistLevel` of §141.10. After the level's
+halo is filled by its own `SpmdHalo::from_level` (§138.3), its product is the row of
+`lduAmul` (§70):
+
+```
+(A_l x)_c = d_c x_c + Σ_{f: o(f) = c} u_f x_{n(f)} + Σ_{f: n(f) = c} l_f x_{o(f)}
+            - Σ_{bf: c(bf) = c, b_nbr(bf) >= 0} bc_bf x_{b_nbr(bf)}                  (141.42)
+```
+
+On level 0 the coupled boundary faces are the part's cyclic couples and its processor faces,
+and `ldu_ops::amul` runs on the part's mesh. On a coarse level they are the processor faces
+of (141.41), and the same kernel runs on the level's own merged row map: per cell its internal
+faces in ascending face id, then its processor faces in ascending face id.
+
+**The smoothers.** Each part runs §141.3's smoother on its own rows: the diagonal and, as
+off-diagonal entries, its faces and its coupled boundary faces of (141.42), whose columns may
+be ghosts. The smoothing diagonal `m` of (141.3.3)/(141.3.4) is therefore the whole matrix's
+row value. `σ` is the part's own. When every part's setup succeeds, every row has
+`σ a_cc > 0` with one sign, so all parts' `σ` agree, and an allgather checks it. The global
+quantities are taken over the whole level:
+
+```
+g = max_r g_r                                Gershgorin's bound of (141.3.7)
+θ = §141.3's Lanczos on the whole level, with
+    v_c = frac((key_c + 1) s) - 1/2          the start by GLOBAL key (§141.10)
+    (a, b) = Σ_{r = 0 .. P-1} (a, b)_r       each rank's f64 partial, allgathered and
+                                             added from 0 in rank order
+    S v = σ |D|^-1/2 A_l |D|^-1/2 v          (141.42) in f64, after an f64 halo exchange   (141.43)
+```
+
+Every rank therefore holds the same bits of `θ`, `g` and the coefficients of (141.3.5). On
+level 0 the keys are the global cell ids, so the start vector is the serial one, permuted.
+
+**The coarsest level** (*DESIGN*, docs/17 AMG-07b: "coarsest level allgatherv'd and solved
+redundantly"). At setup every rank allgathervs its coarsest `DistLevel`. `gather_level`
+(§141.10) puts them into one `HostLevel` numbered by key, and every rank factors it as
+`Gamg::new` factors its coarsest level, `CoarseSetup::general` (§141.4, (141.5.4)). Every
+cycle then runs
+
+```
+b[gid(key_c)] = b_L[c] of every rank (one allgatherv);   x = C(b) on every rank;
+x_L[c] = x[gid(key_c)]                                                                (141.44)
+```
+
+where `gid(k)` is the rank of `k` among the whole coarsest level's keys. Every rank solves the
+same bits with the same kernel, so every rank's copy of `x` is the same.
+
+**The cycle** is (141.5.1) with (141.42) for every `A_l`, the smoothers above, the part-local
+`GpuGalerkin` of the block-local aggregation for `P_l` and `P_l^T` (no aggregate spans a cut,
+so the transfers send nothing), and (141.44) for `C`. Only the V-cycle is built, and a
+hierarchy without a coarse level is refused, because such a system belongs on one rank. PCG
+takes the cycle only with `n_pre = n_post`, as `solve_pcg` does. `spmd_gamg` is
+`solve_gamg` (§141.5) on SPMD: one iteration is one cycle, and the residual of §8.4 is tested
+every `check_interval` iterations with `spmd_pcg`'s norm factor, reductions and flag vote. The
+exchanges of the cycle's products are counted in `DistPerformance::n_exchanges`.
+
+**Not partition-invariant** (§73.5's pattern). A cut changes the block-local aggregation and
+so the whole hierarchy. `SpmdWorkspace::partition_invariant(Gamg)` and
+`DistWorkspace::partition_invariant(Gamg)` are `false`, and the answer moves under a cut,
+which a gate shows. The gates hold the answer against the serial GAMG, not bits.
+
+**Refused by name.** `DistGamg::new` (`amg::distcycle: `, voted on every rank): a hierarchy
+without a coarse level, `n_pre + n_post = 0`, a part given to another rank, a part with no
+cell on some level, parts whose `σ` differ, and a coarsest level `CoarseSetup` refuses (for
+example more than `MAX_DENSE_CELLS` cells). `DistGamg::cycle`: a CUDA-graph capture, a handle
+of another rank or world, an operator or field of another shape. `SpmdWorkspace::set_gamg`:
+a cycle of another rank, world or part shape (`distsolve: `). `Preconditioner::Gamg` without
+a cycle: §13.4's `Error::Refused`, naming `SpmdWorkspace::set_gamg`. `spmd_gamg` without a
+cycle: `spmd_gamg: solver GAMG was requested`, naming `set_gamg`, `PCG` and `PBiCGStab`.
+`spmd_pcg` with `n_pre != n_post`. In one process, `dist_solve` with `GAMG` and
+`DistWorkspace::effective_preconditioner(Gamg)` name the SPMD route.
+
+**Precision.** The answer gate is class R (docs/17 §5.1.4): `1e-8` relative to the serial
+answer in f64, and `tol32 = max(1e-8, min(1e-8 · 2^29, 1e-5)) = 1e-5` under `single`. The
+iteration gate is a count. Under `single` the SPMD solves are float solves without §118.4's
+refinement (F32-07 wraps the distributed Krylov), so they run at the solver tolerance `1e-5`
+of the SPMD gates of §138.5. At `1e-6` the stationary float cycle stalls at its floor (a true
+residual of `4.3e-6` after 500 cycles on POI 32³), while the refined serial solve converges
+in 42 cycles. That is a property of the unrefined float solve, not of the cycle.
+
+#### 141.11.1 The gates
+
+POI is the §2 laplacian negated (`σ = +1`), walls folded as Dirichlet zero, cyclic couples as
+`boundary_coeffs`, and `b = 1 + (c mod 7)/7`. The config is the default (Chebyshev degree 2,
+V(2,2), `n_cells_coarsest = 64`), and the solver tolerance is `1e-11` (f64) or `1e-5`
+(`single`), from zero.
+
+| test (`tests/amg_dist_cycle.rs`) | what | class |
+|---|---|---|
+| `distributed_gamg_matches_serial_gamg_in_both_builds` | **the AMG-07b gate.** POI 32³ and POI 24×16×12 cyclic in x; `P = 2, 4` ThreadComm ranks; Hilbert and linear cuts. `spmd_pcg` + `Gamg` against the serial GAMG-PCG and `spmd_solve` `GAMG` against the serial `solve_gamg`: every rank converged on the same iteration, `max|x - x_s| / max|x_s| <= 1e-8` (`1e-5` under `single`), and `10 it <= 13 it_s`. 16 rows | R, count |
+| `the_distributed_cycle_moves_the_answer_under_a_cut_and_says_so` | POI 16×12×10, `P = 2, 4`, Hilbert and linear: `partition_invariant(Gamg)` is `false` on every rank and in one process, every cut is within the answer gate of the serial GAMG-PCG, and the answers of the cuts differ in their bits (6 of 6 pairs, both builds) | R, D |
+| `a_distributed_gamg_request_that_cannot_be_served_is_refused_by_name` | the in-process refusals, then on two ranks: no coarse level, `ν1 = ν2 = 0`, PCG and `spmd_solve` `GAMG` without a cycle, the cycle inside a capture, PCG with V(1,2). 12 rank messages | D |
+
+Measured (f64; `single` in brackets). Serial GAMG-PCG takes 21 [9] iterations on POI 32³ and
+15 [5] on the cyclic box; the serial stationary GAMG takes 93 [34] and 44 [16].
+
+| mesh | P, cut | GAMG-PCG iterations | GAMG iterations | worst relative difference |
+|---|---|---|---|---|
+| POI 32³ | 2, Hilbert | 21 [9] | 93 [34] | 3.0e-12 [1.4e-6] |
+| POI 32³ | 2, linear | 21 [9] | 94 [34] | 2.4e-12 [1.4e-6] |
+| POI 32³ | 4, Hilbert | 21 [9] | 95 [34] | 2.9e-12 [1.4e-6] |
+| POI 32³ | 4, linear | 22 [9] | 93 [34] | 5.3e-12 [1.4e-6] |
+| 24×16×12 cyclic x | 2, Hilbert | 15 [5] | 46 [16] | 4.0e-12 [8.9e-7] |
+| 24×16×12 cyclic x | 2, linear | 15 [6] | 46 [15] | 5.1e-12 [4.7e-6] |
+| 24×16×12 cyclic x | 4, Hilbert | 15 [5] | 47 [16] | 2.9e-12 [7.9e-7] |
+| 24×16×12 cyclic x | 4, linear | 15 [6] | 42 [16] | 5.5e-12 [5.0e-6] |
+
+The worst iteration ratio is 47/44 = 1.07 in f64 and 6/5 = 1.2 under `single`, against the
+gate's 1.3.
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 
