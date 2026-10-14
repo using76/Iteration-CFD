@@ -1218,6 +1218,17 @@ struct ConductivityCurve {
     k_face: GpuSurfaceScalarField,
 }
 
+/// SPEC-LIT 133.8 (CHR-10a): a per-cell `cp`, J/(kg K), in place of
+/// [`GasProperties::cp`] in the ddt row (133.13) and the convection row
+/// (133.14). Set by [`Energy::set_cp_field`]; `None` is the constant path.
+struct CpField {
+    /// `cp` per cell (`f`) and per boundary face (`bf`).
+    cp: GpuScalarField,
+    /// (133.14)'s `cp_f`: `cp` interpolated linearly onto every face, once,
+    /// when the field is set.
+    cp_face: GpuSurfaceScalarField,
+}
+
 /// What [`Energy`] needs in order to run over SPEC-LIT §47.4's concatenated
 /// fluid+solid thermal mesh - SPEC-LIT §59.
 ///
@@ -1576,6 +1587,11 @@ pub struct Energy<'m> {
     /// SPEC-LIT §100.10: the fluid's conductivity curve. `None` is the
     /// constant `props.k` and every bit that path produced before.
     k_curve: Option<ConductivityCurve>,
+
+    /// SPEC-LIT 133.8: the per-cell `cp` of the ddt and convection rows.
+    /// `None` is the constant `props.cp` and every bit that path produced
+    /// before.
+    cp_field: Option<CpField>,
 }
 
 impl<'m> Energy<'m> {
@@ -1640,6 +1656,7 @@ impl<'m> Energy<'m> {
             lumps_ready: false,
             cht: None,
             k_curve: None,
+            cp_field: None,
         })
     }
 
@@ -1711,6 +1728,64 @@ impl<'m> Energy<'m> {
     /// [`Self::correct`].
     pub fn conv_flux(&self) -> &GpuSurfaceScalarField {
         &self.phi_conv
+    }
+
+    /// SPEC-LIT 133.8 (CHR-10a): from the next [`Self::correct`] on, the ddt
+    /// row (133.13) and the convection row (133.14) weigh with this `cp`,
+    /// J/(kg K): `cells` holds one value per cell and `boundary` one per
+    /// boundary face (the face value (133.14) uses there). Both are copied,
+    /// so the caller may overwrite its buffers; the face `cp_f` is
+    /// interpolated here, once. A value that is not finite and positive, or a
+    /// buffer shorter than the mesh, is refused by name and leaves the field
+    /// as it was.
+    ///
+    /// What still reads [`GasProperties::cp`], as SPEC-LIT 133.8 states:
+    /// `k_eff`'s turbulent part (S26, both `Pr_t` models), S25.1's target
+    /// divergence and the S29.3 thermal wall function.
+    pub fn set_cp_field(&mut self, gpu: &Gpu, cells: &DevBuf<Scalar>, boundary: &DevBuf<Scalar>) -> Result<()> {
+        let m = self.m;
+        let (n, nbf) = (m.n_cells, m.n_boundary_faces);
+        for (what, buf, want) in [("cells", cells, n), ("boundary faces", boundary, nbf)] {
+            if buf.len() < want {
+                return Err(Error::Config(format!(
+                    "Energy::set_cp_field: the cp field holds {} {what}, the mesh has {want} \
+                     (SPEC-LIT 133.8)",
+                    buf.len()
+                )));
+            }
+        }
+        let host_c = gpu.download(cells)?;
+        let host_b = gpu.download(boundary)?;
+        for (what, vals) in [("cell", &host_c[..n]), ("boundary face", &host_b[..nbf])] {
+            if let Some(i) = vals.iter().position(|&c| !(c.is_finite() && c > 0.0)) {
+                return Err(Error::Config(format!(
+                    "Energy::set_cp_field: the cp field is {} at {what} {i}; cp must be finite \
+                     and positive, J/(kg K) (SPEC-LIT 133.8)",
+                    vals[i]
+                )));
+            }
+        }
+        let mut f = CpField {
+            cp: GpuScalarField::zeros(gpu, m, "cpField")?,
+            cp_face: GpuSurfaceScalarField::zeros(gpu, m, "cpFieldf")?,
+        };
+        field_ops::copy_field(gpu, &self.fldk, &mut f.cp.f, cells, n)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut f.cp.bf, boundary, nbf)?;
+        fv::interpolate_linear(gpu, &self.fvk, &mut f.cp_face, &f.cp, m)?;
+        self.cp_field = Some(f);
+        Ok(())
+    }
+
+    /// SPEC-LIT 133.8: back to the constant [`GasProperties::cp`].
+    pub fn clear_cp_field(&mut self) {
+        self.cp_field = None;
+    }
+
+    /// SPEC-LIT 133.8: the per-cell `cp` [`Self::set_cp_field`] last set
+    /// (cells in `f`, boundary faces in `bf`), or `None` on the constant
+    /// path.
+    pub fn cp_field(&self) -> Option<&GpuScalarField> {
+        self.cp_field.as_ref().map(|f| &f.cp)
     }
 
     /// SPEC-LIT §100.10: the molecular conductivity becomes the curve `p`,
@@ -2495,8 +2570,28 @@ impl<'m> Energy<'m> {
             field_ops::add_field(gpu, &self.fldk, &mut self.t_star, &self.t.f0, n)?;
             field_ops::add_field(gpu, &self.fldk, &mut self.t_star, &self.t.f0, n)?;
             for level in [&mut self.rho_cp, &mut self.rho_cp0, &mut self.rho_cp00] {
-                field_ops::set_field(gpu, &self.fldk, level, cp * gas.p0() / rs, n)?;
+                match &self.cp_field {
+                    None => field_ops::set_field(gpu, &self.fldk, level, cp * gas.p0() / rs, n)?,
+                    // (133.13) under backward: `(p0/R_s) cp_c / T*_c`.
+                    Some(f) => {
+                        field_ops::set_field(gpu, &self.fldk, level, gas.p0() / rs, n)?;
+                        field_ops::multiply_field(gpu, &self.fldk, level, &f.cp.f, n)?;
+                    }
+                }
                 field_ops::divide_field(gpu, &self.fldk, level, &self.t_star, n)?;
+            }
+            return self.blend_rho_cp(gpu);
+        }
+
+        // (133.13): `rho_c cp_c` on all three levels, the field as last set.
+        if let Some(f) = &self.cp_field {
+            for (level, rho) in [
+                (&mut self.rho_cp, &gas.rho().f),
+                (&mut self.rho_cp0, &gas.rho().f0),
+                (&mut self.rho_cp00, &gas.rho().f00),
+            ] {
+                field_ops::copy_field(gpu, &self.fldk, level, rho, n)?;
+                field_ops::multiply_field(gpu, &self.fldk, level, &f.cp.f, n)?;
             }
             return self.blend_rho_cp(gpu);
         }
@@ -2670,6 +2765,19 @@ impl<'m> Energy<'m> {
     fn update_conv_flux(&mut self, gpu: &Gpu, phi: &GpuSurfaceScalarField) -> Result<()> {
         let m = self.m;
         let cp = self.props.cp;
+
+        // (133.14): `phi_m,f = cp_f rho_f phi_f`, `cp_f` interpolated once
+        // when the field was set.
+        if let Some(f) = &self.cp_field {
+            let (nif, nbf) = (m.n_internal_faces, m.n_boundary_faces);
+            field_ops::copy_field(gpu, &self.fldk, &mut self.phi_conv.f, &phi.f, nif)?;
+            field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_conv.f, &self.rho_face.f, nif)?;
+            field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_conv.f, &f.cp_face.f, nif)?;
+            field_ops::copy_field(gpu, &self.fldk, &mut self.phi_conv.bf, &phi.bf, nbf)?;
+            field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_conv.bf, &self.rho_face.bf, nbf)?;
+            field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_conv.bf, &f.cp_face.bf, nbf)?;
+            return self.mask_conv_flux(gpu);
+        }
 
         field_ops::copy_field(gpu, &self.fldk, &mut self.phi_conv.f, &phi.f, m.n_internal_faces)?;
         field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_conv.f, &self.rho_face.f, m.n_internal_faces)?;
@@ -2943,10 +3051,17 @@ impl<'m> Energy<'m> {
         let mut phi_vol = GpuSurfaceScalarField::zeros(gpu, m, "phiVolBudget")?;
         field_ops::copy_field(gpu, &self.fldk, &mut phi_vol.f, &self.phi_conv.f, m.n_internal_faces)?;
         field_ops::divide_field(gpu, &self.fldk, &mut phi_vol.f, &self.rho_face.f, m.n_internal_faces)?;
-        field_ops::scale_field(gpu, &self.fldk, &mut phi_vol.f, 1.0 / self.props.cp, m.n_internal_faces)?;
+        match &self.cp_field {
+            None => field_ops::scale_field(gpu, &self.fldk, &mut phi_vol.f, 1.0 / self.props.cp, m.n_internal_faces)?,
+            // SPEC-LIT 133.8: (133.14)'s own `cp_f`.
+            Some(f) => field_ops::divide_field(gpu, &self.fldk, &mut phi_vol.f, &f.cp_face.f, m.n_internal_faces)?,
+        }
         field_ops::copy_field(gpu, &self.fldk, &mut phi_vol.bf, &self.phi_conv.bf, m.n_boundary_faces)?;
         field_ops::divide_field(gpu, &self.fldk, &mut phi_vol.bf, &self.rho_face.bf, m.n_boundary_faces)?;
-        field_ops::scale_field(gpu, &self.fldk, &mut phi_vol.bf, 1.0 / self.props.cp, m.n_boundary_faces)?;
+        match &self.cp_field {
+            None => field_ops::scale_field(gpu, &self.fldk, &mut phi_vol.bf, 1.0 / self.props.cp, m.n_boundary_faces)?,
+            Some(f) => field_ops::divide_field(gpu, &self.fldk, &mut phi_vol.bf, &f.cp_face.bf, m.n_boundary_faces)?,
+        }
 
         self.a.zero(gpu)?;
         fv::fvm_div_bounded_correction(gpu, &self.fvk, &mut self.a, m, &phi_vol, 1.0)?;
@@ -2954,24 +3069,47 @@ impl<'m> Energy<'m> {
         let rho = gpu.download(&gas.rho().f)?;
         let vol = gpu.download(&m.v)?;
         let tdiv = gpu.download(&self.target_div)?;
-        let cpf = f64::from(self.props.cp);
+        // SPEC-LIT 133.8: the cell's own `cp_c` with a field, else `props.cp`.
+        let cpc: Vec<f64> = match &self.cp_field {
+            None => vec![f64::from(self.props.cp); n],
+            Some(f) => gpu.download(&f.cp.f)?.into_iter().map(f64::from).collect(),
+        };
         let prescribed: f64 = (0..n)
-            .map(|i| cpf * f64::from(rho[i]) * f64::from(t[i]) * f64::from(vdiag[i]))
+            .map(|i| cpc[i] * f64::from(rho[i]) * f64::from(t[i]) * f64::from(vdiag[i]))
             .sum();
         let target_w: f64 = -(0..n)
             .map(|i| {
-                cpf * f64::from(rho[i]) * f64::from(t[i]) * f64::from(vol[i]) * f64::from(tdiv[i])
+                cpc[i] * f64::from(rho[i]) * f64::from(t[i]) * f64::from(vol[i]) * f64::from(tdiv[i])
             })
             .sum::<f64>();
 
-        let inv_cp = 1.0 / f64::from(self.props.cp);
-        let net_mass: f64 = -diag.iter().map(|&d| f64::from(d)).sum::<f64>() * inv_cp;
-        let l1_mass: f64 = diag.iter().map(|&d| f64::from(d).abs()).sum::<f64>() * inv_cp;
-        let max_mass: f64 = diag
-            .iter()
-            .map(|&d| f64::from(d).abs())
-            .fold(0.0f64, f64::max)
-            * inv_cp;
+        let (net_mass, l1_mass, max_mass) = match &self.cp_field {
+            None => {
+                let inv_cp = 1.0 / f64::from(self.props.cp);
+                let net_mass: f64 = -diag.iter().map(|&d| f64::from(d)).sum::<f64>() * inv_cp;
+                let l1_mass: f64 = diag.iter().map(|&d| f64::from(d).abs()).sum::<f64>() * inv_cp;
+                let max_mass: f64 = diag
+                    .iter()
+                    .map(|&d| f64::from(d).abs())
+                    .fold(0.0f64, f64::max)
+                    * inv_cp;
+                (net_mass, l1_mass, max_mass)
+            }
+            // SPEC-LIT 133.8: `cp_f` varies from face to face, so no one
+            // number divides the diagonal back to kg/s. The same pass on the
+            // mass flux `rho_f phi_f = phi_vol rho_f` does, exactly.
+            Some(_) => {
+                field_ops::multiply_field(gpu, &self.fldk, &mut phi_vol.f, &self.rho_face.f, m.n_internal_faces)?;
+                field_ops::multiply_field(gpu, &self.fldk, &mut phi_vol.bf, &self.rho_face.bf, m.n_boundary_faces)?;
+                self.a.zero(gpu)?;
+                fv::fvm_div_bounded_correction(gpu, &self.fvk, &mut self.a, m, &phi_vol, 1.0)?;
+                let mdiag = gpu.download(&self.a.diag)?;
+                let net_mass: f64 = -mdiag.iter().map(|&d| f64::from(d)).sum::<f64>();
+                let l1_mass: f64 = mdiag.iter().map(|&d| f64::from(d).abs()).sum::<f64>();
+                let max_mass: f64 = mdiag.iter().map(|&d| f64::from(d).abs()).fold(0.0f64, f64::max);
+                (net_mass, l1_mass, max_mass)
+            }
+        };
 
         Ok(EnergyBudget {
             ddt_w: cum[0],

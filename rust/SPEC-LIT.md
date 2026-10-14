@@ -2426,7 +2426,8 @@ unit-tested and uncalled — this is what they were built for.
 ## 26. The energy equation
 
 Temperature form, sensible enthalpy with constant cp (v1, stated; cp(T)
-polynomials are a coefficient change, not a structure change):
+polynomials are a coefficient change, not a structure change; §133.8 carries
+a per-cell `cp` field in the ddt and convection rows, CHR-10a):
 
 ```
 rho cp [ ∂T/∂t + ∇·(u T) − T (∇·u) ] = ∇·(k_eff ∇T) + q'''_c − ∇·q_r + dp0/dt
@@ -45758,6 +45759,59 @@ every printed Table 8/12 value from 300 to 1000 K.
 
 No new equation labels. TM-4513 eq. (10) is quoted above under the report's
 own number.
+
+### 133.8 A per-cell `cp` in the energy equation's ddt and convection rows (CHR-10a, `src/energy.rs`)
+
+`No GPL-licensed source was consulted.`
+
+**What it is.** §26 writes the temperature equation with one constant `cp`
+and says a `cp(T)` is "a coefficient change, not a structure change". (133.2)
+in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
+the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
+that `cp` as a field: one value per cell and one per boundary face, set by the
+caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
+through the mixture rule, from `T` and `Y`) is CHR-10b's and CHR-12a's; this
+unit builds the slot and the two rows that read it. Without a field nothing
+changes.
+
+**The two rows.** §26's ddt and convection carry the same weight, so the
+field enters both:
+
+```
+(rho cp)_c^(l) = rho_c^(l) cp_c,   l = n, n-1, n-2;   under backward, §105.17: (rho* cp)_c = (p0/R_s) cp_c / T*_c   (133.13)
+phi_m,f = cp_f rho_f phi_f,   cp_f = w_f cp_P + (1 - w_f) cp_N (internal),   cp_f = cp_b (boundary)            (133.14)
+```
+
+*DESIGN.* All three time levels carry the field as last set: the same lag
+`rho*` already has under backward (§105.17), and the form in which §26's
+discrete `rho cp DT/Dt` (the conservative rows plus §26.1's bounded
+correction, now on (133.14)'s flux) stays a temperature equation. `cp_f`
+is §25.3's linear interpolation, the convention every face coefficient in
+this module uses, and is formed once, when the field is set, not every
+outer iteration. A value that is not finite and positive, or a buffer
+shorter than the mesh, is refused by name, naming the cell or boundary face.
+
+**What still reads the constant `cp`, stated.** `k_eff`'s turbulent part
+`rho cp nu_t/Pr_t` (S26, both `Pr_t` models), §25.1's target divergence
+(which (133.4) replaces in CHR-11), and the S29.3 thermal wall function.
+The §120.8 Danckwerts inlet reads `phi_m` itself, so it follows (133.14).
+`assembly_budget` divides by (133.14)'s own `cp_f` and weighs by the cell's
+`cp_c`; its mass diagnostics come from the same pass on `rho_f phi_f`, exact,
+because no one number divides a face-varying `phi_m` back to kg/s.
+
+**Gates, measured 2026-10-14 (both builds, `tests/energy_cp_field.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `energy_cp_field_default_bitwise` | SHA-256 of the restart checkpoint of `cases/channelPeriodicFluxWF.jsonc`, `ofgpu-lowmach -iters 20 -restartWrite 20`, against the parent commit 0777b1d's binaries, one pin per build | bitwise | D | equal in both builds |
+| `energy_uniform_cp_field_equals_constant` | 16-cell channel, plug flow 0.01 m/s, 310 K in, 10 steps of 2 s, Euler and backward: (a) a uniform field equal to `cp` against the constant path, T and `assembly_budget`'s entries; (b) a uniform `2 cp` with `k` against the constant `cp` with `k/2`, the same equation times two, which holds only if both rows read the field | `1e-12` relative (D-F32-1: `1e-5` in f32) | R | (a) `0` and the budget's entries within `9.7e-15` (f64), `3.0e-6` (f32, its mass rows, formed by another route); (b) `0` in both builds; the `2 cp` run differs from the `cp` run by `1.5e-2` (Euler) and `3.0e-3` (backward), so (b) is not vacuous |
+| `energy_cp_field_refuses_by_name` | zero, negative and NaN cells, a negative boundary face, a short buffer | refused by name | D | — |
+
+The two exact zeros are not a promise: the uniform mesh's `w_f = 1/2` makes
+`w_f c + (1 - w_f) c = c` exact, and on a graded mesh (133.14)'s `cp_f` may
+differ from `c` in its last bit, which the R tolerance allows.
+
+Labels: (133.13)-(133.14).
 
 ---
 
