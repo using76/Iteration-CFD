@@ -46828,6 +46828,74 @@ shipped meshes are §73.5's and are not re-measured here, because a rank's
 solve is the in-process solve bit for bit. No pressure backend runs on a rank
 yet (PAR-10b).
 
+### 138.7 Ranks placed on devices
+
+ORIGINAL: this project's own design (docs/17 PAR-05), with no external source.
+It defines no numerical equation, only the rule below. `src/comm/placement.rs`
+holds the rule and `src/device.rs` opens the device.
+
+**The rule.** Rank `r` of an SPMD world uses device
+
+    device(r) = L[r mod |L|]
+
+where `L` is the list `0, 1, ..., n - 1` over the `n` devices the driver sees,
+unless the environment variable `OFGPU_DEVICES` gives the list. Its value is
+a comma-separated list of device ordinals. Entries are trimmed, and an ordinal
+may appear more than once. So four ranks on one device all use device 0. Four
+ranks on two devices use 0, 1, 0, 1. `OFGPU_DEVICES=1` puts every rank on
+device 1, and `OFGPU_DEVICES=0,0,1` puts two ranks in three on device 0.
+
+* `Placement::new(device_count, devices: Option<&str>)` builds the list.
+  `Placement::from_env(device_count)` reads `OFGPU_DEVICES` (unset means no
+  override). `Placement::device_of(rank)` applies the rule. The module is host
+  only, so it is tested with faked counts.
+* `Gpu::device_count()` is the driver's count. `Gpu::for_rank(&placement,
+  rank)` opens `Gpu::new(placement.device_of(rank))`. `Gpu::ordinal()` names
+  the device a `Gpu` is on.
+
+**One `Gpu` per rank, event tracking off.** Every rank thread opens its own
+`Gpu`. `CudaContext::new` returns a new handle on the device's primary context
+each call, with its own event-tracking flag, and `Gpu::new` switches that flag
+off before its first allocation and creates one non-blocking stream (§81.3
+needs both). So four ranks on device 0 have four handles on one context and
+four streams, and nothing orders work across the streams. The safety rule that
+makes this correct is on `Gpu`: **a buffer belongs to the `Gpu` that allocated
+it, and is passed only to that `Gpu`'s methods and kernels.** The SPMD path
+keeps it by construction. Each rank builds its halo, system, workspace and
+fields from its own `Gpu`, and every byte that crosses ranks goes through the
+`Comm` in host memory (§138.3). `Gpu::owns(&buf)` (the buffer's stream is
+this `Gpu`'s) answers the question for any one buffer. CHR-18's fixture broke
+the rule once by uploading on one `Gpu` and launching on another, and
+compute-sanitizer reported an illegal address. `Gpu::event_tracking()` reads
+the flag back.
+
+**Refused by name.** Every message starts `placement: `.
+
+| case | the message names |
+|---|---|
+| a device count of 0 | `the device count is 0` |
+| `OFGPU_DEVICES` set but empty or blank | `OFGPU_DEVICES`, `empty`, and the default `r mod n` |
+| an empty entry (`0,,1`) | the entry's position and the value |
+| an entry that is not an ordinal (`a`, `-1`, `1.5`) | the position, the entry and `not a device ordinal` |
+| an ordinal `>= n` | the position, the ordinal, the count and the range `0..n-1` |
+| a value that is not UTF-8 | `OFGPU_DEVICES` |
+| `Gpu::for_rank`: a placed device the driver does not have | the rank, the device and the driver's count |
+
+**What must hold.** Class D: bytes and counts, in both builds
+(`tests/comm_placement.rs`).
+
+| test | what it asserts |
+|---|---|
+| **`placement_maps_ranks_to_devices`** | at faked counts 1, 2, 4 and 8, ranks 0..31 go to `r mod n` (128 ranks checked). The overrides `1`, `3,1`, ` 0 , 2 `, `0,0,1` and `7,...,0` cycle as listed. The nine refusal rows each name what they refuse |
+| **`four_ranks_on_one_device_run_concurrently`** | a one-device placement puts a `ThreadComm` world of 4 on device 0. On the 5×4×3 and 8×6×5 boxes, with `Diagonal` and `None` and three partitioners (12 worlds), every rank is on ordinal 0 with event tracking off. The four rank streams and the main thread's stream are five distinct streams. Each rank's field is owned by its own `Gpu` and not by the main one. The last rank's solve starts before the first rank's solve ends, so the four solves overlap in time. §138.5's comparison holds bit for bit: every owned cell equals the in-process `dist_pcg` part and the one-part answer, the counters and both residuals' bits are equal, and every rank took `n_iterations + 1` votes. 48 rank results and 1,800 cells are compared |
+| `for_rank_refuses_a_device_the_driver_lacks` | a placement built for one device more than the driver sees, with `OFGPU_DEVICES` naming that device: `Gpu::for_rank` refuses it, naming the rank, the device and the driver's count |
+| `peer_placement_two_devices` (`#[ignore = "needs 2 GPUs"]`) | ranks 0 and 1 on devices 0 and 1, then swapped by `OFGPU_DEVICES=1,0`, three partitioners: the same comparison against the in-process solve on device 0 (12 rank results). **Written and not run**: this machine has one GPU. The bits match only on two devices of the same architecture (the same SASS) |
+
+**What this does not establish.** No run on two devices has been made, so the
+two-device placement is untested. The halo still goes through host memory and
+does not use peer-to-peer copies. Running ranks concurrently on one device
+gives no speed-up claim: the ranks share one GPU and its context.
+
 ---
 
 ## 141. Native GAMG and AMGX — aggregation, the Galerkin hierarchy, and the AMGX library

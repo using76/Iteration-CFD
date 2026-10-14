@@ -32,6 +32,9 @@
 //! same trait, so the program above it is one code path. The rules both must
 //! keep are R1-R10 of SPEC-LIT §138.1.2, restated on [`Comm`] below.
 //!
+//! [`Placement`] says which device each rank opens: rank `r` on device
+//! `r mod device_count`, or on the `OFGPU_DEVICES` list (SPEC-LIT §138.7).
+//!
 //! This module is host only: no `Gpu`, no device memory and no `Scalar`, so
 //! the default build and `--features single` compile and run the same code.
 //!
@@ -41,11 +44,13 @@
 //! MPI implementation's source was opened. No GPL-licensed source was
 //! consulted.
 
+pub mod placement;
 pub mod thread;
 
 #[cfg(test)]
 mod tests;
 
+pub use placement::Placement;
 pub use thread::ThreadComm;
 
 use crate::error::Result;
