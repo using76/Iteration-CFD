@@ -1,5 +1,5 @@
 {
- "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. AUT-01 (docs/17 §12.6): one RED fixture per family-G defect class that ends SURFACE-OPEN today. Each names a tuning row of tools/autonomy/corpus/manifests/tuning.jsonl; the STL is rebuilt by inject.write_row from that row's params (sha256-checked) and repaired by stl_repair with default options. 'today' is the measured stl_repair report on 2026-10-11 at feat/t17 7fd775c. Selection: per class, the tuning G row of that class whose repaired surface is still open, with the fewest STL bytes; the hole class only among 33..64 edges.",
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. AUT-01 (docs/17 §12.6): one RED fixture per family-G defect class that ends SURFACE-OPEN today. Each names a tuning row of tools/autonomy/corpus/manifests/tuning.jsonl; the STL is rebuilt by inject.write_row from that row's params (sha256-checked) and repaired by stl_repair with default options. 'today' is the measured stl_repair report on 2026-10-11 at feat/t17 7fd775c. Selection: per class, the tuning G row of that class whose repaired surface is still open, with the fewest STL bytes; the hole class only among 33..64 edges. AUT-02a (2026-10-13): the duplicate and flip fixtures are green, re-measured with duplicate removal and patch orientation.",
  "schema": "g-defect-fixtures/1",
  "manifest": "tools/autonomy/corpus/manifests/tuning.jsonl",
  "fixtures": [
@@ -8,14 +8,14 @@
    "geometry_id": "G-1-026",
    "count": 4,
    "stl_sha256": "56bae50edcdf1527f4dbb44a908476c58e476bcf12791364f9fbac03e21e0040",
-   "status": "red",
+   "status": "green",
    "today": {
     "open_before": 0,
     "non_manifold_before": 12,
     "open_after": 0,
-    "non_manifold_after": 12,
-    "closed_after": false,
-    "repaired": false
+    "non_manifold_after": 0,
+    "closed_after": true,
+    "repaired": true
    }
   },
   {
@@ -23,14 +23,14 @@
    "geometry_id": "G-1-103",
    "count": 5,
    "stl_sha256": "66951ddcd23cd914f9dc484e82773093533ca39e03db26d84e01734ebf31e70e",
-   "status": "red",
+   "status": "green",
    "today": {
     "open_before": 0,
     "non_manifold_before": 7,
     "open_after": 0,
-    "non_manifold_after": 7,
-    "closed_after": false,
-    "repaired": false
+    "non_manifold_after": 0,
+    "closed_after": true,
+    "repaired": true
    }
   },
   {

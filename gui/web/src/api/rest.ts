@@ -65,6 +65,14 @@ export interface SearchResponse {
   filesScanned: number
 }
 
+/** Reply of POST /api/case/validate (save_case's check): the case_validate report for an editor buffer. */
+export interface CaseBufferReport {
+  path: string
+  ok: boolean
+  errors: Array<{ pointer: string; message: string }>
+  warnings: Array<{ pointer: string; message: string }>
+}
+
 /** Reply of POST /api/geometry/edit (geom_tool edit): no id — re-import `path`. */
 export interface GeometryEditResponse {
   path: string
@@ -78,6 +86,7 @@ export const api = {
   tree: (path: string, depth = 1) => request<FsTreeNode>('GET', withQuery(REST.fsTree, { path, depth })),
   readFile: (path: string) => request<FsFileResponse>('GET', withQuery(REST.fsFile, { path })),
   writeFile: (path: string, content: string, baseHash: string | null) => request<FsFileResponse>('PUT', REST.fsFile, { path, content, baseHash }),
+  validateCase: (path: string, content: string) => request<CaseBufferReport>('POST', REST.caseValidate, { path, content }),
   search: (q: string, opts: { glob?: string | null; regex?: boolean; caseSensitive?: boolean; max?: number } = {}) =>
     request<SearchResponse>('GET', withQuery(REST.fsSearch, { q, glob: opts.glob ?? null, regex: opts.regex ? 1 : null, case: opts.caseSensitive ? 1 : null, max: opts.max ?? 300 })),
   gitStatus: () => request<GitStatusResponse>('GET', REST.gitStatus),

@@ -1,0 +1,14 @@
+# McCaffrey, B. J., "Purely Buoyant Diffusion Flames: Some Experimental Results", NBSIR 79-1910,
+# National Bureau of Standards, 1979. US Government work, public domain. Table 1, weighted averages.
+# z = vertical height above burner [m]; Q = nominal heat release rate [kW]; V centreline velocity [m/s];
+# dT centreline temperature rise above ambient [C]. Regime boundaries in z/Q^(2/5) [m kW^(-2/5)].
+# key value
+boundary_flame_intermittent 0.0796
+boundary_intermittent_plume 0.195
+flame_V_over_sqrt_z 6.84
+flame_dT 797
+intermittent_V_over_Q15 1.93
+intermittent_dT_z_over_Q25 62.9
+plume_V_z13_over_Q13 1.12
+plume_dT_z53_over_Q23 21.6
+buoyancy_constant 0.935

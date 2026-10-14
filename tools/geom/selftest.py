@@ -896,8 +896,184 @@ def test_repair_zero_area_fill(top):
     assert int(np.count_nonzero(np.all(zc == 0.0, axis=1))) == 1, zc
 
 
+def _area_volume(tris):
+    """f64 total area and divergence-theorem volume over read STL corners."""
+    import numpy as np
+    C = np.array([t[1] for t in tris], dtype=np.float64)
+    cr = np.cross(C[:, 1] - C[:, 0], C[:, 2] - C[:, 0])
+    area = 0.5 * float(np.linalg.norm(cr, axis=1).sum())
+    vol = float(np.einsum('ij,ij->i', C[:, 0],
+                          np.cross(C[:, 1], C[:, 2])).sum()) / 6.0
+    return area, vol
+
+
+def test_repair_duplicates(top):
+    """AUT-02a: verbatim duplicate facets are removed by _dedup before the
+    orientation walk.  Case A: appended exact copies (every copy edge used
+    3 ways).  Case B: one corners-reversed copy prepended - a coincident
+    opposite pair whose intact side runs against the outside users on all
+    3 edges, so the reversed copy goes.  Case C: an isolated coincident
+    opposite pair away from the cube - a closed zero-volume sheet, both
+    removed."""
+    d = work(top, 'repair_duplicates')
+    tris = cube_tris()
+    src = os.path.join(d, 'dup_a.stl')
+    write_stl_binary(src, tris + [tris[3], tris[7], tris[7]], 'dupa')
+    p = repair(src, '--out', os.path.join(d, 'dup_a_r.stl'),
+               '--json', os.path.join(d, 'a.json'))
+    rep = load(os.path.join(d, 'a.json'))
+    assert rep['before'] == {'open_edges': 0, 'non_manifold_edges': 6,
+                             'closed': False}, rep['before']
+    assert rep['duplicates'] == {'exact_removed': 3, 'opposite_removed': 0}, \
+        rep['duplicates']
+    assert rep['degenerate_dropped'] == 0 and rep['triangles_out'] == 12, rep
+    assert rep['after']['closed'] is True and \
+        rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+    assert rep['stages'][2]['stage'] == 'dedup', rep['stages']
+    assert 'duplicates: 3 exact, 0 opposite-coincident removed' in p.stdout, \
+        p.stdout
+    tris = [flip(cube_tris()[4])] + cube_tris()
+    src = os.path.join(d, 'dup_b.stl')
+    write_stl_binary(src, tris, 'dupb')
+    repair(src, '--out', os.path.join(d, 'dup_b_r.stl'),
+           '--json', os.path.join(d, 'b.json'))
+    rep = load(os.path.join(d, 'b.json'))
+    assert rep['before'] == {'open_edges': 0, 'non_manifold_edges': 3,
+                             'closed': False}, rep['before']
+    assert rep['duplicates'] == {'exact_removed': 0, 'opposite_removed': 1}, \
+        rep['duplicates']
+    assert rep['triangles_out'] == 12 and \
+        rep['orientation']['reoriented_triangles'] == 0, rep
+    assert rep['after']['closed'] is True and \
+        rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+    tris = cube_tris() + [((3.0, 0.0, 0.0), (4.0, 0.0, 0.0), (3.0, 1.0, 0.0)),
+                          ((3.0, 0.0, 0.0), (3.0, 1.0, 0.0), (4.0, 0.0, 0.0))]
+    src = os.path.join(d, 'dup_c.stl')
+    write_stl_binary(src, tris, 'dupc')
+    repair(src, '--out', os.path.join(d, 'dup_c_r.stl'),
+           '--json', os.path.join(d, 'c.json'))
+    rep = load(os.path.join(d, 'c.json'))
+    assert rep['before'] == {'open_edges': 0, 'non_manifold_edges': 0,
+                             'closed': True}, rep['before']
+    assert rep['duplicates'] == {'exact_removed': 0, 'opposite_removed': 2}, \
+        rep['duplicates']
+    assert rep['n_components'] == 1 and rep['triangles_out'] == 12, rep
+    assert rep['after']['closed'] is True and \
+        rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+
+
+def test_repair_flip_patch(top):
+    """AUT-02a: a corners-reversed DISK is one patch - its triangles are
+    still joined by edges that run opposite - so the orientation walk
+    flips it whole instead of refusing triangle by triangle.  On the cube
+    with tris 0, 1 and 4 reversed the patch is 3 edge-connected triangles
+    (area 1.5 of 6), its 5 boundary edges run same-direction against the
+    intact rest (the 5 non-manifold edges), and the largest-area seed is
+    the intact 9-triangle patch, so all 3 flip and none is left alone."""
+    d = work(top, 'repair_flip_patch')
+    tris = cube_tris()
+    for i in (0, 1, 4):
+        tris[i] = flip(tris[i])
+    src = os.path.join(d, 'fpatch.stl')
+    write_stl_binary(src, tris, 'fpatch')
+    repair(src, '--out', os.path.join(d, 'fpatch_r.stl'),
+           '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before'] == {'open_edges': 0, 'non_manifold_edges': 5,
+                             'closed': False}, rep['before']
+    o = rep['orientation']
+    assert o['reoriented_triangles'] == 3 and o['left_alone'] == 0, o
+    assert o['left_alone_reason'] == [] and o['reseeded_patches'] == 0, o
+    assert o['flipped_components'] == 0, o
+    assert rep['after']['closed'] is True and \
+        rel(rep['after']['volume'], 1.0) <= 1e-9, rep['after']
+    sys.path.insert(0, os.path.dirname(GEOM_TOOL))
+    import numpy as np
+    import stl_repair as sr
+    P = np.array([[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.],
+                  [0., 0., 1.], [1., 0., 1.], [1., 1., 1.], [0., 1., 1.]])
+    F = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
+         (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+    T = np.array(F, dtype=np.int64)
+    for i in (0, 1, 4):
+        T[i] = T[i][[0, 2, 1]]
+    r = sr._orient(T, P, 8)
+    assert r == (3, 0, [], 0), r
+
+
+def test_repair_g_flip_duplicate_rows(top):
+    """AUT-02a: every family-G flip and duplicate tuning row repairs to the
+    closed parent - same triangle count, total area and divergence-theorem
+    volume to 1e-9 relative - with the injected count either removed as
+    exact duplicates or reoriented as one whole patch."""
+    base = os.path.dirname(GEOM_TOOL)
+    for rel_p in ('../autonomy', '../autonomy/corpus'):
+        p = os.path.abspath(os.path.join(base, rel_p))
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import hashlib
+    import importlib
+    import numpy as np
+    import stl_io
+    import stl_repair as sr
+    import inject, split
+    parent = {'A': 'gen_wing', 'B': 'gen_lathe', 'D': 'gen_bluff',
+              'E': 'gen_gap', 'F': 'gen_thin'}
+    rows = [r for r in split.load('tuning', 'fixture')
+            if r['family'] == 'G'
+            and r['params']['defect'] in ('flip', 'duplicate')]
+    assert len(rows) == 26, len(rows)
+    assert sum(1 for r in rows if r['params']['defect'] == 'flip') == 14, \
+        'flip rows'
+    assert sum(1 for r in rows if r['params']['defect'] == 'duplicate') == 12, \
+        'duplicate rows'
+    d = work(top, 'g_flip_dup')
+    for row in rows:
+        params, gid = row['params'], row['geometry_id']
+        stl = inject.write_row(row, d)
+        out = os.path.join(d, gid + '_r.stl')
+        jp = os.path.join(d, gid + '.json')
+        repair(stl, '--out', out, '--json', jp)
+        rep = load(jp)
+        pgen = importlib.import_module(parent[params['parent_family']])
+        pp = pgen.sample_params(params['parent_seed'], params['parent_index'])
+        P, T = pgen.build(pp)
+        data = stl_io.stl_bytes(P, T, pgen.SOLID)
+        assert hashlib.sha256(data).hexdigest() == params['parent_sha256'], gid
+        ppath = os.path.join(d, gid + '_parent.stl')
+        with open(ppath, 'wb') as f:
+            f.write(data)
+        ptris, _ = sr.read_stl(ppath, gid + '_parent')
+        rtris, _ = sr.read_stl(out, gid)
+        assert rep['after']['closed'] is True, (gid, rep['after'])
+        assert rep['triangles_out'] == len(ptris), \
+            (gid, rep['triangles_out'], len(ptris))
+        pa, pv = _area_volume(ptris)
+        ra, rv = _area_volume(rtris)
+        assert rel(ra, pa) <= 1e-9 and rel(rv, pv) <= 1e-9, \
+            (gid, 'area', ra, pa, 'vol', rv, pv)
+        if params['defect'] == 'duplicate':
+            assert rep['duplicates']['exact_removed'] == params['count'], \
+                (gid, rep['duplicates'], params['count'])
+            fixed = 'exact %d' % rep['duplicates']['exact_removed']
+        else:
+            o = rep['orientation']
+            assert o['reoriented_triangles'] == params['count'], (gid, o)
+            assert o['left_alone'] == 0, (gid, o)
+            fixed = 'reoriented %d' % o['reoriented_triangles']
+        assert rep['before']['non_manifold_edges'] == \
+            params['expect']['non_manifold_edges'], \
+            (gid, rep['before'], params['expect'])
+        print('  [aut02a] %s %s n=%d: before nm %d, %s, rel area %.2e vol %.2e'
+              % (gid, params['defect'], params['count'],
+                 rep['before']['non_manifold_edges'], fixed,
+                 rel(ra, pa), rel(rv, pv)), flush=True)
+
+
 def test_repair_g_defects_red(top):
-    """AUT-01 (docs/17 §12.6): the RED G fixtures fail with today's counts."""
+    """AUT-01 (docs/17 §12.6): every G fixture reports exactly its 'today'
+    counts - the RED ones stay open, the GREEN ones (duplicate and flip,
+    since AUT-02a) close."""
     base = os.path.dirname(GEOM_TOOL)
     for rel in ('../autonomy', '../autonomy/corpus'):
         p = os.path.abspath(os.path.join(base, rel))
@@ -909,7 +1085,7 @@ def test_repair_g_defects_red(top):
         doc = json.load(f)
     assert doc['schema'] == 'g-defect-fixtures/1', doc['schema']
     assert len(doc['fixtures']) == 4, len(doc['fixtures'])
-    assert all(fx['status'] == 'red' for fx in doc['fixtures'])
+    assert all(fx['status'] in ('red', 'green') for fx in doc['fixtures'])
     assert {fx['class'] for fx in doc['fixtures']} == \
         {'duplicate', 'flip', 'hole', 't_junction'}
     rows = {r['geometry_id']: r for r in split.load('tuning', 'fixture')}
@@ -939,15 +1115,17 @@ def test_repair_g_defects_red(top):
                 a['open_edges'], a['non_manifold_edges']) == \
             (t['open_before'], t['non_manifold_before'],
              t['open_after'], t['non_manifold_after']), (gid, b, a)
-        assert b['closed'] is False and a['closed'] is False, gid
-        assert ((not b['closed']) and a['closed']) == t['repaired'], gid
-        print('  RED %s %s: open %d -> %d, non-manifold %d -> %d, repaired %s'
-              % (gid, fx['class'], t['open_before'], t['open_after'],
-                 t['non_manifold_before'], t['non_manifold_after'],
+        assert b['closed'] is False, gid
+        assert a['closed'] == t['closed_after'], gid
+        assert a['closed'] == t['repaired'], gid
+        print('  %s %s %s: open %d -> %d, non-manifold %d -> %d, repaired %s'
+              % (fx['status'].upper(), gid, fx['class'], t['open_before'],
+                 t['open_after'], t['non_manifold_before'],
+                 t['non_manifold_after'],
                  'true' if t['repaired'] else 'false'), flush=True)
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill, test_repair_g_defects_red)
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill, test_repair_duplicates, test_repair_flip_patch, test_repair_g_flip_duplicate_rows, test_repair_g_defects_red)
 
 
 def main(argv=None):

@@ -1,0 +1,41 @@
+# D. Bradley, Z. Chen and J. R. Swithenbank, "Burning rates in turbulent fine dust-air explosions",
+# Proc. Combust. Inst. 22 (1989) 1767-1775, DOI 10.1016/S0082-0784(89)80190-0 (not read): the
+# measured mean flame speed S_t,b = dR_f/dt of cornflour-air flames in the Leeds fan-stirred
+# explosion vessel, as C. Huang, A. N. Lipatnikov and K. Nessvi, "Unsteady 3-D RANS simulations of
+# dust explosion in a fan stirred explosion vessel using an open source code", J. Loss Prev. Process
+# Ind. 67 (2020) 104237, DOI 10.1016/j.jlp.2020.104237, plot them in FIG. 9 (page 8 of the copy
+# read: research.chalmers.se/publication/518494/file/518494_Fulltext.pdf, read 2026-10-13).
+# DIGITISED, not printed: neither paper tabulates these values. Only the filled symbols
+# ("exp.") are read; the lines are the 2020 paper's own computation and are not read.
+# The figure is a raster image embedded in the PDF (1012 x 491 px). Axis calibration from the
+# figure's own frame and dashed grid lines: S_t,b = 0 at the bottom frame and 1, 2, 3 at the
+# grid lines, 101 px per m/s; R_f = 20, 25, 30, 35 mm at the vertical grid lines, 161 px per 5 mm.
+# Every marker sits on a vertical grid line. Marker centre = the centre of the marker's vertical
+# extent (dark pixels within 10 px of the grid line). The figure is drawn with matplotlib, whose
+# triangle, circle, square and diamond markers are all drawn about their bounding-box centre;
+# the mean-of-vertices convention would lower the u' = 0.80 (triangle) row by 0.025 m/s.
+# Columns:
+#   u_prime   rms turbulent velocity of the series, m/s (the paper's Table 4)
+#   R_f_mm    mean flame radius of the Schlieren image, mm (the c_bar = 0.1 surface in a model)
+#   S_tb      the marker centre's ordinate, m/s, kept to three decimals (1 px = 0.0099 m/s)
+#   u_S_tb    the reading uncertainty, m/s
+#   gated     1 = a gate row of docs/17 DST-07; 0 = reported only (R_f = 20 mm is
+#             ignition-affected, the 2020 paper's section 3.3)
+# The least-squares slope dS_tb/du' of the R_f = 30 mm rows is 0.678 (SPEC-LIT section 151.6).
+u_prime,R_f_mm,S_tb,u_S_tb,gated
+0.80,20,1.104,0.05,0
+0.80,25,1.134,0.05,1
+0.80,30,1.149,0.05,1
+0.80,35,1.168,0.05,1
+1.62,20,1.688,0.05,0
+1.62,25,1.708,0.05,1
+1.62,30,1.738,0.05,1
+1.62,35,1.757,0.05,1
+2.45,20,2.005,0.05,0
+2.45,25,2.035,0.05,1
+2.45,30,2.084,0.05,1
+2.45,35,2.139,0.05,1
+3.31,20,2.673,0.05,0
+3.31,25,2.792,0.05,1
+3.31,30,2.921,0.05,1
+3.31,35,3.040,0.05,1

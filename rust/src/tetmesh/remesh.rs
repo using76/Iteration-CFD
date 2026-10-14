@@ -17,8 +17,15 @@
 //! closest-point query over a BVH of the input's f64 boxes. Ties go to
 //! the smallest triangle index, every pass visits edges and vertices in
 //! a fixed index order, and no `HashMap`/`HashSet` iteration reaches a
-//! result, so two runs are bit-identical. TET-06a treats every vertex
-//! as free; features, corners and seams are TET-06b's job.
+//! result, so two runs are bit-identical. TET-06b adds the features:
+//! corners never move, feature vertices move only along their input
+//! polyline ((116.14f)-(116.14j)), feature and seam edges are never
+//! flipped and never collapsed across, and the output carries the
+//! features in its own numbering. (116.14k) is the flat test that
+//! takes the exact-zero area test's place and also refuses a flip onto
+//! a flat triangle, and (116.14l) is the cut-triangle refusal that
+//! keeps three vertices of one feature line from ending up as one
+//! triangle.
 //!
 //! Provenance: ORIGINAL. Written from Botsch & Kobbelt (2004), Proc. SGP
 //! 185-192; the choices are derived in SPEC-LIT §116.10. No GPL-licensed
@@ -70,14 +77,23 @@ fn mid(a: Point, b: Point) -> Point {
     [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5]
 }
 
-/// Exactly zero, all three components.
-fn is_zero(v: Point) -> bool {
-    v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0
-}
-
 /// The triangle's f64 normal `(x1 - x0) x (x2 - x0)`, unnormalised.
 fn tri_normal(p: &[Point; 3]) -> Point {
     cross(sub(p[1], p[0]), sub(p[2], p[0]))
+}
+
+/// (116.14k): the triangle is flat when
+/// `|(x1 - x0) x (x2 - x0)| <= 1e-6 max(l01^2, l12^2, l02^2)`.
+/// A degeneracy floor (height below one millionth of the longest edge),
+/// not a quality bar; it replaces the TET-06a exact-zero area test,
+/// whose cross product is round-off noise of either sign on a straight
+/// feature line that is not axis-aligned.
+fn tri_flat(t: &[Point; 3]) -> bool {
+    let l01 = sub(t[1], t[0]);
+    let l12 = sub(t[2], t[1]);
+    let l20 = sub(t[0], t[2]);
+    let l2max = dot(l01, l01).max(dot(l12, l12)).max(dot(l20, l20));
+    norm(tri_normal(t)) <= 1e-6 * l2max
 }
 
 /// The remesh's every `h` call goes through here: a value that is not
@@ -108,6 +124,23 @@ fn segment_closest(x: Point, p: Point, q: Point) -> Point {
     }
     let t = (dot(sub(x, p), pq) / l2).clamp(0.0, 1.0);
     add(p, scale(pq, t))
+}
+
+/// (116.14j): the closest point on the input polyline `L_k`, over its
+/// consecutive input segments; the first strict minimum in increasing
+/// segment order. A feature vertex of `L_k` is projected here.
+fn closest_on_polyline(x: Point, segs: &[(Point, Point)]) -> Point {
+    let mut best = segment_closest(x, segs[0].0, segs[0].1);
+    let mut d = norm(sub(x, best));
+    for (p, q) in &segs[1..] {
+        let q2 = segment_closest(x, *p, *q);
+        let d2 = norm(sub(x, q2));
+        if d2 < d {
+            best = q2;
+            d = d2;
+        }
+    }
+    best
 }
 
 /// The closest point on the triangle `t` to `x`: the same Voronoi-region
@@ -397,11 +430,20 @@ pub struct RemeshStats {
     pub n_tris: usize,
 }
 
-/// The remeshed surface and its stats.
+/// The remeshed surface and its stats, and the features of the output in
+/// the output's numbering (TET-06b).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Remeshed {
     pub surface: TetSurface,
     pub stats: RemeshStats,
+    /// The output's feature edges, each [min, max], in ascending order, in the OUTPUT numbering.
+    pub feature_edges: Vec<[u32; 2]>,
+    /// Beside feature_edges: the seam flag each edge carries from its input edge.
+    pub edge_is_seam: Vec<bool>,
+    /// Beside feature_edges: the index k of the input polyline (input.polylines[k]) the edge lies on.
+    pub edge_polyline: Vec<u32>,
+    /// The corners, ascending, in the output numbering.
+    pub corners: Vec<u32>,
 }
 
 /// The undirected edge key `(min, max)`.
@@ -448,6 +490,21 @@ struct Mesh {
     nbrs: Vec<BTreeSet<u32>>,
     edges: BTreeMap<(u32, u32), Vec<u32>>,
     n_live_v: usize,
+    /// A corner never moves and is never removed (116.14g)-(116.14j).
+    corner: Vec<bool>,
+    /// A feature vertex (not a corner): an end of a feature edge; it
+    /// moves only along its polyline.
+    feat_v: Vec<bool>,
+    /// The polyline `k` a feature vertex lies on (its class' index k).
+    fpoly: Vec<u32>,
+    /// The feature edges, one map per vertex: `feat_idx[v][w]` is the
+    /// `(polyline k, seam flag)` of the feature edge `(v, w)`, stored in
+    /// both directions. A lookup at `v` costs its own feature edges,
+    /// whatever the table's size; only `(v + 1)..` and `..v` ranges of
+    /// it are ever walked, in that order, so `feat_at`'s neighbours come
+    /// out exactly as the old whole-table walk produced them (the
+    /// larger indices first in ascending order, then the smaller ones).
+    feat_idx: Vec<BTreeMap<u32, (u32, bool)>>,
 }
 
 impl Mesh {
@@ -472,7 +529,79 @@ impl Mesh {
             nbrs,
             edges,
             n_live_v: n,
+            corner: vec![false; n],
+            feat_v: vec![false; n],
+            fpoly: vec![0; n],
+            feat_idx: vec![BTreeMap::new(); n],
         }
+    }
+
+    /// Sets the feature edge `(a, b)` to `(k, seam)`, both directions.
+    fn feat_insert(&mut self, a: u32, b: u32, d: (u32, bool)) {
+        self.feat_idx[a as usize].insert(b, d);
+        self.feat_idx[b as usize].insert(a, d);
+    }
+
+    /// Removes the feature edge `(a, b)` from both directions.
+    fn feat_remove(&mut self, a: u32, b: u32) {
+        self.feat_idx[a as usize].remove(&b);
+        self.feat_idx[b as usize].remove(&a);
+    }
+
+    /// The feature edges at `v`, each as `(other vertex, (k, seam))`:
+    /// the ones with a larger index first in ascending order, then the
+    /// smaller ones in ascending order. Two BTreeMap ranges of `v`'s
+    /// own map, so the cost is in proportion to `v`'s feature edges,
+    /// whatever the table's size.
+    fn feat_at(&self, v: u32) -> Vec<(u32, (u32, bool))> {
+        let mut out: Vec<(u32, (u32, bool))> = Vec::new();
+        for (&w, &d) in self.feat_idx[v as usize].range((v + 1)..) {
+            out.push((w, d));
+        }
+        for (&w, &d) in self.feat_idx[v as usize].range(..v) {
+            out.push((w, d));
+        }
+        out
+    }
+
+    /// (116.14l): the triangle is a cut triangle when two of its edges
+    /// are feature edges that meet at a feature vertex (not a corner;
+    /// `feat_v` is false at corners).
+    fn tri_is_cut(&self, tri: [u32; 3]) -> bool {
+        self.tri_is_cut_by(tri, &|x, y| {
+            self.feat_idx[x as usize].contains_key(&y)
+        })
+    }
+
+    /// (116.14l) as [`Mesh::tri_is_cut`], with the feature edges judged
+    /// by `feat`: the collapse guards pass the post-collapse table.
+    fn tri_is_cut_by(&self, tri: [u32; 3], feat: &dyn Fn(u32, u32) -> bool) -> bool {
+        for k in 0..3 {
+            let (a, b, c) = (tri[k], tri[(k + 1) % 3], tri[(k + 2) % 3]);
+            if self.feat_v[a as usize] && feat(a, b) && feat(a, c) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The output's feature tables: the edges each `[min, max]` in
+    /// ascending order, with the seam flag and the polyline `k` beside
+    /// them. Walking each vertex's `(v + 1)..` range in ascending `v`
+    /// visits every edge once, in the `(min, max)` order the old
+    /// whole-table keys() gave.
+    fn feature_tables(&self) -> (Vec<[u32; 2]>, Vec<bool>, Vec<u32>) {
+        let mut feature_edges = Vec::new();
+        let mut edge_is_seam = Vec::new();
+        let mut edge_polyline = Vec::new();
+        for v in 0..self.pts.len() as u32 {
+            for (&w, &(k, seam)) in self.feat_idx[v as usize].range((v + 1)..) {
+                feature_edges.push([v, w]);
+                edge_is_seam.push(seam);
+                edge_polyline.push(k);
+            }
+        }
+        (feature_edges, edge_is_seam, edge_polyline)
     }
 
     /// The triangle's points, in its winding order.
@@ -603,6 +732,10 @@ impl Mesh {
         self.pts.push(m);
         self.live_v.push(true);
         self.nbrs.push(BTreeSet::new());
+        self.corner.push(false);
+        self.feat_v.push(false);
+        self.fpoly.push(0);
+        self.feat_idx.push(BTreeMap::new());
         self.n_live_v += 1;
         let patch_ab = self.tri_patch[t_ab as usize];
         let patch_ba = self.tri_patch[t_ba as usize];
@@ -635,6 +768,16 @@ impl Mesh {
         self.nbrs[a as usize].remove(&b);
         self.nbrs[b as usize].remove(&a);
         self.nbrs[mi as usize] = [a, b, c, d].into_iter().collect();
+        // (116.14f): a split feature edge leaves the new vertex a feature
+        // vertex of the same polyline, its two halves carry the edge's
+        // polyline and seam flag, and (m, c), (m, d) are free.
+        if let Some(&(k, seam)) = self.feat_idx[a as usize].get(&b) {
+            self.feat_remove(a, b);
+            self.feat_insert(a, mi, (k, seam));
+            self.feat_insert(mi, b, (k, seam));
+            self.feat_v[mi as usize] = true;
+            self.fpoly[mi as usize] = k;
+        }
         true
     }
 
@@ -667,9 +810,16 @@ impl Mesh {
         Ok(n)
     }
 
-    /// The collapse of `(a, b)` into its midpoint: the survivor is `a`
-    /// (the smaller index, since the pass visits keys ascending), `b`
-    /// dies. Every guard of §116.10 is checked before anything moves.
+    /// The collapse of `(a, b)` per (116.14g): the survivor `s` and its
+    /// position `p` follow the class table - on a free edge the smaller
+    /// free index survives at the midpoint, the non-free vertex survives
+    /// in place, a free edge with neither end free is refused; on a
+    /// feature edge the corner survives in place, two feature vertices
+    /// collapse onto the smaller index at the midpoint, two corners are
+    /// refused. The length test stays `l_ab < (4/5) h(m_ab)`; `p`
+    /// replaces `m_ab` in the guards. A feature edge of the dying vertex
+    /// may not land on a feature edge of the survivor (the merged-edge
+    /// rule). Every guard of §116.10 is checked before anything moves.
     fn collapse(&mut self, a: u32, b: u32, h: &dyn Fn(Point) -> f64) -> Result<bool> {
         let (t1, t2) = match self.edges.get(&edge_key(a, b)) {
             Some(v) if v.len() == 2 => (v[0], v[1]),
@@ -702,41 +852,73 @@ impl Mesh {
         if self.n_live_v - 1 <= 4 {
             return Ok(false);
         }
-        if !self.collapse_guards(a, b, m, t1, t2, h)? {
+        // (116.14g): the survivor, its position, the refusal.
+        let feat_ab = self.feat_idx[a as usize].get(&b).copied();
+        let cls = |v: u32| {
+            if self.corner[v as usize] {
+                2u8
+            } else if self.feat_v[v as usize] {
+                1
+            } else {
+                0
+            }
+        };
+        let (ca, cb) = (cls(a), cls(b));
+        let (s, t, p) = match (feat_ab, ca, cb) {
+            (None, 0, 0) => (a, b, m),
+            (None, 0, _) => (b, a, self.pts[b as usize]),
+            (None, _, 0) => (a, b, self.pts[a as usize]),
+            (None, _, _) => return Ok(false),
+            (Some(_), 2, 2) => return Ok(false),
+            (Some(_), 2, _) => (a, b, self.pts[a as usize]),
+            (Some(_), _, 2) => (b, a, self.pts[b as usize]),
+            (Some(_), _, _) => (a, b, m),
+        };
+        // The merged-edge rule: a feature edge of the dying vertex `t`
+        // may not land on a feature edge of the survivor `s`.
+        for (w, _) in self.feat_at(t) {
+            if w != s && self.feat_idx[s as usize].contains_key(&w) {
+                return Ok(false);
+            }
+        }
+        if !self.collapse_guards(s, t, p, t1, t2, h)? {
             return Ok(false);
         }
-        self.collapse_apply(a, b, m, t1, t2);
+        self.collapse_apply(s, t, p, t1, t2);
         Ok(true)
     }
 
     /// The guards of §116.10's collapse: every `w` in
-    /// `N(a) u N(b) \ {a, b}` stays within `(4/3) h` of `m` (116.14b),
-    /// and every surviving triangle of the two one-rings keeps positive
-    /// area and turns its normal by less than 90 degrees. `Ok(false)` is
+    /// `N(s) u N(t) \ {s, t}` stays within `(4/3) h` of the survivor's
+    /// position `p` (116.14b, with (116.14g)'s `p` in place of `m_ab`),
+    /// and every surviving triangle of the two one-rings keeps
+    /// non-flat area (116.14k, in the exact-zero test's place) and
+    /// turns its normal by less than 90 degrees, and a triangle that is
+    /// not a cut triangle does not become one (116.14l). `Ok(false)` is
     /// a refused collapse, never an error.
     fn collapse_guards(
         &self,
-        a: u32,
-        b: u32,
-        m: Point,
+        s: u32,
+        t: u32,
+        p: Point,
         t1: u32,
         t2: u32,
         h: &dyn Fn(Point) -> f64,
     ) -> Result<bool> {
-        let ws: BTreeSet<u32> = self.nbrs[a as usize]
-            .union(&self.nbrs[b as usize])
+        let ws: BTreeSet<u32> = self.nbrs[s as usize]
+            .union(&self.nbrs[t as usize])
             .copied()
-            .filter(|&w| w != a && w != b)
+            .filter(|&w| w != s && w != t)
             .collect();
         for w in &ws {
             let xw = self.pts[*w as usize];
-            let hw = h_checked(h, mid(m, xw))?;
-            if norm(sub(m, xw)) > (4.0 / 3.0) * hw {
+            let hw = h_checked(h, mid(p, xw))?;
+            if norm(sub(p, xw)) > (4.0 / 3.0) * hw {
                 return Ok(false);
             }
         }
         let mut ring: BTreeSet<u32> = BTreeSet::new();
-        for v in [a, b] {
+        for v in [s, t] {
             for &w in &self.nbrs[v as usize] {
                 if let Some(ts) = self.edges.get(&edge_key(v, w)) {
                     ring.extend(ts.iter().copied());
@@ -745,86 +927,128 @@ impl Mesh {
         }
         ring.remove(&t1);
         ring.remove(&t2);
-        for t in &ring {
-            let old = self.tri_pts(*t);
+        // (116.14l) with the feature edges as they would be after the
+        // collapse: the dying vertex's edges pass to the survivor, so
+        // a merged edge at `s` is a feature edge when either of its two
+        // parts was (the both-parts case is refused upstream). `t` is
+        // already replaced by `s` in the indices `feat` is fed.
+        let feat_after = |x: u32, y: u32| -> bool {
+            if x == s || y == s {
+                let w = if x == s { y } else { x };
+                self.feat_idx[s as usize].contains_key(&w)
+                    || self.feat_idx[t as usize].contains_key(&w)
+            } else {
+                self.feat_idx[x as usize].contains_key(&y)
+            }
+        };
+        for tid in &ring {
+            let old = self.tri_pts(*tid);
             let old_n = tri_normal(&old);
-            let tri = self.tris[*t as usize];
+            let tri = self.tris[*tid as usize];
             let mut new = old;
+            let mut post = tri;
             for k in 0..3 {
                 let u = tri[k];
-                if u == a || u == b {
-                    new[k] = m;
+                if u == s || u == t {
+                    new[k] = p;
+                    post[k] = s;
                 }
             }
             let new_n = tri_normal(&new);
-            if is_zero(new_n) || dot(new_n, old_n) <= 0.0 {
+            // (116.14k): the flat test takes the exact-zero area test's
+            // place; the 90 degree test stays.
+            if tri_flat(&new) || dot(new_n, old_n) <= 0.0 {
+                return Ok(false);
+            }
+            // (116.14l): a surviving triangle that is not a cut triangle
+            // may not become one.
+            if !self.tri_is_cut(tri) && self.tri_is_cut_by(post, &feat_after) {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    /// Applies the collapse: `a` moves to `m`, the two dead triangles
-    /// go, every other triangle around `b` is re-pointed to `a`, and the
-    /// edge and neighbour maps follow.
-    fn collapse_apply(&mut self, a: u32, b: u32, m: Point, t1: u32, t2: u32) {
-        for t in [t1, t2] {
-            let tri = self.tris[t as usize];
+    /// Applies the collapse: the survivor `s` takes the position `p`
+    /// (a corner is never written; (116.14g) gives it `x_s` there
+    /// anyway), the two dead triangles go, every other triangle around
+    /// the dying vertex `t` is re-pointed to `s`, and the edge and
+    /// neighbour maps follow. The feature edges of `t` pass to `s` with
+    /// their polyline and seam flag (116.14g); the refusal has already
+    /// ruled out a landing on a feature edge of `s`.
+    fn collapse_apply(&mut self, s: u32, t: u32, p: Point, t1: u32, t2: u32) {
+        let pass: Vec<(u32, (u32, bool))> = self
+            .feat_at(t)
+            .into_iter()
+            .filter(|(w, _)| *w != s)
+            .collect();
+        self.feat_remove(s, t);
+        for (w, d) in pass {
+            self.feat_remove(t, w);
+            self.feat_insert(s, w, d);
+        }
+        for tid in [t1, t2] {
+            let tri = self.tris[tid as usize];
             for k in 0..3 {
-                self.edge_drop(edge_key(tri[k], tri[(k + 1) % 3]), t);
+                self.edge_drop(edge_key(tri[k], tri[(k + 1) % 3]), tid);
             }
-            self.live_t[t as usize] = false;
+            self.live_t[tid as usize] = false;
         }
         let mut b_tris: Vec<u32> = Vec::new();
-        for &w in &self.nbrs[b as usize] {
-            if let Some(ts) = self.edges.get(&edge_key(b, w)) {
+        for &w in &self.nbrs[t as usize] {
+            if let Some(ts) = self.edges.get(&edge_key(t, w)) {
                 b_tris.extend(ts.iter().copied());
             }
         }
         b_tris.sort_unstable();
         b_tris.dedup();
-        for t in b_tris {
-            let tri = self.tris[t as usize];
+        for tid in b_tris {
+            let tri = self.tris[tid as usize];
             let others: Vec<u32> =
-                (0..3).filter(|&k| tri[k] != b).map(|k| tri[k]).collect();
-            self.edge_drop(edge_key(b, others[0]), t);
-            self.edge_drop(edge_key(b, others[1]), t);
-            self.edge_add(edge_key(a, others[0]), t);
-            self.edge_add(edge_key(a, others[1]), t);
+                (0..3).filter(|&k| tri[k] != t).map(|k| tri[k]).collect();
+            self.edge_drop(edge_key(t, others[0]), tid);
+            self.edge_drop(edge_key(t, others[1]), tid);
+            self.edge_add(edge_key(s, others[0]), tid);
+            self.edge_add(edge_key(s, others[1]), tid);
             let mut tri = tri;
             for k in 0..3 {
-                if tri[k] == b {
-                    tri[k] = a;
+                if tri[k] == t {
+                    tri[k] = s;
                 }
             }
-            self.tris[t as usize] = tri;
+            self.tris[tid as usize] = tri;
         }
-        let nb: Vec<u32> = self.nbrs[b as usize].iter().copied().collect();
+        let nb: Vec<u32> = self.nbrs[t as usize].iter().copied().collect();
         for w in nb.iter().copied() {
-            if w == a {
+            if w == s {
                 continue;
             }
-            self.nbrs[w as usize].remove(&b);
-            self.nbrs[w as usize].insert(a);
+            self.nbrs[w as usize].remove(&t);
+            self.nbrs[w as usize].insert(s);
         }
-        self.nbrs[a as usize].remove(&b);
+        self.nbrs[s as usize].remove(&t);
         for w in nb.iter().copied() {
-            if w != a {
-                self.nbrs[a as usize].insert(w);
+            if w != s {
+                self.nbrs[s as usize].insert(w);
             }
         }
-        self.nbrs[b as usize].clear();
-        self.pts[a as usize] = m;
-        self.live_v[b as usize] = false;
+        self.nbrs[t as usize].clear();
+        if !self.corner[s as usize] {
+            self.pts[s as usize] = p;
+        }
+        self.live_v[t as usize] = false;
         self.n_live_v -= 1;
     }
 
-    /// (116.14c): one pass over the edges in ascending order, flipping
-    /// each interior edge whose flip lowers the valence energy
-    /// `E = sum (val(v) - 6)^2` over `{a, b, c, d}` and passes the
-    /// guards: `(c, d)` not already an edge, neither `val(a)` nor
-    /// `val(b)` is 3, and each new triangle's normal makes less than 90
-    /// degrees with the sum of the two old ones.
+    /// (116.14c)/(116.14h): one pass over the edges in ascending order,
+    /// flipping each interior edge whose flip lowers the valence energy
+    /// `E = sum (val(v) - val*(v))^2` over `{a, b, c, d}`, with `val*`
+    /// 4 at a corner and 6 at any other vertex, and passing the guards:
+    /// the edge is not a feature edge, `(c, d)` not already an edge,
+    /// neither `val(a)` nor `val(b)` is 3, no new triangle is flat
+    /// (116.14k) or a cut triangle (116.14l), and each new triangle's
+    /// normal makes less than 90 degrees with the sum of the two old
+    /// ones.
     fn flip_pass(&mut self) -> usize {
         let cand: Vec<(u32, u32)> = self.edges.keys().copied().collect();
         let mut n = 0usize;
@@ -832,6 +1056,9 @@ impl Mesh {
             let (a, b) = key;
             if !self.live_v[a as usize] || !self.live_v[b as usize] {
                 continue;
+            }
+            if self.feat_idx[a as usize].contains_key(&b) {
+                continue; // (116.14h): a feature edge is never flipped.
             }
             let (t1, t2) = match self.edges.get(&key) {
                 Some(v) if v.len() == 2 => (v[0], v[1]),
@@ -856,17 +1083,18 @@ impl Mesh {
                 continue;
             }
             let val = |v: u32| self.nbrs[v as usize].len() as i64;
+            let valstar = |v: u32| if self.corner[v as usize] { 4i64 } else { 6i64 };
             if val(a) == 3 || val(b) == 3 {
                 continue;
             }
-            let e = (val(a) - 6).pow(2)
-                + (val(b) - 6).pow(2)
-                + (val(c) - 6).pow(2)
-                + (val(d) - 6).pow(2);
-            let e2 = (val(a) - 7).pow(2)
-                + (val(b) - 7).pow(2)
-                + (val(c) - 5).pow(2)
-                + (val(d) - 5).pow(2);
+            let e = (val(a) - valstar(a)).pow(2)
+                + (val(b) - valstar(b)).pow(2)
+                + (val(c) - valstar(c)).pow(2)
+                + (val(d) - valstar(d)).pow(2);
+            let e2 = (val(a) - 1 - valstar(a)).pow(2)
+                + (val(b) - 1 - valstar(b)).pow(2)
+                + (val(c) + 1 - valstar(c)).pow(2)
+                + (val(d) + 1 - valstar(d)).pow(2);
             if e2 >= e {
                 continue;
             }
@@ -879,6 +1107,16 @@ impl Mesh {
             let pd = self.pts[d as usize];
             let m1 = tri_normal(&[pa, pd, pc]);
             let m2 = tri_normal(&[pb, pc, pd]);
+            // (116.14k): a flip is refused when a new triangle is flat;
+            // (116.14l): a flip is refused when a new triangle would be
+            // a cut triangle. Both before the 90 degree tests, whose
+            // verdicts the two rules do not change.
+            if tri_flat(&[pa, pd, pc]) || tri_flat(&[pb, pc, pd]) {
+                continue;
+            }
+            if self.tri_is_cut([a, d, c]) || self.tri_is_cut([b, c, d]) {
+                continue;
+            }
             if dot(m1, s) <= 0.0 || dot(m2, s) <= 0.0 {
                 continue;
             }
@@ -909,15 +1147,29 @@ impl Mesh {
         self.nbrs[d as usize].insert(c);
     }
 
-    /// (116.14): tangential relaxation in Jacobi order - every vertex's
-    /// new position is computed from the old positions before any moves:
-    /// `x <- x + (I - n n^T) (c - x)` with `n` the normalised sum of the
-    /// one-ring's triangle normals and `c` the area-weighted centroid.
+    /// (116.14)/(116.14i): tangential relaxation in Jacobi order - every
+    /// vertex's new position is computed from the old positions before
+    /// any moves. A corner stays. A feature vertex goes to the midpoint
+    /// of its two feature neighbours' old positions, staying on its
+    /// polyline. A free vertex follows (116.14): `x <- x + (I - n n^T)
+    /// (c - x)` with `n` the normalised sum of the one-ring's triangle
+    /// normals and `c` the area-weighted centroid.
     fn relax(&mut self) {
         let old = self.pts.clone();
         let mut new_pts = old.clone();
         for v in 0..self.pts.len() {
             if !self.live_v[v] {
+                continue;
+            }
+            if self.corner[v] {
+                continue; // a corner never moves.
+            }
+            if self.feat_v[v] {
+                let fnbrs: Vec<u32> =
+                    self.feat_at(v as u32).into_iter().map(|(w, _)| w).collect();
+                if fnbrs.len() == 2 {
+                    new_pts[v] = mid(old[fnbrs[0] as usize], old[fnbrs[1] as usize]);
+                }
                 continue;
             }
             let mut ring: BTreeSet<u32> = BTreeSet::new();
@@ -969,23 +1221,67 @@ impl Mesh {
         self.pts = new_pts;
     }
 
-    /// (116.14d): every live vertex projected onto the input surface
-    /// through the one `Projector` built on it; among equally close
-    /// triangles the smallest index wins.
-    fn project(&mut self, proj: &Projector) {
+    /// (116.14d)/(116.14j): every live vertex projected - a corner
+    /// stays, a feature vertex of polyline `L_k` onto `L_k`'s input
+    /// segments (the first strict minimum over them), a free vertex onto
+    /// the input surface through the one `Projector` built on it; among
+    /// equally close triangles the smallest index wins.
+    fn project(&mut self, proj: &Projector, polys: &[Vec<(Point, Point)>]) {
         for v in 0..self.pts.len() {
-            if self.live_v[v] {
-                self.pts[v] = proj.closest(self.pts[v]).0;
+            if !self.live_v[v] {
+                continue;
             }
+            if self.corner[v] {
+                continue;
+            }
+            if self.feat_v[v] {
+                let k = self.fpoly[v] as usize;
+                self.pts[v] = closest_on_polyline(self.pts[v], &polys[k]);
+                continue;
+            }
+            self.pts[v] = proj.closest(self.pts[v]).0;
         }
     }
 
     /// Compacts: no unused vertices, vertices renumbered in increasing
-    /// old-index order, adjacency rebuilt.
+    /// old-index order, adjacency rebuilt, and the feature state (the
+    /// vertex classes, the per-vertex polyline index, the feature-edge
+    /// table) carried across the renumbering.
     fn compact(&mut self) {
+        let mut map: Vec<u32> = Vec::with_capacity(self.pts.len());
+        let mut corner: Vec<bool> = Vec::new();
+        let mut feat_v: Vec<bool> = Vec::new();
+        let mut fpoly: Vec<u32> = Vec::new();
+        for i in 0..self.pts.len() {
+            if self.live_v[i] {
+                map.push(corner.len() as u32);
+                corner.push(self.corner[i]);
+                feat_v.push(self.feat_v[i]);
+                fpoly.push(self.fpoly[i]);
+            } else {
+                map.push(u32::MAX);
+            }
+        }
+        // Each edge once, ascending (min, max), re-inserted after the
+        // renumbering in the same order.
+        let mut feat: Vec<(u32, u32, (u32, bool))> = Vec::new();
+        for v in 0..self.pts.len() as u32 {
+            for (&w, &d) in self.feat_idx[v as usize].range((v + 1)..) {
+                feat.push((v, w, d));
+            }
+        }
         let names = Vec::new();
         let surf = self.to_surface(names);
         *self = Mesh::from_surface(&surf);
+        self.corner = corner;
+        self.feat_v = feat_v;
+        self.fpoly = fpoly;
+        for (a, b, d) in feat {
+            let (ma, mb) = (map[a as usize], map[b as usize]);
+            if ma != u32::MAX && mb != u32::MAX {
+                self.feat_insert(ma, mb, d);
+            }
+        }
     }
 
     /// The live part as a `TetSurface`; `patch_names` comes from the
@@ -1025,11 +1321,14 @@ impl Mesh {
 
 /// The isotropic remesh of §116.10: `iterations` rounds of splits
 /// (116.14a, repeated sweeps, at most 32 per iteration), collapses
-/// (116.14b with the guards), flips (116.14c with the guards),
-/// tangential relaxation (116.14) in Jacobi order, and projection
-/// (116.14d). Refuses `iterations == 0` and any `h` value that is not
-/// finite and positive, and returns the output only once
-/// [`check_manifold`] accepts it.
+/// (116.14b with (116.14g)'s survivor table), flips (116.14c/(116.14h)),
+/// tangential relaxation (116.14/(116.14i)) in Jacobi order, and
+/// projection (116.14d/(116.14j)). Corners never move, feature vertices
+/// move only along their input polyline, feature and seam edges are
+/// never flipped and never collapsed across. Refuses `iterations == 0`
+/// and any `h` value that is not finite and positive, and returns the
+/// output only once [`check_manifold`] accepts it. `Remeshed` carries
+/// the output's features in the output's numbering.
 pub fn remesh(
     input: &PreparedSurface,
     h: &dyn Fn(Point) -> f64,
@@ -1041,7 +1340,55 @@ pub fn remesh(
         ));
     }
     let proj = Projector::new(&input.surface);
+    // (116.14j)'s input: each polyline's consecutive input segments.
+    let polys: Vec<Vec<(Point, Point)>> = input
+        .polylines
+        .iter()
+        .map(|chain| {
+            chain
+                .windows(2)
+                .map(|w| {
+                    (
+                        input.surface.points[w[0] as usize],
+                        input.surface.points[w[1] as usize],
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    // The feature state of the input: each polyline edge's k, the
+    // feature edges with their (k, seam), the corners and feature
+    // vertices with their k.
+    let mut edge_poly: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    for (k, chain) in input.polylines.iter().enumerate() {
+        for w in chain.windows(2) {
+            edge_poly.insert(edge_key(w[0], w[1]), k as u32);
+        }
+    }
     let mut mesh = Mesh::from_surface(&input.surface);
+    for (i, e) in input.feature_edges.iter().enumerate() {
+        let k = edge_poly.get(&edge_key(e[0], e[1])).copied().unwrap_or(0);
+        mesh.feat_insert(e[0], e[1], (k, input.edge_is_seam[i]));
+    }
+    for &c in &input.corners {
+        mesh.corner[c as usize] = true;
+    }
+    // Each edge once, in ascending (min, max) order, as the old
+    // whole-table walk visited them.
+    let mut tops: Vec<(u32, u32, u32)> = Vec::new();
+    for v in 0..mesh.pts.len() as u32 {
+        for (&w, &(k, _)) in mesh.feat_idx[v as usize].range((v + 1)..) {
+            tops.push((v, w, k));
+        }
+    }
+    for (v, w, k) in tops {
+        for u in [v, w] {
+            if !mesh.corner[u as usize] {
+                mesh.feat_v[u as usize] = true;
+                mesh.fpoly[u as usize] = k;
+            }
+        }
+    }
     let mut stats = RemeshStats::default();
     for _ in 0..opts.iterations {
         for _ in 0..32 {
@@ -1054,7 +1401,7 @@ pub fn remesh(
         stats.collapses += mesh.collapse_pass(h)?;
         stats.flips += mesh.flip_pass();
         mesh.relax();
-        mesh.project(&proj);
+        mesh.project(&proj, &polys);
         mesh.compact();
     }
     let surface = mesh.to_surface(input.surface.patch_names.clone());
@@ -1062,7 +1409,18 @@ pub fn remesh(
     stats.iterations = opts.iterations;
     stats.n_points = surface.points.len();
     stats.n_tris = surface.tris.len();
-    Ok(Remeshed { surface, stats })
+    let (feature_edges, edge_is_seam, edge_polyline) = mesh.feature_tables();
+    let corners: Vec<u32> = (0..mesh.pts.len() as u32)
+        .filter(|&v| mesh.corner[v as usize])
+        .collect();
+    Ok(Remeshed {
+        surface,
+        stats,
+        feature_edges,
+        edge_is_seam,
+        edge_polyline,
+        corners,
+    })
 }
 
 // ==========================================================================
@@ -1768,33 +2126,738 @@ mod tests {
             assert_eq!(d.to_bits(), want.to_bits(), "x {x:?} t {t:?}");
         }
     }
+
+    // ==================================================================
+    //  TET-06b: features, corners and seams survive the remesh
+    // ==================================================================
+
+    /// FNV-1a 64 over a surface's points (each coordinate's bits, little
+    /// endian), triangles (each index, little endian) and patches.
+    fn fnv1a(s: &TetSurface) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for p in &s.points {
+            for k in 0..3 {
+                for b in p[k].to_bits().to_le_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+        for t in &s.tris {
+            for k in 0..3 {
+                for b in t[k].to_le_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+        for q in &s.tri_patch {
+            for b in q.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h
+    }
+
+    /// The distance from `x` to the segment `p q`.
+    fn seg_dist(x: Point, p: Point, q: Point) -> f64 {
+        let pq = sub(q, p);
+        let l2 = dot(pq, pq);
+        let t = if l2 == 0.0 {
+            0.0
+        } else {
+            (dot(sub(x, p), pq) / l2).clamp(0.0, 1.0)
+        };
+        norm(sub(x, add(p, scale(pq, t))))
+    }
+
+    /// The patch's area: the sum of the triangle areas, in triangle
+    /// order.
+    fn patch_area(s: &TetSurface, patch: u32) -> f64 {
+        let mut a = 0.0f64;
+        for (t, &p) in s.tris.iter().zip(&s.tri_patch) {
+            if p != patch {
+                continue;
+            }
+            let x = [
+                s.points[t[0] as usize],
+                s.points[t[1] as usize],
+                s.points[t[2] as usize],
+            ];
+            a += norm(cross(sub(x[1], x[0]), sub(x[2], x[0]))) * 0.5;
+        }
+        a
+    }
+
+    /// The unit cube's 8 points: point k has coordinate 1.0 on axis q
+    /// when bit q of k is set, else 0.0.
+    fn cube_points() -> Vec<Point> {
+        (0..8u32)
+            .map(|k| {
+                [
+                    (k & 1) as f64,
+                    ((k >> 1) & 1) as f64,
+                    ((k >> 2) & 1) as f64,
+                ]
+            })
+            .collect()
+    }
+
+    /// The cube surface: one patch "box", or a patch per face
+    /// ("xmin" .. "zmax", patch t / 2 for triangle t).
+    fn cube_surface(per_face: bool) -> TetSurface {
+        let points = cube_points();
+        let faces: [[u32; 4]; 6] = [
+            [0, 4, 6, 2],
+            [1, 3, 7, 5],
+            [0, 1, 5, 4],
+            [2, 6, 7, 3],
+            [0, 2, 3, 1],
+            [4, 5, 7, 6],
+        ];
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for f in &faces {
+            tris.push([f[0], f[1], f[2]]);
+            tris.push([f[0], f[2], f[3]]);
+        }
+        let (tri_patch, names): (Vec<u32>, Vec<String>) = if per_face {
+            (
+                (0..12u32).map(|t| t / 2).collect(),
+                ["xmin", "xmax", "ymin", "ymax", "zmin", "zmax"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
+        } else {
+            (vec![0; 12], vec!["box".to_string()])
+        };
+        TetSurface {
+            points,
+            tris,
+            tri_patch,
+            patch_names: names,
+        }
+    }
+
+    /// The capped 16-sided cylinder: two apex points, three rings, the
+    /// bottom and top fans first, then the two side bands. Patch 0
+    /// ("lower") on the bottom fan and the lower band, patch 1 ("upper")
+    /// on the top fan and the upper band.
+    fn cyl2() -> TetSurface {
+        let mut points = vec![[0.0, 0.0, -1.0], [0.0, 0.0, 1.0]];
+        for r in 0..3u32 {
+            let z = match r {
+                0 => -1.0,
+                1 => 0.0,
+                _ => 1.0,
+            };
+            for k in 0..16u32 {
+                let t = 2.0 * PI * k as f64 / 16.0;
+                points.push([t.cos(), t.sin(), z]);
+            }
+        }
+        let ring = |r: u32, k: u32| 2 + 16 * r + (k % 16);
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for k in 0..16u32 {
+            tris.push([0, ring(0, k + 1), ring(0, k)]);
+        }
+        for k in 0..16u32 {
+            tris.push([1, ring(2, k), ring(2, k + 1)]);
+        }
+        for r in 0..2u32 {
+            for k in 0..16u32 {
+                let (a, b, c, d) =
+                    (ring(r, k), ring(r, k + 1), ring(r + 1, k + 1), ring(r + 1, k));
+                tris.push([a, b, c]);
+                tris.push([a, c, d]);
+            }
+        }
+        let tri_patch: Vec<u32> = (0..96u32)
+            .map(|t| if (16..32).contains(&t) || t >= 64 { 1 } else { 0 })
+            .collect();
+        TetSurface {
+            points,
+            tris,
+            tri_patch,
+            patch_names: vec!["lower".to_string(), "upper".to_string()],
+        }
+    }
+
+    /// The 30 degree wedge: the prism over the triangle (0,0), (1,0),
+    /// (cos 30, sin 30) from z = 0 to z = 1, one patch.
+    fn wedge() -> TetSurface {
+        let c = 30f64.to_radians().cos();
+        let s = 30f64.to_radians().sin();
+        let points: Vec<Point> = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [c, s, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [c, s, 1.0],
+        ];
+        let tris: Vec<[u32; 3]> = vec![
+            [0, 2, 1],
+            [3, 4, 5],
+            [0, 1, 4],
+            [0, 4, 3],
+            [1, 2, 5],
+            [1, 5, 4],
+            [2, 0, 3],
+            [2, 3, 5],
+        ];
+        TetSurface {
+            points,
+            tris,
+            tri_patch: vec![0; 8],
+            patch_names: vec!["wedge".to_string()],
+        }
+    }
+
+    /// The cube turned by Rz(0.3) Ry(0.5) Rx(0.7), one patch.
+    fn rcube() -> TetSurface {
+        let (ga, gb, gg) = (0.7f64, 0.5f64, 0.3f64);
+        let (ca, sa) = (ga.cos(), ga.sin());
+        let (cb, sb) = (gb.cos(), gb.sin());
+        let (cg, sg) = (gg.cos(), gg.sin());
+        let points: Vec<Point> = cube_points()
+            .into_iter()
+            .map(|p| {
+                let (x, y, z) = (p[0], p[1], p[2]);
+                let (y, z) = (y * ca - z * sa, y * sa + z * ca);
+                let (x, z) = (x * cb + z * sb, -x * sb + z * cb);
+                let (x, y) = (x * cg - y * sg, x * sg + y * cg);
+                [x, y, z]
+            })
+            .collect();
+        let base = cube_surface(false);
+        TetSurface {
+            points,
+            tris: base.tris,
+            tri_patch: base.tri_patch,
+            patch_names: base.patch_names,
+        }
+    }
+
+    /// The assertions the two cube fixtures share (TET-06b's cube gate):
+    /// a closed manifold of Euler 2, 8 corners and 12 open polylines in
+    /// the re-extraction, the 8 input points bit for bit, the output's
+    /// feature tables equal to the re-extraction's, and every polyline
+    /// running along one cube edge with 8..=12 edges in band.
+    fn cube_gate(input: &TetSurface, out: &Remeshed, per_face: bool) {
+        let q = prepare(&out.surface, 60.0).unwrap();
+        let rep = check_manifold(&out.surface).unwrap();
+        assert_eq!(rep.euler, 2, "euler");
+        assert_eq!(q.report.n_corners, 8, "corners");
+        assert_eq!(q.report.n_polylines, 12, "polylines");
+        assert_eq!(q.report.n_closed_polylines, 0, "closed polylines");
+        for k in 0..8 {
+            for d in 0..3 {
+                assert_eq!(
+                    out.surface.points[k][d].to_bits(),
+                    input.points[k][d].to_bits(),
+                    "point {k} coordinate {d}"
+                );
+            }
+        }
+        assert_eq!(out.corners, vec![0, 1, 2, 3, 4, 5, 6, 7], "out corners");
+        assert_eq!(out.corners, q.corners, "corners equal the re-extraction");
+        assert_eq!(out.feature_edges, q.feature_edges, "feature edges");
+        assert_eq!(out.edge_is_seam, q.edge_is_seam, "seam flags");
+        let all_seam = out.edge_is_seam.iter().all(|&s| s);
+        let no_seam = out.edge_is_seam.iter().all(|&s| !s);
+        assert!(if per_face { all_seam } else { no_seam }, "seam flags");
+        assert_eq!(out.edge_polyline.len(), out.feature_edges.len());
+        assert!(out.edge_polyline.iter().all(|&k| k < 12), "polyline k");
+        let mut pairs: BTreeSet<(u32, u32)> = BTreeSet::new();
+        for chain in &q.polylines {
+            let (i, j) = (chain[0], *chain.last().unwrap());
+            assert!(i < 8 && j < 8, "chain ends {i} {j}");
+            let x = i ^ j;
+            assert!(x == 1 || x == 2 || x == 4, "ends {i} {j} not one bit");
+            let q0 = x.trailing_zeros() as usize;
+            let p0 = out.surface.points[i as usize];
+            assert_eq!(p0[q0], 0.0, "first corner on the axis");
+            let mut prev = -1.0f64;
+            for &v in chain {
+                let p = out.surface.points[v as usize];
+                for d in 0..3 {
+                    if d != q0 {
+                        assert_eq!(p[d].to_bits(), p0[d].to_bits(), "off-axis");
+                    }
+                }
+                assert!(p[q0] > prev, "not increasing");
+                assert!(p[q0] <= 1.0, "past the far corner");
+                prev = p[q0];
+            }
+            assert_eq!(prev, 1.0, "far corner at 1.0");
+            let edges = chain.len() - 1;
+            assert!((8..=12).contains(&edges), "chain of {edges} edges");
+            pairs.insert((i, j));
+        }
+        assert_eq!(pairs.len(), 12, "12 different cube edges");
+        for [a, b] in &out.feature_edges {
+            let pa = out.surface.points[*a as usize];
+            let pb = out.surface.points[*b as usize];
+            let r = norm(sub(pa, pb)) / 0.1;
+            assert!(r >= 0.8 && r <= 4.0 / 3.0, "edge ratio {r}");
+        }
+    }
+
+    /// TET-06b's cube gate: the feature edges, corners and patch seams
+    /// of the unit cube at h = 0.1 survive the remesh, once with one
+    /// patch and once with a patch per face.
+    #[test]
+    fn cube_features_exact() {
+        for per_face in [false, true] {
+            let input = cube_surface(per_face);
+            let prep = prepare(&input, 60.0).unwrap();
+            let out = remesh(&prep, &|_: Point| 0.1, &RemeshOptions::default()).unwrap();
+            cube_gate(&input, &out, per_face);
+            let per_edge: BTreeMap<u32, usize> =
+                out.edge_polyline.iter().fold(BTreeMap::new(), |mut m, &k| {
+                    *m.entry(k).or_default() += 1;
+                    m
+                });
+            let ratios = edge_length_ratios(&out.surface, &|_: Point| 0.1);
+            let frac = band_frac(&ratios);
+            let angs = min_angles_deg(&out.surface);
+            let afrac = angs.iter().filter(|&&a| a >= 25.0).count() as f64
+                / angs.len() as f64;
+            println!(
+                "cube_features_exact(per_face {per_face}): points {}, tris {}, \
+                 splits {}, collapses {}, flips {}, edges per cube edge {:?}, \
+                 band_frac {frac:.6}, angle frac {afrac:.6}",
+                out.stats.n_points,
+                out.stats.n_tris,
+                out.stats.splits,
+                out.stats.collapses,
+                out.stats.flips,
+                per_edge,
+            );
+        }
+    }
+
+    /// TET-06b's patch-area gate: with a patch per face each patch's
+    /// area equals the input's within 1e-12 relative and every triangle
+    /// of a face's patch sits bit for bit on that face; with one patch
+    /// the total area is 6 within 6e-12.
+    #[test]
+    fn patch_area_kept() {
+        let input = cube_surface(true);
+        let prep = prepare(&input, 60.0).unwrap();
+        let out = remesh(&prep, &|_: Point| 0.1, &RemeshOptions::default()).unwrap();
+        let names = ["x", "y", "z"];
+        for p in 0..6u32 {
+            let ia = patch_area(&input, p);
+            let oa = patch_area(&out.surface, p);
+            assert!(
+                (oa - ia).abs() <= 1e-12 * ia,
+                "patch {p}: {oa} vs input {ia}"
+            );
+            let (axis, val) = (p as usize / 2, if p % 2 == 0 { 0.0f64 } else { 1.0 });
+            for (ti, (t, &tp)) in
+                out.surface.tris.iter().zip(&out.surface.tri_patch).enumerate()
+            {
+                if tp != p {
+                    continue;
+                }
+                for k in 0..3 {
+                    assert_eq!(
+                        out.surface.points[t[k] as usize][axis].to_bits(),
+                        val.to_bits(),
+                        "patch {p} ({}{}) triangle {ti}",
+                        names[axis],
+                        val
+                    );
+                }
+            }
+            println!("patch_area_kept: patch {p} diff {:.3e}", oa - ia);
+        }
+        let input1 = cube_surface(false);
+        let prep1 = prepare(&input1, 60.0).unwrap();
+        let out1 =
+            remesh(&prep1, &|_: Point| 0.1, &RemeshOptions::default()).unwrap();
+        let total = patch_area(&out1.surface, 0);
+        assert!((total - 6.0).abs() <= 6e-12, "total area {total}");
+        println!("patch_area_kept: single-patch total {total:.16}");
+    }
+
+    /// TET-06b's wedge gate: the 30 degree prism's 6 corners and 9
+    /// polylines survive; the polyline on the 30 degree edge runs from
+    /// (0,0,0) to (0,0,1) with x = y = 0 bit for bit, and every point of
+    /// the other polylines lies on its segment.
+    #[test]
+    fn wedge_edge() {
+        let input = wedge();
+        let prep = prepare(&input, 60.0).unwrap();
+        assert_eq!(prep.report.n_corners, 6, "input corners");
+        assert_eq!(prep.report.n_polylines, 9, "input polylines");
+        let out = remesh(&prep, &|_: Point| 0.1, &RemeshOptions::default()).unwrap();
+        let rep = check_manifold(&out.surface).unwrap();
+        assert_eq!(rep.euler, 2);
+        let q = prepare(&out.surface, 60.0).unwrap();
+        assert_eq!(q.report.n_corners, 6, "output corners");
+        assert_eq!(q.report.n_polylines, 9, "output polylines");
+        for k in 0..6 {
+            for d in 0..3 {
+                assert_eq!(
+                    out.surface.points[k][d].to_bits(),
+                    input.points[k][d].to_bits(),
+                    "corner {k} coordinate {d}"
+                );
+            }
+        }
+        assert_eq!(out.corners, vec![0, 1, 2, 3, 4, 5], "out corners");
+        assert_eq!(out.corners, q.corners, "corners");
+        assert_eq!(out.feature_edges, q.feature_edges, "feature edges");
+        let pts = |v: u32| out.surface.points[v as usize];
+        let zchain = q
+            .polylines
+            .iter()
+            .find(|c| c[0] == 0 && *c.last().unwrap() == 3)
+            .expect("the z-edge polyline");
+        let mut prev = 0.0f64;
+        for (i, &v) in zchain.iter().enumerate() {
+            let p = pts(v);
+            assert_eq!(p[0], 0.0, "x on the z edge");
+            assert_eq!(p[1], 0.0, "y on the z edge");
+            if i == 0 {
+                assert_eq!(p[2], 0.0, "z starts at 0.0");
+            } else {
+                assert!(p[2] > prev, "z strictly increasing");
+            }
+            assert!(p[2] <= 1.0);
+            prev = p[2];
+        }
+        assert_eq!(prev, 1.0, "top corner");
+        let edges = zchain.len() - 1;
+        assert!((8..=12).contains(&edges), "z chain of {edges} edges");
+        let mut lens: Vec<usize> = Vec::new();
+        let mut worst = 0.0f64;
+        for chain in &q.polylines {
+            lens.push(chain.len() - 1);
+            if chain[0] == 0 && *chain.last().unwrap() == 3 {
+                continue;
+            }
+            let (p0, p1) = (pts(chain[0]), pts(*chain.last().unwrap()));
+            for &v in chain {
+                worst = worst.max(seg_dist(pts(v), p0, p1));
+            }
+        }
+        assert!(worst <= 1e-12, "off-segment by {worst}");
+        let ia: f64 = patch_area(&input, 0);
+        let oa: f64 = patch_area(&out.surface, 0);
+        println!(
+            "wedge_edge: chain lengths {lens:?}, area change {:.3e} (relative {:.3e})",
+            oa - ia,
+            (oa - ia) / ia
+        );
+    }
+
+    /// TET-06b's cylinder gate: the two-patch cylinder keeps its three
+    /// closed polylines with no corners, every end of a seam edge sits
+    /// bit for bit at z = 0 on the input's 16-sided ring, and each
+    /// triangle stays on its patch's side of the seam.
+    #[test]
+    fn cylinder_seam_kept() {
+        let input = cyl2();
+        let prep = prepare(&input, 60.0).unwrap();
+        let out = remesh(&prep, &|_: Point| 0.1, &RemeshOptions::default()).unwrap();
+        let rep = check_manifold(&out.surface).unwrap();
+        assert_eq!(rep.euler, 2);
+        let q = prepare(&out.surface, 60.0).unwrap();
+        assert_eq!(q.report.n_corners, 0, "corners");
+        assert_eq!(q.report.n_polylines, 3, "polylines");
+        assert_eq!(q.report.n_closed_polylines, 3, "closed polylines");
+        assert!(out.corners.is_empty(), "no corners");
+        assert_eq!(out.feature_edges, q.feature_edges, "feature edges");
+        assert_eq!(out.edge_is_seam, q.edge_is_seam, "seam flags");
+        let ring = |k: u32| {
+            let t = 2.0 * PI * (k % 16) as f64 / 16.0;
+            [t.cos(), t.sin(), 0.0]
+        };
+        let mut n_seam = 0usize;
+        for (i, seam) in out.edge_is_seam.iter().enumerate() {
+            if !*seam {
+                continue;
+            }
+            n_seam += 1;
+            for e in 0..2 {
+                let p = out.surface.points[out.feature_edges[i][e] as usize];
+                assert_eq!(p[2].to_bits(), 0.0f64.to_bits(), "seam end z");
+                let d = (0..16u32)
+                    .map(|k| seg_dist(p, ring(k), ring(k + 1)))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(d <= 1e-12, "seam end off the ring by {d}");
+            }
+        }
+        for (ti, (t, &tp)) in
+            out.surface.tris.iter().zip(&out.surface.tri_patch).enumerate()
+        {
+            for k in 0..3 {
+                let z = out.surface.points[t[k] as usize][2];
+                if tp == 0 {
+                    assert!(z <= 0.0, "lower patch triangle {ti} at z {z}");
+                } else {
+                    assert!(z >= 0.0, "upper patch triangle {ti} at z {z}");
+                }
+            }
+        }
+        let ratios = edge_length_ratios(&out.surface, &|_: Point| 0.1);
+        let frac = band_frac(&ratios);
+        let angs = min_angles_deg(&out.surface);
+        let afrac =
+            angs.iter().filter(|&&a| a >= 25.0).count() as f64 / angs.len() as f64;
+        for p in 0..2u32 {
+            let ia = patch_area(&input, p);
+            let oa = patch_area(&out.surface, p);
+            println!(
+                "cylinder_seam_kept: patch {p} area {oa:.6} vs input {ia:.6} (diff {:.3e}, not asserted)",
+                oa - ia
+            );
+        }
+        println!(
+            "cylinder_seam_kept: seam edges {n_seam}, band_frac {frac:.6}, angle frac {afrac:.6}, points {}, tris {}",
+            out.stats.n_points,
+            out.stats.n_tris
+        );
+    }
+
+    /// TET-06b's rotated-cube gate: no face axis-aligned, the 8 input
+    /// points still bit for bit, 8 corners and 12 polylines, every
+    /// polyline point on its segment, the total area kept.
+    #[test]
+    fn rotated_cube_features() {
+        let input = rcube();
+        let prep = prepare(&input, 60.0).unwrap();
+        let out = remesh(&prep, &|_: Point| 0.1, &RemeshOptions::default()).unwrap();
+        let rep = check_manifold(&out.surface).unwrap();
+        assert_eq!(rep.euler, 2);
+        let q = prepare(&out.surface, 60.0).unwrap();
+        assert_eq!(q.report.n_corners, 8, "corners");
+        assert_eq!(q.report.n_polylines, 12, "polylines");
+        for k in 0..8 {
+            for d in 0..3 {
+                assert_eq!(
+                    out.surface.points[k][d].to_bits(),
+                    input.points[k][d].to_bits(),
+                    "corner {k} coordinate {d}"
+                );
+            }
+        }
+        assert_eq!(out.feature_edges, q.feature_edges, "feature edges");
+        assert_eq!(out.corners, q.corners, "corners");
+        let mut worst = 0.0f64;
+        for chain in &q.polylines {
+            let (p0, p1) = (
+                out.surface.points[chain[0] as usize],
+                out.surface.points[*chain.last().unwrap() as usize],
+            );
+            for &v in chain {
+                worst = worst.max(seg_dist(out.surface.points[v as usize], p0, p1));
+            }
+        }
+        assert!(worst <= 1e-12, "polyline point off its segment by {worst}");
+        let ia = patch_area(&input, 0);
+        let oa = patch_area(&out.surface, 0);
+        assert!(
+            (oa - ia).abs() <= 1e-12 * ia,
+            "total area {oa} vs input {ia}"
+        );
+        println!(
+            "rotated_cube_features: largest seg_dist {worst:.3e}, area diff {:.3e}, points {}, tris {}",
+            oa - ia,
+            out.stats.n_points,
+            out.stats.n_tris
+        );
+    }
+
+    /// The free remesh is unchanged by TET-06b: the TET-06a sphere's
+    /// output holds bit for bit (FNV-1a over points, triangles and
+    /// patches) and the new tables are empty.
+    #[test]
+    fn free_surface_unchanged() {
+        let out = sphere_out();
+        assert_eq!(fnv1a(&out.surface), 0xf76943aa6d947000);
+        assert!(out.feature_edges.is_empty(), "feature edges");
+        assert!(out.edge_is_seam.is_empty(), "seam flags");
+        assert!(out.edge_polyline.is_empty(), "edge polylines");
+        assert!(out.corners.is_empty(), "corners");
+    }
+
+    // ==================================================================
+    //  TET-06b: no flat and no cut triangle (116.14k)/(116.14l)
+    // ==================================================================
+
+    /// The flat measure of (116.14k): |n| / L^2, the triangle's normal
+    /// length over the longest edge's square.
+    fn flat_measure(t: &[Point; 3]) -> f64 {
+        let l01 = sub(t[1], t[0]);
+        let l12 = sub(t[2], t[1]);
+        let l20 = sub(t[0], t[2]);
+        let l2max = dot(l01, l01).max(dot(l12, l12)).max(dot(l20, l20));
+        norm(tri_normal(t)) / l2max
+    }
+
+    /// (116.14k): how many of the surface's triangles are flat.
+    fn n_flat(s: &TetSurface) -> usize {
+        s.tris
+            .iter()
+            .filter(|t| {
+                tri_flat(&[
+                    s.points[t[0] as usize],
+                    s.points[t[1] as usize],
+                    s.points[t[2] as usize],
+                ])
+            })
+            .count()
+    }
+
+    /// (116.14l): how many of the output's triangles are cut triangles
+    /// - two edges of `out.feature_edges` meeting at a vertex that is
+    /// not in `out.corners`.
+    fn n_cut(out: &Remeshed) -> usize {
+        let feat: BTreeSet<(u32, u32)> =
+            out.feature_edges.iter().map(|&e| (e[0], e[1])).collect();
+        let corners: BTreeSet<u32> = out.corners.iter().copied().collect();
+        let mut n = 0usize;
+        for t in &out.surface.tris {
+            for k in 0..3 {
+                let (u, a, b) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+                if !corners.contains(&u)
+                    && feat.contains(&edge_key(u, a))
+                    && feat.contains(&edge_key(u, b))
+                {
+                    n += 1;
+                    break;
+                }
+            }
+        }
+        n
+    }
+
+    /// The point turned exactly as `rcube` turns the cube's: Rx(0.7),
+    /// then Ry(0.5), then Rz(0.3).
+    fn turn(p: Point) -> Point {
+        let (ga, gb, gg) = (0.7f64, 0.5f64, 0.3f64);
+        let (ca, sa) = (ga.cos(), ga.sin());
+        let (cb, sb) = (gb.cos(), gb.sin());
+        let (cg, sg) = (gg.cos(), gg.sin());
+        let (x, y, z) = (p[0], p[1], p[2]);
+        let (y, z) = (y * ca - z * sa, y * sa + z * ca);
+        let (x, z) = (x * cb + z * sb, -x * sb + z * cb);
+        let (x, y) = (x * cg - y * sg, x * sg + y * cg);
+        [x, y, z]
+    }
+
+    /// The 30 degree wedge with every point turned exactly as RCUBE
+    /// turns CUBE1.
+    fn rwedge() -> TetSurface {
+        let base = wedge();
+        TetSurface {
+            points: base.points.iter().map(|&p| turn(p)).collect(),
+            tris: base.tris,
+            tri_patch: base.tri_patch,
+            patch_names: base.patch_names,
+        }
+    }
+
+    /// The two-patch cylinder with every point turned exactly as RCUBE
+    /// turns CUBE1.
+    fn rcyl2() -> TetSurface {
+        let base = cyl2();
+        TetSurface {
+            points: base.points.iter().map(|&p| turn(p)).collect(),
+            tris: base.tris,
+            tri_patch: base.tri_patch,
+            patch_names: base.patch_names,
+        }
+    }
+
+    /// One named row of the no-flat-no-cut gate: remesh and assert the
+    /// "expected in every row" list - a closed 2-manifold of Euler 2,
+    /// `Q = prepare(.., 60)` ok on the output, 0 flat and 0 cut
+    /// triangles, and the output's feature tables equal to `Q`'s. Every
+    /// assert names the input, h and n. Returns the smallest flat
+    /// measure |n| / L^2 seen over the output's triangles.
+    fn feature_run(name: &str, input: &TetSurface, h: f64, n: u32) -> f64 {
+        let tag = format!("{name} h {h} n {n}");
+        let prep = prepare(input, 60.0)
+            .unwrap_or_else(|e| panic!("{tag}: input refused: {e}"));
+        let out = remesh(&prep, &|_: Point| h, &RemeshOptions { iterations: n })
+            .unwrap_or_else(|e| panic!("{tag}: remesh refused: {e}"));
+        let rep = check_manifold(&out.surface)
+            .unwrap_or_else(|e| panic!("{tag}: manifold: {e}"));
+        assert_eq!(rep.euler, 2, "{tag}: euler");
+        let q = prepare(&out.surface, 60.0)
+            .unwrap_or_else(|e| panic!("{tag}: output refused: {e}"));
+        let nf = n_flat(&out.surface);
+        let nc = n_cut(&out);
+        assert_eq!(nf, 0, "{tag}: flat triangles");
+        assert_eq!(nc, 0, "{tag}: cut triangles");
+        assert_eq!(out.feature_edges, q.feature_edges, "{tag}: feature edges");
+        assert_eq!(out.edge_is_seam, q.edge_is_seam, "{tag}: seam flags");
+        assert_eq!(out.corners, q.corners, "{tag}: corners");
+        let mut m = f64::INFINITY;
+        for t in &out.surface.tris {
+            m = m.min(flat_measure(&[
+                out.surface.points[t[0] as usize],
+                out.surface.points[t[1] as usize],
+                out.surface.points[t[2] as usize],
+            ]));
+        }
+        println!(
+            "feature_run({tag}): flat {nf}, cut {nc}, min |n|/L^2 {m:.3e}, \
+             points {}, tris {}, feature edges {}",
+            out.stats.n_points,
+            out.stats.n_tris,
+            out.feature_edges.len()
+        );
+        m
+    }
+
+    /// The five named rows the first build failed (it had neither
+    /// rule): 0 flat and 0 cut triangles in every one, with the
+    /// manifold, `Q` and the tables as in [`feature_run`].
+    #[test]
+    fn no_flat_no_cut_named() {
+        let rcube_s = rcube();
+        let rwedge_s = rwedge();
+        let cyl2_s = cyl2();
+        let rcyl2_s = rcyl2();
+        feature_run("rcube", &rcube_s, 0.07, 3);
+        feature_run("rwedge", &rwedge_s, 0.13, 3);
+        feature_run("cyl2", &cyl2_s, 0.2, 2);
+        feature_run("cyl2", &cyl2_s, 0.07, 7);
+        feature_run("rcyl2", &rcyl2_s, 0.07, 11);
+    }
+
+    /// The sweep: CUBE1, RCUBE, WEDGE, RWEDGE, CYL2, RCYL2 at
+    /// h in {0.07, 0.1, 0.13, 0.2} and 1..=12 iterations, 288 runs.
+    #[test]
+    fn feature_sweep() {
+        let inputs: Vec<(&str, TetSurface)> = vec![
+            ("cube1", cube_surface(false)),
+            ("rcube", rcube()),
+            ("wedge", wedge()),
+            ("rwedge", rwedge()),
+            ("cyl2", cyl2()),
+            ("rcyl2", rcyl2()),
+        ];
+        let mut runs = 0usize;
+        let mut smallest = f64::INFINITY;
+        for (name, input) in &inputs {
+            for h in [0.07f64, 0.1, 0.13, 0.2] {
+                for n in 1..=12u32 {
+                    let m = feature_run(name, input, h, n);
+                    smallest = smallest.min(m);
+                    runs += 1;
+                }
+            }
+        }
+        println!("feature_sweep: {runs} runs, smallest |n|/L^2 {smallest:.3e}");
+        assert_eq!(runs, 288);
+    }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

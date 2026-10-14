@@ -702,6 +702,24 @@ export const UiTabSchema = z.object({
 })
 export type UiTab = z.infer<typeof UiTabSchema>
 
+/**
+ * The session's mesh draft: what open_mesh_dialog edits on the server and
+ * start_mesh runs (through mesh_generate, or mesh_regions for the regions
+ * form). The server holds it per session in memory and fills UiState.meshDraft
+ * with it; the window only shows it.
+ */
+export const MeshDraftSchema = z.object({
+  mode: z.enum(['preset', 'automesher', 'regions']),
+  preset: z.string().nullable(),
+  cells: z.tuple([z.number().int(), z.number().int(), z.number().int()]).nullable(),
+  outputDir: z.string().nullable(),
+  config: z.string().nullable(),
+  layoutDir: z.string().nullable(),
+  check: z.string().nullable(),
+  dryRun: z.boolean(),
+})
+export type MeshDraft = z.infer<typeof MeshDraftSchema>
+
 export const UiStateSchema = z.object({
   activeTab: z.string().nullable(),
   activeStep: z.string().nullable(),
@@ -740,6 +758,8 @@ export const UiStateSchema = z.object({
   logs: z.object({ text: z.string(), streams: z.array(z.enum(['stdout', 'stderr', 'system'])), follow: z.boolean() }).nullish(),
   /** What the metrics chart draws: slot 1 (left axis), slot 2 (right axis), metrics or sweeps; null or absent = unknown. */
   metricPick: z.object({ left: z.string().nullable(), right: z.string().nullable(), mode: z.enum(['metrics', 'sweeps']) }).nullish(),
+  /** The session's mesh draft (open_mesh_dialog), filled by the server; null or absent = no draft. */
+  meshDraft: MeshDraftSchema.nullish(),
 })
 export type UiState = z.infer<typeof UiStateSchema>
 
@@ -860,6 +880,8 @@ export const REST = {
   llmSettings: '/api/llm/settings',
   registry: '/api/registry',
   caseSchema: '/api/schema/case-1.json',
+  /** POST {path, content}: validate an editor buffer as case_validate would, without writing (save_case). */
+  caseValidate: '/api/case/validate',
   fsTree: '/api/fs/tree',
   fsFile: '/api/fs/file',
   fsSearch: '/api/fs/search',

@@ -3585,8 +3585,10 @@ fn run(c: &mut Checks) -> Result<()> {
     published_benchmarks::check_ghia_cavity(c, &gpu, &k)?;
     c.leave_gate();
     }
-    // SPEC-LIT 110 - the published fluid gates: on this tree every one of
-    // the three takes the missing-key path (SPEC-LIT §110.1), and says so by name.
+    // SPEC-LIT 110 - the published fluid gates: the two tracked
+    // transcriptions load wherever the tree is; the three `fetched` DNS keys
+    // are absent on a clean clone (SPEC-LIT §110.1) and every gate says what
+    // its keys' absence leaves it, by name.
     if c.section("Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2)") {
     c.enter_gate("SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)");
     check_channel_dns(c)?;
@@ -13051,12 +13053,16 @@ const BOUNDED_AFTER_S261: [BoundedRun; 2] = [
 //
 //  Three gates compare this crate against numbers somebody else produced:
 //  110-A the Moser-Kim-Mansour channel DNS, 110-B the Driver & Seegmiller
-//  reattachment, 110-C the McCaffrey plume centreline. None of their keys
-//  is distributed with this tree (SPEC-LIT 110.1, the user's decision of
-//  2026-09-20), so on THIS tree every gate takes the missing-key path; the
-//  verdict logic for a recorded run is written here anyway and exercised
-//  by `mod published_fluid_gates` on synthetic records, so that a run
-//  changes DATA, not code.
+//  reattachment, 110-C the McCaffrey plume centreline. The step and plume
+//  keys are tracked files, the fenced blocks of SPEC-LIT 110.3 and 110.4
+//  byte for byte (docs/17 decision D-VAL-1, reversing the decision of
+//  2026-09-20 for these two); the three channel keys are `fetched` rows
+//  whose files are git-ignored and absent on a clean clone (SPEC-LIT 110.1)
+//  - tools/keys/fetch_answer_keys.py writes or fetches all five. A gate
+//  whose key is absent takes the missing-key path, by name; the verdict
+//  logic for a recorded run is written here anyway and exercised by
+//  `mod published_fluid_gates` on synthetic records, so that a run changes
+//  DATA, not code.
 // ==========================================================================
 
 /// One Re_tau leg of Gate 110-A as RECORDED from `ofgpu-lowmach` +
@@ -13092,10 +13098,11 @@ const CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [None, None, None]; 
 const STEP_RECORD: Option<&StepRecord> = None;
 const PLUME_RECORD: Option<&PlumeRecord> = None;
 
-/// The five answer keys the three gates read, id and expected file under
-/// `reference/` (SPEC-LIT 110.1). None is distributed: no manifest row, no
-/// `// answer-key:` marker - a key exists to the code exactly when the user
-/// places BOTH the file and its manifest row.
+/// The three MKM answer keys the channel gate reads, id and expected file
+/// under `reference/` (SPEC-LIT 110.2). They are `fetched` rows: their host
+/// states no redistribution terms, so the files are git-ignored and
+/// `tools/keys/fetch_answer_keys.py fetch` places them, refusing bytes whose
+/// digest is not the row's (SPEC-LIT 110.1).
 const MKM_KEYS: [(&str, &str); 3] = [
     ("mkm99-chan180", "mkm99/chan180.means"),
     ("mkm99-chan395", "mkm99/chan395.means"),
@@ -13154,14 +13161,17 @@ fn band_of(e_abs: Scalar, band: Scalar, u_val: Scalar) -> Band {
 /// the id, the file that would hold it, and the reader's own refusal.
 fn answer_key_missing_line(id: &str, file: &str, why: &ofgpu::Error) -> String {
     format!(
-        "answer key {id} missing: reference/{file} is not in this tree and \
-         reference/PROVENANCE.md has no row for it (not distributed, SPEC-LIT 110.1) - {why}"
+        "answer key {id} missing: reference/{file} could not be read through \
+         reference/PROVENANCE.md (SPEC-LIT 110.1; tools/keys/fetch_answer_keys.py \
+         fetches or writes it) - {why}"
     )
 }
 
-/// Parse one MKM `.means` file (SPEC-LIT 110.2): `%`-comment header lines
-/// carry `Re_tau = <r>` and `ny = <n>` in either order; every other
-/// non-empty line is whitespace-separated data whose first three fields are
+/// Parse one MKM `.means` file (SPEC-LIT 110.2): a header line is one whose
+/// trimmed text starts with `#` or `%` (the host's real files use `#`), all
+/// leading `#`/`%` characters are stripped, and the remainder carries
+/// `Re_tau = <r>` and `ny = <n>` in either order; every other non-empty
+/// line is whitespace-separated data whose first three fields are
 /// `y y+ Umean`. It cannot go through `key::load_from`, which parses CSV -
 /// this file is whitespace-separated (S2).
 fn parse_mkm_means(text: &str) -> Result<MkmProfile> {
@@ -13185,8 +13195,8 @@ fn parse_mkm_means(text: &str) -> Result<MkmProfile> {
     let mut rows: Vec<(Scalar, Scalar, Scalar)> = Vec::new();
     for line in text.lines() {
         let t = line.trim();
-        if t.starts_with('%') {
-            let body = t.trim_start_matches('%');
+        if t.starts_with('#') || t.starts_with('%') {
+            let body = t.trim_start_matches(['#', '%']);
             if re_tau.is_none() {
                 re_tau = number_after("Re_tau", body);
             }
@@ -13219,10 +13229,10 @@ fn parse_mkm_means(text: &str) -> Result<MkmProfile> {
         rows.push((y, yp, up));
     }
     let re_tau = re_tau.ok_or_else(|| {
-        Error::Config("mkm99 .means: no '% Re_tau = <r>' header line".to_string())
+        Error::Config("mkm99 .means: no 'Re_tau = <r>' header line".to_string())
     })?;
     let ny = ny.ok_or_else(|| {
-        Error::Config("mkm99 .means: no '% ny = <n>' header line".to_string())
+        Error::Config("mkm99 .means: no 'ny = <n>' header line".to_string())
     })?;
     if rows.is_empty() {
         return Err(Error::Config("mkm99 .means: no data rows".to_string()));
@@ -13508,6 +13518,9 @@ const NU_CHANNEL: Scalar = 1.5e-5;
 fn check_channel_dns(c: &mut Checks) -> Result<()> {
     let mut keys: [Option<MkmProfile>; 3] = [None, None, None];
     for (i, (id, file)) in MKM_KEYS.iter().enumerate() {
+        // answer-key: mkm99-chan180
+        // answer-key: mkm99-chan395
+        // answer-key: mkm99-chan590
         match key::load_text(id) {
             Ok((line, text)) => {
                 c.note(&line);
@@ -13536,8 +13549,10 @@ fn check_channel_dns_on(
         let Some(p) = k else { continue };
         let leg = &MKM_KEYS[i].0["mkm99-".len()..];
         c.check(
-            &format!("MKM99 {leg}: header ny equals the row count"),
-            (p.rows.len() as Scalar - p.ny as Scalar).abs(),
+            &format!(
+                "MKM99 {leg}: the rows run wall to centreline, (ny + 1)/2 of the header's ny"
+            ),
+            (p.rows.len() as Scalar - ((p.ny + 1) / 2) as Scalar).abs(),
             0.0,
         );
         let last = p.rows[p.rows.len() - 1];
@@ -13580,8 +13595,8 @@ fn check_channel_dns_on(
                 Verdict::Open,
                 How::Live,
                 format!(
-                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
-                     110.1); no comparison was run",
+                    "answer key missing: {} - absent from reference/ or not its manifest \
+                     digest (SPEC-LIT 110.1); no comparison was run",
                     ids.join(", ")
                 ),
                 vec![],
@@ -13689,6 +13704,7 @@ fn check_channel_dns_on(
 /// Gate 110-B: load the Driver & Seegmiller key and the record slot, then
 /// hand the verdict to [`check_backstep_reattachment_on`] (S7's split).
 fn check_backstep_reattachment(c: &mut Checks) -> Result<()> {
+    // answer-key: driver-seegmiller1985
     let key = match key::load_text(DS_KEY.0) {
         Ok((line, text)) => {
             c.note(&line);
@@ -13733,8 +13749,8 @@ fn check_backstep_reattachment_on(
                 Verdict::Open,
                 How::Live,
                 format!(
-                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
-                     110.1); no comparison was run",
+                    "answer key missing: {} - absent from reference/ or not its manifest \
+                     digest (SPEC-LIT 110.1); no comparison was run",
                     DS_KEY.0
                 ),
                 not_yet_run_uncertainty(),
@@ -13812,6 +13828,7 @@ fn check_backstep_reattachment_on(
 /// Gate 110-C: load the McCaffrey key and the record slot, then hand the
 /// verdict to [`check_mccaffrey_plume_on`] (S7's split).
 fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
+    // answer-key: mccaffrey1979-table1
     let key = match key::load_text(MC_KEY.0) {
         Ok((line, text)) => {
             c.note(&line);
@@ -13873,8 +13890,8 @@ fn check_mccaffrey_plume_on(
                 Verdict::Open,
                 How::Live,
                 format!(
-                    "answer key missing: {} - not distributed with this tree (SPEC-LIT \
-                     110.1); no comparison was run",
+                    "answer key missing: {} - absent from reference/ or not its manifest \
+                     digest (SPEC-LIT 110.1); no comparison was run",
                     MC_KEY.0
                 ),
                 not_yet_run_uncertainty(),
@@ -23222,8 +23239,12 @@ mod region_layout {
 mod published_fluid_gates {
     use super::*;
 
-    /// C-DS's bytes, as the test fixture (never a file: the key is NOT
-    /// distributed, S1).
+    /// C-DS's bytes: the tracked file
+    /// `reference/driver_seegmiller_1985/reattachment.txt` byte for byte -
+    /// SPEC-LIT 110.3's fenced block, written by
+    /// `tools/keys/fetch_answer_keys.py write`; test
+    /// `the_tracked_transcriptions_are_the_fixture_bytes` holds the two
+    /// together.
     const DS_KEY_TEXT: &str = "\
 # Driver, D. M. and Seegmiller, H. L., \"Features of a Reattaching Turbulent Shear Layer in Divergent
 # Channel Flow\", AIAA Journal 23 (2) (1985) 163-171. DOI 10.2514/3.8890.
@@ -23234,7 +23255,11 @@ mod published_fluid_gates {
 x_r_over_H 6.26 0.10
 ";
 
-    /// C-MC's bytes, as the test fixture (never a file, S1).
+    /// C-MC's bytes: the tracked file
+    /// `reference/mccaffrey_1979/centreline_table1.txt` byte for byte -
+    /// SPEC-LIT 110.4's fenced block, written by
+    /// `tools/keys/fetch_answer_keys.py write`, and held to the file by the
+    /// same test as C-DS.
     const MC_KEY_TEXT: &str = "\
 # McCaffrey, B. J., \"Purely Buoyant Diffusion Flames: Some Experimental Results\", NBSIR 79-1910,
 # National Bureau of Standards, 1979. US Government work, public domain. Table 1, weighted averages.
@@ -23271,6 +23296,61 @@ buoyancy_constant 0.935
         assert_eq!(p.rows[1], (0.5, 89.06, 11.44), "middle row verbatim");
     }
 
+    /// (a2) The parser on the host's OWN header shape, verbatim: `#` comment
+    /// lines (the real `.means` files use `#`, not the `%` of the older
+    /// fixture), the `Re_tau=590` spelling that must NOT match, the
+    /// `#---End of Header---` rule and the `ny = 5,  Re = 178.12` line with
+    /// its trailing comma. Failed before the `#` change landed, by
+    /// construction.
+    #[test]
+    fn parse_mkm_means_reads_the_hosts_hash_header() {
+        let text = "\
+# Authors: Moser, Kim & Mansour
+# Reference: DNS of Turbulent Channel Flow up to Re_tau=590, 1999,
+# Re_tau = 178.12
+#---End of Header---
+# 
+# ny = 5,  Re = 178.12
+#
+#       y           y+         Umean      dUmean/dy
+#
+   0.0000e+00   0.0000e+00   0.0000e+00   1.7812e+02
+   5.0000e-01   8.9060e+01   1.6000e+01   1.0000e+00
+   1.0000e-00   1.7812e+02   1.8301e+01   0.0000e+00
+";
+        let p = parse_mkm_means(text).expect("the host's own header parses");
+        assert_eq!(p.re_tau, 178.12, "Re_tau from the # header line");
+        assert_eq!(p.ny, 5, "ny from the # header line, trailing comma gone");
+        assert_eq!(p.rows.len(), 3, "three data rows");
+        assert_eq!(p.rows[1], (0.5, 89.06, 16.0), "middle row verbatim");
+        assert_eq!(p.rows[2], (1.0, 178.12, 18.301), "last row verbatim");
+    }
+
+    /// (a3) The half-channel row-count row on a synthetic key: (ny + 1)/2
+    /// rows is what the header's ny asks for (SPEC-LIT 110.2: ny 129 -> 65
+    /// rows), and the full ny is refused.
+    #[test]
+    fn a_half_channel_key_passes_its_row_count_row() {
+        let half = MkmProfile {
+            re_tau: 178.12,
+            ny: 5,
+            rows: vec![(0.0, 0.0, 0.0), (0.01, 2.0, 2.0), (1.0, 178.12, 18.301)],
+        };
+        let mut c = Checks::new();
+        check_channel_dns_on(&mut c, [Some(half), None, None], [None, None, None])
+            .expect("the gate runs");
+        assert_eq!(c.failures, 0, "3 rows is (5 + 1)/2, what ny = 5 asks for");
+        let whole = MkmProfile {
+            re_tau: 178.12,
+            ny: 3,
+            rows: vec![(0.0, 0.0, 0.0), (0.01, 2.0, 2.0), (1.0, 178.12, 18.301)],
+        };
+        let mut c = Checks::new();
+        check_channel_dns_on(&mut c, [Some(whole), None, None], [None, None, None])
+            .expect("the gate runs");
+        assert_eq!(c.failures, 1, "3 rows against ny = 3's (3 + 1)/2 = 2 fails");
+    }
+
     /// (b) The Driver & Seegmiller parser on C-DS's own bytes.
     #[test]
     fn parse_ds_key_reads_the_datum_row() {
@@ -23292,6 +23372,24 @@ buoyancy_constant 0.935
         assert_eq!(k.plume_v, 1.12);
         assert_eq!(k.plume_dt, 21.6);
         assert_eq!(k.buoyancy, 0.935);
+    }
+
+    /// (h) The two transcriptions are TRACKED files now (docs/17 decision
+    /// D-VAL-1): what sits under `reference/` is these fixtures, byte for
+    /// byte - SPEC-LIT 110.3's and 110.4's fenced blocks as
+    /// `tools/keys/fetch_answer_keys.py write` lays them down.
+    #[test]
+    fn the_tracked_transcriptions_are_the_fixture_bytes() {
+        assert_eq!(
+            include_str!("../../../reference/driver_seegmiller_1985/reattachment.txt"),
+            DS_KEY_TEXT,
+            "the tracked Driver & Seegmiller key is the fixture"
+        );
+        assert_eq!(
+            include_str!("../../../reference/mccaffrey_1979/centreline_table1.txt"),
+            MC_KEY_TEXT,
+            "the tracked McCaffrey key is the fixture"
+        );
     }
 
     /// (d) The band helper at its three edges: inside; undecided because
@@ -23361,9 +23459,11 @@ buoyancy_constant 0.935
         assert!((p + 5.0 / 3.0).abs() < 1e-9, "slope {p} against -5/3");
     }
 
-    /// (g) THIS TREE's own truth: no key is distributed, no record exists,
-    /// so the three top-level checks each print the missing-key line(s) and
-    /// register exactly one open, live verdict, BY NAME, in C-GATES order.
+    /// (g) THIS TREE's own truth: the two tracked transcriptions load and
+    /// their key rows run, the three `fetched` DNS keys are absent on a
+    /// clean clone, and no record exists - so the three top-level checks
+    /// each register exactly one open, live verdict, BY NAME, in C-GATES
+    /// order, and nothing a key alone could close has closed.
     #[test]
     fn the_three_sections_report_not_closed_by_name_on_this_tree() {
         let mut c = Checks::new();

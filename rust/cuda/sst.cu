@@ -374,3 +374,141 @@ extern "C" __global__ void sstOmegaSources
 
     susp[c] = -cross;
 }
+
+
+// ==========================================================================
+//  The rho-weighted form - SPEC-LIT 156 (DST-05)
+//
+//  Everything below is NEW and is reached only through KOmegaSst::correct_rho.
+//  The six kernels above are byte for byte what they were, so the kinematic
+//  model's SASS does not move. The rho form reuses them and multiplies their
+//  Su/Sp/Susp by rho afterwards (multiply_field, a separate pass), so at
+//  rho == 1 every source is the kinematic one exactly: x*1 is exact in IEEE
+//  arithmetic and no fused multiply-add can straddle the separate pass.
+//
+//  Written from SPEC-LIT 156 (the NASA Turbulence Modeling Resource SST page:
+//  the conservation form, SST-2003, SST-sust; Menter 1994, Menter, Kuntz &
+//  Langtry 2003 and Spalart & Rumsey 2007 cited through it).
+//  The specification was informed by a review of FSCDustFoam (Huang &
+//  Lipatnikov, GPL) and no code was copied.
+// ==========================================================================
+
+//- (156.5) with the density in the cross-diffusion: CD_kw is
+//  max(2 rho sigma_w2 (1/w) grad k . grad w, 1e-10), and arg1's third branch
+//  is 4 rho sigma_w2 k/(CD_kw y^2). The floor is in the rho units of (156.5),
+//  so for rho != 1 F1 differs from sstBlending's wherever the floor is active.
+//  rho multiplies LAST in both places, so at rho == 1 each product is the
+//  kinematic one followed by an exact *1, and F1 and F2 are sstBlending's bit
+//  for bit (the rho == 1 row of 156.6).
+extern "C" __global__ void sstBlendingRho
+(
+    ofscalar* __restrict__ F1,
+    ofscalar* __restrict__ F2,
+    const ofscalar* __restrict__ k,
+    const ofscalar* __restrict__ omega,
+    const ofvec3* __restrict__ gradK,
+    const ofvec3* __restrict__ gradOmega,
+    const ofscalar* __restrict__ y,
+    const ofscalar* __restrict__ rho,
+    ofscalar nu,
+    ofscalar betaStar,
+    ofscalar sigmaW2,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar kc = ofmax_(k[c], (ofscalar)0);
+    const ofscalar w  = ofmax_(omega[c], OFGPU_SST_TINY);
+    const ofscalar yc = ofmax_(y[c], OFGPU_SST_TINY);
+    const ofscalar y2 = yc*yc;
+    const ofscalar r  = rho[c];
+
+    const ofscalar cdkw =
+        (ofscalar)2*sigmaW2*dot3(gradK[c], gradOmega[c])/w*r;
+    const ofscalar cdPos = ofmax_(cdkw, OFGPU_SST_CD_FLOOR);
+
+    const ofscalar sqrtK   = ofsqrt_(kc);
+    const ofscalar turbLen = sqrtK/(betaStar*w*yc);
+    const ofscalar viscous = (ofscalar)500*nu/(y2*w);
+
+    ofscalar a1 = ofmax_(turbLen, viscous);
+    a1 = ofmin_(a1, (ofscalar)4*sigmaW2*kc*r/(cdPos*y2));
+    a1 = ofmin_(a1, (ofscalar)10);
+
+    const ofscalar a1sq = a1*a1;
+    F1[c] = oftanh_(a1sq*a1sq);
+
+    ofscalar a2 = ofmax_((ofscalar)2*turbLen, viscous);
+    a2 = ofmin_(a2, (ofscalar)100);
+
+    F2[c] = oftanh_(a2*a2);
+}
+
+//- (156.8) on the omega side, the setting limitOmegaProduction (156.3):
+//  where G > c1 beta* k w the omega production blend(gamma) G/nu_t becomes
+//  blend(gamma) (c1 beta* k w)/nu_t, i.e. (gamma/nu_t) min(G, c1 beta* k w).
+//  Written over the Su that sstOmegaSources has just formed, and only in the
+//  cells where the limiter is active, so every other cell keeps the kinematic
+//  blend(gamma) P exactly. `lim` is the expression sstKSources limits with.
+//  Per unit density: correct_rho multiplies by rho afterwards.
+extern "C" __global__ void sstOmegaLimitedProduction
+(
+    ofscalar* __restrict__ su,
+    const ofscalar* __restrict__ G,
+    const ofscalar* __restrict__ nut,
+    const ofscalar* __restrict__ k,
+    const ofscalar* __restrict__ omega,
+    const ofscalar* __restrict__ gammaB,
+    ofscalar betaStar,
+    ofscalar c1,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar w   = omega[c];
+    const ofscalar kc  = ofmax_(k[c], (ofscalar)0);
+    const ofscalar lim = c1*betaStar*kc*w;
+
+    if (G[c] > lim) {
+        su[c] = gammaB[c]*lim/ofmax_(nut[c], OFGPU_SST_TINY);
+    }
+}
+
+//- (156.9), SST-sust's k term beta* w_amb k_amb, added to the limited
+//  production before correct_rho multiplies it by rho. An explicit Su.
+extern "C" __global__ void sstSustK
+(
+    ofscalar* __restrict__ gLim,
+    ofscalar betaStar,
+    ofscalar kAmb,
+    ofscalar wAmb,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    gLim[c] += betaStar*wAmb*kAmb;
+}
+
+//- (156.9), SST-sust's omega term blend(beta) w_amb^2, added to the omega Su
+//  before correct_rho multiplies it by rho. The blended beta is the one the
+//  destruction Sp = blend(beta) w carries, so the ambient state is a fixed
+//  point of the pair whatever F1 is.
+extern "C" __global__ void sstSustOmega
+(
+    ofscalar* __restrict__ su,
+    const ofscalar* __restrict__ betaB,
+    ofscalar wAmb,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    su[c] += betaB[c]*wAmb*wAmb;
+}

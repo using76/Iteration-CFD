@@ -7,7 +7,9 @@
 //! The ghost-cell exchange: the launcher for `cuda/halo.cu`.
 //!
 //! SPEC-LIT §71.4. [`crate::decompose`] decides *what* crosses each cut and in
-//! what order; this file moves it. The whole operation is
+//! what order; this file moves it. The in-process form lives here;
+//! [`spmd`] holds the SPMD form, a rank per part, on the same plan and the
+//! same pack kernels (SPEC-LIT §138.3). The whole operation is
 //!
 //! ```text
 //! pack   sendBuf[k] = psi[sendIndex[k]]              one gather kernel per part
@@ -49,12 +51,17 @@ use cudarc::driver::{CudaFunction, DeviceRepr, PushKernelArg};
 use crate::decompose::Decomposition;
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
-use crate::{Label, Scalar, Vec3};
+use crate::{Label, Scalar, Tensor, Vec3};
+
+pub mod spmd;
+
+pub use spmd::{SpmdHalo, HALO_TAG};
 
 /// Entry points of `cuda/halo.cu`, resolved once.
 struct HaloKernels {
     pack_scalar: CudaFunction,
     pack_vector: CudaFunction,
+    pack_tensor: CudaFunction,
     pack_label: CudaFunction,
 }
 
@@ -79,14 +86,15 @@ struct HaloPlan {
 /// The exchange, with its own send buffers.
 ///
 /// Built once, at set-up. Nothing in a time loop allocates, which is why all
-/// three payload buffers exist from the start even if a given run only ever
+/// four payload buffers exist from the start even if a given run only ever
 /// exchanges scalars: the halo is a few per cent of the cells, so the unused
-/// two cost about a byte per cell between them.
+/// three cost a few bytes per cell between them.
 pub struct HaloExchange {
     k: HaloKernels,
     plans: Vec<HaloPlan>,
     buf_scalar: Vec<DevBuf<Scalar>>,
     buf_vector: Vec<DevBuf<Vec3>>,
+    buf_tensor: Vec<DevBuf<Tensor>>,
     buf_label: Vec<DevBuf<Label>>,
 }
 
@@ -96,12 +104,14 @@ impl HaloExchange {
         let k = HaloKernels {
             pack_scalar: ks.func("haloPackScalar")?,
             pack_vector: ks.func("haloPackVector")?,
+            pack_tensor: ks.func("haloPackTensor")?,
             pack_label: ks.func("haloPackLabel")?,
         };
 
         let mut plans = Vec::with_capacity(dec.n_parts);
         let mut buf_scalar = Vec::with_capacity(dec.n_parts);
         let mut buf_vector = Vec::with_capacity(dec.n_parts);
+        let mut buf_tensor = Vec::with_capacity(dec.n_parts);
         let mut buf_label = Vec::with_capacity(dec.n_parts);
 
         for part in &dec.parts {
@@ -149,6 +159,7 @@ impl HaloExchange {
             let alloc = n_send.max(1);
             buf_scalar.push(gpu.zeros::<Scalar>(alloc)?);
             buf_vector.push(gpu.zeros::<Vec3>(alloc)?);
+            buf_tensor.push(gpu.zeros::<Tensor>(alloc)?);
             buf_label.push(gpu.zeros::<Label>(alloc)?);
 
             plans.push(HaloPlan {
@@ -172,6 +183,7 @@ impl HaloExchange {
             plans,
             buf_scalar,
             buf_vector,
+            buf_tensor,
             buf_label,
         })
     }
@@ -197,6 +209,14 @@ impl HaloExchange {
         run(gpu, k, plans, bufs, fields)
     }
 
+    /// The same for a tensor field - nine scalars moved as one struct, the
+    /// gradient of a vector field being the one a distributed flow needs it
+    /// for (SPEC-LIT §71.4, PAR-02).
+    pub fn tensor(&mut self, gpu: &Gpu, fields: &mut [DevBuf<Tensor>]) -> Result<()> {
+        let (k, plans, bufs) = (&self.k.pack_tensor, &self.plans, &mut self.buf_tensor);
+        run(gpu, k, plans, bufs, fields)
+    }
+
     /// The same for a label field - the integer masks a coupled face's
     /// neighbour is tested for, `lduSetValues`'s `isFixed` being the one this
     /// tree has today.
@@ -206,7 +226,7 @@ impl HaloExchange {
     }
 }
 
-/// Pack, then copy. One implementation for all three payloads, because the
+/// Pack, then copy. One implementation for all four payloads, because the
 /// exchange is a property of the plan and not of what is being moved.
 fn run<T: DeviceRepr>(
     gpu: &Gpu,
@@ -554,6 +574,76 @@ mod tests {
                     let g = part.global_cell[i] as usize;
                     assert_eq!(gv[i], vecs[g], "vector, P={np} part {p} cell {i}");
                     assert_eq!(gl[i], labels[g], "label, P={np} part {p} cell {i}");
+                }
+            }
+        }
+    }
+
+    /// PAR-02: the tensor payload - nine scalars moved as one struct -
+    /// crosses the cut like the other three. Every component of every local
+    /// cell, owned and ghost, is the global tensor at the cell the plan says
+    /// it is: the pack is a gather and the move is the identity on the bytes.
+    #[test]
+    fn a_tensor_halo_crosses_the_cut_too() {
+        let Some(gpu) = gpu() else { return };
+        let m = boxes([4, 3, 2], true);
+        let tens: Vec<Tensor> = (0..m.n_cells)
+            .map(|c| {
+                let s = field(c);
+                let v: [Scalar; 9] = std::array::from_fn(|k| {
+                    let x = (k + 1) as Scalar * s;
+                    if k % 2 == 1 {
+                        -x
+                    } else {
+                        x
+                    }
+                });
+                Tensor {
+                    xx: v[0], xy: v[1], xz: v[2],
+                    yx: v[3], yy: v[4], yz: v[5],
+                    zx: v[6], zy: v[7], zz: v[8],
+                }
+            })
+            .collect();
+        for (np, method) in plans(&m) {
+            let d = Decomposition::build(&m, np, &method).expect("cut");
+            let mut ex = HaloExchange::new(&gpu, &d).expect("exchange");
+            let mut tf: Vec<DevBuf<Tensor>> = d
+                .parts
+                .iter()
+                .map(|p| {
+                    let mut h = vec![Tensor::ZERO; p.n_local()];
+                    for (i, hi) in h.iter_mut().enumerate().take(p.mesh.n_cells) {
+                        *hi = tens[p.global_cell[i] as usize];
+                    }
+                    gpu.upload(&h).expect("upload")
+                })
+                .collect();
+            ex.tensor(&gpu, &mut tf).expect("exchange");
+            gpu.sync().expect("sync");
+            for (p, part) in d.parts.iter().enumerate() {
+                let got = gpu.download(&tf[p]).expect("download");
+                for i in 0..part.n_local() {
+                    let g = part.global_cell[i] as usize;
+                    let a = [
+                        got[i].xx, got[i].xy, got[i].xz,
+                        got[i].yx, got[i].yy, got[i].yz,
+                        got[i].zx, got[i].zy, got[i].zz,
+                    ];
+                    let b = [
+                        tens[g].xx, tens[g].xy, tens[g].xz,
+                        tens[g].yx, tens[g].yy, tens[g].yz,
+                        tens[g].zx, tens[g].zy, tens[g].zz,
+                    ];
+                    for k in 0..9 {
+                        assert_eq!(
+                            a[k].to_bits(),
+                            b[k].to_bits(),
+                            "component {k}, P={np} {} part {p} local cell {i} \
+                             (global {g})",
+                            method.as_str()
+                        );
+                    }
                 }
             }
         }

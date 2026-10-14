@@ -107,14 +107,14 @@
 
 use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
-use crate::field::GpuScalarField;
+use crate::field::{GpuScalarField, GpuSurfaceScalarField};
 use crate::field_ops::{advance_time_levels, correct_boundary_conditions, set_field, FieldKernels};
-use crate::fv::{fvc_grad_scalar_scheme, fvm_sp, fvm_su, fvm_susp};
+use crate::fv::{fvc_div_surface, fvc_grad_scalar_scheme, fvm_sp, fvm_su, fvm_susp};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solver::SolverPerformance;
 use crate::turbulence::{
     add_buoyancy_to_k, add_buoyancy_to_omega_cell, bound_k, bound_omega, nut_boundary,
-    strain_rate_mag, BuoyancyProduction, FlowState, RasCore, TurbulenceControls,
+    strain_rate_mag, BuoyancyProduction, FlowState, MassWeighting, RasCore, TurbulenceControls,
 };
 use crate::wallfunctions::WallFunctionCoeffs;
 use crate::{Scalar, Vec3};
@@ -122,8 +122,9 @@ use crate::{Scalar, Vec3};
 mod kernels;
 pub use kernels::SstKernels;
 use kernels::{
-    sst_blend_coeffs, sst_blending, sst_k_sources, sst_nut, sst_omega_sources,
-    sst_production_by_nut,
+    sst_blend_coeffs, sst_blending, sst_blending_rho, sst_k_sources, sst_nut,
+    sst_omega_limited_production, sst_omega_sources, sst_production_by_nut, sst_sust_k,
+    sst_sust_omega,
 };
 
 // ==========================================================================
@@ -224,6 +225,52 @@ impl KOmegaSstCoeffs {
 }
 
 // ==========================================================================
+//  The rho-weighted form - SPEC-LIT §156 (DST-05)
+// ==========================================================================
+
+/// SST-sust's ambient state (156.9): `+ beta* rho omega_amb k_amb` in the `k`
+/// equation and `+ blend(beta) rho omega_amb²` in the `omega` equation, both
+/// explicit. With `k_amb = k_0` and `omega_amb = omega_0` the homogeneous
+/// state is a fixed point (§156.4).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SstSust {
+    pub k_amb: Scalar,
+    pub omega_amb: Scalar,
+}
+
+/// The settings the rho-weighted form reads (§156.3, §156.4). The default is
+/// the tree's kinematic behaviour: the production limiter in the `k`
+/// equation only, and no sustaining terms. A DUST case sets
+/// `limit_omega_production`, which is TMR's SST-2003.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RhoSstOptions {
+    /// `limitOmegaProduction`: (156.8)'s `min(P, 10 beta* rho omega k)` in
+    /// the `omega` production as well.
+    pub limit_omega_production: bool,
+    /// SST-sust (156.9).
+    pub sust: Option<SstSust>,
+}
+
+/// The density a rho-weighted correction is handed - SPEC-LIT §156.1.
+///
+/// The [`FlowState`] passed beside it must carry the MASS flux
+/// `phi_m = rho_f phi` as its `phi` (the convective flux of (156.1)-(156.2),
+/// the §86.3 contract), and `nu` is the laminar kinematic viscosity, so the
+/// laminar diffusivity is `rho_f nu`. `phi_volume` is the volume flux the
+/// dilatation `div u` of (156.3) is formed from.
+pub struct SstDensity<'a> {
+    /// `rho^n`, `rho^{n-1}`, `rho^{n-2}` per cell, `[n_cells]`: the `ddt`'s
+    /// levels (§86.3). `rho` also multiplies every source.
+    pub rho: &'a DevBuf<Scalar>,
+    pub rho0: &'a DevBuf<Scalar>,
+    pub rho00: &'a DevBuf<Scalar>,
+    /// `rho_f` on every face: multiplies the face diffusivity.
+    pub rho_face: &'a GpuSurfaceScalarField,
+    /// The volume flux `u_f . S_f`.
+    pub phi_volume: &'a GpuSurfaceScalarField,
+}
+
+// ==========================================================================
 //  The model
 // ==========================================================================
 
@@ -308,6 +355,15 @@ pub struct KOmegaSst<'m> {
     /// [`crate::models::menter_gamma::MenterGamma`], which is not
     /// constructed.
     gm: Option<crate::models::menter_gamma::MenterGamma>,
+
+    /// SPEC-LIT §156: what [`KOmegaSst::correct_rho`] reads. Nothing else
+    /// does, so the kinematic [`KOmegaSst::correct`] is unmoved whatever it
+    /// holds.
+    rho_opts: RhoSstOptions,
+    /// `[n_cells]` (86.4)'s `a_N rho + a_0 rho^0 + a_00 rho^00`, which a
+    /// `bounded` scheme on a mass-weighted equation reads. Allocated always
+    /// (one buffer, as `grad_frob`), written only by `correct_rho`.
+    cont_ddt: DevBuf<Scalar>,
 }
 
 impl<'m> KOmegaSst<'m> {
@@ -383,6 +439,8 @@ impl<'m> KOmegaSst<'m> {
             lm: None,
             gm: None,
             grad_frob: gpu.zeros(nc)?,
+            rho_opts: RhoSstOptions::default(),
+            cont_ddt: gpu.zeros(nc)?,
         })
     }
 
@@ -647,7 +705,7 @@ impl<'m> KOmegaSst<'m> {
         correct_boundary_conditions(gpu, &self.core.fld, &mut self.omega, self.core.mesh)?;
 
         self.core.update_flow_derived(gpu, flow)?;
-        self.update_blending(gpu, flow)?;
+        self.update_blending(gpu, flow, None)?;
         self.correct_nut(gpu, flow)?;
         self.core.store_k_prev(gpu, &self.k.f)?;
 
@@ -659,7 +717,12 @@ impl<'m> KOmegaSst<'m> {
     ///
     /// Assumes `grad U` is current, which is [`RasCore::update_flow_derived`]'s
     /// job; everything else here is rebuilt from scratch.
-    fn update_blending(&mut self, gpu: &Gpu, flow: &FlowState) -> Result<()> {
+    fn update_blending(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        rho: Option<&DevBuf<Scalar>>,
+    ) -> Result<()> {
         let n = self.core.mesh.n_cells;
         let c = self.coeffs;
         let grad_scheme = self.core.ctrl.grad_scheme;
@@ -684,21 +747,40 @@ impl<'m> KOmegaSst<'m> {
             grad_scheme,
         )?;
 
-        sst_blending(
-            gpu,
-            &self.sst,
-            &mut self.f1,
-            &mut self.f2,
-            &self.k.f,
-            &self.omega.f,
-            &self.grad_k,
-            &self.grad_omega,
-            &self.y,
-            flow.nu,
-            c.beta_star,
-            c.sigma_w2,
-            n,
-        )?;
+        match rho {
+            None => sst_blending(
+                gpu,
+                &self.sst,
+                &mut self.f1,
+                &mut self.f2,
+                &self.k.f,
+                &self.omega.f,
+                &self.grad_k,
+                &self.grad_omega,
+                &self.y,
+                flow.nu,
+                c.beta_star,
+                c.sigma_w2,
+                n,
+            )?,
+            // (156.5): the density in CD_kw and in arg1's third branch.
+            Some(r) => sst_blending_rho(
+                gpu,
+                &self.sst,
+                &mut self.f1,
+                &mut self.f2,
+                &self.k.f,
+                &self.omega.f,
+                &self.grad_k,
+                &self.grad_omega,
+                &self.y,
+                r,
+                flow.nu,
+                c.beta_star,
+                c.sigma_w2,
+                n,
+            )?,
+        }
 
         if let Some(v) = self.f1_override {
             set_field(gpu, &self.fld, &mut self.f1, v, n)?;
@@ -795,6 +877,115 @@ impl<'m> KOmegaSst<'m> {
         flow: &FlowState,
         t: Option<&GpuScalarField>,
     ) -> Result<(SolverPerformance, SolverPerformance)> {
+        self.correct_impl(gpu, flow, t, None)
+    }
+
+    /// The settings [`KOmegaSst::correct_rho`] reads - SPEC-LIT §156.3-§156.4.
+    pub fn set_rho_options(&mut self, opts: RhoSstOptions) -> Result<()> {
+        if let Some(s) = opts.sust {
+            let ok = |v: Scalar| v.is_finite() && v > 0.0;
+            if !ok(s.k_amb) || !ok(s.omega_amb) {
+                return Err(Error::Config(format!(
+                    "kOmegaSST sust: k_amb = {} and omega_amb = {} must both be \
+                     finite and positive (SPEC-LIT 156.4)",
+                    s.k_amb, s.omega_amb
+                )));
+            }
+        }
+        self.rho_opts = opts;
+        Ok(())
+    }
+
+    pub fn rho_options(&self) -> RhoSstOptions {
+        self.rho_opts
+    }
+
+    /// `[n_cells]` the `k` equation's explicit production as the last
+    /// correction assembled it: `min(G, c_1 beta* k omega)`, times `rho` and
+    /// with SST-sust's term under [`KOmegaSst::correct_rho`].
+    pub fn k_production(&self) -> &DevBuf<Scalar> {
+        &self.g_lim
+    }
+
+    /// One outer iteration of the rho-weighted SST-2003 - SPEC-LIT §156,
+    /// (156.1)-(156.9):
+    ///
+    /// ```text
+    /// ddt(rho, k) + div(phi_m, k) - laplacian(rho_f (nu + sigma_k nu_t), k)
+    ///     = rho min(G, c_1 beta* k omega) - rho beta* omega k - (2/3) rho k div u
+    /// ddt(rho, w) + div(phi_m, w) - laplacian(rho_f (nu + sigma_w nu_t), w)
+    ///     = rho blend(gamma) P - rho blend(beta) w² + rho cross-diffusion
+    /// ```
+    ///
+    /// `nu_t` stays the kinematic `a_1 k/max(a_1 omega, S F_2)`, so
+    /// `mu_t = rho nu_t` is (156.4). The sources are the kinematic kernels'
+    /// multiplied by `rho` cell by cell after the limiter and SST-sust terms
+    /// are added, and the dilatation term keeps the kinematic structure (a
+    /// Susp of the `k` equation, outside the limiter): §156.7.
+    /// With every density `1`, `phi_volume` the same flux and the default
+    /// [`RhoSstOptions`], this is [`KOmegaSst::correct`] bit for bit.
+    ///
+    /// Refused by name: buoyancy production, a hybrid length scale and the
+    /// two transition models (each is a kinematic stamp this form does not
+    /// weight), and `localEuler` (refused by `Ddt::add_rho`, §86.7).
+    pub fn correct_rho(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        dens: &SstDensity<'_>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        let refuse = |what: &str| {
+            Err(Error::Config(format!(
+                "kOmegaSST: the rho-weighted form (SPEC-LIT 156) does not carry {what}; \
+                 it is a kinematic stamp this form does not weight by rho. \
+                 Alternative: the kinematic form, or a case without it."
+            )))
+        };
+        if self.core.buoyancy.map(|b| b.is_active()).unwrap_or(false) {
+            return refuse("buoyancy production (SPEC-LIT 17)");
+        }
+        if self.des.is_some() {
+            return refuse("a hybrid length scale (SPEC-LIT 57)");
+        }
+        if self.lm.is_some() {
+            return refuse("the Langtry-Menter transition model (SPEC-LIT 88)");
+        }
+        if self.gm.is_some() {
+            return refuse("the gamma transition model (SPEC-LIT 90)");
+        }
+
+        let m = self.core.mesh;
+        let (n, nif, nbf) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
+        let len = |what: &str, got: usize, want: usize| -> Result<()> {
+            if got == want {
+                Ok(())
+            } else {
+                Err(Error::Config(format!(
+                    "kOmegaSST rho form: `{what}` has {got} entries, expected {want}"
+                )))
+            }
+        };
+        len("rho", dens.rho.len(), n)?;
+        len("rho0", dens.rho0.len(), n)?;
+        len("rho00", dens.rho00.len(), n)?;
+        len("rho_face (internal)", dens.rho_face.f.len(), nif)?;
+        len("rho_face (boundary)", dens.rho_face.bf.len(), nbf)?;
+        len("phi_volume (internal)", dens.phi_volume.f.len(), nif)?;
+        len("phi_volume (boundary)", dens.phi_volume.bf.len(), nbf)?;
+
+        self.correct_impl(gpu, flow, None, Some(dens))
+    }
+
+    fn correct_impl(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        t: Option<&GpuScalarField>,
+        // SPEC-LIT §156. `None` is every line of this function as it stood
+        // before §156: each use below is one failed `if let` or the `None`
+        // arm of a `match` that is the old line verbatim.
+        dens: Option<&SstDensity<'_>>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
         let n = self.core.mesh.n_cells;
         let ctrl = self.core.ctrl;
         let wall = self.core.wall;
@@ -822,7 +1013,19 @@ impl<'m> KOmegaSst<'m> {
         self.core.ddt.advance(ctrl.delta_t);
 
         self.core.update_flow_derived(gpu, flow)?;
-        self.update_blending(gpu, flow)?;
+        // §156.1: `update_flow_derived` formed `div u` from `flow.phi`, which
+        // in the rho form is the MASS flux; (156.3)'s dilatation is the
+        // velocity divergence, so it is re-formed from the volume flux. Then
+        // (86.4)'s continuity coefficient for a `bounded` scheme.
+        if let Some(d) = dens {
+            let mesh = self.core.mesh;
+            fvc_div_surface(gpu, &self.core.fv, &mut self.core.div_u, d.phi_volume, mesh)?;
+            if n > 0 {
+                let core = &self.core;
+                core.ddt.rho_continuity(gpu, &mut self.cont_ddt, mesh, d.rho, d.rho0, d.rho00)?;
+            }
+        }
+        self.update_blending(gpu, flow, dens.map(|d| d.rho))?;
 
         // G_b = (nu_t/Pr_t) g.grad(T)/T and its C_3 (SPEC-LIT 17), from the
         // same PREVIOUS nu_t the shear production G uses - identical to
@@ -859,13 +1062,32 @@ impl<'m> KOmegaSst<'m> {
         )?;
 
         // ---- omega -------------------------------------------------------
-        self.core.assemble_transport_blended(
-            gpu,
-            flow,
-            &self.omega,
-            ctrl.eps_conv(),
-            &self.sigma_w,
-        )?;
+        match dens {
+            None => self.core.assemble_transport_blended(
+                gpu,
+                flow,
+                &self.omega,
+                ctrl.eps_conv(),
+                &self.sigma_w,
+            )?,
+            Some(d) => {
+                let mass = MassWeighting {
+                    rho: d.rho,
+                    rho0: d.rho0,
+                    rho00: d.rho00,
+                    rho_face: d.rho_face,
+                    cont_ddt: &self.cont_ddt,
+                };
+                self.core.assemble_transport_blended_mass_weighted(
+                    gpu,
+                    flow,
+                    &self.omega,
+                    ctrl.eps_conv(),
+                    &self.sigma_w,
+                    &mass,
+                )?;
+            }
+        }
 
         // `P` rather than the wall-corrected `G/nu_t`: in a wall-adjacent cell
         // `constrain_wall_cells` replaces the whole row with the near-wall
@@ -917,6 +1139,34 @@ impl<'m> KOmegaSst<'m> {
             )?;
         }
 
+        // §156.3-§156.4: the omega-side limiter and SST-sust's term, then
+        // every omega source times rho. Per unit density until the multiply,
+        // which is exact at rho == 1.
+        if let Some(d) = dens {
+            if self.rho_opts.limit_omega_production {
+                sst_omega_limited_production(
+                    gpu,
+                    &self.sst,
+                    &mut self.core.su,
+                    &self.core.g,
+                    &self.core.nut.f,
+                    &self.k.f,
+                    &self.omega.f,
+                    &self.gamma_b,
+                    c.beta_star,
+                    c.c1,
+                    n,
+                )?;
+            }
+            if let Some(s) = self.rho_opts.sust {
+                sst_sust_omega(gpu, &self.sst, &mut self.core.su, &self.beta_b, s.omega_amb, n)?;
+            }
+            let fld = &self.fld;
+            crate::field_ops::multiply_field(gpu, fld, &mut self.core.su, d.rho, n)?;
+            crate::field_ops::multiply_field(gpu, fld, &mut self.core.sp, d.rho, n)?;
+            crate::field_ops::multiply_field(gpu, fld, &mut self.core.susp, d.rho, n)?;
+        }
+
         fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.core.su, 1.0)?;
         fvm_sp(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.core.sp, 1.0)?;
         fvm_susp(
@@ -946,13 +1196,32 @@ impl<'m> KOmegaSst<'m> {
         correct_boundary_conditions(gpu, &self.core.fld, &mut self.omega, self.core.mesh)?;
 
         // ---- k -----------------------------------------------------------
-        self.core.assemble_transport_blended(
-            gpu,
-            flow,
-            &self.k,
-            ctrl.k_conv(),
-            &self.sigma_k,
-        )?;
+        match dens {
+            None => self.core.assemble_transport_blended(
+                gpu,
+                flow,
+                &self.k,
+                ctrl.k_conv(),
+                &self.sigma_k,
+            )?,
+            Some(d) => {
+                let mass = MassWeighting {
+                    rho: d.rho,
+                    rho0: d.rho0,
+                    rho00: d.rho00,
+                    rho_face: d.rho_face,
+                    cont_ddt: &self.cont_ddt,
+                };
+                self.core.assemble_transport_blended_mass_weighted(
+                    gpu,
+                    flow,
+                    &self.k,
+                    ctrl.k_conv(),
+                    &self.sigma_k,
+                    &mass,
+                )?;
+            }
+        }
 
         sst_k_sources(
             gpu,
@@ -1037,6 +1306,19 @@ impl<'m> KOmegaSst<'m> {
             let gm = gm.as_ref().expect("checked just above");
             let (sp, nut) = (&mut core.sp, &core.nut.f);
             gm.stamp_k_sources(gpu, g_lim, sp, nut, s, nu, n)?;
+        }
+
+        // §156.4 then (156.1): SST-sust's k term, then every k source times
+        // rho - `rho min(G, c_1 beta* k omega)`, `rho beta* omega` and the
+        // dilatation Susp `(2/3) rho div u`. Exact at rho == 1.
+        if let Some(d) = dens {
+            if let Some(s) = self.rho_opts.sust {
+                sst_sust_k(gpu, &self.sst, &mut self.g_lim, c.beta_star, s.k_amb, s.omega_amb, n)?;
+            }
+            let fld = &self.fld;
+            crate::field_ops::multiply_field(gpu, fld, &mut self.g_lim, d.rho, n)?;
+            crate::field_ops::multiply_field(gpu, fld, &mut self.core.sp, d.rho, n)?;
+            crate::field_ops::multiply_field(gpu, fld, &mut self.core.susp, d.rho, n)?;
         }
 
         fvm_su(gpu, &self.core.fv, &mut self.core.a, self.core.mesh, &self.g_lim, 1.0)?;
@@ -1875,4 +2157,9 @@ mod tests {
         Ok(())
     }
 
+    // SPEC-LIT §156.6 (DST-05): the rho-weighted form's six rows, written
+    // once in tests/shared/ and run here and by tests/sst_rho.rs (both
+    // builds).
+    use crate as ofgpu;
+    include!("../../tests/shared/sst_rho_cases.rs");
 }

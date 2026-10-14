@@ -331,7 +331,7 @@ export async function validateCaseText(text: string, relPath: string, workspaceR
   return { ok: errors.length === 0, format, errors, warnings, suggestedDrivers, problems, model: info.model }
 }
 
-function broadcastProblems(ctx: ToolContext, relPath: string, problems: Problem[]): void {
+export function broadcastProblems(ctx: ToolContext, relPath: string, problems: Problem[]): void {
   ctx.hub.broadcast({ t: 'problems', source: 'schema', path: relPath, runId: null, items: problems.filter((p) => p.source === 'schema') })
   ctx.hub.broadcast({ t: 'problems', source: 'semantic', path: relPath, runId: null, items: problems.filter((p) => p.source === 'semantic') })
 }

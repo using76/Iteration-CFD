@@ -1,0 +1,21 @@
+# C. Huang, M. Bloching and A. N. Lipatnikov, "A vented corn starch dust explosion in an 11.5 m3
+# vessel: Experimental and numerical study", J. Loss Prev. Process Ind. 75 (2022) 104707,
+# DOI 10.1016/j.jlp.2021.104707, open access under CC BY 4.0 (the copy read:
+# research.chalmers.se/publication/527616/file/527616_Fulltext.pdf, read 2026-10-13).
+# TABLE 1 (page 4, "Summary of thermophysical properties of corn starch dust"), every row, AS
+# PRINTED (tabulated, not digitised), and the four numbers section 3.1's text prints beside it.
+# The one data row holds, in order:
+#   n_C, n_H, n_O    the chemical formula C6H7.88O4.98 (Table 1)
+#   W_cs             molecular weight, kg/mol (Table 1: 0.16)
+#   Hf_cs            standard heat of formation, kJ/mol (Table 1: -792.6)
+#   a0 .. a4         the polynomial coefficients of eq. (1), a0 dimensionless, a1 in 1/K (Table 1)
+#   a5               the constant of eq. (2), K. Table 1 prints it "-9 9808", read as -99808 with a
+#                    thin-space thousands separator; SPEC-LIT section 152.2 says why the stream
+#                    re-derives it from Hf_cs instead
+#   R_spec           the specific gas constant R0/W_cs, J/(kg K) (section 3.1 text: 52.11)
+#   R0               the gas constant, J/(mol K) (section 3.1 text: 8.314)
+#   Hf_cs_kg         the heat of formation per mass, kJ/kg (section 3.1 text: -4970)
+#   dH_reaction      the heat of reaction, kJ/mol, as Bradley et al. (1989) report it
+#                    (section 3.1 text: 2521)
+n_C,n_H,n_O,W_cs,Hf_cs,a0,a1,a2,a3,a4,a5,R_spec,R0,Hf_cs_kg,dH_reaction
+6,7.88,4.98,0.16,-792.6,-3.2726,0.10056,0,0,0,-99808,52.11,8.314,-4970,2521

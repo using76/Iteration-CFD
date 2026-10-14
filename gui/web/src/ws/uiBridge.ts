@@ -13,6 +13,8 @@ import { linkCameras } from '../viewer/api/cameraLink'
 import { actions, activeCasePath } from './actions'
 import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
 import type { useSessionStore } from '../state/sessionStore'
+// Type-only: the value import would pull monaco into the node tests (see editor below).
+import type { SaveCaseOutcome } from '../state/editorStore'
 // tabStateLabel / tabScreenLabel are value imports; uiStore has no DOM imports,
 // so this stays node-test safe. useUiStore itself must NOT be imported here
 // (the bridge takes its store through deps so tests can inject fakes).
@@ -37,7 +39,13 @@ export interface UiBridgeDeps {
   /** close_tab's bookkeeping on the editor store. Injected by client.ts; kept
    *  optional and behind this interface because importing editorStore here
    *  would pull monaco into the node tests. */
-  editor?: { isDirty(path: string): boolean; closeBuffer(path: string): void; removeDiff(id: string): void }
+  editor?: {
+    isDirty(path: string): boolean
+    closeBuffer(path: string): void
+    removeDiff(id: string): void
+    /** save_case: validate the buffer on the server, refuse on errors unless force, then write it (editorStore.saveCase). */
+    saveCase?(path: string, force: boolean): Promise<SaveCaseOutcome>
+  }
 }
 
 /** set_camera / fit_view always answer within this, below the hub's 5 s UI_TIMEOUT_MS. */
@@ -493,6 +501,34 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'open_case':
         u.openFile(cmd.path)
         return { ok: true }
+      case 'save_case': {
+        // The open editor buffer of the screen's case, validated before it is written (STU-05).
+        const path = activeCasePath()
+        if (path === null) return { ok: false, error: 'NO_CASE (save_case): no case is open in the editor; open_case first' }
+        if (!deps.editor?.saveCase) return { ok: false, error: 'NO_EDITOR (save_case): this window has no case editor to save from' }
+        const showProblems = () => {
+          u.setBottomVisible(true)
+          u.setBottomTab('problems')
+        }
+        const r = await deps.editor.saveCase(path, cmd.force === true)
+        if (r.ok) {
+          if (r.errors > 0) showProblems()
+          return { ok: true }
+        }
+        if (r.code === 'CASE_INVALID') {
+          showProblems()
+          return {
+            ok: false,
+            error: `CASE_INVALID (save_case): ${r.message}; nothing was written. The findings are in the Problems list: fix them, or send save_case {force: true} to save anyway`,
+          }
+        }
+        return { ok: false, error: `${r.code} (save_case): ${r.message}` }
+      }
+      case 'new_case':
+      case 'validate_case':
+        return unsupported(cmd.type, 'gui_control applies this on the server through case_create / case_validate; this window should not receive it')
+      case 'start_mesh':
+        return unsupported(cmd.type, 'gui_control applies this on the server through mesh_generate / mesh_regions; this window should not receive it')
       case 'set_locale':
         u.setLocale(cmd.locale)
         actions.setSettings({ locale: cmd.locale })

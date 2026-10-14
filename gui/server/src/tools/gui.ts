@@ -4,10 +4,16 @@
 // session carries the commands. The run commands are the exception:
 // set_run_setting / start_run / stop_run (and the legacy run command) are
 // applied on the server through guiRun.ts's delegation to run_start /
-// run_stop, never forwarded to the window.
+// run_stop, never forwarded to the window. So are new_case / validate_case,
+// through guiCase.ts's delegation to case_create / case_validate; save_case
+// goes to the window, which owns the editor buffer it writes. open_mesh_dialog
+// edits guiMesh.ts's per-session mesh draft and start_mesh runs it through
+// mesh_generate (or mesh_regions) with that tool's approval.
 import { UiCommandSchema, type UiState } from '@cfd/shared'
 import { z } from 'zod'
 import { okResult, type ToolDef } from './context.js'
+import { guiCasePreview, guiNewCase, guiValidateCase } from './guiCase.js'
+import { applyMeshDialog, guiMeshPreview, guiStartMesh, withMeshDraft } from './guiMesh.js'
 import { applyRunSetting, guiRunDelegate, guiRunPreview, guiStartRun, guiStopRun } from './guiRun.js'
 
 const UI_COMMAND_TIMEOUT_MS = 5_000
@@ -24,17 +30,23 @@ export const guiControl: ToolDef<typeof UiCommandSchema> = {
     const delegate = guiRunDelegate(cmd)
     if (delegate === 'run_start') return guiStartRun(ctx)
     if (delegate === 'run_stop') return guiStopRun(cmd.type === 'stop_run' ? (cmd.runId ?? null) : null, ctx)
+    // The case commands likewise (guiCase.ts): case_create / case_validate.
+    if (cmd.type === 'new_case') return guiNewCase(cmd, ctx)
+    if (cmd.type === 'validate_case') return guiValidateCase(cmd, ctx)
+    // The mesh commands likewise (guiMesh.ts): the draft edit, then mesh_generate / mesh_regions.
+    if (cmd.type === 'open_mesh_dialog') return applyMeshDialog(cmd, ctx)
+    if (cmd.type === 'start_mesh') return guiStartMesh(ctx)
     const res = await ctx.hub.requestUi(cmd, { timeoutMs: UI_COMMAND_TIMEOUT_MS, sessionId: ctx.sessionId })
     if (!res.ok) {
       const code = res.error?.code ?? 'UI_ERROR'
       const message = res.error?.message ?? 'the UI did not apply the command'
       return { ok: false, data: { ok: false, error: { code, message }, state: res.state }, error: { code, message } }
     }
-    return okResult({ ok: true, command: cmd.type, state: res.state })
+    return okResult({ ok: true, command: cmd.type, state: withMeshDraft(res.state, ctx.sessionId) })
   },
-  // The approval card for a delegated run command; null for every other
-  // gui_control command, which policy classifies as auto anyway.
-  preview: (cmd, ctx) => guiRunPreview(cmd, ctx),
+  // The approval card for a delegated run command, new_case or start_mesh; null
+  // for every other gui_control command, which policy classifies as auto anyway.
+  preview: async (cmd, ctx) => (await guiRunPreview(cmd, ctx)) ?? (await guiCasePreview(cmd, ctx)) ?? guiMeshPreview(cmd, ctx),
 }
 
 export const guiState: ToolDef<z.ZodObject<Record<string, never>>> = {
@@ -43,7 +55,8 @@ export const guiState: ToolDef<z.ZodObject<Record<string, never>>> = {
     "Read what the operator's screen currently shows: active tab, project-tree step, right panel, mouse tool, frame, projection, overlays, selected cell, run id and run progress. Check it before assuming what the user is looking at, and after driving the screen with gui_control.",
   schema: z.object({}),
   async run(_input, ctx) {
-    const state: UiState | null = ctx.hub.getUiState(ctx.sessionId)
+    // The mesh draft lives on the server (guiMesh.ts), so it is filled in here.
+    const state: UiState | null = withMeshDraft(ctx.hub.getUiState(ctx.sessionId), ctx.sessionId)
     if (!state) return okResult({ ok: true, state: null, notice: 'no GUI has reported its state; the operator may not have the studio open' })
     return okResult({ ok: true, state })
   },
