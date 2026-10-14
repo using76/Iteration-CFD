@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 use ofgpu::io::case::CaseControls;
 use ofgpu::io::case_json::{read_case_jsonc, LoweredCase};
-use ofgpu::io::polymesh::{build_host_mesh_local, read_poly_mesh};
+use ofgpu::io::polymesh::{build_host_mesh_local, read_poly_mesh, PolyMeshRaw};
 use ofgpu::models::RasModel;
 use ofgpu::types::DVec3;
 use ofgpu::{Error, Gpu, HostMesh, Result, Scalar};
@@ -113,6 +113,19 @@ pub fn load_case(case_path: &Path) -> Result<(HostMesh, CaseControls, Option<Low
         }
         let cc = ofgpu::io::case::read_case_controls(case_path)?;
         Ok((hm, cc, None))
+    }
+}
+
+/// The raw polyMesh of the case [`load_case`] loaded, which it does not keep:
+/// the lattice of SPEC-LIT 117.4 is laid from it (VIO-05a). A JSONC case
+/// builds it again from its lowering (`lowered` is `load_case`'s third
+/// value); an OpenFOAM case reads `constant/polyMesh` again. Called only by
+/// a run that writes `vdb`/`nvdb` on a mesh that is not a uniform Cartesian
+/// box, once, before the time loop.
+pub fn case_raw_mesh(case_path: &Path, lowered: Option<&LoweredCase>) -> Result<PolyMeshRaw> {
+    match lowered {
+        Some(l) => l.build_raw_mesh(),
+        None => read_poly_mesh(case_path),
     }
 }
 

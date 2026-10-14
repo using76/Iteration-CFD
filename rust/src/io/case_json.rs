@@ -1606,6 +1606,17 @@ impl LoweredCase {
         }
     }
 
+    /// The raw polyMesh [`Self::build_host_mesh`] builds its mesh from - the
+    /// lattice of SPEC-LIT 117.4 is laid from it (VIO-05a). The patch names
+    /// are the builder's; the map reads the faces and points only, in the
+    /// mesh's own face order.
+    pub fn build_raw_mesh(&self) -> Result<crate::io::polymesh::PolyMeshRaw> {
+        match &self.wedge {
+            None => crate::blockgen::raw_mesh(&self.block),
+            Some(w) => crate::blockgen::raw_wedge_mesh(w),
+        }
+    }
+
     /// The mesh this case runs on. Without `mesh.wedge`: exactly
     /// `crate::blockgen::build_mesh(&self.block)`, bit for bit what every
     /// driver built before SPEC-LIT 119.3. With it: the 119.0 wedge mesh of

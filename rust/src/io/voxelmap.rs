@@ -960,10 +960,11 @@ impl VoxelMap {
     /// BOTH builds - the boxes from the polyMesh points, which are f64 from
     /// F32-03 on, and the half-space tests through `geom64()` - so it is the
     /// same, bit for bit, in either build (117.2 item 1). The lattice box and
-    /// every point are in world coordinates: this tree has no local origin
-    /// yet, and when F32-10's shift arrives the map adds it back before it is
-    /// built, so the written transform stays the world transform (117.2
-    /// item 4). Deterministic and single-threaded; no float is hashed.
+    /// every point are in world coordinates, so `hm` must be a world mesh:
+    /// `output_plan::volume_target` builds one from `raw` when the driver's
+    /// mesh is stored about F32-10's local origin, and the written transform
+    /// stays the world transform (117.2 item 4). Deterministic and
+    /// single-threaded; no float is hashed.
     pub fn build(raw: &PolyMeshRaw, hm: &HostMesh, spec: &LatticeSpec) -> Result<VoxelMap> {
         let t0 = Instant::now();
         let shape = lattice_shape(raw, hm, spec)?;

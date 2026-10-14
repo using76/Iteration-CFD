@@ -858,8 +858,14 @@ error: solution diverged (NaN/Inf)
 키는 모두 생략할 수 있습니다. 이 블록으로 격자를 만들 수 없으면 솔버는 루프 전에 키 이름을
 대고 거절합니다: 어느 축에서 `lo >= hi`인 `box`, 0 이하의 `voxel`, `maxVoxels: 0`, 예산을
 맞추려면 16배를 넘게 성기게 해야 하는 명시적 `voxel`, 모르는 `sample`·`activation` 값.
-아직 격자를 깔지 않는 드라이버는 카테시안이 아닌 격자에서 `vdb`/`nvdb`를 루프 전에
-자기 이름을 대고 거절합니다. `-permissive`를 주면 대신 시각화 출력을 쓰지 않습니다.
+`-permissive`를 주면 대신 시각화 출력을 쓰지 않습니다.
+
+`ofgpu-lowmach`와 `ofgpu-k-omega`는 어떤 격자에서도 이 격자를 깝니다. 케이스의 블록을 쓰고,
+격자를 말하지 않는 명령줄(`-output vdb`)에서는 위의 기본값을 씁니다. 격자는 루프 전에 한 번
+만들고 크기, 복셀, 유체 비율을 출력합니다. 얇거나 경사가 심한 격자에서는 기본 복셀(가장 작은
+셀 부피의 세제곱근)이 영역의 두께보다 성길 수 있으니 `voxel`을 적으십시오. 아직 격자를 깔지
+않는 드라이버는 카테시안이 아닌 격자에서 `vdb`/`nvdb`를 루프 전에 자기 이름을 대고
+거절합니다.
 
 ### Studio 3D 뷰어
 
@@ -1095,8 +1101,9 @@ ofgpu-validate
 ### 컷셀·경사 격자에서 `-output nvdb`가 거절됨
 
 `nvdb`/`vdb`는 복셀 격자입니다. 균일 카테시안 상자에서는 셀이 곧 복셀이고, 그 밖의
-격자에는 `output.visualisation.lattice`의 복셀 격자가 필요합니다(8장). 그 격자를 깔지
-않는 드라이버는 루프에 들어가기 전에 자기 이름과 이유(예: `cell volumes are not uniform`)를
+격자에는 `output.visualisation.lattice`의 복셀 격자가 필요합니다(8장).
+`ofgpu-lowmach`와 `ofgpu-k-omega`는 그 격자를 깔고, 격자를 깔 수 없을 때만 거절합니다. 그
+격자를 깔지 않는 드라이버는 루프에 들어가기 전에 자기 이름과 이유(예: `cell volumes are not uniform`)를
 대고 거절합니다.
 컷셀 해석의 산출물은 `-output foam,vtu`로 받으십시오. `-permissive`를 주면 `nvdb`만
 목록에서 빠지고 나머지 형식은 그대로 쓰입니다.

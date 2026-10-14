@@ -46,12 +46,13 @@ use crate::io::case_json::{JsonLattice, JsonOutput};
 use crate::io::contract;
 use crate::io::nvdb::Precision;
 use crate::io::output_types::OutputField;
-use crate::io::polymesh::PolyMeshRaw;
-use crate::io::voxelmap::{self, LatticeActivation, LatticeSample, LatticeSpec};
+use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
+use crate::io::voxelmap::{self, LatticeActivation, LatticeSample, LatticeSpec, VoxelMap};
 use crate::mesh::HostMesh;
 use crate::io::writer::{
-    FoamWriter, NvdbWriter, ResultWriter, UsdaWriter, VdbWriter, VtuWriter, WriteCtx,
+    CartesianInfo, FoamWriter, NvdbWriter, ResultWriter, UsdaWriter, VdbWriter, VtuWriter, WriteCtx,
 };
+use crate::types::DVec3;
 use crate::restart::Checkpoints;
 
 // ==========================================================================
@@ -1050,6 +1051,138 @@ pub fn drop_volume_formats_on_a_non_cartesian_mesh(
 }
 
 // ==========================================================================
+//  SPEC-LIT 117.6 / 117.12 - what the volume writers sample onto (VIO-05a)
+// ==========================================================================
+
+/// Whether `formats` names a voxel format, `vdb` or `nvdb` - the two that
+/// need a [`VolumeTarget`].
+pub fn has_volume_format(formats: &[OutputFormat]) -> bool {
+    formats.iter().any(|f| matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb))
+}
+
+/// What a run's `.vdb`/`.nvdb` files sample onto, decided once before the
+/// time loop: the cells of a uniform Cartesian box, whose bytes SPEC-LIT
+/// 117.6 keeps, or the lattice of 117.3 on any other mesh.
+pub enum VolumeTarget {
+    Cartesian(CartesianInfo),
+    Lattice(VoxelMap),
+}
+
+impl VolumeTarget {
+    /// `WriteCtx::cart`.
+    pub fn cart(&self) -> Option<&CartesianInfo> {
+        match self {
+            VolumeTarget::Cartesian(c) => Some(c),
+            VolumeTarget::Lattice(_) => None,
+        }
+    }
+
+    /// `WriteCtx::vox`.
+    pub fn vox(&self) -> Option<&VoxelMap> {
+        match self {
+            VolumeTarget::Cartesian(_) => None,
+            VolumeTarget::Lattice(m) => Some(m),
+        }
+    }
+
+    /// The lines a driver prints before the time loop: SPEC-LIT 117.7's
+    /// report of the lattice, or one line saying the cells are the voxels.
+    pub fn report_lines(&self) -> Vec<String> {
+        let VolumeTarget::Lattice(vm) = self else {
+            return vec!["volume output: uniform Cartesian box, the cells are the voxels (SPEC-LIT 117.6)".to_string()];
+        };
+        let r = &vm.report;
+        let mut lines = vec![format!(
+            "volume output: lattice {} x {} x {} of h = {} m (requested {}, coarsen {}): {} voxels, {} fluid, {} gap-filled; fluid fraction {} (SPEC-LIT 117.7)",
+            r.n[0], r.n[1], r.n[2], r.voxel, r.voxel_requested, r.coarsen, r.n_voxels, r.n_fluid, r.n_filled, r.fluid_fraction,
+        )];
+        if let Some(e) = r.volume_error {
+            lines.push(format!("  volume error {e}"));
+        }
+        if r.n_linear_fallback > 0 {
+            lines.push(format!("  linear sampling falls back to the cell value in {} cells", r.n_linear_fallback));
+        }
+        if let Some(n) = &r.note {
+            lines.push(format!("  note: {n}"));
+        }
+        lines.push(format!("  lattice built in {:.3} s", r.build_s));
+        lines
+    }
+}
+
+/// The one helper of VIO-05a: `cart` is `cartesian::detect` turned into a
+/// [`CartesianInfo`] (`None` when the mesh is not a uniform Cartesian box),
+/// and `spec` the case's `output.visualisation.lattice`, or the 117.3
+/// defaults on the command-line route. Call it only when
+/// [`has_volume_format`] holds: the map can be large.
+///
+/// `raw` is the polyMesh `hm` was built from. A Cartesian box needs none, so
+/// a caller passes `None` there and reads no mesh twice; on any other mesh
+/// `None` is refused by name.
+///
+/// The lattice is laid in world coordinates (117.2 item 4). `raw.points` are
+/// world; when `hm` stores its geometry about a local origin (F32-10, the
+/// `single` build's OpenFOAM route) a world `HostMesh` is built from the same
+/// `raw` for the map alone, so the map is the f64 build's map bit for bit
+/// (117.2 item 1). The cell order is `raw`'s in both, which is all the map
+/// hands the writers.
+pub fn volume_target(
+    raw: Option<&PolyMeshRaw>,
+    hm: &HostMesh,
+    cart: Option<CartesianInfo>,
+    spec: &LatticeSpec,
+) -> Result<VolumeTarget> {
+    if let Some(c) = cart {
+        return Ok(VolumeTarget::Cartesian(c));
+    }
+    let Some(raw) = raw else {
+        return Err(Error::Config(
+            "volume output: the mesh is not a uniform Cartesian box, and the lattice of SPEC-LIT 117.4 \
+             is laid from its polyMesh, which this caller did not pass"
+                .into(),
+        ));
+    };
+    let vm = if hm.origin == DVec3::ZERO {
+        VoxelMap::build(raw, hm, spec)?
+    } else {
+        VoxelMap::build(raw, &build_host_mesh(raw)?, spec)?
+    };
+    Ok(VolumeTarget::Lattice(vm))
+}
+
+/// SPEC-LIT 117.12 on the command-line route of a driver that lays the
+/// lattice: `-output vdb`/`-output nvdb` are refused only when no lattice
+/// can be laid. `no_lattice` is `voxelmap::lattice_shape(..).err()` on the
+/// 117.3 defaults, `None` on a Cartesian box. Strict: `Err` naming the
+/// format, the reason and what does work (§13.4). `-permissive`: one
+/// warning per volume format, and the list comes back without them.
+pub fn drop_volume_formats_without_a_lattice(
+    formats: &[OutputFormat],
+    no_lattice: Option<&str>,
+) -> Result<Vec<OutputFormat>> {
+    let Some(reason) = no_lattice else { return Ok(formats.to_vec()) };
+    let mut kept = Vec::with_capacity(formats.len());
+    for f in formats {
+        if !matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb) {
+            kept.push(*f);
+            continue;
+        }
+        contract::unsupported_note(
+            &format!("-output {}", f.name()),
+            "a mesh with no lattice",
+            &["foam", "vtu", "usda (boundary surface only)"],
+            &format!(
+                "a .{} file is a voxel grid, and no lattice can be laid for this run: {reason}. foam and vtu preserve the polyhedra",
+                f.name()
+            ),
+            &format!("dropping {} from -output", f.name()),
+            (),
+        )?;
+    }
+    Ok(kept)
+}
+
+// ==========================================================================
 //  Tests
 // ==========================================================================
 
@@ -1559,6 +1692,76 @@ mod tests {
         assert!(!warned("-output nvdb") && !warned("-output vdb"), "and nothing to warn about");
         let s = drop_volume(&all, Some(why)).unwrap_err().to_string();
         for want in ["-output nvdb", "a non-Cartesian mesh", why, "foam", "vtu", "-permissive"] {
+            assert!(s.contains(want), "strict must say {want:?}: {s}");
+        }
+        reset_warnings();
+        set_permissive(true);
+        let kept = drop_volume(&all, Some(why)).expect("permissive");
+        assert_eq!(kept, vec![OutputFormat::Foam, OutputFormat::Vtu], "the substitution the warning named");
+        assert!(warned("-output nvdb") && warned("-output vdb"), "one warning per volume format");
+        set_permissive(false);
+    }
+
+    /// VIO-05a's helper: the cells of a uniform Cartesian box, else the
+    /// lattice of (117.1) - predicted here from the mesh, not from the map.
+    #[test]
+    fn volume_target_is_the_box_or_the_lattice() {
+        use crate::blockgen::{raw_mesh, BlockSpec, GradedAxis};
+        let axis = |n: usize| GradedAxis { lo: 0.0, hi: 1.0, n, expansion: 1.0, two_sided: false };
+        let spec = BlockSpec { x: axis(4), y: axis(4), z: axis(4), ..Default::default() };
+        let raw = raw_mesh(&spec).expect("raw_mesh");
+        let hm = build_host_mesh(&raw).expect("build_host_mesh");
+        let grid = crate::pressure::cartesian::detect(&hm).expect("a uniform box");
+        let info = crate::io::writer::cartesian_info(&hm, &grid);
+        let t = volume_target(None, &hm, Some(info), &LatticeSpec::default()).unwrap();
+        let c = t.cart().expect("the cells are the voxels (117.6)");
+        assert_eq!((c.nx, c.ny, c.nz, c.origin, c.spacing), (info.nx, info.ny, info.nz, info.origin, info.spacing));
+        assert!(t.vox().is_none());
+        assert_eq!(t.report_lines().len(), 1);
+
+        // The 2:1 mesh on [0, 1]^3: min V = 1/512, so (117.1)'s default
+        // h = 1/8 and n = ceil(1/h - 1e-9) = 8 on every axis.
+        let (raw, hm) = crate::io::nvdb::lattice_fixture::refined();
+        assert!(crate::pressure::cartesian::detect(&hm).is_err());
+        let v_min = hm.geom64().v.iter().copied().fold(f64::INFINITY, f64::min);
+        let h = v_min.cbrt();
+        let n = (1.0 / h - 1e-9).ceil() as usize;
+        assert_eq!(n, 8);
+        assert!(volume_target(None, &hm, None, &LatticeSpec::default()).is_err(), "no polyMesh, no lattice");
+        let t = volume_target(Some(&raw), &hm, None, &LatticeSpec::default()).unwrap();
+        assert!(t.cart().is_none());
+        let r = &t.vox().expect("a lattice").report;
+        assert_eq!(r.n, [n, n, n]);
+        assert_eq!(r.n_voxels, 512);
+        assert_eq!(r.n_fluid, 512, "the default box is the mesh's own");
+        assert_eq!(r.coarsen, 1.0);
+        let lines = t.report_lines();
+        assert!(lines[0].contains("lattice 8 x 8 x 8") && lines[0].contains("512 voxels"), "{}", lines[0]);
+
+        // 117.12: the budget refusal of an explicit voxel comes back by name.
+        let tight = LatticeSpec { voxel: Some(1e-3), max_voxels: 1000, ..LatticeSpec::default() };
+        let e = volume_target(Some(&raw), &hm, None, &tight).err().expect("s > 16").to_string();
+        assert!(e.contains("over the 16 limit"), "{e}");
+        assert!(has_volume_format(&[OutputFormat::Foam, OutputFormat::Nvdb]));
+        assert!(!has_volume_format(&[OutputFormat::Foam, OutputFormat::Usda]));
+    }
+
+    /// SPEC-LIT 117.12 on the command-line route of a driver that lays the
+    /// lattice, strict and `-permissive`.
+    #[test]
+    fn the_command_line_volume_formats_are_dropped_without_a_lattice() {
+        use super::drop_volume_formats_without_a_lattice as drop_volume;
+        let _g = permissive_test_guard();
+        let all = [OutputFormat::Nvdb, OutputFormat::Foam, OutputFormat::Vdb, OutputFormat::Vtu];
+        let why = "output.visualisation.lattice.maxVoxels: 0 - a zero-voxel budget";
+        set_permissive(false);
+        reset_warnings();
+        assert_eq!(drop_volume(&all, None).unwrap(), all.to_vec(), "a lattice: the identity");
+        let exact = [OutputFormat::Foam, OutputFormat::Vtu];
+        assert_eq!(drop_volume(&exact, Some(why)).unwrap(), exact.to_vec(), "no volume format: the identity");
+        assert!(!warned("-output nvdb") && !warned("-output vdb"), "and nothing to warn about");
+        let s = drop_volume(&all, Some(why)).unwrap_err().to_string();
+        for want in ["-output nvdb", "a mesh with no lattice", "no lattice can be laid for this run", why, "foam", "vtu", "-permissive"] {
             assert!(s.contains(want), "strict must say {want:?}: {s}");
         }
         reset_warnings();

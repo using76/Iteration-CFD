@@ -182,6 +182,7 @@ use ofgpu::field_setup::{
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField, RawVectorField};
 use ofgpu::io::case_json::{LoweredCase, LoweredMotion};
+use ofgpu::io::voxelmap::LatticeSpec;
 use ofgpu::mesh::ale::AleMesh;
 use ofgpu::mesh::gpugeom::flatten_faces;
 use ofgpu::mesh::motion::{MeshMotion, PatchMotion};
@@ -689,6 +690,9 @@ fn write_time(
     // one `outer_iteration` reported, carried here so the file's own line
     // says what the iteration line said.
     mach: MachReport,
+    // SPEC-LIT 117.6: the lattice the volume writers sample onto, laid once
+    // in `run`; `None` when no vdb/nvdb is written or the box is Cartesian.
+    volume: Option<&ofgpu::io::VolumeTarget>,
 ) -> Result<()> {
     let out_root = output_root(case_path);
     let name = format_time_name(t);
@@ -749,7 +753,7 @@ fn write_time(
         name: &name,
         mesh: hm,
         cart: cart.as_ref(),
-        vox: None,
+        vox: volume.and_then(|v| v.vox()),
         fields: &vis_fields,
         foam: &foam_fields,
     };
@@ -1808,6 +1812,20 @@ fn run(o: &Options) -> Result<RunEnd> {
             output_plan = None;
         }
     }
+    // SPEC-LIT 117.4: the lattice is laid from the polyMesh, which
+    // `load_case` does not keep. It is read again (rebuilt from the lowering
+    // on a JSONC case) only when vdb/nvdb are asked for on a mesh that is
+    // not a uniform Cartesian box, and dropped once the map is built.
+    let wants_volume = ofgpu::io::has_volume_format(&o.output)
+        || output_plan
+            .as_ref()
+            .and_then(|p| p.vis.as_ref())
+            .is_some_and(|v| ofgpu::io::has_volume_format(&v.formats));
+    let raw_mesh = if wants_volume && ofgpu::pressure::cartesian::detect(&hm).is_err() {
+        Some(common::case_raw_mesh(&o.case_path, lowered.as_ref())?)
+    } else {
+        None
+    };
     if let Some(plan) = &mut output_plan {
         // §44.4 - a steady run advances an iteration counter, not a clock.
         if !transient {
@@ -1818,15 +1836,15 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
         // SPEC-LIT 117.12 - a voxel grid needs a lattice to sample onto, and
         // the volume writers would otherwise only say so at the FIRST WRITE,
-        // which on a long transient run is a long way in. This driver lays
-        // no output.visualisation.lattice yet, so a mesh that is not a
-        // uniform Cartesian box has none.
-        plan.refuse_visualisation_without_a_lattice(
-            ofgpu::pressure::cartesian::detect(&hm)
-                .err()
-                .map(|why| format!("ofgpu-lowmach lays no output.visualisation.lattice yet, and this mesh is not a uniform Cartesian box ({why})"))
-                .as_deref(),
-        )?;
+        // which on a long transient run is a long way in. On a mesh that is
+        // not a uniform Cartesian box this driver lays the case's
+        // output.visualisation.lattice (VIO-05a), so only a lattice that
+        // cannot be laid is refused here, by its own reason.
+        let no_lattice = match (plan.vis.as_ref(), raw_mesh.as_ref()) {
+            (Some(v), Some(raw)) if ofgpu::io::has_volume_format(&v.formats) => v.lattice_refusal(raw, &hm),
+            _ => None,
+        };
+        plan.refuse_visualisation_without_a_lattice(no_lattice.as_deref())?;
         // Every sub-block may have been substituted away under
         // `-permissive`; an empty plan is no plan, and the command line
         // drives, which is what each of those warnings said.
@@ -1835,16 +1853,41 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
     }
 
-    // SPEC-LIT §44.1 on the command-line route: the same early refusal the
-    // case block gets above, with `cartesian::detect`'s own reason in it.
-    // Consulted only when the command line drives (§44.6).
+    // SPEC-LIT 117.12 on the command-line route: the same early refusal the
+    // case block gets above, on the 117.3 defaults - the command line states
+    // no lattice. Consulted only when the command line drives (§44.6).
     let cli_output: Vec<OutputFormat> = match &output_plan {
         Some(_) => o.output.clone(),
-        None => ofgpu::io::output_plan::drop_volume_formats_on_a_non_cartesian_mesh(
-            &o.output,
-            ofgpu::pressure::cartesian::detect(&hm).err().as_deref(),
-        )?,
+        None => {
+            let no_lattice = match raw_mesh.as_ref() {
+                Some(raw) if ofgpu::io::has_volume_format(&o.output) => {
+                    ofgpu::io::voxelmap::lattice_shape(raw, &hm, &LatticeSpec::default()).err().map(|e| e.to_string())
+                }
+                _ => None,
+            };
+            ofgpu::io::output_plan::drop_volume_formats_without_a_lattice(&o.output, no_lattice.as_deref())?
+        }
     };
+
+    // SPEC-LIT 117.6 / 117.3: what the volume writers sample onto, laid
+    // ONCE, before the time loop, and only when vdb/nvdb are written.
+    let (volume_formats, volume_spec) = match output_plan.as_ref().and_then(|p| p.vis.as_ref()) {
+        Some(v) => (v.formats.clone(), v.lattice.clone()),
+        None if output_plan.is_none() => (cli_output.clone(), LatticeSpec::default()),
+        None => (Vec::new(), LatticeSpec::default()),
+    };
+    let volume: Option<ofgpu::io::VolumeTarget> = if ofgpu::io::has_volume_format(&volume_formats) {
+        let cart = ofgpu::pressure::cartesian::detect(&hm).ok().map(|c| ofgpu::io::cartesian_info(&hm, &c));
+        let t = ofgpu::io::volume_target(raw_mesh.as_ref(), &hm, cart, &volume_spec)?;
+        for line in t.report_lines() {
+            println!("{line}");
+        }
+        Some(t)
+    } else {
+        None
+    };
+    // The raw mesh was for the map; the run never reads it again.
+    drop(raw_mesh);
 
     let gas_props = ctrls.gas;
     let simple_ctrl = ctrls.simple;
@@ -2595,6 +2638,7 @@ fn run(o: &Options) -> Result<RunEnd> {
                 &raw_turb,
                 &raw_rho_seed,
                 last_mach,
+                volume.as_ref(),
             )?;
         }
 
@@ -2663,6 +2707,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         &raw_turb,
         &raw_rho_seed,
         last_mach,
+        volume.as_ref(),
     )?;
     // ... and a final checkpoint, for the same reason, when the case asked
     // for a series at all.
@@ -5678,11 +5723,13 @@ mod lowmach_tests {
         );
     }
 
-    /// SPEC-LIT §44.1 on the command line: `-output nvdb` on a mesh
-    /// `cartesian::detect` refuses is refused BEFORE the loop, naming the
-    /// reason - not at the final write, after the whole run, with `foam` lost.
+    /// SPEC-LIT 117.12 (VIO-05a): on a mesh `cartesian::detect` refuses,
+    /// `-output nvdb` lays the lattice of 117.3 and writes the `.nvdb` with
+    /// the foam state. A lattice that cannot be laid - here an explicit
+    /// voxel the budget would coarsen past 16 - is refused BEFORE the loop,
+    /// naming the reason, not at the final write with `foam` lost.
     #[test]
-    fn the_command_line_volume_formats_are_refused_before_the_loop_naming_the_reason() {
+    fn the_volume_formats_lay_a_lattice_on_a_graded_mesh_or_are_refused_before_the_loop() {
         if Gpu::new(0).is_err() {
             return;
         }
@@ -5691,30 +5738,47 @@ mod lowmach_tests {
         // `the_drivers_own_output_refusals_fire_by_name` takes.
         let _g = ofgpu::io::contract::permissive_test_guard();
         // The duct, graded in y: cell volumes are no longer uniform.
-        let graded = knob_case_text(&Knobs::default()).replace(
-            "\"cells\":  [10, 5, 3],",
-            "\"cells\":  [10, 5, 3],\n    \"grading\": { \"y\": { \"expansion\": 4.0 } },",
-        );
-        assert!(graded.contains("\"grading\""), "knob_case_text's cells line moved - fix the anchor");
-        let dir = scratch_dir("nvdb_graded");
-        let path = dir.join("case.jsonc");
-        std::fs::write(&path, &graded).expect("write case");
-        let case_arg = path.to_string_lossy().to_string();
-        let args: Vec<String> =
-            ["ofgpu-lowmach", case_arg.as_str(), "-iters", "2", "-output", "foam,nvdb"]
-                .iter().map(|s| s.to_string()).collect();
-        let o = parse(&args).expect("the command line must parse");
-        let e = run(&o).expect_err("nvdb on a graded mesh must be refused");
-        let m = format!("{e}");
-        for want in ["-output nvdb", "cell volumes are not uniform", "vtu", "foam", "-permissive"] {
+        let graded = |k: &Knobs| {
+            let text = knob_case_text(k).replace(
+                "\"cells\":  [10, 5, 3],",
+                "\"cells\":  [10, 5, 3],\n    \"grading\": { \"y\": { \"expansion\": 4.0 } },",
+            );
+            assert!(text.contains("\"grading\""), "knob_case_text's cells line moved - fix the anchor");
+            text
+        };
+        let run_case = |k: &Knobs, tag: &str, extra: &[&str]| -> (PathBuf, Result<()>) {
+            let dir = scratch_dir(tag);
+            let path = dir.join("case.jsonc");
+            std::fs::write(&path, graded(k)).expect("write case");
+            let mut args: Vec<String> = vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+            args.extend(extra.iter().map(|s| (*s).to_string()));
+            let o = parse(&args).expect("the command line must parse");
+            let r = run(&o).map(drop);
+            (common::json_case_output_dir(&path), r)
+        };
+        let nvdb_files = |out: &Path| -> usize {
+            std::fs::read_dir(out.join("VDB")).map_or(0, |rd| {
+                rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "nvdb")).count()
+            })
+        };
+
+        // The command line: the lattice on the 117.3 defaults.
+        let (out, r) = run_case(&Knobs::default(), "nvdb_graded", &["-iters", "2", "-output", "foam,nvdb"]);
+        r.expect("nvdb on a graded mesh lays the lattice");
+        assert!(!written_state(&out).is_empty(), "the foam state is written");
+        assert_eq!(nvdb_files(&out), 1, "and the .nvdb beside it");
+
+        // The case route: voxel 1e-4 m over the duct's default box needs far
+        // more than 1000 voxels, so (117.4)'s s exceeds 16.
+        const OUT_NVDB_TOO_FINE: &str =
+            r#", "output": { "visualisation": { "format": "nvdb", "lattice": { "voxel": 1e-4, "maxVoxels": 1000 } } }"#;
+        let (out, r) = run_case(&Knobs { output: OUT_NVDB_TOO_FINE, ..Knobs::default() }, "nvdb_too_fine", &["-iters", "2"]);
+        let m = format!("{}", r.expect_err("a lattice the budget cannot hold must be refused"));
+        for want in ["output.visualisation.format", "output.visualisation.lattice.voxel", "over the 16 limit", "vtu", "-permissive"] {
             assert!(m.contains(want), "the refusal must say {want:?}: {m}");
         }
-        let out = common::json_case_output_dir(&path);
         assert!(written_state(&out).is_empty(), "refused BEFORE the loop: nothing may be written");
         assert!(!out.join("VDB").exists(), "no empty VDB/ directory may be left behind");
-        // SPEC-LIT §13.4.1's pair: the un-graded duct, same command line, runs and writes the .nvdb.
-        let uniform = run_knobs_bytes(&Knobs::default(), "nvdb_uniform", &["-iters", "2", "-output", "foam,nvdb"]);
-        assert!(uniform.iter().any(|(n, _)| n.ends_with(".nvdb")), "the uniform duct must write the .nvdb");
     }
 
     // ----------------------------------------------------------------------
