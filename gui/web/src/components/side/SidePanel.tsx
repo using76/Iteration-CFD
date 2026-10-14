@@ -7,6 +7,7 @@ import { CfdToolsPane } from './CfdToolsPane'
 import { ExplorerTree } from './ExplorerTree'
 import { ExtensionsPane } from './ExtensionsPane'
 import { OutlineView } from './OutlineView'
+import { ProjectTree } from './ProjectTree'
 import { RunsPane } from './RunsPane'
 import { ScmPane } from './ScmPane'
 import { SearchPane } from './SearchPane'
@@ -59,6 +60,9 @@ export function SidePanel() {
             <ExplorerTree />
           </div>
           <div className="side-footer">
+            <Collapsible title={t('tree.title')} testId="project-tree-section">
+              <ProjectTree />
+            </Collapsible>
             <Collapsible title={t('panel.outline')} testId="outline-section">
               <OutlineView />
             </Collapsible>

@@ -22,6 +22,8 @@ import { selectionOfProbe, tabScreenLabel, tabStateLabel, type LogStream, type u
 // Pure series helpers (metric matching, surface keys); series.ts only type-imports
 // the store, so this value import stays node-test safe too.
 import { findMetric, metricNames, surfaceSeriesKeys } from '../chart/series'
+// The project tree's model is pure (no React, no store), so select_step stays node-test safe.
+import { buildProjectTree, findStep, parseCaseText, selectProjectNode, stepIds } from '../components/side/projectTreeModel'
 
 type SessionStore = ReturnType<typeof useSessionStore.getState>
 type UiStoreState = ReturnType<typeof useUiStore.getState>
@@ -45,6 +47,8 @@ export interface UiBridgeDeps {
     removeDiff(id: string): void
     /** save_case: validate the buffer on the server, refuse on errors unless force, then write it (editorStore.saveCase). */
     saveCase?(path: string, force: boolean): Promise<SaveCaseOutcome>
+    /** select_step: the case's text, its open buffer else the file on disk; null when neither can be read. */
+    caseText?(path: string): Promise<string | null>
   }
 }
 
@@ -267,7 +271,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
     const vs = v.getState()
     return {
       activeTab: u.activeTabId,
-      activeStep: null,
+      activeStep: u.activeStep ?? null,
       rightTab: u.assistantVisible ? (u.rightTab ?? 'AI Assistant') : null,
       tool: TOOL_TO_UI[v.getTool()],
       frame: null,
@@ -916,8 +920,16 @@ export function createUiBridge(deps: UiBridgeDeps) {
       }
       case 'run_custom_tool':
         return unsupported(cmd.type, 'gui_control runs this on the server as custom_tool_run; this window should not receive it')
-      case 'select_step':
-        return unsupported(cmd.type, 'this screen does not implement it')
+      case 'select_step': {
+        // The tree ProjectTree draws, built from the open case's text (STU-08b).
+        const path = activeCasePath()
+        const text = path !== null && deps.editor?.caseText ? await deps.editor.caseText(path) : null
+        const tree = buildProjectTree(text === null ? null : parseCaseText(text), u.locale === 'ko' ? 'ko' : 'en')
+        const node = findStep(tree, cmd.step)
+        if (node === null) return { ok: false, error: `NO_STEP (select_step): no project tree node is '${cmd.step}'; ids: ${stepIds(tree).join(', ')}` }
+        selectProjectNode(u, node, path)
+        return { ok: true }
+      }
       default:
         // Every type has a case now; a type a newer server sends still answers by name.
         return unsupported((cmd as { type: string }).type, 'this screen does not implement it')

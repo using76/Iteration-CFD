@@ -297,6 +297,8 @@ const EXTRA = {
     'properties.key': '키',
     'properties.value': '값',
     'properties.noKeys': '이 노드에는 키가 없습니다.',
+    'tree.title': '프로젝트 트리',
+    'tree.noCase': '열린 케이스가 없습니다. 케이스를 열면 단계별 항목이 채워집니다.',
   },
   en: {
     'conn.connecting': 'Connecting...',
@@ -591,6 +593,8 @@ const EXTRA = {
     'properties.key': 'Key',
     'properties.value': 'Value',
     'properties.noKeys': 'This node has no keys.',
+    'tree.title': 'Project Tree',
+    'tree.noCase': 'No case is open. Open a case to fill in each step.',
   },
 } as const
 

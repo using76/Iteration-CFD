@@ -73,10 +73,20 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
   }
 
   const viewer = createViewerBridge(send, ui)
+  // select_step's tree reads the case from its open buffer, else from disk (ProjectTree does the same).
+  const caseText = async (path: string): Promise<string | null> => {
+    const buf = useEditorStore.getState().buffers[path]
+    if (buf && !buf.loading) return buf.content
+    try {
+      return (await api.readFile(path)).content
+    } catch {
+      return null
+    }
+  }
   // The agent's gui_control drives this screen through ui.command; the bridge
   // applies what it can and answers every command, so the model never waits
   // out the hub's 5 s timeout on a frame nothing would ever answer.
-  const uiBridge = createUiBridge({ send, ui, session, subscribeRun, editor: { isDirty: (path) => !!useEditorStore.getState().buffers[path]?.dirty, closeBuffer: (path) => useEditorStore.getState().closeBuffer(path), removeDiff: (id) => useEditorStore.getState().removeDiff(id), saveCase: (path, force) => useEditorStore.getState().saveCase(path, { force }) } })
+  const uiBridge = createUiBridge({ send, ui, session, subscribeRun, editor: { isDirty: (path) => !!useEditorStore.getState().buffers[path]?.dirty, closeBuffer: (path) => useEditorStore.getState().closeBuffer(path), removeDiff: (id) => useEditorStore.getState().removeDiff(id), saveCase: (path, force) => useEditorStore.getState().saveCase(path, { force }), caseText } })
 
   function subscribeRun(runId: string) {
     const data = session.getState().runData[runId]
