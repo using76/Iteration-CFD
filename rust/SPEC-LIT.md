@@ -36978,9 +36978,102 @@ tetrahedra on both sides would be protected. A pass takes the tetrahedra present
 worst `q` first (ties by index). For each one still present it evaluates the removal of its six
 edges and the 2-3 flip of its four faces, and keeps the candidate with the largest new worst `q`
 if any is kept by its rule (DESIGN). The passes stop after one with no move or after
-`optimise.passes`; TET-10b will alternate them with the smoothing. The rule is strict in f64, so a
+`optimise.passes`; TET-10b alternates them with the smoothing (below). The rule is strict in f64, so a
 move can gain a round-off amount (the sphere's smallest gain is `2.5e-14` degrees). That is still
 an increase of the sorted vector of the star's qualities, so no sequence of moves cycles.
+
+**The smoothing and the perturbation, as TET-10b builds them.** `optimise::optimise` takes the
+points, the kept tetrahedra, the frozen faces and one freedom per point, and returns moved points
+and new tetrahedra. `optimise::freedoms` sets the freedoms from the face recovery of §116.11, whose
+`point_tris` names the input triangles each point lies on:
+
+```
+on input triangles:  group them into exact planes (orient3d = 0 against the group's first one)
+    one plane of one patch            ->  Plane(n)            a surface vertex, tangential
+    two planes of one patch each      ->  Line(n_1 x n_2)     a feature vertex, along its edge
+    anything else                     ->  Fixed               a corner
+on no input triangle:  k = the coordinates equal to a bound of the domain box
+    k = 0 -> Free,   k = 1 -> Plane(axis),   k = 2 -> Line(axis),   k = 3 -> Fixed     (116.21c)
+x' = a + P (x - a),    P = I,  I - n n^T,  u u^T  or  0,    a = the input position of the point
+```
+
+A point that would be `Free` but lies on a boundary face, and a point on no tetrahedron, are
+`Fixed` (DESIGN). The surface here is the polyhedral surface given to §116.11 (for the sphere, the
+remeshed one), so a point of a curved, faceted surface moves only inside one facet or along one
+crease, and the polyhedron's own vertices are corners. Placing every move at `a + P (x - a)` from
+the input position, not from the last one, keeps the point on its plane or line to rounding. A
+moved surface point also stays inside the polygon its boundary faces tile: a face that left it
+would turn over in its plane, and its tetrahedron's `orient3d` would change sign, which no move
+allows.
+
+With `f_v(x)`, the smallest `q` over the tetrahedra on `v` when `v` is at `x`, a move of `v` from
+`x` to `x'` is kept iff every one of those tetrahedra has `orient3d > 0` at `x'` and
+`f_v(x') > f_v(x)`. Only that star changes, so (116.21b) holds as stated, with "the faces on one
+tetrahedron unchanged" read as index sets; the volume is unchanged to rounding because the
+boundary moves only within its own planes. The smoothing is Freitag & Ollivier-Gooch (1997)'s
+non-smooth ascent of `f_v`:
+
+```
+A = { angles theta_i of the star with theta_i(x) <= f_v(x) + 1e-3 rad },   g_i = P grad theta_i(x)
+d = the point of smallest norm in the convex hull of the g_i      (Gilbert 1966's iteration)
+stop when |d| l <= 1e-6;   else  x <- a + P (x + s d / |d| - a),   s = 0.25 l 2^-k,
+the first k < 12 that raises f_v                                                         (116.21d)
+```
+
+`l` is the shortest edge at `v`, and the gradients are central differences with step `1e-6 l`.
+Before the ascent the centroid of the star's other vertices, placed by `P`, is tried. That is the
+"smart" Laplacian step. A vertex gets at most 8 ascent steps per sweep. A sweep visits every vertex
+that is not `Fixed`, the smallest `f_v` first (ties by index). The constants are DESIGN.
+
+The sliver perturbation is DESIGN, a heuristic. Cheng et al. (2000)'s sliver exudation is the
+provable alternative, kept for TET-10c:
+
+```
+bad = { T : q(T) < target_min  or  max theta(T) > target_max },  the smallest q first (ties by index)
+for each vertex v of a bad T that is not Fixed, 4 trials at each r in {0.2, 0.1, 0.05}:
+    x' = a + P (x + r l P u / |P u| - a),   u uniform in the unit ball (splitmix64 of perturb_seed)
+keep the trial with the largest f_v(x') if it exceeds f_v(x)                               (116.21e)
+```
+
+A round is one flip pass of `optimise::flip`, then one smoothing sweep, then, with
+`optimise.perturb_slivers`, one perturbation sweep:
+
+```
+round = flip (1 pass, frozen faces kept), smoothing sweep (116.21d), perturbation sweep (116.21e)
+at most optimise.passes rounds, stopping after a round with no move                     (116.21f)
+```
+
+The generator is seeded once per call, and no step depends on hash order, so a run is
+deterministic.
+
+**Measured (TET-10b).** These are the defaults: 8 rounds, targets 10 and 165 degrees, and the
+perturbation on with seed 1.
+
+- **Sphere in a box (TET-09's).** There are 2 262 points: 913 free, 677 on planes, 450 on lines
+  and 222 fixed. The 9 989 tetrahedra become 9 309. The smallest dihedral per round is 1.0232,
+  18.2508, 23.3533, 24.8167, 25.4794, 26.0452, 26.2778, 26.4511 and 26.5925 degrees. The largest
+  goes from 178.1956 to 153.0691 degrees. That is 0 + 691 + 968 flip moves and 14 595 smoothing
+  moves, with no tetrahedron left for the perturbation. The volume is kept to a relative
+  1.14e-14, and the largest distance of a moved surface point from the surface is 1.57e-16.
+- **Cube minus a cylinder.** The body is `[-0.5, 0.5]^3` minus the cylinder of radius 0.25 along
+  `z`, with 24 facets. It is remeshed and refined at `h = 0.0625` on the body, `H = 0.4` and
+  `g = 1.2`, in `[-1.25, 1.25]^3`, with the flow outside and through the hole. The 71 074
+  tetrahedra become 66 072. The smallest dihedral goes from 0.1086 to 24.0054 degrees, and the
+  largest from 179.8283 to 149.9348 degrees. There are 14 perturbation moves, and the jump from
+  8.2006 to 23.8962 degrees comes in the round after them. The surface distance is 7.85e-17 and
+  the volume relative 1.64e-14.
+- **The 30-degree wedge: MISSED.** The body is the prism over the isosceles triangle with a
+  30-degree apex, `x` from -0.5 to 0.5 and `z` from -0.5 to 0.5, in the same box. §116.13's
+  refinement does not finish on it. At `h = 0.1` it reaches a cap of 20 000 inserted points after
+  187 passes, and the next pass would need 5 816 more. The whole sphere in a box has 2 262 points.
+  Probes at `h` from 0.04 to 0.15, with the default cap and with a cap of 60 000, did not finish
+  either: they hit the cap, the 240 s probe limit, or, at `h = 0.08`, `refine/facet`. So the gate
+  cannot be measured on the wedge. The cause is upstream. The 30-degree angle between the facets
+  at the apex edge breaks Shewchuk (1998)'s assumption of angles of at least 90 degrees, the same
+  family as TET-09's recorded miss. The cure is protection of small angles in the refinement
+  (§116.13), not in the optimiser, so neither the gate nor TET-10c's exudation applies yet. The
+  cube minus a cylinder does not finish at `h = 0.1` either: it reaches a cap of 60 000 after
+  520 passes. At `h = 0.0625` it finishes.
 
 ### 116.15 Prism layers by post-inflation
 
@@ -37223,6 +37316,11 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-10a | TET-09's cube `[-0.5, 0.5]^3` at `h = 0.4` in `[-1, 1]^3` (1 495 kept tetrahedra) | 2 passes: 53 3-2 flips, 81 edge removals, 0 2-3 flips; 1 442 tetrahedra; the worst `q` 2.4429, 15.8028, 15.8028 degrees; the volume relative 2.03e-15 | the TET-10a commit |
 | TET-10a | the hand fixtures | three tetrahedra about the edge `(0, 0, +-1)` over a triangle in `z = 0`: one 3-2 flip, worst 38.5679 -> 62.7744 degrees, and no 2-3 flip brings them back; the same pair flattened to `z = +-0.05`: one 2-3 flip, 5.5507 -> 11.1014 degrees, refused when the shared face is frozen; the regular tetrahedron's six angles `arccos(1/3)` within 1e-12 rad | the TET-10a commit |
 | TET-10a | the f32 arm | `rust/tests/tetmesh_optimise.rs`, 3 tests (the `Scalar` width; the monotone worst, validity and volume; the boundary faces) on the sphere in a box pass under `--features single` with every printed number identical to the f64 build; the largest dihedral, printed and not gated, goes 178.1956 -> 152.7733 degrees | the TET-10a commit |
+| TET-10b | §116.14, changed by this unit | the paragraphs "The smoothing and the perturbation, as TET-10b builds them" and "Measured (TET-10b)", (116.21c)-(116.21f), the DESIGN freedom rule and constants (active set 1e-3 rad, 8 ascent steps of 12 halvings, the centroid first, radii 0.2, 0.1 and 0.05 of the shortest edge with 4 trials each, splitmix64); Gilbert (1966) joined §116.19 | the TET-10b commit |
+| TET-10b | TET-09's sphere in a box at the default `tet.optimise` (8 rounds, perturbation on, seed 1) | 9 989 -> 9 309 tetrahedra; the smallest dihedral per round 1.0232, 18.2508, 23.3533, 24.8167, 25.4794, 26.0452, 26.2778, 26.4511, 26.5925 degrees, the largest 178.1956 -> 153.0691: min >= 10 and max <= 165 PASS; 691 3-2 flips, 968 edge removals, 14 595 smoothing moves, 0 perturbation moves; volume relative 1.14e-14; the largest distance of a moved surface point (359 moved) from the surface 1.57e-16 (bar 1e-12) PASS; the boundary faces unchanged | the TET-10b commit |
+| TET-10b | the cube `[-0.5, 0.5]^3` minus the 24-facet cylinder of radius 0.25, at `h = 0.0625`, `H = 0.4`, `g = 1.2` in `[-1.25, 1.25]^3` (71 074 kept tetrahedra) | 66 072 tetrahedra; the smallest dihedral 0.1086 -> 24.0054 degrees, the largest 179.8283 -> 149.9348: PASS; 14 perturbation moves; volume relative 1.64e-14; surface distance 7.85e-17 (5 127 surface points moved) PASS | the TET-10b commit |
+| TET-10b | the 30-degree wedge at `h = 0.1`, the same field and box | **MISSED**: §116.13's refinement does not finish (a cap of 20 000 inserted points after 187 passes; probes at `h = 0.04-0.15` with caps up to 60 000 did not finish either), so the gate cannot be measured; the cause is the 30-degree facet angle at the apex edge in the refinement, not the optimiser. `optimise::tests::dihedral_bounds_wedge` asserts that cause | the TET-10b commit |
+| TET-10b | the f32 arm | `rust/tests/tetmesh_optimise.rs`, 4 tests (TET-10a's 3 and `optimise_dihedral_bounds` on the sphere in a box) pass under `--features single`, and the printed optimise line is byte-identical to the f64 build's | the TET-10b commit |
 
 ### 116.19 References
 
@@ -37252,6 +37350,9 @@ Crossref metadata was checked against the title, authors, year and pages given h
   `10.1002/(SICI)1097-0207(19971115)40:21<3979::AID-NME251>3.0.CO;2-9`.
 - Geuzaine, C. & Remacle, J.-F. (2009). Gmsh. *Int. J. Numer. Meth. Engng* 79(11), 1309-1331.
   DOI `10.1002/nme.2579`. Cited for its licence. Not read.
+- Gilbert, E. G. (1966). An iterative procedure for computing the minimum of a quadratic form on
+  a convex set. *SIAM J. Control* 4(1), 61-80. DOI `10.1137/0304007` (checked against Crossref by
+  the supervisor of TET-10b, 2026-10-15).
 - Kallinderis, Y., Khawaja, A. & McMorris, H. (1996). Hybrid prismatic/tetrahedral grid
   generation for viscous flows around complex geometries. *AIAA J.* 34(2), 291-298. DOI
   `10.2514/3.13063`.

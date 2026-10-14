@@ -5,8 +5,9 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-//! TET-10a's integration test: the flips of SPEC-LIT §116.14 through the
-//! public API only, in both builds. The fixture is TET-09's: the level-3
+//! TET-10a's and TET-10b's integration test: the flips, and the rounds of
+//! flips, smoothing and sliver perturbation, of SPEC-LIT §116.14 through
+//! the public API only, in both builds. The fixture is TET-09's: the level-3
 //! icosphere remeshed to a size field with `h = 0.25` on the sphere,
 //! `H = 0.5` and `g = 1.2`, in the domain box [-2, 2]^3, recovered and
 //! refined from the hull. The bars are §116.18's for TET-10a: the worst
@@ -20,7 +21,9 @@
 //! consulted.
 
 use ofgpu::tetmesh::carve::CarveStart;
-use ofgpu::tetmesh::optimise::{boundary_faces, check_valid, dihedral_angles, flip, Flipped};
+use ofgpu::tetmesh::optimise::{
+    boundary_faces, check_valid, dihedral_angles, dihedral_extremes, flip, freedoms, optimise, Flipped,
+};
 use ofgpu::tetmesh::predicates::orient3d;
 use ofgpu::tetmesh::recover::recover_faces;
 use ofgpu::tetmesh::refine::{refine, Refined};
@@ -256,4 +259,38 @@ fn optimise_boundary_frozen() {
     assert_eq!(b0, carved);
     assert_eq!(b1, b0);
     assert!(subtris_kept);
+}
+
+/// TET-10b's gate on the sphere in a box through the public API, in both
+/// builds: the freedoms of (116.21c), the rounds of (116.21f) at the
+/// default `tet.optimise`, the smallest dihedral never decreasing, every
+/// tetrahedron valid, the boundary faces and the volume kept, and
+/// min >= 10, max <= 165 degrees (§116.18). Every number is f64, so the
+/// printed line matches across builds.
+#[test]
+fn optimise_dihedral_bounds() {
+    let c = case();
+    let r = &c.refined;
+    let (pts, tets) = (&r.recovery.points, &r.carved.tets);
+    let free = freedoms(&r.recovery, &vec![0; r.recovery.tris.len()], tets);
+    let o = optimise(pts, tets, &r.recovery.subtris, &free, &TetOptimiseSpec::default()).unwrap();
+    let s = &o.stats;
+    let (lo, hi) = (*s.worst.last().unwrap(), *s.largest.last().unwrap());
+    let pass = lo >= 10.0 && hi <= 165.0;
+    let rv = (volume(&o.points, &o.tets) - volume(pts, tets)).abs() / volume(pts, tets);
+    println!(
+        "optimise sphere in a box: {} -> {} tets; {s:?}; volume rel {rv:.2e}; min {lo:.4} max {hi:.4} deg against \
+         10 and 165: {}",
+        tets.len(),
+        o.tets.len(),
+        if pass { "PASS" } else { "MISSED" }
+    );
+    assert!(s.worst.windows(2).all(|p| p[1] >= p[0]), "{:?}", s.worst);
+    check_valid(&o.points, &o.tets).unwrap();
+    assert_eq!(boundary_faces(&o.tets), boundary_faces(tets));
+    assert!(rv <= 1e-12, "volume rel {rv:e}");
+    let deg = 180.0 / std::f64::consts::PI;
+    let (l2, h2) = dihedral_extremes(&o.points, &o.tets);
+    assert_eq!((l2 * deg, h2 * deg), (lo, hi));
+    assert!(pass, "min {lo:.4} deg, max {hi:.4} deg against 10 and 165");
 }
