@@ -47712,6 +47712,98 @@ own repeatability:
 
 Labels: (137.4)-(137.5).
 
+### 137.6 The `parcels` block as built (CHR-25)
+
+`src/io/case_parcels.rs` builds §137.2's `parcels` table. This subsection
+records the rules that table leaves open, as the code applies them. It is
+this project's own contract (ORIGINAL), with no external source.
+
+**One lowering for both routes.** The dictionary route turns
+`constant/cloudProperties` into the JSON object the JSONC route reads, then
+hands it to the same `deny_unknown_fields` deserialiser. An unknown key is
+therefore refused by name on both routes. `JsonParcels::lower(species,
+gravity)` is the only lowering. In the dictionary:
+
+* `(a b c)` is a vector, and a number may carry `[dimensions]` (the last
+  number is read).
+* `addedMass` is a switch (`yes`/`no`, `true`/`false`, `on`/`off`).
+* `evaporation { liquid { } }`, `impact { }` and `coupling { }` are
+  sub-dictionaries.
+* `injectors { <name> { ... } }` holds one named sub-dictionary per
+  injector. They are taken in name order, because an injector's index is
+  part of every parcel it emits (§66.8).
+
+**Keys and names.** Every model name goes through the library's own
+`from_name`. A refused name therefore keeps the library's reason: `film` and
+`spread` keep §78.11's, and `splash` keeps §78.7's. §137.2's capitalised
+spellings (`SchillerNaumann`, `Inert`, `Weber`, `SemiImplicit`) are accepted
+by lowering their first letter. `wall` also takes `stick`, the fourth value
+of §78.5. The key `maxSubsteps` is spelled as in §137.2.
+
+The sub-blocks map field by field:
+
+* `evaporation` holds `saturation`, `transfer`, `wCarrier`, `pAmbient`,
+  `cfl` and `liquid`.
+* `liquid` is a `preset` (`water`, the default, or `benzene`) with any of
+  its nine properties overridden: `wVapour`, `tBoil`, `pBoil`, `hVBoil`,
+  `tCrit`, `dVapour`, `tRefD`, `dExponent` and `cpVapour`.
+* `impact` holds `splash`, `tension`, `sigma`, `muLiquid`, `weStick`,
+  `weSpread`, `kCrit` and `splashA`.
+
+`persistentBlocks` reaches `ParcelControls::persistent_blocks`, so every
+library field has a key.
+
+**Defaults.** An absent key takes the library's `Default`, with two
+exceptions:
+
+* An absent `gravity` on the JSONC route is the case's `physics.gravity`,
+  because a case states one gravity. On the dictionary route it is the
+  library's.
+* An absent `coupling`, or an absent key inside it, is `off`/`off`/`none`,
+  as §137.2's table says. This differs from `CouplingControls::default()`,
+  whose momentum coupling is `explicit`.
+
+An injector requires `position` and `massFlow`. Its other fields default to
+`Injector::default()`.
+
+**Refusals,** each naming its key:
+
+* An empty `injectors` list.
+* A setting the selected model would not read (§13.4): `restitution` or
+  `tangentialLoss` unless `wall` is `rebound` or `weber`; `cLiquid`, `kGas`
+  or `cpGas` with `physics inert`; `evaporation` unless `physics
+  evaporating`; `impact` unless `wall weber`; and `coupling.vapour` with
+  `mass none`.
+* `coupling.mass evaporation` without a `species` block. The JSONC route has
+  none until CHR-12a, so `JsonCase::lower` passes no species and the mass
+  coupling is refused there. The lowering already takes `species.names` for
+  CHR-12a to pass in.
+* `coupling.mass evaporation` without a `vapour`, or with a `vapour` that is
+  not in `species.names`.
+* An unknown liquid `preset`.
+* Every range check of `ParcelControls::validate`, which runs at lowering.
+
+The coupling-consistency rules of §77.7 stay in `ParcelCoupling::new`.
+
+**The driver seam.** `ofgpu-lowmach` is the one driver that carries parcels,
+and it drives them from a case only from CHR-26 on. Until then, every driver
+refuses a parcel case rather than run it without its parcels:
+
+* `common::load_case` refuses a JSONC case through
+  `LoweredCase::refuse_parcels`.
+* `read_case_controls` refuses a case directory that holds
+  `constant/cloudProperties`.
+
+CHR-26 replaces the refusal on `ofgpu-lowmach`'s path.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `case_parcels_lowers_every_field` | one case sets every `ParcelControls`, `EvaporationControls`, `LiquidProperties`, `WallImpactControls`, `CouplingControls` and `Injector` field to a non-default value; each is read back; the dictionary route equals the JSONC route; serde round trip | exact | D |
+| `case_parcels_refusals` | every refusal above, the driver seam included | refused, naming the key | D |
+| `tests/case_parcels.rs` | both routes equal, and `film` refused, in both builds | exact | D |
+
+No labels.
+
 ---
 
 ## 138. SPMD transports — the `Comm` trait, ThreadComm, and MPI

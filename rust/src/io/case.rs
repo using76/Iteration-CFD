@@ -1583,6 +1583,14 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
         )));
     }
 
+    // SPEC-LIT §137.6: no driver carries a case's parcels before CHR-26, so a
+    // case that states them is refused rather than run without them.
+    if case_dir.join(crate::io::case_parcels::FILE).exists() {
+        return Err(crate::io::case_parcels::refuse_parcel_case(
+            crate::io::case_parcels::FILE,
+        ));
+    }
+
     // ---- physicalProperties: nu ------------------------------------------
     // transportProperties is the pre-OpenFOAM-11 name for the same file.
     //

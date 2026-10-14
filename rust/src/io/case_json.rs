@@ -111,6 +111,12 @@ pub struct JsonCase {
     /// lowers, serialises and runs exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motion: Option<JsonMotion>,
+    /// SPEC-LIT §137.2: the parcel model (`crate::io::case_parcels`). Absent
+    /// (the default) is every case this reader has ever built; present, it
+    /// lowers to [`LoweredCase::parcels`] and every driver refuses the case
+    /// until CHR-26 wires `ofgpu-lowmach` (§137.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parcels: Option<crate::io::case_parcels::JsonParcels>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -1549,9 +1555,22 @@ pub struct LoweredCase {
     /// validated (the `cp` check included). `None` for every case without
     /// the block.
     pub compressible: Option<crate::compressible::thermo::PerfectGas>,
+    /// SPEC-LIT §137.2: the `parcels` block, lowered onto the library's
+    /// settings. `None` for every case without the block.
+    pub parcels: Option<crate::io::case_parcels::LoweredParcels>,
 }
 
 impl LoweredCase {
+    /// SPEC-LIT §137.6: a driver's refusal of a case that states parcels.
+    /// No driver carries a case's parcels before CHR-26, so a run would
+    /// ignore them; `Ok` for every case without the block.
+    pub fn refuse_parcels(&self) -> Result<()> {
+        match self.parcels {
+            Some(_) => Err(crate::io::case_parcels::refuse_parcel_case("parcels")),
+            None => Ok(()),
+        }
+    }
+
     /// The mesh this case runs on. Without `mesh.wedge`: exactly
     /// `crate::blockgen::build_mesh(&self.block)`, bit for bit what every
     /// driver built before SPEC-LIT 119.3. With it: the 119.0 wedge mesh of
@@ -3172,6 +3191,14 @@ impl JsonCase {
         }
 
         let motion = self.motion.as_ref().map(JsonMotion::lower).transpose()?;
+        // SPEC-LIT §137.2: JSONC has no `species` block before CHR-12a, so a
+        // mass coupling is refused here by name; the parcels' gravity, when
+        // the block states none, is the case's.
+        let parcels = self
+            .parcels
+            .as_ref()
+            .map(|p| p.lower(None, Some(self.physics.gravity)))
+            .transpose()?;
         Ok(LoweredCase {
             name: self.name.clone(),
             block,
@@ -3212,6 +3239,7 @@ impl JsonCase {
             motion,
             wedge,
             compressible,
+            parcels,
         })
     }
 }
