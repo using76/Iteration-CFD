@@ -40500,161 +40500,6 @@ numerics change of `vof.cu`), which belongs to the §118 owner.
   |U|^2` along a streamline entering through the boundary, and hydrostatic
   equilibrium `grad p = rho g`.
 
-### 120.18 Imprinting a static non-conformal interface - two patches clipped into one conformal pair (BC-18)
-
-`cyclicAMI` stays refused (BC-19 lifts it); this subsection is the mesh
-operation BC-19 builds on. `mesh::imprint::imprint(raw, a, b, opts)` takes a
-`PolyMeshRaw` and two of its patches, `A` and `B`, whose faces cover the same
-surface but do not match, and returns a new `PolyMeshRaw` in which both
-patches are replaced by SUB-FACES: every overlapping pair `(a, b)` of an `A`
-face and a `B` face gives one sub-face on each side, the sub-face `i` of `A`
-and the sub-face `i` of `B` are the same polygon, and every cell that owned
-an `A` or `B` face becomes a polyhedron whose faces still close. The operation
-is static (it runs once, before the solver, on the host) and all of its
-arithmetic is `f64` in both builds: `PolyMeshRaw::points` is `DVec3`
-(§118.2), and nothing is rounded to `Scalar`.
-
-**Source.** The clipping is the reentrant polygon clipper of **Sutherland &
-Hodgman, "Reentrant polygon clipping", Communications of the ACM 17(1):32-42,
-1974, doi:10.1145/360767.360802** (ACM Digital Library, open archive); the
-plane frame, the Newell area vector and the edge splitting are elementary
-vector geometry. No AMI, imprint or mesh-intersection code was opened.
-
-**The transform.** `B` may sit elsewhere (a cyclic pair): a rigid map takes a
-point `y` of `B` into the frame of `A`,
-
-```
-x = T(y) = R y + t,     T^-1(x) = R^T (x - t),     R^T R = I   (120.18.1)
-```
-
-with `R` checked orthonormal to `1e-12` in every entry of `R^T R - I`; the
-identity is the default, for two blocks that meet. A `B` normal maps by `R`.
-
-**Tolerance.** `L` is the diagonal of the bounding box of `A`'s points and
-`tau = rel_tol L` (`rel_tol` defaults to `1e-9`). Two points closer than `tau`
-are the same point; a point within `tau` of a line or a plane lies on it.
-
-**The plane frame of a face.** For a face with vertices `x_0 .. x_{n-1}`, the
-Newell area vector, the centre and the frame are
-
-```
-S = 1/2 sum_k x_k x x_{k+1},   e3 = S/|S|,   c = (1/n) sum_k x_k
-e1 = unit((x_1 - x_0) - ((x_1 - x_0).e3) e3),   e2 = e3 x e1          (120.18.2)
-(s, r) = ((x - c).e1, (x - c).e2),   x = c + s e1 + r e2
-```
-
-A face whose vertex lies farther than `tau` from its own plane, or whose loop
-in `(s, r)` turns clockwise anywhere (a cross product below `-tau |edge|`), is
-refused by name: the clipper needs planar convex faces.
-
-**Pairs.** `(a, b)` is a candidate when the boxes of `a` and `T(b)`, each grown
-by `tau`, overlap and every vertex of `T(b)` lies within `tau` of `a`'s plane.
-A candidate whose normals agree (`e3_a . R e3_b > 0`) is refused by name:
-the two sides face the same way, so the transform is wrong. Non-coplanar
-boxes that overlap are not a pair; a faceted curved interface therefore ends
-in the coverage refusal below, and that is its stated limit.
-
-**The clip (Sutherland-Hodgman).** In `a`'s frame, `a`'s loop is
-counter-clockwise; `T(b)`'s loop runs the other way and is reversed first.
-The subject polygon `P` is clipped against each edge `p -> q` of `a` in turn.
-With the signed distance
-
-```
-d(x) = cross(q - p, x - p) / |q - p|,   cross(u, w) = u_s w_r - u_r w_s     (120.18.3)
-```
-
-a point is inside when `d >= -tau`. Each subject edge `S -> E` emits: both
-inside, `E`; `S` inside and `E` outside, `I`; `S` outside and `E` inside, `I`
-then `E`; both outside, nothing; where
-
-```
-I = S + (d_S / (d_S - d_E)) (E - S)                                    (120.18.4)
-```
-
-The result, mapped back by (120.18.2), is the sub-face of the pair. It is
-dropped when fewer than three distinct points remain after the snap below, or
-when `2 |area| <= tau * perimeter` (a contact along an edge or at a corner).
-
-**Snap and weld.** Each sub-face vertex `v` (in `A`'s frame) is matched
-twice: `k`, the vertex of `a` within `tau` of `v`, and `m`, the vertex of `b`
-with `|v - T(y_m)| <= tau`, either of which may be absent. The `A` side takes
-`k` when there is one; else, when there is `m`, one new point `T(y_m)` per
-`m`; else a new point at `v`, welded with any earlier such point within
-`tau`. The `B` side takes `m` when there is one; else, when there is `k`, one
-new point `T^-1(x_k)` per `k`; else one new point `T^-1(v)` per welded `A`-side
-point. Matching grids therefore add no point at all. Consecutive repeats in a
-loop are removed; collinear vertices are KEPT, because the neighbouring
-sub-face or cell face needs them.
-
-**Orientation and pairing.** The `A` sub-face keeps `a`'s orientation (its
-area vector along `S_a`); the `B` sub-face of the same pair is the `A` loop
-reversed with the same first vertex, `[w_0, w_{n-1}, .., w_1]`, written with
-the `B` side's indices, so its area vector, mapped by `R`, is `-S` of the `A`
-sub-face: it points out of `B`'s cell, as `S_b` does. The sub-faces of both patches are written in one pair order
-(by `A` face, then by `B` face), so face `i` of `A` couples with face `i` of
-`B`, as a conformal `cyclic` pairs its faces.
-
-**Coverage.** Each original face must be covered by its sub-faces:
-
-```
-| sum_{i : parent(i) = f} |S_i|  -  |S_f| |  <=  1e-8 |S_f|             (120.18.5)
-```
-
-for every `f` of `A` and of `B`; otherwise the interface only partly overlaps,
-which is `cyclicACMI` and refused (§120), and the refusal names the face and
-its covered fraction.
-
-**Splitting the edges of the cells.** An original edge `p q` of an `A` face
-that now carries `A`-side points `v` strictly inside it (`|(v - p) x (q - p)|
-<= tau |q - p|`, `lambda = (v - p).(q - p)/|q - p|^2` in `(0, 1)`) gets them
-inserted, in increasing `lambda`, into every OTHER face of the mesh that has
-`p` and `q` consecutive in either direction - the side walls and the internal
-faces the edge borders - so each cell stays edge-manifold. The same holds for
-`B` with its own points. Patches `A` and `B` that share a point are refused
-(the two maps would meet in one face).
-
-**The output.** Internal faces keep their order and owners (with inserted
-points); patches keep their order, names, types and kinds; `A` and `B` hold
-their sub-faces with the parents' owners; every `start` is recomputed. The
-record `Imprinted` carries the mesh, the two patch indices, `parent_a[i]` and
-`parent_b[i]` (local face indices of the input patches), and the counts of
-new points on each side and of other faces that gained a point.
-
-**Refusals by name.** An unknown patch; the same patch twice; an empty patch;
-`R` not orthonormal; patches that share a point; a non-planar or non-convex
-face; a coplanar pair facing the same way; a face not covered by (120.18.5).
-
-**The gate (`tests/shared/mesh_imprint_cases.rs`, both builds; all class A or
-D - f64 geometry, the same tolerance under `single`).** The meshes are two
-one-layer blocks over the unit square, the interface at `z = 0`: `A` is a
-3 x 3 grid below, `B` above is a 3 x 3 grid (matching), a 2 x 2 grid (3:2) or
-a grid of spacing 0.5 rotated 7 degrees about (0.5, 0.5) and clipped to the
-square (12 faces, 28 pairs), and the 3:2 pair again with `B` rotated 90
-degrees about the `z` axis through (0.5, 0.5) and moved to `z = 5`, with the
-transform that maps it back.
-
-| row | claim | class |
-|---|---|---|
-| matching | 9 pairs, no new point, each sub-face its parent | D |
-| 3:2 counts | 16 pairs; 9 new `A`-side and 16 new `B`-side points; `A` parents split 1/2/4 (corner/edge/centre), every `B` face into 4; 8 `A`-block and 12 `B`-block faces gain one point each | D |
-| areas | per parent, the sub-face areas sum to the parent's to `1e-12` relative, both sides, 3:2 and rotated | A |
-| pairing | equal sizes; each `B` loop mapped by `T` equals the reversed `A` loop to `1e-12` (bit for bit with the identity); area vectors cancel to `1e-12` | A, D |
-| closure | every cell: `|sum_f S_f| <= 1e-12 sum_f |S_f|`, each directed edge once each way, the volume unchanged to `1e-12` relative; `build_host_mesh` accepts the result | A, D |
-| transform | the moved 3:2 pair gives the 3:2 counts and pairing | A, D |
-| refusals | a 0.1 shift names `cyclicACMI` and a fraction; a 0.01 gap is not covered; the bad requests above | D |
-
-**Measured beside the gate (supervisor probe, not gated).** On the gate
-meshes the worst cell closure is 4.2e-17 (3:2) and 1.1e-16 (rotated). On
-finer pairs - a 12 x 12 grid against a 1/7 grid turned 13 degrees, 30 x 30
-against 1/20 at 7 degrees, 60 x 60 against 1/40 at 3 degrees (396, 2624 and
-10264 pairs) - every cell stays edge-manifold, the worst closure is 6.2e-16,
-and the cell volumes hold to 2.2e-14 when the fan volume is taken about the
-cell's own first point (3.8e-12 about the origin, on a 6e-7 cell: the
-measurement's round-off, not the imprint's). The 60 x 60 pair imprints in
-0.36 s. The candidate search is all pairs with a box test and the weld and
-edge tables are linear scans, so the cost grows with the square of the face
-count; binning them is left to the unit that needs larger interfaces.
-
 No GPL-licensed source was consulted.
 
 ### 120.8 The thermal family - an outer wall, a prescribed heat, a lumped mass and Danckwerts' inlet
@@ -41009,6 +40854,163 @@ why the gate selects it.
   *J. Wind Eng. Ind. Aerodyn.* 95 (2007) 355-369,
   doi:10.1016/j.jweia.2006.08.002 - the empty-fetch test of horizontal
   homogeneity, and the rough-wall function written in `z0`.
+
+No GPL-licensed source was consulted.
+
+### 120.18 Imprinting a static non-conformal interface - two patches clipped into one conformal pair (BC-18)
+
+`cyclicAMI` stays refused (BC-19 lifts it); this subsection is the mesh
+operation BC-19 builds on. `mesh::imprint::imprint(raw, a, b, opts)` takes a
+`PolyMeshRaw` and two of its patches, `A` and `B`, whose faces cover the same
+surface but do not match, and returns a new `PolyMeshRaw` in which both
+patches are replaced by SUB-FACES: every overlapping pair `(a, b)` of an `A`
+face and a `B` face gives one sub-face on each side, the sub-face `i` of `A`
+and the sub-face `i` of `B` are the same polygon, and every cell that owned
+an `A` or `B` face becomes a polyhedron whose faces still close. The operation
+is static (it runs once, before the solver, on the host) and all of its
+arithmetic is `f64` in both builds: `PolyMeshRaw::points` is `DVec3`
+(§118.2), and nothing is rounded to `Scalar`.
+
+**Source.** The clipping is the reentrant polygon clipper of **Sutherland &
+Hodgman, "Reentrant polygon clipping", Communications of the ACM 17(1):32-42,
+1974, doi:10.1145/360767.360802** (ACM Digital Library, open archive); the
+plane frame, the Newell area vector and the edge splitting are elementary
+vector geometry. No AMI, imprint or mesh-intersection code was opened.
+
+**The transform.** `B` may sit elsewhere (a cyclic pair): a rigid map takes a
+point `y` of `B` into the frame of `A`,
+
+```
+x = T(y) = R y + t,     T^-1(x) = R^T (x - t),     R^T R = I   (120.18.1)
+```
+
+with `R` checked orthonormal to `1e-12` in every entry of `R^T R - I`; the
+identity is the default, for two blocks that meet. A `B` normal maps by `R`.
+
+**Tolerance.** `L` is the diagonal of the bounding box of `A`'s points and
+`tau = rel_tol L` (`rel_tol` defaults to `1e-9`). Two points closer than `tau`
+are the same point; a point within `tau` of a line or a plane lies on it.
+
+**The plane frame of a face.** For a face with vertices `x_0 .. x_{n-1}`, the
+Newell area vector, the centre and the frame are
+
+```
+S = 1/2 sum_k x_k x x_{k+1},   e3 = S/|S|,   c = (1/n) sum_k x_k
+e1 = unit((x_1 - x_0) - ((x_1 - x_0).e3) e3),   e2 = e3 x e1          (120.18.2)
+(s, r) = ((x - c).e1, (x - c).e2),   x = c + s e1 + r e2
+```
+
+A face whose vertex lies farther than `tau` from its own plane, or whose loop
+in `(s, r)` turns clockwise anywhere (a cross product below `-tau |edge|`), is
+refused by name: the clipper needs planar convex faces.
+
+**Pairs.** `(a, b)` is a candidate when the boxes of `a` and `T(b)`, each grown
+by `tau`, overlap and every vertex of `T(b)` lies within `tau` of `a`'s plane.
+A candidate whose normals agree (`e3_a . R e3_b > 0`) is refused by name:
+the two sides face the same way, so the transform is wrong. Non-coplanar
+boxes that overlap are not a pair; a faceted curved interface therefore ends
+in the coverage refusal below, and that is its stated limit.
+
+**The clip (Sutherland-Hodgman).** In `a`'s frame, `a`'s loop is
+counter-clockwise; `T(b)`'s loop runs the other way and is reversed first.
+The subject polygon `P` is clipped against each edge `p -> q` of `a` in turn.
+With the signed distance
+
+```
+d(x) = cross(q - p, x - p) / |q - p|,   cross(u, w) = u_s w_r - u_r w_s     (120.18.3)
+```
+
+a point is inside when `d >= -tau`. Each subject edge `S -> E` emits: both
+inside, `E`; `S` inside and `E` outside, `I`; `S` outside and `E` inside, `I`
+then `E`; both outside, nothing; where
+
+```
+I = S + (d_S / (d_S - d_E)) (E - S)                                    (120.18.4)
+```
+
+The result, mapped back by (120.18.2), is the sub-face of the pair. It is
+dropped when fewer than three distinct points remain after the snap below, or
+when `2 |area| <= tau * perimeter` (a contact along an edge or at a corner).
+
+**Snap and weld.** Each sub-face vertex `v` (in `A`'s frame) is matched
+twice: `k`, the vertex of `a` within `tau` of `v`, and `m`, the vertex of `b`
+with `|v - T(y_m)| <= tau`, either of which may be absent. The `A` side takes
+`k` when there is one; else, when there is `m`, one new point `T(y_m)` per
+`m`; else a new point at `v`, welded with any earlier such point within
+`tau`. The `B` side takes `m` when there is one; else, when there is `k`, one
+new point `T^-1(x_k)` per `k`; else one new point `T^-1(v)` per welded `A`-side
+point. Matching grids therefore add no point at all. Consecutive repeats in a
+loop are removed; collinear vertices are KEPT, because the neighbouring
+sub-face or cell face needs them.
+
+**Orientation and pairing.** The `A` sub-face keeps `a`'s orientation (its
+area vector along `S_a`); the `B` sub-face of the same pair is the `A` loop
+reversed with the same first vertex, `[w_0, w_{n-1}, .., w_1]`, written with
+the `B` side's indices, so its area vector, mapped by `R`, is `-S` of the `A`
+sub-face: it points out of `B`'s cell, as `S_b` does. The sub-faces of both patches are written in one pair order
+(by `A` face, then by `B` face), so face `i` of `A` couples with face `i` of
+`B`, as a conformal `cyclic` pairs its faces.
+
+**Coverage.** Each original face must be covered by its sub-faces:
+
+```
+| sum_{i : parent(i) = f} |S_i|  -  |S_f| |  <=  1e-8 |S_f|             (120.18.5)
+```
+
+for every `f` of `A` and of `B`; otherwise the interface only partly overlaps,
+which is `cyclicACMI` and refused (§120), and the refusal names the face and
+its covered fraction.
+
+**Splitting the edges of the cells.** An original edge `p q` of an `A` face
+that now carries `A`-side points `v` strictly inside it (`|(v - p) x (q - p)|
+<= tau |q - p|`, `lambda = (v - p).(q - p)/|q - p|^2` in `(0, 1)`) gets them
+inserted, in increasing `lambda`, into every OTHER face of the mesh that has
+`p` and `q` consecutive in either direction - the side walls and the internal
+faces the edge borders - so each cell stays edge-manifold. The same holds for
+`B` with its own points. Patches `A` and `B` that share a point are refused
+(the two maps would meet in one face).
+
+**The output.** Internal faces keep their order and owners (with inserted
+points); patches keep their order, names, types and kinds; `A` and `B` hold
+their sub-faces with the parents' owners; every `start` is recomputed. The
+record `Imprinted` carries the mesh, the two patch indices, `parent_a[i]` and
+`parent_b[i]` (local face indices of the input patches), and the counts of
+new points on each side and of other faces that gained a point.
+
+**Refusals by name.** An unknown patch; the same patch twice; an empty patch;
+`R` not orthonormal; patches that share a point; a non-planar or non-convex
+face; a coplanar pair facing the same way; a face not covered by (120.18.5).
+
+**The gate (`tests/shared/mesh_imprint_cases.rs`, both builds; all class A or
+D - f64 geometry, the same tolerance under `single`).** The meshes are two
+one-layer blocks over the unit square, the interface at `z = 0`: `A` is a
+3 x 3 grid below, `B` above is a 3 x 3 grid (matching), a 2 x 2 grid (3:2) or
+a grid of spacing 0.5 rotated 7 degrees about (0.5, 0.5) and clipped to the
+square (12 faces, 28 pairs), and the 3:2 pair again with `B` rotated 90
+degrees about the `z` axis through (0.5, 0.5) and moved to `z = 5`, with the
+transform that maps it back.
+
+| row | claim | class |
+|---|---|---|
+| matching | 9 pairs, no new point, each sub-face its parent | D |
+| 3:2 counts | 16 pairs; 9 new `A`-side and 16 new `B`-side points; `A` parents split 1/2/4 (corner/edge/centre), every `B` face into 4; 8 `A`-block and 12 `B`-block faces gain one point each | D |
+| areas | per parent, the sub-face areas sum to the parent's to `1e-12` relative, both sides, 3:2 and rotated | A |
+| pairing | equal sizes; each `B` loop mapped by `T` equals the reversed `A` loop to `1e-12` (bit for bit with the identity); area vectors cancel to `1e-12` | A, D |
+| closure | every cell: `|sum_f S_f| <= 1e-12 sum_f |S_f|`, each directed edge once each way, the volume unchanged to `1e-12` relative; `build_host_mesh` accepts the result | A, D |
+| transform | the moved 3:2 pair gives the 3:2 counts and pairing | A, D |
+| refusals | a 0.1 shift names `cyclicACMI` and a fraction; a 0.01 gap is not covered; the bad requests above | D |
+
+**Measured beside the gate (supervisor probe, not gated).** On the gate
+meshes the worst cell closure is 4.2e-17 (3:2) and 1.1e-16 (rotated). On
+finer pairs - a 12 x 12 grid against a 1/7 grid turned 13 degrees, 30 x 30
+against 1/20 at 7 degrees, 60 x 60 against 1/40 at 3 degrees (396, 2624 and
+10264 pairs) - every cell stays edge-manifold, the worst closure is 6.2e-16,
+and the cell volumes hold to 2.2e-14 when the fan volume is taken about the
+cell's own first point (3.8e-12 about the origin, on a 6e-7 cell: the
+measurement's round-off, not the imprint's). The 60 x 60 pair imprints in
+0.36 s. The candidate search is all pairs with a box test and the weld and
+edge tables are linear scans, so the cost grows with the square of the face
+count; binning them is left to the unit that needs larger interfaces.
 
 No GPL-licensed source was consulted.
 
