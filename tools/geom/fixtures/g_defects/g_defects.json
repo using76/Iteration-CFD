@@ -1,5 +1,5 @@
 {
- "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. AUT-01 (docs/17 §12.6): one RED fixture per family-G defect class that ends SURFACE-OPEN today. Each names a tuning row of tools/autonomy/corpus/manifests/tuning.jsonl; the STL is rebuilt by inject.write_row from that row's params (sha256-checked) and repaired by stl_repair with default options. 'today' is the measured stl_repair report on 2026-10-11 at feat/t17 7fd775c. Selection: per class, the tuning G row of that class whose repaired surface is still open, with the fewest STL bytes; the hole class only among 33..64 edges. AUT-02a (2026-10-13): the duplicate and flip fixtures are green, re-measured with duplicate removal and patch orientation. AUT-02b (2026-10-14): the t_junction fixture is green, re-measured with T-junction splitting (open 12 -> 0).",
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. AUT-01 (docs/17 §12.6): one RED fixture per family-G defect class that ends SURFACE-OPEN today. Each names a tuning row of tools/autonomy/corpus/manifests/tuning.jsonl; the STL is rebuilt by inject.write_row from that row's params (sha256-checked) and repaired by stl_repair with default options. 'today' is the measured stl_repair report on 2026-10-11 at feat/t17 7fd775c. Selection: per class, the tuning G row of that class whose repaired surface is still open, with the fewest STL bytes; the hole class only among 33..64 edges. AUT-02a (2026-10-13): the duplicate and flip fixtures are green, re-measured with duplicate removal and patch orientation. AUT-02b (2026-10-14): the t_junction fixture is green, re-measured with T-junction splitting (open 12 -> 0). AUT-02c (2026-10-14): the hole fixture is green, re-measured with Liepa hole filling up to the new default of 64 edges (open 56 -> 0); all four are green.",
  "schema": "g-defect-fixtures/1",
  "manifest": "tools/autonomy/corpus/manifests/tuning.jsonl",
  "fixtures": [
@@ -38,14 +38,14 @@
    "geometry_id": "G-1-114",
    "count": 56,
    "stl_sha256": "e58242814117e18e4f4633297921271b7e479ccad1472a91929ca318d5be1d77",
-   "status": "red",
+   "status": "green",
    "today": {
     "open_before": 56,
     "non_manifold_before": 0,
-    "open_after": 56,
+    "open_after": 0,
     "non_manifold_after": 0,
-    "closed_after": false,
-    "repaired": false
+    "closed_after": true,
+    "repaired": true
    }
   },
   {

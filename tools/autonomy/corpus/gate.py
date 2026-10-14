@@ -223,14 +223,19 @@ def _check_row_g_counts(row, stl_path, binary, scratch, params, exp, rep,
                           % (w["max_move"], 0.5 * w["tol_abs"]))
         elif w["max_move"] != 0.0:
             er.append("weld.max_move = %r != 0.0" % (w["max_move"],))
+        # a hole over 32 edges is past the ear clip; since AUT-02c the
+        # default --max-hole-edges 64 hands it to Liepa's fill, so it must
+        # come back filled by that method or skipped with a named reason
         if (params["defect"] == "hole"
                 and params["count"] > inject.MAX_HOLE_EDGES):
             ph = rep["holes"]["per_hole"]
-            want_reason = ("loop of %d edges > max_hole_edges 32"
-                           % params["count"])
-            if not (len(ph) == 1 and ph[0].get("outcome") == "skipped"
-                    and ph[0].get("reason") == want_reason):
-                er.append("the big hole was not skipped as named: %r" % (ph,))
+            if not (len(ph) == 1
+                    and ((ph[0].get("outcome") == "filled"
+                          and ph[0].get("method") == "liepa")
+                         or (ph[0].get("outcome") == "skipped"
+                             and ph[0].get("reason")))):
+                er.append("the big hole was neither filled by liepa nor "
+                          "skipped by name: %r" % (ph,))
     res["expected_repair"] = "; ".join(er)
     return _check_row_g_bytes(row, stl_path, binary, scratch, params, exp,
                               rep, res)
@@ -589,9 +594,9 @@ def run_gate(family: str, n: int, seed: int, binary: str,
                    if res["_g"]["defect"] == "hole"
                    and res["_g"]["count"] > inject.MAX_HOLE_EDGES]
             print("G-CORPUS G repair (reported, not gated): after.closed on "
-                  "%s; holes over 32 edges skipped %d/%d"
+                  "%s; holes over 32 edges filled %d/%d"
                   % (rep_line,
-                     sum(1 for res in big if res["_g"]["hole_skipped"]),
+                     sum(1 for res in big if res["_g"]["hole_skipped"] is False),
                      len(big)))
         if hasattr(gen, "expected_features"):
             ck = sum(1 for r, _ in results

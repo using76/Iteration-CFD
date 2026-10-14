@@ -1186,10 +1186,164 @@ def test_repair_g_t_junction_rows(top):
     assert not open_rows, open_rows
 
 
+def test_repair_liepa_planar_cap(top):
+    """AUT-02c: a 40-gon prism (r 1, h 0.2) without its top cap leaves a
+    planar 40-edge loop, longer than the ear clip's 32, so Liepa fills it
+    (SPEC-LIT §23.2.1): refinement inserts points, the membrane fairing
+    keeps every one in the cap's plane, no cap triangle folds over, and
+    the volume is the prism's (n/2) r^2 sin(2 pi/n) h."""
+    d = work(top, 'repair_liepa_cap')
+    n, r, h = 40, 1.0, 0.2
+    ring = [(r * math.cos(2 * math.pi * i / n), r * math.sin(2 * math.pi * i / n))
+            for i in range(n)]
+    tris = []
+    for i in range(n):
+        (x0, y0), (x1, y1) = ring[i], ring[(i + 1) % n]
+        b0, b1, t0, t1 = (x0, y0, 0.0), (x1, y1, 0.0), (x0, y0, h), (x1, y1, h)
+        tris += [((0.0, 0.0, 0.0), b1, b0), (b0, b1, t1), (b0, t1, t0)]
+    src = os.path.join(d, 'cap.stl')
+    write_stl_ascii(src, [('prism', tris)])
+    out = os.path.join(d, 'cap_r.stl')
+    repair(src, '--out', out, '--json', os.path.join(d, 'r.json'))
+    rep = load(os.path.join(d, 'r.json'))
+    assert rep['before']['open_edges'] == n, rep['before']
+    ph = rep['holes']['per_hole']
+    assert len(ph) == 1 and ph[0]['outcome'] == 'filled' and \
+        ph[0]['method'] == 'liepa' and ph[0]['inserted_vertices'] > 0, ph
+    k = ph[0]['inserted_vertices']
+    assert rep['liepa'] == {'filled': 1, 'triangles': n - 2 + 2 * k,
+                            'inserted_vertices': k}, rep['liepa']
+    assert rep['after']['closed'] is True, rep['after']
+    vol = 0.5 * n * r * r * math.sin(2 * math.pi / n) * h
+    assert rel(rep['after']['volume'], vol) <= 1e-9, (rep['after'], vol)
+    import stl_repair as sr
+    top_tris = [t for _, t in sr.read_stl(out, 'cap_r')[0]
+                if min(v[2] for v in t) > 0.5 * h]
+    assert len(top_tris) == n - 2 + 2 * k, len(top_tris)
+    zdev = max(abs(v[2] - h) for t in top_tris for v in t)
+    assert zdev <= 1e-12, zdev
+    for t in top_tris:
+        nz = (t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - \
+            (t[1][1] - t[0][1]) * (t[2][0] - t[0][0])
+        assert nz > 0.0, ('cap triangle folds over', t)
+    print('  [aut02c] 40-gon cap: %d point(s) inserted, %d cap triangle(s), '
+          'max |z - h| %.1e, rel volume %.1e'
+          % (k, len(top_tris), zdev, rel(rep['after']['volume'], vol)), flush=True)
+
+
+def _point_mesh_distance(p, A, B, C):
+    """The distance from point p to the nearest of the triangles (A, B, C)
+    (n x 3 arrays each): the closest point by Voronoi region of each
+    triangle (C. Ericson, Real-Time Collision Detection, 2005, 5.1.5)."""
+    import numpy as np
+    ab, ac, ap, bp, cp = B - A, C - A, p - A, p - B, p - C
+    d1, d2 = (ab * ap).sum(1), (ac * ap).sum(1)
+    d3, d4 = (ab * bp).sum(1), (ac * bp).sum(1)
+    d5, d6 = (ab * cp).sum(1), (ac * cp).sum(1)
+    va, vb, vc = d3 * d6 - d5 * d4, d5 * d2 - d1 * d6, d1 * d4 - d3 * d2
+    den = va + vb + vc
+    with np.errstate(divide='ignore', invalid='ignore'):
+        q = A + ab * (vb / den)[:, None] + ac * (vc / den)[:, None]
+
+    def put(mask, val):
+        q[mask] = val[mask]
+
+    def safe(x):
+        return np.where(x == 0, 1.0, x)
+
+    t = d1 / safe(d1 - d3)
+    put((vc <= 0) & (d1 >= 0) & (d3 <= 0), A + ab * t[:, None])
+    t = d2 / safe(d2 - d6)
+    put((vb <= 0) & (d2 >= 0) & (d6 <= 0), A + ac * t[:, None])
+    t = (d4 - d3) / safe((d4 - d3) + (d5 - d6))
+    put((va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0), B + (C - B) * t[:, None])
+    put((d1 <= 0) & (d2 <= 0), A)
+    put((d3 >= 0) & (d4 <= d3), B)
+    put((d6 >= 0) & (d5 <= d6), C)
+    return float(np.sqrt(((q - p) ** 2).sum(1)).min())
+
+
+def test_repair_g_hole_rows(top):
+    """AUT-02c: the 16 family-G hole tuning rows (6 to 64 edges) all close.
+    The filled patch's area equals the area the injection removed from the
+    regenerated parent within 2 %, and every point the fill inserted lies
+    within 0.5 h_f of the parent surface, h_f = base_size / 2**max_level of
+    tools/autonomy/rules.py's setup on the parent (its summary's wall and
+    feature levels, which a refused row also carries).  G-1-054 is a
+    planar 9-edge loop and keeps the ear clip's report entry."""
+    base = os.path.dirname(GEOM_TOOL)
+    for rel_p in ('../autonomy', '../autonomy/corpus'):
+        p = os.path.abspath(os.path.join(base, rel_p))
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import hashlib
+    import importlib
+    import warnings
+    import numpy as np
+    import rules
+    import stl_io
+    import stl_repair as sr
+    import inject, split
+    parent = {'A': 'gen_wing', 'B': 'gen_lathe', 'D': 'gen_bluff',
+              'E': 'gen_gap', 'F': 'gen_thin'}
+    rows = [r for r in split.load('tuning', 'fixture')
+            if r['family'] == 'G' and r['params']['defect'] == 'hole']
+    assert len(rows) == 16, len(rows)
+    d = work(top, 'g_hole')
+
+    def corners(path, stem):
+        return np.array([t for _, t in sr.read_stl(path, stem)[0]], dtype=np.float64)
+
+    def area(C):
+        return 0.5 * float(np.linalg.norm(
+            np.cross(C[:, 1] - C[:, 0], C[:, 2] - C[:, 0]), axis=1).sum())
+
+    for row in rows:
+        params, gid = row['params'], row['geometry_id']
+        stl = inject.write_row(row, d)
+        out = os.path.join(d, gid + '_r.stl')
+        jp = os.path.join(d, gid + '.json')
+        repair(stl, '--out', out, '--json', jp)
+        rep = load(jp)
+        pgen = importlib.import_module(parent[params['parent_family']])
+        pp = pgen.sample_params(params['parent_seed'], params['parent_index'])
+        P, T = pgen.build(pp)
+        data = stl_io.stl_bytes(P, T, pgen.SOLID)
+        assert hashlib.sha256(data).hexdigest() == params['parent_sha256'], gid
+        ppath = os.path.join(d, gid + '_parent.stl')
+        with open(ppath, 'wb') as f:
+            f.write(data)
+        assert rep['before']['open_edges'] == params['count'], (gid, rep['before'])
+        assert rep['after']['closed'] is True, (gid, rep['holes'])
+        ph = rep['holes']['per_hole']
+        assert len(ph) == 1 and ph[0]['outcome'] == 'filled', (gid, ph)
+        if gid == 'G-1-054':
+            assert ph == [{'edges': 9, 'outcome': 'filled', 'triangles': 7,
+                           'reason': None}], (gid, ph)
+        Cp, Ch, Cr = corners(ppath, 'p'), corners(stl, 'h'), corners(out, 'r')
+        da = (area(Cr) - area(Ch)) / (area(Cp) - area(Ch)) - 1.0
+        assert abs(da) <= 0.02, (gid, 'area', da)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            fp = rules._fp_of(ppath, gid)
+        sm = rules.setup(row, fp, ppath, 'case', gid)['summary']
+        h_f = sm['base_size_m'] / 2 ** max(sm['wall_level'], sm['feature_level'] or 0)
+        had = {tuple(v) for v in Ch.reshape(-1, 3).tolist()}
+        new = sorted({tuple(v) for v in Cr.reshape(-1, 3).tolist()} - had)
+        assert len(new) == ph[0].get('inserted_vertices', 0), (gid, len(new), ph)
+        dmax = max((_point_mesh_distance(np.array(v), Cp[:, 0], Cp[:, 1], Cp[:, 2])
+                    for v in new), default=0.0)
+        assert dmax <= 0.5 * h_f, (gid, 'distance', dmax, h_f)
+        print('  [aut02c] %s n=%d: closed, %s, %d triangle(s), %d inserted, '
+              'area %+.2e, max distance %.3f h_f'
+              % (gid, params['count'], ph[0].get('method', 'ear clip'),
+                 ph[0]['triangles'], len(new), da, dmax / h_f), flush=True)
+
+
 def test_repair_g_defects_red(top):
     """AUT-01 (docs/17 §12.6): every G fixture reports exactly its 'today'
     counts - the RED ones stay open, the GREEN ones (duplicate and flip
-    since AUT-02a, t_junction since AUT-02b) close."""
+    since AUT-02a, t_junction since AUT-02b, hole since AUT-02c) close."""
     base = os.path.dirname(GEOM_TOOL)
     for rel in ('../autonomy', '../autonomy/corpus'):
         p = os.path.abspath(os.path.join(base, rel))
@@ -1241,7 +1395,7 @@ def test_repair_g_defects_red(top):
                  'true' if t['repaired'] else 'false'), flush=True)
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill, test_repair_duplicates, test_repair_flip_patch, test_repair_g_flip_duplicate_rows, test_repair_t_junction, test_repair_g_t_junction_rows, test_repair_g_defects_red)
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill, test_repair_duplicates, test_repair_flip_patch, test_repair_g_flip_duplicate_rows, test_repair_t_junction, test_repair_g_t_junction_rows, test_repair_liepa_planar_cap, test_repair_g_hole_rows, test_repair_g_defects_red)
 
 
 def main(argv=None):

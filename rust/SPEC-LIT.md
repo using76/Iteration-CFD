@@ -2177,6 +2177,65 @@ non-closed surface (SPEC-LIT §13.4 contract; `-permissive` downgrades to a
 warning and uses parity voting, §23.3). Degenerate triangles (zero area at
 f64) are dropped with a count.
 
+#### 23.2.1 Filling a hole (`tools/geom/stl_repair.py`, AUT-02c)
+
+The reader never edits a surface; the repair tool writes a NEW file and fills
+a boundary loop v_0 … v_{n-1} (walk order along the open edges, n ≤
+`--max-hole-edges`, default 64) as follows. A 3-edge loop is one triangle. A
+planar loop of 4 to 32 edges — every v_i within the weld tolerance of the plane
+through the loop's mean point orthogonal to its Newell normal — is ear-clipped
+in that plane (Meisters's two-ears theorem), exactly as before AUT-02c. Every
+other loop, and a planar one in which no ear is found, is filled by the
+minimum-weight triangulation and refinement of P. Liepa, "Filling Holes in
+Meshes", Proc. Eurographics Symposium on Geometry Processing 2003, 200–206
+(DOI 10.2312/SGP/SGP03/200-206), then faired:
+
+```
+1. minimum-weight triangulation (dynamic programme over the loop):
+     W(i, i+1) = (0, 0)
+     W(i, k)   = min_{i<m<k} W(i, m) ⊕ W(m, k) ⊕ Ω(i, m, k)
+     (a, A) ⊕ (b, B) = (max(a, b), A + B), compared lexicographically
+     Ω(i, m, k) = (largest dihedral angle between triangle (v_i, v_m, v_k)
+                   and its neighbours, area(v_i, v_m, v_k))
+   the neighbours are the triangles W(i, m) and W(m, k) chose on the edges
+   (i, m) and (m, k), or the surface triangle on a loop edge, and at the root
+   (0, n-1) also the surface triangle on the closing edge; the dihedral angle
+   is the angle between the two normals, 0 for a flat continuation.
+2. refinement, α = √2:
+     σ(v_i) = the mean length of v_i's surface edges
+     for each patch triangle (v_i, v_j, v_k) with centroid v_c,
+       σ(v_c) = (σ(v_i) + σ(v_j) + σ(v_k)) / 3;
+       if α‖v_c − v_m‖ > σ(v_c) and α‖v_c − v_m‖ > σ(v_m) for every
+       m ∈ {i, j, k}: split it into (v_c, v_j, v_k), (v_i, v_c, v_k),
+       (v_i, v_j, v_c) and relax its three edges
+     stop when a pass splits nothing; otherwise relax every interior patch edge
+     and repeat
+   relax (v_a, v_b), shared by (v_a, v_b, v_c) and (v_b, v_a, v_d): swap it for
+   (v_c, v_d) when v_d lies strictly inside the sphere whose equator is the
+   circumcircle of (v_a, v_b, v_c)
+3. fairing: the inserted points solve the membrane U(v) = 0 with the
+   scale-dependent umbrella
+     U(v) = (2/E) Σ_j (v_j − v) / |e_j|,   E = Σ_j |e_j|
+   over v's patch neighbours v_j, the lengths taken before the solve and the
+   loop held fixed (M. Desbrun, M. Meyer, P. Schröder, A. H. Barr, "Implicit
+   fairing of irregular meshes using diffusion and curvature flow", SIGGRAPH
+   1999, 317–324)
+```
+
+Patch triangles take the reversed walk winding, so each loop edge is used once
+each way. *DESIGN*, beyond the paper: a chord that is already a surface edge,
+and a zero-area triangle, are never chosen; a swap is not made when its new
+edge already exists, a new triangle would have zero area, or a new triangle's
+normal would turn against the pair's; refinement stops after 32 passes and a
+relaxation after 64 sweeps. The fairing operator is this tool's choice. The
+thin-plate form U²(v) = 0, which also holds the surface's ring around the hole
+for tangent continuity, was measured and rejected: on the three tuning hole
+rows where refinement inserts a point (G-1-060, G-1-090, G-1-114) it moved
+that point 0.72–3.3 h_f off the parent surface, with the same umbrella, while
+the membrane keeps it within 0.002 h_f (h_f = base_size / 2^max_level of the
+setup rules). A fill that would give an edge a third use or hold a zero-area
+triangle is refused whole and named in the report.
+
 ### 23.3 Inside/outside classification
 
 Column-parity ray casting, the standard voxelizer construction:
