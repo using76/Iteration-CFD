@@ -160,6 +160,14 @@ a { color: var(--accent); }
 .run-row-head { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); font-weight: 600; }
 .run-row-meta { display: flex; gap: 10px; font-size: var(--fs-xs); color: var(--fg-muted); font-family: var(--font-mono); }
 .run-row-actions { display: flex; gap: 4px; }
+.par-report { padding-top: 4px; font-size: var(--fs-xs); cursor: default; }
+.par-report-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-weight: 600; }
+.par-report-meta { color: var(--fg-muted); font-family: var(--font-mono); }
+.par-report-wrap { overflow-x: auto; margin-top: 4px; }
+.par-report table { border-collapse: collapse; font-family: var(--font-mono); white-space: nowrap; }
+.par-report th, .par-report td { padding: 2px 6px; border-bottom: 1px solid var(--border); text-align: right; }
+.par-report th { color: var(--fg-muted); font-weight: 500; }
+.par-report td.par-bad { color: var(--danger); font-weight: 600; }
 .cfd-card { margin: 6px 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-panel-alt); font-size: var(--fs-sm); }
 .cfd-card-head { display: flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
 .cfd-card-head .grow { flex: 1; }

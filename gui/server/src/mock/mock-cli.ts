@@ -10,6 +10,7 @@ import { parseMockArgs, usageLine, UsageError, type MockArgs } from './args.js'
 import { g, sci, sleep } from './format.js'
 import { defaultCells, presetSpec, writeMockCase } from './mesh.js'
 import { DEMO_DEVICE, runMockSolver, type SolverEnv, type SolverIo } from './solver.js'
+import { mockParLines, mockParRefusal } from './par.js'
 
 const io: SolverIo = {
   out: (line) => process.stdout.write(`${line}\n`),
@@ -165,6 +166,19 @@ async function decompose(args: MockArgs): Promise<number> {
   return 0
 }
 
+async function par(args: MockArgs): Promise<number> {
+  const refused = mockParRefusal(args)
+  if (refused) {
+    io.err(`ofgpu-par: ${refused}`)
+    return 1
+  }
+  for (const line of mockParLines(args)) {
+    if (line.startsWith('P = ') && line.includes(' MAP ')) await pace(4)
+    io.out(line)
+  }
+  return 0
+}
+
 async function main(): Promise<number> {
   const [binary, ...rest] = process.argv.slice(2)
   if (!binary) {
@@ -198,6 +212,8 @@ async function main(): Promise<number> {
       return dispatchBench()
     case 'ofgpu-decompose':
       return decompose(args)
+    case 'ofgpu-par':
+      return par(args)
     default:
       return runMockSolver(args, io, env)
   }

@@ -84,6 +84,11 @@ function BinaryCard({ b, available }: { b: BinarySpec; available: boolean }) {
               ))}
             </div>
           ) : null}
+          {b.runOptions?.map((g) => (
+            <div key={g.key} style={{ marginTop: 4 }} data-testid="cfd-run-option">
+              <b>{t(`cfd.runOption.${g.key}`)}</b>: {g.flags.join(', ')}
+            </div>
+          ))}
         </>
       }
       ask={b.kind === 'solver' ? `Run ${b.name} on the active case (${b.summary})` : b.kind === 'mesh' ? `Generate a mesh with ${b.name}` : `Run ${b.name}`}
