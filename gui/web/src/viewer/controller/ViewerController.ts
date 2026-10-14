@@ -12,6 +12,7 @@ import {
   type FieldComponent,
   type FieldInfo,
   type GeometryBounds,
+  type IsoSurfaceInfo,
   type PlaneCutInfo,
   type PointLocateInfo,
   type ViewerCommand,
@@ -106,6 +107,8 @@ export class ViewerController {
   private readonly speedRanges = new Map<string, [number, number]>()
   /** Plane cuts the server already made for the loaded dataset, by plane (a non-lattice polyMesh). */
   private readonly cuts = new Map<string, PlaneCutInfo>()
+  /** Iso-surfaces the server already contoured for the loaded dataset, by field, time and values (a non-lattice polyMesh). */
+  private readonly isos = new Map<string, IsoSurfaceInfo>()
   private layerSeq = 0
   private overlayLines: () => string[] = () => []
   private readonly requireMount: boolean
@@ -360,6 +363,7 @@ export class ViewerController {
       this.observedRanges.clear()
       this.speedRanges.clear()
       this.cuts.clear()
+      this.isos.clear()
       this.timeIndex = this.resolveTime(cmd.timeIndex ?? 'last')
       this.display.patches = this.defaultPatches()
       const wanted = cmd.field ?? 'U'
@@ -532,6 +536,12 @@ export class ViewerController {
   }
 
   private async addIso(cmd: Extract<ViewerCommand, { type: 'addIsoSurface' }>): Promise<void> {
+    // A polyMesh with no lattice is contoured on the server (SPEC-LIT §148.2).
+    if (this.isServerIso()) {
+      const info = this.requireField(cmd.field)
+      await this.upsertLayer({ id: this.layerId(cmd.id ?? null, 'iso'), type: 'iso', field: info.name, values: cmd.values })
+      return
+    }
     const ds = this.requireGrid()
     if (ds.manifest.grid?.emptyAxis) throw new ViewerError('NO_STRUCTURED_GRID', 'ISO_2D: iso-surfaces are disabled for 2-D cases; use a slice instead')
     // Marching cubes walks the lattice by site and reads the field by the same
@@ -584,7 +594,13 @@ export class ViewerController {
   }
 
   private async computeLayer(entry: LayerEntry): Promise<void> {
-    const req = this.isCutMesh() && (entry.spec.type === 'slice' || entry.spec.type === 'plane') ? await this.cutRequest(entry.spec) : this.layerRequest(entry.spec)
+    const spec = entry.spec
+    const req =
+      this.isCutMesh() && (spec.type === 'slice' || spec.type === 'plane')
+        ? await this.cutRequest(spec)
+        : this.isServerIso() && spec.type === 'iso'
+          ? await this.isoRequest(spec)
+          : this.layerRequest(spec)
     if (!req) {
       entry.result = null
       return
@@ -601,6 +617,28 @@ export class ViewerController {
   private isCutMesh(): boolean {
     const ds = this.dataset
     return !!ds && !ds.grid && this.loader.canCut(ds.manifest)
+  }
+
+  /** A dataset with no lattice whose iso-surfaces the server contours (SPEC-LIT §148.2). */
+  private isServerIso(): boolean {
+    const ds = this.dataset
+    return !!ds && !ds.grid && this.loader.canIso(ds.manifest)
+  }
+
+  private async isoRequest(spec: Extract<LayerSpec, { type: 'iso' }>): Promise<ComputeRequest> {
+    const ds = this.requireDataset()
+    const req = { field: spec.field, timeIndex: this.timeIndex, values: [...spec.values] }
+    const key = JSON.stringify(req)
+    let info = this.isos.get(key)
+    if (!info) {
+      try {
+        info = await this.loader.polyIso(ds.manifest, req)
+      } catch (e) {
+        throw new ViewerError('LOAD_FAILED', `the server could not contour ${ds.manifest.name}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      this.isos.set(key, info)
+    }
+    return { op: 'isoMesh', positions: scopedKey(ds.manifest.id, info.positions.key), normals: scopedKey(ds.manifest.id, info.normals.key) }
   }
 
   /**
@@ -791,7 +829,12 @@ export class ViewerController {
 
   private requireGrid(): LoadedDataset {
     const ds = this.requireDataset()
-    if (!ds.grid || !ds.gridKeys) throw new ViewerError('NO_STRUCTURED_GRID', `${ds.manifest.name} has no structured grid (${ds.manifest.source}); iso-surfaces, streamlines and glyphs need one${this.loader.canCut(ds.manifest) ? ' (slices and planes are exact cuts here)' : ''}`)
+    if (!ds.grid || !ds.gridKeys) {
+      const cut = this.loader.canCut(ds.manifest)
+      const iso = this.loader.canIso(ds.manifest)
+      const here = cut && iso ? ' (slices, planes and iso-surfaces are computed on its cells here)' : cut ? ' (slices and planes are exact cuts here)' : iso ? ' (iso-surfaces are computed on its cells here)' : ''
+      throw new ViewerError('NO_STRUCTURED_GRID', `${ds.manifest.name} has no structured grid (${ds.manifest.source}); ${iso ? '' : 'iso-surfaces, '}streamlines and glyphs need one${here}`)
+    }
     return ds
   }
 

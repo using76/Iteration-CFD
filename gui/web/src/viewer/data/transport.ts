@@ -1,7 +1,7 @@
 // How the viewer reaches dataset manifests and blobs: over HTTP (the
 // server's /api/datasets routes) or from in-memory synthetic datasets
 // (`?demoDataset=1`, tests). A routing transport picks per path / id.
-import type { CutPlaneSpec, DatasetOpenResponse, PlaneCutInfo, PointLocateInfo, ViewerDataset } from '@cfd/shared'
+import type { CutPlaneSpec, DatasetOpenResponse, IsoSurfaceInfo, IsoSurfaceSpec, PlaneCutInfo, PointLocateInfo, ViewerDataset } from '@cfd/shared'
 import type { TypedArray } from './BlobCache'
 
 export interface DatasetTransport {
@@ -11,6 +11,8 @@ export interface DatasetTransport {
   blob(id: string, key: string): Promise<ArrayBuffer>
   /** An exact plane cut of a non-lattice polyMesh (`manifest.planeCut`), stored as two blobs. Absent: no cuts. */
   cut?(id: string, plane: CutPlaneSpec): Promise<PlaneCutInfo>
+  /** The iso-surfaces of a cell field on a non-lattice polyMesh (`manifest.planeCut`), stored as three blobs. Absent: none. */
+  iso?(id: string, spec: IsoSurfaceSpec): Promise<IsoSurfaceInfo>
   /** The cell of a polyMesh (`manifest.pointLocate`) that holds a world point; `cell` null when none does. Absent: no location. */
   locate?(id: string, point: [number, number, number]): Promise<PointLocateInfo>
 }
@@ -59,6 +61,18 @@ export class HttpTransport implements DatasetTransport {
     const body = (await res.json().catch(() => null)) as (PlaneCutInfo & { error?: string }) | null
     if (!res.ok) throw new Error(body?.error ?? `cut ${id}: ${res.status} ${res.statusText}`)
     if (!body) throw new Error(`empty response from /api/datasets/${id}/cut`)
+    return body
+  }
+
+  async iso(id: string, spec: IsoSurfaceSpec): Promise<IsoSurfaceInfo> {
+    const res = await this.fetchImpl(`${this.baseUrl}/api/datasets/${encodeURIComponent(id)}/iso`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ field: spec.field, timeIndex: spec.timeIndex, values: spec.values }),
+    })
+    const body = (await res.json().catch(() => null)) as (IsoSurfaceInfo & { error?: string }) | null
+    if (!res.ok) throw new Error(body?.error ?? `iso ${id}: ${res.status} ${res.statusText}`)
+    if (!body) throw new Error(`empty response from /api/datasets/${id}/iso`)
     return body
   }
 
@@ -144,6 +158,11 @@ export class RoutingTransport implements DatasetTransport {
   cut(id: string, plane: CutPlaneSpec): Promise<PlaneCutInfo> {
     if (this.synthetic.ownsId(id)) return Promise.reject(new Error(`synthetic dataset ${id} has no plane cut`))
     return this.http.cut(id, plane)
+  }
+
+  iso(id: string, spec: IsoSurfaceSpec): Promise<IsoSurfaceInfo> {
+    if (this.synthetic.ownsId(id)) return Promise.reject(new Error(`synthetic dataset ${id} has no server iso-surface`))
+    return this.http.iso(id, spec)
   }
 
   locate(id: string, point: [number, number, number]): Promise<PointLocateInfo> {

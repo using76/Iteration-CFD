@@ -94,6 +94,12 @@ export function runCompute(req: ComputeRequest, resolve: BlobResolver): ComputeR
       const { values, colors } = cutColors(cells, scalarField(resolve, req.field), req.mapper)
       return { op: 'cut', positions, cells, values, colors, triangleCount: cells.length }
     }
+    case 'isoMesh': {
+      // Copies, as for a cut: the result is transferred out, and the blobs stay in the cache.
+      const positions = need(resolve, req.positions, Float32Array).slice()
+      const normals = need(resolve, req.normals, Float32Array).slice()
+      return { op: 'iso', positions, normals, triangleCount: positions.length / 9 }
+    }
     case 'glyphs': {
       const grid = gridOf(resolve, req.grid)
       const g = sampleGlyphs(grid, vectorField(resolve, req.field), req.stride, req.cap, req.slice)

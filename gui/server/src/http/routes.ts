@@ -129,6 +129,7 @@ const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.num
 const Vec3Schema = z.tuple([z.number(), z.number(), z.number()])
 const DatasetCutSchema = z.object({ origin: Vec3Schema, normal: Vec3Schema })
 const DatasetLocateSchema = z.object({ point: Vec3Schema })
+const DatasetIsoSchema = z.object({ field: z.string(), timeIndex: z.number().int().nonnegative(), values: z.array(z.number()).min(1) })
 const GeometryOpenSchema = z.object({ path: z.string() })
 const GeometrySaveSchema = z.object({
   path: z.string(),
@@ -328,6 +329,16 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     if (!datasets.get(ctx.params.id)) throw new HttpError(404, `no such dataset: ${ctx.params.id}`)
     try {
       return await datasets.cut(ctx.params.id, body)
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : String(err))
+    }
+  })
+  // The iso-surfaces of a cell field on a non-lattice polyMesh (SPEC-LIT §148.2); the answer names the three blobs.
+  router.post('/api/datasets/:id/iso', async (ctx) => {
+    const body = await ctx.json(DatasetIsoSchema)
+    if (!datasets.get(ctx.params.id)) throw new HttpError(404, `no such dataset: ${ctx.params.id}`)
+    try {
+      return await datasets.iso(ctx.params.id, body)
     } catch (err) {
       throw new HttpError(400, err instanceof Error ? err.message : String(err))
     }

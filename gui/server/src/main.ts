@@ -43,6 +43,7 @@ function unavailableDatasets(reason: string): DatasetService {
     fieldStats: fail,
     discover: fail,
     cut: fail,
+    iso: fail,
     locate: fail,
     onProgress: () => () => {},
     evict: () => {},

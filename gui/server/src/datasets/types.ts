@@ -1,7 +1,7 @@
 // Dataset service interface: turns a case / result path into a ViewerDataset
 // manifest plus binary blobs, and answers result queries for the tools.
 // Implemented in datasets/service.ts.
-import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, FieldComponent, FieldTimeInfo, PlaneCutInfo, PointLocateInfo, ResultsResponse, ViewerDataset } from '@cfd/shared'
+import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, FieldComponent, FieldTimeInfo, IsoSurfaceInfo, IsoSurfaceSpec, PlaneCutInfo, PointLocateInfo, ResultsResponse, ViewerDataset } from '@cfd/shared'
 import type { StatComponent } from './stats.js'
 
 export interface FieldStats {
@@ -42,6 +42,12 @@ export interface DatasetService {
    * and `INVALID: ...` for a zero or non-finite plane.
    */
   cut(id: string, plane: CutPlaneSpec): Promise<PlaneCutInfo>
+  /**
+   * The iso-surfaces of a cell field on a non-lattice polyMesh dataset (SPEC-LIT §148.2), stored as
+   * three blobs. Refuses `NO_POLY_ISO: ...` when the dataset is not one (`manifest.planeCut` false)
+   * and `INVALID: ...` for no or non-finite values, an unknown, point or tensor field.
+   */
+  iso(id: string, spec: IsoSurfaceSpec): Promise<IsoSurfaceInfo>
   /**
    * The cell of a polyMesh dataset that holds a world point (docs/17 STU-13); `cell` null when none
    * does. Refuses `NO_POINT_LOCATE: ...` when the dataset is not a polyMesh read from its files

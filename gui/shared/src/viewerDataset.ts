@@ -112,6 +112,7 @@ export interface ViewerDataset {
   /**
    * True when the server cuts this mesh by a plane exactly (`POST /api/datasets/<id>/cut`,
    * SPEC-LIT §148.1): a polyMesh with no lattice, whose slices and planes are drawn from the cut.
+   * The same server also contours it (`POST /api/datasets/<id>/iso`, SPEC-LIT §148.2).
    */
   planeCut?: boolean
   /**
@@ -168,7 +169,42 @@ export interface PlaneCutInfo {
   openCells: number
 }
 
-export type DatasetStage = 'queued' | 'scanning' | 'geometry' | 'fields' | 'ready' | 'error'
+/** An iso-surface request on a non-lattice polyMesh: a field (vectors by magnitude) at one stored time. */
+export interface IsoSurfaceSpec {
+  field: string
+  timeIndex: number
+  /** One or more iso values; finite. */
+  values: number[]
+}
+
+/**
+ * The iso-surfaces of a cell field on a non-lattice polyMesh (`POST /api/datasets/<id>/iso`,
+ * SPEC-LIT §148.2, served where `planeCut` is true), their triangles stored as blobs.
+ */
+export interface IsoSurfaceInfo {
+  /** Blob key prefix: `<key>.positions`, `<key>.normals` and `<key>.cells`. */
+  key: string
+  field: string
+  timeIndex: number
+  values: number[]
+  triangleCount: number
+  /** f32, components 3: three corners per triangle (vertices not shared). */
+  positions: BlobRef
+  /** f32, components 3: the triangle's unit normal at each corner, pointing to increasing values. */
+  normals: BlobRef
+  /** u32, components 1: the cell of each triangle. */
+  cells: BlobRef
+  /** Triangles of each value, in the order of `values`. */
+  valueCounts: number[]
+  /** Total area (f64). */
+  area: number
+  /** Mesh points whose least-squares stencil never had full rank (their value is a weighted mean). */
+  fallbackPoints: number
+  /** Tetrahedra (centroid, face centre, edge) with non-positive volume: cells not star-shaped about their centroid. */
+  invertedTets: number
+}
+
+export type DatasetStage ='queued' | 'scanning' | 'geometry' | 'fields' | 'ready' | 'error'
 
 export interface DatasetProgress {
   datasetId: string

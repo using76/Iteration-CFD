@@ -1,7 +1,7 @@
 // Opens a dataset through a transport, polls until the manifest is ready,
 // decodes blobs into typed arrays (LRU-cached) and exposes them to the
 // compute service under dataset-scoped keys.
-import { blobElementBytes, type BlobRef, type CutPlaneSpec, type PlaneCutInfo, type PointLocateInfo, type ViewerDataset } from '@cfd/shared'
+import { blobElementBytes, type BlobRef, type CutPlaneSpec, type IsoSurfaceInfo, type IsoSurfaceSpec, type PlaneCutInfo, type PointLocateInfo, type ViewerDataset } from '@cfd/shared'
 import { BlobCache, type TypedArray } from './BlobCache'
 import { StructuredGrid } from './StructuredGrid'
 import type { DatasetTransport } from './transport'
@@ -140,6 +140,19 @@ export class DatasetLoader {
     const info = await this.transport.cut(manifest.id, plane)
     this.refs.set(scopedKey(manifest.id, info.positions.key), { id: manifest.id, ref: info.positions })
     this.refs.set(scopedKey(manifest.id, info.cells.key), { id: manifest.id, ref: info.cells })
+    return info
+  }
+
+  /** True when the transport contours this dataset on the server (a non-lattice polyMesh, SPEC-LIT §148.2). */
+  canIso(manifest: ViewerDataset): boolean {
+    return manifest.planeCut === true && typeof this.transport.iso === 'function'
+  }
+
+  /** Ask the server for the iso-surfaces of a cell field and make their three blobs resolvable through `provide`. */
+  async polyIso(manifest: ViewerDataset, spec: IsoSurfaceSpec): Promise<IsoSurfaceInfo> {
+    if (!this.transport.iso) throw new LoadError(`${manifest.name}: this transport cannot contour a mesh`)
+    const info = await this.transport.iso(manifest.id, spec)
+    for (const ref of [info.positions, info.normals, info.cells]) this.refs.set(scopedKey(manifest.id, ref.key), { id: manifest.id, ref })
     return info
   }
 

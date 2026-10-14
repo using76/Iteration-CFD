@@ -10,6 +10,7 @@ import { readFoamField, type FoamField } from '../formats/foam.js'
 import type { Bounds, SurfaceGeometry } from '../formats/geometry.js'
 import { buildCellLocator, locatePoint, type CellLocator } from '../formats/pointLocate.js'
 import { cutPolyMesh } from '../formats/polycut.js'
+import { buildIsoMesh, isoSurface, type IsoMesh } from '../formats/polyiso.js'
 import { detectLattice, polyMeshBoundarySurface, polyMeshCellCenters, readPolyMesh, type PolyMesh, type PolyMeshPatch } from '../formats/polymesh.js'
 import { readVtuCellData, readVtuPointData, readVtuInfo, vtuBoundarySurface, type VtuArrayInfo } from '../formats/vtu.js'
 
@@ -21,6 +22,7 @@ export type WorkerTask =
   | { op: 'vtuPointData'; path: string; name: string }
   | { op: 'polyCut'; dir: string; origin: [number, number, number]; normal: [number, number, number] }
   | { op: 'locate'; dir: string; point: [number, number, number] }
+  | { op: 'polyIso'; dir: string; cellValues: Float64Array; values: number[] }
 
 export interface FoamFieldResult {
   op: 'foamField'
@@ -91,7 +93,22 @@ export interface LocateResult {
   center: [number, number, number] | null
 }
 
-export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult | PolyCutResult | LocateResult
+/** The iso-surfaces of a cell field on the polyMesh in `dir` (SPEC-LIT §148.2). */
+export interface PolyIsoResult {
+  op: 'polyIso'
+  /** Three corners per triangle, each polyiso coordinate rounded once to f32. */
+  positions: Float32Array
+  /** The unit normal at each corner, rounded once to f32. */
+  normals: Float32Array
+  /** Cell id per triangle. */
+  cells: Uint32Array
+  valueCounts: number[]
+  area: number
+  fallbackPoints: number
+  invertedTets: number
+}
+
+export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult | PolyCutResult | LocateResult | PolyIsoResult
 
 // The last polyMesh a cut read, per thread: a run of slices on one mesh parses it once.
 // Keyed by the directory and every file's size and mtime, so a re-meshed case is read again.
@@ -124,6 +141,16 @@ async function locatorFor(dir: string): Promise<CellLocator> {
   const loc = buildCellLocator(await meshForCut(dir))
   locator = { key, loc }
   return loc
+}
+// The iso topology of the last mesh contoured, per thread, under the same key as cutMesh.
+let isoTopology: { key: string; iso: IsoMesh } | null = null
+
+async function isoMeshFor(dir: string): Promise<IsoMesh> {
+  const key = await polyMeshStamp(dir)
+  if (isoTopology && isoTopology.key === key) return isoTopology.iso
+  const iso = buildIsoMesh(await meshForCut(dir))
+  isoTopology = { key, iso }
+  return iso
 }
 export type ResultOf<T extends WorkerTask> = Extract<WorkerResult, { op: T['op'] }>
 
@@ -175,6 +202,21 @@ export async function runTask(task: WorkerTask): Promise<WorkerResult> {
       const hit = locatePoint(await locatorFor(task.dir), task.point)
       return hit ? { op: 'locate', cell: hit.cell, method: hit.method, center: hit.center } : { op: 'locate', cell: null, method: null, center: null }
     }
+    case 'polyIso': {
+      const iso = await isoMeshFor(task.dir)
+      if (task.cellValues.length !== iso.mesh.nCells) throw new Error(`polyIso: ${task.cellValues.length} cell values for ${iso.mesh.nCells} cells`)
+      const r = isoSurface(iso, task.cellValues, task.values)
+      return {
+        op: 'polyIso',
+        positions: Float32Array.from(r.triPositions),
+        normals: Float32Array.from(r.triNormals),
+        cells: Uint32Array.from(r.triCells),
+        valueCounts: r.valueCounts,
+        area: r.area,
+        fallbackPoints: r.fallbackPoints,
+        invertedTets: r.invertedTets,
+      }
+    }
   }
 }
 
@@ -192,6 +234,11 @@ function transferables(result: WorkerResult): ArrayBuffer[] {
       break
     case 'polyCut':
       add(result.positions)
+      add(result.cells)
+      break
+    case 'polyIso':
+      add(result.positions)
+      add(result.normals)
       add(result.cells)
       break
     case 'polyMesh':
