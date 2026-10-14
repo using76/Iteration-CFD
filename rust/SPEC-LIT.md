@@ -33855,6 +33855,61 @@ for from reaching a verdict. The gate then loads the
 key, prints its digest line beside the verdict, and runs the key's own consistency
 rows; the recorded runs are still this subsection's to make.
 
+**Pricing (docs/17 VAL-50).** Before any recorded run is scheduled, every case of this
+recipe was run for 200 iterations at each of its three levels and timed. The build was the f64
+release `ofgpu-lowmach` at `c1ebdb4`, on the one RTX 5070 Ti of record, on scratch copies made
+exactly as above (only `cells` edited; the step through `backstep.cmd`'s generator line and its
+two edits), `-iters 200 -check 50` (`-check 5` on the step's two finer levels). Each stdout
+line was time-stamped as it arrived, and the rate is taken between the `iter 0` and the last
+`iter` line, so mesh build, setup and the final write are outside it. The rate is given two
+ways: the mean over the run, and the last window of about 50 iterations. The projection takes
+the larger of the two: setup, plus that rate times the recorded iteration count, plus the
+write. Memory is the pool peak of §111.2, from the run's `device memory` line. The two step
+levels that stopped early have no such line, so their peak is from a 2-iteration run of the
+same mesh; on the fine plume a 2-iteration run reads the same 7,177 MiB as the 200-iteration one.
+This is a PRICE, not a measurement of the recorded runs. It prices the first 200 iterations
+from each case's initial field, and solver work changes as the flow develops: the fine
+plume's rate falls from 545 to 307 ms per iteration across the 200, and the coarse step's
+rises from 133 to 216. While these were timed, the card's other load was the desktop at
+0-36 % utilisation, and 64-97 % on the step's two finer levels. A first pass made while
+another lane's tests held the card at 84-89 % ran slower: 13-17 ms on the channel, 641 ms on
+the fine plume and 2,364 ms on the fine step. The table gives the second pass.
+
+| gate | level | cells | ms/iter, mean | ms/iter, last window | recorded iterations | projected wall time | pool peak |
+|---|---|---|---|---|---|---|---|
+| 110-A Re_tau 180 | N_y 32 / 64 / 128 | 256 / 512 / 1,024 | 6.23 / 5.85 / 6.92 | 5.98 / 5.27 / 7.14 | 40 000 | 4.2 / 3.9 / 4.8 min | 4,709 / 4,541 / 4,457 B/cell |
+| 110-A Re_tau 395 | N_y 32 / 64 / 128 | 256 / 512 / 1,024 | 6.67 / 6.09 / 7.48 | 6.92 / 5.78 / 7.76 | 40 000 | 4.6 / 4.1 / 5.2 min | as 180 |
+| 110-A Re_tau 590 | N_y 32 / 64 / 128 | 256 / 512 / 1,024 | 6.33 / 5.97 / 7.26 | 6.80 / 5.65 / 7.96 | 40 000 | 4.5 / 4.0 / 5.3 min | as 180 |
+| 110-B step | 700 × 90 | 57,500 | 167 | 216 | 6 000 | 21.7 min | 230 MiB, 4,210 B/cell |
+| 110-B step | 1400 × 180 | 230,000 | 469 (iterations 0-20) | — | 6 000 | 46.9 min | 920 MiB, 4,199 B/cell |
+| 110-B step | 2800 × 360 | 920,000 | 2,201 (iterations 0-150) | 2,188 | 6 000 | 3.67 h | 3,679 MiB, 4,193 B/cell |
+| 110-C plume | 33 × 33 × 40 | 43,560 | 12.9 | 12.3 | 4 000 | 0.9 min | 116 MiB, 2,796 B/cell |
+| 110-C plume | 66 × 66 × 80 | 348,480 | 45.9 | 33.0 | 4 000 | 3.1 min | 907 MiB, 2,731 B/cell |
+| 110-C plume | 132 × 132 × 160 | 2,787,840 | 425 | 307 | 4 000 | 28.5 min | 7,177 MiB, 2,700 B/cell |
+
+The nine channel runs price at 41 min, mostly launch latency (a 1,024-cell iteration costs
+about what a 256-cell one does). The three plume runs price at 33 min. The three step runs,
+had they run, price at 4.8 h. The whole of §110's recorded set is about 6.0 h of card time,
+one night. Memory is not what limits any of it. The largest level, the fine plume, peaks at
+7,177 MiB of pool at 2.79 M cells, which is below the 4.72 M cells at which `docs/11` read its
+cliff. §111.1 shows that cliff was a whole-card reading taken beside a second process, not an
+allocation. The idle card leaves about 14.66 GiB for the pool (§111.4). At the plume's
+2,700 B/cell that holds 5.83 M cells, and at the step's 4,193 B/cell it holds 3.75 M, so the
+fine plume uses 48 % of it.
+
+**What the pricing found on the step.** Both finer step levels stop on the Mach guard of
+§93.6. The 1400 × 180 level stops at step 24, with M = 0.730 at cell 221598, and so does its
+re-run. The 2800 × 360 level stops at step 152, with M = 0.490 at cell 914399, in both
+passes. The coarse level runs its 200 iterations. The recipe as written also does not set
+the flow it states. The generator's inflow is the `step` preset's power-law profile,
+`u = U_ref (1 - min(1 - 1e-9, |y|/h))^(1/7)` (`initial_velocity` in `src/blockgen.rs`), with
+`U_ref = 10` and `h = 1`, centred on `y = 0`. The recipe's `-extent ... 0 9` puts the whole
+inlet at `y` in [1, 9], where the clamp holds, so `0/U`'s inlet is `uniform (0.517947 0 0)`,
+which is 10 × (1e-9)^(1/7), and not 10 m/s. With the recipe's ν = 2.7778e-4 that is
+Re_H ≈ 1.86e3, not 36 000. Both are recorded here as found and are not changed: this
+pricing edits no recipe. The step's prices above are for the recipe as it stands, and
+docs/17 VAL-52 settles its inflow and its divergence before any run of it is recorded.
+
 **Results.** Every cell below is filled by the run that produced it; until then none
 has been made, and no verdict in this table is a claim.
 
