@@ -17,7 +17,18 @@
 //! big      uniform benchmark box                    (160 x 160 x 160)
 //! plume    buoyant plume, floor inlet, xMax outlet  (98 x 42 x 20)
 //! damBreak two-phase collapsing column, 2-D           (150 x 90 x 1)
+//! plate    laminar flat plate, symmetry floor ahead of the edge, 2-D (150 x 80 x 1)
 //! ```
+//!
+//! `plate` (also `flatPlate`) is SPEC-LIT §144.1's flat plate: the leading
+//! edge at `x = 0` on a node, a `symmetry` floor over `[-upstream, 0]`, the
+//! `plate` wall over `[0, length]`, graded to the wall and to the edge from
+//! both sides. `nx` is split a fifth ahead of the edge and the rest on the
+//! plate. Its own flags, refused on every other case: `-upstream m`,
+//! `-length m`, `-height m`, `-ratios rUp rPlate rY` (inlet cell / edge cell,
+//! trailing-edge cell / edge cell, top cell / wall cell), `-uInf U` and
+//! `-nu nu`. It prints the Blasius estimate of the wall cell's y+ (144.1c).
+//! It takes no `-stl`, `-cutcell`, `-extent`, `-grading` or `-cyclic`.
 //!
 //! Writes `<outputDir>/constant/polyMesh` and, if they do not already exist,
 //! a minimal `<outputDir>/system` so that `checkMesh` can be pointed at the
@@ -81,7 +92,7 @@ use std::process::ExitCode;
 
 use ofgpu::blockgen::{
     write_carved_case_with_override, write_case_with_override, write_cutcell_case_with_override,
-    BlockOverride, CaseKind,
+    write_flat_plate_case, BlockOverride, CaseKind, FlatPlateSpec,
 };
 use ofgpu::io::case::{Roughness, WallTreatment};
 use ofgpu::io::contract;
@@ -96,12 +107,14 @@ use common::atoi;
 
 fn usage_text() -> String {
     format!(
-        "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak> <outputDir> \
+        "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak|plate> <outputDir> \
          [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]]\n       \
          [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]... \
          [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-cyclic x|y|z] \
          [-permissive]\n       \
          ofgpu-generate-mesh big <outputDir> [n | nx ny nz] [-stl ...]   # one n: an n^3 cube; three: per axis, e.g. big dir 128 52 41\n       \
+         ofgpu-generate-mesh plate <outputDir> [nx ny 1] [-upstream m] [-length m] [-height m] \
+         [-ratios rUp rPlate rY] [-uInf U] [-nu nu] [-wallModel ...]   # SPEC-LIT 144.1 flat plate\n       \
          resolution: none (the preset's own), three numbers nx ny nz, or - big only - one n; two are refused\n\
          {}",
         contract::PERMISSIVE_USAGE
@@ -110,6 +123,75 @@ fn usage_text() -> String {
 
 fn usage() {
     eprintln!("{}", usage_text());
+}
+
+/// The `plate` case's own flags (SPEC-LIT §144.1), each `None` until given.
+/// Applied on top of [`FlatPlateSpec::with_resolution`]; whether the result
+/// can be meshed is [`FlatPlateSpec::validate`]'s to refuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct PlateFlags {
+    upstream: Option<f64>,
+    length: Option<f64>,
+    height: Option<f64>,
+    ratios: Option<[f64; 3]>,
+    u_inf: Option<f64>,
+    nu: Option<f64>,
+}
+
+impl PlateFlags {
+    /// The first plate flag given, for refusing it on another case by name.
+    fn first_given(&self) -> Option<&'static str> {
+        [
+            (self.upstream.is_some(), "-upstream"),
+            (self.length.is_some(), "-length"),
+            (self.height.is_some(), "-height"),
+            (self.ratios.is_some(), "-ratios"),
+            (self.u_inf.is_some(), "-uInf"),
+            (self.nu.is_some(), "-nu"),
+        ]
+        .into_iter()
+        .find_map(|(given, name)| given.then_some(name))
+    }
+
+    fn apply(&self, s: &mut FlatPlateSpec) {
+        if let Some(v) = self.upstream {
+            s.x_upstream = v;
+        }
+        if let Some(v) = self.length {
+            s.length = v;
+        }
+        if let Some(v) = self.height {
+            s.height = v;
+        }
+        if let Some([a, b, c]) = self.ratios {
+            (s.r_upstream, s.r_plate, s.r_y) = (a, b, c);
+        }
+        if let Some(v) = self.u_inf {
+            s.u_inf = v;
+        }
+        if let Some(v) = self.nu {
+            s.nu = v;
+        }
+    }
+}
+
+/// `count` numbers following the flag at `args[*i]`; the index rests on the
+/// last one consumed.
+fn parse_numbers(args: &[String], i: &mut usize, count: usize) -> Result<Vec<f64>> {
+    let flag = args[*i].clone();
+    let mut v = Vec::with_capacity(count);
+    for _ in 0..count {
+        *i += 1;
+        let Some(a) = args.get(*i) else {
+            usage();
+            return Err(Error::Config(format!("{flag} needs {count} number(s)")));
+        };
+        v.push(
+            a.parse::<f64>()
+                .map_err(|_| Error::Config(format!("{flag}: '{a}' is not a number")))?,
+        );
+    }
+    Ok(v)
 }
 
 /// `-cyclic x|y|z` - SPEC-LIT §31.1. Only `translate` exists (the transform
@@ -253,10 +335,20 @@ fn run(args: &[String]) -> Result<()> {
     let mut extent: Option<[ofgpu::Scalar; 6]> = None;
     let mut grading: [Option<ofgpu::Scalar>; 3] = [None; 3];
     let mut grading_seen = [false; 3];
+    let mut plate = PlateFlags::default();
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
             "-permissive" => contract::set_permissive(true),
+            "-upstream" => plate.upstream = Some(parse_numbers(args, &mut i, 1)?[0]),
+            "-length" => plate.length = Some(parse_numbers(args, &mut i, 1)?[0]),
+            "-height" => plate.height = Some(parse_numbers(args, &mut i, 1)?[0]),
+            "-uInf" => plate.u_inf = Some(parse_numbers(args, &mut i, 1)?[0]),
+            "-nu" => plate.nu = Some(parse_numbers(args, &mut i, 1)?[0]),
+            "-ratios" => {
+                let v = parse_numbers(args, &mut i, 3)?;
+                plate.ratios = Some([v[0], v[1], v[2]]);
+            }
             "-cutcell" => cutcell = true,
             "-cyclic" => {
                 i += 1;
@@ -363,6 +455,38 @@ fn run(args: &[String]) -> Result<()> {
 
     let res: Vec<&str> = positional[2..].iter().map(|s| s.as_str()).collect();
     let (nx, ny, nz) = resolve_dims(kind, &res)?;
+
+    // SPEC-LIT §144.1: the plate is its own spec, written by its own writer.
+    if kind == CaseKind::FlatPlate {
+        let refused = [
+            (!stl_args.is_empty(), "-stl"),
+            (cutcell, "-cutcell"),
+            (extent.is_some(), "-extent"),
+            (grading_seen.iter().any(|&g| g), "-grading"),
+            (!cyclic.is_empty(), "-cyclic"),
+        ];
+        if let Some((_, flag)) = refused.iter().find(|(given, _)| *given) {
+            return Err(Error::Config(format!(
+                "plate takes no {flag}: its block is two graded segments meeting at the \
+                 leading edge, set by -upstream, -length, -height and -ratios"
+            )));
+        }
+        let mut spec = FlatPlateSpec::with_resolution(nx, ny, nz)?;
+        plate.apply(&mut spec);
+        spec.validate()?;
+        let roughness = wall_model
+            .map(|wt| Roughness::resolve(wt, ks, cs, "-wallModel"))
+            .transpose()?
+            .flatten();
+        write_flat_plate_case(Path::new(dir), &spec, wall_model, roughness)?;
+        return Ok(());
+    }
+    if let Some(flag) = plate.first_given() {
+        return Err(Error::Config(format!(
+            "{flag} is a plate flag (SPEC-LIT 144.1); case '{}' takes none",
+            kind.as_str()
+        )));
+    }
 
     if cutcell && stl_args.is_empty() {
         usage();
@@ -581,6 +705,36 @@ mod tests {
         let e = resolve_dims(CaseKind::Channel, &["200"]).unwrap_err().to_string();
         assert!(e.contains("channel") && !e.contains("n^3"), "one n is big-only: {e}");
         assert!(resolve_dims(CaseKind::Big, &["128", "52", "41", "7"]).is_err(), "four must be refused");
+    }
+
+    /// SPEC-LIT §144.1: `plate` names the flat plate, its flags land on the
+    /// spec, and a plate flag on another case is refused by name.
+    #[test]
+    fn plate_flags_set_the_flat_plate_spec_and_are_refused_elsewhere() {
+        assert_eq!(CaseKind::from_name("plate"), Some(CaseKind::FlatPlate));
+        assert_eq!(resolve_dims(CaseKind::FlatPlate, &[]).unwrap(), (150, 80, 1));
+        assert!(usage_text().contains("plate <outputDir>"));
+
+        let a = args(&["prog", "-ratios", "10", "30", "150", "rest"]);
+        let mut i = 1usize;
+        assert_eq!(parse_numbers(&a, &mut i, 3).unwrap(), vec![10.0, 30.0, 150.0]);
+        assert_eq!(i, 4, "the index must rest on the last number consumed");
+        let a = args(&["prog", "-length", "long"]);
+        let mut i = 1usize;
+        assert!(parse_numbers(&a, &mut i, 1).unwrap_err().to_string().contains("not a number"));
+
+        let f = PlateFlags { length: Some(2.0), ratios: Some([10.0, 30.0, 150.0]), ..Default::default() };
+        assert_eq!(f.first_given(), Some("-length"));
+        assert_eq!(PlateFlags::default().first_given(), None);
+        let mut s = FlatPlateSpec::with_resolution(150, 80, 1).unwrap();
+        f.apply(&mut s);
+        assert_eq!((s.length, s.r_upstream, s.r_plate, s.r_y), (2.0, 10.0, 30.0, 150.0));
+        assert_eq!((s.n_upstream, s.n_plate, s.n_y), (30, 120, 80));
+
+        let e = run(&args(&["prog", "channel", "unused_dir", "-length", "2"])).unwrap_err();
+        assert!(e.to_string().contains("-length is a plate flag"), "{e}");
+        let e = run(&args(&["prog", "plate", "unused_dir", "-cyclic", "x"])).unwrap_err();
+        assert!(e.to_string().contains("plate takes no -cyclic"), "{e}");
     }
 
     #[test]

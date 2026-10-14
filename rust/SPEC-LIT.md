@@ -48882,6 +48882,79 @@ a measurement of the intercept.
 that cell set with a pinned wall-cell omega, not a device run and not validation of the solver. Wilcox 2006 exists
 only in the oracle: there is no device kernel, case keyword or registry row (VAL-22a-c, conditional on D-VAL-5).
 
+## 144. The flat-plate harness, Blasius, T3A leg 4, ZPG
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to VAL-30..34: §144.1 the flat-plate mesh
+(VAL-30), and the Blasius gate, the T3A rig and the TMR zero-pressure-gradient plate after it. §88.10, §40.7 and
+§56.11 each record that this tree had no flat-plate harness. §144.1 is its mesh, and it claims nothing about a
+solution.
+
+### 144.1 The flat-plate mesh
+
+`blockgen::FlatPlateSpec` is a 2-D box with the leading edge at `x = 0`. The floor `y = 0` is a symmetry plane over
+`[-x_up, 0]` and the wall `plate` over `[0, L]`. The domain is `[0, H]` above it, with one `empty` cell of `depth` in
+z. The floor is split by the one `PatchWindow` its slot may carry (`build_patches` refuses a second): the window is
+the first `n_up` floor columns, named `symmetry` with type `symmetryPlane`, and it is written before the rest of the
+slot, `plate` (`wall`). The patches in face order are `inlet`, `outlet`, `symmetry`, `plate`, `top`, `back` and
+`front`. `inlet` and `outlet` are the two x faces and `top` is an open `patch`; the boundary conditions on them are
+each case's.
+
+The x axis is two graded segments meeting at the edge. No single `GradedAxis` expresses that, so the nodes are
+computed in f64 whatever `Scalar` is (§118.2: host geometry is f64), rounded once into the grid, and the mesh points
+are exactly those roundings. A segment `[a, b]` of `n` cells whose last cell divided by its first is `E` has the
+nodes of `fill_graded`'s law:
+
+```text
+r = E^(1/(n-1)),   x_i = a + (b - a)(r^i - 1)/(r^n - 1),   i = 0..n                  (144.1a)
+```
+
+with `E = 1` or `n = 1` uniform and both endpoints set, not accumulated. The plate's nodes are
+
+```text
+s = segment(0, x_up, n_up, r_up),   x_i = 0 - s_(n_up - i)   for i = 0..n_up
+x_(n_up + i) = segment(0, L, n_plate, r_plate)_i              for i = 1..n_plate
+y = segment(0, H, n_y, r_y),   z = {0, depth}                                     (144.1b)
+```
+
+`r_up` is the inlet cell over the edge cell, `r_plate` the trailing-edge cell over the edge cell, `r_y` the top cell
+over the wall cell. The upstream segment is graded outward from the edge and mirrored, so the smallest cells sit at
+the smallest coordinates and `x_(n_up)` is exactly `+0.0`: the leading edge is a node, and the last symmetry face
+and the first plate face share its two points.
+
+The generator prints an estimate of the wall cell's y+ to choose `dy_1` by. It is Blasius's local skin friction,
+`C_f = 2 f''(0) Re_x^(-1/2)` with `f''(0) = 0.332057` (Blasius, *Z. Math. Phys.* 56 (1908) 1-37; the value §88.7
+measures, so `2 f''(0) = 0.664114`, of which the estimate takes the classical `0.664`), at the wall cell's centre
+`y_P = dy_1/2`:
+
+```text
+C_f = 0.664 Re_x^(-1/2),   Re_x = U x/nu,   u_tau = U sqrt(C_f/2),   y+_P = y_P u_tau/nu   (144.1c)
+```
+
+It is printed at the first plate face's centre and at the trailing edge. It is an estimate for sizing a mesh, not a
+measurement and not a gate.
+
+`FlatPlateSpec::laminar()` is `cases/flatPlateLaminar`'s plate: `x_up = 0.25 m` (the TMR T3A rig's distance,
+§88.10), `L = 1 m`, `H = 0.25 m`, `depth = 0.01 m`, `30 + 120` cells along x and 80 across, `r_up = r_plate = 20`,
+`r_y = 200`, `U = 1 m/s`, `nu = 5e-6 m^2/s`, so `Re_L = 2e5`. On it the two cells at the edge are `1.2847e-3 m` and
+`1.3067e-3 m` (ratio 1.0171), the wall cell is `8.1466e-5 m`, and (144.1c) gives `y+ = 1.388` at the first plate face
+and `0.223` at the trailing edge. `ofgpu-generate-mesh plate <dir> [nx ny 1]` writes it as a laminar case, splitting
+`nx` a fifth ahead of the edge. The flags `-upstream`, `-length`, `-height`, `-ratios rUp rPlate rY`, `-uInf` and
+`-nu` set the spec; `-stl`, `-cutcell`, `-extent`, `-grading` and `-cyclic` are refused by name.
+`blockgen::build_flat_plate_mesh` is the same mesh in memory.
+
+`cases/flatPlateLaminar.jsonc` is the same plate, box and patches on the JSONC reader's `cartesian` mesh. That mesh
+carries one grading ratio per axis toward an end of the axis, so the file is uniform in x (the edge on node 30) and
+graded only to the wall. Its header says so.
+
+Gate (`tests/flat_plate_mesh.rs`, both builds): the patch face ranges are exact (starts 0, 80, 160, 190, 310, 460 and
+12460 after 23770 internal faces); the edge is a node shared by the last symmetry face and the first plate face; the
+cell-size ratios of the three segments hold to `1e-12` on the f64 nodes; the points are the nodes rounded to `Scalar`;
+and (144.1c) matches a hand evaluation to `1e-12`. Precision classes: D for the ranges, the edge node and the points,
+A for the ratios and the estimate (evaluated in f64, the same tolerance in both builds).
+
+**Not claimed.** No flow has been solved on this mesh. The Blasius comparison is VAL-31's, and the mesh's
+fitness for it is that gate's to show.
+
 ## 145. Martin & Moyce's collapsing column — the surge-front key
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the

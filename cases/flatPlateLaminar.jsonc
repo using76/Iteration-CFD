@@ -1,0 +1,120 @@
+// SPEC-LIT 144.1 - the laminar flat plate of the flat-plate harness (docs/17
+// VAL-30). A 2-D box x [-0.25, 1.0] m, y [0, 0.25] m, one cell of 0.01 m in z:
+// the floor is a `symmetry` plane ahead of the leading edge at x = 0 and the
+// `plate` wall behind it, U_inf = 1 m/s, nu = 5e-6 m2/s, so Re_L = 2e5 at the
+// trailing edge (Blasius, laminar, below the textbook transition 5e5). The
+// 0.25 m ahead of the edge is the TMR T3A rig's distance (SPEC-LIT 88.10).
+//
+// THE MESH HERE IS NOT THE GRADED ONE. This reader's `cartesian` mesh carries
+// one grading ratio per axis, toward an END of the axis, so it cannot refine x
+// toward an interior leading edge from both sides. This file therefore runs
+// the same plate on a mesh UNIFORM in x (dx = 1/120 m, the edge on a node,
+// i = 30) and graded only to the wall in y (ratio 200, as below). The graded
+// mesh of SPEC-LIT 144.1 - x refined to the edge from both sides, 1.7 %
+// between the two cells at the edge - is
+//
+//   ofgpu-generate-mesh plate <dir>                  (an OpenFOAM case dir)
+//   ofgpu::blockgen::build_flat_plate_mesh(&FlatPlateSpec::laminar())
+//
+// with the same box, the same patch names and the same free stream; the
+// generator prints the Blasius estimate of the wall cell's y+ (144.1c): 1.39
+// at the first plate face, 0.22 at the trailing edge.
+//
+// Boundaries: the inlet is the free stream; the outlet and the top are open
+// at p = 0, so the free stream carries no pressure gradient and the layer's
+// displacement leaves through the top; front and back are the 2-D `empty`
+// constraint.
+//
+// UNVERIFIED: no run of this file is recorded, and no number in it is a
+// claim about the solution. The Blasius gate is docs/17's VAL-31, not yet run.
+// ============================================================================
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "flatPlateLaminar",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [-0.25, 0.0, 0.0], "max": [1.0, 0.25, 0.01] },
+    "cells":  [150, 80, 1],
+
+    "boundaries": {
+      "xmin": "inlet", "xmax": "outlet",
+      "ymin": "plate", "ymax": "top",
+      "zmin": "back",  "zmax": "front",
+    },
+
+    // The floor's 30 columns whose centres lie ahead of the edge.
+    "regions": [
+      {
+        "name": "symmetry",
+        "on": "ymin",
+        "shape": { "kind": "box", "min": [-0.25, -1, -1], "max": [0.0, 1, 1] },
+      },
+    ],
+
+    "grading": { "y": { "expansion": 200.0 } },
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 5e-6, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "patches": [
+    { "match": "(back|front)", "kind": "empty" },
+    { "match": "symmetry", "kind": "symmetry" },
+    {
+      "match": "inlet",
+      "kind": "inlet",
+      "U": { "type": "fixedValue", "value": [1.0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 293.15 },
+    },
+    {
+      "match": "(outlet|top)",
+      "kind": "open",
+      "U": { "type": "zeroGradient" },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "zeroGradient" },
+    },
+    {
+      // The plate.
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+  ],
+
+  "initial": {
+    "U": [1.0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.7, "p": 0.3, "T": 0.7 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC",      "tolerance": 1e-9, "relTol": 0.01, "maxIter": 1000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  "run": {
+    "endTime": 3000,
+    "deltaT": 1,
+    "adjustTimeStep": false,
+  },
+}
