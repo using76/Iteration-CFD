@@ -51,7 +51,7 @@ pub(crate) struct Entry {
 /// aliases, then the planned names by their unit, the owned names by their
 /// stream, and the permanent refusals last.
 pub(crate) const CATALOGUE: &[Entry] = &[
-    // ---- implemented (89), in IMPLEMENTED_BC_NAMES' order -----------------
+    // ---- implemented (92), in IMPLEMENTED_BC_NAMES' order -----------------
     Entry { family: "basic", name: "fixedValue", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "noSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "zeroGradient", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
@@ -161,6 +161,12 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "atmospheric", name: "atmBoundaryLayerInletOmega", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "atmospheric", name: "nutkAtmRoughWallFunction", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "atmospheric", name: "nutUBlendedWallFunction", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    // SPEC-LIT 120.10: the recycled inflow - a fixedValue refreshed from the
+    // offset plane every outer iteration, and a seeded fluctuation drawn
+    // every time step.
+    Entry { family: "mapped inflow", name: "mapped", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "mapped inflow", name: "mappedFixedValue", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "mapped inflow", name: "turbulentInlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     // ---- alias (5) --------------------------------------------------------
     Entry { family: "thermal", name: "compressible::alphatJayatillekeWallFunction", status: Status::Alias { to: "thermalWallFunction" }, field: "T", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::turbulentTemperatureCoupledBaffleMixed", status: Status::Alias { to: "coupledTemperature" }, field: "T", extended_by: &[], probes: &[] },
@@ -170,10 +176,7 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     // named `alphat`, refused naming `alphat` on any other.
     Entry { family: "thermal", name: "alphatWallFunction", status: Status::Alias { to: "calculated" }, field: "alphat", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::alphatWallFunction", status: Status::Alias { to: "calculated" }, field: "alphat", extended_by: &[], probes: &[] },
-    // ---- planned (16), by unit --------------------------------------------
-    Entry { family: "mapped inflow", name: "mapped", status: Status::Planned { unit: "BC-14" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "mapped inflow", name: "mappedFixedValue", status: Status::Planned { unit: "BC-14" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "mapped inflow", name: "turbulentInlet", status: Status::Planned { unit: "BC-14" }, field: "psi", extended_by: &[], probes: &[] },
+    // ---- planned (13), by unit --------------------------------------------
     Entry { family: "mapped inflow", name: "timeVaryingMappedFixedValue", status: Status::Planned { unit: "BC-15" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "synthetic inflow", name: "turbulentDFSEMInlet", status: Status::Planned { unit: "BC-16" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "synthetic inflow", name: "turbulentDigitalFilterInlet", status: Status::Planned { unit: "BC-16" }, field: "psi", extended_by: &[], probes: &[] },

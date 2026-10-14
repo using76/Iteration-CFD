@@ -754,6 +754,9 @@ impl<'m> Simple<'m> {
     pub fn begin_time_step(&mut self, gpu: &Gpu, dt: Scalar) -> Result<()> {
         field_ops::advance_time_levels_vector(gpu, &self.fldk, &mut self.u)?;
         field_ops::advance_time_levels(gpu, &self.fldk, &mut self.p)?;
+        // SPEC-LIT 120.10: a turbulentInlet on U draws its next fluctuation
+        // once per time step (BcInputs::turbulent_inlet); no rule, no launch.
+        field_ops::advance_turbulent_inlet_vector(gpu, &self.fldk, &mut self.u)?;
         self.momentum.ddt.advance(dt);
         Ok(())
     }
@@ -906,6 +909,11 @@ impl<'m> Simple<'m> {
             Some(self.momentum.grad_p()),
             m,
         )?;
+        // SPEC-LIT 120.10: the mapped inlets rewrite their refValue from the
+        // cells their offset plane samples, on the same terms - one launch
+        // per rule the setup built (BcInputs::mapped), nothing without one.
+        field_ops::update_mapped_vector(gpu, &self.fldk, &mut self.u, m)?;
+        field_ops::update_mapped_scalar(gpu, &self.fldk, &mut self.p, m)?;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
 

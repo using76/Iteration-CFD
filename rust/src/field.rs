@@ -648,6 +648,13 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "atmBoundaryLayerInletOmega",
     "nutkAtmRoughWallFunction",
     "nutUBlendedWallFunction",
+    // SPEC-LIT 120.10: the recycled inflow. All three ride
+    // `BcKind::FixedValue`; their refValue is rewritten by `fldMapped`
+    // every outer iteration (BcInputs::mapped) or by `fldTurbulentInlet`
+    // every time step (BcInputs::turbulent_inlet).
+    "mapped",
+    "mappedFixedValue",
+    "turbulentInlet",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -1004,6 +1011,12 @@ impl BcKind {
             | "atmBoundaryLayerInletK"
             | "atmBoundaryLayerInletEpsilon"
             | "atmBoundaryLayerInletOmega" => Self::FixedValue,
+            // SPEC-LIT 120.10: the recycled inflow is a fixedValue whose
+            // refValue a refresh kernel rewrites - `fldMapped` from the
+            // offset plane's cells, `fldTurbulentInlet` from the seeded
+            // fluctuation - so all three names are this kind; `field_setup`
+            // builds the rule and refuses where no caller refreshes it.
+            "mapped" | "mappedFixedValue" | "turbulentInlet" => Self::FixedValue,
             "nutLowReWallFunction" => Self::NutLowReWallFunction,
             "epsilonWallFunction" => Self::EpsilonWallFunction,
             "omegaWallFunction" => Self::OmegaWallFunction,
@@ -1611,6 +1624,14 @@ pub struct GpuScalarField {
     /// kernel per rule once per outer iteration; a field with no rule
     /// launches nothing.
     pub mean_rules: Vec<patch_mean::PatchMeanRule>,
+    /// SPEC-LIT 120.10: the `mapped`/`mappedFixedValue` patches, each with
+    /// its sampled cells on the device - `update_mapped_scalar` launches one
+    /// kernel per rule once per outer iteration; none, nothing.
+    pub mapped: Vec<mapped::GpuMapped>,
+    /// SPEC-LIT 120.10: the `turbulentInlet` patches, each with its
+    /// reference and step counter on the device - advanced once per time
+    /// step by `advance_turbulent_inlet_scalar`; none, nothing.
+    pub turbulent: Vec<mapped::GpuTurbulentInlet>,
 }
 
 impl GpuScalarField {
@@ -1632,6 +1653,8 @@ impl GpuScalarField {
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
             mean_rules: Vec::new(),
+            mapped: Vec::new(),
+            turbulent: Vec::new(),
         })
     }
 
@@ -1690,6 +1713,12 @@ pub struct GpuVectorField {
     /// as on [`GpuScalarField::mean_rules`] - `update_patch_means_vector`
     /// launches one kernel per rule once per outer iteration.
     pub mean_rules: Vec<patch_mean::PatchMeanRule>,
+    /// SPEC-LIT 120.10: as [`GpuScalarField::mapped`], refreshed by
+    /// `update_mapped_vector`.
+    pub mapped: Vec<mapped::GpuMapped>,
+    /// SPEC-LIT 120.10: as [`GpuScalarField::turbulent`], advanced by
+    /// `advance_turbulent_inlet_vector`.
+    pub turbulent: Vec<mapped::GpuTurbulentInlet>,
 }
 
 impl GpuVectorField {
@@ -1709,6 +1738,8 @@ impl GpuVectorField {
             bc_kind: gpu.upload(&kinds)?,
             dm: gpu.zeros(12 * m.n_boundary_faces)?,
             mean_rules: Vec::new(),
+            mapped: Vec::new(),
+            turbulent: Vec::new(),
         })
     }
 }
@@ -1775,6 +1806,13 @@ pub mod advective;
 /// [`patch_mean::patch_mean_values_vector`] and
 /// [`patch_mean::extrapolated_sn_grad`].
 pub mod patch_mean;
+
+/// The recycled inflow of SPEC-LIT 120.10: the [`mapped::MappedRule`] and
+/// [`mapped::TurbulentInletRule`] the setup holds per patch, and the host
+/// twins of the `fldMapped` and `fldTurbulentInlet` kernels - see
+/// [`mapped::mapped_values`], [`mapped::turbulent_seed`] and
+/// [`mapped::turbulent_advance`].
+pub mod mapped;
 
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
@@ -1962,7 +2000,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [89, 5, 16, 10, 10], "the per-status counts");
+        assert_eq!(counts, [92, 5, 13, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

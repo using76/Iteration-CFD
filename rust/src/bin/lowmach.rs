@@ -1861,6 +1861,9 @@ fn run(o: &Options) -> Result<RunEnd> {
             // outer iteration (Simple::correct_outer), so U may carry the
             // Outlets II conditions.
             patch_means: true,
+            // SPEC-LIT 120.10: Simple::correct_outer refreshes the mapped
+            // inlets on U and p every outer iteration too.
+            mapped: true,
             ..BcInputs::default()
         },
     )?;
@@ -1873,6 +1876,9 @@ fn run(o: &Options) -> Result<RunEnd> {
         &hm,
         BcInputs {
             patch_means: true,
+            // SPEC-LIT 120.10: Simple::correct_outer refreshes the mapped
+            // inlets on U and p every outer iteration too.
+            mapped: true,
             ..BcInputs::default()
         },
     )?;

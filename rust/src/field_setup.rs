@@ -103,6 +103,7 @@ use std::collections::BTreeMap;
 
 use crate::device::Gpu;
 use crate::error::{Error, Result};
+use crate::field::mapped::{MappedRule, TurbulentInletRule};
 use crate::field::patch_mean::PatchMeanRule;
 use crate::field::{BcKind, GpuScalarField, GpuVectorField};
 use crate::function1::{DeviceTimedPatch, F1, F1Clock, F1Kernels, F1Target, TimedPatch};
@@ -141,6 +142,13 @@ pub struct BoundaryTriple<T> {
     /// iteration through `field_ops::update_patch_means_*`; empty for every
     /// field that carries none of the five.
     pub mean_rules: Vec<PatchMeanRule>,
+    /// SPEC-LIT 120.10: the `mapped`/`mappedFixedValue` rules, one per patch,
+    /// each with its sampled cells; refreshed every outer iteration through
+    /// `field_ops::update_mapped_*`.
+    pub mapped_rules: Vec<MappedRule>,
+    /// SPEC-LIT 120.10: the `turbulentInlet` rules, one per patch; drawn
+    /// every time step through `field_ops::advance_turbulent_inlet_*`.
+    pub turbulent_rules: Vec<TurbulentInletRule>,
 }
 
 impl<T: Copy + Default> BoundaryTriple<T> {
@@ -153,6 +161,8 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             value: vec![T::default(); n],
             dm: vec![0.0; 12 * n],
             mean_rules: Vec::new(),
+            mapped_rules: Vec::new(),
+            turbulent_rules: Vec::new(),
         }
     }
 }
@@ -228,6 +238,20 @@ pub struct BcInputs<'a> {
     /// nothing to refresh it would freeze the face at its first value under
     /// a name that promises a patch integral (SPEC-LIT 13.4).
     pub patch_means: bool,
+    /// The caller refreshes the `mapped`/`mappedFixedValue` patches of
+    /// SPEC-LIT 120.10 every outer iteration through
+    /// `field_ops::update_mapped_*` - `Simple::correct_outer` does, for `U`
+    /// and `p`. False - the default - refuses the two names: a seed with
+    /// nothing to refresh it would freeze the face at the plane's first
+    /// sample under a name that promises the plane (SPEC-LIT 13.4).
+    pub mapped: bool,
+    /// The caller draws the `turbulentInlet` fluctuation of SPEC-LIT 120.10
+    /// once per TIME STEP through `field_ops::advance_turbulent_inlet_*` -
+    /// `Simple::begin_time_step` does, for `U`. False - the default, which
+    /// every driver passes today - refuses the name: a frozen draw would be
+    /// a fixed, randomly perturbed value under a name that promises a
+    /// fluctuation (SPEC-LIT 13.4).
+    pub turbulent_inlet: bool,
     /// SPEC-LIT 120.7: what the four buoyant pressure names are evaluated
     /// from. `None` - the default, which every setup that solves no `p_rgh`
     /// passes - refuses the four names: a solver whose pressure is not the
@@ -1490,6 +1514,27 @@ fn scalar_patch(
         });
     }
 
+    // SPEC-LIT 120.10: the recycled inflow, before the static arms - all
+    // three names map to `FixedValue` and would be read as a plain fixed
+    // value at the `value` entry there. The face is a fixed value whose
+    // refValue the caller's refresh rewrites (BcInputs::mapped,
+    // BcInputs::turbulent_inlet); a mapped seed is written by the post-pass
+    // `resolve_mapped_*` once the sampled cells are known.
+    if is_recycled_inflow(spec.type_name.as_str()) {
+        let seed = recycled_inflow(spec, n, at, patch, field, 1, aux)?;
+        for i in 0..n {
+            let v = if seed.values.is_empty() { internal[i] } else { seed.values[i] };
+            out.kind[at + i] = BcKind::FixedValue as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = v;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = v;
+        }
+        out.mapped_rules.extend(seed.mapped);
+        out.turbulent_rules.extend(seed.turbulent);
+        return Ok(());
+    }
+
     // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
     // same reason - the triple is rewritten once per outer iteration by
     // `update_patch_means_scalar`, so the setup only seeds it (the cell
@@ -2123,6 +2168,8 @@ pub fn scalar_boundary_with(
     for p in pending {
         out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
+    // SPEC-LIT 120.10: the mapped patches' sampled cells and seed values.
+    resolve_mapped_scalar(&mut out, m, internal, &raw.name)?;
 
     Ok(out)
 }
@@ -2173,6 +2220,8 @@ pub fn scalar_boundary_timed(
     for p in pending {
         out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
+    // SPEC-LIT 120.10: the mapped patches' sampled cells and seed values.
+    resolve_mapped_scalar(&mut out, m, internal, &raw.name)?;
 
     Ok((out, timed))
 }
@@ -2203,6 +2252,8 @@ pub fn upload_scalar(
         ref_grad: gpu.upload(&b.ref_grad)?,
         bc_kind: gpu.upload(&b.kind)?,
         mean_rules: b.mean_rules,
+        mapped: crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?,
+        turbulent: crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?,
     })
 }
 
@@ -2698,7 +2749,22 @@ fn scalar_entry_faces(
 /// normalisation runs on these numbers, and the rounded result is what the
 /// `dm` block carries.
 fn inlet_direction_faces(raw: &str, n: usize, patch: &str, field: &str) -> Result<Vec<DVec3>> {
-    let setting = format!("{field}: boundaryField/{patch}/inletDirection");
+    vector_entry_faces(raw, "inletDirection", "direction", n, patch, field)
+}
+
+/// Any per-face VECTOR entry `key` (SPEC-LIT 120.5's `inletDirection`,
+/// 120.10's `referenceField`): `uniform (x y z)` or `nonuniform
+/// List<vector> N ( (x y z) ... )`, held in f64; `noun` names one vector in
+/// the errors.
+fn vector_entry_faces(
+    raw: &str,
+    key: &str,
+    noun: &str,
+    n: usize,
+    patch: &str,
+    field: &str,
+) -> Result<Vec<DVec3>> {
+    let setting = format!("{field}: boundaryField/{patch}/{key}");
     let mut tz = crate::io::tokenizer::Tokenizer::new(raw, &setting);
     let mut flat: Vec<DVec3> = Vec::new();
     if tz.is_word("nonuniform") {
@@ -2727,13 +2793,13 @@ fn inlet_direction_faces(raw: &str, n: usize, patch: &str, field: &str) -> Resul
         if tz.is_punct(')') {
             break;
         }
-        return tz.err("expected a (dx dy dz) direction");
+        return tz.err(format!("expected a (x y z) {noun}"));
     }
     if flat.len() != declared as usize {
         return Err(Error::Field {
             field: field.to_string(),
             msg: format!(
-                "{setting}: the list declares {declared} directions and carries {}",
+                "{setting}: the list declares {declared} {noun}s and carries {}",
                 flat.len()
             ),
         });
@@ -2743,7 +2809,7 @@ fn inlet_direction_faces(raw: &str, n: usize, patch: &str, field: &str) -> Resul
         k if k == n => Ok(flat),
         k => Err(Error::Field {
             field: field.to_string(),
-            msg: format!("{setting}: {k} directions but the patch has {n} faces"),
+            msg: format!("{setting}: {k} {noun}s but the patch has {n} faces"),
         }),
     }
 }
@@ -2906,6 +2972,372 @@ fn resolve_mean_rule(
         src_size: q.size,
         ..rule
     })
+}
+
+// ==========================================================================
+//  SPEC-LIT 120.10 - the recycled inflow
+// ==========================================================================
+
+/// The names of SPEC-LIT 120.10's recycled inflow.
+fn is_recycled_inflow(name: &str) -> bool {
+    matches!(name, "mapped" | "mappedFixedValue" | "turbulentInlet")
+}
+
+/// A refusal of the recycled inflow, naming the setting and SPEC-LIT 120.10.
+fn recycled_refused(field: &str, setting: &str, why: &str) -> Error {
+    Error::Field {
+        field: field.to_string(),
+        msg: format!("{setting}: {why} (SPEC-LIT 120.10)"),
+    }
+}
+
+/// One CONSTANT entry of `n_c` components (SPEC-LIT 120.10), read through
+/// `F1::parse`: `Ok(None)` when absent, a time-varying one refused by name -
+/// no driver runs the timed path for these names.
+fn recycled_constant(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    n_c: usize,
+    base: &str,
+    field: &str,
+) -> Result<Option<[f64; 3]>> {
+    let setting = format!("{base}/{key}");
+    let Some(f) = F1::parse(entries, key, n_c, &setting, None)? else {
+        return Ok(None);
+    };
+    if !f.is_constant() {
+        return Err(recycled_refused(
+            field,
+            &setting,
+            &format!("a time-varying `{key}` is refused on the recycled inflow"),
+        ));
+    }
+    let v = f.eval(0.0);
+    if v[..n_c].iter().any(|x| !x.is_finite()) {
+        return Err(recycled_refused(field, &setting, &format!("`{key}` is not finite")));
+    }
+    Ok(Some(v))
+}
+
+/// What the recycled-inflow arm seeds on one patch: the rule, and for
+/// `turbulentInlet` the seed values `psi_ref + x^0` (`[n * ncomp]`).
+struct RecycledSeed {
+    mapped: Option<MappedRule>,
+    turbulent: Option<TurbulentInletRule>,
+    /// `[n * ncomp]` the turbulentInlet seed; empty for `mapped`, whose
+    /// seed the post-pass [`resolve_mapped`] writes from the sampled cells.
+    values: Vec<Scalar>,
+}
+
+/// SPEC-LIT 120.10: parse one recycled-inflow patch - the opt-in, the
+/// entries, the refusals by name - for a field of `ncomp` components. The
+/// patch occupies `at..at + n` of the flattened boundary.
+fn recycled_inflow(
+    spec: &PatchFieldSpec,
+    n: usize,
+    at: usize,
+    patch: &str,
+    field: &str,
+    ncomp: usize,
+    aux: &PatchAux,
+) -> Result<RecycledSeed> {
+    let name = spec.type_name.as_str();
+    let base = format!("{field}: boundaryField/{patch}");
+    if name == "turbulentInlet" {
+        if !aux.inputs.turbulent_inlet {
+            return Err(recycled_refused(
+                field,
+                &base,
+                "`turbulentInlet` is refused - its fluctuation must be drawn once \
+                 per time step through advance_turbulent_inlet_*, and this setup \
+                 was given BcInputs::turbulent_inlet = false, so nothing would",
+            ));
+        }
+        return turbulent_inlet_seed(spec, n, at, patch, field, ncomp, &base);
+    }
+    if !aux.inputs.mapped {
+        return Err(recycled_refused(
+            field,
+            &base,
+            &format!(
+                "`{name}` is refused - its refValue must be rewritten from the \
+                 offset plane every outer iteration through update_mapped_*, and \
+                 this setup was given BcInputs::mapped = false, so nothing would"
+            ),
+        ));
+    }
+    let entries = crate::function1::patch_entries(spec, &base)?;
+    // The sampling this solver builds is the nearest-cell sample of an
+    // offset plane in the same region: anything else is refused by name.
+    if let Some(v) = entries.get("sampleMode") {
+        if v.trim() != "nearestCell" {
+            return Err(recycled_refused(
+                field,
+                &format!("{base}/sampleMode"),
+                &format!("`{}` is not built - only `nearestCell` is", v.trim()),
+            ));
+        }
+    }
+    for key in ["sampleRegion", "samplePatch"] {
+        if entries.contains_key(key) {
+            return Err(recycled_refused(
+                field,
+                &format!("{base}/{key}"),
+                "sampling another region or another patch is not built - the \
+                 sample is the cell holding the face centre plus `offset`",
+            ));
+        }
+    }
+    if let Some(v) = entries.get("interpolationScheme") {
+        if v.trim() != "cell" {
+            return Err(recycled_refused(
+                field,
+                &format!("{base}/interpolationScheme"),
+                &format!(
+                    "`{}` is not built - only `cell`, the sampled cell's value, is",
+                    v.trim()
+                ),
+            ));
+        }
+    }
+    for key in ["fieldName", "field"] {
+        if let Some(v) = entries.get(key) {
+            if v.trim() != field {
+                return Err(recycled_refused(
+                    field,
+                    &format!("{base}/{key}"),
+                    &format!("sampling another field (`{}`) is not built", v.trim()),
+                ));
+            }
+        }
+    }
+    let Some(d) = recycled_constant(&entries, "offset", 3, &base, field)? else {
+        return Err(recycled_refused(
+            field,
+            &format!("{base}/offset"),
+            &format!(
+                "`{name}` needs an `offset` entry and the patch has none - this \
+                 solver reads the sampling offset from the field's patch entry, \
+                 not from constant/polyMesh/boundary"
+            ),
+        ));
+    };
+    let set_average = match entries.get("setAverage").map(|v| v.trim()) {
+        None => false,
+        Some("true" | "yes" | "on" | "1") => true,
+        Some("false" | "no" | "off" | "0") => false,
+        Some(v) => {
+            return Err(recycled_refused(
+                field,
+                &format!("{base}/setAverage"),
+                &format!("`{v}` is not a switch"),
+            ))
+        }
+    };
+    let average = match recycled_constant(&entries, "average", ncomp, &base, field)? {
+        Some(a) if ncomp == 1 => Vec3::new(a[0] as Scalar, 0.0, 0.0),
+        Some(a) => Vec3::new(a[0] as Scalar, a[1] as Scalar, a[2] as Scalar),
+        None if set_average => {
+            return Err(recycled_refused(
+                field,
+                &format!("{base}/average"),
+                "`setAverage` needs an `average` entry and the patch has none",
+            ))
+        }
+        None => Vec3::ZERO,
+    };
+    Ok(RecycledSeed {
+        mapped: Some(MappedRule {
+            start: at,
+            size: n,
+            offset: DVec3::new(d[0], d[1], d[2]),
+            cells: Vec::new(),
+            set_average,
+            average: if set_average { average } else { Vec3::ZERO },
+        }),
+        turbulent: None,
+        values: Vec::new(),
+    })
+}
+
+/// SPEC-LIT 120.10's `turbulentInlet` entries and its seed (120.10g).
+fn turbulent_inlet_seed(
+    spec: &PatchFieldSpec,
+    n: usize,
+    at: usize,
+    patch: &str,
+    field: &str,
+    ncomp: usize,
+    base: &str,
+) -> Result<RecycledSeed> {
+    let entries = crate::function1::patch_entries(spec, base)?;
+    let Some(raw) = spec.extra.get("referenceField") else {
+        return Err(recycled_refused(
+            field,
+            &format!("{base}/referenceField"),
+            "`turbulentInlet` needs a `referenceField` entry and the patch has none",
+        ));
+    };
+    let reference: Vec<Scalar> = if ncomp == 1 {
+        scalar_entry_faces(raw, "referenceField", n, patch, field)?
+    } else {
+        vector_entry_faces(raw, "referenceField", "vector", n, patch, field)?
+            .iter()
+            .flat_map(|v| [v.x as Scalar, v.y as Scalar, v.z as Scalar])
+            .collect()
+    };
+    if reference.iter().any(|r| !r.is_finite()) {
+        return Err(recycled_refused(
+            field,
+            &format!("{base}/referenceField"),
+            "`referenceField` is not finite",
+        ));
+    }
+    let Some(s) = recycled_constant(&entries, "fluctuationScale", ncomp, base, field)? else {
+        return Err(recycled_refused(
+            field,
+            &format!("{base}/fluctuationScale"),
+            "`turbulentInlet` needs a `fluctuationScale` entry and the patch has none",
+        ));
+    };
+    if s[..ncomp].iter().any(|x| *x < 0.0) {
+        return Err(recycled_refused(
+            field,
+            &format!("{base}/fluctuationScale"),
+            "`fluctuationScale` is negative - it is an RMS relative to |referenceField|",
+        ));
+    }
+    let alpha = recycled_constant(&entries, "alpha", 1, base, field)?.map_or(0.1, |a| a[0]);
+    if !(alpha > 0.0 && alpha <= 1.0) {
+        return Err(recycled_refused(
+            field,
+            &format!("{base}/alpha"),
+            &format!("`alpha` {alpha} is outside (0, 1] - (120.10g) has mu = 1 - alpha"),
+        ));
+    }
+    let seed = match entries.get("seed") {
+        None => 0u64,
+        Some(v) => v.trim().parse::<u64>().map_err(|_| {
+            recycled_refused(
+                field,
+                &format!("{base}/seed"),
+                &format!("`{}` is not a non-negative integer", v.trim()),
+            )
+        })?,
+    };
+    let scale = if ncomp == 1 {
+        Vec3::new(s[0] as Scalar, 0.0, 0.0)
+    } else {
+        Vec3::new(s[0] as Scalar, s[1] as Scalar, s[2] as Scalar)
+    };
+    let rule = TurbulentInletRule {
+        start: at,
+        size: n,
+        ncomp,
+        reference,
+        scale,
+        alpha: alpha as Scalar,
+        seed,
+    };
+    // (120.10g)'s x^0. `turbulent_seed` indexes the FLATTENED boundary, so
+    // the scratch reaches the patch's own place and is cut there.
+    let mut scratch = vec![0.0 as Scalar; (at + n) * ncomp];
+    crate::field::mapped::turbulent_seed(&rule, &mut scratch);
+    let values = scratch[at * ncomp..].to_vec();
+    Ok(RecycledSeed {
+        mapped: None,
+        turbulent: Some(rule),
+        values,
+    })
+}
+
+/// SPEC-LIT 120.10's post-pass: every mapped rule's sampled cells
+/// (120.10a), the cell holding the LOCAL f64 face centre plus `offset` by
+/// the parcel walk's point location (`parcels::locate_cell64`), and the seed
+/// triple (120.10b)-(120.10c) from the initial cells `psi`
+/// (`[n_cells * ncomp]`) into `ref_value` and `value` (`[n_bf * ncomp]`).
+/// A sample outside the mesh is refused by name.
+fn resolve_mapped(
+    rules: &mut [MappedRule],
+    ref_value: &mut [Scalar],
+    value: &mut [Scalar],
+    m: &HostMesh,
+    psi: &[Scalar],
+    ncomp: usize,
+    field: &str,
+) -> Result<()> {
+    let g = m.geom64();
+    for rule in rules.iter_mut() {
+        let patch = m
+            .patches
+            .iter()
+            .find(|p| p.start == rule.start && p.size == rule.size)
+            .map_or("?", |p| p.name.as_str());
+        rule.cells = Vec::with_capacity(rule.size);
+        for i in 0..rule.size {
+            let x = g.b_cf[rule.start + i] + rule.offset;
+            let Some(c) = crate::parcels::locate_cell64(m, x) else {
+                let w = m.world64(x);
+                return Err(recycled_refused(
+                    field,
+                    &format!("{field}: boundaryField/{patch}/offset"),
+                    &format!(
+                        "face {i}'s sample point ({} {} {}) lies in no cell of the mesh",
+                        w.x, w.y, w.z
+                    ),
+                ));
+            };
+            rule.cells.push(c as Label);
+        }
+        crate::field::mapped::mapped_values(rule, ncomp, psi, &m.b_mag_sf, ref_value);
+        let lo = rule.start * ncomp;
+        let hi = (rule.start + rule.size) * ncomp;
+        value[lo..hi].copy_from_slice(&ref_value[lo..hi]);
+    }
+    Ok(())
+}
+
+/// [`resolve_mapped`] on a scalar triple, from the builder's `internal`
+/// (a short `internal` reads 0 past its end, as the patch loop reads it).
+fn resolve_mapped_scalar(
+    out: &mut BoundaryTriple<Scalar>,
+    m: &HostMesh,
+    internal: &[Scalar],
+    field: &str,
+) -> Result<()> {
+    if out.mapped_rules.is_empty() {
+        return Ok(());
+    }
+    let psi: Vec<Scalar> = (0..m.n_cells).map(|c| internal.get(c).copied().unwrap_or(0.0)).collect();
+    let mut rules = std::mem::take(&mut out.mapped_rules);
+    resolve_mapped(&mut rules, &mut out.ref_value, &mut out.value, m, &psi, 1, field)?;
+    out.mapped_rules = rules;
+    Ok(())
+}
+
+/// [`resolve_mapped`] on a vector triple, through component-fastest flat
+/// copies of the cells, `refValue` and the face values.
+fn resolve_mapped_vector(
+    out: &mut BoundaryTriple<Vec3>,
+    m: &HostMesh,
+    internal: &[Vec3],
+    field: &str,
+) -> Result<()> {
+    if out.mapped_rules.is_empty() {
+        return Ok(());
+    }
+    let flat = |v: &[Vec3]| -> Vec<Scalar> { v.iter().flat_map(|u| [u.x, u.y, u.z]).collect() };
+    let cells: Vec<Vec3> =
+        (0..m.n_cells).map(|c| internal.get(c).copied().unwrap_or_default()).collect();
+    let psi = flat(&cells);
+    let mut rv = flat(&out.ref_value);
+    let mut val = flat(&out.value);
+    let mut rules = std::mem::take(&mut out.mapped_rules);
+    resolve_mapped(&mut rules, &mut rv, &mut val, m, &psi, 3, field)?;
+    out.mapped_rules = rules;
+    out.ref_value = rv.chunks_exact(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
+    out.value = val.chunks_exact(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
+    Ok(())
 }
 
 fn inlet_seed(kind: BcKind, n: usize, ref_value: Vec<Vec3>, dm: Vec<Scalar>) -> WallSlipSeed {
@@ -3703,6 +4135,31 @@ fn vector_patch(
         _ => {}
     }
 
+    // SPEC-LIT 120.10: the recycled inflow, before the static arms - all
+    // three names map to `FixedValue` and would be read as a plain fixed
+    // value at the `value` entry there. The face is a fixed value whose
+    // refValue the caller's refresh rewrites (BcInputs::mapped,
+    // BcInputs::turbulent_inlet); a mapped seed is written by the post-pass
+    // `resolve_mapped_*` once the sampled cells are known.
+    if is_recycled_inflow(spec.type_name.as_str()) {
+        let seed = recycled_inflow(spec, n, at, patch, field, 3, aux)?;
+        for i in 0..n {
+            let v = if seed.values.is_empty() {
+                internal[i]
+            } else {
+                Vec3::new(seed.values[3 * i], seed.values[3 * i + 1], seed.values[3 * i + 2])
+            };
+            out.kind[at + i] = BcKind::FixedValue as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = v;
+            out.ref_grad[at + i] = zero;
+            out.value[at + i] = v;
+        }
+        out.mapped_rules.extend(seed.mapped);
+        out.turbulent_rules.extend(seed.turbulent);
+        return Ok(());
+    }
+
     // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
     // same reason - the triple is rewritten once per outer iteration by
     // `update_patch_means_vector` (the cell value; `fr = 1` for the plain
@@ -4206,6 +4663,8 @@ pub fn vector_boundary_with(
     for p in pending {
         out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
+    // SPEC-LIT 120.10: the mapped patches' sampled cells and seed values.
+    resolve_mapped_vector(&mut out, m, internal, &raw.name)?;
 
     Ok(out)
 }
@@ -4256,6 +4715,8 @@ pub fn vector_boundary_timed(
     for p in pending {
         out.mean_rules.push(resolve_mean_rule(p, m, &raw.name)?);
     }
+    // SPEC-LIT 120.10: the mapped patches' sampled cells and seed values.
+    resolve_mapped_vector(&mut out, m, internal, &raw.name)?;
 
     Ok((out, timed))
 }
@@ -4286,6 +4747,8 @@ pub fn upload_vector(
         bc_kind: gpu.upload(&b.kind)?,
         dm: gpu.upload(&b.dm)?,
         mean_rules: b.mean_rules,
+        mapped: crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?,
+        turbulent: crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?,
     })
 }
 
@@ -4351,6 +4814,9 @@ pub fn setup_scalar_field(
     gpu.write(&mut f.bc_kind, &b.kind)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
+    f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     Ok(())
 }
 
@@ -4376,6 +4842,9 @@ pub fn setup_scalar_field_with(
     gpu.write(&mut f.bc_kind, &b.kind)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
+    f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     Ok(())
 }
 
@@ -4401,6 +4870,9 @@ pub fn setup_vector_field_with(
     gpu.write(&mut f.dm, &b.dm)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
+    f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     Ok(())
 }
 
@@ -4425,6 +4897,9 @@ pub fn setup_vector_field(
     gpu.write(&mut f.dm, &b.dm)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
+    f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     Ok(())
 }
 
@@ -4452,6 +4927,9 @@ pub fn setup_scalar_field_timed(
     gpu.write(&mut f.bc_kind, &b.kind)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
+    f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     TimedBcs::upload(gpu, &timed)
 }
 
@@ -4480,6 +4958,9 @@ pub fn setup_vector_field_timed(
     gpu.write(&mut f.dm, &b.dm)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
+    f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     TimedBcs::upload(gpu, &timed)
 }
 

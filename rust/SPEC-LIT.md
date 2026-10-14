@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 89 names of
+accepts it on the field the row is asked on, and it is one of the 92 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39117,14 +39117,14 @@ row, row for row.
 | atmospheric | `atmBoundaryLayerInletOmega` | implemented | — | — | (120.9e), `epsilon/(C_mu k)` |
 | atmospheric | `nutkAtmRoughWallFunction` | implemented | — | — | (120.9g), the k-based ground in the roughness length `z0`; the wall shear is `u*^2` on the profile |
 | atmospheric | `nutUBlendedWallFunction` | implemented | — | — | (120.9h), the binomial blend of the viscous and log-law friction velocities, exponent `n` |
+| mapped inflow | `mapped` | implemented | — | — | (120.10a)-(120.10c), the cells of the plane `offset` downstream, `setAverage` to an area mean |
+| mapped inflow | `mappedFixedValue` | implemented | — | — | `mapped`'s other spelling, the same condition |
+| mapped inflow | `turbulentInlet` | implemented | — | — | (120.10e)-(120.10h), `referenceField` plus a seeded fluctuation of RMS `fluctuationScale` times the reference's magnitude and memory `1 - alpha` |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
-| mapped inflow | `mapped` | planned | BC-14 | — | — |
-| mapped inflow | `mappedFixedValue` | planned | BC-14 | — | — |
-| mapped inflow | `turbulentInlet` | planned | BC-14 | — | — |
 | mapped inflow | `timeVaryingMappedFixedValue` | planned | BC-15 | — | — |
 | synthetic inflow | `turbulentDFSEMInlet` | planned | BC-16 | — | — |
 | synthetic inflow | `turbulentDigitalFilterInlet` | planned | BC-16 | — | — |
@@ -40579,6 +40579,181 @@ why the gate selects it.
   *J. Wind Eng. Ind. Aerodyn.* 95 (2007) 355-369,
   doi:10.1016/j.jweia.2006.08.002 - the empty-fetch test of horizontal
   homogeneity, and the rough-wall function written in `z0`.
+
+No GPL-licensed source was consulted.
+
+### 120.10 The recycled inflow - an offset plane copied onto an inlet, and a seeded fluctuation
+
+BC-14 implements the three recycled-inflow names of the §120 table. The
+names are taken from the user guides of §120 by name only; every equation
+below is cited, or is ours and marked DESIGN.
+
+All three are a §4 FIXED VALUE (`BcKind::FixedValue`, `fr = 1`,
+`refGrad = 0`) whose `refValue` a refresh kernel rewrites - no new
+evaluation branch (§5.2 of the completion plan), and every kernel that asks
+whether a face's flux is prescribed sees the fixed value it is.
+
+**`mapped` and `mappedFixedValue`** (one condition, two spellings). The
+recycling idea - take the inflow from a plane inside the domain and feed
+it back at the inlet, so that a short domain carries a developed profile -
+is Lund, Wu & Squires (1998). For each face `f` of the patch, with the
+LOCAL f64 face centre `x_f` (§118.7) and the patch entry `offset` `d`:
+
+```
+x_s,f = x_f + d,   c(f) = the cell that holds x_s,f                   (120.10a)
+psi*_f = psi_c(f)                                                     (120.10b)
+```
+
+`c(f)` is found once, at setup, by the parcel walk's point location
+(`parcels::locate_cell64`, the half-space test of §66.6 on the f64
+`geom64` view), so a point on a shared face goes to the lower-numbered
+cell. (120.10b) is the cell value - the sample is not interpolated. With
+`setAverage` the samples are rescaled to the area mean `a` (`average`, the
+field's rank) *(DESIGN - ours)*:
+
+```
+A = SUM_f |S_f|,   m = SUM_f |S_f| psi*_f / A
+s = |a|/|m|  if |a| > 0 and |m| >= |a|/2,   s = 1 otherwise
+psi_f = s psi*_f + (a - s m)                                          (120.10c)
+```
+
+so `SUM_f |S_f| psi_f / A = a` whatever the branch: the factor keeps the
+sampled profile's shape where its mean is comparable with the target, and
+where it is not (a sample near rest, or a target of zero) the shift alone
+moves the mean without amplifying the sample. On a vector field `|.|` is
+the magnitude, so the factor is one number and the shift removes the part
+of `m` across `a`. On a planar patch with outward normal `n`, (120.10c)
+holds the flux:
+
+```
+SUM_f psi_f . S_f = A a . n                                           (120.10d)
+```
+
+The refresh is `field_ops::update_mapped_scalar`/`_vector`: one
+`fldMapped` launch per patch, once per outer iteration before the boundary
+evaluation, the sums in `ofacc` (§118.1) in face order and each value
+rounded once; without `setAverage` the face value is the cell value, bit
+for bit. `Simple::correct_outer` runs it for `U` and `p`;
+`BcInputs::mapped` is the caller's promise, and `ofgpu-lowmach` and
+`ofgpu-buoyant` give it for both. Without it - every other setup, and every
+field outside `Simple` (`T`, `k`, `epsilon`, species) - the two names are
+refused by name, because a seed nobody refreshes would freeze the face at
+the plane's first sample (§13.4). The setup seeds the face from the
+initial cells through the same host twin, `field::mapped::mapped_values`.
+
+Entries: `offset` (required; a constant - a time-varying Function1 is
+refused by name), `setAverage` (a switch, false when absent), `average`
+(required when `setAverage` is on). This solver reads the sampling from
+the field's patch entry, not from a mapped patch in
+`constant/polyMesh/boundary`. Refused by name: `sampleMode` other than
+`nearestCell`; any `sampleRegion` or `samplePatch` (another region or a
+patch-to-patch sample is not built); `interpolationScheme` other than
+`cell`; `fieldName` or `field` naming another field; a sample point in no
+cell of the mesh.
+
+**`turbulentInlet`** *(DESIGN - ours, on Gillespie's update)*. The face
+value is a reference plus a fluctuation with a set RMS and a set memory,
+drawn from a counter-based generator so that a run is reproducible and the
+device and the host twin draw the same numbers. The unit-variance draw for
+step `n`, global boundary face `g` and component `c`:
+
+```
+k = seed XOR (n << 32) XOR (3 g + c),   h = SplitMix64(k + 0x9E3779B97F4A7C15)
+u = 2^-53 floor(h / 2^11),   eps = sqrt(3) (2u - 1)                   (120.10e)
+```
+
+`SplitMix64` is the finaliser of Steele, Lea & Flood (2014) -
+`z = (z XOR z>>30) 0xBF58476D1CE4E5B9`, `z = (z XOR z>>27)
+0x94D049BB133111EB`, `z XOR z>>31`, in wrapping 64-bit arithmetic - and
+`eps` is uniform on `[-sqrt 3, sqrt 3)`, mean 0 and variance 1. With
+`s = fluctuationScale` (the field's rank) and the reference `psi_ref`
+(`referenceField`, uniform or per face):
+
+```
+sigma_f,c = s_c |psi_ref,f|                                           (120.10f)
+x^0 = sigma eps^0,   x^n = mu x^(n-1) + sqrt(1 - mu^2) sigma eps^n,
+mu = 1 - alpha                                                        (120.10g)
+psi_f^n = psi_ref,f + x^n                                             (120.10h)
+```
+
+(120.10g) is Gillespie's (1996) exact update of an Ornstein-Uhlenbeck
+process over a step, `mu = exp(-dt/tau)`, here with `mu` given through
+`alpha` rather than through a correlation time: started from a stationary
+draw, `x` keeps the RMS `sigma` at every step and its lag-1
+autocorrelation is `mu`. `alpha = 1` is white. `|psi_ref,f|` is the vector
+magnitude, or the absolute value on a scalar field. The update runs in
+f64 in both builds and rounds once; `x^(n-1)` is read back as
+`refValue - psi_ref`. Entries: `referenceField` and `fluctuationScale`
+(required, `fluctuationScale >= 0`), `alpha` (`0 < alpha <= 1`, 0.1 when
+absent), `seed` (a non-negative integer, 0 when absent - this solver's key).
+
+The draw is `field_ops::advance_turbulent_inlet_scalar`/`_vector`: one
+`fldTurbulentInlet` launch per patch, once per TIME step, with the step
+counter in a device buffer so a captured graph advances it (§81).
+`Simple::begin_time_step` runs it for `U`. `BcInputs::turbulent_inlet` is
+the caller's promise; no driver gives it today - the steady modes of
+`ofgpu-lowmach` and `ofgpu-buoyant` open a time step every outer unit,
+which would redraw the fluctuation every iteration - so every driver
+refuses the name, as §120.4 records for `advective`; the API carries it.
+
+**Gates** - `tests/bc_mapped.rs`, both builds (f64 [single]), 5 tests.
+`mapped_copies_the_sampled_cell` - 4 x 3 x 2 cells over [0,2] x [0,1]^2,
+xMin `offset (1.25 0 0)`: every face value is the cell centred at
+`x_f + d`, found by a direct search on the centres, bit for bit in both
+builds, scalar and vector, for both spellings (class D).
+`set_average_holds_the_mean_and_the_flux` - `T = 1 + x + 2y^2 + 0.5z`:
+`average 5` takes the factor branch (one ratio over the patch, spread 0
+[5.0e-8]), `average 100` the shift branch (spread 0 [5.0e-6]); the area
+mean within 1.4e-16 [1.5e-8] of `a` relative (tol(1e-12), class R); the
+device against `mapped_values` within 8.9e-16 [0]. `U = (1 + x, y - z,
+2z)` with `average (2 0 0)` against a sample mean of `(2.25 0 1)`: each
+component's mean within 0 [3.1e-9] of `a` and the inflow (120.10d)
+`2.00000000000000` [`2.00000000000000`] against `2 A = 2` (tol(1e-12),
+class R). `a_recycled_channel_is_the_cyclic_channel` - THE gate: 16 x 16 x 1
+cells over [0,2] x [0,1] x [0,1/16], `nu = 0.01` (Re = 100 on the height).
+The cyclic channel is driven by the uniform body force `b = 12 nu U_b/H^2 =
+0.12` (the density-ratio form at `T_ref/T = 2`), `p = 0` on one wall. The
+recycled channel has xMin `mappedFixedValue offset (1.0625 0 0) setAverage
+true average (1 0 0)`, xMax `zeroGradient` with `p = 0`. Steady SIMPLE
+stops on a cell change of `U` below 1e-14 in 2037 (cyclic) and 303 (recycled) iterations
+[the 4000-iteration cap, the f32 SIMPLE floor of §118]. At the sample
+plane, each profile by its own bulk: the worst difference 1.559e-4 [1.557e-4]
+of the peak 1.4884 (<= 1 %, class P); the inflow `-SUM phi` within
+0 [5.6e-9] of `A` relative (the f64 sum prints `0.062500000000000`) (tol(1e-12), class R).
+`turbulent_inlet_rms_is_the_prescribed_scale` - 100 faces, reference
+`(2 0 0)`, scale `(0.1 0.2 0.05)`: `alpha 1`, the seed and 99 steps, 1e4
+samples a component - `RMS/sigma` 1.00659, 0.99826, 0.99776 and
+`mean/sigma` -0.00076, -0.00019, 0.00270 in both builds (RMS within 5 %,
+mean within 0.05, class P); the device against `turbulent_advance` over
+all 3e4 draws 0 [0]; the same seed draws the same field bit for bit and
+another seed does not; `alpha 0.1` over 1000 steps - `RMS/sigma` 0.99402,
+1.00313, 1.00159 and lag-1 autocorrelation 0.89835, 0.90040, 0.90024
+against `mu = 0.9` (within 0.05); a scalar `T` about 300 at scale 0.02,
+`RMS/sigma` 0.99916. `mapped_and_turbulent_inlet_refusals_are_by_name` -
+18 refusals, each naming its entry and this section, and the seed of an
+accepted `mapped` patch is its sample bit for bit. 5 of 5 in each build.
+
+Control, measured once and not kept as a test: the same recycled channel
+with a UNIFORM `fixedValue (1 0 0)` inlet is 2.1e-1 of the peak off the
+cyclic profile at the sample plane (at `nu = 0.1`, Re = 10, it was only
+7.2e-3 - inside the band - which is why the gate runs at Re = 100: there
+the band sees the recycling, not a short entry length).
+
+Finding (for the §118 owner, F32-13/14/15): under `single` neither channel
+reaches the 1e-14 change; both run to the 4000 cap. The profiles still
+agree to 1.557e-4 of the peak - the f32 SIMPLE floor family of §120.3-§120.6.
+
+* **Lund, T. S., Wu, X., Squires, K. D.** Generation of turbulent inflow
+  data for spatially-developing boundary layer simulations. *J. Comput.
+  Phys.* 140 (1998) 233-258, doi:10.1006/jcph.1998.5882 - the recycled
+  inflow taken from a plane downstream (the idea; their rescaling of a
+  boundary layer is not (120.10c)).
+* **Gillespie, D. T.** Exact numerical simulation of the Ornstein-Uhlenbeck
+  process and its integral. *Phys. Rev. E* 54 (1996) 2084-2091,
+  doi:10.1103/PhysRevE.54.2084 - the exact one-step update (120.10g).
+* **Steele, G. L., Lea, D., Flood, C. H.** Fast splittable pseudorandom
+  number generators. *Proc. OOPSLA 2014* (SPLASH '14), 453-472,
+  doi:10.1145/2660193.2660195 - the SplitMix64 finaliser of (120.10e).
 
 No GPL-licensed source was consulted.
 
