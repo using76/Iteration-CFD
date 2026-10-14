@@ -1,7 +1,7 @@
 // Dataset service interface: turns a case / result path into a ViewerDataset
 // manifest plus binary blobs, and answers result queries for the tools.
 // Implemented in datasets/service.ts.
-import type { DatasetOpenResponse, DatasetProgress, FieldComponent, FieldTimeInfo, ResultsResponse, ViewerDataset } from '@cfd/shared'
+import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, FieldComponent, FieldTimeInfo, PlaneCutInfo, ResultsResponse, ViewerDataset } from '@cfd/shared'
 import type { StatComponent } from './stats.js'
 
 export interface FieldStats {
@@ -36,6 +36,12 @@ export interface DatasetService {
   fieldStats(relRoot: string, time: string, field: string, component?: FieldComponent, region?: { min: [number, number, number]; max: [number, number, number] } | null): Promise<FieldStats>
   /** Time directories, fields and VTK files under a result root, for `results_discover` and the explorer. */
   discover(relRoot: string): Promise<ResultsResponse>
+  /**
+   * Cut a non-lattice polyMesh dataset by a plane exactly (SPEC-LIT §148.1) and store the triangles
+   * as blobs. Refuses `NO_PLANE_CUT: ...` when the dataset is not one (`manifest.planeCut` false)
+   * and `INVALID: ...` for a zero or non-finite plane.
+   */
+  cut(id: string, plane: CutPlaneSpec): Promise<PlaneCutInfo>
   onProgress(handler: (p: DatasetProgress) => void): () => void
   evict(id: string): void
   /** Byte accounting of cached blobs. */

@@ -30,6 +30,8 @@ export type ComputeRequest =
   | { op: 'iso'; grid: GridKeys; field: FieldRef; values: number[] }
   | { op: 'streamlines'; grid: GridKeys; field: FieldRef; seeds: Float32Array; direction: StreamDirection; maxLength: number; planarAxis: Axis | null }
   | { op: 'glyphs'; grid: GridKeys; field: FieldRef; stride: number; cap: number; slice: { axis: Axis; position: number } | null }
+  /** Colour a stored plane cut (positions: f32 3 per vertex, 3 vertices per triangle; cells: u32 per triangle) by the cell value. */
+  | { op: 'cut'; positions: string; cells: string; field: FieldRef; mapper: MapperSpec }
 
 export type ComputeResult =
   | { op: 'surfaceScalars'; scalars: Float32Array }
@@ -37,6 +39,8 @@ export type ComputeResult =
   | { op: 'iso'; positions: Float32Array; normals: Float32Array; triangleCount: number }
   | { op: 'streamlines'; points: Float32Array; speeds: Float32Array; offsets: Uint32Array }
   | { op: 'glyphs'; positions: Float32Array; vectors: Float32Array; count: number; stride: number }
+  /** values[t] is the coloured scalar of cells[t] (untransformed); colors are RGBA8 per vertex, flat per triangle. */
+  | { op: 'cut'; positions: Float32Array; cells: Uint32Array; values: Float32Array; colors: Uint8Array; triangleCount: number }
 
 export type ResultOf<R extends ComputeRequest> = Extract<ComputeResult, { op: R['op'] }>
 
@@ -49,6 +53,8 @@ export function requestKeys(req: ComputeRequest): string[] {
   switch (req.op) {
     case 'surfaceScalars':
       return [req.cellOfTri, req.indices, req.field.key]
+    case 'cut':
+      return [req.positions, req.cells, req.field.key]
     default:
       return [req.grid.x, req.grid.y, req.grid.z, req.field.key]
   }

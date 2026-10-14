@@ -1,9 +1,10 @@
 // Dataset service: turns a case / result path into a ViewerDataset manifest
 // plus binary blobs, parsing on demand in a worker pool and caching blobs on
 // disk under config.cacheDir.
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { DatasetOpenResponse, DatasetProgress, DatasetSource, DatasetStage, FieldComponent, FieldTimeInfo, GeometryFidelity, RegionEntry, ResultsResponse, ViewerDataset } from '@cfd/shared'
+import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, DatasetSource, DatasetStage, FieldComponent, FieldTimeInfo, GeometryFidelity, PlaneCutInfo, RegionEntry, ResultsResponse, ViewerDataset } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import { buildCartesianGrid, cartesianBoundarySurface, cartesianCellCenters, type CartesianGrid } from '../formats/cartesian.js'
 import { readCaseJsonc, type CaseJsoncInfo } from '../formats/casejsonc.js'
@@ -72,6 +73,8 @@ interface Entry {
   error: string | null
   manifest: ViewerDataset | null
   geometry: Geometry | null
+  /** Plane cuts already stored, by blob key prefix (in flight or done). */
+  cuts: Map<string, Promise<PlaneCutInfo>>
   ready: Promise<ViewerDataset>
   resolveReady: (m: ViewerDataset) => void
   rejectReady: (e: Error) => void
@@ -104,7 +107,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       rejectReady = rej
     })
     ready.catch(() => {})
-    const entry: Entry = { id, rel, root, series, caseInfo, status: 'loading', error: null, manifest: null, geometry: null, ready, resolveReady, rejectReady }
+    const entry: Entry = { id, rel, root, series, caseInfo, status: 'loading', error: null, manifest: null, geometry: null, cuts: new Map(), ready, resolveReady, rejectReady }
     entries.set(id, entry)
     return entry
   }
@@ -152,7 +155,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
         warnings.push(`structured block recovered from the cut-cell mesh: ${block.grid.dims.join(' x ')}, ${block.holes.toLocaleString()} site(s) inside the body`)
         return { geometry: { source: 'polymesh', fidelity: 'exact', grid: block.grid, cellCount: r.nCells, pointCount: r.nPoints, cellCenters: r.cellCenters, lattice: { index: block.index, holes: block.holes } }, surface: r.surface, warnings }
       }
-      warnings.push('polyMesh is not a structured lattice: slices, iso-surfaces and streamlines are unavailable')
+      warnings.push('polyMesh is not a structured lattice: slices and planes are exact cuts of its cells; iso-surfaces, streamlines and glyphs are unavailable')
       return { geometry: { source: 'polymesh', fidelity: 'exact', grid: null, cellCount: r.nCells, pointCount: r.nPoints, cellCenters: r.cellCenters }, surface: r.surface, warnings }
     }
     const vtuTime = series.times.find((t) => t.source.kind === 'vtu')
@@ -219,6 +222,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
         cellCount: geometry.cellCount,
         pointCount: geometry.pointCount,
         grid: geometry.grid ? gridInfo(geometry.grid, geometry.lattice ?? null) : null,
+        planeCut: cuttable(entry, geometry.source, geometry.grid !== null),
         surface: surfaceInfo(surface),
         fields: fieldInfos(entry.series, geometry.cellCount, geometry.pointCount),
         times: timeSteps(entry.series),
@@ -286,6 +290,8 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       grid = { dims: [...manifest.grid.dims], nodes, bounds: { min: [...manifest.bounds.min], max: [...manifest.bounds.max] }, uniform: manifest.grid.uniform, emptyAxis: manifest.grid.emptyAxis }
     }
     entry.geometry = { source: manifest.source, fidelity: manifest.geometryFidelity, grid, cellCount: manifest.cellCount, pointCount: manifest.pointCount ?? null, cellCenters: null }
+    // A manifest cached before plane cuts existed says nothing; the rule decides again.
+    manifest.planeCut = cuttable(entry, manifest.source, manifest.grid !== null)
     // Ranges are recomputed lazily; the field list follows the current scan so new time steps show up.
     manifest.fields = fieldInfos(entry.series, manifest.cellCount, manifest.pointCount ?? null)
     manifest.times = timeSteps(entry.series)
@@ -304,6 +310,47 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     entry.status = 'ready'
     entry.resolveReady(manifest)
     return true
+  }
+
+  /** A polyMesh with no lattice is sliced by the exact cut (SPEC-LIT §148.1); a lattice keeps its image slices. */
+  function cuttable(entry: Entry, source: DatasetSource, hasGrid: boolean): boolean {
+    return source === 'polymesh' && !hasGrid && entry.root.polyMeshDirAbs !== null
+  }
+
+  async function cut(id: string, plane: CutPlaneSpec): Promise<PlaneCutInfo> {
+    const entry = entries.get(id)
+    if (!entry) throw new Error(`unknown dataset ${id}`)
+    const manifest = await entry.ready
+    const dir = entry.root.polyMeshDirAbs
+    if (!manifest.planeCut || !dir) throw new Error(`NO_PLANE_CUT: ${manifest.name} is not a non-lattice polyMesh (${manifest.source}${manifest.grid ? ', structured grid' : ''}); its slices are lattice images`)
+    const [nx, ny, nz] = plane.normal
+    const len = Math.hypot(nx, ny, nz)
+    if (!(len > 0) || !Number.isFinite(len) || !plane.origin.every(Number.isFinite)) throw new Error('INVALID: the cut plane needs a finite origin and a finite, non-zero normal')
+    const origin: [number, number, number] = [plane.origin[0], plane.origin[1], plane.origin[2]]
+    const normal: [number, number, number] = [nx / len, ny / len, nz / len]
+    const key = `cut.${createHash('sha1').update(JSON.stringify([origin, normal])).digest('hex').slice(0, 16)}`
+    const known = entry.cuts.get(key)
+    if (known) return known
+    const task = (async (): Promise<PlaneCutInfo> => {
+      const r = await pool.run({ op: 'polyCut', dir, origin, normal })
+      const triangleCount = r.cells.length
+      await blobs.put(id, `${key}.positions`, r.positions)
+      await blobs.put(id, `${key}.cells`, r.cells)
+      return {
+        key,
+        origin,
+        normal,
+        triangleCount,
+        positions: { key: `${key}.positions`, dtype: 'f32', count: 3 * triangleCount, components: 3, bytes: r.positions.byteLength },
+        cells: { key: `${key}.cells`, dtype: 'u32', count: triangleCount, components: 1, bytes: r.cells.byteLength },
+        cellCount: r.cellCount,
+        area: r.area,
+        openCells: r.openCells,
+      }
+    })()
+    entry.cuts.set(key, task)
+    task.catch(() => entry.cuts.delete(key))
+    return task
   }
 
   function f32(buf: Buffer): Float32Array {
@@ -515,6 +562,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     ensureField,
     fieldStats,
     discover,
+    cut,
     whenReady,
     onProgress(handler) {
       handlers.add(handler)

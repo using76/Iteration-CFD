@@ -126,6 +126,8 @@ const FsWriteSchema = z.object({ path: z.string(), content: z.string(), baseHash
 const CaseValidateSchema = z.object({ path: z.string(), content: z.string() })
 const CasePatchSchema = z.object({ path: z.string(), edit: z.unknown() })
 const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().default(null), field: z.string().nullable().default(null), region: z.string().nullable().default(null).describe('Region of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); null = the first region that has something to open') })
+const Vec3Schema = z.tuple([z.number(), z.number(), z.number()])
+const DatasetCutSchema = z.object({ origin: Vec3Schema, normal: Vec3Schema })
 const GeometryOpenSchema = z.object({ path: z.string() })
 const GeometrySaveSchema = z.object({
   path: z.string(),
@@ -318,6 +320,16 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': buf.length, 'cache-control': 'private, max-age=3600' })
     res.end(buf)
     return RESPONDED
+  })
+  // An exact plane cut of a non-lattice polyMesh (SPEC-LIT §148.1); the answer names the two blobs.
+  router.post('/api/datasets/:id/cut', async (ctx) => {
+    const body = await ctx.json(DatasetCutSchema)
+    if (!datasets.get(ctx.params.id)) throw new HttpError(404, `no such dataset: ${ctx.params.id}`)
+    try {
+      return await datasets.cut(ctx.params.id, body)
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : String(err))
+    }
   })
   router.delete('/api/datasets/:id', ({ params }) => {
     datasets.evict(params.id)

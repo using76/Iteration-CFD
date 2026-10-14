@@ -1131,6 +1131,13 @@ block-based, or (b) it is holier than the recovery will accept (more than ~15 %
 of the sites). The second is a deliberate refusal: reading a mesh that merely
 resembles a lattice as one would put cells in the wrong place.
 
+A polyMesh that is no lattice at all is not refused for slices and planes: the
+studio server cuts its cells by the plane exactly (SPEC-LIT §148.1) and the
+viewer colours each section polygon by its cell's value. Iso-surfaces,
+streamlines and glyphs still need a lattice and still answer
+`NO_STRUCTURED_GRID` there, and so does a VTU whose cell centres form no lattice
+(it carries no cell faces to cut).
+
 ### The viewer draws the case on its side
 
 The case has no `constant/g` and its floor patch is not named `bottomWall`,
