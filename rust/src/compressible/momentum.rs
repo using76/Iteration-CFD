@@ -403,6 +403,20 @@ impl<'m> RhoMomentum<'m> {
         &self.ctrl
     }
 
+    /// `alpha_U` for the next assembly - 1 on a final transient corrector
+    /// (§125.3 step 2), the twin of `RhoEnergy::set_t_relax` that the outer
+    /// loop of `compressible::Compressible` (CMP-12) calls.
+    pub fn set_u_relax(&mut self, alpha: Scalar) -> Result<()> {
+        if !(alpha > 0.0 && alpha <= 1.0) {
+            return Err(Error::Refused(format!(
+                "compressible::momentum::set_u_relax: u_relax is {alpha}; implicit \
+                 under-relaxation needs 0 < alpha <= 1 (SPEC-LIT §5.2)"
+            )));
+        }
+        self.ctrl.u_relax = alpha;
+        Ok(())
+    }
+
     /// The matrix the last component assembly left behind - bit-identical
     /// to the first two passes', which is what all three solves use.
     pub fn matrix(&self) -> &GpuLduMatrix {

@@ -42408,8 +42408,8 @@ source plus `rho` times its flux sum, as the row says. The brief's first form
 ## 125. Energy, the outer loop, and the local time step
 
 `No GPL-licensed source was consulted.` CMP-11 implements §125.1-§125.2 in
-`src/compressible/energy.rs` (as built: §125.5), CMP-12 §125.3 in `src/compressible/mod.rs`, and CMP-13
-§125.4 in `src/compressible/lts.rs`.
+`src/compressible/energy.rs` (as built: §125.5), CMP-12 §125.3 in `src/compressible/mod.rs`
+(as built: §125.6), and CMP-13 §125.4 in `src/compressible/lts.rs`.
 
 ### 125.1 The energy equation, solved for `T`
 
@@ -42608,6 +42608,87 @@ Every cubin but `compressible.cubin` is unchanged in SASS in both builds, apart 
 `solidblock.cubin` in f64, which flipped between its two known hashes on a rebuild with
 no edit to it (nvcc's nondeterminism, as CMP-08 recorded). CMP-08's, CMP-09's and
 CMP-10's integration tests are unchanged (4, 5 and 4 passed in both builds).
+
+### 125.6 The outer loop as built (CMP-12)
+
+`src/compressible/mod.rs` holds `Compressible`, the loop of §125.3 over CMP-08's gas law,
+CMP-09's momentum, CMP-10's pressure and CMP-11's energy equations. It adds no kernel:
+`cuda/compressible.cu` is unchanged, and the only arithmetic of its own is step 6's
+relaxation through `simple.cu`'s `smpRelaxField`. `CompressibleState` holds `u`, the gauge
+`p` and `T` with the caller's boundary conditions, and `rho`, `psi`, `mu`, `kappa` and
+`mdot`. The boundary values of `rho`, `psi`, `mu` and `kappa` are formed elementwise from
+`p`'s and `T`'s evaluated boundary values. Their own boundary conditions are never
+evaluated.
+
+*DESIGN* - the choices §125.3 leaves open:
+
+* **Steady or transient** is the momentum equation's ddt scheme: `steadyState` is SIMPLE,
+  `Euler` or `backward` is PIMPLE. The energy equation must name the same scheme, `delta_t`
+  and `g`, or `Compressible::new` refuses by name. `c_p` is never an input (§122.1), so
+  the loop writes `PerfectGas::cp` into the energy controls.
+* **"Final"** exists only in a transient run: on the last outer iteration `alpha_U` and
+  `alpha_T` are 1 (`RhoMomentum::set_u_relax`, `RhoEnergy::set_t_relax`), and `p` is not
+  relaxed. A steady run relaxes all three on every iteration.
+* **The old levels.** At the top of every step, `advance_time_levels` rotates `rho`, `u`,
+  `T` and `p`, and `K^o` follows because the energy source forms it from `u^o`. Both
+  equations' `TimeState::advance` runs at every step but the first, so a first backward
+  step is Euler (§13.3). `initialise` seeds both old levels from the initial fields. It
+  evaluates the boundaries of `u`, `p` and `T`, forms `mu`, `kappa`, `psi` and `rho`, and
+  sets `mdot = rho_f (u_f . Sf)` with a linear `rho_f`.
+* **Steps 1 and 4.** Step 1 is `transport` (`mu`, `kappa`). Step 4 is `gas_state`, which
+  gives `psi` AND `rho* = psi (p* + p_op)`, the consistent `rho*` that CMP-10's corrector
+  needs. The corrector leaves `rho = psi (p + p_op)` to round-off, so a second corrector
+  starts from a consistent `rho*` too.
+* **Step 6.** `p` is relaxed against its value before the correctors, in a steady run and
+  on a transient run's non-final outer iterations. Then `p`'s boundary is evaluated and
+  `gas_state` restores the gas law. Every outer iteration therefore ends with
+  `rho = psi (p + p_op)`.
+* **Step 7 is absent.** The gas is laminar until CMP-14's SA lands.
+* **Step 8.** The mass imbalance is formed in f64 on the host after the correctors, on the
+  momentum equation's time coefficients. A steady run has no `ddt(rho)` and divides by its
+  `delta_t`. The `h_0` residual is the energy solve's initial residual. The bounds count
+  tests `!(x > 0)`, so a NaN counts. Its order is `T`, then `p_abs = p + p_op`, then
+  `rho`, each by cell index, and the first violation found is the one named. `M_max` and
+  `M_mean` are (93.7). `OuterReport::line` prints all of these, and `BOUNDS n` when `n` is
+  nonzero. `residualControl` (`u`, `p` on the first corrector, `T`) stops only a steady
+  `run`. A transient step reports it and stops nothing.
+* **Capture.** The registry row is `Refused`: step 8 reads `T`, `p`, `rho`, `u` and
+  `mdot` back after every outer iteration and stops on what it reads. Each of the four
+  equations is gated on its own.
+
+*Tree over plan.* The row names `mod.rs` and `tests.rs`. The final-corrector rule also
+needs `RhoMomentum::set_u_relax`, which is additive, and the module root needs its
+capture-registry row.
+
+CMP-12's gate table (`tests/shared/compressible_solver_cases.rs`, included by
+`src/compressible/tests.rs` and by `tests/compressible_solver.rs`, so it runs in both
+builds):
+
+| test | class | what |
+|---|---|---|
+| `one_step_twice_equals_two_steps_state` | D | A graded 5x4x3 channel, backward with `dt = 1e-4`, two outer iterations and two correctors. `step; step` equals `run(2)` in every bit of 30 buffers. After each step every `^o` is the state the step started from, and `^oo` is the one before. Control: step 1 moves `T`, `u` and `p` |
+| `quiescent_box_stays_at_rest` | R | The closed box at rest under Euler (two outer iterations), backward and steady SIMPLE, three steps each: `|u| <= tol_r(1e-12) c_0`, `|T - 300| <= tol_r(1e-12) 300`, `|p| <= tol_r(1e-12) p_op`, `|rho - rho_0| <= tol_r(1e-12) rho_0`, mass imbalance `<= tol_r(1e-12)`, bounds 0. Control: one cell 2e4 Pa above the rest moves the gas by more than 100 bars |
+| `bounds_counter_fires_and_names_the_cell` | D | `T = -50 K` in cell 7 stops step 1 with `Error::Refused`, which names `T`, the cell and the value after the solve (still negative, so nothing clipped it) and counts `rho <= 0: 1`. Gauge `p = -1.5e5` in cell 11 is named as `p_abs`. Control: `T = 50 K` runs two steps and counts zero |
+| `solver_refusals_name_the_setting` | D | `nOuterCorrectors` 0, `nCorrectors` 0, `p_relax` 0 and 1.5, a `ddtSchemes`, `delta_t` or `g` mismatch, `gamma = 1` |
+
+The old-level row was checked against its bug: a refresh inside the outer loop (on the
+second outer iteration) fails it at once ("p: after step 1 the old level is not the
+initial state").
+
+*Landed* (f64, then single):
+
+- The quiescent box, Euler, backward and steady: `|u|` is `4.6e-14`, `3.9e-14` and `0`
+  m/s, then `1.4e-5`, `2.1e-5` and `0` m/s. The bars are `3.47e-10` and `3.47e-3`.
+- `|p|` is `6.0e-11`, `8.2e-11` and `0` Pa, then `3.3e-3`, `4.4e-2` and `0` Pa. The bars
+  are `1e-7` and `1` Pa.
+- `|T - 300|` is at most `3.4e-13` K, then `1.8e-4` K (bars `3e-10` and `3e-3` K).
+- The control reaches `0.674` m/s in both builds: `1.9e9` bars in f64, `194` bars in single.
+- The channel's last mass imbalance is `1.7e-16`, then `6.9e-8`.
+- The bounds messages give `T = -50.00000018123904` in f64 and `T = -50` in single (the
+  conduction step is below f32's resolution of 50), and `p_abs = -50000.14526378136`, then
+  `-50000.140625`.
+
+No `.cu`, `build.rs`, driver or validate code changed.
 
 ---
 
