@@ -13,12 +13,14 @@
 // tol32 = max(tol64, min(tol64 2^29, 1e-5)) = 1e-5 under `single`
 // (D-F32-1). The device-vs-host row is 4 ulp in either build, against the
 // host run on the device's own rounded inputs. A GPU test returns early, by
-// name, on a box without a device.
+// name, on a box without a device. DST-13 burns the char; these gates keep
+// it inert (no oxygen, `CharInputs::inert`), and dust_char_cases.rs holds it.
 // The specification was informed by a review of FSCDustFoam (Huang &
 // Lipatnikov, GPL) and no code was copied.
 // No GPL-licensed source was consulted.
 
 use ofgpu::device::{DevBuf, Gpu};
+use ofgpu::dust::char::CharInputs;
 use ofgpu::dust::device::{particle_step, ExchangeFields, ParticleFields, ParticleGasDev, ParticleKernels};
 use ofgpu::dust::particle::{
     bird_factor, phi_g, step, Drying, Exchange, GasAtParcel, ParticleInputs, ParticleProps, ParticleState,
@@ -74,6 +76,7 @@ fn props(emissivity: f64, devol_dh: f64) -> ParticleProps {
         mu: 1.8e-5,
         k_g: 0.06,
         cp_g: 1100.0,
+        char_rate: CharInputs::inert(),
     })
     .expect("props")
 }
@@ -125,6 +128,7 @@ struct Pool {
     yw: DevBuf<Scalar>,
     rho: DevBuf<Scalar>,
     gr: DevBuf<Scalar>,
+    po2: DevBuf<Scalar>,
     n: usize,
     n_cells: usize,
 }
@@ -144,26 +148,46 @@ impl Pool {
             m_a: col(|p| p.m_a),
             t: col(|p| p.t),
             d: col(|p| p.d),
-            acc: (0..6).map(|_| g.zeros::<Acc>(n).expect("acc")).collect(),
+            acc: (0..11).map(|_| g.zeros::<Acc>(n).expect("acc")).collect(),
             cell: g.upload(&cells).expect("cells"),
             u_rel: up(g, u_rel),
             tg: gcol(|c| c.t),
             yw: gcol(|c| c.y_w),
             rho: gcol(|c| c.rho),
             gr: gcol(|c| c.g),
+            po2: gcol(|c| c.p_o2),
             n,
             n_cells: gas.len(),
         }
     }
 
     fn step(&mut self, g: &Gpu, p: &ParticleProps, dt: f64) -> Result<(), Error> {
-        let [a0, a1, a2, a3, a4, a5] = &mut self.acc[..] else { unreachable!() };
+        let [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10] = &mut self.acc[..] else { unreachable!() };
         particle_step(
             g,
             &self.k,
             p,
-            ParticleFields { m_w: &mut self.m_w, m_v: &mut self.m_v, m_c: &self.m_c, m_a: &self.m_a, t: &mut self.t, d: &self.d },
-            ExchangeFields { m_w: a0, m_v: a1, mt_w: a2, mt_v: a3, q_conv: a4, q_rad: a5 },
+            ParticleFields {
+                m_w: &mut self.m_w,
+                m_v: &mut self.m_v,
+                m_c: &mut self.m_c,
+                m_a: &self.m_a,
+                t: &mut self.t,
+                d: &mut self.d,
+            },
+            ExchangeFields {
+                m_w: a0,
+                m_v: a1,
+                mt_w: a2,
+                mt_v: a3,
+                q_conv: a4,
+                q_rad: a5,
+                m_c: a6,
+                m_o2: a7,
+                m_co2: a8,
+                mt_c: a9,
+                q_char: a10,
+            },
             ParticleGasDev {
                 cell: &self.cell,
                 u_rel: &self.u_rel,
@@ -171,6 +195,7 @@ impl Pool {
                 y_w: &self.yw,
                 rho: &self.rho,
                 g: &self.gr,
+                p_o2: &self.po2,
                 n_cells: self.n_cells,
             },
             dt,
@@ -187,7 +212,19 @@ impl Pool {
     fn exchanges(&self, g: &Gpu) -> Vec<Exchange> {
         let a: Vec<Vec<f64>> = self.acc.iter().map(|b| g.download(b).expect("acc")).collect();
         (0..self.n)
-            .map(|i| Exchange { m_w: a[0][i], m_v: a[1][i], mt_w: a[2][i], mt_v: a[3][i], q_conv: a[4][i], q_rad: a[5][i] })
+            .map(|i| Exchange {
+                m_w: a[0][i],
+                m_v: a[1][i],
+                mt_w: a[2][i],
+                mt_v: a[3][i],
+                q_conv: a[4][i],
+                q_rad: a[5][i],
+                m_c: a[6][i],
+                m_o2: a[7][i],
+                m_co2: a[8][i],
+                mt_c: a[9][i],
+                q_char: a[10][i],
+            })
             .collect()
     }
 }
@@ -199,7 +236,7 @@ impl Pool {
 fn devol_isothermal_closed_form() {
     let p = props(0.0, 0.0);
     let s0 = particle(50.0e-6, 1500.0, (0.0, 0.6, 0.3), 900.0);
-    let gas = GasAtParcel { t: 900.0, y_w: 0.0, rho: 101_325.0 / (287.0 * 900.0), g: 0.0, u_rel: 0.3 };
+    let gas = GasAtParcel { t: 900.0, y_w: 0.0, rho: 101_325.0 / (287.0 * 900.0), g: 0.0, u_rel: 0.3, p_o2: 0.0 };
     let k = 1000.0 * (-(3.0e4 / R0) / 900.0).exp();
     let n = 40;
     let dt = 3.0 / k / n as f64;
@@ -242,7 +279,7 @@ fn devol_isothermal_closed_form() {
 fn heatup_closed_form() {
     let p = props(0.0, 0.0);
     let s0 = particle(50.0e-6, 1500.0, (0.0, 0.0, 0.0), 300.0);
-    let gas = GasAtParcel { t: 1200.0, y_w: 0.0, rho: 101_325.0 / (287.0 * 1200.0), g: 0.0, u_rel: 0.0 };
+    let gas = GasAtParcel { t: 1200.0, y_w: 0.0, rho: 101_325.0 / (287.0 * 1200.0), g: 0.0, u_rel: 0.0, p_o2: 0.0 };
     let tau = |s: &ParticleState| s.mass() * 1500.0 / (2.0 * std::f64::consts::PI * s.d * 0.06);
     let n = 40;
     let dt = 3.0 * tau(&s0) / n as f64;
@@ -333,6 +370,7 @@ fn stage_order() {
         rho: 101_325.0 / (287.0 * 1500.0),
         g: 4.0 * SIGMA_SB * 1500f64.powi(4),
         u_rel: 1.0,
+        p_o2: 0.0,
     };
     let dt = 1.0e-3;
     let mut seen = vec![s0.stage()];
@@ -409,6 +447,7 @@ fn device_matches_host() {
                 rho: r(101_325.0 / (287.0 * t)),
                 g: r(4.0 * SIGMA_SB * (2000.0 * rng.u()).powi(4)),
                 u_rel: 0.0,
+                p_o2: 0.0,
             }
         })
         .collect();
@@ -514,6 +553,7 @@ fn particle_refusals() {
         mu: 1.8e-5,
         k_g: 0.06,
         cp_g: 1100.0,
+        char_rate: CharInputs::inert(),
     };
     let refused = |i: ParticleInputs, what: &str| match ParticleProps::new(&i) {
         Err(Error::Refused(m)) => assert!(m.contains(what), "{what}: {m}"),
@@ -527,7 +567,7 @@ fn particle_refusals() {
     assert!(matches!(Drying::water(1.0e9), Err(Error::Refused(_))), "p_amb beyond T_crit");
     let p = ParticleProps::new(&base).expect("props");
     let s = particle(50.0e-6, 1500.0, (0.1, 0.5, 0.3), 300.0);
-    let gas = GasAtParcel { t: 1200.0, y_w: 0.0, rho: 0.3, g: 0.0, u_rel: 0.0 };
+    let gas = GasAtParcel { t: 1200.0, y_w: 0.0, rho: 0.3, g: 0.0, u_rel: 0.0, p_o2: 0.0 };
     assert!(matches!(step(&p, &s, &gas, 0.0), Err(Error::Refused(_))), "dt = 0");
     // T_b(1 atm) of Hyland-Wexler within 0.05 K of 373.124 K.
     assert!((p.drying.t_boil_p - 373.124).abs() < 0.05, "T_b = {}", p.drying.t_boil_p);

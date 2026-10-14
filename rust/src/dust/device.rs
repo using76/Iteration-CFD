@@ -14,7 +14,8 @@
 //! counter; their host twins are in [`crate::dust::progress`],
 //! [`crate::dust::ignition`] and [`crate::dust::courant`]. DST-12 adds the
 //! reacting-parcel step of `cuda/dustparticle.cu` (SPEC-LIT §159), whose
-//! host twin is [`crate::dust::particle::step`]. A launcher only
+//! host twin is [`crate::dust::particle::step`]; DST-13 adds its char
+//! stage (SPEC-LIT §159.8, [`crate::dust::char`]). A launcher only
 //! launches - no sync, no download, no allocation - so a captured region
 //! can hold it; a counter is a one-element `u64` buffer the caller zeroes,
 //! and the kernels add to it.
@@ -25,6 +26,7 @@
 //!   SPEC-LIT §155.1-§155.6 - (155.2)-(155.4), (155.9) and the bounds
 //!     counter; §154.8 - the implicit split (154.11)
 //!   SPEC-LIT §159.1-§159.4, §159.7 - the reacting parcel (DST-12)
+//!   SPEC-LIT §159.8 - its char stage and the five char accumulators (DST-13)
 //! The specification was informed by a review of FSCDustFoam (Huang &
 //! Lipatnikov, GPL) and no code was copied.
 //! No GPL-licensed source was consulted.
@@ -418,18 +420,20 @@ impl ParticleKernels {
 }
 
 /// One particle of each parcel: the four masses (kg), T_p (K) and d_p (m).
-/// DST-12 writes m_w, m_v and T_p; char, ash and the diameter are read.
+/// The kernel writes m_w, m_v, m_c, T_p and d_p (the char stage shrinks
+/// the particle); ash is read.
 pub struct ParticleFields<'a> {
     pub m_w: &'a mut DevBuf<Scalar>,
     pub m_v: &'a mut DevBuf<Scalar>,
-    pub m_c: &'a DevBuf<Scalar>,
+    pub m_c: &'a mut DevBuf<Scalar>,
     pub m_a: &'a DevBuf<Scalar>,
     pub t: &'a mut DevBuf<Scalar>,
-    pub d: &'a DevBuf<Scalar>,
+    pub d: &'a mut DevBuf<Scalar>,
 }
 
-/// The six per-parcel accumulators of §159.7, in `Acc` in both builds; the
-/// kernel adds one particle's step to each and the caller zeroes them.
+/// The eleven per-parcel accumulators of §159.7 and §159.8, in `Acc` in
+/// both builds; the kernel adds one particle's step to each and the caller
+/// zeroes them. They are the fields of [`crate::dust::particle::Exchange`].
 pub struct ExchangeFields<'a> {
     pub m_w: &'a mut DevBuf<Acc>,
     pub m_v: &'a mut DevBuf<Acc>,
@@ -437,10 +441,16 @@ pub struct ExchangeFields<'a> {
     pub mt_v: &'a mut DevBuf<Acc>,
     pub q_conv: &'a mut DevBuf<Acc>,
     pub q_rad: &'a mut DevBuf<Acc>,
+    pub m_c: &'a mut DevBuf<Acc>,
+    pub m_o2: &'a mut DevBuf<Acc>,
+    pub m_co2: &'a mut DevBuf<Acc>,
+    pub mt_c: &'a mut DevBuf<Acc>,
+    pub q_char: &'a mut DevBuf<Acc>,
 }
 
 /// The gas the parcels see: each parcel's cell and |u_p - u|, and the cell
-/// fields T, Y_H2O, rho and the incident radiation G (`n_cells` each).
+/// fields T, Y_H2O, rho, the incident radiation G and the O2 partial
+/// pressure p_O2 in Pa (`n_cells` each).
 pub struct ParticleGasDev<'a> {
     pub cell: &'a DevBuf<Label>,
     pub u_rel: &'a DevBuf<Scalar>,
@@ -448,6 +458,7 @@ pub struct ParticleGasDev<'a> {
     pub y_w: &'a DevBuf<Scalar>,
     pub rho: &'a DevBuf<Scalar>,
     pub g: &'a DevBuf<Scalar>,
+    pub p_o2: &'a DevBuf<Scalar>,
     pub n_cells: usize,
 }
 
@@ -485,6 +496,11 @@ pub fn particle_step(
         ("acc mt_v", ex.mt_v.len()),
         ("acc q_conv", ex.q_conv.len()),
         ("acc q_rad", ex.q_rad.len()),
+        ("acc m_c", ex.m_c.len()),
+        ("acc m_o2", ex.m_o2.len()),
+        ("acc m_co2", ex.m_co2.len()),
+        ("acc mt_c", ex.mt_c.len()),
+        ("acc q_char", ex.q_char.len()),
         ("cell", gas.cell.len()),
         ("u_rel", gas.u_rel.len()),
     ] {
@@ -495,6 +511,7 @@ pub fn particle_step(
         ("gas y_w", gas.y_w.len()),
         ("gas rho", gas.rho.len()),
         ("gas g", gas.g.len()),
+        ("gas p_o2", gas.p_o2.len()),
     ] {
         check_len("particle_step", name, len, gas.n_cells)?;
     }
@@ -508,27 +525,34 @@ pub fn particle_step(
     }
     let nl = n as Label;
     let dr = &p.drying;
+    let ch = &p.char_rate;
     unsafe {
         gpu.stream()
             .launch_builder(&k.step)
             .arg(&mut *f.m_w)
             .arg(&mut *f.m_v)
-            .arg(f.m_c)
+            .arg(&mut *f.m_c)
             .arg(f.m_a)
             .arg(&mut *f.t)
-            .arg(f.d)
+            .arg(&mut *f.d)
             .arg(&mut *ex.m_w)
             .arg(&mut *ex.m_v)
             .arg(&mut *ex.mt_w)
             .arg(&mut *ex.mt_v)
             .arg(&mut *ex.q_conv)
             .arg(&mut *ex.q_rad)
+            .arg(&mut *ex.m_c)
+            .arg(&mut *ex.m_o2)
+            .arg(&mut *ex.m_co2)
+            .arg(&mut *ex.mt_c)
+            .arg(&mut *ex.q_char)
             .arg(gas.cell)
             .arg(gas.u_rel)
             .arg(gas.t)
             .arg(gas.y_w)
             .arg(gas.rho)
             .arg(gas.g)
+            .arg(gas.p_o2)
             .arg(&nl)
             .arg(&dt)
             .arg(&p.cp)
@@ -552,6 +576,14 @@ pub fn particle_step(
             .arg(&dr.w_carrier)
             .arg(&dr.p_amb)
             .arg(&dr.t_boil_p)
+            .arg(&ch.c0)
+            .arg(&ch.a)
+            .arg(&ch.theta)
+            .arg(&ch.h_c)
+            .arg(&ch.h_s)
+            .arg(&ch.gas_share)
+            .arg(&ch.o2_per_c)
+            .arg(&ch.co2_per_c)
             .launch(cfg_for(n))?;
     }
     Ok(())
@@ -724,9 +756,11 @@ mod tests {
 
     /// DST-12's reacting-parcel step (SPEC-LIT §159) under §81.6's protocol:
     /// each step moves T_p, the masses and the accumulators, so a replay
-    /// that skipped the kernel cannot reproduce the state.
+    /// that skipped the kernel cannot reproduce the state. DST-13: the odd
+    /// parcels have no moisture or volatile and burn their char.
     #[test]
     fn dust_particle_step_replays_under_capture() {
+        use crate::dust::char::CharInputs;
         use crate::dust::particle::{Drying, ParticleInputs};
         struct S {
             k: ParticleKernels,
@@ -748,13 +782,14 @@ mod tests {
             mu: 1.8e-5,
             k_g: 0.06,
             cp_g: 1100.0,
+            char_rate: CharInputs { c0: 5.0e-12, a: 1.0, e_a: 8.0e4, h_c: 3.29e7, h_s: 0.3 },
         })
         .expect("props");
         let m = 1500.0 * std::f64::consts::PI * 1.25e-13 / 6.0;
         let col = |f: &dyn Fn(usize) -> f64| (0..n).map(|i| f(i) as Scalar).collect::<Vec<Scalar>>();
         let init = [
             col(&|i| if i % 2 == 0 { 0.1 * m } else { 0.0 }),
-            col(&|_| 0.5 * m),
+            col(&|i| if i % 2 == 0 { 0.5 * m } else { 0.0 }),
             col(&|_| 0.3 * m),
             col(&|_| 0.1 * m),
             col(&|i| 300.0 + 10.0 * i as f64),
@@ -764,6 +799,7 @@ mod tests {
             col(&|_| 0.005),
             col(&|_| 0.3),
             col(&|_| 4.0 * 5.670_374_419e-8 * 1.6e12),
+            col(&|_| 2.0e4),
         ];
         let cells: Vec<Label> = (0..n as Label).collect();
         let report = capture_replays_bitwise(
@@ -773,32 +809,47 @@ mod tests {
                 Ok(S {
                     k: ParticleKernels::new(&g)?,
                     st: init[..7].iter().map(|v| g.upload(v)).collect::<Result<Vec<_>>>()?,
-                    acc: (0..6).map(|_| g.zeros::<Acc>(n)).collect::<Result<Vec<_>>>()?,
+                    acc: (0..11).map(|_| g.zeros::<Acc>(n)).collect::<Result<Vec<_>>>()?,
                     cell: g.upload(&cells)?,
                     gas: init[7..].iter().map(|v| g.upload(v)).collect::<Result<Vec<_>>>()?,
                 })
             },
             |s| {
                 let [w, v, c, a, t, d, u] = &mut s.st[..] else { unreachable!() };
-                let [a0, a1, a2, a3, a4, a5] = &mut s.acc[..] else { unreachable!() };
-                let [tg, yw, rho, gr] = &s.gas[..] else { unreachable!() };
+                let [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10] = &mut s.acc[..] else { unreachable!() };
+                let [tg, yw, rho, gr, po2] = &s.gas[..] else { unreachable!() };
                 particle_step(
                     &g,
                     &s.k,
                     &p,
                     ParticleFields { m_w: w, m_v: v, m_c: c, m_a: a, t, d },
-                    ExchangeFields { m_w: a0, m_v: a1, mt_w: a2, mt_v: a3, q_conv: a4, q_rad: a5 },
-                    ParticleGasDev { cell: &s.cell, u_rel: u, t: tg, y_w: yw, rho, g: gr, n_cells: n },
+                    ExchangeFields {
+                        m_w: a0,
+                        m_v: a1,
+                        mt_w: a2,
+                        mt_v: a3,
+                        q_conv: a4,
+                        q_rad: a5,
+                        m_c: a6,
+                        m_o2: a7,
+                        m_co2: a8,
+                        mt_c: a9,
+                        q_char: a10,
+                    },
+                    ParticleGasDev { cell: &s.cell, u_rel: u, t: tg, y_w: yw, rho, g: gr, p_o2: po2, n_cells: n },
                     1.0e-4,
                     n,
                 )
             },
             |s| {
                 let mut out = Vec::new();
-                for (name, b) in ["m_w", "m_v", "t"].iter().zip([&s.st[0], &s.st[1], &s.st[4]]) {
+                for (name, b) in ["m_w", "m_v", "m_c", "t", "d"].iter().zip([&s.st[0], &s.st[1], &s.st[2], &s.st[4], &s.st[5]]) {
                     out.push((*name, g.download(b)?));
                 }
-                for (name, b) in ["acc m_w", "acc m_v", "acc q_conv"].iter().zip([&s.acc[0], &s.acc[1], &s.acc[4]]) {
+                for (name, b) in ["acc m_w", "acc m_v", "acc q_conv", "acc m_c", "acc q_char"]
+                    .iter()
+                    .zip([&s.acc[0], &s.acc[1], &s.acc[4], &s.acc[6], &s.acc[10]])
+                {
                     out.push((*name, g.download(b)?.iter().map(|&x| x as Scalar).collect()));
                 }
                 Ok(out)

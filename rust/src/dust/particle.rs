@@ -10,9 +10,10 @@
 //! order. It heats by (159.1) with the Ranz-Marshall Nusselt number (159.2)
 //! and Bird's blowing correction (159.3), dries by §76's evaporation (the
 //! Ranz-Marshall rung of (76.1) and the heat-limited boiling branch of
-//! (76.9)), and devolatilises by SFOM (159.4). Char and ash are inert here;
-//! DST-13 burns the char. Each step reports the mass and the heat it
-//! exchanged with the gas, the accumulators of §159.7.
+//! (76.9)), devolatilises by SFOM (159.4), and burns its char at the
+//! kinetic-diffusion rate (159.5) of [`crate::dust::char`] with the heat
+//! retention h_s (DST-13); ash is inert. Each step reports the mass and the
+//! heat it exchanged with the gas, the accumulators of §159.7 and §159.8.
 //!
 //! Everything here is the host twin of `cuda/dustparticle.cu`: `f64` in
 //! both builds, never [`crate::Scalar`], and the same operations in the same
@@ -28,17 +29,20 @@
 //!   SPEC-LIT §159.4 - (159.7) the radiation temperature
 //!   SPEC-LIT §159.7 - the stages, the segment integrator and the
 //!     accumulators (derived here)
+//!   SPEC-LIT §159.8 - the char stage, its accumulators and the stop on a
+//!     particle with no mass left (DST-13)
 //!   SPEC-LIT §76.1, §76.4, §76.5, §76.9 - the moisture closures: (76.1),
 //!     the film state, Watson's h_v, Marrero-Mason's D(T), the surface
 //!     mass fraction and the boiling branch; (S54.3) of §54 - Hyland-Wexler p_ws
 //!   SPEC-LIT §77.1 - (77.5) the end-of-step temperature the vapour leaves at
 //!   A. Islas, A. Rodriguez Fernandez, C. Betegon, E. Martinez-Paneda,
 //!     A. Pandal, Computational assessment of biomass dust explosions in the
-//!     20L sphere, arXiv:2207.13149 (2022) - eqs. (13)-(17)
+//!     20L sphere, arXiv:2207.13149 (2022) - eqs. (13)-(17), (20)-(23)
 //! The specification was informed by a review of FSCDustFoam (Huang &
 //! Lipatnikov, GPL) and no code was copied.
 //! No GPL-licensed source was consulted.
 
+use crate::dust::char::{self, CharInputs, CharProps};
 use crate::error::{Error, Result};
 use std::f64::consts::PI;
 
@@ -220,10 +224,13 @@ pub struct ParticleInputs {
     pub mu: f64,
     pub k_g: f64,
     pub cp_g: f64,
+    /// The char reaction (159.5); [`CharInputs::inert`] leaves the char
+    /// inert, as DST-12 did.
+    pub char_rate: CharInputs,
 }
 
 /// [`ParticleInputs`] checked, with the two derived constants the kernel
-/// takes: theta = E_a/R0 and Pr^(1/3).
+/// takes: theta = E_a/R0 and Pr^(1/3), and the char's [`CharProps`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParticleProps {
     pub cp: f64,
@@ -237,6 +244,7 @@ pub struct ParticleProps {
     pub k_g: f64,
     pub cp_g: f64,
     pub cbrt_pr: f64,
+    pub char_rate: CharProps,
 }
 
 impl ParticleProps {
@@ -279,6 +287,7 @@ impl ParticleProps {
             k_g: i.k_g,
             cp_g: i.cp_g,
             cbrt_pr: (i.mu * i.cp_g / i.k_g).cbrt(),
+            char_rate: CharProps::new(&i.char_rate)?,
         })
     }
 }
@@ -313,7 +322,8 @@ impl ParticleState {
 }
 
 /// The gas a parcel sees over a step, frozen: the cell's T, water vapour
-/// mass fraction, density and incident radiation G, and |u_p - u|.
+/// mass fraction, density, incident radiation G and O2 partial pressure
+/// p_O2 (Pa; no char burns at p_O2 <= 0), and |u_p - u|.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GasAtParcel {
     pub t: f64,
@@ -321,14 +331,17 @@ pub struct GasAtParcel {
     pub rho: f64,
     pub g: f64,
     pub u_rel: f64,
+    pub p_o2: f64,
 }
 
 /// What one particle exchanged with the gas over a step (§159.7): the
 /// water and volatile mass given, each times the end-of-step T_p (77.5),
 /// the heat the gas gave by convection and the net radiation absorbed, J.
-/// The end-of-step T_p of the two products is the stored word, rounded to
-/// [`crate::Scalar`] as the device stores it - the one place the host twin
-/// meets the build's precision.
+/// DST-13's char stage (§159.8) adds the carbon burnt, the O2 taken, the
+/// CO2 given, the carbon times the end-of-step T_p, and the gas's share
+/// (1 - h_s) of the reaction heat, J. The end-of-step T_p of the products
+/// and the stored char mass are rounded to [`crate::Scalar`] as the device
+/// stores them - the two places the host twin meets the build's precision.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Exchange {
     pub m_w: f64,
@@ -337,6 +350,11 @@ pub struct Exchange {
     pub mt_v: f64,
     pub q_conv: f64,
     pub q_rad: f64,
+    pub m_c: f64,
+    pub m_o2: f64,
+    pub m_co2: f64,
+    pub mt_c: f64,
+    pub q_char: f64,
 }
 
 /// One frozen-rate segment of (159.1): the end temperature and the
@@ -369,17 +387,20 @@ pub fn step(p: &ParticleProps, s: &ParticleState, gas: &GasAtParcel, dt: f64) ->
     }
     let dr = &p.drying;
     let tb = dr.t_boil_p;
-    let re = gas.rho * gas.u_rel * st.d / p.mu;
-    let sqre = re.sqrt();
-    let nu0 = 2.0 + 0.6 * sqre * p.cbrt_pr;
-    let a0 = PI * st.d * p.k_g * nu0;
-    let ar = PI * st.d * st.d * p.emissivity;
     let g4 = 0.25 * gas.g;
     let mut rem = dt;
     for _ in 0..MAX_SEGMENTS {
-        if rem <= 0.0 {
+        // A particle with no mass left has nothing to heat (§159.8).
+        if rem <= 0.0 || !(st.mass() > 0.0) {
             break;
         }
+        // The diameter moves only in the char stage, so these are the
+        // step's values until the char burns.
+        let re = gas.rho * gas.u_rel * st.d / p.mu;
+        let sqre = re.sqrt();
+        let nu0 = 2.0 + 0.6 * sqre * p.cbrt_pr;
+        let a0 = PI * st.d * p.k_g * nu0;
+        let ar = PI * st.d * st.d * p.emissivity;
         let mc = st.mass() * p.cp;
         let t0 = st.t;
         let t03 = t0 * t0 * t0;
@@ -476,8 +497,28 @@ pub fn step(p: &ParticleProps, s: &ParticleState, gas: &GasAtParcel, dt: f64) ->
             ex.q_rad += qr;
             st.t = t1;
             rem = 0.0;
+        } else if let Some(bn) = char::burn(&p.char_rate, st.m_c, st.m_a, st.d, t0, gas.t, gas.p_o2, rem) {
+            // (159.5): the char burns; h_s of its heat stays in the particle.
+            let ch = &p.char_rate;
+            let q = bn.dm * ch.h_c;
+            if bn.tseg > 0.0 {
+                let sv = ch.h_s * q / bn.tseg;
+                let (t1, qc, qr) = segment(a0, b, rad0, sv, gas.t, t0, bn.tseg, mc);
+                ex.q_conv += qc;
+                ex.q_rad += qr;
+                st.t = t1;
+            } else {
+                st.t = t0 + ch.h_s * q / mc;
+            }
+            ex.m_c += bn.dm;
+            ex.m_o2 += bn.dm * ch.o2_per_c;
+            ex.m_co2 += bn.dm * ch.co2_per_c;
+            ex.q_char += ch.gas_share * q;
+            st.m_c = bn.m_c;
+            st.d = bn.d;
+            rem = if bn.out { rem - bn.tseg } else { 0.0 };
         } else {
-            // Char and ash, inert until DST-13.
+            // Ash, char with nothing to burn it, or a particle that is out.
             let (t1, qc, qr) = segment(a0, b, rad0, 0.0, gas.t, t0, rem, mc);
             ex.q_conv += qc;
             ex.q_rad += qr;
@@ -491,6 +532,7 @@ pub fn step(p: &ParticleProps, s: &ParticleState, gas: &GasAtParcel, dt: f64) ->
     let t_end = st.t as crate::Scalar as f64;
     ex.mt_w = ex.m_w * t_end;
     ex.mt_v = ex.m_v * t_end;
+    ex.mt_c = ex.m_c * t_end;
     Ok((st, ex))
 }
 

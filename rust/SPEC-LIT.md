@@ -51585,6 +51585,102 @@ the two rates, is ill-conditioned in the model itself, and a 1-ulp difference in
 becomes a few ulp of the moisture. The row reports the miss and asserts the crossing parcels stay
 within 16 × 4 ulp, far below what a branch taken differently would give.
 
+### 159.8 What DST-13 landed
+
+`No GPL-licensed source was consulted.` `src/dust/char.rs` (the module `dust::char`:
+`CharInputs`/`CharProps`, the rates `diff_coef`, `r_kin` and `rate` of (159.5), the shrinkage
+`shrink` of (159.10) and the segment `burn`), the char stage of `dustParticleStep` in
+`cuda/dustparticle.cu` (the device function `dustpCharBurn`) and of the host twin
+`dust::particle::step`, and the launcher `particle_step` with the char's fields. The tests are
+written once in `tests/shared/dust_char_cases.rs` and included as the lib tests `dust::char::tests`
+and by `tests/dust_char.rs` in the default and the `single` build. Nothing outside `dust/` calls
+the char stage yet: DST-14 to DST-18 (lane S) state it in the case, take p_O2 from the cell and
+deposit the accumulators.
+
+**The inputs and the interface.** `ParticleInputs` gains `char_rate: CharInputs { c0, a, e_a,
+h_c, h_s }`: C_0 (kg/(m s Pa K^0.75)), A (kg/(m² s Pa)) and E_a (J/mol) of (159.5), the heat
+released per kilogram of carbon burnt h_c (J/kg; ISL22's 32.9 MJ/kg), and h_s in [0, 1].
+`CharInputs::inert()` (all zero) leaves the char inert, as DST-12 did; each of C_0, A, E_a below 0,
+a non-finite h_c and an h_s outside [0, 1] is refused by name. `GasAtParcel` gains the cell's O2
+partial pressure p_O2 (Pa); no char burns where p_O2 ≤ 0. On the device `ParticleGasDev` gains the
+cell field `p_o2`, and the kernel now writes m_c and d_p.
+
+**[derived] The char segment.** Once m_w = m_v = 0 the particle is char and ash; while m_c > 0 and
+p_O2 > 0 it burns. Over a segment T_p, T_g and p_O2 are frozen at its start, so are
+`C' = R_diff d = C_0 T_m^{3/4}` and R_kin, and the particle shrinks at constant density
+`ρ_p = 6 m/(π d³)` (m = m_c + m_a, the density at the segment's start). Then
+`(ρ_p π d²/2) dd/dt = −π d² p_O2 C' R_kin/(C' + R_kin d)`, i.e. `(C' + R_kin d) dd = −K dt` with
+`K = 2 p_O2 C' R_kin/ρ_p`, whose integral is `C' Δ + R_kin (d_0 Δ − Δ²/2) = K t` for
+`Δ = d_0 − d`. Its root that starts at Δ = 0, in the form that does not cancel:
+
+```
+  Δ(t) = 2 K t / ( B + sqrt(B² − 2 R_kin K t) ) ,    B = C' + R_kin d_0                          (159.10)
+```
+
+With R_kin → ∞ it is `d_0 − sqrt(d_0² − 4 p_O2 C' t/ρ_p)`, the d² law of (159.6); with C' → ∞ it
+is `2 p_O2 R_kin t/ρ_p`, the linear shrinking. The char is gone when m = m_a, at
+`d_end = d_0 (m_a/m_0)^{1/3}`, after `t_out = (d_0 − d_end) (C' + R_kin (d_0 + d_end)/2)/K`
+(the integral at Δ = d_0 − d_end, where the root is still real). A segment that reaches t_out
+ends there with m_c = 0 exactly and d = d_end (0 for a particle with no ash), and the step goes
+on with the ash; otherwise it takes the rest of the step, and the char burnt is
+`Δm = m_0 Δ (d_0² + d_0 d + d²)/d_0³` (that is `m_0 (1 − (d/d_0)³)` without the cancellation). The
+new char mass is rounded to `Scalar` where it is stored, `m_c' = round(m_c − Δm)`, the carbon given
+is the difference of the two stored words `m_c − m_c'`, and the diameter follows the stored mass,
+`d = d_0 ((m_c' + m_a)/m_0)^{1/3}`, so mass and diameter keep one density and the carbon ledger
+telescopes in both builds. A remnant whose t_out is not positive (a char too small to move the
+diameter) leaves at once, its retained heat added to T_p as `h_s Δm h_c/(m C)`.
+
+**The heat.** The reaction releases `Q = Δm h_c`. (159.1)'s source in the segment integrator
+(159.9) is `s = h_s Q/t` (the h_s of §159.2), so `m C (T(t) − T_0) = Q_conv + Q_rad + h_s Q`; the
+rest, `(1 − h_s) Q`, is the gas's, accumulated as `q_char`. Bird's factor (159.3) is not applied in
+the char stage (f = 1): §159.1 states it for a vapour leaving the particle, and the net Stefan flux
+of `C + O2 → CO2` is the carbon alone; this is a choice made here.
+
+**The elements.** `C(s) + O2 → CO2` by mass, with the IUPAC conventional atomic weights
+`W_C = 12.011` and `W_O = 15.999` g/mol:
+
+```
+  m_O2 = Δm W_O2/W_C ,   m_CO2 = Δm W_CO2/W_C ,   W_O2 = 2 W_O ,   W_CO2 = W_C + W_O2              (159.11)
+```
+
+so that carbon plus oxygen is the CO2 by construction.
+
+**The accumulators.** Five more `Acc` per parcel, eleven in all: the carbon burnt Δm, the O2
+taken, the CO2 given, the carbon times the stored end-of-step T_p (as (77.5) for the vapours), and
+`q_char`. As for drying and devolatilisation, the particle's share h_s Q is inside the segment's
+heats and is not a second source.
+
+**The stop on a particle with no mass.** A parcel whose mass is all moisture, all volatile, or
+all char without ash loses all of it inside a step; DST-12's loop then took another segment with
+m C = 0 and returned NaN for T_p and the heats (`vanished_particle_stays_finite` failed so before
+the fix). The loop now stops when the mass is 0, on the host and the device; no DST-12 row moves.
+
+**The device.** As in §159.7: double intermediates, `-fmad=false`, each state word rounded once at
+its store, and the char mass rounded where the char segment ends, as the host twin does. The
+twin's contact with the build's precision is therefore the stored T_p of (77.5) and the stored char
+mass, so its closed-form char rows are class R as the device's are.
+
+**Measured** (RTX 5070 Ti, tests/dust_char.rs). Diffusion-limited (R_kin = 1e12, E_a = 0; C' /
+(R_kin d) below 1e−16), a pure-char 50 µm particle at 1500 K, 40 steps to 90 % burnout: d² within
+1.5e−15 of the d² law on the host and 3.9e−16 on the device in f64, 2.6e−7 and 3.1e−7 under
+`single` (bar 1e−8; 1e−5 under `single` by D-F32-1). Kinetic-limited (C_0 = 1e6, A = 1, E_a = 80
+kJ/mol): d within 2.9e−16 (host) and 8.8e−16 (device) of the line in f64, 3.6e−8 and 2.8e−7 under
+`single` (bar 1e−10, R). The harmonic combination is within 1/ratio of each limit and 2.2e−16 at a
+ratio of 1e16, (159.10) within 1.4e−16 d_0 of both closed forms there, and within 2.5e−16 of its own
+integral at finite rates (bar 1e−12 and 1e−13). Element balance, an 80 µm parcel with 30 % ash and
+a 30 µm pure-char parcel to burnout in 24 steps: the carbon given equals the char lost exactly,
+and O2, CO2 = C + O2 and the elements carried back by the CO2 are within 5.2e−16 in both builds,
+host and device (bar 1e−14). Retention, one step at h_s = 0.3: the gas's share is
+`(1 − h_s)(Δm h_c)` bit for bit, and the particle's share is within 2.9e−16 of `h_s Δm h_c` (host)
+and 9.5e−8 on the device under `single` (bar 1e−12, R); h_s = 1 gives the gas 0 and h_s = 0 keeps a
+particle at T_g bit for bit. **Device against host**, one 5 ms step of 4096 random dry parcels in
+1024 cells (332 burn out with ash left, 11 with nothing left, 3241 partly, 512 do not burn): m_c,
+d, T_p (at the scale `T + h_s h_c m_c/(m C)`, the retained heat of the char), the carbon given and
+the two heats (at DST-12's integrand plus `h_s m_c h_c`) are within 4 ulp in both builds (worst 4,
+on Q_conv/Q_rad in f64 and Q_rad under `single`), and the O2, the CO2, the carbon times T_p and the
+gas's heat are the products of the carbon given bit for bit, on the device as on the host. DST-12's
+six rows print what they printed before.
+
 ---
 
 ## 160. The flame-age option and the studio surface

@@ -34,9 +34,10 @@
 //!   SPEC-LIT §159 - the reacting parcel of Phase B in `particle`: the
 //!     particle energy (159.1) with Ranz-Marshall (159.2) and Bird (159.3),
 //!     drying by §76's evaporation, SFOM (159.4), the radiation temperature
-//!     (159.7) and the accumulators of §159.7; its kernel `cuda/dustparticle.cu`
+//!     (159.7) and the accumulators of §159.7; its kernel `cuda/dustparticle.cu`;
+//!     and §159.8 - the char reaction (159.5) with its heat retention in `char`
 //!   A. Islas, A. Rodriguez Fernandez, C. Betegon, E. Martinez-Paneda,
-//!     A. Pandal, arXiv:2207.13149 (2022) - eqs. (13)-(17)
+//!     A. Pandal, arXiv:2207.13149 (2022) - eqs. (13)-(17), (20)-(23)
 //!   C. Huang, M. Bloching & A. N. Lipatnikov, J. Loss Prev. Process Ind. 75
 //!     (2022) 104707, DOI 10.1016/j.jlp.2021.104707 - eqs. 1-3 and Table 1
 //!   C. Huang, A. N. Lipatnikov & K. Nessvi, J. Loss Prev. Process Ind. 67
@@ -44,6 +45,7 @@
 //!   NASA TM-4513 Table II through §128
 //! No GPL-licensed source was consulted.
 
+pub mod char;
 pub mod courant;
 pub mod device;
 pub mod fsc;
