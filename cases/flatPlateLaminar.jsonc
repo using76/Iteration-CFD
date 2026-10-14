@@ -26,7 +26,9 @@
 // constraint.
 //
 // UNVERIFIED: no run of this file is recorded, and no number in it is a
-// claim about the solution. The Blasius gate is docs/17's VAL-31, not yet run.
+// claim about the solution. The Blasius gate (Gate 132-L, SPEC-LIT 144.2)
+// solves the graded mesh of SPEC-LIT 144.1 in memory with these conditions,
+// on three meshes; it does not read this file.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

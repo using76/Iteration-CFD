@@ -125,6 +125,9 @@ mod json;
 #[path = "validate_key/mod.rs"]
 mod key;
 
+#[path = "validate_gates/blasius_plate.rs"]
+mod blasius_plate;
+
 use common::sci;
 
 // ==========================================================================
@@ -3617,6 +3620,13 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Gate 119-A: the wedge - Hagen-Poiseuille through the axis prisms and radial conduction in an annulus (SPEC-LIT 119.3)") {
     c.enter_gate("SPEC-LIT 119.3 Gate 119-A the wedge");
     check_wedge_gate(c, &gpu)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 144.2 - Gate 132-L: the flat-plate harness against Blasius,
+    // three meshes live, in src/bin/validate_gates/blasius_plate.rs.
+    if c.section("Gate 132-L: the laminar flat plate against Blasius, three meshes (SPEC-LIT 144.2)") {
+    c.enter_gate(blasius_plate::GATE);
+    blasius_plate::check_blasius_plate(c, &gpu)?;
     c.leave_gate();
     }
 

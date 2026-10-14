@@ -48955,6 +48955,97 @@ A for the ratios and the estimate (evaluated in f64, the same tolerance in both 
 **Not claimed.** No flow has been solved on this mesh. The Blasius comparison is VAL-31's, and the mesh's
 fitness for it is that gate's to show.
 
+### 144.2 Gate 132-L: the laminar plate against Blasius
+
+`No GPL-licensed source was consulted.` The plan names this gate 132-L (docs/17's row VAL-31); it lives here
+in §144, not in §132. `src/bin/validate_gates/blasius_plate.rs` solves §144.1's plate laminar and steady on three
+meshes and holds the wall shear and one velocity profile against the Blasius similarity solution. That solution
+is exact for the boundary-layer equations (H. Blasius, *Z. Math. Phys.* 56 (1908) 1-37), so a miss is the verdict
+MISSES. No published table is read. `f''' + f f''/2 = 0` with `f(0) = f'(0) = 0` and `f'(inf) = 1` is integrated
+by RK4 at `h = 1e-3` with a secant shot on `f''(0)` that drives `f'(10)` to 1, as §88.7 does, and the shot's own
+`f''(0)` is the gate's first row. Between the RK4 nodes `f'` is the cubic Hermite interpolant whose slopes are the
+nodes' `f''`. The gate compares against:
+
+```text
+C_f,B = 2 f''(0) Re_x^(-1/2),   Re_x = U x/nu                                          (144.2a)
+u/U = f'(eta),   eta = y sqrt(U/(nu x))                                                (144.2b)
+```
+
+**The meshes.** The meshes keep `FlatPlateSpec::laminar()`'s box, end-cell ratios (`r_up = r_plate = 20`,
+`r_y = 200`) and free stream (`U = 1 m/s`, `nu = 5e-6 m^2/s`, `Re_L = 2e5`). They differ only in their counts
+`n_up + n_plate x n_y`: `32 + 128 x 96` (15 360 cells), `16 + 64 x 48` (3 840) and `8 + 32 x 24` (960). Each
+level halves every count of the one before, so (94.1)'s `h = sqrt(A/N)` doubles exactly: `4.5105e-3`, `9.0211e-3`
+and `1.8042e-2` m. The boundary conditions are `cases/flatPlateLaminar.jsonc`'s:
+
+- the inlet carries the free stream, with zero-gradient `p`;
+- the outlet and the top have zero-gradient `U` at `p = 0`;
+- `symmetry` is a symmetry plane;
+- the plate is no-slip;
+- `back` and `front` are `empty`.
+
+The run seeds the free stream and its face fluxes. It is steady SIMPLE with `alpha_U = 0.7` and `alpha_p = 0.3`
+(§5.2), `linearUpwind` on `div(phi,U)` with the bounded form, and no eddy viscosity.
+
+**The wall shear.** On a plate face with centre `c_f`, unit normal `n` and wall cell `P`, all in f64 from
+`geom64()`:
+
+```text
+tau_w = nu u_P,x / d,   d = |(c_P - c_f) . n|,   C_f = 2 tau_w / U^2                   (144.2d)
+```
+
+This is the one-sided wall gradient that the momentum equation's own wall flux uses. The study's quantity, `C_f` at
+`Re_x = 1e5` (`x = 0.5 m`), interpolates `C_f sqrt(Re_x)` linearly in `x` between the two faces that bracket it,
+because Blasius makes that product constant:
+
+```text
+C_f(Re) = [g_a + t (g_b - g_a)] / sqrt(Re),   g = C_f sqrt(Re_x),   t = (Re - Re_a)/(Re_b - Re_a)   (144.2c)
+```
+
+**The stopping rule.** Every 50 SIMPLE iterations, after at least 200, the run takes the largest relative change of
+`C_f` over the band's faces since the last check. It stops when that change is `1e-6` or less, with a cap of
+20 000 iterations. A non-finite initial residual is an `Err`, never a row.
+
+**The rows**, all in `ofgpu-validate`'s section `Gate 132-L`:
+
+1. `|f''(0) - 0.332057| <= 1e-6`: the reference itself.
+2. Each mesh meets the stopping rule within the cap.
+3. On the finest mesh, `max |C_f/C_f,B - 1| <= 0.03` over every plate face with `2e4 <= Re_x <= Re_L`, by (144.2a)
+   and (144.2d).
+4. On the finest mesh, `max |u/U - f'(eta)| <= 0.02` (fractions of `U`) over the column of cells above the plate face
+   nearest `Re_x = 1e5`, for `eta <= 8`. Here `eta` is (144.2b) evaluated at the column's own centroid `x`. The rows
+   above `eta = 8`, where `f' = 1` to `1e-5`, are free stream and are not read.
+5. §94's `grid_study` reads the three levels of (144.2c).
+
+The study and the (94.10) metric against `D = C_f,B(1e5)` are printed as notes. `u_input = 0` because the inputs
+are exact, and `u_D = 0` because Blasius is exact. A failure of row 3 or row 4 registers `Verdict::Misses` with the
+study as its `Uncertainty`. A pass registers nothing (§69).
+
+**Measured** on this tree, on this machine's GPU, in both builds:
+
+| row | f64 | single |
+|---|---|---|
+| `f''(0)` (shot, f64 in both) | `0.33205734`, err `3.37e-7` | the same |
+| iterations, finest / medium / coarse | 1500 / 500 / 250 | 1600 / 500 / 250 |
+| `C_f` at `Re_x = 1e5`, finest / medium / coarse | `2.098053e-3` / `2.095611e-3` / `2.084387e-3` | `2.098052e-3` / `2.095612e-3` / `2.084389e-3` |
+| `C_f / C_f,B` at `Re_x` 2e4, 5e4, 1e5 (finest) | 1.0047, 1.0016, 0.9990 | the same |
+| row 3: worst face | `1.299e-2` (bar `0.03`), at `x = 0.9877 m`, the last plate face | the same |
+| row 4: worst cell | `3.163e-3` (bar `0.02`), at `eta = 4.404` of the column at `x = 0.4983 m`, 44 cells | the same |
+| study | monotone, `p = 2.201`, `phi_ext = 2.099110e-3`, `U_fine = 3.117e-6` (Fs 3, second order, unweighted) | `phi_ext = 2.099109e-3`, `U_fine = 3.118e-6` |
+| (94.10) | `E = -2.062e-6 +/- 3.117e-6` (`-0.10 % +/- 0.15 %` of D): `abs(E) <= u_val` | `E = -2.063e-6 +/- 3.118e-6` |
+| section wall time, two runs each | 51.7 s, 63.7 s | 23.9 s, 23.8 s |
+
+The gate HOLDS in both builds. The run's single-build `C_f` agrees with the f64 build's to `1e-6` relative. The
+initial residual at the stop is `1.1e-9` in f64 and `5.2e-4` under single, so the `C_f` rule is the one that both
+builds can meet. Precision classes: A for row 1 (host f64 in both builds), and R for rows 3 and 4 (a solved field
+against an exact solution, with the same bars in both builds).
+
+**Not claimed.** The leading-edge region `Re_x < 2e4` is not gated. There the boundary-layer approximation and the
+mesh both fail by design, so the band starts at `x = 0.1 m`. The worst face of row 3 is the last plate face, whose
+cell touches the zero-gradient outlet. It is 1.3 % low there, and that end effect is not diagnosed further. §144.1's
+`laminar()` mesh (`30 + 120 x 80`) is not one of the three levels, because halving its 30 and 120 twice is not whole.
+The levels keep its box and ratios instead. Nothing here holds a transition model or a turbulent plate; those are
+the later subsections of §144, by the plan's allocation.
+
 ## 145. Martin & Moyce's collapsing column — the surge-front key
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the
