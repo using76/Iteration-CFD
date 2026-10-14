@@ -37403,6 +37403,47 @@ fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream
 0.005. The bound 0.005 is the plan's. It is ten times tighter than `isaac_export.py`'s
 `FREESTREAM_TOL` of 0.05, and it is not loosened to 0.05.
 
+**As built (VIO-06).** The full command is `ofgpu-sample volume <case> <time|latest> [-vdb]
+[-nvdb] [-usda] [-lattice JSON] [-fields a,b,...] [-precision fp32|fp16] [-freestream Ux]
+[-out DIR] [-stem NAME]`. The code makes these choices where the text above leaves room.
+
+- **The keys.** A JSONC case's `output.visualisation` is resolved by `OutputPlan::from_json`, as a
+  run resolves it: formats, `fields`, `precision` and `lattice`. Each flag replaces its key:
+  `-vdb`/`-nvdb`/`-usda` the formats, in command-line order; `-lattice` the whole lattice block,
+  given as the block's own JSON; `-fields` the selection of §44.2; `-precision` the voxel
+  precision. `-lattice` and `-precision` go through `OutputPlan::from_json` too, so a flag is
+  refused for exactly what the same key is refused for in a case (§117.12). An OpenFOAM case has
+  no `output` block, so its keys are the flags and the defaults of §117.3.
+- **The fields.** Every file of `<output root>/<time>` whose `FoamFile` header names
+  `volScalarField` or `volVectorField` is read, in byte order of file name (`U` before `p`).
+  Every other file (`phi`, for one) is skipped and named in one line. `latest` is the time
+  directory with the largest numeric name. A run hands its writers the fields in its own order,
+  so the files equal a run's byte for byte when `fields` names that order.
+- **The mesh.** An OpenFOAM case's polyMesh is read and built in world coordinates in both builds
+  (`build_host_mesh`, not the local origin of §118.7). The map of §117.4 is therefore laid in
+  world coordinates with no shift to add (§117.2 item 4). A uniform Cartesian box is written on
+  its own cells (§117.6) and no lattice is laid. Under `single`, the Cartesian origin of a box far
+  from the axis can differ in its last f32 bit from a run's, because a run's centres are local.
+  A JSONC case on a mesh that is not a Cartesian box is refused by name: its block mesh is built
+  in memory and there is no polyMesh to lay a lattice from.
+- **The write.** `build_writers(out, stem, formats, precision)` and one `WriteCtx` with
+  `step = 0`, `name = <time>`, `time` = the directory name parsed and rounded once to `Scalar`, and
+  `cart` or `vox` as above. That is what `OutputPipeline::write` hands its writers at a run's
+  first write. The files are `<out>/VDB/<stem>_000000.vdb|.nvdb` and `<out>/<stem>.usda`, with
+  `out` defaulting to `<output root>/volume_<time>` and `stem` to `volume`, so a run's own series
+  is never overwritten.
+- **The free stream.** `-freestream Ux` prints `m`, the median of the sampled `U.x` over the fluid
+  voxels (`M[v] != NONE`) of the lattice's last x plane `i = n_x - 1`, and `|m - Ux| / |Ux|`. The
+  median is numpy's: the middle value, or the mean of the two middle values. The samples are
+  `VoxelMap::sample` of the cells' `U.x` under the lattice's `sample` key. On a Cartesian box the
+  plane is the box's last cell plane. This is `isaac_export.py`'s G-FREESTREAM. That tool's xMax
+  plane is the last node of a node lattice (`lo + h i`), and this plane is the last voxel centre
+  of (117.2)'s lattice.
+- **Refused by name.** No format; `-usda` with neither `-vdb` nor `-nvdb`; `-isaac`, because the
+  profile of §117.9 is VIO-09's and not in this tree; a missing time directory; a directory with
+  no `volScalarField` or `volVectorField`; `-freestream` that is zero or not finite, with no
+  `volVectorField U`, or with no fluid voxel on the plane; and an unknown argument.
+
 ### 117.12 The boundary surface, and what is refused
 
 **The true face polygons (VIO-07).** When the raw mesh is available,
@@ -37520,6 +37561,9 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 | VIO-08 | Isaac Sim omni.volume `openvdb.readAll` (12.0.0, module format 224) on that file | 10 grids, named `T`, `U.mag`, `U.x`, `U.y`, `U.z`, `epsilon`, `k`, `nut`, `p`, `rho`; each with 150 active voxels, box (0,0,0)-(9,4,2), voxel (0.04, 0.01, 0.0167), class fog volume; no warning; 0.2 s | this unit |
 | VIO-08 | Blender 5.1.2's `openvdb.readAll` (13.0.0, module format 225) on that file | the same ten grids, with the same per-grid active count, box, voxel size, class, min, max and sum as Isaac's read | this unit |
 | VIO-08 | the same file before VIO-08, under both readers | ten unnamed grids with 0 active voxels each, "multi-buffer trees are no longer supported" | this unit |
+| VIO-06 | the drone at `t = 0.5 s` (fluid fraction against 0.999906, free-stream `U.x` against 0.005, 2 min) | **NOT RUN**. The solve is not on disk: no `write.json`, `x500_assembled.blend`, `drone_flow*.usda` or `rotors.json` was found under `C:/Users/sdd32`, `C:/bulc_runs`, `C:/Temp`, `C:/isaac` or `C:/iss`. Re-running the drone solve was not authorised for this unit. The gate stays open for the run that has the solve (VIO-11) | VIO-06 |
+| VIO-06 | `tests/sample_volume_cli.rs`, both builds: a 6 x 4 x 3 Cartesian box; the 2:1 mesh of `refined_core([4,4,4], 1/4, 0.3, 1)` with `-lattice` `h` = 1/16 over `[-1/4, 3/4] x [-1/4, 5/4]^2`, `linear`, `fluid`, background -7.5 | the `.vdb`, `.nvdb` and `.usda` equal `build_writers` on one `WriteCtx` byte for byte, on both meshes; the lattice is 16 x 24 x 24 = 9 216 voxels, 3 072 fluid, fluid fraction 1/3 as printed; the free-stream median is over 12 cells (box) and 256 voxels (2:1), equal to the test's own; 8 refusals by name | VIO-06 |
+| VIO-06 | stand-in at the drone lattice's size, f64 build: the box-sphere automesher example (15 376 cells, snapped, 2 layers), `h` = 4/138 over `[3, 7]^3` (138^3 = 2 628 072 voxels against the drone's 2 650 021), uniform `U = (2, 0, 0)`, `-vdb -nvdb -usda -freestream 2` | fluid fraction 0.9363335555494674 against `1 - V_s/V_b` = 0.934550 of the true sphere, a difference of 1.8e-3 under `A_s h / V_b` = 5.7e-3 (the snapped sphere is faceted); 4 360 voxels gap-filled; median 2 over 19 044 voxels, relative error 0; map 0.09 s, whole command 0.4 s (`cell`) and 0.5 s (`linear`); `.vdb` 64.9 MB, `.nvdb` 65.2 MB | VIO-06 |
 
 **As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
 
