@@ -46896,6 +46896,97 @@ two-device placement is untested. The halo still goes through host memory and
 does not use peer-to-peer copies. Running ranks concurrently on one device
 gives no speed-up claim: the ranks share one GPU and its context.
 
+### 138.8 The parallel driver `ofgpu-par`
+
+ORIGINAL: this project's own design (docs/17 PAR-07), with no external source.
+It defines no equation. `src/bin/par.rs` is the driver and
+`tests/par_driver.rs` its test.
+
+```
+ofgpu-par <case> [-np 2,3,4] [-comm threads] [-method all] [-sweeps N] [-alpha A] [-quiet]
+```
+
+`ofgpu-decompose` (§71.9, §72.9, §73.9) holds every part in one process.
+`ofgpu-par` runs the same three gates SPMD, as a decomposed solve will run. One
+`ThreadComm` world is built per (rank count, partitioner), and every rank does
+all of the following itself:
+
+1. It opens `Gpu::for_rank(&placement, r)`, with
+   `Placement::from_env(Gpu::device_count()?)` (§138.7).
+2. It computes the partition map with `partition` and rotates it,
+   `r -> (r + shift) mod P`, for every `shift` in `0..P`. It builds its own
+   `Decomposition::from_map` and holds part `r` only.
+3. It runs every gate below at every rotation. Every byte that crosses ranks
+   goes through the `Comm` (§138.3, §138.4, §138.5).
+
+The partitioners are Hilbert, linear and round robin (`c mod P`). The matrices,
+the fields and the sweep pipeline are `ofgpu-decompose`'s, unchanged, so the two
+drivers gate the same systems. The whole-mesh references are computed once, on
+the main thread, on rank 0's device.
+
+| gate | what each rank does | passes when |
+|---|---|---|
+| MAP | it hashes the rotated map with 64-bit FNV-1a, over `P` as a little-endian u64 and then every label's little-endian bytes, and allgathers the 8 bytes | every rank received P equal hashes, equal to the main thread's hash of the same map |
+| HALO | (a) it fills a `Scalar`, a `Vec3`, a `Tensor` and a `Label` field from the global cell id, poisons the ghosts, and runs one `SpmdHalo` exchange per payload; (b) it runs §71.8's pipeline: `split_matrix` of the pinned Laplacian, `is_fixed` and `fixed_value` through the exchange, relax, `set_values`, the fold, `1/diag`, then `-sweeps` Jacobi sweeps (default 8), with an exchange before each | (a) every local cell, owned and ghost, holds the value at its global id; (b) every owned cell equals the undecomposed run |
+| REDUCTION | `SpmdReduction` `sum` and `dot` of (swept field, `V`) and of §72's adversarial field with `V`, with the halo poisoned | the four values equal the whole mesh's `ExactReduction` |
+| KRYLOV | `spmd_solve` with PCG and with PBiCGStab, `Diagonal` and `DistReduce::Exact`, flag vote on, on §73.8's SPD Poisson plus `ddt` | every owned cell equals the whole mesh's `dist_solve` answer, and every rank stopped on the whole mesh's iteration |
+
+Every comparison is `to_bits()` equality. The HALO and Krylov lines report the
+number of cells that differ and the worst `|d|`, so `worst == 0` is the pass, and
+the REDUCTION line reports how many values moved. The solver
+tolerance is a solver control and not a gate tolerance. It is 1e-10 in f64,
+`ofgpu-decompose`'s value, and 1e-5 under `--features single`,
+`tests/distsolve_spmd.rs`'s value. `rel_tol` is 0 and `max_iter` is 600. If the
+whole-mesh reference does not converge, the driver refuses to run, because the
+gate would have no reference. The exit status is 0 only when every gate at every
+rotation passes. The last line is `ofgpu-par: PASS - ...` or
+`ofgpu-par: FAIL - ...`.
+
+**The MPI half waits for PAR-06.** The docs/17 row asks for `-comm threads|mpi`
+and for auto-detection of `PMI_RANK`/`PMI_SIZE` under `mpiexec`. The user
+deferred the MS-MPI install, so PAR-06 (§138.2, `MpiComm`) is not in the tree.
+Until it lands, only `-comm threads` is built. The driver refuses, by name and
+before the case is read or a device is opened:
+
+| case | the message names |
+|---|---|
+| `-comm mpi` | `-comm mpi`, that the MPI transport is `deferred (PAR-06)` and not built, and `-comm threads` |
+| `PMI_RANK` or `PMI_SIZE` in the environment, whatever `-comm` says | the variable, `mpiexec`, `deferred (PAR-06)`, and to run one process with `-comm threads`. Under `mpiexec`, every process would otherwise run a whole threads world of its own |
+| any other `-comm` | the value and the known transport `threads` |
+| `-np` with a 0 or a non-number | the value, and `at least 1` for a 0 |
+
+`-np` above the cell count and an unknown `-method` are refused by value after
+the case is read and before a device is opened. An unknown option is refused by
+name while the arguments are parsed.
+
+When PAR-06 lands, `-comm mpi` (and the PMI detection) runs `rank_body` once per
+process over `MpiComm`. That rank body is unchanged, because each rank already
+computes its own map and decomposition. The MAP gate is the check that makes this
+safe, since separate processes do not share the map.
+
+**What must hold.** Class D: bytes and counts, in both builds.
+
+| test | what it asserts |
+|---|---|
+| **the row gate**, `ofgpu-par cases/plume.jsonc -np 2,3,4 -comm threads` | 9 worlds and 27 rotations, all PASS, with `worst == 0` and the whole mesh's iteration count. Measured 2026-10-14 on the RTX 5070 Ti: f64 in 28.7 s wall, with PCG at 125 and PBiCGStab at 79 iterations to 1e-10 at every P, partitioner and rotation; single in 8.9 s, with PCG at 49 and PBiCGStab at 32 iterations to 1e-5. The tree has the tracked `cases/plume.jsonc` (98×42×20 = 82,320 cells). The `cases/plume` that the row names is not a tracked case |
+| **`par_threads_gates_pass_on_a_small_plume`** | the same run on `cases/plume.jsonc` at 28×12×5: 27 MAP, HALO, REDUCTION, PCG and PBiCGStab PASS lines each, no FAIL, the verdict `9 worlds, 27 rotations`, and ghost cells compared on every HALO line |
+| `par_refuses_mpi_by_name` | `-comm mpi` is refused with the four names above |
+| `par_refuses_mpiexec_environment` | `PMI_RANK` and `PMI_SIZE` together with `-comm threads`, then `PMI_SIZE` alone and `PMI_RANK` alone without `-comm` |
+| `par_refuses_bad_options` | `-comm tcp`, `-np 2,0`, `-np x`, `-method metis`, and an unknown option |
+
+Each gate was shown able to fail. The supervisor ran a mutated copy, which was
+not kept, with four changes: the exchange before each sweep dropped, the exact
+`sum` swapped for `gathered_sum`, one rank's Krylov reference perturbed by
+1e-6, and the expected map hash taken from the next rotation. At P = 2 and 3,
+Hilbert, every one of the 5 rotations failed MAP, HALO and REDUCTION, and both
+Krylov lines failed (10 lines).
+
+**What this does not establish.** All ranks are threads of one process on one
+device. So nothing here runs over MPI (PAR-06), nothing runs on two devices
+(§138.7's ignored test), and no time is a scaling number (PAR-16). The driver
+gates the linear algebra of a decomposed solve. It does not yet run a flow
+solver decomposed (PAR-10c, §139).
+
 ---
 
 ## 141. Native GAMG and AMGX — aggregation, the Galerkin hierarchy, and the AMGX library
