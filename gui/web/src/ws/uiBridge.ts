@@ -467,6 +467,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
     if (outcome.code === 'MISS') return { ok: false, error: `MISS (probe): ${outcome.message}` }
     if (outcome.code === 'NO_STRUCTURED_GRID') return { ok: false, error: `UNSUPPORTED (probe): ${outcome.message}` }
     if (outcome.code === 'NO_DATASET') return { ok: false, error: `NO_DATASET (probe): ${outcome.message}` }
+    if (outcome.code === 'LOCATE_FAILED') return { ok: false, error: `LOCATE_FAILED (probe): ${outcome.message}` }
     return { ok: false, error: `NO_VIEWER (probe): ${outcome.message}` }
   }
 
@@ -839,7 +840,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
           ui.getState().openViewerTab()
           return noViewer(cmd.type)
         }
-        if (cmd.point != null) return probeAnswer(v.probePoint(cmd.point))
+        if (cmd.point != null) return probeAnswer(await v.probePoint(cmd.point))
         const t = probeTarget(cmd, rect)
         if ('error' in t) return { ok: false, error: t.error }
         return probeAnswer(v.probePixel(t.x, t.y))

@@ -3,6 +3,8 @@
 // The Inspector right panel (STU-08a): the last probe or screen pick, which is
 // the store's selection. A gui_control probe and a select-tool click on the
 // canvas both write it, so the panel and gui_state's selection agree.
+// A point probe the server located on a polyMesh also says how (STU-13): exactly in a
+// convex cell, or the nearest centre of a warped or non-convex one.
 import type { ReactElement } from 'react'
 import type { Locale, UiSelection } from '@cfd/shared'
 import { tx, type UiKey } from '../../i18n/extra'
@@ -43,6 +45,12 @@ export function InspectorView({ locale, selection }: InspectorViewProps): ReactE
             <th>{t('inspectorPanel.center')}</th>
             <td data-testid="inspector-center">{c ? c.map((x) => formatValue(x)).join(', ') : '-'}</td>
           </tr>
+          {selection.located ? (
+            <tr>
+              <th>{t('inspectorPanel.located')}</th>
+              <td data-testid="inspector-located">{t(selection.located === 'nearest-centre' ? 'inspectorPanel.locatedNearest' : 'inspectorPanel.locatedCell')}</td>
+            </tr>
+          ) : null}
           {selection.patch ? (
             <tr>
               <th>{t('inspectorPanel.patch')}</th>

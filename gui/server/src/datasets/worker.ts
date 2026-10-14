@@ -8,6 +8,7 @@ import { Worker, isMainThread, parentPort } from 'node:worker_threads'
 import type { CartesianGrid } from '../formats/cartesian.js'
 import { readFoamField, type FoamField } from '../formats/foam.js'
 import type { Bounds, SurfaceGeometry } from '../formats/geometry.js'
+import { buildCellLocator, locatePoint, type CellLocator } from '../formats/pointLocate.js'
 import { cutPolyMesh } from '../formats/polycut.js'
 import { detectLattice, polyMeshBoundarySurface, polyMeshCellCenters, readPolyMesh, type PolyMesh, type PolyMeshPatch } from '../formats/polymesh.js'
 import { readVtuCellData, readVtuPointData, readVtuInfo, vtuBoundarySurface, type VtuArrayInfo } from '../formats/vtu.js'
@@ -19,6 +20,7 @@ export type WorkerTask =
   | { op: 'vtuCellData'; path: string; name: string }
   | { op: 'vtuPointData'; path: string; name: string }
   | { op: 'polyCut'; dir: string; origin: [number, number, number]; normal: [number, number, number] }
+  | { op: 'locate'; dir: string; point: [number, number, number] }
 
 export interface FoamFieldResult {
   op: 'foamField'
@@ -81,7 +83,15 @@ export interface PolyCutResult {
   openCells: number
 }
 
-export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult | PolyCutResult
+/** The cell of the polyMesh in `dir` that holds a point (docs/17 STU-13); cell null: no cell does. */
+export interface LocateResult {
+  op: 'locate'
+  cell: number | null
+  method: 'contains' | 'nearest-centre' | null
+  center: [number, number, number] | null
+}
+
+export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult | PolyCutResult | LocateResult
 
 // The last polyMesh a cut read, per thread: a run of slices on one mesh parses it once.
 // Keyed by the directory and every file's size and mtime, so a re-meshed case is read again.
@@ -103,6 +113,17 @@ async function meshForCut(dir: string): Promise<PolyMesh> {
   const mesh = await readPolyMesh(dir)
   cutMesh = { key, mesh }
   return mesh
+}
+
+// The locator of the last mesh a point was located in, per thread, under the same key as cutMesh.
+let locator: { key: string; loc: CellLocator } | null = null
+
+async function locatorFor(dir: string): Promise<CellLocator> {
+  const key = await polyMeshStamp(dir)
+  if (locator && locator.key === key) return locator.loc
+  const loc = buildCellLocator(await meshForCut(dir))
+  locator = { key, loc }
+  return loc
 }
 export type ResultOf<T extends WorkerTask> = Extract<WorkerResult, { op: T['op'] }>
 
@@ -149,6 +170,10 @@ export async function runTask(task: WorkerTask): Promise<WorkerResult> {
         }
       }
       return { op: 'polyCut', positions: Float32Array.from(cut.triPositions), cells, cellCount, area: cut.area, openCells: cut.openCells }
+    }
+    case 'locate': {
+      const hit = locatePoint(await locatorFor(task.dir), task.point)
+      return hit ? { op: 'locate', cell: hit.cell, method: hit.method, center: hit.center } : { op: 'locate', cell: null, method: null, center: null }
     }
   }
 }

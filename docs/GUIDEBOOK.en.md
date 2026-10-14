@@ -1138,6 +1138,13 @@ streamlines and glyphs still need a lattice and still answer
 `NO_STRUCTURED_GRID` there, and so does a VTU whose cell centres form no lattice
 (it carries no cell faces to cut).
 
+A probe at a world point (`probe {point}`) works on such a polyMesh too: the
+server finds the cell that holds the point. A convex cell with planar faces is
+tested exactly, face by face; when only warped or non-convex cells could hold
+the point, the cell with the nearest centre answers and the Inspector (and
+`gui_state`'s `selection.located`) says `nearest-centre`. A point in no cell is a
+`MISS`.
+
 ### The viewer draws the case on its side
 
 The case has no `constant/g` and its floor patch is not named `bottomWall`,

@@ -72,7 +72,11 @@ export interface PropertiesNode {
 /** The selection a probe outcome leaves (STU-08a): a hit selects its cell, a miss selects nothing, and
  *  an outcome that read nothing (no viewer, no dataset, no structured grid) leaves the selection as it was (null). */
 export function selectionOfProbe(o: ProbeOutcome): UiSelection | null {
-  if (o.ok) return { kind: 'cell', id: o.hit.cell, center: o.hit.center, value: o.hit.value, field: o.hit.field, patch: null }
+  if (o.ok) {
+    // `located` only when the server located a point (STU-13), so a pick's selection keeps its shape.
+    const located = o.hit.located ? { located: o.hit.located } : {}
+    return { kind: 'cell', id: o.hit.cell, center: o.hit.center, value: o.hit.value, field: o.hit.field, patch: null, ...located }
+  }
   return o.code === 'MISS' ? { kind: 'none' } : null
 }
 

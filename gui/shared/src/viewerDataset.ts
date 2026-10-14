@@ -114,6 +114,11 @@ export interface ViewerDataset {
    * SPEC-LIT §148.1): a polyMesh with no lattice, whose slices and planes are drawn from the cut.
    */
   planeCut?: boolean
+  /**
+   * True when the server locates a world point in this mesh's cells (`POST /api/datasets/<id>/locate`,
+   * docs/17 STU-13): a polyMesh read from its files. A window without the cells probes a point there.
+   */
+  pointLocate?: boolean
   surface: SurfaceInfo
   fields: FieldInfo[]
   times: TimeStepInfo[]
@@ -121,6 +126,20 @@ export interface ViewerDataset {
   meta: Record<string, string | number | boolean>
   /** Human-readable warnings collected while reading (e.g. proxy geometry, skipped files). */
   warnings: string[]
+}
+
+/**
+ * The cell of a polyMesh that holds a point (docs/17 STU-13). `cell` null: no cell does (outside
+ * the mesh, or in a hole). `method` 'contains': a convex cell with planar faces, tested exactly by
+ * its faces' half-spaces. 'nearest-centre': only warped or non-convex cells' boxes hold the point,
+ * and the one with the nearest centre answers, labelled so.
+ */
+export interface PointLocateInfo {
+  point: [number, number, number]
+  cell: number | null
+  method: 'contains' | 'nearest-centre' | null
+  /** The cell's centre (face-centroid, area-weighted, f32 as the viewer stores it), null with no cell. */
+  center: [number, number, number] | null
 }
 
 /** The plane of a cut request: any point of it and a non-zero normal. */

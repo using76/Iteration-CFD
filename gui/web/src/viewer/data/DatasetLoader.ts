@@ -1,7 +1,7 @@
 // Opens a dataset through a transport, polls until the manifest is ready,
 // decodes blobs into typed arrays (LRU-cached) and exposes them to the
 // compute service under dataset-scoped keys.
-import { blobElementBytes, type BlobRef, type CutPlaneSpec, type PlaneCutInfo, type ViewerDataset } from '@cfd/shared'
+import { blobElementBytes, type BlobRef, type CutPlaneSpec, type PlaneCutInfo, type PointLocateInfo, type ViewerDataset } from '@cfd/shared'
 import { BlobCache, type TypedArray } from './BlobCache'
 import { StructuredGrid } from './StructuredGrid'
 import type { DatasetTransport } from './transport'
@@ -141,6 +141,17 @@ export class DatasetLoader {
     this.refs.set(scopedKey(manifest.id, info.positions.key), { id: manifest.id, ref: info.positions })
     this.refs.set(scopedKey(manifest.id, info.cells.key), { id: manifest.id, ref: info.cells })
     return info
+  }
+
+  /** True when the transport can locate a world point in this dataset's cells (a polyMesh on a server, docs/17 STU-13). */
+  canLocate(manifest: ViewerDataset): boolean {
+    return manifest.pointLocate === true && typeof this.transport.locate === 'function'
+  }
+
+  /** Ask the server which cell holds a world point; `cell` null when none does. */
+  locate(manifest: ViewerDataset, point: [number, number, number]): Promise<PointLocateInfo> {
+    if (!this.transport.locate) return Promise.reject(new LoadError(`${manifest.name}: this transport cannot locate a point`))
+    return this.transport.locate(manifest.id, point)
   }
 
   fieldRef(manifest: ViewerDataset, field: string, timeIndex: number): BlobRef | null {

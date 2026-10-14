@@ -573,7 +573,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     y: z.coerce.number().nullish().describe('Window y in pixels from the top (with x)'),
     fx: z.coerce.number().nullish().describe('Fraction 0..1 across the 3-D canvas, left to right (with fy)'),
     fy: z.coerce.number().nullish().describe('Fraction 0..1 down the 3-D canvas, top to bottom (with fx)'),
-    point: Vec3Schema.nullish().describe('World point [x, y, z]: the cell containing it is read'),
+    point: Vec3Schema.nullish().describe('World point [x, y, z]: the cell containing it is read; on a polyMesh, ui.state selection.located "nearest-centre" means the cell is warped or non-convex and only the nearest centre could be named'),
     at: z.literal('center').nullish().describe('"center": the middle of the canvas'),
   }),
   z.object({ type: z.literal('open_tab'), kind: z.string().describe('Tab kind, e.g. "viewer", "chart", "log"'), label: z.string().nullish(), path: z.string().nullish().describe('Workspace path, for kind geometry (.stl/.obj/.step) or campaign (a campaign directory)') }),
@@ -695,6 +695,10 @@ export const UiSelectionSchema = z.discriminatedUnion('kind', [
     value: z.number().nullish(),
     field: z.string().nullish(),
     patch: z.string().nullish(),
+    // How a point probe on a polyMesh found the cell (docs/17 STU-13): 'contains' when a convex cell
+    // holds it exactly, 'nearest-centre' when only warped or non-convex cells could and the nearest
+    // centre answered. Absent for a pixel pick or a structured-grid lookup.
+    located: z.enum(['contains', 'nearest-centre']).nullish(),
   }),
 ])
 export type UiSelection = z.infer<typeof UiSelectionSchema>

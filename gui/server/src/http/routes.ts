@@ -128,6 +128,7 @@ const CasePatchSchema = z.object({ path: z.string(), edit: z.unknown() })
 const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().default(null), field: z.string().nullable().default(null), region: z.string().nullable().default(null).describe('Region of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); null = the first region that has something to open') })
 const Vec3Schema = z.tuple([z.number(), z.number(), z.number()])
 const DatasetCutSchema = z.object({ origin: Vec3Schema, normal: Vec3Schema })
+const DatasetLocateSchema = z.object({ point: Vec3Schema })
 const GeometryOpenSchema = z.object({ path: z.string() })
 const GeometrySaveSchema = z.object({
   path: z.string(),
@@ -327,6 +328,16 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     if (!datasets.get(ctx.params.id)) throw new HttpError(404, `no such dataset: ${ctx.params.id}`)
     try {
       return await datasets.cut(ctx.params.id, body)
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : String(err))
+    }
+  })
+  // The cell of a polyMesh that holds a point (docs/17 STU-13); `cell` null is a miss, not an error.
+  router.post('/api/datasets/:id/locate', async (ctx) => {
+    const body = await ctx.json(DatasetLocateSchema)
+    if (!datasets.get(ctx.params.id)) throw new HttpError(404, `no such dataset: ${ctx.params.id}`)
+    try {
+      return await datasets.locate(ctx.params.id, body.point)
     } catch (err) {
       throw new HttpError(400, err instanceof Error ? err.message : String(err))
     }

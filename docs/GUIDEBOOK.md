@@ -1064,6 +1064,12 @@ ofgpu-validate
 필요해 그런 격자에서는 `NO_STRUCTURED_GRID`로 답하며, 셀 중심이 격자를 이루지
 않는 VTU도 마찬가지입니다(자를 셀 면 정보가 없음).
 
+이런 polyMesh에서도 월드 좌표 probe(`probe {point}`)가 됩니다. 서버가 그 점을 품은
+셀을 찾습니다. 면이 평평한 볼록 셀은 면마다 정확히 판정하고, 뒤틀리거나 볼록하지
+않은 셀만 그 점을 품을 수 있을 때는 중심이 가장 가까운 셀이 답하며 검사기(와
+`gui_state`의 `selection.located`)가 `nearest-centre`라고 밝힙니다. 어느 셀에도
+없는 점은 `MISS`입니다.
+
 ### 뷰어가 케이스를 옆으로 눕혀 그림
 
 케이스에 `constant/g`가 없고, 바닥 패치 이름이 `bottomWall`/`floor`/`ground`가

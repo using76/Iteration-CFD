@@ -159,6 +159,12 @@ export function fakeDatasets(): DatasetService & { opened: string[]; openedOpts:
       if (plane.origin[0] !== 0) throw new Error('NO_PLANE_CUT: the fake cuts on x = 0 only')
       return { key: 'cut.fake', id, origin: plane.origin, normal: plane.normal, triangleCount: 0 }
     },
+    // The fake locates in the unit cube only: cell 0 inside, a miss outside, refused for y < -10.
+    locate: async (_id: string, point: [number, number, number]) => {
+      if (point[1] < -10) throw new Error('NO_POINT_LOCATE: the fake refuses y < -10')
+      const inside = point.every((v) => v >= 0 && v <= 1)
+      return { point, cell: inside ? 0 : null, method: inside ? 'contains' : null, center: inside ? [0.5, 0.5, 0.5] : null }
+    },
     ensureField: async () => {
       throw new Error('not in the fake')
     },

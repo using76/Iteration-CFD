@@ -13,6 +13,7 @@ import {
   type FieldInfo,
   type GeometryBounds,
   type PlaneCutInfo,
+  type PointLocateInfo,
   type ViewerCommand,
   type ViewerErrorCode,
   type ViewerResult,
@@ -61,11 +62,17 @@ export interface ProbeHit {
   field: string | null
   /** Cell centre when known; see centerFor(). */
   center: [number, number, number] | null
+  /**
+   * How a world point found the cell, when the server located it (docs/17 STU-13): 'contains' when a
+   * convex cell holds the point exactly, 'nearest-centre' when only warped or non-convex cells could
+   * and the nearest centre among them answers. Absent for a pixel pick or a lattice lookup.
+   */
+  located?: 'contains' | 'nearest-centre'
 }
 
 export type ProbeOutcome =
   | { ok: true; hit: ProbeHit }
-  | { ok: false; code: 'NO_VIEWER' | 'NO_DATASET' | 'NO_STRUCTURED_GRID' | 'MISS'; message: string }
+  | { ok: false; code: 'NO_VIEWER' | 'NO_DATASET' | 'NO_STRUCTURED_GRID' | 'MISS' | 'LOCATE_FAILED'; message: string }
 
 type Listener = (state: ViewerState) => void
 
@@ -197,6 +204,26 @@ export class ViewerController {
     const cell = g.cellIndex(i, j, k)
     if (cell < 0) return { ok: false, code: 'MISS', message: 'the point lies inside a body (no cell there)' }
     return { ok: true, hit: { cell, value: this.valueAt(cell), field: this.field?.name ?? null, center: this.centerFor(cell, [i, j, k]) } }
+  }
+
+  /**
+   * Cell containing a world point on any dataset: the structured grid when there is one (probePoint),
+   * else the server's cells when it can locate in them (a polyMesh, docs/17 STU-13). A hit there says
+   * how it was found (`located`); a point in no cell is a MISS.
+   */
+  async locatePoint(point: [number, number, number]): Promise<ProbeOutcome> {
+    const ds = this.dataset
+    if (!ds || ds.grid || !this.loader.canLocate(ds.manifest)) return this.probePoint(point)
+    let info: PointLocateInfo
+    try {
+      info = await this.loader.locate(ds.manifest, point)
+    } catch (err) {
+      return { ok: false, code: 'LOCATE_FAILED', message: err instanceof Error ? err.message : String(err) }
+    }
+    if (this.dataset !== ds) return { ok: false, code: 'NO_DATASET', message: 'the result in the viewer changed while the point was being located' }
+    if (info.cell === null) return { ok: false, code: 'MISS', message: 'the point lies in no cell of the mesh (outside it, or in a hole)' }
+    const located = info.method === 'nearest-centre' ? 'nearest-centre' : 'contains'
+    return { ok: true, hit: { cell: info.cell, value: this.valueAt(info.cell), field: this.field?.name ?? null, center: info.center, located } }
   }
 
   /** Attach the renderer; rebuilds everything the model already holds. */
