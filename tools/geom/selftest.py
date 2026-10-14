@@ -856,6 +856,9 @@ def test_repair_zero_area_fill(top):
     assert rep['before'] == {'open_edges': 3, 'non_manifold_edges': 0,
                              'closed': False}, rep['before']
     assert rep['degenerate_dropped'] == 0 and rep['triangles_out'] == 3, rep
+    # AUT-02b: B lies on the open edge C-A, but the spoke B-D is already an
+    # edge, so the fan would cover (A, B, D) and (B, C, D) twice: not made
+    assert rep['t_junctions']['split_edges'] == 0, rep['t_junctions']
     h = rep['holes']
     assert h['filled'] == 0 and h['filled_triangles'] == 0, h
     assert len(h['unfilled']) == 1 and h['unfilled'][0]['edges'] == 3, h
@@ -1070,10 +1073,123 @@ def test_repair_g_flip_duplicate_rows(top):
                  rel(ra, pa), rel(rv, pv)), flush=True)
 
 
+def test_repair_t_junction(top):
+    """AUT-02b: a vertex lying on another triangle's open edge, within the
+    weld tolerance, splits that edge.  The cube's bottom diagonal (0,0,0)-
+    (1,1,0) is fanned on triangle 0's side only.  Case A: at its midpoint
+    (3 open edges, one insertion).  Case B: at 1/4 and 3/4 (4 open edges,
+    two insertions on one edge).  Case C: at a midpoint lifted 1e-3 off the
+    plane, far outside the 1e-6 x diagonal weld tolerance, so nothing is
+    split and the 3-edge loop is left to the hole fill."""
+    d = work(top, 'repair_t_junction')
+    cube = cube_tris()
+    A, B, C = cube[0]
+
+    def fan(pts):
+        # triangle (B, C, A) with its edge C -> A split at pts, ordered from C
+        chain = [C] + pts + [A]
+        return [(chain[i], chain[i + 1], B) for i in range(len(chain) - 1)]
+
+    cases = (('a', [(0.5, 0.5, 0.0)], 3, 1, 14),
+             ('b', [(0.75, 0.75, 0.0), (0.25, 0.25, 0.0)], 4, 2, 16))
+    for tag, pts, n_open, n_ins, n_out in cases:
+        src = os.path.join(d, 'tj_%s.stl' % tag)
+        write_stl_binary(src, fan(pts) + cube[1:], 'tj' + tag)
+        jp = os.path.join(d, tag + '.json')
+        p = repair(src, '--out', os.path.join(d, 'tj_%s_r.stl' % tag), '--json', jp)
+        rep = load(jp)
+        assert rep['before'] == {'open_edges': n_open, 'non_manifold_edges': 0,
+                                 'closed': False}, (tag, rep['before'])
+        assert rep['t_junctions'] == {'split_edges': 1, 'inserted_vertices': n_ins,
+                                      'triangles_added': n_ins, 'passes': 1}, \
+            (tag, rep['t_junctions'])
+        assert rep['stages'][3] == {'stage': 'tjunction', 'open_edges': 0,
+                                    'non_manifold_edges': 0}, (tag, rep['stages'])
+        assert rep['holes']['filled'] == 0 and rep['triangles_out'] == n_out, (tag, rep)
+        assert rep['after']['closed'] is True and \
+            rel(rep['after']['volume'], 1.0) <= 1e-9, (tag, rep['after'])
+        assert ('t-junctions: 1 edge(s) split at %d vertex insertion(s), %d '
+                'triangle(s) added' % (n_ins, n_ins)) in p.stdout, p.stdout
+    src = os.path.join(d, 'tj_c.stl')
+    write_stl_binary(src, fan([(0.5, 0.5, 1e-3)]) + cube[1:], 'tjc')
+    repair(src, '--json', os.path.join(d, 'c.json'))
+    rep = load(os.path.join(d, 'c.json'))
+    assert rep['t_junctions'] == {'split_edges': 0, 'inserted_vertices': 0,
+                                  'triangles_added': 0, 'passes': 0}, rep['t_junctions']
+    assert rep['stages'][3] == {'stage': 'tjunction', 'open_edges': 3,
+                                'non_manifold_edges': 0}, rep['stages']
+
+
+def test_repair_g_t_junction_rows(top):
+    """AUT-02b: the 14 family-G t_junction tuning rows.  Each closed row
+    equals its regenerated parent in area and divergence-theorem volume to
+    1e-9 relative and carries parent + 2 x count triangles: the injection
+    split one side of each site's edge, and the repair splits the other
+    side once (count edges, count insertions, count added), with no hole
+    filled.  The plan's gate is >= 13/14 closed with each residual named;
+    14/14 closed was measured (2026-10-14), so a row left open is named
+    and fails the test."""
+    base = os.path.dirname(GEOM_TOOL)
+    for rel_p in ('../autonomy', '../autonomy/corpus'):
+        p = os.path.abspath(os.path.join(base, rel_p))
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import hashlib
+    import importlib
+    import stl_io
+    import stl_repair as sr
+    import inject, split
+    parent = {'A': 'gen_wing', 'B': 'gen_lathe', 'D': 'gen_bluff',
+              'E': 'gen_gap', 'F': 'gen_thin'}
+    rows = [r for r in split.load('tuning', 'fixture')
+            if r['family'] == 'G' and r['params']['defect'] == 't_junction']
+    assert len(rows) == 14, len(rows)
+    d = work(top, 'g_t_junction')
+    open_rows = []
+    for row in rows:
+        params, gid = row['params'], row['geometry_id']
+        stl = inject.write_row(row, d)
+        out = os.path.join(d, gid + '_r.stl')
+        jp = os.path.join(d, gid + '.json')
+        repair(stl, '--out', out, '--json', jp)
+        rep = load(jp)
+        tj = rep['t_junctions']
+        if rep['after']['closed'] is not True:
+            open_rows.append('%s n=%d: open %d -> %d, t_junctions %s'
+                             % (gid, params['count'], rep['before']['open_edges'],
+                                rep['after']['open_edges'], tj))
+            print('  [aut02b] OPEN ' + open_rows[-1], flush=True)
+            continue
+        pgen = importlib.import_module(parent[params['parent_family']])
+        pp = pgen.sample_params(params['parent_seed'], params['parent_index'])
+        P, T = pgen.build(pp)
+        data = stl_io.stl_bytes(P, T, pgen.SOLID)
+        assert hashlib.sha256(data).hexdigest() == params['parent_sha256'], gid
+        ppath = os.path.join(d, gid + '_parent.stl')
+        with open(ppath, 'wb') as f:
+            f.write(data)
+        ptris, _ = sr.read_stl(ppath, gid + '_parent')
+        rtris, _ = sr.read_stl(out, gid)
+        assert rep['before']['open_edges'] == 3 * params['count'], (gid, rep['before'])
+        assert tj['split_edges'] == tj['inserted_vertices'] == \
+            tj['triangles_added'] == params['count'], (gid, tj)
+        assert rep['holes']['filled'] == 0, (gid, rep['holes'])
+        assert rep['triangles_out'] == len(ptris) + 2 * params['count'], \
+            (gid, rep['triangles_out'], len(ptris))
+        pa, pv = _area_volume(ptris)
+        ra, rv = _area_volume(rtris)
+        assert rel(ra, pa) <= 1e-9 and rel(rv, pv) <= 1e-9, \
+            (gid, 'area', ra, pa, 'vol', rv, pv)
+        print('  [aut02b] %s n=%d: open %d -> 0, %s, rel area %.2e vol %.2e'
+              % (gid, params['count'], rep['before']['open_edges'], tj,
+                 rel(ra, pa), rel(rv, pv)), flush=True)
+    assert not open_rows, open_rows
+
+
 def test_repair_g_defects_red(top):
     """AUT-01 (docs/17 §12.6): every G fixture reports exactly its 'today'
-    counts - the RED ones stay open, the GREEN ones (duplicate and flip,
-    since AUT-02a) close."""
+    counts - the RED ones stay open, the GREEN ones (duplicate and flip
+    since AUT-02a, t_junction since AUT-02b) close."""
     base = os.path.dirname(GEOM_TOOL)
     for rel in ('../autonomy', '../autonomy/corpus'):
         p = os.path.abspath(os.path.join(base, rel))
@@ -1125,7 +1241,7 @@ def test_repair_g_defects_red(top):
                  'true' if t['repaired'] else 'false'), flush=True)
 
 
-TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill, test_repair_duplicates, test_repair_flip_patch, test_repair_g_flip_duplicate_rows, test_repair_g_defects_red)
+TESTS = (test_info_two_boxes, test_export_round_trip, test_sidecar_names, test_iges_surfaces_only, test_stl_discrete, test_refusals, test_edit_refusals, test_edit_cut_closed_form, test_edit_fragment_three_pieces, test_edit_rename_round_trip, test_edit_transforms, test_repair_weld, test_repair_hole3, test_repair_flip, test_repair_inward, test_repair_patch_identity, test_repair_reports_unrepairable, test_repair_racecar, test_repair_refusals, test_repair_fill_guard, test_repair_orient_cost, test_repair_hole4, test_repair_hole_bent, test_repair_orient_partner, test_repair_zero_area_fill, test_repair_duplicates, test_repair_flip_patch, test_repair_g_flip_duplicate_rows, test_repair_t_junction, test_repair_g_t_junction_rows, test_repair_g_defects_red)
 
 
 def main(argv=None):

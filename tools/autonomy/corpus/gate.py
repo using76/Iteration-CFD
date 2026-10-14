@@ -203,9 +203,20 @@ def _check_row_g_counts(row, stl_path, binary, scratch, params, exp, rep,
         for field, got, want in pairs:
             if got != want:
                 er.append("%s = %r != %r" % (field, got, want))
+        # stl_repair splits a T-junction before the hole fill (AUT-02b), so
+        # the 3-edge loop the injector walks at each t_junction site comes
+        # back as one split edge in t_junctions, never as a hole; every
+        # other class must split none
         holes = sorted(h["edges"] for h in rep["holes"]["per_hole"])
-        if holes != exp["per_hole"]:
-            er.append("per_hole = %r != %r" % (holes, exp["per_hole"]))
+        tj = rep["t_junctions"]["split_edges"]
+        if params["defect"] == "t_junction":
+            want_holes, want_tj = [], len(exp["per_hole"])
+        else:
+            want_holes, want_tj = exp["per_hole"], 0
+        if holes != want_holes:
+            er.append("per_hole = %r != %r" % (holes, want_holes))
+        if tj != want_tj:
+            er.append("t_junctions.split_edges = %r != %r" % (tj, want_tj))
         if params["defect"] == "near_duplicate":
             if not (0 < w["max_move"] <= 0.5 * w["tol_abs"]):
                 er.append("weld.max_move = %r not in (0, 0.5 * tol_abs %r]"

@@ -15,7 +15,9 @@ What is repaired, in order: a bit-exact weld is measured first, duplicate
 corners are welded at a tolerance (a coordinate a cluster already had is
 kept), degenerate triangles are dropped, verbatim duplicate facets are
 removed - exact copies, and coincident opposite pairs unless one of the
-two runs against the surrounding surface - and each component is oriented
+two runs against the surrounding surface - a vertex lying on another
+triangle's open edge within the weld tolerance splits that edge (a
+T-junction), and each component is oriented
 patch by patch: a patch is a maximal set of triangles joined by edges the
 input uses twice in opposite directions, so the windings inside a patch
 already agree, and a reached patch is flipped whole when more of its
@@ -336,6 +338,114 @@ def _dedup(T, tri_patch, nP):
                 keep2[j] = False             # i wins; a tie keeps the lower row
     n_opposite = int(np.count_nonzero(~keep2))
     return T2[keep2], patch2[keep2], n_exact, n_opposite
+
+
+# --- T-junctions (AUT-02b) -------------------------------------------------
+
+TJ_MAX_PASSES = 16
+
+
+def _split_t_junctions(T, P, tri_patch, nP, tol_abs):
+    """(T, tri_patch, stats): a vertex lying on another triangle's edge,
+    within the weld tolerance, splits that edge.  Only OPEN edges (one use)
+    and only boundary vertices (an endpoint of an open edge) take part, so
+    a closed surface is returned untouched.  Vertex m splits the open edge
+    (a, b) of triangle (a, b, c) iff m is none of a, b, c, its parameter
+    s = (m - a).(b - a) / |b - a|^2 lies in (0, 1), its distance to
+    a + s (b - a) is <= tol_abs, and it is farther than tol_abs from a and
+    from b.  The hits sorted by s, a = q_0, q_1 .. q_k, q_k+1 = b, replace
+    the triangle in place by the fan (q_i, q_i+1, c), which keeps its
+    winding and its patch.  A triangle splits at most one edge per pass
+    (its lowest corner with a hit).  A fan is not made when one of its
+    triangles has an exactly-zero cross product, when one of its new
+    spokes (q_i, c), 1 <= i <= k, is already an edge (it would lay a
+    triangle over one already there, as around a collinear sliver), or
+    when a sub-edge (q_i, q_i+1) already has two uses - the uses counted
+    on the pass's input plus the fans planned before it in the pass, the
+    rule the hole fill applies, so no edge ends with three.  Passes repeat
+    until none splits (at most TJ_MAX_PASSES).  stats counts the split
+    edges, the vertex insertions, the triangles added and the passes that
+    split."""
+    stats = {'split_edges': 0, 'inserted_vertices': 0,
+             'triangles_added': 0, 'passes': 0}
+    for _ in range(TJ_MAX_PASSES):
+        if len(T) == 0:
+            break
+        a, b, key = _edge_key(T, nP)
+        uk, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
+        inv = np.asarray(inv).reshape(-1)
+        open_c = np.nonzero(counts[inv] == 1)[0]     # flat corner 3 t + k
+        if len(open_c) == 0:
+            break
+        bverts = np.unique(np.concatenate((a[open_c], b[open_c])))
+        tree = cKDTree(P[bverts])
+        uses = dict(zip(uk.tolist(), counts.tolist()))   # undirected edge -> uses
+        ekey = lambda p, q: min(p, q) * nP + max(p, q)
+        plan = {}
+        for e in open_c.tolist():
+            t, k = divmod(e, 3)
+            if t in plan:
+                continue
+            ia, ib, ic = int(a[e]), int(b[e]), int(T[t, (k + 2) % 3])
+            pa, pb = P[ia], P[ib]
+            d = pb - pa
+            L2 = float(d @ d)
+            if L2 == 0.0:
+                continue
+            hits = []
+            for j in sorted(tree.query_ball_point(0.5 * (pa + pb),
+                                                  0.5 * math.sqrt(L2) + tol_abs)):
+                m = int(bverts[j])
+                if m in (ia, ib, ic):
+                    continue
+                pm = P[m]
+                s = float((pm - pa) @ d) / L2
+                if not 0.0 < s < 1.0:
+                    continue
+                if np.linalg.norm(pm - (pa + s * d)) > tol_abs:
+                    continue
+                if np.linalg.norm(pm - pa) <= tol_abs or \
+                        np.linalg.norm(pm - pb) <= tol_abs:
+                    continue
+                hits.append((s, m))
+            if not hits:
+                continue
+            hits.sort()
+            chain = [ia] + [m for _, m in hits] + [ib]
+            fan = [(chain[i], chain[i + 1], ic) for i in range(len(chain) - 1)]
+            if any(np.all(np.cross(P[q1] - P[q0], P[qc] - P[q0]) == 0.0)
+                   for q0, q1, qc in fan):
+                continue
+            spokes = [ekey(m, ic) for _, m in hits]
+            subs = [ekey(q0, q1) for q0, q1, _ in fan]
+            if any(uses.get(x, 0) for x in spokes) or \
+                    any(uses.get(x, 0) >= 2 for x in subs):
+                continue
+            for x in spokes:
+                uses[x] = 2
+            for x in subs:
+                uses[x] = uses.get(x, 0) + 1
+            uses[ekey(ia, ib)] -= 1
+            plan[t] = fan
+        if not plan:
+            break
+        rows, patches = [], []
+        for t in range(len(T)):
+            pieces = plan.get(t)
+            if pieces is None:
+                rows.append(T[t])
+                patches.append(tri_patch[t])
+            else:
+                rows.extend(np.array(f, dtype=np.int64) for f in pieces)
+                patches.extend([tri_patch[t]] * len(pieces))
+        added = sum(len(f) - 1 for f in plan.values())
+        T = np.array(rows, dtype=np.int64).reshape(-1, 3)
+        tri_patch = np.array(patches, dtype=tri_patch.dtype)
+        stats['split_edges'] += len(plan)
+        stats['inserted_vertices'] += added
+        stats['triangles_added'] += added
+        stats['passes'] += 1
+    return T, tri_patch, stats
 
 
 def _orient(T, P, nP):
@@ -758,6 +868,8 @@ def run_repair(args):
     weld_stage = _defects(T, nP)
     T, patch_k, n_exact, n_opposite = _dedup(T, patch_k, nP)
     dedup_stage = _defects(T, nP)
+    T, patch_k, tj = _split_t_junctions(T, P, patch_k, nP, tol_abs)
+    tj_stage = _defects(T, nP)
     flip3, left_alone, alone_reasons, reseeded = _orient(T, P, nP)
     orient_stage = _defects(T, nP)
     T, tri_patch, filled, filled_tris, unfilled, per_hole = _fill_holes(
@@ -771,6 +883,8 @@ def run_repair(args):
          'non_manifold_edges': weld_stage[1]},
         {'stage': 'dedup', 'open_edges': dedup_stage[0],
          'non_manifold_edges': dedup_stage[1]},
+        {'stage': 'tjunction', 'open_edges': tj_stage[0],
+         'non_manifold_edges': tj_stage[1]},
         {'stage': 'orient', 'open_edges': orient_stage[0],
          'non_manifold_edges': orient_stage[1]},
         {'stage': 'fill', 'open_edges': after_open,
@@ -810,6 +924,7 @@ def run_repair(args):
            'degenerate_dropped': dropped,
            'duplicates': {'exact_removed': n_exact,
                           'opposite_removed': n_opposite},
+           't_junctions': tj,
            'weld': dict({'tol_rel': args.weld, 'tol_abs': tol_abs,
                          'points_raw': 3 * n_in}, **wst),
            'orientation': {'reoriented_triangles': flip3,
@@ -837,6 +952,8 @@ def run_repair(args):
                      % (wst['merged'], tol_abs, args.weld, diag, wst['max_move'], dropped))
     sys.stdout.write('  duplicates: %d exact, %d opposite-coincident removed\n'
                      % (n_exact, n_opposite))
+    sys.stdout.write('  t-junctions: %d edge(s) split at %d vertex insertion(s), %d triangle(s) added\n'
+                     % (tj['split_edges'], tj['inserted_vertices'], tj['triangles_added']))
     sys.stdout.write('  orient: %d triangle(s) reoriented, %d left alone, %d patch(es) re-seeded, %d component(s) flipped outward\n'
                      % (flip3, left_alone, reseeded, len(flipped_set)))
     ear_tris = sum(h['triangles'] for h in per_hole

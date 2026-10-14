@@ -1,5 +1,5 @@
 {
- "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. AUT-01 (docs/17 §12.6): one RED fixture per family-G defect class that ends SURFACE-OPEN today. Each names a tuning row of tools/autonomy/corpus/manifests/tuning.jsonl; the STL is rebuilt by inject.write_row from that row's params (sha256-checked) and repaired by stl_repair with default options. 'today' is the measured stl_repair report on 2026-10-11 at feat/t17 7fd775c. Selection: per class, the tuning G row of that class whose repaired surface is still open, with the fewest STL bytes; the hole class only among 33..64 edges. AUT-02a (2026-10-13): the duplicate and flip fixtures are green, re-measured with duplicate removal and patch orientation.",
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted. AUT-01 (docs/17 §12.6): one RED fixture per family-G defect class that ends SURFACE-OPEN today. Each names a tuning row of tools/autonomy/corpus/manifests/tuning.jsonl; the STL is rebuilt by inject.write_row from that row's params (sha256-checked) and repaired by stl_repair with default options. 'today' is the measured stl_repair report on 2026-10-11 at feat/t17 7fd775c. Selection: per class, the tuning G row of that class whose repaired surface is still open, with the fewest STL bytes; the hole class only among 33..64 edges. AUT-02a (2026-10-13): the duplicate and flip fixtures are green, re-measured with duplicate removal and patch orientation. AUT-02b (2026-10-14): the t_junction fixture is green, re-measured with T-junction splitting (open 12 -> 0).",
  "schema": "g-defect-fixtures/1",
  "manifest": "tools/autonomy/corpus/manifests/tuning.jsonl",
  "fixtures": [
@@ -53,14 +53,14 @@
    "geometry_id": "G-1-119",
    "count": 4,
    "stl_sha256": "dc8c1606b68a6429b23ea467453671401825e63e2c93d3528a86204c999c747e",
-   "status": "red",
+   "status": "green",
    "today": {
     "open_before": 12,
     "non_manifold_before": 0,
-    "open_after": 9,
+    "open_after": 0,
     "non_manifold_after": 0,
-    "closed_after": false,
-    "repaired": false
+    "closed_after": true,
+    "repaired": true
    }
   }
  ]
