@@ -36281,9 +36281,10 @@ p encroaches segment [a, b]   iff   (p - a) . (p - b) < 0     (strictly inside i
 p encroaches triangle t       iff   | p - c_t | < r_t           (c_t, r_t: circumcentre and circumradius of t)   (116.15)
 ```
 
-An encroached or missing segment is split. An encroached or missing triangle is split at its
-circumcentre, unless that point would encroach a segment, in which case the segment is split
-instead.
+A missing segment is split; a segment that is present but encroached is counted, and TET-09
+splits it before it inserts interior points (changed by TET-07a, see "The edge recovery, as
+TET-07a builds it" below). An encroached or missing triangle is split at its circumcentre,
+unless that point would encroach a segment, in which case the segment is split instead.
 
 **Small angles.** Where two input segments, or a segment and a facet, meet at an angle below
 `recover.protect_angle_deg`, the shared vertex `v` gets a protecting ball (Cohen-Steiner,
@@ -36300,6 +36301,105 @@ termination test asserts that the cap is never reached on its fixtures.
 **Schönhardt's twisted prism** (Schönhardt 1928) cannot be tetrahedralised without a new
 point. TET-07b's gate is that it recovers with at least one Steiner point. Every Steiner point
 lies on its facet within `1e-12 h`.
+
+**The edge recovery, as TET-07a builds it.** The input is a closed triangulated surface (the
+remesh of §116.10) and its feature edges. The **segments** are every undirected edge of its
+triangles, `[min, max]`, ascending. The input's **features** are the feature edges. Its
+**facets** are the regions of triangles joined across every edge that is not a feature edge.
+The angles of the small-angle rule are measured at a vertex `v` with a feature edge, for each
+feature edge `s = [v, w]`, `d = w - v`:
+
+```
+cos(s, s')   = d . d' / (|d| |d'|)                for every other feature edge s' = [v, w'] at v   (116.15a)
+cos(s, R)    = sqrt(1 - sin^2),  sin = |d . n| / (|d| |n|),   n = e1 x e2,
+               if the projection d_p = d - (d . n) n / |n|^2 has (e1 x d_p) . n >= 0 and (d_p x e2) . n >= 0,
+               else max(cos(d, e1), cos(d, e2)),
+               maximised over the triangles (v, a, b) of R, e1 = a - v, e2 = b - v,
+               for every facet R at v that holds no triangle with the edge s                      (116.15b)
+```
+
+`v` is **protected** when the largest of these cosines exceeds `cos(recover.protect_angle_deg)`,
+which is taken as exactly 0 at the default 90 degrees, so an exact right angle (a dot product
+of exactly 0, as on an axis-aligned cube) is not below 90. (116.15b)'s cosine is formed from
+`sin` rather than from `|d_p|`, because the projection of a ray normal to the facet keeps the
+rounding of `d - k n` and would protect every cube corner; the first build did, and the
+cube's own test caught it. The ball radius confirms the DESIGN above:
+
+```
+r_v = (1/3) min( min |w - v| over the surface edges [v, w],
+                 min dist(v, t) over the triangles t that do not contain v )                      (116.15c)
+```
+
+`dist` is `sizefield::point_triangle_distance`. A radius that is not positive and finite (a
+triangle not on `v` touches it) is the refusal `recover/protect`. Every surface edge
+`[v, w]` from a protected vertex, feature or not, gets one Steiner point on the ball's surface,
+computed from the vertex side:
+
+```
+x = v + s (w - v),   s = r_v / |w - v|   (s <= 1/3 by (116.15c))                                 (116.15d)
+```
+
+Every point carries its parameter `t` on its parent edge `[p, q]` (`s`, or `1 - s` when `v = q`).
+A **pass** triangulates every point with `Delaunay::build_brio` (§116.6-§116.7) and takes the
+edge set of its finite tetrahedra. A subsegment `[a, b]` of a chain that is not in that set is
+**missing**, and is split at
+
+```
+t = (t_a + t_b) / 2,   x = p + t (q - p)                                                        (116.15e)
+```
+
+the midpoint of its parameter interval, so every Steiner point lies on its input edge to
+rounding. A split whose `t` does not lie strictly between `t_a` and `t_b` is the refusal
+`recover/split`. Next to a protected vertex the splits fall at `r_v / 2^k` on every incident
+edge alike, which are the concentric shells. The new points of a pass are numbered in (edge,
+position) order. A pass that finds no missing subsegment ends the recovery, and `passes`
+counts the triangulations built, that last one included. A pass at `recover.max_passes` that
+still finds one is the refusal `recover/cap: m of n subsegments missing after k passes, first
+[a, b]`. The cap is exact: a run that needs `k` passes succeeds with `max_passes = k` and
+refuses with `k - 1`.
+
+**Why an encroached segment is counted, not split.** Take two segments from `v` at angle
+`theta`, of lengths `l_1` and `l_2`. The midpoint of the first encroaches the second (116.15)
+iff `l_1 < 2 l_2 cos(theta)`. The midpoint of the second then encroaches the first's half
+iff `l_2 < l_1 cos(theta)`, and the next split repeats the first condition. Both hold together
+when `cos^2(theta) > 1/2`, so below 45 degrees encroachment splitting ping-pongs toward `v`
+without end for any length ratio `l_1 / l_2` in `(1/cos(theta), 2 cos(theta))`. A triangulated
+surface has angles between 25 and 45 degrees at many vertices (§116.10 bounds them below at 25
+only), so splitting every encroached subsegment would need a ball at almost every vertex.
+Splitting only missing subsegments recovers every edge, and the end state reports how many
+present subsegments are still encroached. A Delaunay edge's diametral ball is empty iff it
+holds none of the edge's link vertices (its midpoint lies in its Voronoi face, whose sides are
+the link's bisectors), so the count tests the link only. TET-09's refinement splits those
+before it inserts interior points.
+
+`recover::recover_edges(surface, feature_edges, spec)` returns the points (the input's bit for
+bit, then the Steiner points), the edges, each edge's chain of point ids, each Steiner point's
+edge and parameter, the protected vertices with their radii and smallest input angles, the
+ball and split Steiner counts, the passes, the encroached count and the final triangulation.
+`recover_remeshed` takes a `Remeshed`. The spec's two bounds are refused with `TetSpec`'s
+messages. A triangle index out of range, a repeated index and a feature edge that is not a
+surface edge are refused as `recover/input`.
+
+The gate definitions (TET-07a):
+
+- **recovered**: every subsegment of every chain is an edge of the final triangulation's finite
+  tetrahedra, counted from that triangulation independently of the pass loop: 100 %;
+- **cap**: `passes` is below `recover.max_passes` (64);
+- **protected**: the cube (one patch per face, `h = 0.1`) has no protected vertex. The 30 degree
+  wedge has its 6 corners, at 30, 75 and 75 degrees (within 1e-9 degrees). The 10 degree spike
+  (three unit apex edges meeting pairwise at 10 degrees over an equilateral base at `z = 0`) has
+  its 4 corners, at `asin(1.5 rho cos(phi))` = 8.67 degrees at the apex (an apex edge against
+  the opposite face) and `asin(sin(60) cos(phi))` = 59.87 degrees at a base corner, where
+  `rho = sqrt(2 (1 - cos 10) / 3)` is the base circumradius and `phi = atan(rho / (2 h))` the
+  side faces' lean. Each ball point lies at `r_v` from its vertex within 1e-12 relative;
+- **on the edge**: each Steiner point lies within `1e-12 |q - p|` of `p + t (q - p)`;
+- **refusals**: `recover/cap` on the rhombus pyramid with `max_passes = 1`. Its points are
+  `A (-2,0,0)`, `B (0.3,-1,0)`, `C (2,0,0)`, `D (-0.2,1,0)` and `E (0,0,-1)`, and its top is
+  split along `A C`. A sphere through `A` and `C` has its centre at `(0, y, z)`, and it leaves
+  `B` out only for `y > 1.455` and `D` out only for `y < -1.48`, so `A C` is in no Delaunay
+  triangulation. With `max_passes = 2` the one Steiner point is `(0, 0, 0)` and 10 of 10
+  subsegments are present. `recover/protect`, `recover/input` and the two spec bounds are
+  refused by name.
 
 ### 116.12 Carving
 
@@ -36604,6 +36704,16 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-06b | the first build, which had (116.14f)-(116.14j) only | it passed every gate at `h = 0.1` after 10 iterations and failed the probe's sweep: one triangle with `|n| / L^2` of 1.7e-16 on the rotated cube (`h = 0.07`, 3 iterations), 5.9e-17 on the rotated wedge (`h = 0.13`, 3 iterations) and 1.7e-16 on the cylinder (`h = 0.2`, 2 iterations, with 5 cut triangles); on the cylinder at `h = 0.07` after 7 iterations one cut triangle of 10.1 degrees made `Q` find 2 corners and 300 feature edges against the tables' 299; on the rotated cylinder at `h = 0.07` after 11 iterations `Q` found 291 against 292. Each was three points of one feature line made into a triangle by a flip or a collapse. (116.14k) and (116.14l) were added for it, and the five runs are tests | the TET-06b commit |
 | TET-06b | the f32 arm | `rust/tests/tetmesh_remesh.rs`, 5 tests (the two of TET-06a, the cube with a patch per face, the wedge, the five named runs), pass under `--features single` with the same printed numbers as the f64 build | the TET-06b commit |
 | TET-06b | the whole `tetmesh::` test filter, release | 92 tests, and the 10^6 run ignored | the TET-06b commit |
+| TET-07a | §116.11, changed by this unit | the sentence "An encroached or missing segment is split" now splits a missing subsegment and counts a present encroached one, for TET-09 to split (the 45 degree ping-pong argument); the paragraph "The edge recovery, as TET-07a builds it", (116.15a)-(116.15e) and the gate definitions were added; the ball radius of the DESIGN text is confirmed as (116.15c) | the TET-07a commit |
+| TET-07a | the cube with a patch per face at `h = 0.1` (691 points, 2 067 edges), the default spec (90 degrees, 64 passes) | 2 067 of 2 067 subsegments present after 1 pass; 0 protected vertices; 0 Steiner points; 1 present subsegment encroached | the TET-07a commit |
+| TET-07a | the 30 degree wedge at `h = 0.1` (343 points, 1 023 edges) | 1 058 of 1 058 subsegments present after 2 passes; the 6 corners protected at 30, 75 and 75 degrees; 35 Steiner points (34 on balls, 1 split); 15 encroached | the TET-07a commit |
+| TET-07a | the 10 degree spike at `h = 0.1` (46 points, 132 edges) | 155 of 155 subsegments present after 2 passes; the 4 corners protected at 8.67 degrees (apex) and 59.87 degrees (base), each ball point at `r_v` within 1e-12 relative; 23 Steiner points (18 on balls, 5 split); 37 encroached | the TET-07a commit |
+| TET-07a | the L-shaped prism at `h = 0.2` (393 points, 1 173 edges), not a plan gate | 1 177 of 1 177 subsegments present after 3 passes; no protected vertex; 4 split Steiner points; 12 encroached; with `max_passes = 2` the refusal `recover/cap: 1 of 1176 subsegments missing after 2 passes, first [40, 141]`, with 3 the same points | the TET-07a commit |
+| TET-07a | termination: the cube, wedge, spike and prism at `h` = 0.05, 0.07, 0.1, 0.13 and 0.2 (20 runs), not a plan gate | every run 100 %; at most 8 passes against the cap of 64; 562 Steiner points in all | the TET-07a commit |
+| TET-07a | the rhombus pyramid (`A C` in no Delaunay triangulation) | `max_passes = 1`: `recover/cap: 1 of 9 subsegments missing after 1 passes, first [0, 2]`; `max_passes = 2`: one Steiner point `(0, 0, 0)` bit for bit, 10 of 10 present | the TET-07a commit |
+| TET-07a | the first build's one failure | (116.15b) took the cosine as `norm(d_p) / norm(d)`, whose rounding protected 4 of the cube's 8 corners after the remesh; `edges_cube` caught it, and the cosine is now `sqrt(1 - sin^2)` | the TET-07a commit |
+| TET-07a | the f32 arm | `rust/tests/tetmesh_recover.rs`, 3 tests (the `Scalar` width; cube, wedge, spike and prism; the two cap refusals) pass under `--features single` with every printed number identical to the f64 build | the TET-07a commit |
+| TET-07a | the whole `tetmesh::` test filter, release | 100 tests in 43.7 s with 2 threads, and the 10^6 run ignored | the TET-07a commit |
 
 ### 116.19 References
 

@@ -46,6 +46,7 @@ pub mod order;
 pub mod sizefield;
 pub mod surfprep;
 pub mod remesh;
+pub mod recover;
 
 /// A vertex coordinate: `[f64; 3]` in both builds, whatever `Scalar` is
 /// (§116.2). Sizes and lengths are `f64` too; no `tetmesh` function takes
