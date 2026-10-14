@@ -35473,7 +35473,7 @@ default, so `"tet": {}` is a complete block.
 | `recover.protect_angle_deg` | `90` | input angles below this get a protecting ball | §116.11 |
 | `recover.max_passes` | `64` | the cap on recovery passes. It is reported, never silently passed | §116.11 |
 | `refine.radius_edge` | `2` | `B` of (116.17) | §116.13 |
-| `refine.size_factor` | `sqrt(6)/4` | `c` of (116.18): the circumradius of the regular tetrahedron with edge `h` is `c h` | §116.13 |
+| `refine.size_factor` | `0.8` | `c` of (116.18): a kept tetrahedron's circumradius is at most `c h`. `0.8` is TET-09's measured value (§116.13); the regular tetrahedron's `sqrt(6)/4` was the first default | §116.13 |
 | `refine.max_inserted_points` | `50000000` | the cap on refinement insertions. It is reported, never silently passed | §116.13 |
 | `optimise.passes` | `8` | the number of flip/smooth alternations (§92.4's R1 and R2) | §116.14 |
 | `optimise.target_min_dihedral_deg` | `10` | the optimiser's goal for the smallest dihedral angle | §116.14 |
@@ -36775,15 +36775,133 @@ triangle or segment is split instead, first. Shewchuk (1998) proves termination 
 exception. Tetrahedra next to them are counted and reported, never hidden.
 `refine.max_inserted_points` caps the loop. Hitting it is a refusal.
 
-The default `c = sqrt(6)/4` is DESIGN. It is the circumradius of the regular tetrahedron of
-edge `h`. TET-09 measures the mean `edge / h(x)` against its band and records any changed
-default here with that measurement.
+The first default `c = sqrt(6)/4` was DESIGN. It is the circumradius of the regular
+tetrahedron of edge `h`. TET-09 measures the mean `edge / h(x)` against its band and records any
+changed default here with that measurement. **Changed by TET-09: the default is `c = 0.8`**
+(DESIGN, measured; see "The size factor, as TET-09 measured it" below).
 
 The predicted count uses the regular tetrahedron's volume, `h^3 / (6 sqrt 2)`:
 
 ```
 N_pred = 1.1 * integral over Omega of  dV / ( h(x)^3 / (6 sqrt 2) )                         (116.20)
 ```
+
+**The refinement, as TET-09 builds it.** `refine::refine(surface, recovery, start, spec, h)`
+takes a face recovery of §116.11, the surface it was built from, the carve start of §116.12 and
+the size field. The domain box is among the points as its eight corners, as in §116.12. The box
+is the bounding box of the points, and a missing corner is the refusal `refine/box`, because the
+convex hull is then not the box. The triangulation is updated by insertion and never rebuilt.
+The perturbed Delaunay triangulation is unique (§116.6), so it always equals a fresh build of the
+same points. Each **pass** takes the first of these steps that has work:
+
+1. **Conformity.** Each input triangle is re-triangulated in its frame by (116.15f). A
+   subsegment that is not an edge is split, and then a subtriangle that is not a face is split
+   by (116.15h). This repairs anything an insertion removed.
+2. **Encroachment, first** (Shewchuk 1998). A present subsegment with a link vertex strictly
+   inside its diametral ball is split. Next, a present subtriangle with an apex strictly inside
+   its diametral ball is split by (116.15h). These are the counts that §116.11 handed to this
+   unit.
+3. **Quality.** The carve of §116.12 names the kept tetrahedra. Each kept tetrahedron that
+   violates (116.17) or (116.18) is a candidate. The candidates are ordered worst first by
+   `max(rho / B, R / (c h(x_T)))`, with ties broken by slot. Take the candidate's circumcentre
+   `x` from (116.19).
+   - If `x` is not strictly inside the box, the box face is split instead. That face is the hull
+     face on the plane of the largest excess that holds the projection of `x`.
+   - Otherwise its **cavity** is built: every tetrahedron in conflict with `x` by (116.5a). If
+     `x` encroaches (116.15) a subsegment that is an edge of the cavity, those subsegments are
+     split. Otherwise, if it encroaches a subtriangle that is a face of the cavity, or the cavity
+     holds both tetrahedra of a subtriangle (inserting `x` would remove it), those are split by
+     (116.15h). Otherwise, if it encroaches a hull face of the cavity, that box face is split.
+   - Otherwise `x` is accepted, unless its cavity meets a tetrahedron marked earlier in the pass.
+     In that case it is deferred to a later pass. Accepting `x` marks its cavity and every
+     neighbour of the cavity.
+
+   The neighbour layer is what makes the pass equal to inserting its points one by one. Each new
+   tetrahedron around an accepted point `x` has a circumsphere in the pencil of one cavity boundary
+   face `f`. That sphere lies between the ball of the cavity tetrahedron on `f` and the ball of
+   the outer neighbour across `f`: `x` is inside the first and not inside the second. So its ball
+   lies inside the union of those two balls. A later point that conflicts with a new tetrahedron
+   therefore conflicts with a marked one, and its connected conflict region holds that marked
+   tetrahedron.
+
+The accepted points are inserted first, in the order they were accepted, so each one takes the id
+its cavity was computed with. The splits come next. A box face is split at its circumcentre with
+the plane coordinate set exactly, unless that point encroaches a box subsegment (a hull edge on a
+box edge), which is then split at its midpoint, exactly on its line. A box face whose
+circumcentre falls outside its rectangle gets its centroid instead. A subsegment `[a, b]` of edge
+`[p, q]` (length `L`, chain parameters `t_a < t_b`) is split on a **concentric shell** (Ruppert
+1995) when exactly one of its ends is an input vertex that is not protected:
+
+```
+s = 2^k,  k = ceil( log2( (t_b - t_a) L / 3 ) ),   t = t_a + s / L   (end p),   t = t_b - s / L   (end q)
+otherwise t = (t_a + t_b) / 2, which is (116.15e)                                         (116.20a)
+```
+
+This keeps the split in `[len/3, 2 len/3)`. Two subsegments from one vertex then split on the
+same radii, so a split on one does not encroach the other's piece next to the vertex. A protected
+vertex keeps the midpoints of (116.15e), whose shells are `r_v / 2^k`. A split whose `t` does not
+lie strictly between `t_a` and `t_b` is the refusal `refine/split`.
+
+**Small angles between unprotected segments.** Every surface edge is a segment (§116.11), and only
+angles at feature edges are protected. Shewchuk 1998's termination proof needs every input angle
+at 90 degrees or more, so it does not cover the remeshed surface. There the triangles meet at 25
+degrees or more inside nearly flat facets (§116.10). The remeshed fixtures terminate. An input
+that is not remeshed does not: the cube `[-0.5, 0.5]^3`, two triangles per face, in `[-1, 1]^3`
+at `h = 0.4` (its diagonals meet the face edges at 45 degrees) cascades. It reached 67 289 points
+after 91 passes, against about 930 predicted tetrahedra, and the cap is what ends it. The same
+cube remeshed at `h = 0.4` ends after 25 passes with 1 495 kept tetrahedra. The pipeline always
+remeshes first (§116.3), so this is recorded, not cured. The cures (facets as unions of coplanar
+triangles, or protection at every angle below 90 degrees) change §116.11 and are left for review.
+
+**Exempt tetrahedra.** A violating tetrahedron is exempt when one of its vertices, or its
+circumcentre, lies in a closed protecting ball, `|x - v| <= r_v (1 + 1e-9)`, where `r_v` is
+(116.15c). Exempt tetrahedra are never split. `Refined::exempt` lists them as indices into the
+kept tetrahedra, and `Refined::balls` lists the balls.
+
+**The end and the cap.** A pass with no work ends the loop, and it returns the final carve with
+every subsegment an edge and every subtriangle a face. A pass with work that schedules no point is
+the refusal `refine/stall`. `refine.max_inserted_points` bounds every inserted point, of every
+kind. A pass that would pass it is the refusal `refine/cap: n points inserted after k passes, the
+next pass needs m more, cap N`. The cap is exact: a run that inserts `n` points succeeds with
+`N = n` and refuses with `n - 1`. Other refusals are by name: a size that is not finite and
+positive (`refine/h`), a kept tetrahedron without a finite circumcentre (`refine/centre`), a
+chain point that is not an edge site (`refine/input`), a facet that cannot be triangulated
+(`refine/facet`), and the spec's three
+bounds with `TetSpec`'s messages. A refinement point off the surface is the recovery's new site
+`SteinerSite::Volume`.
+
+The gate measures (TET-09):
+
+```
+violators  = #{ kept T : rho(T) > B  or  R(T) > c h(x_T),  T not exempt }   = 0
+m_edge     = (1 / |E|) sum_{e in E} |e| / h(m_e),   E = the kept tetrahedra's unique edges,
+             m_e = the edge's midpoint                                                   (116.20b)
+N_pred     = 1.1 sum_{T kept} V_T / ( h(g_T)^3 / (6 sqrt 2) ),   g_T = the centroid       (116.20c)
+```
+
+(116.20c) is (116.20) by the midpoint rule on the kept tetrahedra themselves. The fixture is the
+sphere in a box. It is the level-3 icosphere, remeshed by §116.10 to a size field (§116.8) with
+one patch source on it (`h = 0.25`, flat distance 0), `H = 0.5` and `g = 1.2`, in `[-2, 2]^3`. It
+is recovered by §116.11 and refined from the hull. The gates are: `m_edge` in `[0.85, 1.15]`;
+`|N / N_pred - 1| <= 0.2`; no violator; and the split surface still recovered with the kept
+volume still closing by (116.16) at relative `1e-12`.
+
+**The size factor, as TET-09 measured it.** With the first default, `c = sqrt(6)/4`, the fixture
+came out at `m_edge = 0.7969` and `N / N_pred - 1 = +134 %`. That misses both bands. The bound
+caps the edges below `h` by construction. For four points on a sphere of radius `R`, the sum of
+the squared edges is `16 R^2 - |p_0 + p_1 + p_2 + p_3 - 4 x_T|^2 <= 16 R^2`. So the mean edge is
+at most the root mean square `sqrt(8/3) R`, with equality only for the regular tetrahedron.
+`R <= sqrt(6)/4 h` then gives a mean edge of at most `h`, and every tetrahedron short of regular,
+or of the bound, falls below it. A sweep of `c` on the fixture gave these results:
+
+| `c` | 0.612 | 0.70 | 0.75 | 0.78 | 0.80 | 0.82 | 0.85 |
+|---|---|---|---|---|---|---|---|
+| `m_edge` | 0.797 | 0.892 | 0.945 | 0.975 | 0.995 | 1.021 | 1.098 |
+| `N / N_pred - 1` | +134 % | +65 % | +37 % | +23 % | +15 % | +6 % | -12 % |
+
+The default is now `c = 0.8`. It is DESIGN: the value where `m_edge` is closest to 1. The same
+`c` holds both bands with the sphere's `h` at 0.18 (`m_edge` 1.032, `+6.5 %`) and at 0.35
+(1.006, `+15.3 %`, with `H = 2h`). Neither gate band changed.
 
 ### 116.14 Optimisation
 
@@ -37053,6 +37171,12 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-08 | patch face counts: the cube with 6 patches, and the level-2 icosphere with a patch per hemisphere, each in `[-2, 2]^3` | cube: 4 faces per patch against 4 subtriangles each, 12 hull faces of 12; sphere: 168 and 152 against 168 and 152, 12 hull faces of 12; every face once, each subtriangle face the reverse of its input winding | the TET-08 commit |
 | TET-08 | R4 on a hollow cube (outer `[-1, 1]^3` outward, inner `[-0.5, 0.5]^3` inward) in `[-2, 2]^3`, not a plan gate | 3 regions. The hull start keeps `V` = 56.000000000000000 (printed to 15 places); the pocket is dropped and reported: fluid, 24 tetrahedra, volume 1, box `[-0.5, 0.5]^3` exactly; the solid shell: 72 tetrahedra, volume 7, box `[-1, 1]^3`. A seed at `(0.1, 0.2, 0.3)` keeps the pocket (1); a seed at `(0.75, 0, 0)` in the shell is the wrong-side refusal naming patch `out_xmin` | the TET-08 commit |
 | TET-08 | the f32 arm | `rust/tests/tetmesh_carve.rs`, 3 tests (the `Scalar` width; the sphere in a box with (116.16), (116.16b), the face counts and the fluid seed; the seed and hull refusals) pass under `--features single` with every printed number identical to the f64 build | the TET-08 commit |
+| TET-09 | §116.13, changed by this unit | the paragraphs "The refinement, as TET-09 builds it" and "The size factor, as TET-09 measured it", (116.20a)-(116.20c) and the gate measures were added; the DESIGN default `c = sqrt(6)/4` became `c = 0.8` (§116.3's table and `TetRefineSpec`), recorded with the sweep that set it; the gate bands are unchanged | the TET-09 commit |
+| TET-09 | sphere in a box: the level-3 icosphere remeshed to the size field (`h = 0.25` on the sphere, `H = 0.5`, `g = 1.2`) in `[-2, 2]^3`, refined from the hull with the defaults (`B = 2`, `c = 0.8`) | 2 262 points, 9 989 kept tetrahedra in 119 passes: 913 interior circumcentres, 366 subsegment splits, 0 facet points, 677 box-face and 84 box-edge points; 4 163 circumcentres rejected for encroachment or the box, 35 550 deferrals. 0 violators of (116.17) or (116.18), 0 exempt (no protecting ball); 1 156/1 156 subtriangles and 1 002/1 002 subsegments recovered; (116.16) relative 6.16e-15. `m_edge` (116.20b) = 0.9948 in `[0.85, 1.15]`; 9 989 against `N_pred` (116.20c) = 8 654.7, +15.42 % within 20 %. About 1 s in a release build | the TET-09 commit |
+| TET-09 | the same fixture with the first default `c = sqrt(6)/4` | 20 295 kept tetrahedra in 126 passes; `m_edge` = 0.7969 and +133.97 % against `N_pred` = 8 674.1: both bands missed, which set the new default (§116.13) | the TET-09 commit |
+| TET-09 | the cap and the refusals: the cube `[-0.5, 0.5]^3` remeshed at a uniform `h = 0.4` (57 points, 94 triangles, its 12 edges as features, no protected vertex) in `[-1, 1]^3` | 25 passes, 1 495 kept tetrahedra in 0.04 s, `k` = 375 points inserted (57 interior, 131 subsegment, 151 box-face and 36 box-edge); it succeeds again with `max_inserted_points = 375`, with the same stats and tetrahedra, and with 374 it refuses as `refine/cap: 363 points inserted after 24 passes, the next pass needs 12 more, cap 374`; the three spec bounds with `TetSpec`'s messages; `refine/box` for a missing box corner; `refine/h` for a size of NaN | the TET-09 commit |
+| TET-09 | the same cube NOT remeshed (two triangles per face, 45 degree diagonals), `h = 0.4`, not a plan gate | the refinement cascades toward the small angles: 67 289 points after 91 passes (about 930 tetrahedra predicted), stopped by hand; recorded in §116.13 and left for review | the TET-09 commit |
+| TET-09 | the f32 arm | `rust/tests/tetmesh_refine.rs`, 4 tests (the `Scalar` width; the bound, the recovery and (116.16); `m_edge`; the count) pass under `--features single` with every printed number identical to the f64 build | the TET-09 commit |
 
 ### 116.19 References
 

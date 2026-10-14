@@ -48,6 +48,7 @@ pub mod surfprep;
 pub mod remesh;
 pub mod recover;
 pub mod carve;
+pub mod refine;
 
 /// A vertex coordinate: `[f64; 3]` in both builds, whatever `Scalar` is
 /// (§116.2). Sizes and lengths are `f64` too; no `tetmesh` function takes
@@ -143,8 +144,10 @@ pub struct TetRefineSpec {
     /// 1998's termination guarantee.
     #[serde(default = "d_radius_edge")]
     pub radius_edge: f64,
-    /// The size factor `c` of (116.18): the circumradius of the regular
-    /// tetrahedron with edge `h` is `c h`.
+    /// The size factor `c` of (116.18): a kept tetrahedron's circumradius
+    /// is at most `c h`. The default `0.8` is TET-09's measured DESIGN value
+    /// (§116.13): it puts the mean `edge / h` at 1.0; the regular
+    /// tetrahedron's `sqrt(6)/4` put it at 0.80.
     #[serde(default = "d_size_factor")]
     pub size_factor: f64,
     /// The cap on refinement insertions. It is reported, never silently
@@ -158,7 +161,7 @@ fn d_radius_edge() -> f64 {
 }
 
 fn d_size_factor() -> f64 {
-    6f64.sqrt() / 4.0
+    0.8
 }
 
 fn d_max_inserted_points() -> u64 {
@@ -415,7 +418,7 @@ mod tests {
                 "recover": {"protect_angle_deg": 90.0, "max_passes": 64},
                 "refine": {
                     "radius_edge": 2.0,
-                    "size_factor": 0.6123724356957945,
+                    "size_factor": 0.8,
                     "max_inserted_points": 50000000
                 },
                 "optimise": {
@@ -490,8 +493,7 @@ mod tests {
         assert_eq!(d.recover.protect_angle_deg, 90.0);
         assert_eq!(d.recover.max_passes, 64);
         assert_eq!(d.refine.radius_edge, 2.0);
-        assert_eq!(d.refine.size_factor, 0.6123724356957945);
-        assert_eq!(d.refine.size_factor, 6f64.sqrt() / 4.0);
+        assert_eq!(d.refine.size_factor, 0.8);
         assert_eq!(d.refine.max_inserted_points, 50_000_000);
         assert_eq!(d.optimise.passes, 8);
         assert_eq!(d.optimise.target_min_dihedral_deg, 10.0);
