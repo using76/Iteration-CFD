@@ -13,13 +13,16 @@
 //! This unit ships [`exact`], the host answer keys of SPEC-LIT §127.2,
 //! [`thermo`], the perfect-gas state of §122 with its device twins, landed
 //! with CMP-08, [`momentum`], the rho-weighted momentum equation of §123,
-//! landed with CMP-09, and [`pressure`], the all-speed pressure equation of
-//! §124, landed with CMP-10. Later units add these submodules to the module:
+//! landed with CMP-09, [`pressure`], the all-speed pressure equation of
+//! §124, landed with CMP-10, and [`energy`], the energy equation of §125.1
+//! solved for `T`, landed with CMP-11. Later units add these submodules to
+//! the module:
 //!
 //! - `thermo` (§122.1-§122.3), the perfect-gas state, landed with CMP-08;
 //! - `momentum` (§123), momentum in conservative form, landed with CMP-09;
 //! - `pressure` (§124), the all-speed pressure equation, landed with CMP-10;
-//! - `energy` (§125), the energy equation solved for `T`, CMP-11;
+//! - `energy` (§125.1, §125.5), the energy equation solved for `T`, landed
+//!   with CMP-11;
 //! - `bc` (§126), the compressible boundary conditions, CMP-16 to CMP-18;
 //! - `lts` (§125), the local time step of a steady run, CMP-13;
 //! - `exact` (§127.2), the analytic answer keys, CMP-06, with
@@ -33,6 +36,7 @@
 //! [`exact`] and names the submodules the later units add. No GPL-licensed
 //! source was consulted.
 
+pub mod energy;
 pub mod exact;
 pub mod gatemesh;
 pub mod momentum;

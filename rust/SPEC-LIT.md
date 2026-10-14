@@ -42408,7 +42408,7 @@ source plus `rho` times its flux sum, as the row says. The brief's first form
 ## 125. Energy, the outer loop, and the local time step
 
 `No GPL-licensed source was consulted.` CMP-11 implements §125.1-§125.2 in
-`src/compressible/energy.rs`, CMP-12 §125.3 in `src/compressible/mod.rs`, and CMP-13
+`src/compressible/energy.rs` (as built: §125.5), CMP-12 §125.3 in `src/compressible/mod.rs`, and CMP-13
 §125.4 in `src/compressible/lts.rs`.
 
 ### 125.1 The energy equation, solved for `T`
@@ -42504,6 +42504,110 @@ every ddt difference is zero, so the fixed point does not depend on `CFL`. CMP-1
 `steady_fixed_point_independent_of_cfl` holds two CFLs to the same field within `1e-8`
 in f64 (class P; the same bar in f32 is reported as its own row if missed, §5.1.4) and
 `dt_field_matches_host_formula` holds (125.2) to its host twin (class R).
+
+### 125.5 The assembly as built (CMP-11)
+
+`src/compressible/energy.rs` holds `RhoEnergy`, and `cuda/compressible.cu` gains three
+kernels. Like §123.3 and §124.4, this subsection adds no physics: it fixes the scaling,
+the order and the face values of (125.1). Everything §3, §7, §12 and §86.3 already
+compute is CALLED: the scalar operators of `src/fv.rs`, the time term
+`timescheme::Ddt::add_rho`, the face product of `cuda/momentum.cu` (`momMul`) and the
+face-flux sum of `cuda/simple.cu` (`smpFaceFluxSum`).
+
+**The scaling.** *DESIGN*: `c_p` is constant (`hConst`, §122.1), so the system
+assembled is (125.1) divided by `c_p`. The time term is `Ddt::add_rho` with weight `rho`
+on `T`'s old levels, the convection is `fvm_div_gauss` on `mdot`, the laplacian's
+coefficient is `kappa_f |Sf| / c_p`, and every explicit term carries
+`rcp = fl(1/c_p)`, formed in f64 and rounded once. The solution is (125.1)'s; only the
+rounding of the scaling differs. The system is
+
+```
+A T = b
+A T = ddt_rho(T) + sum_f mdot_f T~_f - sum_f rcp kappa_f |Sf| snGrad(T)                      (125.3)
+b   = sum_f ±e_f + rcp V_P [ (a_n p_P + a_0 p_P^o + a_00 p_P^oo)
+                             - (a_n rho_P K_P + a_0 rho_P^o K_P^o + a_00 rho_P^oo K_P^oo)
+                             + rho_P g . u_P ]
+e_f = rcp ( W_f - mdot_f K~_f ) ,   K = |u|^2 / 2 ,   W_f = u_f . (tau_f . Sf)                     (125.4)
+(tau_f . Sf)_i = mu_f ( sum_j (T_f,ij + T_f,ji) Sf_j - (2/3) tr(T_f) Sf_i ) ,   T_ij = d u_j/d x_i  (grad u)
+```
+
+`(a_n, a_0, a_00)` are this equation's own time coefficients (`DdtCoeffs`), so `dp/dt`,
+`d(rho K)/dt` and `d(rho T)/dt` are one scheme. `K^o` and `K^oo` are `|u^o|^2/2` and
+`|u^oo|^2/2`, formed from `u`'s old levels. `(tau . Sf)` is (123.2) contracted with
+`Sf` in §123.2's three terms. `sum_f` runs over the cell's faces with the outward sign
+(owner `+`, neighbour `-`, boundary `+`).
+
+**Face values.** One set of weights serves `T~_f` and `K~_f`: §7's weights of the
+scheme on `mdot`, with `T` as the sensor (§125.1's DESIGN). A deferred-correction scheme
+(`linearUpwind`, `linearUpwindBlended`, `cubic`) has no weight for its face value, so it
+is refused by name. `u_f`, `mu_f` and the face tensor `T_f` of `grad u` (§123.3's `T`,
+not the temperature) are linear on the mesh weights:
+
+```
+internal face:                      K~_f = w_f K_P + (1 - w_f) K_N ,   T_f = l_f T_P + (1 - l_f) T_N ,   u_f likewise
+cyclic face with a cell across it:  the same with bw_b (K) and the mesh's b_weights (T_f, u_f)
+any other boundary face:            K~_b = |u_b|^2/2 ,   u_f = u_b ,   T_f = T_P                     (123.10)
+empty face:                         e_b = 0
+```
+
+`u_b` is the value of `u`'s §4 triple, as `T~_b` is the value of `T`'s, so a boundary
+face's flux is `mdot_b (T_b + K_b/c_p)` from the two triples.
+
+**The order** (`assemble_only`, and `solve` before its one linear solve):
+1. the weights, `rcp kappa_f |Sf|`, and, with `viscousWork`, `mu_f` and `grad u`; then `e_f`;
+2. zero the matrix;
+3. `Ddt::add_rho(rho, rho^o, rho^oo; T^o, T^oo, +1)`;
+4. `fvm_div_gauss(mdot, w, bw, T, +1)`;
+5. `fvm_laplacian(rcp kappa_f |Sf|, T, -1)`, and §12.3's correction with the Gauss `grad T`;
+6. `source += sum_f ±e_f` (`smpFaceFluxSum`, accumulating);
+7. the cell source, launched when the time coefficients are not all zero or `g != 0`;
+8. `ldu_ops::relax` by `alpha_T`, always (at 1 it only enforces dominance);
+9. the boundary fold.
+
+`solve` then solves for `T` and evaluates its boundary values. The solve's initial
+residual is the `h_0` residual of §125.3 step 8. `set_t_relax` sets `alpha_T` for a final
+corrector. Refused by name: `localEuler` and `CrankNicolson` (as §123.3 refuses them),
+`PCG`, `DIC` and `GAMG` (the convection makes the matrix asymmetric), `alpha_T` outside
+`(0, 1]`, and a `c_p` that is not positive and finite.
+
+| gate (lib: `compressible::energy::tests::*`, f64 build; the same names in `tests/compressible_energy.rs` run in both builds from one shared source) | bar | class |
+|---|---|---|
+| `uniform_flow_preserves_t` | §123.3's 6x5x4 box graded 3:1 in y, uniform `u = (37.5, -12.25, 4)`, `rho = 1.177`, `p = 250` and `T = 300` at every level; `u` fixed on every patch, `T` fixed on the inflow faces and zeroGradient on the outflow faces; `mu = 1.8e-5`, `kappa = mu c_p/Pr` (air). Run for steadyState (`alpha_T = 0.9`), Euler and backward (`dt = 1e-3`) with upwind, and Euler with `Limited(VanLeer)`. The residual at `T = 300` satisfies `abs(r_P) <= 1e-13 S_P`, `S_P = abs(diag_P) T + sum_f abs(mdot_f) (T + K/c_p) + V_P abs(a_n) (rho T + (rho K + abs(p))/c_p)`. One solve leaves `T` within `1e-10 S_P/abs(diag_P)` of 300. Control: `T + 1` in one interior cell puts `abs(r_P)` within `[0.5, 1.5] abs(diag_P)` | R |
+| `slab_conduction_linear_exact` | an 8x3x2 box on `[0, 0.5] x [0, 0.2] x [0, 0.1]` graded 3:1 in x, `u = 0`, `mdot = 0`, `kappa = 0.0263`, `T = 300` at `x = 0` and `400` at `x = 0.5`, zeroGradient elsewhere. Steady, and Euler (`dt = 1e-3`) with the profile as the old levels, each from `T = 300`: every `abs(T_P - (300 + 200 x_P)) <= 1e-10 x 400` K | R |
+| `viscous_work_matches_couette_exact` | (127.12) on a 1x20x1 channel, `h = 0.01`, `U = 200` m/s, `T_top = 300` fixed, the bottom wall adiabatic, `mu = 1.8e-5`, `kappa = mu c_p/Pr` (air), `u = U y/h` fixed on every patch. The x and z boundary faces carry no mass flux (the channel is one-dimensional; see below). Steady: every `abs(T_P - T(y_P)) <= 0.005 (T_w - T_top)`, §127.4's allowance. Derived for this mesh: the discrete solution is the parabola lowered by `(dy/h)^2/4` of the rise (the half-cell closure at the isothermal wall), `6.25e-4`. Control: without the work the miss is more than 100 bars | P |
+| `h0_conserved_along_inviscid_duct_to_1e_6` | a 16x3x2 duct on `[0, 2] x [0, 0.3] x [0, 0.2]` graded 2:1 in x, `mdot = 117.7 Sf_x` (exactly divergence-free), `u = (100 + 200 x, 0, 0)` fixed on every patch but the outlet (zeroGradient), `mu = kappa = 0`, `T = 300` fixed at the inlet. Steady. Every cell's `abs(sum_f ±mdot_f (T~_f + K~_f/c_p)) <= 1e-6 sum_f abs(mdot_f) (abs(T~_f) + K~_f/c_p)` on the solve's weights, with upwind (one solve) and with `Limited(VanLeer)` (200 outer solves: step 8's dominance enforcement makes a partly central convection reach (125.3) only at its outer fixed point, about 150 solves in f64). With upwind every `abs(h0_P - h0_in) <= 1e-6 h0_in`, `h0 = T + K/c_p`. Control: `T` falls by more than 100 K along the duct | A |
+| `energy_refusals_name_the_setting` | `RhoEnergy::new` refuses `localEuler`, `CrankNicolson`, `LinearUpwind`, `Cubic`, `t_relax = 0`, `cp = 0`, `PCG`, `GAMG` and `DIC`, each by name | D |
+| `the_compressible_energy_equation_replays_bitwise` (lib) | §81.7's row for `src/compressible/energy.rs`. One energy solve - every term of (125.3)-(125.4) live (Euler, `g = (0, -9.81, 0)`, non-uniform `u` with an old level, `rho`, `p`, `mu`, `kappa` and `T`) and a fixed 4-sweep Jacobi solve - captures into one graph and replays bitwise | D |
+
+The R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1): `1e-5` for the
+`1e-10` and `1e-13` bars. The P and A rows are the same in both builds.
+
+**Landed (CMP-11).** Measured on the RTX 5070 Ti, f64 first and then `single`; each
+number is the worst over the row.
+
+- The uniform flow: the residual is `2.4e-16` and `1.1e-7` of `S_P`, the solve's `T`
+  `4.7e-16` and `9.4e-8` of `S_P/abs(diag_P)`, and the control ratio is 1 to `3.4e-5`.
+- The slab: `2.8e-13` K and `1.3e-4` K (bars `4e-8` and `4e-3` K).
+- Couette: the rise is `14.133676596` K, and the worst cell is `6.250e-4` and `6.194e-4`
+  of it, the derived `6.25e-4` (bar `5e-3`). Without the work the miss is `0.9994` of the
+  rise.
+- The duct: the face sum is `4.1e-15` and `3.6e-8` with upwind, `2.9e-15` and `4.7e-8`
+  with van Leer; the upwind `h0` drift is `1.2e-14` and `7.8e-8`; `T` falls 110.09 K.
+- The replay gate captures 110 nodes (99 kernel, 11 memset) and replays three times
+  bitwise over 4 buffers and 174 values.
+
+*Finding (single).* A first form of the Couette row let the x boundary faces carry the
+channel's through-flow. Each cell's two x faces then carry K fluxes `4e4` times its viscous
+work, which cancel exactly only in exact arithmetic. Under `single` the rounding of that
+cancellation moved the worst cell to `3.5e-3` of the rise, inside the bar but six times the
+f64 error, and f64 was unchanged. The row now states the one-dimensional channel. A case
+whose energy balance is a small difference of large convected `K` fluxes carries that
+rounding in `single`.
+
+Every cubin but `compressible.cubin` is unchanged in SASS in both builds, apart from
+`solidblock.cubin` in f64, which flipped between its two known hashes on a rebuild with
+no edit to it (nvcc's nondeterminism, as CMP-08 recorded). CMP-08's, CMP-09's and
+CMP-10's integration tests are unchanged (4, 5 and 4 passed in both builds).
 
 ---
 

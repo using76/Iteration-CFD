@@ -127,6 +127,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         ),
     ),
     (
+        "src/compressible/energy.rs",
+        Stance::Gate("the_compressible_energy_equation_replays_bitwise"),
+    ),
+    (
         "src/compressible/momentum.rs",
         Stance::Gate("the_compressible_momentum_predictor_replays_bitwise"),
     ),
