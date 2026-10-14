@@ -18,8 +18,13 @@
     ofgpu SPEC-LIT.md §154.6 - the TFC limit (154.9)
     ofgpu SPEC-LIT.md §154.7 - the f32-safe rate constant (154.10) and its
       zero rule; §118.11 - why K_b is formed once in f64
+    ofgpu SPEC-LIT.md §155.1-§155.6 - the progress-variable kernels (DST-04):
+      the sources of (155.3) with the split (154.11), the ignition bracket
+      (155.4), the flame-Courant number (155.9), the Reynolds mean (155.2)
+      and the bounds counter
     C. Huang, A. N. Lipatnikov & K. Nessvi, J. Loss Prev. Process Ind. 67
-      (2020) 104237, DOI 10.1016/j.jlp.2020.104237 - eqs. (3)-(7), (15)-(17)
+      (2020) 104237, DOI 10.1016/j.jlp.2020.104237 - eqs. (3)-(7), (15)-(17),
+      and eqs. (1)-(2), (14) for the progress-variable kernels
     C. Huang, M. Bloching & A. N. Lipatnikov, J. Loss Prev. Process Ind. 75
       (2022) 104707, DOI 10.1016/j.jlp.2021.104707 - eqs. (7)-(11)
   The specification was informed by a review of FSCDustFoam (Huang &
@@ -201,4 +206,139 @@ extern "C" __global__ void dustArrhenius
     const ofacc v = dustArrheniusE((ofacc)T[i], thetab, tb, ezero, &zeroed);
     if (zeroed) atomicAdd(nzero, 1ULL);
     e[i] = (ofscalar)v;
+}
+
+// ==========================================================================
+//  The progress-variable equation (SPEC-LIT 155, docs/17 DST-04). Appended
+//  after the DST-03 kernels, which are unchanged. The same rule holds: every
+//  intermediate is `ofacc` in both builds and each output is rounded once at
+//  its store; the host twins are in src/dust/{progress,ignition,courant}.rs.
+// ==========================================================================
+
+//- The sources of (155.3) as one S_U + S_P c~ pair per cell (155.2):
+//  S_U = rho_u U_t |grad c~| + rho K + rho W and S_P' = rho K + rho W, the
+//  diagonal coefficient fvm_sp adds (S_P = -S_P'). K is (154.11)'s rate, W
+//  the bracket of (155.4) (`hasIgn` = 0 leaves it out, `wign` unread), and
+//  rhou the CURRENT unburned density rho_u(p) of (155.10).
+extern "C" __global__ void dustProgressSources
+(
+    ofscalar* __restrict__ su,
+    ofscalar* __restrict__ sp,
+    const ofvec3* __restrict__ gradc,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ ut,
+    const ofscalar* __restrict__ krate,
+    const ofscalar* __restrict__ wign,
+    oflabel n,
+    oflabel hasIgn,
+    ofacc rhou
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc gx = (ofacc)gradc[i].x;
+    const ofacc gy = (ofacc)gradc[i].y;
+    const ofacc gz = (ofacc)gradc[i].z;
+    const ofacc mag = sqrt(__dadd_rn(__dadd_rn(__dmul_rn(gx, gx), __dmul_rn(gy, gy)), __dmul_rn(gz, gz)));
+    const ofacc r = (ofacc)rho[i];
+    ofacc rate = (ofacc)krate[i];
+    if (hasIgn) rate = rate + (ofacc)wign[i];
+    const ofacc imp = __dmul_rn(r, rate);
+    const ofacc prop = __dmul_rn(__dmul_rn(rhou, (ofacc)ut[i]), mag);
+    su[i] = (ofscalar)(prop + imp);
+    sp[i] = (ofscalar)imp;
+}
+
+//- The bracket of (155.4), W = W_0 exp{-[(r/sigma_r)^2 + H(t_0 - t)
+//  ((t - t_0)/sigma_t)^2]}, 1/s. r is formed from LOCAL positions: the cell
+//  centres as stored and the ignition point already shifted by the same
+//  origin on the host (SPEC-LIT 118.7), so the difference has no
+//  cancellation in either build. A W below FLT_MIN is written as +0 (the
+//  float store would be subnormal), the same cells in both builds.
+extern "C" __global__ void dustIgnition
+(
+    ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ c,
+    oflabel n,
+    ofacc px,
+    ofacc py,
+    ofacc pz,
+    ofacc sigr,
+    ofacc w0,
+    ofacc t,
+    ofacc t0,
+    ofacc sigt
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc dx = (ofacc)c[i].x - px;
+    const ofacc dy = (ofacc)c[i].y - py;
+    const ofacc dz = (ofacc)c[i].z - pz;
+    const ofacc r2 = __dadd_rn(__dadd_rn(__dmul_rn(dx, dx), __dmul_rn(dy, dy)), __dmul_rn(dz, dz));
+    ofacc arg = r2 / __dmul_rn(sigr, sigr);
+    if (t < t0)
+    {
+        const ofacc s = (t - t0) / sigt;
+        arg = arg + __dmul_rn(s, s);
+    }
+    ofacc v = __dmul_rn(w0, exp(-arg));
+    if (!(v >= OFGPU_DUST_FLT_MIN)) v = 0.0;
+    w[i] = (ofscalar)v;
+}
+
+//- The flame-Courant number (155.9) per cell:
+//  Co_f = dt (|u| + rho_u U_t / rho) / V^{1/3}.
+extern "C" __global__ void dustFlameCourant
+(
+    ofscalar* __restrict__ co,
+    const ofvec3* __restrict__ u,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ ut,
+    const ofscalar* __restrict__ v,
+    oflabel n,
+    ofacc rhou,
+    ofacc dt
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc ux = (ofacc)u[i].x;
+    const ofacc uy = (ofacc)u[i].y;
+    const ofacc uz = (ofacc)u[i].z;
+    const ofacc mag = sqrt(__dadd_rn(__dadd_rn(__dmul_rn(ux, ux), __dmul_rn(uy, uy)), __dmul_rn(uz, uz)));
+    const ofacc w = __dmul_rn(rhou, (ofacc)ut[i]) / (ofacc)rho[i];
+    co[i] = (ofscalar)(__dmul_rn(dt, mag + w) / cbrt((ofacc)v[i]));
+}
+
+//- The Reynolds mean (155.2): cbar = rho c~ / rho_b(p).
+extern "C" __global__ void dustReynoldsMean
+(
+    ofscalar* __restrict__ cbar,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ c,
+    oflabel n,
+    ofacc rhob
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    cbar[i] = (ofscalar)(__dmul_rn((ofacc)rho[i], (ofacc)c[i]) / rhob);
+}
+
+//- The bounds counter of SPEC-LIT 155.2: every cell with c~ < -tol,
+//  c~ > 1 + tol or not a number is added to nout[0], tol the round-off
+//  margin of the build (64 epsilon). Nothing is clipped.
+extern "C" __global__ void dustCountOutOfBounds
+(
+    unsigned long long* __restrict__ nout,
+    const ofscalar* __restrict__ c,
+    oflabel n,
+    ofscalar tol
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofscalar v = c[i];
+    if (!(v >= -tol && v <= (ofscalar)1 + tol)) atomicAdd(nout, 1ULL);
 }

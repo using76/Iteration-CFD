@@ -26,6 +26,11 @@
 //!   SPEC-LIT §154 - the FSC and TFC closures of `fsc` and their kernels in
 //!     `device` (`cuda/dust.cu`): (154.1)-(154.11), the f32-safe rate
 //!     constant and its zero rule
+//!   SPEC-LIT §155 - the progress-variable equation (155.3) of `progress`
+//!     on the device, its ignition source (155.4) in `ignition`, the
+//!     flame-Courant number (155.9) in `courant`, the BML density, the
+//!     Reynolds mean and rho_u(p) (155.1), (155.2), (155.10), and the 1-D
+//!     flame tube `tube1d` that holds it against (155.5)
 //!   C. Huang, M. Bloching & A. N. Lipatnikov, J. Loss Prev. Process Ind. 75
 //!     (2022) 104707, DOI 10.1016/j.jlp.2021.104707 - eqs. 1-3 and Table 1
 //!   C. Huang, A. N. Lipatnikov & K. Nessvi, J. Loss Prev. Process Ind. 67
@@ -33,14 +38,20 @@
 //!   NASA TM-4513 Table II through §128
 //! No GPL-licensed source was consulted.
 
+pub mod courant;
 pub mod device;
 pub mod fsc;
+pub mod ignition;
 pub mod laminar;
+pub mod progress;
 pub mod psi;
 pub mod thermo;
+pub mod tube1d;
 
 pub use fsc::{CombustionModel, FscConstants, FscInputs, FscOut, FscState};
+pub use ignition::IgnitionSource;
 pub use laminar::{LaminarSpeed, SlFactors};
+pub use progress::{ProgressCoupling, ProgressEquation, ProgressSolve};
 pub use psi::{AdiabaticCurve, FlameCurve, PsiOptions, PsiProblem, PsiSolution, PublishedCurve};
 pub use thermo::{
     AiccState, BurnedState, EquivalentGas, FormulaInputs, PrescribedInputs, StarchFuel, ThermoMode,
