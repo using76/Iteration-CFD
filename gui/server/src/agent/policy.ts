@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { TOOL_META, ToolPolicySchema, type SessionSettings, type ToolPolicy } from '@cfd/shared'
 import { guiBoundaryDelegate } from '../tools/guiBoundary.js'
+import { customRunInput, guiCustomDelegate } from '../tools/gui.js'
 import { guiCaseDelegate } from '../tools/guiCase.js'
 import { guiMeshDelegate } from '../tools/guiMesh.js'
 import { guiRunDelegate } from '../tools/guiRun.js'
@@ -58,11 +59,12 @@ export const ALWAYS_ASK: ReadonlySet<string> = new Set(['autonomy_propose_edit',
 
 export function classifyTool(name: string, input: unknown, ctx: PolicyInput): ToolPolicy {
   // A gui_control command that stands in for run_start / run_stop,
-  // case_create / case_validate, mesh_generate / mesh_regions or (set_patch)
-  // case_edit is approved exactly as that tool: policy.json overrides,
-  // TOOL_META, ALWAYS_ASK, the per-session allowlist and autoApprove all
-  // apply to the delegate's name.
+  // case_create / case_validate, mesh_generate / mesh_regions, (set_patch)
+  // case_edit or (run_custom_tool) custom_tool_run is approved exactly as that
+  // tool: policy.json overrides, TOOL_META, ALWAYS_ASK, the per-session
+  // allowlist and autoApprove all apply to the delegate's name.
   if (name === 'gui_control') {
+    if (guiCustomDelegate(input) !== null) return classifyTool('custom_tool_run', customRunInput(input as { name?: unknown; input?: unknown }), ctx)
     const delegate = guiRunDelegate(input) ?? guiCaseDelegate(input) ?? guiBoundaryDelegate(input) ?? guiMeshDelegate(input, ctx.sessionId)
     if (delegate !== null) return classifyTool(delegate, input, ctx)
   }

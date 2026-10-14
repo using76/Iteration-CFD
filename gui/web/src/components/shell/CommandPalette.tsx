@@ -32,6 +32,8 @@ function tabLabel(tab: Tab, t: ReturnType<typeof useT>): string {
       return `${t('tab.geometry')}: ${basename(tab.path)}`
     case 'campaign':
       return `${t('autonomy.tab')}: ${basename(tab.path)}`
+    case 'centerline':
+      return `${t('charts.centerline')}: ${tab.line.field}`
   }
 }
 
@@ -115,7 +117,7 @@ export function CommandPalette() {
         run: () => actions.quick(a),
       })),
     ]
-    const tabItems: Item[] = tabs.map((tab) => ({ id: `t:${tab.id}`, group: 'tabs', label: tabLabel(tab, t), hint: tab.kind === 'file' || tab.kind === 'geometry' || tab.kind === 'campaign' ? tab.path : undefined, icon: tab.kind === 'viewer' || tab.kind === 'geometry' ? 'cube' : tab.kind === 'campaign' || tab.kind === 'residuals' ? 'chart' : tab.kind === 'diff' ? 'diff' : 'file', run: () => s.activateTab(tab.id) }))
+    const tabItems: Item[] = tabs.map((tab) => ({ id: `t:${tab.id}`, group: 'tabs', label: tabLabel(tab, t), hint: tab.kind === 'file' || tab.kind === 'geometry' || tab.kind === 'campaign' ? tab.path : undefined, icon: tab.kind === 'viewer' || tab.kind === 'geometry' ? 'cube' : tab.kind === 'campaign' || tab.kind === 'residuals' || tab.kind === 'centerline' ? 'chart' : tab.kind === 'diff' ? 'diff' : 'file', run: () => s.activateTab(tab.id) }))
     const fileItems: Item[] = matchPaths(files, q, 12).map((p) => ({ id: `f:${p}`, group: 'files', label: basename(p), hint: p, icon: /\.(ste?p|stl|obj)$/i.test(p) ? 'cube' : /\.jsonc?$/.test(p) ? 'braces' : /\.rs$/.test(p) ? 'gear' : 'file', run: () => s.openFile(p) }))
     const lq = q.toLowerCase()
     const filt = (i: Item) => !lq || i.label.toLowerCase().includes(lq) || (i.hint ?? '').toLowerCase().includes(lq)

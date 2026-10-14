@@ -456,7 +456,18 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('set_projection'), projection: z.enum(['Perspective', 'Orthographic']) }),
   z.object({ type: z.literal('fit_view') }),
   z.object({ type: z.literal('show_overlay'), what: z.enum(['axes', 'colorbars']), on: z.boolean() }),
-  z.object({ type: z.literal('set_centerline'), quantity: z.string() }),
+  // The centreline chart (STU-09): line_sample along the longest axis through
+  // the domain centre, or along p0..p1. gui_control resolves every optional key
+  // on the server, so the window always receives the full line.
+  z.object({
+    type: z.literal('set_centerline'),
+    quantity: z.string().describe('Field name (U, p, T, k...) or Temperature / Velocity / Pressure'),
+    component: z.enum(['magnitude', 'x', 'y', 'z']).nullish().describe('Vector component; null = magnitude'),
+    p0: Vec3Schema.nullish().describe('Explicit line start (x, y, z) in metres; give p1 too. Null = the longest axis through the domain centre'),
+    p1: Vec3Schema.nullish().describe('Explicit line end (x, y, z) in metres'),
+    path: z.string().nullish().describe('Workspace-relative result root; null = the result on screen'),
+    time: z.string().nullish().describe('Time directory label; null = the time on screen, else the latest'),
+  }),
   z.object({ type: z.literal('run'), action: z.enum(['run', 'stop']) }),
   z.object({ type: z.literal('notify'), level: z.enum(['info', 'warning', 'error']), text: z.string().describe('Shown as a toast on the operator\'s screen') }),
   // The workspace commands the GUI shell units add: cases, runs, meshing,

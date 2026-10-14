@@ -20,6 +20,18 @@ export interface LogFilter {
 /** The metrics chart's mode: the metric picker or the linear-solver sweep counts (show_metric). */
 export type MetricMode = 'metrics' | 'sweeps'
 
+/** The line the centreline tab samples: set_centerline as gui_control resolved it on the server (STU-09). */
+export interface CenterlineLine {
+  /** Workspace-relative result root. */
+  path: string
+  field: string
+  component: 'magnitude' | 'x' | 'y' | 'z'
+  /** Time directory label the server sampled. */
+  time: string | null
+  p0: [number, number, number]
+  p1: [number, number, number]
+}
+
 export type Tab =
   | { id: string; kind: 'file'; path: string }
   | { id: 'viewer'; kind: 'viewer' }
@@ -27,6 +39,7 @@ export type Tab =
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
   | { id: string; kind: 'geometry'; path: string }
   | { id: string; kind: 'campaign'; path: string }
+  | { id: 'centerline'; kind: 'centerline'; line: CenterlineLine }
 
 export type PanelLayout = Record<string, number>
 
@@ -132,6 +145,8 @@ export interface UiActions {
   openViewerTab(): void
   openGeometryTab(path: string): void
   openCampaignTab(path: string): void
+  /** Opens (or re-aims) the one centreline chart tab on a resolved set_centerline line. */
+  openCenterlineTab(line: CenterlineLine): void
   openResidualsTab(runId: string | null, chart?: ChartKind): void
   /** Merges a set_log_filter patch; streams land de-duplicated in canonical order. */
   setLogFilter(patch: Partial<LogFilter>): void
@@ -242,7 +257,9 @@ export function tabScreenLabel(tab: Tab, locale: Locale): string {
           ? `${tx(locale, 'tab.geometry')}: ${basename(tab.path)}`
           : tab.kind === 'campaign'
             ? `${tx(locale, 'autonomy.tab')}: ${basename(tab.path) || '.'}`
-            : `${tx(locale, 'tab.diff')}: ${basename(tab.path)}`
+            : tab.kind === 'centerline'
+              ? `${tx(locale, 'charts.centerline')}: ${tab.line.field}`
+              : `${tx(locale, 'tab.diff')}: ${basename(tab.path)}`
 }
 
 /** The label ui.state reports for a tab: its path, its chart, or 'viewer'. */
@@ -257,6 +274,8 @@ export function tabStateLabel(tab: Tab): string {
       return tab.chart ?? 'residuals'
     case 'viewer':
       return 'viewer'
+    case 'centerline':
+      return 'centerline'
   }
 }
 
@@ -356,6 +375,9 @@ export const useUiStore = create<UiStore>()(
       openCampaignTab(path) {
         const p = path.replace(/\/+$/, '')
         get().openTab({ id: `campaign:${p}`, kind: 'campaign', path: p })
+      },
+      openCenterlineTab(line) {
+        get().openTab({ id: 'centerline', kind: 'centerline', line: { ...line, p0: [...line.p0], p1: [...line.p1] } })
       },
       openResidualsTab(runId, chart) {
         set((s) => {

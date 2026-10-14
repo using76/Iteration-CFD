@@ -90,6 +90,7 @@ function makeUi() {
     setCamerasLinked: vi.fn(),
     openGeometryTab: vi.fn(),
     openCampaignTab: vi.fn(),
+    openCenterlineTab: vi.fn(),
     setOverlay: vi.fn(),
     closeTab: vi.fn(),
     activateTab: vi.fn(),
@@ -162,8 +163,6 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
   select_step: 'STU-08b',
-  set_centerline: 'STU-09',
-  run_custom_tool: 'STU-09',
 }
 
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>

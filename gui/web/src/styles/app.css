@@ -124,6 +124,17 @@ a { color: var(--accent); }
 .mesh-log .mesh-run { text-transform: none; font-weight: 400; letter-spacing: 0; }
 .mesh-log pre { margin: 0; max-height: 220px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre-wrap; }
 
+/* ---- Centreline chart (STU-09) ------------------------------------------- */
+.cl-chart { display: flex; flex-direction: column; gap: 8px; height: 100%; padding: 12px; overflow: auto; }
+.cl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; font-size: var(--fs-sm); }
+.cl-meta { color: var(--fg-muted); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.cl-note { color: var(--fg-muted); font-size: var(--fs-sm); }
+.cl-error { color: var(--danger); font-size: var(--fs-sm); white-space: pre-wrap; }
+.cl-svg { width: 100%; max-height: 70vh; }
+.cl-box { fill: none; stroke: var(--border); }
+.cl-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.cl-tick { fill: var(--fg-muted); font-size: 11px; }
+
 /* ---- Boundary editor (STU-07b) -------------------------------------------- */
 .bnd-dialog { width: 1240px; max-width: 96vw; }
 .bnd-path { font-family: var(--font-mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

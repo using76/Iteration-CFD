@@ -96,6 +96,16 @@ export interface GeometryEditResponse {
   toolMs: number
 }
 
+/** GET /api/results/sample: line_sample's parallel arrays (s 0..1, x metres from p0, values). */
+export interface LineSampleReply {
+  s: number[]
+  x: number[]
+  values: number[]
+  field: string
+  time: string
+  cells: number
+}
+
 export const api = {
   tree: (path: string, depth = 1) => request<FsTreeNode>('GET', withQuery(REST.fsTree, { path, depth })),
   readFile: (path: string) => request<FsFileResponse>('GET', withQuery(REST.fsFile, { path })),
@@ -105,6 +115,9 @@ export const api = {
   caseBoundary: (path: string) => request<BoundaryTable>('GET', withQuery(REST.caseBoundary, { path })),
   /** One set_patch on that case, applied as gui_control's set_patch is; the reply is case_edit's (its diff). */
   casePatch: (path: string, edit: Extract<UiCommand, { type: 'set_patch' }>) => request<CasePatchReply>('POST', REST.casePatch, { path, edit }),
+  /** The centreline chart's samples (STU-09): the route line_sample serves, on the line set_centerline resolved. */
+  resultsSample: (q: { dir: string; field: string; component: string; time: string | null; p0: readonly number[]; p1: readonly number[] }) =>
+    request<LineSampleReply>('GET', withQuery(`${REST.results}/sample`, { dir: q.dir, field: q.field, component: q.component, time: q.time, p0: q.p0.join(','), p1: q.p1.join(',') })),
   search: (q: string, opts: { glob?: string | null; regex?: boolean; caseSensitive?: boolean; max?: number } = {}) =>
     request<SearchResponse>('GET', withQuery(REST.fsSearch, { q, glob: opts.glob ?? null, regex: opts.regex ? 1 : null, case: opts.caseSensitive ? 1 : null, max: opts.max ?? 300 })),
   gitStatus: () => request<GitStatusResponse>('GET', REST.gitStatus),

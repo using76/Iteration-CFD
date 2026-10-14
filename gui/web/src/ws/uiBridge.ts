@@ -903,11 +903,20 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'show_overlay':
         u.setOverlay(cmd.what, cmd.on)
         return { ok: true }
-      case 'set_centerline':
+      case 'set_centerline': {
+        // gui_control resolves the result, field, time and line on the server
+        // (guiCenterline.ts); the chart fetches the samples on exactly that line.
+        if (!cmd.path || !cmd.p0 || !cmd.p1) return { ok: false, error: 'NO_LINE (set_centerline): the server resolves the result and the line before this window receives it; send set_centerline through gui_control' }
+        u.openCenterlineTab({ path: cmd.path, field: cmd.quantity, component: cmd.component ?? 'magnitude', time: cmd.time ?? null, p0: [cmd.p0[0], cmd.p0[1], cmd.p0[2]], p1: [cmd.p1[0], cmd.p1[1], cmd.p1[2]] })
+        return { ok: true }
+      }
+      case 'run_custom_tool':
+        return unsupported(cmd.type, 'gui_control runs this on the server as custom_tool_run; this window should not receive it')
       case 'select_step':
         return unsupported(cmd.type, 'this screen does not implement it')
       default:
-        return unsupported(cmd.type, 'this screen does not implement it')
+        // Every type has a case now; a type a newer server sends still answers by name.
+        return unsupported((cmd as { type: string }).type, 'this screen does not implement it')
     }
   }
 

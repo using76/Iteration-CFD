@@ -299,11 +299,11 @@ beforeEach(() => {
 describe('the four geometry edit commands', () => {
   it('an unlisted command is still refused by name', async () => {
     const h = harness([])
-    // set_centerline: still unimplemented on this screen (STU-09); show_overlay
-    // stopped being the sample here when STU-02 implemented it.
-    const r = await h.run({ type: 'set_centerline', quantity: 'p' })
+    // select_step: still unimplemented on this screen (STU-08b); set_centerline
+    // stopped being the sample here when STU-09 implemented it.
+    const r = await h.run({ type: 'select_step', step: 'step-1' })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('UNSUPPORTED (set_centerline): this screen does not implement it')
+    expect(r.error).toBe('UNSUPPORTED (select_step): this screen does not implement it')
   })
 
   it('without a geometry tab the four commands refuse and the snapshot has no geometry', async () => {
