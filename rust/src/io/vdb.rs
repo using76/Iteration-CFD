@@ -44,8 +44,9 @@
 //!
 //! # What is written
 //!
-//! One `.vdb` file (a single `io::Archive` "segment", `OPENVDB_FILE_VERSION
-//! = 225`), no file-level metadata, one grid per scalar field - a
+//! One `.vdb` file (a single `io::Archive` "segment", file version 224 -
+//! `OPENVDB_FILE_VERSION_MULTIPASS_IO`, SPEC-LIT §117.8), no file-level
+//! metadata, one grid per scalar field - a
 //! `FieldValues::Vector` field becomes four grids (`name.x`, `name.y`,
 //! `name.z`, `name.mag`) for the same reason `nvdb.rs` does: a dense
 //! `Vec3f` grid is the documented Omniverse/Blender split failure in
@@ -53,7 +54,8 @@
 //! `Vec3fGrid` exactly as much as to NanoVDB's. Every grid is
 //! `Tree_float_5_4_3` (OpenVDB's own default `FloatTree` configuration -
 //! Upper 32³, Lower 16³, Leaf 8³ fan-out, the same shape `nvdb.rs` builds),
-//! `class = "fog volume"`, transformed by an `AffineMap` (a general 4x4,
+//! `class = "fog volume"` and `name` = the grid name in its metadata,
+//! transformed by an `AffineMap` (a general 4x4,
 //! not `UniformScaleMap`, so anisotropic `dx/dy/dz` - already ordinary in
 //! this crate's own `pressure::cartesian::CartesianGrid` - are represented
 //! exactly rather than approximated). Every LeafNode is written in full
@@ -158,9 +160,18 @@ use std::path::Path;
 /// writeHeader`: `int64_t magic = OPENVDB_MAGIC; os.write(&magic, 8)` -
 /// sign-extension of a positive `int32_t` is zero-extension).
 const MAGIC: u64 = 0x5644_4220;
-/// `OPENVDB_FILE_VERSION` at the `v13.0.0` tag (>= 224, the task's floor -
-/// `OPENVDB_FILE_VERSION_MULTIPASS_IO`).
-const FILE_VERSION: u32 = 225;
+/// The file version written at bytes 8..11: `OPENVDB_FILE_VERSION_MULTIPASS_IO`
+/// = 224 (`version.h.in`, `v13.0.0`), the highest version Isaac Sim 6.0
+/// reads. `OPENVDB_FILE_VERSION` at that tag is 225
+/// (`OPENVDB_FILE_VERSION_HALF_GRID`), which marks the native `HalfGrid`
+/// type; no read in the library branches on it, and this writer emits only
+/// `Tree_float_5_4_3` (with or without the older `_HalfFloat` save suffix),
+/// so nothing it writes is new at 225 (SPEC-LIT §117.8).
+const FILE_VERSION: u32 = 224;
+/// `OPENVDB_FILE_VERSION_HALF_GRID`, the newest version the internal
+/// reader accepts besides [`FILE_VERSION`].
+#[cfg(test)]
+const FILE_VERSION_HALF_GRID: u32 = 225;
 /// `OPENVDB_LIBRARY_MAJOR_VERSION_NUMBER` / `_MINOR_VERSION_NUMBER` at the
 /// `v13.0.0` tag. Purely informational - no reader branches on these.
 const LIB_MAJOR: u32 = 13;
@@ -180,6 +191,9 @@ const HALF_FLOAT_TYPENAME_SUFFIX: &str = "_HalfFloat";
 /// `setSaveFloatAsHalf` inserts, which `Grid::writeMeta` then emits.
 /// SPEC-LIT S45.1(4).
 const META_SAVE_HALF_FLOAT: &str = "is_saved_as_half_float";
+/// `GridBase::META_GRID_NAME` (`Grid.cc`). `GridBase::getName` reads this
+/// metadata entry; a read grid is never named from its descriptor.
+const META_GRID_NAME: &str = "name";
 /// The base grid type: OpenVDB's own default `FloatTree` configuration.
 const TREE_TYPE: &str = "Tree_float_5_4_3";
 
@@ -403,7 +417,7 @@ fn write_grid(
 
     put_u32(b, COMPRESS_NONE); // Archive::setGridCompression's stream word
 
-    write_grid_metadata(b, precision);
+    write_grid_metadata(b, name, precision);
     write_transform(b, grid);
     write_topology(b, grid, values, precision);
     let block_pos = b.len() as i64;
@@ -418,17 +432,21 @@ fn write_grid(
 /// `GridBase::writeMeta` -> `MetaMap::writeMeta`: a `uint32_t` entry count,
 /// then per entry `writeString(name)` + `writeString(typeName)` +
 /// `Metadata::write` (`writeSize` u32 + `writeValue` raw bytes - see
-/// `StringMetadata::size`/`writeValue`, `Metadata.h`). One entry here:
+/// `StringMetadata::size`/`writeValue`, `Metadata.h`). Entries here:
 /// `GridBase::META_GRID_CLASS` ("class") = `gridClassToString(GRID_FOG_VOLUME)`
 /// = "fog volume" (`Grid.cc`) - *DESIGN*, same choice `nvdb.rs` makes and
 /// for the same reason (a plain scalar/component field renders sensibly as
-/// a volume/fog density by default).
-fn write_grid_metadata(b: &mut Vec<u8>, precision: Precision) {
+/// a volume/fog density by default) - and `GridBase::META_GRID_NAME`
+/// ("name"), the grid's name. `GridBase::setName` stores the name only as
+/// this entry and `getName` reads it back from it; `Archive`'s read never
+/// copies the descriptor's name onto the grid, so a grid without the entry
+/// reads back unnamed (SPEC-LIT §117.8).
+fn write_grid_metadata(b: &mut Vec<u8>, name: &str, precision: Precision) {
     // `MetaMap` is a `std::map<Name, Metadata::Ptr>`, so entries come out in
-    // ascending name order: "class" before "is_saved_as_half_float".
+    // ascending name order: "class", "is_saved_as_half_float", "name".
     let n = match precision {
-        Precision::F32 => 1,
-        Precision::F16 => 2,
+        Precision::F32 => 2,
+        Precision::F16 => 3,
     };
     put_u32(b, n); // metaCount
     put_string(b, "class");
@@ -449,6 +467,11 @@ fn write_grid_metadata(b: &mut Vec<u8>, precision: Precision) {
         put_u32(b, 1); // TypedMetadata<bool>::size()
         put_u8(b, 1);
     }
+
+    put_string(b, META_GRID_NAME);
+    put_string(b, "string");
+    put_u32(b, name.len() as u32); // StringMetadata::size()
+    put_bytes(b, name.as_bytes());
 }
 
 /// `Grid::writeTransform` -> `Transform::write`: `writeString(map->type())`
@@ -494,6 +517,7 @@ fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
 //  LeafNode::writeTopology (tree/{Root,Internal,Leaf}Node.h)
 // ============================================================================
 
+/// `Tree::writeTopology`: `bufferCount`(`i32`, always 1), then
 /// `RootNode<ChildT>::writeTopology`: `background`(`f32`) + `numTiles`(u32,
 /// always 0 - this writer never places a root-level constant tile) +
 /// `numChildren`(u32), then, per child (`std::map<Coord,_>` order -
@@ -501,6 +525,11 @@ fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
 /// the child's own `writeTopology`.
 fn write_topology(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], precision: Precision) {
     let (_n_leaf, n_lower, n_upper) = node_counts(grid);
+    // `Tree::writeTopology` = `TreeBase::writeTopology` (`tree/Tree.h`: an
+    // `int32_t bufferCount = 1`) then `RootNode::writeTopology`. Without the
+    // word, OpenVDB warns "multi-buffer trees are no longer supported" and
+    // reads every field of the root four bytes early (SPEC-LIT §117.8).
+    put_i32(b, 1); // bufferCount
     put_f32(b, 0.0); // background
     put_u32(b, 0); // numTiles
     put_u32(b, (n_upper[0] * n_upper[1] * n_upper[2]) as u32); // numChildren
@@ -751,6 +780,10 @@ mod reader {
         /// `GridDescriptor::read` does before parsing a single node.
         pub precision: Precision,
         pub class_metadata: Option<String>,
+        /// The `name` grid metadata (`GridBase::META_GRID_NAME`), which is
+        /// what OpenVDB's `GridBase::getName` returns after a read - the
+        /// descriptor's name is not copied onto the grid.
+        pub name_metadata: Option<String>,
         /// `is_saved_as_half_float`, when the grid carries it.
         pub half_metadata: Option<bool>,
         pub voxel_size: [f64; 3],
@@ -822,6 +855,13 @@ mod reader {
     pub fn read_all(bytes: &[u8]) -> Vec<ReadGrid> {
         let magic = get_u64(bytes, 0);
         assert_eq!(magic, MAGIC, "not a .vdb file");
+        // SPEC-LIT §117.8(3): the version is bytes 8..11; 224 and 225 read
+        // alike, because nothing this reader parses differs between them.
+        let version = get_u32(bytes, 8);
+        assert!(
+            version == FILE_VERSION || version == FILE_VERSION_HALF_GRID,
+            "reader only handles file versions {FILE_VERSION} and {FILE_VERSION_HALF_GRID}, got {version}"
+        );
         let mut pos = 8 + 4 + 4 + 4; // magic, fileVersion, libMajor, libMinor
         pos += 1; // hasGridOffsets
         pos += 36; // uuid
@@ -861,6 +901,7 @@ mod reader {
             let meta_count = get_u32(bytes, pos);
             pos += 4;
             let mut class_metadata = None;
+            let mut name_metadata = None;
             let mut half_metadata = None;
             for _ in 0..meta_count {
                 let mname = get_string(bytes, &mut pos);
@@ -871,8 +912,10 @@ mod reader {
                     "string" => {
                         let value =
                             String::from_utf8_lossy(&bytes[pos..pos + len]).into_owned();
-                        if mname == "class" {
-                            class_metadata = Some(value);
+                        match mname.as_str() {
+                            "class" => class_metadata = Some(value),
+                            META_GRID_NAME => name_metadata = Some(value),
+                            _ => {}
                         }
                     }
                     "bool" => {
@@ -895,6 +938,12 @@ mod reader {
             }
             let voxel_size = [m[0], m[5], m[10]];
             let origin = [m[12], m[13], m[14]];
+
+            // `TreeBase::readTopology` (`tree/Tree.h`): an `int32_t`
+            // bufferCount, which must be 1, before the root node.
+            let buffer_count = get_i32(bytes, pos);
+            assert_eq!(buffer_count, 1, "TreeBase::writeTopology writes bufferCount = 1");
+            pos += 4;
 
             // SPEC-LIT S45.1(5): the background stays `sizeof(ValueType)`
             // even under `toHalf` - `RootNode::writeTopology` truncates the
@@ -934,7 +983,8 @@ mod reader {
 
             pos = end_pos;
             out.push(ReadGrid {
-                name, grid_type, precision, class_metadata, half_metadata, voxel_size, origin,
+                name, grid_type, precision, class_metadata, name_metadata, half_metadata,
+                voxel_size, origin,
                 nx, ny, nz, values,
             });
         }
@@ -1127,6 +1177,7 @@ mod tests {
         assert_eq!(g.name, "T");
         assert_eq!(g.grid_type, "Tree_float_5_4_3");
         assert_eq!(g.class_metadata.as_deref(), Some("fog volume"));
+        assert_eq!(g.name_metadata.as_deref(), Some("T"), "GridBase::getName reads this");
         assert_eq!((g.nx, g.ny, g.nz), (grid.nx, grid.ny, grid.nz));
         for k in 0..grid.nz {
             for j in 0..grid.ny {
@@ -1426,5 +1477,57 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ------------------------------------------------------------------
+    //  SPEC-LIT §117.8 - the file version (VIO-08)
+    // ------------------------------------------------------------------
+
+    /// Bytes 8..11 are the file version as a little-endian `u32`, and it is
+    /// 224 (`OPENVDB_FILE_VERSION_MULTIPASS_IO`), the version Isaac Sim 6.0
+    /// reads. The reader reads the same bytes stamped 224 or 225 to the same
+    /// grids, and refuses 223 and 226.
+    #[test]
+    fn file_version_224() {
+        let grid = make_grid(5, 4, 3);
+        let field = ramp_field(&grid);
+        let path = scratch("version");
+        write(&path, &grid, &[OutputField::scalar("T", &field)], Precision::F32).expect("write");
+        let bytes = std::fs::read(&path).expect("read back");
+        let _ = std::fs::remove_file(&path);
+
+        let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        assert_eq!(version, 224, "bytes 8..11 must be the file version 224");
+
+        let check = |grids: &[reader::ReadGrid]| {
+            assert_eq!(grids.len(), 1);
+            let g = &grids[0];
+            assert_eq!(g.name, "T");
+            assert_eq!(g.name_metadata.as_deref(), Some("T"));
+            assert_eq!(g.grid_type, "Tree_float_5_4_3");
+            assert_eq!((g.nx, g.ny, g.nz), (grid.nx, grid.ny, grid.nz));
+            for k in 0..grid.nz {
+                for j in 0..grid.ny {
+                    for i in 0..grid.nx {
+                        let want = field[grid.idx(i, j, k)] as f32 as f64;
+                        let got = g.values[i + grid.nx * (j + grid.ny * k)];
+                        assert_eq!(got, want, "voxel ({i},{j},{k})");
+                    }
+                }
+            }
+        };
+        check(&read_all(&bytes));
+
+        let stamped = |v: u32| {
+            let mut b = bytes.clone();
+            b[8..12].copy_from_slice(&v.to_le_bytes());
+            b
+        };
+        check(&read_all(&stamped(225)));
+        for v in [223u32, 226] {
+            let b = stamped(v);
+            let r = std::panic::catch_unwind(|| read_all(&b));
+            assert!(r.is_err(), "the reader must refuse file version {v}");
+        }
     }
 }

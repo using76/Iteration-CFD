@@ -36748,9 +36748,9 @@ VIO-01's sphere gate states that `fluid_fraction` equals `1 - V_s / V_b` within
 
 ### 117.8 The `.vdb` file version
 
-**Implemented by VIO-08.** `vdb.rs` writes `OPENVDB_FILE_VERSION = 225`, the value at the
-OpenVDB `v13.0.0` tag it was transcribed from. Isaac Sim 6.0 reads 224 or lower (§117.1).
-`isaac_export.py`'s gate `G-VDBVER` already holds the exported file to `<= 224`.
+**Implemented by VIO-08.** Before VIO-08, `vdb.rs` wrote `OPENVDB_FILE_VERSION = 225`, the
+value at the OpenVDB `v13.0.0` tag it was transcribed from. Isaac Sim 6.0 reads 224 or lower
+(§117.1). `isaac_export.py`'s gate `G-VDBVER` already holds the exported file to `<= 224`.
 
 The rule:
 
@@ -36762,7 +36762,44 @@ The rule:
 3. In either case bytes 8 to 11 of the file are the version, as a little-endian `u32`, and the
    crate's own reader reads both 224 and 225.
 
-VIO-08 records its finding here, in place of this sentence.
+**The finding (VIO-08, from the Apache-2.0 sources at the `v13.0.0` tag).**
+`openvdb/version.h.in` ends the enumeration with `OPENVDB_FILE_VERSION_MULTIPASS_IO = 224` and
+`OPENVDB_FILE_VERSION_HALF_GRID = 225`, and sets `OPENVDB_FILE_VERSION = 225`. The `CHANGES`
+entry for 13.0.0 says what 225 is for: "in-memory support for Half Grids and the file format
+has been extended to add I/O serialization for half grids", that is, the native `HalfGrid`
+type, a tree whose values are `half`. No read in the library branches on 225:
+`OPENVDB_FILE_VERSION_HALF_GRID` is defined and never referenced. The reads that branch on the
+version are `Archive::readHeader` (above `OPENVDB_FILE_VERSION` it warns "expected version 225
+or earlier", below 222 it throws), the `< 222` (`NODE_MASK_COMPRESSION`) reads in `Archive.cc`
+and `File.cc`, and the `< 223` (`BLOSC_COMPRESSION`) default codec. `vdb.rs` writes only
+`Tree_float_5_4_3` grids, with or without the `_HalfFloat` save suffix of §45. That suffix is a
+float grid saved as half and is older than 225. So rule 2's first branch holds, and every
+`.vdb` is written as 224. There is no `fileVersion` key. The library version words stay 13.0,
+because no reader branches on them.
+
+**Two writer defects that the supervisor check found.** Reading a file from `ofgpu-lowmach`
+with Isaac Sim's own module (omni.volume, OpenVDB 12.0.0) and with Blender 5.1's (13.0.0)
+showed both readers warn "multi-buffer trees are no longer supported". Both returned all ten
+grids with an empty name and no active voxels. That was true at 224 and at 225, so the
+version was not the cause. The two causes were:
+
+1. `Tree::writeTopology` writes `TreeBase::writeTopology`'s `int32_t bufferCount = 1`
+   (`tree/Tree.h`) before `RootNode::writeTopology`. `vdb.rs` did not write that word, so a
+   reader took every field of the root from four bytes early. The crate's own test reader
+   skipped the same word, which is why its round trips passed.
+2. `GridBase::getName` reads the grid's `name` metadata (`GridBase::META_GRID_NAME`,
+   `Grid.cc`). The `Archive` read never copies the descriptor's name onto the grid, and
+   `vdb.rs` wrote only `class` (and `is_saved_as_half_float`).
+
+The writer now writes `bufferCount = 1`, and it writes a `name` `StringMetadata` after the
+other entries (`MetaMap` is a `std::map`, so the order is `class`, `is_saved_as_half_float`,
+`name`). Each grid grows by `26 + len(name)` bytes. The fp32-to-fp16 size difference of §45 is
+unchanged, because both files carry both additions. The test reader now asserts
+`bufferCount = 1`, records the `name` entry, and accepts the versions 224 and 225 only. Every
+earlier round-trip test failed against the old writer at the `bufferCount` assertion (9 of
+12), and the new test `vdb::tests::file_version_224` failed at `225 != 224`. Because of this, a
+Cartesian `.vdb` is no longer byte-identical to the one `8ab1c4a` wrote, and VIO-03's "SHA-256
+unchanged from `8ab1c4a`" has to be taken against the bytes after VIO-08.
 
 ### 117.9 The Isaac Sim profile
 
@@ -36950,7 +36987,11 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 
 | unit | quantity | value | commit |
 |---|---|---|---|
-| — | — | — | — |
+| VIO-08 | bytes 8..11 of an `ofgpu-lowmach` `.vdb` (10 x 5 x 3 Cartesian duct, 10 grids, 3 iterations) | 224 (`E0 00 00 00`) | this unit |
+| VIO-08 | `vdb::tests::file_version_224`: 224 written; the reader reads 224 and 225 to the same grids and refuses 223 and 226 | pass | this unit |
+| VIO-08 | Isaac Sim omni.volume `openvdb.readAll` (12.0.0, module format 224) on that file | 10 grids, named `T`, `U.mag`, `U.x`, `U.y`, `U.z`, `epsilon`, `k`, `nut`, `p`, `rho`; each with 150 active voxels, box (0,0,0)-(9,4,2), voxel (0.04, 0.01, 0.0167), class fog volume; no warning; 0.2 s | this unit |
+| VIO-08 | Blender 5.1.2's `openvdb.readAll` (13.0.0, module format 225) on that file | the same ten grids, with the same per-grid active count, box, voxel size, class, min, max and sum as Isaac's read | this unit |
+| VIO-08 | the same file before VIO-08, under both readers | ten unnamed grids with 0 active voxels each, "multi-buffer trees are no longer supported" | this unit |
 
 ### 117.14 References
 
