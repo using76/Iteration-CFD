@@ -177,7 +177,7 @@ fn both_ways<I, S>(
     Vec<Vec<Scalar>>,
     DistPerformance,
     Vec<usize>,
-    Vec<Result<(Vec<Scalar>, DistPerformance, u64, usize, bool)>>,
+    Vec<Result<(Vec<Scalar>, DistPerformance, u64, usize, bool, usize)>>,
 )>
 where
     I: Fn(
@@ -222,7 +222,7 @@ where
 
     let got = ThreadComm::run(
         np,
-        |comm| -> Result<(Vec<Scalar>, DistPerformance, u64, usize, bool)> {
+        |comm| -> Result<(Vec<Scalar>, DistPerformance, u64, usize, bool, usize)> {
         let gpu = Gpu::new(0)?;
         let sol = SolverKernels::new(&gpu)?;
         let rank = comm.rank();
@@ -237,7 +237,7 @@ where
         let perf = spmd(&gpu, &sol, comm, &mut psi, &sys, &mut halo, &mut w, ctrl)?;
         gpu.sync()?;
         let pinv = w.partition_invariant(ctrl.precon);
-        Ok((gpu.download(&psi)?, perf, w.n_flag_votes(), w.colours(), pinv))
+        Ok((gpu.download(&psi)?, perf, w.n_flag_votes(), w.colours(), pinv, outer_steps(&w)))
         },
     )?;
     Ok((fields, perf, colours, got))
@@ -316,7 +316,7 @@ fn an_spmd_pcg_is_the_in_process_pcg_in_both_builds() {
                     )
                     .unwrap_or_else(|e| panic!("{nx}x{ny}x{nz} {precon:?} P = {np} {name}: {e}"));
                     for (r, part) in dec.parts.iter().enumerate() {
-                        let (g, perf, votes, _, _) = got[r]
+                        let (g, perf, votes, _, _, outer) = got[r]
                             .as_ref()
                             .unwrap_or_else(|e| {
                                 panic!("{nx}x{ny}x{nz} {precon:?} P = {np} {name} rank {r}: {e}")
@@ -357,7 +357,7 @@ fn an_spmd_pcg_is_the_in_process_pcg_in_both_builds() {
                             "final residual bits, {at}"
                         );
                         assert_eq!(perf.n_iterations, wp.n_iterations, "vs Reference ONE, {at}");
-                        assert_eq!(*votes, perf.n_iterations as u64 + 1, "votes, {at}");
+                        assert_eq!(*votes, expected_votes(perf, *outer), "votes, {at}");
                     }
                 }
             }
@@ -387,7 +387,7 @@ fn an_spmd_pcg_is_the_in_process_pcg_in_both_builds() {
                 )
                 .unwrap_or_else(|e| panic!("gathered P = {np} {name}: {e}"));
                 for (r, part) in dec.parts.iter().enumerate() {
-                    let (g, perf, votes, _, _) = got[r]
+                    let (g, perf, votes, _, _, outer) = got[r]
                         .as_ref()
                         .unwrap_or_else(|e| panic!("gathered P = {np} {name} rank {r}: {e}"));
                     rank_results += 1;
@@ -415,7 +415,7 @@ fn an_spmd_pcg_is_the_in_process_pcg_in_both_builds() {
                         ref_perf.final_residual.to_bits(),
                         "final residual bits, {at}"
                     );
-                    assert_eq!(*votes, perf.n_iterations as u64 + 1, "votes, {at}");
+                    assert_eq!(*votes, expected_votes(perf, *outer), "votes, {at}");
                 }
             }
         }
@@ -846,14 +846,37 @@ fn an_spmd_pcg_refuses_by_name() {
 }
 
 
+/// The flag votes a solve takes at check interval 1: `n_iterations + 1`
+/// unrefined. Under `single` the solve is refined (SPEC-LIT §118.12): each
+/// of the `outer` inner solves votes once before it iterates and once per
+/// iteration (`n_iterations + outer` in all), and each of the `outer + 1`
+/// outer verdicts is voted too - `n_iterations + 2 outer + 1`, which is the
+/// unrefined count at `outer = 0`.
+fn expected_votes(perf: &DistPerformance, outer: usize) -> u64 {
+    (perf.n_iterations + 2 * outer + 1) as u64
+}
+
+/// The outer refinement steps of the workspace's last solve: 0 in the f64
+/// build, which does not refine.
+#[cfg(feature = "single")]
+fn outer_steps(w: &SpmdWorkspace) -> usize {
+    w.ir_outer_steps()
+}
+
+#[cfg(not(feature = "single"))]
+fn outer_steps(_w: &SpmdWorkspace) -> usize {
+    0
+}
+
 /// The per-rank comparison every gate below makes: the counters, both
-/// residuals' bits, `converged`, and `n_iterations + 1` votes - plus the
+/// residuals' bits, `converged`, and the [`expected_votes`] - plus the
 /// owned cells bit for bit the in-process part's and, when `one` is given,
 /// bit for bit the ONE-part answer's at the owned cell's global index.
 fn assert_rank(
     g: &[Scalar],
     perf: &DistPerformance,
     votes: u64,
+    outer: usize,
     global_cell: &[Label],
     ref_field: &[Scalar],
     ref_perf: &DistPerformance,
@@ -892,7 +915,7 @@ fn assert_rank(
     if let Some((_, iters)) = one {
         assert_eq!(perf.n_iterations, iters, "vs Reference ONE, {at}");
     }
-    assert_eq!(votes, perf.n_iterations as u64 + 1, "votes, {at}");
+    assert_eq!(votes, expected_votes(perf, outer), "votes, {at}");
 }
 
 /// The in-process solver as a plain fn pointer, matching [`SpmdSolve`].
@@ -988,7 +1011,7 @@ fn an_spmd_pbicgstab_is_the_in_process_pbicgstab_in_both_builds() {
                         panic!("PBiCGStab {nx}x{ny}x{nz} {precon:?} P = {np} {name}: {e}")
                     });
                     for (r, part) in dec.parts.iter().enumerate() {
-                        let (g, perf, votes, _, _) = got[r]
+                        let (g, perf, votes, _, _, outer) = got[r]
                             .as_ref()
                             .unwrap_or_else(|e| {
                                 panic!(
@@ -1005,6 +1028,7 @@ fn an_spmd_pbicgstab_is_the_in_process_pbicgstab_in_both_builds() {
                             g,
                             perf,
                             *votes,
+                            *outer,
                             &part.global_cell,
                             &ref_fields[r],
                             &ref_perf,
@@ -1040,7 +1064,7 @@ fn an_spmd_pbicgstab_is_the_in_process_pbicgstab_in_both_builds() {
                 )
                 .unwrap_or_else(|e| panic!("gathered PBiCGStab P = {np} {name}: {e}"));
                 for (r, part) in dec.parts.iter().enumerate() {
-                    let (g, perf, votes, _, _) = got[r]
+                    let (g, perf, votes, _, _, outer) = got[r]
                         .as_ref()
                         .unwrap_or_else(|e| panic!("gathered P = {np} {name} rank {r}: {e}"));
                     rank_results += 1;
@@ -1050,6 +1074,7 @@ fn an_spmd_pbicgstab_is_the_in_process_pbicgstab_in_both_builds() {
                         g,
                         perf,
                         *votes,
+                        *outer,
                         &part.global_cell,
                         &ref_fields[r],
                         &ref_perf,
@@ -1155,7 +1180,7 @@ fn an_spmd_block_local_factorisation_is_the_in_process_one_in_both_builds() {
                     );
 
                     for (r, part) in dec.parts.iter().enumerate() {
-                        let (g, perf, votes, colours, pinv) = got[r]
+                        let (g, perf, votes, colours, pinv, outer) = got[r]
                             .as_ref()
                             .unwrap_or_else(|e| {
                                 panic!(
@@ -1172,6 +1197,7 @@ fn an_spmd_block_local_factorisation_is_the_in_process_one_in_both_builds() {
                             g,
                             perf,
                             *votes,
+                            *outer,
                             &part.global_cell,
                             &ref_fields[r],
                             &ref_perf,

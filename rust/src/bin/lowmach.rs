@@ -749,6 +749,7 @@ fn write_time(
         name: &name,
         mesh: hm,
         cart: cart.as_ref(),
+        vox: None,
         fields: &vis_fields,
         foam: &foam_fields,
     };
@@ -2748,7 +2749,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         // formula is correct on both a wall-function and a resolved mesh
         // (§32.2's own point: "on a resolved mesh directly from the first
         // cell").
-        let mut yplus_by_patch: Vec<(String, f64, f64, f64)> = Vec::new(); // (name, min, mean, max)
+        let mut yplus_by_patch: Vec<PatchYPlus> = Vec::new();
         let mut tw_by_patch: Vec<(String, f64, f64, f64, f64, f64)> = Vec::new(); // (name, mean q, mean T_P, mean T_w, mean k_P, area)
         // SPEC-LIT §33.2's mesh check needs the owner cell of every wall
         // boundary face - gathered here, over every `wall`-kind patch (not
@@ -2829,12 +2830,13 @@ fn run(o: &Options) -> Result<RunEnd> {
                 }
             }
             if patch.size > 0 && k_internal.is_some() {
-                yplus_by_patch.push((
-                    patch.name.clone(),
-                    yplus_min,
-                    yplus_sum / patch.size as f64,
-                    yplus_max,
-                ));
+                yplus_by_patch.push(PatchYPlus {
+                    patch: patch.name.clone(),
+                    faces: patch.size,
+                    min: yplus_min,
+                    mean: yplus_sum / patch.size as f64,
+                    max: yplus_max,
+                });
                 tw_by_patch.push((
                     patch.name.clone(),
                     patch_q_sum / patch_area.max(1e-30),
@@ -2979,10 +2981,10 @@ fn run(o: &Options) -> Result<RunEnd> {
             g(q_wall_w),
             g(q_wall_w / wall_area_m2.max(1e-30)),
         );
-        for (name, ymin, ymean, ymax) in &yplus_by_patch {
+        for y in &yplus_by_patch {
             println!(
-                "  y+ at {name}: min {} | mean {} | max {}",
-                g(*ymin), g(*ymean), g(*ymax)
+                "  y+ at {}: min {} | mean {} | max {}",
+                y.patch, g(y.min), g(y.mean), g(y.max)
             );
         }
         for (name, qmean, tp_mean, tw_mean, kp_mean, _area) in &tw_by_patch {
@@ -2994,6 +2996,14 @@ fn run(o: &Options) -> Result<RunEnd> {
         if k_internal.is_none() {
             println!("  y+ not reported: {} carries no turbulence kinetic energy", turb.name());
         }
+        // SPEC-LIT §29.3 note (docs/15 AR-1): the SAME tuples the lines
+        // above print, as JSON beside the run - written only when there is
+        // a `k`, and a stale file from an earlier run is removed otherwise.
+        write_yplus_json(
+            &output_root(&o.case_path),
+            turb.name(),
+            k_internal.is_some().then_some(yplus_by_patch.as_slice()),
+        )?;
 
         // SPEC-LIT §35.2: "the thermostat's integrated power equals the wall
         // heat input to round-off" at steady state - printed side by side
@@ -3424,6 +3434,48 @@ struct RunEnd {
     /// 105-E's readout (SPEC-LIT 105.17). It feeds no output.
     #[cfg_attr(not(test), allow(dead_code))]
     t_mean: f64,
+}
+
+/// One wall patch's first-cell y+ (SPEC-LIT §29.3: `y+ = C_mu^{1/4} y
+/// sqrt(k_P) / nu`), over its faces: the printed `y+ at` line and one
+/// `patches[]` entry of `yPlus.json`. `mean` is the face-count mean, as
+/// printed.
+#[derive(serde::Serialize)]
+struct PatchYPlus {
+    patch: String,
+    faces: usize,
+    min: f64,
+    mean: f64,
+    max: f64,
+}
+
+/// The file name of the per-patch y+ document in the output root.
+const YPLUS_JSON: &str = "yPlus.json";
+
+/// Writes `<root>/yPlus.json` from `patches` (SPEC-LIT §29.3 note), or, when
+/// `patches` is `None` (no `k` field), removes a stale one so the file never
+/// describes a run other than this one. serde_json writes each f64 as its
+/// shortest round-trip form, so the file holds the exact doubles that the
+/// `y+ at` lines print to six digits.
+fn write_yplus_json(root: &Path, turbulence: &str, patches: Option<&[PatchYPlus]>) -> Result<()> {
+    let path = root.join(YPLUS_JSON);
+    let io = |e: std::io::Error| Error::Io { path: path.display().to_string(), source: e };
+    let Some(patches) = patches else {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+            _ => Ok(()),
+        };
+    };
+    let doc = serde_json::json!({
+        "solver": "ofgpu-lowmach",
+        "turbulence": turbulence,
+        "definition": "first-cell y+ = Cmu^(1/4) y sqrt(k_P) / nu per wall face (SPEC-LIT 29.3); mean over faces",
+        "patches": patches,
+    });
+    let text = serde_json::to_string_pretty(&doc)
+        .map_err(|e| Error::Config(format!("{YPLUS_JSON}: {e}")))?;
+    std::fs::create_dir_all(root).map_err(io)?;
+    std::fs::write(&path, text + "\n").map_err(io)
 }
 
 /// SPEC-LIT §31.4: 0 the budget was reached, 2 diverged, 3 refused by name

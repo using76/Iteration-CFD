@@ -72,6 +72,8 @@ pub mod boundary_data;
 pub mod writer;
 pub mod output_plan;
 pub mod voxelmap;
+pub mod thermo_dict;
+pub mod case_parcels;
 
 pub use writer::{
     cartesian_info, CartesianInfo, FoamField, FoamPayload, FoamWriter, NvdbWriter, ResultWriter,

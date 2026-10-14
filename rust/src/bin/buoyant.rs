@@ -1049,6 +1049,7 @@ impl FieldWriter<'_> {
             name,
             mesh: hm,
             cart: cart.as_ref(),
+            vox: None,
             fields: &vis_fields,
             foam: &foam_fields,
         };

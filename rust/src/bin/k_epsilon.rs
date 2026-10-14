@@ -721,6 +721,7 @@ kappa implied by these coefficients {} (S41.3)",
             name: &wt,
             mesh: &hm,
             cart: cart.as_ref(),
+            vox: None,
             fields: &vis_fields,
             foam: &foam_fields,
         };

@@ -2426,7 +2426,8 @@ unit-tested and uncalled — this is what they were built for.
 ## 26. The energy equation
 
 Temperature form, sensible enthalpy with constant cp (v1, stated; cp(T)
-polynomials are a coefficient change, not a structure change):
+polynomials are a coefficient change, not a structure change; §133.8 carries
+a per-cell `cp` field in the ddt and convection rows, CHR-10a):
 
 ```
 rho cp [ ∂T/∂t + ∇·(u T) − T (∇·u) ] = ∇·(k_eff ∇T) + q'''_c − ∇·q_r + dp0/dt
@@ -2925,6 +2926,20 @@ the molecular resistance the resolved mesh already provides.
 | Ks → 0 rough thermal wall | reproduces the smooth thermal wall |
 | flat channel, fixed-T walls, y+ ≈ 30 vs y+ ≈ 1 (lowRe) | wall heat flux agrees between the two meshes to a stated tolerance — the whole point of the model |
 | energy budget | wall heat extracted = domain enthalpy change + outflow, closed |
+
+**Note - the y+ report as a file (AUT-15, docs/15 AR-1).** Whenever the
+turbulence model carries a `k`, `ofgpu-lowmach` writes the per-patch
+first-cell `y+ = C_mu^{1/4} y sqrt(k_P) / nu` of every `wall`-kind patch, the
+numbers its `y+ at <patch>: min | mean | max` lines print in the integrated
+wall heat flux block, to `yPlus.json` in the output root (the case directory,
+or `<stem>_jsonc` beside a JSONC case): `solver`, `turbulence`, `definition`
+and `patches[]` of `{patch, faces, min, mean, max}`, `mean` being the
+face-count mean as printed. The file holds the same doubles in shortest
+round-trip form; the line is their `%g`. Without a `k` (laminar, LES) no file
+is written, and one left by an earlier run is removed. Output only: no field,
+residual or printed line changes. Gate: `tests/lowmach_yplus_json.rs` runs the
+shipped `cases/channelPeriodicFluxWF.jsonc` (20 iterations) as the binary and
+requires `%g` of each JSON value to equal the printed token on both walls.
 
 ---
 
@@ -37216,9 +37231,9 @@ VIO-01's sphere gate states that `fluid_fraction` equals `1 - V_s / V_b` within
 
 ### 117.8 The `.vdb` file version
 
-**Implemented by VIO-08.** `vdb.rs` writes `OPENVDB_FILE_VERSION = 225`, the value at the
-OpenVDB `v13.0.0` tag it was transcribed from. Isaac Sim 6.0 reads 224 or lower (§117.1).
-`isaac_export.py`'s gate `G-VDBVER` already holds the exported file to `<= 224`.
+**Implemented by VIO-08.** Before VIO-08, `vdb.rs` wrote `OPENVDB_FILE_VERSION = 225`, the
+value at the OpenVDB `v13.0.0` tag it was transcribed from. Isaac Sim 6.0 reads 224 or lower
+(§117.1). `isaac_export.py`'s gate `G-VDBVER` already holds the exported file to `<= 224`.
 
 The rule:
 
@@ -37230,7 +37245,44 @@ The rule:
 3. In either case bytes 8 to 11 of the file are the version, as a little-endian `u32`, and the
    crate's own reader reads both 224 and 225.
 
-VIO-08 records its finding here, in place of this sentence.
+**The finding (VIO-08, from the Apache-2.0 sources at the `v13.0.0` tag).**
+`openvdb/version.h.in` ends the enumeration with `OPENVDB_FILE_VERSION_MULTIPASS_IO = 224` and
+`OPENVDB_FILE_VERSION_HALF_GRID = 225`, and sets `OPENVDB_FILE_VERSION = 225`. The `CHANGES`
+entry for 13.0.0 says what 225 is for: "in-memory support for Half Grids and the file format
+has been extended to add I/O serialization for half grids", that is, the native `HalfGrid`
+type, a tree whose values are `half`. No read in the library branches on 225:
+`OPENVDB_FILE_VERSION_HALF_GRID` is defined and never referenced. The reads that branch on the
+version are `Archive::readHeader` (above `OPENVDB_FILE_VERSION` it warns "expected version 225
+or earlier", below 222 it throws), the `< 222` (`NODE_MASK_COMPRESSION`) reads in `Archive.cc`
+and `File.cc`, and the `< 223` (`BLOSC_COMPRESSION`) default codec. `vdb.rs` writes only
+`Tree_float_5_4_3` grids, with or without the `_HalfFloat` save suffix of §45. That suffix is a
+float grid saved as half and is older than 225. So rule 2's first branch holds, and every
+`.vdb` is written as 224. There is no `fileVersion` key. The library version words stay 13.0,
+because no reader branches on them.
+
+**Two writer defects that the supervisor check found.** Reading a file from `ofgpu-lowmach`
+with Isaac Sim's own module (omni.volume, OpenVDB 12.0.0) and with Blender 5.1's (13.0.0)
+showed both readers warn "multi-buffer trees are no longer supported". Both returned all ten
+grids with an empty name and no active voxels. That was true at 224 and at 225, so the
+version was not the cause. The two causes were:
+
+1. `Tree::writeTopology` writes `TreeBase::writeTopology`'s `int32_t bufferCount = 1`
+   (`tree/Tree.h`) before `RootNode::writeTopology`. `vdb.rs` did not write that word, so a
+   reader took every field of the root from four bytes early. The crate's own test reader
+   skipped the same word, which is why its round trips passed.
+2. `GridBase::getName` reads the grid's `name` metadata (`GridBase::META_GRID_NAME`,
+   `Grid.cc`). The `Archive` read never copies the descriptor's name onto the grid, and
+   `vdb.rs` wrote only `class` (and `is_saved_as_half_float`).
+
+The writer now writes `bufferCount = 1`, and it writes a `name` `StringMetadata` after the
+other entries (`MetaMap` is a `std::map`, so the order is `class`, `is_saved_as_half_float`,
+`name`). Each grid grows by `26 + len(name)` bytes. The fp32-to-fp16 size difference of §45 is
+unchanged, because both files carry both additions. The test reader now asserts
+`bufferCount = 1`, records the `name` entry, and accepts the versions 224 and 225 only. Every
+earlier round-trip test failed against the old writer at the `bufferCount` assertion (9 of
+12), and the new test `vdb::tests::file_version_224` failed at `225 != 224`. Because of this, a
+Cartesian `.vdb` is no longer byte-identical to the one `8ab1c4a` wrote, and VIO-03's "SHA-256
+unchanged from `8ab1c4a`" has to be taken against the bytes after VIO-08.
 
 ### 117.9 The Isaac Sim profile
 
@@ -37426,7 +37478,7 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 | VIO-00 | the §80 xref audit; every DOI of §117.14 resolves | D |
 | VIO-01 | Cartesian box, `h` = cell size: `M[v] = v` for every voxel; a 2:1 `refined.rs` mesh: 100 % agreement with (117.6)'s f64 brute force on 10^4 voxels; sphere in a box: `fluid_fraction` = `1 - V_s/V_b` within `A_s h / V_b`; the `maxVoxels` cap coarsens by (117.3) with the note; the map is identical under `single` | D, A |
 | VIO-02 | `phi = a . x + b` reproduced at interior voxels to 1e-12 (f64) and 1e-5 (`single`, R class); `max_v s_v <= max_c phi_c` and `min_v s_v >= min_c phi_c`; (117.9) as an identity in f64 | R, D, A |
-| VIO-03 | active count = `n_fluid` (`fluid`) or `n_voxels` (`dense`); values round-trip bit for bit (`fp32`); the Cartesian SHA-256 unchanged from `8ab1c4a` | D |
+| VIO-03 | active count = `n_fluid` (`fluid`) or `n_voxels` (`dense`); values round-trip bit for bit (`fp32`); the Cartesian SHA-256 unchanged from the tree before VIO-03 (`97f3d6a`; the bytes of `8ab1c4a` no longer hold after VIO-08, §117.8) | D |
 | VIO-04 | the keys parse and are schema-exported; every refusal of §117.12 by name; `-permissive` kept | D |
 | VIO-05a/b | a box-sphere automesher mesh writes `.vdb` from `ofgpu-lowmach` and `ofgpu-k-omega` (a 20-step run, 2 min or less), then from every other driver | D, measured |
 | VIO-06 | the drone at `t = 0.5 s`: fluid fraction within 1e-3 of 0.999906; free-stream `U.x` relative error 0.005 or less; 2 min or less | A, P |
@@ -37453,10 +37505,20 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 | VIO-02 | (117.9) for `cell` on the 2:1 mesh at `h` = 0.1 (not commensurate with 1/4 or 1/8), pseudo-random field, evaluated in f64 | the two sides differ by 6.2e-17, bar `1e-12 sum_c abs(phi_c) V_c` = 5.0e-13; `sum_c abs(n_c h^3 - V_c)` = 0.310469, and the left side is within the largest `abs(phi_c)` times it; with `phi = 1` the left side over `sum_c V_c` equals `volume_error` (3.3e-16) within 1e-12; every owned voxel holds `phi_c` bit for bit | VIO-02 |
 | VIO-02 | background, fallback and refusals: 16^3 box, `h` = 1/8, box `[-1/2, 3/2]^3`, `background` = -7.5; an 8 x 4 x 1 slab; one cell; a 513-value field on 512 cells; a NaN or an infinite cell value | 3 584 `NONE` voxels hold -7.5 exactly and the 512 owned ones lie in `[0, 1)`, under `cell` and under `linear`; the slab has `n_linear_fallback` = 32 of 32 and `linear` equals `cell` bit for bit; the single cell has no neighbour and falls back; the wrong length is refused by name; a non-finite value does not panic and changes no voxel outside the cell and its point neighbours (3 880 voxels bit-identical) | VIO-02 |
 | VIO-02 | FNV-1a 64 of the `linear` samples (the f64 bits, in voxel order) of four fields whose cell values are exact in f32: the pseudo-random field on the 2:1 mesh (`h` = 1/24, and VIO-01's lattice on the ties), on the sphere, and the step on the 8^3 box; f64 build against `single` | `635690dc32b97949`, `32a66f5dc7a7cdcb`, `9e8419bfe07c2c53`, `528f800969e3f325` in both builds | VIO-02 |
+| VIO-03 | the Cartesian path, `tests/volume_lattice.rs`: `.vdb` and `.nvdb`, `fp32` and `fp16`, of a 130 x 9 x 3 box (two Lower nodes, partial leaves on every axis) carrying a scalar, a vector and a symmetric tensor whose values and magnitudes are exact in f32 | SHA-256 `5f897e75...`, `da492a7d...`, `6ede35ce...`, `45251abc...`, written by the tree at `97f3d6a` before VIO-03 and unchanged after it, in both builds | VIO-03 |
+| VIO-03 | lattice round trips through the crate's readers: the 2:1 mesh at `h` = 1/24 over `[-1/2, 6] x [-1/2, 3/2]^2` (156 x 48 x 48 = 359 424 voxels, two Lower nodes along x, the fluid in one), `background` = -7.5, `cell` and `linear`, `fp32` and `fp16` | `fluid`: 13 824 active voxels = `n_fluid`, 64 of 720 leaves and 1 of 2 Lower nodes written; `dense`: 359 424 active, all 720 leaves; every active value is the sample rounded once (then to f16 under `fp16`) bit for bit; every inactive leaf slot, every childless internal slot and the root background hold -7.5; the transform is `vm.origin()` and `h'` in f64 bit for bit; a `fluid` `.vdb` grid is 656 leaves x 2 177 B + one Lower node of 16 385 B smaller than the `dense` one; a `fluid` lattice no cell reaches is refused by name | VIO-03 |
+| VIO-03 | SHA-256 of four lattice files on that lattice (`.vdb` and `.nvdb`; `fluid` + `linear` + `fp32`, `dense` + `cell` + `fp16`), f64 build against `single` | `122b3656...`, `eae7c546...`, `847301c6...`, `d8f6421d...` in both builds | VIO-03 |
+| VIO-08 | bytes 8..11 of an `ofgpu-lowmach` `.vdb` (10 x 5 x 3 Cartesian duct, 10 grids, 3 iterations) | 224 (`E0 00 00 00`) | this unit |
+| VIO-08 | `vdb::tests::file_version_224`: 224 written; the reader reads 224 and 225 to the same grids and refuses 223 and 226 | pass | this unit |
+| VIO-08 | Isaac Sim omni.volume `openvdb.readAll` (12.0.0, module format 224) on that file | 10 grids, named `T`, `U.mag`, `U.x`, `U.y`, `U.z`, `epsilon`, `k`, `nut`, `p`, `rho`; each with 150 active voxels, box (0,0,0)-(9,4,2), voxel (0.04, 0.01, 0.0167), class fog volume; no warning; 0.2 s | this unit |
+| VIO-08 | Blender 5.1.2's `openvdb.readAll` (13.0.0, module format 225) on that file | the same ten grids, with the same per-grid active count, box, voxel size, class, min, max and sum as Isaac's read | this unit |
+| VIO-08 | the same file before VIO-08, under both readers | ten unnamed grids with 0 active voxels each, "multi-buffer trees are no longer supported" | this unit |
 
 **As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
 
 **As built (VIO-02).** `VoxelMap::build` builds a `LinearStencil` when `sample` is `linear`, and `VoxelMap::sample` and `sample_f64` return `s_v` for every voxel as f64; the writer of VIO-03 rounds once (§117.2 item 2). The code makes these choices where §117.5 leaves room. `N_f(c)` is the set of cells across the internal faces of `c`: a cell that shares two faces with `c` counts once, and a boundary face, a coupled one included, adds nothing. `N_p(c)` is taken from the points of all the faces of `c`, so a hanging node on a 2:1 face is a point of the coarse cell too. `C_c` is the f64 centre of `geom64()` and `x_v` is the voxel centre of (117.2). The fallback test of (117.7) reads the geometry only, so it is decided once per cell at setup; a cell with no face neighbour falls back. (117.7) is solved by Cramer's rule on the 3 x 3 normal matrix. `g_c`, `m_c` and `M_c` are evaluated once per cell per call, so one call costs `O(n_cells x neighbours + n_voxels)`. The clip is two comparisons, not `f64::clamp`, so a non-finite cell value passes through instead of aborting the run. A `Scalar` field is widened to f64 exactly and nothing is rounded back, which is why the `linear` samples of an f32-exact field are the same bits in both builds. The exactness gate's `single` arm needs a field whose cell values are not exact in f32; the plan's wording does not say so, and the second field of the first row is that field.
+
+**As built (VIO-03).** `vdb::write_lattice` and `nvdb::write_lattice` write a `VoxelMap`'s lattice, and `VdbWriter` and `NvdbWriter` call them through `WriteCtx.vox` when `WriteCtx.cart` is `None`; with both `None` the old refusal stands until VIO-04 rewrites it. Both writers now lay out one internal `Volume` (dimensions, the f64 origin and spacing of item 3 of §117.2, the background, the active set) and one `Occupancy` (the nodes holding an active voxel). The Cartesian path is the `Volume` with every voxel active and a background of 0, which reproduces the old bytes: `tests/volume_lattice.rs` pins their SHA-256 in both builds. The baseline is the tree at `97f3d6a`, taken before VIO-03 touched the writers, because VIO-08 changed the bytes of `8ab1c4a` on purpose (§117.8); it is a new baseline, not a looser gate. The code makes these choices where §117.6 leaves room. Each grid is `VoxelMap::sample` of its cell component, one grid at a time, and a vector's `.mag` grid samples the cells' own magnitudes, so it obeys (117.8)'s bounds too. A `fluid` lattice that no cell reaches is refused by name, because it has no tree. Every inactive leaf slot and every internal slot without a child holds the background; under `fp16` the OpenVDB root background is truncated to half and written back as a float, as `RootNode::writeTopology` does. In the NanoVDB header, `voxelCount` is the active count, the index box is the box of the active voxels (the world box is that box widened by half a voxel), the node counts are the written nodes, and each level's nodes are contiguous in ascending flat order, so with every node present the blob is the dense one. A leaf's and an internal node's box is the box of its active voxels. Found and not changed, because the Cartesian bytes must not move: `writer::cartesian_info` sets `origin` to the lowest cell centre minus half a cell, which is the box's low corner, while both writers read `origin` as the centre of voxel `(0,0,0)`, so a Cartesian file sits half a cell low on every axis; the lattice path uses (117.2)'s centre. `UsdaWriter` still writes the `HostMesh`-only boundary surface of §117.12; its raw-mesh wiring is left to VIO-09.
 
 ### 117.14 References
 
@@ -38076,7 +38138,7 @@ came from a stream file that is lost; this is the tree's count, by
 | `psychro.rs` `t_wb` | `1e-13`, `1e-6`, `1e-12` | Newton stops and step | f64 (item 1) |
 | `fan.rs` `table_at` | `1e-30` | floor | unchanged. It is representable in f32. The fan and porous host algebra has no guard below round-off. `FanCurve::at` is the bit mirror of `cuda/fan.cu` and stays `Scalar`, and its `1e-13`/`1e-14` rows in section 31 are round-off rows (F32-14) |
 | `pressure/mod.rs` `reference_controls` | `1e-14` | yardstick solve tolerance | unchanged. Under `single` the solve is §118.4's refinement |
-| `pressure/mod.rs` | `AGREEMENT_TOL = 1e-8` | backend agreement | unchanged, and NOT moved to f64 here. It compares two answers that are each stored in f32, so the floor is their storage (`2^-24` each), whatever the arithmetic. Under `single` a candidate that disagrees by an ulp is disqualified and PBiCGStab is kept. F32-07, which wraps the FFT and the selector's probe in refinement, owns it |
+| `pressure/mod.rs` | `AGREEMENT_TOL = 1e-8` | backend agreement | unchanged, and NOT moved to f64 here. It compares two answers that are each stored in f32, so the floor is their storage (`2^-24` each), whatever the arithmetic. F32-07 (§118.12): under `single` the selector now compares the backends' refined double answers and measures the yardstick's residual in double, so the `1e-8` applies to the answers themselves. Before it, the float yardstick's own residual (`7.6e-8` measured) relaxed the test to `100x` that residual, and a float cuFFT answer `4e-7` away was kept on that weaker test |
 | `pressure/mod.rs` | `REFERENCE_RESIDUAL_MAX = 1e-6` | yardstick residual | unchanged. It is above the f32 floor (`8.4 × 2^-23`) |
 | `cht/ambient.rs` | `NEWTON_RTOL = 1e-10` | §98.3 pass criterion | one value in both builds (item 4) |
 | `cht/ambient.rs` `radiating_slab_root` | `1e-14 * |t|` | answer-key Newton stop | unchanged. Under `single` it reaches an exact f32 fixed point (last correction `0.0`). The answer key's class is F32-14's |
@@ -38190,7 +38252,8 @@ unused there, and the new kernels do not exist in its cubin.
 
 **What it does not do.** The FFT direct solve, the distributed Krylov of
 §73, the pressure selector's probe and the region-ranged conjugate solves are
-F32-07's. The two section-6 rows that compare the solve against the HOST
+F32-07's: §118.12 refines the first three, and says why the fourth is left
+open. The two section-6 rows that compare the solve against the HOST
 reference's own float assembly and Gaussian elimination
 (`PCG == dense direct solve`, `dense solve leaves no residual`) keep their
 meaning and their tolerance: their floor under `single` is that float
@@ -38959,6 +39022,156 @@ builds, so the f64 build zeroes the same cells, and the f32 build never writes a
 Measured: the float kernel is 0 ulp from the f64 host twin rounded to float, in all five outputs
 over 4096 states and in E over 4096 temperatures in [150, 3500] K. The zero counter equals the
 host's prediction in both builds.
+
+No GPL-licensed source was consulted.
+
+### 118.12 Refinement on the other backends - the cuFFT solve, the selector's probe, and the distributed and SPMD Krylov
+
+§118.4 refined PCG and PBiCGStab (and AMG-04a's `solve_gamg` rides the same
+`solve_refined`). Under `single` the other paths still stopped at the float
+floor: the cuFFT direct solve, the pressure selector's probe, which measured
+float fields, and §73's distributed Krylov in process and SPMD (§138.5,
+§138.6). This section applies §118.4's outer loop to all three. Equations
+(118.4.1)-(118.4.9) and the constants `IR_STAGNATION = 0.5` and
+`IR_MAX_OUTER = 12` are unchanged; what changes is the inner method, and, on
+a decomposed mesh, where the vectors live. The unit is F32-07. The f64 build
+does not change by a bit. The new kernels exist only under `OFGPU_SINGLE`,
+and each float body takes its right-hand side as an argument, which the f64
+build passes as `a.source`, the launches it made before.
+
+**1. The cuFFT direct solve** (`src/pressure/fft.rs`). The method of
+(118.4.6) is the transform solve itself, `d = Â^-1 btilde`, where `Â^-1` is
+the float transform, divide and inverse transform of §8.5. `x^0 = fl64(p)`.
+A direct solve has no tolerance, so `T = 0`, and the loop runs to the double
+floor. It stops when `R = 0` (converged), when a correction no longer halves
+`R`, or after 12 transforms. A stop on the halving rule is the floor, and the
+solve is converged if at least one earlier transform did halve `R`. If the
+very first transform fails to halve it, the float solve does not contract,
+and the solve is not converged. `n_iterations` is the number of transforms.
+The reported residuals are `R_0/N` and `R_last/N`, as in §118.4. This is the
+setting of Moler (1967) exactly: a direct solve in the working precision, with
+the residual in a higher one. Each transform reduces the residual by about
+`κ·u32`.
+
+**2. The selector's probe** (`src/pressure/mod.rs`). `PressureBackend`
+gains `refined_solution()` under `single`. It defaults to `None`.
+`PbicgstabBackend` returns its workspace's `x_hi` (not for `fixed_iters`
+controls, which are never refined), and `FftBackend` returns its own. The
+selector compares the refined answers and gates each residual with
+`residual_norm64`, which is (118.4.2) and (118.4.3) at the double field. A
+backend without a refined answer (AMGX, when it is compiled in) is compared
+through its float field. `AGREEMENT_TOL = 1e-8` and
+`REFERENCE_RESIDUAL_MAX = 1e-6` are unchanged.
+
+**3. The distributed and SPMD Krylov** (`src/distsolve.rs`,
+`src/distsolve/refine.rs`, `src/distsolve/spmd.rs`). Every part carries its
+own `x` in double, as long as the part's owned and halo cells together. A
+row (118.4.3) at a cut face reads its neighbour's `x`. The double crosses the
+float exchange of §71 as three floats, joined back on the halo cells:
+
+```
+hi = fl32(x),   mid = fl32(x - hi),   lo = fl32(x - hi - mid)     (118.12.1)
+x_halo = (hi + mid) + lo                                         (118.12.2)
+S = 0 + S_0 + S_1 + ... + S_{P-1}          (each S_p a part's ofacc sum
+                                            stored in double; part order)
+                                                                 (118.12.3)
+x_ref = S_x / n_global,  N = sum_p N_p + eps64,  R = sum_p R_p   (118.12.4)
+```
+
+(118.12.1) is the error-free split of Dekker (1971), taken one word further
+as in Hida, Li and Bailey (2001). `x - fl32(x)` is exactly representable,
+because the remainder of a round-to-nearest holds the low bits of `x` and
+nothing else; so is the second remainder. Three 24-bit words cover the 53 bits
+of a double, so `lo` is exact whenever `ulp64(x) >= 2^-149`, that is for
+`2^-97 <= |x| < 2^128`, and for `x = 0`. The build has no `--use_fast_math`,
+so a subnormal `lo` is not flushed. (118.12.2) adds non-overlapping words:
+`hi + mid = x - e2` is representable, so both sums are exact, and the ghost
+holds the owner's double to the bit. A negative zero comes back as `+0`. The
+halo fill is `solSplit3`, three float exchanges and `solJoin3`.
+
+(118.12.3) is a world sum. In process, it is the parts' doubles summed in
+part order on the host. On a rank, it is one `Comm::allgather` of the rank's
+16 bytes `[N_p, R_p]`, summed in rank order. The two are the same sum, so
+the SPMD refinement is bit for bit the in-process refinement. Every rank
+reads the same `R_k`, applies the same (118.4.8) and stops on the same step.
+With the flag vote on (§138.5), each outer verdict is voted as well: one byte
+per rank, "stop here" or not, and a refusal by name when two differ. Ranks
+whose controls differ would otherwise part at the verdict, where no inner
+solve's flag sees it. At check interval 1 a refined SPMD solve therefore
+takes `n_iterations + 2·outer + 1` votes, which is the unrefined
+`n_iterations + 1` at `outer = 0`.
+The SPMD preflight (§138.5) runs before the refinement's first collective, so
+a refusal still reaches every rank before any waits. (118.12.4) keeps
+§73's rule: the mean divides by the whole mesh's cell count.
+
+The refinement is **not** claimed partition-invariant to the bit. The part
+sums S_p move with the cut, so `R_k` can round differently from one partition
+to another. The inner float solves keep their own guarantee: with
+`DistReduce::Exact` and `Diagonal`, an inner solve is partition-invariant
+for identical inputs. The gate is the plan's: the same answer at the f64
+tolerance across part counts. The counts in `DistPerformance` include the
+refinement's own work. The initial fill and sums cost 3 exchanges and 2
+reductions, each outer step costs 3 exchanges and 1 reduction, and the inner
+solves add theirs. §73.8's per-iteration counts hold for each inner solve and,
+unchanged, for the f64 build.
+
+**What it does not do.** CHT's per-region residuals (`solver::residual_ranged`
+in `cht.rs`) are still measured on the stored float field, so under `single`
+a region's report sits at the float floor. Ranged double kernels would be
+needed, and `cht.rs` is outside this unit's files; the item is F32-13/14's to
+class. GAMG as a solver was already refined (AMG-04a), and GAMG in f32 is
+AMG-06a's. **A refined PBiCGStab on the sealed all-Neumann box of section 6
+returns NaN under `single`.** That box is singular, and its float-rounded
+source is inconsistent by `O(n·u32)`. Once the refinement has removed
+everything else, the correction system is mostly that inconsistent
+component, and the float PBiCGStab breaks down (a division by an inner
+product of order zero; the mechanism is a reading, not a measured trace).
+This was so before this section: the float row `cuFFT == iterative, sealed
+box` reports `0` only because `max_abs_diff` drops a NaN. The refined row
+added here does not drop it, and FAILS. It is listed for the owner of the
+open f32 pure-Neumann findings (BC-07). Curing it is a numerics decision this
+unit does not take.
+
+**Measured** (RTX 5070 Ti, 2026-10-14). `tests/f32_backends_refined.rs`
+passes 5/5 in both builds with the same assertions (`SLACK = 1e-10` relative,
+residuals `<= 1e-13`). The figures, `single` first and the f64 build after:
+
+| system | `single` | f64 build |
+|---|---|---|
+| cuFFT, 9x6x4 box, Dirichlet on -x and +y | 4 transforms; vs dense f64 solve `1.56e-15`; f64 residual `2.08e-16` | 1 transform; `1.04e-15`; `4.74e-16` |
+| selector, same system | yardstick residual `2.50e-15`; cuFFT agrees to `9.5e-15`; kept | `5.86e-16`; `1.5e-15`; kept |
+| distributed PCG, SPD, 120 cells, P = 1, 2, 4 (Hilbert and linear) | 4 outer steps, 60 sweeps; final `5.73e-15`; vs dense `1.30e-14`; vs P = 1: `0` | 45 iterations; `6.86e-15`; `6.93e-15`; `0` |
+| distributed PBiCGStab, asymmetric, same cuts | 4 outer steps, 32 sweeps; final `5.22e-15`; vs dense `1.67e-14`; vs P = 1: `0` | 29 iterations; `5.88e-16`; `9.80e-16`; `0` |
+| SPMD vs in-process, P = 2 and 4, both methods | every owned double, sweeps, outer steps, exchanges, reductions and residual bits equal | equal |
+| (118.12.1)-(118.12.2), 4006 doubles over `2^-97 .. 2^126` | bit for bit (zeros as zeros) | no split in this build |
+
+The sweep counts are 1.33x (PCG) and 1.10x (PBiCGStab) the f64 counts. On
+this system the across-part difference is `0`: the part sums happened to round
+alike, but nothing guarantees it, and the gate is `1e-10`. Before this
+section, under `single`, the distributed PCG at P = 2 stopped on its float
+recurrence and reported converged, with a true residual of `1.89e-7` against
+`1e-14`. The selector's yardstick residual was `7.64e-8`, and the agreement
+test was relaxed to `100x` that residual. `ofgpu-validate -sections 6` under
+`single`: the plan's gate row `cuFFT == iterative, mixed sides (Dn, nD, NN)`
+moves from `4.247e-7` to `0` against its unchanged `1e-10`. The two fields are
+now the float roundings of answers `1.75e-14` apart. The new row `cuFFT
+refined == iterative refined, mixed sides` measures `1.753e-14` after 4
+transforms. Its sealed-box twin FAILS on the NaN above (3 transforms; the
+cuFFT answer is finite). The f64 build's section 6 is row-identical
+(`tools/f64_identity.py rows`). Every cubin's SASS hashes as before except
+`solidblock.cubin`. Its source did not change, and its hash flips between its
+two known values on any recompile (§118.4).
+
+Sources: **Moler, C. B. (1967), "Iterative refinement in floating point",
+J. ACM 14(2) 316-321, doi:10.1145/321386.321394**, and **Carson & Higham
+(2018)**, as cited in §118.4; **Dekker, T. J. (1971), "A floating-point
+technique for extending the available precision", Numer. Math. 18(3)
+224-242, doi:10.1007/BF01397083**; **Hida, Y., Li, X. S. & Bailey, D. H.
+(2001), "Algorithms for quad-double precision floating point arithmetic",
+Proc. 15th IEEE Symposium on Computer Arithmetic (ARITH-15) 155-162,
+doi:10.1109/ARITH.2001.930115**, open copy
+<https://www.davidhbailey.com/dhbpapers/arith15.pdf>. And §8.5, §73, §118.4
+and §138 for everything else, unchanged.
 
 No GPL-licensed source was consulted.
 
@@ -40939,6 +41152,22 @@ velocity through `rAU` and therefore scales with `dt`; at 2.5e-4 it is
 5.6e-6. The fix is an f64 evaluation of that split under `single` (a §118
 numerics change of `vof.cu`), which belongs to the §118 owner.
 
+**`forceSplitDouble`** *(DESIGN - ours; the user's decision of 2026-10-14
+to offer the f64 split as a choice)*. `ofgpu-vof -forceSplitDouble`
+(`VofControls::force_split_double`) is off by default, and off the `single`
+path is the one above, bit for bit. On, under `single`, `Vof::update_force`
+forms the internal-face force in f64 from the stored f32 inputs,
+`-(g . x)_f deltaCoeffs (rho_N - rho_P) |Sf| + sigma kappa_f |Sf|
+snGrad(alpha) - |Sf| deltaCoeffs (p_N - p_P) - c_f` with `c_f` the
+non-orthogonal correction of `|Sf| snGrad(p_rgh)` alone, and rounds once
+(`vofForceFluxSplit64`, compiled only under `single`), so the gravity and
+pressure terms cancel before any f32 rounding; it costs one extra pass over
+the faces. The boundary faces (`momForceFluxBoundary`), the face flux `phi`
+and `phi_HbyA` keep their f32 split, and a run with the §87 Marangoni model
+(`sigma` a field) keeps the f32 path. In the f64 build the setting does
+nothing: the split is already double. Its effect on the column is not
+measured here; the user ruled out further tests of this item.
+
 * **Rusche, H.** *Computational Fluid Dynamics of Dispersed Two-Phase Flows
   at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
   the modified pressure `p - rho (g . x)` of the two-phase momentum
@@ -42417,6 +42646,71 @@ alike: in f64 `5.7e-12`, `1.5e-12` and `1.9e-12` at 300, 288.15 and 273.15 K; un
 gate captures 5 kernel nodes (the three kernels and the two field operations that
 feed `M` back into `T`) and replays three times bitwise over 7 buffers and 1792
 values. The 46 cubins that existed before are unchanged in SASS in both builds.
+
+### 122.6 The case input (CMP-14)
+
+`No GPL-licensed source was consulted.` The dictionary keyword NAMES and the unit of
+`molWeight` are from the OpenFOAM *User Guide* v12, "Thermophysical models",
+<https://doc.cfd.direct/openfoam/user-guide-v12/thermophysical> (DOCUMENTATION,
+**read** 2026-10-14). No OpenFOAM source file was opened.
+
+A compressible case states the gas of §122.1 in one of two ways, and both end in the
+same `compressible::thermo::PerfectGas`, validated by `PerfectGas::validate`.
+
+**JSONC** (`src/io/case_json.rs`): `physics.compressible { gamma, W, cp, Pr,
+viscosity, pOperating }`. `gamma` and `W` (kg/mol) are required. `cp` is optional
+and is only checked: §122.1's `1e-6` relative rule refuses a disagreeing value by name
+(`physics.compressible.cp`), and `-permissive` warns and keeps the derived `c_p`.
+`Pr` defaults to 0.71. `viscosity` is `{ "model": "sutherland", "As", "Ts" }`, which
+is (122.6), or `{ "model": "const", "mu" }`. `pOperating` is §122.2's `p_op` in Pa,
+with no default. `Pr_t` is §122.1's 0.85, and neither route has a key for it. Every
+object is `deny_unknown_fields`, so an unknown key is refused with its JSON path. Two
+patch kinds read a `freestream { U, p, T }`: `p` is gauge in the datum of the `p`
+field (§122.2) and `T` is in kelvin.
+
+* `supersonicInlet` (§126.2) lowers `U`, `p` and `T` to `fixedValue` at that state.
+* `farfield` (§126.6) lowers all three to `characteristicFarfield`, with the free stream
+  as each field's `value`. CMP-18 registers and implements the kind.
+
+Both kinds are refused in a case without `physics.compressible`, without a
+`freestream`, or with a `U`, `p` or `T` entry of their own, because the preset decides
+all three. They are also refused when the free stream has no gas-law state: `T <= 0`,
+`p + p_op <= 0` or a non-finite value (§122.3). A `freestream` on any other kind is
+refused, and so is a compressible case without `initial.T`.
+
+**OpenFOAM** (`src/io/thermo_dict.rs`, `constant/thermophysicalProperties`): one
+`thermoType` with `type` `hePsiThermo` or `heRhoThermo`, `mixture pureMixture`,
+`transport` `sutherland` or `const`, `thermo hConst`, `equationOfState perfectGas`,
+`specie specie` and `energy` `sensibleEnthalpy` or `sensibleInternalEnergy`. Every
+one of the seven is required, and any other model is refused with the menu. The
+`mixture` block holds `specie { molWeight; nMoles }`, `thermodynamics { Cp; Hf }` and
+`transport { As; Ts; Pr }` (sutherland) or `transport { mu; Pr }` (const). The file
+also has a top-level `pOperating`, which is required. Any other key, at any of these
+levels, is refused by name with the keys that are read, through §13.4's `unsupported`.
+The dictionary states `molWeight` in g/mol and `Cp` rather than `gamma`, so the gas
+follows from (122.2) and (122.5) solved for `gamma` (derived):
+
+```
+W = molWeight / 1000 ,   gamma = c_p / (c_p - R_s) ,   R_s = R / W                   (122.14)
+```
+
+`c_p <= R_s` has no `gamma` above 1 and is refused by name. With constant `c_p`, the
+two `energy` forms describe the same state; the form is kept for CMP-15's driver.
+`Hf` must be 0, because (122.5) fixes `h(0 K) = 0` and a formation enthalpy matters
+only to a reacting mixture. `nMoles` must be 1. `Pr` is read under both transport
+models and defaults to 0.71 when absent. The User Guide lists no `Pr` for
+`sutherland`, but this solver's conductivity is (122.7) under both models, so it needs
+one. The oracle gives `molWeight 28.9647` with `Cp 1004.692579691832` as `W = 0.0289647`,
+`R_s = 287.0550227690948` and `gamma = 1.4000000000000001`, which is §122.1's air to
+one ulp. `ThermoDict::to_text` writes the subset back in Rust's shortest round-trip
+form, so a read, a write and a second read agree bit for bit
+(`thermophysical_subset_round_trips`).
+
+**Landed (CMP-14).** Tests: `io::thermo_dict::tests::{thermophysical_subset_round_trips,
+unknown_thermo_key_is_refused_by_name}`, `io::case_json::tests::jsonc_compressible_lowers`,
+and the schema sync test `the_shipped_schema_is_the_generated_one` on the regenerated
+`docs/schema/case-1.json`. No driver reads either route yet: `ofgpu-compressible`
+(CMP-15) is the first.
 
 ---
 
@@ -45483,6 +45777,59 @@ every printed Table 8/12 value from 300 to 1000 K.
 No new equation labels. TM-4513 eq. (10) is quoted above under the report's
 own number.
 
+### 133.8 A per-cell `cp` in the energy equation's ddt and convection rows (CHR-10a, `src/energy.rs`)
+
+`No GPL-licensed source was consulted.`
+
+**What it is.** §26 writes the temperature equation with one constant `cp`
+and says a `cp(T)` is "a coefficient change, not a structure change". (133.2)
+in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
+the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
+that `cp` as a field: one value per cell and one per boundary face, set by the
+caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
+through the mixture rule, from `T` and `Y`) is CHR-10b's and CHR-12a's; this
+unit builds the slot and the two rows that read it. Without a field nothing
+changes.
+
+**The two rows.** §26's ddt and convection carry the same weight, so the
+field enters both:
+
+```
+(rho cp)_c^(l) = rho_c^(l) cp_c,   l = n, n-1, n-2;   under backward, §105.17: (rho* cp)_c = (p0/R_s) cp_c / T*_c   (133.13)
+phi_m,f = cp_f rho_f phi_f,   cp_f = w_f cp_P + (1 - w_f) cp_N (internal),   cp_f = cp_b (boundary)            (133.14)
+```
+
+*DESIGN.* All three time levels carry the field as last set: the same lag
+`rho*` already has under backward (§105.17), and the form in which §26's
+discrete `rho cp DT/Dt` (the conservative rows plus §26.1's bounded
+correction, now on (133.14)'s flux) stays a temperature equation. `cp_f`
+is §25.3's linear interpolation, the convention every face coefficient in
+this module uses, and is formed once, when the field is set, not every
+outer iteration. A value that is not finite and positive, or a buffer
+shorter than the mesh, is refused by name, naming the cell or boundary face.
+
+**What still reads the constant `cp`, stated.** `k_eff`'s turbulent part
+`rho cp nu_t/Pr_t` (S26, both `Pr_t` models), §25.1's target divergence
+(which (133.4) replaces in CHR-11), and the S29.3 thermal wall function.
+The §120.8 Danckwerts inlet reads `phi_m` itself, so it follows (133.14).
+`assembly_budget` divides by (133.14)'s own `cp_f` and weighs by the cell's
+`cp_c`; its mass diagnostics come from the same pass on `rho_f phi_f`, exact,
+because no one number divides a face-varying `phi_m` back to kg/s.
+
+**Gates, measured 2026-10-14 (both builds, `tests/energy_cp_field.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `energy_cp_field_default_bitwise` | SHA-256 of the restart checkpoint of `cases/channelPeriodicFluxWF.jsonc`, `ofgpu-lowmach -iters 20 -restartWrite 20`, against the parent commit 0777b1d's binaries, one pin per build | bitwise | D | equal in both builds |
+| `energy_uniform_cp_field_equals_constant` | 16-cell channel, plug flow 0.01 m/s, 310 K in, 10 steps of 2 s, Euler and backward: (a) a uniform field equal to `cp` against the constant path, T and `assembly_budget`'s entries; (b) a uniform `2 cp` with `k` against the constant `cp` with `k/2`, the same equation times two, which holds only if both rows read the field | `1e-12` relative (D-F32-1: `1e-5` in f32) | R | (a) `0` and the budget's entries within `9.7e-15` (f64), `3.0e-6` (f32, its mass rows, formed by another route); (b) `0` in both builds; the `2 cp` run differs from the `cp` run by `1.5e-2` (Euler) and `3.0e-3` (backward), so (b) is not vacuous |
+| `energy_cp_field_refuses_by_name` | zero, negative and NaN cells, a negative boundary face, a short buffer | refused by name | D | — |
+
+The two exact zeros are not a promise: the uniform mesh's `w_f = 1/2` makes
+`w_f c + (1 - w_f) c = c` exact, and on a graded mesh (133.14)'s `cp_f` may
+differ from `c` in its last bit, which the R tolerance allows.
+
+Labels: (133.13)-(133.14).
+
 ---
 
 ## 134. Turbulence-chemistry interaction — EDM, EDC and PaSR, selected through `MixingRate`
@@ -47381,6 +47728,98 @@ own repeatability:
 | `tnf_flame_d_centreline_anchors_the_chr16_band` | `T_max` and its x/d; `L_stoic/d` against 47.0; r/d = 0 rows against the centreline; the coflow edge | exact; 1; 0.015 and 3 %; `f <= 0.005`, `T <= 330 K` | D |
 
 Labels: (137.4)-(137.5).
+
+### 137.6 The `parcels` block as built (CHR-25)
+
+`src/io/case_parcels.rs` builds §137.2's `parcels` table. This subsection
+records the rules that table leaves open, as the code applies them. It is
+this project's own contract (ORIGINAL), with no external source.
+
+**One lowering for both routes.** The dictionary route turns
+`constant/cloudProperties` into the JSON object the JSONC route reads, then
+hands it to the same `deny_unknown_fields` deserialiser. An unknown key is
+therefore refused by name on both routes. `JsonParcels::lower(species,
+gravity)` is the only lowering. In the dictionary:
+
+* `(a b c)` is a vector, and a number may carry `[dimensions]` (the last
+  number is read).
+* `addedMass` is a switch (`yes`/`no`, `true`/`false`, `on`/`off`).
+* `evaporation { liquid { } }`, `impact { }` and `coupling { }` are
+  sub-dictionaries.
+* `injectors { <name> { ... } }` holds one named sub-dictionary per
+  injector. They are taken in name order, because an injector's index is
+  part of every parcel it emits (§66.8).
+
+**Keys and names.** Every model name goes through the library's own
+`from_name`. A refused name therefore keeps the library's reason: `film` and
+`spread` keep §78.11's, and `splash` keeps §78.7's. §137.2's capitalised
+spellings (`SchillerNaumann`, `Inert`, `Weber`, `SemiImplicit`) are accepted
+by lowering their first letter. `wall` also takes `stick`, the fourth value
+of §78.5. The key `maxSubsteps` is spelled as in §137.2.
+
+The sub-blocks map field by field:
+
+* `evaporation` holds `saturation`, `transfer`, `wCarrier`, `pAmbient`,
+  `cfl` and `liquid`.
+* `liquid` is a `preset` (`water`, the default, or `benzene`) with any of
+  its nine properties overridden: `wVapour`, `tBoil`, `pBoil`, `hVBoil`,
+  `tCrit`, `dVapour`, `tRefD`, `dExponent` and `cpVapour`.
+* `impact` holds `splash`, `tension`, `sigma`, `muLiquid`, `weStick`,
+  `weSpread`, `kCrit` and `splashA`.
+
+`persistentBlocks` reaches `ParcelControls::persistent_blocks`, so every
+library field has a key.
+
+**Defaults.** An absent key takes the library's `Default`, with two
+exceptions:
+
+* An absent `gravity` on the JSONC route is the case's `physics.gravity`,
+  because a case states one gravity. On the dictionary route it is the
+  library's.
+* An absent `coupling`, or an absent key inside it, is `off`/`off`/`none`,
+  as §137.2's table says. This differs from `CouplingControls::default()`,
+  whose momentum coupling is `explicit`.
+
+An injector requires `position` and `massFlow`. Its other fields default to
+`Injector::default()`.
+
+**Refusals,** each naming its key:
+
+* An empty `injectors` list.
+* A setting the selected model would not read (§13.4): `restitution` or
+  `tangentialLoss` unless `wall` is `rebound` or `weber`; `cLiquid`, `kGas`
+  or `cpGas` with `physics inert`; `evaporation` unless `physics
+  evaporating`; `impact` unless `wall weber`; and `coupling.vapour` with
+  `mass none`.
+* `coupling.mass evaporation` without a `species` block. The JSONC route has
+  none until CHR-12a, so `JsonCase::lower` passes no species and the mass
+  coupling is refused there. The lowering already takes `species.names` for
+  CHR-12a to pass in.
+* `coupling.mass evaporation` without a `vapour`, or with a `vapour` that is
+  not in `species.names`.
+* An unknown liquid `preset`.
+* Every range check of `ParcelControls::validate`, which runs at lowering.
+
+The coupling-consistency rules of §77.7 stay in `ParcelCoupling::new`.
+
+**The driver seam.** `ofgpu-lowmach` is the one driver that carries parcels,
+and it drives them from a case only from CHR-26 on. Until then, every driver
+refuses a parcel case rather than run it without its parcels:
+
+* `common::load_case` refuses a JSONC case through
+  `LoweredCase::refuse_parcels`.
+* `read_case_controls` refuses a case directory that holds
+  `constant/cloudProperties`.
+
+CHR-26 replaces the refusal on `ofgpu-lowmach`'s path.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `case_parcels_lowers_every_field` | one case sets every `ParcelControls`, `EvaporationControls`, `LiquidProperties`, `WallImpactControls`, `CouplingControls` and `Injector` field to a non-default value; each is read back; the dictionary route equals the JSONC route; serde round trip | exact | D |
+| `case_parcels_refusals` | every refusal above, the driver seam included | refused, naming the key | D |
+| `tests/case_parcels.rs` | both routes equal, and `film` refused, in both builds | exact | D |
+
+No labels.
 
 ---
 

@@ -199,7 +199,8 @@ fn placement_maps_ranks_to_devices() {
 /// One rank's evidence: the owned field, the performance, the votes, the
 /// device ordinal, the stream handle, whether event tracking was off,
 /// whether the rank's own `Gpu` owns its field and the main thread's does
-/// not, and the solve's start and end.
+/// not, the solve's start and end, and its outer refinement steps (0 in
+/// the f64 build; SPEC-LIT §118.12 under `single`).
 type RankRun = (
     Vec<Scalar>,
     DistPerformance,
@@ -210,7 +211,19 @@ type RankRun = (
     bool,
     Instant,
     Instant,
+    usize,
 );
+
+/// The outer refinement steps of the workspace's last solve.
+#[cfg(feature = "single")]
+fn outer_steps(w: &SpmdWorkspace) -> usize {
+    w.ir_outer_steps()
+}
+
+#[cfg(not(feature = "single"))]
+fn outer_steps(_w: &SpmdWorkspace) -> usize {
+    0
+}
 
 /// The SPMD PCG at `dec.n_parts` ranks, rank `r` opening
 /// `Gpu::for_rank(placement, r)`.
@@ -251,6 +264,7 @@ fn spmd_run(
             owns,
             t0,
             t1,
+            outer_steps(&w),
         ))
     })
 }
@@ -296,7 +310,7 @@ fn assert_bitwise(
 ) -> (usize, usize) {
     let (mut ranks, mut cells) = (0usize, 0usize);
     for (r, part) in dec.parts.iter().enumerate() {
-        let (g, perf, votes, ..) = got[r]
+        let (g, perf, votes, .., outer) = got[r]
             .as_ref()
             .unwrap_or_else(|e| panic!("{at} rank {r}: {e}"));
         ranks += 1;
@@ -330,7 +344,9 @@ fn assert_bitwise(
             ref_perf.final_residual.to_bits(),
             "final residual bits, {at}"
         );
-        assert_eq!(*votes, perf.n_iterations as u64 + 1, "votes, {at}");
+        // `n_iterations + 1` unrefined; a refined solve also votes before
+        // each inner solve and at each outer verdict (SPEC-LIT §118.12).
+        assert_eq!(*votes, (perf.n_iterations + 2 * *outer + 1) as u64, "votes, {at}");
     }
     (ranks, cells)
 }
@@ -393,7 +409,7 @@ fn four_ranks_on_one_device_run_concurrently() {
 
                 let mut streams: Vec<u64> = Vec::new();
                 for (r, run) in runs_ok.iter().enumerate() {
-                    let (_, _, _, ordinal, stream, tracking_off, owns, _, _) = run;
+                    let (_, _, _, ordinal, stream, tracking_off, owns, _, _, _) = run;
                     assert_eq!(*ordinal, 0, "{at} rank {r}: device");
                     assert!(*tracking_off, "{at} rank {r}: event tracking is on");
                     assert!(
