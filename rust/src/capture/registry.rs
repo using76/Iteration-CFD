@@ -165,6 +165,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              count reduced on the device; not implemented",
         ),
     ),
+    // SPEC-LIT 125.7: the local step is formed at the top of each pseudo
+    // step of `Compressible::step`, and its three time-term kernels run only
+    // in the equations `Compressible::new` attached it to.
+    ("src/compressible/lts.rs", Stance::Via("src/compressible/mod.rs")),
     (
         "src/compressible/exact/riemann.rs",
         Stance::Outside(

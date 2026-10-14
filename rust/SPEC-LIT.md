@@ -42409,7 +42409,7 @@ source plus `rho` times its flux sum, as the row says. The brief's first form
 
 `No GPL-licensed source was consulted.` CMP-11 implements §125.1-§125.2 in
 `src/compressible/energy.rs` (as built: §125.5), CMP-12 §125.3 in `src/compressible/mod.rs`
-(as built: §125.6), and CMP-13 §125.4 in `src/compressible/lts.rs`.
+(as built: §125.6), and CMP-13 §125.4 in `src/compressible/lts.rs` (as built: §125.7).
 
 ### 125.1 The energy equation, solved for `T`
 
@@ -42504,6 +42504,8 @@ every ddt difference is zero, so the fixed point does not depend on `CFL`. CMP-1
 `steady_fixed_point_independent_of_cfl` holds two CFLs to the same field within `1e-8`
 in f64 (class P; the same bar in f32 is reported as its own row if missed, §5.1.4) and
 `dt_field_matches_host_formula` holds (125.2) to its host twin (class R).
+*As built* (§125.7): the fixed-point row is MISSED. `rAU` (123.5) carries the time term's
+diagonal, so the Rhie-Chow flux keeps `CFL` at the fixed point.
 
 ### 125.5 The assembly as built (CMP-11)
 
@@ -42689,6 +42691,84 @@ initial state").
   `-50000.140625`.
 
 No `.cu`, `build.rs`, driver or validate code changed.
+
+### 125.7 The local time step as built (CMP-13)
+
+`src/compressible/lts.rs` holds (125.2) and the per-cell time terms, and
+`cuda/compressible.cu` gains four kernels after CMP-08's to CMP-11's nineteen, which are
+untouched. `cmpLtsRDeltaT` forms the reciprocal step `r_P = (|u_P| + c_P) / (CFL V_P^(1/3))`
+with `c_P = sqrt(grs T_P)` as (122.12) forms it. `cmpDdtRhoLocal`, `cmpPressureDdtLocal` and
+`cmpEnergySourceLocal` are `tsDdtGeneralRho`, `cmpPressureDdt` and `cmpEnergySource` with the
+Euler coefficients `a_n = r_P`, `a_0 = -r_P`, `a_00 = 0` taken per cell, in the same expression
+order. They carry no floor and no clip (§122.5).
+
+*DESIGN* - the choices §125.4 leaves open:
+
+* **Selection.** A run names `localEuler` for the momentum AND the energy equation (one
+  scheme for both, as §125.6 already requires). `Compressible::new` then builds both
+  equations on `Euler` and attaches a `LocalStep` to each (`attach_local_step`). The
+  pressure equation reads the momentum equation's, because (124.1) shares its ddt. The run
+  is steady: every outer iteration is relaxed, and `residualControl` stops it. `CFL` is
+  `CompressibleControls::lts.cfl`, finite and above 0, or `Compressible::new` refuses it by
+  name. The default is 1, the acoustic Courant limit of an explicit scheme. A lone
+  `RhoMomentum` or `RhoEnergy` still refuses `localEuler` by name.
+* **When `r` is formed.** Once per pseudo step, at its top, right after the old levels
+  rotate. It is formed from the cell `u` and `T` the step starts from, so every outer
+  iteration and every corrector of the step uses one step field. The energy equation's
+  field is a device copy of the momentum equation's.
+* **The mass imbalance** of §125.6 step 8 takes `a_n = r_P`, `a_0 = -r_P` per cell, and its
+  denominator is `sum_P rho_P V_P r_P`.
+* **Capture.** The registry row is `Via` the module root, which is `Refused`. The step is
+  formed inside `Compressible::step`, and the three time-term kernels run only in equations
+  that `Compressible::new` attached it to. The equations' own capture gates run their scalar
+  coefficients.
+
+*Tree over plan.* The row names `lts.rs` and `compressible.cu`. The equations also need an
+optional attached step: `RhoMomentum::attach_local_step` and `RhoEnergy::attach_local_step`
+(additive), one branch in each time term, and the module root's wiring.
+
+**The fixed-point row is MISSED** (an open finding for the user). §125.4 argues that every
+ddt difference is zero at a converged fixed point, so the fixed point does not depend on
+`CFL`. The argument misses one term. `rAU = V/a_P` (123.5) carries the time term's diagonal
+`V_P r_P rho_P`, and the Rhie-Chow flux of (123.6)-(123.7) carries `rAU` at the fixed point,
+where the ddt differences themselves vanish. So the fixed point moves with `CFL`, just as
+steady SIMPLE's moves with `alpha_U`, whose relaxed diagonal enters `rAU` the same way. A
+cure would change the Rhie-Chow numerics (a time-step-independent `rAU` or a ddt
+correction), so it is the user's decision (docs/17 §5.3.4).
+
+CMP-13's gate table (`tests/shared/compressible_lts_cases.rs`, included by
+`src/compressible/lts.rs` and by `tests/compressible_lts.rs`, so it runs in both builds):
+
+| test | class | what |
+|---|---|---|
+| `dt_field_matches_host_formula` | R | One pseudo step of the graded 5x4x3 channel at `CFL` 0.7. The momentum equation's `r_P` equals `1/host_delta_t` in f64 on the device's own inputs within `tol_r(1e-12)` relative, cell by cell. The energy equation's copy has the same bits. Control: `r` varies by more than 1.2 across the box |
+| `uniform_step_equals_euler` | R | A uniform 4^3 closed box at 300 K, with one cell 2e4 Pa up and gravity on, so `r_P = c/(CFL h)` is one value. One `localEuler` pseudo step (two outer iterations, relaxation 1) equals one Euler step at `dt = CFL h/c` within the quiescent box's bars (§125.6). Controls: `u` moves by more than 100 bars, and Euler at `2 dt` misses by more than 100 |
+| `steady_fixed_point_independent_of_cfl` | P | The steady channel, 1500 pseudo steps at `CFL` 2, 20 and 1e6 and steady SIMPLE at `alpha_U` 0.9 and 0.7, each at its initial-residual floor in f64. Records the miss: `CFL` 2 against 20 is above `1e-8`. Records the cause: SIMPLE's two `alpha_U` differ by more than `1e-8`, the distance to SIMPLE falls as `CFL` grows, and at `CFL` 1e6 `u` and `T` are SIMPLE's within `1e-8`. Under `single` every row is reported (§5.1.4). Control: five pseudo steps in, the two CFLs are `4.3e-3` apart |
+| `lts_refusals_name_the_setting` | D | `cfl` 0, -1, NaN and infinity. `localEuler` on the momentum equation alone (`ddtSchemes differ`). A lone `RhoMomentum` on `localEuler` |
+
+Each difference is taken over the field's largest magnitude: `max_P |a_P - b_P| / max_P |a_P|`
+(`u` in the Euclidean norm, gauge `p`, `T` in K).
+
+*Landed* (f64, then single):
+
+- (125.2): the worst relative deviation is `3.5e-16`, then `1.6e-7` (bars `1e-12` and `1e-5`).
+  `r` spans `2407` to `3003` 1/s.
+- The uniform step, at `dt = 2.88e-3` s: `|du|` is `1.7e-14` m/s, then `7.9e-6` m/s (bars
+  `3.47e-10` and `3.47e-3`). `|dp|` is `4.0e-12` Pa, then `4.3e-3` Pa. `|dT|` is `1.1e-13` K, then
+  `6.1e-5` K. `u` moves `1.42` m/s, which is `4.1e9` bars in f64 and `409` bars in single.
+- The fixed point in f64: `CFL` 2 against 20 differs by `2.85e-6` in `u`, `7.0e-2` in `p` and
+  `5.5e-9` in `T`. That is MISSED against `1e-8`. `max |p|` is `3.18e-2` Pa, so the `p` gap is
+  `2.2e-3` Pa, `6e-6` of the dynamic pressure. Steady SIMPLE at `alpha_U` 0.9 against 0.7
+  differs by `8.4e-7`, `1.5e-2` and `1.4e-9`. From SIMPLE at 0.9, `u` sits at `5.0e-6` (`CFL`
+  2), `2.1e-6` (`CFL` 20) and `6.7e-11` (`CFL` 1e6). `T` at 1e6 is `1.1e-13` and `p` at 1e6 is
+  `1.1e-6`. The initial-residual floors are about `3e-11` (`u`), `1e-9` (`p`) and `5e-9` (`h_0`).
+- The fixed point in single (reported): no run reaches an f64-like floor (the initial
+  residuals stay between `3e-3` and `0.61`). `CFL` 2 against 20 differs by `3.1e-6`, `0.11` and
+  `1.4e-6`, and SIMPLE's two `alpha_U` by `8.6e-7`, `2.1e-2` and `4.1e-7`.
+
+No driver or validate code changed. No existing kernel changed: the four kernels were
+appended, and the other nineteen of `compressible.cu` have SASS identical to the baseline in
+both builds.
 
 ---
 

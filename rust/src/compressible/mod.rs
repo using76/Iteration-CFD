@@ -28,10 +28,12 @@
 //!   and compressible Couette flow (§127.4), CMP-07;
 //! - [`gatemesh`] (§127.5), the gate meshes - with CMP-26, the airfoil
 //!   C-mesh of §127.5.1;
+//! - [`lts`] (§125.4, §125.7), the local time step of a steady run,
+//!   CMP-13: `localEuler` on both equations builds them on Euler with a
+//!   per-cell step (125.2) attached;
 //! - `tests`, the outer loop's gate table (CMP-12);
 //! - still to come: `bc` (§126), the compressible boundary conditions,
-//!   CMP-16 to CMP-18; `lts` (§125.4), the local time step of a steady run,
-//!   CMP-13.
+//!   CMP-16 to CMP-18.
 //!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §125.3 - the outer loop, its order and its reports,
@@ -51,6 +53,7 @@
 pub mod energy;
 pub mod exact;
 pub mod gatemesh;
+pub mod lts;
 pub mod momentum;
 pub mod pressure;
 pub mod thermo;
@@ -67,6 +70,7 @@ use crate::field_ops::{self, FieldKernels};
 use crate::fv::{self, FvKernels};
 use crate::mesh::GpuMesh;
 use crate::solver::SolverPerformance;
+use crate::timescheme::DdtScheme;
 use crate::{Label, Scalar};
 
 use energy::{EnergyInputs, RhoEnergy, RhoEnergyControls};
@@ -127,6 +131,9 @@ pub struct CompressibleControls {
     pub p_relax: Scalar,
     /// The steady run's stop (step 8); `None` runs every iteration asked.
     pub residual_control: Option<ResidualControl>,
+    /// The local time step of §125.4, read only when the momentum and the
+    /// energy equation name `localEuler` (§125.7).
+    pub lts: lts::LtsControls,
     /// Print [`OuterReport::line`] after every outer iteration.
     pub log: bool,
 }
@@ -142,6 +149,7 @@ impl Default for CompressibleControls {
             n_corr: 2,
             p_relax: 0.3,
             residual_control: None,
+            lts: lts::LtsControls::default(),
             log: false,
         }
     }
@@ -316,8 +324,10 @@ pub struct Compressible<'m> {
     ctrl: CompressibleControls,
     gas: GasConstants,
     p_op: f64,
-    /// Steady SIMPLE when the ddt scheme is `steadyState`.
+    /// Steady SIMPLE when the ddt scheme is `steadyState` or `localEuler`.
     steady: bool,
+    /// `localEuler`: the equations run on Euler with §125.7's local step.
+    local: bool,
 
     thk: ThermoKernels,
     fvk: FvKernels,
@@ -344,7 +354,8 @@ impl<'m> Compressible<'m> {
     /// Build the three equations and everything the loop touches. Refused by
     /// name: `n_outer` or `n_corr` of 0, `p_relax` outside (0, 1], a gas
     /// `PerfectGas::validate` refuses, and a momentum and energy equation
-    /// that disagree on `ddt`, `delta_t` or `g`.
+    /// that disagree on `ddt`, `delta_t` or `g`, and under `localEuler` a `cfl`
+    /// that `lts::LtsControls::validate` refuses (§125.7).
     pub fn new(gpu: &Gpu, m: &'m GpuMesh, mut ctrl: CompressibleControls) -> Result<Self> {
         let who = "Compressible::new";
         if ctrl.n_outer == 0 {
@@ -410,6 +421,15 @@ impl<'m> Compressible<'m> {
         // c_p is never an input (§122.1): the energy equation divides by
         // the gas's own.
         ctrl.energy.cp = ctrl.gas.cp();
+        // §125.7: `localEuler` builds both equations on Euler and attaches
+        // the per-cell step; `ctrl` keeps the scheme the case named.
+        let local = ctrl.momentum.ddt == DdtScheme::LocalEuler;
+        let (mut mom_ctrl, mut energy_ctrl) = (ctrl.momentum, ctrl.energy);
+        if local {
+            ctrl.lts.validate()?;
+            mom_ctrl.ddt = DdtScheme::Euler;
+            energy_ctrl.ddt = DdtScheme::Euler;
+        }
 
         let n = m.n_cells;
         let one = |k: usize| k.max(1);
@@ -423,12 +443,20 @@ impl<'m> Compressible<'m> {
             v: gpu.download(&m.v)?,
         };
 
+        let mut mom = RhoMomentum::new(gpu, m, mom_ctrl)?;
+        let mut energy = RhoEnergy::new(gpu, m, energy_ctrl)?;
+        if local {
+            mom.attach_local_step(gpu)?;
+            energy.attach_local_step(gpu)?;
+        }
+
         Ok(Self {
             m,
             ctrl,
             gas: ctrl.gas.constants(),
             p_op: ctrl.gas.p_op,
             steady: ctrl.momentum.ddt.is_steady(),
+            local,
 
             thk: ThermoKernels::new(gpu)?,
             fvk: FvKernels::new(gpu)?,
@@ -436,9 +464,9 @@ impl<'m> Compressible<'m> {
             relax_field: si.func("smpRelaxField")?,
             mul: mo.func("momMul")?,
 
-            mom: RhoMomentum::new(gpu, m, ctrl.momentum)?,
+            mom,
             prs: RhoPressure::new(gpu, m, ctrl.pressure)?,
-            energy: RhoEnergy::new(gpu, m, ctrl.energy)?,
+            energy,
 
             p_prev: gpu.zeros(one(n))?,
             rho_face: GpuSurfaceScalarField::zeros(gpu, m, "rhoF")?,
@@ -456,6 +484,27 @@ impl<'m> Compressible<'m> {
     /// Steps completed since [`Self::new`].
     pub fn steps_taken(&self) -> u64 {
         self.steps
+    }
+
+    /// §125.7: the per-cell reciprocal step `r_P = 1/dt_P` of the pseudo
+    /// step last taken (the momentum equation's; the energy equation holds
+    /// a copy). `None` unless the run names `localEuler`.
+    pub fn local_step(&self) -> Option<&DevBuf<Scalar>> {
+        self.mom.local_step().map(|l| &l.r_delta_t)
+    }
+
+    /// (125.2) on every cell from the cell `u` and `T`, into the momentum
+    /// equation's step, then copied into the energy equation's.
+    fn update_local_step(&mut self, gpu: &Gpu, s: &CompressibleState) -> Result<()> {
+        let (m, gas, cfl) = (self.m, self.gas, self.ctrl.lts.cfl);
+        let (Some(lm), Some(le)) = (self.mom.local_step_mut(), self.energy.local_step_mut()) else {
+            return Err(refuse(
+                "Compressible::step",
+                "localEuler is named and an equation has no local step attached".to_string(),
+            ));
+        };
+        lm.update(gpu, m, &gas, cfl, &s.u.f, &s.t.f)?;
+        le.copy_from(gpu, lm)
     }
 
     // ---- the gas law and the transport laws, cells and boundary faces ----
@@ -549,6 +598,11 @@ impl<'m> Compressible<'m> {
             field_ops::advance_time_levels(gpu, &self.fldk, f)?;
         }
         field_ops::advance_time_levels_vector(gpu, &self.fldk, &mut s.u)?;
+        // §125.7: the pseudo step's own dt_P, once, from the state it
+        // starts from.
+        if self.local {
+            self.update_local_step(gpu, s)?;
+        }
         let step = self.steps + 1;
 
         let n_outer = self.ctrl.n_outer;
@@ -710,7 +764,9 @@ impl<'m> Compressible<'m> {
 
     /// §125.3's mass imbalance, in f64 on the host from the corrected
     /// `rho` (three levels) and `mdot`, on the momentum equation's time
-    /// coefficients - the ones (124.1) was solved with.
+    /// coefficients - the ones (124.1) was solved with. Under §125.7's
+    /// local step those are `a_n = r_P`, `a_0 = -r_P` per cell, and the
+    /// denominator is `sum_P rho_P V_P r_P`.
     fn mass_imbalance(&self, gpu: &Gpu, s: &CompressibleState) -> Result<f64> {
         let n = self.m.n_cells;
         let h = &self.host;
@@ -721,10 +777,20 @@ impl<'m> Compressible<'m> {
         let r2 = gpu.download(&s.rho.f00)?;
         let mf = gpu.download(&s.mdot.f)?;
         let mb = gpu.download(&s.mdot.bf)?;
+        let rdt = match self.mom.local_step() {
+            Some(l) => Some(gpu.download(&l.r_delta_t)?),
+            None => None,
+        };
         let mut e = vec![0.0f64; n];
         let mut den = 0.0f64;
         for i in 0..n {
             let v = w64(h.v[i]);
+            if let Some(r) = &rdt {
+                let ri = w64(r[i]);
+                e[i] = v * (ri * w64(rf[i]) - ri * w64(r0[i]));
+                den += w64(rf[i]) * v * ri;
+                continue;
+            }
             e[i] = v * (w64(co.a_n) * w64(rf[i]) + w64(co.a_0) * w64(r0[i]) + w64(co.a_00) * w64(r2[i]));
             den += w64(rf[i]) * v / dt;
         }

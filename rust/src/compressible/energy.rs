@@ -59,6 +59,8 @@ use crate::timescheme::{DdtCoeffs, DdtScheme, LtsControls};
 use crate::types::Tensor;
 use crate::{Label, Scalar, Vec3};
 
+use super::lts::LocalStep;
+
 /// A refusal in the one house format.
 fn refuse(msg: String) -> Error {
     Error::Refused(format!("compressible::energy::new: {msg}"))
@@ -97,7 +99,8 @@ pub struct RhoEnergyControls {
 
     /// `ddtSchemes`: `steadyState`, `Euler` or `backward`. `localEuler` and
     /// `CrankNicolson` are refused by name, as §123.3 refuses them for the
-    /// momentum equation; §125.4's per-cell step is CMP-13's.
+    /// momentum equation; §125.4's per-cell step is attached to an `Euler`
+    /// equation by `compressible::Compressible` (CMP-13, §125.7).
     pub ddt: DdtScheme,
 
     /// The time step of a transient run.
@@ -206,6 +209,10 @@ pub struct RhoEnergy<'m> {
 
     /// The time term of §86.3, `d(rho T)/dt`.
     pub ddt: crate::timescheme::Ddt,
+    /// §125.7: the per-cell step of a local-time-step run, attached to an
+    /// `Euler` equation by [`Self::attach_local_step`]; `None` runs on
+    /// `ddt`'s own coefficients.
+    local: Option<LocalStep>,
 
     a: GpuLduMatrix,
     ws: SolverWorkspace,
@@ -239,10 +246,11 @@ impl<'m> RhoEnergy<'m> {
         if matches!(ctrl.ddt, DdtScheme::LocalEuler) {
             return Err(refuse(
                 "ddtSchemes named localEuler, and this equation is mass-weighted: \
-                 d(rho T)/dt with a different dt in every cell conserves nothing, \
-                 and the steady run it serves is CMP-13's to specify (SPEC-LIT \
-                 §125.4). Alternative: `Euler` or `backward` for a transient run, \
-                 `steadyState` for a steady one"
+                 d(rho T)/dt with a different dt in every cell conserves nothing \
+                 alone. The steady run it serves is `compressible::Compressible`'s, \
+                 which builds this equation on Euler with the local step of SPEC-LIT \
+                 §125.4 attached. Alternative: `Euler` or `backward` for a transient \
+                 run, `steadyState` for a steady one"
                     .to_string(),
             ));
         }
@@ -344,6 +352,7 @@ impl<'m> RhoEnergy<'m> {
                 LtsControls::default(),
                 ctrl.t_relax < 1.0,
             )?,
+            local: None,
 
             a: GpuLduMatrix::new(gpu, m)?,
             ws: SolverWorkspace::for_mesh(gpu, m)?,
@@ -381,6 +390,34 @@ impl<'m> RhoEnergy<'m> {
         }
         self.ctrl.t_relax = alpha;
         Ok(())
+    }
+
+    /// §125.7: attach the per-cell step of a local-time-step run, the twin
+    /// of `RhoMomentum::attach_local_step`. The time term and the cell
+    /// source then take `a_n = r_P`, `a_0 = -r_P` from
+    /// [`LocalStep::r_delta_t`]. Refused unless the equation was built on
+    /// `Euler`. Allocates: call it before a captured region.
+    pub fn attach_local_step(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.ddt.scheme != DdtScheme::Euler {
+            return Err(Error::Refused(format!(
+                "compressible::energy::attach_local_step: the equation was built \
+                 on {:?}; the local step of SPEC-LIT §125.4 is the Euler scheme \
+                 with a per-cell dt",
+                self.ddt.scheme
+            )));
+        }
+        self.local = Some(LocalStep::new(gpu, self.m)?);
+        Ok(())
+    }
+
+    /// The attached local step, if any.
+    pub fn local_step(&self) -> Option<&LocalStep> {
+        self.local.as_ref()
+    }
+
+    /// The attached local step, for the outer loop to fill.
+    pub fn local_step_mut(&mut self) -> Option<&mut LocalStep> {
+        self.local.as_mut()
     }
 
     /// The matrix the last assembly left behind.
@@ -538,8 +575,11 @@ impl<'m> RhoEnergy<'m> {
 
         // §86.3: d(rho T)/dt on T's two old levels with rho at its three.
         {
-            let Self { ddt, a, .. } = self;
-            ddt.add_rho(gpu, a, m, &inp.rho.f, &inp.rho.f0, &inp.rho.f00, &t.f0, &t.f00, 1.0)?;
+            let Self { ddt, local, a, .. } = self;
+            match local {
+                Some(ls) => ls.add_ddt_rho(gpu, a, m, &inp.rho.f, &inp.rho.f0, &t.f0, 1.0)?,
+                None => ddt.add_rho(gpu, a, m, &inp.rho.f, &inp.rho.f0, &inp.rho.f00, &t.f0, &t.f00, 1.0)?,
+            }
         }
 
         {
@@ -598,7 +638,19 @@ impl<'m> RhoEnergy<'m> {
         let timed = !(co.a_n == 0.0 && co.a_0 == 0.0 && co.a_00 == 0.0);
         let g = self.ctrl.g;
         let gravity = !(g.x == 0.0 && g.y == 0.0 && g.z == 0.0);
-        if (timed || gravity) && n > 0 {
+        if let Some(ls) = &self.local {
+            // §125.7: the same source on the per-cell step.
+            ls.add_energy_source(
+                gpu,
+                &mut self.a.source,
+                m,
+                (&inp.rho.f, &inp.rho.f0),
+                (&inp.p.f, &inp.p.f0),
+                (&inp.u.f, &inp.u.f0),
+                g,
+                self.rcp,
+            )?;
+        } else if (timed || gravity) && n > 0 {
             let nl = n as Label;
             let rcp = self.rcp;
             let f = self.k.source.clone();

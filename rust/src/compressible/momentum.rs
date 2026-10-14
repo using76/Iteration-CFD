@@ -51,6 +51,8 @@ use crate::timescheme::{DdtScheme, LtsControls};
 use crate::types::Tensor;
 use crate::{Label, Scalar, Vec3};
 
+use super::lts::LocalStep;
+
 /// A refusal in the one house format.
 fn refuse(msg: String) -> Error {
     Error::Refused(format!("compressible::momentum::new: {msg}"))
@@ -83,7 +85,8 @@ pub struct RhoMomentumControls {
 
     /// The time scheme `ddtSchemes` named - §13, on the mass-weighted form
     /// of §86.3. `LocalEuler` and `CrankNicolson` are refused by name in
-    /// [`RhoMomentum::new`]; §125.4's per-cell step is CMP-13's.
+    /// [`RhoMomentum::new`]; §125.4's per-cell step is attached to an
+    /// `Euler` equation by `compressible::Compressible` (CMP-13, §125.7).
     pub ddt: DdtScheme,
 
     pub delta_t: Scalar,
@@ -214,6 +217,10 @@ pub struct RhoMomentum<'m> {
     /// The time term of §86.3, `d(rho u)/dt` - SPEC-LIT §13 on the
     /// mass-weighted form.
     pub ddt: crate::timescheme::Ddt,
+    /// §125.7: the per-cell step of a local-time-step run, attached to an
+    /// `Euler` equation by [`Self::attach_local_step`]; `None` runs on
+    /// `ddt`'s own coefficients.
+    local: Option<LocalStep>,
 
     a: GpuLduMatrix,
     ws: SolverWorkspace,
@@ -283,14 +290,16 @@ impl<'m> RhoMomentum<'m> {
     pub fn new(gpu: &Gpu, m: &'m GpuMesh, ctrl: RhoMomentumControls) -> Result<Self> {
         // §123.3: `localEuler` is refused by name - its step is a per-cell
         // preconditioner, and `d(rho u)/dt` with a different dt in every
-        // cell conserves nothing (§86.7); §125.4's per-cell step is CMP-13's.
+        // cell conserves nothing (§86.7); §125.4's per-cell step is a steady
+        // run's, which `Compressible` builds on Euler (CMP-13, §125.7).
         if matches!(ctrl.ddt, DdtScheme::LocalEuler) {
             return Err(refuse(
                 "ddtSchemes named localEuler, and this equation is mass-weighted: \
-                 d(rho u)/dt with a different dt in every cell conserves nothing, \
-                 and the steady run it serves is CMP-13's to specify (SPEC-LIT \
-                 §125.4). Alternative: `Euler` or `backward` for a transient run, \
-                 `steadyState` for a steady one"
+                 d(rho u)/dt with a different dt in every cell conserves nothing \
+                 alone. The steady run it serves is `compressible::Compressible`'s, \
+                 which builds this equation on Euler with the local step of SPEC-LIT \
+                 §125.4 attached. Alternative: `Euler` or `backward` for a transient \
+                 run, `steadyState` for a steady one"
                     .to_string(),
             ));
         }
@@ -357,6 +366,7 @@ impl<'m> RhoMomentum<'m> {
                 LtsControls::default(),
                 ctrl.u_relax < 1.0,
             )?,
+            local: None,
 
             a: GpuLduMatrix::new(gpu, m)?,
             ws: SolverWorkspace::for_mesh(gpu, m)?,
@@ -415,6 +425,34 @@ impl<'m> RhoMomentum<'m> {
         }
         self.ctrl.u_relax = alpha;
         Ok(())
+    }
+
+    /// §125.7: attach the per-cell step of a local-time-step run. Every
+    /// later assembly takes the Euler coefficients `a_n = r_P`, `a_0 = -r_P`
+    /// from [`LocalStep::r_delta_t`] instead of `ddt`'s. Refused unless the
+    /// equation was built on `Euler`. Allocates: call it before a captured
+    /// region, never inside one.
+    pub fn attach_local_step(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.ddt.scheme != DdtScheme::Euler {
+            return Err(Error::Refused(format!(
+                "compressible::momentum::attach_local_step: the equation was built \
+                 on {:?}; the local step of SPEC-LIT §125.4 is the Euler scheme \
+                 with a per-cell dt",
+                self.ddt.scheme
+            )));
+        }
+        self.local = Some(LocalStep::new(gpu, self.m)?);
+        Ok(())
+    }
+
+    /// The attached local step, if any.
+    pub fn local_step(&self) -> Option<&LocalStep> {
+        self.local.as_ref()
+    }
+
+    /// The attached local step, for the outer loop to fill.
+    pub fn local_step_mut(&mut self) -> Option<&mut LocalStep> {
+        self.local.as_mut()
     }
 
     /// The matrix the last component assembly left behind - bit-identical
@@ -858,8 +896,11 @@ impl<'m> RhoMomentum<'m> {
         // §86.3: the mass-weighted time derivative, on THIS component's two
         // old levels with `rho` at its three.
         {
-            let Self { ddt, a, uc, .. } = self;
-            ddt.add_rho(gpu, a, m, &rho.f, &rho.f0, &rho.f00, &uc.f0, &uc.f00, 1.0)?;
+            let Self { ddt, local, a, uc, .. } = self;
+            match local {
+                Some(ls) => ls.add_ddt_rho(gpu, a, m, &rho.f, &rho.f0, &uc.f0, 1.0)?,
+                None => ddt.add_rho(gpu, a, m, &rho.f, &rho.f0, &rho.f00, &uc.f0, &uc.f00, 1.0)?,
+            }
         }
 
         {

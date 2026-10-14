@@ -639,7 +639,11 @@ impl<'m> RhoPressure<'m> {
         // continuity and momentum share one time scheme (§124.4). A
         // steadyState ddt returns `DdtCoeffs::ZERO`, and no kernel runs.
         let co: DdtCoeffs = mom.ddt.state.coeffs(mom.ddt.scheme)?;
-        if !(co.a_n == 0.0 && co.a_0 == 0.0 && co.a_00 == 0.0) && n > 0 {
+        if let Some(ls) = mom.local_step() {
+            // §125.7: the momentum equation's per-cell step, the same sign.
+            let sign = -1.0 as Scalar;
+            ls.add_pressure_ddt(gpu, &mut self.a, m, &psi.f, &rho.f, &self.p_star, &rho.f0, sign)?;
+        } else if !(co.a_n == 0.0 && co.a_0 == 0.0 && co.a_00 == 0.0) && n > 0 {
             let sign = -1.0 as Scalar;
             let nl = n as Label;
             let f = self.k.pressure_ddt.clone();

@@ -848,3 +848,125 @@ extern "C" __global__ void cmpEnergySource
     const ofscalar gw = rho[i]*(gx*uc.x + gy*uc.y + gz*uc.z);
     source[i] += rcp*V[i]*(dpdt - drk + gw);
 }
+
+
+/*
+  ==========================================================================
+  The local time step of a steady run. SPEC-LIT 125.4, 125.7 (CMP-13). Four
+  kernels, one thread per cell, called from src/compressible/lts.rs. The
+  first forms (125.2)'s reciprocal step rDeltaT = 1/dt_P; the other three are
+  the Euler time terms of (123.3), (124.1) and (125.1) with a per-cell
+  coefficient: a_n = rDeltaT_P, a_0 = -rDeltaT_P, a_00 = 0, in the same
+  expression order as tsDdtGeneralRho, cmpPressureDdt and cmpEnergySource,
+  so an rDeltaT equal to 1/dt everywhere is the Euler step. The kernels above
+  are untouched. No floor and no clip (SPEC-LIT 122.5): T <= 0 gives a NaN c,
+  and SPEC-LIT 122.3 counts the cell afterwards.
+  ==========================================================================
+*/
+
+//- (125.2) as its reciprocal: rDeltaT = (|u| + c) / (cfl V^(1/3)), with
+//  c = sqrt(grs T) as cmpSoundMach forms it and |u| the sum of squares left
+//  to right, then one square root.
+extern "C" __global__ void cmpLtsRDeltaT
+(
+    ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ V,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ T,
+    ofscalar grs,
+    ofscalar cfl,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+    const ofscalar c = sqrt(grs * T[i]);
+    const ofvec3 u = U[i];
+    const ofscalar um = sqrt(u.x * u.x + u.y * u.y + u.z * u.z);
+    rDeltaT[i] = (um + c) / (cfl * cbrt(V[i]));
+}
+
+//- d(rho psi)/dt, Euler with the per-cell step:
+//    diag   += sign*V*r*rho
+//    source -= sign*V*(-r*rho0*psi0)
+extern "C" __global__ void cmpDdtRhoLocal
+(
+    ofscalar* __restrict__ diag,
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ psi0,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    const ofscalar aN = rDeltaT[c];
+    const ofscalar a0 = -aN;
+    const ofscalar sv = sign*V[c];
+    diag[c]   += sv*aN*rho[c];
+    source[c] -= sv*(a0*rho0[c]*psi0[c]);
+}
+
+//- (124.7)-(124.8)'s time term with the per-cell step, launched with
+//  sign = -1 as cmpPressureDdt is:
+//    diag   += sign*V*r*psi
+//    source -= sign*V*(r*(rho - psi*pStar) - r*rho0)
+extern "C" __global__ void cmpPressureDdtLocal
+(
+    ofscalar* __restrict__ diag,
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ pStar,
+    const ofscalar* __restrict__ rho0,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+    const ofscalar aN = rDeltaT[i];
+    const ofscalar a0 = -aN;
+    diag[i] += sign*V[i]*aN*psi[i];
+    source[i] -= sign*V[i]*(aN*(rho[i] - psi[i]*pStar[i]) + a0*rho0[i]);
+}
+
+//- (125.3)'s cell source with the per-cell step:
+//    source += rcp V ( dp/dt - d(rho K)/dt + rho g . u )
+//    dp/dt       = r p - r p0
+//    d(rho K)/dt = r rho K - r rho0 K0,  K = |u|^2/2
+extern "C" __global__ void cmpEnergySourceLocal
+(
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ p0,
+    const ofvec3* __restrict__ u,
+    const ofvec3* __restrict__ u0,
+    ofscalar gx,
+    ofscalar gy,
+    ofscalar gz,
+    ofscalar rcp,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+
+    const ofscalar aN = rDeltaT[i];
+    const ofscalar a0 = -aN;
+    const ofvec3 uc = u[i];
+    const ofscalar dpdt = aN*p[i] + a0*p0[i];
+    const ofscalar drk = aN*rho[i]*cmpKin(uc) + a0*rho0[i]*cmpKin(u0[i]);
+    const ofscalar gw = rho[i]*(gx*uc.x + gy*uc.y + gz*uc.z);
+    source[i] += rcp*V[i]*(dpdt - drk + gw);
+}
