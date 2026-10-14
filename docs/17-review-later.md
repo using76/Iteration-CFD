@@ -25,6 +25,9 @@
 | A5 | CHR-21 | `DomSolve`의 정지 규칙 `change < tol`은 마지막 한 스텝의 크기만 제한한다 | 산란 slab(수축률 약 0.6/sweep)에서 남는 오차는 약 1.5 tol. f32에서 G를 tol32 이내로 원하면 더 작은 tol을 줘야 한다 | SPEC-LIT 136.8 |
 | A6 | DST-02 | 단열선 Ψ가 논문 closure 값의 약 57 % | 단열선을 잡는 방법에 따라 Ψ가 약 2배까지 달라진다. DST-06의 논문 비교에는 논문에 실린 식을 쓴다 | SPEC-LIT 153.8, `d337a4c` |
 | A7 | CHR-07b | device Rosenbrock 성능이 CPU 1코어의 약 4.5배에 그친다 | 정확도 게이트는 통과. 성능 목표는 미달 | `0758690` |
+| A8 | VAL-70 | Gate 78-D 측정 레그: 두 splash 기준 모두 Riboux & Gordillo 2014 임계 속도에 미달 (`MISSES`) | 띠 ±20 %, 액체 8개 중 6개 이상이 들어와야 통과. Mundo: 17행 중 0, 액체 8개 중 0 (e −0.734 ~ −0.214). Bai & Gosman: 17행 중 3, 액체 8개 중 1(에탄올) (e −0.396 ~ +0.690). 4.78 행은 OPEN으로 남는다 | SPEC-LIT 146.2, `1280c6f` |
+| A9 | AMG-04c | single에서 K-cycle FCG의 POI(32) 답이 Jacobi-PBiCGStab과 2.37e-8 차이 (기준 1e-8) | 11회 반복에 수렴은 한다. 이 테스트는 파일 관례(AMG-06a)에 따라 single에서 ignore 상태다. AMG-06a가 켜야 한다. f64는 1.61e-9~5.38e-9로 통과 | SPEC-LIT 141.6, `a887eb3` |
+| A10 | AMG-07b | single의 SPMD GAMG(정상 상태 cycle)는 반복 정밀화가 없어서 tol 1e-6이면 정체된다 | POI 32³, 500 cycle 뒤 참 잔차 4.3e-6. 게이트는 기존 SPMD 게이트와 같은 solver tol 1e-5로 돈다 (게이트 허용오차 tol32 1e-5는 그대로). F32-07의 IR이 `spmd_gamg`도 감싸야 한다 | SPEC-LIT 141.11, `3f110b3` |
 
 ## B. 측정·검증을 미룬 것 (10분 규칙 또는 하드웨어)
 
@@ -50,7 +53,7 @@
 | C4 | BC-17 | fan/porous flux law는 lagged Picard. 강한 baffle은 §53.2의 implicit 형태가 맞다 | SPEC-LIT 120.2 |
 | C5 | VIO-08 | `.vdb` 바이트가 의도적으로 바뀌었다 (버전 224, bufferCount, 격자 이름). 이전 파일은 실제 OpenVDB에서 빈 격자로 읽혔다. Cartesian SHA 기준은 `69d21f7` 이후로 새로 잡는다 | SPEC-LIT 117.8 |
 
-## D. 드라이버 연결이 남은 것 (API만 있음)
+## D. 연결·기능이 남은 것 (API만 있거나 후속 작업 필요)
 
 - BC-06, BC-09, BC-14, BC-15, BC-17의 경계 이름: 모든 드라이버가 아직 이름으로 거부한다.
   - BC-14 `mapped`는 lowmach/buoyant의 U, p만 연결돼 있다.
@@ -59,6 +62,15 @@
 - BC-12: lowmach end-to-end 테스트가 없다 (BC-22 몫).
 - AUT-15: y+를 계산하는 드라이버가 `ofgpu-lowmach` 하나뿐이다.
 - DST-05 → DST-06: FlowState에 μ(T)가 필요하다.
+- AMG-04c/07b: 케이스에서 FCG, K-cycle, SPMD GAMG를 고를 수 없다. `io/case.rs`는 S 레인 파일이며, 연결은 AMG-04b 영역의 후속 작업이다. `ofgpu-par`도 rank별 `DistGamg`를 아직 붙이지 않는다.
+- AMG-07a: `build_spmd` 안에서 한 rank만 `SpmdHalo::from_level`에 실패하면 나머지 rank가 ThreadComm 타임아웃까지 기다린다. `coarsen`이 만든 계획에서는 일어나지 않지만, 투표를 한 번 더 넣으면 막을 수 있다.
+- PAR-17: `ofgpu-par`가 rank별 잔차를 출력하지 않으므로, 실행 패널은 rank별 Krylov 반복 수와 전체 잔차만 보여준다.
+- STU-06b: 메시 초안에서 텍스트 필드를 비울 수 없다. 한 번 켠 automesher `-check`가 계속 남는다.
+- STU-07a: gui의 patchRules 매칭은 `^...$`로 고정되지만, 솔버(`resolve_patch_rule`)는 고정하지 않는다. 예를 들어 `wall` 규칙과 `wallXMin` 패치에서 둘의 결과가 다를 수 있다.
+- STU-07b: `set_patch`는 명령 한 번에 필드 하나만 쓴다. T를 푸는 케이스에서 wall을 velocity-inlet으로 바꾸려면 U와 T를 동시에 바꿔야 해서 항상 `PATCH_FIELD`로 거부된다.
+- STU-13: 볼록하지 않거나 뒤틀린 셀은 `nearest-centre`로 답한다. snappy 계열 실제 메시에서는 대부분의 셀이 이렇게 답할 수 있다.
+- STU-17: boolean 결과 파일을 덮어써도, 이미 열린 탭은 다시 열 때까지 이전 파일을 보여준다.
+- VAL-70: README와 GUIDEBOOK이 splash 기준을 "실험과 비교하지 않았다"고 적고 있어서 새 MISSES 게이트와 맞지 않는다.
 
 ## E. 기존 gui 실패 (이번 트랜치가 원인 아님)
 
