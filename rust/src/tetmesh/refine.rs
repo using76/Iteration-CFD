@@ -946,7 +946,7 @@ pub fn refine(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::tetmesh) mod tests {
     use super::super::recover::recover_faces;
     use super::super::remesh::{remesh, RemeshOptions};
     use super::super::sizefield::{OctreeOptions, SizeField, SizeParams, SizeSource};
@@ -1061,14 +1061,14 @@ mod tests {
     /// the box `[-2, 2]^3`, refined from the hull. The size field has one
     /// patch source on the icosphere, `h = 0.25` on it, `H = 0.5` and
     /// `g = 1.2`.
-    struct Case {
+    pub(in crate::tetmesh) struct Case {
         n_body: u32,
         field: SizeField,
-        refined: Refined,
+        pub(in crate::tetmesh) refined: Refined,
         seconds: f64,
     }
 
-    fn case() -> &'static Case {
+    pub(in crate::tetmesh) fn case() -> &'static Case {
         static CASE: OnceLock<Case> = OnceLock::new();
         CASE.get_or_init(|| {
             let ico3 = ico(3);
@@ -1198,7 +1198,7 @@ mod tests {
 
     /// The cube `[-0.5, 0.5]^3` remeshed at a uniform `h = 0.4` (§116.10,
     /// its 12 edges held as features), in `[-1, 1]^3`.
-    fn small() -> (TetSurface, FaceRecovery) {
+    pub(in crate::tetmesh) fn small() -> (TetSurface, FaceRecovery) {
         let prep = prepare(&cube(-0.5, 0.5), 60.0).unwrap();
         let r = remesh(&prep, &|_: Point| 0.4, &RemeshOptions::default()).unwrap();
         let mut s = r.surface.clone();

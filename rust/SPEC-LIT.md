@@ -36941,6 +36941,47 @@ These are §92.4's repair moves, now inside the generator:
 The targets `10` and `165` degrees are the bounds of Labelle & Shewchuk (2007),
 `10.7` and `164.8` degrees.
 
+**The flips, as TET-10a builds them.** `optimise::flip` takes the points, the kept tetrahedra
+(each with (116.2) > 0, no face on three or more) and a set of frozen faces, and returns new
+tetrahedra on the same points; no coordinate changes. The quality `q(T)` is the smallest of
+(116.21)'s six angles. Edge removal of the edge `ab` takes the `m` tetrahedra on it, `3 <= m <= 10`
+(DESIGN: the largest ring triangulated), and orders the other two vertices of each into the ring
+`u_0, .., u_{m-1}` with `orient3d(a, b, u_i, u_{i+1}) > 0`. An edge whose ring does not close (an
+edge on the boundary) or one with a frozen face `(a, b, u_i)` is not removed. A triangulation of
+the ring polygon gives two tetrahedra per triangle, and the best one is found by Klincsek (1980)'s
+dynamic programme, as Shewchuk (2002) uses it:
+
+```
+Q(i, i+1) = +inf
+Q(i, j)   = max over i < k < j of  min( Q(i, k), Q(k, j), q2(i, k, j) )                   (116.21a)
+q2(i, k, j) = min( q(u_i, u_k, u_j, b), q(u_k, u_i, u_j, a) ),
+              or -inf if either has orient3d <= 0, the face (u_i, u_k, u_j) exists, or an
+              edge (u_x, u_y) of the triangle that is not a ring edge exists
+```
+
+The removal is kept iff `Q(0, m-1)` exceeds the smallest `q` of the `m` old tetrahedra; `m = 3`
+is the 3-2 flip. The 2-3 flip of a face `pqr` that is on two tetrahedra, with apexes `s` and `t`,
+not frozen, with no edge `st`, makes the three tetrahedra `(s, t, u_i, u_{i+1})` over the ring
+`pqr` ordered so the first is positive; it is kept iff all three have `orient3d > 0` and their
+smallest `q` exceeds that of the two. A move's tetrahedra are positive and their chain has the old
+star's boundary, so they tile the old star exactly: the winding number of that boundary is 1
+inside and 0 outside, and positive tetrahedra add only `+1`s. So, for the whole mesh,
+
+```
+every orient3d > 0,  every face on at most 2 tetrahedra,  the faces on one tetrahedron
+unchanged,  sum of V(T) unchanged,  and  min over T of q(T) never decreasing             (116.21b)
+```
+
+A face on one tetrahedron is never interior to a move, so the boundary is untouched without being
+named; a frozen face (any winding) is never removed, which is how a subtriangle with kept
+tetrahedra on both sides would be protected. A pass takes the tetrahedra present at its start,
+worst `q` first (ties by index). For each one still present it evaluates the removal of its six
+edges and the 2-3 flip of its four faces, and keeps the candidate with the largest new worst `q`
+if any is kept by its rule (DESIGN). The passes stop after one with no move or after
+`optimise.passes`; TET-10b will alternate them with the smoothing. The rule is strict in f64, so a
+move can gain a round-off amount (the sphere's smallest gain is `2.5e-14` degrees). That is still
+an increase of the sorted vector of the star's qualities, so no sequence of moves cycles.
+
 ### 116.15 Prism layers by post-inflation
 
 **Implemented by TET-13a** (normals and thicknesses), **TET-13b** (deformation and insertion)
@@ -37177,6 +37218,11 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-09 | the cap and the refusals: the cube `[-0.5, 0.5]^3` remeshed at a uniform `h = 0.4` (57 points, 94 triangles, its 12 edges as features, no protected vertex) in `[-1, 1]^3` | 25 passes, 1 495 kept tetrahedra in 0.04 s, `k` = 375 points inserted (57 interior, 131 subsegment, 151 box-face and 36 box-edge); it succeeds again with `max_inserted_points = 375`, with the same stats and tetrahedra, and with 374 it refuses as `refine/cap: 363 points inserted after 24 passes, the next pass needs 12 more, cap 374`; the three spec bounds with `TetSpec`'s messages; `refine/box` for a missing box corner; `refine/h` for a size of NaN | the TET-09 commit |
 | TET-09 | the same cube NOT remeshed (two triangles per face, 45 degree diagonals), `h = 0.4`, not a plan gate | the refinement cascades toward the small angles: 67 289 points after 91 passes (about 930 tetrahedra predicted), stopped by hand; recorded in §116.13 and left for review | the TET-09 commit |
 | TET-09 | the f32 arm | `rust/tests/tetmesh_refine.rs`, 4 tests (the `Scalar` width; the bound, the recovery and (116.16); `m_edge`; the count) pass under `--features single` with every printed number identical to the f64 build | the TET-09 commit |
+| TET-10a | §116.14, changed by this unit | the paragraph "The flips, as TET-10a builds them", (116.21a)-(116.21b), the DESIGN ring limit `m <= 10`, the pass order and the candidate choice were added; Klincsek (1980) joined §116.19 | the TET-10a commit |
+| TET-10a | TET-09's sphere in a box (9 989 kept tetrahedra), the subtriangles frozen, `optimise.passes = 8` | 3 passes (the third with no move): 670 3-2 flips, 468 edge removals with `m >= 4`, 0 2-3 flips; 9 325 tetrahedra. The worst `q` per pass 1.0232, 10.4342, 10.4342, 10.4342 degrees: never decreasing. All `orient3d > 0`, no face on three; the volume relative 3.20e-15; the 2 690 boundary faces equal before and after and equal the carve's, every subtriangle still a face, the points untouched | the TET-10a commit |
+| TET-10a | TET-09's cube `[-0.5, 0.5]^3` at `h = 0.4` in `[-1, 1]^3` (1 495 kept tetrahedra) | 2 passes: 53 3-2 flips, 81 edge removals, 0 2-3 flips; 1 442 tetrahedra; the worst `q` 2.4429, 15.8028, 15.8028 degrees; the volume relative 2.03e-15 | the TET-10a commit |
+| TET-10a | the hand fixtures | three tetrahedra about the edge `(0, 0, +-1)` over a triangle in `z = 0`: one 3-2 flip, worst 38.5679 -> 62.7744 degrees, and no 2-3 flip brings them back; the same pair flattened to `z = +-0.05`: one 2-3 flip, 5.5507 -> 11.1014 degrees, refused when the shared face is frozen; the regular tetrahedron's six angles `arccos(1/3)` within 1e-12 rad | the TET-10a commit |
+| TET-10a | the f32 arm | `rust/tests/tetmesh_optimise.rs`, 3 tests (the `Scalar` width; the monotone worst, validity and volume; the boundary faces) on the sphere in a box pass under `--features single` with every printed number identical to the f64 build; the largest dihedral, printed and not gated, goes 178.1956 -> 152.7733 degrees | the TET-10a commit |
 
 ### 116.19 References
 
@@ -37209,6 +37255,8 @@ Crossref metadata was checked against the title, authors, year and pages given h
 - Kallinderis, Y., Khawaja, A. & McMorris, H. (1996). Hybrid prismatic/tetrahedral grid
   generation for viscous flows around complex geometries. *AIAA J.* 34(2), 291-298. DOI
   `10.2514/3.13063`.
+- Klincsek, G. T. (1980). Minimal triangulations of polygonal domains. *Ann. Discrete Math.* 9,
+  121-123. DOI `10.1016/S0167-5060(08)70044-X`.
 - Labelle, F. & Shewchuk, J. R. (2007). Isosurface stuffing. *ACM Trans. Graph.* 26(3), 57.
   DOI `10.1145/1276377.1276448`.
 - Lawson, C. L. (1977). Software for C1 surface interpolation. In J. R. Rice (ed.),
