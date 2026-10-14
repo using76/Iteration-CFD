@@ -18,7 +18,7 @@ import type { SaveCaseOutcome } from '../state/editorStore'
 // tabStateLabel / tabScreenLabel are value imports; uiStore has no DOM imports,
 // so this stays node-test safe. useUiStore itself must NOT be imported here
 // (the bridge takes its store through deps so tests can inject fakes).
-import { tabScreenLabel, tabStateLabel, type LogStream, type useUiStore } from '../state/uiStore'
+import { selectionOfProbe, tabScreenLabel, tabStateLabel, type LogStream, type useUiStore } from '../state/uiStore'
 // Pure series helpers (metric matching, surface keys); series.ts only type-imports
 // the store, so this value import stays node-test safe too.
 import { findMetric, metricNames, surfaceSeriesKeys } from '../chart/series'
@@ -268,7 +268,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
     return {
       activeTab: u.activeTabId,
       activeStep: null,
-      rightTab: u.assistantVisible ? 'AI Assistant' : null,
+      rightTab: u.assistantVisible ? (u.rightTab ?? 'AI Assistant') : null,
       tool: TOOL_TO_UI[v.getTool()],
       frame: null,
       projection: vs.camera.projection === 'orthographic' ? 'Orthographic' : 'Perspective',
@@ -280,7 +280,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
       metricPick: Array.isArray(u.metricSlots)
         ? { left: u.metricSlots[0] ?? null, right: u.metricSlots[1] ?? null, mode: u.metricMode ?? 'metrics' }
         : null,
-      selection: lastSelection,
+      // The store's selection also follows a pick on the screen (Viewer3D); a fake ui without it reports the probe's.
+      selection: u.selection !== undefined ? u.selection : lastSelection,
       runId: u.activeRunId,
       sim: null,
       case: casePath ? { path: casePath, name: null, dirty: null } : null,
@@ -456,15 +457,14 @@ export function createUiBridge(deps: UiBridgeDeps) {
 
   /** A probe outcome becomes the answer and the selection ui.state reports. */
   function probeAnswer(outcome: ProbeOutcome): { ok: true } | { ok: false; error: string } {
-    if (outcome.ok) {
-      const h = outcome.hit
-      lastSelection = { kind: 'cell', id: h.cell, center: h.center, value: h.value, field: h.field, patch: null }
-      return { ok: true }
+    const selection = selectionOfProbe(outcome)
+    if (selection !== null) {
+      // Inspector shows the store's selection (STU-08a).
+      lastSelection = selection
+      ui.getState().setSelection(selection)
     }
-    if (outcome.code === 'MISS') {
-      lastSelection = { kind: 'none' }
-      return { ok: false, error: `MISS (probe): ${outcome.message}` }
-    }
+    if (outcome.ok) return { ok: true }
+    if (outcome.code === 'MISS') return { ok: false, error: `MISS (probe): ${outcome.message}` }
     if (outcome.code === 'NO_STRUCTURED_GRID') return { ok: false, error: `UNSUPPORTED (probe): ${outcome.message}` }
     if (outcome.code === 'NO_DATASET') return { ok: false, error: `NO_DATASET (probe): ${outcome.message}` }
     return { ok: false, error: `NO_VIEWER (probe): ${outcome.message}` }
@@ -801,11 +801,9 @@ export function createUiBridge(deps: UiBridgeDeps) {
         // The studio's own edits (E1): real edits through the geometry store.
         return geometryCommand(cmd)
       case 'open_panel':
-        if (cmd.panel === 'AI Assistant') {
-          if (!ui.getState().assistantVisible) ui.getState().toggleAssistant()
-          return { ok: true }
-        }
-        return unsupported('open_panel', `panel "${cmd.panel}" does not exist on this screen (AI Assistant only)`)
+        // The right column's four panels (STU-08a); the column shows if it was hidden.
+        u.openPanel(cmd.panel)
+        return { ok: true }
       case 'run':
       case 'start_run':
       case 'stop_run':

@@ -228,6 +228,7 @@ function harness(tabs: (GeoTab | ResTab)[] = [], cameraBudgetMs?: number) {
     viewSplit: false,
     focusedView: 'A' as 'A' | 'B',
     camerasLinked: false,
+    setSelection: vi.fn(),
     openGeometryTab: vi.fn(),
     openViewerTab: vi.fn(),
     setActiveRun(runId: string | null) {

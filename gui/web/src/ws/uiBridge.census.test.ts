@@ -82,6 +82,8 @@ function makeUi() {
     setLocale: vi.fn(),
     setActiveRun: vi.fn(),
     toggleAssistant: vi.fn(),
+    openPanel: vi.fn(),
+    setSelection: vi.fn(),
     setCompareRun: vi.fn(),
     setViewSplit: vi.fn(),
     setFocusedView: vi.fn(),
@@ -181,7 +183,7 @@ function freshBridge() {
     subscribeRun: vi.fn(),
     saveImage: vi.fn(),
   })
-  return { sent, bridge }
+  return { sent, bridge, ui }
 }
 
 /** The sent ui.result frame for a requestId. */
@@ -247,6 +249,18 @@ describe('uiBridge.census', () => {
     const r = resultFor(sent, 'census-no_such_command')
     expect(r?.ok).toBe(false)
     expect(r?.error).toBe('UNSUPPORTED (no_such_command): this screen does not implement it')
+  })
+
+  // STU-08a: open_panel's census row is green for every panel the schema names, not only the sample's.
+  it('open_panel answers ok for each of the four right panels', async () => {
+    for (const panel of ['AI Assistant', 'Post', 'Inspector', 'Properties'] as const) {
+      const { sent, bridge, ui } = freshBridge()
+      await bridge.handleCommand(`census-open_panel-${panel}`, { type: 'open_panel', panel })
+      const r = resultFor(sent, `census-open_panel-${panel}`)
+      expect(r?.error ?? null).toBeNull()
+      expect(r?.ok).toBe(true)
+      expect(ui.openPanel).toHaveBeenCalledWith(panel)
+    }
   })
 
   it('the unimplemented set is exactly the open list', async () => {

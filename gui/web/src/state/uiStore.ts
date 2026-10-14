@@ -1,7 +1,8 @@
 // Layout and preference state, persisted to localStorage (versioned).
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { Locale, MeshDraft, ViewId } from '@cfd/shared'
+import type { Locale, MeshDraft, UiCommand, UiSelection, ViewId } from '@cfd/shared'
+import type { ProbeOutcome } from '../viewer/controller/ViewerController'
 import { tx } from '../i18n/extra'
 
 export type Theme = 'light' | 'dark'
@@ -42,6 +43,24 @@ export interface MeshDialogState {
   draft: MeshDraft
   runId: string | null
   status: MeshStatus | null
+}
+
+/** A right-column panel (STU-08a): the panels open_panel names, in the column's tab order. */
+export type RightPanelId = Extract<UiCommand, { type: 'open_panel' }>['panel']
+export const RIGHT_PANELS: readonly RightPanelId[] = ['AI Assistant', 'Post', 'Inspector', 'Properties']
+
+/** What the Properties panel shows (STU-08a): the selected tree node and its keys. STU-08b's project tree sets it. */
+export interface PropertiesNode {
+  id: string
+  label: string
+  keys: Record<string, unknown>
+}
+
+/** The selection a probe outcome leaves (STU-08a): a hit selects its cell, a miss selects nothing, and
+ *  an outcome that read nothing (no viewer, no dataset, no structured grid) leaves the selection as it was (null). */
+export function selectionOfProbe(o: ProbeOutcome): UiSelection | null {
+  if (o.ok) return { kind: 'cell', id: o.hit.cell, center: o.hit.center, value: o.hit.value, field: o.hit.field, patch: null }
+  return o.code === 'MISS' ? { kind: 'none' } : null
 }
 
 /** The Boundary editor on screen (STU-07b). */
@@ -87,6 +106,12 @@ export interface UiState {
   meshDialog: MeshDialogState | null
   /** The Boundary editor (STU-07b): the case it shows, and a count that makes an open editor read its table again; null when it is closed. Transient. */
   boundaryEditor: BoundaryEditorState | null
+  /** The right column's active panel (STU-08a); the column itself shows while assistantVisible. Transient. */
+  rightTab: RightPanelId
+  /** The last probe or screen pick (STU-08a), what Inspector shows; null before the first. Transient. */
+  selection: UiSelection | null
+  /** The node Properties shows (STU-08a); null when nothing is selected. Transient. */
+  propertiesNode: PropertiesNode | null
 }
 
 export interface UiActions {
@@ -141,6 +166,11 @@ export interface UiActions {
   /** Opens the Boundary editor on a case, or has the open one read its table again. */
   showBoundaryEditor(path: string): void
   closeBoundaryEditor(): void
+  /** Shows the right column on one of its panels (open_panel's target). */
+  openPanel(panel: RightPanelId): void
+  setSelection(selection: UiSelection | null): void
+  /** Puts a node in the Properties panel (null clears it). */
+  selectNode(node: PropertiesNode | null): void
 }
 
 export type UiStore = UiState & UiActions
@@ -181,6 +211,9 @@ const INITIAL: UiState = {
   metricMode: 'metrics',
   meshDialog: null,
   boundaryEditor: null,
+  rightTab: 'AI Assistant',
+  selection: null,
+  propertiesNode: null,
 }
 
 export function fileTabId(path: string): string {
@@ -457,6 +490,15 @@ export const useUiStore = create<UiStore>()(
       },
       closeBoundaryEditor() {
         set({ boundaryEditor: null })
+      },
+      openPanel(panel) {
+        set({ rightTab: panel, assistantVisible: true })
+      },
+      setSelection(selection) {
+        set({ selection })
+      },
+      selectNode(node) {
+        set({ propertiesNode: node })
       },
     }),
     {
