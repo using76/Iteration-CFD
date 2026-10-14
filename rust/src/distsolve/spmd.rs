@@ -1505,6 +1505,10 @@ pub(super) fn spmd_pbicgstab_float(
 /// [`spmd_pcg`]. The cycle comes from the workspace
 /// ([`SpmdWorkspace::set_gamg`]); a request without one is refused by name,
 /// and `ctrl.precon` is ignored - the cycle IS the method here.
+///
+/// Under `single` the solve is refined (SPEC-LIT §118.12's outer loop
+/// around this float body, AMG-06a, §141.9), every refusal first - before
+/// the refinement's first collective - as [`spmd_pcg`]'s is.
 #[allow(clippy::too_many_arguments)]
 pub fn spmd_gamg(
     gpu: &Gpu,
@@ -1516,13 +1520,42 @@ pub fn spmd_gamg(
     w: &mut SpmdWorkspace,
     ctrl: &SolverControls,
 ) -> Result<DistPerformance> {
-    let mut perf = DistPerformance {
-        converged: true,
-        ..Default::default()
-    };
-    // `ctrl.precon` is not read: the rows of §138.5's table are checked
-    // with `None`, so a preconditioner this workspace cannot build does not
-    // refuse a method that never applies one.
+    #[cfg(feature = "single")]
+    {
+        if let Some(i) = w.ir.as_mut() {
+            i.outer_steps = 0;
+        }
+        if super::refine::refines(ctrl, sys.n_global_cells()) {
+            gamg_preflight(gpu, comm, psi, sys, halo, w, ctrl)?;
+            return super::refine::spmd_refined(
+                gpu,
+                sol,
+                comm,
+                psi,
+                sys,
+                halo,
+                w,
+                ctrl,
+                super::refine::Method::Gamg,
+            );
+        }
+    }
+    spmd_gamg_float(gpu, sol, comm, psi, None, sys, halo, w, ctrl)
+}
+
+/// [`spmd_gamg`]'s refusals: §138.5's preflight with `ctrl.precon` not
+/// read - the rows are checked with `None`, so a preconditioner this
+/// workspace cannot build does not refuse a method that never applies
+/// one - and a workspace without a cycle. Returns the owned cell count.
+fn gamg_preflight(
+    gpu: &Gpu,
+    comm: &dyn Comm,
+    psi: &DevBuf<Scalar>,
+    sys: &DistSystem,
+    halo: &SpmdHalo,
+    w: &SpmdWorkspace,
+    ctrl: &SolverControls,
+) -> Result<usize> {
     let plain = SolverControls {
         precon: Preconditioner::None,
         ..*ctrl
@@ -1537,6 +1570,28 @@ pub fn spmd_gamg(
                 .to_string(),
         ));
     }
+    Ok(n)
+}
+
+/// [`spmd_gamg`]'s float body against `rhs` (`None`: the part's
+/// `a.source`, the f64 path) - unchanged otherwise.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spmd_gamg_float(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    comm: &dyn Comm,
+    psi: &mut DevBuf<Scalar>,
+    rhs: Option<&DevBuf<Scalar>>,
+    sys: &DistSystem,
+    halo: &mut SpmdHalo,
+    w: &mut SpmdWorkspace,
+    ctrl: &SolverControls,
+) -> Result<DistPerformance> {
+    let mut perf = DistPerformance {
+        converged: true,
+        ..Default::default()
+    };
+    let n = gamg_preflight(gpu, comm, psi, sys, halo, w, ctrl)?;
     if sys.n_global_cells() == 0 {
         return Ok(perf);
     }
@@ -1562,7 +1617,7 @@ pub fn spmd_gamg(
     let reduce = w.reduce;
 
     // ---- dist_norm_factor for ONE part, as `spmd_pcg` -------------------
-    solver::vec_copy(gpu, sol, b, &sys.a[0].source, n)?;
+    solver::vec_copy(gpu, sol, b, rhs.unwrap_or(&sys.a[0].source), n)?;
     reduce_into(gpu, sol, comm, red, reduce, What::Sum(psi), x_ref, &mut perf)?;
     let inv_n = 1.0 / (sys.n_global_cells() as Scalar);
     if n > 0 {

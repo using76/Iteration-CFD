@@ -39260,7 +39260,7 @@ in `cht.rs`) are still measured on the stored float field, so under `single`
 a region's report sits at the float floor. Ranged double kernels would be
 needed, and `cht.rs` is outside this unit's files; the item is F32-13/14's to
 class. GAMG as a solver was already refined (AMG-04a), and GAMG in f32 is
-AMG-06a's. **A refined PBiCGStab on the sealed all-Neumann box of section 6
+AMG-06a's (§141.9, which also refines the SPMD stationary `spmd_gamg`). **A refined PBiCGStab on the sealed all-Neumann box of section 6
 returns NaN under `single`.** That box is singular, and its float-rounded
 source is inconsistent by `O(n·u32)`. Once the refinement has removed
 everything else, the correction system is mostly that inconsistent
@@ -49649,8 +49649,8 @@ on its own, so `solver::solve` no longer refuses `GAMG` (§8.3 is amended). `src
 gains a dense LU factor for an asymmetric coarsest level, because the Galerkin product of an
 asymmetric matrix is asymmetric and §141.4 factors only symmetric levels. `cuda/amg.cu` gains
 two kernels, `amgResidual` and `amgCoarseLu`. The tests are `tests/amg_cycle.rs`, an
-integration test (both builds; the iteration gates are f64 and wait for AMG-06a under
-`single`), and one library test, the capture gate of §81. No existing solve, case or SASS
+integration test (both builds; since AMG-06a the iteration and agreement gates hold their
+f64 numbers under `single` too, §141.9), and one library test, the capture gate of §81. No existing solve, case or SASS
 outside `amg.cubin` moves: a case cannot ask for GAMG yet (AMG-04b), the pressure backend
 still refuses it (AMG-04b, AMG-05), and every other preconditioner and solver path is unchanged.
 
@@ -49760,7 +49760,9 @@ AMG-07b, and `partition_invariant(Gamg)` is `false`. Since AMG-07b the SPMD solv
 in f64, `1e-6` under `single`), R (residual `1e-12` / `1e-5`) and D (device against host twin,
 bitwise in both builds). The device cycle against its host twin is class R, `1e-12` of `‖x‖_2`
 (f64) / `1e-5` (`single`), because level 0's product is `ldu_ops::amul` and `ldu.cu` is not on
-the `-fmad=false` list. The iteration gates are f64 rows; under `single` they wait for AMG-06a.
+the `-fmad=false` list. The iteration and agreement gates hold their f64 numbers in both builds
+since AMG-06a: under `single` every solve is refined (§118.4) and the answers compared are the
+double solutions (§141.9).
 
 **The matrices.** `POI(n)`: the uniform `n^3` box of unit cells, every wall Dirichlet, the §2
 laplacian negated so that `σ = +1`: `upper = lower = -|S_f| δ_f` on the internal faces, the
@@ -49788,8 +49790,8 @@ an M-matrix, asymmetric, column diagonally dominant.
 | `the_lu_factor_and_solution_of_small_asymmetric_matrices` | `[[4, -1], [-2, 3]]`, `b = (1, 2)`: `L_10 = -0.5`, `U = (4, -1; 2.5)`, `x = (0.5, 1)`; its negation: `σ = -1`, the same factor, `x = -(0.5, 1)`; device bitwise the host twin; `general` on `K4` and `SYM` is `new` bit for bit | A, D |
 | `the_lu_coarse_solve_on_the_convection_diffusion_coarsest_level` | the one coarse level of `CD(8)` with `max_levels = 2` (128 cells): its largest `|Â_ij - Â_ji|` is `>= 1` (measured 10, `Pe D` of an x-coupling, in both builds), method `Lu` in both builds, residual `<= 1e-12` (f64) / `1e-5` (f32), device bitwise the host twin, twice | R, D |
 | `an_asymmetric_level_that_cannot_be_factored_is_refused_by_name` | `[[1, 2], [3, 6]]`: `pivot` at 1 (`Error::Refused`, naming `-permissive`), and under `-permissive` `JacobiFallback`; `[[1, -1], [-2, 2]]`: `singular` | D |
-| `gamg_on_dirichlet_poisson_32_64_128` (f64) | `POI(32)`, `POI(64)`, `POI(128)`, tol `1e-8`: DIC-PCG, GAMG-PCG and standalone GAMG all converge; at 128^3 GAMG-PCG takes `<= 1/3` of DIC-PCG's iterations; the iteration growth 32^3 -> 128^3 is measured and printed (table below); at 128^3 GAMG-PCG and Jacobi-PBiCGStab at tol `1e-8` agree to `‖x_g - x_b‖_2 <= 1e-8 ‖x_b‖_2`, and so do the two solved to `1e-12` (a stricter, additional row) | R, P |
-| `gamg_pbicgstab_on_convection_diffusion` (f64) | `CD(64)`, tol `1e-8`: DILU-PBiCGStab and GAMG-PBiCGStab converge, GAMG's iterations `<= 1/2` of DILU's | P |
+| `gamg_on_dirichlet_poisson_32_64_128` (both builds, §141.9) | `POI(32)`, `POI(64)`, `POI(128)`, tol `1e-8`: DIC-PCG, GAMG-PCG and standalone GAMG all converge; at 128^3 GAMG-PCG takes `<= 1/3` of DIC-PCG's iterations; the iteration growth 32^3 -> 128^3 is measured and printed (table below); at 128^3 GAMG-PCG and Jacobi-PBiCGStab at tol `1e-8` agree to `‖x_g - x_b‖_2 <= 1e-8 ‖x_b‖_2`, and so do the two solved to `1e-12` (a stricter, additional row) | R, P |
+| `gamg_pbicgstab_on_convection_diffusion` (both builds, §141.9) | `CD(64)`, tol `1e-8`: DILU-PBiCGStab and GAMG-PBiCGStab converge, GAMG's iterations `<= 1/2` of DILU's | P |
 | `a_gamg_request_that_cannot_be_served_is_refused_by_name` | `solver GAMG` and `preconditioner GAMG` on a workspace without a hierarchy (`set_gamg`); PCG with V(1,2) (`nPreSweeps`); `set_gamg` with another cell count (`cells`); `ν1 = ν2 = 0` (`sweeps`); `dist_solve` with `Preconditioner::Gamg` (`AMG-07b`) | D |
 | `amg::cycle::tests::vcycle_replays_under_capture` (library) | the preconditioner on `POI(8)` with one coarse level and more, captured into a graph and replayed bitwise (§81) | D |
 
@@ -49919,8 +49921,8 @@ cycle, the K-cycle included.
 
 **Precision** (§118, docs/17 §5.1.4). The device K-cycle against its host twin is class R, as
 the V-cycle's (§141.5): `1e-12` of `‖x‖_2` (f64) / `1e-5` (`single`), level 0's product being
-`ldu_ops::amul`. The iteration gate and the agreement rows are f64 rows; under `single` they
-wait for AMG-06a, as §141.5.1's do.
+`ldu_ops::amul`. The iteration gate and the agreement rows hold their f64 numbers in both
+builds since AMG-06a (§141.9), as §141.5.1's do.
 
 #### 141.6.1 The gates
 
@@ -49929,8 +49931,8 @@ wait for AMG-06a, as §141.5.1's do.
 | test (`tests/amg_cycle.rs`) | what | class |
 |---|---|---|
 | `the_device_k_cycle_matches_its_host_twin` | `POI(16)` with `n_cells_coarsest = 16` (at least three coarse levels), K(2,2) Chebyshev at `t = 0.25` and `t = 0`, K(1,1) l1-Jacobi at `t = 0.25`, `z = 0; K(z, b)` with `b` = the test field: device against a host twin in `Scalar` written in the test; `t = 0` takes the second iteration every time, and the three take both branches | R |
-| `k_cycle_fcg_on_dirichlet_poisson_32_64_128` (f64) | docs/17's AMG-04c gate: `POI(32)`, `POI(64)`, `POI(128)`, default config with the K-cycle at `t = 0.25`, FCG(1), tol `1e-8`: converges at every size and the iteration growth 32^3 -> 128^3 is `<= 1.3x`; at every size its answer is within `1e-8 ‖x_b‖_2` of Jacobi-PBiCGStab's (§141.5.1's agreement row) | P, R |
-| `fcg_with_a_fixed_preconditioner_agrees_with_pcg` (f64) | `POI(32)` with DIC, tol `1e-8`: DIC-FCG and DIC-PCG converge and agree to `1e-8` of `‖x‖_2` | R |
+| `k_cycle_fcg_on_dirichlet_poisson_32_64_128` (both builds, §141.9) | docs/17's AMG-04c gate: `POI(32)`, `POI(64)`, `POI(128)`, default config with the K-cycle at `t = 0.25`, FCG(1), tol `1e-8`: converges at every size and the iteration growth 32^3 -> 128^3 is `<= 1.3x`; at every size its answer is within `1e-8 ‖x_b‖_2` of Jacobi-PBiCGStab's (§141.5.1's agreement row) | P, R |
+| `fcg_with_a_fixed_preconditioner_agrees_with_pcg` (both builds, §141.9) | `POI(32)` with DIC, tol `1e-8`: DIC-FCG and DIC-PCG converge and agree to `1e-8` of `‖x‖_2` | R |
 | `the_k_cycle_refusals_are_named` | thresholds `1`, `-0.1`, NaN, ∞ (`threshold`; the V-cycle is kept); a K-cycle inside a capture (`K-cycle`, `capture`); PCG and PBiCGStab with a K-cycle preconditioner (`variable`, `solve_fcg`) | D |
 
 **Measured** (supervisor's run of `tests/amg_cycle.rs`, f64, 2026-10-14, RTX 5070 Ti; default
@@ -49948,6 +49950,109 @@ The iteration growth 32^3 -> 128^3 is 14/13 = 1.08x for the K-cycle, inside the 
 `POI(32)` both take 39 iterations and agree to 3.5e-16. The host twin agrees to 9.4e-16
 (K(2,2), `t = 0.25`: 4 one-step and 0 two-step inner solves), 1.0e-15 (`t = 0`: 15 two-step)
 and 2.9e-16 (K(1,1) l1-Jacobi: 8 one-step, 5 two-step).
+
+### 141.9 GAMG in f32 (AMG-06a)
+
+`No GPL-licensed source was consulted.` Under `--features single` the native GAMG of §141.5,
+§141.6 and §141.11 converges, and it meets the f64 numbers of those sections' gates. The
+plan's row asked for "the f32 residual floor". docs/17 §12's note 4 tightened that: under
+§118.4's refinement the f32 build reaches AMG-04a's f64 tolerances, and the floor of the raw
+float hierarchy is reported beside that. The unit is AMG-06a.
+
+**What was already refined.** The serial `solve_gamg` (one iteration one cycle) was already
+inside §118.4's outer loop, and so were PCG, PBiCGStab and FCG with `Preconditioner::Gamg`
+(F32-06, AMG-04a, AMG-04c). In each, the float cycle is the unchanged inner method, solving
+for a correction. AMG-06a adds no kernel, no equation and no solver path to the serial solve.
+The refinement is (118.4.1)-(118.4.9), and the residual is §8.4's.
+
+**What AMG-06a wraps.** The SPMD stationary cycle `spmd_gamg` of §141.11 was a float solve.
+At tol `1e-6` it stalled at a true residual of `4.3e-6` after 500 cycles on POI 32³. It is now
+refined by §118.12's outer loop, exactly as `spmd_pcg` and `spmd_pbicgstab` are:
+- `distsolve::refine::Method::Gamg` is the new method;
+- the float body `spmd_gamg_float` takes the correction's right-hand side, `None` being the
+  part's own `a.source`;
+- every refusal of `spmd_gamg` (the §138.5 preflight, and a workspace without a cycle) comes
+  before the refinement's first collective;
+- `vote_verdict` names `spmd_gamg`.
+
+The in-process `dist_solve` has no GAMG form, so `Method::Gamg` there is refused by name,
+pointing to the SPMD route. A `fixed_iters` solve and an empty system are not refined, as in
+§118.4. The f64 build runs the same float body through `spmd_gamg_float(.., None, ..)`, and its
+answers are unchanged.
+
+**What the gates compare.** Under `single` the answer of a refined solve is its double
+solution `x` (`SolverWorkspace::refined_solution`, `SpmdWorkspace::refined_solution`). The
+stored field `psi = fl32(x)` of (118.4.9) is that answer rounded once. That one rounding is
+up to `2^-24` relative per entry, and on its own it moves two converged answers apart by
+`1.5e-8` to `2.4e-8` (measured below). That is why the `1e-8` agreement rows of §141.5.1 and
+§141.6.1 were ignored under `single` before this unit. They now compare the double answers,
+and every one of them holds at its f64 number.
+
+**The hierarchy differs between builds.** Aggregation reads the strengths in `Scalar`
+(§141.1), so ties break differently in f32. Level 1 of POI(64) has 65546 cells in f64 and
+65536 under `single`. An iteration count under `single` is therefore a count on a different
+hierarchy as well as at a different precision. It is gated against the f64 count, as the row
+asks.
+
+**`cuda/amg.cu`** holds no double-only literal (`1e-300`, `1e300`, `DBL_MIN`). The §112.1 scan
+test (`types::tests::no_kernel_unit_carries_a_double_only_literal_outside_its_pair`) reads
+every `.cu` in `cuda/`, `amg.cu` included. The `f64::MIN_POSITIVE` bounds of `src/amg/smooth.rs`
+are host arithmetic in `f64` (the Lanczos bracket of §141.3), not device floors.
+
+Sources: the refinement and its sources are §118.4's: **Moler (1967)**, J. ACM 14(2) 316-321,
+doi:10.1145/321386.321394; **Carson & Higham (2018)**; and **Higham (2002)** ch. 12. The
+residual is §8.4's. The cycle is §141.5's (Saad 2003 §13.4.3, the author's open copy).
+
+#### 141.9.1 The gates
+
+`tol = 1e-8` is the §8.4 residual. "Iterations" is `SolverPerformance::n_iterations`, which
+under `single` counts every inner iteration of every outer step.
+
+| test | what | class |
+|---|---|---|
+| `gamg_pcg_holds_in_f32_on_poisson_64` (`tests/amg_cycle.rs`) | **the AMG-06a gate.** `POI(64)`, default config, GAMG-PCG at tol `1e-8` from zero. In f64 it converges in the reference 24 iterations of §141.5's table, asserted equal so that the reference cannot drift. Under `single` the refined solve converges at the same tol, after at least one outer step, in `4 it <= 5 · 24` (that is `<= 1.25x`). In both builds the answer's §8.4 residual, recomputed on the host in f64 against the stored coefficients, is `<= 1e-8`. Reported beside that: the §8.4 residual of the stored field, and the floor of the raw float cycle (`fixed_iters`, never refined) after 24, 48 and 96 iterations | P, R |
+| `gamg_on_dirichlet_poisson_32_64_128`, `gamg_pbicgstab_on_convection_diffusion` (§141.5.1), `k_cycle_fcg_on_dirichlet_poisson_32_64_128`, `fcg_with_a_fixed_preconditioner_agrees_with_pcg` (§141.6.1) | no longer ignored under `single`. Every row keeps its f64 number: `1/3` and `1/2` of the iterations, `1.3x` growth, and the `1e-8` and `1e-12`-solve agreements on the double answers | P, R |
+| `tests/amg_dist_cycle.rs` (§141.11.1) | the solver tolerance is `1e-11` and the answer gate `1e-8` in BOTH builds. Before this unit they were `1e-5` and `1e-5` under `single`. The stationary `spmd_gamg` is refined | R, count |
+| `types::tests::no_kernel_unit_carries_a_double_only_literal_outside_its_pair` (library, f64) | the §112.1 scan, `cuda/amg.cu` among the files it reads | D |
+
+**Measured** (supervisor's runs, 2026-10-15; `single` first, f64 in brackets; the f64
+numbers are §141.5's and §141.6's, unchanged).
+
+- `POI(64)` GAMG-PCG: 20 iterations in 2 outer steps [24], against a gate of 30.
+  - The answer's §8.4 residual is 2.96e-10 [2.20e-10].
+  - The stored field's residual is 3.37e-7.
+  - The raw float cycle stops at **1.332e-6** after 24, 48 and 96 iterations alike. Its
+    float update no longer moves `psi`. In f64 the raw cycle reaches 2.20e-10 at 24 iterations
+    and 4.08e-15 at 48 and 96.
+
+  So the f32 hierarchy without refinement floors near `1e-6`. The refined answer is four orders
+  of magnitude below that floor, and even rounded once to f32 it is 4x below the floor.
+- §141.5.1 under `single`, for POI 32³ / 64³ / 128³:
+  - DIC-PCG takes 53 / 113 / 235 iterations [39 / 78 / 155].
+  - GAMG-PCG takes 14 / 20 / 30 [16 / 24 / 38].
+  - The standalone GAMG takes 56 / 111 / 283 [67 / 151 / 343].
+  - GAMG-PCG against Jacobi-PBiCGStab at `1e-8` differs by 8.69e-9 / 5.01e-9 / 7.12e-9. On
+    the stored fields, before this unit, the 128³ difference was 2.38e-8.
+  - The 128³ pair solved to `1e-12` differs by 7.50e-13 [2.02e-13].
+  - On `CD(64)`, DILU-PBiCGStab takes 79 iterations [47] and GAMG-PBiCGStab 7 [7].
+
+  The refined DIC counts are higher than f64's, because every outer step restarts the
+  recurrence. The GAMG counts are lower, on the f32 hierarchy.
+- §141.6.1 under `single`:
+  - K-cycle FCG takes 11 / 12 / 12 iterations [13 / 13 / 14], a growth of 1.09x [1.08x].
+  - Against Jacobi-PBiCGStab it differs by 7.68e-9 / 3.55e-9 / 5.91e-9. On the stored fields
+    the POI(32) difference was 2.37e-8.
+  - DIC-FCG takes 56 iterations and DIC-PCG 53 [39 and 39], and the two differ by 3.11e-9
+    [3.5e-16]. On the stored fields the difference was 1.49e-8.
+- §141.11.1 under `single` at tol `1e-11`:
+  - Serial GAMG-PCG takes 20 iterations on POI 32³ and 12 on the cyclic box.
+  - The serial stationary GAMG takes 78 and 35.
+  - Every SPMD row converged on one iteration across its ranks.
+  - The worst relative difference from serial is 7.0e-12 (cyclic box, P = 2, Hilbert, GAMG-PCG).
+  - The worst iteration ratio is 14/12 = 1.17 (cyclic box, P = 4, linear, GAMG-PCG).
+  - The answers of the four cuts differ in their bits in 6 of 6 pairs.
+
+  The f64 rows are the table of §141.11.1, unchanged.
 
 ### 141.10 Decomposed levels: block-local aggregation, coarse processor faces and coarse halos (AMG-07a)
 
@@ -50157,27 +50262,30 @@ cycle: `spmd_gamg: solver GAMG was requested`, naming `set_gamg`, `PCG` and `PBi
 `DistWorkspace::effective_preconditioner(Gamg)` name the SPMD route.
 
 **Precision.** The answer gate is class R (docs/17 §5.1.4): `1e-8` relative to the serial
-answer in f64, and `tol32 = max(1e-8, min(1e-8 · 2^29, 1e-5)) = 1e-5` under `single`. The
-iteration gate is a count. Under `single` the SPMD solves are float solves without §118.4's
-refinement (F32-07 wraps the distributed Krylov), so they run at the solver tolerance `1e-5`
-of the SPMD gates of §138.5. At `1e-6` the stationary float cycle stalls at its floor (a true
-residual of `4.3e-6` after 500 cycles on POI 32³), while the refined serial solve converges
-in 42 cycles. That is a property of the unrefined float solve, not of the cycle.
+answer. The iteration gate is a count. As AMG-07b landed, the SPMD solves under `single` were
+float solves without §118.4's refinement, so they ran at the solver tolerance `1e-5` of the
+SPMD gates of §138.5 against `tol32 = 1e-5`. At `1e-6` the stationary float cycle stalled at
+its floor (a true residual of `4.3e-6` after 500 cycles on POI 32³), while the refined serial
+solve converged in 42 cycles. That is a property of the unrefined float solve, not of the
+cycle. F32-07 then refined `spmd_pcg` and `spmd_pbicgstab` (§118.12), and AMG-06a refined
+`spmd_gamg` (§141.9). Since AMG-06a both numbers are the f64 ones in both builds: the solver
+tolerance is `1e-11`, and the gate `1e-8` on the double answers.
 
 #### 141.11.1 The gates
 
 POI is the §2 laplacian negated (`σ = +1`), walls folded as Dirichlet zero, cyclic couples as
 `boundary_coeffs`, and `b = 1 + (c mod 7)/7`. The config is the default (Chebyshev degree 2,
-V(2,2), `n_cells_coarsest = 64`), and the solver tolerance is `1e-11` (f64) or `1e-5`
-(`single`), from zero.
+V(2,2), `n_cells_coarsest = 64`), and the solver tolerance is `1e-11` in both builds (it was
+`1e-5` under `single` before AMG-06a), from zero.
 
 | test (`tests/amg_dist_cycle.rs`) | what | class |
 |---|---|---|
-| `distributed_gamg_matches_serial_gamg_in_both_builds` | **the AMG-07b gate.** POI 32³ and POI 24×16×12 cyclic in x; `P = 2, 4` ThreadComm ranks; Hilbert and linear cuts. `spmd_pcg` + `Gamg` against the serial GAMG-PCG and `spmd_solve` `GAMG` against the serial `solve_gamg`: every rank converged on the same iteration, `max|x - x_s| / max|x_s| <= 1e-8` (`1e-5` under `single`), and `10 it <= 13 it_s`. 16 rows | R, count |
+| `distributed_gamg_matches_serial_gamg_in_both_builds` | **the AMG-07b gate.** POI 32³ and POI 24×16×12 cyclic in x; `P = 2, 4` ThreadComm ranks; Hilbert and linear cuts. `spmd_pcg` + `Gamg` against the serial GAMG-PCG and `spmd_solve` `GAMG` against the serial `solve_gamg`: every rank converged on the same iteration, `max|x - x_s| / max|x_s| <= 1e-8` in both builds (it was `1e-5` under `single` before AMG-06a), and `10 it <= 13 it_s`. 16 rows | R, count |
 | `the_distributed_cycle_moves_the_answer_under_a_cut_and_says_so` | POI 16×12×10, `P = 2, 4`, Hilbert and linear: `partition_invariant(Gamg)` is `false` on every rank and in one process, every cut is within the answer gate of the serial GAMG-PCG, and the answers of the cuts differ in their bits (6 of 6 pairs, both builds) | R, D |
 | `a_distributed_gamg_request_that_cannot_be_served_is_refused_by_name` | the in-process refusals, then on two ranks: no coarse level, `ν1 = ν2 = 0`, PCG and `spmd_solve` `GAMG` without a cycle, the cycle inside a capture, PCG with V(1,2). 12 rank messages | D |
 
-Measured (f64; `single` in brackets). Serial GAMG-PCG takes 21 [9] iterations on POI 32³ and
+Measured as AMG-07b landed (f64; `single`, then at tol `1e-5` without refinement, in brackets;
+§141.9 has the refined `single` numbers at `1e-11`). Serial GAMG-PCG takes 21 [9] iterations on POI 32³ and
 15 [5] on the cyclic box; the serial stationary GAMG takes 93 [34] and 44 [16].
 
 | mesh | P, cut | GAMG-PCG iterations | GAMG iterations | worst relative difference |

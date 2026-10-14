@@ -10,14 +10,20 @@
 //! device cycle against its host twin is class R, `1e-12` of `norm(x)`
 //! in f64 and `1e-5` under `single` (D-F32-1), because level 0's
 //! product is `ldu_ops::amul`; the LU hand values are class A; the
-//! device LU solves are bitwise (class D); the iteration gates are f64
-//! rows and wait for AMG-06a under `single`.
+//! device LU solves are bitwise (class D); the iteration and agreement
+//! gates hold their f64 numbers in BOTH builds (AMG-06a, SPEC-LIT
+//! §141.9): under `single` every solve is refined (§118.4) and the
+//! answer compared is the refinement's double solution.
 //!
 //! AMG-04c adds the K-cycle and FCG(1) of SPEC-LIT §141.6: the device
 //! K-cycle against its host twin (class R, as the V-cycle's), the gate
-//! of its h-independence on `POI(32)` to `POI(128)` (an f64 row, AMG-06a
-//! under `single`), FCG against PCG with a fixed preconditioner, and the
+//! of its h-independence on `POI(32)` to `POI(128)` (both builds since
+//! AMG-06a), FCG against PCG with a fixed preconditioner, and the
 //! K-cycle's refusals by name.
+//!
+//! AMG-06a adds the f32 gate of SPEC-LIT §141.9: GAMG-PCG on `POI(64)`
+//! under `single` within `1.25x` of the f64 iteration count, beside the
+//! residual floor of the raw (unrefined) float cycle.
 //!
 //! An integration test, so the SAME assertions run in both builds (§118).
 //! A machine without a card passes the device rows vacuously, the
@@ -155,15 +161,39 @@ fn upload_fine(gpu: &Gpu, m: &HostMesh, a: &HostLduMatrix) -> Result<(GpuMesh, G
     Ok((mesh, mat))
 }
 
-/// Relative L2 distance `||x - y|| / ||y||` in f64 from Scalar values.
-fn rel_l2(x: &[Scalar], y: &[Scalar]) -> f64 {
+/// Relative L2 distance `||x - y|| / ||y||` in f64 from Scalar or f64
+/// values.
+fn rel_l2<T: Copy + Into<f64>>(x: &[T], y: &[T]) -> f64 {
     let (mut sq, mut sy) = (0.0f64, 0.0f64);
     for (a, b) in x.iter().zip(y.iter()) {
-        let d = *a as f64 - *b as f64;
+        let (a, b): (f64, f64) = ((*a).into(), (*b).into());
+        let d = a - b;
         sq += d * d;
-        sy += (*b as f64) * (*b as f64);
+        sy += b * b;
     }
     sq.sqrt() / sy.sqrt()
+}
+
+/// The solve's own answer in f64 (AMG-06a, SPEC-LIT 141.9): under
+/// `single` the double solution of the §118.4 refinement,
+/// `SolverWorkspace::refined_solution` ((118.4.9): the stored `psi` is
+/// its one rounding), when the solve was refined; otherwise `psi`
+/// widened.
+fn answer(
+    gpu: &Gpu,
+    w: &SolverWorkspace,
+    psi: &ofgpu::DevBuf<Scalar>,
+    n: usize,
+) -> Result<Vec<f64>> {
+    #[cfg(feature = "single")]
+    if w.ir_outer_steps() > 0 {
+        if let Some(x) = w.refined_solution() {
+            return Ok(gpu.download(x)?[..n].to_vec());
+        }
+    }
+    #[cfg(not(feature = "single"))]
+    let _ = w;
+    Ok(gpu.download(psi)?[..n].iter().map(|&v| v as f64).collect())
 }
 
 /// The relative residual `||b - A x|| / ||b||` of the RAW system in f64,
@@ -617,7 +647,7 @@ fn one_solve(
     mat: &GpuLduMatrix,
     gamg: Option<Gamg>,
     ctrl: &SolverControls,
-) -> Result<(SolverPerformance, Vec<Scalar>)> {
+) -> Result<(SolverPerformance, Vec<f64>)> {
     let n = mesh.n_cells;
     let mut w = SolverWorkspace::for_mesh(gpu, mesh)?;
     if let Some(g) = gamg {
@@ -625,7 +655,7 @@ fn one_solve(
     }
     let mut psi = gpu.zeros(n)?;
     let p = solve(gpu, k, &mut psi, mat, mesh, &mut w, ctrl)?;
-    let x = gpu.download(&psi)?;
+    let x = answer(gpu, &w, &psi, n)?;
     Ok((p, x))
 }
 
@@ -635,10 +665,9 @@ fn one_solve(
 /// to `1e-8` of `norm(x)` at tol `1e-8` (the plan's row), and the
 /// 1e-12 row is an additional, stricter agreement check on the same
 /// pair solved to `1e-12` (SPEC-LIT 141.5.1, classes R and P). The
-/// iteration growth is printed as a table (f64 only; the gates wait
-/// for AMG-06a under `single`).
+/// iteration growth is printed as a table. Both builds, the same
+/// numbers (AMG-06a, SPEC-LIT 141.9).
 #[test]
-#[cfg_attr(feature = "single", ignore = "AMG-06a: GAMG under single")]
 fn gamg_on_dirichlet_poisson_32_64_128() {
     let Some(gpu) = gpu() else { return };
     let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");
@@ -806,9 +835,8 @@ fn gamg_on_dirichlet_poisson_32_64_128() {
 
 /// `CD(64)`, tol `1e-8`: DILU-PBiCGStab and GAMG-PBiCGStab both
 /// converge, GAMG's iterations `<= 1/2` of DILU's (SPEC-LIT 141.5.1,
-/// class P; f64 only, AMG-06a under `single`).
+/// class P; both builds since AMG-06a).
 #[test]
-#[cfg_attr(feature = "single", ignore = "AMG-06a: GAMG under single")]
 fn gamg_pbicgstab_on_convection_diffusion() {
     let Some(gpu) = gpu() else { return };
     let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");
@@ -864,6 +892,115 @@ fn gamg_pbicgstab_on_convection_diffusion() {
         p_gamg.n_iterations,
         p_dilu.n_iterations
     );
+}
+
+/// The f64 reference of the AMG-06a gate: GAMG-PCG's iterations on
+/// `POI(64)` at tol `1e-8` with the default config, SPEC-LIT 141.5's
+/// measured table (f64).
+const F64_GAMG_PCG_POI64: usize = 24;
+
+/// SPEC-LIT §8.4's normalised residual of the system AS STORED, in f64
+/// on the host: `x_ref = mean(x)`, `norm = sum|A x - A x_ref| +
+/// sum|b - A x_ref| + eps`, `res = sum|b - A x| / norm`.
+fn res_8_4(rows: &HostRows, b: &[Scalar], x: &[f64]) -> f64 {
+    let n = rows.n_cells;
+    let ax = rows.amul(&x[..n]);
+    let mean = x[..n].iter().sum::<f64>() / n as f64;
+    let axr = rows.amul(&vec![mean; n]);
+    let (mut num, mut den) = (0.0f64, f64::MIN_POSITIVE);
+    for c in 0..n {
+        let bc = b[c] as f64;
+        num += (bc - ax[c]).abs();
+        den += (ax[c] - axr[c]).abs() + (bc - axr[c]).abs();
+    }
+    num / den
+}
+
+/// **The AMG-06a gate** (docs/17 §12 row and its note 4, SPEC-LIT
+/// 141.9.1), both builds: GAMG-PCG on `POI(64)`, default config, tol
+/// `1e-8`, from zero. f64: it converges in the reference
+/// [`F64_GAMG_PCG_POI64`] iterations. `single`: the §118.4-refined solve
+/// converges at the SAME tolerance, every inner iteration counted, in
+/// `<= 1.25x` the f64 count, after at least one outer step. Both: the
+/// answer's §8.4 residual, recomputed on the host in f64, is `<= 1e-8`.
+/// Beside that, the floor of the RAW float cycle (`fixed_iters`, which
+/// is never refined) after 24, 48 and 96 iterations is printed: the
+/// residual a float-only GAMG-PCG cannot get below; and the residual of
+/// the stored field, the refined answer rounded once to `Scalar`.
+#[test]
+fn gamg_pcg_holds_in_f32_on_poisson_64() {
+    let Some(gpu) = gpu() else { return };
+    let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");
+    let m = box_mesh(64, 64, 64);
+    let a = poi(&m);
+    let rows = HostRows::of_matrix(&m, &a).expect("host rows");
+    let (mesh, mat) = upload_fine(&gpu, &m, &a).expect("upload");
+    let n = m.n_cells;
+    let ctrl = SolverControls {
+        solver: LinearSolverKind::PCG,
+        precon: Preconditioner::Gamg,
+        tolerance: 1e-8,
+        rel_tol: 0.0,
+        max_iter: 5000,
+        check_interval: 1,
+        ..SolverControls::default()
+    };
+
+    let mut w = SolverWorkspace::for_mesh(&gpu, &mesh).expect("workspace");
+    let gamg = Gamg::new(&gpu, &m, &a, &GamgConfig::default(), false).expect("gamg");
+    let sizes = gamg.sizes();
+    w.set_gamg(gamg).expect("set_gamg");
+    let mut psi = gpu.zeros(n).expect("psi");
+    let p = solve(&gpu, &k, &mut psi, &mat, &mesh, &mut w, &ctrl).expect("GAMG-PCG");
+    let x = answer(&gpu, &w, &psi, n).expect("answer");
+    let res = res_8_4(&rows, &a.source, &x);
+    // The stored field: under `single` the answer's one rounding (118.4.9).
+    let stored: Vec<f64> =
+        gpu.download(&psi).expect("psi")[..n].iter().map(|&v| v as f64).collect();
+    let res_stored = res_8_4(&rows, &a.source, &stored);
+    #[cfg(feature = "single")]
+    let outer = w.ir_outer_steps();
+    #[cfg(not(feature = "single"))]
+    let outer = 0usize;
+    eprintln!(
+        "POI(64) GAMG-PCG @1e-8: sizes {} | {} it ({outer} outer) | f64 reference {} it \
+         | 8.4 residual of the answer {res:.3e}, of the stored field {res_stored:.3e}",
+        sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("->"),
+        p.n_iterations,
+        F64_GAMG_PCG_POI64,
+    );
+    assert!(p.converged, "GAMG-PCG must converge on POI(64) at tol 1e-8");
+    assert!(res <= 1e-8, "the answer's 8.4 residual {res:.3e} is over the tolerance 1e-8");
+    if cfg!(feature = "single") {
+        assert!(outer >= 1, "under single the solve must be refined (SPEC-LIT §118.4)");
+        assert!(
+            4 * p.n_iterations <= 5 * F64_GAMG_PCG_POI64,
+            "f32 GAMG-PCG took {} iterations, over 1.25x the f64 {}",
+            p.n_iterations,
+            F64_GAMG_PCG_POI64
+        );
+    } else {
+        assert_eq!(
+            p.n_iterations, F64_GAMG_PCG_POI64,
+            "the f64 reference count moved: re-measure SPEC-LIT 141.5 and 141.9"
+        );
+    }
+
+    // The raw float cycle's floor: `fixed_iters` solves are not refined.
+    for its in [24usize, 48, 96] {
+        let mut psi = gpu.zeros(n).expect("psi");
+        let fixed = SolverControls {
+            max_iter: its as ofgpu::Label,
+            fixed_iters: true,
+            ..ctrl
+        };
+        solve(&gpu, &k, &mut psi, &mat, &mesh, &mut w, &fixed).expect("fixed GAMG-PCG");
+        let xs: Vec<f64> =
+            gpu.download(&psi).expect("psi")[..n].iter().map(|&v| v as f64).collect();
+        let r = res_8_4(&rows, &a.source, &xs);
+        eprintln!("POI(64) raw GAMG-PCG floor: {its} fixed iterations, 8.4 residual {r:.3e}");
+        assert!(r.is_finite(), "the raw cycle's residual after {its} iterations is {r}");
+    }
 }
 
 /// Every refusal of the 141.5.1 row, by name (SPEC-LIT 141.5.1, class
@@ -1173,7 +1310,7 @@ fn one_fcg(
     mat: &GpuLduMatrix,
     gamg: Option<Gamg>,
     ctrl: &SolverControls,
-) -> Result<(SolverPerformance, Vec<Scalar>)> {
+) -> Result<(SolverPerformance, Vec<f64>)> {
     let n = mesh.n_cells;
     let mut w = SolverWorkspace::for_mesh(gpu, mesh)?;
     if let Some(g) = gamg {
@@ -1181,7 +1318,7 @@ fn one_fcg(
     }
     let mut psi = gpu.zeros(n)?;
     let p = solve_fcg(gpu, k, &mut psi, mat, mesh, &mut w, ctrl)?;
-    let x = gpu.download(&psi)?;
+    let x = answer(gpu, &w, &psi, n)?;
     Ok((p, x))
 }
 
@@ -1190,10 +1327,8 @@ fn one_fcg(
 /// `t = 0.25`, FCG(1): it converges at every size and its iteration count
 /// grows `<= 1.3x` from 32^3 to 128^3 (class P); at every size its answer
 /// is within `1e-8` of Jacobi-PBiCGStab's (AMG-04a's agreement row,
-/// class R). f64 rows; under `single` they wait for AMG-06a, as the
-/// V-cycle's do.
+/// class R). Both builds, the same numbers (AMG-06a, SPEC-LIT 141.9).
 #[test]
-#[cfg_attr(feature = "single", ignore = "AMG-06a: GAMG under single")]
 fn k_cycle_fcg_on_dirichlet_poisson_32_64_128() {
     let Some(gpu) = gpu() else { return };
     let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");
@@ -1267,9 +1402,8 @@ fn k_cycle_fcg_on_dirichlet_poisson_32_64_128() {
 /// FCG(1) with a FIXED preconditioner is PCG in exact arithmetic
 /// ((141.6.2) of SPEC-LIT 141.6): on `POI(32)` with DIC, tol `1e-8`, both converge
 /// and their answers agree to `1e-8` of `norm(x)` (class R, the
-/// agreement row of 141.5.1). f64; AMG-06a under `single`.
+/// agreement row of 141.5.1). Both builds since AMG-06a.
 #[test]
-#[cfg_attr(feature = "single", ignore = "AMG-06a: GAMG under single")]
 fn fcg_with_a_fixed_preconditioner_agrees_with_pcg() {
     let Some(gpu) = gpu() else { return };
     let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");

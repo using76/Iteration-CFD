@@ -14,8 +14,11 @@
 //! user). The reference is the serial GAMG of §141.5 on the whole mesh:
 //! GAMG-PCG for `spmd_pcg` with `Preconditioner::Gamg`, and the stationary
 //! cycle for `spmd_solve` with `LinearSolverKind::Gamg`. The answer gate is
-//! class R of the docs/17 precision rules (`1e-8` relative; `tol32 = 1e-5` under
-//! `single`), the iteration gate a count (`<= 1.3x` serial).
+//! class R of the docs/17 precision rules, `1e-8` relative, the iteration
+//! gate a count (`<= 1.3x` serial). Since AMG-06a (SPEC-LIT §141.9) both
+//! numbers hold in BOTH builds: under `single` every solve here, the
+//! stationary `spmd_gamg` included, is refined (§118.12), and the answer
+//! compared is the refinement's double solution.
 //!
 //! Provenance: ORIGINAL - the gates of this project's own design (SPEC-LIT
 //! §141.11). No external source. No GPL-licensed source was consulted.
@@ -38,16 +41,14 @@ use ofgpu::solver::{
 };
 use ofgpu::{Result, Scalar};
 
-/// The answer gate, class R: `1e-8` relative in f64, and under `single`
-/// `tol32 = max(tol64, min(tol64 2^29, 1e-5)) = 1e-5` (D-F32-1).
-const GATE: f64 = if cfg!(feature = "single") { 1e-5 } else { 1e-8 };
+/// The answer gate, class R: `1e-8` relative, in both builds - under
+/// `single` the refined solves reach the f64 tolerance (docs/17 §12 note 4,
+/// AMG-06a; it was `tol32 = 1e-5` before).
+const GATE: f64 = 1e-8;
 
-/// The solver tolerance - a solver control, not a gate tolerance: `1e-5`
-/// under `single`, as `tests/distsolve_spmd.rs` (an SPMD float solve is not
-/// refined before F32-07, so it stops near the f32 floor).
-#[cfg(feature = "single")]
-const TOL: Scalar = 1e-5;
-#[cfg(not(feature = "single"))]
+/// The solver tolerance, a solver control: `1e-11` in both builds (it was
+/// `1e-5` under `single` while `spmd_gamg` was a float solve that stalls
+/// near the f32 floor).
 const TOL: Scalar = 1e-11;
 
 /// A uniform box, every patch a wall, the axes of `cyclic` cyclic.
@@ -120,24 +121,50 @@ fn serial(
     m: &HostMesh,
     a: &HostLduMatrix,
     ctrl: &SolverControls,
-) -> Result<(SolverPerformance, Vec<Scalar>)> {
+) -> Result<(SolverPerformance, Vec<f64>)> {
     let mesh = GpuMesh::upload(gpu, m)?;
     let mat = a.upload(gpu)?;
     let mut w = SolverWorkspace::for_mesh(gpu, &mesh)?;
     w.set_gamg(Gamg::new(gpu, m, a, &GamgConfig::default(), false)?)?;
     let mut psi = gpu.zeros(m.n_cells)?;
     let p = solve(gpu, k, &mut psi, &mat, &mesh, &mut w, ctrl)?;
-    Ok((p, gpu.download(&psi)?))
+    #[cfg(feature = "single")]
+    if w.ir_outer_steps() > 0 {
+        if let Some(x) = w.refined_solution() {
+            return Ok((p, gpu.download(x)?[..m.n_cells].to_vec()));
+        }
+    }
+    Ok((p, gpu.download(&psi)?.iter().map(|&v| v as f64).collect()))
 }
 
 /// What one rank brings back: per control its performance and owned field,
 /// the cycle's owned and whole-level sizes, and the workspace's
 /// `partition_invariant(Gamg)`.
 struct RankOut {
-    solves: Vec<(DistPerformance, Vec<Scalar>)>,
+    solves: Vec<(DistPerformance, Vec<f64>)>,
     sizes: Vec<usize>,
     global_sizes: Vec<usize>,
     invariant: bool,
+}
+
+/// The rank's owned answer in f64: under `single` the refinement's double
+/// solution when the solve was refined (SPEC-LIT §118.12), else `psi`
+/// widened.
+fn owned_answer(
+    gpu: &Gpu,
+    w: &SpmdWorkspace,
+    psi: &ofgpu::DevBuf<Scalar>,
+    n: usize,
+) -> Result<Vec<f64>> {
+    #[cfg(feature = "single")]
+    if w.ir_outer_steps() > 0 {
+        if let Some(x) = w.refined_solution() {
+            return Ok(gpu.download(x)?[..n].to_vec());
+        }
+    }
+    #[cfg(not(feature = "single"))]
+    let _ = w;
+    Ok(gpu.download(psi)?[..n].iter().map(|&v| v as f64).collect())
 }
 
 /// One rank per part: `DistGamg::new` on the rank's split matrix, attached
@@ -170,7 +197,7 @@ fn spmd(
             let mut psi = gpu.zeros(dec.parts[r].n_local())?;
             let perf = spmd_solve(&gpu, &sol, comm, &mut psi, &sys, &mut halo, &mut w, ctrl)?;
             gpu.sync()?;
-            solves.push((perf, gpu.download(&psi)?[..n].to_vec()));
+            solves.push((perf, owned_answer(&gpu, &w, &psi, n)?));
         }
         Ok(RankOut {
             solves,
@@ -188,8 +215,8 @@ fn gathered(
     got: &[Result<RankOut>],
     k: usize,
     what: &str,
-) -> (Vec<Scalar>, Vec<DistPerformance>) {
-    let mut x = vec![0 as Scalar; dec.n_global_cells];
+) -> (Vec<f64>, Vec<DistPerformance>) {
+    let mut x = vec![0.0f64; dec.n_global_cells];
     let mut perfs = Vec::new();
     for (r, out) in got.iter().enumerate() {
         let out = out
@@ -205,16 +232,16 @@ fn gathered(
 }
 
 /// `max |x - y| / max |y|` in f64.
-fn rel_inf(x: &[Scalar], y: &[Scalar]) -> f64 {
+fn rel_inf(x: &[f64], y: &[f64]) -> f64 {
     let (mut d, mut s) = (0.0f64, 0.0f64);
     for (&a, &b) in x.iter().zip(y) {
-        d = d.max((a as f64 - b as f64).abs());
-        s = s.max((b as f64).abs());
+        d = d.max((a - b).abs());
+        s = s.max(b.abs());
     }
     d / s
 }
 
-fn differs(x: &[Scalar], y: &[Scalar]) -> bool {
+fn differs(x: &[f64], y: &[f64]) -> bool {
     x.iter().zip(y).any(|(a, b)| a.to_bits() != b.to_bits())
 }
 
@@ -322,7 +349,7 @@ fn the_distributed_cycle_moves_the_answer_under_a_cut_and_says_so() {
         assert!(!dw.partition_invariant(Preconditioner::Gamg));
     }
 
-    let mut fields: Vec<(String, Vec<Scalar>)> = Vec::new();
+    let mut fields: Vec<(String, Vec<f64>)> = Vec::new();
     for (np, cut, method) in [
         (2usize, "hilbert", PartitionMethod::Hilbert),
         (2, "linear", PartitionMethod::Linear),
